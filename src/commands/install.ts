@@ -60,7 +60,6 @@ import type {
 } from '../lib/harness-permissions';
 import { hasHooks, hooksSkipped, registeredHooks, writeHooks } from '../lib/harness-hooks';
 import { trustKey } from '../lib/codex-trust';
-import type { TrustResult } from '../lib/codex-trust';
 import { shimBundlePath } from '../lib/paths';
 import type { WriteHooksOptions } from '../lib/harness-hooks';
 import { ADAPTERS } from '../adapters/registry';
@@ -217,6 +216,8 @@ interface HarnessResult {
 }
 
 export interface InstallDeps {
+  /** Harness lifecycle implementations; tests inject adapters with in-process trust/readback. */
+  adapters?: Readonly<Record<Harness, HarnessAdapter>>;
   /** Home directory root for harness detection + skill destinations. Tests inject a temp dir. */
   homeDir?: string;
   /** The packaged skills source directory. Defaults to resolving it from this module's location. */
@@ -240,30 +241,8 @@ export interface InstallDeps {
     home: string,
     mode: PublishMode,
   ) => Promise<{ pending: string[] | null; satisfied?: PermissionsResult }>;
-  /** Read one adapter's native grant during refresh. */
-  inspectHarnessGrant?: (
-    adapter: HarnessAdapter,
-    home: string,
-    mode: PublishMode,
-    env: NodeJS.ProcessEnv,
-  ) => Promise<HarnessPermissions>;
   /** The retraction-only pass `review` runs; defaults to the real writer. */
   retractModeGated?: (home: string) => Promise<PermissionsResult>;
-  /** Codex's hook-trust step; defaults to the real app-server round trip.
-   *  A seam so tests never spawn `codex app-server`. */
-  trustHooks?: (
-    home: string,
-    keys: readonly string[],
-    ours: (row: { command?: unknown; sourcePath?: unknown }) => boolean,
-    opts: { env: NodeJS.ProcessEnv },
-  ) => Promise<TrustResult>;
-  /** Codex's grant writer; defaults to the real one. Injected so tests never
-   *  shell out to `codex execpolicy` or touch a real $CODEX_HOME. */
-  writeCodexGrant?: (
-    home: string,
-    mode: PublishMode,
-    env: NodeJS.ProcessEnv,
-  ) => Promise<CodexGrantResult>;
   /** "Create a wallet now?"; defaults to the clack confirm (default yes). */
   confirmWallet?: ConfirmFn;
   /** Prompt-sequence chrome. A seam so tests never load the renderer. */
@@ -285,6 +264,10 @@ export interface InstallDeps {
   walletPassphrase?: PassphraseOverrides;
   /** Steps 1-3 of the hook cutover: bundles, token, a healthy daemon. */
   startDaemon?: WriteHooksOptions['start'];
+}
+
+function adapterRegistry(deps: InstallDeps): Readonly<Record<Harness, HarnessAdapter>> {
+  return deps.adapters ?? ADAPTERS;
 }
 
 /**
@@ -415,7 +398,8 @@ async function runInstallRefresh(
   // nothing to converge, and an unattended upgrade may not materialize a
   // surface nobody asked for.
   const hooks: HooksResult[] = [];
-  for (const adapter of Object.values(ADAPTERS)) {
+  const adapters = adapterRegistry(deps);
+  for (const adapter of Object.values(adapters)) {
     if (!(await hasHooks(adapter, home, ctx.dataDir, env))) continue;
     const written = await writeHooks({
       adapter,
@@ -436,7 +420,7 @@ async function runInstallRefresh(
   // Claude settings file (or a Claude warning) on a Codex-only machine.
   // A settled `--no-allow-free-verbs` persists the EXACT rules that were
   // pending at the time in `install.freeVerbsDeclined`
-  // (see `resolvePermissions`), and this run subtracts that recorded set from
+  // (see `resolveClaudeGrant`), and this run subtracts that recorded set from
   // what it would otherwise report — recomputing from the settings file alone,
   // with nothing to distinguish "declined" from "never asked", reported the
   // full set forever (tenjin-agent#234). A per-rule set rather than a
@@ -446,15 +430,13 @@ async function runInstallRefresh(
   const declined = new Set(resolveFreeVerbsDeclined(rawConfig.install?.freeVerbsDeclined));
   const permissions: Partial<Record<Harness, HarnessPermissions>> = {};
   for (const hook of hooks) {
-    const adapter = ADAPTERS[hook.harness as Harness];
+    const adapter = adapters[hook.harness as Harness];
     const grant = adapter.registrar.grant;
     if (grant === undefined) continue;
     const report =
       adapter.id === 'claude' && deps.inspectPermissions !== undefined
         ? await legacyRefreshPermissions(home, publishMode, deps.inspectPermissions)
-        : deps.inspectHarnessGrant !== undefined
-          ? await deps.inspectHarnessGrant(adapter, home, publishMode, env)
-          : await grant.inspect(home, publishMode, env);
+        : await grant.inspect(home, publishMode, env);
     const missing = report.missing.filter((rule) => !declined.has(rule));
     permissions[adapter.id] = {
       ...report,
@@ -713,8 +695,8 @@ async function installBody(
   const publishMode = await underDataDir(ctx.dataDir, () =>
     resolvePublishMode(publishModeFlag, ctx, deps, dryRun, canPrompt),
   );
-  const permissions = await underDataDir(ctx.dataDir, () =>
-    resolvePermissions({
+  const grants = await underDataDir(ctx.dataDir, () =>
+    resolveGrants({
       plans,
       home,
       ctx,
@@ -724,24 +706,6 @@ async function installBody(
       publishMode: publishMode.value,
     }),
   );
-  // Codex's grant is its own file in its own grammar, so it is its own step
-  // rather than a branch inside the Claude writer. Both are driven by the one
-  // `publish.mode` just settled and by the same two fixed tiers
-  // (tenjin-agent#342).
-  const codexGrant = await underDataDir(ctx.dataDir, () =>
-    resolveCodexGrant({
-      plans,
-      home,
-      deps,
-      declined: noAllowFreeVerbs,
-      dryRun,
-      publishMode: publishMode.value,
-    }),
-  );
-  const grants: Partial<Record<Harness, PermissionsResult | CodexGrantResult>> = {
-    ...(permissions !== undefined ? { claude: permissions } : {}),
-    ...(codexGrant !== undefined ? { codex: codexGrant } : {}),
-  };
   const hooks = await underDataDir(ctx.dataDir, () =>
     resolveHooks({ harnesses: selectedHarnesses, home, ctx, deps, noHooks, dryRun }),
   );
@@ -817,7 +781,11 @@ async function installBody(
     permissions: {
       ...recommendedPermissions(
         publishMode.value,
-        plans.some((p) => ADAPTERS[p.harness].registrar.grant === ADAPTERS.claude.registrar.grant),
+        plans.some(
+          (p) =>
+            adapterRegistry(deps)[p.harness].registrar.grant ===
+            adapterRegistry(deps).claude.registrar.grant,
+        ),
       ),
       byHarness: grants,
     },
@@ -967,31 +935,16 @@ function permissionNote(io: Io, s: WalkthroughState): string[] {
 
 /** One subject per row, each label padded to the same column so the facts line up. */
 function rows(io: Io, s: WalkthroughState): string[] {
-  const claude = s.grants.claude as PermissionsResult | undefined;
-  const codex = s.grants.codex as CodexGrantResult | undefined;
+  const grants = Object.entries(s.grants) as [Harness, PermissionsResult | CodexGrantResult][];
   const entries: [string, string][] = [
     ['skills', skillsValue(s.harnesses)],
-    // One row per harness that has a grant surface, named when there are two,
-    // so neither harness's state is read off the other's row. The Claude row is
-    // dropped only when it has NOTHING of its own to report: a `review` run
-    // that retracted from ~/.claude/settings.json changed that file, and a
-    // receipt that hides the deletion is worse than a redundant row.
-    ...(claude === undefined
-      ? []
-      : ([
-          [
-            'permissions',
-            codex === undefined
-              ? permissionsValue(claude)
-              : `Claude Code: ${permissionsValue(claude)}`,
-          ],
-        ] as [string, string][])),
-    ...(codex !== undefined
-      ? ([['permissions', `Codex: ${codexGrantValue(codex, s.publishMode.value)}`]] as [
-          string,
-          string,
-        ][])
-      : []),
+    // One row per adapter grant, so no harness's state is read off another's.
+    ...grants.map(([harness, grant]): [string, string] => [
+      'permissions',
+      harness === 'claude' && grants.length === 1
+        ? grantValue(grant, s.publishMode.value)
+        : `${harnessLabel(harness)}: ${grantValue(grant, s.publishMode.value)}`,
+    ]),
     // One row per wired harness, named in the value when there are several,
     // so a Claude-only machine keeps the row it had and the columns hold.
     ...s.hooks.map((h): [string, string] => [
@@ -1097,13 +1050,9 @@ function permissionsValue(p: PermissionsResult): string {
   return `${allowed} tenjin commands in ${p.path}${removed(true)}`;
 }
 
-/**
- * Codex's grant in one clause: how many prefixes are cleared, and whether the
- * mode-gated pair is among them. The single row this replaced said nothing
- * about Codex, so a reader took the Claude row for their own and believed
- * `auto` was live (tenjin-agent#342).
- */
-function codexGrantValue(g: CodexGrantResult, mode: PublishMode): string {
+/** Render one adapter-native grant without parallel harness-specific row builders. */
+function grantValue(g: PermissionsResult | CodexGrantResult, mode: PublishMode): string {
+  if ('added' in g) return permissionsValue(g);
   if (g.error !== undefined) {
     return `${g.path} could not be written (${g.error}); Codex will keep asking`;
   }
@@ -1456,7 +1405,7 @@ export const WALLET_QUESTION = 'Create a wallet now?';
  * between. An unreadable file is "unknown", never "already allowed", so it falls
  * through.
  */
-async function resolvePermissions(args: {
+interface ResolveGrantsArgs {
   plans: HarnessPlan[];
   home: string;
   ctx: CommandContext;
@@ -1470,23 +1419,41 @@ async function resolvePermissions(args: {
    * the two cannot disagree.
    */
   publishMode: PublishMode;
-}): Promise<PermissionsResult | undefined> {
-  const { plans, home, ctx, deps, declined, dryRun, publishMode } = args;
-  const targetsClaude = plans.some(
-    (p) => ADAPTERS[p.harness].registrar.grant === ADAPTERS.claude.registrar.grant,
-  );
+}
+
+/** Resolve each selected harness's grant through its adapter. */
+async function resolveGrants(
+  args: ResolveGrantsArgs,
+): Promise<Partial<Record<Harness, PermissionsResult | CodexGrantResult>>> {
+  const { plans, home, deps, declined, dryRun, publishMode } = args;
+  const adapters = adapterRegistry(deps);
+  const out: Partial<Record<Harness, PermissionsResult | CodexGrantResult>> = {};
+  for (const plan of plans) {
+    const adapter = adapters[plan.harness];
+    const grant = adapter.registrar.grant;
+    if (grant === undefined) continue;
+    if (adapter.id === 'claude') {
+      out.claude = await resolveClaudeGrant(args);
+      continue;
+    }
+    const path = grant.path(home, deps.env ?? process.env);
+    out[adapter.id] =
+      dryRun || declined
+        ? { path, granted: [], wrote: false }
+        : await grant.write(home, publishMode, deps.env ?? process.env);
+  }
+  return out;
+}
+
+/** Claude's atomic settings.json grant path, selected by {@link resolveGrants}. */
+async function resolveClaudeGrant(args: ResolveGrantsArgs): Promise<PermissionsResult> {
+  const { home, ctx, deps, declined, dryRun, publishMode } = args;
 
   // A dry run writes nothing, so it settles before the retraction rather than
   // after it: what it owes the operator is the plan, not a revocation.
   if (dryRun) {
-    return targetsClaude
-      ? (deps.planPermissions ?? planFreeVerbAllowlist)(home, publishMode)
-      : undefined;
+    return (deps.planPermissions ?? planFreeVerbAllowlist)(home, publishMode);
   }
-
-  // The selected adapter owns the whole grant lifecycle. A Codex-only install
-  // never reads or rewrites Claude's settings file.
-  if (!targetsClaude) return undefined;
 
   /**
    * TIGHTENING FIRST, above every guard below, because none of them is about a
@@ -1557,7 +1524,7 @@ async function resolvePermissions(args: {
   // for a command that no longer exists, or the publish rule under a mode that
   // no longer carries it. That only ever removes a rule this CLI wrote.
   if (probe.pending !== null && probe.pending.length === 0) {
-    return withRetraction(await writeClaudeGrant(home, publishMode));
+    return withRetraction(await writeClaudeGrant(home, publishMode, deps));
   }
 
   // A decline recorded on some earlier run is stale as of now IF the write
@@ -1566,56 +1533,21 @@ async function resolvePermissions(args: {
   // the rules absent but erased the very record that told the next refresh they
   // were still pending. Wire first, and only clear the decline once
   // `wireFreeVerbAllowlist` reports it actually wrote (no `skipped`).
-  const wired = await writeClaudeGrant(home, publishMode);
+  const wired = await writeClaudeGrant(home, publishMode, deps);
   if (wired.skipped === undefined) {
     await persistFreeVerbsDeclined(ctx.dataDir, []);
   }
   return withRetraction(wired);
 }
 
-/**
- * Codex's half of the permission decision: same mode, same
- * `--no-allow-free-verbs` refusal, different file, so an operator cannot end up
- * granted on one harness and not the other by accident. `review` needs no
- * branch — the writer regenerates from the mode and the narrower file IS the
- * retraction. Absent when this run targets no Codex.
- */
-async function resolveCodexGrant(args: {
-  plans: HarnessPlan[];
-  home: string;
-  deps: InstallDeps;
-  declined: boolean;
-  dryRun: boolean;
-  publishMode: PublishMode;
-}): Promise<CodexGrantResult | undefined> {
-  const { plans, home, deps, declined, dryRun, publishMode } = args;
-  if (!plans.some((p) => ADAPTERS[p.harness].registrar.grant === ADAPTERS.codex.registrar.grant))
-    return undefined;
-  const path = ADAPTERS.codex.registrar.grant!.path(home, deps.env ?? process.env);
-  if (dryRun || declined) {
-    return { path, granted: [], wrote: false };
-  }
-  return await (deps.writeCodexGrant ?? writeCodexGrant)(
-    home,
-    publishMode,
-    deps.env ?? process.env,
-  );
-}
-
-async function writeClaudeGrant(home: string, mode: PublishMode): Promise<PermissionsResult> {
-  const result = await ADAPTERS.claude.registrar.grant!.write(home, mode);
-  if ('added' in result) return result;
-  throw new Error('Claude adapter returned a non-Claude grant result');
-}
-
-async function writeCodexGrant(
+async function writeClaudeGrant(
   home: string,
   mode: PublishMode,
-  env: NodeJS.ProcessEnv,
-): Promise<CodexGrantResult> {
-  const result = await ADAPTERS.codex.registrar.grant!.write(home, mode, env);
-  if ('granted' in result) return result;
-  throw new Error('Codex adapter returned a non-Codex grant result');
+  deps: InstallDeps,
+): Promise<PermissionsResult> {
+  const result = await adapterRegistry(deps).claude.registrar.grant!.write(home, mode);
+  if ('added' in result) return result;
+  throw new Error('Claude adapter returned a non-Claude grant result');
 }
 
 // --- Search hooks -----------------------------------------------------------------
@@ -1640,7 +1572,7 @@ async function resolveHooks(args: {
 
   // Hook targets stay at harness granularity even when their skills share a
   // destination. Collapsing skill directories must never erase a registrar.
-  const adapters = harnesses.map((harness) => ADAPTERS[harness]);
+  const adapters = harnesses.map((harness) => adapterRegistry(deps)[harness]);
   const out: HooksResult[] = [];
   for (const adapter of adapters) {
     // `--no-hooks` is a decision about THIS RUN and writes no config, so a
@@ -1700,7 +1632,7 @@ async function activateHooks(
     typeof row.command === 'string' &&
     row.command.includes(shimBundlePath(dataDir)) &&
     row.sourcePath === registered.path;
-  const result = await (deps.trustHooks ?? trust.ensure)(home, keys, ours, { env });
+  const result = await trust.ensure(home, keys, ours, { env });
   if (!result.ok) {
     return {
       ...written,

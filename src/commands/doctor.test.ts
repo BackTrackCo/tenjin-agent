@@ -17,6 +17,8 @@ import type { CommandContext } from '../context';
 import type { Io } from '../lib/output';
 import { openLoopDb } from '../hooks/store';
 import type { WalletProvider } from '../lib/wallet';
+import { ADAPTERS } from '../adapters/registry';
+import type { HarnessAdapter } from '../adapters/types';
 
 // doctor loads viem's balance read lazily; the mock keeps every test off-chain.
 vi.mock('../lib/usdc', () => ({ getUsdcBalance: vi.fn() }));
@@ -35,6 +37,21 @@ const ARTICLES_OK = { items: [{ id: 'a1' }], nextCursor: null };
 // never appears in any output.
 const PRIVATE_KEY = `0x${'de'.repeat(32)}` as `0x${string}`;
 const ADDRESS = privateKeyToAccount(PRIVATE_KEY).address;
+
+type TrustRead = NonNullable<HarnessAdapter['registrar']['trust']>['read'];
+
+function adaptersWithTrustRead(read: TrustRead): Readonly<typeof ADAPTERS> {
+  return {
+    ...ADAPTERS,
+    codex: {
+      ...ADAPTERS.codex,
+      registrar: {
+        ...ADAPTERS.codex.registrar,
+        trust: { ...ADAPTERS.codex.registrar.trust!, read },
+      },
+    },
+  };
+}
 
 let dir: string;
 // A temp HOME for the skill-wiring check. Every runDoctor call injects it so the
@@ -2504,13 +2521,13 @@ describe('runDoctor — Codex loop hook wiring', () => {
     addFire('recent-claude', 'claude', now);
 
     const result = await page({
-      readHarnessTrust: async (_adapter, _home, keys) => ({
+      adapters: adaptersWithTrustRead(async (_home, keys) => ({
         state: 'untrusted',
         source: 'app-server',
         configPath: join(skillHome, '.codex', 'config.toml'),
         trusted: 0,
         expected: keys.length,
-      }),
+      })),
     });
     const configured = find(result.checks, 'codex configured');
     expect(configured).toMatchObject({ status: 'ok', required: false });
@@ -2536,13 +2553,13 @@ describe('runDoctor — Codex loop hook wiring', () => {
   it('an installed-but-untrusted Codex reads as inert, and points at install', async () => {
     await wireCodex();
     const result = await page({
-      readHarnessTrust: async (_adapter, _home, keys) => ({
+      adapters: adaptersWithTrustRead(async (_home, keys) => ({
         state: 'untrusted',
         source: 'app-server',
         configPath: join(skillHome, '.codex', 'config.toml'),
         trusted: 0,
         expected: keys.length,
-      }),
+      })),
     });
     expect(find(result.checks, 'codex configured').status).toBe('ok');
     const trusted = find(result.checks, 'codex trusted');

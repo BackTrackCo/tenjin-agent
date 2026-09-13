@@ -13,6 +13,7 @@ import { stopDaemon } from '../daemon/control';
 import { sanitizeForTerminal } from '../lib/output';
 import { loadRawConfig } from '../lib/config';
 import { ADAPTERS } from '../adapters/registry';
+import type { Harness, HarnessAdapter } from '../adapters/types';
 import type { CommandContext, CommandResult } from '../context';
 
 /**
@@ -37,6 +38,8 @@ import type { CommandContext, CommandResult } from '../context';
  */
 
 export interface UninstallDeps {
+  /** Harness lifecycle implementations; tests may inject adapters at this boundary. */
+  adapters?: Readonly<Record<Harness, HarnessAdapter>>;
   /** Home whose harness directories are cleaned; tests inject a temp dir. */
   home?: string;
   /** Seam for stopping the daemon; tests inject one that signals nothing. */
@@ -50,6 +53,7 @@ export async function runUninstall(
   deps: UninstallDeps = {},
 ): Promise<CommandResult> {
   const home = deps.home ?? homedir();
+  const adapters = deps.adapters ?? ADAPTERS;
 
   // Settings first: it is the only step with a concurrency guard, and the only
   // one that can refuse. Doing it before the daemon is stopped means a refusal
@@ -59,15 +63,17 @@ export async function runUninstall(
   // Every other harness's hooks file, by the same rules and before the daemon
   // for the same reason.
   const hookFiles: SettingsOutcome[] = [];
-  for (const adapter of Object.values(ADAPTERS)) {
+  const grants: Partial<Record<Harness, string>> = {};
+  for (const adapter of Object.values(adapters)) {
     if (adapter.id === 'claude') continue;
     hookFiles.push(await removeFromHooksFile(adapter, home, ctx.dataDir, deps.env));
+    const removed = await adapter.registrar.grant?.remove?.(home, deps.env ?? process.env);
+    if (removed?.removed) grants[adapter.id] = removed.path;
   }
-  // Codex's grant lives in its own file rather than inside a settings key, so
-  // reclaiming it is a delete rather than a rewrite. An operator who removed
-  // Tenjin must keep no standing permission for it, not even the free tier
-  // (tenjin-agent#342).
-  const codexGrant = await ADAPTERS.codex.registrar.grant?.remove?.(home, deps.env ?? process.env);
+  // Claude's hooks and grants share settings.json and are intentionally removed
+  // in the one guarded read-modify-write above. Record that adapter outcome in
+  // the same map as the independent grant files.
+  if (settings.rules.length > 0) grants.claude = settings.path;
   // Then the daemon, before its bundle is deleted: a running daemon whose entries
   // are gone still holds the port and still serves any session that has not
   // re-read settings.json yet.
@@ -78,8 +84,8 @@ export async function runUninstall(
   const report: UninstallReport = {
     settings,
     hookFiles,
+    grants,
     daemon: daemon.state,
-    ...(codexGrant?.removed ? { codexGrant: codexGrant.path } : {}),
     skills,
     scripts: scripts.scripts,
     ...(scripts.removedDir !== undefined ? { hooksDir: scripts.removedDir } : {}),
@@ -118,8 +124,9 @@ function humanLines(report: UninstallReport): string[] {
       removed.push(`${event} hook entry in ${sanitizeForTerminal(file.path)}`);
     }
   }
-  if (report.codexGrant !== undefined) {
-    removed.push(`the Codex command grant ${sanitizeForTerminal(report.codexGrant)}`);
+  for (const [harness, path] of Object.entries(report.grants)) {
+    if (harness === 'claude') continue; // already counted by settings.rules below
+    removed.push(`the ${harness} command grant ${sanitizeForTerminal(path)}`);
   }
   if (settings.rules.length > 0) {
     removed.push(

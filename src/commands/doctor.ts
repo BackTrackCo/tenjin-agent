@@ -20,7 +20,6 @@ import {
   harnessInPlay,
   harnessReads,
   harnessRequested,
-  harnessTargetDir,
   missingCliSkills,
   onPath,
   readAllWiring,
@@ -52,6 +51,7 @@ import {
 import { trustKey } from '../lib/codex-trust';
 import type { CodexTrust, CodexTrustReport } from '../lib/codex-trust';
 import { hookBundlesPresent, registeredHooks } from '../lib/harness-hooks';
+import { installedHarnessInPlay } from '../lib/harness-presence';
 import type { RegisteredHooks } from '../lib/harness-hooks';
 import { ADAPTERS } from '../adapters/registry';
 import { existsSync } from 'node:fs';
@@ -151,6 +151,8 @@ interface BuiltCheck {
 }
 
 export interface DoctorDeps {
+  /** Harness lifecycle implementations; tests inject adapters with recorded trust answers. */
+  adapters?: Readonly<Record<Harness, HarnessAdapter>>;
   /** Environment for wallet-key detection and settings precedence. */
   env?: NodeJS.ProcessEnv;
   /** The loop-database open; tests inject a failing one to exercise the
@@ -177,13 +179,6 @@ export interface DoctorDeps {
   now?: () => number;
   /** Packaged skills to compare the wired copies against; defaults to this build's. */
   skillsSourceDir?: string;
-  /** Read a harness's hook trust; tests inject recorded app-server answers. */
-  readHarnessTrust?: (
-    adapter: HarnessAdapter,
-    home: string,
-    keys: readonly string[],
-    env: NodeJS.ProcessEnv,
-  ) => Promise<CodexTrustReport>;
   /**
    * Passphrase seams for the wallet verification (#70), which reads the OS
    * credential store. Tests inject a platform with no store, or a stubbed exec,
@@ -251,6 +246,7 @@ export async function collectDoctorChecks(
   // instead of sending the team shelf's key to that host three times.
   const bypass: ShelfBypass | undefined = resolveShelfBypass(config, settings);
   const home = deps.homeDir ?? homedir();
+  const adapters = deps.adapters ?? ADAPTERS;
   const which = deps.which ?? ((bin: string) => onPath(bin, env));
   const requested = config.install?.harness ?? [];
   const teamMode = isTeamModeConfig(config);
@@ -298,7 +294,7 @@ export async function collectDoctorChecks(
       env,
       deps.openLoopDb ?? openLoopDbForCli,
       settings.publishMode.value,
-      deps.readHarnessTrust,
+      adapters,
     )),
     await checkSkills(
       home,
@@ -332,7 +328,11 @@ export async function collectDoctorChecks(
   // command away from working when nothing would have made it work
   // (tenjin-agent#342). The per-harness `permissions` check carries the truth
   // for those machines instead.
-  const grantable = await installedHarnessInPlay('claude', home, ctx.dataDir, env, which, config);
+  const grantable = await installedHarnessInPlay(adapters.claude, home, ctx.dataDir, {
+    env,
+    which,
+    requested: config.install?.harness ?? [],
+  });
   const probe = await inspectFreeVerbRules(deps.homeDir ?? homedir(), publishMode);
   const gated = new Set<string>(MODE_GATED_RULES);
   const declined = new Set(resolveFreeVerbsDeclined(config.install?.freeVerbsDeclined));
@@ -348,37 +348,6 @@ export async function collectDoctorChecks(
     grantable,
     failure: { code: firstFail.failCode ?? 'INTERNAL', result: firstFail.result },
   };
-}
-
-/**
- * Is Claude Code — the harness whose grammar these `Bash(...)` rules are — this
- * machine's business at all?
- *
- * THE SAME UNION EVERY OTHER SURFACE USES: a past `--harness` selection, else
- * detection (PATH or home directory), plus hook entries of ours, which prove
- * an install predating the selection record. Skipping this check is what
- * showed a Codex operator two rules their harness has never heard of
- * (tenjin-agent#342).
- */
-async function installedHarnessInPlay(
-  harness: Harness,
-  homeDir: string,
-  dataDir: string,
-  env: NodeJS.ProcessEnv,
-  which: (bin: string) => boolean,
-  config: PartialConfig,
-): Promise<boolean> {
-  if (
-    harnessInPlay(
-      homeDir,
-      harnessTargetDir(homeDir, harness),
-      detectHarnesses(homeDir, which),
-      config.install?.harness ?? [],
-    )
-  ) {
-    return true;
-  }
-  return (await registeredHooks(ADAPTERS[harness], homeDir, dataDir, env)).entries > 0;
 }
 
 export async function runDoctor(
@@ -1256,11 +1225,11 @@ async function checkHooks(
   env: NodeJS.ProcessEnv,
   open: typeof openLoopDbForCli,
   publishMode: PublishMode,
-  readTrust?: NonNullable<DoctorDeps['readHarnessTrust']>,
+  adapters: Readonly<Record<Harness, HarnessAdapter>>,
 ): Promise<BuiltCheck[]> {
   const out: BuiltCheck[] = [];
   const registered = await Promise.all(
-    Object.values(ADAPTERS).map(async (adapter) => ({
+    Object.values(adapters).map(async (adapter) => ({
       adapter,
       hooks: await registeredHooks(adapter, homeDir, dataDir, env),
     })),
@@ -1298,9 +1267,7 @@ async function checkHooks(
   }
   for (const { adapter, hooks } of wired) {
     if (adapter.registrar.trust !== undefined) {
-      out.push(
-        ...(await checkTrustedHooks(adapter, homeDir, dataDir, env, hooks, open, readTrust)),
-      );
+      out.push(...(await checkTrustedHooks(adapter, homeDir, dataDir, env, hooks, open)));
     }
     out.push(await checkHarnessPermissions(adapter, homeDir, publishMode, env));
   }
@@ -1319,7 +1286,6 @@ async function checkTrustedHooks(
   env: NodeJS.ProcessEnv,
   codex: RegisteredHooks,
   open: typeof openLoopDbForCli,
-  readTrust?: NonNullable<DoctorDeps['readHarnessTrust']>,
 ): Promise<BuiltCheck[]> {
   const out: BuiltCheck[] = [
     {
@@ -1334,10 +1300,7 @@ async function checkTrustedHooks(
   const keys = codex.handlers
     .map((h) => trustKey(codex.path, h.event, h.groupIndex, h.handlerIndex))
     .filter((k): k is string => k !== null);
-  const trust =
-    readTrust === undefined
-      ? await adapter.registrar.trust!.read(homeDir, keys, { env })
-      : await readTrust(adapter, homeDir, keys, env);
+  const trust = await adapter.registrar.trust!.read(homeDir, keys, { env });
   const willRun = trust.state === 'trusted';
   // `unknown` is NOT ok. It means Codex could not settle whether these entries
   // run, and a green line there reads as a working loop

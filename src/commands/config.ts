@@ -43,12 +43,13 @@ import type {
   LoopConfigKey,
   TeamConfigKey,
 } from '../lib/config';
-import { detectHarnesses, harnessInPlay, harnessTargetDir, onPath } from '../lib/skill-wiring';
-import type { Harness } from '../adapters/types';
+import { onPath } from '../lib/skill-wiring';
+import type { Harness, HarnessAdapter } from '../adapters/types';
 import { ADAPTERS } from '../adapters/registry';
 import { isTeamShelfOrigin, loadProjectConfig } from '../lib/settings';
 import { configPath } from '../lib/paths';
 import { writeFileAtomic } from '../lib/atomic-json';
+import { installedHarnessInPlay } from '../lib/harness-presence';
 import { withFileLock, LockTimeoutError } from '../lib/lock';
 import { parseUsdToAtomic, toMoney } from '../lib/money';
 import type { Money } from '../schemas';
@@ -73,26 +74,18 @@ interface RenderedSetting extends RenderedValue {
  * Tests inject all of them; nothing here is reachable from a flag.
  */
 export interface ConfigSetDeps {
+  /** Harness lifecycle implementations; tests inject adapters at this boundary. */
+  adapters?: Readonly<Record<Harness, HarnessAdapter>>;
   /** Home whose `.claude/settings.json` is synced; defaults to os.homedir(). */
   homeDir?: string;
   /** Overrides TTY detection, exactly as install's own seam does. */
   isInteractive?: boolean;
   /** The yes/no for a loosening write; defaults to the clack confirm (default yes). */
   confirmRule?: (label: string) => Promise<boolean>;
-  /** Whether this machine's harness is Claude Code (the only settings file we write).
-   *  Absent, it is DETECTED the way install and doctor detect it. */
-  harnessIsClaude?: boolean;
-  /** Whether Codex is in play, detected the same way when absent. */
-  harnessIsCodex?: boolean;
+  /** Settled harness selection; absent, each registered adapter is detected normally. */
+  harnessesInPlay?: readonly Harness[];
   /** The retraction-only pass `review` runs; defaults to the real writer. */
   retractModeGated?: (home: string) => Promise<PermissionsResult>;
-  /** Codex's grant writer; defaults to the real one. A seam so tests never
-   *  shell out to `codex execpolicy` or touch a real $CODEX_HOME. */
-  writeCodexGrant?: (
-    home: string,
-    mode: PublishMode,
-    env: NodeJS.ProcessEnv,
-  ) => Promise<CodexGrantResult>;
   /** PATH probe for harness detection; defaults to probing `env.PATH`. */
   which?: (bin: string) => boolean;
   /** Environment for that probe; defaults to process.env. */
@@ -487,22 +480,39 @@ async function syncPublishRule(
     return { byHarness: { claude: result } };
   };
 
-  const codex =
-    deps.harnessIsCodex ??
-    (deps.harnessIsClaude !== undefined
-      ? false
-      : await configuredHarnessInPlay('codex', home, ctx, deps));
-  const withCodex = async (sync: AllowlistSync): Promise<AllowlistSync> => {
-    if (!codex) return sync;
-    const writer =
-      deps.writeCodexGrant ??
-      (async (grantHome: string, grantMode: PublishMode, env: NodeJS.ProcessEnv) => {
-        const result = await ADAPTERS.codex.registrar.grant!.write(grantHome, grantMode, env);
-        if ('granted' in result) return result;
-        throw new Error('Codex adapter returned a non-Codex grant result');
-      });
-    const codexGrant = await writer(home, mode, deps.env ?? process.env);
-    return { ...sync, byHarness: { ...sync.byHarness, codex: codexGrant } };
+  const adapters = deps.adapters ?? ADAPTERS;
+  const env = deps.env ?? process.env;
+  const which = deps.which ?? ((bin: string) => onPath(bin, env));
+  const requested = await loadRawConfig(ctx.dataDir)
+    .then((config) => config.install?.harness ?? [])
+    .catch(() => [] as Harness[]);
+  const inPlay =
+    deps.harnessesInPlay ??
+    (
+      await Promise.all(
+        Object.values(adapters).map(async (adapter) => ({
+          adapter,
+          selected: await installedHarnessInPlay(adapter, home, ctx.dataDir, {
+            env,
+            which,
+            requested,
+          }),
+        })),
+      )
+    )
+      .filter((entry) => entry.selected)
+      .map((entry) => entry.adapter.id);
+  const selectedAdapters = inPlay.map((harness) => adapters[harness]);
+  const isClaude = inPlay.includes('claude');
+
+  const withOtherGrants = async (sync: AllowlistSync): Promise<AllowlistSync> => {
+    const byHarness = { ...sync.byHarness };
+    for (const adapter of selectedAdapters) {
+      if (adapter.id === 'claude' || adapter.registrar.grant === undefined) continue;
+      const result = await adapter.registrar.grant.write(home, mode, env);
+      byHarness[adapter.id] = result;
+    }
+    return { ...sync, byHarness };
   };
 
   // Only Claude Code has a settings file of this shape; guessing at another
@@ -510,12 +520,7 @@ async function syncPublishRule(
   // DETECTED, never assumed: a codex-only machine has a ~/.claude/settings.json
   // that nothing reads, so prompting about it is noise and writing to it is an
   // uninvited edit — and the retraction would sweep a file we never owned.
-  const isClaude =
-    deps.harnessIsClaude ??
-    (deps.harnessIsCodex !== undefined
-      ? false
-      : await configuredHarnessInPlay('claude', home, ctx, deps));
-  if (!isClaude && !codex) {
+  if (selectedAdapters.every((adapter) => adapter.registrar.grant === undefined)) {
     // No settings file of ours to be missing anything, so the pointer would be
     // advice about a machine this is not.
     return { ...nothing, skipped: 'not-claude' };
@@ -545,7 +550,7 @@ async function syncPublishRule(
         ...(retracted.fix !== undefined ? { pointer: retracted.fix } : {}),
       };
     }
-    return await withCodex({
+    return await withOtherGrants({
       byHarness: retracted === undefined ? {} : { claude: retracted },
     });
   }
@@ -554,7 +559,7 @@ async function syncPublishRule(
   // nothing to ask about and nothing to write, so a `--json` or headless run
   // there is a no-op rather than a `no-tty` skip carrying a pointer at rules it
   // already has.
-  if (probe.satisfied !== undefined && !codex) return nothing;
+  if (probe.satisfied !== undefined && selectedAdapters.length === 1 && isClaude) return nothing;
 
   const canPrompt =
     ctx.flags.json === true ? false : (deps.isInteractive ?? Boolean(process.stdin.isTTY));
@@ -563,34 +568,13 @@ async function syncPublishRule(
   }
 
   const confirm = deps.confirmRule ?? ((label: string) => confirmChoice(label, true));
-  const harnesses: Harness[] = [
-    ...(isClaude ? (['claude'] as const) : []),
-    ...(codex ? (['codex'] as const) : []),
-  ];
-  if (!(await confirm(publishRuleQuestion(mode, probe.pending ?? [], harnesses)))) {
+  const grantable = selectedAdapters
+    .filter((adapter) => adapter.registrar.grant !== undefined)
+    .map((adapter) => adapter.id);
+  if (!(await confirm(publishRuleQuestion(mode, probe.pending ?? [], grantable)))) {
     return { ...nothing, skipped: 'declined', ...(pointer ? { pointer } : {}) };
   }
-  return await withCodex(isClaude ? await write() : nothing);
-}
-
-/** Is this harness detected or explicitly selected on this machine? */
-async function configuredHarnessInPlay(
-  harness: Harness,
-  home: string,
-  ctx: CommandContext,
-  deps: ConfigSetDeps,
-): Promise<boolean> {
-  const env = deps.env ?? process.env;
-  const which = deps.which ?? ((bin: string) => onPath(bin, env));
-  const requested = await loadRawConfig(ctx.dataDir)
-    .then((c) => c.install?.harness ?? [])
-    .catch(() => [] as Harness[]);
-  return harnessInPlay(
-    home,
-    harnessTargetDir(home, harness),
-    detectHarnesses(home, which),
-    requested,
-  );
+  return await withOtherGrants(isClaude ? await write() : nothing);
 }
 
 /** The human rendering of {@link syncPublishRule}, or nothing when it was a no-op. */

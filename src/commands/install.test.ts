@@ -96,6 +96,8 @@ import { configPath, daemonPidPath, daemonTokenPath, hooksDir, shimBundlePath } 
 import { renderSkillMarkdown } from '../lib/skill-materialize';
 import type { DoctorChecks } from './doctor';
 import type { CommandContext, GlobalFlags } from '../context';
+import { ADAPTERS } from '../adapters/registry';
+import type { HarnessAdapter } from '../adapters/types';
 
 // Real packaged skills, resolved once from this test's location. Using the real
 // source (not a fixture) also proves the copy lands byte-identical content.
@@ -241,6 +243,23 @@ const noKeychain: ExecFn = async () => {
   throw new Error('no credential store here');
 };
 
+type TrustEnsure = NonNullable<HarnessAdapter['registrar']['trust']>['ensure'];
+
+function adaptersWithTrust(
+  ensure: TrustEnsure = async (_home, keys) => ({ ok: true, trusted: [...keys] }),
+): Readonly<typeof ADAPTERS> {
+  return {
+    ...ADAPTERS,
+    codex: {
+      ...ADAPTERS.codex,
+      registrar: {
+        ...ADAPTERS.codex.registrar,
+        trust: { ...ADAPTERS.codex.registrar.trust!, ensure },
+      },
+    },
+  };
+}
+
 function deps(over: Partial<InstallDeps> = {}): InstallDeps {
   return {
     homeDir: home,
@@ -267,18 +286,10 @@ function deps(over: Partial<InstallDeps> = {}): InstallDeps {
     // the real creator with `realWalletCreate()`, which still goes through the
     // fake keychain above.
     createWallet: async () => STUB_ADDRESS,
-    // Codex's trust step, answered in-process: the real one spawns `codex
-    // app-server`, and no unit test may depend on a Codex being installed.
-    // The cases that are ABOUT trust override this with a refusal.
-    trustHooks: async (_home, keys) => ({ ok: true, trusted: [...keys] }),
-    inspectHarnessGrant: async (adapter) => ({
-      harness: adapter.id,
-      state: 'granted',
-      path: adapter.registrar.grant?.path(home, {}),
-      rules: [],
-      missing: [],
-      detail: 'current',
-    }),
+    // Lifecycle behavior is injected at the adapter boundary. The real Codex
+    // trust implementation spawns `codex app-server`, so unit tests replace
+    // only that adapter method and keep the command free of Codex-only seams.
+    adapters: adaptersWithTrust(),
     promptPublishMode: async () => null,
     // NEVER the real one. Steps 1-3 of the hook cutover spawn a detached daemon;
     // this writes exactly what one leaves behind (the bundles, the token, the pid
@@ -3470,12 +3481,12 @@ describe('runInstall: harness hooks', () => {
       { harness: ['claude', 'codex'] },
       makeCtx({ json: true }),
       deps({
-        trustHooks: async () => ({
+        adapters: adaptersWithTrust(async () => ({
           ok: false,
           trusted: [],
           failedAt: 'list',
           reason: 'the codex app server could not be reached',
-        }),
+        })),
       }),
     );
     const hooks = (res.data as HooksData).hooks;
@@ -3872,10 +3883,10 @@ describe('runInstall --refresh', () => {
       makeCtx(),
       refreshDeps({
         which: (bin) => bin === 'codex',
-        trustHooks: async (_home, keys) => {
+        adapters: adaptersWithTrust(async (_home, keys) => {
           calls.push([...keys]);
           return { ok: true, trusted: [...keys] };
-        },
+        }),
       }),
     );
     expect(calls).toHaveLength(1);
