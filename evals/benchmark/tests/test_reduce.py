@@ -603,3 +603,26 @@ def test_complete_pipeline_charges_failed_producer_and_preserves_zero_success():
     records[0]['outcome'] = 'pass'
     records[0]['isolation']['producer']['agent_time_s'] = None
     assert reduce_module._cell(records)['pipeline_seconds_per_verified_resolution'] is None
+
+
+def test_invalid_producer_spend_is_visible_without_entering_completion_ratios():
+    good = support.reduction_record('t1', 'on', 0, 0, 100)
+    bad = support.reduction_record('t1', 'on', 1, 1, 100, 'invalid', auxiliary=(
+        support.receipt('producer', 'producer', 'interrupted-producer', 140000, 2000),
+        support.receipt('producer', 'capture', 'interrupted-capture', 300, 20),
+    ))
+    bad['usage'] = []
+    bad['agent_time_s'] = None
+    bad['isolation']['producer'] = {'native_root_id': 'producer-root', 'outcome': 'invalid', 'agent_time_s': 135, 'publication': {'wall_time_s': 2}}
+    # The same producer receipt can be attached to several dependent attempts.
+    later = support.reduction_record('t1', 'on', 2, 2, 100, 'invalid', auxiliary=tuple(bad['auxiliary']))
+    later['usage'] = []
+    later['agent_time_s'] = None
+    later['isolation']['producer'] = bad['isolation']['producer']
+    result = reduce_module.reduce(support.accept(good, bad, later), [])['arms']['on']
+    assert result['tokens_per_verified_resolution'] == 100
+    assert result['invalid_observed_effort'] == {
+        'tokens': 0, 'agent_seconds': 0, 'missing_timing': 2,
+        'phase_tokens': {'producer': 142000, 'capture': 320}, 'pipeline_tokens': 142320,
+        'producer_agent_seconds': 135, 'producer_missing_timing': 0, 'publication_seconds': 2,
+    }
