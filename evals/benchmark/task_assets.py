@@ -7,7 +7,7 @@ from pathlib import Path
 import re
 from typing import Any
 
-from . import sha256_dir, sha256_file, verifier
+from . import sha256_dir, sha256_file, sha256_json, verifier
 
 HISTORICAL = "historical_vitest"
 ORACLE = "src/benchmark-independent.test.ts"
@@ -123,6 +123,7 @@ def trial_arm(manifest: Any, task: dict[str, Any], arm: dict[str, Any]) -> dict[
     instruction = "Before starting, read LESSONS.md for findings retained from earlier work. Treat them as fallible evidence; the current task's requirements take precedence.\n"
     for name in ("CLAUDE.md", "AGENTS.md"):
         overlay[name] = overlay.get(name, "") + instruction
+    result["settings_hash"] = "sha256:" + sha256_json(result["settings"])
     return result
 
 
