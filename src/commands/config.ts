@@ -14,7 +14,6 @@ import {
 import { modeGatedPointer } from '../lib/permissions';
 import { PRODUCTION_ORIGIN, isSameDeployment } from '../lib/production-origin';
 import {
-  CONFIG_DEFAULTS,
   CONFIG_KEYS,
   HOOKS_CONFIG_KEYS,
   PUBLISH_CONFIG_KEYS,
@@ -93,8 +92,6 @@ export interface ConfigSetDeps {
   env?: NodeJS.ProcessEnv;
   inspectAllowlist?: typeof inspectFreeVerbRules;
   wireAllowlist?: (home: string, mode: PublishMode) => Promise<PermissionsResult>;
-  /** Publish-mode commit seam; tests make the final config write fail after grants land. */
-  persistPublishMode?: (dir: string, mode: PublishMode) => Promise<void>;
 }
 
 const CONFIRM_ABOVE = 'above:';
@@ -416,59 +413,23 @@ async function setPublishKey(
   // Synchronize before committing the mode. A grant writer may refuse after
   // consent (permissions, concurrent edits, an unwritable parent); persisting
   // first made the command exit successfully with an unattended mode that its
-  // harness could not carry. Because several files cannot commit atomically,
-  // every later failure compensates completed grants back to the previous mode.
-  const mode = entry.value as PublishMode;
-  // A person may take minutes to answer. Consent is gathered without the
-  // config mutex; the locked phase re-probes before it writes and refuses if
-  // the approved grant surface grew while the prompt was open.
-  const decision = await decidePublishRule(mode, ctx, deps);
-  // The SAME cross-process lock used by every config writer covers grants,
-  // commit and compensation as one transaction. A second mode change cannot
-  // interleave a different grant or make `previousMode` stale underneath a
-  // rollback. The harness writers retain their own compare-before-write checks
-  // for edits by processes outside this CLI.
-  const allowlist = await withConfigLock(ctx.dataDir, async () => {
-    const existing = await loadRawConfig(ctx.dataDir);
-    const previousMode = existing.publish?.mode ?? CONFIG_DEFAULTS.publish.mode;
-    const synced = await syncPublishRule(mode, ctx, deps, decision);
-    const failure = grantSyncFailure(synced);
-    if (failure !== undefined) {
-      const rollback = await rollbackGrantChanges(previousMode, synced, ctx, deps);
-      throw new CliError(
-        'REFUSED',
-        `publish.mode was not changed because the ${failure.harness} grant could not be updated: ${failure.reason}`,
-        {
-          fix:
-            failure.fix ??
-            `Fix the permissions for ${failure.path}, then re-run \`tenjin config set publish.mode ${entry.value as string}\`.`,
-          details: { key, value: entry.value, allowlist: synced, rollback },
-        },
-      );
-    }
-    try {
-      if (deps.persistPublishMode !== undefined) {
-        await deps.persistPublishMode(ctx.dataDir, mode);
-      } else {
-        await writePartialConfig(ctx.dataDir, {
-          ...existing,
-          publish: { ...existing.publish, mode },
-        });
-      }
-    } catch (err) {
-      const rollback = await rollbackGrantChanges(previousMode, synced, ctx, deps);
-      throw new CliError(
-        'INTERNAL',
-        `publish.mode was not changed because its config could not be written: ${errorMessage(err)}`,
-        {
-          fix: `Fix the reported config problem, then re-run \`tenjin config set publish.mode ${mode}\`.`,
-          details: { key, value: entry.value, allowlist: synced, rollback },
-          cause: err,
-        },
-      );
-    }
-    return synced;
-  });
+  // harness could not carry. Grant-first is also the least-authority failure
+  // order: if a later config write fails, the CLI still resolves the old mode.
+  const allowlist = await syncPublishRule(entry.value as PublishMode, ctx, deps);
+  const failure = grantSyncFailure(allowlist);
+  if (failure !== undefined) {
+    throw new CliError(
+      'REFUSED',
+      `publish.mode was not changed because the ${failure.harness} grant could not be updated: ${failure.reason}`,
+      {
+        fix:
+          failure.fix ??
+          `Fix the permissions for ${failure.path}, then re-run \`tenjin config set publish.mode ${entry.value as string}\`.`,
+        details: { key, value: entry.value, allowlist },
+      },
+    );
+  }
+  await persistEntry();
   return {
     data: { key, ...entry, allowlist },
     humanLines: [...humanLines, ...allowlistLines(allowlist)],
@@ -510,49 +471,6 @@ function grantSyncFailure(
   return undefined;
 }
 
-function grantSyncChanged(sync: AllowlistSync): boolean {
-  return Object.values(sync.byHarness).some((result) => {
-    if (result === undefined) return false;
-    if ('wrote' in result) return result.wrote;
-    return result.added.length > 0 || result.removed.length > 0;
-  });
-}
-
-interface GrantRollback {
-  attempted: boolean;
-  ok: boolean;
-  allowlist?: AllowlistSync;
-  error?: string;
-}
-
-/** Restore the adapter-owned grant state that the previous mode requires. The
- * writer is idempotent and owns only Tenjin's rules, so this is the recoverable
- * transaction boundary when another harness or the config commit fails. */
-async function rollbackGrantChanges(
-  previousMode: PublishMode,
-  changed: AllowlistSync,
-  ctx: CommandContext,
-  deps: ConfigSetDeps,
-): Promise<GrantRollback> {
-  if (!grantSyncChanged(changed)) return { attempted: false, ok: true };
-  try {
-    const allowlist = await syncPublishRule(previousMode, ctx, deps, { kind: 'rollback' });
-    const failure = grantSyncFailure(allowlist);
-    return {
-      attempted: true,
-      ok: failure === undefined,
-      allowlist,
-      ...(failure !== undefined ? { error: `${failure.harness}: ${failure.reason}` } : {}),
-    };
-  } catch (err) {
-    return { attempted: true, ok: false, error: errorMessage(err) };
-  }
-}
-
-function errorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
-}
-
 /** Names what the write actually carries: on a machine that never ran `install`,
  *  the free tier is pending too, and a question naming two lines while eleven
  *  land is asking about something else. */
@@ -576,26 +494,39 @@ function publishRuleQuestion(
   );
 }
 
-interface PublishRuleContext {
-  home: string;
-  selectedAdapters: HarnessAdapter[];
-  isClaude: boolean;
-  probe: Awaited<ReturnType<typeof inspectFreeVerbRules>>;
-  pointer?: string;
-  grantable: Harness[];
-}
-
-type PublishRuleDecision =
-  | { kind: 'narrowing' | 'recheck' | 'rollback' }
-  | { kind: 'skip'; result: AllowlistSync }
-  | { kind: 'approved'; harnesses: Harness[]; pending: string[] };
-
-async function publishRuleContext(
+/**
+ * Keep the harness allowlist in step with the mode just written.
+ *
+ * ASYMMETRIC ON PURPOSE, and the asymmetry is the consent rule:
+ *  - Loosening (auto/full-auto) ADDS a grant, so it needs a human in the loop.
+ *    No TTY, `--json`, or a declined prompt all leave the file alone and return
+ *    the pointer instead; nothing here writes on silence.
+ *  - Tightening (review) only ever REMOVES a rule this CLI wrote under a setting
+ *    the operator has just changed, so it runs unconditionally — the same reason
+ *    install sweeps a retired rule without asking. Leaving it behind would keep
+ *    publishing pre-cleared after the operator said "ask me first", which is the
+ *    failure that matters.
+ */
+async function syncPublishRule(
   mode: PublishMode,
   ctx: CommandContext,
   deps: ConfigSetDeps,
-): Promise<PublishRuleContext> {
+): Promise<AllowlistSync> {
   const home = deps.homeDir ?? homedir();
+  const nothing: AllowlistSync = { byHarness: {} };
+
+  const write = async (): Promise<AllowlistSync> => {
+    const result = await (deps.wireAllowlist ?? wireFreeVerbAllowlist)(home, mode);
+    if (result.skipped !== undefined) {
+      return {
+        byHarness: { claude: result },
+        skipped: 'unwritable',
+        ...(result.fix !== undefined ? { pointer: result.fix } : {}),
+      };
+    }
+    return { byHarness: { claude: result } };
+  };
+
   const adapters = deps.adapters ?? ADAPTERS;
   const env = deps.env ?? process.env;
   const which = deps.which ?? ((bin: string) => onPath(bin, env));
@@ -620,110 +551,6 @@ async function publishRuleContext(
       .map((entry) => entry.adapter.id);
   const selectedAdapters = inPlay.map((harness) => adapters[harness]);
   const isClaude = inPlay.includes('claude');
-  const probe = isClaude
-    ? await (deps.inspectAllowlist ?? inspectFreeVerbRules)(home, mode)
-    : { pending: [] as string[] };
-  const gated = new Set<string>(MODE_GATED_RULES);
-  const missing = (probe.pending ?? []).filter((rule) => gated.has(rule));
-  const pointer = modeGatedPointer(mode, missing) ?? undefined;
-  return {
-    home,
-    selectedAdapters,
-    isClaude,
-    probe,
-    ...(pointer !== undefined ? { pointer } : {}),
-    grantable: selectedAdapters
-      .filter((adapter) => adapter.registrar.grant !== undefined)
-      .map((adapter) => adapter.id),
-  };
-}
-
-/** Ask before the transaction lock. The returned receipt is narrow: the locked
- * phase may write only the same harnesses and no rules beyond those disclosed. */
-async function decidePublishRule(
-  mode: PublishMode,
-  ctx: CommandContext,
-  deps: ConfigSetDeps,
-): Promise<PublishRuleDecision> {
-  if (mode === 'review') return { kind: 'narrowing' };
-  const planned = await publishRuleContext(mode, ctx, deps);
-  const nothing: AllowlistSync = { byHarness: {} };
-  if (planned.grantable.length === 0) {
-    return { kind: 'skip', result: { ...nothing, skipped: 'not-claude' } };
-  }
-  if (
-    planned.probe.satisfied !== undefined &&
-    planned.selectedAdapters.length === 1 &&
-    planned.isClaude
-  ) {
-    return { kind: 'recheck' };
-  }
-  const canPrompt =
-    ctx.flags.json === true ? false : (deps.isInteractive ?? Boolean(process.stdin.isTTY));
-  if (!canPrompt) {
-    return {
-      kind: 'skip',
-      result: {
-        ...nothing,
-        skipped: 'no-tty',
-        ...(planned.pointer !== undefined ? { pointer: planned.pointer } : {}),
-      },
-    };
-  }
-  const confirm = deps.confirmRule ?? ((label: string) => confirmChoice(label, true));
-  if (!(await confirm(publishRuleQuestion(mode, planned.probe.pending ?? [], planned.grantable)))) {
-    return {
-      kind: 'skip',
-      result: {
-        ...nothing,
-        skipped: 'declined',
-        ...(planned.pointer !== undefined ? { pointer: planned.pointer } : {}),
-      },
-    };
-  }
-  return {
-    kind: 'approved',
-    harnesses: planned.grantable,
-    pending: [...(planned.probe.pending ?? [])],
-  };
-}
-
-/**
- * Keep the harness allowlist in step with the mode just written.
- *
- * ASYMMETRIC ON PURPOSE, and the asymmetry is the consent rule:
- *  - Loosening (auto/full-auto) ADDS a grant, so it needs a human in the loop.
- *    No TTY, `--json`, or a declined prompt all leave the file alone and return
- *    the pointer instead; nothing here writes on silence.
- *  - Tightening (review) only ever REMOVES a rule this CLI wrote under a setting
- *    the operator has just changed, so it runs unconditionally — the same reason
- *    install sweeps a retired rule without asking. Leaving it behind would keep
- *    publishing pre-cleared after the operator said "ask me first", which is the
- *    failure that matters.
- */
-async function syncPublishRule(
-  mode: PublishMode,
-  ctx: CommandContext,
-  deps: ConfigSetDeps,
-  decision: PublishRuleDecision,
-): Promise<AllowlistSync> {
-  const planned = await publishRuleContext(mode, ctx, deps);
-  const { home, selectedAdapters, isClaude, probe, pointer, grantable } = planned;
-  const nothing: AllowlistSync = { byHarness: {} };
-
-  const write = async (): Promise<AllowlistSync> => {
-    const result = await (deps.wireAllowlist ?? wireFreeVerbAllowlist)(home, mode);
-    if (result.skipped !== undefined) {
-      return {
-        byHarness: { claude: result },
-        skipped: 'unwritable',
-        ...(result.fix !== undefined ? { pointer: result.fix } : {}),
-      };
-    }
-    return { byHarness: { claude: result } };
-  };
-
-  const env = deps.env ?? process.env;
 
   const withOtherGrants = async (sync: AllowlistSync): Promise<AllowlistSync> => {
     const byHarness = { ...sync.byHarness };
@@ -740,11 +567,20 @@ async function syncPublishRule(
   // DETECTED, never assumed: a codex-only machine has a ~/.claude/settings.json
   // that nothing reads, so prompting about it is noise and writing to it is an
   // uninvited edit — and the retraction would sweep a file we never owned.
-  if (grantable.length === 0) {
+  if (selectedAdapters.every((adapter) => adapter.registrar.grant === undefined)) {
     // No settings file of ours to be missing anything, so the pointer would be
     // advice about a machine this is not.
     return { ...nothing, skipped: 'not-claude' };
   }
+
+  const probe = isClaude
+    ? await (deps.inspectAllowlist ?? inspectFreeVerbRules)(home, mode)
+    : { pending: [] as string[] };
+  const gated = new Set<string>(MODE_GATED_RULES);
+  const missing = (probe.pending ?? []).filter((r) => gated.has(r));
+  // Only ever names rules this machine does not have. A pointer built from the
+  // mode alone told a fully-wired operator to go add what they already had.
+  const pointer = modeGatedPointer(mode, missing) ?? undefined;
 
   // Tightening runs with no question and with no precondition, through a pass
   // that can only ever REMOVE. Riding the additive writer made this decline
@@ -772,23 +608,18 @@ async function syncPublishRule(
   // already has.
   if (probe.satisfied !== undefined && selectedAdapters.length === 1 && isClaude) return nothing;
 
-  if (decision.kind === 'skip') return decision.result;
-  if (decision.kind === 'recheck') {
-    return { ...nothing, skipped: 'no-tty', ...(pointer !== undefined ? { pointer } : {}) };
+  const canPrompt =
+    ctx.flags.json === true ? false : (deps.isInteractive ?? Boolean(process.stdin.isTTY));
+  if (!canPrompt) {
+    return { ...nothing, skipped: 'no-tty', ...(pointer ? { pointer } : {}) };
   }
-  if (decision.kind === 'approved') {
-    const sameHarnesses =
-      decision.harnesses.length === grantable.length &&
-      decision.harnesses.every((harness, index) => harness === grantable[index]);
-    const disclosed = new Set([...decision.pending, ...MODE_GATED_RULES]);
-    const addedSincePrompt = (probe.pending ?? []).filter((rule) => !disclosed.has(rule));
-    if (!sameHarnesses || addedSincePrompt.length > 0) {
-      throw new CliError(
-        'REFUSED',
-        'The harness grant surface changed while confirmation was open, so nothing was written.',
-        { fix: `Re-run \`tenjin config set publish.mode ${mode}\` to review the current grant.` },
-      );
-    }
+
+  const confirm = deps.confirmRule ?? ((label: string) => confirmChoice(label, true));
+  const grantable = selectedAdapters
+    .filter((adapter) => adapter.registrar.grant !== undefined)
+    .map((adapter) => adapter.id);
+  if (!(await confirm(publishRuleQuestion(mode, probe.pending ?? [], grantable)))) {
+    return { ...nothing, skipped: 'declined', ...(pointer ? { pointer } : {}) };
   }
   return await withOtherGrants(isClaude ? await write() : nothing);
 }
@@ -1149,19 +980,21 @@ async function persist(
   dir: string,
   merge: (existing: PartialConfig) => PartialConfig,
 ): Promise<void> {
-  await withConfigLock(dir, async () => {
-    const existing = await loadRawConfig(dir);
-    await writePartialConfig(dir, merge(existing));
-  });
-}
-
-/** One mutex for every config mutation, including the publish-mode transaction
- * whose adapter-owned files must not interleave with another mode decision. */
-async function withConfigLock<T>(dir: string, action: () => Promise<T>): Promise<T> {
   await mkdir(dir, { recursive: true, mode: 0o700 });
   const lockPath = `${configPath(dir)}.lock`;
   try {
-    return await withFileLock(lockPath, action);
+    await withFileLock(lockPath, async () => {
+      const existing = await loadRawConfig(dir);
+      const merged = merge(existing);
+      const validated = RawConfigSchema.parse(merged);
+      // 0600, matching lib/config.ts's `writeConfig`: this file holds
+      // `shelfBypassSecret`, and this is the writer `config set` uses to put it
+      // there. See that function for why dirMode alone is not enough.
+      await writeFileAtomic(configPath(dir), `${JSON.stringify(validated, null, 2)}\n`, {
+        mode: 0o600,
+        dirMode: 0o700,
+      });
+    });
   } catch (err) {
     // A lock timeout is not the user's malformed input; surface it as INTERNAL with
     // the one manual step (there is no auto-steal), keeping the JSON error contract.
@@ -1173,17 +1006,6 @@ async function withConfigLock<T>(dir: string, action: () => Promise<T>): Promise
     }
     throw err;
   }
-}
-
-async function writePartialConfig(dir: string, next: PartialConfig): Promise<void> {
-  const validated = RawConfigSchema.parse(next);
-  // 0600, matching lib/config.ts's `writeConfig`: this file holds
-  // `shelfBypassSecret`, and this is the writer `config set` uses to put it
-  // there. See that function for why dirMode alone is not enough.
-  await writeFileAtomic(configPath(dir), `${JSON.stringify(validated, null, 2)}\n`, {
-    mode: 0o600,
-    dirMode: 0o700,
-  });
 }
 
 function formatLine(key: string, entry: RenderedSetting): string {
