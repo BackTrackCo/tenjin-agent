@@ -1,5 +1,4 @@
 import { spawn } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { codexHome } from '../adapters/codex';
 
@@ -73,7 +72,7 @@ export type CodexTrust = 'trusted' | 'modified' | 'untrusted' | 'partial' | 'dis
 export interface CodexTrustReport {
   state: CodexTrust;
   /** How the answer was obtained, because they are not equally strong. */
-  source: 'app-server' | 'config-file' | 'none';
+  source: 'app-server' | 'none';
   /** The file the state lives in, named whatever the answer is. */
   configPath: string;
   /** Handlers of ours Codex will actually run. */
@@ -427,55 +426,6 @@ export async function trustCodexHooks(
 }
 
 /**
- * The `[hooks.state]` keys present in `toml`, or null when the shape is not one
- * this reader follows.
- *
- * THE FALLBACK, not the answer: it sees whether a row exists and whether it is
- * switched off, never whether the recorded hash still matches, so a `modified`
- * hook reads here as fine. Hence `hooks/list` first, and `partial` at best.
- *
- * A narrow scan rather than a TOML parser: two facts from a file this CLI must
- * never write, in both forms Codex writes (an inline table under
- * `[hooks.state]`, and a `[hooks.state."<key>"]` sub-table). Anything else
- * answers null, which surfaces as `unknown` rather than as a guess.
- */
-export function parseHooksState(toml: string): Map<string, { enabled: boolean }> | null {
-  const rows = new Map<string, { enabled: boolean }>();
-  let inState = false;
-  let subTableKey: string | null = null;
-  for (const line of toml.split('\n')) {
-    const text = line.trim();
-    if (text.length === 0 || text.startsWith('#')) continue;
-    if (text.startsWith('[')) {
-      const sub = /^\[hooks\.state\."((?:[^"\\]|\\.)*)"\]$/.exec(text);
-      if (sub !== null) {
-        subTableKey = unquote(sub[1] ?? '');
-        rows.set(subTableKey, { enabled: true });
-        inState = false;
-        continue;
-      }
-      inState = text === '[hooks.state]';
-      subTableKey = null;
-      continue;
-    }
-    if (subTableKey !== null) {
-      if (/^enabled\s*=\s*false\b/.test(text)) rows.set(subTableKey, { enabled: false });
-      continue;
-    }
-    if (!inState) continue;
-    const row = /^"((?:[^"\\]|\\.)*)"\s*=\s*(.*)$/.exec(text);
-    if (row === null) return null;
-    rows.set(unquote(row[1] ?? ''), { enabled: !/\benabled\s*=\s*false\b/.test(row[2] ?? '') });
-  }
-  return rows;
-}
-
-/** TOML basic-string escapes, limited to the ones a filesystem path can carry. */
-function unquote(raw: string): string {
-  return raw.replace(/\\(["\\])/g, '$1');
-}
-
-/**
  * What Codex will do with our hooks. `keys` comes from the caller reading the
  * installed hooks.json, so an empty list is "nothing of ours is registered"
  * and answers `unknown` rather than inventing a verdict.
@@ -505,27 +455,7 @@ export async function readCodexTrust(
     return { ...base, trusted, state, source: 'app-server' };
   }
 
-  // ONLY A MISSING FILE MEANS ABSENT. A file that exists and cannot be read --
-  // permissions, a directory in its place, an I/O error -- says nothing about
-  // trust, and reporting it as definitely untrusted both hides the real
-  // problem and recommends a fix that would not touch it (tenjin-agent#343).
-  const read = await readFile(configPath, 'utf8').then(
-    (text) => ({ text }),
-    (err: NodeJS.ErrnoException) => ({ err }),
-  );
-  if ('err' in read) {
-    if (read.err.code === 'ENOENT') return { ...base, state: 'untrusted', source: 'config-file' };
-    return { ...base, state: 'unknown', source: 'config-file' };
-  }
-  const raw = read.text;
-  const rows = parseHooksState(raw);
-  if (rows === null) return { ...base, state: 'unknown', source: 'config-file' };
-  const found = keys.map((k) => rows.get(k)).filter((r) => r !== undefined);
-  if (found.some((r) => !r.enabled)) {
-    return { ...base, trusted: 0, state: 'disabled', source: 'config-file' };
-  }
-  if (found.length === 0) return { ...base, state: 'untrusted', source: 'config-file' };
-  // Never `trusted` from this path: the hash may have gone stale under it, and
-  // only Codex can say. `partial` is the strongest honest word here.
-  return { ...base, trusted: found.length, state: 'partial', source: 'config-file' };
+  // Trust is Codex's judgment over its private handler hash. If Codex cannot be
+  // asked, a config.toml row cannot settle whether that hash still matches.
+  return { ...base, state: 'unknown', source: 'none' };
 }

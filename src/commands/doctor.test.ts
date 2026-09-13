@@ -6,7 +6,7 @@ import { existsSync } from 'node:fs';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import type { Address } from 'viem';
 import { runDoctor, runDoctorPrune } from './doctor';
-import type { CheckResult } from './doctor';
+import type { CheckResult, DoctorDeps } from './doctor';
 import { getUsdcBalance } from '../lib/usdc';
 import { CliError } from '../lib/errors';
 import { claudeSettingsPath, FREE_VERB_RULES, MODE_GATED_RULES } from '../lib/harness-permissions';
@@ -1914,6 +1914,17 @@ describe('runDoctor — the rule the publish mode carries', () => {
     expect(await run()).toContain('publish.mode=full-auto');
   });
 
+  it('does not nag after the operator explicitly declined those rules', async () => {
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({
+        publish: { mode: 'auto' },
+        install: { freeVerbsDeclined: [...FREE_VERB_RULES, ...MODE_GATED_RULES] },
+      }),
+    );
+    expect(await run()).not.toContain('Bash(tenjin publish:*)');
+  });
+
   it('carries the mode-gated tier in --json', async () => {
     await writeFile(join(dir, 'config.json'), JSON.stringify({ publish: { mode: 'auto' } }));
     const res = await runDoctor(ctxFor(), {
@@ -2462,13 +2473,16 @@ describe('runDoctor — Codex loop hook wiring', () => {
     }
   }
 
-  async function page(): Promise<{ checks: CheckResult[]; text: string }> {
+  async function page(
+    over: Partial<DoctorDeps> = {},
+  ): Promise<{ checks: CheckResult[]; text: string }> {
     const res = await runDoctor(ctxFor(), {
       walletPassphrase: NO_OS_STORE,
       homeDir: skillHome,
       skillsSourceDir: pkgSrc,
       env: {},
       fetchImpl: healthyFetch,
+      ...over,
     });
     return {
       checks: (res.data as { checks: CheckResult[] }).checks,
@@ -2489,13 +2503,20 @@ describe('runDoctor — Codex loop hook wiring', () => {
     addFire('old-codex', 'codex', now - 8 * 24 * 60 * 60 * 1000);
     addFire('recent-claude', 'claude', now);
 
-    const result = await page();
+    const result = await page({
+      readHarnessTrust: async (_adapter, _home, keys) => ({
+        state: 'untrusted',
+        source: 'app-server',
+        configPath: join(skillHome, '.codex', 'config.toml'),
+        trusted: 0,
+        expected: keys.length,
+      }),
+    });
     const configured = find(result.checks, 'codex configured');
     expect(configured).toMatchObject({ status: 'ok', required: false });
     expect(configured.detail).toBe(`2 entries in ${codexHooksPath()}`);
 
-    // Nothing has trusted these, and `codex` is not reachable with env {}, so
-    // the config file settles it: no rows, therefore inert.
+    // Codex's own app-server answer settles that nothing is trusted.
     const trusted = find(result.checks, 'codex trusted');
     expect(trusted.status).toBe('warn');
     expect(trusted.fix).toContain('tenjin install');
@@ -2514,7 +2535,15 @@ describe('runDoctor — Codex loop hook wiring', () => {
    */
   it('an installed-but-untrusted Codex reads as inert, and points at install', async () => {
     await wireCodex();
-    const result = await page();
+    const result = await page({
+      readHarnessTrust: async (_adapter, _home, keys) => ({
+        state: 'untrusted',
+        source: 'app-server',
+        configPath: join(skillHome, '.codex', 'config.toml'),
+        trusted: 0,
+        expected: keys.length,
+      }),
+    });
     expect(find(result.checks, 'codex configured').status).toBe('ok');
     const trusted = find(result.checks, 'codex trusted');
     expect(trusted.status).toBe('warn');

@@ -14,6 +14,14 @@
  * before.
  */
 
+import type { PublishMode } from '../lib/config';
+import type {
+  CodexGrantResult,
+  HarnessPermissions,
+  PermissionsResult,
+} from '../lib/harness-permissions';
+import type { CodexTrustReport, TrustProbeOptions, TrustResult } from '../lib/codex-trust';
+
 /** Harnesses with an adapter in this build. */
 export type Harness = 'claude' | 'codex';
 
@@ -165,6 +173,31 @@ export interface Registrar {
    * (tenjin-agent#342).
    */
   activation?(hooksPath: string): string[];
+  /** The harness-native persistent command grant, when this harness has one. */
+  grant?: {
+    path(home: string, env?: NodeJS.ProcessEnv): string;
+    inspect(home: string, mode: PublishMode, env?: NodeJS.ProcessEnv): Promise<HarnessPermissions>;
+    write(
+      home: string,
+      mode: PublishMode,
+      env?: NodeJS.ProcessEnv,
+    ): Promise<PermissionsResult | CodexGrantResult>;
+    remove?(home: string, env?: NodeJS.ProcessEnv): Promise<{ path: string; removed: boolean }>;
+  };
+  /** A harness-native trust gate for registered hook handlers. */
+  trust?: {
+    ensure(
+      home: string,
+      keys: readonly string[],
+      ownedBy: (row: { command?: unknown; sourcePath?: unknown }) => boolean,
+      opts?: TrustProbeOptions,
+    ): Promise<TrustResult>;
+    read(
+      home: string,
+      keys: readonly string[],
+      opts?: TrustProbeOptions,
+    ): Promise<CodexTrustReport>;
+  };
 }
 
 export interface HarnessAdapter {

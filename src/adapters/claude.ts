@@ -1,6 +1,10 @@
 import { AGENT_ID_RE } from '../lib/grade';
 import { CONTEXT_MAX } from '../hooks/constants';
-import { claudeSettingsPath } from '../lib/harness-permissions';
+import {
+  claudeSettingsPath,
+  inspectClaudeGrant,
+  wireFreeVerbAllowlist,
+} from '../lib/harness-permissions';
 import { hasErrorMarker } from './error-markers';
 import type {
   Emit,
@@ -257,6 +261,11 @@ export const registrar: Registrar = {
       { event: 'SubagentStop', hooks: http },
       { event: 'Stop', hooks: http },
     ];
+  },
+  grant: {
+    path: claudeSettingsPath,
+    inspect: inspectClaudeGrant,
+    write: wireFreeVerbAllowlist,
   },
 };
 

@@ -48,19 +48,18 @@ import { walletFileExists } from '../lib/wallet/store';
 import { recommendedPermissions } from '../lib/permissions';
 import {
   claudeSettingsPath,
-  grantSurfaceFor,
-  usesGrantWriter,
   inspectFreeVerbRules,
   permissionsSkipped,
   planFreeVerbAllowlist,
   retractModeGatedRules,
-  wireCodexGrant,
-  wireFreeVerbAllowlist,
 } from '../lib/harness-permissions';
-import type { CodexGrantResult, PermissionsResult } from '../lib/harness-permissions';
-import { codexRulesPath } from '../lib/codex-rules';
+import type {
+  CodexGrantResult,
+  HarnessPermissions,
+  PermissionsResult,
+} from '../lib/harness-permissions';
 import { hasHooks, hooksSkipped, registeredHooks, writeHooks } from '../lib/harness-hooks';
-import { trustCodexHooks, trustKey } from '../lib/codex-trust';
+import { trustKey } from '../lib/codex-trust';
 import type { TrustResult } from '../lib/codex-trust';
 import { shimBundlePath } from '../lib/paths';
 import type { WriteHooksOptions } from '../lib/harness-hooks';
@@ -241,6 +240,13 @@ export interface InstallDeps {
     home: string,
     mode: PublishMode,
   ) => Promise<{ pending: string[] | null; satisfied?: PermissionsResult }>;
+  /** Read one adapter's native grant during refresh. */
+  inspectHarnessGrant?: (
+    adapter: HarnessAdapter,
+    home: string,
+    mode: PublishMode,
+    env: NodeJS.ProcessEnv,
+  ) => Promise<HarnessPermissions>;
   /** The retraction-only pass `review` runs; defaults to the real writer. */
   retractModeGated?: (home: string) => Promise<PermissionsResult>;
   /** Codex's hook-trust step; defaults to the real app-server round trip.
@@ -411,22 +417,23 @@ async function runInstallRefresh(
   const hooks: HooksResult[] = [];
   for (const adapter of Object.values(ADAPTERS)) {
     if (!(await hasHooks(adapter, home, ctx.dataDir, env))) continue;
+    const written = await writeHooks({
+      adapter,
+      homeDir: home,
+      dataDir: ctx.dataDir,
+      env,
+      ...(deps.startDaemon !== undefined ? { start: deps.startDaemon } : {}),
+    });
     hooks.push(
-      await writeHooks({
-        adapter,
-        homeDir: home,
-        dataDir: ctx.dataDir,
-        env,
-        ...(deps.startDaemon !== undefined ? { start: deps.startDaemon } : {}),
-      }),
+      written.skipped !== undefined
+        ? written
+        : await activateHooks(adapter, written, home, ctx.dataDir, deps, env),
     );
   }
   const wired = hooks.length > 0;
 
-  // `pending` is exactly the set a real install WOULD add, which is exactly the
-  // set this run must not. Reported so the operator can see what an explicit
-  // install is holding for them.
-  const probe = await (deps.inspectPermissions ?? inspectFreeVerbRules)(home, publishMode);
+  // Read every wired harness through its adapter. A refresh must not invent a
+  // Claude settings file (or a Claude warning) on a Codex-only machine.
   // A settled `--no-allow-free-verbs` persists the EXACT rules that were
   // pending at the time in `install.freeVerbsDeclined`
   // (see `resolvePermissions`), and this run subtracts that recorded set from
@@ -437,12 +444,26 @@ async function runInstallRefresh(
   // version's genuinely new suggestion — is not in this list, so it still
   // surfaces even on a machine sitting on an old decline.
   const declined = new Set(resolveFreeVerbsDeclined(rawConfig.install?.freeVerbsDeclined));
-  const permissions = {
-    path: probe.satisfied?.path ?? claudeSettingsPath(home),
-    alreadyPresent: probe.satisfied?.alreadyPresent ?? [],
-    /** Rules a `tenjin install` would write. Never written here; see the header. */
-    pending: (probe.pending ?? []).filter((rule) => !declined.has(rule)),
-  };
+  const permissions: Partial<Record<Harness, HarnessPermissions>> = {};
+  for (const hook of hooks) {
+    const adapter = ADAPTERS[hook.harness as Harness];
+    const grant = adapter.registrar.grant;
+    if (grant === undefined) continue;
+    const report =
+      adapter.id === 'claude' && deps.inspectPermissions !== undefined
+        ? await legacyRefreshPermissions(home, publishMode, deps.inspectPermissions)
+        : deps.inspectHarnessGrant !== undefined
+          ? await deps.inspectHarnessGrant(adapter, home, publishMode, env)
+          : await grant.inspect(home, publishMode, env);
+    const missing = report.missing.filter((rule) => !declined.has(rule));
+    permissions[adapter.id] = {
+      ...report,
+      missing,
+      ...(report.state === 'pending' && missing.length === 0
+        ? { state: 'skipped', detail: 'the missing rules were explicitly declined' }
+        : {}),
+    };
+  }
 
   const touched = skills.ran || wired;
   const data = { refresh: true, dataDir: ctx.dataDir, skills, hooks, permissions, touched };
@@ -490,7 +511,7 @@ async function runInstallRefresh(
 function refreshLines(
   hooks: HooksResult[],
   skills: HealOutcome,
-  permissions: { pending: string[] },
+  permissions: Partial<Record<Harness, HarnessPermissions>>,
   dataDir: string,
 ): string[] {
   const lines = [`Refreshed what is already installed for ${dataDir}.`];
@@ -508,12 +529,33 @@ function refreshLines(
           : `- hooks (${h.harness}): ${h.entries} entries already current in ${h.path ?? 'settings'}`,
     );
   }
-  if (permissions.pending.length > 0) {
+  for (const [harness, report] of Object.entries(permissions)) {
+    if (report.missing.length === 0) continue;
     lines.push(
-      `- permissions: ${permissions.pending.length} rule(s) this version would add were NOT written; run \`tenjin install\` to grant them.`,
+      `- permissions (${harness}): ${report.missing.length} rule(s) this version would add were NOT written; run \`tenjin install\` to grant them.`,
     );
   }
   return lines;
+}
+
+async function legacyRefreshPermissions(
+  home: string,
+  mode: PublishMode,
+  inspect: NonNullable<InstallDeps['inspectPermissions']>,
+): Promise<HarnessPermissions> {
+  const probe = await inspect(home, mode);
+  const missing = probe.pending ?? [];
+  return {
+    harness: 'claude',
+    state: missing.length === 0 ? 'granted' : 'pending',
+    path: probe.satisfied?.path ?? claudeSettingsPath(home),
+    rules: probe.satisfied?.alreadyPresent ?? [],
+    missing,
+    detail:
+      missing.length === 0
+        ? 'the configured grant is current'
+        : `${missing.length} of this mode's rules are missing`,
+  };
 }
 
 /** How far the command got, for the interrupt diagnostic. */
@@ -696,6 +738,10 @@ async function installBody(
       publishMode: publishMode.value,
     }),
   );
+  const grants: Partial<Record<Harness, PermissionsResult | CodexGrantResult>> = {
+    ...(permissions !== undefined ? { claude: permissions } : {}),
+    ...(codexGrant !== undefined ? { codex: codexGrant } : {}),
+  };
   const hooks = await underDataDir(ctx.dataDir, () =>
     resolveHooks({ harnesses: selectedHarnesses, home, ctx, deps, noHooks, dryRun }),
   );
@@ -759,7 +805,7 @@ async function installBody(
     // Shipped with the install rather than left for the operator to discover after
     // their first auto-mode denial (#33). Static constants, no config key: see
     // lib/permissions.ts for why this is deliberately not operator-editable state.
-    // `wired` is the outcome of THIS run's settings.json write; the three
+    // `byHarness` holds each adapter's native grant outcome; the three
     // recommendation tiers beside it are unchanged, so a machine consumer that
     // read `alwaysSafe` / `optIn` / `neverAllowlisted` before still does.
     // `effective` is about THESE rules, which are Claude Code's `Bash(...)`
@@ -767,18 +813,14 @@ async function installBody(
     // own. Codex has one and cannot carry a single line of this payload, so
     // asking `kind === 'writable'` made a Codex-only envelope claim the rules
     // were in force there: the very defect of #342, one level up. The Codex
-    // grant is reported on `codexGrant`, in its own grammar.
+    // grant is reported under the Codex key, in its own grammar.
     permissions: {
       ...recommendedPermissions(
         publishMode.value,
-        plans.some((p) => usesGrantWriter(p.harness, 'claude-settings')),
+        plans.some((p) => ADAPTERS[p.harness].registrar.grant === ADAPTERS.claude.registrar.grant),
       ),
-      wired: permissions,
+      byHarness: grants,
     },
-    // Per harness, and absent for a Claude-only run. A Codex operator reading
-    // `permissions` alone was reading Claude's grammar about someone else's
-    // machine (tenjin-agent#342).
-    ...(codexGrant !== undefined ? { codexGrant } : {}),
     hooks,
     wallet,
   };
@@ -792,8 +834,7 @@ async function installBody(
     dryRun,
     harnesses,
     publishMode,
-    permissions,
-    ...(codexGrant !== undefined ? { codexGrant } : {}),
+    grants,
     hooks,
     hooksEnabled: enabledArms(rawConfig),
     wallet,
@@ -834,9 +875,7 @@ interface WalkthroughState {
   dryRun: boolean;
   harnesses: HarnessResult[];
   publishMode: PublishModeSelection;
-  permissions: PermissionsResult;
-  /** Codex's own grant, absent when this run targeted no Codex. */
-  codexGrant?: CodexGrantResult;
+  grants: Partial<Record<Harness, PermissionsResult | CodexGrantResult>>;
   /** One outcome per harness with a hook registrar, or one skip when none was targeted. */
   hooks: HooksResult[];
   /** Arms answering after this run; every one is on unless config turned it off. */
@@ -908,25 +947,28 @@ function activationBlock(io: Io, s: WalkthroughState): string[] {
  * and silent on a harness that took the rules.
  */
 function permissionNote(io: Io, s: WalkthroughState): string[] {
-  if (s.permissions.skipped !== 'harness-unsupported') return [];
+  const unsupported = Object.values(s.grants).find(
+    (grant): grant is PermissionsResult =>
+      'skipped' in grant && grant.skipped === 'harness-unsupported',
+  );
+  if (unsupported === undefined) return [];
   if (s.publishMode.value === 'review') return [];
-  const surface = grantSurfaceFor(s.permissions.harness);
-  if (surface.kind !== 'absent') return [];
-  const label = harnessLabel(s.permissions.harness as Harness);
+  const label = harnessLabel(unsupported.harness as Harness);
   return [
     paint(
       io,
       'yellow',
       `publish.mode is ${s.publishMode.value}, but ${label} will still ask before running \`tenjin publish\`.`,
     ),
-    paint(io, 'dim', `  ${surface.why}`),
-    ...surface.operatorSteps.map((step) => paint(io, 'dim', `  ${step}`)),
+    paint(io, 'dim', `  This build knows no persistent command grant for ${label}.`),
     '',
   ];
 }
 
 /** One subject per row, each label padded to the same column so the facts line up. */
 function rows(io: Io, s: WalkthroughState): string[] {
+  const claude = s.grants.claude as PermissionsResult | undefined;
+  const codex = s.grants.codex as CodexGrantResult | undefined;
   const entries: [string, string][] = [
     ['skills', skillsValue(s.harnesses)],
     // One row per harness that has a grant surface, named when there are two,
@@ -934,20 +976,18 @@ function rows(io: Io, s: WalkthroughState): string[] {
     // dropped only when it has NOTHING of its own to report: a `review` run
     // that retracted from ~/.claude/settings.json changed that file, and a
     // receipt that hides the deletion is worse than a redundant row.
-    ...(s.permissions.skipped === 'harness-elsewhere' &&
-    s.codexGrant !== undefined &&
-    s.permissions.removed.length === 0
+    ...(claude === undefined
       ? []
       : ([
           [
             'permissions',
-            s.codexGrant === undefined
-              ? permissionsValue(s.permissions)
-              : `Claude Code: ${permissionsValue(s.permissions)}`,
+            codex === undefined
+              ? permissionsValue(claude)
+              : `Claude Code: ${permissionsValue(claude)}`,
           ],
         ] as [string, string][])),
-    ...(s.codexGrant !== undefined
-      ? ([['permissions', `Codex: ${codexGrantValue(s.codexGrant, s.publishMode.value)}`]] as [
+    ...(codex !== undefined
+      ? ([['permissions', `Codex: ${codexGrantValue(codex, s.publishMode.value)}`]] as [
           string,
           string,
         ][])
@@ -1040,11 +1080,6 @@ function permissionsValue(p: PermissionsResult): string {
   if (p.skipped === 'harness-unsupported') {
     return `pending: ${harnessLabel(p.harness as Harness)} has no grant this CLI can write, so it still asks${removed(false)}`;
   }
-  // The Codex row beside this one carries that harness's real answer, so this
-  // one says only that it is not the place to read it.
-  if (p.skipped === 'harness-elsewhere') {
-    return `none here (Claude Code's file); see the ${harnessLabel(p.harness as Harness)} row${removed(false)}`;
-  }
   if (p.skipped === 'declined' || p.skipped === 'not-requested') {
     return `none written (--no-allow-free-verbs)${removed(false)}`;
   }
@@ -1125,7 +1160,10 @@ function problemLines(io: Io, s: WalkthroughState): string[] {
   // Sanitized for the same reason doctor sanitizes its own detail: these strings
   // embed a V8 JSON parse error, and V8 quotes the offending input, so bytes out
   // of the operator's settings file reach the terminal through them.
-  for (const w of [...s.hooks.map((h) => h.warning), s.wallet.warning, s.permissions.warning]) {
+  const grantWarnings = Object.values(s.grants)
+    .filter((grant): grant is PermissionsResult => 'added' in grant)
+    .map((grant) => grant.warning);
+  for (const w of [...s.hooks.map((h) => h.warning), s.wallet.warning, ...grantWarnings]) {
     if (w !== undefined) lines.push(paint(io, 'yellow', `! ${sanitizeForTerminal(w)}`));
   }
   return lines;
@@ -1432,12 +1470,23 @@ async function resolvePermissions(args: {
    * the two cannot disagree.
    */
   publishMode: PublishMode;
-}): Promise<PermissionsResult> {
+}): Promise<PermissionsResult | undefined> {
   const { plans, home, ctx, deps, declined, dryRun, publishMode } = args;
+  const targetsClaude = plans.some(
+    (p) => ADAPTERS[p.harness].registrar.grant === ADAPTERS.claude.registrar.grant,
+  );
 
   // A dry run writes nothing, so it settles before the retraction rather than
   // after it: what it owes the operator is the plan, not a revocation.
-  if (dryRun) return (deps.planPermissions ?? planFreeVerbAllowlist)(home, publishMode);
+  if (dryRun) {
+    return targetsClaude
+      ? (deps.planPermissions ?? planFreeVerbAllowlist)(home, publishMode)
+      : undefined;
+  }
+
+  // The selected adapter owns the whole grant lifecycle. A Codex-only install
+  // never reads or rewrites Claude's settings file.
+  if (!targetsClaude) return undefined;
 
   /**
    * TIGHTENING FIRST, above every guard below, because none of them is about a
@@ -1446,9 +1495,9 @@ async function resolvePermissions(args: {
    * ordering it first let `install --publish-mode review --no-allow-free-verbs`
    * write `mode: review` to config.json, leave both mode-gated rules allowed, and
    * report `skipped: declined` with a fix telling the operator to ADD rules on the
-   * run where they asked to revoke. The `--harness` guard is the same shape: it
-   * scopes a write to the harnesses this run targets, and a Claude rule this CLI
-   * wrote is ours to reclaim whichever harness is being installed today.
+   * run where they asked to revoke. The adapter selection is settled before
+   * this function runs, so a Codex-only install never reaches this Claude
+   * retraction path.
    *
    * The one thing that CANNOT fall through is a file we could not read: the
    * additive writer refuses it for the same reason, so there is nothing to fall
@@ -1485,25 +1534,6 @@ async function resolvePermissions(args: {
           ...(result.path === undefined ? { path: retractedFrom } : {}),
         };
 
-  // THIS writer owns ~/.claude/settings.json and nothing else. Codex has a real
-  // grant surface of its own and `resolveCodexGrant` writes it; routing on
-  // "writable" alone would send a Codex-only install down this path and create
-  // a Claude settings file on a machine with no Claude on it. The two skips are
-  // kept apart because they are different facts: `harness-elsewhere` says the
-  // grant landed in another file, `harness-unsupported` that there is none
-  // (tenjin-agent#342).
-  if (!plans.some((p) => usesGrantWriter(p.harness, 'claude-settings'))) {
-    const other = plans.find((p) => grantSurfaceFor(p.harness).kind === 'writable');
-    const subject = other ?? plans[0]!;
-    return withRetraction(
-      permissionsSkipped(
-        subject.harness,
-        home,
-        other === undefined ? 'harness-unsupported' : 'harness-elsewhere',
-      ),
-    );
-  }
-
   // Read ahead of the decline guard (rather than only on the branches that go
   // on to grant) so a decline has the EXACT rule set that was actually pending
   // to persist. `--refresh` subtracts this from what it recomputes, per rule
@@ -1527,7 +1557,7 @@ async function resolvePermissions(args: {
   // for a command that no longer exists, or the publish rule under a mode that
   // no longer carries it. That only ever removes a rule this CLI wrote.
   if (probe.pending !== null && probe.pending.length === 0) {
-    return withRetraction(await wireFreeVerbAllowlist(home, publishMode));
+    return withRetraction(await writeClaudeGrant(home, publishMode));
   }
 
   // A decline recorded on some earlier run is stale as of now IF the write
@@ -1536,7 +1566,7 @@ async function resolvePermissions(args: {
   // the rules absent but erased the very record that told the next refresh they
   // were still pending. Wire first, and only clear the decline once
   // `wireFreeVerbAllowlist` reports it actually wrote (no `skipped`).
-  const wired = await wireFreeVerbAllowlist(home, publishMode);
+  const wired = await writeClaudeGrant(home, publishMode);
   if (wired.skipped === undefined) {
     await persistFreeVerbsDeclined(ctx.dataDir, []);
   }
@@ -1559,12 +1589,33 @@ async function resolveCodexGrant(args: {
   publishMode: PublishMode;
 }): Promise<CodexGrantResult | undefined> {
   const { plans, home, deps, declined, dryRun, publishMode } = args;
-  if (!plans.some((p) => usesGrantWriter(p.harness, 'codex-rules'))) return undefined;
-  const path = codexRulesPath(home, deps.env ?? process.env);
+  if (!plans.some((p) => ADAPTERS[p.harness].registrar.grant === ADAPTERS.codex.registrar.grant))
+    return undefined;
+  const path = ADAPTERS.codex.registrar.grant!.path(home, deps.env ?? process.env);
   if (dryRun || declined) {
     return { path, granted: [], wrote: false };
   }
-  return await (deps.writeCodexGrant ?? wireCodexGrant)(home, publishMode, deps.env ?? process.env);
+  return await (deps.writeCodexGrant ?? writeCodexGrant)(
+    home,
+    publishMode,
+    deps.env ?? process.env,
+  );
+}
+
+async function writeClaudeGrant(home: string, mode: PublishMode): Promise<PermissionsResult> {
+  const result = await ADAPTERS.claude.registrar.grant!.write(home, mode);
+  if ('added' in result) return result;
+  throw new Error('Claude adapter returned a non-Claude grant result');
+}
+
+async function writeCodexGrant(
+  home: string,
+  mode: PublishMode,
+  env: NodeJS.ProcessEnv,
+): Promise<CodexGrantResult> {
+  const result = await ADAPTERS.codex.registrar.grant!.write(home, mode, env);
+  if ('granted' in result) return result;
+  throw new Error('Codex adapter returned a non-Codex grant result');
 }
 
 // --- Search hooks -----------------------------------------------------------------
@@ -1621,12 +1672,11 @@ async function resolveHooks(args: {
 /**
  * Complete a harness's activation, where its entries do not run until trusted.
  *
- * FAILS THE INSTALL RATHER THAN DEGRADE. Every other writer here reports a
- * skip and lets the run succeed, because what each wrote is useful on its own.
- * This one is different: entries that exist and cannot run are the exact state
- * this command exists to prevent, and reporting success over them is what sent
- * operators diagnosing an inert loop by hand. A failure to list, write or
- * verify throws, naming the step that did not complete.
+ * A trust failure fails this HARNESS, not the whole multi-harness install.
+ * Claude's independently usable skills, grant, and hooks remain installed, and
+ * the Codex outcome carries the failed step plus the command that selects
+ * Claude alone. A refresh treats the warning as a refusal, so update never
+ * reports stale Codex handlers as refreshed.
  *
  * `--no-hooks` remains the opt-out; it never reaches here.
  */
@@ -1638,7 +1688,8 @@ async function activateHooks(
   deps: InstallDeps,
   env: NodeJS.ProcessEnv,
 ): Promise<HooksResult> {
-  if (adapter.id !== 'codex') return written;
+  const trust = adapter.registrar.trust;
+  if (trust === undefined) return written;
   const registered = await registeredHooks(adapter, home, dataDir, env);
   const keys = registered.handlers
     .map((h) => trustKey(registered.path, h.event, h.groupIndex, h.handlerIndex))
@@ -1649,15 +1700,13 @@ async function activateHooks(
     typeof row.command === 'string' &&
     row.command.includes(shimBundlePath(dataDir)) &&
     row.sourcePath === registered.path;
-  const result = await (deps.trustHooks ?? trustCodexHooks)(home, keys, ours, { env });
+  const result = await (deps.trustHooks ?? trust.ensure)(home, keys, ours, { env });
   if (!result.ok) {
-    throw new CliError(
-      'INTERNAL',
-      `Codex hook trust could not be completed at the ${result.failedAt} step: ${result.reason}`,
-      {
-        fix: `The ${written.entries} entries are written to ${written.path}. Re-run \`tenjin install\`, or \`tenjin install --no-hooks\` to skip hooks entirely.`,
-      },
-    );
+    return {
+      ...written,
+      warning: `Codex hook trust could not be completed at the ${result.failedAt} step: ${result.reason}. The ${written.entries} entries are written but Codex will not run them.`,
+      fix: 'Run `tenjin install --harness claude` to keep the Claude installation only, or fix the Codex app server and re-run `tenjin install --harness codex`.',
+    };
   }
   return { ...written, trusted: result.trusted.length };
 }

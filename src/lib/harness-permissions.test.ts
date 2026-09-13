@@ -742,29 +742,11 @@ describe('permissionsSkipped', () => {
     }
   });
 
-  it('tells a harness with no grant surface apart from one whose grant is elsewhere', () => {
-    // Two different facts, and conflating them is #342: `harness-unsupported`
-    // says no grant exists anywhere, `harness-elsewhere` that it landed in
-    // another file and is reported on its own row. Neither fix may claim the
-    // Claude rules apply.
+  it('does not invent a repair path for a harness with no grant surface', () => {
     const none = permissionsSkipped('shared', home, 'harness-unsupported');
     expect(none.fix).toBeTruthy();
     expect(none.fix).not.toMatch(/tenjin (install|doctor)/);
-
-    const elsewhere = permissionsSkipped('codex', home, 'harness-elsewhere');
-    expect(elsewhere.fix).toMatch(/codex/i);
-    expect(elsewhere.fix).not.toMatch(/tenjin (install|doctor)/);
-  });
-
-  it('names no Claude path for a harness that does not keep its grant there', () => {
-    // A Codex-only install has no ~/.claude/settings.json in play, so the
-    // envelope must never point its reader at one.
-    for (const harness of ['codex', 'shared']) {
-      const result = permissionsSkipped(harness, home, 'harness-elsewhere');
-      expect(result.harness).toBe(harness);
-      expect(result.path).not.toBe(settingsPath());
-    }
-    expect(permissionsSkipped('shared', home, 'harness-unsupported')).not.toHaveProperty('path');
+    expect(none).not.toHaveProperty('path');
   });
 });
 

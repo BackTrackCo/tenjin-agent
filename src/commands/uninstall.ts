@@ -9,7 +9,6 @@ import {
   type SettingsOutcome,
   type UninstallReport,
 } from '../lib/uninstall';
-import { removeCodexGrant } from '../lib/harness-permissions';
 import { stopDaemon } from '../daemon/control';
 import { sanitizeForTerminal } from '../lib/output';
 import { loadRawConfig } from '../lib/config';
@@ -68,7 +67,7 @@ export async function runUninstall(
   // reclaiming it is a delete rather than a rewrite. An operator who removed
   // Tenjin must keep no standing permission for it, not even the free tier
   // (tenjin-agent#342).
-  const codexGrant = await removeCodexGrant(home, deps.env ?? process.env);
+  const codexGrant = await ADAPTERS.codex.registrar.grant?.remove?.(home, deps.env ?? process.env);
   // Then the daemon, before its bundle is deleted: a running daemon whose entries
   // are gone still holds the port and still serves any session that has not
   // re-read settings.json yet.
@@ -80,7 +79,7 @@ export async function runUninstall(
     settings,
     hookFiles,
     daemon: daemon.state,
-    ...(codexGrant.removed ? { codexGrant: codexGrant.path } : {}),
+    ...(codexGrant?.removed ? { codexGrant: codexGrant.path } : {}),
     skills,
     scripts: scripts.scripts,
     ...(scripts.removedDir !== undefined ? { hooksDir: scripts.removedDir } : {}),

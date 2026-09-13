@@ -29,9 +29,9 @@ import {
 } from '../lib/skill-wiring';
 import { skillMaterialize } from '../lib/skill-materialize';
 import type { HarnessWiring, NotInvocableReason } from '../lib/skill-wiring';
-import type { Harness } from '../adapters/types';
+import type { Harness, HarnessAdapter } from '../adapters/types';
 import { fetchJson, type FetchJsonFailure, type ShelfBypass } from '../lib/http';
-import { loadRawConfig, resolveSettings } from '../lib/config';
+import { loadRawConfig, resolveFreeVerbsDeclined, resolveSettings } from '../lib/config';
 import {
   isTeamModeConfig,
   isTeamShelfOrigin,
@@ -47,10 +47,9 @@ import { modeGatedPointer, recommendedPermissions } from '../lib/permissions';
 import {
   claudeSettingsPath,
   inspectFreeVerbRules,
-  inspectHarnessPermissions,
   MODE_GATED_RULES,
 } from '../lib/harness-permissions';
-import { readCodexTrust, trustKey } from '../lib/codex-trust';
+import { trustKey } from '../lib/codex-trust';
 import type { CodexTrust, CodexTrustReport } from '../lib/codex-trust';
 import { hookBundlesPresent, registeredHooks } from '../lib/harness-hooks';
 import type { RegisteredHooks } from '../lib/harness-hooks';
@@ -179,6 +178,13 @@ export interface DoctorDeps {
   now?: () => number;
   /** Packaged skills to compare the wired copies against; defaults to this build's. */
   skillsSourceDir?: string;
+  /** Read a harness's hook trust; tests inject recorded app-server answers. */
+  readHarnessTrust?: (
+    adapter: HarnessAdapter,
+    home: string,
+    keys: readonly string[],
+    env: NodeJS.ProcessEnv,
+  ) => Promise<CodexTrustReport>;
   /**
    * Passphrase seams for the wallet verification (#70), which reads the OS
    * credential store. Tests inject a platform with no store, or a stubbed exec,
@@ -293,6 +299,7 @@ export async function collectDoctorChecks(
       env,
       deps.openLoopDb ?? openLoopDbForCli,
       settings.publishMode.value,
+      deps.readHarnessTrust,
     )),
     await checkSkills(
       home,
@@ -326,11 +333,12 @@ export async function collectDoctorChecks(
   // command away from working when nothing would have made it work
   // (tenjin-agent#342). The per-harness `permissions` check carries the truth
   // for those machines instead.
-  const grantable = await claudeIsInPlay(home, ctx.dataDir, env, which, config);
+  const grantable = await installedHarnessInPlay('claude', home, ctx.dataDir, env, which, config);
   const probe = await inspectFreeVerbRules(deps.homeDir ?? homedir(), publishMode);
   const gated = new Set<string>(MODE_GATED_RULES);
+  const declined = new Set(resolveFreeVerbsDeclined(config.install?.freeVerbsDeclined));
   const missingModeGated = grantable
-    ? (probe.pending ?? []).filter((r) => gated.has(r))
+    ? (probe.pending ?? []).filter((r) => gated.has(r) && !declined.has(r))
     : ([] as string[]);
   const firstFail = built.find((b) => b.result.required && b.result.status === 'fail');
   if (firstFail === undefined) return { checks, publishMode, missingModeGated, grantable };
@@ -353,7 +361,8 @@ export async function collectDoctorChecks(
  * showed a Codex operator two rules their harness has never heard of
  * (tenjin-agent#342).
  */
-async function claudeIsInPlay(
+async function installedHarnessInPlay(
+  harness: Harness,
   homeDir: string,
   dataDir: string,
   env: NodeJS.ProcessEnv,
@@ -363,14 +372,14 @@ async function claudeIsInPlay(
   if (
     harnessInPlay(
       homeDir,
-      harnessTargetDir(homeDir, 'claude'),
+      harnessTargetDir(homeDir, harness),
       detectHarnesses(homeDir, which),
       config.install?.harness ?? [],
     )
   ) {
     return true;
   }
-  return (await registeredHooks(ADAPTERS.claude, homeDir, dataDir, env)).entries > 0;
+  return (await registeredHooks(ADAPTERS[harness], homeDir, dataDir, env)).entries > 0;
 }
 
 export async function runDoctor(
@@ -1286,17 +1295,26 @@ async function checkHooks(
   env: NodeJS.ProcessEnv,
   open: typeof openLoopDbForCli,
   publishMode: PublishMode,
+  readTrust?: NonNullable<DoctorDeps['readHarnessTrust']>,
 ): Promise<BuiltCheck[]> {
   const out: BuiltCheck[] = [];
-  const claude = await registeredHooks(ADAPTERS.claude, homeDir, dataDir, env);
-  const codex = await registeredHooks(ADAPTERS.codex, homeDir, dataDir, env);
-  if (claude.entries === 0 && codex.entries === 0) return out;
-  const wired = [
-    ...(claude.entries > 0 ? (['claude'] as const) : []),
-    ...(codex.entries > 0 ? (['codex'] as const) : []),
-  ];
-  out.push(await checkDaemon(claude.port, dataDir, wired));
-  if (claude.entries > 0) {
+  const registered = await Promise.all(
+    Object.values(ADAPTERS).map(async (adapter) => ({
+      adapter,
+      hooks: await registeredHooks(adapter, homeDir, dataDir, env),
+    })),
+  );
+  const wired = registered.filter((entry) => entry.hooks.entries > 0);
+  if (wired.length === 0) return out;
+  const claude = wired.find((entry) => entry.adapter.id === 'claude')?.hooks;
+  out.push(
+    await checkDaemon(
+      claude?.port ?? null,
+      dataDir,
+      wired.map((entry) => entry.adapter.id),
+    ),
+  );
+  if (claude !== undefined) {
     const path = claudeSettingsPath(homeDir);
     const mode = await settingsMode(homeDir);
     const wide = mode !== null && (mode & 0o077) !== 0;
@@ -1317,9 +1335,13 @@ async function checkHooks(
           },
     });
   }
-  if (codex.entries > 0) out.push(...(await checkCodexHooks(homeDir, dataDir, env, codex, open)));
-  for (const harness of wired) {
-    out.push(await checkHarnessPermissions(harness, homeDir, publishMode, env));
+  for (const { adapter, hooks } of wired) {
+    if (adapter.registrar.trust !== undefined) {
+      out.push(
+        ...(await checkTrustedHooks(adapter, homeDir, dataDir, env, hooks, open, readTrust)),
+      );
+    }
+    out.push(await checkHarnessPermissions(adapter, homeDir, publishMode, env));
   }
   return out;
 }
@@ -1329,12 +1351,14 @@ async function checkHooks(
  * each has its own remedy. `trusted` asks Codex rather than modelling it, so
  * this line never claims a security state from a file read.
  */
-async function checkCodexHooks(
+async function checkTrustedHooks(
+  adapter: HarnessAdapter,
   homeDir: string,
   dataDir: string,
   env: NodeJS.ProcessEnv,
   codex: RegisteredHooks,
   open: typeof openLoopDbForCli,
+  readTrust?: NonNullable<DoctorDeps['readHarnessTrust']>,
 ): Promise<BuiltCheck[]> {
   const out: BuiltCheck[] = [
     {
@@ -1349,10 +1373,13 @@ async function checkCodexHooks(
   const keys = codex.handlers
     .map((h) => trustKey(codex.path, h.event, h.groupIndex, h.handlerIndex))
     .filter((k): k is string => k !== null);
-  const trust = await readCodexTrust(homeDir, keys, { env });
+  const trust =
+    readTrust === undefined
+      ? await adapter.registrar.trust!.read(homeDir, keys, { env })
+      : await readTrust(adapter, homeDir, keys, env);
   const willRun = trust.state === 'trusted';
-  // `unknown` is NOT ok. It means neither Codex nor its config could settle
-  // whether these entries run, and a green line there reads as a working loop
+  // `unknown` is NOT ok. It means Codex could not settle whether these entries
+  // run, and a green line there reads as a working loop
   // -- which, with one fire still inside the observation window, makes an
   // inert install look healthy on both lines (tenjin-agent#343). It warns,
   // like the equivalent unknown permission state, and carries its own remedy
@@ -1406,10 +1433,7 @@ const TRUST_DETAIL: Readonly<Record<CodexTrust, (r: CodexTrustReport) => string>
   modified: (r) =>
     `${r.expected} entries changed since you trusted them, so Codex is refusing them`,
   untrusted: (r) => `none of the ${r.expected} entries is trusted; they are installed and inert`,
-  partial: (r) =>
-    r.source === 'config-file'
-      ? `${r.trusted} of ${r.expected} have a trust record in ${r.configPath}, but Codex could not be asked whether it still matches`
-      : `Codex will run ${r.trusted} of ${r.expected}`,
+  partial: (r) => `Codex will run ${r.trusted} of ${r.expected}`,
   disabled: () => 'at least one entry is trusted but switched off',
   unknown: (r) => `Codex could not be asked, and ${r.configPath} did not settle it`,
 };
@@ -1423,12 +1447,22 @@ const TRUST_DETAIL: Readonly<Record<CodexTrust, (r: CodexTrustReport) => string>
  * (tenjin-agent#342).
  */
 async function checkHarnessPermissions(
-  harness: string,
+  adapter: HarnessAdapter,
   homeDir: string,
   publishMode: PublishMode,
   env: NodeJS.ProcessEnv,
 ): Promise<BuiltCheck> {
-  const p = await inspectHarnessPermissions(harness, homeDir, publishMode, env);
+  const harness = adapter.id;
+  const p =
+    adapter.registrar.grant === undefined
+      ? {
+          harness,
+          state: 'unsupported' as const,
+          rules: [],
+          missing: [],
+          detail: `This build knows no permission surface for ${harness}.`,
+        }
+      : await adapter.registrar.grant.inspect(homeDir, publishMode, env);
   // `unsupported` is a fact about the harness, not a fault in the machine, so
   // it warns only where it changes what happens: an unattended mode that will
   // be prompted anyway.

@@ -14,7 +14,7 @@ import {
 } from './codex-rules';
 import {
   FREE_VERB_RULES,
-  inspectHarnessPermissions,
+  inspectCodexGrant,
   MODE_GATED_FORBIDDEN_FRAGMENTS,
   MODE_GATED_RULES,
   rulesForPublishMode,
@@ -238,14 +238,14 @@ describe("the grant state is Codex's answer, not our own", () => {
   it('is unknown, not granted, when codex cannot be asked to confirm', async () => {
     await wireCodexGrant(home, 'auto', {});
     // No `codex` on this PATH, so `execpolicy check` cannot answer.
-    const state = await inspectHarnessPermissions('codex', home, 'auto', { PATH: '/nonexistent' });
+    const state = await inspectCodexGrant(home, 'auto', { PATH: '/nonexistent' });
     expect(state.state).toBe('unknown');
     expect(state.detail).toMatch(/could not be asked/);
     expect(state.rules.length).toBeGreaterThan(0);
   });
 
   it('is pending when no grant is installed at all', async () => {
-    const state = await inspectHarnessPermissions('codex', home, 'auto', { PATH: '/nonexistent' });
+    const state = await inspectCodexGrant(home, 'auto', { PATH: '/nonexistent' });
     expect(state.state).toBe('pending');
     expect(state.fix).toBe('tenjin install');
   });

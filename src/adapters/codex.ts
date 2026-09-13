@@ -1,6 +1,9 @@
 import { join } from 'node:path';
 import { AGENT_ID_RE } from '../lib/grade';
 import { CONTEXT_MAX } from '../hooks/constants';
+import { codexRulesPath, removeCodexGrant } from '../lib/codex-rules';
+import { inspectCodexGrant, wireCodexGrant } from '../lib/harness-permissions';
+import { readCodexTrust, trustCodexHooks } from '../lib/codex-trust';
 import { hasErrorMarker } from './error-markers';
 import type { Emit, Event, HarnessAdapter, HookInput, HookTool, Registrar } from './types';
 
@@ -194,6 +197,16 @@ export const registrar: Registrar = {
    */
   activation() {
     return ['Start a new Codex session: hooks are read at session start.'];
+  },
+  grant: {
+    path: codexRulesPath,
+    inspect: inspectCodexGrant,
+    write: wireCodexGrant,
+    remove: removeCodexGrant,
+  },
+  trust: {
+    ensure: trustCodexHooks,
+    read: readCodexTrust,
   },
 };
 

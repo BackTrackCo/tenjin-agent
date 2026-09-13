@@ -1,14 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import {
-  foldTrust,
-  parseHooksState,
-  readCodexTrust,
-  trustCodexHooks,
-  trustKey,
-} from './codex-trust';
+import { foldTrust, readCodexTrust, trustCodexHooks, trustKey } from './codex-trust';
 
 let home: string;
 beforeEach(async () => {
@@ -99,7 +93,7 @@ describe('foldTrust: worst news first, because each state has its own remedy', (
   });
 });
 
-describe('readCodexTrust: asking Codex first, the file only as a fallback', () => {
+describe('readCodexTrust: Codex is the authority for its private hook hashes', () => {
   const listing = (rows: Record<string, unknown>[]) => async () => rows;
 
   it('takes the app server’s answer when there is one', async () => {
@@ -110,70 +104,14 @@ describe('readCodexTrust: asking Codex first, the file only as a fallback', () =
     expect(report).toMatchObject({ state: 'trusted', source: 'app-server', trusted: 2 });
   });
 
-  /**
-   * The fallback can see that a row exists; it cannot see whether the hash
-   * under it still matches. So its best word is `partial`, never `trusted`:
-   * claiming trust from a file read is the mistake this whole module avoids.
-   */
-  it('never says trusted from the config file alone', async () => {
-    await mkdir(join(home, '.codex'), { recursive: true });
-    await writeFile(
-      join(home, '.codex', 'config.toml'),
-      `[hooks.state]\n"${KEYS[0]}" = { enabled = true, trusted_hash = "sha256:aa" }\n` +
-        `"${KEYS[1]}" = { enabled = true, trusted_hash = "sha256:bb" }\n`,
-    );
+  it('reports unknown when the app server cannot be asked', async () => {
     const report = await readCodexTrust(home, KEYS, { env: {}, listHooks: async () => null });
-    expect(report.state).toBe('partial');
-    expect(report.source).toBe('config-file');
-  });
-
-  it('reads an absent config file as untrusted, which is a real answer', async () => {
-    const report = await readCodexTrust(home, KEYS, { env: {}, listHooks: async () => null });
-    expect(report).toMatchObject({ state: 'untrusted', source: 'config-file' });
-  });
-
-  it('reads a config file it cannot follow as unknown, never as either verdict', async () => {
-    await mkdir(join(home, '.codex'), { recursive: true });
-    await writeFile(join(home, '.codex', 'config.toml'), '[hooks.state]\nnot a toml row at all\n');
-    const report = await readCodexTrust(home, KEYS, { env: {}, listHooks: async () => null });
-    expect(report.state).toBe('unknown');
+    expect(report).toMatchObject({ state: 'unknown', source: 'none' });
   });
 
   it('has nothing to say when nothing of ours is registered', async () => {
     const report = await readCodexTrust(home, [], { env: {} });
     expect(report).toMatchObject({ state: 'unknown', source: 'none' });
-  });
-});
-
-describe('parseHooksState: the narrow read of a file we must never write', () => {
-  it('reads the inline-table form', () => {
-    const rows = parseHooksState(
-      `model = "gpt"\n[hooks.state]\n"a:stop:0:0" = { enabled = true, trusted_hash = "sha256:x" }\n`,
-    );
-    expect(rows?.get('a:stop:0:0')).toEqual({ enabled: true });
-  });
-
-  it('reads the sub-table form, and sees a hook switched off', () => {
-    const rows = parseHooksState(
-      `[hooks.state."a:stop:0:0"]\nenabled = false\ntrusted_hash = "sha256:x"\n`,
-    );
-    expect(rows?.get('a:stop:0:0')).toEqual({ enabled: false });
-  });
-
-  it('does not mistake another table’s rows for hook state', () => {
-    const rows = parseHooksState(
-      `[hooks.state]\n"a:stop:0:0" = { enabled = true }\n[other]\nb = 1\n`,
-    );
-    expect([...(rows?.keys() ?? [])]).toEqual(['a:stop:0:0']);
-  });
-
-  it('gives up rather than guess on a row it cannot follow', () => {
-    expect(parseHooksState('[hooks.state]\nbare_key = 1\n')).toBeNull();
-  });
-
-  it('unescapes a quoted path', () => {
-    const rows = parseHooksState('[hooks.state]\n"a\\"b:stop:0:0" = { enabled = true }\n');
-    expect([...(rows?.keys() ?? [])]).toEqual(['a"b:stop:0:0']);
   });
 });
 
@@ -287,16 +225,5 @@ describe('trustCodexHooks: list, upsert, and prove it took', () => {
       trusted: [],
     });
     expect(s.calls).toHaveLength(0);
-  });
-});
-
-describe('readCodexTrust: an unreadable config is not an untrusted one', () => {
-  it('reports unknown when config.toml exists but cannot be read', async () => {
-    // A directory where the file goes: it exists, and reading it fails with
-    // EISDIR rather than ENOENT. Reporting that as "definitely untrusted"
-    // hides a filesystem problem behind a remedy that would not touch it.
-    await mkdir(join(home, '.codex', 'config.toml'), { recursive: true });
-    const report = await readCodexTrust(home, ['k'], { env: {}, listHooks: async () => null });
-    expect(report.state).toBe('unknown');
   });
 });
