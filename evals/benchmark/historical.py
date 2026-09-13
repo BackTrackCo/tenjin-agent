@@ -163,12 +163,13 @@ def verify(context: Path, run_dir: Path, image: str, *, catalog: Path) -> dict:
         if report.returncode == 0:
             data = json.loads(report.stdout)
             total, failed = data.get("numTotalTests", 0), data.get("numFailedTests", 0)
+            result["suite_errors"] = [str(suite["message"])[-2000:] for suite in data.get("testResults", []) if suite.get("message")]
             result["tests"] = {"total": total, "passed": data.get("numPassedTests", 0), "failed": failed}
             # Import/setup/collection failures cannot masquerade as fail-before.
             assertions = [a for suite in data.get("testResults", []) for a in suite.get("assertionResults", [])]
             result["status"] = vitest_result.outcome(data, completed.returncode)
             result["assertions"] = [{"title": a.get("fullName"), "status": a.get("status"), "failures": a.get("failureMessages", [])} for a in assertions]
-        result["detail"] = (completed.stderr or completed.stdout)[-1600:]
+        result["detail"] = (completed.stdout + "\n" + completed.stderr)[-4000:]
     except Exception as error:
         result["status"] = "invalid"
         result["detail"] = f"verification infrastructure failed: {type(error).__name__}"
