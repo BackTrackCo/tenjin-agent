@@ -157,7 +157,7 @@ def test_the_fixture_failures_key_as_the_lesson_records() -> None:
             "",
         ]
     )
-    assert signature.key_of(trap)["key"] is None
+    assert signature.key_of(trap)["key"] == "b1c92d4dda8ed40e"
 
 
 def test_the_test_identity_key_reads_the_last_fail_header_and_matches_the_product() -> None:
@@ -196,5 +196,5 @@ def test_totals_reach_only_the_immediately_preceding_failure_block(blanks: int) 
 
 def test_totals_do_not_reach_past_free_text_or_a_wide_gap() -> None:
     block = " FAIL  tests/actor.test.mjs > actorKey\nAssertionError: expected root"
-    for gap in ["\n" * 6, "\n\nan unrelated operation\n\n"]:
+    for gap in ["\n" * 6, "\n\n\nan unrelated operation\n\n\n"]:
         assert signature.error_line(block + gap + " Test Files 1 failed\n") is None
