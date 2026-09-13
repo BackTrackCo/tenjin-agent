@@ -17,7 +17,7 @@ import subprocess
 import tarfile
 from pathlib import Path
 
-from . import vitest_result, container, database_service, images, sha256_dir, sha256_file
+from . import vitest_result, container, database_service, images, sha256_dir, sha256_file, sha256_json
 
 ROOT = Path(__file__).parent / "historical"
 REVISION = ("before", "after")
@@ -87,7 +87,7 @@ def prepare(repo: Path, task_id: str, revision: str, out: Path, *, catalog: Path
     shutil.copyfile(ROOT / "vitest.config.mjs", out / "vitest.config.mjs")
     shutil.copyfile(ROOT / "Dockerfile", out / "Dockerfile")
     shutil.copyfile(ROOT / "database.mjs", out / "database.mjs")
-    receipt = {"schema": "bench1.historical-source.v1", "task": task_id, "revision": revision, "catalog_sha256": sha256_file(catalog),
+    receipt = {"schema": "bench1.historical-source.v1", "task": task_id, "revision": revision, "catalog_sha256": sha256_file(catalog), "task_sha256": sha256_json(task),
                "commit": commit, "tree": tree.strip(), "source_hash": sha256_dir(source),
                "lock_sha256": sha256_file(lock), "oracle_sha256": sha256_file(out / "oracle.test.ts"),
                "omitted_roots": sorted(OMIT), "model_executed": False}
@@ -102,8 +102,8 @@ def build_args() -> dict[str, str]:
 def validate_context(context: Path, *, catalog: Path) -> dict:
     receipt = json.loads((context / "source-receipt.json").read_text())
     task = task_named(receipt["task"], catalog)
-    if receipt.get("catalog_sha256") != sha256_file(catalog):
-        raise ReplayError("experiment catalog changed after preparation")
+    if receipt.get("task_sha256") != sha256_json(task):
+        raise ReplayError("experiment task changed after preparation")
     revision = receipt["revision"]
     if revision not in REVISION or receipt["commit"] != task[f"{revision}_commit"] or receipt["tree"] != task["trees"][revision]:
         raise ReplayError("context does not name the catalog's historical source")

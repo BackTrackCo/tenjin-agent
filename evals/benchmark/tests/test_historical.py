@@ -62,7 +62,7 @@ def context(tmp_path, monkeypatch):
     catalog = root / "catalog.json"
     catalog.write_text(json.dumps({"tasks": [task]}))
     monkeypatch.setattr(replay, "task_named", lambda *_: task)
-    receipt = {"catalog_sha256": sha256_file(catalog), "task": "fixture", "revision": "before", "commit": "a" * 40, "tree": "c" * 40, "source_hash": sha256_dir(out / "source")}
+    receipt = {"catalog_sha256": sha256_file(catalog), "task_sha256": replay.sha256_json(task), "task": "fixture", "revision": "before", "commit": "a" * 40, "tree": "c" * 40, "source_hash": sha256_dir(out / "source")}
     (out / "source-receipt.json").write_text(json.dumps(receipt))
     return out
 
@@ -131,8 +131,17 @@ def test_only_completed_assertions_establish_fail_before_or_pass_after(context, 
     assert list((tmp_path / "run/projects").glob("*.project")) == []
 
 
-def test_changed_experiment_catalog_refuses_prepared_context(context):
+def test_changed_experiment_task_refuses_prepared_context(context):
     catalog = replay.ROOT / "catalog.json"
-    catalog.write_text(json.dumps({"tasks": [], "changed": True}))
-    with pytest.raises(replay.ReplayError, match="catalog changed"):
+    replay.task_named("fixture", catalog)["prompt"] = "different assignment"
+    with pytest.raises(replay.ReplayError, match="task changed"):
         replay.validate_context(context, catalog=catalog)
+
+
+def test_unrelated_catalog_addition_preserves_prepared_task(context):
+    catalog = replay.ROOT / "catalog.json"
+    data = json.loads(catalog.read_text())
+    data["tasks"].append({"id": "unrelated-new-task"})
+    catalog.write_text(json.dumps(data))
+    receipt = replay.validate_context(context, catalog=catalog)
+    assert receipt["catalog_sha256"] != sha256_file(catalog)
