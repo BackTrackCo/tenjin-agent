@@ -326,7 +326,17 @@ def prompt_of(task: Mapping[str, Any]) -> str:
     if "prompt" not in task:
         raise LiveExecutorError(f"task {task.get('id')!r} has no prompt, which a live executor needs")
     check("task prompt", task["prompt"], PROMPT, LiveExecutorError)
-    return str(task["prompt"])
+    prompt = str(task["prompt"])
+    if task.get("database") == "postgres":
+        prompt += (
+            "\n\nTest environment: a disposable PostgreSQL/pgvector database is already running. "
+            "Use the supplied adapter for focused existing source tests: "
+            "pnpm exec vitest run --config .bench1/model-tests.config.mjs --configLoader runner <test-file>. "
+            "Replace <test-file> with the relevant existing test path. The adapter applies migrations "
+            "and isolates test databases. Do not start Docker/Testcontainers, install dependencies, "
+            "or change .bench1 support; no host Docker socket is available."
+        )
+    return prompt
 
 
 def model_of(pins: Mapping[str, Any]) -> str:
