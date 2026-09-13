@@ -1,0 +1,72 @@
+{
+  "schema": "bench3.replay-catalog.v1",
+  "status": "verifier-readiness-only",
+  "tasks": [
+    {
+      "id": "actor-grade",
+      "source_repository": "https://github.com/BackTrackCo/tenjin-agent.git",
+      "source_pr": "https://github.com/BackTrackCo/tenjin-agent/pull/247",
+      "before_commit": "deababa5b83774f66b957feb1c948d2a15319e35",
+      "after_commit": "720f8684180897b4efe0e47da97202dc82460535",
+      "trees": {
+        "before": "48d27f46a09b27579fa4ac0f853141bb2267a2a0",
+        "after": "09035b97f58651140ed6c75a8bd37e08a2f683c3"
+      },
+      "lock_sha256": "49604a80a97819037ac51e91f006ca9cb2cddb11afc9094f05cd75dcb823f19a",
+      "oracle": "actor-grade.test.ts",
+      "scope": "intended-worker injection attribution; scoped subset of original PR",
+      "role": "proposed earlier producer for actor-score",
+      "eligibility": "pending-container-proof",
+      "assignment": "unassigned"
+    },
+    {
+      "id": "actor-score",
+      "source_repository": "https://github.com/BackTrackCo/tenjin-agent.git",
+      "source_pr": "https://github.com/BackTrackCo/tenjin-agent/pull/251",
+      "before_commit": "9a6f2aa3b31dfbb109407814dbd1ca1dd6c49644",
+      "after_commit": "ff9a344856d95bf93d1ec708ae0779955be2d0b7",
+      "trees": {
+        "before": "3d0c3a4cda450fd6e4644aaa80cd53ac79271491",
+        "after": "952dc841908c8e7de8576541e8742cf5341aac4c"
+      },
+      "lock_sha256": "49604a80a97819037ac51e91f006ca9cb2cddb11afc9094f05cd75dcb823f19a",
+      "oracle": "actor-score.test.ts",
+      "scope": "actor-owned close and search attribution",
+      "earlier_producer": "https://github.com/BackTrackCo/tenjin-agent/pull/247",
+      "relationship": {
+        "status": "source-supported-prior-principle-transfer-candidate",
+        "distance": "same-subsystem-different-reader",
+        "prior_fact": "A session contains multiple actors; each actor must be judged using its own evidence, identified by session plus agent ID. #247 establishes this for injection transcript grading.",
+        "consumer_application": "#251 applies the same identity boundary to session-score pairing-close and search rows instead of borrowing sibling events.",
+        "not_claimed": "No measured reuse benefit, natural capture success, or representative workload admission."
+      },
+      "eligibility": "pending-container-proof",
+      "assignment": "unassigned"
+    },
+    {
+      "id": "release-policy",
+      "source_repository": "https://github.com/BackTrackCo/tenjin-agent.git",
+      "source_pr": "https://github.com/BackTrackCo/tenjin-agent/pull/170",
+      "before_commit": "77244fdec4b62e615a3c55dc598f2d62ad8584b0",
+      "after_commit": "9aa18bafe5b09d66fa9850651f36b416460c329f",
+      "trees": {
+        "before": "ce18c834e11bc6668427853b7eb94bd52c84ef54",
+        "after": "e2f6420727dc6e5979a80823314ad989a33fb949"
+      },
+      "lock_sha256": "49604a80a97819037ac51e91f006ca9cb2cddb11afc9094f05cd75dcb823f19a",
+      "oracle": "release-policy.test.ts",
+      "scope": "latest-only release target selection; scoped subset of original PR",
+      "earlier_producer": "https://github.com/BackTrackCo/tenjin-agent/pull/136",
+      "relationship": {
+        "status": "source-supported-policy-change-with-stale-knowledge-risk",
+        "distance": "same-subsystem-policy-revision",
+        "prior_fact": "The update command and passive nudge share resolveTarget; installation pins the exact registry-reported version and refuses unsupported install layouts. #136 deliberately chooses the maximum of channel and latest.",
+        "consumer_application": "#170 changes the release policy to latest-only and separates unusable registry answers from transport failures. The shared-code location remains useful, while the old maximum-of-tags prescription is stale.",
+        "required_reporting": "Label this a policy-change/stale-knowledge diagnostic until the workload rubric admits it; never label the obsolete algorithm an approved correct seeded lesson.",
+        "not_claimed": "No earlier piece may contain the later latest-only solution unless independently documented before the consumer cutoff."
+      },
+      "eligibility": "pending-container-proof",
+      "assignment": "unassigned"
+    }
+  ]
+}
