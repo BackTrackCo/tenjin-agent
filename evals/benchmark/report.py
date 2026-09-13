@@ -367,6 +367,8 @@ def project(
                 "local_hits": sum(1 for leg in record["delivery"].get("legs", []) if leg.get("shelf") == "local" and leg.get("outcome") == "hit"),
                 "child_tokens": sum(item["input_total"] + item["output_total"] for item in record["usage"] if item["actor_key"][2] != ""),
                 "historical_source": record["isolation"].get("historical_source"),
+                "model_tool_environment": record["isolation"].get("model_tool_environment"),
+                "producer_model_tool_environment": (record["isolation"].get("producer") or {}).get("model_tool_environment"),
                 "producer_source": (record["isolation"].get("producer") or {}).get("historical_source"),
                 "producer_image": (record["isolation"].get("producer") or {}).get("image"),
                 "producer_outcome": None if not isinstance(record["isolation"].get("producer"), dict) else record["isolation"]["producer"].get("outcome"),

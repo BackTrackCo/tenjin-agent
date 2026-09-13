@@ -190,3 +190,33 @@ def test_provenance_cannot_name_another_oracle_even_with_new_support_hash(histor
     data['tasks'][0]['verification']['hash'] = 'sha256:'+sha256_dir(path.parent)
     with pytest.raises(manifest.ManifestError, match='different oracle'):
         config(data, base)
+
+
+def test_database_model_support_is_visible_bound_and_separate_from_oracle(historical, monkeypatch):
+    from evals.benchmark import historical as preparation
+    data, base = historical
+    context = base / 'context'; context.mkdir()
+    shutil.copytree(base / 'fixture', context / 'source')
+    shutil.copyfile(base / 'hidden' / task_assets.ORACLE, context / 'oracle.test.ts')
+    for name in ('vitest.config.mjs', 'database.mjs'):
+        shutil.copyfile(base / 'verification' / name, context / name)
+    receipt = json.loads((base / 'verification/source-receipt.json').read_text())
+    source = {**data['tasks'][0], 'database': 'postgres', 'prompt': 'Implement the historical contract.'}
+    monkeypatch.setattr(preparation, 'validate_context', lambda *args, **kwargs: receipt)
+    monkeypatch.setattr(preparation, 'task_named', lambda *args: source)
+    out = base / 'admitted'
+    task = task_assets.materialize(context, out, catalog=base / 'catalog.json')
+    visible = out / 'fixture/.bench1'
+    assert {p.name for p in visible.iterdir()} == {'model-tests.config.mjs', 'model-test-database.mjs'}
+    assert not (out / 'fixture' / task_assets.ORACLE).exists()
+    assert (out / 'hidden' / task_assets.ORACLE).read_text() == (context / 'oracle.test.ts').read_text()
+    assert task['fixture_hash'] == manifest.fixture_hash(out / 'fixture')
+    data['tasks'] = [task]
+    loaded = config(data, base)
+    spec = loaded.verifier_spec(task)
+    repo = base / 'submitted'; shutil.copytree(out / 'fixture', repo)
+    (repo / '.bench1/model-test-database.mjs').write_text('forged helper')
+    assert task_assets.changed_outside_contract(spec, repo) == 'changed file outside allowed source paths'
+    (visible / 'model-tests.config.mjs').write_text('different model environment')
+    with pytest.raises(manifest.ManifestError, match='hash'):
+        config(data, base)
