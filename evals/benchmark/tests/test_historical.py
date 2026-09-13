@@ -185,3 +185,20 @@ def test_link_to_same_bytes_still_refuses_historical_source(context, tmp_path):
     (context/'source/pnpm-lock.yaml').symlink_to(outside)
     with pytest.raises(replay.ReplayError, match='links'):
         replay.validate_context(context, catalog=replay.ROOT/'catalog.json')
+
+
+@pytest.mark.parametrize('relative', ['../escape.ts', '/absolute.ts', 'src/tool.test.ts', 'src/package.json', 'src/benchmark-independent.test.ts'])
+def test_mutation_cannot_replace_oracle_tooling_or_escape_source(tmp_path, relative):
+    file = tmp_path/'mutation.ts'; file.write_text('wrong product implementation')
+    with pytest.raises(replay.ReplayError, match='allowed product'):
+        replay.mutation_mounts({'allowed_changes':['src/']}, {relative:file})
+
+
+def test_mutation_mounts_are_read_only_and_receipts_contain_no_host_path(tmp_path):
+    file = tmp_path/'mutation.ts';file.write_text('wrong product implementation')
+    mounts, hashes = replay.mutation_mounts({'allowed_changes':['src/']}, {'src/product.ts':file})
+    assert mounts[0].target == Path('/opt/task/src/product.ts') and mounts[0].mode == 'ro'
+    assert hashes == {'src/product.ts':sha256_file(file)}
+    link = tmp_path/'link.ts';link.symlink_to(file)
+    with pytest.raises(replay.ReplayError, match='regular file'):
+        replay.mutation_mounts({'allowed_changes':['src/']}, {'src/product.ts':link})

@@ -138,7 +138,22 @@ def build(context: Path, *, catalog: Path) -> str:
     )))
 
 
-def verify(context: Path, run_dir: Path, image: str, *, catalog: Path) -> dict:
+def mutation_mounts(task: dict, overrides: dict[str, Path]) -> tuple[list, dict]:
+    """Mutation probes can replace declared product files, never oracle/tooling."""
+    from .task_assets import may_change
+    mounts, hashes = [], {}
+    for relative, source in overrides.items():
+        path = Path(relative)
+        if path.is_absolute() or ".." in path.parts or not may_change(relative, task.get("allowed_changes", [])):
+            raise ReplayError("mutation must name an allowed product source file")
+        if source.is_symlink() or not source.is_file() or any(parent.is_symlink() for parent in source.parents):
+            raise ReplayError("mutation source must be a regular file without linked parents")
+        mounts.append(container.Mount(source, Path("/opt/task") / relative, "ro"))
+        hashes[relative] = sha256_file(source)
+    return mounts, hashes
+
+
+def verify(context: Path, run_dir: Path, image: str, *, catalog: Path, overrides: dict[str, Path] | None = None) -> dict:
     if re.fullmatch(r"sha256:[0-9a-f]{64}", image) is None:
         raise ReplayError("verification requires an immutable image ID")
     receipt = validate_context(context, catalog=catalog)
@@ -146,13 +161,16 @@ def verify(context: Path, run_dir: Path, image: str, *, catalog: Path) -> dict:
     key = api.context_hash(context=context, dockerfile_path=context / "Dockerfile", build_args=build_args(), platform=asyncio.run(api.platform()))
     if images.image_id(api.name("bench-historical", key)) != image:
         raise ReplayError("image does not match the prepared historical source and oracle")
+    mutations, mutation_hashes = mutation_mounts(task_named(receipt["task"], catalog), overrides or {})
     identity = "replay-" + receipt["task"] + "-" + receipt["revision"] + "-" + image[7:19] + "-" + uuid.uuid4().hex[:12]
     name = container.container_name(identity)
     project = container.record_project(run_dir, identity, name)
     recipe = container.Recipe(name=name, image=image, workdir=Path("/opt/task"),
                               trial_dir=run_dir / identity / "trial", environment_dir=run_dir / identity / "environment",
-                              plan=[container.Mount(context / "database.mjs", Path("/benchmark-database.mjs"), "ro")] if task_named(receipt["task"], catalog).get("database") == "postgres" else [], environment={"HOME": "/tmp"}, egress=container.no_network())
+                              plan=mutations + ([container.Mount(context / "database.mjs", Path("/benchmark-database.mjs"), "ro")] if task_named(receipt["task"], catalog).get("database") == "postgres" else []), environment={"HOME": "/tmp"}, egress=container.no_network())
     result = {**receipt, "image": image, "status": "invalid", "cleanup": False, "tests": None}
+    if mutation_hashes:
+        result["mutation_hashes"] = mutation_hashes
     try:
         enabled = task_named(receipt["task"], catalog).get("database") == "postgres"
         if enabled:
