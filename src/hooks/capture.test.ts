@@ -20,10 +20,11 @@ import type { Actor, Deps, KernelConfig } from './types';
 /**
  * Capture through the two arms that call it (from #298's suite, re-keyed
  * onto the kernel). Both audiences are asked once, with evidence, as context;
- * the lead is re-armed only by what its children queue; the stop after an ask
- * harvests the fence whole. The LEAD's ask also names what this session left
- * open: its unanswered searches, the errors it fixed, what its children queued
- * and published. A child's ask carries none of those.
+ * the lead is re-armed by what its children queue and by a failure newer than
+ * its ask; the stop after an ask harvests the fence whole. The LEAD's ask also
+ * names what this session left open: its unanswered searches, what its children
+ * queued and published. A child's ask carries none of those, and both carry the
+ * failures the actor itself hit that nothing answered.
  */
 
 const TEAM = kernelConfig();
@@ -67,12 +68,50 @@ function started(db: LoopDb, agentType = 'general-purpose'): void {
   setMark(db, CHILD, STARTED_MARK, agentType, NOW - 100);
 }
 
-/** One ledger row, as a fire by `actor` on `arm` would have left it. */
-function seedFire(db: LoopDb, actor: Actor, arm: string, reason: string, event = 'prompt'): void {
+/** One ledger row, as a fire by `actor` on `arm` would have left it. The
+ *  question half is what a failure leaves behind — `fires` IS the record the
+ *  turn-end ask reads back — so it is seeded here rather than in a helper of
+ *  its own. */
+function seedFire(
+  db: LoopDb,
+  actor: Actor,
+  arm: string,
+  reason: string,
+  event = 'prompt',
+  over: { questionKey?: string; question?: string; at?: number } = {},
+): void {
   db.prepare(
     `INSERT INTO fires (id, at, session, agent, arm, harness, event, cwd, wait, deadline_ms,
-       elapsed_ms, reason) VALUES (?, ?, ?, ?, ?, 'claude', ?, '', 'tool', 1, 1, ?)`,
-  ).run(randomUUID(), NOW - 50, actor.session, actor.agent, arm, event, reason);
+       elapsed_ms, reason, question_key, question)
+     VALUES (?, ?, ?, ?, ?, 'claude', ?, '', 'tool', 1, 1, ?, ?, ?)`,
+  ).run(
+    randomUUID(),
+    over.at ?? NOW - 50,
+    actor.session,
+    actor.agent,
+    arm,
+    event,
+    reason,
+    over.questionKey ?? null,
+    over.question ?? null,
+  );
+}
+
+const ENOENT_LINE = "Error: ENOENT: no such file or directory, open 'drizzle.config.ts'";
+const ENOENT_KEY = 'sig_v1:aaaabbbbccccdddd|line:' + 'f'.repeat(32);
+
+/** One failure fire the shelves had nothing for, as the arm would have left
+ *  it: the composed question key, and the masked line under it. */
+function seedFailure(
+  db: LoopDb,
+  actor: Actor,
+  over: { questionKey?: string; question?: string; reason?: string; at?: number } = {},
+): void {
+  seedFire(db, actor, 'failure', over.reason ?? 'no-hit', 'tool.after', {
+    questionKey: over.questionKey ?? ENOENT_KEY,
+    question: over.question ?? ENOENT_LINE,
+    ...(over.at === undefined ? {} : { at: over.at }),
+  });
 }
 
 /** One `searches` row, as `tenjin search` would have left it. */
@@ -92,34 +131,6 @@ function seedSearch(
     over.source === undefined ? 'cli' : over.source,
     over.resolvedAt ?? null,
   );
-}
-
-/** One pairing this session opened and closed, as the failure arm leaves it. */
-function seedPairing(
-  db: LoopDb,
-  over: { key: string; kind?: string; scope?: string; postId?: string | null },
-): void {
-  const id = db
-    .prepare(
-      `INSERT INTO pairings (uid, at, session, project, machine, kind, key, error_line,
-         error_files, scope, status, closes, closed_at, post_id)
-       VALUES (?, ?, ?, NULL, 'm', ?, ?, ?, '[]', ?, 'unverified', 1, ?, ?) RETURNING id`,
-    )
-    .get(
-      randomUUID(),
-      NOW - 30,
-      LEAD.session,
-      over.kind ?? 'sig_v1_test',
-      over.key,
-      'AssertionError: expected 3 to be 4',
-      over.scope ?? 'code',
-      NOW - 20,
-      over.postId ?? null,
-    ) as { id: number };
-  db.prepare(
-    `INSERT INTO pairing_closes (pairing_id, session, at, fix_cmd, fix_files, scope)
-     VALUES (?, ?, ?, 'vitest', '["src/http.ts"]', ?)`,
-  ).run(id.id, LEAD.session, NOW - 20, over.scope ?? 'code');
 }
 
 function queueFinding(db: LoopDb, over: Record<string, unknown> = {}, at = NOW - 10): string {
@@ -299,26 +310,62 @@ describe('the child ask', () => {
     expect(findings(db)).toMatchObject([{ body: 'first', searchId: SEARCH_ID }]);
   });
 
-  it('carries no miss or fix line, though the lead in the same session gets both', async () => {
+  it('carries no miss line, though the lead in the same session gets one', async () => {
     const db = freshDb();
     started(db);
     setMark(db, CHILD, 'edited:abc', 'src/a.ts', NOW);
     seedSearch(db, { id: 'open-1' });
-    seedPairing(db, { key: 'ab12' });
 
-    // The open search and the closed pairing are the session's, and only the
-    // lead can act on either: a child must not be handed them.
+    // The open search is the session's, and only the lead can act on it: a
+    // child must not be handed it.
     const child = (await fire(db, childStop()))?.context ?? '';
     expect(child.startsWith('Tenjin: this turn did work worth a second look.')).toBe(true);
     expect(child).not.toContain('had no answer');
     expect(child).not.toContain('open-1');
-    expect(child).not.toContain('You fixed');
-    expect(child).not.toContain('ab12');
 
     seedFire(db, LEAD, 'research', 'hit');
     const lead = (await fire(db, leadStop()))?.context ?? '';
     expect(lead).toContain('(open-1) had no answer');
-    expect(lead).toContain('`--key fingerprint=sig_v1_test:ab12`');
+  });
+
+  it("names the failures it hit itself, and never the lead's", async () => {
+    const db = freshDb();
+    started(db);
+    setMark(db, CHILD, 'edited:abc', 'src/a.ts', NOW);
+    seedFailure(db, CHILD);
+    seedFailure(db, LEAD, {
+      questionKey: 'line:' + '0'.repeat(32),
+      question: 'error: linting failed for the workspace',
+    });
+
+    // A failure belongs to the actor that hit it: the child is the one that can
+    // explain its own wall, and the lead never walked into it.
+    const child = (await fire(db, childStop()))?.context ?? '';
+    expect(child).toContain(
+      '- Encountered this turn: `' +
+        ENOENT_LINE +
+        '`. If you settled it and the answer would save a teammate the same hour, publish it with ' +
+        '`--key fingerprint=sig_v1:aaaabbbbccccdddd`.',
+    );
+    expect(child).not.toContain('linting failed');
+    // The line reports what came up. It asserts no fix, because nothing on the
+    // row says one was made.
+    expect(child).not.toContain('You fixed');
+  });
+
+  it('is asked once however many failures follow: an asked child harvests instead', async () => {
+    const db = freshDb();
+    started(db);
+    setMark(db, CHILD, 'edited:abc', 'src/a.ts', NOW);
+    await fire(db, childStop());
+
+    // The re-arm is the lead's in practice, and this is why: `stop()` sends an
+    // already-asked child to its harvest and never reaches the ask at all.
+    seedFailure(db, CHILD, { at: NOW + 20 });
+    expect(
+      await fire(db, childStop({ lastMessage: fence('done') }), TEAM, () => NOW + 30),
+    ).toBeNull();
+    expect(findings(db)).toMatchObject([{ body: 'done' }]);
   });
 });
 
@@ -427,23 +474,6 @@ describe('the lead ask', () => {
     expect(reason).not.toContain('hit-1');
   });
 
-  it('names a closed code-scope fix with its key, but not a user-scope or an already-published one', async () => {
-    const db = freshDb();
-    seedFire(db, LEAD, 'research', 'hit');
-    seedPairing(db, { key: 'ab12' });
-    seedPairing(db, { key: 'usr9', scope: 'user' });
-    seedPairing(db, { key: 'done7', postId: 'post_1' });
-    seedPairing(db, { key: 'cd34', kind: 'sig_v1' });
-    const reason = (await fire(db, leadStop()))?.context ?? '';
-    expect(reason).toContain(
-      '- You fixed `AssertionError: expected 3 to be 4` (key `sig_v1_test:ab12`): ' +
-        'publish the explanation with `--key fingerprint=sig_v1_test:ab12`',
-    );
-    expect(reason).toContain('`--key fingerprint=sig_v1:cd34`');
-    expect(reason).not.toContain('usr9');
-    expect(reason).not.toContain('done7');
-  });
-
   it("names what this session's children published, and not another session's child", async () => {
     const db = freshDb();
     started(db);
@@ -490,6 +520,196 @@ describe('the lead ask', () => {
     expect(emit?.context).toContain('publish.mode is auto');
     // One wording for both shelves: the team's extra kinds ride the same sentence.
     expect(emit?.context).toContain('on the team shelf also a decision and why');
+  });
+
+  it('a failure is evidence whatever the lookup did, and a bare repeat is not', async () => {
+    // NO OUTCOME DISQUALIFIES A FAILURE. `hit` says a note was injected, not
+    // that it was right; `seen` is decided on the answer's resource id, so it
+    // can mean only that a note about a NEIGHBOURING failure had been read.
+    // Neither tells the agent this failure's key, which is what the next
+    // teammate resolves under.
+    for (const reason of ['no-hit', 'hit', 'seen', 'deadline', 'error', 'rate-server']) {
+      const db = freshDb();
+      seedFailure(db, LEAD, { reason });
+      expect((await fire(db, leadStop()))?.context, reason).toContain(ENOENT_LINE);
+      expect(getMark(db, LEAD, 'capture:asked'), reason).toBe('failure');
+    }
+
+    // The one thing a reason still decides: a claim answered from its own cache
+    // ran no leg and cannot stand in for a first sighting.
+    for (const reason of ['cached', 'asked']) {
+      const repeat = freshDb();
+      seedFailure(repeat, LEAD, { reason });
+      expect(await fire(repeat, leadStop()), reason).toBeNull();
+      expect(getMark(repeat, LEAD, 'capture:asked'), reason).toBeNull();
+    }
+  });
+
+  it('names a second failure whose note the first failure had already shown', async () => {
+    // The real shape: one actor hits the same error in two files, both prose
+    // searches land on one note, so the first fire is `hit` and the second is
+    // `seen` with nothing injected. Two distinct question keys, and the second
+    // one's fingerprint has to survive into the ask.
+    const db = freshDb();
+    seedFailure(db, LEAD, { reason: 'hit', at: NOW - 50 });
+    seedFailure(db, LEAD, {
+      reason: 'seen',
+      questionKey: 'sig_v1:bbbb1111bbbb1111',
+      question: "TypeError: cfg.load is not a function ('src/b.ts')",
+      at: NOW - 40,
+    });
+    const context = (await fire(db, leadStop()))?.context ?? '';
+    const lines = context.split('\n').filter((l) => l.startsWith('- Encountered this turn'));
+    expect(lines).toHaveLength(2);
+    expect(context).toContain('--key fingerprint=sig_v1:aaaabbbbccccdddd');
+    expect(context).toContain('--key fingerprint=sig_v1:bbbb1111bbbb1111');
+  });
+
+  it('names a failure the shelf rate-limited', async () => {
+    // A 429 is one more way for the request not to land, the same class as
+    // `deadline`. An allowlist of outcomes dropped it twice over.
+    const db = freshDb();
+    seedFailure(db, LEAD, { reason: 'rate-server' });
+    expect((await fire(db, leadStop()))?.context).toContain(ENOENT_LINE);
+    expect(getMark(db, LEAD, 'capture:asked')).toBe('failure');
+  });
+
+  it('names a failure whose lookup never finished, and the repeat behind it cannot stand in', async () => {
+    // The gap the outcome filter left: `deadline` and `error` say nothing about
+    // whether the shelf holds an answer, and reading only the misses dropped the
+    // failure entirely, because every re-run behind it is a `cached` row.
+    for (const reason of ['deadline', 'error']) {
+      const db = freshDb();
+      seedFailure(db, LEAD, { reason, at: NOW - 50 });
+      seedFailure(db, LEAD, { reason: 'cached', at: NOW - 40 });
+      const context = (await fire(db, leadStop()))?.context ?? '';
+      expect(context, reason).toContain(ENOENT_LINE);
+      expect(getMark(db, LEAD, 'capture:asked'), reason).toBe('failure');
+    }
+
+    // A repeat on its own is not a first sighting: `cached` alone earns nothing.
+    const repeatOnly = freshDb();
+    seedFailure(repeatOnly, LEAD, { reason: 'cached' });
+    expect(await fire(repeatOnly, leadStop())).toBeNull();
+  });
+
+  it('names a failure whose prose note was delivered, because a note is not a key', async () => {
+    // The first delivery, not the second: exact keys missed, a prose note came
+    // back `strong` and was injected, and the fire recorded `hit`. Whether the
+    // note solved it, needed a correction this repo alone knows, or missed the
+    // problem is not legible from that row — and the note carries no
+    // fingerprint of its own, so unless the agent files one the next teammate
+    // resolving this key still finds nothing.
+    const db = freshDb();
+    seedFailure(db, LEAD, { reason: 'hit' });
+    const context = (await fire(db, leadStop()))?.context ?? '';
+    expect(context).toContain(ENOENT_LINE);
+    expect(context).toContain('--key fingerprint=sig_v1:aaaabbbbccccdddd');
+  });
+
+  it('offers every fingerprint the arm resolves, one --key flag each', async () => {
+    // Naming only the first filed the piece under `sig_v1` while the arm went on
+    // asking `sig_v1_test` too, so the next teammate to hit that same test
+    // resolved under a key nothing had ever been published against.
+    const db = freshDb();
+    seedFailure(db, LEAD, {
+      questionKey: 'sig_v1:aaaabbbbccccdddd|sig_v1_test:0123456789abcdef',
+    });
+    const context = (await fire(db, leadStop()))?.context ?? '';
+    expect(context).toContain(
+      '`--key fingerprint=sig_v1:aaaabbbbccccdddd` `--key fingerprint=sig_v1_test:0123456789abcdef`',
+    );
+  });
+
+  it('one line per failure, deduped by key, each naming what it can be filed under', async () => {
+    const db = freshDb();
+    // The same command re-run after a failed edit is one problem, not three.
+    seedFailure(db, LEAD, { at: NOW - 50 });
+    seedFailure(db, LEAD, { at: NOW - 40 });
+    // A line too generic for `sigV1` to key. NOT NAMED: there is no key to
+    // offer, so the line would say only what `CAPTURE_ASK` says already. The
+    // arm still asks the shelf about it in words; only the nudge is dropped.
+    seedFailure(db, LEAD, {
+      questionKey: 'line:' + '0'.repeat(32),
+      question: 'error: linting failed for the workspace',
+      at: NOW - 30,
+    });
+    // A test identity and no error line at all: the empty `question` is a row
+    // to name, not a row to filter, and the key is the whole of it.
+    seedFailure(db, LEAD, {
+      questionKey: 'sig_v1_test:0123456789abcdef',
+      question: '',
+      at: NOW - 20,
+    });
+    const reason = (await fire(db, leadStop()))?.context ?? '';
+    const lines = reason.split('\n').filter((l) => l.startsWith('- Encountered this turn'));
+    expect(lines).toEqual([
+      '- Encountered this turn: `' +
+        ENOENT_LINE +
+        '`. If you settled it and the answer would save a teammate the same hour, publish it with ' +
+        '`--key fingerprint=sig_v1:aaaabbbbccccdddd`.',
+      '- Encountered this turn: A failure filed under ' +
+        '`sig_v1_test:0123456789abcdef`. If you settled it and the answer would save a teammate the ' +
+        'same hour, publish it with `--key fingerprint=sig_v1_test:0123456789abcdef`.',
+    ]);
+  });
+
+  it('still asks for a failure with no fingerprint, and says nothing about it', async () => {
+    // The whole turn is one unhashable failure: no edit, no search, no read, so
+    // the failure is the only thing that can earn the ask. It must still earn
+    // it. A piece published about this one carries no `--key` and is found by
+    // the same words the failure arm searches with, so arming the ask off the
+    // RENDERED LINES would close the write end of the loop the text stage opens.
+    const db = freshDb();
+    started(db);
+    seedFailure(db, CHILD, {
+      questionKey: 'line:' + '0'.repeat(32),
+      question: 'error: linting failed for the workspace',
+      at: NOW - 10,
+    });
+    const reason = (await fire(db, childStop()))?.context ?? '';
+    expect(reason).toContain('Tenjin: this turn did work worth a second look.');
+    // Asked, but with nothing added: the line would only repeat the ask above it.
+    expect(reason).not.toContain('- Encountered this turn');
+    expect(getMark(db, CHILD, 'capture:asked')).toBe('failure');
+  });
+
+  it('is re-armed by a failure hit after the ask, and not by one hit before it', async () => {
+    const db = freshDb();
+    seedFire(db, LEAD, 'prompt', 'no-hit');
+    // Hit before the ask: the first ask already named it, so it re-arms nothing.
+    seedFailure(db, LEAD, { at: NOW - 10 });
+    expect((await fire(db, leadStop()))?.context).toContain('- Encountered this turn');
+    await fire(db, leadStop({ stopFuse: true, lastMessage: fence('first') }), TEAM, () => NOW + 5);
+    expect(await fire(db, leadStop(), TEAM, () => NOW + 10)).toBeNull();
+
+    // A wall it had to climb out of AFTER its first stop is something new to
+    // say, and the first ask could not have named it.
+    seedFailure(db, LEAD, {
+      questionKey: 'sig_v1:1111222233334444|line:' + 'e'.repeat(32),
+      question: 'error: EADDRINUSE: address already in use :::5433',
+      at: NOW + 20,
+    });
+    const again = (await fire(db, leadStop(), TEAM, () => NOW + 30))?.context ?? '';
+    expect(again).toContain('address already in use');
+    expect(again).toContain('`--key fingerprint=sig_v1:1111222233334444`');
+    // And only that one. The ENOENT did not come up this turn, and repeating
+    // its `--key fingerprint=` offers a publish the agent may already have
+    // made off the first ask.
+    expect(again).not.toContain(ENOENT_LINE);
+  });
+
+  it('names a failure that keeps recurring once, and is not re-armed by its repeat', async () => {
+    const db = freshDb();
+    // `no-answer` is a leg that never landed, so the fire releases its
+    // once-per-question claim: a shelf that cannot be reached writes a fresh
+    // row behind every run of the same failing command.
+    seedFailure(db, LEAD, { reason: 'no-answer', at: NOW - 10 });
+    expect((await fire(db, leadStop()))?.context).toContain(ENOENT_LINE);
+    await fire(db, leadStop({ stopFuse: true, lastMessage: fence('first') }), TEAM, () => NOW + 5);
+
+    seedFailure(db, LEAD, { reason: 'no-answer', at: NOW + 20 });
+    expect(await fire(db, leadStop(), TEAM, () => NOW + 30)).toBeNull();
   });
 
   it('the second stop harvests the lead own fence; a skipped lookup is not evidence', async () => {

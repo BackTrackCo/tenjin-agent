@@ -73,8 +73,15 @@ function canonicalTool(name: string, input: Record<string, unknown>): HookTool {
       const path = str(input.file_path);
       return { name, kind, paths: path === undefined ? [] : [path] };
     }
-    case 'dispatch':
-      return { name, kind, task: str(input.prompt) ?? '' };
+    case 'dispatch': {
+      const description = str(input.description);
+      return {
+        name,
+        kind,
+        task: str(input.prompt) ?? '',
+        ...(description !== undefined ? { description } : {}),
+      };
+    }
     case 'web':
       return { name, kind, query: str(input.query) ?? '' };
     case 'fetch':

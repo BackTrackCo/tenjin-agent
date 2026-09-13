@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { CONFIG_DEFAULTS } from '../../lib/config';
 import { SHELF_BYPASS_HEADER } from '../../lib/http';
+import { question } from '../question';
 import type { KernelConfig, Question } from '../types';
 import { keysLeg, searchLeg } from './shelf';
 
@@ -85,17 +86,17 @@ async function body(calls: Request[]): Promise<Record<string, unknown>> {
 }
 
 describe('searchLeg request', () => {
-  it('cuts a long question at 512 on a word boundary rather than throwing USAGE', async () => {
+  it('sends `Question.text` whole: the cut was made once, upstream', async () => {
     const { fetchImpl, calls } = stub(() => json(200, envelope([])));
-    const leg = searchLeg('team', 'prompt', CONFIG, fetchImpl);
-    const long = 'collation '.repeat(60).trim(); // 599 characters
-    expect(long.length).toBeGreaterThan(512);
-    const result = await leg.request(q(long), 4000, new AbortController().signal);
+    const leg = searchLeg('team', 'dispatch', CONFIG, fetchImpl);
+    // Already at the dispatch trigger's bound, because `question()` cut it
+    // there. The leg repeats no cut of its own, so a work order longer than any
+    // other trigger's 512 reaches the shelf as the plan built it.
+    const asked = question('collation '.repeat(600).trim(), 'dispatch');
+    expect(asked.text.length).toBeGreaterThan(512);
+    const result = await leg.request(asked, 4000, new AbortController().signal);
     expect(result.status).toBe('ok');
-    const sent = (await body(calls)).query as string;
-    expect(sent.length).toBeLessThanOrEqual(512);
-    expect(sent.endsWith('collation')).toBe(true);
-    expect(long.startsWith(sent)).toBe(true);
+    expect((await body(calls)).query).toBe(asked.text);
   });
 
   it('puts the trigger, the limit and budget_ms on the wire, and no identifiers', async () => {
