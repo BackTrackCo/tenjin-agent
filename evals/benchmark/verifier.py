@@ -144,6 +144,8 @@ def run(spec: VerifierSpec, repo_copy: Path, allowed_root: Path, *, image: str |
     if not isinstance(argv, list) or not argv or not all(isinstance(item, str) and item for item in argv):
         raise VerifierError(f"verifier {spec.name!r} did not produce an argv list")
     if spec.container_test is not None:
+        if not (resolved / spec.container_test).is_file():
+            return Verdict(spec.name, "invalid", None, "hidden verifier file is missing")
         if image is None:
             return Verdict(spec.name, "invalid", None, "hidden source verification requires the pinned trial image")
         from . import container_verifier
