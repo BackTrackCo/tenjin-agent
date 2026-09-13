@@ -1437,3 +1437,13 @@ def test_complete_historical_work_order_is_preserved_and_still_bounded():
     assert claude_live.prompt_of({"prompt": prompt}) == prompt
     with pytest.raises(LiveExecutorError, match="too long"):
         claude_live.prompt_of({"prompt": "x" * (claude_live.PROMPT_LIMIT + 1)})
+
+
+def test_postgres_launch_explains_visible_test_facilities_in_every_arm(edited: Edited) -> None:
+    request = edited(task={"database": "postgres"})
+    launch = claude_live.launch(request)
+    prompt = launch.argv[launch.argv.index("-p") + 1]
+    assert prompt.startswith(request.task["prompt"])
+    assert "--config .bench1/model-tests.config.mjs --configLoader runner <test-file>" in prompt
+    assert "no host Docker socket" in prompt
+    assert "hidden" not in prompt
