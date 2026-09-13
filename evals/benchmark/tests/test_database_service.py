@@ -78,3 +78,55 @@ def test_harbor_owned_deny_all_sidecar_is_accepted_but_foreign_sidecar_is_not():
         else:
             with pytest.raises(ValueError,match='not isolated'):
                 with database_service.service(running(),True,docker=docker): pass
+
+
+@pytest.mark.parametrize('mode,owner,accepted', [
+    ('allowlist', 'bench-fixture', True),
+    ('public', 'bench-fixture', False),
+    ('no-network', 'bench-fixture', False),
+    ('allowlist', 'foreign-project', False),
+])
+def test_model_service_requires_its_owned_allowlist_sidecar(mode, owner, accepted):
+    calls, base = fake(mode='container:sidecar-id')
+    def docker(argv, timeout_s=0):
+        if argv == ['inspect', 'sidecar-id']:
+            return SimpleNamespace(returncode=0, stderr='', stdout=json.dumps([{'Config': {
+                'Labels': {container.COMPOSE_PROJECT_LABEL: owner, 'com.docker.compose.service': 'harbor-docker-egress-control-sidecar'},
+                'Env': ['EGRESS_CONTROL_INITIAL_NETWORK_MODE=' + mode],
+            }}]))
+        return base(argv, timeout_s)
+    model = running(container.plan_egress(('chatgpt.com',)), forward=('MODEL_SECRET',))
+    if accepted:
+        with database_service.model_service(model, True, docker=docker) as env:
+            assert env == database_service.ENVIRONMENT and 'MODEL_SECRET' not in env
+            argv = next(call for call in calls if call[0] == 'run')
+            assert not set(argv) & {'--publish', '-p', '--mount', '--privileged'}
+            assert argv[-1] == 'listen_addresses=127.0.0.1'
+        assert calls[-1][0] == 'rm'
+    else:
+        with pytest.raises(ValueError, match='not isolated'):
+            with database_service.model_service(model, True, docker=docker): pass
+        assert not any(call[0] == 'run' for call in calls)
+
+
+@pytest.mark.parametrize('mode', ['none', 'host', 'bridge'])
+def test_model_service_rejects_non_sidecar_network(mode):
+    calls, docker = fake(mode=mode)
+    with pytest.raises(ValueError, match='not isolated'):
+        with database_service.model_service(running(container.plan_egress(('chatgpt.com',))), True, docker=docker): pass
+    assert not any(call[0] == 'run' for call in calls)
+
+
+def test_model_launch_failure_tears_down_database():
+    calls, base = fake(mode='container:sidecar-id')
+    def docker(argv, timeout_s=0):
+        if argv == ['inspect', 'sidecar-id']:
+            return SimpleNamespace(returncode=0, stderr='', stdout=json.dumps([{'Config': {
+                'Labels': {container.COMPOSE_PROJECT_LABEL: 'bench-fixture', 'com.docker.compose.service': 'harbor-docker-egress-control-sidecar'},
+                'Env': ['EGRESS_CONTROL_INITIAL_NETWORK_MODE=allowlist'],
+            }}]))
+        return base(argv, timeout_s)
+    with pytest.raises(RuntimeError, match='model launch failed'):
+        with database_service.model_service(running(container.plan_egress(('chatgpt.com',))), True, docker=docker):
+            raise RuntimeError('model launch failed')
+    assert calls[-1] == ['rm', '--force', 'bench-fixture-postgres']

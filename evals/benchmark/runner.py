@@ -107,7 +107,8 @@ def container_spawn(launch: executor.Launch, roots: artifact.TrialRoots, timeout
     if launch.separate_streams:
         command, separated_out, separated_err = container.split_streams(command, roots.output)
     try:
-        with container.Container(recipe=recipe) as box:
+        from . import database_service
+        with container.Container(recipe=recipe) as box, database_service.model_service(box, launch.database) as database_environment:
             refused = container.daemon_error(roots.output)
             if refused is not None:
                 return Completed(returncode=container.DAEMON_REFUSED, stderr=refused, timed_out=False)
@@ -116,7 +117,7 @@ def container_spawn(launch: executor.Launch, roots: artifact.TrialRoots, timeout
                 ran = box.exec(
                     command,
                     cwd=recipe.workdir,
-                    environment=container.forwarded(recipe, os.environ),
+                    environment={**container.forwarded(recipe, os.environ), **database_environment},
                     timeout_s=timeout_s,
                     stream=None if launch.separate_streams else stream,
                 )
@@ -345,10 +346,14 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
     image = images.require(task, manifest.fixture_path(task), manifest.pins) if spec.live else None
     if image is not None:
         isolation = {**isolation, "image": image.facts}
-    from . import task_assets
+    from . import task_assets, database_service
     provenance = task_assets.source_facts(manifest, task)
     if provenance is not None:
-        isolation = {**isolation, "historical_source": provenance}
+        isolation = {**isolation, "historical_source": provenance, "model_tool_environment": {
+            "database_image": database_service.IMAGE if task.get("database") == "postgres" else None,
+            "network": "provider-and-shelf-allowlist", "provider_authentication": True,
+            "hidden_oracle_available": False,
+        }}
     knowledge = task_assets.knowledge_facts(manifest, task, arm)
     if knowledge is not None:
         isolation = {**isolation, "knowledge": knowledge}
@@ -417,6 +422,10 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
             prior_source = task_assets.source_facts(manifest, prior)
             if prior_source is not None:
                 produced.facts["historical_source"] = prior_source
+                produced.facts["model_tool_environment"] = {
+                    "database_image": database_service.IMAGE if prior.get("database") == "postgres" else None,
+                    "network": "provider-and-shelf-allowlist", "provider_authentication": True, "hidden_oracle_available": False,
+                }
             if prior_image is not None:
                 produced.facts["image"] = prior_image.facts
             isolation = {**isolation, "producer": produced.facts}

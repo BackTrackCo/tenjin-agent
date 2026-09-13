@@ -749,6 +749,7 @@ def launch(request: LaunchRequest) -> Launch:
         argv=agent,
         cwd=workdir,
         root_session_id=session_id,
+        database=request.task.get("database") == "postgres",
         resolved_settings_hash=resolved_hash,
         package_manager=package_manager(),
         recipe=recipe,
@@ -757,6 +758,7 @@ def launch(request: LaunchRequest) -> Launch:
             "image": {"reference": reference, "resolved": request.image is not None},
             "user": container.user(),
             "agent": list(agent),
+            "database": "postgres" if request.task.get("database") == "postgres" else None,
         },
     )
 
