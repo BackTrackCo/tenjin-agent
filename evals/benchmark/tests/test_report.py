@@ -712,7 +712,8 @@ def test_json_headline_flags_follow_the_whole_run_gate(tmp_path, condition):
     value = report.project(manifest.data, manifest.hash, "sha256:s", reduction, accepted)
     expected = condition == "complete"
     assert all(row["headline_eligible"] is expected for row in value["arms"].values())
-    assert all(row["headline_eligible"] is expected for row in value["comparisons"].values())
+    # One task is insufficient for a comparison headline even with complete accounting.
+    assert all(row["headline_eligible"] is False for row in value["comparisons"].values())
     assert (report.run_status(value) == report.PROVISIONAL_STATUS) is expected
     # Diagnostic numbers remain available; the report does not delete the failed attempt.
     assert len(value["trials"]) == len(accepted)

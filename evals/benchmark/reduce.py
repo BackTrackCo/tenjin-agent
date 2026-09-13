@@ -484,7 +484,10 @@ def _compare(arm: dict[str, Any], base: dict[str, Any], seed: int) -> dict[str, 
         "headline": completion_tokens["point"],
         "headline_rule": "system_tokens_per_verified_completion_reuse_1",
         "headline_interval": completion_tokens,
-        "headline_eligible": bool(arm["headline_eligible"] and base["headline_eligible"] and completion_tokens["point"] is not None),
+        "headline_eligible": bool(
+            arm["headline_eligible"] and base["headline_eligible"]
+            and completion_tokens["point"] is not None and completion_tokens["reason"] is None
+        ),
     }
 
 
