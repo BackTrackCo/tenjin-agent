@@ -102,6 +102,10 @@ def test_flat_knowledge_uses_exact_bound_seed_bodies(historical):
 def test_hidden_verifier_replaces_model_tooling_and_classifies_assertions(historical,monkeypatch):
     data,base=historical;loaded=config(data,base);spec=loaded.verifier_spec(data['tasks'][0])
     repo=base/'run/verify';shutil.copytree(base/'fixture',repo);shutil.copytree(spec.hidden_layer,repo,dirs_exist_ok=True)
+    for name in ("dist", ".next", ".pnpm-store", "node_modules"):
+        (repo/name).mkdir()
+        (repo/name/'generated.js').write_text('throw new Error("must never run")')
+    (repo/'tsconfig.tsbuildinfo').write_text('cache')
     seen=[]
     class Running:
         def __init__(self,recipe): seen.append(recipe)
@@ -116,7 +120,7 @@ def test_hidden_verifier_replaces_model_tooling_and_classifies_assertions(histor
     result=verifier.run(spec,repo,base/'run',image='sha256:'+'ab'*32)
     assert result.outcome=='fail'
     assert ['ln','-s','/opt/fixture/node_modules','/tmp/historical-task/node_modules'] in seen
-    assert ['tar','-C','/benchmark-verify','--exclude=./node_modules','--exclude=./.pnpm-store','--exclude=./tsconfig.tsbuildinfo','-cf','/tmp/historical-source.tar','.'] in seen
+    assert ['tar','-C','/benchmark-verify','--no-wildcards','--exclude=./.next','--exclude=./.pnpm-store','--exclude=./dist','--exclude=./node_modules','--exclude=./tsconfig.tsbuildinfo','-cf','/tmp/historical-source.tar','.'] in seen
     assert seen[0].egress.mode==container.NO_NETWORK and not seen[0].forward
     support_mount = seen[0].plan[1]
     assert support_mount.host.is_relative_to(base/'run')
@@ -235,3 +239,39 @@ def test_database_model_support_is_visible_bound_and_separate_from_oracle(histor
     (visible / 'model-tests.config.mjs').write_text('different model environment')
     with pytest.raises(manifest.ManifestError, match='hash'):
         config(data, base)
+
+
+@pytest.mark.parametrize("path", ["dist/generated.js", ".next/server/generated.js", "build/index.js", "out/index.html", "coverage/index.html", "storybook-static/index.html", ".eslintcache", ".prettiercache", "vitest-report.json", "custom.tsbuildinfo", "npm-debug.log", "package-1.0.tgz"])
+def test_generated_outputs_do_not_expand_source_permissions(historical, path):
+    data, base = historical
+    spec = config(data, base).verifier_spec(data['tasks'][0])
+    repo = base/'run/verify'
+    shutil.copytree(base/'fixture', repo)
+    output = repo/path
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text('disposable output')
+    assert task_assets.changed_outside_contract(spec, repo) is None
+    # A build artifact cannot excuse a protected test/config edit.
+    original = base/'fixture/vitest.config.mjs'
+    original.write_text('trusted')
+    (repo/original.name).write_text('forged')
+    assert task_assets.changed_outside_contract(spec, repo) == 'changed file outside allowed source paths'
+
+
+def test_generated_roots_cannot_hide_original_fixture_source(historical):
+    data, base = historical
+    (base/'fixture/dist').mkdir()
+    (base/'fixture/dist/checked-in.js').write_text('tracked source')
+    data['tasks'][0]['fixture_hash'] = manifest.fixture_hash(base/'fixture')
+    with pytest.raises(manifest.ManifestError, match='reserved generated outputs'):
+        config(data, base)
+
+
+def test_submitted_ignore_rules_cannot_expand_permissions(historical):
+    data, base = historical
+    spec = config(data, base).verifier_spec(data['tasks'][0])
+    repo = base/'run/verify'
+    shutil.copytree(base/'fixture', repo)
+    (repo/'.gitignore').write_text('unexpected.ts\n')
+    (repo/'unexpected.ts').write_text('shadow source')
+    assert task_assets.changed_outside_contract(spec, repo) == 'added file outside allowed source paths'

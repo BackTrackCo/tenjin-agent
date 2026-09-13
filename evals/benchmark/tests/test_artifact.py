@@ -95,7 +95,7 @@ def test_hidden_verifier_bytes_are_unavailable_before_agent_shutdown(create: Cre
 
 def test_image_backed_verification_omits_only_discarded_root_dependencies(create: Create) -> None:
     roots = create()
-    for name in ("node_modules", ".pnpm-store", "src/node_modules"):
+    for name in ("node_modules", ".pnpm-store", "dist", ".next", "coverage", "src/node_modules", "src/dist"):
         folder = roots.repo / name
         folder.mkdir(parents=True, exist_ok=True)
         (folder / "sentinel").write_text(name)
@@ -105,6 +105,9 @@ def test_image_backed_verification_omits_only_discarded_root_dependencies(create
     assert not (copy / "node_modules").exists()
     assert not (copy / ".pnpm-store").exists()
     assert not (copy / "tsconfig.tsbuildinfo").exists()
+    for name in ("dist", ".next", "coverage"):
+        assert not (copy / name).exists()
+    assert (copy / "src/dist/sentinel").read_text() == "src/dist"
     assert (copy / "src/node_modules/sentinel").read_text() == "src/node_modules"
     assert (roots.repo / "node_modules/sentinel").exists()
     assert (roots.hidden_copy() / "node_modules/sentinel").exists()
