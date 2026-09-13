@@ -847,8 +847,9 @@ const CARD_KEY_MEANING: Record<string, string> = {
  * questions, the scope and the exclusions, so a searcher decides whether the
  * piece fits without paying for it. An incomplete one is labelled in every
  * searcher's `matchReasons` (`no answer card`, `incomplete answer card`), and a
- * row with no card AT ALL is the only one that fails `freshWithin` and
- * `appliesTo`. Completeness changes neither relevance nor rank: the server has
+ * cardless row fails `freshWithin` and `appliesTo`. Those filters also reject
+ * snapshots outside the requested freshness window and cards missing requested
+ * applicability values. Completeness changes neither relevance nor rank: the server has
  * no card tier in its ordering, and `cacheEligible` reaches a searcher only as
  * that label.
  *

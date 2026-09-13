@@ -15,9 +15,10 @@ frontmatter carrying `title` plus the answer-card keys, then the body.
   payload, since the rank-1 card inlines the questions, the scope and the
   exclusions, so a searcher judges fit without paying. An incomplete card is
   labelled `no answer card` or `incomplete answer card` in every searcher's
-  `matchReasons`, and a piece with no card at all is the only one that fails
-  `freshWithin` and `appliesTo`. Completeness changes neither relevance nor
-  rank.
+  `matchReasons`. Explicit filters remain independent: `freshWithin` requires
+  an in-window `asOf` for snapshots, and `appliesTo` requires every requested
+  value. A cardless piece fails both filters. Completeness changes neither
+  relevance nor rank.
 - The title is frontmatter `title`, else the body's first level-1 `# ` heading.
   No other heading level counts.
 - Removed: `--dry-run` (validate-before-write is the preview), `--finding` and
