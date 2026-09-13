@@ -1,0 +1,50 @@
+{
+  "note": "Inputs and the method's deterministic fields for evals.benchmark.reduce.paired_bootstrap. The interval's endpoints are NOT pinned here: they are asserted as invariants (low <= point <= high, and low < high when the ratios differ), so a resampling-order change is a real failure rather than a fixture to regenerate.",
+  "cases": [
+    {
+      "name": "single_task",
+      "seed": 1,
+      "ratios": [0.8],
+      "expected": {
+        "method": "task_paired_percentile",
+        "point": 0.8,
+        "tasks": 1,
+        "resamples": 2000,
+        "confidence": 0.95,
+        "seed": 1
+      }
+    },
+    {
+      "name": "three_task_corpus",
+      "seed": 20260907,
+      "ratios": [0.85, 0.7916666666666666, 0.8333333333333334],
+      "expected": {
+        "method": "task_paired_percentile",
+        "point": 0.825,
+        "tasks": 3,
+        "resamples": 2000,
+        "confidence": 0.95,
+        "seed": 20260907
+      }
+    },
+    {
+      "name": "eight_task_mixed",
+      "seed": 424242,
+      "ratios": [0.62, 0.71, 0.79, 0.83, 0.9, 0.97, 1.06, 1.21],
+      "expected": {
+        "method": "task_paired_percentile",
+        "point": 0.88625,
+        "tasks": 8,
+        "resamples": 2000,
+        "confidence": 0.95,
+        "seed": 424242
+      }
+    },
+    {
+      "name": "no_task",
+      "seed": 7,
+      "ratios": [],
+      "expected": null
+    }
+  ]
+}

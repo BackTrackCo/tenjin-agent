@@ -5,6 +5,35 @@ and is its output right when it does. These are the skill half of the eval loop.
 half (does the server return the right piece for a question) lives in the tenjin repo as
 `scripts/eval-lookup-recall.ts`.
 
+## Benchmark (Bench-1)
+
+`evals/benchmark/` is a separate package: the trial-level token benchmark foundation, not a
+skill eval. It measures whole agent runs, and nothing below this section applies to it. Read
+[`benchmark/README.md`](./benchmark/README.md) before touching it; that file is the contract.
+
+The offline path, from the repository root:
+
+```bash
+python3 -m evals.benchmark.cli fake-run --out /tmp/bench1-fake   # manifest to report, no spend
+python3 -m evals.benchmark.cli verify --run /tmp/bench1-fake     # re-run the hidden verifiers
+python3 -m evals.benchmark.cli reduce --run /tmp/bench1-fake     # task-equal aggregates
+python3 -m evals.benchmark.cli report --run /tmp/bench1-fake     # the publishable projection
+python3 -m evals.benchmark.cli summary --run /tmp/bench1-fake     # read that report as text
+python3 evals/benchmark/selftest.py                              # the offline suite the required CI runs
+```
+
+Nothing above starts an agent or spends anything: this layer is the offline chain, and the live
+executor and the `live-run` command that drives it land on top of it. Publishing anything from a
+live run requires a disposable container or VM attestation, and the attestation contract is
+already here in `artifact.py`.
+
+What the README covers: the manifest, attempt, usage, verifier, and invalid-run contracts; the
+reduction and interval rules; the private versus publishable artifact boundary; and how
+Bench-2, Bench-3, and Bench-6 add fixtures and adapters without changing the foundation. It
+also records what Bench-1 deliberately does not measure: the product's `tokens saved` counter,
+`tenjin grade`, provider usage-limit percentages, and LLM judging are not primary
+benchmark outcomes.
+
 ## Layout
 
 ```
