@@ -71,6 +71,12 @@ def test_json_round_trip_validates() -> None:
         usage.from_json({**payload, "cache_read": 0, "cache_write": 0, "uncached_input": 0})
 
 
+@pytest.mark.parametrize("payload", [None, 1, True, "bad", [], [["adapter", "claude"]]])
+def test_non_object_json_is_a_controlled_shape_error(payload) -> None:
+    with pytest.raises(UsageError, match="must be an object"):
+        usage.from_json(payload)
+
+
 def test_identical_echo_collapses_to_one() -> None:
     first = record()
     assert usage.dedupe([first, record(source_hash="sha256:other-line")]) == [first]
