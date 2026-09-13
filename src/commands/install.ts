@@ -30,12 +30,12 @@ import {
   loadRawConfig,
   PublishModeSchema,
   parsePublishModeFlag,
-  resolveFreeVerbsDeclined,
+  resolveGrantDeclined,
 } from '../lib/config';
 import type { PartialConfig, PublishMode } from '../lib/config';
 import {
   persistBazaarPay,
-  persistFreeVerbsDeclined,
+  persistGrantDeclined,
   persistInstallHarness,
   persistPublishMode,
 } from './config';
@@ -47,6 +47,7 @@ import type { PassphraseOverrides } from '../lib/wallet/local';
 import { walletFileExists } from '../lib/wallet/store';
 import { recommendedPermissions } from '../lib/permissions';
 import {
+  applyGrantDecline,
   claudeSettingsPath,
   inspectFreeVerbRules,
   permissionsSkipped,
@@ -79,11 +80,11 @@ const InstallInputSchema = z.object({
   publishMode: z.string().optional(),
   noWallet: z.boolean().optional(),
   /**
-   * `--no-allow-free-verbs`: write no permission rule at all. The allowlist is
+   * `--no-grant`: write no permission rule at all. The allowlist is
    * otherwise written on every run, because installing tenjin is the consent for
    * it (the publish-mode select says what an auto mode adds).
    */
-  noAllowFreeVerbs: z.boolean().optional(),
+  noGrant: z.boolean().optional(),
   /**
    * `--bazaar-pay`: let `tenjin pay` pay Bazaar-listed non-Tenjin endpoints under
    * the spend policy, and place the skill that teaches the lane. Off unless asked
@@ -418,8 +419,8 @@ async function runInstallRefresh(
 
   // Read every wired harness through its adapter. A refresh must not invent a
   // Claude settings file (or a Claude warning) on a Codex-only machine.
-  // A settled `--no-allow-free-verbs` persists the EXACT rules that were
-  // pending at the time in `install.freeVerbsDeclined`
+  // A settled `--no-grant` persists the EXACT rules that were
+  // pending at the time in `install.grantDeclined`
   // (see `resolveClaudeGrant`), and this run subtracts that recorded set from
   // what it would otherwise report — recomputing from the settings file alone,
   // with nothing to distinguish "declined" from "never asked", reported the
@@ -427,7 +428,7 @@ async function runInstallRefresh(
   // suppress-everything flag: a rule that was never offered before — a later
   // version's genuinely new suggestion — is not in this list, so it still
   // surfaces even on a machine sitting on an old decline.
-  const declined = new Set(resolveFreeVerbsDeclined(rawConfig.install?.freeVerbsDeclined));
+  const declined = resolveGrantDeclined(rawConfig.install?.grantDeclined);
   const permissions: Partial<Record<Harness, HarnessPermissions>> = {};
   for (const hook of hooks) {
     const adapter = adapters[hook.harness as Harness];
@@ -437,14 +438,7 @@ async function runInstallRefresh(
       adapter.id === 'claude' && deps.inspectPermissions !== undefined
         ? await legacyRefreshPermissions(home, publishMode, deps.inspectPermissions)
         : await grant.inspect(home, publishMode, env);
-    const missing = report.missing.filter((rule) => !declined.has(rule));
-    permissions[adapter.id] = {
-      ...report,
-      missing,
-      ...(report.state === 'pending' && missing.length === 0
-        ? { state: 'skipped', detail: 'the missing rules were explicitly declined' }
-        : {}),
-    };
+    permissions[adapter.id] = applyGrantDecline(report, declined);
   }
 
   const touched = skills.ran || wired;
@@ -606,7 +600,7 @@ async function installBody(
   const dryRun = parsed.data.dryRun === true;
   const noWallet = parsed.data.noWallet === true;
   const noHooks = parsed.data.noHooks === true;
-  const noAllowFreeVerbs = parsed.data.noAllowFreeVerbs === true;
+  const noGrant = parsed.data.noGrant === true;
   const bazaarPayFlag = parsed.data.bazaarPay === true;
   // Validate the enum flags UP FRONT so a bad value fails before any wiring.
   const publishModeFlag =
@@ -701,7 +695,7 @@ async function installBody(
       home,
       ctx,
       deps,
-      declined: noAllowFreeVerbs,
+      declined: noGrant,
       dryRun,
       publishMode: publishMode.value,
     }),
@@ -712,11 +706,10 @@ async function installBody(
   const failedActivation = hooks.find(
     (hook) => hook.trusted !== undefined && hook.warning !== undefined,
   );
-  if (failedActivation?.warning !== undefined) {
-    // Finish every selected harness first, then fail the command. A mixed
-    // install therefore preserves Claude's usable result in the error details,
-    // while Codex-only automation still gets the non-zero outcome an inert loop
-    // requires instead of mistaking a warning-bearing success for completion.
+  if (selectedHarnesses.length === 1 && failedActivation?.warning !== undefined) {
+    // A sole Codex install has no usable loop when trust fails, so its exit must
+    // say so. A mixed install continues through wallet and doctor because Claude
+    // is already usable; the Codex result keeps the warning and retry command.
     throw new CliError('REFUSED', failedActivation.warning, {
       ...(failedActivation.fix !== undefined ? { fix: failedActivation.fix } : {}),
       details: {
@@ -1054,7 +1047,7 @@ function permissionsValue(p: PermissionsResult): string {
     return `pending: ${harnessLabel(p.harness as Harness)} has no grant this CLI can write, so it still asks${removed(false)}`;
   }
   if (p.skipped === 'declined' || p.skipped === 'not-requested') {
-    return `none written (--no-allow-free-verbs)${removed(false)}`;
+    return `none written (--no-grant)${removed(false)}`;
   }
   if (p.skipped === 'changed-since-read') {
     return `${p.path} changed mid-write, nothing written; re-run: tenjin install`;
@@ -1076,7 +1069,7 @@ function grantValue(g: PermissionsResult | CodexGrantResult, mode: PublishMode):
   if (g.error !== undefined) {
     return `${g.path} could not be written (${g.error}); Codex will keep asking`;
   }
-  if (g.granted.length === 0) return 'none written (--no-allow-free-verbs)';
+  if (g.granted.length === 0) return 'none written (--no-grant)';
   const gated = mode === 'review' ? '' : `, including publish and edit on ${mode}`;
   return `${g.granted.length} command prefixes in ${g.path}${gated}`;
 }
@@ -1134,6 +1127,11 @@ function problemLines(io: Io, s: WalkthroughState): string[] {
     .map((grant) => grant.warning);
   for (const w of [...s.hooks.map((h) => h.warning), s.wallet.warning, ...grantWarnings]) {
     if (w !== undefined) lines.push(paint(io, 'yellow', `! ${sanitizeForTerminal(w)}`));
+  }
+  for (const h of s.hooks) {
+    if (h.warning !== undefined && h.fix !== undefined) {
+      lines.push(paint(io, 'dim', `  fix: ${sanitizeForTerminal(h.fix)}`));
+    }
   }
   return lines;
 }
@@ -1401,7 +1399,7 @@ export const WALLET_QUESTION = 'Create a wallet now?';
  * Settle the harness allowlist. The write itself is free-verb only and cannot
  * widen (see lib/harness-permissions.ts); this decides ONLY whether to call it.
  *
- * Precedence: `--no-allow-free-verbs` refuses outright, and every other run
+ * Precedence: `--no-grant` refuses outright, and every other run
  * wires it. There is no question here any more: the publish-mode select is the
  * consent moment for this write too, since `auto` is what adds the publish and
  * edit rules and its hint says so.
@@ -1430,7 +1428,7 @@ interface ResolveGrantsArgs {
   home: string;
   ctx: CommandContext;
   deps: InstallDeps;
-  /** `--no-allow-free-verbs`: write nothing, and record what was pending. */
+  /** `--no-grant`: write nothing, and record what was pending. */
   declined: boolean;
   dryRun: boolean;
   /**
@@ -1477,9 +1475,9 @@ async function resolveClaudeGrant(args: ResolveGrantsArgs): Promise<PermissionsR
 
   /**
    * TIGHTENING FIRST, above every guard below, because none of them is about a
-   * retraction. `--no-allow-free-verbs` declines a WRITE OF OURS; it is not a
+   * retraction. `--no-grant` declines a WRITE OF OURS; it is not a
    * request to keep a grant the operator just revoked by moving to `review`, and
-   * ordering it first let `install --publish-mode review --no-allow-free-verbs`
+   * ordering it first let `install --publish-mode review --no-grant`
    * write `mode: review` to config.json, leave both mode-gated rules allowed, and
    * report `skipped: declined` with a fix telling the operator to ADD rules on the
    * run where they asked to revoke. The adapter selection is settled before
@@ -1530,14 +1528,14 @@ async function resolveClaudeGrant(args: ResolveGrantsArgs): Promise<PermissionsR
   const probe = await (deps.inspectPermissions ?? inspectFreeVerbRules)(home, publishMode);
 
   if (declined) {
-    await persistFreeVerbsDeclined(ctx.dataDir, probe.pending ?? []);
+    await persistGrantDeclined(ctx.dataDir, probe.pending ?? []);
     return withRetraction(permissionsSkipped('claude', home, 'declined'));
   }
   if (probe.satisfied !== undefined) {
     // Fully satisfied: nothing pending, nothing to retire. Clear any decline
     // recorded on an earlier run so a satisfied state never leaves a stale
     // suppression sitting in config.json for a future rule to inherit.
-    await persistFreeVerbsDeclined(ctx.dataDir, []);
+    await persistGrantDeclined(ctx.dataDir, []);
     return withRetraction(probe.satisfied);
   }
   // Nothing to GRANT, but something of ours to retract: an older version's rule
@@ -1555,7 +1553,7 @@ async function resolveClaudeGrant(args: ResolveGrantsArgs): Promise<PermissionsR
   // `wireFreeVerbAllowlist` reports it actually wrote (no `skipped`).
   const wired = await writeClaudeGrant(home, publishMode, deps);
   if (wired.skipped === undefined) {
-    await persistFreeVerbsDeclined(ctx.dataDir, []);
+    await persistGrantDeclined(ctx.dataDir, []);
   }
   return withRetraction(wired);
 }
@@ -1626,9 +1624,9 @@ async function resolveHooks(args: {
  *
  * A trust failure fails this HARNESS, not the whole multi-harness install.
  * Claude's independently usable skills, grant, and hooks remain installed, and
- * the Codex outcome carries the failed step plus the command that selects
- * Claude alone. A refresh treats the warning as a refusal, so update never
- * reports stale Codex handlers as refreshed.
+ * the Codex outcome carries the failed step plus the command that retries Codex
+ * alone. A refresh treats the warning as a refusal, so update never reports
+ * stale Codex handlers as refreshed.
  *
  * `--no-hooks` remains the opt-out; it never reaches here.
  */
@@ -1658,7 +1656,7 @@ async function activateHooks(
       ...written,
       trusted: result.trusted.length,
       warning: `Codex hook trust could not be completed at the ${result.failedAt} step: ${result.reason}. The ${written.entries} entries are written but Codex will not run them.`,
-      fix: 'Run `tenjin install --harness claude` to keep the Claude installation only, or fix the Codex app server and re-run `tenjin install --harness codex`.',
+      fix: 'Fix the Codex app server and re-run `tenjin install --harness codex`.',
     };
   }
   return { ...written, trusted: result.trusted.length };

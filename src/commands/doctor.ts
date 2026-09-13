@@ -30,7 +30,7 @@ import { skillMaterialize } from '../lib/skill-materialize';
 import type { HarnessWiring, NotInvocableReason } from '../lib/skill-wiring';
 import type { Harness, HarnessAdapter } from '../adapters/types';
 import { fetchJson, type FetchJsonFailure, type ShelfBypass } from '../lib/http';
-import { loadRawConfig, resolveFreeVerbsDeclined, resolveSettings } from '../lib/config';
+import { loadRawConfig, resolveGrantDeclined, resolveSettings } from '../lib/config';
 import {
   isTeamModeConfig,
   isTeamShelfOrigin,
@@ -44,8 +44,9 @@ import { walletFileExists } from '../lib/wallet/store';
 import { sanitizeForTerminal } from '../lib/output';
 import { modeGatedPointer, recommendedPermissions } from '../lib/permissions';
 import {
+  applyGrantDecline,
   claudeSettingsPath,
-  inspectFreeVerbRules,
+  inspectClaudeGrant,
   MODE_GATED_RULES,
 } from '../lib/harness-permissions';
 import { trustKey } from '../lib/codex-trust';
@@ -249,6 +250,7 @@ export async function collectDoctorChecks(
   const adapters = deps.adapters ?? ADAPTERS;
   const which = deps.which ?? ((bin: string) => onPath(bin, env));
   const requested = config.install?.harness ?? [];
+  const grantDeclined = resolveGrantDeclined(config.install?.grantDeclined);
   const teamMode = isTeamModeConfig(config);
   const built: BuiltCheck[] = [
     checkNode(),
@@ -295,6 +297,7 @@ export async function collectDoctorChecks(
       deps.openLoopDb ?? openLoopDbForCli,
       settings.publishMode.value,
       adapters,
+      grantDeclined,
     )),
     await checkSkills(
       home,
@@ -333,11 +336,13 @@ export async function collectDoctorChecks(
     which,
     requested: config.install?.harness ?? [],
   });
-  const probe = await inspectFreeVerbRules(deps.homeDir ?? homedir(), publishMode);
+  const probe = applyGrantDecline(
+    await inspectClaudeGrant(deps.homeDir ?? homedir(), publishMode),
+    grantDeclined,
+  );
   const gated = new Set<string>(MODE_GATED_RULES);
-  const declined = new Set(resolveFreeVerbsDeclined(config.install?.freeVerbsDeclined));
   const missingModeGated = grantable
-    ? (probe.pending ?? []).filter((r) => gated.has(r) && !declined.has(r))
+    ? probe.missing.filter((rule) => gated.has(rule))
     : ([] as string[]);
   const firstFail = built.find((b) => b.result.required && b.result.status === 'fail');
   if (firstFail === undefined) return { checks, publishMode, missingModeGated, grantable };
@@ -1226,6 +1231,7 @@ async function checkHooks(
   open: typeof openLoopDbForCli,
   publishMode: PublishMode,
   adapters: Readonly<Record<Harness, HarnessAdapter>>,
+  grantDeclined: readonly string[],
 ): Promise<BuiltCheck[]> {
   const out: BuiltCheck[] = [];
   const registered = await Promise.all(
@@ -1269,7 +1275,7 @@ async function checkHooks(
     if (adapter.registrar.trust !== undefined) {
       out.push(...(await checkTrustedHooks(adapter, homeDir, dataDir, env, hooks, open)));
     }
-    out.push(await checkHarnessPermissions(adapter, homeDir, publishMode, env));
+    out.push(await checkHarnessPermissions(adapter, homeDir, publishMode, grantDeclined, env));
   }
   return out;
 }
@@ -1374,6 +1380,7 @@ async function checkHarnessPermissions(
   adapter: HarnessAdapter,
   homeDir: string,
   publishMode: PublishMode,
+  grantDeclined: readonly string[],
   env: NodeJS.ProcessEnv,
 ): Promise<BuiltCheck> {
   const harness = adapter.id;
@@ -1386,7 +1393,10 @@ async function checkHarnessPermissions(
           missing: [],
           detail: `This build knows no permission surface for ${harness}.`,
         }
-      : await adapter.registrar.grant.inspect(homeDir, publishMode, env);
+      : applyGrantDecline(
+          await adapter.registrar.grant.inspect(homeDir, publishMode, env),
+          grantDeclined,
+        );
   // `unsupported` is a fact about the harness, not a fault in the machine, so
   // it warns only where it changes what happens: an unattended mode that will
   // be prompted anyway.
@@ -1395,7 +1405,11 @@ async function checkHarnessPermissions(
     result: {
       name: `${harness} permissions`,
       status:
-        p.state === 'granted' ? 'ok' : p.state === 'unsupported' && !consequential ? 'ok' : 'warn',
+        p.state === 'granted' || p.state === 'skipped'
+          ? 'ok'
+          : p.state === 'unsupported' && !consequential
+            ? 'ok'
+            : 'warn',
       required: false,
       detail: consequential
         ? `${p.state}: publish.mode=${publishMode} still prompts here. ${p.detail}`

@@ -199,16 +199,22 @@ describe('main', () => {
     expect(await main(['install', '--help'], cap.io)).toBe(0);
     const help = cap.stdout();
     expect(help).toContain('--bazaar-pay');
+    expect(help).toContain('--no-grant');
+    expect(help).not.toContain('--no-allow-free-verbs');
     // The hooks are not a flag or a prompt any more: all seven arms are on and
     // `tenjin config set hooks.<arm> false` is the one place to change that.
     expect(help).not.toContain('--search-hooks');
   });
 
-  // The compat no-ops are gone rather than hidden: `install` writes no CLAUDE.md
-  // line, and `--allow-free-verbs` only ever restated the default. Rejected at
-  // parse time, so the action never runs.
-  it('rejects the compat no-op flags', async () => {
-    for (const flag of ['--claude-md', '--no-claude-md', '--allow-free-verbs']) {
+  // Removed pre-release flags are gone rather than hidden. Rejected at parse
+  // time, so the action never runs and none remains as an alias.
+  it('rejects removed install flags', async () => {
+    for (const flag of [
+      '--claude-md',
+      '--no-claude-md',
+      '--allow-free-verbs',
+      '--no-allow-free-verbs',
+    ]) {
       const cap = captureIo();
       expect(await main(['install', flag, '--json'], cap.io), flag).toBe(2);
       expect(cap.stdout(), flag).toContain(`unknown option '${flag}'`);

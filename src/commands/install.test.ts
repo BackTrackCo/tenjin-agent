@@ -1561,9 +1561,9 @@ describe('runInstall: permissions decision', () => {
     expect(await allowList()).toEqual([...FREE_VERB_RULES]);
   });
 
-  it('--no-allow-free-verbs is the opt-out and writes nothing', async () => {
+  it('--no-grant is the opt-out and writes nothing', async () => {
     const res = await runInstall(
-      { harness: ['claude'], noAllowFreeVerbs: true },
+      { harness: ['claude'], noGrant: true },
       makeCtx({ json: true }),
       deps(),
     );
@@ -1574,15 +1574,14 @@ describe('runInstall: permissions decision', () => {
   async function declinedList(): Promise<string[] | undefined> {
     const raw = await readFile(join(data, 'config.json'), 'utf8').catch(() => null);
     if (raw === null) return undefined;
-    return (JSON.parse(raw) as { install?: { freeVerbsDeclined?: string[] } }).install
-      ?.freeVerbsDeclined;
+    return (JSON.parse(raw) as { install?: { grantDeclined?: string[] } }).install?.grantDeclined;
   }
 
   // tenjin-agent#234, per-rule fix: a decline records the EXACT rules that were
   // pending, not a flag that suppresses everything forever.
-  it('--no-allow-free-verbs persists the exact rules that were pending', async () => {
+  it('--no-grant persists the exact rules that were pending', async () => {
     await runInstall(
-      { harness: ['claude'], noAllowFreeVerbs: true, publishMode: 'review' },
+      { harness: ['claude'], noGrant: true, publishMode: 'review' },
       makeCtx({ json: true }),
       deps(),
     );
@@ -1591,7 +1590,7 @@ describe('runInstall: permissions decision', () => {
 
   /**
    * Greptile P1 #1: the satisfied-early-return in `resolvePermissions` used to
-   * return before ever touching `install.freeVerbsDeclined`, so a decline
+   * return before ever touching `install.grantDeclined`, so a decline
    * recorded on one run survived a grant made an entirely different way (a
    * hand-edit, another tool, or `tenjin uninstall` and reinstall of just the
    * settings file) — the next refresh kept nagging about rules the settings
@@ -1599,7 +1598,7 @@ describe('runInstall: permissions decision', () => {
    */
   it('a satisfied file clears a stale decline, even when satisfied by hand', async () => {
     await runInstall(
-      { harness: ['claude'], noAllowFreeVerbs: true, publishMode: 'review' },
+      { harness: ['claude'], noGrant: true, publishMode: 'review' },
       makeCtx(),
       deps(),
     );
@@ -1623,7 +1622,7 @@ describe('runInstall: permissions decision', () => {
    */
   it('a later grant clears the declined list entirely', async () => {
     await runInstall(
-      { harness: ['claude'], noAllowFreeVerbs: true, publishMode: 'review' },
+      { harness: ['claude'], noGrant: true, publishMode: 'review' },
       makeCtx(),
       deps(),
     );
@@ -1635,7 +1634,7 @@ describe('runInstall: permissions decision', () => {
 
   /**
    * Greptile P1 (tenjin-agent#272): the grant branch used to clear
-   * `freeVerbsDeclined` BEFORE `wireFreeVerbAllowlist` returned, so a refused
+   * `grantDeclined` BEFORE `wireFreeVerbAllowlist` returned, so a refused
    * settings write left the rules absent but the record erased — reopening
    * exactly the #234 bug this changeset fixes (a settled decline recomputed as
    * pending on every later refresh) for the one machine that can least repair
@@ -1647,7 +1646,7 @@ describe('runInstall: permissions decision', () => {
   it('a failed grant leaves the decline on record, so refresh keeps honoring it', async () => {
     await writeSettings({ permissions: { allow: [] } });
     await runInstall(
-      { harness: ['claude'], noAllowFreeVerbs: true, publishMode: 'auto' },
+      { harness: ['claude'], noGrant: true, publishMode: 'auto' },
       makeCtx(),
       deps({ which: (bin) => bin === 'claude' }),
     );
@@ -1696,7 +1695,7 @@ describe('runInstall: permissions decision', () => {
   // CliError's `fix` carries, so a machine consumer never has to parse prose.
   it('carries a fix string on every skipped permissions state', async () => {
     const declined = await runInstall(
-      { harness: ['claude'], noAllowFreeVerbs: true },
+      { harness: ['claude'], noGrant: true },
       makeCtx({ json: true }),
       deps(),
     );
@@ -2208,10 +2207,10 @@ describe('runInstall: permissions decision', () => {
       expect(human(res)).toContain('publishing   review');
     });
 
-    // `--no-allow-free-verbs` still refuses the whole write, publish rule included.
+    // `--no-grant` still refuses the whole write, publish rule included.
     it('writes nothing at all when the allowlist itself is refused', async () => {
       const res = await runInstall(
-        { harness: ['claude'], noAllowFreeVerbs: true },
+        { harness: ['claude'], noGrant: true },
         makeCtx({ json: true }),
         deps(),
       );
@@ -2220,7 +2219,7 @@ describe('runInstall: permissions decision', () => {
     });
 
     /**
-     * `--no-allow-free-verbs` declines a WRITE OF OURS. It is not a request to
+     * `--no-grant` declines a WRITE OF OURS. It is not a request to
      * keep a grant the operator just revoked, and while the retraction sat below
      * this guard the run wrote `mode: review` to config.json, left both rules
      * allowed, exited 0, and reported `skipped: declined` with a fix telling the
@@ -2231,7 +2230,7 @@ describe('runInstall: permissions decision', () => {
         permissions: { allow: [FREE_VERB_RULES[0], PUBLISH_MODE_RULE, EDIT_MODE_RULE] },
       });
       const res = await runInstall(
-        { harness: ['claude'], noAllowFreeVerbs: true, publishMode: 'review' },
+        { harness: ['claude'], noGrant: true, publishMode: 'review' },
         makeCtx({ json: true }),
         deps(),
       );
@@ -2247,7 +2246,7 @@ describe('runInstall: permissions decision', () => {
       const res = await runInstall(
         {
           harness: ['claude'],
-          noAllowFreeVerbs: true,
+          noGrant: true,
           publishMode: 'review',
         },
         makeCtx(),
@@ -2266,14 +2265,14 @@ describe('runInstall: permissions decision', () => {
     it('says nothing about a retraction when there was nothing to take back', async () => {
       await writeSettings({ permissions: { allow: ['Bash(git status:*)'] } });
       const res = await runInstall(
-        { harness: ['claude'], noAllowFreeVerbs: true, publishMode: 'review' },
+        { harness: ['claude'], noGrant: true, publishMode: 'review' },
         makeCtx(),
         deps({ isInteractive: true }),
       );
       const line = human(res)
         .split('\n')
         .find((l) => l.includes('permissions'));
-      expect(line).toContain('none written (--no-allow-free-verbs)');
+      expect(line).toContain('none written (--no-grant)');
       expect(line).not.toContain('removed');
     });
 
@@ -3476,34 +3475,41 @@ describe('runInstall: harness hooks', () => {
     expect(JSON.stringify(file)).not.toContain(DAEMON_PORT.toString());
   });
 
-  it('fails but keeps the Claude install usable when Codex trust cannot be completed', async () => {
-    const err = await caught(() =>
-      runInstall(
-        { harness: ['claude', 'codex'] },
-        makeCtx({ json: true }),
-        deps({
-          adapters: adaptersWithTrust(async () => ({
-            ok: false,
-            trusted: [],
-            failedAt: 'list',
-            reason: 'the codex app server could not be reached',
-          })),
-        }),
-      ),
+  it('keeps a mixed install usable and completes the wallet when Codex trust fails', async () => {
+    const createWallet = vi.fn(async () => STUB_ADDRESS);
+    const res = await runInstall(
+      { harness: ['claude', 'codex'] },
+      makeCtx(),
+      deps({
+        isInteractive: true,
+        confirmWallet: async () => true,
+        createWallet,
+        adapters: adaptersWithTrust(async () => ({
+          ok: false,
+          trusted: [],
+          failedAt: 'list',
+          reason: 'the codex app server could not be reached',
+        })),
+      }),
     );
-    expect(err).toMatchObject({
-      code: 'REFUSED',
-      message: expect.stringContaining('app server could not be reached'),
-      fix: expect.stringContaining('--harness claude'),
+    expect(createWallet).toHaveBeenCalledOnce();
+    expect((res.data as { wallet: { status: string; address?: string } }).wallet).toEqual({
+      status: 'created',
+      address: STUB_ADDRESS,
     });
-    const hooks = (err.details as HooksData).hooks;
+    const hooks = (res.data as HooksData).hooks;
     expect(hooks.find((h) => h.harness === 'claude')).toMatchObject({ entries: 11 });
     expect(hooks.find((h) => h.harness === 'codex')).toMatchObject({
       entries: 7,
       trusted: 0,
       warning: expect.stringContaining('app server could not be reached'),
-      fix: expect.stringContaining('--harness claude'),
+      fix: expect.stringContaining('tenjin install --harness codex'),
     });
+    const text = (res.humanLines ?? []).join('\n').replace(/\x1b\[[0-9;]*m/g, ''); // eslint-disable-line no-control-regex
+    expect(text).toContain('app server could not be reached');
+    expect(text).toContain('tenjin install --harness codex');
+    expect(text).not.toContain('tenjin install --harness claude');
+    expect(text).toContain(`wallet       ${STUB_ADDRESS}, $0`);
   });
 
   it('fails a Codex-only install when its written hooks cannot be trusted', async () => {
@@ -3524,6 +3530,7 @@ describe('runInstall: harness hooks', () => {
     expect(err).toMatchObject({
       code: 'REFUSED',
       message: expect.stringContaining('0 of 7 entries'),
+      fix: expect.stringContaining('tenjin install --harness codex'),
     });
     expect((err.details as HooksData).hooks).toEqual([
       expect.objectContaining({ harness: 'codex', entries: 7, trusted: 0 }),
@@ -4015,13 +4022,13 @@ describe('runInstall --refresh', () => {
   });
 
   /**
-   * tenjin-agent#234: a settled `--no-allow-free-verbs` must stay settled, not
+   * tenjin-agent#234: a settled `--no-grant` must stay settled, not
    * get recomputed from the settings file (which has none of the rules) and
    * reported as pending on every later refresh.
    */
   it('does not re-report a declined allowlist as pending', async () => {
     await runInstall(
-      { harness: ['claude'], noAllowFreeVerbs: true, publishMode: 'auto' },
+      { harness: ['claude'], noGrant: true, publishMode: 'auto' },
       makeCtx(),
       deps({ which: (bin) => bin === 'claude' }),
     );
@@ -4035,7 +4042,7 @@ describe('runInstall --refresh', () => {
   });
 
   /**
-   * Greptile P1 #2: a boolean `freeVerbsDeclined` suppressed EVERY future
+   * Greptile P1 #2: a boolean `grantDeclined` suppressed EVERY future
    * pending rule forever, so a later version's genuinely new suggestion would
    * never be reported once any decline was on record. The per-rule list must
    * silence only the rules that were actually declined and let a new one
@@ -4043,7 +4050,7 @@ describe('runInstall --refresh', () => {
    */
   it('still reports a genuinely new rule after an earlier decline', async () => {
     await runInstall(
-      { harness: ['claude'], noAllowFreeVerbs: true, publishMode: 'auto' },
+      { harness: ['claude'], noGrant: true, publishMode: 'auto' },
       makeCtx(),
       deps({ which: (bin) => bin === 'claude' }),
     );
@@ -4076,18 +4083,18 @@ describe('runInstall --refresh', () => {
   // because a single-rule `pending` mock reads back identically whether or not
   // the declined set was actually cleared — nothing here distinguished "the
   // grant cleared the record" from "the record was never consulted at all".
-  // Read `install.freeVerbsDeclined` off disk directly so the test fails if
+  // Read `install.grantDeclined` off disk directly so the test fails if
   // the grant stops clearing it.
   it('reports freshly-pending rules again once a decline has been cleared by a grant', async () => {
     await runInstall(
-      { harness: ['claude'], noAllowFreeVerbs: true, publishMode: 'auto' },
+      { harness: ['claude'], noGrant: true, publishMode: 'auto' },
       makeCtx(),
       deps({ which: (bin) => bin === 'claude' }),
     );
     const declinedBefore = JSON.parse(await readFile(join(data, 'config.json'), 'utf8')) as {
-      install?: { freeVerbsDeclined?: string[] };
+      install?: { grantDeclined?: string[] };
     };
-    expect(declinedBefore.install?.freeVerbsDeclined?.length).toBeGreaterThan(0);
+    expect(declinedBefore.install?.grantDeclined?.length).toBeGreaterThan(0);
 
     // A later, explicit run grants the allowlist and clears the record.
     await runInstall(
@@ -4096,9 +4103,9 @@ describe('runInstall --refresh', () => {
       deps({ which: (bin) => bin === 'claude' }),
     );
     const declinedAfter = JSON.parse(await readFile(join(data, 'config.json'), 'utf8')) as {
-      install?: { freeVerbsDeclined?: string[] };
+      install?: { grantDeclined?: string[] };
     };
-    expect(declinedAfter.install?.freeVerbsDeclined).toEqual([]);
+    expect(declinedAfter.install?.grantDeclined).toEqual([]);
 
     const REVOKED_RULE = FREE_VERB_RULES[0]!;
     const result = await runInstall(

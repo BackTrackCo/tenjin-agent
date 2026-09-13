@@ -482,7 +482,7 @@ function publishRuleQuestion(
   const gated = new Set<string>(MODE_GATED_RULES);
   const others = pending.filter((rule) => !gated.has(rule)).length;
   const also =
-    others > 0 ? ` Also adds the ${others} free-verb rule(s) \`tenjin install\` writes.` : '';
+    others > 0 ? ` Also adds the ${others} command-grant rule(s) \`tenjin install\` writes.` : '';
   const targets = harnesses
     .map((harness) =>
       harness === 'claude' ? 'Claude Code' : harness === 'codex' ? 'Codex' : harness,
@@ -783,15 +783,15 @@ export async function persistInstallHarness(
 /**
  * Record the EXACT free-verb rules `install` declined, through the same locked
  * read-modify-write every `config set` uses. Set to whatever was pending at the
- * moment of `--no-allow-free-verbs`; cleared back to `[]` the moment an install
+ * moment of `--no-grant`; cleared back to `[]` the moment an install
  * actually wires the allowlist, or finds it already fully satisfied. `--refresh` subtracts this list from what it would otherwise
  * report as pending, so a settled no stays settled per rule — without also
  * silencing a genuinely NEW rule a later version adds (tenjin-agent#234).
  */
-export async function persistFreeVerbsDeclined(dir: string, declined: string[]): Promise<void> {
+export async function persistGrantDeclined(dir: string, declined: string[]): Promise<void> {
   await persist(dir, (existing) => ({
     ...existing,
-    install: { ...existing.install, freeVerbsDeclined: declined },
+    install: { ...existing.install, grantDeclined: declined },
   }));
 }
 

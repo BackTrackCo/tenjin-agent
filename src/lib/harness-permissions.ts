@@ -11,7 +11,7 @@ import type { PublishMode } from './config';
  *
  *  - OPT-OUT, AND DISCLOSED. Every install writes the free tier, because an
  *    unattended agent that gets denied is the failure this whole file exists to
- *    prevent. `--no-allow-free-verbs` refuses it outright, and every run that
+ *    prevent. `--no-grant` refuses it outright, and every run that
  *    writes says how many rules landed and in which file. What keeps that defensible is the next two invariants: the grant is a
  *    fixed free tier, and it can never widen.
  *  - TWO FIXED SETS, AND NOT PARAMETERIZED. The writer takes no rule argument.
@@ -87,6 +87,40 @@ export interface HarnessPermissions {
   /** One line an operator can act on. */
   detail: string;
   fix?: string;
+}
+
+/**
+ * Apply the operator's persisted `--no-grant` decision to a native grant
+ * inspection. Both install refresh and doctor use this exact projection so a
+ * settled decline cannot be reported as pending by one surface and skipped by
+ * the other. Exact-rule filtering deliberately lets a rule added by a later
+ * version surface normally.
+ */
+export function applyGrantDecline(
+  report: HarnessPermissions,
+  declined: readonly string[],
+): HarnessPermissions {
+  if (report.state !== 'pending' || report.missing.length === 0 || declined.length === 0) {
+    return report;
+  }
+  const declinedSet = new Set(declined);
+  const missing = report.missing.filter((rule) => !declinedSet.has(rule));
+  if (missing.length === report.missing.length) return report;
+  if (missing.length > 0) {
+    return {
+      ...report,
+      missing,
+      detail: `${missing.length} of this mode's rules remain missing; ${report.missing.length - missing.length} were explicitly declined`,
+    };
+  }
+  return {
+    harness: report.harness,
+    state: 'skipped',
+    ...(report.path !== undefined ? { path: report.path } : {}),
+    rules: report.rules,
+    missing,
+    detail: 'the command grant was explicitly declined',
+  };
 }
 
 /** Read Claude Code's settings-native grant without dispatching on a harness id. */

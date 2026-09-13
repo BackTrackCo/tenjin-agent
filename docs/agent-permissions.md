@@ -113,7 +113,7 @@ publish mode, so no flag or config value can widen it to `buy`, `wallet send`,
 
 A non-interactive install (piped, or under `--json`) does the same write, for the
 same reason: the machine most likely to be denied mid-task is the headless one.
-`--no-allow-free-verbs` is the only opt-out. Every run reports how many rules
+`--no-grant` is the only opt-out. Every run reports how many rules
 landed and in which file, on its `permissions` row.
 
 `tenjin doctor --json` carries this whole recommendation as data under

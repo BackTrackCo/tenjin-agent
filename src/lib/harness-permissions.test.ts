@@ -33,6 +33,7 @@ import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  applyGrantDecline,
   claudeSettingsPath,
   FORBIDDEN_VERB_FRAGMENTS,
   FREE_VERB_RULES,
@@ -77,6 +78,37 @@ async function seedSettings(value: unknown): Promise<void> {
 
 const allowOf = (s: Record<string, unknown>): unknown[] =>
   (s.permissions as { allow: unknown[] }).allow;
+
+describe('applyGrantDecline', () => {
+  const pending = {
+    harness: 'claude',
+    state: 'pending' as const,
+    path: '/tmp/settings.json',
+    rules: [],
+    missing: ['rule-a', 'rule-b'],
+    detail: '2 rules are missing',
+    fix: 'tenjin install',
+  };
+
+  it('settles a fully declined grant without leaving a nag or stale fix', () => {
+    expect(applyGrantDecline(pending, ['rule-a', 'rule-b'])).toEqual({
+      harness: 'claude',
+      state: 'skipped',
+      path: '/tmp/settings.json',
+      rules: [],
+      missing: [],
+      detail: 'the command grant was explicitly declined',
+    });
+  });
+
+  it('still surfaces rules added after the recorded decline', () => {
+    expect(applyGrantDecline(pending, ['rule-a'])).toMatchObject({
+      state: 'pending',
+      missing: ['rule-b'],
+      fix: 'tenjin install',
+    });
+  });
+});
 
 // The upgrade path a real user takes: they installed an older tenjin, updated,
 // and re-ran `tenjin install`. Their settings.json must end up with exactly the

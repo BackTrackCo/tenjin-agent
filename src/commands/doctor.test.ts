@@ -1936,7 +1936,7 @@ describe('runDoctor — the rule the publish mode carries', () => {
       join(dir, 'config.json'),
       JSON.stringify({
         publish: { mode: 'auto' },
-        install: { freeVerbsDeclined: [...FREE_VERB_RULES, ...MODE_GATED_RULES] },
+        install: { grantDeclined: [...FREE_VERB_RULES, ...MODE_GATED_RULES] },
       }),
     );
     expect(await run()).not.toContain('Bash(tenjin publish:*)');
@@ -2456,6 +2456,30 @@ describe('runDoctor — loop hook wiring', () => {
     expect(entries?.status).toBe('warn');
     expect(entries?.detail).toContain('wider than 0600');
     expect(entries?.fix).toContain('chmod 600');
+  });
+
+  it('reports an explicitly declined command grant as settled, with no fix nag', async () => {
+    await wireAt(31_999);
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({
+        publish: { mode: 'auto' },
+        install: { grantDeclined: [...FREE_VERB_RULES, ...MODE_GATED_RULES] },
+      }),
+    );
+    const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
+      homeDir: skillHome,
+      skillsSourceDir: pkgSrc,
+      env: {},
+      fetchImpl: healthyFetch,
+    });
+    const permissions = find((res.data as { checks: CheckResult[] }).checks, 'claude permissions');
+    expect(permissions).toMatchObject({
+      status: 'ok',
+      detail: 'skipped: the command grant was explicitly declined',
+    });
+    expect(permissions.fix).toBeUndefined();
   });
 });
 

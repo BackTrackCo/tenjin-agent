@@ -230,7 +230,7 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     .option('--dry-run', 'print what would change, write nothing')
     .option('--publish-mode <mode>', 'set the publish consent mode: review | auto | full-auto')
     .option('--no-wallet', 'create no wallet')
-    .option('--no-allow-free-verbs', 'write no harness permission rules at all')
+    .option('--no-grant', 'write no harness permission rules at all')
     .option(
       '--bazaar-pay',
       'let `tenjin pay` pay Bazaar-listed endpoints, and install the skill that teaches the lane',
@@ -271,7 +271,7 @@ Learn more:
             ...(o.dryRun === true ? { dryRun: true } : {}),
             ...(typeof o.publishMode === 'string' ? { publishMode: o.publishMode } : {}),
             ...(o.wallet === false ? { noWallet: true } : {}),
-            ...(o.allowFreeVerbs === false ? { noAllowFreeVerbs: true } : {}),
+            ...(o.grant === false ? { noGrant: true } : {}),
             ...(o.bazaarPay === true ? { bazaarPay: true } : {}),
             ...(o.hooks === false ? { noHooks: true } : {}),
             ...(o.refresh === true ? { refresh: true } : {}),

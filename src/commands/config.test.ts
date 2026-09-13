@@ -9,7 +9,7 @@ import {
   runConfigGet,
   runConfigSet,
   persistPublishMode,
-  persistFreeVerbsDeclined,
+  persistGrantDeclined,
 } from './config';
 import { HOOK_ARMS, LOOP_CONFIG_KEYS, RawConfigSchema } from '../lib/config';
 import { CliError } from '../lib/errors';
@@ -190,21 +190,21 @@ describe('runConfigList', () => {
     });
   });
 
-  it('persistFreeVerbsDeclined preserves a sibling install.harness key', async () => {
+  it('persistGrantDeclined preserves a sibling install.harness key', async () => {
     // Seeded as a past `install --harness claude` would have left it; declining
     // the allowlist on a later run must not clobber that record.
     await writeFile(configFile(), JSON.stringify({ install: { harness: ['claude'] } }));
-    await persistFreeVerbsDeclined(dir, ['Bash(tenjin search:*)', 'Bash(tenjin read:*)']);
+    await persistGrantDeclined(dir, ['Bash(tenjin search:*)', 'Bash(tenjin read:*)']);
     expect(await readRawFile()).toEqual({
       install: {
         harness: ['claude'],
-        freeVerbsDeclined: ['Bash(tenjin search:*)', 'Bash(tenjin read:*)'],
+        grantDeclined: ['Bash(tenjin search:*)', 'Bash(tenjin read:*)'],
       },
     });
     // A later grant clears it back, through the same merge.
-    await persistFreeVerbsDeclined(dir, []);
+    await persistGrantDeclined(dir, []);
     expect(await readRawFile()).toEqual({
-      install: { harness: ['claude'], freeVerbsDeclined: [] },
+      install: { harness: ['claude'], grantDeclined: [] },
     });
   });
 
@@ -217,11 +217,11 @@ describe('runConfigList', () => {
       }),
     );
 
-    await persistFreeVerbsDeclined(dir, ['Bash(tenjin search:*)']);
+    await persistGrantDeclined(dir, ['Bash(tenjin search:*)']);
     expect(await readRawFile()).toEqual({
       install: {
         harness: ['codex'],
-        freeVerbsDeclined: ['Bash(tenjin search:*)'],
+        grantDeclined: ['Bash(tenjin search:*)'],
       },
       future: { kept: true },
     });
@@ -763,7 +763,7 @@ describe('publish.mode keeps the harness allowlist in step', () => {
 
   // The write carries the free tier too on a machine that never ran install, so
   // the question has to say so rather than name one line and write ten.
-  it('discloses the free-verb rules the same write carries', async () => {
+  it('discloses the command-grant rules the same write carries', async () => {
     let label = '';
     await runConfigSet({ key: 'publish.mode', value: 'full-auto' }, makeCtx(), {
       homeDir: home,
@@ -774,7 +774,7 @@ describe('publish.mode keeps the harness allowlist in step', () => {
         return true;
       },
     });
-    expect(label).toMatch(/Also adds the \d+ free-verb rule/);
+    expect(label).toMatch(/Also adds the \d+ command-grant rule/);
     expect(await allowOf()).toHaveLength(FREE_VERB_RULES.length + MODE_GATED_RULES.length);
   });
 
