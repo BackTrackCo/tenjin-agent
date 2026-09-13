@@ -2,7 +2,7 @@
 
 This is the single Bench-3 experiment PR (#355). `protocol.json` defines the
 population, deterministic pilot proof queue, four treatments, historical knowledge
-cutoffs, delivery analysis and completion metrics. The pilot is admitted; model results remain pending.
+cutoffs, delivery analysis and completion metrics. The pilot is paused after seven consumers in its third engineering cohort; model admission is disabled pending oracle-contract adjudication.
 All reusable preparation, containers, databases, task/knowledge assets, scheduling,
 verification, reporting and cleanup arrive from Bench-1 through #313.
 
@@ -42,8 +42,17 @@ reviewed. The model-visible environment passed 33 isolated source/adapter checks
 manifests pass all 16 distinct task/arm dry-run templates, including four producers.
 The pilot freezes 600 seconds per phase, Sol/low/requested-fast subscription mode,
 and serialized mutable-shelf execution. All eight immutable consumer/producer images are built and their identities verified.
-The admitted pilot is diagnostic; it cannot establish a representative team effect. Stale prior release policy is a declared risk,
+The pilot is diagnostic; it cannot establish a representative team effect. Stale prior release policy is a declared risk,
 not an approved correct answer for the later task.
+
+The latest engineering checkpoint separates generated-build rejection from behavior.
+After the shared Bench-1 repair, eight reference patches pass all 145 checks with
+build/cache/report outputs present. Retained repository-replay model patches still
+fail: control passes 6/9 checks, flat and seeded 7/9. The original records and costs
+remain in notes and are not pooled into a future controller cohort. Before further
+model admission, align the documented demand-honesty UI-oracle requirements with
+the supplied work order and validate any change against retained/reference patches
+without more model calls. The selected tasks and treatments remain fixed.
 
 Prepare each revision from a checkout containing its Git objects:
 
@@ -72,7 +81,7 @@ credential-free verification.
 A readiness pair requires real assertion failure before, every assertion passing
 after, and confirmed cleanup. Import, setup, timeout and cleanup errors are invalid
 proofs. Readiness checks spend no model tokens and do not establish savings.
-The ordinary shared runner will execute the admitted model experiments and report
+Once readmitted under a new freeze, the ordinary shared runner executes the model experiments and reports
 consumer-reuse metrics plus the complete producer/capture/consumer pipeline cost.
 Hook type, actor, shelf, pointer/body form and reviewed applicability stay separate.
 Actor-shaped test data does not establish live dispatch-reranker coverage.
