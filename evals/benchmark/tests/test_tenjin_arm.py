@@ -1489,7 +1489,8 @@ def test_the_producer_runs_first_is_verified_and_its_capture_reaches_the_consume
     produced = record["isolation"]["producer"]
     assert (produced["outcome"], produced["daemon"], produced["wal_live_between_phases"], produced["stop_reason"]) == ("pass", "restarted", False, "exit")
     assert produced["verifier"] == {"id": "fake_answer_file", "exit_code": 0}
-    assert produced["capture"]["pairings"] == {"open": 0, "unverified": 1, "verified": 0}
+    assert produced["capture"]["findings"] == 0
+    assert "pairings" not in produced["capture"]
     assert (produced["capture"]["turn_end_fires"], produced["capture"]["fires"]) == (1, 2)
     assert produced["usage_reconciliation"] == {"status": "matched"}
     assert produced["tokens"]["input_total"] > 0
@@ -1535,7 +1536,7 @@ def test_a_producer_that_captured_nothing_is_a_valid_natural_attempt(
     )
     records.validate(record)
     assert record["outcome"] == "pass"
-    assert record["isolation"]["producer"]["capture"]["pairings"] == {"open": 0, "unverified": 0, "verified": 0}
+    assert record["isolation"]["producer"]["capture"]["findings"] == 0
     assert record["delivery"].get("phase_fires") == {}
 
 
