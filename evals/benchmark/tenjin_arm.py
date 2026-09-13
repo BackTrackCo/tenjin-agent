@@ -82,7 +82,7 @@ HOOK_ARMS = ("prompt", "web-search", "web-fetch", "subagent", "failure", "publis
 PUBLIC_FALLBACK = ("on", "off")
 DEFAULT_PUBLIC_FALLBACK = "on"
 SEEDED: dict[str, Any] = {
-    "publish": {"mode": "review"},
+    "publish": {"mode": "review", "defaultPrice": "0"},
     "hooks": {arm: True for arm in HOOK_ARMS},
     "loop": {"idle_exit_min": 2},
 }
@@ -315,7 +315,9 @@ def check_keys(lesson: Lesson, task_id: str, probed: dict[str, dict[str, str | N
 
 
 def publish_argv(body: Path, keys: tuple[str, ...]) -> list[str]:
-    argv = [CLI, "publish", str(body), "--yes", "--json"]
+    # These are free team-reuse lessons. Never inherit a host's marketplace
+    # default or fixture frontmatter price and silently test paid pointers.
+    argv = [CLI, "publish", str(body), "--yes", "--json", "--price", "0"]
     for kind_key in keys:
         argv += ["--key", f"fingerprint={kind_key}"]
     return argv
@@ -856,7 +858,7 @@ def seeded_config(
         "loop": {**SEEDED["loop"], "port": port},
     }
     if mode == "producer":
-        seeded["publish"] = {"mode": "auto"}
+        seeded["publish"] = {"mode": "auto", "defaultPrice": "0"}
     return seeded
 
 
