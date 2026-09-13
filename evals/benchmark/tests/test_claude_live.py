@@ -1406,3 +1406,26 @@ def test_subscription_mode_refuses_api_auth_and_claude_fast_mode(request_for):
     generated = json.loads(claude_live.settings_path(item.roots).read_text())
     assert generated["fastMode"] is False
     assert generated["forceLoginMethod"] == "claudeai"
+
+
+def test_dry_run_validates_and_displays_the_distinct_producer_launch(run_dir):
+    original = hooks_smoke()
+    data = json.loads(json.dumps(original.data))
+    consumer = data['tasks'][0]
+    prior = json.loads(json.dumps(consumer))
+    prior.update(id='earlier-task', prompt='Implement the earlier independent optical task.')
+    consumer['producer_task'] = prior
+    data['tasks'] = [consumer]
+    arm = next(item for item in data['arms'] if item['id'] == 'tenjin_seeded')
+    arm.update(producer=True)
+    data['arms'] = [arm]
+    config = dataclasses.replace(original, data=data)
+    plan = cli.plan_trial(config, schedule.expand(config)[0], run_dir)
+    phase = plan['producer_phase']
+    assert phase['task_id'] == 'earlier-task'
+    assert prior['prompt'] in phase['argv']
+    assert phase['container']['image']['reference'] != plan['container']['image']['reference']
+    assert phase['verifier'] == prior['verifier']
+    rendered = cli.render_plan(config, [plan])
+    assert 'producer task=earlier-task' in rendered
+    assert prior['prompt'] in rendered

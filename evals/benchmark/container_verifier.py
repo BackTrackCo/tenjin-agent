@@ -19,7 +19,9 @@ def run(spec: verifier.VerifierSpec, repo: Path, run_dir: Path, image: str) -> v
     target = Path("/benchmark-verify")
     mounts = [container.Mount(repo, target, "ro")]
     if spec.kind == "historical_vitest":
-        config = Path(__file__).parent / "historical" / "vitest.config.mjs"
+        if spec.support is None:
+            return verifier.Verdict(spec.name, "invalid", None, "historical verification support is missing")
+        config = spec.support / "vitest.config.mjs"
         mounts.append(container.Mount(config, Path("/benchmark-historical.config.mjs"), "ro"))
         if spec.database:
             mounts.append(container.Mount(config.with_name("database.mjs"), Path("/benchmark-database.mjs"), "ro"))
