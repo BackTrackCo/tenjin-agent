@@ -374,6 +374,11 @@ def project(
             for record in sorted(accepted.values(), key=lambda item: item["position"])
         ],
     }
+    # Isolation-safe output can still be incomplete evidence. Apply the same
+    # whole-run gate to machine-readable flags as to the human overview.
+    if run_status(report) != PROVISIONAL_STATUS:
+        report["arms"] = {key: {**arm, "headline_eligible": False} for key, arm in report["arms"].items()}
+        report["comparisons"] = {key: {**row, "headline_eligible": False} for key, row in report["comparisons"].items()}
     guard(report)
     return report
 
@@ -421,6 +426,7 @@ def _decomposition(report: dict[str, Any], arm_id: str, baseline: str | None, co
 # its own length, so `check_summary` truncates and says it did.
 CHECK_SUMMARY_LIMIT = 65535
 METHODOLOGY = "https://github.com/BackTrackCo/tenjin-agent/blob/main/evals/benchmark/README.md"
+PROVISIONAL_STATUS = "PROVISIONAL MEASUREMENT — not a hardened product claim"
 
 
 def run_status(report: dict[str, Any]) -> str:
@@ -442,7 +448,7 @@ def run_status(report: dict[str, Any]) -> str:
         return "INCOMPLETE — invalid or excluded attempts; no headline"
     if any(arm.get("accounting") != "complete" for arm in report.get("arms", {}).values()):
         return "INCOMPLETE — token accounting is not complete; no headline"
-    return "PROVISIONAL MEASUREMENT — not a hardened product claim"
+    return PROVISIONAL_STATUS
 
 
 def overview(report: dict[str, Any], *, markdown: bool = False) -> str:
