@@ -15,6 +15,7 @@ import re
 import shutil
 import subprocess
 import tarfile
+import uuid
 from pathlib import Path
 
 from . import vitest_result, container, database_service, images, sha256_dir, sha256_file, sha256_json
@@ -43,6 +44,8 @@ def task_named(name: str, catalog: Path) -> dict:
             raise ReplayError("historical task requires full commit and tree IDs")
     if task["source_repository"] not in {"https://github.com/BackTrackCo/tenjin-agent.git", "https://github.com/BackTrackCo/tenjin.git"}:
         raise ReplayError("historical source repository is not allowlisted")
+    if any(re.fullmatch(r"[0-9a-f]{64}", task.get("source_hashes", {}).get(revision, "")) is None for revision in REVISION):
+        raise ReplayError("historical task requires catalog-pinned source hashes")
     if task["oracle"] != name + ".test.ts":
         raise ReplayError("oracle must be the task's code-owned file")
     return task
@@ -78,21 +81,27 @@ def prepare(repo: Path, task_id: str, revision: str, out: Path, *, catalog: Path
     if result.returncode:
         raise ReplayError("cannot archive historical commit")
     out.mkdir(parents=True)
-    source = out / "source"
-    unpack(result.stdout, source)
-    lock = source / "pnpm-lock.yaml"
-    if not lock.is_file() or sha256_file(lock) != task["lock_sha256"]:
-        raise ReplayError("historical dependency lock differs from admission evidence")
-    shutil.copyfile(catalog.parent / "oracles" / task["oracle"], out / "oracle.test.ts")
-    shutil.copyfile(ROOT / "vitest.config.mjs", out / "vitest.config.mjs")
-    shutil.copyfile(ROOT / "Dockerfile", out / "Dockerfile")
-    shutil.copyfile(ROOT / "database.mjs", out / "database.mjs")
-    receipt = {"schema": "bench1.historical-source.v1", "task": task_id, "revision": revision, "catalog_sha256": sha256_file(catalog), "task_sha256": sha256_json(task),
-               "commit": commit, "tree": tree.strip(), "source_hash": sha256_dir(source),
-               "lock_sha256": sha256_file(lock), "oracle_sha256": sha256_file(out / "oracle.test.ts"),
-               "omitted_roots": sorted(OMIT), "model_executed": False}
-    (out / "source-receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
-    return receipt
+    try:
+        source = out / "source"
+        unpack(result.stdout, source)
+        if sha256_dir(source) != task["source_hashes"][revision]:
+            raise ReplayError("historical source differs from the catalog-pinned tree content")
+        lock = source / "pnpm-lock.yaml"
+        if not lock.is_file() or sha256_file(lock) != task["lock_sha256"]:
+            raise ReplayError("historical dependency lock differs from admission evidence")
+        shutil.copyfile(catalog.parent / "oracles" / task["oracle"], out / "oracle.test.ts")
+        shutil.copyfile(ROOT / "vitest.config.mjs", out / "vitest.config.mjs")
+        shutil.copyfile(ROOT / "Dockerfile", out / "Dockerfile")
+        shutil.copyfile(ROOT / "database.mjs", out / "database.mjs")
+        receipt = {"schema": "bench1.historical-source.v1", "task": task_id, "revision": revision, "catalog_sha256": sha256_file(catalog), "task_sha256": sha256_json(task),
+                   "commit": commit, "tree": tree.strip(), "source_hash": sha256_dir(source),
+                   "lock_sha256": sha256_file(lock), "oracle_sha256": sha256_file(out / "oracle.test.ts"),
+                   "omitted_roots": sorted(OMIT), "model_executed": False}
+        (out / "source-receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
+        return receipt
+    except BaseException:
+        shutil.rmtree(out)
+        raise
 
 
 def build_args() -> dict[str, str]:
@@ -107,7 +116,10 @@ def validate_context(context: Path, *, catalog: Path) -> dict:
     revision = receipt["revision"]
     if revision not in REVISION or receipt["commit"] != task[f"{revision}_commit"] or receipt["tree"] != task["trees"][revision]:
         raise ReplayError("context does not name the catalog's historical source")
-    if sha256_dir(context / "source") != receipt["source_hash"] or sha256_file(context / "source" / "pnpm-lock.yaml") != task["lock_sha256"]:
+    source_root = context / "source"
+    if source_root.is_symlink() or not source_root.is_dir() or any(path.is_symlink() or not (path.is_file() or path.is_dir()) for path in source_root.rglob("*")):
+        raise ReplayError("historical source contains links or special files")
+    if receipt["source_hash"] != task["source_hashes"][revision] or sha256_dir(context / "source") != task["source_hashes"][revision] or sha256_file(context / "source" / "pnpm-lock.yaml") != task["lock_sha256"]:
         raise ReplayError("historical source or dependency lock changed after preparation")
     for source, staged in [(catalog.parent / "oracles" / task["oracle"], context / "oracle.test.ts"), (ROOT / "Dockerfile", context / "Dockerfile"), (ROOT / "vitest.config.mjs", context / "vitest.config.mjs"), (ROOT / "database.mjs", context / "database.mjs")]:
         if not source.is_file() or not staged.is_file() or sha256_file(source) != sha256_file(staged):
@@ -134,7 +146,7 @@ def verify(context: Path, run_dir: Path, image: str, *, catalog: Path) -> dict:
     key = api.context_hash(context=context, dockerfile_path=context / "Dockerfile", build_args=build_args(), platform=asyncio.run(api.platform()))
     if images.image_id(api.name("bench-historical", key)) != image:
         raise ReplayError("image does not match the prepared historical source and oracle")
-    identity = "replay-" + receipt["task"] + "-" + receipt["revision"] + "-" + image[7:19]
+    identity = "replay-" + receipt["task"] + "-" + receipt["revision"] + "-" + image[7:19] + "-" + uuid.uuid4().hex[:12]
     name = container.container_name(identity)
     project = container.record_project(run_dir, identity, name)
     recipe = container.Recipe(name=name, image=image, workdir=Path("/opt/task"),
