@@ -618,6 +618,14 @@ Verification restores immutable image dependencies and refuses source edits outs
 the declared contract. Every assertion must complete; skipped tests, contradictory
 counts, collection failures and broken cleanup are invalid measurements.
 
+Historical source admission and both staging steps share `historical_outputs.py`:
+root build bundles (`dist`, `.next`, `out`, `build`, Storybook), test reports/coverage,
+package-manager dependencies, and compiler/lint/format logs and caches are disposable.
+They never reach hidden execution. This fixed controller policy does not read the
+submitted `.gitignore`, does not exempt nested product source, and rejects fixtures
+containing reserved outputs before model admission. Original tests and configuration
+remain protected. The original model worktree retains generated outputs for diagnosis.
+
 Historical tasks can request a disposable PostgreSQL service. The trusted controller
 attaches a pinned pgvector image to the verifier's existing deny-all network namespace,
 listening only on loopback. It exposes no host port, Docker socket, persistent volume
