@@ -116,7 +116,7 @@ def test_hidden_verifier_replaces_model_tooling_and_classifies_assertions(histor
     result=verifier.run(spec,repo,base/'run',image='sha256:'+'ab'*32)
     assert result.outcome=='fail'
     assert ['ln','-s','/opt/fixture/node_modules','/tmp/historical-task/node_modules'] in seen
-    assert ['tar','-C','/benchmark-verify','--exclude=./node_modules','--exclude=./.pnpm-store','-cf','/tmp/historical-source.tar','.'] in seen
+    assert ['tar','-C','/benchmark-verify','--exclude=./node_modules','--exclude=./.pnpm-store','--exclude=./tsconfig.tsbuildinfo','-cf','/tmp/historical-source.tar','.'] in seen
     assert seen[0].egress.mode==container.NO_NETWORK and not seen[0].forward
     support_mount = seen[0].plan[1]
     assert support_mount.host.is_relative_to(base/'run')
@@ -136,6 +136,7 @@ def test_unrequested_source_or_tooling_edit_fails_contract(historical):
     assert task_assets.changed_outside_contract(spec,repo) is None
     cache = repo/'.pnpm-store/v11'; cache.mkdir(parents=True)
     (cache/'index.db').write_bytes(b'package-manager-generated cache')
+    (repo/'tsconfig.tsbuildinfo').write_text('compiler-generated cache')
     assert task_assets.changed_outside_contract(spec,repo) is None
     (repo/'unexpected.ts').write_text('shadow dependency')
     assert 'added file' in task_assets.changed_outside_contract(spec,repo)
