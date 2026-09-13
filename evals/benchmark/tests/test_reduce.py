@@ -551,3 +551,31 @@ def test_host_publication_requires_exact_consumer_piece_and_team_fire():
     del row["isolation"]["producer"]["publication"]
     got = reduce_module.producer_summary([row])
     assert got["published"] is None and got["consumer_deliveries"] is None
+
+
+def test_capture_reuse_curve_matches_completion_headline_with_unequal_tasks_and_failures() -> None:
+    def capture(key):
+        return (support.receipt("producer", "capture", key, 100, 0),)
+
+    accepted = support.accept(
+        support.reduction_record("large", "off", 0, 0, 1000),
+        support.reduction_record("small", "off", 0, 1, 100),
+        support.reduction_record("large", "on", 0, 2, 100, auxiliary=capture("a")),
+        support.reduction_record("small", "on", 0, 3, 200, auxiliary=capture("b")),
+        support.reduction_record("small", "on", 1, 4, 300, "fail", auxiliary=capture("c")),
+    )
+    comparison = reduce_module.reduce(accepted, [], baseline="off")["comparisons"]["on"]
+    curve = [point["token_ratio"] for point in comparison["amortized_capture_only_token_ratio"]]
+    # Baseline task mean is 550. Both small-task attempts remain charged to its
+    # one completion: task means at reuse 1/2/5/10 are 450/375/330/315.
+    assert curve == pytest.approx([450 / 550, 375 / 550, 330 / 550, 315 / 550])
+    assert curve[0] == comparison["headline"]
+
+
+def test_capture_reuse_curve_is_unavailable_without_paired_task_completions() -> None:
+    accepted = support.accept(
+        support.reduction_record("t1", "off", 0, 0, 100),
+        support.reduction_record("t1", "on", 0, 1, 50, "fail"),
+    )
+    comparison = reduce_module.reduce(accepted, [], baseline="off")["comparisons"]["on"]
+    assert all(point["token_ratio"] is None for point in comparison["amortized_capture_only_token_ratio"])

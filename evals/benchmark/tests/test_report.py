@@ -371,12 +371,12 @@ def test_the_slice_and_the_producer_reach_the_report_and_its_reading() -> None:
     lines = text.splitlines()
     headline = next(index for index, line in enumerate(lines) if line.startswith("  headline on: 0.688 (" + report.HEADLINE_LABEL + ")"))
     assert "headline eligible" in lines[headline]
-    assert lines[headline + 1].startswith("    reuse 2/5/10: 0.594/0.537/0.519")
+    assert lines[headline + 1].startswith("    per-completion reuse 2/5/10: 0.594/0.537/0.519")
     assert lines[headline + 2].startswith("    " + report.CAPTURE_FREE_LABEL + ": 0.500  interval")
     # The retrieval-only decomposition sits between the capture-free line
     # and the producer diagnostic, labelled where it is printed.
     assert "retrieval only, decomposition" in lines[headline + 3]
-    assert lines[headline + 4].startswith("    diagnostic, the producer's own work charged too, reuse 1/10: 1.688/0.619")
+    assert lines[headline + 4].startswith("    per-attempt diagnostic, producer work charged too, reuse 1/10: 1.688/0.619")
     assert report.CAPTURE_FREE_LABEL == "capture-free (future: capture on an operator-run model)"
     # A non-publishable run keeps the number and loses the claim, on the headline line.
     for stamped_record in accepted.values():
