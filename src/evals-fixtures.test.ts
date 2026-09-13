@@ -29,6 +29,8 @@ const read = (path: string): string => readFileSync(`${EVALS_DIR}${path}`, 'utf8
  * someone adds a fixture it guards less than it claims while staying green.
  */
 function walkFixtures(dir = EVALS_DIR, prefix = ''): string[] {
+  // Generated historical snapshots are checked against their own source revision.
+  if (prefix === 'benchmark/local/') return [];
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
     if (entry.isDirectory()) return walkFixtures(`${dir}${entry.name}/`, `${prefix}${entry.name}/`);
     return /\.(json|md)$/.test(entry.name) ? [`${prefix}${entry.name}`] : [];
@@ -357,6 +359,10 @@ describe('skill text follows the wire schema', () => {
 });
 
 describe('historical fixture scope', () => {
+  it('does not descend into generated historical snapshots', () => {
+    expect(walkFixtures('/not-a-directory/', 'benchmark/local/')).toEqual([]);
+  });
+
   it('exempts only version-pinned historical catalogs from current-CLI vocabulary', () => {
     const task = {
       before_commit: 'a'.repeat(40),
