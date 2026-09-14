@@ -994,6 +994,136 @@ def copy_template_data_dir(runner: Runner, dest: Path) -> str:
     return pf.read_text(encoding="utf-8").strip() if pf.is_file() else ""
 
 
+class GateStop(Exception):
+    """Raised to stop a run at a review gate. Carries the path a human reads."""
+
+    def __init__(self, review_path: Path, run_dir: Path) -> None:
+        super().__init__(str(review_path))
+        self.review_path = review_path
+        self.run_dir = run_dir
+
+
+def fetch_note(
+    runner: Runner, args: argparse.Namespace, data_dir: Path, passphrase: str, url: str
+) -> dict[str, Any]:
+    """One published note, body included, off the bench shelf.
+
+    `read` is the free-delivery verb, and bench notes are published at price 0,
+    so this pays nothing. A failure is reported in the review rather than raised:
+    the point of the gate is to show a human what happened, and "the shelf would
+    not give the body back" is itself something worth seeing.
+    """
+    res = runner.run(
+        [*tenjin_argv(args.tenjin_bin), "read", url, "--json", "--print-body"],
+        env_overlay=tenjin_env(data_dir, passphrase),
+        timeout=CLI_TIMEOUT_S,
+        label="tenjin.read",
+    )
+    data = (cli_json(res) or {}).get("data") or {}
+    return {
+        "url": url,
+        "exit_code": res["exit_code"],
+        "title": data.get("title"),
+        "resource_id": data.get("resourceId"),
+        "price": data.get("price"),
+        "body": data.get("bodyMd") or data.get("body"),
+        "error": None if res["exit_code"] == 0 else tail(res["stderr"] or res["stdout"], 600),
+    }
+
+
+def write_capture_review(
+    runner: Runner,
+    args: argparse.Namespace,
+    record: dict[str, Any],
+    session_dir: Path,
+    data_dir: Path,
+    passphrase: str,
+) -> Path:
+    """What A captured, in full, for a human to read before B is paid for.
+
+    The whole body, not an excerpt: the question a reviewer is answering is
+    whether this note is worth injecting into the next agent, and an excerpt
+    cannot answer it.
+    """
+    published = [
+        p for p in (record.get("published") or []) if str(p.get("key", "")).startswith("published:")
+    ]
+    notes = [fetch_note(runner, args, data_dir, passphrase, p["url"]) for p in published if p.get("url")]
+
+    cap = record.get("capture") or {}
+    funnel_counts = ((record.get("funnel") or {}).get("counts")) or {}
+
+    lines: list[str] = []
+    lines.append(f"# Capture review — {record['pair_id']} / producer / r{record['repeat']}")
+    lines.append("")
+    lines.append(f"- run: `{record['run_id']}`")
+    lines.append(f"- base commit: `{record['base_commit']}` ({record['repo']})")
+    lines.append(f"- producer session: `{(record.get('agent') or {}).get('session_id')}`")
+    lines.append(f"- capture turn ran: {cap.get('ran', False)}")
+    if cap.get("ran"):
+        lines.append(
+            f"- capture turn: {cap.get('num_turns')} turn(s), "
+            f"{(cap.get('tokens') or {}).get('total', 0)} tokens, ${cap.get('cost_usd') or 0}"
+        )
+        lines.append(f"- capture ask came from: {cap.get('ask_source')}")
+    elif cap:
+        lines.append(f"- capture turn skipped: {cap.get('why')}")
+    lines.append(f"- oracle: {(record.get('oracle') or {}).get('passed')}")
+    lines.append(f"- stop-arm fires: {funnel_counts.get('fires_by_arm', {}).get('stop', 0)}")
+    lines.append(f"- notes published: **{len(notes)}**")
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+
+    if not notes:
+        lines.append("## Nothing was published")
+        lines.append("")
+        lines.append(
+            "The producer finished without putting anything on the shelf. The consumer would "
+            "search an empty shelf, so this repeat measures nothing about reuse. Consider "
+            "re-running the producer rather than resuming."
+        )
+        lines.append("")
+    for i, note in enumerate(notes, 1):
+        lines.append(f"## Note {i}: {note.get('title') or '(no title returned)'}")
+        lines.append("")
+        lines.append(f"- url: {note['url']}")
+        if note.get("resource_id"):
+            lines.append(f"- id: `{note['resource_id']}`")
+        if note.get("price") is not None:
+            lines.append(f"- price: {note['price']}")
+        lines.append("")
+        if note.get("error"):
+            lines.append(f"> Could not read the body back: {note['error']}")
+        else:
+            lines.append("```markdown")
+            lines.append((note.get("body") or "(empty body)").rstrip())
+            lines.append("```")
+        lines.append("")
+
+    lines.append("---")
+    lines.append("")
+    lines.append("Resume once you have read this:")
+    lines.append("")
+    lines.append(f"```\npython3 evals/bench-lite/run.py resume --out {record['paths']['session_dir'].split('/sessions/')[0]}\n```")
+    lines.append("")
+    lines.append(
+        "To drop this repeat instead, delete its producer line from `records.jsonl` before "
+        "resuming, or retract the note with `run.py cleanup` and re-run the pair."
+    )
+    lines.append("")
+
+    text = "\n".join(lines)
+    path = session_dir / "capture-review.md"
+    if not runner.dry_run:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(redact(text), encoding="utf-8")
+    # The same review goes to the run log, so a terminal that scrolled past it
+    # still holds the evidence.
+    runner.log("\n" + redact(text))
+    return path
+
+
 def install_tenjin_hooks(
     runner: Runner, args: argparse.Namespace, worktree: Path, data_dir: Path, passphrase: str
 ) -> dict[str, Any]:
@@ -1723,6 +1853,25 @@ def run_session(
                 record["funnel"] = funnel
                 record["published"] = funnel.get("published", [])
                 write_json(session_dir / "funnel.json", funnel)
+
+                # THE REVIEW GATE. Written here because this is the first point
+                # where the published list is known, and it is the last point
+                # before the consumer would be paid for.
+                if args.gate_after_capture and role == "producer":
+                    review = write_capture_review(
+                        runner, args, record, session_dir, data_dir, passphrase
+                    )
+                    record["gate"] = {
+                        "review": str(review),
+                        "stop": True,
+                        "notes": len(
+                            [
+                                p
+                                for p in record.get("published") or []
+                                if str(p.get("key", "")).startswith("published:")
+                            ]
+                        ),
+                    }
             else:
                 runner.log(f"# read ledger {data_dir}/loop.db (mode=ro&immutable=1)")
     finally:
@@ -2221,6 +2370,62 @@ def fmt_counter(counter: dict[str, int] | None) -> str:
 # --------------------------------------------------------------------------
 
 
+def load_prior_records(run_dir: Path) -> list[dict[str, Any]]:
+    path = run_dir / "records.jsonl"
+    if not path.is_file():
+        return []
+    rows: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return rows
+
+
+def session_key(r: dict[str, Any]) -> tuple[str, str, int, str]:
+    return (r["pair_id"], r["condition"], int(r["repeat"]), r["role"])
+
+
+def merge_manifest_args(args: argparse.Namespace, run_dir: Path) -> argparse.Namespace:
+    """Rebuild a resumed run's settings from the manifest it wrote.
+
+    A resume must not silently change the measurement, so the pairs file, model,
+    conditions, repeats and caps all come back from disk. Only the flags that
+    govern THIS invocation are allowed to differ.
+    """
+    manifest_path = run_dir / "manifest.json"
+    if not manifest_path.is_file():
+        die(f"no manifest at {manifest_path}; is {run_dir} a bench-lite run dir?")
+    m = json.loads(manifest_path.read_text(encoding="utf-8"))
+    for key in (
+        "model",
+        "repeats",
+        "cap_s",
+        "capture_cap_s",
+        "claude_bin",
+        "tenjin_bin",
+        "permission_mode",
+        "workers",
+        "capture_turn",
+    ):
+        if key in m and m[key] is not None:
+            setattr(args, key, m[key])
+    args.pairs = m["pairs_file"]
+    args.conditions = ",".join(m["conditions"])
+    args.sessions = ",".join(m.get("sessions") or list(ROLES))
+    args.only = m.get("pairs")
+    args.out = str(run_dir)
+    # A resumed run keeps gating unless the operator turns it off, so a multi-pair
+    # block stops for review at each producer rather than only the first.
+    if args.gate_after_capture is None:
+        args.gate_after_capture = bool(m.get("gate_after_capture"))
+    return args
+
+
 def preflight(runner: Runner, args: argparse.Namespace, run_dir: Path) -> dict[str, Any]:
     """One tiny real agent call with the exact flags the sessions use. It proves
     three things at once: the binary is the real one, the login still works under
@@ -2342,6 +2547,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         "cap_s": args.cap_s,
         "capture_turn": args.capture_turn,
         "capture_cap_s": args.capture_cap_s,
+        "gate_after_capture": bool(args.gate_after_capture),
+        "sessions": sessions,
         "workers": args.workers,
         "dry_run": args.dry_run,
     }
@@ -2356,7 +2563,12 @@ def cmd_run(args: argparse.Namespace) -> int:
         if not pf["ok"]:
             die("preflight failed; fix the agent invocation before spending a run")
 
-    records: list[dict[str, Any]] = []
+    prior = load_prior_records(run_dir) if args.resume else []
+    done = {session_key(r) for r in prior}
+    if args.resume:
+        out(f"  resuming   : {len(prior)} session(s) already recorded, skipping those")
+
+    records: list[dict[str, Any]] = list(prior)
     records_path = run_dir / "records.jsonl"
     write_lock = threading.Lock()
 
@@ -2393,6 +2605,14 @@ def cmd_run(args: argparse.Namespace) -> int:
         invalid: str | None = None
 
         for role in roles_in_play:
+            key = (pair["id"], cond, rep, role)
+            if key in done:
+                previous = next((r for r in prior if session_key(r) == key), None)
+                if previous is not None and role == "producer":
+                    invalid = previous.get("invalid")
+                out(f"\n=== {pair['id']}/{cond}/r{rep}/{role} === already recorded, skipped")
+                continue
+
             if role == "consumer" and invalid is not None and cond == "tenjin":
                 skipped = {
                     "run_id": run_id,
@@ -2426,6 +2646,9 @@ def cmd_run(args: argparse.Namespace) -> int:
             elif invalid is not None:
                 record["invalid"] = invalid
             emit(record)
+            gate = record.get("gate")
+            if gate and gate.get("stop"):
+                raise GateStop(Path(gate["review"]), run_dir)
 
     # Only `off` may be parallel, and the unit of parallelism is the GROUP, so a
     # producer and its consumer stay in order inside one worker. In `tenjin`, B
@@ -2434,12 +2657,16 @@ def cmd_run(args: argparse.Namespace) -> int:
     parallel = [g for g in groups if g[1] == "off"] if args.workers > 1 else []
     serial = [g for g in groups if g not in parallel]
 
-    if parallel:
-        out(f"running {len(parallel)} `off` group(s) with {args.workers} worker(s)")
-        with ThreadPoolExecutor(max_workers=args.workers) as pool:
-            list(pool.map(run_group, parallel))
-    for group in serial:
-        run_group(group)
+    gate_stop: GateStop | None = None
+    try:
+        if parallel:
+            out(f"running {len(parallel)} `off` group(s) with {args.workers} worker(s)")
+            with ThreadPoolExecutor(max_workers=args.workers) as pool:
+                list(pool.map(run_group, parallel))
+        for group in serial:
+            run_group(group)
+    except GateStop as stop:
+        gate_stop = stop
 
     if args.dry_run:
         out("\ndry-run complete: no agent was called, nothing was installed, nothing published.")
@@ -2449,9 +2676,27 @@ def cmd_run(args: argparse.Namespace) -> int:
     (run_dir / "report.md").write_text(report, encoding="utf-8")
     manifest["finished_at"] = now_iso()
     manifest["sessions_recorded"] = len(records)
+    manifest["stopped_at_gate"] = bool(gate_stop)
     write_json(run_dir / "manifest.json", manifest)
     out(f"\nrecords: {records_path}")
     out(f"report : {run_dir / 'report.md'}")
+
+    if gate_stop is not None:
+        out("")
+        out("=" * 72)
+        out("STOPPED AT THE CAPTURE REVIEW GATE — the consumer has NOT been run.")
+        out("")
+        out(f"  Read this first : {gate_stop.review_path}")
+        out("                    (the same text is in commands.log)")
+        out("")
+        out("  Then continue   : python3 evals/bench-lite/run.py resume --out "
+            f"{gate_stop.run_dir}")
+        out("")
+        out("  The published note(s) are left on the bench shelf. To drop this repeat")
+        out("  instead, retract them with `run.py cleanup` and re-run the pair.")
+        out("=" * 72)
+        return 3
+
     failures = [r for r in records if r.get("errors")]
     return 1 if failures else 0
 
@@ -2459,6 +2704,15 @@ def cmd_run(args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------------
 # The `cleanup` subcommand
 # --------------------------------------------------------------------------
+
+
+def cmd_resume(args: argparse.Namespace) -> int:
+    """Continue a run from its own records. The measurement's settings come back
+    from the manifest, so resuming cannot quietly change them."""
+    run_dir = Path(args.out).resolve()
+    merge_manifest_args(args, run_dir)
+    out(f"resuming {run_dir}")
+    return cmd_run(args)
 
 
 def cmd_cleanup(args: argparse.Namespace) -> int:
@@ -2601,6 +2855,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="skip the producer's follow-up capture turn in the tenjin condition",
     )
     run_p.add_argument(
+        "--gate-after-capture",
+        action="store_true",
+        default=None,
+        help="in the tenjin condition, stop after each producer's capture turn (exit 3) and "
+        "write a capture-review.md for a human to read before the consumer is spent; "
+        "continue with `resume`",
+    )
+    run_p.add_argument(
         "--capture-cap-s",
         type=int,
         default=900,
@@ -2608,7 +2870,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_p.add_argument("--no-preflight", dest="preflight", action="store_false",
                        help="skip the one-call sandbox/auth/JSON check")
-    run_p.set_defaults(func=cmd_run, preflight=True, capture_turn=True)
+    run_p.set_defaults(func=cmd_run, preflight=True, capture_turn=True, resume=False)
+
+    res_p = sub.add_parser(
+        "resume",
+        help="continue a run that stopped at a capture review gate, or was interrupted",
+    )
+    common(res_p)
+    res_p.add_argument("--out", required=True, help="the run directory to continue")
+    res_p.add_argument(
+        "--no-gate",
+        dest="gate_after_capture",
+        action="store_false",
+        default=None,
+        help="run the rest without stopping at further review gates",
+    )
+    res_p.add_argument("--workers", type=int, default=1)
+    res_p.add_argument("--keep-worktrees", action="store_true")
+    res_p.add_argument("--skip-install", action="store_true")
+    res_p.add_argument("--skip-oracle", action="store_true")
+    res_p.add_argument("--max-budget-usd", default=None)
+    res_p.set_defaults(func=cmd_resume, preflight=False, resume=True)
 
     prep_p = sub.add_parser("prepare", help="build the template bench data dir and verify it")
     common(prep_p)
@@ -2633,7 +2915,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str]) -> int:
     # `run` is the default verb, so the documented form works without it.
-    if argv and argv[0] not in {"run", "prepare", "cleanup", "-h", "--help"}:
+    if argv and argv[0] not in {"run", "prepare", "cleanup", "resume", "-h", "--help"}:
         argv = ["run"] + argv
     parser = build_parser()
     args = parser.parse_args(argv)

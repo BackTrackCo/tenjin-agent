@@ -155,6 +155,36 @@ Two different mechanisms carry the choice into a session, and both matter:
 Each session record and the report name the resolved path and the version it reports, and the
 report warns if sessions did not all run against the same CLI.
 
+## The capture review gate
+
+`--gate-after-capture` stops the run after each `tenjin` producer's capture turn, before the
+consumer is paid for, so a human can see what A actually put on the shelf. It writes
+`sessions/<pair>/tenjin/r<n>/producer/capture-review.md` and prints the same text to
+`commands.log`, then exits **3**.
+
+The review carries each published note's title, url, id and **full body**, fetched back off the
+bench shelf with `tenjin read --print-body` (free, since bench notes are priced 0), plus the
+capture turn's cost and turns, the stop-arm fire count and the oracle result. The whole body,
+not an excerpt: the question a reviewer is answering is whether this note is worth injecting
+into the next agent, and an excerpt cannot answer it. A producer that published nothing gets a
+section saying so, because "the consumer would search an empty shelf" is the most important
+thing the gate can tell you.
+
+Continue with:
+
+```bash
+python3 evals/bench-lite/run.py resume --out runs/<id>
+```
+
+`resume` rebuilds the measurement's settings from the run's own `manifest.json` — pairs file,
+model, conditions, repeats, caps — so continuing cannot quietly change what is being measured.
+It skips every session already in `records.jsonl` and picks up where the gate stopped, leaving
+the published notes in place. Gating stays on by default so a multi-pair block stops at each
+producer; `resume --no-gate` runs the rest straight through.
+
+`resume` also works on a run interrupted for any other reason, since "skip what is already
+recorded" is not specific to the gate.
+
 ## Usage is summed from the transcripts, not the JSON
 
 `--output-format json` reports the **main agent only**. Smoke-3's tenjin consumer delegated once
@@ -351,6 +381,7 @@ section naming every capped or errored session.
 | `--permission-mode`                                     | `bypassPermissions`                | the agent must edit files and run pnpm/vitest with nobody to answer a prompt. It is confined by `cwd` (the worktree), not by the permission mode                                                         |
 | `--max-budget-usd`                                      | unset                              | per-session API spend cap, passed straight through                                                                                                                                                       |
 | `--skip-install` / `--skip-oracle` / `--keep-worktrees` | off                                | debugging                                                                                                                                                                                                |
+| `--gate-after-capture`                                  | off                                | stop after each tenjin producer's capture turn (exit 3) for a human review; continue with `resume`                                                                                                       |
 | `--no-capture-turn`                                     | capture turn on                    | skip the `tenjin` producer's follow-up publish turn                                                                                                                                                      |
 | `--capture-cap-s`                                       | `900`                              | wall-clock cap for that follow-up turn                                                                                                                                                                   |
 | `--no-preflight`                                        | preflight on                       | the preflight is one tiny real agent call with the exact session flags; it proves the binary, the login under `--setting-sources project`, and the JSON parse before a run spends anything               |
