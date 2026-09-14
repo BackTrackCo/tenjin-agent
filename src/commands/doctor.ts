@@ -34,7 +34,7 @@ import { fetchJson, previewBypassHeaders, type FetchJsonFailure } from '../lib/h
 import { loadRawConfig, resolveGrantDeclined, resolveSettings } from '../lib/config';
 import { loadProjectConfig } from '../lib/settings';
 import { searchHeaders } from '../lib/search-auth';
-import { tryOriginOf, trimSlash } from '../lib/url';
+import { trimSlash } from '../lib/url';
 import { configPath, dataDir as resolveDataDir, loopDbPath } from '../lib/paths';
 import { toMoney } from '../lib/money';
 import { walletFileExists } from '../lib/wallet/store';
@@ -54,7 +54,7 @@ import type { RegisteredHooks } from '../lib/harness-hooks';
 import { ADAPTERS } from '../adapters/registry';
 import { existsSync } from 'node:fs';
 import { health, missingRoutes, readPid } from '../hooks/shim';
-import type { EffectiveSettings, PartialConfig, PublishMode } from '../lib/config';
+import type { PartialConfig, PublishMode } from '../lib/config';
 import type { ErrorCode } from '../schemas';
 import type { Io } from '../lib/output';
 import type {

@@ -12,7 +12,7 @@ import {
   type PermissionsResult,
 } from '../lib/harness-permissions';
 import { modeGatedPointer } from '../lib/permissions';
-import { PRODUCTION_ORIGIN, isSameDeployment } from '../lib/production-origin';
+import { PRODUCTION_ORIGIN } from '../lib/production-origin';
 import {
   CONFIG_KEYS,
   HOOKS_CONFIG_KEYS,

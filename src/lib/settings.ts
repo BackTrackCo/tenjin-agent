@@ -16,8 +16,6 @@ import {
 } from './config';
 import type {
   AckServerWarnings,
-  EffectiveSettings,
-  PartialConfig,
   Provenance,
   ProjectPublishLayer,
   PublicFallback,

@@ -356,7 +356,7 @@ function timeoutFailure(url: string, timeoutMs: number): FetchJsonFailure {
  * still returns the discriminated FetchJsonFailure so callers map it uniformly.
  */
 export interface HttpRequestOptions {
-  method?: 'GET' | 'POST' | 'PUT' | 'DELETE';
+  method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
   timeoutMs: number;
   headers?: Record<string, string>;
   /** INTERNAL; see `FetchJsonOptions.callerUserAgent`. */
@@ -425,7 +425,11 @@ function prepareRequest(url: string, opts: HttpRequestOptions): PreparedRequest 
       body = JSON.stringify(opts.jsonBody);
       merged.set('content-type', 'application/json');
     }
-    const wantsAccept = opts.method === 'POST' || opts.method === 'PUT' || body !== undefined;
+    const wantsAccept =
+      opts.method === 'POST' ||
+      opts.method === 'PUT' ||
+      opts.method === 'PATCH' ||
+      body !== undefined;
     if (wantsAccept && !merged.has('accept')) merged.set('accept', 'application/json');
     // An `accept`/`content-type` set here wins the slot regardless of how a
     // caller cased its own copy.

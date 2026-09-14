@@ -7,17 +7,7 @@ import {
 } from '../../lib/agent-api';
 import { httpRequest } from '../../lib/http';
 import { trimSlash } from '../../lib/url';
-import type {
-  Answer,
-  Deps,
-  KernelConfig,
-  LegResult,
-  LegStatus,
-  Question,
-  Shelf,
-  Leg,
-  Trigger,
-} from '../types';
+import type { Answer, KernelConfig, LegResult, LegStatus, Shelf, Leg, Trigger } from '../types';
 
 /**
  * ONE QUESTION IS ONE HTTP REQUEST (00-principles.md, "Do not double count").
