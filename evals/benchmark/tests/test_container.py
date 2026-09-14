@@ -161,6 +161,59 @@ def test_a_recipe_states_the_whole_container_and_carries_no_credential_value(tmp
     assert [mount["mode"] for mount in plan["mounts"]] == ["rw"] * 5
 
 
+def test_every_recipe_turns_off_pnpms_auto_repair_without_naming_it(tmp_path: Path) -> None:
+    # No caller asks for this: a producer, a consumer, the hidden verifier and
+    # the historical replay all run the image's `pnpm exec`, and an auto-install
+    # there purges the staged tree the attempt is measured on.
+    plan = recipe(tmp_path)
+    assert container.PNPM_VERIFY_DEPS not in plan.environment
+    assert plan.container_env()[container.PNPM_VERIFY_DEPS] == "false"
+    # The recorded plan is what the container got, not what the caller passed.
+    assert plan.to_json()["env"][container.PNPM_VERIFY_DEPS] == "false"
+    assert plan.container_env()["HOME"] == plan.environment["HOME"]
+
+
+def test_a_recipe_that_names_a_baseline_variable_keeps_its_own_value(tmp_path: Path) -> None:
+    # The baseline is a default for callers that say nothing, not a ceiling.
+    plan = recipe(tmp_path, environment={container.PNPM_VERIFY_DEPS: "install"})
+    assert plan.container_env()[container.PNPM_VERIFY_DEPS] == "install"
+
+
+def test_the_environment_a_container_comes_up_with_reaches_the_compose_file(tmp_path: Path, monkeypatch) -> None:
+    # End to end for the trial environment: what `container_env` says has to be
+    # what Harbor writes for the `main` service, or nothing in the container
+    # sees it. Harbor is faked, per the no-import rule this file's first case pins.
+    class Environment:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        async def start(self, force_build: bool = False) -> None:
+            pass
+
+        async def stop(self, delete: bool = False) -> None:
+            pass
+
+    class Paths:
+        def __init__(self, trial_dir: Path) -> None:
+            self.trial_dir = trial_dir
+
+        def mkdir(self) -> None:
+            self.trial_dir.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(container, "remove_project", lambda project, docker=None: True)
+    monkeypatch.setattr(container, "harbor", lambda: container.Api(
+        DockerEnvironment=Environment, EnvironmentConfig=lambda **_: None,
+        NetworkMode=type("Modes", (), {"NO_NETWORK": "none"}), NetworkPolicy=lambda **_: None,
+        TrialPaths=Paths, version="0.22.0"))
+
+    plan = recipe(tmp_path, egress=container.no_network())
+    with container.Container(recipe=plan, ledger=None):
+        written = json.loads((plan.environment_dir / container.ENV_OVERRIDE).read_text(encoding="utf-8"))
+    service = written["services"][container.MAIN_SERVICE]["environment"]
+    assert service[container.PNPM_VERIFY_DEPS] == "false"
+    assert service == {key: value for key, value in sorted(plan.container_env().items())}
+
+
 def test_the_credential_is_read_out_of_this_process_and_only_when_it_is_set(tmp_path: Path) -> None:
     plan = recipe(tmp_path, forward=("CLAUDE_CODE_OAUTH_TOKEN",))
     assert container.forwarded(plan, {"CLAUDE_CODE_OAUTH_TOKEN": "sk-value"}) == {"CLAUDE_CODE_OAUTH_TOKEN": "sk-value"}

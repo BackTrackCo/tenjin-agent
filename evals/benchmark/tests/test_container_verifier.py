@@ -59,6 +59,9 @@ def test_hidden_source_uses_only_pinned_image_readonly_copy_and_no_network(repo,
     assert recipe.forward == () and not recipe.daemon
     assert recipe.plan == [container.Mount(repo.resolve(), Path("/benchmark-verify"), "ro")]
     assert recipe.environment == {"HOME": "/tmp", "BENCH2_DAEMON": "", "BENCH2_OUTPUT": "/tmp/benchmark-verifier"}
+    # The verifier names three variables; pnpm's auto-repair switch comes from
+    # the shared runtime, and it has to, because this command is `pnpm exec`.
+    assert recipe.container_env()[container.PNPM_VERIFY_DEPS] == "false"
     assert seen[1][0] == ["node", "/benchmark-verify/hidden-tests/actor.test.mjs"]
     assert seen[1][1]["timeout_s"] == spec.timeout_s
     assert "closed" in seen

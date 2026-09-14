@@ -32,7 +32,7 @@ def test_codex_plan_has_only_subscription_auth_and_generated_configuration(tmp_p
     assert result.argv[:3] == ["codex", "exec", "--json"]
     assert result.recipe.forward == ()
     assert "OPENAI_API_KEY" not in result.recipe.environment
-    assert result.recipe.environment["PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN"] == "false"
+    assert result.recipe.container_env()["PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN"] == "false"
     config = (item.roots.profile / "config.toml").read_text()
     assert 'model = "gpt-5.6-sol"' in config
     assert 'forced_login_method = "chatgpt"' in config

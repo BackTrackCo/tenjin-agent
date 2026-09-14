@@ -124,7 +124,9 @@ INHERITED = ("LANG",)
 # its own variables; it does not reach these through `settings.env`.
 RESERVED_ENV_PREFIXES = ("ANTHROPIC_", "AWS_", "CLAUDE_", "COREPACK_", "DYLD_", "GITHUB_", "LD_", "NODE_", "TENJIN_")
 RESERVED_ENV_NAMES = frozenset({"HOME", "PATH", "TERM", "LANG", "SHELL", "PYTHONPATH"})
-PNPM_VERIFY_DEPS = "PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN"
+# The shared runtime sets this for every container (`container.BASELINE_ENV`);
+# named here so an arm cannot take it back through `settings.env`.
+PNPM_VERIFY_DEPS = container.PNPM_VERIFY_DEPS
 # Where Harbor's own trial directory goes: under the attempt's base, beside the
 # roots, so it is thrown away with them. `environment` is the directory Harbor
 # resolves for `--project-directory`; with a prebuilt image nothing in it is
@@ -646,11 +648,9 @@ def container_environment(
     # run never wanted.
     env["DISABLE_AUTOUPDATER"] = "1"
     env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
-    # Dependencies already belong to the pinned image. pnpm 11 otherwise
-    # auto-installs before run/exec when relocated workspace metadata differs,
-    # potentially purging the staged tree before blocked registry requests.
-    # Use uppercase: this release treats the lowercase alias as a raw string.
-    env[PNPM_VERIFY_DEPS] = "false"
+    # `PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN` is deliberately absent: it is the
+    # shared runtime's (`container.BASELINE_ENV`), so the verifier and the
+    # historical replay get it as well and no executor can drift from it.
     for name in INHERITED:
         value = parent.get(name)
         if value:

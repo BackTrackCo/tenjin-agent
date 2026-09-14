@@ -715,13 +715,16 @@ synthetic database for each checkout, and applies that checkout's migration file
 Missing database support is an error; integration tests cannot silently skip.
 Neither the hidden oracle nor its configuration is part of these model-visible files.
 
-Both native runners set `PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false` so normal
-`pnpm exec` and `pnpm run` use the pinned image's staged dependencies. pnpm11's
-default automatic repair treats the relocated workspace metadata as outdated and
-can purge that tree before attempting a blocked registry install. The uppercase
-setting is owned by the runner; host and arm settings cannot replace it. Native
-qualification must exercise pnpm in the relocated trial layout, including the
-ordinary command documented above.
+Every container the harness starts sets `PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false`
+(`container.BASELINE_ENV`), so normal `pnpm exec` and `pnpm run` use the pinned
+image's staged dependencies. pnpm11's default automatic repair treats the
+relocated workspace metadata as outdated and can purge that tree before
+attempting a blocked registry install. The baseline covers the producer and
+consumer sessions, the hidden verifier and the historical replay alike, because
+all of them run the image's `pnpm exec vitest`. The uppercase setting is owned by
+the shared runtime; host and arm settings cannot replace it. Native qualification
+must exercise pnpm in the relocated trial layout, including the ordinary command
+documented above.
 
 The model session retains its normal subscription authentication and provider/shelf
 network allowlist. Its synthetic PostgreSQL service shares only the task's loopback,

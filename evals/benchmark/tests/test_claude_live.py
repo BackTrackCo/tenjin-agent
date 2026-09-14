@@ -704,7 +704,6 @@ def test_the_container_gets_the_allowlist_and_the_trials_own_roots(container_env
         "DISABLE_AUTOUPDATER",
         "HOME",
         "LANG",
-        "PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN",
         "TENJIN_DATA_DIR",
         "TENJIN_NO_UPDATE_CHECK",
         "TENJIN_PUBLISH_MODE",
@@ -715,7 +714,9 @@ def test_the_container_gets_the_allowlist_and_the_trials_own_roots(container_env
     assert env["TENJIN_NO_UPDATE_CHECK"] == "1"
     assert env["DISABLE_AUTOUPDATER"] == "1"
     assert env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
-    assert env[claude_live.PNPM_VERIFY_DEPS] == "false"
+    # pnpm's auto-repair switch is not here: it is the shared runtime's, so the
+    # verifier and the historical replay get it too. `test_container` holds it.
+    assert claude_live.PNPM_VERIFY_DEPS not in env
     assert "pnpm_config_verify_deps_before_run" not in env
     assert env["HOME"] == str(roots.home)
     assert env["TENJIN_DATA_DIR"] == str(roots.data_dir)

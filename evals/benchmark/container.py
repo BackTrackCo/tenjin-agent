@@ -48,6 +48,18 @@ TRIAL_PREFIX = "bench2-"
 MOUNT_MARKER = ".bench2-mount"
 MOUNT_TIMEOUT_S = 60.0
 OUTPUT_VAR = "BENCH2_OUTPUT"
+# pnpm 11 verifies the workspace before every `run` and `exec` and auto-installs
+# when relocated metadata disagrees. Inside a trial that repair is never wanted:
+# the tree is the image's, installed at build time with a network the trial no
+# longer has, so the repair either fails the command or purges the staged tree
+# the attempt is measured on. Measured in the bench-lite pilot: it ran in 15 of
+# 16 consumer sessions. It belongs to every container this module starts rather
+# than to one executor, because the hidden verifier and the historical replay
+# run the image's `pnpm exec vitest` too. Uppercase, because this pnpm reads the
+# lowercase alias as a raw string. A recipe still names its environment last, so
+# a caller that means something else stays in charge.
+PNPM_VERIFY_DEPS = "PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN"
+BASELINE_ENV: dict[str, str] = {PNPM_VERIFY_DEPS: "false"}
 # A docker object name: what `--name` accepts, and what a trial id already is.
 NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 # Harbor names the compose project after the session id and the container
@@ -252,6 +264,14 @@ class Recipe:
     # time, which is the last moment it exists in this package.
     forward: tuple[str, ...] = ()
 
+    def container_env(self) -> dict[str, str]:
+        """What the container actually comes up with: the runtime's baseline, then this recipe's own.
+
+        One function, used by both the compose override and the recorded plan,
+        so the record can never name an environment the trial did not get.
+        """
+        return {**BASELINE_ENV, **self.environment}
+
     def to_json(self) -> dict[str, Any]:
         return {
             "container": self.name,
@@ -259,7 +279,7 @@ class Recipe:
             "image": self.image,
             "workdir": str(self.workdir),
             "mounts": [mount.to_json() for mount in self.plan],
-            "env": dict(self.environment),
+            "env": self.container_env(),
             "forward": list(self.forward),
             "daemon": self.daemon,
             "egress": self.egress.to_json(),
@@ -294,7 +314,7 @@ class Container:
         self.environment_dir.mkdir(parents=True, exist_ok=True)
         paths = api.TrialPaths(trial_dir=self.recipe.trial_dir)
         paths.mkdir()
-        override = write_environment_override(self.environment_dir / ENV_OVERRIDE, self.recipe.environment)
+        override = write_environment_override(self.environment_dir / ENV_OVERRIDE, self.recipe.container_env())
         self._loop = asyncio.new_event_loop()
         try:
             self._environment = api.DockerEnvironment(
