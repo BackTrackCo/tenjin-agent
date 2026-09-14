@@ -133,3 +133,35 @@ def test_cli_dry_run_does_not_forward_loop_options(tmp_path, monkeypatch):
         return {"dry_run": True}
     monkeypatch.setattr(cli, "_live_run", dry)
     assert cli.live_run(tmp_path, cli.FAKE_MANIFEST, dry_run=True, until_complete=False, admission_seconds=None)["dry_run"]
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_parallel_codex_snapshot_lives_across_chunks_and_is_always_erased(tmp_path, monkeypatch, fails):
+    from evals.benchmark import codex_live
+    from evals.benchmark.tests.test_codex_live import PINS, subscription_file
+    source = manifest.load(cli.FAKE_MANIFEST)
+    config = dataclasses.replace(source, data={**source.data, "harness": "codex", "pins": {**PINS, "concurrency": 2}})
+    monkeypatch.setattr(cli.manifest_module, "load", lambda path: config)
+    auth = subscription_file(tmp_path)
+    original = auth.read_bytes()
+    snapshots = []
+    def chunk(*args, **kwargs):
+        snapshot = kwargs["runtime"].subscription_auth
+        assert snapshot.is_file()
+        assert kwargs["runtime"].settle_cap_s == 7
+        snapshots.append(snapshot)
+        if len(snapshots) == 2 and fails:
+            raise RuntimeError("second chunk failed")
+        return {"complete": len(snapshots) == 2}
+    monkeypatch.setattr(cli, "_live_run", chunk)
+    def run():
+        return cli.live_run(tmp_path / "out", config.path, max_new_trials=1, until_complete=True,
+                            runtime=runner.Runtime(settle_cap_s=7), environ={codex_live.AUTH_ENV: str(auth)})
+    if fails:
+        with pytest.raises(RuntimeError, match="second chunk failed"):
+            run()
+    else:
+        assert run()["complete"]
+    assert len(snapshots) == 2 and snapshots[0] == snapshots[1]
+    assert not snapshots[0].parent.exists()
+    assert auth.read_bytes() == original

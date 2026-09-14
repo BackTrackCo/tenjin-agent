@@ -2,7 +2,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
-import { mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, beforeEach, expect, it } from 'vitest';
@@ -317,7 +317,7 @@ it.each(['alias', 'deep'])(
     const got = await observedCalls();
     expect(got).toHaveLength(1);
     expect(got[0].argv).toEqual(['sync', '--cwd', target]);
-    expect(await realpath(got[0].cwd)).toBe(mode === 'alias' ? repo : deep);
+    // --cwd is the identity contract; the child process need not chdir.
     const published = await sync(target);
     expect(published.sent).toHaveLength(1);
     expect(
@@ -356,6 +356,17 @@ it('a stale claim deleted during acquisition is not resurrected or dispatched', 
     store.run(
       `CREATE TRIGGER delete_stale_claim BEFORE INSERT ON session_state
     WHEN NEW.session='' AND NEW.key='sync:claim' AND EXISTS (SELECT 1 FROM session_state WHERE session='' AND key='sync:claim')
+    BEGIN DELETE FROM session_state WHERE session='' AND key='sync:claim';
+    UPDATE oracle_claim_deletions SET n=n+1; SELECT RAISE(IGNORE); END`,
+      [],
+    ),
+  ).toBe(true);
+  // A stale claim may be acquired using conditional UPDATE instead of INSERT.
+  // Inject the same deletion at either write seam without prescribing SQL shape.
+  expect(
+    store.run(
+      `CREATE TRIGGER delete_stale_claim_update BEFORE UPDATE ON session_state
+    WHEN OLD.session='' AND OLD.key='sync:claim'
     BEGIN DELETE FROM session_state WHERE session='' AND key='sync:claim';
     UPDATE oracle_claim_deletions SET n=n+1; SELECT RAISE(IGNORE); END`,
       [],

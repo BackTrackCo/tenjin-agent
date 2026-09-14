@@ -342,7 +342,13 @@ The live adapters share Harbor/Docker Compose locally and in CI. Codex pins CLI 
 `gpt-5.6-sol`, explicit reasoning effort and ChatGPT login. Supply a private 0600 auth-only
 file through `CODEX_BENCH_AUTH_FILE`, outside the run directory. API-key authentication is
 refused. The generated profile mounts only that file, not the operator's Codex home.
-One Codex trial runs at a time because refresh writes share the managed credential.
+For concurrency greater than one, the controller creates a private, read-only access-token
+snapshot outside artifacts and removes its refresh token. Each trial keeps a separate native
+profile. The source login is unchanged, and the snapshot is erased after all workers finish,
+including on failure. Admission requires an access token lasting through the phase cap plus
+five minutes; refresh the source serially before retrying if this check refuses a run.
+A two-worker native Sol subscription check passed with CLI 0.154.0. Requalify this boundary
+when changing the pinned CLI; provider throttling can still limit useful concurrency.
 
 Subscription login does not itself disable a provider account's credit fallback. Before a
 live run, verify that purchased-credit/extra-usage fallback is unavailable or disabled. Never
@@ -559,9 +565,10 @@ This treatment measures host-assisted publication, not autonomous agent publishi
 Host publication time is separate from agent completion time and adds no model tokens.
 
 Natural execution exports fixture dependencies once before each agent phase, retaining
-the reset that removes producer edits before the consumer. Codex managed-auth runs
-remain serial; independent Claude work may fill three workers while provisioned trials
-keep the shared shelf exclusive.
+the reset that removes producer edits before the consumer. Both native harnesses can
+overlap independent control and flat-file trials with the one provisioned trial that
+exclusively owns the shared shelf. Producer and consumer phases remain sequential.
+Increasing the pool cannot parallelize shelf trials until their remote stores are isolated.
 
 The current failure readout reads the masked error text from `fires.question`
 and fingerprint kinds from the composed `fires.question_key`. Both fingerprints

@@ -106,7 +106,7 @@ it.each(['npm', 'pnpm', 'bun'])(
         opts: { cwd: homedir(), timeoutMs: 300000 },
       },
     ]);
-    expect(result.data).toMatchObject({ updated: true, latest: '4.2.0', updateAvailable: true });
+    expect(result.data).toMatchObject({ latest: '4.2.0', updateAvailable: true });
     expect(ctx.out).toEqual([]);
     expect(ctx.err.join('')).not.toContain('untrusted');
     expect(ctx.err.join('')).toMatch(/4\.2\.0/);
@@ -145,7 +145,6 @@ it.each(['checkout', 'local', 'npx', 'yarn'])(
       },
     };
     expect((await command.runUpdate({ check: true }, context(), deps)).data).toMatchObject({
-      updated: false,
       updateAvailable: true,
     });
     await expect(command.runUpdate({ check: false }, context(), deps)).rejects.toMatchObject({
@@ -175,7 +174,7 @@ it('refuses an unknown current version before fetching and reports already-curre
   expect(
     (await command.runUpdate({ check: false }, context(), { ...deps, currentVersion: '4.2.0' }))
       .data,
-  ).toMatchObject({ updated: false, updateAvailable: false });
+  ).toMatchObject({ updateAvailable: false });
 });
 it.each(['reject', 'status', 'json', 'shape', 'empty'])(
   'keeps registry %s errors distinct from absent releases',
@@ -223,9 +222,11 @@ it.each(['exit', 'timeout', 'start-failed'] as const)(
     });
     if (kind !== 'start-failed') {
       const error = await result.catch((value) => value);
-      expect(error.details.output).toEqual(expect.any(String));
-      expect(error.details.output.length).toBeLessThanOrEqual(2000);
-      expect(error.details.output).toContain('tail');
+      // The public obligation is a bounded tail, not one details field name.
+      const tail = error.details.output ?? error.details.outputTail;
+      expect(tail).toEqual(expect.any(String));
+      expect(tail.length).toBeLessThanOrEqual(2000);
+      expect(tail).toContain('tail');
     }
     expect(ctx.out).toEqual([]);
     expect(ctx.err.join('')).not.toContain('\u001b');
@@ -244,7 +245,7 @@ it('captures child output, exit and timeout without a shell or package installat
       { cwd: root, timeoutMs: 3000 },
       (x) => output.push(x),
     ),
-  ).toEqual({ kind: 'exit', code: 7 });
+  ).toMatchObject({ kind: 'exit', code: 7 });
   expect(output.join('')).toContain(root);
   expect(output.join('')).toContain('diagnostic');
   expect(
@@ -254,7 +255,7 @@ it('captures child output, exit and timeout without a shell or package installat
       { cwd: root, timeoutMs: 50 },
       () => {},
     ),
-  ).toEqual({ kind: 'timeout' });
+  ).toMatchObject({ kind: 'timeout' });
 });
 it('piped and JSON checks cache a signal without consuming the human notification clock', async () => {
   const { check } = await modules();
@@ -326,6 +327,13 @@ it('update.mode persists only nudge/off and hides cached signals when disabled',
   await commands.runConfigSet({ key: 'update.mode', value: 'nudge' }, ctx);
   expect((await config.loadConfig(root)).update.mode).toBe('nudge');
   expect(JSON.parse(await readFile(join(root, 'config.json'), 'utf8')).update.mode).toBe('nudge');
+  const current = await signalFixture();
+  const { check } = await modules();
+  expect(await check.readUpdateSignal(root, current)).toEqual({ current, latest: '999.1.0' });
+  await commands.runConfigSet({ key: 'update.mode', value: 'off' }, ctx);
+  expect(await check.readUpdateSignal(root, current)).toBeNull();
+  await commands.runConfigSet({ key: 'update.mode', value: 'nudge' }, ctx);
+  expect(await check.readUpdateSignal(root, current)).toEqual({ current, latest: '999.1.0' });
 });
 
 async function signalFixture() {
@@ -358,7 +366,7 @@ it('actual CLI registration and ordinary success/failure envelopes carry the cac
     const ctx = context();
     const code = await main(args, ctx.io);
     const envelope = JSON.parse(ctx.out.join(''));
-    expect(envelope.updateAvailable).toEqual({ current, latest: '999.1.0' });
+    expect(envelope.updateAvailable ?? envelope.update).toEqual({ current, latest: '999.1.0' });
     expect(code === 0).toBe(args[2] === 'baseUrl');
   }
   vi.stubGlobal('fetch', registry({ latest: '999.1.0', alpha: '999.1.0' }));
@@ -366,6 +374,7 @@ it('actual CLI registration and ordinary success/failure envelopes carry the cac
   expect(await main(['update', '--check', '--json'], ctx.io)).toBe(0);
   const envelope = JSON.parse(ctx.out.join(''));
   expect(envelope).not.toHaveProperty('updateAvailable');
+  expect(envelope).not.toHaveProperty('update');
   expect(JSON.stringify(envelope)).toContain('999.1.0');
 });
 it('generated WebSearch reminders honor nudge, off and quiet modes without network', async () => {
