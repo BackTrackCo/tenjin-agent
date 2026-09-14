@@ -5,9 +5,6 @@ import {
   getPostMetadata,
   postSearch,
   postOutcomes,
-  queryMax,
-  LONG_QUERY_TRIGGERS,
-  DISPATCH_QUERY_MAX,
   QUERY_MAX,
   type SearchResult,
 } from './agent-api';
@@ -109,52 +106,12 @@ describe('buildSearchRequest', () => {
   it('rejects an empty question', () => {
     expect(() => buildSearchRequest({ question: '   ' })).toThrowError(CliError);
   });
-  it('rejects a question over 512 chars on every short-query trigger', () => {
-    expect(() => buildSearchRequest({ question: 'x'.repeat(513) })).toThrowError(/512/);
-    expect(() =>
-      buildSearchRequest({ question: 'x'.repeat(513), trigger: 'research' }),
-    ).toThrowError(/512/);
-    expect(() =>
-      buildSearchRequest({ question: 'x'.repeat(512), trigger: 'research' }),
-    ).not.toThrowError();
-  });
-
-  // A work order is the one query the shelf reads whole: it splits a dispatch
-  // query into sentence sub-queries and reranks against all of it, so the bound
-  // is the TRIGGER's and this guard has to know which trigger it is guarding.
-  it('accepts 8,000 characters on the dispatch trigger and rejects 8,001', () => {
-    const body = buildSearchRequest({ question: 'x'.repeat(8000), trigger: 'dispatch' });
-    expect(body.query.length).toBe(8000);
-    expect(body.trigger).toBe('dispatch');
-    expect(() =>
-      buildSearchRequest({ question: 'x'.repeat(8001), trigger: 'dispatch' }),
-    ).toThrowError(/8000/);
-  });
-
-  it('queryMax names the bound each trigger is cut to', () => {
-    // `prompt` joined `dispatch` at the long bound: the hook sends what the
-    // person typed, and a ticket's first 512 characters are its rules preamble
-    // (tenjin-notes bench-lite/log.md, smoke-4).
-    expect(LONG_QUERY_TRIGGERS).toEqual(['dispatch', 'prompt']);
-    for (const trigger of LONG_QUERY_TRIGGERS) {
-      expect(queryMax(trigger)).toBe(DISPATCH_QUERY_MAX);
-    }
-    expect(DISPATCH_QUERY_MAX).toBe(8000);
-    expect(QUERY_MAX).toBe(512);
-    for (const trigger of ['cli', 'research', 'failure'] as const) {
-      expect(queryMax(trigger)).toBe(QUERY_MAX);
-    }
-  });
-
-  it('sends a 3000-character prompt whole', () => {
-    const body = buildSearchRequest({ question: 'x'.repeat(3000), trigger: 'prompt' });
-    expect(body.query.length).toBe(3000);
-    // The trigger stays `prompt`: it is telemetry and per-surface policy on the
-    // shelf, never a claim to be a dispatch.
-    expect(body.trigger).toBe('prompt');
-    expect(() =>
-      buildSearchRequest({ question: 'x'.repeat(8001), trigger: 'prompt' }),
-    ).toThrowError(/8000/);
+  it('accepts 8,000 characters on any trigger and rejects 8,001', () => {
+    expect(QUERY_MAX).toBe(8000);
+    expect(
+      buildSearchRequest({ question: 'x'.repeat(8000), trigger: 'research' }).query,
+    ).toHaveLength(8000);
+    expect(() => buildSearchRequest({ question: 'x'.repeat(8001) })).toThrowError(/8000/);
   });
   it('rejects a malformed freshWithin', () => {
     expect(() => buildSearchRequest({ question: 'q', freshWithin: '30 days' })).toThrowError(

@@ -88,40 +88,14 @@ export interface SearchRequestBody {
   budget_ms?: number;
 }
 
-/** The server's query bound for every short-query trigger (`SEARCH_QUERY_MAX_CHARS`). */
-export const QUERY_MAX = 512;
-/** The server's bound for a decision-view long query (`DISPATCH_QUERY_MAX_CHARS`):
- *  a whole work order or a whole prompt, which the shelf splits into sentence
- *  sub-queries and reranks against in full (tenjin#844, tenjin-agent#346). */
-export const DISPATCH_QUERY_MAX = 8000;
-
-/** The triggers the shelf reads a whole document for, mirroring its own
- *  `LONG_QUERY_TRIGGERS`.
- *
- *  `dispatch` is the work order. `prompt` is here because it has the same
- *  shape and had the same failure: an engineering ticket typed as a prompt is
- *  2,000 to 5,000 characters, and its first 512 are the rules preamble, so the
- *  team leg missed even when the word leg ranked the right piece #1
- *  (tenjin-notes `bench-lite/log.md`, smoke-4). The trigger is unchanged on the
- *  wire — it is still `prompt`, still telemetry and still what makes the shelf
- *  drop auto-synced fix records from the lexical leg. */
-export const LONG_QUERY_TRIGGERS = ['dispatch', 'prompt'] as const;
-
-/** How much of a question the shelf will read for this trigger. The bound is
- *  the TRIGGER's and not any arm's or the CLI's, so it is spelled once, here,
- *  beside the request it bounds; every caller cuts to it before building. */
-export function queryMax(trigger: SearchRequestBody['trigger']): number {
-  return (LONG_QUERY_TRIGGERS as readonly (typeof trigger)[]).includes(trigger)
-    ? DISPATCH_QUERY_MAX
-    : QUERY_MAX;
-}
+/** The server's query bound (`SEARCH_QUERY_MAX_CHARS`), the same for every trigger. */
+export const QUERY_MAX = 8000;
 
 export function buildSearchRequest(input: SearchInput): SearchRequestBody {
   const question = input.question.trim();
-  const max = queryMax(input.trigger ?? 'cli');
-  if (question.length === 0 || question.length > max) {
-    throw new CliError('USAGE', `question must be 1 to ${max} characters`, {
-      fix: `Pass a non-empty question under ${max} characters.`,
+  if (question.length === 0 || question.length > QUERY_MAX) {
+    throw new CliError('USAGE', `question must be 1 to ${QUERY_MAX} characters`, {
+      fix: `Pass a non-empty question under ${QUERY_MAX} characters.`,
     });
   }
   if (input.freshWithin !== undefined) {
