@@ -1,0 +1,27 @@
+diff --git a/src/utils/proxy.ts b/src/utils/proxy.ts
+index 3c747c0..c437ea7 100644
+--- a/src/utils/proxy.ts
++++ b/src/utils/proxy.ts
+@@ -18,6 +18,8 @@ export interface ProxyOptions {
+   streamRequest?: boolean;
+   cookieDomainRewrite?: string | Record<string, string>;
+   cookiePathRewrite?: string | Record<string, string>;
++  /** Pass the incoming request's headers on to the target. */
++  forwardHeaders?: boolean;
+   onResponse?: (event: H3Event, response: Response) => void;
+ }
+ 
+@@ -84,9 +86,12 @@ export async function sendProxy(
+   opts: ProxyOptions = {},
+ ) {
+   let response: Response | undefined;
++  const requestHeaders = opts.forwardHeaders
++    ? mergeHeaders(getProxyRequestHeaders(event), opts.headers)
++    : (opts.headers as HeadersInit);
+   try {
+     response = await _getFetch(opts.fetch)(target, {
+-      headers: opts.headers as HeadersInit,
++      headers: requestHeaders as HeadersInit,
+       ignoreResponseError: true, // make $ofetch.raw transparent
+       ...opts.fetchOptions,
+     });

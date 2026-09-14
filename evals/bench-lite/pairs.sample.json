@@ -1,0 +1,36 @@
+[
+  {
+    "id": "sample-collation",
+    "notes": "PLACEHOLDER SHAPE ONLY. The real pairs.json comes from the pair-selection agent; this one exists so `--dry-run` has something to plan and so the schema has a worked example. Replace base_commit with a real commit before running anything for real.",
+    "producer": {
+      "repo": "tenjin-agent",
+      "base_commit": "origin/main",
+      "prompt_file": "pairs/sample-collation/prompts/producer.md",
+      "oracle": {
+        "copy": [
+          {
+            "from": "pairs/sample-collation/oracle/producer.oracle.test.ts",
+            "to": "src/lib/__bench__/producer.oracle.test.ts"
+          }
+        ],
+        "command": "pnpm vitest run src/lib/__bench__/producer.oracle.test.ts",
+        "timeout_s": 900
+      }
+    },
+    "consumer": {
+      "repo": "tenjin-agent",
+      "base_commit": "origin/main",
+      "prompt_file": "pairs/sample-collation/prompts/consumer.md",
+      "oracle": {
+        "copy": [
+          {
+            "from": "pairs/sample-collation/oracle/consumer.oracle.test.ts",
+            "to": "src/lib/__bench__/consumer.oracle.test.ts"
+          }
+        ],
+        "command": "pnpm vitest run src/lib/__bench__/consumer.oracle.test.ts",
+        "timeout_s": 900
+      }
+    }
+  }
+]

@@ -1,0 +1,112 @@
+diff --git a/src/utils/sse/index.ts b/src/utils/sse/index.ts
+index 3e634ff..e91527b 100644
+--- a/src/utils/sse/index.ts
++++ b/src/utils/sse/index.ts
+@@ -1,5 +1,5 @@
+ import type { H3Event } from "../../event";
+-import type { EventStreamOptions } from "./types";
++import type { EventStreamMessage, EventStreamOptions } from "./types";
+ import { EventStream as _EventStream } from "./event-stream";
+ 
+ /**
+@@ -38,5 +38,43 @@ export function createEventStream(
+   return new _EventStream(event, opts);
+ }
+ 
++/**
++ * Stream an iterable to the client as server-sent events.
++ *
++ * Each item becomes one message; the stream closes when the source is done.
++ */
++export async function sendEventStream(
++  event: H3Event,
++  source: Iterable<unknown> | AsyncIterable<unknown>,
++  opts?: EventStreamOptions,
++): Promise<void> {
++  const stream = new _EventStream(event, opts);
++
++  const pump = (async () => {
++    try {
++      for await (const item of source as AsyncIterable<unknown>) {
++        await stream.push(_asMessage(item));
++      }
++    } finally {
++      await stream.close();
++    }
++  })();
++
++  const sent = stream.send();
++  await Promise.all([pump, sent]);
++}
++
++/** An item is either a message with its own fields, or the payload itself. */
++function _asMessage(item: unknown): EventStreamMessage {
++  if (
++    item !== null &&
++    typeof item === "object" &&
++    "data" in (item as Record<string, unknown>)
++  ) {
++    return item as EventStreamMessage;
++  }
++  return { data: item };
++}
++
+ export type EventStream = ReturnType<typeof createEventStream>;
+ export type { EventStreamOptions, EventStreamMessage } from "./types";
+diff --git a/src/utils/sse/types.ts b/src/utils/sse/types.ts
+index 6a3f1f1..74b47b8 100644
+--- a/src/utils/sse/types.ts
++++ b/src/utils/sse/types.ts
+@@ -11,8 +11,8 @@ export interface EventStreamOptions {
+  * See https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events#fields
+  */
+ export interface EventStreamMessage {
+-  id?: string;
++  id?: string | number;
+   event?: string;
+   retry?: number;
+-  data: string;
++  data: unknown;
+ }
+diff --git a/src/utils/sse/utils.ts b/src/utils/sse/utils.ts
+index f2da3d1..5568905 100644
+--- a/src/utils/sse/utils.ts
++++ b/src/utils/sse/utils.ts
+@@ -6,8 +6,8 @@ import { EventStreamMessage } from "./types";
+ 
+ export function formatEventStreamMessage(message: EventStreamMessage): string {
+   let result = "";
+-  if (message.id) {
+-    result += `id: ${_sanitizeSingleLine(message.id)}\n`;
++  if (message.id !== undefined && message.id !== "") {
++    result += `id: ${_sanitizeSingleLine(String(message.id))}\n`;
+   }
+   if (message.event) {
+     result += `event: ${_sanitizeSingleLine(message.event)}\n`;
+@@ -15,7 +15,7 @@ export function formatEventStreamMessage(message: EventStreamMessage): string {
+   if (typeof message.retry === "number" && Number.isInteger(message.retry)) {
+     result += `retry: ${message.retry}\n`;
+   }
+-  const data = typeof message.data === "string" ? message.data : "";
++  const data = _serializeData(message.data);
+   for (const line of data.split(/\r\n|\r|\n/)) {
+     result += `data: ${line}\n`;
+   }
+@@ -23,6 +23,17 @@ export function formatEventStreamMessage(message: EventStreamMessage): string {
+   return result;
+ }
+ 
++/** A string payload goes out as it stands; anything else goes out as JSON. */
++function _serializeData(data: unknown): string {
++  if (typeof data === "string") {
++    return data;
++  }
++  if (data === undefined) {
++    return "";
++  }
++  return JSON.stringify(data) ?? "";
++}
++
+ function _sanitizeSingleLine(value: string): string {
+   return value.replace(/[\n\r]/g, "");
+ }
