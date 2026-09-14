@@ -33,6 +33,9 @@ def test_db_shares_only_verified_none_namespace_and_cleans_up():
         assert database_service.IMAGE in argv
         assert not set(argv)&{'--publish','-p','--volume','-v','--privileged','--mount'}
         assert '--read-only' in argv and '--tmpfs' in argv
+        # The collation the ordering assertions were written under. An image
+        # whose initdb locale differs silently reorders them.
+        assert 'POSTGRES_INITDB_ARGS=--locale=C.UTF-8' in argv
     assert calls[-1]==['rm','--force','bench-fixture-postgres']
 
 
