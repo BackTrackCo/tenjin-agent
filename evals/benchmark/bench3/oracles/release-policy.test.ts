@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { channelTag, resolveTarget } from './lib/update-check';
+import { resolveTarget } from './lib/update-check';
 
 // Mounted as src/bench3-independent.test.ts only in the verifier image.
 // These synthetic version tables specify the requested release policy.
@@ -7,7 +7,8 @@ describe('the promoted release controls updates', () => {
   it.each(['3.7.0-alpha.4', '3.7.0', '0.8.0-alpha.12'])(
     'follows latest for supported build %s',
     (current) => {
-      expect(channelTag(current)).toBe('latest');
+      // A version-family classifier may still say alpha. The selected target,
+      // command response and passive signal must follow latest instead.
       expect(resolveTarget(current, { latest: '3.8.0', alpha: '9.0.0-alpha.3' })).toBe('3.8.0');
     },
   );
@@ -20,7 +21,6 @@ describe('the promoted release controls updates', () => {
   );
 
   it('refuses unknown current builds and accepts a lower promoted target as policy data', () => {
-    expect(channelTag('development')).toBeNull();
     expect(resolveTarget('development', { latest: '3.8.0' })).toBeNull();
     // Resolver policy is separate from the caller deciding whether to install.
     expect(resolveTarget('3.7.0-alpha.4', { latest: '3.6.0', alpha: '3.9.0-alpha.1' })).toBe(
@@ -66,6 +66,66 @@ async function temporary(run: (dir: string) => Promise<void>) {
 }
 
 describe('update command and daily checks share the promoted policy', () => {
+  it('refuses an unknown current build before requesting or installing anything', async () => {
+    await temporary(async (dir) => {
+      let requests = 0;
+      let installs = 0;
+      await expect(
+        runUpdate(
+          { check: true },
+          { flags: { json: true, timeout: 1000 }, dataDir: dir, io: silentIo() },
+          {
+            currentVersion: 'development',
+            fetchImpl: (async () => {
+              requests++;
+              return answer({ latest: '3.8.0' })('https://example.invalid');
+            }) as typeof fetch,
+            spawnImpl: async () => {
+              installs++;
+              throw new Error('must not install');
+            },
+          },
+        ),
+      ).rejects.toMatchObject({ code: expect.any(String) });
+      expect(requests).toBe(0);
+      expect(installs).toBe(0);
+    });
+  });
+
+  it('reports an older latest as policy data without an upgrade or passive signal', async () => {
+    await temporary(async (dir) => {
+      const currentVersion = '3.7.0-alpha.4';
+      const fetchImpl = answer({ latest: '3.6.0', alpha: '9.0.0-alpha.3' });
+      const result = await runUpdate(
+        { check: true },
+        { flags: { json: true, timeout: 1000 }, dataDir: dir, io: silentIo() },
+        {
+          currentVersion,
+          fetchImpl,
+          spawnImpl: async () => {
+            throw new Error('must not install');
+          },
+        },
+      );
+      expect(result.data).toEqual({
+        current: currentVersion,
+        latest: '3.6.0',
+        updateAvailable: false,
+        updated: false,
+      });
+      await maybeUpdate({
+        dir,
+        io: silentIo(),
+        json: true,
+        env: {},
+        currentVersion,
+        fetchImpl,
+        now: () => Date.now(),
+      });
+      expect(await readUpdateSignal(dir, currentVersion)).toBeNull();
+    });
+  });
+
   it.each(['3.7.0-alpha.4', '3.7.0'])(
     'explicit check on %s never installs or reports a channel',
     async (currentVersion) => {
@@ -107,6 +167,14 @@ describe('update command and daily checks share the promoted policy', () => {
         expect(error.message).toMatch(/latest|release|version/i);
       }
       expect(absent.message).not.toBe(malformed.message);
+      await expect(
+        runUpdate({ check: true }, ctx, {
+          currentVersion: '3.7.0-alpha.4',
+          fetchImpl: (async () => {
+            throw new Error('offline');
+          }) as typeof fetch,
+        }),
+      ).rejects.toMatchObject({ code: 'NETWORK_ERROR' });
     });
   });
 
