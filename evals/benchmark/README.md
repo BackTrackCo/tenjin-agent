@@ -433,7 +433,7 @@ different endpoints cannot silently become this method's baseline.
   incomplete or contradictory and never scores. `invalid` is never a miss, never a failure, and
   never a zero-token run, and its reason names the gate that refused it (`executor:exit_N`,
   `usage:<code>`, `delivery:<code>`, `verifier:<id>`, `auxiliary:<code>`, `provision:<code>`,
-  `isolation:symlink_escape`, `sentinel:credential_exposure`).
+  `producer:<outcome>`, `isolation:symlink_escape`, `sentinel:credential_exposure`).
 - **Every task weighs the same.** A cell is one `(arm, task)` pair and an arm figure is the mean
   over its cells, never a sum over attempts, so a task with more repeats does not speak louder.
   Pass rate and token ratio are separate axes and nothing folds them into one number. Producer
@@ -682,9 +682,14 @@ shows complete pipeline cost for producer arms. This secondary quantity adds the
 earlier producer, capture and consumer tokens once, divided by verified consumers
 within each task. Its time adds both measured agent brackets and host publication
 time; container preparation and hidden verification remain separately timed.
-Failed and capped producers stay in the denominator's attempted population, and
-their spending is retained when the consumer continues. Missing producer timing
-and zero consumer successes produce `n/a`, never a fabricated zero.
+A failed producer finished its turn and captured what it worked out, so it stays
+in the denominator's attempted population and its spending is retained when the
+consumer continues. A producer that never settled its turn is the other case:
+`capped`, `interrupted` or `invalid`, its turn-end hook never ran, so the attempt
+it was to prepare read an empty store and is `producer:<outcome>` invalid rather
+than a measurement of reuse. That spending is retained too, under
+`invalid_observed_effort`. Missing producer timing and zero consumer successes
+produce `n/a`, never a fabricated zero.
 
 This is the cost to prepare memory and complete a later task. It is not a matched
 two-task comparison against a control that also did the earlier work, and it does

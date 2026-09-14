@@ -37,6 +37,13 @@ RECONCILED = frozenset({"matched", "matched_with_descendants", "explained_by_sid
 # all, or a partial one: the outcome itself names the gap.
 CAPPED_OUTCOMES = frozenset({"capped", "interrupted"})
 CAPPED_RECONCILIATION = frozenset({"no_envelope", "envelope_partial"})
+# A producer phase that never settled its own turn: a wall-clock or budget cap,
+# descendants that never settled, or a refusal. Its turn-end hook never ran, so
+# nothing was captured and nothing was published, and the attempt it was to
+# prepare then measures the absence of a publish rather than the presence of
+# reuse. `fail` is not one of these: a producer that finished and failed its
+# task still captured and published what it worked out on the way.
+UNSETTLED_PRODUCER = frozenset({"capped", "interrupted", "invalid"})
 REQUIRED = frozenset(
     {
         "schema",
@@ -104,6 +111,25 @@ class RecordError(ValueError):
 class Excluded:
     path: str
     reason: str
+
+
+def producer_unusable(record: dict[str, Any]) -> str | None:
+    """The reason this attempt's producer left it unmeasurable, or None.
+
+    An attempt carries `isolation.producer` exactly when a producer phase
+    prepared the memory it was to reuse, so the block's presence is the
+    dependence and its outcome says whether the dependence was met. Every
+    caller reads this rather than the outcome string: the phase runner to skip
+    the dependent attempt before it spends anything, `validate` to refuse a
+    file that claims a score anyway, and the reducer to keep one out of its
+    ratios.
+    """
+    isolation = record.get("isolation")
+    producer = isolation.get("producer") if isinstance(isolation, dict) else None
+    if not isinstance(producer, dict):
+        return None
+    outcome = producer.get("outcome")
+    return f"producer:{outcome}" if outcome in UNSETTLED_PRODUCER else None
 
 
 def final_path(records_dir: Path, trial_id: str) -> Path:
@@ -371,6 +397,12 @@ def validate(record: dict[str, Any]) -> None:
         raise RecordError("isolation.producer must be an object")
     if "producer" in isolation and isolation["producer"].get("outcome") not in OUTCOMES:
         raise RecordError("isolation.producer must carry an outcome")
+    # The dependence belongs to the record, not only to the phase runner that
+    # built it: a file the reducer reads from disk must not be able to claim a
+    # scored outcome over a producer that published nothing.
+    unusable = producer_unusable(record)
+    if unusable is not None and record["outcome"] != "invalid":
+        raise RecordError(f"an attempt with {unusable} cannot carry outcome {record['outcome']!r}")
     if "slice" in isolation and (not isinstance(isolation["slice"], dict) or not isinstance(isolation["slice"].get("kind"), str)):
         raise RecordError("isolation.slice must name a kind")
     corpus = isolation.get("corpus")
