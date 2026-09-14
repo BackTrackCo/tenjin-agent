@@ -373,7 +373,7 @@ it('publishes a bounded free cardless pairing with exact fingerprints once and r
   }
   expect((await sync(repo)).sent).toEqual([]);
 });
-it('public mode refuses and only eligible same-project closed code rows enter publication', async () => {
+it('only eligible same-project closed code rows enter publication', async () => {
   const repo = await repository('repo', null);
   const other = await repository('other', null);
   await seed(other);
@@ -385,11 +385,30 @@ it('public mode refuses and only eligible same-project closed code rows enter pu
     s.close();
   }
   expect((await sync(repo)).sent).toEqual([]);
+});
+it('public mode leaves eligible code rows unpublished and retryable', async () => {
+  const repo = await repository('repo', null);
+  const uid = await seed(repo);
   await writeFile(
     join(data, 'config.json'),
     JSON.stringify({ baseUrl: url, publicShelfUrl: url, hooks: { push: 'on' } }),
   );
-  await expect(sync(repo)).rejects.toMatchObject({ code: 'REFUSED' });
+  // Either an explicit refusal or a safe no-op implements team-only sync.
+  // Observe writes even if the operation throws after sending a request.
+  try {
+    await sync(repo);
+  } catch (error) {
+    expect(error).toMatchObject({ code: 'REFUSED' });
+  }
+  expect(syncRequests).toEqual([]);
+  const s = await store();
+  try {
+    expect(
+      (s.get('SELECT synced_at FROM pairings WHERE uid=?', [uid]) as { synced_at: null }).synced_at,
+    ).toBeNull();
+  } finally {
+    s.close();
+  }
 });
 // Receipt-specific SQL fault injection is intentionally absent: the work order
 // does not prescribe a receipt table/key, and runSync has no receipt-write seam.

@@ -313,7 +313,7 @@ it('off mode and CI suppress checks; network failure stays silent and is retried
   expect(ctx.out).toEqual([]);
   expect(ctx.err).toEqual([]);
 });
-it('update.mode persists only nudge/off and hides cached signals when disabled', async () => {
+it('update.mode persists only nudge/off and retains cached availability', async () => {
   await modules();
   const config = await import('./lib/config');
   const commands = await import('./commands/config');
@@ -331,7 +331,6 @@ it('update.mode persists only nudge/off and hides cached signals when disabled',
   const { check } = await modules();
   expect(await check.readUpdateSignal(root, current)).toEqual({ current, latest: '999.1.0' });
   await commands.runConfigSet({ key: 'update.mode', value: 'off' }, ctx);
-  expect(await check.readUpdateSignal(root, current)).toBeNull();
   await commands.runConfigSet({ key: 'update.mode', value: 'nudge' }, ctx);
   expect(await check.readUpdateSignal(root, current)).toEqual({ current, latest: '999.1.0' });
 });
@@ -369,6 +368,18 @@ it('actual CLI registration and ordinary success/failure envelopes carry the cac
     expect(envelope.updateAvailable ?? envelope.update).toEqual({ current, latest: '999.1.0' });
     expect(code === 0).toBe(args[2] === 'baseUrl');
   }
+  await writeFile(join(root, 'config.json'), JSON.stringify({ update: { mode: 'off' } }));
+  for (const args of [
+    ['config', 'get', 'baseUrl', '--json'],
+    ['config', 'get', 'not-a-config-key', '--json'],
+  ]) {
+    const ctx = context();
+    await main(args, ctx.io);
+    const envelope = JSON.parse(ctx.out.join(''));
+    expect(envelope).not.toHaveProperty('updateAvailable');
+    expect(envelope).not.toHaveProperty('update');
+  }
+  await writeFile(join(root, 'config.json'), JSON.stringify({ update: { mode: 'nudge' } }));
   vi.stubGlobal('fetch', registry({ latest: '999.1.0', alpha: '999.1.0' }));
   const ctx = context();
   expect(await main(['update', '--check', '--json'], ctx.io)).toBe(0);
