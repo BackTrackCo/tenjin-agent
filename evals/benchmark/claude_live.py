@@ -124,6 +124,7 @@ INHERITED = ("LANG",)
 # its own variables; it does not reach these through `settings.env`.
 RESERVED_ENV_PREFIXES = ("ANTHROPIC_", "AWS_", "CLAUDE_", "COREPACK_", "DYLD_", "GITHUB_", "LD_", "NODE_", "TENJIN_")
 RESERVED_ENV_NAMES = frozenset({"HOME", "PATH", "TERM", "LANG", "SHELL", "PYTHONPATH"})
+PNPM_VERIFY_DEPS = "PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN"
 # Where Harbor's own trial directory goes: under the attempt's base, beside the
 # roots, so it is thrown away with them. `environment` is the directory Harbor
 # resolves for `--project-directory`; with a prebuilt image nothing in it is
@@ -408,7 +409,7 @@ def _settings_env(env: Any) -> None:
     """
     check("arm settings.env", env, ENV_SCHEMA, LiveExecutorError)
     for name in env:
-        if name in RESERVED_ENV_NAMES or name.startswith(RESERVED_ENV_PREFIXES):
+        if name in RESERVED_ENV_NAMES or name.startswith(RESERVED_ENV_PREFIXES) or name.upper() == PNPM_VERIFY_DEPS:
             raise LiveExecutorError(f"arm settings.env may not set {name}: the trial's own roots and seams own it")
 
 
@@ -645,6 +646,11 @@ def container_environment(
     # run never wanted.
     env["DISABLE_AUTOUPDATER"] = "1"
     env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
+    # Dependencies already belong to the pinned image. pnpm 11 otherwise
+    # auto-installs before run/exec when relocated workspace metadata differs,
+    # potentially purging the staged tree before blocked registry requests.
+    # Use uppercase: this release treats the lowercase alias as a raw string.
+    env[PNPM_VERIFY_DEPS] = "false"
     for name in INHERITED:
         value = parent.get(name)
         if value:
@@ -669,9 +675,29 @@ def probe_environment(roots: artifact.TrialRoots, parent: Mapping[str, str]) -> 
     return container_environment(roots, parent)
 
 
+def execution_controls(pins: Mapping[str, Any]) -> tuple[list[str], str]:
+    """Apply the recorded reasoning/turn/dollar protocol to the native CLI."""
+    effort = pins.get("effort")
+    if effort not in {"default", "low", "medium", "high", "xhigh", "max"}:
+        raise LiveExecutorError("Claude effort must be explicit; use default or a supported effort level")
+    concurrency = pins.get("concurrency", 1)
+    if isinstance(concurrency, bool) or not isinstance(concurrency, int) or concurrency < 1:
+        raise LiveExecutorError("Claude concurrency must be a positive integer")
+    turns = pins.get("turn_budget")
+    if turns is not None and (isinstance(turns, bool) or not isinstance(turns, int) or turns < 1):
+        raise LiveExecutorError("Claude turn_budget must be a positive integer or null")
+    flags = [] if effort == "default" else ["--effort", effort]
+    if turns is not None:
+        flags += ["--max-turns", str(turns)]
+    if pins.get("max_budget_usd") is not None or pins.get("billing_mode") != "subscription":
+        flags += ["--max-budget-usd", budget_of(pins)]
+    return flags, "auto" if effort == "default" else effort
+
+
 def build_argv(request: LaunchRequest, settings: Path, session_id: str) -> list[str]:
     """The whole command. Every flag is a literal here; every value is checked above."""
     pins = pins_for(request.pins, request.task)
+    controls, _ = execution_controls(pins)
     return [
         CLI,
         "-p",
@@ -682,8 +708,7 @@ def build_argv(request: LaunchRequest, settings: Path, session_id: str) -> list[
         "--include-hook-events",
         "--model",
         model_of(pins),
-        "--max-budget-usd",
-        budget_of(pins),
+        *controls,
         "--strict-mcp-config",
         "--setting-sources",
         "project",
@@ -733,6 +758,8 @@ def launch(request: LaunchRequest) -> Launch:
     name = container.container_name(request.trial_id, request.phase)
     plan = container.mounts(request.roots, settings=path)
     environment = container_environment(request.roots, os.environ, session_id, daemon=provisioned)
+    _, effort = execution_controls(request.pins)
+    environment["CLAUDE_CODE_EFFORT_LEVEL"] = effort
     # An attempt with an egress can reach the marketplace, so it does not start
     # unnamed. The failure this refuses is silent: the run succeeds and only the
     # marketplace's demand tables show it, so the check is here, at the seam that
@@ -764,6 +791,7 @@ def launch(request: LaunchRequest) -> Launch:
         hook_settings={"hooks": settings.get("hooks", {})},
         package_manager=package_manager(),
         recipe=recipe,
+        separate_streams=True,
         container_plan={
             **recipe.to_json(),
             "image": {"reference": reference, "resolved": request.image is not None},
