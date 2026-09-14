@@ -239,6 +239,7 @@ class Runtime:
     # The run's one corpus reading (`snapshot.Once`), asked for once the first
     # seed has reached the shelf, so the count is the corpus the trials searched.
     snapshot: Any = None
+    subscription_auth: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -432,7 +433,8 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
             artifact.refresh_repo(roots, manifest.fixture_path(task), image)
         launch = spec.launch(
             executor.LaunchRequest(
-                trial.trial_id, roots, task, arm, manifest.pins, provision, image=None if image is None else image.id, egress=runtime.egress
+                trial.trial_id, roots, task, arm, manifest.pins, provision, image=None if image is None else image.id, egress=runtime.egress,
+                subscription_auth=runtime.subscription_auth,
             )
         )
         if launch.package_manager is not None:
