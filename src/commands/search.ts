@@ -12,7 +12,7 @@ import {
 } from '../lib/agent-api';
 import { resolveWriteAuth } from '../lib/consent';
 import { searchHeaders } from '../lib/search-auth';
-import { resolveWalletProvider, type WalletProvider } from '../lib/wallet';
+import { describeWallet, resolveWalletProvider, type WalletProvider } from '../lib/wallet';
 import { cut } from '../hooks/text';
 import { recordSearch } from '../lib/searches';
 import { readActor, type SessionActor } from '../lib/session';
@@ -116,6 +116,10 @@ export async function runSearch(
             ctx,
             deps.provider !== undefined ? { provider: deps.provider } : {},
           );
+          // Surfaces WALLET_MISSING with its own fix, and it is what tells
+          // `searchHeaders` that "no wallet" is the answer rather than a
+          // credential that would not open.
+          await describeWallet(provider);
           return resolveWriteAuth({
             signer: await provider.getSigner(),
             baseUrl: settings.baseUrl,

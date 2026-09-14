@@ -97,7 +97,7 @@ async function dataDirWith(config: Record<string, unknown>): Promise<string> {
 
 const TEAM_CONFIG = {
   baseUrl: 'https://backtrack.tenjin.sh',
-  shelfBypassSecret: 'shelf-secret-abc123',
+  shelf: 'backtrack',
 };
 
 const claudeDir = (): string => skillsDirsFor(home)[0]!;
@@ -533,7 +533,7 @@ describe('healWiredSkills shapes what it writes by the machine mode', () => {
       ...(dataDir !== undefined ? { dataDir } : {}),
     });
 
-  it('writes the team arm on a team-mode machine, and no marker', async () => {
+  it('writes the team arm on a machine with a shelf, and no marker', async () => {
     const path = await seedSkill(claudeDir(), 'tenjin-search');
     const { io } = captureIo();
     await healFrom(io, await dataDirWith(TEAM_CONFIG));
@@ -550,12 +550,13 @@ describe('healWiredSkills shapes what it writes by the machine mode', () => {
     expect(await readFile(path, 'utf8')).toContain('PUBLIC GUIDANCE');
   });
 
-  // The half-set state: the key landed before the shelf did. Team mode there would
-  // render team guidance on a machine still publishing to the marketplace.
-  it('writes the public arm for a key with baseUrl still on the marketplace', async () => {
+  // A private-looking base URL with no shelf slug is a machine on the public
+  // marketplace: the shelf is the whole of the question now, and a URL answers
+  // none of it.
+  it('writes the public arm for a base URL with no shelf set', async () => {
     const path = await seedSkill(claudeDir(), 'tenjin-search');
     const { io } = captureIo();
-    await healFrom(io, await dataDirWith({ shelfBypassSecret: 'shelf-secret-abc123' }));
+    await healFrom(io, await dataDirWith({ baseUrl: 'https://backtrack.tenjin.sh' }));
     expect(await readFile(path, 'utf8')).toContain('PUBLIC GUIDANCE');
   });
 

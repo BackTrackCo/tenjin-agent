@@ -84,14 +84,24 @@ export async function searchHeaders(
       return { kind: 'unauthenticated', detail: classOf(err) };
     }
   }
-  if (!walletFileExists(dataDir, opts.env)) return { kind: 'no-wallet' };
   if (opts.mint === null) {
-    return { kind: 'unauthenticated', detail: 'no session is cached and this caller cannot mint' };
+    // A caller that may not mint has only the file to go on, and that is the
+    // right question for it: doctor reports what IS, and creates nothing.
+    return walletFileExists(dataDir, opts.env)
+      ? { kind: 'unauthenticated', detail: 'no session is cached' }
+      : { kind: 'no-wallet' };
   }
   try {
     const auth = await opts.mint();
     return { kind: 'signed', headers: await auth.headersFor(req) };
   } catch (err) {
+    // THE MINT ANSWERS THE WALLET QUESTION. `WALLET_MISSING` is the one refusal
+    // that means "there is nothing here to sign with", which is an ordinary
+    // configuration rather than a failure; everything else is a wallet that
+    // exists and would not open. Asking the filesystem instead would be a
+    // second source of truth, and it gets the answer wrong for any caller that
+    // supplies its own provider.
+    if (err instanceof CliError && err.code === 'WALLET_MISSING') return { kind: 'no-wallet' };
     return { kind: 'unauthenticated', detail: classOf(err) };
   }
 }

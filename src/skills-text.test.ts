@@ -1123,9 +1123,17 @@ describe('the public render did not move', () => {
   // tenjin-search is this branch's only by inheritance: #346 made `tenjin
   // search` cut a question past 512 at a whole word instead of refusing with
   // USAGE. Main's digest for it is taken as-is.
+  //
+  // Re-pinned for shelves (`shelf-cli`): the item bullet gained `shelf`, the
+  // field the server now stamps on every candidate of both lists, so an agent
+  // reading a hit can say which shelf it came from without inferring it from
+  // which list it was in. `src/evals-fixtures.test.ts` pins the same bullet
+  // against the candidate schema, so the two move together or neither does.
+  // tenjin-publish is untouched: the one call and the two lists change what the
+  // CLI does, not what a publisher is told.
   it('renders the exact bytes a public install shipped before team mode existed', () => {
     expect(Object.fromEntries(SHAPED_SKILLS.map((n) => [n, digest(read(n))]))).toEqual({
-      'tenjin-search': 'a24b665cac975d738bc8dbb611362741',
+      'tenjin-search': 'd40ccdcdde9cf4fbb00afbb4e5963150',
       'tenjin-publish': '3c7bc8ca8ddde86353f7019928b81ee2',
     });
   });
