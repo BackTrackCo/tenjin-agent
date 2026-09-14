@@ -1,0 +1,51 @@
+{
+  "benchmark_version": "bench1-live-smoke-2",
+  "schema_version": 1,
+  "harness": "claude",
+  "seed": 20260907,
+  "repeats": 1,
+  "pins": {
+    "model": "claude-opus-5",
+    "harness_version": "2.1.263",
+    "effort": "default",
+    "image": "operator-container",
+    "dependency_lock_hash": "sha256:none",
+    "permission_mode": "dontAsk",
+    "wall_clock_s": 600,
+    "turn_budget": 20,
+    "max_budget_usd": 0.5,
+    "credential_env": "CLAUDE_CODE_OAUTH_TOKEN",
+    "tools": ["Read", "Edit", "Write", "Glob", "Grep"],
+    "allowed_tools": ["Read(./**)", "Edit(./**)", "Write(./**)", "Glob(./**)", "Grep(./**)"],
+    "billing_mode": "subscription",
+    "speed_mode": "standard"
+  },
+  "price_sheet_version": "smoke-2026-09",
+  "phases": {
+    "producer": "none",
+    "capture": "none",
+    "consumer": "none"
+  },
+  "tasks": [
+    {
+      "id": "answer-file",
+      "family": "smoke",
+      "transfer_distance": "none",
+      "fixture": "repo",
+      "fixture_hash": "sha256:ca6f76a594ad47542a6fc5ee7e43dcc77a3a553aeb7d85dbf901ae5568daae15",
+      "verifier": "fake_answer_file",
+      "prompt": "Write the single line 42 into a file named answer.txt in this directory. Change nothing else."
+    }
+  ],
+  "arms": [
+    {
+      "id": "off",
+      "executor": "claude_live",
+      "product_version": "none",
+      "settings": {},
+      "settings_hash": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+      "memory_snapshot_hash": "sha256:empty",
+      "auxiliary_usage": "none"
+    }
+  ]
+}

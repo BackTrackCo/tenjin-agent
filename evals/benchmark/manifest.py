@@ -12,7 +12,8 @@ settings that actually run rather than the shorthand that named them.
 `validate` is the short list a schema cannot state, because each rule reads
 something outside its own subdocument: the fixture directory on disk, the hash
 of its bytes, whether ids repeat or the arms disagree on one executor, which of
-an arm's choices need a provisioned arm, and which tasks a slice's kind needs.
+an arm's choices need a provisioned arm, which tasks a slice's kind needs, and
+which manifests ask for a parallelism their own trials cannot take.
 """
 
 from __future__ import annotations
@@ -306,6 +307,27 @@ def _arm_rules(name: str, arm: dict[str, Any]) -> None:
         raise ManifestError(f"{name}.public_fallback needs a provisioned arm: there is no seeded config to write it into")
 
 
+def _degree_rules(data: dict[str, Any]) -> None:
+    """Two manifests whose trials cannot overlap, however many workers the pin asks for.
+
+    `runner.run` holds one mutual exclusion for the whole of a provisioning
+    trial, so a matrix whose every arm provisions runs one trial at a time
+    whatever the degree says, and `report.json` would state a parallelism the
+    run never had. A database-backed task starts its own Postgres container
+    per verification on the daemon every other trial shares, and two of those
+    contend for it rather than overlap on it.
+    """
+    degree = data["pins"].get("concurrency", 1)
+    if degree <= 1:
+        return
+    every = [item for task in data["tasks"] for item in (task, *([task["producer_task"]] if "producer_task" in task else []))]
+    database = sorted({item["id"] for item in every if "database" in item})
+    if database:
+        raise ManifestError(f"concurrency {degree} with database-backed task(s) {', '.join(database)}: they contend for one Docker daemon rather than overlap on it")
+    if all(arm.get("provision") for arm in data["arms"]):
+        raise ManifestError(f"concurrency {degree} with no arm that runs beside another: every arm provisions the one shared shelf, which admits one trial at a time")
+
+
 def _validate_slice(data: dict[str, Any]) -> None:
     """A slice is one named variation of a local run, with exactly the fields its kind needs."""
     item = data["slice"]
@@ -351,6 +373,7 @@ def validate(data: dict[str, Any], base: Path) -> None:
     # token totals would not be comparable under one manifest.
     if len({arm["executor"] for arm in data["arms"]}) != 1:
         raise ManifestError("arms are unbalanced: every arm must share one executor")
+    _degree_rules(data)
     if "slice" in data:
         _validate_slice(data)
     if data.get("slice", {}).get("kind") != "recursive" and any(SUBAGENT_TOOL in task.get("tools", data["pins"].get("tools", [])) for task in data["tasks"]):

@@ -222,6 +222,20 @@ def test_an_oracle_that_does_not_name_its_one_test_file_is_refused_before_launch
         config(data, base)
 
 
+def test_a_database_backed_task_caps_the_run_at_one_trial(historical):
+    # Each verification starts its own Postgres beside the verifier's container
+    # on the one daemon every other trial shares, so they contend rather than
+    # overlap and the manifest says so before the run starts.
+    data, base = historical
+    data['tasks'][0]['database'] = 'postgres'
+    config(data, base)
+    data['pins']['concurrency'] = 2
+    with pytest.raises(manifest.ManifestError, match='Docker daemon'):
+        config(data, base)
+    del data['tasks'][0]['database']
+    config(data, base)
+
+
 def test_provenance_cannot_name_another_oracle_even_with_new_support_hash(historical):
     data, base = historical
     path = base/'verification/source-receipt.json'
