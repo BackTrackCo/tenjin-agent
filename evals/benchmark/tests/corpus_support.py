@@ -24,6 +24,37 @@ PNPM_GUARD = "process.env.npm_config_user_agent"
 # A base64 run long enough to be a payload, which a frozen fixture never holds.
 BLOB = re.compile(r"[A-Za-z0-9+/]{40,}={0,2}")
 PNPM_GUARD_MESSAGE = "this repository's tests run through pnpm; see the repository convention"
+# A hidden oracle is plain Node: it names what it pins in its own import list
+# and in the paths it spawns, so the contract a prompt owes the agent is read
+# off the oracle rather than restated by hand.
+NAMED_IMPORT = re.compile(r"import\s*\{([^}]*)\}\s*from\s*'([^']+)'")
+LITERAL = re.compile(r"'((?:[^'\\\n]|\\.)*)'")
+SOURCE_PATH = re.compile(r"^(?:\.\./)*[\w@./-]+\.(?:mjs|cjs|js|ts)$")
+
+
+def _fixture_relative(specifier: str) -> str:
+    """A hidden oracle sits one directory above the fixture root it judges."""
+    return re.sub(r"^(?:\.{1,2}/)+", "", specifier) if specifier.startswith(".") else specifier
+
+
+def oracle_contract(oracle: Path) -> tuple[frozenset[str], frozenset[str]]:
+    """The exported names and the module paths a hidden oracle pins.
+
+    Each one is a name the agent has to get exactly right and cannot derive
+    from a failing run, so a prompt that omits one grades naming luck. Node's
+    own modules are the oracle's harness, never the task's interface.
+    """
+    text = oracle.read_text(encoding="utf-8")
+    names: set[str] = set()
+    paths: set[str] = set()
+    for block, specifier in NAMED_IMPORT.findall(text):
+        if specifier.startswith("node:"):
+            continue
+        names.update(part.strip() for part in block.split(",") if part.strip())
+        paths.add(_fixture_relative(specifier))
+    # A spawned entry point is pinned by its path alone; it has no import line.
+    paths.update(_fixture_relative(literal) for literal in LITERAL.findall(text) if SOURCE_PATH.match(literal))
+    return frozenset(names), frozenset(paths)
 
 
 def link_workspace_packages(repo: Path) -> list[str]:

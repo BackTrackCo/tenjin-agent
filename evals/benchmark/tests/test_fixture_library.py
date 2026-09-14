@@ -192,6 +192,20 @@ def test_catalog_tasks_match_their_fixtures_and_keep_verifiers_hidden(task: dict
     corpus_support.assert_vitest_fixture(fixture, task["id"], trap=task["id"] in {"actor", "budget", "candidate", "slug"}, package_dir=verifier.TASK_PACKAGES[task["id"]], test_ext="ts" if task["id"] == "alias" else "mjs")
 
 
+@pytest.mark.parametrize("task", [task for task in CATALOG if task["verifier"] != "fake_answer_file"], ids=lambda task: task["id"])
+def test_every_task_prompt_states_the_interface_its_oracle_pins(task: dict) -> None:
+    """An underspecified prompt grades naming luck rather than the fix.
+
+    The hidden oracle imports exported names from module paths and spawns entry
+    points by path. None of that is derivable from a red run, so every one of
+    them is stated in the work order the agent is given.
+    """
+    names, paths = corpus_support.oracle_contract(verifier.HIDDEN / task["id"] / verifier.HIDDEN_TESTS / f"{task['id']}.test.mjs")
+    assert names or paths
+    for pinned in sorted(names | paths):
+        assert pinned in task["prompt"], f"{task['id']}: the prompt leaves {pinned} to luck"
+
+
 def test_the_catalog_covers_every_registered_task_and_ships_each_directory_once() -> None:
     assert {task["id"] for task in CATALOG} == set(verifier.TASK_PACKAGES) | {"answer-file"}
     assert {task["fixture"] for task in CATALOG} == {p.name for p in LIVE.iterdir() if p.is_dir() and p.name != "lessons"}
