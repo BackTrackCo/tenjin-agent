@@ -225,3 +225,12 @@ def test_actor_instructions_allow_recursive_experiments_without_loosening_networ
     assert "do not spawn subagents" not in instructions
     assert "Network access is limited to configured Tenjin search/read/inspect commands" in instructions
     assert "Do not publish from the task container" in instructions
+
+
+def test_a_verdict_is_the_exit_code_and_never_a_word_in_the_output(repo: Path, run_dir: Path) -> None:
+    # A green run prints the word FAIL whenever its own output quotes a fixed
+    # case, and a red one still prints "0 failed" for the files that passed.
+    noisy = verifier.VerifierSpec(name="noisy", argv=lambda _: [sys.executable, "-c", "print('FAIL 3 assertions failed'); raise SystemExit(0)"], timeout_s=30)
+    quiet = verifier.VerifierSpec(name="quiet", argv=lambda _: [sys.executable, "-c", "print('ok: 0 failed, every suite passed'); raise SystemExit(1)"], timeout_s=30)
+    assert verifier.run(noisy, repo, run_dir).outcome == "pass"
+    assert verifier.run(quiet, repo, run_dir).outcome == "fail"

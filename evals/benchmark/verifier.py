@@ -180,7 +180,12 @@ def run(spec: VerifierSpec, repo_copy: Path, allowed_root: Path, *, image: str |
 
 
 def outcome_of(exit_code: int | None) -> str:
-    """Exit 0 is pass, 1 is fail, anything else means the verifier could not decide."""
+    """Exit 0 is pass, 1 is fail, anything else means the verifier could not decide.
+
+    The exit code is the whole verdict. A passing run's own output can carry the
+    word FAIL and a failing one can carry the word passed, so no verdict here is
+    ever read out of the text a verifier printed.
+    """
     return {0: "pass", 1: "fail"}.get(exit_code, "invalid")  # type: ignore[arg-type]
 
 
