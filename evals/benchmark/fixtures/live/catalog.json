@@ -99,5 +99,57 @@
       "verifier": "fake_answer_file",
       "prompt": "Write the single line 42 into a file named answer.txt in this directory. Change nothing else."
     }
-  ]
+  ],
+  "verifiers": {
+    "node_test_actor": {
+      "prescriptive": false,
+      "private_names": [],
+      "exact_prose": []
+    },
+    "node_test_alias": {
+      "prescriptive": true,
+      "private_names": ["src/window.mjs"],
+      "exact_prose": []
+    },
+    "node_test_ambient": {
+      "prescriptive": false,
+      "private_names": [],
+      "exact_prose": []
+    },
+    "node_test_budget": {
+      "prescriptive": false,
+      "private_names": [],
+      "exact_prose": []
+    },
+    "node_test_candidate": {
+      "prescriptive": false,
+      "private_names": [],
+      "exact_prose": []
+    },
+    "node_test_core": {
+      "prescriptive": false,
+      "private_names": [],
+      "exact_prose": []
+    },
+    "node_test_level": {
+      "prescriptive": true,
+      "private_names": ["Level", "levelOf", "src/level.ts"],
+      "exact_prose": []
+    },
+    "node_test_money": {
+      "prescriptive": false,
+      "private_names": [],
+      "exact_prose": []
+    },
+    "node_test_shadow": {
+      "prescriptive": false,
+      "private_names": [],
+      "exact_prose": []
+    },
+    "node_test_slug": {
+      "prescriptive": false,
+      "private_names": [],
+      "exact_prose": []
+    }
+  }
 }

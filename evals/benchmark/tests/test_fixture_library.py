@@ -18,7 +18,11 @@ from evals.benchmark.tests.test_verifier import run_dir, repo, _write_marker
 
 LIVE = cli.FIXTURES / "live"
 ACTOR_FIXTURE = LIVE / "actor"
-CATALOG = json.loads((LIVE / "catalog.json").read_text())["tasks"]
+LIBRARY = json.loads((LIVE / "catalog.json").read_text())
+CATALOG = LIBRARY["tasks"]
+# Per-verifier metadata sits beside the tasks rather than inside them: a task
+# entry is the manifest's task shape, which accepts no additional properties.
+VERIFIERS = LIBRARY["verifiers"]
 # The product's prompt hook asks the shelf what the agent typed, cut to
 # `queryMax` (src/hooks/question.ts): 512 characters for every trigger except a
 # dispatch work order. Whatever leads the prompt is what the query is spent on.
@@ -261,6 +265,44 @@ def test_every_task_prompt_leads_with_its_ticket_inside_the_queried_head(task: d
     for marker in PREAMBLE:
         found = prompt.find(marker)
         assert found == -1 or found > len(ticket), f"{task['id']}: {marker!r} leads the query instead of the ticket"
+
+
+@pytest.mark.parametrize("task", sorted(verifier.TASK_PACKAGES))
+def test_every_hidden_verifier_records_the_prescriptiveness_derived_from_its_oracle(task: str) -> None:
+    """A verifier states how much of the fix's shape it dictates, and the file is checked.
+
+    The audit in `fixtures/live/README.md` is the judgement; this is the fact it
+    is judged from, derived from the oracle rather than asserted by its author,
+    so a new verifier cannot ship without it and a recorded flag cannot drift
+    from the file it describes.
+    """
+    oracle = verifier.HIDDEN / task / verifier.HIDDEN_TESTS / f"{task}.test.mjs"
+    assert VERIFIERS[f"node_test_{task}"] == corpus_support.prescriptiveness(oracle, LIVE / task, task)
+
+
+def test_the_prescriptiveness_flag_covers_every_hidden_verifier_and_only_those() -> None:
+    assert set(VERIFIERS) == {f"node_test_{task}" for task in verifier.TASK_PACKAGES}
+    # The two this library has: one names an enum and the module it lives in
+    # behind a path alias, the other pins the real path behind one.
+    assert {name for name, flag in VERIFIERS.items() if flag["prescriptive"]} == {"node_test_level", "node_test_alias"}
+
+
+def test_prescriptiveness_reads_a_private_helper_and_an_exact_sentence_off_the_oracle(tmp_path: Path) -> None:
+    """The derivation is a grep, so it is exercised against an oracle that trips it."""
+    fixture = tmp_path / "fixture"
+    (fixture / "tests").mkdir(parents=True)
+    (fixture / "tests" / "demo.test.mjs").write_text("import { shown } from '../src/demo.mjs';\n")
+    oracle = tmp_path / "demo.test.mjs"
+    oracle.write_text("// a comment quoting 'a sentence long enough to be prose' is not an assertion\n"
+                      "import { shown } from '../src/demo.mjs';\n"
+                      "import { hidden } from '../src/internal.mjs';\n"
+                      "assert.equal(shown(), '123.46 USDC');\n")
+    flag = corpus_support.prescriptiveness(oracle, fixture, "demo")
+    assert flag == {"prescriptive": True, "private_names": ["hidden", "src/internal.mjs"], "exact_prose": []}
+    oracle.write_text("import { shown } from '../src/demo.mjs';\n"
+                      "assert.equal(shown(), 'the value must be a positive integer');\n")
+    assert corpus_support.prescriptiveness(oracle, fixture, "demo") == {
+        "prescriptive": True, "private_names": [], "exact_prose": ["the value must be a positive integer"]}
 
 
 def test_the_catalog_covers_every_registered_task_and_ships_each_directory_once() -> None:

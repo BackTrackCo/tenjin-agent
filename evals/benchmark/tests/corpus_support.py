@@ -57,6 +57,58 @@ def oracle_contract(oracle: Path) -> tuple[frozenset[str], frozenset[str]]:
     return frozenset(names), frozenset(paths)
 
 
+# Prose is a sentence the agent would have to reproduce word for word. Three
+# words and 24 characters keeps a formatted value out of it: '123.46 USDC' is
+# an output, 'the value must be a positive integer' is a wording the oracle
+# imposes. Comments come off first, because prose in a comment is the file
+# explaining itself and is asserted on nothing.
+PROSE_WORDS = 3
+PROSE_CHARS = 24
+LINE_COMMENT = re.compile(r"//[^\n]*")
+
+
+def visible_interface(fixture: Path, task: str) -> tuple[frozenset[str], frozenset[str]]:
+    """The names and module paths the task's own visible test already reaches for.
+
+    This is the interface a red run teaches. A relative specifier is resolved
+    against the test that writes it and stated from the fixture root, so a
+    package's `../src/core.mjs` and the oracle's `../packages/core/src/core.mjs`
+    are recognised as the one module they both are.
+    """
+    names: set[str] = set()
+    paths: set[str] = set()
+    for test in sorted(fixture.rglob(f"tests/{task}.test.*")):
+        if "node_modules" in test.parts:
+            continue
+        here = os.path.relpath(test.parent, fixture)
+        text = test.read_text(encoding="utf-8")
+        for block, specifier in NAMED_IMPORT.findall(text):
+            if specifier.startswith("node:") or specifier == "vitest":
+                continue
+            names.update(part.strip() for part in block.split(",") if part.strip())
+            paths.add(os.path.normpath(os.path.join(here, specifier)) if specifier.startswith(".") else specifier)
+        # A spawned entry point is written from the working directory, not from the test.
+        paths.update(literal for literal in LITERAL.findall(text) if SOURCE_PATH.match(literal) and not literal.startswith("."))
+    return frozenset(names), frozenset(paths)
+
+
+def prescriptiveness(oracle: Path, fixture: Path, task: str) -> dict:
+    """How much of the fix's shape a hidden oracle dictates, read off the oracle.
+
+    A prescriptive oracle grades more than the behaviour: it names a helper the
+    visible run never touches, so the agent has to keep an internal name or path
+    it would otherwise be free to change, or it pins exact prose. Neither is
+    forbidden, and both have to be answerable from the prompt, so the fact is
+    recorded per verifier rather than argued about per review.
+    """
+    names, paths = oracle_contract(oracle)
+    seen_names, seen_paths = visible_interface(fixture, task)
+    prose = {literal for literal in LITERAL.findall(LINE_COMMENT.sub("", oracle.read_text(encoding="utf-8")))
+             if len(literal) >= PROSE_CHARS and len(literal.split()) >= PROSE_WORDS}
+    private = sorted((names - seen_names) | (paths - seen_paths))
+    return {"prescriptive": bool(private or prose), "private_names": private, "exact_prose": sorted(prose)}
+
+
 def link_workspace_packages(repo: Path) -> list[str]:
     """The workspace links `pnpm install` would make, for a check that runs without the image.
 

@@ -45,6 +45,15 @@ run: a name it has to guess, a string nothing states, a digest of generated outp
 statement order. This table is the audit, and it is re-read whenever an oracle changes. No
 oracle in this library pins a digest, a prose string or a statement order.
 
+`catalog.json` carries the machine-readable half of it under `verifiers`, one entry per hidden
+verifier: `private_names` is every name and module path the oracle reaches for that the task's
+visible test never does, `exact_prose` is every sentence-length literal it asserts, and
+`prescriptive` is true when either is non-empty. The entries are derived from the oracle by
+`corpus_support.prescriptiveness` and compared against the file on every run, so an author
+cannot state one and ship another, and a new verifier is red until it records the flag. Two are
+prescriptive today, `node_test_alias` and `node_test_level`, and the rows below say where their
+agent learns what they pin.
+
 | task        | what the oracle pins beyond the visible run           | where the agent learns it                                      |
 | ----------- | ----------------------------------------------------- | -------------------------------------------------------------- |
 | `actor`     | a missing agent is the `root` actor of its session    | the injected case with no agent states the rule                |
