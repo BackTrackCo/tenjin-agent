@@ -54,6 +54,7 @@ import os
 import re
 import secrets
 import shutil
+import signal
 import sqlite3
 import statistics
 import subprocess
@@ -103,7 +104,10 @@ DEFAULT_CLAUDE_BIN = os.environ.get("BENCH_LITE_CLAUDE_BIN", "/Users/vraspar/.lo
 DEFAULT_TENJIN_BIN = os.environ.get("BENCH_LITE_TENJIN_BIN", "tenjin")
 
 DEFAULT_MODEL = "claude-sonnet-5"
-DEFAULT_TIMEOUT_MIN = 30
+# The wall-clock cap on ONE agent session. Smoke-1 capped a producer at 1800s
+# while it was still actively working (192 turns, 35 edits), so the default is
+# an hour; a pair may raise or lower it per session with `cap_s`.
+DEFAULT_CAP_S = 3600
 PNPM_TIMEOUT_S = 30 * 60
 ORACLE_TIMEOUT_S = 20 * 60
 CLI_TIMEOUT_S = 180
@@ -195,7 +199,14 @@ def render_cmd(
 ) -> str:
     parts = []
     for key in sorted(env_overlay or {}):
-        parts.append(f"{key}={shell_quote(redact(env_overlay[key]))}")
+        value = env_overlay[key]
+        if key == "PATH":
+            # The full PATH is ~1.5 KB of inherited entries and would bury every
+            # command in the log. Only the prefix this runner adds is news.
+            prefix = value.split(os.pathsep)[0] if value else ""
+            parts.append(f'PATH="{prefix}:$PATH"')
+            continue
+        parts.append(f"{key}={shell_quote(redact(value))}")
     parts.extend(shell_quote(redact(a)) for a in argv)
     prefix = f"(cd {shell_quote(str(cwd))} && " if cwd else "("
     suffix = f"   # <<< {stdin_chars} chars on stdin" if stdin_chars else ""
@@ -259,30 +270,57 @@ class Runner:
         env.update(env_overlay or {})
         started = time.monotonic()
         timed_out = False
+        pid: int | None = None
+        killed_group = False
+        group_gone: bool | None = None
+
+        # `subprocess.run(timeout=...)` kills only the direct child, so a timed-out
+        # `claude` would leave its own tool subprocesses (pnpm, vitest, a dev
+        # server) running with nobody to reap them. `start_new_session=True` puts
+        # the child in its own process GROUP, and the timeout path signals the
+        # whole group.
         try:
-            proc = subprocess.run(
+            proc = subprocess.Popen(
                 argv,
                 cwd=str(cwd) if cwd else None,
                 env=env,
-                input=stdin_text,
-                capture_output=True,
+                stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=timeout,
+                start_new_session=True,
             )
-            code, stdout, stderr = proc.returncode, proc.stdout, proc.stderr
-        except subprocess.TimeoutExpired as exc:
-            timed_out = True
-            code = None
-            stdout = exc.stdout.decode() if isinstance(exc.stdout, bytes) else (exc.stdout or "")
-            stderr = exc.stderr.decode() if isinstance(exc.stderr, bytes) else (exc.stderr or "")
         except FileNotFoundError as exc:
             code, stdout, stderr = 127, "", str(exc)
+        else:
+            pid = proc.pid
+            try:
+                stdout, stderr = proc.communicate(input=stdin_text, timeout=timeout)
+                code = proc.returncode
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                killed_group = True
+                self.log(f"  ! timeout after {timeout}s; killing process group {pid}")
+                _kill_group(pid)
+                try:
+                    # The pipes are still open in the (now dead) children; drain
+                    # what was produced before the kill.
+                    stdout, stderr = proc.communicate(timeout=30)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    stdout, stderr = proc.communicate()
+                code = proc.returncode
+                group_gone = _group_is_gone(pid)
+                self.log(f"  ! process group {pid} gone after kill: {group_gone}")
         duration_ms = int((time.monotonic() - started) * 1000)
 
         result = {
             "argv": [redact(a) for a in argv],
             "rendered": rendered,
             "exit_code": code,
+            "pid": pid,
+            "killed_process_group": killed_group,
+            "process_group_gone": group_gone,
             "stdout": redact(stdout),
             "stderr": redact(stderr),
             # The UNREDACTED stdout, for structured parsing only. Redaction runs
@@ -300,6 +338,43 @@ class Runner:
         if check and code != 0:
             die(f"command failed ({label or argv[0]}): exit={code}\n{tail(stderr or stdout, 2000)}")
         return result
+
+
+def _kill_group(pid: int) -> None:
+    """SIGTERM the child's whole process group, then SIGKILL what is left.
+
+    The group, not the pid: a timed-out agent has its own children (pnpm, vitest),
+    and killing only the parent orphans them onto a laptop that several sessions
+    already share."""
+    try:
+        pgid = os.getpgid(pid)
+    except (ProcessLookupError, PermissionError):
+        return
+    for sig, grace in ((signal.SIGTERM, 5.0), (signal.SIGKILL, 2.0)):
+        try:
+            os.killpg(pgid, sig)
+        except (ProcessLookupError, PermissionError):
+            return
+        deadline = time.monotonic() + grace
+        while time.monotonic() < deadline:
+            if _group_is_gone(pid):
+                return
+            time.sleep(0.1)
+
+
+def _group_is_gone(pid: int) -> bool:
+    """True when no process remains in the child's group. Signal 0 is the probe."""
+    try:
+        pgid = os.getpgid(pid)
+    except (ProcessLookupError, PermissionError):
+        return True
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+    return False
 
 
 def cli_json(result: dict[str, Any]) -> dict[str, Any] | None:
@@ -381,8 +456,51 @@ def ensure_passphrase(data_dir: Path, dry_run: bool) -> str:
     return value
 
 
+def node_path_prefix() -> str:
+    """The directory holding the `node` this runner resolves, for prepending to
+    PATH.
+
+    Smoke-1 ran its oracle under Node 18.14.2 while the runner itself was on
+    24.19.0, and corepack (shipped with node@24) died on `URL.canParse is not a
+    function` before a single test loaded. The cause was `bash -lc`: the `-l`
+    re-sources the login profile, which rebuilds PATH from scratch and puts an
+    older node first. The oracle is now run with `bash -c` so it inherits this
+    process's PATH, and this prefix pins the node explicitly on top of that so a
+    future profile change cannot silently move it again."""
+    found = shutil.which("node")
+    return str(Path(found).parent) if found else ""
+
+
+def base_env(extra: dict[str, str] | None = None) -> dict[str, str]:
+    """The env every runner-owned subprocess gets: CI, a pinned node, plus extras."""
+    env = {"CI": "true"}
+    prefix = node_path_prefix()
+    if prefix:
+        env["PATH"] = prefix + os.pathsep + os.environ.get("PATH", "")
+    env.update(extra or {})
+    return env
+
+
+def probe_node_version(runner: Runner, cwd: Path, env_overlay: dict[str, str]) -> dict[str, Any]:
+    """`node --version` and `pnpm --version` as the oracle's own env sees them,
+    recorded per session so a version skew is visible in the record rather than
+    only in a stack trace."""
+    out: dict[str, Any] = {}
+    for tool, argv in (("node", ["node", "--version"]), ("pnpm", ["pnpm", "--version"])):
+        res = runner.run(
+            ["bash", "-c", " ".join(argv)],
+            cwd=cwd,
+            env_overlay=env_overlay,
+            timeout=60,
+            label=f"probe.{tool}",
+        )
+        out[tool] = (res["stdout"] or res["stderr"] or "").strip().splitlines()[:1]
+        out[tool] = out[tool][0] if out[tool] else None
+    return out
+
+
 def tenjin_env(data_dir: Path, passphrase: str | None) -> dict[str, str]:
-    env = {"TENJIN_DATA_DIR": str(data_dir), "CI": "true"}
+    env = base_env({"TENJIN_DATA_DIR": str(data_dir)})
     if passphrase:
         env["TENJIN_WALLET_PASSPHRASE"] = passphrase
     return env
@@ -839,7 +957,7 @@ def stop_daemon(runner: Runner, args: argparse.Namespace, data_dir: Path) -> dic
     otherwise idle for `loop.idle_exit_min` after every session."""
     res = runner.run(
         [args.tenjin_bin, "daemon", "stop", "--json"],
-        env_overlay={"TENJIN_DATA_DIR": str(data_dir), "CI": "true"},
+        env_overlay=base_env({"TENJIN_DATA_DIR": str(data_dir)}),
         timeout=120,
         label="tenjin.daemon.stop",
     )
@@ -1144,6 +1262,7 @@ def run_session(
         return record
 
     daemon_stopped = False
+    patch_taken = False
     try:
         # ---- the settings surface the agent will read ----------------------
         ensure_project_settings(runner, worktree)
@@ -1171,7 +1290,7 @@ def run_session(
             pnpm = runner.run(
                 ["pnpm", "install", "--frozen-lockfile", "--prefer-offline"],
                 cwd=worktree,
-                env_overlay={"CI": "true"},
+                env_overlay=base_env(),
                 timeout=PNPM_TIMEOUT_S,
                 label="pnpm.install",
             )
@@ -1184,18 +1303,29 @@ def run_session(
             if pnpm["exit_code"] not in (0, None):
                 record["errors"].append("pnpm install failed")
 
+        # ---- what runtime will the oracle actually see ---------------------
+        # Recorded per session because smoke-1's oracle silently ran on a
+        # different node than the runner, and the only evidence was a corepack
+        # stack trace.
+        if not runner.dry_run:
+            record["runtime"] = probe_node_version(runner, worktree, base_env())
+        else:
+            runner.log("# probe node --version / pnpm --version in the oracle env")
+
         # ---- the agent ----------------------------------------------------
         # NOTE: no HOME override here. The agent runs under the real HOME because
         # that is where its login lives; the isolation comes from
         # `--setting-sources project` plus a per-session data dir.
-        env_overlay = {
-            "TENJIN_DATA_DIR": str(data_dir),
-            "CI": "true",
-        }
+        # The agent gets the pinned node too, so that a test it runs itself sees
+        # the same runtime the oracle will. Identical in both conditions.
+        env_overlay = base_env({"TENJIN_DATA_DIR": str(data_dir)})
         if condition == "tenjin" and passphrase:
             env_overlay["TENJIN_WALLET_PASSPHRASE"] = passphrase
 
-        timeout_s = args.timeout_min * 60
+        cap_s = int(spec.get("cap_s") or args.cap_s)
+        record["cap_s"] = cap_s
+        record["cap_source"] = "pairs.json" if spec.get("cap_s") else "--cap-s"
+        timeout_s = cap_s
         started = time.monotonic()
         agent = runner.run(
             claude_argv(args),
@@ -1214,6 +1344,9 @@ def run_session(
         record["agent"] = {
             "exit_code": agent["exit_code"],
             "timed_out": agent["timed_out"],
+            "pid": agent.get("pid"),
+            "killed_process_group": agent.get("killed_process_group"),
+            "process_group_gone": agent.get("process_group_gone"),
             "stderr_tail": tail(agent["stderr"], 2000),
             **parsed,
         }
@@ -1232,7 +1365,10 @@ def run_session(
                 )
 
         # ---- the agent's diff, kept ---------------------------------------
+        # Also attempted in the `finally` below, so an exception anywhere above
+        # cannot cost us the agent's work.
         record["diff"] = capture_patch(runner, worktree, session_dir / "agent.patch")
+        patch_taken = True
 
         # ---- the oracle ---------------------------------------------------
         record["oracle"] = run_oracle(runner, args, spec["oracle"], pairs_dir, worktree)
@@ -1251,6 +1387,15 @@ def run_session(
             else:
                 runner.log(f"# read ledger {data_dir}/loop.db (mode=ro&immutable=1)")
     finally:
+        # THE DIFF IS TAKEN BEFORE THE WORKTREE GOES, ALWAYS. A capped or crashed
+        # session still did real work, and the patch is the only copy of it once
+        # the worktree is removed.
+        if not patch_taken and not runner.dry_run and worktree.is_dir():
+            try:
+                record["diff"] = capture_patch(runner, worktree, session_dir / "agent.patch")
+                record["diff"]["taken_in_finally"] = True
+            except Exception as exc:  # never let cleanup lose the daemon stop
+                record["errors"].append(f"could not capture the diff: {exc}")
         if condition == "tenjin" and not daemon_stopped:
             # Belt and braces: a failure above must not strand a daemon.
             stop_daemon(runner, args, data_dir)
@@ -1320,10 +1465,13 @@ def run_oracle(
         result["passed"] = None
         return result
 
+    # `bash -c`, NOT `bash -lc`. The login shell re-sources the profile and
+    # rebuilds PATH, which is how smoke-1's oracle ended up on Node 18 while the
+    # runner was on 24. See node_path_prefix().
     res = runner.run(
-        ["bash", "-lc", command],
+        ["bash", "-c", command],
         cwd=worktree,
-        env_overlay={"CI": "true"},
+        env_overlay=base_env(),
         timeout=oracle.get("timeout_s", ORACLE_TIMEOUT_S),
         label="oracle",
     )
@@ -1372,7 +1520,14 @@ def tokens_of(record: dict[str, Any]) -> dict[str, int]:
     }
 
 
-def build_report(run_dir: Path, records: list[dict[str, Any]], args: argparse.Namespace) -> str:
+def build_report(run_dir: Path, all_records: list[dict[str, Any]], args: argparse.Namespace) -> str:
+    # A repeat whose producer was capped or errored is EXCLUDED from every median
+    # and total below. In the tenjin condition its consumer never ran at all (the
+    # producer's Stop hook captured nothing to find), and letting a zero-token
+    # skip into a median would quietly report the shelf as a huge saving.
+    invalid_records = [r for r in all_records if r.get("invalid") or r.get("skipped")]
+    records = [r for r in all_records if not (r.get("invalid") or r.get("skipped"))]
+
     by_key: dict[tuple[str, str, int, str], dict[str, Any]] = {}
     for r in records:
         by_key[(r["pair_id"], r["condition"], r["repeat"], r["role"])] = r
@@ -1388,8 +1543,14 @@ def build_report(run_dir: Path, records: list[dict[str, Any]], args: argparse.Na
     lines.append("")
     lines.append(f"- generated: {now_iso()}")
     lines.append(f"- model: `{args.model}`")
-    lines.append(f"- sessions recorded: {len(records)}")
+    lines.append(f"- sessions recorded: {len(all_records)}")
+    lines.append(f"- sessions scored: {len(records)}")
     lines.append(f"- repeats: {args.repeats}")
+    lines.append(f"- cap per session: {args.cap_s}s")
+    if invalid_records:
+        lines.append(
+            f"- **excluded as invalid: {len(invalid_records)}** (see Invalid repeats below)"
+        )
     lines.append("")
     lines.append("Token columns are the agent's own `usage` block: `in` is uncached input,")
     lines.append("`cc` cache-creation input, `cr` cache-read input, `out` output. `total` is")
@@ -1566,11 +1727,43 @@ def build_report(run_dir: Path, records: list[dict[str, Any]], args: argparse.Na
             )
         lines.append("")
 
+    if invalid_records:
+        lines.append("## Invalid repeats (excluded from every number above)")
+        lines.append("")
+        for r in sorted(
+            invalid_records, key=lambda x: (x["pair_id"], x["condition"], x["repeat"], x["role"])
+        ):
+            why = r.get("skipped") or r.get("invalid")
+            what = "SKIPPED" if r.get("skipped") else "ran, not scored"
+            lines.append(
+                f"- {r['pair_id']}/{r['condition']}/r{r['repeat']}/{r['role']}: {what} — {why}"
+            )
+        lines.append("")
+        lines.append(
+            "A capped or errored producer never reaches its Stop hook, so in the tenjin "
+            "condition nothing was captured and nothing was published. Re-run those repeats "
+            "with a higher `--cap-s` before drawing any conclusion from the pair."
+        )
+        lines.append("")
+
+    runtimes = {
+        json.dumps(r.get("runtime"), sort_keys=True)
+        for r in all_records
+        if r.get("runtime")
+    }
+    if len(runtimes) > 1:
+        lines.append("## Runtime skew")
+        lines.append("")
+        lines.append("Sessions did not all see the same node/pnpm. Oracle results are suspect.")
+        for rt in sorted(runtimes):
+            lines.append(f"- `{rt}`")
+        lines.append("")
+
     problems = [r for r in records if r.get("errors") or r.get("capped")]
     lines.append("## Health")
     lines.append("")
     if not problems:
-        lines.append("Every session ran to completion with no recorded errors.")
+        lines.append("Every scored session ran to completion with no recorded errors.")
     else:
         for r in problems:
             flag = "CAPPED" if r.get("capped") else "ERROR"
@@ -1604,7 +1797,7 @@ def preflight(runner: Runner, args: argparse.Namespace, run_dir: Path) -> dict[s
     res = runner.run(
         claude_argv(args),
         cwd=workdir,
-        env_overlay={"CI": "true"},
+        env_overlay=base_env(),
         stdin_text="reply with the single word ok",
         timeout=300,
         label="claude.preflight",
@@ -1665,14 +1858,17 @@ def cmd_run(args: argparse.Namespace) -> int:
         run_dir.mkdir(parents=True, exist_ok=True)
     runner = Runner(run_dir / "commands.log", args.dry_run)
 
-    plan = [
-        (pair, cond, rep, role)
+    # A GROUP is one (pair, condition, repeat): the producer and the consumer that
+    # depend on each other. Grouping rather than listing flat sessions is what
+    # lets a failed producer invalidate its own repeat.
+    groups = [
+        (pair, cond, rep)
         for pair in pairs
         for cond in conditions
         for rep in range(1, args.repeats + 1)
-        for role in ROLES
-        if role in sessions
     ]
+    roles_in_play = [r for r in ROLES if r in sessions]
+    plan = [(pair, cond, rep, role) for (pair, cond, rep) in groups for role in roles_in_play]
 
     out(f"bench-lite run {run_id}")
     out(f"  pairs      : {', '.join(p['id'] for p in pairs)}")
@@ -1697,7 +1893,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         "claude_bin": args.claude_bin,
         "tenjin_bin": args.tenjin_bin,
         "permission_mode": args.permission_mode,
-        "timeout_min": args.timeout_min,
+        "cap_s": args.cap_s,
         "workers": args.workers,
         "dry_run": args.dry_run,
     }
@@ -1723,23 +1919,78 @@ def cmd_run(args: argparse.Namespace) -> int:
                 with records_path.open("a", encoding="utf-8") as fh:
                     fh.write(json.dumps(record, sort_keys=True, default=str) + "\n")
 
-    def work(item: tuple[dict[str, Any], str, int, str]) -> None:
-        pair, cond, rep, role = item
-        record = run_session(runner, args, run_dir, pairs_path.parent, pair, role, cond, rep, run_id)
-        emit(record)
+    def session_failed(record: dict[str, Any]) -> str | None:
+        """Why this session cannot be trusted to have finished its work, or None."""
+        if record.get("capped"):
+            return "producer_capped"
+        if record.get("errors"):
+            return "producer_errored"
+        agent = record.get("agent") or {}
+        if agent.get("exit_code") not in (0, None) or agent.get("is_error") is True:
+            return "producer_errored"
+        return None
 
-    # Only `off` may be parallel. In `tenjin`, B must see what A published, so
-    # the pair is a chain; and two `tenjin` sessions at once would be two loop
-    # daemons and two pnpm installs on a 16 GB laptop.
-    parallel = [i for i in plan if i[1] == "off"] if args.workers > 1 else []
-    serial = [i for i in plan if i not in parallel]
+    def run_group(group: tuple[dict[str, Any], str, int]) -> None:
+        """One (pair, condition, repeat), producer first.
+
+        A producer that is capped or errored never reached its Stop hook, so in
+        the `tenjin` condition nothing was captured and nothing was published —
+        and a consumer run against that empty shelf would measure the absence of
+        a publish, not the presence of reuse. So the repeat is marked invalid and
+        the consumer is SKIPPED there. In `off` there is nothing to publish, so
+        the consumer still runs; the repeat is flagged so the pair totals can be
+        excluded alongside their tenjin counterpart.
+        """
+        pair, cond, rep = group
+        invalid: str | None = None
+
+        for role in roles_in_play:
+            if role == "consumer" and invalid is not None and cond == "tenjin":
+                skipped = {
+                    "run_id": run_id,
+                    "pair_id": pair["id"],
+                    "role": role,
+                    "condition": cond,
+                    "repeat": rep,
+                    "skipped": invalid,
+                    "invalid": invalid,
+                    "errors": [
+                        f"consumer not run: the {cond} producer for this repeat was "
+                        f"{invalid.replace('producer_', '')}, so its Stop hook never "
+                        "captured or published anything"
+                    ],
+                    "started_at": now_iso(),
+                    "finished_at": now_iso(),
+                }
+                out(f"\n=== {pair['id']}/{cond}/r{rep}/{role} === SKIPPED ({invalid})")
+                emit(skipped)
+                continue
+
+            record = run_session(
+                runner, args, run_dir, pairs_path.parent, pair, role, cond, rep, run_id
+            )
+            if role == "producer":
+                invalid = session_failed(record)
+                if invalid:
+                    record["invalid"] = invalid
+                    out(f"  !! producer {invalid}: this repeat is marked invalid")
+            elif invalid is not None:
+                record["invalid"] = invalid
+            emit(record)
+
+    # Only `off` may be parallel, and the unit of parallelism is the GROUP, so a
+    # producer and its consumer stay in order inside one worker. In `tenjin`, B
+    # must see what A published, and two loop daemons plus two pnpm installs at
+    # once is how a 16 GB laptop swaps to death.
+    parallel = [g for g in groups if g[1] == "off"] if args.workers > 1 else []
+    serial = [g for g in groups if g not in parallel]
 
     if parallel:
-        out(f"running {len(parallel)} `off` session(s) with {args.workers} worker(s)")
+        out(f"running {len(parallel)} `off` group(s) with {args.workers} worker(s)")
         with ThreadPoolExecutor(max_workers=args.workers) as pool:
-            list(pool.map(work, parallel))
-    for item in serial:
-        work(item)
+            list(pool.map(run_group, parallel))
+    for group in serial:
+        run_group(group)
 
     if args.dry_run:
         out("\ndry-run complete: no agent was called, nothing was installed, nothing published.")
@@ -1871,7 +2122,13 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--only", action="append", help="restrict to this pair id (repeatable)")
     run_p.add_argument("--sessions", default="producer,consumer", help="comma list: producer,consumer")
     run_p.add_argument("--workers", type=int, default=1, help="parallel workers; `off` sessions only")
-    run_p.add_argument("--timeout-min", type=int, default=DEFAULT_TIMEOUT_MIN)
+    run_p.add_argument(
+        "--cap-s",
+        type=int,
+        default=DEFAULT_CAP_S,
+        help="wall-clock cap per agent session in seconds; a pair may override it "
+        "per session with `cap_s` in pairs.json",
+    )
     run_p.add_argument("--claude-bin", default=DEFAULT_CLAUDE_BIN)
     run_p.add_argument("--permission-mode", default="bypassPermissions",
                        choices=["acceptEdits", "auto", "bypassPermissions", "dontAsk", "plan"])

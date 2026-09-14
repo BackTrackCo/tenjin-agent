@@ -56,7 +56,7 @@ A JSON array. Each entry is one producer/consumer pair:
           { "from": "pairs/x/oracle/a.test.ts", "to": "src/lib/__bench__/a.test.ts" },
         ],
         "command": "pnpm vitest run src/lib/__bench__/a.test.ts",
-        "timeout_s": 900, // optional, default 1200
+        "timeout_s": 900, // optional oracle timeout, default 1200
       },
     },
     "consumer": {/* the same five keys */},
@@ -94,6 +94,38 @@ graded by and cannot special-case it.
    output tails.
 7. For `tenjin`: stop the loop daemon, then read the ledger (below).
 8. Remove the worktree.
+
+The diff is taken in a `finally`, so a capped or crashed session still leaves its `agent.patch`
+behind. It lands in that session's own directory under `sessions/`, not in the run-dir root.
+
+## Runtime: the oracle must see the same node the agent did
+
+The oracle runs under `bash -c`, never `bash -lc`, and every runner-owned subprocess gets the
+directory of the resolved `node` prepended to `PATH`. This is not defensive styling. A real run
+put its oracle on Node 18.14.2 while the runner was on 24.19.0, and corepack died with
+`URL.canParse is not a function` before a single test loaded, which reads as a broken repo rather
+than a broken PATH. The `-l` was the cause: a login shell re-sources the profile and rebuilds
+`PATH` from scratch. Each session now records `node --version` and `pnpm --version` as its oracle
+env sees them, and the report raises a **Runtime skew** section if sessions disagree.
+
+## A failed producer invalidates its repeat
+
+A producer that is capped or errors never reaches its Stop hook, so under `tenjin` nothing was
+captured and nothing was published. Running the consumer against that empty shelf would measure
+the absence of a publish and report it as the absence of reuse.
+
+So the runner works in groups of one (pair, condition, repeat), producer first:
+
+- **`tenjin`**: the consumer is **skipped**, and both sessions are marked
+  `invalid: producer_capped` or `producer_errored`.
+- **`off`**: there is nothing to publish, so the consumer still runs; the repeat is flagged so it
+  can be excluded alongside its `tenjin` counterpart.
+
+Invalid sessions are excluded from every median and total and listed in their own report section.
+`--workers` parallelizes whole groups, never the two halves of one.
+
+A timed-out agent is killed by process **group**, not by pid, so its own `pnpm` and `vitest`
+children die with it. The pid and whether the group was confirmed gone are both recorded.
 
 ## Isolation
 
@@ -242,20 +274,20 @@ section naming every capped or errored session.
 
 ## Flags worth knowing
 
-| flag                                                    | default                            | notes                                                                                                                                                                                      |
-| ------------------------------------------------------- | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `--conditions`                                          | `off,tenjin`                       | comma list                                                                                                                                                                                 |
-| `--repeats`                                             | `3`                                | medians are taken across these                                                                                                                                                             |
-| `--sessions`                                            | `producer,consumer`                | run one side only                                                                                                                                                                          |
-| `--only <id>`                                           | all pairs                          | repeatable                                                                                                                                                                                 |
-| `--workers N`                                           | `1`                                | **`off` sessions only.** `tenjin` is a chain — B must see what A published — and two loop daemons plus two pnpm installs at once is how a 16 GB laptop swaps to death                      |
-| `--timeout-min`                                         | `30`                               | per session; a session that hits it is recorded as `capped`                                                                                                                                |
-| `--claude-bin`                                          | `/Users/vraspar/.local/bin/claude` | **the real binary.** The `claude` first on PATH is a cmux shim that makes harness detection pick Codex; the runner says so if they differ                                                  |
-| `--permission-mode`                                     | `bypassPermissions`                | the agent must edit files and run pnpm/vitest with nobody to answer a prompt. It is confined by `cwd` (the worktree), not by the permission mode                                           |
-| `--max-budget-usd`                                      | unset                              | per-session API spend cap, passed straight through                                                                                                                                         |
-| `--skip-install` / `--skip-oracle` / `--keep-worktrees` | off                                | debugging                                                                                                                                                                                  |
-| `--no-preflight`                                        | preflight on                       | the preflight is one tiny real agent call with the exact session flags; it proves the binary, the login under `--setting-sources project`, and the JSON parse before a run spends anything |
-| `--dry-run`                                             | off                                | prints the plan and every command; calls no agent, installs nothing, publishes nothing                                                                                                     |
+| flag                                                    | default                            | notes                                                                                                                                                                                                    |
+| ------------------------------------------------------- | ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--conditions`                                          | `off,tenjin`                       | comma list                                                                                                                                                                                               |
+| `--repeats`                                             | `3`                                | medians are taken across these                                                                                                                                                                           |
+| `--sessions`                                            | `producer,consumer`                | run one side only                                                                                                                                                                                        |
+| `--only <id>`                                           | all pairs                          | repeatable                                                                                                                                                                                               |
+| `--workers N`                                           | `1`                                | **`off` sessions only.** `tenjin` is a chain — B must see what A published — and two loop daemons plus two pnpm installs at once is how a 16 GB laptop swaps to death                                    |
+| `--cap-s`                                               | `3600`                             | wall-clock cap per agent session, in seconds. A pair may override it per session with `cap_s` in `pairs.json`. A session that hits the cap is recorded as `capped` and its whole process group is killed |
+| `--claude-bin`                                          | `/Users/vraspar/.local/bin/claude` | **the real binary.** The `claude` first on PATH is a cmux shim that makes harness detection pick Codex; the runner says so if they differ                                                                |
+| `--permission-mode`                                     | `bypassPermissions`                | the agent must edit files and run pnpm/vitest with nobody to answer a prompt. It is confined by `cwd` (the worktree), not by the permission mode                                                         |
+| `--max-budget-usd`                                      | unset                              | per-session API spend cap, passed straight through                                                                                                                                                       |
+| `--skip-install` / `--skip-oracle` / `--keep-worktrees` | off                                | debugging                                                                                                                                                                                                |
+| `--no-preflight`                                        | preflight on                       | the preflight is one tiny real agent call with the exact session flags; it proves the binary, the login under `--setting-sources project`, and the JSON parse before a run spends anything               |
+| `--dry-run`                                             | off                                | prints the plan and every command; calls no agent, installs nothing, publishes nothing                                                                                                                   |
 
 ## `cleanup`
 
