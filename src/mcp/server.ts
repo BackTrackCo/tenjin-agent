@@ -500,6 +500,10 @@ export function buildTenjinMcpServer(opts: BuildMcpOptions = {}): McpServer {
             ...(args.price !== undefined ? { price: args.price } : {}),
             ...(args.excerpt !== undefined ? { excerpt: args.excerpt } : {}),
             ...(args.key !== undefined ? { key: args.key } : {}),
+            // The schema above advertises it, so it has to arrive: without it
+            // `runPublish` reads `args.public` as undefined and a caller that
+            // asked for the marketplace silently gets a shelf publish at 0.
+            ...(args.public !== undefined ? { public: args.public } : {}),
           },
           ctx,
           { ...deps.publish, searchIdLabel: 'searchId' },
