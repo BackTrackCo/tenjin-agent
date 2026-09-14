@@ -121,7 +121,6 @@ async function connect(ctx: CommandContext, deps: ProfileDeps, scope: 'read' | '
   const client = {
     baseUrl: runtime.baseUrl,
     timeoutMs: ctx.flags.timeout,
-    ...(runtime.bypass !== undefined ? { bypass: runtime.bypass } : {}),
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   };
   return { auth, client };

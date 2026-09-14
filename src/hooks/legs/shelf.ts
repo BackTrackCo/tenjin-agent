@@ -1,81 +1,47 @@
 import {
   buildSearchRequest,
   searchResultSchema,
+  shelfSearchResponseSchema,
   type SearchCandidate,
   type SearchResult,
 } from '../../lib/agent-api';
-import { httpRequest, type ShelfBypass } from '../../lib/http';
-import { isTeamShelfOrigin } from '../../lib/settings';
-import { tryOriginOf } from '../../lib/url';
+import { httpRequest } from '../../lib/http';
+import { trimSlash } from '../../lib/url';
 import type {
   Answer,
+  Deps,
   KernelConfig,
-  Leg,
   LegResult,
   LegStatus,
   Question,
   Shelf,
+  Leg,
   Trigger,
 } from '../types';
 
 /**
- * One shelf, one leg, one transport (02-redesign.md §5, 13-pr-d-local-arms.md).
- * `searchLeg` and `keysLeg` are specs over {@link shelfLeg}: the same HTTP
- * transport, the same status map, the same bypass route, with the path, the
- * body and the verdict as data. Both endpoints answer in the search envelope
- * (`searchResultSchema`), so one parser reads both.
+ * ONE QUESTION IS ONE HTTP REQUEST (00-principles.md, "Do not double count").
  *
- * THIS LEG NEVER THROWS. A bad response is one row in a ledger, and the fire
- * has other legs to hear from. So every failure becomes a {@link LegStatus},
- * which is what tenjin-agent#286 asked for: a timeout, an abort, a refused
- * bypass, a non-JSON body and a JSON body of the wrong shape are five
+ * It used to be two: a team origin and a public origin, raced in one stage. A
+ * shelf is now a row on the one deployment, so the request goes to
+ * `/api/shelves/<slug>/search`, signed, and comes back with TWO candidate sets:
+ * the shelf's and the marketplace's. `searchLeg` therefore returns a
+ * {@link LegResult} PER SET, not per request, and `ask.ts` writes one `legs`
+ * row per set from them. `legs.shelf` keeps its name and its three values.
+ *
+ * THIS LEG NEVER THROWS. A bad response is one row in a ledger. So every
+ * failure becomes a {@link LegStatus}: a timeout, an abort, a rejected
+ * signature, a non-JSON body and a JSON body of the wrong shape are five
  * different facts and used to be one silent miss.
  *
  * THE LEG SENDS `Question.text` WHOLE. The cut to the trigger's bound is
- * `question()`'s (`hooks/question.ts`), made once when the plan is built, so
- * what the leg sends, what the ledger stores and what the claim key hashes are
- * one string. `buildSearchRequest` still throws `USAGE` past the bound, as the
- * last guard against a question that skipped that path.
+ * `question()`'s, made once when the plan is built, so what the leg sends, what
+ * the ledger stores and what the claim key hashes are one string.
  */
 
 /** Candidates asked for, so a search `verdict` can take a strong rank 2 or 3
  *  over an un-strong rank 1; the keys resolve asks for the same. */
 const SEARCH_LIMIT = 3;
-
-/** The team shelf's origin, or null when `baseUrl` is the public marketplace:
- *  keys go to a team shelf only (there is no public resolve), and the primer
- *  and the capture ask pick their wording by the same test. */
-export function teamOrigin(cfg: KernelConfig): string | null {
-  const origin = tryOriginOf(cfg.baseUrl);
-  return origin !== null && isTeamShelfOrigin(origin, cfg.publicShelfUrl) ? origin : null;
-}
-
-interface Route {
-  baseUrl: string;
-  bypass?: ShelfBypass;
-}
-
-/**
- * Which origin this shelf is, and what opens it.
- *
- * The same rule `lib/settings.ts` resolves for the CLI, minus the flag and env
- * layers a daemon has none of: the team shelf is `baseUrl` carrying the bypass
- * secret, and the secret rides only when `baseUrl` is a shelf of the team's own
- * — not production, not whatever `publicShelfUrl` points at. A secret with no
- * private shelf behind it is a setup that is not finished, and it fails to
- * public rather than posting the team's door key to the marketplace.
- */
-function routeOf(shelf: 'team' | 'public', cfg: KernelConfig): Route {
-  if (shelf === 'public') return { baseUrl: cfg.publicShelfUrl };
-  const origin = tryOriginOf(cfg.baseUrl);
-  const secret = cfg.shelfBypassSecret;
-  const carries =
-    secret.length > 0 && origin !== null && isTeamShelfOrigin(origin, cfg.publicShelfUrl);
-  return {
-    baseUrl: cfg.baseUrl,
-    ...(carries && origin !== null ? { bypass: { origin, secret } } : {}),
-  };
-}
 
 /** What the transport saw, for the failure map below. Captured off the
  *  Response because `httpRequest` reports the CLI's failure contract, which
@@ -86,21 +52,18 @@ interface Seen {
 }
 
 /**
- * Why this leg produced no answer.
+ * Why this call produced no answer.
  *
  * ONE CLOCK. The leg starts no timer of its own: `ask` already hands in
  * `AbortSignal.any([fire.signal, AbortSignal.timeout(budget)])`, and the abort
- * REASON says which of the two ended it — `AbortSignal.timeout` aborts with a
- * `TimeoutError` and `AbortSignal.any` forwards the first reason, so a deadline
- * and a harness that closed its socket stay distinguishable with nothing extra
- * running (00-principles.md, "One clock").
+ * REASON says which of the two ended it.
  *
  * The order is the order of certainty: a request that never returned beats one
- * we misread, and a status beats a body. 401 and 403 are `refused` rather than
- * `http_401`: on a team shelf that is Deployment Protection turning the bypass
- * key away, which is a setup problem and not a server outage. A 404 is
- * `http_404` like any other status: on the keys route it is the server saying
- * `not_enabled`, and the ledger row is the whole of what that costs.
+ * we misread, and a status beats a body. 401 and 403 are `refused` and now mean
+ * ONE thing: the signature was rejected. A 404 is `refused` too, and means this
+ * wallet is not a member of the configured shelf, or the slug names nothing —
+ * the route answers the same either way on purpose, and `tenjin doctor` is
+ * where a user learns which it was.
  */
 function statusOf(seen: Seen | null, signal: AbortSignal): LegStatus {
   if (signal.aborted) {
@@ -108,7 +71,7 @@ function statusOf(seen: Seen | null, signal: AbortSignal): LegStatus {
     return name === 'TimeoutError' ? 'timeout' : 'aborted';
   }
   if (seen === null) return 'error';
-  if (seen.status === 401 || seen.status === 403) return 'refused';
+  if (seen.status === 401 || seen.status === 403 || seen.status === 404) return 'refused';
   if (seen.status !== 200) return `http_${seen.status}`;
   // A 200 that is not JSON is a page where an answer should be — a gate, an
   // error template, a proxy. A 200 that IS JSON and still failed to parse is
@@ -135,73 +98,12 @@ function answerOf(shelf: Shelf, candidate: SearchCandidate, searchId: string): A
     ...(candidate.body !== undefined ? { text: candidate.body.text } : {}),
     ...(handle.length > 0 ? { handle } : {}),
     ...(excerpt !== undefined && excerpt.length > 0 ? { excerpt } : {}),
-  };
-}
-
-/** One shelf request as data: where it goes, what it carries, how its
- *  envelope is judged. */
-interface ShelfSpec {
-  shelf: Shelf;
-  route: Route;
-  path: string;
-  body(q: Question, budgetMs: number): unknown;
-  /** null = miss. Decides over the parsed envelope and nothing else. */
-  verdict(result: SearchResult): Answer | null;
-}
-
-function shelfLeg(spec: ShelfSpec, fetchImpl?: typeof fetch): Leg {
-  return {
-    shelf: spec.shelf,
-    async request(q: Question, budgetMs: number, signal: AbortSignal): Promise<LegResult> {
-      let seen: Seen | null = null;
-      const base: typeof fetch = fetchImpl ?? ((input, init) => fetch(input, init));
-      const probe: typeof fetch = async (input, init) => {
-        const res = await base(input, init);
-        seen = {
-          status: res.status,
-          json: (res.headers.get('content-type') ?? '').includes('json'),
-        };
-        return res;
-      };
-      try {
-        const res = await httpRequest(spec.route.baseUrl.replace(/\/+$/, '') + spec.path, {
-          method: 'POST',
-          // The transport's own timer is not a second deadline: `httpRequest`
-          // requires a number and the caller's signal is what actually ends the
-          // leg, so it gets the same budget and never fires first.
-          timeoutMs: Math.max(1, budgetMs),
-          signal,
-          fetchImpl: probe,
-          jsonBody: spec.body(q, budgetMs),
-          ...(spec.route.bypass !== undefined ? { bypass: spec.route.bypass } : {}),
-        });
-        if (!res.ok || res.status !== 200) return { status: statusOf(seen, signal) };
-        const parsed = searchResultSchema.safeParse(res.json);
-        if (!parsed.success) return { status: statusOf(seen, signal) };
-        const result = parsed.data;
-        const top = result.items[0];
-        return {
-          status: 'ok',
-          searchId: result.searchId,
-          calibration: result.calibration,
-          ...(top !== undefined ? { title: top.title, url: top.url, form: top.artifactType } : {}),
-          payload: result,
-        };
-      } catch {
-        return { status: statusOf(seen, signal) };
-      }
-    },
-    verdict(result: LegResult): Answer | null {
-      const payload = result.payload as SearchResult | undefined;
-      if (payload === undefined) return null;
-      return spec.verdict(payload);
-    },
+    // The server's stamp, copied and never inferred from which list it was in.
+    ...(candidate.shelf !== undefined ? { shelfRef: candidate.shelf } : {}),
   };
 }
 
 /**
- * `POST /api/search`: the question as built, whole.
- *
  * THE VERDICT IS THE ONLY THING THAT DECIDES WHETHER AN AGENT SEES A PIECE,
  * and it is the shelf's decision, not this machine's: the FIRST candidate the
  * server marked `strong` is the answer. Strong means its meaning leg was medium
@@ -211,63 +113,229 @@ function shelfLeg(spec: ShelfSpec, fetchImpl?: typeof fetch): Leg {
  *
  * THIS MACHINE HAS NO QUALITY RULE OF ITS OWN, so there is no fallback to fall
  * back to: a response the shelf vouched for nothing in is a MISS, and the fire
- * records `no-hit` rather than speaking rank 1 on nobody's word. What rank 1
- * was still rides on the leg's `LegResult` — title, url, form, searchId and
- * `calibration` — so the ledger keeps what the shelf offered, and how often a
- * lookup came back with an offer and no vouch, on a row whose `outcome` is
- * `miss`.
+ * records `no-hit` rather than speaking rank 1 on nobody's word.
+ */
+function strongestOf(shelf: Shelf, result: SearchResult): Answer | null {
+  const winner = result.items.find((c) => c.strong === true);
+  return winner === undefined ? null : answerOf(shelf, winner, result.searchId);
+}
+
+/** A key hit is exact, so there is nothing to select: the first item wins. */
+function firstOf(shelf: Shelf, result: SearchResult): Answer | null {
+  const top = result.items[0];
+  return top === undefined ? null : answerOf(shelf, top, result.searchId);
+}
+
+/** One set's `LegResult`, built from one parsed envelope. */
+function resultOf(
+  shelf: Shelf,
+  envelope: SearchResult,
+  verdict: (shelf: Shelf, r: SearchResult) => Answer | null,
+  extra: { authError?: string },
+): LegResult {
+  const top = envelope.items[0];
+  return {
+    shelf,
+    status: 'ok',
+    searchId: envelope.searchId,
+    calibration: envelope.calibration,
+    ...(top !== undefined ? { title: top.title, url: top.url, form: top.artifactType } : {}),
+    answer: verdict(shelf, envelope),
+    ...(extra.authError !== undefined ? { authError: extra.authError } : {}),
+  };
+}
+
+/** A failed call, as one row per set the call would have carried. */
+function failed(shelves: Shelf[], status: LegStatus, extra: { authError?: string }): LegResult[] {
+  return shelves.map((shelf) => ({
+    shelf,
+    status,
+    answer: null,
+    ...(extra.authError !== undefined ? { authError: extra.authError } : {}),
+  }));
+}
+
+/** Records what the transport saw without a second round trip. */
+function probeFetch(fetchImpl: typeof fetch | undefined, sink: (seen: Seen) => void): typeof fetch {
+  const base: typeof fetch = fetchImpl ?? ((input, init) => fetch(input, init));
+  return async (input, init) => {
+    const res = await base(input, init);
+    sink({ status: res.status, json: (res.headers.get('content-type') ?? '').includes('json') });
+    return res;
+  };
+}
+
+/**
+ * The search leg: ONE call, one or two sets.
+ *
+ * - `cfg.shelf !== null` and a signature: POST `/api/shelves/<slug>/search`
+ *   with `includePublic` from `team.publicFallback`. Two sets, `team` and
+ *   `public` (the latter empty when the server answered `public: null`, which
+ *   is what both a `false` we sent and an org policy of off look like).
+ * - no wallet: POST `/api/search`, unsigned. One `public` set, an ordinary
+ *   valid configuration.
+ * - a shelf is set and nothing local can sign: POST `/api/search`, unsigned,
+ *   and the row carries `authError`. THE PUBLIC ANSWER IS STILL DELIVERED.
+ *   This is the only case where the configured shelf is not the route that gets
+ *   called, and it has to be explicit: unlike the old shape, dropping the
+ *   signature no longer leaves a second leg already planned.
+ * - `cfg.shelf === null`: POST `/api/search`, unsigned. One `public` set.
  */
 export function searchLeg(
-  shelf: 'team' | 'public',
   trigger: Trigger,
   cfg: KernelConfig,
+  opts: { includePublic?: boolean } = {},
   fetchImpl?: typeof fetch,
 ): Leg {
-  return shelfLeg(
-    {
-      shelf,
-      route: routeOf(shelf, cfg),
-      path: '/api/search',
-      body: (q, budgetMs) =>
-        buildSearchRequest({
+  return {
+    shelves: cfg.shelf !== null ? ['team', 'public'] : ['public'],
+    async request(q, budgetMs, signal, deps): Promise<LegResult[]> {
+      const includePublic = opts.includePublic ?? cfg.team.publicFallback === 'on';
+      const base = trimSlash(cfg.baseUrl);
+      const publicBody = () =>
+        buildSearchRequest({ question: q.text, limit: SEARCH_LIMIT, trigger, budgetMs });
+
+      let authError: string | undefined;
+      if (cfg.shelf !== null) {
+        const url = `${base}/api/shelves/${encodeURIComponent(cfg.shelf)}/search`;
+        const body = buildSearchRequest({
           question: q.text,
           limit: SEARCH_LIMIT,
           trigger,
           budgetMs,
-        }),
-      verdict(result) {
-        const winner = result.items.find((c) => c.strong === true);
-        return winner === undefined ? null : answerOf(shelf, winner, result.searchId);
-      },
+          includePublic,
+        });
+        const auth = await deps.auth({ method: 'POST', url, body: JSON.stringify(body) });
+        if (auth.kind === 'signed') {
+          return await callShelf(url, body, auth.headers, budgetMs, signal, fetchImpl);
+        }
+        // `no-wallet` is not a failure and writes no error; `unauthenticated`
+        // is, and the row says so while the answer still gets delivered.
+        if (auth.kind === 'unauthenticated') authError = `unauthenticated: ${auth.detail}`;
+      }
+      return await callPublic(
+        `${base}/api/search`,
+        publicBody(),
+        budgetMs,
+        signal,
+        authError === undefined ? {} : { authError },
+        fetchImpl,
+      );
     },
-    fetchImpl,
-  );
+  };
 }
 
 /**
- * `POST /api/keys/resolve` on the team shelf: the failure arm's fingerprints,
- * exact keys and nothing else about the failure (`search.md`: a key hit is
- * exact, nothing to select, so the verdict is the first item). The route is
- * the team shelf's — there is no public resolve — and the arm plans this leg
- * only against a team origin (decision 13). A shelf with keys off answers 404
- * `not_enabled`, which is one `http_404` row and no machine-wide fact.
+ * `POST /api/shelves/<slug>/keys/resolve`: the failure arm's fingerprints,
+ * exact keys and nothing else about the failure. Planned only when a shelf is
+ * set (there is no public resolve, decision 13), and it yields one `keys` set.
+ * A shelf with keys off answers 404, which is one `refused` row and no
+ * machine-wide fact.
  */
 export function keysLeg(cfg: KernelConfig, keys: string[], fetchImpl?: typeof fetch): Leg {
-  return shelfLeg(
-    {
-      shelf: 'keys',
-      route: routeOf('team', cfg),
-      path: '/api/keys/resolve',
-      body: () => ({
+  return {
+    shelves: ['keys'],
+    async request(_q, budgetMs, signal, deps): Promise<LegResult[]> {
+      if (cfg.shelf === null) return failed(['keys'], 'error', {});
+      const url = `${trimSlash(cfg.baseUrl)}/api/shelves/${encodeURIComponent(cfg.shelf)}/keys/resolve`;
+      const body = {
         keys: keys.map((key) => ({ kind: 'fingerprint', key })),
         trigger: 'failure' satisfies Trigger,
         limit: SEARCH_LIMIT,
-      }),
-      verdict(result) {
-        const top = result.items[0];
-        return top === undefined ? null : answerOf('keys', top, result.searchId);
-      },
+      };
+      const auth = await deps.auth({ method: 'POST', url, body: JSON.stringify(body) });
+      if (auth.kind !== 'signed') {
+        // There is no unsigned resolve to fall back to, so this is a refused
+        // row and the text round is what the failure has left.
+        return failed(['keys'], 'refused', {
+          ...(auth.kind === 'unauthenticated'
+            ? { authError: `unauthenticated: ${auth.detail}` }
+            : {}),
+        });
+      }
+      let seen: Seen | null = null;
+      try {
+        const res = await httpRequest(url, {
+          method: 'POST',
+          timeoutMs: Math.max(1, budgetMs),
+          signal,
+          headers: auth.headers,
+          fetchImpl: probeFetch(fetchImpl, (s) => (seen = s)),
+          jsonBody: body,
+        });
+        if (!res.ok || res.status !== 200) return failed(['keys'], statusOf(seen, signal), {});
+        const parsed = searchResultSchema.safeParse(res.json);
+        if (!parsed.success) return failed(['keys'], statusOf(seen, signal), {});
+        return [resultOf('keys', parsed.data, firstOf, {})];
+      } catch {
+        return failed(['keys'], statusOf(seen, signal), {});
+      }
     },
-    fetchImpl,
-  );
+  };
+}
+
+/** The signed two-list call. */
+async function callShelf(
+  url: string,
+  body: unknown,
+  headers: Record<string, string>,
+  budgetMs: number,
+  signal: AbortSignal,
+  fetchImpl?: typeof fetch,
+): Promise<LegResult[]> {
+  let seen: Seen | null = null;
+  try {
+    const res = await httpRequest(url, {
+      method: 'POST',
+      // The transport's own timer is not a second deadline: `httpRequest`
+      // requires a number and the caller's signal is what actually ends the
+      // call, so it gets the same budget and never fires first.
+      timeoutMs: Math.max(1, budgetMs),
+      signal,
+      headers,
+      fetchImpl: probeFetch(fetchImpl, (s) => (seen = s)),
+      jsonBody: body,
+    });
+    if (!res.ok || res.status !== 200)
+      return failed(['team', 'public'], statusOf(seen, signal), {});
+    const parsed = shelfSearchResponseSchema.safeParse(res.json);
+    if (!parsed.success) return failed(['team', 'public'], statusOf(seen, signal), {});
+    const rows = [resultOf('team', parsed.data.shelf, strongestOf, {})];
+    // A `public` of null is not a failure and not a row: the marketplace was
+    // never run, either because this call said so or because the org's policy
+    // does. The CLI cannot tell those apart and does not need to.
+    if (parsed.data.public !== null) {
+      rows.push(resultOf('public', parsed.data.public, strongestOf, {}));
+    }
+    return rows;
+  } catch {
+    return failed(['team', 'public'], statusOf(seen, signal), {});
+  }
+}
+
+/** The unsigned public call: one set, however it was reached. */
+async function callPublic(
+  url: string,
+  body: unknown,
+  budgetMs: number,
+  signal: AbortSignal,
+  extra: { authError?: string },
+  fetchImpl?: typeof fetch,
+): Promise<LegResult[]> {
+  let seen: Seen | null = null;
+  try {
+    const res = await httpRequest(url, {
+      method: 'POST',
+      timeoutMs: Math.max(1, budgetMs),
+      signal,
+      fetchImpl: probeFetch(fetchImpl, (s) => (seen = s)),
+      jsonBody: body,
+    });
+    if (!res.ok || res.status !== 200) return failed(['public'], statusOf(seen, signal), extra);
+    const parsed = searchResultSchema.safeParse(res.json);
+    if (!parsed.success) return failed(['public'], statusOf(seen, signal), extra);
+    return [resultOf('public', parsed.data, strongestOf, extra)];
+  } catch {
+    return failed(['public'], statusOf(seen, signal), extra);
+  }
 }

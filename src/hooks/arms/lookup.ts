@@ -52,12 +52,6 @@ export interface LookupSpec {
   text(input: HookInput, ctx: FireContext): Maybe<string | null>;
   /** The prompt arm's junk rules, and no one else's. */
   skip?(text: string): SkipReason | null;
-  /**
-   * One stage, run in parallel. Never `keys`: that shelf answers a different
-   * question with a different leg (the failure arm's, PR D).
-   * `ask.ts` drops the public leg under `team.publicFallback: off`.
-   */
-  shelves: Array<'team' | 'public'>;
   /** `log` is the dispatch arm's: it parks what it found for the child and
    *  says nothing to the parent. */
   deliver: 'inject' | 'log';
@@ -98,7 +92,12 @@ export function lookupArm(spec: LookupSpec): Arm {
         const trigger = typeof spec.trigger === 'function' ? spec.trigger(ctx.input) : spec.trigger;
         const q = question(raw, trigger);
         if (q.text.length === 0) return null;
-        return { question: q, stages: [spec.shelves.map((s) => searchLeg(s, trigger, cfg))] };
+        // ONE STAGE, ONE LEG, ONE HTTP REQUEST. It used to be one stage racing
+        // two requests at two origins against one budget; the shelf route
+        // carries both candidate sets in one round trip, so the stage's budget
+        // is now one round trip rather than the slower of two, and the two
+        // `legs` rows come out of the one response.
+        return { question: q, stages: [[searchLeg(trigger, cfg)]] };
       };
       // A spec whose text is synchronous plans synchronously: the promise is
       // only ever the spec's own, so a sync spec costs no microtask.

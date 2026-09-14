@@ -6,7 +6,6 @@ import { fileURLToPath } from 'node:url';
 import { emitWriteNotice } from './output';
 import type { Io } from './output';
 import { loadRawConfig } from './config';
-import { isTeamModeConfig } from './settings';
 import { skillMaterialize } from './skill-materialize';
 import { readSkillFile, skillFrontmatterName, skillsDirsFor } from './skill-wiring';
 import { installSkill } from './skill-writer';
@@ -85,8 +84,8 @@ export async function syncBazaarSkill(
   // Same fail-safe as the heal's: an unreadable config throws out of here rather
   // than being guessed as public, which on a team machine would write the other
   // mode's text. The caller is already best-effort after a successful persist.
-  const teamMode =
-    deps.dataDir === undefined ? false : isTeamModeConfig(await loadRawConfig(deps.dataDir));
+  const raw = deps.dataDir === undefined ? null : await loadRawConfig(deps.dataDir);
+  const teamMode = raw !== null && raw.shelf !== null && raw.shelf !== undefined;
   let source: string;
   try {
     source =

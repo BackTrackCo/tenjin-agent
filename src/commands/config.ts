@@ -46,7 +46,7 @@ import type {
 import { onPath } from '../lib/skill-wiring';
 import type { Harness, HarnessAdapter } from '../adapters/types';
 import { ADAPTERS } from '../adapters/registry';
-import { isTeamShelfOrigin, loadProjectConfig } from '../lib/settings';
+import { loadProjectConfig } from '../lib/settings';
 import { configPath } from '../lib/paths';
 import { writeFileAtomic } from '../lib/atomic-json';
 import { installedHarnessInPlay } from '../lib/harness-presence';
@@ -62,7 +62,9 @@ import type { CommandContext, CommandResult } from '../context';
  * so an agent reads the dollar amount without re-parsing the string.
  */
 interface RenderedValue {
-  value: Money | string | string[] | boolean;
+  /** `null` is `shelf` unset: public only, and a real value rather than an
+   *  absence, so `--json` reports it rather than dropping the key. */
+  value: Money | string | string[] | boolean | null;
   threshold?: Money;
 }
 interface RenderedSetting extends RenderedValue {
@@ -117,11 +119,8 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
   sendMaxAmount:
     'hard cap per tenjin wallet send; unset = send refuses until set, 0 disables send, none = uncapped; never bypassed by --yes',
   allowlistCreators: 'only auto-pay these creators (empty = any)',
-  baseUrl: 'Tenjin API base URL: what publish/read/search go to (the team shelf, in team mode)',
-  publicShelfUrl:
-    'the public marketplace, consume-only: the second shelf a team-mode search falls through to',
-  shelfBypassSecret:
-    "the team shelf's Vercel protection-bypass secret; setting it is what turns team mode on (printed as set/unset)",
+  baseUrl: 'Tenjin API base URL: the one origin publish/read/search go to',
+  shelf: "the active shelf's slug, or unset for public only; set it with `tenjin shelf use <slug>`",
   rpcUrl: 'Base RPC endpoint for balance reads',
   evalCohort: 'opt in to the search evaluation cohort',
   bazaarPay: 'let `tenjin pay` spend at registry-listed non-Tenjin endpoints',
@@ -306,66 +305,7 @@ export async function runConfigSet(
     }
   }
   const entry = renderSetting(configKey, stored, 'file');
-  const warning = await halfWiredTeamShelf(configKey, ctx.dataDir);
-  return {
-    data: { key: configKey, ...entry, ...(warning !== undefined ? { warning } : {}) },
-    humanLines: [formatLine(configKey, entry), ...(warning !== undefined ? [warning] : [])],
-  };
-}
-
-/**
- * The half-wired team shelf, said out loud at the moment it is created.
- *
- * Team mode takes TWO settings — a private deployment in `baseUrl` and its
- * bypass secret — and the setup is two independent commands, so a machine can
- * easily end up with the secret and no shelf (run in the other order, or the
- * secret line alone on a second machine). The CLI fails that state safe to
- * public mode, which means an operator who thinks they are on the team shelf
- * would otherwise get no signal at all: publishes would go to the marketplace
- * under the public gates. Warn, do not refuse — the pair is legitimately
- * half-set between two commands, and refusing would make the documented order
- * the only order.
- *
- * THREE KEYS, not two. `isTeamShelfOrigin` also returns false when `baseUrl`
- * matches `publicShelfUrl`, so pointing `publicShelfUrl` at the team deployment
- * drops the machine out of team mode just as surely as unsetting the secret
- * would. It fails safe and doctor catches it later; this is the warning at the
- * moment it happens, on the third key of the same triple.
- */
-async function halfWiredTeamShelf(
-  configKey: ScalarConfigKey,
-  dataDir: string,
-): Promise<string | undefined> {
-  if (
-    configKey !== 'shelfBypassSecret' &&
-    configKey !== 'baseUrl' &&
-    configKey !== 'publicShelfUrl'
-  ) {
-    return undefined;
-  }
-  const config = await loadRawConfig(dataDir).catch(() => undefined);
-  if (config === undefined) return undefined;
-  const s = resolveSettings({ config, flags: {}, env: {} });
-  if (s.shelfBypassSecret.value.length === 0) return undefined;
-  const baseUrl = s.baseUrl.value;
-  if (isTeamShelfOrigin(new URL(baseUrl).origin, s.publicShelfUrl.value)) return undefined;
-  // WHICH KEY BROKE THE PAIR decides which fix to name. A baseUrl that now
-  // matches publicShelfUrl is not "the marketplace" in any recognizable sense —
-  // it is the operator's own two keys pointed at one place — and telling them to
-  // re-point baseUrl would be advice for the other half of the same collision.
-  const isProduction = isSameDeployment(new URL(baseUrl).origin, PRODUCTION_ORIGIN);
-  const cause = isProduction
-    ? `baseUrl is the public marketplace (${baseUrl})`
-    : `baseUrl and publicShelfUrl are the same shelf (${baseUrl})`;
-  const fix = isProduction
-    ? 'Point baseUrl at the team deployment to finish team mode: `tenjin config set baseUrl <team shelf url>`.'
-    : `A team shelf must differ from the shelf it falls through to: \`tenjin config set publicShelfUrl ${PRODUCTION_ORIGIN}\`.`;
-  return (
-    `Warning: shelfBypassSecret is set, but ${cause}, ` +
-    'so this machine stays in PUBLIC mode — publishes go to the marketplace with the scan’s ' +
-    'warn tier and the confirm cascade on. ' +
-    fix
-  );
+  return { data: { key: configKey, ...entry }, humanLines: [formatLine(configKey, entry)] };
 }
 
 /**
@@ -817,7 +757,7 @@ function assertKey(key: string): ScalarConfigKey {
 
 function renderSetting(
   key: ScalarConfigKey,
-  stored: string | string[] | boolean,
+  stored: string | string[] | boolean | null,
   source: Provenance,
 ): RenderedSetting {
   return { ...renderValue(key, stored), source };
@@ -850,16 +790,11 @@ function renderHooksSetting(key: HooksConfigKey, settings: EffectiveSettings): R
   return { value, source };
 }
 
-function renderValue(key: ScalarConfigKey, stored: string | string[] | boolean): RenderedValue {
-  // REDACTED IN THE MACHINE ENVELOPE TOO, not just in the human line. `config
-  // --json` is what an agent reads and what a bug report pastes, and the whole
-  // point of a door key is that it opens the door for whoever holds it. What a
-  // caller actually needs from this key is whether team mode is on, and
-  // set/unset says exactly that. The value is still readable, by the operator,
-  // in ~/.tenjin/config.json.
-  if (key === 'shelfBypassSecret') {
-    return { value: typeof stored === 'string' && stored.length > 0 ? 'set' : 'unset' };
-  }
+function renderValue(
+  key: ScalarConfigKey,
+  stored: string | string[] | boolean | null,
+): RenderedValue {
+  if (stored === null) return { value: null };
   if (Array.isArray(stored) || typeof stored === 'boolean') return { value: stored };
   if (key === 'maxAutoSpend' || key === 'sessionBudget') return { value: toMoney(stored) };
   if (key === 'sendMaxAmount') {
@@ -874,6 +809,16 @@ function renderValue(key: ScalarConfigKey, stored: string | string[] | boolean):
 }
 
 /** Per-key edge parsing. Returns the persisted form; throws USAGE on bad input. */
+function parseShelfSlug(value: string): string {
+  const slug = value.trim();
+  if (!/^[a-z0-9-]{2,32}$/.test(slug)) {
+    throw new CliError('USAGE', `Invalid shelf slug: ${JSON.stringify(value)}`, {
+      fix: 'A slug is 2 to 32 characters of a-z, 0-9 or hyphen. To clear it, run `tenjin shelf use --none`.',
+    });
+  }
+  return slug;
+}
+
 function parseValue(key: ScalarConfigKey, value: string): string | string[] | boolean {
   switch (key) {
     case 'maxAutoSpend':
@@ -886,13 +831,13 @@ function parseValue(key: ScalarConfigKey, value: string): string | string[] | bo
     case 'allowlistCreators':
       return parseAllowlist(value);
     case 'baseUrl':
-    case 'publicShelfUrl':
     case 'rpcUrl':
       return parseHttpUrl(value);
-    case 'shelfBypassSecret':
-      // A free string: it is whatever Vercel generated. Empty clears it, which
-      // is how team mode is turned back off.
-      return value.trim();
+    case 'shelf':
+      // The slug alone, checked against the same regex the schema pins. There is
+      // no empty form: clearing it is `tenjin shelf use --none`, which persists
+      // null, because `config set` has no way to say "no value".
+      return parseShelfSlug(value);
     case 'evalCohort':
     case 'bazaarPay':
       return parseBoolean(value);
@@ -987,9 +932,8 @@ async function persist(
       const existing = await loadRawConfig(dir);
       const merged = merge(existing);
       const validated = RawConfigSchema.parse(merged);
-      // 0600, matching lib/config.ts's `writeConfig`: this file holds
-      // `shelfBypassSecret`, and this is the writer `config set` uses to put it
-      // there. See that function for why dirMode alone is not enough.
+      // 0600, matching lib/config.ts's `writeConfig`: the whole data directory
+      // keeps one posture. See that function for why dirMode alone is not enough.
       await writeFileAtomic(configPath(dir), `${JSON.stringify(validated, null, 2)}\n`, {
         mode: 0o600,
         dirMode: 0o700,
@@ -1040,6 +984,7 @@ function downgradeNote(key: PublishConfigKey, settings: EffectiveSettings): stri
 
 function displayValue(entry: RenderedSetting): string {
   const { value } = entry;
+  if (value === null) return '(unset)'; // shelf: public only
   if (Array.isArray(value)) return value.length > 0 ? value.join(', ') : '(empty)';
   if (typeof value === 'boolean') return value ? 'true' : 'false'; // evalCohort
   if (typeof value === 'object') return `${value.usd} USD`; // Money (spend keys)

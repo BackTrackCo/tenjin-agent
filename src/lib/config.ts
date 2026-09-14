@@ -142,9 +142,11 @@ export const LoopConfigSchema = z.object({
 export type LoopConfig = z.infer<typeof LoopConfigSchema>;
 
 /**
- * `team.publicFallback` (tenjin-agent#229): `off` drops every public-only stage
- * from every lookup plan, so a team-mode miss never reaches tenjin.blog. Plain
- * config read by the daemon per fire; install against a team shelf writes `off`.
+ * `team.publicFallback` (tenjin-agent#229): on a machine with a shelf set, this
+ * is what the CLI sends as `includePublic` on the one shelf search request, so
+ * `off` means the marketplace is never asked. With no shelf set it still drops
+ * the public leg from a plan, which is the only leg there is. Plain config read
+ * by the daemon per fire; `install` writes no value for it.
  */
 export const PublicFallbackSchema = z.enum(['on', 'off']);
 export type PublicFallback = z.infer<typeof PublicFallbackSchema>;
@@ -260,30 +262,17 @@ export const ConfigSchema = z.object({
   allowlistCreators: z.array(z.string()),
   baseUrl: z.url(),
   /**
-   * The PUBLIC marketplace, consume-only, and the second shelf a team-mode
-   * lookup falls through to. Distinct from `baseUrl` because in team mode
-   * `baseUrl` is the team's own deployment: `publish`, `read` and the first leg
-   * of every search go there, and this is the shelf that still gets asked when
-   * the team's own has nothing. In public mode the two are the same origin and
-   * nothing falls through.
-   */
-  publicShelfUrl: z.url(),
-  /**
-   * The team shelf's Vercel "Protection Bypass for Automation" secret, and the
-   * ONE key that decides which mode this CLI is in: empty (the default) is
-   * public mode, byte-for-byte what it always did; non-empty is team mode.
+   * The active shelf's slug, or null: nothing set means public only.
    *
-   * It is a DOOR KEY, not a credential of the operator's: it gets a request past
-   * Deployment Protection on the team's preview deployment and authenticates
-   * nobody. Stored in plain config.json alongside everything else for exactly
-   * that reason — anything that can read this file can already read the wallet's
-   * keystore path and rewrite `baseUrl`. It is redacted from `config get` and
-   * `config list` all the same, because those outputs are pasted into issues.
-   *
-   * Sent ONLY to `baseUrl`'s origin; see lib/http.ts's `bypass` option, which
-   * derives that from the request URL rather than from the caller's intent.
+   * A shelf is a row on the one deployment, not a second deployment, so this is
+   * the whole of "which shelf is this machine on". It is the slug in the route
+   * a signed search and a shelf publish go to; membership is the server's
+   * answer, never inferred here.
    */
-  shelfBypassSecret: z.string(),
+  shelf: z
+    .string()
+    .regex(/^[a-z0-9-]{2,32}$/)
+    .nullable(),
   rpcUrl: z.url(),
   /**
    * Evaluation-cohort opt-in (spec 09 §3): when true, search sends
@@ -391,9 +380,8 @@ export const CONFIG_DEFAULTS: Config = {
   sendMaxAmount: '0',
   allowlistCreators: [],
   baseUrl: PRODUCTION_ORIGIN,
-  publicShelfUrl: PRODUCTION_ORIGIN,
-  // Empty = public mode. Setting it is the whole of "turn on team mode".
-  shelfBypassSecret: '',
+  // null = public only. `tenjin shelf use <slug>` is the whole of "join a shelf".
+  shelf: null,
   rpcUrl: 'https://mainnet.base.org',
   evalCohort: false,
   bazaarPay: false,
@@ -587,8 +575,7 @@ export interface EffectiveSettings {
   sendMaxAmount: ResolvedSetting<string>;
   allowlistCreators: ResolvedSetting<string[]>;
   baseUrl: ResolvedSetting<string>;
-  publicShelfUrl: ResolvedSetting<string>;
-  shelfBypassSecret: ResolvedSetting<string>;
+  shelf: ResolvedSetting<string | null>;
   rpcUrl: ResolvedSetting<string>;
   evalCohort: ResolvedSetting<boolean>;
   bazaarPay: ResolvedSetting<boolean>;
@@ -631,8 +618,7 @@ export function resolveSettings(input: ResolveSettingsInput): EffectiveSettings 
     sendMaxAmount: resolveSendMaxAmount(config),
     allowlistCreators: fileOrDefault('allowlistCreators', config),
     baseUrl: resolveBaseUrl(config, flags, env),
-    publicShelfUrl: fileOrDefault('publicShelfUrl', config),
-    shelfBypassSecret: fileOrDefault('shelfBypassSecret', config),
+    shelf: fileOrDefault('shelf', config),
     rpcUrl: fileOrDefault('rpcUrl', config),
     evalCohort: fileOrDefault('evalCohort', config),
     bazaarPay: fileOrDefault('bazaarPay', config),
@@ -792,15 +778,14 @@ export function resolvePublishDefaultPrice(input: {
 /**
  * Persist a full, validated config via the atomic writer (0700 dir, 0600 file).
  *
- * 0600 BECAUSE config.json NOW HOLDS A CREDENTIAL: `shelfBypassSecret` is the
- * team shelf's shared door key, and every other secret in this tree is 0600
- * (the wallet, the passphrase, the session key, the spend ledger, the daemon
- * token) — wallet/local.ts even warns when it finds one that is not.
+ * 0600 STAYS even though config.json no longer holds a credential of its own:
+ * every other file in this tree is 0600 (the wallet, the passphrase, the
+ * session key, the spend ledger, the daemon token) and wallet/local.ts warns
+ * when it finds one that is not, so the directory's posture is uniform.
  * `dirMode: 0o700` is not a substitute: node's recursive mkdir does not chmod a
  * directory that already exists, so a `~/.tenjin` or `TENJIN_DATA_DIR` created
- * at 0755 by a devcontainer volume, a restored backup or a shared CI image left
- * the key world-readable. `config --json` already redacts it, which is the same
- * care applied one layer up. Keep this in step with `persist` in commands/config.ts,
+ * at 0755 by a devcontainer volume, a restored backup or a shared CI image is
+ * left as it was found. Keep this in step with `persist` in commands/config.ts,
  * the other writer of this file.
  */
 export async function writeConfig(dir: string, config: Config): Promise<void> {

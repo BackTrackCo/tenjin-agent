@@ -1,6 +1,6 @@
 import { CliError } from '../lib/errors';
 import { parseUsdToAtomic, toMoney } from '../lib/money';
-import { resolveContextSettings, resolvePublishSettings, shelfRouteFor } from '../lib/settings';
+import { resolveContextSettings, resolvePublishSettings } from '../lib/settings';
 import { parsePublishModeFlag } from '../lib/config';
 import {
   getStoredSearch,
@@ -108,6 +108,12 @@ export interface PublishArgs {
    * hand publish gets to assert. Needs KNOWLEDGE_KEYS on the shelf.
    */
   key?: string[];
+  /**
+   * Publish to the PUBLIC marketplace even though a shelf is set: no `shelf` on
+   * the body and the configured default price, exactly what a machine with no
+   * shelf does. Without it a machine on a shelf publishes to that shelf, free.
+   */
+  public?: boolean;
 }
 
 export interface PublishDeps {
@@ -224,16 +230,14 @@ export async function runPublish(
   // its close reports and what is warned about below.
   const stored = await loadNamedSearches(ctx, searchIds);
   if (status !== 'draft') warnUnrecorded(ctx, searchIds, stored);
-  // THE OTHER SHELF'S SEARCHES ARE NOT THIS SHELF'S TO CLAIM. A publish lands on
-  // one shelf; a searchId minted by the other names a row in a database this one
-  // has never seen. The server format-validates the uuid and stores it set-once,
-  // so sending it does not fail — it misfiles the attribution permanently, on the
-  // wrong shelf, while the shelf that actually served the search hears nothing.
-  // Dropped from the body and left OPEN locally, so the close is still reachable
-  // by `tenjin outcome`, which routes to the shelf that answered.
-  const foreignIds = searchIds.filter((id) => !shelfRouteFor(stored.get(id), runtime).configured);
-  const claimableIds = searchIds.filter((id) => !foreignIds.includes(id));
-  if (status !== 'draft') warnForeignShelf(ctx, foreignIds, stored);
+  // ONE ORIGIN, so every searchId this machine recorded names a row in the one
+  // database this publish lands in: there is no foreign shelf left to drop a
+  // claim for.
+  const claimableIds = searchIds;
+  // WHERE THIS PIECE LANDS. The active shelf when one is set, unless `--public`
+  // says the marketplace outright. Everything that used to branch on "team mode"
+  // branches on this: the price default, the scan scope, the body's `shelf`.
+  const targetShelf = args.public === true ? null : runtime.shelf;
   const tags = resolveTags(frontmatter);
   const excerpt = resolveExcerpt(args, frontmatter);
   const handle = expectString(frontmatter, 'handle');
@@ -257,7 +261,7 @@ export async function runPublish(
   const priceAtomic = resolvePrice(
     args,
     frontmatter,
-    runtime.teamMode ? '0' : settings.defaultPriceAtomic,
+    targetShelf !== null ? '0' : settings.defaultPriceAtomic,
   );
 
   // The scan runs in EVERY publish mode (D38) and on EVERY shelf, and every
@@ -268,7 +272,7 @@ export async function runPublish(
   // back into this same flow. WHICH rows a shelf flags is `scopes` on the rule
   // in lib/redact-rules.json, applied inside `findings()`: this command, edit.ts
   // and sync.ts pass a scope and filter nothing, so they cannot drift.
-  const warns = await scanDraft(args, raw, card, runtime.teamMode ? 'team' : 'publish');
+  const warns = await scanDraft(args, raw, card, targetShelf !== null ? 'team' : 'publish');
 
   const eligibility = localCardEligibility(card);
   const price = toMoney(priceAtomic);
@@ -297,8 +301,7 @@ export async function runPublish(
   // Approved (or nothing to confirm): from here a wallet is required. The write
   // base URL is resolved through the shared settings seam and used for BOTH the
   // SIWX/session header domain and the POST host, so the two never diverge. In
-  // team mode that is the team shelf and nowhere else — a publish never reaches
-  // `publicShelfUrl`, which is consume-only.
+  // one deployment serves both, and the shelf (if any) is named in the body.
   const provider = resolveWalletProvider(
     ctx,
     deps.provider !== undefined ? { provider: deps.provider } : {},
@@ -334,12 +337,14 @@ export async function runPublish(
     // Keys ride on a draft too: a draft's keys are private to its author and
     // resolve never returns a draft, so nothing is claimed early by sending them.
     ...(keys.length > 0 ? { keys } : {}),
+    // OMITTED for the marketplace: an absent `shelf` is what the server reads
+    // as public, and the strict create schema has no null to accept.
+    ...(targetShelf !== null ? { shelf: targetShelf } : {}),
   };
 
   const client = {
     baseUrl: runtime.baseUrl,
     timeoutMs: ctx.flags.timeout,
-    ...(runtime.bypass !== undefined ? { bypass: runtime.bypass } : {}),
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   };
   // The server ingest gate runs the same rule corpus in the marketplace's write
@@ -382,10 +387,6 @@ export async function runPublish(
   // server has every id, so an unrecorded search warns without costing the rest.
   const searches: SearchReceipt[] = [];
   for (const id of searchIds) {
-    if (foreignIds.includes(id)) {
-      searches.push({ id, closed: false, otherShelf: true });
-      continue;
-    }
     searches.push(
       await closeNamedSearch(
         ctx,
@@ -439,33 +440,6 @@ function warnUnrecorded(
 }
 
 /**
- * Named searches this machine recorded against the OTHER shelf, said before the
- * wallet touch like {@link warnUnrecorded}. Not an error: naming the search a
- * piece answers is right, and in team mode the public marketplace answering a
- * team miss is the ordinary path. Only the destination is wrong, and `outcome`
- * is the verb that reaches it.
- */
-function warnForeignShelf(
-  ctx: CommandContext,
-  foreignIds: string[],
-  stored: Map<string, StoredSearch>,
-): void {
-  if (foreignIds.length === 0) return;
-  for (const id of foreignIds) {
-    // Sanitized like every other store- or server-derived string this tree
-    // writes to a terminal (outcome's echoed question, buy's creator label,
-    // search's shelf error text). Today the field only ever holds a validated
-    // config URL, so this is consistency rather than a live escape-sequence
-    // risk — but the rule that store text is sanitized on the way out is worth
-    // more than the one call site that could argue its way out of it.
-    const shelf = sanitizeForTerminal(stored.get(id)?.shelfBaseUrl ?? 'another shelf');
-    ctx.io.stderr.write(
-      `Search ${id} was answered by ${shelf}, not the shelf this piece is published to, so it is not claimed here and stays open. Close it there with \`tenjin outcome --search-id ${id} --status used\`.\n`,
-    );
-  }
-}
-
-/**
  * The local records for the named searches, keyed case-folded like the ids that
  * look them up, so an entry recorded in another spelling is still found.
  */
@@ -504,12 +478,6 @@ interface SearchReceipt {
    * `outcome` report.
    */
   alreadyAnswered?: boolean;
-  /**
-   * The named search was answered by the OTHER shelf, so this publish did not
-   * claim it and the loop is still open. The one `closed: false` case that is a
-   * routing fact rather than a failure; see {@link warnForeignShelf}.
-   */
-  otherShelf?: true;
 }
 
 /**

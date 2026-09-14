@@ -13,20 +13,20 @@ import type { Answer, Leg, LegResult } from '../types';
  */
 export function localLeg(shelf: Answer['shelf'], read: () => Answer | null): Leg {
   return {
-    shelf,
-    async request(): Promise<LegResult> {
+    shelves: [shelf],
+    async request(): Promise<LegResult[]> {
       const answer = read();
-      return {
-        status: 'ok',
-        ...(answer?.searchId !== undefined ? { searchId: answer.searchId } : {}),
-        ...(answer?.title !== undefined ? { title: answer.title } : {}),
-        ...(answer?.url !== undefined ? { url: answer.url } : {}),
-        ...(answer?.form !== undefined ? { form: answer.form } : {}),
-        payload: answer,
-      };
-    },
-    verdict(result: LegResult): Answer | null {
-      return (result.payload as Answer | null | undefined) ?? null;
+      return [
+        {
+          shelf,
+          status: 'ok',
+          ...(answer?.searchId !== undefined ? { searchId: answer.searchId } : {}),
+          ...(answer?.title !== undefined ? { title: answer.title } : {}),
+          ...(answer?.url !== undefined ? { url: answer.url } : {}),
+          ...(answer?.form !== undefined ? { form: answer.form } : {}),
+          answer,
+        },
+      ];
     },
   };
 }
