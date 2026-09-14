@@ -350,6 +350,21 @@ def test_a_reuse_arm_the_shared_shelf_gate_would_not_cover_refuses_more_than_one
     assert experiments.concurrency_violations(synthetic(pins={"concurrency": 3}, arms=provisioned)) == []
 
 
+def test_a_database_backed_task_refuses_more_than_one_worker_whatever_its_arms_are() -> None:
+    """Concurrent database pairs stall on the one Docker daemon, so the selection that holds one runs alone."""
+    tasks = [{"id": "ledger", "database": "postgres"}, {"id": "actor"}]
+    assert experiments.concurrency_violations(synthetic(pins={"concurrency": 3}, tasks=tasks)) == [
+        "task ledger is database-backed, so the experiment runs one worker"
+    ]
+    assert experiments.concurrency_violations(synthetic(pins={"concurrency": 1}, tasks=tasks)) == []
+    # A producer task reaches for the same daemon as the consumer it precedes.
+    paired = [{"id": "actor", "producer_task": {"id": "actor-producer", "database": "postgres"}}]
+    assert experiments.concurrency_violations(synthetic(pins={"concurrency": 3}, tasks=paired)) == [
+        "task actor-producer is database-backed, so the experiment runs one worker"
+    ]
+    assert experiments.concurrency_violations(synthetic(pins={"concurrency": 3}, tasks=[{"id": "actor"}])) == []
+
+
 HIGH_DISCOVERY = {
     "shadow": ("stale-build-artifact", "packages/range/src/range.mjs"),
     "ambient": ("invisible-whitespace-mismatch", "src/price.mjs"),

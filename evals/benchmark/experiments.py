@@ -64,6 +64,7 @@ def prompt_violations(manifest: Manifest) -> list[str]:
 # An arm that installs no product is a baseline: it starts no loop daemon and
 # reads no shelf, so two of them may overlap.
 BASELINE_PRODUCT = "none"
+DATABASE = "postgres"
 
 
 def concurrency_violations(manifest: Manifest) -> list[str]:
@@ -75,8 +76,15 @@ def concurrency_violations(manifest: Manifest) -> list[str]:
     on one host. `runner.seeds_shelf` is the gate that already admits one of
     them at a time and it reads `provision`, so the rule here is that a reuse
     arm declares one and is covered, rather than a second mechanism beside it.
+
+    A database-backed task is the same rule for the same reason: its pair holds
+    the one Docker daemon the host has, and concurrent pairs stall on it, so an
+    experiment that selects one runs a single worker whatever its arms are.
     """
     if manifest.concurrency == 1:
         return []
-    return [f"arm {arm['id']} is a reuse condition without `provision`, so nothing keeps two of it apart"
-            for arm in manifest.arms if arm["product_version"] != BASELINE_PRODUCT and not arm.get("provision")]
+    violations = [f"arm {arm['id']} is a reuse condition without `provision`, so nothing keeps two of it apart"
+                  for arm in manifest.arms if arm["product_version"] != BASELINE_PRODUCT and not arm.get("provision")]
+    violations += [f"task {task['id']} is database-backed, so the experiment runs one worker"
+                   for task in manifest.image_tasks if task.get("database") == DATABASE]
+    return violations
