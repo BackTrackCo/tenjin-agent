@@ -4,12 +4,13 @@ Does a team shelf make the **second** agent cheaper?
 
 One measurement is a pair of tasks. A **producer** task (A) is solved from scratch and yields a
 finding worth keeping. A **consumer** task (B) is different work that needs that same finding.
-Each pair runs under two conditions:
+Each pair runs under up to three conditions:
 
-| condition | producer (A)                                      | consumer (B)                                  |
-| --------- | ------------------------------------------------- | --------------------------------------------- |
-| `off`     | fresh worktree, no Tenjin hooks                   | fresh worktree, no Tenjin hooks               |
-| `tenjin`  | hooks on; the turn-end arm captures and publishes | hooks on; the prompt arm searches and injects |
+| condition | producer (A)                                                               | consumer (B)                                  |
+| --------- | -------------------------------------------------------------------------- | --------------------------------------------- |
+| `off`     | fresh worktree, no Tenjin hooks                                            | fresh worktree, no Tenjin hooks               |
+| `seeded`  | **no agent runs**; the producer PR's description is published to the shelf | identical to `tenjin`                         |
+| `tenjin`  | hooks on; the turn-end arm captures and publishes                          | hooks on; the prompt arm searches and injects |
 
 If the loop works, B's token total under `tenjin` is lower than under `off` by more than A's
 capture overhead. That delta, per pair, is the number the whole thing exists to produce.
@@ -107,6 +108,32 @@ put its oracle on Node 18.14.2 while the runner was on 24.19.0, and corepack die
 than a broken PATH. The `-l` was the cause: a login shell re-sources the profile and rebuilds
 `PATH` from scratch. Each session now records `node --version` and `pnpm --version` as its oracle
 env sees them, and the report raises a **Runtime skew** section if sessions disagree.
+
+## The `seeded` condition
+
+`seeded` answers a different question from `tenjin`: not "is the loop worth running", but "is a
+shelf worth having at all". **No producer agent session runs.** Instead the runner publishes one
+note to the bench shelf before B starts, and that note is the producer PR's own description,
+fetched with `gh pr view <n> --repo BackTrackCo/<repo> --json title,body,mergedAt,url`. The
+consumer session is then identical to the `tenjin` one.
+
+So A costs nothing, by construction, and the note is of human quality. The `seeded` A+B delta is
+therefore the **optimistic bound**: what a shelf is worth when someone else already wrote the
+note for free. `tenjin` is the same measurement with the note's real production cost included.
+
+The note needs a complete answer card, because `requirePublishableCard` hard-blocks an
+incomplete one. Every card field is derived from the PR rather than invented, and the provenance
+line says plainly that this is the author's description copied over, not an independently
+reproduced finding. Three narrow strips are applied to the body — PR-template HTML comments,
+task-list lines, and the Claude Code attribution footer — and everything else stays verbatim,
+because a PR body is evidence and trimming it changes what B could have read. Both the raw and
+the published lengths are recorded.
+
+`pairs.json` needs `producer.pr` and `producer.repo` for this condition; all four block1 pairs
+have them. One note is published per pair per run, not per repeat: the note lives on the shelf,
+and later repeats must find that same one rather than three copies. Its url is recorded in the
+stand-in producer record under the same `published:` key a real session uses, so `cleanup`
+retracts it like any other.
 
 ## The capture turn
 
