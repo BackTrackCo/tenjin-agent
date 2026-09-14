@@ -24,6 +24,37 @@ PNPM_GUARD = "process.env.npm_config_user_agent"
 # A base64 run long enough to be a payload, which a frozen fixture never holds.
 BLOB = re.compile(r"[A-Za-z0-9+/]{40,}={0,2}")
 PNPM_GUARD_MESSAGE = "this repository's tests run through pnpm; see the repository convention"
+# A hidden oracle is plain Node: it names what it pins in its own import list
+# and in the paths it spawns, so the contract a prompt owes the agent is read
+# off the oracle rather than restated by hand.
+NAMED_IMPORT = re.compile(r"import\s*\{([^}]*)\}\s*from\s*'([^']+)'")
+LITERAL = re.compile(r"'((?:[^'\\\n]|\\.)*)'")
+SOURCE_PATH = re.compile(r"^(?:\.\./)*[\w@./-]+\.(?:mjs|cjs|js|ts)$")
+
+
+def _fixture_relative(specifier: str) -> str:
+    """A hidden oracle sits one directory above the fixture root it judges."""
+    return re.sub(r"^(?:\.{1,2}/)+", "", specifier) if specifier.startswith(".") else specifier
+
+
+def oracle_contract(oracle: Path) -> tuple[frozenset[str], frozenset[str]]:
+    """The exported names and the module paths a hidden oracle pins.
+
+    Each one is a name the agent has to get exactly right and cannot derive
+    from a failing run, so a prompt that omits one grades naming luck. Node's
+    own modules are the oracle's harness, never the task's interface.
+    """
+    text = oracle.read_text(encoding="utf-8")
+    names: set[str] = set()
+    paths: set[str] = set()
+    for block, specifier in NAMED_IMPORT.findall(text):
+        if specifier.startswith("node:"):
+            continue
+        names.update(part.strip() for part in block.split(",") if part.strip())
+        paths.add(_fixture_relative(specifier))
+    # A spawned entry point is pinned by its path alone; it has no import line.
+    paths.update(_fixture_relative(literal) for literal in LITERAL.findall(text) if SOURCE_PATH.match(literal))
+    return frozenset(names), frozenset(paths)
 
 
 def link_workspace_packages(repo: Path) -> list[str]:
@@ -112,3 +143,43 @@ def assert_vitest_fixture(fixture: Path, task: str, *, trap: bool = True, packag
         assert not (fixture / artefact).exists(), artefact
         assert not (project / artefact).exists(), artefact
     assert [path for path in fixture.rglob("*") if path.is_symlink()] == []
+
+
+# A no-break space is a byte, not a word: an oracle escapes what it pins.
+ESCAPE = re.compile(r"\\u([0-9a-fA-F]{4})")
+
+
+def oracle_probes(oracle: Path, cases: Path, visible: Path) -> frozenset[str]:
+    """The oracle's own literals that nothing the agent may read already holds.
+
+    The injected cases and the fixture's own tests are what a trial discloses
+    by design; what is left is the unseen half of the measurement, and a corpus
+    that repeats one of those values hands the answer over without a run.
+    """
+    known = _strings(json.loads(cases.read_text(encoding="utf-8")))
+    for test in sorted(visible.rglob("*.test.*")):
+        known.update(LITERAL.findall(test.read_text(encoding="utf-8")))
+    probes = set()
+    for literal in LITERAL.findall(oracle.read_text(encoding="utf-8")):
+        if len(literal) < 2 or literal in known or literal.startswith("node:") or SOURCE_PATH.match(literal):
+            continue
+        probes.add(literal)
+        # The oracle escapes the bytes it pins; a corpus would paste them.
+        probes.add(ESCAPE.sub(lambda match: chr(int(match.group(1), 16)), literal))
+    return frozenset(probes - known)
+
+
+def _strings(value: object) -> set[str]:
+    """Every string anywhere in a decoded JSON document."""
+    if isinstance(value, str):
+        return {value}
+    if isinstance(value, dict):
+        value = list(value.values())
+    if isinstance(value, list):
+        return {item for element in value for item in _strings(element)}
+    return set()
+
+
+def discloses(probe: str, text: str) -> bool:
+    """Whole-token match, so a digest that happens to contain a probe is not a leak."""
+    return re.search(r"(?<![A-Za-z0-9])" + re.escape(probe) + r"(?![A-Za-z0-9])", text) is not None

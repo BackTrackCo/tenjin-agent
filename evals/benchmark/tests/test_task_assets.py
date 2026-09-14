@@ -22,8 +22,8 @@ def historical(tmp_path):
     hidden.mkdir(parents=True)
     (hidden / 'benchmark-independent.test.ts').write_text('// independently controlled oracle\n')
     support = tmp_path / 'verification'; support.mkdir()
-    for name in ['vitest.config.mjs', 'database.mjs']:
-        (support/name).write_text('// controlled support\n')
+    (support/'vitest.config.mjs').write_text("export default { test: { include: ['" + task_assets.ORACLE + "'] } };\n")
+    (support/'database.mjs').write_text('// controlled support\n')
     receipt = {'task': task['id'], 'revision': 'before', 'commit': 'a'*40, 'tree': 'b'*40,
                'source_hash': 'c'*64, 'lock_sha256': 'd'*64, 'oracle_sha256': sha256_file(hidden/'benchmark-independent.test.ts'), 'catalog_sha256': 'e'*64, 'task_sha256': 'f'*64}
     (support/'source-receipt.json').write_text(json.dumps(receipt))
@@ -199,6 +199,22 @@ def test_verifier_support_and_provenance_drift_refuse_before_launch(historical, 
     assert spec.support == base/'verification'
     (base/'verification'/file).write_text('changed')
     with pytest.raises(manifest.ManifestError, match='hash'):
+        config(data, base)
+
+
+@pytest.mark.parametrize('config_text', [
+    pytest.param("export default { test: { include: ['src/**/*.test.ts'] } };\n", id='whole suite'),
+    pytest.param('export default { test: { testTimeout: 15000 } };\n', id='no include list'),
+    pytest.param("export default { test: { projects: [{ test: { include: ['src/benchmark-independent.test.ts'] } }] } };\n", id='projects reopen it'),
+])
+def test_an_oracle_that_does_not_name_its_one_test_file_is_refused_before_launch(historical, config_text):
+    # A bare suite costs a worker per core and every service it boots, inside
+    # the trial image, so the refusal belongs where the manifest is read.
+    data, base = historical
+    path = base/'verification/vitest.config.mjs'
+    path.write_text(config_text)
+    data['tasks'][0]['verification']['hash'] = 'sha256:'+sha256_dir(path.parent)
+    with pytest.raises(manifest.ManifestError, match='verifier configuration'):
         config(data, base)
 
 

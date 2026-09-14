@@ -177,6 +177,30 @@ def test_every_lesson_is_loadable_and_keyed_apart_from_the_others() -> None:
 
 
 
+def test_no_lesson_or_fixture_file_repeats_an_oracle_probe_the_trial_never_shows() -> None:
+    """The per-pair leak check: a verifier may not be answerable from the corpus.
+
+    A fixture and the lessons a run seeds are both readable inside the trial, so
+    an oracle value that appears in either is answered without solving the task.
+    The injected cases and the fixture's own tests are disclosed by design and
+    are not probes; what remains is matched as whole tokens.
+    """
+    corpus = [path for path in sorted((LIVE / "lessons").iterdir()) if path.is_file()]
+    assert corpus
+    probed = 0
+    for task in sorted(verifier.TASK_PACKAGES):
+        fixture = LIVE / task
+        hidden = verifier.HIDDEN / task
+        probes = corpus_support.oracle_probes(hidden / verifier.HIDDEN_TESTS / f"{task}.test.mjs", hidden / "cases.json", fixture)
+        probed += len(probes)
+        readable = corpus + [path for path in sorted(fixture.rglob("*")) if path.is_file() and "node_modules" not in path.parts]
+        for path in readable:
+            text = path.read_text(encoding="utf-8", errors="replace")
+            for probe in sorted(probes):
+                assert not corpus_support.discloses(probe, text), f"{path.name} answers {task}'s hidden probe {probe!r}"
+    assert probed >= len(verifier.TASK_PACKAGES)
+
+
 @pytest.mark.parametrize("task", CATALOG, ids=lambda task: task["id"])
 def test_catalog_tasks_match_their_fixtures_and_keep_verifiers_hidden(task: dict) -> None:
     fixture = LIVE / task["fixture"]
@@ -192,10 +216,36 @@ def test_catalog_tasks_match_their_fixtures_and_keep_verifiers_hidden(task: dict
     corpus_support.assert_vitest_fixture(fixture, task["id"], trap=task["id"] in {"actor", "budget", "candidate", "slug"}, package_dir=verifier.TASK_PACKAGES[task["id"]], test_ext="ts" if task["id"] == "alias" else "mjs")
 
 
+@pytest.mark.parametrize("task", [task for task in CATALOG if task["verifier"] != "fake_answer_file"], ids=lambda task: task["id"])
+def test_every_task_prompt_states_the_interface_its_oracle_pins(task: dict) -> None:
+    """An underspecified prompt grades naming luck rather than the fix.
+
+    The hidden oracle imports exported names from module paths and spawns entry
+    points by path. None of that is derivable from a red run, so every one of
+    them is stated in the work order the agent is given.
+    """
+    names, paths = corpus_support.oracle_contract(verifier.HIDDEN / task["id"] / verifier.HIDDEN_TESTS / f"{task['id']}.test.mjs")
+    assert names or paths
+    for pinned in sorted(names | paths):
+        assert pinned in task["prompt"], f"{task['id']}: the prompt leaves {pinned} to luck"
+
+
 def test_the_catalog_covers_every_registered_task_and_ships_each_directory_once() -> None:
     assert {task["id"] for task in CATALOG} == set(verifier.TASK_PACKAGES) | {"answer-file"}
     assert {task["fixture"] for task in CATALOG} == {p.name for p in LIVE.iterdir() if p.is_dir() and p.name != "lessons"}
     assert sorted(p.parent.name for p in verifier.HIDDEN.glob(f"*/{images.QUIRK_CHECK}")) == ["ambient"]
+
+
+def test_every_shipped_oracle_names_the_one_test_file_it_runs() -> None:
+    from evals.benchmark import task_assets
+
+    for task in verifier.TASK_PACKAGES:
+        # A node oracle is one file, handed to `node` as the whole command.
+        assert verifier.lookup(f"node_test_{task}").container_test == f"{verifier.HIDDEN_TESTS}/{task}.test.mjs"
+    config = (verifier.PACKAGE_ROOT / "historical" / "vitest.config.mjs").read_text(encoding="utf-8")
+    assert verifier.unnarrowed_oracle(config, task_assets.ORACLE) is None
+    # The model's own visible configuration is a suite on purpose, and is never an oracle.
+    assert verifier.unnarrowed_oracle((verifier.PACKAGE_ROOT / "historical" / "model-tests.config.mjs").read_text(encoding="utf-8"), task_assets.ORACLE)
 
 
 def test_the_key_only_lesson_has_no_task_names_and_matches_the_actor_failure() -> None:
@@ -211,3 +261,12 @@ def test_actor_instructions_allow_recursive_experiments_without_loosening_networ
     assert "do not spawn subagents" not in instructions
     assert "Network access is limited to configured Tenjin search/read/inspect commands" in instructions
     assert "Do not publish from the task container" in instructions
+
+
+def test_a_verdict_is_the_exit_code_and_never_a_word_in_the_output(repo: Path, run_dir: Path) -> None:
+    # A green run prints the word FAIL whenever its own output quotes a fixed
+    # case, and a red one still prints "0 failed" for the files that passed.
+    noisy = verifier.VerifierSpec(name="noisy", argv=lambda _: [sys.executable, "-c", "print('FAIL 3 assertions failed'); raise SystemExit(0)"], timeout_s=30)
+    quiet = verifier.VerifierSpec(name="quiet", argv=lambda _: [sys.executable, "-c", "print('ok: 0 failed, every suite passed'); raise SystemExit(1)"], timeout_s=30)
+    assert verifier.run(noisy, repo, run_dir).outcome == "pass"
+    assert verifier.run(quiet, repo, run_dir).outcome == "fail"
