@@ -124,6 +124,7 @@ INHERITED = ("LANG",)
 # its own variables; it does not reach these through `settings.env`.
 RESERVED_ENV_PREFIXES = ("ANTHROPIC_", "AWS_", "CLAUDE_", "COREPACK_", "DYLD_", "GITHUB_", "LD_", "NODE_", "TENJIN_")
 RESERVED_ENV_NAMES = frozenset({"HOME", "PATH", "TERM", "LANG", "SHELL", "PYTHONPATH"})
+PNPM_VERIFY_DEPS = "PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN"
 # Where Harbor's own trial directory goes: under the attempt's base, beside the
 # roots, so it is thrown away with them. `environment` is the directory Harbor
 # resolves for `--project-directory`; with a prebuilt image nothing in it is
@@ -408,7 +409,7 @@ def _settings_env(env: Any) -> None:
     """
     check("arm settings.env", env, ENV_SCHEMA, LiveExecutorError)
     for name in env:
-        if name in RESERVED_ENV_NAMES or name.startswith(RESERVED_ENV_PREFIXES):
+        if name in RESERVED_ENV_NAMES or name.startswith(RESERVED_ENV_PREFIXES) or name.upper() == PNPM_VERIFY_DEPS:
             raise LiveExecutorError(f"arm settings.env may not set {name}: the trial's own roots and seams own it")
 
 
@@ -645,6 +646,11 @@ def container_environment(
     # run never wanted.
     env["DISABLE_AUTOUPDATER"] = "1"
     env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
+    # Dependencies already belong to the pinned image. pnpm 11 otherwise
+    # auto-installs before run/exec when relocated workspace metadata differs,
+    # potentially purging the staged tree before blocked registry requests.
+    # Use uppercase: this release treats the lowercase alias as a raw string.
+    env[PNPM_VERIFY_DEPS] = "false"
     for name in INHERITED:
         value = parent.get(name)
         if value:

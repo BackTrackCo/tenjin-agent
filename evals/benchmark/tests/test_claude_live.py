@@ -314,6 +314,8 @@ SETTINGS_REFUSALS = {
     "the trial's own home": {"env": {"HOME": "/Users/operator"}},
     "the transcript directory name": {"env": {claude_live.PROJECT_DIR_VAR: "elsewhere"}},
     "the process loader": {"env": {"NODE_OPTIONS": "--require /tmp/x.js"}},
+    "automatic dependency replacement": {"env": {"PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN": "install"}},
+    "lowercase dependency replacement alias": {"env": {"pnpm_config_verify_deps_before_run": "install"}},
     "an env value that is not a string": {"env": {"BENCH1_SMOKE_ARM": ["on"]}},
     "an env name that is not a name": {"env": {"BENCH1 SMOKE ARM": "on"}},
     "a tool the flags do not pass": {"permissions": {"allow": ["Bash(*)"]}},
@@ -680,6 +682,8 @@ PARENT_ENV = {
     "TENJIN_SHELF_TOKEN": "shelf-secret",
     "AWS_SECRET_ACCESS_KEY": "aws-secret",
     "GITHUB_TOKEN": "gh-secret",
+    "PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN": "install",
+    "pnpm_config_verify_deps_before_run": "install",
 }
 
 
@@ -700,6 +704,7 @@ def test_the_container_gets_the_allowlist_and_the_trials_own_roots(container_env
         "DISABLE_AUTOUPDATER",
         "HOME",
         "LANG",
+        "PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN",
         "TENJIN_DATA_DIR",
         "TENJIN_NO_UPDATE_CHECK",
         "TENJIN_PUBLISH_MODE",
@@ -710,6 +715,8 @@ def test_the_container_gets_the_allowlist_and_the_trials_own_roots(container_env
     assert env["TENJIN_NO_UPDATE_CHECK"] == "1"
     assert env["DISABLE_AUTOUPDATER"] == "1"
     assert env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
+    assert env[claude_live.PNPM_VERIFY_DEPS] == "false"
+    assert "pnpm_config_verify_deps_before_run" not in env
     assert env["HOME"] == str(roots.home)
     assert env["TENJIN_DATA_DIR"] == str(roots.data_dir)
     assert env[claude_live.PROJECT_DIR_VAR] == session_id
