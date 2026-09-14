@@ -1,6 +1,6 @@
 {
   "schema": "bench3.protocol.v1",
-  "status": "pilot-readmitted-oracle-v3-results-pending",
+  "status": "oracle-v4-corrected-parallel-cohort-preparation",
   "model_admission": true,
   "population": {
     "window_start": "2026-08-15T00:00:00Z",
@@ -47,7 +47,12 @@
     "order": "Deterministic balanced treatment order through the shared scheduler, same task/model/harness/limits across arms.",
     "purpose": "Validate full task scope, capture/publication/delivery, failure accounting, runtime and precision. No publishable team effect or quality noninferiority claim from this pilot.",
     "quality_margin": "Freeze after pilot calibration and before any locked treatment; none asserted by the pilot.",
-    "final_sample_size": "Freeze from pilot precision and feasibility before locked outcomes; repeats never count as independent task families."
+    "final_sample_size": "Freeze from pilot precision and feasibility before locked outcomes; repeats never count as independent task families.",
+    "concurrency": {
+      "workers": 2,
+      "shelf": "One provisioned producer/consumer/publication/cleanup chain exclusively owns the remote shelf; control and flat work may overlap it.",
+      "auth": "Run-owned access-only ChatGPT snapshot; per-worker native profiles; no shared refresh grant in workers."
+    }
   },
   "treatments": {
     "off": "No memory product and no injected prior lessons.",
