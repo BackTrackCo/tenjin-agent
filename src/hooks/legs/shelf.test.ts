@@ -307,6 +307,43 @@ describe('searchLeg routing when the call cannot be signed', () => {
     expect(results[0]?.authError).toBe('unauthenticated: WALLET_LOCKED');
   });
 
+  /**
+   * THE FALLBACK IS NOT UNCONDITIONAL. A round that asked for the shelf alone
+   * has no marketplace to fall back to: the failure arm masks failure text and
+   * sends it shelf-only on purpose (decision 13), and `publicFallback: off` is
+   * a machine saying the same thing about every round. An expired session must
+   * not turn either of those into a question for tenjin.blog.
+   */
+  it('unauthenticated on a shelf-only round asks nobody, and the row says why', async () => {
+    const { fetchImpl, calls } = stub(() => json(200, envelope([candidate({ strong: true })])));
+    const results = await searchLeg('failure', CONFIG, { includePublic: false }, fetchImpl).request(
+      q('Error: the token ghp_x is invalid'),
+      2000,
+      new AbortController().signal,
+      deps(cannotSign),
+    );
+    expect(calls).toHaveLength(0);
+    expect(results.map((r) => r.shelf)).toEqual(['team']);
+    expect(results[0]?.status).toBe('refused');
+    expect(results[0]?.answer).toBeNull();
+    expect(results[0]?.authError).toBe('unauthenticated: WALLET_LOCKED');
+  });
+
+  it('no wallet on a publicFallback:off machine asks nobody either', async () => {
+    const offCfg: KernelConfig = { ...CONFIG, team: { publicFallback: 'off' } };
+    const { fetchImpl, calls } = stub(() => json(200, envelope([])));
+    const results = await searchLeg('prompt', offCfg, {}, fetchImpl).request(
+      q('why'),
+      2000,
+      new AbortController().signal,
+      deps(noWallet),
+    );
+    expect(calls).toHaveLength(0);
+    expect(results.map((r) => r.shelf)).toEqual(['team']);
+    expect(results[0]?.status).toBe('refused');
+    expect(results[0]?.authError).toBeUndefined();
+  });
+
   it('no shelf configured: one unsigned public call, and auth is never consulted', async () => {
     const { fetchImpl, calls } = stub(() => json(200, envelope([])));
     let asked = 0;

@@ -169,7 +169,10 @@ function probeFetch(fetchImpl: typeof fetch | undefined, sink: (seen: Seen) => v
  *   and the row carries `authError`. THE PUBLIC ANSWER IS STILL DELIVERED.
  *   This is the only case where the configured shelf is not the route that gets
  *   called, and it has to be explicit: unlike the old shape, dropping the
- *   signature no longer leaves a second leg already planned.
+ *   signature no longer leaves a second leg already planned. It happens only
+ *   where the round asked for a public list at all: a shelf-only round (the
+ *   failure text, or `publicFallback: off`) records `refused` rather than send
+ *   its question somewhere it was never meant to go.
  * - `cfg.shelf === null`: POST `/api/search`, unsigned. One `public` set.
  */
 export function searchLeg(
@@ -208,6 +211,17 @@ export function searchLeg(
         // `no-wallet` is not a failure and writes no error; `unauthenticated`
         // is, and the row says so while the answer still gets delivered.
         if (auth.kind === 'unauthenticated') authError = `unauthenticated: ${auth.detail}`;
+        // THE FALLBACK IS TO THE PUBLIC LIST, AND ONLY WHERE THIS ROUND ASKED
+        // FOR ONE. A round that sent `includePublic: false` said the
+        // marketplace is not part of this question: the failure arm's text
+        // round (decision 13) and a machine on `publicFallback: off` both mean
+        // it, and posting the masked failure text to tenjin.blog because a
+        // session expired is not a fallback, it is a different question being
+        // asked of a different audience. The round records the credential
+        // failure instead, which is what doctor reads.
+        if (!includePublic) {
+          return failed(sets, 'refused', authError === undefined ? {} : { authError });
+        }
       }
       return await callPublic(
         `${base}/api/search`,
