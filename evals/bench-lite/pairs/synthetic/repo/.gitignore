@@ -1,3 +1,10 @@
-node_modules/
-*.log
+.vscode
+node_modules
+*.log*
+dist
+coverage
+.profile
+.idea
+.eslintcache
+tsconfig.vitest-temp.json
 .DS_Store

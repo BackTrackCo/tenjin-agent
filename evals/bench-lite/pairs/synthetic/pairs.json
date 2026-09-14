@@ -1,198 +1,198 @@
 [
   {
-    "id": "settings-override-clear",
+    "id": "cors-default-options",
     "producer": {
       "repo": "repo.git",
-      "base_commit": "f8042b8e46ea61ae7e188aefc03a9b88b354322c",
-      "prompt_file": "prompts/settings-override-clear-producer.md",
+      "base_commit": "7ec48b5d0ab80ae1365b2871c4a2a41daee77304",
+      "prompt_file": "prompts/cors-default-options-producer.md",
       "oracle": {
         "copy": [
           {
-            "from": "oracles/settings-override-clear/producer.test.ts",
-            "to": "tests/oracle/settings-override-clear-producer.test.ts"
+            "from": "oracles/cors-default-options/producer.test.ts",
+            "to": "test/oracle/cors-default-options-producer.test.ts"
           }
         ],
-        "command": "pnpm vitest run tests/oracle/settings-override-clear-producer.test.ts",
+        "command": "pnpm vitest run --typecheck.enabled=false test/oracle/cors-default-options-producer.test.ts",
         "timeout_s": 600
       }
     },
     "consumer": {
       "repo": "repo.git",
-      "base_commit": "f8042b8e46ea61ae7e188aefc03a9b88b354322c",
-      "prompt_file": "prompts/settings-override-clear-consumer.md",
+      "base_commit": "7ec48b5d0ab80ae1365b2871c4a2a41daee77304",
+      "prompt_file": "prompts/cors-default-options-consumer.md",
       "oracle": {
         "copy": [
           {
-            "from": "oracles/settings-override-clear/consumer.test.ts",
-            "to": "tests/oracle/settings-override-clear-consumer.test.ts"
+            "from": "oracles/cors-default-options/consumer.test.ts",
+            "to": "test/oracle/cors-default-options-consumer.test.ts"
           }
         ],
-        "command": "pnpm vitest run tests/oracle/settings-override-clear-consumer.test.ts",
+        "command": "pnpm vitest run --typecheck.enabled=false test/oracle/cors-default-options-consumer.test.ts",
         "timeout_s": 600
       }
     }
   },
   {
-    "id": "entry-ordering-ms",
+    "id": "app-handled-responses",
     "producer": {
       "repo": "repo.git",
-      "base_commit": "f8042b8e46ea61ae7e188aefc03a9b88b354322c",
-      "prompt_file": "prompts/entry-ordering-ms-producer.md",
+      "base_commit": "7ec48b5d0ab80ae1365b2871c4a2a41daee77304",
+      "prompt_file": "prompts/app-handled-responses-producer.md",
       "oracle": {
         "copy": [
           {
-            "from": "oracles/entry-ordering-ms/producer.test.ts",
-            "to": "tests/oracle/entry-ordering-ms-producer.test.ts"
+            "from": "oracles/app-handled-responses/producer.test.ts",
+            "to": "test/oracle/app-handled-responses-producer.test.ts"
           }
         ],
-        "command": "pnpm vitest run tests/oracle/entry-ordering-ms-producer.test.ts",
+        "command": "pnpm vitest run --typecheck.enabled=false test/oracle/app-handled-responses-producer.test.ts",
         "timeout_s": 600
       }
     },
     "consumer": {
       "repo": "repo.git",
-      "base_commit": "f8042b8e46ea61ae7e188aefc03a9b88b354322c",
-      "prompt_file": "prompts/entry-ordering-ms-consumer.md",
+      "base_commit": "7ec48b5d0ab80ae1365b2871c4a2a41daee77304",
+      "prompt_file": "prompts/app-handled-responses-consumer.md",
       "oracle": {
         "copy": [
           {
-            "from": "oracles/entry-ordering-ms/consumer.test.ts",
-            "to": "tests/oracle/entry-ordering-ms-consumer.test.ts"
+            "from": "oracles/app-handled-responses/consumer.test.ts",
+            "to": "test/oracle/app-handled-responses-consumer.test.ts"
           }
         ],
-        "command": "pnpm vitest run tests/oracle/entry-ordering-ms-consumer.test.ts",
+        "command": "pnpm vitest run --typecheck.enabled=false test/oracle/app-handled-responses-consumer.test.ts",
         "timeout_s": 600
       }
     }
   },
   {
-    "id": "job-audit-scope",
+    "id": "body-json-strictness",
     "producer": {
       "repo": "repo.git",
-      "base_commit": "f8042b8e46ea61ae7e188aefc03a9b88b354322c",
-      "prompt_file": "prompts/job-audit-scope-producer.md",
+      "base_commit": "7ec48b5d0ab80ae1365b2871c4a2a41daee77304",
+      "prompt_file": "prompts/body-json-strictness-producer.md",
       "oracle": {
         "copy": [
           {
-            "from": "oracles/job-audit-scope/producer.test.ts",
-            "to": "tests/oracle/job-audit-scope-producer.test.ts"
+            "from": "oracles/body-json-strictness/producer.test.ts",
+            "to": "test/oracle/body-json-strictness-producer.test.ts"
           }
         ],
-        "command": "pnpm vitest run tests/oracle/job-audit-scope-producer.test.ts",
+        "command": "pnpm vitest run --typecheck.enabled=false test/oracle/body-json-strictness-producer.test.ts",
         "timeout_s": 600
       }
     },
     "consumer": {
       "repo": "repo.git",
-      "base_commit": "f8042b8e46ea61ae7e188aefc03a9b88b354322c",
-      "prompt_file": "prompts/job-audit-scope-consumer.md",
+      "base_commit": "7ec48b5d0ab80ae1365b2871c4a2a41daee77304",
+      "prompt_file": "prompts/body-json-strictness-consumer.md",
       "oracle": {
         "copy": [
           {
-            "from": "oracles/job-audit-scope/consumer.test.ts",
-            "to": "tests/oracle/job-audit-scope-consumer.test.ts"
+            "from": "oracles/body-json-strictness/consumer.test.ts",
+            "to": "test/oracle/body-json-strictness-consumer.test.ts"
           }
         ],
-        "command": "pnpm vitest run tests/oracle/job-audit-scope-consumer.test.ts",
+        "command": "pnpm vitest run --typecheck.enabled=false test/oracle/body-json-strictness-consumer.test.ts",
         "timeout_s": 600
       }
     }
   },
   {
-    "id": "pricing-rule-kind",
+    "id": "proxy-forwarded-headers",
     "producer": {
       "repo": "repo.git",
-      "base_commit": "f8042b8e46ea61ae7e188aefc03a9b88b354322c",
-      "prompt_file": "prompts/pricing-rule-kind-producer.md",
+      "base_commit": "7ec48b5d0ab80ae1365b2871c4a2a41daee77304",
+      "prompt_file": "prompts/proxy-forwarded-headers-producer.md",
       "oracle": {
         "copy": [
           {
-            "from": "oracles/pricing-rule-kind/producer.test.ts",
-            "to": "tests/oracle/pricing-rule-kind-producer.test.ts"
+            "from": "oracles/proxy-forwarded-headers/producer.test.ts",
+            "to": "test/oracle/proxy-forwarded-headers-producer.test.ts"
           }
         ],
-        "command": "pnpm vitest run tests/oracle/pricing-rule-kind-producer.test.ts",
+        "command": "pnpm vitest run --typecheck.enabled=false test/oracle/proxy-forwarded-headers-producer.test.ts",
         "timeout_s": 600
       }
     },
     "consumer": {
       "repo": "repo.git",
-      "base_commit": "f8042b8e46ea61ae7e188aefc03a9b88b354322c",
-      "prompt_file": "prompts/pricing-rule-kind-consumer.md",
+      "base_commit": "7ec48b5d0ab80ae1365b2871c4a2a41daee77304",
+      "prompt_file": "prompts/proxy-forwarded-headers-consumer.md",
       "oracle": {
         "copy": [
           {
-            "from": "oracles/pricing-rule-kind/consumer.test.ts",
-            "to": "tests/oracle/pricing-rule-kind-consumer.test.ts"
+            "from": "oracles/proxy-forwarded-headers/consumer.test.ts",
+            "to": "test/oracle/proxy-forwarded-headers-consumer.test.ts"
           }
         ],
-        "command": "pnpm vitest run tests/oracle/pricing-rule-kind-consumer.test.ts",
+        "command": "pnpm vitest run --typecheck.enabled=false test/oracle/proxy-forwarded-headers-consumer.test.ts",
         "timeout_s": 600
       }
     }
   },
   {
-    "id": "config-reload-env",
+    "id": "sse-message-fields",
     "producer": {
       "repo": "repo.git",
-      "base_commit": "f8042b8e46ea61ae7e188aefc03a9b88b354322c",
-      "prompt_file": "prompts/config-reload-env-producer.md",
+      "base_commit": "7ec48b5d0ab80ae1365b2871c4a2a41daee77304",
+      "prompt_file": "prompts/sse-message-fields-producer.md",
       "oracle": {
         "copy": [
           {
-            "from": "oracles/config-reload-env/producer.test.ts",
-            "to": "tests/oracle/config-reload-env-producer.test.ts"
+            "from": "oracles/sse-message-fields/producer.test.ts",
+            "to": "test/oracle/sse-message-fields-producer.test.ts"
           }
         ],
-        "command": "pnpm vitest run tests/oracle/config-reload-env-producer.test.ts",
+        "command": "pnpm vitest run --typecheck.enabled=false test/oracle/sse-message-fields-producer.test.ts",
         "timeout_s": 600
       }
     },
     "consumer": {
       "repo": "repo.git",
-      "base_commit": "f8042b8e46ea61ae7e188aefc03a9b88b354322c",
-      "prompt_file": "prompts/config-reload-env-consumer.md",
+      "base_commit": "7ec48b5d0ab80ae1365b2871c4a2a41daee77304",
+      "prompt_file": "prompts/sse-message-fields-consumer.md",
       "oracle": {
         "copy": [
           {
-            "from": "oracles/config-reload-env/consumer.test.ts",
-            "to": "tests/oracle/config-reload-env-consumer.test.ts"
+            "from": "oracles/sse-message-fields/consumer.test.ts",
+            "to": "test/oracle/sse-message-fields-consumer.test.ts"
           }
         ],
-        "command": "pnpm vitest run tests/oracle/config-reload-env-consumer.test.ts",
+        "command": "pnpm vitest run --typecheck.enabled=false test/oracle/sse-message-fields-consumer.test.ts",
         "timeout_s": 600
       }
     }
   },
   {
-    "id": "content-key-digest",
+    "id": "session-sliding-expiry",
     "producer": {
       "repo": "repo.git",
-      "base_commit": "f8042b8e46ea61ae7e188aefc03a9b88b354322c",
-      "prompt_file": "prompts/content-key-digest-producer.md",
+      "base_commit": "7ec48b5d0ab80ae1365b2871c4a2a41daee77304",
+      "prompt_file": "prompts/session-sliding-expiry-producer.md",
       "oracle": {
         "copy": [
           {
-            "from": "oracles/content-key-digest/producer.test.ts",
-            "to": "tests/oracle/content-key-digest-producer.test.ts"
+            "from": "oracles/session-sliding-expiry/producer.test.ts",
+            "to": "test/oracle/session-sliding-expiry-producer.test.ts"
           }
         ],
-        "command": "pnpm vitest run tests/oracle/content-key-digest-producer.test.ts",
+        "command": "pnpm vitest run --typecheck.enabled=false test/oracle/session-sliding-expiry-producer.test.ts",
         "timeout_s": 600
       }
     },
     "consumer": {
       "repo": "repo.git",
-      "base_commit": "f8042b8e46ea61ae7e188aefc03a9b88b354322c",
-      "prompt_file": "prompts/content-key-digest-consumer.md",
+      "base_commit": "7ec48b5d0ab80ae1365b2871c4a2a41daee77304",
+      "prompt_file": "prompts/session-sliding-expiry-consumer.md",
       "oracle": {
         "copy": [
           {
-            "from": "oracles/content-key-digest/consumer.test.ts",
-            "to": "tests/oracle/content-key-digest-consumer.test.ts"
+            "from": "oracles/session-sliding-expiry/consumer.test.ts",
+            "to": "test/oracle/session-sliding-expiry-consumer.test.ts"
           }
         ],
-        "command": "pnpm vitest run tests/oracle/content-key-digest-consumer.test.ts",
+        "command": "pnpm vitest run --typecheck.enabled=false test/oracle/session-sliding-expiry-consumer.test.ts",
         "timeout_s": 600
       }
     }

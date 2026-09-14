@@ -26,12 +26,12 @@ work="${BENCH_SYNTH_WORK:-${TMPDIR:-/tmp}/bench-lite-synthetic-verify}"
 pairs=("$@")
 if [ ${#pairs[@]} -eq 0 ]; then
   pairs=(
-    settings-override-clear
-    entry-ordering-ms
-    job-audit-scope
-    pricing-rule-kind
-    config-reload-env
-    content-key-digest
+    cors-default-options
+    app-handled-responses
+    body-json-strictness
+    proxy-forwarded-headers
+    sse-message-fields
+    session-sliding-expiry
   )
 fi
 
@@ -43,7 +43,7 @@ run_case() {
   local pair="$1" role="$2" variant="$3" expect="$4"
   local dir="$work/${pair}__${role}__${variant}"
   local oracle="$here/oracles/$pair/$role.test.ts"
-  local dest="tests/oracle/${pair}-${role}.test.ts"
+  local dest="test/oracle/${pair}-${role}.test.ts"
 
   rm -rf "$dir"
   git --git-dir="$bare" worktree prune >/dev/null 2>&1
@@ -64,9 +64,9 @@ run_case() {
   local got='error'
   if [ -z "$note" ]; then
     (cd "$dir" && CI=true pnpm install --frozen-lockfile --prefer-offline >/dev/null 2>&1)
-    mkdir -p "$dir/tests/oracle"
+    mkdir -p "$dir/test/oracle"
     cp "$oracle" "$dir/$dest"
-    if (cd "$dir" && CI=true pnpm vitest run "$dest" >/dev/null 2>&1); then
+    if (cd "$dir" && CI=true pnpm vitest run --typecheck.enabled=false "$dest" >/dev/null 2>&1); then
       got='pass'
     else
       got='fail'

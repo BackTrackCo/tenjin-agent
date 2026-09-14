@@ -1,0 +1,32 @@
+diff --git a/src/utils/body.ts b/src/utils/body.ts
+index ac70be2..cdedc8a 100644
+--- a/src/utils/body.ts
++++ b/src/utils/body.ts
+@@ -161,8 +161,26 @@ export async function readBody<
+   T,
+   Event extends H3Event = H3Event,
+   _T = InferEventInput<"body", Event, T>,
+->(event: Event, options: { strict?: boolean } = {}): Promise<_T> {
++>(
++  event: Event,
++  options: { strict?: boolean; limit?: number } = {},
++): Promise<_T> {
+   const request = event.node.req as InternalRequest<T>;
++
++  // The limit is about this read, so it is checked before any cached parse is
++  // handed back. The raw body itself is cached, so this costs nothing.
++  if (options.limit !== undefined) {
++    const raw = await readRawBody(event, false);
++    const size = raw === undefined ? 0 : raw.length;
++    if (size > options.limit) {
++      throw createError({
++        statusCode: 413,
++        statusMessage: "Payload Too Large",
++        message: "Body exceeds the size limit",
++      });
++    }
++  }
++
+   if (hasProp(request, ParsedBodySymbol)) {
+     return request[ParsedBodySymbol] as _T;
+   }

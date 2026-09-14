@@ -1,65 +1,51 @@
-# Ledgerline
+# H3
 
-The billing ledger behind Ledgerline. Accounts post entries, entries carry a fee from the
-pricing table, and the balance is what is left over.
+<!-- automd:badges -->
 
-One process, one in-memory store. The Postgres store lives in the deploy repo and implements the
-same `Table` interface, so everything above `src/db/` is the same code either way.
+[![npm version](https://img.shields.io/npm/v/h3)](https://npmjs.com/package/h3)
+[![npm downloads](https://img.shields.io/npm/dm/h3)](https://npm.chart.dev/h3)
 
-## Layout
+<!-- /automd -->
 
-| path                 | what is in it                                                  |
-| -------------------- | -------------------------------------------------------------- |
-| `src/types.ts`       | the domain types every layer shares                            |
-| `src/config.ts`      | `LEDGER_*` environment configuration                           |
-| `src/context.ts`     | the request scope: request id, buffered audit events           |
-| `src/audit.ts`       | the audit trail, written when a scope closes                   |
-| `src/merge.ts`       | one-level defaults-plus-override layering                      |
-| `src/time.ts`        | the only place storage timestamps and ISO strings meet         |
-| `src/hash.ts`        | content hashing for idempotency and dedupe keys                |
-| `src/db/`            | row shapes, the table primitive, and the queries built on them |
-| `src/accounts.ts`    | accounts, plans, settings resolution                           |
-| `src/ledger.ts`      | posting entries and computing balances                         |
-| `src/pricing/`       | the pricing rules and the table folded out of them             |
-| `src/jobs/runner.ts` | the job runner, with retries                                   |
-| `src/http/`          | the route table and the handlers                               |
-| `src/commands/`      | what the CLI's subcommands actually do                         |
-| `src/cli.ts`         | the CLI entry point                                            |
-| `src/testing/`       | helpers for tests, imported by nothing in `src/` proper        |
+H3 (pronounced as /eɪtʃθriː/, like h-3) is a minimal h(ttp) framework built for high performance and portability.
 
-## Settings
+> [!NOTE]
+> You are on the v1 branch. Check out [h3 main](https://github.com/unjs/h3/tree/main) for latest.
 
-Settings resolve in three layers: the plan defaults in `PLAN_DEFAULTS`, then `ORG_OVERRIDES`,
-then whatever the account overrides itself. An account stores only its own layer, so an account
-that overrides nothing follows its plan for ever after, including when the plan changes.
+👉 [Documentation](https://h3.unjs.io)
 
-Every accepted settings write bumps `accounts.version` and leaves a row in `settingsVersions`
-holding the override set as of that version.
+## Contribution
 
-## Pricing
+<details>
+  <summary>Local development</summary>
 
-`src/pricing/rules.ts` is where prices are written. Rules add up: a plan and entry kind may carry
-a flat rule and a percentage rule at once. The service reads the folded table rather than the
-rules:
+- Clone this repository
+- Install the latest LTS version of [Node.js](https://nodejs.org/en/)
+- Enable [Corepack](https://github.com/nodejs/corepack) using `corepack enable`
+- Install dependencies using `pnpm install`
+- Run tests using `pnpm dev` or `pnpm test`
 
-```
-pnpm gen:pricing
-```
+</details>
 
-## Idempotency
+<!-- /automd -->
 
-`POST /entries` takes an `Idempotency-Key` header. When the caller does not send one, hash the
-content instead: `fingerprint(payload)` in `src/hash.ts` returns the 32-character key the
-`idempotencyKey` column is sized for.
+## License
 
-## Running things
+<!-- automd:contributors license=MIT author="pi0" -->
 
-```
-pnpm install
-pnpm test                       # the whole suite
-pnpm vitest run tests/ledger.test.ts   # one file
-pnpm typecheck
-pnpm ledger summary <accountId>
-```
+Published under the [MIT](https://github.com/h3js/h3/blob/main/LICENSE) license.
+Made by [@pi0](https://github.com/pi0) and [community](https://github.com/h3js/h3/graphs/contributors) 💛
+<br><br>
+<a href="https://github.com/h3js/h3/graphs/contributors">
+<img src="https://contrib.rocks/image?repo=h3js/h3" />
+</a>
 
-Node 24 or newer: the CLI runs the TypeScript sources directly.
+<!-- /automd -->
+
+<!-- automd:with-automd -->
+
+---
+
+_🤖 auto updated with [automd](https://automd.unjs.io)_
+
+<!-- /automd -->

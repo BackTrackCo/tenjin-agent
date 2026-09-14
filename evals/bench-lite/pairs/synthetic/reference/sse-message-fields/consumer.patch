@@ -1,0 +1,58 @@
+diff --git a/src/utils/sse/types.ts b/src/utils/sse/types.ts
+index 6a3f1f1..71a7a7c 100644
+--- a/src/utils/sse/types.ts
++++ b/src/utils/sse/types.ts
+@@ -11,8 +11,8 @@ export interface EventStreamOptions {
+  * See https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events#fields
+  */
+ export interface EventStreamMessage {
+-  id?: string;
++  id?: string | number;
+   event?: string;
+-  retry?: number;
++  retry?: number | string;
+   data: string;
+ }
+diff --git a/src/utils/sse/utils.ts b/src/utils/sse/utils.ts
+index f2da3d1..40f95a2 100644
+--- a/src/utils/sse/utils.ts
++++ b/src/utils/sse/utils.ts
+@@ -6,14 +6,15 @@ import { EventStreamMessage } from "./types";
+ 
+ export function formatEventStreamMessage(message: EventStreamMessage): string {
+   let result = "";
+-  if (message.id) {
+-    result += `id: ${_sanitizeSingleLine(message.id)}\n`;
++  if (message.id !== undefined && message.id !== "") {
++    result += `id: ${_sanitizeSingleLine(String(message.id))}\n`;
+   }
+   if (message.event) {
+     result += `event: ${_sanitizeSingleLine(message.event)}\n`;
+   }
+-  if (typeof message.retry === "number" && Number.isInteger(message.retry)) {
+-    result += `retry: ${message.retry}\n`;
++  const retry = _retryValue(message.retry);
++  if (retry !== undefined) {
++    result += `retry: ${retry}\n`;
+   }
+   const data = typeof message.data === "string" ? message.data : "";
+   for (const line of data.split(/\r\n|\r|\n/)) {
+@@ -23,6 +24,18 @@ export function formatEventStreamMessage(message: EventStreamMessage): string {
+   return result;
+ }
+ 
++/** A retry delay in whole, non-negative milliseconds, or undefined. */
++function _retryValue(retry: number | string | undefined): number | undefined {
++  if (retry === undefined || retry === "") {
++    return undefined;
++  }
++  const value = typeof retry === "number" ? retry : Number(retry);
++  if (!Number.isInteger(value) || value < 0) {
++    return undefined;
++  }
++  return value;
++}
++
+ function _sanitizeSingleLine(value: string): string {
+   return value.replace(/[\n\r]/g, "");
+ }

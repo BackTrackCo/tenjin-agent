@@ -1,0 +1,58 @@
+diff --git a/src/utils/body.ts b/src/utils/body.ts
+index ac70be2..759827b 100644
+--- a/src/utils/body.ts
++++ b/src/utils/body.ts
+@@ -14,6 +14,7 @@ import { hasProp } from "./internal/object";
+ export type { MultiPartData } from "./internal/multipart";
+ 
+ const RawBodySymbol = Symbol.for("h3RawBody");
++const ParsedStrictlySymbol = Symbol.for("h3ParsedBodyStrictly");
+ const ParsedBodySymbol = Symbol.for("h3ParsedBody");
+ type InternalRequest<T = any> = IncomingMessage & {
+   [RawBodySymbol]?: Promise<Buffer | undefined>;
+@@ -163,17 +164,24 @@ export async function readBody<
+   _T = InferEventInput<"body", Event, T>,
+ >(event: Event, options: { strict?: boolean } = {}): Promise<_T> {
+   const request = event.node.req as InternalRequest<T>;
++  const contentType = request.headers["content-type"] || "";
++  const isJSON = _isJSONContentType(contentType);
++  const strict = options.strict ?? isJSON;
++
+   if (hasProp(request, ParsedBodySymbol)) {
+-    return request[ParsedBodySymbol] as _T;
++    // A cached value is only good enough for this read if it was parsed at
++    // least as strictly as this read asks for.
++    if (!strict || (request as any)[ParsedStrictlySymbol]) {
++      return request[ParsedBodySymbol] as _T;
++    }
+   }
+ 
+-  const contentType = request.headers["content-type"] || "";
+   const body = await readRawBody(event);
+ 
+   let parsed: T;
+ 
+-  if (contentType === "application/json") {
+-    parsed = _parseJSON(body, options.strict ?? true) as T;
++  if (isJSON) {
++    parsed = _parseJSON(body, strict) as T;
+   } else if (contentType.startsWith("application/x-www-form-urlencoded")) {
+     // TODO: Extract and pass charset as option (; charset=utf-8)
+     parsed = _parseURLEncodedBody(body!) as T;
+@@ -184,9 +192,16 @@ export async function readBody<
+   }
+ 
+   request[ParsedBodySymbol] = parsed;
++  (request as any)[ParsedStrictlySymbol] = isJSON ? strict : true;
+   return parsed as unknown as _T;
+ }
+ 
++/** True for `application/json` and for any `*+json` media type, parameters and case ignored. */
++function _isJSONContentType(contentType: string): boolean {
++  const mediaType = (contentType.split(";")[0] || "").trim().toLowerCase();
++  return mediaType === "application/json" || mediaType.endsWith("+json");
++}
++
+ /**
+  * Tries to read the request body via `readBody`, then uses the provided validation function and either throws a validation error or returns the result.
+  *

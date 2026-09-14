@@ -1,0 +1,34 @@
+diff --git a/src/utils/session.ts b/src/utils/session.ts
+index 4574406..ee69bdf 100644
+--- a/src/utils/session.ts
++++ b/src/utils/session.ts
+@@ -40,6 +40,11 @@ export interface SessionConfig {
+   crypto?: Crypto;
+   /** Default is Crypto.randomUUID */
+   generateId?: () => string;
++  /** Called when a presented session token could not be restored. */
++  onRestoreError?: (
++    event: H3Event,
++    details: { reason: "expired" | "invalid"; error: Error },
++  ) => void;
+ }
+ 
+ const DEFAULT_NAME = "h3";
+@@ -139,7 +144,16 @@ export async function getSession<T extends SessionDataT = SessionDataT>(
+   if (sealedSession) {
+     // Unseal session data from cookie
+     const promise = unsealSession(event, config, sealedSession)
+-      .catch(() => {})
++      .catch((error: unknown) => {
++        // The only place that knows WHY a token did not come back.
++        if (config.onRestoreError && isEvent(event)) {
++          const err = error instanceof Error ? error : new Error(String(error));
++          config.onRestoreError(event, {
++            reason: err.message === "Session expired!" ? "expired" : "invalid",
++            error: err,
++          });
++        }
++      })
+       .then((unsealed) => {
+         Object.assign(session, unsealed);
+         delete event.context.sessions![sessionName][getSessionPromise];

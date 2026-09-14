@@ -1,0 +1,28 @@
+diff --git a/src/utils/sse/types.ts b/src/utils/sse/types.ts
+index 6a3f1f1..71a7a7c 100644
+--- a/src/utils/sse/types.ts
++++ b/src/utils/sse/types.ts
+@@ -11,8 +11,8 @@ export interface EventStreamOptions {
+  * See https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events#fields
+  */
+ export interface EventStreamMessage {
+-  id?: string;
++  id?: string | number;
+   event?: string;
+-  retry?: number;
++  retry?: number | string;
+   data: string;
+ }
+diff --git a/src/utils/sse/utils.ts b/src/utils/sse/utils.ts
+index f2da3d1..194afb7 100644
+--- a/src/utils/sse/utils.ts
++++ b/src/utils/sse/utils.ts
+@@ -7,7 +7,7 @@ import { EventStreamMessage } from "./types";
+ export function formatEventStreamMessage(message: EventStreamMessage): string {
+   let result = "";
+   if (message.id) {
+-    result += `id: ${_sanitizeSingleLine(message.id)}\n`;
++    result += `id: ${_sanitizeSingleLine(String(message.id))}\n`;
+   }
+   if (message.event) {
+     result += `event: ${_sanitizeSingleLine(message.event)}\n`;

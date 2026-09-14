@@ -1,0 +1,28 @@
+diff --git a/src/app.ts b/src/app.ts
+index 2f8e4fa..16b7c89 100644
+--- a/src/app.ts
++++ b/src/app.ts
+@@ -67,6 +67,8 @@ export interface AppOptions {
+     response?: { body?: unknown },
+   ) => void | Promise<void>;
+   websocket?: WebSocketOptions;
++  /** Headers added to every response this app produces. */
++  responseHeaders?: Record<string, string>;
+ }
+ 
+ export interface App {
+@@ -155,6 +157,14 @@ export function createAppEventHandler(stack: Stack, options: AppOptions) {
+     // Layer path is the path without the prefix
+     let _layerPath: string;
+ 
++    // App-wide response headers go on before anything can write a response,
++    // since a handler that writes its own response flushes them with it.
++    if (options.responseHeaders) {
++      for (const [name, value] of Object.entries(options.responseHeaders)) {
++        event.node.res.setHeader(name, value);
++      }
++    }
++
+     // Call onRequest hook
+     if (options.onRequest) {
+       await options.onRequest(event);

@@ -1,0 +1,23 @@
+diff --git a/src/utils/proxy.ts b/src/utils/proxy.ts
+index 3c747c0..fd3ea91 100644
+--- a/src/utils/proxy.ts
++++ b/src/utils/proxy.ts
+@@ -22,6 +22,10 @@ export interface ProxyOptions {
+ }
+ 
+ const PayloadMethods = new Set(["PATCH", "POST", "PUT", "DELETE"]);
++// Headers that describe the hop this proxy just terminated, so they are never
++// passed on. `accept-encoding` is here because the response side strips
++// `content-encoding`: asking the upstream to compress would hand the client a
++// body it cannot read.
+ const ignoredHeaders = new Set([
+   "transfer-encoding",
+   "accept-encoding",
+@@ -30,7 +34,6 @@ const ignoredHeaders = new Set([
+   "upgrade",
+   "expect",
+   "host",
+-  "accept",
+ ]);
+ 
+ /**

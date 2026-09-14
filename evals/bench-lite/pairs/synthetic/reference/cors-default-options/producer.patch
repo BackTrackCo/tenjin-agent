@@ -1,0 +1,29 @@
+diff --git a/src/utils/cors/handler.ts b/src/utils/cors/handler.ts
+index 08e1151..624f3aa 100644
+--- a/src/utils/cors/handler.ts
++++ b/src/utils/cors/handler.ts
+@@ -37,10 +37,10 @@ import type { H3CorsOptions } from "./types";
+ export function handleCors(event: H3Event, options: H3CorsOptions): boolean {
+   const _options = resolveCorsOptions(options);
+   if (isPreflightRequest(event)) {
+-    appendCorsPreflightHeaders(event, options);
++    appendCorsPreflightHeaders(event, _options);
+     sendNoContent(event, _options.preflight.statusCode);
+     return true;
+   }
+-  appendCorsHeaders(event, options);
++  appendCorsHeaders(event, _options);
+   return false;
+ }
+diff --git a/src/utils/cors/utils.ts b/src/utils/cors/utils.ts
+index b4900c6..2465d36 100644
+--- a/src/utils/cors/utils.ts
++++ b/src/utils/cors/utils.ts
+@@ -209,6 +209,7 @@ export function appendCorsPreflightHeaders(
+   appendHeaders(event, createExposeHeaders(options));
+   appendHeaders(event, createMethodsHeaders(options));
+   appendHeaders(event, createAllowHeaderHeaders(event, options));
++  appendHeaders(event, createMaxAgeHeader(options));
+ }
+ 
+ /**

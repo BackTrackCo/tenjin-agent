@@ -1,5 +1,13 @@
-# Single-package repo. This file exists so pnpm stops walking up for a
-# workspace root.
+packages:
+  - playground
+  - examples
 
+ignoredBuiltDependencies:
+  - '@parcel/watcher'
+  - esbuild
+
+# pnpm 11 renamed this list and errors (ERR_PNPM_IGNORED_BUILDS) on a
+# build-script dependency that is in neither list.
 allowBuilds:
+  '@parcel/watcher': false
   esbuild: false

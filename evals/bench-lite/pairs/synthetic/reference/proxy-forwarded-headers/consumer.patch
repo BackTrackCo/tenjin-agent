@@ -1,0 +1,42 @@
+diff --git a/src/utils/proxy.ts b/src/utils/proxy.ts
+index 3c747c0..2a682e9 100644
+--- a/src/utils/proxy.ts
++++ b/src/utils/proxy.ts
+@@ -18,10 +18,15 @@ export interface ProxyOptions {
+   streamRequest?: boolean;
+   cookieDomainRewrite?: string | Record<string, string>;
+   cookiePathRewrite?: string | Record<string, string>;
++  /** Pass the incoming request's headers on to the target. */
++  forwardHeaders?: boolean;
+   onResponse?: (event: H3Event, response: Response) => void;
+ }
+ 
+ const PayloadMethods = new Set(["PATCH", "POST", "PUT", "DELETE"]);
++// Headers that describe the hop this proxy just terminated, so they are never
++// passed on. `accept-encoding` is here because the response side strips
++// `content-encoding`.
+ const ignoredHeaders = new Set([
+   "transfer-encoding",
+   "accept-encoding",
+@@ -30,7 +35,6 @@ const ignoredHeaders = new Set([
+   "upgrade",
+   "expect",
+   "host",
+-  "accept",
+ ]);
+ 
+ /**
+@@ -84,9 +88,12 @@ export async function sendProxy(
+   opts: ProxyOptions = {},
+ ) {
+   let response: Response | undefined;
++  const requestHeaders = opts.forwardHeaders
++    ? mergeHeaders(getProxyRequestHeaders(event), opts.headers)
++    : (opts.headers as HeadersInit);
+   try {
+     response = await _getFetch(opts.fetch)(target, {
+-      headers: opts.headers as HeadersInit,
++      headers: requestHeaders as HeadersInit,
+       ignoreResponseError: true, // make $ofetch.raw transparent
+       ...opts.fetchOptions,
+     });

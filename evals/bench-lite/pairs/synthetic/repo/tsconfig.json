@@ -1,17 +1,13 @@
 {
   "compilerOptions": {
-    "target": "ES2023",
-    "module": "nodenext",
-    "moduleResolution": "nodenext",
-    "lib": ["ES2023"],
-    "types": ["node"],
+    "target": "ESNext",
+    "module": "ESNext",
+    "skipLibCheck": true,
+    "allowSyntheticDefaultImports": true,
+    "lib": ["WebWorker", "DOM", "DOM.Iterable"],
     "strict": true,
-    "noUncheckedIndexedAccess": true,
-    "noEmit": true,
-    "verbatimModuleSyntax": true,
-    "erasableSyntaxOnly": true,
-    "allowImportingTsExtensions": true,
-    "skipLibCheck": true
+    "declaration": true,
+    "types": ["node"]
   },
-  "include": ["src", "tests", "scripts"]
+  "include": ["src", "test/types.test-d.ts"]
 }

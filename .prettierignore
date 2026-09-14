@@ -15,3 +15,9 @@ evals/bench-lite/pairs/*/oracles/
 # Parked task packages, kept verbatim for reference including the source
 # package's own notes. Nothing here is wired into pairs.json.
 evals/bench-lite/pairs/parked/
+# Vendored upstream fixture for evals/bench-lite: unjs/h3 at v1.15.11, kept as
+# the tag ships it apart from two toolchain lines. It is formatted with h3's own
+# prettier config, and reformatting it would change the base commit every
+# synthetic pair is graded against.
+evals/bench-lite/pairs/synthetic/repo/
+evals/bench-lite/pairs/synthetic/repo.git/

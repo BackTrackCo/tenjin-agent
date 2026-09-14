@@ -1,0 +1,43 @@
+diff --git a/src/utils/sse/types.ts b/src/utils/sse/types.ts
+index 6a3f1f1..a89f8cb 100644
+--- a/src/utils/sse/types.ts
++++ b/src/utils/sse/types.ts
+@@ -14,5 +14,6 @@ export interface EventStreamMessage {
+   id?: string;
+   event?: string;
+   retry?: number;
+-  data: string;
++  /** Any JSON-serialisable value. A string is sent as it stands. */
++  data: unknown;
+ }
+diff --git a/src/utils/sse/utils.ts b/src/utils/sse/utils.ts
+index f2da3d1..5485d77 100644
+--- a/src/utils/sse/utils.ts
++++ b/src/utils/sse/utils.ts
+@@ -15,7 +15,7 @@ export function formatEventStreamMessage(message: EventStreamMessage): string {
+   if (typeof message.retry === "number" && Number.isInteger(message.retry)) {
+     result += `retry: ${message.retry}\n`;
+   }
+-  const data = typeof message.data === "string" ? message.data : "";
++  const data = _serializeData(message.data);
+   for (const line of data.split(/\r\n|\r|\n/)) {
+     result += `data: ${line}\n`;
+   }
+@@ -23,6 +23,17 @@ export function formatEventStreamMessage(message: EventStreamMessage): string {
+   return result;
+ }
+ 
++/** A string payload goes out as it stands; anything else is JSON. */
++function _serializeData(data: unknown): string {
++  if (typeof data === "string") {
++    return data;
++  }
++  if (data === undefined) {
++    return "";
++  }
++  return JSON.stringify(data) ?? "";
++}
++
+ function _sanitizeSingleLine(value: string): string {
+   return value.replace(/[\n\r]/g, "");
+ }
