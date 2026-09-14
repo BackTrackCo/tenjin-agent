@@ -74,10 +74,11 @@ export const SKILL_CONTENT_FLAG_NAMES = ['teamMode'] as const;
  * "what does this machine's skill text say" and no call site can drift by omitting
  * a flag (an omitted flag is a silent OFF, which is a rendered mode, not an error).
  *
- * `teamMode` is the machine's CONFIGURED mode — a team shelf of the team's own
- * plus its door key, per `settings.isTeamModeConfig` — not this invocation's. A
- * `--base-url` cannot reach it, and it should not: the file being written outlives
- * the command that wrote it and is read by every later session on this machine.
+ * `teamMode` means THIS MACHINE HAS A SHELF: `config.shelf !== null`, read off
+ * the raw config rather than this invocation's resolved settings. A `--base-url`
+ * cannot reach it, and it should not: the file being written outlives the command
+ * that wrote it and is read by every later session on this machine. The flag
+ * keeps its name so no marker line in either SKILL.md has to move.
  */
 export function skillContentFlags(facts: { teamMode: boolean }): SkillContentFlags {
   return { teamMode: facts.teamMode };

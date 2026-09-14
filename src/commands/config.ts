@@ -714,10 +714,20 @@ export async function persistInstallHarness(
   dir: string,
   harness: readonly Harness[],
 ): Promise<void> {
-  await persist(dir, (existing) => ({
-    ...existing,
-    install: { ...existing.install, harness: [...harness] },
-  }));
+  await persist(dir, (existing) => {
+    const merged: PartialConfig = {
+      ...existing,
+      install: { ...existing.install, harness: [...harness] },
+    };
+    // NO MIGRATION, ONE SWEEP. `RawConfigSchema` is passthrough, so an old file
+    // carrying the two deleted shelf keys still loads and still rides through
+    // every other write. `install` is the one command that already rewrites the
+    // file on every run, so it is where the dead keys go, and doctor warns
+    // while they are still there.
+    delete (merged as Record<string, unknown>).publicShelfUrl;
+    delete (merged as Record<string, unknown>).shelfBypassSecret;
+    return merged;
+  });
 }
 
 /**

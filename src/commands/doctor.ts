@@ -581,6 +581,27 @@ async function loadConfigForDoctor(
     const config = await loadRawConfig(dataDir);
     const detail =
       Object.keys(config).length === 0 ? 'no config file; using defaults' : configPath(dataDir);
+    // RETIRED KEYS, named while they are still in the file. `RawConfigSchema` is
+    // passthrough, so an old file still loads and these ride through untouched
+    // and unread; the next `tenjin install` sweeps them. Saying so is what keeps
+    // an operator from believing a `shelfBypassSecret` still does something.
+    const dead = ['publicShelfUrl', 'shelfBypassSecret'].filter((key) =>
+      Object.hasOwn(config, key),
+    );
+    if (dead.length > 0) {
+      return {
+        config,
+        check: {
+          result: {
+            name: 'config',
+            status: 'warn',
+            required: true,
+            detail: `${detail}; it still carries retired keys (${dead.join(', ')}), which nothing reads`,
+            fix: 'Run `tenjin install` to sweep them, and `tenjin shelf use <slug>` to name the shelf instead.',
+          },
+        },
+      };
+    }
     return { config, check: { result: { name: 'config', status: 'ok', required: true, detail } } };
   } catch (err) {
     if (err instanceof CliError && err.code === 'CONFIG_INVALID') {

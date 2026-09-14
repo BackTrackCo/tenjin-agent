@@ -123,28 +123,28 @@ export type SettingsSkipReason =
  * time), and docs/agent-permissions.md carries the full paragraph, but an operator
  * uninstalling to revoke should not have to find it there.
  *
- * `shelfBypassSecret` gets its own item for a different reason: every other kept
- * value is the operator's own state, and that one is a SHARED TEAM CREDENTIAL —
- * the door key to a deployment their teammates are also behind. An uninstall is
- * often "I am handing this machine on", and a kept-items list that says only
- * "config" leaves the key readable for whoever gets it next. Named, with the one
- * command that clears it, because the alternative is clearing it for them: the
- * key is not ours to revoke, and a teammate's shelf must not go dark because
- * somebody uninstalled the CLI.
+ * The `shelf` slug gets its own item for a different reason: it is not a
+ * credential (the wallet is, and membership is the server's answer), but it is
+ * the one kept value that says this machine belongs to somebody's team. An
+ * uninstall is often "I am handing this machine on", and a kept-items list that
+ * says only "config" leaves the next holder pointed at a shelf that is not
+ * theirs. Named, with the one command that clears it. Clearing it for them is
+ * not ours to do: membership is the org admin's to revoke, and a teammate's
+ * shelf must not change because somebody uninstalled the CLI.
  *
  * That item is CONDITIONAL, which is why this is a function and not a constant.
- * `shelfBypassSecret` defaults to `''`, so on a public-mode machine — most of
- * them — a static entry printed an imperative to clear a credential that is not
- * there. A receipt whose items an operator can check and find false is a receipt
- * they stop reading, and this one's whole job is to be read.
+ * `shelf` defaults to null, so on a public-only machine — most of them — a
+ * static entry would print an imperative about a shelf that is not there. A
+ * receipt whose items an operator can check and find false is a receipt they
+ * stop reading, and this one's whole job is to be read.
  */
-export function keptItems(hasShelfSecret: boolean): string[] {
+export function keptItems(hasShelf: boolean): string[] {
   return [
     'your wallet, config (publish.mode included, so a later install resumes it), and library under ~/.tenjin',
     'the loop database ~/.tenjin/loop.db — your search record, your outcome history and the findings your agents queued but never published; a later install picks it up as it is',
-    ...(hasShelfSecret
+    ...(hasShelf
       ? [
-          'the team shelf’s shelfBypassSecret, in that config — a shared credential, so clear it before handing the machine on: `tenjin config set shelfBypassSecret ""`',
+          'the active shelf slug, in that config — this machine still points at your team’s shelf, so clear it before handing the machine on: `tenjin shelf use --none`',
         ]
       : []),
   ];
