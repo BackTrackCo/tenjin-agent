@@ -344,6 +344,25 @@ five minutes; refresh the source serially before retrying if this check refuses 
 A two-worker native Sol subscription check passed with CLI 0.154.0. Requalify this boundary
 when changing the pinned CLI; provider throttling can still limit useful concurrency.
 
+Claude uses the same worker pool, separate per-trial profiles/session IDs, database
+facilities, shelf exclusion, checkpoints and cleanup. Its native `claude -p` receives
+the declared effort and optional turn cap; the generated effort environment prevents
+host or task configuration from silently changing it. Subscription runs may declare
+`max_budget_usd: null` and `turn_budget: null` to use the shared wall-clock cap without
+an artificial API-price ceiling. An explicit dollar cap is still honored; API-mode
+runs still require one. Native JSON stdout and diagnostic stderr are kept separately.
+Use `claude-opus-5`, `effort: low`, `speed_mode: standard`,
+`credential_env: CLAUDE_CODE_OAUTH_TOKEN` and `billing_mode: subscription` for the
+Claude counterpart to Sol/low. Resolve the latest official Claude release into its
+own lock and image set; results form a separate harness/model stratum.
+
+The parallel Claude launch and exhaustion paths are verified without model calls.
+A fresh native parallel subscription check remains required when allowance returns.
+Supply the operator's own token from the official `claude setup-token` flow; the
+controller does not copy the operator's credential store or rotate a shared refresh
+grant. Both vendors document native parallel workflows, which does not guarantee
+account enforcement outcomes or authorize exceeding plan limits.
+
 Subscription login does not itself disable a provider account's credit fallback. Before a
 live run, verify that purchased-credit/extra-usage fallback is unavailable or disabled. Never
 buy credits, enable extra usage, redeem resets or switch to API billing to finish a run.

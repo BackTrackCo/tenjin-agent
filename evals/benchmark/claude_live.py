@@ -669,9 +669,29 @@ def probe_environment(roots: artifact.TrialRoots, parent: Mapping[str, str]) -> 
     return container_environment(roots, parent)
 
 
+def execution_controls(pins: Mapping[str, Any]) -> tuple[list[str], str]:
+    """Apply the recorded reasoning/turn/dollar protocol to the native CLI."""
+    effort = pins.get("effort")
+    if effort not in {"default", "low", "medium", "high", "xhigh", "max"}:
+        raise LiveExecutorError("Claude effort must be explicit; use default or a supported effort level")
+    concurrency = pins.get("concurrency", 1)
+    if isinstance(concurrency, bool) or not isinstance(concurrency, int) or concurrency < 1:
+        raise LiveExecutorError("Claude concurrency must be a positive integer")
+    turns = pins.get("turn_budget")
+    if turns is not None and (isinstance(turns, bool) or not isinstance(turns, int) or turns < 1):
+        raise LiveExecutorError("Claude turn_budget must be a positive integer or null")
+    flags = [] if effort == "default" else ["--effort", effort]
+    if turns is not None:
+        flags += ["--max-turns", str(turns)]
+    if pins.get("max_budget_usd") is not None or pins.get("billing_mode") != "subscription":
+        flags += ["--max-budget-usd", budget_of(pins)]
+    return flags, "auto" if effort == "default" else effort
+
+
 def build_argv(request: LaunchRequest, settings: Path, session_id: str) -> list[str]:
     """The whole command. Every flag is a literal here; every value is checked above."""
     pins = pins_for(request.pins, request.task)
+    controls, _ = execution_controls(pins)
     return [
         CLI,
         "-p",
@@ -682,8 +702,7 @@ def build_argv(request: LaunchRequest, settings: Path, session_id: str) -> list[
         "--include-hook-events",
         "--model",
         model_of(pins),
-        "--max-budget-usd",
-        budget_of(pins),
+        *controls,
         "--strict-mcp-config",
         "--setting-sources",
         "project",
@@ -733,6 +752,8 @@ def launch(request: LaunchRequest) -> Launch:
     name = container.container_name(request.trial_id, request.phase)
     plan = container.mounts(request.roots, settings=path)
     environment = container_environment(request.roots, os.environ, session_id, daemon=provisioned)
+    _, effort = execution_controls(request.pins)
+    environment["CLAUDE_CODE_EFFORT_LEVEL"] = effort
     # An attempt with an egress can reach the marketplace, so it does not start
     # unnamed. The failure this refuses is silent: the run succeeds and only the
     # marketplace's demand tables show it, so the check is here, at the seam that
@@ -764,6 +785,7 @@ def launch(request: LaunchRequest) -> Launch:
         hook_settings={"hooks": settings.get("hooks", {})},
         package_manager=package_manager(),
         recipe=recipe,
+        separate_streams=True,
         container_plan={
             **recipe.to_json(),
             "image": {"reference": reference, "resolved": request.image is not None},
