@@ -211,5 +211,19 @@ This arm cannot show anything until feasibility is settled. Mining these pairs i
 than mining post-merge pairs. B's oracle also has to run on the older base. Run the
 feasibility check before any measurement is planned on this arm.
 
-The ancestor-check verification and the two synthetic runs above come from the bench-lite
-experiment in tenjin-agent#357.
+### Expected mechanism to watch
+
+Two product findings say what these arms should be expected to show. Neither is a harness
+defect, so neither is fixed by changing the runner.
+
+Capture records what surprised A. A compiler error or a library quirk is what reaches the
+note, and that is not the same thing as what B needs. An arm that treats the two as one
+will count a capture that no consumer can use.
+
+A long query retrieves nothing. A query taken from a whole ticket returns no match where a
+short keyword query on the same subject returns one, so any arm that queries the ticket
+sees an empty shelf until the upstream query-path fix lands. Read a zero delivery rate
+against that before reading it as an absent benefit.
+
+The ancestor-check verification, the two synthetic runs, and the two findings above come
+from the bench-lite experiment in tenjin-agent#357.
