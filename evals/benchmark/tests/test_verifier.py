@@ -2,25 +2,37 @@
 
 from __future__ import annotations
 
+import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 import pytest
 
-from evals.benchmark import executor, manifest as manifest_module, verifier
+from evals.benchmark import artifact, executor, manifest as manifest_module, verifier
 from evals.benchmark.manifest import ManifestError
 from evals.benchmark.tests import support
 from evals.benchmark.verifier import VerifierError, VerifierSpec
 
+ACTOR_FIXTURE = verifier.HIDDEN.parent / "fixtures" / "live" / "actor"
 SHELL_SHAPED = ("$(curl http://example.test)", "fake; rm -rf /", "`id`", "fake && echo", "../../bin/sh")
 
 
 def _echo(length: int) -> VerifierSpec:
     program = f"print('x' * {length}); raise SystemExit(1)"
     return VerifierSpec(name="echo", argv=lambda repo: [sys.executable, "-c", program], timeout_s=30)
+
+
+def _write_marker(repo: Path, name: str, **overrides: Any) -> None:
+    """The marker the fixture's reporter would write for task `name`, with fields overridden."""
+    marker = {"task": name, "files": [f"tests/{name}.test.mjs"], "passed": 2, "failed": 0, **overrides}
+    path = verifier.marker_path(repo, name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(marker), encoding="utf-8")
 
 
 @pytest.fixture
@@ -115,15 +127,69 @@ def test_the_run_hands_that_allowlist_to_the_process(repo: Path, run_dir: Path) 
     assert "PATH" in passed
 
 
+
+
+
+
+
+
+
+
+# The honest barrier: `npx vitest` and a bare `node node_modules/vitest/...`
+# reach the config with no pnpm agent and stop on a repository reason;
+# `pnpm exec vitest` and `pnpm vitest` carry `npm_config_user_agent=pnpm/...`
+# and load it. Importing the config is the whole check, so no vitest boots.
+
+
+
+
+
+
+
+
+
+
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        pytest.param(dict(files=["tests/other.test.mjs"]), id="wrong file"),
+        pytest.param(dict(files=["tests/actor.test.mjs", "unrelated/shard-1.test.mjs"]), id="the whole set"),
+        pytest.param(dict(files=[]), id="no files"),
+        pytest.param(dict(task="budget"), id="wrong task"),
+        pytest.param(dict(passed=0), id="nothing passed"),
+        pytest.param(dict(failed=1), id="a failure"),
+        pytest.param(dict(passed=True), id="a boolean count"),
+    ],
+)
+def test_a_run_marker_that_does_not_name_one_green_test_is_refused(repo: Path, overrides: dict) -> None:
+    _write_marker(repo, "actor", **overrides)
+    assert verifier.check_marker(repo, "actor") is not None
+
+
+
+def test_the_run_marker_must_be_present_and_readable(repo: Path) -> None:
+    assert "no run marker" in (verifier.check_marker(repo, "actor") or "")
+    verifier.marker_path(repo, "actor").parent.mkdir(parents=True, exist_ok=True)
+    verifier.marker_path(repo, "actor").write_text("{not json", encoding="utf-8")
+    assert "not readable JSON" in (verifier.check_marker(repo, "actor") or "")
+    _write_marker(repo, "actor")
+    assert verifier.check_marker(repo, "actor") is None
+
+
+
 def test_verifier_output_is_bounded(repo: Path, run_dir: Path) -> None:
     verdict = verifier.run(_echo(5000), repo, run_dir)
     assert verdict.outcome == "fail"
     assert len(verdict.detail) == verifier.OUTPUT_LIMIT
 
 
+
 @pytest.fixture
 def synthetic(tmp_path: Path) -> tuple[dict, Path]:
     return support.synthetic_manifest(tmp_path).data, tmp_path
+
 
 
 @pytest.mark.parametrize("value", SHELL_SHAPED)
@@ -139,6 +205,7 @@ def test_shell_shaped_manifest_values_fail_closed(synthetic: tuple[dict, Path], 
         verifier.lookup(value)
     with pytest.raises(executor.ExecutorError):
         executor.lookup(value)
+
 
 
 @pytest.mark.parametrize("value", ("../fixture", "/etc", ""))

@@ -162,7 +162,7 @@ def protocol_hash(manifest: dict[str, Any], *, harness_update: bool = False) -> 
     Runtime product/image commit receipts are not manifest inputs. Explicit
     product version labels are excluded too; model/toolchain pins stay fixed.
     """
-    data = {**manifest, "measurement_method": "completion-v2-agent-clock-capture-reuse1", "arms": [{key: value for key, value in arm.items() if key != "product_version"}
+    data = {**manifest, "measurement_method": "completion-v3-free-team-agent-clock-capture-reuse1", "arms": [{key: value for key, value in arm.items() if key != "product_version"}
                                for arm in manifest.get("arms", [])]}
     if harness_update:
         data["pins"] = {key: value for key, value in manifest.get("pins", {}).items() if key not in {"harness_version", "harness_integrity"}}

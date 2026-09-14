@@ -187,6 +187,19 @@ def test_timing_requires_finite_nonnegative_observations(field, value) -> None:
         records.validate({**attempt_record(parse("sess-family")), field: value})
 
 
+def test_knowledge_receipt_rejects_unbound_or_unversioned_available_bodies(family_session):
+    import copy
+    base = attempt_record(family_session)
+    knowledge = {"corpus_hash": "sha256:" + "a" * 64, "body_hashes": {"prior": "sha256:" + "b" * 64}, "available": ["prior"]}
+    base["isolation"]["knowledge"] = knowledge
+    records.validate(base)
+    for change in [{"available": ["future"]}, {"available": ["prior", "prior"]}, {"corpus_hash": "unversioned"}, {"body_hashes": {"prior": "current"}}]:
+        bad = copy.deepcopy(base)
+        bad["isolation"]["knowledge"].update(change)
+        with pytest.raises(RecordError):
+            records.validate(bad)
+
+
 def _with_producer(producer: str, **overrides) -> dict:
     """A record whose memory was prepared by one producer phase that ended `producer`."""
     base = attempt_record(parse("sess-family"))

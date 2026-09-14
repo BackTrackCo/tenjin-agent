@@ -29,6 +29,8 @@ const read = (path: string): string => readFileSync(`${EVALS_DIR}${path}`, 'utf8
  * someone adds a fixture it guards less than it claims while staying green.
  */
 function walkFixtures(dir = EVALS_DIR, prefix = ''): string[] {
+  // Generated historical snapshots are checked against their own source revision.
+  if (prefix === 'benchmark/local/') return [];
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
     if (entry.isDirectory()) return walkFixtures(`${dir}${entry.name}/`, `${prefix}${entry.name}/`);
     return /\.(json|md)$/.test(entry.name) ? [`${prefix}${entry.name}`] : [];
@@ -71,13 +73,37 @@ const SHIPPED_SKILLS: readonly string[] = PACKAGED_SKILL_NAMES.filter(
   (n) => n !== 'tenjin',
 ).flatMap((name) => SHIPPED_SKILL_FILES[name].map((rel) => `${name}/${rel}`));
 
+// Historical work orders describe version-pinned source, not instructions for
+// today's CLI. Their source/oracle contracts are checked by Bench-1 admission.
+function isHistoricalCatalog(text: string): boolean {
+  try {
+    const data = JSON.parse(text) as { schema?: string; tasks?: unknown[] };
+    return (
+      data.schema === 'bench3.replay-catalog.v1' &&
+      Array.isArray(data.tasks) &&
+      data.tasks.length > 0 &&
+      data.tasks.every((task) => {
+        if (!task || typeof task !== 'object') return false;
+        const row = task as Record<string, unknown>;
+        return ['before_commit', 'after_commit'].every(
+          (key) => typeof row[key] === 'string' && /^[a-f0-9]{40}$/.test(row[key]),
+        );
+      })
+    );
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Everything the two verb guards sweep, read once, each carrying the label a
  * failure names it by. The fixtures and the shipped skills live under different
  * roots, so the text travels with the entry rather than the path.
  */
 const SOURCES: ReadonlyArray<{ label: string; text: string }> = [
-  ...FIXTURE_PATHS.map((path) => ({ label: `evals/${path}`, text: read(path) })),
+  ...FIXTURE_PATHS.map((path) => ({ label: `evals/${path}`, text: read(path) })).filter(
+    ({ text }) => !isHistoricalCatalog(text),
+  ),
   ...SHIPPED_SKILLS.map((path) => ({
     label: `skills/${path}`,
     text: readFileSync(`${SKILLS_DIR}${path}`, 'utf8'),
@@ -329,5 +355,32 @@ describe('skill text follows the wire schema', () => {
       },
       'skills/tenjin-search/SKILL.md and searchCandidateSchema disagree; update whichever is stale',
     ).toEqual({ omittedByTheDoc: [], notInTheSchema: [] });
+  });
+});
+
+describe('historical fixture scope', () => {
+  it('does not descend into generated historical snapshots', () => {
+    expect(walkFixtures('/not-a-directory/', 'benchmark/local/')).toEqual([]);
+  });
+
+  it('exempts only version-pinned historical catalogs from current-CLI vocabulary', () => {
+    const task = {
+      before_commit: 'a'.repeat(40),
+      after_commit: 'b'.repeat(40),
+      prompt: 'tenjin lookup',
+    };
+    expect(
+      isHistoricalCatalog(JSON.stringify({ schema: 'bench3.replay-catalog.v1', tasks: [task] })),
+    ).toBe(true);
+    expect(isHistoricalCatalog(JSON.stringify({ tasks: [task] }))).toBe(false);
+    expect(
+      isHistoricalCatalog(
+        JSON.stringify({
+          schema: 'bench3.replay-catalog.v1',
+          tasks: [{ ...task, before_commit: 'main' }],
+        }),
+      ),
+    ).toBe(false);
+    expect(isHistoricalCatalog('Run tenjin lookup.')).toBe(false);
   });
 });
