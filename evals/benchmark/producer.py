@@ -158,6 +158,7 @@ def run(
             phase=PHASE,
             image=None if image is None else image.id,
             egress=getattr(runtime, "egress", None),
+            subscription_auth=getattr(runtime, "subscription_auth", None),
         )
     )
     session_id = launch.root_session_id

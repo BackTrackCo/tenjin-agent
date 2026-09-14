@@ -1,7 +1,9 @@
 """The subscription Codex boundary, without starting a model or using credentials."""
 from __future__ import annotations
 
+import base64
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -11,7 +13,7 @@ from evals.benchmark import artifact, codex_live, executor, images, sha256_json
 PINS = {"model": "gpt-5.6-sol", "harness_version": "0.154.0", "permission_mode": "workspace-write",
         "credential_env": "CODEX_BENCH_AUTH_FILE", "agent_package": "@openai/codex",
         "billing_mode": "subscription", "effort": "low", "speed_mode": "fast",
-        "turn_budget": None, "concurrency": 1, "tools": ["Bash", "Read", "Edit"]}
+        "turn_budget": None, "concurrency": 1, "wall_clock_s": 600, "tools": ["Bash", "Read", "Edit"]}
 
 
 def request(tmp_path):
@@ -43,7 +45,7 @@ def test_codex_plan_has_only_subscription_auth_and_generated_configuration(tmp_p
 
 @pytest.mark.parametrize("change", [
     {"model": "gpt-5.6"}, {"credential_env": "OPENAI_API_KEY"}, {"billing_mode": "credits"},
-    {"agent_package": "arbitrary"}, {"turn_budget": 30}, {"concurrency": 2}, {"effort": "ultra"},
+    {"agent_package": "arbitrary"}, {"turn_budget": 30}, {"concurrency": 0}, {"concurrency": True}, {"concurrency": 1.5}, {"effort": "ultra"},
 ])
 def test_codex_refuses_changes_outside_subscription_protocol(change):
     with pytest.raises(executor.ExecutorError):
@@ -238,3 +240,61 @@ def test_codex_postgres_launch_uses_the_same_visible_test_instructions(tmp_path)
     prompt = codex_live.launch(item).argv[-1]
     assert prompt == claude_live.prompt_of(item.task)
     assert "--config .bench1/model-tests.config.mjs --configLoader runner <test-file>" in prompt
+
+
+def subscription_file(tmp_path, *, expiry=None):
+    auth = tmp_path / "subscription.json"
+    claims = base64.urlsafe_b64encode(json.dumps({"exp": time.time() + 3600 if expiry is None else expiry}).encode()).decode().rstrip("=")
+    auth.write_text(json.dumps({"auth_mode": "chatgpt", "tokens": {
+        "access_token": f"header.{claims}.signature", "refresh_token": "renewable-secret"}}))
+    auth.chmod(0o600)
+    return auth
+
+
+def test_parallel_snapshot_is_private_nonrenewing_and_removed_on_failure(tmp_path):
+    auth = subscription_file(tmp_path)
+    original = auth.read_bytes()
+    with pytest.raises(RuntimeError, match="worker failed"):
+        with codex_live.parallel_auth(tmp_path / "run", PINS, {codex_live.AUTH_ENV: str(auth)}) as snapshot:
+            assert not snapshot.is_relative_to(tmp_path / "run")
+            assert snapshot.stat().st_mode & 0o777 == 0o600
+            assert snapshot.parent.stat().st_mode & 0o777 == 0o700
+            assert json.loads(snapshot.read_text())["tokens"]["refresh_token"] == ""
+            assert auth.read_bytes() == original
+            raise RuntimeError("worker failed")
+    assert not snapshot.parent.exists()
+    assert auth.read_bytes() == original
+
+
+@pytest.mark.parametrize("expiry", [0, None, True, "tomorrow", float("inf")])
+def test_parallel_admission_refuses_unusable_expiry(tmp_path, expiry):
+    auth = subscription_file(tmp_path, expiry=0)
+    data = json.loads(auth.read_text())
+    claims = base64.urlsafe_b64encode(json.dumps({"exp": expiry}).encode()).decode().rstrip("=")
+    data["tokens"]["access_token"] = f"header.{claims}.signature"
+    auth.write_text(json.dumps(data))
+    with pytest.raises(executor.ExecutorError):
+        with codex_live.parallel_auth(tmp_path / "run", PINS, {codex_live.AUTH_ENV: str(auth)}):
+            pytest.fail("unusable access token admitted")
+    assert not list(tmp_path.glob("benchmark-codex-access-*"))
+
+
+def test_parallel_launch_uses_read_only_snapshot_and_rechecks_expiry(tmp_path, monkeypatch):
+    from dataclasses import replace
+    item = request(tmp_path)
+    auth = subscription_file(tmp_path)
+    pins = {**PINS, "concurrency": 2}
+    codex_live.validate_pins(pins)
+    with pytest.raises(executor.ExecutorError, match="run-owned"):
+        codex_live.auth_path(item.roots, pins=pins)
+    with pytest.raises(executor.ExecutorError, match="refresh token"):
+        codex_live.auth_path(item.roots, pins=pins, snapshot=auth)
+    monkeypatch.setattr(codex_live, "trust_hooks", lambda *args: None)
+    with codex_live.parallel_auth(item.roots.run_dir, pins, {codex_live.AUTH_ENV: str(auth)}) as snapshot:
+        result = codex_live.launch(replace(item, pins=pins, dry_run=False, subscription_auth=snapshot))
+        mounts = [mount for mount in result.recipe.plan if mount.host == snapshot]
+        assert len(mounts) == 1 and mounts[0].mode == "ro"
+        assert (item.roots.profile / "auth.json").read_bytes() == b""
+        monkeypatch.setattr(codex_live.time, "time", lambda: 1e20)
+        with pytest.raises(executor.ExecutorError, match="refresh subscription"):
+            codex_live.auth_path(item.roots, pins=pins, snapshot=snapshot)
