@@ -204,6 +204,8 @@ def test_the_argv_is_exactly_the_command_the_operator_would_run(request_for: Req
         "--include-hook-events",
         "--model",
         pins["model"],
+        "--max-turns",
+        str(pins["turn_budget"]),
         "--max-budget-usd",
         f"{pins['max_budget_usd']:.2f}",
         "--strict-mcp-config",
@@ -1447,3 +1449,74 @@ def test_postgres_launch_explains_visible_test_facilities_in_every_arm(edited: E
     assert "--config .bench1/model-tests.config.mjs --configLoader runner <test-file>" in prompt
     assert "no host Docker socket" in prompt
     assert "hidden" not in prompt
+
+
+@pytest.mark.parametrize("effort", ["low", "medium", "high", "xhigh", "max", "default"])
+def test_claude_native_controls_match_recorded_pins(request_for, effort):
+    item = request_for(smoke())
+    pins = {**item.pins, "effort": effort, "turn_budget": 7, "billing_mode": "subscription", "max_budget_usd": None, "concurrency": 2}
+    result = claude_live.launch(dataclasses.replace(item, pins=pins))
+    assert result.argv[result.argv.index("--max-turns") + 1] == "7"
+    assert "--max-budget-usd" not in result.argv
+    if effort == "default":
+        assert "--effort" not in result.argv
+    else:
+        assert result.argv[result.argv.index("--effort") + 1] == effort
+    assert result.recipe.environment["CLAUDE_CODE_EFFORT_LEVEL"] == ("auto" if effort == "default" else effort)
+    assert result.separate_streams
+
+
+@pytest.mark.parametrize("change", [{"effort": "ultracode"}, {"turn_budget": 0}, {"turn_budget": True}, {"turn_budget": 1.5}, {"concurrency": 0}, {"concurrency": True}, {"concurrency": 1.5}])
+def test_claude_refuses_unsupported_execution_controls(request_for, change):
+    item = request_for(smoke())
+    with pytest.raises(LiveExecutorError):
+        claude_live.launch(dataclasses.replace(item, pins={**item.pins, **change}))
+
+
+def test_parallel_claude_profiles_and_auth_are_independent(request_for, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "must-not-cross")
+    monkeypatch.setenv("CLAUDE_CODE_EFFORT_LEVEL", "max")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "synthetic-subscription")
+    items = [request_for(smoke(), i) for i in range(2)]
+    barrier = Barrier(2)
+    def launch(item):
+        barrier.wait(timeout=5)
+        return claude_live.launch(dataclasses.replace(item, pins={**item.pins, "billing_mode": "subscription", "effort": "low", "concurrency": 2, "turn_budget": None, "max_budget_usd": None}))
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(launch, items))
+    assert results[0].root_session_id != results[1].root_session_id
+    assert items[0].roots.profile != items[1].roots.profile
+    assert results[0].recipe.name != results[1].recipe.name
+    for result in results:
+        assert result.recipe.forward == ("CLAUDE_CODE_OAUTH_TOKEN",)
+        assert "ANTHROPIC_API_KEY" not in result.recipe.environment
+        assert "synthetic-subscription" not in json.dumps(result.container_plan)
+        assert result.recipe.environment["CLAUDE_CODE_EFFORT_LEVEL"] == "low"
+        assert "--max-turns" not in result.argv and "--max-budget-usd" not in result.argv
+        settings = json.loads(Path(result.argv[result.argv.index("--settings") + 1]).read_text())
+        assert settings["forceLoginMethod"] == "claudeai" and settings["fastMode"] is False
+
+
+def test_claude_terminal_limit_retains_native_stdout_and_stderr(request_for, monkeypatch):
+    item = request_for(smoke())
+    launch = claude_live.launch(item)
+    native = json.dumps({"type": "result", "subtype": "error_during_execution", "is_error": True,
+                         "errors": ["You've hit your limit · resets tomorrow"]}) + "\n"
+    class Box:
+        def __init__(self, **kwargs): pass
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def exec(self, command, **kwargs):
+            assert command[:2] == ["bash", "-c"] and kwargs["stream"] is None
+            (item.roots.output / "command.stdout").write_text(native)
+            (item.roots.output / "command.stderr").write_text("Native Claude diagnostic\n")
+            return container.Completed(returncode=1, stdout="Harbor diagnostic", stderr="compose stderr")
+    monkeypatch.setattr(container, "Container", Box)
+    monkeypatch.setattr(container, "daemon_error", lambda output: None)
+    monkeypatch.setattr(container, "stop", lambda name: None)
+    result = runner.container_spawn(launch, item.roots, 5)
+    assert result.returncode == 1 and result.stderr == "Native Claude diagnostic\n"
+    assert item.roots.stream.read_text() == native
+    assert claude_usage.provider_limit(item.roots.stream)
