@@ -116,3 +116,58 @@ Once readmitted under a new freeze, the ordinary shared runner executes the mode
 consumer-reuse metrics plus the complete producer/capture/consumer pipeline cost.
 Hook type, actor, shelf, pointer/body form and reviewed applicability stay separate.
 Actor-shaped test data does not establish live dispatch-reranker coverage.
+
+## Corpus arms
+
+Bench-3 draws its pairs from three corpora. Each corpus answers a different question.
+The three are labelled when a pair is selected, are reported separately, and are never
+pooled into one number. A result from one arm is never restated as a result from another
+arm. Bench-3 keeps real pairs rather than replacing them with a synthetic corpus.
+
+A pair is classified by a merge-base ancestor check. Run
+`git merge-base --is-ancestor <A merge commit> <B base commit>`. When the check succeeds,
+A's merged code is already present in the tree B starts from, and the pair is post-merge.
+When the check fails, B was cut before A landed, and the pair is concurrent. The check
+runs before a pair enters a corpus, and its result is recorded with the pair.
+
+### Arm 1: real post-merge pairs
+
+Pairs are mined from merged pull requests in the frozen frame, and the ancestor check
+places A's merged code in B's base commit.
+
+The estimand is the discovery cost that A's note saves. B already holds A's code, so the
+note can shorten the search and prevent wrong turns.
+
+This arm cannot show knowledge transfer. Every real pair examined so far passes the
+ancestor check, so A's note never supplies a fact that is absent from B's tree. Report
+this arm as discovery cost saved, never as knowledge transfer.
+
+This arm is already mined.
+
+### Arm 2: synthetic trap tickets
+
+Pairs are built by planting a fact in the corpus so that doing A reveals what B needs.
+The trap is an obstacle inside an unrelated feature ticket, not the ticket itself.
+
+The estimand is a mechanics upper bound for capture and delivery. It shows what the
+product can carry when a transferable fact exists and A meets it.
+
+This arm cannot show that a benefit is real. The first two synthetic runs showed that the
+plant does not reliably manufacture transfer. In one run the trap was avoidable, because
+the obvious implementation never met it. In the other run B passed unaided in two minutes
+and received nothing. The arm bounds the mechanics, and it does not prove a benefit.
+
+### Arm 3: real concurrent pre-merge pairs
+
+Pairs are mined where A and B are cut from a common base before A merged, the ancestor
+check fails, B does not depend on A's code, and both hit the same subsystem gotcha.
+
+The estimand is un-planted transfer. This is the only arm in which a real fact can be
+present for A and absent from B's tree.
+
+This arm cannot show anything until feasibility is settled. Mining these pairs is harder
+than mining post-merge pairs. B's oracle also has to run on the older base. Run the
+feasibility check before any measurement is planned on this arm.
+
+The ancestor-check verification and the two synthetic runs above come from the bench-lite
+experiment in tenjin-agent#357.
