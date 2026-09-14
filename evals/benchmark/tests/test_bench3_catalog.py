@@ -6,8 +6,11 @@ from pathlib import Path
 
 import pytest
 
+from evals.benchmark.bench3 import prescriptiveness
+
 REPO = Path(__file__).resolve().parents[3]
 CATALOG = Path(__file__).resolve().parents[1] / "bench3" / "catalog.json"
+ORACLES = CATALOG.parent / "oracles"
 TASKS = json.loads(CATALOG.read_text())["tasks"]
 IDS = [task["id"] for task in TASKS]
 # The prompt hook queries the first 512 characters of the work order, so those
@@ -79,3 +82,36 @@ def test_the_recorded_base_is_recomputed_from_the_merge_commit(task) -> None:
     assert (git("rev-parse", f"{merge}^1")[1] == task["before_commit"]) is matches
     if matches:
         assert git("rev-parse", f"{merge}:")[1] == task["trees"]["after"]
+
+
+@pytest.mark.parametrize("task", TASKS, ids=IDS)
+def test_every_oracle_carries_the_prescriptiveness_its_source_derives(task) -> None:
+    """A prescriptive oracle can fail a correct implementation on naming luck, so the run reads the signals."""
+    assert task["prescriptiveness"] == prescriptiveness.classify((ORACLES / task["oracle"]).read_text())
+
+
+def test_an_oracle_that_only_drives_the_product_surface_is_not_prescriptive() -> None:
+    """Nothing in the catalog reaches this yet; the flag has to be able to say no."""
+    source = "import { expect, it } from 'vitest';\nit('updates', async () => expect(await cli(['update'])).toBe(0));\n"
+    assert prescriptiveness.classify(source) == {
+        "prescriptive": False,
+        "internal_modules": [],
+        "named_symbols": [],
+        "prose_assertions": [],
+    }
+
+
+def test_both_import_forms_and_an_exact_sentence_are_prescriptiveness_signals() -> None:
+    """A single-token literal is an identifier the behavior owns, not prose the oracle dictates."""
+    source = (
+        "import { resolveTarget } from './lib/update-check';\n"
+        "const { main } = await import('./cli');\n"
+        "expect(out).toContain('measured calibration interval');\n"
+        "expect(columns).toContain('agent_id');\n"
+    )
+    assert prescriptiveness.classify(source) == {
+        "prescriptive": True,
+        "internal_modules": ["./cli", "./lib/update-check"],
+        "named_symbols": ["main", "resolveTarget"],
+        "prose_assertions": ["measured calibration interval"],
+    }

@@ -19,6 +19,12 @@
       },
       "lock_sha256": "49604a80a97819037ac51e91f006ca9cb2cddb11afc9094f05cd75dcb823f19a",
       "oracle": "actor-grade.test.ts",
+      "prescriptiveness": {
+        "prescriptive": true,
+        "internal_modules": ["./commands/push", "./context", "./lib/state-store"],
+        "named_symbols": ["CommandContext", "STORE_SQL", "openStore", "runPushGrade"],
+        "prose_assertions": []
+      },
       "scope": "intended-worker injection attribution; scoped subset of original PR",
       "role": "proposed earlier producer for actor-score",
       "eligibility": "scoped-engineering-oracle-proven",
@@ -47,6 +53,12 @@
       },
       "lock_sha256": "49604a80a97819037ac51e91f006ca9cb2cddb11afc9094f05cd75dcb823f19a",
       "oracle": "actor-score.test.ts",
+      "prescriptiveness": {
+        "prescriptive": true,
+        "internal_modules": ["./commands/push", "./lib/state-store"],
+        "named_symbols": ["STORE_SQL", "openStore", "readSessionScores"],
+        "prose_assertions": []
+      },
       "scope": "actor-owned close and search attribution",
       "earlier_producer": "https://github.com/BackTrackCo/tenjin-agent/pull/247",
       "relationship": {
@@ -82,6 +94,12 @@
       },
       "lock_sha256": "49604a80a97819037ac51e91f006ca9cb2cddb11afc9094f05cd75dcb823f19a",
       "oracle": "release-policy.test.ts",
+      "prescriptiveness": {
+        "prescriptive": true,
+        "internal_modules": ["./commands/update", "./lib/update-check"],
+        "named_symbols": ["maybeUpdate", "readUpdateSignal", "resolveTarget", "runUpdate"],
+        "prose_assertions": []
+      },
       "scope": "full original runtime behavior; original branch boundary proof pending",
       "earlier_producer": "https://github.com/BackTrackCo/tenjin-agent/pull/136",
       "relationship": {
@@ -118,6 +136,28 @@
       },
       "lock_sha256": "49604a80a97819037ac51e91f006ca9cb2cddb11afc9094f05cd75dcb823f19a",
       "oracle": "repository-replay.test.ts",
+      "prescriptiveness": {
+        "prescriptive": true,
+        "internal_modules": [
+          "./cli",
+          "./commands/sync",
+          "./lib/hook-scripts",
+          "./lib/push-scripts",
+          "./lib/read-test-utils",
+          "./lib/state-store"
+        ],
+        "named_symbols": [
+          "SYNC_CLAIM_KEY",
+          "SYNC_CLAIM_TTL_MS",
+          "main",
+          "pushFailureHookScript",
+          "runSync",
+          "state",
+          "stopHookScript",
+          "testSigner"
+        ],
+        "prose_assertions": []
+      },
       "scope": "full original runtime behavior; proof pending",
       "eligibility": "proof-required",
       "assignment": "pilot-proof-required",
@@ -149,6 +189,19 @@
         "after": "b15ede2e3ccbab032b7803d025f1b16f913ea8374abf2530e6b0a37d8daca85f"
       },
       "oracle": "update-command.test.ts",
+      "prescriptiveness": {
+        "prescriptive": true,
+        "internal_modules": [
+          "./cli",
+          "./commands/config",
+          "./commands/update",
+          "./lib/config",
+          "./lib/hook-scripts",
+          "./lib/update-check"
+        ],
+        "named_symbols": ["main", "websearchHookScript"],
+        "prose_assertions": []
+      },
       "scope": "full original behavior; independent verifier development in progress",
       "role": "historical producer for release-policy",
       "eligibility": "proof-required",
@@ -177,6 +230,37 @@
         "after": "f8c88fca3c2c94b76a23f2e6287a1378188a59f601342f01ab37f44f5a1ca54c"
       },
       "oracle": "team-learning.test.ts",
+      "prescriptiveness": {
+        "prescriptive": true,
+        "internal_modules": [
+          "./commands/push",
+          "./commands/sync",
+          "./lib/errors",
+          "./lib/hook-scripts",
+          "./lib/push-scripts",
+          "./lib/read-test-utils",
+          "./lib/state-store"
+        ],
+        "named_symbols": [
+          "CliError",
+          "pushContextHookScript",
+          "pushFailureHookScript",
+          "pushPromptHookScript",
+          "readSessionScores",
+          "runPushStatus",
+          "scoreSession",
+          "sessionPrimerHookScript",
+          "state",
+          "stopHookScript",
+          "testSigner"
+        ],
+        "prose_assertions": [
+          "calibration input missing",
+          "measured calibration interval",
+          "pnpm test",
+          "tenjin inspect"
+        ]
+      },
       "scope": "full original behavior; independent verifier development in progress",
       "role": "historical producer for repository-replay",
       "eligibility": "proof-required",

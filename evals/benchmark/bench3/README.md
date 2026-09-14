@@ -145,6 +145,20 @@ tree is not the merged tree. Both are recorded as `pr-branch-base-ref` with
 operator decision before either becomes a treatment. A task marked oracle-proven may not
 stand on such a base, which is the second case in the same file.
 
+## Oracle prescriptiveness
+
+Every task records `prescriptiveness` next to the oracle it judges: the product modules
+the oracle imports by path, the symbols it imports by name out of them, and the exact
+sentences it matches. Each signal is a way for a correct implementation to fail on naming
+luck rather than on behavior, which is why the prompts declare their callable interfaces.
+
+`python -m evals.benchmark.bench3.prescriptiveness` reprints the values from the oracle
+sources, and `test_every_oracle_carries_the_prescriptiveness_its_source_derives` fails
+when a recorded value drifts from the oracle it describes. All six current oracles are
+prescriptive. No oracle judges the product through its shipped surface alone, so no
+result from this catalog may be read as evidence that an unconstrained implementation
+would have passed.
+
 ## Corpus arms
 
 Bench-3 draws its pairs from three corpora. Each corpus answers a different question.
