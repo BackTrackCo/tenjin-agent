@@ -288,6 +288,41 @@ def test_every_experiment_selects_only_shared_catalog_fixtures() -> None:
             assert task["verifier"] == catalog[task["id"]]["verifier"]
 
 
+def synthetic(**data: Any) -> manifest_module.Manifest:
+    """A manifest object for a guard case, which is about one rule and never about a whole file."""
+    return manifest_module.Manifest({"pins": {}, "arms": [], "tasks": [], **data}, Path("synthetic.json"), "sha256:synthetic")
+
+
+@pytest.mark.parametrize("path", experiments.MANIFESTS, ids=lambda path: path.name)
+def test_every_experiment_prompt_is_the_catalog_s_own_interface_contract(path: Path) -> None:
+    """The prompt a model reads is the corpus's, so a contract the corpus states is one the run states."""
+    assert experiments.prompt_violations(manifest_module.load(path)) == []
+
+
+def test_the_recursive_slice_restates_its_prompt_and_still_names_every_path_the_oracle_enters_through() -> None:
+    (task,) = manifest_module.load(experiments.SLICE_MANIFESTS["recursive"]).tasks
+    stated = experiments.catalog_prompts()["actor"]
+    assert task["prompt"] != stated
+    assert experiments.interface_contract(stated) == {"src/actor.mjs", "tests/actor.test.mjs"}
+    assert experiments.interface_contract(stated) <= experiments.interface_contract(task["prompt"])
+
+
+def test_a_prompt_that_drifts_from_the_catalog_or_drops_one_of_its_paths_is_named() -> None:
+    stated = experiments.catalog_prompts()["actor"]
+    assert experiments.prompt_violations(synthetic(tasks=[{"id": "actor", "prompt": stated}])) == []
+    # Restating a prompt is a slice's treatment and no other selection's.
+    rewritten = [{"id": "actor", "prompt": stated + " Then stop."}]
+    assert experiments.prompt_violations(synthetic(tasks=rewritten)) == ["task actor rewrites the catalog prompt outside a slice"]
+    assert experiments.prompt_violations(synthetic(tasks=rewritten, slice={"kind": "recursive"})) == []
+    dropped = [{"id": "actor", "prompt": "Fix the source under src/ so that tests/actor.test.mjs passes."}]
+    assert experiments.prompt_violations(synthetic(tasks=dropped, slice={"kind": "recursive"})) == [
+        "task actor drops src/actor.mjs from the catalog's interface contract"
+    ]
+    assert experiments.prompt_violations(synthetic(tasks=[{"id": "invented", "prompt": "anything"}])) == [
+        "task invented carries a prompt the shared catalog does not define"
+    ]
+
+
 HIGH_DISCOVERY = {
     "shadow": ("stale-build-artifact", "packages/range/src/range.mjs"),
     "ambient": ("invisible-whitespace-mismatch", "src/price.mjs"),

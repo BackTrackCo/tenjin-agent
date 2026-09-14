@@ -11,6 +11,11 @@ Docker Compose runs against Docker or Colima locally. Bench-1 handles execution,
 phase accounting, reports, artifacts, main regression comparisons and cleanup. Historical
 results remain in `tenjin-notes/benchmark/`; no provisional number here is hardened.
 
+Every task an experiment selects runs the shared catalog's prompt verbatim. Only a slice
+restates one, because that variation is its treatment, and the restatement repeats every path
+the catalog names: those are the paths the hidden oracle enters the fixture through, and a
+prompt that left one unsaid would fail a correct change on the agent's choice of name.
+
 ## What runs
 
 Claude selections use Opus 5; matched Codex selections use CLI 0.154.0 / `gpt-5.6-sol`,
