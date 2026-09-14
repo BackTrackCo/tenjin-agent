@@ -2,10 +2,13 @@
 
 This is the single Bench-3 experiment PR (#355). `protocol.json` defines the
 population, deterministic pilot proof queue, four treatments, historical knowledge
-cutoffs, delivery analysis and completion metrics. Pilot5 is paused after 11 consumers.
-The corrected oracle-v4 cohort uses two Codex workers with exclusive mutable-shelf
-trials. It receives fresh contexts, image qualification, dry plans and a freeze before
-new model admission. Earlier frozen records remain intact and are never pooled.
+cutoffs, delivery analysis and completion metrics. Pilot6 stopped after 19 consumers
+when an audit found pnpm automatic dependency repair in relocated fixture trees.
+Its time/token ratios remain affected diagnostics. The fresh oracle-v5 cohort
+uses the corrected shared dependency environment, qualified public-behavior
+oracles and two Codex workers with exclusive mutable-shelf trials. Fresh contexts,
+image qualification, dry plans and a freeze precede new model admission. Earlier
+frozen records remain intact and are never pooled.
 All reusable preparation, containers, databases, task/knowledge assets, scheduling,
 verification, reporting and cleanup arrive from Bench-1 through #313.
 
@@ -20,9 +23,9 @@ or show less benefit. The pilot calls for 48 consumers and 12 earlier producers.
 | Public task                | Contract                                                                                                        | Role and verified checks                 |
 | -------------------------- | --------------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
 | `repository-replay` (#256) | Repository identity across transports, unknown-origin locality, exact hook --cwd argument and stale sync claims | Pilot consumer; 9 checks                 |
-| `release-policy` (#170)    | Latest-only releases, registry versus transport errors, daily cache and metadata                                | Pilot consumer; 14 checks                |
+| `release-policy` (#170)    | Latest-only releases, registry versus transport errors, daily cache and metadata                                | Pilot consumer; 16 checks                |
 | `update-command` (#136)    | Manager ownership, explicit update, bounded output and passive notices                                          | Earlier producer for #170; 24 checks     |
-| `team-learning` (#243)     | Publication, independent verification, local fallback and repository-scoped replay                              | Earlier producer for #256; 25 checks     |
+| `team-learning` (#243)     | Publication, independent verification, local fallback and repository-scoped replay                              | Earlier producer for #256; 26 checks     |
 | `actor-grade` (#247)       | Actor-owned injection transcript evidence                                                                       | Engineering diagnostic outside the pilot |
 | `actor-score` (#251)       | Actor-owned outcome and search evidence                                                                         | Engineering diagnostic outside the pilot |
 
@@ -30,7 +33,7 @@ Private server catalogs/oracles and workload evidence live in the authorized
 `tenjin-notes/benchmark/bench3/` directory. The public repository and its CI do not
 require that private checkout. #740 covers trending term/question separation;
 #674 covers content-based ranking, confidentiality, budgets, limits and telemetry.
-Their earlier producers are #727 demand population honesty and #670 content-vector generation. The four private tasks have 10, 25, 16 and 19 checks respectively. All eight before/after proof pairs pass admission: the before has assertion failures, the after passes all checks, and cleanup is confirmed. These 142 checks are verifier evidence, not model outcomes.
+Their earlier producers are #727 demand population honesty and #670 content-vector generation. The four private tasks have 10, 25, 16 and 19 checks respectively. All eight fresh reference solutions pass 145 checks. The three repeated original-before checks (repository, update and demand) fail real assertions; corrected-oracle proofs additionally reject broken variants and accept equivalent implementations. These checks are verifier evidence, not model outcomes.
 
 The catalog pins original PR URLs, before/after commits and trees, dependency locks,
 and prepared source content hashes. The same independent oracle runs on both sides.

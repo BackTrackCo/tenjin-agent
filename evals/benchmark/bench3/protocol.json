@@ -1,6 +1,6 @@
 {
   "schema": "bench3.protocol.v1",
-  "status": "oracle-v4-corrected-parallel-cohort-preparation",
+  "status": "oracle-v5-dependency-corrected-cohort-preparation",
   "model_admission": true,
   "population": {
     "window_start": "2026-08-15T00:00:00Z",
