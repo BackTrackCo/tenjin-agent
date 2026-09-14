@@ -37,14 +37,16 @@ def interface_contract(prompt: str) -> set[str]:
 
 
 def prompt_violations(manifest: Manifest) -> list[str]:
-    """Where an experiment would measure a prompt the shared corpus does not state.
+    """Where an experiment would measure a prompt that drops the corpus's contract.
 
-    An experiment copies the catalog's prompt into its manifest, so a copy that
-    drifted would be the thing the model reads while the corpus stated
-    something else, and a contract the corpus tightens would never reach a run.
-    A slice is the one selection that rewrites a prompt, because its variation
-    is the treatment: it still repeats every path the catalog names, since those
-    are the paths the hidden oracle asserts on.
+    The catalog states each task's interface contract, an experiment copies that
+    prompt into its manifest, and a slice restates it around its own variation,
+    so the rule both shapes keep is that every path the catalog names is named
+    again: those are the paths the hidden oracle enters the fixture through, and
+    a prompt that left one unsaid fails a correct change on the agent's choice of
+    name. The comparison is one-way on purpose. A manifest that states more than
+    the catalog is a tightening on its way through the stack and is safe to run;
+    a manifest that states less is the underspecified prompt itself.
     """
     catalog = catalog_prompts()
     violations = []
@@ -52,10 +54,6 @@ def prompt_violations(manifest: Manifest) -> list[str]:
         stated = catalog.get(task["id"])
         if stated is None:
             violations.append(f"task {task['id']} carries a prompt the shared catalog does not define")
-        elif task["prompt"] == stated:
-            continue
-        elif manifest.slice is None:
-            violations.append(f"task {task['id']} rewrites the catalog prompt outside a slice")
         elif missing := sorted(interface_contract(stated) - interface_contract(task["prompt"])):
             violations.append(f"task {task['id']} drops {', '.join(missing)} from the catalog's interface contract")
     return violations

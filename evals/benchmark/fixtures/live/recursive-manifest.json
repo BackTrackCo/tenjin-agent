@@ -57,7 +57,7 @@
       "fixture_hash": "sha256:86b48d133f09b0bfccba62fb870f68b5017494a378b16de49d9aa29ace55a793",
       "verifier": "node_test_actor",
       "required_descendants": 1,
-      "prompt": "Delegate the diagnosis of why tests/actor.test.mjs fails to a subagent that runs only that one test file and reports the failing case, then fix src/actor.mjs yourself and run only that one test file again. Never run the whole suite.",
+      "prompt": "Delegate the diagnosis of why tests/actor.test.mjs fails to a subagent that runs only that one test file and reports the failing case, then fix src/actor.mjs yourself and run only that one test file again. Keep src/actor.mjs exporting actorKey(session, agent). Never run the whole suite.",
       "tools": ["Bash", "Read", "Edit", "Write", "Glob", "Grep", "Agent"],
       "allowed_tools": [
         "Bash(pnpm:*)",

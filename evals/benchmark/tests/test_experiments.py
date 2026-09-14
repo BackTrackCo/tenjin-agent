@@ -294,8 +294,8 @@ def synthetic(**data: Any) -> manifest_module.Manifest:
 
 
 @pytest.mark.parametrize("path", experiments.MANIFESTS, ids=lambda path: path.name)
-def test_every_experiment_prompt_is_the_catalog_s_own_interface_contract(path: Path) -> None:
-    """The prompt a model reads is the corpus's, so a contract the corpus states is one the run states."""
+def test_every_experiment_prompt_names_the_catalog_s_whole_interface_contract(path: Path) -> None:
+    """The prompt a model reads states what the oracle asserts on, so no task is failed on a name."""
     assert experiments.prompt_violations(manifest_module.load(path)) == []
 
 
@@ -305,17 +305,16 @@ def test_the_recursive_slice_restates_its_prompt_and_still_names_every_path_the_
     assert task["prompt"] != stated
     assert experiments.interface_contract(stated) == {"src/actor.mjs", "tests/actor.test.mjs"}
     assert experiments.interface_contract(stated) <= experiments.interface_contract(task["prompt"])
+    assert "actorKey(session, agent)" in task["prompt"]
 
 
-def test_a_prompt_that_drifts_from_the_catalog_or_drops_one_of_its_paths_is_named() -> None:
+def test_a_prompt_that_drops_one_of_the_catalog_s_paths_is_named_and_a_tightening_is_not() -> None:
     stated = experiments.catalog_prompts()["actor"]
     assert experiments.prompt_violations(synthetic(tasks=[{"id": "actor", "prompt": stated}])) == []
-    # Restating a prompt is a slice's treatment and no other selection's.
-    rewritten = [{"id": "actor", "prompt": stated + " Then stop."}]
-    assert experiments.prompt_violations(synthetic(tasks=rewritten)) == ["task actor rewrites the catalog prompt outside a slice"]
-    assert experiments.prompt_violations(synthetic(tasks=rewritten, slice={"kind": "recursive"})) == []
+    # A manifest ahead of the catalog is a tightening moving through the stack, never a violation.
+    assert experiments.prompt_violations(synthetic(tasks=[{"id": "actor", "prompt": stated + " Keep src/actor.mjs where it is."}])) == []
     dropped = [{"id": "actor", "prompt": "Fix the source under src/ so that tests/actor.test.mjs passes."}]
-    assert experiments.prompt_violations(synthetic(tasks=dropped, slice={"kind": "recursive"})) == [
+    assert experiments.prompt_violations(synthetic(tasks=dropped)) == [
         "task actor drops src/actor.mjs from the catalog's interface contract"
     ]
     assert experiments.prompt_violations(synthetic(tasks=[{"id": "invented", "prompt": "anything"}])) == [
