@@ -212,6 +212,18 @@ def test_the_catalog_covers_every_registered_task_and_ships_each_directory_once(
     assert sorted(p.parent.name for p in verifier.HIDDEN.glob(f"*/{images.QUIRK_CHECK}")) == ["ambient"]
 
 
+def test_every_shipped_oracle_names_the_one_test_file_it_runs() -> None:
+    from evals.benchmark import task_assets
+
+    for task in verifier.TASK_PACKAGES:
+        # A node oracle is one file, handed to `node` as the whole command.
+        assert verifier.lookup(f"node_test_{task}").container_test == f"{verifier.HIDDEN_TESTS}/{task}.test.mjs"
+    config = (verifier.PACKAGE_ROOT / "historical" / "vitest.config.mjs").read_text(encoding="utf-8")
+    assert verifier.unnarrowed_oracle(config, task_assets.ORACLE) is None
+    # The model's own visible configuration is a suite on purpose, and is never an oracle.
+    assert verifier.unnarrowed_oracle((verifier.PACKAGE_ROOT / "historical" / "model-tests.config.mjs").read_text(encoding="utf-8"), task_assets.ORACLE)
+
+
 def test_the_key_only_lesson_has_no_task_names_and_matches_the_actor_failure() -> None:
     lesson = tenjin_arm.lesson_named("actor-fix-keyonly")
     assert lesson is not None
