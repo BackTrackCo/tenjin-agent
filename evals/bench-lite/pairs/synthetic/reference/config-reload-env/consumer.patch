@@ -1,0 +1,95 @@
+diff --git a/src/flags.ts b/src/flags.ts
+new file mode 100644
+index 0000000..229a4a9
+--- /dev/null
++++ b/src/flags.ts
+@@ -0,0 +1,19 @@
++/**
++ * Feature flags, read at the moment they are asked about.
++ *
++ * Ops flip `LEDGER_FLAGS` on a running process, so a flag has to be read when
++ * the work happens rather than kept from whenever this module first loaded.
++ */
++
++/** The flags set right now, trimmed, in the order they were written. */
++export function currentFlags(): string[] {
++  return (process.env.LEDGER_FLAGS ?? '')
++    .split(',')
++    .map((flag) => flag.trim())
++    .filter((flag) => flag.length > 0);
++}
++
++/** True if `name` is one of the flags set right now. */
++export function isFlagOn(name: string): boolean {
++  return currentFlags().includes(name);
++}
+diff --git a/src/http/handlers.ts b/src/http/handlers.ts
+index 977e8d2..830b2d9 100644
+--- a/src/http/handlers.ts
++++ b/src/http/handlers.ts
+@@ -7,9 +7,11 @@ import {
+   updateSettings,
+ } from '../accounts.ts';
+ import { config, describeConfig } from '../config.ts';
++import { recordAudit } from '../audit.ts';
+ import { beginRequest } from '../context.ts';
+ import { badRequest, isLedgerError, notFound } from '../errors.ts';
+-import { balanceFor, listEntries, postEntries, postEntry } from '../ledger.ts';
++import { isFlagOn } from '../flags.ts';
++import { balanceFor, listEntries, postEntries, postEntry, settleAccount } from '../ledger.ts';
+ import { matchRoute } from './router.ts';
+ import type { Account, Entry, EntryKind } from '../types.ts';
+ 
+@@ -142,6 +144,19 @@ function handleMatched(
+       };
+     }
+ 
++    case 'settlement.settle': {
++      const accountId = params.accountId ?? '';
++      getAccount(accountId);
++      const mode = isFlagOn('settlement_v2') ? 'v2' : 'v1';
++      const settled = settleAccount(accountId);
++      recordAudit({
++        action: 'settlement.completed',
++        accountId,
++        detail: { mode, settled },
++      });
++      return { status: 200, body: { settled, mode } };
++    }
++
+     case 'entries.create': {
+       const body = asObject(request.body);
+       const headerKey = request.headers?.['idempotency-key'] ?? null;
+diff --git a/src/http/router.ts b/src/http/router.ts
+index eb3f8b1..7625e10 100644
+--- a/src/http/router.ts
++++ b/src/http/router.ts
+@@ -12,6 +12,7 @@ export const ROUTES: readonly Route[] = [
+   { name: 'accounts.get', method: 'GET', pattern: '/accounts/:accountId' },
+   { name: 'settings.get', method: 'GET', pattern: '/accounts/:accountId/settings' },
+   { name: 'settings.patch', method: 'PATCH', pattern: '/accounts/:accountId/settings' },
++  { name: 'settlement.settle', method: 'POST', pattern: '/accounts/:accountId/settle' },
+   { name: 'entries.list', method: 'GET', pattern: '/accounts/:accountId/entries' },
+   { name: 'balance.get', method: 'GET', pattern: '/accounts/:accountId/balance' },
+   { name: 'entries.create', method: 'POST', pattern: '/entries' },
+diff --git a/src/ledger.ts b/src/ledger.ts
+index b755c88..9e8e1af 100644
+--- a/src/ledger.ts
++++ b/src/ledger.ts
+@@ -127,6 +127,16 @@ export function balanceFor(accountId: string): Balance {
+   };
+ }
+ 
++/** Settle every open entry on an account. Returns how many were settled. */
++export function settleAccount(accountId: string): number {
++  getAccount(accountId);
++  const open = listEntryRows(accountId).filter((row) => !row.settled);
++  for (const row of open) {
++    settleEntry(row.id);
++  }
++  return open.length;
++}
++
+ /** Mark an entry settled. Idempotent. */
+ export function settleEntry(entryId: string): void {
+   markEntrySettled(entryId);

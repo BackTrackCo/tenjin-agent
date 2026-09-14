@@ -1,0 +1,170 @@
+diff --git a/src/accounts.ts b/src/accounts.ts
+index 50bbb5e..989733e 100644
+--- a/src/accounts.ts
++++ b/src/accounts.ts
+@@ -6,6 +6,7 @@ import {
+   listSettingsVersionRows,
+   rowToAccount,
+   rowToSettingsVersion,
++  replaceAccountOverrides,
+   updateAccountOverrides,
+ } from './db/queries.ts';
+ import { badRequest, notFound } from './errors.ts';
+@@ -113,6 +114,83 @@ export function updateSettings(accountId: string, patch: SettingsOverrides): Acc
+   return resolveSettings(accountId);
+ }
+ 
++/** Every field an account may carry an override for. */
++export const SETTINGS_FIELDS: readonly (keyof AccountSettings)[] = [
++  'spendingLimitCents',
++  'notifyEmail',
++  'autoSettle',
++  'statementDay',
++];
++
++function asSettingsField(field: string): keyof AccountSettings {
++  const known = SETTINGS_FIELDS.find((name) => name === field);
++  if (!known) {
++    throw badRequest('invalid_field', `not a settings field: ${field}`);
++  }
++  return known;
++}
++
++export interface SettingsPatchResult {
++  settings: AccountSettings;
++  version: number;
++  cleared: string[];
++}
++
++/**
++ * Set some overrides and take others off, in one write.
++ *
++ * One call is one version, however many fields it touched.
++ */
++export function applySettingsPatch(
++  accountId: string,
++  set: SettingsOverrides,
++  reset: readonly string[],
++): SettingsPatchResult {
++  const row = getAccountRow(accountId);
++  if (!row) {
++    throw notFound('account_not_found', `no such account: ${accountId}`);
++  }
++  const clean = validateOverrides(set);
++  const names = reset.map(asSettingsField);
++
++  const overrides: SettingsOverrides = { ...row.overrides, ...clean };
++  const cleared: string[] = [];
++  for (const name of names) {
++    if (name in overrides) {
++      delete overrides[name];
++      cleared.push(name);
++    }
++  }
++
++  const next = replaceAccountOverrides(accountId, overrides);
++
++  if (Object.keys(clean).length > 0) {
++    recordAudit({
++      action: 'settings.updated',
++      accountId,
++      detail: { version: next.version, fields: Object.keys(clean).sort().join(',') },
++    });
++  }
++  if (cleared.length > 0) {
++    recordAudit({
++      action: 'settings.cleared',
++      accountId,
++      detail: { version: next.version, fields: [...cleared].sort().join(',') },
++    });
++  }
++
++  return {
++    settings: resolveSettings(accountId),
++    version: next.version,
++    cleared: [...cleared].sort(),
++  };
++}
++
++/** Take this account's override off the named fields. */
++export function clearSettingsOverrides(accountId: string, fields: string[]): AccountSettings {
++  return applySettingsPatch(accountId, {}, fields).settings;
++}
++
+ /** Every settings version ever written for this account, oldest first. */
+ export function listSettingsVersions(accountId: string): SettingsVersion[] {
+   return listSettingsVersionRows(accountId).map(rowToSettingsVersion);
+diff --git a/src/db/queries.ts b/src/db/queries.ts
+index 89784b5..a2ebb88 100644
+--- a/src/db/queries.ts
++++ b/src/db/queries.ts
+@@ -133,6 +133,30 @@ export function updateAccountOverrides(accountId: string, patch: SettingsOverrid
+   return next;
+ }
+ 
++/**
++ * Replace this account's override set wholesale, bump the version, and keep a
++ * copy of the result in `settingsVersions`.
++ *
++ * Unlike `updateAccountOverrides` this is not a layering: what is passed in is
++ * what the account ends up with, so it is the path for a write that has to be
++ * able to take a key away.
++ */
++export function replaceAccountOverrides(
++  accountId: string,
++  overrides: SettingsOverrides,
++): AccountRow {
++  const current = db.accounts.get(accountId);
++  if (!current) {
++    throw new Error(`no such account: ${accountId}`);
++  }
++  const next = db.accounts.update(accountId, {
++    overrides: { ...overrides },
++    version: current.version + 1,
++  });
++  writeSettingsVersion(next);
++  return next;
++}
++
+ export function listSettingsVersionRows(accountId: string): SettingsVersionRow[] {
+   return db.settingsVersions
+     .filter((row) => row.accountId === accountId)
+diff --git a/src/http/handlers.ts b/src/http/handlers.ts
+index 977e8d2..7904425 100644
+--- a/src/http/handlers.ts
++++ b/src/http/handlers.ts
+@@ -1,4 +1,5 @@
+ import {
++  applySettingsPatch,
+   createAccount,
+   getAccount,
+   isPlan,
+@@ -135,10 +136,26 @@ function handleMatched(
+     case 'settings.patch': {
+       const accountId = params.accountId ?? '';
+       const body = asObject(request.body);
+-      const settings = updateSettings(accountId, body);
++      const hasSet = 'set' in body;
++      const hasReset = 'reset' in body;
++
++      if (!hasSet && !hasReset) {
++        const settings = updateSettings(accountId, body);
++        return {
++          status: 200,
++          body: { settings, version: getAccount(accountId).version, cleared: [] },
++        };
++      }
++
++      const reset = hasReset ? body.reset : [];
++      if (!Array.isArray(reset) || reset.some((field) => typeof field !== 'string')) {
++        throw badRequest('invalid_field', 'reset must be an array of field names');
++      }
++      const set = hasSet ? asObject(body.set) : {};
++      const result = applySettingsPatch(accountId, set, reset as string[]);
+       return {
+         status: 200,
+-        body: { settings, version: getAccount(accountId).version },
++        body: { settings: result.settings, version: result.version, cleared: result.cleared },
+       };
+     }
+ 

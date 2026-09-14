@@ -1,0 +1,22 @@
+{
+  "name": "ledgerline",
+  "version": "0.4.2",
+  "private": true,
+  "type": "module",
+  "description": "Ledgerline billing ledger service.",
+  "engines": {
+    "node": ">=24"
+  },
+  "packageManager": "pnpm@11.11.0",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "gen:pricing": "node scripts/build-pricing.mjs",
+    "ledger": "node src/cli.ts"
+  },
+  "devDependencies": {
+    "@types/node": "25.9.5",
+    "typescript": "6.0.3",
+    "vitest": "4.1.10"
+  }
+}

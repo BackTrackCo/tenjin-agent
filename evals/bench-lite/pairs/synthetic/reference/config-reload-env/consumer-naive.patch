@@ -1,0 +1,71 @@
+diff --git a/src/http/handlers.ts b/src/http/handlers.ts
+index 977e8d2..7cdbbef 100644
+--- a/src/http/handlers.ts
++++ b/src/http/handlers.ts
+@@ -6,10 +6,11 @@ import {
+   resolveSettings,
+   updateSettings,
+ } from '../accounts.ts';
+-import { config, describeConfig } from '../config.ts';
++import { config, describeConfig, isFlagEnabled } from '../config.ts';
++import { recordAudit } from '../audit.ts';
+ import { beginRequest } from '../context.ts';
+ import { badRequest, isLedgerError, notFound } from '../errors.ts';
+-import { balanceFor, listEntries, postEntries, postEntry } from '../ledger.ts';
++import { balanceFor, listEntries, postEntries, postEntry, settleAccount } from '../ledger.ts';
+ import { matchRoute } from './router.ts';
+ import type { Account, Entry, EntryKind } from '../types.ts';
+ 
+@@ -142,6 +143,19 @@ function handleMatched(
+       };
+     }
+ 
++    case 'settlement.settle': {
++      const accountId = params.accountId ?? '';
++      getAccount(accountId);
++      const mode = isFlagEnabled('settlement_v2') ? 'v2' : 'v1';
++      const settled = settleAccount(accountId);
++      recordAudit({
++        action: 'settlement.completed',
++        accountId,
++        detail: { mode, settled },
++      });
++      return { status: 200, body: { settled, mode } };
++    }
++
+     case 'entries.create': {
+       const body = asObject(request.body);
+       const headerKey = request.headers?.['idempotency-key'] ?? null;
+diff --git a/src/http/router.ts b/src/http/router.ts
+index eb3f8b1..7625e10 100644
+--- a/src/http/router.ts
++++ b/src/http/router.ts
+@@ -12,6 +12,7 @@ export const ROUTES: readonly Route[] = [
+   { name: 'accounts.get', method: 'GET', pattern: '/accounts/:accountId' },
+   { name: 'settings.get', method: 'GET', pattern: '/accounts/:accountId/settings' },
+   { name: 'settings.patch', method: 'PATCH', pattern: '/accounts/:accountId/settings' },
++  { name: 'settlement.settle', method: 'POST', pattern: '/accounts/:accountId/settle' },
+   { name: 'entries.list', method: 'GET', pattern: '/accounts/:accountId/entries' },
+   { name: 'balance.get', method: 'GET', pattern: '/accounts/:accountId/balance' },
+   { name: 'entries.create', method: 'POST', pattern: '/entries' },
+diff --git a/src/ledger.ts b/src/ledger.ts
+index b755c88..9e8e1af 100644
+--- a/src/ledger.ts
++++ b/src/ledger.ts
+@@ -127,6 +127,16 @@ export function balanceFor(accountId: string): Balance {
+   };
+ }
+ 
++/** Settle every open entry on an account. Returns how many were settled. */
++export function settleAccount(accountId: string): number {
++  getAccount(accountId);
++  const open = listEntryRows(accountId).filter((row) => !row.settled);
++  for (const row of open) {
++    settleEntry(row.id);
++  }
++  return open.length;
++}
++
+ /** Mark an entry settled. Idempotent. */
+ export function settleEntry(entryId: string): void {
+   markEntrySettled(entryId);

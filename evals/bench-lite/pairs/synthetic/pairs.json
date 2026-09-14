@@ -1,0 +1,200 @@
+[
+  {
+    "id": "settings-override-clear",
+    "producer": {
+      "repo": "repo.git",
+      "base_commit": "f8042b8e46ea61ae7e188aefc03a9b88b354322c",
+      "prompt_file": "prompts/settings-override-clear-producer.md",
+      "oracle": {
+        "copy": [
+          {
+            "from": "oracles/settings-override-clear/producer.test.ts",
+            "to": "tests/oracle/settings-override-clear-producer.test.ts"
+          }
+        ],
+        "command": "pnpm vitest run tests/oracle/settings-override-clear-producer.test.ts",
+        "timeout_s": 600
+      }
+    },
+    "consumer": {
+      "repo": "repo.git",
+      "base_commit": "f8042b8e46ea61ae7e188aefc03a9b88b354322c",
+      "prompt_file": "prompts/settings-override-clear-consumer.md",
+      "oracle": {
+        "copy": [
+          {
+            "from": "oracles/settings-override-clear/consumer.test.ts",
+            "to": "tests/oracle/settings-override-clear-consumer.test.ts"
+          }
+        ],
+        "command": "pnpm vitest run tests/oracle/settings-override-clear-consumer.test.ts",
+        "timeout_s": 600
+      }
+    }
+  },
+  {
+    "id": "entry-ordering-ms",
+    "producer": {
+      "repo": "repo.git",
+      "base_commit": "f8042b8e46ea61ae7e188aefc03a9b88b354322c",
+      "prompt_file": "prompts/entry-ordering-ms-producer.md",
+      "oracle": {
+        "copy": [
+          {
+            "from": "oracles/entry-ordering-ms/producer.test.ts",
+            "to": "tests/oracle/entry-ordering-ms-producer.test.ts"
+          }
+        ],
+        "command": "pnpm vitest run tests/oracle/entry-ordering-ms-producer.test.ts",
+        "timeout_s": 600
+      }
+    },
+    "consumer": {
+      "repo": "repo.git",
+      "base_commit": "f8042b8e46ea61ae7e188aefc03a9b88b354322c",
+      "prompt_file": "prompts/entry-ordering-ms-consumer.md",
+      "oracle": {
+        "copy": [
+          {
+            "from": "oracles/entry-ordering-ms/consumer.test.ts",
+            "to": "tests/oracle/entry-ordering-ms-consumer.test.ts"
+          }
+        ],
+        "command": "pnpm vitest run tests/oracle/entry-ordering-ms-consumer.test.ts",
+        "timeout_s": 600
+      }
+    }
+  },
+  {
+    "id": "job-audit-scope",
+    "producer": {
+      "repo": "repo.git",
+      "base_commit": "f8042b8e46ea61ae7e188aefc03a9b88b354322c",
+      "prompt_file": "prompts/job-audit-scope-producer.md",
+      "oracle": {
+        "copy": [
+          {
+            "from": "oracles/job-audit-scope/producer.test.ts",
+            "to": "tests/oracle/job-audit-scope-producer.test.ts"
+          }
+        ],
+        "command": "pnpm vitest run tests/oracle/job-audit-scope-producer.test.ts",
+        "timeout_s": 600
+      }
+    },
+    "consumer": {
+      "repo": "repo.git",
+      "base_commit": "f8042b8e46ea61ae7e188aefc03a9b88b354322c",
+      "prompt_file": "prompts/job-audit-scope-consumer.md",
+      "oracle": {
+        "copy": [
+          {
+            "from": "oracles/job-audit-scope/consumer.test.ts",
+            "to": "tests/oracle/job-audit-scope-consumer.test.ts"
+          }
+        ],
+        "command": "pnpm vitest run tests/oracle/job-audit-scope-consumer.test.ts",
+        "timeout_s": 600
+      }
+    }
+  },
+  {
+    "id": "pricing-rule-kind",
+    "producer": {
+      "repo": "repo.git",
+      "base_commit": "f8042b8e46ea61ae7e188aefc03a9b88b354322c",
+      "prompt_file": "prompts/pricing-rule-kind-producer.md",
+      "oracle": {
+        "copy": [
+          {
+            "from": "oracles/pricing-rule-kind/producer.test.ts",
+            "to": "tests/oracle/pricing-rule-kind-producer.test.ts"
+          }
+        ],
+        "command": "pnpm vitest run tests/oracle/pricing-rule-kind-producer.test.ts",
+        "timeout_s": 600
+      }
+    },
+    "consumer": {
+      "repo": "repo.git",
+      "base_commit": "f8042b8e46ea61ae7e188aefc03a9b88b354322c",
+      "prompt_file": "prompts/pricing-rule-kind-consumer.md",
+      "oracle": {
+        "copy": [
+          {
+            "from": "oracles/pricing-rule-kind/consumer.test.ts",
+            "to": "tests/oracle/pricing-rule-kind-consumer.test.ts"
+          }
+        ],
+        "command": "pnpm vitest run tests/oracle/pricing-rule-kind-consumer.test.ts",
+        "timeout_s": 600
+      }
+    }
+  },
+  {
+    "id": "config-reload-env",
+    "producer": {
+      "repo": "repo.git",
+      "base_commit": "f8042b8e46ea61ae7e188aefc03a9b88b354322c",
+      "prompt_file": "prompts/config-reload-env-producer.md",
+      "oracle": {
+        "copy": [
+          {
+            "from": "oracles/config-reload-env/producer.test.ts",
+            "to": "tests/oracle/config-reload-env-producer.test.ts"
+          }
+        ],
+        "command": "pnpm vitest run tests/oracle/config-reload-env-producer.test.ts",
+        "timeout_s": 600
+      }
+    },
+    "consumer": {
+      "repo": "repo.git",
+      "base_commit": "f8042b8e46ea61ae7e188aefc03a9b88b354322c",
+      "prompt_file": "prompts/config-reload-env-consumer.md",
+      "oracle": {
+        "copy": [
+          {
+            "from": "oracles/config-reload-env/consumer.test.ts",
+            "to": "tests/oracle/config-reload-env-consumer.test.ts"
+          }
+        ],
+        "command": "pnpm vitest run tests/oracle/config-reload-env-consumer.test.ts",
+        "timeout_s": 600
+      }
+    }
+  },
+  {
+    "id": "content-key-digest",
+    "producer": {
+      "repo": "repo.git",
+      "base_commit": "f8042b8e46ea61ae7e188aefc03a9b88b354322c",
+      "prompt_file": "prompts/content-key-digest-producer.md",
+      "oracle": {
+        "copy": [
+          {
+            "from": "oracles/content-key-digest/producer.test.ts",
+            "to": "tests/oracle/content-key-digest-producer.test.ts"
+          }
+        ],
+        "command": "pnpm vitest run tests/oracle/content-key-digest-producer.test.ts",
+        "timeout_s": 600
+      }
+    },
+    "consumer": {
+      "repo": "repo.git",
+      "base_commit": "f8042b8e46ea61ae7e188aefc03a9b88b354322c",
+      "prompt_file": "prompts/content-key-digest-consumer.md",
+      "oracle": {
+        "copy": [
+          {
+            "from": "oracles/content-key-digest/consumer.test.ts",
+            "to": "tests/oracle/content-key-digest-consumer.test.ts"
+          }
+        ],
+        "command": "pnpm vitest run tests/oracle/content-key-digest-consumer.test.ts",
+        "timeout_s": 600
+      }
+    }
+  }
+]

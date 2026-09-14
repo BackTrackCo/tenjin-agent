@@ -1,0 +1,115 @@
+diff --git a/src/http/handlers.ts b/src/http/handlers.ts
+index 977e8d2..e28a589 100644
+--- a/src/http/handlers.ts
++++ b/src/http/handlers.ts
+@@ -9,7 +9,8 @@ import {
+ import { config, describeConfig } from '../config.ts';
+ import { beginRequest } from '../context.ts';
+ import { badRequest, isLedgerError, notFound } from '../errors.ts';
+-import { balanceFor, listEntries, postEntries, postEntry } from '../ledger.ts';
++import { balanceFor, contentKey, listEntries, postEntries, postEntry } from '../ledger.ts';
++import { findEntryByIdempotencyKey, rowToEntry } from '../db/queries.ts';
+ import { matchRoute } from './router.ts';
+ import type { Account, Entry, EntryKind } from '../types.ts';
+ 
+@@ -46,10 +47,13 @@ function requireString(body: Record<string, unknown>, field: string): string {
+ 
+ function requireNumber(body: Record<string, unknown>, field: string): number {
+   const value = body[field];
+-  if (typeof value !== 'number') {
+-    throw badRequest('invalid_field', `${field} must be a number`);
++  if (typeof value === 'number') {
++    return value;
+   }
+-  return value;
++  if (typeof value === 'string' && value.trim() !== '' && Number.isFinite(Number(value))) {
++    return Number(value);
++  }
++  throw badRequest('invalid_field', `${field} must be a number`);
+ }
+ 
+ function requireKind(body: Record<string, unknown>): EntryKind {
+@@ -145,14 +149,22 @@ function handleMatched(
+     case 'entries.create': {
+       const body = asObject(request.body);
+       const headerKey = request.headers?.['idempotency-key'] ?? null;
+-      const entry = postEntry({
+-        accountId: requireString(body, 'accountId'),
+-        amountCents: requireNumber(body, 'amountCents'),
+-        kind: requireKind(body),
+-        memo: typeof body.memo === 'string' ? body.memo : '',
+-        idempotencyKey: headerKey,
+-      });
+-      return { status: 201, body: { entry: serialiseEntry(entry) } };
++      const accountId = requireString(body, 'accountId');
++      const amountCents = requireNumber(body, 'amountCents');
++      const kind = requireKind(body);
++      const memo = typeof body.memo === 'string' ? body.memo : '';
++
++      const key = headerKey ?? contentKey({ accountId, amountCents, kind, memo });
++      const already = findEntryByIdempotencyKey(accountId, key);
++      if (already) {
++        return {
++          status: 200,
++          body: { entry: serialiseEntry(rowToEntry(already)), duplicate: true },
++        };
++      }
++
++      const entry = postEntry({ accountId, amountCents, kind, memo, idempotencyKey: key });
++      return { status: 201, body: { entry: serialiseEntry(entry), duplicate: false } };
+     }
+ 
+     case 'entries.batch': {
+diff --git a/src/ledger.ts b/src/ledger.ts
+index b755c88..e563346 100644
+--- a/src/ledger.ts
++++ b/src/ledger.ts
+@@ -9,6 +9,7 @@ import {
+   rowToEntry,
+ } from './db/queries.ts';
+ import { badRequest } from './errors.ts';
++import { digest } from './hash.ts';
+ import { priceFor } from './pricing/index.ts';
+ import type { Entry, EntryKind } from './types.ts';
+ 
+@@ -30,6 +31,40 @@ export interface Balance {
+ 
+ const KINDS: readonly EntryKind[] = ['debit', 'credit'];
+ 
++export interface ContentKeyInput {
++  accountId: string;
++  amountCents: number | string;
++  kind: EntryKind;
++  memo?: string;
++}
++
++/** The amount as one canonical string, however it was written. */
++function canonicalAmount(amountCents: number | string): string {
++  const value = typeof amountCents === 'string' ? Number(amountCents) : amountCents;
++  if (!Number.isFinite(value)) {
++    throw badRequest('invalid_amount', 'amountCents must be a number');
++  }
++  return String(Math.round(value));
++}
++
++/**
++ * The idempotency key for an entry with this content.
++ *
++ * The parts are listed in a fixed order and each is labelled, so the key does
++ * not depend on the order the caller wrote the fields in.
++ */
++export function contentKey(input: ContentKeyInput): string {
++  return digest(
++    [
++      `accountId=${input.accountId}`,
++      `amountCents=${canonicalAmount(input.amountCents)}`,
++      `kind=${input.kind}`,
++      `memo=${input.memo ?? ''}`,
++    ],
++    { salt: 'entries.v1' },
++  );
++}
++
+ function normaliseAmount(amountCents: number): number {
+   if (typeof amountCents !== 'number' || !Number.isFinite(amountCents)) {
+     throw badRequest('invalid_amount', 'amountCents must be a number');

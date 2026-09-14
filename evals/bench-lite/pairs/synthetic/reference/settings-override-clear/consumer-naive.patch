@@ -1,0 +1,69 @@
+diff --git a/src/accounts.ts b/src/accounts.ts
+index 50bbb5e..dfc8637 100644
+--- a/src/accounts.ts
++++ b/src/accounts.ts
+@@ -113,6 +113,22 @@ export function updateSettings(accountId: string, patch: SettingsOverrides): Acc
+   return resolveSettings(accountId);
+ }
+ 
++/** Put this account's settings back to the override set `toVersion` held. */
++export function revertSettings(accountId: string, toVersion: number): AccountSettings {
++  const row = getAccountRow(accountId);
++  if (!row) {
++    throw notFound('account_not_found', `no such account: ${accountId}`);
++  }
++  const target = getSettingsVersion(accountId, toVersion);
++  const next = updateAccountOverrides(accountId, target.overrides);
++  recordAudit({
++    action: 'settings.reverted',
++    accountId,
++    detail: { from: row.version, to: toVersion, version: next.version },
++  });
++  return resolveSettings(accountId);
++}
++
+ /** Every settings version ever written for this account, oldest first. */
+ export function listSettingsVersions(accountId: string): SettingsVersion[] {
+   return listSettingsVersionRows(accountId).map(rowToSettingsVersion);
+diff --git a/src/http/handlers.ts b/src/http/handlers.ts
+index 977e8d2..e844811 100644
+--- a/src/http/handlers.ts
++++ b/src/http/handlers.ts
+@@ -4,6 +4,7 @@ import {
+   isPlan,
+   listAccounts,
+   resolveSettings,
++  revertSettings,
+   updateSettings,
+ } from '../accounts.ts';
+ import { config, describeConfig } from '../config.ts';
+@@ -142,6 +143,17 @@ function handleMatched(
+       };
+     }
+ 
++    case 'settings.revert': {
++      const accountId = params.accountId ?? '';
++      const body = asObject(request.body);
++      const toVersion = requireNumber(body, 'toVersion');
++      const settings = revertSettings(accountId, toVersion);
++      return {
++        status: 200,
++        body: { settings, version: getAccount(accountId).version, restoredFrom: toVersion },
++      };
++    }
++
+     case 'entries.create': {
+       const body = asObject(request.body);
+       const headerKey = request.headers?.['idempotency-key'] ?? null;
+diff --git a/src/http/router.ts b/src/http/router.ts
+index eb3f8b1..33e548e 100644
+--- a/src/http/router.ts
++++ b/src/http/router.ts
+@@ -12,6 +12,7 @@ export const ROUTES: readonly Route[] = [
+   { name: 'accounts.get', method: 'GET', pattern: '/accounts/:accountId' },
+   { name: 'settings.get', method: 'GET', pattern: '/accounts/:accountId/settings' },
+   { name: 'settings.patch', method: 'PATCH', pattern: '/accounts/:accountId/settings' },
++  { name: 'settings.revert', method: 'POST', pattern: '/accounts/:accountId/settings/revert' },
+   { name: 'entries.list', method: 'GET', pattern: '/accounts/:accountId/entries' },
+   { name: 'balance.get', method: 'GET', pattern: '/accounts/:accountId/balance' },
+   { name: 'entries.create', method: 'POST', pattern: '/entries' },

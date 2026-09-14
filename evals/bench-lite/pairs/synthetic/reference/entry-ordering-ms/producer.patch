@@ -1,0 +1,85 @@
+diff --git a/src/db/queries.ts b/src/db/queries.ts
+index 89784b5..4ce6967 100644
+--- a/src/db/queries.ts
++++ b/src/db/queries.ts
+@@ -60,7 +60,8 @@ export function rowToEntry(row: EntryRow): Entry {
+     memo: row.memo,
+     feeCents: row.feeCents,
+     idempotencyKey: row.idempotencyKey,
+-    createdAt: fromStamp(row.createdAtStamp),
++    sequence: row.sequence,
++    createdAt: new Date(row.createdAtMs),
+   };
+ }
+ 
+@@ -139,6 +140,11 @@ export function listSettingsVersionRows(accountId: string): SettingsVersionRow[]
+     .sort((a, b) => a.version - b.version);
+ }
+ 
++/** The next per-account entry number. */
++function nextSequenceFor(accountId: string): number {
++  return db.entries.filter((row) => row.accountId === accountId).length + 1;
++}
++
+ export function insertEntryRow(input: {
+   accountId: string;
+   amountCents: number;
+@@ -156,6 +162,8 @@ export function insertEntryRow(input: {
+     feeCents: input.feeCents,
+     idempotencyKey: input.idempotencyKey,
+     settled: false,
++    sequence: nextSequenceFor(input.accountId),
++    createdAtMs: Date.now(),
+     createdAtStamp: nowStamp(),
+   };
+   db.entries.insert(row);
+@@ -166,7 +174,7 @@ export function insertEntryRow(input: {
+ export function listEntryRows(accountId: string): EntryRow[] {
+   return db.entries
+     .filter((row) => row.accountId === accountId)
+-    .sort((a, b) => a.createdAtStamp - b.createdAtStamp || a.id.localeCompare(b.id));
++    .sort((a, b) => a.createdAtMs - b.createdAtMs || a.sequence - b.sequence);
+ }
+ 
+ export function findEntryByIdempotencyKey(accountId: string, key: string): EntryRow | undefined {
+diff --git a/src/db/schema.ts b/src/db/schema.ts
+index 8db9c9f..938eac7 100644
+--- a/src/db/schema.ts
++++ b/src/db/schema.ts
+@@ -25,6 +25,11 @@ export interface EntryRow {
+   feeCents: number;
+   idempotencyKey: string | null;
+   settled: boolean;
++  /** Per-account counter, 1-based, in the order the rows were written. */
++  sequence: number;
++  /** When the row was written, in milliseconds. */
++  createdAtMs: number;
++  /** The same instant in whole seconds, for the day-granularity queries. */
+   createdAtStamp: number;
+ }
+ 
+diff --git a/src/http/handlers.ts b/src/http/handlers.ts
+index 977e8d2..5095130 100644
+--- a/src/http/handlers.ts
++++ b/src/http/handlers.ts
+@@ -80,6 +80,7 @@ export function serialiseEntry(entry: Entry): Record<string, unknown> {
+     memo: entry.memo,
+     feeCents: entry.feeCents,
+     idempotencyKey: entry.idempotencyKey,
++    sequence: entry.sequence,
+     createdAt: entry.createdAt.toISOString(),
+   };
+ }
+diff --git a/src/types.ts b/src/types.ts
+index 9b69261..4189dc6 100644
+--- a/src/types.ts
++++ b/src/types.ts
+@@ -44,6 +44,8 @@ export interface Entry {
+   feeCents: number;
+   /** Set when the caller supplied one, or when the service derived one. */
+   idempotencyKey: string | null;
++  /** Which entry this is on its account, counting from 1 in posting order. */
++  sequence: number;
+   createdAt: Date;
+ }
+ 

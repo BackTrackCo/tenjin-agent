@@ -1,0 +1,122 @@
+diff --git a/src/db/queries.ts b/src/db/queries.ts
+index 89784b5..e8f7978 100644
+--- a/src/db/queries.ts
++++ b/src/db/queries.ts
+@@ -60,7 +60,7 @@ export function rowToEntry(row: EntryRow): Entry {
+     memo: row.memo,
+     feeCents: row.feeCents,
+     idempotencyKey: row.idempotencyKey,
+-    createdAt: fromStamp(row.createdAtStamp),
++    createdAt: new Date(row.createdAtMs),
+   };
+ }
+ 
+@@ -156,6 +156,7 @@ export function insertEntryRow(input: {
+     feeCents: input.feeCents,
+     idempotencyKey: input.idempotencyKey,
+     settled: false,
++    createdAtMs: Date.now(),
+     createdAtStamp: nowStamp(),
+   };
+   db.entries.insert(row);
+@@ -166,7 +167,7 @@ export function insertEntryRow(input: {
+ export function listEntryRows(accountId: string): EntryRow[] {
+   return db.entries
+     .filter((row) => row.accountId === accountId)
+-    .sort((a, b) => a.createdAtStamp - b.createdAtStamp || a.id.localeCompare(b.id));
++    .sort((a, b) => a.createdAtMs - b.createdAtMs || a.id.localeCompare(b.id));
+ }
+ 
+ export function findEntryByIdempotencyKey(accountId: string, key: string): EntryRow | undefined {
+diff --git a/src/db/schema.ts b/src/db/schema.ts
+index 8db9c9f..73c1d14 100644
+--- a/src/db/schema.ts
++++ b/src/db/schema.ts
+@@ -25,6 +25,9 @@ export interface EntryRow {
+   feeCents: number;
+   idempotencyKey: string | null;
+   settled: boolean;
++  /** When the row was written, in milliseconds. */
++  createdAtMs: number;
++  /** The same instant in whole seconds, for the day-granularity queries. */
+   createdAtStamp: number;
+ }
+ 
+diff --git a/src/http/handlers.ts b/src/http/handlers.ts
+index 977e8d2..3d9ab3e 100644
+--- a/src/http/handlers.ts
++++ b/src/http/handlers.ts
+@@ -9,7 +9,7 @@ import {
+ import { config, describeConfig } from '../config.ts';
+ import { beginRequest } from '../context.ts';
+ import { badRequest, isLedgerError, notFound } from '../errors.ts';
+-import { balanceFor, listEntries, postEntries, postEntry } from '../ledger.ts';
++import { balanceFor, listEntriesInWindow, postEntries, postEntry } from '../ledger.ts';
+ import { matchRoute } from './router.ts';
+ import type { Account, Entry, EntryKind } from '../types.ts';
+ 
+@@ -182,9 +182,13 @@ function handleMatched(
+ 
+     case 'entries.list': {
+       const accountId = params.accountId ?? '';
++      const entries = listEntriesInWindow(accountId, {
++        since: request.query?.since,
++        until: request.query?.until,
++      });
+       return {
+         status: 200,
+-        body: { entries: listEntries(accountId).map(serialiseEntry) },
++        body: { entries: entries.map(serialiseEntry), count: entries.length },
+       };
+     }
+ 
+diff --git a/src/ledger.ts b/src/ledger.ts
+index b755c88..2949bae 100644
+--- a/src/ledger.ts
++++ b/src/ledger.ts
+@@ -9,6 +9,7 @@ import {
+   rowToEntry,
+ } from './db/queries.ts';
+ import { badRequest } from './errors.ts';
++
+ import { priceFor } from './pricing/index.ts';
+ import type { Entry, EntryKind } from './types.ts';
+ 
+@@ -108,6 +109,37 @@ export function listEntries(accountId: string): Entry[] {
+   return listEntryRows(accountId).map(rowToEntry);
+ }
+ 
++export interface EntryWindow {
++  since?: string;
++  until?: string;
++}
++
++function windowBound(value: string | undefined): number | null {
++  if (value === undefined) {
++    return null;
++  }
++  const parsed = value.trim() === '' ? Number.NaN : new Date(value).getTime();
++  if (Number.isNaN(parsed)) {
++    throw badRequest('invalid_window', `not an ISO-8601 instant: ${value}`);
++  }
++  return parsed;
++}
++
++/** The entries on an account inside a time window, oldest first. */
++export function listEntriesInWindow(accountId: string, window: EntryWindow): Entry[] {
++  getAccount(accountId);
++  const since = windowBound(window.since);
++  const until = windowBound(window.until);
++
++  return listEntryRows(accountId)
++    .filter(
++      (row) =>
++        (since === null || row.createdAtMs >= since) &&
++        (until === null || row.createdAtMs < until),
++    )
++    .map(rowToEntry);
++}
++
+ /** What the account owes, net of fees. */
+ export function balanceFor(accountId: string): Balance {
+   getAccount(accountId);

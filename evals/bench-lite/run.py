@@ -78,6 +78,9 @@ WORKSPACE = Path(
 # `repo` in pairs.json maps to one of these checkouts. Worktrees are cut FROM
 # them (`git worktree add --detach`), so a bench run never checks anything out
 # in the checkout itself.
+#
+# A pair may also give a PATH instead of one of these names, so a task package
+# can ship its own fixture repository; see `resolve_checkout`.
 CHECKOUTS = {
     "tenjin": WORKSPACE / "tenjin",
     "tenjin-agent": WORKSPACE / "tenjin-agent",
@@ -796,7 +799,13 @@ def load_pairs(path: Path, only: list[str] | None) -> list[dict[str, Any]]:
                 if key not in spec:
                     die(f"pair {pid}.{role}: missing `{key}`")
             if spec["repo"] not in CHECKOUTS:
-                die(f"pair {pid}.{role}: repo must be one of {sorted(CHECKOUTS)}")
+                # Not a named checkout, so it has to be a path to a git repo.
+                checkout = resolve_checkout(path.parent, spec["repo"])
+                if not is_git_repo(checkout):
+                    die(
+                        f"pair {pid}.{role}: repo must be one of {sorted(CHECKOUTS)}, "
+                        f"or a path to a git repository; {checkout} is not one"
+                    )
             oracle = spec["oracle"]
             if not isinstance(oracle, dict) or "command" not in oracle:
                 die(f"pair {pid}.{role}: oracle needs a `command`")
@@ -838,6 +847,32 @@ def load_pairs(path: Path, only: list[str] | None) -> list[dict[str, Any]]:
 def resolve_rel(base: Path, value: str) -> Path:
     p = Path(value)
     return p if p.is_absolute() else (base / p)
+
+
+def resolve_checkout(pairs_dir: Path, repo: str) -> Path:
+    """The repository a pair's worktrees are cut from.
+
+    `repo` is either one of the named workspace checkouts above, or a path to a
+    git repository: absolute, or relative to the directory holding pairs.json.
+    The path form is how a task package ships its own fixture repo next to its
+    prompts; a bare repository (`repo.git`) works and is the tidier thing to
+    commit, since a nested `.git` directory cannot itself be committed.
+    """
+    if repo in CHECKOUTS:
+        return CHECKOUTS[repo]
+    return resolve_rel(pairs_dir, repo)
+
+
+def is_git_repo(path: Path) -> bool:
+    if not path.is_dir():
+        return False
+    res = subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "--git-dir"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return res.returncode == 0
 
 
 # --------------------------------------------------------------------------
@@ -1598,7 +1633,7 @@ def run_session(
     sandbox = SCRATCH_ROOT / run_id / f"{pair['id']}__{condition}__r{repeat}__{role}"
     worktree = sandbox / "repo"
     data_dir = sandbox / "tenjin"
-    checkout = CHECKOUTS[spec["repo"]]
+    checkout = resolve_checkout(pairs_dir, spec["repo"])
     prompt_path = resolve_rel(pairs_dir, spec["prompt_file"])
 
     record: dict[str, Any] = {

@@ -69,6 +69,12 @@ Rules the runner enforces:
 - `repo` must be `tenjin` or `tenjin-agent`. Each maps to a local checkout under the workspace
   root; worktrees are cut from it with `git worktree add --detach`, and the checkout itself is
   never checked out, never modified, and never left with a stray worktree.
+- `repo` may instead be a **path to a git repository**, absolute or relative to the directory
+  holding `pairs.json`. That is how a task package ships its own fixture repo beside its prompts,
+  so a pair does not depend on a checkout that moves: see `pairs/synthetic/`, which points at its
+  own `repo.git`. A bare repository is the tidier thing to commit, since a nested `.git`
+  directory would be recorded as a gitlink and its files would never land in the repo. Worktrees
+  are cut from it exactly as they are from a named checkout.
 - `base_commit` is fetched if the checkout does not already have it.
 - Every path in `prompt_file` and `oracle.copy[].from` is relative to the directory holding
   `pairs.json`; `oracle.copy[].to` is relative to the worktree.

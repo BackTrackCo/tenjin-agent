@@ -1,0 +1,158 @@
+diff --git a/src/commands/sweep.ts b/src/commands/sweep.ts
+index 3b1330d..38b5358 100644
+--- a/src/commands/sweep.ts
++++ b/src/commands/sweep.ts
+@@ -1,4 +1,4 @@
+-import { config } from '../config.ts';
++import { getConfig } from '../config.ts';
+ import { db } from '../db/queries.ts';
+ import { runJobs, tallyResults } from '../jobs/runner.ts';
+ import type { Job } from '../jobs/runner.ts';
+@@ -49,5 +49,5 @@ export async function sweepSettled(
+ 
+ /** The window the sweeper is configured with, for the CLI banner. */
+ export function sweepWindowDays(): number {
+-  return config.retentionDays;
++  return getConfig().retentionDays;
+ }
+diff --git a/src/config.ts b/src/config.ts
+index 590f93c..ab6a64a 100644
+--- a/src/config.ts
++++ b/src/config.ts
+@@ -5,8 +5,6 @@
+  * environment. Defaults are the production values.
+  */
+ 
+-const env = process.env;
+-
+ export interface LedgerConfig {
+   /** ISO-4217 code every amount in this process is denominated in. */
+   currency: string;
+@@ -35,21 +33,39 @@ function readFlags(value: string | undefined): readonly string[] {
+     .filter((flag) => flag.length > 0);
+ }
+ 
+-export const config: LedgerConfig = Object.freeze({
+-  currency: env.LEDGER_CURRENCY ?? 'USD',
+-  maxBatchSize: readInt(env.LEDGER_MAX_BATCH, 50),
+-  retentionDays: readInt(env.LEDGER_RETENTION_DAYS, 90),
+-  flags: Object.freeze(readFlags(env.LEDGER_FLAGS)),
+-  strictAmounts: env.LEDGER_STRICT_AMOUNTS === '1',
+-});
++/** Read the environment as it stands right now. */
++function readConfig(): LedgerConfig {
++  const env = process.env;
++  return Object.freeze({
++    currency: env.LEDGER_CURRENCY ?? 'USD',
++    maxBatchSize: readInt(env.LEDGER_MAX_BATCH, 50),
++    retentionDays: readInt(env.LEDGER_RETENTION_DAYS, 90),
++    flags: Object.freeze(readFlags(env.LEDGER_FLAGS)),
++    strictAmounts: env.LEDGER_STRICT_AMOUNTS === '1',
++  });
++}
++
++let current: LedgerConfig = readConfig();
++
++/** The configuration in force now. */
++export function getConfig(): LedgerConfig {
++  return current;
++}
++
++/** Re-read the environment and adopt it. */
++export function reloadConfig(): LedgerConfig {
++  current = readConfig();
++  return current;
++}
+ 
+ /** True if the named feature flag is on. */
+ export function isFlagEnabled(name: string): boolean {
+-  return config.flags.includes(name);
++  return getConfig().flags.includes(name);
+ }
+ 
+ /** The config as an object safe to put in a health payload. */
+ export function describeConfig(): Record<string, string | number | boolean> {
++  const config = getConfig();
+   return {
+     currency: config.currency,
+     maxBatchSize: config.maxBatchSize,
+diff --git a/src/http/handlers.ts b/src/http/handlers.ts
+index 977e8d2..c901577 100644
+--- a/src/http/handlers.ts
++++ b/src/http/handlers.ts
+@@ -6,16 +6,13 @@ import {
+   resolveSettings,
+   updateSettings,
+ } from '../accounts.ts';
+-import { config, describeConfig } from '../config.ts';
++import { describeConfig, getConfig } from '../config.ts';
+ import { beginRequest } from '../context.ts';
+ import { badRequest, isLedgerError, notFound } from '../errors.ts';
+ import { balanceFor, listEntries, postEntries, postEntry } from '../ledger.ts';
+ import { matchRoute } from './router.ts';
+ import type { Account, Entry, EntryKind } from '../types.ts';
+ 
+-/** Largest batch this process will take, read once at boot. */
+-const MAX_BATCH = config.maxBatchSize;
+-
+ export interface LedgerRequest {
+   method: string;
+   path: string;
+@@ -161,9 +158,10 @@ function handleMatched(
+       if (!Array.isArray(entries)) {
+         throw badRequest('invalid_field', 'entries must be an array');
+       }
+-      if (entries.length > MAX_BATCH) {
+-        throw badRequest('batch_too_large', `a batch may hold at most ${MAX_BATCH} entries`, {
+-          maxBatchSize: MAX_BATCH,
++      const maxBatchSize = getConfig().maxBatchSize;
++      if (entries.length > maxBatchSize) {
++        throw badRequest('batch_too_large', `a batch may hold at most ${maxBatchSize} entries`, {
++          maxBatchSize,
+         });
+       }
+       const posted = postEntries(
+diff --git a/src/ledger.ts b/src/ledger.ts
+index b755c88..d9d59fe 100644
+--- a/src/ledger.ts
++++ b/src/ledger.ts
+@@ -1,6 +1,6 @@
+ import { getAccount, resolveSettings } from './accounts.ts';
+ import { recordAudit } from './audit.ts';
+-import { config } from './config.ts';
++import { getConfig } from './config.ts';
+ import {
+   findEntryByIdempotencyKey,
+   insertEntryRow,
+@@ -35,7 +35,7 @@ function normaliseAmount(amountCents: number): number {
+     throw badRequest('invalid_amount', 'amountCents must be a number');
+   }
+   if (!Number.isInteger(amountCents)) {
+-    if (config.strictAmounts) {
++    if (getConfig().strictAmounts) {
+       throw badRequest('fractional_amount', 'amountCents must be a whole number of cents');
+     }
+     return Math.round(amountCents);
+@@ -94,9 +94,10 @@ export function postEntries(inputs: PostEntryInput[]): Entry[] {
+   if (inputs.length === 0) {
+     throw badRequest('empty_batch', 'a batch must hold at least one entry');
+   }
+-  if (inputs.length > config.maxBatchSize) {
+-    throw badRequest('batch_too_large', `a batch may hold at most ${config.maxBatchSize} entries`, {
+-      maxBatchSize: config.maxBatchSize,
++  const maxBatchSize = getConfig().maxBatchSize;
++  if (inputs.length > maxBatchSize) {
++    throw badRequest('batch_too_large', `a batch may hold at most ${maxBatchSize} entries`, {
++      maxBatchSize,
+     });
+   }
+   return inputs.map((input) => postEntry(input));
+@@ -120,7 +121,7 @@ export function balanceFor(accountId: string): Balance {
+   }
+   return {
+     accountId,
+-    currency: config.currency,
++    currency: getConfig().currency,
+     balanceCents: balanceCents - feesCents,
+     feesCents,
+     entryCount: rows.length,

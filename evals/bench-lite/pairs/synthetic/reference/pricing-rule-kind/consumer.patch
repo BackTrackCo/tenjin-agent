@@ -1,0 +1,167 @@
+diff --git a/scripts/build-pricing.mjs b/scripts/build-pricing.mjs
+index e08c5bc..a59429f 100644
+--- a/scripts/build-pricing.mjs
++++ b/scripts/build-pricing.mjs
+@@ -16,13 +16,19 @@ function fold(rules) {
+   const table = {};
+   for (const rule of rules) {
+     const key = cellKey(rule.plan, rule.appliesTo);
+-    const cell = (table[key] ??= { flatCents: 0, basisPoints: 0 });
++    const cell = (table[key] ??= { flatCents: 0, basisPoints: 0, tier: null });
+     if (rule.kind === 'flat') {
+       cell.flatCents += rule.valueCents;
+     }
+     if (rule.kind === 'percent') {
+       cell.basisPoints += rule.basisPoints;
+     }
++    if (rule.kind === 'tier') {
++      cell.tier = {
++        aboveCents: rule.aboveCents,
++        discountBasisPoints: rule.discountBasisPoints,
++      };
++    }
+   }
+   return table;
+ }
+@@ -32,11 +38,23 @@ function render(table) {
+     '// GENERATED FILE. Written by scripts/build-pricing.mjs from src/pricing/rules.ts.',
+     '// Hand edits do not survive.',
+     '',
+-    'export const PRICING_TABLE: Record<string, { flatCents: number; basisPoints: number }> = {',
++    'export interface PriceCellData {',
++    '  flatCents: number;',
++    '  basisPoints: number;',
++    '  tier: { aboveCents: number; discountBasisPoints: number } | null;',
++    '}',
++    '',
++    'export const PRICING_TABLE: Record<string, PriceCellData> = {',
+   ];
+   for (const key of Object.keys(table).sort()) {
+     const cell = table[key];
+-    lines.push(`  '${key}': { flatCents: ${cell.flatCents}, basisPoints: ${cell.basisPoints} },`);
++    const tier = cell.tier
++      ? `{ aboveCents: ${cell.tier.aboveCents}, discountBasisPoints: ${cell.tier.discountBasisPoints} }`
++      : 'null';
++    lines.push(
++      `  '${key}': { flatCents: ${cell.flatCents}, basisPoints: ${cell.basisPoints}, ` +
++        `tier: ${tier} },`,
++    );
+   }
+   lines.push('};', '');
+   return lines.join('\n');
+diff --git a/src/pricing/index.ts b/src/pricing/index.ts
+index 638ca1c..2ad242c 100644
+--- a/src/pricing/index.ts
++++ b/src/pricing/index.ts
+@@ -6,13 +6,16 @@ import { PRICING_TABLE } from './table.generated.ts';
+ export interface PriceCell {
+   flatCents: number;
+   basisPoints: number;
++  /** Discount above a threshold, or null where none applies. */
++  tier: { aboveCents: number; discountBasisPoints: number } | null;
+ }
+ 
+-const EMPTY_CELL: PriceCell = { flatCents: 0, basisPoints: 0 };
++const EMPTY_CELL: PriceCell = { flatCents: 0, basisPoints: 0, tier: null };
+ 
+ /** The cell that prices this plan and entry kind. */
+ export function cellFor(plan: Plan, kind: EntryKind): PriceCell {
+-  return PRICING_TABLE[cellKey(plan, kind)] ?? EMPTY_CELL;
++  const cell = PRICING_TABLE[cellKey(plan, kind)];
++  return cell ? { ...EMPTY_CELL, ...cell } : EMPTY_CELL;
+ }
+ 
+ /**
+@@ -22,7 +25,10 @@ export function cellFor(plan: Plan, kind: EntryKind): PriceCell {
+  */
+ export function priceFor(plan: Plan, kind: EntryKind, amountCents: number): number {
+   const cell = cellFor(plan, kind);
+-  const fee = cell.flatCents + (amountCents * cell.basisPoints) / 10_000;
++  let fee = cell.flatCents + (amountCents * cell.basisPoints) / 10_000;
++  if (cell.tier && amountCents > cell.tier.aboveCents) {
++    fee = (fee * (10_000 - cell.tier.discountBasisPoints)) / 10_000;
++  }
+   return Math.max(0, Math.round(fee));
+ }
+ 
+diff --git a/src/pricing/rules.ts b/src/pricing/rules.ts
+index 504fe97..3583df7 100644
+--- a/src/pricing/rules.ts
++++ b/src/pricing/rules.ts
+@@ -8,7 +8,14 @@ import type { EntryKind, Plan } from '../types.ts';
+  */
+ export type PricingRule =
+   | { plan: Plan; appliesTo: EntryKind; kind: 'flat'; valueCents: number }
+-  | { plan: Plan; appliesTo: EntryKind; kind: 'percent'; basisPoints: number };
++  | { plan: Plan; appliesTo: EntryKind; kind: 'percent'; basisPoints: number }
++  | {
++      plan: Plan;
++      appliesTo: EntryKind;
++      kind: 'tier';
++      aboveCents: number;
++      discountBasisPoints: number;
++    };
+ 
+ export const PRICING_RULES: PricingRule[] = [
+   { plan: 'starter', appliesTo: 'debit', kind: 'flat', valueCents: 25 },
+@@ -20,6 +27,14 @@ export const PRICING_RULES: PricingRule[] = [
+ 
+   { plan: 'scale', appliesTo: 'debit', kind: 'percent', basisPoints: 15 },
+   { plan: 'scale', appliesTo: 'credit', kind: 'percent', basisPoints: 5 },
++
++  {
++    plan: 'scale',
++    appliesTo: 'debit',
++    kind: 'tier',
++    aboveCents: 100_000,
++    discountBasisPoints: 1_500,
++  },
+ ];
+ 
+ /** The key a rule contributes to in the generated table. */
+diff --git a/src/pricing/table.generated.ts b/src/pricing/table.generated.ts
+index a45faa9..656051e 100644
+--- a/src/pricing/table.generated.ts
++++ b/src/pricing/table.generated.ts
+@@ -1,11 +1,17 @@
+ // GENERATED FILE. Written by scripts/build-pricing.mjs from src/pricing/rules.ts.
+ // Hand edits do not survive.
+ 
+-export const PRICING_TABLE: Record<string, { flatCents: number; basisPoints: number }> = {
+-  'scale:credit': { flatCents: 0, basisPoints: 5 },
+-  'scale:debit': { flatCents: 0, basisPoints: 15 },
+-  'standard:credit': { flatCents: 5, basisPoints: 0 },
+-  'standard:debit': { flatCents: 10, basisPoints: 25 },
+-  'starter:credit': { flatCents: 10, basisPoints: 0 },
+-  'starter:debit': { flatCents: 25, basisPoints: 0 },
++export interface PriceCellData {
++  flatCents: number;
++  basisPoints: number;
++  tier: { aboveCents: number; discountBasisPoints: number } | null;
++}
++
++export const PRICING_TABLE: Record<string, PriceCellData> = {
++  'scale:credit': { flatCents: 0, basisPoints: 5, tier: null },
++  'scale:debit': { flatCents: 0, basisPoints: 15, tier: { aboveCents: 100000, discountBasisPoints: 1500 } },
++  'standard:credit': { flatCents: 5, basisPoints: 0, tier: null },
++  'standard:debit': { flatCents: 10, basisPoints: 25, tier: null },
++  'starter:credit': { flatCents: 10, basisPoints: 0, tier: null },
++  'starter:debit': { flatCents: 25, basisPoints: 0, tier: null },
+ };
+diff --git a/tests/pricing.test.ts b/tests/pricing.test.ts
+index b0921ee..abaa282 100644
+--- a/tests/pricing.test.ts
++++ b/tests/pricing.test.ts
+@@ -25,7 +25,11 @@ describe('priceFor', () => {
+ 
+ describe('cellFor', () => {
+   it('folds every rule for a plan and kind into one cell', () => {
+-    expect(cellFor('standard', 'debit')).toEqual({ flatCents: 10, basisPoints: 25 });
++    expect(cellFor('standard', 'debit')).toEqual({
++      flatCents: 10,
++      basisPoints: 25,
++      tier: null,
++    });
+   });
+ });
+ 
