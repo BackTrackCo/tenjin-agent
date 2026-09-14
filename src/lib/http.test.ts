@@ -591,6 +591,34 @@ describe('httpRequest, signed requests never follow redirects', () => {
     expect(calls[0]?.redirect).toBe('manual');
   });
 
+  /**
+   * `fetchJson` IS NOT ANONYMOUS ANY MORE. Doctor's shelf check presents a
+   * cached session delegation on `GET /api/orgs` through this transport, and
+   * that header is a session-lifetime SIWX signature: `redirect: 'follow'`
+   * re-sends every request header but `Authorization`, so one http-to-https hop,
+   * an apex/www alias or an SSO interstitial would disclose it for the whole
+   * session's life.
+   */
+  it('refuses a 3xx carrying the session delegation through fetchJson too', async () => {
+    const { fetchImpl, calls } = recordingFetch(() => redirect(302, 'https://evil.example/'));
+    const res = await fetchJson('https://tenjin.blog/api/orgs', {
+      timeoutMs: 1000,
+      headers: { 'Tenjin-Session-Delegation': 'delegation-value' },
+      fetchImpl,
+    });
+
+    expect(res).toMatchObject({ ok: false, kind: 'blocked-redirect', status: 302 });
+    expect((res as { message: string }).message).toContain('signed material');
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.redirect).toBe('manual');
+  });
+
+  it('leaves an anonymous fetchJson probe following redirects, as doctor needs', async () => {
+    const { fetchImpl, calls } = recordingFetch(() => jsonResponse({ ok: true }));
+    await fetchJson('https://tenjin.blog/openapi.json', { timeoutMs: 1000, fetchImpl });
+    expect(calls[0]?.redirect).toBeUndefined();
+  });
+
   it('pins an UNSIGNED request when the caller sets blockRedirects (durable-artifact case)', async () => {
     const { fetchImpl, calls } = recordingFetch(() =>
       redirect(302, 'https://evil.example/content'),

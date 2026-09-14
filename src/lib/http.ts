@@ -293,15 +293,20 @@ export async function fetchJson(url: string, opts: FetchJsonOptions): Promise<Fe
     // inside the catch that turns any pre-flight refusal into the same
     // discriminated network failure a dead socket gets.
     let pinned = false;
+    let signed = false;
     try {
       const headers = withUserAgent(
         { ...opts.headers, ...previewBypassHeaders(url) },
         opts.callerUserAgent,
       );
-      // fetchJson sends no signed material — doctor's probes and the contract
-      // checks are anonymous — so the preview key is the one thing here worth
-      // pinning, and it pins the same way it does in httpRequest.
-      pinned = carriesPreviewBypass(headers);
+      // THE SAME TWO REASONS `httpRequest` PINS, and for the same reason it
+      // reads them off the BUILT headers rather than off an option. This
+      // transport is no longer anonymous: doctor's shelf check presents a
+      // session delegation here, and that header is the most replayable
+      // credential the CLI holds, so a 3xx on the configured origin would hand
+      // a session-lifetime credential to whatever `Location` names.
+      signed = carriesSignedMaterial(headers);
+      pinned = signed || carriesPreviewBypass(headers);
       res = await doFetch(url, {
         signal: controller.signal,
         headers,
@@ -333,8 +338,9 @@ export async function fetchJson(url: string, opts: FetchJsonOptions): Promise<Fe
           ? { gateOffOrigin: true as const }
           : {}),
         message:
-          `Request to ${url} was redirected (${res.status}) while carrying the preview ` +
-          'bypass key; refusing to follow it, because a redirect would disclose it.',
+          `Request to ${url} was redirected (${res.status}) while carrying ` +
+          `${signed ? 'signed material' : 'the preview bypass key'}; refusing to follow it, ` +
+          'because a redirect would disclose it.',
       };
     }
 
