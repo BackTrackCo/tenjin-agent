@@ -210,6 +210,12 @@ After each `tenjin` session the ledger is read straight out of the session's own
 - **facts** rows under `published:` and `agent_published:` — the urls this session actually
   published, which is also what `cleanup` retracts.
 
+The ledger is the ONLY source for what a session published. The CLI has no "list my posts"
+verb — its publish group is `publish`, `edit`, `delete`, `profile` and `stats`, and `stats`
+returns this month's aggregates rather than rows. So the per-session `published:` facts are
+what the report counts, and `cleanup` resolves each url to a post uuid with `tenjin inspect`
+because `tenjin delete` takes a uuid and the facts row stores only the url.
+
 The report rolls these into per-session counts: fires by arm, legs by status and outcome,
 searches by decision, and posts published.
 

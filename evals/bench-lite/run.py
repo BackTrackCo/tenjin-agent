@@ -1515,17 +1515,20 @@ def build_report(run_dir: Path, records: list[dict[str, Any]], args: argparse.Na
                 )
             )
         lines.append("")
-        pubs = [
-            p
-            for r in tenjin_records
-            for p in (r.get("published") or [])
-            if p.get("key", "").startswith("published:")
-        ]
-        lines.append(f"Posts published to the bench shelf during this run: **{len(pubs)}**.")
-        if pubs:
+        # Deduplicated by url: the same finding published once can appear in more
+        # than one session's ledger rows, and a count of rows would overstate what
+        # is actually on the shelf (and what `cleanup` has to retract).
+        pub_urls: list[str] = []
+        for r in tenjin_records:
+            for p in r.get("published") or []:
+                if p.get("key", "").startswith("published:") and p.get("url"):
+                    if p["url"] not in pub_urls:
+                        pub_urls.append(p["url"])
+        lines.append(f"Distinct posts published to the bench shelf during this run: **{len(pub_urls)}**.")
+        if pub_urls:
             lines.append("")
-            for p in pubs:
-                lines.append(f"- {p['url']}")
+            for url in pub_urls:
+                lines.append(f"- {url}")
             lines.append("")
             lines.append(
                 "`python3 evals/bench-lite/run.py cleanup --out <this run dir>` retracts them "
