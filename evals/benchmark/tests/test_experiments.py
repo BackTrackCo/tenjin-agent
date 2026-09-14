@@ -323,6 +323,33 @@ def test_a_prompt_that_drifts_from_the_catalog_or_drops_one_of_its_paths_is_name
     ]
 
 
+@pytest.mark.parametrize("path", experiments.MANIFESTS, ids=lambda path: path.name)
+def test_every_experiment_declares_a_concurrency_only_its_baseline_spends(path: Path) -> None:
+    assert experiments.concurrency_violations(manifest_module.load(path)) == []
+
+
+def test_the_core_suite_parallelizes_its_baseline_and_never_two_reuse_trials() -> None:
+    """Three workers, and the gate the scheduler itself reads is what holds the reuse arms to one."""
+    manifest = manifest_module.load(experiments.LOCAL_ARMS_MANIFEST)
+    assert manifest.concurrency == 3
+    gated = {trial.arm_id for trial in schedule.expand(manifest) if runner.seeds_shelf(manifest, trial)}
+    assert gated == {"tenjin_seeded", "tenjin_seeded_no_public", "tenjin_natural"}
+    assert {arm["id"] for arm in manifest.arms} - gated == {"off", "flat"}
+    assert all(arm["product_version"] == experiments.BASELINE_PRODUCT for arm in manifest.arms if arm["id"] not in gated)
+
+
+def test_a_reuse_arm_the_shared_shelf_gate_would_not_cover_refuses_more_than_one_worker() -> None:
+    arms = [{"id": "off", "product_version": "none"},
+            {"id": "tenjin_replay", "product_version": "operator-installed"}]
+    assert experiments.concurrency_violations(synthetic(pins={"concurrency": 3}, arms=arms)) == [
+        "arm tenjin_replay is a reuse condition without `provision`, so nothing keeps two of it apart"
+    ]
+    # One worker needs no gate, and a declared `provision` is the gate.
+    assert experiments.concurrency_violations(synthetic(pins={"concurrency": 1}, arms=arms)) == []
+    provisioned = [{**arm, "provision": "tenjin"} if arm["id"] != "off" else arm for arm in arms]
+    assert experiments.concurrency_violations(synthetic(pins={"concurrency": 3}, arms=provisioned)) == []
+
+
 HIGH_DISCOVERY = {
     "shadow": ("stale-build-artifact", "packages/range/src/range.mjs"),
     "ambient": ("invisible-whitespace-mismatch", "src/price.mjs"),

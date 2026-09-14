@@ -20,7 +20,9 @@ prompt that left one unsaid would fail a correct change on the agent's choice of
 
 Claude selections use Opus 5; matched Codex selections use CLI 0.154.0 / `gpt-5.6-sol`,
 low reasoning and requested fast service. Both use subscription allowance only. Claude core
-admits up to three workers, with only one shelf-provisioning trial at a time. Codex serializes
+admits up to three workers, with only one shelf-provisioning trial at a time: every
+reuse-condition arm declares `provision`, so the shared gate holds those to one and the
+baseline arms are the only ones that ever overlap. Codex serializes
 its managed auth file; preflight/canary/recursive are also serial. Producer sessions are additional model work. The smoke configurations live in Bench-1: plumbing is one control launch, hooks smoke is
 4 consumers, and failure-key smoke is 6 consumers. They check different delivery paths.
 

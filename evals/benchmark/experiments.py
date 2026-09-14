@@ -59,3 +59,24 @@ def prompt_violations(manifest: Manifest) -> list[str]:
         elif missing := sorted(interface_contract(stated) - interface_contract(task["prompt"])):
             violations.append(f"task {task['id']} drops {', '.join(missing)} from the catalog's interface contract")
     return violations
+
+
+# An arm that installs no product is a baseline: it starts no loop daemon and
+# reads no shelf, so two of them may overlap.
+BASELINE_PRODUCT = "none"
+
+
+def concurrency_violations(manifest: Manifest) -> list[str]:
+    """Why an experiment's declared `pins.concurrency` is more than it may use.
+
+    Only baseline may parallelize. A reuse-condition arm installs the product,
+    runs its daemon and searches the one shelf this account owns, so two
+    overlapping reuse trials answer each other's searches and put two installs
+    on one host. `runner.seeds_shelf` is the gate that already admits one of
+    them at a time and it reads `provision`, so the rule here is that a reuse
+    arm declares one and is covered, rather than a second mechanism beside it.
+    """
+    if manifest.concurrency == 1:
+        return []
+    return [f"arm {arm['id']} is a reuse condition without `provision`, so nothing keeps two of it apart"
+            for arm in manifest.arms if arm["product_version"] != BASELINE_PRODUCT and not arm.get("provision")]
