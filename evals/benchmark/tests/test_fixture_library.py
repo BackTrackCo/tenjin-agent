@@ -177,6 +177,30 @@ def test_every_lesson_is_loadable_and_keyed_apart_from_the_others() -> None:
 
 
 
+def test_no_lesson_or_fixture_file_repeats_an_oracle_probe_the_trial_never_shows() -> None:
+    """The per-pair leak check: a verifier may not be answerable from the corpus.
+
+    A fixture and the lessons a run seeds are both readable inside the trial, so
+    an oracle value that appears in either is answered without solving the task.
+    The injected cases and the fixture's own tests are disclosed by design and
+    are not probes; what remains is matched as whole tokens.
+    """
+    corpus = [path for path in sorted((LIVE / "lessons").iterdir()) if path.is_file()]
+    assert corpus
+    probed = 0
+    for task in sorted(verifier.TASK_PACKAGES):
+        fixture = LIVE / task
+        hidden = verifier.HIDDEN / task
+        probes = corpus_support.oracle_probes(hidden / verifier.HIDDEN_TESTS / f"{task}.test.mjs", hidden / "cases.json", fixture)
+        probed += len(probes)
+        readable = corpus + [path for path in sorted(fixture.rglob("*")) if path.is_file() and "node_modules" not in path.parts]
+        for path in readable:
+            text = path.read_text(encoding="utf-8", errors="replace")
+            for probe in sorted(probes):
+                assert not corpus_support.discloses(probe, text), f"{path.name} answers {task}'s hidden probe {probe!r}"
+    assert probed >= len(verifier.TASK_PACKAGES)
+
+
 @pytest.mark.parametrize("task", CATALOG, ids=lambda task: task["id"])
 def test_catalog_tasks_match_their_fixtures_and_keep_verifiers_hidden(task: dict) -> None:
     fixture = LIVE / task["fixture"]
