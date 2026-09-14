@@ -1,0 +1,13 @@
+{
+  "id": "budget-fix",
+  "title": "budgetMs: the budget is a ceiling, not a rate",
+  "commands": [
+    {
+      "command": "pnpm exec vitest run tests/budget.test.mjs",
+      "kind": "sig_v1_test",
+      "key": "0cb3f30510a29447",
+      "check": true,
+      "reason": "the assertion on the unfixed source has no errno and no frame in its block, so sig_v1 is null; the product keys the failure on the test identity from vitest's FAIL header, which is stable"
+    }
+  ]
+}

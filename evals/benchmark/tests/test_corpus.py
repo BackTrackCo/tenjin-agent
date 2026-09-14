@@ -227,6 +227,13 @@ def test_a_restore_that_names_no_operation_is_not_a_finished_reset(http_api, res
     assert caught.value.code == "reset_unconfirmed"
 
 
+@pytest.mark.parametrize("operation", [None, True, 1, "finished", ["finished"], {}, {"status": None}, {"status": 3}, {"status": ""}])
+def test_an_unreadable_operation_status_is_a_protocol_refusal(http_api, operation) -> None:
+    with pytest.raises(CorpusError) as caught:
+        http_api([{"operations": [{"id": "op-1"}]}, {"operation": operation}]).reset_to_parent(PROJECT, BRANCH, PARENT)
+    assert caught.value.code == "operation_unreadable"
+
+
 def test_a_branch_response_without_a_branch_is_refused(http_api) -> None:
     with pytest.raises(CorpusError) as caught:
         http_api([{"nothing": True}]).branch(PROJECT, BRANCH)

@@ -1,0 +1,27 @@
+{
+  "id": "stale-build-artifact",
+  "title": "In this workspace a consumer imports the package's built output; `src` is only what the build reads",
+  "commands": [
+    {
+      "command": "pnpm exec vitest run tests/shadow.test.mjs",
+      "kind": "sig_v1_test",
+      "key": "d07b7fe211944def",
+      "check": true,
+      "reason": "vitest's FAIL header names tests/shadow.test.mjs; the test-identity lane keys the file rather than the case, so this is the key at every point on the repair path"
+    },
+    {
+      "command": "pnpm exec vitest run tests/shadow.test.mjs",
+      "kind": "sig_v1",
+      "key": null,
+      "check": true,
+      "reason": "an assertion diff carries no errno and vitest's frame line ends the block, so the message lane derives nothing"
+    },
+    {
+      "command": "pnpm test -- tests/shadow.test.mjs",
+      "kind": "sig_v1_test",
+      "key": "d07b7fe211944def",
+      "check": true,
+      "reason": "the package script forwards the file to the same runner and prints the same header"
+    }
+  ]
+}

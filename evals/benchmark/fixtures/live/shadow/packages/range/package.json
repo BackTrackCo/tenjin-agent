@@ -1,0 +1,7 @@
+{
+  "name": "@fixture/range",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/range.js"
+}

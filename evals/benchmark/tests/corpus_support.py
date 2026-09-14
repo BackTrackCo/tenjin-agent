@@ -1,0 +1,237 @@
+"""Assertions over the reusable fixture library."""
+from __future__ import annotations
+import json
+import os
+import re
+from pathlib import Path
+from evals.benchmark import REPO_ROOT
+
+EXACT_VERSION = re.compile(r"^\d+\.\d+\.\d+$")
+# Files a run leaves behind. A frozen fixture carries none of them.
+RUN_ARTEFACTS = (
+    ".bench1",
+    "node_modules/.vite",
+    "node_modules/.vite-temp",
+    "node_modules/.modules.yaml",
+    "node_modules/.pnpm",
+    "node_modules/.package-map.json",
+    "node_modules/.pnpm-workspace-state-v1.json",
+)
+# The guard in every fixture's vitest config: a runner that did not come
+# through pnpm is refused for a repository reason, in words that name the
+# convention and never the command that satisfies it.
+PNPM_GUARD = "process.env.npm_config_user_agent"
+# A base64 run long enough to be a payload, which a frozen fixture never holds.
+BLOB = re.compile(r"[A-Za-z0-9+/]{40,}={0,2}")
+PNPM_GUARD_MESSAGE = "this repository's tests run through pnpm; see the repository convention"
+# A hidden oracle is plain Node: it names what it pins in its own import list
+# and in the paths it spawns, so the contract a prompt owes the agent is read
+# off the oracle rather than restated by hand.
+NAMED_IMPORT = re.compile(r"import\s*\{([^}]*)\}\s*from\s*'([^']+)'")
+LITERAL = re.compile(r"'((?:[^'\\\n]|\\.)*)'")
+SOURCE_PATH = re.compile(r"^(?:\.\./)*[\w@./-]+\.(?:mjs|cjs|js|ts)$")
+
+
+def _fixture_relative(specifier: str) -> str:
+    """A hidden oracle sits one directory above the fixture root it judges."""
+    return re.sub(r"^(?:\.{1,2}/)+", "", specifier) if specifier.startswith(".") else specifier
+
+
+def oracle_contract(oracle: Path) -> tuple[frozenset[str], frozenset[str]]:
+    """The exported names and the module paths a hidden oracle pins.
+
+    Each one is a name the agent has to get exactly right and cannot derive
+    from a failing run, so a prompt that omits one grades naming luck. Node's
+    own modules are the oracle's harness, never the task's interface.
+    """
+    text = oracle.read_text(encoding="utf-8")
+    names: set[str] = set()
+    paths: set[str] = set()
+    for block, specifier in NAMED_IMPORT.findall(text):
+        if specifier.startswith("node:"):
+            continue
+        names.update(part.strip() for part in block.split(",") if part.strip())
+        paths.add(_fixture_relative(specifier))
+    # A spawned entry point is pinned by its path alone; it has no import line.
+    paths.update(_fixture_relative(literal) for literal in LITERAL.findall(text) if SOURCE_PATH.match(literal))
+    return frozenset(names), frozenset(paths)
+
+
+# Prose is a sentence the agent would have to reproduce word for word. Three
+# words and 24 characters keeps a formatted value out of it: '123.46 USDC' is
+# an output, 'the value must be a positive integer' is a wording the oracle
+# imposes. Comments come off first, because prose in a comment is the file
+# explaining itself and is asserted on nothing.
+PROSE_WORDS = 3
+PROSE_CHARS = 24
+LINE_COMMENT = re.compile(r"//[^\n]*")
+
+
+def visible_interface(fixture: Path, task: str) -> tuple[frozenset[str], frozenset[str]]:
+    """The names and module paths the task's own visible test already reaches for.
+
+    This is the interface a red run teaches. A relative specifier is resolved
+    against the test that writes it and stated from the fixture root, so a
+    package's `../src/core.mjs` and the oracle's `../packages/core/src/core.mjs`
+    are recognised as the one module they both are.
+    """
+    names: set[str] = set()
+    paths: set[str] = set()
+    for test in sorted(fixture.rglob(f"tests/{task}.test.*")):
+        if "node_modules" in test.parts:
+            continue
+        here = os.path.relpath(test.parent, fixture)
+        text = test.read_text(encoding="utf-8")
+        for block, specifier in NAMED_IMPORT.findall(text):
+            if specifier.startswith("node:") or specifier == "vitest":
+                continue
+            names.update(part.strip() for part in block.split(",") if part.strip())
+            paths.add(os.path.normpath(os.path.join(here, specifier)) if specifier.startswith(".") else specifier)
+        # A spawned entry point is written from the working directory, not from the test.
+        paths.update(literal for literal in LITERAL.findall(text) if SOURCE_PATH.match(literal) and not literal.startswith("."))
+    return frozenset(names), frozenset(paths)
+
+
+def prescriptiveness(oracle: Path, fixture: Path, task: str) -> dict:
+    """How much of the fix's shape a hidden oracle dictates, read off the oracle.
+
+    A prescriptive oracle grades more than the behaviour: it names a helper the
+    visible run never touches, so the agent has to keep an internal name or path
+    it would otherwise be free to change, or it pins exact prose. Neither is
+    forbidden, and both have to be answerable from the prompt, so the fact is
+    recorded per verifier rather than argued about per review.
+    """
+    names, paths = oracle_contract(oracle)
+    seen_names, seen_paths = visible_interface(fixture, task)
+    prose = {literal for literal in LITERAL.findall(LINE_COMMENT.sub("", oracle.read_text(encoding="utf-8")))
+             if len(literal) >= PROSE_CHARS and len(literal.split()) >= PROSE_WORDS}
+    private = sorted((names - seen_names) | (paths - seen_paths))
+    return {"prescriptive": bool(private or prose), "private_names": private, "exact_prose": sorted(prose)}
+
+
+def link_workspace_packages(repo: Path) -> list[str]:
+    """The workspace links `pnpm install` would make, for a check that runs without the image.
+
+    A fixture commits no `node_modules` and the installed tree comes out of the
+    task's image, but a workspace fixture's hidden test resolves its package by
+    specifier. This is the one link that resolution goes through and none of
+    the dependency tree, so an offline case can judge the fixture.
+    """
+    made = []
+    for manifest in sorted(repo.glob("packages/*/package.json")):
+        name = json.loads(manifest.read_text(encoding="utf-8")).get("name")
+        if not name:
+            continue
+        link = repo / "node_modules" / name
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to(os.path.relpath(manifest.parent, link.parent))
+        made.append(str(name))
+    return made
+
+
+def assert_vitest_fixture(fixture: Path, task: str, *, trap: bool = True, package_dir: str = "", test_ext: str = "mjs") -> None:
+    """A live task fixture is a real Vitest project that commits none of its toolchain.
+
+    Its dependency tree is the image's: `pnpm install` ran there at build time,
+    so the fixture states the runner it pins and nothing about how it is
+    installed. No lockfile, no `.npmrc`, no `node_modules`, no vendored
+    archive. `trap` is the Bench-0 family's barrier (the wrapper script, the
+    pnpm guard, the failing shards); a Bench-2 family carries its own real
+    failure instead and no barrier. `package_dir` is the workspace package the
+    tests live in.
+    """
+    root = json.loads((fixture / "package.json").read_text(encoding="utf-8"))
+    pinned = root["devDependencies"]["vitest"]
+    assert EXACT_VERSION.match(pinned), pinned
+    for absent in ("pnpm-lock.yaml", ".npmrc", "node_modules"):
+        assert not (fixture / absent).exists(), f"{task} commits {absent}, which the image owns"
+    project = fixture / package_dir if package_dir else fixture
+    package = json.loads((project / "package.json").read_text(encoding="utf-8"))
+    config = (project / "vitest.config.mjs").read_text(encoding="utf-8")
+    assert f"['./scripts/ran-marker.mjs', {{ task: '{task}' }}]" in config
+    assert "pnpm exec" not in config
+    if trap:
+        # The trap: the package script is a wrapper, and the wrapper never reads its arguments.
+        assert package["scripts"]["test"] == "node scripts/all-tests.mjs"
+        assert "argv" not in (project / "scripts" / "all-tests.mjs").read_text(encoding="utf-8")
+        assert "'unrelated/**/*.test.mjs'" in config
+        assert PNPM_GUARD in config
+        assert PNPM_GUARD_MESSAGE in config
+        assert list((project / "unrelated").glob("*.test.mjs"))
+    else:
+        assert PNPM_GUARD not in config
+        assert not (project / "unrelated").exists()
+        assert not (project / "scripts" / "all-tests.mjs").exists()
+    # pnpm 11 reads its settings from pnpm-workspace.yaml and, without this,
+    # runs an install before the first `pnpm exec` or `pnpm run` in a fresh
+    # tree: a registry download the trial must never make.
+    workspace = (fixture / "pnpm-workspace.yaml").read_text(encoding="utf-8")
+    assert "verifyDepsBeforeRun: false" in workspace
+    assert "nodeLinker: hoisted" in workspace
+    # The named test is a vitest test, so plain `node` cannot run it, and its cases come from the
+    # runner's setup file: nothing in the tree holds them, decodable or not.
+    test = (project / "tests" / f"{task}.test.{test_ext}").read_text(encoding="utf-8")
+    assert "from 'vitest'" in test
+    assert "globalThis.__bench1Cases" in test
+    assert "setupFiles: ['./.bench1/cases.setup.mjs']" in config
+    assert not (project / "tests" / "support").exists()
+    hidden = REPO_ROOT / "evals" / "benchmark" / "hidden" / task / "cases.json"
+    assert hidden.is_file(), f"hidden/{task}/cases.json holds the expected values"
+    # Values of three characters or more, matched as whole tokens, so a bare digit or a word inside
+    # an identifier is not "revealed"; the source under test is skipped, since the fix's own tokens
+    # (an enum member, a unit) live there.
+    expected = {str(entry["expected"]) for entry in json.loads(hidden.read_text(encoding="utf-8")) if len(str(entry["expected"])) >= 3}
+    for path in fixture.rglob("*"):
+        if path.is_file() and "node_modules" not in path.parts:
+            text = path.read_text(encoding="utf-8", errors="replace")
+            # The lockfile's integrity hashes are base64 by design and name no expected value.
+            if path.name != "pnpm-lock.yaml":
+                assert BLOB.search(text) is None, f"{path.relative_to(fixture)} holds a decodable blob"
+            if "src" in path.relative_to(fixture).parts:
+                continue
+            for value in expected:
+                assert re.search(r"(?<![A-Za-z0-9])" + re.escape(value) + r"(?![A-Za-z0-9])", text) is None, f"{path.relative_to(fixture)} reveals an expected value"
+    for artefact in RUN_ARTEFACTS:
+        assert not (fixture / artefact).exists(), artefact
+        assert not (project / artefact).exists(), artefact
+    assert [path for path in fixture.rglob("*") if path.is_symlink()] == []
+
+
+# A no-break space is a byte, not a word: an oracle escapes what it pins.
+ESCAPE = re.compile(r"\\u([0-9a-fA-F]{4})")
+
+
+def oracle_probes(oracle: Path, cases: Path, visible: Path) -> frozenset[str]:
+    """The oracle's own literals that nothing the agent may read already holds.
+
+    The injected cases and the fixture's own tests are what a trial discloses
+    by design; what is left is the unseen half of the measurement, and a corpus
+    that repeats one of those values hands the answer over without a run.
+    """
+    known = _strings(json.loads(cases.read_text(encoding="utf-8")))
+    for test in sorted(visible.rglob("*.test.*")):
+        known.update(LITERAL.findall(test.read_text(encoding="utf-8")))
+    probes = set()
+    for literal in LITERAL.findall(oracle.read_text(encoding="utf-8")):
+        if len(literal) < 2 or literal in known or literal.startswith("node:") or SOURCE_PATH.match(literal):
+            continue
+        probes.add(literal)
+        # The oracle escapes the bytes it pins; a corpus would paste them.
+        probes.add(ESCAPE.sub(lambda match: chr(int(match.group(1), 16)), literal))
+    return frozenset(probes - known)
+
+
+def _strings(value: object) -> set[str]:
+    """Every string anywhere in a decoded JSON document."""
+    if isinstance(value, str):
+        return {value}
+    if isinstance(value, dict):
+        value = list(value.values())
+    if isinstance(value, list):
+        return {item for element in value for item in _strings(element)}
+    return set()
+
+
+def discloses(probe: str, text: str) -> bool:
+    """Whole-token match, so a digest that happens to contain a probe is not a leak."""
+    return re.search(r"(?<![A-Za-z0-9])" + re.escape(probe) + r"(?![A-Za-z0-9])", text) is not None

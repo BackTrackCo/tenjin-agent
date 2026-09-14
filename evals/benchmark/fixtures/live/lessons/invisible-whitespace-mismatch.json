@@ -1,0 +1,27 @@
+{
+  "id": "invisible-whitespace-mismatch",
+  "title": "A diff whose two sides read the same is a character you cannot see: dump code points before changing the code",
+  "commands": [
+    {
+      "command": "pnpm exec vitest run tests/ambient.test.mjs",
+      "kind": "sig_v1_test",
+      "key": "8f2b90e3b495cd83",
+      "check": true,
+      "reason": "vitest's FAIL header names tests/ambient.test.mjs; the whitespace class the formula normalizes covers both spaces, so the key is the same whichever side of the mismatch appears"
+    },
+    {
+      "command": "pnpm exec vitest run tests/ambient.test.mjs",
+      "kind": "sig_v1",
+      "key": null,
+      "check": true,
+      "reason": "an assertion diff carries no errno and vitest's frame line ends the block, so the message lane derives nothing"
+    },
+    {
+      "command": "pnpm test -- tests/ambient.test.mjs",
+      "kind": "sig_v1_test",
+      "key": "8f2b90e3b495cd83",
+      "check": true,
+      "reason": "the package script forwards the file to the same runner and prints the same header"
+    }
+  ]
+}

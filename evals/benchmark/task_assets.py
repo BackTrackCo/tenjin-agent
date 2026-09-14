@@ -66,6 +66,9 @@ def validate(data: dict[str, Any], base: Path) -> None:
                         raise ValueError("historical source receipt names a different oracle")
                     if any(not (support / name).is_file() for name in ("vitest.config.mjs", "database.mjs")):
                         raise ValueError("historical verifier support is missing")
+                    wide = verifier.unnarrowed_oracle((support / "vitest.config.mjs").read_text(), ORACLE)
+                    if wide:
+                        raise ValueError(wide)
                     if any(not Path(path).parts or Path(path).is_absolute() or ".." in Path(path).parts or path.startswith(("node_modules/", "hidden-tests/")) or path == ORACLE or "*" in path for path in task["allowed_changes"]):
                         raise ValueError("allowed changes must name confined product source files")
                 elif any(key in task for key in ("hidden", "verification", "allowed_changes", "database")):
