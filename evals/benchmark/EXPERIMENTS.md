@@ -14,7 +14,9 @@ results remain in `tenjin-notes/benchmark/`; no provisional number here is harde
 Every task an experiment selects runs the catalog's prompt, and a slice restates it around its
 own variation. Either shape names every path the catalog names: those are the paths the hidden
 oracle enters the fixture through, and a prompt that left one unsaid would fail a correct
-change on the agent's choice of name.
+change on the agent's choice of name. Either shape keeps the catalog's constraints too, so no
+selection quietly measures an easier task; the recursive slice drops only the subagent rule
+its own treatment replaces.
 
 ## What runs
 

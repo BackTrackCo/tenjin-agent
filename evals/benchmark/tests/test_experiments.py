@@ -306,6 +306,8 @@ def test_the_recursive_slice_restates_its_prompt_and_still_names_every_path_the_
     assert experiments.interface_contract(stated) == {"src/actor.mjs", "tests/actor.test.mjs"}
     assert experiments.interface_contract(stated) <= experiments.interface_contract(task["prompt"])
     assert "actorKey(session, agent)" in task["prompt"]
+    # Delegation is the treatment, so the subagent rule is the one constraint it drops.
+    assert experiments.constraints_stated(stated) - experiments.constraints_stated(task["prompt"]) == {"spawn no subagent"}
 
 
 def test_a_prompt_that_drops_one_of_the_catalog_s_paths_is_named_and_a_tightening_is_not() -> None:
@@ -313,9 +315,28 @@ def test_a_prompt_that_drops_one_of_the_catalog_s_paths_is_named_and_a_tightenin
     assert experiments.prompt_violations(synthetic(tasks=[{"id": "actor", "prompt": stated}])) == []
     # A manifest ahead of the catalog is a tightening moving through the stack, never a violation.
     assert experiments.prompt_violations(synthetic(tasks=[{"id": "actor", "prompt": stated + " Keep src/actor.mjs where it is."}])) == []
-    dropped = [{"id": "actor", "prompt": "Fix the source under src/ so that tests/actor.test.mjs passes."}]
+    dropped = [{"id": "actor", "prompt": "Run only that one test file, never the whole suite, and do not spawn subagents."}]
     assert experiments.prompt_violations(synthetic(tasks=dropped)) == [
-        "task actor drops src/actor.mjs from the catalog's interface contract"
+        "task actor drops src/actor.mjs, tests/actor.test.mjs from the catalog's interface contract"
+    ]
+
+
+def test_a_prompt_that_keeps_the_paths_and_drops_a_constraint_is_named() -> None:
+    """Names alone are not the task: an experiment that let the whole suite run would measure an easier one."""
+    stated = experiments.catalog_prompts()["actor"]
+    assert experiments.constraints_stated(stated) == {"run one test file", "never the whole suite", "spawn no subagent"}
+    loosened = [{"id": "actor", "prompt": "Fix src/actor.mjs so that tests/actor.test.mjs passes."}]
+    assert experiments.prompt_violations(synthetic(tasks=loosened)) == [
+        "task actor drops the catalog's constraint to never the whole suite, run one test file, spawn no subagent"
+    ]
+    # A slice drops the subagent rule and nothing else.
+    assert experiments.prompt_violations(synthetic(tasks=loosened, slice={"kind": "recursive"})) == [
+        "task actor drops the catalog's constraint to never the whole suite, run one test file"
+    ]
+    delegated = [{"id": "actor", "prompt": stated.replace(", and do not spawn subagents", "")}]
+    assert experiments.prompt_violations(synthetic(tasks=delegated, slice={"kind": "recursive"})) == []
+    assert experiments.prompt_violations(synthetic(tasks=delegated)) == [
+        "task actor drops the catalog's constraint to spawn no subagent"
     ]
     assert experiments.prompt_violations(synthetic(tasks=[{"id": "invented", "prompt": "anything"}])) == [
         "task invented carries a prompt the shared catalog does not define"
