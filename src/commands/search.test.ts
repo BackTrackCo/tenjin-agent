@@ -731,6 +731,33 @@ describe('runSearch on a shelf', () => {
     ]);
   });
 
+  /**
+   * THE FLAG MUST NOT MOVE THE PIN. `--base-url` and `TENJIN_BASE_URL` ride
+   * every leaf command, and an agent picks the value: minting a session
+   * delegation for a host the config does not name would wallet-sign for that
+   * host AND overwrite the machine's good session file on the way out. On main
+   * `tenjin search` sent no credential at all, so this is new exposure and the
+   * gate is `read`'s, applied here.
+   */
+  it('never signs for a base URL the config does not name, and still answers public', async () => {
+    await writeShelfConfig();
+    // A miss, so the candidate-origin guard is not what this case is measuring.
+    const { fetch, sent } = shelfStub(() => MISS);
+    const result = await runSearch(
+      { question: 'q' },
+      makeCtx({ baseUrl: 'https://attacker.example' }),
+      deps(fetch),
+    );
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.url).toBe('https://attacker.example/api/search');
+    expect(sent[0]?.headers['tenjin-session-delegation']).toBeUndefined();
+    expect(sent[0]?.headers['sign-in-with-x']).toBeUndefined();
+    expect(result.humanLines?.join('\n')).toContain(
+      'not the deployment this machine is configured',
+    );
+  });
+
   it('with the marketplace turned off there is nothing to fall back to, so it refuses', async () => {
     // `team.publicFallback: off` is this machine asking for the shelf ALONE, so
     // a credential failure withholds no public answer and the refusal is the

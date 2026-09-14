@@ -3,10 +3,7 @@ import { CONFIG_DEFAULTS, RawConfigSchema, loadRawConfig } from '../lib/config';
 import { configPath } from '../lib/paths';
 import { writeFileAtomic } from '../lib/atomic-json';
 import { sanitizeForTerminal } from '../lib/output';
-import { getOrgs, type OrgDeps } from './org';
-import { resolveContextSettings } from '../lib/settings';
-import { resolveWriteAuth } from '../lib/consent';
-import { describeWallet, resolveWalletProvider } from '../lib/wallet';
+import { connect, getOrgs, type OrgDeps } from './org';
 import type { CommandContext, CommandResult } from '../context';
 
 /**
@@ -54,26 +51,11 @@ export async function runShelfUse(
     });
   }
 
-  const env = deps.env ?? process.env;
-  const settings = await resolveContextSettings(ctx);
-  const provider = resolveWalletProvider(
-    ctx,
-    deps.provider !== undefined ? { provider: deps.provider } : {},
-  );
-  await describeWallet(provider);
-  const auth = resolveWriteAuth({
-    signer: await provider.getSigner(),
-    baseUrl: settings.baseUrl,
-    dataDir: ctx.dataDir,
-    scope: 'read',
-    ...(deps.useSession !== undefined ? { useSession: deps.useSession } : {}),
-    env,
-  });
-  const orgs = await getOrgs(auth, {
-    baseUrl: settings.baseUrl,
-    timeoutMs: ctx.flags.timeout,
-    ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
-  });
+  // `org.ts`'s own connect, not a copy of it: the origin pin, the wallet and
+  // the session auth are one decision, and a second spelling of it here is how
+  // one of the three eventually goes missing.
+  const { auth, client } = await connect(ctx, deps, 'read');
+  const orgs = await getOrgs(auth, client);
   const reachable = orgs.flatMap((org) => org.shelves.map((sh) => sh.slug));
   if (!reachable.includes(slug)) {
     throw new CliError('USAGE', `This wallet cannot reach a shelf called "${slug}".`, {

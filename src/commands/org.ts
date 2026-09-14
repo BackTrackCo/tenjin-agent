@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { CliError } from '../lib/errors';
 import { httpRequest } from '../lib/http';
-import { resolveContextSettings } from '../lib/settings';
+import { assertConfiguredDeployment, resolveContextSettings } from '../lib/settings';
 import { resolveWriteAuth } from '../lib/consent';
 import { sanitizeForTerminal } from '../lib/output';
 import { trimSlash } from '../lib/url';
@@ -164,12 +164,20 @@ interface Client {
 }
 
 /**
- * The `profile.ts` shape: resolve the wallet, surface WALLET_MISSING with its
- * own fix, then sign through the same session-key auth every other write uses.
+ * The `profile.ts` shape: pin the origin, resolve the wallet, surface
+ * WALLET_MISSING with its own fix, then sign through the same session-key auth
+ * every other write uses. Exported because `shelf use` signs the same way and
+ * must not grow a second copy of the pin.
  */
-async function connect(ctx: CommandContext, deps: OrgDeps, scope: 'read' | 'read+write') {
+export async function connect(ctx: CommandContext, deps: OrgDeps, scope: 'read' | 'read+write') {
   const env = deps.env ?? process.env;
   const settings = await resolveContextSettings(ctx);
+  // THE PIN COMES FIRST, before the keystore is opened and before anything is
+  // signed: `--base-url` and `TENJIN_BASE_URL` ride every leaf command, and an
+  // agent that names a host must not thereby move the deployment this machine
+  // delegates a session to. `read` has held this rule since #218; these verbs
+  // wallet-sign too, so they hold it as well.
+  assertConfiguredDeployment(settings);
   const provider = resolveWalletProvider(
     ctx,
     deps.provider !== undefined ? { provider: deps.provider } : {},

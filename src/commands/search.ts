@@ -1,6 +1,10 @@
 import { CliError } from '../lib/errors';
 import { formatUsdDisplay, parseUsdToAtomic } from '../lib/money';
-import { resolveContextSettings, type ResolvedSettings } from '../lib/settings';
+import {
+  onConfiguredDeployment,
+  resolveContextSettings,
+  type ResolvedSettings,
+} from '../lib/settings';
 import {
   buildSearchRequest,
   postSearch,
@@ -17,6 +21,7 @@ import { cut } from '../hooks/text';
 import { recordSearch } from '../lib/searches';
 import { readActor, type SessionActor } from '../lib/session';
 import { assertOnBaseOrigin } from '../lib/resource-ref';
+import { originOf } from '../lib/url';
 import { sanitizeForTerminal } from '../lib/output';
 import type { CommandContext, CommandResult } from '../context';
 
@@ -116,7 +121,18 @@ export async function runSearch(
   // call's 401/404, which is a membership or credential problem the operator
   // has to hear about, and it is not this branch.
   let shelfError: string | undefined;
-  if (settings.shelf !== null) {
+  // THE PIN COMES BEFORE THE SIGNATURE. `settings.baseUrl` is the RESOLVED base
+  // and a flag moves it; the delegation this mints is wallet-signed and gets
+  // written over the machine's cached session on the way out, so an agent that
+  // runs `tenjin search --base-url https://attacker.example` must not thereby
+  // move where the credential goes. Off the configured deployment there is no
+  // shelf to search, and the public route still answers unsigned: same shape as
+  // the credential fallback below, and the same rule `read` has held since #218.
+  const onConfigured = onConfiguredDeployment(originOf(settings.baseUrl), settings);
+  if (settings.shelf !== null && !onConfigured) {
+    shelfError = `${originOf(settings.baseUrl)} is not the deployment this machine is configured for, so shelf "${settings.shelf}" was not asked`;
+  }
+  if (settings.shelf !== null && onConfigured) {
     const request = buildSearchRequest({
       ...input,
       includePublic: settings.teamPublicFallback === 'on',

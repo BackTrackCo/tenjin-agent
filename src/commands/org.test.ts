@@ -37,10 +37,10 @@ const ORGS = {
   ],
 };
 
-function makeCtx(): CommandContext {
+function makeCtx(baseUrl?: string): CommandContext {
   const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
   return {
-    flags: { json: true, timeout: 5000 },
+    flags: { json: true, timeout: 5000, ...(baseUrl !== undefined ? { baseUrl } : {}) },
     dataDir: dir,
     io: { stdout: sink(), stderr: sink(), isTTY: false },
   };
@@ -231,5 +231,33 @@ describe('tenjin org set public-search', () => {
     await expect(
       runOrgSetPublicSearch({ on: false }, makeCtx(), deps(s.fetch)),
     ).rejects.toMatchObject({ code: 'PUBLISH_FAILED', exitCode: 4 });
+  });
+});
+
+/**
+ * THE FLAG MUST NOT MOVE THE PIN. Every verb here wallet-signs, and the
+ * delegation it mints is written to disk: a `--base-url` an agent chose would
+ * otherwise sign for that host and clobber the machine's session on the way
+ * out. There is no public route for membership to degrade to, so this refuses
+ * before the keystore is even opened.
+ */
+describe('the configured deployment is the only one these verbs sign for', () => {
+  it.each([
+    ['org list', (c: CommandContext, d: ReturnType<typeof deps>) => runOrgList(c, d)],
+    [
+      'org add',
+      (c: CommandContext, d: ReturnType<typeof deps>) => runOrgAdd({ member: 'ali' }, c, d),
+    ],
+    [
+      'org set public-search',
+      (c: CommandContext, d: ReturnType<typeof deps>) => runOrgSetPublicSearch({ on: false }, c, d),
+    ],
+  ])('%s refuses a base URL the config does not name', async (_label, run) => {
+    const s = stub(() => json(200, ORGS));
+    const err = await run(makeCtx('https://attacker.example'), deps(s.fetch)).catch(
+      (e: unknown) => e as Error,
+    );
+    expect(err).toMatchObject({ code: 'REFUSED' });
+    expect(s.calls).toHaveLength(0);
   });
 });

@@ -35,10 +35,10 @@ const ORGS = {
   ],
 };
 
-function makeCtx(): CommandContext {
+function makeCtx(baseUrl?: string): CommandContext {
   const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
   return {
-    flags: { json: true, timeout: 5000 },
+    flags: { json: true, timeout: 5000, ...(baseUrl !== undefined ? { baseUrl } : {}) },
     dataDir: dir,
     io: { stdout: sink(), stderr: sink(), isTTY: false },
   };
@@ -160,5 +160,21 @@ describe('tenjin shelf use', () => {
     if (process.platform !== 'win32') {
       expect((await stat(join(dir, 'config.json'))).mode & 0o777).toBe(0o600);
     }
+  });
+});
+
+/** The same pin `org` holds: this verb signs, so a `--base-url` an agent chose
+ *  must not decide where the delegation goes. */
+describe('the configured deployment is the only one shelf use signs for', () => {
+  it('refuses a base URL the config does not name, and writes nothing', async () => {
+    const s = stub(ORGS);
+    const err = await runShelfUse(
+      { slug: 'bench' },
+      makeCtx('https://attacker.example'),
+      deps(s.fetch),
+    ).catch((e: unknown) => e as Error);
+    expect(err).toMatchObject({ code: 'REFUSED' });
+    expect(s.calls).toEqual([]);
+    expect(await storedShelf()).toBeUndefined();
   });
 });

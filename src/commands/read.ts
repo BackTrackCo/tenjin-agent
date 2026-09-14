@@ -1,6 +1,6 @@
 import { CliError } from '../lib/errors';
 import { formatUsdDisplay, toMoney } from '../lib/money';
-import { resolveContextSettings } from '../lib/settings';
+import { onConfiguredDeployment, resolveContextSettings } from '../lib/settings';
 import { resolveResourceRef } from '../lib/resource-ref';
 import { fetchRead } from '../lib/read-client';
 import type { ReadBody, SessionReadResult } from '../lib/read-client';
@@ -16,8 +16,7 @@ import { searchHeaders } from '../lib/search-auth';
 import type { SignableRequest } from '../lib/session-present';
 import { resolveWriteAuth } from '../lib/consent';
 import { resolveWalletProvider, type WalletProvider } from '../lib/wallet';
-import { isSameDeployment } from '../lib/production-origin';
-import { originOf, tryOriginOf } from '../lib/url';
+import { originOf } from '../lib/url';
 import type { CommandContext, CommandResult } from '../context';
 
 /**
@@ -237,12 +236,6 @@ async function presentOrMint(
     return { kind: 'refuse', check: 'no_wallet' };
   }
   return await present(() => Promise.resolve(auth.headers), url, fetchOpts);
-}
-
-/** Is this origin the one shelf the config names? */
-function onConfiguredDeployment(origin: string, settings: { configuredBaseUrl: string }): boolean {
-  const shelf = tryOriginOf(settings.configuredBaseUrl);
-  return shelf !== null && isSameDeployment(origin, shelf);
 }
 
 /**

