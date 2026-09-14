@@ -1,10 +1,11 @@
-import { describe, it, expect, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   fetchJson,
   fetchFailureToCliError,
   httpRequest,
-  shelfBypassHeaders,
-  SHELF_BYPASS_HEADER,
+  previewBypassHeaders,
+  PREVIEW_BYPASS_ENV,
+  PREVIEW_BYPASS_HEADER,
 } from './http';
 import { SIWX_HEADER } from './siwx';
 import { CliError } from './errors';
@@ -453,6 +454,12 @@ describe('fetchFailureToCliError', () => {
  * against it for the signature's lifetime. These pin that it cannot happen.
  */
 describe('httpRequest, signed requests never follow redirects', () => {
+  // The blocked-redirect cases below arm the pin with the preview key, which is
+  // process-wide; cleared here so it cannot leak into the unsigned cases.
+  afterEach(() => {
+    delete process.env[PREVIEW_BYPASS_ENV];
+  });
+
   /** Records the init `httpRequest` passed to fetch, so the redirect mode is assertable. */
   function recordingFetch(response: () => Response): {
     fetchImpl: typeof fetch;
@@ -470,12 +477,12 @@ describe('httpRequest, signed requests never follow redirects', () => {
     new Response('', { status, headers: { location } });
 
   /**
-   * `gateOffOrigin` on a blocked redirect is what licenses doctor to say the key
-   * was refused rather than that the base URL is wrong, so each `Location` shape
-   * is pinned at the transport rather than through a caller. The probe carries the
-   * bypass header, which is what makes a 3xx `blocked-redirect` rather than a
-   * plain http error. The relative form is the commonest sign-in shape and must
-   * NOT read as off-host.
+   * `gateOffOrigin` on a blocked redirect is what licenses doctor to say a page
+   * answered rather than that the base URL is wrong, so each `Location` shape is
+   * pinned at the transport rather than through a caller. The probe carries the
+   * preview-bypass header, which is what makes a 3xx `blocked-redirect` rather
+   * than a plain http error. The relative form is the commonest sign-in shape and
+   * must NOT read as off-host.
    */
   it.each([
     ['an absolute Location on another host', 'https://vercel.com/sso-api?url=x', true],
@@ -488,9 +495,9 @@ describe('httpRequest, signed requests never follow redirects', () => {
     ['an absolute Location back to the same host', 'https://shelf.example/openapi.json', undefined],
   ])('reports the off-host signal for %s', async (_label, location, expected) => {
     const fetchImpl: typeof fetch = async () => redirect(302, location as string);
+    process.env[PREVIEW_BYPASS_ENV] = 'preview-secret';
     const res = await fetchJson('https://shelf.example/openapi.json', {
       timeoutMs: 1000,
-      bypass: { origin: 'https://shelf.example', secret: 'shelf-secret' },
       fetchImpl,
     });
     expect(res).toMatchObject({ ok: false, kind: 'blocked-redirect' });
@@ -499,9 +506,9 @@ describe('httpRequest, signed requests never follow redirects', () => {
 
   it('claims nothing about the host when the redirect carries no Location', async () => {
     const fetchImpl: typeof fetch = async () => new Response('', { status: 302 });
+    process.env[PREVIEW_BYPASS_ENV] = 'preview-secret';
     const res = await fetchJson('https://shelf.example/openapi.json', {
       timeoutMs: 1000,
-      bypass: { origin: 'https://shelf.example', secret: 'shelf-secret' },
       fetchImpl,
     });
     expect(res).toMatchObject({ ok: false, kind: 'blocked-redirect' });
@@ -510,9 +517,9 @@ describe('httpRequest, signed requests never follow redirects', () => {
 
   it('claims nothing about the host when the Location cannot be parsed', async () => {
     const fetchImpl: typeof fetch = async () => redirect(302, 'http://[not a url');
+    process.env[PREVIEW_BYPASS_ENV] = 'preview-secret';
     const res = await fetchJson('https://shelf.example/openapi.json', {
       timeoutMs: 1000,
-      bypass: { origin: 'https://shelf.example', secret: 'shelf-secret' },
       fetchImpl,
     });
     expect(res).toMatchObject({ ok: false, kind: 'blocked-redirect' });
@@ -760,15 +767,20 @@ describe('a caller header the Headers API rejects is a returned failure, not a t
 });
 
 /**
- * THE ORIGIN TEST, IN THE TRANSPORT. The bypass secret opens a deployment, and
- * the CLI talks to two shelves in one session — sometimes inside one fire. The
- * decision therefore lives here, driven by the request URL, so a call site that
- * passes the key while fetching the wrong host sends nothing rather than the
- * key.
+ * THE PREVIEW KEY IS ENVIRONMENT-ONLY, and it is not a shelf or a team notion any
+ * more: a shelf is a row on production, so the only thing left that needs this is
+ * a PREVIEW deployment behind Vercel Deployment Protection. It is read once, in
+ * the transport, from `TENJIN_PREVIEW_BYPASS`, never persisted and never printed.
  */
-describe('the team shelf bypass header', () => {
-  const SECRET = 'shelf-secret-abc123';
-  const bypass = { origin: 'https://team.example', secret: SECRET };
+describe('the preview bypass header', () => {
+  const SECRET = 'preview-secret-abc123';
+
+  beforeEach(() => {
+    process.env[PREVIEW_BYPASS_ENV] = SECRET;
+  });
+  afterEach(() => {
+    delete process.env[PREVIEW_BYPASS_ENV];
+  });
 
   function recorder(): { fetchImpl: typeof fetch; seen: Array<Record<string, string>> } {
     const seen: Array<Record<string, string>> = [];
@@ -779,45 +791,35 @@ describe('the team shelf bypass header', () => {
     return { fetchImpl, seen };
   }
 
-  it('is attached on the bypass origin and on no other, through both transports', async () => {
+  it('rides every request while the variable is set, through both transports', async () => {
     for (const send of [
       (url: string, o: { fetchImpl: typeof fetch }) =>
-        fetchJson(url, { timeoutMs: 1000, bypass, fetchImpl: o.fetchImpl }),
+        fetchJson(url, { timeoutMs: 1000, fetchImpl: o.fetchImpl }),
       (url: string, o: { fetchImpl: typeof fetch }) =>
-        httpRequest(url, { timeoutMs: 1000, bypass, fetchImpl: o.fetchImpl }),
+        httpRequest(url, { timeoutMs: 1000, fetchImpl: o.fetchImpl }),
     ]) {
       const rec = recorder();
-      await send('https://team.example/api/search', rec);
-      await send('https://public.example/api/search', rec);
-      // Not a sibling host, and not a different port on the same host: an origin
-      // is scheme + host + port, and anything else is somebody else's server.
-      await send('https://evil.team.example/api/search', rec);
-      await send('https://team.example:8443/api/search', rec);
-      expect(rec.seen.map((h) => h[SHELF_BYPASS_HEADER])).toEqual([
-        SECRET,
-        undefined,
-        undefined,
-        undefined,
-      ]);
+      await send('https://preview.example/api/search', rec);
+      await send('https://tenjin.blog/api/search', rec);
+      expect(rec.seen.map((h) => h[PREVIEW_BYPASS_HEADER])).toEqual([SECRET, SECRET]);
     }
   });
 
-  it('sends nothing for an empty secret or an unparseable URL', () => {
-    expect(
-      shelfBypassHeaders('https://team.example/x', { origin: bypass.origin, secret: '' }),
-    ).toEqual({});
-    expect(shelfBypassHeaders('https://team.example/x', undefined)).toEqual({});
-    expect(shelfBypassHeaders('not-a-url', bypass)).toEqual({});
+  it('sends nothing when the variable is unset or empty', () => {
+    expect(previewBypassHeaders({})).toEqual({});
+    expect(previewBypassHeaders({ [PREVIEW_BYPASS_ENV]: '' })).toEqual({});
+    expect(previewBypassHeaders({ [PREVIEW_BYPASS_ENV]: SECRET })).toEqual({
+      [PREVIEW_BYPASS_HEADER]: SECRET,
+    });
   });
 
   /**
-   * A 3xx MUST NOT CARRY THE DOOR KEY ONWARD. `fetch` re-sends request headers
-   * verbatim to a redirect target (only `Authorization` is stripped), so a
-   * Vercel Authentication interstitial on the shelf origin — what a rotated
-   * bypass secret actually gets — would hand the key to `vercel.com` or to
-   * whatever else `Location` names, and the key is all anyone needs to walk in.
-   * The bypass is not replayable like a signature, so it is not in
-   * CREDENTIAL_HEADERS; it pins anyway, because disclosure is the harm here.
+   * A 3xx MUST NOT CARRY THE KEY ONWARD. `fetch` re-sends request headers
+   * verbatim to a redirect target (only `Authorization` is stripped), so a Vercel
+   * Authentication interstitial — what a rotated preview secret actually gets —
+   * would hand the key to `vercel.com` or to whatever else `Location` names. It
+   * is not replayable like a signature, so it is not in CREDENTIAL_HEADERS; it
+   * pins anyway, because disclosure is the harm here.
    */
   describe('pins redirects the way a signed header does', () => {
     function recordingFetch(response: () => Response): {
@@ -835,31 +837,28 @@ describe('the team shelf bypass header', () => {
     const ssoRedirect = (): Response =>
       new Response('', {
         status: 307,
-        headers: { location: 'https://vercel.com/sso-api?url=team.example' },
+        headers: { location: 'https://vercel.com/sso-api?url=preview.example' },
       });
 
-    it('refuses a 3xx on the bypass origin, through httpRequest', async () => {
+    it('refuses a 3xx while the key rides, through httpRequest', async () => {
       const { fetchImpl, calls } = recordingFetch(ssoRedirect);
-      const res = await httpRequest('https://team.example/api/search', {
+      const res = await httpRequest('https://preview.example/api/search', {
         method: 'POST',
         timeoutMs: 1000,
-        bypass,
         jsonBody: { query: 'q' },
         fetchImpl,
       });
 
       expect(res).toMatchObject({ ok: false, kind: 'blocked-redirect', status: 307 });
       expect((res as { message: string }).message).toContain('bypass key');
-      // One request, to the configured origin, and the key was never re-sent.
       expect(calls).toHaveLength(1);
       expect(calls[0]?.redirect).toBe('manual');
     });
 
-    it('refuses a 3xx on the bypass origin, through fetchJson (doctor probes)', async () => {
+    it('refuses a 3xx while the key rides, through fetchJson (doctor probes)', async () => {
       const { fetchImpl, calls } = recordingFetch(ssoRedirect);
-      const res = await fetchJson('https://team.example/api/search', {
+      const res = await fetchJson('https://preview.example/api/search', {
         timeoutMs: 1000,
-        bypass,
         fetchImpl,
       });
 
@@ -870,14 +869,13 @@ describe('the team shelf bypass header', () => {
       expect(calls[0]?.redirect).toBe('manual');
     });
 
-    it('leaves an off-origin request on ordinary transport', async () => {
-      // The public shelf gets no key, so it has nothing to disclose and keeps
-      // normal redirect following: the pin is armed by the header, not by intent.
+    it('leaves an ordinary request unpinned when the variable is unset', async () => {
+      delete process.env[PREVIEW_BYPASS_ENV];
       for (const send of [
         (fetchImpl: typeof fetch) =>
-          httpRequest('https://public.example/api/search', { timeoutMs: 1000, bypass, fetchImpl }),
+          httpRequest('https://tenjin.blog/api/search', { timeoutMs: 1000, fetchImpl }),
         (fetchImpl: typeof fetch) =>
-          fetchJson('https://public.example/api/search', { timeoutMs: 1000, bypass, fetchImpl }),
+          fetchJson('https://tenjin.blog/api/search', { timeoutMs: 1000, fetchImpl }),
       ]) {
         const { fetchImpl, calls } = recordingFetch(() => jsonResponse({ ok: true }));
         await send(fetchImpl);
@@ -886,25 +884,15 @@ describe('the team shelf bypass header', () => {
     });
   });
 
-  it('wins the slot on its own origin, and contributes nothing off it', async () => {
-    // The bypass is merged OVER the caller's headers, so on-origin the real
-    // secret replaces whatever a call site put in that slot; off-origin the rule
-    // adds nothing at all, and the caller's own header is the caller's business.
+  it('wins the slot over a caller header of the same name', async () => {
+    // The key is merged OVER the caller's headers, so a call site cannot spell it
+    // a second way and win the slot.
     const rec = recorder();
-    const planted = { [SHELF_BYPASS_HEADER]: 'planted' };
-    await httpRequest('https://team.example/api/search', {
+    await httpRequest('https://preview.example/api/search', {
       timeoutMs: 1000,
-      headers: planted,
-      bypass,
+      headers: { [PREVIEW_BYPASS_HEADER]: 'planted' },
       fetchImpl: rec.fetchImpl,
     });
-    await httpRequest('https://public.example/api/search', {
-      timeoutMs: 1000,
-      headers: planted,
-      bypass,
-      fetchImpl: rec.fetchImpl,
-    });
-    expect(rec.seen[0]?.[SHELF_BYPASS_HEADER]).toBe(SECRET);
-    expect(rec.seen[1]?.[SHELF_BYPASS_HEADER]).toBe('planted');
+    expect(rec.seen[0]?.[PREVIEW_BYPASS_HEADER]).toBe(SECRET);
   });
 });

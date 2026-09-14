@@ -159,9 +159,10 @@ function probeFetch(fetchImpl: typeof fetch | undefined, sink: (seen: Seen) => v
  * The search leg: ONE call, one or two sets.
  *
  * - `cfg.shelf !== null` and a signature: POST `/api/shelves/<slug>/search`
- *   with `includePublic` from `team.publicFallback`. Two sets, `team` and
- *   `public` (the latter empty when the server answered `public: null`, which
- *   is what both a `false` we sent and an org policy of off look like).
+ *   with `includePublic` from `team.publicFallback` unless the caller says
+ *   otherwise. Two sets, `team` and `public` — or one when `includePublic` is
+ *   false, and one when the server answered `public: null` anyway because the
+ *   org's policy is off, which the client deliberately cannot tell apart.
  * - no wallet: POST `/api/search`, unsigned. One `public` set, an ordinary
  *   valid configuration.
  * - a shelf is set and nothing local can sign: POST `/api/search`, unsigned,
@@ -177,10 +178,15 @@ export function searchLeg(
   opts: { includePublic?: boolean } = {},
   fetchImpl?: typeof fetch,
 ): Leg {
+  // Decided ONCE, here, because it is what the call will produce: the shelf
+  // route returns a public list only when this is true, so a round that says
+  // `includePublic: false` (the failure arm's) yields one set and declares one.
+  const includePublic = opts.includePublic ?? cfg.team.publicFallback === 'on';
+  const sets: Shelf[] =
+    cfg.shelf === null ? ['public'] : includePublic ? ['team', 'public'] : ['team'];
   return {
-    shelves: cfg.shelf !== null ? ['team', 'public'] : ['public'],
+    shelves: sets,
     async request(q, budgetMs, signal, deps): Promise<LegResult[]> {
-      const includePublic = opts.includePublic ?? cfg.team.publicFallback === 'on';
       const base = trimSlash(cfg.baseUrl);
       const publicBody = () =>
         buildSearchRequest({ question: q.text, limit: SEARCH_LIMIT, trigger, budgetMs });
@@ -197,7 +203,7 @@ export function searchLeg(
         });
         const auth = await deps.auth({ method: 'POST', url, body: JSON.stringify(body) });
         if (auth.kind === 'signed') {
-          return await callShelf(url, body, auth.headers, budgetMs, signal, fetchImpl);
+          return await callShelf(sets, url, body, auth.headers, budgetMs, signal, fetchImpl);
         }
         // `no-wallet` is not a failure and writes no error; `unauthenticated`
         // is, and the row says so while the answer still gets delivered.
@@ -266,6 +272,7 @@ export function keysLeg(cfg: KernelConfig, keys: string[], fetchImpl?: typeof fe
 
 /** The signed two-list call. */
 async function callShelf(
+  sets: Shelf[],
   url: string,
   body: unknown,
   headers: Record<string, string>,
@@ -299,7 +306,7 @@ async function callShelf(
     }
     return rows;
   } catch {
-    return failed(['team', 'public'], statusOf(seen, signal), {});
+    return failed(sets, statusOf(seen, signal), {});
   }
 }
 

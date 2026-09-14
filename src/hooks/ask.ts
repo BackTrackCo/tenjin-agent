@@ -119,11 +119,15 @@ export async function ask(ctx: FireContext, plan: Plan): Promise<AskResult> {
           ...(result.calibration !== undefined ? { calibration: result.calibration } : {}),
         };
         rows.push(row);
-        if (result.answer && better(best, result.answer)) {
-          best = result.answer;
+        // ONLY AN `ok` SET CAN ANSWER. A leg that failed has nothing the server
+        // vouched for, whatever it put in `answer`, and the row already says
+        // `no-answer`; letting one through here would deliver on a refusal.
+        const answer = result.status === 'ok' ? result.answer : null;
+        if (answer !== null && better(best, answer)) {
+          best = answer;
           bestRow = row;
         }
-        if (result.answer !== null) stageAnswered = true;
+        if (answer !== null) stageAnswered = true;
       }
     });
     if (stageAnswered) break;

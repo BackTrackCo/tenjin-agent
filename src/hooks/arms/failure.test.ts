@@ -4,7 +4,6 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { HookInput } from '../../adapters/types';
 import { nativeSessionOf } from '../../lib/session';
-import { PRODUCTION_ORIGIN } from '../../lib/production-origin';
 import { runFire } from '../fire';
 import { sigV1Test } from '../failure/test-identity';
 import { setMark } from '../gates';
@@ -31,7 +30,7 @@ import {
  */
 
 const TEAM = kernelConfig();
-const PUBLIC_ONLY: KernelConfig = { ...TEAM, baseUrl: PRODUCTION_ORIGIN };
+const NO_SHELF: KernelConfig = { ...TEAM, shelf: null };
 const SEARCH_ID = '11111111-1111-4111-8111-111111111111';
 const POST_ID = '22222222-2222-4222-8222-222222222222';
 
@@ -94,6 +93,7 @@ function deps(config: KernelConfig = TEAM, clock: () => number = () => NOW): Dep
     log: () => undefined,
     arms: [failureArm],
     adapters: {},
+    auth: () => Promise.resolve({ kind: 'signed', headers: {} }),
   };
 }
 
@@ -121,7 +121,7 @@ interface ShelfCall {
 
 /** A stubbed shelf that records every request's path and body and answers
  *  `hits` items on each call in turn (the last entry repeats). BOTH ROUNDS
- *  come through here: `/api/keys/resolve` in stage 0 and `/api/search` in
+ *  come through here: the shelf's `keys/resolve` in stage 0 and its `search` in
  *  stage 1, so a test can say which round asked what. */
 function shelf(hits: Array<Array<Record<string, unknown>>>): { calls: ShelfCall[] } {
   const calls: ShelfCall[] = [];
@@ -131,14 +131,19 @@ function shelf(hits: Array<Array<Record<string, unknown>>>): { calls: ShelfCall[
       body: (await new Request(String(input), init).json()) as ShelfCall['body'],
     });
     const items = hits[Math.min(calls.length, hits.length) - 1] ?? [];
+    const envelope = {
+      schemaVersion: 3,
+      searchId: SEARCH_ID,
+      calibration: 'key-v1',
+      items,
+      matched: items.length,
+    };
+    // The keys route answers the plain envelope; the shelf search route answers
+    // the two-list one, with `public: null` because the failure round sends
+    // `includePublic: false`.
+    const path = new URL(String(input)).pathname;
     return new Response(
-      JSON.stringify({
-        schemaVersion: 3,
-        searchId: SEARCH_ID,
-        calibration: 'key-v1',
-        items,
-        matched: items.length,
-      }),
+      JSON.stringify(path.endsWith('/search') ? { shelf: envelope, public: null } : envelope),
       { status: 200, headers: { 'content-type': 'application/json' } },
     );
   });
@@ -197,17 +202,17 @@ describe('the plan', () => {
     expect(await planOf(shell({ command: 'pnpm build', ok: false, stdout: totals }))).toBeNull();
   });
 
-  it('asks nothing at all without a team origin: both rounds go to a team shelf alone', async () => {
+  it('asks nothing at all with no shelf set: both rounds are the shelf’s alone', async () => {
     const plan = await planOf(
       shell({ command: 'pnpm db:migrate', ok: false, stderr: ENOENT }),
-      PUBLIC_ONLY,
+      NO_SHELF,
     );
     expect(plan).toBeNull();
   });
 
   it('asks the error line in words, keyed on its own text', async () => {
     const plan = await planOf(shell({ command: 'pnpm db:migrate', ok: false, stderr: ENOENT }));
-    expect(plan?.stages.map((s) => s.map((l) => l.shelf))).toEqual([['keys'], ['team']]);
+    expect(plan?.stages.map((s) => s.map((l) => l.shelves))).toEqual([[['keys']], [['team']]]);
     expect(plan?.question.text).toBe(
       "Error: ENOENT: no such file or directory, open 'drizzle.config.ts'",
     );
@@ -236,7 +241,7 @@ describe('the plan', () => {
     // And it is the SAME failure: colour must not fork the fingerprint, or one
     // teammate's note is filed under a key the next one never asks.
     expect(plan?.question.questionKey).toBe(plain?.question.questionKey);
-    expect(plan?.stages.map((s) => s.map((l) => l.shelf))).toEqual([['keys'], ['team']]);
+    expect(plan?.stages.map((s) => s.map((l) => l.shelves))).toEqual([[['keys']], [['team']]]);
   });
 
   it('reads a coloured diagnostic whose only marker is start-anchored', async () => {
@@ -267,7 +272,7 @@ describe('the plan', () => {
     const plan = await planOf(shell({ command: 'pnpm lint', ok: false, stderr: generic }));
     // No errno and no frame, so `sigV1` refuses it and there is no test
     // identity either: the keys leg has nothing to resolve and is not planned.
-    expect(plan?.stages.map((s) => s.map((l) => l.shelf))).toEqual([['team']]);
+    expect(plan?.stages.map((s) => s.map((l) => l.shelves))).toEqual([[['team']]]);
     expect(plan?.question.text).toBe('error: linting failed for the workspace');
     // Nothing but the line to key on, and the line hash alone is the key.
     expect(plan?.question.questionKey).toMatch(/^line:[0-9a-f]{32}$/);
@@ -286,7 +291,10 @@ describe('the plan', () => {
       shell({ command: 'pnpm test', ok: false, stderr: ENOENT, stdout: VITEST_FAIL }),
     );
     expect(row.reason).toBe('no-hit');
-    expect(calls.map((c) => c.path)).toEqual(['/api/keys/resolve', '/api/search']);
+    expect(calls.map((c) => c.path)).toEqual([
+      '/api/shelves/backtrack/keys/resolve',
+      '/api/shelves/backtrack/search',
+    ]);
     expect(keysOf(calls[0]!)).toEqual(['sig_v1', 'sig_v1_test']);
     // Both fingerprints, in the order the resolve sent them, then the line.
     expect(row.question_key).toMatch(
@@ -307,7 +315,7 @@ describe('the plan', () => {
       shell({ command: 'pnpm test', ok: false, stderr: ENOENT, stdout: VITEST_FAIL }),
     );
     expect(row.reason).toBe('hit');
-    expect(calls.map((c) => c.path)).toEqual(['/api/keys/resolve']);
+    expect(calls.map((c) => c.path)).toEqual(['/api/shelves/backtrack/keys/resolve']);
     // A key match is a team surface, so it is delivered under the team opener.
     expect(emit?.context).toContain(TEAM_OPENER);
   });
@@ -328,7 +336,7 @@ describe('the plan', () => {
     setMark(db, LEAD, 'bashstart', String(NOW - 2000), NOW - 2000);
     const totals = ' Test Files  1 failed (1)\n      Tests  2 failed (2)\n';
     const plan = await planOf(shell({ command: 'pnpm test', ok: false, stdout: totals }));
-    expect(plan?.stages.map((s) => s.map((l) => l.shelf))).toEqual([['keys']]);
+    expect(plan?.stages.map((s) => s.map((l) => l.shelves))).toEqual([[['keys']]]);
     expect(plan?.question.text).toBe('');
     // No line, so no line hash: the fingerprint alone is the key.
     expect(plan?.question.questionKey).toBe(
@@ -340,7 +348,7 @@ describe('the plan', () => {
 describe('what a failure asks with', () => {
   it("reads a test report only behind this call's own `bashstart` stamp", async () => {
     const { calls } = shelf([[]]);
-    const resolved = () => calls.filter((c) => c.path === '/api/keys/resolve');
+    const resolved = () => calls.filter((c) => c.path.endsWith('/keys/resolve'));
     // A report from an earlier run sits in the checkout, naming another file.
     writeFileSync(
       join(repo, '.vitest-report.json'),
@@ -390,10 +398,10 @@ describe('what a failure asks with', () => {
     const lineOf = (key: string | null) => String(key).split('|').pop();
     expect(lineOf(one.row.question_key)).toBe(lineOf(two.row.question_key));
     expect(calls.map((c) => c.path)).toEqual([
-      '/api/keys/resolve',
-      '/api/search',
-      '/api/keys/resolve',
-      '/api/search',
+      '/api/shelves/backtrack/keys/resolve',
+      '/api/shelves/backtrack/search',
+      '/api/shelves/backtrack/keys/resolve',
+      '/api/shelves/backtrack/search',
     ]);
   });
 

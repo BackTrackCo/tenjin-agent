@@ -4,7 +4,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { HookInput } from '../adapters/types';
-import { PRODUCTION_ORIGIN } from '../lib/production-origin';
 import { STARTED_MARK } from './actor';
 import { stopArm } from './arms/stop';
 import { subagentStopArm } from './arms/subagent-stop';
@@ -28,7 +27,7 @@ import type { Actor, Deps, KernelConfig } from './types';
  */
 
 const TEAM = kernelConfig();
-const PUBLIC_ONLY: KernelConfig = { ...TEAM, baseUrl: PRODUCTION_ORIGIN };
+const PUBLIC_ONLY: KernelConfig = { ...TEAM, shelf: null };
 const SEARCH_ID = '11111111-1111-4111-8111-111111111111';
 
 const dirs: string[] = [];
@@ -155,6 +154,7 @@ async function fire(db: LoopDb, input: HookInput, config: KernelConfig = TEAM, c
     log: () => undefined,
     arms: [subagentStopArm, stopArm],
     adapters: {},
+    auth: () => Promise.resolve({ kind: 'no-wallet' }),
   };
   const result = await runFire(input, deps);
   result.commit();
