@@ -4,6 +4,7 @@ import {
   buildOutcomeItem,
   getPostMetadata,
   postSearch,
+  postShelfSearch,
   postOutcomes,
   queryMax,
   DISPATCH_QUERY_MAX,
@@ -555,6 +556,108 @@ describe('postSearch', () => {
       fetchImpl: fetch,
     });
     expect((res.items[0] as Record<string, unknown>).futureField).toBe('keep me');
+  });
+});
+
+/**
+ * THE SHELF ROUTE'S WIRE. The slug is in the URL and nowhere in the body, the
+ * only new body field is `includePublic`, and the response is TWO independent
+ * lists rather than one merged one. Pinned here because this parser is what the
+ * whole one-call shape is built on: a server that flattened the envelope back to
+ * one list would otherwise fail at runtime rather than in CI.
+ */
+describe('the shelf search wire', () => {
+  const SHELF_RESULT = {
+    ...RESULT,
+    items: [{ ...(RESULT.items[0] as object), shelf: { id: 'sh_1', slug: 'backtrack' } }],
+  };
+  const PUBLIC_RESULT = {
+    ...RESULT,
+    searchId: '0197bbbb-cccc-dddd-eeee-ffffffffffff',
+    items: [{ ...(RESULT.items[0] as object), shelf: null }],
+  };
+
+  it('sends `includePublic` and NOT `shelf` or `scope`', () => {
+    const body = buildSearchRequest({ question: 'q', includePublic: true });
+    expect(body.includePublic).toBe(true);
+    expect(body).not.toHaveProperty('shelf');
+    expect(body).not.toHaveProperty('scope');
+    // Omitted entirely when the caller says nothing, which is what `/api/search`
+    // gets: it is public by construction and has no such field.
+    expect(buildSearchRequest({ question: 'q' })).not.toHaveProperty('includePublic');
+    expect(buildSearchRequest({ question: 'q', includePublic: false }).includePublic).toBe(false);
+  });
+
+  it('POSTs to /api/shelves/<slug>/search with the caller’s signed headers', async () => {
+    const { fetch, calls } = stubFetch(json(200, { shelf: SHELF_RESULT, public: PUBLIC_RESULT }));
+    const res = await postShelfSearch(
+      'backtrack',
+      buildSearchRequest({ question: 'q', includePublic: true }),
+      {
+        baseUrl: 'https://tenjin.blog',
+        timeoutMs: 5000,
+        fetchImpl: fetch,
+        headers: { 'Tenjin-Session-Delegation': 'stub' },
+      },
+    );
+    expect(calls[0]?.url).toBe('https://tenjin.blog/api/shelves/backtrack/search');
+    const headers = calls[0]?.init.headers as Record<string, string>;
+    expect(headers['tenjin-session-delegation']).toBe('stub');
+    expect(res.shelf.matched).toBe(1);
+    expect(res.public?.searchId).toBe(PUBLIC_RESULT.searchId);
+  });
+
+  it('parses `shelf` on a candidate, and null as the marketplace', async () => {
+    const { fetch } = stubFetch(json(200, { shelf: SHELF_RESULT, public: PUBLIC_RESULT }));
+    const res = await postShelfSearch('backtrack', buildSearchRequest({ question: 'q' }), {
+      baseUrl: 'https://tenjin.blog',
+      timeoutMs: 5000,
+      fetchImpl: fetch,
+    });
+    expect(res.shelf.items[0]?.shelf).toEqual({ id: 'sh_1', slug: 'backtrack' });
+    expect(res.public?.items[0]?.shelf).toBeNull();
+  });
+
+  it('accepts a null public list, which is the org policy and the toggle alike', async () => {
+    const { fetch } = stubFetch(json(200, { shelf: SHELF_RESULT, public: null }));
+    const res = await postShelfSearch('backtrack', buildSearchRequest({ question: 'q' }), {
+      baseUrl: 'https://tenjin.blog',
+      timeoutMs: 5000,
+      fetchImpl: fetch,
+    });
+    expect(res.public).toBeNull();
+  });
+
+  it('refuses a flattened one-list response as a contract mismatch', async () => {
+    const { fetch } = stubFetch(json(200, RESULT));
+    await expect(
+      postShelfSearch('backtrack', buildSearchRequest({ question: 'q' }), {
+        baseUrl: 'https://tenjin.blog',
+        timeoutMs: 5000,
+        fetchImpl: fetch,
+      }),
+    ).rejects.toMatchObject({ code: 'CONTRACT_MISMATCH' });
+  });
+
+  it('names the membership question on a 404, which the route cannot disambiguate', async () => {
+    const { fetch } = stubFetch(json(404, { error: 'not found' }));
+    const err = await postShelfSearch('backtrack', buildSearchRequest({ question: 'q' }), {
+      baseUrl: 'https://tenjin.blog',
+      timeoutMs: 5000,
+      fetchImpl: fetch,
+    }).catch((e: unknown) => e);
+    expect(String((err as Error).message)).toContain('not a member');
+    expect(String((err as { fix?: string }).fix)).toContain('tenjin org list');
+  });
+
+  it('names the signature on a 401', async () => {
+    const { fetch } = stubFetch(json(401, { error: 'unsigned' }));
+    const err = await postShelfSearch('backtrack', buildSearchRequest({ question: 'q' }), {
+      baseUrl: 'https://tenjin.blog',
+      timeoutMs: 5000,
+      fetchImpl: fetch,
+    }).catch((e: unknown) => e);
+    expect(String((err as Error).message)).toContain('not signed');
   });
 });
 

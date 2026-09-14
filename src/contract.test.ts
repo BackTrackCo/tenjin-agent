@@ -119,7 +119,7 @@ const READ_CARD_REQUIRED = [
  */
 interface PinnedOp {
   path: string;
-  method: 'get' | 'post' | 'put';
+  method: 'get' | 'post' | 'put' | 'patch' | 'delete';
   operationId: string;
   /** The state live advertises now. A change in EITHER direction is drift. */
   deprecated: boolean;
@@ -406,6 +406,152 @@ describe('contract fixture request shapes', () => {
 
   it('SearchOutcomeSubmit status enum is exactly the five CLI statuses', () => {
     assertOutcomeStatusEnum(fixtureDoc);
+  });
+});
+
+/**
+ * THE SHELF ROUTES, PINNED THE WAY `assertPublishContract` PINS `PostCreate`.
+ *
+ * These walks are written and exercised here; they are not yet run against the
+ * committed fixture, because `shelf-scope` is not deployed and this repo must
+ * not invent OpenAPI entries for a server half that does not exist. The tripwire
+ * below is what makes that a step rather than a hope: it asserts the fixture
+ * does NOT yet declare the shelf paths, so the moment somebody refreshes
+ * `src/fixtures/openapi.fixture.json` from the deployed `openapi.json` this
+ * suite goes red and the refresher has to delete the tripwire and call
+ * `assertShelfContract(fixtureDoc)` in its place.
+ *
+ * Pinned on both sides, because the RESPONSE is what this PR's parser is newly
+ * built on: a server that flattened the two-list envelope back to one list would
+ * otherwise fail at runtime rather than in CI.
+ */
+const SHELF_OPS: PinnedOp[] = [
+  {
+    path: '/api/shelves/{slug}/search',
+    method: 'post',
+    operationId: 'shelfSearch',
+    deprecated: false,
+    migration: 'a signed shelf search has no second path; the loop and `tenjin search` stop here',
+  },
+  {
+    path: '/api/shelves/{slug}/keys/resolve',
+    method: 'post',
+    operationId: 'shelfKeysResolve',
+    deprecated: false,
+    migration: "the failure arm's fingerprint round has no second path",
+  },
+  {
+    path: '/api/orgs/{slug}',
+    method: 'patch',
+    operationId: 'orgUpdate',
+    deprecated: false,
+    migration: '`tenjin org set public-search` has no second path',
+  },
+  {
+    path: '/api/orgs/{slug}/members',
+    method: 'post',
+    operationId: 'orgAddMember',
+    deprecated: false,
+    migration: '`tenjin org add` has no second path',
+  },
+  {
+    path: '/api/orgs/{slug}/members',
+    method: 'delete',
+    operationId: 'orgRemoveMember',
+    deprecated: false,
+    migration: '`tenjin org remove` has no second path',
+  },
+  {
+    path: '/api/shelves',
+    method: 'post',
+    operationId: 'shelfCreate',
+    deprecated: false,
+    migration: 'the bench creates shelves here; the CLI only lists',
+  },
+];
+
+export function assertShelfContract(doc: unknown): void {
+  for (const op of SHELF_OPS) assertPinnedOp(doc, op);
+
+  // THE REQUEST: the public search body plus `includePublic`, and NOT `shelf` or
+  // `scope`. The slug is in the URL, so nothing about it belongs in the body.
+  const search = get(
+    doc,
+    'paths',
+    '/api/shelves/{slug}/search',
+    'post',
+    'requestBody',
+    'content',
+    'application/json',
+    'schema',
+    'properties',
+  );
+  for (const field of ['schemaVersion', 'query', 'view', 'limit', 'includePublic']) {
+    expect(get(search, field), `shelf search request must declare ${field}`).toBeDefined();
+  }
+  expect(get(search, 'shelf'), 'the slug is in the URL, never in the body').toBeUndefined();
+  expect(get(search, 'scope'), 'there is no scope field on the wire').toBeUndefined();
+
+  // THE RESPONSE: two independent lists, the public one nullable.
+  const response = get(
+    doc,
+    'paths',
+    '/api/shelves/{slug}/search',
+    'post',
+    'responses',
+    '200',
+    'content',
+    'application/json',
+    'schema',
+    'properties',
+  );
+  expect(get(response, 'shelf'), 'the shelf list must be its own key').toBeDefined();
+  expect(get(response, 'public'), 'the public list must be its own key').toBeDefined();
+
+  // `{ member }` on both sides, which is what the two repos drifted on before.
+  for (const method of ['post', 'delete']) {
+    const members = get(
+      doc,
+      'paths',
+      '/api/orgs/{slug}/members',
+      method,
+      'requestBody',
+      'content',
+      'application/json',
+      'schema',
+      'properties',
+    );
+    expect(get(members, 'member'), `${method} members must take { member }`).toBeDefined();
+  }
+
+  const patch = get(
+    doc,
+    'paths',
+    '/api/orgs/{slug}',
+    'patch',
+    'requestBody',
+    'content',
+    'application/json',
+    'schema',
+    'properties',
+  );
+  expect(get(patch, 'publicSearch'), 'PATCH /api/orgs/{slug} takes { publicSearch }').toBeDefined();
+}
+
+describe('the shelf routes are pinned but not yet in the fixture', () => {
+  /**
+   * A TRIPWIRE, not a skip. A skipped test is a quiet one; this is an assertion
+   * that is true today and becomes false in exactly the act that makes the pins
+   * runnable, so the fixture refresh cannot land without turning them on.
+   */
+  it('FOLLOW-UP: refresh the fixture after shelf-scope deploys, then turn these pins on', () => {
+    expect(
+      get(fixtureDoc, 'paths', '/api/shelves/{slug}/search'),
+      'the fixture now declares the shelf routes: delete this test and call assertShelfContract(fixtureDoc) instead',
+    ).toBeUndefined();
+    // The walks themselves are exercised against a hand-built document, so they
+    // are working code rather than a plan the refresher has to finish writing.
+    expect(() => assertShelfContract(fixtureDoc)).toThrow(/gone from the spec/);
   });
 });
 
