@@ -1,0 +1,51 @@
+{
+  "benchmark_version": "bench1-fake-0",
+  "schema_version": 1,
+  "harness": "claude",
+  "seed": 7,
+  "repeats": 1,
+  "pins": {
+    "model": "fake-model-0",
+    "harness_version": "0.0.0",
+    "effort": "default",
+    "image": "none",
+    "dependency_lock_hash": "sha256:none",
+    "permission_mode": "default",
+    "wall_clock_s": 30,
+    "turn_budget": 4
+  },
+  "price_sheet_version": "fake-2026-09",
+  "phases": {
+    "producer": "none",
+    "capture": "none",
+    "consumer": "fake"
+  },
+  "tasks": [
+    {
+      "id": "answer-file",
+      "family": "fake",
+      "transfer_distance": "none",
+      "fixture": "repo",
+      "fixture_hash": "sha256:6998c67be9267b08089ffd7a98d01e961987efc3ba1cbaec68b79f3a7782e768",
+      "verifier": "fake_answer_file"
+    }
+  ],
+  "arms": [
+    {
+      "id": "off",
+      "auxiliary_usage": "none",
+      "executor": "fake",
+      "product_version": "none",
+      "settings_hash": "sha256:off",
+      "memory_snapshot_hash": "sha256:empty"
+    },
+    {
+      "id": "on",
+      "auxiliary_usage": "none",
+      "executor": "fake",
+      "product_version": "none",
+      "settings_hash": "sha256:on",
+      "memory_snapshot_hash": "sha256:empty"
+    }
+  ]
+}
