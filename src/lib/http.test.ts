@@ -6,6 +6,7 @@ import {
   previewBypassHeaders,
   PREVIEW_BYPASS_ENV,
   PREVIEW_BYPASS_HEADER,
+  PREVIEW_ORIGIN_ENV,
 } from './http';
 import { SIWX_HEADER } from './siwx';
 import { CliError } from './errors';
@@ -458,6 +459,7 @@ describe('httpRequest, signed requests never follow redirects', () => {
   // process-wide; cleared here so it cannot leak into the unsigned cases.
   afterEach(() => {
     delete process.env[PREVIEW_BYPASS_ENV];
+    delete process.env[PREVIEW_ORIGIN_ENV];
   });
 
   /** Records the init `httpRequest` passed to fetch, so the redirect mode is assertable. */
@@ -496,6 +498,7 @@ describe('httpRequest, signed requests never follow redirects', () => {
   ])('reports the off-host signal for %s', async (_label, location, expected) => {
     const fetchImpl: typeof fetch = async () => redirect(302, location as string);
     process.env[PREVIEW_BYPASS_ENV] = 'preview-secret';
+    process.env[PREVIEW_ORIGIN_ENV] = 'https://shelf.example';
     const res = await fetchJson('https://shelf.example/openapi.json', {
       timeoutMs: 1000,
       fetchImpl,
@@ -507,6 +510,7 @@ describe('httpRequest, signed requests never follow redirects', () => {
   it('claims nothing about the host when the redirect carries no Location', async () => {
     const fetchImpl: typeof fetch = async () => new Response('', { status: 302 });
     process.env[PREVIEW_BYPASS_ENV] = 'preview-secret';
+    process.env[PREVIEW_ORIGIN_ENV] = 'https://shelf.example';
     const res = await fetchJson('https://shelf.example/openapi.json', {
       timeoutMs: 1000,
       fetchImpl,
@@ -518,6 +522,7 @@ describe('httpRequest, signed requests never follow redirects', () => {
   it('claims nothing about the host when the Location cannot be parsed', async () => {
     const fetchImpl: typeof fetch = async () => redirect(302, 'http://[not a url');
     process.env[PREVIEW_BYPASS_ENV] = 'preview-secret';
+    process.env[PREVIEW_ORIGIN_ENV] = 'https://shelf.example';
     const res = await fetchJson('https://shelf.example/openapi.json', {
       timeoutMs: 1000,
       fetchImpl,
@@ -771,15 +776,24 @@ describe('a caller header the Headers API rejects is a returned failure, not a t
  * more: a shelf is a row on production, so the only thing left that needs this is
  * a PREVIEW deployment behind Vercel Deployment Protection. It is read once, in
  * the transport, from `TENJIN_PREVIEW_BYPASS`, never persisted and never printed.
+ *
+ * AND IT IS PINNED TO ONE ORIGIN. The environment carries the value; the
+ * environment also says where it may go (`TENJIN_PREVIEW_ORIGIN`, or the base
+ * URL the run was pointed at). Every other host gets nothing, whatever the call
+ * site believed: `tenjin pay <url>` probes a URL an agent chose, and a bare
+ * environment secret would be handed to it.
  */
 describe('the preview bypass header', () => {
   const SECRET = 'preview-secret-abc123';
+  const PREVIEW = 'https://preview.example';
 
   beforeEach(() => {
     process.env[PREVIEW_BYPASS_ENV] = SECRET;
+    process.env[PREVIEW_ORIGIN_ENV] = PREVIEW;
   });
   afterEach(() => {
     delete process.env[PREVIEW_BYPASS_ENV];
+    delete process.env[PREVIEW_ORIGIN_ENV];
   });
 
   function recorder(): { fetchImpl: typeof fetch; seen: Array<Record<string, string>> } {
@@ -791,7 +805,7 @@ describe('the preview bypass header', () => {
     return { fetchImpl, seen };
   }
 
-  it('rides every request while the variable is set, through both transports', async () => {
+  it('rides the pinned origin and NO other host, through both transports', async () => {
     for (const send of [
       (url: string, o: { fetchImpl: typeof fetch }) =>
         fetchJson(url, { timeoutMs: 1000, fetchImpl: o.fetchImpl }),
@@ -799,18 +813,52 @@ describe('the preview bypass header', () => {
         httpRequest(url, { timeoutMs: 1000, fetchImpl: o.fetchImpl }),
     ]) {
       const rec = recorder();
-      await send('https://preview.example/api/search', rec);
+      await send(`${PREVIEW}/api/search`, rec);
+      // The marketplace, and a host an agent could name through `tenjin pay`.
       await send('https://tenjin.blog/api/search', rec);
-      expect(rec.seen.map((h) => h[PREVIEW_BYPASS_HEADER])).toEqual([SECRET, SECRET]);
+      await send('https://attacker.example/x402', rec);
+      expect(rec.seen.map((h) => h[PREVIEW_BYPASS_HEADER])).toEqual([SECRET, undefined, undefined]);
     }
   });
 
   it('sends nothing when the variable is unset or empty', () => {
-    expect(previewBypassHeaders({})).toEqual({});
-    expect(previewBypassHeaders({ [PREVIEW_BYPASS_ENV]: '' })).toEqual({});
-    expect(previewBypassHeaders({ [PREVIEW_BYPASS_ENV]: SECRET })).toEqual({
-      [PREVIEW_BYPASS_HEADER]: SECRET,
-    });
+    const url = `${PREVIEW}/api/search`;
+    expect(previewBypassHeaders(url, {})).toEqual({});
+    expect(previewBypassHeaders(url, { [PREVIEW_BYPASS_ENV]: '' })).toEqual({});
+    expect(
+      previewBypassHeaders(url, {
+        [PREVIEW_BYPASS_ENV]: SECRET,
+        [PREVIEW_ORIGIN_ENV]: PREVIEW,
+      }),
+    ).toEqual({ [PREVIEW_BYPASS_HEADER]: SECRET });
+  });
+
+  /** The whole point of the pin: the secret is not a fact about the process, it
+   *  is a fact about one deployment. */
+  it('sends nothing to another origin, and nothing at all with no origin named', () => {
+    const withPin = { [PREVIEW_BYPASS_ENV]: SECRET, [PREVIEW_ORIGIN_ENV]: PREVIEW };
+    expect(previewBypassHeaders('https://attacker.example/x', withPin)).toEqual({});
+    expect(previewBypassHeaders('not a url', withPin)).toEqual({});
+    expect(previewBypassHeaders(`${PREVIEW}/x`, { [PREVIEW_BYPASS_ENV]: SECRET })).toEqual({});
+    // An unparseable pin names a host the operator got wrong; it does not fall
+    // through to the base URL.
+    expect(
+      previewBypassHeaders(`${PREVIEW}/x`, {
+        [PREVIEW_BYPASS_ENV]: SECRET,
+        [PREVIEW_ORIGIN_ENV]: 'not a url',
+        TENJIN_BASE_URL: PREVIEW,
+      }),
+    ).toEqual({});
+  });
+
+  /** The bench points a run with TENJIN_BASE_URL and one secret; that is enough. */
+  it('falls back to the base URL the run was pointed at', () => {
+    expect(
+      previewBypassHeaders(`${PREVIEW}/api/search`, {
+        [PREVIEW_BYPASS_ENV]: SECRET,
+        TENJIN_BASE_URL: `${PREVIEW}/`,
+      }),
+    ).toEqual({ [PREVIEW_BYPASS_HEADER]: SECRET });
   });
 
   /**
@@ -871,6 +919,7 @@ describe('the preview bypass header', () => {
 
     it('leaves an ordinary request unpinned when the variable is unset', async () => {
       delete process.env[PREVIEW_BYPASS_ENV];
+      delete process.env[PREVIEW_ORIGIN_ENV];
       for (const send of [
         (fetchImpl: typeof fetch) =>
           httpRequest('https://tenjin.blog/api/search', { timeoutMs: 1000, fetchImpl }),

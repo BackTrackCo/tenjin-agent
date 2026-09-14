@@ -44,12 +44,64 @@ export const PREVIEW_BYPASS_HEADER = 'x-vercel-protection-bypass';
 /** The environment variable that carries it. Read per request, once, here. */
 export const PREVIEW_BYPASS_ENV = 'TENJIN_PREVIEW_BYPASS';
 
-/** The preview-bypass header for this process's environment, or nothing.
- *  Exported for the hook-script mirror test and for doctor's "preview bypass:
- *  set" line, which reports presence and never the value. */
-export function previewBypassHeaders(env: NodeJS.ProcessEnv = process.env): Record<string, string> {
+/**
+ * The origin the key belongs to, named by the operator for this run.
+ *
+ * THE ORIGIN IS PART OF THE VALUE. The key is a door key for one deployment and
+ * disclosing it is the whole harm, so it must never ride to a host that is
+ * merely the URL of the moment: `tenjin pay <url>` takes a URL an agent chose,
+ * `tenjin buy` follows a candidate's own link, and a bare environment secret
+ * would be handed to either. The compare is done here, off the REQUEST URL, so
+ * no call site decides whether this request is "the preview one" and none can
+ * get it wrong.
+ *
+ * `TENJIN_PREVIEW_ORIGIN` names it outright; `TENJIN_BASE_URL` is the fallback,
+ * because a run pointed at a preview by the environment has already said where
+ * it is going. Neither set means the key rides nowhere, which is the safe
+ * direction: doctor says so by name.
+ */
+export const PREVIEW_ORIGIN_ENV = 'TENJIN_PREVIEW_ORIGIN';
+
+/** The one origin the preview key may be sent to, or null for none. */
+export function previewBypassPin(env: NodeJS.ProcessEnv = process.env): string | null {
+  for (const key of [PREVIEW_ORIGIN_ENV, 'TENJIN_BASE_URL']) {
+    const raw = env[key];
+    if (typeof raw !== 'string' || raw.length === 0) continue;
+    try {
+      return new URL(raw).origin;
+    } catch {
+      // A named pin that does not parse is not a reason to fall through to the
+      // next candidate: the operator named a host and got it wrong, and sending
+      // the key somewhere else is the one outcome nobody asked for.
+      return null;
+    }
+  }
+  return null;
+}
+
+/** Is the key set at all? Doctor reports presence and never the value. */
+export function previewBypassSet(env: NodeJS.ProcessEnv = process.env): boolean {
+  const secret = env[PREVIEW_BYPASS_ENV];
+  return typeof secret === 'string' && secret.length > 0;
+}
+
+/** The preview-bypass header for `url`, or nothing. Exported for the hook-script
+ *  mirror test and for doctor's "preview bypass" line. */
+export function previewBypassHeaders(
+  url: string,
+  env: NodeJS.ProcessEnv = process.env,
+): Record<string, string> {
   const secret = env[PREVIEW_BYPASS_ENV];
   if (typeof secret !== 'string' || secret.length === 0) return {};
+  const pin = previewBypassPin(env);
+  if (pin === null) return {};
+  let origin: string;
+  try {
+    origin = new URL(url).origin;
+  } catch {
+    return {};
+  }
+  if (origin !== pin) return {};
   return { [PREVIEW_BYPASS_HEADER]: secret };
 }
 
@@ -243,7 +295,7 @@ export async function fetchJson(url: string, opts: FetchJsonOptions): Promise<Fe
     let pinned = false;
     try {
       const headers = withUserAgent(
-        { ...opts.headers, ...previewBypassHeaders() },
+        { ...opts.headers, ...previewBypassHeaders(url) },
         opts.callerUserAgent,
       );
       // fetchJson sends no signed material — doctor's probes and the contract
@@ -420,7 +472,7 @@ function prepareRequest(url: string, opts: HttpRequestOptions): PreparedRequest 
     let body: string | undefined;
     // The preview key rides in with the caller's headers rather than being set
     // after them, so a caller cannot spell it a second way and win the slot.
-    const merged = new Headers({ ...opts.headers, ...previewBypassHeaders() });
+    const merged = new Headers({ ...opts.headers, ...previewBypassHeaders(url) });
     if (opts.jsonBody !== undefined) {
       body = JSON.stringify(opts.jsonBody);
       merged.set('content-type', 'application/json');

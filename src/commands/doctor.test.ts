@@ -524,14 +524,28 @@ describe('runDoctor — passing outcomes', () => {
       }
     });
 
-    it('reports the preview key as present, and never its value', async () => {
+    it('reports the preview key as present with the origin it rides to, never its value', async () => {
       const SECRET = 'preview-secret-abc123';
-      const res = await run({ baseUrl: TEAM }, { TENJIN_PREVIEW_BYPASS: SECRET });
+      const res = await run(
+        { baseUrl: TEAM },
+        { TENJIN_PREVIEW_BYPASS: SECRET, TENJIN_PREVIEW_ORIGIN: TEAM },
+      );
       const check = checkNamed(res, 'preview bypass');
       expect(check?.status).toBe('ok');
       expect(check?.required).toBe(false);
       expect(check?.detail).toContain('set');
+      expect(check?.detail).toContain(new URL(TEAM).origin);
       expect(JSON.stringify(res.data)).not.toContain(SECRET);
+    });
+
+    /** A key with nowhere to go looks armed and reaches nothing, which is the
+     *  state a silent line would leave a preview tester guessing about. */
+    it('warns when the preview key is set but no origin is named for it', async () => {
+      const res = await run({ baseUrl: TEAM }, { TENJIN_PREVIEW_BYPASS: 'preview-secret-abc123' });
+      const check = checkNamed(res, 'preview bypass');
+      expect(check?.status).toBe('warn');
+      expect(check?.detail).toContain('no origin');
+      expect(check?.fix).toContain('TENJIN_PREVIEW_ORIGIN');
     });
 
     it('says nothing about a preview key on a machine that has none', async () => {
@@ -650,6 +664,7 @@ describe('runDoctor — required failures throw the mapped CliError', () => {
       JSON.stringify({ baseUrl: 'https://backtrack.tenjin.sh', shelf: 'backtrack' }),
     );
     process.env.TENJIN_PREVIEW_BYPASS = 'preview-secret';
+    process.env.TENJIN_PREVIEW_ORIGIN = 'https://backtrack.tenjin.sh';
     try {
       const err = await catchDoctor(
         routeFetch({
@@ -669,6 +684,7 @@ describe('runDoctor — required failures throw the mapped CliError', () => {
       expect(check.fix).not.toContain('shelfBypassSecret');
     } finally {
       delete process.env.TENJIN_PREVIEW_BYPASS;
+      delete process.env.TENJIN_PREVIEW_ORIGIN;
     }
   });
 

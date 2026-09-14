@@ -30,7 +30,13 @@ import {
 import { skillMaterialize } from '../lib/skill-materialize';
 import type { HarnessWiring, NotInvocableReason } from '../lib/skill-wiring';
 import type { Harness, HarnessAdapter } from '../adapters/types';
-import { fetchJson, previewBypassHeaders, type FetchJsonFailure } from '../lib/http';
+import {
+  fetchJson,
+  previewBypassPin,
+  previewBypassSet,
+  PREVIEW_ORIGIN_ENV,
+  type FetchJsonFailure,
+} from '../lib/http';
 import { loadRawConfig, resolveGrantDeclined, resolveSettings } from '../lib/config';
 import { loadProjectConfig } from '../lib/settings';
 import { searchHeaders } from '../lib/search-auth';
@@ -1081,17 +1087,33 @@ function fixFor(home: string, dirs: HarnessWiring[]): string {
  *
  * `TENJIN_PREVIEW_BYPASS` is the one way a CLI or daemon request reaches a
  * PREVIEW deployment behind Vercel Deployment Protection: nothing about ordinary
- * use needs it, because a shelf is a row on production. Presence is the whole
- * report; the value is never printed and never persisted.
+ * use needs it, because a shelf is a row on production. Presence and the origin
+ * it is pinned to are the whole report; the value is never printed and never
+ * persisted.
  */
 function checkPreviewBypass(env: NodeJS.ProcessEnv): BuiltCheck | null {
-  if (Object.keys(previewBypassHeaders(env)).length === 0) return null;
+  if (!previewBypassSet(env)) return null;
+  const pin = previewBypassPin(env);
+  // A key with no origin to ride to is the one state worth a line of its own:
+  // it is set, it looks armed, and it reaches nothing. Silence there would read
+  // as "the preview is just refusing me".
+  if (pin === null) {
+    return {
+      result: {
+        name: 'preview bypass',
+        status: 'warn',
+        required: false,
+        detail: 'set, but no origin is named for it, so no request carries it',
+        fix: `Set ${PREVIEW_ORIGIN_ENV} (or TENJIN_BASE_URL) to the preview deployment's origin.`,
+      },
+    };
+  }
   return {
     result: {
       name: 'preview bypass',
       status: 'ok',
       required: false,
-      detail: 'set: requests carry the Vercel protection-bypass header',
+      detail: `set: requests to ${sanitizeForTerminal(pin)} carry the Vercel protection-bypass header`,
     },
   };
 }

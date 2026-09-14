@@ -6,7 +6,7 @@ import { runProfileSet, runProfileShow, type ProfileDeps } from './profile';
 import { runStats } from './stats';
 import { testSigner } from '../lib/read-test-utils';
 import { CliError } from '../lib/errors';
-import { PREVIEW_BYPASS_ENV, PREVIEW_BYPASS_HEADER } from '../lib/http';
+import { PREVIEW_BYPASS_ENV, PREVIEW_BYPASS_HEADER, PREVIEW_ORIGIN_ENV } from '../lib/http';
 import type { WalletProvider } from '../lib/wallet';
 import type { CommandContext } from '../context';
 
@@ -337,9 +337,10 @@ describe('team shelf', () => {
       JSON.stringify({ baseUrl: 'https://team.example', shelf: 'backtrack' }),
     );
     // The only thing left that sends this header: a PREVIEW deployment behind
-    // Vercel Deployment Protection. It is environment-only and rides every
-    // request while it is set, which is what the bench needs.
+    // Vercel Deployment Protection. It is environment-only and rides the one
+    // origin the environment pinned it to, which is what the bench needs.
     process.env[PREVIEW_BYPASS_ENV] = 'preview-123';
+    process.env[PREVIEW_ORIGIN_ENV] = 'https://team.example';
     const s = stub((c) =>
       c.url.endsWith('/stats')
         ? json(200, { earningsThisMonth: '0', readsThisMonth: 0, glancesThisMonth: 0 })
@@ -354,5 +355,6 @@ describe('team shelf', () => {
       expect(c.headers[PREVIEW_BYPASS_HEADER]).toBe('preview-123');
     }
     delete process.env[PREVIEW_BYPASS_ENV];
+    delete process.env[PREVIEW_ORIGIN_ENV];
   });
 });
