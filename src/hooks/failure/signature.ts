@@ -298,6 +298,26 @@ export function isAggregateLine(line: string): boolean {
  *  these is a DIFFERENT failure, so a scan stops there. */
 const RUNNER_HEADER_RE =
   /^\s{0,4}(?:FAIL\b|PASS\b|ok\b|not ok\b|●|✓|✔|✗|✘|×|✖|❯|---|===|failures:)/;
+/**
+ * vitest spends its `❯` twice: on the file summary that OPENS a run's report
+ * (` ❯ test/x.test.ts (5 tests | 1 failed) 63ms`) and on every source pointer
+ * INSIDE a failure's stack (` ❯ test/x.test.ts:131:26`). Only the first opens a
+ * block. Read as a header, the pointer walls the ` FAIL  file > suite > test`
+ * line and the `AssertionError:` under it off from the totals row below, so
+ * every vitest failure in default reporter output keyed nothing at all.
+ *
+ * The remainder is the whole discriminator: a bare `file:line[:col]` and
+ * nothing after it is a frame; the summary form carries its counts past the
+ * name, across a space this cannot cross.
+ */
+const RUNNER_POINTER_RE = /^\s{0,4}❯\s*\S+\.[A-Za-z]{1,5}:\d+(?::\d+)?\s*$/;
+
+/** Whether a line OPENS a per-failure block, for the block walk: header-shaped,
+ *  not a stack pointer wearing a header's glyph, and not a totals row however
+ *  header-shaped (go's bare `FAIL`). */
+function isRunnerHeader(raw: string): boolean {
+  return RUNNER_HEADER_RE.test(raw) && !RUNNER_POINTER_RE.test(raw) && !isAggregateLine(raw.trim());
+}
 /** How far a block may extend either way from its marker line. */
 const BLOCK_SCAN_MAX = 60;
 /** How far up the output the marker scan looks: the tail is where a runner
@@ -317,7 +337,7 @@ function blockStart(lines: string[], at: number): number {
   let start = at;
   for (let j = at - 1; j >= 0 && at - j <= BLOCK_SCAN_MAX; j -= 1) {
     const raw = lines[j] ?? '';
-    if (RUNNER_HEADER_RE.test(raw) && !isAggregateLine(raw.trim())) return j;
+    if (isRunnerHeader(raw)) return j;
     if (isBlank(lines, j) && (j === 0 || isBlank(lines, j - 1))) return start;
     start = j;
   }
@@ -331,7 +351,7 @@ function blockEnd(lines: string[], at: number): number {
   let end = at;
   for (let j = at + 1; j < lines.length && j - at <= BLOCK_SCAN_MAX; j += 1) {
     const raw = lines[j] ?? '';
-    if (RUNNER_HEADER_RE.test(raw) && !isAggregateLine(raw.trim())) return end;
+    if (isRunnerHeader(raw)) return end;
     if (isBlank(lines, j) && (j + 1 >= lines.length || isBlank(lines, j + 1))) return end;
     end = j;
   }
@@ -368,7 +388,7 @@ function precedingFailureBlock(lines: string[], totalsStart: number): [number, n
   if (j < 0) return null;
   const start = blockStart(lines, j);
   const header = lines[start] ?? '';
-  if (!RUNNER_HEADER_RE.test(header) || isAggregateLine(header.trim())) return null;
+  if (!isRunnerHeader(header)) return null;
   return [start, j];
 }
 

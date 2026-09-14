@@ -251,6 +251,66 @@ describe('the error line', () => {
     expect(sigV1(found?.line ?? '', found?.block ?? '')).toBeNull();
   });
 
+  // vitest's default reporter, verbatim from a real run. Its `❯` is spent
+  // twice: on the file summary at the top and on the source pointer inside the
+  // stack. Reading the pointer as a header stopped the hop from the totals row
+  // one block short, and three real failures in a row keyed nothing.
+  const VITEST_DEFAULT_REPORTER = [
+    ' ❯ test/session.test.ts (5 tests | 1 failed) 63ms',
+    '     × renews session, restarting the maxAge window without touching id/data 28ms',
+    '',
+    '⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯',
+    '',
+    ' FAIL  test/session.test.ts > session > renews session, restarting the maxAge window without touching id/data',
+    'AssertionError: expected { Object (session) } to match object { Object (session) }',
+    '',
+    '- Expected',
+    '+ Received',
+    '',
+    '  {',
+    '    "session": {',
+    '      "data": {',
+    '        "foo": "bar",',
+    '      },',
+    '-     "id": "1",',
+    '+     "id": "2",',
+    '    },',
+    '  }',
+    '',
+    ' ❯ test/session.test.ts:131:26',
+    '    129|       .set("Cookie", initialCookie)',
+    '    130|       .set("x-renew", "1");',
+    '    131|     expect(renewed.body).toMatchObject({',
+    '       |                          ^',
+    '    132|       session: { id: "1", data: { foo: "bar" } },',
+    '    133|     });',
+    '',
+    '⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯',
+    '',
+    '',
+    ' Test Files  1 failed (1)',
+    '      Tests  1 failed | 4 passed (5)',
+    'Type Errors  no errors',
+    '   Start at  14:21:56',
+    '   Duration  598ms (transform 235ms, setup 48ms, import 344ms, tests 63ms, environment 0ms)',
+    '',
+  ].join('\n');
+
+  it('reads through a vitest stack pointer to the assertion above it', () => {
+    const found = errorLine(VITEST_DEFAULT_REPORTER);
+    expect(found?.line).toBe(
+      'AssertionError: expected { Object (session) } to match object { Object (session) }',
+    );
+    // The pointer belongs to this failure, so it stays INSIDE the block, which
+    // is where the key gets its frame: without it there is no key at all.
+    expect(found?.block).toContain('test/session.test.ts:131:26');
+    expect(sigV1(found?.line ?? '', found?.block ?? '')?.key).toMatch(HEX16);
+    // The summary line wears the same glyph and still opens a block, so the
+    // block starts at the FAIL header and reaches no further up.
+    expect(found?.block.startsWith(' FAIL  test/session.test.ts >')).toBe(true);
+    expect(found?.block).not.toContain('5 tests | 1 failed');
+  });
+
   it('is silent on output with no marker at all', () => {
     expect(errorLine('all 12 tests passed\n')).toBeNull();
   });
