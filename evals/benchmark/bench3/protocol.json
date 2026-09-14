@@ -1,0 +1,122 @@
+{
+  "schema": "bench3.protocol.v1",
+  "status": "oracle-v5-dependency-corrected-cohort-preparation",
+  "model_admission": true,
+  "population": {
+    "window_start": "2026-08-15T00:00:00Z",
+    "window_end_exclusive": "2026-09-12T00:00:00Z",
+    "repositories": ["BackTrackCo/tenjin", "BackTrackCo/tenjin-agent"],
+    "frame_sha256": "0eb021ae2ed1d698af4defe1e69edac2263c7518d15dcd03e80f8100144f7dfc",
+    "frame_candidates": 169,
+    "proposed_runtime_candidates": 99,
+    "coverage_gaps": 70,
+    "claim": "Historical product runtime engineering in two repositories and this window. Not all team work.",
+    "excluded_work_types": [
+      "automation/workflow execution",
+      "dependency and release-only changes",
+      "authored prose or policy",
+      "tests/evals only",
+      "behavior-preserving refactors"
+    ],
+    "unobserved_work": ["unmerged or abandoned work", "general research", "reviews"],
+    "eligibility": "Independent solvability, full original runtime work order, pinned before/after source, synthetic/inert dependencies, hidden behavioral failure before and success after. A difficult task or missing verifier is not an exclusion.",
+    "work_order_disclosure": "Tasks use retrospectively reconstructed historical work orders, not recovered original user prompts. Each work order combines the PR\u2019s stated requirements with explicitly identified requirements reconstructed from its final historical source. Original descriptions sometimes became stale during review. Sampling remains fixed independently of treatment outcomes.",
+    "compatibility_constraints": "Four earlier producer tasks declare new callable interfaces for independent testing. This pilot evaluates implementation under those interfaces, not unconstrained architecture selection."
+  },
+  "sampling": {
+    "seed": "bench3-workload-2026-08-15_2026-09-12-v1",
+    "implementation": "Bench-1 workload.assign",
+    "allocation": "First two ranked candidates per repository, from distinct correlation clusters; proof queue only until admission.",
+    "proof_queue": ["tenjin#740", "tenjin#674", "tenjin-agent#256", "tenjin-agent#170"],
+    "assignments": {
+      "pilot_proof_required": 4,
+      "pilot_cluster_reserve": 15,
+      "locked_reserve": 80,
+      "out_of_scope": 70
+    },
+    "replacement": "No replacement because a candidate is difficult, expensive, lacks transfer, or performs poorly. Publish any objective exclusion before choosing the next rank.",
+    "locked_protection": "Exclude entire pilot correlation clusters from the locked reserve. Do not inspect locked model outcomes while changing tasks, corpus, prompts, or settings.",
+    "weights": "Pilot is diagnostic and task-equal. Freeze final workload weights and cluster bootstrap before locked treatment; the two repositories are 40/99 and 59/99 of the proposed runtime frame."
+  },
+  "pilot": {
+    "consumers": 4,
+    "repeats": 3,
+    "arms": ["off", "flat", "tenjin_seeded", "tenjin_natural"],
+    "consumer_attempts": 48,
+    "natural_producer_attempts": 12,
+    "order": "Deterministic balanced treatment order through the shared scheduler, same task/model/harness/limits across arms.",
+    "purpose": "Validate full task scope, capture/publication/delivery, failure accounting, runtime and precision. No publishable team effect or quality noninferiority claim from this pilot.",
+    "quality_margin": "Freeze after pilot calibration and before any locked treatment; none asserted by the pilot.",
+    "final_sample_size": "Freeze from pilot precision and feasibility before locked outcomes; repeats never count as independent task families.",
+    "concurrency": {
+      "workers": 2,
+      "shelf": "One provisioned producer/consumer/publication/cleanup chain exclusively owns the remote shelf; control and flat work may overlap it.",
+      "auth": "Run-owned access-only ChatGPT snapshot; per-worker native profiles; no shared refresh grant in workers."
+    }
+  },
+  "treatments": {
+    "off": "No memory product and no injected prior lessons.",
+    "flat": "Read the same approved, version-bound prior lesson bodies as seeded, including the same distractors, from LESSONS.md.",
+    "tenjin_seeded": "Publish those same prior bodies free on the isolated benchmark team shelf; use product hooks and normal public fallback.",
+    "tenjin_natural": "Run the independently verified earlier task with natural capture, then let the benchmark host publish only its captured drafts. Seed only the frozen background distractors. A fresh consumer starts from its own before revision.",
+    "publication": "Host-assisted publication, explicitly labeled. No publishing wallet is mounted into task containers. Publication, body delivery and useful reuse are separate observations.",
+    "producer_failure": "continue_unpublished: retain ordinary failed/capped producer outcome and all observed cost, run consumer, and do not host-publish its drafts. Local captures may remain. Measurement/containment failures still invalidate.",
+    "empty_capture": "A valid producer that captures no usable finding remains a product outcome, not an exclusion."
+  },
+  "knowledge": {
+    "cutoff": "Earlier of original task creation and first observed implementation; not a claim to know the exact task-start time. Every body requires a pre-cutoff source version.",
+    "seed_kind": "Retrospectively curated from earlier source evidence, labeled separately from naturally captured findings.",
+    "identity": "Manifest binds corpus directory and exact body hashes; every consumer records available lesson IDs and versions. Publication nonces/IDs are separate.",
+    "distractors": "Plausible wrong-topic and stale/version-inapplicable pieces, sourced from the same sanitized workload distribution and labeled before treatment. Do not manufacture an applicable answer or a no-knowledge case.",
+    "future_leakage": "Never seed the consumer solution, post-cutoff lessons, hidden verifier, or any scored consumer output into a later consumer.",
+    "public_fallback": "On for the product-default experiment. Attribute public results separately; the live public corpus limits exact reproduction. A no-public diagnostic has its own name."
+  },
+  "measurement": {
+    "primary": [
+      "Raw system tokens per verified consumer completion, including incremental capture at reuse 1",
+      "Measured consumer agent seconds per verified completion, including tools and hooks",
+      "Hidden-verifier completion rate"
+    ],
+    "secondary": [
+      "Complete producer-plus-capture-plus-consumer cost per verified consumer",
+      "Capture amortization at reuse 2/5/10",
+      "Paired completion time conditional on both arms succeeding"
+    ],
+    "failures": "Include all scored failed, capped and interrupted work in numerators. Keep zero-success tasks explicit and undefined rather than dropping them. Show invalid attempts with reasons and observed effort separately.",
+    "time_boundary": "Use measured agent brackets. Name container preparation, hidden verification, publication, and total trial wall time separately; transcript first/last events are not elapsed task time.",
+    "billing": "Subscription authentication only. No paid usage credits, automatic subscription reset, or dollar-price headline.",
+    "uncertainty": "Paired task/producer-family clusters; never bootstrap individual repetitions as independent tasks. Pilot intervals are diagnostic only."
+  },
+  "delivery": {
+    "funnel": [
+      "applicable earlier lesson available",
+      "eligible hook",
+      "hook fired",
+      "candidate returned",
+      "candidate accepted or rejected",
+      "delivery to intended actor",
+      "frozen discovery step avoided",
+      "verifier passes"
+    ],
+    "breakdowns": [
+      "hook type",
+      "team versus public",
+      "root versus child actor",
+      "pointer versus full body versus truncated body versus unknown",
+      "applicable versus wrong-topic versus stale body",
+      "rejected candidate versus actual delivery"
+    ],
+    "causality": "Delivery plus a pass is not proof of usefulness. Compare matched outcomes; agent self-report does not establish reuse.",
+    "dispatch": "Preserve natural task routing. Separate controlled dispatch diagnostics use the same complete work order across arms. Actor-shaped test data and Codex recursive accounting do not establish Claude dispatch-reranker coverage."
+  },
+  "runtime": {
+    "owner": "Bench-1 shared local/CI container runner, images, readouts, corpus reset and cleanup",
+    "model": "gpt-5.6-sol",
+    "effort": "low",
+    "speed_mode": "fast requested, actual availability recorded",
+    "harness": "Resolve latest official Codex CLI once into an integrity-bound lock; resume that exact release.",
+    "concurrency": "Respect serialized shared subscription refresh and exclusive mutable corpus. Parallelize independent source preparation and no-model verification where safe.",
+    "caps": "Frozen before model admission: 600 seconds per producer or consumer phase, 48 consumer attempts and 12 producer attempts, at most 36,000 model-bracket seconds plus separately reported preparation, publication and verification. No automatic paid fallback or cap increase."
+  },
+  "admission_remaining": []
+}
