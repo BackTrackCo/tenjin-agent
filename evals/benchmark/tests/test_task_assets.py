@@ -108,7 +108,11 @@ def test_hidden_verifier_replaces_model_tooling_and_classifies_assertions(histor
     (repo/'tsconfig.tsbuildinfo').write_text('cache')
     seen=[]
     class Running:
-        def __init__(self,recipe): seen.append(recipe)
+        # `ledger` is required: the container republishes the attempt's project
+        # line through it, so a call site that stops passing one reds here.
+        def __init__(self,*,recipe,ledger):
+            assert isinstance(ledger,container.Ledger)
+            seen.append(recipe)
         def __enter__(self): return self
         def __exit__(self,*args): pass
         def exec(self,argv,**kwargs):
