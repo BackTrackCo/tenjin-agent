@@ -312,9 +312,9 @@ describe('runFire: a hit', () => {
 
   it('stores what was SENT: the row is the text the leg was handed, verbatim', async () => {
     // `question()` made the only cut, at the trigger's bound, before the plan
-    // carried the text here. The row repeats no cut of its own, so a dispatch
-    // work order is stored past the 512 the ledger used to stop at and a prompt
-    // is stored at the length `question()` already cut it to.
+    // carried the text here. The row repeats no cut of its own, so a long-query
+    // trigger is stored past the 512 the ledger used to stop at and a
+    // short-query one is stored at the length `question()` already cut it to.
     const db = await freshDb();
     const paste = 'why is vitest slow '.repeat(600).trim();
     const seen: string[] = [];
@@ -346,7 +346,7 @@ describe('runFire: a hit', () => {
     expect(dispatched.text.length).toBeGreaterThan(512);
     (await runFire(input(), deps(db, [armFor(dispatched)]))).commit();
 
-    const asked = question(paste, 'prompt');
+    const asked = question(paste, 'research');
     expect(asked.text.length).toBeLessThanOrEqual(512);
     (await runFire(input(), deps(db, [armFor(asked)]))).commit();
 

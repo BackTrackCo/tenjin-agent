@@ -10,7 +10,7 @@ import type { Question, SkipReason, Trigger } from './types';
  *
  * A QUESTION IS WHAT THE AGENT TYPED, WITH ITS SECRETS STUBBED AND CUT TO WHAT
  * THE SHELF WILL READ. `mask` and then `cut` at the trigger's bound
- * (`queryMax`: 8,000 for a dispatch work order, 512 for everything else) are the
+ * (`queryMax`: 8,000 for a dispatch work order or a prompt, 512 for everything else) are the
  * only two things that happen to an arm's text before it leaves the machine
  * (owner decisions 2026-09-06 and 2026-09-11). No condensing, no identifier
  * lifting, no per-arm shaping: an arm that rewrites its own words is guessing at

@@ -18,7 +18,8 @@ const PROMPT =
 const SECRET = 'abcdefghijklmnopqrstuvwxyz0123456789';
 
 /** The shelf's bounds, which `question()` cuts to and nothing downstream repeats:
- *  8,000 characters for a dispatch work order, 512 for every other trigger. */
+ *  8,000 characters for a whole document (`dispatch`, `prompt`), 512 for every
+ *  other trigger. */
 const QUERY_MAX = 512;
 const DISPATCH_QUERY_MAX = 8000;
 
@@ -48,7 +49,7 @@ describe('question', () => {
     const paste = `${'collation '.repeat(1500)}pgvector`;
     expect(paste.length).toBeGreaterThan(DISPATCH_QUERY_MAX);
 
-    const asked = question(paste, 'prompt');
+    const asked = question(paste, 'research');
     expect(asked.text.length).toBeLessThanOrEqual(QUERY_MAX);
     expect(asked.text.endsWith('collation')).toBe(true);
     expect(paste.startsWith(`${asked.text} `)).toBe(true);
@@ -64,6 +65,26 @@ describe('question', () => {
     expect(asked.questionKey).toBe(questionKeyOf(asked.text));
     expect(dispatched.questionKey).toBe(questionKeyOf(dispatched.text));
     expect(dispatched.questionKey).not.toBe(asked.questionKey);
+  });
+
+  it('sends a whole prompt, not its first 512 characters', () => {
+    // The pilot6 and smoke-4 failure: a ticket opens with rules and states its
+    // task after them, so the 512-char head was the preamble and the team leg
+    // missed on it. The prompt arm now cuts at the long bound like dispatch.
+    const ticket = `${'follow the repo rules and never force-push. '.repeat(40)}Now fix the pgvector testcontainer collation flip.`;
+    expect(ticket.length).toBeGreaterThan(QUERY_MAX);
+    expect(ticket.length).toBeLessThan(DISPATCH_QUERY_MAX);
+
+    const asked = question(ticket, 'prompt');
+    expect(asked.text).toBe(ticket);
+    expect(asked.text).toContain('pgvector testcontainer collation flip');
+    expect(asked.questionKey).toBe(questionKeyOf(ticket));
+
+    // Still bounded: a paste larger than the shelf will read is still cut.
+    const paste = `${'collation '.repeat(1500)}pgvector`;
+    const long = question(paste, 'prompt');
+    expect(long.text.length).toBeLessThanOrEqual(DISPATCH_QUERY_MAX);
+    expect(long.text.length).toBeGreaterThan(QUERY_MAX);
   });
 
   it('keys two work orders apart when only their tails differ', () => {

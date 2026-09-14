@@ -102,7 +102,8 @@ function questionOf(
   testSig: TestSignature | null,
 ): Question | null {
   // The trigger is what picks the wire bound (`agent-api.ts`, `queryMax`): 512
-  // here, where only `dispatch` takes the 8,000 that #346 raised.
+  // here. Only the long-query triggers take the 8,000 that #346 raised, and a
+  // failure asks about one error line, which is not a document.
   const asked = found === null ? null : question(found.line, 'failure');
   const questionKey = failureQuestionKey({
     ...(sig !== null ? { sig: sig.key } : {}),

@@ -75,12 +75,18 @@ describe('the prompt arm skips, each with its own reason', () => {
 
   it('asks a short prompt and a pasted one: neither is refused for its length', () => {
     expect(plan('why did the collation flip?')).toMatchObject({ stages: expect.anything() });
-    // A paste is asked, not skipped. The only thing its length costs it is the
-    // tail past the prompt trigger's 512 characters, which `question()` cuts at
-    // a whole word because that is all the shelf would read.
-    const pasted = `${'collation '.repeat(500)}pgvector`;
+    // A paste is asked, not skipped, and it goes WHOLE: the prompt trigger's
+    // bound is the long-query one, because a ticket's first 512 characters are
+    // its rules preamble and the shelf missed on them. The cut is still there
+    // for a paste larger than the shelf will read, at a whole word.
+    const ticket = `${'collation '.repeat(500)}pgvector`;
+    expect(ticket.length).toBeGreaterThan(512);
+    expect((plan(ticket) as Plan).question.text).toBe(ticket);
+
+    const pasted = `${'collation '.repeat(1500)}pgvector`;
     const asked = (plan(pasted) as Plan).question.text;
-    expect(asked.length).toBeLessThanOrEqual(512);
+    expect(asked.length).toBeLessThanOrEqual(8000);
+    expect(asked.length).toBeGreaterThan(512);
     expect(asked.endsWith('collation')).toBe(true);
     expect(pasted.startsWith(`${asked} `)).toBe(true);
   });

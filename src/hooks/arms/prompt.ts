@@ -14,6 +14,14 @@ import type { Arm } from '../types';
  * THE QUESTION IS THE PROMPT. It is masked and it is not rewritten: the shelf
  * ranks the sentence better than this machine's summary of it, and the three
  * skips below are the only text rules the arm has.
+ *
+ * THE WHOLE PROMPT GOES, not its first 512 characters. `question()` cuts at
+ * `queryMax('prompt')`, which is now the long-query bound (`agent-api.ts`): a
+ * ticket pasted as a prompt opens with rules and states its task after them, so
+ * the old head was the preamble and the team leg missed on it even when the
+ * word leg ranked the right piece #1 (tenjin-notes `bench-lite/log.md`,
+ * smoke-4). The shelf splits it into sentence sub-queries and reranks against
+ * the whole text.
  */
 export const promptArm: Arm = lookupArm({
   id: 'prompt',
