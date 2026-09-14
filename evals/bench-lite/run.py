@@ -1108,6 +1108,181 @@ def read_ledger(data_dir: Path) -> dict[str, Any]:
 # --------------------------------------------------------------------------
 
 
+# --------------------------------------------------------------------------
+# Transcript usage. The `--output-format json` result reports the MAIN agent
+# only; a session that delegated to a subagent under-reports badly. Smoke-3's
+# tenjin consumer showed 8 turns and 1.9M tokens against $8.16 of cost after
+# one dispatch. The transcripts on disk have the rest.
+# --------------------------------------------------------------------------
+
+USAGE_FIELDS = (
+    "input_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+    "output_tokens",
+)
+
+
+# The turn-end ask, verbatim from `src/hooks/prose.ts` CAPTURE_ASK as the
+# installed CLI rendered it into smoke-3's ledger (publish.mode full-auto, a root
+# session so no `--agent` flag). Used only when the session's own ledger has no
+# stop-arm emit to copy.
+CAPTURE_ASK_FALLBACK = (
+    "Tenjin: this turn did work worth a second look. If it settled something reusable "
+    "(a probe result, a version gotcha, a tested workaround; on the team shelf also a "
+    "decision and why, or a code map), publish it now: `tenjin publish <file>`, title as "
+    "the first `# ` heading, one file per finding; publish.mode is full-auto. The "
+    "tenjin-publish skill has the rest. If nothing durable, just finish.\n"
+    "If publish refuses or you cannot run it, put the finding in your final answer inside "
+    "a ```tenjin-finding fence, first line `# <title>`; it is kept locally for a person."
+)
+
+
+def stop_ask_from_ledger(data_dir: Path) -> str | None:
+    """The exact text this session's own Stop arm emitted.
+
+    Preferred over the constant above: it is the product's current wording, under
+    this run's own config, rather than a copy that drifts. Smoke-3's producer
+    shows the arm firing with reason `no-question` and a full `context` payload
+    that simply had no next turn to land in under `claude -p` — this reads that
+    payload back and gives it one.
+    """
+    db = data_dir / "loop.db"
+    if not db.is_file():
+        return None
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=10)
+    except sqlite3.Error:
+        return None
+    try:
+        rows = conn.execute(
+            "SELECT emit FROM fires WHERE arm = 'stop' AND emit IS NOT NULL"
+            " AND emit != '' ORDER BY at DESC"
+        ).fetchall()
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+    for (emit,) in rows:
+        try:
+            context = (json.loads(emit) or {}).get("context")
+        except json.JSONDecodeError:
+            continue
+        if isinstance(context, str) and context.strip():
+            return context
+    return None
+
+
+def project_slug(cwd: Path) -> str:
+    """Claude Code's directory name for a project: every `/` and `_` becomes `-`.
+
+    Verified against smoke-3, whose worktree
+    `/private/tmp/.../smoke-3/tenjin-746-748-confidence__tenjin__r1__consumer/repo`
+    is stored as `-private-tmp-...-tenjin-746-748-confidence--tenjin--r1--consumer-repo`.
+    """
+    return str(cwd).replace("/", "-").replace("_", "-")
+
+
+def transcript_dir(cwd: Path, home: Path | None = None) -> Path:
+    base = (home or Path.home()) / ".claude" / "projects"
+    return base / project_slug(cwd)
+
+
+def sum_transcript_usage(path: Path) -> dict[str, int]:
+    """Token totals over one transcript's assistant rows.
+
+    DEDUPED ON requestId (falling back to the message id): a transcript records a
+    row per streamed API block, and several rows can carry the same request's
+    usage. Counting rows rather than requests multiplies the total.
+    """
+    totals = {f: 0 for f in USAGE_FIELDS}
+    totals["assistant_rows"] = 0
+    totals["requests"] = 0
+    seen: set[str] = set()
+    try:
+        handle = path.open(encoding="utf-8", errors="replace")
+    except OSError:
+        return totals
+    with handle:
+        for line in handle:
+            line = line.strip()
+            if not line or not line.startswith("{"):
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if row.get("type") != "assistant":
+                continue
+            totals["assistant_rows"] += 1
+            message = row.get("message") or {}
+            usage = message.get("usage") or {}
+            if not usage:
+                continue
+            key = row.get("requestId") or message.get("id")
+            if key is None or key in seen:
+                continue
+            seen.add(key)
+            totals["requests"] += 1
+            for field in USAGE_FIELDS:
+                value = usage.get(field)
+                if isinstance(value, (int, float)):
+                    totals[field] += int(value)
+    return totals
+
+
+def zero_usage() -> dict[str, int]:
+    return {f: 0 for f in USAGE_FIELDS} | {"assistant_rows": 0, "requests": 0}
+
+
+def add_usage(a: dict[str, int], b: dict[str, int]) -> dict[str, int]:
+    return {k: a.get(k, 0) + b.get(k, 0) for k in set(a) | set(b)}
+
+
+def with_total(usage: dict[str, int]) -> dict[str, int]:
+    """Add the one number the report compares on."""
+    out = dict(usage)
+    out["total"] = sum(out.get(f, 0) for f in USAGE_FIELDS)
+    return out
+
+
+def collect_session_usage(cwd: Path, session_ids: list[str]) -> dict[str, Any]:
+    """Main-agent and subagent token totals for one bench session.
+
+    `session_ids` is every id this bench session produced — the main call plus a
+    capture turn, which `--resume` may or may not file under a new id.
+    """
+    root = transcript_dir(cwd)
+    main = zero_usage()
+    subs = zero_usage()
+    main_files: list[str] = []
+    sub_files: list[str] = []
+
+    for sid in session_ids:
+        if not sid:
+            continue
+        transcript = root / f"{sid}.jsonl"
+        if transcript.is_file():
+            main = add_usage(main, sum_transcript_usage(transcript))
+            main_files.append(str(transcript))
+        # Subagent transcripts live under <project>/<session id>/subagents/.
+        sub_dir = root / sid / "subagents"
+        if sub_dir.is_dir():
+            for f in sorted(sub_dir.glob("*.jsonl")):
+                subs = add_usage(subs, sum_transcript_usage(f))
+                sub_files.append(str(f))
+
+    return {
+        "transcript_dir": str(root),
+        "usage_main": with_total(main),
+        "usage_subagents": with_total(subs),
+        "usage_total": with_total(add_usage(main, subs)),
+        "subagent_files": len(sub_files),
+        "main_transcripts": main_files,
+        "subagent_transcripts": sub_files,
+    }
+
+
 def claude_argv(args: argparse.Namespace, extra: list[str] | None = None) -> list[str]:
     argv = [
         args.claude_bin,
@@ -1365,13 +1540,99 @@ def run_session(
                 )
 
         # ---- the agent's diff, kept ---------------------------------------
-        # Also attempted in the `finally` below, so an exception anywhere above
-        # cannot cost us the agent's work.
+        # Taken BEFORE the capture turn, so the recorded patch is the task work
+        # and not the finding the capture turn may write. Also attempted in the
+        # `finally` below, so an exception anywhere above cannot cost it.
         record["diff"] = capture_patch(runner, worktree, session_dir / "agent.patch")
         patch_taken = True
 
+        # ---- the capture turn ---------------------------------------------
+        # THE PRODUCT'S STOP NUDGE HAS NOWHERE TO LAND UNDER `claude -p`. The Stop
+        # arm fires and emits its "publish it now" context, but a headless run
+        # ends at that moment, so a producer captures nothing while an
+        # interactive session would have published. Smoke-3 showed exactly that:
+        # the producer's stop arm fired twice, published 0, while the consumer —
+        # which had mid-session turns to act in — published 2.
+        #
+        # So the producer gets one more turn, resuming the same session, carrying
+        # the same ask the arm emitted. `--resume` keeps the session id and
+        # appends to the same transcript (verified), so the transcript totals
+        # below cover it without extra bookkeeping.
+        capture_wanted = (
+            condition == "tenjin"
+            and role == "producer"
+            and args.capture_turn
+            and not record.get("capped")
+        )
+        if capture_wanted and runner.dry_run:
+            runner.log(
+                "$ claude.capture (same flags + --resume <session id>, stdin = the Stop arm's "
+                "own ask read back from loop.db)"
+            )
+        capture_session = capture_wanted and bool(parsed.get("session_id"))
+        if capture_session:
+            ask = stop_ask_from_ledger(data_dir) or CAPTURE_ASK_FALLBACK
+            cap_started = time.monotonic()
+            cap = runner.run(
+                claude_argv(args, ["--resume", str(parsed["session_id"])]),
+                cwd=worktree,
+                env_overlay=env_overlay,
+                timeout=args.capture_cap_s,
+                stdin_text=ask,
+                label="claude.capture",
+            )
+            cap_parsed = parse_agent_json(cap["stdout"])
+            record["capture"] = {
+                "ran": True,
+                "ask_source": "ledger" if stop_ask_from_ledger(data_dir) else "fallback",
+                "ask_chars": len(ask),
+                "exit_code": cap["exit_code"],
+                "timed_out": cap["timed_out"],
+                "capped": bool(cap["timed_out"]),
+                "pid": cap.get("pid"),
+                "wall_ms": int((time.monotonic() - cap_started) * 1000),
+                "session_id": cap_parsed.get("session_id"),
+                "num_turns": cap_parsed.get("num_turns"),
+                "cost_usd": cap_parsed.get("total_cost_usd"),
+                "tokens": cap_parsed.get("tokens"),
+                "result_tail": cap_parsed.get("result_tail"),
+                "stderr_tail": tail(cap["stderr"], 1200),
+            }
+            if not runner.dry_run:
+                (session_dir / "capture-stdout.json").write_text(
+                    redact(cap["stdout"]), encoding="utf-8"
+                )
+            # A second diffstat: the capture turn should only write a finding
+            # file, but if it touched code the oracle below grades that too, so
+            # make it visible rather than silent.
+            record["capture"]["diff_after"] = capture_patch(
+                runner, worktree, session_dir / "after-capture.patch"
+            )
+        elif condition == "tenjin" and role == "producer":
+            record["capture"] = {
+                "ran": False,
+                "why": "capped" if record.get("capped") else (
+                    "--no-capture-turn" if not args.capture_turn else "no session id"
+                ),
+            }
+
         # ---- the oracle ---------------------------------------------------
         record["oracle"] = run_oracle(runner, args, spec["oracle"], pairs_dir, worktree)
+
+        # ---- usage, main + subagents, from the transcripts ------------------
+        if not runner.dry_run:
+            ids = [parsed.get("session_id")]
+            cap_id = (record.get("capture") or {}).get("session_id")
+            if cap_id and cap_id not in ids:
+                ids.append(cap_id)
+            usage = collect_session_usage(worktree, [i for i in ids if i])
+            record["usage"] = usage
+            record["usage_total"] = usage["usage_total"]
+            # `tokens` stays the main agent's JSON block, for comparison; the
+            # report compares on usage_total.
+            record["tokens_json"] = record.get("tokens")
+        else:
+            runner.log("# sum usage from ~/.claude/projects/<slug>/ + subagents/")
 
         # ---- the funnel ---------------------------------------------------
         if condition == "tenjin":
@@ -1510,6 +1771,22 @@ def is_whole_suite(command: str) -> bool:
 
 
 def tokens_of(record: dict[str, Any]) -> dict[str, int]:
+    """Token counts for one session, SUBAGENTS INCLUDED.
+
+    Prefers the transcript sum (`usage_total`), which covers the main agent, any
+    capture turn and every subagent. The `--output-format json` block is the
+    fallback for a record written before transcripts were read, and it
+    under-reports a delegating session badly: smoke-3's tenjin consumer reported
+    1.89M there against 17.44M on disk."""
+    u = record.get("usage_total")
+    if isinstance(u, dict) and u.get("total"):
+        return {
+            "input": u.get("input_tokens", 0) or 0,
+            "cache_creation": u.get("cache_creation_input_tokens", 0) or 0,
+            "cache_read": u.get("cache_read_input_tokens", 0) or 0,
+            "output": u.get("output_tokens", 0) or 0,
+            "total": u.get("total", 0) or 0,
+        }
     t = record.get("tokens") or {}
     return {
         "input": t.get("input", 0) or 0,
@@ -1518,6 +1795,20 @@ def tokens_of(record: dict[str, Any]) -> dict[str, int]:
         "output": t.get("output", 0) or 0,
         "total": t.get("total", 0) or 0,
     }
+
+
+def cost_of(record: dict[str, Any]) -> float:
+    """The JSON cost, plus the capture turn's own cost when there was one."""
+    base = record.get("cost_usd") or 0
+    cap = (record.get("capture") or {}).get("cost_usd") or 0
+    return float(base) + float(cap)
+
+
+def subagent_note(record: dict[str, Any]) -> str:
+    u = record.get("usage") or {}
+    n = u.get("subagent_files") or 0
+    sub = (u.get("usage_subagents") or {}).get("total") or 0
+    return f"{n} ({sub:,})" if n else "—"
 
 
 def build_report(run_dir: Path, all_records: list[dict[str, Any]], args: argparse.Namespace) -> str:
@@ -1552,17 +1843,21 @@ def build_report(run_dir: Path, all_records: list[dict[str, Any]], args: argpars
             f"- **excluded as invalid: {len(invalid_records)}** (see Invalid repeats below)"
         )
     lines.append("")
-    lines.append("Token columns are the agent's own `usage` block: `in` is uncached input,")
-    lines.append("`cc` cache-creation input, `cr` cache-read input, `out` output. `total` is")
-    lines.append("every one of those added up, which is the number to compare across conditions.")
+    lines.append("Token columns are summed from the session TRANSCRIPTS, not from the agent's")
+    lines.append("`--output-format json` block, so they include every subagent and the producer's")
+    lines.append("capture turn. `in` is uncached input, `cc` cache-creation input, `cr` cache-read")
+    lines.append("input, `out` output; `total` is all four, and is the number to compare across")
+    lines.append("conditions. `capture tok` is the producer's follow-up turn, already inside")
+    lines.append("`total`. `cost $` is the agent's own reported cost plus the capture turn's.")
     lines.append("")
 
     lines.append("## Per session (median across repeats)")
     lines.append("")
     lines.append(
-        "| pair | condition | session | total tok | in | cc | cr | out | wall s | turns | cost $ | oracle |"
+        "| pair | condition | session | total tok | in | cc | cr | out | subagents (tok) "
+        "| capture tok | wall s | turns | cost $ | oracle |"
     )
-    lines.append("|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|")
+    lines.append("|---|---|---|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---|")
     for pid in pair_ids:
         for cond in conditions:
             for role in ROLES:
@@ -1576,8 +1871,12 @@ def build_report(run_dir: Path, all_records: list[dict[str, Any]], args: argpars
                 toks = [tokens_of(r) for r in rs]
                 passes = [r.get("oracle", {}).get("passed") for r in rs]
                 n_pass = sum(1 for p in passes if p is True)
+                cap_toks = [
+                    ((r.get("capture") or {}).get("tokens") or {}).get("total") or 0 for r in rs
+                ]
                 lines.append(
-                    "| {pid} | {cond} | {role} | {total} | {i} | {cc} | {cr} | {o} | {wall} | {turns} | {cost} | {p}/{n} |".format(
+                    "| {pid} | {cond} | {role} | {total} | {i} | {cc} | {cr} | {o} | {subs} "
+                    "| {captok} | {wall} | {turns} | {cost} | {p}/{n} |".format(
                         pid=pid,
                         cond=cond,
                         role=role,
@@ -1586,9 +1885,11 @@ def build_report(run_dir: Path, all_records: list[dict[str, Any]], args: argpars
                         cc=median([t["cache_creation"] for t in toks]) or 0,
                         cr=median([t["cache_read"] for t in toks]) or 0,
                         o=median([t["output"] for t in toks]) or 0,
+                        subs=subagent_note(rs[0]),
+                        captok=median(cap_toks) or 0,
                         wall=median([(r.get("wall_ms") or 0) / 1000 for r in rs]) or 0,
                         turns=median([r.get("num_turns") or 0 for r in rs]) or 0,
-                        cost=median([r.get("cost_usd") or 0 for r in rs]) or 0,
+                        cost=median([cost_of(r) for r in rs]) or 0,
                         p=n_pass,
                         n=len(rs),
                     )
@@ -1624,7 +1925,7 @@ def build_report(run_dir: Path, all_records: list[dict[str, Any]], args: argpars
                     ((a.get("wall_ms") or 0) if a else 0) + ((b.get("wall_ms") or 0) if b else 0)
                 )
                 per_repeat_cost.append(
-                    ((a.get("cost_usd") or 0) if a else 0) + ((b.get("cost_usd") or 0) if b else 0)
+                    (cost_of(a) if a else 0) + (cost_of(b) if b else 0)
                 )
                 if a:
                     a_n += 1
@@ -1656,27 +1957,74 @@ def build_report(run_dir: Path, all_records: list[dict[str, Any]], args: argpars
     if "off" in conditions and "tenjin" in conditions:
         lines.append("## Reuse delta (tenjin − off, median totals)")
         lines.append("")
-        lines.append("| pair | B tok off | B tok tenjin | B delta | A+B off | A+B tenjin | A+B delta |")
-        lines.append("|---|---:|---:|---:|---:|---:|---:|")
+        lines.append(
+            "| pair | B tok off | B tok tenjin | B delta | A+B off | A+B tenjin | A+B delta "
+            "| B oracle off | B oracle tenjin | reading |"
+        )
+        lines.append("|---|---:|---:|---:|---:|---:|---:|---|---|---|")
+        caveats: list[str] = []
         for pid in pair_ids:
-            def med_role(cond: str, role: str) -> float:
-                rs = [
-                    r for r in records
+
+            def rows_for(cond: str, role: str) -> list[dict[str, Any]]:
+                return [
+                    r
+                    for r in records
                     if r["pair_id"] == pid and r["condition"] == cond and r["role"] == role
                 ]
-                return median([tokens_of(r)["total"] for r in rs]) or 0
+
+            def med_role(cond: str, role: str) -> float:
+                return median([tokens_of(r)["total"] for r in rows_for(cond, role)]) or 0
+
+            def oracle_tally(cond: str) -> tuple[int, int]:
+                rs = rows_for(cond, "consumer")
+                return sum(1 for r in rs if (r.get("oracle") or {}).get("passed") is True), len(rs)
 
             b_off = med_role("off", "consumer")
             b_ten = med_role("tenjin", "consumer")
             t_off = pair_totals.get((pid, "off"), 0)
             t_ten = pair_totals.get((pid, "tenjin"), 0)
+            off_pass, off_n = oracle_tally("off")
+            ten_pass, ten_n = oracle_tally("tenjin")
+
+            # A TOKEN DELTA BETWEEN TWO FAILED CONSUMERS IS NOT A REUSE WIN. Both
+            # sides failed the task, so the cheaper one is only the one that gave
+            # up sooner. Say so in the row rather than leaving a tempting number.
+            if off_n and ten_n and off_pass == 0 and ten_pass == 0:
+                reading = "**NOT A REUSE RESULT — B failed in both conditions**"
+                caveats.append(
+                    f"- `{pid}`: B's oracle failed in BOTH conditions "
+                    f"(off {off_pass}/{off_n}, tenjin {ten_pass}/{ten_n}). The token delta "
+                    "compares two failures and says nothing about reuse."
+                )
+            elif off_n and ten_n and (off_pass == 0) != (ten_pass == 0):
+                better = "tenjin" if ten_pass else "off"
+                reading = f"B passed only under `{better}`"
+                caveats.append(
+                    f"- `{pid}`: B's oracle passed only under `{better}` "
+                    f"(off {off_pass}/{off_n}, tenjin {ten_pass}/{ten_n}). Compare the outcome "
+                    "first; the token delta is secondary."
+                )
+            elif not off_n or not ten_n:
+                reading = "incomplete"
+            else:
+                reading = "comparable"
+
             lines.append(
                 f"| {pid} | {b_off} | {b_ten} | {round(b_ten - b_off, 2)} | "
-                f"{t_off} | {t_ten} | {round(t_ten - t_off, 2)} |"
+                f"{t_off} | {t_ten} | {round(t_ten - t_off, 2)} | "
+                f"{off_pass}/{off_n} | {ten_pass}/{ten_n} | {reading} |"
             )
         lines.append("")
         lines.append("A negative B delta is the shelf paying for itself on the consumer side.")
         lines.append("A negative A+B delta means it paid for the capture overhead too.")
+        lines.append("")
+        lines.append(
+            "**Both readings assume B actually did the task.** A delta is only a reuse "
+            "result when B's oracle passed; otherwise it compares how much two failures cost."
+        )
+        if caveats:
+            lines.append("")
+            lines.extend(caveats)
         lines.append("")
 
     tenjin_records = [r for r in records if r["condition"] == "tenjin"]
@@ -1894,6 +2242,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         "tenjin_bin": args.tenjin_bin,
         "permission_mode": args.permission_mode,
         "cap_s": args.cap_s,
+        "capture_turn": args.capture_turn,
+        "capture_cap_s": args.capture_cap_s,
         "workers": args.workers,
         "dry_run": args.dry_run,
     }
@@ -2136,9 +2486,21 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--skip-install", action="store_true", help="skip pnpm install (deps already present)")
     run_p.add_argument("--skip-oracle", action="store_true", help="copy the oracle files but do not run the command")
     run_p.add_argument("--keep-worktrees", action="store_true", help="leave worktrees in place for debugging")
+    run_p.add_argument(
+        "--no-capture-turn",
+        dest="capture_turn",
+        action="store_false",
+        help="skip the producer's follow-up capture turn in the tenjin condition",
+    )
+    run_p.add_argument(
+        "--capture-cap-s",
+        type=int,
+        default=900,
+        help="wall-clock cap for the capture turn, in seconds",
+    )
     run_p.add_argument("--no-preflight", dest="preflight", action="store_false",
                        help="skip the one-call sandbox/auth/JSON check")
-    run_p.set_defaults(func=cmd_run, preflight=True)
+    run_p.set_defaults(func=cmd_run, preflight=True, capture_turn=True)
 
     prep_p = sub.add_parser("prepare", help="build the template bench data dir and verify it")
     common(prep_p)

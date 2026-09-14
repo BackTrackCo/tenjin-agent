@@ -108,6 +108,48 @@ than a broken PATH. The `-l` was the cause: a login shell re-sources the profile
 `PATH` from scratch. Each session now records `node --version` and `pnpm --version` as its oracle
 env sees them, and the report raises a **Runtime skew** section if sessions disagree.
 
+## The capture turn
+
+Under `claude -p` the product's turn-end nudge has nowhere to land. The Stop arm fires and emits
+its "publish it now" context, but a headless run ends at that moment, so a producer captures
+nothing where an interactive session would have published. Smoke-3 showed exactly this: the
+producer's Stop arm fired twice with reason `no-question` and published **0**, while the
+consumer, which had mid-session turns to act in, published **2** on its own.
+
+So a `tenjin` producer gets one follow-up turn. It resumes the same session
+(`--resume <session_id>`, same flags, env, cwd and data dir) and its prompt is **the Stop arm's
+own emitted text, read back out of that session's `loop.db`** — the product's current wording
+under this run's config, not a copy that drifts. A verbatim fallback is used only if the ledger
+holds no stop emit.
+
+`--resume` keeps the session id and appends to the same transcript (verified), so the transcript
+totals below cover the capture turn without extra bookkeeping. It is recorded as its own
+`capture` sub-record with usage, cost, wall time and turns, and the ledger is read **after** it,
+so anything it publishes shows up in the funnel.
+
+The agent's patch is taken **before** the capture turn, so the recorded diff is task work rather
+than the finding. A second diffstat afterwards makes any code the capture turn touched visible.
+
+Off by `--no-capture-turn`. Capped producers and every `off` session skip it, since in `off`
+there is no shelf to publish to.
+
+## Usage is summed from the transcripts, not the JSON
+
+`--output-format json` reports the **main agent only**. Smoke-3's tenjin consumer delegated once
+and reported 1.89M tokens against $8.16 of cost; its transcripts hold 12.66M for the main agent
+plus 4.78M across one subagent, 17.44M in total, which is what $8.16 actually buys.
+
+So after each session the runner reads
+`~/.claude/projects/<slugged worktree path>/<session_id>.jsonl` plus every `*.jsonl` under
+`<session_id>/subagents/`, and sums the four usage fields over assistant rows **deduped on
+`requestId`** (falling back to the message id) — a transcript writes a row per streamed block,
+and counting rows multiplies the total. Records carry `usage_main`, `usage_subagents`,
+`usage_total` and the subagent file count; `cost_usd` still comes from the JSON. The report
+compares on `usage_total`.
+
+Validated offline against smoke-3: the three sessions with no subagent match their JSON total
+**exactly**, to the token.
+
 ## A failed producer invalidates its repeat
 
 A producer that is capped or errors never reaches its Stop hook, so under `tenjin` nothing was
@@ -286,6 +328,8 @@ section naming every capped or errored session.
 | `--permission-mode`                                     | `bypassPermissions`                | the agent must edit files and run pnpm/vitest with nobody to answer a prompt. It is confined by `cwd` (the worktree), not by the permission mode                                                         |
 | `--max-budget-usd`                                      | unset                              | per-session API spend cap, passed straight through                                                                                                                                                       |
 | `--skip-install` / `--skip-oracle` / `--keep-worktrees` | off                                | debugging                                                                                                                                                                                                |
+| `--no-capture-turn`                                     | capture turn on                    | skip the `tenjin` producer's follow-up publish turn                                                                                                                                                      |
+| `--capture-cap-s`                                       | `900`                              | wall-clock cap for that follow-up turn                                                                                                                                                                   |
 | `--no-preflight`                                        | preflight on                       | the preflight is one tiny real agent call with the exact session flags; it proves the binary, the login under `--setting-sources project`, and the JSON parse before a run spends anything               |
 | `--dry-run`                                             | off                                | prints the plan and every command; calls no agent, installs nothing, publishes nothing                                                                                                                   |
 
