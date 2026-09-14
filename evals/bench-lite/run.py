@@ -456,6 +456,63 @@ def ensure_passphrase(data_dir: Path, dry_run: bool) -> str:
     return value
 
 
+def tenjin_argv(bin_spec: str) -> list[str]:
+    """How to invoke the configured tenjin CLI.
+
+    Three shapes are accepted, because a branch build is not a bin script:
+      - a bare name resolved on PATH (`tenjin`, the default)
+      - a path to an executable (a bin script, a shim)
+      - a path to a `.js`/`.mjs` entry, e.g. a worktree's `dist/index.js`, which
+        is run as `node <path>`
+    """
+    path = Path(bin_spec)
+    if path.suffix in (".js", ".mjs") and path.is_file():
+        return ["node", str(path.resolve())]
+    if path.is_file() and os.access(path, os.X_OK):
+        return [str(path.resolve())]
+    return [bin_spec]
+
+
+def tenjin_shim_dir(run_root: Path, bin_spec: str) -> Path | None:
+    """A directory holding a `tenjin` executable that forwards to `bin_spec`.
+
+    `install` copies the daemon and shim bundles out of the RUNNING CLI's own
+    `dist/`, so the hook entries already point at the configured build with no
+    help from PATH. What still resolves through PATH is everything the AGENT runs
+    itself — `tenjin search`, and the `tenjin publish` the capture turn asks for.
+    Without this the agent would use whatever `tenjin` the machine has while the
+    hooks used the branch build, which is the worst of both.
+
+    Returns None when the spec is already a plain `tenjin` on PATH.
+    """
+    argv = tenjin_argv(bin_spec)
+    if argv == ["tenjin"]:
+        return None
+    shim_dir = run_root / "bin"
+    shim_dir.mkdir(parents=True, exist_ok=True)
+    shim = shim_dir / "tenjin"
+    quoted = " ".join(shell_quote(a) for a in argv)
+    shim.write_text(f'#!/bin/sh\nexec {quoted} "$@"\n', encoding="utf-8")
+    shim.chmod(0o755)
+    return shim_dir
+
+
+def resolve_tenjin(runner: Runner, bin_spec: str) -> dict[str, Any]:
+    """What `--tenjin-bin` actually resolved to, and which version it reports."""
+    argv = tenjin_argv(bin_spec)
+    which = shutil.which(argv[0]) if len(argv) == 1 else None
+    info: dict[str, Any] = {
+        "spec": bin_spec,
+        "argv": argv,
+        "resolved": which or (argv[-1] if len(argv) > 1 else argv[0]),
+    }
+    res = runner.run(argv + ["--version"], timeout=120, allow_in_dry_run=True, label="tenjin.version")
+    info["version"] = (res["stdout"] or res["stderr"] or "").strip().splitlines()[:1]
+    info["version"] = info["version"][0] if info["version"] else None
+    info["version_exit"] = res["exit_code"]
+    return info
+
+
 def node_path_prefix() -> str:
     """The directory holding the `node` this runner resolves, for prepending to
     PATH.
@@ -471,12 +528,19 @@ def node_path_prefix() -> str:
     return str(Path(found).parent) if found else ""
 
 
+# Set once per run by cmd_run/prepare: the directory holding a `tenjin` shim that
+# forwards to --tenjin-bin. Prepended to PATH ahead of the node pin so anything
+# the AGENT shells out to gets the configured build.
+TENJIN_SHIM_DIR: Path | None = None
+
+
 def base_env(extra: dict[str, str] | None = None) -> dict[str, str]:
-    """The env every runner-owned subprocess gets: CI, a pinned node, plus extras."""
+    """The env every runner-owned subprocess gets: CI, a pinned node, the
+    configured tenjin ahead of PATH, plus extras."""
     env = {"CI": "true"}
-    prefix = node_path_prefix()
-    if prefix:
-        env["PATH"] = prefix + os.pathsep + os.environ.get("PATH", "")
+    parts = [p for p in (str(TENJIN_SHIM_DIR) if TENJIN_SHIM_DIR else "", node_path_prefix()) if p]
+    if parts:
+        env["PATH"] = os.pathsep.join(parts) + os.pathsep + os.environ.get("PATH", "")
     env.update(extra or {})
     return env
 
@@ -545,7 +609,14 @@ def cmd_prepare(args: argparse.Namespace) -> int:
     secret = values["TENJIN_BENCH_BYPASS_SECRET"]
 
     runner = Runner(SCRATCH_ROOT / "prepare.log", args.dry_run)
-    data_dir = TEMPLATE_DATA_DIR
+    data_dir = Path(args.data_dir).resolve() if args.data_dir else TEMPLATE_DATA_DIR
+
+    global TENJIN_SHIM_DIR
+    if not args.dry_run:
+        data_dir.mkdir(parents=True, exist_ok=True)
+        TENJIN_SHIM_DIR = tenjin_shim_dir(data_dir.parent / f"{data_dir.name}-bin", args.tenjin_bin)
+    tenjin_info = resolve_tenjin(runner, args.tenjin_bin)
+    out(f"tenjin: {tenjin_info['resolved']} ({tenjin_info['version']})")
 
     if data_dir.exists() and args.force:
         runner.log(f"# rm -rf {data_dir}")
@@ -562,7 +633,7 @@ def cmd_prepare(args: argparse.Namespace) -> int:
     out("setting team-mode config keys …")
     for key, value in prepare_config_pairs(origin, secret):
         runner.run(
-            [args.tenjin_bin, "config", "set", key, value, "--json"],
+            [*tenjin_argv(args.tenjin_bin), "config", "set", key, value, "--json"],
             env_overlay=env,
             check=not args.dry_run,
             label="config.set",
@@ -574,7 +645,7 @@ def cmd_prepare(args: argparse.Namespace) -> int:
     wallet_exists = (data_dir / "wallet.json").is_file()
     if not wallet_exists:
         runner.run(
-            [args.tenjin_bin, "wallet", "create", "--json"],
+            [*tenjin_argv(args.tenjin_bin), "wallet", "create", "--json"],
             env_overlay=env,
             check=not args.dry_run,
             label="wallet.create",
@@ -596,7 +667,7 @@ def cmd_prepare(args: argparse.Namespace) -> int:
 
     out("\nverifying …")
     got = cli_json(
-        runner.run([args.tenjin_bin, "config", "get", "baseUrl", "--json"], env_overlay=env)
+        runner.run([*tenjin_argv(args.tenjin_bin), "config", "get", "baseUrl", "--json"], env_overlay=env)
     )
     base_url = (got or {}).get("data", {}).get("value")
     check(
@@ -607,7 +678,7 @@ def cmd_prepare(args: argparse.Namespace) -> int:
 
     got = cli_json(
         runner.run(
-            [args.tenjin_bin, "config", "get", "shelfBypassSecret", "--json"], env_overlay=env
+            [*tenjin_argv(args.tenjin_bin), "config", "get", "shelfBypassSecret", "--json"], env_overlay=env
         )
     )
     secret_view = (got or {}).get("data", {}).get("value")
@@ -622,18 +693,18 @@ def cmd_prepare(args: argparse.Namespace) -> int:
         ("publish.mode", "full-auto"),
         ("update.mode", "off"),
     ):
-        got = cli_json(runner.run([args.tenjin_bin, "config", "get", key, "--json"], env_overlay=env))
+        got = cli_json(runner.run([*tenjin_argv(args.tenjin_bin), "config", "get", key, "--json"], env_overlay=env))
         value = (got or {}).get("data", {}).get("value")
         check(key, value == expected, f"{value!r} (want {expected!r})")
 
     got = cli_json(
-        runner.run([args.tenjin_bin, "config", "get", "publish.defaultPrice", "--json"], env_overlay=env)
+        runner.run([*tenjin_argv(args.tenjin_bin), "config", "get", "publish.defaultPrice", "--json"], env_overlay=env)
     )
     price = (got or {}).get("data", {}).get("value")
     price_atomic = price.get("atomic") if isinstance(price, dict) else price
     check("publish.defaultPrice", str(price_atomic) == "0", f"atomic {price_atomic}")
 
-    got = cli_json(runner.run([args.tenjin_bin, "wallet", "show", "--json"], env_overlay=env))
+    got = cli_json(runner.run([*tenjin_argv(args.tenjin_bin), "wallet", "show", "--json"], env_overlay=env))
     address = (got or {}).get("data", {}).get("address")
     check("bench wallet", bool(address), str(address))
     verification["wallet_address"] = address
@@ -642,7 +713,7 @@ def cmd_prepare(args: argparse.Namespace) -> int:
     # envelope names every shelf leg it asked.
     probe = args.probe
     search = runner.run(
-        [args.tenjin_bin, "search", probe, "--json", "--limit", "1"],
+        [*tenjin_argv(args.tenjin_bin), "search", probe, "--json", "--limit", "1"],
         env_overlay=env,
         timeout=CLI_TIMEOUT_S,
         label="search",
@@ -687,6 +758,7 @@ def cmd_prepare(args: argparse.Namespace) -> int:
         )
     verification["search_shelves"] = shelves
     verification["config_keys_set"] = [k for k, _ in prepare_config_pairs(origin, secret)]
+    verification["tenjin"] = tenjin_info
 
     write_json(data_dir / "bench-prepare.json", verification)
     ok = all(c["ok"] for c in verification["checks"])
@@ -939,7 +1011,7 @@ def install_tenjin_hooks(
     env = tenjin_env(data_dir, passphrase)
     env["HOME"] = str(worktree)
     res = runner.run(
-        [args.tenjin_bin, "install", "--harness", "claude", "--publish-mode", "full-auto", "--json"],
+        [*tenjin_argv(args.tenjin_bin), "install", "--harness", "claude", "--publish-mode", "full-auto", "--json"],
         env_overlay=env,
         timeout=600,
         label="tenjin.install",
@@ -956,7 +1028,7 @@ def stop_daemon(runner: Runner, args: argparse.Namespace, data_dir: Path) -> dic
     """Never leave a server running. The loop daemon is per data dir and would
     otherwise idle for `loop.idle_exit_min` after every session."""
     res = runner.run(
-        [args.tenjin_bin, "daemon", "stop", "--json"],
+        [*tenjin_argv(args.tenjin_bin), "daemon", "stop", "--json"],
         env_overlay=base_env({"TENJIN_DATA_DIR": str(data_dir)}),
         timeout=120,
         label="tenjin.daemon.stop",
@@ -1386,6 +1458,7 @@ def run_session(
     condition: str,
     repeat: int,
     run_id: str,
+    tenjin_info: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     spec = pair[role]
     tag = f"{pair['id']}/{condition}/r{repeat}/{role}"
@@ -1409,6 +1482,11 @@ def run_session(
         "prompt_file": str(prompt_path),
         "model": args.model,
         "started_at": now_iso(),
+        # Which tenjin CLI this session ran against. A branch build and the
+        # machine's installed one produce different hooks and different asks, so
+        # a record that does not name the binary cannot be compared with one from
+        # another run.
+        "tenjin": tenjin_info,
         "errors": [],
         "paths": {
             "session_dir": str(session_dir),
@@ -1838,6 +1916,15 @@ def build_report(run_dir: Path, all_records: list[dict[str, Any]], args: argpars
     lines.append(f"- sessions scored: {len(records)}")
     lines.append(f"- repeats: {args.repeats}")
     lines.append(f"- cap per session: {args.cap_s}s")
+    tenjins = {
+        (r.get("tenjin") or {}).get("resolved"): (r.get("tenjin") or {}).get("version")
+        for r in all_records
+        if r.get("tenjin")
+    }
+    for resolved, version in tenjins.items():
+        lines.append(f"- tenjin CLI: `{resolved}` ({version})")
+    if len(tenjins) > 1:
+        lines.append("- **WARNING: sessions did not all run against the same tenjin CLI.**")
     if invalid_records:
         lines.append(
             f"- **excluded as invalid: {len(invalid_records)}** (see Invalid repeats below)"
@@ -2174,7 +2261,8 @@ def check_binaries(args: argparse.Namespace) -> None:
             f"note: `claude` first on PATH is {resolved}; this run uses {claude} "
             "(the PATH one is the cmux shim)."
         )
-    if shutil.which(args.tenjin_bin) is None and not Path(args.tenjin_bin).is_file():
+    argv = tenjin_argv(args.tenjin_bin)
+    if len(argv) == 1 and shutil.which(argv[0]) is None and not Path(argv[0]).is_file():
         die(f"tenjin binary not found: {args.tenjin_bin}")
 
 
@@ -2205,6 +2293,14 @@ def cmd_run(args: argparse.Namespace) -> int:
     if not args.dry_run:
         run_dir.mkdir(parents=True, exist_ok=True)
     runner = Runner(run_dir / "commands.log", args.dry_run)
+
+    global TENJIN_SHIM_DIR
+    if not args.dry_run:
+        TENJIN_SHIM_DIR = tenjin_shim_dir(run_dir, args.tenjin_bin)
+    tenjin_info = resolve_tenjin(runner, args.tenjin_bin)
+    out(f"  tenjin     : {tenjin_info['resolved']} ({tenjin_info['version']})")
+    if TENJIN_SHIM_DIR:
+        out(f"  tenjin shim: {TENJIN_SHIM_DIR}/tenjin ahead of PATH")
 
     # A GROUP is one (pair, condition, repeat): the producer and the consumer that
     # depend on each other. Grouping rather than listing flat sessions is what
@@ -2240,6 +2336,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         "model": args.model,
         "claude_bin": args.claude_bin,
         "tenjin_bin": args.tenjin_bin,
+        "tenjin": tenjin_info,
+        "tenjin_shim_dir": str(TENJIN_SHIM_DIR) if TENJIN_SHIM_DIR else None,
         "permission_mode": args.permission_mode,
         "cap_s": args.cap_s,
         "capture_turn": args.capture_turn,
@@ -2317,7 +2415,8 @@ def cmd_run(args: argparse.Namespace) -> int:
                 continue
 
             record = run_session(
-                runner, args, run_dir, pairs_path.parent, pair, role, cond, rep, run_id
+                runner, args, run_dir, pairs_path.parent, pair, role, cond, rep, run_id,
+                tenjin_info,
             )
             if role == "producer":
                 invalid = session_failed(record)
@@ -2371,6 +2470,10 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
         die(f"no records at {records_path}")
     runner = Runner(run_dir / "cleanup.log", args.dry_run)
 
+    global TENJIN_SHIM_DIR
+    if not args.dry_run:
+        TENJIN_SHIM_DIR = tenjin_shim_dir(run_dir, args.tenjin_bin)
+
     records = [json.loads(line) for line in records_path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
     # 1. No daemon may outlive the run, whatever else happens below.
@@ -2386,7 +2489,7 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
     passphrase = ensure_passphrase(TEMPLATE_DATA_DIR, args.dry_run)
     env = tenjin_env(TEMPLATE_DATA_DIR, passphrase)
     got = cli_json(runner.run(
-        [args.tenjin_bin, "config", "get", "baseUrl", "--json"],
+        [*tenjin_argv(args.tenjin_bin), "config", "get", "baseUrl", "--json"],
         env_overlay=env, allow_in_dry_run=True, label="config.get",
     ))
     configured = ((got or {}).get("data") or {}).get("value")
@@ -2414,7 +2517,7 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
         # `tenjin delete` takes the post uuid; `inspect` hands it over without
         # paying (bench posts are price 0, so this is the free path).
         info = cli_json(runner.run(
-            [args.tenjin_bin, "inspect", url, "--json"],
+            [*tenjin_argv(args.tenjin_bin), "inspect", url, "--json"],
             env_overlay=env, timeout=CLI_TIMEOUT_S, label="inspect",
         ))
         post_id = ((info or {}).get("data") or {}).get("resourceId")
@@ -2423,7 +2526,7 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
             deleted.append({"url": url, "skipped": "no-post-id"})
             continue
         res = runner.run(
-            [args.tenjin_bin, "delete", str(post_id), "--yes", "--json"],
+            [*tenjin_argv(args.tenjin_bin), "delete", str(post_id), "--yes", "--json"],
             env_overlay=env, timeout=CLI_TIMEOUT_S, label="delete",
         )
         ok = res["exit_code"] == 0
@@ -2459,7 +2562,12 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command")
 
     def common(sp: argparse.ArgumentParser) -> None:
-        sp.add_argument("--tenjin-bin", default=DEFAULT_TENJIN_BIN, help="tenjin CLI to use")
+        sp.add_argument(
+            "--tenjin-bin",
+            default=DEFAULT_TENJIN_BIN,
+            help="tenjin CLI to use: a name on PATH (default `tenjin`), an executable path, "
+            "or a built entry such as a worktree's dist/index.js, which is run with node",
+        )
         sp.add_argument("--dry-run", action="store_true", help="print the plan and every command; run nothing")
 
     run_p = sub.add_parser("run", help="run the benchmark")
@@ -2505,6 +2613,11 @@ def build_parser() -> argparse.ArgumentParser:
     prep_p = sub.add_parser("prepare", help="build the template bench data dir and verify it")
     common(prep_p)
     prep_p.add_argument("--force", action="store_true", help="delete and rebuild the template data dir")
+    prep_p.add_argument(
+        "--data-dir",
+        default=None,
+        help="build this data dir instead of the shared template (for trying a different CLI)",
+    )
     prep_p.add_argument("--probe", default="bench-lite prepare connectivity probe",
                         help="the question `prepare` searches with to prove the shelf answers")
     prep_p.set_defaults(func=cmd_prepare)

@@ -133,6 +133,28 @@ than the finding. A second diffstat afterwards makes any code the capture turn t
 Off by `--no-capture-turn`. Capped producers and every `off` session skip it, since in `off`
 there is no shelf to publish to.
 
+## Running against a branch build
+
+`--tenjin-bin` takes a name on PATH (the default `tenjin`), an executable path, or a built entry
+such as a branch worktree's `dist/index.js`, which is run with `node`. It applies to `run`,
+`prepare` and `cleanup`, and `prepare --data-dir <path>` builds a separate data dir so a second
+CLI can be prepared without disturbing the shared template.
+
+Two different mechanisms carry the choice into a session, and both matter:
+
+- **The hooks follow the binary on their own.** `install` copies the daemon and shim bundles out
+  of the _running_ CLI's own `dist/` (`installDaemonFiles` in `src/daemon/control.ts`), and the
+  hook entries name those copies by absolute path inside the session's data dir. So installing
+  with a branch build gives that session the branch's hooks, with no help from PATH.
+- **What the agent runs itself does not.** `tenjin search`, and the `tenjin publish` the capture
+  turn asks for, resolve through PATH. So the runner writes a one-line `tenjin` shim that
+  forwards to the configured entry and prepends its directory to PATH for every subprocess.
+  Without it the agent would use the machine's installed CLI while the hooks used the branch
+  build, which is the worst of both.
+
+Each session record and the report name the resolved path and the version it reports, and the
+report warns if sessions did not all run against the same CLI.
+
 ## Usage is summed from the transcripts, not the JSON
 
 `--output-format json` reports the **main agent only**. Smoke-3's tenjin consumer delegated once
@@ -325,6 +347,7 @@ section naming every capped or errored session.
 | `--workers N`                                           | `1`                                | **`off` sessions only.** `tenjin` is a chain — B must see what A published — and two loop daemons plus two pnpm installs at once is how a 16 GB laptop swaps to death                                    |
 | `--cap-s`                                               | `3600`                             | wall-clock cap per agent session, in seconds. A pair may override it per session with `cap_s` in `pairs.json`. A session that hits the cap is recorded as `capped` and its whole process group is killed |
 | `--claude-bin`                                          | `/Users/vraspar/.local/bin/claude` | **the real binary.** The `claude` first on PATH is a cmux shim that makes harness detection pick Codex; the runner says so if they differ                                                                |
+| `--tenjin-bin`                                          | `tenjin`                           | which tenjin CLI to run: a name on PATH, an executable path, or a built entry such as a branch worktree's `dist/index.js`, which is run with node. See below                                             |
 | `--permission-mode`                                     | `bypassPermissions`                | the agent must edit files and run pnpm/vitest with nobody to answer a prompt. It is confined by `cwd` (the worktree), not by the permission mode                                                         |
 | `--max-budget-usd`                                      | unset                              | per-session API spend cap, passed straight through                                                                                                                                                       |
 | `--skip-install` / `--skip-oracle` / `--keep-worktrees` | off                                | debugging                                                                                                                                                                                                |
