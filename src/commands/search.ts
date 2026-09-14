@@ -30,6 +30,13 @@ import type { CommandContext, CommandResult } from '../context';
  * Either way it is one request: a question is charged once however many shelves
  * answer it.
  *
+ * A LOCAL CREDENTIAL FAILURE ROUTES, IT DOES NOT REFUSE. Nothing able to sign
+ * sends the one call unsigned to `/api/search` and prints the reason first, the
+ * same rule `hooks/legs/shelf.ts` follows, because the MCP `tenjin_search` tool
+ * runs this function with no TTY to mint at. The two loud cases stay loud: a
+ * server that rejected a signed call, and a machine that turned the marketplace
+ * off and so has nothing to fall back to.
+ *
  * Prints the compact result (spec 10) and records the searchId + items locally so
  * `outcome --search-id` and `buy <resourceId>` can use them.
  *
@@ -55,6 +62,9 @@ import type { CommandContext, CommandResult } from '../context';
  * end to end, so nothing on the wire or in the local store still speaks
  * `lookupId` or a prefixed spelling.
  */
+
+/** The one remedy for a shelf that could not be signed for; doctor names the rest. */
+const DOCTOR_FIX = 'Run `tenjin doctor` to see the wallet and its session.';
 
 export interface SearchArgs {
   question: string;
@@ -94,11 +104,18 @@ export async function runSearch(
   const actor = readActor(deps.env ?? process.env);
 
   const legs: ShelfLeg[] = [];
-  // THE ONE CALL CAN STILL FAIL, and a failure is reported rather than
-  // swallowed. With a shelf set, a 401 or 404 is a membership or credential
-  // problem the operator has to hear about; there is no second origin to fall
-  // through to any more, so the command exits on it rather than degrading into
-  // a quiet public search that would hide the misconfiguration.
+  // A CREDENTIAL FAILURE NEVER SILENCES A PUBLIC ANSWER (principle 4), and this
+  // is the leg rule `hooks/legs/shelf.ts` follows, mirrored here because the
+  // same `runSearch` is what the MCP `tenjin_search` tool calls. A non-TTY run
+  // cannot mint, so a machine whose session expired would otherwise get exit 3
+  // and NO results where the daemon beside it still returns marketplace ones.
+  // The reason is printed first, on its own line, so the fallback is never
+  // silent; the search itself succeeds.
+  //
+  // A SERVER REFUSAL IS STILL LOUD. `postShelfSearch` raises on the signed
+  // call's 401/404, which is a membership or credential problem the operator
+  // has to hear about, and it is not this branch.
+  let shelfError: string | undefined;
   if (settings.shelf !== null) {
     const request = buildSearchRequest({
       ...input,
@@ -130,7 +147,23 @@ export async function runSearch(
         },
       },
     );
-    if (auth.kind !== 'signed') {
+    if (auth.kind === 'signed') {
+      const response = await postShelfSearch(settings.shelf, request, {
+        baseUrl: settings.baseUrl,
+        timeoutMs: ctx.flags.timeout,
+        evalCohort: settings.evalCohort,
+        headers: auth.headers,
+        ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+      });
+      legs.push(await recordLeg('team', response.shelf, request, ctx, settings, actor));
+      if (response.public !== null) {
+        legs.push(await recordLeg('public', response.public, request, ctx, settings, actor));
+      }
+    } else if (settings.teamPublicFallback === 'off') {
+      // There is no public answer to withhold: this machine asked for the shelf
+      // alone, so a credential failure leaves nothing to fall back to and the
+      // refusal is the honest answer rather than a search of a list the
+      // operator turned off.
       throw new CliError(
         'REFUSED',
         auth.kind === 'no-wallet'
@@ -140,22 +173,17 @@ export async function runSearch(
           fix:
             auth.kind === 'no-wallet'
               ? 'Create one with `tenjin wallet create`, or clear the shelf with `tenjin shelf use --none` to search the public marketplace.'
-              : 'Run `tenjin doctor` to see the wallet and its session, then retry.',
+              : 'Run `tenjin doctor` to see the wallet and its session, or `config set team.publicFallback on` to let a failure fall back to the marketplace.',
         },
       );
+    } else {
+      shelfError =
+        auth.kind === 'no-wallet'
+          ? `this machine has no wallet, so shelf "${settings.shelf}" was not asked`
+          : `the search of shelf "${settings.shelf}" could not be signed: ${auth.detail}`;
     }
-    const response = await postShelfSearch(settings.shelf, request, {
-      baseUrl: settings.baseUrl,
-      timeoutMs: ctx.flags.timeout,
-      evalCohort: settings.evalCohort,
-      headers: auth.headers,
-      ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
-    });
-    legs.push(await recordLeg('team', response.shelf, request, ctx, settings, actor));
-    if (response.public !== null) {
-      legs.push(await recordLeg('public', response.public, request, ctx, settings, actor));
-    }
-  } else {
+  }
+  if (legs.length === 0) {
     const request = buildSearchRequest(input);
     const response = await postSearch(request, {
       baseUrl: settings.baseUrl,
@@ -177,6 +205,12 @@ export async function runSearch(
   const decision = primary.response.items.length > 0 ? 'CANDIDATES' : 'MISS';
 
   const humanLines: string[] = [
+    // First, whichever way the search then went: a shelf that went unasked is
+    // something the operator has to hear about, and the search succeeding on
+    // the marketplace is exactly when nothing else would say so.
+    ...(shelfError === undefined
+      ? []
+      : [`The shelf was not searched: ${sanitizeForTerminal(shelfError)}.`, DOCTOR_FIX]),
     ...(decision === 'MISS'
       ? [
           `MISS, no candidates (searchId ${primary.response.searchId})`,
@@ -197,6 +231,9 @@ export async function runSearch(
     data: labelled
       ? {
           ...(data as object),
+          // The machine half of the line above: a caller that never renders
+          // humanLines still sees that a shelf it configured went unasked.
+          ...(shelfError === undefined ? {} : { shelfError }),
           shelves: legs.map((leg) => ({
             shelf: leg.shelf,
             baseUrl: settings.baseUrl,

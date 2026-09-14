@@ -702,15 +702,45 @@ describe('runSearch on a shelf', () => {
     expect(String((err as CliError).fix)).toContain('tenjin org list');
   });
 
-  it('with no wallet it refuses rather than silently searching the marketplace', async () => {
-    // The daemon falls back to public and writes the reason on its row; a HUMAN
-    // typing `tenjin search` gets told, because a quiet public search would hide
-    // the misconfiguration behind ordinary-looking results.
+  /**
+   * THE LEG RULE, MIRRORED. A credential failure never silences a public
+   * answer: `runSearch` is what the MCP `tenjin_search` tool calls, and a
+   * non-TTY run cannot mint, so a hard refusal here would leave an agent on a
+   * shelf machine with NO results where the daemon beside it still returns
+   * marketplace ones. The reason is loud; the search still answers.
+   */
+  it('with no wallet it falls back to the unsigned public route and says so', async () => {
     await writeShelfConfig();
-    const { fetch } = shelfStub(() => ({ shelf: MISS, public: null }));
+    const { fetch, sent } = shelfStub(() => publicHit);
+    const result = await runSearch({ question: 'q' }, shelfCtx(), {
+      fetchImpl: fetch,
+      env: {} as NodeJS.ProcessEnv,
+    });
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.url).toBe(`${BASE}/api/search`);
+    expect(sent[0]?.headers['tenjin-session-delegation']).toBeUndefined();
+    expect(sent[0]?.body.includePublic).toBeUndefined();
+    const lines = result.humanLines?.join('\n') ?? '';
+    expect(lines).toContain('The shelf was not searched');
+    expect(lines).toContain('has no wallet');
+    // The machine half, for a caller that renders no human lines at all.
+    expect((result.data as { shelfError?: string }).shelfError).toContain('no wallet');
+    expect((result.data as { shelves: unknown[] }).shelves).toEqual([
+      { shelf: 'public', baseUrl: BASE, searchId: publicHit.searchId, matched: 1 },
+    ]);
+  });
+
+  it('with the marketplace turned off there is nothing to fall back to, so it refuses', async () => {
+    // `team.publicFallback: off` is this machine asking for the shelf ALONE, so
+    // a credential failure withholds no public answer and the refusal is the
+    // honest result rather than a search of a list the operator turned off.
+    await writeShelfConfig({ team: { publicFallback: 'off' } });
+    const { fetch, sent } = shelfStub(() => ({ shelf: MISS, public: null }));
     await expect(
       runSearch({ question: 'q' }, shelfCtx(), { fetchImpl: fetch, env: {} }),
     ).rejects.toMatchObject({ code: 'REFUSED' });
+    expect(sent).toHaveLength(0);
   });
 
   it('with no shelf set it is one unsigned public call, exactly as before', async () => {
