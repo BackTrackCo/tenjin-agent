@@ -240,6 +240,27 @@ def project(
                 seeds["published"] += 1
                 if seed.get("deleted") is not True:
                     seeds["not_deleted"] += 1
+    # Where each injection came from, per arm: a piece this run put on the
+    # shelf itself (the arm's seeded lesson, or the natural arm's producer
+    # publication) against one that was already standing, which is what `flat`
+    # names. An arm's delivery count alone cannot tell reuse of the prepared
+    # memory from a coincidental hit on the rest of the corpus, and a run whose
+    # deliveries are mostly flat is reporting the corpus, not the treatment.
+    delivery_origin: dict[str, dict[str, int]] = {}
+    for record in accepted.values():
+        own = {seed.get("piece_id") for seed in record["isolation"].get("seed") or []}
+        producer = record["isolation"].get("producer")
+        if isinstance(producer, dict):
+            own |= {item.get("piece_id") for item in (producer.get("publication") or {}).get("pieces", []) if item.get("published") is True}
+        own.discard(None)
+        row = delivery_origin.setdefault(record["arm_id"], {"attempts": 0, "injections": 0, "seeded": 0, "flat": 0})
+        row["attempts"] += 1
+        for fire in record["delivery"].get("fires", []):
+            sent = fire.get("delivered")
+            if not isinstance(sent, str) or not sent.startswith("inject:") or not sent[7:]:
+                continue
+            row["injections"] += 1
+            row["seeded" if sent[7:] in own else "flat"] += 1
     # The failure path per arm: which fingerprints the failure fire carried, whether the
     # keys leg hit, whether the reporter's artifact existed, what was delivered.
     failure_keys: dict[str, dict[str, Any]] = {}
@@ -342,6 +363,7 @@ def project(
         "origins": origins,
         "injections": injections.project(accepted, manifest_hash, schedule_hash, injection_review),
         "seeds": seeds,
+        "delivery_origin": delivery_origin,
         "failure_keys": failure_keys,
         "discovery": found,
         "trials": [
@@ -748,6 +770,14 @@ def render(report: dict[str, Any], *, include_overview: bool = True) -> str:
         lines.append(f"seeded pieces: {seeds['published']} published to the team shelf, {seeds['published'] - seeds['not_deleted']} deleted")
         if seeds["not_deleted"]:
             lines.append(f"WARNING: {seeds['not_deleted']} seeded piece(s) still on the team shelf: delete them by hand (isolation.seed.piece_id in the records)")
+    # Seeded against flat, per arm: an injection off a piece this run published
+    # itself is the treatment, and one off the standing corpus is not.
+    for arm_id, row in sorted((report.get("delivery_origin") or {}).items()):
+        if row["injections"]:
+            lines.append(
+                f"delivery origin {arm_id}: {row['seeded']} of {plural(row['injections'], 'injection')} came from a piece this run seeded, "
+                f"{row['flat']} from the corpus already standing (flat)"
+            )
     # The two shelf arms are byte-identical in their settings, so the reading
     # names which one had the marketplace leg on.
     for arm_id, arm in sorted(report["arms"].items()):

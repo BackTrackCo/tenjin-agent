@@ -716,3 +716,42 @@ def test_json_headline_flags_follow_the_whole_run_gate(tmp_path, condition):
     assert (report.run_status(value) == report.PROVISIONAL_STATUS) is expected
     # Diagnostic numbers remain available; the report does not delete the failed attempt.
     assert len(value["trials"]) == len(accepted)
+
+
+def test_an_injection_is_split_into_the_run_own_seed_and_the_standing_corpus(corpus, project: Project) -> None:
+    """An arm's delivery count cannot tell reuse of the prepared memory from a hit on the rest of the corpus."""
+    _manifest, _digest, accepted, _excluded = corpus
+    records_in = copies(accepted)
+    first = sorted(records_in)[0]
+    seeded_arm = records_in[first]["arm_id"]
+    natural = next(trial for trial in sorted(records_in) if records_in[trial]["arm_id"] != seeded_arm)
+    natural_arm = records_in[natural]["arm_id"]
+    actor = list(records_in[first]["actors"][0]["key"])
+    seed = {"lesson": "fam", "title": "The lesson", "nonce": "20260908T000000Z-0badf00d", "key_hashes": ["abcd"], "keys": 1, "shelf_origin": "team-shelf.example", "piece_id": "piece-seeded", "published": True, "probe": None, "deleted": True, "delete_error": None}
+    records_in[first]["isolation"] = {**records_in[first]["isolation"], "seed": [seed]}
+    records_in[first]["delivery"] = {
+        **records_in[first]["delivery"],
+        "fires": [
+            {"fire_id": "f1", "actor": actor, "delivered": "inject:piece-seeded"},
+            {"fire_id": "f2", "actor": actor, "delivered": "inject:piece-standing"},
+            {"fire_id": "f3", "actor": actor, "delivered": None},
+        ],
+    }
+    # The natural arm publishes through its producer rather than a seed, and
+    # its own piece is the treatment just the same.
+    records_in[natural]["isolation"] = {
+        **records_in[natural]["isolation"],
+        "producer": {"outcome": "pass", "publication": {"pieces": [{"piece_id": "piece-made", "published": True}]}},
+    }
+    records_in[natural]["delivery"] = {
+        **records_in[natural]["delivery"],
+        "fires": [{"fire_id": "f4", "actor": list(records_in[natural]["actors"][0]["key"]), "delivered": "inject:piece-made"}],
+    }
+    published = project(accepted_records=records_in)
+    origin = published["delivery_origin"]
+    assert (origin[seeded_arm]["injections"], origin[seeded_arm]["seeded"], origin[seeded_arm]["flat"]) == (2, 1, 1)
+    assert (origin[natural_arm]["injections"], origin[natural_arm]["seeded"], origin[natural_arm]["flat"]) == (1, 1, 0)
+    rendered = report.render(published)
+    assert f"delivery origin {seeded_arm}: 1 of 2 injections came from a piece this run seeded, 1 from the corpus already standing (flat)" in rendered
+    assert f"delivery origin {natural_arm}: 1 of 1 injection came from a piece this run seeded, 0 from the corpus already standing (flat)" in rendered
+    assert "delivery origin" not in report.render(project())
