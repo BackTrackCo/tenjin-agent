@@ -515,6 +515,7 @@ def sweep(run_dir: Path, docker: Docker | None = None) -> dict[str, Any]:
     """
     directory = run_dir / PROJECTS
     removed: dict[str, bool] = {}
+    failed: list[str] = []
     for path in sorted(directory.glob("*.project")) if directory.is_dir() else []:
         try:
             project = path.read_text(encoding="utf-8").strip()
@@ -522,8 +523,18 @@ def sweep(run_dir: Path, docker: Docker | None = None) -> dict[str, Any]:
             # A finishing trial already removed its project and marker.
             continue
         if project:
-            removed[project] = remove_project(project, docker)
+            try:
+                removed[project] = remove_project(project, docker)
+            except ImageError:
+                # One project Docker will not remove keeps its own line for a
+                # retry and nothing else: raising from inside the loop stranded
+                # every later project, and a persistently wedged one at the
+                # front of the sort order stranded them on every retry too.
+                failed.append(project)
+                continue
         path.unlink(missing_ok=True)
+    if failed:
+        raise ImageError("cleanup_failed", "could not remove " + ", ".join(failed))
     return {"run": str(run_dir), "projects": removed}
 
 

@@ -135,6 +135,15 @@ def test_a_root_without_a_result_row_is_unresolved_too(unsettled) -> None:
     assert clock.now == 0.5
 
 
+def test_a_teardown_failure_invalidates_its_own_attempt_and_not_the_run(one_trial: OneTrial, make_manifest, make_runtime) -> None:
+    # Docker failing to remove a finished attempt's container used to raise out
+    # of the trial, so a completed attempt's evidence was lost and every later
+    # trial went unrun. The attempt is the invalid one; the run continues.
+    record = one_trial(make_manifest(), make_runtime(spawn=support.fake_spawn(cleanup_error="could not remove container in project bench2-x")))
+    assert record["outcome"] == "invalid"
+    assert record["invalid_reason"] == "isolation:container_cleanup"
+
+
 def test_a_task_failure_and_an_infrastructure_failure_are_different_outcomes(one_trial: OneTrial, make_manifest, make_runtime) -> None:
     failed = one_trial(make_manifest(), make_runtime(spawn=support.fake_spawn(answer="41\n")))
     assert failed["outcome"] == "fail"

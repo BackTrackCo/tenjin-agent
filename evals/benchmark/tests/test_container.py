@@ -379,6 +379,25 @@ def test_a_cleanup_that_spends_the_line_before_the_project_exists_gets_it_back(t
     assert container.sweep(tmp_path)["projects"] == {plan.name: False}
 
 
+def test_one_project_docker_will_not_remove_does_not_strand_the_others(tmp_path: Path, monkeypatch) -> None:
+    # Sort order put the wedged project first, so raising from inside the loop
+    # left every later project running, on this cleanup and on every retry.
+    container.record_project(tmp_path, "a", "bench2-a")
+    container.record_project(tmp_path, "b", "bench2-b")
+    def remove(project, docker=None):
+        if project == "bench2-a":
+            raise ImageError("cleanup_failed", "could not remove container in project bench2-a")
+        return True
+    monkeypatch.setattr(container, "remove_project", remove)
+    with pytest.raises(ImageError, match="bench2-a"):
+        container.sweep(tmp_path)
+    assert (tmp_path / container.PROJECTS / "a.project").is_file()
+    # The line that was removed is spent, so the retry is only the wedged one.
+    assert not (tmp_path / container.PROJECTS / "b.project").exists()
+    monkeypatch.setattr(container, "remove_project", lambda project, docker=None: True)
+    assert container.sweep(tmp_path)["projects"] == {"bench2-a": True}
+
+
 @pytest.mark.parametrize("failed", ("container-list", "container-remove", "network-list", "network-remove"))
 def test_cleanup_failure_keeps_the_project_marker_for_retry(tmp_path, failed):
     container.record_project(tmp_path, "trial-a", "bench2-trial-a")

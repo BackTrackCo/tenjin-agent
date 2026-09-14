@@ -211,6 +211,7 @@ def fake_spawn(
     returncode: int = 0,
     before: Before | None = None,
     after: Before | None = None,
+    cleanup_error: str | None = None,
 ) -> runner.Spawn:
     """An in-process stand-in for the executor: writes what an agent would leave.
 
@@ -236,7 +237,7 @@ def fake_spawn(
             (roots.repo / "answer.txt").write_text(answer, encoding="utf-8")
         if after is not None:
             after(launch, roots)
-        return runner.Completed(returncode=returncode, stderr="", timed_out=False)
+        return runner.Completed(returncode=returncode, stderr="", timed_out=False, cleanup_error=cleanup_error)
 
     return spawn
 

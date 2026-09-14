@@ -58,6 +58,10 @@ class Completed:
     stderr: str
     timed_out: bool
     agent_time_s: float | None = None
+    # What Docker said when tearing this attempt's container down. Set means
+    # the attempt ran and the host then failed to clean up after it, which is
+    # this one attempt's invalidity and never the run's.
+    cleanup_error: str | None = None
 
 
 Spawn = Callable[[executor.Launch, artifact.TrialRoots, float], Completed]
@@ -106,41 +110,61 @@ def container_spawn(launch: executor.Launch, roots: artifact.TrialRoots, timeout
     separated_out = separated_err = None
     if launch.separate_streams:
         command, separated_out, separated_err = container.split_streams(command, roots.output)
+    finished = False
+    cleanup_error: str | None = None
     try:
         from . import database_service
         with container.Container(recipe=recipe, ledger=container.Ledger(roots.run_dir, roots.trial_id)) as box, database_service.model_service(box, launch.database) as database_environment:
             refused = container.daemon_error(roots.output)
             if refused is not None:
-                return Completed(returncode=container.DAEMON_REFUSED, stderr=refused, timed_out=False)
-            agent_started = time.monotonic()
-            try:
-                ran = box.exec(
-                    command,
-                    cwd=recipe.workdir,
-                    environment={**container.forwarded(recipe, os.environ), **database_environment},
-                    timeout_s=timeout_s,
-                    stream=None if launch.separate_streams else stream,
-                )
-                completed = Completed(returncode=ran.returncode, stderr=ran.stderr, timed_out=False, agent_time_s=time.monotonic() - agent_started)
-            except RuntimeError as error:
-                # Harbor raises a plain RuntimeError on its own timeout, having
-                # already killed the host-side client. The command inside the
-                # container outlives that and dies with the container below,
-                # which is the same guarantee the process-group kill gave.
-                if "timed out" not in str(error):
-                    raise
-                completed = Completed(returncode=124, stderr=str(error), timed_out=True, agent_time_s=time.monotonic() - agent_started)
-            if recipe.daemon:
-                box.exec([container.TRIAL_ENTRY, container.STOP_ARG], timeout_s=container.STOP_TIMEOUT_S)
+                completed = Completed(returncode=container.DAEMON_REFUSED, stderr=refused, timed_out=False)
+            else:
+                agent_started = time.monotonic()
+                try:
+                    ran = box.exec(
+                        command,
+                        cwd=recipe.workdir,
+                        environment={**container.forwarded(recipe, os.environ), **database_environment},
+                        timeout_s=timeout_s,
+                        stream=None if launch.separate_streams else stream,
+                    )
+                    completed = Completed(returncode=ran.returncode, stderr=ran.stderr, timed_out=False, agent_time_s=time.monotonic() - agent_started)
+                except RuntimeError as error:
+                    # Harbor raises a plain RuntimeError on its own timeout, having
+                    # already killed the host-side client. The command inside the
+                    # container outlives that and dies with the container below,
+                    # which is the same guarantee the process-group kill gave.
+                    if "timed out" not in str(error):
+                        raise
+                    completed = Completed(returncode=124, stderr=str(error), timed_out=True, agent_time_s=time.monotonic() - agent_started)
+                if recipe.daemon:
+                    box.exec([container.TRIAL_ENTRY, container.STOP_ARG], timeout_s=container.STOP_TIMEOUT_S)
+            finished = True
+    except container.ImageError as error:
+        # Docker failed tearing the attempt down, and only that: `finished` is
+        # the last statement of the block, so a failure bringing the container
+        # up or anything the attempt itself raised still ends the run and is
+        # never masked by the teardown error that follows it. Here the attempt
+        # is already spent, and losing its record to a host fault would cost
+        # more than the attempt is worth, so it settles as invalid instead.
+        # `forget_project` below is skipped, so the line survives for cleanup.
+        if not finished:
+            raise
+        cleanup_error = error.detail or error.code
     finally:
         if separated_out is not None and separated_out.is_file():
             stream.write(separated_out.read_text(encoding="utf-8"))
         if separated_err is not None and separated_err.is_file():
             completed = replace(completed, stderr=separated_err.read_text(encoding="utf-8"))
         stream.close()
-        container.stop(recipe.name)
-        container.forget_project(roots.run_dir, roots.trial_id)
-    return completed
+        if cleanup_error is None:
+            try:
+                container.stop(recipe.name)
+            except container.ImageError as error:
+                cleanup_error = error.detail or error.code
+            else:
+                container.forget_project(roots.run_dir, roots.trial_id)
+    return completed if cleanup_error is None else replace(completed, cleanup_error=cleanup_error)
 
 
 def process_spawn(launch: executor.Launch, roots: artifact.TrialRoots, timeout_s: float) -> Completed:
@@ -537,6 +561,8 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
     # whatever else it did. A sentinel hit outranks an accounting gap for the
     # same reason.
     cleanup_reason = "isolation:seed_cleanup" if any(value is not None for value in (provision_stop or {}).get("seed_deleted", {}).values()) else None
+    if cleanup_reason is None and completed.cleanup_error:
+        cleanup_reason = "isolation:container_cleanup"
     try:
         provider_reason = "provider:rate_limit" if spec.evidence.limited(sessions, launch.root_session_id, roots.stream) else None
     except spec.evidence.errors:

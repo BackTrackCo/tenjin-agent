@@ -190,6 +190,75 @@ def test_historical_database_is_requested_for_model_tools(tmp_path, monkeypatch)
     assert events == ['database ready', 'model started', 'database removed', 'container removed']
 
 
+def test_a_teardown_failure_is_the_attempts_own_invalidity_and_keeps_its_project_line(tmp_path, monkeypatch):
+    # Docker failing on the way out used to raise through `container_spawn` and
+    # `run_trial`, so one finished attempt's teardown ended the whole run and
+    # took that attempt's evidence with it.
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    from evals.benchmark import container, database_service, runner
+    item = request(tmp_path)
+    launch = codex_live.launch(item)
+    @contextmanager
+    def service(box, enabled):
+        yield {}
+    class Box:
+        def __init__(self, **kwargs): pass
+        def __enter__(self): return self
+        def __exit__(self, *args):
+            raise container.ImageError("cleanup_failed", "could not remove container in project bench2-x")
+        def exec(self, command, **kwargs):
+            return SimpleNamespace(returncode=0, stderr="", stdout="")
+    monkeypatch.setattr(database_service, "model_service", service)
+    monkeypatch.setattr(container, "Container", Box)
+    monkeypatch.setattr(container, "daemon_error", lambda output: None)
+    monkeypatch.setattr(container, "stop", lambda name: pytest.fail("teardown already failed; do not ask Docker again here"))
+    result = runner.container_spawn(launch, item.roots, 5)
+    assert result.returncode == 0 and not result.timed_out
+    assert result.cleanup_error == "could not remove container in project bench2-x"
+    # The line survives, so `cleanup --run` still reaches whatever is left.
+    assert (item.roots.run_dir / container.PROJECTS / f"{item.roots.trial_id}.project").is_file()
+
+
+def test_an_attempt_that_broke_is_not_relabelled_as_a_teardown_failure(tmp_path, monkeypatch):
+    # The teardown error arrives last and would otherwise mask what actually
+    # broke, turning a defect into a tidy `invalid` record.
+    from contextlib import contextmanager
+    from evals.benchmark import container, database_service, runner
+    item = request(tmp_path)
+    launch = codex_live.launch(item)
+    @contextmanager
+    def service(box, enabled):
+        yield {}
+    class Box:
+        def __init__(self, **kwargs): pass
+        def __enter__(self): return self
+        def __exit__(self, *args):
+            raise container.ImageError("cleanup_failed", "could not remove container in project bench2-x")
+        def exec(self, command, **kwargs):
+            raise RuntimeError("harbor answered something this seam does not handle")
+    monkeypatch.setattr(database_service, "model_service", service)
+    monkeypatch.setattr(container, "Container", Box)
+    monkeypatch.setattr(container, "daemon_error", lambda output: None)
+    with pytest.raises(container.ImageError, match="cleanup_failed") as caught:
+        runner.container_spawn(launch, item.roots, 5)
+    assert isinstance(caught.value.__context__, RuntimeError)
+
+
+def test_a_failure_bringing_the_container_up_is_still_the_runs_problem(tmp_path, monkeypatch):
+    from evals.benchmark import container, runner
+    item = request(tmp_path)
+    launch = codex_live.launch(item)
+    class Box:
+        def __init__(self, **kwargs): pass
+        def __enter__(self):
+            raise container.ImageError("harbor_missing", "no harbor importable")
+        def __exit__(self, *args): pass
+    monkeypatch.setattr(container, "Container", Box)
+    with pytest.raises(container.ImageError, match="harbor_missing"):
+        runner.container_spawn(launch, item.roots, 5)
+
+
 @pytest.mark.parametrize("final", ["removed", "already-removed", "refused"])
 def test_hook_cleanup_retries_only_its_owned_container_after_docker_timeout(monkeypatch, final):
     import subprocess
