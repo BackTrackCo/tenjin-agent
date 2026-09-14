@@ -11,21 +11,18 @@ import {
 import type { App, SessionConfig } from "../../src";
 
 const PASSWORD = "1234567123456712345671234567123456712345671234567";
-const OTHER_PASSWORD = "abcdefgabcdefgabcdefgabcdefgabcdefgabcdefgabcdefg";
 const START = new Date("2026-03-04T12:00:00.000Z");
 
-describe("session restore failures", () => {
+describe("renewing a session", () => {
   let app: App;
   let request: TestAgent;
   let idCounter: number;
-  const onRestoreError = vi.fn();
 
   function mount(config: Partial<SessionConfig> = {}) {
     const sessionConfig: SessionConfig = {
       name: "h3-test",
       password: PASSWORD,
       generateId: () => String(++idCounter),
-      onRestoreError,
       ...config,
     } as SessionConfig;
 
@@ -34,6 +31,14 @@ describe("session restore failures", () => {
         const session = await useSession(event, sessionConfig);
         if (event.method === "POST") {
           await session.update(await readBody(event));
+        }
+        if (event.path === "/renew") {
+          const returned = await session.renew();
+          return {
+            id: session.id,
+            data: session.data,
+            chainable: typeof returned?.update === "function",
+          };
         }
         return { id: session.id, data: session.data };
       }),
@@ -44,7 +49,6 @@ describe("session restore failures", () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(START);
     idCounter = 0;
-    onRestoreError.mockReset();
     app = createApp({ debug: true });
     request = supertest(toNodeListener(app));
   });
@@ -53,137 +57,115 @@ describe("session restore failures", () => {
     vi.useRealTimers();
   });
 
-  function cookieOf(result: { headers: Record<string, any> }): string {
-    return result.headers["set-cookie"][0];
+  type Result = { headers: Record<string, any>; body: any };
+
+  function nextCookie(result: Result, previous: string): string {
+    const issued = result.headers["set-cookie"];
+    return issued ? issued[0] : previous;
+  }
+
+  function expiryOf(cookie: string): number {
+    return Date.parse(/expires=([^;]+)/i.exec(cookie)?.[1] ?? "");
   }
 
   function advance(seconds: number) {
     vi.setSystemTime(new Date(Date.now() + seconds * 1000));
   }
 
-  it("says nothing when there was no session to restore", async () => {
-    mount();
-
-    const result = await request.get("/");
-
-    expect(result.body.id).toEqual("1");
-    expect(onRestoreError).not.toHaveBeenCalled();
-  });
-
-  it("says nothing when the session restores", async () => {
-    mount();
+  it("keeps the session it renewed", async () => {
+    mount({ maxAge: 60 });
 
     const first = await request.post("/").send({ user: "ada" });
-    const second = await request.get("/").set("Cookie", cookieOf(first));
+    const cookie = nextCookie(first, "");
 
-    expect(second.body.data).toEqual({ user: "ada" });
-    expect(onRestoreError).not.toHaveBeenCalled();
+    const renewed = await request.get("/renew").set("Cookie", cookie);
+
+    expect(renewed.body.id).toEqual("1");
+    expect(renewed.body.data).toEqual({ user: "ada" });
+    expect(renewed.body.chainable).toBe(true);
   });
 
-  it("says nothing for a restored session that holds no data", async () => {
-    mount();
+  it("starts the window again", async () => {
+    mount({ maxAge: 60 });
 
-    const first = await request.get("/");
-    const second = await request.get("/").set("Cookie", cookieOf(first));
+    const first = await request.post("/").send({ user: "ada" });
+    let cookie = nextCookie(first, "");
 
-    expect(second.body.id).toEqual("1");
-    expect(second.body.data).toEqual({});
-    expect(onRestoreError).not.toHaveBeenCalled();
+    advance(50);
+    const renewed = await request.get("/renew").set("Cookie", cookie);
+    cookie = nextCookie(renewed, cookie);
+
+    advance(50);
+    const later = await request.get("/").set("Cookie", cookie);
+
+    expect(later.body.id).toEqual("1");
+    expect(later.body.data).toEqual({ user: "ada" });
   });
 
-  it("reports a tampered token as invalid", async () => {
-    mount();
-
-    const result = await request
-      .get("/")
-      .set("Cookie", "h3-test=not-a-real-session-token");
-
-    expect(onRestoreError).toHaveBeenCalledTimes(1);
-    expect(onRestoreError.mock.calls[0]?.[1]).toMatchObject({
-      reason: "invalid",
-    });
-    expect(onRestoreError.mock.calls[0]?.[1]?.error).toBeInstanceOf(Error);
-    expect(result.body.id).toEqual("1");
-  });
-
-  it("reports a token sealed with another password as invalid", async () => {
-    const other = createApp({ debug: true });
-    other.use(
-      eventHandler(async (event) => {
-        const session = await useSession(event, {
-          name: "h3-test",
-          password: OTHER_PASSWORD,
-        });
-        return { id: session.id };
-      }),
-    );
-    const foreign = await supertest(toNodeListener(other)).get("/");
-
-    mount();
-    await request.get("/").set("Cookie", cookieOf(foreign));
-
-    expect(onRestoreError).toHaveBeenCalledTimes(1);
-    expect(onRestoreError.mock.calls[0]?.[1]).toMatchObject({
-      reason: "invalid",
-    });
-  });
-
-  it("reports a token past its window as expired", async () => {
+  it("issues a cookie that expires later than the one before it", async () => {
     mount({ maxAge: 60 });
 
     const first = await request.get("/");
-    const cookie = cookieOf(first);
+    const cookie = nextCookie(first, "");
+
+    advance(50);
+    const renewed = await request.get("/renew").set("Cookie", cookie);
+
+    expect(renewed.headers["set-cookie"]).toBeTruthy();
+    expect(
+      expiryOf(renewed.headers["set-cookie"][0]) - expiryOf(cookie),
+    ).toBeGreaterThanOrEqual(45_000);
+  });
+
+  it("does not keep a session alive that was never renewed", async () => {
+    mount({ maxAge: 60 });
+
+    const first = await request.post("/").send({ user: "ada" });
+    const cookie = nextCookie(first, "");
 
     advance(70);
-    const second = await request.get("/").set("Cookie", cookie);
+    const later = await request.get("/").set("Cookie", cookie);
 
-    expect(onRestoreError).toHaveBeenCalledTimes(1);
-    expect(onRestoreError.mock.calls[0]?.[1]).toMatchObject({
-      reason: "expired",
-    });
-    expect(second.body.id).toEqual("2");
-    expect(second.body.data).toEqual({});
+    expect(later.body.id).toEqual("2");
+    expect(later.body.data).toEqual({});
   });
 
-  it("says nothing while the token is still inside its window", async () => {
+  it("can be renewed more than once", async () => {
     mount({ maxAge: 60 });
 
-    const first = await request.get("/");
+    const first = await request.post("/").send({ user: "ada" });
+    let cookie = nextCookie(first, "");
 
-    advance(30);
-    await request.get("/").set("Cookie", cookieOf(first));
+    for (const _ of [1, 2, 3]) {
+      advance(50);
+      const renewed = await request.get("/renew").set("Cookie", cookie);
+      cookie = nextCookie(renewed, cookie);
+      expect(renewed.body.id).toEqual("1");
+    }
 
-    expect(onRestoreError).not.toHaveBeenCalled();
+    advance(50);
+    const later = await request.get("/").set("Cookie", cookie);
+    expect(later.body.data).toEqual({ user: "ada" });
   });
 
-  it("hands the callback the event it happened on", async () => {
-    mount();
+  it("is harmless on a session that has only just started", async () => {
+    mount({ maxAge: 60 });
 
-    await request
-      .get("/some/path")
-      .set("Cookie", "h3-test=not-a-real-session-token");
+    const renewed = await request.get("/renew");
 
-    expect(onRestoreError.mock.calls[0]?.[0]?.path).toEqual("/some/path");
+    expect(renewed.body.id).toEqual("1");
+    expect(renewed.headers["set-cookie"]).toBeTruthy();
   });
 
-  it("still works without the callback", async () => {
-    idCounter = 0;
-    const plain = createApp({ debug: true });
-    plain.use(
-      eventHandler(async (event) => {
-        const session = await useSession(event, {
-          name: "h3-test",
-          password: PASSWORD,
-          generateId: () => String(++idCounter),
-        });
-        return { id: session.id };
-      }),
-    );
+  it("works on a session with no maxAge at all", async () => {
+    mount({});
 
-    const result = await supertest(toNodeListener(plain))
-      .get("/")
-      .set("Cookie", "h3-test=not-a-real-session-token");
+    const first = await request.post("/").send({ user: "ada" });
+    const cookie = nextCookie(first, "");
 
-    expect(result.body.id).toEqual("1");
+    const renewed = await request.get("/renew").set("Cookie", cookie);
+
+    expect(renewed.body.id).toEqual("1");
+    expect(renewed.body.data).toEqual({ user: "ada" });
   });
 });

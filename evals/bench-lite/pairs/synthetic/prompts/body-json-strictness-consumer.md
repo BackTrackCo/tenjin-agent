@@ -28,9 +28,8 @@ const body = await readBody(event, { limit: 64 * 1024 });
 - The size is the size of the raw body in bytes, not its length in characters: a six-character
   string that encodes to ten bytes is ten bytes.
 - An empty body is under every limit.
-- **The limit is about this read.** A handler that asks for a limit gets it enforced even when an
-  earlier layer in the stack already read the body without one, and a reader that names no limit
-  still gets the body. Two reads within the limit both get the parsed body.
+- The limit belongs to the read that asked for it: a reader that names no limit is not affected
+  by one another reader asked for, and a body inside the limit is returned as usual.
 - Without `limit`, nothing changes: no ceiling, whatever the body's size.
 - It composes with `strict`: both may be given in the same options object.
 

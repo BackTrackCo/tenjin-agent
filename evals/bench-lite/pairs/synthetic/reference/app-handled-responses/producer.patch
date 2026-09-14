@@ -1,43 +1,92 @@
 diff --git a/src/app.ts b/src/app.ts
-index 2f8e4fa..c30d4d3 100644
+index 2f8e4fa..3e5e4c3 100644
 --- a/src/app.ts
 +++ b/src/app.ts
-@@ -66,6 +66,10 @@ export interface AppOptions {
-     event: H3Event,
+@@ -67,12 +67,20 @@ export interface AppOptions {
      response?: { body?: unknown },
    ) => void | Promise<void>;
-+  onResponse?: (
-+    event: H3Event,
-+    response: { statusCode: number; body?: unknown; handled: boolean },
-+  ) => void | Promise<void>;
    websocket?: WebSocketOptions;
++  /** Count the responses this app serves, by status code. */
++  collectStats?: boolean;
++}
++
++export interface AppStats {
++  total: number;
++  byStatus: Record<string, number>;
  }
  
-@@ -197,6 +201,13 @@ export function createAppEventHandler(stack: Stack, options: AppOptions) {
+ export interface App {
+   stack: Stack;
+   handler: EventHandler;
+   options: AppOptions;
++  stats?: AppStats;
+   use: AppUse;
+   resolve: EventHandlerResolver;
+   readonly websocket: WebSocketOptions;
+@@ -84,7 +92,11 @@ export interface App {
+ export function createApp(options: AppOptions = {}): App {
+   const stack: Stack = [];
+ 
+-  const handler = createAppEventHandler(stack, options);
++  const stats: AppStats | undefined = options.collectStats
++    ? { total: 0, byStatus: {} }
++    : undefined;
++
++  const handler = createAppEventHandler(stack, options, stats);
+ 
+   const resolve = createResolver(stack);
+   handler.__resolve__ = resolve;
+@@ -98,6 +110,7 @@ export function createApp(options: AppOptions = {}): App {
+     handler,
+     stack,
+     options,
++    stats,
+     get websocket() {
+       return getWebsocket();
+     },
+@@ -132,7 +145,11 @@ export function use(
+   return app;
+ }
+ 
+-export function createAppEventHandler(stack: Stack, options: AppOptions) {
++export function createAppEventHandler(
++  stack: Stack,
++  options: AppOptions,
++  stats?: AppStats,
++) {
+   const spacing = options.debug ? 2 : undefined;
+ 
+   return eventHandler(async (event) => {
+@@ -197,6 +214,7 @@ export function createAppEventHandler(stack: Stack, options: AppOptions) {
            await options.onBeforeResponse(event, _response);
          }
          await handleHandlerResponse(event, _response.body, spacing);
-+        if (options.onResponse) {
-+          await options.onResponse(event, {
-+            statusCode: event.node.res.statusCode,
-+            body: _response.body,
-+            handled: false,
-+          });
-+        }
++        _countResponse(stats, event);
          if (options.onAfterResponse) {
            event._onAfterResponseCalled = true;
            await options.onAfterResponse(event, _response);
-@@ -206,6 +217,13 @@ export function createAppEventHandler(stack: Stack, options: AppOptions) {
+@@ -206,6 +224,7 @@ export function createAppEventHandler(stack: Stack, options: AppOptions) {
  
        // Already handled
        if (event.handled) {
-+        if (options.onResponse) {
-+          await options.onResponse(event, {
-+            statusCode: event.node.res.statusCode,
-+            body: undefined,
-+            handled: true,
-+          });
-+        }
++        _countResponse(stats, event);
          if (options.onAfterResponse) {
            event._onAfterResponseCalled = true;
            await options.onAfterResponse(event, undefined);
+@@ -228,6 +247,16 @@ export function createAppEventHandler(stack: Stack, options: AppOptions) {
+   });
+ }
+ 
++/** One response, counted under the status the client sees. */
++function _countResponse(stats: AppStats | undefined, event: H3Event): void {
++  if (!stats) {
++    return;
++  }
++  const key = String(event.node.res.statusCode);
++  stats.byStatus[key] = (stats.byStatus[key] ?? 0) + 1;
++  stats.total += 1;
++}
++
+ function createResolver(stack: Stack): EventHandlerResolver {
+   return async (path: string) => {
+     let _layerPath: string;

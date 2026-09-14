@@ -24,13 +24,8 @@ const app = createApp({
 
 `AppOptions` gains `responseHeaders?: Record<string, string>`.
 
-Every response the app produces carries them. Every response means:
-
-- a response from a handler that returned a value;
-- a response a handler wrote itself, through `send`, `sendNoContent`, `sendRedirect`,
-  `sendStream` or `sendWebResponse`;
-- the 404 h3 raises when nothing in the stack answered;
-- an error response, including one from a handler that threw.
+Every response the app serves carries them, whatever the handler did to produce it, and
+including the 404 and the error responses h3 produces itself.
 
 A handler that sets the same header itself wins: the app's value is a default, not an override.
 Headers the handler does not touch are still there.

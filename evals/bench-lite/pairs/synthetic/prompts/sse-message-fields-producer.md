@@ -6,43 +6,44 @@ server or watcher running. Do not spawn subagents.
 
 ---
 
-## Server-sent events arrive empty when the payload is not a string
+## Feature request: stream an iterable to the client as server-sent events
 
-Two reports of the same thing. Someone streams progress from a long job:
+Every app that streams progress writes the same handler: make an event stream, loop over
+something that yields, push each item, remember to close at the end, remember to return the
+stream. It is six lines of ceremony around one loop, and the docs example for the SSE utils even
+imports a `sendEventStream` that does not exist yet.
+
+Add it.
 
 ```ts
-eventStream.push({ event: "progress", data: { pct: 40, stage: "build" } });
+app.use(
+  eventHandler((event) => sendEventStream(event, watchBuildProgress())),
+);
 ```
-
-The browser's `onmessage` fires, `event.data` is the empty string, and there is nothing in the
-server log. Switching to `JSON.stringify` by hand fixes it, which is how both reporters worked it
-out, eventually.
-
-An event stream is the natural way to push structured updates, and every client parses `data`
-with `JSON.parse`. Serialise the payload instead of losing it.
 
 ### Interface contract
 
-`EventStreamMessage.data` takes any JSON-serialisable value, and
-`formatEventStreamMessage(message)` turns it into the `data:` lines of one SSE message:
+Export `sendEventStream(event, source, options?)` from the SSE utils, alongside
+`createEventStream`.
 
-- A **string** is sent as it stands, not quoted and not re-encoded:
-  `{ data: "hello world" }` gives `data: hello world\n\n`, and a string that already holds JSON
-  (`'{"already":"json"}'`) is sent unchanged.
-- **Anything else** is serialised with JSON: an object gives `data: {"pct":40}`, an array gives
-  `data: [1,2,3]`, and a number, a boolean or `null` give `data: 40`, `data: false`,
-  `data: null`.
-- `undefined` keeps today's behaviour and produces one empty data line, `data: \n\n`.
-- A payload whose serialised form contains newlines is still split across one `data:` line per
-  line, as a multi-line string is today.
-- The `event`, `id` and `retry` lines keep their current shape and their current order relative
-  to the data lines.
-- `formatEventStreamMessages(messages)` serialises each message the same way.
-
-`EventStream.push` accepts the same payloads, since it hands the message to the formatter.
+- `source` is an iterable or an async iterable. Each item it yields becomes **one** message to
+  the client, in order.
+- An item is either the message's payload, or an object that names its own fields:
+  `{ id?, event?, data }`.
+- The payload can be anything a JSON API deals in. A string arrives at the client as it stands;
+  an object, an array, a number or a boolean arrives as JSON, so `JSON.parse(event.data)` in the
+  browser gives back what the handler yielded.
+- An item may carry an `id`, a string or a number, which the client sees on that message. `0` is
+  a real id: it is the first message of a stream that numbers from zero.
+- An item may carry an `event` name, which the client sees on that message.
+- When the source is exhausted the stream closes and the response ends. An empty source is a
+  valid, empty stream.
+- The response is a normal h3 event stream: status 200, `content-type: text/event-stream`, and
+  the handler returns what `sendEventStream` returns.
+- `options` are the `EventStreamOptions` `createEventStream` already takes.
 
 ### Scope
 
-- `formatEventStreamMessage`, `formatEventStreamMessages`, `createEventStream` and `EventStream`
-  keep the names, signatures and exports they have now, beyond `data` accepting more types.
+- `createEventStream`, `EventStream` and its methods keep the names, signatures and exports they
+  have now.
 - Behaviour the ticket does not name stays exactly as it is today.

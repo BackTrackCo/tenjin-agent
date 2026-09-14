@@ -1,32 +1,38 @@
 import supertest from "supertest";
 import type TestAgent from "supertest/lib/agent";
-import { describe, it, expect, vi } from "vitest";
-import {
-  createApp,
-  toNodeListener,
-  eventHandler,
-  createError,
-} from "../../src";
-import type { AppOptions } from "../../src";
+import { describe, it, expect, beforeEach, vi } from "vitest";
+import { createApp, toNodeListener, eventHandler } from "../../src";
+import type { App } from "../../src";
 
 const ORIGIN = "https://app.example.com";
 
-describe("createApp cors option", () => {
+describe("per-route cors", () => {
+  let app: App;
+  let request: TestAgent;
   const handler = vi.fn();
 
-  function appWith(options: AppOptions): TestAgent {
+  beforeEach(() => {
     handler.mockReset();
     handler.mockImplementation(() => "ok");
-    const app = createApp({ debug: true, ...options });
-    app.use(eventHandler(handler));
-    return supertest(toNodeListener(app));
+    app = createApp({ debug: true });
+    request = supertest(toNodeListener(app));
+  });
+
+  function mount(cors: unknown, route = "/widgets") {
+    app.use(
+      route,
+      eventHandler({
+        cors,
+        handler,
+      } as any),
+    );
   }
 
-  it("answers a preflight without running the handler", async () => {
-    const request = appWith({ cors: { origin: [ORIGIN] } });
+  it("answers a preflight for the route without running the handler", async () => {
+    mount({ origin: [ORIGIN] });
 
     const result = await request
-      .options("/")
+      .options("/widgets")
       .set("origin", ORIGIN)
       .set("access-control-request-method", "DELETE");
 
@@ -36,10 +42,10 @@ describe("createApp cors option", () => {
   });
 
   it("advertises every method and exposes every header by default", async () => {
-    const request = appWith({ cors: { origin: [ORIGIN] } });
+    mount({ origin: [ORIGIN] });
 
     const result = await request
-      .options("/")
+      .options("/widgets")
       .set("origin", ORIGIN)
       .set("access-control-request-method", "PUT");
 
@@ -47,49 +53,47 @@ describe("createApp cors option", () => {
     expect(result.headers["access-control-expose-headers"]).toEqual("*");
   });
 
-  it("uses the methods the app named", async () => {
-    const request = appWith({
-      cors: { origin: [ORIGIN], methods: ["GET", "POST"] },
-    });
+  it("uses the methods the route named", async () => {
+    mount({ origin: [ORIGIN], methods: ["GET", "POST"] });
 
     const result = await request
-      .options("/")
+      .options("/widgets")
       .set("origin", ORIGIN)
       .set("access-control-request-method", "POST");
 
     expect(result.headers["access-control-allow-methods"]).toEqual("GET,POST");
   });
 
-  it("puts the headers on an ordinary response and still runs the handler", async () => {
-    const request = appWith({ cors: { origin: [ORIGIN] } });
+  it("puts the headers on an ordinary response and runs the handler", async () => {
+    mount({ origin: [ORIGIN] });
 
-    const result = await request.get("/").set("origin", ORIGIN);
+    const result = await request.get("/widgets").set("origin", ORIGIN);
 
     expect(result.status).toEqual(200);
     expect(result.text).toEqual("ok");
     expect(handler).toHaveBeenCalledTimes(1);
     expect(result.headers["access-control-allow-origin"]).toEqual(ORIGIN);
     expect(result.headers["access-control-expose-headers"]).toEqual("*");
-    expect(result.headers["access-control-allow-methods"]).toBeUndefined();
   });
 
-  it("keeps the headers when the handler throws", async () => {
-    const request = appWith({ cors: { origin: [ORIGIN] } });
-    handler.mockImplementation(() => {
-      throw createError({ statusCode: 418, statusMessage: "teapot" });
-    });
+  it("takes true as allow anything", async () => {
+    mount(true);
 
-    const result = await request.get("/").set("origin", ORIGIN);
+    const result = await request
+      .options("/widgets")
+      .set("origin", ORIGIN)
+      .set("access-control-request-method", "PATCH");
 
-    expect(result.status).toEqual(418);
-    expect(result.headers["access-control-allow-origin"]).toEqual(ORIGIN);
+    expect(result.status).toEqual(204);
+    expect(result.headers["access-control-allow-origin"]).toEqual("*");
+    expect(result.headers["access-control-allow-methods"]).toEqual("*");
   });
 
   it("gives an origin it does not allow no allow-origin header", async () => {
-    const request = appWith({ cors: { origin: [ORIGIN] } });
+    mount({ origin: [ORIGIN] });
 
     const result = await request
-      .get("/")
+      .get("/widgets")
       .set("origin", "https://evil.example.com");
 
     expect(result.status).toEqual(200);
@@ -97,35 +101,33 @@ describe("createApp cors option", () => {
     expect(result.headers["access-control-allow-origin"]).toBeUndefined();
   });
 
-  it("takes true as allow anything", async () => {
-    const request = appWith({ cors: true });
+  it("leaves a route that did not ask for cors alone", async () => {
+    app.use(
+      "/plain",
+      eventHandler(() => "plain"),
+    );
 
-    const result = await request
-      .options("/")
-      .set("origin", ORIGIN)
-      .set("access-control-request-method", "PATCH");
+    const result = await request.get("/plain").set("origin", ORIGIN);
 
-    expect(result.status).toEqual(204);
-    expect(result.headers["access-control-allow-origin"]).toEqual("*");
-    expect(result.headers["access-control-allow-methods"]).toEqual("*");
-    expect(result.headers["access-control-expose-headers"]).toEqual("*");
+    expect(result.text).toEqual("plain");
+    expect(result.headers["access-control-allow-origin"]).toBeUndefined();
   });
 
-  it("does nothing at all when the app did not ask for cors", async () => {
-    const request = appWith({});
+  it("still runs the route's other hooks", async () => {
+    const onRequest = vi.fn();
+    app.use(
+      "/widgets",
+      eventHandler({
+        cors: { origin: [ORIGIN] },
+        onRequest,
+        handler,
+      } as any),
+    );
 
-    const result = await request.get("/").set("origin", ORIGIN);
+    const result = await request.get("/widgets").set("origin", ORIGIN);
 
-    expect(result.status).toEqual(200);
-    expect(result.headers["access-control-allow-origin"]).toBeUndefined();
-    expect(result.headers["access-control-expose-headers"]).toBeUndefined();
-
-    const preflight = await request
-      .options("/")
-      .set("origin", ORIGIN)
-      .set("access-control-request-method", "DELETE");
-
-    expect(preflight.headers["access-control-allow-origin"]).toBeUndefined();
-    expect(handler).toHaveBeenCalledTimes(2);
+    expect(result.text).toEqual("ok");
+    expect(onRequest).toHaveBeenCalledTimes(1);
+    expect(result.headers["access-control-allow-origin"]).toEqual(ORIGIN);
   });
 });

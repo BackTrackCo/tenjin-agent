@@ -24,10 +24,10 @@ return sendProxy(event, target, { forwardHeaders: true });
 
 `ProxyOptions` gains `forwardHeaders?: boolean`, default `false`, and `sendProxy` honours it:
 
-- With `forwardHeaders: true`, the request to the target carries the incoming request's headers:
-  `accept`, `accept-language`, `authorization`, `content-type`, and any custom header such as
-  `x-tenant`, exactly as h3 already decides which of a request's headers may be passed to an
-  upstream.
+- With `forwardHeaders: true`, the request to the target carries the caller's own request
+  headers, the ones h3 already considers safe to pass to an upstream. An upstream that
+  negotiates content, reads a bearer token or branches on a custom header sees what the caller
+  sent.
 - The caller's `host` is not passed on; the target's own host is used.
 - An entry in `opts.headers` wins over a forwarded header of the same name. Forwarded headers the
   `headers` option does not mention are still sent.
@@ -38,7 +38,7 @@ return sendProxy(event, target, { forwardHeaders: true });
 
 ### Scope
 
-- `sendProxy`, `proxyRequest`, `getProxyRequestHeaders` and `fetchWithEvent` keep the names,
-  signatures and exports they have now, beyond this one new option.
+- The existing proxy utils keep the names, signatures and exports they have now, beyond this one
+  new option.
 - `proxyRequest` keeps behaving as it does today.
 - Behaviour the ticket does not name stays exactly as it is today.

@@ -6,61 +6,37 @@ server or watcher running. Do not spawn subagents.
 
 ---
 
-## Feature request: tell the app when a session token could not be restored
+## Feature request: let an app keep a session open on purpose
 
-An app cannot currently tell these three visitors apart: someone arriving for the first time,
-someone whose session has been sitting too long, and someone presenting a token that was
-tampered with or sealed with a password we have since rotated. All three get a brand new empty
-session and no signal.
+Apps want to extend a session at a moment of their choosing: the user ticks "keep me signed in",
+the editor sends a heartbeat while a draft is open, an admin extends a support session. Today the
+only lever is `update`, which is for changing the data, and people are surprised by what it does
+and does not do to the session's lifetime.
 
-They want different treatment. The first sees the marketing page; the second sees "your session
-timed out, sign in again"; the third is worth a log line and, for one user of ours, an alert.
-
-Give the app a callback.
+Give the session manager an explicit way to say "start the clock again".
 
 ```ts
-const session = await useSession(event, {
-  password,
-  maxAge: 60 * 30,
-  onRestoreError: (event, { reason, error }) => {
-    logger.warn({ reason, err: error }, "session not restored");
-  },
-});
+const session = await useSession(event, { password, maxAge: 60 * 30 });
+await session.renew();
 ```
 
 ### Interface contract
 
-`SessionConfig` gains:
+`SessionManager` gains `renew(): Promise<SessionManager>`, alongside `update` and `clear`.
 
-```ts
-onRestoreError?: (
-  event: H3Event,
-  details: { reason: "expired" | "invalid"; error: Error },
-) => void;
-```
-
-It is called **once**, and only when a session token was presented and could not be restored:
-
-- `reason: "expired"` when the token was well formed and readable but is past the window `maxAge`
-  allows.
-- `reason: "invalid"` for anything else that stops a presented token being restored: it was
-  tampered with, truncated, or sealed with a different password.
-- `error` is the `Error` that describes the failure.
-- `event` is the event of the request the token arrived on.
-
-It is **not** called when:
-
-- no session token was presented at all;
-- the token restored successfully, **including when the session it restores holds no data at
-  all**, which is what an untouched new session looks like;
-- the token is inside its window.
-
-After the callback, the request continues exactly as it does today: it gets a brand new session
-with a new id and empty data, and a new token. An app that does not set the callback behaves
-exactly as it does today.
+- After `renew()`, the session's `maxAge` window runs from now. With a 60 second `maxAge`, a
+  session renewed 50 seconds in is still the same session 50 seconds after that, and can be
+  renewed again as often as the app likes.
+- It keeps the session: the same `id` and the same data, untouched.
+- It issues the session cookie again, with an expiry later than the one the client was holding.
+- It returns the manager, so it chains the way `update` does.
+- It is harmless on a session that has only just been created, and on a session configured
+  without a `maxAge`.
+- A session that is never renewed still expires exactly as it does today.
 
 ### Scope
 
-- `useSession`, `getSession`, `updateSession`, `sealSession`, `unsealSession` and `clearSession`
-  keep the names, signatures and exports they have now, beyond this one new config field.
+- The session utils keep the names, signatures and exports they have now, beyond the new manager method.
+- Session cookies stay sealed the way they are sealed today, and the `password`, `name`, `cookie`
+  and `sessionHeader` options keep their behaviour.
 - Behaviour the ticket does not name stays exactly as it is today.

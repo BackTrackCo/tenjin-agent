@@ -6,41 +6,48 @@ server or watcher running. Do not spawn subagents.
 
 ---
 
-## Truncated JSON reaches handlers as a string instead of being rejected
+## Feature request: an app-wide hook that sees each request's body
 
-A user reported an API that stores rubbish when a client's upload is cut short. They post JSON,
-their proxy truncates the body, and instead of the 400 they expect, the handler receives the
-truncated text as a plain string and writes it to the database. They only see it in the data.
+Audit logging, payload sampling and "what did that client actually send us" debugging all want
+the same thing: the body of every request, in one place, without touching a single route. Apps do
+it today by adding a first layer that reads the body, and the teams that have tried it report
+that it is easy to get subtly wrong.
 
-They send `content-type: application/json; charset=utf-8`, which is what their HTTP client sets
-by default. With a bare `content-type: application/json` the same request is rejected properly.
-The same hole is there for the `+json` media types (`application/vnd.api+json`,
-`application/problem+json`), which are JSON as far as any client is concerned.
+Make it an app option.
 
-Make body parsing treat a JSON media type as JSON whatever else the header carries.
+```ts
+const app = createApp({
+  onRequestBody: (event, body) => auditLog.push({ path: event.path, body }),
+});
+```
 
 ### Interface contract
 
-`readBody(event, options?)`:
+`AppOptions` gains:
 
-- A request whose media type is JSON is parsed strictly by default: a body that is not valid JSON
-  raises the existing 400 with message `Invalid JSON body`.
-- "media type is JSON" means the part of `content-type` before any `;` parameter, compared
-  case-insensitively, is `application/json` or ends with `+json`. A `charset` or any other
-  parameter makes no difference.
-- A valid body of such a type parses to its value, as it does today: `{"a":1}` becomes the object
-  `{ a: 1 }`.
-- `readBody(event, { strict: false })` still opts out: a malformed body of a JSON media type comes
-  back as the raw string instead of raising.
-- The strict reading applies **however many times the body is read**: if one layer reads the body
-  leniently and a later handler reads it with the default options, the later read raises the 400.
-  Two reads of a valid body both return the same parsed value.
-- Everything else keeps today's behaviour: `text/*` comes back as a string and is never parsed,
-  `application/x-www-form-urlencoded` is parsed as a form, and a request with some other or
-  missing content type is parsed leniently.
+```ts
+onRequestBody?: (event: H3Event, body: unknown) => void | Promise<void>;
+```
+
+- It is called **once per request that carried a body**, before the stack runs, with the body
+  parsed the way h3 parses it for that content type: an object for JSON, a string for `text/*`.
+- It is not called for a request with no body at all.
+- `event` is the event of that request.
+
+**It must not change what the app does.** With the hook set, every route answers exactly as it
+answers without it:
+
+- a route that reads the body still gets the same value;
+- a route that validates the body still accepts the same bodies and still rejects the same ones,
+  with the same status and the same error, byte for byte;
+- a route that never reads the body is unaffected.
+
+An app with no `onRequestBody` behaves exactly as it does today.
 
 ### Scope
 
-- `readBody`, `readRawBody`, `readValidatedBody` and `readFormData` keep the names, signatures and
-  exports they have now, and `readValidatedBody` keeps validating what `readBody` returns.
+- `createApp`, `createAppEventHandler` and `App` keep their current shapes; this is one new
+  optional option.
+- `readBody`, `readRawBody`, `readValidatedBody` and `readFormData` keep the names, signatures
+  and exports they have now.
 - Behaviour the ticket does not name stays exactly as it is today.

@@ -1,8 +1,14 @@
 diff --git a/src/utils/proxy.ts b/src/utils/proxy.ts
-index 3c747c0..fd3ea91 100644
+index 3c747c0..26f2291 100644
 --- a/src/utils/proxy.ts
 +++ b/src/utils/proxy.ts
-@@ -22,6 +22,10 @@ export interface ProxyOptions {
+@@ -1,3 +1,5 @@
++import { eventHandler } from "../event";
++import type { EventHandler } from "../types";
+ import type { H3Event } from "../event";
+ import type { H3EventContext, RequestHeaders } from "../types";
+ import { getRequestHeaders } from "./request";
+@@ -22,6 +24,10 @@ export interface ProxyOptions {
  }
  
  const PayloadMethods = new Set(["PATCH", "POST", "PUT", "DELETE"]);
@@ -13,7 +19,7 @@ index 3c747c0..fd3ea91 100644
  const ignoredHeaders = new Set([
    "transfer-encoding",
    "accept-encoding",
-@@ -30,7 +34,6 @@ const ignoredHeaders = new Set([
+@@ -30,7 +36,6 @@ const ignoredHeaders = new Set([
    "upgrade",
    "expect",
    "host",
@@ -21,3 +27,26 @@ index 3c747c0..fd3ea91 100644
  ]);
  
  /**
+@@ -75,6 +80,22 @@ export async function proxyRequest(
+   });
+ }
+ 
++/**
++ * An event handler that answers the request from `target`.
++ *
++ * The path the handler was reached at is appended to the target, so a handler
++ * mounted at `/api` sends `/api/things` to `<target>/things`.
++ */
++export function proxyEventHandler(
++  target: string,
++  opts: ProxyOptions = {},
++): EventHandler {
++  const base = target.endsWith("/") ? target.slice(0, -1) : target;
++  return eventHandler((event) =>
++    proxyRequest(event, base + (event.path || "/"), opts),
++  );
++}
++
+ /**
+  * Make a proxy request to a target URL and send the response back to the client.
+  */

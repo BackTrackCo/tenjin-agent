@@ -1,6 +1,6 @@
 import supertest from "supertest";
 import type TestAgent from "supertest/lib/agent";
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
 import {
   createApp,
   toNodeListener,
@@ -11,69 +11,52 @@ import {
 } from "../../src";
 import type { App } from "../../src";
 
-describe("app onResponse", () => {
+describe("app response stats", () => {
   let app: App;
   let request: TestAgent;
-  const onResponse = vi.fn();
 
   beforeEach(() => {
-    onResponse.mockReset();
-    app = createApp({ debug: true, onResponse });
+    app = createApp({ debug: true, collectStats: true });
     request = supertest(toNodeListener(app));
   });
 
-  it("sees a response the handler returned", async () => {
+  it("starts at nothing", () => {
+    expect(app.stats).toEqual({ total: 0, byStatus: {} });
+  });
+
+  it("counts a response a handler returned", async () => {
     app.use(eventHandler(() => "hello"));
 
-    const result = await request.get("/");
+    await request.get("/");
 
-    expect(result.text).toEqual("hello");
-    expect(onResponse).toHaveBeenCalledTimes(1);
-    expect(onResponse.mock.calls[0]?.[1]).toMatchObject({
-      statusCode: 200,
-      body: "hello",
-      handled: false,
-    });
+    expect(app.stats).toEqual({ total: 1, byStatus: { "200": 1 } });
   });
 
-  it("sees a redirect the handler sent itself", async () => {
+  it("counts a redirect", async () => {
     app.use(eventHandler((event) => sendRedirect(event, "/elsewhere", 302)));
 
-    const result = await request.get("/");
+    await request.get("/");
 
-    expect(result.status).toEqual(302);
-    expect(result.headers.location).toEqual("/elsewhere");
-    expect(onResponse).toHaveBeenCalledTimes(1);
-    expect(onResponse.mock.calls[0]?.[1]).toMatchObject({
-      statusCode: 302,
-      handled: true,
-    });
+    expect(app.stats).toEqual({ total: 1, byStatus: { "302": 1 } });
   });
 
-  it("sees an empty response the handler sent itself", async () => {
+  it("counts an empty response", async () => {
     app.use(eventHandler((event) => sendNoContent(event, 204)));
 
-    const result = await request.get("/");
+    await request.get("/");
 
-    expect(result.status).toEqual(204);
-    expect(onResponse).toHaveBeenCalledTimes(1);
-    expect(onResponse.mock.calls[0]?.[1]).toMatchObject({
-      statusCode: 204,
-      handled: true,
-    });
+    expect(app.stats).toEqual({ total: 1, byStatus: { "204": 1 } });
   });
 
-  it("sees a body the handler wrote itself", async () => {
+  it("counts a body the handler wrote itself", async () => {
     app.use(eventHandler((event) => send(event, "written", "text/plain")));
 
-    const result = await request.get("/");
+    await request.get("/");
 
-    expect(result.text).toEqual("written");
-    expect(onResponse).toHaveBeenCalledTimes(1);
-    expect(onResponse.mock.calls[0]?.[1]).toMatchObject({ handled: true });
+    expect(app.stats).toEqual({ total: 1, byStatus: { "200": 1 } });
   });
 
-  it("reports the status the handler set on a returned body", async () => {
+  it("counts the status the handler set", async () => {
     app.use(
       eventHandler((event) => {
         event.node.res.statusCode = 201;
@@ -81,56 +64,52 @@ describe("app onResponse", () => {
       }),
     );
 
-    const result = await request.get("/");
+    await request.get("/");
 
-    expect(result.status).toEqual(201);
-    expect(onResponse.mock.calls[0]?.[1]).toMatchObject({
-      statusCode: 201,
-      handled: false,
+    expect(app.stats).toEqual({ total: 1, byStatus: { "201": 1 } });
+  });
+
+  it("adds up a mixed run", async () => {
+    app.use(
+      "/hello",
+      eventHandler(() => "hello"),
+    );
+    app.use(
+      "/go",
+      eventHandler((event) => sendRedirect(event, "/hello", 302)),
+    );
+    app.use(
+      "/empty",
+      eventHandler((event) => sendNoContent(event, 204)),
+    );
+
+    await request.get("/hello");
+    await request.get("/hello");
+    await request.get("/go");
+    await request.get("/empty");
+
+    expect(app.stats).toEqual({
+      total: 4,
+      byStatus: { "200": 2, "302": 1, "204": 1 },
     });
   });
 
-  it("fires once per request, not once per layer", async () => {
+  it("counts one per request, not one per layer", async () => {
     app.use(eventHandler(() => undefined));
     app.use(eventHandler(() => "second"));
 
     await request.get("/");
 
-    expect(onResponse).toHaveBeenCalledTimes(1);
+    expect(app.stats?.total).toEqual(1);
   });
 
-  it("is given the event it was called for", async () => {
-    app.use(eventHandler(() => "hello"));
-
-    await request.get("/some/path");
-
-    expect(onResponse.mock.calls[0]?.[0]?.path).toEqual("/some/path");
-  });
-
-  it("runs before onAfterResponse", async () => {
-    const order: string[] = [];
-    const ordered = createApp({
-      debug: true,
-      onResponse: () => {
-        order.push("onResponse");
-      },
-      onAfterResponse: () => {
-        order.push("onAfterResponse");
-      },
-    });
-    ordered.use(eventHandler((event) => sendRedirect(event, "/x", 302)));
-
-    await supertest(toNodeListener(ordered)).get("/");
-
-    expect(order).toEqual(["onResponse", "onAfterResponse"]);
-  });
-
-  it("is optional", async () => {
+  it("counts nothing when the app did not ask for stats", async () => {
     const plain = createApp({ debug: true });
     plain.use(eventHandler((event) => sendRedirect(event, "/x", 302)));
 
     const result = await supertest(toNodeListener(plain)).get("/");
 
     expect(result.status).toEqual(302);
+    expect(plain.stats).toBeUndefined();
   });
 });

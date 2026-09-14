@@ -1,40 +1,46 @@
-diff --git a/src/app.ts b/src/app.ts
-index 2f8e4fa..56d5d93 100644
---- a/src/app.ts
-+++ b/src/app.ts
-@@ -8,6 +8,9 @@ import {
-   H3Event,
- } from "./event";
- import { H3Error, createError } from "./error";
-+import { handleCors } from "./utils/cors";
-+import { resolveCorsOptions } from "./utils/cors/utils";
-+import type { H3CorsOptions } from "./utils/cors";
- import {
-   send,
-   sendStream,
-@@ -67,6 +70,8 @@ export interface AppOptions {
-     response?: { body?: unknown },
-   ) => void | Promise<void>;
-   websocket?: WebSocketOptions;
-+  /** Handle CORS for every request the app serves. `true` allows anything. */
-+  cors?: H3CorsOptions | true;
- }
- 
- export interface App {
-@@ -160,6 +165,16 @@ export function createAppEventHandler(stack: Stack, options: AppOptions) {
-       await options.onRequest(event);
-     }
- 
-+    // Handle CORS before anything in the stack sees the request
-+    if (options.cors) {
-+      const corsOptions = resolveCorsOptions(
-+        options.cors === true ? {} : options.cors,
-+      );
-+      if (handleCors(event, corsOptions)) {
-+        return;
-+      }
+diff --git a/src/event/utils.ts b/src/event/utils.ts
+index bbcd4f0..714f2c3 100644
+--- a/src/event/utils.ts
++++ b/src/event/utils.ts
+@@ -1,3 +1,5 @@
++import { handleCors } from "../utils/cors";
++import { resolveCorsOptions } from "../utils/cors/utils";
+ import type {
+   EventHandler,
+   LazyEventHandler,
+@@ -55,7 +57,13 @@ export function defineEventHandler<
+     onRequest: _normalizeArray(handler.onRequest),
+     onBeforeResponse: _normalizeArray(handler.onBeforeResponse),
+   };
++  const _cors = handler.cors
++    ? resolveCorsOptions(handler.cors === true ? {} : handler.cors)
++    : undefined;
+   const _handler: EventHandler<Request, any> = (event) => {
++    if (_cors && handleCors(event, _cors)) {
++      return;
 +    }
+     return _callHandler(event, handler.handler, _hooks);
+   };
+   _handler.__is_handler__ = true;
+diff --git a/src/types/index.ts b/src/types/index.ts
+index cda2d2b..750c969 100644
+--- a/src/types/index.ts
++++ b/src/types/index.ts
+@@ -78,6 +78,8 @@ export type _ResponseMiddleware<
+   response: { body?: Awaited<Response> },
+ ) => void | Promise<void>;
+ 
++import type { H3CorsOptions } from "../utils/cors";
 +
-     for (const layer of stack) {
-       // 1. Remove prefix from path
-       if (layer.route.length > 1) {
+ export type EventHandlerObject<
+   Request extends EventHandlerRequest = EventHandlerRequest,
+   Response extends EventHandlerResponse = EventHandlerResponse,
+@@ -88,6 +90,8 @@ export type EventHandlerObject<
+     | _ResponseMiddleware<Request, Response>[];
+   /** @experimental */
+   websocket?: Partial<WSHooks>;
++  /** Handle CORS for this route. `true` allows anything. */
++  cors?: H3CorsOptions | true;
+   handler: EventHandler<Request, Response>;
+ };
+ 

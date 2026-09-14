@@ -6,62 +6,55 @@ server or watcher running. Do not spawn subagents.
 
 ---
 
-## Browsers are blocking cross-origin calls that our CORS options say are allowed
+## Feature request: CORS as an app option
 
-Reported by two users within a week, with the same shape both times. They call `handleCors` with
-an origin policy and nothing else:
+Every app that needs CORS writes the same first layer by hand, and people get it wrong: they
+forget that the preflight has to short-circuit, or they register it after the router so it never
+runs for a matched route. Several issues have asked for CORS to be something you configure on
+the app instead.
+
+Add it to `createApp`.
 
 ```ts
-app.use(
-  eventHandler((event) => {
-    if (handleCors(event, { origin: ["https://app.example.com"] })) {
-      return;
-    }
-    return handle(event);
-  }),
-);
+const app = createApp({
+  cors: { origin: ["https://app.example.com"] },
+});
 ```
 
-`GET` and `POST` work. A `DELETE` or a `PUT` from the browser fails at the preflight, and a
-response header the app sets is not readable from JavaScript. Setting `maxAge` to cut down the
-preflight traffic also does nothing. The server log shows a clean 204 for each preflight.
+### Interface contract
 
-`handleCors` is meant to be the one-call helper: give it an origin policy, get correct CORS.
-Every option it documents should take effect, and the ones the caller leaves out should fall back
-to the documented defaults.
+`AppOptions` gains `cors?: H3CorsOptions | true`.
 
-### What must be true afterwards
+- `true` means "allow anything", the same as passing `{}`.
+- Left out, the app behaves exactly as it does today: no CORS header ever appears, and an
+  `OPTIONS` request reaches the stack like any other request.
 
-For `handleCors(event, options)`:
+With `cors` set, for every request the app handles:
 
-- **On a preflight request** (the existing `isPreflightRequest` definition), it answers with
-  `preflight.statusCode` (default 204), the handler chain does not run, and the response carries:
-  - `access-control-allow-origin` per the origin policy, with `vary: origin` where the policy is
-    anything other than `*`;
-  - `access-control-allow-methods`, from `methods`, defaulting to `*`;
-  - `access-control-allow-headers`, from `allowHeaders`; where the caller named none, it echoes
-    the request's `access-control-request-headers`;
-  - `access-control-expose-headers`, from `exposeHeaders`, defaulting to `*`;
-  - `access-control-allow-credentials: true` only where `credentials` is true, which it is not by
-    default;
-  - `access-control-max-age`, where `maxAge` is set. It is not set by default, and it never
-    belongs on a non-preflight response.
-- **On any other request with an `Origin`**, it returns `false`, the handler runs, and the
-  response carries the origin, credentials and expose-headers headers, and none of the
-  preflight-only ones.
-- An origin the policy does not allow gets no `access-control-allow-origin` header at all, and
-  the request is otherwise handled normally.
-- `handleCors(event, {})` is "allow anything": origin `*`, methods `*`, expose-headers `*`.
+- **A preflight request** is answered by the app itself: the configured preflight status (204
+  unless the options say otherwise), and **no layer in the stack runs**, not even one registered
+  at `/`.
+- **Any other request** is handled normally, and the CORS response headers are on the response.
+  They are there whether the handler returned a value or threw: a handler that throws a 418 still
+  produces a 418 carrying the CORS headers.
 
-Defaults are the ones `resolveCorsOptions` already documents: `origin: "*"`, `methods: "*"`,
-`allowHeaders: "*"`, `exposeHeaders: "*"`, `credentials: false`, `maxAge: false`,
-`preflight.statusCode: 204`.
+The headers themselves follow the options, and an option the app did not name falls back to h3's
+documented CORS default:
+
+| option          | default | header                                                      |
+| --------------- | ------- | ----------------------------------------------------------- |
+| `origin`        | `*`     | `access-control-allow-origin`, plus `vary: origin` when not `*` |
+| `methods`       | `*`     | `access-control-allow-methods`, preflight only               |
+| `allowHeaders`  | `*`     | `access-control-allow-headers`, preflight only; echoes the request's `access-control-request-headers` when the default is in force |
+| `exposeHeaders` | `*`     | `access-control-expose-headers`                              |
+| `credentials`   | `false` | `access-control-allow-credentials: true` only when true      |
+
+An origin the policy does not allow gets no `access-control-allow-origin` header, and its request
+is otherwise handled normally.
 
 ### Scope
 
-- `handleCors`, `isPreflightRequest`, `appendCorsHeaders`, `appendCorsPreflightHeaders` and
-  `resolveCorsOptions` keep the names, signatures and exports they have now. The two
-  `appendCors*` helpers are the low-level API and keep taking the options they are handed, as
-  they do today.
-- No change to the `H3CorsOptions` type.
+- `createApp`, `createAppEventHandler` and `App` keep their current shapes; this is one new
+  optional option.
+- No change to `H3CorsOptions`, and none to what the existing CORS utils export.
 - Behaviour the ticket does not name stays exactly as it is today.

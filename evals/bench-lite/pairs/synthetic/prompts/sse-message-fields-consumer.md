@@ -6,42 +6,43 @@ server or watcher running. Do not spawn subagents.
 
 ---
 
-## Feature request: numeric event ids and a reconnection delay clients can trust
+## Feature request: event streams a dropped client can resume
 
-Browsers resume a dropped event stream by sending back the last `id` they saw in
-`Last-Event-ID`, and they respect a `retry` line as the reconnection delay. Both are awkward to
-use from h3 today.
+A browser that loses an event stream reconnects on its own and tells the server the last message
+it saw, in the `Last-Event-ID` header. The server can then carry on from there instead of
+replaying an hour of progress notifications. Both halves of that are on the app today: it has to
+number every message itself, and dig the header out of the request by hand.
 
-Event ids are usually a sequence counter, which is a number, and the first one is `0`. Retry
-delays usually come out of configuration, which means they arrive as strings.
+Let the stream do it.
 
-Make both fields take what people actually have.
+```ts
+const stream = createEventStream(event, { autoId: true });
+if (stream.lastEventId) {
+  // resume from there
+}
+await stream.push({ data: { stage: "build", pct: 40 } });
+```
 
 ### Interface contract
 
-`EventStreamMessage`, and `formatEventStreamMessage` which renders it:
+`EventStreamOptions` gains `autoId?: boolean`, default `false`. `EventStream` gains a
+`lastEventId` property.
 
-**`id`** is a string or a number.
+- With `autoId: true`, every message the stream sends carries an id. They count **from `0`**, in
+  the order the messages go out, and the first message of a stream is id `0`.
+- A message that names its own id keeps it, and it does not consume a number: pushing three
+  messages where the second names `"custom"` gives the ids `0`, `custom`, `1`.
+- Messages pushed as a bare string are numbered the same way.
+- `stream.lastEventId` is the `Last-Event-ID` the client sent, as a string, or `undefined` on a
+  first connection.
+- Without `autoId`, a stream numbers nothing, exactly as today.
 
-- A number is rendered as it reads: `{ id: 7 }` gives the line `id: 7`. `0` is a real id and is
-  sent: `{ id: 0 }` gives `id: 0`.
-- A string is rendered as it stands: `{ id: "42" }` gives `id: 42`.
-- No `id` at all, or the empty string, means no `id` line.
-- Newlines are stripped from an id, as they are today: `"4\n2"` gives `id: 42`.
-
-**`retry`** is a number of milliseconds, given as a number or as a string of digits.
-
-- `{ retry: 1500 }` and `{ retry: "1500" }` both give the line `retry: 1500`.
-- `0` is a valid delay and is sent.
-- Anything that is not a whole, non-negative number of milliseconds is left out entirely: `1.5`,
-  `-1`, and a string such as `"soon"` produce no `retry` line.
-
-The order of the lines is unchanged: `id`, then `event`, then `retry`, then the `data` lines.
-`event` and `data` keep their current behaviour.
+The payloads these streams carry are progress notifications: the handler pushes an object and the
+browser does `JSON.parse(event.data)` on it, so what the client parses must be what the handler
+pushed. A payload pushed as a string arrives as it stands.
 
 ### Scope
 
-- `formatEventStreamMessage`, `formatEventStreamMessages`, `createEventStream` and `EventStream`
-  keep the names, signatures and exports they have now, beyond `id` and `retry` accepting more
-  types.
+- `createEventStream`, `EventStream.push`, `send`, `close`, `pause`, `resume` and `flush` keep
+  the names, signatures and exports they have now, beyond the new option and property.
 - Behaviour the ticket does not name stays exactly as it is today.

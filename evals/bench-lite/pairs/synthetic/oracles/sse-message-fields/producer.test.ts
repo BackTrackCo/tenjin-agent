@@ -1,73 +1,132 @@
-import { describe, it, expect } from "vitest";
+import supertest from "supertest";
+import type TestAgent from "supertest/lib/agent";
+import { describe, it, expect, beforeEach } from "vitest";
 import {
-  formatEventStreamMessage,
-  formatEventStreamMessages,
-} from "../../src/utils/sse/utils";
+  createApp,
+  toNodeListener,
+  eventHandler,
+  sendEventStream,
+} from "../../src";
+import type { App } from "../../src";
 
-describe("event stream data serialisation", () => {
-  it("sends an object as JSON", () => {
-    expect(formatEventStreamMessage({ data: { pct: 40, stage: "build" } })).toEqual(
-      'data: {"pct":40,"stage":"build"}\n\n',
+describe("sendEventStream", () => {
+  let app: App;
+  let request: TestAgent;
+
+  beforeEach(() => {
+    app = createApp({ debug: true });
+    request = supertest(toNodeListener(app));
+  });
+
+  function stream(items: unknown[]) {
+    app.use(
+      eventHandler((event) =>
+        sendEventStream(
+          event,
+          (async function* () {
+            for (const item of items) {
+              yield item;
+            }
+          })(),
+        ),
+      ),
     );
+  }
+
+  it("serves an event stream", async () => {
+    stream(["one"]);
+
+    const result = await request.get("/");
+
+    expect(result.status).toEqual(200);
+    expect(result.headers["content-type"]).toContain("text/event-stream");
   });
 
-  it("sends an array as JSON", () => {
-    expect(formatEventStreamMessage({ data: [1, 2, 3] })).toEqual(
-      "data: [1,2,3]\n\n",
+  it("sends one message per item, in order", async () => {
+    stream(["one", "two", "three"]);
+
+    const result = await request.get("/");
+
+    expect(result.text).toEqual("data: one\n\ndata: two\n\ndata: three\n\n");
+  });
+
+  it("delivers an object the client can parse", async () => {
+    stream([{ pct: 40, stage: "build" }]);
+
+    const result = await request.get("/");
+
+    const payload = /^data: (.*)$/m.exec(result.text)?.[1] ?? "";
+    expect(JSON.parse(payload)).toEqual({ pct: 40, stage: "build" });
+  });
+
+  it("delivers arrays and numbers the client can parse", async () => {
+    stream([[1, 2, 3], 42, true]);
+
+    const result = await request.get("/");
+
+    const payloads = [...result.text.matchAll(/^data: (.*)$/gm)].map((m) =>
+      JSON.parse(m[1] as string),
     );
+    expect(payloads).toEqual([[1, 2, 3], 42, true]);
   });
 
-  it("sends a number, a boolean and null as JSON", () => {
-    expect(formatEventStreamMessage({ data: 40 })).toEqual("data: 40\n\n");
-    expect(formatEventStreamMessage({ data: false })).toEqual(
-      "data: false\n\n",
-    );
-    expect(formatEventStreamMessage({ data: null })).toEqual("data: null\n\n");
+  it("leaves a string item alone", async () => {
+    stream(['{"already":"json"}']);
+
+    const result = await request.get("/");
+
+    expect(result.text).toEqual('data: {"already":"json"}\n\n');
   });
 
-  it("sends a string as it is", () => {
-    expect(formatEventStreamMessage({ data: "hello world" })).toEqual(
-      "data: hello world\n\n",
-    );
+  it("takes an item that names its own event and id", async () => {
+    stream([{ id: 0, event: "progress", data: { pct: 80 } }]);
+
+    const result = await request.get("/");
+
+    expect(result.text).toContain("id: 0\n");
+    expect(result.text).toContain("event: progress\n");
+    const payload = /^data: (.*)$/m.exec(result.text)?.[1] ?? "";
+    expect(JSON.parse(payload)).toEqual({ pct: 80 });
   });
 
-  it("does not quote a string that looks like JSON", () => {
-    expect(formatEventStreamMessage({ data: '{"already":"json"}' })).toEqual(
-      'data: {"already":"json"}\n\n',
-    );
+  it("numbers messages the caller numbered itself", async () => {
+    stream([
+      { id: 0, data: "zero" },
+      { id: 1, data: "one" },
+      { id: "two", data: "two" },
+    ]);
+
+    const result = await request.get("/");
+
+    expect([...result.text.matchAll(/^id: (.*)$/gm)].map((m) => m[1])).toEqual([
+      "0",
+      "1",
+      "two",
+    ]);
   });
 
-  it("splits a multi-line string over several data lines", () => {
-    expect(formatEventStreamMessage({ data: "first\nsecond" })).toEqual(
-      "data: first\ndata: second\n\n",
-    );
+  it("closes the stream when the source runs out", async () => {
+    stream(["only"]);
+
+    const result = await request.get("/");
+
+    expect(result.text).toEqual("data: only\n\n");
   });
 
-  it("splits a serialised value over several data lines when it has newlines", () => {
-    expect(
-      formatEventStreamMessage({ data: JSON.parse('"a\\nb"') as unknown }),
-    ).toEqual("data: a\ndata: b\n\n");
+  it("takes a plain array as the source", async () => {
+    app.use(eventHandler((event) => sendEventStream(event, ["a", "b"])));
+
+    const result = await request.get("/");
+
+    expect(result.text).toEqual("data: a\n\ndata: b\n\n");
   });
 
-  it("keeps the event name alongside the serialised data", () => {
-    expect(
-      formatEventStreamMessage({ event: "progress", data: { pct: 40 } }),
-    ).toEqual('event: progress\ndata: {"pct":40}\n\n');
-  });
+  it("serves an empty stream for an empty source", async () => {
+    stream([]);
 
-  it("sends an empty data line for an undefined payload", () => {
-    expect(formatEventStreamMessage({ data: undefined })).toEqual(
-      "data: \n\n",
-    );
-  });
+    const result = await request.get("/");
 
-  it("serialises every message of a batch", () => {
-    expect(
-      formatEventStreamMessages([
-        { data: { n: 1 } },
-        { data: "two" },
-        { data: 3 },
-      ]),
-    ).toEqual('data: {"n":1}\n\ndata: two\n\ndata: 3\n\n');
+    expect(result.status).toEqual(200);
+    expect(result.text).toEqual("");
   });
 });

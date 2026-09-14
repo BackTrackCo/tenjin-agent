@@ -1,168 +1,147 @@
 import supertest from "supertest";
 import type TestAgent from "supertest/lib/agent";
-import { describe, it, expect, beforeEach } from "vitest";
-import { createApp, toNodeListener, eventHandler, readBody } from "../../src";
-import type { App } from "../../src";
+import { describe, it, expect, beforeEach, vi } from "vitest";
+import {
+  createApp,
+  toNodeListener,
+  eventHandler,
+  readBody,
+  readValidatedBody,
+} from "../../src";
+import type { App, AppOptions } from "../../src";
 
-describe("readBody json strictness", () => {
-  let app: App;
-  let request: TestAgent;
+describe("app onRequestBody", () => {
+  const onRequestBody = vi.fn();
 
   beforeEach(() => {
-    app = createApp({ debug: true });
-    request = supertest(toNodeListener(app));
+    onRequestBody.mockReset();
   });
 
-  function echoBody() {
+  /** An app whose route echoes the body it read. */
+  function echoApp(options: AppOptions = { onRequestBody }): {
+    app: App;
+    request: TestAgent;
+  } {
+    const app = createApp({ debug: true, ...options });
     app.use(
       eventHandler(async (event) => {
-        const body = await readBody(event);
-        return { type: typeof body, body };
+        return { body: await readBody(event) };
       }),
     );
+    return { app, request: supertest(toNodeListener(app)) };
   }
 
-  it("rejects a malformed body sent as application/json", async () => {
-    echoBody();
+  /** An app whose route insists the body is an object. */
+  function validatingApp(options: AppOptions = { onRequestBody }): TestAgent {
+    const app = createApp({ debug: true, ...options });
+    app.use(
+      eventHandler(async (event) => {
+        const body = await readValidatedBody(event, (input) =>
+          typeof input === "object" && input !== null ? input : false,
+        );
+        return { body };
+      }),
+    );
+    return supertest(toNodeListener(app));
+  }
+
+  it("is given the body that was posted", async () => {
+    const { request } = echoApp();
 
     const result = await request
       .post("/")
       .set("content-type", "application/json")
-      .send('{"a":1');
+      .send({ user: "ada" });
 
-    expect(result.status).toEqual(400);
-    expect(result.body).toMatchObject({ statusCode: 400 });
+    expect(result.status).toEqual(200);
+    expect(onRequestBody).toHaveBeenCalledTimes(1);
+    expect(onRequestBody.mock.calls[0]?.[1]).toEqual({ user: "ada" });
   });
 
-  it("rejects a malformed body when the type carries a charset", async () => {
-    echoBody();
+  it("leaves the body for the handler to read as well", async () => {
+    const { request } = echoApp();
+
+    const result = await request
+      .post("/")
+      .set("content-type", "application/json")
+      .send({ user: "ada" });
+
+    expect(result.body.body).toEqual({ user: "ada" });
+    expect(onRequestBody).toHaveBeenCalledTimes(1);
+  });
+
+  it("is given the event of the request", async () => {
+    const { request } = echoApp();
+
+    await request
+      .post("/some/path")
+      .set("content-type", "application/json")
+      .send({ user: "ada" });
+
+    expect(onRequestBody.mock.calls[0]?.[0]?.path).toEqual("/some/path");
+  });
+
+  it("stays quiet for a request with no body", async () => {
+    const { request } = echoApp();
+
+    await request.get("/");
+
+    expect(onRequestBody).not.toHaveBeenCalled();
+  });
+
+  it("does not change how a validating route answers a good body", async () => {
+    const request = validatingApp();
 
     const result = await request
       .post("/")
       .set("content-type", "application/json; charset=utf-8")
-      .send('{"a":1');
+      .send('{"user":"ada"}');
 
-    expect(result.status).toEqual(400);
-    expect(result.body).toMatchObject({ statusCode: 400 });
+    expect(result.status).toEqual(200);
+    expect(result.body.body).toEqual({ user: "ada" });
+    expect(onRequestBody).toHaveBeenCalledTimes(1);
   });
 
-  it("rejects a malformed body on a +json media type", async () => {
-    echoBody();
+  it("does not change how a validating route rejects a broken body", async () => {
+    const withHook = validatingApp();
+    const withoutHook = validatingApp({});
 
-    const result = await request
-      .post("/")
-      .set("content-type", "application/vnd.api+json")
-      .send('{"a":1');
-
-    expect(result.status).toEqual(400);
-  });
-
-  it("parses a good body that carries a charset", async () => {
-    echoBody();
-
-    const result = await request
+    const expected = await withoutHook
       .post("/")
       .set("content-type", "application/json; charset=utf-8")
-      .send('{"a":1}');
+      .send('{"user":"ada"');
 
-    expect(result.status).toEqual(200);
-    expect(result.body).toEqual({ type: "object", body: { a: 1 } });
-  });
-
-  it("parses a good body on a +json media type", async () => {
-    echoBody();
-
-    const result = await request
+    const actual = await withHook
       .post("/")
-      .set("content-type", "application/vnd.api+json")
-      .send('{"a":1}');
+      .set("content-type", "application/json; charset=utf-8")
+      .send('{"user":"ada"');
 
-    expect(result.status).toEqual(200);
-    expect(result.body).toEqual({ type: "object", body: { a: 1 } });
+    expect(expected.status).toEqual(400);
+    expect(actual.status).toEqual(expected.status);
+    expect(actual.body.statusMessage).toEqual(expected.body.statusMessage);
   });
 
-  it("leaves text bodies alone", async () => {
-    echoBody();
+  it("does not change how a plain route reads a text body", async () => {
+    const { request } = echoApp();
 
     const result = await request
       .post("/")
       .set("content-type", "text/plain")
-      .send('{"a":1');
+      .send("just text");
 
-    expect(result.status).toEqual(200);
-    expect(result.body).toEqual({ type: "string", body: '{"a":1' });
+    expect(result.body.body).toEqual("just text");
+    expect(onRequestBody.mock.calls[0]?.[1]).toEqual("just text");
   });
 
-  it("leaves form bodies alone", async () => {
-    echoBody();
-
-    const result = await request
-      .post("/")
-      .set("content-type", "application/x-www-form-urlencoded")
-      .send("a=1&b=2");
-
-    expect(result.status).toEqual(200);
-    expect(result.body.body).toEqual({ a: "1", b: "2" });
-  });
-
-  it("still lets a caller ask for the lenient parse", async () => {
-    app.use(
-      eventHandler(async (event) => {
-        const body = await readBody(event, { strict: false });
-        return { type: typeof body, body };
-      }),
-    );
-
-    const result = await request
-      .post("/")
-      .set("content-type", "application/json; charset=utf-8")
-      .send('{"a":1');
-
-    expect(result.status).toEqual(200);
-    expect(result.body).toEqual({ type: "string", body: '{"a":1' });
-  });
-
-  it("rejects the malformed body even when a layer already read it leniently", async () => {
-    app.use(
-      eventHandler(async (event) => {
-        await readBody(event, { strict: false });
-      }),
-    );
-    echoBody();
+  it("adds nothing when the app did not ask for it", async () => {
+    const { request } = echoApp({});
 
     const result = await request
       .post("/")
       .set("content-type", "application/json")
-      .send('{"a":1');
+      .send({ user: "ada" });
 
-    expect(result.status).toEqual(400);
-    expect(result.body).toMatchObject({ statusCode: 400 });
-  });
-
-  it("gives every reader the same good body", async () => {
-    const seen: unknown[] = [];
-    app.use(
-      eventHandler(async (event) => {
-        seen.push(await readBody(event));
-      }),
-    );
-    app.use(
-      eventHandler(async (event) => {
-        seen.push(await readBody(event));
-        return { count: seen.length, same: seen[0], second: seen[1] };
-      }),
-    );
-
-    const result = await request
-      .post("/")
-      .set("content-type", "application/json; charset=utf-8")
-      .send('{"a":1}');
-
-    expect(result.status).toEqual(200);
-    expect(result.body).toEqual({
-      count: 2,
-      same: { a: 1 },
-      second: { a: 1 },
-    });
+    expect(result.body.body).toEqual({ user: "ada" });
+    expect(onRequestBody).not.toHaveBeenCalled();
   });
 });

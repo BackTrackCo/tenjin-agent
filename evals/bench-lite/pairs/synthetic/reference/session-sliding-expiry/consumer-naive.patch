@@ -1,32 +1,27 @@
 diff --git a/src/utils/session.ts b/src/utils/session.ts
-index 4574406..242ae5c 100644
+index 4574406..99319a4 100644
 --- a/src/utils/session.ts
 +++ b/src/utils/session.ts
-@@ -40,6 +40,11 @@ export interface SessionConfig {
-   crypto?: Crypto;
-   /** Default is Crypto.randomUUID */
-   generateId?: () => string;
-+  /** Called when a presented session token could not be restored. */
-+  onRestoreError?: (
-+    event: H3Event,
-+    details: { reason: "expired" | "invalid"; error: Error },
-+  ) => void;
+@@ -22,6 +22,8 @@ export interface SessionManager<T extends SessionDataT = SessionDataT> {
+   readonly id: string | undefined;
+   readonly data: SessionData<T>;
+   update: (update: SessionUpdate<T>) => Promise<SessionManager<T>>;
++  /** Start this session's expiry window again, keeping its id and its data. */
++  renew: () => Promise<SessionManager<T>>;
+   clear: () => Promise<SessionManager<T>>;
  }
  
- const DEFAULT_NAME = "h3";
-@@ -149,6 +154,15 @@ export async function getSession<T extends SessionDataT = SessionDataT>(
-     await promise;
-   }
- 
-+  if (sealedSession && config.onRestoreError && isEvent(event)) {
-+    if (Object.keys(session.data).length === 0) {
-+      config.onRestoreError(event, {
-+        reason: "invalid",
-+        error: new Error("Could not restore session"),
-+      });
-+    }
-+  }
-+
-   // New session store in response cookies
-   if (!session.id) {
-     if (!isEvent(event)) {
+@@ -78,6 +80,13 @@ export async function useSession<T extends SessionDataT = SessionDataT>(
+       await updateSession<T>(event, config, update);
+       return sessionManager;
+     },
++    renew: async () => {
++      if (!isEvent(event)) {
++        throw new Error("[h3] Cannot renew read-only session.");
++      }
++      await updateSession<T>(event, config);
++      return sessionManager;
++    },
+     clear: () => {
+       if (!isEvent(event)) {
+         throw new Error("[h3] Cannot clear read-only session.");

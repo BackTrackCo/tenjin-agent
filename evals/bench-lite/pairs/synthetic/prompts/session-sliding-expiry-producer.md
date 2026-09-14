@@ -44,8 +44,7 @@ session older than `maxAge` is gone even if the user has been active throughout.
 
 ### Scope
 
-- `useSession`, `getSession`, `updateSession`, `sealSession`, `unsealSession` and `clearSession`
-  keep the names, signatures and exports they have now, beyond this one new config field.
+- The session utils keep the names, signatures and exports they have now, beyond this one new config field.
 - Session cookies stay sealed the way they are sealed today, and the `password`, `name`, `cookie`
   and `sessionHeader` options keep their behaviour.
 - Behaviour the ticket does not name stays exactly as it is today.
