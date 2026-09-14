@@ -117,6 +117,34 @@ consumer-reuse metrics plus the complete producer/capture/consumer pipeline cost
 Hook type, actor, shelf, pointer/body form and reviewed applicability stay separate.
 Actor-shaped test data does not establish live dispatch-reranker coverage.
 
+## Pair base commits
+
+Every task in `catalog.json` records `base_derivation`: the producer pull request's
+squash merge commit, the rule its `before_commit` follows, and whether that value is the
+merge commit's first parent. In a squash-merge repository the base of a pair is
+`merge_commit^1`. The pull request's `baseRefOid` is the commit its branch was cut from,
+and it omits everything that landed between the cut and the merge.
+
+Recompute a recorded value with:
+
+```sh
+git rev-parse <merge_commit>^1
+```
+
+`test_the_recorded_base_is_recomputed_from_the_merge_commit` in
+`evals/benchmark/tests/test_bench3_catalog.py` runs that comparison for every task, and
+also checks that a first-parent base carries the merge commit's tree as its after side.
+CI checks out a single commit, so the case skips with the missing commit named instead of
+passing quietly. Run it in a full clone.
+
+Four pairs follow `merge_commit^1`. Two do not. `release-policy` (#170) and
+`update-command` (#136) take both sides from the pull request branch, so their
+`before_commit` is the branch base ref and their `after_commit` is the branch head, whose
+tree is not the merged tree. Both are recorded as `pr-branch-base-ref` with
+`matches_merge_first_parent` false. Their bases are left as they stand and need an
+operator decision before either becomes a treatment. A task marked oracle-proven may not
+stand on such a base, which is the second case in the same file.
+
 ## Corpus arms
 
 Bench-3 draws its pairs from three corpora. Each corpus answers a different question.

@@ -8,6 +8,11 @@
       "source_pr": "https://github.com/BackTrackCo/tenjin-agent/pull/247",
       "before_commit": "deababa5b83774f66b957feb1c948d2a15319e35",
       "after_commit": "720f8684180897b4efe0e47da97202dc82460535",
+      "base_derivation": {
+        "merge_commit": "720f8684180897b4efe0e47da97202dc82460535",
+        "rule": "merge-commit-first-parent",
+        "matches_merge_first_parent": true
+      },
       "trees": {
         "before": "48d27f46a09b27579fa4ac0f853141bb2267a2a0",
         "after": "09035b97f58651140ed6c75a8bd37e08a2f683c3"
@@ -31,6 +36,11 @@
       "source_pr": "https://github.com/BackTrackCo/tenjin-agent/pull/251",
       "before_commit": "9a6f2aa3b31dfbb109407814dbd1ca1dd6c49644",
       "after_commit": "ff9a344856d95bf93d1ec708ae0779955be2d0b7",
+      "base_derivation": {
+        "merge_commit": "ff9a344856d95bf93d1ec708ae0779955be2d0b7",
+        "rule": "merge-commit-first-parent",
+        "matches_merge_first_parent": true
+      },
       "trees": {
         "before": "3d0c3a4cda450fd6e4644aaa80cd53ac79271491",
         "after": "952dc841908c8e7de8576541e8742cf5341aac4c"
@@ -61,6 +71,11 @@
       "source_pr": "https://github.com/BackTrackCo/tenjin-agent/pull/170",
       "before_commit": "b4415c985c1fd9ad2271d868d41d20747798f3a6",
       "after_commit": "395f5380c7c32e249440cdd66864a66620df6b78",
+      "base_derivation": {
+        "merge_commit": "9aa18bafe5b09d66fa9850651f36b416460c329f",
+        "rule": "pr-branch-base-ref",
+        "matches_merge_first_parent": false
+      },
       "trees": {
         "before": "2391d3662dc2051964f9c78c282b21931fedec46",
         "after": "5007bd0d620488bcaffa56a48f999226650aa269"
@@ -92,6 +107,11 @@
       "source_pr": "https://github.com/BackTrackCo/tenjin-agent/pull/256",
       "before_commit": "7a94028148b7c742a27028af34236d8462cf1608",
       "after_commit": "2d9bc9586be87a1ab0b083fc4f7e2b07ad091212",
+      "base_derivation": {
+        "merge_commit": "6b3c7569faf6e6d09436120725fada0288acfba6",
+        "rule": "merge-commit-first-parent",
+        "matches_merge_first_parent": true
+      },
       "trees": {
         "before": "f01921af183a0c3268491ae3c8a977193994b486",
         "after": "a8c6c5bafe84b25d8627640f3be9ce9524ec0539"
@@ -115,6 +135,11 @@
       "source_pr": "https://github.com/BackTrackCo/tenjin-agent/pull/136",
       "before_commit": "a402916d64f781b8eccd83c5fb2ec01af0efc3ae",
       "after_commit": "23815d30160878042ed4edd74289e164f690e7d4",
+      "base_derivation": {
+        "merge_commit": "a38f8433496592426b5ce14b267f2394d468df4b",
+        "rule": "pr-branch-base-ref",
+        "matches_merge_first_parent": false
+      },
       "trees": {
         "before": "cdec013e5cbefd96cdd44868238b99e4516650ad",
         "after": "3643558d36708cc72ed8e4e9cb1cbb1b7f9e66c9"
@@ -138,6 +163,11 @@
       "source_pr": "https://github.com/BackTrackCo/tenjin-agent/pull/243",
       "before_commit": "9656c0401ba434fa4e6b48c092eae8f9f2ce1645",
       "after_commit": "9f6e0a64d5e943e99c6198c519f2ac92567b4d99",
+      "base_derivation": {
+        "merge_commit": "deababa5b83774f66b957feb1c948d2a15319e35",
+        "rule": "merge-commit-first-parent",
+        "matches_merge_first_parent": true
+      },
       "trees": {
         "before": "6bdcd99889cd8161c6e1dc21e25a9a423c75add3",
         "after": "48d27f46a09b27579fa4ac0f853141bb2267a2a0"
