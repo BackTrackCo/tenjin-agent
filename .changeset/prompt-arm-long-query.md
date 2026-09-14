@@ -12,5 +12,5 @@ with rules, so the old 512-character head was the preamble and not the question:
 the team leg missed even when the word leg ranked the right piece first. The
 trigger stays `prompt` on the wire, so the per-arm shelf policy and the
 telemetry are unchanged. Needs the matching server change
-in BackTrackCo/tenjin; against an older shelf a long prompt is a `400` on the
+in BackTrackCo/tenjin#853; against an older shelf a long prompt is a `400` on the
 prompt leg, which the arm reports and the turn continues without an injection.
