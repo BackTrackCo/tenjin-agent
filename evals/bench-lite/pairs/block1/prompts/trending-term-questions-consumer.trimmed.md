@@ -1,0 +1,8 @@
+Prevent bare catalog terms qualifying for either published term tier from also appearing in any of the four public question tiers. Preserve those questions in the moderation queue, because term eligibility can later disappear. Preserve both term tiers’ existing rows, floors, windows, ordering and agent-source restriction, and preserve ordinary question moderation and shape rules.
+
+Compare using the existing normalization contract: case, interior ASCII whitespace and surrounding spaces; broader Unicode equivalence is not required. Suppress qualifying terms even when they rank beyond the term display limit. Restrict this exclusion to terms of at most 80 characters and three words, so promoting a sentence as a term cannot hide the corresponding question. Longer questions, expanded questions and below-floor terms remain eligible under their existing rules.
+
+Keep the comparison within the existing question query; do not add a new table or separate per-caller term lookup.
+
+Work within the supplied product source: src/ for agent tasks; lib/, app/, and drizzle/ for server tasks. Preserve existing interfaces and unrelated behavior. Do not change tests, dependencies, or benchmark support. Run relevant focused tests only. Services, installs, payments, and publication must use the supplied inert test facilities; do not contact production.
+The supplied disposable database supports existing focused Node/integration tests with: pnpm exec vitest run --config .bench1/model-tests.config.mjs --configLoader runner tests/integration/<relevant-file>.test.ts. Use the corresponding lib test path for a focused unit test. The original root Testcontainers setup cannot access Docker here; do not use it. Hidden final verification is separate.

@@ -3,7 +3,19 @@ import tseslint from 'typescript-eslint';
 import prettier from 'eslint-config-prettier';
 
 export default [
-  { ignores: ['dist/**', 'node_modules/**'] },
+  {
+    ignores: [
+      'dist/**',
+      'node_modules/**',
+      // Task packages for evals/bench-lite: oracle test files lifted verbatim
+      // from the commits they grade, and the prompt text an agent under test is
+      // given. They are fixtures, never compiled or run by this repo (vitest's
+      // include is `src/**/*.test.ts`), and editing them to satisfy a lint rule
+      // would change what the benchmark measures.
+      'evals/bench-lite/pairs/*/oracles/**',
+      'evals/bench-lite/pairs/*/prompts/**',
+    ],
+  },
   js.configs.recommended,
   ...tseslint.configs.recommended,
   prettier,

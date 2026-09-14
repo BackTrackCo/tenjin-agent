@@ -1,0 +1,222 @@
+[
+  {
+    "id": "tenjin-746-748-confidence",
+    "notes": "Strongest pair per the source NOTES.md: both PRs single-theme and small, the shared fact is an enum plus two numeric cuts, and the consumer's gate is unwritable without it. Run this one first.",
+    "producer": {
+      "repo": "tenjin",
+      "pr": 746,
+      "base_commit": "c7d0a5f252416f6be6a5d6dbe9080aec6e6c507f",
+      "merge_commit": "ee76fc478ac797bfd9b82a28d5e88a2bc16a8af4",
+      "prompt_file": "prompts/tenjin-746-748-confidence-producer.md",
+      "oracle": {
+        "copy": [
+          {
+            "from": "oracles/tenjin-746-748-confidence-producer/lib/lookup.test.ts",
+            "to": "lib/lookup.test.ts"
+          },
+          {
+            "from": "oracles/tenjin-746-748-confidence-producer/lib/openapi.test.ts",
+            "to": "lib/openapi.test.ts"
+          },
+          {
+            "from": "oracles/tenjin-746-748-confidence-producer/lib/search-response.test.ts",
+            "to": "lib/search-response.test.ts"
+          },
+          {
+            "from": "oracles/tenjin-746-748-confidence-producer/tests/integration/search-route-envelopes.test.ts",
+            "to": "tests/integration/search-route-envelopes.test.ts"
+          }
+        ],
+        "command": "pnpm vitest run lib/lookup.test.ts lib/openapi.test.ts lib/search-response.test.ts tests/integration/search-route-envelopes.test.ts",
+        "timeout_s": 1800
+      }
+    },
+    "consumer": {
+      "repo": "tenjin",
+      "pr": 748,
+      "base_commit": "afb0452ccc0d7bec3c2e26dbf18a6b54934104d4",
+      "merge_commit": "83fa8bacd7f069237b3afa0e066187fb237764be",
+      "prompt_file": "prompts/tenjin-746-748-confidence-consumer.md",
+      "oracle": {
+        "copy": [
+          {
+            "from": "oracles/tenjin-746-748-confidence-consumer/tests/integration/_support/embedder.ts",
+            "to": "tests/integration/_support/embedder.ts"
+          },
+          {
+            "from": "oracles/tenjin-746-748-confidence-consumer/tests/integration/answer.test.ts",
+            "to": "tests/integration/answer.test.ts"
+          },
+          {
+            "from": "oracles/tenjin-746-748-confidence-consumer/tests/integration/lookup-hybrid.test.ts",
+            "to": "tests/integration/lookup-hybrid.test.ts"
+          }
+        ],
+        "command": "pnpm vitest run tests/integration/answer.test.ts tests/integration/lookup-hybrid.test.ts",
+        "timeout_s": 1800
+      }
+    }
+  },
+  {
+    "id": "agent-219-266-state-store",
+    "notes": "Producer oracle TRIMMED to the 5 files the source NOTES.md recommends; src/sidecar-e2e.test.ts, src/commands/outcome.test.ts, src/commands/publish.test.ts and src/commands/uninstall.test.ts are dropped as incidental to the state store.",
+    "producer": {
+      "repo": "tenjin-agent",
+      "pr": 219,
+      "base_commit": "7886e230aedcf183aec517fa7b4198e7b522ee9a",
+      "merge_commit": "0a9d8efc2b6c2ebd1c91e0313846a8014e583f48",
+      "prompt_file": "prompts/agent-219-266-state-store-producer.md",
+      "oracle": {
+        "copy": [
+          {
+            "from": "oracles/agent-219-266-state-store-producer/src/lib/state-store.test.ts",
+            "to": "src/lib/state-store.test.ts"
+          },
+          {
+            "from": "oracles/agent-219-266-state-store-producer/src/lib/push-scripts.test.ts",
+            "to": "src/lib/push-scripts.test.ts"
+          },
+          {
+            "from": "oracles/agent-219-266-state-store-producer/src/lib/hook-scripts.test.ts",
+            "to": "src/lib/hook-scripts.test.ts"
+          },
+          {
+            "from": "oracles/agent-219-266-state-store-producer/src/lib/search-store.test.ts",
+            "to": "src/lib/search-store.test.ts"
+          },
+          {
+            "from": "oracles/agent-219-266-state-store-producer/src/commands/push.test.ts",
+            "to": "src/commands/push.test.ts"
+          }
+        ],
+        "command": "pnpm vitest run src/lib/state-store.test.ts src/lib/push-scripts.test.ts src/lib/hook-scripts.test.ts src/lib/search-store.test.ts src/commands/push.test.ts",
+        "timeout_s": 1800
+      }
+    },
+    "consumer": {
+      "repo": "tenjin-agent",
+      "pr": 266,
+      "base_commit": "c2cbd4d08072c12e37df7ac013f1ddbd8f662a32",
+      "merge_commit": "97424b546a6506fd3ca8e882cdb20dc2050a4ab1",
+      "prompt_file": "prompts/agent-219-266-state-store-consumer.md",
+      "oracle": {
+        "copy": [
+          {
+            "from": "oracles/agent-219-266-state-store-consumer/src/lib/push-scripts.test.ts",
+            "to": "src/lib/push-scripts.test.ts"
+          },
+          {
+            "from": "oracles/agent-219-266-state-store-consumer/src/lib/state-store.test.ts",
+            "to": "src/lib/state-store.test.ts"
+          }
+        ],
+        "command": "pnpm vitest run src/lib/push-scripts.test.ts src/lib/state-store.test.ts",
+        "timeout_s": 1800
+      }
+    }
+  },
+  {
+    "id": "content-retrieval",
+    "notes": "bench3 historical task. The pair is named for the CONSUMER task (PR 674); the producer is PR 670, whose own hidden oracle is content-generation.test.ts. Consumer uses the trimmed prompt.",
+    "producer": {
+      "repo": "tenjin",
+      "pr": 670,
+      "base_commit": "f76f075b7228175b25750de90c8eba832825b44a",
+      "prompt_file": "prompts/content-retrieval-producer.md",
+      "oracle": {
+        "copy": [
+          {
+            "from": "oracles/content-generation.test.ts",
+            "to": "src/benchmark-independent.test.ts"
+          },
+          {
+            "from": "oracles/vitest.config.mjs",
+            "to": ".bench3/vitest.config.mjs"
+          },
+          {
+            "from": "oracles/database.mjs",
+            "to": ".bench3/benchmark-database.mjs"
+          }
+        ],
+        "command": "BENCHMARK_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/benchmark pnpm exec vitest run --config .bench3/vitest.config.mjs --configLoader native src/benchmark-independent.test.ts",
+        "timeout_s": 1800
+      }
+    },
+    "consumer": {
+      "repo": "tenjin",
+      "pr": 674,
+      "base_commit": "def7ef711acb449499a34ed7e47b3186f509681b",
+      "prompt_file": "prompts/content-retrieval-consumer.trimmed.md",
+      "oracle": {
+        "copy": [
+          {
+            "from": "oracles/content-retrieval.test.ts",
+            "to": "src/benchmark-independent.test.ts"
+          },
+          {
+            "from": "oracles/vitest.config.mjs",
+            "to": ".bench3/vitest.config.mjs"
+          },
+          {
+            "from": "oracles/database.mjs",
+            "to": ".bench3/benchmark-database.mjs"
+          }
+        ],
+        "command": "BENCHMARK_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/benchmark pnpm exec vitest run --config .bench3/vitest.config.mjs --configLoader native src/benchmark-independent.test.ts",
+        "timeout_s": 1800
+      }
+    }
+  },
+  {
+    "id": "trending-term-questions",
+    "notes": "bench3 historical task. Named for the CONSUMER task (PR 740); the producer is PR 727, whose own hidden oracle is demand-honesty.test.ts. Consumer uses the trimmed prompt.",
+    "producer": {
+      "repo": "tenjin",
+      "pr": 727,
+      "base_commit": "35f5a2f1140d4ea87cad042f88608a6cb5172ad3",
+      "prompt_file": "prompts/trending-term-questions-producer.md",
+      "oracle": {
+        "copy": [
+          {
+            "from": "oracles/demand-honesty.test.ts",
+            "to": "src/benchmark-independent.test.ts"
+          },
+          {
+            "from": "oracles/vitest.config.mjs",
+            "to": ".bench3/vitest.config.mjs"
+          },
+          {
+            "from": "oracles/database.mjs",
+            "to": ".bench3/benchmark-database.mjs"
+          }
+        ],
+        "command": "BENCHMARK_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/benchmark pnpm exec vitest run --config .bench3/vitest.config.mjs --configLoader native src/benchmark-independent.test.ts",
+        "timeout_s": 1800
+      }
+    },
+    "consumer": {
+      "repo": "tenjin",
+      "pr": 740,
+      "base_commit": "d7a2cc78b3925fece16a47058b52a676c9953c31",
+      "prompt_file": "prompts/trending-term-questions-consumer.trimmed.md",
+      "oracle": {
+        "copy": [
+          {
+            "from": "oracles/trending-term-questions.test.ts",
+            "to": "src/benchmark-independent.test.ts"
+          },
+          {
+            "from": "oracles/vitest.config.mjs",
+            "to": ".bench3/vitest.config.mjs"
+          },
+          {
+            "from": "oracles/database.mjs",
+            "to": ".bench3/benchmark-database.mjs"
+          }
+        ],
+        "command": "BENCHMARK_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/benchmark pnpm exec vitest run --config .bench3/vitest.config.mjs --configLoader native src/benchmark-independent.test.ts",
+        "timeout_s": 1800
+      }
+    }
+  }
+]

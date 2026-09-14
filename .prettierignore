@@ -6,3 +6,9 @@ skills/
 # Rewritten by the changesets release action in its own JSON style
 # (multi-line arrays), which prettier disagrees with. Bot-owned, not ours.
 .changeset/pre.json
+# Task packages for evals/bench-lite. `prompts/` is the exact text an agent under
+# test is given and `oracles/` is test files lifted verbatim from the commits they
+# grade. Reformatting either one changes the measurement, so neither is ours to
+# style. The package's own pairs.json and NOTES.md are still checked.
+evals/bench-lite/pairs/*/prompts/
+evals/bench-lite/pairs/*/oracles/

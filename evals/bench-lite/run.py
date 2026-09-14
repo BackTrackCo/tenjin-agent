@@ -610,9 +610,31 @@ def load_pairs(path: Path, only: list[str] | None) -> list[dict[str, Any]]:
             oracle = spec["oracle"]
             if not isinstance(oracle, dict) or "command" not in oracle:
                 die(f"pair {pid}.{role}: oracle needs a `command`")
+            if is_whole_suite(oracle["command"]):
+                die(
+                    f"pair {pid}.{role}: the oracle command looks like a whole-suite run. "
+                    "Name the test files."
+                )
             for item in oracle.get("copy", []) or []:
                 if not isinstance(item, dict) or "from" not in item or "to" not in item:
                     die(f"pair {pid}.{role}: every oracle.copy entry needs `from` and `to`")
+                # The destination is resolved against the worktree, so an absolute
+                # path or a `..` would escape it. The upstream bench3 harness
+                # stages a file at the container-absolute `/benchmark-database.mjs`;
+                # a local runner must never write there, so this is refused at load
+                # rather than discovered as a permission error mid-run.
+                dest = Path(item["to"])
+                if dest.is_absolute() or ".." in dest.parts:
+                    die(
+                        f"pair {pid}.{role}: oracle.copy destination must stay inside the "
+                        f"worktree, got {item['to']!r}"
+                    )
+                src = resolve_rel(path.parent, item["from"])
+                if not src.is_file():
+                    die(f"pair {pid}.{role}: oracle.copy source not found: {src}")
+            prompt = resolve_rel(path.parent, spec["prompt_file"])
+            if not prompt.is_file():
+                die(f"pair {pid}.{role}: prompt file not found: {prompt}")
     if only:
         pairs = [p for p in pairs if p["id"] in set(only)]
         missing = set(only) - {p["id"] for p in pairs}
@@ -1267,6 +1289,14 @@ def run_oracle(
     for item in oracle.get("copy", []) or []:
         src = resolve_rel(pairs_dir, item["from"])
         dst = worktree / item["to"]
+        # Defence in depth; `load_pairs` already refused absolute and `..` paths.
+        try:
+            dst.resolve().relative_to(worktree.resolve())
+        except ValueError:
+            result["error"] = f"oracle destination escapes the worktree: {dst}"
+            result["ran"] = False
+            result["passed"] = False
+            return result
         runner.log(f"# cp {src} {dst}")
         if runner.dry_run:
             result["copied"].append({"from": str(src), "to": str(dst), "ok": None})
