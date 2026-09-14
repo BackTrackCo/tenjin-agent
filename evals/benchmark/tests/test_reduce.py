@@ -643,3 +643,29 @@ def test_repeats_of_one_task_keep_a_point_but_cannot_qualify_as_a_headline() -> 
     assert comparison["completion_tokens"]["point"] == 0.8
     assert comparison["completion_tokens"]["reason"] == "insufficient_independent_tasks"
     assert comparison["headline_eligible"] is False
+
+
+def test_an_unsettled_producer_invalidates_the_attempt_it_prepared() -> None:
+    reused = support.reduction_record("t1", "on", 0, 0, 100)
+    stranded = support.reduction_record(
+        "t1", "on", 1, 1, 400,
+        auxiliary=(support.receipt("producer", "producer", "capped-producer", 900, 100),),
+    )
+    stranded["isolation"]["producer"] = {"outcome": "capped", "agent_time_s": 40}
+    assert reduce_module.scored_outcome(stranded) == "invalid"
+    # A record written before this contract can still claim `pass` on disk. The
+    # reducer reads the producer, not the claim: the consumer searched a store
+    # the capped producer never published to, so there was no reuse to measure.
+    result = reduce_module.reduce({record["trial_id"]: record for record in (reused, stranded)}, [])
+    arm = result["arms"]["on"]
+    assert arm["outcomes"] == {"pass": 1, "fail": 0, "capped": 0, "interrupted": 0, "invalid": 1}
+    assert result["invalid"] == [
+        {"trial_id": stranded["trial_id"], "arm_id": "on", "task_id": "t1", "reason": "producer"}
+    ]
+    assert (arm["tasks"]["t1"]["attempts"], arm["tasks"]["t1"]["tokens"]) == (1, 100)
+    assert arm["tokens_per_verified_resolution"] == 100
+    # Charged, not hidden: the stranded consumer and its producer both spent.
+    assert arm["invalid_observed_effort"]["tokens"] == 400
+    assert arm["invalid_observed_effort"]["phase_tokens"]["producer"] == 1000
+    assert arm["invalid_observed_effort"]["producer_agent_seconds"] == 40
+    assert arm["producer"]["capped_or_interrupted"] == 1

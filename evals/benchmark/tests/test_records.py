@@ -185,3 +185,37 @@ def test_publish_refuses_an_invalid_record_before_writing(tmp_path: Path) -> Non
 def test_timing_requires_finite_nonnegative_observations(field, value) -> None:
     with pytest.raises(RecordError):
         records.validate({**attempt_record(parse("sess-family")), field: value})
+
+
+def _with_producer(producer: str, **overrides) -> dict:
+    """A record whose memory was prepared by one producer phase that ended `producer`."""
+    base = attempt_record(parse("sess-family"))
+    return {
+        **base,
+        "isolation": {**base["isolation"], "producer": {"outcome": producer, "agent_time_s": 12.0}},
+        **overrides,
+    }
+
+
+@pytest.mark.parametrize("outcome", sorted(records.UNSETTLED_PRODUCER))
+def test_an_unsettled_producer_leaves_its_attempt_unmeasurable(outcome: str) -> None:
+    scored = _with_producer(outcome)
+    assert records.producer_unusable(scored) == f"producer:{outcome}"
+    with pytest.raises(RecordError, match=f"producer:{outcome}"):
+        records.validate(scored)
+    # The same attempt is a record once it says what it is: the producer
+    # published nothing, so there was nothing to reuse and nothing to score.
+    records.validate(_with_producer(outcome, outcome="invalid", invalid_reason=f"producer:{outcome}", verifier=None))
+
+
+@pytest.mark.parametrize("outcome", ("pass", "fail"))
+def test_a_producer_that_finished_still_prepared_a_measurement(outcome: str) -> None:
+    record = _with_producer(outcome)
+    assert records.producer_unusable(record) is None
+    records.validate(record)
+
+
+def test_an_attempt_without_a_producer_phase_depends_on_none() -> None:
+    assert records.producer_unusable(attempt_record(parse("sess-family"))) is None
+    assert records.producer_unusable({"isolation": {"producer": "capped"}}) is None
+    assert records.producer_unusable({}) is None

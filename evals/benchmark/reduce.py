@@ -3,9 +3,10 @@
 Failed, capped, and interrupted attempts keep their usage in the numerator:
 they are task outcomes, so dropping them would pay an arm for giving up.
 Infrastructure-invalid attempts are the opposite case, and they are counted
-and named rather than scored. Every task weighs the same regardless of repeats
-or token size, which is why every arm figure is a mean over task cells and
-never a sum over attempts.
+and named rather than scored; so is an attempt whose producer never settled,
+because it read an empty store and measured no reuse at all. Every task weighs
+the same regardless of repeats or token size, which is why every arm figure is
+a mean over task cells and never a sum over attempts.
 
 Every ratio is stated beside what it decomposes into: requests per attempt,
 new tokens per attempt (uncached input, cache writes, and output), and their
@@ -37,7 +38,7 @@ import numpy as np
 from scipy import stats
 
 from . import phases as phases_module
-from .records import Excluded
+from .records import Excluded, producer_unusable
 from .usage import from_json, totals
 
 REDUCTION_SCHEMA = "bench1.reduction.v1"
@@ -193,6 +194,17 @@ def producer_summary(records: list[dict[str, Any]]) -> dict[str, Any] | None:
         "consumers_with_delivery": sum(count > 0 for count in counts) if len(observed) == len(phases) else None,
         "verified_with_delivery": sum(count > 0 and record["outcome"] == "pass" for count, record in zip(counts, paired)) if len(observed) == len(phases) else None,
     }
+
+
+def scored_outcome(record: dict[str, Any]) -> str:
+    """The outcome the reduction reads.
+
+    A producer that never settled published nothing, so the attempt it prepared
+    is `invalid` here whatever it recorded for itself: it measured an empty
+    store, and scoring it would enter the absence of a publish as the cost of
+    reuse. Its spend is kept and named through `invalid_observed_effort`.
+    """
+    return "invalid" if producer_unusable(record) is not None else record["outcome"]
 
 
 def _accounting(record: dict[str, Any]) -> str:
@@ -518,8 +530,8 @@ def reduce(
             {"attempts": 0, "outcomes": {name: 0 for name in OUTCOMES}, "tasks": {}, "accounting_reasons": []},
         )
         arm["attempts"] += 1
-        arm["outcomes"][record["outcome"]] += 1
-        if record["outcome"] == "invalid":
+        arm["outcomes"][scored_outcome(record)] += 1
+        if scored_outcome(record) == "invalid":
             # Named, never scored: an invalid attempt is a measurement that did
             # not happen, not a zero-token run and not a miss.
             invalid.append(
@@ -527,7 +539,7 @@ def reduce(
                     "trial_id": record["trial_id"],
                     "arm_id": record["arm_id"],
                     "task_id": record["task_id"],
-                    "reason": str(record["invalid_reason"]).split(":", 1)[0],
+                    "reason": str(record["invalid_reason"] or producer_unusable(record)).split(":", 1)[0],
                 }
             )
             continue
@@ -550,7 +562,7 @@ def reduce(
         arm["capture_tokens"] = capture_tokens(scored)
         arm["phase_tokens"] = phase_tokens(scored)
         arm["producer"] = producer_summary(all_by_arm.get(arm_id, []))
-        invalid_records = [record for record in all_by_arm.get(arm_id, []) if record["outcome"] == "invalid"]
+        invalid_records = [record for record in all_by_arm.get(arm_id, []) if scored_outcome(record) == "invalid"]
         arm["invalid_observed_effort"] = {
             "tokens": sum(sum(item["input_total"] + item["output_total"] for item in record["usage"]) + consumer_auxiliary(record) for record in invalid_records),
             "agent_seconds": sum(record["agent_time_s"] for record in invalid_records if record.get("agent_time_s") is not None),
