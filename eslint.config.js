@@ -14,6 +14,12 @@ export default [
       // would change what the benchmark measures.
       'evals/bench-lite/pairs/*/oracles/**',
       'evals/bench-lite/pairs/*/prompts/**',
+      // The h3 fixture repo a synthetic pair is graded against. It ships its
+      // own eslint.config.mjs importing `eslint-config-unjs`, which this repo
+      // does not depend on, so walking into it fails the whole lint run with
+      // ERR_MODULE_NOT_FOUND before a single file is checked.
+      'evals/bench-lite/pairs/synthetic/repo/**',
+      'evals/bench-lite/pairs/synthetic/repo.git/**',
     ],
   },
   js.configs.recommended,

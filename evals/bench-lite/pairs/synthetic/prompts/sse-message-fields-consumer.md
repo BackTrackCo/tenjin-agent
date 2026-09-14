@@ -1,11 +1,3 @@
-You are working in the h3 repository (unjs/h3, the HTTP framework). Implement the ticket below.
-
-Working rules for this session: you may run the repository's existing test files that are
-relevant to what you change, but never the whole suite with no file argument, and never leave a
-server or watcher running. Do not spawn subagents.
-
----
-
 ## Feature request: event streams a dropped client can resume
 
 A browser that loses an event stream reconnects on its own and tells the server the last message
@@ -46,3 +38,13 @@ pushed. A payload pushed as a string arrives as it stands.
 - `createEventStream`, `EventStream.push`, `send`, `close`, `pause`, `resume` and `flush` keep
   the names, signatures and exports they have now, beyond the new option and property.
 - Behaviour the ticket does not name stays exactly as it is today.
+
+---
+
+## Working rules
+
+You are working in the h3 repository (unjs/h3, the HTTP framework). Implement the ticket above.
+
+Working rules for this session: you may run the repository's existing test files that are
+relevant to what you change, but never the whole suite with no file argument, and never leave a
+server or watcher running. Do not spawn subagents.

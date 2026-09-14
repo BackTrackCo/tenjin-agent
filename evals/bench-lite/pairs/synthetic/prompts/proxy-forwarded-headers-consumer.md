@@ -1,11 +1,3 @@
-You are working in the h3 repository (unjs/h3, the HTTP framework). Implement the ticket below.
-
-Working rules for this session: you may run the repository's existing test files that are
-relevant to what you change, but never the whole suite with no file argument, and never leave a
-server or watcher running. Do not spawn subagents.
-
----
-
 ## Feature request: let `sendProxy` pass the caller's headers on
 
 `sendProxy` is the right tool for serving a `GET` from somewhere else: an avatar, a rendered PDF,
@@ -42,3 +34,13 @@ return sendProxy(event, target, { forwardHeaders: true });
   new option.
 - `proxyRequest` keeps behaving as it does today.
 - Behaviour the ticket does not name stays exactly as it is today.
+
+---
+
+## Working rules
+
+You are working in the h3 repository (unjs/h3, the HTTP framework). Implement the ticket above.
+
+Working rules for this session: you may run the repository's existing test files that are
+relevant to what you change, but never the whole suite with no file argument, and never leave a
+server or watcher running. Do not spawn subagents.

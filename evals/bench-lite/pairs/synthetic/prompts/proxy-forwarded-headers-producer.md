@@ -1,11 +1,3 @@
-You are working in the h3 repository (unjs/h3, the HTTP framework). Implement the ticket below.
-
-Working rules for this session: you may run the repository's existing test files that are
-relevant to what you change, but never the whole suite with no file argument, and never leave a
-server or watcher running. Do not spawn subagents.
-
----
-
 ## Feature request: mount an upstream service on a route
 
 Putting an h3 app in front of another service is four lines of boilerplate every time: a handler
@@ -42,3 +34,13 @@ request from `target`.
 - Nothing changes about the response side: the upstream response's `content-encoding` and
   `content-length` are still dropped, and cookie rewriting is untouched.
 - Behaviour the ticket does not name stays exactly as it is today.
+
+---
+
+## Working rules
+
+You are working in the h3 repository (unjs/h3, the HTTP framework). Implement the ticket above.
+
+Working rules for this session: you may run the repository's existing test files that are
+relevant to what you change, but never the whole suite with no file argument, and never leave a
+server or watcher running. Do not spawn subagents.

@@ -1,11 +1,3 @@
-You are working in the h3 repository (unjs/h3, the HTTP framework). Implement the ticket below.
-
-Working rules for this session: you may run the repository's existing test files that are
-relevant to what you change, but never the whole suite with no file argument, and never leave a
-server or watcher running. Do not spawn subagents.
-
----
-
 ## Feature request: a size limit on the body a handler is willing to read
 
 h3 will happily buffer whatever a client sends. Apps that want a ceiling currently check
@@ -38,3 +30,13 @@ const body = await readBody(event, { limit: 64 * 1024 });
 - `readBody`, `readRawBody`, `readValidatedBody` and `readFormData` keep the names, signatures and
   exports they have now, beyond this one new option.
 - Behaviour the ticket does not name stays exactly as it is today.
+
+---
+
+## Working rules
+
+You are working in the h3 repository (unjs/h3, the HTTP framework). Implement the ticket above.
+
+Working rules for this session: you may run the repository's existing test files that are
+relevant to what you change, but never the whole suite with no file argument, and never leave a
+server or watcher running. Do not spawn subagents.

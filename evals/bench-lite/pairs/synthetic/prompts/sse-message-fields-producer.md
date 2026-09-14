@@ -1,11 +1,3 @@
-You are working in the h3 repository (unjs/h3, the HTTP framework). Implement the ticket below.
-
-Working rules for this session: you may run the repository's existing test files that are
-relevant to what you change, but never the whole suite with no file argument, and never leave a
-server or watcher running. Do not spawn subagents.
-
----
-
 ## Feature request: stream an iterable to the client as server-sent events
 
 Every app that streams progress writes the same handler: make an event stream, loop over
@@ -47,3 +39,13 @@ Export `sendEventStream(event, source, options?)` from the SSE utils, alongside
 - `createEventStream`, `EventStream` and its methods keep the names, signatures and exports they
   have now.
 - Behaviour the ticket does not name stays exactly as it is today.
+
+---
+
+## Working rules
+
+You are working in the h3 repository (unjs/h3, the HTTP framework). Implement the ticket above.
+
+Working rules for this session: you may run the repository's existing test files that are
+relevant to what you change, but never the whole suite with no file argument, and never leave a
+server or watcher running. Do not spawn subagents.

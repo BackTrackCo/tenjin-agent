@@ -1,11 +1,3 @@
-You are working in the h3 repository (unjs/h3, the HTTP framework). Implement the ticket below.
-
-Working rules for this session: you may run the repository's existing test files that are
-relevant to what you change, but never the whole suite with no file argument, and never leave a
-server or watcher running. Do not spawn subagents.
-
----
-
 ## Feature request: an app-wide hook that sees each request's body
 
 Audit logging, payload sampling and "what did that client actually send us" debugging all want
@@ -51,3 +43,13 @@ An app with no `onRequestBody` behaves exactly as it does today.
 - `readBody`, `readRawBody`, `readValidatedBody` and `readFormData` keep the names, signatures
   and exports they have now.
 - Behaviour the ticket does not name stays exactly as it is today.
+
+---
+
+## Working rules
+
+You are working in the h3 repository (unjs/h3, the HTTP framework). Implement the ticket above.
+
+Working rules for this session: you may run the repository's existing test files that are
+relevant to what you change, but never the whole suite with no file argument, and never leave a
+server or watcher running. Do not spawn subagents.

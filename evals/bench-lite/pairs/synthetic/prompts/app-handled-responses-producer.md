@@ -1,11 +1,3 @@
-You are working in the h3 repository (unjs/h3, the HTTP framework). Implement the ticket below.
-
-Working rules for this session: you may run the repository's existing test files that are
-relevant to what you change, but never the whole suite with no file argument, and never leave a
-server or watcher running. Do not spawn subagents.
-
----
-
 ## Feature request: how many responses has this app served, and with what status
 
 People ask h3 for the simplest possible traffic number: a counter of responses by status code,
@@ -46,3 +38,13 @@ A request that produced no response at all (nothing in the stack handled it, so 
 - `createApp`, `createAppEventHandler` and `App` keep their current shapes, and the app's
   existing hooks keep their current behaviour.
 - Behaviour the ticket does not name stays exactly as it is today.
+
+---
+
+## Working rules
+
+You are working in the h3 repository (unjs/h3, the HTTP framework). Implement the ticket above.
+
+Working rules for this session: you may run the repository's existing test files that are
+relevant to what you change, but never the whole suite with no file argument, and never leave a
+server or watcher running. Do not spawn subagents.

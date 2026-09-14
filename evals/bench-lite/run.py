@@ -1667,6 +1667,12 @@ def run_session(
         return record
     prompt = prompt_path.read_text(encoding="utf-8") if prompt_path.is_file() else "(dry-run)"
     record["prompt_chars"] = len(prompt)
+    # EXACTLY WHAT THE PROMPT ARM QUERIES. The hook keys its lookup on the first
+    # 512 characters of the prompt as sent, so whatever sits at the top of the
+    # file IS the query. Recorded per session because a prompt whose first 512
+    # chars are harness boilerplate produces a search about the harness, and the
+    # only way to see that happened is to look at this field.
+    record["prompt_head_512"] = prompt[:512]
 
     if not runner.dry_run:
         session_dir.mkdir(parents=True, exist_ok=True)
@@ -1740,6 +1746,9 @@ def run_session(
         if condition == "tenjin" and passphrase:
             env_overlay["TENJIN_WALLET_PASSPHRASE"] = passphrase
 
+        if runner.dry_run:
+            head = prompt[:200].replace("\n", " ⏎ ")
+            runner.log(f"# prompt[0:200] -> {head}")
         cap_s = int(spec.get("cap_s") or args.cap_s)
         record["cap_s"] = cap_s
         record["cap_source"] = "pairs.json" if spec.get("cap_s") else "--cap-s"

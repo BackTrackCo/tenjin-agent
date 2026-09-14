@@ -1,11 +1,3 @@
-You are working in the h3 repository (unjs/h3, the HTTP framework). Implement the ticket below.
-
-Working rules for this session: you may run the repository's existing test files that are
-relevant to what you change, but never the whole suite with no file argument, and never leave a
-server or watcher running. Do not spawn subagents.
-
----
-
 ## Feature request: sessions that expire on inactivity, not on the clock
 
 `maxAge` today is the time from when a session was created. A user who signs in, then works
@@ -48,3 +40,13 @@ session older than `maxAge` is gone even if the user has been active throughout.
 - Session cookies stay sealed the way they are sealed today, and the `password`, `name`, `cookie`
   and `sessionHeader` options keep their behaviour.
 - Behaviour the ticket does not name stays exactly as it is today.
+
+---
+
+## Working rules
+
+You are working in the h3 repository (unjs/h3, the HTTP framework). Implement the ticket above.
+
+Working rules for this session: you may run the repository's existing test files that are
+relevant to what you change, but never the whole suite with no file argument, and never leave a
+server or watcher running. Do not spawn subagents.
