@@ -457,11 +457,23 @@ PROJECTS = "projects"
 
 
 def record_project(run_dir: Path, trial_id: str, name: str) -> str:
-    """Name the attempt's compose project on disk, before Harbor creates it."""
+    """Name the attempt's compose project on disk, before Harbor creates it.
+
+    Published by rename, because `sweep` reads this directory concurrently by
+    design. Written in place, the marker exists and is empty between the open
+    and the write: a sweep landing in that window reads no project, removes
+    nothing, and still spends the line, so the attempt's containers would
+    outlive the only record that names them. A rename leaves the marker either
+    absent or whole, so a sweep only ever unlinks a project it has read.
+    """
     project = compose_project(name)
     directory = run_dir / PROJECTS
     directory.mkdir(parents=True, exist_ok=True)
-    (directory / f"{_name(trial_id)}.project").write_text(project + "\n", encoding="utf-8")
+    marker = directory / f"{_name(trial_id)}.project"
+    # Not `*.project`, so the half-written file is outside `sweep`'s glob.
+    pending = directory / f"{marker.name}.{secrets.token_hex(4)}.pending"
+    pending.write_text(project + "\n", encoding="utf-8")
+    os.replace(pending, marker)
     return project
 
 

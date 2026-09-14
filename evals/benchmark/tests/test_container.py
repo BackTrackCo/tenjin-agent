@@ -315,6 +315,26 @@ def test_sweep_continues_when_a_finishing_trial_removes_its_marker(tmp_path: Pat
     assert container.sweep(tmp_path)["projects"] == {}
 
 
+def test_a_marker_being_written_is_invisible_to_a_sweep_until_it_is_whole(tmp_path: Path, monkeypatch) -> None:
+    # The window a write in place opens: the bytes are on disk, nothing has
+    # published them yet, and a sweep that spent the line there would leave the
+    # attempt's containers with nothing on disk naming them.
+    swept: list[dict] = []
+    write_text = Path.write_text
+    def racing_write(path, *args, **kwargs):
+        written = write_text(path, *args, **kwargs)
+        swept.append(container.sweep(tmp_path, fake_docker()))
+        return written
+    monkeypatch.setattr(Path, "write_text", racing_write)
+    container.record_project(tmp_path, "trial-a", "bench2-trial-a")
+    monkeypatch.undo()
+    assert swept == [{"run": str(tmp_path), "projects": {}}]
+    assert (tmp_path / container.PROJECTS / "trial-a.project").read_text(encoding="utf-8").strip() == "bench2-trial-a"
+    # The marker that survived the race is the one a later cleanup spends.
+    assert container.sweep(tmp_path, fake_docker())["projects"] == {"bench2-trial-a": False}
+    assert list((tmp_path / container.PROJECTS).iterdir()) == []
+
+
 @pytest.mark.parametrize("failed", ("container-list", "container-remove", "network-list", "network-remove"))
 def test_cleanup_failure_keeps_the_project_marker_for_retry(tmp_path, failed):
     container.record_project(tmp_path, "trial-a", "bench2-trial-a")
