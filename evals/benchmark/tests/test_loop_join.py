@@ -256,3 +256,22 @@ def test_line_only_failure_has_no_fingerprint_and_retains_team_text_delivery(tmp
     assert key['keys_leg'] is None
     assert key['keys_leg_hit'] is False
     assert key['delivered_piece_id'] == 'text-piece'
+
+
+def test_a_fire_carries_the_query_head_it_sent(db: Path) -> None:
+    """A delivery miss is diagnosable from the record alone: the head says what was asked."""
+    fires = {fire["fire_id"]: fire for fire in loop_join.project(db, [ROOT, CHILD])["fires"]}
+    assert fires["fire-root"]["question_head"] == "private question text"
+    assert fires["fire-root"]["question_chars"] == len("private question text")
+
+
+def test_a_query_longer_than_the_head_says_how_long_it_was(db: Path) -> None:
+    asked = "ticket body " + "x" * 600
+    with sqlite3.connect(db) as connection:
+        connection.execute("UPDATE fires SET question = ? WHERE id = ?", (asked, "fire-child"))
+        connection.execute("UPDATE fires SET question = NULL WHERE id = ?", ("fire-root",))
+    fires = {fire["fire_id"]: fire for fire in loop_join.project(db, [ROOT, CHILD])["fires"]}
+    assert fires["fire-child"]["question_head"] == asked[: loop_join.QUESTION_HEAD_CHARS]
+    assert fires["fire-child"]["question_chars"] == len(asked)
+    # A fire that carried no query at all says so rather than reading as empty.
+    assert (fires["fire-root"]["question_head"], fires["fire-root"]["question_chars"]) == (None, 0)

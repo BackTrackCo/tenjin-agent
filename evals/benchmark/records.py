@@ -317,6 +317,17 @@ def validate(record: dict[str, Any]) -> None:
     for fire in delivery["fires"]:
         if _actor(fire.get("actor"), harness, root) not in actors:
             raise RecordError("a joined fire names an actor outside the attempt")
+        # The query the hook sent, bounded by the same 512 the product caps an
+        # ordinary query at. A head longer than that, or a length under the head
+        # beside it, would have the record say the fire asked something it did
+        # not, which is the one thing this field exists to settle.
+        head, chars = fire.get("question_head"), fire.get("question_chars")
+        if head is not None and (not isinstance(head, str) or not head or len(head) > loop_join.QUESTION_HEAD_CHARS):
+            raise RecordError(f"a fire's question_head must be null or at most {loop_join.QUESTION_HEAD_CHARS} characters")
+        if chars is not None and not _count(chars):
+            raise RecordError("a fire's question_chars must be null or a count")
+        if head is not None and _count(chars) and chars < len(head):
+            raise RecordError("a fire's question_chars is shorter than the head it carries")
     for name in ("tool_counts", "sentinel", "isolation", "private_hashes"):
         if not isinstance(record[name], dict):
             raise RecordError(f"{name} must be an object")

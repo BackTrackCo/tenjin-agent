@@ -74,6 +74,7 @@ FORBIDDEN_KEYS = frozenset(
         "prompt",
         "prompts",
         "question",
+        "question_head",
         "repo",
         "secret",
         "stderr",

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from evals.benchmark import claude_usage, records
+from evals.benchmark import claude_usage, loop_join, records
 from evals.benchmark.records import RecordError
 from evals.benchmark.tests.support import attempt_record, parse
 
@@ -219,3 +219,22 @@ def test_an_attempt_without_a_producer_phase_depends_on_none() -> None:
     assert records.producer_unusable(attempt_record(parse("sess-family"))) is None
     assert records.producer_unusable({"isolation": {"producer": "capped"}}) is None
     assert records.producer_unusable({}) is None
+
+
+def test_a_fires_query_head_is_bounded_and_agrees_with_the_length_beside_it(family_session: claude_usage.SessionUsage) -> None:
+    """The head exists to settle what a fire asked, so a record cannot claim more than the hook could send."""
+    base = attempt_record(family_session)
+    actor = list(base["actors"][0]["key"])
+    fire = {"fire_id": "f", "actor": actor, "question_head": "why does pnpm reinstall every run", "question_chars": 900}
+    delivery = {**base["delivery"], "status": "joined", "fires": [fire]}
+    records.validate({**base, "delivery": delivery})
+    records.validate({**base, "delivery": {**delivery, "fires": [{"fire_id": "f", "actor": actor}]}})
+    bent = (
+        {**fire, "question_head": "x" * (loop_join.QUESTION_HEAD_CHARS + 1)},
+        {**fire, "question_head": ""},
+        {**fire, "question_chars": 4},
+        {**fire, "question_chars": -1},
+    )
+    for entry in bent:
+        with pytest.raises(RecordError, match="question_"):
+            records.validate({**base, "delivery": {**delivery, "fires": [entry]}})

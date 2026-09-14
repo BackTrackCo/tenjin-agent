@@ -24,8 +24,16 @@ from .usage import ActorKey
 from .injections import presentation
 
 STATUSES = frozenset({"unavailable", "joined"})
-FIRE_COLUMNS = ("id", "at", "session", "agent", "harness", "arm", "event", "prompt_id", "reason", "delivered")
+FIRE_COLUMNS = ("id", "at", "session", "agent", "harness", "arm", "event", "prompt_id", "reason", "question", "delivered")
 LEG_COLUMNS = ("fire_id", "stage", "shelf", "status", "outcome", "search_id", "form", "calibration")
+# The head of the query the hook actually sent, kept per fire. The product caps
+# an ordinary query at 512 characters (`QUERY_MAX` in src/lib/agent-api.ts) and
+# allows a longer dispatch work order, so the head is the part every fire has.
+# Without it a miss is a row of nulls and the record cannot say whether the hook
+# asked the wrong question or asked the right one and nothing answered. Private,
+# like a transcript: `report.py` projects no fire field, and its guard refuses
+# the key by name.
+QUESTION_HEAD_CHARS = 512
 
 
 class LoopJoinError(RuntimeError):
@@ -48,6 +56,13 @@ NO_ANSWER = "no-answer"
 # product stores with `source = 'cli'`; the hooks' own legs are `fires` and
 # `legs`. Counted and costed apart, so a manual search is visible.
 CLI_SOURCE = "cli"
+
+
+def question_head(value: Any) -> dict[str, Any]:
+    """The head of a fire's query, with the query's full length beside it so a cut is visible."""
+    if not isinstance(value, str) or not value:
+        return {"question_head": None, "question_chars": 0}
+    return {"question_head": value[:QUESTION_HEAD_CHARS], "question_chars": len(value)}
 
 
 def wal_live(loop_db: Path) -> bool:
@@ -214,6 +229,7 @@ def project(loop_db: Path | None, actors: list[ActorKey], foreign_sessions: tupl
                 "prompt_id": row["prompt_id"],
                 "reason": row["reason"],
                 "delivered": row["delivered"],
+                **question_head(row["question"]),
                 **presentation(row["emit"], row["delivered"]),
             }
             if actor not in wanted:
