@@ -354,6 +354,39 @@ describe('searchLeg statuses', () => {
     });
   }
 
+  /**
+   * THE OTHER POLARITY. The five cases above all run the default config, whose
+   * `publicFallback` is on; a round that asked for the shelf ALONE must not
+   * file a `public` row saying the marketplace failed a call it never made. The
+   * failure arm's text round is exactly that round, every time it fires.
+   */
+  it('a failure on an includePublic:false round files ONE row, the team one', async () => {
+    const { fetchImpl } = stub(() => json(500, { error: 'boom' }));
+    const results = await searchLeg('failure', CONFIG, { includePublic: false }, fetchImpl).request(
+      q('Error: boom'),
+      2000,
+      new AbortController().signal,
+      deps(signed),
+    );
+    expect(results.map((r) => r.shelf)).toEqual(['team']);
+    expect(results[0]?.status).toBe('http_500');
+  });
+
+  it('a shelf-only round drops a public list the server sent anyway', async () => {
+    // Same rule read from the other end: the round declared one set, so one set
+    // is what the ledger gets, whatever the server volunteered.
+    const { fetchImpl } = stub(() =>
+      json(200, twoList([candidate({ strong: true })], [candidate({ strong: true })])),
+    );
+    const results = await searchLeg('failure', CONFIG, { includePublic: false }, fetchImpl).request(
+      q('Error: boom'),
+      2000,
+      new AbortController().signal,
+      deps(signed),
+    );
+    expect(results.map((r) => r.shelf)).toEqual(['team']);
+  });
+
   it('a candidate missing resourceId is bad_shape', async () => {
     const broken = candidate();
     delete broken.resourceId;

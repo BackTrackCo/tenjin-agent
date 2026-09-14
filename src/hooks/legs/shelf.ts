@@ -293,15 +293,19 @@ async function callShelf(
       fetchImpl: probeFetch(fetchImpl, (s) => (seen = s)),
       jsonBody: body,
     });
-    if (!res.ok || res.status !== 200)
-      return failed(['team', 'public'], statusOf(seen, signal), {});
+    // THE SETS THE ROUND DECLARED, never a hardcoded pair. A round that sent
+    // `includePublic: false` asked the marketplace nothing, so a row saying the
+    // marketplace failed is a row about a request that was never made: the
+    // failure arm's text round is exactly that round, every time.
+    if (!res.ok || res.status !== 200) return failed(sets, statusOf(seen, signal), {});
     const parsed = shelfSearchResponseSchema.safeParse(res.json);
-    if (!parsed.success) return failed(['team', 'public'], statusOf(seen, signal), {});
+    if (!parsed.success) return failed(sets, statusOf(seen, signal), {});
     const rows = [resultOf('team', parsed.data.shelf, strongestOf, {})];
     // A `public` of null is not a failure and not a row: the marketplace was
     // never run, either because this call said so or because the org's policy
-    // does. The CLI cannot tell those apart and does not need to.
-    if (parsed.data.public !== null) {
+    // does. The CLI cannot tell those apart and does not need to. A list the
+    // round did not ask for is dropped for the same reason it is not declared.
+    if (parsed.data.public !== null && sets.includes('public')) {
       rows.push(resultOf('public', parsed.data.public, strongestOf, {}));
     }
     return rows;
