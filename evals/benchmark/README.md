@@ -300,6 +300,12 @@ the free port its daemon claimed, and lets everything else run freely. A four-ar
 unprovisioned arm converges on the time its provisioned arms take alone, and the gain is the
 unprovisioned quarter hiding inside that.
 
+Two manifests cannot take a degree above one, and validation refuses both before any spend. One
+whose arms all provision would run its trials one at a time whatever the pin said, and
+`report.json` would state a parallelism the run never had. One carrying a database-backed task
+starts a Postgres container per verification on the daemon every other trial shares, and two of
+those contend for it rather than overlap on it.
+
 The schedule is untouched: trials are assigned in its order, the results come back in it whatever
 order they finish in, and no trial id, hash, or balance property depends on the degree.
 
