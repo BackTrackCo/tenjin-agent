@@ -12,23 +12,27 @@ Run configuration and experiment manifests are separate from this library review
 ## Authoring a task and its hidden verifier
 
 A task is a pair: the fixture the agent works in, and the oracle that judges the retained
-worktree after every model process has stopped. Four rules keep the pair fair, and
+worktree after every model process has stopped. Five rules keep the pair fair, and
 `tests/test_fixture_library.py` fails the build on each of them.
 
-1. State the interface. The catalog prompt names every export and module path the oracle
+1. Lead with the ticket. The prompt hook asks the shelf what the agent was told, cut to the
+   first 512 characters (`queryMax`, `src/hooks/question.ts`). A contract or an environment note
+   in front of the work spends that query describing the harness, and a seeded arm is then
+   delivered the harness. Everything the next rules require goes after the ticket sentence.
+2. State the interface. The catalog prompt names every export and module path the oracle
    imports or spawns, because none of that is derivable from a red run. A prompt that leaves a
    name open grades naming luck: an agent can fix the behaviour, rename the module, pass the
    visible test and still be scored red.
-2. State no more. The prompt carries the interface, never the diagnosis or the fix; those are
+3. State no more. The prompt carries the interface, never the diagnosis or the fix; those are
    what a lesson carries, and what a reuse arm is measured on finding.
-3. Name the one test file. A node oracle is `node hidden-tests/<task>.test.mjs`, and a
+4. Name the one test file. A node oracle is `node hidden-tests/<task>.test.mjs`, and a
    Vitest oracle configuration includes exactly its one bound file. A bare suite command forks a
    worker per core and boots every service the suite touches, inside the trial image, so it is
    refused when the manifest is read.
-4. Leak check the pair. The oracle probes values the trial never shows. A fixture file or a
+5. Leak check the pair. The oracle probes values the trial never shows. A fixture file or a
    seeded lesson that repeats one of them answers the verifier without solving the task.
 
-Run all four over the whole library with:
+Run all five over the whole library with:
 
 ```
 PYTHONPATH=. python3 -m pytest -c evals/benchmark/pytest.ini evals/benchmark/tests/test_fixture_library.py

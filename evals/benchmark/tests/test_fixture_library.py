@@ -19,6 +19,15 @@ from evals.benchmark.tests.test_verifier import run_dir, repo, _write_marker
 LIVE = cli.FIXTURES / "live"
 ACTOR_FIXTURE = LIVE / "actor"
 CATALOG = json.loads((LIVE / "catalog.json").read_text())["tasks"]
+# The product's prompt hook asks the shelf what the agent typed, cut to
+# `queryMax` (src/hooks/question.ts): 512 characters for every trigger except a
+# dispatch work order. Whatever leads the prompt is what the query is spent on.
+PROMPT_HEAD = 512
+# A ticket opens with the work. Everything else a prompt in this library says is
+# a preamble when it comes first: the interface contract ("Keep ..."), the run
+# rule ("Run only ..."), and the scope rule ("Change nothing else").
+TICKET_VERBS = ("Fix ", "Make ", "Write ")
+PREAMBLE = ("Keep ", "Run only ", "Change nothing else")
 
 
 def fixture_oracle(spec: verifier.VerifierSpec, copy: Path) -> verifier.Verdict:
@@ -228,6 +237,30 @@ def test_every_task_prompt_states_the_interface_its_oracle_pins(task: dict) -> N
     assert names or paths
     for pinned in sorted(names | paths):
         assert pinned in task["prompt"], f"{task['id']}: the prompt leaves {pinned} to luck"
+
+
+@pytest.mark.parametrize("task", CATALOG, ids=lambda task: task["id"])
+def test_every_task_prompt_leads_with_its_ticket_inside_the_queried_head(task: dict) -> None:
+    """The ticket is the query the shelf is asked, so nothing precedes it.
+
+    A seeded arm's delivery is decided by what the prompt hook sends, and that is
+    the first 512 characters of the prompt and nothing else. A contract or an
+    environment note in front of the work turns the question into a description
+    of the harness, which is what it then retrieves. The contract still has to be
+    stated, as the test above requires, so this holds the order and not the
+    content.
+    """
+    prompt = task["prompt"]
+    ticket = prompt[:PROMPT_HEAD].split(". ", 1)[0]
+    assert prompt == prompt.strip()
+    assert ticket.startswith(TICKET_VERBS), f"{task['id']}: the query opens on {ticket!r}, not on the work"
+    assert len(ticket) < PROMPT_HEAD, f"{task['id']}: the ticket outruns the {PROMPT_HEAD}-character query"
+    if task["verifier"] != "fake_answer_file":
+        assert f"tests/{task['id']}.test." in ticket, f"{task['id']}: the ticket names no test to make pass"
+        assert any(marker in prompt for marker in PREAMBLE), f"{task['id']}: nothing follows the ticket to order"
+    for marker in PREAMBLE:
+        found = prompt.find(marker)
+        assert found == -1 or found > len(ticket), f"{task['id']}: {marker!r} leads the query instead of the ticket"
 
 
 def test_the_catalog_covers_every_registered_task_and_ships_each_directory_once() -> None:
