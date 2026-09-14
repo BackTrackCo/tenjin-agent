@@ -113,7 +113,7 @@ ORACLE_TIMEOUT_S = 20 * 60
 CLI_TIMEOUT_S = 180
 
 ROLES = ("producer", "consumer")
-CONDITIONS = ("off", "seeded", "tenjin")
+CONDITIONS = ("off", "tenjin")
 
 UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
 
@@ -971,85 +971,6 @@ def settings_hook_summary(root: Path) -> dict[str, Any]:
 # --------------------------------------------------------------------------
 
 
-def uses_shelf(condition: str) -> bool:
-    """Conditions whose sessions run against the bench shelf with hooks on."""
-    return condition in ("tenjin", "seeded")
-
-
-CONDITION_LABEL = {
-    "off": "off (no Tenjin hooks)",
-    "tenjin": "tenjin (producer publishes what it learned)",
-    "seeded": "seeded (note = producer PR description, no producer run)",
-}
-
-# GitHub-only furniture that carries no finding. Deliberately three narrow rules
-# rather than a cleaner: anything ambiguous stays verbatim, because a PR body is
-# evidence and trimming it changes what B could have read.
-_PR_NOISE = (
-    # PR-template HTML comments
-    (re.compile(r"<!--.*?-->", re.S), ""),
-    # task-list lines, checked or not, on their own line
-    (re.compile(r"^[ \t]*[-*][ \t]*\[[ xX]\][^\n]*\n?", re.M), ""),
-    # the Claude Code attribution footer and its session link
-    (re.compile(r"\n*🤖 Generated with \[Claude Code\][^\n]*\n?", re.M), ""),
-    (re.compile(r"^https://claude\.ai/code/session_[A-Za-z0-9]+\s*$", re.M), ""),
-    (re.compile(r"^Co-Authored-By:[^\n]*\n?", re.M), ""),
-)
-
-
-def strip_pr_noise(body: str) -> str:
-    out = body
-    for pattern, repl in _PR_NOISE:
-        out = pattern.sub(repl, out)
-    return re.sub(r"\n{3,}", "\n\n", out).strip()
-
-
-def seed_document(pr_json: dict[str, Any], repo: str, pr: int) -> str:
-    """The note the `seeded` condition puts on the shelf: the producer PR's own
-    description, with a complete answer card around it.
-
-    The card is REQUIRED — `requirePublishableCard` hard-blocks an incomplete one
-    — so every field here is derived from the PR itself rather than invented. The
-    provenance line says plainly that this is the author's description copied
-    over and not an independently verified finding, because that is exactly what
-    a reader needs to know to weigh it.
-    """
-    title = (pr_json.get("title") or f"{repo}#{pr}").strip()
-    body = strip_pr_noise(pr_json.get("body") or "")
-    merged = (pr_json.get("mergedAt") or "").strip()
-    url = (pr_json.get("url") or "").strip()
-
-    def esc(text: str) -> str:
-        return text.replace("\\", "\\\\").replace('"', '\\"')
-
-    front = [
-        "---",
-        f'title: "{esc(title)}"',
-        "artifactType: document",
-        "temporalMode: snapshot",
-    ]
-    if merged:
-        front.append(f"asOf: {merged}")
-    front += [
-        "questionsAnswered:",
-        f'  - "What did {repo}#{pr} change, and what was the reasoning behind it?"',
-        "tasksSupported:",
-        f'  - "Build on or extend the work {repo}#{pr} landed"',
-        f'scope: "The pull request description for {repo}#{pr}, {esc(title)}, as its author '
-        f'wrote it."',
-        'exclusions: "The diff itself, the review discussion, and anything that changed after '
-        'this pull request merged. Nothing here has been re-verified against the code."',
-        'provenanceSummary: "Copied from the pull request description on GitHub'
-        + (f" ({url})" if url else "")
-        + '. Author\'s own words, not an independently reproduced finding."',
-        "---",
-        "",
-        f"# {title}",
-        "",
-    ]
-    return "\n".join(front) + (body or "_The pull request had no description._") + "\n"
-
-
 def copy_template_data_dir(runner: Runner, dest: Path) -> str:
     if not TEMPLATE_DATA_DIR.is_dir() and not runner.dry_run:
         die(f"no template data dir at {TEMPLATE_DATA_DIR}; run `run.py prepare` first")
@@ -1071,157 +992,6 @@ def copy_template_data_dir(runner: Runner, dest: Path) -> str:
     dest.chmod(0o700)
     pf = passphrase_file(dest)
     return pf.read_text(encoding="utf-8").strip() if pf.is_file() else ""
-
-
-# One seed per PAIR per run, not per repeat: the note lives on the shelf and the
-# later repeats of the same pair must find the same one, not three copies of it.
-_SEED_CACHE: dict[str, dict[str, Any]] = {}
-_SEED_LOCK = threading.Lock()
-
-
-def seed_shelf(
-    runner: Runner,
-    args: argparse.Namespace,
-    pair: dict[str, Any],
-    run_id: str,
-    tenjin_info: dict[str, Any] | None,
-) -> dict[str, Any]:
-    """Put the producer PR's own description on the bench shelf, in place of a
-    producer session.
-
-    This is the `seeded` condition's whole premise: instead of paying an agent to
-    do task A and write up what it learned, the shelf starts with the note a
-    human already wrote — the PR description. B then runs exactly as it does
-    under `tenjin`. It measures what a shelf is worth when the note is free and
-    of human quality, which is the optimistic bound on the `tenjin` result.
-    """
-    spec = pair["producer"]
-    pr = spec.get("pr")
-    repo = spec.get("repo")
-    pair_id = pair["id"]
-
-    with _SEED_LOCK:
-        cached = _SEED_CACHE.get(pair_id)
-    if cached is not None:
-        return {**cached, "reused": True}
-
-    record: dict[str, Any] = {
-        "pair_id": pair_id,
-        "pr": pr,
-        "repo": repo,
-        "reused": False,
-        "at": now_iso(),
-    }
-    if not pr:
-        record["error"] = (
-            f"pair {pair_id} has no producer.pr, so the seeded condition has nothing to publish"
-        )
-        return record
-
-    slug = f"BackTrackCo/{repo}"
-    started = time.monotonic()
-    view = runner.run(
-        ["gh", "pr", "view", str(pr), "--repo", slug, "--json", "title,body,mergedAt,url"],
-        timeout=180,
-        label="gh.pr.view",
-    )
-    if runner.dry_run:
-        runner.log(
-            f"# build the seed document from {slug}#{pr} and publish it free to the bench shelf"
-        )
-        return record
-    if view["exit_code"] != 0:
-        record["error"] = f"gh pr view failed: {tail(view['stderr'], 600)}"
-        return record
-    pr_json = cli_json(view) or {}
-    if not isinstance(pr_json, dict) or "title" not in pr_json:
-        record["error"] = "gh pr view returned no title"
-        return record
-
-    document = seed_document(pr_json, repo, int(pr))
-    record["pr_title"] = pr_json.get("title")
-    record["pr_url"] = pr_json.get("url")
-    record["body_chars_raw"] = len(pr_json.get("body") or "")
-    record["body_chars_published"] = len(strip_pr_noise(pr_json.get("body") or ""))
-
-    sandbox = SCRATCH_ROOT / run_id / f"{pair_id}__seed"
-    data_dir = sandbox / "tenjin"
-    passphrase = copy_template_data_dir(runner, data_dir)
-    doc_path = sandbox / "note.md"
-    doc_path.parent.mkdir(parents=True, exist_ok=True)
-    doc_path.write_text(document, encoding="utf-8")
-    record["document_path"] = str(doc_path)
-
-    res = runner.run(
-        [
-            *tenjin_argv(args.tenjin_bin),
-            "publish",
-            str(doc_path),
-            "--json",
-            "--price",
-            "0",
-            "--yes",
-        ],
-        env_overlay=tenjin_env(data_dir, passphrase),
-        timeout=CLI_TIMEOUT_S,
-        label="tenjin.publish.seed",
-    )
-    envelope = cli_json(res) or {}
-    data = envelope.get("data") or {}
-    record["publish_exit"] = res["exit_code"]
-    record["wall_ms"] = int((time.monotonic() - started) * 1000)
-    record["url"] = data.get("url")
-    record["resource_id"] = data.get("resourceId")
-    record["cache_eligible"] = data.get("cacheEligible")
-    if res["exit_code"] != 0 or not record["url"]:
-        record["error"] = f"publish failed: {tail(res['stderr'] or res['stdout'], 900)}"
-    # The daemon may have been started by the publish; never leave one behind.
-    stop_daemon(runner, args, data_dir)
-    if not record.get("error"):
-        with _SEED_LOCK:
-            _SEED_CACHE[pair_id] = record
-    return record
-
-
-def seeded_producer_record(
-    pair: dict[str, Any],
-    repeat: int,
-    run_id: str,
-    seed: dict[str, Any],
-    tenjin_info: dict[str, Any] | None,
-) -> dict[str, Any]:
-    """The stand-in for a producer session that never ran.
-
-    Zero tokens and zero cost, by construction: the `seeded` condition's A side
-    costs nothing, which is the point of measuring it. Carries the published url
-    in the same shape a real session's `published` list uses, so `cleanup`
-    retracts it like any other."""
-    published = (
-        [{"key": "published:seed", "url": seed["url"], "at": seed.get("at")}]
-        if seed.get("url")
-        else []
-    )
-    return {
-        "run_id": run_id,
-        "pair_id": pair["id"],
-        "role": "producer",
-        "condition": "seeded",
-        "repeat": repeat,
-        "seeded": True,
-        "seed": seed,
-        "tenjin": tenjin_info,
-        "tokens": {"input": 0, "cache_creation": 0, "cache_read": 0, "output": 0, "total": 0},
-        "usage_total": None,
-        "cost_usd": 0,
-        "num_turns": 0,
-        "wall_ms": seed.get("wall_ms", 0),
-        "capped": False,
-        "published": published,
-        "oracle": {"ran": False, "skipped": "seeded: no producer session", "passed": None},
-        "errors": [seed["error"]] if seed.get("error") else [],
-        "started_at": seed.get("at"),
-        "finished_at": now_iso(),
-    }
 
 
 def install_tenjin_hooks(
@@ -1751,7 +1521,7 @@ def run_session(
         ensure_project_settings(runner, worktree)
 
         passphrase = ""
-        if uses_shelf(condition):
+        if condition == "tenjin":
             passphrase = copy_template_data_dir(runner, data_dir)
             record["install"] = install_tenjin_hooks(runner, args, worktree, data_dir, passphrase)
         else:
@@ -1802,7 +1572,7 @@ def run_session(
         # The agent gets the pinned node too, so that a test it runs itself sees
         # the same runtime the oracle will. Identical in both conditions.
         env_overlay = base_env({"TENJIN_DATA_DIR": str(data_dir)})
-        if uses_shelf(condition) and passphrase:
+        if condition == "tenjin" and passphrase:
             env_overlay["TENJIN_WALLET_PASSPHRASE"] = passphrase
 
         cap_s = int(spec.get("cap_s") or args.cap_s)
@@ -1867,7 +1637,7 @@ def run_session(
         # appends to the same transcript (verified), so the transcript totals
         # below cover it without extra bookkeeping.
         capture_wanted = (
-            uses_shelf(condition)
+            condition == "tenjin"
             and role == "producer"
             and args.capture_turn
             and not record.get("capped")
@@ -1916,7 +1686,7 @@ def run_session(
             record["capture"]["diff_after"] = capture_patch(
                 runner, worktree, session_dir / "after-capture.patch"
             )
-        elif uses_shelf(condition) and role == "producer":
+        elif condition == "tenjin" and role == "producer":
             record["capture"] = {
                 "ran": False,
                 "why": "capped" if record.get("capped") else (
@@ -1943,7 +1713,7 @@ def run_session(
             runner.log("# sum usage from ~/.claude/projects/<slug>/ + subagents/")
 
         # ---- the funnel ---------------------------------------------------
-        if uses_shelf(condition):
+        if condition == "tenjin":
             # Stop the daemon BEFORE reading the ledger: `immutable=1` assumes
             # nothing else is writing, and a live daemon would outlive the run.
             record["daemon_stop"] = stop_daemon(runner, args, data_dir)
@@ -1965,7 +1735,7 @@ def run_session(
                 record["diff"]["taken_in_finally"] = True
             except Exception as exc:  # never let cleanup lose the daemon stop
                 record["errors"].append(f"could not capture the diff: {exc}")
-        if uses_shelf(condition) and not daemon_stopped:
+        if condition == "tenjin" and not daemon_stopped:
             # Belt and braces: a failure above must not strand a daemon.
             stop_daemon(runner, args, data_dir)
         if not args.keep_worktrees:
@@ -2168,12 +1938,6 @@ def build_report(run_dir: Path, all_records: list[dict[str, Any]], args: argpars
     lines.append("`total`. `cost $` is the agent's own reported cost plus the capture turn's.")
     lines.append("")
 
-    lines.append("Conditions in this run:")
-    lines.append("")
-    for cond in conditions:
-        lines.append(f"- `{cond}` — {CONDITION_LABEL.get(cond, cond)}")
-    lines.append("")
-
     lines.append("## Per session (median across repeats)")
     lines.append("")
     lines.append(
@@ -2194,17 +1958,12 @@ def build_report(run_dir: Path, all_records: list[dict[str, Any]], args: argpars
                 toks = [tokens_of(r) for r in rs]
                 passes = [r.get("oracle", {}).get("passed") for r in rs]
                 n_pass = sum(1 for p in passes if p is True)
-                # A seeded producer never ran a session, so it has no oracle to
-                # pass or fail; printing 0/N would read as a failure.
-                oracle_cell = (
-                    "seeded" if any(r.get("seeded") for r in rs) else f"{n_pass}/{len(rs)}"
-                )
                 cap_toks = [
                     ((r.get("capture") or {}).get("tokens") or {}).get("total") or 0 for r in rs
                 ]
                 lines.append(
                     "| {pid} | {cond} | {role} | {total} | {i} | {cc} | {cr} | {o} | {subs} "
-                    "| {captok} | {wall} | {turns} | {cost} | {oracle} |".format(
+                    "| {captok} | {wall} | {turns} | {cost} | {p}/{n} |".format(
                         pid=pid,
                         cond=cond,
                         role=role,
@@ -2218,7 +1977,8 @@ def build_report(run_dir: Path, all_records: list[dict[str, Any]], args: argpars
                         wall=median([(r.get("wall_ms") or 0) / 1000 for r in rs]) or 0,
                         turns=median([r.get("num_turns") or 0 for r in rs]) or 0,
                         cost=median([cost_of(r) for r in rs]) or 0,
-                        oracle=oracle_cell,
+                        p=n_pass,
+                        n=len(rs),
                     )
                 )
     lines.append("")
@@ -2238,7 +1998,6 @@ def build_report(run_dir: Path, all_records: list[dict[str, Any]], args: argpars
             a_tok: list[float] = []
             b_tok: list[float] = []
             a_pass = b_pass = a_n = b_n = 0
-            a_seeded = False
             for rep in range(1, args.repeats + 1):
                 a = by_key.get((pid, cond, rep, "producer"))
                 b = by_key.get((pid, cond, rep, "consumer"))
@@ -2258,8 +2017,6 @@ def build_report(run_dir: Path, all_records: list[dict[str, Any]], args: argpars
                 if a:
                     a_n += 1
                     a_pass += 1 if a.get("oracle", {}).get("passed") is True else 0
-                    if a.get("seeded"):
-                        a_seeded = True
                 if b:
                     b_n += 1
                     b_pass += 1 if b.get("oracle", {}).get("passed") is True else 0
@@ -2268,7 +2025,7 @@ def build_report(run_dir: Path, all_records: list[dict[str, Any]], args: argpars
             total_med = median(per_repeat_total) or 0
             pair_totals[(pid, cond)] = total_med
             lines.append(
-                "| {pid} | {cond} | {a} | {b} | {t} | {w} | {c} | {a_oracle} | {bp}/{bn} |".format(
+                "| {pid} | {cond} | {a} | {b} | {t} | {w} | {c} | {ap}/{an} | {bp}/{bn} |".format(
                     pid=pid,
                     cond=cond,
                     a=median(a_tok) or 0,
@@ -2276,24 +2033,24 @@ def build_report(run_dir: Path, all_records: list[dict[str, Any]], args: argpars
                     t=total_med,
                     w=round((median(per_repeat_wall) or 0) / 1000, 1),
                     c=median(per_repeat_cost) or 0,
-                    a_oracle="seeded" if a_seeded else f"{a_pass}/{a_n}",
+                    ap=a_pass,
+                    an=a_n,
                     bp=b_pass,
                     bn=b_n,
                 )
             )
     lines.append("")
 
-    shelf_conditions = [c for c in conditions if uses_shelf(c)]
-    if "off" in conditions and shelf_conditions:
-        lines.append("## Reuse delta (each shelf condition − off, median totals)")
+    if "off" in conditions and "tenjin" in conditions:
+        lines.append("## Reuse delta (tenjin − off, median totals)")
         lines.append("")
         lines.append(
-            "| pair | condition | B tok off | B tok shelf | B delta | A+B off | A+B shelf "
-            "| A+B delta | B oracle off | B oracle shelf | reading |"
+            "| pair | B tok off | B tok tenjin | B delta | A+B off | A+B tenjin | A+B delta "
+            "| B oracle off | B oracle tenjin | reading |"
         )
-        lines.append("|---|---|---:|---:|---:|---:|---:|---:|---|---|---|")
+        lines.append("|---|---:|---:|---:|---:|---:|---:|---|---|---|")
         caveats: list[str] = []
-        for pid, shelf in [(p, c) for p in pair_ids for c in shelf_conditions]:
+        for pid in pair_ids:
 
             def rows_for(cond: str, role: str) -> list[dict[str, Any]]:
                 return [
@@ -2310,11 +2067,11 @@ def build_report(run_dir: Path, all_records: list[dict[str, Any]], args: argpars
                 return sum(1 for r in rs if (r.get("oracle") or {}).get("passed") is True), len(rs)
 
             b_off = med_role("off", "consumer")
-            b_ten = med_role(shelf, "consumer")
+            b_ten = med_role("tenjin", "consumer")
             t_off = pair_totals.get((pid, "off"), 0)
-            t_ten = pair_totals.get((pid, shelf), 0)
+            t_ten = pair_totals.get((pid, "tenjin"), 0)
             off_pass, off_n = oracle_tally("off")
-            ten_pass, ten_n = oracle_tally(shelf)
+            ten_pass, ten_n = oracle_tally("tenjin")
 
             # A TOKEN DELTA BETWEEN TWO FAILED CONSUMERS IS NOT A REUSE WIN. Both
             # sides failed the task, so the cheaper one is only the one that gave
@@ -2322,16 +2079,16 @@ def build_report(run_dir: Path, all_records: list[dict[str, Any]], args: argpars
             if off_n and ten_n and off_pass == 0 and ten_pass == 0:
                 reading = "**NOT A REUSE RESULT — B failed in both conditions**"
                 caveats.append(
-                    f"- `{pid}` / `{shelf}`: B's oracle failed in BOTH conditions "
-                    f"(off {off_pass}/{off_n}, {shelf} {ten_pass}/{ten_n}). The token delta "
+                    f"- `{pid}`: B's oracle failed in BOTH conditions "
+                    f"(off {off_pass}/{off_n}, tenjin {ten_pass}/{ten_n}). The token delta "
                     "compares two failures and says nothing about reuse."
                 )
             elif off_n and ten_n and (off_pass == 0) != (ten_pass == 0):
-                better = shelf if ten_pass else "off"
+                better = "tenjin" if ten_pass else "off"
                 reading = f"B passed only under `{better}`"
                 caveats.append(
-                    f"- `{pid}` / `{shelf}`: B's oracle passed only under `{better}` "
-                    f"(off {off_pass}/{off_n}, {shelf} {ten_pass}/{ten_n}). Compare the outcome "
+                    f"- `{pid}`: B's oracle passed only under `{better}` "
+                    f"(off {off_pass}/{off_n}, tenjin {ten_pass}/{ten_n}). Compare the outcome "
                     "first; the token delta is secondary."
                 )
             elif not off_n or not ten_n:
@@ -2340,19 +2097,13 @@ def build_report(run_dir: Path, all_records: list[dict[str, Any]], args: argpars
                 reading = "comparable"
 
             lines.append(
-                f"| {pid} | {shelf} | {b_off} | {b_ten} | {round(b_ten - b_off, 2)} | "
+                f"| {pid} | {b_off} | {b_ten} | {round(b_ten - b_off, 2)} | "
                 f"{t_off} | {t_ten} | {round(t_ten - t_off, 2)} | "
                 f"{off_pass}/{off_n} | {ten_pass}/{ten_n} | {reading} |"
             )
         lines.append("")
         lines.append("A negative B delta is the shelf paying for itself on the consumer side.")
         lines.append("A negative A+B delta means it paid for the capture overhead too.")
-        lines.append("")
-        lines.append(
-            "In `seeded` the A side costs nothing by construction: no producer session runs, "
-            "and the note is the producer PR's own description. Its A+B delta is therefore the "
-            "optimistic bound — what the shelf is worth when the note is free and human-written."
-        )
         lines.append("")
         lines.append(
             "**Both readings assume B actually did the task.** A delta is only a reuse "
@@ -2363,25 +2114,21 @@ def build_report(run_dir: Path, all_records: list[dict[str, Any]], args: argpars
             lines.extend(caveats)
         lines.append("")
 
-    tenjin_records = [r for r in records if uses_shelf(r["condition"]) and r.get("funnel")]
+    tenjin_records = [r for r in records if r["condition"] == "tenjin"]
     if tenjin_records:
-        lines.append("## Delivery funnel (shelf conditions, from the CLI ledger)")
+        lines.append("## Delivery funnel (tenjin condition, from the CLI ledger)")
         lines.append("")
         lines.append(
-            "| pair | condition | session | rep | fires | by arm | legs | leg status | searches "
-            "| decisions | published |"
+            "| pair | session | rep | fires | by arm | legs | leg status | searches | decisions | published |"
         )
-        lines.append("|---|---|---|---:|---:|---|---:|---|---:|---|---:|")
+        lines.append("|---|---|---:|---:|---|---:|---|---:|---|---:|")
         for r in sorted(
-            tenjin_records,
-            key=lambda x: (x["pair_id"], x["condition"], x["role"] != "producer", x["repeat"]),
+            tenjin_records, key=lambda x: (x["pair_id"], x["role"] != "producer", x["repeat"])
         ):
             counts = (r.get("funnel") or {}).get("counts") or {}
             lines.append(
-                "| {pid} | {cond} | {role} | {rep} | {fires} | {arms} | {legs} | {status} "
-                "| {searches} | {dec} | {pub} |".format(
+                "| {pid} | {role} | {rep} | {fires} | {arms} | {legs} | {status} | {searches} | {dec} | {pub} |".format(
                     pid=r["pair_id"],
-                    cond=r["condition"],
                     role=r["role"],
                     rep=r["repeat"],
                     fires=counts.get("fires", 0),
@@ -2398,9 +2145,9 @@ def build_report(run_dir: Path, all_records: list[dict[str, Any]], args: argpars
         # than one session's ledger rows, and a count of rows would overstate what
         # is actually on the shelf (and what `cleanup` has to retract).
         pub_urls: list[str] = []
-        for r in all_records:
+        for r in tenjin_records:
             for p in r.get("published") or []:
-                if str(p.get("key", "")).startswith("published:") and p.get("url"):
+                if p.get("key", "").startswith("published:") and p.get("url"):
                     if p["url"] not in pub_urls:
                         pub_urls.append(p["url"])
         lines.append(f"Distinct posts published to the bench shelf during this run: **{len(pub_urls)}**.")
@@ -2570,16 +2317,12 @@ def cmd_run(args: argparse.Namespace) -> int:
     out(f"bench-lite run {run_id}")
     out(f"  pairs      : {', '.join(p['id'] for p in pairs)}")
     out(f"  conditions : {', '.join(conditions)}")
-    out(f"  roles      : {', '.join(sessions)}")
+    out(f"  sessions   : {', '.join(sessions)}")
     out(f"  repeats    : {args.repeats}")
     out(f"  model      : {args.model}")
     out(f"  out        : {run_dir}")
     out(f"  scratch    : {SCRATCH_ROOT / run_id}")
-    # A seeded producer makes no agent call; it publishes a PR description.
-    agent_calls = sum(1 for (_, c, _, role) in plan if not (c == "seeded" and role == "producer"))
-    seeds = len({(p["id"], c) for (p, c, _, role) in plan if c == "seeded" and role == "producer"})
-    out(f"  sessions   : {len(plan)}")
-    out(f"  agent calls: {agent_calls}" + (f" (+{seeds} shelf seed(s), no agent)" if seeds else ""))
+    out(f"  agent calls: {len(plan)}")
     out("")
 
     manifest = {
@@ -2650,27 +2393,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         invalid: str | None = None
 
         for role in roles_in_play:
-            if role == "producer" and cond == "seeded":
-                # NO PRODUCER AGENT RUNS HERE. The shelf is seeded with the
-                # producer PR's own description instead, so B measures a shelf
-                # whose note was free and written by a human.
-                out(f"\n=== {pair['id']}/{cond}/r{rep}/seed ===")
-                seed = seed_shelf(runner, args, pair, run_id, tenjin_info)
-                if seed.get("error"):
-                    invalid = "seed_failed"
-                    out(f"  !! seeding failed: {seed['error']}")
-                elif runner.dry_run:
-                    out("  seeded: would publish the PR description (dry run)")
-                else:
-                    where = "reused" if seed.get("reused") else "published"
-                    out(f"  seeded ({where}): {seed.get('url')}")
-                stub = seeded_producer_record(pair, rep, run_id, seed, tenjin_info)
-                if invalid:
-                    stub["invalid"] = invalid
-                emit(stub)
-                continue
-
-            if role == "consumer" and invalid is not None and uses_shelf(cond):
+            if role == "consumer" and invalid is not None and cond == "tenjin":
                 skipped = {
                     "run_id": run_id,
                     "pair_id": pair["id"],
@@ -2680,13 +2403,9 @@ def cmd_run(args: argparse.Namespace) -> int:
                     "skipped": invalid,
                     "invalid": invalid,
                     "errors": [
-                        f"consumer not run: seeding the shelf failed for this repeat"
-                        if invalid == "seed_failed"
-                        else (
-                            f"consumer not run: the {cond} producer for this repeat was "
-                            f"{invalid.replace('producer_', '')}, so its Stop hook never "
-                            "captured or published anything"
-                        )
+                        f"consumer not run: the {cond} producer for this repeat was "
+                        f"{invalid.replace('producer_', '')}, so its Stop hook never "
+                        "captured or published anything"
                     ],
                     "started_at": now_iso(),
                     "finished_at": now_iso(),
