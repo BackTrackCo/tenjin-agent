@@ -114,7 +114,11 @@ def test_only_completed_assertions_establish_fail_before_or_pass_after(context, 
         report["testResults"][0]["message"] = "fixture setup refused invalid synthetic configuration"
     seen = []
     class Running:
-        def __init__(self, *, recipe):
+        # `ledger` is required here on purpose: the container republishes the
+        # attempt's project line through it once the project exists, so a call
+        # site that stopped passing one fails this case rather than a live run.
+        def __init__(self, *, recipe, ledger):
+            assert isinstance(ledger, container.Ledger)
             seen.append(recipe)
         def __enter__(self):
             return self

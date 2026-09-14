@@ -108,7 +108,7 @@ def container_spawn(launch: executor.Launch, roots: artifact.TrialRoots, timeout
         command, separated_out, separated_err = container.split_streams(command, roots.output)
     try:
         from . import database_service
-        with container.Container(recipe=recipe) as box, database_service.model_service(box, launch.database) as database_environment:
+        with container.Container(recipe=recipe, ledger=container.Ledger(roots.run_dir, roots.trial_id)) as box, database_service.model_service(box, launch.database) as database_environment:
             refused = container.daemon_error(roots.output)
             if refused is not None:
                 return Completed(returncode=container.DAEMON_REFUSED, stderr=refused, timed_out=False)

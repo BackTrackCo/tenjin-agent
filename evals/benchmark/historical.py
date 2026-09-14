@@ -217,7 +217,7 @@ def verify(context: Path, run_dir: Path, image: str, *, catalog: Path, overrides
             result["database_image"] = database_service.IMAGE
         command = (["node", "/opt/task/node_modules/vitest/vitest.mjs", "run", "--config", "/opt/task/.bench1/model-tests.config.mjs", "--configLoader", "runner", *selected,
                     "--reporter=json", "--outputFile=/tmp/benchmark-historical-result.json"] if visible else COMMAND)
-        with container.Container(recipe=recipe) as running, database_service.service(running, enabled) as database_environment:
+        with container.Container(recipe=recipe, ledger=container.Ledger(run_dir, identity)) as running, database_service.service(running, enabled) as database_environment:
             completed = running.exec(command, cwd=recipe.workdir, environment=database_environment, timeout_s=120)
             report = running.exec(["cat", "/tmp/benchmark-historical-result.json"], timeout_s=10)
         if report.returncode == 0:

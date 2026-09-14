@@ -276,13 +276,14 @@ class Container:
     trial's daemon before any agent runs.
     """
 
-    def __init__(self, *, recipe: Recipe, image: str | None = None, user_id: str | None = None) -> None:
+    def __init__(self, *, recipe: Recipe, image: str | None = None, user_id: str | None = None, ledger: Ledger | None = None) -> None:
         self.recipe = recipe
         self.name = _name(recipe.name)
         self.project = compose_project(self.name)
         self.environment_dir = recipe.environment_dir
         self.image = recipe.image if image is None else image
         self.user_id = user() if user_id is None else user_id
+        self.ledger = ledger
         self._loop: asyncio.AbstractEventLoop | None = None
         self._environment: Any = None
 
@@ -307,6 +308,13 @@ class Container:
                 extra_docker_compose=[override],
             )
             self._loop.run_until_complete(self._environment.start(force_build=False))
+            if self.ledger is not None:
+                # The objects exist now, so the run's record of them has to. The
+                # line is written before `start` because a kill inside `start`
+                # also leaves objects, but a `cleanup --run` landing before the
+                # first object exists removes nothing and still spends the line;
+                # republishing here restores the only name they have on disk.
+                record_project(self.ledger.run_dir, self.ledger.trial_id, self.recipe.name)
         except BaseException:
             self.close()
             raise
@@ -454,6 +462,19 @@ def daemon_error(output: Path) -> str | None:
 # After a SIGKILL nothing else on disk says which project to remove, and a
 # prefix sweep cannot tell this run's objects from a concurrent run's.
 PROJECTS = "projects"
+
+
+@dataclass(frozen=True)
+class Ledger:
+    """Which line of the run's project ledger one attempt owns.
+
+    Handed to `Container` so the object that creates the Compose project is also
+    the one that guarantees a marker names it, rather than each call site
+    remembering to.
+    """
+
+    run_dir: Path
+    trial_id: str
 
 
 def record_project(run_dir: Path, trial_id: str, name: str) -> str:
@@ -614,6 +635,7 @@ __all__ = [
     "Egress",
     "EgressError",
     "ImageError",
+    "Ledger",
     "Mount",
     "attestation",
     "check_mount",

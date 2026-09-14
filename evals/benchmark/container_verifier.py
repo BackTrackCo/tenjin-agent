@@ -47,7 +47,7 @@ def run(spec: verifier.VerifierSpec, repo: Path, run_dir: Path, image: str) -> v
         (owned / "diagnostic.json").write_text(json.dumps(value, indent=2) + "\n")
     verdict = verifier.Verdict(spec.name, "invalid", None, "verification did not complete")
     try:
-        with container.Container(recipe=recipe) as running, database_service.service(running, spec.database) as database_environment:
+        with container.Container(recipe=recipe, ledger=container.Ledger(run_dir, identity)) as running, database_service.service(running, spec.database) as database_environment:
             historical = spec.kind == "historical_vitest"
             if historical:
                 # Use fresh image dependencies, never model-modified tooling.

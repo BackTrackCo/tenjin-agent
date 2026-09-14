@@ -335,6 +335,50 @@ def test_a_marker_being_written_is_invisible_to_a_sweep_until_it_is_whole(tmp_pa
     assert list((tmp_path / container.PROJECTS).iterdir()) == []
 
 
+def test_a_cleanup_that_spends_the_line_before_the_project_exists_gets_it_back(tmp_path: Path, monkeypatch) -> None:
+    # The interval the marker cannot cover by being written early: a cleanup
+    # landing between the line and the first object removes nothing and still
+    # spends it, and the container that comes up afterwards would have no name
+    # on disk. So the container republishes the line once its project exists.
+    # Harbor is faked, per the no-import rule this file's first case pins.
+    spent: list[dict] = []
+    removed: list[str] = []
+
+    class Environment:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        async def start(self, force_build: bool = False) -> None:
+            spent.append(container.sweep(tmp_path))
+
+        async def stop(self, delete: bool = False) -> None:
+            pass
+
+    class Paths:
+        def __init__(self, trial_dir: Path) -> None:
+            self.trial_dir = trial_dir
+
+        def mkdir(self) -> None:
+            self.trial_dir.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(container, "remove_project", lambda project, docker=None: removed.append(project) or False)
+    monkeypatch.setattr(container, "harbor", lambda: container.Api(
+        DockerEnvironment=Environment, EnvironmentConfig=lambda **_: None,
+        NetworkMode=type("Modes", (), {"NO_NETWORK": "none"}), NetworkPolicy=lambda **_: None,
+        TrialPaths=Paths, version="0.22.0"))
+
+    plan = recipe(tmp_path, egress=container.no_network())
+    marker = tmp_path / container.PROJECTS / "trial-a.project"
+    container.record_project(tmp_path, "trial-a", plan.name)
+    with container.Container(recipe=plan, ledger=container.Ledger(tmp_path, "trial-a")):
+        # The cleanup during `start` did spend the line, and it is back.
+        assert spent == [{"run": str(tmp_path), "projects": {plan.name: False}}]
+        assert marker.read_text(encoding="utf-8").strip() == container.compose_project(plan.name)
+    assert removed == [plan.name, plan.name]
+    # The republished line is a real one: a later cleanup reaches these objects.
+    assert container.sweep(tmp_path)["projects"] == {plan.name: False}
+
+
 @pytest.mark.parametrize("failed", ("container-list", "container-remove", "network-list", "network-remove"))
 def test_cleanup_failure_keeps_the_project_marker_for_retry(tmp_path, failed):
     container.record_project(tmp_path, "trial-a", "bench2-trial-a")

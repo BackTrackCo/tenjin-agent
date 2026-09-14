@@ -20,7 +20,10 @@ def repo(tmp_path):
 def stub(monkeypatch, *, code=0, error=None, cleanup=True):
     seen = []
     class Running:
-        def __init__(self, *, recipe):
+        # Required, not optional: the container republishes the attempt's
+        # project line through it once the project exists.
+        def __init__(self, *, recipe, ledger):
+            assert isinstance(ledger, container.Ledger)
             seen.append(recipe)
         def __enter__(self):
             return self
