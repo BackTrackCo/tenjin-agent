@@ -106,7 +106,10 @@ export function assertConfiguredDeployment(settings: {
     'REFUSED',
     `${origin} is not the deployment this machine is configured for, so nothing will be signed for it.`,
     {
-      fix: 'Drop --base-url (and TENJIN_BASE_URL), or point the config at that deployment with `tenjin config set baseUrl <url>`.',
+      // The flag that moved the base URL is deliberately NOT named here: a
+      // `fix:` line rides the failure envelope to the agent, and the skill
+      // forbids exactly that move (see skills-text.test.ts).
+      fix: 'Run this against the deployment the config names, or point the config at another one with `tenjin config set baseUrl <url>`.',
     },
   );
 }

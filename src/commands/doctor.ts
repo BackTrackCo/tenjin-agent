@@ -1104,7 +1104,7 @@ function checkPreviewBypass(env: NodeJS.ProcessEnv): BuiltCheck | null {
         status: 'warn',
         required: false,
         detail: 'set, but no origin is named for it, so no request carries it',
-        fix: `Set ${PREVIEW_ORIGIN_ENV} (or TENJIN_BASE_URL) to the preview deployment's origin.`,
+        fix: `Set ${PREVIEW_ORIGIN_ENV} to the preview deployment's origin.`,
       },
     };
   }
