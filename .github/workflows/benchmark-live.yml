@@ -20,6 +20,19 @@ on:
     branches: [main]
     types: [opened, synchronize, reopened, ready_for_review, labeled]
   workflow_dispatch:
+    inputs:
+      lane:
+        description: >-
+          Which lane to run on the dispatched ref. `plumbing` is this
+          workflow's own smoke. `canary` runs the shelf lane instead, which is
+          how a branch runs it before its own workflow is registered: GitHub
+          keys `workflow_dispatch` on registration against the DEFAULT branch,
+          not on the file being present in the ref, so a new workflow cannot be
+          dispatched until it has merged. This workflow is already registered,
+          and a dispatch runs the ref's copy of it.
+        type: choice
+        default: plumbing
+        options: [plumbing, canary]
 
 concurrency:
   group: >-
@@ -30,12 +43,35 @@ concurrency:
 permissions: {}
 
 jobs:
+  # The shelf lane, on demand, for a ref whose own workflow is not registered
+  # yet. It spends model budget, so it runs only when the dispatcher asks for it
+  # by name; a schedule or a push can never reach it.
+  canary:
+    if: inputs.lane == 'canary'
+    uses: ./.github/workflows/benchmark-shelf.yml
+    permissions:
+      contents: read
+      actions: read
+      checks: write
+    secrets: inherit
+    with:
+      manifest: evals/benchmark/fixtures/live/canary-manifest.json
+      harness_version: latest
+      lane: benchmark-live-canary
+      check_name: benchmark canary (dispatched)
+      timeout_minutes: 60
+      budget_note: >-
+        Dispatched Bench-2 canary: two tasks, two arms, one repeat
+        (4 planned attempts). Results are provisional; the overview states
+        coverage and verified completion costs before detailed diagnostics.
+
   live:
     if: >-
-      github.event_name != 'pull_request' ||
-      (!github.event.pull_request.draft &&
-       contains(github.event.pull_request.labels.*.name, 'benchmark: canary') &&
-       (github.event.action != 'labeled' || github.event.label.name == 'benchmark: canary'))
+      inputs.lane != 'canary' &&
+      (github.event_name != 'pull_request' ||
+       (!github.event.pull_request.draft &&
+        contains(github.event.pull_request.labels.*.name, 'benchmark: canary') &&
+        (github.event.action != 'labeled' || github.event.label.name == 'benchmark: canary')))
     name: benchmark live (plumbing smoke)
     runs-on: ubuntu-latest
     timeout-minutes: 15

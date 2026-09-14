@@ -1,0 +1,86 @@
+name: benchmark headline
+
+# Full Bench-2: core and recursive experiments, each with its own readout.
+# The shared shelf workflow serializes corpus resets across both jobs.
+on:
+  schedule:
+    # 03:41 UTC on Sunday. Off the hour and off the canary's slot, and the two
+    # lanes share one concurrency group anyway, so neither resets under the
+    # other.
+    - cron: '41 3 * * 0'
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      core_checkpoint_run:
+        description: Prior run ID for core recovery; zero starts fresh.
+        type: number
+        default: 0
+      core_checkpoint_artifact:
+        description: Exact core checkpoint artifact name.
+        type: string
+        default: ''
+      recursive_checkpoint_run:
+        description: Prior run ID for recursive recovery; also supply a completed core checkpoint to avoid rerunning core.
+        type: number
+        default: 0
+      recursive_checkpoint_artifact:
+        description: Exact recursive checkpoint artifact name.
+        type: string
+        default: ''
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
+
+permissions: {}
+
+jobs:
+  headline:
+    # On a pull request this lane is opt-in and costly, so it runs only while
+    # benchmark: headline is on. Main schedules and explicit dispatch remain available.
+    if: >-
+      github.event_name != 'pull_request' ||
+      (!github.event.pull_request.draft &&
+       contains(github.event.pull_request.labels.*.name, 'benchmark: headline') &&
+       (github.event.action != 'labeled' || github.event.label.name == 'benchmark: headline'))
+    uses: ./.github/workflows/benchmark-shelf.yml
+    permissions:
+      contents: read
+      actions: read
+      checks: write
+    secrets: inherit
+    with:
+      manifest: evals/benchmark/fixtures/live/local-arms-manifest.json
+      harness_version: latest
+      lane: benchmark-headline
+      checkpoint_run: ${{ inputs.core_checkpoint_run || 0 }}
+      checkpoint_artifact: ${{ inputs.core_checkpoint_artifact || '' }}
+      check_name: benchmark headline (core suite)
+      timeout_minutes: 360
+      budget_note: >-
+        Bench-2 full core experiment: ten tasks across every configured arm,
+        three repeats, plus the natural arm's producer phase. The overview
+        reports actual coverage and verified time/token costs for every arm.
+        These are provisional measurements until metric hardening is complete.
+
+  recursive:
+    needs: headline
+    if: always() && needs.headline.result == 'success'
+    uses: ./.github/workflows/benchmark-shelf.yml
+    permissions:
+      contents: read
+      actions: read
+      checks: write
+    secrets: inherit
+    with:
+      manifest: evals/benchmark/fixtures/live/recursive-manifest.json
+      harness_version: latest
+      lane: benchmark-recursive
+      checkpoint_run: ${{ inputs.recursive_checkpoint_run || 0 }}
+      checkpoint_artifact: ${{ inputs.recursive_checkpoint_artifact || '' }}
+      check_name: benchmark headline (recursive suite)
+      timeout_minutes: 360
+      budget_note: >-
+        Bench-2 recursive experiment: actual root and descendant task work,
+        reported separately from the core suite. Native actor coverage,
+        verified completion, time and tokens are shown in the overview.
