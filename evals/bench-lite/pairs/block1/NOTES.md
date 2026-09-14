@@ -1,24 +1,48 @@
 # block1 — four producer/consumer pairs
 
-Assembled from two scratchpad task packages. Paths in `pairs.json` are relative to this
+Assembled from three scratchpad task packages. Paths in `pairs.json` are relative to this
 directory, which is what `run.py` expects.
 
-| pair                        | repo         | producer PR | consumer PR | needs                          |
-| --------------------------- | ------------ | ----------- | ----------- | ------------------------------ |
-| `tenjin-746-748-confidence` | tenjin       | 746         | 748         | Docker (testcontainers)        |
-| `agent-219-266-state-store` | tenjin-agent | 219         | 266         | Node >= 24 only                |
-| `content-retrieval`         | tenjin       | 670         | 674         | Postgres + pgvector, fixed URL |
-| `trending-term-questions`   | tenjin       | 727         | 740         | Postgres + pgvector, fixed URL |
+| #   | pair                          | repo   | producer PR | consumer PR | needs                          |
+| --- | ----------------------------- | ------ | ----------- | ----------- | ------------------------------ |
+| 1   | `tenjin-746-748-confidence`   | tenjin | 746         | 748         | Docker (testcontainers)        |
+| 2   | `tenjin-789-798-demand-gates` | tenjin | 789         | 798         | Docker (testcontainers)        |
+| 3   | `trending-term-questions`     | tenjin | 727         | 740         | Postgres + pgvector, fixed URL |
+| 4   | `tenjin-772-841-pooled-gate`  | tenjin | 772         | 841         | Docker (testcontainers)        |
 
-Run `tenjin-746-748-confidence` first. Its source notes call it the strongest pair: both PRs are
-single-theme and small, the shared fact is an enum plus two numeric cuts, and the consumer's
-`qualify` gate is literally unwritable without it.
+`pairs.json` holds exactly these four, in this order.
+
+**Not in `pairs.json`, files still present:** `agent-219-266-state-store` and
+`content-retrieval`. Their prompts and oracles are left in `prompts/` and `oracles/` so a pair
+can be put back by restoring its entry, and they are harmless where they sit.
+
+**Parked:** `agent-262-273-condense` lives in `../parked/` for reference, with the source
+package's own notes as `../parked/NOTES-source.md`. Its source notes rank it the best fact of
+its set (a pipeline order plus a code-generation convention, no Docker), so it is the first
+candidate if a slot opens.
+
+## Base-state verification
+
+Every pair's oracle was run once at its base commit in a throwaway worktree with **no agent**,
+to prove it fails for the reason the task is about rather than for a runner or environment
+reason. All worktrees were removed afterwards.
+
+| pair / side                          | result at base                                                                                                                                                                            |
+| ------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tenjin-789-798` producer            | 1 failure: `expected { total: 6, matched: 3, missed: 3 } to deeply equal { total: 4, matched: 3, missed: 1 }` — the veto gate PR 789 adds is not there, so synthetic rows are not dropped |
+| `tenjin-789-798` consumer            | 4 failures, led by `TypeError: publishableQuestionShape is not a function` (the SQL twin the consumer must write) and the `'😀a'` non-BMP code-point assertion                            |
+| `tenjin-772-841` producer (narrowed) | 8 failures, all `expected 1 to be +0` style assertions on `matched` — the pooled gate does not exist yet                                                                                  |
+| `tenjin-772-841` consumer            | 9 failures across `project.test.ts`, `search-response.test.ts` and `lexical-rank.test.ts`                                                                                                 |
+
+No corepack crash, no module-resolution error, no container failure in any of the four.
+Testcontainers pulled and ran `pgvector/pgvector:pg16` each time. Each check took 54-66 seconds
+including `pnpm install`.
 
 ## Three different database stories
 
-**`content-retrieval` and `trending-term-questions` — the bench3 hidden-oracle path.**
-Their oracle imports `startDatabase` from `#benchmark/database`. That alias is resolved by the
-staged `.bench3/vitest.config.mjs`, and `startDatabase()` does three things, in order:
+**`trending-term-questions` — the bench3 hidden-oracle path.** Its oracle imports
+`startDatabase` from `#benchmark/database`. That alias is resolved by the staged
+`.bench3/vitest.config.mjs`, and `startDatabase()` does three things, in order:
 
 1. Hard-fails unless `BENCHMARK_DATABASE_URL` is **exactly**
    `postgresql://postgres@127.0.0.1:5432/benchmark`. Not an equivalent URL — a string compare.
@@ -27,12 +51,9 @@ staged `.bench3/vitest.config.mjs`, and `startDatabase()` does three things, in 
    own migrator.
 
 So the oracle migrates the database itself. Do not run the repo's migrate script first, and do
-not reuse a database another pair already migrated: the two base commits carry different
-migration sets (44 SQL files at `content-retrieval`'s consumer base, 46 at
-`trending-term-questions`'s), so a database left over from one pair is the wrong schema for the
-other. **Start a fresh container per session.**
-
-Bring it up, publishing the port so the fixed URL resolves from the host:
+not reuse a database another pair already migrated — base commits carry different migration
+sets. **Start a fresh container per session**, publishing the port so the fixed URL resolves
+from the host:
 
 ```bash
 docker run --rm -d --name bench-lite-postgres \
@@ -45,24 +66,24 @@ docker run --rm -d --name bench-lite-postgres \
 
 `POSTGRES_HOST_AUTH_METHOD=trust` is required because the URL carries no password.
 `POSTGRES_INITDB_ARGS=--locale=C.UTF-8` is not decoration: changing the pgvector image flips the
-default collation, and text ordering assertions move with it. The real harness pins the image by
-digest and shares a network namespace with the task container; `-p 127.0.0.1:5432:5432` is the
-local equivalent. Stop the container when the run is done — bench-lite will not stop it for you,
-and leaving it up violates the no-servers rule.
+default collation, and text ordering assertions move with it. Stop the container when the run is
+done — bench-lite will not stop it for you, and leaving it up violates the no-servers rule.
 
-**`tenjin-746-748-confidence` — testcontainers.** The PR's own integration tests boot
-`pgvector/pgvector:pg16` through `@testcontainers/postgresql`. No fixed URL and no manual
-container: just a running Docker daemon. Both of the consumer's oracle files are integration
-tests, so Docker is mandatory for the consumer; the producer needs it for one of four files.
+**`tenjin-746-748`, `tenjin-789-798`, `tenjin-772-841` — testcontainers.** Each PR's own
+integration tests boot `pgvector/pgvector:pg16` through `@testcontainers/postgresql`. No fixed
+URL and no manual container, just a running Docker daemon. The collation point applies here too:
+789's producer verified Postgres `[[:alpha:]]` and `length()` against TypeScript `\p{L}`
+semantics under the suite's `C.UTF-8` locale, so a different collation changes the answer.
 
-**`agent-219-266-state-store` — none.** Embedded SQLite via `node:sqlite`.
+**Running two of these at once is the known stall.** Three of the four pairs drive
+testcontainers, and concurrent suites contend for Docker. Keep `--workers 1` unless you have
+measured otherwise.
 
 ## Node
 
-`node --version` on this machine is **v24.19.0**, which satisfies the requirement. PR 219 raises
-`engines.node` from `>=22` to `>=24`; the base commit still declares `>=22`, so the engines field
-will not protect you. On Node 22 `node:sqlite` behaves differently and the store's fail-open path
-swallows it silently, which reads as a mysterious oracle failure rather than a version problem.
+`node --version` on this machine is **v24.19.0**. The three tenjin pairs declare `>=22`; the
+runner pins the node it resolved onto `PATH` for the agent, `pnpm install` and the oracle alike,
+and records `node --version` per session.
 
 ## Two local adaptations, both deliberate
 
@@ -70,46 +91,56 @@ swallows it silently, which reads as a mysterious oracle failure rather than a v
    header. The `#benchmark/database` alias pointed at the container-absolute
    `/benchmark-database.mjs`; it now resolves under the checkout, and `pairs.json` stages
    `database.mjs` at `.bench3/benchmark-database.mjs`. `cacheDir` moved off the shared
-   `/tmp/benchmark-historical-vite-cache` to a per-checkout path. `test.include` is untouched and
-   still hardcoded to the single hidden-oracle file.
-2. `run.py` now refuses any `oracle.copy` destination that is absolute or contains `..`, at load
-   time and again at copy time. Writing to the filesystem root is not something a benchmark
-   should be able to do by accident.
+   `/tmp/benchmark-historical-vite-cache` to a per-checkout path. `test.include` is untouched.
+2. `run.py` refuses any `oracle.copy` destination that is absolute or contains `..`, at load
+   time and again at copy time.
 
 ## Prescriptiveness flags, carried over
 
-These are reasons a pass or a failure may not mean what it looks like.
-
-**`agent-219-266-state-store`.** Moderate. The consumer oracle pins the state-key prefix
-`capture:activity:` and the three kind names `inspection`, `mutation`, `shell` verbatim, which
-are implementation-private choices the prompt describes only in prose. One test also asserts the
-exact wording of the Stop capture brief, and prose assertions are unreachable without the PR's
-own copy. The producer oracle here is **trimmed to 5 files** on the source notes'
-recommendation; `src/sidecar-e2e.test.ts`, `src/commands/outcome.test.ts`,
-`src/commands/publish.test.ts` and `src/commands/uninstall.test.ts` were dropped as incidental to
-the state store.
+Reasons a pass or a failure may not mean what it looks like.
 
 **`tenjin-746-748-confidence`.** Moderate. The consumer oracle imports
-`CONFIDENCE_MEDIUM_SIMILARITY` by name from `@/lib/search/project`, so running it reveals the
-constant's identifier and module. It does not reveal the value 0.52, the high cut 0.62, the enum
-values, or that the bucket reads the dense leg alone. The consumer oracle also stages
-`tests/integration/_support/embedder.ts`, which is pure test infrastructure and leaks nothing.
+`CONFIDENCE_MEDIUM_SIMILARITY` by name from `@/lib/search/project`, revealing the constant's
+identifier and module. It does not reveal the value 0.52, the high cut 0.62, the enum values, or
+that the bucket reads the dense leg alone.
 
-**Both bench3 pairs.** The pair is named for the **consumer** task, and the producer is a
-different task whose own hidden oracle is a differently named file: `content-retrieval`'s
-producer (PR 670) is graded by `content-generation.test.ts`, and `trending-term-questions`'s
-producer (PR 727) by `demand-honesty.test.ts`. That asymmetry is inherited from the source
-package and is worth confirming before a real run, because it is exactly what a copy-paste slip
-would also look like.
+**`tenjin-789-798-demand-gates`.** Moderate, and this is the weakest pair on the axis the
+benchmark measures. Its consumer prompt carries two deliberate hints the others do not: it tells
+the agent to look at the existing veto's shape, and it names the length disagreement in the
+abstract. Without the second hint the code-point case is close to unpassable; with it, the gap a
+shelf note would close is narrower. Also mild: the producer is 95 added lines over 2 files, so
+do not describe it as mid-sized, and the consumer oracle imports `publishableQuestionShape`,
+fixing that identifier and module.
+
+**`trending-term-questions`.** The pair is named for the **consumer** task (PR 740); the
+producer is PR 727, whose own hidden oracle is the differently named `demand-honesty.test.ts`.
+That asymmetry is inherited from the source package and is worth confirming before a real run,
+because it is exactly what a copy-paste slip would also look like.
+
+**`tenjin-772-841-pooled-gate`.** The producer oracle is **narrowed**, per its source notes:
+`scripts/eval-lookup-recall.test.ts` and `scripts/eval/lookup-gold-set.ts` are dropped from both
+the copy set and the command, together, because the `junk` register that PR 772 adds to the gold
+set is roughly a third of the producer's spec. Staging it would hand the agent the answer.
+
+The consumer keeps its **full** command, which is what was asked for, but note that two of its
+six files (`lib/search/retrieve/lexical-rank.test.ts` and
+`tests/integration/search-keyword-leg.test.ts`) belong to the PR's second, independent theme,
+the BM25 corpus count, about which the shared fact says nothing. The base-state check confirmed
+this concretely: one of the nine failures is `lexical-rank.test.ts` asserting that a count query
+mentions `creators`, which has nothing to do with the pooled gate. `oracle.command_narrowed` in
+the source package drops both files; if the consumer is ever narrowed too, the matching cut is
+the last paragraph of its prompt. Also moderate: the oracle spells `pooledSimilarity` and
+`chunkCount`, fixing both identifiers, and this pair shares a subsystem with
+`tenjin-746-748-confidence`.
 
 **All four pairs.** Every consumer's base commit already contains the producer's merged code, so
 the shared fact is never genuinely _unavailable_ to agent B — it is discoverable by reading B's
-own tree. These pairs measure **search cost saved**, not information transfer. Still a real reuse
-signal, but do not describe the result as "B could not have known this".
+own tree. These pairs measure **search cost saved**, not information transfer. Do not describe a
+result as "B could not have known this".
 
 ## Consumer prompts
 
-`content-retrieval` and `trending-term-questions` use the `*-consumer.trimmed.md` prompts, with
-the reconstructed-compatibility block removed. The filename keeps the `.trimmed` marker so the
-provenance stays visible against the source package. The other two pairs use their verbatim
-consumer prompts.
+`trending-term-questions` uses the `*-consumer.trimmed.md` prompt, with the
+reconstructed-compatibility block removed; the filename keeps the `.trimmed` marker so the
+provenance stays visible against the source package. The three tenjin PR pairs use their
+verbatim consumer prompts.

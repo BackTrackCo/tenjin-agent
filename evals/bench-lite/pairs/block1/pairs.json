@@ -58,114 +58,55 @@
     }
   },
   {
-    "id": "agent-219-266-state-store",
-    "notes": "Producer oracle TRIMMED to the 5 files the source NOTES.md recommends; src/sidecar-e2e.test.ts, src/commands/outcome.test.ts, src/commands/publish.test.ts and src/commands/uninstall.test.ts are dropped as incidental to the state store.",
-    "producer": {
-      "repo": "tenjin-agent",
-      "pr": 219,
-      "base_commit": "7886e230aedcf183aec517fa7b4198e7b522ee9a",
-      "merge_commit": "0a9d8efc2b6c2ebd1c91e0313846a8014e583f48",
-      "prompt_file": "prompts/agent-219-266-state-store-producer.md",
-      "oracle": {
-        "copy": [
-          {
-            "from": "oracles/agent-219-266-state-store-producer/src/lib/state-store.test.ts",
-            "to": "src/lib/state-store.test.ts"
-          },
-          {
-            "from": "oracles/agent-219-266-state-store-producer/src/lib/push-scripts.test.ts",
-            "to": "src/lib/push-scripts.test.ts"
-          },
-          {
-            "from": "oracles/agent-219-266-state-store-producer/src/lib/hook-scripts.test.ts",
-            "to": "src/lib/hook-scripts.test.ts"
-          },
-          {
-            "from": "oracles/agent-219-266-state-store-producer/src/lib/search-store.test.ts",
-            "to": "src/lib/search-store.test.ts"
-          },
-          {
-            "from": "oracles/agent-219-266-state-store-producer/src/commands/push.test.ts",
-            "to": "src/commands/push.test.ts"
-          }
-        ],
-        "command": "pnpm vitest run src/lib/state-store.test.ts src/lib/push-scripts.test.ts src/lib/hook-scripts.test.ts src/lib/search-store.test.ts src/commands/push.test.ts",
-        "timeout_s": 1800
-      }
-    },
-    "consumer": {
-      "repo": "tenjin-agent",
-      "pr": 266,
-      "base_commit": "c2cbd4d08072c12e37df7ac013f1ddbd8f662a32",
-      "merge_commit": "97424b546a6506fd3ca8e882cdb20dc2050a4ab1",
-      "prompt_file": "prompts/agent-219-266-state-store-consumer.md",
-      "oracle": {
-        "copy": [
-          {
-            "from": "oracles/agent-219-266-state-store-consumer/src/lib/push-scripts.test.ts",
-            "to": "src/lib/push-scripts.test.ts"
-          },
-          {
-            "from": "oracles/agent-219-266-state-store-consumer/src/lib/state-store.test.ts",
-            "to": "src/lib/state-store.test.ts"
-          }
-        ],
-        "command": "pnpm vitest run src/lib/push-scripts.test.ts src/lib/state-store.test.ts",
-        "timeout_s": 1800
-      }
-    }
-  },
-  {
-    "id": "content-retrieval",
-    "notes": "bench3 historical task. The pair is named for the CONSUMER task (PR 674); the producer is PR 670, whose own hidden oracle is content-generation.test.ts. Consumer uses the trimmed prompt.",
+    "id": "tenjin-789-798-demand-gates",
     "producer": {
       "repo": "tenjin",
-      "pr": 670,
-      "base_commit": "f76f075b7228175b25750de90c8eba832825b44a",
-      "prompt_file": "prompts/content-retrieval-producer.md",
+      "pr": 789,
+      "base_commit": "ff20092bf038fe272f8739b063c55e58efb0048d",
+      "merge_commit": "b8a2371c509a18c4febdd89fd0ac215d4d36e51a",
+      "additions": 95,
+      "changed_files": 2,
+      "prompt_file": "prompts/tenjin-789-798-demand-gates-producer.md",
       "oracle": {
         "copy": [
           {
-            "from": "oracles/content-generation.test.ts",
-            "to": "src/benchmark-independent.test.ts"
-          },
-          {
-            "from": "oracles/vitest.config.mjs",
-            "to": ".bench3/vitest.config.mjs"
-          },
-          {
-            "from": "oracles/database.mjs",
-            "to": ".bench3/benchmark-database.mjs"
+            "from": "oracles/tenjin-789-798-demand-gates-producer/tests/integration/search-telemetry.test.ts",
+            "to": "tests/integration/search-telemetry.test.ts"
           }
         ],
-        "command": "BENCHMARK_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/benchmark pnpm exec vitest run --config .bench3/vitest.config.mjs --configLoader native src/benchmark-independent.test.ts",
+        "command": "pnpm vitest run tests/integration/search-telemetry.test.ts",
         "timeout_s": 1800
       }
     },
     "consumer": {
       "repo": "tenjin",
-      "pr": 674,
-      "base_commit": "def7ef711acb449499a34ed7e47b3186f509681b",
-      "prompt_file": "prompts/content-retrieval-consumer.trimmed.md",
+      "pr": 798,
+      "base_commit": "55337c8b325251f43f437ec256d7d73562d32e48",
+      "merge_commit": "205a8798ef7c4217cb44e245195d0134e72666fe",
+      "additions": 196,
+      "changed_files": 4,
+      "prompt_file": "prompts/tenjin-789-798-demand-gates-consumer.md",
       "oracle": {
         "copy": [
           {
-            "from": "oracles/content-retrieval.test.ts",
-            "to": "src/benchmark-independent.test.ts"
+            "from": "oracles/tenjin-789-798-demand-gates-consumer/lib/search/gates.test.ts",
+            "to": "lib/search/gates.test.ts"
           },
           {
-            "from": "oracles/vitest.config.mjs",
-            "to": ".bench3/vitest.config.mjs"
-          },
-          {
-            "from": "oracles/database.mjs",
-            "to": ".bench3/benchmark-database.mjs"
+            "from": "oracles/tenjin-789-798-demand-gates-consumer/tests/integration/search-telemetry.test.ts",
+            "to": "tests/integration/search-telemetry.test.ts"
           }
         ],
-        "command": "BENCHMARK_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/benchmark pnpm exec vitest run --config .bench3/vitest.config.mjs --configLoader native src/benchmark-independent.test.ts",
+        "command": "pnpm vitest run lib/search/gates.test.ts tests/integration/search-telemetry.test.ts",
         "timeout_s": 1800
       }
-    }
+    },
+    "runtime": {
+      "node": ">=22",
+      "docker": true,
+      "image": "pgvector/pgvector:pg16"
+    },
+    "notes": "tenjin #789 -> #798. Cheapest pair in the set: 291 added lines across both PRs, 3 oracle files, one testcontainers image. Its consumer prompt carries two deliberate hints the others do not, so it is the weakest pair on the 'expensive without the note' axis."
   },
   {
     "id": "trending-term-questions",
@@ -218,5 +159,79 @@
         "timeout_s": 1800
       }
     }
+  },
+  {
+    "id": "tenjin-772-841-pooled-gate",
+    "producer": {
+      "repo": "tenjin",
+      "pr": 772,
+      "base_commit": "3163344b21038e0bc4996cc89d3a417f607feb33",
+      "merge_commit": "9309532b94922ced867042b83f427569ac9c8c01",
+      "additions": 592,
+      "changed_files": 15,
+      "prompt_file": "prompts/tenjin-772-841-pooled-gate-producer.md",
+      "oracle": {
+        "copy": [
+          {
+            "from": "oracles/tenjin-772-841-pooled-gate-producer/tests/integration/search-floor.test.ts",
+            "to": "tests/integration/search-floor.test.ts"
+          },
+          {
+            "from": "oracles/tenjin-772-841-pooled-gate-producer/tests/integration/lookup-hybrid.test.ts",
+            "to": "tests/integration/lookup-hybrid.test.ts"
+          }
+        ],
+        "command": "pnpm vitest run tests/integration/search-floor.test.ts tests/integration/lookup-hybrid.test.ts",
+        "narrowed": "producer: dropped the eval gold-set pair (see NOTES.md)",
+        "timeout_s": 1800
+      }
+    },
+    "consumer": {
+      "repo": "tenjin",
+      "pr": 841,
+      "base_commit": "c1d177cf197c76e4281343af8875d55a89096068",
+      "merge_commit": "247a92072636ee92045e6c6419bea85f511a8a47",
+      "additions": 499,
+      "changed_files": 14,
+      "prompt_file": "prompts/tenjin-772-841-pooled-gate-consumer.md",
+      "oracle": {
+        "copy": [
+          {
+            "from": "oracles/tenjin-772-841-pooled-gate-consumer/lib/search/project.test.ts",
+            "to": "lib/search/project.test.ts"
+          },
+          {
+            "from": "oracles/tenjin-772-841-pooled-gate-consumer/lib/search-response.test.ts",
+            "to": "lib/search-response.test.ts"
+          },
+          {
+            "from": "oracles/tenjin-772-841-pooled-gate-consumer/tests/integration/lookup-hybrid.test.ts",
+            "to": "tests/integration/lookup-hybrid.test.ts"
+          },
+          {
+            "from": "oracles/tenjin-772-841-pooled-gate-consumer/scripts/eval-lookup-recall.test.ts",
+            "to": "scripts/eval-lookup-recall.test.ts"
+          },
+          {
+            "from": "oracles/tenjin-772-841-pooled-gate-consumer/lib/search/retrieve/lexical-rank.test.ts",
+            "to": "lib/search/retrieve/lexical-rank.test.ts",
+            "theme": "BM25 corpus count \u2014 independent of the shared fact"
+          },
+          {
+            "from": "oracles/tenjin-772-841-pooled-gate-consumer/tests/integration/search-keyword-leg.test.ts",
+            "to": "tests/integration/search-keyword-leg.test.ts",
+            "theme": "BM25 corpus count \u2014 independent of the shared fact"
+          }
+        ],
+        "command": "pnpm vitest run lib/search/project.test.ts lib/search-response.test.ts lib/search/retrieve/lexical-rank.test.ts scripts/eval-lookup-recall.test.ts tests/integration/lookup-hybrid.test.ts tests/integration/search-keyword-leg.test.ts",
+        "timeout_s": 1800
+      }
+    },
+    "runtime": {
+      "node": ">=22",
+      "docker": true,
+      "image": "pgvector/pgvector:pg16"
+    },
+    "notes": "tenjin #772 -> #841. Producer oracle NARROWED per its source NOTES: scripts/eval-lookup-recall.test.ts and scripts/eval/lookup-gold-set.ts are dropped from both the copy set and the command, because the junk register that PR 772 adds to the gold set IS a third of the producer's spec. Consumer keeps its full command."
   }
 ]

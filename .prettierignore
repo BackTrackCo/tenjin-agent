@@ -12,3 +12,6 @@ skills/
 # style. The package's own pairs.json and NOTES.md are still checked.
 evals/bench-lite/pairs/*/prompts/
 evals/bench-lite/pairs/*/oracles/
+# Parked task packages, kept verbatim for reference including the source
+# package's own notes. Nothing here is wired into pairs.json.
+evals/bench-lite/pairs/parked/
