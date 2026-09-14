@@ -5,7 +5,6 @@ import { UUID_RE } from './ids';
 import { isSameDeployment } from './production-origin';
 import { getPostMetadata } from './agent-api';
 import { trimSlash } from './url';
-import type { ShelfBypass } from './http';
 
 /**
  * Resolve a `<resource-url-or-id>` CLI argument to the payable read URL. A full
@@ -56,19 +55,12 @@ export interface ResourceRef {
  * is one of the deployment's own origins; a self-hosted base keeps the exact
  * compare, and every other origin is refused on the terms it always was.
  *
- * `alsoAllow` is the SECOND SHELF, and it widens this by exactly one origin the
- * operator configured themselves (`publicShelfUrl`). Team mode searches two
- * shelves, so it surfaces candidates from two origins, and a `read` that
- * refused every public-shelf hit would make the fallback leg useless. It is
- * still a configured origin, checked the same way, and never a value that
- * arrived from a response.
+ * THERE IS NO SECOND ORIGIN LEFT. A shelf is a row on the one deployment, so
+ * shelf candidates and marketplace candidates arrive on the same host and the
+ * `alsoAllow` widening this used to take is deleted. One configured origin,
+ * one compare.
  */
-export function assertOnBaseOrigin(
-  url: string,
-  baseUrl: string,
-  what: string,
-  alsoAllow?: string,
-): void {
+export function assertOnBaseOrigin(url: string, baseUrl: string, what: string): void {
   let target: URL;
   let base: URL;
   try {
@@ -79,7 +71,6 @@ export function assertOnBaseOrigin(
       fix: 'Pass an absolute https URL on the configured base URL.',
     });
   }
-  if (alsoAllow !== undefined && onOrigin(target.origin, alsoAllow)) return;
   if (!isSameDeployment(target.origin, base.origin)) {
     throw new CliError(
       'USAGE',
@@ -95,23 +86,12 @@ export function assertOnBaseOrigin(
   }
 }
 
-/** Is `origin` the origin of `baseUrl`? False for a `baseUrl` that will not parse
- *  — an unusable second shelf widens nothing. */
-function onOrigin(origin: string, baseUrl: string): boolean {
-  try {
-    return new URL(baseUrl).origin === origin;
-  } catch {
-    return false;
-  }
-}
-
 /** The network capability a bare-id resolution falls back on (see below). Left
  *  optional and threaded through explicitly rather than defaulted to the
  *  global `fetch`, so a caller that omits it gets exactly today's local-only
  *  resolution — no test or seam has to stub a network it never asked for. */
 export interface ResourceRefNetOptions {
   timeoutMs: number;
-  bypass?: ShelfBypass;
   fetchImpl?: typeof fetch;
 }
 
@@ -119,24 +99,13 @@ export async function resolveResourceRef(
   arg: string,
   dataDir: string,
   baseUrl: string,
-  publicShelfUrl?: string,
   net?: ResourceRefNetOptions,
 ): Promise<ResourceRef> {
-  // The second shelf only widens anything when it is a DIFFERENT origin; in
-  // public mode the two are the same and this is a no-op.
-  const alsoAllow =
-    publicShelfUrl !== undefined && !onOrigin(safeOrigin(baseUrl), publicShelfUrl)
-      ? publicShelfUrl
-      : undefined;
-  /** Which shelf the resolved URL is on, for the caller's SIWX domain. */
-  const shelfFor = (url: string): string =>
-    alsoAllow !== undefined && onOrigin(safeOrigin(url), alsoAllow) ? alsoAllow : baseUrl;
-
   const trimmed = arg.trim();
   if (/^https?:\/\//i.test(trimmed)) {
     const url = canonicalReadUrl(trimmed);
-    assertOnBaseOrigin(url, baseUrl, 'resource URL', alsoAllow);
-    return { url, shelfBaseUrl: shelfFor(url) };
+    assertOnBaseOrigin(url, baseUrl, 'resource URL');
+    return { url, shelfBaseUrl: baseUrl };
   }
   if (UUID_RE.test(trimmed)) {
     const candidate = await findStoredCandidate(dataDir, trimmed);
@@ -174,7 +143,7 @@ export async function resolveResourceRef(
       const url = canonicalReadUrl(
         `${trimSlash(baseUrl)}/api/read/${encodeURIComponent(remote.creator.handle)}/${encodeURIComponent(remote.slug)}`,
       );
-      assertOnBaseOrigin(url, baseUrl, 'resolved candidate URL', alsoAllow);
+      assertOnBaseOrigin(url, baseUrl, 'resolved candidate URL');
       // `remote.id`, not `trimmed` (PR 283 round-2 review): the id compare
       // above is case-insensitive, so a differently-cased request still gets
       // here, and `trimmed` would carry the CALLER's casing into a ref that
@@ -182,7 +151,7 @@ export async function resolveResourceRef(
       // receipt-directory path is case-sensitive, so a `buy` under one
       // casing would miss a delivery saved under another and pay twice for
       // the same piece.
-      return { url, resourceId: remote.id, shelfBaseUrl: shelfFor(url) };
+      return { url, resourceId: remote.id, shelfBaseUrl: baseUrl };
     }
     // The stored url was origin-checked at search time, but the config can have
     // changed since; re-assert against the CURRENT base URL before any send.
@@ -190,21 +159,10 @@ export async function resolveResourceRef(
     // candidates arrive without a trailing slash, so this is insurance against a
     // deployment that ever emits one, not a case seen in practice.
     const url = canonicalReadUrl(candidate.url);
-    assertOnBaseOrigin(url, baseUrl, 'stored candidate URL', alsoAllow);
-    return { url, resourceId: trimmed, shelfBaseUrl: shelfFor(url) };
+    assertOnBaseOrigin(url, baseUrl, 'stored candidate URL');
+    return { url, resourceId: trimmed, shelfBaseUrl: baseUrl };
   }
   throw new CliError('USAGE', `Not a resource URL or id: ${JSON.stringify(arg)}`, {
     fix: 'Pass a full https read URL (a candidate `url`) or a resourceId uuid.',
   });
-}
-
-/** `URL.origin`, or a sentinel that matches nothing, for a string that will not
- *  parse. The callers above all re-check through `assertOnBaseOrigin`, which is
- *  where an unparseable URL becomes the USAGE error. */
-function safeOrigin(url: string): string {
-  try {
-    return new URL(url).origin;
-  } catch {
-    return '\0';
-  }
 }

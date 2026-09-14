@@ -6,7 +6,6 @@ import { loadRawConfig } from './config';
 import { dataDir } from './paths';
 import { emitWriteNotice } from './output';
 import type { Io } from './output';
-import { isTeamModeConfig } from './settings';
 import { skillMaterialize } from './skill-materialize';
 import { installSkill } from './skill-writer';
 import {
@@ -114,14 +113,13 @@ export async function healWiredSkills(deps: HealDeps): Promise<HealOutcome> {
 
     const source = deps.skillsSourceDir ?? packagedSource();
     if (source === null) return skip('The packaged skills are a working tree.');
-    // The mode the skill text is shaped by. An absent config.json reads as {} and
-    // so as public mode, which is right — no shelf is configured. A config that
+    // The mode the skill text is shaped by: "this machine has a shelf". An absent
+    // config.json reads as {} and so as no shelf, which is right. A config that
     // cannot be read or parsed THROWS, and the catch below turns that into "heal
     // nothing this time", which is the only safe direction: guessing public on a
-    // team machine would rewrite every wired skill to the other mode's guidance,
+    // shelf machine would rewrite every wired skill to the other mode's guidance,
     // under a notice claiming it matched this CLI.
-    const teamMode =
-      deps.dataDir === undefined ? false : isTeamModeConfig(await loadRawConfig(deps.dataDir));
+    const teamMode = deps.dataDir === undefined ? false : await hasShelf(deps.dataDir);
     // Lenient on purpose: an unattended healer is the last place that should
     const targets = healable(home);
     if (targets.length === 0) return skip('No wired CLI skill is present to heal.');
@@ -131,6 +129,14 @@ export async function healWiredSkills(deps: HealDeps): Promise<HealOutcome> {
     // Whatever it was, it is the next command's to retry; this one is finished.
     return skip('The heal pass could not complete.');
   }
+}
+
+/** Is a shelf configured on this machine? The raw config, never resolved
+ *  settings: the installed skill text outlives the command that wrote it, so a
+ *  one-off `--base-url` must not shape it. */
+async function hasShelf(dataDir: string): Promise<boolean> {
+  const raw = await loadRawConfig(dataDir);
+  return raw.shelf !== null && raw.shelf !== undefined;
 }
 
 function skip(reason: string): HealOutcome {

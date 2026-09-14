@@ -8,7 +8,7 @@ import { STARTED_MARK } from './actor';
 import { EDITED_PREFIX } from './arms/context';
 import { factsWithPrefix } from './facts';
 import { getMark, setMark } from './gates';
-import { teamOrigin } from './legs/shelf';
+
 import { captureAsk, CHILD_PUBLISHED_LINE, FAILURE_LINE, MISS_LINE } from './prose';
 import type { LoopDb } from './store';
 import { clean } from './text';
@@ -307,8 +307,7 @@ function evidence(ctx: FireContext, misses: string[], hasFailures: boolean): Evi
     return null;
   }
   if (fired(db, actor, LEAD_LOOKUP_SQL)) return 'lookup';
-  if (teamOrigin(ctx.deps.config()) !== null && hasMark(db, actor, ACTIVITY_PREFIX))
-    return 'activity';
+  if (ctx.deps.config().shelf !== null && hasMark(db, actor, ACTIVITY_PREFIX)) return 'activity';
   if (misses.length > 0) return 'miss';
   if (hasFailures) return 'failure';
   return null;

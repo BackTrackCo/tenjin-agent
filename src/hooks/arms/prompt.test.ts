@@ -40,10 +40,11 @@ describe('the prompt arm plan', () => {
     expect(plan(PROMPT, kernelConfig({ prompt: false }))).toBeNull();
   });
 
-  it('asks both shelves at once: one stage, team first', () => {
+  it('asks once: one stage, one leg, two candidate sets', () => {
     const planned = plan(PROMPT) as Plan;
     expect(planned.stages).toHaveLength(1);
-    expect(planned.stages[0]?.map((l) => l.shelf)).toEqual(['team', 'public']);
+    expect(planned.stages[0]).toHaveLength(1);
+    expect(planned.stages[0]?.[0]?.shelves).toEqual(['team', 'public']);
   });
 
   it('asks the prompt itself: nothing is rewritten, dropped or reordered', () => {
@@ -106,14 +107,23 @@ describe('the prompt arm and secrets', () => {
 });
 
 describe('the prompt arm under team.publicFallback off', () => {
-  it('sends the question to the team shelf only, out of its one mixed stage', async () => {
-    const asked: string[] = [];
-    const fetchImpl: typeof fetch = async (input) => {
-      asked.push(String(input));
-      return new Response(JSON.stringify({ schemaVersion: 3, searchId: 'x', items: [] }), {
-        status: 200,
-        headers: { 'content-type': 'application/json' },
-      });
+  it('still sends ONE call, and the toggle rides in its body as includePublic:false', async () => {
+    const asked: Array<{ url: string; body: string }> = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      asked.push({ url: String(input), body: String(init?.body ?? '') });
+      return new Response(
+        JSON.stringify({
+          shelf: {
+            schemaVersion: 3,
+            searchId: '11111111-1111-4111-8111-111111111111',
+            calibration: 'hybrid-v1',
+            items: [],
+            matched: 0,
+          },
+          public: null,
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
     };
     vi.stubGlobal('fetch', fetchImpl);
     try {
@@ -126,12 +136,17 @@ describe('the prompt arm under team.publicFallback off', () => {
         config,
       });
       const planned = promptArm.plan?.(ctx) as Plan;
-      // The arm plans both shelves in ONE stage, so nothing but a leg-level
-      // filter can keep the public marketplace from being asked.
-      expect(planned.stages[0]?.map((l) => l.shelf)).toEqual(['team', 'public']);
+      // THE TOGGLE NO LONGER DROPS A LEG. It used to be visible in the plan and
+      // in the leg count; it is now visible only in the body and in what comes
+      // back, which is what makes stale reasoning about it quiet.
+      expect(planned.stages[0]).toHaveLength(1);
+      // The declared sets follow what the ONE call will produce, so with the
+      // toggle off it yields the shelf set alone.
+      expect(planned.stages[0]?.[0]?.shelves).toEqual(['team']);
       await ask(ctx, planned);
       expect(asked).toHaveLength(1);
-      expect(asked[0]).toContain('shelf.acme.internal');
+      expect(asked[0]?.url).toContain('/api/shelves/backtrack/search');
+      expect(JSON.parse(asked[0]?.body ?? '{}').includePublic).toBe(false);
     } finally {
       vi.unstubAllGlobals();
     }

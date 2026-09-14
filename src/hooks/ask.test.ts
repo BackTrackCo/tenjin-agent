@@ -42,8 +42,7 @@ function config(publicFallback: PublicFallback): KernelConfig {
     loop: CONFIG_DEFAULTS.loop,
     team: { publicFallback },
     baseUrl: CONFIG_DEFAULTS.baseUrl,
-    publicShelfUrl: CONFIG_DEFAULTS.publicShelfUrl,
-    shelfBypassSecret: CONFIG_DEFAULTS.shelfBypassSecret,
+    shelf: 'backtrack',
     publish: CONFIG_DEFAULTS.publish,
   };
 }
@@ -89,42 +88,46 @@ function context(
       log: () => undefined,
       arms: [],
       adapters: {},
+      auth: () => Promise.resolve({ kind: 'no-wallet' as const }),
     },
   };
 }
 
 interface FakeLeg extends Leg {
   requestSpy: ReturnType<typeof vi.fn>;
-  verdictSpy: ReturnType<typeof vi.fn>;
 }
 
+/** A leg is ONE CALL that yields a result per candidate SET, so a fake takes the
+ *  sets it declares and the results it hands back. */
 function makeLeg(
-  shelf: Shelf,
-  requestImpl: (budgetMs: number, signal: AbortSignal) => Promise<LegResult>,
-  verdictImpl: (r: LegResult) => Answer | null = () => null,
+  shelves: Shelf[],
+  requestImpl: (budgetMs: number, signal: AbortSignal) => Promise<LegResult[]>,
 ): FakeLeg {
   const requestSpy = vi.fn((_q: Question, budgetMs: number, signal: AbortSignal) =>
     requestImpl(budgetMs, signal),
   );
-  const verdictSpy = vi.fn(verdictImpl);
-  return { shelf, request: requestSpy, verdict: verdictSpy, requestSpy, verdictSpy };
+  return { shelves, request: requestSpy, requestSpy };
 }
 
-/** A leg that resolves 'ok' immediately with the given extra fields and verdict. */
+/** A leg that resolves one 'ok' set immediately with the given extra fields. */
 function okLeg(
   shelf: Shelf,
-  extra: Partial<Omit<LegResult, 'status'>>,
+  extra: Partial<Omit<LegResult, 'status' | 'shelf' | 'answer'>>,
   ans: Answer | null,
 ): FakeLeg {
-  return makeLeg(
-    shelf,
-    async () => ({ status: 'ok', ...extra }),
-    () => ans,
-  );
+  return makeLeg([shelf], async () => [{ shelf, status: 'ok', answer: ans, ...extra }]);
+}
+
+/** The shape the real shelf leg has: ONE call, two sets out of one response. */
+function twoSetLeg(team: Answer | null, pub: Answer | null): FakeLeg {
+  return makeLeg(['team', 'public'], async () => [
+    { shelf: 'team', status: 'ok', answer: team },
+    { shelf: 'public', status: 'ok', answer: pub },
+  ]);
 }
 
 function rejectingLeg(shelf: Shelf, err: unknown): FakeLeg {
-  return makeLeg(shelf, async () => {
+  return makeLeg([shelf], async () => {
     throw err;
   });
 }
@@ -133,9 +136,9 @@ function rejectingLeg(shelf: Shelf, err: unknown): FakeLeg {
  *  aborts, rejecting with the signal's reason the way `fetch` would. */
 function signalAwareLeg(shelf: Shelf): FakeLeg {
   return makeLeg(
-    shelf,
+    [shelf],
     (_budgetMs, signal) =>
-      new Promise<LegResult>((_resolve, reject) => {
+      new Promise<LegResult[]>((_resolve, reject) => {
         if (signal.aborted) {
           reject(signal.reason);
           return;
@@ -167,17 +170,34 @@ describe('ask: stage progression', () => {
     expect(result.legs[1]).toMatchObject({ shelf: 'team', outcome: 'hit' });
   });
 
-  it('team beats public within one stage, regardless of leg order; the public row is shadowed', async () => {
+  it('team beats public within ONE CALL; the public row is shadowed', async () => {
+    // The real shape: one request, two sets. Selection is the same comparison on
+    // the same tags it always was, now ranging over the sets one leg yielded.
     const teamAns = mkAnswer('team');
     const publicAns = mkAnswer('public');
-    const team = okLeg('team', {}, teamAns);
-    const pub = okLeg('public', {}, publicAns);
-    const result = await ask(context(), plan([[pub, team]]));
+    const result = await ask(context(), plan([[twoSetLeg(teamAns, publicAns)]]));
     expect(result.answer).toEqual(teamAns);
     expect(result.legs).toMatchObject([
-      { shelf: 'public', outcome: 'shadowed' },
       { shelf: 'team', outcome: 'hit' },
+      { shelf: 'public', outcome: 'shadowed' },
     ]);
+  });
+
+  it('a public win over a shelf miss is one call, two rows, and the public row is the hit', async () => {
+    const publicAns = mkAnswer('public');
+    const result = await ask(context(), plan([[twoSetLeg(null, publicAns)]]));
+    expect(result.answer).toEqual(publicAns);
+    expect(result.legs).toMatchObject([
+      { shelf: 'team', outcome: 'miss' },
+      { shelf: 'public', outcome: 'hit' },
+    ]);
+  });
+
+  it('both rows carry the ONE call’s elapsed time', async () => {
+    // Worth pinning because it is the thing that quietly changed meaning: per-leg
+    // latency across the two rows of one fire is not a comparison any more.
+    const result = await ask(context(), plan([[twoSetLeg(mkAnswer('team'), mkAnswer('public'))]]));
+    expect(result.legs[0]?.elapsed_ms).toBe(result.legs[1]?.elapsed_ms);
   });
 
   it("ranks team over keys over public, so a teammate's write-up beats a key match", async () => {
@@ -204,25 +224,28 @@ describe('ask: stage progression', () => {
   });
 });
 
+/**
+ * THE TOGGLE MOVED. With a shelf set, `off` no longer drops a planned leg: it
+ * sets `includePublic: false` on the one call's body, and the server returns no
+ * public list, which is tested at the leg. What survives here is the NO-SHELF
+ * case, where the single leg IS public and dropping it is the only way to honour
+ * the setting. Anything that reasoned about the toggle by counting legs is now
+ * wrong, which is exactly why this filter must not be deleted wholesale.
+ */
 describe('ask: team.publicFallback off', () => {
-  it('drops the public leg out of a MIXED stage, which is the only stage C plans', async () => {
-    // Every lookup arm plans `[[team, public]]`, so a stage-level filter would
-    // have sent the public leg on every fire `off` exists to stop.
+  it('leaves a two-set shelf call alone: the toggle travelled in the body', async () => {
     const teamAns = mkAnswer('team');
-    const mixedPublic = makeLeg('public', async () => {
-      throw new Error('must not run: publicFallback is off');
-    });
-    const mixedTeam = okLeg('team', {}, teamAns);
-    const result = await ask(context({ publicFallback: 'off' }), plan([[mixedPublic, mixedTeam]]));
-    expect(mixedPublic.requestSpy).not.toHaveBeenCalled();
-    expect(mixedTeam.requestSpy).toHaveBeenCalledTimes(1);
+    const leg = twoSetLeg(teamAns, mkAnswer('public'));
+    const result = await ask(context({ publicFallback: 'off' }), plan([[leg]]));
+    // Still sent, because the call is the shelf's and the server decides what
+    // comes back. Dropping it here would have taken the TEAM answer with it.
+    expect(leg.requestSpy).toHaveBeenCalledTimes(1);
     expect(result.answer).toEqual(teamAns);
-    expect(result.legs.map((row) => row.shelf)).toEqual(['team']);
   });
 
-  it('skips a stage that held nothing but public legs, and the next stage keeps its index', async () => {
-    const dropped = makeLeg('public', async () => {
-      throw new Error('must not run: stage was all-public');
+  it('drops a leg whose only set is public, and the next stage keeps its index', async () => {
+    const dropped = makeLeg(['public'], async () => {
+      throw new Error('must not run: the leg was public-only');
     });
     const teamAns = mkAnswer('team');
     const team = okLeg('team', {}, teamAns);
@@ -267,16 +290,34 @@ describe('ask: leg failure modes', () => {
     expect(result.answer).toBeNull();
   });
 
-  it('a non-ok result never calls verdict and is recorded as no-answer', async () => {
-    const refused = makeLeg(
-      'team',
-      async () => ({ status: 'refused' }),
-      () => mkAnswer('team'),
-    );
+  it('a non-ok set is no-answer, whatever it claims to carry', async () => {
+    const refused = makeLeg(['team'], async () => [
+      { shelf: 'team' as const, status: 'refused' as const, answer: mkAnswer('team') },
+    ]);
     const result = await ask(context(), plan([[refused]]));
-    expect(refused.verdictSpy).not.toHaveBeenCalled();
     expect(result.legs[0]).toMatchObject({ status: 'refused', outcome: 'no-answer' });
     expect(result.answer).toBeNull();
+  });
+
+  /**
+   * A CREDENTIAL FAILURE IS NOT A REASON. The public answer still won; the row
+   * carries the detail so doctor can name the remedy and `fire.ts` writes it to
+   * the fire's own `error` column.
+   */
+  it('surfaces a set’s authError without touching its answer', async () => {
+    const publicAns = mkAnswer('public');
+    const leg = makeLeg(['public'], async () => [
+      {
+        shelf: 'public',
+        status: 'ok',
+        answer: publicAns,
+        authError: 'unauthenticated: WALLET_LOCKED',
+      },
+    ]);
+    const result = await ask(context(), plan([[leg]]));
+    expect(result.answer).toEqual(publicAns);
+    expect(result.authError).toBe('unauthenticated: WALLET_LOCKED');
+    expect(result.legs[0]).toMatchObject({ shelf: 'public', outcome: 'hit' });
   });
 });
 
@@ -288,6 +329,7 @@ describe('ask: budget', () => {
     expect(leg1.requestSpy).toHaveBeenCalledWith(
       expect.anything(),
       remainingMs - RESERVE_MS,
+      expect.anything(),
       expect.anything(),
     );
   });

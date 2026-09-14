@@ -73,6 +73,12 @@ CREATE TABLE IF NOT EXISTS fires (
 );
 CREATE INDEX IF NOT EXISTS fires_at ON fires (at);
 CREATE INDEX IF NOT EXISTS fires_actor ON fires (session, agent, at);
+-- A ROW IS A CANDIDATE SET, NOT A REQUEST. One signed call to the shelf route
+-- comes back carrying the shelf's candidates and the marketplace's, so one call
+-- writes two rows, team and public, each with its own status, count and
+-- outcome. elapsed_ms is therefore the ONE call's elapsed time on both, and
+-- comparing it across the two rows of a single fire means nothing; nothing
+-- queries that today, and this is the line that says so before something does.
 CREATE TABLE IF NOT EXISTS legs (
   fire_id     TEXT NOT NULL REFERENCES fires(id) ON DELETE CASCADE,
   stage       INTEGER NOT NULL,

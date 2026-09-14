@@ -11,7 +11,6 @@ import { hasCode } from '../lib/errno';
 import { ownsAnyLock, releaseOwnedLocks } from '../lib/lock';
 import { skillMaterialize } from '../lib/skill-materialize';
 import { installSkill } from '../lib/skill-writer';
-import { isTeamModeConfig } from '../lib/settings';
 import type { SkillInstallStatus } from '../lib/skill-writer';
 import { resolveSkillsSource, OPTIONAL_PAY_SKILL, SKILL_NAMES } from '../lib/skills-source';
 import { placeOptionalSkill } from '../lib/skill-placement';
@@ -670,7 +669,7 @@ async function installBody(
   // The machine's configured mode, which is what the skill text is shaped by. Read
   // off the raw config on purpose: a `--base-url` on THIS run must not decide what
   // every later session on this machine reads. See lib/skill-materialize.
-  const teamMode = isTeamModeConfig(rawConfig);
+  const teamMode = rawConfig.shelf !== null && rawConfig.shelf !== undefined;
   if (!dryRun) markPhase('writing-skills');
   for (const plan of plans) {
     harnesses.push(await applyPlan(plan, skillsSource, dryRun, teamMode));

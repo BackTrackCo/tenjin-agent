@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { Trigger } from '../hooks/types';
 import { CliError } from './errors';
-import { httpRequest, type HttpResult, type ShelfBypass } from './http';
+import { httpRequest, type HttpResult } from './http';
 import { ATOMIC_RE, UUID_RE } from './ids';
 import { trimSlash } from './url';
 
@@ -50,6 +50,13 @@ export interface SearchInput {
   /** What is left of the fire's deadline, so the shelf can spend its embedding
    *  budget knowing when the answer stops being wanted. */
   budgetMs?: number;
+  /**
+   * Shelf route only: may this one call also ask the public marketplace. There
+   * is no `shelf` and no `scope` field anywhere on the wire — the slug is in
+   * the URL, so nothing about it belongs in the body. Omitted entirely for
+   * `POST /api/search`, which is public by construction.
+   */
+  includePublic?: boolean;
 }
 
 /** The nested v3 filter object. Freshness, price and applicability are no longer
@@ -86,6 +93,11 @@ export interface SearchRequestBody {
    *  not know the field echoes it as an unknown-key warning and answers as
    *  before, which is why it ships ahead of the server half. */
   budget_ms?: number;
+  /** Shelf route only: also run the public list. The org's `public_search`
+   *  policy bounds it, so `true` is a request and never a guarantee — a `public`
+   *  of null is the answer either way, and the client does not distinguish a
+   *  policy refusal from a `false` it sent itself. */
+  includePublic?: boolean;
 }
 
 /** The server's query bound for every trigger but `dispatch` (`SEARCH_QUERY_MAX_CHARS`). */
@@ -178,6 +190,7 @@ export function buildSearchRequest(input: SearchInput): SearchRequestBody {
     limit,
     trigger: input.trigger ?? 'cli',
     ...(input.budgetMs !== undefined ? { budget_ms: input.budgetMs } : {}),
+    ...(input.includePublic !== undefined ? { includePublic: input.includePublic } : {}),
   };
 }
 
@@ -213,6 +226,12 @@ export const searchCandidateSchema = z
      *  `.passthrough()`, so an undeclared `body` would ride through untyped —
      *  and read by the loop's delivery, never by `tenjin search`. */
     body: z.object({ text: z.string() }).optional(),
+    /** Which shelf this row came from, or null for the public marketplace. The
+     *  server stamps it on every item of both lists, so a delivered answer can
+     *  say `shelf: backtrack` without the client inferring it from which list
+     *  it was reading. Optional here because `POST /api/search`'s public rows
+     *  predate the field; absent reads as null. */
+    shelf: z.object({ id: z.string(), slug: z.string() }).nullable().optional(),
   })
   .passthrough();
 
@@ -252,16 +271,32 @@ export const searchResultSchema = z.object({
 
 export type SearchResult = z.infer<typeof searchResultSchema>;
 
+/**
+ * `POST /api/shelves/<slug>/search`: two independent lists, each the envelope
+ * above, each ranked exactly as today. There is no merged list and no merged
+ * ranking; the client's own selection (`SHELF_RANK` in `hooks/ask.ts`) is what
+ * chooses between them.
+ *
+ * `public` is null when `includePublic` was false AND when the org turned
+ * `public_search` off. The two are deliberately indistinguishable from here:
+ * one call, one contract, no oracle for another org's policy.
+ */
+export const shelfSearchResponseSchema = z.object({
+  shelf: searchResultSchema,
+  public: searchResultSchema.nullable(),
+});
+
+export type ShelfSearchResponse = z.infer<typeof shelfSearchResponseSchema>;
+
 export interface AgentApiOptions {
   baseUrl: string;
   timeoutMs: number;
   fetchImpl?: typeof fetch;
   /** Spec 09 §3 evaluation-cohort opt-in: sends X-Tenjin-Eval-Cohort: 1. */
   evalCohort?: boolean;
-  /** The team shelf's bypass secret and its origin. The transport attaches the
-   *  header only when the request URL is on that origin, so passing it while
-   *  searching the public shelf sends nothing. */
-  bypass?: ShelfBypass;
+  /** Request headers the caller signed (session-key or SIWX). Anonymous
+   *  callers pass nothing; the shelf routes require these. */
+  headers?: Record<string, string>;
   /** The caller's abort, combined with `timeoutMs` by the transport. A loop leg
    *  hands in the fire's signal so a harness that walked away ends the request. */
   signal?: AbortSignal;
@@ -316,8 +351,10 @@ export async function postSearch(
   const res = await httpRequest(url, {
     method: 'POST',
     timeoutMs: opts.timeoutMs,
-    headers: opts.evalCohort === true ? { 'x-tenjin-eval-cohort': '1' } : {},
-    ...(opts.bypass !== undefined ? { bypass: opts.bypass } : {}),
+    headers: {
+      ...(opts.headers ?? {}),
+      ...(opts.evalCohort === true ? { 'x-tenjin-eval-cohort': '1' } : {}),
+    },
     jsonBody: body,
     fetchImpl: opts.fetchImpl,
     ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
@@ -381,6 +418,75 @@ export async function postSearch(
     });
   }
   return truncateResponse(parsed.data);
+}
+
+/**
+ * `POST /api/shelves/<slug>/search`: ONE signed call, two candidate lists.
+ *
+ * The slug is in the path and nowhere else; `includePublic` in the body is the
+ * only thing that says whether the marketplace is also asked. Every failure
+ * mapping is `postSearch`'s, because the two routes answer with the same
+ * envelope inside a two-key wrapper: a 401 is an unsigned or rejected
+ * signature, a 404 is a non-member or an unknown slug (indistinguishable by
+ * design, `tenjin doctor` is where a user learns which).
+ */
+export async function postShelfSearch(
+  shelf: string,
+  body: SearchRequestBody,
+  opts: AgentApiOptions,
+): Promise<ShelfSearchResponse> {
+  const url = `${trimSlash(opts.baseUrl)}/api/shelves/${encodeURIComponent(shelf)}/search`;
+  const res = await httpRequest(url, {
+    method: 'POST',
+    timeoutMs: opts.timeoutMs,
+    headers: {
+      ...(opts.headers ?? {}),
+      ...(opts.evalCohort === true ? { 'x-tenjin-eval-cohort': '1' } : {}),
+    },
+    jsonBody: body,
+    fetchImpl: opts.fetchImpl,
+    ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
+  });
+  if (!res.ok) throw apiFailure(url, res);
+  if (res.status === 429) throw rateLimitError(url, (n) => res.header(n));
+  if (res.status === 401) {
+    throw new CliError('API_UNREACHABLE', `${url} answered 401: the request was not signed.`, {
+      fix: 'Run `tenjin doctor` to see the wallet and its session, then retry.',
+      details: res.json,
+    });
+  }
+  if (res.status === 404) {
+    throw new CliError(
+      'API_UNREACHABLE',
+      `${url} answered 404: this wallet is not a member of "${shelf}", or no such shelf exists.`,
+      {
+        fix: 'Run `tenjin org list` to see the shelves this wallet can reach, then `tenjin shelf use <slug>`.',
+        details: res.json,
+      },
+    );
+  }
+  if (res.status !== 200) {
+    throw new CliError(
+      'API_UNREACHABLE',
+      serverErrorMessage(res.json) ?? `Shelf search failed (${res.status})`,
+      { fix: 'Retry; if it persists the search endpoint may be unavailable.', details: res.json },
+    );
+  }
+  const parsed = shelfSearchResponseSchema.safeParse(res.json);
+  if (!parsed.success) {
+    throw new CliError(
+      'CONTRACT_MISMATCH',
+      'Shelf search response did not match the expected contract (a shelf list and a public list)',
+      {
+        fix: 'Update tenjin-cli; the server contract may have changed.',
+        details: parsed.error.issues,
+      },
+    );
+  }
+  return {
+    shelf: truncateResponse(parsed.data.shelf),
+    public: parsed.data.public === null ? null : truncateResponse(parsed.data.public),
+  };
 }
 
 /** One wording for all three ways a pre-v3 server refuses this CLI (no route, a
@@ -524,7 +630,7 @@ export async function postOutcomes(
   const res = await httpRequest(url, {
     method: 'POST',
     timeoutMs: opts.timeoutMs,
-    ...(opts.bypass !== undefined ? { bypass: opts.bypass } : {}),
+    ...(opts.headers !== undefined ? { headers: opts.headers } : {}),
     jsonBody: items.length === 1 ? items[0] : items,
     fetchImpl: opts.fetchImpl,
   });
@@ -634,7 +740,7 @@ export async function getPostMetadata(
   const res = await httpRequest(url, {
     method: 'GET',
     timeoutMs: opts.timeoutMs,
-    ...(opts.bypass !== undefined ? { bypass: opts.bypass } : {}),
+    ...(opts.headers !== undefined ? { headers: opts.headers } : {}),
     fetchImpl: opts.fetchImpl,
   });
   if (!res.ok || res.status !== 200) return null;

@@ -1,6 +1,6 @@
 import { CliError } from '../lib/errors';
 import { parseUsdToAtomic, toMoney } from '../lib/money';
-import { resolveContextSettings, resolvePublishSettings, shelfRouteFor } from '../lib/settings';
+import { resolveContextSettings, resolvePublishSettings } from '../lib/settings';
 import { parsePublishModeFlag, type PublishMode } from '../lib/config';
 import { UUID_RE } from '../lib/ids';
 import { findings as scanFindings } from '../lib/redact';
@@ -182,7 +182,6 @@ export async function runEdit(
   const client = {
     baseUrl: runtime.baseUrl,
     timeoutMs: ctx.flags.timeout,
-    ...(runtime.bypass !== undefined ? { bypass: runtime.bypass } : {}),
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   };
 
@@ -250,9 +249,8 @@ export async function runEdit(
   // publish deferred (publish.ts): the searches parked on the draft ride the
   // same PUT the status does, and the dedup marker is written on success below.
   const promotes = input.status === 'published';
-  const claims = promotes ? await promotableClaims(ctx.dataDir, args.postId, runtime) : [];
-  warnForeignClaims(ctx, claims);
-  const claimIds = claims.filter((c) => !c.foreign).map((c) => c.search.searchId);
+  const claims = promotes ? await promotableClaims(ctx.dataDir, args.postId) : [];
+  const claimIds = claims.map((c) => c.search.searchId);
   if (claimIds.length > 0) input.searchId = claimIds;
 
   // Bounds-check the pruned body here so a miss is USAGE before the consent
@@ -272,7 +270,7 @@ export async function runEdit(
     'each edit asks you once. Set auto to apply clean edits automatically',
   );
 
-  const scope = runtime.teamMode ? 'team' : 'publish';
+  const scope = runtime.shelf !== null ? 'team' : 'publish';
   // The scan covers exactly what this edit SHIPS: the typed text behind the keys
   // that survived pruning, plus the body file only when the body itself survived.
   // Scanning the raw flags instead would block on a value that prunes away — a
@@ -469,8 +467,6 @@ function eligibilityLine(card: OwnPostCard | undefined): string {
 
 interface PromotableClaim {
   search: StoredSearch;
-  /** Recorded against the OTHER shelf: named on stderr, never claimed here. */
-  foreign: boolean;
 }
 
 /** What the promotion reports per claimed search; publish's SearchReceipt shape
@@ -482,33 +478,15 @@ interface ClaimReceipt {
 }
 
 /**
- * The claims parked on this draft, shelf-routed the way publish routes a
- * `--search-id` (an id the other shelf minted is a routing fact, not ours to
- * claim). An id that fails the server's wire shape is dropped silently rather
- * than failing the promotion: it came from this CLI's own bookkeeping, and a
- * corrupt entry must not hold a publish hostage.
+ * The claims parked on this draft. ONE ORIGIN now, so no claim is foreign: every
+ * search this machine ran was minted by the deployment this piece publishes to.
+ * An id that fails the server's wire shape is dropped silently rather than
+ * failing the promotion: it came from this CLI's own bookkeeping, and a corrupt
+ * entry must not hold a publish hostage.
  */
-async function promotableClaims(
-  dataDir: string,
-  postId: string,
-  runtime: Parameters<typeof shelfRouteFor>[1],
-): Promise<PromotableClaim[]> {
+async function promotableClaims(dataDir: string, postId: string): Promise<PromotableClaim[]> {
   const parked = await searchesForDraft(dataDir, postId);
-  return parked
-    .filter((s) => SEARCH_ID_WIRE_RE.test(s.searchId))
-    .map((search) => ({ search, foreign: !shelfRouteFor(search, runtime).configured }));
-}
-
-/** publish.ts's warnForeignShelf, said at the same moment for the same reason:
- *  the claim stays open and `tenjin outcome` is the verb that reaches its shelf. */
-function warnForeignClaims(ctx: CommandContext, claims: PromotableClaim[]): void {
-  for (const { search, foreign } of claims) {
-    if (!foreign) continue;
-    const shelf = sanitizeForTerminal(search.shelfBaseUrl ?? 'another shelf');
-    ctx.io.stderr.write(
-      `Search ${search.searchId} was answered by ${shelf}, not the shelf this piece is published to, so it is not claimed here and stays open. Close it there with \`tenjin outcome --search-id ${search.searchId} --status used\`.\n`,
-    );
-  }
+  return parked.filter((s) => SEARCH_ID_WIRE_RE.test(s.searchId)).map((search) => ({ search }));
 }
 
 /**

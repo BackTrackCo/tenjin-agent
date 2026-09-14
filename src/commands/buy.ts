@@ -4,7 +4,6 @@ import { resolveContextSettings } from '../lib/settings';
 import { resolveResourceRef } from '../lib/resource-ref';
 import { findSearchForResource } from '../lib/searches';
 import { fetchRead, type Preview } from '../lib/read-client';
-import type { ShelfBypass } from '../lib/http';
 import { buildSiwxHeader } from '../lib/siwx';
 import { buildExactPayment } from '../lib/x402-pay';
 import { gateSpend } from '../lib/spend-gate';
@@ -73,20 +72,10 @@ export async function runBuy(
   const sectionsBudget = parseSectionsBudget(args.sections);
   const maxPriceAtomic =
     args.maxPrice !== undefined ? BigInt(parseUsdToAtomic(args.maxPrice)) : undefined;
-  const ref = await resolveResourceRef(
-    args.ref,
-    ctx.dataDir,
-    settings.baseUrl,
-    // The second origin only exists in TEAM mode. In public mode `publicShelfUrl`
-    // is a shelf nothing falls through to, so widening on it would accept a URL
-    // from an origin no search on this machine can even surface.
-    settings.teamMode ? settings.publicShelfUrl : undefined,
-    {
-      timeoutMs: ctx.flags.timeout,
-      ...(settings.bypass !== undefined ? { bypass: settings.bypass } : {}),
-      ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
-    },
-  );
+  const ref = await resolveResourceRef(args.ref, ctx.dataDir, settings.baseUrl, {
+    timeoutMs: ctx.flags.timeout,
+    ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+  });
 
   // 1. Library idempotence, BEFORE any network or pay: a resource already on disk
   //    re-delivers from disk. Works for both an id ref and a url ref (the url is
@@ -112,7 +101,6 @@ export async function runBuy(
   // never converts is not over-counted if the server ever classifies reads.
   const fetchOpts = {
     timeoutMs: ctx.flags.timeout,
-    ...(settings.bypass !== undefined ? { bypass: settings.bypass } : {}),
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   };
 
@@ -279,17 +267,10 @@ async function siwxRedeliver(
   url: string,
   baseUrl: string,
   signer: TenjinSigner,
-  // THE REAL SHAPE, `bypass` included. It compiles either way — the caller
-  // passes a variable, so excess-property checking does not apply, and the
-  // `{ ...fetchOpts }` below forwards the key at run time. But a refactor that
-  // destructures the named fields instead of spreading would drop the team
-  // shelf's door key silently, and only this redelivery leg would show it, as a
-  // Deployment Protection 401 HTML page rather than as a missing header.
   fetchOpts: {
     timeoutMs: number;
     fetchImpl?: typeof fetch;
     searchId?: string;
-    bypass?: ShelfBypass;
   },
   presentOpts: PresentOpts,
   network: string,

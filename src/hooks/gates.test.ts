@@ -63,8 +63,7 @@ const CONFIG: KernelConfig = {
   loop: CONFIG_DEFAULTS.loop,
   team: CONFIG_DEFAULTS.team,
   baseUrl: CONFIG_DEFAULTS.baseUrl,
-  publicShelfUrl: CONFIG_DEFAULTS.publicShelfUrl,
-  shelfBypassSecret: CONFIG_DEFAULTS.shelfBypassSecret,
+  shelf: 'backtrack',
   publish: CONFIG_DEFAULTS.publish,
 };
 
@@ -88,6 +87,7 @@ function context(db: LoopDb, actor: Actor, now: number): FireContext {
       log: () => undefined,
       arms: [],
       adapters: {},
+      auth: () => Promise.resolve({ kind: 'no-wallet' }),
     },
   };
 }

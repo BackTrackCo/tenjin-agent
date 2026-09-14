@@ -39,7 +39,6 @@ export async function runStats(ctx: CommandContext, deps: StatsDeps = {}): Promi
   const stats = await getMyStats(auth, {
     baseUrl: runtime.baseUrl,
     timeoutMs: ctx.flags.timeout,
-    ...(runtime.bypass !== undefined ? { bypass: runtime.bypass } : {}),
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   });
   const earningsUsd = atomicToUsd(stats.earningsThisMonth);

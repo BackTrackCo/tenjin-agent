@@ -1,5 +1,5 @@
 import { CliError } from '../lib/errors';
-import { resolveContextSettings, shelfRouteFor } from '../lib/settings';
+import { resolveContextSettings } from '../lib/settings';
 import { buildOutcomeItem, postOutcomes } from '../lib/agent-api';
 import { UUID_RE } from '../lib/ids';
 import { getStoredSearch, markSearchResolved, type StoredSearch } from '../lib/searches';
@@ -91,19 +91,14 @@ export async function runOutcome(
       reports.push({ searchId: target.searchId, accepted: 0, untouched: true });
       continue;
     }
-    // TO THE SHELF THAT ANSWERED. In team mode the ordinary team-miss /
-    // public-hit means the id was minted by the public marketplace, and the team
-    // shelf has no such search: posting there raises a dropped-parent alarm on
-    // the team's own deployment and leaves the marketplace's demand loop open.
-    // An entry with no recorded shelf, and every public-mode run, routes to the
-    // configured base exactly as before. The key rides the origin, so a report to
-    // the public shelf carries no bypass header.
-    const route = shelfRouteFor(target.stored, settings);
+    // ONE ORIGIN. A shelf search and a marketplace search now come from the
+    // same deployment and mint their ids in the same database, so there is no
+    // routing decision left: every close goes to `baseUrl`. `shelf_base_url` on
+    // the stored entry is kept as the record of where it went, not as a route.
     try {
       const result = await postOutcomes(target.searchId, [item], {
-        baseUrl: route.baseUrl,
+        baseUrl: settings.baseUrl,
         timeoutMs: ctx.flags.timeout,
-        ...(route.bypass !== undefined ? { bypass: route.bypass } : {}),
         ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
       });
       // The loop is closed, so the turn-end ask has nothing left to raise about

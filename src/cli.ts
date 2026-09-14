@@ -57,6 +57,7 @@ const SETUP = 'Setup:';
 const SEARCH = 'Search and read:';
 const PUBLISH = 'Publish:';
 const WALLET = 'Wallet:';
+const TEAM = 'Team:';
 const INTEGRATION = 'Integration:';
 
 /**
@@ -504,6 +505,10 @@ Examples:
     .option('--mode <mode>', 'consent mode for this run: review | auto | full-auto')
     .option('--price <usd>', 'post price in decimal USD (defaults to publish.defaultPrice)')
     .option(
+      '--public',
+      'publish to the public marketplace even with a shelf active (the shelf is the default, free)',
+    )
+    .option(
       '--excerpt <text>',
       'the public preview text (max 500 chars; default: derived from the body)',
     )
@@ -540,6 +545,7 @@ Examples:
             ...(o.yes === true ? { yes: true } : {}),
             ...(typeof o.mode === 'string' ? { mode: o.mode } : {}),
             ...(typeof o.price === 'string' ? { price: o.price } : {}),
+            ...(o.public === true ? { public: true } : {}),
             ...(typeof o.excerpt === 'string' ? { excerpt: o.excerpt } : {}),
             ...(Array.isArray(o.key) && o.key.length > 0 ? { key: o.key as string[] } : {}),
           },
@@ -670,6 +676,108 @@ Examples:
     });
 
   // The account surface (#208): thin verbs over /api/me and /api/me/stats on the
+  // `org` and `shelf`: who is on this team's shelves and which one this machine
+  // uses. Shaped like the `profile` group, signing through the same session-key
+  // auth. There is no `org create` and no `shelf create`: an operator
+  // provisions an org, its first admin and its shelf by script and hands over a
+  // slug (shelves/02-server.md).
+  const org = leaf(
+    program,
+    TEAM,
+    'org',
+    'list orgs, manage members and the public-search policy',
+  ).description(
+    "Show the orgs this wallet belongs to, their shelves and each org's public-search policy. `org add`/`org remove` manage members and are admin only; orgs themselves are provisioned by an operator.",
+  );
+  org.action(async function (this: Command) {
+    await runCommand('org', this, async (ctx) => {
+      const { runOrgList } = await import('./commands/org');
+      return runOrgList(ctx);
+    });
+  });
+  addGlobalFlags(org.command('list'))
+    .summary('orgs this wallet belongs to, with their shelves')
+    .description(
+      'List every org this wallet is a member of, the shelves under each, the public-search policy, and which shelf is active on this machine. This is also what a 404 from a shelf route means: the route never says whether the slug was unknown or you are not a member.',
+    )
+    .action(async function (this: Command) {
+      await runCommand('org.list', this, async (ctx) => {
+        const { runOrgList } = await import('./commands/org');
+        return runOrgList(ctx);
+      });
+    });
+  addGlobalFlags(org.command('add <member>'))
+    .summary('add a member by handle or 0x address (admin only)')
+    .description(
+      'Add a member to the org. Pass a handle or a 0x wallet address; the server resolves it to a creator and creates one for a wallet that has only ever searched. Defaults to the org owning the active shelf.',
+    )
+    .option('--org <slug>', 'the org to add to; defaults to the one owning the active shelf')
+    .action(async function (this: Command, member: string) {
+      await runCommand('org.add', this, async (ctx) => {
+        const o = this.opts();
+        const { runOrgAdd } = await import('./commands/org');
+        return runOrgAdd({ member, ...(typeof o.org === 'string' ? { org: o.org } : {}) }, ctx);
+      });
+    });
+  addGlobalFlags(org.command('remove <member>'))
+    .summary('remove a member by handle or 0x address (admin only)')
+    .description(
+      'Remove a member from the org. Pass the handle or 0x address they were added as. Defaults to the org owning the active shelf.',
+    )
+    .option('--org <slug>', 'the org to remove from; defaults to the one owning the active shelf')
+    .action(async function (this: Command, member: string) {
+      await runCommand('org.remove', this, async (ctx) => {
+        const o = this.opts();
+        const { runOrgRemove } = await import('./commands/org');
+        return runOrgRemove({ member, ...(typeof o.org === 'string' ? { org: o.org } : {}) }, ctx);
+      });
+    });
+  const orgSet = addGlobalFlags(org.command('set'))
+    .summary('change an org policy (admin only)')
+    .description('Change a policy that applies to every member of the org.');
+  addGlobalFlags(orgSet.command('public-search <on|off>'))
+    .summary("may a member's shelf search also reach the public marketplace")
+    .description(
+      "The ORG's policy, for everyone. It is a different thing from `team.publicFallback`, which is this machine's own preference: the server's off wins, and a member who asks for public anyway simply gets no public list back. Admin only.",
+    )
+    .option('--org <slug>', 'the org to change; defaults to the one owning the active shelf')
+    .action(async function (this: Command, value: string) {
+      await runCommand('org.set.public-search', this, async (ctx) => {
+        const o = this.opts();
+        const { runOrgSetPublicSearch } = await import('./commands/org');
+        const { CliError } = await import('./lib/errors');
+        if (value !== 'on' && value !== 'off') {
+          throw new CliError('USAGE', `Invalid public-search: ${JSON.stringify(value)}`, {
+            fix: 'Use "on" or "off".',
+          });
+        }
+        return runOrgSetPublicSearch(
+          { on: value === 'on', ...(typeof o.org === 'string' ? { org: o.org } : {}) },
+          ctx,
+        );
+      });
+    });
+
+  const shelf = leaf(program, TEAM, 'shelf', 'set the active shelf for this machine').description(
+    'Choose which shelf this machine publishes to and looks up first. `tenjin org list` names the shelves this wallet can reach; there is no `shelf create`.',
+  );
+  addGlobalFlags(shelf.command('use [slug]'))
+    .summary('set the active shelf, or --none for public only')
+    .description(
+      'Set the active shelf, validated against the shelves this wallet can actually reach, so a typo is refused here rather than looking like a membership problem on every later lookup. `--none` clears it: publishes and lookups then go to the public marketplace.',
+    )
+    .option('--none', 'clear the active shelf; publish and look up on the public marketplace only')
+    .action(async function (this: Command, slug: string | undefined) {
+      await runCommand('shelf.use', this, async (ctx) => {
+        const o = this.opts();
+        const { runShelfUse } = await import('./commands/shelf');
+        return runShelfUse(
+          { ...(slug !== undefined ? { slug } : {}), ...(o.none === true ? { none: true } : {}) },
+          ctx,
+        );
+      });
+    });
+
   // same session-key auth publish/edit use. No consent gate: operator-invoked
   // account edits, not content. Group-level flags so `tenjin profile --json set`
   // parses like the config group; a bare `tenjin profile` shows.

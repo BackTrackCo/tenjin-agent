@@ -1,6 +1,5 @@
 import { homedir } from 'node:os';
 import { readFile } from 'node:fs/promises';
-import { resolveContextSettings } from '../lib/settings';
 import { CliError } from '../lib/errors';
 import { nativeSessionOf } from '../lib/session';
 import { buildOutcomeItem, postOutcomes } from '../lib/agent-api';
@@ -518,15 +517,10 @@ interface PostTally {
  * lost, and nothing anywhere says so. Every delivered leg carries the read url
  * it was shown with, on the shelf that served it, so that origin is the address.
  *
- * THE BYPASS SECRET RIDES THE LEG'S SHELF LABEL: the secret belongs to the team
- * — it is what gets a request past the team shelf's protection — so a `team` leg
- * carries it and a `public` one never does. The origin it is authorized at is
- * this machine's configured team base, never the leg's url: that url is a
- * candidate url the shelf chose, so authorizing the key there would hand the
- * team's shelf key to any origin a search response cared to name. The transport
- * does the final compare against the request URL ({@link ShelfBypass}), so a leg
- * whose candidate url wandered off that shelf posts unauthenticated rather than
- * leaking the key.
+ * ONE ORIGIN, so there is no per-leg routing decision left: a `team` row and a
+ * `public` row of the same fire came from one deployment and their search ids
+ * live in one database. The origin still comes from the leg's own candidate
+ * url, because that is the record of where the id was minted.
  *
  * A failure never fails the command — the verdicts are already recorded locally,
  * and the leg keeps its NULL stamp so the next run retries it. A rate limit or a
@@ -555,7 +549,6 @@ async function postGraded(
     [],
   );
   if (rows.length === 0) return tally;
-  const settings = await resolveContextSettings(ctx);
   let halted = false;
   for (const row of rows) {
     if (halted) break;
@@ -572,7 +565,6 @@ async function postGraded(
     }
     const verdict = verdictOf(row.graded);
     if (verdict === null) continue;
-    const bypass = row.shelf === 'team' ? settings.bypass : undefined;
     const resourceId = resourceIdOf(row.delivered) ?? '';
     try {
       const item = buildOutcomeItem({
@@ -584,7 +576,6 @@ async function postGraded(
       await postOutcomes(searchId, [item], {
         baseUrl: origin,
         timeoutMs: ctx.flags.timeout,
-        ...(bypass !== undefined ? { bypass } : {}),
         ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
       });
       db.prepare('UPDATE legs SET posted_at = ? WHERE fire_id = ? AND stage = ? AND shelf = ?').run(

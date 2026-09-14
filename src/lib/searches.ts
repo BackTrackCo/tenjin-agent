@@ -64,18 +64,16 @@ export interface StoredSearch {
    */
   agentId?: string;
   /**
-   * WHICH SHELF ANSWERED, as a base URL. A team-mode search asks the team shelf
-   * and falls through to `publicShelfUrl`, and the two shelves have separate
-   * databases: a searchId minted by one means nothing to the other. Without this
-   * field every close — `tenjin outcome`, and the `--search-id` publish sends
-   * with the piece — goes to the configured `baseUrl`, so the ordinary team-miss
-   * / public-hit reports the public marketplace's search to the team shelf,
-   * where it inflates `outcomes_dropped_no_parent`, while the shelf that served
-   * the search hears nothing and its demand loop stays open.
+   * WHERE THE SEARCH WENT, as a base URL. There is one origin now: a shelf is a
+   * row on the same deployment as the marketplace, so both lists of one call
+   * mint their ids in one database and every close goes to `baseUrl`. This is
+   * the RECORD of that and no longer a route.
    *
-   * Absent means `baseUrl`, which is what a single-shelf public-mode run means.
-   * Stored as the URL rather than as `team`/`public` so a re-pointed `baseUrl`
-   * cannot silently re-label an old row's shelf.
+   * KEPT ON PURPOSE. It is listed in `LOOP_SHAPE` (`hooks/store.ts`), so
+   * dropping the column would delete every machine's ledger at first open to
+   * retire one field. `recordSearch` writes `baseUrl` into it instead.
+   *
+   * Absent means `baseUrl`, which is what every row written before this meant.
    */
   shelfBaseUrl?: string;
   /**

@@ -323,9 +323,8 @@ mints can only ever fund your own wallet, the CLI refuses any checkout host but
 gate. The `--base-url` caveat that qualifies every other prefix rule does not
 apply here: `fund` is pinned to the production origin and takes no override from
 the flag, the environment, or config, so an allowlisted invocation cannot steer
-where the wallet's SIWX proof goes. `read` is pinned the same way, one step
-wider: it presents and mints only against `baseUrl` or `publicShelfUrl` as the
-config file names them, so `read --base-url <host>` still fetches a free piece
+where the wallet's SIWX proof goes. `read` is pinned the same way: it presents and mints only against `baseUrl` as
+the config file names it, so `read --base-url <host>` still fetches a free piece
 from that host but signs nothing for it.
 
 ### `tenjin wallet send`, the escape hatch
@@ -450,12 +449,14 @@ A Codex shell result carries no exit status, so the failure arm learns of a
 failure only from an error marker; a Codex spawn's task is opaque on the wire,
 so no work order is looked up for a child. No arm can block or change a tool call; every one of
 them only adds context beside it. The arms ask your configured shelf a question
-and mention a tested answer if one exists. Six things leave the machine, each
+in ONE signed request, which comes back carrying the shelf's answer and the
+public marketplace's, and mention a tested answer if one exists. Six things
+leave the machine, each
 with its secrets stubbed and then cut at 512 characters: a prompt you typed, a
 WebSearch query, a WebFetch address and the prompt beside it, the description
 and work order a subagent is dispatched with (this one cut at 8,000 characters,
 so the task and not only the rules above it is what the shelf reads), and — to
-the team shelf only — the fingerprint of a failed command and, when that
+your own shelf only — the fingerprint of a failed command and, when that
 fingerprint round comes back with no answer, the failed command's error line as
 the runner printed it. Nothing else does. A failure too generic to fingerprint
 at all has no first round to lose, so for that one the error line is the only
@@ -471,24 +472,25 @@ before it.
 
 The seven arms, in the order `tenjin hooks` prints them:
 
-- **prompt** — you press enter. Your prompt goes to the team shelf and the
-  public one, and a piece that answers it is named beside what you typed.
-- **web-search** — before a WebSearch runs. The query goes to both shelves as
-  typed, and an answer already paid for is named beside the search.
-- **web-fetch** — before a WebFetch runs. The address goes to both shelves, cut
-  at the first `?` or `#` so a token in the query string or the fragment stays
-  here, along with the prompt attached to the fetch.
+- **prompt** — you press enter. Your prompt goes out once, and the answer covers
+  your shelf and the public marketplace; a piece that answers it is named beside
+  what you typed.
+- **web-search** — before a WebSearch runs. The query goes out once as typed, and
+  an answer already paid for is named beside the search.
+- **web-fetch** — before a WebFetch runs. The address goes out once, cut at the
+  first `?` or `#` so a token in the query string or the fragment stays here,
+  along with the prompt attached to the fetch.
 - **subagent** — you dispatch a subagent, and that subagent starts. The work
-  order goes to both shelves at dispatch; you are told nothing, and whatever it
-  found opens the subagent's first turn instead. The start itself sends nothing.
+  order goes out once at dispatch; you are told nothing, and whatever it found
+  opens the subagent's first turn instead. The start itself sends nothing.
 - **failure** — a shell command fails. Its fingerprint, a hash rather than your
-  error text, goes to the team shelf first; if that round answers nothing —
-  because no piece is filed under the hash, or because the request never landed
-  — the error line itself follows as a question, in the runner's words rather
-  than yours, so a teammate's write-up that carries no fingerprint is still
+  error text, goes to your shelf first; if that round answers nothing — because
+  no piece is filed under the hash, or because the request never landed — the
+  error line itself follows as a question, in the runner's words rather than
+  yours, so a teammate's write-up that carries no fingerprint is still
   reachable. A failure with no fingerprint to send skips straight to the words.
-  Both rounds are the team shelf, never the public one, and with no team shelf
-  configured nothing leaves at all. This machine keeps no record of the errors
+  Both rounds ask your shelf and explicitly not the public marketplace, and with
+  no shelf configured nothing leaves at all. This machine keeps no record of the errors
   it has fixed, and nothing here pairs a failure with a later pass.
 - **publish** — your turn ends, and each subagent's turn ends. If there is
   something worth writing up, you are asked once whether to publish it, and the

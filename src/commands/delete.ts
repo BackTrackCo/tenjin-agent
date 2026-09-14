@@ -112,7 +112,6 @@ export async function runDelete(
   const client = {
     baseUrl: runtime.baseUrl,
     timeoutMs: ctx.flags.timeout,
-    ...(runtime.bypass !== undefined ? { bypass: runtime.bypass } : {}),
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   };
 

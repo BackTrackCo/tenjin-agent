@@ -571,31 +571,28 @@ describe('runBuy, real spend authorizer wiring (resolveSpendAuthorizer)', () => 
  * SIWX header is bound to a domain, so signing it for the configured origin
  * while requesting another one produces a credential that host will refuse.
  */
-describe('runBuy across two shelves', () => {
+/**
+ * ONE ORIGIN. A shelf piece and a marketplace piece live on the same
+ * deployment, so `buy` has no second shelf to widen the ref resolver to and no
+ * door key to withhold: what is left to pin is that the SIWX message names the
+ * origin actually being read, and that an origin the config does not name is
+ * refused before any signature.
+ */
+describe('runBuy on the configured origin', () => {
   const TEAM = 'https://team.example';
-  const SECRET = 'shelf-secret-abc123';
-  const BYPASS_HEADER = 'x-vercel-protection-bypass';
 
-  async function writeShelfConfig(): Promise<void> {
-    await writeFile(
-      join(dir, 'config.json'),
-      JSON.stringify({
-        baseUrl: TEAM,
-        publicShelfUrl: 'https://tenjin.blog',
-        shelfBypassSecret: SECRET,
-      }),
-    );
+  async function writeShelfConfig(baseUrl: string): Promise<void> {
+    await writeFile(join(dir, 'config.json'), JSON.stringify({ baseUrl, shelf: 'backtrack' }));
   }
 
-  it('signs SIWX for the shelf the URL is on, and sends it no bypass key', async () => {
-    await writeShelfConfig();
+  it('signs SIWX for the configured base URL that served the piece', async () => {
+    await writeShelfConfig(TEAM);
     const pr = buildPaymentRequired();
     const { fetch, calls } = makeReadServer({
       plain: () => reply.paymentRequired(pr),
       siwx: () => reply.entitled(readBody()),
     });
-    // URL_ is on tenjin.blog: the public shelf, not the configured base.
-    const result = await runBuy({ ref: URL_ }, makeCtx(), {
+    const result = await runBuy({ ref: `${TEAM}/api/read/iris/slug` }, makeCtx(), {
       fetchImpl: fetch,
       provider: testWalletProvider(),
       authorizer: fakeAuthorizer('allow'),
@@ -604,29 +601,26 @@ describe('runBuy across two shelves', () => {
 
     const siwx = calls.find((c) => c.phase === 'siwx');
     expect(siwx).toBeDefined();
-    // The SIWX message names the origin actually being read, not the team shelf.
-    const decoded = Buffer.from(siwx!.headers['sign-in-with-x'] ?? '', 'base64').toString('utf8');
-    expect(decoded).toContain('tenjin.blog');
-    expect(decoded).not.toContain('team.example');
-    // And the team's door key stayed home, on every request.
-    for (const c of calls) expect(c.headers[BYPASS_HEADER]).toBeUndefined();
-  });
-
-  it('carries the bypass key on a buy from the team shelf itself', async () => {
-    await writeShelfConfig();
-    const pr = buildPaymentRequired();
-    const { fetch, calls } = makeReadServer({
-      plain: () => reply.paymentRequired(pr),
-      siwx: () => reply.entitled(readBody()),
-    });
-    await runBuy({ ref: `${TEAM}/api/read/iris/slug` }, makeCtx(), {
-      fetchImpl: fetch,
-      provider: testWalletProvider(),
-      authorizer: fakeAuthorizer('allow'),
-    });
-    for (const c of calls) expect(c.headers[BYPASS_HEADER]).toBe(SECRET);
-    const siwx = calls.find((c) => c.phase === 'siwx');
     const decoded = Buffer.from(siwx!.headers['sign-in-with-x'] ?? '', 'base64').toString('utf8');
     expect(decoded).toContain('team.example');
+  });
+
+  it('refuses a piece on any other origin, marketplace included, before signing', async () => {
+    // The second-origin allowance is deleted with the second shelf: a machine on
+    // a private base URL has no business signing for tenjin.blog just because
+    // the marketplace exists.
+    await writeShelfConfig(TEAM);
+    const { fetch, calls } = makeReadServer({
+      plain: () => reply.paymentRequired(buildPaymentRequired()),
+      siwx: () => reply.entitled(readBody()),
+    });
+    await expect(
+      runBuy({ ref: URL_ }, makeCtx(), {
+        fetchImpl: fetch,
+        provider: testWalletProvider(),
+        authorizer: fakeAuthorizer('allow'),
+      }),
+    ).rejects.toMatchObject({ code: 'USAGE' });
+    expect(calls).toHaveLength(0);
   });
 });

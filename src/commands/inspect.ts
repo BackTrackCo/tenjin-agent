@@ -1,5 +1,5 @@
 import { resolveResourceRef } from '../lib/resource-ref';
-import { resolveContextSettings, shelfRouteFor, type ResolvedSettings } from '../lib/settings';
+import { resolveContextSettings } from '../lib/settings';
 import { fetchRead, type PreviewCard } from '../lib/read-client';
 import { getPostMetadata, type PostMetadata } from '../lib/agent-api';
 import { toMoney } from '../lib/money';
@@ -33,33 +33,20 @@ export async function runInspect(
   deps: InspectDeps = {},
 ): Promise<CommandResult> {
   const settings = await resolveContextSettings(ctx);
-  const ref = await resolveResourceRef(
-    args.ref,
-    ctx.dataDir,
-    settings.baseUrl,
-    // The second origin only exists in TEAM mode. In public mode `publicShelfUrl`
-    // is a shelf nothing falls through to, so widening on it would accept a URL
-    // from an origin no search on this machine can even surface.
-    settings.teamMode ? settings.publicShelfUrl : undefined,
-    {
-      timeoutMs: ctx.flags.timeout,
-      ...(settings.bypass !== undefined ? { bypass: settings.bypass } : {}),
-      ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
-    },
-  );
+  const ref = await resolveResourceRef(args.ref, ctx.dataDir, settings.baseUrl, {
+    timeoutMs: ctx.flags.timeout,
+    ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+  });
 
   const result = await fetchRead(ref.url, {
     timeoutMs: ctx.flags.timeout,
-    ...(settings.bypass !== undefined ? { bypass: settings.bypass } : {}),
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   });
 
   // Lazy and memoized: a live GET /api/posts/<id>/public call, made only for a
   // ref resolved via a bare id (a URL-only ref has no id to look up) and only
   // when a caller below actually needs it — the common case (an entitled body,
-  // or a 402 preview that already names a title) never triggers this. Routed
-  // through `shelfRouteFor` the same way every other id-keyed lookup is, so
-  // the bypass secret only rides to the shelf it was paired with.
+  // or a 402 preview that already names a title) never triggers this.
   let metadataPromise: Promise<PostMetadata | null> | undefined;
   const displayMetadata = (): Promise<PostMetadata | null> => {
     const resourceId = ref.resourceId;
@@ -67,7 +54,7 @@ export async function runInspect(
       metadataPromise =
         resourceId === undefined
           ? Promise.resolve(null)
-          : fetchDisplayMetadata(resourceId, ref.shelfBaseUrl, ctx, settings, deps);
+          : fetchDisplayMetadata(resourceId, ref.shelfBaseUrl, ctx, deps);
     }
     return metadataPromise;
   };
@@ -191,22 +178,19 @@ export async function runInspect(
 }
 
 /** A best-effort `GET /api/posts/<id>/public` lookup for a ref resolved via a
- *  bare id, routed the same way every other id-keyed shelf lookup is
- *  (`shelfRouteFor`): the bypass secret only carries to the shelf origin it
- *  was paired with, never to a second one. Callers gate on `ref.resourceId`
- *  before calling this (a URL-only ref has nothing to look up). */
+ *  bare id. ONE ORIGIN: there is no second shelf to route between any more, so
+ *  the ref's `shelfBaseUrl` is the configured base by construction. Callers
+ *  gate on `ref.resourceId` before calling this (a URL-only ref has nothing to
+ *  look up). */
 async function fetchDisplayMetadata(
   resourceId: string,
   shelfBaseUrl: string,
   ctx: CommandContext,
-  settings: ResolvedSettings,
   deps: InspectDeps,
 ): Promise<PostMetadata | null> {
-  const route = shelfRouteFor({ shelfBaseUrl }, settings);
   return getPostMetadata(resourceId, {
-    baseUrl: route.baseUrl,
+    baseUrl: shelfBaseUrl,
     timeoutMs: ctx.flags.timeout,
-    ...(route.bypass !== undefined ? { bypass: route.bypass } : {}),
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   });
 }

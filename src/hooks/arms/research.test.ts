@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { KernelConfig, Plan } from '../types';
+import type { Deps, KernelConfig, Plan } from '../types';
 import { fetchArm, fetchQuestion, researchArm } from './research';
 import { cleanup, fireContext, freshDb, hookInput, kernelConfig, toolInput } from './test-support';
 
@@ -43,6 +43,12 @@ function planOf(
   return { plan: arm.plan?.(ctx) ?? null, ctx };
 }
 
+/** The `Deps` a leg reads: only the auth seam, stubbed signed so the request is
+ *  the shelf route's and the body is the one under test. */
+const DEPS = {
+  auth: () => Promise.resolve({ kind: 'signed' as const, headers: {} }),
+} as unknown as Deps;
+
 /** The bodies a stubbed global `fetch` was handed. */
 function captureFetch(): { bodies: Promise<unknown>[] } {
   const bodies: Promise<unknown>[] = [];
@@ -50,11 +56,14 @@ function captureFetch(): { bodies: Promise<unknown>[] } {
     bodies.push(new Request(String(input), init).json());
     return new Response(
       JSON.stringify({
-        schemaVersion: 3,
-        searchId: '11111111-1111-4111-8111-111111111111',
-        calibration: 'hybrid-v1',
-        items: [],
-        matched: 0,
+        shelf: {
+          schemaVersion: 3,
+          searchId: '11111111-1111-4111-8111-111111111111',
+          calibration: 'hybrid-v1',
+          items: [],
+          matched: 0,
+        },
+        public: null,
       }),
       { status: 200, headers: { 'content-type': 'application/json' } },
     );
@@ -83,10 +92,11 @@ describe('research and fetch are two arms', () => {
 });
 
 describe('the research arm', () => {
-  it('asks both shelves the query the agent typed', () => {
+  it('asks the query the agent typed, in one call carrying both candidate sets', () => {
     const planned = planOf(researchArm, searchInput('pgvector testcontainer collation')).plan;
     const plan = planned as Plan;
-    expect(plan.stages[0]?.map((l) => l.shelf)).toEqual(['team', 'public']);
+    expect(plan.stages[0]).toHaveLength(1);
+    expect(plan.stages[0]?.[0]?.shelves).toEqual(['team', 'public']);
     expect(plan.question.text).toBe('pgvector testcontainer collation');
   });
 
@@ -113,8 +123,8 @@ describe('the research arm', () => {
     const plan = planOf(researchArm, searchInput(`why does ${token} 401 on push`)).plan as Plan;
     const leg = plan.stages[0]?.[0];
     expect(leg).toBeDefined();
-    const result = await leg?.request(plan.question, 1000, new AbortController().signal);
-    expect(result?.status).toBe('ok');
+    const results = await leg?.request(plan.question, 1000, new AbortController().signal, DEPS);
+    expect(results?.[0]?.status).toBe('ok');
     const body = JSON.stringify(await bodies[0]);
     expect(body).not.toContain(token);
     expect(body).toContain('"trigger":"research"');
@@ -135,7 +145,7 @@ describe('the fetch arm', () => {
     const plan = planOf(fetchArm, fetchInput({ url: 'https://example.com/docs/collation' }))
       .plan as Plan;
     const leg = plan.stages[0]?.[0];
-    await leg?.request(plan.question, 1000, new AbortController().signal);
+    await leg?.request(plan.question, 1000, new AbortController().signal, DEPS);
     expect(JSON.stringify(await bodies[0])).toContain('"trigger":"research"');
   });
 
@@ -148,7 +158,7 @@ describe('the fetch arm', () => {
     const plan = planOf(fetchArm, fetchInput({ url: `https://acme.com/download/${token}/report` }))
       .plan as Plan;
     const leg = plan.stages[0]?.[0];
-    await leg?.request(plan.question, 1000, new AbortController().signal);
+    await leg?.request(plan.question, 1000, new AbortController().signal, DEPS);
     const body = JSON.stringify(await bodies[0]);
     expect(body).not.toContain(token);
     expect(body).not.toContain('0123456789abcdefghijklmnopqrstuvwxyz');
@@ -163,7 +173,7 @@ describe('the fetch arm', () => {
     const plan = planOf(fetchArm, fetchInput({ url: `https://acme.com/f/${token}/report.pdf` }))
       .plan as Plan;
     const leg = plan.stages[0]?.[0];
-    await leg?.request(plan.question, 1000, new AbortController().signal);
+    await leg?.request(plan.question, 1000, new AbortController().signal, DEPS);
     const body = JSON.stringify(await bodies[0]);
     expect(body).not.toContain(token);
     expect(body).not.toContain('a'.repeat(59));

@@ -293,9 +293,9 @@ grep -q 'acme-search' "$HEAL_HOME/.agents/skills/tenjin-search/SKILL.md" ||
 rm -rf "$HEAL_HOME" "$HEAL_DATA"
 echo "pack-smoke: stale adapter healed; mirror, both symlinks and third-party skill untouched (ok)"
 
-# 4b) The OTHER arm, from the same packed skills. Team mode needs both halves — a
-# shelf of the team's own and its door key — so a run with only the key would stay
-# in public mode and this leg would silently re-test 4a. `config set` is the
+# 4b) The OTHER arm, from the same packed skills. "This machine has a shelf" is
+# now one stored key, `shelf`, so setting it is the whole of what puts this leg
+# on the team arm rather than silently re-testing 4a. `config set` is the
 # operator's own door, and `--json` keeps stdout parseable if this ever grows an
 # assertion on it.
 TEAM_HOME="$(mktemp -d)"
@@ -311,23 +311,19 @@ team_fail() {
   exit 1
 }
 
-# The shelf URL is an UNROUTABLE LOOPBACK on purpose, twice over: this leg makes no
-# request (the heal is filesystem-only, and team mode is decided from stored config
-# alone), and scripts/ is swept for host literals other than the production one
-# (src/lib/production-origin.test.ts), so a plausible-looking shelf domain here
-# fails that sweep.
+# NO NETWORK, and no host literal: this leg makes no request (the heal is
+# filesystem-only, and the shelf is read from stored config alone), and scripts/
+# is swept for host literals other than the production one
+# (src/lib/production-origin.test.ts), so naming a shelf host here would fail
+# that sweep. A slug names no host, which is the point of the new shape.
 #
-# HOME and CI are BOTH pinned on the setup commands, and neither is optional. The
-# post-command heal writes into HOME, so a `config set` that leaves the real one in
-# place heals the DEVELOPER'S OWN skills — and here it would heal them to the wrong
-# arm, since the second set completes team mode. `CI` set is the heal's own off
-# switch, so these two runs cannot write skills anywhere; only the run below, which
-# is the one under test, clears it.
-for KV in "baseUrl http://127.0.0.1:9" "shelfBypassSecret pack-smoke-secret"; do
-  # shellcheck disable=SC2086 # deliberate word split: key and value are separate argv.
-  HOME="$TEAM_HOME" TENJIN_DATA_DIR="$TEAM_DATA" CI=1 "$BIN" config set $KV --json >/dev/null 2>&1 ||
-    team_fail "'tenjin config set ${KV%% *}' failed"
-done
+# HOME and CI are BOTH pinned on the setup command, and neither is optional. The
+# post-command heal writes into HOME, so a `config set` that leaves the real one
+# in place heals the DEVELOPER'S OWN skills — and here it would heal them to the
+# team arm. `CI` set is the heal's own off switch, so this run cannot write
+# skills anywhere; only the run below, which is the one under test, clears it.
+HOME="$TEAM_HOME" TENJIN_DATA_DIR="$TEAM_DATA" CI=1 "$BIN" config set shelf pack-smoke --json >/dev/null 2>&1 ||
+  team_fail "'tenjin config set shelf' failed"
 
 HOME="$TEAM_HOME" TENJIN_DATA_DIR="$TEAM_DATA" CI= "$BIN" config --json >/dev/null 2>&1 ||
   team_fail "'tenjin config --json' failed with a team shelf configured"

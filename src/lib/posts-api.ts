@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { CliError } from './errors';
-import { httpRequest, type HttpResponse, type HttpResult, type ShelfBypass } from './http';
+import { httpRequest, type HttpResponse, type HttpResult } from './http';
 import { rateLimitError } from './agent-api';
 import { UUID_RE } from './ids';
 import { sanitizeWireText } from './output';
@@ -66,6 +66,12 @@ export interface PublishInput {
    * defaults to false; see {@link normalizePostKeys} for the bounds.
    */
   keys?: PostKeyInput[];
+  /**
+   * The shelf slug this piece is published to, or omitted for the public
+   * marketplace. The server checks the named shelf against the caller's
+   * membership; an unnamed shelf means public (shelves/02-server.md).
+   */
+  shelf?: string;
 }
 
 /** The kinds the server's `post_keys.kind` registry closes on
@@ -104,6 +110,7 @@ export interface PostCreateBody {
   searchId?: string | string[];
   scanAck?: string;
   keys?: PostKeyWire[];
+  shelf?: string;
 }
 
 /**
@@ -357,6 +364,9 @@ export function buildPostCreateBody(input: PublishInput): PostCreateBody {
     // already reported on the search is not a fact about who answered it.
     ...(searchId !== undefined ? { searchId } : {}),
     ...(input.scanAck !== undefined ? { scanAck: input.scanAck } : {}),
+    // OMITTED, never sent as null: an absent `shelf` is what the server reads
+    // as the public marketplace, and the strict schema has no null to accept.
+    ...(input.shelf !== undefined ? { shelf: input.shelf } : {}),
     // OMITTED WHEN NONE, never sent as `[]`: on the wire an empty array is a
     // diff that CLEARS the stored set, and a deployment with KNOWLEDGE_KEYS off
     // refuses any body that carries the field at all (`keys_disabled`).
@@ -442,10 +452,6 @@ export interface PublishClientOptions {
   baseUrl: string;
   timeoutMs: number;
   fetchImpl?: typeof fetch;
-  /** The team shelf's bypass secret and its origin; the transport attaches the
-   *  header only for that origin. Writes only ever go to `baseUrl`, so this is
-   *  what gets a publish past a protected team deployment. */
-  bypass?: ShelfBypass;
 }
 
 /** Bounded 401 recovery: the initial attempt plus at most this many re-signs. */
@@ -477,7 +483,6 @@ export async function publishPost(
       timeoutMs: opts.timeoutMs,
       headers: { ...authHeaders },
       jsonBody: body,
-      ...(opts.bypass !== undefined ? { bypass: opts.bypass } : {}),
       ...(opts.fetchImpl !== undefined ? { fetchImpl: opts.fetchImpl } : {}),
     });
     if (!res.ok) throw writeTransportError(url, res);
@@ -716,7 +721,6 @@ export async function getOwnPost(
       method: 'GET',
       timeoutMs: opts.timeoutMs,
       headers: { accept: 'application/json', ...authHeaders },
-      ...(opts.bypass !== undefined ? { bypass: opts.bypass } : {}),
       ...(opts.fetchImpl !== undefined ? { fetchImpl: opts.fetchImpl } : {}),
     });
     if (!res.ok) throw writeTransportError(url, res);
@@ -775,7 +779,6 @@ export async function updatePost(
       timeoutMs: opts.timeoutMs,
       headers: { ...authHeaders },
       jsonBody: body,
-      ...(opts.bypass !== undefined ? { bypass: opts.bypass } : {}),
       ...(opts.fetchImpl !== undefined ? { fetchImpl: opts.fetchImpl } : {}),
     });
     if (!res.ok) throw writeTransportError(url, res);
@@ -826,7 +829,6 @@ export async function deletePost(
       method: 'DELETE',
       timeoutMs: opts.timeoutMs,
       headers: { accept: 'application/json', ...authHeaders },
-      ...(opts.bypass !== undefined ? { bypass: opts.bypass } : {}),
       ...(opts.fetchImpl !== undefined ? { fetchImpl: opts.fetchImpl } : {}),
     });
     if (!res.ok) throw writeTransportError(url, res);
@@ -1070,7 +1072,7 @@ function writeTransportError(url: string, result: Exclude<HttpResult, { ok: true
 // ---------------------------------------------------------------------------
 // The account surface (tenjin-agent#208): `tenjin profile [set]` and `tenjin
 // stats`. Owner-scoped like getOwnPost, signed through the same WriteAuth, and
-// riding the same bypass plumbing so a team shelf needs nothing extra.
+// on the one origin the CLI talks to.
 // ---------------------------------------------------------------------------
 
 /**
@@ -1173,7 +1175,6 @@ export async function updateMe(
       timeoutMs: opts.timeoutMs,
       headers: { ...authHeaders },
       jsonBody: body,
-      ...(opts.bypass !== undefined ? { bypass: opts.bypass } : {}),
       ...(opts.fetchImpl !== undefined ? { fetchImpl: opts.fetchImpl } : {}),
     });
     if (!res.ok) throw writeTransportError(url, res);
@@ -1207,7 +1208,6 @@ async function signedRead(
       method: 'GET',
       timeoutMs: opts.timeoutMs,
       headers: { accept: 'application/json', ...authHeaders },
-      ...(opts.bypass !== undefined ? { bypass: opts.bypass } : {}),
       ...(opts.fetchImpl !== undefined ? { fetchImpl: opts.fetchImpl } : {}),
     });
     if (!res.ok) throw writeTransportError(url, res);

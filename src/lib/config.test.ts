@@ -129,15 +129,15 @@ describe('writeConfig', () => {
   });
 
   /**
-   * config.json holds `shelfBypassSecret`, the team shelf's shared door key, so
-   * it is a secret file and gets the 0600 every other secret in this tree gets.
-   * dirMode 0o700 is not the backstop it looks like: node's recursive mkdir does
-   * not chmod a directory that already exists, so a data dir a devcontainer
-   * volume or a restored backup created at 0755 leaves a 0644 config readable
-   * by anyone on the box.
+   * config.json holds no credential of its own any more, and keeps 0600 anyway:
+   * every other file in this tree is 0600 and the directory's posture stays
+   * uniform. dirMode 0o700 is not the backstop it looks like: node's recursive
+   * mkdir does not chmod a directory that already exists, so a data dir a
+   * devcontainer volume or a restored backup created at 0755 leaves a 0644
+   * config readable by anyone on the box.
    */
   it.skipIf(process.platform === 'win32')('writes config.json at 0600', async () => {
-    await writeConfig(dir, { ...CONFIG_DEFAULTS, shelfBypassSecret: 'shelf-secret-abc123' });
+    await writeConfig(dir, { ...CONFIG_DEFAULTS, shelf: 'backtrack' });
     expect((await stat(configFile())).mode & 0o777).toBe(0o600);
   });
 
@@ -146,10 +146,50 @@ describe('writeConfig', () => {
     async () => {
       await mkdir(dir, { recursive: true });
       await chmod(dir, 0o755);
-      await writeConfig(dir, { ...CONFIG_DEFAULTS, shelfBypassSecret: 'shelf-secret-abc123' });
+      await writeConfig(dir, { ...CONFIG_DEFAULTS, shelf: 'backtrack' });
       expect((await stat(configFile())).mode & 0o777).toBe(0o600);
     },
   );
+
+  /**
+   * THE ONE NEW KEY. A slug names no host, so nothing about "which shelf" can be
+   * confused with "which deployment" any more; the regex is the whole rule and
+   * `tenjin shelf use --none` is how it goes back to null.
+   */
+  it('defaults shelf to null and round-trips a slug', async () => {
+    expect(CONFIG_DEFAULTS.shelf).toBeNull();
+    expect((await loadConfig(dir)).shelf).toBeNull();
+    await writeConfig(dir, { ...CONFIG_DEFAULTS, shelf: 'backtrack' });
+    expect((await loadConfig(dir)).shelf).toBe('backtrack');
+  });
+
+  it('refuses a shelf slug the regex does not admit', async () => {
+    for (const bad of ['', 'a', 'Backtrack', 'back track', 'back_track', 'x'.repeat(33)]) {
+      await expect(writeConfig(dir, { ...CONFIG_DEFAULTS, shelf: bad })).rejects.toThrow();
+    }
+  });
+
+  /**
+   * NO MIGRATION, AND NO REFUSAL EITHER. `RawConfigSchema` is passthrough, so a
+   * file an older CLI wrote still loads with the two retired keys riding through
+   * unread; `tenjin install` sweeps them and doctor warns while they are there.
+   */
+  it('still loads a config carrying the retired shelf keys', async () => {
+    await mkdir(dir, { recursive: true });
+    await writeFile(
+      configFile(),
+      JSON.stringify({
+        baseUrl: CONFIG_DEFAULTS.baseUrl,
+        publicShelfUrl: CONFIG_DEFAULTS.baseUrl,
+        shelfBypassSecret: 'stale-secret',
+      }),
+    );
+    const raw = await loadRawConfig(dir);
+    expect(raw.baseUrl).toBe(CONFIG_DEFAULTS.baseUrl);
+    expect((raw as Record<string, unknown>).shelfBypassSecret).toBe('stale-secret');
+    // Retired means UNREAD, not rejected: nothing resolves off them.
+    expect((await loadConfig(dir)).shelf).toBeNull();
+  });
 });
 
 describe('publish block', () => {

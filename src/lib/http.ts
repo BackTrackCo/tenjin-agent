@@ -14,8 +14,6 @@ export interface FetchJsonOptions {
   fetchImpl?: typeof fetch;
   /** Optional request headers, merged onto the User-Agent this module always sends. */
   headers?: Record<string, string>;
-  /** The team shelf's bypass secret and its origin; see {@link ShelfBypass}. */
-  bypass?: ShelfBypass;
   /**
    * INTERNAL. A caller's own product sequence, composed BEHIND the CLI's
    * identity (see `composeUserAgent`). The package ships a `bin` and no
@@ -29,71 +27,92 @@ export interface FetchJsonOptions {
 }
 
 /**
- * The team shelf's Vercel "Protection Bypass for Automation" header.
+ * Vercel's "Protection Bypass for Automation" header.
  *
- * A door key for a protected preview deployment, not a credential of anyone's:
- * it gets a request past Deployment Protection and authenticates nobody. It is
- * NOT in {@link CREDENTIAL_HEADERS}, whose members are wallet-signed material a
- * redirect target could REPLAY — this one cannot be replayed into a signature.
- * It is still a secret, and DISCLOSING it is the whole harm: whoever holds it
- * walks into the team shelf. So it pins redirects exactly as a signed header
- * does (see {@link carriesBypassKey}), and where it may go is decided here and
- * nowhere else.
+ * NOT a shelf or a team notion any more: a shelf is a row on the production
+ * deployment, so nothing about ordinary use needs this. It exists because
+ * PREVIEW deployments sit behind Vercel Deployment Protection, and the bench
+ * harness, and anyone testing a preview, must reach them. The value comes from
+ * `TENJIN_PREVIEW_BYPASS` in the environment, is never persisted to config and
+ * never printed, and a request carrying it pins its redirects exactly as a
+ * signed request does: the value cannot be replayed into a signature, but
+ * DISCLOSING it is the harm, and `fetch` re-sends request headers verbatim to a
+ * redirect target.
  */
-export const SHELF_BYPASS_HEADER = 'x-vercel-protection-bypass';
+export const PREVIEW_BYPASS_HEADER = 'x-vercel-protection-bypass';
+
+/** The environment variable that carries it. Read per request, once, here. */
+export const PREVIEW_BYPASS_ENV = 'TENJIN_PREVIEW_BYPASS';
 
 /**
- * A bypass secret and the origin it belongs to.
+ * The origin the key belongs to, named by the operator for this run.
  *
- * THE ORIGIN IS PART OF THE VALUE, and that is the whole design. The CLI talks
- * to two shelves in team mode — the team's own deployment and the public
- * marketplace — and a caller that decides "this request is to the team shelf, so
- * attach the key" is a caller that eventually gets it wrong once. So callers
- * pass the pair and this transport does the compare: the header is attached from
- * the REQUEST URL, so a request to any other host cannot carry it, whatever the
- * call site believed.
+ * THE ORIGIN IS PART OF THE VALUE. The key is a door key for one deployment and
+ * disclosing it is the whole harm, so it must never ride to a host that is
+ * merely the URL of the moment: `tenjin pay <url>` takes a URL an agent chose,
+ * `tenjin buy` follows a candidate's own link, and a bare environment secret
+ * would be handed to either. The compare is done here, off the REQUEST URL, so
+ * no call site decides whether this request is "the preview one" and none can
+ * get it wrong.
+ *
+ * `TENJIN_PREVIEW_ORIGIN` names it outright; `TENJIN_BASE_URL` is the fallback,
+ * because a run pointed at a preview by the environment has already said where
+ * it is going. Neither set means the key rides nowhere, which is the safe
+ * direction: doctor says so by name.
  */
-export interface ShelfBypass {
-  /** `URL.origin` of the shelf the secret opens (the configured `baseUrl`). */
-  origin: string;
-  secret: string;
+export const PREVIEW_ORIGIN_ENV = 'TENJIN_PREVIEW_ORIGIN';
+
+/** The one origin the preview key may be sent to, or null for none. */
+export function previewBypassPin(env: NodeJS.ProcessEnv = process.env): string | null {
+  for (const key of [PREVIEW_ORIGIN_ENV, 'TENJIN_BASE_URL']) {
+    const raw = env[key];
+    if (typeof raw !== 'string' || raw.length === 0) continue;
+    try {
+      return new URL(raw).origin;
+    } catch {
+      // A named pin that does not parse is not a reason to fall through to the
+      // next candidate: the operator named a host and got it wrong, and sending
+      // the key somewhere else is the one outcome nobody asked for.
+      return null;
+    }
+  }
+  return null;
 }
 
-/** The bypass header for `url`, or nothing. Exported for the hook-script mirror
- *  test, which runs the generated copy of this rule against this one. */
-export function shelfBypassHeaders(
+/** Is the key set at all? Doctor reports presence and never the value. */
+export function previewBypassSet(env: NodeJS.ProcessEnv = process.env): boolean {
+  const secret = env[PREVIEW_BYPASS_ENV];
+  return typeof secret === 'string' && secret.length > 0;
+}
+
+/** The preview-bypass header for `url`, or nothing. Exported for the hook-script
+ *  mirror test and for doctor's "preview bypass" line. */
+export function previewBypassHeaders(
   url: string,
-  bypass: ShelfBypass | undefined,
+  env: NodeJS.ProcessEnv = process.env,
 ): Record<string, string> {
-  if (bypass === undefined || bypass.secret.length === 0) return {};
+  const secret = env[PREVIEW_BYPASS_ENV];
+  if (typeof secret !== 'string' || secret.length === 0) return {};
+  const pin = previewBypassPin(env);
+  if (pin === null) return {};
   let origin: string;
   try {
     origin = new URL(url).origin;
   } catch {
     return {};
   }
-  if (origin !== bypass.origin) return {};
-  return { [SHELF_BYPASS_HEADER]: bypass.secret };
+  if (origin !== pin) return {};
+  return { [PREVIEW_BYPASS_HEADER]: secret };
 }
 
 /**
- * Whether the request being assembled actually carries the door key.
- *
- * A request that carries it MUST NOT follow a redirect. `fetch`'s default
- * `redirect: 'follow'` re-sends request headers verbatim to the new host (Node
- * strips only `Authorization`), so a single 3xx anywhere on the shelf origin —
- * the Vercel Authentication interstitial a rotated bypass secret gets, a domain
- * alias, a CDN rule — would hand the team shelf's key to whatever `Location`
- * names. Nothing else is needed to walk in afterwards, so the key never leaves
- * the origin it was paired with, not even one hop.
- *
- * Read off the BUILT headers rather than off `opts.bypass`, for the same reason
- * {@link CREDENTIAL_HEADERS} is matched by name: attaching the secret is what
- * arms the protection, so an off-origin request (which gets no header) keeps
- * ordinary transport and a call site cannot forget to ask for the pin.
+ * Whether the request being assembled actually carries the preview key. Read
+ * off the BUILT headers rather than off an option, for the same reason
+ * {@link CREDENTIAL_HEADERS} is matched by name: attaching the value is what
+ * arms the protection, so no call site can forget to ask for the pin.
  */
-function carriesBypassKey(headers: Record<string, string>): boolean {
-  return Object.keys(headers).some((name) => name.toLowerCase() === SHELF_BYPASS_HEADER);
+function carriesPreviewBypass(headers: Record<string, string>): boolean {
+  return Object.keys(headers).some((name) => name.toLowerCase() === PREVIEW_BYPASS_HEADER);
 }
 
 /**
@@ -274,15 +293,20 @@ export async function fetchJson(url: string, opts: FetchJsonOptions): Promise<Fe
     // inside the catch that turns any pre-flight refusal into the same
     // discriminated network failure a dead socket gets.
     let pinned = false;
+    let signed = false;
     try {
       const headers = withUserAgent(
-        { ...opts.headers, ...shelfBypassHeaders(url, opts.bypass) },
+        { ...opts.headers, ...previewBypassHeaders(url) },
         opts.callerUserAgent,
       );
-      // fetchJson sends no signed material — doctor's probes and the contract
-      // checks are anonymous — so the door key is the one thing here worth
-      // pinning, and it pins the same way it does in httpRequest.
-      pinned = carriesBypassKey(headers);
+      // THE SAME TWO REASONS `httpRequest` PINS, and for the same reason it
+      // reads them off the BUILT headers rather than off an option. This
+      // transport is no longer anonymous: doctor's shelf check presents a
+      // session delegation here, and that header is the most replayable
+      // credential the CLI holds, so a 3xx on the configured origin would hand
+      // a session-lifetime credential to whatever `Location` names.
+      signed = carriesSignedMaterial(headers);
+      pinned = signed || carriesPreviewBypass(headers);
       res = await doFetch(url, {
         signal: controller.signal,
         headers,
@@ -314,8 +338,9 @@ export async function fetchJson(url: string, opts: FetchJsonOptions): Promise<Fe
           ? { gateOffOrigin: true as const }
           : {}),
         message:
-          `Request to ${url} was redirected (${res.status}) while carrying the team shelf's ` +
-          'bypass key; refusing to follow it, because the key opens only the configured origin.',
+          `Request to ${url} was redirected (${res.status}) while carrying ` +
+          `${signed ? 'signed material' : 'the preview bypass key'}; refusing to follow it, ` +
+          'because a redirect would disclose it.',
       };
     }
 
@@ -389,11 +414,9 @@ function timeoutFailure(url: string, timeoutMs: number): FetchJsonFailure {
  * still returns the discriminated FetchJsonFailure so callers map it uniformly.
  */
 export interface HttpRequestOptions {
-  method?: 'GET' | 'POST' | 'PUT' | 'DELETE';
+  method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
   timeoutMs: number;
   headers?: Record<string, string>;
-  /** The team shelf's bypass secret and its origin; see {@link ShelfBypass}. */
-  bypass?: ShelfBypass;
   /** INTERNAL; see `FetchJsonOptions.callerUserAgent`. */
   callerUserAgent?: string;
   /** A JSON body (POST); serialized with a content-type header set automatically. */
@@ -453,26 +476,30 @@ interface PreparedRequest {
 function prepareRequest(url: string, opts: HttpRequestOptions): PreparedRequest | FetchJsonFailure {
   try {
     let body: string | undefined;
-    // The bypass rides in with the caller's headers rather than being set after
-    // them, so a caller cannot spell it a second way and win the slot.
-    const merged = new Headers({ ...opts.headers, ...shelfBypassHeaders(url, opts.bypass) });
+    // The preview key rides in with the caller's headers rather than being set
+    // after them, so a caller cannot spell it a second way and win the slot.
+    const merged = new Headers({ ...opts.headers, ...previewBypassHeaders(url) });
     if (opts.jsonBody !== undefined) {
       body = JSON.stringify(opts.jsonBody);
       merged.set('content-type', 'application/json');
     }
-    const wantsAccept = opts.method === 'POST' || opts.method === 'PUT' || body !== undefined;
+    const wantsAccept =
+      opts.method === 'POST' ||
+      opts.method === 'PUT' ||
+      opts.method === 'PATCH' ||
+      body !== undefined;
     if (wantsAccept && !merged.has('accept')) merged.set('accept', 'application/json');
     // An `accept`/`content-type` set here wins the slot regardless of how a
     // caller cased its own copy.
     const headers = Object.fromEntries(applyUserAgent(merged, opts.callerUserAgent).entries());
 
     // Signed requests opt out of redirect following entirely; see CREDENTIAL_HEADERS.
-    // So does a request carrying the team shelf's bypass key: it cannot be
-    // replayed, but a 3xx would DISCLOSE it, and that is the whole harm (see
-    // carriesBypassKey). A caller can also pin an unsigned, keyless request
+    // So does a request carrying the preview bypass key: it cannot be replayed,
+    // but a 3xx would DISCLOSE it, and that is the whole harm (see
+    // carriesPreviewBypass). A caller can also pin an unsigned, keyless request
     // (blockRedirects) when the response it gets back becomes a durable local record.
     const signed = carriesSignedMaterial(headers);
-    const bypassed = carriesBypassKey(headers);
+    const bypassed = carriesPreviewBypass(headers);
     return {
       ok: true,
       headers,
@@ -540,8 +567,8 @@ export async function httpRequest(url: string, opts: HttpRequestOptions): Promis
           ? `Request to ${url} was redirected (${res.status}) while carrying a signed header; ` +
             'refusing to follow it, because the signature is bound to the configured origin.'
           : bypassed
-            ? `Request to ${url} was redirected (${res.status}) while carrying the team shelf's ` +
-              'bypass key; refusing to follow it, because the key opens only the configured origin.'
+            ? `Request to ${url} was redirected (${res.status}) while carrying the preview ` +
+              'bypass key; refusing to follow it, because a redirect would disclose it.'
             : `Request to ${url} was redirected (${res.status}); ` +
               'refusing to follow it, because the response must come from the configured origin.',
       };

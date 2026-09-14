@@ -28,7 +28,6 @@ function spec(over: Partial<LookupSpec> = {}): LookupSpec {
     trigger: 'prompt',
     enabled: () => true,
     text: (input) => input.prompt ?? null,
-    shelves: ['team', 'public'],
     deliver: 'inject',
     ...over,
   };
@@ -49,12 +48,16 @@ describe('lookupArm wiring', () => {
     expect(arm.on).toEqual([{ event: 'turn.end' }]);
   });
 
-  it('builds one stage with one leg per shelf, in the spec’s order', () => {
+  it('builds ONE stage holding ONE leg, which yields both candidate sets', () => {
+    // It used to be one stage racing two requests at two origins. The shelf
+    // route carries both sets in one round trip, so the stage's budget is one
+    // call rather than the slower of two.
     const plan = planOf(lookupArm(spec()));
     expect(plan).not.toBeNull();
     const stages = (plan as Plan).stages;
     expect(stages).toHaveLength(1);
-    expect(stages[0]?.map((l) => l.shelf)).toEqual(['team', 'public']);
+    expect(stages[0]).toHaveLength(1);
+    expect(stages[0]?.[0]?.shelves).toEqual(['team', 'public']);
   });
 
   it('masks the text and keys the question on the result', () => {

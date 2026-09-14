@@ -2994,17 +2994,14 @@ describe('runInstall: hosted skill already present (#35)', () => {
    * a mode change is reported as an update rather than as up-to-date.
    */
   describe('shapes the installed skills by the configured mode', () => {
-    const TEAM = {
-      baseUrl: 'https://backtrack.tenjin.sh',
-      shelfBypassSecret: 'shelf-secret-abc123',
-    };
+    const TEAM = { baseUrl: 'https://backtrack.tenjin.sh', shelf: 'backtrack' };
     const searchAt = () => join(home, '.claude', 'skills', 'tenjin-search', 'SKILL.md');
 
     async function configure(config: Record<string, unknown>): Promise<void> {
       await writeFile(join(data, 'config.json'), JSON.stringify(config));
     }
 
-    it('writes the team arm on a team-mode machine, and no marker', async () => {
+    it('writes the team arm on a machine with a shelf, and no marker', async () => {
       await configure(TEAM);
       await runInstall({ harness: ['claude'] }, makeCtx(), deps());
       const written = await readFile(searchAt(), 'utf8');
@@ -3014,22 +3011,23 @@ describe('runInstall: hosted skill already present (#35)', () => {
       expect(written).not.toContain('Public + durable + costly to reproduce');
     });
 
-    it('writes the public arm with no config, and with the key alone', async () => {
+    it('writes the public arm with no config, and with a base URL alone', async () => {
       await runInstall({ harness: ['claude'] }, makeCtx(), deps());
       expect(await readFile(searchAt(), 'utf8')).toBe(await packagedText('tenjin-search'));
 
-      // The half-set state: the key landed before the shelf did. Team mode there
-      // would render team guidance on a machine still publishing to the marketplace.
-      await configure({ shelfBypassSecret: TEAM.shelfBypassSecret });
+      // THE SHELF IS THE WHOLE ANSWER. A private-looking base URL with no shelf
+      // slug is a machine on the public marketplace, and the skill text says so.
+      await configure({ baseUrl: TEAM.baseUrl });
       await runInstall({ harness: ['claude'] }, makeCtx(), deps());
       expect(await readFile(searchAt(), 'utf8')).toBe(await packagedText('tenjin-search'));
     });
 
     /**
-     * A `--base-url` re-points THIS run; it does not change what mode the machine is
-     * configured in. The file being written outlives the command, so shaping it by a
-     * one-off flag would leave a team machine reading public guidance until the next
-     * install — and would let any single command silently rewrite every wired skill.
+     * A `--base-url` re-points THIS run; it does not change which shelf the
+     * machine is on. The file being written outlives the command, so shaping it
+     * by a one-off flag would leave a shelf machine reading public guidance
+     * until the next install — and would let any single command silently
+     * rewrite every wired skill.
      */
     it('ignores --base-url when deciding which arm to write', async () => {
       await configure(TEAM);

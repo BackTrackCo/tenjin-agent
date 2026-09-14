@@ -90,6 +90,24 @@ describe('recordSearch and the reads over it', () => {
     expect(stored?.candidates).toEqual(entry().candidates);
   });
 
+  /**
+   * `shelf_base_url` IS A RECORD, NOT A ROUTE. One deployment mints every id a
+   * search on this machine gets back, so `recordSearch` writes the configured
+   * base into it and every close goes there. The column is kept because it is
+   * listed in `LOOP_SHAPE` (`hooks/store.ts`), and dropping it would delete
+   * every machine's ledger at first open to retire one field.
+   */
+  it('round-trips the base URL a search went to', async () => {
+    await recordSearch(
+      dataDir,
+      entry({
+        searchId: '0197aaaa-bbbb-cccc-dddd-000000000009',
+        shelfBaseUrl: 'https://tenjin.blog',
+      }),
+    );
+    expect((await loadSearches(dataDir))[0]?.shelfBaseUrl).toBe('https://tenjin.blog');
+  });
+
   // A turn-end ask reads this field to tell one session's open loops from a
   // sibling's; a shape that dropped it would silently un-scope every reminder.
   it('keeps a row with no sessionId loadable, with the field absent', async () => {

@@ -113,20 +113,46 @@ describe('main', () => {
 
   /**
    * The shape `tenjin --help` is expected to hold (clig.dev's "display the most
-   * common flags and commands at the start", gh's grouped root list): five
+   * common flags and commands at the start", gh's grouped root list): six
    * headings, one line per command, the globals listed once, and examples plus
-   * pointers at the end. A command that lands outside the five falls into
+   * pointers at the end. A command that lands outside the six falls into
    * commander's ungrouped `Commands:` bucket, which is what this catches.
    */
-  it('files every command under the five headings, in order', async () => {
+  it('files every command under the six headings, in order', async () => {
     const cap = captureIo();
     expect(await main(['--help'], cap.io)).toBe(0);
     const help = cap.stdout();
-    const groups = ['Setup:', 'Search and read:', 'Publish:', 'Wallet:', 'Integration:'];
+    const groups = ['Setup:', 'Search and read:', 'Publish:', 'Team:', 'Wallet:', 'Integration:'];
     const at = groups.map((group) => help.indexOf(group));
     expect(at.filter((i) => i === -1)).toEqual([]);
     expect(at).toEqual([...at].sort((a, b) => a - b));
     expect(help).not.toMatch(/^Commands:$/m);
+  });
+
+  /** The subcommand names commander lists under `Commands:`, sorted. */
+  function subcommandsIn(help: string): string[] {
+    const block = help.split(/^Commands:$/m)[1] ?? '';
+    return [...block.matchAll(/^\s{2}([a-z][a-z-]*)/gm)].map((m) => m[1] ?? '').sort();
+  }
+
+  /** The two verbs shelves arrive with, and the two they deliberately do not. */
+  it('lists `org` and `shelf` under Team, with no create verb', async () => {
+    const cap = captureIo();
+    expect(await main(['--help'], cap.io)).toBe(0);
+    expect(cap.stdout()).toContain('org');
+    expect(cap.stdout()).toContain('shelf');
+
+    const org = captureIo();
+    expect(await main(['org', '--help'], org.io)).toBe(0);
+    for (const sub of ['add', 'remove', 'list', 'set']) expect(org.stdout()).toContain(sub);
+    // An operator provisions an org by script; there is no public creation route
+    // and so no verb for one. Matched on the COMMAND LIST, since both help texts
+    // say "there is no `org create`" in prose.
+    expect(subcommandsIn(org.stdout())).toEqual(['add', 'list', 'remove', 'set']);
+
+    const shelf = captureIo();
+    expect(await main(['shelf', '--help'], shelf.io)).toBe(0);
+    expect(subcommandsIn(shelf.stdout())).toEqual(['use']);
   });
 
   /**

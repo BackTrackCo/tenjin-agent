@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import { styleText } from 'node:util';
 import { Stream } from 'node:stream';
 import { homedir } from 'node:os';
@@ -29,15 +30,17 @@ import {
 import { skillMaterialize } from '../lib/skill-materialize';
 import type { HarnessWiring, NotInvocableReason } from '../lib/skill-wiring';
 import type { Harness, HarnessAdapter } from '../adapters/types';
-import { fetchJson, type FetchJsonFailure, type ShelfBypass } from '../lib/http';
-import { loadRawConfig, resolveGrantDeclined, resolveSettings } from '../lib/config';
 import {
-  isTeamModeConfig,
-  isTeamShelfOrigin,
-  loadProjectConfig,
-  resolveShelfBypass,
-} from '../lib/settings';
-import { tryOriginOf, trimSlash } from '../lib/url';
+  fetchJson,
+  previewBypassPin,
+  previewBypassSet,
+  PREVIEW_ORIGIN_ENV,
+  type FetchJsonFailure,
+} from '../lib/http';
+import { loadRawConfig, resolveGrantDeclined, resolveSettings } from '../lib/config';
+import { loadProjectConfig } from '../lib/settings';
+import { searchHeaders } from '../lib/search-auth';
+import { trimSlash } from '../lib/url';
 import { configPath, dataDir as resolveDataDir, loopDbPath } from '../lib/paths';
 import { toMoney } from '../lib/money';
 import { walletFileExists } from '../lib/wallet/store';
@@ -57,7 +60,7 @@ import type { RegisteredHooks } from '../lib/harness-hooks';
 import { ADAPTERS } from '../adapters/registry';
 import { existsSync } from 'node:fs';
 import { health, missingRoutes, readPid } from '../hooks/shim';
-import type { EffectiveSettings, PartialConfig, PublishMode } from '../lib/config';
+import type { PartialConfig, PublishMode } from '../lib/config';
 import type { ErrorCode } from '../schemas';
 import type { Io } from '../lib/output';
 import type {
@@ -107,22 +110,6 @@ const FIX_POINT_AT_TENJIN_API =
   'Point the configured base URL at a Tenjin API (expected an OpenAPI document): `tenjin config set baseUrl <url>`.';
 const FIX_CHECK_NETWORK_AND_BASE_URL =
   'Check your network connection and the configured base URL (`tenjin config get baseUrl`).';
-/**
- * The base URL was RIGHT and the credential was missing. Sending the operator to
- * `baseUrl` here (what a bare CONTRACT_MISMATCH did, #218) asks them to change
- * the one setting that was already correct. Names the config key and no value:
- * the secret itself never reaches any check output.
- */
-const FIX_SET_SHELF_BYPASS =
-  'If that deployment is access-protected, set the team shelf key: `tenjin config set shelfBypassSecret <value>`.';
-/**
- * Same page, but the probe CARRIED the configured key and still did not get
- * past. Telling this machine to set the secret it already sent (the stale-key
- * case: a rotated Vercel bypass token answers the 200 gate page, a 401, or the
- * 307 interstitial) would read as "doctor says my config is fine as is".
- */
-const FIX_ROTATE_SHELF_BYPASS =
-  'The configured shelfBypassSecret was sent and did not get past, so it is stale or rotated: `tenjin config set shelfBypassSecret <value>`.';
 /**
  * A keyed probe was redirected, but to the SAME host it asked for: an `http://`
  * base URL that 301s to https, or a host normalising to its canonical name. The
@@ -241,17 +228,11 @@ export async function collectDoctorChecks(
     project: project?.layer,
   });
   const baseUrl = settings.baseUrl.value;
-  // The SAME resolver resolveContextSettings uses, not a second copy of the
-  // rule: the key is paired with the origin the operator configured, so
-  // `tenjin doctor --base-url <anywhere>` runs its three probes unauthenticated
-  // instead of sending the team shelf's key to that host three times.
-  const bypass: ShelfBypass | undefined = resolveShelfBypass(config, settings);
   const home = deps.homeDir ?? homedir();
   const adapters = deps.adapters ?? ADAPTERS;
   const which = deps.which ?? ((bin: string) => onPath(bin, env));
   const requested = config.install?.harness ?? [];
   const grantDeclined = resolveGrantDeclined(config.install?.grantDeclined);
-  const teamMode = isTeamModeConfig(config);
   const built: BuiltCheck[] = [
     checkNode(),
     // One open, two facts: the file opens, and what it holds that is waiting.
@@ -263,29 +244,19 @@ export async function collectDoctorChecks(
   if (redirected !== null) built.push(redirected);
   built.push(
     configCheck,
-    // The two baseUrl probes carry the team shelf's bypass. Without it both
-    // report a protected team deployment as unreachable, which is the check
-    // saying "your CLI is broken" about the one setting that is right.
-    ...(await checkShelfContract(
-      baseUrl,
-      ctx.flags.timeout,
-      deps.fetchImpl,
-      bypass,
-      shelfKeyIsTheRemedy(settings, bypass),
-    )),
-    await checkReadPath(
-      baseUrl,
-      ctx.flags.timeout,
-      deps.fetchImpl,
-      bypass,
-      shelfKeyIsTheRemedy(settings, bypass),
-    ),
+    // ONE ORIGIN, and the probes are anonymous: a shelf is a row on this same
+    // deployment, so nothing here needs a credential. A preview deployment is
+    // the one exception and `TENJIN_PREVIEW_BYPASS` covers it in the transport.
+    ...(await checkShelfContract(baseUrl, ctx.flags.timeout, deps.fetchImpl)),
+    await checkReadPath(baseUrl, ctx.flags.timeout, deps.fetchImpl),
   );
 
-  // Silent unless one of the two settings claims a team shelf, so a default
-  // machine gets no check about a feature it never turned on.
-  const teamShelf = checkTeamShelf(settings, bypass);
-  if (teamShelf !== null) built.push(teamShelf);
+  // Silent on a machine that set no shelf and has no preview key: the default
+  // machine gets no line about a feature it never turned on.
+  const previewLine = checkPreviewBypass(env);
+  if (previewLine !== null) built.push(previewLine);
+  const shelfCheck = await checkShelf(ctx, config.shelf ?? null, baseUrl, deps, env);
+  if (shelfCheck !== null) built.push(shelfCheck);
 
   // Silent (nothing pushed) on a machine with no hook entries of ours at all;
   // see checkHooks.
@@ -307,8 +278,8 @@ export async function collectDoctorChecks(
       deps.skillsSourceDir,
       // The raw config, not resolved settings: the staleness compare has to shape
       // the packaged copies the way the WRITERS shaped them, and they read the
-      // machine's configured mode with no flag layer (lib/skill-materialize).
-      teamMode,
+      // machine's configured shelf with no flag layer (lib/skill-materialize).
+      config.shelf !== null && config.shelf !== undefined,
     ),
   );
 
@@ -512,12 +483,49 @@ function checkNode(): BuiltCheck {
  * strict subset of what opening the real file answers, so there is no second
  * check and no second handle.
  */
+/**
+ * The one number the loop is for, as far as the ledger can see it: team answers
+ * DELIVERED in the last seven days.
+ *
+ * `legs.outcome = 'hit'` is the leg whose answer won, so this counts the team
+ * set winning and never a public win over a team miss. It is DELIVERED, not
+ * acted on: the ledger cannot see whether the agent used the note, and the
+ * by-hand weekly count in the principles stays the measure of that.
+ *
+ * Never throws into the check: a ledger this build cannot query is a missing
+ * number, not a failed store.
+ */
+function teamAnswersDelivered(db: ReturnType<typeof openLoopDbForCli>): string {
+  try {
+    const since = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    const row = db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM fires f JOIN legs l ON l.fire_id = f.id
+          WHERE l.shelf = 'team' AND l.outcome = 'hit' AND f.at > ?`,
+      )
+      .get(since) as { n?: unknown } | undefined;
+    const n = Number(row?.n ?? 0);
+    return `team answers delivered, 7d: ${Number.isFinite(n) ? n : 0}`;
+  } catch {
+    return 'team answers delivered, 7d: unknown';
+  }
+}
+
 function checkLoopDb(dir: string, open: typeof openLoopDbForCli): BuiltCheck[] {
   const path = loopDbPath(dir);
   try {
     const db = open(dir);
     try {
-      return [{ result: { name: 'store', status: 'ok', required: true, detail: `${path} open` } }];
+      return [
+        {
+          result: {
+            name: 'store',
+            status: 'ok',
+            required: true,
+            detail: `${path} open; ${teamAnswersDelivered(db)}`,
+          },
+        },
+      ];
     } finally {
       db.close();
     }
@@ -579,6 +587,27 @@ async function loadConfigForDoctor(
     const config = await loadRawConfig(dataDir);
     const detail =
       Object.keys(config).length === 0 ? 'no config file; using defaults' : configPath(dataDir);
+    // RETIRED KEYS, named while they are still in the file. `RawConfigSchema` is
+    // passthrough, so an old file still loads and these ride through untouched
+    // and unread; the next `tenjin install` sweeps them. Saying so is what keeps
+    // an operator from believing a `shelfBypassSecret` still does something.
+    const dead = ['publicShelfUrl', 'shelfBypassSecret'].filter((key) =>
+      Object.hasOwn(config, key),
+    );
+    if (dead.length > 0) {
+      return {
+        config,
+        check: {
+          result: {
+            name: 'config',
+            status: 'warn',
+            required: true,
+            detail: `${detail}; it still carries retired keys (${dead.join(', ')}), which nothing reads`,
+            fix: 'Run `tenjin install` to sweep them, and `tenjin shelf use <slug>` to name the shelf instead.',
+          },
+        },
+      };
+    }
     return { config, check: { result: { name: 'config', status: 'ok', required: true, detail } } };
   } catch (err) {
     if (err instanceof CliError && err.code === 'CONFIG_INVALID') {
@@ -631,18 +660,11 @@ async function loadConfigForDoctor(
  * flags to say what happened; the detail lines do that, and they say only what
  * the transport saw.
  */
-function shelfGateFix(
-  res: FetchJsonFailure,
-  bypass: ShelfBypass | undefined,
-  shelfKeyRemedy: boolean,
-): string | undefined {
-  const blocked = res.kind === 'blocked-redirect' && bypass !== undefined;
-  const refused =
-    res.kind === 'http' && (res.status === 401 || res.status === 403) && shelfKeyRemedy;
-  if (res.gateSuspected !== true && !blocked && !refused) return undefined;
+function shelfGateFix(res: FetchJsonFailure): string | undefined {
+  const blocked = res.kind === 'blocked-redirect';
+  if (res.gateSuspected !== true && !blocked) return undefined;
   if (blocked && res.gateOffOrigin !== true) return FIX_FOLLOW_REDIRECT_IN_BASE_URL;
-  if (!shelfKeyRemedy) return FIX_PAGE_NOT_THE_API;
-  return bypass !== undefined ? FIX_ROTATE_SHELF_BYPASS : FIX_SET_SHELF_BYPASS;
+  return FIX_PAGE_NOT_THE_API;
 }
 
 /**
@@ -679,16 +701,9 @@ async function checkShelfContract(
   baseUrl: string,
   timeoutMs: number,
   fetchImpl?: typeof fetch,
-  bypass?: ShelfBypass,
-  /** Whether the bypass key is a remedy this machine can use; see {@link shelfKeyIsTheRemedy}. */
-  shelfKeyRemedy = false,
 ): Promise<BuiltCheck[]> {
   const url = `${trimSlash(baseUrl)}/openapi.json`;
-  const res = await fetchJson(url, {
-    timeoutMs,
-    fetchImpl,
-    ...(bypass !== undefined ? { bypass } : {}),
-  });
+  const res = await fetchJson(url, { timeoutMs, fetchImpl });
   if (!res.ok) {
     const malformed = res.kind === 'invalid-json';
     // Same failure code either way (the contract was not met), but a different
@@ -701,8 +716,7 @@ async function checkShelfContract(
     // The gate-aware fix rides BOTH verdicts: one response cannot be told to
     // set a key on one line and to check the base URL on the next.
     const fix =
-      shelfGateFix(res, bypass, shelfKeyRemedy) ??
-      (malformed ? FIX_POINT_AT_TENJIN_API : FIX_CHECK_NETWORK_AND_BASE_URL);
+      shelfGateFix(res) ?? (malformed ? FIX_POINT_AT_TENJIN_API : FIX_CHECK_NETWORK_AND_BASE_URL);
     return [
       {
         result: {
@@ -1069,131 +1083,174 @@ function fixFor(home: string, dirs: HarnessWiring[]): string {
 }
 
 /**
- * Is team mode actually on, and does the operator know which answer they got?
+ * "preview bypass: set", and only when it is.
  *
- * Team mode needs TWO settings, and the setup is two independent commands, so
- * BOTH halves are reachable: a machine with the bypass secret and `baseUrl`
- * still on the public marketplace, and a machine with `baseUrl` on a shelf of
- * its own and no secret. The CLI fails the first safe to public mode —
- * publishes keep the client scan and the confirm cascade — but silently, and an
- * operator who believes they are on the team shelf would keep writing internal
- * notes at a command that sends them to tenjin.blog. The second half is the one
- * that breaks every network probe (see {@link halfWiredShelfWarn}). Warn, never
- * fail, for both: each is a working machine, just not the one they configured.
- *
- * Reports what the probes ACTUALLY DID — it is handed the same `bypass` they
- * were, rather than re-deriving the answer — so a run whose base URL came from
- * `--base-url` reports the key as withheld instead of claiming a team mode this
- * run does not have.
+ * `TENJIN_PREVIEW_BYPASS` is the one way a CLI or daemon request reaches a
+ * PREVIEW deployment behind Vercel Deployment Protection: nothing about ordinary
+ * use needs it, because a shelf is a row on production. Presence and the origin
+ * it is pinned to are the whole report; the value is never printed and never
+ * persisted.
  */
-function checkTeamShelf(
-  settings: EffectiveSettings,
-  bypass: ShelfBypass | undefined,
-): BuiltCheck | null {
-  if (settings.shelfBypassSecret.value.length === 0) return halfWiredShelfWarn(settings);
-  const baseUrl = settings.baseUrl.value;
-  if (bypass !== undefined) {
+function checkPreviewBypass(env: NodeJS.ProcessEnv): BuiltCheck | null {
+  if (!previewBypassSet(env)) return null;
+  const pin = previewBypassPin(env);
+  // A key with no origin to ride to is the one state worth a line of its own:
+  // it is set, it looks armed, and it reaches nothing. Silence there would read
+  // as "the preview is just refusing me".
+  if (pin === null) {
     return {
       result: {
-        name: 'team shelf',
-        status: 'ok',
-        required: false,
-        detail: `${sanitizeForTerminal(baseUrl)}, and requests to it carry the bypass header`,
-      },
-    };
-  }
-  // The secret is set and the shelf is a real one, but THIS run was pointed
-  // elsewhere, so the key was withheld. Not a misconfiguration — the config is
-  // fine — which is why it reads differently from the half-wired case below.
-  const origin = tryOriginOf(baseUrl);
-  if (
-    settings.baseUrl.source !== 'file' &&
-    settings.baseUrl.source !== 'default' &&
-    origin !== null &&
-    isTeamShelfOrigin(origin, settings.publicShelfUrl.value)
-  ) {
-    return {
-      result: {
-        name: 'team shelf',
+        name: 'preview bypass',
         status: 'warn',
         required: false,
-        // NAMING THE FLAG HERE IS ITSELF THE HAZARD (see FIX_POINT_AT_TENJIN_API
-        // and lib/permissions FLAG_CAVEAT): doctor's lines reach an unattended
-        // agent, and an override is what a prompt-injected one would reach for.
-        // So this says an override happened, never how to make one.
-        detail: `this run's base URL came from ${settings.baseUrl.source === 'flag' ? 'a command-line override' : 'the environment'} (${sanitizeForTerminal(baseUrl)}), so the team shelf's bypass key was withheld and these probes ran unauthenticated`,
-        fix: 'Run doctor with no base-URL override to check the configured team shelf.',
+        detail: 'set, but no origin is named for it, so no request carries it',
+        fix: `Set ${PREVIEW_ORIGIN_ENV} to the preview deployment's origin.`,
       },
     };
   }
   return {
     result: {
-      name: 'team shelf',
-      status: 'warn',
+      name: 'preview bypass',
+      status: 'ok',
       required: false,
-      detail: `shelfBypassSecret is set, but baseUrl is the public marketplace (${sanitizeForTerminal(baseUrl)}), so this machine is in PUBLIC mode`,
-      fix: 'Point the base URL at the team deployment: `tenjin config set baseUrl <team shelf url>` (or clear the secret with `tenjin config set shelfBypassSecret ""`).',
+      detail: `set: requests to ${sanitizeForTerminal(pin)} carry the Vercel protection-bypass header`,
     },
   };
 }
 
-/**
- * Is the team's bypass key a remedy THIS MACHINE can use?
- *
- * Two conditions, and both are about the config rather than about any response:
- * the base URL came from config, and it points at a shelf of the team's own.
- *
- * - Not from config means the origin belongs to this RUN (`--base-url`,
- *   `TENJIN_BASE_URL`). Naming the key against a host a flag chose is doctor
- *   coaching the team's door key toward it, which is the move FLAG_CAVEAT exists
- *   to stop; the withheld-key warn already names the override instead.
- * - The public marketplace is not access-protected and takes no key: a secret
- *   set beside it is refused outright (`resolveShelfBypass` fails safe to public
- *   mode), so the advice would be inert AND would trip the other half-wired warn.
- *
- * Shared by the three baseUrl probes' fix lines (via {@link shelfGateFix}) and
- * {@link halfWiredShelfWarn} so they cannot answer differently about one
- * machine.
- */
-function shelfKeyIsTheRemedy(settings: EffectiveSettings, bypass?: ShelfBypass): boolean {
-  // A key that WAS issued for this request is the remedy whatever named the
-  // origin: resolveShelfBypass keys on the configured and effective origins
-  // matching, not on baseUrl.source, so repeating the configured shelf through
-  // --base-url or TENJIN_BASE_URL still sends it. Deciding on source alone hid
-  // a rejected key behind the neutral page advice.
-  if (bypass !== undefined) return true;
-  // Exactly 'file': resolveBaseUrl never returns 'project' today (a project
-  // .tenjin.json baseUrl is dropped on the floor by loadProjectConfig, by
-  // design). If a project layer ever lands, whether a repo-checked-in file may
-  // summon the team's door key must be decided then, not inherited from here.
-  if (settings.baseUrl.source !== 'file') return false;
-  const origin = tryOriginOf(settings.baseUrl.value);
-  return origin !== null && isTeamShelfOrigin(origin, settings.publicShelfUrl.value);
-}
+/** One org as `GET /api/orgs` returns it. Only the fields doctor prints are
+ *  required; anything else the server adds rides through unread. */
+const orgListSchema = z.object({
+  orgs: z.array(
+    z.object({
+      slug: z.string(),
+      name: z.string().optional(),
+      publicSearch: z.boolean().optional(),
+      role: z.string().optional(),
+      shelves: z.array(z.object({ slug: z.string(), name: z.string().optional() })).default([]),
+    }),
+  ),
+});
 
 /**
- * The other half-wiring: `baseUrl` on a shelf of the team's own, no secret.
+ * The wallet, its orgs, their shelves and each org's public-search policy, plus
+ * whether the configured shelf is one of them.
  *
- * Response-INDEPENDENT on purpose. The symptom is a protection page answering
- * every probe, and `checkApiContract` now names that when it sees one, but a
- * deployment that is not protected today can be protected tomorrow with no
- * config change here. This check reads the two settings alone, so it is true
- * before the network says anything and stays true when the network says nothing.
+ * DOCTOR NEVER MINTS, the same rule `verifyLocalWallet` holds: it presents a
+ * CACHED session and nothing else, because a diagnostic verb must not open the
+ * keystore or leave a new credential on disk. A machine with a shelf set and no
+ * presentable session is exactly the state that produces `unauthenticated` rows,
+ * so that is the warning, with the one remedy that clears it.
  *
- * The gate is {@link shelfKeyIsTheRemedy}: there is nothing to warn about unless
- * the missing key is one this machine could actually use. Empty secret plus the
- * public marketplace stays silent, because that is the default machine.
+ * THE SHELF ROUTE ANSWERS 404 FOR BOTH "not a member" AND "no such shelf", by
+ * design, so this is the only place a user learns which it was: the org list is
+ * what the wallet can actually reach.
+ *
+ * Silent on a machine with no shelf set and no orgs to report: the default
+ * machine gets no line about a feature it never turned on.
  */
-function halfWiredShelfWarn(settings: EffectiveSettings): BuiltCheck | null {
-  if (!shelfKeyIsTheRemedy(settings)) return null;
-  const baseUrl = settings.baseUrl.value;
+async function checkShelf(
+  ctx: CommandContext,
+  shelf: string | null,
+  baseUrl: string,
+  deps: DoctorDeps,
+  env: NodeJS.ProcessEnv,
+): Promise<BuiltCheck | null> {
+  if (shelf === null) return null;
+  const name = 'shelf';
+  const url = `${trimSlash(baseUrl)}/api/orgs`;
+  const auth = await searchHeaders(
+    ctx.dataDir,
+    { method: 'GET', url },
+    // `mint: null` IS the rule, not an omission: see above.
+    { now: deps.now ?? Date.now, env, mint: null },
+  );
+  if (auth.kind === 'no-wallet') {
+    return {
+      result: {
+        name,
+        status: 'warn',
+        required: false,
+        detail: `shelf "${sanitizeForTerminal(shelf)}" is set, but this machine has no wallet, so every lookup runs public-only`,
+        fix: 'Create one with `tenjin wallet create`, or clear the shelf with `tenjin shelf use --none`.',
+      },
+    };
+  }
+  if (auth.kind !== 'signed') {
+    return {
+      result: {
+        name,
+        status: 'warn',
+        required: false,
+        detail: `shelf "${sanitizeForTerminal(shelf)}" is set, but no session key can be presented (${sanitizeForTerminal(auth.detail)}), so lookups fall back to the public marketplace and their rows carry error=unauthenticated`,
+        fix: 'Run `tenjin search "anything"` once at a terminal to mint a session, then re-run doctor.',
+      },
+    };
+  }
+  const res = await fetchJson(url, {
+    timeoutMs: ctx.flags.timeout,
+    headers: auth.headers,
+    ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+  });
+  if (!res.ok) {
+    return {
+      result: {
+        name,
+        status: 'warn',
+        required: false,
+        detail: `could not list the orgs this wallet belongs to: ${sanitizeForTerminal(res.message)}`,
+        fix: FIX_CHECK_NETWORK_AND_BASE_URL,
+      },
+    };
+  }
+  const parsed = orgListSchema.safeParse(res.json);
+  if (!parsed.success) {
+    return {
+      result: {
+        name,
+        status: 'warn',
+        required: false,
+        detail: `${url} did not return an org list this CLI understands`,
+        fix: 'Update tenjin-cli; the server contract may have changed.',
+      },
+    };
+  }
+  const orgs = parsed.data.orgs;
+  if (orgs.length === 0) {
+    return {
+      result: {
+        name,
+        status: 'warn',
+        required: false,
+        detail: `this wallet is in no org, so shelf "${sanitizeForTerminal(shelf)}" answers 404 for it`,
+        fix: 'An operator provisions the org and adds this wallet; `tenjin profile` prints the address to hand them.',
+      },
+    };
+  }
+  const listed = orgs
+    .map(
+      (org) =>
+        `${sanitizeForTerminal(org.slug)} (public-search ${org.publicSearch === false ? 'off' : 'on'}: ${org.shelves.map((sh) => sanitizeForTerminal(sh.slug)).join(', ') || 'no shelves'})`,
+    )
+    .join('; ');
+  const found = orgs.some((org) => org.shelves.some((sh) => sh.slug === shelf));
+  if (!found) {
+    return {
+      result: {
+        name,
+        status: 'warn',
+        required: false,
+        detail: `the active shelf "${sanitizeForTerminal(shelf)}" is not one this wallet can reach. Reachable: ${listed}`,
+        fix: 'Pick one of the shelves above: `tenjin shelf use <slug>`.',
+      },
+    };
+  }
   return {
     result: {
-      name: 'team shelf',
-      status: 'warn',
+      name,
+      status: 'ok',
       required: false,
-      detail: `${sanitizeForTerminal(baseUrl)} is a shelf of your own, but no shelfBypassSecret is set, so every probe above ran unauthenticated`,
-      fix: 'Set the team shelf key so requests get past deployment protection: `tenjin config set shelfBypassSecret <value>`.',
+      detail: `active shelf "${sanitizeForTerminal(shelf)}"; orgs: ${listed}`,
     },
   };
 }
@@ -1516,9 +1573,6 @@ async function checkReadPath(
   baseUrl: string,
   timeoutMs: number,
   fetchImpl?: typeof fetch,
-  bypass?: ShelfBypass,
-  /** Whether the bypass key is a remedy this machine can use; see {@link shelfKeyIsTheRemedy}. */
-  shelfKeyRemedy = false,
 ): Promise<BuiltCheck> {
   // The shipped public read path, its own request: `api` and `search` share the
   // openapi document, and this probes what a reader actually fetches.
@@ -1526,11 +1580,7 @@ async function checkReadPath(
   // as agent search demand, so a `q` here would fabricate that demand into the
   // experiment this CLI exists to measure. Never add a `q` to this probe.
   const url = `${trimSlash(baseUrl)}/api/articles?limit=1`;
-  const res = await fetchJson(url, {
-    timeoutMs,
-    fetchImpl,
-    ...(bypass !== undefined ? { bypass } : {}),
-  });
+  const res = await fetchJson(url, { timeoutMs, fetchImpl });
   if (!res.ok) {
     return {
       result: {
@@ -1546,7 +1596,7 @@ async function checkReadPath(
             : `Read path ${url} failed: ${res.message}`,
         // Same gate-aware fix as `api` (see shelfGateFix): the identical
         // protection page answers this probe too, and `--json` carries both.
-        fix: shelfGateFix(res, bypass, shelfKeyRemedy) ?? FIX_CHECK_NETWORK_AND_BASE_URL,
+        fix: shelfGateFix(res) ?? FIX_CHECK_NETWORK_AND_BASE_URL,
       },
       failCode: 'API_UNREACHABLE',
     };

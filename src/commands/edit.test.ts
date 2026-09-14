@@ -1671,10 +1671,8 @@ describe('runEdit — a big appliesTo cannot flood one line', () => {
  */
 describe('runEdit — a team shelf narrows the scan exactly as publish does', () => {
   const TEAM = 'https://team.example';
-  const PUBLIC = 'https://public.example';
-  const SECRET = 'shelf-secret-abc123';
 
-  /** No --base-url flag: an override yields no bypass pair and so no team mode. */
+  /** No --base-url flag: the config's own shelf is what decides the scope. */
   function teamCtx(): CommandContext {
     const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
     return {
@@ -1687,7 +1685,7 @@ describe('runEdit — a team shelf narrows the scan exactly as publish does', ()
   async function writeShelfConfig(): Promise<void> {
     await writeFile(
       join(dir, 'config.json'),
-      JSON.stringify({ baseUrl: TEAM, publicShelfUrl: PUBLIC, shelfBypassSecret: SECRET }),
+      JSON.stringify({ baseUrl: TEAM, shelf: 'backtrack' }),
     );
   }
 
@@ -2129,10 +2127,10 @@ describe('runEdit — promoting a draft', () => {
     expect((await loadSearches(dir))[0]?.resolved?.by).toBe('publish');
   });
 
-  // publish's foreign-shelf rule, at the moment the promotion would claim: the
-  // other shelf served the search, so the claim is named on stderr, kept off the
-  // wire, and left open for `tenjin outcome` to close where it belongs.
-  it('never claims a search another shelf answered, and says where to close it', async () => {
+  // NO FOREIGN SHELF LEFT. One deployment mints every searchId this machine
+  // records, so a parked claim with a `shelf_base_url` from before the cutover
+  // is still this shelf's to claim rather than something to drop and explain.
+  it('claims a parked search whatever its stored shelf_base_url says', async () => {
     await recordSearch(dir, {
       searchId: SEARCH,
       at: new Date().toISOString(),
@@ -2143,17 +2141,14 @@ describe('runEdit — promoting a draft', () => {
       draftPostId: POST_ID,
     });
     const stub = stubServer({ get: DRAFT });
-    const { ctx, stderr } = makeCtxCapturingStderr();
+    const { ctx } = makeCtxCapturingStderr();
     const res = await runEdit(
       args({ status: 'published', yes: true }),
       ctx,
       hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
     );
-    expect(stub.putBody()).toEqual({ status: 'published' });
-    expect((res.data as { searches?: unknown }).searches).toBeUndefined();
-    expect(stderr()).toContain('was answered by https://team.example');
-    expect(stderr()).toContain(`tenjin outcome --search-id ${SEARCH} --status used`);
-    expect((await loadSearches(dir))[0]?.resolved).toBeUndefined();
+    expect(stub.putBody()).toEqual({ status: 'published', searchId: SEARCH });
+    expect((res.data as { searches?: unknown }).searches).toEqual([{ id: SEARCH, closed: true }]);
   });
 
   it('claims nothing when the parked draft is a different post', async () => {

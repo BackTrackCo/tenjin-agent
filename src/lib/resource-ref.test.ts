@@ -180,7 +180,7 @@ describe('resolveResourceRef bare-id network fallback', () => {
   it('resolves via the public by-id route when both local sources miss', async () => {
     const { fetch } = stubFetch(200, POST);
     const net: ResourceRefNetOptions = { timeoutMs: 5000, fetchImpl: fetch };
-    await expect(resolveResourceRef(RES, dir, BASE, undefined, net)).resolves.toEqual({
+    await expect(resolveResourceRef(RES, dir, BASE, net)).resolves.toEqual({
       url: `${BASE}/api/read/${POST.creator.handle}/${POST.slug}`,
       resourceId: RES,
       shelfBaseUrl: BASE,
@@ -200,7 +200,7 @@ describe('resolveResourceRef bare-id network fallback', () => {
     const upper = RES.toUpperCase();
     const { fetch } = stubFetch(200, POST);
     const net: ResourceRefNetOptions = { timeoutMs: 5000, fetchImpl: fetch };
-    await expect(resolveResourceRef(upper, dir, BASE, undefined, net)).resolves.toEqual({
+    await expect(resolveResourceRef(upper, dir, BASE, net)).resolves.toEqual({
       url: `${BASE}/api/read/${POST.creator.handle}/${POST.slug}`,
       resourceId: RES,
       shelfBaseUrl: BASE,
@@ -224,7 +224,7 @@ describe('resolveResourceRef bare-id network fallback', () => {
       creator: { handle: 'attacker' },
     });
     const net: ResourceRefNetOptions = { timeoutMs: 5000, fetchImpl: fetch };
-    await expect(resolveResourceRef(RES, dir, BASE, undefined, net)).rejects.toMatchObject({
+    await expect(resolveResourceRef(RES, dir, BASE, net)).rejects.toMatchObject({
       code: 'RESOURCE_NOT_FOUND',
     });
   });
@@ -232,7 +232,7 @@ describe('resolveResourceRef bare-id network fallback', () => {
   it('stays a clean RESOURCE_NOT_FOUND when the public route also 404s', async () => {
     const { fetch } = stubFetch(404, { error: 'not found' });
     const net: ResourceRefNetOptions = { timeoutMs: 5000, fetchImpl: fetch };
-    await expect(resolveResourceRef(RES, dir, BASE, undefined, net)).rejects.toMatchObject({
+    await expect(resolveResourceRef(RES, dir, BASE, net)).rejects.toMatchObject({
       code: 'RESOURCE_NOT_FOUND',
     });
   });
@@ -249,7 +249,7 @@ describe('resolveResourceRef bare-id network fallback', () => {
     });
     const { fetch, calls } = stubFetch(200, POST);
     const net: ResourceRefNetOptions = { timeoutMs: 5000, fetchImpl: fetch };
-    await expect(resolveResourceRef(RES, dir, BASE, undefined, net)).resolves.toMatchObject({
+    await expect(resolveResourceRef(RES, dir, BASE, net)).resolves.toMatchObject({
       resourceId: RES,
     });
     expect(calls).toHaveLength(0);

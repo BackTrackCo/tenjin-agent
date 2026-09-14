@@ -191,9 +191,9 @@ describe('runUninstall — a fully installed machine', () => {
     await seedHookScripts();
     const keep = {
       'wallet.json': '{"wallet":true}',
-      // With a door key, because the receipt line asserted below is conditional
-      // on this machine actually holding one.
-      'config.json': '{"baseUrl":"https://shelf.example","shelfBypassSecret":"door-key"}',
+      // With a shelf set, because the receipt line asserted below is
+      // conditional on this machine actually being on one.
+      'config.json': '{"baseUrl":"https://shelf.example","shelf":"backtrack"}',
       'library.json': '{"receipts":[]}',
     };
     for (const [file, body] of Object.entries(keep)) await writeFile(join(data, file), body);
@@ -224,14 +224,14 @@ describe('runUninstall — a fully installed machine', () => {
      */
     expect(text).toContain('publish.mode included');
     /**
-     * And the one kept value that is not the operator's own: the team shelf's
-     * door key is shared with everyone else behind that deployment, so an
-     * uninstall that reads as "handing this machine on" has to name it and say
-     * how to clear it. Clearing it FOR them is not on: the key is not ours to
-     * revoke, and a teammate's shelf must not go dark over an uninstall.
+     * And the one kept value that says this machine belongs to somebody's team:
+     * an uninstall that reads as "handing this machine on" has to name the
+     * active shelf and say how to clear it. Clearing it FOR them is not on:
+     * membership is the org admin's to revoke, and a teammate's shelf must not
+     * change over an uninstall.
      */
-    expect(text).toContain('shelfBypassSecret');
-    expect(text).toContain('tenjin config set shelfBypassSecret ""');
+    expect(text).toContain('the active shelf slug');
+    expect(text).toContain('tenjin shelf use --none');
     for (const item of report.kept) {
       expect(item, item).not.toMatch(/everything under/i);
     }

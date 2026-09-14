@@ -95,7 +95,8 @@ export type SessionFile = z.infer<typeof SessionFileSchema>;
  * "GET with a body" and "PUT without one" are both unrepresentable.
  */
 export type SignableRequest =
-  { method: 'GET' | 'DELETE'; url: string } | { method: 'POST' | 'PUT'; url: string; body: string };
+  | { method: 'GET' | 'DELETE'; url: string }
+  | { method: 'POST' | 'PUT' | 'PATCH'; url: string; body: string };
 
 export interface SessionKeyDeps {
   /** Clock seam (ms since epoch). */
@@ -127,7 +128,7 @@ export function targetUri(url: string): string {
 }
 
 export interface SignatureParamsInput {
-  method: 'POST' | 'PUT' | 'GET' | 'DELETE';
+  method: 'POST' | 'PUT' | 'PATCH' | 'GET' | 'DELETE';
   url: string;
   /** Present ⇒ the request has a body and content-digest joins the covered set. */
   contentDigest?: string;

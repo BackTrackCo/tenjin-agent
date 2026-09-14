@@ -15,6 +15,11 @@ import { readToken, resolveDataDir } from '../hooks/shim';
 import type { Arm, Deps, KernelConfig } from '../hooks/types';
 import { configPath } from '../lib/paths';
 import { CONFIG_DEFAULTS, RawConfigSchema, resolveLoopConfig } from '../lib/config';
+import { resolveWriteAuth } from '../lib/consent';
+import { searchHeaders } from '../lib/search-auth';
+import type { SignableRequest } from '../lib/session-present';
+import type { WriteAuth } from '../lib/session-key';
+import { createLocalProvider } from '../lib/wallet/local';
 import { bind, derivePort, IdleTimer, openLog, shutdown, writePid } from './lifecycle';
 import { createHookServer } from './server';
 
@@ -49,9 +54,10 @@ const ARMS: Arm[] = [
 
 /**
  * Config is read here without `loadConfig`'s hooks-key migration: the daemon
- * needs `loop`, `team`, `hooks` and the three shelf fields the search leg
- * routes on, and must not throw on a file an older CLI wrote. Invalid JSON or
- * schema falls back to defaults with a log line, never to a dead daemon.
+ * needs `loop`, `team`, `hooks`, the one origin and the one shelf slug the
+ * search leg routes on, and must not throw on a file an older CLI wrote.
+ * Invalid JSON or schema falls back to defaults with a log line, never to a
+ * dead daemon.
  *
  * NO FLAG OR ENV LAYER. A daemon serves every session on the machine, so the
  * only `baseUrl` it can honour is the one on disk; `--base-url` belongs to the
@@ -62,8 +68,7 @@ const DEFAULTS: KernelConfig = {
   team: CONFIG_DEFAULTS.team,
   hooks: CONFIG_DEFAULTS.hooks,
   baseUrl: CONFIG_DEFAULTS.baseUrl,
-  publicShelfUrl: CONFIG_DEFAULTS.publicShelfUrl,
-  shelfBypassSecret: CONFIG_DEFAULTS.shelfBypassSecret,
+  shelf: CONFIG_DEFAULTS.shelf,
   publish: CONFIG_DEFAULTS.publish,
 };
 
@@ -80,8 +85,7 @@ function readKernelConfig(dataDir: string, log: (l: string) => void): KernelConf
       team: { publicFallback: r.team?.publicFallback ?? CONFIG_DEFAULTS.team.publicFallback },
       hooks: { ...CONFIG_DEFAULTS.hooks, ...(r.hooks ?? {}) } as KernelConfig['hooks'],
       baseUrl: r.baseUrl ?? DEFAULTS.baseUrl,
-      publicShelfUrl: r.publicShelfUrl ?? DEFAULTS.publicShelfUrl,
-      shelfBypassSecret: r.shelfBypassSecret ?? DEFAULTS.shelfBypassSecret,
+      shelf: r.shelf ?? DEFAULTS.shelf,
       publish: { ...CONFIG_DEFAULTS.publish, ...(r.publish ?? {}) } as KernelConfig['publish'],
     };
   } catch {
@@ -114,12 +118,39 @@ async function main(): Promise<void> {
   // shims racing to spawn could otherwise have the loser unlink the file the
   // winner had just opened. The continuation after `await bind()` runs before
   // any connection callback, so no fire can see `deps.db` unset.
+  // ONE WriteAuth PER DAEMON, built lazily and reused: minting decrypts the
+  // keystore, and the daemon must never prompt. `createLocalProvider` with
+  // `isTTY: false` is the seam `verifyLocalWallet` uses, so the passphrase
+  // comes from `TENJIN_WALLET_PASSPHRASE` or the OS keychain or not at all.
+  // A machine that cannot sign gets `unauthenticated` rows and public answers,
+  // which is the whole point: a credential problem never withholds one.
+  let writeAuth: WriteAuth | null = null;
+  const mint = async (): Promise<WriteAuth> => {
+    if (writeAuth !== null) return writeAuth;
+    const provider = createLocalProvider({
+      dir: dataDir,
+      env: process.env,
+      passphrase: { isTTY: false },
+    });
+    const signer = await provider.getSigner();
+    writeAuth = resolveWriteAuth({
+      signer,
+      baseUrl: config.baseUrl,
+      dataDir,
+      scope: 'read',
+      env: process.env,
+    });
+    return writeAuth;
+  };
+
   const deps = {
     config: () => config,
     clock,
     log,
     arms: ARMS,
     adapters: ADAPTERS,
+    auth: (req: SignableRequest) =>
+      searchHeaders(dataDir, req, { now: clock, env: process.env, mint }),
   } as Deps;
 
   const startedAt = clock();
