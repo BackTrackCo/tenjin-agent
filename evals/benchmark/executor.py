@@ -115,6 +115,8 @@ class LaunchRequest:
     # The run's egress (`container.Egress`): the network the container joins
     # and the proxy variables it is given. None outside a live run.
     egress: Any = None
+    # Run-owned access-only credential snapshot, outside collected artifacts.
+    subscription_auth: Path | None = None
 
 
 @dataclass(frozen=True)

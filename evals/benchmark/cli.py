@@ -486,6 +486,10 @@ def live_run(out: Path, manifest_path: Path, attestation_path: Path | None = Non
     config = manifest_module.load(manifest_path)
     with contextlib.ExitStack() as locks:
         locks.enter_context(lease.acquire(Path(os.path.abspath(out))))
+        if config.harness == "codex" and config.concurrency > 1:
+            from . import codex_live
+            auth = locks.enter_context(codex_live.parallel_auth(out, config.pins, options.get("environ")))
+            options["runtime"] = dataclasses.replace(options.get("runtime") or runner.Runtime(), subscription_auth=auth)
         if config.corpus is not None:
             resource = Path(tempfile.gettempdir()) / "tenjin-benchmark-corpus" / sha256_json({key: config.corpus.facts[key] for key in ("provider", "project_id", "branch_id")})
             locks.enter_context(lease.acquire(resource))

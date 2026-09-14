@@ -2,12 +2,17 @@
 from __future__ import annotations
 
 import json
+import base64
+import binascii
+from contextlib import contextmanager
+import math
 import os
 from pathlib import Path
 import selectors
 import shlex
 import subprocess
 import time
+import tempfile
 import uuid
 
 from . import harness_release, protocol, claude_live, codex_usage, container, images, sha256_json, tenjin_arm
@@ -31,8 +36,9 @@ def validate_pins(pins):
         raise ExecutorError("Codex reasoning effort must be explicit; ultra delegates outside the core protocol")
     if pins.get("turn_budget") is not None or pins.get("max_budget_usd") is not None:
         raise ExecutorError("Codex has no Claude turn/dollar cap; declare null and use the shared wall-clock cap")
-    if pins.get("concurrency", 1) != 1:
-        raise ExecutorError("one managed subscription credential requires a serialized Codex job stream")
+    concurrency = pins.get("concurrency", 1)
+    if isinstance(concurrency, bool) or not isinstance(concurrency, int) or concurrency < 1:
+        raise ExecutorError("Codex concurrency must be a positive integer")
     if pins.get("speed_mode", "standard") not in {"standard", "fast"}:
         raise ExecutorError("unknown Codex speed mode")
 
@@ -42,21 +48,75 @@ def credential_seam(pins):
     return AUTH_ENV
 
 
-def auth_path(roots, *, dry_run=False):
-    if dry_run:
-        return roots.run_dir.parent / "subscription-auth" / "auth.json"
-    value = os.environ.get(AUTH_ENV)
-    if not value:
-        raise ExecutorError(f"{AUTH_ENV} must name an auth-only subscription file outside the run")
-    path = Path(value).resolve()
-    if path.is_relative_to(roots.run_dir.resolve()) or not path.is_file() or path.stat().st_mode & 0o077:
+def read_auth(path, run_dir):
+    if path.is_relative_to(run_dir.resolve()) or not path.is_file() or path.stat().st_mode & 0o077:
         raise ExecutorError("subscription auth must be a private 0600 file outside benchmark artifacts")
     try:
         auth = json.loads(path.read_text())
     except (OSError, ValueError) as error:
         raise ExecutorError("subscription auth file is unreadable") from error
-    if auth.get("auth_mode") != "chatgpt" or auth.get("OPENAI_API_KEY") or not (auth.get("tokens") or {}).get("access_token"):
+    if (not isinstance(auth, dict) or auth.get("auth_mode") != "chatgpt" or auth.get("OPENAI_API_KEY")
+            or not isinstance(auth.get("tokens"), dict) or not auth["tokens"].get("access_token")):
         raise ExecutorError("benchmark refuses API-key or non-ChatGPT authentication")
+    return auth
+
+
+def source_auth_path(environ=None):
+    value = (os.environ if environ is None else environ).get(AUTH_ENV)
+    if not value:
+        raise ExecutorError(f"{AUTH_ENV} must name an auth-only subscription file outside the run")
+    return Path(value).resolve()
+
+
+def require_fresh_access(auth, pins):
+    # This is a scheduling check, not signature verification; the provider
+    # still authenticates the token. Never refresh a shared grant in workers.
+    try:
+        parts = auth["tokens"]["access_token"].split(".")
+        if len(parts) != 3:
+            raise ValueError("not a JWT")
+        claims = json.loads(base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4)))
+        expiry = claims["exp"]
+        if isinstance(expiry, bool) or not isinstance(expiry, (int, float)) or not math.isfinite(expiry):
+            raise ValueError("no finite expiry")
+    except (KeyError, TypeError, ValueError, AttributeError, binascii.Error):
+        raise ExecutorError("parallel Codex requires a ChatGPT access token with a readable expiry") from None
+    if expiry < time.time() + float(pins["wall_clock_s"]) + 300:
+        raise ExecutorError("refresh subscription auth serially before parallel admission: access token cannot cover the phase cap plus setup")
+
+
+@contextmanager
+def parallel_auth(run_dir, pins, environ=None):
+    """One read-only, non-refreshing snapshot; never put credentials in a run.
+
+    Native profiles remain per trial. Workers cannot rotate the shared grant,
+    and the caller's renewable auth remains untouched. Refresh the source
+    serially before a run when needed; expiry stops new admission.
+    """
+    source = source_auth_path(environ)
+    auth = read_auth(source, run_dir)
+    require_fresh_access(auth, pins)
+    auth["tokens"]["refresh_token"] = ""
+    with tempfile.TemporaryDirectory(prefix="benchmark-codex-access-", dir=source.parent) as directory:
+        path = Path(directory) / "auth.json"
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "w") as handle:
+            json.dump(auth, handle)
+        yield path
+
+
+def auth_path(roots, *, dry_run=False, pins=None, snapshot=None):
+    if dry_run:
+        return roots.run_dir.parent / "subscription-auth" / "auth.json"
+    parallel = pins is not None and pins.get("concurrency", 1) > 1
+    if parallel and snapshot is None:
+        raise ExecutorError("parallel Codex requires the run-owned access-only auth snapshot")
+    path = Path(snapshot).resolve() if snapshot is not None else source_auth_path()
+    auth = read_auth(path, roots.run_dir)
+    if parallel:
+        if auth["tokens"].get("refresh_token"):
+            raise ExecutorError("parallel Codex workers may not receive a refresh token")
+        require_fresh_access(auth, pins)
     return path
 
 
@@ -185,7 +245,7 @@ def launch(request: LaunchRequest) -> Launch:
     claude_live.apply_overlay(roots, overlay)
     claude_live.inject_cases(roots, request.task)
     provisioned = request.provision is not None
-    auth = auth_path(roots, dry_run=request.dry_run)
+    auth = auth_path(roots, dry_run=request.dry_run, pins=pins, snapshot=request.subscription_auth)
     allow_agents = "Agent" in request.task.get("tools", pins.get("tools", []))
     protected = [roots.repo / name for name in (".git", ".codex", ".agents")]
     for path in protected:
@@ -219,7 +279,7 @@ def launch(request: LaunchRequest) -> Launch:
         image=request.image or images.fixture_stem(request.task["id"]), workdir=roots.repo,
         trial_dir=roots.base / claude_live.HARBOR_DIR,
         environment_dir=roots.base / claude_live.HARBOR_DIR / claude_live.ENVIRONMENT_DIR,
-        plan=[*container.mounts(roots), container.Mount(auth, target),
+        plan=[*container.mounts(roots), container.Mount(auth, target, "ro" if pins.get("concurrency", 1) > 1 else "rw"),
               *(container.Mount(path, path, "ro") for path in protected)], environment=environment,
         egress=request.egress or container.plan_egress(()), daemon=provisioned,
     )
