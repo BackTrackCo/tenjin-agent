@@ -123,10 +123,9 @@ and excerpt), with freshness/price/applicability as HARD gates. This endpoint on
 `matched: 0` means no eligible results were returned. An empty result carries a `hint`
 pointing at GET `/api/articles`, where the catalog is browsed. Weak candidates can remain
 listed even when none meets the shelf's delivery threshold. Matching uses wording and meaning.
-A rephrased question is worth one retry. Send the full work order with `trigger: dispatch` (≤8,000 chars);
-the server retrieves sentence questions and reranks with the full received query. Other calls
-accept ≤512 chars: send one natural-language sentence, not keywords, generalized first (no
-private identifiers, internal names, or secrets: generalize the NAMES, keep the specifics).
+A rephrased question is worth one retry. Send one natural-language sentence, not keywords, or a
+whole work order or prompt (≤8,000 chars), generalized first (no private identifiers, internal
+names, or secrets: generalize the NAMES, keep the specifics).
 
 - `POST https://tenjin.sh/api/search` with `{ "schemaVersion": 3, "view": "decision",
   "query": "<task question>", "identifiers"?: ["PR 751", "migrate.yml"], "limit"?: 5,
