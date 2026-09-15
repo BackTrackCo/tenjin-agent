@@ -410,7 +410,12 @@ describe('contract fixture request shapes', () => {
 });
 
 /**
- * THE SHELF ROUTES, PINNED THE WAY `assertPublishContract` PINS `PostCreate`.
+ * THE SHELF CONTRACT, PINNED THE WAY `assertPublishContract` PINS `PostCreate`.
+ *
+ * ONE ENDPOINT PER ACTION (owner decision 2026-09-15). The per-shelf route
+ * families are gone: `POST /api/search` and `POST /api/keys/resolve` each gained
+ * an optional `shelf`, so the pins below are on those two bodies rather than on
+ * `/api/shelves/{slug}/...`, which nothing calls any more.
  *
  * These walks run, today, against `shelfSpecByHand()` below: the document
  * `shelf-scope` has to produce, written out here so a typo in a walk path fails
@@ -418,10 +423,10 @@ describe('contract fixture request shapes', () => {
  * the committed fixture, because `shelf-scope` is not deployed and this repo
  * must not invent OpenAPI entries for a server half that does not exist. The
  * tripwire below is what makes that a step rather than a hope: it asserts the
- * fixture does NOT yet declare the shelf paths, so the moment somebody refreshes
- * `src/fixtures/openapi.fixture.json` from the deployed `openapi.json` this
- * suite goes red and the refresher has to delete the tripwire and call
- * `assertShelfContract(fixtureDoc)` in its place.
+ * fixture's search request does NOT yet declare `shelf`, so the moment somebody
+ * refreshes `src/fixtures/openapi.fixture.json` from the deployed
+ * `openapi.json` this suite goes red and the refresher has to delete the
+ * tripwire and call `assertShelfContract(fixtureDoc)` in its place.
  *
  * Pinned on both sides, because the RESPONSE is what this PR's parser is newly
  * built on: a server that flattened the two-list envelope back to one list would
@@ -429,16 +434,9 @@ describe('contract fixture request shapes', () => {
  */
 const SHELF_OPS: PinnedOp[] = [
   {
-    path: '/api/shelves/{slug}/search',
+    path: '/api/keys/resolve',
     method: 'post',
-    operationId: 'shelfSearch',
-    deprecated: false,
-    migration: 'a signed shelf search has no second path; the loop and `tenjin search` stop here',
-  },
-  {
-    path: '/api/shelves/{slug}/keys/resolve',
-    method: 'post',
-    operationId: 'shelfKeysResolve',
+    operationId: 'keysResolve',
     deprecated: false,
     migration: "the failure arm's fingerprint round has no second path",
   },
@@ -475,47 +473,121 @@ const SHELF_OPS: PinnedOp[] = [
     method: 'get',
     operationId: 'orgList',
     deprecated: false,
-    // Three call sites read this body: `org list`, `shelf use`'s validation and
-    // doctor's shelf check. It was the one shape in this set with no pin, and a
-    // server that nested it differently would break all three at once.
+    // Three call sites read this body: `org list`, `shelf use`'s resolution of a
+    // bare name into the qualified one, and doctor's shelf check. It was the one
+    // shape in this set with no pin, and a server that nested it differently
+    // would break all three at once.
     migration: '`tenjin org list`, `shelf use` and doctor all read this list',
   },
 ];
 
+/**
+ * One `$ref` hop into `components`, because a real OpenAPI document says
+ * `{ $ref: '#/components/schemas/SearchRequestV3' }` where the by-hand document
+ * below inlines the schema. Walking only the inline spelling would make every
+ * pin here pass by vacuum the day the fixture is refreshed.
+ */
+function deref(doc: unknown, node: unknown): unknown {
+  const ref = get(node, '$ref');
+  if (typeof ref !== 'string' || !ref.startsWith('#/')) return node;
+  let at: unknown = doc;
+  for (const segment of ref.slice(2).split('/')) at = get(at, segment);
+  return at;
+}
+
+/**
+ * The shapes a schema node can be read as: itself, plus each branch of an
+ * `anyOf`/`oneOf`, each dereferenced. One endpoint now answers two shapes (the
+ * flat result, and the two-list wrapper when the body named a shelf), and a
+ * server is free to spell that as a union; this reads either spelling rather
+ * than pinning the one this repo happened to guess.
+ */
+function schemaVariants(doc: unknown, node: unknown): unknown[] {
+  const resolved = deref(doc, node);
+  const union = get(resolved, 'anyOf') ?? get(resolved, 'oneOf');
+  if (!Array.isArray(union)) return [resolved];
+  return union.map((branch) => deref(doc, branch));
+}
+
+/** The `properties` of whichever variant declares `wanted`, falling back to the
+ *  first so a missing field fails by NAME rather than as an undefined walk. */
+function propertiesOf(doc: unknown, node: unknown, wanted: string): unknown {
+  const variants = schemaVariants(doc, node);
+  const hit = variants.find((v) => get(v, 'properties', wanted) !== undefined);
+  return get(hit ?? variants[0], 'properties');
+}
+
 export function assertShelfContract(doc: unknown): void {
   for (const op of SHELF_OPS) assertPinnedOp(doc, op);
 
-  // THE REQUEST: the public search body plus `includePublic`, and NOT `shelf` or
-  // `scope`. The slug is in the URL, so nothing about it belongs in the body.
-  const search = get(
+  // THE REQUEST: the public search body plus `shelf` and `includePublic`.
+  //
+  // THIS PIN IS THE REVERSE OF THE ONE IT REPLACES, BY DESIGN. Until the owner
+  // decision of 2026-09-15 the shelf was a URL segment and this asserted that
+  // `shelf` never appeared in a body; the route families were then deleted in
+  // favour of one endpoint per action, so the body is the only place a shelf can
+  // be named and its ABSENCE from the schema is now the drift to catch.
+  const search = propertiesOf(
     doc,
-    'paths',
-    '/api/shelves/{slug}/search',
-    'post',
-    'requestBody',
-    'content',
-    'application/json',
-    'schema',
-    'properties',
+    get(
+      doc,
+      'paths',
+      '/api/search',
+      'post',
+      'requestBody',
+      'content',
+      'application/json',
+      'schema',
+    ),
+    'shelf',
   );
-  for (const field of ['schemaVersion', 'query', 'view', 'limit', 'includePublic']) {
-    expect(get(search, field), `shelf search request must declare ${field}`).toBeDefined();
+  for (const field of ['schemaVersion', 'query', 'view', 'limit', 'shelf', 'includePublic']) {
+    expect(get(search, field), `search request must declare ${field}`).toBeDefined();
   }
-  expect(get(search, 'shelf'), 'the slug is in the URL, never in the body').toBeUndefined();
   expect(get(search, 'scope'), 'there is no scope field on the wire').toBeUndefined();
+  // QUALIFIED, and the server is what enforces it: a pattern admitting a bare
+  // slug would make `notes` mean whichever org the server looked at first.
+  expect(
+    String(get(search, 'shelf', 'pattern') ?? ''),
+    'the shelf pattern must require an <org>/<shelf> pair',
+  ).toContain('/');
 
-  // THE RESPONSE: two independent lists, the public one nullable.
-  const response = get(
+  // THE KEYS BODY carries the same `shelf` and no `includePublic`: there is no
+  // public resolve for a failure round to fall back to (decision 13).
+  const keys = propertiesOf(
     doc,
-    'paths',
-    '/api/shelves/{slug}/search',
-    'post',
-    'responses',
-    '200',
-    'content',
-    'application/json',
-    'schema',
-    'properties',
+    get(
+      doc,
+      'paths',
+      '/api/keys/resolve',
+      'post',
+      'requestBody',
+      'content',
+      'application/json',
+      'schema',
+    ),
+    'shelf',
+  );
+  expect(get(keys, 'keys'), 'the keys body must declare keys').toBeDefined();
+  expect(get(keys, 'shelf'), 'the keys body must declare shelf').toBeDefined();
+
+  // THE RESPONSE a shelf search gets back: two independent lists, the public one
+  // nullable. Declared beside the flat one the same endpoint answers with when
+  // no shelf was named.
+  const response = propertiesOf(
+    doc,
+    get(
+      doc,
+      'paths',
+      '/api/search',
+      'post',
+      'responses',
+      '200',
+      'content',
+      'application/json',
+      'schema',
+    ),
+    'shelf',
   );
   expect(get(response, 'shelf'), 'the shelf list must be its own key').toBeDefined();
   expect(get(response, 'public'), 'the public list must be its own key').toBeDefined();
@@ -550,8 +622,8 @@ export function assertShelfContract(doc: unknown): void {
   expect(get(patch, 'publicSearch'), 'PATCH /api/orgs/{slug} takes { publicSearch }').toBeDefined();
 
   // THE ORG LIST'S BODY, because three call sites parse it: `org list`,
-  // `shelf use`'s validation of a slug before it is persisted, and doctor's
-  // shelf check. Each needs `orgs[].slug`, `orgs[].shelves[].slug` and the
+  // `shelf use`'s resolution of a name into the qualified form it persists, and
+  // doctor's shelf check. Each needs `orgs[].slug`, `orgs[].shelves[].slug` and the
   // policy flag, so those are what is pinned.
   const org = get(
     doc,
@@ -597,20 +669,23 @@ function shelfSpecByHand(): unknown {
   const empty = {};
   return {
     paths: {
-      '/api/shelves/{slug}/search': {
+      '/api/search': {
         post: {
-          operationId: 'shelfSearch',
+          operationId: 'search',
           ...bodyWith({
             schemaVersion: empty,
             query: empty,
             view: empty,
             limit: empty,
+            shelf: { pattern: '^[a-z0-9-]{2,32}/[a-z0-9-]{2,32}$' },
             includePublic: empty,
           }),
           ...answersWith({ shelf: empty, public: empty }),
         },
       },
-      '/api/shelves/{slug}/keys/resolve': { post: { operationId: 'shelfKeysResolve' } },
+      '/api/keys/resolve': {
+        post: { operationId: 'keysResolve', ...bodyWith({ keys: empty, shelf: empty }) },
+      },
       '/api/shelves': { post: { operationId: 'shelfCreate' } },
       '/api/orgs': {
         get: {
@@ -639,13 +714,15 @@ function shelfSpecByHand(): unknown {
   };
 }
 
-describe('the shelf routes are pinned but not yet in the fixture', () => {
+describe('the shelf fields are pinned but not yet in the fixture', () => {
   it('every walk passes against the document shelf-scope has to produce', () => {
     expect(() => assertShelfContract(shelfSpecByHand())).not.toThrow();
   });
 
   it.each([
-    ['the two-list response', ['/api/shelves/{slug}/search', 'post', 'responses']],
+    ['the two-list response', ['/api/search', 'post', 'responses']],
+    ['the shelf-bearing search body', ['/api/search', 'post', 'requestBody']],
+    ['the keys body', ['/api/keys/resolve', 'post', 'requestBody']],
     ['the members body', ['/api/orgs/{slug}/members', 'post', 'requestBody']],
     ['the org list body', ['/api/orgs', 'get', 'responses']],
     ['the publicSearch patch', ['/api/orgs/{slug}', 'patch', 'requestBody']],
@@ -662,11 +739,14 @@ describe('the shelf routes are pinned but not yet in the fixture', () => {
    * that is true today and becomes false in exactly the act that makes the pins
    * runnable against the SERVER's own document, so the fixture refresh cannot
    * land without turning them on.
+   *
+   * It moved with the design: the fixture declares `/api/search` already, so
+   * what is not there yet is the `shelf` field on its request schema.
    */
   it('FOLLOW-UP: refresh the fixture after shelf-scope deploys, then turn these pins on', () => {
     expect(
-      get(fixtureDoc, 'paths', '/api/shelves/{slug}/search'),
-      'the fixture now declares the shelf routes: delete this test and call assertShelfContract(fixtureDoc) instead',
+      get(fixtureDoc, 'components', 'schemas', 'SearchRequestV3', 'properties', 'shelf'),
+      'the fixture now declares `shelf` on the search body: delete this test and call assertShelfContract(fixtureDoc) instead',
     ).toBeUndefined();
   });
 });
