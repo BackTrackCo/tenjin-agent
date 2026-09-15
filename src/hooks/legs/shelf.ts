@@ -31,7 +31,7 @@ import type {
  * bypass, a non-JSON body and a JSON body of the wrong shape are five
  * different facts and used to be one silent miss.
  *
- * THE LEG SENDS `Question.text` WHOLE. The cut to the trigger's bound is
+ * THE LEG SENDS `Question.text` WHOLE. The cut to the shelf's bound is
  * `question()`'s (`hooks/question.ts`), made once when the plan is built, so
  * what the leg sends, what the ledger stores and what the claim key hashes are
  * one string. `buildSearchRequest` still throws `USAGE` past the bound, as the

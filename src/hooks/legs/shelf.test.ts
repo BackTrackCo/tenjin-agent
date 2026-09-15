@@ -89,11 +89,7 @@ describe('searchLeg request', () => {
   it('sends `Question.text` whole: the cut was made once, upstream', async () => {
     const { fetchImpl, calls } = stub(() => json(200, envelope([])));
     const leg = searchLeg('team', 'dispatch', CONFIG, fetchImpl);
-    // Already at the dispatch trigger's bound, because `question()` cut it
-    // there. The leg repeats no cut of its own, so a work order longer than any
-    // other trigger's 512 reaches the shelf as the plan built it.
-    const asked = question('collation '.repeat(600).trim(), 'dispatch');
-    expect(asked.text.length).toBeGreaterThan(512);
+    const asked = question('collation '.repeat(600).trim());
     const result = await leg.request(asked, 4000, new AbortController().signal);
     expect(result.status).toBe('ok');
     expect((await body(calls)).query).toBe(asked.text);

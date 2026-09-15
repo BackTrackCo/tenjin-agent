@@ -5,8 +5,6 @@ import {
   getPostMetadata,
   postSearch,
   postOutcomes,
-  queryMax,
-  DISPATCH_QUERY_MAX,
   QUERY_MAX,
   type SearchResult,
 } from './agent-api';
@@ -108,35 +106,12 @@ describe('buildSearchRequest', () => {
   it('rejects an empty question', () => {
     expect(() => buildSearchRequest({ question: '   ' })).toThrowError(CliError);
   });
-  it('rejects a question over 512 chars on every trigger but dispatch', () => {
-    expect(() => buildSearchRequest({ question: 'x'.repeat(513) })).toThrowError(/512/);
-    expect(() => buildSearchRequest({ question: 'x'.repeat(513), trigger: 'prompt' })).toThrowError(
-      /512/,
-    );
-    expect(() =>
-      buildSearchRequest({ question: 'x'.repeat(512), trigger: 'prompt' }),
-    ).not.toThrowError();
-  });
-
-  // A work order is the one query the shelf reads whole: it splits a dispatch
-  // query into sentence sub-queries and reranks against all of it, so the bound
-  // is the TRIGGER's and this guard has to know which trigger it is guarding.
-  it('accepts 8,000 characters on the dispatch trigger and rejects 8,001', () => {
-    const body = buildSearchRequest({ question: 'x'.repeat(8000), trigger: 'dispatch' });
-    expect(body.query.length).toBe(8000);
-    expect(body.trigger).toBe('dispatch');
-    expect(() =>
-      buildSearchRequest({ question: 'x'.repeat(8001), trigger: 'dispatch' }),
-    ).toThrowError(/8000/);
-  });
-
-  it('queryMax names the bound each trigger is cut to', () => {
-    expect(queryMax('dispatch')).toBe(DISPATCH_QUERY_MAX);
-    expect(DISPATCH_QUERY_MAX).toBe(8000);
-    expect(QUERY_MAX).toBe(512);
-    for (const trigger of ['cli', 'prompt', 'research', 'failure'] as const) {
-      expect(queryMax(trigger)).toBe(QUERY_MAX);
-    }
+  it('accepts 8,000 characters on any trigger and rejects 8,001', () => {
+    expect(QUERY_MAX).toBe(8000);
+    expect(
+      buildSearchRequest({ question: 'x'.repeat(8000), trigger: 'research' }).query,
+    ).toHaveLength(8000);
+    expect(() => buildSearchRequest({ question: 'x'.repeat(8001) })).toThrowError(/8000/);
   });
   it('rejects a malformed freshWithin', () => {
     expect(() => buildSearchRequest({ question: 'q', freshWithin: '30 days' })).toThrowError(
