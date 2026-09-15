@@ -58,7 +58,10 @@ interface Seen {
  *
  * NEITHER IS EVER SILENT. `refusedReason` below turns both into the sentence
  * the row carries, so a fire that asked a shelf and was turned away says why in
- * `fires.error` instead of reading as an ordinary miss.
+ * `fires.error` instead of reading as an ordinary miss. The keys endpoint gets
+ * its own sentence from `keysRefusedReason`, because a 404 there is EITHER
+ * membership or knowledge keys being off, and the two remedies are different
+ * people's.
  */
 function statusOf(seen: Seen | null, signal: AbortSignal): LegStatus {
   if (signal.aborted) {
@@ -75,10 +78,13 @@ function statusOf(seen: Seen | null, signal: AbortSignal): LegStatus {
 }
 
 /**
- * The sentence a refused shelf call writes to the ledger, or undefined when the
+ * The sentence a refused SEARCH call writes to the ledger, or undefined when the
  * status was not a refusal. Only a call that NAMED a shelf can be refused for
  * membership, so the shelf is named in the text: it is the one fact that tells
  * an operator which of the two remedies is theirs.
+ *
+ * SEARCH ONLY. On `/api/search` a 404 has the one cause; on `/api/keys/resolve`
+ * it has two, and {@link keysRefusedReason} is the sentence for that endpoint.
  */
 function refusedReason(seen: Seen | null, shelf: string | null): string | undefined {
   if (seen === null || shelf === null) return undefined;
@@ -89,6 +95,36 @@ function refusedReason(seen: Seen | null, shelf: string | null): string | undefi
     return `not-a-member: shelf "${shelf}" answered 404, so this creator is not in that org or no such shelf exists`;
   }
   return undefined;
+}
+
+/** The server's `error.code`, when the refusal body carried one. */
+function errorCodeOf(body: unknown): string | undefined {
+  const error = (body as { error?: unknown } | undefined)?.error;
+  const code = (error as { code?: unknown } | undefined)?.code;
+  return typeof code === 'string' ? code : undefined;
+}
+
+/**
+ * The sentence a refused KEYS call writes to the ledger.
+ *
+ * A 404 HERE HAS TWO CAUSES, NOT ONE, and they have different remedies: this
+ * wallet is not a member of the shelf (an org admin's to fix), or knowledge keys
+ * are off on that shelf (a redeploy with KNOWLEDGE_KEYS on). Telling a member
+ * they are not one sends them to the wrong person, so the code the server sends
+ * decides the sentence, and a 404 with no code names both causes rather than
+ * picking one. 401 and 403 mean the same here as on search.
+ */
+function keysRefusedReason(
+  seen: Seen | null,
+  shelf: string | null,
+  body: unknown,
+): string | undefined {
+  if (seen === null || shelf === null) return undefined;
+  if (seen.status !== 404) return refusedReason(seen, shelf);
+  if (errorCodeOf(body) === 'not_enabled') {
+    return `keys-off: shelf "${shelf}" answered 404 not_enabled, so knowledge keys are off on that shelf; turn KNOWLEDGE_KEYS on for it and redeploy`;
+  }
+  return `refused: shelf "${shelf}" answered 404, so either knowledge keys are off on that shelf or this creator is not in that org`;
 }
 
 function readString(candidate: SearchCandidate, key: string): string | undefined {
@@ -315,7 +351,11 @@ export function keysLeg(cfg: KernelConfig, keys: string[], fetchImpl?: typeof fe
           fetchImpl: probeFetch(fetchImpl, (s) => (seen = s)),
           jsonBody: body,
         });
-        const refused = refusedReason(seen, cfg.shelf);
+        // The BODY decides which of the two 404s this was, so the code is read
+        // before the status is turned into a row. It is only there on the ok
+        // branch; a transport failure carries no parsed body and falls through
+        // to the sentence that names both causes.
+        const refused = keysRefusedReason(seen, cfg.shelf, res.ok ? res.json : undefined);
         const reason = refused === undefined ? {} : { authError: refused };
         if (!res.ok || res.status !== 200) return failed(['keys'], statusOf(seen, signal), reason);
         const parsed = searchResultSchema.safeParse(res.json);

@@ -676,7 +676,7 @@ describe('keysLeg', () => {
     });
   });
 
-  it('a 404 (keys not enabled) is one refused row carrying the reason', async () => {
+  it('a 404 carrying not_enabled says KEYS ARE OFF, not that this creator is a stranger', async () => {
     const { fetchImpl } = stub(() => json(404, { error: { code: 'not_enabled' } }));
     const results = await keysLeg(CONFIG, KEYS, fetchImpl).request(
       q(''),
@@ -686,10 +686,46 @@ describe('keysLeg', () => {
     );
     expect(results).toHaveLength(1);
     expect(results[0]).toMatchObject({ shelf: 'keys', status: 'refused', answer: null });
-    // NEVER SILENT: the row says which shelf answered 404 and what that means,
-    // because an operator reading the ledger has two different remedies.
-    expect(String(results[0]?.authError)).toContain('not-a-member');
-    expect(String(results[0]?.authError)).toContain(SHELF);
+    /**
+     * NEVER SILENT, AND NEVER THE WRONG REMEDY. A 404 on this endpoint has two
+     * causes: not a member, or knowledge keys off on the shelf. The server said
+     * which, so the row says which. Telling a member they are not in the org
+     * sends them to an admin who has nothing to fix.
+     */
+    const reason = String(results[0]?.authError);
+    expect(reason).toContain('keys-off');
+    expect(reason).toContain('KNOWLEDGE_KEYS');
+    expect(reason).not.toContain('not-a-member');
+    expect(reason).toContain(SHELF);
+  });
+
+  it('a 404 with no code names BOTH causes rather than picking one', async () => {
+    const { fetchImpl } = stub(() => json(404, { error: 'nope' }));
+    const results = await keysLeg(CONFIG, KEYS, fetchImpl).request(
+      q(''),
+      3000,
+      new AbortController().signal,
+      deps(signed),
+    );
+    expect(results[0]).toMatchObject({ shelf: 'keys', status: 'refused', answer: null });
+    // The ambiguous case is the one the old single sentence got wrong: with
+    // nothing to tell the two apart, the row states both and names the shelf.
+    const reason = String(results[0]?.authError);
+    expect(reason).toContain('knowledge keys are off');
+    expect(reason).toContain('not in that org');
+    expect(reason).toContain(SHELF);
+  });
+
+  it('a 401 on the keys call reads the same as on search', async () => {
+    const { fetchImpl } = stub(() => json(401, { error: 'nope' }));
+    const results = await keysLeg(CONFIG, KEYS, fetchImpl).request(
+      q(''),
+      3000,
+      new AbortController().signal,
+      deps(signed),
+    );
+    expect(results[0]).toMatchObject({ shelf: 'keys', status: 'refused' });
+    expect(String(results[0]?.authError)).toContain('unauthenticated');
   });
 
   it('a 200 with items is a hit on the first item, strong or not, calibration key-v1', async () => {
