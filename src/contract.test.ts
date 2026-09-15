@@ -749,6 +749,39 @@ describe('the shelf fields are pinned but not yet in the fixture', () => {
       'the fixture now declares `shelf` on the search body: delete this test and call assertShelfContract(fixtureDoc) instead',
     ).toBeUndefined();
   });
+
+  /**
+   * THE SAME GAP, ON A THIRD ENDPOINT. The design names `/api/search` and
+   * `/api/keys/resolve`, but `tenjin publish` also moved the shelf out of the
+   * route and into the body, so `POST /api/posts` has to learn the qualified
+   * name too. PostCreate is strict (`additionalProperties: false`), so until the
+   * server half declares the field EVERY shelf publish is a 400 — and the walk
+   * that would catch it ("every field buildPostCreateBody emits is a declared
+   * PostCreate field") only passes because its body names no shelf.
+   *
+   * A tripwire rather than a red test, for the same reason as the one above:
+   * this repo must not invent an OpenAPI entry for a server half that is not
+   * deployed. Refreshing the fixture flips it.
+   */
+  it('FOLLOW-UP: POST /api/posts has to accept the qualified `shelf` too', () => {
+    // The value the CLI actually puts on the wire, stated here so the follow-up
+    // is about a concrete string and not a field name.
+    const body = buildPostCreateBody({
+      status: 'draft',
+      title: 'T',
+      bodyMd: 'B',
+      shelf: 'backtrack/notes',
+    });
+    expect(body.shelf).toBe('backtrack/notes');
+    // Strict, so an undeclared field is a rejection and not an ignored extra.
+    expect(get(fixtureDoc, 'components', 'schemas', 'PostCreate', 'additionalProperties')).toBe(
+      false,
+    );
+    expect(
+      get(postCreateProps(fixtureDoc), 'shelf'),
+      'the fixture now declares `shelf` on PostCreate: add it to POST_CREATE_FIELDS and delete this test',
+    ).toBeUndefined();
+  });
 });
 
 describe('a response shaped like the fixture parses through the CLI schema', () => {
@@ -1066,6 +1099,10 @@ describe('contract fixture pins the publish endpoints', () => {
       priceAtomic: '100000',
       handle: 'iris',
       searchId: SEARCH_ID,
+      // Named here so the qualified value is walked against the declared
+      // pattern the day the fixture gains the field; a key the fixture does not
+      // declare yet is skipped by the loop below, so this stays green until then.
+      shelf: 'backtrack/notes',
     }) as Record<string, unknown>;
     const declared = postCreateProps(fixtureDoc);
     for (const [key, value] of Object.entries(body)) {

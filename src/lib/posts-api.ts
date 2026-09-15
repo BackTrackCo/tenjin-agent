@@ -67,9 +67,12 @@ export interface PublishInput {
    */
   keys?: PostKeyInput[];
   /**
-   * The shelf slug this piece is published to, or omitted for the public
-   * marketplace. The server checks the named shelf against the caller's
-   * membership; an unnamed shelf means public (shelves/02-server.md).
+   * The QUALIFIED `<org>/<shelf>` name this piece is published to, or omitted
+   * for the public marketplace. Never a bare slug: the shelf left the route, so
+   * the body carries the whole of which shelf this is, and a bare `notes` names
+   * a different shelf in every org that has one. Forwarded verbatim from the
+   * config, never split here. The server checks the named shelf against the
+   * caller's membership; an unnamed shelf means public (shelves/02-server.md).
    */
   shelf?: string;
 }
