@@ -1,19 +1,14 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { readFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { HookInput } from '../../adapters/types';
 import { nativeSessionOf } from '../../lib/session';
 import { PRODUCTION_ORIGIN } from '../../lib/production-origin';
 import { runFire } from '../fire';
-import { sigV1Test } from '../failure/test-identity';
-import { setMark } from '../gates';
 import { TEAM_OPENER } from '../prose';
 import type { LoopDb } from '../store';
 import type { Actor, Deps, KernelConfig, Plan } from '../types';
 import { failureArm } from './failure';
 import {
-  CHILD,
   LEAD,
   NOW,
   cleanup,
@@ -37,26 +32,37 @@ const POST_ID = '22222222-2222-4222-8222-222222222222';
 
 const ENOENT =
   "Error: ENOENT: no such file or directory, open 'drizzle.config.ts'\n    at run (src/migrate.ts:12:3)\n";
-const VITEST_FAIL =
-  ' FAIL  src/date.test.ts > formatDate > handles null\nAssertionError: expected undefined to be null\n';
+const ENOENT_LINE = "Error: ENOENT: no such file or directory, open 'drizzle.config.ts'";
+const DATE_TEST = 'src/date.test.ts > formatDate > handles null';
+const VITEST_FAIL = ` FAIL  ${DATE_TEST}\nAssertionError: expected undefined to be null\n`;
+/** A real vitest 4.1.10 run's last five lines, `2>&1 | tail -5`: nothing but
+ *  the tenjin reporter's lines survived the pipe. */
+const TAIL5 = readFileSync(
+  new URL('../failure/fixtures/vitest-tail5.txt', import.meta.url),
+  'utf8',
+);
+const TAIL5_NAMES = [
+  'test/helper.test.ts > helpers > fails inside a named helper',
+  'test/session expiry.test.ts > expires after the window',
+  'test/session.test.ts > session > renews session, restarting the maxAge window',
+  'test/store.test.ts > store > loads a user',
+];
 /** One error line, printed off a frame the caller names: the same sentence in
- *  two files, which is two failures and used to be one question. */
+ *  two files, with no test to tell them apart. */
 const typeError = (file: string): string =>
   "TypeError: Cannot read properties of undefined (reading 'id')\n    at load (" +
   file +
   ':12:3)\n';
+const LINE_ONLY = /^\["line:[0-9a-f]{32}"\]$/;
 
 let db: LoopDb;
-let repo: string;
 
 beforeEach(() => {
   db = freshDb();
-  repo = mkdtempSync(join(tmpdir(), 'tenjin-d-failure-repo-'));
 });
 
 afterEach(() => {
   vi.unstubAllGlobals();
-  rmSync(repo, { recursive: true, force: true });
   cleanup();
 });
 
@@ -66,7 +72,6 @@ interface Shell {
   stdout?: string;
   stderr?: string;
   actor?: Actor;
-  cwd?: string;
 }
 
 function shell(s: Shell): HookInput {
@@ -76,7 +81,6 @@ function shell(s: Shell): HookInput {
     native: { event: 'PostToolUse' },
     // The input carries the NATIVE id; `actorOf` prefixes the harness back on.
     session: nativeSessionOf(actor.session),
-    cwd: s.cwd ?? repo,
     ...(actor.agent !== '' ? { agent: actor.agent } : {}),
     tool: {
       ...toolInput('shell', { command: s.command }),
@@ -116,7 +120,7 @@ function candidate(): Record<string, unknown> {
 
 interface ShelfCall {
   path: string;
-  body: { keys?: Array<{ key: string }>; query?: string };
+  body: { keys?: Array<{ kind: string; key: string }>; query?: string };
 }
 
 /** A stubbed shelf that records every request's path and body and answers
@@ -163,7 +167,7 @@ async function fire(input: HookInput, d: Deps = deps()) {
 }
 
 function keysOf(call: ShelfCall): string[] {
-  return (call.body.keys ?? []).map((k) => k.key.split(':')[0] ?? '');
+  return (call.body.keys ?? []).map((k) => k.key);
 }
 
 async function planOf(input: HookInput, config: KernelConfig = TEAM): Promise<Plan | null> {
@@ -171,6 +175,8 @@ async function planOf(input: HookInput, config: KernelConfig = TEAM): Promise<Pl
   const planned = await failureArm.plan?.(ctx);
   return planned !== null && planned !== undefined && 'stages' in planned ? planned : null;
 }
+
+const shelvesOf = (plan: Plan | null) => plan?.stages.map((s) => s.map((l) => l.shelf));
 
 describe('the failure arm registration', () => {
   it('is one tool-wait arm on the shell result', () => {
@@ -192,7 +198,7 @@ describe('the plan', () => {
     expect(await planOf(shell({ command: 'pnpm db:migrate', ok: true, stdout: 'ok' }))).toBeNull();
   });
 
-  it('asks nothing below the specificity floor', async () => {
+  it('asks nothing from totals alone: no test named and no line to say', async () => {
     const totals = ' Test Files  1 failed (1)\n      Tests  2 failed (2)\n';
     expect(await planOf(shell({ command: 'pnpm build', ok: false, stdout: totals }))).toBeNull();
   });
@@ -205,72 +211,49 @@ describe('the plan', () => {
     expect(plan).toBeNull();
   });
 
-  it('asks the error line in words, keyed on its own text', async () => {
+  it('asks the error line in words when the output names no test, keyed on its own text', async () => {
     const plan = await planOf(shell({ command: 'pnpm db:migrate', ok: false, stderr: ENOENT }));
-    expect(plan?.stages.map((s) => s.map((l) => l.shelf))).toEqual([['keys'], ['team']]);
-    expect(plan?.question.text).toBe(
-      "Error: ENOENT: no such file or directory, open 'drizzle.config.ts'",
-    );
-    // The fingerprint it has, then the line hash behind it.
-    expect(plan?.question.questionKey).toMatch(/^sig_v1:[0-9a-f]{16}\|line:[0-9a-f]{32}$/);
+    expect(shelvesOf(plan)).toEqual([['team']]);
+    expect(plan?.question.text).toBe(ENOENT_LINE);
+    expect(plan?.question.questionKey).toMatch(LINE_ONLY);
   });
 
   it('reads a coloured diagnostic as the same failure as an uncoloured one', async () => {
     // A pty or `FORCE_COLOR` puts an SGR sequence in front of the line, and
     // every marker that recognizes one is anchored to the start of the line.
-    const red = '\u001b[31m';
-    const off = '\u001b[39m';
+    const red = '[31m';
+    const off = '[39m';
     const coloured =
       red +
       'Error:' +
       off +
       " ENOENT: no such file or directory, open 'drizzle.config.ts'\n" +
-      '\u001b[2m    at run (src/migrate.ts:12:3)\u001b[22m\n';
+      '[2m    at run (src/migrate.ts:12:3)[22m\n';
     const plain = await planOf(shell({ command: 'pnpm db:migrate', ok: false, stderr: ENOENT }));
     const plan = await planOf(shell({ command: 'pnpm db:migrate', ok: false, stderr: coloured }));
     // The line reaches the wire as the person saw it — no `[31m` residue, which
     // `mask` would not have taken off (it deletes the escape byte alone).
-    expect(plan?.question.text).toBe(
-      "Error: ENOENT: no such file or directory, open 'drizzle.config.ts'",
-    );
-    // And it is the SAME failure: colour must not fork the fingerprint, or one
-    // teammate's note is filed under a key the next one never asks.
+    expect(plan?.question.text).toBe(ENOENT_LINE);
+    // And it is the SAME failure: colour must not fork the question.
     expect(plan?.question.questionKey).toBe(plain?.question.questionKey);
-    expect(plan?.stages.map((s) => s.map((l) => l.shelf))).toEqual([['keys'], ['team']]);
   });
 
   it('reads a coloured diagnostic whose only marker is start-anchored', async () => {
     // `npm ERR!`, `panic:`, `fatal:` and `error[E\d+]` are anchored and have no
     // unanchored twin, so a colour in front of them left the arm with nothing
     // to ask at all rather than with a worse question.
-    const coloured =
-      '\u001b[31mnpm ERR!\u001b[39m code ELIFECYCLE\n\u001b[31mnpm ERR!\u001b[39m errno 1\n';
+    const coloured = '[31mnpm ERR![39m code ELIFECYCLE\n[31mnpm ERR![39m errno 1\n';
     const plan = await planOf(shell({ command: 'pnpm build', ok: false, stderr: coloured }));
     expect(plan?.question.text).toBe('npm ERR! errno 1');
   });
 
   it('reads through an OSC-8 hyperlink sitting in front of the marker', async () => {
     // OSC, not CSI: `ESC ] 8 ; ; <url> BEL <text> ESC ] 8 ; ; BEL`, which is how
-    // a runner turns a path into a clickable link. An SGR-only pattern leaves
-    // the `]8;;<url>` residue at the head of the line, and every marker that
-    // recognizes a diagnostic is anchored to the start of it, so the line is
-    // unrecognizable for exactly the reason a colour made it unrecognizable.
-    const link = (url: string, text: string): string =>
-      '\u001b]8;;' + url + '\u0007' + text + '\u001b]8;;\u0007';
+    // a runner turns a path into a clickable link.
+    const link = (url: string, text: string): string => ']8;;' + url + '' + text + ']8;;';
     const stderr = link('https://pnpm.io/errors/ELIFECYCLE', 'npm ERR!') + ' errno 1\n';
     const plan = await planOf(shell({ command: 'pnpm build', ok: false, stderr }));
     expect(plan?.question.text).toBe('npm ERR! errno 1');
-  });
-
-  it('asks in words with no fingerprint at all, under a key of its own', async () => {
-    const generic = 'error: linting failed for the workspace\n';
-    const plan = await planOf(shell({ command: 'pnpm lint', ok: false, stderr: generic }));
-    // No errno and no frame, so `sigV1` refuses it and there is no test
-    // identity either: the keys leg has nothing to resolve and is not planned.
-    expect(plan?.stages.map((s) => s.map((l) => l.shelf))).toEqual([['team']]);
-    expect(plan?.question.text).toBe('error: linting failed for the workspace');
-    // Nothing but the line to key on, and the line hash alone is the key.
-    expect(plan?.question.questionKey).toMatch(/^line:[0-9a-f]{32}$/);
   });
 
   it('gives two different failures two different question keys', async () => {
@@ -280,31 +263,31 @@ describe('the plan', () => {
     expect(one?.question.questionKey.length).toBeGreaterThan(0);
   });
 
-  it('asks two exact keys in one round, then the words in the next', async () => {
+  it('asks the failing test by name, then its line in words with the name beside it', async () => {
     const { calls } = shelf([[]]);
     const { row, legs } = await fire(
-      shell({ command: 'pnpm test', ok: false, stderr: ENOENT, stdout: VITEST_FAIL }),
+      shell({ command: 'pnpm test', ok: false, stdout: VITEST_FAIL }),
     );
     expect(row.reason).toBe('no-hit');
     expect(calls.map((c) => c.path)).toEqual(['/api/keys/resolve', '/api/search']);
-    expect(keysOf(calls[0]!)).toEqual(['sig_v1', 'sig_v1_test']);
-    // Both fingerprints, in the order the resolve sent them, then the line.
-    expect(row.question_key).toMatch(
-      /^sig_v1:[0-9a-f]{16}\|sig_v1_test:[0-9a-f]{16}\|line:[0-9a-f]{32}$/,
-    );
+    expect(calls[0]!.body.keys).toEqual([{ kind: 'fingerprint', key: 'test:' + DATE_TEST }]);
     expect(calls[1]!.body.query).toBe(
-      "Error: ENOENT: no such file or directory, open 'drizzle.config.ts'",
+      'AssertionError: expected undefined to be null — ' + DATE_TEST,
     );
+    // The test key, then the hash of the words, as one readable array.
+    const parts = JSON.parse(row.question_key ?? '[]') as string[];
+    expect(parts[0]).toBe('test:' + DATE_TEST);
+    expect(parts[1]).toMatch(/^line:[0-9a-f]{32}$/);
     expect(legs.map((l) => [l.stage, l.shelf, l.outcome])).toEqual([
       [0, 'keys', 'miss'],
       [1, 'team', 'miss'],
     ]);
   });
 
-  it('never reaches the words when a fingerprint answered', async () => {
+  it('never reaches the words when a key answered', async () => {
     const { calls } = shelf([[candidate()]]);
     const { row, emit } = await fire(
-      shell({ command: 'pnpm test', ok: false, stderr: ENOENT, stdout: VITEST_FAIL }),
+      shell({ command: 'pnpm test', ok: false, stdout: VITEST_FAIL }),
     );
     expect(row.reason).toBe('hit');
     expect(calls.map((c) => c.path)).toEqual(['/api/keys/resolve']);
@@ -312,70 +295,46 @@ describe('the plan', () => {
     expect(emit?.context).toContain(TEAM_OPENER);
   });
 
-  it('plans one stage for a failure with a test identity and no words', async () => {
-    // The runner printed only totals — nothing `errorLine` will take — and the
-    // report behind this call's own stamp names the test. There is a key and
-    // no sentence, so the words round is not planned; a plan with no stage at
-    // all would run no leg and still be filed as a miss.
-    writeFileSync(
-      join(repo, '.vitest-report.json'),
-      JSON.stringify({
-        startTime: NOW - 1000,
-        endTime: NOW - 100,
-        failed: [{ file: join(repo, 'src/a.test.ts'), suite: 's', test: 't' }],
-      }),
+  it('asks every test a tail-cut run names, off the reporter lines printed last', async () => {
+    // THE CASE THE REPORTER LINES EXIST FOR. The agent's pipe kept five lines
+    // and no assertion; the names and lines are all there is, and all it needs.
+    const { calls } = shelf([[]]);
+    await fire(shell({ command: 'pnpm vitest run 2>&1 | tail -5', ok: false, stdout: TAIL5 }));
+    expect(keysOf(calls[0]!)).toEqual(TAIL5_NAMES.map((n) => 'test:' + n));
+    // The last named failure's line, not the unhandled error printed after it.
+    expect(calls[1]!.body.query).toBe(
+      "TypeError: Cannot read properties of undefined (reading 'id') — test/store.test.ts > store > loads a user",
     );
-    setMark(db, LEAD, 'bashstart', String(NOW - 2000), NOW - 2000);
-    const totals = ' Test Files  1 failed (1)\n      Tests  2 failed (2)\n';
-    const plan = await planOf(shell({ command: 'pnpm test', ok: false, stdout: totals }));
-    expect(plan?.stages.map((s) => s.map((l) => l.shelf))).toEqual([['keys']]);
-    expect(plan?.question.text).toBe('');
-    // No line, so no line hash: the fingerprint alone is the key.
-    expect(plan?.question.questionKey).toBe(
-      'sig_v1_test:' + sigV1Test({ file: 'src/a.test.ts', suite: 's', test: 't' }).key,
+  });
+
+  it('sends at most ten keys, the last ten, in one resolve', async () => {
+    const lines = Array.from(
+      { length: 12 },
+      (_, i) =>
+        `::error title=src/t${i + 1}.test.ts > s > case ${i + 1}::AssertionError: expected ${i + 1} to be 0`,
     );
+    const plan = await planOf(
+      shell({ command: 'pnpm test', ok: false, stdout: lines.join('\n') + '\n' }),
+    );
+    const parts = JSON.parse(plan?.question.questionKey ?? '[]') as string[];
+    const keys = parts.filter((p) => p.startsWith('test:'));
+    expect(keys).toHaveLength(10);
+    expect(keys[0]).toBe('test:src/t3.test.ts > s > case 3');
+    expect(keys[9]).toBe('test:src/t12.test.ts > s > case 12');
+  });
+
+  it('asks an error no test owns in words, and keys nothing on it', async () => {
+    const stdout = "::error title=test/broken.test.ts::Error: Cannot find module './x'\n";
+    const plan = await planOf(shell({ command: 'pnpm test', ok: false, stdout }));
+    expect(shelvesOf(plan)).toEqual([['team']]);
+    expect(plan?.question.text).toBe("Error: Cannot find module './x'");
   });
 });
 
 describe('what a failure asks with', () => {
-  it("reads a test report only behind this call's own `bashstart` stamp", async () => {
-    const { calls } = shelf([[]]);
-    const resolved = () => calls.filter((c) => c.path === '/api/keys/resolve');
-    // A report from an earlier run sits in the checkout, naming another file.
-    writeFileSync(
-      join(repo, '.vitest-report.json'),
-      JSON.stringify({
-        startTime: NOW - 1000,
-        endTime: NOW - 100,
-        failed: [{ file: join(repo, 'src/a.test.ts'), suite: 's', test: 't' }],
-      }),
-    );
-    await fire(shell({ command: 'pnpm test', ok: false, stdout: VITEST_FAIL }));
-    // No stamp (the PreToolUse fire never reached the daemon): the console
-    // header is the identity, not the stale report, and the key on the wire is
-    // the one the header names.
-    expect(resolved()[0]!.body.keys?.map((k) => k.key)).toEqual([
-      'sig_v1_test:' +
-        sigV1Test({ file: 'src/date.test.ts', suite: 'formatDate', test: 'handles null' }).key,
-    ]);
-
-    // A DIFFERENT ACTOR runs the second one, because the stamp is per actor and
-    // so is the once-per-question claim: the same console text asked twice by
-    // one agent is one question, and the second fire would be answered from the
-    // claim instead of reading the report at all.
-    setMark(db, CHILD, 'bashstart', String(NOW - 2000), NOW - 2000);
-    await fire(shell({ command: 'pnpm test', ok: false, stdout: VITEST_FAIL, actor: CHILD }));
-    expect(resolved()[1]!.body.keys?.map((k) => k.key)).toEqual([
-      'sig_v1_test:' + sigV1Test({ file: 'src/a.test.ts', suite: 's', test: 't' }).key,
-    ]);
-  });
-
-  it('is two questions when one error line comes off two frames', async () => {
-    // THE COLLISION THE COMPOSED KEY EXISTS FOR. The same TypeError in two
-    // files prints the same sentence, and a key over the sentence alone would
-    // hand the second failure the first's cached miss out of the gate — its
-    // fingerprint sitting right there, never resolved. So the call count is the
-    // assertion, not just the keys.
+  it('is one question when one error line comes off two frames: nothing else tells them apart', async () => {
+    // With no test named, the words are the whole question, and asking the same
+    // words twice would ask the shelf nothing new.
     const { calls } = shelf([[]]);
     const one = await fire(
       shell({ command: 'pnpm test', ok: false, stderr: typeError('src/a.ts') }),
@@ -384,11 +343,21 @@ describe('what a failure asks with', () => {
       shell({ command: 'pnpm test', ok: false, stderr: typeError('src/b.ts') }),
     );
     expect(one.row.reason).toBe('no-hit');
-    expect(two.row.reason).toBe('no-hit');
+    expect(two.row.reason).toBe('cached');
+    expect(calls.map((c) => c.path)).toEqual(['/api/search']);
+  });
+
+  it('is two questions when the same assertion fails in two tests', async () => {
+    // THE COLLISION THE COMPOSED KEY EXISTS FOR. The same assertion in two tests
+    // prints the same sentence, and a key over the sentence alone would hand the
+    // second test the first's cached miss — its own name sitting right there,
+    // never resolved. So the call count is the assertion, not just the keys.
+    const failing = (name: string): string =>
+      ` FAIL  src/a.test.ts > suite > ${name}\nAssertionError: expected 1 to be 2\n`;
+    const { calls } = shelf([[]]);
+    const one = await fire(shell({ command: 'pnpm test', ok: false, stdout: failing('one') }));
+    const two = await fire(shell({ command: 'pnpm test', ok: false, stdout: failing('two') }));
     expect(one.row.question_key).not.toBe(two.row.question_key);
-    // The line half is the same bytes in both; only the fingerprint differs.
-    const lineOf = (key: string | null) => String(key).split('|').pop();
-    expect(lineOf(one.row.question_key)).toBe(lineOf(two.row.question_key));
     expect(calls.map((c) => c.path)).toEqual([
       '/api/keys/resolve',
       '/api/search',

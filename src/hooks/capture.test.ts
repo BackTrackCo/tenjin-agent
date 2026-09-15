@@ -1,9 +1,11 @@
+import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { HookInput } from '../adapters/types';
+import { parseKeyFlags } from '../commands/publish';
 import { PRODUCTION_ORIGIN } from '../lib/production-origin';
 import { STARTED_MARK } from './actor';
 import { stopArm } from './arms/stop';
@@ -94,7 +96,10 @@ function seedFire(
 }
 
 const ENOENT_LINE = "Error: ENOENT: no such file or directory, open 'drizzle.config.ts'";
-const ENOENT_KEY = 'sig_v1:aaaabbbbccccdddd|line:' + 'f'.repeat(32);
+const ENOENT_TEST = 'test:src/migrate.test.ts > migrate > reads drizzle.config.ts';
+const ENOENT_KEY = JSON.stringify([ENOENT_TEST, 'line:' + 'f'.repeat(32)]);
+/** The flag the ask renders for a key: single-quoted, so it pastes as one word. */
+const flag = (key: string): string => "`--key 'fingerprint=" + key + "'`";
 
 /** One failure fire the shelves had nothing for, as the arm would have left
  *  it: the composed question key, and the masked line under it. */
@@ -280,7 +285,7 @@ describe('the child ask', () => {
     setMark(db, CHILD, 'edited:abc', 'src/a.ts', NOW);
     seedFailure(db, CHILD);
     seedFailure(db, LEAD, {
-      questionKey: 'line:' + '0'.repeat(32),
+      questionKey: JSON.stringify(['line:' + '0'.repeat(32)]),
       question: 'error: linting failed for the workspace',
     });
 
@@ -291,7 +296,8 @@ describe('the child ask', () => {
       '- Encountered this turn: `' +
         ENOENT_LINE +
         '`. If you settled it and the answer would save a teammate the same hour, publish it with ' +
-        '`--key fingerprint=sig_v1:aaaabbbbccccdddd`.',
+        flag(ENOENT_TEST) +
+        '.',
     );
     expect(child).not.toContain('linting failed');
     // The line reports what came up. It asserts no fix, because nothing on the
@@ -473,15 +479,15 @@ describe('the lead ask', () => {
     seedFailure(db, LEAD, { reason: 'hit', at: NOW - 50 });
     seedFailure(db, LEAD, {
       reason: 'seen',
-      questionKey: 'sig_v1:bbbb1111bbbb1111',
+      questionKey: JSON.stringify(['test:src/b.test.ts > cfg > loads']),
       question: "TypeError: cfg.load is not a function ('src/b.ts')",
       at: NOW - 40,
     });
     const context = (await fire(db, leadStop()))?.context ?? '';
     const lines = context.split('\n').filter((l) => l.startsWith('- Encountered this turn'));
     expect(lines).toHaveLength(2);
-    expect(context).toContain('--key fingerprint=sig_v1:aaaabbbbccccdddd');
-    expect(context).toContain('--key fingerprint=sig_v1:bbbb1111bbbb1111');
+    expect(context).toContain(flag(ENOENT_TEST));
+    expect(context).toContain(flag('test:src/b.test.ts > cfg > loads'));
   });
 
   it('names a failure the shelf rate-limited', async () => {
@@ -523,21 +529,32 @@ describe('the lead ask', () => {
     seedFailure(db, LEAD, { reason: 'hit' });
     const context = (await fire(db, leadStop()))?.context ?? '';
     expect(context).toContain(ENOENT_LINE);
-    expect(context).toContain('--key fingerprint=sig_v1:aaaabbbbccccdddd');
+    expect(context).toContain(flag(ENOENT_TEST));
   });
 
-  it('offers every fingerprint the arm resolves, one --key flag each', async () => {
-    // Naming only the first filed the piece under `sig_v1` while the arm went on
-    // asking `sig_v1_test` too, so the next teammate to hit that same test
-    // resolved under a key nothing had ever been published against.
+  it('offers every test key the arm resolves, one --key flag each', async () => {
+    // Naming only the first filed the piece under one test while the arm went on
+    // asking every test the run named, so the next teammate to hit another of
+    // them resolved under a key nothing had ever been published against.
     const db = freshDb();
-    seedFailure(db, LEAD, {
-      questionKey: 'sig_v1:aaaabbbbccccdddd|sig_v1_test:0123456789abcdef',
-    });
+    const other = 'test:src/migrate.test.ts > migrate > seeds';
+    seedFailure(db, LEAD, { questionKey: JSON.stringify([ENOENT_TEST, other]) });
     const context = (await fire(db, leadStop()))?.context ?? '';
-    expect(context).toContain(
-      '`--key fingerprint=sig_v1:aaaabbbbccccdddd` `--key fingerprint=sig_v1_test:0123456789abcdef`',
-    );
+    expect(context).toContain(flag(ENOENT_TEST) + ' ' + flag(other));
+  });
+
+  it('renders a --key a shell hands publish back whole, whatever the test is called', async () => {
+    // A test name is free text: spaces, `>`, quotes, a backtick, a pipe and an
+    // equals sign all have to survive the paste into the one key publish sends.
+    const odd = "test:src/a.test.ts > it's `quoted` > a | b = c";
+    const db = freshDb();
+    seedFailure(db, LEAD, { questionKey: JSON.stringify([odd]), question: '' });
+    const context = (await fire(db, leadStop()))?.context ?? '';
+    const rendered = /`` --key (.*?) ``/.exec(context)?.[1] ?? '';
+    const word = execFileSync('sh', ['-c', 'printf %s ' + rendered], { encoding: 'utf8' });
+    expect(parseKeyFlags([word])).toEqual([
+      expect.objectContaining({ kind: 'fingerprint', key: odd }),
+    ]);
   });
 
   it('one line per failure, deduped by key, each naming what it can be filed under', async () => {
@@ -545,18 +562,18 @@ describe('the lead ask', () => {
     // The same command re-run after a failed edit is one problem, not three.
     seedFailure(db, LEAD, { at: NOW - 50 });
     seedFailure(db, LEAD, { at: NOW - 40 });
-    // A line too generic for `sigV1` to key. NOT NAMED: there is no key to
+    // A line with no test named. NOT NAMED: there is no key to
     // offer, so the line would say only what `CAPTURE_ASK` says already. The
     // arm still asks the shelf about it in words; only the nudge is dropped.
     seedFailure(db, LEAD, {
-      questionKey: 'line:' + '0'.repeat(32),
+      questionKey: JSON.stringify(['line:' + '0'.repeat(32)]),
       question: 'error: linting failed for the workspace',
       at: NOW - 30,
     });
     // A test identity and no error line at all: the empty `question` is a row
     // to name, not a row to filter, and the key is the whole of it.
     seedFailure(db, LEAD, {
-      questionKey: 'sig_v1_test:0123456789abcdef',
+      questionKey: JSON.stringify(['test:src/a.test.ts > s > t']),
       question: '',
       at: NOW - 20,
     });
@@ -566,10 +583,12 @@ describe('the lead ask', () => {
       '- Encountered this turn: `' +
         ENOENT_LINE +
         '`. If you settled it and the answer would save a teammate the same hour, publish it with ' +
-        '`--key fingerprint=sig_v1:aaaabbbbccccdddd`.',
-      '- Encountered this turn: A failure filed under ' +
-        '`sig_v1_test:0123456789abcdef`. If you settled it and the answer would save a teammate the ' +
-        'same hour, publish it with `--key fingerprint=sig_v1_test:0123456789abcdef`.',
+        flag(ENOENT_TEST) +
+        '.',
+      '- Encountered this turn: A failure filed under `test:src/a.test.ts > s > t`. If you settled ' +
+        'it and the answer would save a teammate the same hour, publish it with ' +
+        flag('test:src/a.test.ts > s > t') +
+        '.',
     ]);
   });
 
@@ -582,7 +601,7 @@ describe('the lead ask', () => {
     const db = freshDb();
     started(db);
     seedFailure(db, CHILD, {
-      questionKey: 'line:' + '0'.repeat(32),
+      questionKey: JSON.stringify(['line:' + '0'.repeat(32)]),
       question: 'error: linting failed for the workspace',
       at: NOW - 10,
     });
@@ -605,13 +624,16 @@ describe('the lead ask', () => {
     // A wall it had to climb out of AFTER its first stop is something new to
     // say, and the first ask could not have named it.
     seedFailure(db, LEAD, {
-      questionKey: 'sig_v1:1111222233334444|line:' + 'e'.repeat(32),
+      questionKey: JSON.stringify([
+        'test:src/db.test.ts > db > connects',
+        'line:' + 'e'.repeat(32),
+      ]),
       question: 'error: EADDRINUSE: address already in use :::5433',
       at: NOW + 20,
     });
     const again = (await fire(db, leadStop(), TEAM, () => NOW + 30))?.context ?? '';
     expect(again).toContain('address already in use');
-    expect(again).toContain('`--key fingerprint=sig_v1:1111222233334444`');
+    expect(again).toContain(flag('test:src/db.test.ts > db > connects'));
     // And only that one. The ENOENT did not come up this turn, and repeating
     // its `--key fingerprint=` offers a publish the agent may already have
     // made off the first ask.
@@ -647,7 +669,7 @@ describe('the lead ask', () => {
     // The next ordinary stop is the one that says it, so the re-arm still works.
     const again = (await fire(db, leadStop(), TEAM, () => NOW + 30))?.context ?? '';
     expect(again).toContain(ENOENT_LINE);
-    expect(again).toContain('`--key fingerprint=sig_v1:aaaabbbbccccdddd`');
+    expect(again).toContain(flag(ENOENT_TEST));
   });
 
   it('names a failure that keeps recurring once, and is not re-armed by its repeat', async () => {

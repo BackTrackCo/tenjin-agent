@@ -15,6 +15,7 @@ import { codexAdapter } from '../adapters/codex';
 import { readCodexTrust, trustCodexHooks, trustKey } from '../lib/codex-trust';
 import { registeredHooks, writeHooks } from '../lib/harness-hooks';
 import { HARNESS_MS } from '../hooks/constants';
+import { testFailuresOf } from '../hooks/failure/test-identity';
 import { ensureDaemon, health, readToken } from '../hooks/shim';
 import {
   configPath,
@@ -373,12 +374,12 @@ describe('the daemon, cold-started from the real bundle', () => {
       // This file pins every arm off, so every lookup arm declines
       // and nothing is asked of any shelf. `arm` still names the arm that
       // declined — the WebFetch fixture reaches `fetch`, the Bash result
-      // reaches `failure`, the Bash call and the Read reach `context` — and
-      // every installed entry now finds an arm.
-      for (const r of rows) {
-        expect(r.reason, r.event).toBe('no-question');
-        expect(r.arm).not.toBe('none');
-      }
+      // reaches `failure`, the Read reaches `context`. The one row with no arm
+      // is the child's Bash CALL: captured from a real turn, but no installed
+      // entry sends it since nothing reads a shell call before it runs
+      // (tenjin-agent#350). Even so, it leaves its row.
+      for (const r of rows) expect(r.reason, r.event).toBe('no-question');
+      expect(rows.filter((r) => r.arm === 'none').map((r) => r.event)).toEqual(['tool.before']);
       // The SubagentStop fixture is from another session than the
       // SubagentStart one, so no `started` mark exists for it (actor.ts): a
       // phantom stop, and it leaves no row at all.
@@ -1100,31 +1101,38 @@ describe('the daemon, cold-started from the real bundle', () => {
  * the one file `installDaemonFiles` copies that is never spawned: a repo's own
  * `vitest.config.ts` imports it into the user's vitest process by the absolute
  * path install gave it. So what has to hold is that the built module loads on
- * its own — importing nothing but `node:fs` — and writes the artifact in the
- * exact shape `hooks/failure/test-identity.ts` reads back.
+ * its own — importing nothing — and prints the `::error` line
+ * `hooks/failure/test-identity.ts` reads back.
  */
 describe('the built vitest reporter bundle', () => {
-  it('writes .vitest-report.json in the shape test-identity.ts reads', async () => {
+  it('prints the ::error line test-identity.ts reads back', async () => {
     const path = vitestReporterPath(dataDir);
     expect(existsSync(path)).toBe(true);
     // No node_modules beside it and no bundler: a bare dynamic import is the
     // same thing vitest does with the path in a repo's own config.
     const mod = (await import(pathToFileURL(path).href)) as {
-      default: new (options?: { outputFile?: string }) => {
-        onInit(): void;
+      default: new () => {
+        onInit(ctx: { logger: { log(message: string): void } }): void;
         onTestRunEnd(modules: unknown[], unhandled: unknown[]): void;
       };
     };
-    const outputFile = join(dataDir, 'smoke-report.json');
-    const reporter = new mod.default({ outputFile });
-    reporter.onInit();
+    const printed: string[] = [];
+    const reporter = new mod.default();
+    reporter.onInit({ logger: { log: (message: string) => printed.push(message) } });
     reporter.onTestRunEnd(
       [
         {
           moduleId: join(dataDir, 'src/lib/http.test.ts'),
+          relativeModuleId: 'src/lib/http.test.ts',
+          errors: () => [],
           children: {
             allTests: () => [
-              { name: 'gives up after three', parent: { type: 'suite', fullName: 'retries' } },
+              {
+                fullName: 'retries > gives up after three',
+                result: () => ({
+                  errors: [{ name: 'AssertionError', message: 'expected 4 to be 3' }],
+                }),
+              },
             ],
           },
         },
@@ -1132,20 +1140,13 @@ describe('the built vitest reporter bundle', () => {
       [],
     );
 
-    const report = JSON.parse(await readFile(outputFile, 'utf8')) as {
-      startTime: number;
-      endTime: number;
-      success: boolean;
-      failed: { file: string; suite: string; test: string }[];
-    };
-    expect(report.success).toBe(false);
-    expect(report.startTime).toBeGreaterThan(0);
-    expect(report.endTime).toBeGreaterThanOrEqual(report.startTime);
-    expect(report.failed).toEqual([
+    expect(printed.join('\n')).toBe(
+      '::error title=src/lib/http.test.ts > retries > gives up after three::AssertionError: expected 4 to be 3',
+    );
+    expect(testFailuresOf(printed.join('\n'))).toEqual([
       {
-        file: join(dataDir, 'src/lib/http.test.ts'),
-        suite: 'retries',
-        test: 'gives up after three',
+        name: 'src/lib/http.test.ts > retries > gives up after three',
+        line: 'AssertionError: expected 4 to be 3',
       },
     ]);
   });

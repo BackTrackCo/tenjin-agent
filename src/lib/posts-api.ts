@@ -60,7 +60,7 @@ export interface PublishInput {
   scanAck?: string;
   /**
    * Exact-match keys `POST /api/keys/resolve` answers on (tenjin#774): a
-   * failure fingerprint (`sig_v1:<hash>`), a `name@version`, a command head, a
+   * failing test (`test:<file> > <suite> > <test>`), a `name@version`, a command head, a
    * repo. Its own top-level field, not a card field, because a
    * key-only publish carries keys and no card. `verified` is the writer's own claim and
    * defaults to false; see {@link normalizePostKeys} for the bounds.

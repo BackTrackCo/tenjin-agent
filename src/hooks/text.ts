@@ -56,10 +56,6 @@ export function stripControlKeepingLines(text: string): string {
  * The pattern is {@link ANSI_ESCAPE_RE}, shared with the terminal sanitizer
  * rather than written again here: OSC-8 hyperlinks are the case a narrower SGR
  * pattern misses, and pnpm emits them.
- *
- * `normalizeForSig` keeps its own copy on purpose: that one is part of the
- * frozen `sig_v1` formula and is not free to change. After this runs, its
- * clause simply never fires.
  */
 export function stripAnsi(text: string): string {
   return text.replace(ANSI_ESCAPE_RE, '');

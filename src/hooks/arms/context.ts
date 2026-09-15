@@ -13,15 +13,18 @@ import type { Arm, FireContext } from '../types';
  * (owner decision 2026-09-06). A fire on this arm therefore records
  * `no-question`, which is the truth: it never had one.
  *
- * WHAT IS LEFT IS WHAT OTHER ARMS READ, all under THIS actor — which is what
- * the old code faked with an `agentKey()` prefix, and a subagent's edit is the
- * subagent's:
- *  - `bashstart`, the failure arm's test-identity clock (PR D);
+ * WHAT IS LEFT IS WHAT THE PUBLISH ARM READS, all under THIS actor — which is
+ * what the old code faked with an `agentKey()` prefix, and a subagent's edit is
+ * the subagent's:
  *  - `edited:<pathKey>`, the publish arm's evidence that this actor did work;
  *  - `activity:inspection` / `activity:mutation`, the capture ask's gate.
  *
- * It stays registered on the same three (event, kind) pairs because those marks
- * are stamped where the work happens.
+ * It is registered on the two (event, kind) pairs where that work happens. NOT
+ * ON A SHELL CALL: the `bashstart` stamp it used to write there was the
+ * failure arm's clock for a report file, and both went with tenjin-agent#350.
+ * A shell call reaching this arm would fall through to `activity:mutation` and
+ * arm the lead's publish ask on every Bash call, so `before` also refuses any
+ * kind it is not registered for.
  */
 
 /**
@@ -36,8 +39,7 @@ function pathKey(path: string): string {
   return createHash('sha256').update(path).digest('hex').slice(0, 32);
 }
 
-/** The marks this arm writes and the failure and capture arms read back. */
-export const BASH_START = 'bashstart';
+/** The marks this arm writes and the capture arm reads back. */
 export const EDITED_PREFIX = 'edited:';
 const ACTIVITY_PREFIX = 'activity:';
 
@@ -53,7 +55,6 @@ export const contextArm: Arm = {
   wait: 'tool',
   on: [
     { event: 'tool.before', kind: 'edit' },
-    { event: 'tool.before', kind: 'shell' },
     { event: 'tool.after', kind: 'read' },
   ],
   /**
@@ -64,19 +65,11 @@ export const contextArm: Arm = {
    */
   before(ctx) {
     const { db, clock } = ctx.deps;
-    // Bookkeeping for the failure and publish arms — the shell stamp is the
-    // failure arm's, the edit marks are the publish arm's evidence test — so it
-    // runs while either is on and stops when both are off.
-    const { hooks } = ctx.deps.config();
-    if (!hooks.failure && !hooks.publish) return;
+    // Bookkeeping for the publish arm, and for nothing else since the failure
+    // arm stopped reading a stamp, so it stops when that arm is off.
+    if (!ctx.deps.config().hooks.publish) return;
     const kind = ctx.input.tool?.kind;
-    if (kind === 'shell') {
-      // One stamp per Bash call, per agent, so parallel subagents cannot
-      // clobber each other's. PR D's failure arm reads it back to decide
-      // whether a test report could be about THIS command.
-      setMark(db, ctx.actor, BASH_START, String(clock()), clock());
-      return;
-    }
+    if (kind !== 'edit' && kind !== 'read') return;
     // One mark per path, all in this fire: a patch that touches three files is
     // one native call and one row, and every file it named is attempted work.
     // Upserted, so a re-edit moves `marks.at` and nothing else. NOTHING READS
