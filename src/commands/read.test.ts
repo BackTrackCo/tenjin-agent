@@ -908,7 +908,10 @@ describe('runRead on one origin', () => {
 
   /** A machine on a shelf: one base URL, one slug, and no second origin. */
   async function writeShelfConfig(baseUrl = TEAM): Promise<void> {
-    await writeFile(join(dir, 'config.json'), JSON.stringify({ baseUrl, shelf: 'backtrack' }));
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ baseUrl, shelf: 'backtrack/backtrack' }),
+    );
   }
 
   /** No --base-url, so the config above decides. */

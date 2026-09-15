@@ -42,7 +42,7 @@ function config(publicFallback: PublicFallback): KernelConfig {
     loop: CONFIG_DEFAULTS.loop,
     team: { publicFallback },
     baseUrl: CONFIG_DEFAULTS.baseUrl,
-    shelf: 'backtrack',
+    shelf: 'backtrack/backtrack',
     publish: CONFIG_DEFAULTS.publish,
   };
 }

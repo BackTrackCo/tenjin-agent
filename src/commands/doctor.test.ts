@@ -562,7 +562,7 @@ describe('runDoctor — passing outcomes', () => {
      * the one action that clears it rather than quietly opening the keystore.
      */
     it('warns, without minting, when a shelf is set and nothing can sign', async () => {
-      const res = await run({ baseUrl: TEAM, shelf: 'backtrack' });
+      const res = await run({ baseUrl: TEAM, shelf: 'backtrack/backtrack' });
       const check = checkNamed(res, 'shelf');
       expect(check?.status).toBe('warn');
       expect(check?.required).toBe(false);
@@ -661,7 +661,7 @@ describe('runDoctor — required failures throw the mapped CliError', () => {
   it('a same-host redirect points at baseUrl, which is the setting that moves it', async () => {
     await writeFile(
       join(dir, 'config.json'),
-      JSON.stringify({ baseUrl: 'https://backtrack.tenjin.sh', shelf: 'backtrack' }),
+      JSON.stringify({ baseUrl: 'https://backtrack.tenjin.sh', shelf: 'backtrack/backtrack' }),
     );
     process.env.TENJIN_PREVIEW_BYPASS = 'preview-secret';
     process.env.TENJIN_PREVIEW_ORIGIN = 'https://backtrack.tenjin.sh';

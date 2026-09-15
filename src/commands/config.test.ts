@@ -1279,12 +1279,16 @@ describe('runConfigSet: the bazaarPay toggle places the tenjin-pay skill', () =>
 });
 
 describe('the shelf key', () => {
-  it('takes a slug and refuses anything the schema regex does not admit', async () => {
+  it('takes the qualified name and refuses anything the schema regex does not admit', async () => {
     const ctx = makeCtx();
-    const set = await runConfigSet({ key: 'shelf', value: 'backtrack' }, ctx);
-    expect(set.data).toMatchObject({ key: 'shelf', value: 'backtrack', source: 'file' });
-    expect(JSON.parse(await readFile(configFile(), 'utf8')).shelf).toBe('backtrack');
-    for (const bad of ['', 'Backtrack', 'back track', 'a', 'x'.repeat(33)]) {
+    const set = await runConfigSet({ key: 'shelf', value: 'backtrack/backtrack' }, ctx);
+    expect(set.data).toMatchObject({
+      key: 'shelf',
+      value: 'backtrack/backtrack',
+      source: 'file',
+    });
+    expect(JSON.parse(await readFile(configFile(), 'utf8')).shelf).toBe('backtrack/backtrack');
+    for (const bad of ['', 'Backtrack/x', 'back track/x', 'a/b', 'acme/notes/extra']) {
       await expect(runConfigSet({ key: 'shelf', value: bad }, ctx)).rejects.toMatchObject({
         code: 'USAGE',
       });
@@ -1292,33 +1296,46 @@ describe('the shelf key', () => {
   });
 
   /**
-   * NOTHING TO REDACT ANY MORE. The slug is not a credential and names no host,
+   * A BARE SLUG IS A USAGE REFUSAL THAT NAMES THE FORM. `config set` asks the
+   * server nothing, so it cannot know which org owns a `notes`; the fix points
+   * at the verb that can, rather than leaving the operator to guess the org.
+   */
+  it('refuses a bare slug and names both the form and `shelf use`', async () => {
+    const ctx = makeCtx();
+    const refused = await caught(() => runConfigSet({ key: 'shelf', value: 'backtrack' }, ctx));
+    expect(refused).toMatchObject({ code: 'USAGE' });
+    expect(String(refused?.fix)).toContain('<org>/<shelf>');
+    expect(String(refused?.fix)).toContain('tenjin shelf use');
+  });
+
+  /**
+   * NOTHING TO REDACT ANY MORE. The name is not a credential and names no host,
    * so `config get` and `--json` print it plainly; what used to be here was a
    * shared door key whose whole harm was disclosure.
    */
   it('reads back plainly through get and list', async () => {
     const ctx = makeCtx();
-    await runConfigSet({ key: 'shelf', value: 'backtrack' }, ctx);
+    await runConfigSet({ key: 'shelf', value: 'backtrack/backtrack' }, ctx);
     const got = await runConfigGet({ key: 'shelf' }, ctx);
-    expect(got.data).toMatchObject({ value: 'backtrack', source: 'file' });
+    expect(got.data).toMatchObject({ value: 'backtrack/backtrack', source: 'file' });
     const listed = await runConfigList(ctx);
-    expect(JSON.stringify(listed)).toContain('backtrack');
+    expect(JSON.stringify(listed)).toContain('backtrack/backtrack');
   });
 
   /** The file keeps 0600: the tree's posture is uniform, credential or not. */
   it.skipIf(process.platform === 'win32')('leaves config.json at 0600', async () => {
-    await runConfigSet({ key: 'shelf', value: 'backtrack' }, makeCtx());
+    await runConfigSet({ key: 'shelf', value: 'backtrack/backtrack' }, makeCtx());
     expect((await stat(configFile())).mode & 0o777).toBe(0o600);
   });
 
   /**
-   * `config set` has no way to say "no value", and the slug regex has no empty
+   * `config set` has no way to say "no value", and the name regex has no empty
    * form, so clearing the shelf is its own verb rather than an empty string that
    * would have to be read as null somewhere.
    */
   it('has no empty form: clearing it is `tenjin shelf use --none`', async () => {
     const ctx = makeCtx();
-    await runConfigSet({ key: 'shelf', value: 'backtrack' }, ctx);
+    await runConfigSet({ key: 'shelf', value: 'backtrack/backtrack' }, ctx);
     const refused = await caught(() => runConfigSet({ key: 'shelf', value: '' }, ctx));
     expect(refused).toMatchObject({ code: 'USAGE' });
     expect(String(refused?.fix)).toContain('tenjin shelf use --none');

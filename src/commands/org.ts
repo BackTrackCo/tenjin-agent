@@ -64,9 +64,13 @@ export type Org = z.infer<typeof orgSchema>;
  * `tenjin org list`: every org this wallet belongs to, its shelves, its
  * public-search policy, and which shelf is active on this machine.
  *
- * It is also the answer to a 404 from a shelf route, which never says whether
- * the slug was unknown or the wallet was not a member: this list is what the
- * wallet can actually reach.
+ * It is also the answer to a 404 from a call that named a shelf, which never
+ * says whether the shelf was unknown or the wallet was not a member: this list
+ * is what the wallet can actually reach.
+ *
+ * Shelves print QUALIFIED, `<org>/<shelf>`, because that is the name the config
+ * stores and the wire speaks; a bare slug in this list would be a name the
+ * operator could not paste anywhere.
  */
 export async function runOrgList(ctx: CommandContext, deps: OrgDeps = {}): Promise<CommandResult> {
   const { settings, auth, client } = await connect(ctx, deps, 'read');
@@ -79,13 +83,15 @@ export async function runOrgList(ctx: CommandContext, deps: OrgDeps = {}): Promi
           `${sanitizeForTerminal(org.slug)}${org.role !== undefined ? ` (${sanitizeForTerminal(org.role)})` : ''}  public-search: ${org.publicSearch === false ? 'off' : 'on'}`,
           ...(org.shelves.length === 0
             ? ['  (no shelves)']
-            : org.shelves.map(
-                (sh) =>
-                  `  ${sanitizeForTerminal(sh.slug)}${sh.slug === active ? '  <- active' : ''}`,
-              )),
+            : org.shelves.map((sh) => {
+                const name = `${org.slug}/${sh.slug}`;
+                return `  ${sanitizeForTerminal(name)}${name === active ? '  <- active' : ''}`;
+              })),
         ]);
   if (orgs.length > 0 && active === null) {
-    humanLines.push('No active shelf on this machine. Set one with `tenjin shelf use <slug>`.');
+    humanLines.push(
+      'No active shelf on this machine. Set one with `tenjin shelf use <org/shelf>`.',
+    );
   }
   return { data: { orgs, activeShelf: active }, humanLines };
 }
@@ -233,10 +239,13 @@ async function resolveOrg(
       fix: 'An operator provisions the org and adds your address; `tenjin profile` prints it.',
     });
   }
+  // The org half of the qualified name IS the answer, but it is still looked up
+  // rather than split off the string: an org the wallet is not in must not
+  // become the target of a member write because the config named it.
   const owning =
     settings.shelf === null
       ? undefined
-      : orgs.find((org) => org.shelves.some((sh) => sh.slug === settings.shelf));
+      : orgs.find((org) => org.shelves.some((sh) => `${org.slug}/${sh.slug}` === settings.shelf));
   if (owning !== undefined) return owning.slug;
   if (orgs.length === 1) return orgs[0]!.slug;
   throw new CliError('USAGE', 'More than one org and no active shelf to pick one.', {

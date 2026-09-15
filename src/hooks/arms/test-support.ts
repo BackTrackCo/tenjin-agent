@@ -48,7 +48,7 @@ export function cleanup(): void {
 export function kernelConfig(
   hooks: Partial<KernelConfig['hooks']> = {},
   team: Partial<KernelConfig['team']> = {},
-  shelf: string | null = 'backtrack',
+  shelf: string | null = 'backtrack/backtrack',
 ): KernelConfig {
   return {
     hooks: { ...CONFIG_DEFAULTS.hooks, ...hooks },

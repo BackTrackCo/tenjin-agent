@@ -42,9 +42,10 @@ export interface ResolvedSettings {
    */
   configuredBaseUrl: string;
   /**
-   * The active shelf's slug, or null for public only. "On a shelf" is exactly
-   * `shelf !== null`: nothing is inferred from the base URL or from a secret.
-   * Read file-or-default, so a `--base-url` on one run never moves it.
+   * The active shelf's QUALIFIED name, `<org-slug>/<shelf-slug>`, or null for
+   * public only. "On a shelf" is exactly `shelf !== null`: nothing is inferred
+   * from the base URL or from a secret. Read file-or-default, so a `--base-url`
+   * on one run never moves it.
    */
   shelf: string | null;
   rpcUrl: string;

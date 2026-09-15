@@ -389,7 +389,7 @@ describe('tenjin_publish consent', () => {
   it('forwards public:true, so a marketplace publish carries no shelf', async () => {
     await writeFile(
       join(dir, 'config.json'),
-      JSON.stringify({ baseUrl: BASE, shelf: 'backtrack' }),
+      JSON.stringify({ baseUrl: BASE, shelf: 'backtrack/backtrack' }),
     );
     const file = join(dir, 'clean.md');
     await writeFile(

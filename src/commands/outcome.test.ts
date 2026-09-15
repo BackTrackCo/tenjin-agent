@@ -694,7 +694,7 @@ describe('runOutcome posts to the configured base URL', () => {
   async function writeShelfConfig(): Promise<void> {
     await writeFile(
       join(dir, 'config.json'),
-      JSON.stringify({ baseUrl: BASE, shelf: 'backtrack' }),
+      JSON.stringify({ baseUrl: BASE, shelf: 'backtrack/backtrack' }),
     );
   }
 

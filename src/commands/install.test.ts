@@ -2994,7 +2994,7 @@ describe('runInstall: hosted skill already present (#35)', () => {
    * a mode change is reported as an update rather than as up-to-date.
    */
   describe('shapes the installed skills by the configured mode', () => {
-    const TEAM = { baseUrl: 'https://backtrack.tenjin.sh', shelf: 'backtrack' };
+    const TEAM = { baseUrl: 'https://backtrack.tenjin.sh', shelf: 'backtrack/backtrack' };
     const searchAt = () => join(home, '.claude', 'skills', 'tenjin-search', 'SKILL.md');
 
     async function configure(config: Record<string, unknown>): Promise<void> {

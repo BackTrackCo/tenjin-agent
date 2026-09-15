@@ -582,7 +582,10 @@ describe('runBuy on the configured origin', () => {
   const TEAM = 'https://team.example';
 
   async function writeShelfConfig(baseUrl: string): Promise<void> {
-    await writeFile(join(dir, 'config.json'), JSON.stringify({ baseUrl, shelf: 'backtrack' }));
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ baseUrl, shelf: 'backtrack/backtrack' }),
+    );
   }
 
   it('signs SIWX for the configured base URL that served the piece', async () => {

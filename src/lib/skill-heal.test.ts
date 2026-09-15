@@ -97,7 +97,7 @@ async function dataDirWith(config: Record<string, unknown>): Promise<string> {
 
 const TEAM_CONFIG = {
   baseUrl: 'https://backtrack.tenjin.sh',
-  shelf: 'backtrack',
+  shelf: 'backtrack/backtrack',
 };
 
 const claudeDir = (): string => skillsDirsFor(home)[0]!;

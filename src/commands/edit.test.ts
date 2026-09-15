@@ -1685,7 +1685,7 @@ describe('runEdit — a team shelf narrows the scan exactly as publish does', ()
   async function writeShelfConfig(): Promise<void> {
     await writeFile(
       join(dir, 'config.json'),
-      JSON.stringify({ baseUrl: TEAM, shelf: 'backtrack' }),
+      JSON.stringify({ baseUrl: TEAM, shelf: 'backtrack/backtrack' }),
     );
   }
 

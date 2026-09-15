@@ -137,7 +137,7 @@ describe('writeConfig', () => {
    * config readable by anyone on the box.
    */
   it.skipIf(process.platform === 'win32')('writes config.json at 0600', async () => {
-    await writeConfig(dir, { ...CONFIG_DEFAULTS, shelf: 'backtrack' });
+    await writeConfig(dir, { ...CONFIG_DEFAULTS, shelf: 'backtrack/backtrack' });
     expect((await stat(configFile())).mode & 0o777).toBe(0o600);
   });
 
@@ -146,26 +146,43 @@ describe('writeConfig', () => {
     async () => {
       await mkdir(dir, { recursive: true });
       await chmod(dir, 0o755);
-      await writeConfig(dir, { ...CONFIG_DEFAULTS, shelf: 'backtrack' });
+      await writeConfig(dir, { ...CONFIG_DEFAULTS, shelf: 'backtrack/backtrack' });
       expect((await stat(configFile())).mode & 0o777).toBe(0o600);
     },
   );
 
   /**
-   * THE ONE NEW KEY. A slug names no host, so nothing about "which shelf" can be
-   * confused with "which deployment" any more; the regex is the whole rule and
-   * `tenjin shelf use --none` is how it goes back to null.
+   * THE ONE NEW KEY, AND IT IS QUALIFIED. A name names no host, so nothing about
+   * "which shelf" can be confused with "which deployment" any more; what it does
+   * carry is the org, because the shelf rides in the request body now and a bare
+   * `notes` names a different shelf in every org that has one. The regex is the
+   * whole rule and `tenjin shelf use --none` is how it goes back to null.
    */
-  it('defaults shelf to null and round-trips a slug', async () => {
+  it('defaults shelf to null and round-trips a qualified name', async () => {
     expect(CONFIG_DEFAULTS.shelf).toBeNull();
     expect((await loadConfig(dir)).shelf).toBeNull();
-    await writeConfig(dir, { ...CONFIG_DEFAULTS, shelf: 'backtrack' });
-    expect((await loadConfig(dir)).shelf).toBe('backtrack');
+    await writeConfig(dir, { ...CONFIG_DEFAULTS, shelf: 'backtrack/backtrack' });
+    expect((await loadConfig(dir)).shelf).toBe('backtrack/backtrack');
   });
 
-  it('refuses a shelf slug the regex does not admit', async () => {
-    for (const bad of ['', 'a', 'Backtrack', 'back track', 'back_track', 'x'.repeat(33)]) {
-      await expect(writeConfig(dir, { ...CONFIG_DEFAULTS, shelf: bad })).rejects.toThrow();
+  it('refuses a shelf name the regex does not admit, a BARE slug included', async () => {
+    const bad = [
+      '',
+      'a',
+      // The bare forms. Valid before shelves moved into the body, refused now:
+      // storing one would send a name the server answers 400 for.
+      'backtrack',
+      'notes',
+      'Backtrack/backtrack',
+      'back track/x',
+      'back_track/x',
+      'acme/notes/extra',
+      '/notes',
+      'acme/',
+      `${'x'.repeat(33)}/notes`,
+    ];
+    for (const value of bad) {
+      await expect(writeConfig(dir, { ...CONFIG_DEFAULTS, shelf: value })).rejects.toThrow();
     }
   });
 

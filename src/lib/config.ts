@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { CliError } from './errors';
 import { PRODUCTION_ORIGIN } from './production-origin';
 import { configPath } from './paths';
+import { QUALIFIED_SHELF_RE } from './ids';
 import { HARNESSES } from '../adapters/types';
 import type { Harness } from '../adapters/types';
 import { writeFileAtomic } from './atomic-json';
@@ -262,17 +263,21 @@ export const ConfigSchema = z.object({
   allowlistCreators: z.array(z.string()),
   baseUrl: z.url(),
   /**
-   * The active shelf's slug, or null: nothing set means public only.
+   * The active shelf's QUALIFIED name, `<org-slug>/<shelf-slug>`, or null:
+   * nothing set means public only.
    *
    * A shelf is a row on the one deployment, not a second deployment, so this is
-   * the whole of "which shelf is this machine on". It is the slug in the route
-   * a signed search and a shelf publish go to; membership is the server's
-   * answer, never inferred here.
+   * the whole of "which shelf is this machine on". It is the name a signed
+   * search and a shelf publish send in the request BODY; membership is the
+   * server's answer, never inferred here.
+   *
+   * QUALIFIED, never bare. The shelf left the URL, so the name has to carry its
+   * org: a bare `notes` names a different shelf in every org that has one, and
+   * this machine must not be the thing that decides which. `tenjin shelf use
+   * notes` resolves the bare form against the orgs the wallet belongs to and
+   * stores what it resolved to; the file only ever holds the qualified form.
    */
-  shelf: z
-    .string()
-    .regex(/^[a-z0-9-]{2,32}$/)
-    .nullable(),
+  shelf: z.string().regex(QUALIFIED_SHELF_RE).nullable(),
   rpcUrl: z.url(),
   /**
    * Evaluation-cohort opt-in (spec 09 §3): when true, search sends
@@ -380,7 +385,8 @@ export const CONFIG_DEFAULTS: Config = {
   sendMaxAmount: '0',
   allowlistCreators: [],
   baseUrl: PRODUCTION_ORIGIN,
-  // null = public only. `tenjin shelf use <slug>` is the whole of "join a shelf".
+  // null = public only. `tenjin shelf use <org/shelf>` is the whole of "join a
+  // shelf", and it is what resolves a bare slug to the qualified name stored here.
   shelf: null,
   rpcUrl: 'https://mainnet.base.org',
   evalCohort: false,

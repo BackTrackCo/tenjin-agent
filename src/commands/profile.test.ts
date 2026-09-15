@@ -334,7 +334,7 @@ describe('team shelf', () => {
   it('every account request goes to the one configured origin, preview key and all', async () => {
     await writeFile(
       join(dir, 'config.json'),
-      JSON.stringify({ baseUrl: 'https://team.example', shelf: 'backtrack' }),
+      JSON.stringify({ baseUrl: 'https://team.example', shelf: 'backtrack/backtrack' }),
     );
     // The only thing left that sends this header: a PREVIEW deployment behind
     // Vercel Deployment Protection. It is environment-only and rides the one

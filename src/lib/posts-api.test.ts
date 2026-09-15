@@ -136,14 +136,16 @@ describe('buildPostCreateBody — bounds', () => {
   });
 
   /**
-   * WHERE THE PIECE LANDS, as one slug on the body. Omitted rather than null for
-   * the marketplace: an absent `shelf` is what the server reads as public, and
-   * the strict create schema has no null to accept.
+   * WHERE THE PIECE LANDS, as the QUALIFIED name on the body — the same
+   * `<org>/<shelf>` the config stores and a search sends. Forwarded verbatim,
+   * never split: this client does not decide which org a shelf belongs to.
+   * Omitted rather than null for the marketplace: an absent `shelf` is what the
+   * server reads as public, and the strict create schema has no null to accept.
    */
   it('emits `shelf` when one is set, and omits it entirely when not', () => {
-    expect(buildPostCreateBody({ status: 'draft', title: 't', shelf: 'backtrack' }).shelf).toBe(
-      'backtrack',
-    );
+    expect(
+      buildPostCreateBody({ status: 'draft', title: 't', shelf: 'backtrack/backtrack' }).shelf,
+    ).toBe('backtrack/backtrack');
     const marketplace = buildPostCreateBody({ status: 'draft', title: 't' });
     expect(marketplace).not.toHaveProperty('shelf');
   });

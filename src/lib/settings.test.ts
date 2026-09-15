@@ -291,13 +291,13 @@ describe('resolveContextSettings — the shelf is stored, never inferred', () =>
     expect(settings.teamPublicFallback).toBe('on');
   });
 
-  it('reads the stored slug, and a --base-url override does not move it', async () => {
-    await writeFile(join(dataDir, 'config.json'), JSON.stringify({ shelf: 'backtrack' }));
-    expect((await resolveContextSettings(ctx())).shelf).toBe('backtrack');
+  it('reads the stored name, and a --base-url override does not move it', async () => {
+    await writeFile(join(dataDir, 'config.json'), JSON.stringify({ shelf: 'backtrack/backtrack' }));
+    expect((await resolveContextSettings(ctx())).shelf).toBe('backtrack/backtrack');
     // The one thing the old shape got wrong: an overridden base URL used to drop
-    // the machine out of team mode entirely. A slug is not an origin.
+    // the machine out of team mode entirely. A shelf name is not an origin.
     const overridden = await resolveContextSettings(ctx({ baseUrl: 'https://elsewhere.example' }));
-    expect(overridden.shelf).toBe('backtrack');
+    expect(overridden.shelf).toBe('backtrack/backtrack');
     expect(overridden.baseUrl).toBe('https://elsewhere.example');
     // The pin a signature follows is still the CONFIGURED base, not the flag.
     expect(overridden.configuredBaseUrl).toBe(CONFIG_DEFAULTS.baseUrl);
@@ -306,7 +306,7 @@ describe('resolveContextSettings — the shelf is stored, never inferred', () =>
   it('carries team.publicFallback through, since it is what sets includePublic', async () => {
     await writeFile(
       join(dataDir, 'config.json'),
-      JSON.stringify({ shelf: 'backtrack', team: { publicFallback: 'off' } }),
+      JSON.stringify({ shelf: 'backtrack/backtrack', team: { publicFallback: 'off' } }),
     );
     expect((await resolveContextSettings(ctx())).teamPublicFallback).toBe('off');
   });

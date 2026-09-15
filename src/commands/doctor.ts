@@ -1142,9 +1142,10 @@ const orgListSchema = z.object({
  * presentable session is exactly the state that produces `unauthenticated` rows,
  * so that is the warning, with the one remedy that clears it.
  *
- * THE SHELF ROUTE ANSWERS 404 FOR BOTH "not a member" AND "no such shelf", by
+ * A SHELF CALL ANSWERS 404 FOR BOTH "not a member" AND "no such shelf", by
  * design, so this is the only place a user learns which it was: the org list is
- * what the wallet can actually reach.
+ * what the wallet can actually reach, printed as the QUALIFIED names the config
+ * stores and the wire speaks.
  *
  * Silent on a machine with no shelf set and no orgs to report: the default
  * machine gets no line about a feature it never turned on.
@@ -1230,10 +1231,12 @@ async function checkShelf(
   const listed = orgs
     .map(
       (org) =>
-        `${sanitizeForTerminal(org.slug)} (public-search ${org.publicSearch === false ? 'off' : 'on'}: ${org.shelves.map((sh) => sanitizeForTerminal(sh.slug)).join(', ') || 'no shelves'})`,
+        `${sanitizeForTerminal(org.slug)} (public-search ${org.publicSearch === false ? 'off' : 'on'}: ${org.shelves.map((sh) => sanitizeForTerminal(`${org.slug}/${sh.slug}`)).join(', ') || 'no shelves'})`,
     )
     .join('; ');
-  const found = orgs.some((org) => org.shelves.some((sh) => sh.slug === shelf));
+  // MATCHED QUALIFIED. A shelf slug alone is not an identity any more, so
+  // comparing on it would call a `notes` in some other org this machine's shelf.
+  const found = orgs.some((org) => org.shelves.some((sh) => `${org.slug}/${sh.slug}` === shelf));
   if (!found) {
     return {
       result: {
@@ -1241,7 +1244,7 @@ async function checkShelf(
         status: 'warn',
         required: false,
         detail: `the active shelf "${sanitizeForTerminal(shelf)}" is not one this wallet can reach. Reachable: ${listed}`,
-        fix: 'Pick one of the shelves above: `tenjin shelf use <slug>`.',
+        fix: 'Pick one of the shelves above: `tenjin shelf use <org/shelf>`.',
       },
     };
   }

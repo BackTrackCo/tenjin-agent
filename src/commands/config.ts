@@ -48,6 +48,7 @@ import type { Harness, HarnessAdapter } from '../adapters/types';
 import { ADAPTERS } from '../adapters/registry';
 import { loadProjectConfig } from '../lib/settings';
 import { configPath } from '../lib/paths';
+import { QUALIFIED_SHELF_RE } from '../lib/ids';
 import { writeFileAtomic } from '../lib/atomic-json';
 import { installedHarnessInPlay } from '../lib/harness-presence';
 import { withFileLock, LockTimeoutError } from '../lib/lock';
@@ -120,7 +121,8 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
     'hard cap per tenjin wallet send; unset = send refuses until set, 0 disables send, none = uncapped; never bypassed by --yes',
   allowlistCreators: 'only auto-pay these creators (empty = any)',
   baseUrl: 'Tenjin API base URL: the one origin publish/read/search go to',
-  shelf: "the active shelf's slug, or unset for public only; set it with `tenjin shelf use <slug>`",
+  shelf:
+    'the active shelf as "<org>/<shelf>", or unset for public only; set it with `tenjin shelf use <org/shelf>`',
   rpcUrl: 'Base RPC endpoint for balance reads',
   evalCohort: 'opt in to the search evaluation cohort',
   bazaarPay: 'let `tenjin pay` spend at registry-listed non-Tenjin endpoints',
@@ -819,14 +821,18 @@ function renderValue(
 }
 
 /** Per-key edge parsing. Returns the persisted form; throws USAGE on bad input. */
-function parseShelfSlug(value: string): string {
-  const slug = value.trim();
-  if (!/^[a-z0-9-]{2,32}$/.test(slug)) {
-    throw new CliError('USAGE', `Invalid shelf slug: ${JSON.stringify(value)}`, {
-      fix: 'A slug is 2 to 32 characters of a-z, 0-9 or hyphen. To clear it, run `tenjin shelf use --none`.',
+function parseQualifiedShelf(value: string): string {
+  const name = value.trim();
+  if (!QUALIFIED_SHELF_RE.test(name)) {
+    // A BARE SLUG IS REFUSED HERE, not resolved. `config set` writes what it is
+    // given and asks the server nothing, so it has no way to learn which org
+    // owns a `notes`; `tenjin shelf use notes` is the verb that can, and the
+    // fix names it rather than leaving the operator to guess the org.
+    throw new CliError('USAGE', `Invalid shelf: ${JSON.stringify(value)}`, {
+      fix: 'A shelf is "<org>/<shelf>", e.g. backtrack/backtrack, each half 2 to 32 characters of a-z, 0-9 or hyphen. `tenjin shelf use <slug>` resolves a bare name against your orgs; to clear it, run `tenjin shelf use --none`.',
     });
   }
-  return slug;
+  return name;
 }
 
 function parseValue(key: ScalarConfigKey, value: string): string | string[] | boolean {
@@ -844,10 +850,10 @@ function parseValue(key: ScalarConfigKey, value: string): string | string[] | bo
     case 'rpcUrl':
       return parseHttpUrl(value);
     case 'shelf':
-      // The slug alone, checked against the same regex the schema pins. There is
-      // no empty form: clearing it is `tenjin shelf use --none`, which persists
-      // null, because `config set` has no way to say "no value".
-      return parseShelfSlug(value);
+      // The QUALIFIED name, checked against the same regex the schema pins.
+      // There is no empty form: clearing it is `tenjin shelf use --none`, which
+      // persists null, because `config set` has no way to say "no value".
+      return parseQualifiedShelf(value);
     case 'evalCohort':
     case 'bazaarPay':
       return parseBoolean(value);

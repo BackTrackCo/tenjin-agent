@@ -698,7 +698,7 @@ Examples:
   addGlobalFlags(org.command('list'))
     .summary('orgs this wallet belongs to, with their shelves')
     .description(
-      'List every org this wallet is a member of, the shelves under each, the public-search policy, and which shelf is active on this machine. This is also what a 404 from a shelf route means: the route never says whether the slug was unknown or you are not a member.',
+      'List every org this wallet is a member of, the shelves under each as "<org>/<shelf>", the public-search policy, and which shelf is active on this machine. This is also what a 404 from a shelf lookup means: the server never says whether the shelf was unknown or you are not a member.',
     )
     .action(async function (this: Command) {
       await runCommand('org.list', this, async (ctx) => {
@@ -761,10 +761,10 @@ Examples:
   const shelf = leaf(program, TEAM, 'shelf', 'set the active shelf for this machine').description(
     'Choose which shelf this machine publishes to and looks up first. `tenjin org list` names the shelves this wallet can reach; there is no `shelf create`.',
   );
-  addGlobalFlags(shelf.command('use [slug]'))
-    .summary('set the active shelf, or --none for public only')
+  addGlobalFlags(shelf.command('use [shelf]'))
+    .summary('set the active shelf as <org>/<shelf>, or --none for public only')
     .description(
-      'Set the active shelf, validated against the shelves this wallet can actually reach, so a typo is refused here rather than looking like a membership problem on every later lookup. `--none` clears it: publishes and lookups then go to the public marketplace.',
+      'Set the active shelf, validated against the shelves this wallet can actually reach, so a typo is refused here rather than looking like a membership problem on every later lookup. Pass "<org>/<shelf>", or a bare shelf name to resolve against your orgs: exactly one match is stored qualified, and several is a refusal that lists them. `--none` clears it: publishes and lookups then go to the public marketplace.',
     )
     .option('--none', 'clear the active shelf; publish and look up on the public marketplace only')
     .action(async function (this: Command, slug: string | undefined) {

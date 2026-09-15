@@ -47,7 +47,7 @@ const CONFIG: KernelConfig = {
   loop: CONFIG_DEFAULTS.loop,
   team: CONFIG_DEFAULTS.team,
   baseUrl: CONFIG_DEFAULTS.baseUrl,
-  shelf: 'backtrack',
+  shelf: 'backtrack/backtrack',
   publish: CONFIG_DEFAULTS.publish,
 };
 

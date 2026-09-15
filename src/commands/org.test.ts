@@ -17,7 +17,10 @@ import type { CommandContext } from '../context';
 let dir: string;
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'tenjin-org-'));
-  await writeFile(join(dir, 'config.json'), JSON.stringify({ baseUrl: BASE, shelf: 'backtrack' }));
+  await writeFile(
+    join(dir, 'config.json'),
+    JSON.stringify({ baseUrl: BASE, shelf: 'backtrack/backtrack' }),
+  );
 });
 afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
@@ -114,11 +117,13 @@ describe('tenjin org list', () => {
     expect(s.calls[0]?.url).toBe(`${BASE}/api/orgs`);
     expect(signed(s.calls[0])).toBe(true);
 
-    expect(res.data).toMatchObject({ activeShelf: 'backtrack' });
+    expect(res.data).toMatchObject({ activeShelf: 'backtrack/backtrack' });
     const lines = res.humanLines?.join('\n') ?? '';
     expect(lines).toContain('backtrack (admin)');
     expect(lines).toContain('public-search: on');
-    expect(lines).toContain('<- active');
+    // QUALIFIED IN THE LIST TOO: a bare slug here would be a name the operator
+    // could not paste into `shelf use` or `config set shelf`.
+    expect(lines).toContain('backtrack/backtrack  <- active');
   });
 
   it('says so plainly when the wallet is in no org at all', async () => {

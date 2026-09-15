@@ -232,8 +232,9 @@ export interface Arm {
 }
 
 /**
- * What a fire reads off `config.json`. One origin (`baseUrl`) and one slug
- * (`shelf`): "on a shelf" is `shelf !== null` and nothing is inferred.
+ * What a fire reads off `config.json`. One origin (`baseUrl`) and one qualified
+ * shelf name (`shelf`, `<org>/<shelf>`): "on a shelf" is `shelf !== null` and
+ * nothing is inferred.
  * `publish` is the capture ask's `<mode>` when the checkout has no
  * `.tenjin.json` of its own: the ask names the consent a publish will actually
  * run under.
