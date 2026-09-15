@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runBuy } from './buy';
 import { findDelivered, saveDelivery } from '../lib/library';
-import { recordSearch } from '../lib/state-store';
+import { recordSearch } from '../lib/searches';
 import { verifyTypedData } from 'viem';
 import {
   buildPaymentRequired,

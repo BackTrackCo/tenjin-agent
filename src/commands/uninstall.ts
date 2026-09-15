@@ -2,35 +2,33 @@ import { homedir } from 'node:os';
 import {
   keptItems,
   REMOVED_FROM_DATA_DIR,
+  removeFromHooksFile,
   removeFromSettings,
   removeHookScripts,
-  removeMarkerLines,
   removeSkills,
+  type SettingsOutcome,
   type UninstallReport,
 } from '../lib/uninstall';
+import { stopDaemon } from '../daemon/control';
 import { sanitizeForTerminal } from '../lib/output';
 import { loadRawConfig } from '../lib/config';
+import { ADAPTERS } from '../adapters/registry';
+import type { Harness, HarnessAdapter } from '../adapters/types';
 import type { CommandContext, CommandResult } from '../context';
 
 /**
  * `tenjin uninstall`: undo exactly what `tenjin install` wrote, and nothing else.
  *
  * The shape of this command is the promise it makes. It removes the skills, the
- * hook scripts, our hook entries and permission rules in the harness's
- * settings.json, and the legacy pointer line older versions wrote into
- * CLAUDE.md/AGENTS.md. "The hook scripts" INCLUDES the push experiment's four
- * arms (prompt, failure, subagent, context) and all seven of their settings.json
- * entries, whatever `hooks.push` currently says: `tenjin push off` leaves the
- * files on disk on purpose, so uninstall is the only thing that takes them away.
- * It does NOT remove the wallet, the config (the team shelf's shared
- * `shelfBypassSecret` included, which the receipt names on its own line, with the
- * command that clears it, on the machines that actually hold one), the library,
- * the push ledger, the search ledger, or
- * parked candidates: `install` did not create those, a wallet holds funds, and
- * the ledger is the experiment's only record. The hook scripts are
- * the one thing under `~/.tenjin` it does remove, because `install` generated
- * them. The receipt names both halves on every run, so the operator learns the
- * boundary from the command rather than from the docs.
+ * loop daemon and its files, and our hook entries and permission rules in the
+ * harness's settings.json. It does NOT remove the wallet, the config (the team
+ * shelf's shared `shelfBypassSecret` included, which the receipt names on its
+ * own line, with the command that clears it, on the machines that actually hold
+ * one), the library, or `loop.db`: `install` did not create those, a wallet
+ * holds funds, and the loop database is the machine's only record.
+ * `~/.tenjin/hooks` is the one thing under `~/.tenjin` it does remove, because
+ * `install` wrote it. The receipt names both halves on every run, so the
+ * operator learns the boundary from the command rather than from the docs.
  *
  * IDEMPOTENT BY CONSTRUCTION. Every step is "remove it if it is ours and there",
  * so a half-installed machine, an already-uninstalled one, and a machine that
@@ -40,9 +38,13 @@ import type { CommandContext, CommandResult } from '../context';
  */
 
 export interface UninstallDeps {
+  /** Harness lifecycle implementations; tests may inject adapters at this boundary. */
+  adapters?: Readonly<Record<Harness, HarnessAdapter>>;
   /** Home whose harness directories are cleaned; tests inject a temp dir. */
   home?: string;
-  /** Environment the Hermes home is resolved from; defaults to process.env. */
+  /** Seam for stopping the daemon; tests inject one that signals nothing. */
+  stop?: typeof stopDaemon;
+  /** Environment (CODEX_HOME); defaults to process.env. */
   env?: NodeJS.ProcessEnv;
 }
 
@@ -51,22 +53,42 @@ export async function runUninstall(
   deps: UninstallDeps = {},
 ): Promise<CommandResult> {
   const home = deps.home ?? homedir();
+  const adapters = deps.adapters ?? ADAPTERS;
 
   // Settings first: it is the only step with a concurrency guard, and the only
-  // one that can refuse. Doing it before the scripts are deleted means a refusal
-  // leaves a registered hook still pointing at a script that exists, rather than
-  // at one that does not.
-  const settings = await removeFromSettings(home);
+  // one that can refuse. Doing it before the daemon is stopped means a refusal
+  // leaves registered entries pointing at a daemon that is still answering them,
+  // rather than at a port with nothing behind it.
+  const settings = await removeFromSettings(home, ctx.dataDir);
+  // Every other harness's hooks file, by the same rules and before the daemon
+  // for the same reason.
+  const hookFiles: SettingsOutcome[] = [];
+  const grants: Partial<Record<Harness, string>> = {};
+  for (const adapter of Object.values(adapters)) {
+    if (adapter.id === 'claude') continue;
+    hookFiles.push(await removeFromHooksFile(adapter, home, ctx.dataDir, deps.env));
+    const removed = await adapter.registrar.grant?.remove?.(home, deps.env ?? process.env);
+    if (removed?.removed) grants[adapter.id] = removed.path;
+  }
+  // Claude's hooks and grants share settings.json and are intentionally removed
+  // in the one guarded read-modify-write above. Record that adapter outcome in
+  // the same map as the independent grant files.
+  if (settings.rules.length > 0) grants.claude = settings.path;
+  // Then the daemon, before its bundle is deleted: a running daemon whose entries
+  // are gone still holds the port and still serves any session that has not
+  // re-read settings.json yet.
+  const daemon = await (deps.stop ?? stopDaemon)(ctx.dataDir);
   const scripts = await removeHookScripts(ctx.dataDir);
-  const skills = await removeSkills(home, deps.env);
-  const markers = await removeMarkerLines(home);
+  const skills = await removeSkills(home);
 
   const report: UninstallReport = {
     settings,
+    hookFiles,
+    grants,
+    daemon: daemon.state,
     skills,
     scripts: scripts.scripts,
     ...(scripts.removedDir !== undefined ? { hooksDir: scripts.removedDir } : {}),
-    markers,
     // Read rather than assumed: the shelf-key item is an imperative to clear a
     // shared credential, and on the machines that do not have one it is a false
     // line in a receipt whose only job is to be checked.
@@ -92,20 +114,24 @@ function humanLines(report: UninstallReport): string[] {
   const { settings } = report;
   const removed: string[] = [];
   for (const dir of report.skills) removed.push(`skill ${sanitizeForTerminal(dir)}`);
-  for (const script of report.scripts) removed.push(`hook script ${sanitizeForTerminal(script)}`);
+  if (report.daemon === 'stopped' || report.daemon === 'killed') removed.push('the loop daemon');
+  for (const script of report.scripts) removed.push(`hook file ${sanitizeForTerminal(script)}`);
   if (report.hooksDir !== undefined) {
     removed.push(`empty hooks directory ${sanitizeForTerminal(report.hooksDir)}`);
   }
-  for (const event of settings.hooks) {
-    removed.push(`${event} hook entry in ${sanitizeForTerminal(settings.path)}`);
+  for (const file of [settings, ...report.hookFiles]) {
+    for (const event of file.hooks) {
+      removed.push(`${event} hook entry in ${sanitizeForTerminal(file.path)}`);
+    }
+  }
+  for (const [harness, path] of Object.entries(report.grants)) {
+    if (harness === 'claude') continue; // already counted by settings.rules below
+    removed.push(`the ${harness} command grant ${sanitizeForTerminal(path)}`);
   }
   if (settings.rules.length > 0) {
     removed.push(
       `${settings.rules.length} tenjin permission rule(s) in ${sanitizeForTerminal(settings.path)}`,
     );
-  }
-  for (const path of report.markers) {
-    removed.push(`legacy pointer line in ${sanitizeForTerminal(path)}`);
   }
 
   const lines =
@@ -123,8 +149,8 @@ function humanLines(report: UninstallReport): string[] {
   lines.push('Removed from ~/.tenjin:');
   for (const item of REMOVED_FROM_DATA_DIR) lines.push(`  - ${item}`);
 
-  if (settings.warning !== undefined) {
-    lines.push(`! ${sanitizeForTerminal(settings.warning)}`);
+  for (const file of [settings, ...report.hookFiles]) {
+    if (file.warning !== undefined) lines.push(`! ${sanitizeForTerminal(file.warning)}`);
   }
   lines.push('Reinstall anytime: tenjin install');
   return lines;

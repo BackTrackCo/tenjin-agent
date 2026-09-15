@@ -11,7 +11,6 @@ import { skillMaterialize } from './skill-materialize';
 import { readSkillFile, skillFrontmatterName, skillsDirsFor } from './skill-wiring';
 import { installSkill } from './skill-writer';
 import { OPTIONAL_PAY_SKILL, SKILL_NAMES, resolveSkillsSource } from './skills-source';
-import { resolveHermesHomeLenient } from './hermes';
 
 /**
  * Optional skills, where PRESENCE is the whole mechanism: the tenjin-pay skill
@@ -76,7 +75,6 @@ export async function syncBazaarSkill(
     io: Io;
     homeDir?: string;
     skillsSourceDir?: string;
-    env?: NodeJS.ProcessEnv;
     /** Where `config.json` lives, for the team-mode fact the content is shaped by.
      *  Absent means public, for a caller with no data dir to read. */
     dataDir?: string;
@@ -96,12 +94,8 @@ export async function syncBazaarSkill(
   } catch {
     return; // no readable source: nothing safe to write, nothing to remove FROM
   }
-  const env = deps.env ?? process.env;
-  // Lenient, like `skill-heal` and `uninstall`: a stray relative HERMES_HOME must
-  // not stop an operator's own `config set bazaarPay`. Resolving it at all is
-  // what puts the Hermes skills directory in scope for the sync.
   const touched: string[] = [];
-  for (const dir of skillsDirsFor(home, resolveHermesHomeLenient(home, env).home)) {
+  for (const dir of skillsDirsFor(home)) {
     try {
       if (lstatSync(dir, { throwIfNoEntry: false })?.isDirectory() !== true) continue;
       const consented = SKILL_NAMES.some(

@@ -1,9 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { join } from 'node:path';
 import { claudeAdapter, decode, encode, registrar } from './claude';
-import { EVENTS } from './types';
 import type { Event, HookInput, ToolKind } from './types';
-import { CLAUDE_CONTEXT_MAX } from '../hooks/constants';
+import { CONTEXT_MAX } from '../hooks/constants';
 import SessionStart from './fixtures/claude/SessionStart.json';
 import UserPromptSubmit from './fixtures/claude/UserPromptSubmit.json';
 import PreToolUse from './fixtures/claude/PreToolUse.json';
@@ -12,6 +11,8 @@ import PostToolUseFailure from './fixtures/claude/PostToolUseFailure.json';
 import SubagentStart from './fixtures/claude/SubagentStart.json';
 import SubagentStop from './fixtures/claude/SubagentStop.json';
 import Stop from './fixtures/claude/Stop.json';
+import childPreToolUse from './fixtures/claude/child-PreToolUse.json';
+import childPostToolUse from './fixtures/claude/child-PostToolUse.json';
 
 const FIXTURES = {
   SessionStart,
@@ -24,9 +25,10 @@ const FIXTURES = {
   Stop,
 } as const;
 
-const SESSION = '6d2f0c8a-9b41-4e7a-8c3d-1f5e2a7b9c04';
-const TRANSCRIPT = `/Users/dev/.claude/projects/-Users-dev-proj/${SESSION}.jsonl`;
 const PROMPT_ID = '01J9X4M2K7Q8R3T5V6W7Y8Z9A0';
+/** The child's id as Claude Code 2.1.261 really mints it (17 hex chars), from
+ *  the captured turn in `evidence/claude-2.1.261-subagent-turn.json`. */
+const CHILD_ID = 'a59db2769b6f0fcd1';
 
 /** Every fixture decodes; `null` here would hide a fixture typo behind a TypeError. */
 function decoded(name: keyof typeof FIXTURES): HookInput {
@@ -54,9 +56,9 @@ describe('decode', () => {
       expect(input.harness).toBe('claude');
       expect(input.event).toBe(EXPECTED[name]);
       expect(input.native).toEqual({ event: name });
-      expect(input.session).toBe(SESSION);
+      expect(input.session).toBe(FIXTURES[name].session_id);
       expect(input.cwd).toBe('/Users/dev/proj');
-      expect(input.transcript?.path).toBe(TRANSCRIPT);
+      expect(input.transcript?.path).toBe(FIXTURES[name].transcript_path);
       expect(input.raw).toBe(FIXTURES[name]);
     },
   );
@@ -81,8 +83,9 @@ describe('decode', () => {
     expect(input.turn).toBe(PROMPT_ID);
     expect(input.tool).toEqual({
       name: 'WebFetch',
-      kind: 'web',
-      input: PreToolUse.tool_input,
+      kind: 'fetch',
+      url: PreToolUse.tool_input.url,
+      prompt: PreToolUse.tool_input.prompt,
       callId: PreToolUse.tool_use_id,
     });
   });
@@ -92,7 +95,7 @@ describe('decode', () => {
     expect(input.tool).toEqual({
       name: 'Bash',
       kind: 'shell',
-      input: PostToolUse.tool_input,
+      command: PostToolUse.tool_input.command,
       callId: PostToolUse.tool_use_id,
       ok: true,
       result: { stdout: PostToolUse.tool_response.stdout, stderr: '' },
@@ -105,7 +108,7 @@ describe('decode', () => {
     expect(input.tool).toEqual({
       name: 'Bash',
       kind: 'shell',
-      input: PostToolUseFailure.tool_input,
+      command: PostToolUseFailure.tool_input.command,
       callId: PostToolUseFailure.tool_use_id,
       ok: false,
       result: { error: PostToolUseFailure.error },
@@ -113,12 +116,43 @@ describe('decode', () => {
     });
   });
 
-  it('SubagentStart names the child and its type', () => {
+  it('SubagentStart names the child and its type, and carries the parent turn', () => {
     const input = decoded('SubagentStart');
-    expect(input.agent).toBe('a7c31e9f');
+    expect(input.agent).toBe(CHILD_ID);
     expect(input.agentType).toBe('Explore');
-    expect(input.turn).toBe(PROMPT_ID);
+    // `prompt_id` is real on SubagentStart (probed 2026-09-05): the handoff
+    // claim keys on it, so a child's start finds its own turn's parked row.
+    expect(input.turn).toBe(SubagentStart.prompt_id);
     expect(input.stopFuse).toBeUndefined();
+  });
+
+  describe("a child's tool fires (captured 2.1.261 turn)", () => {
+    it('PreToolUse inside the child carries agent_id and the parent turn', () => {
+      const input = decode(childPreToolUse);
+      expect(input).toMatchObject({
+        event: 'tool.before',
+        session: childPreToolUse.session_id,
+        agent: CHILD_ID,
+        turn: childPreToolUse.prompt_id,
+        agentType: 'Explore',
+        tool: { name: 'Bash', kind: 'shell', callId: childPreToolUse.tool_use_id },
+      });
+      expect(input?.tool?.ok).toBeUndefined();
+    });
+
+    it('PostToolUse inside the child is ok: a clean `ls` carries no marker', () => {
+      const input = decode(childPostToolUse);
+      expect(input).toMatchObject({
+        event: 'tool.after',
+        agent: CHILD_ID,
+        turn: childPostToolUse.prompt_id,
+        tool: {
+          kind: 'shell',
+          ok: true,
+          result: { stdout: childPostToolUse.tool_response.stdout, stderr: '' },
+        },
+      });
+    });
   });
 
   it('SubagentStop carries the child transcript, last message and fuse', () => {
@@ -126,7 +160,7 @@ describe('decode', () => {
     expect(input.agent).toBe('a7c31e9f');
     expect(input.agentType).toBe('Explore');
     expect(input.transcript).toEqual({
-      path: TRANSCRIPT,
+      path: SubagentStop.transcript_path,
       agentPath: SubagentStop.agent_transcript_path,
     });
     expect(input.lastMessage).toBe(SubagentStop.last_assistant_message);
@@ -138,7 +172,7 @@ describe('decode', () => {
     expect(input.agent).toBeUndefined();
     expect(input.stopFuse).toBe(false);
     expect(input.lastMessage).toBe(Stop.last_assistant_message);
-    expect(input.transcript).toEqual({ path: TRANSCRIPT });
+    expect(input.transcript).toEqual({ path: Stop.transcript_path });
   });
 
   it('reads stop_hook_active true as a tripped fuse', () => {
@@ -148,7 +182,7 @@ describe('decode', () => {
   describe('tool kind', () => {
     const KINDS: [string, ToolKind | 'other'][] = [
       ['WebSearch', 'web'],
-      ['WebFetch', 'web'],
+      ['WebFetch', 'fetch'],
       ['Agent', 'dispatch'],
       ['Task', 'dispatch'],
       ['Bash', 'shell'],
@@ -165,21 +199,63 @@ describe('decode', () => {
       expect(input?.tool).toMatchObject({ name, kind });
     });
 
-    it('a missing tool_name is an empty other tool with an empty input', () => {
+    it('a missing tool_name is an empty other tool', () => {
       const rest = { ...PreToolUse } as Record<string, unknown>;
       delete rest.tool_name;
       delete rest.tool_input;
       expect(decode(rest)?.tool).toEqual({
         name: '',
         kind: 'other',
-        input: {},
         callId: PreToolUse.tool_use_id,
       });
     });
 
-    it('a non-object tool_input decodes as an empty input', () => {
-      expect(decode({ ...PreToolUse, tool_input: 'ls' })?.tool?.input).toEqual({});
-      expect(decode({ ...PreToolUse, tool_input: ['ls'] })?.tool?.input).toEqual({});
+    it('a non-object tool_input leaves the canonical fields empty', () => {
+      expect(decode({ ...PreToolUse, tool_input: 'ls' })?.tool).toMatchObject({
+        kind: 'fetch',
+        url: '',
+        prompt: '',
+      });
+      expect(decode({ ...PreToolUse, tool_name: 'Bash', tool_input: ['ls'] })?.tool).toMatchObject({
+        kind: 'shell',
+        command: '',
+      });
+    });
+  });
+
+  describe('canonical tool fields', () => {
+    it.each([
+      ['Edit', { file_path: '/p/a.ts' }, { kind: 'edit', paths: ['/p/a.ts'] }],
+      ['Read', { file_path: '/p/b.ts' }, { kind: 'read', paths: ['/p/b.ts'] }],
+      ['Edit', {}, { kind: 'edit', paths: [] }],
+      [
+        'Agent',
+        { prompt: 'find the flake', description: 'a label', subagent_type: 'Explore' },
+        { kind: 'dispatch', task: 'find the flake', description: 'a label' },
+      ],
+      ['WebSearch', { query: 'pg 16 collation' }, { kind: 'web', query: 'pg 16 collation' }],
+    ])('%s carries its canonical fields', (tool_name, tool_input, expected) => {
+      expect(decode({ ...PreToolUse, tool_name, tool_input })?.tool).toMatchObject(expected);
+    });
+
+    // The description is the one line a work order's rules do not bury, and the
+    // dispatch arm sends it ahead of the task. A dispatch that carried none
+    // must carry no key either, so the arm's `?? ''` is the only default.
+    it('Agent carries the description only when tool_input has one', () => {
+      const bare = decode({
+        ...PreToolUse,
+        tool_name: 'Agent',
+        tool_input: { prompt: 'find the flake' },
+      })?.tool;
+      expect(bare).toMatchObject({ kind: 'dispatch', task: 'find the flake' });
+      expect(bare !== undefined && 'description' in bare).toBe(false);
+
+      const blank = decode({
+        ...PreToolUse,
+        tool_name: 'Agent',
+        tool_input: { prompt: 'find the flake', description: 42 },
+      })?.tool;
+      expect(blank !== undefined && 'description' in blank).toBe(false);
     });
   });
 
@@ -209,11 +285,48 @@ describe('decode', () => {
       expect(decode({ ...PostToolUse, is_interrupt: true })?.tool?.interrupted).toBe(true);
     });
 
-    it('ok is decided by the event literal, never by the response text', () => {
-      const failing = { ...PostToolUse, tool_response: { stdout: '', stderr: 'FAIL: 3 tests' } };
-      expect(decode(failing)?.tool?.ok).toBe(true);
+    it('PostToolUseFailure is not ok whatever its error text says', () => {
       const clean = { ...PostToolUseFailure, error: '' };
       expect(decode(clean)?.tool?.ok).toBe(false);
+    });
+
+    describe('a Bash PostToolUse is not ok when its output carries an error marker', () => {
+      // Decision 9: a non-zero exit inside a pipe and a runner that prints its
+      // verdict and exits zero both arrive as a plain PostToolUse. The adapter
+      // decides here; the failure arm never reads text.
+      function bash(stdout: string, stderr = ''): boolean | undefined {
+        return decode({ ...PostToolUse, tool_response: { stdout, stderr } })?.tool?.ok;
+      }
+
+      it.each([
+        ['a vitest FAIL verdict on stderr', '', ' FAIL  src/x.test.ts > flips'],
+        ['a totals row', ' Tests  3 failed | 40 passed (43)'],
+        ['a tsc diagnostic', "src/a.ts(3,1): error TS2322: Type 'x' is not assignable"],
+        ['a class-named error at line start', 'TypeError: cannot read properties of undefined'],
+        ['a POSIX code', 'spawn pnpm ENOENT'],
+        ['a stated exit code', 'Command failed with exit code 1'],
+      ])('%s', (_label, stdout, stderr = '') => {
+        expect(bash(stdout, stderr)).toBe(false);
+      });
+
+      it('prose that mentions an error mid-line is not a failure', () => {
+        expect(bash('handled an error: retried and passed')).toBe(true);
+        expect(bash('0 failed, nothing to see')).toBe(true);
+      });
+
+      it('scans the whole output, not a bounded tail', () => {
+        expect(bash(' FAIL  src/x.test.ts\n' + 'ok\n'.repeat(5000))).toBe(false);
+        expect(bash('ok\n'.repeat(5000) + 'npm ERR! code ELIFECYCLE')).toBe(false);
+      });
+
+      it('a Read whose text says Error: is still ok — the scan is for shells only', () => {
+        const read = {
+          ...PostToolUse,
+          tool_name: 'Read',
+          tool_response: { text: 'Error: this is file content' },
+        };
+        expect(decode(read)?.tool?.ok).toBe(true);
+      });
     });
   });
 
@@ -297,43 +410,28 @@ describe('encode', () => {
     });
   });
 
-  it('slices additionalContext at CLAUDE_CONTEXT_MAX', () => {
-    expect(CLAUDE_CONTEXT_MAX).toBe(10_000);
-    const out = encode({ context: 'x'.repeat(CLAUDE_CONTEXT_MAX + 50) }, stop) as {
+  it('slices additionalContext at CONTEXT_MAX', () => {
+    expect(CONTEXT_MAX).toBe(10_000);
+    const out = encode({ context: 'x'.repeat(CONTEXT_MAX + 50) }, stop) as {
       hookSpecificOutput: { additionalContext: string };
     };
-    expect(out.hookSpecificOutput.additionalContext).toHaveLength(CLAUDE_CONTEXT_MAX);
-    const exact = encode({ context: 'y'.repeat(CLAUDE_CONTEXT_MAX) }, stop) as {
+    expect(out.hookSpecificOutput.additionalContext).toHaveLength(CONTEXT_MAX);
+    const exact = encode({ context: 'y'.repeat(CONTEXT_MAX) }, stop) as {
       hookSpecificOutput: { additionalContext: string };
     };
-    expect(exact.hookSpecificOutput.additionalContext).toHaveLength(CLAUDE_CONTEXT_MAX);
+    expect(exact.hookSpecificOutput.additionalContext).toHaveLength(CONTEXT_MAX);
   });
 
-  it('blocks only when the fuse is present and false', () => {
-    const block = { block: { reason: 'answer the parked question first' } };
-    expect(encode(block, stop)).toEqual({
-      decision: 'block',
-      reason: 'answer the parked question first',
-    });
-    expect(encode(block, { ...stop, stopFuse: true })).toBeNull();
-    expect(encode(block, { ...stop, stopFuse: undefined })).toBeNull();
-    expect(encode(block, decoded('UserPromptSubmit'))).toBeNull();
-  });
-
-  it('block and context travel together', () => {
-    expect(encode({ context: 'ctx', block: { reason: 'r' } }, stop)).toEqual({
+  it('speaks the same field with the fuse tripped: the ask is feedback, not an error', () => {
+    // additionalContext on Stop keeps the conversation going through the same
+    // loop protections a blocking decision would, with no red banner, so the
+    // fuse changes nothing about what this encoder says.
+    expect(encode({ context: 'ctx' }, { ...stop, stopFuse: true })).toEqual({
       hookSpecificOutput: { hookEventName: 'Stop', additionalContext: 'ctx' },
-      decision: 'block',
-      reason: 'r',
     });
-  });
-
-  it('a tripped fuse keeps the context and drops only the block', () => {
-    expect(encode({ context: 'ctx', block: { reason: 'r' } }, { ...stop, stopFuse: true })).toEqual(
-      {
-        hookSpecificOutput: { hookEventName: 'Stop', additionalContext: 'ctx' },
-      },
-    );
+    expect(encode({ context: 'ctx' }, { ...stop, stopFuse: undefined })).toEqual({
+      hookSpecificOutput: { hookEventName: 'Stop', additionalContext: 'ctx' },
+    });
   });
 });
 
@@ -392,55 +490,6 @@ describe('registrar', () => {
       hooks: { timeout: number }[];
     }[];
     for (const entry of plan) for (const h of entry.hooks) expect(h.timeout).toBe(8);
-  });
-
-  it('events map covers all seven canonical events under their native names', () => {
-    expect(Object.keys(registrar.events).sort()).toEqual([...EVENTS].sort());
-    expect(registrar.events).toEqual({
-      'session.start': {
-        native: 'SessionStart',
-        matcher: 'startup|clear|compact',
-        canBlock: false,
-      },
-      prompt: { native: 'UserPromptSubmit', canBlock: false },
-      'tool.before': { native: 'PreToolUse', canBlock: false },
-      'tool.after': { native: 'PostToolUse', canBlock: false },
-      'agent.start': { native: 'SubagentStart', canBlock: false },
-      'agent.stop': { native: 'SubagentStop', canBlock: true },
-      'turn.end': { native: 'Stop', canBlock: true },
-    });
-  });
-
-  it('tools regexes anchor on the whole native name', () => {
-    const { tools } = registrar;
-    expect(tools.web?.test('WebSearch')).toBe(true);
-    expect(tools.web?.test('WebFetch')).toBe(true);
-    expect(tools.web?.test('WebFetchX')).toBe(false);
-    expect(tools.dispatch?.test('Agent')).toBe(true);
-    expect(tools.dispatch?.test('Task')).toBe(true);
-    expect(tools.dispatch?.test('TaskOutput')).toBe(false);
-    expect(tools.shell?.test('Bash')).toBe(true);
-    expect(tools.shell?.test('BashOutput')).toBe(false);
-    expect(tools.edit?.test('Edit')).toBe(true);
-    expect(tools.edit?.test('Write')).toBe(true);
-    expect(tools.edit?.test('MultiEdit')).toBe(true);
-    expect(tools.edit?.test('NotebookEdit')).toBe(false);
-    expect(tools.read?.test('Read')).toBe(true);
-    expect(tools.read?.test('ReadMcpResourceTool')).toBe(false);
-  });
-
-  it('children are tagged', () => {
-    expect(registrar.childrenTagged).toBe(true);
-  });
-
-  it('transcriptFor prefers the child transcript, then the session one, else null', () => {
-    expect(registrar.transcriptFor(decoded('SubagentStop'))).toEqual({
-      path: SubagentStop.agent_transcript_path,
-    });
-    expect(registrar.transcriptFor(decoded('Stop'))).toEqual({ path: TRANSCRIPT });
-    const stop = decoded('Stop');
-    expect(registrar.transcriptFor({ ...stop, transcript: undefined })).toBeNull();
-    expect(registrar.transcriptFor({ ...stop, transcript: {} })).toBeNull();
   });
 });
 

@@ -1,6 +1,11 @@
-import { join } from 'node:path';
 import { AGENT_ID_RE } from '../lib/grade';
-import { CLAUDE_CONTEXT_MAX } from '../hooks/constants';
+import { CONTEXT_MAX } from '../hooks/constants';
+import {
+  claudeSettingsPath,
+  inspectClaudeGrant,
+  wireFreeVerbAllowlist,
+} from '../lib/harness-permissions';
+import { hasErrorMarker } from './error-markers';
 import type {
   Emit,
   Event,
@@ -9,6 +14,7 @@ import type {
   HookTool,
   Registrar,
   ToolKind,
+  ToolResult,
 } from './types';
 
 /**
@@ -32,7 +38,8 @@ const NATIVE_TO_EVENT: Record<string, Event> = {
 
 /** Native tool names per kind, spelled once (the matchers below derive from them). */
 const TOOLS: Record<ToolKind, RegExp> = {
-  web: /^(WebSearch|WebFetch)$/,
+  web: /^WebSearch$/,
+  fetch: /^WebFetch$/,
   dispatch: /^(Agent|Task)$/,
   shell: /^Bash$/,
   edit: /^(Edit|Write|MultiEdit)$/,
@@ -59,10 +66,39 @@ function toolKind(name: string): ToolKind | 'other' {
   return 'other';
 }
 
-function toolResult(v: unknown): HookTool['result'] | undefined {
+/** Claude's argument shapes onto the canonical fields; nothing else reads `tool_input`. */
+function canonicalTool(name: string, input: Record<string, unknown>): HookTool {
+  const kind = toolKind(name);
+  switch (kind) {
+    case 'shell':
+      return { name, kind, command: str(input.command) ?? '' };
+    case 'edit':
+    case 'read': {
+      const path = str(input.file_path);
+      return { name, kind, paths: path === undefined ? [] : [path] };
+    }
+    case 'dispatch': {
+      const description = str(input.description);
+      return {
+        name,
+        kind,
+        task: str(input.prompt) ?? '',
+        ...(description !== undefined ? { description } : {}),
+      };
+    }
+    case 'web':
+      return { name, kind, query: str(input.query) ?? '' };
+    case 'fetch':
+      return { name, kind, url: str(input.url) ?? '', prompt: str(input.prompt) ?? '' };
+    default:
+      return { name, kind };
+  }
+}
+
+function toolResult(v: unknown): ToolResult | undefined {
   if (typeof v === 'string') return { text: v };
   if (!isRecord(v)) return undefined;
-  const out: NonNullable<HookTool['result']> = {};
+  const out: ToolResult = {};
   const stdout = str(v.stdout);
   const stderr = str(v.stderr);
   const error = str(v.error);
@@ -81,7 +117,7 @@ function toolResult(v: unknown): HookTool['result'] | undefined {
  * Pure. Returns null for an unknown event, a missing session, or an `agent_id`
  * that is present but fails `AGENT_ID_RE`: the harness named a worker this build
  * cannot use, and recording the fire anyway would file a child's work under the
- * lead (`hook-scripts.ts` `identityOf` rule, kept verbatim).
+ * lead.
  */
 export function decode(raw: unknown): HookInput | null {
   if (!isRecord(raw)) return null;
@@ -126,18 +162,17 @@ export function decode(raw: unknown): HookInput | null {
 
   if (event === 'tool.before' || event === 'tool.after') {
     const name = str(raw.tool_name) ?? '';
-    const tool: HookTool = {
-      name,
-      kind: toolKind(name),
-      input: isRecord(raw.tool_input) ? raw.tool_input : {},
-    };
+    const tool: HookTool = canonicalTool(name, isRecord(raw.tool_input) ? raw.tool_input : {});
     const callId = str(raw.tool_use_id);
     if (callId !== undefined) tool.callId = callId;
     if (event === 'tool.after') {
       // Decided here, never by an arm reading the text: PostToolUseFailure is
-      // a distinct event literal in the 2.1.259 schema.
-      tool.ok = native === 'PostToolUseFailure' ? false : true;
+      // a distinct event literal in the 2.1.259 schema, and a Bash PostToolUse
+      // whose output carries an error marker is a failure too (decision 9):
+      // a non-zero exit inside a pipe, or a runner that prints its verdict and
+      // exits zero, arrives as a plain PostToolUse.
       if (native === 'PostToolUseFailure') {
+        tool.ok = false;
         if (typeof raw.error === 'string') tool.result = { error: raw.error };
         else {
           const result = toolResult(raw.error);
@@ -146,6 +181,10 @@ export function decode(raw: unknown): HookInput | null {
       } else {
         const result = toolResult(raw.tool_response);
         if (result !== undefined) tool.result = result;
+        tool.ok = !(
+          tool.kind === 'shell' &&
+          hasErrorMarker((result?.stdout ?? '') + '\n' + (result?.stderr ?? ''))
+        );
       }
       if (typeof raw.is_interrupt === 'boolean') tool.interrupted = raw.is_interrupt;
     }
@@ -156,24 +195,21 @@ export function decode(raw: unknown): HookInput | null {
 
 /**
  * Pure. `null` when there is nothing to say (the daemon answers 204).
- * `decision: 'block'` only when the fuse is present AND false: `stop_hook_active`
- * true means this Stop was already raised by a hook's block, and blocking again
- * loops the turn (today's rule, `push-scripts.ts` `emitBlock`).
+ *
+ * ONE FIELD FOR EVERY EVENT. On Stop and SubagentStop `additionalContext` keeps
+ * the conversation going through the same loop protections `decision: 'block'`
+ * would, and reads in the transcript as hook feedback rather than a hook error
+ * (https://code.claude.com/docs/en/hooks, checked 2026-09-06), so the turn-end
+ * ask travels the same way a lookup's context does.
  */
 export function encode(emit: Emit | null, input: HookInput): unknown {
-  if (emit === null) return null;
-  const out: Record<string, unknown> = {};
-  if (emit.context !== undefined && emit.context.length > 0) {
-    out.hookSpecificOutput = {
+  if (emit === null || emit.context === undefined || emit.context.length === 0) return null;
+  return {
+    hookSpecificOutput: {
       hookEventName: input.native.event,
-      additionalContext: emit.context.slice(0, CLAUDE_CONTEXT_MAX),
-    };
-  }
-  if (emit.block !== undefined && input.stopFuse === false) {
-    out.decision = 'block';
-    out.reason = emit.block.reason;
-  }
-  return Object.keys(out).length === 0 ? null : out;
+      additionalContext: emit.context.slice(0, CONTEXT_MAX),
+    },
+  };
 }
 
 /** One settings.json handler, as `install` writes it (PR C). */
@@ -198,7 +234,7 @@ function commandHandler(shimPath: string, timeoutSeconds: number) {
 
 export const registrar: Registrar = {
   configPath(home) {
-    return join(home, '.claude', 'settings.json');
+    return claudeSettingsPath(home);
   },
   /**
    * 9 `http` entries and 2 `command` entries (02-redesign.md §4). SessionStart
@@ -211,7 +247,14 @@ export const registrar: Registrar = {
     return [
       { event: 'SessionStart', matcher: SESSION_START_MATCHER, hooks: command },
       { event: 'UserPromptSubmit', hooks: command },
-      { event: 'PreToolUse', matcher: matcherOf(TOOLS.web), hooks: http },
+      // ONE entry for both web kinds. The arms are separate; the harness entry
+      // is not, because a settings file with two PreToolUse entries whose
+      // matchers overlap is two POSTs for one tool call.
+      {
+        event: 'PreToolUse',
+        matcher: `${matcherOf(TOOLS.web)}|${matcherOf(TOOLS.fetch)}`,
+        hooks: http,
+      },
       { event: 'PreToolUse', matcher: matcherOf(TOOLS.dispatch), hooks: http },
       {
         event: 'PreToolUse',
@@ -226,24 +269,10 @@ export const registrar: Registrar = {
       { event: 'Stop', hooks: http },
     ];
   },
-  events: {
-    'session.start': { native: 'SessionStart', matcher: SESSION_START_MATCHER, canBlock: false },
-    // `canBlock` is where `stop_hook_active` exists: Claude sends the fuse on
-    // Stop and SubagentStop only, and `encode` gates `block` on it, so a block
-    // on a prompt or tool event could never be emitted (today's loop blocks
-    // only at those two events too).
-    prompt: { native: 'UserPromptSubmit', canBlock: false },
-    'tool.before': { native: 'PreToolUse', canBlock: false },
-    'tool.after': { native: 'PostToolUse', canBlock: false },
-    'agent.start': { native: 'SubagentStart', canBlock: false },
-    'agent.stop': { native: 'SubagentStop', canBlock: true },
-    'turn.end': { native: 'Stop', canBlock: true },
-  },
-  tools: TOOLS,
-  childrenTagged: true,
-  transcriptFor(input) {
-    const path = input.transcript?.agentPath ?? input.transcript?.path;
-    return path === undefined ? null : { path };
+  grant: {
+    path: claudeSettingsPath,
+    inspect: inspectClaudeGrant,
+    write: wireFreeVerbAllowlist,
   },
 };
 

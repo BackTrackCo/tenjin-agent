@@ -1,0 +1,86 @@
+import { lookupArm } from './lookup';
+import type { Arm } from '../types';
+
+/**
+ * The two web arms, over one spec shape (09-pr-c-lookup-arms.md).
+ *
+ * TWO ARMS, NOT ONE, because they answer to different switches and read
+ * different words: `research` is what `hooks.web-search` speaks for and asks
+ * the query as typed, `fetch` answers `hooks.web-fetch` and asks a url. Two arms
+ * also means two `fires.arm` values, so the ledger can tell a page fetch from a
+ * real search. They are the same pipeline everywhere else. (The once-per-question
+ * claim is keyed on the QUESTION, per actor, not per arm: identical text asked
+ * by both is one lookup, which is the point — the loop does not double count.)
+ *
+ * NEITHER REWRITES ITS WORDS and neither has a length rule. A query is already a
+ * query, a url is already an address, and `question()` cuts at the shelf's
+ * bound on a word boundary.
+ */
+
+/**
+ * The url up to its first `?` or `#`, whichever comes first; the rest is cut.
+ * ONE RULE, because both runs carry the same risk: a credential in a shape
+ * `mask` has no rule for — a presigned signature or an account id in the query,
+ * a hash router's own `#/invite?code=…`, the `#access_token=…` an OAuth
+ * redirect hands back. A fragment that is none of those is a doc anchor, and an
+ * anchor is worth nothing to a shelf that ranks on the page.
+ */
+function addressOnly(raw: string): string {
+  const end = raw.search(/[?#]/);
+  return end === -1 ? raw : raw.slice(0, end);
+}
+
+/**
+ * The question a WebFetch is really asking: the page's address and the prompt
+ * the agent attached to it, both as written.
+ *
+ * THE ADDRESS STOPS AT THE FIRST `?` OR `#`. Everything before it goes as
+ * typed and nothing after it travels, because either run can hold a credential
+ * `mask` cannot see (see `addressOnly`). A url this build cannot parse, or one
+ * that is not a web address, is a fetch this arm has no words for.
+ *
+ * THE PARSER IS THE http(s) CHECK, NOT THE ADDRESS. Sending `url.origin +
+ * url.pathname` back out was a second rewrite wearing the parser's clothes: it
+ * lower-cases and punycodes the host, percent-encodes the path, folds `..`
+ * segments away, and strips the `user:pass@` that `mask` has its own rule for —
+ * four alterations nobody asked for, under a comment claiming one. The string
+ * the agent typed is the address; `URL` only says whether it is a web one.
+ */
+export function fetchQuestion(fetch: { url: string; prompt?: string }): string {
+  let url: URL;
+  try {
+    url = new URL(fetch.url);
+  } catch {
+    return '';
+  }
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') return '';
+  // The trim is the join's own: with no prompt attached there is nothing on the
+  // far side of the space to keep it for.
+  return `${addressOnly(fetch.url)} ${fetch.prompt ?? ''}`.trim();
+}
+
+/** WebSearch. The one arm `hooks.web-search` speaks for. */
+export const researchArm: Arm = lookupArm({
+  id: 'research',
+  wait: 'tool',
+  on: [{ event: 'tool.before', kind: 'web' }],
+  trigger: 'research',
+  enabled: (cfg) => cfg.hooks['web-search'],
+  text: (input) => (input.tool?.kind === 'web' ? input.tool.query.trim() : null),
+  shelves: ['team', 'public'],
+  deliver: 'inject',
+});
+
+/** WebFetch. Its own arm, its own switch, its own row in the ledger. */
+export const fetchArm: Arm = lookupArm({
+  id: 'fetch',
+  wait: 'tool',
+  on: [{ event: 'tool.before', kind: 'fetch' }],
+  // The wire trigger is `research` for both: the server's telemetry asks which
+  // KIND of moment produced the question, and both of these are a web lookup.
+  trigger: 'research',
+  enabled: (cfg) => cfg.hooks['web-fetch'],
+  text: (input) => (input.tool?.kind === 'fetch' ? fetchQuestion(input.tool) : null),
+  shelves: ['team', 'public'],
+  deliver: 'inject',
+});

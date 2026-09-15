@@ -1,0 +1,17 @@
+{
+  "session_id": "aaaaaaaa-0000-7000-8000-000000000001",
+  "turn_id": "cccccccc-0000-7000-8000-000000000002",
+  "agent_id": "bbbbbbbb-0000-7000-8000-000000000000",
+  "agent_type": "default",
+  "transcript_path": "/Users/dev/.codex/sessions/2026/09/08/rollout-2026-09-08T04-30-00-aaaaaaaa-0000-7000-8000-000000000001.jsonl",
+  "cwd": "/Users/dev/proj",
+  "hook_event_name": "PostToolUse",
+  "model": "gpt-5.6-sol",
+  "permission_mode": "bypassPermissions",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "env | grep ^CODEX_"
+  },
+  "tool_response": "CODEX_SANDBOX=seatbelt\nCODEX_SANDBOX_NETWORK_DISABLED=1\nCODEX_SESSION_ID=aaaaaaaa-0000-7000-8000-000000000001\nCODEX_SHELL=1\nCODEX_THREAD_ID=bbbbbbbb-0000-7000-8000-000000000000\n",
+  "tool_use_id": "exec-74a1ea70-84a4-4d63-9fed-bb56857bbfdd"
+}

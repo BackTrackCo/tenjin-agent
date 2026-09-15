@@ -30,10 +30,10 @@ import type { TenjinSigner } from './wallet/provider';
  * `establishSession`, the cache writer, and the two `WriteAuth` implementations.
  * The present-only half (load a file, sign one request with it) lives in
  * `session-present.ts` and is re-exported below, so `posts-api`/`publish`/`edit`
- * keep importing one module while `read` can import the present half ALONE and
- * stay structurally unable to open a keystore. Do not move a signer-touching
- * function down into `session-present.ts`: read's import-graph pin is what makes
- * "read cannot mint and cannot pay" a property of the code rather than a promise.
+ * keep importing one module while a caller that only wants to present a live
+ * delegation — `read`, on the reuse path — imports that half alone and touches
+ * no keystore. Do not move a signer-touching function down into
+ * `session-present.ts`: that free reuse path is what it buys.
  *
  * A minted delegation is a wallet-derived credential, so it is bound to the
  * ORIGIN it was minted against and every presenter re-checks that binding.
@@ -68,7 +68,7 @@ export type {
  * The chain a session delegation is signed over. Writes require Base mainnet per
  * the server's SIWX chain constraint, and a session covers reads and writes
  * alike, so there is exactly ONE session chain id rather than a per-caller
- * choice: `session start` and the write path must mint against the same chain or
+ * choice: the read path and the write path must mint against the same chain or
  * the file they share would flip between two delegations.
  */
 export const SESSION_CHAIN_ID = 'eip155:8453';

@@ -43,6 +43,8 @@ function names(db: LoopDb, type: 'table' | 'index'): string[] {
     .sort();
 }
 
+const TABLES = ['facts', 'fires', 'handoff', 'legs', 'marks', 'searches'];
+
 const FIRE = {
   id: 'f1',
   at: 1,
@@ -75,14 +77,20 @@ function insertFire(db: LoopDb, id = FIRE.id): void {
 }
 
 describe('openLoopDb', () => {
-  it('creates loop.db with the four PR B tables and both fires indexes', async () => {
+  it('creates loop.db with its six tables and their indexes', async () => {
     // A nested, not-yet-existing dataDir: the daemon may be the first thing to
     // touch ~/.tenjin on a fresh machine.
     const dir = join(await freshDir(), 'nested', 'data');
     const db = track(openLoopDb(dir));
     expect(existsSync(loopDbPath(dir))).toBe(true);
-    expect(names(db, 'table')).toEqual(['actors', 'fires', 'legs', 'marks']);
-    expect(names(db, 'index')).toEqual(['fires_actor', 'fires_at']);
+    expect(names(db, 'table')).toEqual(TABLES);
+    expect(names(db, 'index')).toEqual([
+      'fires_actor',
+      'fires_at',
+      'handoff_claim',
+      'searches_at',
+      'searches_session_at',
+    ]);
   });
 
   it('sets wal, foreign_keys and incremental auto_vacuum', async () => {
@@ -108,18 +116,14 @@ describe('openLoopDb', () => {
   it('reopens an existing file without error and keeps its rows', async () => {
     const dir = await freshDir();
     const first = openLoopDb(dir);
-    first
-      .prepare(`INSERT INTO actors (session, agent, arm, tat) VALUES ('s', '', 'lead', 42)`)
-      .run();
     first.prepare(`INSERT INTO marks (session, key, value, at) VALUES ('s', 'k', 'v', 1)`).run();
     first.close();
 
     const again = track(openLoopDb(dir));
     // Every statement is IF NOT EXISTS, so the DDL is safe against a live file.
     expect(() => again.exec(LOOP_DDL)).not.toThrow();
-    expect(again.prepare('SELECT tat FROM actors').all()).toEqual([{ tat: 42 }]);
     expect(again.prepare('SELECT value FROM marks').all()).toEqual([{ value: 'v' }]);
-    expect(names(again, 'table')).toEqual(['actors', 'fires', 'legs', 'marks']);
+    expect(names(again, 'table')).toEqual(TABLES);
     expect(again.prepare('PRAGMA journal_mode').get()).toEqual({ journal_mode: 'wal' });
   });
 
@@ -157,6 +161,91 @@ describe('openLoopDb', () => {
     // And once the lock is gone the same connection writes fine.
     insertFire(cli);
     expect(daemon.prepare('SELECT count(*) AS n FROM fires').get()).toEqual({ n: 1 });
+  });
+
+  it("rebuilds a loop.db whose tables are a different build's shape", async () => {
+    // PR B's `legs` had no `calibration`, and `CREATE TABLE IF NOT EXISTS` is
+    // silent about a table that already exists in another shape: every leg
+    // insert would then throw and ROLLBACK its whole fire, leaving a ledger that
+    // looks alive while every real lookup vanishes. The no-migration rule says
+    // delete the file, so this is where it is deleted.
+    const dir = await freshDir();
+    const old = track(new (await import('node:sqlite')).DatabaseSync(loopDbPath(dir)));
+    old.exec(`CREATE TABLE fires (id TEXT PRIMARY KEY, reason TEXT);
+              CREATE TABLE legs (fire_id TEXT, stage INTEGER, shelf TEXT);
+              CREATE TABLE marks (session TEXT, agent TEXT, key TEXT, value TEXT, at INTEGER);`);
+    old.prepare('INSERT INTO fires (id, reason) VALUES (?, ?)').run('stale', 'hit');
+    old.close();
+
+    const db = track(openLoopDb(dir));
+    expect(names(db, 'table')).toEqual(TABLES);
+    // The stale rows went with the file; a fire written now records in full.
+    expect(db.prepare('SELECT count(*) AS n FROM fires').get()).toEqual({ n: 0 });
+    insertFire(db);
+    db.prepare(
+      `INSERT INTO legs (fire_id, stage, shelf, status, elapsed_ms, calibration)
+       VALUES (?, 0, 'team', 'ok', 12, 'hybrid-v1')`,
+    ).run(FIRE.id);
+    expect(db.prepare('SELECT count(*) AS n FROM legs').get()).toEqual({ n: 1 });
+  });
+
+  it("rebuilds when one of D's tables is in another shape", async () => {
+    // `handoff` without `question` is a file from another build; a park on it
+    // would fail on every dispatch. Same rule, same delete.
+    const dir = await freshDir();
+    const old = track(new (await import('node:sqlite')).DatabaseSync(loopDbPath(dir)));
+    old.exec(LOOP_DDL.replace('  question  TEXT NOT NULL,\n', ''));
+    old.prepare(`INSERT INTO handoff (session, at) VALUES ('s', 1)`).run();
+    old.close();
+    const db = track(openLoopDb(dir));
+    expect(db.prepare('SELECT count(*) AS n FROM handoff').get()).toEqual({ n: 0 });
+    const columns = db.prepare('PRAGMA table_info(handoff)').all() as Array<{ name: string }>;
+    expect(columns.map((c) => c.name)).toContain('question');
+  });
+
+  it('drops the retired pairing tables off a file that still carries them', async () => {
+    // The DROPs in the DDL are the only thing that can reach these: they are
+    // gone from LOOP_SHAPE, and `shapeMatches` inspects nothing it does not
+    // list, so a file holding them passes the shape check and is never rebuilt.
+    // They cannot be built from LOOP_DDL either — it no longer creates them —
+    // so the old statements are written out by hand here.
+    const dir = await freshDir();
+    const old = track(new (await import('node:sqlite')).DatabaseSync(loopDbPath(dir)));
+    old.exec(`CREATE TABLE pairings (
+                id INTEGER PRIMARY KEY, uid TEXT NOT NULL UNIQUE, at INTEGER NOT NULL,
+                session TEXT NOT NULL, project TEXT, machine TEXT NOT NULL, kind TEXT NOT NULL,
+                key TEXT NOT NULL, cmd_head TEXT, cmd TEXT, error_line TEXT, error_files TEXT,
+                fix_cmd TEXT, fix_files TEXT, pkg_versions TEXT, scope TEXT NOT NULL,
+                status TEXT NOT NULL, closes INTEGER NOT NULL DEFAULT 0, closed_at INTEGER,
+                post_id TEXT);
+              CREATE TABLE pairing_closes (
+                pairing_id INTEGER NOT NULL, session TEXT NOT NULL, agent_id TEXT,
+                at INTEGER NOT NULL, fix_cmd TEXT, fix_files TEXT, scope TEXT,
+                PRIMARY KEY (pairing_id, session));
+              CREATE INDEX pairings_key_status ON pairings(key, status);
+              CREATE INDEX pairings_open_head ON pairings(cmd_head, at) WHERE status = 'open';`);
+    old
+      .prepare(
+        `INSERT INTO pairings (uid, at, session, machine, kind, key, scope, status)
+         VALUES ('u1', 1, 's', 'm', 'sig_v1', 'k', 'code', 'open')`,
+      )
+      .run();
+    old.prepare(`INSERT INTO pairing_closes (pairing_id, session, at) VALUES (1, 's', 2)`).run();
+    old.close();
+
+    const db = track(openLoopDb(dir));
+    expect(names(db, 'table')).toEqual(TABLES);
+    expect(names(db, 'index')).not.toContain('pairings_key_status');
+    expect(names(db, 'index')).not.toContain('pairings_open_head');
+  });
+
+  it('leaves a loop.db of the CURRENT shape alone, rows and all', async () => {
+    const dir = await freshDir();
+    const first = track(openLoopDb(dir));
+    insertFire(first);
+    first.close();
+    const second = track(openLoopDb(dir));
+    expect(second.prepare('SELECT count(*) AS n FROM fires').get()).toEqual({ n: 1 });
   });
 
   it.skipIf(process.platform === 'win32')('leaves the file 0600', async () => {

@@ -1,0 +1,15 @@
+{
+  "session_id": "aaaaaaaa-0000-7000-8000-000000000000",
+  "turn_id": "cccccccc-0000-7000-8000-000000000000",
+  "transcript_path": "/Users/dev/.codex/sessions/2026/09/08/rollout-2026-09-08T04-30-00-aaaaaaaa-0000-7000-8000-000000000000.jsonl",
+  "cwd": "/Users/dev/proj",
+  "hook_event_name": "PostToolUse",
+  "model": "gpt-5.6-sol",
+  "permission_mode": "bypassPermissions",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "sh -c \"echo silent-failure-probe; exit 3\""
+  },
+  "tool_response": "silent-failure-probe\n",
+  "tool_use_id": "exec-7d581d40-d7d8-4eff-8b1e-4f73ef61f637"
+}

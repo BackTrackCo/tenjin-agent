@@ -1,8 +1,15 @@
 /**
- * Every bound the loop uses that is not one of the four config numbers
- * (`loop.human_wait_ms`, `loop.tool_wait_ms`, `loop.rate_per_min`, `loop.burst`),
- * each with the reason it is a constant and not a knob. One file, so a reviewer
- * can see every number at once (tenjin-notes loop-redesign/02-redesign.md §7).
+ * THE KERNEL'S bounds: every number the lifecycle, the store, the daemon and the
+ * shim use that is not one of the two config knobs (`loop.human_wait_ms`,
+ * `loop.tool_wait_ms`), each with the reason it is a constant
+ * (tenjin-notes loop-redesign/02-redesign.md §7).
+ *
+ * AN ARM's own bounds are not here and must not be moved here: they are evidence
+ * about one arm's input — a prompt's junk rules, the head a skipped row stores,
+ * the shelf's own query bound — and each is only readable next to the code and
+ * the measurement that justifies it. They live in `hooks/question.ts`,
+ * `hooks/text.ts`, `hooks/legs/shelf.ts` and the arm files, and every one
+ * carries its reason there the way these do here.
  */
 
 /** Left on every fetch so the response can be encoded and flushed before the
@@ -39,10 +46,6 @@ export const HEALTH_MS = 200;
  * file; `tenjin doctor` reads it (PR E).
  */
 export const SPAWN_BACKOFF_MS = 60_000;
-
-/** A parked parent-to-child handoff and the parent-answer fallback live this
- *  long. A dispatch that never became a child must not seed a stranger later. */
-export const HANDOFF_TTL_MS = 120_000;
 
 /** Ledger rows older than this are deleted at the daemon's idle exit. Matches
  *  Claude Code's own transcript sweep default. */
@@ -91,8 +94,8 @@ export const HEADERS_TIMEOUT_MS = 5000;
 export const PORT_BASE = 30_000;
 export const PORT_SPAN = 2000;
 
-/** Claude Code caps `additionalContext` here; the encoder slices to it. */
-export const CLAUDE_CONTEXT_MAX = 10_000;
+/** Claude Code caps `additionalContext` here; both encoders slice their context to it. */
+export const CONTEXT_MAX = 10_000;
 
 /** How long `tenjin daemon stop` waits after SIGTERM before SIGKILL. */
 export const STOP_GRACE_MS = 3000;

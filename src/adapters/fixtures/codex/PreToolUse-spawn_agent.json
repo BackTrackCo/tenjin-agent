@@ -1,0 +1,16 @@
+{
+  "session_id": "aaaaaaaa-0000-7000-8000-000000000001",
+  "turn_id": "cccccccc-0000-7000-8000-000000000001",
+  "transcript_path": "/Users/dev/.codex/sessions/2026/09/08/rollout-2026-09-08T04-30-00-aaaaaaaa-0000-7000-8000-000000000001.jsonl",
+  "cwd": "/Users/dev/proj",
+  "hook_event_name": "PreToolUse",
+  "model": "gpt-5.6-sol",
+  "permission_mode": "bypassPermissions",
+  "tool_name": "collaborationspawn_agent",
+  "tool_input": {
+    "task_name": "child_a",
+    "fork_turns": "all",
+    "message": "gAAAAABqn4uy...(opaque ciphertext, 1244 chars in the capture)"
+  },
+  "tool_use_id": "call_r3YdpOL7IebpcWd5xCSfajr5"
+}

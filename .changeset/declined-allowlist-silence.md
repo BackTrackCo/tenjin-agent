@@ -4,9 +4,9 @@
 
 `tenjin install --refresh` no longer re-reports a declined allowlist as pending.
 
-A machine installed with `--no-allow-free-verbs` (or an interactive "no") used
-to have its `permissions.pending` recomputed from the settings file on every
-later `--refresh`, which `update` spawns after each version swap — a settled
+A machine installed with `--no-allow-free-verbs` used to have its
+`permissions.pending` recomputed from the settings file on every later
+`--refresh`, which `update` spawns after each version swap — a settled
 decline had no persisted trace, so the full free-verb rule set came back as
 "NOT written; run `tenjin install`" forever (tenjin-agent#234). A decline now
 persists the EXACT rules that were pending in `install.freeVerbsDeclined` (a

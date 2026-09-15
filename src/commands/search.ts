@@ -1,9 +1,16 @@
 import { CliError } from '../lib/errors';
 import { formatUsdDisplay, parseUsdToAtomic } from '../lib/money';
 import { resolveContextSettings, type ResolvedSettings } from '../lib/settings';
-import { buildSearchRequest, postSearch, MAX_LIMIT, type SearchInput } from '../lib/agent-api';
-import { recordSearch } from '../lib/state-store';
-import { readSessionId } from '../lib/session';
+import {
+  buildSearchRequest,
+  postSearch,
+  MAX_LIMIT,
+  QUERY_MAX,
+  type SearchInput,
+} from '../lib/agent-api';
+import { cut } from '../hooks/text';
+import { recordSearch } from '../lib/searches';
+import { readActor, type SessionActor } from '../lib/session';
 import { assertOnBaseOrigin } from '../lib/resource-ref';
 import { sanitizeForTerminal } from '../lib/output';
 import type { CommandContext, CommandResult } from '../context';
@@ -11,7 +18,7 @@ import type { CommandContext, CommandResult } from '../context';
 /**
  * `tenjin search "<question>"`, one POST to /api/search with `view: "decision"`.
  * Prints the compact result (spec 10) and records the searchId + items locally so
- * `outcome --last` and `buy <resourceId>` can use them. No wallet, no signing:
+ * `outcome --search-id` and `buy <resourceId>` can use them. No wallet, no signing:
  * search is anonymous.
  *
  * The machine envelope is the server's response verbatim plus exactly one
@@ -49,7 +56,7 @@ export interface SearchArgs {
 
 export interface SearchDeps {
   fetchImpl?: typeof fetch;
-  /** Environment seam (TENJIN_SESSION_ID); defaults to process.env. */
+  /** Environment seam (the harness session and thread ids); defaults to process.env. */
   env?: NodeJS.ProcessEnv;
 }
 
@@ -59,7 +66,10 @@ export async function runSearch(
   deps: SearchDeps = {},
 ): Promise<CommandResult> {
   const settings = await resolveContextSettings(ctx);
-  const input: SearchInput = { question: args.question };
+  // Cut to the shelf's bound at a word boundary, silently, as the daemon's arms
+  // do: an agent mid-task that wrote a long question gets its head answered
+  // rather than a USAGE refusal and a retry (owner decision 2026-09-12).
+  const input: SearchInput = { question: cut(args.question.trim(), QUERY_MAX) };
   if (args.maxPrice !== undefined) input.maxPrice = parseUsdToAtomic(args.maxPrice);
   if (args.freshWithin !== undefined) input.freshWithin = args.freshWithin;
   if (args.limit !== undefined) input.limit = parseLimit(args.limit);
@@ -67,17 +77,16 @@ export async function runSearch(
     input.appliesTo = parseAppliesTo(args.appliesTo);
   }
 
-  const sessionId = readSessionId(deps.env ?? process.env);
+  const actor = readActor(deps.env ?? process.env);
   const request = buildSearchRequest(input);
 
   // SHELF ONE IS ALWAYS `baseUrl`, and the label follows the mode: in team mode
   // that origin IS the team shelf, in public mode it is the marketplace.
   const legs: ShelfLeg[] = [];
   /**
-   * A TEAM SHELF THAT ERRORS IS A MISS, NOT A STOP — the rule the push hooks
-   * already state in so many words (lib/push-scripts.ts shelfDecide: "silencing
-   * the public shelf ... would turn one misconfigured secret into a sidecar that
-   * never speaks again"). `postSearch` throws on any non-200, and Deployment
+   * A TEAM SHELF THAT ERRORS IS A MISS, NOT A STOP — the rule the daemon's legs
+   * hold too (hooks/legs/shelf.ts never throws; a failed leg is one row and the
+   * fire still hears from the others). `postSearch` throws on any non-200, and Deployment
    * Protection answers a rotated or mistyped bypass secret with a 401 HTML page,
    * so an unguarded first leg meant that a typo, a redeploy, or ten minutes of
    * 500s took down every `tenjin search` on the machine while tenjin.blog sat
@@ -100,7 +109,7 @@ export async function runSearch(
         request,
         ctx,
         settings,
-        sessionId,
+        actor,
         ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
       }),
     );
@@ -110,7 +119,7 @@ export async function runSearch(
     teamError = sanitizeForTerminal(err instanceof Error ? err.message : String(err));
   }
   // SHELF TWO, TEAM MODE ONLY, AND ONLY WHEN THE FIRST HAD NOTHING TO GIVE —
-  // no candidates, or no answer at all. Same order the push hooks use, for the
+  // no candidates, or no answer at all. Same order the hook arms use, for the
   // same reason: the team's own shelf covers the working day and the public
   // marketplace is the fallback, so a team hit is never buried under a page of
   // marketplace results. No bypass here — the transport would drop it anyway,
@@ -123,7 +132,7 @@ export async function runSearch(
         request,
         ctx,
         settings,
-        sessionId,
+        actor,
         ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
       }),
     );
@@ -202,7 +211,8 @@ interface ShelfQuery {
   request: ReturnType<typeof buildSearchRequest>;
   ctx: CommandContext;
   settings: ResolvedSettings;
-  sessionId: string | undefined;
+  /** Who ran it, from the harness env; undefined stamps neither column. */
+  actor: SessionActor | undefined;
   fetchImpl?: typeof fetch;
 }
 
@@ -225,10 +235,10 @@ async function queryShelf(q: ShelfQuery): Promise<ShelfLeg> {
   // Ingest trust boundary: a candidate url that points off the shelf that served
   // it would later route a wallet-signed SIWX header and payment to that host via
   // `buy <resourceId>`. Refuse the whole response as a contract violation.
-  // This deliberately diverges from the hook path (lib/hook-scripts.ts
-  // askTenjin), which DROPS the one off-origin candidate and keeps the rest: a
-  // hook hint is advisory and never pays, so one bad row should not blank the
-  // hint, whereas a `search` result feeds `buy` and must fail closed as a whole.
+  // This deliberately diverges from the hook path (hooks/legs/shelf.ts), which
+  // DROPS the one off-origin candidate and keeps the rest: a hook hint is
+  // advisory and never pays, so one bad row should not blank the hint, whereas a
+  // `search` result feeds `buy` and must fail closed as a whole.
   for (const c of response.items) {
     try {
       assertOnBaseOrigin(c.url, q.baseUrl, 'search candidate URL');
@@ -240,19 +250,15 @@ async function queryShelf(q: ShelfQuery): Promise<ShelfLeg> {
       );
     }
   }
-  // Derived, never read off the wire: v3 has no `decision` field. The store keeps
-  // the two words because entries written by older CLIs and by the WebSearch hook
-  // carry them and `outcome` branches on them, so a rename here would split the
-  // ledger rather than clean it up.
+  // Derived, never read off the wire: v3 has no `decision` field. The two words
+  // are what `outcome` branches on, so they are written here rather than
+  // re-derived by every reader from the candidate count.
   const decision = response.items.length > 0 ? 'CANDIDATES' : 'MISS';
   await recordSearch(q.ctx.dataDir, {
     searchId: response.searchId,
     at: new Date().toISOString(),
     question: q.request.query,
     decision,
-    // A deliberate search, as opposed to one the WebSearch hook rode along with.
-    // The Stop hook nags on the two differently, so the tag has to be written
-    // here rather than inferred later from anything.
     source: 'cli',
     // THE LEG THAT ANSWERED, not the configured base. In team mode the public
     // fallthrough mints its searchId in the public marketplace's database, and a
@@ -260,9 +266,11 @@ async function queryShelf(q: ShelfQuery): Promise<ShelfLeg> {
     // to the marketplace that did the work. `outcome` and publish's search-close
     // route on this.
     shelfBaseUrl: q.baseUrl,
-    // Usually absent; see readSessionId. An unstamped entry is raised in every
-    // session, which is the safe direction for a reminder.
-    ...(q.sessionId !== undefined ? { sessionId: q.sessionId } : {}),
+    // Usually absent; see readActor. An unstamped entry is raised in every
+    // session, which is the safe direction for a reminder. The agent is the
+    // child this ran inside, so the capture ask names the miss to it alone.
+    ...(q.actor !== undefined ? { sessionId: q.actor.session } : {}),
+    ...(q.actor?.agent !== undefined ? { agentId: q.actor.agent } : {}),
     candidates: response.items.map((c) => ({
       resourceId: c.resourceId,
       url: c.url,
@@ -274,8 +282,7 @@ async function queryShelf(q: ShelfQuery): Promise<ShelfLeg> {
     // pointer was offered and none of them cost money. `outcome` reads this to
     // tell a search that offered nothing to buy from one that put a payable
     // pointer in front of the agent, and under v3 the answer is always the
-    // former. The field stays on the store because entries written by older CLIs
-    // still carry a real count, and `undefined` there must keep reading as
+    // former. `undefined` stays reachable on the column and must keep reading as
     // "unknown" rather than as zero.
     paidBrowseCount: 0,
   });

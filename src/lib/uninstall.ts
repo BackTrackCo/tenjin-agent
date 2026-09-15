@@ -1,5 +1,5 @@
 import { lstat, readFile, readdir, rm, rmdir, realpath } from 'node:fs/promises';
-import { lstatSync } from 'node:fs';
+import { lstatSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { writeFileAtomic } from './atomic-json';
 import {
@@ -8,48 +8,17 @@ import {
   LEGACY_ALLOWLIST_RULES,
   MODE_GATED_RULES,
 } from './harness-permissions';
+import { inspectHooksFile, pruneHooks } from './harness-hooks';
+import type { Harness, HarnessAdapter } from '../adapters/types';
 import {
-  DISPATCH_HOOK_FILE,
-  SESSIONSTART_HOOK_FILE,
-  STOP_HOOK_FILE,
-  WEBSEARCH_HOOK_FILE,
-} from './hook-scripts';
-import {
-  PUSH_CONTEXT_HOOK_FILE,
-  PUSH_FAILURE_HOOK_FILE,
-  PUSH_PROMPT_HOOK_FILE,
-  PUSH_SUBAGENT_HOOK_FILE,
-} from './push-scripts';
+  daemonPidPath,
+  daemonSpawnPath,
+  daemonTokenPath,
+  hooksDir,
+  VITEST_REPORTER_FILE,
+} from './paths';
 
-/**
- * Every script `install` (or `tenjin push on`) generates, which is exactly what
- * uninstall claims and removes: ownership is by filename in both directions.
- *
- * THE PUSH ARMS ARE IN THIS LIST UNCONDITIONALLY, whatever `hooks.push` says.
- * Every install writes all four bodies (`scriptPlan` is `specs(dataDir, { push:
- * true })`, and `wireSearchHooks` writes that plan on both paths), so they are on
- * disk on machines that never ran `tenjin push on` — inert, because nothing
- * points at them. Uninstall is the command an operator reaches for to get their
- * machine back, and `hooks.push` is a KEPT value under the data dir — reading it here would mean an operator who ran
- * `tenjin push off` before `tenjin uninstall` kept four generated scripts and
- * seven settings.json entries pointing at files that no longer exist. Removal
- * stays ownership-gated either way: a filename we never wrote is not found, and
- * a hook entry naming somebody else's script is left alone.
- */
-const HOOK_SCRIPT_FILES = [
-  WEBSEARCH_HOOK_FILE,
-  DISPATCH_HOOK_FILE,
-  SESSIONSTART_HOOK_FILE,
-  STOP_HOOK_FILE,
-  PUSH_PROMPT_HOOK_FILE,
-  PUSH_FAILURE_HOOK_FILE,
-  PUSH_SUBAGENT_HOOK_FILE,
-  PUSH_CONTEXT_HOOK_FILE,
-] as const;
-import { hooksDir } from './paths';
-import { resolveHermesHomeLenient } from './hermes';
 import { SHIPPED_SKILL_FILES } from './skills-source';
-import { resolveThroughLink } from './skill-writer';
 import {
   CLI_SKILL_NAMES,
   HOSTED_SKILL_NAME,
@@ -58,6 +27,15 @@ import {
   skillsDirsFor,
 } from './skill-wiring';
 import { OPTIONAL_SKILL_NAMES } from './skills-source';
+
+/**
+ * Every file `install` puts in the hooks dir, which is exactly what uninstall
+ * claims and removes: ownership is by filename in both directions.
+ *
+ * `loop.db` IS NOT HERE. It sits under the data dir and holds this machine's
+ * own record, the same class of thing as the wallet and the library.
+ */
+const HOOK_FILES = ['tenjin-daemon.mjs', 'tenjin-shim.mjs', VITEST_REPORTER_FILE] as const;
 
 /**
  * The reverse of `install`, and ONLY of `install`.
@@ -79,15 +57,12 @@ import { OPTIONAL_SKILL_NAMES } from './skills-source';
  * THE ONE EXCEPTION IS GENERATED, and it is listed in the receipt:
  * `~/.tenjin/hooks/*.mjs`, which `install` writes and rewrites.
  *
- * `~/.tenjin/state.db` IS KEPT, and that is a reversal of an earlier call in
- * this branch. It reads like hook state and is written by the hooks, but what
- * it HOLDS is the operator's: the error/fix pairings this machine worked out
- * for itself, the outcome history, and the open search loops `outcome --last`
- * and the Stop reminder are raised from. That is the same class as the wallet,
- * the config and the library — their own record, unrecoverable if deleted, and
- * `install` did not create it. A reinstall picks the store back up untouched,
- * because the schema gate only ever moves forward. The `-wal`/`-shm` sidecars
- * stay with it; they are meaningless apart from it.
+ * `~/.tenjin/loop.db` IS KEPT. It reads like hook state and is written by the
+ * daemon, but what it HOLDS is the operator's: its search record, its outcome
+ * history, and the findings its agents queued and never published.
+ * That is the same class as the wallet, the config and the library — their own
+ * record, unrecoverable if deleted, and `install` did not create it. The
+ * `-wal`/`-shm` sidecars stay with it; they are meaningless apart from it.
  *
  * SETTINGS.JSON IS EDITED IN ONE PASS. Hooks and permission rules live in the
  * same file, so removing them separately would mean two whole-file
@@ -98,10 +73,15 @@ import { OPTIONAL_SKILL_NAMES } from './skills-source';
 /** Everything the command found and acted on, for both the receipt and the JSON. */
 export interface UninstallReport {
   settings: SettingsOutcome;
+  /** The other harnesses' hook files (Codex's hooks.json), one outcome each. */
+  hookFiles: SettingsOutcome[];
+  /** How the loop daemon ended, from `stopDaemon`. */
+  daemon: string;
+  /** Harness-native grant files changed by this run. */
+  grants: Partial<Record<Harness, string>>;
   skills: string[];
   scripts: string[];
   hooksDir?: string;
-  markers: string[];
   kept: string[];
 }
 
@@ -161,7 +141,7 @@ export type SettingsSkipReason =
 export function keptItems(hasShelfSecret: boolean): string[] {
   return [
     'your wallet, config (publish.mode included, so a later install resumes it), and library under ~/.tenjin',
-    'the hook state store ~/.tenjin/state.db — the error→fix pairings this machine worked out, your outcome history and open search loops; a later install picks it up as it is',
+    'the loop database ~/.tenjin/loop.db — your search record, your outcome history and the findings your agents queued but never published; a later install picks it up as it is',
     ...(hasShelfSecret
       ? [
           'the team shelf’s shelfBypassSecret, in that config — a shared credential, so clear it before handing the machine on: `tenjin config set shelfBypassSecret ""`',
@@ -175,32 +155,16 @@ export function keptItems(hasShelfSecret: boolean): string[] {
  * keptItems} so the boundary reads as a boundary. It is generated, and it comes
  * back on the next `install`.
  *
- * A LIST OF ONE, deliberately kept as a list: `state.db` was in it for part of
- * this branch's life, and the shape is what made the contradiction with
+ * A LIST OF ONE, deliberately kept as a list: the database was in it for part
+ * of this epic's life, and the shape is what made the contradiction with
  * {@link keptItems} obvious enough to catch.
  */
 export const REMOVED_FROM_DATA_DIR = [
-  'the generated hook scripts in ~/.tenjin/hooks (install writes them back)',
+  'the loop daemon, its shim, the vitest reporter and the daemon token in ~/.tenjin/hooks (install writes them back)',
 ];
-
-/** The legacy pointer line `install` used to write into CLAUDE.md / AGENTS.md. */
-export const SKILLS_MARKER = '<!-- tenjin-cli:skills -->';
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-/** Ours by the same rule that wrote it: the command names one of our scripts. */
-function ownsHookEntry(entry: unknown): boolean {
-  if (!isPlainObject(entry)) return false;
-  const handlers = entry.hooks;
-  if (!Array.isArray(handlers)) return false;
-  return handlers.some(
-    (h) =>
-      isPlainObject(h) &&
-      typeof h.command === 'string' &&
-      HOOK_SCRIPT_FILES.some((file) => (h.command as string).includes(file)),
-  );
 }
 
 /**
@@ -213,7 +177,10 @@ function ownsHookEntry(entry: unknown): boolean {
  * `hooks` or `permissions.allow` likewise, so a full uninstall leaves the file
  * as it would have been had install never run — but only when WE emptied them.
  */
-export async function removeFromSettings(homeDir: string): Promise<SettingsOutcome> {
+export async function removeFromSettings(
+  homeDir: string,
+  dataDir: string,
+): Promise<SettingsOutcome> {
   const declaredPath = claudeSettingsPath(homeDir);
   const skip = (path: string, skipped: SettingsSkipReason, warning?: string): SettingsOutcome => ({
     path,
@@ -275,22 +242,12 @@ export async function removeFromSettings(homeDir: string): Promise<SettingsOutco
     );
   }
   if (isPlainObject(hooksValue)) {
-    const nextHooks: Record<string, unknown> = {};
-    for (const [event, value] of Object.entries(hooksValue)) {
-      if (!Array.isArray(value)) {
-        nextHooks[event] = value;
-        continue;
-      }
-      const kept = value.filter((e) => !ownsHookEntry(e));
-      if (kept.length !== value.length) removedHooks.push(event);
-      // An event WE emptied loses its key entirely; one that still holds someone
-      // else's entry keeps it, and an array that was already empty before we
-      // looked is left as we found it.
-      const emptiedByUs = kept.length === 0 && value.length > 0;
-      if (!emptiedByUs) nextHooks[event] = kept;
-    }
-    next = { ...next, hooks: nextHooks };
-    if (Object.keys(nextHooks).length === 0) delete next.hooks;
+    // The one prune `install` runs before it appends its plan: handler by
+    // handler, so an entry someone hand-merged ours into keeps theirs.
+    const pruned = pruneHooks(hooksValue, dataDir);
+    removedHooks.push(...pruned.removed);
+    next = { ...next, hooks: pruned.next };
+    if (Object.keys(pruned.next).length === 0) delete next.hooks;
   }
 
   const permissions = settings.permissions;
@@ -333,8 +290,75 @@ export async function removeFromSettings(homeDir: string): Promise<SettingsOutco
       `${path} changed while it was being updated, so nothing was removed from it. Re-run \`tenjin uninstall\`.`,
     );
   }
-  await writeFileAtomic(path, `${JSON.stringify(next, null, 2)}\n`);
+  // KEEPING THE MODE IT HAS, the same rule lib/harness-permissions.ts holds:
+  // install now writes this file 0600 because it carries the daemon token, and
+  // handing it back world-readable on the way out is a downgrade nobody asked
+  // for. (The token itself goes in this same run, but an env block and an
+  // apiKeyHelper of the operator's own do not.)
+  const mode = statSync(path, { throwIfNoEntry: false })?.mode;
+  await writeFileAtomic(
+    path,
+    `${JSON.stringify(next, null, 2)}\n`,
+    mode === undefined ? {} : { mode: mode & 0o777 },
+  );
   return { path, hooks: removedHooks, rules: removedRules };
+}
+
+/**
+ * Strip our hook entries from a harness's own hooks file (Codex's
+ * `hooks.json`), leaving every other entry and key exactly where it was. The
+ * same prune and the same concurrency contract as {@link removeFromSettings};
+ * a file with nothing of ours in it is not rewritten. Codex keeps its trust
+ * records in config.toml, which this never touches: a record for an entry
+ * that is gone is inert, and config.toml is not ours to edit.
+ */
+export async function removeFromHooksFile(
+  adapter: HarnessAdapter,
+  homeDir: string,
+  dataDir: string,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<SettingsOutcome> {
+  const declaredPath = adapter.registrar.configPath(homeDir, env);
+  if ((await lstat(declaredPath).catch(() => null)) === null) {
+    return { path: declaredPath, hooks: [], rules: [], skipped: 'absent' };
+  }
+  const found = await inspectHooksFile(declaredPath);
+  if ('refusal' in found) {
+    const reason: SettingsSkipReason =
+      found.refusal.reason === 'unresolvable' ||
+      found.refusal.reason === 'unreadable' ||
+      found.refusal.reason === 'unparsable'
+        ? found.refusal.reason
+        : 'unexpected-shape';
+    return {
+      path: found.refusal.path,
+      hooks: [],
+      rules: [],
+      skipped: reason,
+      warning: found.refusal.message,
+    };
+  }
+  const { path, raw, settings, hooks } = found;
+  const pruned = pruneHooks(hooks, dataDir);
+  if (pruned.removed.length === 0) return { path, hooks: [], rules: [] };
+  const next: Record<string, unknown> = { ...settings, hooks: pruned.next };
+  if (Object.keys(pruned.next).length === 0) delete next.hooks;
+  if ((await readFile(path, 'utf8').catch(() => null)) !== raw) {
+    return {
+      path,
+      hooks: [],
+      rules: [],
+      skipped: 'changed-since-read',
+      warning: `${path} changed while it was being updated, so nothing was removed from it. Re-run \`tenjin uninstall\`.`,
+    };
+  }
+  const mode = statSync(path, { throwIfNoEntry: false })?.mode;
+  await writeFileAtomic(
+    path,
+    `${JSON.stringify(next, null, 2)}\n`,
+    mode === undefined ? {} : { mode: mode & 0o777 },
+  );
+  return { path, hooks: pruned.removed, rules: [] };
 }
 
 /**
@@ -348,7 +372,15 @@ export async function removeHookScripts(dataDir: string): Promise<{
 }> {
   const dir = hooksDir(dataDir);
   const removed: string[] = [];
-  for (const file of HOOK_SCRIPT_FILES) {
+  // The daemon's own bookkeeping, beside the bundles it belongs to: a token
+  // nothing can present and a pid file naming a process this command just
+  // stopped are both stale the moment the bundles go.
+  for (const path of [daemonTokenPath(dataDir), daemonPidPath(dataDir), daemonSpawnPath(dataDir)]) {
+    if (lstatSync(path, { throwIfNoEntry: false })?.isFile() !== true) continue;
+    await rm(path, { force: true });
+    removed.push(path);
+  }
+  for (const file of HOOK_FILES) {
     const path = join(dir, file);
     // isFile, not mere existence: a directory parked at a script path would make
     // the non-recursive `rm` throw EISDIR and abort the uninstall halfway.
@@ -389,17 +421,10 @@ export async function removeHookScripts(dataDir: string): Promise<{
  * with their own is not ours to delete just for sitting at our path, and neither
  * is a directory reached through a symlink.
  */
-export async function removeSkills(
-  homeDir: string,
-  env: NodeJS.ProcessEnv = process.env,
-): Promise<string[]> {
+export async function removeSkills(homeDir: string): Promise<string[]> {
   const removed: string[] = [];
   const names = [...CLI_SKILL_NAMES, ...OPTIONAL_SKILL_NAMES, HOSTED_SKILL_NAME];
-  // Lenient, like `skill-heal`: uninstall is a cleanup command, so a stray
-  // relative HERMES_HOME must not stop it. Resolving it at all is what puts the
-  // Hermes skills directory in scope; `skillsDirsFor` requires the argument
-  // precisely so a new caller cannot quietly leave that directory behind.
-  for (const dir of skillsDirsFor(homeDir, resolveHermesHomeLenient(homeDir, env).home)) {
+  for (const dir of skillsDirsFor(homeDir)) {
     if (lstatSync(dir, { throwIfNoEntry: false })?.isDirectory() !== true) continue;
     for (const name of names) {
       const skillDir = join(dir, name);
@@ -441,45 +466,4 @@ export async function removeSkills(
     }
   }
   return removed;
-}
-
-/**
- * Drop the legacy pointer line from the files an older `install` wrote it into.
- * The line is found by its marker, never by exact text, so a drifted copy from
- * any earlier version is recognized; everything around it is preserved byte for
- * byte, because these files are the operator's own notes.
- *
- * Written through the link for the same reason the writers were: `writeFileAtomic`
- * commits with a rename, so committing at a declared path would replace a
- * dotfiles-managed symlink with a regular file and strand its target. A file we
- * cannot read, or one that is not a regular file, is skipped rather than fixed.
- */
-export async function removeMarkerLines(homeDir: string): Promise<string[]> {
-  const cleaned: string[] = [];
-  for (const path of markerFiles(homeDir)) {
-    const read = await readSkillFile(path);
-    if (read.kind !== 'ok') continue;
-    const text = read.bytes.toString('utf8');
-    if (!text.split('\n').some((l) => l.startsWith(SKILLS_MARKER))) continue;
-    // ANCHORED to the start of the line, which is the only way install ever
-    // wrote it. `includes` would take a whole line of the operator's own prose
-    // for quoting the marker inside a sentence or a code fence.
-    const kept = text.split('\n').filter((l) => !l.startsWith(SKILLS_MARKER));
-    const writeTo = await resolveThroughLink(path, 'the Tenjin pointer');
-    // A file that held nothing but our line is emptied rather than deleted:
-    // install created it in that case, but the operator may have pointed a
-    // dotfiles link at it since, and an empty file is inert either way.
-    await writeFileAtomic(writeTo, kept.join('\n'));
-    cleaned.push(path);
-  }
-  return cleaned;
-}
-
-/** Every file `install` has ever written the pointer line into. */
-export function markerFiles(homeDir: string): string[] {
-  return [
-    join(homeDir, '.claude', 'CLAUDE.md'),
-    join(homeDir, '.agents', 'AGENTS.md'),
-    join(homeDir, '.codex', 'AGENTS.md'),
-  ];
 }

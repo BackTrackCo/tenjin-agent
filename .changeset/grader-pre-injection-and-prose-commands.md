@@ -12,7 +12,7 @@ however precisely the agent followed it.
 `used-likely` extracts command heads and file basenames from the note's full
 body and credits a match within the grading window, ranked below `read` and
 `span`. Verdict's `by` field gains `'likely'` alongside `'read' | 'span'`;
-`push status`'s `wireStatus()` reports it as `partially_used`, same as `span`,
+`grade`'s `wireStatus()` reports it as `partially_used`, same as `span`,
 since both are weaker-than-a-followed-pointer evidence.
 
 Review follow-ups on the same fix: the pre-injection exclusion window is now
@@ -23,7 +23,7 @@ instead of by plain substring, so a longer token on either side
 against a shorter genuine one the note actually named (`db:generate`); the
 injection template's own opener, body fence and closing line are excluded
 from `used-likely` candidates so the grader never credits its own
-boilerplate; `push grade`'s default line now breaks `used=` down by tier
+boilerplate; `tenjin grade`'s default line now breaks `used=` down by tier
 (`read`/`span`/`likely`, plus `hand` when a `--label` verdict is present)
 instead of only under `--explain`, and the same breakdown is
 `data.graded.byTier` on `--json`.

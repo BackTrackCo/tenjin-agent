@@ -5,7 +5,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import {
-  hookFallthroughAsked,
   isTeamModeConfig,
   loadProjectConfig,
   resolvePublishSettings,
@@ -379,9 +378,9 @@ describe('isTeamModeConfig — the machine mode, not the invocation', () => {
     expect(isTeamModeConfig({ baseUrl: TEAM, shelfBypassSecret: '' })).toBe(false);
   });
 
-  // The half-set state docs/command-reference.md#team-shelf documents: a secret
-  // landed before the baseUrl did. Team mode there would render team guidance on a
-  // machine still publishing to the public marketplace.
+  // The half-set state `isTeamShelfOrigin` rules out: a secret landed before the
+  // baseUrl did. Team mode there would render team guidance on a machine still
+  // publishing to the public marketplace.
   it('is false for a secret with baseUrl still on the marketplace, alias included', () => {
     expect(isTeamModeConfig({ baseUrl: 'https://tenjin.blog', shelfBypassSecret: SECRET })).toBe(
       false,
@@ -403,26 +402,6 @@ describe('isTeamModeConfig — the machine mode, not the invocation', () => {
 
   it('is false on an unparseable baseUrl rather than throwing', () => {
     expect(isTeamModeConfig({ baseUrl: 'not a url', shelfBypassSecret: SECRET })).toBe(false);
-  });
-
-  /**
-   * One rule, two names. The disclosure of what the hooks ask and the guidance the
-   * skills render must never disagree about which mode the machine is in, so this
-   * pins them to the same function rather than to two copies that drift.
-   */
-  it('agrees with hookFallthroughAsked on every shape above', () => {
-    const shapes: Record<string, unknown>[] = [
-      { baseUrl: TEAM, shelfBypassSecret: SECRET },
-      { baseUrl: TEAM },
-      { shelfBypassSecret: SECRET },
-      {},
-      { baseUrl: TEAM, shelfBypassSecret: '' },
-      { baseUrl: 'https://tenjin.blog', shelfBypassSecret: SECRET },
-      { baseUrl: 'not a url', shelfBypassSecret: SECRET },
-    ];
-    for (const config of shapes) {
-      expect(hookFallthroughAsked(config), JSON.stringify(config)).toBe(isTeamModeConfig(config));
-    }
   });
 
   /**

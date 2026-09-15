@@ -1,0 +1,35 @@
+import type { LoopDb } from './store';
+
+/**
+ * `facts`: the machine's key-value table on `loop.db` (13-pr-d-local-arms.md).
+ * The CLI's `published:` and `agent_published:` writers live here (E). Nothing
+ * is stored on an agent's behalf: the capture ask names a command, so there is
+ * no queue of half-published text and nothing to take off one.
+ */
+
+export interface Fact {
+  key: string;
+  value: string;
+  at: number;
+}
+
+export function getFact(db: LoopDb, key: string): string | null {
+  const row = db.prepare('SELECT value FROM facts WHERE key = ?').get(key) as
+    { value?: unknown } | undefined;
+  return typeof row?.value === 'string' ? row.value : null;
+}
+
+export function setFact(db: LoopDb, key: string, value: string, at: number): void {
+  db.prepare(
+    `INSERT INTO facts (key, value, at) VALUES (?, ?, ?)
+     ON CONFLICT (key) DO UPDATE SET value = excluded.value, at = excluded.at`,
+  ).run(key, value, at);
+}
+
+/** Every fact under `prefix`, oldest first. `substr`, not LIKE: a prefix is
+ *  literal and needs no escaping. */
+export function factsWithPrefix(db: LoopDb, prefix: string): Fact[] {
+  return db
+    .prepare('SELECT key, value, at FROM facts WHERE substr(key, 1, ?) = ? ORDER BY at, key')
+    .all(prefix.length, prefix) as unknown as Fact[];
+}

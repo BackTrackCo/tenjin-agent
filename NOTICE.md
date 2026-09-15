@@ -129,4 +129,4 @@ standalone MCP server (MIT), whose Tenjin-specific modifications are
 Copyright (c) 2026 Tenjin contributors.
 
 Tenjin-specific code in this repository is Copyright (c) 2026 BackTrackCo and
-Tenjin contributors, licensed under this project's MIT License.
+Tenjin contributors.

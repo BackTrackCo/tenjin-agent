@@ -11,13 +11,12 @@ import { sessionPath } from './paths';
  * function that needs a wallet signer lives in `session-key.ts`, which imports
  * this module and re-exports it.
  *
- * The split exists so `tenjin read` can present an owner's session key on a cold
- * 402 while its import graph stays test-pinned clear of the wallet. What that
- * pin establishes is exactly two things: read cannot mint a session, and read
- * cannot pay (a P-256 key cannot produce the secp256k1/EIP-712 signature an
- * EIP-3009 transfer authorization needs). It says nothing about what an
- * already-minted delegation is worth to whoever holds it — see `origin` below,
- * and the tier note in `permissions.ts`.
+ * The split earns its keep on the reuse path: presenting a live delegation costs
+ * no keystore decryption, so `tenjin read` reaches this half alone whenever one
+ * is cached and only falls through to the mint half (and one passphrase) when
+ * there is none. Neither half says anything about what an already-minted
+ * delegation is worth to whoever holds it — see `origin` below, and the tier
+ * note in `permissions.ts`.
  *
  * Byte-exact against the "Auth — session keys" contract in
  * https://tenjin.blog/llms-full.txt (D35). P-256 signing is node:crypto webcrypto.
@@ -188,7 +187,7 @@ async function importSigningKey(jwk: Record<string, unknown>): Promise<webcrypto
     );
   } catch (err) {
     throw new CliError('INTERNAL', 'The cached session key is not a usable P-256 key.', {
-      fix: 'Delete the session cache and run `tenjin session start --scope read`; a write command re-establishes on its own.',
+      fix: 'Delete the session cache (`~/.tenjin/session.json`); the next read or write mints a fresh one.',
       cause: err,
     });
   }

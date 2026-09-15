@@ -2,10 +2,10 @@ import { describe, it, expect } from 'vitest';
 import {
   buildSearchRequest,
   buildOutcomeItem,
-  getLookupStats,
   getPostMetadata,
   postSearch,
   postOutcomes,
+  QUERY_MAX,
   type SearchResult,
 } from './agent-api';
 import { CliError } from './errors';
@@ -106,8 +106,12 @@ describe('buildSearchRequest', () => {
   it('rejects an empty question', () => {
     expect(() => buildSearchRequest({ question: '   ' })).toThrowError(CliError);
   });
-  it('rejects a question over 512 chars', () => {
-    expect(() => buildSearchRequest({ question: 'x'.repeat(513) })).toThrowError(/512/);
+  it('accepts 8,000 characters on any trigger and rejects 8,001', () => {
+    expect(QUERY_MAX).toBe(8000);
+    expect(
+      buildSearchRequest({ question: 'x'.repeat(8000), trigger: 'research' }).query,
+    ).toHaveLength(8000);
+    expect(() => buildSearchRequest({ question: 'x'.repeat(8001) })).toThrowError(/8000/);
   });
   it('rejects a malformed freshWithin', () => {
     expect(() => buildSearchRequest({ question: 'q', freshWithin: '30 days' })).toThrowError(
@@ -605,214 +609,9 @@ describe('postOutcomes', () => {
   });
 });
 
-describe('getLookupStats', () => {
-  const STATS = {
-    windowDays: 7,
-    triggers: [
-      { trigger: 'prompt', lookups: 12, hits: 3, candidates: 7, used: 1, wrong: 2, useRate: 1 / 3 },
-      { trigger: 'read', lookups: 4, hits: 0, candidates: 0, used: 0, wrong: 0, useRate: null },
-    ],
-  };
-
-  it('GETs the window and parses the per-trigger rollup', async () => {
-    const { fetch, calls } = stubFetch(json(200, STATS));
-    const stats = await getLookupStats(7, {
-      baseUrl: 'https://preview.example/',
-      timeoutMs: 5000,
-      fetchImpl: fetch,
-    });
-    expect(calls[0]?.url).toBe('https://preview.example/api/lookups/stats?days=7');
-    expect(calls[0]?.init.method).toBe('GET');
-    expect(stats.windowDays).toBe(7);
-    expect(stats.triggers[0]).toMatchObject({ trigger: 'prompt', lookups: 12, used: 1 });
-    // A trigger nothing has judged reports a null rate rather than a zero, so a
-    // shelf with no reuse yet is not rendered as a shelf nobody reuses.
-    expect(stats.triggers[1]?.useRate).toBeNull();
-  });
-
-  /** `push status` renders "unavailable" from a throw; a shelf that is down must
-   *  not read as a shelf with no demand. */
-  it('throws rather than reporting zeros when the shelf answers badly', async () => {
-    const notFound = stubFetch(json(404, { error: 'nope' }));
-    await expect(
-      getLookupStats(7, {
-        baseUrl: 'https://preview.example',
-        timeoutMs: 5000,
-        fetchImpl: notFound.fetch,
-      }),
-    ).rejects.toBeInstanceOf(CliError);
-
-    const garbage = stubFetch(json(200, { windowDays: 7 }));
-    await expect(
-      getLookupStats(7, {
-        baseUrl: 'https://preview.example',
-        timeoutMs: 5000,
-        fetchImpl: garbage.fetch,
-      }),
-    ).rejects.toMatchObject({ code: 'CONTRACT_MISMATCH' });
-  });
-
-  /**
-   * `trigger` is the one field of this response that gets PRINTED, and the shelf
-   * chooses it. An unbounded string is a shelf-controlled write to the
-   * operator's terminal, so a name that is not one is a contract mismatch and
-   * the block renders "unavailable" instead.
-   */
-  it('refuses a trigger name that is not a short lowercase word', async () => {
-    for (const trigger of ['x'.repeat(17), 'Prompt', 'pro mpt', '\u001b[2Jprompt', '']) {
-      const bad = stubFetch(
-        json(200, {
-          windowDays: 7,
-          triggers: [
-            { trigger, lookups: 1, hits: 0, candidates: 0, used: 0, wrong: 0, useRate: null },
-          ],
-        }),
-      );
-      await expect(
-        getLookupStats(7, {
-          baseUrl: 'https://preview.example',
-          timeoutMs: 5000,
-          fetchImpl: bad.fetch,
-        }),
-        trigger,
-      ).rejects.toMatchObject({ code: 'CONTRACT_MISMATCH' });
-    }
-  });
-
-  /**
-   * tenjin-agent#252: `GET /api/lookups/stats` is cached server-side for
-   * several minutes, and the response's own `Age` header is the only thing
-   * that says so — a stale zero-`used` count otherwise reads as "grading
-   * never reached the shelf" rather than "the cache has not turned over yet".
-   */
-  it('captures the Age response header as ageSeconds', async () => {
-    const res = new Response(JSON.stringify(STATS), {
-      status: 200,
-      headers: { 'content-type': 'application/json', age: '137' },
-    });
-    const { fetch } = stubFetch(res);
-    const stats = await getLookupStats(7, {
-      baseUrl: 'https://preview.example',
-      timeoutMs: 5000,
-      fetchImpl: fetch,
-    });
-    expect(stats.ageSeconds).toBe(137);
-  });
-
-  /** Absent, never coerced to 0 — a freshness claim this CLI was never told. */
-  it('leaves ageSeconds undefined with no Age header', async () => {
-    const { fetch } = stubFetch(json(200, STATS));
-    const stats = await getLookupStats(7, {
-      baseUrl: 'https://preview.example',
-      timeoutMs: 5000,
-      fetchImpl: fetch,
-    });
-    expect(stats.ageSeconds).toBeUndefined();
-  });
-
-  /**
-   * PR 277 review: `Number(raw)` alone accepts everything `Age` never
-   * legitimately carries. An empty header is the sharpest case — some proxies
-   * emit `Age: ""`, and `Number('') === 0` reads as a freshly-served answer,
-   * exactly inverting the signal this field exists to give.
-   */
-  it.each([
-    ['', 'empty'],
-    ['   ', 'whitespace-only'],
-    ['0x10', 'hex'],
-    ['+5', 'leading plus'],
-    ['1e300', 'exponent'],
-    ['1.5', 'fractional'],
-    ['-1', 'negative'],
-    ['12abc', 'trailing garbage'],
-  ])('leaves ageSeconds undefined for a non-integer Age header: %s (%s)', async (raw) => {
-    const res = new Response(JSON.stringify(STATS), {
-      status: 200,
-      headers: { 'content-type': 'application/json', age: raw },
-    });
-    const { fetch } = stubFetch(res);
-    const stats = await getLookupStats(7, {
-      baseUrl: 'https://preview.example',
-      timeoutMs: 5000,
-      fetchImpl: fetch,
-    });
-    expect(stats.ageSeconds).toBeUndefined();
-  });
-
-  it('accepts a zero Age header (a genuinely fresh read, not the empty-string default)', async () => {
-    const res = new Response(JSON.stringify(STATS), {
-      status: 200,
-      headers: { 'content-type': 'application/json', age: '0' },
-    });
-    const { fetch } = stubFetch(res);
-    const stats = await getLookupStats(7, {
-      baseUrl: 'https://preview.example',
-      timeoutMs: 5000,
-      fetchImpl: fetch,
-    });
-    expect(stats.ageSeconds).toBe(0);
-  });
-
-  /**
-   * PR 277 round-2 review, nit 3: the digit-only shape check has no length
-   * cap of its own, so `Age: "99999999999999999999999999"` still parsed and
-   * rendered as "~1e+26s ago" — a proxy sending an absurd value should read as
-   * unparseable, not as a freshness claim past any real cache lifetime.
-   */
-  it('leaves ageSeconds undefined for an Age header past the sanity cap', async () => {
-    const res = new Response(JSON.stringify(STATS), {
-      status: 200,
-      headers: { 'content-type': 'application/json', age: '99999999999999999999999999' },
-    });
-    const { fetch } = stubFetch(res);
-    const stats = await getLookupStats(7, {
-      baseUrl: 'https://preview.example',
-      timeoutMs: 5000,
-      fetchImpl: fetch,
-    });
-    expect(stats.ageSeconds).toBeUndefined();
-  });
-
-  it('accepts an Age header at the sanity cap boundary', async () => {
-    const res = new Response(JSON.stringify(STATS), {
-      status: 200,
-      headers: { 'content-type': 'application/json', age: '10000000' },
-    });
-    const { fetch } = stubFetch(res);
-    const stats = await getLookupStats(7, {
-      baseUrl: 'https://preview.example',
-      timeoutMs: 5000,
-      fetchImpl: fetch,
-    });
-    expect(stats.ageSeconds).toBe(10000000);
-  });
-
-  /** A pattern rather than the arm names, so a shelf that grows an arm still
-   *  renders instead of failing the whole block. */
-  it('accepts an arm name this build has never heard of', async () => {
-    const { fetch } = stubFetch(
-      json(200, {
-        windowDays: 7,
-        triggers: [
-          { trigger: 'newarm', lookups: 1, hits: 1, candidates: 1, used: 1, wrong: 0, useRate: 1 },
-        ],
-      }),
-    );
-    const stats = await getLookupStats(7, {
-      baseUrl: 'https://preview.example',
-      timeoutMs: 5000,
-      fetchImpl: fetch,
-    });
-    expect(stats.triggers[0]?.trigger).toBe('newarm');
-  });
-});
-
 /**
- * PR 277 round-2 review, nit on state-store.ts:4132: `findPairingCandidate`
- * used to synthesize `title: ''` / `price: '0'` for a `pairing_post` link
- * missing them — a false default a future spend-check could have trusted.
- * `getPostMetadata` is the replacement: `GET /api/posts/<id>/public`
- * (tenjin PR #803), a sibling of the owner-scoped-SIWX `GET /api/posts/<id>`
+ * `getPostMetadata`: `GET /api/posts/<id>/public` (tenjin PR #803), a sibling
+ * of the owner-scoped-SIWX `GET /api/posts/<id>`
  * route, serving `articleBase()`'s full shape (id, slug, title, excerpt,
  * coverImageId, price, arbiterId, status, publishedAt, tags, creator) for
  * PUBLISHED posts only. The schema asserts `id`/`slug`/`title`/`price`/
@@ -820,11 +619,11 @@ describe('getLookupStats', () => {
  * required set once `resolveResourceRef` (lib/resource-ref.ts) started using
  * this as its own by-id fallback: the read route is keyed by handle/slug, so
  * those two are what let a resolved id become a payable URL. Every other
- * field stays passthrough (PR 277 round-3 review nit) — a drift in a field
- * nothing here reads must not turn a good response into `null`. It must
- * never invent a value, so every failure mode (404, any other non-200, a
- * network error, or a body this CLI cannot read) collapses to the same
- * `null`.
+ * field stays passthrough — a drift in a field nothing here reads must not turn
+ * a good response into `null`. It must never invent a value (a synthesized
+ * `title: ''` / `price: '0'` is a false default a spend-check could trust), so
+ * every failure mode (404, any other non-200, a network error, or a body this
+ * CLI cannot read) collapses to the same `null`.
  */
 describe('getPostMetadata', () => {
   const POST = {

@@ -6,7 +6,7 @@ Push hooks in team mode now ask the team shelf and the public shelf at the same 
 
 The verdict reads the top three candidates rather than rank 1 alone: the first one the shelf corroborated and did not call `low` is the hit, and when none qualifies rank 1 is recorded on the `weak` row as before. Push arms ask the shelf for three candidates (`limit: 3`); the WebSearch hint still asks for two.
 
-A new ledger reason, `shadowed`, marks a strong public answer on a fire the team shelf also answered strongly: the team answer is delivered, the public one is recorded, and `tenjin push status` counts it with the other reasons.
+A new ledger reason, `shadowed`, marks a strong public answer on a fire the team shelf also answered strongly: the team answer is delivered, the public one is recorded, and the ledger counts it with the other reasons.
 
 The hourly lookup allowance is now counted **per session** rather than per machine. Machine-wide, ten concurrent sessions shared one hourly allowance and burned it in the first half hour, so every session that started later was capped before it had asked anything and the sidecar went quiet exactly when the laptop was busiest. Each session now gets its own 60 lookups per rolling hour per trigger, and there is deliberately no machine ceiling over the top: a stuck loop is one session, and it is still bounded by that same 60 an hour per arm.
 

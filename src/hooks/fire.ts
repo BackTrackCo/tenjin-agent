@@ -5,7 +5,7 @@ import { ask } from './ask';
 import { finish, firstSight, gates, release } from './gates';
 import { record } from './ledger';
 import type { FireRecord } from './ledger';
-import type { Actor, Arm, Deps, FireClock, FireContext, LegRow, Outcome } from './types';
+import type { Actor, Arm, Deps, FireClock, FireContext, LegRow, Outcome, Question } from './types';
 
 /**
  * The one lifecycle (02-redesign.md §5). A fire is one hook event with one
@@ -52,10 +52,7 @@ function mergeEmit(delivery: Outcome['delivery'], after: Emit | null): Emit | nu
   const context = [delivery?.mode === 'inject' ? delivery.text : undefined, after?.context].filter(
     (t): t is string => typeof t === 'string' && t.length > 0,
   );
-  const out: Emit = {};
-  if (context.length > 0) out.context = context.join('\n\n');
-  if (after?.block) out.block = after.block;
-  return Object.keys(out).length === 0 ? null : out;
+  return context.length === 0 ? null : { context: context.join('\n\n') };
 }
 
 export async function runFire(
@@ -87,8 +84,11 @@ export async function runFire(
 
   let outcome: Outcome;
   let emit: Emit | null = null;
-  let fingerprint: string | undefined;
+  let questionKey: string | undefined;
   let question: string | undefined;
+  /** The Question this fire built, for `after`: what was asked, never what a
+   *  second look at the same input would ask now. */
+  let asked: Question | null = null;
 
   if (arm === null) {
     outcome = skip('no-question');
@@ -105,12 +105,26 @@ export async function runFire(
     // `asking`: never a `done` verdict `finish` just cached, and never a claim
     // an earlier fire made (the `cached` path claims nothing).
     let holdsClaim = false;
-    const main = async (): Promise<Outcome> => {
+    const lookup = async (): Promise<Outcome> => {
       try {
-        arm.before?.(ctx);
-        const plan = arm.plan?.(ctx) ?? null;
-        if (plan === null) return skip('no-question');
-        fingerprint = plan.question.fingerprint;
+        await arm.before?.(ctx);
+        const planned = (await arm.plan?.(ctx)) ?? null;
+        // A plan that landed after the deadline (or after the harness left)
+        // claims nothing: the row already says `deadline`.
+        if (controller.signal.aborted) return skip('deadline');
+        if (planned === null) return skip('no-question');
+        if ('reason' in planned) {
+          // The arm had text and refused it. The row keeps both, because the
+          // skipped prompts are what a "/clear", a "yes" and a one-line
+          // correction leave behind, and something has to read them.
+          question = planned.text;
+          return skip(planned.reason);
+        }
+        const plan = planned;
+        asked = plan.question;
+        questionKey = plan.question.questionKey;
+        // Exactly the wire text: `question()` already cut it to the shelf's
+        // bound, so the row reads as what this fire asked and nothing more.
         question = plan.question.text;
         const gated = gates(ctx, plan);
         let result: Outcome;
@@ -120,46 +134,63 @@ export async function runFire(
           holdsClaim = true;
           const asked = await ask(ctx, plan);
           if (controller.signal.aborted) {
-            release(deps.db, actor, plan.question.fingerprint, fire.id);
+            release(deps.db, actor, plan.question.questionKey, fire.id);
             holdsClaim = false;
             return skip('deadline');
           }
           const definite = asked.legs.length > 0 && asked.legs.every((l) => l.status === 'ok');
           if (asked.answer === null && !definite) {
-            release(deps.db, actor, plan.question.fingerprint, fire.id);
+            release(deps.db, actor, plan.question.questionKey, fire.id);
             holdsClaim = false;
             return skip(
               asked.legs.some((l) => l.status === 'http_429') ? 'rate-server' : 'no-answer',
             );
           }
-          finish(deps.db, actor, plan.question.fingerprint, asked.answer, deps.clock(), fire.id);
+          finish(deps.db, actor, plan.question.questionKey, asked.answer, deps.clock(), fire.id);
           holdsClaim = false;
           result = asked.answer ? { reason: 'hit', answer: asked.answer } : skip('no-hit');
         }
         if (result.answer) {
-          if (!firstSight(deps.db, actor, result.answer.resourceId, deps.clock())) {
-            return { reason: 'seen', answer: result.answer };
-          }
           const delivery = arm.deliver?.(result.answer, ctx) ?? null;
           if (delivery === null) return { reason: 'no-hit', answer: result.answer };
+          // ONCE-PER-PIECE IS ABOUT WHAT AN AGENT WAS SHOWN, so only an
+          // injection burns the mark. A log-only arm looks a piece up and says
+          // nothing; burning the mark there would let a silent lookup silence
+          // the real injection a prompt asks for a second later
+          // (00-principles.md, principle 4).
+          if (
+            delivery.mode === 'inject' &&
+            !firstSight(deps.db, actor, result.answer.resourceId, deps.clock())
+          ) {
+            return { reason: 'seen', answer: result.answer };
+          }
           return { ...result, delivery };
         }
         return result;
       } catch (err) {
-        if (holdsClaim && fingerprint !== undefined) release(deps.db, actor, fingerprint, fire.id);
+        if (holdsClaim && questionKey !== undefined) release(deps.db, actor, questionKey, fire.id);
+        return skip('error', reasonOf(err));
+      }
+    };
+    // `after` runs INSIDE the race, because it may be async (K1): an `after`
+    // that stalls past the deadline is a `deadline` row like any other stage,
+    // never a hung fire. The abort check in front of it is what keeps an
+    // abandoned fire — the bail timer or the harness closing its socket, both
+    // abort this controller — from spending a mark on a question nobody will
+    // read the answer to; the row says `deadline` either way.
+    const main = async (): Promise<Outcome> => {
+      const result = await lookup();
+      if (controller.signal.aborted || result.reason === 'deadline') return result;
+      try {
+        emit = mergeEmit(result.delivery, (await arm.after?.(ctx, result, asked)) ?? null);
+        return result;
+      } catch (err) {
+        emit = null;
         return skip('error', reasonOf(err));
       }
     };
     outcome = await Promise.race([main(), bail]);
     clearTimeout(timer);
-    if (outcome.reason !== 'deadline') {
-      try {
-        emit = mergeEmit(outcome.delivery, arm.after?.(ctx, outcome) ?? null);
-      } catch (err) {
-        outcome = skip('error', reasonOf(err));
-        emit = null;
-      }
-    }
     if (clientSignal?.aborted) {
       // The harness gave up on this fire: nothing we send will be read.
       outcome = outcome.reason === 'deadline' ? outcome : { ...outcome, reason: 'deadline' };
@@ -181,7 +212,7 @@ export async function runFire(
     deadlineMs,
     elapsedMs: deps.clock() - startedAt,
     outcome,
-    ...(fingerprint !== undefined ? { fingerprint } : {}),
+    ...(questionKey !== undefined ? { questionKey } : {}),
     ...(question !== undefined ? { question } : {}),
     emit,
     legs,

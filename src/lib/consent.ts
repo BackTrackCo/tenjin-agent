@@ -20,9 +20,9 @@ import type { TenjinSigner } from './wallet';
 
 /**
  * Writes require Base mainnet per the server's SIWX chain constraint. Aliased to
- * the one session chain id rather than re-declared: `tenjin session start` mints
- * into the same `session.json` this path reuses, and two constants that drifted
- * would silently invalidate each other's cached delegation.
+ * the one session chain id rather than re-declared: `tenjin read` mints into the
+ * same `session.json` this path reuses, and two constants that drifted would
+ * silently invalidate each other's cached delegation.
  */
 export const WRITE_CHAIN_ID = SESSION_CHAIN_ID;
 

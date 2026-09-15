@@ -475,7 +475,7 @@ describe('a schema-valid but cryptographically invalid key is a typed error', ()
     expect(cliErr.code).toBe('INTERNAL');
     expect(cliErr.message).toMatch(/not a usable P-256 key/i);
     // The half a bare DOMException never had: something to actually do.
-    expect(cliErr.fix).toMatch(/tenjin session start --scope read/);
+    expect(cliErr.fix).toMatch(/Delete the session cache/);
     // And the original is preserved for anyone debugging it.
     expect(cliErr.cause).toBeDefined();
   });

@@ -1,12 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile, chmod } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, symlink, writeFile, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { existsSync } from 'node:fs';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import type { Address } from 'viem';
-import { isNoWalletCheck, runDoctor } from './doctor';
-import type { CheckResult } from './doctor';
+import { runDoctor, runDoctorPrune } from './doctor';
+import type { CheckResult, DoctorDeps } from './doctor';
 import { getUsdcBalance } from '../lib/usdc';
 import { CliError } from '../lib/errors';
 import { claudeSettingsPath, FREE_VERB_RULES, MODE_GATED_RULES } from '../lib/harness-permissions';
@@ -15,14 +15,10 @@ import { fakeRecord } from '../lib/wallet/test-support';
 import { ALWAYS_SAFE_ALLOWLIST, OPT_IN_ALLOWLIST, PERMISSIONS_DOC_URL } from '../lib/permissions';
 import type { CommandContext } from '../context';
 import type { Io } from '../lib/output';
-import { saveSessionFile } from '../lib/session-key';
-import { sessionPath } from '../lib/paths';
-import { testSessionKey } from '../lib/read-test-utils';
+import { openLoopDb } from '../hooks/store';
 import type { WalletProvider } from '../lib/wallet';
-import { wireHermesIntegration } from '../lib/hermes';
-import { wireSearchHooks } from '../lib/harness-hooks';
-import { WEBSEARCH_HOOK_FILE } from '../lib/hook-scripts';
-import { hooksDir } from '../lib/paths';
+import { ADAPTERS } from '../adapters/registry';
+import type { HarnessAdapter } from '../adapters/types';
 
 // doctor loads viem's balance read lazily; the mock keeps every test off-chain.
 vi.mock('../lib/usdc', () => ({ getUsdcBalance: vi.fn() }));
@@ -31,7 +27,7 @@ const balanceMock = vi.mocked(getUsdcBalance);
 const OPENAPI_OK = {
   openapi: '3.1.0',
   info: { title: 'Tenjin', version: '0.1.0' },
-  // A healthy deploy advertises the search endpoint, so the search-contract
+  // A healthy deploy advertises the search endpoint, so the `search`
   // check is ok (no extra fix line): "all required checks green" stays true.
   paths: { '/api/search': {} },
 };
@@ -41,6 +37,21 @@ const ARTICLES_OK = { items: [{ id: 'a1' }], nextCursor: null };
 // never appears in any output.
 const PRIVATE_KEY = `0x${'de'.repeat(32)}` as `0x${string}`;
 const ADDRESS = privateKeyToAccount(PRIVATE_KEY).address;
+
+type TrustRead = NonNullable<HarnessAdapter['registrar']['trust']>['read'];
+
+function adaptersWithTrustRead(read: TrustRead): Readonly<typeof ADAPTERS> {
+  return {
+    ...ADAPTERS,
+    codex: {
+      ...ADAPTERS.codex,
+      registrar: {
+        ...ADAPTERS.codex.registrar,
+        trust: { ...ADAPTERS.codex.registrar.trust!, read },
+      },
+    },
+  };
+}
 
 let dir: string;
 // A temp HOME for the skill-wiring check. Every runDoctor call injects it so the
@@ -63,6 +74,7 @@ beforeEach(async () => {
   delete process.env.TENJIN_WALLET_KEY;
 });
 afterEach(async () => {
+  vi.unstubAllGlobals();
   await rm(dir, { recursive: true, force: true });
   await rm(skillHome, { recursive: true, force: true });
   await rm(pkgSrc, { recursive: true, force: true });
@@ -140,43 +152,23 @@ async function writeWallet(mode: number): Promise<void> {
 }
 
 describe('runDoctor — passing outcomes', () => {
-  it('reports a working native Hermes integration separately from portable skills', async () => {
-    await wireHermesIntegration({
-      // A path that EXISTS: doctor now stats the baked command, because an
-      // `npx`/`dlx` cache path can be pruned out from under a green check.
-      hermesHome: join(skillHome, '.hermes'),
-      dataDir: dir,
-      tenjinCommand: process.execPath,
-      nodeCommand: process.execPath,
-      dryRun: false,
-      explicit: true,
-      hooks: { enabled: true, mode: 'auto' },
-    });
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      homeDir: skillHome,
-      skillsSourceDir: pkgSrc,
-      env: {},
-      which: () => false,
-      fetchImpl: healthyFetch,
-    });
-    const checks = (res.data as { checks: CheckResult[] }).checks;
-    expect(find(checks, 'hermes')).toMatchObject({ status: 'ok', required: false });
-    expect(find(checks, 'hermes').detail).toContain('retrieval and publish-back');
-  });
-
-  // The preflight in src/index.ts already refused anything below Node 24, so a
-  // failing probe here is never "upgrade Node": the runtime is supported and the
-  // import still failed, which is a damaged install or bundle (tsup once shipped
-  // `import("sqlite")`, tenjin-agent#225). The remedy and the code must say so,
-  // and must not collide with the preflight's NODE_UNSUPPORTED.
-  it('a failing node:sqlite probe on a supported Node blames the install, not Node', async () => {
+  /**
+   * THE OPEN IS THE PROBE. The preflight in src/index.ts already refused
+   * anything below Node 24, so a failing open here is never "upgrade Node": the
+   * runtime is supported and the file still would not open, which is a damaged
+   * install or bundle (tsup once shipped `import("sqlite")`, tenjin-agent#225)
+   * or another build's daemon holding the ledger. The remedy and the code must
+   * say so, and must not collide with the preflight's NODE_UNSUPPORTED.
+   */
+  it('a loop.db that will not open blames the install, not Node', async () => {
     const err = await runDoctor(ctxFor(), {
       walletPassphrase: NO_OS_STORE,
       env: {},
       which: () => false,
       fetchImpl: healthyFetch,
-      probeSqlite: async () => ({ ok: false, version: null }),
+      openLoopDb: () => {
+        throw new Error('loop.db is from another build; run tenjin daemon stop and retry');
+      },
     }).then(
       () => {
         throw new Error('expected doctor to fail');
@@ -186,151 +178,61 @@ describe('runDoctor — passing outcomes', () => {
     expect(err).toBeInstanceOf(CliError);
     expect(err.code).toBe('INTERNAL');
     const checks = (err.details as { checks: CheckResult[] }).checks;
-    const store = find(checks, 'state-store');
+    const store = find(checks, 'store');
     expect(store.status).toBe('fail');
-    expect(store.detail).toContain(`Node ${process.versions.node}`);
-    expect(store.fix).toContain('Reinstall tenjin-cli');
+    expect(store.detail).toContain(join(dir, 'loop.db'));
+    expect(store.detail).toContain('from another build');
+    expect(store.fix).toContain('tenjin daemon stop');
     expect(store.fix).not.toMatch(/Node 24/);
   });
 
-  /**
-   * THE SAME ARGUMENT AS THE PROBE ABOVE, ONE STEP DOWN (#246).
-   *
-   * `PRAGMA journal_mode = wal` is the one statement in the store the busy
-   * timeout cannot protect, so an open that loses it twice runs on against a
-   * rollback journal — correct, but with the eight hooks a turn can fire now
-   * serialising. `openStore` records that in one row and nothing read it, which
-   * is the same invisibility the `node:sqlite` check exists to refuse.
-   */
-  it('reports a store stuck on a rollback journal, next to the node:sqlite line', async () => {
-    const at = Date.parse('2026-08-27T09:15:00.000Z');
+  /** The real open, which both proves `node:sqlite` and materializes the file. */
+  it('reports the loop database path when it opens', async () => {
     const res = await runDoctor(ctxFor(), {
       walletPassphrase: NO_OS_STORE,
       env: {},
       which: () => false,
       fetchImpl: healthyFetch,
-      readStoreJournal: async () => ({ mode: 'rollback', at }),
     });
     const checks = (res.data as { checks: CheckResult[] }).checks;
-    const journal = find(checks, 'state-store-journal');
-    // WARN, NEVER FAIL, and never required: degradation is not absence. The
-    // store answers real counts on a rollback journal, so every bound still
-    // works and doctor must not tell the operator their install is broken.
-    expect(journal.status).toBe('warn');
-    expect(journal.required).toBe(false);
-    expect(journal.detail).toContain('rollback journal (WAL unavailable)');
-    expect(journal.detail).toContain('2026-08-27T09:15:00.000Z');
-    expect(journal.detail).toContain(join(dir, 'state.db'));
-    expect(journal.fix).toContain('TENJIN_DATA_DIR');
-    // `--json` readers get it as data, not only as prose.
-    expect(journal.data).toEqual({ mode: 'rollback', at });
-    // Beside the probe it belongs to, not at the bottom of the page.
-    expect(checks.map((c) => c.name).indexOf('state-store-journal')).toBe(
-      checks.map((c) => c.name).indexOf('state-store') + 1,
-    );
+    const store = find(checks, 'store');
+    expect(store.status).toBe('ok');
+    expect(store.detail).toBe(`${join(dir, 'loop.db')} open`);
+    expect(existsSync(join(dir, 'loop.db'))).toBe(true);
   });
 
   /**
-   * SILENT WHEN THERE IS NOTHING TO SAY. A permanently-present line about a
-   * pragma that has never failed is the noise that teaches an operator to skim
-   * the page, and the row self-heals, so a machine that got WAL back must stop
-   * mentioning it.
+   * #227: `TENJIN_DATA_DIR` is the documented way to run a second profile, and
+   * it is silent about one consequence — skill self-healing stands down under
+   * it (lib/skill-heal.ts). A note, never a warning: this is what the operator
+   * asked for.
    */
-  it('says nothing about the journal on a store that has WAL', async () => {
+  it('names a redirected data dir and says skill self-healing stands down', async () => {
     const res = await runDoctor(ctxFor(), {
       walletPassphrase: NO_OS_STORE,
-      env: {},
-      which: () => false,
-      fetchImpl: healthyFetch,
-      readStoreJournal: async () => ({ mode: 'wal', at: Date.now() }),
-    });
-    const checks = (res.data as { checks: CheckResult[] }).checks;
-    expect(checks.map((c) => c.name)).not.toContain('state-store-journal');
-  });
-
-  /**
-   * ...and the REAL reader, on a machine that has never run a hook. Doctor is
-   * reached for when something is already broken; it may not be the thing that
-   * first materialises the state database, so a missing file reads as nothing to
-   * report rather than as a store to bootstrap.
-   */
-  it('creates no state database just to look at the journal', async () => {
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      env: {},
+      env: { TENJIN_DATA_DIR: dir },
       which: () => false,
       fetchImpl: healthyFetch,
     });
     const checks = (res.data as { checks: CheckResult[] }).checks;
-    expect(checks.map((c) => c.name)).not.toContain('state-store-journal');
-    expect(existsSync(join(dir, 'state.db'))).toBe(false);
+    const note = find(checks, 'data-dir');
+    expect(note.status).toBe('ok');
+    expect(note.required).toBe(false);
+    expect(note.detail).toContain(dir);
+    expect(note.detail).toContain('skill self-healing stands down');
   });
 
-  // Doctor is the command you reach for when something is already broken, so the
-  // STRICT resolver must never run here: a stray relative HERMES_HOME belonging to
-  // some other tool would return CONFIG_INVALID and run zero checks on a machine
-  // with no Hermes at all.
-  it('a relative HERMES_HOME warns and falls back instead of aborting every check', async () => {
+  /** Silent on the machine's own data dir: a permanently-present line about the
+   *  default is the noise that teaches an operator to skim the page. */
+  it('says nothing about the data dir with no override set', async () => {
     const res = await runDoctor(ctxFor(), {
       walletPassphrase: NO_OS_STORE,
-      homeDir: skillHome,
-      skillsSourceDir: pkgSrc,
-      env: { HERMES_HOME: 'relative/hermes' },
+      env: {},
       which: () => false,
       fetchImpl: healthyFetch,
     });
     const checks = (res.data as { checks: CheckResult[] }).checks;
-    expect(checks.length).toBeGreaterThan(1);
-    expect(find(checks, 'node').status).toBe('ok');
-  });
-
-  it('a baked MCP command that no longer exists warns instead of reading green', async () => {
-    const hermesHome = join(skillHome, '.hermes');
-    await wireHermesIntegration({
-      hermesHome,
-      dataDir: dir,
-      tenjinCommand: join(skillHome, 'pruned-npx-cache', 'tenjin'),
-      nodeCommand: process.execPath,
-      dryRun: false,
-      explicit: true,
-      hooks: { enabled: true, mode: 'auto' },
-    });
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      homeDir: skillHome,
-      skillsSourceDir: pkgSrc,
-      env: {},
-      which: () => false,
-      fetchImpl: healthyFetch,
-    });
-    const hermes = find((res.data as { checks: CheckResult[] }).checks, 'hermes');
-    expect(hermes.status).toBe('warn');
-    expect(hermes.detail).toContain('MCP command missing');
-    // One subject per problem: prefixing the activation with `plugin` too reads as
-    // one subject named twice.
-    expect(hermes.detail).not.toContain('plugin plugin');
-  });
-
-  // `tenjin install --harness hermes` alone is a dead end with the mode stored off:
-  // it re-runs, withholds the hook code by design, and prints the same warning
-  // forever. The `native-harness` fix string in this same PR already names the
-  // config command; doctor has to as well.
-  it('names the config command when the stored webSearch is what blocks the plugin', async () => {
-    await writeFile(
-      join(dir, 'config.json'),
-      JSON.stringify({ install: { harness: ['hermes'] }, hooks: { webSearch: 'off' } }),
-    );
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      homeDir: skillHome,
-      skillsSourceDir: pkgSrc,
-      env: {},
-      which: () => false,
-      fetchImpl: healthyFetch,
-    });
-    const hermes = find((res.data as { checks: CheckResult[] }).checks, 'hermes');
-    expect(hermes.status).toBe('warn');
-    expect(hermes.fix).toContain('tenjin config set hooks.webSearch auto');
+    expect(checks.map((c) => c.name)).not.toContain('data-dir');
   });
 
   it('all required checks green, no wallet: status pass with a warn wallet check', async () => {
@@ -343,28 +245,25 @@ describe('runDoctor — passing outcomes', () => {
     });
     const data = res.data as { status: string; checks: CheckResult[] };
     expect(data.status).toBe('pass');
-    expect(find(data.checks, 'api-contract').detail).toContain('0.1.0');
+    expect(find(data.checks, 'api').detail).toContain('0.1.0');
     expect(find(data.checks, 'wallet').status).toBe('warn');
-    // `install` suppresses this one check as a duplicate of its own wallet line,
-    // and recognises it by this marker rather than by the name it shares with
-    // every other wallet warning.
-    expect(isNoWalletCheck(find(data.checks, 'wallet'))).toBe(true);
-    expect(find(data.checks, 'search-contract').status).toBe('ok');
+    expect(find(data.checks, 'search').status).toBe('ok');
     // A bare temp HOME has no skills, so the wiring check warns with a fix too.
     expect(find(data.checks, 'skills').status).toBe('warn');
-    // checks + a wallet-warn fix line + a skills-warn fix line, then a blank
-    // separator and the one pointer line — and nothing after it (#81).
-    const checkLines = data.checks.length + 2; // wallet + skills warns add a fix line each
-    expect(res.humanLines?.[checkLines]).toBe('');
-    expect(res.humanLines?.[checkLines + 1]).toContain(PERMISSIONS_DOC_URL);
-    expect((res.humanLines ?? []).length).toBe(checkLines + 2);
+    // Group headings + one line per check + a fix line under each of the two
+    // warns, then the blank and the tally — and nothing after it.
+    const lines = res.humanLines ?? [];
+    expect(lines.at(-2)).toBe('');
+    expect(lines.at(-1)).toBe(
+      `${data.checks.length} checks: ${data.checks.length - 2} ok, 2 warn.`,
+    );
   });
 
   // The alias is what a stale deployment advertises: it is deprecated and answers
   // 410 after one release, so a deploy carrying ONLY it is the case this check has
   // to warn about. Passing on the alias would send `tenjin search` at a path that
   // is about to stop answering, which is the entire point of the probe.
-  it('search-contract warns when the deploy advertises only the deprecated alias', async () => {
+  it('search warns when the deploy advertises only the deprecated alias', async () => {
     const aliasOnly = routeFetch({
       '/openapi.json': {
         body: {
@@ -383,13 +282,13 @@ describe('runDoctor — passing outcomes', () => {
       fetchImpl: aliasOnly,
     });
     const data = res.data as { status: string; checks: CheckResult[] };
-    expect(data.status).toBe('pass'); // still passes: search-contract is not required
-    const check = find(data.checks, 'search-contract');
+    expect(data.status).toBe('pass'); // still passes: `search` is not required
+    const check = find(data.checks, 'search');
     expect(check.status).toBe('warn');
     expect(check.detail).toContain('POST /api/search');
   });
 
-  it('search-contract warns (never fails doctor) when the deploy omits the search path', async () => {
+  it('search warns (never fails doctor) when the deploy omits the search path', async () => {
     const noSearch = routeFetch({
       '/openapi.json': { body: { openapi: '3.1.0', info: { version: '0.1.0' }, paths: {} } },
       '/api/articles': { body: ARTICLES_OK },
@@ -402,8 +301,8 @@ describe('runDoctor — passing outcomes', () => {
       fetchImpl: noSearch,
     });
     const data = res.data as { status: string; checks: CheckResult[] };
-    expect(data.status).toBe('pass'); // still passes: search-contract is not required
-    expect(find(data.checks, 'search-contract').status).toBe('warn');
+    expect(data.status).toBe('pass'); // still passes: `search` is not required
+    expect(find(data.checks, 'search').status).toBe('warn');
   });
 
   it('wallet present but not 0600: warns on perms, still passes', async () => {
@@ -519,7 +418,7 @@ describe('runDoctor — passing outcomes', () => {
     expect(data.checks.some((c) => c.name === 'balance')).toBe(false);
   });
 
-  it('read-path probe sends no q parameter (never fabricate search demand)', async () => {
+  it('the read probe sends no q parameter (never fabricate search demand)', async () => {
     // The server logs every nonblank first-page `q` as agent search demand, so a
     // health probe must never inject one. This assertion must never regress.
     let readPathUrl: string | undefined;
@@ -558,8 +457,8 @@ describe('runDoctor — passing outcomes', () => {
       env: {},
       fetchImpl: capturing,
     });
-    // api-contract, search-contract, and read-path each fetch (three requests).
-    expect(headersSeen.length).toBeGreaterThanOrEqual(3);
+    // Two fetches: one openapi.json behind `api` and `search`, plus the read path.
+    expect(headersSeen.length).toBe(2);
     for (const headers of headersSeen) {
       expect(headers['user-agent']).toMatch(/^tenjin-cli\//);
       expect(headers['x-tenjin-client']).toBeUndefined();
@@ -614,7 +513,8 @@ describe('runDoctor — passing outcomes', () => {
 
     it('carries the key on the configured shelf', async () => {
       const seen = await probe({ baseUrl: undefined });
-      expect(seen.length).toBeGreaterThanOrEqual(3);
+      // Two probes, not three: `api` and `search` are two verdicts on one fetch.
+      expect(seen.length).toBe(2);
       for (const headers of seen) expect(headers[BYPASS_HEADER]).toBe(SECRET);
     });
 
@@ -673,7 +573,7 @@ describe('runDoctor — passing outcomes', () => {
         await probe({ baseUrl: 'https://attacker.example' }),
         await probe({ baseUrl: undefined }, { TENJIN_BASE_URL: 'https://attacker.example' }),
       ]) {
-        expect(seen.length).toBeGreaterThanOrEqual(3);
+        expect(seen.length).toBe(2);
         for (const headers of seen) expect(headers[BYPASS_HEADER]).toBeUndefined();
       }
     });
@@ -785,7 +685,7 @@ describe('runDoctor — required failures throw the mapped CliError', () => {
     const err = await catchDoctor(rejecting);
     expect(err.code).toBe('API_UNREACHABLE');
     const checks = (err.details as { checks: CheckResult[] }).checks;
-    expect(find(checks, 'api-contract').status).toBe('fail');
+    expect(find(checks, 'api').status).toBe('fail');
   });
 
   it('a 200 with garbage JSON at openapi is CONTRACT_MISMATCH', async () => {
@@ -819,7 +719,7 @@ describe('runDoctor — required failures throw the mapped CliError', () => {
     );
     const err = await catchDoctor(GATE_PAGE);
     expect(err.code).toBe('CONTRACT_MISMATCH');
-    const check = find((err.details as { checks: CheckResult[] }).checks, 'api-contract');
+    const check = find((err.details as { checks: CheckResult[] }).checks, 'api');
     expect(check.detail).toContain('HTML page');
     expect(check.fix).toContain('shelfBypassSecret');
     expect(check.fix).not.toContain('config set baseUrl');
@@ -853,7 +753,7 @@ describe('runDoctor — required failures throw the mapped CliError', () => {
         env: {},
         fetchImpl: GATE_PAGE,
       }).catch((e: unknown) => e)) as CliError;
-      const check = find((err.details as { checks: CheckResult[] }).checks, 'api-contract');
+      const check = find((err.details as { checks: CheckResult[] }).checks, 'api');
       // Still names what actually came back: that part is true either way.
       expect(check.detail).toContain('HTML page');
       expect(check.fix).not.toContain('shelfBypassSecret');
@@ -877,13 +777,13 @@ describe('runDoctor — required failures throw the mapped CliError', () => {
     const err = await catchDoctor(GATE_PAGE);
     expect(err.code).toBe('CONTRACT_MISMATCH');
     const checks = (err.details as { checks: CheckResult[] }).checks;
-    const check = find(checks, 'api-contract');
+    const check = find(checks, 'api');
     expect(check.fix).toContain('stale or rotated');
     expect(check.fix).toContain('shelfBypassSecret');
     expect(check.fix).not.toContain('set the team shelf key');
-    // search-contract hits the same page; its fix must not hand out a second
-    // verdict ("check the base URL") beside api-contract's in --json.
-    expect(find(checks, 'search-contract').fix).toContain('stale or rotated');
+    // search hits the same page; its fix must not hand out a second
+    // verdict ("check the base URL") beside `api`'s in --json.
+    expect(find(checks, 'search').fix).toContain('stale or rotated');
     // A secret is configured on this run, so this assertion can actually fail.
     expect(JSON.stringify(err.details)).not.toContain(SECRET);
   });
@@ -905,7 +805,7 @@ describe('runDoctor — required failures throw the mapped CliError', () => {
     const err = await catchDoctor(GATE_PAGE, SHELF);
     expect(err.code).toBe('CONTRACT_MISMATCH');
     const checks = (err.details as { checks: CheckResult[] }).checks;
-    const check = find(checks, 'api-contract');
+    const check = find(checks, 'api');
     expect(check.fix).toContain('stale or rotated');
     expect(JSON.stringify(checks)).not.toContain(SECRET);
   });
@@ -926,7 +826,7 @@ describe('runDoctor — required failures throw the mapped CliError', () => {
       }),
     );
     expect(err.code).toBe('API_UNREACHABLE');
-    const check = find((err.details as { checks: CheckResult[] }).checks, 'api-contract');
+    const check = find((err.details as { checks: CheckResult[] }).checks, 'api');
     expect(check.detail).toContain('401');
     expect(check.detail).toContain('HTML page');
     expect(check.fix).toContain('shelfBypassSecret');
@@ -952,7 +852,7 @@ describe('runDoctor — required failures throw the mapped CliError', () => {
       }),
     );
     expect(err.code).toBe('API_UNREACHABLE');
-    const check = find((err.details as { checks: CheckResult[] }).checks, 'api-contract');
+    const check = find((err.details as { checks: CheckResult[] }).checks, 'api');
     expect(check.fix).toContain('stale or rotated');
     expect(check.fix).not.toContain('config get baseUrl');
     expect(JSON.stringify(err.details)).not.toContain(SECRET);
@@ -980,7 +880,7 @@ describe('runDoctor — required failures throw the mapped CliError', () => {
       JSON.stringify({ baseUrl: 'https://backtrack.tenjin.sh' }),
     );
     const err = await catchDoctor(JSON_401);
-    const check = find((err.details as { checks: CheckResult[] }).checks, 'api-contract');
+    const check = find((err.details as { checks: CheckResult[] }).checks, 'api');
     expect(check.fix).toContain('shelfBypassSecret');
     // The classification is untouched: nothing claims a page answered.
     expect(check.detail).not.toContain('HTML page');
@@ -994,7 +894,7 @@ describe('runDoctor — required failures throw the mapped CliError', () => {
       JSON.stringify({ baseUrl: 'https://backtrack.tenjin.sh', shelfBypassSecret: SECRET }),
     );
     const err = await catchDoctor(JSON_401);
-    const check = find((err.details as { checks: CheckResult[] }).checks, 'api-contract');
+    const check = find((err.details as { checks: CheckResult[] }).checks, 'api');
     expect(check.fix).toContain('stale or rotated');
     expect(JSON.stringify(err.details)).not.toContain(SECRET);
   });
@@ -1002,7 +902,7 @@ describe('runDoctor — required failures throw the mapped CliError', () => {
   it('a JSON 401 from the marketplace keeps the ordinary advice and names no key', async () => {
     await writeFile(join(dir, 'config.json'), JSON.stringify({}));
     const err = await catchDoctor(JSON_401);
-    const check = find((err.details as { checks: CheckResult[] }).checks, 'api-contract');
+    const check = find((err.details as { checks: CheckResult[] }).checks, 'api');
     expect(check.fix).not.toContain('shelfBypassSecret');
     expect(check.fix).toContain('config get baseUrl');
   });
@@ -1031,14 +931,14 @@ describe('runDoctor — required failures throw the mapped CliError', () => {
       }),
     );
     expect(err.code).toBe('API_UNREACHABLE');
-    const check = find((err.details as { checks: CheckResult[] }).checks, 'api-contract');
+    const check = find((err.details as { checks: CheckResult[] }).checks, 'api');
     expect(check.fix).toContain('canonical host');
     expect(check.fix).not.toContain('stale or rotated');
     expect(check.fix).not.toContain('shelfBypassSecret');
     expect(JSON.stringify(err.details)).not.toContain(SECRET);
   });
 
-  it('a gated read path points at the key too, not only api-contract', async () => {
+  it('a gated read path points at the key too, not only `api`', async () => {
     await writeFile(
       join(dir, 'config.json'),
       JSON.stringify({ baseUrl: 'https://backtrack.tenjin.sh' }),
@@ -1053,7 +953,7 @@ describe('runDoctor — required failures throw the mapped CliError', () => {
       }),
     );
     expect(err.code).toBe('API_UNREACHABLE');
-    const check = find((err.details as { checks: CheckResult[] }).checks, 'read-path');
+    const check = find((err.details as { checks: CheckResult[] }).checks, 'read');
     expect(check.status).toBe('fail');
     expect(check.fix).toContain('shelfBypassSecret');
     expect(check.fix).not.toContain('config get baseUrl');
@@ -1066,7 +966,7 @@ describe('runDoctor — required failures throw the mapped CliError', () => {
         '/api/articles': { body: ARTICLES_OK },
       }),
     );
-    const check = find((err.details as { checks: CheckResult[] }).checks, 'api-contract');
+    const check = find((err.details as { checks: CheckResult[] }).checks, 'api');
     expect(check.detail).toContain('was not valid JSON');
     expect(check.fix).toContain('config set baseUrl');
     expect(check.fix).not.toContain('shelfBypassSecret');
@@ -1091,8 +991,8 @@ describe('runDoctor — required failures throw the mapped CliError', () => {
     );
     expect(err.code).toBe('API_UNREACHABLE');
     const checks = (err.details as { checks: CheckResult[] }).checks;
-    expect(find(checks, 'api-contract').status).toBe('ok');
-    expect(find(checks, 'read-path').status).toBe('fail');
+    expect(find(checks, 'api').status).toBe('ok');
+    expect(find(checks, 'read').status).toBe('fail');
   });
 
   it('invalid config JSON is CONFIG_INVALID (exit 2 by default mapping)', async () => {
@@ -1335,7 +1235,6 @@ describe('runDoctor — skill wiring', () => {
     expect(skills.detail).toContain(
       `${claudeSkills()}: the hosted tenjin skill is here but neither CLI skill is wired`,
     );
-    expect(skills.detail).toContain('hosted skill only, no CLI skills here');
     expect(skills.fix).toBe('tenjin install --harness claude');
   });
 
@@ -1372,11 +1271,12 @@ describe('runDoctor — skill wiring', () => {
     expect(skills.detail).toContain(
       `${claudeSkills()}: tenjin-publish installed but not model-invocable (disable-model-invocation: true)`,
     );
-    expect(skills.detail).toContain('[disabled]');
     expect(skills.fix).toBe('tenjin install --harness claude');
   });
 
-  it('both CLI skills wired alongside the hosted mirror: ok, and says which takes precedence', async () => {
+  // A passing line is one clause. Which directory holds what is the per-directory
+  // `data` payload's job, and it is asserted on its own below.
+  it('both CLI skills wired alongside the hosted mirror: ok, in one clause', async () => {
     await writeSkill('tenjin');
     await writeSkill('tenjin-search');
     await writeSkill('tenjin-publish');
@@ -1389,8 +1289,7 @@ describe('runDoctor — skill wiring', () => {
     });
     const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
     expect(skills.status).toBe('ok');
-    expect(skills.detail).toContain('tenjin-search + tenjin-publish wired');
-    expect(skills.detail).toContain('CLI skills wired, take precedence over the hosted mirror');
+    expect(skills.detail).toBe('tenjin-search + tenjin-publish, current');
   });
 
   it('reports the shared ~/.agents/skills target too, not just Claude Code', async () => {
@@ -1406,7 +1305,7 @@ describe('runDoctor — skill wiring', () => {
     });
     const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
     expect(skills.status).toBe('ok');
-    expect(skills.detail).toContain(sharedSkills());
+    expect(JSON.stringify(skills.data)).toContain(sharedSkills());
   });
 
   it('an unreadable skill is not reported as disable-model-invocation', async () => {
@@ -1424,7 +1323,6 @@ describe('runDoctor — skill wiring', () => {
       const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
       expect(skills.status).toBe('warn');
       expect(skills.detail).toContain('unreadable or disable-model-invocation');
-      expect(skills.detail).toContain('[unreadable]');
     } finally {
       await chmod(join(claudeSkills(), 'tenjin-publish', 'SKILL.md'), 0o600);
     }
@@ -1454,24 +1352,6 @@ describe('runDoctor — skill wiring', () => {
     } finally {
       await chmod(join(claudeSkills(), 'tenjin-publish', 'SKILL.md'), 0o600);
     }
-  });
-
-  it('a wired directory with no mirror does not claim precedence over one', async () => {
-    await writeSkill('tenjin-search');
-    await writeSkill('tenjin-publish');
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      homeDir: skillHome,
-      skillsSourceDir: pkgSrc,
-      env: {},
-      fetchImpl: healthyFetch,
-    });
-    const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
-    expect(skills.status).toBe('ok');
-    expect(skills.detail).toContain(
-      `${claudeSkills()} -> tenjin-search, tenjin-publish (CLI skills wired)`,
-    );
-    expect(skills.detail).not.toContain('take precedence');
   });
 
   // The optional tenjin-pay skill's presence must match the bazaarPay toggle:
@@ -1553,12 +1433,9 @@ describe('runDoctor — skill wiring', () => {
       // The regression: a union across directories announced both CLI skills
       // missing in the same sentence that listed them wired.
       expect(skills.detail).not.toContain('missing');
-      expect(skills.detail).toContain(
-        `${claudeSkills()} -> tenjin-search, tenjin-publish, tenjin (CLI skills wired`,
-      );
-      expect(skills.detail).toContain(
-        `${sharedSkills()} -> tenjin (hosted skill only, no CLI skills here)`,
-      );
+      const dirs = (skills.data as { directories: { dir: string; state: string }[] }).directories;
+      expect(dirs.find((d) => d.dir === claudeSkills())?.state).toBe('wired');
+      expect(dirs.find((d) => d.dir === sharedSkills())?.state).toBe('hosted-only');
     });
 
     it('shadowed in one directory and missing in the other names BOTH, with both fixes', async () => {
@@ -1579,10 +1456,10 @@ describe('runDoctor — skill wiring', () => {
       // The shadowed branch used to return before missing was ever computed.
       expect(skills.detail).toContain(`${claudeSkills()}: tenjin-publish installed but not`);
       expect(skills.detail).toContain(`${sharedSkills()}: tenjin-publish missing`);
-      expect(skills.fix).toBe('tenjin install --harness claude --harness shared');
+      expect(skills.fix).toBe('tenjin install --harness claude --harness codex');
     });
 
-    it('a problem only in .agents/skills gets the --harness shared fix that can clear it', async () => {
+    it('a problem only in .agents/skills gets the --harness codex fix that can clear it', async () => {
       await installCodex();
       for (const name of ['tenjin', 'tenjin-search', 'tenjin-publish']) {
         await writeSkillIn(claudeSkills(), name);
@@ -1600,7 +1477,7 @@ describe('runDoctor — skill wiring', () => {
       expect(skills.status).toBe('warn');
       // A bare `tenjin install` never targets ~/.agents/skills on a Claude-only
       // machine, so it would reproduce the warning forever.
-      expect(skills.fix).toBe('tenjin install --harness shared');
+      expect(skills.fix).toBe('tenjin install --harness codex');
     });
 
     // Unioning the SUCCESSES is the same bug as unioning the problems, inverted:
@@ -1664,8 +1541,9 @@ describe('runDoctor — skill wiring', () => {
       const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
       expect(skills.status).toBe('ok');
       expect(skills.fix).toBeUndefined();
-      // Still fully described, just not warned about.
-      expect(skills.detail).toContain(`${sharedSkills()} -> tenjin-search (only one CLI skill)`);
+      // Still fully described in the data, just not warned about.
+      const dirs = (skills.data as { directories: { dir: string; state: string }[] }).directories;
+      expect(dirs.find((d) => d.dir === sharedSkills())?.state).toBe('partial');
     });
 
     // The other half of the narrowing: detection cannot see a harness the CLI does
@@ -1682,7 +1560,7 @@ describe('runDoctor — skill wiring', () => {
         }
         await writeSkillIn(sharedSkills(), 'tenjin-search');
         await writeSkillIn(sharedSkills(), 'tenjin-publish', 'disable-model-invocation: true\n');
-        await recordHarness('shared');
+        await recordHarness('codex');
 
         const res = await runDoctor(ctxFor(), {
           walletPassphrase: NO_OS_STORE,
@@ -1698,7 +1576,7 @@ describe('runDoctor — skill wiring', () => {
         expect(skills.detail).toContain(
           `${sharedSkills()}: tenjin-publish installed but not model-invocable`,
         );
-        expect(skills.fix).toBe('tenjin install --harness shared');
+        expect(skills.fix).toBe('tenjin install --harness codex');
         // The healthy .claude directory is not dragged into the warning.
         expect(skills.detail).not.toContain(`${claudeSkills()}: `);
       });
@@ -1725,14 +1603,14 @@ describe('runDoctor — skill wiring', () => {
         const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
         expect(skills.detail).not.toContain('not model-invocable');
         expect(skills.detail).toContain('not from this CLI build');
-        expect(skills.fix).toBe('tenjin install --harness shared');
+        expect(skills.fix).toBe('tenjin install --harness codex');
       });
 
       it('rides in the data as `requested`, leaving `harnessPresent` a detection fact', async () => {
         for (const name of ['tenjin-search', 'tenjin-publish']) {
           await writeSkillIn(claudeSkills(), name);
         }
-        await recordHarness('codex'); // `codex` and `shared` are the same directory
+        await recordHarness('codex');
 
         const res = await runDoctor(ctxFor(), {
           walletPassphrase: NO_OS_STORE,
@@ -1748,14 +1626,14 @@ describe('runDoctor — skill wiring', () => {
         expect(shared?.harnessPresent).toBe(false); // no Codex here, and that stays true
         // An empty requested directory the user asked for is still the defect.
         expect(skills.status).toBe('warn');
-        expect(skills.fix).toBe('tenjin install --harness shared');
+        expect(skills.fix).toBe('tenjin install --harness codex');
       });
 
       it('a recorded directory that is properly wired stays quiet', async () => {
         for (const dirOf of [claudeSkills(), sharedSkills()]) {
           for (const name of ['tenjin-search', 'tenjin-publish']) await writeSkillIn(dirOf, name);
         }
-        await recordHarness('shared');
+        await recordHarness('codex');
 
         const res = await runDoctor(ctxFor(), {
           walletPassphrase: NO_OS_STORE,
@@ -1770,11 +1648,11 @@ describe('runDoctor — skill wiring', () => {
       });
 
       it('nothing wired anywhere: the first fix names the recorded target, not a bare tenjin install', async () => {
-        // Both directories empty, but a past `install --harness shared` recorded
+        // Both directories empty, but a past `install --harness codex` recorded
         // where the user wants it. Before this fix, this branch hardcoded
         // `tenjin install`, which wires .claude only; a second `doctor` run was
-        // then needed to learn about --harness shared. One recorded target, one fix.
-        await recordHarness('shared');
+        // then needed to learn about --harness codex. One recorded target, one fix.
+        await recordHarness('codex');
 
         const res = await runDoctor(ctxFor(), {
           walletPassphrase: NO_OS_STORE,
@@ -1786,7 +1664,7 @@ describe('runDoctor — skill wiring', () => {
         const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
         expect(skills.status).toBe('warn');
         expect(skills.detail).toContain('No Tenjin skills wired');
-        expect(skills.fix).toBe('tenjin install --harness shared');
+        expect(skills.fix).toBe('tenjin install --harness codex');
 
         // The fix clears the warning in one pass: wiring what it names is enough.
         for (const name of ['tenjin-search', 'tenjin-publish']) {
@@ -1803,17 +1681,11 @@ describe('runDoctor — skill wiring', () => {
         expect(skillsAfter.status).toBe('ok');
       });
 
-      it('nothing wired anywhere, with a DETECTED harness alongside the recorded target: the fix names both', async () => {
-        // Claude Code detected (a bare .claude dir, no skill written into it yet)
-        // AND a different target recorded via a past `install --harness shared`.
-        // Filtering on `requested` alone named only the recorded directory;
-        // wiring it left the DETECTED .claude directory empty, and a second
-        // doctor run then asked for --harness claude — two commands either way,
-        // just a swapped which-directory-is-left-behind. The round-4 test above
-        // could not catch this: with no `.claude` dir and `env: {}`, nothing was
-        // ever detected, so filtering on `requested` alone looked sufficient.
+      it('a settled selection outranks detection of a different harness', async () => {
+        // Claude Code is detected, but the operator explicitly settled on Codex.
+        // Doctor must honor that answer instead of silently widening the install.
         await mkdir(join(skillHome, '.claude'), { recursive: true });
-        await recordHarness('shared');
+        await recordHarness('codex');
 
         const res = await runDoctor(ctxFor(), {
           walletPassphrase: NO_OS_STORE,
@@ -1824,12 +1696,11 @@ describe('runDoctor — skill wiring', () => {
         });
         const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
         expect(skills.status).toBe('warn');
-        expect(skills.fix).toBe('tenjin install --harness claude --harness shared');
+        expect(skills.fix).toBe('tenjin install --harness codex');
 
-        // The fix clears the warning in one pass: wiring what it names, both
-        // directories, is enough. Wiring only one of the two would still warn.
-        for (const dirOf of [claudeSkills(), sharedSkills()]) {
-          for (const name of ['tenjin-search', 'tenjin-publish']) await writeSkillIn(dirOf, name);
+        // Wiring exactly the selected target clears the warning in one pass.
+        for (const name of ['tenjin-search', 'tenjin-publish']) {
+          await writeSkillIn(sharedSkills(), name);
         }
         const after = await runDoctor(ctxFor(), {
           walletPassphrase: NO_OS_STORE,
@@ -1859,7 +1730,7 @@ describe('runDoctor — skill wiring', () => {
       });
       const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
       expect(skills.status).toBe('warn');
-      expect(skills.fix).toBe('tenjin install --harness shared');
+      expect(skills.fix).toBe('tenjin install --harness codex');
     });
   });
 
@@ -1912,15 +1783,15 @@ describe('runDoctor — recommended auto-mode allowlist (#33)', () => {
     expect(data.permissions.optIn.map((e) => e.rule)).toEqual([
       'Bash(tenjin buy:*)',
       'Bash(tenjin pay:*)',
-      'Bash(tenjin session start:*)',
     ]);
-    expect(data.permissions.neverAllowlisted.map((e) => e.command)).toContain('tenjin send');
+    expect(data.permissions.neverAllowlisted.map((e) => e.command)).toContain('tenjin wallet send');
   });
 
-  // #81: the human render is the check list plus ONE pointer. The rules, the
-  // opt-in notes, the exclusions and both caveats live on the page it points at
-  // and in `--json` (asserted above), so none of them may be back in the terminal.
-  it('prints no allowlist rule at all, only the pointer', async () => {
+  // #81: the human render is the check list and nothing else. The rules, the
+  // opt-in notes, the exclusions and both caveats live in `--json` (asserted
+  // above) and on the page it documents, so none may be back in the terminal —
+  // and neither may a standing pointer at that page on a run with no finding.
+  it('prints no allowlist rule at all, and no pointer', async () => {
     const res = await runDoctor(ctxFor(), {
       walletPassphrase: NO_OS_STORE,
       env: {},
@@ -1932,7 +1803,7 @@ describe('runDoctor — recommended auto-mode allowlist (#33)', () => {
     }
     expect(text).not.toContain('Never recommended');
     expect(text).not.toContain('mcp__tenjin__tenjin_publish');
-    expect(text).toContain(PERMISSIONS_DOC_URL);
+    expect(text).not.toContain(PERMISSIONS_DOC_URL);
   });
 
   // The essay was ~60 lines above a check list of ~9. Pinned as a budget rather
@@ -1946,20 +1817,27 @@ describe('runDoctor — recommended auto-mode allowlist (#33)', () => {
     });
     const data = res.data as { checks: CheckResult[] };
     const fixes = data.checks.filter((c) => c.status !== 'ok' && c.fix !== undefined).length;
-    // checks + their fix lines + one blank separator + the pointer.
-    expect((res.humanLines ?? []).length).toBe(data.checks.length + fixes + 2);
+    const headings = (res.humanLines ?? []).filter((l) => /^[A-Z]/.test(l)).length;
+    // checks + their fix lines + a group heading each + one blank + the tally.
+    expect((res.humanLines ?? []).length).toBe(data.checks.length + fixes + headings + 2);
   });
 });
 
 /**
- * The one rule doctor DOES name. An operator whose agent is being prompted for
- * every publish, on a mode that says not to ask, is reading exactly this line —
- * and the pointer, which names no rule at all, cannot tell them which one to add.
+ * The one rule doctor DOES name, and the only line it prints below the tally.
+ * An operator whose agent is being prompted for every publish, on a mode that
+ * says not to ask, is reading exactly this line.
  */
 describe('runDoctor — the rule the publish mode carries', () => {
   let home: string;
   beforeEach(async () => {
     home = await mkdtemp(join(tmpdir(), 'tenjin-doc-home-'));
+    // These rules are Claude Code's grammar, and the pointer that names them is
+    // suppressed where they could never apply — a Codex-only machine was being
+    // told to add two rules its harness has never heard of (tenjin-agent#342).
+    // So every case here states the precondition it is actually about: a
+    // machine whose install targeted Claude.
+    await mkdir(join(home, '.claude'), { recursive: true });
   });
   afterEach(async () => {
     await rm(home, { recursive: true, force: true });
@@ -2044,13 +1922,24 @@ describe('runDoctor — the rule the publish mode carries', () => {
     const text = await run();
     expect(text).toContain('Bash(tenjin publish:*)');
     expect(text).toContain('publish.mode=auto');
-    // Still above the one pointer that closes every doctor run.
-    expect(text.trimEnd().endsWith(PERMISSIONS_DOC_URL)).toBe(true);
+    // Below the tally: it is a finding about this machine, not a check.
+    expect(text.trimEnd().split('\n').at(-1)).toContain('publish.mode=auto');
   });
 
   it('names the rule on full-auto', async () => {
     await writeFile(join(dir, 'config.json'), JSON.stringify({ publish: { mode: 'full-auto' } }));
     expect(await run()).toContain('publish.mode=full-auto');
+  });
+
+  it('does not nag after the operator explicitly declined those rules', async () => {
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({
+        publish: { mode: 'auto' },
+        install: { grantDeclined: [...FREE_VERB_RULES, ...MODE_GATED_RULES] },
+      }),
+    );
+    expect(await run()).not.toContain('Bash(tenjin publish:*)');
   });
 
   it('carries the mode-gated tier in --json', async () => {
@@ -2201,7 +2090,7 @@ describe('runDoctor — allowlist on the failure path and terminal safety', () =
     expect(text).toContain('error: Read path');
     expect(text).toContain('fix: ');
     expect(text).not.toContain(PERMISSIONS_DOC_URL);
-    expect(text).not.toContain('api-contract'); // no check list on this path
+    expect(text).not.toContain('Environment'); // no check list on this path
   });
 
   // `info.version` is server-controlled and now renders directly above a block
@@ -2226,7 +2115,7 @@ describe('runDoctor — allowlist on the failure path and terminal safety', () =
       fetchImpl: hostile,
     });
     const lines = res.humanLines ?? [];
-    const apiLine = lines.find((l) => l.includes('api-contract')) ?? '';
+    const apiLine = lines.find((l) => l.includes('api')) ?? '';
     // The payload survives as inert text on ONE line: no newline to start a
     // forged block, and no escape sequence left to repaint it.
     expect(apiLine).toContain('Bash(tenjin:*)');
@@ -2447,241 +2336,6 @@ describe('runDoctor — a pipe at a skill path cannot hang the diagnostic', () =
   }, 15000);
 });
 
-describe('runDoctor — session key', () => {
-  it('reports ok with no session, naming the verb that would mint one', async () => {
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      env: {},
-      fetchImpl: healthyFetch,
-    });
-    const check = find((res.data as { checks: CheckResult[] }).checks, 'session');
-    expect(check.status).toBe('ok');
-    expect(check.required).toBe(false);
-    expect(check.detail).toContain('No session key');
-    expect(check.detail).toContain('tenjin session start --scope read');
-    expect(check.data).toBeUndefined();
-  });
-
-  it('reports a live session as ok with address, scope and expiry — never key material', async () => {
-    const { file } = await testSessionKey();
-    await saveSessionFile(dir, file);
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      env: {},
-      fetchImpl: healthyFetch,
-    });
-    const check = find((res.data as { checks: CheckResult[] }).checks, 'session');
-    expect(check.status).toBe('ok');
-    expect(check.data).toEqual({
-      address: file.address,
-      origin: file.origin,
-      scope: 'read',
-      exp: file.exp,
-    });
-    const rendered = JSON.stringify(res.data) + (res.humanLines ?? []).join('\n');
-    expect(rendered).not.toContain(file.delegation);
-    expect(rendered).not.toContain(String((file.privateKeyJwk as { d?: string }).d));
-  });
-
-  // 24h expiry is designed decay, not a fault. Warning on it made every machine
-  // that ever ran `tenjin session start` permanently yellow for working as
-  // intended, so a spent key reads as ok and names the verb that re-mints it.
-  it('reports an expired session as ok, naming the verb that re-mints', async () => {
-    const { file } = await testSessionKey({ exp: new Date(Date.now() - 1000).toISOString() });
-    await saveSessionFile(dir, file);
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      env: {},
-      fetchImpl: healthyFetch,
-    });
-    const data = res.data as { status: string; checks: CheckResult[] };
-    const check = find(data.checks, 'session');
-    expect(check.status).toBe('ok');
-    expect(check.required).toBe(false);
-    expect(check.detail).toContain('normal after 24h');
-    expect(check.detail).toContain('tenjin session start --scope read');
-    // No `fix` on an ok check: the command rides the detail, as `absent` and
-    // `outdated` already do.
-    expect(check.fix).toBeUndefined();
-    expect(data.status).toBe('pass');
-  });
-
-  // Decay is ok; a file whose expiry cannot be READ is not — that is malformed,
-  // not spent, and it must not be laundered through the friendly branch.
-  it('still warns when the expiry does not parse', async () => {
-    const { file } = await testSessionKey({ exp: 'whenever' });
-    await saveSessionFile(dir, file);
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      env: {},
-      fetchImpl: healthyFetch,
-    });
-    const data = res.data as { status: string; checks: CheckResult[] };
-    const check = find(data.checks, 'session');
-    expect(check.status).toBe('warn');
-    expect(check.detail).toContain('unparseable expiry');
-    expect(check.fix).toBe('tenjin session start --scope read');
-    expect(data.status).toBe('pass');
-  });
-
-  // The cache an older CLI left behind. Reported as a fact about the file, not as
-  // a failing check: it is unusable for the same reason an absent one is, and a
-  // machine that updated should not carry a permanent warning about it.
-  it('reports a pre-origin cache as ok, naming the field and the verb that re-mints', async () => {
-    const { file } = await testSessionKey();
-    await saveSessionFile(dir, file);
-    const stale: Record<string, unknown> = { ...file };
-    delete stale.origin;
-    await writeFile(sessionPath(dir), JSON.stringify(stale), { mode: 0o600 });
-
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      env: {},
-      fetchImpl: healthyFetch,
-    });
-    const data = res.data as { status: string; checks: CheckResult[] };
-    const check = find(data.checks, 'session');
-    expect(check.status).toBe('ok');
-    expect(check.detail).toContain('predates this CLI version');
-    expect(check.detail).toContain('origin');
-    expect(check.detail).toContain('tenjin session start --scope read');
-    expect(check.detail).not.toContain('could not be parsed');
-    expect(data.status).toBe('pass');
-  });
-
-  // A tamper signal must not be laundered through the friendly branch above.
-  it('still warns when a session field is present but the wrong type', async () => {
-    const { file } = await testSessionKey();
-    await saveSessionFile(dir, file);
-    await writeFile(sessionPath(dir), JSON.stringify({ ...file, origin: 42 }), { mode: 0o600 });
-
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      env: {},
-      fetchImpl: healthyFetch,
-    });
-    const check = find((res.data as { checks: CheckResult[] }).checks, 'session');
-    expect(check.status).toBe('warn');
-    expect(check.detail).toContain('could not be parsed');
-  });
-
-  // Both directions off ONE file, so the clock is provably what decides: expiry
-  // is no longer a status change, so the detail is what has to carry it.
-  it('uses the injected clock, so expiry is decided rather than observed', async () => {
-    const { file } = await testSessionKey();
-    await saveSessionFile(dir, file);
-    const detailAt = async (now: () => number): Promise<string> => {
-      const res = await runDoctor(ctxFor(), {
-        walletPassphrase: NO_OS_STORE,
-        env: {},
-        fetchImpl: healthyFetch,
-        now,
-      });
-      return find((res.data as { checks: CheckResult[] }).checks, 'session').detail;
-    };
-    expect(await detailAt(() => Date.parse(file.exp) + 1)).toContain('normal after 24h');
-    expect(await detailAt(() => Date.parse(file.exp) - 3_600_000)).toContain(
-      `Session key ${file.address}`,
-    );
-  });
-});
-
-/**
- * The tamper and failure states. `loadSessionFile` collapses all of these to
- * null, which is the right instruction for a caller that can re-mint and exactly
- * the wrong report for the verb an operator runs when something looks wrong: a
- * 0644 file holding a wallet-derived credential was changed out of band, and
- * "No session key" hides that.
- */
-describe('runDoctor — session key, the states loadSessionFile flattens', () => {
-  it('warns on a group-readable file rather than calling it absent', async () => {
-    if (process.platform === 'win32') return;
-    const { file } = await testSessionKey();
-    await saveSessionFile(dir, file);
-    await chmod(join(dir, 'session.json'), 0o644);
-    const check = find(
-      (
-        (
-          await runDoctor(ctxFor(), {
-            walletPassphrase: NO_OS_STORE,
-            env: {},
-            fetchImpl: healthyFetch,
-          })
-        ).data as {
-          checks: CheckResult[];
-        }
-      ).checks,
-      'session',
-    );
-    expect(check.status).toBe('warn');
-    expect(check.detail).toContain('0644');
-    expect(check.detail).toMatch(/out of band/i);
-  });
-
-  it('warns on a corrupt file, naming it as unparseable rather than missing', async () => {
-    await writeFile(join(dir, 'session.json'), 'not json {{{', { mode: 0o600 });
-    const check = find(
-      (
-        (
-          await runDoctor(ctxFor(), {
-            walletPassphrase: NO_OS_STORE,
-            env: {},
-            fetchImpl: healthyFetch,
-          })
-        ).data as {
-          checks: CheckResult[];
-        }
-      ).checks,
-      'session',
-    );
-    expect(check.status).toBe('warn');
-    expect(check.detail).toMatch(/could not be parsed/i);
-  });
-
-  it('warns when the session belongs to another origin than the configured base URL', async () => {
-    const { file } = await testSessionKey({ origin: 'https://other.example' });
-    await saveSessionFile(dir, file);
-    const check = find(
-      (
-        (
-          await runDoctor(ctxFor(), {
-            walletPassphrase: NO_OS_STORE,
-            env: {},
-            fetchImpl: healthyFetch,
-          })
-        ).data as {
-          checks: CheckResult[];
-        }
-      ).checks,
-      'session',
-    );
-    expect(check.status).toBe('warn');
-    expect(check.detail).toContain('https://other.example');
-    expect(check.detail).toMatch(/not presented off its own origin/i);
-  });
-
-  it('never aborts the whole run when the session cache cannot be read', async () => {
-    // doctor is diagnostics. An unreadable session cache (EACCES after a `sudo`
-    // run, EIO) used to throw INTERNAL out of the check array and take down the
-    // one command an operator reaches for when the install is broken.
-    if (process.platform === 'win32' || process.getuid?.() === 0) return;
-    await writeFile(join(dir, 'session.json'), '{}', { mode: 0o600 });
-    await chmod(join(dir, 'session.json'), 0o000);
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      env: {},
-      fetchImpl: healthyFetch,
-    });
-    const data = res.data as { status: string; checks: CheckResult[] };
-    // Every other check still ran, and the session one warns with its fix.
-    expect(data.status).toBe('pass');
-    expect(find(data.checks, 'api-contract').status).toBe('ok');
-    const check = find(data.checks, 'session');
-    expect(check.status).toBe('warn');
-    expect(check.fix).toBe('tenjin session start --scope read');
-  });
-});
-
 /**
  * The regression this round nearly shipped: `originOf` throws USAGE, and calling
  * it inline while building the check array took down the whole diagnostic before
@@ -2706,40 +2360,19 @@ describe('runDoctor — a base URL that is not an origin never aborts the run', 
     const data = res.data as { checks: CheckResult[] };
     // The run produced a check list at all, which is the whole point.
     expect(data.checks.length).toBeGreaterThan(3);
-    expect(find(data.checks, 'session').status).toBe('ok'); // absent, and absent is ok
-  });
-
-  it('warns that a cached session cannot be matched, instead of throwing', async () => {
-    await saveSessionFile(dir, (await testSessionKey()).file);
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      env: { TENJIN_BASE_URL: 'foo://tenjin.blog' },
-      fetchImpl: healthyFetch,
-    });
-    const check = find((res.data as { checks: CheckResult[] }).checks, 'session');
-    expect(check.status).toBe('warn');
-    expect(check.detail).toMatch(/not an http\(s\) origin/i);
-    expect(check.fix).toMatch(/config set baseUrl/);
+    // The `config` check is what owns the bad value; the rest still ran.
+    expect(find(data.checks, 'node').status).toBe('ok');
   });
 });
 
 /**
- * The push sidecar's wiring, and the ONE half-wired state an upgrade produces.
- *
- * `tenjin update` refreshes hook bodies and materializes no new surface
- * (tenjin-agent#224), so a machine wired before `SubagentStop` existed runs the
- * new subagent body under the old entries: every other arm fires and the
- * child-capture half never does. The generic "half wired" line would send the
- * operator to `tenjin push on`; the fix here is `tenjin install`, which is what
- * the release note says too.
+ * The one hook failure that is silent in the wild: the URL in settings.json
+ * carries the port the daemon had bound when install ran, and a daemon that
+ * later came back on another one makes every tool fire a non-blocking
+ * `HTTP hook error` the operator never sees.
  */
-describe('runDoctor — push hook wiring', () => {
-  async function wirePush(): Promise<void> {
-    await writeFile(join(dir, 'config.json'), JSON.stringify({ hooks: { push: 'on' } }));
-    await wireSearchHooks({ homeDir: skillHome, dataDir: dir, mode: 'auto', push: true });
-  }
-
-  async function pushCheck(): Promise<CheckResult> {
+describe('runDoctor — loop hook wiring', () => {
+  async function hookChecks(): Promise<CheckResult[]> {
     const res = await runDoctor(ctxFor(), {
       walletPassphrase: NO_OS_STORE,
       homeDir: skillHome,
@@ -2747,194 +2380,405 @@ describe('runDoctor — push hook wiring', () => {
       env: {},
       fetchImpl: healthyFetch,
     });
-    return find((res.data as { checks: CheckResult[] }).checks, 'push hooks');
+    const checks = (res.data as { checks: CheckResult[] }).checks;
+    return checks.filter((c) => c.name === 'daemon' || c.name === 'entries');
   }
 
-  it('is ok when both halves agree', async () => {
-    await wirePush();
-    const check = await pushCheck();
-    expect(check.status).toBe('ok');
-    expect(check.detail).toContain('7/7 hook entries registered');
-  });
-
-  it('names the missing SubagentStop entry, and sends the operator to install', async () => {
-    await wirePush();
-    // The upgraded machine: every entry the previous release wrote, and not the
-    // one this release added.
-    const path = claudeSettingsPath(skillHome);
-    const settings = JSON.parse(await readFile(path, 'utf8')) as {
-      hooks: Record<string, unknown>;
-    };
-    delete settings.hooks.SubagentStop;
-    await writeFile(path, JSON.stringify(settings, null, 2));
-
-    const check = await pushCheck();
-    expect(check.status).toBe('warn');
-    expect(check.required).toBe(false);
-    expect(check.detail).toContain('6/7 hook entries registered');
-    expect(check.detail).toContain('the SubagentStop entry is missing');
-    expect(check.detail).toContain('tenjin update refreshes hook bodies and adds no new entry');
-    expect(check.fix).toBe('tenjin install');
-  });
-
-  it('falls back to the generic half-wired line when more than that is missing', async () => {
-    await wirePush();
-    const path = claudeSettingsPath(skillHome);
-    const settings = JSON.parse(await readFile(path, 'utf8')) as {
-      hooks: Record<string, unknown>;
-    };
-    delete settings.hooks.SubagentStop;
-    delete settings.hooks.SubagentStart;
-    await writeFile(path, JSON.stringify(settings, null, 2));
-
-    const check = await pushCheck();
-    expect(check.status).toBe('warn');
-    expect(check.detail).toContain('only half wired');
-    expect(check.fix).toBe('tenjin push on');
-  });
-});
-
-/**
- * The `sig_v1_test` lane (tenjin-agent#267, redesigned round 3) reads a
- * report `tenjin-vitest-reporter.mjs` wrote when one exists; this is the hint
- * that tells an operator whose project has no such reporter that they are
- * losing precision. Silent unless there is something to report, so most of
- * these assert the check is ABSENT.
- */
-describe('runDoctor — test reporter hint', () => {
-  async function reporterCheck(): Promise<CheckResult | undefined> {
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      homeDir: skillHome,
-      skillsSourceDir: pkgSrc,
-      env: {},
-      fetchImpl: healthyFetch,
-      cwd: dir,
-    });
-    return (res.data as { checks: CheckResult[] }).checks.find((c) => c.name === 'test-reporters');
+  async function loopCheck(): Promise<CheckResult | undefined> {
+    return (await hookChecks()).find((c) => c.name === 'daemon');
   }
 
-  it('stays quiet when the project has no vitest at all', async () => {
-    expect(await reporterCheck()).toBeUndefined();
-  });
-
-  it('detects a vitest config with no tenjin reporter', async () => {
+  async function wireAt(port: number): Promise<void> {
+    await mkdir(join(skillHome, '.claude'), { recursive: true });
     await writeFile(
-      join(dir, 'vitest.config.ts'),
-      "export default { test: { environment: 'node' } };",
+      join(skillHome, '.claude', 'settings.json'),
+      `${JSON.stringify(
+        {
+          hooks: {
+            Stop: [
+              {
+                hooks: [
+                  {
+                    type: 'http',
+                    url: `http://127.0.0.1:${port}/hook/claude`,
+                    headers: { Authorization: 'Bearer t' },
+                  },
+                ],
+              },
+            ],
+          },
+        },
+        null,
+        2,
+      )}\n`,
+      { mode: 0o600 },
     );
-    const check = await reporterCheck();
-    expect(check?.status).toBe('warn');
-    expect(check?.required).toBe(false);
-    expect(check?.detail).toMatch(/vitest detected without the tenjin reporter/);
-    expect(check?.fix).toContain("reporters: ['default', ['");
-    expect(check?.fix).toContain('tenjin-vitest-reporter.mjs');
-    expect(check?.fix).toContain("{ outputFile: '.vitest-report.json' }]]");
-  });
-
-  it('detects vitest as a bare devDependency with no config file', async () => {
-    await writeFile(
-      join(dir, 'package.json'),
-      JSON.stringify({ name: 'x', devDependencies: { vitest: '^2.0.0' } }),
-    );
-    const check = await reporterCheck();
-    expect(check?.status).toBe('warn');
-    expect(check?.detail).toMatch(/vitest detected without the tenjin reporter/);
-  });
-
-  it('a vite.config.* with no test block is not read as an unconfigured vitest', async () => {
-    await writeFile(join(dir, 'vite.config.ts'), 'export default { plugins: [] };');
-    expect(await reporterCheck()).toBeUndefined();
-  });
-
-  it('stays quiet when the config already wires the tenjin reporter', async () => {
-    await writeFile(
-      join(dir, 'vitest.config.ts'),
-      "export default { test: { reporters: ['default', ['/home/x/.tenjin/hooks/tenjin-vitest-reporter.mjs', { outputFile: '.vitest-report.json' }]] } };",
-    );
-    expect(await reporterCheck()).toBeUndefined();
-  });
-
-  // tenjin-agent#278 round 3: the stock `json` reporter carries no
-  // `startTime`/`endTime`, so an artifact it writes now fails the failure
-  // arm's window check outright — a config still wired to it is exactly as
-  // unwired, precision-wise, as one with no reporter at all, and the hint
-  // must say so rather than reading the old shape as "already fixed".
-  it('still warns when the config only wires the stock json reporter, not the tenjin one', async () => {
-    await writeFile(
-      join(dir, 'vitest.config.ts'),
-      "export default { test: { reporters: ['default', ['json', { outputFile: '.vitest-report.json' }]] } };",
-    );
-    const check = await reporterCheck();
-    expect(check?.status).toBe('warn');
-    expect(check?.detail).toMatch(/vitest detected without the tenjin reporter/);
-  });
-});
-
-/**
- * tenjin-agent#252: `tenjin update` bumps the npm-installed binary and nothing
- * else, so the generated hook/push scripts under `<dataDir>/hooks` stay
- * whatever bytes `tenjin install` last wrote until an operator reinstalls —
- * the exact shape #242's merged allowlist fix hit (junk pairings kept
- * accumulating for hours on a machine that had not reinstalled). Modeled on
- * the "skills go stale after a CLI update" block above:
- * {@link compareWiredSkills}'s equivalent for the four generated scripts.
- */
-describe('runDoctor — hook scripts go stale after a CLI update', () => {
-  async function hookScriptsCheck(): Promise<CheckResult | undefined> {
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      homeDir: skillHome,
-      skillsSourceDir: pkgSrc,
-      env: {},
-      fetchImpl: healthyFetch,
-    });
-    return (res.data as { checks: CheckResult[] }).checks.find((c) => c.name === 'hook scripts');
   }
 
-  it('reports nothing on a machine with no hook scripts on disk', async () => {
-    expect(await hookScriptsCheck()).toBeUndefined();
+  it('says nothing on a machine with no hook entries of ours', async () => {
+    expect(await hookChecks()).toEqual([]);
   });
 
-  it('is ok when every wired script matches this build', async () => {
-    await wireSearchHooks({ homeDir: skillHome, dataDir: dir, mode: 'auto', push: true });
-    const check = await hookScriptsCheck();
-    expect(check?.status).toBe('ok');
+  // Two facts, two lines: whether the daemon answers, and what the file holds.
+  it('counts the entries and names the file they are in', async () => {
+    await wireAt(31_999);
+    const entries = (await hookChecks()).find((c) => c.name === 'entries');
+    expect(entries?.status).toBe('ok');
+    expect(entries?.detail).toBe(`1 in ${join(skillHome, '.claude', 'settings.json')}`);
+    expect(entries?.fix).toBeUndefined();
   });
 
-  it('warns and names the stale script when one was hand-edited (or left over from a merge)', async () => {
-    await wireSearchHooks({ homeDir: skillHome, dataDir: dir, mode: 'auto', push: true });
-    // The exact dogfooded shape: a merge changed the generated source, and
-    // nobody has run `tenjin install` since — simulated here by mutating the
-    // installed script directly rather than re-generating it.
-    const target = join(hooksDir(dir), WEBSEARCH_HOOK_FILE);
-    await writeFile(target, `${await readFile(target, 'utf8')}\n// hand-edited, or pre-merge\n`);
-
-    const check = await hookScriptsCheck();
+  it('warns with "daemon not running" when nothing answers the registered port', async () => {
+    await wireAt(31_999);
+    const check = await loopCheck();
     expect(check?.status).toBe('warn');
-    expect(check?.detail).toContain('1 of');
-    expect(check?.detail).toContain(WEBSEARCH_HOOK_FILE);
+    expect(check?.detail).toContain('daemon not running');
+    expect(check?.fix).toBe('tenjin daemon start');
+  });
+
+  it('names the port the daemon actually bound when it has moved', async () => {
+    await wireAt(31_999);
+    await writeFile(
+      join(dir, 'daemon.pid'),
+      JSON.stringify({ pid: 1, port: 32_100, started_at: 1, data_dir: dir }),
+    );
+    const check = await loopCheck();
+    expect(check?.status).toBe('warn');
+    expect(check?.detail).toContain('the daemon is on port 32100 instead');
     expect(check?.fix).toBe('tenjin install');
   });
 
-  // chmod 0o000 only blocks the owner's own read on a non-root process; skip
-  // rather than false-fail where that does not hold (Windows, root).
-  const canDenyOwnRead = process.platform !== 'win32' && process.getuid?.() !== 0;
-  (canDenyOwnRead ? it : it.skip)(
-    'warns when an installed script cannot be read, rather than staying silent',
-    async () => {
-      await wireSearchHooks({ homeDir: skillHome, dataDir: dir, mode: 'auto', push: true });
-      const target = join(hooksDir(dir), WEBSEARCH_HOOK_FILE);
-      await chmod(target, 0o000);
-      try {
-        const check = await hookScriptsCheck();
-        expect(check?.status).toBe('warn');
-        expect(check?.detail).toContain('could not be read');
-        expect(check?.detail).toContain(WEBSEARCH_HOOK_FILE);
-        expect(check?.fix).toContain('permissions');
-      } finally {
-        await chmod(target, 0o755);
-      }
-    },
-  );
+  it('warns about a settings file wider than 0600, because it carries the token', async () => {
+    if (process.platform === 'win32') return;
+    await wireAt(31_999);
+    await chmod(join(skillHome, '.claude', 'settings.json'), 0o644);
+    const entries = (await hookChecks()).find((c) => c.name === 'entries');
+    expect(entries?.status).toBe('warn');
+    expect(entries?.detail).toContain('wider than 0600');
+    expect(entries?.fix).toContain('chmod 600');
+  });
+
+  it('reports an explicitly declined command grant as settled, with no fix nag', async () => {
+    await wireAt(31_999);
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({
+        publish: { mode: 'auto' },
+        install: { grantDeclined: [...FREE_VERB_RULES, ...MODE_GATED_RULES] },
+      }),
+    );
+    const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
+      homeDir: skillHome,
+      skillsSourceDir: pkgSrc,
+      env: {},
+      fetchImpl: healthyFetch,
+    });
+    const permissions = find((res.data as { checks: CheckResult[] }).checks, 'claude permissions');
+    expect(permissions).toMatchObject({
+      status: 'ok',
+      detail: 'skipped: the command grant was explicitly declined',
+    });
+    expect(permissions.fix).toBeUndefined();
+  });
+});
+
+describe('runDoctor — Codex loop hook wiring', () => {
+  const codexHooksPath = (): string => join(skillHome, '.codex', 'hooks.json');
+
+  async function wireCodex(events: readonly string[] = ['SessionStart', 'Stop']): Promise<void> {
+    await mkdir(join(skillHome, '.codex'), { recursive: true });
+    const command = `node ${join(dir, 'hooks', 'tenjin-shim.mjs')} --harness codex`;
+    await writeFile(
+      codexHooksPath(),
+      `${JSON.stringify({
+        hooks: Object.fromEntries(
+          events.map((event) => [event, [{ hooks: [{ type: 'command', command }] }]]),
+        ),
+      })}\n`,
+      { mode: 0o600 },
+    );
+  }
+
+  function addFire(id: string, harness: 'claude' | 'codex', at: number): void {
+    const db = openLoopDb(dir);
+    try {
+      db.prepare(
+        `INSERT INTO fires (id, at, session, agent, arm, harness, event, prompt_id, cwd, wait,
+           deadline_ms, elapsed_ms, reason, question_key, question, delivered, emit, error)
+         VALUES (?, ?, 's', '', 'prompt', ?, 'prompt', NULL, '/r', 'tool', 1, 1,
+           'hit', NULL, NULL, NULL, NULL, NULL)`,
+      ).run(id, at, harness);
+    } finally {
+      db.close();
+    }
+  }
+
+  async function page(
+    over: Partial<DoctorDeps> = {},
+  ): Promise<{ checks: CheckResult[]; text: string }> {
+    const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
+      homeDir: skillHome,
+      skillsSourceDir: pkgSrc,
+      env: {},
+      fetchImpl: healthyFetch,
+      ...over,
+    });
+    return {
+      checks: (res.data as { checks: CheckResult[] }).checks,
+      text: (res.humanLines ?? []).join('\n'),
+    };
+  }
+
+  /**
+   * Configured, trusted and observed are three checks, not one line, because
+   * they fail separately and each has a different remedy. Rolled together, a
+   * Codex install that was written but never trusted read as `ok` and an
+   * operator spent an afternoon finding out otherwise (tenjin-agent#342).
+   */
+  it('separates configured, trusted and observed, and counts only recent fires', async () => {
+    await wireCodex();
+    const now = Date.now();
+    addFire('recent-codex', 'codex', now);
+    addFire('old-codex', 'codex', now - 8 * 24 * 60 * 60 * 1000);
+    addFire('recent-claude', 'claude', now);
+
+    const result = await page({
+      adapters: adaptersWithTrustRead(async (_home, keys) => ({
+        state: 'untrusted',
+        source: 'app-server',
+        configPath: join(skillHome, '.codex', 'config.toml'),
+        trusted: 0,
+        expected: keys.length,
+      })),
+    });
+    const configured = find(result.checks, 'codex configured');
+    expect(configured).toMatchObject({ status: 'ok', required: false });
+    expect(configured.detail).toBe(`2 entries in ${codexHooksPath()}`);
+
+    // Codex's own app-server answer settles that nothing is trusted.
+    const trusted = find(result.checks, 'codex trusted');
+    expect(trusted.status).toBe('warn');
+    expect(trusted.fix).toContain('tenjin install');
+
+    const observed = find(result.checks, 'codex observed');
+    expect(observed).toMatchObject({ status: 'ok', required: false });
+    expect(observed.detail).toBe('1 fire in 7d');
+    expect(result.text).toContain('codex configured');
+    expect(result.text).toContain(configured.detail);
+  });
+
+  /**
+   * The state the whole issue turns on: entries present, nothing trusted,
+   * nothing observed. Every one of those has to be visible and separately
+   * remediable, and none of them may read as a working loop.
+   */
+  it('an installed-but-untrusted Codex reads as inert, and points at install', async () => {
+    await wireCodex();
+    const result = await page({
+      adapters: adaptersWithTrustRead(async (_home, keys) => ({
+        state: 'untrusted',
+        source: 'app-server',
+        configPath: join(skillHome, '.codex', 'config.toml'),
+        trusted: 0,
+        expected: keys.length,
+      })),
+    });
+    expect(find(result.checks, 'codex configured').status).toBe('ok');
+    const trusted = find(result.checks, 'codex trusted');
+    expect(trusted.status).toBe('warn');
+    expect(trusted.detail).toMatch(/inert/);
+    const observed = find(result.checks, 'codex observed');
+    expect(observed.status).toBe('warn');
+    // `install` is the remedy now that it completes trust; the manual `/hooks`
+    // walkthrough is gone from every surface (tenjin-agent#343).
+    expect(observed.fix).toContain('tenjin install');
+    expect(`${trusted.fix} ${observed.fix}`).not.toContain('/hooks');
+  });
+
+  /**
+   * Unknown is not ok. Neither Codex nor its config could settle whether these
+   * entries run, and a green line there reads as a working loop -- which, with
+   * one fire still inside the seven-day window, makes an inert install look
+   * healthy on both lines (tenjin-agent#343).
+   */
+  it('warns, never passes, when trust cannot be settled at all', async () => {
+    await wireCodex();
+    // A config.toml that exists and cannot be read: trust is unknown, not
+    // absent, and `codex` is unreachable with env {}.
+    await mkdir(join(skillHome, '.codex', 'config.toml'), { recursive: true });
+    const trusted = find((await page()).checks, 'codex trusted');
+    expect(trusted.status).toBe('warn');
+    expect(trusted.detail).toMatch(/could not be asked/);
+    expect(trusted.fix).toBeTruthy();
+  });
+
+  /**
+   * And Codex's permission state is Codex's own file, never Claude's rules.
+   */
+  it("reports Codex permissions against Codex's own grant file", async () => {
+    await wireCodex();
+    const perms = find((await page()).checks, 'codex permissions');
+    expect(perms.detail).not.toContain('Bash(');
+    expect(perms.detail).toMatch(/tenjin\.rules|no grant is installed/);
+  });
+
+  it('probes a Codex-only daemon through daemon.pid and reports that port', async () => {
+    await wireCodex(['Stop']);
+    await writeFile(
+      join(dir, 'daemon.pid'),
+      JSON.stringify({ pid: 42, port: 32_123, started_at: 1, data_dir: dir }),
+    );
+    vi.stubGlobal(
+      'fetch',
+      routeFetch({
+        '/health': {
+          body: {
+            version: '9.9.9',
+            pid: 42,
+            port: 32_123,
+            uptime_ms: 1,
+            idle_ms: 0,
+            data_dir: dir,
+            rss: 1,
+          },
+        },
+      }),
+    );
+
+    const daemon = find((await page()).checks, 'daemon');
+    expect(daemon.status).toBe('ok');
+    expect(daemon.detail).toBe('127.0.0.1:32123, pid 42, v9.9.9');
+  });
+});
+
+/**
+ * The page itself: four groups, one line per check, a `fix:` only where there is
+ * something to fix, one tally. The wall this replaced was fifteen ungrouped
+ * lines, a paragraph of `fix:` under every one of them, and a standing pointer.
+ */
+describe('runDoctor — the grouped page', () => {
+  async function page(): Promise<{ lines: string[]; checks: CheckResult[] }> {
+    const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
+      homeDir: skillHome,
+      skillsSourceDir: pkgSrc,
+      env: {},
+      fetchImpl: healthyFetch,
+    });
+    return { lines: res.humanLines ?? [], checks: (res.data as { checks: CheckResult[] }).checks };
+  }
+
+  it('prints the four groups in order, with every check under one of them', async () => {
+    const { lines, checks } = await page();
+    const headings = lines.filter((l) => /^[A-Z]/.test(l));
+    expect(headings).toEqual(['Environment', 'Shelf', 'Hooks', 'Wallet']);
+    // A check whose name is in no group would render nowhere at all.
+    for (const c of checks) {
+      expect(lines.some((l) => l.startsWith(`  `) && l.includes(` ${c.name} `))).toBe(true);
+    }
+  });
+
+  it('indents each check under its heading and aligns the detail column', async () => {
+    const { lines, checks } = await page();
+    const width = Math.max(...checks.map((c) => c.name.length));
+    const icon = { ok: '\u2713', warn: '!', fail: '\u2717' };
+    for (const c of checks) {
+      expect(lines).toContain(`  ${icon[c.status]} ${c.name.padEnd(width)}  ${c.detail}`);
+    }
+  });
+
+  it('prints a fix line only under a warn or a fail', async () => {
+    const { lines, checks } = await page();
+    const fixes = lines.filter((l) => l.trimStart().startsWith('fix: '));
+    const failing = checks.filter((c) => c.status !== 'ok' && c.fix !== undefined);
+    expect(fixes.length).toBe(failing.length);
+    for (const c of checks.filter((x) => x.status === 'ok' && x.fix !== undefined)) {
+      expect(fixes.some((l) => l.includes(c.fix ?? ''))).toBe(false);
+    }
+  });
+
+  it('closes with one tally, after a blank line', async () => {
+    const { lines, checks } = await page();
+    const warns = checks.filter((c) => c.status === 'warn').length;
+    expect(lines.at(-2)).toBe('');
+    expect(lines.at(-1)).toBe(
+      `${checks.length} checks: ${checks.length - warns} ok, ${warns} warn.`,
+    );
+  });
+});
+
+/**
+ * `tenjin doctor --prune`: the retention rule by hand, plus the retired store.
+ *
+ * NAMED ENTRIES ONLY. The data dir also holds the wallet, the config and the
+ * library, whose loss is unrecoverable, so the whole point of this command is
+ * that it deletes exactly what it names and reports each one.
+ */
+describe('runDoctorPrune', () => {
+  it('runs retention on loop.db, removes the retired store, and never the wallet', async () => {
+    const db = openLoopDb(dir);
+    const old = Date.now() - 400 * 24 * 60 * 60 * 1000;
+    db.prepare(
+      `INSERT INTO fires (id, at, session, agent, arm, harness, event, prompt_id, cwd, wait,
+         deadline_ms, elapsed_ms, reason, question_key, question, delivered, emit, error)
+       VALUES ('f-old', ?, 's', '', 'prompt', 'claude', 'prompt', NULL, '/r', 'tool', 1, 1,
+         'hit', NULL, NULL, NULL, NULL, NULL)`,
+    ).run(old);
+    db.prepare(
+      `INSERT INTO fires (id, at, session, agent, arm, harness, event, prompt_id, cwd, wait,
+         deadline_ms, elapsed_ms, reason, question_key, question, delivered, emit, error)
+       VALUES ('f-new', ?, 's', '', 'prompt', 'claude', 'prompt', NULL, '/r', 'tool', 1, 1,
+         'hit', NULL, NULL, NULL, NULL, NULL)`,
+    ).run(Date.now());
+    db.close();
+
+    for (const name of [
+      'state.db',
+      'state.db-wal',
+      'state.db-shm',
+      'push-ledger.jsonl',
+      'hook-nags.json',
+      'hook-health.json',
+    ]) {
+      await writeFile(join(dir, name), 'x');
+    }
+    await mkdir(join(dir, 'candidates'), { recursive: true });
+    await writeWallet(0o600);
+    await writeFile(join(dir, 'config.json'), '{}');
+
+    const res = await runDoctorPrune(ctxFor());
+    expect(res.data).toMatchObject({ retention: { fires: 1 } });
+    const removed = (res.data as { removed: string[] }).removed;
+    expect(removed).toContain(join(dir, 'state.db'));
+    expect(removed).toContain(join(dir, 'state.db-wal'));
+    expect(removed).toContain(join(dir, 'state.db-shm'));
+    expect(removed).toContain(join(dir, 'push-ledger.jsonl'));
+    expect(removed).toContain(join(dir, 'hook-nags.json'));
+    expect(removed).toContain(join(dir, 'hook-health.json'));
+    expect(removed).toContain(join(dir, 'candidates'));
+    expect(existsSync(join(dir, 'state.db'))).toBe(false);
+    expect(existsSync(join(dir, 'hook-nags.json'))).toBe(false);
+    expect(existsSync(join(dir, 'hook-health.json'))).toBe(false);
+    expect(existsSync(join(dir, 'candidates'))).toBe(false);
+
+    // The operator's own property, untouched and said to be so.
+    expect(existsSync(join(dir, 'wallet.json'))).toBe(true);
+    expect(existsSync(join(dir, 'config.json'))).toBe(true);
+    const human = res.humanLines?.join('\n') ?? '';
+    expect(human).toContain('removed 1 fire(s)');
+    expect(human).toContain('Kept: your wallet, config and library');
+
+    // The fire inside the window is still there.
+    const after = openLoopDb(dir);
+    expect(after.prepare('SELECT id FROM fires').all()).toEqual([{ id: 'f-new' }]);
+    after.close();
+  });
+
+  it('says so when there is nothing retired left to remove', async () => {
+    const res = await runDoctorPrune(ctxFor());
+    expect((res.data as { removed: string[] }).removed).toEqual([]);
+    expect(res.humanLines?.join('\n')).toContain('Nothing retired left to remove.');
+  });
 });

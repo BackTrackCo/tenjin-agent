@@ -16,7 +16,6 @@ import {
   skillsDirsFor,
 } from './skill-wiring';
 import { OPTIONAL_SKILL_NAMES, resolveSkillsSource } from './skills-source';
-import { resolveHermesHomeLenient } from './hermes';
 
 export interface HealDeps {
   io: Io;
@@ -73,7 +72,7 @@ const OPT_OUT = 'TENJIN_NO_SKILL_HEAL';
  * own, from the next command onward, with no re-install.
  *
  * ONLY FROM THE MACHINE'S DEFAULT DATA DIR. The targets are machine-wide —
- * `~/.claude/skills`, `~/.agents/skills`, `$HERMES_HOME/skills`, none of which
+ * `~/.claude/skills` and `~/.agents/skills`, neither of which
  * has a data-dir component — while the mode that shapes the bytes is read per
  * invocation. Convergence is the right property for one profile per machine and
  * the wrong one for two: a single `TENJIN_DATA_DIR=~/.tenjin-shelf tenjin …` run
@@ -124,8 +123,7 @@ export async function healWiredSkills(deps: HealDeps): Promise<HealOutcome> {
     const teamMode =
       deps.dataDir === undefined ? false : isTeamModeConfig(await loadRawConfig(deps.dataDir));
     // Lenient on purpose: an unattended healer is the last place that should
-    // refuse to run over a stray relative HERMES_HOME.
-    const targets = healable(home, resolveHermesHomeLenient(home, env).home);
+    const targets = healable(home);
     if (targets.length === 0) return skip('No wired CLI skill is present to heal.');
     await heal(targets, source, deps.io, teamMode);
     return { ran: true };
@@ -178,9 +176,9 @@ interface Target {
  * edited under a healthy SKILL.md is restored on the same pass. The other gate,
  * that the file is ours at all, needs its content and so lives at the write.
  */
-function healable(home: string, hermesHome: string): Target[] {
+function healable(home: string): Target[] {
   const found: Target[] = [];
-  for (const dir of skillsDirsFor(home, hermesHome)) {
+  for (const dir of skillsDirsFor(home)) {
     if (!isRealDirectory(dir)) continue;
     for (const name of [...CLI_SKILL_NAMES, ...OPTIONAL_SKILL_NAMES]) {
       if (!isRealDirectory(join(dir, name))) continue;

@@ -1,5 +1,5 @@
 import { CliError } from './errors';
-import { findPairingCandidate, findStoredCandidate } from './state-store';
+import { findStoredCandidate } from './searches';
 import { canonicalReadUrl } from './library';
 import { UUID_RE } from './ids';
 import { isSameDeployment } from './production-origin';
@@ -13,7 +13,7 @@ import type { ShelfBypass } from './http';
  * resourceId, resolved to its URL first through the local search store (the read
  * route is keyed by handle/slug, so an id alone cannot build the URL on its own),
  * then — when a caller supplies `net` — through the public by-id route
- * (`getPostMetadata`), for an id neither local source has ever seen. Anything
+ * (`getPostMetadata`), for an id the local record has never seen. Anything
  * else is a usage error with a clear fix.
  *
  * The origin pin is a MONEY-PATH trust boundary, not pedantry: `buy` sends a
@@ -139,16 +139,9 @@ export async function resolveResourceRef(
     return { url, shelfBaseUrl: shelfFor(url) };
   }
   if (UUID_RE.test(trimmed)) {
-    // A search candidate first (the ordinary case), then a pairing this
-    // machine's own `tenjin sync` published (tenjin-agent#252): `sync` never
-    // records what it publishes as a search result, so an id straight out of
-    // its own output would otherwise refuse to resolve here even though the
-    // CLI is the one that minted it.
-    const candidate =
-      (await findStoredCandidate(dataDir, trimmed)) ??
-      (await findPairingCandidate(dataDir, trimmed));
+    const candidate = await findStoredCandidate(dataDir, trimmed);
     if (candidate === null) {
-      // Both local sources miss. The one id-only route left is the public
+      // The local record misses. The one id-only route left is the public
       // by-id lookup (tenjin#803, `getPostMetadata`): it is what lets an id
       // this CLI's own `tenjin publish` just returned resolve immediately,
       // without a `tenjin search` round trip to plant it in the local store

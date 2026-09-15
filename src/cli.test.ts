@@ -111,6 +111,67 @@ describe('main', () => {
     );
   });
 
+  /**
+   * The shape `tenjin --help` is expected to hold (clig.dev's "display the most
+   * common flags and commands at the start", gh's grouped root list): five
+   * headings, one line per command, the globals listed once, and examples plus
+   * pointers at the end. A command that lands outside the five falls into
+   * commander's ungrouped `Commands:` bucket, which is what this catches.
+   */
+  it('files every command under the five headings, in order', async () => {
+    const cap = captureIo();
+    expect(await main(['--help'], cap.io)).toBe(0);
+    const help = cap.stdout();
+    const groups = ['Setup:', 'Search and read:', 'Publish:', 'Wallet:', 'Integration:'];
+    const at = groups.map((group) => help.indexOf(group));
+    expect(at.filter((i) => i === -1)).toEqual([]);
+    expect(at).toEqual([...at].sort((a, b) => a - b));
+    expect(help).not.toMatch(/^Commands:$/m);
+  });
+
+  /**
+   * gh, git, cargo and docker all take both spellings, so this one does too.
+   * The heading matters as much as the command: `help` is the one command
+   * commander files itself, and an ungrouped one is exactly the stray
+   * `Commands:` block the case above forbids. Exit 0, because the text was
+   * asked for — a bare `tenjin` is the usage error, and stays one.
+   */
+  it('takes `tenjin help <command>` as well as `<command> --help`', async () => {
+    const root = captureIo();
+    expect(await main(['--help'], root.io)).toBe(0);
+    expect(root.stdout()).toContain('help [command]');
+
+    const cap = captureIo();
+    expect(await main(['help', 'hooks'], cap.io)).toBe(0);
+    expect(cap.stdout()).toContain('Usage: tenjin hooks');
+    expect(cap.stdout()).toContain('$ tenjin hooks disable web-fetch');
+  });
+
+  // vercel's rule, applied here: a global flag is listed once, on the root. The
+  // per-command copies still PARSE (`tenjin doctor --json`, covered below); they
+  // are hidden so a command's own flags are what its help shows.
+  it('lists the globals once, on the root, and not again under a command', async () => {
+    const root = captureIo();
+    expect(await main(['--help'], root.io)).toBe(0);
+    expect(root.stdout()).toContain('Global options:');
+    expect(root.stdout()).toContain('emit one machine JSON envelope on stdout');
+
+    const leafHelp = captureIo();
+    expect(await main(['doctor', '--help'], leafHelp.io)).toBe(0);
+    expect(leafHelp.stdout()).toContain('--prune');
+    expect(leafHelp.stdout()).not.toContain('--base-url');
+  });
+
+  it('ends with examples and the pointers, not a second copy of the docs', async () => {
+    const cap = captureIo();
+    expect(await main(['--help'], cap.io)).toBe(0);
+    const help = cap.stdout();
+    expect(help).toContain('Examples:');
+    expect(help).toContain('$ tenjin install');
+    expect(help).toContain('Run `tenjin <command> --help` for one command.');
+    expect(help).toContain(PERMISSIONS_DOC_URL);
+  });
+
   // A pointer in help has to work from wherever the reader is standing, which is
   // their own project and not this package. A repo-relative `docs/...` path reads
   // as a file they can open and is not one.
@@ -120,38 +181,44 @@ describe('main', () => {
     const help = cap.stdout();
     expect(help).toContain(PERMISSIONS_DOC_URL);
     expect(help).not.toMatch(/(?<!\/)docs\/agent-permissions\.md/);
-    // Same tier claim as every other surface, doctor's local check included.
-    expect(help.replace(/\s+/g, ' ')).toContain('none can spend USDC or move your keys');
-    expect(help.replace(/\s+/g, ' ')).toContain('doctor may check your wallet still opens');
+    // Same tier claim as every other surface: no spending, and the keystore
+    // access `read` and `doctor` do have.
+    expect(help.replace(/\s+/g, ' ')).toContain('none can spend USDC');
+    expect(help.replace(/\s+/g, ' ')).toContain(
+      '`tenjin read` opens the keystore to mint a read-scoped session key',
+    );
+    expect(help.replace(/\s+/g, ' ')).toContain(
+      '`tenjin doctor` decrypts locally to check your wallet still opens',
+    );
   });
 
-  /**
-   * `sync --cwd <path>` is what the Stop hook spawns with (tenjin-agent#249): the
-   * hook payload's cwd STRING, which `projectId` hashed the pairing rows under,
-   * and which `process.cwd()` in the spawned child would have resolved through
-   * any symlink into a different project id. It takes a value, and it is
-   * documented, because an operator running the by-hand fallback from a
-   * different directory needs the same scoping the hook gets.
-   */
-  it('documents sync --cwd and requires a value for it', async () => {
+  // The Bazaar lane is a flag now, not a prompt, so it has to be discoverable
+  // where every other flag is.
+  it('offers the lane install no longer asks about as a flag', async () => {
     const cap = captureIo();
-    expect(await main(['sync', '--help'], cap.io)).toBe(0);
-    expect(cap.stdout()).toContain('--cwd <path>');
+    expect(await main(['install', '--help'], cap.io)).toBe(0);
+    const help = cap.stdout();
+    expect(help).toContain('--bazaar-pay');
+    expect(help).toContain('--no-grant');
+    expect(help).not.toContain('--no-allow-free-verbs');
+    // The hooks are not a flag or a prompt any more: all seven arms are on and
+    // `tenjin config set hooks.<arm> false` is the one place to change that.
+    expect(help).not.toContain('--search-hooks');
+  });
 
-    const missing = captureIo();
-    expect(await main(['sync', '--cwd'], missing.io)).toBe(2);
-    expect(JSON.parse(missing.stdout()).error.code).toBe('USAGE');
-
-    // AN EMPTY VALUE IS THE SAME ERROR, not a fallback to `process.cwd()`.
-    // `tenjin sync --cwd "$REPO"` with `REPO` unset reaches commander as `''`,
-    // and syncing whatever directory the shell is in would end in the same
-    // "Nothing to sync." a real miss ends in — the one wrong outcome an
-    // operator cannot tell from a right one.
-    const empty = captureIo();
-    expect(await main(['sync', '--cwd', ''], empty.io)).toBe(2);
-    const err = JSON.parse(empty.stdout()).error as { code: string; fix?: string };
-    expect(err.code).toBe('USAGE');
-    expect(err.fix).toContain('--cwd');
+  // Removed pre-release flags are gone rather than hidden. Rejected at parse
+  // time, so the action never runs and none remains as an alias.
+  it('rejects removed install flags', async () => {
+    for (const flag of [
+      '--claude-md',
+      '--no-claude-md',
+      '--allow-free-verbs',
+      '--no-allow-free-verbs',
+    ]) {
+      const cap = captureIo();
+      expect(await main(['install', flag, '--json'], cap.io), flag).toBe(2);
+      expect(cap.stdout(), flag).toContain(`unknown option '${flag}'`);
+    }
   });
 
   it('bare invocation at a TTY: commander help on stderr, stdout empty (no envelope)', async () => {
@@ -373,22 +440,29 @@ describe('edit flag forwarding (the dispatcher mapping)', () => {
   });
 });
 
-// `outcome`'s batch selectors, read back through refusals that resolve before
-// any request: an uncollected `--search-id` would keep the LAST id and drop the
-// rest, and an `--all-open` that never reached the arg would exit 0 doing nothing.
-describe('outcome batch flags (the dispatcher mapping)', () => {
+// `outcome`'s one selector, read back through a refusal that resolves before any
+// request: an uncollected `--search-id` would keep the LAST id and drop the rest,
+// and a report with no id at all must name the flag rather than guess a search.
+describe('outcome selector (the dispatcher mapping)', () => {
   const ID = '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 
-  it('--all-open reaches the arg, and is refused at any status but regenerated', async () => {
+  it('refuses a report with no --search-id, naming the flag', async () => {
     const cap = captureIo();
-    const code = await main(['outcome', '--all-open', '--status', 'used', '--json'], cap.io);
+    const code = await main(['outcome', '--status', 'used', '--json'], cap.io);
     expect(code).toBe(2);
     const parsed = JSON.parse(cap.stdout());
     expect(parsed.command).toBe('outcome');
-    expect(parsed.error.message).toContain('--all-open');
+    expect(parsed.error.fix).toContain('--search-id');
   });
 
-  it('--search-id repeats rather than replacing, and refuses to mix with --all-open', async () => {
+  it('rejects --last, which no longer exists', async () => {
+    const cap = captureIo();
+    const code = await main(['outcome', '--last', '--status', 'used', '--json'], cap.io);
+    expect(code).toBe(2);
+    expect(cap.stdout() + cap.stderr()).toContain('--last');
+  });
+
+  it('--search-id repeats rather than replacing', async () => {
     const cap = captureIo();
     const code = await main(
       [
@@ -396,8 +470,7 @@ describe('outcome batch flags (the dispatcher mapping)', () => {
         '--search-id',
         ID,
         '--search-id',
-        ID,
-        '--all-open',
+        'not-a-uuid',
         '--status',
         'regenerated',
         '--json',
@@ -405,7 +478,7 @@ describe('outcome batch flags (the dispatcher mapping)', () => {
       cap.io,
     );
     expect(code).toBe(2);
-    expect(JSON.parse(cap.stdout()).error.message).toContain('not several');
+    expect(JSON.parse(cap.stdout()).error.message).toContain('not-a-uuid');
   });
 });
 
@@ -432,71 +505,107 @@ describe('publish --search-id collects (the dispatcher mapping)', () => {
 });
 
 /**
- * The `session` group. Dispatcher-level only: `session start` reaches a wallet,
- * so the cases here are the ones that resolve BEFORE it — the group exists, the
- * leaf exists, and a bad `--scope` is USAGE.
+ * The verbs decision 15 deleted, and the ones that replaced them. Dispatcher
+ * level only: `wallet send` reaches a wallet and `hooks list` reaches loop.db,
+ * so what is asserted here is what resolves BEFORE either — the command exists,
+ * or it does not.
  */
-describe('session command group', () => {
-  it('registers `session start` as a subcommand, not a bare verb', async () => {
+describe('the deleted verbs and their replacements', () => {
+  it.each(['push', 'state', 'session', 'send'])('`tenjin %s` is not a command', async (verb) => {
     const cap = captureIo();
-    expect(await main(['session', '--help'], cap.io)).toBe(0);
-    expect(cap.stdout()).toContain('start [options]');
-  });
-
-  it('a bare `tenjin session` is USAGE, never a silent mint', async () => {
-    const cap = captureIo();
-    expect(await main(['session'], cap.io)).toBe(2);
-    expect(JSON.parse(cap.stdout()).error.code).toBe('USAGE');
-  });
-
-  it('--scope read+write is refused as USAGE, before any wallet work', async () => {
-    const cap = captureIo();
-    const code = await main(['session', 'start', '--scope', 'read+write', '--json'], cap.io);
-    expect(code).toBe(2);
+    expect(await main([verb, '--json'], cap.io)).toBe(2);
     const parsed = JSON.parse(cap.stdout()) as { error: { code: string; message: string } };
     expect(parsed.error.code).toBe('USAGE');
-    expect(parsed.error.message).toContain('read+write');
+    expect(parsed.error.message).toContain(`unknown command '${verb}'`);
   });
 
-  it('the leaf takes trailing global flags like every other command', async () => {
+  it('`tenjin wallet send` is registered under the wallet group', async () => {
     const cap = captureIo();
-    // A bad --timeout is a dispatcher-level USAGE, which proves the leaf parsed
-    // the global flag rather than passing it through as an unknown option.
-    const code = await main(['session', 'start', '--timeout', 'abc'], cap.io);
-    expect(code).toBe(2);
-    expect(JSON.parse(cap.stdout()).error.code).toBe('USAGE');
+    expect(await main(['wallet', '--help'], cap.io)).toBe(0);
+    expect(cap.stdout()).toContain('send [options] <amount> <token> <to>');
+  });
+
+  it('`tenjin hooks` carries list, enable and disable', async () => {
+    const cap = captureIo();
+    expect(await main(['hooks', '--help'], cap.io)).toBe(0);
+    const help = cap.stdout();
+    expect(help).toContain('list');
+    expect(help).toContain('enable [options] <arm>');
+    expect(help).toContain('disable [options] <arm>');
+    // How to run it and how to switch an arm, with one example.
+    expect(help).toContain('$ tenjin hooks disable web-fetch');
+  });
+
+  // The arm -> event -> counts table is two thirds live state, so it ships as the
+  // command's OUTPUT and is never snapshotted into help, where it would rot.
+  it('leaves the arms table to `tenjin hooks` itself, not its help', async () => {
+    const cap = captureIo();
+    expect(await main(['hooks', '--help'], cap.io)).toBe(0);
+    const help = cap.stdout();
+    for (const column of ['ARM', 'STATE', 'FIRED', 'HIT']) expect(help).not.toContain(column);
+  });
+
+  it('`tenjin hooks disable` on an unknown arm is USAGE naming the seven', async () => {
+    const cap = captureIo();
+    expect(await main(['hooks', 'disable', 'nope', '--json'], cap.io)).toBe(2);
+    const parsed = JSON.parse(cap.stdout()) as { error: { code: string; fix?: string } };
+    expect(parsed.error.code).toBe('USAGE');
+    expect(parsed.error.fix).toContain('prompt, web-search, web-fetch, subagent, failure');
+  });
+
+  it('`tenjin grade` is a top-level verb carrying the four grading flags', async () => {
+    const cap = captureIo();
+    expect(await main(['grade', '--help'], cap.io)).toBe(0);
+    const help = cap.stdout();
+    for (const flag of ['--since', '--session', '--explain', '--label']) {
+      expect(help).toContain(flag);
+    }
   });
 });
 
 /**
- * The stored-finding source on `publish`, at the dispatcher.
- *
- * There is no `finding` COMMAND GROUP to reach the queue with: the id the
- * capture ask prints is an argument to the command the ask already names, so
- * what has to hold here is that the flag exists and that a wrong id fails the
- * way every other missing resource in this CLI does — before any wallet touch.
+ * ONE COMMAND, ONE SHAPE. `publish` takes a document and nothing else: the
+ * source flags and the card-authoring flags are gone, and a caller reaching for
+ * one gets commander's unknown-option refusal rather than a silent drop.
  */
-describe('publish --finding', () => {
-  it('is registered on publish rather than as a command group of its own', async () => {
+describe('publish takes a document and nothing else', () => {
+  it('carries no source, dry-run or card-authoring flags', async () => {
     const help = captureIo();
     expect(await main(['publish', '--help'], help.io)).toBe(0);
-    expect(help.stdout()).toContain('--finding <id>');
-    expect(help.stdout()).toContain('--dry-run');
-
-    const gone = captureIo();
-    expect(await main(['finding', 'list'], gone.io)).toBe(2);
+    const text = help.stdout();
+    for (const gone of [
+      '--finding',
+      '--dry-run',
+      '--discard',
+      '--question',
+      '--task',
+      '--scope',
+      '--exclusions',
+      '--applies-to',
+      '--as-of',
+      '--valid-until',
+      '--artifact-type',
+      '--temporal-mode',
+      '--provenance',
+      '--methodology',
+    ]) {
+      expect(text, gone).not.toContain(gone);
+    }
+    // The flags that stay.
+    for (const kept of ['--agent <id>', '--search-id <id>', '--draft', '--key <kind=value>']) {
+      expect(text, kept).toContain(kept);
+    }
   });
 
-  it('reports an unknown id as not found', async () => {
-    const cap = captureIo();
-    expect(await main(['publish', '--finding', 'no-such-id', '--json'], cap.io)).toBe(1);
-    expect(JSON.parse(cap.stdout()).error.code).toBe('RESOURCE_NOT_FOUND');
-  });
-
-  it('refuses a file and an id together rather than picking one', async () => {
-    const cap = captureIo();
-    expect(await main(['publish', 'post.md', '--finding', 'abc', '--json'], cap.io)).toBe(2);
-    expect(JSON.parse(cap.stdout()).error.code).toBe('USAGE');
+  it('refuses a removed flag rather than dropping it', async () => {
+    for (const argv of [
+      ['publish', 'post.md', '--finding', 'abc', '--json'],
+      ['publish', 'post.md', '--dry-run', '--json'],
+      ['publish', 'post.md', '--scope', 'x', '--json'],
+    ]) {
+      const cap = captureIo();
+      expect(await main(argv, cap.io), argv.join(' ')).toBe(2);
+    }
   });
 });
 
@@ -504,21 +613,20 @@ describe('stdin command routing', () => {
   const POST_ID = '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
   const markdown = '# Stdin probe\n\nA plain body from the pipe.\n';
 
-  it('routes `publish -` and bare non-TTY publish through the same dry-run pipeline', async () => {
+  // Both stdin forms reach the same pipeline, and reach it far enough to be
+  // refused for the document's shape: the card gate runs above every write, so
+  // a piped body with no card never touches a wallet or a shelf.
+  it('routes `publish -` and bare non-TTY publish through the same pipeline', async () => {
     for (const argv of [
-      ['publish', '-', '--dry-run', '--json'],
-      ['publish', '--dry-run', '--json'],
+      ['publish', '-', '--json'],
+      ['publish', '--json'],
     ]) {
       const cap = captureIo(false, { stream: Readable.from([markdown]), isTTY: false });
-      expect(await main(argv, cap.io)).toBe(0);
+      expect(await main(argv, cap.io), argv.join(' ')).toBe(2);
       const parsed = JSON.parse(cap.stdout());
       expect(parsed.command).toBe('publish');
-      expect(parsed.data).toMatchObject({
-        dryRun: true,
-        published: false,
-        title: 'Stdin probe',
-        body: markdown,
-      });
+      expect(parsed.error.code).toBe('USAGE');
+      expect(parsed.error.message).toContain('answer card');
     }
   });
 
@@ -743,140 +851,5 @@ describe('the delete verb is registered', () => {
     const code = await main(['edit', '--help'], cap.io);
     expect(code).toBe(0);
     expect(cap.stdout()).toContain('--status <status>');
-  });
-});
-
-/**
- * THE ONE LINE THAT JOINS THE THREE HALVES (tenjin-agent#249).
- *
- * `--cwd` is proved three ways elsewhere and nowhere together: the hook side
- * against a stub CLI (push-scripts.test.ts), the receive side below the flag by
- * passing `deps.cwd` straight into `runSync` (sync.test.ts), and the flag's own
- * parsing by its help text and its exit codes above. The line in cli.ts that
- * turns `--cwd <path>` into `deps.cwd` was the one no test executed, so the
- * end-to-end claim rested on three halves that never met.
- *
- * This runs the real dispatcher against a real store, a real keystore and a
- * stubbed shelf, and asserts the thing the whole change is about: the coarse
- * key on the wire is salted with the SLUG of the origin in the `--cwd`
- * checkout's `.git/config`, which is only true if the flag reached `runSync`,
- * the rows were found under `projectId` of that string, and the salt was read
- * from that directory rather than from the process's own.
- */
-describe('sync --cwd, end to end through the dispatcher', () => {
-  const SHELF = 'https://team.example';
-  const POST = {
-    id: '11111111-1111-4111-8111-111111111111',
-    slug: 'fix-pnpm-test',
-    title: 'Fix: pnpm — ENOENT',
-    status: 'published',
-    price: '0',
-    url: `${SHELF}/a/team/fix-pnpm-test`,
-    tags: [],
-  };
-
-  let dataDir: string;
-  let repo: string;
-  const prev: Record<string, string | undefined> = {};
-
-  beforeEach(async () => {
-    dataDir = await mkdtemp(join(sandbox, 'e2e-sync-'));
-    repo = join(dataDir, 'checkout');
-    for (const key of ['TENJIN_DATA_DIR', 'TENJIN_WALLET_PASSPHRASE']) prev[key] = process.env[key];
-    process.env.TENJIN_DATA_DIR = dataDir;
-    process.env.TENJIN_WALLET_PASSPHRASE = 'correct-horse-battery-staple-249';
-    // A real checkout with a real origin, in the two shapes git writes.
-    await mkdir(join(repo, '.git'), { recursive: true });
-    await writeFile(
-      join(repo, '.git', 'config'),
-      '[core]\n\tbare = false\n[remote "origin"]\n\turl = git@github.com:acme/api.git\n',
-    );
-  });
-
-  afterEach(async () => {
-    vi.unstubAllGlobals();
-    for (const [key, value] of Object.entries(prev)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-    await rm(dataDir, { recursive: true, force: true });
-  });
-
-  it('salts the published coarse key with the --cwd checkout’s own origin', async () => {
-    const { openStore, projectId, teamCoarseKey, STORE_SQL } = await import('./lib/state-store');
-
-    // A wallet the dispatcher can actually sign with, created through the CLI.
-    expect(await main(['wallet', 'create'], captureIo().io)).toBe(0);
-    await writeFile(
-      join(dataDir, 'config.json'),
-      JSON.stringify({
-        baseUrl: SHELF,
-        publicShelfUrl: 'https://public.example',
-        shelfBypassSecret: 'shelf-secret-abc123',
-      }),
-    );
-
-    // One closed, code-scoped pairing, scoped by `projectId` of the cwd STRING
-    // — the same hash the failure arm would have written it under.
-    const store = await openStore(dataDir);
-    if (store === null) throw new Error('no store');
-    const at = Date.now() - 60_000;
-    store.run(STORE_SQL.insertPairing, [
-      'pair-e2e-249',
-      at,
-      'sess-e2e',
-      projectId(repo),
-      'machine-e2e',
-      'sig_v1',
-      'fine-hash-abc',
-      'coarse-hash-def',
-      'pnpm',
-      'pnpm test',
-      'Error: ENOENT: no such file or directory',
-      JSON.stringify(['widget.ts']),
-      JSON.stringify({}),
-      'code',
-    ]);
-    store.run(
-      `UPDATE pairings SET status = 'unverified', closes = 1, closed_at = ?, fix_cmd = ?, fix_files = ?
-         WHERE uid = 'pair-e2e-249'`,
-      [at + 1000, 'pnpm test', JSON.stringify(['widget.ts'])],
-    );
-    store.close();
-
-    const sent: Array<{ method?: string; url: string; body?: Record<string, unknown> }> = [];
-    vi.stubGlobal('fetch', async (url: string | URL, init?: RequestInit) => {
-      sent.push({
-        method: init?.method,
-        url: String(url),
-        body: typeof init?.body === 'string' ? JSON.parse(init.body) : undefined,
-      });
-      return new Response(JSON.stringify(POST), {
-        status: init?.method === 'PUT' ? 200 : 201,
-        headers: { 'content-type': 'application/json' },
-      });
-    });
-
-    const cap = captureIo();
-    expect(await main(['sync', '--cwd', repo], cap.io)).toBe(0);
-
-    const post = sent.find((r) => r.method === 'POST' && r.url === `${SHELF}/api/posts`);
-    expect(post).toBeDefined();
-    const keys = post!.body!.keys as Array<{ kind: string; key: string }>;
-    // THE SALT CAME FROM `--cwd`. `github.com/acme/api` is the reduction of the
-    // origin in THAT directory's `.git/config`; the process's own working
-    // directory is this repo's checkout and would salt differently.
-    expect(keys).toContainEqual({
-      kind: 'fingerprint',
-      key: 'sig_v1c:' + teamCoarseKey('coarse-hash-def', 'github.com/acme/api'),
-      verified: false,
-    });
-    // And the fine key rode along unsalted, as it always does.
-    expect(keys).toContainEqual({
-      kind: 'fingerprint',
-      key: 'sig_v1:fine-hash-abc',
-      verified: false,
-    });
-    expect(JSON.parse(cap.stdout()).data).toMatchObject({ synced: 1 });
   });
 });

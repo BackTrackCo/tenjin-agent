@@ -4,7 +4,6 @@
   "mcpName": "blog.tenjin/tenjin",
   "type": "module",
   "description": "Tenjin agent CLI for the x402 knowledge marketplace.",
-  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/BackTrackCo/tenjin-agent.git"

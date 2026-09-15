@@ -1,10 +1,9 @@
 {
-  "session_id": "6d2f0c8a-9b41-4e7a-8c3d-1f5e2a7b9c04",
-  "transcript_path": "/Users/dev/.claude/projects/-Users-dev-proj/6d2f0c8a-9b41-4e7a-8c3d-1f5e2a7b9c04.jsonl",
+  "session_id": "82de9582-76ea-4429-8ba4-b564359ea22e",
+  "transcript_path": "/Users/dev/.claude/projects/-Users-dev-proj/82de9582-76ea-4429-8ba4-b564359ea22e.jsonl",
   "cwd": "/Users/dev/proj",
-  "permission_mode": "default",
-  "hook_event_name": "SubagentStart",
-  "prompt_id": "01J9X4M2K7Q8R3T5V6W7Y8Z9A0",
-  "agent_id": "a7c31e9f",
-  "agent_type": "Explore"
+  "prompt_id": "47911754-8aa4-46b6-b69e-f9b384ab39bf",
+  "agent_id": "a59db2769b6f0fcd1",
+  "agent_type": "Explore",
+  "hook_event_name": "SubagentStart"
 }

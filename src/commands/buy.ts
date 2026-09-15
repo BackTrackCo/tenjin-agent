@@ -2,7 +2,7 @@ import { CliError } from '../lib/errors';
 import { parseUsdToAtomic } from '../lib/money';
 import { resolveContextSettings } from '../lib/settings';
 import { resolveResourceRef } from '../lib/resource-ref';
-import { findSearchForResource } from '../lib/state-store';
+import { findSearchForResource } from '../lib/searches';
 import { fetchRead, type Preview } from '../lib/read-client';
 import type { ShelfBypass } from '../lib/http';
 import { buildSiwxHeader } from '../lib/siwx';

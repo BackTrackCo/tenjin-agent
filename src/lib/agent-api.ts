@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { Trigger } from '../hooks/types';
 import { CliError } from './errors';
 import { httpRequest, type HttpResult, type ShelfBypass } from './http';
 import { ATOMIC_RE, UUID_RE } from './ids';
@@ -44,6 +45,11 @@ export interface SearchInput {
   maxPrice?: string;
   appliesTo?: Record<string, string[]>;
   limit?: number;
+  /** Which arm asked; omitted is `cli`, a direct `tenjin search`. */
+  trigger?: SearchRequestBody['trigger'];
+  /** What is left of the fire's deadline, so the shelf can spend its embedding
+   *  budget knowing when the answer stops being wanted. */
+  budgetMs?: number;
 }
 
 /** The nested v3 filter object. Freshness, price and applicability are no longer
@@ -72,17 +78,24 @@ export interface SearchRequestBody {
   limit: number;
   /** Which client arm fired the search. A direct `tenjin search` (and the MCP
    *  tool over it) is `cli`, which is also what the server records when the
-   *  field is absent; the hook arms send their own names from lib/hook-scripts.ts
-   *  askTenjin. Telemetry for the per-trigger use rates (`GET
-   *  /api/lookups/stats`); it never changes the result. */
-  trigger: 'cli';
+   *  field is absent; the loop's lookup arms send their own names. Telemetry for
+   *  the per-trigger use rates (`GET /api/lookups/stats`); it never changes the
+   *  result. */
+  trigger: 'cli' | Trigger;
+  /** Milliseconds the caller will still read an answer for. A server that does
+   *  not know the field echoes it as an unknown-key warning and answers as
+   *  before, which is why it ships ahead of the server half. */
+  budget_ms?: number;
 }
+
+/** The server's query bound (`SEARCH_QUERY_MAX_CHARS`), the same for every trigger. */
+export const QUERY_MAX = 8000;
 
 export function buildSearchRequest(input: SearchInput): SearchRequestBody {
   const question = input.question.trim();
-  if (question.length === 0 || question.length > 512) {
-    throw new CliError('USAGE', 'question must be 1 to 512 characters', {
-      fix: 'Pass a non-empty question under 512 characters.',
+  if (question.length === 0 || question.length > QUERY_MAX) {
+    throw new CliError('USAGE', `question must be 1 to ${QUERY_MAX} characters`, {
+      fix: `Pass a non-empty question under ${QUERY_MAX} characters.`,
     });
   }
   if (input.freshWithin !== undefined) {
@@ -151,7 +164,8 @@ export function buildSearchRequest(input: SearchInput): SearchRequestBody {
     // invites a server to read meaning into it.
     ...(Object.keys(filters).length > 0 ? { filters } : {}),
     limit,
-    trigger: 'cli',
+    trigger: input.trigger ?? 'cli',
+    ...(input.budgetMs !== undefined ? { budget_ms: input.budgetMs } : {}),
   };
 }
 
@@ -175,6 +189,18 @@ export const searchCandidateSchema = z
     matchReasons: z.array(z.string()),
     estimatedTokens: z.number(),
     creator: z.object({ handle: z.string() }).passthrough(),
+    /** The shelf's own verdict on this row: the meaning leg was medium or better
+     *  AND the word leg corroborated it. The rule lives on the server so one
+     *  definition serves every client; absent (an older deployment, or a
+     *  `lexical-v1` calibration) reads as not strong, never as unknown. */
+    strong: z.boolean().optional(),
+    /** The free row's inline body, WHOLE: the shelf sends the whole free piece
+     *  and does not cut it, because a long body costs the reading agent's
+     *  context and the shelf cannot see that budget. The cut is the client's,
+     *  in `hooks/deliver.ts`. Declared for TYPING only — the candidate is
+     *  `.passthrough()`, so an undeclared `body` would ride through untyped —
+     *  and read by the loop's delivery, never by `tenjin search`. */
+    body: z.object({ text: z.string() }).optional(),
   })
   .passthrough();
 
@@ -224,6 +250,9 @@ export interface AgentApiOptions {
    *  header only when the request URL is on that origin, so passing it while
    *  searching the public shelf sends nothing. */
   bypass?: ShelfBypass;
+  /** The caller's abort, combined with `timeoutMs` by the transport. A loop leg
+   *  hands in the fire's signal so a harness that walked away ends the request. */
+  signal?: AbortSignal;
 }
 
 /** Turn a non-2xx / transport HttpResult into the CLI error contract. */
@@ -279,6 +308,7 @@ export async function postSearch(
     ...(opts.bypass !== undefined ? { bypass: opts.bypass } : {}),
     jsonBody: body,
     fetchImpl: opts.fetchImpl,
+    ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
   });
   if (!res.ok) throw apiFailure(url, res);
   if (res.status === 429) throw rateLimitError(url, (n) => res.header(n));
@@ -470,7 +500,7 @@ export async function postOutcomes(
 ): Promise<{ accepted: number }> {
   if (!SEARCH_ID_RE.test(searchId)) {
     throw new CliError('USAGE', `Invalid search id: ${JSON.stringify(searchId)}`, {
-      fix: 'Pass the searchId from a prior search (or use --last).',
+      fix: 'Pass the searchId from a prior search; `tenjin search` prints it.',
     });
   }
   if (items.length === 0 || items.length > 10) {
@@ -505,134 +535,6 @@ export async function postOutcomes(
       ? Number((res.json as { accepted: unknown }).accepted)
       : items.length;
   return { accepted: Number.isFinite(accepted) ? accepted : items.length };
-}
-
-/**
- * One arm's demand and reuse over a window, as the shelf sees it.
- *
- * The counts a machine could sum from its own outcome reports, summed across
- * every caller — which is the whole point: `tenjin push grade` says what THIS
- * machine's injections did, and this says whether the arm earns its keep at all.
- * Keyless and aggregate-only on the server side (no query text, no post ids), so
- * it needs nothing but the base URL and, on a team shelf, the bypass the
- * transport attaches by origin.
- */
-export interface TriggerStats {
-  trigger: string;
-  /** Decision-view searches this arm fired in the window, MISS and CANDIDATES. */
-  lookups: number;
-  /** Of those, how many surfaced at least one candidate. */
-  hits: number;
-  /** Candidate rows shown across those lookups. */
-  candidates: number;
-  /** Lookups with at least one used / partially_used outcome. */
-  used: number;
-  /** Lookups with at least one rejected / regenerated outcome. */
-  wrong: number;
-  /** used / hits, or null with no hits. */
-  useRate: number | null;
-}
-
-export interface LookupStats {
-  windowDays: number;
-  triggers: TriggerStats[];
-  /**
-   * The response's `Age` header (RFC 9111 §5.1), when the server sent one — how
-   * long ago the underlying answer was computed, not how long ago this CLI
-   * asked. `GET /api/lookups/stats` is cached for several minutes server-side
-   * (tenjin-agent#252), so a `push grade` run and the next `push status` can
-   * read the same stale count and look, wrongly, like grading never reached the
-   * shelf. Surfacing the header is what tells the two apart. Undefined when the
-   * header is absent (an uncached hit, or a deployment that never sends it) or
-   * unparseable — never coerced to 0, which would claim a freshness this CLI
-   * was never told.
-   */
-  ageSeconds?: number;
-}
-
-/**
- * Unknown keys are stripped, like every other response this module parses: the
- * server may grow a column before this CLI reads it.
- *
- * `trigger` IS BOUNDED, unlike the rest of the strings this file accepts,
- * because it is the one field of this response that gets printed: `push status`
- * draws a line per trigger, and an unconstrained `z.string()` lets a shelf paint
- * a megabyte of anything into the operator's terminal. A pattern rather than the
- * arm names, so a shelf that adds an arm still renders instead of failing the
- * whole block with a contract mismatch. The printer sanitizes it as well —
- * a length bound is not an escape-sequence bound.
- */
-const TRIGGER_RE = /^[a-z]{1,16}$/;
-
-/** Sanity cap on an `Age` response header, in seconds (~115 days). Past this,
- *  the value is treated the same as unparseable rather than rendered verbatim
- *  (PR 277 round-2 review, nit 3). */
-const MAX_AGE_SECONDS = 1e7;
-
-const lookupStatsSchema = z.object({
-  windowDays: z.number().int().positive(),
-  triggers: z.array(
-    z.object({
-      trigger: z.string().regex(TRIGGER_RE),
-      lookups: z.number().int().nonnegative(),
-      hits: z.number().int().nonnegative(),
-      candidates: z.number().int().nonnegative(),
-      used: z.number().int().nonnegative(),
-      wrong: z.number().int().nonnegative(),
-      useRate: z.number().nullable(),
-    }),
-  ),
-});
-
-/**
- * GET /api/lookups/stats?days=N.
- *
- * NO RETRY, and every failure throws: this is one optional block under `push
- * status`, and the caller renders "unavailable" rather than failing the command
- * or making an operator wait out a backoff for a number they were reading in
- * passing.
- */
-export async function getLookupStats(days: number, opts: AgentApiOptions): Promise<LookupStats> {
-  const url = `${trimSlash(opts.baseUrl)}/api/lookups/stats?days=${encodeURIComponent(String(days))}`;
-  const res = await httpRequest(url, {
-    method: 'GET',
-    timeoutMs: opts.timeoutMs,
-    ...(opts.bypass !== undefined ? { bypass: opts.bypass } : {}),
-    fetchImpl: opts.fetchImpl,
-  });
-  if (!res.ok) throw apiFailure(url, res);
-  if (res.status === 429) throw rateLimitError(url, (n) => res.header(n));
-  if (res.status !== 200) {
-    throw new CliError(
-      'API_UNREACHABLE',
-      serverErrorMessage(res.json) ?? `Lookup stats failed (${res.status})`,
-      { fix: 'Check the base URL, then retry.', details: res.json },
-    );
-  }
-  const parsed = lookupStatsSchema.safeParse(res.json);
-  if (!parsed.success) {
-    throw new CliError('CONTRACT_MISMATCH', `${url} answered a shape this CLI cannot read.`, {
-      fix: 'Update tenjin-cli, or point the base URL at a matching deployment.',
-      details: parsed.error.issues,
-    });
-  }
-  // `Number(...)` alone accepts what `Age` never legitimately carries: `''`
-  // and whitespace coerce to 0 (a false "fresh"), hex/leading-`+`/exponent
-  // forms all parse, and a fraction survives. RFC 9111 `Age` is delta-seconds,
-  // a plain non-negative integer, so requiring that shape BEFORE the numeric
-  // conversion is what keeps this "undefined when absent or unparseable,
-  // never coerced to a freshness this CLI was never told" (PR 277 review).
-  // The digit-only shape has no length cap of its own, so a proxy sending an
-  // absurd `Age` (`"99999999999999999999999999"`) still parsed and rendered
-  // as "~1e+26s ago" (PR 277 round-2 review, nit 3 on agent-api.ts:621);
-  // MAX_AGE_SECONDS rejects anything past ~115 days, well past any real cache.
-  const rawAge = res.header('age');
-  const parsedAge = rawAge !== undefined && /^\d+$/.test(rawAge) ? Number(rawAge) : NaN;
-  const age = parsedAge <= MAX_AGE_SECONDS ? parsedAge : NaN;
-  return {
-    ...parsed.data,
-    ...(Number.isFinite(age) ? { ageSeconds: age } : {}),
-  };
 }
 
 /**
@@ -683,12 +585,10 @@ export interface PostMetadata {
 
 /**
  * GET /api/posts/<id>/public — the public id lookup for a PUBLISHED post
- * (tenjin PR #803, sibling of the tenjin-agent#252 local-bookkeeping removal
- * in PR 277 round-2 review: `state-store.ts`'s `findPairingCandidate` used to
- * synthesize `title: ''` / `price: '0'` for a link missing them, which is
- * exactly the "invented value" this function exists not to produce). A
- * sibling route to the owner-scoped SIWX `GET /api/posts/<id>`, not a
- * relaxation of it.
+ * (tenjin PR #803). A sibling route to the owner-scoped SIWX
+ * `GET /api/posts/<id>`, not a relaxation of it. It answers with what the
+ * server holds or with nothing: a synthesized `title: ''` / `price: '0'` is
+ * exactly the invented value this function exists not to produce.
  *
  * Every failure collapses to `null`: a 404 (draft, unlisted, unknown id, a
  * malformed id, or a deployment that predates this route — all

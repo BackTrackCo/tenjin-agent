@@ -1,0 +1,343 @@
+import { describe, expect, it } from 'vitest';
+import {
+  allowedHeads,
+  commandHeads,
+  errnoOf,
+  errorLine,
+  normalizeForSig,
+  sigV1,
+  topFrameFile,
+} from './signature';
+
+/**
+ * The failure arm's pure half. What matters: which commands the arm fires
+ * behind, which line of a runner's output is the failure, and that the keys stay
+ * the bytes the team shelf already holds.
+ */
+
+const HEX16 = /^[0-9a-f]{16}$/;
+
+describe('the heads allowlist', () => {
+  it.each([
+    ['cd /x && pnpm test', ['pnpm']],
+    ['pnpm test && echo done', ['pnpm']],
+    ['sudo -u builder pnpm test', ['pnpm']],
+    ['FOO=1 npx tsc --noEmit', ['tsc']],
+    ['./node_modules/.bin/vitest run', ['vitest']],
+    ['python3 -m pytest tests/', ['pytest']],
+    ['node scripts/build.js', ['node']],
+    ['pnpm exec vitest run x', ['vitest']],
+  ])('fires behind %s', (command, heads) => {
+    expect(allowedHeads(command)).toEqual(heads);
+  });
+
+  it.each([
+    // 14 of 14 historical false positives: source that MENTIONS an errno,
+    // read through a pipe.
+    'git show HEAD:src/x.ts | grep ENOENT',
+    'git log -p | sed -n 1,20p',
+    'npm ls zod',
+    'node -e "throw new Error()"',
+    'python3 -c "import x"',
+    'sudo grep pnpm src',
+    'echo vitest',
+  ])('stays out of %s', (command) => {
+    expect(allowedHeads(command)).toEqual([]);
+  });
+
+  it('reads the program each segment runs and its first argument', () => {
+    expect(commandHeads('timeout 30s pnpm build; go test ./...')).toEqual([
+      { head: 'pnpm', sub: 'build' },
+      { head: 'go', sub: 'test' },
+    ]);
+  });
+});
+
+describe('the error line', () => {
+  const VITEST = [
+    ' FAIL  src/date.test.ts > formatDate > handles null',
+    'AssertionError: expected undefined to be null',
+    '    at Object.<anonymous> (src/date.test.ts:12:5)',
+    '',
+    ' Test Files  1 failed | 3 passed (4)',
+    '      Tests  2 failed | 5 passed (7)',
+    '',
+  ].join('\n');
+  const JEST = [
+    ' FAIL  src/date.test.js',
+    '  ● formatDate › handles null',
+    '',
+    '    expect(received).toBe(expected)',
+    '    AssertionError: expected undefined to be null',
+    '',
+    'Test Suites: 1 failed, 3 passed, 4 total',
+    'Tests:       1 failed, 5 passed, 6 total',
+    '',
+  ].join('\n');
+  const PYTEST = [
+    '=================================== FAILURES ===================================',
+    'E       AssertionError: assert 1 == 2',
+    '',
+    '=========================== short test summary info ============================',
+    'FAILED tests/test_date.py::TestDate::test_handles_null - AssertionError: assert 1 == 2',
+    '3 failed, 10 passed in 0.42s',
+    '',
+  ].join('\n');
+  const CARGO = [
+    'error[E0308]: mismatched types',
+    ' --> src/main.rs:4:5',
+    '',
+    'error: could not compile `demo` due to 2 previous errors',
+    '',
+  ].join('\n');
+  const GO = [
+    '--- FAIL: TestFormatDate (0.00s)',
+    '    date_test.go:14: expected 1, got 2',
+    'FAIL',
+    'FAIL\tgithub.com/acme/api/date\t0.021s',
+    '',
+  ].join('\n');
+  const TSC = [
+    "src/app.ts(12,3): error TS2304: Cannot find name 'foo'.",
+    '',
+    'Found 3 errors in 2 files.',
+    '',
+  ].join('\n');
+  const TSC_PRESTEP = [
+    '> api@1.0.0 test',
+    '> tsc --noEmit && vitest run',
+    '',
+    "src/app.ts(42,7): error TS2345: argument of type 'string' is not assignable.",
+    '',
+    'Found 2 errors in 1 file.',
+    '',
+  ].join('\n');
+
+  it.each([
+    ['vitest', VITEST, 'AssertionError: expected undefined to be null'],
+    ['jest', JEST, 'AssertionError: expected undefined to be null'],
+    [
+      'pytest',
+      PYTEST,
+      'FAILED tests/test_date.py::TestDate::test_handles_null - AssertionError: assert 1 == 2',
+    ],
+    // rustc's `could not compile … due to N previous errors` is a totals row
+    // wearing an error class.
+    ['cargo', CARGO, 'error[E0308]: mismatched types'],
+    ['go', GO, '--- FAIL: TestFormatDate (0.00s)'],
+    ['tsc', TSC, "src/app.ts(12,3): error TS2304: Cannot find name 'foo'."],
+    [
+      'a tsc pre-step inside pnpm test',
+      TSC_PRESTEP,
+      "src/app.ts(42,7): error TS2345: argument of type 'string' is not assignable.",
+    ],
+  ])('picks the specific line over the totals row for %s', (_name, out, want) => {
+    expect(errorLine(out)?.line).toBe(want);
+  });
+
+  it('yields nothing from a totals-only output: a key on "2 failed" is every repo on earth', () => {
+    const totals = [
+      ' Test Files  1 failed | 3 passed (4)',
+      '      Tests  2 failed | 5 passed (7)',
+      '',
+    ];
+    expect(errorLine(totals.join('\n'))).toBeNull();
+  });
+
+  // The arm joins stdout, stderr, `error` and `text` with a newline apiece
+  // (`failureText`), so the single blank vitest prints before its summary
+  // arrives as two — and two blanks are a block boundary, which left the
+  // totals block holding nothing but totals.
+  const ENOENT_LINE = "Error: ENOENT: no such file or directory, open '/repo/fixtures/a.json'";
+  const spliced = (blanks: number): string =>
+    [
+      ' FAIL  src/thing.test.ts > loads config',
+      ENOENT_LINE,
+      '    at readFileSync (node:fs:1234:5)',
+      ...Array.from({ length: blanks }, () => ''),
+      ' Test Files  1 failed (1)',
+      '      Tests  1 failed (1)',
+      '',
+    ].join('\n');
+  const scrollback = Array.from({ length: 200 }, (_, n) => `  transform src/mod${n}.ts (ok)`);
+
+  it.each([0, 1, 2, 3, 4])(
+    'reaches the run own failure block across %i blank lines above the totals',
+    (blanks) => {
+      const found = errorLine(spliced(blanks));
+      expect(found?.line).toBe(ENOENT_LINE);
+      // The width of the gap is a splice artifact, so it must not reach the
+      // key: every width keys the same bytes, and the same bytes the
+      // one-blank output already keyed before this hop existed.
+      expect(sigV1(found?.line ?? '', found?.block ?? '')?.key).toBe('609f799adea79f63');
+    },
+  );
+
+  it('gives up past the gap: five blank lines is a different screenful', () => {
+    expect(errorLine(spliced(5))).toBeNull();
+  });
+
+  it.each([
+    [
+      'a lifecycle banner above',
+      [
+        '> api@1.0.0 test',
+        '> vitest run',
+        '',
+        '',
+        ' Test Files  1 failed (1)',
+        '      Tests  1 failed (1)',
+        '',
+      ],
+    ],
+    [
+      'an unrelated error 200 lines up',
+      [
+        "Error: EACCES: permission denied, open '/etc/hosts'",
+        '    at open (node:fs:9:9)',
+        ...scrollback,
+        '',
+        '',
+        ' Test Files  1 failed (1)',
+        '      Tests  1 failed (1)',
+        '',
+      ],
+    ],
+    [
+      'an earlier run failure block 200 lines up',
+      [
+        ' FAIL  src/old.test.ts > old',
+        "Error: ECONNREFUSED: connect refused, open '/x/y.json'",
+        '',
+        '',
+        ...scrollback,
+        '',
+        '',
+        ' Test Files  1 failed (1)',
+        '      Tests  1 failed (1)',
+        '',
+      ],
+    ],
+    [
+      'an earlier run failure block across a wide blank gap',
+      [
+        ' FAIL  src/old.test.ts > old',
+        "Error: ECONNREFUSED: connect refused, open '/x/y.json'",
+        ...Array.from({ length: 30 }, () => ''),
+        ' Test Files  1 failed (1)',
+        '      Tests  1 failed (1)',
+        '',
+      ],
+    ],
+  ])('still yields nothing when the totals block is all there is: %s', (_name, out) => {
+    expect(errorLine(out.join('\n'))).toBeNull();
+  });
+
+  it('anchors the block to the failure, so a frame from another failure cannot key it', () => {
+    const two = [
+      ' FAIL  src/a.test.ts > one',
+      'TypeError: x is not a function',
+      '    at Object.<anonymous> (src/a.test.ts:3:1)',
+      '',
+      ' FAIL  src/b.test.ts > two',
+      'AssertionError: expected 1 to be 2',
+      '',
+      ' Test Files  2 failed (2)',
+      '',
+    ].join('\n');
+    const found = errorLine(two);
+    expect(found?.line).toBe('AssertionError: expected 1 to be 2');
+    expect(found?.block).not.toContain('a.test.ts');
+    expect(sigV1(found?.line ?? '', found?.block ?? '')).toBeNull();
+  });
+
+  it('is silent on output with no marker at all', () => {
+    expect(errorLine('all 12 tests passed\n')).toBeNull();
+  });
+});
+
+describe('sig_v1', () => {
+  const ENOENT = "Error: ENOENT: no such file or directory, open 'drizzle.config.ts'";
+  const ENOENT_BLOCK = ENOENT + '\n    at run (src/migrate.ts:12:3)\n';
+
+  it('is one 16-hex key, and the frame is part of it', () => {
+    const sig = sigV1(ENOENT, ENOENT_BLOCK);
+    expect(sig?.key).toMatch(HEX16);
+    // The same errno raised from a sibling file is a different key: there is no
+    // lane that drops the frame any more.
+    const sibling = sigV1(ENOENT, ENOENT + '\n    at run (src/seed.ts:4:1)\n');
+    expect(sibling?.key).not.toBe(sig?.key);
+  });
+
+  it('keys the same bytes on two machines: paths, digits, hosts and hex normalized', () => {
+    const a = sigV1(
+      "Error: ENOENT: no such file, open '/Users/ali/proj/drizzle.config.ts' (line 12)",
+      '    at run (/Users/ali/proj/src/migrate.ts:12:3)',
+    );
+    const b = sigV1(
+      "Error: ENOENT: no such file, open '/home/bo/work/drizzle.config.ts' (line 40)",
+      '    at run (/home/bo/work/src/migrate.ts:99:1)',
+    );
+    expect(a?.key).toBe(b?.key);
+  });
+
+  it('is below the floor with neither an errno nor a frame', () => {
+    expect(sigV1('Tests  2 failed | 5 passed (7)', 'Tests  2 failed | 5 passed (7)')).toBeNull();
+    // The word ERROR is not an errno: the whitelist, not a shape.
+    expect(sigV1('ERROR: 2 tests failed', 'ERROR: 2 tests failed')).toBeNull();
+  });
+
+  it('keys a bundler-generated frame the same on two builds', () => {
+    // The chunk name carries the build's own content hash, so the raw frame
+    // made every rebuild of one failure a key the shelf had never been asked.
+    const first = sigV1(
+      'TypeError: e.map is not a function',
+      'TypeError: e.map is not a function\n    at render (/app/dist/assets/chunk-4f2a91.js:1:2048)',
+    );
+    const second = sigV1(
+      'TypeError: e.map is not a function',
+      'TypeError: e.map is not a function\n    at render (/app/dist/assets/chunk-9b7c03.js:1:5100)',
+    );
+    expect(first?.key).toMatch(HEX16);
+    expect(first?.key).toBe(second?.key);
+    // Reduced, not dropped: a hand-written file still separates two failures
+    // that print the same message.
+    expect(
+      sigV1('TypeError: e.map is not a function', '    at render (src/list.tsx:9:1)')?.key,
+    ).not.toBe(first?.key);
+  });
+
+  it('clears the floor on the frame alone, with no errno', () => {
+    const sig = sigV1(
+      'AssertionError: expected 1 to be 2',
+      'AssertionError: expected 1 to be 2\n    at src/a.test.ts:3:1',
+    );
+    expect(sig?.key).toMatch(HEX16);
+  });
+
+  it.each([
+    ['ERR_PNPM_OUTDATED_LOCKFILE  Cannot install', 'ERR_PNPM_OUTDATED_LOCKFILE'],
+    ["error TS2345: Argument of type 'string'", 'TS2345'],
+    ['error[E0308]: mismatched types', 'E0308'],
+    ['listen EADDRINUSE: address already in use', 'EADDRINUSE'],
+    ['ESLINT found 2 EXPECTED problems', ''],
+  ])('reads the errno off %s', (line, errno) => {
+    expect(errnoOf(line)).toBe(errno);
+  });
+
+  it.each([
+    ['    at run (/a/b/file.ts:12:3)', 'file.ts'],
+    ['  File "/a/b.py", line 3', 'b.py'],
+    ['src/x.ts(12,3): error TS2304', 'x.ts'],
+    [' --> src/main.rs:4:5', 'main.rs'],
+    ['no frame here', ''],
+  ])('reduces the top frame of %s to a basename', (text, frame) => {
+    expect(topFrameFile(text)).toBe(frame);
+  });
+
+  it('normalizes env-var names before digits, so ERR_MODULE_NOT_FOUND is one token', () => {
+    expect(normalizeForSig('ERR_MODULE_NOT_FOUND at /a/b/c.js:12 on host.acme.io')).toBe(
+      'e at @/:n on h',
+    );
+  });
+});

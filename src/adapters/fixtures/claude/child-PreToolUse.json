@@ -1,0 +1,19 @@
+{
+  "session_id": "82de9582-76ea-4429-8ba4-b564359ea22e",
+  "transcript_path": "/Users/dev/.claude/projects/-Users-dev-proj/82de9582-76ea-4429-8ba4-b564359ea22e.jsonl",
+  "cwd": "/Users/dev/proj",
+  "prompt_id": "47911754-8aa4-46b6-b69e-f9b384ab39bf",
+  "permission_mode": "default",
+  "agent_id": "a59db2769b6f0fcd1",
+  "agent_type": "Explore",
+  "effort": {
+    "level": "high"
+  },
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "ls /Users/dev/proj",
+    "description": "List files in probe directory"
+  },
+  "tool_use_id": "toolu_01ThJQ2jwzVwoqBAxGARjEjh"
+}

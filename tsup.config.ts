@@ -69,4 +69,26 @@ export default defineConfig([
     outExtension: () => ({ js: '.mjs' }),
     banner,
   },
+  // The vitest reporter (loop-redesign/11-pr-e-cli-readers E11): a third
+  // single-file bundle `tenjin daemon start` copies into ~/.tenjin/hooks, but
+  // unlike the two above it is never spawned — a repo's OWN vitest config
+  // imports it by absolute path, so it is loaded into the user's vitest
+  // process. No `banner` for exactly that reason: it imports `node:fs` and
+  // nothing else, and a commander shim it never uses has no business in
+  // someone else's test run. `node20`, the same floor the CLI entry keeps, so
+  // a repo on an older runtime than this daemon's can still load it.
+  {
+    entry: { 'tenjin-vitest-reporter': 'src/hooks/failure/vitest-reporter.ts' },
+    format: ['esm'],
+    target: 'node20',
+    platform: 'node',
+    removeNodeProtocol: false,
+    splitting: false,
+    sourcemap: false,
+    minify: false,
+    clean: false,
+    dts: false,
+    outDir: 'dist',
+    outExtension: () => ({ js: '.mjs' }),
+  },
 ]);

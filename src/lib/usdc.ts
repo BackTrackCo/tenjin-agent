@@ -24,7 +24,7 @@ export async function getUsdcBalance(address: Address, rpcUrl: string): Promise<
   });
 }
 
-// The chain boundary for `tenjin send`, two-phase around the human confirm:
+// The chain boundary for `tenjin wallet send`, two-phase around the human confirm:
 // prepareUsdcSend (read-only: encode, nonce, gas, fees, ETH-for-gas balance)
 // runs BEFORE the confirm so the prompt can show the fee, broadcastUsdcSend
 // (sign via the TenjinSigner seam, broadcast, wait for the receipt) runs after.

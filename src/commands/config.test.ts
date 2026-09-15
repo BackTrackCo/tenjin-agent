@@ -9,9 +9,9 @@ import {
   runConfigGet,
   runConfigSet,
   persistPublishMode,
-  persistFreeVerbsDeclined,
+  persistGrantDeclined,
 } from './config';
-import { LOOP_CONFIG_KEYS, RawConfigSchema } from '../lib/config';
+import { HOOK_ARMS, LOOP_CONFIG_KEYS, RawConfigSchema } from '../lib/config';
 import { CliError } from '../lib/errors';
 import { fileURLToPath } from 'node:url';
 import { resolveSkillsSource } from '../lib/skills-source';
@@ -23,6 +23,8 @@ import {
 } from '../lib/harness-permissions';
 import { PRODUCTION_ORIGIN } from '../lib/production-origin';
 import type { CommandContext, GlobalFlags } from '../context';
+import { ADAPTERS } from '../adapters/registry';
+import type { HarnessAdapter } from '../adapters/types';
 
 const SKILLS_SRC = resolveSkillsSource(fileURLToPath(new URL('.', import.meta.url)));
 
@@ -53,7 +55,7 @@ const configFile = () => join(dir, 'config.json');
 async function hermeticHome(): Promise<{
   homeDir: string;
   isInteractive: boolean;
-  harnessIsClaude: boolean;
+  harnessesInPlay: readonly [];
 }> {
   return {
     homeDir: await mkdtemp(join(tmpdir(), 'tenjin-cfg-h-')),
@@ -61,7 +63,22 @@ async function hermeticHome(): Promise<{
     // PINNED, like every other harness-touching test here: without it these read
     // whichever harness the RUNNER has, so they pass on a laptop with Claude Code
     // installed and take a different branch on a bare CI box.
-    harnessIsClaude: false,
+    harnessesInPlay: [],
+  };
+}
+
+type GrantWrite = NonNullable<HarnessAdapter['registrar']['grant']>['write'];
+
+function adaptersWithCodexGrant(write: GrantWrite): Readonly<typeof ADAPTERS> {
+  return {
+    ...ADAPTERS,
+    codex: {
+      ...ADAPTERS.codex,
+      registrar: {
+        ...ADAPTERS.codex.registrar,
+        grant: { ...ADAPTERS.codex.registrar.grant!, write },
+      },
+    },
   };
 }
 const readRawFile = async () => JSON.parse(await readFile(configFile(), 'utf8')) as unknown;
@@ -94,12 +111,9 @@ describe('runConfigList', () => {
       value: { atomic: '100000', usd: '0.1' },
       source: 'default',
     });
-    expect(d['hooks.webSearch']).toEqual({ value: 'auto', source: 'default' });
-    expect(d['hooks.agentDispatch']).toEqual({ value: 'auto', source: 'default' });
-    expect(d['hooks.stopNag']).toEqual({ value: 'on', source: 'default' });
-    expect(d['hooks.sessionPrimer']).toEqual({ value: 'on', source: 'default' });
-    expect(d['hooks.push']).toEqual({ value: 'off', source: 'default' });
-    expect(d['hooks.capture']).toEqual({ value: 'off', source: 'default' });
+    for (const arm of HOOK_ARMS) {
+      expect(d[`hooks.${arm}`]).toEqual({ value: true, source: 'default' });
+    }
     expect(d['update.mode']).toEqual({ value: 'nudge', source: 'default' });
     expect(d.publicShelfUrl).toEqual({ value: 'https://tenjin.blog', source: 'default' });
     // REDACTED even here, on a fresh dir where the value is empty: the rendered
@@ -107,10 +121,9 @@ describe('runConfigList', () => {
     expect(d.shelfBypassSecret).toEqual({ value: 'unset', source: 'default' });
     expect(d['publish.ackServerWarnings']).toEqual({ value: 'mode', source: 'default' });
     // 12 scalar keys (incl. bazaarPay/bazaarRegistries and the two shelf keys)
-    // + 3 publish.* (mode, defaultPrice, ackServerWarnings) + 6 hooks.*
-    // (webSearch, agentDispatch, stopNag, sessionPrimer, push, capture)
-    // + 1 update.mode + 6 loop.* + 1 team.publicFallback.
-    expect(humanLines).toHaveLength(29);
+    // + 3 publish.* (mode, defaultPrice, ackServerWarnings) + 7 hooks.* (one
+    // per arm) + 1 update.mode + 4 loop.* + 1 team.publicFallback.
+    expect(humanLines).toHaveLength(28);
   });
 
   it('sendMaxAmount round-trips: unset until set, decimal USD in, Money out, 0 and none valid', async () => {
@@ -177,21 +190,40 @@ describe('runConfigList', () => {
     });
   });
 
-  it('persistFreeVerbsDeclined preserves a sibling install.harness key', async () => {
+  it('persistGrantDeclined preserves a sibling install.harness key', async () => {
     // Seeded as a past `install --harness claude` would have left it; declining
     // the allowlist on a later run must not clobber that record.
     await writeFile(configFile(), JSON.stringify({ install: { harness: ['claude'] } }));
-    await persistFreeVerbsDeclined(dir, ['Bash(tenjin search:*)', 'Bash(tenjin read:*)']);
+    await persistGrantDeclined(dir, ['Bash(tenjin search:*)', 'Bash(tenjin read:*)']);
     expect(await readRawFile()).toEqual({
       install: {
         harness: ['claude'],
-        freeVerbsDeclined: ['Bash(tenjin search:*)', 'Bash(tenjin read:*)'],
+        grantDeclined: ['Bash(tenjin search:*)', 'Bash(tenjin read:*)'],
       },
     });
     // A later grant clears it back, through the same merge.
-    await persistFreeVerbsDeclined(dir, []);
+    await persistGrantDeclined(dir, []);
     expect(await readRawFile()).toEqual({
-      install: { harness: ['claude'], freeVerbsDeclined: [] },
+      install: { harness: ['claude'], grantDeclined: [] },
+    });
+  });
+
+  it('the next locked config write persists a legacy shared harness as codex', async () => {
+    await writeFile(
+      configFile(),
+      JSON.stringify({
+        install: { harness: ['shared', 'codex', 'shared'] },
+        future: { kept: true },
+      }),
+    );
+
+    await persistGrantDeclined(dir, ['Bash(tenjin search:*)']);
+    expect(await readRawFile()).toEqual({
+      install: {
+        harness: ['codex'],
+        grantDeclined: ['Bash(tenjin search:*)'],
+      },
+      future: { kept: true },
     });
   });
 
@@ -660,7 +692,7 @@ describe('update.mode', () => {
   it('survives a write to another block', async () => {
     const ctx = makeCtx();
     await runConfigSet({ key: 'update.mode', value: 'off' }, ctx);
-    await runConfigSet({ key: 'hooks.stopNag', value: 'off' }, ctx);
+    await runConfigSet({ key: 'hooks.primer', value: 'off' }, ctx);
     expect(await runConfigGet({ key: 'update.mode' }, ctx)).toMatchObject({
       data: { value: 'off', source: 'file' },
     });
@@ -686,19 +718,35 @@ describe('publish.mode keeps the harness allowlist in step', () => {
     if (raw === null) return [];
     return (JSON.parse(raw) as { permissions?: { allow?: string[] } }).permissions?.allow ?? [];
   };
-  const syncOf = (d: unknown) =>
-    (
+  const syncOf = (d: unknown) => {
+    const sync = (
       d as {
-        allowlist?: { added: string[]; removed: string[]; skipped?: string; pointer?: string };
+        allowlist?: {
+          byHarness: {
+            claude?: { added: string[]; removed: string[] };
+            codex?: { granted: string[] };
+          };
+          skipped?: string;
+          pointer?: string;
+        };
       }
     ).allowlist;
+    if (sync === undefined) return undefined;
+    return {
+      added: sync.byHarness.claude?.added ?? [],
+      removed: sync.byHarness.claude?.removed ?? [],
+      skipped: sync.skipped,
+      pointer: sync.pointer,
+      codexGrant: sync.byHarness.codex,
+    };
+  };
 
   // Loosening ADDS a grant, so a human says yes to it.
   it('writes the publish rule on auto when the operator agrees', async () => {
     const asked: string[] = [];
     const res = await runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), {
       homeDir: home,
-      harnessIsClaude: true,
+      harnessesInPlay: ['claude'],
       isInteractive: true,
       confirmRule: async (label) => {
         asked.push(label);
@@ -715,25 +763,25 @@ describe('publish.mode keeps the harness allowlist in step', () => {
 
   // The write carries the free tier too on a machine that never ran install, so
   // the question has to say so rather than name one line and write ten.
-  it('discloses the free-verb rules the same write carries', async () => {
+  it('discloses the command-grant rules the same write carries', async () => {
     let label = '';
     await runConfigSet({ key: 'publish.mode', value: 'full-auto' }, makeCtx(), {
       homeDir: home,
-      harnessIsClaude: true,
+      harnessesInPlay: ['claude'],
       isInteractive: true,
       confirmRule: async (l) => {
         label = l;
         return true;
       },
     });
-    expect(label).toMatch(/Also adds the \d+ free-verb rule/);
+    expect(label).toMatch(/Also adds the \d+ command-grant rule/);
     expect(await allowOf()).toHaveLength(FREE_VERB_RULES.length + MODE_GATED_RULES.length);
   });
 
   it('writes nothing when the operator declines, and points instead', async () => {
     const res = await runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), {
       homeDir: home,
-      harnessIsClaude: true,
+      harnessesInPlay: ['claude'],
       isInteractive: true,
       confirmRule: async () => false,
     });
@@ -750,7 +798,7 @@ describe('publish.mode keeps the harness allowlist in step', () => {
   it('never prompts and never writes without a TTY', async () => {
     const res = await runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), {
       homeDir: home,
-      harnessIsClaude: true,
+      harnessesInPlay: ['claude'],
       isInteractive: false,
       confirmRule: async () => {
         throw new Error('must not ask');
@@ -767,7 +815,7 @@ describe('publish.mode keeps the harness allowlist in step', () => {
       makeCtx({ json: true }),
       {
         homeDir: home,
-        harnessIsClaude: true,
+        harnessesInPlay: ['claude'],
         isInteractive: true,
         confirmRule: async () => {
           throw new Error('must not ask');
@@ -780,12 +828,97 @@ describe('publish.mode keeps the harness allowlist in step', () => {
     expect(syncOf(res.data)?.pointer).toContain(PUBLISH_MODE_RULE);
   });
 
+  it('does not write the Codex grant before a declined loosening', async () => {
+    const writes: string[] = [];
+    const res = await runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), {
+      homeDir: home,
+      harnessesInPlay: ['codex'],
+      isInteractive: true,
+      confirmRule: async () => false,
+      adapters: adaptersWithCodexGrant(async (_home, mode) => {
+        writes.push(mode);
+        return { path: join(home, '.codex', 'rules', 'tenjin.rules'), granted: [], wrote: true };
+      }),
+    });
+    expect(writes).toEqual([]);
+    expect(syncOf(res.data)?.skipped).toBe('declined');
+    expect(syncOf(res.data)?.codexGrant).toBeUndefined();
+  });
+
+  it('does not write the Codex grant on a headless loosening', async () => {
+    const writes: string[] = [];
+    const res = await runConfigSet(
+      { key: 'publish.mode', value: 'full-auto' },
+      makeCtx({ json: true }),
+      {
+        homeDir: home,
+        harnessesInPlay: ['codex'],
+        isInteractive: true,
+        adapters: adaptersWithCodexGrant(async (_home, mode) => {
+          writes.push(mode);
+          return { path: join(home, '.codex', 'rules', 'tenjin.rules'), granted: [], wrote: true };
+        }),
+      },
+    );
+    expect(writes).toEqual([]);
+    expect(syncOf(res.data)?.skipped).toBe('no-tty');
+  });
+
+  it('writes the Codex grant only after the operator accepts the loosening', async () => {
+    const events: string[] = [];
+    const res = await runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), {
+      homeDir: home,
+      harnessesInPlay: ['codex'],
+      isInteractive: true,
+      confirmRule: async () => {
+        events.push('confirm');
+        return true;
+      },
+      adapters: adaptersWithCodexGrant(async (_home, mode) => {
+        events.push(`write:${mode}`);
+        return {
+          path: join(home, '.codex', 'rules', 'tenjin.rules'),
+          granted: ['tenjin publish'],
+          wrote: true,
+        };
+      }),
+    });
+    expect(events).toEqual(['confirm', 'write:auto']);
+    expect(syncOf(res.data)?.codexGrant?.granted).toEqual(['tenjin publish']);
+  });
+
+  it('does not persist the mode when the accepted Codex grant write fails', async () => {
+    const path = join(home, '.codex', 'rules', 'tenjin.rules');
+    const err = await caught(() =>
+      runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), {
+        homeDir: home,
+        harnessesInPlay: ['codex'],
+        isInteractive: true,
+        confirmRule: async () => true,
+        adapters: adaptersWithCodexGrant(async () => ({
+          path,
+          granted: [],
+          wrote: false,
+          error: 'permission denied',
+        })),
+      }),
+    );
+    expect(err).toMatchObject({
+      code: 'REFUSED',
+      message: expect.stringContaining('permission denied'),
+      fix: expect.stringContaining('tenjin config set publish.mode auto'),
+    });
+    expect(await runConfigGet({ key: 'publish.mode' }, makeCtx())).toMatchObject({
+      data: { value: 'review', source: 'default' },
+    });
+  });
+
   // Tightening only ever removes what this CLI wrote, so it needs no question —
   // including on a headless machine, which is where a stale grant would sit.
   it('retracts the rule on review, unprompted, and reports it', async () => {
     await runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), {
       homeDir: home,
-      harnessIsClaude: true,
+      harnessesInPlay: ['claude'],
       isInteractive: true,
       confirmRule: async () => true,
     });
@@ -793,7 +926,7 @@ describe('publish.mode keeps the harness allowlist in step', () => {
 
     const res = await runConfigSet({ key: 'publish.mode', value: 'review' }, makeCtx(), {
       homeDir: home,
-      harnessIsClaude: true,
+      harnessesInPlay: ['claude'],
       isInteractive: false,
       confirmRule: async () => {
         throw new Error('must not ask');
@@ -830,7 +963,7 @@ describe('publish.mode keeps the harness allowlist in step', () => {
     );
     const res = await runConfigSet({ key: 'publish.mode', value: 'review' }, makeCtx(), {
       homeDir: home,
-      harnessIsClaude: true,
+      harnessesInPlay: ['claude'],
     });
     expect(await allowOf()).toEqual(['Bash(git status:*)']);
     expect(syncOf(res.data)?.removed).toEqual([PUBLISH_MODE_RULE]);
@@ -843,7 +976,7 @@ describe('publish.mode keeps the harness allowlist in step', () => {
   it('is a clean no-op on a wired machine under --json, not a no-tty pointer', async () => {
     await runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), {
       homeDir: home,
-      harnessIsClaude: true,
+      harnessesInPlay: ['claude'],
       isInteractive: true,
       confirmRule: async () => true,
     });
@@ -852,7 +985,7 @@ describe('publish.mode keeps the harness allowlist in step', () => {
       makeCtx({ json: true }),
       {
         homeDir: home,
-        harnessIsClaude: true,
+        harnessesInPlay: ['claude'],
       },
     );
     expect(syncOf(res.data)).toMatchObject({ added: [], removed: [] });
@@ -867,7 +1000,7 @@ describe('publish.mode keeps the harness allowlist in step', () => {
       makeCtx({ json: true }),
       {
         homeDir: home,
-        harnessIsClaude: true,
+        harnessesInPlay: ['claude'],
       },
     );
     expect(syncOf(res.data)?.skipped).toBe('no-tty');
@@ -877,13 +1010,13 @@ describe('publish.mode keeps the harness allowlist in step', () => {
   it('asks nothing when the allowlist already carries every rule the mode needs', async () => {
     await runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), {
       homeDir: home,
-      harnessIsClaude: true,
+      harnessesInPlay: ['claude'],
       isInteractive: true,
       confirmRule: async () => true,
     });
     const res = await runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), {
       homeDir: home,
-      harnessIsClaude: true,
+      harnessesInPlay: ['claude'],
       isInteractive: true,
       confirmRule: async () => {
         throw new Error('must not ask');
@@ -897,7 +1030,7 @@ describe('publish.mode keeps the harness allowlist in step', () => {
     const res = await runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), {
       homeDir: home,
       isInteractive: true,
-      harnessIsClaude: false,
+      harnessesInPlay: [],
       confirmRule: async () => {
         throw new Error('must not ask');
       },
@@ -918,19 +1051,27 @@ describe('publish.mode keeps the harness allowlist in step', () => {
    */
   describe('harness detection, when the caller names none', () => {
     // Nothing on PATH, no ~/.claude, no recorded --harness: not our file.
-    it('skips a codex-only machine at a TTY, without asking', async () => {
+    it('asks before widening a Codex-only machine and writes nothing on no', async () => {
       await mkdir(join(home, '.codex'), { recursive: true });
+      const writes: string[] = [];
       const res = await runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), {
         homeDir: home,
         isInteractive: true,
         which: (bin) => bin === 'codex',
         env: { PATH: '' },
-        confirmRule: async () => {
-          throw new Error('must not ask');
-        },
+        confirmRule: async () => false,
+        adapters: adaptersWithCodexGrant(async (_home, mode) => {
+          writes.push(mode);
+          return {
+            path: join(home, '.codex', 'rules', 'tenjin.rules'),
+            granted: [],
+            wrote: true,
+          };
+        }),
       });
       expect(await allowOf()).toEqual([]);
-      expect(syncOf(res.data)?.skipped).toBe('not-claude');
+      expect(writes).toEqual([]);
+      expect(syncOf(res.data)?.skipped).toBe('declined');
       // No pointer either: there is no settings file of ours here to be missing
       // anything, so naming Claude rules would be advice about another machine.
       expect(syncOf(res.data)?.pointer).toBeUndefined();
@@ -943,14 +1084,24 @@ describe('publish.mode keeps the harness allowlist in step', () => {
     // Tightening on the same machine must not CREATE the file either: the writer
     // makes ~/.claude/settings.json when it is absent, so an unguarded retraction
     // would leave a codex-only operator holding a Claude config they never had.
-    it('creates no settings file on review for a codex-only machine', async () => {
+    it('narrows the Codex grant on review without creating Claude settings', async () => {
+      const writes: string[] = [];
       const res = await runConfigSet({ key: 'publish.mode', value: 'review' }, makeCtx(), {
         homeDir: home,
         which: (bin) => bin === 'codex',
         env: { PATH: '' },
+        adapters: adaptersWithCodexGrant(async (_home, mode) => {
+          writes.push(mode);
+          return {
+            path: join(home, '.codex', 'rules', 'tenjin.rules'),
+            granted: [],
+            wrote: true,
+          };
+        }),
       });
       expect(existsSync(claudeSettingsPath(home))).toBe(false);
-      expect(syncOf(res.data)?.skipped).toBe('not-claude');
+      expect(writes).toEqual(['review']);
+      expect(syncOf(res.data)?.skipped).toBeUndefined();
     });
 
     // A ~/.claude directory IS Claude-detection evidence (home-dir reason), so a
@@ -1017,199 +1168,64 @@ describe('publish.mode keeps the harness allowlist in step', () => {
 });
 
 describe('the hooks block is set through config, which stays human-gated', () => {
-  it('round-trips every hook key and rejects a value outside the enum', async () => {
+  it('round-trips every arm and rejects a value that is not a boolean', async () => {
     const ctx = makeCtx();
-    for (const [key, value] of [
-      ['hooks.webSearch', 'remind'],
-      ['hooks.agentDispatch', 'off'],
-      ['hooks.stopNag', 'off'],
-      ['hooks.sessionPrimer', 'off'],
-      ['hooks.push', 'on'],
-      ['hooks.capture', 'block'],
-    ] as const) {
-      const set = await runConfigSet({ key, value }, ctx);
-      expect(set.data).toMatchObject({ key, value, source: 'file' });
+    for (const arm of HOOK_ARMS) {
+      const key = `hooks.${arm}` as const;
+      const set = await runConfigSet({ key, value: 'off' }, ctx);
+      expect(set.data).toMatchObject({ key, value: false, source: 'file' });
       expect(await runConfigGet({ key }, ctx)).toMatchObject({
-        data: { key, value, source: 'file' },
+        data: { key, value: false, source: 'file' },
       });
     }
-    // Legacy aliases still work and map to the new keys.
-    expect(await runConfigGet({ key: 'hooks.searchMode' }, ctx)).toMatchObject({
-      data: { value: 'remind' },
-    });
-    expect(await runConfigGet({ key: 'hooks.dispatchMode' }, ctx)).toMatchObject({
-      data: { value: 'off' },
-    });
-    // Every subkey survives the others' writes, so silencing one hook cannot
+    // Every arm survives the others' writes, so silencing one hook cannot
     // silently reset another.
-    expect(await runConfigGet({ key: 'hooks.webSearch' }, ctx)).toMatchObject({
-      data: { value: 'remind' },
-    });
-    expect(await runConfigGet({ key: 'hooks.stopNag' }, ctx)).toMatchObject({
-      data: { value: 'off' },
-    });
-    expect(await runConfigGet({ key: 'hooks.push' }, ctx)).toMatchObject({
-      data: { value: 'on' },
-    });
-    expect(await runConfigGet({ key: 'hooks.capture' }, ctx)).toMatchObject({
-      data: { value: 'block' },
+    for (const arm of HOOK_ARMS) {
+      expect(await runConfigGet({ key: `hooks.${arm}` }, ctx)).toMatchObject({
+        data: { value: false },
+      });
+    }
+    // `true`/`false` and `on`/`off` are one parse rule, the same one every
+    // boolean key in this table uses.
+    expect(await runConfigSet({ key: 'hooks.prompt', value: 'true' }, ctx)).toMatchObject({
+      data: { value: true },
     });
 
-    expect(await runConfigGet({ key: 'hooks.agentDispatch' }, ctx)).toMatchObject({
-      data: { value: 'off' },
-    });
-
-    const dispatch = await caught(() =>
-      runConfigSet({ key: 'hooks.agentDispatch', value: 'sometimes' }, ctx),
-    );
-    expect(dispatch.code).toBe('USAGE');
-    expect(dispatch.fix).toContain('"off"');
-
-    const primer = await caught(() =>
-      runConfigSet({ key: 'hooks.sessionPrimer', value: 'sometimes' }, ctx),
-    );
-    expect(primer.code).toBe('USAGE');
-    expect(primer.fix).toContain('"off"');
-
-    const bad = await caught(() => runConfigSet({ key: 'hooks.stopNag', value: 'sometimes' }, ctx));
+    const bad = await caught(() => runConfigSet({ key: 'hooks.publish', value: 'sometimes' }, ctx));
     expect(bad.code).toBe('USAGE');
     expect(bad.fix).toContain('"on"');
-    // The middle setting is offered by name, or an operator hunting for it
-    // finds only the cliff.
-    expect(bad.fix).toContain('"deliberate-only"');
+    expect(bad.fix).toContain('"off"');
 
-    const badPush = await caught(() =>
-      runConfigSet({ key: 'hooks.push', value: 'sometimes' }, ctx),
+    // A key this table does not know is a usage error on both verbs, never a
+    // silently accepted alias — the raw hooks block passes unknown fields
+    // through, so nothing else refuses one.
+    const unknown = 'hooks.notAKey';
+    expect((await caught(() => runConfigSet({ key: unknown, value: 'off' }, ctx))).code).toBe(
+      'USAGE',
     );
-    expect(badPush.code).toBe('USAGE');
-    expect(badPush.fix).toContain('"on"');
-    expect(badPush.fix).toContain('"off"');
-
-    const badCapture = await caught(() =>
-      runConfigSet({ key: 'hooks.capture', value: 'sometimes' }, ctx),
-    );
-    expect(badCapture.code).toBe('USAGE');
-    expect(badCapture.fix).toContain('"block"');
-    expect(badCapture.fix).toContain('"nudge"');
-  });
-
-  // hooks.push is read by the push arms, which ship in the same build as the key
-  // itself, so there is no version of them that ignores it.
-  it('never reports hookScriptStale for push', async () => {
-    const ctx = makeCtx();
-    const push = await runConfigSet({ key: 'hooks.push', value: 'on' }, ctx, {
-      stopHookIsCurrent: async () => false,
-    });
-    expect(push.data).not.toHaveProperty('hookScriptStale');
+    expect((await caught(() => runConfigGet({ key: unknown }, ctx))).code).toBe('USAGE');
   });
 
   /**
-   * `hooks.push` is the one hooks key whose value is not the whole switch: the
-   * seven settings entries are written by `tenjin push on`, and `config set` only
-   * persists the key — so it echoed as effective while no arm fired.
-   * command-reference.md already gave the guidance; the CLI accepted it silently.
+   * NO STALENESS OR WIRING LINE ON ANY HOOKS KEY, and that is the change: every
+   * one of them is read out of config.json by the daemon on each fire, so a set
+   * takes effect on the next prompt. The old notes here described generated
+   * scripts (a Stop hook too old to read the ask's key) and a `push on` that
+   * had to write settings entries of its own. Neither exists.
    */
-  it('points hooks.push at `tenjin push on`, because config set wires nothing', async () => {
+  it('stores a hooks key and says one thing about it, whatever the key', async () => {
     const ctx = makeCtx();
-    const push = await runConfigSet({ key: 'hooks.push', value: 'on' }, ctx);
-    expect(push.data).toMatchObject({ hookEntriesNotWired: true });
-    expect((push.humanLines ?? []).join('\n')).toContain('tenjin push on');
-    // The value is still stored: this is an honest line, not a refusal.
-    expect(await runConfigGet({ key: 'hooks.push' }, ctx)).toMatchObject({
-      data: { value: 'on', source: 'file' },
-    });
-  });
-
-  it('says nothing for `off`, which is what an unwired machine already does', async () => {
-    const ctx = makeCtx();
-    const push = await runConfigSet({ key: 'hooks.push', value: 'off' }, ctx);
-    expect(push.data).not.toHaveProperty('hookEntriesNotWired');
-    expect(push.humanLines).toHaveLength(1);
-  });
-
-  /**
-   * Worse than `deliberate-only`'s misread: a Stop hook written before
-   * `hooks.capture` existed does not read the key at all. Setting `block` on one
-   * of those asks for nothing, while `config get` reports `value=block
-   * source=file` — the operator watches sessions end silently and has no way to
-   * tell the setting from the script.
-   */
-  it('says so when the installed Stop hook predates hooks.capture', async () => {
-    const ctx = makeCtx();
-    for (const value of ['block', 'nudge']) {
-      const set = await runConfigSet({ key: 'hooks.capture', value }, ctx, {
-        stopHookIsCurrent: async () => false,
+    for (const arm of HOOK_ARMS) {
+      const key = `hooks.${arm}` as const;
+      const set = await runConfigSet({ key, value: 'off' }, ctx);
+      expect(set.data, key).toMatchObject({ key, value: false, source: 'file' });
+      expect(set.data, key).not.toHaveProperty('hookScriptStale');
+      expect(set.data, key).not.toHaveProperty('hookEntriesNotWired');
+      expect(set.humanLines, key).toHaveLength(1);
+      expect(await runConfigGet({ key }, ctx), key).toMatchObject({
+        data: { value: false, source: 'file' },
       });
-      expect(set.data).toMatchObject({ value, hookScriptStale: true });
-      expect(set.humanLines?.join('\n')).toContain('tenjin install');
     }
-    // Stored regardless: the line reports the script, it does not refuse the set.
-    expect(await runConfigGet({ key: 'hooks.capture' }, ctx)).toMatchObject({
-      data: { value: 'nudge', source: 'file' },
-    });
-  });
-
-  it('stays quiet about capture on a current script, and about `off` on any', async () => {
-    const ctx = makeCtx();
-    const current = await runConfigSet({ key: 'hooks.capture', value: 'block' }, ctx, {
-      stopHookIsCurrent: async () => true,
-    });
-    expect(current.data).not.toHaveProperty('hookScriptStale');
-    expect(current.humanLines).toHaveLength(1);
-
-    // `off` is exactly what a script that never heard of the key already does.
-    const off = await runConfigSet({ key: 'hooks.capture', value: 'off' }, ctx, {
-      stopHookIsCurrent: async () => false,
-    });
-    expect(off.data).not.toHaveProperty('hookScriptStale');
-    expect(off.humanLines).toHaveLength(1);
-  });
-
-  // The arm-level toggle (#162): silencing the batched web-search reminders
-  // without silencing the deliberate-search ones.
-  it('round-trips deliberate-only, the middle stopNag setting', async () => {
-    const ctx = makeCtx();
-    const set = await runConfigSet({ key: 'hooks.stopNag', value: 'deliberate-only' }, ctx);
-    expect(set.data).toMatchObject({ value: 'deliberate-only', source: 'file' });
-    expect(await runConfigGet({ key: 'hooks.stopNag' }, ctx)).toMatchObject({
-      data: { value: 'deliberate-only', source: 'file' },
-    });
-  });
-
-  /**
-   * `deliberate-only` is a value only the current script understands: an older
-   * installed script maps every non-`off` value to `on`. Storing it and saying
-   * nothing leaves the operator watching the batch keep firing while `config get`
-   * reports the setting effective.
-   */
-  it('says so when the installed Stop hook predates deliberate-only', async () => {
-    const ctx = makeCtx();
-    const set = await runConfigSet({ key: 'hooks.stopNag', value: 'deliberate-only' }, ctx, {
-      stopHookIsCurrent: async () => false,
-    });
-    expect(set.data).toMatchObject({ value: 'deliberate-only', hookScriptStale: true });
-    expect(set.humanLines?.join('\n')).toContain('tenjin install');
-    // Stored regardless: the line reports the script, it does not refuse the set.
-    expect(await runConfigGet({ key: 'hooks.stopNag' }, ctx)).toMatchObject({
-      data: { value: 'deliberate-only', source: 'file' },
-    });
-  });
-
-  it('stays quiet on a current script, and on the values an old script honors', async () => {
-    const ctx = makeCtx();
-    const current = await runConfigSet({ key: 'hooks.stopNag', value: 'deliberate-only' }, ctx, {
-      stopHookIsCurrent: async () => true,
-    });
-    expect(current.data).not.toHaveProperty('hookScriptStale');
-    expect(current.humanLines).toHaveLength(1);
-
-    // `off` and `on` mean the same thing to every script version ever shipped,
-    // so a stale script is not worth a line about them.
-    const off = await runConfigSet({ key: 'hooks.stopNag', value: 'off' }, ctx, {
-      stopHookIsCurrent: async () => false,
-    });
-    expect(off.data).not.toHaveProperty('hookScriptStale');
-    expect(off.humanLines).toHaveLength(1);
   });
 });
 
@@ -1372,8 +1388,6 @@ describe('loop.* and team.publicFallback (loop-redesign/07-pr-b-daemon-kernel.md
   const LOOP_DEFAULT_LINES: Record<string, string> = {
     'loop.human_wait_ms': '2500',
     'loop.tool_wait_ms': '4000',
-    'loop.rate_per_min': '3',
-    'loop.burst': '6',
     'loop.idle_exit_min': '30',
     'loop.port': 'null',
   };
@@ -1402,8 +1416,8 @@ describe('loop.* and team.publicFallback (loop-redesign/07-pr-b-daemon-kernel.md
     expect(got.humanLines?.[0]).toContain('31000');
     // Provenance stays truthful: the untouched subkeys are not materialized.
     expect(await readRawFile()).toEqual({ loop: { port: 31000 } });
-    const burst = await runConfigGet({ key: 'loop.burst' }, ctx);
-    expect(burst.data).toMatchObject({ value: '6', source: 'default' });
+    const wait = await runConfigGet({ key: 'loop.tool_wait_ms' }, ctx);
+    expect(wait.data).toMatchObject({ value: '4000', source: 'default' });
   });
 
   it('set loop.port null reads back as "null" from file', async () => {
@@ -1418,13 +1432,13 @@ describe('loop.* and team.publicFallback (loop-redesign/07-pr-b-daemon-kernel.md
 
   it('set of a second loop key keeps the first', async () => {
     const ctx = makeCtx();
-    await runConfigSet({ key: 'loop.burst', value: '2' }, ctx);
-    await runConfigSet({ key: 'loop.rate_per_min', value: '1' }, ctx);
-    expect(await readRawFile()).toEqual({ loop: { burst: 2, rate_per_min: 1 } });
+    await runConfigSet({ key: 'loop.tool_wait_ms', value: '2' }, ctx);
+    await runConfigSet({ key: 'loop.idle_exit_min', value: '1' }, ctx);
+    expect(await readRawFile()).toEqual({ loop: { tool_wait_ms: 2, idle_exit_min: 1 } });
     const { data } = await runConfigList(ctx);
     const d = data as Record<string, { value: unknown; source: string }>;
-    expect(d['loop.burst']).toEqual({ value: '2', source: 'file' });
-    expect(d['loop.rate_per_min']).toEqual({ value: '1', source: 'file' });
+    expect(d['loop.tool_wait_ms']).toEqual({ value: '2', source: 'file' });
+    expect(d['loop.idle_exit_min']).toEqual({ value: '1', source: 'file' });
     expect(d['loop.human_wait_ms']).toEqual({ value: '2500', source: 'default' });
   });
 
@@ -1439,9 +1453,9 @@ describe('loop.* and team.publicFallback (loop-redesign/07-pr-b-daemon-kernel.md
   });
 
   it.each([
-    ['loop.burst', '0'],
-    ['loop.burst', 'abc'],
-    ['loop.burst', 'null'],
+    ['loop.tool_wait_ms', '0'],
+    ['loop.tool_wait_ms', 'abc'],
+    ['loop.tool_wait_ms', 'null'],
     ['loop.port', '70000'],
     ['loop.port', '-1'],
     ['team.publicFallback', 'maybe'],

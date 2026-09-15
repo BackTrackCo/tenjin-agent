@@ -3,7 +3,8 @@ import { z } from 'zod';
 import { CliError } from './errors';
 import { PRODUCTION_ORIGIN } from './production-origin';
 import { configPath } from './paths';
-import { HARNESS_TARGETS } from './skill-wiring';
+import { HARNESSES } from '../adapters/types';
+import type { Harness } from '../adapters/types';
 import { writeFileAtomic } from './atomic-json';
 
 /** A non-negative integer string in USDC atomic units (6-decimal base). */
@@ -68,167 +69,40 @@ const PublishConfigSchema = z.object({
 });
 
 /**
- * What the harness WebSearch hook does when the agent is about to search the web
- * (see lib/hook-scripts.ts). `auto` asks Tenjin first and mentions a tested
- * answer when one exists, `remind` says the marketplace is there without sending
- * the query anywhere, `off` leaves the installed hook inert.
+ * The seven hook arms, one boolean each. Named by what the arm does, with the
+ * harness event it answers beside it: `prompt` (UserPromptSubmit), `web-search`
+ * (WebSearch), `web-fetch` (WebFetch), `subagent` (the dispatch and the child's
+ * own start), `failure` (a failing command), `publish` (the turn-end ask on
+ * Stop and SubagentStop), `primer` (SessionStart). The context arm is
+ * bookkeeping for `failure` and `publish` and runs when either is on.
  */
-export const WebSearchModeSchema = z.enum(['auto', 'remind', 'off']);
-export type WebSearchMode = z.infer<typeof WebSearchModeSchema>;
+export const HOOK_ARMS = [
+  'prompt',
+  'web-search',
+  'web-fetch',
+  'subagent',
+  'failure',
+  'publish',
+  'primer',
+] as const;
+export type HookArm = (typeof HOOK_ARMS)[number];
 
 /**
- * What the subagent-dispatch hook does, on its own switch. Disjoint from
- * `hooks.webSearch`: both default `auto`, no `inherit`. The split exists because
- * a dispatch prompt is the most sensitive payload any hook sees: a fleet can keep
- * `webSearch auto` and still run dispatch as `remind` (a local nudge, nothing
- * sent) or `off`.
- */
-export const AgentDispatchModeSchema = z.enum(['auto', 'remind', 'off']);
-export type AgentDispatchMode = z.infer<typeof AgentDispatchModeSchema>;
-
-// Backward compat aliases — old keys still parse, new code uses the WebSearch/AgentDispatch names.
-export const SearchHookModeSchema = WebSearchModeSchema;
-export type SearchHookMode = WebSearchMode;
-/** Legacy: accepted on read for old config files that stored `inherit`. */
-export const DispatchHookModeSchema = z.enum(['inherit', 'auto', 'remind', 'off']);
-export type DispatchHookMode = z.infer<typeof DispatchHookModeSchema>;
-
-/** Validate a dispatch-hook mode at a command edge for the new disjoint key. */
-export function parseAgentDispatchHookModeFlag(value: string, flagName: string): AgentDispatchMode {
-  const parsed = AgentDispatchModeSchema.safeParse(value);
-  if (parsed.success) return parsed.data;
-  throw new CliError('USAGE', `Invalid ${flagName} ${JSON.stringify(value)}`, {
-    fix: 'Use "auto", "remind", or "off".',
-  });
-}
-
-/** Validate a web-search hook mode at a command edge. */
-export function parseWebSearchHookModeFlag(value: string, flagName: string): WebSearchMode {
-  const parsed = WebSearchModeSchema.safeParse(value);
-  if (parsed.success) return parsed.data;
-  throw new CliError('USAGE', `Invalid ${flagName} ${JSON.stringify(value)}`, {
-    fix: 'Use "auto", "remind", or "off".',
-  });
-}
-
-/** @deprecated use parseAgentDispatchHookModeFlag — kept for `hooks.dispatchMode` alias */
-export function parseDispatchHookModeFlag(value: string, flagName: string): DispatchHookMode {
-  const parsed = DispatchHookModeSchema.safeParse(value);
-  if (parsed.success) return parsed.data;
-  throw new CliError('USAGE', `Invalid ${flagName} ${JSON.stringify(value)}`, {
-    fix: 'Use "inherit", "auto", "remind", or "off".',
-  });
-}
-
-/**
- * @deprecated use parseWebSearchHookModeFlag — kept for `hooks.searchMode` alias
- */
-export function parseSearchHookModeFlag(value: string, flagName: string): SearchHookMode {
-  return parseWebSearchHookModeFlag(value, flagName);
-}
-
-/**
- * Which open loops the Stop hook may raise at the end of a turn.
- *
- * `deliberate-only` is the middle setting the two-value toggle was missing. The
- * hook has two arms, and they are not equally welcome: a deliberate `tenjin
- * search` MISS is a question the agent chose to ask, while the batched
- * ride-along web searches are a firehose in a research session. With only `on`
- * and `off`, silencing the noisy arm meant silencing both, and nothing ever
- * prompts turning them back on (tenjin-agent #162). This keeps the high-signal
- * arm and drops the batch.
- */
-export const StopNagModeSchema = z.enum(['on', 'deliberate-only', 'off']);
-export type StopNagMode = z.infer<typeof StopNagModeSchema>;
-
-export function parseStopNagFlag(value: string, flagName: string): StopNagMode {
-  const parsed = StopNagModeSchema.safeParse(value);
-  if (parsed.success) return parsed.data;
-  throw new CliError('USAGE', `Invalid ${flagName} ${JSON.stringify(value)}`, {
-    fix: 'Use "on", "deliberate-only", or "off".',
-  });
-}
-
-/** Whether the SessionStart hook prints its primer. Two values and no middle
- *  one: one paragraph either belongs at the top of a session or does not. */
-export const SessionPrimerModeSchema = z.enum(['on', 'off']);
-export type SessionPrimerMode = z.infer<typeof SessionPrimerModeSchema>;
-
-export function parseSessionPrimerFlag(value: string, flagName: string): SessionPrimerMode {
-  const parsed = SessionPrimerModeSchema.safeParse(value);
-  if (parsed.success) return parsed.data;
-  throw new CliError('USAGE', `Invalid ${flagName} ${JSON.stringify(value)}`, {
-    fix: 'Use "on" or "off".',
-  });
-}
-
-/**
- * Whether the push experiment's hook scripts are wired and speaking (docs/command-reference.md#push-experimental).
- * `on` is what `tenjin push on` writes: `tenjin install` then wires the extra hook
- * entries (prompt, failure, subagent, context) alongside the search hooks it always
- * wires. `off` (the default) leaves any already-wired push scripts on disk but
- * inert — every push arm reads this at run time before it spends a request, so
- * turning the experiment off never needs a re-install.
- */
-export const PushModeSchema = z.enum(['on', 'off']);
-export type PushMode = z.infer<typeof PushModeSchema>;
-
-export function parsePushModeFlag(value: string, flagName: string): PushMode {
-  const parsed = PushModeSchema.safeParse(value);
-  if (parsed.success) return parsed.data;
-  throw new CliError('USAGE', `Invalid ${flagName} ${JSON.stringify(value)}`, {
-    fix: 'Use "on" or "off".',
-  });
-}
-
-/**
- * What the Stop hook does with an end-of-session capture prompt (docs/command-reference.md#push-experimental's
- * notes half): `block` raises a blocking reason when the
- * session carried a research signal (a search it asked for, a row showing an
- * arm actually surfaced something, or a subagent finding on the queue) and
- * nothing has captured it yet, and it is also the one mode in which a subagent
- * is asked at its own end; `nudge` says the same thing to the parent as
- * additionalContext, blocks nobody, and never spends a child a turn, which
- * makes it the "parent asks, child never blocked" switch; `off` is silent
- * everywhere. Default `off`. The parent's ask fires once per session plus once
- * for anything that arrives afterwards and has not been named.
- */
-export const CaptureModeSchema = z.enum(['block', 'nudge', 'off']);
-export type CaptureMode = z.infer<typeof CaptureModeSchema>;
-
-export function parseCaptureModeFlag(value: string, flagName: string): CaptureMode {
-  const parsed = CaptureModeSchema.safeParse(value);
-  if (parsed.success) return parsed.data;
-  throw new CliError('USAGE', `Invalid ${flagName} ${JSON.stringify(value)}`, {
-    fix: 'Use "block", "nudge", or "off".',
-  });
-}
-
-/**
- * The harness-hook block. EVERY key is read by the installed scripts at run
- * time, which is what makes them runtime toggles rather than install-time
- * choices: `tenjin config set hooks.webSearch off`, `hooks.agentDispatch off`,
- * `hooks.stopNag off` or `hooks.sessionPrimer off` silences a hook immediately,
- * with no re-install and nothing to unwire. The scripts stay registered and
- * no-op, which is also what lets turning one back on be a single `config set`.
+ * The harness-hook block. EVERY key is read by the daemon at run time, which is
+ * what makes them runtime toggles rather than install-time choices:
+ * `tenjin config set hooks.web-search false` silences that arm immediately,
+ * with no re-install and nothing to unwire. The entries stay registered and the
+ * arm no-ops, which is also what lets turning one back on be a single
+ * `config set`.
  */
 const HooksConfigSchema = z.object({
-  webSearch: WebSearchModeSchema,
-  agentDispatch: AgentDispatchModeSchema,
-  stopNag: StopNagModeSchema,
-  sessionPrimer: SessionPrimerModeSchema,
-  push: PushModeSchema,
-  capture: CaptureModeSchema,
-});
-
-/**
- * Legacy hook fields kept for one release so an old config.json still parses.
- * `searchMode` maps to `webSearch`; `dispatchMode` (including `inherit`) maps
- * to `agentDispatch` per the migration in loadConfig / resolve* below.
- */
-const LegacyHooksFields = z.object({
-  searchMode: SearchHookModeSchema.optional(),
-  dispatchMode: DispatchHookModeSchema.optional(),
+  prompt: z.boolean(),
+  'web-search': z.boolean(),
+  'web-fetch': z.boolean(),
+  subagent: z.boolean(),
+  failure: z.boolean(),
+  publish: z.boolean(),
+  primer: z.boolean(),
 });
 
 /**
@@ -247,22 +121,21 @@ const LegacyHooksFields = z.object({
 export const UpdateModeSchema = z.enum(['nudge', 'off']);
 
 /**
- * The loop daemon's numbers (tenjin-notes loop-redesign/02-redesign.md §7). FOUR
+ * The loop daemon's numbers (tenjin-notes loop-redesign/02-redesign.md §7). TWO
  * budget numbers and two daemon knobs; every other bound is a formula over
  * these or a constant with a stated reason in `src/hooks/constants.ts`.
  *
  * `human_wait_ms`: a fire the human is waiting on (prompt, Stop, SessionStart).
- * `tool_wait_ms`: a fire a tool call is waiting on. `rate_per_min` and `burst`:
- * GCRA per (session, agent, arm), charged once per question. `idle_exit_min`:
- * the daemon exits after this long with no request. `port`: null derives one
- * from the data dir path; set it only when doctor reports a foreign listener.
+ * `tool_wait_ms`: a fire a tool call is waiting on. There is no third budget:
+ * a client-side rate limit rationed the research panel the loop exists to
+ * capture, so the runaway stop is the server's own 429. `idle_exit_min`: the
+ * daemon exits after this long with no request. `port`: null derives one from
+ * the data dir path; set it only when doctor reports a foreign listener.
  */
 const positiveInt = z.number().int().positive();
 export const LoopConfigSchema = z.object({
   human_wait_ms: positiveInt,
   tool_wait_ms: positiveInt,
-  rate_per_min: positiveInt,
-  burst: positiveInt,
   idle_exit_min: positiveInt,
   port: z.number().int().min(0).max(65535).nullable(),
 });
@@ -316,19 +189,17 @@ export function parseUpdateModeFlag(value: string, flagName: string): UpdateMode
 }
 
 /**
- * What `install` recorded about its OWN targets. `harness` is the explicit
- * `--harness` set of the last install that passed the flag, and it exists so
- * `doctor` keeps judging a directory the user named by hand: detection cannot see a
- * harness this CLI does not probe for, and without the record such a directory is a
- * target for one run and invisible to every later check. Written by `install`, not a
- * `config set` key.
+ * What `install` recorded about its own targets. `harness` is the last settled
+ * prompt or explicit `--harness` selection, so `doctor` keeps judging every
+ * directory the operator chose even when later detection cannot see it. Written
+ * by `install`, not a `config set` key.
  */
 const InstallConfigSchema = z.object({
-  harness: z.array(z.enum(HARNESS_TARGETS)),
+  harness: z.array(z.enum(HARNESSES)),
   /**
    * The EXACT rule strings still pending the last time an install explicitly
-   * declined the free-verb allowlist (`--no-allow-free-verbs`, or "no" at the
-   * interactive prompt), so `--refresh` can subtract them from what it would
+   * declined the free-verb allowlist (`--no-grant`), so `--refresh`
+   * can subtract them from what it would
    * otherwise report as pending instead of recomputing from the settings file
    * and nagging about a settled "no" on every refresh (tenjin-agent#234).
    *
@@ -342,8 +213,29 @@ const InstallConfigSchema = z.object({
    * or finds it already fully satisfied, so a later legitimate grant (manual or
    * otherwise) is never shadowed by a stale decline.
    */
-  freeVerbsDeclined: z.array(z.string()),
+  grantDeclined: z.array(z.string()),
 });
+
+/**
+ * `shared` was a real `install --harness` value before the harness selector was
+ * narrowed to actual harnesses. It targeted the same ~/.agents/skills directory
+ * as Codex, so the lossless upgrade is `codex`. Normalize at the raw parse edge:
+ * commands that intentionally consume loadRawConfig directly must never see the
+ * superseded value, and a later merge-write naturally persists the current shape.
+ */
+const STORED_INSTALL_HARNESSES = [...HARNESSES, 'shared'] as const;
+type StoredInstallHarness = (typeof STORED_INSTALL_HARNESSES)[number];
+
+export function resolveInstallHarness(
+  value: readonly StoredInstallHarness[] | undefined,
+): Harness[] {
+  const normalized = new Set(value?.map((harness) => (harness === 'shared' ? 'codex' : harness)));
+  return HARNESSES.filter((harness) => normalized.has(harness));
+}
+
+const RawInstallHarnessSchema = z
+  .array(z.enum(STORED_INSTALL_HARNESSES))
+  .transform(resolveInstallHarness);
 
 /**
  * The persisted config shape. Spend keys are stored atomic (accepted as decimal
@@ -356,11 +248,11 @@ export const ConfigSchema = z.object({
   sessionBudget: atomicString,
   confirm: z.union([z.literal('always'), z.string().regex(/^above:\d+$/)]),
   /**
-   * Hard per-send cap for `tenjin send`, NOT satisfiable by --yes or a prompt
+   * Hard per-send cap for `tenjin wallet send`, NOT satisfiable by --yes or a prompt
    * (the spend-policy posture): an atomic amount caps each send, "0" disables
    * the verb entirely, and "none" = explicitly uncapped (send exists to drain
    * the wallet, but uncapped is an opt-in, never a default). The key has NO
-   * usable default: absent from config.json, `tenjin send` refuses until it is
+   * usable default: absent from config.json, `tenjin wallet send` refuses until it is
    * set (see resolveSendMaxAmount). Client-enforced like every spend key (see
    * the note above).
    */
@@ -420,16 +312,15 @@ export const ConfigSchema = z.object({
 export type Config = z.infer<typeof ConfigSchema>;
 
 /**
- * `install`'s raw shape, widened to still parse a `freeVerbsDeclined: true`
- * left by an earlier revision of this same key (before tenjin-agent#234's
- * rewrite from a suppress-everything boolean to a per-rule list): a stray
- * boolean must not fail config.json with CONFIG_INVALID. See
- * {@link resolveFreeVerbsDeclined} for how it is read back — treated the same
- * as absent either way, never as "these specific rules were declined", because
- * a boolean carries no per-rule information to recover.
+ * `install`'s raw shape. The decline is a list of exact rules rather than a
+ * boolean so a later version can still report a rule the operator was never
+ * offered. The key is intentionally not aliased from its pre-release name.
  */
 const RawInstallConfigSchema = InstallConfigSchema.partial()
-  .extend({ freeVerbsDeclined: z.union([z.array(z.string()), z.boolean()]).optional() })
+  .extend({
+    harness: RawInstallHarnessSchema.optional(),
+    grantDeclined: z.array(z.string()).optional(),
+  })
   .passthrough();
 
 /**
@@ -447,7 +338,7 @@ export const RawConfigSchema = ConfigSchema.partial()
   .extend({
     publish: PublishConfigSchema.partial().passthrough().optional(),
     install: RawInstallConfigSchema.optional(),
-    hooks: HooksConfigSchema.partial().merge(LegacyHooksFields).passthrough().optional(),
+    hooks: HooksConfigSchema.partial().passthrough().optional(),
     update: UpdateConfigSchema.partial().passthrough().optional(),
     loop: LoopConfigSchema.partial().passthrough().optional(),
     team: TeamConfigSchema.partial().passthrough().optional(),
@@ -456,24 +347,17 @@ export const RawConfigSchema = ConfigSchema.partial()
 export type PartialConfig = z.infer<typeof RawConfigSchema>;
 
 /**
- * Normalize `install.freeVerbsDeclined` as read from config.json: the current
- * shape (an array of exact declined rule strings) passes through as-is; the
- * boolean the key held before tenjin-agent#234, and an absent key, both read
- * back as "nothing specific is known to be declined" — `[]`. That is the safe
- * direction for the boolean: a stray `true` from before the rewrite silences
- * nothing, so at worst a settled decline is reported pending once more (the
- * exact bug this key exists to prevent, but the machine has already re-decided
- * this by installing the version that made the rewrite); it never silently
- * papers over a rule that this list should be naming.
+ * Normalize `install.grantDeclined` as read from config.json. An absent key is
+ * an empty set; a present key is already validated as exact rule strings.
  */
-export function resolveFreeVerbsDeclined(value: string[] | boolean | undefined): string[] {
-  return Array.isArray(value) ? value : [];
+export function resolveGrantDeclined(value: string[] | undefined): string[] {
+  return value ?? [];
 }
 
 /**
  * The resolved-view sentinel for an absent sendMaxAmount. Never a persistable
  * value (ConfigSchema rejects it, and `config set` has no way to produce it);
- * while the resolved value is this sentinel, `tenjin send` refuses —
+ * while the resolved value is this sentinel, `tenjin wallet send` refuses —
  * require-set-before-first-send.
  */
 export const SEND_MAX_UNSET = 'unset';
@@ -500,7 +384,7 @@ export const CONFIG_DEFAULTS: Config = {
   confirm: 'always',
   // A type placeholder only, never honored: Config requires every key (and
   // CONFIG_KEYS derives from these). resolveSendMaxAmount never reads it — an
-  // absent key resolves to SEND_MAX_UNSET and `tenjin send` refuses until the
+  // absent key resolves to SEND_MAX_UNSET and `tenjin wallet send` refuses until the
   // cap is set. '0' (send disabled) rather than 'none' (uncapped) so that if a
   // future caller ever DOES read the cap through loadConfig/fileOrDefault, the
   // leak fails closed instead of silently running uncapped.
@@ -515,27 +399,24 @@ export const CONFIG_DEFAULTS: Config = {
   bazaarPay: false,
   bazaarRegistries: DEFAULT_BAZAAR_REGISTRIES,
   publish: { mode: 'review', defaultPrice: '100000', ackServerWarnings: 'mode' },
-  install: { harness: [], freeVerbsDeclined: [] },
-  // `auto` is the default because the hook exists to be useful without being
-  // asked for; the disclosure and the undo ride the install output, and `off`
-  // leaves the installed script inert without touching settings.json. Both hooks
-  // are `auto` by default and disjoint — no `inherit`. `push` and `capture`
-  // default `off`: the push experiment (docs/command-reference.md#push-experimental) is opt-in only,
-  // through `tenjin push on`.
+  install: { harness: [], grantDeclined: [] },
+  // Every hook is on out of the box: a vanilla install turns the whole loop on,
+  // and the disclosure and the undo ride the install output. `false` leaves the
+  // registered entries inert without touching settings.json, so any of these is
+  // one `config set` away in either direction.
   hooks: {
-    webSearch: 'auto',
-    agentDispatch: 'auto',
-    stopNag: 'on',
-    sessionPrimer: 'on',
-    push: 'off',
-    capture: 'off',
+    prompt: true,
+    'web-search': true,
+    'web-fetch': true,
+    subagent: true,
+    failure: true,
+    publish: true,
+    primer: true,
   },
   update: { mode: 'nudge' },
   loop: {
     human_wait_ms: 2500,
     tool_wait_ms: 4000,
-    rate_per_min: 3,
-    burst: 6,
     idle_exit_min: 30,
     port: null,
   },
@@ -574,19 +455,10 @@ export const PUBLISH_CONFIG_KEYS = [
 export type PublishConfigKey = (typeof PUBLISH_CONFIG_KEYS)[number];
 
 /** The dotted keys `config get/set` accept for the nested hooks block. */
-export const HOOKS_CONFIG_KEYS = [
-  'hooks.webSearch',
-  'hooks.agentDispatch',
-  'hooks.stopNag',
-  'hooks.sessionPrimer',
-  'hooks.push',
-  'hooks.capture',
-] as const;
-export type HooksConfigKey = (typeof HOOKS_CONFIG_KEYS)[number];
-
-/** Legacy aliases still accepted on `config set/get` for one release. */
-export const LEGACY_HOOKS_CONFIG_KEYS = ['hooks.searchMode', 'hooks.dispatchMode'] as const;
-export type LegacyHooksConfigKey = (typeof LEGACY_HOOKS_CONFIG_KEYS)[number];
+export type HooksConfigKey = `hooks.${HookArm}`;
+export const HOOKS_CONFIG_KEYS: readonly HooksConfigKey[] = HOOK_ARMS.map(
+  (arm) => `hooks.${arm}` as const,
+);
 
 /** The dotted key `config get/set` accepts for the nested update block. */
 export const UPDATE_CONFIG_KEYS = ['update.mode'] as const;
@@ -596,8 +468,6 @@ export type UpdateConfigKey = (typeof UPDATE_CONFIG_KEYS)[number];
 export const LOOP_CONFIG_KEYS = [
   'loop.human_wait_ms',
   'loop.tool_wait_ms',
-  'loop.rate_per_min',
-  'loop.burst',
   'loop.idle_exit_min',
   'loop.port',
 ] as const;
@@ -648,47 +518,8 @@ export async function loadRawConfig(dir: string): Promise<PartialConfig> {
  *  the default defaultPrice (a shallow spread would drop it). */
 export async function loadConfig(dir: string): Promise<Config> {
   const raw = await loadRawConfig(dir);
-  const rawHooks = raw.hooks as
-    | {
-        webSearch?: WebSearchMode;
-        agentDispatch?: AgentDispatchMode;
-        searchMode?: WebSearchMode;
-        dispatchMode?: DispatchHookMode;
-        stopNag?: StopNagMode;
-        sessionPrimer?: SessionPrimerMode;
-      }
-    | undefined;
-  // Backward compat: new webSearch wins, else legacy searchMode, else default.
-  const resolvedWebSearch =
-    rawHooks?.webSearch ?? rawHooks?.searchMode ?? CONFIG_DEFAULTS.hooks.webSearch;
-  // Migration for agentDispatch: new key wins; else legacy dispatchMode (if not inherit) wins;
-  // else if legacy is inherit or missing but webSearch resolved, copy webSearch; else default.
-  // Since dispatch never shipped to npm (only searchMode did), the elaborate branch is only
-  // for the unreleased `inherit` branch; the important legacy is searchMode -> webSearch.
-  let resolvedAgentDispatch: AgentDispatchMode;
-  if (rawHooks?.agentDispatch !== undefined) {
-    resolvedAgentDispatch = rawHooks.agentDispatch;
-  } else if (rawHooks?.dispatchMode !== undefined && rawHooks.dispatchMode !== 'inherit') {
-    resolvedAgentDispatch = rawHooks.dispatchMode as AgentDispatchMode;
-  } else if (rawHooks?.dispatchMode === 'inherit') {
-    resolvedAgentDispatch = resolvedWebSearch;
-  } else if (rawHooks?.dispatchMode === undefined && rawHooks?.searchMode !== undefined) {
-    // Old file had only searchMode (dispatch inherited): preserve previous behavior for one release.
-    resolvedAgentDispatch = resolvedWebSearch;
-  } else if (
-    rawHooks?.dispatchMode === undefined &&
-    rawHooks?.webSearch !== undefined &&
-    rawHooks?.agentDispatch === undefined
-  ) {
-    // New file with only webSearch set after the rename — keep disjoint: do NOT copy.
-    resolvedAgentDispatch = CONFIG_DEFAULTS.hooks.agentDispatch;
-  } else {
-    resolvedAgentDispatch = CONFIG_DEFAULTS.hooks.agentDispatch;
-  }
-  // If the file had neither new nor legacy hooks at all, loadSettings' file-or-default
-  // semantics would say `default` rather than `file` — but loadConfig's job is to produce
-  // the effective Config object, so defaults are correct here regardless. The provenance
-  // question lives in resolve* below.
+  // loadConfig's job is the effective Config object, so an absent key is its
+  // default here; the provenance question lives in resolve* below.
   return {
     ...CONFIG_DEFAULTS,
     ...raw,
@@ -700,16 +531,9 @@ export async function loadConfig(dir: string): Promise<Config> {
     },
     install: {
       harness: raw.install?.harness ?? CONFIG_DEFAULTS.install.harness,
-      freeVerbsDeclined: resolveFreeVerbsDeclined(raw.install?.freeVerbsDeclined),
+      grantDeclined: resolveGrantDeclined(raw.install?.grantDeclined),
     },
-    hooks: {
-      webSearch: resolvedWebSearch,
-      agentDispatch: resolvedAgentDispatch,
-      stopNag: rawHooks?.stopNag ?? CONFIG_DEFAULTS.hooks.stopNag,
-      sessionPrimer: rawHooks?.sessionPrimer ?? CONFIG_DEFAULTS.hooks.sessionPrimer,
-      push: raw.hooks?.push ?? CONFIG_DEFAULTS.hooks.push,
-      capture: raw.hooks?.capture ?? CONFIG_DEFAULTS.hooks.capture,
-    },
+    hooks: resolveHooksConfig(raw),
     update: { mode: raw.update?.mode ?? CONFIG_DEFAULTS.update.mode },
     loop: resolveLoopConfig(raw),
     team: { publicFallback: raw.team?.publicFallback ?? CONFIG_DEFAULTS.team.publicFallback },
@@ -723,8 +547,6 @@ export function resolveLoopConfig(raw: PartialConfig): LoopConfig {
   return {
     human_wait_ms: file.human_wait_ms ?? CONFIG_DEFAULTS.loop.human_wait_ms,
     tool_wait_ms: file.tool_wait_ms ?? CONFIG_DEFAULTS.loop.tool_wait_ms,
-    rate_per_min: file.rate_per_min ?? CONFIG_DEFAULTS.loop.rate_per_min,
-    burst: file.burst ?? CONFIG_DEFAULTS.loop.burst,
     idle_exit_min: file.idle_exit_min ?? CONFIG_DEFAULTS.loop.idle_exit_min,
     port: file.port === undefined ? CONFIG_DEFAULTS.loop.port : file.port,
   };
@@ -774,19 +596,10 @@ export interface EffectiveSettings {
   publishMode: PublishModeResolution;
   publishDefaultPrice: ResolvedSetting<string>;
   publishAckServerWarnings: ResolvedSetting<AckServerWarnings>;
-  hooksWebSearch: ResolvedSetting<WebSearchMode>;
-  hooksAgentDispatch: ResolvedSetting<AgentDispatchMode>;
-  hooksStopNag: ResolvedSetting<StopNagMode>;
-  hooksSessionPrimer: ResolvedSetting<SessionPrimerMode>;
-  hooksPush: ResolvedSetting<PushMode>;
-  hooksCapture: ResolvedSetting<CaptureMode>;
+  hooks: { [K in HookArm]: ResolvedSetting<boolean> };
   updateMode: ResolvedSetting<UpdateMode>;
   loop: { [K in keyof LoopConfig]: ResolvedSetting<LoopConfig[K]> };
   teamPublicFallback: ResolvedSetting<PublicFallback>;
-  /** @deprecated use hooksWebSearch — kept for backward compat */
-  hooksSearchMode: ResolvedSetting<WebSearchMode>;
-  /** @deprecated use hooksAgentDispatch — kept for backward compat (never `inherit`) */
-  hooksDispatchMode: ResolvedSetting<AgentDispatchMode>;
 }
 
 /** CLI flags that participate in settings precedence (`--base-url`). */
@@ -811,8 +624,6 @@ export interface ResolveSettingsInput {
  */
 export function resolveSettings(input: ResolveSettingsInput): EffectiveSettings {
   const { config, flags, env, project } = input;
-  const webSearch = resolveHooksWebSearch(config);
-  const agentDispatch = resolveHooksAgentDispatch(config);
   return {
     maxAutoSpend: fileOrDefault('maxAutoSpend', config),
     sessionBudget: fileOrDefault('sessionBudget', config),
@@ -829,14 +640,7 @@ export function resolveSettings(input: ResolveSettingsInput): EffectiveSettings 
     publishMode: resolvePublishMode({ config, project, env }),
     publishDefaultPrice: resolvePublishDefaultPrice({ config, project }),
     publishAckServerWarnings: resolveAckServerWarnings(config),
-    hooksWebSearch: webSearch,
-    hooksAgentDispatch: agentDispatch,
-    hooksSearchMode: webSearch,
-    hooksDispatchMode: agentDispatch,
-    hooksStopNag: resolveHooksStopNag(config),
-    hooksSessionPrimer: resolveHooksSessionPrimer(config),
-    hooksPush: resolveHooksPush(config),
-    hooksCapture: resolveHooksCapture(config),
+    hooks: resolveHookSettings(config),
     updateMode: resolveUpdateMode(config),
     loop: resolveLoopSettings(config),
     teamPublicFallback: resolveTeamPublicFallback(config),
@@ -853,8 +657,6 @@ function resolveLoopSettings(config: PartialConfig): EffectiveSettings['loop'] {
   return {
     human_wait_ms: one('human_wait_ms'),
     tool_wait_ms: one('tool_wait_ms'),
-    rate_per_min: one('rate_per_min'),
-    burst: one('burst'),
     idle_exit_min: one('idle_exit_min'),
     port: one('port'),
   };
@@ -896,88 +698,25 @@ function resolveUpdateMode(config: PartialConfig): ResolvedSetting<UpdateMode> {
   return { value: CONFIG_DEFAULTS.update.mode, source: 'default' };
 }
 
-/** hooks.webSearch: file or default. Legacy `hooks.searchMode` counts as `file`. */
-export function resolveHooksWebSearch(config: PartialConfig): ResolvedSetting<WebSearchMode> {
-  const hooks = config.hooks as
-    { webSearch?: WebSearchMode; searchMode?: WebSearchMode } | undefined;
-  if (hooks?.webSearch !== undefined) return { value: hooks.webSearch, source: 'file' };
-  if (hooks?.searchMode !== undefined) return { value: hooks.searchMode, source: 'file' };
-  return { value: CONFIG_DEFAULTS.hooks.webSearch, source: 'default' };
-}
-
-/** @deprecated use resolveHooksWebSearch */
-export function resolveHooksSearchMode(config: PartialConfig): ResolvedSetting<WebSearchMode> {
-  return resolveHooksWebSearch(config);
-}
-
-/** hooks.agentDispatch: file or default, disjoint from webSearch. Legacy `dispatchMode` (including `inherit`) honoured on read. */
-export function resolveHooksAgentDispatch(
-  config: PartialConfig,
-): ResolvedSetting<AgentDispatchMode> {
-  const hooks = config.hooks as
-    | {
-        agentDispatch?: AgentDispatchMode;
-        dispatchMode?: DispatchHookMode;
-        webSearch?: WebSearchMode;
-        searchMode?: WebSearchMode;
-      }
-    | undefined;
-  if (hooks?.agentDispatch !== undefined) return { value: hooks.agentDispatch, source: 'file' };
-  const legacy = hooks?.dispatchMode;
-  if (legacy !== undefined && legacy !== 'inherit') {
-    return { value: legacy as AgentDispatchMode, source: 'file' };
-  }
-  if (legacy === 'inherit') {
-    const webSearch = hooks?.webSearch ?? hooks?.searchMode ?? CONFIG_DEFAULTS.hooks.webSearch;
-    return { value: webSearch as AgentDispatchMode, source: 'file' };
-  }
-  // File had only legacy searchMode (dispatch inherited implicitly) — preserve prior behaviour for one release.
-  if (
-    hooks?.searchMode !== undefined &&
-    hooks?.dispatchMode === undefined &&
-    hooks?.agentDispatch === undefined
-  ) {
-    const webSearch = hooks.webSearch ?? hooks.searchMode ?? CONFIG_DEFAULTS.hooks.webSearch;
-    return { value: webSearch as AgentDispatchMode, source: 'file' };
-  }
-  return { value: CONFIG_DEFAULTS.hooks.agentDispatch, source: 'default' };
-}
-
-/** @deprecated use resolveHooksAgentDispatch — `inherit` never surfaces; value is already resolved */
-export function resolveHooksDispatchMode(
-  config: PartialConfig,
-): ResolvedSetting<AgentDispatchMode> {
-  return resolveHooksAgentDispatch(config);
-}
-
-/** hooks.sessionPrimer: file or default, same shape as hooks.webSearch. */
-function resolveHooksSessionPrimer(config: PartialConfig): ResolvedSetting<SessionPrimerMode> {
-  const fromFile = (config.hooks as { sessionPrimer?: SessionPrimerMode } | undefined)
-    ?.sessionPrimer;
+/** One hook arm: file or default. Read per fire by the daemon, so a `config
+ *  set` takes effect on the next prompt with no re-install. */
+export function resolveHook(config: PartialConfig, arm: HookArm): ResolvedSetting<boolean> {
+  const fromFile = config.hooks?.[arm];
   if (fromFile !== undefined) return { value: fromFile, source: 'file' };
-  return { value: CONFIG_DEFAULTS.hooks.sessionPrimer, source: 'default' };
+  return { value: CONFIG_DEFAULTS.hooks[arm], source: 'default' };
 }
 
-/** hooks.stopNag: file or default, same shape as hooks.webSearch. */
-function resolveHooksStopNag(config: PartialConfig): ResolvedSetting<StopNagMode> {
-  const fromFile = (config.hooks as { stopNag?: StopNagMode } | undefined)?.stopNag;
-  if (fromFile !== undefined) return { value: fromFile, source: 'file' };
-  return { value: CONFIG_DEFAULTS.hooks.stopNag, source: 'default' };
+function resolveHookSettings(config: PartialConfig): EffectiveSettings['hooks'] {
+  return Object.fromEntries(
+    HOOK_ARMS.map((arm) => [arm, resolveHook(config, arm)]),
+  ) as EffectiveSettings['hooks'];
 }
 
-/** hooks.push: file or default, same shape as hooks.webSearch — read at run time
- *  by every push arm, so a set takes effect with no re-install. */
-function resolveHooksPush(config: PartialConfig): ResolvedSetting<PushMode> {
-  const fromFile = config.hooks?.push;
-  if (fromFile !== undefined) return { value: fromFile, source: 'file' };
-  return { value: CONFIG_DEFAULTS.hooks.push, source: 'default' };
-}
-
-/** hooks.capture: file or default, same shape as hooks.webSearch. */
-function resolveHooksCapture(config: PartialConfig): ResolvedSetting<CaptureMode> {
-  const fromFile = config.hooks?.capture;
-  if (fromFile !== undefined) return { value: fromFile, source: 'file' };
-  return { value: CONFIG_DEFAULTS.hooks.capture, source: 'default' };
+/** Per-arm merge over the defaults, for the effective Config object. */
+function resolveHooksConfig(raw: PartialConfig): Config['hooks'] {
+  return Object.fromEntries(
+    HOOK_ARMS.map((arm) => [arm, raw.hooks?.[arm] ?? CONFIG_DEFAULTS.hooks[arm]]),
+  ) as Config['hooks'];
 }
 
 /**
@@ -1055,8 +794,8 @@ export function resolvePublishDefaultPrice(input: {
  *
  * 0600 BECAUSE config.json NOW HOLDS A CREDENTIAL: `shelfBypassSecret` is the
  * team shelf's shared door key, and every other secret in this tree is 0600
- * (the wallet, the passphrase, the session key, the spend ledger, the generated
- * hook scripts) — wallet/local.ts even warns when it finds one that is not.
+ * (the wallet, the passphrase, the session key, the spend ledger, the daemon
+ * token) — wallet/local.ts even warns when it finds one that is not.
  * `dirMode: 0o700` is not a substitute: node's recursive mkdir does not chmod a
  * directory that already exists, so a `~/.tenjin` or `TENJIN_DATA_DIR` created
  * at 0755 by a devcontainer volume, a restored backup or a shared CI image left
@@ -1076,7 +815,7 @@ export async function writeConfig(dir: string, config: Config): Promise<void> {
  * sendMaxAmount deliberately bypasses fileOrDefault: it has no usable default
  * (the operator's require-set-before-first-send posture). Absent from
  * config.json it resolves to the SEND_MAX_UNSET sentinel with source 'default',
- * which `tenjin send` refuses outright — the cap must be set to an amount, "0"
+ * which `tenjin wallet send` refuses outright — the cap must be set to an amount, "0"
  * (disable), or an explicit "none" (uncapped opt-in) before the first send.
  */
 function resolveSendMaxAmount(config: PartialConfig): ResolvedSetting<string> {

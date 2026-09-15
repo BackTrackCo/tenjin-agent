@@ -11,7 +11,7 @@ import {
   reply,
 } from '../lib/read-test-utils';
 import { libraryDir } from '../lib/library';
-import { recordSearch } from '../lib/state-store';
+import { recordSearch } from '../lib/searches';
 import type { CommandContext, GlobalFlags } from '../context';
 
 let dir: string;

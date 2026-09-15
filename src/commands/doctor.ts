@@ -3,7 +3,7 @@ import { Stream } from 'node:stream';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { readFile } from 'node:fs/promises';
+import { lstat, rm, stat } from 'node:fs/promises';
 import {
   OPTIONAL_PAY_SKILL,
   OPTIONAL_SKILL_NAMES,
@@ -16,7 +16,6 @@ import {
   anyTenjinSkill,
   cliSkillsWired,
   detectHarnesses,
-  harnessDetectedBy,
   harnessFlagFor,
   harnessInPlay,
   harnessReads,
@@ -27,16 +26,11 @@ import {
   readSkillFile,
   shadowedCliSkills,
 } from '../lib/skill-wiring';
-import { readHermesIntegrationStatus, resolveHermesHomeLenient } from '../lib/hermes';
 import { skillMaterialize } from '../lib/skill-materialize';
-import type {
-  DirState,
-  HarnessTarget,
-  HarnessWiring,
-  NotInvocableReason,
-} from '../lib/skill-wiring';
+import type { HarnessWiring, NotInvocableReason } from '../lib/skill-wiring';
+import type { Harness, HarnessAdapter } from '../adapters/types';
 import { fetchJson, type FetchJsonFailure, type ShelfBypass } from '../lib/http';
-import { loadRawConfig, resolveSettings } from '../lib/config';
+import { loadRawConfig, resolveGrantDeclined, resolveSettings } from '../lib/config';
 import {
   isTeamModeConfig,
   isTeamShelfOrigin,
@@ -44,20 +38,25 @@ import {
   resolveShelfBypass,
 } from '../lib/settings';
 import { tryOriginOf, trimSlash } from '../lib/url';
-import { configPath, hooksDir, sessionPath } from '../lib/paths';
+import { configPath, dataDir as resolveDataDir, loopDbPath } from '../lib/paths';
 import { toMoney } from '../lib/money';
 import { walletFileExists } from '../lib/wallet/store';
-import { isSessionPresentable, readSessionFile, scopeSatisfies } from '../lib/session-present';
 import { sanitizeForTerminal } from '../lib/output';
-import { modeGatedPointer, permissionsPointer, recommendedPermissions } from '../lib/permissions';
-import { inspectFreeVerbRules, MODE_GATED_RULES } from '../lib/harness-permissions';
+import { modeGatedPointer, recommendedPermissions } from '../lib/permissions';
 import {
-  PUSH_SCRIPT_FILES,
-  compareHookScripts,
-  countPushHookEntries,
-  pushScriptsPresent,
-} from '../lib/harness-hooks';
-import { PUSH_VITEST_REPORTER_FILE } from '../lib/push-scripts';
+  applyGrantDecline,
+  claudeSettingsPath,
+  inspectClaudeGrant,
+  MODE_GATED_RULES,
+} from '../lib/harness-permissions';
+import { trustKey } from '../lib/codex-trust';
+import type { CodexTrust, CodexTrustReport } from '../lib/codex-trust';
+import { hookBundlesPresent, registeredHooks } from '../lib/harness-hooks';
+import { installedHarnessInPlay } from '../lib/harness-presence';
+import type { RegisteredHooks } from '../lib/harness-hooks';
+import { ADAPTERS } from '../adapters/registry';
+import { existsSync } from 'node:fs';
+import { health, missingRoutes, readPid } from '../hooks/shim';
 import type { EffectiveSettings, PartialConfig, PublishMode } from '../lib/config';
 import type { ErrorCode } from '../schemas';
 import type { Io } from '../lib/output';
@@ -68,7 +67,8 @@ import type {
   WalletVerification,
 } from '../lib/wallet';
 import type { CommandContext, CommandResult } from '../context';
-import { readStoreJournal, stateDbPath, probeSqlite } from '../lib/state-store';
+import { openLoopDbForCli } from '../lib/loop-db';
+import { runRetention } from '../daemon/retention';
 
 /**
  * One environment/reachability check. The doctor agent builds the check list
@@ -111,15 +111,10 @@ const FIX_CHECK_NETWORK_AND_BASE_URL =
  * The base URL was RIGHT and the credential was missing. Sending the operator to
  * `baseUrl` here (what a bare CONTRACT_MISMATCH did, #218) asks them to change
  * the one setting that was already correct. Names the config key and no value:
- * the secret itself never reaches any check output. Says "if" because the page
- * signal alone does not prove protection; only the off-host redirect does, and
- * the detail line carries that distinction. Names the alternative for the same
- * reason {@link FIX_ROTATE_SHELF_BYPASS} does: an HTML page also answers a
- * `baseUrl` that is one typo off any site on the web, and setting a key would
- * not touch that.
+ * the secret itself never reaches any check output.
  */
 const FIX_SET_SHELF_BYPASS =
-  'If that deployment is access-protected these probes did not get past it; set the team shelf key: `tenjin config set shelfBypassSecret <value>`. If it is not, something else answered instead (a proxy, WAF, or a base URL that is not the shelf you meant); confirm which before setting one.';
+  'If that deployment is access-protected, set the team shelf key: `tenjin config set shelfBypassSecret <value>`.';
 /**
  * Same page, but the probe CARRIED the configured key and still did not get
  * past. Telling this machine to set the secret it already sent (the stale-key
@@ -127,7 +122,7 @@ const FIX_SET_SHELF_BYPASS =
  * 307 interstitial) would read as "doctor says my config is fine as is".
  */
 const FIX_ROTATE_SHELF_BYPASS =
-  'The configured shelfBypassSecret was sent and did not get past. Either the key is stale or rotated (update it: `tenjin config set shelfBypassSecret <value>`), or something between you and the shelf answered instead (a proxy, WAF, or another sign-in layer); confirm which before rotating.';
+  'The configured shelfBypassSecret was sent and did not get past, so it is stale or rotated: `tenjin config set shelfBypassSecret <value>`.';
 /**
  * A keyed probe was redirected, but to the SAME host it asked for: an `http://`
  * base URL that 301s to https, or a host normalising to its canonical name. The
@@ -135,21 +130,21 @@ const FIX_ROTATE_SHELF_BYPASS =
  * again, blaming the setting that was right. `baseUrl` is the one that moves.
  */
 const FIX_FOLLOW_REDIRECT_IN_BASE_URL =
-  'That URL redirects, and a probe carrying the team shelf key does not follow redirects. Point the configured base URL at the canonical host and scheme it redirects to: `tenjin config set baseUrl <url>`.';
+  'That URL redirects: point the configured base URL at the canonical host it names (`tenjin config set baseUrl <url>`).';
 /**
  * The same page, from a URL where the team key is not the answer. Naming
  * `baseUrl` would be wrong too: something answered, it just was not Tenjin. So
- * this describes what happened and points at the two things that can cause it,
- * without prescribing either.
+ * this describes what happened rather than prescribing a setting.
  */
 const FIX_PAGE_NOT_THE_API =
-  'Something between this machine and that URL answered with a page instead of the API (a proxy, a captive portal, or a sign-in wall). Check your network path and the configured base URL (`tenjin config get baseUrl`).';
+  'Something answered with a page instead of the API (a proxy, a captive portal, or a sign-in wall); check your network path and the configured base URL (`tenjin config get baseUrl`).';
 
 /**
  * A CheckResult plus the error code to raise if it is a *required* failure. Only
  * required checks carry a `failCode`; the outcome step raises the first one, so
- * the failure envelope's `error.code` names what actually broke (api-contract
- * unreachable vs malformed differ) while still carrying the whole check list.
+ * the failure envelope's `error.code` names what actually broke (an `api` that
+ * is unreachable and one that is malformed differ) while still carrying the
+ * whole check list.
  */
 interface BuiltCheck {
   result: CheckResult;
@@ -157,14 +152,13 @@ interface BuiltCheck {
 }
 
 export interface DoctorDeps {
+  /** Harness lifecycle implementations; tests inject adapters with recorded trust answers. */
+  adapters?: Readonly<Record<Harness, HarnessAdapter>>;
   /** Environment for wallet-key detection and settings precedence. */
   env?: NodeJS.ProcessEnv;
-  /** The `node:sqlite` probe; tests inject a failing one to exercise the
+  /** The loop-database open; tests inject a failing one to exercise the
    * damaged-install diagnosis without a damaged install. */
-  probeSqlite?: typeof probeSqlite;
-  /** The degraded-store marker reader; tests inject one so the rollback-journal
-   * line can be exercised without a filesystem that cannot do WAL. */
-  readStoreJournal?: typeof readStoreJournal;
+  openLoopDb?: typeof openLoopDbForCli;
   /** Injected fetch for the reachability checks; tests pass a canned stub. */
   fetchImpl?: typeof fetch;
   /** Inject the active wallet provider. When set, NO local fs/env is consulted —
@@ -186,8 +180,6 @@ export interface DoctorDeps {
   now?: () => number;
   /** Packaged skills to compare the wired copies against; defaults to this build's. */
   skillsSourceDir?: string;
-  /** Hermes home override; defaults through HERMES_HOME using the same resolver as install. */
-  hermesHome?: string;
   /**
    * Passphrase seams for the wallet verification (#70), which reads the OS
    * credential store. Tests inject a platform with no store, or a stubbed exec,
@@ -213,6 +205,13 @@ export interface DoctorChecks {
    * which harness rules the operator needs, and it can never pass or fail.
    */
   publishMode: PublishMode;
+  /**
+   * Whether any harness here can carry a `Bash(...)` rule at all. False on a
+   * Codex-only machine, and it suppresses both the mode-gated pointer and the
+   * `effective` claim on the recommendation payload: rules a harness has never
+   * heard of are not a finding about that harness (tenjin-agent#342).
+   */
+  grantable: boolean;
 }
 
 export async function collectDoctorChecks(
@@ -248,33 +247,32 @@ export async function collectDoctorChecks(
   // instead of sending the team shelf's key to that host three times.
   const bypass: ShelfBypass | undefined = resolveShelfBypass(config, settings);
   const home = deps.homeDir ?? homedir();
+  const adapters = deps.adapters ?? ADAPTERS;
   const which = deps.which ?? ((bin: string) => onPath(bin, env));
   const requested = config.install?.harness ?? [];
-  // NEVER the strict resolver here. Doctor is the command you reach for when
-  // something is already broken, so a stray relative HERMES_HOME must not abort it
-  // before a single check runs: it warns on the Hermes check and falls back.
-  const hermesTarget =
-    deps.hermesHome === undefined
-      ? resolveHermesHomeLenient(home, env)
-      : { home: deps.hermesHome, warning: undefined };
-  const hermesHome = hermesTarget.home;
-
-  const built: BuiltCheck[] = [checkNode(), await checkStateStore(deps.probeSqlite ?? probeSqlite)];
-  // Beside the probe it belongs to, and only when there is something to say.
-  const journal = await checkStoreJournal(ctx.dataDir, deps.readStoreJournal ?? readStoreJournal);
-  if (journal !== null) built.push(journal);
+  const grantDeclined = resolveGrantDeclined(config.install?.grantDeclined);
+  const teamMode = isTeamModeConfig(config);
+  const built: BuiltCheck[] = [
+    checkNode(),
+    // One open, two facts: the file opens, and what it holds that is waiting.
+    ...checkLoopDb(ctx.dataDir, deps.openLoopDb ?? openLoopDbForCli),
+  ];
+  // Only when there is something to say: a machine on the default data dir is
+  // the ordinary case and gets no line about it.
+  const redirected = checkDataDirOverride(env);
+  if (redirected !== null) built.push(redirected);
   built.push(
     configCheck,
-    // The three baseUrl probes carry the team shelf's bypass. Without it every
-    // one of them reports a protected team deployment as unreachable, which is
-    // the check saying "your CLI is broken" about the one setting that is right.
-    await checkApiContract(
+    // The two baseUrl probes carry the team shelf's bypass. Without it both
+    // report a protected team deployment as unreachable, which is the check
+    // saying "your CLI is broken" about the one setting that is right.
+    ...(await checkShelfContract(
       baseUrl,
       ctx.flags.timeout,
       deps.fetchImpl,
       bypass,
       shelfKeyIsTheRemedy(settings, bypass),
-    ),
+    )),
     await checkReadPath(
       baseUrl,
       ctx.flags.timeout,
@@ -282,60 +280,37 @@ export async function collectDoctorChecks(
       bypass,
       shelfKeyIsTheRemedy(settings, bypass),
     ),
-    await checkSearchContract(
-      baseUrl,
-      ctx.flags.timeout,
-      deps.fetchImpl,
-      bypass,
-      shelfKeyIsTheRemedy(settings, bypass),
-    ),
+  );
+
+  // Silent unless one of the two settings claims a team shelf, so a default
+  // machine gets no check about a feature it never turned on.
+  const teamShelf = checkTeamShelf(settings, bypass);
+  if (teamShelf !== null) built.push(teamShelf);
+
+  // Silent (nothing pushed) on a machine with no hook entries of ours at all;
+  // see checkHooks.
+  built.push(
+    ...(await checkHooks(
+      home,
+      ctx.dataDir,
+      env,
+      deps.openLoopDb ?? openLoopDbForCli,
+      settings.publishMode.value,
+      adapters,
+      grantDeclined,
+    )),
     await checkSkills(
       home,
       which,
       requested,
       settings.bazaarPay.value,
       deps.skillsSourceDir,
-      hermesHome,
       // The raw config, not resolved settings: the staleness compare has to shape
       // the packaged copies the way the WRITERS shaped them, and they read the
       // machine's configured mode with no flag layer (lib/skill-materialize).
-      isTeamModeConfig(config),
+      teamMode,
     ),
-    await checkSession(ctx.dataDir, deps.now ?? Date.now, tryOriginOf(baseUrl)),
   );
-
-  // Silent (no check pushed) on a machine with no hook scripts on disk at all;
-  // see checkHookScripts.
-  const hookScripts = await checkHookScripts(ctx.dataDir);
-  if (hookScripts !== null) built.push(hookScripts);
-
-  // Only when the experiment is on. Off, there is nothing to be half-wired and
-  // a permanently-present check about a feature nobody enabled is noise.
-  if (config.hooks?.push === 'on') {
-    built.push(await checkPushHooks(home, ctx.dataDir));
-  }
-
-  // Same rule: silent unless one of the two settings claims a team shelf, so a
-  // default machine gets no check about a feature it never turned on.
-  const teamShelf = checkTeamShelf(settings, bypass);
-  if (teamShelf !== null) built.push(teamShelf);
-
-  // Same rule again: silent when this project has no vitest, or already wires
-  // the reporter the failure arm's test-identity lane (tenjin-agent#267) prefers.
-  const testReporterHint = await checkTestReporterHints(cwd, ctx.dataDir);
-  if (testReporterHint !== null) built.push(testReporterHint);
-
-  const hermes = await checkHermes({
-    home,
-    hermesHome,
-    which,
-    requested,
-    webSearch:
-      (config.hooks as { webSearch?: string; searchMode?: string })?.webSearch ??
-      (config.hooks as { searchMode?: string })?.searchMode,
-    homeWarning: hermesTarget.warning,
-  });
-  if (hermes !== null) built.push(hermes);
 
   // The wallet/custody/balance checks all come from the ACTIVE provider: it owns
   // describe() and diagnostics(), so doctor never runs its own fs/env probe.
@@ -348,15 +323,34 @@ export async function collectDoctorChecks(
   // Ask the settings file rather than assuming: the pointer below exists to name
   // a rule that is MISSING, and printing it at a machine that already carries
   // both is a nag with no action behind it.
-  const probe = await inspectFreeVerbRules(deps.homeDir ?? homedir(), publishMode);
+  //
+  // AND ONLY WHERE THE RULES MEAN ANYTHING. `Bash(...)` is Claude Code's
+  // grammar. On a Codex-only machine the pointer named two rules that harness
+  // has never heard of and offered `tenjin install` as the remedy, which
+  // writes nothing there — so the operator's `publish.mode=auto` looked one
+  // command away from working when nothing would have made it work
+  // (tenjin-agent#342). The per-harness `permissions` check carries the truth
+  // for those machines instead.
+  const grantable = await installedHarnessInPlay(adapters.claude, home, ctx.dataDir, {
+    env,
+    which,
+    requested: config.install?.harness ?? [],
+  });
+  const probe = applyGrantDecline(
+    await inspectClaudeGrant(deps.homeDir ?? homedir(), publishMode),
+    grantDeclined,
+  );
   const gated = new Set<string>(MODE_GATED_RULES);
-  const missingModeGated = (probe.pending ?? []).filter((r) => gated.has(r));
+  const missingModeGated = grantable
+    ? probe.missing.filter((rule) => gated.has(rule))
+    : ([] as string[]);
   const firstFail = built.find((b) => b.result.required && b.result.status === 'fail');
-  if (firstFail === undefined) return { checks, publishMode, missingModeGated };
+  if (firstFail === undefined) return { checks, publishMode, missingModeGated, grantable };
   return {
     checks,
     publishMode,
     missingModeGated,
+    grantable,
     failure: { code: firstFail.failCode ?? 'INTERNAL', result: firstFail.result },
   };
 }
@@ -365,7 +359,10 @@ export async function runDoctor(
   ctx: CommandContext,
   deps: DoctorDeps = {},
 ): Promise<CommandResult> {
-  const { checks, failure, publishMode, missingModeGated } = await collectDoctorChecks(ctx, deps);
+  const { checks, failure, publishMode, missingModeGated, grantable } = await collectDoctorChecks(
+    ctx,
+    deps,
+  );
   if (failure !== undefined) {
     const r = failure.result;
     // The allowlist rides on the FAILURE envelope too. An operator whose fresh
@@ -376,19 +373,15 @@ export async function runDoctor(
     // the machine payload is where this has to land.
     throw new CliError(failure.code, r.detail, {
       ...(r.fix !== undefined ? { fix: r.fix } : {}),
-      details: { checks, permissions: recommendedPermissions(publishMode) },
+      details: { checks, permissions: recommendedPermissions(publishMode, grantable) },
     });
   }
 
-  // The discoverability surface for the auto-mode denial problem (#33), now one
-  // line rather than the ~60 that used to bury the check list this command was
-  // run for: an operator whose agent just got denied still learns the allowlist
-  // exists and where to get it. It reports nothing about the local machine, so it
-  // is deliberately NOT a check: it can never pass or fail. `--json` is unchanged
-  // and still carries the whole recommendation as data.
-  // The mode-gated line goes ABOVE the pointer, and only when there is one: it
-  // names a rule this machine's own mode needs, which is closer to a finding than
-  // to the standing recommendation the pointer links to.
+  // The one line doctor adds to the check list, and only when there is one: it
+  // names a rule this machine's own mode is missing, which is a finding. The
+  // standing recommendation is `--json`'s `permissions` payload and the page it
+  // documents; a pointer at that page on every run was a nag with no action
+  // behind it, so there is none.
   // An env-set mode needs `config set`, not `install`: install resolves the mode
   // from the global file, so it would write nothing for a mode that only exists
   // in this process's environment.
@@ -404,105 +397,171 @@ export async function runDoctor(
     : modeGatedPointer(publishMode, missingModeGated, 'tenjin install');
   const showModeLine = fromEnv ? missingModeGated.length > 0 : modeLine !== null;
   return {
-    data: { status: 'pass', checks, permissions: recommendedPermissions(publishMode) },
+    data: { status: 'pass', checks, permissions: recommendedPermissions(publishMode, grantable) },
     humanLines: [
       ...renderDoctorHuman(ctx.io, checks),
-      '',
-      ...(showModeLine && modeLine !== null ? [modeLine] : []),
-      permissionsPointer(),
+      ...(showModeLine && modeLine !== null ? ['', modeLine] : []),
     ],
   };
+}
+
+/**
+ * The seven files and directories the loop database replaced. Deleted by
+ * `doctor --prune`, never imported: the error→fix records and the outcome
+ * history in `state.db` are a record of a system that no longer exists, and a
+ * one-time importer is code that lives forever to serve a week (plan 03, owner
+ * decision 3).
+ *
+ * `searches.json.lock` is in the list because the file version took an mkdir
+ * mutex: a lock directory left behind by a crashed writer is never
+ * stale-stolen (that is the protocol's whole safety property), so nothing
+ * would ever remove it once its owner is gone.
+ *
+ * `hook-nags.json` and `hook-health.json` are the pre-daemon hook notebooks
+ * (which loops were already nagged about; the dispatch arm's health log).
+ * Nothing reads either since the loop database replaced them — no importer in
+ * `src/` references them — so they are retired the same way (#315).
+ */
+const RETIRED_STATE_ENTRIES = [
+  'push-ledger.jsonl',
+  'searches.json',
+  'searches.json.lock',
+  'push',
+  'candidates',
+  'hook-nags.json',
+  'hook-health.json',
+] as const;
+
+/** The retired database and the two WAL sidecars that are meaningless without it. */
+const RETIRED_STORE_FILES = ['state.db', 'state.db-wal', 'state.db-shm'] as const;
+
+/**
+ * `tenjin doctor --prune`: run the loop ledger through its retention rule, then
+ * delete what the loop database replaced.
+ *
+ * NAMED ENTRIES ONLY, and never a sweep. The data dir also holds the wallet,
+ * the config and the library: those are the operator's, `install` did not
+ * create them, and their loss is unrecoverable. So this removes exactly the
+ * names below and reports each one, rather than deleting anything on a pattern.
+ *
+ * The retention pass is the same {@link runRetention} the daemon runs at its
+ * idle exit — a bounded, batched delete of `fires` past `RETENTION_DAYS` or
+ * `FIRES_ROW_CAP` with their `legs` by cascade, then a checkpoint and an
+ * incremental vacuum. Running it here is what gives an operator whose daemon
+ * never goes idle a way to reclaim the file by hand.
+ */
+export async function runDoctorPrune(ctx: CommandContext): Promise<CommandResult> {
+  const db = openLoopDbForCli(ctx.dataDir);
+  let retention;
+  try {
+    retention = runRetention(db, Date.now());
+  } finally {
+    db.close();
+  }
+  const removed: string[] = [];
+  for (const name of [...RETIRED_STORE_FILES, ...RETIRED_STATE_ENTRIES]) {
+    const path = join(ctx.dataDir, name);
+    // A symlink parked at one of these names is not ours to follow, and a
+    // socket or device is not ours to delete.
+    const found = await lstat(path).catch(() => null);
+    if (found === null || (!found.isFile() && !found.isDirectory())) continue;
+    await rm(path, { recursive: found.isDirectory(), force: true });
+    removed.push(path);
+  }
+  const lines = [
+    `${loopDbPath(ctx.dataDir)}: removed ${retention.fires} fire(s), ${retention.marks} mark(s), ${retention.handoff} parked handoff(s)` +
+      (retention.truncated ? ' (time-bounded; run it again to finish)' : ''),
+    ...(removed.length === 0
+      ? ['Nothing retired left to remove.']
+      : ['Removed:', ...removed.map((path) => `  - ${path}`)]),
+    'Kept: your wallet, config and library under the data dir.',
+  ];
+  return { data: { retention, removed }, humanLines: lines };
 }
 
 function checkNode(): BuiltCheck {
   const version = process.versions.node;
   const major = Number.parseInt(version.split('.')[0] ?? '0', 10);
   if (major >= 24) {
-    return { result: { name: 'node', status: 'ok', required: true, detail: `Node ${version}` } };
+    return { result: { name: 'node', status: 'ok', required: true, detail: version } };
   }
   return {
     result: {
       name: 'node',
       status: 'fail',
       required: true,
-      detail: `Node ${version} is unsupported (need >= 24)`,
-      fix: 'Install Node 24 or newer',
+      detail: `${version}, below the 24 this CLI needs`,
+      fix: 'Install Node 24 or newer.',
     },
     failCode: 'NODE_UNSUPPORTED',
   };
 }
 
 /**
- * Is `node:sqlite` there and answering?
+ * Does this machine's loop database open, and what is it holding?
  *
- * The hook sidecar's whole state — the already-shown set, the lookup buckets,
- * the per-session working state, the local error/fix pairings — lives in one
- * SQLite file opened through Node's built-in module (tenjin-agent#209). The
- * hooks fail OPEN without it, which is the right posture for a tool call and
- * the wrong one for a diagnosis: a machine whose sidecar has quietly stopped
- * remembering anything looks identical from the outside to one that simply had
- * nothing to say. So doctor asks directly.
+ * The whole of the loop's state — every fire and leg, the gate marks, the
+ * search record — is one SQLite file opened through Node's
+ * built-in module. The daemon fails OPEN without it, which is the right
+ * posture for a tool call and the wrong one for a diagnosis: a machine whose
+ * loop has quietly stopped remembering anything looks identical from the
+ * outside to one that simply had nothing to say. So doctor opens it, which
+ * proves the module, the file and its shape in one go.
+ *
+ * THE OPEN IS THE PROBE: a separate `node:sqlite` import check answers a
+ * strict subset of what opening the real file answers, so there is no second
+ * check and no second handle.
  */
-async function checkStateStore(probe_: typeof probeSqlite): Promise<BuiltCheck> {
-  const probe = await probe_();
-  if (probe.ok) {
-    return {
-      result: {
-        name: 'state-store',
-        status: 'ok',
-        required: true,
-        detail: `node:sqlite OK (SQLite ${probe.version ?? 'unknown'})`,
+function checkLoopDb(dir: string, open: typeof openLoopDbForCli): BuiltCheck[] {
+  const path = loopDbPath(dir);
+  try {
+    const db = open(dir);
+    try {
+      return [{ result: { name: 'store', status: 'ok', required: true, detail: `${path} open` } }];
+    } finally {
+      db.close();
+    }
+  } catch (err) {
+    return [
+      {
+        result: {
+          name: 'store',
+          status: 'fail',
+          required: true,
+          // Anyone reading this already cleared the >=24 preflight in src/index.ts,
+          // so "upgrade Node" cannot be the remedy: the runtime is supported and
+          // the open still failed, which points at the install — a damaged or
+          // re-bundled dist (tsup once shipped `import("sqlite")`,
+          // tenjin-agent#225), a patched runtime — or at a file another build's
+          // daemon is holding open.
+          detail: `${path} could not be opened, so the loop keeps no state at all: ${err instanceof Error ? err.message : String(err)}`,
+          fix: 'Run `tenjin daemon stop` and retry; if it persists, reinstall tenjin-cli (npm i -g tenjin-cli@latest).',
+        },
+        failCode: 'INTERNAL',
       },
-    };
+    ];
   }
-  return {
-    result: {
-      name: 'state-store',
-      status: 'fail',
-      required: true,
-      // Anyone reading this already cleared the >=24 preflight in src/index.ts,
-      // so "upgrade Node" cannot be the remedy: the runtime is supported and the
-      // import still failed, which points at the install — a damaged or
-      // re-bundled dist (tsup once shipped `import("sqlite")`, tenjin-agent#225),
-      // a patched runtime. Distinct code from the preflight so `--json` readers
-      // can tell the two apart.
-      detail: `node:sqlite failed to load on Node ${process.versions.node}, so the hooks keep no state at all`,
-      fix: 'Reinstall tenjin-cli (npm i -g tenjin-cli@latest); if it persists, report the output of node -e "import(\'node:sqlite\')"',
-    },
-    failCode: 'INTERNAL',
-  };
 }
 
 /**
- * Is the store stuck on a rollback journal?
+ * Is this invocation pointed at a data dir that is not the machine's own?
  *
- * The sibling of the probe above, at lower stakes. `PRAGMA journal_mode = wal`
- * is the one statement in the store the busy timeout cannot protect, so an open
- * that loses it twice runs on against a rollback journal — every statement still
- * correct, but the eight hooks a single turn can fire now serialise instead of
- * overlapping. `openStore` records that in one row; without a line here it stays
- * a fact no one can reach, which is the state the `node:sqlite` check exists to
- * refuse.
- *
- * NEVER REQUIRED, NEVER A FAIL. Degradation is not absence: the store answers
- * real counts, so the caps and the dedup all still work (tenjin-agent#246). And
- * silent when healthy — a permanently-present line about a pragma that has never
- * failed is the noise that teaches an operator to skim the page.
+ * `TENJIN_DATA_DIR` is the documented way to run a second profile, a CI job or
+ * an ephemeral agent (tenjin-agent#227), and it is silent about one
+ * consequence: `lib/skill-heal.ts` stands its self-healing down under an
+ * override, because the skills it would converge are machine-wide while the
+ * mode that shapes them is read per invocation. Nothing else says so, so
+ * doctor does — as a note, never a warning: this is what the operator asked
+ * for.
  */
-async function checkStoreJournal(
-  dataDir: string,
-  read: typeof readStoreJournal,
-): Promise<BuiltCheck | null> {
-  const journal = await read(dataDir);
-  if (journal === null || journal.mode !== 'rollback') return null;
+function checkDataDirOverride(env: NodeJS.ProcessEnv): BuiltCheck | null {
+  if (resolveDataDir(env) === resolveDataDir({})) return null;
   return {
     result: {
-      name: 'state-store-journal',
-      status: 'warn',
+      name: 'data-dir',
+      status: 'ok',
       required: false,
-      detail: `The state store at ${stateDbPath(dataDir)} is on a rollback journal (WAL unavailable) as of ${new Date(journal.at).toISOString()}, so concurrent hooks serialise on it instead of overlapping`,
-      fix: 'Usually the data directory sits on a filesystem that cannot do WAL — a network mount, a container overlay. Point TENJIN_DATA_DIR at local disk; the flag clears itself the next time a WAL switch succeeds. Safe to ignore otherwise: the store stays correct either way, only slower under concurrent hooks.',
-      data: { mode: journal.mode, at: journal.at },
+      detail: `${resolveDataDir(env)} (TENJIN_DATA_DIR); skill self-healing stands down while it is set`,
     },
   };
 }
@@ -519,9 +578,7 @@ async function loadConfigForDoctor(
   try {
     const config = await loadRawConfig(dataDir);
     const detail =
-      Object.keys(config).length === 0
-        ? 'No config file; using defaults'
-        : `Config at ${configPath(dataDir)} is valid`;
+      Object.keys(config).length === 0 ? 'no config file; using defaults' : configPath(dataDir);
     return { config, check: { result: { name: 'config', status: 'ok', required: true, detail } } };
   } catch (err) {
     if (err instanceof CliError && err.code === 'CONFIG_INVALID') {
@@ -591,7 +648,7 @@ function shelfGateFix(
 /**
  * What a gate-suspected failure SAYS happened, shared by the probes that print
  * one so a `detail` and its `fix` cannot tell different stories about one
- * response (read-path used to print the transport's raw "was not valid JSON"
+ * response (`read` used to print the transport's raw "was not valid JSON"
  * beside a fix about the key). Claims no more than the signal proves: an
  * off-host landing proves a sign-in redirect, an HTML content-type alone proves
  * only that a page answered. The status rides both arms, since a 401 is the
@@ -604,14 +661,28 @@ function gateDetail(url: string, res: FetchJsonFailure): string {
     : `${url} answered${status} with an HTML page, not JSON`;
 }
 
-async function checkApiContract(
+/**
+ * ONE `openapi.json`, two verdicts.
+ *
+ * `api` is required: the document proves a Tenjin API answered and names its
+ * version. `search` is warn-only and rides the same response — the deployment
+ * either advertises `/api/search` or predates search v3 (tenjin#137), which
+ * `tenjin search` and the buy path that starts there need. Two fetches of one
+ * document is what this was, and the second one's failure branch existed mostly
+ * to avoid contradicting the first.
+ *
+ * It probes `/api/search`, the path the client actually calls. The
+ * `/api/agent/search` alias it replaced answers 410 after one release, so a
+ * deployment advertising ONLY the alias is exactly the case to warn about.
+ */
+async function checkShelfContract(
   baseUrl: string,
   timeoutMs: number,
   fetchImpl?: typeof fetch,
   bypass?: ShelfBypass,
   /** Whether the bypass key is a remedy this machine can use; see {@link shelfKeyIsTheRemedy}. */
   shelfKeyRemedy = false,
-): Promise<BuiltCheck> {
+): Promise<BuiltCheck[]> {
   const url = `${trimSlash(baseUrl)}/openapi.json`;
   const res = await fetchJson(url, {
     timeoutMs,
@@ -627,104 +698,75 @@ async function checkApiContract(
     // than the signal proves: an off-host landing proves a sign-in redirect, an
     // HTML content-type alone proves only that a page answered.
     const gated = res.gateSuspected === true;
-    return {
-      result: {
-        name: 'api-contract',
-        status: 'fail',
-        required: true,
-        detail: gated
-          ? gateDetail(url, res)
-          : malformed
-            ? `OpenAPI document at ${url} was not valid JSON`
-            : `Could not reach the Tenjin API at ${url}: ${res.message}`,
-        fix:
-          shelfGateFix(res, bypass, shelfKeyRemedy) ??
-          (malformed ? FIX_POINT_AT_TENJIN_API : FIX_CHECK_NETWORK_AND_BASE_URL),
+    // The gate-aware fix rides BOTH verdicts: one response cannot be told to
+    // set a key on one line and to check the base URL on the next.
+    const fix =
+      shelfGateFix(res, bypass, shelfKeyRemedy) ??
+      (malformed ? FIX_POINT_AT_TENJIN_API : FIX_CHECK_NETWORK_AND_BASE_URL);
+    return [
+      {
+        result: {
+          name: 'api',
+          status: 'fail',
+          required: true,
+          detail: gated
+            ? gateDetail(url, res)
+            : malformed
+              ? `OpenAPI document at ${url} was not valid JSON`
+              : `Could not reach the Tenjin API at ${url}: ${res.message}`,
+          fix,
+        },
+        failCode: malformed ? 'CONTRACT_MISMATCH' : 'API_UNREACHABLE',
       },
-      failCode: malformed ? 'CONTRACT_MISMATCH' : 'API_UNREACHABLE',
-    };
-  }
-  const version = infoVersion(res.json);
-  if (version === undefined) {
-    return {
-      result: {
-        name: 'api-contract',
-        status: 'fail',
-        required: true,
-        detail: `OpenAPI document at ${url} is missing a string info.version`,
-        fix: FIX_POINT_AT_TENJIN_API,
-      },
-      failCode: 'CONTRACT_MISMATCH',
-    };
-  }
-  return {
-    result: {
-      name: 'api-contract',
-      status: 'ok',
-      required: true,
-      detail: `Tenjin API ${version} at ${baseUrl}`,
-    },
-  };
-}
-
-/**
- * WARN-level (never fails doctor): is the search endpoint advertised in the
- * OpenAPI doc? Absent means the deployment predates search v3 (tenjin#137), so
- * `tenjin search` and the buy path that starts there will not work against it.
- * Warn-only because doctor's job is a working READ path, and search is additive.
- *
- * It probes `/api/search`, the path the client actually calls. The
- * `/api/agent/search` alias it replaced is deprecated and answers 410 after one
- * release, so a deployment advertising ONLY the alias is exactly the case this
- * check has to warn about rather than pass.
- */
-async function checkSearchContract(
-  baseUrl: string,
-  timeoutMs: number,
-  fetchImpl?: typeof fetch,
-  bypass?: ShelfBypass,
-  /** Whether the bypass key is a remedy this machine can use; see {@link shelfKeyIsTheRemedy}. */
-  shelfKeyRemedy = false,
-): Promise<BuiltCheck> {
-  const url = `${trimSlash(baseUrl)}/openapi.json`;
-  const res = await fetchJson(url, {
-    timeoutMs,
-    fetchImpl,
-    ...(bypass !== undefined ? { bypass } : {}),
-  });
-  if (!res.ok) {
-    // The gate-aware fix rides here too: a gated failure answers all three
-    // probes at once, `--json` carries every check, and a "check the base URL"
-    // here beside a "set the key" on api-contract is two verdicts on one cause.
-    return {
-      result: {
-        name: 'search-contract',
-        status: 'warn',
-        required: false,
-        detail: `Could not confirm the search endpoint at ${url}`,
-        fix:
-          shelfGateFix(res, bypass, shelfKeyRemedy) ??
-          'Check the configured base URL (`tenjin config get baseUrl`); search/buy need the A2 endpoints deployed.',
-      },
-    };
-  }
-  const present = hasSearchPath(res.json);
-  return {
-    result: present
-      ? {
-          name: 'search-contract',
-          status: 'ok',
-          required: false,
-          detail: 'Search endpoint advertised',
-        }
-      : {
-          name: 'search-contract',
+      {
+        result: {
+          name: 'search',
           status: 'warn',
           required: false,
-          detail: 'This deployment does not advertise POST /api/search (it predates search v3)',
-          fix: 'search/buy need search v3 deployed; point the configured base URL at a deploy that has it (`tenjin config set baseUrl <url>`).',
+          detail: 'not confirmed: the same document did not answer',
+          fix,
         },
-  };
+      },
+    ];
+  }
+  const search: BuiltCheck = hasSearchPath(res.json)
+    ? { result: { name: 'search', status: 'ok', required: false, detail: 'advertised' } }
+    : {
+        result: {
+          name: 'search',
+          status: 'warn',
+          required: false,
+          detail: 'POST /api/search not advertised (this deployment predates search v3)',
+          fix: 'Point the configured base URL at a deploy that has search v3: `tenjin config set baseUrl <url>`.',
+        },
+      };
+  const version = infoVersion(res.json);
+  if (version === undefined) {
+    return [
+      {
+        result: {
+          name: 'api',
+          status: 'fail',
+          required: true,
+          detail: `OpenAPI document at ${url} is missing a string info.version`,
+          fix: FIX_POINT_AT_TENJIN_API,
+        },
+        failCode: 'CONTRACT_MISMATCH',
+      },
+      search,
+    ];
+  }
+  return [
+    {
+      result: {
+        name: 'api',
+        status: 'ok',
+        required: true,
+        detail: `Tenjin ${version} at ${baseUrl}`,
+      },
+    },
+    search,
+  ];
 }
 
 function hasSearchPath(json: unknown): boolean {
@@ -764,20 +806,18 @@ function hasSearchPath(json: unknown): boolean {
 async function checkSkills(
   home: string,
   which: (bin: string) => boolean,
-  requested: readonly HarnessTarget[],
+  requested: readonly Harness[],
   bazaarPay: boolean,
   skillsSourceDir: string | undefined,
-  hermesHome: string,
   teamMode: boolean,
 ): Promise<BuiltCheck> {
-  const resolvedHermesHome = hermesHome;
-  const present = detectHarnesses(home, which, resolvedHermesHome);
-  const wiring = await readAllWiring(home, resolvedHermesHome);
+  const present = detectHarnesses(home, which);
+  const wiring = await readAllWiring(home);
   const data = {
     directories: wiring.map((w) => ({
       ...w,
-      harnessPresent: harnessReads(home, w.dir, present, resolvedHermesHome),
-      requested: harnessRequested(home, w.dir, requested, resolvedHermesHome),
+      harnessPresent: harnessReads(home, w.dir, present),
+      requested: harnessRequested(home, w.dir, requested),
     })),
   };
   const inPlay = wiring.filter((w) => anyTenjinSkill(w));
@@ -792,15 +832,15 @@ async function checkSkills(
     // nobody asked to see named.
     const targeted =
       requested.length > 0
-        ? wiring.filter((w) => harnessInPlay(home, w.dir, present, requested, resolvedHermesHome))
+        ? wiring.filter((w) => harnessInPlay(home, w.dir, present, requested))
         : [];
     return {
       result: {
         name: 'skills',
         status: 'warn',
         required: false,
-        detail: `No Tenjin skills wired under ${home} (looked in .claude/skills, .agents/skills, and Hermes skills)`,
-        fix: targeted.length > 0 ? fixFor(home, targeted, resolvedHermesHome) : 'tenjin install',
+        detail: `No Tenjin skills wired under ${home} (looked in .claude/skills and .agents/skills)`,
+        fix: targeted.length > 0 ? fixFor(home, targeted) : 'tenjin install',
         data,
       },
     };
@@ -810,7 +850,7 @@ async function checkSkills(
   // is the defect, whether it is shadowed, half-installed, hosted-only or absent; a
   // directory neither detected nor asked for is described but never warned about.
   const broken = wiring.filter(
-    (w) => harnessInPlay(home, w.dir, present, requested, resolvedHermesHome) && !cliSkillsWired(w),
+    (w) => harnessInPlay(home, w.dir, present, requested) && !cliSkillsWired(w),
   );
   if (broken.length > 0) {
     return {
@@ -818,8 +858,8 @@ async function checkSkills(
         name: 'skills',
         status: 'warn',
         required: false,
-        detail: `${broken.map(describeProblem).join('; ')}. Full state: ${describeWiring(inPlay)}`,
-        fix: fixFor(home, broken, resolvedHermesHome),
+        detail: broken.map(describeProblem).join('; '),
+        fix: fixFor(home, broken),
         data,
       },
     };
@@ -833,7 +873,7 @@ async function checkSkills(
   // keeps the lane itself safe either way, which is why this is warn, not fail.
   const payDrift: string[] = [];
   for (const w of inPlay) {
-    if (!harnessInPlay(home, w.dir, present, requested, resolvedHermesHome)) continue;
+    if (!harnessInPlay(home, w.dir, present, requested)) continue;
     const onDisk = await readSkillFile(join(w.dir, OPTIONAL_PAY_SKILL, 'SKILL.md'));
     if ((onDisk.kind === 'ok') !== bazaarPay) payDrift.push(w.dir);
   }
@@ -873,7 +913,7 @@ async function checkSkills(
         name: 'skills',
         status: 'warn',
         required: false,
-        detail: `${CLI_SKILL_NAMES.join(' + ')} wired, but this build's packaged copies could not be read, so whether they are current is unknown`,
+        detail: `${CLI_SKILL_NAMES.join(' + ')} wired, but this build's packaged copies could not be read`,
         // NOT `tenjin update`: this warning means the packaged copies are
         // unreadable, which a current version answers with "up to date" and no
         // work at all. Reinstalling the same version is the actual repair.
@@ -888,14 +928,13 @@ async function checkSkills(
         name: 'skills',
         status: 'warn',
         required: false,
-        detail: `${CLI_SKILL_NAMES.join(' + ')} wired but not from this CLI build (${stale.join(', ')}); agents are reading an older version's instructions`,
+        detail: `not from this CLI build (${stale.join(', ')}); agents are reading an older version's instructions`,
         // fixFor, like every neighbouring branch: a plain `tenjin install` targets
         // DETECTED harnesses only, so for a directory that exists because someone
         // passed --harness it would be a fix that never clears the warning.
         fix: fixFor(
           home,
           wiring.filter((w) => stale.includes(w.dir)),
-          resolvedHermesHome,
         ),
         data,
       },
@@ -907,67 +946,8 @@ async function checkSkills(
       name: 'skills',
       status: 'ok',
       required: false,
-      detail: `${CLI_SKILL_NAMES.join(' + ')} wired: ${describeWiring(inPlay)}`,
+      detail: `${CLI_SKILL_NAMES.join(' + ')}, current`,
       data,
-    },
-  };
-}
-
-/** Native Hermes wiring is a separate warn-level check from portable skills. */
-async function checkHermes(args: {
-  home: string;
-  hermesHome: string;
-  which: (bin: string) => boolean;
-  requested: readonly HarnessTarget[];
-  webSearch?: string;
-  homeWarning?: string;
-}): Promise<BuiltCheck | null> {
-  const { home, hermesHome, which, requested, webSearch: searchMode, homeWarning } = args;
-  const inPlay =
-    requested.includes('hermes') || harnessDetectedBy(home, 'hermes', which, hermesHome).length > 0;
-  if (!inPlay) return null;
-  const status = {
-    ...(await readHermesIntegrationStatus(hermesHome)),
-    ...(homeWarning !== undefined ? { homeWarning } : {}),
-  };
-  const ok =
-    status.mcp === 'configured' && status.plugin === 'installed' && status.activation === 'enabled';
-  if (ok && homeWarning === undefined) {
-    return {
-      result: {
-        name: 'hermes',
-        status: 'ok',
-        required: false,
-        detail: `Native Tenjin retrieval and publish-back plugin enabled in ${hermesHome}`,
-        data: status,
-      },
-    };
-  }
-  const problems: string[] = [];
-  if (status.mcp === 'stale') {
-    problems.push(`MCP command missing (${status.mcpCommand ?? 'unknown'})`);
-  } else if (status.mcp !== 'configured') problems.push(`MCP ${status.mcp}`);
-  if (status.plugin !== 'installed') problems.push(`plugin ${status.plugin}`);
-  // Named `activation`, not a second `plugin`: "plugin missing, plugin not-enabled"
-  // read as one subject twice.
-  if (status.activation !== 'enabled') problems.push(`activation ${status.activation}`);
-  if (homeWarning !== undefined) problems.push('HERMES_HOME ignored');
-  return {
-    result: {
-      name: 'hermes',
-      status: 'warn',
-      required: false,
-      detail: `Hermes Tenjin integration incomplete in ${hermesHome}: ${problems.join(', ')}${
-        homeWarning === undefined ? '' : `. ${homeWarning}`
-      }`,
-      // `tenjin install --harness hermes` alone is a dead end when the stored mode
-      // is `off`: it re-runs, withholds the hook code by design, and prints the same
-      // warning forever. Name the blocker that actually has to move first.
-      fix:
-        searchMode === 'off'
-          ? 'tenjin config set hooks.webSearch auto && tenjin install --harness hermes'
-          : 'tenjin install --harness hermes',
-      data: status,
     },
   };
 }
@@ -1078,57 +1058,15 @@ function reasonFor(w: HarnessWiring, name: string): NotInvocableReason | undefin
   return w.skills.find((s) => s.name === name)?.reason;
 }
 
-/** Is the hosted zero-install mirror in THIS directory? */
-function hostedHere(w: HarnessWiring): boolean {
-  return w.skills.find((s) => s.name === HOSTED_SKILL_NAME)?.present === true;
-}
-
 /**
  * A fix that can actually clear the warning. A bare `tenjin install` only targets
  * the directories detection picks, so a problem in ~/.agents/skills on a
- * Claude-only machine needs `--harness shared` spelled out.
+ * Claude-only machine needs `--harness codex` spelled out.
  */
-function fixFor(home: string, dirs: HarnessWiring[], hermesHome: string): string {
-  const flags = [...new Set(dirs.map((w) => harnessFlagFor(home, w.dir, hermesHome)))];
+function fixFor(home: string, dirs: HarnessWiring[]): string {
+  const flags = [...new Set(dirs.map((w) => harnessFlagFor(home, w.dir)))];
   return `tenjin install ${flags.map((f) => `--harness ${f}`).join(' ')}`;
 }
-
-/** One-line per-directory summary: `<dir> -> <skills> (<posture>)`. */
-function describeWiring(wiring: HarnessWiring[]): string {
-  return wiring
-    .map((w) => {
-      const parts = w.skills
-        .filter((s) => s.present)
-        .map((s) =>
-          s.modelInvocable === false ? `${s.name} [${s.reason ?? 'shadowed'}]` : s.name,
-        );
-      return `${w.dir} -> ${parts.join(', ')} (${posture(w)})`;
-    })
-    .join('; ');
-}
-
-/**
- * The precedence half of the `wired` posture is only true when there is a mirror
- * here to take precedence OVER. `classify` keys `wired` off the two CLI skills
- * alone, so a directory whose mirror was deleted is `wired` with no `tenjin` in it,
- * and the unconditional string claimed a file the same line had just not listed.
- */
-function posture(w: HarnessWiring): string {
-  if (w.state !== 'wired') return POSTURE[w.state];
-  return hostedHere(w)
-    ? 'CLI skills wired, take precedence over the hosted mirror'
-    : 'CLI skills wired';
-}
-
-const POSTURE: Record<DirState, string> = {
-  empty: 'no Tenjin skills',
-  'hosted-only': 'hosted skill only, no CLI skills here',
-  partial: 'only one CLI skill',
-  // "at least one": a directory with one CLI skill shadowed and the other absent
-  // classifies as `shadowed` too, and "CLI skills present" would be false there.
-  shadowed: 'at least one CLI skill present but not model-invocable',
-  wired: 'CLI skills wired, take precedence over the hosted mirror',
-};
 
 /**
  * Is team mode actually on, and does the operator know which answer they got?
@@ -1160,7 +1098,7 @@ function checkTeamShelf(
         name: 'team shelf',
         status: 'ok',
         required: false,
-        detail: `team mode: baseUrl is ${sanitizeForTerminal(baseUrl)}, and requests to it carry the bypass header`,
+        detail: `${sanitizeForTerminal(baseUrl)}, and requests to it carry the bypass header`,
       },
     };
   }
@@ -1183,7 +1121,7 @@ function checkTeamShelf(
         // and lib/permissions FLAG_CAVEAT): doctor's lines reach an unattended
         // agent, and an override is what a prompt-injected one would reach for.
         // So this says an override happened, never how to make one.
-        detail: `this run's base URL came from ${settings.baseUrl.source === 'flag' ? 'a command-line override' : 'the environment'} (${sanitizeForTerminal(baseUrl)}) rather than from config, so the team shelf's bypass key was withheld and these probes ran unauthenticated`,
+        detail: `this run's base URL came from ${settings.baseUrl.source === 'flag' ? 'a command-line override' : 'the environment'} (${sanitizeForTerminal(baseUrl)}), so the team shelf's bypass key was withheld and these probes ran unauthenticated`,
         fix: 'Run doctor with no base-URL override to check the configured team shelf.',
       },
     };
@@ -1193,7 +1131,7 @@ function checkTeamShelf(
       name: 'team shelf',
       status: 'warn',
       required: false,
-      detail: `shelfBypassSecret is set, but baseUrl is the public marketplace (${sanitizeForTerminal(baseUrl)}), so this machine is in PUBLIC mode: publishes go to the marketplace with the client scan and the confirm cascade on, and there is no second shelf to fall through to`,
+      detail: `shelfBypassSecret is set, but baseUrl is the public marketplace (${sanitizeForTerminal(baseUrl)}), so this machine is in PUBLIC mode`,
       fix: 'Point the base URL at the team deployment: `tenjin config set baseUrl <team shelf url>` (or clear the secret with `tenjin config set shelfBypassSecret ""`).',
     },
   };
@@ -1254,425 +1192,324 @@ function halfWiredShelfWarn(settings: EffectiveSettings): BuiltCheck | null {
       name: 'team shelf',
       status: 'warn',
       required: false,
-      detail: `baseUrl is ${sanitizeForTerminal(baseUrl)}, a shelf of your own, but no shelfBypassSecret is set, so every probe above ran unauthenticated; if that deployment is access-protected they were answered by its protection page rather than by Tenjin`,
+      detail: `${sanitizeForTerminal(baseUrl)} is a shelf of your own, but no shelfBypassSecret is set, so every probe above ran unauthenticated`,
       fix: 'Set the team shelf key so requests get past deployment protection: `tenjin config set shelfBypassSecret <value>`.',
     },
   };
 }
 
 /**
- * One test framework's reporter hint: how to spot its config, how to tell
- * whether the tenjin reporter is already wired, and what to suggest when it
- * is not. A row here is worth adding only once a reporter exists for that
- * framework — `sig_v1_test` (tenjin-agent#267) ships `tenjin-vitest-reporter`
- * today and has no pytest/jest equivalent yet, so this table carries exactly
- * one row until one does.
+ * The loop's wiring, per harness, and silent on a machine with no entry of
+ * ours: a fresh machine that never ran `tenjin install` is the skills check's
+ * business, not this one's.
+ *
+ * `daemon` is the comparison that fails silently in the wild: the URL in
+ * Claude's settings.json carries the port the daemon had bound WHEN INSTALL
+ * RAN, and a daemon that later lost that port (a pinned `loop.port` changed, a
+ * foreign listener took it, a second profile) comes back on another one.
+ * Claude Code then posts every tool fire into a closed port and reports a
+ * non-blocking `HTTP hook error` the operator never sees. `/health` tells the
+ * two apart. A Codex entry names no port (it runs the shim, which finds the
+ * daemon itself), so there the daemon is checked through `daemon.pid` alone.
+ *
+ * `entries` is Claude's file itself: how many of ours are registered, and its
+ * mode, because that file carries the daemon token as a literal.
+ *
+ * FIVE STATES, PER HARNESS, NEVER CONFLATED (tenjin-agent#342). A Codex
+ * install can be configured and inert, trusted and unobserved, observed but
+ * answered 404, or live while `publish.mode=auto` still prompts; one "ok" line
+ * over all of that let an operator conclude the loop was running when nothing
+ * had fired. So: `configured`, `trusted` (READ from the harness's own ledger,
+ * never written — lib/codex-trust.ts), `observed` (fires received, the one
+ * nobody can fake), `permissions` (on this harness's own surface), and
+ * `daemon` (does the RUNNING process carry the route these entries post to).
  */
-interface TestReporterFramework {
-  /** Name used in the hint text. */
-  name: string;
-  /** Dedicated config filenames to look for in cwd, in priority order. */
-  configFiles: string[];
-  /** package.json dependency key that marks this framework present with no dedicated config file. */
-  depName: string;
-  /**
-   * A config file shared with other tooling (`vite.config.*`) only counts when
-   * its source matches this pattern; otherwise a Vite-only project with no
-   * test block at all would be misread as an unconfigured vitest.
-   */
-  sharedConfigNeedsPattern?: RegExp;
-  /**
-   * Heuristic, plain-text scan of the config source — never a config
-   * evaluation. Answers whether the tenjin reporter looks already wired.
-   */
-  hasJsonReporter: (source: string) => boolean;
-  /** Doctor detail line for a framework detected without that reporter. */
-  detail: string;
-  /** Doctor fix line: the snippet to add. */
-  fix: (reporterPath: string) => string;
-}
-
-const TEST_REPORTER_FRAMEWORKS: readonly TestReporterFramework[] = [
-  {
-    name: 'vitest',
-    // Kept in step with push-scripts.ts's own TEST_CONFIG_FILES (tenjin-agent#278
-    // nit 2): a repo on `vitest.config.cts`/`.cjs` cleared the failure arm's own
-    // read but never got this hint, since this list was a strict subset.
-    configFiles: [
-      'vitest.config.ts',
-      'vitest.config.mts',
-      'vitest.config.cts',
-      'vitest.config.js',
-      'vitest.config.mjs',
-      'vitest.config.cjs',
-      'vite.config.ts',
-      'vite.config.mts',
-      'vite.config.js',
-      'vite.config.mjs',
-    ],
-    depName: 'vitest',
-    sharedConfigNeedsPattern: /\btest\s*:/,
-    // ANCHORED ON THE REPORTER'S OWN FILENAME (tenjin-agent#278 round 3), not on
-    // a bare `json`/`outputFile` pair: the stock `json` reporter this used to
-    // recommend carries no `startTime`/`endTime`, so an artifact it writes now
-    // fails the failure arm's window check outright and is worth exactly as
-    // little as no reporter at all — this check has to tell "wired" from
-    // "wired to the wrong thing", not just spot an `outputFile` option.
-    hasJsonReporter: (source) =>
-      /reporters\s*:/.test(source) && /tenjin-vitest-reporter/.test(source),
-    detail:
-      'vitest detected without the tenjin reporter — test-failure matching falls back to console parsing (lower precision)',
-    // The reporter's own path, not a relative guess: `tenjin install`/`push on`
-    // always writes it to this exact spot, so the snippet works pasted verbatim.
-    // Also names WHERE the report lands: it holds every failure's full message
-    // and stack, absolute paths included (tenjin-agent#278, round 1 verdict
-    // note) — worth telling an operator adopting this for the first time.
-    fix: (reporterPath) =>
-      `Add to vitest.config.ts: reporters: ['default', ['${reporterPath}', { outputFile: '.vitest-report.json' }]] — and add .vitest-report.json to .gitignore (it holds full failure messages and absolute paths)`,
-  },
-];
-
-/** What {@link detectFrameworkConfig} found, or 'dep-only' for a dependency with no dedicated config file. */
-type FrameworkConfigFound = { path: string; source: string } | 'dep-only';
-
-/**
- * Does this project have `fw` at all, and if so, from what? A dedicated config
- * file wins over a bare dependency, since only the file's source can be
- * scanned for a reporter; a `vite.config.*` file only counts once its source
- * matches {@link TestReporterFramework.sharedConfigNeedsPattern}, so a Vite
- * project with no `test:` block is not read as unconfigured vitest.
- */
-async function detectFrameworkConfig(
-  cwd: string,
-  fw: TestReporterFramework,
-): Promise<FrameworkConfigFound | null> {
-  for (const file of fw.configFiles) {
-    let source: string;
-    try {
-      source = await readFile(join(cwd, file), 'utf8');
-    } catch {
-      continue;
-    }
-    if (
-      file.startsWith('vite.config') &&
-      fw.sharedConfigNeedsPattern !== undefined &&
-      !fw.sharedConfigNeedsPattern.test(source)
-    ) {
-      continue;
-    }
-    return { path: join(cwd, file), source };
-  }
-  try {
-    const pkg = JSON.parse(await readFile(join(cwd, 'package.json'), 'utf8')) as {
-      devDependencies?: Record<string, unknown>;
-      dependencies?: Record<string, unknown>;
-    };
-    if (fw.depName in (pkg.devDependencies ?? {}) || fw.depName in (pkg.dependencies ?? {})) {
-      return 'dep-only';
-    }
-  } catch {
-    // No package.json, or it does not parse; nothing more to detect from.
-  }
-  return null;
-}
-
-/**
- * WARN-level (never fails doctor), and silent unless there is something to
- * say: a project with no vitest, or one whose config already wires the
- * tenjin reporter the `sig_v1_test` lane (tenjin-agent#267, redesigned round
- * 3) prefers, gets no line at all — the same "nothing to report" posture as
- * {@link checkStoreJournal}. Detection is a plain-text scan of config source,
- * described as heuristic in every doc that mentions it: never a config
- * evaluation, so it can both miss a reporter wired through a shared helper
- * and mistake a commented-out one for live.
- */
-async function checkTestReporterHints(cwd: string, dataDir: string): Promise<BuiltCheck | null> {
-  const reporterPath = join(hooksDir(dataDir), PUSH_VITEST_REPORTER_FILE);
-  for (const fw of TEST_REPORTER_FRAMEWORKS) {
-    const found = await detectFrameworkConfig(cwd, fw);
-    if (found === null) continue;
-    const hasReporter = found !== 'dep-only' && fw.hasJsonReporter(found.source);
-    if (hasReporter) continue;
-    return {
-      result: {
-        name: 'test-reporters',
-        status: 'warn',
-        required: false,
-        detail: fw.detail,
-        fix: fw.fix(reporterPath),
-      },
-    };
-  }
-  return null;
-}
-
-/**
- * Are the generated hook/push scripts ON DISK current for this build?
- *
- * `tenjin update` bumps the npm-installed binary and nothing else; the scripts
- * under `<dataDir>/hooks` are written once, at `tenjin install` time, and stay
- * exactly those bytes until an operator reinstalls (`lib/install-location.ts`
- * refuses the self-heal outright on a git checkout, which is how this team
- * runs `main` — there is no `update` path that could have refreshed them).
- * tenjin-agent#242's hook-allowlist fix merged and kept producing junk pairings
- * on a machine that had not reinstalled for hours, which is the dogfooded case
- * this check exists to catch earlier than that.
- *
- * The skills-staleness check above (`compareWiredSkills`) is the model: same
- * "matches what this build would write now" compare, same silent-until-there
- * shape. Silent (`null`) when nothing is installed at all — a fresh machine
- * that never ran `tenjin install` is the skills/push-hooks checks' business,
- * not this one's. A script that IS installed but could not be READ is neither
- * of those: `compareHookScripts` reports it separately rather than dropping
- * it, so a permissions problem under the hooks directory (or a device node
- * where a script should be) is a `warn` an operator sees, not a diagnostic
- * that silently found "nothing wrong" by never looking.
- */
-async function checkHookScripts(dataDir: string): Promise<BuiltCheck | null> {
-  const { stale, present, unreadable } = await compareHookScripts(dataDir);
-  if (present.length === 0 && unreadable.length === 0) return null;
-  if (stale.length === 0 && unreadable.length === 0) {
-    return {
-      result: {
-        name: 'hook scripts',
-        status: 'ok',
-        required: false,
-        detail: `${present.length} generated hook/push script(s) on disk match this build`,
-      },
-    };
-  }
-  const parts: string[] = [];
-  if (stale.length > 0) {
-    parts.push(
-      `${stale.length} of ${present.length} readable script(s) are stale (${stale.join(', ')})`,
-    );
-  }
-  if (unreadable.length > 0) {
-    parts.push(`${unreadable.length} could not be read (${unreadable.join(', ')})`);
-  }
-  return {
-    result: {
-      name: 'hook scripts',
-      status: 'warn',
-      required: false,
-      detail: `${parts.join('; ')}; agents may be running an older build's hook code`,
-      fix:
-        unreadable.length > 0
-          ? 'Check permissions under the hooks directory, then `tenjin install`.'
-          : 'tenjin install',
-    },
-  };
-}
-
-/**
- * The push experiment's TWO halves, asked separately, because either one alone
- * reports a healthy sidecar that does nothing: the generated scripts on disk
- * with no settings.json entries pointing at them (a `push on` whose settings
- * write refused), or seven entries pointing at scripts that are gone (a
- * half-finished uninstall, a moved data dir). Seven entries across six events,
- * so "half-wired" is a state with several ways in. Both counts are read from
- * the writer's own plan rather than stated here.
- *
- * ONE OF THOSE WAYS IN IS AN UPGRADE, and it needs its own sentence. `tenjin
- * update` refreshes hook BODIES and materializes no new surface
- * (tenjin-agent#224), so a machine that was wired before `SubagentStop` existed
- * runs the new subagent body under the old entries: every other arm works, the
- * child-capture half is simply never fired, and the generic "half wired" line
- * would send the operator hunting. The fix is `tenjin install`, once, which is
- * also what the release note says.
- *
- * Never required and never a fail: an experiment that is off-by-default cannot
- * take down the verb an operator runs when something else is broken.
- */
-async function checkPushHooks(homeDir: string, dataDir: string): Promise<BuiltCheck> {
-  const scripts = await pushScriptsPresent(dataDir);
-  const entries = await countPushHookEntries(homeDir, dataDir);
-  const where = entries.path === null ? 'no settings.json found' : entries.path;
-  const registered = `${entries.present}/${entries.planned} hook entries registered (${where})`;
-  if (scripts && entries.present === entries.planned) {
-    return {
-      result: {
-        name: 'push hooks',
-        status: 'ok',
-        required: false,
-        detail: `hooks.push is on: all ${PUSH_SCRIPT_FILES.length} push scripts written, ${registered}`,
-      },
-    };
-  }
-  // The upgrade shape: everything else is registered and only the newest event
-  // is not. Named before the generic warn, because the remedy is a different
-  // command.
-  if (scripts && entries.missing.length === 1 && entries.missing[0] === 'SubagentStop') {
-    return {
-      result: {
-        name: 'push hooks',
-        status: 'warn',
-        required: false,
-        detail: `hooks.push is on and ${registered}, but the SubagentStop entry is missing: this machine was wired before that arm existed, so a subagent's finding is never captured at the end of the child that settled it. tenjin update refreshes hook bodies and adds no new entry`,
-        fix: 'tenjin install',
-      },
-    };
-  }
-  return {
-    result: {
-      name: 'push hooks',
-      status: 'warn',
-      required: false,
-      detail: `hooks.push is on, but the sidecar is only half wired: ${
-        scripts
-          ? `all ${PUSH_SCRIPT_FILES.length} push scripts are written`
-          : 'one or more push scripts are missing'
-      }, ${registered}. Nothing runs unless both halves are there`,
-      fix: 'tenjin push on',
-    },
-  };
-}
-
-/**
- * The delegated session key `tenjin read` presents to recover a piece this wallet
- * already owns (`tenjin session start --scope read` mints it). Never required and
- * never a fail — `read` works without one — so ABSENT is `ok`: the normal
- * posture, not a defect. So are the states that are ordinary decay rather than
- * damage: an older CLI's file, a spent 24h expiry, a scope that does not cover
- * reading. One command re-mints all of them, and a check that yellowed on them
- * would be permanently yellow on any machine that ever minted a key.
- *
- * A genuine fault still warns, and the states are kept apart on purpose. A 0600 file
- * that is now group-readable, or one whose contents no longer parse, is a TAMPER
- * signal on a wallet-derived credential; `loadSessionFile` fails closed on both
- * and collapses them to "no session", which is the right instruction for a caller
- * that can re-mint and exactly the wrong report for the verb an operator runs
- * when something looks wrong. `readSessionFile` keeps them distinguishable and
- * this is the one caller that needs them.
- *
- * An unreadable file (EACCES after a `sudo` run, EIO) warns rather than throwing:
- * doctor is diagnostics, and a session cache nobody asked about must never take
- * down the run that was going to explain the rest of the machine.
- *
- * Reports address / origin / scope / expiry and nothing else. The delegation and
- * the private JWK never reach this output — doctor's payload is the single most
- * likely thing in this CLI to be pasted into an issue.
- */
-async function checkSession(
+async function checkHooks(
+  homeDir: string,
   dataDir: string,
-  now: () => number,
-  origin: string | null,
-): Promise<BuiltCheck> {
-  const warn = (detail: string, data?: unknown): BuiltCheck => ({
+  env: NodeJS.ProcessEnv,
+  open: typeof openLoopDbForCli,
+  publishMode: PublishMode,
+  adapters: Readonly<Record<Harness, HarnessAdapter>>,
+  grantDeclined: readonly string[],
+): Promise<BuiltCheck[]> {
+  const out: BuiltCheck[] = [];
+  const registered = await Promise.all(
+    Object.values(adapters).map(async (adapter) => ({
+      adapter,
+      hooks: await registeredHooks(adapter, homeDir, dataDir, env),
+    })),
+  );
+  const wired = registered.filter((entry) => entry.hooks.entries > 0);
+  if (wired.length === 0) return out;
+  const claude = wired.find((entry) => entry.adapter.id === 'claude')?.hooks;
+  out.push(
+    await checkDaemon(
+      claude?.port ?? null,
+      dataDir,
+      wired.map((entry) => entry.adapter.id),
+    ),
+  );
+  if (claude !== undefined) {
+    const path = claudeSettingsPath(homeDir);
+    const mode = await settingsMode(homeDir);
+    const wide = mode !== null && (mode & 0o077) !== 0;
+    out.push({
+      result: wide
+        ? {
+            name: 'entries',
+            status: 'warn',
+            required: false,
+            detail: `${claude.entries} in ${path}, mode ${mode.toString(8).padStart(3, '0')} — wider than 0600, and it carries the daemon token`,
+            fix: `chmod 600 ${path}`,
+          }
+        : {
+            name: 'entries',
+            status: 'ok',
+            required: false,
+            detail: `${claude.entries} in ${path}`,
+          },
+    });
+  }
+  for (const { adapter, hooks } of wired) {
+    if (adapter.registrar.trust !== undefined) {
+      out.push(...(await checkTrustedHooks(adapter, homeDir, dataDir, env, hooks, open)));
+    }
+    out.push(await checkHarnessPermissions(adapter, homeDir, publishMode, grantDeclined, env));
+  }
+  return out;
+}
+
+/**
+ * Configured, trusted and observed as three lines: they fail separately and
+ * each has its own remedy. `trusted` asks Codex rather than modelling it, so
+ * this line never claims a security state from a file read.
+ */
+async function checkTrustedHooks(
+  adapter: HarnessAdapter,
+  homeDir: string,
+  dataDir: string,
+  env: NodeJS.ProcessEnv,
+  codex: RegisteredHooks,
+  open: typeof openLoopDbForCli,
+): Promise<BuiltCheck[]> {
+  const out: BuiltCheck[] = [
+    {
+      result: {
+        name: 'codex configured',
+        status: 'ok',
+        required: false,
+        detail: `${codex.entries} entries in ${codex.path}`,
+      },
+    },
+  ];
+  const keys = codex.handlers
+    .map((h) => trustKey(codex.path, h.event, h.groupIndex, h.handlerIndex))
+    .filter((k): k is string => k !== null);
+  const trust = await adapter.registrar.trust!.read(homeDir, keys, { env });
+  const willRun = trust.state === 'trusted';
+  // `unknown` is NOT ok. It means Codex could not settle whether these entries
+  // run, and a green line there reads as a working loop
+  // -- which, with one fire still inside the observation window, makes an
+  // inert install look healthy on both lines (tenjin-agent#343). It warns,
+  // like the equivalent unknown permission state, and carries its own remedy
+  // rather than the trust one, because re-trusting is not what it needs.
+  out.push({
     result: {
-      name: 'session',
-      status: 'warn',
+      name: 'codex trusted',
+      status: willRun ? 'ok' : 'warn',
       required: false,
-      detail,
-      fix: 'tenjin session start --scope read',
-      ...(data !== undefined ? { data } : {}),
+      detail: TRUST_DETAIL[trust.state](trust),
+      ...(willRun ? {} : { fix: trust.state === 'unknown' ? TRUST_UNKNOWN_FIX : TRUST_FIX }),
     },
   });
+  const observed = codexFiresThisWeek(dataDir, open);
+  out.push({
+    result: {
+      name: 'codex observed',
+      status: observed > 0 ? 'ok' : 'warn',
+      required: false,
+      detail:
+        observed > 0
+          ? `${observed} fire${observed === 1 ? '' : 's'} in ${WEEK_DAYS}d`
+          : `no fires in ${WEEK_DAYS}d, so nothing has reached the daemon yet`,
+      ...(observed > 0
+        ? {}
+        : {
+            fix: willRun
+              ? 'Start a new Codex session: hooks are read at session start.'
+              : trust.state === 'unknown'
+                ? TRUST_UNKNOWN_FIX
+                : TRUST_FIX,
+          }),
+    },
+  });
+  return out;
+}
 
-  const state = await readSessionFile(dataDir);
-  if (state.kind === 'absent') {
-    return {
-      result: {
-        name: 'session',
-        status: 'ok',
-        required: false,
-        detail:
-          'No session key; `tenjin read` delivers free and locally-cached pieces (`tenjin session start --scope read` adds owned-piece recovery)',
-      },
-    };
-  }
-  if (state.kind === 'loosened') {
-    return warn(
-      `Session key at ${sessionPath(dataDir)} is mode 0${state.mode.toString(8)}, not 0600, so it is refused; it holds a wallet-derived credential and was changed out of band. Delete it and re-mint`,
-    );
-  }
-  // Same standing as `absent`: a cache this CLI cannot use, re-minted by one
-  // command. A failing check here meant a permanent post-update warning.
-  if (state.kind === 'outdated') {
-    return {
-      result: {
-        name: 'session',
-        status: 'ok',
-        required: false,
-        detail: `Cached session key at ${sessionPath(dataDir)} predates this CLI version (no \`${state.field}\`) and is not used; \`tenjin session start --scope read\` mints a current one`,
-      },
-    };
-  }
-  if (state.kind === 'corrupt') {
-    return warn(`Session key at ${sessionPath(dataDir)} could not be parsed (${state.reason})`);
-  }
-  if (state.kind === 'unreadable') {
-    return warn(`Session key at ${sessionPath(dataDir)} could not be read: ${state.message}`);
-  }
+/** The `/hooks` gesture, exact enough to follow without a second lookup. */
+const TRUST_FIX = 'Run `tenjin install` to trust the entries it wrote.';
 
-  const file = state.file;
-  // A base URL that is not an http(s) origin cannot be compared against, and this
-  // is the diagnostic verb: it reports that and keeps going. The `config` check
-  // above owns the fix for the value itself.
-  if (origin === null) {
-    return {
-      result: {
-        name: 'session',
-        status: 'warn',
-        required: false,
-        detail: `Session key was minted for ${file.origin}, but the configured base URL is not an http(s) origin, so it cannot be matched`,
-        fix: 'Set an absolute http(s) base URL: `tenjin config set baseUrl <url>`.',
-        data: { address: file.address, origin: file.origin, scope: file.scope, exp: file.exp },
-      },
-    };
-  }
-  const data = { address: file.address, origin: file.origin, scope: file.scope, exp: file.exp };
-  if (file.origin !== origin) {
-    return warn(
-      `Session key was minted for ${file.origin}, but the configured base URL is ${origin}; it is not presented off its own origin`,
-      data,
-    );
-  }
-  // Expiry and scope are DESIGNED DECAY, not faults. A delegation lives 24h by
-  // construction, so warning on a spent one made every machine that ever ran
-  // `tenjin session start` permanently yellow for behaving exactly as intended —
-  // the same permanent-warning trap `outdated` above was already pulled out of.
-  // Both are re-minted by the one command named in the detail. An expiry that
-  // does not PARSE is a different thing and stays a warning: that is a malformed
-  // file, not a spent one.
-  if (!Number.isFinite(Date.parse(file.exp))) {
-    return warn(
-      `Session key for ${file.address} carries an unparseable expiry (exp ${file.exp})`,
-      data,
-    );
-  }
-  if (!scopeSatisfies(file.scope, 'read')) {
-    return {
-      result: {
-        name: 'session',
-        status: 'ok',
-        required: false,
-        detail: `Session key has scope ${file.scope}, which does not cover reading; \`tenjin session start --scope read\` mints one that does`,
-        data,
-      },
-    };
-  }
-  if (!isSessionPresentable(file, now(), 'read', origin)) {
-    return {
-      result: {
-        name: 'session',
-        status: 'ok',
-        required: false,
-        detail:
-          'Session key expired (normal after 24h); mint one with `tenjin session start --scope read` when you want free re-reads of owned pieces',
-        data,
-      },
-    };
-  }
+/** Unknown is a different problem: nothing is known to be wrong, and nothing
+ *  is known to be right, so the remedy is to make Codex answerable. */
+const TRUST_UNKNOWN_FIX =
+  'Check that `codex` is on PATH and $CODEX_HOME/config.toml is readable, then re-run `tenjin doctor`.';
+
+/** One sentence per trust state, kept beside the vocabulary that names them. */
+const TRUST_DETAIL: Readonly<Record<CodexTrust, (r: CodexTrustReport) => string>> = {
+  trusted: (r) => `Codex will run all ${r.expected} (asked ${r.source})`,
+  // The state a file reader cannot see: trusted once, edited since, and Codex
+  // refuses it. Re-trusting is the remedy, not re-installing.
+  modified: (r) =>
+    `${r.expected} entries changed since you trusted them, so Codex is refusing them`,
+  untrusted: (r) => `none of the ${r.expected} entries is trusted; they are installed and inert`,
+  partial: (r) => `Codex will run ${r.trusted} of ${r.expected}`,
+  disabled: () => 'at least one entry is trusted but switched off',
+  unknown: (r) => `Codex could not be asked, and ${r.configPath} did not settle it`,
+};
+
+/**
+ * This harness's own grant state, on this harness's own surface.
+ *
+ * NEVER CLAUDE'S RULES UNDER ANOTHER HARNESS'S NAME: `doctor --json` printed
+ * `Bash(tenjin publish:*)` on every machine, so a Codex-only install read as
+ * operational while Codex rejected `tenjin publish` before the CLI ever ran
+ * (tenjin-agent#342).
+ */
+async function checkHarnessPermissions(
+  adapter: HarnessAdapter,
+  homeDir: string,
+  publishMode: PublishMode,
+  grantDeclined: readonly string[],
+  env: NodeJS.ProcessEnv,
+): Promise<BuiltCheck> {
+  const harness = adapter.id;
+  const p =
+    adapter.registrar.grant === undefined
+      ? {
+          harness,
+          state: 'unsupported' as const,
+          rules: [],
+          missing: [],
+          detail: `This build knows no permission surface for ${harness}.`,
+        }
+      : applyGrantDecline(
+          await adapter.registrar.grant.inspect(homeDir, publishMode, env),
+          grantDeclined,
+        );
+  // `unsupported` is a fact about the harness, not a fault in the machine, so
+  // it warns only where it changes what happens: an unattended mode that will
+  // be prompted anyway.
+  const consequential = p.state === 'unsupported' && publishMode !== 'review';
   return {
     result: {
-      name: 'session',
-      status: 'ok',
+      name: `${harness} permissions`,
+      status:
+        p.state === 'granted' || p.state === 'skipped'
+          ? 'ok'
+          : p.state === 'unsupported' && !consequential
+            ? 'ok'
+            : 'warn',
       required: false,
-      detail: `Session key ${file.address}, scope ${file.scope}, for ${file.origin}, expires ${file.exp}`,
-      data,
+      detail: consequential
+        ? `${p.state}: publish.mode=${publishMode} still prompts here. ${p.detail}`
+        : `${p.state}: ${p.detail}`,
+      ...(p.fix !== undefined ? { fix: p.fix } : {}),
     },
   };
+}
+
+const WEEK_DAYS = 7;
+
+/** Fires the daemon recorded from Codex in the last week; 0 when there is no
+ *  ledger yet or it cannot be opened, which the `store` check reports itself. */
+function codexFiresThisWeek(dataDir: string, open: typeof openLoopDbForCli): number {
+  if (!existsSync(loopDbPath(dataDir))) return 0;
+  try {
+    const db = open(dataDir);
+    try {
+      const row = db
+        .prepare("SELECT count(*) AS n FROM fires WHERE harness = 'codex' AND at >= ?")
+        .get(Date.now() - WEEK_DAYS * 24 * 60 * 60 * 1000) as { n?: unknown } | undefined;
+      return typeof row?.n === 'number' ? row.n : 0;
+    } finally {
+      db.close();
+    }
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * The daemon behind the entries. With a port from Claude's `http` entries the
+ * check is whether THAT port answers; with none (Codex alone), whether the
+ * daemon `daemon.pid` names answers at all.
+ *
+ * ANSWERING IS NOT ENOUGH. A daemon can be healthy, on the right port, on this
+ * build's version, and hold no route for the harness whose entries were just
+ * written; every fire then 404s with only a `daemon.log` line to show for it
+ * (tenjin-agent#342). `/health` now names the routes the running PROCESS has,
+ * so `wired` can be compared against them rather than inferred from a version.
+ */
+async function checkDaemon(
+  port: number | null,
+  dataDir: string,
+  wired: readonly string[],
+): Promise<BuiltCheck> {
+  const pid = readPid(dataDir);
+  const probe = port ?? pid?.port ?? null;
+  const live = probe === null ? null : await health(probe);
+  if (live !== null && live.data_dir === dataDir) {
+    // A daemon too old to REPORT its routes is not evidence that it lacks
+    // them. `install` treats silence as "replace", which is safe and heals
+    // itself on the next run; `doctor` runs every day and must not warn where
+    // it cannot tell, so it only speaks when the daemon named its routes and
+    // one this machine needs is missing.
+    const short = live.harnesses === undefined ? [] : missingRoutes(live, wired);
+    if (short.length > 0) {
+      return {
+        result: {
+          name: 'daemon',
+          status: 'warn',
+          required: false,
+          detail: `127.0.0.1:${probe}, pid ${live.pid}, v${live.version}, but it has no /hook/${short.join(' or /hook/')} route: it is running an older build than the one installed, and answers those fires 404`,
+          fix: 'tenjin daemon stop, then tenjin install',
+        },
+      };
+    }
+    return {
+      result: {
+        name: 'daemon',
+        status: 'ok',
+        required: false,
+        detail:
+          live.harnesses === undefined
+            ? `127.0.0.1:${probe}, pid ${live.pid}, v${live.version}`
+            : `127.0.0.1:${probe}, pid ${live.pid}, v${live.version}, serving ${wired.join(' and ')}`,
+      },
+    };
+  }
+  const moved = port !== null && pid !== null && pid.port !== port;
+  const bundles = await hookBundlesPresent(dataDir);
+  return {
+    result: {
+      name: 'daemon',
+      status: 'warn',
+      required: false,
+      detail: `${port === null ? 'the entries run the shim' : `the entries point at 127.0.0.1:${port}`}, but ${moved ? `the daemon is on port ${pid.port} instead` : 'daemon not running'}${bundles ? '' : ', and no daemon bundle is installed'}; every hook fire is a silent ${port === null ? 'daemon-down line' : 'HTTP error'} until it is back`,
+      fix: moved ? 'tenjin install' : 'tenjin daemon start',
+    },
+  };
+}
+
+/** The settings file's permission bits, or null when there is nothing to stat. */
+async function settingsMode(homeDir: string): Promise<number | null> {
+  if (process.platform === 'win32') return null;
+  try {
+    return (await stat(claudeSettingsPath(homeDir))).mode & 0o777;
+  } catch {
+    return null;
+  }
 }
 
 async function checkReadPath(
@@ -1683,7 +1520,8 @@ async function checkReadPath(
   /** Whether the bypass key is a remedy this machine can use; see {@link shelfKeyIsTheRemedy}. */
   shelfKeyRemedy = false,
 ): Promise<BuiltCheck> {
-  // The shipped public read path, separate from the search-contract check above.
+  // The shipped public read path, its own request: `api` and `search` share the
+  // openapi document, and this probes what a reader actually fetches.
   // Probe the UNFILTERED listing: the server logs every nonblank first-page `q`
   // as agent search demand, so a `q` here would fabricate that demand into the
   // experiment this CLI exists to measure. Never add a `q` to this probe.
@@ -1696,7 +1534,7 @@ async function checkReadPath(
   if (!res.ok) {
     return {
       result: {
-        name: 'read-path',
+        name: 'read',
         status: 'fail',
         required: true,
         // Gate-aware on BOTH halves. The transport's message for a gate page is
@@ -1706,7 +1544,7 @@ async function checkReadPath(
           res.gateSuspected === true
             ? `Read path ${gateDetail(url, res)}`
             : `Read path ${url} failed: ${res.message}`,
-        // Same gate-aware fix as api-contract (see shelfGateFix): the identical
+        // Same gate-aware fix as `api` (see shelfGateFix): the identical
         // protection page answers this probe too, and `--json` carries both.
         fix: shelfGateFix(res, bypass, shelfKeyRemedy) ?? FIX_CHECK_NETWORK_AND_BASE_URL,
       },
@@ -1717,7 +1555,7 @@ async function checkReadPath(
   if (!Array.isArray(items)) {
     return {
       result: {
-        name: 'read-path',
+        name: 'read',
         status: 'fail',
         required: true,
         detail: `Read path ${url} did not return an items array`,
@@ -1727,7 +1565,7 @@ async function checkReadPath(
     };
   }
   return {
-    result: { name: 'read-path', status: 'ok', required: true, detail: `Read path OK at ${url}` },
+    result: { name: 'read', status: 'ok', required: true, detail: 'ok' },
   };
 }
 
@@ -1823,7 +1661,7 @@ async function verifyWallet(provider: WalletProvider): Promise<WalletVerificatio
  * the exit code.
  */
 function walletCheck(desc: WalletDescription, v: WalletVerification): CheckResult {
-  const head = `Wallet ${desc.address} (${desc.credentialSource})`;
+  const head = `${desc.address} (${desc.credentialSource})`;
   if (v.status === 'broken') {
     return {
       name: 'wallet',
@@ -1850,21 +1688,10 @@ function noWalletCheck(): CheckResult {
     name: 'wallet',
     status: 'warn',
     required: false,
-    detail: 'No wallet; needed only for buy/publish',
+    detail: 'none; needed only for buy/publish',
     fix: 'tenjin wallet create',
     data: { credential: 'absent' },
   };
-}
-
-/**
- * Is this the check that says there is no credential at all? `install` prints its
- * own line for that state and drops the duplicate, so it has to recognise THIS
- * check and not merely one named `wallet`: a warn about a credential that exists
- * and does not work (an unopenable keystore, an invalid TENJIN_WALLET_KEY) shares
- * the name and is the one wallet state nothing else in install's output carries.
- */
-export function isNoWalletCheck(c: CheckResult): boolean {
-  return c.name === 'wallet' && isRecord(c.data) && c.data.credential === 'absent';
 }
 
 function walletWarn(err: unknown): CheckResult {
@@ -1891,7 +1718,7 @@ async function checkBalance(address: string, rpcUrl: string): Promise<CheckResul
         name: 'balance',
         status: 'warn',
         required: false,
-        detail: 'Wallet USDC balance is 0',
+        detail: '$0.00 USDC',
         fix: 'Fund it with `tenjin wallet fund` (card via Coinbase), or send USDC on Base. $5 covers ~50 typical resources.',
       };
     }
@@ -1903,7 +1730,7 @@ async function checkBalance(address: string, rpcUrl: string): Promise<CheckResul
         name: 'balance',
         status: 'warn',
         required: false,
-        detail: `Balance ${money.usd} USDC is above the ~$20 pocket-money ceiling`,
+        detail: `${money.usd} USDC, above the ~$20 pocket-money ceiling`,
         fix: 'Keep only small change in the CLI wallet; sweep the excess to cold storage.',
       };
     }
@@ -1911,43 +1738,100 @@ async function checkBalance(address: string, rpcUrl: string): Promise<CheckResul
       name: 'balance',
       status: 'ok',
       required: false,
-      detail: `Balance ${money.usd} USDC (${money.atomic} atomic)`,
+      detail: `${money.usd} USDC (${money.atomic} atomic)`,
     };
   } catch (err) {
     return {
       name: 'balance',
       status: 'warn',
       required: false,
-      detail: `Could not read balance: ${err instanceof Error ? err.message : String(err)}`,
+      detail: `could not be read: ${err instanceof Error ? err.message : String(err)}`,
       fix: 'Check rpcUrl or retry; a balance read failure never fails doctor.',
     };
   }
 }
 
+/**
+ * Where each check belongs on the page, and the order within a group.
+ *
+ * Four questions an operator actually asks — is this machine able to run the
+ * CLI, can it reach the shelf, is the loop wired, can it pay — instead of one
+ * flat list of fourteen. A check whose name is missing here would not render, so
+ * the doctor test walks a full run and asserts every name is placed.
+ */
+const CHECK_GROUPS: ReadonlyArray<readonly [string, readonly string[]]> = [
+  ['Environment', ['node', 'store', 'config', 'data-dir']],
+  ['Shelf', ['api', 'read', 'search', 'team shelf']],
+  // Codex's four states in the order an operator hits them: the file exists,
+  // the harness accepted it, something actually fired, and the commands the
+  // mode needs are cleared. Rolled into one line they were unactionable
+  // (tenjin-agent#342).
+  [
+    'Hooks',
+    [
+      'daemon',
+      'entries',
+      'codex configured',
+      'codex trusted',
+      'codex observed',
+      'claude permissions',
+      'codex permissions',
+      'skills',
+    ],
+  ],
+  ['Wallet', ['wallet', 'wallet-custody', 'balance']],
+];
+
+/**
+ * One line per check under its group heading, and a `fix:` line ONLY where
+ * there is something to fix. A fix under a passing check is advice nobody
+ * asked for, and fifteen of them is the wall this rendering replaced.
+ */
 export function renderDoctorHuman(io: Io, checks: CheckResult[]): string[] {
   const nameWidth = Math.max(...checks.map((c) => c.name.length));
   const lines: string[] = [];
-  for (const c of checks) {
-    const icon =
-      c.status === 'ok'
-        ? paint(io, 'green', '✓')
-        : c.status === 'warn'
-          ? paint(io, 'yellow', '!')
-          : paint(io, 'red', '✗');
-    // `detail` and `fix` interpolate SERVER-sourced strings (the OpenAPI
-    // info.version, a provider's error text), so a newline or ANSI in a hostile
-    // deployment's version string could forge extra lines here — including a
-    // convincing closing pointer at a URL of its choosing. Sanitize at the render
-    // seam: output.ts exempts doctor on the assumption it only paints its OWN
-    // text, which has not been true since these lines began carrying server text.
-    lines.push(
-      `${icon} ${c.name.padEnd(nameWidth)}  ${paint(io, 'dim', sanitizeForTerminal(c.detail))}`,
-    );
-    if (c.status !== 'ok' && c.fix !== undefined) {
-      lines.push(`    ${paint(io, 'dim', `fix: ${sanitizeForTerminal(c.fix)}`)}`);
+  for (const [group, names] of CHECK_GROUPS) {
+    // The GROUP's order, not the build order: the page reads the same however
+    // the checks were assembled. A name can match twice (a provider with two
+    // custody warnings), so this filters rather than finds.
+    const here = names.flatMap((name) => checks.filter((c) => c.name === name));
+    if (here.length === 0) continue;
+    lines.push(group);
+    for (const c of here) {
+      const icon =
+        c.status === 'ok'
+          ? paint(io, 'green', '✓')
+          : c.status === 'warn'
+            ? paint(io, 'yellow', '!')
+            : paint(io, 'red', '✗');
+      // `detail` and `fix` interpolate SERVER-sourced strings (the OpenAPI
+      // info.version, a provider's error text), so a newline or ANSI in a
+      // hostile deployment's version string could forge extra lines here.
+      // Sanitize at the render seam: output.ts exempts doctor on the assumption
+      // it only paints its OWN text, which has not been true since these lines
+      // began carrying server text.
+      lines.push(
+        `  ${icon} ${c.name.padEnd(nameWidth)}  ${paint(io, 'dim', sanitizeForTerminal(c.detail))}`,
+      );
+      if (c.status !== 'ok' && c.fix !== undefined) {
+        lines.push(`    ${paint(io, 'dim', `fix: ${sanitizeForTerminal(c.fix)}`)}`);
+      }
     }
   }
+  lines.push('', tally(checks));
   return lines;
+}
+
+/** `12 checks: 10 ok, 2 warn.` — a status with no count is left out. */
+function tally(checks: CheckResult[]): string {
+  const count = (status: CheckResult['status']): number =>
+    checks.filter((c) => c.status === status).length;
+  const parts = [
+    `${count('ok')} ok`,
+    ...(count('warn') > 0 ? [`${count('warn')} warn`] : []),
+    ...(count('fail') > 0 ? [`${count('fail')} fail`] : []),
+  ];
+  return `${checks.length} checks: ${parts.join(', ')}.`;
 }
 
 /**

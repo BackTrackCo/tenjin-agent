@@ -49,7 +49,7 @@ and the score would then read that work as the lead's. Every arm drops such a
 fire whole — no lookup, no event row, no decision row — rather than inventing a
 reason bucket for a row that should not exist.
 
-**`tenjin push grade` reads that file.** A row with an agent id is judged against
+**`tenjin grade` reads that file.** A row with an agent id is judged against
 `<session>/subagents/agent-<id>.jsonl`, never the parent's. A relayed finding has
 no anchor row in any transcript — the child is handed it as its opening context
 and nothing records it — so it is judged from the child's first tool call onward,

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { chmod, mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -10,6 +10,7 @@ import {
   CONFIG_DEFAULTS,
   CONFIG_KEYS,
   DEFAULT_BAZAAR_REGISTRIES,
+  HOOK_ARMS,
   LOOP_CONFIG_KEYS,
   TEAM_CONFIG_KEYS,
   parseLoopValue,
@@ -197,81 +198,96 @@ describe('publish block', () => {
   });
 });
 
-describe('hooks block: push and capture (docs/command-reference.md#push-experimental)', () => {
-  it('default off for both, read at run time by the installed scripts', async () => {
-    expect(CONFIG_DEFAULTS.hooks.push).toBe('off');
-    expect(CONFIG_DEFAULTS.hooks.capture).toBe('off');
-    expect((await loadConfig(dir)).hooks.push).toBe('off');
-    expect((await loadConfig(dir)).hooks.capture).toBe('off');
-  });
-
-  it('merges a partial hooks block per-subkey (keeps the defaults it omits)', async () => {
-    await writeFile(configFile(), JSON.stringify({ hooks: { push: 'on' } }));
+describe('hooks block: seven booleans, one per arm', () => {
+  // A vanilla install turns the whole loop on: every arm is on until someone
+  // says otherwise, and each is one `config set` from inert.
+  it('defaults every arm on, read at run time by the daemon', async () => {
     const cfg = await loadConfig(dir);
-    expect(cfg.hooks.push).toBe('on');
-    expect(cfg.hooks.capture).toBe('off');
-    expect(cfg.hooks.webSearch).toBe(CONFIG_DEFAULTS.hooks.webSearch);
+    for (const arm of HOOK_ARMS) {
+      expect(CONFIG_DEFAULTS.hooks[arm]).toBe(true);
+      expect(cfg.hooks[arm]).toBe(true);
+    }
   });
 
-  it('resolveSettings exposes hooksPush and hooksCapture, file over default', async () => {
-    await writeFile(configFile(), JSON.stringify({ hooks: { push: 'on', capture: 'nudge' } }));
+  it('merges a partial hooks block per-arm (keeps the defaults it omits)', async () => {
+    await writeFile(configFile(), JSON.stringify({ hooks: { 'web-search': false } }));
+    const cfg = await loadConfig(dir);
+    expect(cfg.hooks['web-search']).toBe(false);
+    expect(cfg.hooks.prompt).toBe(true);
+    expect(cfg.hooks.publish).toBe(true);
+  });
+
+  it('resolveSettings exposes every arm, file over default', async () => {
+    await writeFile(configFile(), JSON.stringify({ hooks: { publish: false } }));
     const config = await loadRawConfig(dir);
     const s = resolveSettings({ config, flags: {}, env: {} });
-    expect(s.hooksPush).toEqual({ value: 'on', source: 'file' });
-    expect(s.hooksCapture).toEqual({ value: 'nudge', source: 'file' });
+    expect(s.hooks.publish).toEqual({ value: false, source: 'file' });
+    expect(s.hooks.prompt).toEqual({ value: true, source: 'default' });
   });
 
-  it('resolveSettings reports default provenance when unset', async () => {
-    const config = await loadRawConfig(dir);
-    const s = resolveSettings({ config, flags: {}, env: {} });
-    expect(s.hooksPush).toEqual({ value: 'off', source: 'default' });
-    expect(s.hooksCapture).toEqual({ value: 'off', source: 'default' });
-  });
-
-  it('rejects a value outside either enum', async () => {
-    await writeFile(configFile(), JSON.stringify({ hooks: { push: 'sometimes' } }));
-    await expect(loadConfig(dir)).rejects.toBeInstanceOf(CliError);
-    await writeFile(configFile(), JSON.stringify({ hooks: { capture: 'sometimes' } }));
+  it('rejects a hook value that is not a boolean', async () => {
+    await writeFile(configFile(), JSON.stringify({ hooks: { publish: 'sometimes' } }));
     await expect(loadConfig(dir)).rejects.toBeInstanceOf(CliError);
   });
 });
 
 describe('install block', () => {
   it('defaults to no recorded harness and no recorded decline', async () => {
-    expect(CONFIG_DEFAULTS.install).toEqual({ harness: [], freeVerbsDeclined: [] });
-    expect((await loadConfig(dir)).install).toEqual({ harness: [], freeVerbsDeclined: [] });
+    expect(CONFIG_DEFAULTS.install).toEqual({ harness: [], grantDeclined: [] });
+    expect((await loadConfig(dir)).install).toEqual({ harness: [], grantDeclined: [] });
   });
 
   it('reads back the recorded targets', async () => {
-    await writeFile(configFile(), JSON.stringify({ install: { harness: ['claude', 'shared'] } }));
-    expect((await loadConfig(dir)).install.harness).toEqual(['claude', 'shared']);
+    await writeFile(configFile(), JSON.stringify({ install: { harness: ['claude', 'codex'] } }));
+    expect((await loadConfig(dir)).install.harness).toEqual(['claude', 'codex']);
   });
 
-  it('reads back a recorded free-verb decline as the exact declined rules', async () => {
+  it.each([
+    [['shared'], ['codex']],
+    [
+      ['claude', 'shared'],
+      ['claude', 'codex'],
+    ],
+    [['codex', 'shared'], ['codex']],
+    [
+      ['shared', 'claude', 'shared', 'codex', 'claude'],
+      ['claude', 'codex'],
+    ],
+    [[], []],
+  ])('normalizes the stored harnesses %j at the raw read edge', async (harness, expected) => {
+    const stored = { install: { harness } };
+    await writeFile(configFile(), JSON.stringify(stored));
+
+    expect((await loadRawConfig(dir)).install?.harness).toEqual(expected);
+    expect((await loadConfig(dir)).install.harness).toEqual(expected);
+    // Reading is not a config write: the next locked writer performs the durable
+    // migration, while read-only commands leave the operator's file untouched.
+    expect(JSON.parse(await readFile(configFile(), 'utf8'))).toEqual(stored);
+  });
+
+  it('reads back a recorded grant decline as the exact declined rules', async () => {
+    await writeFile(
+      configFile(),
+      JSON.stringify({ install: { grantDeclined: ['Bash(tenjin search:*)'] } }),
+    );
+    expect((await loadConfig(dir)).install.grantDeclined).toEqual(['Bash(tenjin search:*)']);
+  });
+
+  it('does not alias the pre-release decline key', async () => {
     await writeFile(
       configFile(),
       JSON.stringify({ install: { freeVerbsDeclined: ['Bash(tenjin search:*)'] } }),
     );
-    expect((await loadConfig(dir)).install.freeVerbsDeclined).toEqual(['Bash(tenjin search:*)']);
+    expect((await loadConfig(dir)).install.grantDeclined).toEqual([]);
   });
 
-  // Before tenjin-agent#234's rewrite from a suppress-everything flag to a
-  // per-rule list, this key held a boolean. A machine that already wrote
-  // `true` must not fail CONFIG_INVALID on the next read, but a boolean has no
-  // per-rule information to recover, so it reads back as "nothing specific is
-  // known to be declined" either way — the safe direction (worst case a
-  // settled decline is reported pending once more; never a rule silently
-  // dropped from this list).
-  it('tolerates the old freeVerbsDeclined boolean and treats it as nothing declined', async () => {
-    await writeFile(configFile(), JSON.stringify({ install: { freeVerbsDeclined: true } }));
-    expect((await loadConfig(dir)).install.freeVerbsDeclined).toEqual([]);
-
-    await writeFile(configFile(), JSON.stringify({ install: { freeVerbsDeclined: false } }));
-    expect((await loadConfig(dir)).install.freeVerbsDeclined).toEqual([]);
+  it('rejects a boolean grant decline instead of carrying a pre-release shape', async () => {
+    await writeFile(configFile(), JSON.stringify({ install: { grantDeclined: true } }));
+    await expect(loadConfig(dir)).rejects.toBeInstanceOf(CliError);
   });
 
   it('rejects a harness name install could not have written', async () => {
-    await writeFile(configFile(), JSON.stringify({ install: { harness: ['cursor'] } }));
+    await writeFile(configFile(), JSON.stringify({ install: { harness: ['shared', 'cursor'] } }));
     await expect(loadConfig(dir)).rejects.toBeInstanceOf(CliError);
   });
 
@@ -285,13 +301,11 @@ describe('loop and team blocks (loop-redesign/07-pr-b-daemon-kernel.md)', () => 
   const LOOP_DEFAULTS = {
     human_wait_ms: 2500,
     tool_wait_ms: 4000,
-    rate_per_min: 3,
-    burst: 6,
     idle_exit_min: 30,
     port: null,
   } as const;
 
-  it('defaults to the four budget numbers, two daemon knobs, and public fallback on', async () => {
+  it('defaults to the two budget numbers, two daemon knobs, and public fallback on', async () => {
     expect(CONFIG_DEFAULTS.loop).toEqual(LOOP_DEFAULTS);
     expect(CONFIG_DEFAULTS.team).toEqual({ publicFallback: 'on' });
     const cfg = await loadConfig(dir);
@@ -315,7 +329,7 @@ describe('loop and team blocks (loop-redesign/07-pr-b-daemon-kernel.md)', () => 
   });
 
   it.each([
-    ['loop.burst 0', { loop: { burst: 0 } }],
+    ['loop.tool_wait_ms 0', { loop: { tool_wait_ms: 0 } }],
     ['loop.port 70000', { loop: { port: 70000 } }],
     ['team.publicFallback "maybe"', { team: { publicFallback: 'maybe' } }],
   ])('rejects %s with CONFIG_INVALID', async (_label, raw) => {
@@ -333,22 +347,25 @@ describe('loop and team blocks (loop-redesign/07-pr-b-daemon-kernel.md)', () => 
   // A newer CLI's loop key must survive an older binary's load + persist, the
   // same reason the outer object passes unknown keys through.
   it('passes an unknown loop subkey through loadRawConfig and drops it from the effective config', async () => {
-    await writeFile(configFile(), JSON.stringify({ loop: { burst: 9, future_knob: 'x' } }));
+    await writeFile(
+      configFile(),
+      JSON.stringify({ loop: { tool_wait_ms: 9000, future_knob: 'x' } }),
+    );
     const raw = await loadRawConfig(dir);
-    expect(raw.loop).toEqual({ burst: 9, future_knob: 'x' });
-    expect(await loadConfig(dir)).toMatchObject({ loop: { ...LOOP_DEFAULTS, burst: 9 } });
+    expect(raw.loop).toEqual({ tool_wait_ms: 9000, future_knob: 'x' });
+    expect(await loadConfig(dir)).toMatchObject({
+      loop: { ...LOOP_DEFAULTS, tool_wait_ms: 9000 },
+    });
     expect((await loadConfig(dir)).loop).not.toHaveProperty('future_knob');
   });
 
   it('resolveSettings reports file vs default per loop subkey', async () => {
-    await writeFile(configFile(), JSON.stringify({ loop: { port: 31000, burst: 2 } }));
+    await writeFile(configFile(), JSON.stringify({ loop: { port: 31000, human_wait_ms: 900 } }));
     const config = await loadRawConfig(dir);
     const s = resolveSettings({ config, flags: {}, env: {} });
     expect(s.loop.port).toEqual({ value: 31000, source: 'file' });
-    expect(s.loop.burst).toEqual({ value: 2, source: 'file' });
-    expect(s.loop.human_wait_ms).toEqual({ value: 2500, source: 'default' });
+    expect(s.loop.human_wait_ms).toEqual({ value: 900, source: 'file' });
     expect(s.loop.tool_wait_ms).toEqual({ value: 4000, source: 'default' });
-    expect(s.loop.rate_per_min).toEqual({ value: 3, source: 'default' });
     expect(s.loop.idle_exit_min).toEqual({ value: 30, source: 'default' });
   });
 
@@ -372,8 +389,6 @@ describe('loop and team blocks (loop-redesign/07-pr-b-daemon-kernel.md)', () => 
     expect(LOOP_CONFIG_KEYS).toEqual([
       'loop.human_wait_ms',
       'loop.tool_wait_ms',
-      'loop.rate_per_min',
-      'loop.burst',
       'loop.idle_exit_min',
       'loop.port',
     ]);
@@ -412,7 +427,7 @@ describe('loop and team blocks (loop-redesign/07-pr-b-daemon-kernel.md)', () => 
     });
 
     it.each(['-1', 'abc', '1.5', '', '0'])('rejects %j for a budget key with USAGE', (value) => {
-      const err = usage(() => parseLoopValue('loop.burst', value));
+      const err = usage(() => parseLoopValue('loop.tool_wait_ms', value));
       expect(err.fix).toBe('Use a positive integer.');
     });
 
