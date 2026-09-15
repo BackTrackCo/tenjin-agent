@@ -2,7 +2,7 @@ import { z } from 'zod';
 import type { Trigger } from '../hooks/types';
 import { CliError } from './errors';
 import { httpRequest, type HttpResult } from './http';
-import { ATOMIC_RE, UUID_RE } from './ids';
+import { ATOMIC_RE, QUALIFIED_SHELF_RE, UUID_RE } from './ids';
 import { trimSlash } from './url';
 
 /**
@@ -19,8 +19,11 @@ import { trimSlash } from './url';
  * the MISS `browse[]` tail is gone entirely — a miss is an empty result plus a
  * `hint` pointing at GET /api/articles, not a different kind of answer.
  *
- * These endpoints are anonymous: no wallet, no SIWX. The shared transport's
- * User-Agent is what attributes a later purchase back to the search flow.
+ * A search with no `shelf` in its body is ANONYMOUS: no wallet, no SIWX, and
+ * the same bytes on the wire it has always sent. Naming a shelf is what makes
+ * one signed (`postShelfSearch`), and it is the same endpoint either way. The
+ * shared transport's User-Agent is what attributes a later purchase back to the
+ * search flow.
  */
 
 const FRESH_WITHIN_RE = /^P(\d+)[DWMY]$/;
@@ -51,10 +54,16 @@ export interface SearchInput {
    *  budget knowing when the answer stops being wanted. */
   budgetMs?: number;
   /**
-   * Shelf route only: may this one call also ask the public marketplace. There
-   * is no `shelf` and no `scope` field anywhere on the wire — the slug is in
-   * the URL, so nothing about it belongs in the body. Omitted entirely for
-   * `POST /api/search`, which is public by construction.
+   * The QUALIFIED shelf to ask, `<org-slug>/<shelf-slug>`. Omitted entirely for
+   * a public search, which is what every existing consumer keeps sending; when
+   * present the request must be signed, and the response is the two-list
+   * envelope instead of a bare result.
+   */
+  shelf?: string;
+  /**
+   * Shelf calls only: may this one call also ask the public marketplace.
+   * Omitted entirely when no shelf is named, because `POST /api/search` without
+   * a shelf is public by construction and nothing narrows that.
    */
   includePublic?: boolean;
 }
@@ -93,7 +102,16 @@ export interface SearchRequestBody {
    *  not know the field echoes it as an unknown-key warning and answers as
    *  before, which is why it ships ahead of the server half. */
   budget_ms?: number;
-  /** Shelf route only: also run the public list. The org's `public_search`
+  /**
+   * The QUALIFIED shelf name, `<org-slug>/<shelf-slug>`. ONE ENDPOINT, one
+   * optional field: a body without it is exactly the public request every
+   * existing consumer already sends, byte for byte, and a body with it is a
+   * signed decision-view request the server answers with two lists. A bare slug
+   * is a 400 there and a USAGE refusal here, because the CLI must not be the
+   * thing that decides which org's `notes` was meant.
+   */
+  shelf?: string;
+  /** Shelf calls only: also run the public list. The org's `public_search`
    *  policy bounds it, so `true` is a request and never a guarantee — a `public`
    *  of null is the answer either way, and the client does not distinguish a
    *  policy refusal from a `false` it sent itself. */
@@ -135,6 +153,13 @@ export function buildSearchRequest(input: SearchInput): SearchRequestBody {
   if (input.maxPrice !== undefined && !ATOMIC_RE.test(input.maxPrice)) {
     throw new CliError('USAGE', `Invalid --max-price: ${JSON.stringify(input.maxPrice)}`, {
       fix: 'Pass an atomic USDC integer, e.g. 100000 for $0.10.',
+    });
+  }
+  if (input.shelf !== undefined && !QUALIFIED_SHELF_RE.test(input.shelf)) {
+    // The server answers 400 for a bare slug; fail locally instead, so a
+    // half-configured machine hears the form it needs rather than a round trip.
+    throw new CliError('USAGE', `Invalid shelf: ${JSON.stringify(input.shelf)}`, {
+      fix: 'A shelf is "<org>/<shelf>", e.g. backtrack/backtrack. Run `tenjin shelf use <slug>` to resolve a bare name against your orgs.',
     });
   }
   const limit = input.limit ?? 5;
@@ -190,6 +215,7 @@ export function buildSearchRequest(input: SearchInput): SearchRequestBody {
     limit,
     trigger: input.trigger ?? 'cli',
     ...(input.budgetMs !== undefined ? { budget_ms: input.budgetMs } : {}),
+    ...(input.shelf !== undefined ? { shelf: input.shelf } : {}),
     ...(input.includePublic !== undefined ? { includePublic: input.includePublic } : {}),
   };
 }
@@ -272,10 +298,10 @@ export const searchResultSchema = z.object({
 export type SearchResult = z.infer<typeof searchResultSchema>;
 
 /**
- * `POST /api/shelves/<slug>/search`: two independent lists, each the envelope
- * above, each ranked exactly as today. There is no merged list and no merged
- * ranking; the client's own selection (`SHELF_RANK` in `hooks/ask.ts`) is what
- * chooses between them.
+ * What `POST /api/search` answers when the body NAMED A SHELF: two independent
+ * lists, each the envelope above, each ranked exactly as today. There is no
+ * merged list and no merged ranking; the client's own selection (`SHELF_RANK`
+ * in `hooks/ask.ts`) is what chooses between them.
  *
  * `public` is null when `includePublic` was false AND when the org turned
  * `public_search` off. The two are deliberately indistinguishable from here:
@@ -421,21 +447,24 @@ export async function postSearch(
 }
 
 /**
- * `POST /api/shelves/<slug>/search`: ONE signed call, two candidate lists.
+ * `POST /api/search` WITH A SHELF NAMED: ONE signed call, two candidate lists.
  *
- * The slug is in the path and nowhere else; `includePublic` in the body is the
- * only thing that says whether the marketplace is also asked. Every failure
- * mapping is `postSearch`'s, because the two routes answer with the same
- * envelope inside a two-key wrapper: a 401 is an unsigned or rejected
- * signature, a 404 is a non-member or an unknown slug (indistinguishable by
- * design, `tenjin doctor` is where a user learns which).
+ * SAME ENDPOINT AS THE PUBLIC SEARCH. The only difference is the body: `shelf`
+ * names the qualified shelf and `includePublic` says whether the marketplace is
+ * also asked, and those two fields are what turn the answer into a two-key
+ * wrapper around the same envelope `postSearch` parses. There is no per-shelf
+ * route to build a URL for, which is why nothing here encodes a path segment.
+ *
+ * Every failure mapping is `postSearch`'s: a 401 is an unsigned or rejected
+ * signature, a 404 is a non-member, an unknown org or an unknown shelf (all
+ * indistinguishable by design, `tenjin doctor` is where a user learns which).
  */
 export async function postShelfSearch(
-  shelf: string,
   body: SearchRequestBody,
   opts: AgentApiOptions,
 ): Promise<ShelfSearchResponse> {
-  const url = `${trimSlash(opts.baseUrl)}/api/shelves/${encodeURIComponent(shelf)}/search`;
+  const shelf = body.shelf ?? '';
+  const url = `${trimSlash(opts.baseUrl)}/api/search`;
   const res = await httpRequest(url, {
     method: 'POST',
     timeoutMs: opts.timeoutMs,
@@ -460,7 +489,7 @@ export async function postShelfSearch(
       'API_UNREACHABLE',
       `${url} answered 404: this wallet is not a member of "${shelf}", or no such shelf exists.`,
       {
-        fix: 'Run `tenjin org list` to see the shelves this wallet can reach, then `tenjin shelf use <slug>`.',
+        fix: 'Run `tenjin org list` to see the shelves this wallet can reach, then `tenjin shelf use <org/shelf>`.',
         details: res.json,
       },
     );

@@ -14,7 +14,8 @@ import { keysLeg, searchLeg } from './shelf';
  */
 
 const BASE = PRODUCTION_ORIGIN;
-const SHELF = 'backtrack';
+/** The QUALIFIED name, which is the only form the config or the wire carries. */
+const SHELF = 'backtrack/backtrack';
 
 const CONFIG: KernelConfig = {
   hooks: CONFIG_DEFAULTS.hooks,
@@ -71,7 +72,7 @@ function envelope(
   return { schemaVersion: 3, searchId, calibration, items, matched: items.length };
 }
 
-/** The two-list body the shelf route answers with. */
+/** The two-list body a search naming a shelf answers with. */
 function twoList(
   shelfItems: Array<Record<string, unknown>>,
   publicItems: null | Array<Record<string, unknown>>,
@@ -119,7 +120,7 @@ function setOf(results: LegResult[], shelf: Shelf): LegResult | undefined {
 }
 
 describe('searchLeg: one call, two sets', () => {
-  it('posts once to the shelf route, signed, and yields a team set and a public set', async () => {
+  it('posts once to /api/search with the shelf in the body, signed, and yields both sets', async () => {
     const { fetchImpl, calls } = stub(() =>
       json(200, twoList([candidate({ strong: true })], [candidate({ strong: true })])),
     );
@@ -131,14 +132,19 @@ describe('searchLeg: one call, two sets', () => {
     );
     // EXACTLY ONE request. This is the whole change: it used to be two.
     expect(calls).toHaveLength(1);
-    expect(calls[0]?.url).toBe(`${BASE}/api/shelves/${SHELF}/search`);
+    // ONE ENDPOINT, and the shelf is a body field: there is no per-shelf path a
+    // question could be sent down by mistake.
+    expect(calls[0]?.url).toBe(`${BASE}/api/search`);
     expect(calls[0]?.headers.get('tenjin-session-delegation')).toBe('stub');
+    expect((await calls[0]!.clone().json()) as Record<string, unknown>).toMatchObject({
+      shelf: SHELF,
+    });
     expect(results.map((r) => r.shelf)).toEqual(['team', 'public']);
     expect(setOf(results, 'team')?.searchId).toBe(SEARCH_ID);
     expect(setOf(results, 'public')?.searchId).toBe(PUBLIC_SEARCH_ID);
   });
 
-  it('the slug is in the URL and nowhere in the body: no `shelf`, no `scope`', async () => {
+  it('the shelf is a QUALIFIED name in the body, and there is still no `scope`', async () => {
     const { fetchImpl, calls } = stub(() => json(200, twoList([], [])));
     await searchLeg('research', CONFIG, {}, fetchImpl).request(
       q('why'),
@@ -148,7 +154,10 @@ describe('searchLeg: one call, two sets', () => {
     );
     const sent = await body(calls);
     expect(sent).toMatchObject({ trigger: 'research', limit: 3, budget_ms: 3200 });
-    expect(sent.shelf).toBeUndefined();
+    // The org half is what makes the name an identity: a bare `backtrack` would
+    // name a different shelf in every org that has one.
+    expect(sent.shelf).toBe(SHELF);
+    expect(String(sent.shelf)).toContain('/');
     expect(sent.scope).toBeUndefined();
     // The shelf lifts identifiers out of the query itself; this side sends the
     // question and nothing it inferred from it.
@@ -300,8 +309,10 @@ describe('searchLeg routing when the call cannot be signed', () => {
       deps(cannotSign),
     );
     expect(calls).toHaveLength(1);
-    // NEVER to the shelf route: an unsigned shelf request is a 401 and no answer.
+    // The same endpoint, with NO shelf in the body: an unsigned shelf request is
+    // a 401 and no answer, so the fallback drops the field rather than the call.
     expect(calls[0]?.url).toBe(`${BASE}/api/search`);
+    expect((await body(calls)).shelf).toBeUndefined();
     expect(results.map((r) => r.shelf)).toEqual(['public']);
     expect(results[0]?.answer).not.toBeNull();
     expect(results[0]?.authError).toBe('unauthenticated: WALLET_LOCKED');
@@ -367,9 +378,10 @@ describe('searchLeg statuses', () => {
   const cases: Array<[string, () => Response, string]> = [
     ['a 429', () => json(429, { error: 'slow down' }), 'http_429'],
     ['a 500', () => json(500, { error: 'boom' }), 'http_500'],
-    // A 404 on the shelf route means "not a member, or no such shelf", which the
-    // server answers identically on purpose; `tenjin doctor` is where a user
-    // learns which. A rejected signature is the same class of fact.
+    // A 404 on a call that named a shelf means "not a member, or no such org or
+    // shelf", which the server answers identically on purpose; `tenjin doctor`
+    // is where a user learns which. A rejected signature is the same class of
+    // fact. Both carry a REASON as well as a status; see the case below.
     ['a 404', () => json(404, { error: 'no route' }), 'refused'],
     ['a gate page', () => html(401), 'refused'],
     ['HTML with a 200', () => html(200), 'bad_json'],
@@ -390,6 +402,45 @@ describe('searchLeg statuses', () => {
       }
     });
   }
+
+  /**
+   * A REFUSAL IS NEVER SILENT. A status alone reads in the ledger like any other
+   * empty answer; these two are an OPERATOR's problem, with two different
+   * remedies, so each row carries the sentence that names which. It rides to
+   * `fires.error`, the column doctor already reads.
+   */
+  it.each([
+    [401, 'unauthenticated'],
+    [403, 'unauthenticated'],
+    [404, 'not-a-member'],
+  ])('a %i on a shelf call files the reason on every row', async (status, reason) => {
+    const { fetchImpl } = stub(() => json(status, { error: 'nope' }));
+    const results = await searchLeg('prompt', CONFIG, {}, fetchImpl).request(
+      q('why'),
+      2000,
+      new AbortController().signal,
+      deps(signed),
+    );
+    expect(results.map((r) => r.shelf)).toEqual(['team', 'public']);
+    for (const r of results) {
+      expect(r.status).toBe('refused');
+      expect(String(r.authError)).toContain(reason);
+      expect(String(r.authError)).toContain(SHELF);
+    }
+  });
+
+  /** And a machine on no shelf has no membership to be refused for: an
+   *  anonymous public call that 404s is a bare status and nothing more. */
+  it('files no reason for a public-only call, which has no shelf to be refused from', async () => {
+    const { fetchImpl } = stub(() => json(404, { error: 'nope' }));
+    const results = await searchLeg('prompt', NO_SHELF, {}, fetchImpl).request(
+      q('why'),
+      2000,
+      new AbortController().signal,
+      deps(noWallet),
+    );
+    expect(results).toEqual([{ shelf: 'public', status: 'refused', answer: null }]);
+  });
 
   /**
    * THE OTHER POLARITY. The five cases above all run the default config, whose
@@ -581,7 +632,7 @@ describe('searchLeg verdict', () => {
 describe('keysLeg', () => {
   const KEYS = ['sig_v1:abc', 'sig_v1_test:def'];
 
-  it('posts the fingerprints to the shelf keys route, signed', async () => {
+  it('posts the fingerprints to /api/keys/resolve with the shelf named, signed', async () => {
     const { fetchImpl, calls } = stub(() => json(200, envelope([])));
     const leg = keysLeg(CONFIG, KEYS, fetchImpl);
     const results = await leg.request(
@@ -593,10 +644,11 @@ describe('keysLeg', () => {
     expect(results.map((r) => r.shelf)).toEqual(['keys']);
     expect(results[0]?.status).toBe('ok');
     expect(leg.shelves).toEqual(['keys']);
-    expect(calls[0]?.url).toBe(`${BASE}/api/shelves/${SHELF}/keys/resolve`);
+    expect(calls[0]?.url).toBe(`${BASE}/api/keys/resolve`);
     expect(calls[0]?.headers.get('tenjin-session-delegation')).toBe('stub');
     // Exactly `resolveRequestSchema`'s shape (a strict object): keys, trigger,
-    // limit. No question, no budget: a key is not a search.
+    // limit and the shelf. No question, no budget: a key is not a search. No
+    // `includePublic` either, because there is no public resolve to ask for.
     expect(await body(calls)).toEqual({
       keys: [
         { kind: 'fingerprint', key: 'sig_v1:abc' },
@@ -604,6 +656,7 @@ describe('keysLeg', () => {
       ],
       trigger: 'failure',
       limit: 3,
+      shelf: SHELF,
     });
   });
 
@@ -623,7 +676,7 @@ describe('keysLeg', () => {
     });
   });
 
-  it('a 404 (keys not enabled) is one refused row, and nothing else remembers it', async () => {
+  it('a 404 (keys not enabled) is one refused row carrying the reason', async () => {
     const { fetchImpl } = stub(() => json(404, { error: { code: 'not_enabled' } }));
     const results = await keysLeg(CONFIG, KEYS, fetchImpl).request(
       q(''),
@@ -631,7 +684,12 @@ describe('keysLeg', () => {
       new AbortController().signal,
       deps(signed),
     );
-    expect(results).toEqual([{ shelf: 'keys', status: 'refused', answer: null }]);
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({ shelf: 'keys', status: 'refused', answer: null });
+    // NEVER SILENT: the row says which shelf answered 404 and what that means,
+    // because an operator reading the ledger has two different remedies.
+    expect(String(results[0]?.authError)).toContain('not-a-member');
+    expect(String(results[0]?.authError)).toContain(SHELF);
   });
 
   it('a 200 with items is a hit on the first item, strong or not, calibration key-v1', async () => {

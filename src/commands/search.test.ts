@@ -537,16 +537,17 @@ describe('item URL origin ingest boundary', () => {
 });
 
 /**
- * ONE SHELF ROUTE, ONE CALL, TWO LISTS.
+ * ONE ENDPOINT, ONE CALL, TWO LISTS.
  *
- * Every case here turns on the same three facts: the slug is in the URL and
- * nowhere in the body, the call is signed with the delegated session key the
- * writes already use, and `team.publicFallback` is what sets `includePublic` on
- * the one request rather than deciding whether a second one is made.
+ * Every case here turns on the same three facts: the shelf is a QUALIFIED name
+ * in the body of the same `/api/search` a public search posts to, the call is
+ * signed with the delegated session key the writes already use, and
+ * `team.publicFallback` is what sets `includePublic` on the one request rather
+ * than deciding whether a second one is made.
  */
 describe('runSearch on a shelf', () => {
   const BASE = 'https://team.example';
-  const SHELF = 'backtrack';
+  const SHELF = 'backtrack/backtrack';
 
   interface Sent {
     url: string;
@@ -571,7 +572,7 @@ describe('runSearch on a shelf', () => {
     return { fetch: fetchFn, sent };
   }
 
-  /** A wallet that signs, so the shelf route is reachable without a keystore. */
+  /** A wallet that signs, so a shelf call is reachable without a keystore. */
   function provider(): WalletProvider {
     const inner = testSigner();
     return {
@@ -614,16 +615,16 @@ describe('runSearch on a shelf', () => {
   };
   const emptyList = { ...MISS, searchId: '0197aaaa-bbbb-cccc-dddd-333333333333' };
 
-  it('makes ONE signed request to the shelf route and prints both lists', async () => {
+  it('makes ONE signed request to /api/search naming the shelf, and prints both lists', async () => {
     await writeShelfConfig();
     const { fetch, sent } = shelfStub(() => ({ shelf: shelfHit, public: publicHit }));
     const result = await runSearch({ question: 'q' }, shelfCtx(), deps(fetch));
 
     expect(sent).toHaveLength(1);
-    expect(sent[0]?.url).toBe(`${BASE}/api/shelves/${SHELF}/search`);
+    // THE SAME ENDPOINT A PUBLIC SEARCH USES. What names the shelf is the body.
+    expect(sent[0]?.url).toBe(`${BASE}/api/search`);
     expect(sent[0]?.headers['tenjin-session-delegation']).toBeDefined();
-    // The slug is in the URL and nowhere in the body.
-    expect(sent[0]?.body.shelf).toBeUndefined();
+    expect(sent[0]?.body.shelf).toBe(SHELF);
     expect(sent[0]?.body.scope).toBeUndefined();
     expect(sent[0]?.body.includePublic).toBe(true);
 
@@ -686,8 +687,8 @@ describe('runSearch on a shelf', () => {
   });
 
   it('a 404 names the membership question rather than reading as an empty shelf', async () => {
-    // The route answers 404 for a non-member and for an unknown slug alike, so
-    // the remedy has to name `tenjin org list` rather than guess which it was.
+    // The server answers 404 for a non-member, an unknown org and an unknown
+    // shelf alike, so the remedy has to name `tenjin org list` rather than guess.
     await writeShelfConfig();
     const fetchFn = (async () =>
       new Response(JSON.stringify({ error: 'not found' }), {
@@ -720,6 +721,8 @@ describe('runSearch on a shelf', () => {
     expect(sent).toHaveLength(1);
     expect(sent[0]?.url).toBe(`${BASE}/api/search`);
     expect(sent[0]?.headers['tenjin-session-delegation']).toBeUndefined();
+    // THE ANONYMOUS BODY, BYTE FOR BYTE: no shelf named, so nothing narrows it.
+    expect(sent[0]?.body.shelf).toBeUndefined();
     expect(sent[0]?.body.includePublic).toBeUndefined();
     const lines = result.humanLines?.join('\n') ?? '';
     expect(lines).toContain('The shelf was not searched');
@@ -778,6 +781,7 @@ describe('runSearch on a shelf', () => {
     expect(sent).toHaveLength(1);
     expect(sent[0]?.url).toBe(`${BASE}/api/search`);
     expect(sent[0]?.headers['tenjin-session-delegation']).toBeUndefined();
+    expect(sent[0]?.body.shelf).toBeUndefined();
     expect(sent[0]?.body.includePublic).toBeUndefined();
     // Unlabelled, exactly as a no-shelf run has always rendered.
     expect(result.humanLines?.[0]).toMatch(/^1 candidate\(s\) \(searchId /);

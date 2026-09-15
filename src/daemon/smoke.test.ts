@@ -82,8 +82,9 @@ let shelfUrl: string;
  *  the built bundle. */
 const shelfCalls: Array<{ path: string; body: Record<string, unknown>; signed: boolean }> = [];
 
-/** The shelf the daemon is pointed at in the two lookup cases. */
-const SHELF_SLUG = 'backtrack';
+/** The shelf the daemon is pointed at in the two lookup cases, QUALIFIED as the
+ *  config and the wire both carry it. */
+const SHELF_SLUG = 'backtrack/backtrack';
 
 /** The one piece the stub shelf holds, free and with its body attached — which
  *  is what PR F puts on every free row and what makes the delivery the whole
@@ -144,13 +145,15 @@ function twoListAnswer(): unknown {
 }
 
 /**
- * A shelf on loopback, answering the SIGNED shelf route and nothing else.
+ * A shelf on loopback, answering a SIGNED `/api/search` that NAMES A SHELF, and
+ * nothing else.
  *
  * One question is ONE request now, and it comes back carrying both candidate
  * sets, so a case that sees two requests here has a daemon that went back to
- * two calls. `/api/search` 404s on purpose: the unsigned fallback route is a
- * different case (`hook-server.test.ts` covers it in process), and a 404 is how
- * this file would notice the daemon taking it by accident.
+ * two calls. There is one endpoint, so what this stub gates on is the body: a
+ * request with no `shelf` in it 404s on purpose, because the unsigned fallback
+ * is a different case (`hook-server.test.ts` covers it in process) and a 404 is
+ * how this file would notice the daemon taking it by accident.
  */
 function startShelf(): Promise<{ server: Server; url: string }> {
   const server = createServer((req, res) => {
@@ -158,15 +161,15 @@ function startShelf(): Promise<{ server: Server; url: string }> {
     req.on('data', (c: Buffer) => (raw += c.toString('utf8')));
     req.on('end', () => {
       const path = (req.url ?? '').split('?')[0] ?? '';
-      if (req.method !== 'POST' || path !== `/api/shelves/${SHELF_SLUG}/search`) {
-        res.writeHead(404).end();
-        return;
-      }
       let body: Record<string, unknown> = {};
       try {
         body = JSON.parse(raw) as Record<string, unknown>;
       } catch {
         // The assertion below reads what did parse.
+      }
+      if (req.method !== 'POST' || path !== '/api/search' || body.shelf !== SHELF_SLUG) {
+        res.writeHead(404).end();
+        return;
       }
       shelfCalls.push({
         path,
@@ -653,16 +656,15 @@ describe('the daemon, cold-started from the real bundle', () => {
     // rather than a pointer to it.
     expect(out.additionalContext).toContain(SHELF_BODY);
 
-    // ONE request, to the signed shelf route, carrying `includePublic` and no
-    // `shelf` or `scope`: the slug is in the URL and the marketplace rides the
-    // same call.
+    // ONE request, signed, to `/api/search`: the qualified shelf and
+    // `includePublic` are in the body, and the marketplace rides the same call.
     expect(shelfCalls).toHaveLength(1);
     const call = shelfCalls[0];
-    expect(call?.path).toBe(`/api/shelves/${SHELF_SLUG}/search`);
+    expect(call?.path).toBe('/api/search');
     expect(call?.signed).toBe(true);
     expect(call?.body.trigger).toBe('prompt');
+    expect(call?.body.shelf).toBe(SHELF_SLUG);
     expect(call?.body.includePublic).toBe(true);
-    expect(call?.body.shelf).toBeUndefined();
     expect(call?.body.scope).toBeUndefined();
 
     // The response flushing is not the row landing. Wait for the row, then

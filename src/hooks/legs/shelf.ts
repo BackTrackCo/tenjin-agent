@@ -13,9 +13,10 @@ import type { Answer, KernelConfig, LegResult, LegStatus, Shelf, Leg, Trigger } 
  * ONE QUESTION IS ONE HTTP REQUEST (00-principles.md, "Do not double count").
  *
  * It used to be two: a team origin and a public origin, raced in one stage. A
- * shelf is now a row on the one deployment, so the request goes to
- * `/api/shelves/<slug>/search`, signed, and comes back with TWO candidate sets:
- * the shelf's and the marketplace's. `searchLeg` therefore returns a
+ * shelf is now a row on the one deployment and a FIELD IN THE BODY, so the
+ * request goes to `/api/search` — the one endpoint, the same one an anonymous
+ * caller uses — carrying `shelf`, signed, and comes back with TWO candidate
+ * sets: the shelf's and the marketplace's. `searchLeg` therefore returns a
  * {@link LegResult} PER SET, not per request, and `ask.ts` writes one `legs`
  * row per set from them. `legs.shelf` keeps its name and its three values.
  *
@@ -50,10 +51,14 @@ interface Seen {
  *
  * The order is the order of certainty: a request that never returned beats one
  * we misread, and a status beats a body. 401 and 403 are `refused` and now mean
- * ONE thing: the signature was rejected. A 404 is `refused` too, and means this
- * wallet is not a member of the configured shelf, or the slug names nothing —
- * the route answers the same either way on purpose, and `tenjin doctor` is
- * where a user learns which it was.
+ * ONE thing: the signature was rejected. A 404 is `refused` too, and on a call
+ * that named a shelf it means this wallet is not a member of it, or the org or
+ * shelf names nothing — the server answers the same either way on purpose, and
+ * `tenjin doctor` is where a user learns which it was.
+ *
+ * NEITHER IS EVER SILENT. `refusedReason` below turns both into the sentence
+ * the row carries, so a fire that asked a shelf and was turned away says why in
+ * `fires.error` instead of reading as an ordinary miss.
  */
 function statusOf(seen: Seen | null, signal: AbortSignal): LegStatus {
   if (signal.aborted) {
@@ -67,6 +72,23 @@ function statusOf(seen: Seen | null, signal: AbortSignal): LegStatus {
   // error template, a proxy. A 200 that IS JSON and still failed to parse is
   // the contract drifting, which is the same fact as a missing field.
   return seen.json ? 'bad_shape' : 'bad_json';
+}
+
+/**
+ * The sentence a refused shelf call writes to the ledger, or undefined when the
+ * status was not a refusal. Only a call that NAMED a shelf can be refused for
+ * membership, so the shelf is named in the text: it is the one fact that tells
+ * an operator which of the two remedies is theirs.
+ */
+function refusedReason(seen: Seen | null, shelf: string | null): string | undefined {
+  if (seen === null || shelf === null) return undefined;
+  if (seen.status === 401 || seen.status === 403) {
+    return `unauthenticated: the signed call for shelf "${shelf}" answered ${seen.status}`;
+  }
+  if (seen.status === 404) {
+    return `not-a-member: shelf "${shelf}" answered 404, so this creator is not in that org or no such shelf exists`;
+  }
+  return undefined;
 }
 
 function readString(candidate: SearchCandidate, key: string): string | undefined {
@@ -158,22 +180,26 @@ function probeFetch(fetchImpl: typeof fetch | undefined, sink: (seen: Seen) => v
 /**
  * The search leg: ONE call, one or two sets.
  *
- * - `cfg.shelf !== null` and a signature: POST `/api/shelves/<slug>/search`
+ * ONE ENDPOINT IN EVERY ARM, `/api/search`. What changes is the body.
+ *
+ * - `cfg.shelf !== null` and a signature: POST `/api/search` with `shelf` and
  *   with `includePublic` from `team.publicFallback` unless the caller says
  *   otherwise. Two sets, `team` and `public` — or one when `includePublic` is
  *   false, and one when the server answered `public: null` anyway because the
  *   org's policy is off, which the client deliberately cannot tell apart.
- * - no wallet: POST `/api/search`, unsigned. One `public` set, an ordinary
- *   valid configuration.
- * - a shelf is set and nothing local can sign: POST `/api/search`, unsigned,
- *   and the row carries `authError`. THE PUBLIC ANSWER IS STILL DELIVERED.
- *   This is the only case where the configured shelf is not the route that gets
- *   called, and it has to be explicit: unlike the old shape, dropping the
+ * - no wallet: POST `/api/search` with NO `shelf`, unsigned. One `public` set,
+ *   an ordinary valid configuration.
+ * - a shelf is set and nothing local can sign: POST `/api/search` with no
+ *   `shelf`, unsigned, and the row carries `authError`. THE PUBLIC ANSWER IS
+ *   STILL DELIVERED.
+ *   This is the only case where the configured shelf is not the shelf that gets
+ *   asked, and it has to be explicit: unlike the old shape, dropping the
  *   signature no longer leaves a second leg already planned. It happens only
  *   where the round asked for a public list at all: a shelf-only round (the
  *   failure text, or `publicFallback: off`) records `refused` rather than send
  *   its question somewhere it was never meant to go.
- * - `cfg.shelf === null`: POST `/api/search`, unsigned. One `public` set.
+ * - `cfg.shelf === null`: POST `/api/search` with no `shelf`, unsigned. One
+ *   `public` set.
  */
 export function searchLeg(
   trigger: Trigger,
@@ -181,8 +207,8 @@ export function searchLeg(
   opts: { includePublic?: boolean } = {},
   fetchImpl?: typeof fetch,
 ): Leg {
-  // Decided ONCE, here, because it is what the call will produce: the shelf
-  // route returns a public list only when this is true, so a round that says
+  // Decided ONCE, here, because it is what the call will produce: a shelf call
+  // returns a public list only when this is true, so a round that says
   // `includePublic: false` (the failure arm's) yields one set and declares one.
   const includePublic = opts.includePublic ?? cfg.team.publicFallback === 'on';
   const sets: Shelf[] =
@@ -190,23 +216,34 @@ export function searchLeg(
   return {
     shelves: sets,
     async request(q, budgetMs, signal, deps): Promise<LegResult[]> {
-      const base = trimSlash(cfg.baseUrl);
+      // THE ONE URL. A shelf is a body field, so there is nothing to build per
+      // shelf and no second path a question can be sent down by mistake.
+      const url = `${trimSlash(cfg.baseUrl)}/api/search`;
       const publicBody = () =>
         buildSearchRequest({ question: q.text, limit: SEARCH_LIMIT, trigger, budgetMs });
 
       let authError: string | undefined;
       if (cfg.shelf !== null) {
-        const url = `${base}/api/shelves/${encodeURIComponent(cfg.shelf)}/search`;
         const body = buildSearchRequest({
           question: q.text,
           limit: SEARCH_LIMIT,
           trigger,
           budgetMs,
+          shelf: cfg.shelf,
           includePublic,
         });
         const auth = await deps.auth({ method: 'POST', url, body: JSON.stringify(body) });
         if (auth.kind === 'signed') {
-          return await callShelf(sets, url, body, auth.headers, budgetMs, signal, fetchImpl);
+          return await callShelf(
+            sets,
+            url,
+            body,
+            auth.headers,
+            budgetMs,
+            signal,
+            cfg.shelf,
+            fetchImpl,
+          );
         }
         // `no-wallet` is not a failure and writes no error; `unauthenticated`
         // is, and the row says so while the answer still gets delivered.
@@ -224,7 +261,7 @@ export function searchLeg(
         }
       }
       return await callPublic(
-        `${base}/api/search`,
+        url,
         publicBody(),
         budgetMs,
         signal,
@@ -236,10 +273,11 @@ export function searchLeg(
 }
 
 /**
- * `POST /api/shelves/<slug>/keys/resolve`: the failure arm's fingerprints,
- * exact keys and nothing else about the failure. Planned only when a shelf is
- * set (there is no public resolve, decision 13), and it yields one `keys` set.
- * A shelf with keys off answers 404, which is one `refused` row and no
+ * `POST /api/keys/resolve` WITH A SHELF NAMED: the failure arm's fingerprints,
+ * exact keys and nothing else about the failure. The one endpoint again, with
+ * `shelf` in the body; planned only when a shelf is set (there is no public
+ * resolve, decision 13), and it yields one `keys` set. A shelf with keys off
+ * answers 404, which is one `refused` row carrying the reason and no
  * machine-wide fact.
  */
 export function keysLeg(cfg: KernelConfig, keys: string[], fetchImpl?: typeof fetch): Leg {
@@ -247,11 +285,15 @@ export function keysLeg(cfg: KernelConfig, keys: string[], fetchImpl?: typeof fe
     shelves: ['keys'],
     async request(_q, budgetMs, signal, deps): Promise<LegResult[]> {
       if (cfg.shelf === null) return failed(['keys'], 'error', {});
-      const url = `${trimSlash(cfg.baseUrl)}/api/shelves/${encodeURIComponent(cfg.shelf)}/keys/resolve`;
+      const url = `${trimSlash(cfg.baseUrl)}/api/keys/resolve`;
       const body = {
         keys: keys.map((key) => ({ kind: 'fingerprint', key })),
         trigger: 'failure' satisfies Trigger,
         limit: SEARCH_LIMIT,
+        // SHELF-ONLY BY CONSTRUCTION. There is no `includePublic` here: the
+        // failure arm never sends a masked error to the marketplace, so the
+        // only thing this body says about scope is which shelf to resolve in.
+        shelf: cfg.shelf,
       };
       const auth = await deps.auth({ method: 'POST', url, body: JSON.stringify(body) });
       if (auth.kind !== 'signed') {
@@ -273,7 +315,9 @@ export function keysLeg(cfg: KernelConfig, keys: string[], fetchImpl?: typeof fe
           fetchImpl: probeFetch(fetchImpl, (s) => (seen = s)),
           jsonBody: body,
         });
-        if (!res.ok || res.status !== 200) return failed(['keys'], statusOf(seen, signal), {});
+        const refused = refusedReason(seen, cfg.shelf);
+        const reason = refused === undefined ? {} : { authError: refused };
+        if (!res.ok || res.status !== 200) return failed(['keys'], statusOf(seen, signal), reason);
         const parsed = searchResultSchema.safeParse(res.json);
         if (!parsed.success) return failed(['keys'], statusOf(seen, signal), {});
         return [resultOf('keys', parsed.data, firstOf, {})];
@@ -284,7 +328,7 @@ export function keysLeg(cfg: KernelConfig, keys: string[], fetchImpl?: typeof fe
   };
 }
 
-/** The signed two-list call. */
+/** The signed two-list call: one POST to `/api/search` whose body names a shelf. */
 async function callShelf(
   sets: Shelf[],
   url: string,
@@ -292,6 +336,7 @@ async function callShelf(
   headers: Record<string, string>,
   budgetMs: number,
   signal: AbortSignal,
+  shelf: string,
   fetchImpl?: typeof fetch,
 ): Promise<LegResult[]> {
   let seen: Seen | null = null;
@@ -311,7 +356,21 @@ async function callShelf(
     // `includePublic: false` asked the marketplace nothing, so a row saying the
     // marketplace failed is a row about a request that was never made: the
     // failure arm's text round is exactly that round, every time.
-    if (!res.ok || res.status !== 200) return failed(sets, statusOf(seen, signal), {});
+    // A 401 or a 404 is a REASON, not just a status: the round asked a shelf and
+    // was turned away, which is an operator's problem and rides to `fires.error`
+    // rather than reading in the ledger as an ordinary empty answer.
+    const refused = refusedReason(seen, shelf);
+    if (!res.ok || res.status !== 200) {
+      return failed(
+        sets,
+        statusOf(seen, signal),
+        refused === undefined
+          ? {}
+          : {
+              authError: refused,
+            },
+      );
+    }
     const parsed = shelfSearchResponseSchema.safeParse(res.json);
     if (!parsed.success) return failed(sets, statusOf(seen, signal), {});
     const rows = [resultOf('team', parsed.data.shelf, strongestOf, {})];

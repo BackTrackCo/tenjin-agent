@@ -145,8 +145,10 @@ describe('the prompt arm under team.publicFallback off', () => {
       expect(planned.stages[0]?.[0]?.shelves).toEqual(['team']);
       await ask(ctx, planned);
       expect(asked).toHaveLength(1);
-      expect(asked[0]?.url).toContain('/api/shelves/backtrack/search');
-      expect(JSON.parse(asked[0]?.body ?? '{}').includePublic).toBe(false);
+      expect(asked[0]?.url).toContain('/api/search');
+      const sent = JSON.parse(asked[0]?.body ?? '{}') as Record<string, unknown>;
+      expect(sent.shelf).toBe('backtrack/backtrack');
+      expect(sent.includePublic).toBe(false);
     } finally {
       vi.unstubAllGlobals();
     }

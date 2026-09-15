@@ -28,7 +28,7 @@ afterEach(async () => {
 });
 
 const ORIGIN = 'https://tenjin.blog';
-const REQ = { method: 'POST', url: `${ORIGIN}/api/shelves/backtrack/search`, body: '{}' } as const;
+const REQ = { method: 'POST', url: `${ORIGIN}/api/search`, body: '{}' } as const;
 const NOW = Date.parse('2026-09-14T00:00:00Z');
 
 function opts(over: Partial<Parameters<typeof searchHeaders>[2]> = {}) {

@@ -28,15 +28,17 @@ import type { CommandContext, CommandResult } from '../context';
 /**
  * `tenjin search "<question>"`, ONE POST, `view: "decision"`.
  *
- * With a shelf set it goes signed to `/api/shelves/<slug>/search` and comes back
- * with two lists, the shelf's and the marketplace's; `team.publicFallback` is
- * what sets `includePublic`, and the org's own `public_search` policy bounds it.
- * With no shelf set it goes unsigned to `/api/search`, exactly as it always did.
+ * ONE ENDPOINT, `/api/search`. With a shelf set the body names it (qualified,
+ * `<org>/<shelf>`), the call is signed, and it comes back with two lists, the
+ * shelf's and the marketplace's; `team.publicFallback` is what sets
+ * `includePublic`, and the org's own `public_search` policy bounds it. With no
+ * shelf set the body names none and the call goes unsigned, exactly as it
+ * always did, byte for byte.
  * Either way it is one request: a question is charged once however many shelves
  * answer it.
  *
  * A LOCAL CREDENTIAL FAILURE ROUTES, IT DOES NOT REFUSE. Nothing able to sign
- * sends the one call unsigned to `/api/search` and prints the reason first, the
+ * sends the one call unsigned and with no `shelf` in the body, and prints the reason first, the
  * same rule `hooks/legs/shelf.ts` follows, because the MCP `tenjin_search` tool
  * runs this function with no TTY to mint at. The two loud cases stay loud: a
  * server that rejected a signed call, and a machine that turned the marketplace
@@ -135,9 +137,10 @@ export async function runSearch(
   if (settings.shelf !== null && onConfigured) {
     const request = buildSearchRequest({
       ...input,
+      shelf: settings.shelf,
       includePublic: settings.teamPublicFallback === 'on',
     });
-    const url = `${settings.baseUrl.replace(/\/+$/, '')}/api/shelves/${encodeURIComponent(settings.shelf)}/search`;
+    const url = `${settings.baseUrl.replace(/\/+$/, '')}/api/search`;
     const auth = await searchHeaders(
       ctx.dataDir,
       { method: 'POST', url, body: JSON.stringify(request) },
@@ -164,7 +167,7 @@ export async function runSearch(
       },
     );
     if (auth.kind === 'signed') {
-      const response = await postShelfSearch(settings.shelf, request, {
+      const response = await postShelfSearch(request, {
         baseUrl: settings.baseUrl,
         timeoutMs: ctx.flags.timeout,
         evalCohort: settings.evalCohort,

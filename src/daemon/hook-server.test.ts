@@ -31,6 +31,12 @@ import { createHookServer, type HookServer } from './server';
  * ONE HTTP REQUEST PRODUCES TWO `legs` ROWS. The request count is an assertion
  * in every case below, because "one question is one unit" is the property, and
  * it is invisible to any test that only reads the ledger.
+ *
+ * ONE ENDPOINT, too: every search here goes to `/api/search` and every key
+ * round to `/api/keys/resolve`, and what separates a shelf call from the
+ * anonymous one is the `shelf` field in the body. So each case asserts the PATH
+ * and the field together: a request that carried a team's name to the public
+ * shape, or reached a shelf without naming one, would pass either alone.
  */
 
 const ARMS: Arm[] = [
@@ -46,7 +52,8 @@ const ARMS: Arm[] = [
   contextArm,
 ];
 
-const SHELF = 'backtrack';
+/** The QUALIFIED name, the only form the config and the wire carry. */
+const SHELF = 'backtrack/backtrack';
 const TOKEN = 'test-token';
 const SEARCH_ID = '11111111-1111-4111-8111-111111111111';
 const PUBLIC_SEARCH_ID = '55555555-5555-4555-8555-555555555555';
@@ -246,13 +253,13 @@ describe('the prompt arm over the real hook server', () => {
       hookSpecificOutput?: { additionalContext?: string };
     };
 
-    // EXACTLY ONE request, to the shelf route, signed, with `includePublic` and
-    // no `shelf` or `scope` in the body.
+    // EXACTLY ONE request, to `/api/search` — the one endpoint — signed, with
+    // the qualified shelf and `includePublic` in the body and no `scope`.
     expect(requests).toHaveLength(1);
-    expect(requests[0]?.path).toBe(`/api/shelves/${SHELF}/search`);
+    expect(requests[0]?.path).toBe('/api/search');
     expect(requests[0]?.signed).toBe(true);
+    expect(requests[0]?.body.shelf).toBe(SHELF);
     expect(requests[0]?.body.includePublic).toBe(true);
-    expect(requests[0]?.body.shelf).toBeUndefined();
     expect(requests[0]?.body.scope).toBeUndefined();
 
     const fires = await firesTo(1);
@@ -301,6 +308,9 @@ describe('the prompt arm over the real hook server', () => {
     expect(requests).toHaveLength(1);
     expect(requests[0]?.path).toBe('/api/search');
     expect(requests[0]?.signed).toBe(false);
+    // THE ANONYMOUS BODY, byte for byte what it always was: no shelf, so
+    // nothing narrows it and nothing about a team rides out.
+    expect(requests[0]?.body.shelf).toBeUndefined();
     expect(requests[0]?.body.includePublic).toBeUndefined();
     const fires = await firesTo(1);
     expect(fires[0]).toMatchObject({ reason: 'hit' });
@@ -321,9 +331,11 @@ describe('the prompt arm over the real hook server', () => {
     await post(prompt('why did the collation flip on the image swap'));
 
     expect(requests).toHaveLength(1);
-    // NEVER to the shelf route: unsigned there is a 401 and no answer at all.
+    // The same endpoint with NO shelf named: naming one unsigned is a 401 and
+    // no answer at all, so the fallback drops the field rather than the call.
     expect(requests[0]?.path).toBe('/api/search');
     expect(requests[0]?.signed).toBe(false);
+    expect(requests[0]?.body.shelf).toBeUndefined();
     const fires = await firesTo(1);
     expect(fires[0]).toMatchObject({ reason: 'hit' });
     expect(String(fires[0]?.delivered)).toMatch(/^inject:/);
@@ -379,7 +391,7 @@ describe('the failure arm over the real hook server', () => {
     is_interrupt: false,
   });
 
-  it('keys first, then the words, both to the shelf and never to the marketplace', async () => {
+  it('keys first, then the words, both naming the shelf and never the marketplace', async () => {
     respond = (path) =>
       path.endsWith('/keys/resolve')
         ? { status: 200, body: envelope([]) }
@@ -390,13 +402,15 @@ describe('the failure arm over the real hook server', () => {
       ),
     );
 
-    expect(requests.map((r) => r.path)).toEqual([
-      `/api/shelves/${SHELF}/keys/resolve`,
-      `/api/shelves/${SHELF}/search`,
-    ]);
+    expect(requests.map((r) => r.path)).toEqual(['/api/keys/resolve', '/api/search']);
     expect(requests.every((r) => r.signed)).toBe(true);
+    // BOTH ROUNDS NAME THE SHELF IN THE BODY, which is the only thing that
+    // makes either of them a shelf call.
+    expect(requests.map((r) => r.body.shelf)).toEqual([SHELF, SHELF]);
     // The failure round is shelf-only by an EXPLICIT false: `team.publicFallback`
-    // is on by default, so the shared helper would otherwise send `true`.
+    // is on by default, so the shared helper would otherwise send `true`. The
+    // keys round has no such field at all: there is no public resolve to ask for.
+    expect(requests[0]?.body.includePublic).toBeUndefined();
     expect(requests[1]?.body.includePublic).toBe(false);
 
     const fires = await firesTo(1);
@@ -415,7 +429,8 @@ describe('the failure arm over the real hook server', () => {
         "Error: ENOENT: no such file or directory, open 'drizzle.config.ts'\n    at run (src/migrate.ts:12:3)\n",
       ),
     );
-    expect(requests.map((r) => r.path)).toEqual([`/api/shelves/${SHELF}/keys/resolve`]);
+    expect(requests.map((r) => r.path)).toEqual(['/api/keys/resolve']);
+    expect(requests[0]?.body.shelf).toBe(SHELF);
     const fires = await firesTo(1);
     expect(fires[0]).toMatchObject({ reason: 'hit' });
     expect(legRows()).toEqual([{ shelf: 'keys', status: 'ok', outcome: 'hit' }]);

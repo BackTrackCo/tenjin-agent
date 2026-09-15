@@ -121,7 +121,7 @@ interface ShelfCall {
 
 /** A stubbed shelf that records every request's path and body and answers
  *  `hits` items on each call in turn (the last entry repeats). BOTH ROUNDS
- *  come through here: the shelf's `keys/resolve` in stage 0 and its `search` in
+ *  come through here: `/api/keys/resolve` in stage 0 and `/api/search` in
  *  stage 1, so a test can say which round asked what. */
 function shelf(hits: Array<Array<Record<string, unknown>>>): { calls: ShelfCall[] } {
   const calls: ShelfCall[] = [];
@@ -138,9 +138,9 @@ function shelf(hits: Array<Array<Record<string, unknown>>>): { calls: ShelfCall[
       items,
       matched: items.length,
     };
-    // The keys route answers the plain envelope; the shelf search route answers
-    // the two-list one, with `public: null` because the failure round sends
-    // `includePublic: false`.
+    // The keys endpoint answers the plain envelope; a search naming a shelf
+    // answers the two-list one, with `public: null` because the failure round
+    // sends `includePublic: false`.
     const path = new URL(String(input)).pathname;
     return new Response(
       JSON.stringify(path.endsWith('/search') ? { shelf: envelope, public: null } : envelope),
@@ -291,10 +291,7 @@ describe('the plan', () => {
       shell({ command: 'pnpm test', ok: false, stderr: ENOENT, stdout: VITEST_FAIL }),
     );
     expect(row.reason).toBe('no-hit');
-    expect(calls.map((c) => c.path)).toEqual([
-      '/api/shelves/backtrack/keys/resolve',
-      '/api/shelves/backtrack/search',
-    ]);
+    expect(calls.map((c) => c.path)).toEqual(['/api/keys/resolve', '/api/search']);
     expect(keysOf(calls[0]!)).toEqual(['sig_v1', 'sig_v1_test']);
     // Both fingerprints, in the order the resolve sent them, then the line.
     expect(row.question_key).toMatch(
@@ -315,7 +312,7 @@ describe('the plan', () => {
       shell({ command: 'pnpm test', ok: false, stderr: ENOENT, stdout: VITEST_FAIL }),
     );
     expect(row.reason).toBe('hit');
-    expect(calls.map((c) => c.path)).toEqual(['/api/shelves/backtrack/keys/resolve']);
+    expect(calls.map((c) => c.path)).toEqual(['/api/keys/resolve']);
     // A key match is a team surface, so it is delivered under the team opener.
     expect(emit?.context).toContain(TEAM_OPENER);
   });
@@ -398,10 +395,10 @@ describe('what a failure asks with', () => {
     const lineOf = (key: string | null) => String(key).split('|').pop();
     expect(lineOf(one.row.question_key)).toBe(lineOf(two.row.question_key));
     expect(calls.map((c) => c.path)).toEqual([
-      '/api/shelves/backtrack/keys/resolve',
-      '/api/shelves/backtrack/search',
-      '/api/shelves/backtrack/keys/resolve',
-      '/api/shelves/backtrack/search',
+      '/api/keys/resolve',
+      '/api/search',
+      '/api/keys/resolve',
+      '/api/search',
     ]);
   });
 
