@@ -192,8 +192,10 @@ describe('runUninstall — a fully installed machine', () => {
     const keep = {
       'wallet.json': '{"wallet":true}',
       // With a shelf set, because the receipt line asserted below is
-      // conditional on this machine actually being on one.
-      'config.json': '{"baseUrl":"https://shelf.example","shelf":"backtrack"}',
+      // conditional on this machine actually being on one. QUALIFIED, because a
+      // bare slug no longer loads: `hasShelf` swallows the CONFIG_INVALID and
+      // the receipt would quietly drop the shelf line this test is about.
+      'config.json': '{"baseUrl":"https://shelf.example","shelf":"backtrack/backtrack"}',
       'library.json': '{"receipts":[]}',
     };
     for (const [file, body] of Object.entries(keep)) await writeFile(join(data, file), body);
