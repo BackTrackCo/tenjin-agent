@@ -451,11 +451,10 @@ failure only from an error marker; a Codex spawn's task is opaque on the wire,
 so no work order is looked up for a child. No arm can block or change a tool call; every one of
 them only adds context beside it. The arms ask your configured shelf a question
 and mention a tested answer if one exists. Six things leave the machine, each
-with its secrets stubbed and then cut at 512 characters: a prompt you typed, a
+with its secrets stubbed and then cut at 8,000 characters: a prompt you typed, a
 WebSearch query, a WebFetch address and the prompt beside it, the description
-and work order a subagent is dispatched with (this one cut at 8,000 characters,
-so the task and not only the rules above it is what the shelf reads), and — to
-the team shelf only — the fingerprint of a failed command and, when that
+and work order a subagent is dispatched with, and — to the team shelf only —
+the fingerprint of a failed command and, when that
 fingerprint round comes back with no answer, the failed command's error line as
 the runner printed it. Nothing else does. A failure too generic to fingerprint
 at all has no first round to lose, so for that one the error line is the only

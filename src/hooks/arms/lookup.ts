@@ -96,7 +96,7 @@ export function lookupArm(spec: LookupSpec): Arm {
         // and a credential live.
         if (reason !== null) return { reason, text: skipText(raw) };
         const trigger = typeof spec.trigger === 'function' ? spec.trigger(ctx.input) : spec.trigger;
-        const q = question(raw, trigger);
+        const q = question(raw);
         if (q.text.length === 0) return null;
         return { question: q, stages: [spec.shelves.map((s) => searchLeg(s, trigger, cfg))] };
       };

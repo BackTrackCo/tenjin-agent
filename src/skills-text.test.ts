@@ -1120,12 +1120,11 @@ describe('the public render did not move', () => {
   // label" phrasing and the warning about a short `provenance:` are not on the
   // page any more. The merge then took main's `--key` paragraph on top.
   //
-  // tenjin-search is this branch's only by inheritance: #346 made `tenjin
-  // search` cut a question past 512 at a whole word instead of refusing with
-  // USAGE. Main's digest for it is taken as-is.
+  // tenjin-search moved 2026-09-14: its question bullet no longer names a 512
+  // cap, because the shelf takes 8,000 characters on every trigger.
   it('renders the exact bytes a public install shipped before team mode existed', () => {
     expect(Object.fromEntries(SHAPED_SKILLS.map((n) => [n, digest(read(n))]))).toEqual({
-      'tenjin-search': 'a24b665cac975d738bc8dbb611362741',
+      'tenjin-search': 'b68bf006e5c7dfe0d53a3bbbd2651198',
       'tenjin-publish': '3c7bc8ca8ddde86353f7019928b81ee2',
     });
   });
