@@ -181,7 +181,9 @@ export const registrar: Registrar = {
     return [
       { event: 'SessionStart', hooks: command },
       { event: 'UserPromptSubmit', hooks: command },
-      { event: 'PreToolUse', matcher: `${SHELL_TOOL}|${PATCH_TOOL}`, hooks: command },
+      // A patch before it applies, a shell call once it has run: nothing asks
+      // before a shell call runs (tenjin-agent#350).
+      { event: 'PreToolUse', matcher: PATCH_TOOL, hooks: command },
       { event: 'PostToolUse', matcher: SHELL_TOOL, hooks: command },
       { event: 'SubagentStart', hooks: command },
       { event: 'SubagentStop', hooks: command },

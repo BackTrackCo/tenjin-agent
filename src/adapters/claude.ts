@@ -256,11 +256,10 @@ export const registrar: Registrar = {
         hooks: http,
       },
       { event: 'PreToolUse', matcher: matcherOf(TOOLS.dispatch), hooks: http },
-      {
-        event: 'PreToolUse',
-        matcher: `${matcherOf(TOOLS.edit)}|${matcherOf(TOOLS.shell)}`,
-        hooks: http,
-      },
+      // Edits only. A Bash call is read once it has run (the two entries below);
+      // nothing asks before it runs since the `bashstart` stamp went
+      // (tenjin-agent#350), and an entry no arm claims is a POST per Bash call.
+      { event: 'PreToolUse', matcher: matcherOf(TOOLS.edit), hooks: http },
       { event: 'PostToolUse', matcher: matcherOf(TOOLS.shell), hooks: http },
       { event: 'PostToolUse', matcher: matcherOf(TOOLS.read), hooks: http },
       { event: 'PostToolUseFailure', matcher: matcherOf(TOOLS.shell), hooks: http },

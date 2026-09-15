@@ -522,7 +522,7 @@ Examples:
 Examples:
   $ tenjin publish finding.md --price 0.10
   $ tenjin publish finding.md --draft
-  $ tenjin publish finding.md --search-id <id> --key fingerprint=sig_v1:ab12
+  $ tenjin publish finding.md --search-id <id> --key 'fingerprint=test:src/a.test.ts > suite > name'
 `,
     )
     .action(async function (this: Command, file: string | undefined) {

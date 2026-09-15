@@ -17,9 +17,10 @@ import {
 } from './test-support';
 
 /**
- * The mechanical lane, which asks nothing. What is under test is the marks PR
- * D's arms read — per actor, so a subagent's edit is the subagent's — and the
- * absence of everything else: no plan, no question, no lookup.
+ * The mechanical lane, which asks nothing. What is under test is the marks the
+ * publish arm reads — per actor, so a subagent's edit is the subagent's — and
+ * the absence of everything else: no plan, no question, no lookup, and no mark
+ * at all for a shell call.
  */
 
 const ON = kernelConfig();
@@ -71,6 +72,13 @@ function edit(path: string, actor: Actor = LEAD): void {
   fire('tool.before', toolInput('edit', { paths: [path] }), actor);
 }
 
+function marksOf(actor: Actor): number {
+  const row = db
+    .prepare('SELECT count(*) AS n FROM marks WHERE session = ? AND agent = ?')
+    .get(actor.session, actor.agent) as { n: number };
+  return row.n;
+}
+
 describe('an edit that names several paths', () => {
   it('marks every path in one fire, under this actor, each with its own key', () => {
     const paths = ['/p/a.ts', '/p/b.ts', '/p/c/renamed.ts'];
@@ -88,12 +96,11 @@ describe('an edit that names several paths', () => {
 });
 
 describe('the context arm registration', () => {
-  it('is one tool-wait arm on three (event, kind) pairs', () => {
+  it('is one tool-wait arm on two (event, kind) pairs, and never on a shell call', () => {
     expect(contextArm.id).toBe('context');
     expect(contextArm.wait).toBe('tool');
     expect(contextArm.on).toEqual([
       { event: 'tool.before', kind: 'edit' },
-      { event: 'tool.before', kind: 'shell' },
       { event: 'tool.after', kind: 'read' },
     ]);
   });
@@ -105,12 +112,14 @@ describe('the context arm registration', () => {
   });
 });
 
-describe('the marks PR D reads', () => {
-  it('stamps bashstart on a shell call', () => {
+describe('the marks the publish arm reads', () => {
+  it('marks nothing for a shell call, and above all not the activity that arms the ask', () => {
+    // Registration keeps a shell call away from this arm; `before` refuses one
+    // too, because falling through here would stamp `activity:mutation` on
+    // every Bash call the lead makes and arm its publish ask with no work done.
     fire('tool.before', toolInput('shell', { command: 'pnpm vitest run x' }));
-    expect(getMark(db, LEAD, 'bashstart')).not.toBeNull();
-    // A Bash call is not activity: only a read or an edit is.
     expect(getMark(db, LEAD, 'activity:mutation')).toBeNull();
+    expect(marksOf(LEAD)).toBe(0);
   });
 
   it('marks every edited path whatever its extension, with the path as the value', () => {
@@ -122,9 +131,9 @@ describe('the marks PR D reads', () => {
   });
 
   it('strips control characters from the path it stores', () => {
-    const path = `/p/${'n'.repeat(120)}\u001b[2K.ts`;
+    const path = `/p/${'n'.repeat(120)}[2K.ts`;
     edit(path);
-    expect(getMark(db, LEAD, `edited:${key(path)}`)).not.toContain('\u001b');
+    expect(getMark(db, LEAD, `edited:${key(path)}`)).not.toContain('');
   });
 
   it('keys on the whole path, so a 300-character path is one file', () => {
@@ -170,13 +179,12 @@ describe('the marks PR D reads', () => {
     expect(getMark(db, LEAD, `edits:${key(path)}`)).toBeNull();
   });
 
-  it('writes nothing at all while both arms it keeps books for are off', () => {
-    const off = kernelConfig({ failure: false, publish: false });
+  it('writes nothing at all while the publish arm, the one it keeps books for, is off', () => {
+    const off = kernelConfig({ publish: false });
     const path = '/p/d.ts';
     fire('tool.before', toolInput('edit', { paths: [path] }), LEAD, off);
-    fire('tool.before', toolInput('shell', { command: 'ls' }), LEAD, off);
-    expect(getMark(db, LEAD, `edited:${key(path)}`)).toBeNull();
-    expect(getMark(db, LEAD, 'bashstart')).toBeNull();
+    fire('tool.after', toolInput('read', { paths: ['/p/e.ts'] }), LEAD, off);
+    expect(marksOf(LEAD)).toBe(0);
   });
 });
 

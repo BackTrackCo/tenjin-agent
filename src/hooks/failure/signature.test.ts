@@ -1,21 +1,15 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import {
-  allowedHeads,
-  commandHeads,
-  errnoOf,
-  errorLine,
-  normalizeForSig,
-  sigV1,
-  topFrameFile,
-} from './signature';
+import { allowedHeads, commandHeads, errnoOf, errorLine } from './signature';
 
 /**
  * The failure arm's pure half. What matters: which commands the arm fires
- * behind, which line of a runner's output is the failure, and that the keys stay
- * the bytes the team shelf already holds.
+ * behind, and which line of a runner's output is the failure, judged one line
+ * at a time with no model of how the runner lays out its page.
  */
 
-const HEX16 = /^[0-9a-f]{16}$/;
+const fixture = (name: string): string =>
+  readFileSync(new URL(`./fixtures/${name}`, import.meta.url), 'utf8');
 
 describe('the heads allowlist', () => {
   it.each([
@@ -132,10 +126,10 @@ describe('the error line', () => {
       "src/app.ts(42,7): error TS2345: argument of type 'string' is not assignable.",
     ],
   ])('picks the specific line over the totals row for %s', (_name, out, want) => {
-    expect(errorLine(out)?.line).toBe(want);
+    expect(errorLine(out)).toBe(want);
   });
 
-  it('yields nothing from a totals-only output: a key on "2 failed" is every repo on earth', () => {
+  it('yields nothing from totals alone: "2 failed" is every repo on earth', () => {
     const totals = [
       ' Test Files  1 failed | 3 passed (4)',
       '      Tests  2 failed | 5 passed (7)',
@@ -144,10 +138,6 @@ describe('the error line', () => {
     expect(errorLine(totals.join('\n'))).toBeNull();
   });
 
-  // The arm joins stdout, stderr, `error` and `text` with a newline apiece
-  // (`failureText`), so the single blank vitest prints before its summary
-  // arrives as two — and two blanks are a block boundary, which left the
-  // totals block holding nothing but totals.
   const ENOENT_LINE = "Error: ENOENT: no such file or directory, open '/repo/fixtures/a.json'";
   const spliced = (blanks: number): string =>
     [
@@ -159,156 +149,144 @@ describe('the error line', () => {
       '      Tests  1 failed (1)',
       '',
     ].join('\n');
-  const scrollback = Array.from({ length: 200 }, (_, n) => `  transform src/mod${n}.ts (ok)`);
 
-  it.each([0, 1, 2, 3, 4])(
-    'reaches the run own failure block across %i blank lines above the totals',
-    (blanks) => {
-      const found = errorLine(spliced(blanks));
-      expect(found?.line).toBe(ENOENT_LINE);
-      // The width of the gap is a splice artifact, so it must not reach the
-      // key: every width keys the same bytes, and the same bytes the
-      // one-blank output already keyed before this hop existed.
-      expect(sigV1(found?.line ?? '', found?.block ?? '')?.key).toBe('609f799adea79f63');
-    },
-  );
-
-  it('gives up past the gap: five blank lines is a different screenful', () => {
-    expect(errorLine(spliced(5))).toBeNull();
+  // The arm joins stdout, stderr, `error` and `text` with a newline apiece, so
+  // blank lines between a failure and its totals are a splice artifact. With no
+  // blocks there is no gap to measure: the output is one command's.
+  it.each([0, 1, 2, 5, 30])('reads the line across %i blank lines', (blanks) => {
+    expect(errorLine(spliced(blanks))).toBe(ENOENT_LINE);
   });
 
-  it.each([
-    [
-      'a lifecycle banner above',
-      [
-        '> api@1.0.0 test',
-        '> vitest run',
-        '',
-        '',
-        ' Test Files  1 failed (1)',
-        '      Tests  1 failed (1)',
-        '',
-      ],
-    ],
-    [
-      'an unrelated error 200 lines up',
-      [
-        "Error: EACCES: permission denied, open '/etc/hosts'",
-        '    at open (node:fs:9:9)',
-        ...scrollback,
-        '',
-        '',
-        ' Test Files  1 failed (1)',
-        '      Tests  1 failed (1)',
-        '',
-      ],
-    ],
-    [
-      'an earlier run failure block 200 lines up',
-      [
-        ' FAIL  src/old.test.ts > old',
-        "Error: ECONNREFUSED: connect refused, open '/x/y.json'",
-        '',
-        '',
-        ...scrollback,
-        '',
-        '',
-        ' Test Files  1 failed (1)',
-        '      Tests  1 failed (1)',
-        '',
-      ],
-    ],
-    [
-      'an earlier run failure block across a wide blank gap',
-      [
-        ' FAIL  src/old.test.ts > old',
-        "Error: ECONNREFUSED: connect refused, open '/x/y.json'",
-        ...Array.from({ length: 30 }, () => ''),
-        ' Test Files  1 failed (1)',
-        '      Tests  1 failed (1)',
-        '',
-      ],
-    ],
-  ])('still yields nothing when the totals block is all there is: %s', (_name, out) => {
-    expect(errorLine(out.join('\n'))).toBeNull();
+  it('yields nothing when nothing above the totals is a diagnostic', () => {
+    const banner = [
+      '> api@1.0.0 test',
+      '> vitest run',
+      '',
+      '',
+      ' Test Files  1 failed (1)',
+      '      Tests  1 failed (1)',
+      '',
+    ];
+    expect(errorLine(banner.join('\n'))).toBeNull();
   });
 
-  it('anchors the block to the failure, so a frame from another failure cannot key it', () => {
-    const two = [
-      ' FAIL  src/a.test.ts > one',
-      'TypeError: x is not a function',
-      '    at Object.<anonymous> (src/a.test.ts:3:1)',
-      '',
-      ' FAIL  src/b.test.ts > two',
-      'AssertionError: expected 1 to be 2',
-      '',
-      ' Test Files  2 failed (2)',
+  it("reads an earlier diagnostic in the same output as this command's", () => {
+    // One Bash call's own streams: `pnpm build && pnpm test` prints both halves
+    // into it, and the last diagnostic in it is this call's, however far up.
+    const out = [
+      "Error: EACCES: permission denied, open '/etc/hosts'",
+      '    at open (node:fs:9:9)',
+      ...Array.from({ length: 200 }, (_, n) => `  transform src/mod${n}.ts (ok)`),
+      ' Test Files  1 failed (1)',
+      '      Tests  1 failed (1)',
       '',
     ].join('\n');
-    const found = errorLine(two);
-    expect(found?.line).toBe('AssertionError: expected 1 to be 2');
-    expect(found?.block).not.toContain('a.test.ts');
-    expect(sigV1(found?.line ?? '', found?.block ?? '')).toBeNull();
+    expect(errorLine(out)).toBe("Error: EACCES: permission denied, open '/etc/hosts'");
   });
 
-  // vitest's default reporter, verbatim from a real run. Its `❯` is spent
-  // twice: on the file summary at the top and on the source pointer inside the
-  // stack. Reading the pointer as a header stopped the hop from the totals row
-  // one block short, and three real failures in a row keyed nothing.
-  const VITEST_DEFAULT_REPORTER = [
-    ' ❯ test/session.test.ts (5 tests | 1 failed) 63ms',
-    '     × renews session, restarting the maxAge window without touching id/data 28ms',
-    '',
-    '⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯',
-    '',
-    ' FAIL  test/session.test.ts > session > renews session, restarting the maxAge window without touching id/data',
-    'AssertionError: expected { Object (session) } to match object { Object (session) }',
+  it("prefers the tool's own diagnostic to the package manager's verdict", () => {
+    const tscUnderPnpm = [
+      '> app@1.0.0 typecheck /home/dev/app',
+      '> tsc --noEmit',
+      '',
+      "src/a.ts(12,3): error TS2345: Argument of type 'string' is not assignable to parameter of type 'number'.",
+      ' ELIFECYCLE  Command failed with exit code 2.',
+      '',
+    ].join('\n');
+    expect(errorLine(tscUnderPnpm)).toBe(
+      "src/a.ts(12,3): error TS2345: Argument of type 'string' is not assignable to parameter of type 'number'.",
+    );
+    // With nothing else to say, the verdict is still a line.
+    expect(errorLine(' ELIFECYCLE  Command failed with exit code 2.\n')).toBe(
+      'ELIFECYCLE  Command failed with exit code 2.',
+    );
+  });
+
+  // Failure blocks verbatim from a vitest 4.1.10 run (`fixtures/vitest-default.txt`).
+  // Each has `❯` pointers under its assertion, which the block walker this
+  // replaces read as the start of a new failure.
+  const NAMED_HELPER = [
+    ' FAIL  test/helper.test.ts > helpers > fails inside a named helper',
+    'AssertionError: expected 2 to be 1 // Object.is equality',
     '',
     '- Expected',
     '+ Received',
     '',
-    '  {',
-    '    "session": {',
-    '      "data": {',
-    '        "foo": "bar",',
-    '      },',
-    '-     "id": "1",',
-    '+     "id": "2",',
-    '    },',
-    '  }',
+    '- 1',
+    '+ 2',
     '',
-    ' ❯ test/session.test.ts:131:26',
-    '    129|       .set("Cookie", initialCookie)',
-    '    130|       .set("x-renew", "1");',
-    '    131|     expect(renewed.body).toMatchObject({',
-    '       |                          ^',
-    '    132|       session: { id: "1", data: { foo: "bar" } },',
-    '    133|     });',
+    ' ❯ checkThing test/helper.test.ts:2:13',
+    '      1| function checkThing(x: number): void {',
+    '      2|   expect(x).toBe(1);',
+    '       |             ^',
+    '      3| }',
+    "      4| describe('helpers', () => {",
+    ' ❯ test/helper.test.ts:6:5',
     '',
-    '⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯',
+    '⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/5]⎯',
     '',
+  ];
+  const SPACE_IN_PATH = [
+    ' FAIL  test/session expiry.test.ts > expires after the window',
+    'AssertionError: expected 2 to be 1 // Object.is equality',
     '',
-    ' Test Files  1 failed (1)',
-    '      Tests  1 failed | 4 passed (5)',
-    'Type Errors  no errors',
-    '   Start at  14:21:56',
-    '   Duration  598ms (transform 235ms, setup 48ms, import 344ms, tests 63ms, environment 0ms)',
+    ' ❯ test/session expiry.test.ts:2:13',
+    "      1| test('expires after the window', () => {",
+    '      2|   expect(2).toBe(1);',
+    '       |             ^',
     '',
-  ].join('\n');
+  ];
+  const THROWN_IN_APP = [
+    ' FAIL  test/store.test.ts > store > loads a user',
+    "TypeError: Cannot read properties of undefined (reading 'id')",
+    ' ❯ load src/store.ts:2:40',
+    '      1| export function load(u: { profile?: { id: string } }): string {',
+    '      2|   return (u.profile as { id: string }).id;',
+    '       |                                        ^',
+    ' ❯ test/store.test.ts:4:5',
+    '',
+  ];
+  const TOTALS = [' Test Files  1 failed (1)', '      Tests  1 failed (1)', ''];
 
-  it('reads through a vitest stack pointer to the assertion above it', () => {
-    const found = errorLine(VITEST_DEFAULT_REPORTER);
-    expect(found?.line).toBe(
-      'AssertionError: expected { Object (session) } to match object { Object (session) }',
-    );
-    // The pointer belongs to this failure, so it stays INSIDE the block, which
-    // is where the key gets its frame: without it there is no key at all.
-    expect(found?.block).toContain('test/session.test.ts:131:26');
-    expect(sigV1(found?.line ?? '', found?.block ?? '')?.key).toMatch(HEX16);
-    // The summary line wears the same glyph and still opens a block, so the
-    // block starts at the FAIL header and reaches no further up.
-    expect(found?.block.startsWith(' FAIL  test/session.test.ts >')).toBe(true);
-    expect(found?.block).not.toContain('5 tests | 1 failed');
+  it.each([
+    [
+      'an assertion in a named helper',
+      NAMED_HELPER,
+      'AssertionError: expected 2 to be 1 // Object.is equality',
+    ],
+    [
+      'a test file path with a space',
+      SPACE_IN_PATH,
+      'AssertionError: expected 2 to be 1 // Object.is equality',
+    ],
+    [
+      'a TypeError thrown in app code',
+      THROWN_IN_APP,
+      "TypeError: Cannot read properties of undefined (reading 'id')",
+    ],
+  ])("reaches the assertion through vitest's stack pointers: %s", (_name, block, want) => {
+    expect(errorLine([...block, ...TOTALS].join('\n'))).toBe(want);
+  });
+
+  it('reads a whole real run, pointers and gutters and all, to its last diagnostic', () => {
+    // stdout then stderr, as the arm joins them: the unhandled rejection is
+    // the last diagnostic vitest printed.
+    expect(errorLine(fixture('vitest-default.txt'))).toBe('Error: boom from an unawaited promise');
+  });
+
+  it('never takes a code-frame gutter that quotes a throw', () => {
+    const out = [
+      "Error: ENOENT: no such file or directory, open 'a.json'",
+      '    > 11 |   throw new Error("boom")',
+      '         |         ^',
+      '',
+    ].join('\n');
+    expect(errorLine(out)).toBe("Error: ENOENT: no such file or directory, open 'a.json'");
+  });
+
+  it('never takes a `::` annotation line, which the arm reads on its own', () => {
+    const out = 'Error: real one\n::error title=a.test.ts > s > t::AssertionError: x\n';
+    expect(errorLine(out)).toBe('Error: real one');
   });
 
   it('is silent on output with no marker at all', () => {
@@ -316,65 +294,7 @@ describe('the error line', () => {
   });
 });
 
-describe('sig_v1', () => {
-  const ENOENT = "Error: ENOENT: no such file or directory, open 'drizzle.config.ts'";
-  const ENOENT_BLOCK = ENOENT + '\n    at run (src/migrate.ts:12:3)\n';
-
-  it('is one 16-hex key, and the frame is part of it', () => {
-    const sig = sigV1(ENOENT, ENOENT_BLOCK);
-    expect(sig?.key).toMatch(HEX16);
-    // The same errno raised from a sibling file is a different key: there is no
-    // lane that drops the frame any more.
-    const sibling = sigV1(ENOENT, ENOENT + '\n    at run (src/seed.ts:4:1)\n');
-    expect(sibling?.key).not.toBe(sig?.key);
-  });
-
-  it('keys the same bytes on two machines: paths, digits, hosts and hex normalized', () => {
-    const a = sigV1(
-      "Error: ENOENT: no such file, open '/Users/ali/proj/drizzle.config.ts' (line 12)",
-      '    at run (/Users/ali/proj/src/migrate.ts:12:3)',
-    );
-    const b = sigV1(
-      "Error: ENOENT: no such file, open '/home/bo/work/drizzle.config.ts' (line 40)",
-      '    at run (/home/bo/work/src/migrate.ts:99:1)',
-    );
-    expect(a?.key).toBe(b?.key);
-  });
-
-  it('is below the floor with neither an errno nor a frame', () => {
-    expect(sigV1('Tests  2 failed | 5 passed (7)', 'Tests  2 failed | 5 passed (7)')).toBeNull();
-    // The word ERROR is not an errno: the whitelist, not a shape.
-    expect(sigV1('ERROR: 2 tests failed', 'ERROR: 2 tests failed')).toBeNull();
-  });
-
-  it('keys a bundler-generated frame the same on two builds', () => {
-    // The chunk name carries the build's own content hash, so the raw frame
-    // made every rebuild of one failure a key the shelf had never been asked.
-    const first = sigV1(
-      'TypeError: e.map is not a function',
-      'TypeError: e.map is not a function\n    at render (/app/dist/assets/chunk-4f2a91.js:1:2048)',
-    );
-    const second = sigV1(
-      'TypeError: e.map is not a function',
-      'TypeError: e.map is not a function\n    at render (/app/dist/assets/chunk-9b7c03.js:1:5100)',
-    );
-    expect(first?.key).toMatch(HEX16);
-    expect(first?.key).toBe(second?.key);
-    // Reduced, not dropped: a hand-written file still separates two failures
-    // that print the same message.
-    expect(
-      sigV1('TypeError: e.map is not a function', '    at render (src/list.tsx:9:1)')?.key,
-    ).not.toBe(first?.key);
-  });
-
-  it('clears the floor on the frame alone, with no errno', () => {
-    const sig = sigV1(
-      'AssertionError: expected 1 to be 2',
-      'AssertionError: expected 1 to be 2\n    at src/a.test.ts:3:1',
-    );
-    expect(sig?.key).toMatch(HEX16);
-  });
-
+describe('errnoOf', () => {
   it.each([
     ['ERR_PNPM_OUTDATED_LOCKFILE  Cannot install', 'ERR_PNPM_OUTDATED_LOCKFILE'],
     ["error TS2345: Argument of type 'string'", 'TS2345'],
@@ -383,21 +303,5 @@ describe('sig_v1', () => {
     ['ESLINT found 2 EXPECTED problems', ''],
   ])('reads the errno off %s', (line, errno) => {
     expect(errnoOf(line)).toBe(errno);
-  });
-
-  it.each([
-    ['    at run (/a/b/file.ts:12:3)', 'file.ts'],
-    ['  File "/a/b.py", line 3', 'b.py'],
-    ['src/x.ts(12,3): error TS2304', 'x.ts'],
-    [' --> src/main.rs:4:5', 'main.rs'],
-    ['no frame here', ''],
-  ])('reduces the top frame of %s to a basename', (text, frame) => {
-    expect(topFrameFile(text)).toBe(frame);
-  });
-
-  it('normalizes env-var names before digits, so ERR_MODULE_NOT_FOUND is one token', () => {
-    expect(normalizeForSig('ERR_MODULE_NOT_FOUND at /a/b/c.js:12 on host.acme.io')).toBe(
-      'e at @/:n on h',
-    );
   });
 });

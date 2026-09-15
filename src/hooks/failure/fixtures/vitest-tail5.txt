@@ -1,0 +1,5 @@
+::error title=test/helper.test.ts > helpers > fails inside a named helper::AssertionError: expected 2 to be 1 // Object.is equality
+::error title=test/session expiry.test.ts > expires after the window::AssertionError: expected 2 to be 1 // Object.is equality
+::error title=test/session.test.ts > session > renews session%2C restarting the maxAge window::AssertionError: expected { id: '2', data: { foo: 'bar' } } to match object { id: '1' }
+::error title=test/store.test.ts > store > loads a user::TypeError: Cannot read properties of undefined (reading 'id')
+::error::Error: boom from an unawaited promise

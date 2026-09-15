@@ -1,0 +1,142 @@
+
+ RUN  v4.1.10 /home/dev/app
+
+ ❯ test/helper.test.ts (1 test | 1 failed) 6ms
+     × fails inside a named helper 5ms
+ ❯ test/session.test.ts (2 tests | 1 failed) 8ms
+     × renews session, restarting the maxAge window 6ms
+     ✓ keeps the id 0ms
+ ✓ test/leak.test.ts (1 test) 24ms
+ ❯ test/store.test.ts (1 test | 1 failed) 4ms
+     × loads a user 3ms
+ ❯ test/broken.test.ts (0 test)
+ ❯ test/session expiry.test.ts (1 test | 1 failed) 6ms
+   × expires after the window 6ms
+
+ Test Files  5 failed | 1 passed (6)
+      Tests  4 failed | 2 passed (6)
+     Errors  1 error
+   Start at  17:08:19
+   Duration  676ms (transform 44ms, setup 0ms, import 66ms, tests 48ms, environment 1ms)
+
+::error title=test/broken.test.ts::Error: Cannot find module './does-not-exist' imported from /home/dev/app/test/broken.test.ts
+::error title=test/helper.test.ts > helpers > fails inside a named helper::AssertionError: expected 2 to be 1 // Object.is equality
+::error title=test/session expiry.test.ts > expires after the window::AssertionError: expected 2 to be 1 // Object.is equality
+::error title=test/session.test.ts > session > renews session%2C restarting the maxAge window::AssertionError: expected { id: '2', data: { foo: 'bar' } } to match object { id: '1' }
+::error title=test/store.test.ts > store > loads a user::TypeError: Cannot read properties of undefined (reading 'id')
+::error::Error: boom from an unawaited promise
+
+
+⎯⎯⎯⎯⎯⎯ Failed Suites 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  test/broken.test.ts [ test/broken.test.ts ]
+Error: Cannot find module './does-not-exist' imported from /home/dev/app/test/broken.test.ts
+ ❯ test/broken.test.ts:1:1
+      1| import { nothing } from './does-not-exist';
+       | ^
+      2| test('never runs', () => {
+      3|   expect(nothing).toBe(1);
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/5]⎯
+
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 4 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  test/helper.test.ts > helpers > fails inside a named helper
+AssertionError: expected 2 to be 1 // Object.is equality
+
+- Expected
++ Received
+
+- 1
++ 2
+
+ ❯ checkThing test/helper.test.ts:2:13
+      1| function checkThing(x: number): void {
+      2|   expect(x).toBe(1);
+       |             ^
+      3| }
+      4| describe('helpers', () => {
+ ❯ test/helper.test.ts:6:5
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/5]⎯
+
+ FAIL  test/session expiry.test.ts > expires after the window
+AssertionError: expected 2 to be 1 // Object.is equality
+
+- Expected
++ Received
+
+- 1
++ 2
+
+ ❯ test/session expiry.test.ts:2:13
+      1| test('expires after the window', () => {
+      2|   expect(2).toBe(1);
+       |             ^
+      3| });
+      4|
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/5]⎯
+
+ FAIL  test/session.test.ts > session > renews session, restarting the maxAge window
+AssertionError: expected { id: '2', data: { foo: 'bar' } } to match object { id: '1' }
+(2 matching properties omitted from actual)
+
+- Expected
++ Received
+
+  {
+-   "id": "1",
++   "id": "2",
+  }
+
+ ❯ test/session.test.ts:3:47
+      1| describe('session', () => {
+      2|   test('renews session, restarting the maxAge window', () => {
+      3|     expect({ id: '2', data: { foo: 'bar' } }).toMatchObject({ id: '1' …
+       |                                               ^
+      4|   });
+      5|   test('keeps the id', () => {
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/5]⎯
+
+ FAIL  test/store.test.ts > store > loads a user
+TypeError: Cannot read properties of undefined (reading 'id')
+ ❯ load src/store.ts:2:40
+      1| export function load(u: { profile?: { id: string } }): string {
+      2|   return (u.profile as { id: string }).id;
+       |                                        ^
+      3| }
+      4|
+ ❯ test/store.test.ts:4:5
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[5/5]⎯
+
+⎯⎯⎯⎯⎯⎯ Unhandled Errors ⎯⎯⎯⎯⎯⎯
+
+Vitest caught 1 unhandled error during the test run.
+This might cause false positive tests. Resolve unhandled errors to make sure your tests are not affected.
+
+⎯⎯⎯⎯ Unhandled Rejection ⎯⎯⎯⎯⎯
+Error: boom from an unawaited promise
+ ❯ test/leak.test.ts:2:23
+      1| test('leaks a rejection', async () => {
+      2|   void Promise.reject(new Error('boom from an unawaited promise'));
+       |                       ^
+      3|   await new Promise((r) => setTimeout(r, 20));
+      4| });
+ ❯ /home/dev/app/node_modules/.pnpm/@vitest+runner@4.1.10/node_modules/@vitest/runner/dist/chunk-artifact.js:302:11
+ ❯ /home/dev/app/node_modules/.pnpm/@vitest+runner@4.1.10/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:26
+ ❯ /home/dev/app/node_modules/.pnpm/@vitest+runner@4.1.10/node_modules/@vitest/runner/dist/chunk-artifact.js:2326:20
+ ❯ runWithCancel /home/dev/app/node_modules/.pnpm/@vitest+runner@4.1.10/node_modules/@vitest/runner/dist/chunk-artifact.js:2323:10
+ ❯ /home/dev/app/node_modules/.pnpm/@vitest+runner@4.1.10/node_modules/@vitest/runner/dist/chunk-artifact.js:2305:20
+ ❯ runWithTimeout /home/dev/app/node_modules/.pnpm/@vitest+runner@4.1.10/node_modules/@vitest/runner/dist/chunk-artifact.js:2272:10
+ ❯ /home/dev/app/node_modules/.pnpm/@vitest+runner@4.1.10/node_modules/@vitest/runner/dist/chunk-artifact.js:2955:64
+
+This error originated in "test/leak.test.ts" test file. It doesn't mean the error was thrown inside the file itself, but while it was running.
+The latest test that might've caused the error is "leaks a rejection". It might mean one of the following:
+- The error was thrown, while Vitest was running this test.
+- If the error occurred after the test had been completed, this was the last documented test before it was thrown.
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯
+

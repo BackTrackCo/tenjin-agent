@@ -1,212 +1,106 @@
-import { readFile } from 'node:fs/promises';
-import { isAbsolute, join } from 'node:path';
-import { shortHash } from './keys';
-import { COMMAND_SEPARATOR_RE, LINE_SCAN_MAX } from './signature';
-
 /**
- * The `sig_v1_test` lane (tenjin-agent#267): a key on what the test runner
- * itself names — the file, the suite (its `describe` chain) and the test —
- * because two runs of the SAME test are the same key whatever the assertion
- * text says, which is exactly the variation `sig_v1`'s message hash cannot
- * survive.
+ * The tests a failed command's output says failed, and the line each one
+ * failed on (tenjin-agent#350). Both sources are in the output itself, so there
+ * is no file to find, date or own:
  *
- * Artifact first, console second, a guess never: this lane exists because a
- * guess is worse than silence. Every read is `fs.promises`: this runs on the
- * hook path of a daemon that serves every session, and a stalled mount must
- * cost a `deadline` row, never a hung daemon.
+ * 1. GitHub Actions `::error` lines. The tenjin vitest reporter prints one per
+ *    failure after vitest's summary (`vitest-reporter.ts`), and vitest's own
+ *    GitHub reporter prints the same shape wherever a repo configures it.
+ *    Printed last, so an agent's `2>&1 | tail -30` keeps them even when the
+ *    pipe cut the assertion above.
+ * 2. vitest's console header, ` FAIL  <file> > <suite> > <test>`, for a repo
+ *    without the reporter, with the project label (`|node| `, or the colour
+ *    badge once the colour is off) taken off so both sources name one test the
+ *    same way.
+ *
+ * A NAME ONLY WHEN IT IS ONE: a title or header whose head before ` > ` is a
+ * file. A file that failed to import, an unhandled error, a lint rule's
+ * annotation and jest's `● suite › test` give a line or nothing, never a name,
+ * because a key made of them would be every failure of its kind in every repo.
  */
 
-export interface TestIdentity {
-  /** As the repo names it: relative to `cwd`, forward-slashed. */
-  file: string;
-  suite: string;
-  test: string;
+export interface TestFailure {
+  /** `<file> > <suite> > <test>` as vitest prints it, or '' for an error no
+   *  test owns. */
+  name: string;
+  /** The error's first line as the runner printed it, or '' when the source
+   *  named the test and nothing else. */
+  line: string;
 }
 
-/** The path the doctor hint's reporter snippet writes to, relative to cwd. */
-const TEST_ARTIFACT_DEFAULT_PATH = '.vitest-report.json';
+/** `::error title=…,file=…::message`. Properties are escaped by every producer
+ *  that follows GitHub's toolkit, so the first `::` after them is the split. */
+const ANNOTATION_RE = /^\s*::(?:error|warning|notice)(?: (.*?))?::(.*)$/;
+const FAIL_HEADER_RE = /^\s{0,2}FAIL\s+(.+)$/;
+/** vitest's project label with colour off, `|node| `. */
+const PROJECT_LABEL_RE = /^\|[^|]+\|\s+/;
+/** The same label as a colour badge, ` node `, once the colour is stripped: a
+ *  bare word with no path or extension in it, then a wider gap than a path
+ *  with a space in it has. */
+const PROJECT_BADGE_RE = /^[^\s/.]+\s{2,}(?=\S)/;
+/** vitest's GitHub reporter titles a failure `[project] file > …`. */
+const TITLE_PROJECT_RE = /^\[[^\]]+\] /;
 
-/** A vitest/vite config this arm may read as TEXT — never imported, never
- *  executed: a hook must not run a repo's own build config. A project's own
- *  `vitest.config.*` wins over a shared `vite.config.*`. */
-const TEST_CONFIG_FILES = [
-  'vitest.config.ts',
-  'vitest.config.mts',
-  'vitest.config.cts',
-  'vitest.config.js',
-  'vitest.config.mjs',
-  'vitest.config.cjs',
-  'vite.config.ts',
-  'vite.config.mts',
-  'vite.config.js',
-  'vite.config.mjs',
-];
+function unescapeData(s: string): string {
+  return s.replace(/%0D/gi, '\r').replace(/%0A/gi, '\n').replace(/%25/g, '%');
+}
+function unescapeProperty(s: string): string {
+  return unescapeData(s.replace(/%3A/gi, ':').replace(/%2C/gi, ','));
+}
 
-/** A `[<path to tenjin-vitest-reporter.mjs>, { outputFile: '…' }]` entry read
- *  off a config's raw text, anchored on the reporter's own filename so an
- *  unrelated reporter's output option cannot match. A config this cannot see
- *  into means "nothing configured", never a guess. */
-const TEST_OUTPUT_FILE_RE =
-  /reporters\s*:[\s\S]{0,600}?['"][^'"]*tenjin-vitest-reporter[^'"]*['"][\s\S]{0,300}?outputFile\s*:\s*['"]([^'"]+)['"]/;
-
-/** How much of a config the regex sees. A real config is a few hundred bytes
- *  with `reporters` near the top; the regex's own gaps cost about 1 ms per KB
- *  on a config with no match, so the slice caps what a repo's own file can
- *  cost the hook (tenjin-agent#278). */
-const CONFIG_SCAN_CHARS = 64_000;
-
-/** The `outputFile` a repo's own config names for the tenjin reporter, or
- *  null. A repo WITH a recognized config but no match stops there: a project
- *  that has decided is not a reason to guess from a sibling config. */
-async function configuredTestReportPath(cwd: string): Promise<string | null> {
-  for (const name of TEST_CONFIG_FILES) {
-    let text: string;
-    try {
-      text = await readFile(join(cwd, name), 'utf8');
-    } catch {
-      continue;
-    }
-    const m = TEST_OUTPUT_FILE_RE.exec(text.slice(0, CONFIG_SCAN_CHARS));
-    const path = m?.[1] ?? '';
-    return path.length > 0 ? path : null;
+function titleOf(props: string): string {
+  for (const part of props.split(',')) {
+    if (part.startsWith('title=')) return unescapeProperty(part.slice('title='.length));
   }
-  return null;
+  return '';
 }
 
-/** The artifact paths worth checking, most specific first, deduplicated. */
-async function testReportCandidates(cwd: string): Promise<string[]> {
-  const configured = await configuredTestReportPath(cwd);
-  const out = configured === null ? [] : [configured];
-  if (!out.includes(TEST_ARTIFACT_DEFAULT_PATH)) out.push(TEST_ARTIFACT_DEFAULT_PATH);
-  return out;
+/** The text as a test name, or '' when it is not one: `<file.ext> > <rest>`. */
+function testNameOf(text: string): string {
+  const name = text.trim();
+  const at = name.indexOf(' > ');
+  if (at <= 0 || name.length <= at + 3) return '';
+  return /\.[A-Za-z0-9]+$/.test(name.slice(0, at)) ? name : '';
 }
 
-/** A path AS THE REPO NAMES IT, so the same test file hashes the same across
- *  two clones at different absolute paths; the basename when the path is not
- *  under `cwd` at all (a monorepo run from a parent directory). */
-function relTestFile(cwd: string, path: string): string {
-  if (cwd.length > 0 && path.startsWith(cwd)) {
-    const rest = path.slice(cwd.length).replace(/^[/\\]+/, '');
-    if (rest.length > 0) return rest.split(/[/\\]/).join('/');
-  }
-  return path.split(/[/\\]/).pop() || path;
-}
-
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === 'object' && v !== null && !Array.isArray(v);
-}
-
-/** The LAST failed entry of the reporter's `failed` list, so the artifact leg
- *  and the console leg pick the same failure on a run with more than one. */
-function identityFromReport(report: Record<string, unknown>, cwd: string): TestIdentity | null {
-  if (!Array.isArray(report.failed)) return null;
-  let found: TestIdentity | null = null;
-  for (const entry of report.failed) {
-    if (!isRecord(entry)) continue;
-    const file = typeof entry.file === 'string' ? entry.file : '';
-    const test = typeof entry.test === 'string' ? entry.test : '';
-    if (file.length === 0 || test.length === 0) continue;
-    const suite = typeof entry.suite === 'string' ? entry.suite : '';
-    found = { file: relTestFile(cwd, file), suite, test };
-  }
-  return found;
+function firstLineOf(message: string): string {
+  return (message.split('\n')[0] ?? '').trim();
 }
 
 /**
- * The artifact leg: read, window-check, extract, each failing closed to null.
- * THE WINDOW is the report's own `startTime` (stamped by the reporter before
- * a single test runs) at or after `sinceMs`, this agent's own `bashstart`
- * mark for the call that just failed. File mtime cannot tell "this run" from
- * "the run before it"; content can, once it carries its own clock. No mark,
- * no artifact leg: there is nothing to check the report against.
+ * Every failure this output names, in print order, one entry per test: the
+ * reporter's line and the console's header for one test merge, and whichever
+ * carried a line gives it. An entry with no name is an error no test owns, kept
+ * for its line.
  */
-async function identityFromArtifact(
-  cwd: string,
-  sinceMs: number | null,
-): Promise<TestIdentity | null> {
-  if (cwd.length === 0 || sinceMs === null) return null;
-  for (const rel of await testReportCandidates(cwd)) {
-    let raw: unknown;
-    try {
-      raw = JSON.parse(await readFile(isAbsolute(rel) ? rel : join(cwd, rel), 'utf8'));
-    } catch {
-      continue; // No file, or a torn write: as uninformative as no file at all.
+export function testFailuresOf(text: string): TestFailure[] {
+  const out: TestFailure[] = [];
+  const byName = new Map<string, TestFailure>();
+  const add = (failure: TestFailure): void => {
+    if (failure.name === '') {
+      if (failure.line !== '') out.push(failure);
+      return;
     }
-    if (!isRecord(raw)) continue;
-    const { startTime, endTime } = raw;
-    if (typeof startTime !== 'number' || typeof endTime !== 'number' || endTime < startTime)
-      continue;
-    if (startTime < sinceMs) continue;
-    const identity = identityFromReport(raw, cwd);
-    if (identity !== null) return identity;
-  }
-  return null;
-}
-
-/** vitest's own failure header, ` FAIL  src/a.test.ts > suite > test`. THE
- *  `>` IS REQUIRED: a bare `FAIL  some suite` is shaped like a verdict with
- *  nothing specific in it, and yields no identity rather than a guessed one. */
-const TEST_FAIL_HEADER_RE = /^ {0,2}FAIL {1,4}(\S+) {0,4}>\s*(.+)$/;
-
-/** The console fallback, for a repo with no reporter: the LAST header line. */
-function identityFromConsole(text: string): TestIdentity | null {
-  const lines = text.split('\n');
-  for (let i = lines.length - 1; i >= 0 && i >= lines.length - LINE_SCAN_MAX; i -= 1) {
-    const m = TEST_FAIL_HEADER_RE.exec(lines[i] ?? '');
-    if (m === null) continue;
-    const file = m[1] ?? '';
-    // `(.+)` stops at the `\n` the split removed and happily keeps a `\r`.
-    const parts = (m[2] ?? '')
-      .trim()
-      .split(/\s*>\s*/)
-      .filter((p) => p.length > 0);
-    const test = parts[parts.length - 1] ?? '';
-    if (file.length === 0 || test.length === 0) continue;
-    return { file: file.split(/[/\\]/).join('/'), suite: parts.slice(0, -1).join(' > '), test };
-  }
-  return null;
-}
-
-/** A job-control `&` between two commands, and not `2>&1`, `&>file` or `&&`:
- *  an isolated `&` with plain text on both sides. */
-const BACKGROUND_OP_RE = /(?<![&>])&(?!&|>)/;
-
-/**
- * The artifact is trusted only when there is exactly one segment for it to
- * belong to: `pnpm test; pnpm build` can have a real, in-window test failure
- * in the report while the failure being processed is the build's. Rather than
- * parse which segment a report belongs to, a compound command keeps the
- * console breadcrumb, which is self-locating.
- */
-function isSingleSegmentCommand(command: string): boolean {
-  const segments = command.split(COMMAND_SEPARATOR_RE).filter((s) => s.trim().length > 0);
-  return segments.length <= 1 && !BACKGROUND_OP_RE.test(command);
-}
-
-/** The failure's test identity, artifact first, or null. No gate on the
- *  command's words: `npm run test` names no runner and is the commonest test
- *  invocation there is; the run stamps itself. */
-export async function testIdentityOf(
-  text: string,
-  cwd: string,
-  sinceMs: number | null,
-  command: string,
-): Promise<TestIdentity | null> {
-  const fromArtifact = isSingleSegmentCommand(command)
-    ? await identityFromArtifact(cwd, sinceMs)
-    : null;
-  return fromArtifact ?? identityFromConsole(text);
-}
-
-export interface TestSignature {
-  key: string;
-  file: string;
-}
-
-/** The test-identity key: file + suite + test, as the runner named them. */
-export function sigV1Test(identity: TestIdentity): TestSignature {
-  return {
-    key: shortHash('sig_v1_test|' + identity.file + '|' + identity.suite + '|' + identity.test),
-    file: identity.file,
+    const seen = byName.get(failure.name);
+    if (seen === undefined) {
+      byName.set(failure.name, failure);
+      out.push(failure);
+    } else if (seen.line === '') {
+      seen.line = failure.line;
+    }
   };
+  for (const raw of text.split('\n')) {
+    const annotation = ANNOTATION_RE.exec(raw);
+    if (annotation !== null) {
+      const title = titleOf(annotation[1] ?? '').replace(TITLE_PROJECT_RE, '');
+      add({ name: testNameOf(title), line: firstLineOf(unescapeData(annotation[2] ?? '')) });
+      continue;
+    }
+    const header = FAIL_HEADER_RE.exec(raw);
+    if (header === null) continue;
+    const rest = (header[1] ?? '').replace(PROJECT_LABEL_RE, '').replace(PROJECT_BADGE_RE, '');
+    const name = testNameOf(rest);
+    if (name !== '') add({ name, line: '' });
+  }
+  return out;
 }

@@ -1,128 +1,139 @@
-import { renameSync, unlinkSync, writeFileSync } from 'node:fs';
-
 /**
- * Tenjin's own vitest reporter (tenjin-agent#267, #278): the run stamps
- * ITSELF, the way Datadog Test Optimization, Buildkite Test Engine and
- * dorny/test-reporter all attribute a result to the run that produced it —
- * never by having the failure arm infer "was this a test run" from the
- * command's own text, which is neither soundly nor completely doable (an
- * argument can look like a runner's name; a chained command's earlier, failing
- * segment can look like a later one that never ran; the single most common test
- * invocation, `npm run test`, does not even mention a recognizable runner name
- * at all).
+ * Tenjin's own vitest reporter (tenjin-agent#350): one GitHub Actions `::error`
+ * line per failure, printed after vitest's own summary.
+ *
+ * A LINE, NOT A FILE. The failure arm reads a Bash call's own output. A report
+ * file had to be found (the hook's cwd does not follow a `cd` in the command),
+ * dated (a timestamp window) and owned (a concurrent run overwrites it), and
+ * the arm managed all three for none of 1,004 real vitest failures. A line in
+ * the output is found, dated and owned by being there. It is also the last
+ * thing the run prints, so `2>&1 | tail -30` keeps it even when the agent's own
+ * pipe cut the assertion above it, which is a third of real vitest failures.
+ *
+ * THE ENVELOPE IS GITHUB'S workflow command, `::error title=<name>::<message>`
+ * (docs.github.com, "Setting an error message"): vitest's built-in GitHub
+ * reporter prints the same shape, GitHub renders it as an annotation in CI, and
+ * the arm reads it without caring which tool wrote it. The payload is compact:
+ * the test's name and its error's first line, never the stack or the diff, so a
+ * failing run costs the agent one short line per failure, at most
+ * {@link MAX_LINES} of them.
+ *
+ * THE NAME is `<relativeModuleId> > <fullName>`: the text vitest's own console
+ * header prints after `FAIL`, less any project label. A key built from this line
+ * and a key built from that header are therefore the same bytes, which is what
+ * lets a teammate who ran unpiped and one who ran through `tail` meet on the
+ * shelf. A file that failed to import has no test, so its line carries the file
+ * alone; an error outside any test carries no title at all.
  *
  * ITS OWN BUNDLE, `dist/tenjin-vitest-reporter.mjs`, which `tenjin install`
  * copies beside the daemon and the shim: a repo's own `vitest.config.ts` names
- * that absolute path, so this module is loaded into the USER's vitest process.
- * That is why it imports `node:fs` and nothing else — not the config, not the
- * ledger, not one line of the rest of this package. A reporter must not depend
- * on Tenjin being installed correctly, and a hook must not run a repo's own
- * build config.
- *
- * DELETE ON INIT, ATOMIC WRITE ON FINISH. `onInit` fires before a single test
- * runs and removes any file already at `outputFile`: a stale artifact from an
- * earlier run — or from a run that crashed before writing its own — cannot
- * structurally survive into this one. `onTestRunEnd` then writes the WHOLE
- * report to a temp file and `rename`s it into place, so a reader can never
- * observe a half-written file: a same-filesystem `rename` is atomic, and
- * `outputFile` and its `.tmp-<pid>` sibling always share one.
- *
- * `startTime`/`endTime` are what `test-identity.ts` checks against the failure
- * arm's own PreToolUse stamp for the Bash call that just failed — CONTENT the
- * report carries about ITSELF, not a guess from the file's mtime or from what
- * the command line happened to say.
+ * that absolute path, so this module runs inside the USER's vitest process. It
+ * imports nothing, and reads the vitest API through structural types, so it
+ * depends neither on Tenjin being installed correctly nor on the vitest version
+ * a repo happens to be on.
  */
 
 export interface TenjinVitestReporterOptions {
-  /** Where the report lands, relative to the vitest run's cwd. */
+  /** Unused since tenjin-agent#350, when the report file went: a config that
+   *  still passes it keeps loading. */
   outputFile?: string;
 }
 
-/**
- * The slice of vitest's reporter API this class reads, declared here rather
- * than imported from `vitest/node`: the built module must import nothing but
- * `node:fs`, and a structural type is also what keeps the reporter working
- * across the vitest version a user's repo happens to be on.
- */
+interface ReportedError {
+  name?: unknown;
+  message?: unknown;
+}
 interface ReportedTestCase {
-  name: string;
-  parent?: { type?: string; fullName?: string };
+  fullName: string;
+  result(): { errors?: readonly ReportedError[] };
 }
 interface ReportedTestModule {
   moduleId: string;
+  relativeModuleId?: string;
+  errors?(): readonly ReportedError[];
   children: { allTests(state: 'failed'): Iterable<ReportedTestCase> };
 }
+interface VitestLike {
+  logger?: { log(message: string): void };
+}
 
-/** One failure, as `test-identity.ts` reads it back. */
-interface FailedTest {
-  file: string;
-  suite: string;
-  test: string;
+/** The last failures a run names, so 200 failing tests are not 200 lines in the
+ *  agent's context. Ten is what one resolve request takes. */
+const MAX_LINES = 10;
+/** An error's first line is a sentence; past this it is a pasted value. */
+const MESSAGE_MAX = 300;
+
+function firstLine(error: ReportedError | undefined): string {
+  const name = typeof error?.name === 'string' && error.name !== '' ? error.name : 'Error';
+  const message =
+    typeof error?.message === 'string' ? (error.message.split('\n')[0] ?? '').trim() : '';
+  const line = message === '' ? name : name + ': ' + message;
+  return line.length > MESSAGE_MAX ? line.slice(0, MESSAGE_MAX) : line;
+}
+
+/** The workflow-command escapes, as GitHub's own toolkit spells them. */
+function escapeData(s: string): string {
+  return s.replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
+}
+function escapeProperty(s: string): string {
+  return escapeData(s).replace(/:/g, '%3A').replace(/,/g, '%2C');
+}
+
+function annotation(title: string | null, message: string): string {
+  const props = title === null ? '' : ' title=' + escapeProperty(title);
+  return '::error' + props + '::' + escapeData(message);
+}
+
+/** The path vitest's header prints: `relativeModuleId`, or the absolute id
+ *  made relative to the run's cwd on a vitest that predates it. */
+function fileOf(module: ReportedTestModule): string {
+  if (typeof module.relativeModuleId === 'string' && module.relativeModuleId !== '') {
+    return module.relativeModuleId;
+  }
+  const cwd = process.cwd();
+  const id = module.moduleId;
+  return id.startsWith(cwd + '/') ? id.slice(cwd.length + 1) : id;
 }
 
 export default class TenjinVitestReporter {
-  readonly #outputFile: string;
-  #startTime = 0;
+  #log: (line: string) => void = (line) => {
+    process.stdout.write(line + '\n');
+  };
 
   constructor(options?: TenjinVitestReporterOptions) {
-    this.#outputFile =
-      options !== undefined &&
-      typeof options.outputFile === 'string' &&
-      options.outputFile.length > 0
-        ? options.outputFile
-        : '.vitest-report.json';
+    void options;
   }
 
-  onInit(): void {
-    this.#startTime = Date.now();
-    try {
-      unlinkSync(this.#outputFile);
-    } catch {
-      // No file yet, or a permissions issue this reporter cannot fix either
-      // way: silence, because a reporter that throws breaks the very test
-      // run it is supposed to be reporting on.
+  /** vitest's own logger, when it hands one over: the same stream its summary
+   *  went to, so the order on screen is the order of the calls. */
+  onInit(ctx?: VitestLike): void {
+    const logger = ctx?.logger;
+    if (logger !== undefined && typeof logger.log === 'function') {
+      this.#log = (line) => logger.log(line);
     }
   }
 
   onTestRunEnd(
     testModules: readonly ReportedTestModule[],
-    unhandledErrors: readonly unknown[],
+    unhandledErrors: readonly unknown[] = [],
   ): void {
-    const endTime = Date.now();
-    const failed: FailedTest[] = [];
+    const lines: string[] = [];
     for (const testModule of testModules) {
-      // ALL TESTS, EVERY NESTED SUITE: `allTests` walks the whole tree under
-      // this module, not just its direct children, so a deeply nested
-      // `describe` block's failures are named exactly as vitest's own
-      // console output names them.
+      const file = fileOf(testModule);
+      for (const error of testModule.errors?.() ?? [])
+        lines.push(annotation(file, firstLine(error)));
       for (const testCase of testModule.children.allTests('failed')) {
-        const parent = testCase.parent;
-        failed.push({
-          file: testModule.moduleId,
-          suite: parent !== undefined && parent.type === 'suite' ? (parent.fullName ?? '') : '',
-          test: testCase.name,
-        });
+        const error = testCase.result().errors?.[0];
+        lines.push(annotation(file + ' > ' + testCase.fullName, firstLine(error)));
       }
     }
-    const report = {
-      startTime: this.#startTime,
-      endTime,
-      failed,
-      success: failed.length === 0 && unhandledErrors.length === 0,
-    };
-    const tmp = this.#outputFile + '.tmp-' + process.pid;
+    for (const error of unhandledErrors)
+      lines.push(annotation(null, firstLine(error as ReportedError)));
+    if (lines.length === 0) return;
     try {
-      writeFileSync(tmp, JSON.stringify(report));
-      renameSync(tmp, this.#outputFile);
+      this.#log(lines.slice(-MAX_LINES).join('\n'));
     } catch {
-      // A write failure here (a read-only filesystem, a full disk) leaves no
-      // artifact at all, which the failure arm already treats as "no
-      // evidence" rather than as a wrong one.
-      try {
-        unlinkSync(tmp);
-      } catch {
-        // Nothing left to clean up.
-      }
+      // A reporter that throws breaks the very run it reports on.
     }
   }
 }

@@ -1,13 +1,10 @@
-import { homedir } from 'node:os';
 import { hasErrorMarker } from '../../adapters/error-markers';
-import { shortHash } from './keys';
 
 /**
  * The failure arm's pure half (13-pr-d-local-arms.md, "failure"): which
- * commands the arm fires behind, which line of the output is the failure, and
- * the `sig_v1` keys built from it. The formulas are frozen: the team shelf's
- * `--key` publishes are `sig_v1` today, and a changed byte would strand every
- * one of them.
+ * commands the arm fires behind, and which line of the output is the failure.
+ * The test names it keys on are read in `test-identity.ts`; nothing here is a
+ * key any more (tenjin-agent#350).
  */
 
 // ---- which commands ----
@@ -252,7 +249,10 @@ export function allowedHeads(command: string): string[] {
 
 // ---- which line ----
 
-const STACK_FRAME_RE = /^\s*(at\s|File\s+"|\.{3}|\d+\s*\|)/;
+/** A stack frame or a code-frame gutter: `at fn (…)`, `File "…"`, `...`,
+ *  vitest's `  12| code` and jest's `> 12 | code`. A gutter quotes source, and
+ *  source that throws an `Error` is not the failure. */
+const STACK_FRAME_RE = /^\s*(?:at\s|File\s+"|\.{3}|>?\s*\d+\s*\|)/;
 
 /**
  * A runner's own TOTALS row — `Tests  2 failed | 5 passed (7)`, `3 failed, 10
@@ -293,159 +293,54 @@ export function isAggregateLine(line: string): boolean {
   return !AGGREGATE_FRAME_RE.test(line) && !STACK_FRAME_RE.test(line);
 }
 
-/** A line that OPENS a runner's per-failure block: vitest's ` FAIL  file > …`,
- *  jest's `● suite › test`, go's `--- FAIL: TestX`. The block above one of
- *  these is a DIFFERENT failure, so a scan stops there. */
-const RUNNER_HEADER_RE =
-  /^\s{0,4}(?:FAIL\b|PASS\b|ok\b|not ok\b|●|✓|✔|✗|✘|×|✖|❯|---|===|failures:)/;
-/**
- * vitest spends its `❯` twice: on the file summary that OPENS a run's report
- * (` ❯ test/x.test.ts (5 tests | 1 failed) 63ms`) and on every source pointer
- * INSIDE a failure's stack (` ❯ test/x.test.ts:131:26`). Only the first opens a
- * block. Read as a header, the pointer walls the ` FAIL  file > suite > test`
- * line and the `AssertionError:` under it off from the totals row below, so
- * every vitest failure in default reporter output keyed nothing at all.
- *
- * The remainder is the whole discriminator: a bare `file:line[:col]` and
- * nothing after it is a frame; the summary form carries its counts past the
- * name, across a space this cannot cross.
- */
-const RUNNER_POINTER_RE = /^\s{0,4}❯\s*\S+\.[A-Za-z]{1,5}:\d+(?::\d+)?\s*$/;
-
-/** Whether a line OPENS a per-failure block, for the block walk: header-shaped,
- *  not a stack pointer wearing a header's glyph, and not a totals row however
- *  header-shaped (go's bare `FAIL`). */
-function isRunnerHeader(raw: string): boolean {
-  return RUNNER_HEADER_RE.test(raw) && !RUNNER_POINTER_RE.test(raw) && !isAggregateLine(raw.trim());
-}
-/** How far a block may extend either way from its marker line. */
-const BLOCK_SCAN_MAX = 60;
-/** How far up the output the marker scan looks: the tail is where a runner
- *  puts its verdict. `test-identity.ts` scans the same window for its header. */
+/** How far up the output the line scan looks: the tail is where a runner puts
+ *  its verdict. */
 export const LINE_SCAN_MAX = 400;
 
-function isBlank(lines: string[], j: number): boolean {
-  return (lines[j] ?? '').trim().length === 0;
-}
-
-/** The first line of the block that ends at `at`. ONE blank line does not end
- *  a block (every runner puts one between the failure and its totals); two
- *  do, and a runner header does, inclusively, because for jest and go the
- *  header IS the most specific line printed. A totals row is never a boundary,
- *  however header-shaped (go's bare `FAIL`). */
-function blockStart(lines: string[], at: number): number {
-  let start = at;
-  for (let j = at - 1; j >= 0 && at - j <= BLOCK_SCAN_MAX; j -= 1) {
-    const raw = lines[j] ?? '';
-    if (isRunnerHeader(raw)) return j;
-    if (isBlank(lines, j) && (j === 0 || isBlank(lines, j - 1))) return start;
-    start = j;
-  }
-  return start;
-}
-
-/** The last line of the block that contains `at`: downward too, because a
- *  stack trace follows its message and the top frame is what clears the
- *  specificity floor on the commonest failure shape there is. */
-function blockEnd(lines: string[], at: number): number {
-  let end = at;
-  for (let j = at + 1; j < lines.length && j - at <= BLOCK_SCAN_MAX; j += 1) {
-    const raw = lines[j] ?? '';
-    if (isRunnerHeader(raw)) return end;
-    if (isBlank(lines, j) && (j + 1 >= lines.length || isBlank(lines, j + 1))) return end;
-    end = j;
-  }
-  return end;
-}
-
-/** How many blank lines may sit between a failure block and the totals row of
- *  the same run. `blockStart` stops at two — correctly, two blanks are what
- *  keep two failures apart — but the arm's `failureText` joins `stdout`,
- *  `stderr`, `error` and `text` with a newline apiece, so a run of blanks in
- *  front of a totals row is a splice artifact, not structure. Four covers
- *  every splice plus the blank the runner printed itself. */
-const TOTALS_GAP_MAX = 4;
+/** A wrapper's verdict: a line that says a command failed and never why.
+ *  `pnpm` closes every failing script with `ELIFECYCLE  Command failed with
+ *  exit code 2.`, printed after the tool's own diagnostic. */
+const WRAPPER_RE = /exit (?:code|status) \d+|\bELIFECYCLE\b|\bCommand failed\b/i;
 
 /**
- * The failure block belonging to the run whose totals block starts at
- * `totalsStart`: the block directly above it, across nothing but blank lines,
- * and OPENED BY A RUNNER HEADER.
+ * The failure's most informative line, or null: the LAST line that carries an
+ * error marker (`ERROR_MARKERS`, the same list that decided the command failed)
+ * and is not a totals row, a stack frame, a code-frame gutter or a machine
+ * `::` line, preferring any such line to a wrapper's verdict.
  *
- * The header is the bound, and it is the whole reason this is not a plain
- * `continue` in `errorLine`. Resuming the outer scan walks up to
- * `LINE_SCAN_MAX` lines of scrollback and keys a totals-only run on whatever
- * an earlier command left behind — exactly what the block machinery exists to
- * prevent. One hop, into a block a runner opened, keeps "the scanner stopped
- * one block short" apart from "this output really is totals only": free text
- * above a totals row is still nothing.
+ * ONE LINE AT A TIME, WITH NO MODEL OF THE PAGE. The walker this replaces found
+ * "the failure's block" by header glyphs (`FAIL`, `●`, `❯`, `×`, `---`), and
+ * runners spend their glyphs twice: vitest's `❯` opens a file summary and also
+ * points at every stack frame, which cut every vitest failure off from its
+ * assertion (tenjin-agent#359). On 1,880 real failures from one machine's
+ * transcripts this picker finds a line wherever the walker did, and 22 more.
+ *
+ * THE LAST, because a runner prints the cause after pages of progress. NOT THE
+ * WRAPPER: picking pnpm's `ELIFECYCLE` line over tsc's `error TS2345:` above it
+ * was 43% of real tsc failures.
+ *
+ * ONE COMMAND'S OUTPUT: the text is this Bash call's own streams, so the last
+ * diagnostic in it is this call's, however far up it sits within the window.
  */
-function precedingFailureBlock(lines: string[], totalsStart: number): [number, number] | null {
-  let j = totalsStart - 1;
-  while (j >= 0 && isBlank(lines, j)) {
-    if (totalsStart - j > TOTALS_GAP_MAX) return null;
-    j -= 1;
-  }
-  if (j < 0) return null;
-  const start = blockStart(lines, j);
-  const header = lines[start] ?? '';
-  if (!isRunnerHeader(header)) return null;
-  return [start, j];
-}
-
-export interface ErrorLine {
-  line: string;
-  /** The failure block the line sits in, which is what the top frame is read
-   *  off: a frame from an unrelated failure hundreds of lines away must not
-   *  clear the floor for a message that says nothing specific. */
-  block: string;
-}
-
-/**
- * The most informative line: the LAST error-shaped, non-frame line, because
- * runners print the real cause after pages of summary — except when that line
- * is a bare TOTAL, in which case the nearest non-aggregate marker above it in
- * the same block is what the failure is about, and failing that, the same
- * search over the failure block the run printed DIRECTLY above its totals,
- * across nothing but blank lines. One hop, never a resumed scan: a totals
- * block with free text, or nothing, above it yields nothing, because a key
- * over "2 failed" is a key every repo shares and a key over an unrelated
- * error in the scrollback is worse than none.
- */
-export function errorLine(text: string): ErrorLine | null {
+export function errorLine(text: string): string | null {
   const lines = text.split('\n');
   const floor = Math.max(0, lines.length - LINE_SCAN_MAX);
+  let wrapper: string | null = null;
   for (let i = lines.length - 1; i >= floor; i -= 1) {
     const line = (lines[i] ?? '').trim();
-    if (line.length === 0 || STACK_FRAME_RE.test(line) || !hasErrorMarker(line)) continue;
-    const start = blockStart(lines, i);
-    const block = lines.slice(start, blockEnd(lines, i) + 1).join('\n');
-    if (!isAggregateLine(line)) return { line, block };
-    for (let j = i - 1; j >= start; j -= 1) {
-      const candidate = (lines[j] ?? '').trim();
-      if (candidate.length === 0 || STACK_FRAME_RE.test(candidate)) continue;
-      if (!hasErrorMarker(candidate) || isAggregateLine(candidate)) continue;
-      return { line: candidate, block };
-    }
-    const above = precedingFailureBlock(lines, start);
-    if (above === null) return null;
-    const [aboveStart, aboveEnd] = above;
-    const aboveBlock = lines.slice(aboveStart, aboveEnd + 1).join('\n');
-    for (let j = aboveEnd; j >= aboveStart; j -= 1) {
-      const candidate = (lines[j] ?? '').trim();
-      if (candidate.length === 0 || STACK_FRAME_RE.test(candidate)) continue;
-      if (!hasErrorMarker(candidate) || isAggregateLine(candidate)) continue;
-      return { line: candidate, block: aboveBlock };
-    }
-    return null;
+    if (line.length === 0 || line.startsWith('::') || STACK_FRAME_RE.test(line)) continue;
+    if (!hasErrorMarker(line) || isAggregateLine(line)) continue;
+    if (!WRAPPER_RE.test(line)) return line;
+    wrapper ??= line;
   }
-  return null;
+  return wrapper;
 }
 
-// ---- sig_v1 ----
+// ---- errno ----
 
 /** POSIX/libuv errno names, spelled out. A whitelist, not a shape:
- *  `/E[A-Z]{3,}/` matches ERROR, ESLINT and EXPECTED, and cleared the floor
- *  for a bare "2 failed" on the strength of the word ERROR anywhere. */
+ *  `/E[A-Z]{3,}/` matches ERROR, ESLINT and EXPECTED, and read a bare
+ *  "2 failed" as specific on the strength of the word ERROR anywhere. */
 const ERRNO_NAMES = new Set([
   'ENOENT',
   'EACCES',
@@ -493,80 +388,15 @@ const ERRNO_NAMES = new Set([
   'EOVERFLOW',
 ]);
 
-/** The errno-shaped token a line names, or ''. Read off the RAW line, before
- *  normalization eats `ERR_PNPM_OUTDATED_LOCKFILE` as an env-var name. A token
- *  qualifies with a digit or an underscore (`TS2345`, `E0412`) or as a real
- *  errno by name; everything else is English. */
-const SIG_ERRNO_RE = /\b(ERR_[A-Z0-9]+(?:_[A-Z0-9]+)*|TS\d{3,5}|E\d{3,4}|E[A-Z]{3,})\b/g;
+/** The errno-shaped token a line names, or ''. A token qualifies with a digit
+ *  or an underscore (`TS2345`, `E0412`, `ERR_PNPM_OUTDATED_LOCKFILE`) or as a
+ *  real errno by name; everything else is English. `isAggregateLine` asks it:
+ *  a count that also names an errno describes one failure. */
+const ERRNO_RE = /\b(ERR_[A-Z0-9]+(?:_[A-Z0-9]+)*|TS\d{3,5}|E\d{3,4}|E[A-Z]{3,})\b/g;
 export function errnoOf(text: string): string {
-  for (const m of text.matchAll(SIG_ERRNO_RE)) {
+  for (const m of text.matchAll(ERRNO_RE)) {
     const token = m[1] ?? '';
     if (/[_\d]/.test(token) || ERRNO_NAMES.has(token)) return token;
   }
   return '';
-}
-
-/** `at fn (/a/b/file.ts:12:3)`, `File "/a/b.py", line 3`, tsc's
- *  `src/x.ts(12,3):` and rustc's `--> src/main.rs:4:5` all reduce to one
- *  basename, so the same failure keys the same across two checkouts. */
-const SIG_PY_FRAME_RE = /File "([^"]+)", line \d+/;
-const SIG_FRAME_RE = /([A-Za-z0-9_.+-]+(?:[/\\][A-Za-z0-9_.+-]+)*\.[A-Za-z]{1,5})[:(]\d+/;
-export function topFrameFile(text: string): string {
-  const raw = SIG_PY_FRAME_RE.exec(text)?.[1] ?? SIG_FRAME_RE.exec(text)?.[1] ?? null;
-  if (raw === null) return '';
-  const base = raw.split(/[/\\]/).pop() ?? '';
-  return base.length > 0 && base.length <= 80 ? base : '';
-}
-
-/**
- * The message half of the key, normalized so two runs on two machines produce
- * the same bytes: ANSI and CRLF stripped, `$HOME` to `~`, hosts to `H`, paths
- * to `@/`, env-var names to `E`, hex runs to `H`, digits to `N`, lowercased,
- * whitespace collapsed, 200 characters. Order matters: env-var names are
- * matched while the text is still cased, and paths before the digits a
- * line:column suffix would otherwise leave stranded.
- */
-export function normalizeForSig(text: string): string {
-  const home = homedir();
-  // eslint-disable-next-line no-control-regex
-  let out = text.replace(/\u001b\[[0-9;]*[A-Za-z]/g, ' ').replace(/[\r\n]+/g, ' ');
-  if (home.length > 1) out = out.split(home).join('~');
-  return out
-    .replace(/\b(?:[A-Za-z0-9-]+\.)+(?:com|org|net|io|dev|ai|co|internal|local)\b/g, 'H')
-    .replace(/\b[A-Za-z]:\\[^\s'"]+/g, '@/')
-    .replace(/(?:[/\\][\w.@+-]+){2,}/g, '@/')
-    .replace(/\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b/g, 'E')
-    .replace(/\b[0-9a-fA-F]{6,}\b/g, 'H')
-    .replace(/\d+/g, 'N')
-    .toLowerCase()
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, 200);
-}
-
-export interface Signature {
-  key: string;
-}
-
-/**
- * The `sig_v1` key for one failure — message + errno + frame — or null below
- * the SPECIFICITY FLOOR: no errno and no top frame means "N tests failed"
- * normalizes to the same bytes in every repo on earth, and a key sent on it
- * would resolve somebody else's fix at everybody.
- *
- * THE FRAME GOES THROUGH THE SAME REDUCTION AS THE MESSAGE. A bundler builds
- * the file it points at, and names it after the content: a stack through
- * Vite's `chunk-4f2a91.js` keys the identical failure differently on every
- * rebuild, so the shelf never sees the same hash twice and the fingerprint
- * resolves nothing it was published under. `normalizeForSig` folds the hex run
- * and the digits out of the basename, which is the same trade the message
- * already makes: `main2.rs` and `main3.rs` collapse together, and erring
- * toward a match is the direction a fingerprint is for.
- */
-export function sigV1(line: string, block: string): Signature | null {
-  const message = normalizeForSig(line);
-  const errno = errnoOf(line);
-  const frame = topFrameFile(block);
-  if (errno === '' && frame === '') return null;
-  return { key: shortHash('sig_v1|' + message + '|' + errno + '|' + normalizeForSig(frame)) };
 }

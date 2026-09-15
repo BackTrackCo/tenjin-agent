@@ -10,18 +10,16 @@ export default defineConfig({
     // vi.setConfig — real ox scrypt at N=262144 flakes the default under
     // parallel load (tenjin-agent#47).
     //
-    // This repo's own opt-in into the sig_v1_test key lane (tenjin-agent#267),
-    // pointed straight at the
-    // reporter's SOURCE — the same module tsup builds into
-    // `dist/tenjin-vitest-reporter.mjs` and `tenjin install` copies to every
-    // other repo, so there is no second, drifting copy and no prior install or
-    // build needed on a contributor's machine or in CI.
+    // This repo's own tenjin reporter, pointed straight at its SOURCE — the
+    // same module tsup builds into `dist/tenjin-vitest-reporter.mjs` and
+    // `tenjin install` copies for every other repo, so there is no second,
+    // drifting copy and no prior install or build needed on a contributor's
+    // machine or in CI. It prints one `::error` line per failed test after
+    // vitest's summary: the failure arm reads it as the test's name
+    // (tenjin-agent#350), and GitHub renders it as an annotation in CI.
     //
     // `default` is unchanged — the second reporter is additive, never a
     // replacement.
-    reporters: [
-      'default',
-      ['./src/hooks/failure/vitest-reporter.ts', { outputFile: '.vitest-report.json' }],
-    ],
+    reporters: ['default', './src/hooks/failure/vitest-reporter.ts'],
   },
 });

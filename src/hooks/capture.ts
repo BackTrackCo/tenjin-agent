@@ -226,16 +226,15 @@ function failuresHit(db: LoopDb, actor: Actor, since: number | null): FailureHit
 }
 
 /**
- * Those of them worth a line of their own: the ones with a fingerprint to name.
+ * Those of them worth a line of their own: the ones with a test key to name.
  *
  * A FILTER ON THE PROSE, NEVER ON THE ASK. A key that is nothing but the line
- * hash belongs to a failure below `sigV1`'s specificity floor, and the line it
- * would render says only "this failed, and publish if it was worth it" — which
+ * hash belongs to a failure whose output named no test, and the line it would
+ * render says only "this failed, and publish if it was worth it" — which
  * `CAPTURE_ASK` says two lines above, and which the agent can read off its own
- * context anyway. The fingerprint is the one thing it cannot derive itself, so
- * the fingerprint is what earns the line. On a machine where most failures are
- * too generic to key, the ask grew one such line per failure and said nothing
- * new each time.
+ * context anyway. The key is the one thing it cannot derive itself, so the key
+ * is what earns the line. On a machine where most failures name no test, the
+ * ask grew one such line per failure and said nothing new each time.
  *
  * NOT WHAT ARMS THE ASK — that reads {@link failuresHit}. A failure with no
  * fingerprint is still worth publishing about: the failure arm asks the shelf

@@ -464,7 +464,7 @@ describe('registrar', () => {
       { event: 'UserPromptSubmit', hooks: [command] },
       { event: 'PreToolUse', matcher: 'WebSearch|WebFetch', hooks: [http] },
       { event: 'PreToolUse', matcher: 'Agent|Task', hooks: [http] },
-      { event: 'PreToolUse', matcher: 'Edit|Write|MultiEdit|Bash', hooks: [http] },
+      { event: 'PreToolUse', matcher: 'Edit|Write|MultiEdit', hooks: [http] },
       { event: 'PostToolUse', matcher: 'Bash', hooks: [http] },
       { event: 'PostToolUse', matcher: 'Read', hooks: [http] },
       { event: 'PostToolUseFailure', matcher: 'Bash', hooks: [http] },
