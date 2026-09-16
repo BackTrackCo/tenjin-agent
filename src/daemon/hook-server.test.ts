@@ -4,18 +4,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { ADAPTERS } from '../adapters/registry';
-import { contextArm } from '../hooks/arms/context';
-import { dispatchArm } from '../hooks/arms/dispatch';
-import { failureArm } from '../hooks/arms/failure';
-import { primerArm } from '../hooks/arms/primer';
-import { promptArm } from '../hooks/arms/prompt';
-import { fetchArm, researchArm } from '../hooks/arms/research';
-import { stopArm } from '../hooks/arms/stop';
-import { subagentStartArm } from '../hooks/arms/subagent-start';
-import { subagentStopArm } from '../hooks/arms/subagent-stop';
+import { ARMS } from '../hooks/arms/registry';
 import { openLoopDb } from '../hooks/store';
 import type { LoopDb } from '../hooks/store';
-import type { Arm, Deps, KernelConfig } from '../hooks/types';
+import type { Deps, KernelConfig } from '../hooks/types';
 import { CONFIG_DEFAULTS } from '../lib/config';
 import type { SearchAuthResult } from '../lib/search-auth';
 import { createHookServer, type HookServer } from './server';
@@ -37,20 +29,10 @@ import { createHookServer, type HookServer } from './server';
  * anonymous one is the `shelf` field in the body. So each case asserts the PATH
  * and the field together: a request that carried a team's name to the public
  * shape, or reached a shelf without naming one, would pass either alone.
+ *
+ * The arms are the daemon's own `ARMS`, not a copy of it: a restated list is
+ * one an arm can be added to the daemon without appearing in.
  */
-
-const ARMS: Arm[] = [
-  promptArm,
-  researchArm,
-  fetchArm,
-  dispatchArm,
-  failureArm,
-  subagentStartArm,
-  subagentStopArm,
-  stopArm,
-  primerArm,
-  contextArm,
-];
 
 /** The QUALIFIED name, the only form the config and the wire carry. */
 const SHELF = 'backtrack/backtrack';
@@ -287,17 +269,22 @@ describe('the prompt arm over the real hook server', () => {
     expect(legRows()).toEqual([{ shelf: 'team', status: 'ok', outcome: 'hit' }]);
   });
 
-  it('org policy off: the body asked for public and the server said no anyway', async () => {
+  it('the server withheld the public list: the row says so, and says nothing else', async () => {
     respond = () => ({ status: 200, body: { shelf: envelope([candidate()]), public: null } });
     await post(prompt('why did the collation flip on the image swap'));
 
     expect(requests).toHaveLength(1);
     expect(requests[0]?.body.includePublic).toBe(true);
     const fires = await firesTo(1);
-    // No error, no retry, one row: the CLI does not distinguish this from the
-    // case above, which is the contract.
+    // No error and no retry. TWO ROWS, because the round asked for two sets and
+    // the server answered both: the marketplace with a decision not to run it.
+    // That is the difference from the case above, where nothing was asked, and
+    // it is the only place a withheld run is ever visible on this machine.
     expect(fires[0]?.error).toBeNull();
-    expect(legRows()).toEqual([{ shelf: 'team', status: 'ok', outcome: 'hit' }]);
+    expect(legRows()).toEqual([
+      { shelf: 'public', status: 'withheld', outcome: 'no-answer' },
+      { shelf: 'team', status: 'ok', outcome: 'hit' },
+    ]);
   });
 
   it('no wallet: one unsigned call to /api/search, one public row, no error', async () => {

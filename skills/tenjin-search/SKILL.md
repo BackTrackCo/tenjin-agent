@@ -5,7 +5,7 @@ description: >-
   research, and before empirically probing a third-party library or platform's
 <!-- tenjin:when teamMode -->
   undocumented behavior: someone may have already run the probe. This machine
-  asks its team's own shelf first and the public marketplace second, so a
+  asks its team's own shelf and the public marketplace in ONE call, so a
   question may be about THIS project. Use when a question is durable rather than
   live and costly to settle — a real install, a probe, or elapsed time: a quirk
   of this codebase, a probe against an internal service, a past decision's
@@ -13,8 +13,8 @@ description: >-
   what the docs or the repo answer in one line, even when it names versions; skip
   generic advice, live prices or statuses, and implementing, reviewing, or
   debugging your own code, however famous the gotcha behind it. A question still
-  travels: a team miss sends the same sentence to the public marketplace, so no
-  secret, credential, customer or account name belongs in one. Requires the
+  travels: the one call carries the same sentence to the public marketplace, so
+  no secret, credential, customer or account name belongs in one. Requires the
   tenjin CLI
 <!-- tenjin:else -->
   undocumented behavior: someone may have already run the probe. Use when a
@@ -43,11 +43,12 @@ Costly means browsing, testing, paid data, specialist judgment, or elapsed time,
 not one model response. Add a third: someone plausibly already did it — and on
 this machine "someone" includes a teammate.
 
-This machine is wired to a **team shelf**, asked before the public marketplace.
-It holds what the team already settled: a quirk of THIS codebase, a probe
-against an internal service, a past decision's reasoning. So a project-specific
-question is worth a search here that would be a guaranteed miss on the public
-marketplace. The bar is teammate-useful, not public-and-durable.
+This machine is wired to a **team shelf**, asked in the same call as the public
+marketplace and preferred over it. It holds what the team already settled: a
+quirk of THIS codebase, a probe against an internal service, a past decision's
+reasoning. So a project-specific question is worth a search here that would be a
+guaranteed miss on the public marketplace. The bar is teammate-useful, not
+public-and-durable.
 <!-- tenjin:else -->
 **Public + durable + costly to reproduce, then search first. Otherwise just do
 the task.** Answer it in a second; a habitual miss adds latency to every one.
@@ -77,9 +78,10 @@ tenjin search "<generalized question>" --json --limit 5 [--fresh-within P30D] [-
 ```
 
 <!-- tenjin:when teamMode -->
-- **The question leaves your environment, and a team miss sends it on.** The team
-  shelf is asked first, then the SAME sentence goes to the public marketplace. So
-  a team shelf relaxes the TOPIC, never the wording: name the component, the
+- **The question leaves your environment, and the same call carries it on.** One
+  signed request asks the team shelf and the public marketplace together, so the
+  SAME sentence reaches the marketplace whether or not the shelf answers. A team
+  shelf relaxes the TOPIC, never the wording: name the component, the
   version, the symptom; never a secret, a credential, a customer, or an account
   name. Ask only what you accept being logged elsewhere; if it cannot be asked
   cleanly, do not search.

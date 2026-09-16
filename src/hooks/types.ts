@@ -47,9 +47,25 @@ export type Maybe<T> = T | Promise<T>;
  * refused team bypass, bad JSON and a bad shape are distinguishable in the
  * ledger. A leg sets it from the response; the kernel sets `timeout`,
  * `aborted` and `error` for what never returned.
+ *
+ * `withheld` IS THE SERVER'S ANSWER, NOT A FAILURE: the one call asked for the
+ * public list and the response carried none. It is the only status that comes
+ * out of a 200 this client understood completely. Which reason the server had —
+ * an org policy of off, or a deployment that runs the marketplace only on a
+ * team miss — is deliberately not distinguished here; what the row records is
+ * that the set was ASKED FOR and did not come back, which is the fact a
+ * silently dropped row used to lose.
  */
 export type LegStatus =
-  'ok' | 'timeout' | 'aborted' | 'refused' | 'bad_json' | 'bad_shape' | 'error' | `http_${number}`;
+  | 'ok'
+  | 'withheld'
+  | 'timeout'
+  | 'aborted'
+  | 'refused'
+  | 'bad_json'
+  | 'bad_shape'
+  | 'error'
+  | `http_${number}`;
 
 /**
  * One shelf's answer to the question, as the leg's `verdict` judged it.
