@@ -447,4 +447,37 @@ describe('the failure arm over the real hook server', () => {
     const fires = await firesTo(1);
     expect(fires[0]).toMatchObject({ arm: 'failure', reason: 'no-question' });
   });
+
+  /**
+   * THE SHELF-ONLY ROUND HAS NOWHERE TO FALL BACK TO. A credential failure
+   * never withholds a PUBLIC answer, which is why the prompt case above still
+   * gets one; but this arm asked the shelf ALONE on purpose. The words it would
+   * send are masked failure text, and decision 13 keeps that off the
+   * marketplace. An expired session must not turn it into a question for
+   * tenjin.blog, so the round asks nobody and files the credential failure.
+   */
+  it('unauthenticated: neither round is sent, so nothing reaches the marketplace', async () => {
+    auth = { kind: 'unauthenticated', detail: 'WALLET_LOCKED' };
+    await post(
+      failure(
+        "Error: ENOENT: no such file or directory, open 'drizzle.config.ts'\n    at run (src/migrate.ts:12:3)\n",
+      ),
+    );
+
+    // ZERO REQUESTS, not one unsigned one. Both rounds are shelf-only: the keys
+    // endpoint has no public form at all, and the words round sent
+    // `includePublic: false`, which says the marketplace is not part of this
+    // question rather than that it is the second choice.
+    expect(requests).toHaveLength(0);
+    const fires = await firesTo(1);
+    expect(fires).toHaveLength(1);
+    // Not a hit, and not the `no-hit` that would blame a shelf for an empty
+    // answer it was never asked for: the legs failed, so it is `no-answer`.
+    expect(fires[0]).toMatchObject({ arm: 'failure', reason: 'no-answer' });
+    expect(String(fires[0]?.error)).toMatch(/^unauthenticated: WALLET_LOCKED/);
+    expect(legRows()).toEqual([
+      { shelf: 'keys', status: 'refused', outcome: 'no-answer' },
+      { shelf: 'team', status: 'refused', outcome: 'no-answer' },
+    ]);
+  });
 });
