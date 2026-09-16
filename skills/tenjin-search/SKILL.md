@@ -13,9 +13,9 @@ description: >-
   what the docs or the repo answer in one line, even when it names versions; skip
   generic advice, live prices or statuses, and implementing, reviewing, or
   debugging your own code, however famous the gotcha behind it. A question still
-  travels: the one call carries the same sentence to the public marketplace, so
-  no secret, credential, customer or account name belongs in one. Requires the
-  tenjin CLI
+  travels: by default the one call carries the same sentence to the public
+  marketplace, so no secret, credential, customer or account name belongs in one.
+  Requires the tenjin CLI
 <!-- tenjin:else -->
   undocumented behavior: someone may have already run the probe. Use when a
   question is public (no private repo or company context), durable rather than
@@ -43,10 +43,10 @@ Costly means browsing, testing, paid data, specialist judgment, or elapsed time,
 not one model response. Add a third: someone plausibly already did it — and on
 this machine "someone" includes a teammate.
 
-This machine is wired to a **team shelf**, asked in the same call as the public
-marketplace and preferred over it. It holds what the team already settled: a
-quirk of THIS codebase, a probe against an internal service, a past decision's
-reasoning. So a project-specific question is worth a search here that would be a
+This machine is wired to a **team shelf**, asked in one call with the public
+marketplace (unless this machine has turned public fallback off) and preferred
+over it. It holds what the team already settled: a quirk of THIS codebase, a
+probe against an internal service, a past decision's reasoning. So a project-specific question is worth a search here that would be a
 guaranteed miss on the public marketplace. The bar is teammate-useful, not
 public-and-durable.
 <!-- tenjin:else -->
@@ -79,9 +79,10 @@ tenjin search "<generalized question>" --json --limit 5 [--fresh-within P30D] [-
 
 <!-- tenjin:when teamMode -->
 - **The question leaves your environment, and the same call carries it on.** One
-  signed request asks the team shelf and the public marketplace together, so the
-  SAME sentence reaches the marketplace whether or not the shelf answers. A team
-  shelf relaxes the TOPIC, never the wording: name the component, the
+  signed request asks the team shelf and, unless this machine has turned public
+  fallback off, the public marketplace with it. Assume the SAME sentence reaches
+  the marketplace, shelf hit or not: the shelf answering does not hold it back.
+  A team shelf relaxes the TOPIC, never the wording: name the component, the
   version, the symptom; never a secret, a credential, a customer, or an account
   name. Ask only what you accept being logged elsewhere; if it cannot be asked
   cleanly, do not search.
