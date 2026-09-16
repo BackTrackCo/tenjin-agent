@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
@@ -1108,42 +1108,43 @@ describe('the built vitest reporter bundle', () => {
   it('prints the ::error line test-identity.ts reads back', async () => {
     const path = vitestReporterPath(dataDir);
     expect(existsSync(path)).toBe(true);
-    // No node_modules beside it and no bundler: a bare dynamic import is the
-    // same thing vitest does with the path in a repo's own config.
-    const mod = (await import(pathToFileURL(path).href)) as {
-      default: new () => {
-        onInit(ctx: { logger: { log(message: string): void } }): void;
-        onTestRunEnd(modules: unknown[], unhandled: unknown[]): void;
-      };
-    };
-    const printed: string[] = [];
-    const reporter = new mod.default();
-    reporter.onInit({ logger: { log: (message: string) => printed.push(message) } });
-    reporter.onTestRunEnd(
-      [
-        {
-          moduleId: join(dataDir, 'src/lib/http.test.ts'),
-          relativeModuleId: 'src/lib/http.test.ts',
-          errors: () => [],
-          children: {
-            allTests: () => [
-              {
-                fullName: 'retries > gives up after three',
-                result: () => ({
-                  errors: [{ name: 'AssertionError', message: 'expected 4 to be 3' }],
-                }),
-              },
-            ],
-          },
-        },
-      ],
-      [],
-    );
+    // IN A CHILD NODE, not in this process. The bundle is imported by a repo's
+    // own vitest, so "it loads on its own, importing nothing" is the claim; an
+    // import from inside THIS vitest run drags it through vite's import
+    // analysis instead, which is what made this case flaky (tenjin-agent#325).
+    const script = [
+      `const { default: Reporter } = await import(${JSON.stringify(pathToFileURL(path).href)});`,
+      'const printed = [];',
+      'const reporter = new Reporter();',
+      'reporter.onInit({ logger: { log: (m) => printed.push(m) } });',
+      'reporter.onTestRunEnd(',
+      '  [',
+      '    {',
+      `      moduleId: ${JSON.stringify(join(dataDir, 'src/lib/http.test.ts'))},`,
+      "      relativeModuleId: 'src/lib/http.test.ts',",
+      '      errors: () => [],',
+      '      children: {',
+      '        allTests: () => [',
+      '          {',
+      "            fullName: 'retries > gives up after three',",
+      "            result: () => ({ errors: [{ name: 'AssertionError', message: 'expected 4 to be 3' }] }),",
+      '          },',
+      '        ],',
+      '      },',
+      '    },',
+      '  ],',
+      '  [],',
+      ');',
+      'process.stdout.write(printed.join("\\n"));',
+    ].join('\n');
+    const printed = execFileSync(process.execPath, ['--input-type=module', '-e', script], {
+      encoding: 'utf8',
+    });
 
-    expect(printed.join('\n')).toBe(
+    expect(printed).toBe(
       '::error title=src/lib/http.test.ts > retries > gives up after three::AssertionError: expected 4 to be 3',
     );
-    expect(testFailuresOf(printed.join('\n'))).toEqual([
+    expect(testFailuresOf(printed)).toEqual([
       {
         name: 'src/lib/http.test.ts > retries > gives up after three',
         line: 'AssertionError: expected 4 to be 3',
