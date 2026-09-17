@@ -17,11 +17,12 @@ evals/
     redaction.py        # strips file-content tool results before they are stored or graded
     scoring_selftest.py # pure tests for the two gates that keep broken runs unscored
   tenjin-search/
-    trigger-eval.json   # 20 queries, should_trigger true/false, for description tuning
+    trigger-eval.json   # 22 queries, should_trigger true/false, for description tuning
     trigger-eval-defer.json # 4 no-CLI queries: does this skill stand down for the hosted one
     evals.json          # 6 output cases with expectations
     fixtures/           # bodies seeded into a case's workspace via its `files`
   tenjin-publish/
+    trigger-eval.json   # 20 queries, 10 positive / 10 negative
     evals.json          # 5 output cases with expectations
   tenjin/
     trigger-eval.json   # 20 queries for the zero-install hosted skill
