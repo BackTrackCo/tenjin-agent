@@ -1046,7 +1046,7 @@ function permissionsValue(p: PermissionsResult): string {
   if (p.skipped === 'harness-unsupported') {
     return `pending: ${harnessLabel(p.harness as Harness)} has no grant this CLI can write, so it still asks${removed(false)}`;
   }
-  if (p.skipped === 'declined' || p.skipped === 'not-requested') {
+  if (p.skipped === 'declined') {
     return `none written (--no-grant)${removed(false)}`;
   }
   if (p.skipped === 'changed-since-read') {

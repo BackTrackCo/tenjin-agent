@@ -192,9 +192,3 @@ export async function intro(message: string): Promise<void> {
   const clack = await import('@clack/prompts');
   clack.intro(message, { output: process.stderr });
 }
-
-/** Close it, so the last prompt is not left dangling above plain stdout lines. */
-export async function outro(message: string): Promise<void> {
-  const clack = await import('@clack/prompts');
-  clack.outro(message, { output: process.stderr });
-}

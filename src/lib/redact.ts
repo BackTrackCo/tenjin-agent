@@ -121,19 +121,6 @@ export function mask(text: string): string {
   return out;
 }
 
-/** The `query` rows as the hook template renders them: pattern, flags and the
- *  excerpt's kept prefix. The template cannot import this file, so it gets the
- *  data and a ten-line replace loop instead of a second regex list. */
-export function maskRules(): Array<{ pattern: string; flags: string; keep: number }> {
-  return CORPUS.rules
-    .filter((r) => r.scopes.includes('query') && r.match.kind === 'regex')
-    .map((r) => ({
-      pattern: r.match.pattern ?? '',
-      flags: r.match.flags ?? 'g',
-      keep: r.excerpt.kind === 'mask' ? (r.excerpt.keep ?? 0) : 0,
-    }));
-}
-
 // ---------------------------------------------------------------------------
 // Rule corpus: redact-rules.json compiled into executable detectors.
 // ---------------------------------------------------------------------------
