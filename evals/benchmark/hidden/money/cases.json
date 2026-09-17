@@ -1,0 +1,10 @@
+[
+  {
+    "atomic": 1500000,
+    "expected": "1.50 USDC"
+  },
+  {
+    "atomic": 50000,
+    "expected": "0.05 USDC"
+  }
+]

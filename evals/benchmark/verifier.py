@@ -49,6 +49,11 @@ NODE = "node"
 # What a `python3 -m` child needs to run at all. Everything else the operator
 # happens to have exported stays out of the verifier process.
 INHERITED = ("PATH", "LANG", "LC_ALL", "TMPDIR", "SYSTEMROOT")
+# A Vitest verifier configuration states the one file it runs: the include list
+# and, because a project's own list would override it, no `projects` key.
+INCLUDE = re.compile(r"include\s*:\s*\[([^\]]*)\]")
+PROJECTS = re.compile(r"\bprojects\s*:")
+STRING = re.compile(r"'([^']*)'|\"([^\"]*)\"")
 
 
 def child_environment(parent: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -123,11 +128,11 @@ def node_test_spec(task: str, package: str = "") -> VerifierSpec:
 # pnpm workspace whose tests and marker live in `packages/core`. `shadow` is a
 # workspace too, but its one Vitest project is the root, so its marker is the
 # root's and only the library it consumes lives under `packages/`.
-TASK_PACKAGES: dict[str, str] = {}
+TASK_PACKAGES = {"actor": "", "budget": "", "candidate": "", "slug": "", "alias": "", "level": "", "money": "", "core": "packages/core", "shadow": "", "ambient": ""}
 # The file the task's fix touches, which the discovery facts read edits against.
 # `shadow` names the library source rather than the built artifact the test
 # imports, because an edit there is the edit the task is about.
-TASK_SOURCES: dict[str, str] = {}
+TASK_SOURCES = {"actor": "src/actor.mjs", "budget": "src/budget.mjs", "candidate": "src/candidate.mjs", "slug": "src/slug.mjs", "alias": "src/window.mjs", "level": "src/level.ts", "money": "src/cli.mjs", "core": "packages/core/src/core.mjs", "shadow": "packages/range/src/range.mjs", "ambient": "src/price.mjs"}
 
 REGISTRY: dict[str, VerifierSpec] = {
     "fake_answer_file": VerifierSpec(name="fake_answer_file", argv=_fake_answer_file, timeout_s=30),
@@ -180,8 +185,33 @@ def run(spec: VerifierSpec, repo_copy: Path, allowed_root: Path, *, image: str |
 
 
 def outcome_of(exit_code: int | None) -> str:
-    """Exit 0 is pass, 1 is fail, anything else means the verifier could not decide."""
+    """Exit 0 is pass, 1 is fail, anything else means the verifier could not decide.
+
+    The exit code is the whole verdict. A passing run's own output can carry the
+    word FAIL and a failing one can carry the word passed, so no verdict here is
+    ever read out of the text a verifier printed.
+    """
     return {0: "pass", 1: "fail"}.get(exit_code, "invalid")  # type: ignore[arg-type]
+
+
+def unnarrowed_oracle(config_text: str, oracle: str) -> str | None:
+    """Why a Vitest verifier configuration runs more than its one oracle file, or None.
+
+    An oracle command names the files it runs. A configuration whose file set
+    stays open runs the source repository's whole suite inside the trial image,
+    forking a worker per core and booting every service that suite touches, so
+    a manifest carrying one is refused when it is read rather than after a
+    container has spent the run on it.
+    """
+    if PROJECTS.search(config_text):
+        return "verifier configuration defines Vitest projects, whose own include lists reopen the suite"
+    found = INCLUDE.findall(config_text)
+    if len(found) != 1:
+        return f"verifier configuration must state one include list naming {oracle}"
+    entries = [single or double for single, double in STRING.findall(found[0])]
+    if entries != [oracle]:
+        return f"verifier configuration runs {entries or 'every test file it finds'} rather than only {oracle}"
+    return None
 
 
 def fake_answer_file(repo: Path) -> int:

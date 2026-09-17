@@ -1,0 +1,28 @@
+[
+  {
+    "args": [
+      [
+        {
+          "id": "a",
+          "strong": false
+        },
+        {
+          "id": "b",
+          "strong": true
+        },
+        {
+          "id": "c",
+          "strong": true
+        }
+      ]
+    ],
+    "expected": {
+      "id": "b",
+      "strong": true
+    }
+  },
+  {
+    "args": [[]],
+    "expected": null
+  }
+]

@@ -1,0 +1,13 @@
+{
+  "id": "level-fix",
+  "title": "level: replace the enum with a const object so Node can strip the file",
+  "commands": [
+    {
+      "command": "pnpm exec vitest run tests/level.test.mjs",
+      "kind": "sig_v1_test",
+      "key": "65baf4d73193978e",
+      "check": true,
+      "reason": "vitest's FAIL header names the file and the case; the test-identity lane keys on it"
+    }
+  ]
+}

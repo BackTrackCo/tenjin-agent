@@ -1,0 +1,10 @@
+[
+  {
+    "score": 70,
+    "expected": "high"
+  },
+  {
+    "score": 12,
+    "expected": "low"
+  }
+]

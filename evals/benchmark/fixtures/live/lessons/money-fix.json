@@ -1,0 +1,13 @@
+{
+  "id": "money-fix",
+  "title": "money: take the CommonJS module's `default` before calling it",
+  "commands": [
+    {
+      "command": "pnpm exec vitest run tests/money.test.mjs",
+      "kind": "sig_v1_test",
+      "key": "3489e687cf659ccd",
+      "check": true,
+      "reason": "vitest's FAIL header names the file and the case; the test-identity lane keys on it"
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "id": "alias-fix",
+  "title": "lastWindow: a window of size 0 is empty, not the whole list",
+  "commands": [
+    {
+      "command": "pnpm exec vitest run tests/alias.test.ts",
+      "kind": "sig_v1_test",
+      "key": "d2c89ad47be9f269",
+      "check": false,
+      "reason": "the assertion is reached only once the alias resolves, so the pristine fixture's probe hits the alias error instead; derived on a copy with the alias fixed"
+    }
+  ]
+}

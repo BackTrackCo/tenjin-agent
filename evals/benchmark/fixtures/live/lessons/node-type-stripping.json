@@ -1,0 +1,20 @@
+{
+  "id": "node-type-stripping",
+  "title": "Node runs TypeScript by stripping types, and refuses an `enum`",
+  "commands": [
+    {
+      "command": "pnpm exec vitest run tests/level.test.mjs",
+      "kind": "sig_v1",
+      "key": "cbd4ca8673ef1aab",
+      "check": true,
+      "reason": "the spawned CLI's SyntaxError travels into the assertion message, with Node's frame beneath it"
+    },
+    {
+      "command": "node src/cli.ts 70",
+      "kind": "sig_v1",
+      "key": null,
+      "check": true,
+      "reason": "run directly, Node prints the refusal with an internal frame the formula keeps no file for"
+    }
+  ]
+}
