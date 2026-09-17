@@ -1,0 +1,6 @@
+repo/node_modules/
+repo/**/node_modules/
+repo/dist/
+repo/coverage/
+repo/.eslintcache
+repo.git/worktrees/

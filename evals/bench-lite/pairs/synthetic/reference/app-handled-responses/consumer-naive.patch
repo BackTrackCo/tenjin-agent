@@ -1,0 +1,27 @@
+diff --git a/src/app.ts b/src/app.ts
+index 2f8e4fa..e560637 100644
+--- a/src/app.ts
++++ b/src/app.ts
+@@ -67,6 +67,8 @@ export interface AppOptions {
+     response?: { body?: unknown },
+   ) => void | Promise<void>;
+   websocket?: WebSocketOptions;
++  /** Headers added to every response this app produces. */
++  responseHeaders?: Record<string, string>;
+ }
+ 
+ export interface App {
+@@ -192,6 +194,13 @@ export function createAppEventHandler(stack: Stack, options: AppOptions) {
+       const _body = val === undefined ? undefined : await val;
+       if (_body !== undefined) {
+         const _response = { body: _body };
++        if (options.responseHeaders) {
++          for (const [name, value] of Object.entries(options.responseHeaders)) {
++            if (!event.node.res.getHeader(name)) {
++              event.node.res.setHeader(name, value);
++            }
++          }
++        }
+         if (options.onBeforeResponse) {
+           event._onBeforeResponseCalled = true;
+           await options.onBeforeResponse(event, _response);

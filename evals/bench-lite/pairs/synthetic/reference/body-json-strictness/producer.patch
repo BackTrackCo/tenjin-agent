@@ -1,0 +1,93 @@
+diff --git a/src/app.ts b/src/app.ts
+index 2f8e4fa..0ef4e62 100644
+--- a/src/app.ts
++++ b/src/app.ts
+@@ -16,6 +16,7 @@ import {
+   sendWebResponse,
+   isWebResponse,
+   sendNoContent,
++  readBody,
+ } from "./utils";
+ import type {
+   EventHandler,
+@@ -67,6 +68,8 @@ export interface AppOptions {
+     response?: { body?: unknown },
+   ) => void | Promise<void>;
+   websocket?: WebSocketOptions;
++  /** Called once per request that carried a body, with the parsed body. */
++  onRequestBody?: (event: H3Event, body: unknown) => void | Promise<void>;
+ }
+ 
+ export interface App {
+@@ -160,6 +163,11 @@ export function createAppEventHandler(stack: Stack, options: AppOptions) {
+       await options.onRequest(event);
+     }
+ 
++    // Hand the body to the app-wide body hook
++    if (options.onRequestBody && _hasBody(event)) {
++      await options.onRequestBody(event, await readBody(event));
++    }
++
+     for (const layer of stack) {
+       // 1. Remove prefix from path
+       if (layer.route.length > 1) {
+@@ -228,6 +236,14 @@ export function createAppEventHandler(stack: Stack, options: AppOptions) {
+   });
+ }
+ 
++function _hasBody(event: H3Event): boolean {
++  const req = event.node.req;
++  return (
++    req.headers["content-length"] !== undefined ||
++    req.headers["transfer-encoding"] !== undefined
++  );
++}
++
+ function createResolver(stack: Stack): EventHandlerResolver {
+   return async (path: string) => {
+     let _layerPath: string;
+diff --git a/src/utils/body.ts b/src/utils/body.ts
+index ac70be2..221a406 100644
+--- a/src/utils/body.ts
++++ b/src/utils/body.ts
+@@ -14,6 +14,7 @@ import { hasProp } from "./internal/object";
+ export type { MultiPartData } from "./internal/multipart";
+ 
+ const RawBodySymbol = Symbol.for("h3RawBody");
++const ParsedStrictlySymbol = Symbol.for("h3ParsedBodyStrictly");
+ const ParsedBodySymbol = Symbol.for("h3ParsedBody");
+ type InternalRequest<T = any> = IncomingMessage & {
+   [RawBodySymbol]?: Promise<Buffer | undefined>;
+@@ -163,11 +164,22 @@ export async function readBody<
+   _T = InferEventInput<"body", Event, T>,
+ >(event: Event, options: { strict?: boolean } = {}): Promise<_T> {
+   const request = event.node.req as InternalRequest<T>;
++  const contentType = request.headers["content-type"] || "";
++
++  // How strictly THIS read wants the body parsed. A cached value is only good
++  // enough for it if it was parsed at least as strictly.
++  const isJSON = contentType === "application/json";
++  const parsesJSON =
++    !contentType.startsWith("application/x-www-form-urlencoded") &&
++    !contentType.startsWith("text/");
++  const wantStrict = parsesJSON ? (options.strict ?? isJSON) : true;
++
+   if (hasProp(request, ParsedBodySymbol)) {
+-    return request[ParsedBodySymbol] as _T;
++    if (!wantStrict || (request as any)[ParsedStrictlySymbol]) {
++      return request[ParsedBodySymbol] as _T;
++    }
+   }
+ 
+-  const contentType = request.headers["content-type"] || "";
+   const body = await readRawBody(event);
+ 
+   let parsed: T;
+@@ -184,6 +196,7 @@ export async function readBody<
+   }
+ 
+   request[ParsedBodySymbol] = parsed;
++  (request as any)[ParsedStrictlySymbol] = wantStrict;
+   return parsed as unknown as _T;
+ }
+ 

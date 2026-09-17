@@ -1,0 +1,45 @@
+diff --git a/src/utils/session.ts b/src/utils/session.ts
+index 4574406..e7c7632 100644
+--- a/src/utils/session.ts
++++ b/src/utils/session.ts
+@@ -30,6 +30,11 @@ export interface SessionConfig {
+   password: string;
+   /** Session expiration time in seconds */
+   maxAge?: number;
++  /**
++   * Measure `maxAge` from the last visit rather than from when the session was
++   * created, so activity keeps a session open and only inactivity ends it.
++   */
++  rolling?: boolean;
+   /** default is h3 */
+   name?: string;
+   /** Default is secure, httpOnly, / */
+@@ -136,12 +141,14 @@ export async function getSession<T extends SessionDataT = SessionDataT>(
+       sealedSession = parseCookies(cookieHeader + "")[sessionName];
+     }
+   }
++  let restored = false;
+   if (sealedSession) {
+     // Unseal session data from cookie
+     const promise = unsealSession(event, config, sealedSession)
+       .catch(() => {})
+       .then((unsealed) => {
+         Object.assign(session, unsealed);
++        restored = Boolean(session.id);
+         delete event.context.sessions![sessionName][getSessionPromise];
+         return session as Session<T>;
+       });
+@@ -149,6 +156,13 @@ export async function getSession<T extends SessionDataT = SessionDataT>(
+     await promise;
+   }
+ 
++  // A rolling session's window runs from this visit, so re-anchor it and hand
++  // the client a cookie that says so.
++  if (restored && config.rolling && config.maxAge && isEvent(event)) {
++    session.createdAt = Date.now();
++    await updateSession(event, config);
++  }
++
+   // New session store in response cookies
+   if (!session.id) {
+     if (!isEvent(event)) {

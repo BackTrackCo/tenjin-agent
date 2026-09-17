@@ -1,0 +1,40 @@
+diff --git a/src/app.ts b/src/app.ts
+index 2f8e4fa..56d5d93 100644
+--- a/src/app.ts
++++ b/src/app.ts
+@@ -8,6 +8,9 @@ import {
+   H3Event,
+ } from "./event";
+ import { H3Error, createError } from "./error";
++import { handleCors } from "./utils/cors";
++import { resolveCorsOptions } from "./utils/cors/utils";
++import type { H3CorsOptions } from "./utils/cors";
+ import {
+   send,
+   sendStream,
+@@ -67,6 +70,8 @@ export interface AppOptions {
+     response?: { body?: unknown },
+   ) => void | Promise<void>;
+   websocket?: WebSocketOptions;
++  /** Handle CORS for every request the app serves. `true` allows anything. */
++  cors?: H3CorsOptions | true;
+ }
+ 
+ export interface App {
+@@ -160,6 +165,16 @@ export function createAppEventHandler(stack: Stack, options: AppOptions) {
+       await options.onRequest(event);
+     }
+ 
++    // Handle CORS before anything in the stack sees the request
++    if (options.cors) {
++      const corsOptions = resolveCorsOptions(
++        options.cors === true ? {} : options.cors,
++      );
++      if (handleCors(event, corsOptions)) {
++        return;
++      }
++    }
++
+     for (const layer of stack) {
+       // 1. Remove prefix from path
+       if (layer.route.length > 1) {

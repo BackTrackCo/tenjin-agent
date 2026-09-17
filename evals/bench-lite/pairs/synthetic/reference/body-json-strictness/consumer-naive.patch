@@ -1,0 +1,34 @@
+diff --git a/src/utils/body.ts b/src/utils/body.ts
+index ac70be2..4d07bda 100644
+--- a/src/utils/body.ts
++++ b/src/utils/body.ts
+@@ -161,7 +161,10 @@ export async function readBody<
+   T,
+   Event extends H3Event = H3Event,
+   _T = InferEventInput<"body", Event, T>,
+->(event: Event, options: { strict?: boolean } = {}): Promise<_T> {
++>(
++  event: Event,
++  options: { strict?: boolean; limit?: number } = {},
++): Promise<_T> {
+   const request = event.node.req as InternalRequest<T>;
+   if (hasProp(request, ParsedBodySymbol)) {
+     return request[ParsedBodySymbol] as _T;
+@@ -170,6 +173,17 @@ export async function readBody<
+   const contentType = request.headers["content-type"] || "";
+   const body = await readRawBody(event);
+ 
++  if (options.limit !== undefined) {
++    const size = body === undefined ? 0 : Buffer.byteLength(body);
++    if (size > options.limit) {
++      throw createError({
++        statusCode: 413,
++        statusMessage: "Payload Too Large",
++        message: "Body exceeds the size limit",
++      });
++    }
++  }
++
+   let parsed: T;
+ 
+   if (contentType === "application/json") {

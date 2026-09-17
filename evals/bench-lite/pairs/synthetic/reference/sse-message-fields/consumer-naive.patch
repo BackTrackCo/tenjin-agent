@@ -1,0 +1,79 @@
+diff --git a/src/utils/sse/event-stream.ts b/src/utils/sse/event-stream.ts
+index d278958..5286b1c 100644
+--- a/src/utils/sse/event-stream.ts
++++ b/src/utils/sse/event-stream.ts
+@@ -21,9 +21,17 @@ export class EventStream {
+   private _unsentData: undefined | string;
+   private _disposed = false;
+   private _handled = false;
++  private readonly _autoId: boolean;
++  private _nextId = 0;
++
++  /** The id the client last saw, when it is reconnecting. */
++  readonly lastEventId: string | undefined;
+ 
+   constructor(event: H3Event, opts: EventStreamOptions = {}) {
+     this._h3Event = event;
++    this._autoId = opts.autoId === true;
++    const header = event.node.req.headers["last-event-id"];
++    this.lastEventId = Array.isArray(header) ? header[0] : header;
+     this._writer = this._transformStream.writable.getWriter();
+     this._writer.closed.then(() => {
+       this._writerIsClosed = true;
+@@ -69,6 +77,7 @@ export class EventStream {
+     if (this._writerIsClosed) {
+       return;
+     }
++    message = this._withId(message);
+     if (this._paused && !this._unsentData) {
+       this._unsentData = formatEventStreamMessage(message);
+       return;
+@@ -86,6 +95,7 @@ export class EventStream {
+     if (this._writerIsClosed) {
+       return;
+     }
++    messages = messages.map((message) => this._withId(message));
+     const payload = formatEventStreamMessages(messages);
+     if (this._paused && !this._unsentData) {
+       this._unsentData = payload;
+@@ -99,6 +109,14 @@ export class EventStream {
+     await this._writer.write(this._encoder.encode(payload)).catch();
+   }
+ 
++  /** Number a message when the stream was asked to and it has no id of its own. */
++  private _withId(message: EventStreamMessage): EventStreamMessage {
++    if (!this._autoId || message.id !== undefined) {
++      return message;
++    }
++    return { ...message, id: this._nextId++ };
++  }
++
+   pause() {
+     this._paused = true;
+   }
+diff --git a/src/utils/sse/types.ts b/src/utils/sse/types.ts
+index 6a3f1f1..6d938bf 100644
+--- a/src/utils/sse/types.ts
++++ b/src/utils/sse/types.ts
+@@ -1,4 +1,12 @@
+ export interface EventStreamOptions {
++  /**
++   * Give every message an id, counting from 0, so a dropped client can resume
++   * with `Last-Event-ID`.
++   *
++   * Default is `false`
++   */
++  autoId?: boolean;
++
+   /**
+    * Automatically close the writable stream when the request is closed
+    *
+@@ -11,7 +19,7 @@ export interface EventStreamOptions {
+  * See https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events#fields
+  */
+ export interface EventStreamMessage {
+-  id?: string;
++  id?: string | number;
+   event?: string;
+   retry?: number;
+   data: string;

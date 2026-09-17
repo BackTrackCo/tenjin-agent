@@ -1,0 +1,27 @@
+diff --git a/src/utils/session.ts b/src/utils/session.ts
+index 4574406..99319a4 100644
+--- a/src/utils/session.ts
++++ b/src/utils/session.ts
+@@ -22,6 +22,8 @@ export interface SessionManager<T extends SessionDataT = SessionDataT> {
+   readonly id: string | undefined;
+   readonly data: SessionData<T>;
+   update: (update: SessionUpdate<T>) => Promise<SessionManager<T>>;
++  /** Start this session's expiry window again, keeping its id and its data. */
++  renew: () => Promise<SessionManager<T>>;
+   clear: () => Promise<SessionManager<T>>;
+ }
+ 
+@@ -78,6 +80,13 @@ export async function useSession<T extends SessionDataT = SessionDataT>(
+       await updateSession<T>(event, config, update);
+       return sessionManager;
+     },
++    renew: async () => {
++      if (!isEvent(event)) {
++        throw new Error("[h3] Cannot renew read-only session.");
++      }
++      await updateSession<T>(event, config);
++      return sessionManager;
++    },
+     clear: () => {
+       if (!isEvent(event)) {
+         throw new Error("[h3] Cannot clear read-only session.");
