@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { z } from 'zod';
+import { hasCode } from './errno';
 import { CliError } from './errors';
 import { PRODUCTION_ORIGIN } from './production-origin';
 import { configPath } from './paths';
@@ -488,7 +489,7 @@ export async function loadRawConfig(dir: string): Promise<PartialConfig> {
   try {
     raw = await readFile(path, 'utf8');
   } catch (err) {
-    if (isNotFound(err)) return {};
+    if (hasCode(err, 'ENOENT')) return {};
     throw new CliError('CONFIG_INVALID', `Could not read config at ${path}`, {
       fix: `Check file permissions on ${path}.`,
       cause: err,
@@ -848,13 +849,4 @@ function resolveBaseUrl(
   }
   if (config.baseUrl !== undefined) return { value: config.baseUrl, source: 'file' };
   return { value: CONFIG_DEFAULTS.baseUrl, source: 'default' };
-}
-
-function isNotFound(err: unknown): boolean {
-  return (
-    typeof err === 'object' &&
-    err !== null &&
-    'code' in err &&
-    (err as { code?: unknown }).code === 'ENOENT'
-  );
 }
