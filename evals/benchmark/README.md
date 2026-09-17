@@ -29,6 +29,43 @@ usage-limit percentages and surge multipliers, which move for reasons unrelated 
 LLM judge, which if ever added is benchmark overhead in its own field, neither product cost nor
 correctness. The outcome is raw provider token counts under an executable verifier; subscription dollar cost is supplementary.
 
+## Shared local and CI execution
+
+Local and CI runs use the same container runner, images, Docker Compose lifecycle, verifier,
+and reporting commands. Colima can provide Docker on macOS. Put run directories on a path
+shared with the Docker VM. The fake executor is an offline test double, not a second live runner.
+Build images with `python3 -m evals.benchmark.images --help`, then pass an explicit manifest to
+`python3 -m evals.benchmark.cli live-run --manifest PATH --out RUN`. Use `--dry-run` to inspect
+that same launch without starting it. Install `requirements-live.txt` for live execution.
+
+New local and CI runs resolve the latest official harness release once, before building images:
+
+```sh
+python3 -m evals.benchmark.harness_release --manifest MANIFEST --out harness-lock.json
+python3 -m evals.benchmark.images build --manifest harness-lock.json
+```
+
+Pass that same `harness-lock.json` to `describe`, `attest`, `live-run`, and checkpoint commands.
+The lock preserves the source experiment, exact package/version/integrity and resolution time;
+fixture paths still resolve against the source manifest. Existing locks and restored checkpoints
+never query today's tag. `--version X.Y.Z` requests an exact release for reproduction. The
+checked-in manifest pins remain reference configurations; the resolver's default is `latest`.
+Use a new lock path for a new run. Source changes refuse reuse instead of silently re-resolving.
+Root package integrity and installed CLI version are checked before any model call. Complete
+platform dependency identity is also captured by the built image; the receipt alone is not a
+lockfile for every transitive binary. In-run auto-updates are disabled.
+
+Codex hook trust is configured by the same resolved container image, without network or a
+subscription-auth mount. The host's installed Codex version cannot decide task hook trust.
+Native transcript versions must match the run's resolved pin; unknown or incomplete native
+usage still invalidates the attempt. Updating a CLI does not grant new dispatch capabilities.
+
+Every live attempt captures stdout and stderr, settles usage from retained transcripts and the
+stream envelope, and tears down its Compose project. After an interrupted run, `cleanup --run RUN`
+removes only projects recorded by that run. Provisioning, corpus reset, producer/consumer phases,
+images, and HTTP snapshot transport are shared framework capabilities. The full fixture library
+and concrete preset/configuration data arrive in the next two layers.
+
 ## Read the result at a glance
 
 Every text summary and CI check starts with the experiment identity, model/harness, task list,
@@ -231,7 +268,7 @@ goes into every record, so a published result names the isolation it ran under.
 
 The operator prepares a disposable container or VM booted from a pinned image and thrown away
 after the run; fresh home, profile, data, repository, and output roots, which the run directory
-owns; no wallet in the image or the environment, and no shelf secret; the model credential in exactly one allowlisted variable
+owns; no wallet in the image or the environment, and no ordinary team shelf secret; the model credential in exactly one allowlisted variable
 named by `pins.credential_env`; network allowlisted to the provider plus the arm under test,
 matching the attestation; and `pins.image`, `pins.harness_version`, and `pins.model` set to what
 this instance actually runs. Project-scoped tool permissions and transcript redaction are
@@ -292,6 +329,79 @@ omitted usage. The live Codex launch/activation integration is a separate contai
 `pins.speed_mode` records the requested `standard` or `fast` service configuration, identically
 across arms. Readouts state the request rather than claiming provider acceptance. Claude remains
 standard for subscription-only runs because its fast mode requires separate usage credits.
+
+## Subscription container execution
+
+The live adapters share Harbor/Docker Compose locally and in CI. Codex pins CLI 0.154.0,
+`gpt-5.6-sol`, explicit reasoning effort and ChatGPT login. Supply a private 0600 auth-only
+file through `CODEX_BENCH_AUTH_FILE`, outside the run directory. API-key authentication is
+refused. The generated profile mounts only that file, not the operator's Codex home.
+For concurrency greater than one, the controller creates a private, read-only access-token
+snapshot outside artifacts and removes its refresh token. Each trial keeps a separate native
+profile. The source login is unchanged, and the snapshot is erased after all workers finish,
+including on failure. Admission requires an access token lasting through the phase cap plus
+five minutes; refresh the source serially before retrying if this check refuses a run.
+A two-worker native Sol subscription check passed with CLI 0.154.0. Requalify this boundary
+when changing the pinned CLI; provider throttling can still limit useful concurrency.
+
+Claude uses the same worker pool, separate per-trial profiles/session IDs, database
+facilities, shelf exclusion, checkpoints and cleanup. Its native `claude -p` receives
+the declared effort and optional turn cap; the generated effort environment prevents
+host or task configuration from silently changing it. Subscription runs may declare
+`max_budget_usd: null` and `turn_budget: null` to use the shared wall-clock cap without
+an artificial API-price ceiling. An explicit dollar cap is still honored; API-mode
+runs still require one. Native JSON stdout and diagnostic stderr are kept separately.
+Use `claude-opus-5`, `effort: low`, `speed_mode: standard`,
+`credential_env: CLAUDE_CODE_OAUTH_TOKEN` and `billing_mode: subscription` for the
+Claude counterpart to Sol/low. Resolve the latest official Claude release into its
+own lock and image set; results form a separate harness/model stratum.
+
+The parallel Claude launch and exhaustion paths are verified without model calls.
+A fresh native parallel subscription check remains required when allowance returns.
+Supply the operator's own token from the official `claude setup-token` flow; the
+controller does not copy the operator's credential store or rotate a shared refresh
+grant. Both vendors document native parallel workflows, which does not guarantee
+account enforcement outcomes or authorize exceeding plan limits.
+
+Subscription login does not itself disable a provider account's credit fallback. Before a
+live run, verify that purchased-credit/extra-usage fallback is unavailable or disabled. Never
+buy credits, enable extra usage, redeem resets or switch to API billing to finish a run.
+Codex fast mode may use included allowance faster. Claude fast mode is always disabled here
+because it requires separate credits. Provider exhaustion saves the partial report, stops new
+trial admission and produces UNAVAILABLE, not a product pass or a usable main baseline.
+
+The pinned Codex build uses legacy Landlock inside default-privilege Docker containers;
+protected workspace metadata directories are also mounted read-only. Image-owned protected
+names under `/tmp` keep the native policy representable. The native default Bubblewrap path
+cannot create its namespace under this container policy. No extra Docker privileges are used.
+Native JSON stdout and diagnostic stderr are retained separately for strict reconciliation.
+
+The coordinator fills free workers with independent trials while admitting only one trial
+that provisions the shared shelf. A cleanup failure stops further admission. Run-directory
+leases protect local writers; CI owns the shared shelf through its workflow concurrency group.
+Start a resumable corpus run with `--freeze-corpus`; every continuation restores its saved
+source LSN, validates source generation and the settled target revision, and retains a unique
+reset receipt. `--max-new-trials N` executes at most N additional trials while retaining the
+full schedule and incomplete-coverage status. Repeat the same command/output directory to
+continue, or add `--until-complete` to repeat chunks under one resource lease.
+`--admission-seconds N` stops new admissions after N seconds; active trials finish and
+checkpoint. A changed benchmark runtime refuses frozen continuation before provider calls.
+These chunks need not be independently balanced; only the complete schedule supports
+the complete experiment. Without a frozen baseline, retained corpus evidence refuses before reset.
+Offline and corpus-free runs also preserve full-schedule identity across continuation.
+
+`--neon-cli` uses an existing Neon CLI login through the same guarded provider contract as CI's
+API credential. A target-scoped local lease prevents two runs from resetting the same branch
+through different origin aliases; CI additionally serializes the shared shelf workflow.
+Changed source generation, expired restore history, missing/modified epoch receipts or a
+changed schedule refuse continuation without falling back to parent head. Each report retains
+all reset epochs beside one logical baseline identity. This freezes initial Postgres state;
+it does not freeze an independently deployed application or external search/cache state.
+
+Producer records retain agent and verifier duration separately. Capture-token attribution uses
+each actor's own stop boundary; child capture before the root finishes cannot be mislabeled as
+ordinary producer work. The primary time endpoint remains consumer execution per completion;
+producer task work and total pipeline latency must not be inferred from that label.
 
 ## Completion readout
 
@@ -387,12 +497,183 @@ estimated from text length.
 None of this changes the manifest schema, the record schema, the reducer, or the guard. A change
 that does is a benchmark version bump, and a treatment-informed rewrite is always a new version.
 
+The internal `bench2-` image/container names and marker filenames are retained implementation
+identifiers from the original container runner. They name shared Bench-1 infrastructure and
+are used unchanged by every experiment, locally and in CI.
+
+Portable checkpoints contain the original nonce, full schedule, validated final records with
+private refusal text removed, and the frozen corpus/epoch receipts. They contain no trial
+worktrees, model transcripts, profiles or credentials. Export from a stopped run and import
+into an empty directory using the same checkout revision and manifest:
+
+```sh
+python -m evals.benchmark.checkpoint export --run RUN --out CHECKPOINT --manifest MANIFEST --revision GIT_SHA
+python -m evals.benchmark.checkpoint import --run CHECKPOINT --out RESUMED_RUN --manifest MANIFEST --revision GIT_SHA
+```
+
+Continuation preserves accepted final attempts, including invalid ones. It does not retry a
+recorded quota/instrumentation failure or erase its spend. After such a failure, retain the
+partial evidence and start a fresh run when the cause is fixed; clean deadline checkpoints
+can continue without repeating completed work.
+
+The importer verifies file inventory and hashes, runtime revision, Git revision, manifest,
+full schedule and every referenced epoch before writing. It rewrites only the local manifest
+path and preserves the nonce. Then use the ordinary `live-run --freeze-corpus` command against
+RESUMED_RUN. Re-verification of retained worktrees remains an explicit `verify` command; a
+record-only checkpoint has no worktree to re-verify and uses the recorded hidden verdict.
+
+CI uses `admission.py` to subtract elapsed setup, the longest producer-plus-consumer model
+caps and a conservative cleanup/upload reserve from the job timeout. It is a practical margin,
+not a guarantee against a stalled external service. Deadline stops retain incomplete coverage.
+The reusable workflow accepts an explicit prior run/artifact pair for recovery; it never picks
+an arbitrary latest checkpoint. A different tested commit or runtime requires a fresh run.
+
+### Remote server observations
+
+Live runs that name a corpus automatically read the deployed Next.js identity from the shelf's
+public page before database reset and after each completed trial (after each completed group
+when concurrent). These HTTP checks run outside the agent timing bracket. The run stores only
+an opaque deployment ID and observation state in `server-revision.json`, carries that evidence
+through portable checkpoints, and checks the original ID again before a continuation starts.
+No server change, Vercel credential or private source checkout is required.
+
+A changed ID or unavailable observation stops new admission, lets active work settle, preserves
+completed records and makes the shared CI/local readout **UNAVAILABLE — diagnostic evidence
+only**. A later successful probe cannot rehabilitate that run; start a fresh run. Old records
+without server evidence cannot adopt a newly observed server on continuation. Failure to read
+the page never counts as a measured pass.
+
+This detects deployment changes; it does not lock deployments, inspect database migrations,
+or rule out a change and rollback between observations. Schema-changing work still needs a
+coordinated run window. A frozen database LSN preserves the old schema as well as the corpus;
+new schema/server releases require a fresh baseline. Next.js documents the identifier under
+[deploymentId](https://nextjs.org/docs/app/api-reference/config/next-config-js/deploymentId).
+
+### Host-assisted natural capture
+
+An arm may select `capture_publication: host` only with a producer and a pinned
+disposable corpus. The producer keeps its own task, hooks, verification and native
+usage accounting. Its phase prompt explains that the container has no publishing
+wallet and asks it to use the product's finding-fence fallback when capture is
+requested. The host publishes only that producer session/project's captured drafts,
+without substituting fixture lessons, adding fingerprint keys, or adding run-stamp
+prose. Identical drafts within one producer are deduplicated. No draft is a valid
+zero-capture result; it is never filled in by the harness.
+
+Publication uses a temporary host-only CLI data directory and a link to the existing
+benchmark wallet, with a free price and the configured disposable shelf. This avoids
+cross-run local publish dedup while keeping the signing wallet outside task mounts
+and artifacts. The directory is removed on every normal or exceptional exit. Normal
+CLI validation and content scanning still apply. The host records only opaque draft
+and body hashes, returned piece IDs, publication status and elapsed time.
+
+The consumer starts only after successful publication and receives a fresh repository
+with the intended producer store. The existing exclusive shelf window covers publish,
+consumer execution and deletion. Missing/ambiguous receipts stop further admission;
+known piece IDs are still cleaned up. A fresh corpus reset is required after an
+uncertain write. Failed producers are never published. Publication and confirmed
+cleanup are visible alongside drafts, attributed team-hook
+delivery and verified completion. A delivery followed by a pass does not prove use.
+This treatment measures host-assisted publication, not autonomous agent publishing.
+Host publication time is separate from agent completion time and adds no model tokens.
+
+Natural execution exports fixture dependencies once before each agent phase, retaining
+the reset that removes producer edits before the consumer. Both native harnesses can
+overlap independent control and flat-file trials with the one provisioned trial that
+exclusively owns the shared shelf. Producer and consumer phases remain sequential.
+Increasing the pool cannot parallelize shelf trials until their remote stores are isolated.
+
 The current failure readout reads the masked error text from `fires.question`
 and fingerprint kinds from the composed `fires.question_key`. Both fingerprints
 may be present; neither is reported as the winning match. Line-only failures can
 still retrieve through team text search. Fingerprint resolution counts as a team
 request. The removed `pairings` table is not read. Capture means a retained draft;
 publication and downstream delivery are separate receipt-backed measurements.
+
+Hidden source verification uses the same immutable fixture image as its agent phase,
+through the shared container backend. The finalized copy and hidden tests are mounted
+read-only after the model stops; the verifier has no network or credential mounts.
+Consumer, producer and saved-run verification use this path and record the verifier
+image. Synthetic answer-file plumbing remains a host-side file read. Missing image
+identity, container failures and failed cleanup produce invalid measurements.
+
+### Benchmark team-shelf configuration
+
+The existing CLI enters team mode through `shelfBypassSecret`, including on the
+public `bench.tenjin.sh` custom domain. The benchmark uses a dedicated automation
+key belonging only to the `tenjin-bench` Vercel project. Never copy the ordinary
+team-shelf key. Seeded and captured lessons explicitly publish at price `0`, and
+trial configs set `publish.defaultPrice` to `0`; this measures free team reuse.
+
+The private source directory contains `benchmark-shelf-key.json` with schema
+`bench1.shelf-key.v1`, the dedicated `project_id`, host `origin`, and `key_sha256`.
+The controller validates the actual configured key against this receipt, binds
+it into the isolation attestation, and requires the reset corpus to match.
+This is an operator attestation of project scope, not a Vercel signature. The
+source receipt must be created from the verified project's automation-key
+response, never by relabeling a production key. Credential presence stays true
+in records; only the attested benchmark key is allowed in measured/automated
+runs. Ordinary team keys retain their refusal. The key itself is excluded from
+reports and remains part of the credential-exposure scan.
+
+Runs made without this team profile, including earlier paid-pointer diagnostics,
+are not the free team-reuse measurement. Start a fresh run after changing it.
+The delivery readout separately counts pointers, full bodies, truncated bodies,
+and unknown forms; a successful publish alone does not prove body delivery.
+
+### Historical task execution
+
+Bench-1 owns `historical.py` and its fixed Node/Vitest container recipe. Experiments
+supply a catalog and code-owned oracles; the shared controller prepares committed
+source, checks tree/lock/catalog identity, builds immutable images, runs hidden
+assertions with no network or credentials, validates results, and owns cleanup.
+Repository automation is omitted and dependency lifecycle scripts are disabled.
+An experiment does not implement its own runner or result validation.
+
+`python -m evals.benchmark.historical --catalog PATH prepare|build|verify|materialize`
+uses the same commands as an experiment's thin entrypoint. The adapter supports
+historical pnpm/Vitest tasks from the allowlisted tenjin-agent and tenjin repositories.
+Private source stays in operator-prepared assets; public CI needs no private checkout.
+Task selection, historical boundaries and oracle assertions belong to the experiment.
+
+`materialize` turns a proven before revision into an ordinary runner fixture plus a
+separate hidden oracle. Its manifest binds both directory hashes, the work order,
+allowed product paths and optional earlier `producer_task`. The shared image builder
+builds both producer and consumer fixtures; each starts from its own pristine source.
+Verification restores immutable image dependencies and refuses source edits outside
+the declared contract. Every assertion must complete; skipped tests, contradictory
+counts, collection failures and broken cleanup are invalid measurements.
+
+Historical source admission and both staging steps share `historical_outputs.py`:
+root build bundles (`dist`, `.next`, `out`, `build`, Storybook), test reports/coverage,
+package-manager dependencies, and compiler/lint/format logs and caches are disposable.
+They never reach hidden execution. This fixed controller policy does not read the
+submitted `.gitignore`, does not exempt nested product source, and rejects fixtures
+containing reserved outputs before model admission. Original tests and configuration
+remain protected. The original model worktree retains generated outputs for diagnosis.
+
+Historical tasks can request a disposable PostgreSQL service. The trusted controller
+attaches a pinned pgvector image to the verifier's existing deny-all network namespace,
+listening only on loopback. It exposes no host port, Docker socket, persistent volume
+or real credential. The immutable support module migrates the synthetic database from
+the submitted historical source; the verifier receipt names the database image.
+The controller removes the service with the owning container project.
+
+A task may bind an earlier knowledge directory. Flat and seeded arms use the same
+source bodies; records include the corpus hash, each body hash and available lesson IDs.
+Publication nonces and piece IDs remain separate from those source versions. A natural
+arm seeds only the declared background corpus, then publishes captured producer drafts
+through the host as configured. With `producer_failure: continue_unpublished`, a valid
+failed or capped producer retains its outcome and spending and the consumer still runs,
+without publishing that producer's drafts. Its local captures may remain in the shared
+store: this policy does not claim an empty memory. Measurement errors still invalidate
+the attempt. Existing arms without this policy keep their declared producer-success gate.
+Consumer-only reuse and complete producer-plus-consumer costs must be named separately.
+
+`workload.assign` deterministically ranks a semantically reviewed candidate frame and
+keeps whole correlation clusters out of the locked reserve after pilot selection.
+It never decides eligibility or replaces a difficult task; its output explicitly leaves
+model admission false until the experiment's independent acceptance gates pass.
 
 ### Complete pipeline cost
 
@@ -414,3 +695,50 @@ This is the cost to prepare memory and complete a later task. It is not a matche
 two-task comparison against a control that also did the earlier work, and it does
 not replace the consumer-reuse headline. The readout names producer failures,
 caps, invalid measurements, drafts, publication and consumer delivery separately.
+
+Historical tasks can allow broad product source roots (for example `src/`) so their work orders do not disclose the reference patch's file locations. Existing and newly added tests, fixtures, dependency manifests and verifier configuration remain protected. Prepared contexts bind the individual task definition and oracle; adding an unrelated catalog task does not invalidate that evidence.
+
+Historical catalogs pin the prepared source content hash for each Git revision. Build and verification compare against that independent catalog value as well as the receipt, so coordinated source/receipt edits refuse. Each verification invocation owns a fresh project identity and result path. Failed preparation removes only the new directory it created, permitting a retry without deleting another run's evidence.
+
+Historical live tasks bind a separate `verification` asset: the source receipt,
+Vitest configuration and disposable database adapter. Its hash participates in the
+manifest alongside fixture and hidden-oracle hashes. Verification refuses later
+support-file drift; trial reports retain consumer and producer commit/tree/lock
+provenance plus each producer image. Dry-run output validates and displays both
+phase commands, prompts, fixture images and verifiers before a model is started.
+
+Historical server tasks also receive visible test support in `.bench1/`, bound
+into the fixture hash. Run an existing focused source test with
+`pnpm exec vitest run --config .bench1/model-tests.config.mjs --configLoader runner tests/integration/<file>.test.ts`.
+The adapter replaces the historical Docker-dependent test helper, creates a fresh
+synthetic database for each checkout, and applies that checkout's migration files.
+Missing database support is an error; integration tests cannot silently skip.
+Neither the hidden oracle nor its configuration is part of these model-visible files.
+
+Every container the harness starts sets `PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false`
+(`container.BASELINE_ENV`), so normal `pnpm exec` and `pnpm run` use the pinned
+image's staged dependencies. pnpm11's default automatic repair treats the
+relocated workspace metadata as outdated and can purge that tree before
+attempting a blocked registry install. The baseline covers the producer and
+consumer sessions, the hidden verifier and the historical replay alike, because
+all of them run the image's `pnpm exec vitest`. The uppercase setting is owned by
+the shared runtime; host and arm settings cannot replace it. Native qualification
+must exercise pnpm in the relocated trial layout, including the ordinary command
+documented above.
+
+The model session retains its normal subscription authentication and provider/shelf
+network allowlist. Its synthetic PostgreSQL service shares only the task's loopback,
+has no published host port, real database credential, Docker socket or persistent
+volume, and is removed on completion, cap or launch failure. Hidden verification
+remains a separate credential-free, network-denied execution. Result rows name the
+model-tool environment separately from the hidden verifier and its source evidence.
+
+Materialize local historical manifests and assets under `evals/benchmark/local/`,
+which is ignored by Git. It lets the ordinary harness lock bind both repositories'
+fixtures without committing private source. Visible test configuration includes
+separate Node and DOM projects; select one focused source file, never a full suite.
+The reusable no-model environment proof uses the normal `historical verify`
+command with `--visible-test <existing integration/lib test path>`; add
+`--visible-test database-support` to check database separation, blank checkout,
+failed migration cleanup and the missing-service refusal. These results are labeled
+`model-visible-source-tests` and never substitute for the independent task oracle.

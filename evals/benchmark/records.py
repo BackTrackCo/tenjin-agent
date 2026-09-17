@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import loop_join, phases as phases_module, usage
+from . import benchmark_key, loop_join, phases as phases_module, usage
 from .schedule import trial_id as derive_trial_id
 
 RECORD_SCHEMA = "bench1.attempt.v1"
@@ -339,7 +339,13 @@ def validate(record: dict[str, Any]) -> None:
         if name in isolation and not isinstance(isolation[name], bool):
             raise RecordError(f"isolation.{name} must be true or false")
     # Non-publishable by construction: the file on disk cannot claim otherwise.
-    if isolation.get("shelf_secret_present") and isolation["publishable"]:
+    try:
+        scoped = benchmark_key.recorded(isolation)
+    except ValueError as error:
+        raise RecordError(str(error)) from error
+    if isolation.get("benchmark_shelf_key") is not None and not scoped:
+        raise RecordError("benchmark key scope lacks matching attested benchmark corpus")
+    if isolation.get("shelf_secret_present") and isolation["publishable"] and not scoped:
         raise RecordError("an attempt that seeded a team shelf secret cannot be publishable")
     for name in ("shelf_origin", "public_origin"):
         if isolation.get(name) is not None and (not isinstance(isolation[name], str) or not isolation[name]):
@@ -362,6 +368,18 @@ def validate(record: dict[str, Any]) -> None:
     if isolation.get("wal_checkpoint") is not None and (not isinstance(isolation["wal_checkpoint"], str) or not isolation["wal_checkpoint"]):
         raise RecordError("isolation.wal_checkpoint must be null or the reason the ledger's WAL did not close")
     seeds = isolation.get("seed")
+    knowledge = isolation.get("knowledge")
+    if knowledge is not None:
+        if not isinstance(knowledge, dict) or set(knowledge) != {"corpus_hash", "available", "body_hashes"}:
+            raise RecordError("isolation.knowledge must bind the corpus and available body versions")
+        hashes = knowledge["body_hashes"]
+        if not isinstance(hashes, dict) or not all(isinstance(key, str) and key for key in hashes):
+            raise RecordError("knowledge body_hashes must name lessons")
+        if any(not isinstance(value, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", value) is None for value in [knowledge["corpus_hash"], *hashes.values()]):
+            raise RecordError("knowledge versions must be SHA-256 hashes")
+        available = knowledge["available"]
+        if not isinstance(available, list) or not all(isinstance(key, str) and key in hashes for key in available) or len(set(available)) != len(available):
+            raise RecordError("available knowledge must uniquely name bound bodies")
     if seeds is not None and not isinstance(seeds, list):
         raise RecordError("isolation.seed must be a list, one entry per seeded lesson")
     for seed in seeds or []:
@@ -499,4 +517,3 @@ def select(
             continue
         accepted[record["trial_id"]] = record
     return accepted, excluded
-

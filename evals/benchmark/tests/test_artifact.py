@@ -43,6 +43,23 @@ def test_each_trial_gets_unique_home_profile_data_repo_and_output_roots(create: 
     assert first.canary_token != second.canary_token
 
 
+def test_a_phase_gets_its_own_roots_and_shares_the_consumer_data_dir_and_repo_path(tmp_path: Path, fixture: Path) -> None:
+    run_dir = tmp_path / "run"
+    roots = artifact.create(run_dir, "trial-x", fixture)
+    assert (roots.trial_id, roots.run_dir, roots.phase) == ("trial-x", run_dir, None)
+    producer = artifact.create(run_dir, "trial-x", fixture, phase="producer", data_dir=roots.data_dir)
+    assert producer.data_dir == roots.data_dir
+    assert producer.repo == roots.repo
+    assert producer.base == roots.base / "producer"
+    assert producer.home != roots.home
+    assert producer.canary_token != roots.canary_token
+    assert (producer.trial_id, producer.run_dir, producer.phase) == ("trial-x", run_dir, "producer")
+    (producer.repo / "edited.txt").write_text("x\n", encoding="utf-8")
+    artifact.refresh_repo(roots, fixture, None)
+    assert not (roots.repo / "edited.txt").exists()
+    assert (roots.repo / "TASK.md").is_file()
+
+
 def test_a_reused_trial_root_is_rebuilt_from_the_fixture(create: Create) -> None:
     first = create("trial-a")
     (first.repo / "scratch.txt").write_text("left over\n", encoding="utf-8")
@@ -74,6 +91,26 @@ def test_hidden_verifier_bytes_are_unavailable_before_agent_shutdown(create: Cre
     # The hidden layer lands in the verifier's copy, never on the mount the
     # agent had.
     assert not (roots.repo / "expected.txt").exists()
+
+
+def test_image_backed_verification_omits_only_discarded_root_dependencies(create: Create) -> None:
+    roots = create()
+    for name in ("node_modules", ".pnpm-store", "dist", ".next", "coverage", "src/node_modules", "src/dist"):
+        folder = roots.repo / name
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "sentinel").write_text(name)
+    roots.mark_stopped()
+    (roots.repo / "tsconfig.tsbuildinfo").write_text("compiler cache")
+    copy = roots.hidden_copy(image_dependencies=True)
+    assert not (copy / "node_modules").exists()
+    assert not (copy / ".pnpm-store").exists()
+    assert not (copy / "tsconfig.tsbuildinfo").exists()
+    for name in ("dist", ".next", "coverage"):
+        assert not (copy / name).exists()
+    assert (copy / "src/dist/sentinel").read_text() == "src/dist"
+    assert (copy / "src/node_modules/sentinel").read_text() == "src/node_modules"
+    assert (roots.repo / "node_modules/sentinel").exists()
+    assert (roots.hidden_copy() / "node_modules/sentinel").exists()
 
 
 def test_a_symlink_out_of_the_worktree_fails_closed(create: Create, fixture: Path) -> None:
@@ -228,9 +265,9 @@ def test_an_automated_run_whose_attestation_is_invalid_is_refused() -> None:
     assert caught.value.code == "open_network"
 
 
-def test_the_shipped_executor_registry_has_no_live_entry() -> None:
-    # The live Claude executor registers itself when its module is imported, and it is the only live spec there can be.
-    assert {spec.name for spec in executor.REGISTRY.values() if spec.live} <= {"claude_live"}
+def test_the_registry_contains_only_supported_live_adapters() -> None:
+    # Native adapters register lazily; collection order may have imported either.
+    assert {spec.name for spec in executor.REGISTRY.values() if spec.live} <= {"claude_live", "codex_live"}
 
 
 @pytest.mark.parametrize(

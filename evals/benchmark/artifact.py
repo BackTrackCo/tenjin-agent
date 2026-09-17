@@ -29,7 +29,7 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from . import sha256_json, sha256_text
+from . import benchmark_key, historical_outputs, images as images_module, sha256_json, sha256_text
 
 CANARY_PREFIX = "bench1-canary-"
 CREDENTIAL_FILE = ".benchmark-credential"
@@ -68,6 +68,9 @@ class SentinelReport:
         return "sentinel:credential_exposure" if self.credential_exposures else None
 
 
+PRODUCER_PHASE = "producer"
+
+
 @dataclass
 class TrialRoots:
     base: Path
@@ -78,6 +81,12 @@ class TrialRoots:
     output: Path
     canary_token: str
     stopped: bool = False
+    # `<run>/trials/<trial_id>` is the consumer's base; a producer phase lives
+    # under it and shares the consumer's data dir, so these two are stated
+    # rather than read back off the path.
+    trial: str = ""
+    run_root: Path = Path(".")
+    phase: str | None = None
 
     @property
     def stream(self) -> Path:
@@ -94,19 +103,15 @@ class TrialRoots:
 
     @property
     def run_dir(self) -> Path:
-        """`<run>/trials/<trial_id>` is the layout `create` builds, so the run
-        directory and the trial id are already on hand here. Reading them back
-        keeps the spawn seam's signature unchanged."""
-        return self.base.parent.parent
+        return self.run_root
 
     @property
     def trial_id(self) -> str:
-        return self.base.name
+        return self.trial
 
     @property
     def verify(self) -> Path:
         return self.base / "verify"
-
 
     @property
     def agent_roots(self) -> tuple[Path, ...]:
@@ -139,7 +144,7 @@ class TrialRoots:
                     relative = entry.relative_to(self.repo).as_posix()
                     raise ArtifactError("symlink_escape", f"{relative} links outside the trial repository")
 
-    def hidden_copy(self, hidden_layer: Path | None = None) -> Path:
+    def hidden_copy(self, hidden_layer: Path | None = None, *, image_dependencies: bool = False) -> Path:
         """Copy the final worktree for the verifier and mount the hidden layer."""
         if not self.stopped:
             raise ArtifactError("agent_live", "the verifier mount is built only after the agent has stopped")
@@ -148,7 +153,12 @@ class TrialRoots:
             shutil.rmtree(self.verify)
         # symlinks=True keeps a link a link: following one would copy bytes
         # from outside the worktree into the verifier's view.
-        shutil.copytree(self.repo, self.verify, symlinks=True)
+        # Historical verifiers restore dependencies from the immutable image.
+        # Copying gigabytes of model-visible dependencies only to discard them
+        # wastes disk and can time out before any behavioral assertion runs.
+        def ignore(directory, names):
+            return {name for name in names if historical_outputs.contains(name)} if image_dependencies and Path(directory) == self.repo else set()
+        shutil.copytree(self.repo, self.verify, symlinks=True, ignore=ignore)
         if hidden_layer is not None:
             if not hidden_layer.is_dir():
                 raise ArtifactError("hidden_layer_missing", f"{hidden_layer.name} is not a directory")
@@ -161,28 +171,65 @@ def canary_token(trial_id: str) -> str:
     return CANARY_PREFIX + sha256_text(f"{trial_id}:credential-canary")[:32]
 
 
-def create(run_dir: Path, trial_id: str, fixture: Path) -> TrialRoots:
-    """Fresh roots with the fixture copied in."""
-    base = run_dir / "trials" / trial_id
+def create(
+    run_dir: Path,
+    trial_id: str,
+    fixture: Path,
+    *,
+    phase: str | None = None,
+    data_dir: Path | None = None,
+    image: images_module.Image | None = None,
+) -> TrialRoots:
+    """Fresh roots, the fixture copied in, and its `node_modules` from the fixture image.
+
+    A `phase` (the producer) gets its own home, profile, output, and repository
+    under the consumer's base and shares the consumer's `data_dir`: the store is
+    the one thing the two phases have in common, by design. The repository sits
+    at the same path in both phases, because the product scopes its local
+    records by a hash of the working directory.
+    """
+    consumer = run_dir / "trials" / trial_id
+    base = consumer if phase is None else consumer / phase
     if base.exists():
         shutil.rmtree(base)
     roots = TrialRoots(
         base=base,
         home=base / "home",
         profile=base / "profile",
-        data_dir=base / "data",
-        repo=base / "repo",
+        data_dir=base / "data" if data_dir is None else data_dir,
+        repo=consumer / "repo",
         output=base / "output",
-        canary_token=canary_token(trial_id),
+        canary_token=canary_token(trial_id if phase is None else f"{trial_id}:{phase}"),
+        trial=trial_id,
+        run_root=run_dir,
+        phase=phase,
     )
-    for path in (roots.home, roots.profile, roots.data_dir, roots.output):
+    for path in (roots.home, roots.profile, roots.output):
         path.mkdir(parents=True)
-    shutil.copytree(fixture, roots.repo, symlinks=False)
+    roots.data_dir.mkdir(parents=True, exist_ok=True)
+    refresh_repo(roots, fixture, image)
     (roots.home / CREDENTIAL_FILE).write_text(
         f"# Planted by the benchmark. Nothing real depends on it.\nBENCH1_FAKE_API_KEY={roots.canary_token}\n",
         encoding="utf-8",
     )
     return roots
+
+
+def refresh_repo(roots: TrialRoots, fixture: Path, image: images_module.Image | None = None) -> None:
+    """A fresh repository copy at the roots' repo path: the fixture, plus the dependency tree.
+
+    The tree comes out of the task's own image, which is where `pnpm install`
+    ran, so a trial installs nothing, nothing is committed, and the host never
+    runs those files. An arm's `settings.overlay` is the launch's to apply.
+    """
+    if roots.repo.exists():
+        shutil.rmtree(roots.repo)
+    shutil.copytree(fixture, roots.repo, symlinks=False)
+    if image is not None:
+        try:
+            images_module.export_node_modules(image, roots.repo / images_module.NODE_MODULES)
+        except images_module.ImageError as error:
+            raise ArtifactError(error.code, error.detail) from error
 
 
 def _contains(path: Path, token: bytes) -> bool:
@@ -273,9 +320,12 @@ class Attestation:
     credential_seam: str
     network_allowlist: tuple[str, ...] = field(default_factory=tuple)
     corpus: CorpusStamp | None = None
+    benchmark_shelf_key: dict[str, str] | None = None
 
     def hash(self) -> str:
         payload = asdict(self)
+        if self.benchmark_shelf_key is None:
+            payload.pop("benchmark_shelf_key")
         payload["network_allowlist"] = sorted(self.network_allowlist)
         return "sha256:" + sha256_json(payload)
 
@@ -291,9 +341,14 @@ def load_attestation(path: Path) -> Attestation:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise IsolationError("attestation_unreadable", f"cannot read the attestation: {error}") from error
+    return load_attestation_data(data)
+
+
+def load_attestation_data(data: Any) -> Attestation:
+    """The same checks over a payload a run built itself, so a self-written attestation is read no more kindly than a file."""
     if not isinstance(data, dict):
         raise IsolationError("attestation_shape", "the attestation must be a JSON object")
-    unknown = sorted(set(data) - ATTESTATION_KEYS)
+    unknown = sorted(set(data) - ATTESTATION_KEYS - {"benchmark_shelf_key"})
     missing = sorted(ATTESTATION_KEYS - set(data))
     if unknown or missing:
         detail = f"unknown keys: {', '.join(unknown)}" if unknown else f"missing keys: {', '.join(missing)}"
@@ -307,6 +362,12 @@ def load_attestation(path: Path) -> Attestation:
     for name in ("kind", "instance_id", "image", "credential_seam"):
         if not isinstance(data[name], str):
             raise IsolationError("attestation_shape", f"attestation {name} must be a string")
+    receipt = data.get("benchmark_shelf_key")
+    if receipt is not None:
+        try:
+            receipt = benchmark_key.validate(receipt)
+        except ValueError as error:
+            raise IsolationError("benchmark_shelf_key", str(error)) from error
     return Attestation(
         kind=data["kind"],
         instance_id=data["instance_id"],
@@ -315,6 +376,7 @@ def load_attestation(path: Path) -> Attestation:
         wallet_present=data["wallet_present"],
         credential_seam=data["credential_seam"],
         network_allowlist=tuple(origins),
+        benchmark_shelf_key=receipt,
     )
 
 
@@ -360,14 +422,15 @@ def require_isolation(
     automated: bool = False,
     shelf_secret_present: bool = False,
     shelf_origin: str | None = None,
+    benchmark_shelf_key: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """The isolation slice of an attempt record, or a refusal to run at all.
 
     Three rules, and the order is the argument.
 
-    A run that seeds a team shelf secret is never publishable: the secret is in
-    the trial by design, so asking for a publishable run is a refusal rather
-    than a downgrade, and an unwatched run never seeds one at all.
+    Ordinary team shelf secrets are refused for measured and automated runs.
+    A dedicated benchmark key is allowed only with a matching scope receipt,
+    attestation and reset benchmark corpus. Its presence remains recorded.
 
     A live run under CI is stamped `automated`, because a record that says a
     person watched a run nobody watched is the one claim no reader can check.
@@ -379,9 +442,20 @@ def require_isolation(
     launcher's identity ever was; a run without one is non-publishable whoever
     started it.
     """
-    if shelf_secret_present and publishable:
+    scoped = False
+    if benchmark_shelf_key is not None:
+        try:
+            scope = benchmark_key.validate(benchmark_shelf_key)
+        except ValueError as error:
+            raise IsolationError("benchmark_shelf_key", str(error)) from error
+        scoped = bool(live and shelf_secret_present and attestation is not None
+                      and attestation.benchmark_shelf_key == scope and shelf_origin == scope["origin"]
+                      and attestation.corpus is not None and attestation.corpus.origin == scope["origin"])
+        if not scoped:
+            raise IsolationError("benchmark_shelf_key", "benchmark key scope must match the source, attestation and reset corpus")
+    if shelf_secret_present and publishable and not scoped:
         raise IsolationError("shelf_secret_publishable", "a run that seeds a team shelf secret is never publishable")
-    if automated and shelf_secret_present:
+    if automated and shelf_secret_present and not scoped:
         raise IsolationError("automated_shelf_secret", "an automated live run never seeds a team shelf secret")
     if live and ci and not automated:
         raise IsolationError("automated_unstamped", "a live run in CI is stamped automated, so every record says nobody watched it")
@@ -410,6 +484,7 @@ def require_isolation(
         "automated": automated,
         "shelf_secret_present": shelf_secret_present,
         "shelf_origin": shelf_origin,
+        **({"benchmark_shelf_key": benchmark_shelf_key} if scoped else {}),
         # The corpus reaches the record as fields rather than as a hash alone,
         # so a reader sees which corpus the run measured without the file.
         "corpus": None if attestation is None or attestation.corpus is None else asdict(attestation.corpus),

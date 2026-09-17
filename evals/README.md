@@ -22,10 +22,12 @@ python3 -m evals.benchmark.cli summary --run /tmp/bench1-fake     # read that re
 python3 evals/benchmark/selftest.py                              # the offline suite the required CI runs
 ```
 
-Nothing above starts an agent or spends anything: this layer is the offline chain, and the live
-executor and the `live-run` command that drives it land on top of it. Publishing anything from a
-live run requires a disposable container or VM attestation, and the attestation contract is
-already here in `artifact.py`.
+`live-run --manifest <path>` is the only command that reaches a live executor. Its
+infrastructure and generated-input tests do not require an experiment corpus. Bench-1 ships
+its full reusable task/lesson/verifier library in the next layer and its smoke manifests/live workflow in
+the configuration layer above that. `--dry-run` validates and prints a supplied configuration
+without starting an agent. Regression takes an explicit `--baseline <path>`; run selection
+and baseline policy belong to configuration.
 
 What the README covers: the manifest, attempt, usage, verifier, and invalid-run contracts; the
 reduction and interval rules; the private versus publishable artifact boundary; and how

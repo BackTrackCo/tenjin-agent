@@ -1,0 +1,370 @@
+"""The subscription Codex boundary, without starting a model or using credentials."""
+from __future__ import annotations
+
+import base64
+import json
+import time
+from pathlib import Path
+
+import pytest
+
+from evals.benchmark import artifact, codex_live, executor, images, sha256_json
+
+PINS = {"model": "gpt-5.6-sol", "harness_version": "0.154.0", "permission_mode": "workspace-write",
+        "credential_env": "CODEX_BENCH_AUTH_FILE", "agent_package": "@openai/codex",
+        "billing_mode": "subscription", "effort": "low", "speed_mode": "fast",
+        "turn_budget": None, "concurrency": 1, "wall_clock_s": 600, "tools": ["Bash", "Read", "Edit"]}
+
+
+def request(tmp_path):
+    fixture = tmp_path / "fixture"
+    fixture.mkdir()
+    (fixture / "CLAUDE.md").write_text("Run the task's tests.\n")
+    roots = artifact.create(tmp_path / "run", "trial", fixture)
+    return executor.LaunchRequest("trial", roots, {"id": "toy", "prompt": "Fix the failing test."},
+        {"settings": {}, "settings_hash": "sha256:" + sha256_json({})}, PINS, dry_run=True)
+
+
+def test_codex_plan_has_only_subscription_auth_and_generated_configuration(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "must-not-cross")
+    item = request(tmp_path)
+    result = codex_live.launch(item)
+    assert result.argv[:3] == ["codex", "exec", "--json"]
+    assert result.recipe.forward == ()
+    assert "OPENAI_API_KEY" not in result.recipe.environment
+    assert result.recipe.container_env()["PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN"] == "false"
+    config = (item.roots.profile / "config.toml").read_text()
+    assert 'model = "gpt-5.6-sol"' in config
+    assert 'forced_login_method = "chatgpt"' in config
+    assert 'service_tier = "fast"' in config
+    assert 'use_legacy_landlock = true' in config
+    assert {mount.target.name for mount in result.recipe.plan if mount.mode == 'ro'} >= {'.git', '.codex', '.agents'}
+    assert (item.roots.repo / "AGENTS.md").read_text() == "Run the task's tests.\n"
+    assert (item.roots.profile / "auth.json").read_bytes() == b""
+    assert executor.lookup("codex_live") is codex_live.SPEC
+
+
+@pytest.mark.parametrize("change", [
+    {"model": "gpt-5.6"}, {"credential_env": "OPENAI_API_KEY"}, {"billing_mode": "credits"},
+    {"agent_package": "arbitrary"}, {"turn_budget": 30}, {"concurrency": 0}, {"concurrency": True}, {"concurrency": 1.5}, {"effort": "ultra"},
+])
+def test_codex_refuses_changes_outside_subscription_protocol(change):
+    with pytest.raises(executor.ExecutorError):
+        codex_live.validate_pins({**PINS, **change})
+
+
+def test_auth_only_file_is_external_private_and_chatgpt(tmp_path, monkeypatch):
+    roots = request(tmp_path).roots
+    auth = tmp_path / "auth.json"
+    auth.write_text(json.dumps({"auth_mode": "chatgpt", "tokens": {"access_token": "synthetic"}}))
+    auth.chmod(0o600)
+    monkeypatch.setenv(codex_live.AUTH_ENV, str(auth))
+    assert codex_live.auth_path(roots) == auth
+    auth.chmod(0o644)
+    with pytest.raises(executor.ExecutorError, match="private"):
+        codex_live.auth_path(roots)
+    auth.chmod(0o600)
+    auth.write_text(json.dumps({"auth_mode": "apikey", "OPENAI_API_KEY": "synthetic"}))
+    with pytest.raises(executor.ExecutorError, match="API-key"):
+        codex_live.auth_path(roots)
+
+
+def test_project_configuration_cannot_override_subscription_profile(tmp_path):
+    item = request(tmp_path)
+    (item.roots.repo / ".codex").mkdir()
+    with pytest.raises(executor.ExecutorError, match="override"):
+        codex_live.launch(item)
+
+
+def test_codex_image_pins_the_cli_without_changing_model():
+    args = images.build_args(PINS)
+    assert args["AGENT_PACKAGE"] == "@openai/codex"
+    assert args["AGENT_VERSION"] == "0.154.0"
+    assert args["AGENT_COMMAND"] == "codex"
+    with pytest.raises(images.ImageError):
+        images.build_args({**PINS, "agent_package": "other"})
+
+
+def test_native_stream_excludes_harbor_merged_stderr(tmp_path, monkeypatch):
+    from evals.benchmark import container, runner
+    item = request(tmp_path)
+    launch = codex_live.launch(item)
+    class Box:
+        def __init__(self, **kwargs):
+            pass
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+        def exec(self, command, **kwargs):
+            assert command[:2] == ["bash", "-c"]
+            assert kwargs["stream"] is None
+            (item.roots.output / "command.stdout").write_text('{"type":"thread.started","thread_id":"native-root"}\n')
+            (item.roots.output / "command.stderr").write_text("native CLI diagnostic\n")
+            return container.Completed(returncode=0, stdout="compose diagnostic", stderr="")
+    monkeypatch.setattr(container, "Container", Box)
+    monkeypatch.setattr(container, "daemon_error", lambda output: None)
+    monkeypatch.setattr(container, "stop", lambda name: None)
+    result = runner.container_spawn(launch, item.roots, 5)
+    assert json.loads(item.roots.stream.read_text())["thread_id"] == "native-root"
+    assert result.stderr == "native CLI diagnostic\n"
+
+
+def test_shared_read_grants_do_not_use_claude_permission_mode(tmp_path):
+    from dataclasses import replace
+    item = request(tmp_path)
+    settings = {"permissions": {"allow": ["Bash(tenjin read:*)"]}}
+    item = replace(item, arm={"settings": settings, "settings_hash": "sha256:" + sha256_json(settings)})
+    assert codex_live.launch(item).recipe is not None
+
+
+def test_custom_permission_restrictions_are_not_silently_dropped(tmp_path):
+    from dataclasses import replace
+    item = request(tmp_path)
+    settings = {"permissions": {"deny": ["Bash"]}}
+    item = replace(item, arm={"settings": settings, "settings_hash": "sha256:" + sha256_json(settings)})
+    with pytest.raises(executor.ExecutorError, match="custom Claude permission"):
+        codex_live.launch(item)
+
+
+@pytest.mark.parametrize("mode", ["timeout", "wrong-version"])
+def test_native_trust_uses_resolved_image_and_cleans_failed_version_probe(tmp_path, monkeypatch, mode):
+    import subprocess
+    from types import SimpleNamespace
+    item = request(tmp_path)
+    calls = []
+    monkeypatch.setenv("OPENAI_API_KEY", "must-not-reach-trust")
+    def run(command, **kwargs):
+        calls.append(command)
+        assert "OPENAI_API_KEY" not in kwargs["env"]
+        if command[:2] == ["docker", "run"]:
+            assert command[-2:] == ["resolved-image", "--version"]
+            assert command[command.index("--network") + 1] == "none"
+            assert not any("auth.json" in arg for arg in command)
+            if mode == "timeout":
+                raise subprocess.TimeoutExpired(command, 30)
+            return SimpleNamespace(stdout="codex-cli 0.1.0\n")
+        return SimpleNamespace(returncode=0)
+    monkeypatch.setattr(subprocess, "run", run)
+    with pytest.raises((subprocess.TimeoutExpired, executor.ExecutorError)):
+        codex_live.trust_hooks(item.roots, {}, "0.155.0", "resolved-image")
+    assert calls[-1][:3] == ["docker", "rm", "--force"]
+    assert calls[-1][-1] == calls[0][calls[0].index("--name") + 1]
+
+
+def test_codex_accepts_resolved_new_release_but_not_mutable_tags():
+    codex_live.validate_pins({**PINS, "harness_version": "0.155.0"})
+    with pytest.raises(executor.ExecutorError, match="exact"):
+        codex_live.validate_pins({**PINS, "harness_version": "latest"})
+
+
+def test_historical_database_is_requested_for_model_tools(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+    from evals.benchmark import container, database_service, runner
+    item = request(tmp_path)
+    item.task['database'] = 'postgres'
+    launch = codex_live.launch(item)
+    assert launch.database and launch.container_plan['database'] == 'postgres'
+    events = []
+    @contextmanager
+    def service(box, enabled):
+        assert enabled
+        events.append('database ready')
+        try: yield database_service.ENVIRONMENT
+        finally: events.append('database removed')
+    class Box:
+        def __init__(self, **kwargs): pass
+        def __enter__(self): return self
+        def __exit__(self, *args): events.append('container removed')
+        def exec(self, command, **kwargs):
+            assert events == ['database ready']
+            assert kwargs['environment']['BENCHMARK_DATABASE_URL'] == database_service.ENVIRONMENT['BENCHMARK_DATABASE_URL']
+            events.append('model started')
+            raise RuntimeError('timed out')
+    monkeypatch.setattr(database_service, 'model_service', service)
+    monkeypatch.setattr(container, 'Container', Box)
+    monkeypatch.setattr(container, 'daemon_error', lambda output: None)
+    monkeypatch.setattr(container, 'stop', lambda name: None)
+    result = runner.container_spawn(launch, item.roots, 5)
+    assert result.timed_out
+    assert events == ['database ready', 'model started', 'database removed', 'container removed']
+
+
+def test_a_teardown_failure_is_the_attempts_own_invalidity_and_keeps_its_project_line(tmp_path, monkeypatch):
+    # Docker failing on the way out used to raise through `container_spawn` and
+    # `run_trial`, so one finished attempt's teardown ended the whole run and
+    # took that attempt's evidence with it.
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    from evals.benchmark import container, database_service, runner
+    item = request(tmp_path)
+    launch = codex_live.launch(item)
+    @contextmanager
+    def service(box, enabled):
+        yield {}
+    class Box:
+        def __init__(self, **kwargs): pass
+        def __enter__(self): return self
+        def __exit__(self, *args):
+            raise container.ImageError("cleanup_failed", "could not remove container in project bench2-x")
+        def exec(self, command, **kwargs):
+            return SimpleNamespace(returncode=0, stderr="", stdout="")
+    monkeypatch.setattr(database_service, "model_service", service)
+    monkeypatch.setattr(container, "Container", Box)
+    monkeypatch.setattr(container, "daemon_error", lambda output: None)
+    monkeypatch.setattr(container, "stop", lambda name: pytest.fail("teardown already failed; do not ask Docker again here"))
+    result = runner.container_spawn(launch, item.roots, 5)
+    assert result.returncode == 0 and not result.timed_out
+    assert result.cleanup_error == "could not remove container in project bench2-x"
+    # The line survives, so `cleanup --run` still reaches whatever is left.
+    assert (item.roots.run_dir / container.PROJECTS / f"{item.roots.trial_id}.project").is_file()
+
+
+def test_an_attempt_that_broke_is_not_relabelled_as_a_teardown_failure(tmp_path, monkeypatch):
+    # The teardown error arrives last and would otherwise mask what actually
+    # broke, turning a defect into a tidy `invalid` record.
+    from contextlib import contextmanager
+    from evals.benchmark import container, database_service, runner
+    item = request(tmp_path)
+    launch = codex_live.launch(item)
+    @contextmanager
+    def service(box, enabled):
+        yield {}
+    class Box:
+        def __init__(self, **kwargs): pass
+        def __enter__(self): return self
+        def __exit__(self, *args):
+            raise container.ImageError("cleanup_failed", "could not remove container in project bench2-x")
+        def exec(self, command, **kwargs):
+            raise RuntimeError("harbor answered something this seam does not handle")
+    monkeypatch.setattr(database_service, "model_service", service)
+    monkeypatch.setattr(container, "Container", Box)
+    monkeypatch.setattr(container, "daemon_error", lambda output: None)
+    with pytest.raises(container.ImageError, match="cleanup_failed") as caught:
+        runner.container_spawn(launch, item.roots, 5)
+    assert isinstance(caught.value.__context__, RuntimeError)
+
+
+def test_a_failure_bringing_the_container_up_is_still_the_runs_problem(tmp_path, monkeypatch):
+    from evals.benchmark import container, runner
+    item = request(tmp_path)
+    launch = codex_live.launch(item)
+    class Box:
+        def __init__(self, **kwargs): pass
+        def __enter__(self):
+            raise container.ImageError("harbor_missing", "no harbor importable")
+        def __exit__(self, *args): pass
+    monkeypatch.setattr(container, "Container", Box)
+    with pytest.raises(container.ImageError, match="harbor_missing"):
+        runner.container_spawn(launch, item.roots, 5)
+
+
+@pytest.mark.parametrize("final", ["removed", "already-removed", "refused"])
+def test_hook_cleanup_retries_only_its_owned_container_after_docker_timeout(monkeypatch, final):
+    import subprocess
+    from types import SimpleNamespace
+    calls = []
+    def run(command, **kwargs):
+        calls.append(command)
+        assert command == ["docker", "rm", "--force", "bench2-trust-owned"]
+        assert kwargs["timeout"] == 30
+        if len(calls) == 1:
+            raise subprocess.TimeoutExpired(command, 30)
+        return SimpleNamespace(returncode=0 if final == "removed" else 1,
+                               stderr="No such container: bench2-trust-owned" if final == "already-removed" else "daemon unavailable")
+    monkeypatch.setattr(subprocess, "run", run)
+    if final == "refused":
+        with pytest.raises(executor.ExecutorError, match="cleanup could not be confirmed"):
+            codex_live.remove_trust_container("bench2-trust-owned")
+        assert len(calls) == 3
+    else:
+        codex_live.remove_trust_container("bench2-trust-owned")
+        assert len(calls) == 2
+
+
+@pytest.mark.parametrize("provisioned", [False, True])
+def test_full_codex_dry_run_uses_its_native_hook_config_without_claude_settings(tmp_path, provisioned):
+    from dataclasses import replace
+    from evals.benchmark import cli, manifest, schedule
+    from evals.benchmark.tests import live_inputs
+    source = manifest.load(live_inputs.write(tmp_path / 'source', hooks=True))
+    data = json.loads(json.dumps(source.data))
+    data['harness'] = 'codex'
+    data['pins'] = {**data['pins'], **PINS, 'max_budget_usd': None}
+    arm = data['arms'][int(provisioned)]
+    arm['executor'] = 'codex_live'
+    data['arms'] = [arm]
+    config = replace(source, data=data)
+    plan = cli.plan_trial(config, schedule.expand(config)[0], tmp_path / 'dry-run')
+    assert plan['argv'][0] == 'codex'
+    assert bool(plan['hooks']) is provisioned
+    assert all('--harness codex' in hook for hook in plan['hooks'])
+    assert not list((tmp_path / 'dry-run').glob('trials/*/settings.json'))
+
+
+def test_codex_postgres_launch_uses_the_same_visible_test_instructions(tmp_path):
+    from dataclasses import replace
+    from evals.benchmark import claude_live
+    item = request(tmp_path)
+    item = replace(item, task={**item.task, "database": "postgres"})
+    prompt = codex_live.launch(item).argv[-1]
+    assert prompt == claude_live.prompt_of(item.task)
+    assert "--config .bench1/model-tests.config.mjs --configLoader runner <test-file>" in prompt
+
+
+def subscription_file(tmp_path, *, expiry=None):
+    auth = tmp_path / "subscription.json"
+    claims = base64.urlsafe_b64encode(json.dumps({"exp": time.time() + 3600 if expiry is None else expiry}).encode()).decode().rstrip("=")
+    auth.write_text(json.dumps({"auth_mode": "chatgpt", "tokens": {
+        "access_token": f"header.{claims}.signature", "refresh_token": "renewable-secret"}}))
+    auth.chmod(0o600)
+    return auth
+
+
+def test_parallel_snapshot_is_private_nonrenewing_and_removed_on_failure(tmp_path):
+    auth = subscription_file(tmp_path)
+    original = auth.read_bytes()
+    with pytest.raises(RuntimeError, match="worker failed"):
+        with codex_live.parallel_auth(tmp_path / "run", PINS, {codex_live.AUTH_ENV: str(auth)}) as snapshot:
+            assert not snapshot.is_relative_to(tmp_path / "run")
+            assert snapshot.stat().st_mode & 0o777 == 0o600
+            assert snapshot.parent.stat().st_mode & 0o777 == 0o700
+            assert json.loads(snapshot.read_text())["tokens"]["refresh_token"] == ""
+            assert auth.read_bytes() == original
+            raise RuntimeError("worker failed")
+    assert not snapshot.parent.exists()
+    assert auth.read_bytes() == original
+
+
+@pytest.mark.parametrize("expiry", [0, None, True, "tomorrow", float("inf")])
+def test_parallel_admission_refuses_unusable_expiry(tmp_path, expiry):
+    auth = subscription_file(tmp_path, expiry=0)
+    data = json.loads(auth.read_text())
+    claims = base64.urlsafe_b64encode(json.dumps({"exp": expiry}).encode()).decode().rstrip("=")
+    data["tokens"]["access_token"] = f"header.{claims}.signature"
+    auth.write_text(json.dumps(data))
+    with pytest.raises(executor.ExecutorError):
+        with codex_live.parallel_auth(tmp_path / "run", PINS, {codex_live.AUTH_ENV: str(auth)}):
+            pytest.fail("unusable access token admitted")
+    assert not list(tmp_path.glob("benchmark-codex-access-*"))
+
+
+def test_parallel_launch_uses_read_only_snapshot_and_rechecks_expiry(tmp_path, monkeypatch):
+    from dataclasses import replace
+    item = request(tmp_path)
+    auth = subscription_file(tmp_path)
+    pins = {**PINS, "concurrency": 2}
+    codex_live.validate_pins(pins)
+    with pytest.raises(executor.ExecutorError, match="run-owned"):
+        codex_live.auth_path(item.roots, pins=pins)
+    with pytest.raises(executor.ExecutorError, match="refresh token"):
+        codex_live.auth_path(item.roots, pins=pins, snapshot=auth)
+    monkeypatch.setattr(codex_live, "trust_hooks", lambda *args: None)
+    with codex_live.parallel_auth(item.roots.run_dir, pins, {codex_live.AUTH_ENV: str(auth)}) as snapshot:
+        result = codex_live.launch(replace(item, pins=pins, dry_run=False, subscription_auth=snapshot))
+        mounts = [mount for mount in result.recipe.plan if mount.host == snapshot]
+        assert len(mounts) == 1 and mounts[0].mode == "ro"
+        assert (item.roots.profile / "auth.json").read_bytes() == b""
+        monkeypatch.setattr(codex_live.time, "time", lambda: 1e20)
+        with pytest.raises(executor.ExecutorError, match="refresh subscription"):
+            codex_live.auth_path(item.roots, pins=pins, snapshot=snapshot)

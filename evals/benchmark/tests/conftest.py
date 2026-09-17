@@ -73,3 +73,10 @@ def register_executor() -> Iterator[Callable[[str, executor.ExecutorSpec], str]]
     yield register
     for name in names:
         executor.REGISTRY.pop(name, None)
+
+
+@pytest.fixture
+def live_gates() -> Iterator[Any]:
+    """Every Docker seam a live case would take, stubbed, yielding the image `images.require` returns."""
+    with support.live_gates() as image:
+        yield image
