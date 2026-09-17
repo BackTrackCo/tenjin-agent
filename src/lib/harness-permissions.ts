@@ -1,6 +1,8 @@
-import { lstat, readFile, realpath, stat } from 'node:fs/promises';
-import { join } from 'node:path';
+import { chmod, lstat, mkdir, readFile, realpath, stat } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import { writeFileAtomic } from './atomic-json';
+import { codexRulesPath, grantedPrefixes, rulesFileBody, verifyPrefixAllowed } from './codex-rules';
+export { removeCodexGrant } from './codex-rules';
 import type { PublishMode } from './config';
 
 /**
@@ -9,7 +11,7 @@ import type { PublishMode } from './config';
  *
  *  - OPT-OUT, AND DISCLOSED. Every install writes the free tier, because an
  *    unattended agent that gets denied is the failure this whole file exists to
- *    prevent. `--no-allow-free-verbs` refuses it outright, and every run that
+ *    prevent. `--no-grant` refuses it outright, and every run that
  *    writes says how many rules landed and in which file. What keeps that defensible is the next two invariants: the grant is a
  *    fixed free tier, and it can never widen.
  *  - TWO FIXED SETS, AND NOT PARAMETERIZED. The writer takes no rule argument.
@@ -63,6 +65,241 @@ import type { PublishMode } from './config';
 /** Claude Code's user-level settings file, the only file this module writes. */
 export function claudeSettingsPath(homeDir: string): string {
   return join(homeDir, '.claude', 'settings.json');
+}
+
+/**
+ * What a harness's grant state IS, in the four words `doctor` reports it with.
+ * Deliberately separate from {@link PermissionsSkipReason}, which is about one
+ * WRITE; this is about a machine.
+ */
+export type PermissionState = 'granted' | 'pending' | 'unsupported' | 'skipped' | 'unknown';
+
+export interface HarnessPermissions {
+  harness: string;
+  state: PermissionState;
+  /** The file consulted, absent when the harness has none. */
+  path?: string;
+  /** Rules of ours in force there. Always empty for an `absent` surface, which
+   *  is the point: a Codex machine has no `Bash(...)` rules to list. */
+  rules: string[];
+  /** Rules this machine's mode calls for and does not have. */
+  missing: string[];
+  /** One line an operator can act on. */
+  detail: string;
+  fix?: string;
+}
+
+/**
+ * Apply the operator's persisted `--no-grant` decision to a native grant
+ * inspection. Both install refresh and doctor use this exact projection so a
+ * settled decline cannot be reported as pending by one surface and skipped by
+ * the other. Exact-rule filtering deliberately lets a rule added by a later
+ * version surface normally.
+ */
+export function applyGrantDecline(
+  report: HarnessPermissions,
+  declined: readonly string[],
+): HarnessPermissions {
+  if (report.state !== 'pending' || report.missing.length === 0 || declined.length === 0) {
+    return report;
+  }
+  const declinedSet = new Set(declined);
+  const missing = report.missing.filter((rule) => !declinedSet.has(rule));
+  if (missing.length === report.missing.length) return report;
+  if (missing.length > 0) {
+    return {
+      ...report,
+      missing,
+      detail: `${missing.length} of this mode's rules remain missing; ${report.missing.length - missing.length} were explicitly declined`,
+    };
+  }
+  return {
+    harness: report.harness,
+    state: 'skipped',
+    ...(report.path !== undefined ? { path: report.path } : {}),
+    rules: report.rules,
+    missing,
+    detail: 'the command grant was explicitly declined',
+  };
+}
+
+/** Read Claude Code's settings-native grant without dispatching on a harness id. */
+export async function inspectClaudeGrant(
+  homeDir: string,
+  mode: PublishMode,
+): Promise<HarnessPermissions> {
+  const found = await inspectAllowlist(homeDir, mode);
+  if ('result' in found) {
+    const refused = found.result;
+    return {
+      harness: 'claude',
+      state: 'unknown',
+      ...(refused.path !== undefined ? { path: refused.path } : {}),
+      rules: [],
+      missing: [],
+      detail: refused.warning ?? `${claudeSettingsPath(homeDir)} could not be read.`,
+      ...(refused.fix !== undefined ? { fix: refused.fix } : {}),
+    };
+  }
+  const missing = [...found.added];
+  return {
+    harness: 'claude',
+    state: missing.length === 0 ? 'granted' : 'pending',
+    path: found.path,
+    rules: [...found.alreadyPresent],
+    missing,
+    detail:
+      missing.length === 0
+        ? `${found.alreadyPresent.length} rules in ${found.path}`
+        : `${missing.length} of this mode's rules are missing from ${found.path}`,
+    ...(missing.length === 0 ? {} : { fix: 'tenjin install' }),
+  };
+}
+
+/**
+ * Codex's grant, read back and then PUT TO CODEX.
+ *
+ * Two questions, and the second settles it: does the file say what this mode
+ * calls for, and does the binary agree it grants that. A `.rules` file that
+ * fails to parse is silent until a session runs, so a reader that stopped at
+ * "the file matches" would report `granted` over a file Codex is discarding.
+ * With no `codex` to ask, the file's answer stands and the detail says so.
+ */
+/** Bring an already-correct grant file back to 0600 if something widened it. */
+async function tighten(path: string): Promise<void> {
+  if (process.platform === 'win32') return;
+  const found = await stat(path).catch(() => null);
+  if (found === null || (found.mode & 0o077) === 0) return;
+  await chmod(path, 0o600).catch(() => undefined);
+}
+
+export async function inspectCodexGrant(
+  homeDir: string,
+  mode: PublishMode,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<HarnessPermissions> {
+  const path = codexRulesPath(homeDir, env);
+  const writable = rulesForPublishMode(mode);
+  const want = rulesFileBody(writable);
+  const rules = grantedPrefixes(writable).map((tokens) => tokens.join(' '));
+  const found = await readFile(path, 'utf8').catch(() => null);
+  if (found !== want) {
+    return {
+      harness: 'codex',
+      state: 'pending',
+      path,
+      rules: [],
+      missing: rules,
+      detail:
+        found === null
+          ? `no grant is installed at ${path}`
+          : `${path} does not match what publish.mode ${mode} calls for`,
+      fix: 'tenjin install',
+    };
+  }
+  // One representative prefix, not all eleven: they come from one generated
+  // body, so they parse or fail together, and a self-test that spawns eleven
+  // processes on every `doctor` is a cost with no extra answer in it. The one
+  // asked about is the consequential one — the mode-gated `publish` where the
+  // mode carries it.
+  const probe = grantedPrefixes(writable).at(-1);
+  const agreed = probe === undefined ? null : await verifyPrefixAllowed(path, probe, env);
+  if (agreed === false) {
+    return {
+      harness: 'codex',
+      state: 'pending',
+      path,
+      rules: [],
+      missing: rules,
+      detail: `${path} is installed but Codex does not read it as granting \`${probe?.join(' ')}\``,
+      fix: 'tenjin install',
+    };
+  }
+  // GRANTED ONLY WHEN CODEX SAYS SO. A file that matches what the mode calls
+  // for is not the same fact as a grant in force: on a Codex too old for the
+  // rules layer, or with no `codex` on PATH at all, this file is inert and
+  // reporting `granted` over it would be the same overclaim as the Claude
+  // rules on a Codex machine (tenjin-agent#342). `unknown` says the write
+  // landed and the question could not be put.
+  if (agreed === null) {
+    return {
+      harness: 'codex',
+      state: 'unknown',
+      path,
+      rules,
+      missing: [],
+      detail: `${rules.length} prefixes written to ${path}, but codex could not be asked whether it reads them as a grant`,
+      fix: 'Check `codex execpolicy check --rules <file> tenjin publish x` on the machine itself.',
+    };
+  }
+  return {
+    harness: 'codex',
+    state: 'granted',
+    path,
+    rules,
+    missing: [],
+    detail: `${rules.length} prefixes in ${path}, confirmed by codex execpolicy`,
+  };
+}
+
+/** What one Codex grant write did. */
+export interface CodexGrantResult {
+  path: string;
+  /** The prefixes now granted there, as space-joined command prefixes. */
+  granted: string[];
+  /** True when this run changed the file. */
+  wrote: boolean;
+  /** Present when nothing could be written; the file was left as found. */
+  error?: string;
+}
+
+/**
+ * Write Codex's grant for `mode`, whole.
+ *
+ * TAKES A MODE, NOT RULES, exactly as {@link wireFreeVerbAllowlist} does: the
+ * two fixed constants are all either writer can produce, so no caller and no
+ * future flag can widen one. lib/codex-rules.ts only spells the result.
+ *
+ * Idempotent by construction, the body being a pure function of the mode. And
+ * `review` regenerates it WITHOUT the mode-gated pair, which IS the retraction
+ * — no separate remove path to forget, because narrowing and widening are one
+ * operation.
+ */
+export async function wireCodexGrant(
+  homeDir: string,
+  mode: PublishMode,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<CodexGrantResult> {
+  const path = codexRulesPath(homeDir, env);
+  const rules = rulesForPublishMode(mode);
+  const body = rulesFileBody(rules);
+  const granted = grantedPrefixes(rules).map((t) => t.join(' '));
+  try {
+    await mkdir(dirname(path), { recursive: true });
+    const current = await readFile(path, 'utf8').catch(() => null);
+    if (current === body) {
+      // Byte-identical is not the same as correct. This file is a standing
+      // decision about which commands run unattended, so a dotfiles sync or a
+      // stray chmod that widened it must be converged even on the run that
+      // writes nothing -- otherwise re-installing leaves a group-writable
+      // grant exactly as it found it. Mirrors `tightenFile` in
+      // lib/harness-hooks.ts, for the same reason.
+      await tighten(path);
+      return { path, granted, wrote: false };
+    }
+    // 0600 for the same reason the hooks file gets it: this is a standing
+    // decision about which commands run without asking, and a file another
+    // account can append to is a file that can widen it.
+    await writeFileAtomic(path, body, { mode: 0o600 });
+    return { path, granted, wrote: true };
+  } catch (err) {
+    return {
+      path,
+      granted: [],
+      wrote: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
 }
 
 /**
@@ -207,7 +444,15 @@ export const FORBIDDEN_VERB_FRAGMENTS: readonly string[] = [
  * never a partial write: the writer either appends all missing rules or none.
  */
 export type PermissionsSkipReason =
-  | 'harness-not-claude'
+  /**
+   * The harness has no supported surface for a persistent, command-scoped
+   * grant, so there is nothing to write and no operator step that would make
+   * one appear. NOT `harness-not-claude`, which is what this was called: that
+   * name describes our implementation rather than the harness, and it let
+   * every reader downstream assume a Claude-shaped grant was in force anyway
+   * (tenjin-agent#342). The adapter registrar owns that capability now.
+   */
+  | 'harness-unsupported'
   | 'not-requested'
   | 'declined'
   | 'dry-run'
@@ -342,11 +587,16 @@ export interface PermissionsResult {
 /**
  * The command that turns a skip into a write. Kept beside the reason vocabulary
  * so a new reason cannot ship without one.
+ *
+ * `harness-unsupported` is the exception that proves it: no command turns it
+ * into a write, so its `fix` says what the harness itself does instead. Naming
+ * `tenjin doctor` there, as this used to, sent an operator to a page of Claude
+ * rules and let them read those as their own (tenjin-agent#342).
  */
-function fixFor(reason: PermissionsSkipReason): string {
+function fixFor(reason: PermissionsSkipReason, harness = 'claude'): string {
   switch (reason) {
-    case 'harness-not-claude':
-      return 'This allowlist is Claude Code only. Run `tenjin doctor` for the lines your harness needs.';
+    case 'harness-unsupported':
+      return `No permission rules were written: ${harness} has no surface for them.`;
     case 'not-requested':
     case 'declined':
     case 'dry-run':
@@ -393,7 +643,7 @@ function skip(
     alreadyPresentFree: [],
     skipped: reason,
     ...(warning !== undefined ? { warning } : {}),
-    fix: fixFor(reason),
+    fix: fixFor(reason, harness),
   };
 }
 
@@ -403,6 +653,11 @@ export function permissionsSkipped(
   homeDir: string,
   reason: PermissionsSkipReason,
 ): PermissionsResult {
+  // A PermissionsResult is THIS writer's receipt, so its `path` is this
+  // writer's file or nothing. Naming ~/.claude/settings.json to a Codex
+  // operator points them at a file that is nothing to do with their harness;
+  // naming Codex's rules file here would be worse, because the sentence around
+  // it is about rules that never went there (tenjin-agent#342).
   const path = harness === 'claude' ? claudeSettingsPath(homeDir) : undefined;
   return skip(harness, path, reason);
 }

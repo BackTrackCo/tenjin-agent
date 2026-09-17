@@ -88,11 +88,14 @@ export interface SearchRequestBody {
   budget_ms?: number;
 }
 
+/** The server's query bound (`SEARCH_QUERY_MAX_CHARS`), the same for every trigger. */
+export const QUERY_MAX = 8000;
+
 export function buildSearchRequest(input: SearchInput): SearchRequestBody {
   const question = input.question.trim();
-  if (question.length === 0 || question.length > 512) {
-    throw new CliError('USAGE', 'question must be 1 to 512 characters', {
-      fix: 'Pass a non-empty question under 512 characters.',
+  if (question.length === 0 || question.length > QUERY_MAX) {
+    throw new CliError('USAGE', `question must be 1 to ${QUERY_MAX} characters`, {
+      fix: `Pass a non-empty question under ${QUERY_MAX} characters.`,
     });
   }
   if (input.freshWithin !== undefined) {

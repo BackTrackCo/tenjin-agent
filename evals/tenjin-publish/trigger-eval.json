@@ -22,7 +22,7 @@
   {
     "query": "Anything from our work this session worth selling on Tenjin?",
     "should_trigger": true,
-    "rationale": "The harvest ask: grade what is visible, offer the survivors once as a batch."
+    "rationale": "The turn-end ask: grade what is visible, offer the survivors once as a batch."
   },
   {
     "query": "That was a MISS on Tenjin, and I have now got the tested answer written up. Close the loop.",

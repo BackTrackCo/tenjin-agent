@@ -9,7 +9,7 @@ import {
   runConfigGet,
   runConfigSet,
   persistPublishMode,
-  persistFreeVerbsDeclined,
+  persistGrantDeclined,
 } from './config';
 import { HOOK_ARMS, LOOP_CONFIG_KEYS, RawConfigSchema } from '../lib/config';
 import { CliError } from '../lib/errors';
@@ -23,6 +23,8 @@ import {
 } from '../lib/harness-permissions';
 import { PRODUCTION_ORIGIN } from '../lib/production-origin';
 import type { CommandContext, GlobalFlags } from '../context';
+import { ADAPTERS } from '../adapters/registry';
+import type { HarnessAdapter } from '../adapters/types';
 
 const SKILLS_SRC = resolveSkillsSource(fileURLToPath(new URL('.', import.meta.url)));
 
@@ -53,7 +55,7 @@ const configFile = () => join(dir, 'config.json');
 async function hermeticHome(): Promise<{
   homeDir: string;
   isInteractive: boolean;
-  harnessIsClaude: boolean;
+  harnessesInPlay: readonly [];
 }> {
   return {
     homeDir: await mkdtemp(join(tmpdir(), 'tenjin-cfg-h-')),
@@ -61,7 +63,22 @@ async function hermeticHome(): Promise<{
     // PINNED, like every other harness-touching test here: without it these read
     // whichever harness the RUNNER has, so they pass on a laptop with Claude Code
     // installed and take a different branch on a bare CI box.
-    harnessIsClaude: false,
+    harnessesInPlay: [],
+  };
+}
+
+type GrantWrite = NonNullable<HarnessAdapter['registrar']['grant']>['write'];
+
+function adaptersWithCodexGrant(write: GrantWrite): Readonly<typeof ADAPTERS> {
+  return {
+    ...ADAPTERS,
+    codex: {
+      ...ADAPTERS.codex,
+      registrar: {
+        ...ADAPTERS.codex.registrar,
+        grant: { ...ADAPTERS.codex.registrar.grant!, write },
+      },
+    },
   };
 }
 const readRawFile = async () => JSON.parse(await readFile(configFile(), 'utf8')) as unknown;
@@ -173,21 +190,21 @@ describe('runConfigList', () => {
     });
   });
 
-  it('persistFreeVerbsDeclined preserves a sibling install.harness key', async () => {
+  it('persistGrantDeclined preserves a sibling install.harness key', async () => {
     // Seeded as a past `install --harness claude` would have left it; declining
     // the allowlist on a later run must not clobber that record.
     await writeFile(configFile(), JSON.stringify({ install: { harness: ['claude'] } }));
-    await persistFreeVerbsDeclined(dir, ['Bash(tenjin search:*)', 'Bash(tenjin read:*)']);
+    await persistGrantDeclined(dir, ['Bash(tenjin search:*)', 'Bash(tenjin read:*)']);
     expect(await readRawFile()).toEqual({
       install: {
         harness: ['claude'],
-        freeVerbsDeclined: ['Bash(tenjin search:*)', 'Bash(tenjin read:*)'],
+        grantDeclined: ['Bash(tenjin search:*)', 'Bash(tenjin read:*)'],
       },
     });
     // A later grant clears it back, through the same merge.
-    await persistFreeVerbsDeclined(dir, []);
+    await persistGrantDeclined(dir, []);
     expect(await readRawFile()).toEqual({
-      install: { harness: ['claude'], freeVerbsDeclined: [] },
+      install: { harness: ['claude'], grantDeclined: [] },
     });
   });
 
@@ -200,11 +217,11 @@ describe('runConfigList', () => {
       }),
     );
 
-    await persistFreeVerbsDeclined(dir, ['Bash(tenjin search:*)']);
+    await persistGrantDeclined(dir, ['Bash(tenjin search:*)']);
     expect(await readRawFile()).toEqual({
       install: {
         harness: ['codex'],
-        freeVerbsDeclined: ['Bash(tenjin search:*)'],
+        grantDeclined: ['Bash(tenjin search:*)'],
       },
       future: { kept: true },
     });
@@ -701,19 +718,35 @@ describe('publish.mode keeps the harness allowlist in step', () => {
     if (raw === null) return [];
     return (JSON.parse(raw) as { permissions?: { allow?: string[] } }).permissions?.allow ?? [];
   };
-  const syncOf = (d: unknown) =>
-    (
+  const syncOf = (d: unknown) => {
+    const sync = (
       d as {
-        allowlist?: { added: string[]; removed: string[]; skipped?: string; pointer?: string };
+        allowlist?: {
+          byHarness: {
+            claude?: { added: string[]; removed: string[] };
+            codex?: { granted: string[] };
+          };
+          skipped?: string;
+          pointer?: string;
+        };
       }
     ).allowlist;
+    if (sync === undefined) return undefined;
+    return {
+      added: sync.byHarness.claude?.added ?? [],
+      removed: sync.byHarness.claude?.removed ?? [],
+      skipped: sync.skipped,
+      pointer: sync.pointer,
+      codexGrant: sync.byHarness.codex,
+    };
+  };
 
   // Loosening ADDS a grant, so a human says yes to it.
   it('writes the publish rule on auto when the operator agrees', async () => {
     const asked: string[] = [];
     const res = await runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), {
       homeDir: home,
-      harnessIsClaude: true,
+      harnessesInPlay: ['claude'],
       isInteractive: true,
       confirmRule: async (label) => {
         asked.push(label);
@@ -730,25 +763,25 @@ describe('publish.mode keeps the harness allowlist in step', () => {
 
   // The write carries the free tier too on a machine that never ran install, so
   // the question has to say so rather than name one line and write ten.
-  it('discloses the free-verb rules the same write carries', async () => {
+  it('discloses the command-grant rules the same write carries', async () => {
     let label = '';
     await runConfigSet({ key: 'publish.mode', value: 'full-auto' }, makeCtx(), {
       homeDir: home,
-      harnessIsClaude: true,
+      harnessesInPlay: ['claude'],
       isInteractive: true,
       confirmRule: async (l) => {
         label = l;
         return true;
       },
     });
-    expect(label).toMatch(/Also adds the \d+ free-verb rule/);
+    expect(label).toMatch(/Also adds the \d+ command-grant rule/);
     expect(await allowOf()).toHaveLength(FREE_VERB_RULES.length + MODE_GATED_RULES.length);
   });
 
   it('writes nothing when the operator declines, and points instead', async () => {
     const res = await runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), {
       homeDir: home,
-      harnessIsClaude: true,
+      harnessesInPlay: ['claude'],
       isInteractive: true,
       confirmRule: async () => false,
     });
@@ -765,7 +798,7 @@ describe('publish.mode keeps the harness allowlist in step', () => {
   it('never prompts and never writes without a TTY', async () => {
     const res = await runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), {
       homeDir: home,
-      harnessIsClaude: true,
+      harnessesInPlay: ['claude'],
       isInteractive: false,
       confirmRule: async () => {
         throw new Error('must not ask');
@@ -782,7 +815,7 @@ describe('publish.mode keeps the harness allowlist in step', () => {
       makeCtx({ json: true }),
       {
         homeDir: home,
-        harnessIsClaude: true,
+        harnessesInPlay: ['claude'],
         isInteractive: true,
         confirmRule: async () => {
           throw new Error('must not ask');
@@ -795,12 +828,97 @@ describe('publish.mode keeps the harness allowlist in step', () => {
     expect(syncOf(res.data)?.pointer).toContain(PUBLISH_MODE_RULE);
   });
 
+  it('does not write the Codex grant before a declined loosening', async () => {
+    const writes: string[] = [];
+    const res = await runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), {
+      homeDir: home,
+      harnessesInPlay: ['codex'],
+      isInteractive: true,
+      confirmRule: async () => false,
+      adapters: adaptersWithCodexGrant(async (_home, mode) => {
+        writes.push(mode);
+        return { path: join(home, '.codex', 'rules', 'tenjin.rules'), granted: [], wrote: true };
+      }),
+    });
+    expect(writes).toEqual([]);
+    expect(syncOf(res.data)?.skipped).toBe('declined');
+    expect(syncOf(res.data)?.codexGrant).toBeUndefined();
+  });
+
+  it('does not write the Codex grant on a headless loosening', async () => {
+    const writes: string[] = [];
+    const res = await runConfigSet(
+      { key: 'publish.mode', value: 'full-auto' },
+      makeCtx({ json: true }),
+      {
+        homeDir: home,
+        harnessesInPlay: ['codex'],
+        isInteractive: true,
+        adapters: adaptersWithCodexGrant(async (_home, mode) => {
+          writes.push(mode);
+          return { path: join(home, '.codex', 'rules', 'tenjin.rules'), granted: [], wrote: true };
+        }),
+      },
+    );
+    expect(writes).toEqual([]);
+    expect(syncOf(res.data)?.skipped).toBe('no-tty');
+  });
+
+  it('writes the Codex grant only after the operator accepts the loosening', async () => {
+    const events: string[] = [];
+    const res = await runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), {
+      homeDir: home,
+      harnessesInPlay: ['codex'],
+      isInteractive: true,
+      confirmRule: async () => {
+        events.push('confirm');
+        return true;
+      },
+      adapters: adaptersWithCodexGrant(async (_home, mode) => {
+        events.push(`write:${mode}`);
+        return {
+          path: join(home, '.codex', 'rules', 'tenjin.rules'),
+          granted: ['tenjin publish'],
+          wrote: true,
+        };
+      }),
+    });
+    expect(events).toEqual(['confirm', 'write:auto']);
+    expect(syncOf(res.data)?.codexGrant?.granted).toEqual(['tenjin publish']);
+  });
+
+  it('does not persist the mode when the accepted Codex grant write fails', async () => {
+    const path = join(home, '.codex', 'rules', 'tenjin.rules');
+    const err = await caught(() =>
+      runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), {
+        homeDir: home,
+        harnessesInPlay: ['codex'],
+        isInteractive: true,
+        confirmRule: async () => true,
+        adapters: adaptersWithCodexGrant(async () => ({
+          path,
+          granted: [],
+          wrote: false,
+          error: 'permission denied',
+        })),
+      }),
+    );
+    expect(err).toMatchObject({
+      code: 'REFUSED',
+      message: expect.stringContaining('permission denied'),
+      fix: expect.stringContaining('tenjin config set publish.mode auto'),
+    });
+    expect(await runConfigGet({ key: 'publish.mode' }, makeCtx())).toMatchObject({
+      data: { value: 'review', source: 'default' },
+    });
+  });
+
   // Tightening only ever removes what this CLI wrote, so it needs no question —
   // including on a headless machine, which is where a stale grant would sit.
   it('retracts the rule on review, unprompted, and reports it', async () => {
     await runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), {
       homeDir: home,
-      harnessIsClaude: true,
+      harnessesInPlay: ['claude'],
       isInteractive: true,
       confirmRule: async () => true,
     });
@@ -808,7 +926,7 @@ describe('publish.mode keeps the harness allowlist in step', () => {
 
     const res = await runConfigSet({ key: 'publish.mode', value: 'review' }, makeCtx(), {
       homeDir: home,
-      harnessIsClaude: true,
+      harnessesInPlay: ['claude'],
       isInteractive: false,
       confirmRule: async () => {
         throw new Error('must not ask');
@@ -845,7 +963,7 @@ describe('publish.mode keeps the harness allowlist in step', () => {
     );
     const res = await runConfigSet({ key: 'publish.mode', value: 'review' }, makeCtx(), {
       homeDir: home,
-      harnessIsClaude: true,
+      harnessesInPlay: ['claude'],
     });
     expect(await allowOf()).toEqual(['Bash(git status:*)']);
     expect(syncOf(res.data)?.removed).toEqual([PUBLISH_MODE_RULE]);
@@ -858,7 +976,7 @@ describe('publish.mode keeps the harness allowlist in step', () => {
   it('is a clean no-op on a wired machine under --json, not a no-tty pointer', async () => {
     await runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), {
       homeDir: home,
-      harnessIsClaude: true,
+      harnessesInPlay: ['claude'],
       isInteractive: true,
       confirmRule: async () => true,
     });
@@ -867,7 +985,7 @@ describe('publish.mode keeps the harness allowlist in step', () => {
       makeCtx({ json: true }),
       {
         homeDir: home,
-        harnessIsClaude: true,
+        harnessesInPlay: ['claude'],
       },
     );
     expect(syncOf(res.data)).toMatchObject({ added: [], removed: [] });
@@ -882,7 +1000,7 @@ describe('publish.mode keeps the harness allowlist in step', () => {
       makeCtx({ json: true }),
       {
         homeDir: home,
-        harnessIsClaude: true,
+        harnessesInPlay: ['claude'],
       },
     );
     expect(syncOf(res.data)?.skipped).toBe('no-tty');
@@ -892,13 +1010,13 @@ describe('publish.mode keeps the harness allowlist in step', () => {
   it('asks nothing when the allowlist already carries every rule the mode needs', async () => {
     await runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), {
       homeDir: home,
-      harnessIsClaude: true,
+      harnessesInPlay: ['claude'],
       isInteractive: true,
       confirmRule: async () => true,
     });
     const res = await runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), {
       homeDir: home,
-      harnessIsClaude: true,
+      harnessesInPlay: ['claude'],
       isInteractive: true,
       confirmRule: async () => {
         throw new Error('must not ask');
@@ -912,7 +1030,7 @@ describe('publish.mode keeps the harness allowlist in step', () => {
     const res = await runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), {
       homeDir: home,
       isInteractive: true,
-      harnessIsClaude: false,
+      harnessesInPlay: [],
       confirmRule: async () => {
         throw new Error('must not ask');
       },
@@ -933,19 +1051,27 @@ describe('publish.mode keeps the harness allowlist in step', () => {
    */
   describe('harness detection, when the caller names none', () => {
     // Nothing on PATH, no ~/.claude, no recorded --harness: not our file.
-    it('skips a codex-only machine at a TTY, without asking', async () => {
+    it('asks before widening a Codex-only machine and writes nothing on no', async () => {
       await mkdir(join(home, '.codex'), { recursive: true });
+      const writes: string[] = [];
       const res = await runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), {
         homeDir: home,
         isInteractive: true,
         which: (bin) => bin === 'codex',
         env: { PATH: '' },
-        confirmRule: async () => {
-          throw new Error('must not ask');
-        },
+        confirmRule: async () => false,
+        adapters: adaptersWithCodexGrant(async (_home, mode) => {
+          writes.push(mode);
+          return {
+            path: join(home, '.codex', 'rules', 'tenjin.rules'),
+            granted: [],
+            wrote: true,
+          };
+        }),
       });
       expect(await allowOf()).toEqual([]);
-      expect(syncOf(res.data)?.skipped).toBe('not-claude');
+      expect(writes).toEqual([]);
+      expect(syncOf(res.data)?.skipped).toBe('declined');
       // No pointer either: there is no settings file of ours here to be missing
       // anything, so naming Claude rules would be advice about another machine.
       expect(syncOf(res.data)?.pointer).toBeUndefined();
@@ -958,14 +1084,24 @@ describe('publish.mode keeps the harness allowlist in step', () => {
     // Tightening on the same machine must not CREATE the file either: the writer
     // makes ~/.claude/settings.json when it is absent, so an unguarded retraction
     // would leave a codex-only operator holding a Claude config they never had.
-    it('creates no settings file on review for a codex-only machine', async () => {
+    it('narrows the Codex grant on review without creating Claude settings', async () => {
+      const writes: string[] = [];
       const res = await runConfigSet({ key: 'publish.mode', value: 'review' }, makeCtx(), {
         homeDir: home,
         which: (bin) => bin === 'codex',
         env: { PATH: '' },
+        adapters: adaptersWithCodexGrant(async (_home, mode) => {
+          writes.push(mode);
+          return {
+            path: join(home, '.codex', 'rules', 'tenjin.rules'),
+            granted: [],
+            wrote: true,
+          };
+        }),
       });
       expect(existsSync(claudeSettingsPath(home))).toBe(false);
-      expect(syncOf(res.data)?.skipped).toBe('not-claude');
+      expect(writes).toEqual(['review']);
+      expect(syncOf(res.data)?.skipped).toBeUndefined();
     });
 
     // A ~/.claude directory IS Claude-detection evidence (home-dir reason), so a

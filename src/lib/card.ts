@@ -462,20 +462,20 @@ export function missingSentences(tokens: string[]): string[] {
 }
 
 /**
- * A LOCAL preview of the Q9 eligibility rubric for the pre-publish confirmation
- * payload — the server recomputes the authoritative `cacheEligibleMissing` on
- * write, but the confirmation prompt shows the human what the card is still
- * missing before they approve. `asOf` counts only for a snapshot card.
+ * The Q9 eligibility rubric, as the tokens it fails on, computed LOCALLY.
+ *
+ * ONE RUBRIC, TWO READERS. The publish gate refuses an incomplete card by
+ * naming the frontmatter keys behind these tokens, and {@link
+ * localCardEligibility} renders the same tokens as sentences for a payload; if
+ * the two computed their own answers they would disagree the first time either
+ * moved. The server recomputes the authoritative `cacheEligibleMissing` on
+ * write, and this mirrors it. `asOf` counts only for a snapshot card.
  */
-export function localCardEligibility(card: ResourceCardInput | undefined): {
-  cacheEligible: boolean;
-  missing: string[];
-} {
+export function cardEligibilityTokens(card: ResourceCardInput | undefined): string[] {
   const tokens: string[] = [];
   // Parity with the server rubric: presence is trim().length > 0, so a bare
-  // `scope:` ('' after parse) or `--scope " "` counts as MISSING, not present —
-  // otherwise the needs_confirmation preview claims complete for a card the
-  // server will report as incomplete.
+  // `scope:` ('' after parse) counts as MISSING, not present — otherwise the
+  // gate passes a card the server will report as incomplete.
   const hasQuestionsOrTasks =
     (card?.questionsAnswered?.some(hasText) ?? false) ||
     (card?.tasksSupported?.some(hasText) ?? false);
@@ -486,6 +486,18 @@ export function localCardEligibility(card: ResourceCardInput | undefined): {
   if (!hasText(card?.provenanceSummary) && !hasText(card?.methodologySummary)) {
     tokens.push('provenanceOrMethodology');
   }
+  return tokens;
+}
+
+/**
+ * The same rubric as plain sentences, for the pre-publish confirmation payload
+ * and the receipt: what the card is still missing, in the words a human reads.
+ */
+export function localCardEligibility(card: ResourceCardInput | undefined): {
+  cacheEligible: boolean;
+  missing: string[];
+} {
+  const tokens = cardEligibilityTokens(card);
   return { cacheEligible: tokens.length === 0, missing: missingSentences(tokens) };
 }
 

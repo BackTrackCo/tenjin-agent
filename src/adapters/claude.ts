@@ -1,6 +1,10 @@
 import { AGENT_ID_RE } from '../lib/grade';
 import { CONTEXT_MAX } from '../hooks/constants';
-import { claudeSettingsPath } from '../lib/harness-permissions';
+import {
+  claudeSettingsPath,
+  inspectClaudeGrant,
+  wireFreeVerbAllowlist,
+} from '../lib/harness-permissions';
 import { hasErrorMarker } from './error-markers';
 import type {
   Emit,
@@ -73,8 +77,15 @@ function canonicalTool(name: string, input: Record<string, unknown>): HookTool {
       const path = str(input.file_path);
       return { name, kind, paths: path === undefined ? [] : [path] };
     }
-    case 'dispatch':
-      return { name, kind, task: str(input.prompt) ?? '' };
+    case 'dispatch': {
+      const description = str(input.description);
+      return {
+        name,
+        kind,
+        task: str(input.prompt) ?? '',
+        ...(description !== undefined ? { description } : {}),
+      };
+    }
     case 'web':
       return { name, kind, query: str(input.query) ?? '' };
     case 'fetch':
@@ -257,6 +268,11 @@ export const registrar: Registrar = {
       { event: 'SubagentStop', hooks: http },
       { event: 'Stop', hooks: http },
     ];
+  },
+  grant: {
+    path: claudeSettingsPath,
+    inspect: inspectClaudeGrant,
+    write: wireFreeVerbAllowlist,
   },
 };
 

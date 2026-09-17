@@ -96,6 +96,8 @@ import { configPath, daemonPidPath, daemonTokenPath, hooksDir, shimBundlePath } 
 import { renderSkillMarkdown } from '../lib/skill-materialize';
 import type { DoctorChecks } from './doctor';
 import type { CommandContext, GlobalFlags } from '../context';
+import { ADAPTERS } from '../adapters/registry';
+import type { HarnessAdapter } from '../adapters/types';
 
 // Real packaged skills, resolved once from this test's location. Using the real
 // source (not a fixture) also proves the copy lands byte-identical content.
@@ -202,6 +204,7 @@ function realWalletCreate(exec?: ExecFn): Partial<InstallDeps> {
 const okChecks: DoctorChecks = {
   publishMode: 'review',
   missingModeGated: [],
+  grantable: true,
   checks: [{ name: 'stub', status: 'ok', required: true, detail: 'ok' }],
 };
 
@@ -240,6 +243,23 @@ const noKeychain: ExecFn = async () => {
   throw new Error('no credential store here');
 };
 
+type TrustEnsure = NonNullable<HarnessAdapter['registrar']['trust']>['ensure'];
+
+function adaptersWithTrust(
+  ensure: TrustEnsure = async (_home, keys) => ({ ok: true, trusted: [...keys] }),
+): Readonly<typeof ADAPTERS> {
+  return {
+    ...ADAPTERS,
+    codex: {
+      ...ADAPTERS.codex,
+      registrar: {
+        ...ADAPTERS.codex.registrar,
+        trust: { ...ADAPTERS.codex.registrar.trust!, ensure },
+      },
+    },
+  };
+}
+
 function deps(over: Partial<InstallDeps> = {}): InstallDeps {
   return {
     homeDir: home,
@@ -266,6 +286,10 @@ function deps(over: Partial<InstallDeps> = {}): InstallDeps {
     // the real creator with `realWalletCreate()`, which still goes through the
     // fake keychain above.
     createWallet: async () => STUB_ADDRESS,
+    // Lifecycle behavior is injected at the adapter boundary. The real Codex
+    // trust implementation spawns `codex app-server`, so unit tests replace
+    // only that adapter method and keep the command free of Codex-only seams.
+    adapters: adaptersWithTrust(),
     promptPublishMode: async () => null,
     // NEVER the real one. Steps 1-3 of the hook cutover spawn a detached daemon;
     // this writes exactly what one leaves behind (the bundles, the token, the pid
@@ -653,6 +677,7 @@ describe('runInstall: doctor as the final step', () => {
     const failing: DoctorChecks = {
       publishMode: 'review',
       missingModeGated: [],
+      grantable: true,
       checks: [{ name: 'api', status: 'fail', required: true, detail: 'down' }],
       failure: {
         code: 'API_UNREACHABLE',
@@ -717,6 +742,7 @@ describe('runInstall: output ordering', () => {
   const warning: DoctorChecks = {
     publishMode: 'review',
     missingModeGated: [],
+    grantable: true,
     checks: [
       {
         name: 'search',
@@ -1416,6 +1442,7 @@ describe('runInstall: the ten rows', () => {
     const mixed: DoctorChecks = {
       publishMode: 'review',
       missingModeGated: [],
+      grantable: true,
       checks: [
         { name: 'node', status: 'ok', required: true, detail: '24.4.0' },
         { name: 'balance', status: 'warn', required: false, detail: '$0.00 USDC' },
@@ -1458,23 +1485,25 @@ describe('runInstall: permissions decision', () => {
     permissions: {
       alwaysSafe: { rule: string }[];
       modeGated: { rule: string }[];
-      wired: {
-        harness: string;
-        path?: string;
-        added: string[];
-        alreadyPresent: string[];
-        addedFree: string[];
-        alreadyPresentFree: string[];
-        planned?: boolean;
-        modeGrant?: { rules: string[]; state: string; disclosure: string; undo: string[] };
-        removed: string[];
-        skipped?: string;
-        warning?: string;
-        fix?: string;
+      byHarness: {
+        claude?: {
+          harness: string;
+          path?: string;
+          added: string[];
+          alreadyPresent: string[];
+          addedFree: string[];
+          alreadyPresentFree: string[];
+          planned?: boolean;
+          modeGrant?: { rules: string[]; state: string; disclosure: string; undo: string[] };
+          removed: string[];
+          skipped?: string;
+          warning?: string;
+          fix?: string;
+        };
       };
     };
   };
-  const wiredOf = (d: unknown) => (d as WiredData).permissions.wired;
+  const wiredOf = (d: unknown) => (d as WiredData).permissions.byHarness.claude!;
   const human = (res: { humanLines?: string[] }): string =>
     (res.humanLines ?? []).join('\n').replace(/\x1b\[[0-9;]*m/g, ''); // eslint-disable-line no-control-regex
 
@@ -1532,9 +1561,9 @@ describe('runInstall: permissions decision', () => {
     expect(await allowList()).toEqual([...FREE_VERB_RULES]);
   });
 
-  it('--no-allow-free-verbs is the opt-out and writes nothing', async () => {
+  it('--no-grant is the opt-out and writes nothing', async () => {
     const res = await runInstall(
-      { harness: ['claude'], noAllowFreeVerbs: true },
+      { harness: ['claude'], noGrant: true },
       makeCtx({ json: true }),
       deps(),
     );
@@ -1545,15 +1574,14 @@ describe('runInstall: permissions decision', () => {
   async function declinedList(): Promise<string[] | undefined> {
     const raw = await readFile(join(data, 'config.json'), 'utf8').catch(() => null);
     if (raw === null) return undefined;
-    return (JSON.parse(raw) as { install?: { freeVerbsDeclined?: string[] } }).install
-      ?.freeVerbsDeclined;
+    return (JSON.parse(raw) as { install?: { grantDeclined?: string[] } }).install?.grantDeclined;
   }
 
   // tenjin-agent#234, per-rule fix: a decline records the EXACT rules that were
   // pending, not a flag that suppresses everything forever.
-  it('--no-allow-free-verbs persists the exact rules that were pending', async () => {
+  it('--no-grant persists the exact rules that were pending', async () => {
     await runInstall(
-      { harness: ['claude'], noAllowFreeVerbs: true, publishMode: 'review' },
+      { harness: ['claude'], noGrant: true, publishMode: 'review' },
       makeCtx({ json: true }),
       deps(),
     );
@@ -1562,7 +1590,7 @@ describe('runInstall: permissions decision', () => {
 
   /**
    * Greptile P1 #1: the satisfied-early-return in `resolvePermissions` used to
-   * return before ever touching `install.freeVerbsDeclined`, so a decline
+   * return before ever touching `install.grantDeclined`, so a decline
    * recorded on one run survived a grant made an entirely different way (a
    * hand-edit, another tool, or `tenjin uninstall` and reinstall of just the
    * settings file) — the next refresh kept nagging about rules the settings
@@ -1570,7 +1598,7 @@ describe('runInstall: permissions decision', () => {
    */
   it('a satisfied file clears a stale decline, even when satisfied by hand', async () => {
     await runInstall(
-      { harness: ['claude'], noAllowFreeVerbs: true, publishMode: 'review' },
+      { harness: ['claude'], noGrant: true, publishMode: 'review' },
       makeCtx(),
       deps(),
     );
@@ -1594,7 +1622,7 @@ describe('runInstall: permissions decision', () => {
    */
   it('a later grant clears the declined list entirely', async () => {
     await runInstall(
-      { harness: ['claude'], noAllowFreeVerbs: true, publishMode: 'review' },
+      { harness: ['claude'], noGrant: true, publishMode: 'review' },
       makeCtx(),
       deps(),
     );
@@ -1606,7 +1634,7 @@ describe('runInstall: permissions decision', () => {
 
   /**
    * Greptile P1 (tenjin-agent#272): the grant branch used to clear
-   * `freeVerbsDeclined` BEFORE `wireFreeVerbAllowlist` returned, so a refused
+   * `grantDeclined` BEFORE `wireFreeVerbAllowlist` returned, so a refused
    * settings write left the rules absent but the record erased — reopening
    * exactly the #234 bug this changeset fixes (a settled decline recomputed as
    * pending on every later refresh) for the one machine that can least repair
@@ -1618,7 +1646,7 @@ describe('runInstall: permissions decision', () => {
   it('a failed grant leaves the decline on record, so refresh keeps honoring it', async () => {
     await writeSettings({ permissions: { allow: [] } });
     await runInstall(
-      { harness: ['claude'], noAllowFreeVerbs: true, publishMode: 'auto' },
+      { harness: ['claude'], noGrant: true, publishMode: 'auto' },
       makeCtx(),
       deps({ which: (bin) => bin === 'claude' }),
     );
@@ -1658,7 +1686,8 @@ describe('runInstall: permissions decision', () => {
       makeCtx(),
       deps({ which: (bin) => bin === 'claude' }),
     );
-    const pending = (refreshRes.data as { permissions: { pending: string[] } }).permissions.pending;
+    const pending = (refreshRes.data as { permissions: { claude: { missing: string[] } } })
+      .permissions.claude.missing;
     for (const rule of declinedBefore ?? []) expect(pending).not.toContain(rule);
   });
 
@@ -1666,7 +1695,7 @@ describe('runInstall: permissions decision', () => {
   // CliError's `fix` carries, so a machine consumer never has to parse prose.
   it('carries a fix string on every skipped permissions state', async () => {
     const declined = await runInstall(
-      { harness: ['claude'], noAllowFreeVerbs: true },
+      { harness: ['claude'], noGrant: true },
       makeCtx({ json: true }),
       deps(),
     );
@@ -1678,9 +1707,6 @@ describe('runInstall: permissions decision', () => {
       deps(),
     );
     expect(wiredOf(dry.data).fix).toContain('tenjin install');
-
-    const codex = await runInstall({ harness: ['codex'] }, makeCtx({ json: true }), deps());
-    expect(wiredOf(codex.data).fix).toContain('tenjin doctor');
   });
 
   // The old headless arm returned an empty pair whatever the file held, so a
@@ -1904,11 +1930,38 @@ describe('runInstall: permissions decision', () => {
     expect(human(res)).toContain('unchanged (dry run)');
   });
 
-  it('skips a codex-only install, and says why', async () => {
+  /**
+   * `effective` is about the `Bash(...)` payload beside it, which is Claude
+   * Code's grammar. Codex has a grant surface of its own and cannot carry one
+   * line of it, so a Codex-only envelope claiming these rules are in force is
+   * #342's defect one level up (tenjin-agent#343).
+   */
+  it('never marks Claude rules effective on a codex-only install', async () => {
+    const res = await runInstall({ harness: ['codex'] }, makeCtx({ json: true }), deps());
+    const perms = (res.data as { permissions: { effective: boolean } }).permissions;
+    expect(perms.effective).toBe(false);
+
+    const both = await runInstall(
+      { harness: ['claude', 'codex'] },
+      makeCtx({ json: true }),
+      deps(),
+    );
+    expect((both.data as { permissions: { effective: boolean } }).permissions.effective).toBe(true);
+  });
+
+  it('writes no Claude rules on a codex-only install, and grants Codex its own', async () => {
+    // The Claude writer must not create a settings.json on a machine with no
+    // Claude on it, and the envelope must not read as though it did. Codex is
+    // not ungranted here: its grant is a file of its own (tenjin-agent#342).
     const res = await runInstall({ harness: ['codex'] }, makeCtx(), deps({ isInteractive: true }));
-    expect(wiredOf(res.data)).toMatchObject({ harness: 'codex', skipped: 'harness-not-claude' });
     expect(await allowList()).toBeUndefined();
-    expect(human(res)).toContain('Claude Code only');
+    const grant = (
+      res.data as {
+        permissions: { byHarness: { codex?: { granted: string[]; path: string } } };
+      }
+    ).permissions.byHarness.codex;
+    expect(grant?.granted.length).toBeGreaterThan(0);
+    expect(await readFile(grant?.path ?? '', 'utf8')).toContain('prefix_rule(pattern=["tenjin"');
   });
 
   it('sanitizes the warning, which quotes bytes out of the file', async () => {
@@ -1972,7 +2025,7 @@ describe('runInstall: permissions decision', () => {
     expect(d.permissions.alwaysSafe.map((e) => e.rule)).toEqual(
       ALWAYS_SAFE_ALLOWLIST.map((e) => e.rule),
     );
-    expect(d.permissions.wired.added).toEqual([...FREE_VERB_RULES]);
+    expect(d.permissions.byHarness.claude?.added).toEqual([...FREE_VERB_RULES]);
   });
 
   /**
@@ -2154,10 +2207,10 @@ describe('runInstall: permissions decision', () => {
       expect(human(res)).toContain('publishing   review');
     });
 
-    // `--no-allow-free-verbs` still refuses the whole write, publish rule included.
+    // `--no-grant` still refuses the whole write, publish rule included.
     it('writes nothing at all when the allowlist itself is refused', async () => {
       const res = await runInstall(
-        { harness: ['claude'], noAllowFreeVerbs: true },
+        { harness: ['claude'], noGrant: true },
         makeCtx({ json: true }),
         deps(),
       );
@@ -2166,7 +2219,7 @@ describe('runInstall: permissions decision', () => {
     });
 
     /**
-     * `--no-allow-free-verbs` declines a WRITE OF OURS. It is not a request to
+     * `--no-grant` declines a WRITE OF OURS. It is not a request to
      * keep a grant the operator just revoked, and while the retraction sat below
      * this guard the run wrote `mode: review` to config.json, left both rules
      * allowed, exited 0, and reported `skipped: declined` with a fix telling the
@@ -2177,7 +2230,7 @@ describe('runInstall: permissions decision', () => {
         permissions: { allow: [FREE_VERB_RULES[0], PUBLISH_MODE_RULE, EDIT_MODE_RULE] },
       });
       const res = await runInstall(
-        { harness: ['claude'], noAllowFreeVerbs: true, publishMode: 'review' },
+        { harness: ['claude'], noGrant: true, publishMode: 'review' },
         makeCtx({ json: true }),
         deps(),
       );
@@ -2186,39 +2239,25 @@ describe('runInstall: permissions decision', () => {
       expect(await allowList()).toEqual([FREE_VERB_RULES[0]]);
     });
 
-    /**
-     * The retraction runs above the guards that decline a write, so a run can
-     * retract and then skip. Both skip lines described the file as untouched:
-     * "unchanged" on the declined path, and "not wired (Claude Code only)" on the
-     * other-harness path, which is worse because it names the very file the run
-     * had just deleted two rules from.
-     */
-    it('says what it took back on the skip lines too, not just the write lines', async () => {
-      const lineFor = async (args: Parameters<typeof runInstall>[0]): Promise<string> => {
-        await writeSettings({
-          permissions: { allow: [FREE_VERB_RULES[0], PUBLISH_MODE_RULE, EDIT_MODE_RULE] },
-        });
-        const res = await runInstall(args, makeCtx(), deps({ isInteractive: true }));
-        return (
-          human(res)
-            .split('\n')
-            .find((l) => l.includes('permissions')) ?? ''
-        );
-      };
-
-      const declined = await lineFor({
-        harness: ['claude'],
-        noAllowFreeVerbs: true,
-        publishMode: 'review',
+    it('says what it took back when the Claude grant write is declined', async () => {
+      await writeSettings({
+        permissions: { allow: [FREE_VERB_RULES[0], PUBLISH_MODE_RULE, EDIT_MODE_RULE] },
       });
-      expect(declined).toContain('2 removed');
-
-      const otherHarness = await lineFor({ harness: ['codex'], publishMode: 'review' });
-      expect(otherHarness).toContain('2 removed');
-      // And it NAMES the file. A non-Claude skip carries no path on purpose, but
-      // once this run has deleted from that file, withholding its name is the
-      // thing that leaves the operator unable to check.
-      expect(otherHarness).toContain(claudeSettingsPath(home));
+      const res = await runInstall(
+        {
+          harness: ['claude'],
+          noGrant: true,
+          publishMode: 'review',
+        },
+        makeCtx(),
+        deps({ isInteractive: true }),
+      );
+      const line =
+        human(res)
+          .split('\n')
+          .find((candidate) => candidate.includes('permissions')) ?? '';
+      expect(line).toContain('2 removed');
+      expect(line).toContain(claudeSettingsPath(home));
     });
 
     // And the row stays honest the other way: a run that retracted nothing says
@@ -2226,30 +2265,34 @@ describe('runInstall: permissions decision', () => {
     it('says nothing about a retraction when there was nothing to take back', async () => {
       await writeSettings({ permissions: { allow: ['Bash(git status:*)'] } });
       const res = await runInstall(
-        { harness: ['claude'], noAllowFreeVerbs: true, publishMode: 'review' },
+        { harness: ['claude'], noGrant: true, publishMode: 'review' },
         makeCtx(),
         deps({ isInteractive: true }),
       );
       const line = human(res)
         .split('\n')
         .find((l) => l.includes('permissions'));
-      expect(line).toContain('none written (--no-allow-free-verbs)');
+      expect(line).toContain('none written (--no-grant)');
       expect(line).not.toContain('removed');
     });
 
-    // Same ordering bug, the other guard: scoping a WRITE to the harnesses a run
-    // targets is defensible, but a Claude rule this CLI wrote is ours to reclaim
-    // whichever harness is being installed today.
-    it('retracts on review even when this run targets another harness', async () => {
+    it('does not touch Claude grants when this run targets Codex only', async () => {
       await writeSettings({ permissions: { allow: [PUBLISH_MODE_RULE, EDIT_MODE_RULE] } });
       const res = await runInstall(
         { harness: ['codex'], publishMode: 'review' },
         makeCtx({ json: true }),
         deps(),
       );
-      expect(wiredOf(res.data).skipped).toBe('harness-not-claude');
-      expect(wiredOf(res.data).removed).toEqual([...MODE_GATED_RULES]);
-      expect(await allowList()).toEqual([]);
+      expect(await allowList()).toEqual([PUBLISH_MODE_RULE, EDIT_MODE_RULE]);
+      const permissions = (
+        res.data as {
+          permissions: { byHarness: { codex?: { granted: string[] }; claude?: unknown } };
+        }
+      ).permissions.byHarness;
+      expect(permissions).not.toHaveProperty('claude');
+      const grant = permissions.codex;
+      expect(grant?.granted).not.toContain('tenjin publish');
+      expect(grant?.granted).not.toContain('tenjin edit');
     });
 
     /**
@@ -3311,9 +3354,11 @@ describe('runInstall: harness hooks', () => {
       wrote: boolean;
       url?: string;
       daemon?: { pid: number; port: number; version: string };
-      activation?: string;
+      activation?: string[];
+      trusted?: number;
       removed: string[];
       skipped?: string;
+      warning?: string;
       fix?: string;
     }[];
   };
@@ -3417,7 +3462,10 @@ describe('runInstall: harness hooks', () => {
     expect(h.skipped).toBeUndefined();
     expect(h.path).toBe(join(home, '.codex', 'hooks.json'));
     expect(h.url).toBeUndefined();
-    expect(h.activation).toContain('/hooks');
+    // Install trusts what it wrote, so the only step left is the new session
+    // the operator has to start; no `/hooks` walkthrough (tenjin-agent#343).
+    expect(h.trusted).toBe(7);
+    expect(h.activation).toEqual(['Start a new Codex session: hooks are read at session start.']);
     expect(existsSync(join(data, 'hooks'))).toBe(true);
     expect(existsSync(claudeSettingsPath(home))).toBe(false);
     const file = JSON.parse(await readFile(h.path ?? '', 'utf8')) as {
@@ -3427,7 +3475,69 @@ describe('runInstall: harness hooks', () => {
     expect(JSON.stringify(file)).not.toContain(DAEMON_PORT.toString());
   });
 
-  it('both harnesses: one outcome each, one daemon, and the Codex trust step in the walkthrough', async () => {
+  it('keeps a mixed install usable and completes the wallet when Codex trust fails', async () => {
+    const createWallet = vi.fn(async () => STUB_ADDRESS);
+    const res = await runInstall(
+      { harness: ['claude', 'codex'] },
+      makeCtx(),
+      deps({
+        isInteractive: true,
+        confirmWallet: async () => true,
+        createWallet,
+        adapters: adaptersWithTrust(async () => ({
+          ok: false,
+          trusted: [],
+          failedAt: 'list',
+          reason: 'the codex app server could not be reached',
+        })),
+      }),
+    );
+    expect(createWallet).toHaveBeenCalledOnce();
+    expect((res.data as { wallet: { status: string; address?: string } }).wallet).toEqual({
+      status: 'created',
+      address: STUB_ADDRESS,
+    });
+    const hooks = (res.data as HooksData).hooks;
+    expect(hooks.find((h) => h.harness === 'claude')).toMatchObject({ entries: 11 });
+    expect(hooks.find((h) => h.harness === 'codex')).toMatchObject({
+      entries: 7,
+      trusted: 0,
+      warning: expect.stringContaining('app server could not be reached'),
+      fix: expect.stringContaining('tenjin install --harness codex'),
+    });
+    const text = (res.humanLines ?? []).join('\n').replace(/\x1b\[[0-9;]*m/g, ''); // eslint-disable-line no-control-regex
+    expect(text).toContain('app server could not be reached');
+    expect(text).toContain('tenjin install --harness codex');
+    expect(text).not.toContain('tenjin install --harness claude');
+    expect(text).toContain(`wallet       ${STUB_ADDRESS}, $0`);
+  });
+
+  it('fails a Codex-only install when its written hooks cannot be trusted', async () => {
+    const err = await caught(() =>
+      runInstall(
+        { harness: ['codex'] },
+        makeCtx({ json: true }),
+        deps({
+          adapters: adaptersWithTrust(async () => ({
+            ok: false,
+            trusted: [],
+            failedAt: 'verify',
+            reason: 'Codex confirmed 0 of 7 entries as trusted after the write',
+          })),
+        }),
+      ),
+    );
+    expect(err).toMatchObject({
+      code: 'REFUSED',
+      message: expect.stringContaining('0 of 7 entries'),
+      fix: expect.stringContaining('tenjin install --harness codex'),
+    });
+    expect((err.details as HooksData).hooks).toEqual([
+      expect.objectContaining({ harness: 'codex', entries: 7, trusted: 0 }),
+    ]);
+  });
+
+  it('both harnesses: one outcome each, one daemon, and Codex reported as trusted', async () => {
     const res = await runInstall(
       { harness: ['claude', 'codex'] },
       makeCtx(),
@@ -3441,9 +3551,11 @@ describe('runInstall: harness hooks', () => {
     expect(hooks[0]?.daemon?.port).toBe(hooks[1]?.daemon?.port);
     const text = (res.humanLines ?? []).join('\n').replace(/\x1b\[[0-9;]*m/g, ''); // eslint-disable-line no-control-regex
     expect(text).toContain('hooks        Claude Code: 7 enabled');
-    expect(text).toContain('hooks        Codex: 7 enabled');
+    // Codex's row names the trust it obtained; "7 enabled" over entries the
+    // harness will not run is the claim #342 was filed about.
+    expect(text).toContain('hooks        Codex: 7 trusted, 7 enabled');
     expect(text).toContain('Restart Claude Code to load the hooks.');
-    expect(text).toContain('run /hooks');
+    expect(text).not.toContain('/hooks');
   });
 });
 
@@ -3602,11 +3714,11 @@ describe('runInstall: wallet creation is the default', () => {
       deps(realWalletCreate(noKeychain)),
     );
     const d = res.data as {
-      permissions: { wired: { added: string[] } };
+      permissions: { byHarness: { claude: { added: string[] } } };
       hooks: { entries: number }[];
     };
     // The default mode is auto, so the publish rule rides along with the tier.
-    expect(d.permissions.wired.added).toEqual([...FREE_VERB_RULES, ...MODE_GATED_RULES]);
+    expect(d.permissions.byHarness.claude.added).toEqual([...FREE_VERB_RULES, ...MODE_GATED_RULES]);
     expect(d.hooks[0]?.entries).toBe(11);
   });
 
@@ -3798,6 +3910,36 @@ describe('runInstall --refresh', () => {
     expect(result.humanLines?.join('\n')).not.toContain('hooks (codex)');
   });
 
+  it('re-trusts existing Codex handlers after refresh rewrites them', async () => {
+    await runInstall(
+      { harness: ['codex'], publishMode: 'auto' },
+      makeCtx(),
+      deps({ which: (bin) => bin === 'codex' }),
+    );
+    const calls: string[][] = [];
+    const result = await runInstall(
+      { refresh: true },
+      makeCtx(),
+      refreshDeps({
+        which: (bin) => bin === 'codex',
+        adapters: adaptersWithTrust(async (_home, keys) => {
+          calls.push([...keys]);
+          return { ok: true, trusted: [...keys] };
+        }),
+      }),
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toHaveLength(7);
+    expect((result.data as { hooks: { trusted?: number }[] }).hooks[0]?.trusted).toBe(7);
+    const permissions = (
+      result.data as {
+        permissions: Record<string, { path?: string }>;
+      }
+    ).permissions;
+    expect(Object.keys(permissions)).toEqual(['codex']);
+    expect(permissions.codex?.path).toBe(join(home, '.codex', 'rules', 'tenjin.rules'));
+  });
+
   /**
    * The parent reads the EXIT CODE and nothing else, so a no-op that returned
    * success would reach the operator as "Refreshed the skills and hook scripts
@@ -3874,19 +4016,19 @@ describe('runInstall --refresh', () => {
     expect(after).not.toContain(NEW_RULE);
     // Reported rather than silently skipped: the operator can see what an
     // explicit install is holding for them.
-    const data_ = result.data as { permissions: { pending: string[] } };
-    expect(data_.permissions.pending).toEqual([NEW_RULE]);
+    const data_ = result.data as { permissions: { claude: { missing: string[] } } };
+    expect(data_.permissions.claude.missing).toEqual([NEW_RULE]);
     expect(result.humanLines?.join(' ')).toContain('tenjin install');
   });
 
   /**
-   * tenjin-agent#234: a settled `--no-allow-free-verbs` must stay settled, not
+   * tenjin-agent#234: a settled `--no-grant` must stay settled, not
    * get recomputed from the settings file (which has none of the rules) and
    * reported as pending on every later refresh.
    */
   it('does not re-report a declined allowlist as pending', async () => {
     await runInstall(
-      { harness: ['claude'], noAllowFreeVerbs: true, publishMode: 'auto' },
+      { harness: ['claude'], noGrant: true, publishMode: 'auto' },
       makeCtx(),
       deps({ which: (bin) => bin === 'claude' }),
     );
@@ -3894,13 +4036,13 @@ describe('runInstall --refresh', () => {
 
     const result = await runInstall({ refresh: true }, makeCtx(), refreshDeps());
 
-    const data_ = result.data as { permissions: { pending: string[] } };
-    expect(data_.permissions.pending).toEqual([]);
+    const data_ = result.data as { permissions: { claude: { missing: string[] } } };
+    expect(data_.permissions.claude.missing).toEqual([]);
     expect(result.humanLines?.join(' ')).not.toContain('were NOT written');
   });
 
   /**
-   * Greptile P1 #2: a boolean `freeVerbsDeclined` suppressed EVERY future
+   * Greptile P1 #2: a boolean `grantDeclined` suppressed EVERY future
    * pending rule forever, so a later version's genuinely new suggestion would
    * never be reported once any decline was on record. The per-rule list must
    * silence only the rules that were actually declined and let a new one
@@ -3908,7 +4050,7 @@ describe('runInstall --refresh', () => {
    */
   it('still reports a genuinely new rule after an earlier decline', async () => {
     await runInstall(
-      { harness: ['claude'], noAllowFreeVerbs: true, publishMode: 'auto' },
+      { harness: ['claude'], noGrant: true, publishMode: 'auto' },
       makeCtx(),
       deps({ which: (bin) => bin === 'claude' }),
     );
@@ -3924,11 +4066,11 @@ describe('runInstall --refresh', () => {
       }),
     );
 
-    const data_ = result.data as { permissions: { pending: string[] } };
+    const data_ = result.data as { permissions: { claude: { missing: string[] } } };
     // Every rule this decline actually covered stays quiet...
-    for (const rule of declinedRules) expect(data_.permissions.pending).not.toContain(rule);
+    for (const rule of declinedRules) expect(data_.permissions.claude.missing).not.toContain(rule);
     // ...but a rule the decline never saw still surfaces.
-    expect(data_.permissions.pending).toEqual([NEW_RULE]);
+    expect(data_.permissions.claude.missing).toEqual([NEW_RULE]);
     expect(result.humanLines?.join(' ')).toContain('tenjin install');
   });
 
@@ -3941,18 +4083,18 @@ describe('runInstall --refresh', () => {
   // because a single-rule `pending` mock reads back identically whether or not
   // the declined set was actually cleared — nothing here distinguished "the
   // grant cleared the record" from "the record was never consulted at all".
-  // Read `install.freeVerbsDeclined` off disk directly so the test fails if
+  // Read `install.grantDeclined` off disk directly so the test fails if
   // the grant stops clearing it.
   it('reports freshly-pending rules again once a decline has been cleared by a grant', async () => {
     await runInstall(
-      { harness: ['claude'], noAllowFreeVerbs: true, publishMode: 'auto' },
+      { harness: ['claude'], noGrant: true, publishMode: 'auto' },
       makeCtx(),
       deps({ which: (bin) => bin === 'claude' }),
     );
     const declinedBefore = JSON.parse(await readFile(join(data, 'config.json'), 'utf8')) as {
-      install?: { freeVerbsDeclined?: string[] };
+      install?: { grantDeclined?: string[] };
     };
-    expect(declinedBefore.install?.freeVerbsDeclined?.length).toBeGreaterThan(0);
+    expect(declinedBefore.install?.grantDeclined?.length).toBeGreaterThan(0);
 
     // A later, explicit run grants the allowlist and clears the record.
     await runInstall(
@@ -3961,9 +4103,9 @@ describe('runInstall --refresh', () => {
       deps({ which: (bin) => bin === 'claude' }),
     );
     const declinedAfter = JSON.parse(await readFile(join(data, 'config.json'), 'utf8')) as {
-      install?: { freeVerbsDeclined?: string[] };
+      install?: { grantDeclined?: string[] };
     };
-    expect(declinedAfter.install?.freeVerbsDeclined).toEqual([]);
+    expect(declinedAfter.install?.grantDeclined).toEqual([]);
 
     const REVOKED_RULE = FREE_VERB_RULES[0]!;
     const result = await runInstall(
@@ -3971,8 +4113,8 @@ describe('runInstall --refresh', () => {
       makeCtx(),
       refreshDeps({ inspectPermissions: async () => ({ pending: [REVOKED_RULE] }) }),
     );
-    const data_ = result.data as { permissions: { pending: string[] } };
-    expect(data_.permissions.pending).toEqual([REVOKED_RULE]);
+    const data_ = result.data as { permissions: { claude: { missing: string[] } } };
+    expect(data_.permissions.claude.missing).toEqual([REVOKED_RULE]);
   });
 
   /**

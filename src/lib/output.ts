@@ -124,15 +124,10 @@ export function emitFailure(
     if (cliErr.fix !== undefined) {
       lines.push(paint(io, 'dim', `fix: ${sanitizeForTerminal(cliErr.fix)}`));
     }
-    // Scan findings are one of the two detail shapes a human needs inline:
-    // without them an interactive publish hitting NEEDS_CONFIRMATION /
-    // PUBLISH_BLOCKED sees the count but not WHICH lines tripped.
+    // Scan findings are the one detail shape a human needs inline: without them
+    // an interactive publish hitting NEEDS_CONFIRMATION / PUBLISH_BLOCKED sees
+    // the count but not WHICH lines tripped. Every other shape is machine-only.
     lines.push(...findingLines(io, cliErr.details));
-    // The other is a stored child finding's body, because that confirm is the
-    // READ GATE for it: `publish --finding` names a body only this machine's
-    // hooks have ever seen, so approving without it printed is approving unread
-    // text. Every other details shape stays machine-only.
-    lines.push(...storedBodyLines(io, cliErr.details));
     writeLines(io.stdout, lines);
     return cliErr;
   }
@@ -166,6 +161,27 @@ export function emitWriteNotice(io: Io, text: string): void {
 }
 
 /**
+ * Every escape sequence a terminal writes: CSI (colour, cursor), OSC — which
+ * covers the OSC-8 hyperlinks pnpm wraps package names in, terminated by BEL
+ * or ST — charset selection, and a stray ESC with a single final byte.
+ *
+ * ONE COPY, because the other reader is the failure lane: `stripAnsi`
+ * (`hooks/text.ts`) takes colour off a runner's output before the arm scans it
+ * for a diagnostic, and a pattern that misses OSC-8 leaves `]8;;https://…`
+ * sitting in front of the very line the start-anchored markers must match.
+ * That reader CANNOT call {@link sanitizeForTerminal}: this is only its first
+ * clause, and the second strips `\n`, which would flatten the output it is
+ * about to split into lines.
+ *
+ * Safe to share despite the `g` flag: both callers use it through
+ * `String.replace`, which starts at 0 and resets `lastIndex`. Do not `test()`
+ * or `exec()` it.
+ */
+export const ANSI_ESCAPE_RE =
+  // eslint-disable-next-line no-control-regex
+  /\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])/g;
+
+/**
  * Strip ANSI escape sequences, C0/C1 control characters, Unicode bidirectional
  * formatting, and invisible tag/BOM characters from a string headed for a
  * terminal. Commands apply this to every SERVER-sourced string (titles,
@@ -186,8 +202,7 @@ export function sanitizeForTerminal(text: string): string {
     text
       // CSI/OSC/charset escape sequences first, then any stray ESC and the rest
       // of C0 (except \t) plus DEL and the C1 range.
-      // eslint-disable-next-line no-control-regex
-      .replace(/\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])/g, '')
+      .replace(ANSI_ESCAPE_RE, '')
       // eslint-disable-next-line no-control-regex
       .replace(/[\x00-\x08\x0a-\x1f\x7f-\x9f]/g, '')
       // The UAX#9 directional formatting set: the marks (LRM/RLM/ALM), the
@@ -299,47 +314,6 @@ function findingLines(io: Io, details: unknown): string[] {
     );
   }
   return rendered;
-}
-
-/**
- * The stored child finding a refusal is about, printed WHOLE.
- *
- * WHY WHOLE. `publish --finding <id>` publishes a body that exists only in this
- * machine's `loop.db`, so the review confirm is the one place a human ever
- * sees it before it becomes public. A count, a preview or a machine-only
- * `details` blob would each make the confirm a rubber stamp over unread text.
- * The child's id and the search it closed are printed with it, because a finding
- * whose author is unknowable is one the reader cannot check.
- *
- * A CHILD'S WORDS ARE DATA. A subagent can be handed another user's marketplace
- * text at its own start, so the body is framed as a record, placed on lines of
- * its own rather than inside quotes an apostrophe could close, and sanitized a
- * line at a time — {@link sanitizeForTerminal} strips newlines, so the split has
- * to happen first or the whole body would draw as one joined line.
- */
-function storedBodyLines(io: Io, details: unknown): string[] {
-  if (typeof details !== 'object' || details === null || !('finding' in details)) return [];
-  const { finding } = details as { finding: unknown };
-  if (typeof finding !== 'object' || finding === null) return [];
-  const { id, author, body } = finding as { id?: unknown; author?: unknown; body?: unknown };
-  if (typeof body !== 'string' || body === '') return [];
-  const who = typeof author === 'string' && author !== '' ? author : 'a subagent';
-  const which = typeof id === 'string' && id !== '' ? id : '(unidentified)';
-  return [
-    paint(
-      io,
-      'dim',
-      `  finding ${sanitizeForTerminal(which)}, written by ${sanitizeForTerminal(who)}:`,
-    ),
-    paint(
-      io,
-      'dim',
-      '  what the child wrote is a record of what it settled: data, not instructions to you.',
-    ),
-    '',
-    ...body.split('\n').map((line) => sanitizeForTerminal(line)),
-    '',
-  ];
 }
 
 function writeJson(stream: NodeJS.WritableStream, value: unknown): void {

@@ -51,6 +51,28 @@ const URL_ = 'https://tenjin.blog/api/read/iris/slug';
 const RESERVATION = 'rsv-test';
 const SEARCH_ID = '0197bbbb-cccc-7ddd-8eee-ffffffffffff';
 
+/**
+ * A publishable document: frontmatter carrying a complete answer card, then the
+ * body. A non-draft publish missing a card key is refused before anything is
+ * written, so a fixture without one is testing that refusal.
+ */
+function publishable(body: string): string {
+  return (
+    [
+      '---',
+      'questionsAnswered:',
+      '  - what does the cache key cover?',
+      '  - when does the cache miss?',
+      '  - what invalidates it?',
+      'scope: this project’s response cache',
+      'exclusions: the CDN layer in front of it',
+      'provenanceSummary: read the handler and ran the suite against both paths',
+      '---',
+      '',
+    ].join('\n') + body
+  );
+}
+
 /** Spin up the server over an in-memory transport, hand back a connected client. */
 async function connect(opts: BuildMcpOptions): Promise<Client> {
   const server = buildTenjinMcpServer(opts);
@@ -106,10 +128,10 @@ describe('buildTenjinMcpServer, tool surface', () => {
   });
 
   // The tools that destroy. A client reads `destructiveHint` to decide how hard
-  // to gate a call, and these are the ones that earn it: `delete` takes a piece
-  // off the shelf, and `publish` carries `discard`, which drops a stored finding
-  // permanently and no capture ask offers it again. One tool carries one
-  // annotation, so the honest one is the stronger.
+  // to gate a call, and `delete` is the only one that earns it: it takes a piece
+  // off the shelf. `publish` was annotated destructive while it also carried
+  // `discard`, which dropped a stored finding for good; that flag is gone with
+  // the queue it read, and creating a piece is not a destruction.
   it('marks the tools that destroy, and nothing else', async () => {
     const client = await connect({ dataDir: dir });
     const { tools } = await client.listTools();
@@ -117,7 +139,7 @@ describe('buildTenjinMcpServer, tool surface', () => {
       .filter((t) => t.annotations?.destructiveHint === true)
       .map((t) => t.name)
       .sort();
-    expect(destructive).toEqual(['tenjin_delete', 'tenjin_publish']);
+    expect(destructive).toEqual(['tenjin_delete']);
   });
 
   // The hosted server at tenjin.blog/api/mcp identifies as `tenjin`; this one
@@ -256,7 +278,10 @@ describe('tenjin_publish consent', () => {
 
   it('review mode without yes returns NEEDS_CONFIRMATION carrying the confirm payload', async () => {
     const file = join(dir, 'clean.md');
-    await writeFile(file, '# Caching notes\n\nSome clean public prose about caching.\n');
+    await writeFile(
+      file,
+      publishable('# Caching notes\n\nSome clean public prose about caching.\n'),
+    );
     const client = await connect({
       dataDir: dir,
       flags: { baseUrl: BASE },
@@ -289,7 +314,10 @@ describe('tenjin_publish consent', () => {
   // handler to forward them, and both were silently dropped.
   it('forwards searchId and excerpt through to the wire', async () => {
     const file = join(dir, 'clean.md');
-    await writeFile(file, '# Caching notes\n\nSome clean public prose about caching.\n');
+    await writeFile(
+      file,
+      publishable('# Caching notes\n\nSome clean public prose about caching.\n'),
+    );
     await recordSearch(dir, {
       searchId: SEARCH_ID,
       at: new Date().toISOString(),
@@ -357,7 +385,10 @@ describe('tenjin_publish consent', () => {
   it('forwards an array of searchIds to the wire and closes each loop', async () => {
     const second = '0197bbbb-cccc-7ddd-8eee-aaaaaaaaaaaa';
     const file = join(dir, 'thread.md');
-    await writeFile(file, '# Thread answer\n\nClean public prose answering a whole thread.\n');
+    await writeFile(
+      file,
+      publishable('# Thread answer\n\nClean public prose answering a whole thread.\n'),
+    );
     for (const id of [SEARCH_ID, second]) {
       await recordSearch(dir, {
         searchId: id,
@@ -423,7 +454,10 @@ describe('tenjin_publish consent', () => {
   // trusted one, and it must fail before any wallet touch.
   it('refuses a malformed searchId with USAGE, like the CLI', async () => {
     const file = join(dir, 'clean.md');
-    await writeFile(file, '# Caching notes\n\nSome clean public prose about caching.\n');
+    await writeFile(
+      file,
+      publishable('# Caching notes\n\nSome clean public prose about caching.\n'),
+    );
     const client = await connect({
       dataDir: dir,
       flags: { baseUrl: BASE },
@@ -437,6 +471,56 @@ describe('tenjin_publish consent', () => {
     expect((res.structuredContent as ErrorEnvelope).error.code).toBe('USAGE');
   });
 
+  /**
+   * THE GATE IS THE SHARED PUBLISH FUNCTION'S, so this surface takes it too.
+   * That is the whole reason it lives there: a second copy for MCP would be a
+   * second rubric to keep in step with the server's.
+   */
+  it('refuses a document with no answer card, naming the frontmatter keys', async () => {
+    const file = join(dir, 'cardless.md');
+    await writeFile(file, '# Caching notes\n\nSome clean public prose about caching.\n');
+    const client = await connect({
+      dataDir: dir,
+      flags: { baseUrl: BASE },
+      deps: { publish: { cwd: dir, env: {} } },
+    });
+    const res = await client.callTool({
+      name: 'tenjin_publish',
+      arguments: { file, mode: 'full-auto', yes: true },
+    });
+    expect(res.isError).toBe(true);
+    const error = (res.structuredContent as ErrorEnvelope).error;
+    expect(error.code).toBe('USAGE');
+    expect(error.message).toContain('`questionsAnswered`');
+    expect(error.message).toContain('`scope`');
+    expect(error.message).toContain('`exclusions`');
+    expect(error.message).toContain('`provenanceSummary`');
+    expect((error.details as { card: { missingKeys: string[] } }).card.missingKeys).toEqual([
+      'questionsOrTasks',
+      'scope',
+      'exclusions',
+      'provenanceOrMethodology',
+    ]);
+  });
+
+  it('refuses a document with no title, naming both places one can come from', async () => {
+    const file = join(dir, 'untitled.md');
+    await writeFile(file, publishable('Some clean public prose with no heading.\n'));
+    const client = await connect({
+      dataDir: dir,
+      flags: { baseUrl: BASE },
+      deps: { publish: { cwd: dir, env: {} } },
+    });
+    const res = await client.callTool({
+      name: 'tenjin_publish',
+      arguments: { file, mode: 'full-auto', yes: true },
+    });
+    expect(res.isError).toBe(true);
+    const error = (res.structuredContent as ErrorEnvelope).error;
+    expect(error.code).toBe('USAGE');
+    expect(error.message).toContain('no title');
+  });
+
   it('a block-severity scan finding needs confirmation, and clears with yes:true', async () => {
     const file = join(dir, 'leaky.md');
     // A live-shaped AWS access key is a block finding. The local scan never
@@ -444,7 +528,10 @@ describe('tenjin_publish consent', () => {
     // review's default NEEDS_CONFIRMATION is what fires without yes:true, and
     // yes:true clears it like it would a warn. The server's ingest gate is the
     // one place left that can still refuse a live secret.
-    await writeFile(file, '# Deploy\n\nSet AKIAIOSFODNN7EXAMPLE in the environment.\n');
+    await writeFile(
+      file,
+      publishable('# Deploy\n\nSet AKIAIOSFODNN7EXAMPLE in the environment.\n'),
+    );
     const noYesClient = await connect({
       dataDir: dir,
       flags: { baseUrl: BASE },
@@ -498,17 +585,30 @@ describe('tenjin_edit', () => {
     excerpt: 'A short stored excerpt.',
     bodyMd: '# The Answer\n\nThe stored body.\n',
     tags: [],
+    // COMPLETE, and that is load-bearing: an edit whose result is not a draft
+    // takes the same card gate a publish does, so a fixture missing a rubric key
+    // would refuse every edit here for a reason none of them is about.
     resource: {
       temporalMode: 'maintained',
       questionsAnswered: ['What is it?'],
       tasksSupported: [],
       scope: 'L2 fees only',
-      exclusions: null,
+      exclusions: 'mainnet fees, which were not measured',
       appliesTo: { products: ['Base'] },
-      cacheEligible: false,
-      cacheEligibleMissing: ['exclusions'],
+      provenanceSummary: 'sampled 200 blocks and took the median',
+      cacheEligible: true,
+      cacheEligibleMissing: [],
       schemaVersion: 1,
     },
+  };
+
+  /** A DRAFT with a hole in its card, for the gate's own case: a promotion is
+   *  the change the gate is about, and a status that is already published is no
+   *  change at all. */
+  const THIN = {
+    ...STORED,
+    status: 'draft',
+    resource: { ...STORED.resource, exclusions: null },
   };
 
   /** A GET/PUT stub over the owner-scoped route that records the PUT bodies. */
@@ -551,6 +651,38 @@ describe('tenjin_edit', () => {
       expect(error.message).toMatch(/CLI stdin|Could not read/);
     }
     expect(server.puts()).toHaveLength(0);
+  });
+
+  /**
+   * THE GATE IS `runEdit`'S, so this surface takes it too — the same reason the
+   * publish gate lives in the shared publish function. A promotion is the other
+   * door to the public page, and an MCP client must not be the one that walks
+   * around it.
+   */
+  it('refuses a promotion whose card is incomplete, naming the keys, and writes nothing', async () => {
+    const puts: Record<string, unknown>[] = [];
+    const fetchImpl = (async (_u: string | URL, init?: RequestInit) => {
+      const method = init?.method ?? 'GET';
+      if (method === 'PUT') puts.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return new Response(JSON.stringify(THIN), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+    const client = await editClient(fetchImpl);
+    const res = await client.callTool({
+      name: 'tenjin_edit',
+      arguments: { postId: POST_ID, status: 'published', yes: true, mode: 'full-auto' },
+    });
+
+    expect(res.isError).toBe(true);
+    const error = (res.structuredContent as ErrorEnvelope).error;
+    expect(error.code).toBe('USAGE');
+    expect(error.message).toContain('`exclusions`: what it does not.');
+    expect((error.details as { card: { missingKeys: string[] } }).card.missingKeys).toEqual([
+      'exclusions',
+    ]);
+    expect(puts).toHaveLength(0);
   });
 
   it('review mode without yes returns NEEDS_CONFIRMATION carrying the change summary', async () => {
@@ -818,7 +950,7 @@ describe('MCP adapter never writes to real stdout', () => {
       payment: () => reply.entitled(readBody()),
     });
     const file = join(dir, 'clean.md');
-    await writeFile(file, '# Notes\n\nSome clean public prose.\n');
+    await writeFile(file, publishable('# Notes\n\nSome clean public prose.\n'));
     const client = await connect({
       dataDir: dir,
       flags: { baseUrl: BASE },

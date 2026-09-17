@@ -1,24 +1,15 @@
-import { randomUUID } from 'node:crypto';
 import { readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { Emit } from '../adapters/types';
 import { AGENT_ID_RE } from '../lib/grade';
-import { mask } from '../lib/redact';
-import { projectId } from './failure/keys';
+import { failureKeyFingerprints } from './failure/keys';
 import { STARTED_MARK } from './actor';
 import { EDITED_PREFIX } from './arms/context';
-import { factsWithPrefix, setFact } from './facts';
+import { factsWithPrefix } from './facts';
 import { getMark, setMark } from './gates';
 import { teamOrigin } from './legs/shelf';
-import {
-  captureAsk,
-  CHILD_PUBLISHED_LINE,
-  FINDING_TAG,
-  FIX_LINE,
-  MISS_LINE,
-  type QueuedLine,
-} from './prose';
+import { captureAsk, CHILD_PUBLISHED_LINE, FAILURE_LINE, MISS_LINE } from './prose';
 import type { LoopDb } from './store';
 import { clean } from './text';
 import type { Actor, FireContext } from './types';
@@ -27,23 +18,26 @@ import type { Actor, FireContext } from './types';
  * Capture: one module for the child and the lead (13-pr-d-local-arms.md,
  * proposal B). A child that did work is asked once, at its stop, to publish
  * while it still holds the evidence; the lead is asked once at its turn end
- * and told what its children queued. The second stop after an ask harvests
- * the fenced fallback out of the last message into `facts`.
+ * and told what its children published.
  *
- * EVIDENCE IS LOOSE (decision 2): one Read is a row, so nearly every child
- * gets one ask. The kind that earned it is the `capture:asked` mark's value,
- * so the rule can be tightened later from the ledger rather than from a guess.
+ * ONCE PER AGENT, FULL STOP. The ask names a command and the agent runs it or
+ * does not; there is nothing left for a later stop to collect, so every stop
+ * after the ask writes its row and says nothing (`stop` below).
+ *
+ * EVIDENCE IS WORK THE AGENT DID, not work it read (owner, 2026-09-12). A Read
+ * on its own no longer earns a child an ask: it is the cheapest row in the
+ * ledger and it asked nearly every child, whatever it had been doing. The kind
+ * that earned it is the `capture:asked` mark's value, so the rule can move
+ * again from the ledger rather than from a guess.
  *
  * NO TIMER, NO BUDGET, NO TRANSCRIPT (decision 14): every gate below is a
  * query over rows that already exist.
  */
 
 const ASKED = 'capture:asked';
-const HARVESTED = 'capture:harvested';
 /** Written by subagent-start on a claimed miss, valued with the search id. */
 export const HANDOFF_MISS = 'handoff:miss';
 const ACTIVITY_PREFIX = 'activity:';
-const FINDING_PREFIX = 'finding:';
 /** One row per child publish, keyed `agent_published:<agent>@<at>`
  *  (`lib/publish-dedup.ts`, the CLI's writer). */
 const PUBLISHED_AGENT_PREFIX = 'agent_published:';
@@ -52,15 +46,38 @@ const PUBLISHED_AGENT_PREFIX = 'agent_published:';
  *  written: it has no turn left to answer an ask in (pr298, probed). */
 const WORKFLOW_AGENT_TYPE = 'workflow-subagent';
 
-type Evidence = 'edited' | 'research' | 'handoff-miss' | 'lookup' | 'activity' | 'finding' | 'miss';
+type Evidence = 'edited' | 'research' | 'handoff-miss' | 'lookup' | 'activity' | 'miss' | 'failure';
 
-/** Any WebSearch, WebFetch or Read row by the child counts (decision 2). The
- *  context arm's other row, a Bash call on `tool.before`, is not evidence. */
-const CHILD_RESEARCH_SQL =
-  "(arm IN ('research', 'fetch') OR (arm = 'context' AND event = 'tool.after'))";
+/** Any WebSearch or WebFetch row by the child counts. A READ DOES NOT: decision
+ *  2's "one Read is a row" is withdrawn (owner, 2026-09-12), because a Read is
+ *  the cheapest row an agent can produce and counting it asked nearly every
+ *  child regardless of what it had done. The context arm's other rows — a Read
+ *  on `tool.after`, a Bash call on `tool.before` — are not evidence. */
+const CHILD_RESEARCH_SQL = "arm IN ('research', 'fetch')";
 /** The lead's own lookups that actually ran, as opposed to being skipped. */
 const LEAD_LOOKUP_SQL =
   "arm IN ('prompt', 'research', 'fetch') AND reason IN ('hit', 'no-hit', 'cached', 'seen', 'no-answer', 'rate-server')";
+/**
+ * Every failure fire this actor left. NO LOOKUP OUTCOME DISQUALIFIES ONE, and
+ * that is the point: what the shelf did or did not return is a fact about the
+ * shelf, and the ask is about what the agent walked into.
+ *
+ * A DELIVERED PIECE IS NOT AN ANSWER EITHER. `hit` says a note was injected,
+ * not that it was right: it may need a correction this repo alone knows, or
+ * miss the problem entirely, and none of that is legible from the row. Even a
+ * note that solved it outright carries no fingerprint of its own unless someone
+ * files one, so the key still has to reach the agent for the next teammate to
+ * resolve it. `seen` is weaker still — `fire.ts` decides it on the ANSWER'S
+ * resource id rather than on the failure, so it can mean nothing more than that
+ * a note about a NEIGHBOURING failure had already been read.
+ *
+ * The three reasons excluded are the rows that are not a sighting at all:
+ * `no-question` never had one, and `asked`/`cached` are the same failure a
+ * second time, answered from the claim gate's own cache without a leg running.
+ * A key known only by those is not named, and none of them can stand in for a
+ * first sighting — the one thing a row's reason still decides.
+ */
+const FAILURE_ANY_SQL = "arm = 'failure' AND reason NOT IN ('no-question', 'asked', 'cached')";
 
 function hasMark(db: LoopDb, actor: Actor, prefix: string): boolean {
   return (
@@ -72,6 +89,8 @@ function hasMark(db: LoopDb, actor: Actor, prefix: string): boolean {
   );
 }
 
+/** When this mark was last written, or null. The ask reads its own
+ *  `capture:asked` time to decide what a failure row is newer than. */
 function markAt(db: LoopDb, actor: Actor, key: string): number | null {
   const row = db
     .prepare('SELECT at FROM marks WHERE session = ? AND agent = ? AND key = ?')
@@ -85,35 +104,6 @@ function fired(db: LoopDb, actor: Actor, where: string): boolean {
       .prepare(`SELECT 1 FROM fires WHERE session = ? AND agent = ? AND ${where} LIMIT 1`)
       .get(actor.session, actor.agent) !== undefined
   );
-}
-
-/** What `finding:<uid>` holds. `publish --finding` reads it from E on. */
-interface Finding {
-  title: string;
-  body: string;
-  session: string;
-  agent: string;
-  agentType: string;
-  project: string | null;
-  searchId: string;
-  at: number;
-}
-
-/** This session's children's findings, oldest first. The lead's own harvest
- *  is a fact too, but nothing lists it back to the lead that wrote it. */
-function childFindings(db: LoopDb, session: string): Array<{ id: string; finding: Finding }> {
-  const out: Array<{ id: string; finding: Finding }> = [];
-  for (const fact of factsWithPrefix(db, FINDING_PREFIX)) {
-    let finding: Finding;
-    try {
-      finding = JSON.parse(fact.value) as Finding;
-    } catch {
-      continue;
-    }
-    if (finding.session !== session || finding.agent === '') continue;
-    out.push({ id: fact.key.slice(FINDING_PREFIX.length), finding });
-  }
-  return out;
 }
 
 /**
@@ -150,33 +140,110 @@ function missLines(db: LoopDb, actor: Actor): string[] {
   return out;
 }
 
+/** One failure this actor hit, as the ask reads it back off the `fires`
+ *  row: what to say about it, and what it can be filed under. */
+interface FailureHit {
+  /** The masked error line, empty for a failure known only by a test identity. */
+  line: string;
+  /** The `<kind>:<hash>` fingerprints it is filed under; empty below the floor. */
+  keys: string[];
+}
+
 /**
- * The errors this session closed that no piece explains yet, oldest first.
- * THE LEAD'S ASK ONLY, like the misses: the session's closed pairings are not
- * a child's to write up.
+ * The failures this actor hit and does not already have an answer to, oldest
+ * first.
  *
- * CODE SCOPE ONLY: a `user`-scope pairing is a typo in a command, and its fix
- * teaches nobody. A row with a `post_id` has already been written up, so it is
- * named once and never again — that stamp is what `publish --key` writes.
+ * THE FACT, AND ONLY THE FACT. This is what the ask is ARMED by — an agent that
+ * walked into a wall did real work (principle 5) whether or not the wall could
+ * be fingerprinted. What is SAID about them is {@link failureLines}, which may
+ * drop some; keep the two apart, or an editorial choice about prose decides
+ * whether the ask happens.
+ *
+ * SELECTED BY WHAT HAPPENED, NOT BY WHAT THE LOOKUP RETURNED ({@link
+ * FAILURE_ANY_SQL}). The cost of naming one failure too many is a line the
+ * agent ignores; the cost of dropping one is a fingerprint nobody can ever
+ * publish under, so the asymmetry decides the default.
+ *
+ * DEDUPED AND BOUNDED, WHICH IS WHAT KEEPS IT QUIET. One line per key however
+ * many times the command ran, and `since` drops the keys a previous ask already
+ * named, so a failure is offered once per actor and never re-offered.
+ *
+ * THE `fires` ROW IS THE RECORD: `fire.ts` sets the plan's
+ * question key and its masked, cut text before the gates run, and `ledger.ts`
+ * writes both on every outcome, so a failure that asked has already left
+ * everything this needs. Nothing else is stored and nothing else is joined.
+ *
+ * PER ACTOR, NOT PER SESSION (principle 5). A child's failures belong in the
+ * child's own ask: it is the one that can explain what it hit, and a lead shown
+ * a wall it never walked into cannot write the piece.
+ *
+ * DEDUPED BY `question_key`, oldest kept: a command re-run after a failed edit
+ * is one problem, not four. Deduped here rather than with a `GROUP BY` — the
+ * bare column beside a `MIN(at)` is a SQLite-only rule, the row set is a
+ * handful, and this way the `ORDER BY at, rowid` tiebreak stays explicit.
+ *
+ * A NULL `question` IS NOT A FILTER. A failure with a test identity and no
+ * error line stores the empty string, and that row is exactly the one whose
+ * fingerprint is worth publishing under; only the key is required.
+ *
+ * NOTHING OLDER THAN THE LAST ASK, which is also what re-arms one. The line
+ * says a failure came up this turn, and on a re-armed ask the rows from before
+ * the previous ask did not: naming them again repeats a `--key fingerprint=`
+ * the agent may already have published under. The dedupe runs over the actor's
+ * whole history and `since` filters after it, so a failure that keeps
+ * recurring is still one named failure — a `no-answer` releases its
+ * once-per-question claim, so a shelf that cannot be reached re-asks and
+ * re-writes the row behind every run of the same failing command, and matching
+ * on the key's FIRST row is what keeps that from re-arming the ask every turn.
  */
-function fixLines(db: LoopDb, session: string): string[] {
+
+function failuresHit(db: LoopDb, actor: Actor, since: number | null): FailureHit[] {
   const rows = db
     .prepare(
-      `SELECT p.kind, p.key, p.error_line FROM pairings p
-       JOIN pairing_closes c ON c.pairing_id = p.id
-       WHERE c.session = ? AND p.post_id IS NULL AND p.scope = 'code'
-         AND p.closed_at IS NOT NULL AND p.error_line IS NOT NULL
-       ORDER BY p.closed_at, p.id`,
+      `SELECT question_key, question, at FROM fires
+       WHERE session = ? AND agent = ? AND ${FAILURE_ANY_SQL}
+         AND question_key IS NOT NULL AND question_key != ''
+       ORDER BY at, rowid`,
     )
-    .all(session) as unknown as Array<{ kind?: unknown; key?: unknown; error_line?: unknown }>;
-  const out: string[] = [];
+    .all(actor.session, actor.agent) as unknown as Array<{
+    question_key?: unknown;
+    question?: unknown;
+    at?: unknown;
+  }>;
+  const seen = new Set<string>();
+  const out: FailureHit[] = [];
   for (const row of rows) {
-    const kind = typeof row.kind === 'string' ? row.kind : '';
-    const key = typeof row.key === 'string' ? row.key : '';
-    const line = clean(typeof row.error_line === 'string' ? row.error_line : '', 200);
-    if (kind !== '' && key !== '' && line !== '') out.push(FIX_LINE(line, kind, key));
+    const key = typeof row.question_key === 'string' ? row.question_key : '';
+    if (key === '' || seen.has(key)) continue;
+    seen.add(key);
+    if (since !== null && (typeof row.at === 'number' ? row.at : 0) <= since) continue;
+    // Already masked and cut at the shelf's bound on the way into the row; the
+    // second cut here is for the line's own width and nothing else.
+    const line = clean(typeof row.question === 'string' ? row.question : '', 200);
+    out.push({ line, keys: failureKeyFingerprints(key) });
   }
   return out;
+}
+
+/**
+ * Those of them worth a line of their own: the ones with a fingerprint to name.
+ *
+ * A FILTER ON THE PROSE, NEVER ON THE ASK. A key that is nothing but the line
+ * hash belongs to a failure below `sigV1`'s specificity floor, and the line it
+ * would render says only "this failed, and publish if it was worth it" — which
+ * `CAPTURE_ASK` says two lines above, and which the agent can read off its own
+ * context anyway. The fingerprint is the one thing it cannot derive itself, so
+ * the fingerprint is what earns the line. On a machine where most failures are
+ * too generic to key, the ask grew one such line per failure and said nothing
+ * new each time.
+ *
+ * NOT WHAT ARMS THE ASK — that reads {@link failuresHit}. A failure with no
+ * fingerprint is still worth publishing about: the failure arm asks the shelf
+ * about exactly these IN WORDS (`arms/failure.ts`, the text stage), and a piece
+ * published with no `--key` is found by that same text.
+ */
+function failureLines(hit: readonly FailureHit[]): string[] {
+  return hit.filter((f) => f.keys.length > 0).map((f) => FAILURE_LINE(f.line, f.keys));
 }
 
 /**
@@ -216,10 +283,19 @@ function publishedLines(db: LoopDb, session: string): string[] {
   return out;
 }
 
-/** The kind of evidence that earns this actor an ask, or null. An open CLI
- *  miss of this actor's own is evidence for a child and a lead alike: the
- *  agent chose to ask, and the ask is what closes that loop. */
-function evidence(ctx: FireContext, misses: string[]): Evidence | null {
+/**
+ * The kind of evidence that earns this actor an ask, or null. Each new kind is
+ * appended, never inserted, so no ASKED value a ledger already holds changes
+ * meaning.
+ *
+ * An open CLI miss of this actor's own is evidence for a child and a lead
+ * alike: the agent chose to ask, and the ask is what closes that loop.
+ *
+ * `failure` needs no team-origin guard of its own, unlike `activity`: the
+ * failure arm plans nothing at all without one (`arms/failure.ts`), so a
+ * machine with no team shelf writes no failure fire to find here.
+ */
+function evidence(ctx: FireContext, misses: string[], hasFailures: boolean): Evidence | null {
   const { db } = ctx.deps;
   const actor = ctx.actor;
   if (actor.agent !== '') {
@@ -227,13 +303,14 @@ function evidence(ctx: FireContext, misses: string[]): Evidence | null {
     if (fired(db, actor, CHILD_RESEARCH_SQL)) return 'research';
     if (getMark(db, actor, HANDOFF_MISS) !== null) return 'handoff-miss';
     if (misses.length > 0) return 'miss';
+    if (hasFailures) return 'failure';
     return null;
   }
   if (fired(db, actor, LEAD_LOOKUP_SQL)) return 'lookup';
   if (teamOrigin(ctx.deps.config()) !== null && hasMark(db, actor, ACTIVITY_PREFIX))
     return 'activity';
-  if (childFindings(db, actor.session).length > 0) return 'finding';
   if (misses.length > 0) return 'miss';
+  if (hasFailures) return 'failure';
   return null;
 }
 
@@ -286,11 +363,12 @@ function agentTypeOf(ctx: FireContext): string {
 }
 
 /**
- * The ask, or null. Once per actor (`capture:asked`, valued with the kind);
- * the lead is re-armed only by a child's finding newer than its ask, never by
- * a publish (#294). A child is asked too — the ask is context beside its stop,
- * not a decision it has to answer — but never when it is a workflow child with
- * no turn left to answer in.
+ * The ask, or null. Once per actor (`capture:asked`, valued with the kind),
+ * re-armed ONLY by a failure the ask did not already name, never by a publish
+ * (#294) and no longer by a child's stored finding either, because there is no
+ * store. A child is asked too — the ask is context beside its stop, not a
+ * decision it has to answer — but never when it is a workflow child with no turn
+ * left to answer in.
  */
 function ask(ctx: FireContext, audience: 'child' | 'lead'): Emit | null {
   const cfg = ctx.deps.config();
@@ -298,11 +376,23 @@ function ask(ctx: FireContext, audience: 'child' | 'lead'): Emit | null {
   const { actor, input } = ctx;
   if (!cfg.hooks.publish) return null;
   const askedAt = markAt(db, actor, ASKED);
-  const queued = audience === 'lead' ? childFindings(db, actor.session) : [];
-  if (askedAt !== null && !queued.some((q) => q.finding.at > askedAt)) return null;
+  // Both audiences: a failure belongs to the actor that hit it, where an open
+  // search is the lead's loop to close and a child's publish is the lead's to
+  // hear about.
+  const hit = failuresHit(db, actor, askedAt);
+  const failures = failureLines(hit);
+  // A failure hit AFTER the ask re-arms it, and it is the only thing that does
+  // now: an actor asked at its first stop and then sent into a wall it had to
+  // climb out of has something new to say, and the first ask could not have
+  // named it. The re-arm is the lines themselves rather than a second query: an
+  // ask re-armed by a failure it would then have nothing to say about is an ask
+  // for nothing. Everything else — a publish, a child's stored text — leaves an
+  // asked actor alone, and the queue the second of those read is gone.
+  if (askedAt !== null && failures.length === 0) return null;
   if (audience === 'child' && agentTypeOf(ctx) === WORKFLOW_AGENT_TYPE) return null;
   const misses = missLines(db, actor);
-  const kind = evidence(ctx, misses);
+  // `hit`, never `failures`: the fact arms the ask, the prose only fills it.
+  const kind = evidence(ctx, misses, hit.length > 0);
   if (kind === null) return null;
   setMark(db, actor, ASKED, kind, clock());
 
@@ -314,141 +404,42 @@ function ask(ctx: FireContext, audience: 'child' | 'lead'): Emit | null {
     mode: projectPublishMode(input.cwd) ?? cfg.publish.mode,
     flags,
     misses,
-    fixes: audience === 'lead' ? fixLines(db, actor.session) : [],
+    failures,
     published: audience === 'lead' ? publishedLines(db, actor.session) : [],
-    queued: queued.map((q): QueuedLine => ({
-      id: q.id,
-      agentType: clean(q.finding.agentType, 64),
-      agent: clean(q.finding.agent, 64),
-      searchId: clean(q.finding.searchId, 64),
-      // Raw in `facts`, cleaned here (decision 15), at the bound the
-      // delivery header line already puts on a title.
-      title: clean(q.finding.title, 160),
-    })),
   });
   return { context: text };
 }
 
-const FINDING_OPEN = '```' + FINDING_TAG;
-const FINDING_FENCE = '```';
-
-/** Each line of `text`, trimmed, with its [start, end) offsets. One pass, no
- *  regex: everything the fence parse does is on text an agent chose. */
-function eachLine(
-  text: string,
-  visit: (line: string, start: number, end: number) => boolean | undefined,
-): void {
-  let i = 0;
-  while (i <= text.length) {
-    const nl = text.indexOf('\n', i);
-    const end = nl === -1 ? text.length : nl;
-    if (visit(text.slice(i, end).trim(), i, end) === false) return;
-    if (nl === -1) return;
-    i = nl + 1;
-  }
-}
-
-/** Where the marked block opens, or -1: a line of its own, and the LAST one,
- *  so an agent that mentions the marker while declining does not harvest its
- *  own decline, and one that quotes it on the way to a block keeps the block. */
-function findingOpen(text: string): number {
-  let at = -1;
-  eachLine(text, (line, _start, end) => {
-    if (line === FINDING_OPEN) at = end;
-    return undefined;
-  });
-  return at;
-}
-
-/** Where the block closes, relative to `body`, or -1 for unterminated.
- *  Fence-aware: a bare ``` closes the innermost fence, ```js nests one, so a
- *  code snippet inside the finding does not end the harvest early. */
-function findingClose(body: string): number {
-  let at = -1;
-  let depth = 0;
-  eachLine(body, (line, start) => {
-    if (!line.startsWith(FINDING_FENCE)) return undefined;
-    if (line !== FINDING_FENCE) {
-      depth += 1;
-      return undefined;
-    }
-    if (depth === 0) {
-      at = start;
-      return false;
-    }
-    depth -= 1;
-    return undefined;
-  });
-  return at;
-}
-
 /**
- * The first `# ` line split off as the title, both halves masked, nothing
- * cut (decision 11) and nothing dropped: a block with no heading, or a heading
- * with nothing under it, is the whole body with an empty title.
- */
-export function splitFinding(raw: string): { title: string; body: string } | null {
-  const heading = /^\s*#{1,6}[ \t]+(\S[^\n]*)\n([\s\S]+)$/.exec(raw);
-  if (heading !== null) {
-    const title = mask(heading[1] ?? '').trim();
-    const body = mask(heading[2] ?? '').trim();
-    if (title !== '' && body !== '') return { title, body };
-  }
-  const whole = mask(raw).trim();
-  return whole === '' ? null : { title: '', body: whole };
-}
-
-/** The marked block out of a final answer, or null. An unclosed fence is
- *  read to the end: an agent that forgot the close still settled the thing. */
-export function findingBlock(text: string): { title: string; body: string } | null {
-  const start = findingOpen(text);
-  if (start === -1) return null;
-  const rest = text.slice(start + 1);
-  const end = findingClose(rest);
-  return splitFinding(end === -1 ? rest : rest.slice(0, end));
-}
-
-/**
- * The stop after an ask: one `finding:<uid>` fact when the last message
- * carries the fence, and the `capture:harvested` mark either way, so a later
- * stop is a no-op rather than a re-parse. Once PER ASK: a lead re-armed by a
- * child's finding answers a second time, and that answer is read too.
- */
-function harvest(ctx: FireContext): void {
-  const { db, clock } = ctx.deps;
-  const { actor, input } = ctx;
-  const harvestedAt = markAt(db, actor, HARVESTED);
-  if (harvestedAt !== null && harvestedAt >= (markAt(db, actor, ASKED) ?? 0)) return;
-  const block = findingBlock(input.lastMessage ?? '');
-  let value = 'none';
-  if (block !== null) {
-    const id = randomUUID();
-    const finding: Finding = {
-      ...block,
-      session: actor.session,
-      agent: actor.agent,
-      agentType: actor.agent === '' ? '' : agentTypeOf(ctx),
-      project: projectId(input.cwd),
-      searchId: getMark(db, actor, HANDOFF_MISS) ?? '',
-      at: clock(),
-    };
-    setFact(db, FINDING_PREFIX + id, JSON.stringify(finding), clock());
-    value = id;
-  }
-  setMark(db, actor, HARVESTED, value, clock());
-}
-
-/**
- * The one stop entry for both arms: an actor not yet asked is asked; a child
- * already asked is on its answer turn and is harvested; a lead already asked
- * is harvested on its answer turn (`stopFuse`) and otherwise re-asked only if
- * a newer child finding re-arms it (`ask`).
+ * The one stop entry for both arms: an actor not yet asked goes to `ask`, and
+ * only the LEAD can come back.
+ *
+ * A CHILD IS ASKED ONCE, FULL STOP. That was true before this rule was written
+ * here — `stop()` used to send an already-asked child to the harvest, which
+ * never reached the ask — and it has to be said out loud now the harvest is
+ * gone. A child's later turns are its answer turn and whatever follows it; it
+ * has no open loop of its own for a second ask to be about, and the failure
+ * re-arm is the lead's.
+ *
+ * AND THE LEAD'S ANSWER TURN IS NEVER RE-ASKED. `stopFuse` is the harness saying
+ * it is already handling a stop hook, so this is the turn that ANSWERS the ask —
+ * and answering it is exactly when an agent runs the commands that fail. Without
+ * this guard #327's failure re-arm would see a fresh fingerprinted failure from
+ * that very turn and ask again on top of its own answer. The re-arm is not lost,
+ * only deferred: the next ordinary stop still carries the line, which is the
+ * second half of the case in `capture.test.ts`.
+ *
+ * WHAT IS LEFT OF THE LEAD'S GUARD LIVES IN `ask`, because the one thing that
+ * re-arms it is a failure it hit after being asked, and only `ask` has read the
+ * ledger.
+ *
+ * SAYING NOTHING IS NOT SKIPPING. The fire still writes its row — this decides
+ * what the agent reads, not whether the daemon records the stop — and it is what
+ * keeps the turn that ANSWERS an ask from being asked again: `capture:asked` is
+ * already set by then, on the lead's `stopFuse` turn as on a child's.
  */
 export function stop(ctx: FireContext, audience: 'child' | 'lead'): Emit | null {
   const asked = getMark(ctx.deps.db, ctx.actor, ASKED) !== null;
-  if (asked && (audience === 'child' || ctx.input.stopFuse === true)) {
-    harvest(ctx);
-    return null;
-  }
+  if (asked && (audience === 'child' || ctx.input.stopFuse === true)) return null;
   return ask(ctx, audience);
 }

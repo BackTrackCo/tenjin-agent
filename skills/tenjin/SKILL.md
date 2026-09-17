@@ -120,34 +120,34 @@ FIRST settled sale (no register call), and by x402scan once CDP-settled payments
 
 Mid-task, ask a QUESTION instead of browsing: it matches what pieces actually say (body, title
 and excerpt), with freshness/price/applicability as HARD gates. This endpoint only searches:
-`matched: 0` means nothing matched CONFIDENTLY under `hybrid-v1` (every decision-view item is
-semantically close, or corroborated by an identifier, its title, its excerpt or a tag; a shared
-word is not a match): an empty result plus a `hint` pointing at GET `/api/articles`, where
-the catalog is browsed. A small early catalog makes that honest often; a rephrased question is
-still worth one retry. Anonymous, no wallet. Matching runs on wording and meaning, so send the
-whole question as one natural-language sentence, not keywords, generalized first (no private
-identifiers, internal names, or secrets: generalize the NAMES, keep the specifics).
+`matched: 0` means no eligible results were returned. An empty result carries a `hint`
+pointing at GET `/api/articles`, where the catalog is browsed. Weak candidates can remain
+listed even when none meets the shelf's delivery threshold. Matching uses wording and meaning.
+A rephrased question is worth one retry. Send the full work order with `trigger: dispatch` (≤8,000 chars);
+the server retrieves sentence questions and reranks with the full received query. Other calls
+accept ≤512 chars: send one natural-language sentence, not keywords, generalized first (no
+private identifiers, internal names, or secrets: generalize the NAMES, keep the specifics).
 
 - `POST https://tenjin.sh/api/search` with `{ "schemaVersion": 3, "view": "decision",
   "query": "<task question>", "identifiers"?: ["PR 751", "migrate.yml"], "limit"?: 5,
   "budget_ms"?: 2350, "filters"?: { "maxPrice": "<atomic USDC>", "freshWithin": "P30D" } }` →
   `{ schemaVersion: 3, searchId, calibration, items, matched, hint?, inspect?, truncated? }`.
   `budget_ms`: milliseconds you can still wait. The server shortens its OWN work to fit it — the query
-  embed and the free-body load, nothing else. Up to `limit` (1-10, default 5) lean items: id, payable `url`,
+  embeds, optional reranker and free-body loads. Up to `limit` (1-10, default 5) lean items: id, payable `url`,
   slug, title, artifactType, `excerpt`, `temporalMode`, price, asOf, validUntil, matchReasons,
   estimatedTokens, creator handle (slug + handle feed any handle/slug call; never parse the url), plus `body`
   `{ text }` on most FREE items (`price` `"0"`): the WHOLE piece, uncut, and you decide how much of
   it to keep. Check for the key: omitted when `budget_ms` left no room or the
-  load failed, and never on a paid item. Optional `confidence` (`high` | `medium` | `low`) and
-  `corroborated` (boolean), absent on `lexical-v1`: on `hybrid-v1` `confidence` buckets
-  the DENSE leg's match strength and `corroborated` says whether public-weight text ALSO
-  matched (identifier originals/parts, title, excerpt, or tags). Neither is a verdict (coarse,
-  within this calibration only): a `high` uncorroborated match and a `medium` corroborated
-  one are different evidence, not ranked. `strong` (same presence rule) is the shelf's own bar
-  for showing a hit unasked, `corroborated` and `confidence` not `low`: a delivery bar, not
-  a buying verdict, and as paywall-blind as they are (identifiers and the cosine read the whole
-  paid body): inspect public evidence before paying. `identifiers` is a hard AND lane: every
-  normalized token must occur. At most 3 per creator while others fill the page.
+  load failed, and never on a paid item. `confidence` (`high` | `medium` | `low`) and
+  `corroborated` are absent on `lexical-v1`. Hybrid confidence buckets dense cosine;
+  corroboration means identifier originals/parts, title, excerpt or tags also matched.
+  `strong` is the unsolicited-delivery bar: with decision reranking, the body reranker score meets
+  the shelf threshold. Unscored/below-threshold rows stay listed with `strong: false`, including
+  provider failures. Without a configured reranker, `strong` accompanies hybrid/key evidence and means
+  `corroborated` and `confidence` not `low`; absent on lexical fallback. Use the returned
+  value, never recompute it from evidence. These are paywall-blind signals, not buying verdicts:
+  inspect public evidence before paying. `identifiers` is a hard AND: every normalized token
+  must occur. At most 3 per creator while others fill the page.
   Data handling for this endpoint is stated once, at https://tenjin.sh/privacy.
   `X-Tenjin-Eval-Cohort: 1` marks the evaluation cohort.
 - The rank-1 card is usually inline: a result with matches carries `inspect` `{ resourceId,

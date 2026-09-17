@@ -11,8 +11,11 @@ import { build, type Options } from 'tsup';
 import tsupConfigs from '../../tsup.config';
 import pkg from '../../package.json';
 import { installDaemonFiles } from './control';
+import { codexAdapter } from '../adapters/codex';
+import { readCodexTrust, trustCodexHooks, trustKey } from '../lib/codex-trust';
+import { registeredHooks, writeHooks } from '../lib/harness-hooks';
 import { HARNESS_MS } from '../hooks/constants';
-import { ensureDaemon, readToken } from '../hooks/shim';
+import { ensureDaemon, health, readToken } from '../hooks/shim';
 import {
   configPath,
   daemonBundlePath,
@@ -607,10 +610,10 @@ describe('the daemon, cold-started from the real bundle', () => {
    * THE ONE END-TO-END PASS OF PR D: the captured events of one dispatched
    * turn (2.1.261) against the stub shelf. The parent's dispatch parks a
    * handoff; the child claims it at its start and gets the finding whole; the
-   * child's stop is asked (block) and its answer turn harvested; the lead's
-   * stop is asked and names the queued finding.
+   * child's stop is asked once and its answer turn says nothing; the lead, which
+   * only dispatched, is not asked at all.
    */
-  it('a dispatched turn with a stubbed shelf: handoff parked and claimed, the child asked, the lead told', async () => {
+  it('a dispatched turn with a stubbed shelf: handoff parked and claimed, the child asked once, the lead left alone', async () => {
     const original = await readFile(configPath(dataDir), 'utf8');
     await writeFile(
       configPath(dataDir),
@@ -669,20 +672,22 @@ describe('the daemon, cold-started from the real bundle', () => {
       expect(contextOf(startRes)).toContain(SHELF_BODY);
       expect(handoffCount()).toBe(0);
 
-      // 3. The child reads a file: one context row, which is its evidence.
-      const read = await post({
-        hook_event_name: 'PostToolUse',
+      // 3. The child EDITS a file: one context row and an `edited:` mark, which
+      // is its evidence. A Read is deliberately not enough any more (owner,
+      // 2026-09-12): it is the cheapest row an agent can leave, and counting it
+      // asked nearly every child whatever it had been doing.
+      const edit = await post({
+        hook_event_name: 'PreToolUse',
         agent_id: agent,
         agent_type: 'Explore',
-        tool_name: 'Read',
-        tool_input: { file_path: '/tmp/proj/README.md' },
-        tool_response: { text: '# proj' },
+        tool_name: 'Edit',
+        tool_input: { file_path: '/tmp/proj/README.md', old_string: 'a', new_string: 'b' },
       });
-      expect(read.status).toBe(204);
-      // The child's stop is asked only when its Read is ALREADY in the ledger:
-      // `capture.ts` reads `fires` for the child's evidence (`arm = 'context'`
-      // on `tool.after`), and that row lands after this 204. Polling the total
-      // count would race the same way, so wait for the row itself.
+      expect(edit.status).toBe(204);
+      // The child's stop is asked only when its edit is ALREADY in the ledger:
+      // `capture.ts` reads the marks and `fires` rows for the child's evidence,
+      // and both land after this 204. Polling the total count would race the
+      // same way, so wait for the row itself.
       await expect
         .poll(() => firesOf(session, agent).filter((f) => f.arm === 'context').length, POLL)
         .toBe(1);
@@ -702,29 +707,26 @@ describe('the daemon, cold-started from the real bundle', () => {
       // Never a blocking decision: `additionalContext` is the one channel.
       expect(stopRes.body?.decision).toBeUndefined();
 
-      // 5. The child answers with the fence: harvested, silently.
+      // 5. The child's answer turn: its row is written, and it reads nothing new.
       const answered = await post({
         hook_event_name: 'SubagentStop',
         agent_id: agent,
         agent_type: 'Explore',
         stop_hook_active: true,
-        last_assistant_message:
-          'Recorded:\n```tenjin-finding\n# The image tag flips the collation\nPin pg16 and re-seed.\n```\n',
+        last_assistant_message: 'Published it.',
       });
       expect(answered.status).toBe(204);
 
-      // 6. The lead stops: asked, and told what its child queued.
+      // 6. The lead stops and is NOT asked: it dispatched, and dispatching is
+      // not work of its own. Nothing its child did arms it either — the parent
+      // is asked on its OWN evidence or not at all (principle 5), and the rule
+      // that re-armed it from a child's stored finding is gone with the store.
       const leadRes = await post({
         hook_event_name: 'Stop',
         stop_hook_active: false,
         last_assistant_message: 'done',
       });
-      expect(leadRes.status).toBe(200);
-      const leadAsk = contextOf(leadRes) ?? '';
-      expect(leadAsk).toContain('Tenjin: this turn did work worth a second look.');
-      expect(leadRes.body?.decision).toBeUndefined();
-      expect(leadAsk).toContain(`Explore subagent ${agent}`);
-      expect(leadAsk).toContain('"The image tag flips the collation"');
+      expect(leadRes.status).toBe(204);
     } finally {
       await writeFile(configPath(dataDir), original);
     }
@@ -851,7 +853,7 @@ describe('the daemon, cold-started from the real bundle', () => {
       }
     });
 
-    it('a child with an edit is asked once at its stop as a block reason, and the fused stop harvests', async () => {
+    it('a child with an edit is asked once at its stop as a block reason, and never again', async () => {
       // The sibling child: its patch is in the fixtures, its stop is built from
       // the captured one so it has a start of its own to answer for.
       const start = codexFixtures.find((f) => f.name === 'SubagentStart-sibling.json');
@@ -882,15 +884,166 @@ describe('the daemon, cold-started from the real bundle', () => {
         expect(out.reason).toContain('Tenjin');
         expect(out.reason).toContain(`--agent ${sibling.agent_id}`);
         expect(out.hookSpecificOutput).toBeUndefined();
-        // The answer turn: harvested, and nothing more to say.
-        const fused = await post(
-          stopFor(true, '```tenjin-finding\n# gamma\nthe file is gamma\n```'),
-        );
+        // The answer turn: the row is written, and nothing more is said.
+        const fused = await post(stopFor(true, 'published gamma'));
         expect(fused.status).toBe(204);
         const again = await post(stopFor(false, 'later'));
         expect(again.status).toBe(204);
       });
     });
+
+    /**
+     * ACCEPTANCE 6 (tenjin-agent#342): the whole activation, end to end, with
+     * nothing about it mocked except the one keypress a person has to make.
+     *
+     *   install -> configured, with trust UNKNOWN while Codex cannot be asked
+     *   -> trust  -> Codex accepts the source
+     *   -> a fresh session's captured events, through the real shim
+     *   -> recorded fires, and doctor flips to observed.
+     *
+     * The trust hop runs the REAL `trustCodexHooks` against a scripted app
+     * server: its three round trips, its ownership filter and its verifying
+     * read are all exercised, without requiring a Codex install on the machine
+     * running the suite. What the script cannot prove is that Codex accepts
+     * the write, and that is settled by a live probe recorded in the PR rather
+     * than in CI (tenjin-agent#343).
+     */
+    it('install -> trust -> fresh session -> recorded fires, with doctor honest at each step', async () => {
+      const home = await mkdtemp(join(tmpdir(), 'tenjin-activation-home-'));
+      try {
+        const codexHome = join(home, '.codex');
+        const env = { CODEX_HOME: codexHome };
+
+        // 1. INSTALL. The real writer -- its plan, its ownership prune, its
+        // merge, its mode and its activation steps -- against the daemon this
+        // file already has running. The bundle-materializing half of a start is
+        // seamed out ONLY because `beforeAll` already did it here and a second
+        // copy would rewrite the very files the reporter case imports; the
+        // copy itself is covered by this file's own bundle cases.
+        const live = await health(port);
+        if (live === null) throw new Error('the smoke daemon is not answering');
+        const wired = await writeHooks({
+          adapter: codexAdapter,
+          homeDir: home,
+          dataDir,
+          env,
+          start: async () => ({
+            health: live,
+            spawned: false,
+            replaced: null,
+            unconfirmed: null,
+            written: [],
+          }),
+        });
+        expect(wired.skipped).toBeUndefined();
+        expect(wired.entries).toBe(7);
+        // One note, not a walkthrough: trust is step 3 below, not the
+        // operator's job (tenjin-agent#343).
+        expect(wired.activation).toEqual([
+          'Start a new Codex session: hooks are read at session start.',
+        ]);
+
+        const registered = await registeredHooks(codexAdapter, home, dataDir, env);
+        expect(registered.handlers).toHaveLength(7);
+        const keys = registered.handlers.map((h) =>
+          trustKey(registered.path, h.event, h.groupIndex, h.handlerIndex),
+        );
+        expect(keys.every((k) => k !== null)).toBe(true);
+
+        // 2. CONFIGURED, TRUST UNKNOWN. A hooks file alone cannot settle the
+        // private handler hash; without an app-server answer we do not guess.
+        const before = await readCodexTrust(home, keys as string[], {
+          env,
+          listHooks: async () => null,
+        });
+        expect(before.state).toBe('unknown');
+
+        // 3. TRUST, through the real writer. The scripted server answers as
+        // Codex does: untrusted rows with hashes first, the same rows trusted
+        // once the upsert has landed.
+        const rows = (status: string): Record<string, unknown>[] =>
+          (keys as string[]).map((key) => ({
+            key,
+            command: `node ${JSON.stringify(shimBundlePath(dataDir))} --harness codex`,
+            sourcePath: registered.path,
+            enabled: true,
+            trustStatus: status,
+            currentHash: `sha256:${key.length}`,
+          }));
+        let wrote = false;
+        const trust = await trustCodexHooks(
+          home,
+          keys as string[],
+          (r) => typeof r.command === 'string' && r.command.includes(shimBundlePath(dataDir)),
+          {
+            env,
+            connect: async (method) => {
+              if (method === 'config/batchWrite') {
+                wrote = true;
+                return {};
+              }
+              return { data: [{ cwd: '/r', hooks: rows(wrote ? 'trusted' : 'untrusted') }] };
+            },
+          },
+        );
+        expect(trust.ok).toBe(true);
+        expect(trust.trusted).toHaveLength(7);
+
+        // 4. A FRESH SESSION: every captured event of one root turn.
+        //
+        // The FIRST goes through the real shim bundle, spawned exactly as the
+        // hook entry just written names it -- that is what proves the entry
+        // runs at all. The rest post to the route that shim resolved, because
+        // five cold `node` starts is the slowest thing in this file and the
+        // shim's own forwarding is pinned by the case below this one.
+        const session = `01a08d00-0000-7000-8000-${Date.now().toString(16).padStart(12, '0')}`;
+        const turn = '01a08d00-0000-7000-8000-000000000abc';
+        const wanted = ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Stop'];
+        const fired = countFires();
+        const bodyFor = (event: string): string => {
+          const fixture = codexFixtures.find(
+            (f) => f.event === event && !f.name.startsWith('child'),
+          );
+          if (fixture === undefined) throw new Error(`no captured ${event}`);
+          return JSON.stringify({
+            ...(JSON.parse(fixture.body) as Record<string, unknown>),
+            session_id: session,
+            turn_id: turn,
+          });
+        };
+        const viaShim = await runNode(
+          [shimBundlePath(dataDir), '--harness', 'codex'],
+          { ...process.env, TENJIN_DATA_DIR: dataDir },
+          bodyFor(wanted[0]!),
+        );
+        // The shim never fails the harness, whatever it decides.
+        expect(viaShim.code).toBe(0);
+        for (const event of wanted.slice(1)) {
+          expect((await post(bodyFor(event))).status, event).toBeLessThan(400);
+        }
+        await expect.poll(countFires, POLL).toBe(fired + wanted.length);
+
+        // 5. RECORDED, per event, under this harness and this session.
+        const db = new DatabaseSync(loopDbPath(dataDir), { readOnly: true });
+        try {
+          const rows = db
+            .prepare('SELECT event, harness FROM fires WHERE session = ?')
+            .all(`codex:${session}`) as Array<{ event: string; harness: string }>;
+          expect(rows.every((r) => r.harness === 'codex')).toBe(true);
+          expect([...new Set(rows.map((r) => r.event))].sort()).toEqual([
+            'prompt',
+            'session.start',
+            'tool.after',
+            'tool.before',
+            'turn.end',
+          ]);
+        } finally {
+          db.close();
+        }
+      } finally {
+        await rm(home, { recursive: true, force: true });
+      }
+    }, 45_000);
 
     it('the shim forwards a Codex prompt under --harness codex and the row is filed under codex:', async () => {
       const prompt = codexFixtures.find((f) => f.event === 'UserPromptSubmit');

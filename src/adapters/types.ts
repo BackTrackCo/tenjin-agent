@@ -14,6 +14,14 @@
  * before.
  */
 
+import type { PublishMode } from '../lib/config';
+import type {
+  CodexGrantResult,
+  HarnessPermissions,
+  PermissionsResult,
+} from '../lib/harness-permissions';
+import type { CodexTrustReport, TrustProbeOptions, TrustResult } from '../lib/codex-trust';
+
 /** Harnesses with an adapter in this build. */
 export type Harness = 'claude' | 'codex';
 
@@ -91,7 +99,7 @@ export type HookTool = ToolBase &
     | { kind: 'shell'; command: string }
     | { kind: 'edit'; paths: string[] }
     | { kind: 'read'; paths: string[] }
-    | { kind: 'dispatch'; task: string }
+    | { kind: 'dispatch'; task: string; description?: string }
     | { kind: 'web'; query: string }
     | { kind: 'fetch'; url: string; prompt: string }
     | { kind: 'other' }
@@ -156,9 +164,40 @@ export interface Registrar {
    * `{ event, matcher?, hooks }` in the harness's own JSON shape.
    */
   plan(target: { url: string; token: string; shimPath: string; timeoutSeconds: number }): unknown[];
-  /** Before installing hook entries in a file this harness reads: how the
-   *  operator activates them, when the harness gates untrusted entries. */
-  activation?: string;
+  /**
+   * The steps left to a PERSON once the file is written, for a harness that
+   * gates entries it has not been told to trust. Takes the path actually
+   * written, because a machine on `$CODEX_HOME` is not reading `~/.codex`.
+   * One sentence was not enough: as a clause on the undo line, operators
+   * finished an install reporting "7 entries" with a loop that never fired
+   * (tenjin-agent#342).
+   */
+  activation?(hooksPath: string): string[];
+  /** The harness-native persistent command grant, when this harness has one. */
+  grant?: {
+    path(home: string, env?: NodeJS.ProcessEnv): string;
+    inspect(home: string, mode: PublishMode, env?: NodeJS.ProcessEnv): Promise<HarnessPermissions>;
+    write(
+      home: string,
+      mode: PublishMode,
+      env?: NodeJS.ProcessEnv,
+    ): Promise<PermissionsResult | CodexGrantResult>;
+    remove?(home: string, env?: NodeJS.ProcessEnv): Promise<{ path: string; removed: boolean }>;
+  };
+  /** A harness-native trust gate for registered hook handlers. */
+  trust?: {
+    ensure(
+      home: string,
+      keys: readonly string[],
+      ownedBy: (row: { command?: unknown; sourcePath?: unknown }) => boolean,
+      opts?: TrustProbeOptions,
+    ): Promise<TrustResult>;
+    read(
+      home: string,
+      keys: readonly string[],
+      opts?: TrustProbeOptions,
+    ): Promise<CodexTrustReport>;
+  };
 }
 
 export interface HarnessAdapter {

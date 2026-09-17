@@ -50,8 +50,8 @@ export function priceLabel(answer: Answer): string {
   return shown === null ? 'paid' : '$' + shown + ' (paid)';
 }
 
-/** Title, then the url, price and author the answer carries: a shelf piece has
- *  all three, this machine's own record (a pairing) none of them. The title is
+/** Title, then whichever of the url, price and author the answer carries — a
+ *  card off a shelf has all three, a parked answer may have none. The title is
  *  QUOTED and the whole block is labelled as marketplace text: this lands in a
  *  trusted context.
  *
@@ -149,8 +149,8 @@ function boundedBody(text: string, resourceId: string): string {
 }
 
 /**
- * One answer, as the agent will read it. `shelf` picks the opener (`OPENERS`,
- * by shelf, `local` included); everything else is the answer's own.
+ * One answer, as the agent will read it. `shelf` picks the opener
+ * (`OPENERS`, by shelf); everything else is the answer's own.
  */
 export function deliver(answer: Answer, shelf: Shelf): Delivery {
   const opener = OPENERS[shelf];

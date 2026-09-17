@@ -5,6 +5,7 @@ import {
   getPostMetadata,
   postSearch,
   postOutcomes,
+  QUERY_MAX,
   type SearchResult,
 } from './agent-api';
 import { CliError } from './errors';
@@ -105,8 +106,12 @@ describe('buildSearchRequest', () => {
   it('rejects an empty question', () => {
     expect(() => buildSearchRequest({ question: '   ' })).toThrowError(CliError);
   });
-  it('rejects a question over 512 chars', () => {
-    expect(() => buildSearchRequest({ question: 'x'.repeat(513) })).toThrowError(/512/);
+  it('accepts 8,000 characters on any trigger and rejects 8,001', () => {
+    expect(QUERY_MAX).toBe(8000);
+    expect(
+      buildSearchRequest({ question: 'x'.repeat(8000), trigger: 'research' }).query,
+    ).toHaveLength(8000);
+    expect(() => buildSearchRequest({ question: 'x'.repeat(8001) })).toThrowError(/8000/);
   });
   it('rejects a malformed freshWithin', () => {
     expect(() => buildSearchRequest({ question: 'q', freshWithin: '30 days' })).toThrowError(

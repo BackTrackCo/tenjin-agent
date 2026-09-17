@@ -198,7 +198,7 @@ const InstallConfigSchema = z.object({
   harness: z.array(z.enum(HARNESSES)),
   /**
    * The EXACT rule strings still pending the last time an install explicitly
-   * declined the free-verb allowlist (`--no-allow-free-verbs`), so `--refresh`
+   * declined the free-verb allowlist (`--no-grant`), so `--refresh`
    * can subtract them from what it would
    * otherwise report as pending instead of recomputing from the settings file
    * and nagging about a settled "no" on every refresh (tenjin-agent#234).
@@ -213,7 +213,7 @@ const InstallConfigSchema = z.object({
    * or finds it already fully satisfied, so a later legitimate grant (manual or
    * otherwise) is never shadowed by a stale decline.
    */
-  freeVerbsDeclined: z.array(z.string()),
+  grantDeclined: z.array(z.string()),
 });
 
 /**
@@ -312,18 +312,14 @@ export const ConfigSchema = z.object({
 export type Config = z.infer<typeof ConfigSchema>;
 
 /**
- * `install`'s raw shape, widened to still parse a `freeVerbsDeclined: true`
- * left by an earlier revision of this same key (before tenjin-agent#234's
- * rewrite from a suppress-everything boolean to a per-rule list): a stray
- * boolean must not fail config.json with CONFIG_INVALID. See
- * {@link resolveFreeVerbsDeclined} for how it is read back — treated the same
- * as absent either way, never as "these specific rules were declined", because
- * a boolean carries no per-rule information to recover.
+ * `install`'s raw shape. The decline is a list of exact rules rather than a
+ * boolean so a later version can still report a rule the operator was never
+ * offered. The key is intentionally not aliased from its pre-release name.
  */
 const RawInstallConfigSchema = InstallConfigSchema.partial()
   .extend({
     harness: RawInstallHarnessSchema.optional(),
-    freeVerbsDeclined: z.union([z.array(z.string()), z.boolean()]).optional(),
+    grantDeclined: z.array(z.string()).optional(),
   })
   .passthrough();
 
@@ -351,18 +347,11 @@ export const RawConfigSchema = ConfigSchema.partial()
 export type PartialConfig = z.infer<typeof RawConfigSchema>;
 
 /**
- * Normalize `install.freeVerbsDeclined` as read from config.json: the current
- * shape (an array of exact declined rule strings) passes through as-is; the
- * boolean the key held before tenjin-agent#234, and an absent key, both read
- * back as "nothing specific is known to be declined" — `[]`. That is the safe
- * direction for the boolean: a stray `true` from before the rewrite silences
- * nothing, so at worst a settled decline is reported pending once more (the
- * exact bug this key exists to prevent, but the machine has already re-decided
- * this by installing the version that made the rewrite); it never silently
- * papers over a rule that this list should be naming.
+ * Normalize `install.grantDeclined` as read from config.json. An absent key is
+ * an empty set; a present key is already validated as exact rule strings.
  */
-export function resolveFreeVerbsDeclined(value: string[] | boolean | undefined): string[] {
-  return Array.isArray(value) ? value : [];
+export function resolveGrantDeclined(value: string[] | undefined): string[] {
+  return value ?? [];
 }
 
 /**
@@ -410,7 +399,7 @@ export const CONFIG_DEFAULTS: Config = {
   bazaarPay: false,
   bazaarRegistries: DEFAULT_BAZAAR_REGISTRIES,
   publish: { mode: 'review', defaultPrice: '100000', ackServerWarnings: 'mode' },
-  install: { harness: [], freeVerbsDeclined: [] },
+  install: { harness: [], grantDeclined: [] },
   // Every hook is on out of the box: a vanilla install turns the whole loop on,
   // and the disclosure and the undo ride the install output. `false` leaves the
   // registered entries inert without touching settings.json, so any of these is
@@ -542,7 +531,7 @@ export async function loadConfig(dir: string): Promise<Config> {
     },
     install: {
       harness: raw.install?.harness ?? CONFIG_DEFAULTS.install.harness,
-      freeVerbsDeclined: resolveFreeVerbsDeclined(raw.install?.freeVerbsDeclined),
+      grantDeclined: resolveGrantDeclined(raw.install?.grantDeclined),
     },
     hooks: resolveHooksConfig(raw),
     update: { mode: raw.update?.mode ?? CONFIG_DEFAULTS.update.mode },

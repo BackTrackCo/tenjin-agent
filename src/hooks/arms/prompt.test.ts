@@ -73,7 +73,7 @@ describe('the prompt arm skips, each with its own reason', () => {
     expect(plan(noWords)).toEqual({ reason: 'words', text: noWords });
   });
 
-  it('asks a short prompt and a pasted one: there is no length rule', () => {
+  it('asks a short prompt and a pasted one: neither is refused for its length', () => {
     expect(plan('why did the collation flip?')).toMatchObject({ stages: expect.anything() });
     const pasted = `${'collation '.repeat(500)}pgvector`;
     expect((plan(pasted) as Plan).question.text).toBe(pasted);
