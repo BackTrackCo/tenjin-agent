@@ -90,7 +90,7 @@ export function lookupArm(spec: LookupSpec): Arm {
         // and a credential live.
         if (reason !== null) return { reason, text: skipText(raw) };
         const trigger = typeof spec.trigger === 'function' ? spec.trigger(ctx.input) : spec.trigger;
-        const q = question(raw, trigger);
+        const q = question(raw);
         if (q.text.length === 0) return null;
         // ONE STAGE, ONE LEG, ONE HTTP REQUEST. It used to be one stage racing
         // two requests at two origins against one budget; the shelf route

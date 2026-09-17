@@ -9,7 +9,7 @@ import { ANSI_ESCAPE_RE } from '../lib/output';
  *
  * BOTH CUTS ARE SURROGATE-SAFE. `slice` counts UTF-16 units, so a cut that lands
  * between a high and a low surrogate leaves a lone half that the shelf's own
- * `z.string().max(512)` accepts and then embeds as U+FFFD. Space-free text past
+ * `z.string().max()` accepts and then embeds as U+FFFD. Space-free text past
  * the bound is the only way to reach it (CJK), which is rare and not a reason to
  * ship a cut that can produce an invalid string.
  */

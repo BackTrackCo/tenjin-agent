@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { runSearch } from './search';
 import { loadSearches, type StoredSearch } from '../lib/searches';
 import { CliError } from '../lib/errors';
+import { QUERY_MAX } from '../lib/agent-api';
 import { PRODUCTION_ORIGIN, knownDeploymentOrigins } from '../lib/production-origin';
 import { testSigner } from '../lib/read-test-utils';
 import type { WalletProvider } from '../lib/wallet';
@@ -111,15 +112,15 @@ describe('runSearch', () => {
   // An agent mid-task that pasted a long question gets its head answered rather
   // than a USAGE refusal and a retry: the CLI cuts to the shelf's bound at a
   // word boundary, silently, the way the daemon's arms do.
-  it('cuts a question past 512 characters at a word boundary, with no warning', async () => {
+  it('cuts a question past QUERY_MAX at a word boundary, with no warning', async () => {
     const { fetch, bodies } = stub(HIT);
-    const question = `${'why is the collation flipped '.repeat(24)}pgvector`;
-    expect(question.length).toBeGreaterThan(700);
+    const question = `${'why is the collation flipped '.repeat(300)}pgvector`;
+    expect(question.length).toBeGreaterThan(QUERY_MAX);
     const res = await runSearch({ question }, makeCtx(), { fetchImpl: fetch });
 
     const sent = (bodies[0] as { query: string }).query;
-    expect(sent.length).toBeLessThanOrEqual(512);
-    expect(sent.length).toBeGreaterThan(450);
+    expect(sent.length).toBeLessThanOrEqual(QUERY_MAX);
+    expect(sent.length).toBeGreaterThan(QUERY_MAX - 50);
     // A whole word: what the shelf reads is followed by a space in the original,
     // so the cut never lands inside the last token.
     expect(question.startsWith(`${sent} `)).toBe(true);

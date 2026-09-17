@@ -25,9 +25,11 @@ import type { Answer, KernelConfig, LegResult, LegStatus, Shelf, Leg, Trigger } 
  * signature, a non-JSON body and a JSON body of the wrong shape are five
  * different facts and used to be one silent miss.
  *
- * THE LEG SENDS `Question.text` WHOLE. The cut to the trigger's bound is
- * `question()`'s, made once when the plan is built, so what the leg sends, what
- * the ledger stores and what the claim key hashes are one string.
+ * THE LEG SENDS `Question.text` WHOLE. The cut to the shelf's bound is
+ * `question()`'s (`hooks/question.ts`), made once when the plan is built, so
+ * what the leg sends, what the ledger stores and what the claim key hashes are
+ * one string. `buildSearchRequest` still throws `USAGE` past the bound, as the
+ * last guard against a question that skipped that path.
  */
 
 /** Candidates asked for, so a search `verdict` can take a strong rank 2 or 3
