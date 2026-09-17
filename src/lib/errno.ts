@@ -1,7 +1,7 @@
 /**
  * True when `err` is a Node system error carrying the given `code` (ENOENT,
  * EEXIST, …). One definition so the fs-error checks scattered across the wallet
- * store, config loader, and session cache stay identical.
+ * store, config loader, session cache, and file lock stay identical.
  */
 export function hasCode(err: unknown, code: string): boolean {
   return (
