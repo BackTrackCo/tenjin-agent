@@ -423,7 +423,7 @@ describe('registrar', () => {
     expect(registrar.plan(TARGET)).toEqual([
       { event: 'SessionStart', hooks: [command] },
       { event: 'UserPromptSubmit', hooks: [command] },
-      { event: 'PreToolUse', matcher: 'Bash|apply_patch', hooks: [command] },
+      { event: 'PreToolUse', matcher: 'apply_patch', hooks: [command] },
       { event: 'PostToolUse', matcher: 'Bash', hooks: [command] },
       { event: 'SubagentStart', hooks: [command] },
       { event: 'SubagentStop', hooks: [command] },

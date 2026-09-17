@@ -1,105 +1,116 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { sigV1Test, testIdentityOf } from './test-identity';
+import { readFileSync } from 'node:fs';
+import { describe, expect, it } from 'vitest';
+import { testFailuresOf } from './test-identity';
 
 /**
- * The test-identity lane: the artifact within this command's window first,
- * the console header second, a guess never.
+ * Which tests a failed command's output names, and the line each failed on:
+ * the tenjin reporter's `::error` lines and vitest's `FAIL` header, both read
+ * straight off the output. The fixtures are one real vitest 4.1.10 run of six
+ * files (four failing tests, a file that fails to import, an unhandled
+ * rejection), kept the way the failure arm reads a Bash call: stdout, then
+ * stderr.
  */
 
-const NOW = 1_700_000_000_000;
-const CONSOLE = [
-  ' FAIL  src/a.test.ts > suite > one',
-  'AssertionError: expected 1 to be 2',
-  '',
-  ' FAIL  src/date.test.ts > formatDate > handles null',
-  'AssertionError: expected undefined to be null',
-  '',
-].join('\n');
+const fixture = (name: string): string =>
+  readFileSync(new URL(`./fixtures/${name}`, import.meta.url), 'utf8');
 
-let cwd: string;
+const NAMES = [
+  'test/helper.test.ts > helpers > fails inside a named helper',
+  'test/session expiry.test.ts > expires after the window',
+  'test/session.test.ts > session > renews session, restarting the maxAge window',
+  'test/store.test.ts > store > loads a user',
+];
 
-beforeEach(() => {
-  cwd = mkdtempSync(join(tmpdir(), 'tenjin-d-testid-'));
-});
+const named = (text: string) => testFailuresOf(text).filter((f) => f.name !== '');
+const unowned = (text: string) => testFailuresOf(text).filter((f) => f.name === '');
 
-afterEach(() => {
-  rmSync(cwd, { recursive: true, force: true });
-});
-
-function report(
-  startTime: number,
-  failed: Array<Record<string, string>>,
-  rel = '.vitest-report.json',
-) {
-  writeFileSync(join(cwd, rel), JSON.stringify({ startTime, endTime: startTime + 900, failed }));
-}
-
-describe('testIdentityOf', () => {
-  it("reads the LAST failure off a report written inside this command's window", async () => {
-    report(NOW + 10, [
-      { file: join(cwd, 'src/a.test.ts'), suite: 'suite', test: 'one' },
-      { file: join(cwd, 'src/b.test.ts'), suite: 'outer > inner', test: 'two' },
+describe('testFailuresOf', () => {
+  it('reads every failing test off the reporter lines of a real run, with its line', () => {
+    const got = named(fixture('vitest-default.txt'));
+    expect(got.map((f) => f.name)).toEqual(NAMES);
+    expect(got.map((f) => f.line)).toEqual([
+      'AssertionError: expected 2 to be 1 // Object.is equality',
+      'AssertionError: expected 2 to be 1 // Object.is equality',
+      "AssertionError: expected { id: '2', data: { foo: 'bar' } } to match object { id: '1' }",
+      "TypeError: Cannot read properties of undefined (reading 'id')",
     ]);
-    await expect(testIdentityOf('', cwd, NOW, 'pnpm vitest run')).resolves.toEqual({
-      file: 'src/b.test.ts',
-      suite: 'outer > inner',
-      test: 'two',
-    });
   });
 
-  it('ignores a report from the run before this command, and falls back to the console', async () => {
-    report(NOW - 10, [{ file: join(cwd, 'src/old.test.ts'), suite: 's', test: 'stale' }]);
-    await expect(testIdentityOf(CONSOLE, cwd, NOW, 'pnpm vitest run')).resolves.toEqual({
-      file: 'src/date.test.ts',
-      suite: 'formatDate',
-      test: 'handles null',
-    });
+  it('keeps an import failure and an unhandled rejection as lines no test owns', () => {
+    const lines = unowned(fixture('vitest-default.txt')).map((f) => f.line);
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toMatch(/^Error: Cannot find module '\.\/does-not-exist'/);
+    expect(lines[1]).toBe('Error: boom from an unawaited promise');
   });
 
-  it('reads no artifact with no bashstart mark to check it against', async () => {
-    report(NOW + 10, [{ file: join(cwd, 'src/a.test.ts'), suite: 's', test: 'one' }]);
-    await expect(testIdentityOf('', cwd, null, 'pnpm vitest run')).resolves.toBeNull();
+  it('still names them through `2>&1 | tail -5`, where every assertion above is gone', () => {
+    const tail = fixture('vitest-tail5.txt');
+    // Every line left is a reporter line; the printed assertions are gone.
+    expect(tail.split('\n').filter((line) => line !== '' && !line.startsWith('::'))).toEqual([]);
+    expect(named(tail).map((f) => f.name)).toEqual(NAMES);
   });
 
-  it('trusts the artifact only for a single-segment command', async () => {
-    report(NOW + 10, [{ file: join(cwd, 'src/a.test.ts'), suite: 's', test: 'one' }]);
-    await expect(testIdentityOf('', cwd, NOW, 'pnpm build && pnpm test')).resolves.toBeNull();
-    await expect(testIdentityOf('', cwd, NOW, 'pnpm test 2>&1')).resolves.not.toBeNull();
+  it("reads the agent reporter's run the same way", () => {
+    expect(named(fixture('vitest-agent.txt')).map((f) => f.name)).toEqual(NAMES);
   });
 
-  it("reads the report path the repo's own config names for the tenjin reporter", async () => {
-    writeFileSync(
-      join(cwd, 'vitest.config.ts'),
-      "export default { test: { reporters: ['default', ['./tenjin-vitest-reporter.mjs', { outputFile: 'out/report.json' }]] } };",
+  it("names a test from the console header alone, project label off, in the reporter line's bytes", () => {
+    const run = fixture('vitest-projects.txt');
+    expect(run).toContain(
+      ' FAIL  |node| test/helper.test.ts > helpers > fails inside a named helper',
     );
-    writeFileSync(join(cwd, '.vitest-report.json'), '{}');
-    mkdirSync(join(cwd, 'out'));
-    report(
-      NOW + 10,
-      [{ file: join(cwd, 'src/c.test.ts'), suite: '', test: 'three' }],
-      'out/report.json',
-    );
-    await expect(testIdentityOf('', cwd, NOW, 'pnpm test')).resolves.toEqual({
-      file: 'src/c.test.ts',
-      suite: '',
-      test: 'three',
-    });
+    const consoleOnly = run
+      .split('\n')
+      .filter((line) => !line.startsWith('::'))
+      .join('\n');
+    // The same four names from either source, so a teammate who ran without the
+    // reporter and one who ran through `tail` ask under one key.
+    expect(named(consoleOnly).map((f) => f.name)).toEqual(NAMES);
+    expect(named(run).map((f) => f.name)).toEqual(NAMES);
+    // A header names the test and nothing else.
+    expect(named(consoleOnly).every((f) => f.line === '')).toBe(true);
   });
 
-  it('yields nothing from a bare FAIL line with no breadcrumb', async () => {
-    await expect(testIdentityOf('FAIL  some suite\n', cwd, NOW, 'pnpm test')).resolves.toBeNull();
+  it('takes a colour badge off a header, and keeps a path with a space in it', () => {
+    expect(named(' FAIL   node  src/a.test.ts > suite > one\n').map((f) => f.name)).toEqual([
+      'src/a.test.ts > suite > one',
+    ]);
+    expect(
+      named(' FAIL  test/session expiry.test.ts > expires after the window\n').map((f) => f.name),
+    ).toEqual(['test/session expiry.test.ts > expires after the window']);
   });
-});
 
-describe('sigV1Test', () => {
-  it('keys file, suite and test together, 16 hex', () => {
-    const a = sigV1Test({ file: 'src/a.test.ts', suite: 's', test: 'one' });
-    const b = sigV1Test({ file: 'src/a.test.ts', suite: 's', test: 'two' });
-    expect(a.key).toMatch(/^[0-9a-f]{16}$/);
-    expect(a.key).not.toBe(b.key);
-    expect(a.file).toBe('src/a.test.ts');
+  it("reads vitest's own GitHub reporter: project prefix off, the printed error down to its first line", () => {
+    const line =
+      '::error file=/home/dev/app/src/a.test.ts,title=[node] src/a.test.ts > suite > one,line=3,column=9' +
+      '::AssertionError: expected 1 to be 2%0A%0A- Expected%0A+ Received';
+    expect(testFailuresOf(line)).toEqual([
+      { name: 'src/a.test.ts > suite > one', line: 'AssertionError: expected 1 to be 2' },
+    ]);
+  });
+
+  it('unescapes a name the way GitHub escaped it', () => {
+    const line = '::error title=a.test.ts > 50%25 of runs%2C at 12%3A00::Error: x\n';
+    expect(named(line).map((f) => f.name)).toEqual(['a.test.ts > 50% of runs, at 12:00']);
+  });
+
+  it('makes no name out of a lint rule, jest, or a file that failed to import', () => {
+    const out = [
+      '::error file=src/a.ts,line=1,col=1,title=no-unused-vars::x is assigned a value but never used',
+      // jest leaves `:` unescaped in a title; one colon is still not the split.
+      '::error file=a.test.js,title=suite › works: yes::Error: x',
+      ' FAIL  src/sum.test.js',
+      '  ● math › adds 1 + 2 to equal 3',
+      ' FAIL  test/broken.test.ts [ test/broken.test.ts ]',
+    ].join('\n');
+    expect(named(out)).toEqual([]);
+    expect(unowned(out).map((f) => f.line)).toEqual([
+      'x is assigned a value but never used',
+      'Error: x',
+    ]);
+  });
+
+  it('is empty on output that names nothing', () => {
+    expect(testFailuresOf('all 12 tests passed\n')).toEqual([]);
   });
 });

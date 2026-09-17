@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import type { z } from 'zod';
 import fixtureJson from './fixtures/openapi.fixture.json';
 import { searchCandidateSchema, searchResultSchema } from './lib/agent-api';
-import { OUTCOME_STATUS_VALUES } from './lib/agent-api';
+import { OUTCOME_STATUS_VALUES, QUERY_MAX } from './lib/agent-api';
 import { previewCardSchema } from './lib/read-client';
 import {
   buildPostCreateBody,
@@ -189,7 +189,9 @@ function assertSearchRequest(doc: unknown): void {
   for (const field of ['schemaVersion', 'query', 'view', 'filters', 'limit']) {
     expect(get(properties, field), `SearchRequestV3.properties.${field} missing`).toBeDefined();
   }
-  expect(get(properties, 'query', 'maxLength')).toBe(512);
+  // Pinned to the CLI's own bound, not to a number: the two drifted apart when
+  // the server raised the cap (tenjin-agent#358) and this fixture stayed at 512.
+  expect(get(properties, 'query', 'maxLength')).toBe(QUERY_MAX);
   // `decision` has to be a value `view` accepts, or every search this CLI sends
   // is a 400. Pinned as membership rather than as the default, because the CLI
   // names the view explicitly instead of relying on the server's default.
@@ -400,7 +402,7 @@ describe('contract fixture pins the 402 answer card', () => {
 });
 
 describe('contract fixture request shapes', () => {
-  it('SearchRequest carries the fields the CLI sends, question capped at 512', () => {
+  it('SearchRequest carries the fields the CLI sends, question capped where the CLI cuts', () => {
     assertSearchRequest(fixtureDoc);
   });
 

@@ -102,7 +102,7 @@ export interface PublishArgs {
   excerpt?: string;
   /**
    * Exact-match keys this piece answers resolve-by-key lookups on, each spelled
-   * `<kind>=<value>` (`fingerprint=sig_v1:…`, `package_version=zod@4.1.0`,
+   * `<kind>=<value>` (`fingerprint=test:src/a.test.ts > suite > name`, `package_version=zod@4.1.0`,
    * `command_head=pnpm`, `repo=owner/name`). Repeatable, up to 32. Always sent
    * unverified: `verified` is the shelf's own claim about a key, not a flag a
    * hand publish gets to assert. Needs KNOWLEDGE_KEYS on the shelf.
@@ -399,9 +399,9 @@ export async function runPublish(
 }
 
 /**
- * `--key <kind>=<value>`, split on the FIRST `=` only: a fingerprint key is
- * `sig_v1:<hash>` and a repo key may carry `=` in a query string, so only the
- * kind is ever read off the left. Kind and bounds are checked by
+ * `--key <kind>=<value>`, split on the FIRST `=` only: a test key is free text
+ * (`test:<file> > <suite> > <test>`) and a repo key may carry `=` in a query
+ * string, so only the kind is ever read off the left. Kind and bounds are checked by
  * {@link normalizePostKeys}, the same function the request builder runs.
  */
 export function parseKeyFlags(flags: string[] | undefined): PostKeyInput[] {
