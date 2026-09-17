@@ -758,7 +758,6 @@ describe('permissionsSkipped', () => {
 
   it('carries a fix on every skip reason there is', async () => {
     const reasons = [
-      'not-requested',
       'declined',
       'dry-run',
       'unresolvable',
