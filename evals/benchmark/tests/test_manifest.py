@@ -121,6 +121,21 @@ def test_concurrency_defaults_to_one_and_rides_the_environment_hash() -> None:
     assert manifest.sha256_json(concurrent["pins"]) != manifest.sha256_json(BASE["pins"])
 
 
+def test_a_matrix_whose_every_arm_provisions_may_not_ask_for_a_second_worker() -> None:
+    base = cli.HOOKS_SMOKE_MANIFEST.parent
+    data = committed(cli.HOOKS_SMOKE_MANIFEST)
+    data["pins"]["concurrency"] = 3
+    # One arm that provisions nothing is what the degree is for: the seeded
+    # window stays exclusive while the baseline trials fill the free workers.
+    assert [arm.get("provision") for arm in data["arms"]] == [None, "tenjin"]
+    manifest.validate(data, base)
+    data["arms"] = [arm for arm in data["arms"] if arm.get("provision")]
+    with pytest.raises(ManifestError, match="provisions the one shared shelf"):
+        manifest.validate(data, base)
+    data["pins"]["concurrency"] = 1
+    manifest.validate(data, base)
+
+
 def test_fixture_hash_tracks_fixture_bytes(tmp_path: Path) -> None:
     shutil.copytree(DIR / "repo", tmp_path / "repo")
     data = json.loads(json.dumps(BASE))

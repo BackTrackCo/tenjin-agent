@@ -24,7 +24,41 @@ from __future__ import annotations
 import copy
 from typing import Any
 
-PRESETS: dict[str, dict[str, Any]] = {}
+# The two handlers the product's hook wiring uses. `{data_dir}`, `{daemon_url}`,
+# and `{daemon_token}` are per-trial placeholders `claude_live.py` resolves at
+# launch; the declared `settings_hash` is over the template, so it names the
+# treatment once for every trial that runs it.
+_SHIM = {"type": "command", "command": 'node "{data_dir}/hooks/tenjin-shim.mjs" --harness claude', "timeout": 5}
+_DAEMON = {"type": "http", "url": "{daemon_url}", "headers": {"Authorization": "Bearer {daemon_token}"}, "timeout": 5}
+
+# Named for what it configures: every hook arm the product ships, plus
+# permission to run the CLI's read verbs by hand. An arm's `hooks_disabled`
+# turns arms off at provision time, and this is the full set it turns them off
+# from; `loop_join` reports a hand-run read apart from the hooks' own fires.
+TENJIN_HOOKS_AND_CLI_READS = "tenjin-hooks-and-cli-reads"
+
+PRESETS: dict[str, dict[str, Any]] = {
+    TENJIN_HOOKS_AND_CLI_READS: {
+        "permissions": {"allow": ["Bash(tenjin search:*)", "Bash(tenjin read:*)", "Bash(tenjin inspect:*)"]},
+        "hooks": {
+            "SessionStart": [{"matcher": "startup|clear|compact", "hooks": [_SHIM]}],
+            "UserPromptSubmit": [{"hooks": [_SHIM]}],
+            "PreToolUse": [
+                {"matcher": "WebSearch|WebFetch", "hooks": [_DAEMON]},
+                {"matcher": "Agent|Task", "hooks": [_DAEMON]},
+                {"matcher": "Edit|Write|MultiEdit|Bash", "hooks": [_DAEMON]},
+            ],
+            "PostToolUse": [
+                {"matcher": "Bash", "hooks": [_DAEMON]},
+                {"matcher": "Read", "hooks": [_DAEMON]},
+            ],
+            "PostToolUseFailure": [{"matcher": "Bash", "hooks": [_DAEMON]}],
+            "SubagentStart": [{"hooks": [_DAEMON]}],
+            "SubagentStop": [{"hooks": [_DAEMON]}],
+            "Stop": [{"hooks": [_DAEMON]}],
+        },
+    },
+}
 
 # The arm key that names a preset. It is spent by expansion, so no arm carries
 # it into validation, the hash, or a record.

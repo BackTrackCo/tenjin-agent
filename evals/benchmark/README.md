@@ -66,6 +66,12 @@ removes only projects recorded by that run. Provisioning, corpus reset, producer
 images, and HTTP snapshot transport are shared framework capabilities. The full fixture library
 and concrete preset/configuration data arrive in the next two layers.
 
+Ordinary CI, including offline benchmark checks, runs automatically. On ready PRs into main,
+`benchmark: canary` opts into the live plumbing smoke on label addition and subsequent pushes,
+without a PR path filter. Main retains its benchmark-path smoke trigger; manual runs remain available.
+Bench-2 adds a seeded canary under the same label and full experiments under the independent
+`benchmark: headline` label. Neither live gate requires `ci`.
+
 ## Read the result at a glance
 
 Every text summary and CI check starts with the experiment identity, model/harness, task list,
@@ -293,6 +299,12 @@ the whole of a provisioning trial, covering the publish, the agent's searches, t
 the free port its daemon claimed, and lets everything else run freely. A four-arm matrix with one
 unprovisioned arm converges on the time its provisioned arms take alone, and the gain is the
 unprovisioned quarter hiding inside that.
+
+Two manifests cannot take a degree above one, and validation refuses both before any spend. One
+whose arms all provision would run its trials one at a time whatever the pin said, and
+`report.json` would state a parallelism the run never had. One carrying a database-backed task
+starts a Postgres container per verification on the daemon every other trial shares, and two of
+those contend for it rather than overlap on it.
 
 The schedule is untouched: trials are assigned in its order, the results come back in it whatever
 order they finish in, and no trial id, hash, or balance property depends on the degree.
