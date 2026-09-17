@@ -88,7 +88,12 @@ function candidate(): Record<string, unknown> {
   };
 }
 
-function startShelf(shelf: 'team' | 'public'): Promise<{ server: Server; url: string }> {
+/** Every stub listener this file created, recorded the moment it exists rather
+ *  than once it is up. A second `startShelf` that rejects must not strand the
+ *  first one with nothing left holding a handle to close it by. */
+const shelves: Server[] = [];
+
+function startShelf(shelf: 'team' | 'public'): Promise<string> {
   const server = createServer((req, res) => {
     let raw = '';
     req.on('data', (c: Buffer) => (raw += c.toString('utf8')));
@@ -111,6 +116,7 @@ function startShelf(shelf: 'team' | 'public'): Promise<{ server: Server; url: st
       );
     });
   });
+  shelves.push(server);
   return new Promise((resolve, reject) => {
     server.on('error', reject);
     server.listen(0, '127.0.0.1', () => {
@@ -119,13 +125,11 @@ function startShelf(shelf: 'team' | 'public'): Promise<{ server: Server; url: st
         reject(new Error(`the ${shelf} stub did not bind a port`));
         return;
       }
-      resolve({ server, url: `http://127.0.0.1:${address.port}` });
+      resolve(`http://127.0.0.1:${address.port}`);
     });
   });
 }
 
-let teamShelf: Server;
-let publicShelf: Server;
 let teamUrl: string;
 let publicUrl: string;
 
@@ -223,18 +227,16 @@ const loopbackOnlyFetch: typeof fetch = (input, init) => {
 
 beforeAll(async () => {
   globalThis.fetch = loopbackOnlyFetch;
-  const team = await startShelf('team');
-  const pub = await startShelf('public');
-  teamShelf = team.server;
-  publicShelf = pub.server;
-  teamUrl = team.url;
-  publicUrl = pub.url;
+  teamUrl = await startShelf('team');
+  publicUrl = await startShelf('public');
 });
 
 afterAll(async () => {
   globalThis.fetch = realFetch;
-  await new Promise<void>((r) => teamShelf.close(() => r()));
-  await new Promise<void>((r) => publicShelf.close(() => r()));
+  // Whatever got created, whether or not both bound: a `beforeAll` that threw
+  // half way through still ran `afterAll`, and closing only the pair it never
+  // finished assigning would leak the listener and bury the original error.
+  await Promise.all(shelves.map((s) => new Promise<void>((r) => s.close(() => r()))));
 });
 
 beforeEach(async () => {
@@ -323,6 +325,31 @@ describe('a shelf with the answer', () => {
       { arm: 'research', event: 'tool.before', reason: 'hit', delivered: `inject:${RESOURCE_ID}` },
     ]);
     for (const call of calls) expect(call.body.trigger).toBe('research');
+  });
+
+  it('a WebFetch: the fetch arm delivers, under its own switch and its own row', async () => {
+    configure({ 'web-fetch': true });
+    const res = await post({
+      hook_event_name: 'PreToolUse',
+      tool_name: 'WebFetch',
+      tool_input: {
+        url: 'https://github.com/pgvector/pgvector/issues/123?token=secret',
+        prompt: 'why did the collation flip after the image bump',
+      },
+    });
+
+    expect(res.status).toBe(200);
+    expectTheFindingItself(res.context);
+    // `fetch`, not `research`: the two web arms share a wire trigger and must
+    // stay two rows, or the ledger cannot tell a page fetch from a search.
+    expect(await settled(1)).toEqual([
+      { arm: 'fetch', event: 'tool.before', reason: 'hit', delivered: `inject:${RESOURCE_ID}` },
+    ]);
+    for (const call of calls) {
+      expect(call.body.trigger).toBe('research');
+      // Nothing past the first `?` travels, which is the arm's own rule.
+      expect(call.body.query).not.toContain('secret');
+    }
   });
 
   it('a failed command: the failure arm delivers off the team keys route', async () => {
@@ -425,6 +452,24 @@ describe('a shelf with nothing', () => {
     expect(calls).toHaveLength(2);
   });
 
+  it('a WebFetch: nothing is injected', async () => {
+    configure({ 'web-fetch': true });
+    const res = await post({
+      hook_event_name: 'PreToolUse',
+      tool_name: 'WebFetch',
+      tool_input: {
+        url: 'https://github.com/pgvector/pgvector/issues/123',
+        prompt: 'why did the collation flip after the image bump',
+      },
+    });
+
+    expect(res).toEqual({ status: 204, context: null });
+    expect(await settled(1)).toEqual([
+      { arm: 'fetch', event: 'tool.before', reason: 'no-hit', delivered: null },
+    ]);
+    expect(calls).toHaveLength(2);
+  });
+
   it('a failed command: nothing is injected', async () => {
     configure({ failure: true });
     const res = await post({
@@ -439,7 +484,13 @@ describe('a shelf with nothing', () => {
     expect(await settled(1)).toEqual([
       { arm: 'failure', event: 'tool.after', reason: 'no-hit', delivered: null },
     ]);
-    expect(calls).toHaveLength(1);
+    // Both rounds, team-side only: the fingerprints resolve nothing, so the arm
+    // asks the same shelf again in words (#327). A hit in round one stops there,
+    // which is why the populated case above sees one call and this one sees two.
+    expect(calls.map((c) => `${c.shelf} ${c.path}`)).toEqual([
+      'team /api/keys/resolve',
+      'team /api/search',
+    ]);
   });
 
   it('a dispatch: the child that claims the miss is injected nothing', async () => {
