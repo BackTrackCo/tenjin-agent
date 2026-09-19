@@ -138,7 +138,15 @@ export async function runFire(
             holdsClaim = false;
             return skip('deadline');
           }
-          const definite = asked.legs.length > 0 && asked.legs.every((l) => l.status === 'ok');
+          // A DEFINITE MISS IS ONE EVERY SET ANSWERED. `withheld` counts as an
+          // answer: the server understood the call and decided this question
+          // needed no public run, which is a complete reply, not a leg that
+          // failed. Counting it as a failure would turn every lookup on a shelf
+          // whose marketplace run is withheld into `no-answer`, and a `no-answer`
+          // fire claims nothing and parks nothing for the child.
+          const definite =
+            asked.legs.length > 0 &&
+            asked.legs.every((l) => l.status === 'ok' || l.status === 'withheld');
           if (asked.answer === null && !definite) {
             release(deps.db, actor, plan.question.questionKey, fire.id);
             holdsClaim = false;

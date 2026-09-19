@@ -1179,7 +1179,7 @@ describe('neither render carries the other mode s criteria', () => {
       skill: 'tenjin-search',
       what: 'what a question may carry',
       publicOnly: 'Send only the generalizable part',
-      teamOnly: 'a team shelf relaxes the TOPIC, never the wording',
+      teamOnly: 'A team shelf relaxes the TOPIC, never the wording',
     },
     {
       skill: 'tenjin-search',

@@ -200,7 +200,7 @@ describe('searchLeg: one call, two sets', () => {
     expect((await body(calls)).includePublic).toBe(false);
   });
 
-  it('an org policy of off is indistinguishable from asking for nothing: public: null, one row', async () => {
+  it('a public list the server withheld is a `withheld` ROW, not a missing one', async () => {
     const { fetchImpl, calls } = stub(() =>
       json(200, twoList([candidate({ strong: true })], null)),
     );
@@ -210,11 +210,17 @@ describe('searchLeg: one call, two sets', () => {
       new AbortController().signal,
       deps(signed),
     );
-    // Asked for public and did not get it. No error, no retry, one `team` row.
+    // Asked for public and did not get it. No error and no retry — but the row
+    // is filed, because the server deciding this question needed no public run
+    // is a fact about this fire, and a dropped row said exactly what a round
+    // that never planned the set says.
     expect((await body(calls)).includePublic).toBe(true);
-    expect(results.map((r) => r.shelf)).toEqual(['team']);
+    expect(results.map((r) => r.shelf)).toEqual(['team', 'public']);
     expect(results[0]?.status).toBe('ok');
-    expect(results[0]?.authError).toBeUndefined();
+    expect(results[1]).toEqual({ shelf: 'public', status: 'withheld', answer: null });
+    // WHY it was withheld is still not inferred: an org policy of off and a
+    // deployment that runs the marketplace only on a team miss are one status.
+    expect(results[1]?.authError).toBeUndefined();
   });
 
   it('sends `Question.text` whole: the cut was made once, upstream', async () => {

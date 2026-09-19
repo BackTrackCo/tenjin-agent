@@ -223,8 +223,9 @@ function probeFetch(fetchImpl: typeof fetch | undefined, sink: (seen: Seen) => v
  * - `cfg.shelf !== null` and a signature: POST `/api/search` with `shelf` and
  *   with `includePublic` from `team.publicFallback` unless the caller says
  *   otherwise. Two sets, `team` and `public` — or one when `includePublic` is
- *   false, and one when the server answered `public: null` anyway because the
- *   org's policy is off, which the client deliberately cannot tell apart.
+ *   false. A round that ASKED for the marketplace and got `public: null` still
+ *   files both: the second row is `withheld`, the server's own answer, and why
+ *   it withheld the list is deliberately not something the client infers.
  * - no wallet: POST `/api/search` with NO `shelf`, unsigned. One `public` set,
  *   an ordinary valid configuration.
  * - a shelf is set and nothing local can sign: POST `/api/search` with no
@@ -416,12 +417,24 @@ async function callShelf(
     const parsed = shelfSearchResponseSchema.safeParse(res.json);
     if (!parsed.success) return failed(sets, statusOf(seen, signal), {});
     const rows = [resultOf('team', parsed.data.shelf, strongestOf, {})];
-    // A `public` of null is not a failure and not a row: the marketplace was
-    // never run, either because this call said so or because the org's policy
-    // does. The CLI cannot tell those apart and does not need to. A list the
-    // round did not ask for is dropped for the same reason it is not declared.
-    if (parsed.data.public !== null && sets.includes('public')) {
-      rows.push(resultOf('public', parsed.data.public, strongestOf, {}));
+    // THE SETS THE ROUND DECLARED, ON EVERY EXIT. A round that did not ask for
+    // the marketplace gets no `public` row, whatever the server volunteered. A
+    // round that DID ask gets one either way: a `public` of null is not a
+    // failure, it is the SERVER deciding this question needed no public run,
+    // and that decision is a fact about this fire that exists nowhere else.
+    // Dropping the row recorded the same thing as never planning the set, which
+    // is what made a shelf-only lookup and a withheld marketplace run
+    // indistinguishable in the ledger — and it is the transport path's rule
+    // already, where a failed call files a row for every set it declared. The
+    // CLI still does not learn WHY the server withheld it (an org policy of
+    // off, or a deployment that runs the marketplace only on a team miss); that
+    // stays the server's business and no status here claims to know.
+    if (sets.includes('public')) {
+      rows.push(
+        parsed.data.public === null
+          ? { shelf: 'public', status: 'withheld', answer: null }
+          : resultOf('public', parsed.data.public, strongestOf, {}),
+      );
     }
     return rows;
   } catch {
