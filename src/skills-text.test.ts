@@ -1120,11 +1120,21 @@ describe('the public render did not move', () => {
   // label" phrasing and the warning about a short `provenance:` are not on the
   // page any more. The merge then took main's `--key` paragraph on top.
   //
-  // tenjin-search moved 2026-09-14: its question bullet no longer names a 512
-  // cap, because the shelf takes 8,000 characters on every trigger.
+  // tenjin-search moved on BOTH sides of this merge, so its digest is a value
+  // neither side pinned. Main's #358 dropped the 512 cap from the question
+  // bullet, because the shelf now takes 8,000 characters on every trigger and
+  // the CLI no longer cuts at a whole word. This branch's own move is the item
+  // bullet gaining `shelf`, the field the server stamps on every candidate of
+  // both lists, so an agent reading a hit can say which shelf it came from
+  // without inferring it from which list it was in. The two edits are in
+  // different bullets and both are in the shared region, outside any
+  // `tenjin:when` arm. `src/evals-fixtures.test.ts` pins the same item bullet
+  // against the candidate schema, so the two move together or neither does.
+  // tenjin-publish is untouched by either side: the one call, the two lists and
+  // the query bound change what the CLI does, not what a publisher is told.
   it('renders the exact bytes a public install shipped before team mode existed', () => {
     expect(Object.fromEntries(SHAPED_SKILLS.map((n) => [n, digest(read(n))]))).toEqual({
-      'tenjin-search': 'b68bf006e5c7dfe0d53a3bbbd2651198',
+      'tenjin-search': '6f422c9a41fae7dc3293c0d9c8d6ad61',
       'tenjin-publish': '3c7bc8ca8ddde86353f7019928b81ee2',
     });
   });

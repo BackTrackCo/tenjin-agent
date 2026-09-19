@@ -144,15 +144,27 @@ export async function runFire(
             holdsClaim = false;
             return skip(
               asked.legs.some((l) => l.status === 'http_429') ? 'rate-server' : 'no-answer',
+              asked.authError,
             );
           }
           finish(deps.db, actor, plan.question.questionKey, asked.answer, deps.clock(), fire.id);
           holdsClaim = false;
-          result = asked.answer ? { reason: 'hit', answer: asked.answer } : skip('no-hit');
+          // A credential failure is never a reason: the public route answered
+          // and that answer is delivered. It rides in `detail`, which is the
+          // row's own `error` column, so the failure is loud and doctor can
+          // name the remedy without the fire having been silenced.
+          const detail = asked.authError;
+          result = asked.answer
+            ? {
+                reason: 'hit',
+                answer: asked.answer,
+                ...(detail !== undefined ? { detail } : {}),
+              }
+            : skip('no-hit', detail);
         }
         if (result.answer) {
           const delivery = arm.deliver?.(result.answer, ctx) ?? null;
-          if (delivery === null) return { reason: 'no-hit', answer: result.answer };
+          if (delivery === null) return { ...result, reason: 'no-hit' };
           // ONCE-PER-PIECE IS ABOUT WHAT AN AGENT WAS SHOWN, so only an
           // injection burns the mark. A log-only arm looks a piece up and says
           // nothing; burning the mark there would let a silent lookup silence
@@ -162,7 +174,7 @@ export async function runFire(
             delivery.mode === 'inject' &&
             !firstSight(deps.db, actor, result.answer.resourceId, deps.clock())
           ) {
-            return { reason: 'seen', answer: result.answer };
+            return { ...result, reason: 'seen' };
           }
           return { ...result, delivery };
         }

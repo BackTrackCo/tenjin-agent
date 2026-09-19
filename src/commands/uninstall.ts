@@ -21,10 +21,10 @@ import type { CommandContext, CommandResult } from '../context';
  *
  * The shape of this command is the promise it makes. It removes the skills, the
  * loop daemon and its files, and our hook entries and permission rules in the
- * harness's settings.json. It does NOT remove the wallet, the config (the team
- * shelf's shared `shelfBypassSecret` included, which the receipt names on its
- * own line, with the command that clears it, on the machines that actually hold
- * one), the library, or `loop.db`: `install` did not create those, a wallet
+ * harness's settings.json. It does NOT remove the wallet, the config (the active
+ * shelf slug included, which the receipt names on its own line, with the command
+ * that clears it, on the machines that actually have one), the library, or
+ * `loop.db`: `install` did not create those, a wallet
  * holds funds, and the loop database is the machine's only record.
  * `~/.tenjin/hooks` is the one thing under `~/.tenjin` it does remove, because
  * `install` wrote it. The receipt names both halves on every run, so the
@@ -92,20 +92,20 @@ export async function runUninstall(
     // Read rather than assumed: the shelf-key item is an imperative to clear a
     // shared credential, and on the machines that do not have one it is a false
     // line in a receipt whose only job is to be checked.
-    kept: keptItems(await hasShelfSecret(ctx.dataDir)),
+    kept: keptItems(await hasShelf(ctx.dataDir)),
   };
 
   return { data: report, humanLines: humanLines(report) };
 }
 
-/** Does this machine's config actually hold a team door key? `''` is the default. */
-async function hasShelfSecret(dataDir: string): Promise<boolean> {
+/** Is a shelf actually set on this machine? null is the default. */
+async function hasShelf(dataDir: string): Promise<boolean> {
   try {
     const raw = await loadRawConfig(dataDir);
-    return typeof raw.shelfBypassSecret === 'string' && raw.shelfBypassSecret !== '';
+    return typeof raw.shelf === 'string' && raw.shelf !== '';
   } catch {
     // An unreadable config is not a reason to fail an uninstall, and the quiet
-    // side is the safe one here: the key, if there is one, stays as it was.
+    // side is the safe one here: the slug, if there is one, stays as it was.
     return false;
   }
 }

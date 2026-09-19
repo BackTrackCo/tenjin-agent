@@ -1,6 +1,6 @@
 import { CliError } from '../lib/errors';
 import { formatUsdDisplay, toMoney } from '../lib/money';
-import { resolveContextSettings } from '../lib/settings';
+import { onConfiguredDeployment, resolveContextSettings } from '../lib/settings';
 import { resolveResourceRef } from '../lib/resource-ref';
 import { fetchRead } from '../lib/read-client';
 import type { ReadBody, SessionReadResult } from '../lib/read-client';
@@ -12,12 +12,11 @@ import {
   type PresentOpts,
 } from '../lib/delivery';
 import { sanitizeForTerminal } from '../lib/output';
-import { isSessionPresentable, loadSessionFile, signWithSession } from '../lib/session-present';
+import { searchHeaders } from '../lib/search-auth';
 import type { SignableRequest } from '../lib/session-present';
 import { resolveWriteAuth } from '../lib/consent';
 import { resolveWalletProvider, type WalletProvider } from '../lib/wallet';
-import { isSameDeployment } from '../lib/production-origin';
-import { originOf, tryOriginOf } from '../lib/url';
+import { originOf } from '../lib/url';
 import type { CommandContext, CommandResult } from '../context';
 
 /**
@@ -50,8 +49,8 @@ import type { CommandContext, CommandResult } from '../context';
  *
  * It presents and mints ONLY against a deployment the CONFIG FILE names — the
  * pin `fund` has (owner decision, 2026-09-06). `--base-url` still points a free
- * read anywhere, but the wallet signs for `baseUrl` or `publicShelfUrl` as
- * configured or for nothing at all, so an allowlisted `read --base-url <host>`
+ * read anywhere, but the wallet signs for the configured `baseUrl` or for
+ * nothing at all, so an allowlisted `read --base-url <host>`
  * cannot steer a credential to a host an agent named. Nor is a cached
  * delegation for another origin offered, or clobbered by one minted here.
  */
@@ -81,20 +80,10 @@ export async function runRead(
 ): Promise<CommandResult> {
   const settings = await resolveContextSettings(ctx);
   const sectionsBudget = parseSectionsBudget(args.sections);
-  const ref = await resolveResourceRef(
-    args.ref,
-    ctx.dataDir,
-    settings.baseUrl,
-    // The second origin only exists in TEAM mode. In public mode `publicShelfUrl`
-    // is a shelf nothing falls through to, so widening on it would accept a URL
-    // from an origin no search on this machine can even surface.
-    settings.teamMode ? settings.publicShelfUrl : undefined,
-    {
-      timeoutMs: ctx.flags.timeout,
-      ...(settings.bypass !== undefined ? { bypass: settings.bypass } : {}),
-      ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
-    },
-  );
+  const ref = await resolveResourceRef(args.ref, ctx.dataDir, settings.baseUrl, {
+    timeoutMs: ctx.flags.timeout,
+    ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+  });
   const presentOpts: PresentOpts = { printBody: args.printBody === true, sectionsBudget };
 
   // 1. Library idempotence, BEFORE any network: an owned resource re-delivers
@@ -110,7 +99,6 @@ export async function runRead(
 
   const fetchOpts = {
     timeoutMs: ctx.flags.timeout,
-    ...(settings.bypass !== undefined ? { bypass: settings.bypass } : {}),
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   };
 
@@ -168,12 +156,7 @@ export async function runRead(
 
 /** What the entitlement question got, which is not the same as what was asked. */
 type EntitlementCheck =
-  | 'session'
-  | 'session_rejected'
-  | 'session_inconclusive'
-  | 'session_origin_mismatch'
-  | 'origin_not_configured'
-  | 'no_wallet';
+  'session' | 'session_rejected' | 'session_inconclusive' | 'origin_not_configured' | 'no_wallet';
 
 /** How the one signed GET gets its headers: from the cached delegation, or from
  *  the write auth that mints one. */
@@ -202,16 +185,16 @@ const LOUD_CODES = new Set(['CONTRACT_MISMATCH', 'RATE_LIMITED']);
  * base and the configured public shelf rather than to the resolved ones, which a
  * flag moves.
  *
- * The origin mismatch below is its own outcome rather than "no session": the two
- * are indistinguishable to an agent, and the remedy for one is the remedy the
- * other must NOT get. A cached delegation for another deployment means the
- * configured base moved after it was minted, and minting here would overwrite
- * the good credential with one for the new origin.
+ * THE SIGNING IS `lib/search-auth`'s, not a second copy. That module is where
+ * "present a cached delegation, else mint one" lives for the whole CLI, and
+ * one origin means a stale file bound to some other host is simply not
+ * presentable and re-mints: the `session_origin_mismatch` refusal this used to
+ * raise had nothing left to describe.
  */
 async function presentOrMint(
   ctx: CommandContext,
   origin: string,
-  settings: { configuredBaseUrl: string; publicShelfUrl: string },
+  settings: { configuredBaseUrl: string },
   now: () => number,
   url: string,
   fetchOpts: { timeoutMs: number; fetchImpl?: typeof fetch },
@@ -220,50 +203,39 @@ async function presentOrMint(
   if (!onConfiguredDeployment(origin, settings)) {
     return { kind: 'refuse', check: 'origin_not_configured' };
   }
-  const cached = await loadSessionFile(ctx.dataDir);
-  if (cached !== null && cached.origin !== origin) {
-    return { kind: 'refuse', check: 'session_origin_mismatch' };
-  }
-  if (cached !== null && isSessionPresentable(cached, now(), 'read', origin)) {
-    return await present((req) => signWithSession(cached, req, { now }), url, fetchOpts);
-  }
-  let headersFor: SignHeaders;
-  try {
-    const provider = resolveWalletProvider(
-      ctx,
-      deps.provider !== undefined ? { provider: deps.provider } : {},
-    );
-    const signer = await provider.getSigner();
-    const auth = resolveWriteAuth({
-      signer,
-      // The origin being read, not the configured base URL: in team mode a piece
-      // may live on the public shelf while `baseUrl` names the team's, and a
-      // delegation is only ever valid for the origin it was bound to.
-      baseUrl: origin,
-      dataDir: ctx.dataDir,
-      scope: 'read',
-      env: deps.env ?? process.env,
-    });
-    headersFor = (req) => auth.headersFor(req);
-  } catch {
+  const env = deps.env ?? process.env;
+  const auth = await searchHeaders(
+    ctx.dataDir,
+    { method: 'GET', url },
+    {
+      now,
+      env,
+      mint: async () => {
+        const provider = resolveWalletProvider(
+          ctx,
+          deps.provider !== undefined ? { provider: deps.provider } : {},
+        );
+        const signer = await provider.getSigner();
+        return resolveWriteAuth({
+          signer,
+          // The origin being read, which `resolveResourceRef` has already
+          // pinned to the configured base: a delegation is only ever valid for
+          // the origin it was bound to.
+          baseUrl: origin,
+          dataDir: ctx.dataDir,
+          scope: 'read',
+          env,
+        });
+      },
+    },
+  );
+  if (auth.kind !== 'signed') {
     // No wallet, or one that will not open. Ownership was never asked, and a
     // machine with no key owns nothing here anyway: refuse on the price rather
     // than replace a recoverable exit 3 with a keystore error.
     return { kind: 'refuse', check: 'no_wallet' };
   }
-  return await present(headersFor, url, fetchOpts);
-}
-
-/** Is this origin one of the two shelves the config names? */
-function onConfiguredDeployment(
-  origin: string,
-  settings: { configuredBaseUrl: string; publicShelfUrl: string },
-): boolean {
-  for (const configured of [settings.configuredBaseUrl, settings.publicShelfUrl]) {
-    const shelf = tryOriginOf(configured);
-    if (shelf !== null && isSameDeployment(origin, shelf)) return true;
-  }
-  return false;
+  return await present(() => Promise.resolve(auth.headers), url, fetchOpts);
 }
 
 /**
@@ -316,9 +288,6 @@ async function present(
  *  - `session` — the server answered "you do not own this". Buying is the answer.
  *  - `origin_not_configured` — this host is not a shelf the config names, so
  *    nothing was signed for it. The remedy is to stop redirecting the CLI.
- *  - `session_origin_mismatch` — a session exists, for a DIFFERENT origin, so
- *    nothing was presented and nothing was minted. The remedy is to stop
- *    redirecting the CLI.
  *  - `no_wallet` — there is no key on this machine to ask the question with, so
  *    ownership is unknown rather than denied.
  *  - everything else — the question is still open; retrying is free.
@@ -337,11 +306,9 @@ function refusal(
   const fix =
     check === 'origin_not_configured'
       ? `That host is not a Tenjin shelf this machine is configured for, so nothing was signed for it. Check the configured origin with \`tenjin config get baseUrl\` and drop any host override. ${buyFix}`
-      : check === 'session_origin_mismatch'
-        ? `Your session key was minted for a different Tenjin deployment, so it was not presented and no new one was minted against this host. Read from the origin it belongs to. Check the configured origin with \`tenjin config get baseUrl\` and drop any host override. ${buyFix}`
-        : check === 'no_wallet'
-          ? `This machine has no wallet that opens, so whether you own this piece could never be asked. Create or fix one (\`tenjin wallet create\`, \`tenjin doctor\`), then read it again. ${buyFix}`
-          : buyFix;
+      : check === 'no_wallet'
+        ? `This machine has no wallet that opens, so whether you own this piece could never be asked. Create or fix one (\`tenjin wallet create\`, \`tenjin doctor\`), then read it again. ${buyFix}`
+        : buyFix;
   return new CliError('REFUSED', `This piece costs ${priceText}; \`tenjin read\` never pays.`, {
     fix,
     details: {

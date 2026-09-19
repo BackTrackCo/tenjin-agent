@@ -682,18 +682,15 @@ describe('runRead, module boundary', () => {
   // of routing the mint there rather than open-coding it.
   it('signs only through the session layer: exactly one sign* call, no SIWX of its own', async () => {
     const source = await readFile(join(here, 'read.ts'), 'utf8');
+    // ZERO of its own: the present-or-mint is `lib/search-auth`'s now, one
+    // function for the CLI and the daemon, so `read.ts` signs nothing by hand.
     const signCalls = [...source.matchAll(/\b(sign[A-Za-z]*)\s*\(/g)].map((m) => m[1]);
-    expect(signCalls).toEqual(['signWithSession']);
+    expect(signCalls).toEqual([]);
     // The presentation and the mint are actually WIRED, not merely importable. A
     // type-only import keeps a module in the graph walk above, so without these
     // the pins stay green over a read that quietly stopped doing either.
     const code = source.replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, '');
-    for (const wired of [
-      'loadSessionFile(',
-      'isSessionPresentable(',
-      'resolveWriteAuth(',
-      'originOf(',
-    ]) {
+    for (const wired of ['searchHeaders(', 'resolveWriteAuth(', 'originOf(']) {
       expect(code, `read.ts must still call ${wired}`).toContain(wired);
     }
     expect(source).not.toContain('buildSiwxHeader');
@@ -904,22 +901,16 @@ describe('runRead, failures that must stay loud on the signed GET', () => {
  * — a `read` that refused every public-shelf hit would make the fallback leg
  * useless. The bypass key still goes to one origin only.
  */
-describe('runRead across two shelves', () => {
+describe('runRead on one origin', () => {
   const TEAM = 'https://team.example';
-  const SECRET = 'shelf-secret-abc123';
-  const BYPASS_HEADER = 'x-vercel-protection-bypass';
-  const PUBLIC_URL = 'https://tenjin.blog/api/read/iris/slug';
+  const PUBLIC_URL = `${TEST_ORIGIN}/api/read/iris/slug`;
   const TEAM_URL = `${TEAM}/api/read/iris/slug`;
 
-  /** Team mode: baseUrl is the team shelf, publicShelfUrl is tenjin.blog. */
-  async function writeShelfConfig(): Promise<void> {
+  /** A machine on a shelf: one base URL, one slug, and no second origin. */
+  async function writeShelfConfig(baseUrl = TEAM): Promise<void> {
     await writeFile(
       join(dir, 'config.json'),
-      JSON.stringify({
-        baseUrl: TEAM,
-        publicShelfUrl: TEST_ORIGIN,
-        shelfBypassSecret: SECRET,
-      }),
+      JSON.stringify({ baseUrl, shelf: 'backtrack/backtrack' }),
     );
   }
 
@@ -933,29 +924,18 @@ describe('runRead across two shelves', () => {
     };
   }
 
-  it('reads a free piece on the team shelf, with the key', async () => {
+  it('reads a free piece on the configured base URL', async () => {
     await writeShelfConfig();
     const { fetch, calls } = makeReadServer({
       plain: () => reply.entitled(readBody({ price: '0' })),
     });
     const result = await runRead({ ref: TEAM_URL }, shelfCtx(), { fetchImpl: fetch });
     expect((result.data as { entitlement: string }).entitlement).toBe('free');
-    expect(calls[0]?.headers[BYPASS_HEADER]).toBe(SECRET);
+    expect(calls[0]?.url).toBe(TEAM_URL);
   });
 
-  it('reads a free piece on the public shelf, and sends it no key', async () => {
-    await writeShelfConfig();
-    const { fetch, calls } = makeReadServer({
-      plain: () => reply.entitled(readBody({ price: '0' })),
-    });
-    const result = await runRead({ ref: PUBLIC_URL }, shelfCtx(), { fetchImpl: fetch });
-    expect((result.data as { entitlement: string }).entitlement).toBe('free');
-    expect(calls[0]?.url).toBe(PUBLIC_URL);
-    expect(calls[0]?.headers[BYPASS_HEADER]).toBeUndefined();
-  });
-
-  it('resolves a stored public-shelf candidate by id', async () => {
-    await writeShelfConfig();
+  it('resolves a stored candidate by id on that same origin', async () => {
+    await writeShelfConfig(TEST_ORIGIN);
     const resourceId = '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
     await recordSearch(dir, {
       searchId: '0197aaaa-bbbb-cccc-dddd-000000000001',
@@ -972,32 +952,13 @@ describe('runRead across two shelves', () => {
   });
 
   /**
-   * THE ORIGIN BINDING, between the two origins that are both configured — the
-   * only place it is still reachable now that the mint is pinned. A team-shelf
-   * delegation is not offered to the public shelf, and a public-shelf read does
-   * not mint over it: the good credential survives, and the refusal says so.
+   * THE SECOND ORIGIN IS GONE, and with it the `session_origin_mismatch`
+   * refusal: a shelf piece and a marketplace piece live on one deployment, so a
+   * cached delegation minted for it is presentable to both. A stale file bound
+   * to some other host is simply not presentable and re-mints on first use.
    */
-  it('never mints against the public shelf while a team-shelf session is cached', async () => {
-    await writeShelfConfig();
-    const { file } = await testSessionKey({ origin: TEAM });
-    await saveSessionFile(dir, file);
-    const { fetch } = makeReadServer({
-      plain: () => reply.paymentRequired(buildPaymentRequired()),
-      session: () => reply.entitled(readBody()),
-    });
-    const err = (await runRead({ ref: PUBLIC_URL }, shelfCtx(), { fetchImpl: fetch }).catch(
-      (e: unknown) => e,
-    )) as CliError;
-
-    expect(err.details).toMatchObject({ entitlementCheck: 'session_origin_mismatch' });
-    expect(err.fix).toMatch(/minted for a different Tenjin deployment/i);
-    expect(err.fix).toContain('tenjin config get baseUrl');
-    // The cached delegation is still there, unclobbered.
-    expect(await readdir(dir)).toContain('session.json');
-  });
-
-  it('presents to the origin it WAS minted for, so the binding is not just a refusal', async () => {
-    await writeShelfConfig();
+  it('presents one cached delegation for shelf and marketplace pieces alike', async () => {
+    await writeShelfConfig(TEST_ORIGIN);
     const { file } = await testSessionKey({ origin: TEST_ORIGIN });
     await saveSessionFile(dir, file);
     const { fetch, calls } = makeReadServer({
@@ -1009,22 +970,15 @@ describe('runRead across two shelves', () => {
     expect(calls.map((c) => c.phase)).toEqual(['plain', 'session']);
   });
 
-  it('still refuses an origin that is neither shelf', async () => {
+  it('still refuses an origin the config does not name', async () => {
     await writeShelfConfig();
     await expect(
       runRead({ ref: 'https://evil.example/api/read/iris/slug' }, shelfCtx(), {
         fetchImpl: neverFetch,
       }),
     ).rejects.toMatchObject({ code: 'USAGE' });
-  });
-
-  it('refuses the public shelf in public mode, when it is not the configured base', async () => {
-    // No secret: one shelf, and `publicShelfUrl` widens nothing. A read is
-    // pinned to the configured base exactly as it always was.
-    await writeFile(
-      join(dir, 'config.json'),
-      JSON.stringify({ baseUrl: TEAM, publicShelfUrl: TEST_ORIGIN }),
-    );
+    // Including the public marketplace, which is no longer a second configured
+    // origin just because it exists.
     await expect(
       runRead({ ref: PUBLIC_URL }, shelfCtx(), { fetchImpl: neverFetch }),
     ).rejects.toMatchObject({ code: 'USAGE' });

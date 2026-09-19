@@ -1,4 +1,3 @@
-import { teamOrigin } from '../legs/shelf';
 import { PRIMER_TEXT, PRIMER_TEXT_TEAM } from '../prose';
 import type { Arm } from '../types';
 
@@ -15,6 +14,6 @@ export const primerArm: Arm = {
   after(ctx) {
     const cfg = ctx.deps.config();
     if (!cfg.hooks.primer) return null;
-    return { context: teamOrigin(cfg) !== null ? PRIMER_TEXT_TEAM : PRIMER_TEXT };
+    return { context: cfg.shelf !== null ? PRIMER_TEXT_TEAM : PRIMER_TEXT };
   },
 };

@@ -1,4 +1,6 @@
 import type { Config } from '../lib/config';
+import type { SearchAuthResult } from '../lib/search-auth';
+import type { SignableRequest } from '../lib/session-present';
 import type { Emit, Event, HarnessAdapter, HookInput, ToolKind } from '../adapters/types';
 import type { LoopDb } from './store';
 
@@ -17,6 +19,14 @@ export interface Actor {
 /** Who is blocked on this fire; picks `human_wait_ms` or `tool_wait_ms`. */
 export type Wait = 'human' | 'tool';
 
+/**
+ * The tag on a candidate SET, and the value of the `legs.shelf` column.
+ *
+ * It used to name a planned REQUEST: one leg, one origin, one row. A shelf is
+ * now a row on the one deployment, so one signed request comes back with two
+ * candidate sets and the tag moves onto the set. `legs.shelf` keeps its name
+ * and its three values, and one call can therefore produce two `legs` rows.
+ */
 export type Shelf = 'team' | 'public' | 'keys';
 
 /**
@@ -65,10 +75,24 @@ export interface Answer {
   price?: string;
   handle?: string;
   excerpt?: string;
+  /** Which shelf row the server stamped on this candidate, or null for the
+   *  public marketplace. Copied straight off the candidate, never inferred
+   *  from the set it was in. */
+  shelfRef?: { id: string; slug: string } | null;
 }
 
 export interface LegResult {
+  /** Which candidate set this result is. One call can return two of these. */
+  shelf: Shelf;
   status: LegStatus;
+  /**
+   * Set only when a shelf was configured and nothing local could sign for it.
+   * The call still went out, unsigned, to the public route, and its answer is
+   * delivered; this rides to the `fires.error` column so the failure is loud
+   * and doctor can name the remedy. It is NOT a `Reason`: the fire's reason is
+   * whatever the public answer earned.
+   */
+  authError?: string;
   searchId?: string;
   title?: string;
   url?: string;
@@ -79,8 +103,13 @@ export interface LegResult {
    * embedding budget has to be distinguishable from an empty shelf.
    */
   calibration?: string;
-  /** What the leg's `verdict` decides over; opaque to the kernel. */
-  payload?: unknown;
+  /**
+   * This set's answer, or null for a miss. Decided by the leg, over the parsed
+   * envelope and nothing else: search sets take the server's `strong`, a keys
+   * set takes the exact match, and neither grades a candidate the server
+   * vouched nothing for.
+   */
+  answer: Answer | null;
 }
 
 export interface Question {
@@ -99,13 +128,16 @@ export interface Skip {
   text: string;
 }
 
+/**
+ * ONE CALL, ONE OR MORE CANDIDATE SETS. A leg is a request, and a request now
+ * answers with every set it carried: the shelf search returns `team` and
+ * `public` from one round trip. `shelves` is what that call WILL produce, in
+ * ledger order, so a plan can be reasoned about before it runs.
+ */
 export interface Leg {
-  shelf: Shelf;
+  shelves: Shelf[];
   /** `budgetMs` is what the leg forwards as the server's `budget_ms`. */
-  request(q: Question, budgetMs: number, signal: AbortSignal): Promise<LegResult>;
-  /** null = miss. Search legs take the shelf's `strong`; keys legs take an
-   *  exact key match. Neither grades a candidate the shelf vouched nothing for. */
-  verdict(r: LegResult): Answer | null;
+  request(q: Question, budgetMs: number, signal: AbortSignal, deps: Deps): Promise<LegResult[]>;
 }
 
 /** A stage is parallel legs; the next stage runs only if no stage answered. */
@@ -200,19 +232,27 @@ export interface Arm {
 }
 
 /**
- * What a fire reads off `config.json`. The three shelf fields are here because
- * the search leg resolves its own origin and bypass per shelf: `baseUrl` (with
- * the secret) is the team shelf, `publicShelfUrl` is the public one. `publish`
- * is the capture ask's `<mode>` when the checkout has no `.tenjin.json` of its
- * own: the ask names the consent a publish will actually run under.
+ * What a fire reads off `config.json`. One origin (`baseUrl`) and one qualified
+ * shelf name (`shelf`, `<org>/<shelf>`): "on a shelf" is `shelf !== null` and
+ * nothing is inferred.
+ * `publish` is the capture ask's `<mode>` when the checkout has no
+ * `.tenjin.json` of its own: the ask names the consent a publish will actually
+ * run under.
  */
 export type KernelConfig = Pick<
   Config,
-  'loop' | 'team' | 'hooks' | 'baseUrl' | 'publicShelfUrl' | 'shelfBypassSecret' | 'publish'
+  'loop' | 'team' | 'hooks' | 'baseUrl' | 'shelf' | 'publish'
 >;
 
 export interface Deps {
   db: LoopDb;
+  /**
+   * Sign one search request, or say why it cannot be signed. The daemon builds
+   * it over `lib/search-auth`; the shelf leg routes on the verdict rather than
+   * dropping a leg, because a credential problem must never withhold a public
+   * answer (00-principles.md, principle 4).
+   */
+  auth(req: SignableRequest): Promise<SearchAuthResult>;
   /** Read per fire: the daemon reloads on a config.json mtime change. */
   config(): KernelConfig;
   clock(): number;

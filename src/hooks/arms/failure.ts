@@ -10,7 +10,7 @@ import {
 } from '../failure/signature';
 import { sigV1Test, testIdentityOf, type TestSignature } from '../failure/test-identity';
 import { getMark } from '../gates';
-import { keysLeg, searchLeg, teamOrigin } from '../legs/shelf';
+import { keysLeg, searchLeg } from '../legs/shelf';
 import { question } from '../question';
 import { stripAnsi } from '../text';
 import type { Arm, Leg, Question } from '../types';
@@ -33,9 +33,10 @@ import { BASH_START } from './context';
  * words after it could only be vaguer, which is why the rounds are ordered and
  * not merged.
  *
- * THE TEAM SHELF IS THE ONLY ONE ASKED, in either round. There is no public
- * leg: the marketplace holds none of this team's errors, and every hit in a
- * 150-search census of this shelf came from the team side.
+ * THE SHELF IS THE ONLY THING ASKED, in either round. The text round sends
+ * `includePublic: false` so the marketplace is never run for it: the
+ * marketplace holds none of this team's errors, and every hit in a 150-search
+ * census of this shelf came from the team side.
  *
  * THE ARM ONLY ASKS. It writes nothing about the failure, so a fire that finds
  * nothing leaves its ledger row and no other trace. That row IS the record: it
@@ -119,11 +120,11 @@ export const failureArm: Arm = {
   async plan(ctx) {
     const cfg = ctx.deps.config();
     if (!cfg.hooks.failure) return null;
-    // Both rounds go to a team origin or nowhere: there is no public resolve,
-    // and no public leg by decision. A machine with no team shelf therefore has
-    // nothing to ask however the failure reads, and asking that here is what
-    // keeps it from paying for the test-report read below to learn it.
-    if (teamOrigin(cfg) === null) return null;
+    // Both rounds go to the configured shelf or nowhere: there is no public
+    // resolve, and no public leg by decision. A machine with no shelf therefore
+    // has nothing to ask however the failure reads, and asking that here is
+    // what keeps it from paying for the test-report read below to learn it.
+    if (cfg.shelf === null) return null;
     const tool = ctx.input.tool;
     if (tool?.ok !== false) return null;
     const command = commandOf(tool);
@@ -161,7 +162,10 @@ export const failureArm: Arm = {
     // so it is not sent; the text round is what a keyless failure has instead.
     const stages: Leg[][] = [];
     if (fine.length > 0) stages.push([keysLeg(cfg, fine)]);
-    if (q.text.length > 0) stages.push([searchLeg('team', 'failure', cfg)]);
+    // `includePublic: false` EXPLICITLY, not by the default: `team.publicFallback`
+    // is on by default and the shared helper would otherwise send `true`, which
+    // would turn the shelf-only failure round into a marketplace one (decision 13).
+    if (q.text.length > 0) stages.push([searchLeg('failure', cfg, { includePublic: false })]);
     // A plan with no stage in it would run no leg and still be filed as a
     // `no-hit` fire: a miss the ledger records against a shelf nothing was ever
     // asked. Null is the honest `no-question` instead.

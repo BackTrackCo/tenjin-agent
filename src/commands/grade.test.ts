@@ -553,8 +553,8 @@ describe('runGrade', () => {
         reason: 'hit',
         session: 's2',
         delivered: `inject:${RES}`,
-        // A PUBLIC leg whose url happens to sit on the configured team origin:
-        // the label is what decides, so the team's secret stays home.
+        // A PUBLIC row on the same deployment: the ordinary shape now, since
+        // one call yields a shelf row and a public row from one origin.
         legs: [
           { shelf: 'public', url: 'https://team.example/p/the-collation-trap', searchId: SEARCH },
         ],
@@ -592,10 +592,12 @@ describe('runGrade', () => {
       `https://team.example/api/searches/${SEARCH}/outcomes`,
       `https://team.example/api/searches/${SEARCH}/outcomes`,
     ]);
-    const team = calls[0]?.init.headers as Record<string, string>;
-    const pub = calls[1]?.init.headers as Record<string, string>;
-    expect(Object.keys(team).some((k) => k.includes('bypass'))).toBe(true);
-    expect(Object.keys(pub).some((k) => k.includes('bypass'))).toBe(false);
+    // ONE ORIGIN, so no per-leg key decision is left: both rows of one fire
+    // came from the same deployment and their ids live in one database.
+    for (const call of calls) {
+      const headers = call.init.headers as Record<string, string>;
+      expect(Object.keys(headers).some((k) => k.includes('bypass'))).toBe(false);
+    }
     // The verdict on the parked leg stands; only the posted stamp is withheld.
     expect(result.data).toMatchObject({ posted: 2, postSkipped: 1 });
     expect(result.humanLines?.join('\n')).toContain('not posted: f-parked');

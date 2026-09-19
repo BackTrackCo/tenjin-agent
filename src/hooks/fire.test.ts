@@ -8,7 +8,7 @@ import { claim, getMark } from './gates';
 import { runFire, selectArm } from './fire';
 import { question } from './question';
 import { openLoopDb, type LoopDb } from './store';
-import type { Actor, Answer, Arm, Deps, KernelConfig, Leg, LegResult, Question } from './types';
+import type { Actor, Arm, Deps, KernelConfig, Leg, LegResult, Question } from './types';
 
 // End-to-end over a real loop.db: every gate, the ledger write and the bail
 // timer are the real thing, only the clock, the arms and the legs are fake
@@ -47,8 +47,7 @@ const CONFIG: KernelConfig = {
   loop: CONFIG_DEFAULTS.loop,
   team: CONFIG_DEFAULTS.team,
   baseUrl: CONFIG_DEFAULTS.baseUrl,
-  publicShelfUrl: CONFIG_DEFAULTS.publicShelfUrl,
-  shelfBypassSecret: CONFIG_DEFAULTS.shelfBypassSecret,
+  shelf: 'backtrack/backtrack',
   publish: CONFIG_DEFAULTS.publish,
 };
 
@@ -69,7 +68,17 @@ function toolOf(kind: 'web' | 'shell'): HookTool {
 }
 
 function deps(db: LoopDb, arms: Arm[], clock: () => number = () => NOW): Deps {
-  return { db, config: () => CONFIG, clock, log: () => undefined, arms, adapters: {} };
+  return {
+    db,
+    config: () => CONFIG,
+    clock,
+    log: () => undefined,
+    arms,
+    adapters: {},
+    // The fake legs below make no request, so the auth seam is never consulted;
+    // it is here because `Deps` requires it.
+    auth: () => Promise.resolve({ kind: 'no-wallet' }),
+  };
 }
 
 interface FireRow {
@@ -101,9 +110,10 @@ function legRows(db: LoopDb, fireId: string): LegDbRow[] {
 
 function strongLeg(resourceId: string): Leg {
   return {
-    shelf: 'team',
-    request: async (): Promise<LegResult> => ({ status: 'ok' }),
-    verdict: (): Answer => ({ shelf: 'team', resourceId }),
+    shelves: ['team'],
+    request: async (): Promise<LegResult[]> => [
+      { shelf: 'team', status: 'ok', answer: { shelf: 'team', resourceId } },
+    ],
   };
 }
 
@@ -111,41 +121,44 @@ function strongLeg(resourceId: string): Leg {
  *  row carries what was offered and the verdict is still a miss. */
 function unvouchedLeg(): Leg {
   return {
-    shelf: 'team',
-    request: async (): Promise<LegResult> => ({
-      status: 'ok',
-      searchId: 'sid-weak',
-      title: 'Something adjacent',
-      url: 'https://shelf.acme.internal/p/adjacent',
-      form: 'finding',
-      calibration: 'lexical-v1',
-    }),
-    verdict: () => null,
+    shelves: ['team'],
+    request: async (): Promise<LegResult[]> => [
+      {
+        shelf: 'team',
+        status: 'ok',
+        answer: null,
+        searchId: 'sid-weak',
+        title: 'Something adjacent',
+        url: 'https://tenjin.blog/p/adjacent',
+        form: 'finding',
+        calibration: 'lexical-v1',
+      },
+    ],
   };
 }
 
 function rejectingLeg(): Leg {
   return {
-    shelf: 'team',
+    shelves: ['team'],
     request: async () => {
       throw new Error('leg exploded');
     },
-    verdict: () => null,
   };
 }
 
 function rateLimitedLeg(): Leg {
   return {
-    shelf: 'public',
-    request: async (): Promise<LegResult> => ({ status: 'http_429' }),
-    verdict: () => null,
+    shelves: ['public'],
+    request: async (): Promise<LegResult[]> => [
+      { shelf: 'public', status: 'http_429', answer: null },
+    ],
   };
 }
 
 /** Resolves only when its combined signal aborts, like a fetch that outlives the deadline. */
 function hangingLeg(): Leg {
   return {
-    shelf: 'team',
+    shelves: ['team'],
     request: (_q, _budgetMs, signal) =>
       new Promise((_resolve, reject) => {
         signal.addEventListener(
@@ -154,7 +167,6 @@ function hangingLeg(): Leg {
           { once: true },
         );
       }),
-    verdict: () => null,
   };
 }
 
@@ -328,9 +340,9 @@ describe('runFire: a hit', () => {
             [
               {
                 ...leg,
-                request: (asked, budget, signal) => {
+                request: (asked, budget, signal, d) => {
                   seen.push(asked.text);
-                  return leg.request(asked, budget, signal);
+                  return leg.request(asked, budget, signal, d);
                 },
               },
             ],
@@ -359,9 +371,9 @@ describe('runFire: a hit', () => {
     const leg = strongLeg('res-x');
     const counted: Leg = {
       ...leg,
-      request: (q, b, sig) => {
+      request: (q, b, sig, d) => {
         legCalls += 1;
-        return leg.request(q, b, sig);
+        return leg.request(q, b, sig, d);
       },
     };
     let deliverCalls = 0;

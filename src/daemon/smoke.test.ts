@@ -6,6 +6,7 @@ import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promise
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { webcrypto } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { build, type Options } from 'tsup';
 import tsupConfigs from '../../tsup.config';
@@ -26,6 +27,7 @@ import {
   vitestReporterPath,
 } from '../lib/paths';
 import { HOOK_ARMS } from '../lib/config';
+import { saveSessionFile, type SessionFile } from '../lib/session-key';
 
 /**
  * The one end-to-end test in PR B: the real tsup bundles, a real spawned
@@ -74,8 +76,15 @@ let bundleBytes: number;
 let fixtures: Fixture[];
 let shelf: Server;
 let shelfUrl: string;
-/** Every /api/search body the stub shelf was handed. */
-const shelfBodies: Array<Record<string, unknown>> = [];
+/** Every request the stub shelf was handed: the path, the body, and whether it
+ *  arrived signed. The COUNT is an assertion in the cases below, because "one
+ *  question is one HTTP request" is the property this file exists to prove on
+ *  the built bundle. */
+const shelfCalls: Array<{ path: string; body: Record<string, unknown>; signed: boolean }> = [];
+
+/** The shelf the daemon is pointed at in the two lookup cases, QUALIFIED as the
+ *  config and the wire both carry it. */
+const SHELF_SLUG = 'backtrack/backtrack';
 
 /** The one piece the stub shelf holds, free and with its body attached — which
  *  is what PR F puts on every free row and what makes the delivery the whole
@@ -84,10 +93,17 @@ const SHELF_TITLE = 'The pgvector collation flip';
 const SHELF_BODY = 'swap the image tag back to pgvector/pgvector:pg16 and re-seed';
 const SHELF_CALIBRATION = 'hybrid-v1';
 
-function shelfEnvelope(): unknown {
+const PUBLIC_TITLE = 'A marketplace note on collations';
+
+function envelopeOf(
+  searchId: string,
+  title: string,
+  bodyText: string,
+  shelfRef: null | { id: string; slug: string },
+): unknown {
   return {
     schemaVersion: 3,
-    searchId: '33333333-3333-4333-8333-333333333333',
+    searchId,
     calibration: SHELF_CALIBRATION,
     matched: 1,
     items: [
@@ -95,7 +111,7 @@ function shelfEnvelope(): unknown {
         resourceId: '44444444-4444-4444-8444-444444444444',
         url: 'https://shelf.example/p/collation',
         slug: 'collation',
-        title: SHELF_TITLE,
+        title,
         artifactType: 'finding',
         price: '0',
         asOf: null,
@@ -104,30 +120,64 @@ function shelfEnvelope(): unknown {
         estimatedTokens: 400,
         creator: { handle: 'ali' },
         strong: true,
-        body: { text: SHELF_BODY },
+        body: { text: bodyText },
+        shelf: shelfRef,
       },
     ],
   };
 }
 
-/** A shelf on loopback, answering POST /api/search and nothing else. Both legs
- *  point at it, so one prompt is two requests and two `legs` rows. */
+/** The two-list answer of the one signed call: the shelf's list and the
+ *  marketplace's, in one response. */
+function twoListAnswer(): unknown {
+  return {
+    shelf: envelopeOf('33333333-3333-4333-8333-333333333333', SHELF_TITLE, SHELF_BODY, {
+      id: 'sh_1',
+      slug: SHELF_SLUG,
+    }),
+    public: envelopeOf(
+      '55555555-5555-4555-8555-555555555555',
+      PUBLIC_TITLE,
+      'the marketplace answer',
+      null,
+    ),
+  };
+}
+
+/**
+ * A shelf on loopback, answering a SIGNED `/api/search` that NAMES A SHELF, and
+ * nothing else.
+ *
+ * One question is ONE request now, and it comes back carrying both candidate
+ * sets, so a case that sees two requests here has a daemon that went back to
+ * two calls. There is one endpoint, so what this stub gates on is the body: a
+ * request with no `shelf` in it 404s on purpose, because the unsigned fallback
+ * is a different case (`hook-server.test.ts` covers it in process) and a 404 is
+ * how this file would notice the daemon taking it by accident.
+ */
 function startShelf(): Promise<{ server: Server; url: string }> {
   const server = createServer((req, res) => {
     let raw = '';
     req.on('data', (c: Buffer) => (raw += c.toString('utf8')));
     req.on('end', () => {
-      if (req.method !== 'POST' || !(req.url ?? '').startsWith('/api/search')) {
-        res.writeHead(404).end();
-        return;
-      }
+      const path = (req.url ?? '').split('?')[0] ?? '';
+      let body: Record<string, unknown> = {};
       try {
-        shelfBodies.push(JSON.parse(raw) as Record<string, unknown>);
+        body = JSON.parse(raw) as Record<string, unknown>;
       } catch {
         // The assertion below reads what did parse.
       }
+      if (req.method !== 'POST' || path !== '/api/search' || body.shelf !== SHELF_SLUG) {
+        res.writeHead(404).end();
+        return;
+      }
+      shelfCalls.push({
+        path,
+        body,
+        signed: req.headers['tenjin-session-delegation'] !== undefined,
+      });
       res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify(shelfEnvelope()));
+      res.end(JSON.stringify(twoListAnswer()));
     });
   });
   return new Promise((resolve, reject) => {
@@ -141,6 +191,38 @@ function startShelf(): Promise<{ server: Server; url: string }> {
       resolve({ server, url: `http://127.0.0.1:${address.port}` });
     });
   });
+}
+
+/**
+ * THE DAEMON'S ONE WAY TO SIGN HERE. `daemonEnv` scrubs the spawned process's
+ * environment down to an allowlist, so neither `TENJIN_WALLET_KEY` nor
+ * `TENJIN_WALLET_PASSPHRASE` reaches it and no keystore can be opened: a cached
+ * delegation is the whole credential. That is also the production path a
+ * machine actually runs on — `tenjin search` mints once at a terminal and the
+ * daemon presents it after — so writing one here is not a shortcut around the
+ * real thing, it IS the real thing. `searchHeaders` re-reads the file per call.
+ */
+async function writeSession(dir: string, origin: string): Promise<void> {
+  const pair = (await webcrypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, [
+    'sign',
+    'verify',
+  ])) as webcrypto.CryptoKeyPair;
+  const raw = new Uint8Array(await webcrypto.subtle.exportKey('raw', pair.publicKey));
+  const file: SessionFile = {
+    address: '0x1111111111111111111111111111111111111111',
+    origin,
+    // The stub verifies nothing: what this case is about is the CLI's half of
+    // the call, and a real delegation would need a wallet the daemon cannot open.
+    delegation: 'stub-delegation',
+    exp: new Date(Date.now() + 3_600_000).toISOString(),
+    scope: 'read',
+    publicKeyRaw: Buffer.from(raw).toString('base64url'),
+    privateKeyJwk: (await webcrypto.subtle.exportKey(
+      'jwk',
+      pair.privateKey,
+    )) as SessionFile['privateKeyJwk'],
+  };
+  await saveSessionFile(dir, file);
 }
 
 /** Every pid this file has spawned or is otherwise responsible for; SIGKILLed
@@ -306,6 +388,7 @@ beforeAll(async () => {
   const stub = await startShelf();
   shelf = stub.server;
   shelfUrl = stub.url;
+  await writeSession(dataDir, new URL(shelfUrl).origin);
 });
 
 afterAll(async () => {
@@ -522,19 +605,24 @@ describe('the daemon, cold-started from the real bundle', () => {
   });
 
   /**
-   * THE ONE END-TO-END PASS OF PR C: a real prompt through the real bundle,
-   * both arms' shared pieces, two real HTTP legs against a stub shelf, and the
-   * finding back out as `additionalContext`. Everything between the POST and
-   * the assertion is production code.
+   * THE ONE END-TO-END PASS OF PR C: a real prompt through the real bundle, both
+   * arms' shared pieces, ONE real signed HTTP call against a stub shelf, and the
+   * finding back out as `additionalContext`. Everything between the POST and the
+   * assertion is production code.
+   *
+   * The request COUNT is the assertion that moved: one question used to be two
+   * requests to two origins, and it is now one request that comes back carrying
+   * both candidate sets. Two `legs` rows still land, built from the one
+   * response, which is the whole shape of the change.
    */
-  it('a prompt with a stubbed shelf: one hit row, one leg per shelf, the finding injected', async () => {
+  it('a prompt with a stubbed shelf: ONE signed call, two leg rows, the finding injected', async () => {
     const original = await readFile(configPath(dataDir), 'utf8');
     await writeFile(
       configPath(dataDir),
       JSON.stringify({
         loop: { port: 0 },
         baseUrl: shelfUrl,
-        publicShelfUrl: shelfUrl,
+        shelf: SHELF_SLUG,
         hooks: { ...ALL_OFF, prompt: true },
       }),
     );
@@ -568,9 +656,16 @@ describe('the daemon, cold-started from the real bundle', () => {
     // rather than a pointer to it.
     expect(out.additionalContext).toContain(SHELF_BODY);
 
-    // Both legs asked, on the one question the prompt arm masked.
-    expect(shelfBodies).toHaveLength(2);
-    for (const body of shelfBodies) expect(body.trigger).toBe('prompt');
+    // ONE request, signed, to `/api/search`: the qualified shelf and
+    // `includePublic` are in the body, and the marketplace rides the same call.
+    expect(shelfCalls).toHaveLength(1);
+    const call = shelfCalls[0];
+    expect(call?.path).toBe('/api/search');
+    expect(call?.signed).toBe(true);
+    expect(call?.body.trigger).toBe('prompt');
+    expect(call?.body.shelf).toBe(SHELF_SLUG);
+    expect(call?.body.includePublic).toBe(true);
+    expect(call?.body.scope).toBeUndefined();
 
     // The response flushing is not the row landing. Wait for the row, then
     // read it: the fire and its legs go in ONE transaction (`ledger.ts`), so a
@@ -594,6 +689,8 @@ describe('the daemon, cold-started from the real bundle', () => {
         outcome: string;
         calibration: string | null;
       }>;
+      // TWO ROWS FROM ONE CALL. `legs.shelf` keeps its name and its values; what
+      // changed is that one HTTP request now fills both rows.
       expect(legs.map((l) => l.shelf)).toEqual(['public', 'team']);
       for (const leg of legs) {
         expect(leg.status).toBe('ok');
@@ -601,6 +698,7 @@ describe('the daemon, cold-started from the real bundle', () => {
       }
       // Team outranks public, so the team leg is the hit and public is shadowed.
       expect(legs.find((l) => l.shelf === 'team')?.outcome).toBe('hit');
+      expect(legs.find((l) => l.shelf === 'public')?.outcome).toBe('shadowed');
     } finally {
       db.close();
     }
@@ -620,7 +718,7 @@ describe('the daemon, cold-started from the real bundle', () => {
       JSON.stringify({
         loop: { port: 0 },
         baseUrl: shelfUrl,
-        publicShelfUrl: shelfUrl,
+        shelf: SHELF_SLUG,
         hooks: { ...ALL_OFF, subagent: true, publish: true },
       }),
     );

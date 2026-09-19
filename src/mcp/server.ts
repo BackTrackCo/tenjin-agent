@@ -180,6 +180,12 @@ const publishInput = {
     .describe(
       'Exact-match keys this piece answers by-key lookups on, each `<kind>=<value>` with kind fingerprint | package_version | command_head | repo (max 32; needs KNOWLEDGE_KEYS on the shelf)',
     ),
+  public: z
+    .boolean()
+    .optional()
+    .describe(
+      'Publish to the public marketplace even when a shelf is active: no shelf on the body, and the configured default price',
+    ),
   // `agent` is deliberately NOT exposed here. It records which harness agent ran
   // a publish, and the only thing that knows that is the SubagentStop capture
   // ask, which hands the child a CLI command (tenjin-agent#228). An MCP caller
@@ -494,6 +500,10 @@ export function buildTenjinMcpServer(opts: BuildMcpOptions = {}): McpServer {
             ...(args.price !== undefined ? { price: args.price } : {}),
             ...(args.excerpt !== undefined ? { excerpt: args.excerpt } : {}),
             ...(args.key !== undefined ? { key: args.key } : {}),
+            // The schema above advertises it, so it has to arrive: without it
+            // `runPublish` reads `args.public` as undefined and a caller that
+            // asked for the marketplace silently gets a shelf publish at 0.
+            ...(args.public !== undefined ? { public: args.public } : {}),
           },
           ctx,
           { ...deps.publish, searchIdLabel: 'searchId' },

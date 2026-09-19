@@ -115,15 +115,14 @@ describe('runConfigList', () => {
       expect(d[`hooks.${arm}`]).toEqual({ value: true, source: 'default' });
     }
     expect(d['update.mode']).toEqual({ value: 'nudge', source: 'default' });
-    expect(d.publicShelfUrl).toEqual({ value: 'https://tenjin.blog', source: 'default' });
-    // REDACTED even here, on a fresh dir where the value is empty: the rendered
-    // shape must not depend on whether there is a secret to leak.
-    expect(d.shelfBypassSecret).toEqual({ value: 'unset', source: 'default' });
+    // null, not a placeholder: no shelf is set, so this machine is public only.
+    expect(d.shelf).toEqual({ value: null, source: 'default' });
     expect(d['publish.ackServerWarnings']).toEqual({ value: 'mode', source: 'default' });
-    // 12 scalar keys (incl. bazaarPay/bazaarRegistries and the two shelf keys)
-    // + 3 publish.* (mode, defaultPrice, ackServerWarnings) + 7 hooks.* (one
-    // per arm) + 1 update.mode + 4 loop.* + 1 team.publicFallback.
-    expect(humanLines).toHaveLength(28);
+    // 11 scalar keys (incl. bazaarPay/bazaarRegistries and `shelf`, which
+    // replaced the two retired ones) + 3 publish.* (mode, defaultPrice,
+    // ackServerWarnings) + 7 hooks.* (one per arm) + 1 update.mode + 4 loop.*
+    // + 1 team.publicFallback.
+    expect(humanLines).toHaveLength(27);
   });
 
   it('sendMaxAmount round-trips: unset until set, decimal USD in, Money out, 0 and none valid', async () => {
@@ -1279,105 +1278,80 @@ describe('runConfigSet: the bazaarPay toggle places the tenjin-pay skill', () =>
   });
 });
 
-describe('the shelf keys', () => {
-  const SECRET = 'shelf-secret-abc123';
-
-  it('takes publicShelfUrl as a URL and refuses anything else', async () => {
+describe('the shelf key', () => {
+  it('takes the qualified name and refuses anything the schema regex does not admit', async () => {
     const ctx = makeCtx();
-    const set = await runConfigSet({ key: 'publicShelfUrl', value: 'https://public.example' }, ctx);
+    const set = await runConfigSet({ key: 'shelf', value: 'backtrack/backtrack' }, ctx);
     expect(set.data).toMatchObject({
-      key: 'publicShelfUrl',
-      value: 'https://public.example',
+      key: 'shelf',
+      value: 'backtrack/backtrack',
       source: 'file',
     });
-    await expect(
-      runConfigSet({ key: 'publicShelfUrl', value: 'not-a-url' }, ctx),
-    ).rejects.toMatchObject({ code: 'USAGE' });
+    expect(JSON.parse(await readFile(configFile(), 'utf8')).shelf).toBe('backtrack/backtrack');
+    for (const bad of ['', 'Backtrack/x', 'back track/x', 'a/b', 'acme/notes/extra']) {
+      await expect(runConfigSet({ key: 'shelf', value: bad }, ctx)).rejects.toMatchObject({
+        code: 'USAGE',
+      });
+    }
   });
 
   /**
-   * A door key that gets a request past Deployment Protection. `--json` is what
-   * an agent reads and what a bug report pastes, so the redaction has to be in
-   * `data`, not only in the rendered line — and it has to hold on the SET echo,
-   * which is the one place the value was just typed.
+   * A BARE SLUG IS A USAGE REFUSAL THAT NAMES THE FORM. `config set` asks the
+   * server nothing, so it cannot know which org owns a `notes`; the fix points
+   * at the verb that can, rather than leaving the operator to guess the org.
    */
-  it('never echoes the bypass secret, on set, get, or list', async () => {
+  it('refuses a bare slug and names both the form and `shelf use`', async () => {
     const ctx = makeCtx();
-    const set = await runConfigSet({ key: 'shelfBypassSecret', value: SECRET }, ctx);
-    expect(set.data).toMatchObject({ key: 'shelfBypassSecret', value: 'set', source: 'file' });
-    expect(JSON.stringify(set)).not.toContain(SECRET);
+    const refused = await caught(() => runConfigSet({ key: 'shelf', value: 'backtrack' }, ctx));
+    expect(refused).toMatchObject({ code: 'USAGE' });
+    expect(String(refused?.fix)).toContain('<org>/<shelf>');
+    expect(String(refused?.fix)).toContain('tenjin shelf use');
+  });
 
-    const got = await runConfigGet({ key: 'shelfBypassSecret' }, ctx);
-    expect(got.data).toMatchObject({ value: 'set', source: 'file' });
-    expect(JSON.stringify(got)).not.toContain(SECRET);
-
+  /**
+   * NOTHING TO REDACT ANY MORE. The name is not a credential and names no host,
+   * so `config get` and `--json` print it plainly; what used to be here was a
+   * shared door key whose whole harm was disclosure.
+   */
+  it('reads back plainly through get and list', async () => {
+    const ctx = makeCtx();
+    await runConfigSet({ key: 'shelf', value: 'backtrack/backtrack' }, ctx);
+    const got = await runConfigGet({ key: 'shelf' }, ctx);
+    expect(got.data).toMatchObject({ value: 'backtrack/backtrack', source: 'file' });
     const listed = await runConfigList(ctx);
-    expect(JSON.stringify(listed)).not.toContain(SECRET);
-
-    // The operator's own file still holds it: this is redaction of an output,
-    // not encryption of a setting.
-    expect(JSON.parse(await readFile(configFile(), 'utf8')).shelfBypassSecret).toBe(SECRET);
+    expect(JSON.stringify(listed)).toContain('backtrack/backtrack');
   });
 
-  /** And the file it lands in is a secret file, like every other one in the tree. */
-  it.skipIf(process.platform === 'win32')(
-    'leaves config.json at 0600 once it holds the door key',
-    async () => {
-      await runConfigSet({ key: 'shelfBypassSecret', value: SECRET }, makeCtx());
-      expect((await stat(configFile())).mode & 0o777).toBe(0o600);
-    },
-  );
-
-  it('clears back to unset with an empty value, which is how team mode is turned off', async () => {
-    const ctx = makeCtx();
-    await runConfigSet({ key: 'shelfBypassSecret', value: SECRET }, ctx);
-    const cleared = await runConfigSet({ key: 'shelfBypassSecret', value: '' }, ctx);
-    expect(cleared.data).toMatchObject({ value: 'unset' });
-    expect(JSON.parse(await readFile(configFile(), 'utf8')).shelfBypassSecret).toBe('');
+  /** The file keeps 0600: the tree's posture is uniform, credential or not. */
+  it.skipIf(process.platform === 'win32')('leaves config.json at 0600', async () => {
+    await runConfigSet({ key: 'shelf', value: 'backtrack/backtrack' }, makeCtx());
+    expect((await stat(configFile())).mode & 0o777).toBe(0o600);
   });
 
   /**
-   * Team mode takes two settings, set by two independent commands, and the CLI
-   * fails the half-wired state safe to PUBLIC mode. Safe, but silent is what
-   * made it survivable: an operator who believes they are on a private shelf
-   * would keep writing internal notes at a command that publishes to
-   * tenjin.blog. So the half is named at the moment it is created.
+   * `config set` has no way to say "no value", and the name regex has no empty
+   * form, so clearing the shelf is its own verb rather than an empty string that
+   * would have to be read as null somewhere.
    */
-  it('warns when the secret is set while baseUrl is still the public marketplace', async () => {
+  it('has no empty form: clearing it is `tenjin shelf use --none`', async () => {
     const ctx = makeCtx();
-    const set = await runConfigSet({ key: 'shelfBypassSecret', value: SECRET }, ctx);
-    const warning = (set.data as { warning?: string }).warning ?? '';
-    expect(warning).toContain('PUBLIC mode');
-    expect(set.humanLines?.join('\n')).toContain('PUBLIC mode');
-    expect(JSON.stringify(set)).not.toContain(SECRET);
-
-    // Finishing the setup clears it, from either side of the pair.
-    const based = await runConfigSet({ key: 'baseUrl', value: 'https://backtrack.tenjin.sh' }, ctx);
-    expect(based.data).not.toHaveProperty('warning');
+    await runConfigSet({ key: 'shelf', value: 'backtrack/backtrack' }, ctx);
+    const refused = await caught(() => runConfigSet({ key: 'shelf', value: '' }, ctx));
+    expect(refused).toMatchObject({ code: 'USAGE' });
+    expect(String(refused?.fix)).toContain('tenjin shelf use --none');
   });
 
-  /**
-   * The third key of the same triple. `isTeamShelfOrigin` returns false when
-   * baseUrl matches publicShelfUrl too, so pointing the public shelf at the team
-   * deployment drops the machine out of team mode exactly as unsetting the secret
-   * would — silently, on a key the other two warnings never looked at.
-   */
-  it('warns when publicShelfUrl is pointed at the team shelf itself', async () => {
+  /** The retired keys are not settable, and `assertKey` is what says so. */
+  it('refuses the two retired keys as unknown', async () => {
     const ctx = makeCtx();
-    const TEAM = 'https://backtrack.tenjin.sh';
-    await runConfigSet({ key: 'shelfBypassSecret', value: SECRET }, ctx);
-    const based = await runConfigSet({ key: 'baseUrl', value: TEAM }, ctx);
-    expect(based.data).not.toHaveProperty('warning');
-
-    const collided = await runConfigSet({ key: 'publicShelfUrl', value: TEAM }, ctx);
-    const warning = (collided.data as { warning?: string }).warning ?? '';
-    expect(warning).toContain('PUBLIC mode');
-    // The fix names the key that broke the pair, not the other half of it.
-    expect(warning).toContain('tenjin config set publicShelfUrl');
-    expect(warning).not.toContain('config set baseUrl');
+    for (const key of ['publicShelfUrl', 'shelfBypassSecret']) {
+      await expect(runConfigSet({ key, value: 'x' }, ctx)).rejects.toMatchObject({
+        code: 'USAGE',
+      });
+    }
   });
 
-  it('says nothing about team mode when no secret is set', async () => {
+  it('says nothing extra when the base URL is set: there is no half-wired pair left', async () => {
     const ctx = makeCtx();
     const based = await runConfigSet({ key: 'baseUrl', value: 'https://tenjin.blog' }, ctx);
     expect(based.data).not.toHaveProperty('warning');

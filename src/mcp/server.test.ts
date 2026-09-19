@@ -380,6 +380,64 @@ describe('tenjin_publish consent', () => {
     expect((await loadSearches(dir))[0]?.resolved?.by).toBe('publish');
   });
 
+  /**
+   * The same class of bug as the two above, on the flag that decides WHERE a
+   * piece lands. `public` is advertised in the schema, and without it on the
+   * call `runPublish` reads `args.public` as undefined: an agent asking for a
+   * marketplace publish would have got a silent shelf publish at price 0.
+   */
+  it('forwards public:true, so a marketplace publish carries no shelf', async () => {
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ baseUrl: BASE, shelf: 'backtrack/backtrack' }),
+    );
+    const file = join(dir, 'clean.md');
+    await writeFile(
+      file,
+      publishable('# Caching notes\n\nSome clean public prose about caching.\n'),
+    );
+
+    let body: Record<string, unknown> | undefined;
+    const fetchImpl = (async (_u: string | URL, init?: RequestInit) => {
+      body = typeof init?.body === 'string' ? JSON.parse(init.body) : undefined;
+      return new Response(
+        JSON.stringify({
+          id: '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+          slug: 's',
+          title: 'Caching notes',
+          status: 'published',
+          price: '100000',
+          url: `${BASE}/a/iris/s`,
+          tags: [],
+        }),
+        { status: 201, headers: { 'content-type': 'application/json' } },
+      );
+    }) as unknown as typeof fetch;
+
+    const client = await connect({
+      dataDir: dir,
+      flags: { baseUrl: BASE },
+      deps: {
+        publish: {
+          cwd: dir,
+          env: {},
+          fetchImpl,
+          provider: testWalletProvider(),
+          useSession: false,
+        },
+      },
+    });
+    const res = await client.callTool({
+      name: 'tenjin_publish',
+      arguments: { file, mode: 'full-auto', public: true },
+    });
+
+    expect(res.isError).toBeFalsy();
+    expect(body?.shelf).toBeUndefined();
+    // The marketplace price, not the shelf's free one.
+    expect(body?.price).not.toBe('0');
+  });
+
   // The tool schema accepting an array cannot force the handler to forward one,
   // so a regression that drops arrays would ship green on the scalar case alone.
   it('forwards an array of searchIds to the wire and closes each loop', async () => {

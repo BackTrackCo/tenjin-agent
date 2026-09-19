@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import type { z } from 'zod';
 import fixtureJson from './fixtures/openapi.fixture.json';
 import { searchCandidateSchema, searchResultSchema } from './lib/agent-api';
-import { OUTCOME_STATUS_VALUES } from './lib/agent-api';
+import { OUTCOME_STATUS_VALUES, QUERY_MAX } from './lib/agent-api';
 import { previewCardSchema } from './lib/read-client';
 import {
   buildPostCreateBody,
@@ -119,7 +119,7 @@ const READ_CARD_REQUIRED = [
  */
 interface PinnedOp {
   path: string;
-  method: 'get' | 'post' | 'put';
+  method: 'get' | 'post' | 'put' | 'patch' | 'delete';
   operationId: string;
   /** The state live advertises now. A change in EITHER direction is drift. */
   deprecated: boolean;
@@ -189,7 +189,12 @@ function assertSearchRequest(doc: unknown): void {
   for (const field of ['schemaVersion', 'query', 'view', 'filters', 'limit']) {
     expect(get(properties, field), `SearchRequestV3.properties.${field} missing`).toBeDefined();
   }
-  expect(get(properties, 'query', 'maxLength')).toBe(512);
+  // Against the CLI's OWN constant, not a literal. `QUERY_MAX` is what
+  // `tenjin search` cuts to before it sends, so a server that moves
+  // `SEARCH_QUERY_MAX_CHARS` again fails here as the drift it is, instead of the
+  // fixture and the constant walking apart quietly the way they did between the
+  // 512 fixture and the 8000 the CLI adopted in #346.
+  expect(get(properties, 'query', 'maxLength')).toBe(QUERY_MAX);
   // `decision` has to be a value `view` accepts, or every search this CLI sends
   // is a 400. Pinned as membership rather than as the default, because the CLI
   // names the view explicitly instead of relying on the server's default.
@@ -400,12 +405,428 @@ describe('contract fixture pins the 402 answer card', () => {
 });
 
 describe('contract fixture request shapes', () => {
-  it('SearchRequest carries the fields the CLI sends, question capped at 512', () => {
+  it('SearchRequest carries the fields the CLI sends, query capped at the CLI bound', () => {
     assertSearchRequest(fixtureDoc);
   });
 
   it('SearchOutcomeSubmit status enum is exactly the five CLI statuses', () => {
     assertOutcomeStatusEnum(fixtureDoc);
+  });
+});
+
+/**
+ * THE SHELF CONTRACT, PINNED THE WAY `assertPublishContract` PINS `PostCreate`.
+ *
+ * ONE ENDPOINT PER ACTION (owner decision 2026-09-15). The per-shelf route
+ * families are gone: `POST /api/search` and `POST /api/keys/resolve` each gained
+ * an optional `shelf`, so the pins below are on those two bodies rather than on
+ * `/api/shelves/{slug}/...`, which nothing calls any more.
+ *
+ * These walks run against the committed fixture, refreshed from tenjin main
+ * b5e58807 (PR #852), and against `shelfSpecByHand()` below. The fixture is the
+ * server's own `openapi.json`, so a rename or removal on that side fails here;
+ * the by-hand document is what proves each walk load-bearing, since the tests
+ * delete one node at a time from it and require a throw.
+ *
+ * The operationIds recorded above are the server's OWN spellings, read off the
+ * refreshed fixture. This repo had guessed `keysResolve` / `orgList` /
+ * `orgUpdate` / `orgAddMember` / `orgRemoveMember` / `shelfCreate` before the
+ * server half shipped; it ships `resolveKeys` / `listOrgs` / `setOrgPolicy` /
+ * `addOrgMember` / `removeOrgMember` / `createShelf`. No runtime call reads an
+ * operationId, so nothing broke, but the record has to track reality or the
+ * deprecation lead time it buys is worthless.
+ *
+ * Pinned on both sides, because the RESPONSE is what this PR's parser is newly
+ * built on: a server that flattened the two-list envelope back to one list would
+ * otherwise fail at runtime rather than in CI.
+ */
+const SHELF_OPS: PinnedOp[] = [
+  {
+    path: '/api/keys/resolve',
+    method: 'post',
+    operationId: 'resolveKeys',
+    deprecated: false,
+    migration: "the failure arm's fingerprint round has no second path",
+  },
+  {
+    path: '/api/orgs/{slug}',
+    method: 'patch',
+    operationId: 'setOrgPolicy',
+    deprecated: false,
+    migration: '`tenjin org set public-search` has no second path',
+  },
+  {
+    path: '/api/orgs/{slug}/members',
+    method: 'post',
+    operationId: 'addOrgMember',
+    deprecated: false,
+    migration: '`tenjin org add` has no second path',
+  },
+  {
+    path: '/api/orgs/{slug}/members',
+    method: 'delete',
+    operationId: 'removeOrgMember',
+    deprecated: false,
+    migration: '`tenjin org remove` has no second path',
+  },
+  {
+    path: '/api/shelves',
+    method: 'post',
+    operationId: 'createShelf',
+    deprecated: false,
+    migration: 'the bench creates shelves here; the CLI only lists',
+  },
+  {
+    path: '/api/shelves/{org}/{shelf}',
+    method: 'delete',
+    operationId: 'deleteShelf',
+    deprecated: false,
+    // The one route that still spells a shelf as URL segments, because it names
+    // a shelf to destroy rather than one to work inside. The bench tears its
+    // scratch shelves down through it; nothing else can.
+    migration: 'shelf teardown has no second path',
+  },
+  {
+    path: '/api/orgs',
+    method: 'get',
+    operationId: 'listOrgs',
+    deprecated: false,
+    // Three call sites read this body: `org list`, `shelf use`'s resolution of a
+    // bare name into the qualified one, and doctor's shelf check. It was the one
+    // shape in this set with no pin, and a server that nested it differently
+    // would break all three at once.
+    migration: '`tenjin org list`, `shelf use` and doctor all read this list',
+  },
+];
+
+/**
+ * One `$ref` hop into `components`, because a real OpenAPI document says
+ * `{ $ref: '#/components/schemas/SearchRequestV3' }` where the by-hand document
+ * below inlines the schema. Walking only the inline spelling would make every
+ * pin here pass by vacuum the day the fixture is refreshed.
+ */
+function deref(doc: unknown, node: unknown): unknown {
+  const ref = get(node, '$ref');
+  if (typeof ref !== 'string' || !ref.startsWith('#/')) return node;
+  let at: unknown = doc;
+  for (const segment of ref.slice(2).split('/')) at = get(at, segment);
+  return at;
+}
+
+/**
+ * The shapes a schema node can be read as: itself, plus each branch of an
+ * `anyOf`/`oneOf`, each dereferenced. One endpoint now answers two shapes (the
+ * flat result, and the two-list wrapper when the body named a shelf), and a
+ * server is free to spell that as a union; this reads either spelling rather
+ * than pinning the one this repo happened to guess.
+ */
+function schemaVariants(doc: unknown, node: unknown): unknown[] {
+  const resolved = deref(doc, node);
+  const union = get(resolved, 'anyOf') ?? get(resolved, 'oneOf');
+  if (!Array.isArray(union)) return [resolved];
+  // The node ITSELF stays in the list. A union is not always a choice between
+  // whole shapes: `SearchRequestV3` declares its `properties` at the top level
+  // and uses `anyOf: [{required:['query']}, ...]` only to say which one of the
+  // three query spellings must be present. Dropping the parent there would lose
+  // every property and make each pin below fail as an undefined walk.
+  return [resolved, ...union.map((branch) => deref(doc, branch))];
+}
+
+/** The `properties` of whichever variant declares `wanted`, falling back to the
+ *  first so a missing field fails by NAME rather than as an undefined walk. */
+function propertiesOf(doc: unknown, node: unknown, wanted: string): unknown {
+  const variants = schemaVariants(doc, node);
+  const hit = variants.find((v) => get(v, 'properties', wanted) !== undefined);
+  return get(hit ?? variants[0], 'properties');
+}
+
+export function assertShelfContract(doc: unknown): void {
+  for (const op of SHELF_OPS) assertPinnedOp(doc, op);
+
+  // THE REQUEST: the public search body plus `shelf` and `includePublic`.
+  //
+  // THIS PIN IS THE REVERSE OF THE ONE IT REPLACES, BY DESIGN. Until the owner
+  // decision of 2026-09-15 the shelf was a URL segment and this asserted that
+  // `shelf` never appeared in a body; the route families were then deleted in
+  // favour of one endpoint per action, so the body is the only place a shelf can
+  // be named and its ABSENCE from the schema is now the drift to catch.
+  const search = propertiesOf(
+    doc,
+    get(
+      doc,
+      'paths',
+      '/api/search',
+      'post',
+      'requestBody',
+      'content',
+      'application/json',
+      'schema',
+    ),
+    'shelf',
+  );
+  for (const field of ['schemaVersion', 'query', 'view', 'limit', 'shelf', 'includePublic']) {
+    expect(get(search, field), `search request must declare ${field}`).toBeDefined();
+  }
+  expect(get(search, 'scope'), 'there is no scope field on the wire').toBeUndefined();
+  // QUALIFIED, and the server is what enforces it: a pattern admitting a bare
+  // slug would make `notes` mean whichever org the server looked at first.
+  expect(
+    String(get(search, 'shelf', 'pattern') ?? ''),
+    'the shelf pattern must require an <org>/<shelf> pair',
+  ).toContain('/');
+
+  // THE KEYS BODY carries the same `shelf` and no `includePublic`: there is no
+  // public resolve for a failure round to fall back to (decision 13).
+  const keys = propertiesOf(
+    doc,
+    get(
+      doc,
+      'paths',
+      '/api/keys/resolve',
+      'post',
+      'requestBody',
+      'content',
+      'application/json',
+      'schema',
+    ),
+    'shelf',
+  );
+  expect(get(keys, 'keys'), 'the keys body must declare keys').toBeDefined();
+  expect(get(keys, 'shelf'), 'the keys body must declare shelf').toBeDefined();
+
+  // THE PUBLISH BODY, the third endpoint that learned the qualified name. This
+  // one is the sharp edge: PostCreate is `additionalProperties: false`, so an
+  // undeclared `shelf` is a 400 on every shelf publish rather than an ignored
+  // extra. `POST_CREATE_FIELDS` carries the field itself; the pattern is pinned
+  // here beside the other two so all three spellings move together or fail.
+  const postCreate = propertiesOf(doc, get(doc, 'components', 'schemas', 'PostCreate'), 'shelf');
+  expect(get(postCreate, 'shelf'), 'the publish body must declare shelf').toBeDefined();
+  expect(
+    String(get(postCreate, 'shelf', 'pattern') ?? ''),
+    "the publish body's shelf pattern must require an <org>/<shelf> pair",
+  ).toContain('/');
+
+  // THE RESPONSE a shelf search gets back: two independent lists, the public one
+  // nullable. Declared beside the flat one the same endpoint answers with when
+  // no shelf was named.
+  const response = propertiesOf(
+    doc,
+    get(
+      doc,
+      'paths',
+      '/api/search',
+      'post',
+      'responses',
+      '200',
+      'content',
+      'application/json',
+      'schema',
+    ),
+    'shelf',
+  );
+  expect(get(response, 'shelf'), 'the shelf list must be its own key').toBeDefined();
+  expect(get(response, 'public'), 'the public list must be its own key').toBeDefined();
+
+  // `{ member }` on both sides, which is what the two repos drifted on before.
+  for (const method of ['post', 'delete']) {
+    const members = propertiesOf(
+      doc,
+      get(
+        doc,
+        'paths',
+        '/api/orgs/{slug}/members',
+        method,
+        'requestBody',
+        'content',
+        'application/json',
+        'schema',
+      ),
+      'member',
+    );
+    expect(get(members, 'member'), `${method} members must take { member }`).toBeDefined();
+  }
+
+  const patch = propertiesOf(
+    doc,
+    get(
+      doc,
+      'paths',
+      '/api/orgs/{slug}',
+      'patch',
+      'requestBody',
+      'content',
+      'application/json',
+      'schema',
+    ),
+    'publicSearch',
+  );
+  expect(get(patch, 'publicSearch'), 'PATCH /api/orgs/{slug} takes { publicSearch }').toBeDefined();
+
+  // THE ORG LIST'S BODY, because three call sites parse it: `org list`,
+  // `shelf use`'s resolution of a name into the qualified form it persists, and
+  // doctor's shelf check. Each needs `orgs[].slug`, `orgs[].shelves[].slug` and the
+  // policy flag, so those are what is pinned.
+  const orgList = propertiesOf(
+    doc,
+    get(
+      doc,
+      'paths',
+      '/api/orgs',
+      'get',
+      'responses',
+      '200',
+      'content',
+      'application/json',
+      'schema',
+    ),
+    'orgs',
+  );
+  const org = propertiesOf(doc, get(orgList, 'orgs', 'items'), 'slug');
+  expect(get(org, 'slug'), 'each org is named by its slug').toBeDefined();
+  expect(get(org, 'publicSearch'), "the org's public-search policy rides the list").toBeDefined();
+  expect(
+    get(propertiesOf(doc, get(org, 'shelves', 'items'), 'slug'), 'slug'),
+    'each shelf under an org is named by its slug',
+  ).toBeDefined();
+}
+
+/**
+ * THE SAME CONTRACT, WRITTEN OUT BY HAND AND INLINE.
+ *
+ * `assertShelfContract` now runs against the committed fixture, which is the
+ * real check. This minimal document stays because it is what makes each walk
+ * PROVABLY load-bearing: the tests below delete one node at a time from it and
+ * require the assertion to fail, which a walk against the full fixture cannot
+ * show. It also spells every pinned node inline where the server `$ref`s it, so
+ * the deref hops above are exercised in both spellings.
+ */
+function shelfSpecByHand(): unknown {
+  const bodyWith = (properties: Record<string, unknown>) => ({
+    requestBody: { content: { 'application/json': { schema: { properties } } } },
+  });
+  const answersWith = (properties: Record<string, unknown>) => ({
+    responses: { '200': { content: { 'application/json': { schema: { properties } } } } },
+  });
+  const empty = {};
+  return {
+    paths: {
+      '/api/search': {
+        post: {
+          operationId: 'search',
+          ...bodyWith({
+            schemaVersion: empty,
+            query: empty,
+            view: empty,
+            limit: empty,
+            shelf: { pattern: '^[a-z0-9-]{2,32}/[a-z0-9-]{2,32}$' },
+            includePublic: empty,
+          }),
+          ...answersWith({ shelf: empty, public: empty }),
+        },
+      },
+      '/api/keys/resolve': {
+        post: { operationId: 'resolveKeys', ...bodyWith({ keys: empty, shelf: empty }) },
+      },
+      '/api/shelves': { post: { operationId: 'createShelf' } },
+      '/api/shelves/{org}/{shelf}': { delete: { operationId: 'deleteShelf' } },
+      '/api/orgs': {
+        get: {
+          operationId: 'listOrgs',
+          ...answersWith({
+            orgs: {
+              items: {
+                properties: {
+                  slug: empty,
+                  publicSearch: empty,
+                  shelves: { items: { properties: { slug: empty } } },
+                },
+              },
+            },
+          }),
+        },
+      },
+      '/api/orgs/{slug}': {
+        patch: { operationId: 'setOrgPolicy', ...bodyWith({ publicSearch: empty }) },
+      },
+      '/api/orgs/{slug}/members': {
+        post: { operationId: 'addOrgMember', ...bodyWith({ member: empty }) },
+        delete: { operationId: 'removeOrgMember', ...bodyWith({ member: empty }) },
+      },
+    },
+    components: {
+      schemas: {
+        PostCreate: {
+          properties: { shelf: { pattern: '^[a-z0-9-]{2,32}/[a-z0-9-]{2,32}$' } },
+        },
+      },
+    },
+  };
+}
+
+describe('the shelf contract is pinned against the fixture', () => {
+  // THE REAL CHECK. The fixture is the server's own `openapi.json`, refreshed
+  // from tenjin main b5e58807, so every walk below runs against what the
+  // deployed half actually publishes rather than against what this repo hoped
+  // it would. The two FOLLOW-UP tripwires that stood here until the refresh
+  // (one asserting the search body had no `shelf`, one asserting PostCreate had
+  // none) are gone: they existed to force exactly this swap.
+  it('every shelf walk passes against the committed server fixture', () => {
+    assertShelfContract(fixtureDoc);
+  });
+
+  it('every walk passes against the by-hand document too, in its inline spelling', () => {
+    expect(() => assertShelfContract(shelfSpecByHand())).not.toThrow();
+  });
+
+  it.each([
+    ['the two-list response', ['/api/search', 'post', 'responses']],
+    ['the shelf-bearing search body', ['/api/search', 'post', 'requestBody']],
+    ['the keys body', ['/api/keys/resolve', 'post', 'requestBody']],
+    ['the members body', ['/api/orgs/{slug}/members', 'post', 'requestBody']],
+    ['the org list body', ['/api/orgs', 'get', 'responses']],
+    ['the publicSearch patch', ['/api/orgs/{slug}', 'patch', 'requestBody']],
+    ['the shelf teardown route', ['/api/shelves/{org}/{shelf}', 'delete', 'operationId']],
+  ])('and fails when %s is missing, so each walk is load-bearing', (_label, path) => {
+    const doc = shelfSpecByHand() as { paths: Record<string, Record<string, object>> };
+    const [route, method, key] = path as [string, string, string];
+    const op = doc.paths[route]?.[method] as Record<string, unknown>;
+    delete op[key];
+    expect(() => assertShelfContract(doc)).toThrow();
+  });
+
+  it('and fails when the publish body drops `shelf`, which is a 400 on every shelf publish', () => {
+    const doc = shelfSpecByHand() as {
+      components: { schemas: { PostCreate: { properties: Record<string, unknown> } } };
+    };
+    delete doc.components.schemas.PostCreate.properties.shelf;
+    expect(() => assertShelfContract(doc)).toThrow();
+  });
+
+  /**
+   * THE THIRD ENDPOINT, END TO END. `tenjin publish` moved the shelf out of the
+   * route and into the body, and PostCreate is strict
+   * (`additionalProperties: false`), so an undeclared field is a rejection and
+   * not an ignored extra. This checks the concrete string the CLI puts on the
+   * wire against the schema that has to accept it.
+   */
+  it('the qualified shelf `buildPostCreateBody` emits is a declared PostCreate field', () => {
+    const body = buildPostCreateBody({
+      status: 'draft',
+      title: 'T',
+      bodyMd: 'B',
+      shelf: 'backtrack/notes',
+    });
+    expect(body.shelf).toBe('backtrack/notes');
+    expect(get(fixtureDoc, 'components', 'schemas', 'PostCreate', 'additionalProperties')).toBe(
+      false,
+    );
+    expect(get(postCreateProps(fixtureDoc), 'shelf'), 'PostCreate.shelf missing').toBeDefined();
+    expect(
+      new RegExp(String(get(postCreateProps(fixtureDoc), 'shelf', 'pattern'))).test(
+        String(body.shelf),
+      ),
+      'the server pattern must accept the qualified name the CLI sends',
+    ).toBe(true);
   });
 });
 
@@ -494,6 +915,9 @@ const POST_CREATE_FIELDS = [
   'handle',
   'status',
   'searchId',
+  // The qualified `<org>/<shelf>` a shelf publish names in the body rather than
+  // in the route. Strict schema, so this one being undeclared is a 400.
+  'shelf',
 ];
 const CARD_INPUT_FIELDS = [
   'artifactType',
@@ -724,6 +1148,10 @@ describe('contract fixture pins the publish endpoints', () => {
       priceAtomic: '100000',
       handle: 'iris',
       searchId: SEARCH_ID,
+      // Named here so the qualified value is walked against the declared
+      // pattern the day the fixture gains the field; a key the fixture does not
+      // declare yet is skipped by the loop below, so this stays green until then.
+      shelf: 'backtrack/notes',
     }) as Record<string, unknown>;
     const declared = postCreateProps(fixtureDoc);
     for (const [key, value] of Object.entries(body)) {

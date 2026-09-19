@@ -67,7 +67,6 @@ export const researchArm: Arm = lookupArm({
   trigger: 'research',
   enabled: (cfg) => cfg.hooks['web-search'],
   text: (input) => (input.tool?.kind === 'web' ? input.tool.query.trim() : null),
-  shelves: ['team', 'public'],
   deliver: 'inject',
 });
 
@@ -81,6 +80,5 @@ export const fetchArm: Arm = lookupArm({
   trigger: 'research',
   enabled: (cfg) => cfg.hooks['web-fetch'],
   text: (input) => (input.tool?.kind === 'fetch' ? fetchQuestion(input.tool) : null),
-  shelves: ['team', 'public'],
   deliver: 'inject',
 });

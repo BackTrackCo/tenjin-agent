@@ -1,25 +1,51 @@
 import { CliError } from '../lib/errors';
 import { formatUsdDisplay, parseUsdToAtomic } from '../lib/money';
-import { resolveContextSettings, type ResolvedSettings } from '../lib/settings';
+import {
+  onConfiguredDeployment,
+  resolveContextSettings,
+  type ResolvedSettings,
+} from '../lib/settings';
 import {
   buildSearchRequest,
   postSearch,
+  postShelfSearch,
   MAX_LIMIT,
   QUERY_MAX,
   type SearchInput,
+  type SearchResult,
 } from '../lib/agent-api';
+import { resolveWriteAuth } from '../lib/consent';
+import { searchHeaders } from '../lib/search-auth';
+import { describeWallet, resolveWalletProvider, type WalletProvider } from '../lib/wallet';
 import { cut } from '../hooks/text';
 import { recordSearch } from '../lib/searches';
 import { readActor, type SessionActor } from '../lib/session';
 import { assertOnBaseOrigin } from '../lib/resource-ref';
+import { originOf } from '../lib/url';
 import { sanitizeForTerminal } from '../lib/output';
 import type { CommandContext, CommandResult } from '../context';
 
 /**
- * `tenjin search "<question>"`, one POST to /api/search with `view: "decision"`.
+ * `tenjin search "<question>"`, ONE POST, `view: "decision"`.
+ *
+ * ONE ENDPOINT, `/api/search`. With a shelf set the body names it (qualified,
+ * `<org>/<shelf>`), the call is signed, and it comes back with two lists, the
+ * shelf's and the marketplace's; `team.publicFallback` is what sets
+ * `includePublic`, and the org's own `public_search` policy bounds it. With no
+ * shelf set the body names none and the call goes unsigned, exactly as it
+ * always did, byte for byte.
+ * Either way it is one request: a question is charged once however many shelves
+ * answer it.
+ *
+ * A LOCAL CREDENTIAL FAILURE ROUTES, IT DOES NOT REFUSE. Nothing able to sign
+ * sends the one call unsigned and with no `shelf` in the body, and prints the reason first, the
+ * same rule `hooks/legs/shelf.ts` follows, because the MCP `tenjin_search` tool
+ * runs this function with no TTY to mint at. The two loud cases stay loud: a
+ * server that rejected a signed call, and a machine that turned the marketplace
+ * off and so has nothing to fall back to.
+ *
  * Prints the compact result (spec 10) and records the searchId + items locally so
- * `outcome --search-id` and `buy <resourceId>` can use them. No wallet, no signing:
- * search is anonymous.
+ * `outcome --search-id` and `buy <resourceId>` can use them.
  *
  * The machine envelope is the server's response verbatim plus exactly one
  * CLI-owned key, `publishBack`, and only on a miss. It carries no server data: it
@@ -44,6 +70,9 @@ import type { CommandContext, CommandResult } from '../context';
  * `lookupId` or a prefixed spelling.
  */
 
+/** The one remedy for a shelf that could not be signed for; doctor names the rest. */
+const DOCTOR_FIX = 'Run `tenjin doctor` to see the wallet and its session.';
+
 export interface SearchArgs {
   question: string;
   /** Decimal USD at the edge (O1); converted to atomic for the wire. */
@@ -58,6 +87,8 @@ export interface SearchDeps {
   fetchImpl?: typeof fetch;
   /** Environment seam (the harness session and thread ids); defaults to process.env. */
   env?: NodeJS.ProcessEnv;
+  /** Test-injection seam for the wallet a shelf search signs through. */
+  provider?: WalletProvider;
 }
 
 export async function runSearch(
@@ -78,93 +109,136 @@ export async function runSearch(
   }
 
   const actor = readActor(deps.env ?? process.env);
-  const request = buildSearchRequest(input);
 
-  // SHELF ONE IS ALWAYS `baseUrl`, and the label follows the mode: in team mode
-  // that origin IS the team shelf, in public mode it is the marketplace.
   const legs: ShelfLeg[] = [];
-  /**
-   * A TEAM SHELF THAT ERRORS IS A MISS, NOT A STOP — the rule the daemon's legs
-   * hold too (hooks/legs/shelf.ts never throws; a failed leg is one row and the
-   * fire still hears from the others). `postSearch` throws on any non-200, and Deployment
-   * Protection answers a rotated or mistyped bypass secret with a 401 HTML page,
-   * so an unguarded first leg meant that a typo, a redeploy, or ten minutes of
-   * 500s took down every `tenjin search` on the machine while tenjin.blog sat
-   * there healthy. The failure is reported, not swallowed; it just does not cost
-   * the fallback.
-   *
-   * Two throws are NOT outages and keep propagating. In public mode there is one
-   * shelf and nothing to fall through to. And a CONTRACT_MISMATCH is an ingest
-   * trust-boundary refusal, not a shelf that is down — a response whose candidate
-   * points off the shelf that served it is exactly what `buy` would later pay, so
-   * it fails the command closed rather than degrading into a quiet fallback.
-   */
-  let teamError: string | undefined;
-  try {
-    legs.push(
-      await queryShelf({
-        shelf: settings.teamMode ? 'team' : 'public',
-        baseUrl: settings.baseUrl,
-        ...(settings.bypass !== undefined ? { bypass: settings.bypass } : {}),
-        request,
-        ctx,
-        settings,
-        actor,
-        ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
-      }),
-    );
-  } catch (err) {
-    if (!settings.teamMode) throw err;
-    if (err instanceof CliError && err.code === 'CONTRACT_MISMATCH') throw err;
-    teamError = sanitizeForTerminal(err instanceof Error ? err.message : String(err));
+  // A CREDENTIAL FAILURE NEVER SILENCES A PUBLIC ANSWER (principle 4), and this
+  // is the leg rule `hooks/legs/shelf.ts` follows, mirrored here because the
+  // same `runSearch` is what the MCP `tenjin_search` tool calls. A non-TTY run
+  // cannot mint, so a machine whose session expired would otherwise get exit 3
+  // and NO results where the daemon beside it still returns marketplace ones.
+  // The reason is printed first, on its own line, so the fallback is never
+  // silent; the search itself succeeds.
+  //
+  // A SERVER REFUSAL IS STILL LOUD. `postShelfSearch` raises on the signed
+  // call's 401/404, which is a membership or credential problem the operator
+  // has to hear about, and it is not this branch.
+  let shelfError: string | undefined;
+  // THE PIN COMES BEFORE THE SIGNATURE. `settings.baseUrl` is the RESOLVED base
+  // and a flag moves it; the delegation this mints is wallet-signed and gets
+  // written over the machine's cached session on the way out, so an agent that
+  // runs `tenjin search --base-url https://attacker.example` must not thereby
+  // move where the credential goes. Off the configured deployment there is no
+  // shelf to search, and the public route still answers unsigned: same shape as
+  // the credential fallback below, and the same rule `read` has held since #218.
+  const onConfigured = onConfiguredDeployment(originOf(settings.baseUrl), settings);
+  if (settings.shelf !== null && !onConfigured) {
+    shelfError = `${originOf(settings.baseUrl)} is not the deployment this machine is configured for, so shelf "${settings.shelf}" was not asked`;
   }
-  // SHELF TWO, TEAM MODE ONLY, AND ONLY WHEN THE FIRST HAD NOTHING TO GIVE —
-  // no candidates, or no answer at all. Same order the hook arms use, for the
-  // same reason: the team's own shelf covers the working day and the public
-  // marketplace is the fallback, so a team hit is never buried under a page of
-  // marketplace results. No bypass here — the transport would drop it anyway,
-  // since this is a different origin.
-  if (settings.teamMode && (legs[0] === undefined || legs[0].response.items.length === 0)) {
-    legs.push(
-      await queryShelf({
-        shelf: 'public',
-        baseUrl: settings.publicShelfUrl,
-        request,
-        ctx,
-        settings,
-        actor,
-        ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
-      }),
+  if (settings.shelf !== null && onConfigured) {
+    const request = buildSearchRequest({
+      ...input,
+      shelf: settings.shelf,
+      includePublic: settings.teamPublicFallback === 'on',
+    });
+    const url = `${settings.baseUrl.replace(/\/+$/, '')}/api/search`;
+    const auth = await searchHeaders(
+      ctx.dataDir,
+      { method: 'POST', url, body: JSON.stringify(request) },
+      {
+        now: Date.now,
+        env: deps.env ?? process.env,
+        mint: async () => {
+          const provider = resolveWalletProvider(
+            ctx,
+            deps.provider !== undefined ? { provider: deps.provider } : {},
+          );
+          // Surfaces WALLET_MISSING with its own fix, and it is what tells
+          // `searchHeaders` that "no wallet" is the answer rather than a
+          // credential that would not open.
+          await describeWallet(provider);
+          return resolveWriteAuth({
+            signer: await provider.getSigner(),
+            baseUrl: settings.baseUrl,
+            dataDir: ctx.dataDir,
+            scope: 'read',
+            env: deps.env ?? process.env,
+          });
+        },
+      },
     );
+    if (auth.kind === 'signed') {
+      const response = await postShelfSearch(request, {
+        baseUrl: settings.baseUrl,
+        timeoutMs: ctx.flags.timeout,
+        evalCohort: settings.evalCohort,
+        headers: auth.headers,
+        ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+      });
+      legs.push(await recordLeg('team', response.shelf, request, ctx, settings, actor));
+      if (response.public !== null) {
+        legs.push(await recordLeg('public', response.public, request, ctx, settings, actor));
+      }
+    } else if (settings.teamPublicFallback === 'off') {
+      // There is no public answer to withhold: this machine asked for the shelf
+      // alone, so a credential failure leaves nothing to fall back to and the
+      // refusal is the honest answer rather than a search of a list the
+      // operator turned off.
+      throw new CliError(
+        'REFUSED',
+        auth.kind === 'no-wallet'
+          ? `This machine has no wallet, so the shelf "${settings.shelf}" cannot be searched.`
+          : `Could not sign the search of shelf "${settings.shelf}": ${auth.detail}.`,
+        {
+          fix:
+            auth.kind === 'no-wallet'
+              ? 'Create one with `tenjin wallet create`, or clear the shelf with `tenjin shelf use --none` to search the public marketplace.'
+              : 'Run `tenjin doctor` to see the wallet and its session, or `config set team.publicFallback on` to let a failure fall back to the marketplace.',
+        },
+      );
+    } else {
+      shelfError =
+        auth.kind === 'no-wallet'
+          ? `this machine has no wallet, so shelf "${settings.shelf}" was not asked`
+          : `the search of shelf "${settings.shelf}" could not be signed: ${auth.detail}`;
+    }
+  }
+  if (legs.length === 0) {
+    const request = buildSearchRequest(input);
+    const response = await postSearch(request, {
+      baseUrl: settings.baseUrl,
+      timeoutMs: ctx.flags.timeout,
+      evalCohort: settings.evalCohort,
+      ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+    });
+    legs.push(await recordLeg('public', response, request, ctx, settings, actor));
   }
 
-  // The envelope is ONE shelf's response verbatim: the one that answered, or the
+  const labelled = settings.shelf !== null;
+  const limit = input.limit ?? 5;
+
+  // The envelope is ONE list's response verbatim: the one that answered, or the
   // first (the shelf a publish would go to) when neither did. A merged envelope
   // would be a shape the contract does not describe and `outcome`/`buy` cannot
-  // key off, so the second shelf rides in `shelves` instead, and only when there
-  // was a second shelf at all.
+  // key off, so the second list rides in `shelves` instead.
   const primary = legs.find((leg) => leg.response.items.length > 0) ?? legs[0]!;
   const decision = primary.response.items.length > 0 ? 'CANDIDATES' : 'MISS';
 
-  // Named on its own line, first, whichever way the search then went: a shelf
-  // that is broken is something the operator has to hear about, and the search
-  // succeeding on the fallback is exactly when nothing else would say so.
-  const teamErrorLines =
-    teamError === undefined
-      ? []
-      : [`The team shelf (${settings.baseUrl}) did not answer:`, `  ${teamError}`];
-
   const humanLines: string[] = [
-    ...teamErrorLines,
+    // First, whichever way the search then went: a shelf that went unasked is
+    // something the operator has to hear about, and the search succeeding on
+    // the marketplace is exactly when nothing else would say so.
+    ...(shelfError === undefined
+      ? []
+      : [`The shelf was not searched: ${sanitizeForTerminal(shelfError)}.`, DOCTOR_FIX]),
     ...(decision === 'MISS'
       ? [
           `MISS, no candidates (searchId ${primary.response.searchId})`,
           ...missedShelfLines(legs),
           ...missHint(primary.response),
-          ...truncatedHint(primary.response, request.limit),
+          ...truncatedHint(primary.response, limit),
           publishBackLine(primary.response.searchId),
         ]
-      : legs.flatMap((leg) => shelfLines(leg, settings.teamMode, request.limit))),
+      : legs.flatMap((leg) => shelfLines(leg, labelled, limit))),
   ];
 
   const data =
@@ -173,79 +247,59 @@ export async function runSearch(
       : primary.response;
 
   return {
-    data: settings.teamMode
+    data: labelled
       ? {
           ...(data as object),
-          shelves: [
-            // The shelf that failed is still a leg that ran, and `shelves` is
-            // where a machine reader learns what each one did. It carries
-            // `error` instead of a searchId, so "asked and broken" is not read
-            // as "asked and empty" — or, worse, as "never asked".
-            ...(teamError !== undefined
-              ? [{ shelf: 'team' as const, baseUrl: settings.baseUrl, error: teamError }]
-              : []),
-            ...legs.map((leg) => ({
-              shelf: leg.shelf,
-              baseUrl: leg.baseUrl,
-              searchId: leg.response.searchId,
-              matched: leg.response.items.length,
-            })),
-          ],
+          // The machine half of the line above: a caller that never renders
+          // humanLines still sees that a shelf it configured went unasked.
+          ...(shelfError === undefined ? {} : { shelfError }),
+          shelves: legs.map((leg) => ({
+            shelf: leg.shelf,
+            baseUrl: settings.baseUrl,
+            searchId: leg.response.searchId,
+            matched: leg.response.items.length,
+          })),
         }
       : data,
     humanLines,
   };
 }
 
-/** Which shelf answered, and what it said. */
+/** Which list this is, and what it said. */
 interface ShelfLeg {
   shelf: 'team' | 'public';
-  baseUrl: string;
-  response: Awaited<ReturnType<typeof postSearch>>;
-}
-
-interface ShelfQuery {
-  shelf: 'team' | 'public';
-  baseUrl: string;
-  bypass?: ResolvedSettings['bypass'];
-  request: ReturnType<typeof buildSearchRequest>;
-  ctx: CommandContext;
-  settings: ResolvedSettings;
-  /** Who ran it, from the harness env; undefined stamps neither column. */
-  actor: SessionActor | undefined;
-  fetchImpl?: typeof fetch;
+  response: SearchResult;
 }
 
 /**
- * One shelf's POST, origin-checked and recorded. Everything here was already
- * true of the single-shelf version; the only new thing is that the origin check
- * and the stored candidates are scoped to THIS shelf's base URL, not to the
- * configured one — a public-shelf candidate is on the public shelf's origin, and
- * checking it against the team's would refuse every result the fallback found.
+ * Origin-check one returned list and record it locally.
+ *
+ * Both lists came back from ONE deployment, so the origin checked is the
+ * configured base for both: a shelf candidate and a marketplace candidate live
+ * on the same host now.
+ *
+ * Ingest trust boundary: a candidate url that points off the base URL that
+ * served it would later route a wallet-signed SIWX header and payment to that
+ * host via `buy <resourceId>`. Refuse the whole response as a contract
+ * violation. This deliberately diverges from the hook path
+ * (`hooks/legs/shelf.ts`), which keeps what it can: a hook hint is advisory and
+ * never pays, whereas a `search` result feeds `buy` and must fail closed.
  */
-async function queryShelf(q: ShelfQuery): Promise<ShelfLeg> {
-  const response = await postSearch(q.request, {
-    baseUrl: q.baseUrl,
-    timeoutMs: q.ctx.flags.timeout,
-    evalCohort: q.settings.evalCohort,
-    ...(q.bypass !== undefined ? { bypass: q.bypass } : {}),
-    ...(q.fetchImpl !== undefined ? { fetchImpl: q.fetchImpl } : {}),
-  });
-
-  // Ingest trust boundary: a candidate url that points off the shelf that served
-  // it would later route a wallet-signed SIWX header and payment to that host via
-  // `buy <resourceId>`. Refuse the whole response as a contract violation.
-  // This deliberately diverges from the hook path (hooks/legs/shelf.ts), which
-  // DROPS the one off-origin candidate and keeps the rest: a hook hint is
-  // advisory and never pays, so one bad row should not blank the hint, whereas a
-  // `search` result feeds `buy` and must fail closed as a whole.
+async function recordLeg(
+  shelf: 'team' | 'public',
+  response: SearchResult,
+  request: ReturnType<typeof buildSearchRequest>,
+  ctx: CommandContext,
+  settings: ResolvedSettings,
+  actor: SessionActor | undefined,
+): Promise<ShelfLeg> {
   for (const c of response.items) {
     try {
-      assertOnBaseOrigin(c.url, q.baseUrl, 'search candidate URL');
+      assertOnBaseOrigin(c.url, settings.baseUrl, 'search candidate URL');
     } catch (err) {
       throw new CliError(
         'CONTRACT_MISMATCH',
-        `Search candidate ${c.resourceId} points off the ${q.shelf} shelf's base URL.`,
+        `Search candidate ${c.resourceId} points off the configured base URL.`,
         { cause: err },
       );
     }
@@ -254,23 +308,20 @@ async function queryShelf(q: ShelfQuery): Promise<ShelfLeg> {
   // are what `outcome` branches on, so they are written here rather than
   // re-derived by every reader from the candidate count.
   const decision = response.items.length > 0 ? 'CANDIDATES' : 'MISS';
-  await recordSearch(q.ctx.dataDir, {
+  await recordSearch(ctx.dataDir, {
     searchId: response.searchId,
     at: new Date().toISOString(),
-    question: q.request.query,
+    question: request.query,
     decision,
     source: 'cli',
-    // THE LEG THAT ANSWERED, not the configured base. In team mode the public
-    // fallthrough mints its searchId in the public marketplace's database, and a
-    // close posted to the team shelf is both a lie to the team shelf and silence
-    // to the marketplace that did the work. `outcome` and publish's search-close
-    // route on this.
-    shelfBaseUrl: q.baseUrl,
+    // ONE ORIGIN, so this is the base URL every close goes back to. The column
+    // is kept (it is in `LOOP_SHAPE`) and now holds exactly that.
+    shelfBaseUrl: settings.baseUrl,
     // Usually absent; see readActor. An unstamped entry is raised in every
     // session, which is the safe direction for a reminder. The agent is the
     // child this ran inside, so the capture ask names the miss to it alone.
-    ...(q.actor !== undefined ? { sessionId: q.actor.session } : {}),
-    ...(q.actor?.agent !== undefined ? { agentId: q.actor.agent } : {}),
+    ...(actor !== undefined ? { sessionId: actor.session } : {}),
+    ...(actor?.agent !== undefined ? { agentId: actor.agent } : {}),
     candidates: response.items.map((c) => ({
       resourceId: c.resourceId,
       url: c.url,
@@ -279,22 +330,17 @@ async function queryShelf(q: ShelfQuery): Promise<ShelfLeg> {
     })),
     // Always zero under search v3, and that is a fact about the result rather
     // than a placeholder: the decision view draws no browse tail at all, so no
-    // pointer was offered and none of them cost money. `outcome` reads this to
-    // tell a search that offered nothing to buy from one that put a payable
-    // pointer in front of the agent, and under v3 the answer is always the
-    // former. `undefined` stays reachable on the column and must keep reading as
-    // "unknown" rather than as zero.
+    // pointer was offered and none of them cost money.
     paidBrowseCount: 0,
   });
-  return { shelf: q.shelf, baseUrl: q.baseUrl, response };
+  return { shelf, response };
 }
 
 /**
- * One shelf's candidates. `labelled` follows TEAM MODE, not the number of legs
- * that ran: a team-mode reader needs to know which shelf answered even when only
- * one was asked, and a public-mode reader must see exactly the header this
- * command has always printed — a machine parsing these lines should not learn a
- * new shape because a second shelf exists on somebody else's machine.
+ * One list's candidates. `labelled` follows whether a shelf is SET, not the
+ * number of lists that came back: a reader on a shelf needs to know which list
+ * answered even when only one did, and a reader with no shelf must see exactly
+ * the header this command has always printed.
  */
 function shelfLines(leg: ShelfLeg, labelled: boolean, limit: number): string[] {
   const { response } = leg;
@@ -318,11 +364,11 @@ function shelfLines(leg: ShelfLeg, labelled: boolean, limit: number): string[] {
   ];
 }
 
-/** On a total miss with two shelves, name both, so the reader knows the fallback
- *  ran rather than assuming the team shelf was the only thing asked. */
+/** On a total miss with two lists, name both, so the reader knows the public
+ *  list was asked rather than assuming the shelf was the only thing looked at. */
 function missedShelfLines(legs: ShelfLeg[]): string[] {
   if (legs.length < 2) return [];
-  return [`Asked both shelves: ${legs.map((leg) => leg.shelf).join(', then ')}.`];
+  return [`Asked both shelves in one call: ${legs.map((leg) => leg.shelf).join(', then ')}.`];
 }
 
 /**
@@ -338,7 +384,7 @@ function missedShelfLines(legs: ShelfLeg[]): string[] {
  * when nothing matched, so a server that omits it costs the reader one line
  * rather than an empty bullet.
  */
-function missHint(response: Awaited<ReturnType<typeof postSearch>>): string[] {
+function missHint(response: SearchResult): string[] {
   return response.hint !== undefined && response.hint.length > 0
     ? [sanitizeForTerminal(response.hint)]
     : [];
@@ -361,7 +407,7 @@ function missHint(response: Awaited<ReturnType<typeof postSearch>>): string[] {
  * ever sets the flag alongside candidates it dropped. Handling both keeps the
  * flag from going unrendered if that ever changes.
  */
-function truncatedHint(response: Awaited<ReturnType<typeof postSearch>>, limit: number): string[] {
+function truncatedHint(response: SearchResult, limit: number): string[] {
   if (response.truncated !== true) return [];
   return [
     limit < MAX_LIMIT

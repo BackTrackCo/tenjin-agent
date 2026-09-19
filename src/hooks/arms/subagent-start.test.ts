@@ -41,6 +41,7 @@ function deps(db: LoopDb): Deps {
     log: () => undefined,
     arms: [subagentStartArm],
     adapters: {},
+    auth: () => Promise.resolve({ kind: 'no-wallet' }),
   };
 }
 

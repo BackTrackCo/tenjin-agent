@@ -4,6 +4,7 @@ import {
   buildOutcomeItem,
   getPostMetadata,
   postSearch,
+  postShelfSearch,
   postOutcomes,
   QUERY_MAX,
   type SearchResult,
@@ -530,6 +531,128 @@ describe('postSearch', () => {
       fetchImpl: fetch,
     });
     expect((res.items[0] as Record<string, unknown>).futureField).toBe('keep me');
+  });
+});
+
+/**
+ * THE SHELF SEARCH'S WIRE. ONE ENDPOINT: the same `/api/search` a public search
+ * posts to, with a QUALIFIED `shelf` in the body and `includePublic` beside it,
+ * answering with TWO independent lists rather than one merged one. Pinned here
+ * because this parser is what the whole one-call shape is built on: a server
+ * that flattened the envelope back to one list, or a client that sent a bare
+ * slug, would otherwise fail at runtime rather than in CI.
+ */
+describe('the shelf search wire', () => {
+  /** The qualified name, which is the only form the wire accepts. */
+  const SHELF = 'backtrack/backtrack';
+  const SHELF_RESULT = {
+    ...RESULT,
+    items: [{ ...(RESULT.items[0] as object), shelf: { id: 'sh_1', slug: 'backtrack' } }],
+  };
+  const PUBLIC_RESULT = {
+    ...RESULT,
+    searchId: '0197bbbb-cccc-dddd-eeee-ffffffffffff',
+    items: [{ ...(RESULT.items[0] as object), shelf: null }],
+  };
+
+  it('sends a qualified `shelf` and `includePublic`, and never a `scope`', () => {
+    const body = buildSearchRequest({
+      question: 'q',
+      shelf: 'backtrack/backtrack',
+      includePublic: true,
+    });
+    expect(body.shelf).toBe('backtrack/backtrack');
+    expect(body.includePublic).toBe(true);
+    expect(body).not.toHaveProperty('scope');
+    // BOTH OMITTED ENTIRELY when the caller says nothing, which is what an
+    // ordinary public search sends: the same bytes it always sent.
+    const publicBody = buildSearchRequest({ question: 'q' });
+    expect(publicBody).not.toHaveProperty('shelf');
+    expect(publicBody).not.toHaveProperty('includePublic');
+    expect(buildSearchRequest({ question: 'q', includePublic: false }).includePublic).toBe(false);
+  });
+
+  it('refuses a bare shelf slug locally, before the round trip', () => {
+    // The server answers 400; USAGE here is the same refusal one hop earlier,
+    // and it is what keeps the CLI from guessing which org owns a `notes`.
+    expect(() => buildSearchRequest({ question: 'q', shelf: 'notes' })).toThrowError(/shelf/i);
+    expect(() => buildSearchRequest({ question: 'q', shelf: 'acme/notes/extra' })).toThrowError(
+      /shelf/i,
+    );
+  });
+
+  it('POSTs to /api/search with the shelf in the body and the caller’s signed headers', async () => {
+    const { fetch, calls } = stubFetch(json(200, { shelf: SHELF_RESULT, public: PUBLIC_RESULT }));
+    const res = await postShelfSearch(
+      buildSearchRequest({ question: 'q', shelf: SHELF, includePublic: true }),
+      {
+        baseUrl: 'https://tenjin.blog',
+        timeoutMs: 5000,
+        fetchImpl: fetch,
+        headers: { 'Tenjin-Session-Delegation': 'stub' },
+      },
+    );
+    // THE ONE ENDPOINT. No slug in the path, so there is no per-shelf URL for a
+    // question to be sent down by mistake.
+    expect(calls[0]?.url).toBe('https://tenjin.blog/api/search');
+    expect(JSON.parse(String(calls[0]?.init.body))).toMatchObject({ shelf: SHELF });
+    const headers = calls[0]?.init.headers as Record<string, string>;
+    expect(headers['tenjin-session-delegation']).toBe('stub');
+    expect(res.shelf.matched).toBe(1);
+    expect(res.public?.searchId).toBe(PUBLIC_RESULT.searchId);
+  });
+
+  it('parses `shelf` on a candidate, and null as the marketplace', async () => {
+    const { fetch } = stubFetch(json(200, { shelf: SHELF_RESULT, public: PUBLIC_RESULT }));
+    const res = await postShelfSearch(buildSearchRequest({ question: 'q', shelf: SHELF }), {
+      baseUrl: 'https://tenjin.blog',
+      timeoutMs: 5000,
+      fetchImpl: fetch,
+    });
+    expect(res.shelf.items[0]?.shelf).toEqual({ id: 'sh_1', slug: 'backtrack' });
+    expect(res.public?.items[0]?.shelf).toBeNull();
+  });
+
+  it('accepts a null public list, which is the org policy and the toggle alike', async () => {
+    const { fetch } = stubFetch(json(200, { shelf: SHELF_RESULT, public: null }));
+    const res = await postShelfSearch(buildSearchRequest({ question: 'q', shelf: SHELF }), {
+      baseUrl: 'https://tenjin.blog',
+      timeoutMs: 5000,
+      fetchImpl: fetch,
+    });
+    expect(res.public).toBeNull();
+  });
+
+  it('refuses a flattened one-list response as a contract mismatch', async () => {
+    const { fetch } = stubFetch(json(200, RESULT));
+    await expect(
+      postShelfSearch(buildSearchRequest({ question: 'q', shelf: SHELF }), {
+        baseUrl: 'https://tenjin.blog',
+        timeoutMs: 5000,
+        fetchImpl: fetch,
+      }),
+    ).rejects.toMatchObject({ code: 'CONTRACT_MISMATCH' });
+  });
+
+  it('names the membership question on a 404, which the server cannot disambiguate', async () => {
+    const { fetch } = stubFetch(json(404, { error: 'not found' }));
+    const err = await postShelfSearch(buildSearchRequest({ question: 'q', shelf: SHELF }), {
+      baseUrl: 'https://tenjin.blog',
+      timeoutMs: 5000,
+      fetchImpl: fetch,
+    }).catch((e: unknown) => e);
+    expect(String((err as Error).message)).toContain('not a member');
+    expect(String((err as { fix?: string }).fix)).toContain('tenjin org list');
+  });
+
+  it('names the signature on a 401', async () => {
+    const { fetch } = stubFetch(json(401, { error: 'unsigned' }));
+    const err = await postShelfSearch(buildSearchRequest({ question: 'q', shelf: SHELF }), {
+      baseUrl: 'https://tenjin.blog',
+      timeoutMs: 5000,
+      fetchImpl: fetch,
+    }).catch((e: unknown) => e);
+    expect(String((err as Error).message)).toContain('not signed');
   });
 });
 

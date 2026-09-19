@@ -135,6 +135,21 @@ describe('buildPostCreateBody — bounds', () => {
     expect(() => buildPostCreateBody({ status: 'draft', handle: 'A!' })).toThrow();
   });
 
+  /**
+   * WHERE THE PIECE LANDS, as the QUALIFIED name on the body — the same
+   * `<org>/<shelf>` the config stores and a search sends. Forwarded verbatim,
+   * never split: this client does not decide which org a shelf belongs to.
+   * Omitted rather than null for the marketplace: an absent `shelf` is what the
+   * server reads as public, and the strict create schema has no null to accept.
+   */
+  it('emits `shelf` when one is set, and omits it entirely when not', () => {
+    expect(
+      buildPostCreateBody({ status: 'draft', title: 't', shelf: 'backtrack/backtrack' }).shelf,
+    ).toBe('backtrack/backtrack');
+    const marketplace = buildPostCreateBody({ status: 'draft', title: 't' });
+    expect(marketplace).not.toHaveProperty('shelf');
+  });
+
   // The wire rule the server rollout turns on: one search stays the bare string
   // a post-create that predates the array still takes.
   it('ships one searchId as a bare string and several as an array', () => {

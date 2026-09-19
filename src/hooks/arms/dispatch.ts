@@ -4,7 +4,8 @@ import { lookupArm } from './lookup';
 
 /**
  * The dispatch arm (13-pr-d-local-arms.md, "dispatch"): the work order an
- * agent hands the Agent tool, looked up on both shelves at once and PARKED for
+ * agent hands the Agent tool, looked up in one call (shelf and marketplace in
+ * one response) and PARKED for
  * the child, which claims it at its start (`subagent-start.ts`). The parent
  * never saw that answer before writing the child's prompt, which is why this
  * handoff stays where the prompt-answer fallback went (decision 5).
@@ -37,7 +38,6 @@ export const dispatchArm: Arm = lookupArm({
     const task = input.tool.task.trim();
     return description.length > 0 ? `${description}\n${task}` : task;
   },
-  shelves: ['team', 'public'],
   deliver: 'log',
   after(ctx, result, question) {
     if (question === null) return null;

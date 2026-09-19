@@ -48,17 +48,23 @@ export function cleanup(): void {
 export function kernelConfig(
   hooks: Partial<KernelConfig['hooks']> = {},
   team: Partial<KernelConfig['team']> = {},
+  shelf: string | null = 'backtrack/backtrack',
 ): KernelConfig {
   return {
     hooks: { ...CONFIG_DEFAULTS.hooks, ...hooks },
     loop: CONFIG_DEFAULTS.loop,
     team: { ...CONFIG_DEFAULTS.team, ...team },
-    baseUrl: 'https://shelf.acme.internal',
-    publicShelfUrl: PRODUCTION_ORIGIN,
-    shelfBypassSecret: '',
+    baseUrl: PRODUCTION_ORIGIN,
+    shelf,
     publish: CONFIG_DEFAULTS.publish,
   };
 }
+
+/** A stub `Deps.auth` that signs everything, so an arm test never touches a
+ *  keystore. Cases about the unsigned and unauthenticated branches pass their
+ *  own. */
+export const signedAuth: Deps['auth'] = () =>
+  Promise.resolve({ kind: 'signed', headers: { 'Tenjin-Session-Delegation': 'stub' } });
 
 /** A canonical tool of `kind`, named after it, with the fields that kind carries. */
 export function toolInput<K extends ToolKind>(
@@ -87,6 +93,7 @@ export interface CtxOptions {
   config?: KernelConfig;
   actor?: Actor;
   clock?: () => number;
+  auth?: Deps['auth'];
 }
 
 export function fireContext(opts: CtxOptions): FireContext {
@@ -99,6 +106,7 @@ export function fireContext(opts: CtxOptions): FireContext {
     log: () => undefined,
     arms: [opts.arm],
     adapters: {},
+    auth: opts.auth ?? signedAuth,
   };
   const fire: FireClock = {
     id: 'fire-1',

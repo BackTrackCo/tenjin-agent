@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { PRODUCTION_ORIGIN } from '../../lib/production-origin';
 import { PRIMER_TEXT, PRIMER_TEXT_TEAM } from '../prose';
 import type { KernelConfig } from '../types';
 import { primerArm } from './primer';
@@ -23,11 +22,9 @@ describe('the primer arm', () => {
     expect(primerArm.plan).toBeUndefined();
   });
 
-  it('speaks the team paragraph against a team origin and the public one otherwise', async () => {
+  it('speaks the team paragraph with a shelf set and the public one otherwise', async () => {
     expect(await spoken(kernelConfig())).toEqual({ context: PRIMER_TEXT_TEAM });
-    expect(await spoken({ ...kernelConfig(), baseUrl: PRODUCTION_ORIGIN })).toEqual({
-      context: PRIMER_TEXT,
-    });
+    expect(await spoken({ ...kernelConfig(), shelf: null })).toEqual({ context: PRIMER_TEXT });
   });
 
   it('startup, clear and compact alike', async () => {

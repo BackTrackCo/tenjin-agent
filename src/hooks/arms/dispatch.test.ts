@@ -50,8 +50,14 @@ async function sent(
 ): Promise<{ query: string; trigger: string }> {
   const ctx = fireContext({ db: freshDb(), arm: dispatchArm, input, config: ON });
   const plan = (await dispatchArm.plan?.(ctx)) as Plan;
-  expect(plan.stages.map((s) => s.map((l) => l.shelf))).toEqual([['team', 'public']]);
-  await plan.stages[0]?.[0]?.request(plan.question, 1000, new AbortController().signal);
+  // ONE stage, ONE leg, both candidate sets out of its one response.
+  expect(plan.stages.map((s) => s.map((l) => l.shelves))).toEqual([[['team', 'public']]]);
+  await plan.stages[0]?.[0]?.request(
+    plan.question,
+    1000,
+    new AbortController().signal,
+    deps(freshDb()),
+  );
   return bodies[0] as { query: string; trigger: string };
 }
 
@@ -78,13 +84,19 @@ function shelf(items: Array<Record<string, unknown>>): { bodies: Array<Record<st
   const bodies: Array<Record<string, unknown>> = [];
   vi.stubGlobal('fetch', async (input: unknown, init?: RequestInit) => {
     bodies.push((await new Request(String(input), init).json()) as Record<string, unknown>);
+    // The shelf route's two-list envelope: one call, a shelf list and a public
+    // list. The public list is null here, which is what an org policy of off and
+    // an `includePublic: false` both look like from the client.
     return new Response(
       JSON.stringify({
-        schemaVersion: 3,
-        searchId: SEARCH_ID,
-        calibration: 'hybrid-v1',
-        items,
-        matched: items.length,
+        shelf: {
+          schemaVersion: 3,
+          searchId: SEARCH_ID,
+          calibration: 'hybrid-v1',
+          items,
+          matched: items.length,
+        },
+        public: null,
       }),
       { status: 200, headers: { 'content-type': 'application/json' } },
     );
@@ -98,6 +110,7 @@ function deps(db: ReturnType<typeof freshDb>, config: KernelConfig = ON): Deps {
     config: () => config,
     clock: () => NOW,
     log: () => undefined,
+    auth: () => Promise.resolve({ kind: 'signed', headers: {} }),
     arms: [dispatchArm],
     adapters: {},
   };

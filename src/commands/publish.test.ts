@@ -1799,9 +1799,7 @@ describe('runPublish — a search the store could not close reports closed:false
  */
 describe('runPublish on a team shelf', () => {
   const TEAM = 'https://team.example';
-  const PUBLIC = 'https://public.example';
-  const SECRET = 'shelf-secret-abc123';
-  const BYPASS_HEADER = 'x-vercel-protection-bypass';
+  const SHELF = 'backtrack';
 
   interface Sent {
     url: string;
@@ -1836,10 +1834,7 @@ describe('runPublish on a team shelf', () => {
   }
 
   async function writeShelfConfig(): Promise<void> {
-    await writeFile(
-      join(dir, 'config.json'),
-      JSON.stringify({ baseUrl: TEAM, publicShelfUrl: PUBLIC, shelfBypassSecret: SECRET }),
-    );
+    await writeFile(join(dir, 'config.json'), JSON.stringify({ baseUrl: TEAM, shelf: SHELF }));
   }
 
   it('a live secret is still a flag on the team shelf, cleared by full-auto + --yes', async () => {
@@ -1879,9 +1874,9 @@ describe('runPublish on a team shelf', () => {
     );
     expect((res.data as { resourceId: string }).resourceId).toBe(CREATED.id);
     expect(sent).toHaveLength(1);
-    // To the team shelf, and nowhere near the public one.
+    // To the configured base, naming the shelf in the body.
     expect(new URL(sent[0]!.url).origin).toBe(TEAM);
-    expect(sent[0]!.headers[BYPASS_HEADER]).toBe(SECRET);
+    expect(sent[0]!.body?.shelf).toBe(SHELF);
     // Free by default: a teammate must not hit a 402 on their own team's finding.
     expect(sent[0]!.body?.price).toBe('0');
   });
@@ -2033,39 +2028,37 @@ describe('runPublish on a team shelf', () => {
     expect(sent[0]!.body?.price).toBe('0');
   });
 
-  it('does not claim a search the OTHER shelf answered', async () => {
+  /**
+   * NO FOREIGN SHELF LEFT. One deployment mints every searchId this machine
+   * records, so a row whose `shelf_base_url` names something else is from before
+   * the cutover or hand-edited — and it is still this shelf's search to claim,
+   * because there is nowhere else the id could have come from.
+   */
+  it('claims a search whatever its stored shelf_base_url says', async () => {
     await writeShelfConfig();
-    // The ordinary team-miss / public-hit: the marketplace minted this id, and
-    // the team shelf has never seen it. The server format-validates the uuid and
-    // stores it set-once, so sending it would misfile the attribution on a team
-    // post row permanently while the marketplace's demand loop stays open.
-    const FOREIGN = '0197cccc-dddd-7eee-8fff-aaaaaaaaaaaa';
+    const STALE = '0197cccc-dddd-7eee-8fff-aaaaaaaaaaaa';
     await recordSearch(dir, {
-      searchId: FOREIGN,
+      searchId: STALE,
       at: new Date().toISOString(),
-      question: 'a question the public shelf answered',
+      question: 'a question recorded before the cutover',
       decision: 'CANDIDATES',
       candidates: [],
-      shelfBaseUrl: PUBLIC,
+      shelfBaseUrl: 'https://public.example',
     });
     const file = await writeDoc(CLEAN);
     const { fetch, sent } = shelfServer();
     const { provider } = spyProvider();
 
     const res = await runPublish(
-      baseArgs(file, { searchId: FOREIGN, mode: 'full-auto' }),
+      baseArgs(file, { searchId: STALE, mode: 'full-auto' }),
       teamCtx(),
       hermetic({ fetchImpl: fetch, provider }),
     );
 
-    // Published, to the team shelf, carrying no foreign attribution.
     expect(sent).toHaveLength(1);
-    expect(sent[0]!.body).not.toHaveProperty('searchId');
-    // And the loop stays OPEN, because `tenjin outcome` can still reach the
-    // shelf that answered — a close here would be a receipt for nothing.
-    expect((await loadSearches(dir))[0]?.resolved).toBeUndefined();
+    expect(sent[0]!.body).toMatchObject({ searchId: STALE });
     const searches = (res.data as { searches: Array<Record<string, unknown>> }).searches;
-    expect(searches).toEqual([{ id: FOREIGN, closed: false, otherShelf: true }]);
+    expect(searches).toEqual([{ id: STALE, closed: true }]);
   });
 
   it('still claims a search this shelf answered', async () => {
@@ -2105,14 +2098,11 @@ describe('runPublish on a team shelf', () => {
     expect(sent[0]!.body?.price).toBe('250000');
   });
 
-  it('puts the whole cascade back the moment the shelf secret is cleared', async () => {
-    // An empty shelfBypassSecret yields no bypass pair and so no team mode
-    // (settings.ts): the checkout falls back to the full public scope, where a
-    // WARN body — promptless under team scope's narrower drop — asks again.
-    await writeFile(
-      join(dir, 'config.json'),
-      JSON.stringify({ baseUrl: TEAM, publicShelfUrl: PUBLIC, shelfBypassSecret: '' }),
-    );
+  it('puts the whole cascade back the moment the shelf is cleared', async () => {
+    // No shelf means the marketplace, so the checkout falls back to the full
+    // public scope, where a WARN body — promptless under the team scope's
+    // narrower drop — asks again.
+    await writeFile(join(dir, 'config.json'), JSON.stringify({ baseUrl: TEAM }));
     const file = await writeDoc(WARN);
     const { fetch, sent } = shelfServer();
     const { provider } = spyProvider();
