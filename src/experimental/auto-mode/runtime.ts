@@ -57,6 +57,7 @@ export interface RuntimeDeps {
   executionDeps?: ExecutionDeps;
   env?: NodeJS.ProcessEnv;
   discover?: typeof discoverCandidates;
+  onSelected?: (selected: NonNullable<Outcome['selected']>) => Promise<void>;
 }
 
 export const FIXTURE_RESOURCE = {
@@ -344,6 +345,7 @@ async function runUncachedEvent(
     args: route.args,
     contractHash: route.contract.sourceHash,
   };
+  await deps.onSelected?.(selected);
   if (config.mode === 'route')
     return {
       status: 'prepared',

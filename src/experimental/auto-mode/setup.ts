@@ -14,6 +14,11 @@ export async function writeBridgeSetup(configPath: string, nodePath: string, cli
     JSON.stringify(
       {
         enabledPlugins: {},
+        statusLine: {
+          type: 'command',
+          command: `${quote(nodePath)} ${quote(join(dirname(cliPath), 'tenjin-auto-status.mjs'))} --config ${quote(configPath)}`,
+          refreshInterval: 1,
+        },
         hooks: {
           PreToolUse: [
             {

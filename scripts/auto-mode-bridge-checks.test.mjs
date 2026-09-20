@@ -420,7 +420,7 @@ test('accepts only the canonical bounded preview of a long provider response', (
     })),
   });
   input.outcomes[0].outcome.execution.response.body = body;
-  const preview = previewResult(body, 5000);
+  const preview = previewResult(body, 6000);
   assert.equal(preview.truncated, true);
   updateEnvelope(input, (value) => {
     value.result = preview.result;

@@ -17,6 +17,131 @@ const PROFILES = [
   { list: 2, string: 16, properties: 16 },
   { list: 1, string: 16, properties: 8 },
 ];
+const MAX_VISITED = 20_000;
+const MAX_DEPTH = 16;
+
+/** A few dominant strings usually carry a document rather than tabular data.
+ * Allocate by value size, never by provider, field names, or text instructions.
+ * The structural profiles below still handle responses with many peer records. */
+function prosePreview(parsed: unknown, maxChars: number): ResultPreview | undefined {
+  type Path = Array<string | number>;
+  const candidates: Array<{ path: Path; length: number }> = [];
+  let visited = 0;
+  let stringChars = 0;
+  function scan(value: unknown, path: Path, depth: number): void {
+    if (++visited > MAX_VISITED) throw new Error('Preview traversal limit');
+    if (typeof value === 'string') {
+      stringChars += value.length;
+      if (value.length >= Math.max(1024, maxChars / 2)) {
+        candidates.push({ path, length: value.length });
+        // Stable sorting gives equal-size values the same traversal-order tie break.
+        candidates.sort((a, b) => b.length - a.length);
+        candidates.length = Math.min(candidates.length, 4);
+      }
+      return;
+    }
+    if (value === null || typeof value !== 'object' || depth >= MAX_DEPTH) return;
+    if (Array.isArray(value))
+      value.forEach((item, index) => scan(item, [...path, index], depth + 1));
+    else for (const [key, item] of Object.entries(value)) scan(item, [...path, key], depth + 1);
+  }
+  try {
+    scan(parsed, [], 0);
+  } catch {
+    return undefined;
+  }
+  if (
+    candidates.length === 0 ||
+    candidates.reduce((total, candidate) => total + candidate.length, 0) < stringChars * 0.6
+  )
+    return undefined;
+  const prosePaths = new Set(candidates.map(({ path }) => JSON.stringify(path)));
+  const ancestors = new Set<string>();
+  for (const { path } of candidates)
+    for (let length = 0; length <= path.length; length++)
+      ancestors.add(JSON.stringify(path.slice(0, length)));
+
+  // Auxiliary breadth is bounded independently from the long text. In particular,
+  // seventy metadata leaves must not each consume the document's string budget.
+  for (const profile of [
+    { list: 2, properties: 8, string: 64 },
+    { list: 1, properties: 4, string: 48 },
+    { list: 1, properties: 2, string: 24 },
+  ]) {
+    function render(proseLimit: number): ResultPreview {
+      let count = 0;
+      let truncated = false;
+      function visit(value: unknown, path: Path, depth: number): unknown {
+        if (++count > MAX_VISITED) throw new Error('Preview traversal limit');
+        if (typeof value === 'string') {
+          const limit = prosePaths.has(JSON.stringify(path)) ? proseLimit : profile.string;
+          if (value.length <= limit) return value;
+          let end = limit;
+          // Do not split an astral character at the display boundary.
+          const last = value.charCodeAt(end - 1);
+          if (last >= 0xd800 && last <= 0xdbff) end--;
+          truncated = true;
+          return `${value.slice(0, end)}… [${value.length - end} chars omitted]`;
+        }
+        if (value === null || typeof value !== 'object') return value;
+        if (depth >= MAX_DEPTH) {
+          truncated = true;
+          return '[nested content omitted from preview]';
+        }
+        if (Array.isArray(value)) {
+          const kept = value.flatMap((item, index) => {
+            const child = [...path, index];
+            return index < profile.list || ancestors.has(JSON.stringify(child))
+              ? [visit(item, child, depth + 1)]
+              : [];
+          });
+          if (kept.length < value.length) {
+            truncated = true;
+            kept.push(`[${value.length - kept.length} items omitted from preview]`);
+          }
+          return kept;
+        }
+        const entries = Object.entries(value);
+        const kept = entries.flatMap(([key, item], index) => {
+          const child = [...path, key];
+          return index < profile.properties || ancestors.has(JSON.stringify(child))
+            ? [[key, visit(item, child, depth + 1)] as const]
+            : [];
+        });
+        if (kept.length < entries.length) truncated = true;
+        return Object.fromEntries(kept);
+      }
+      return {
+        result: JSON.stringify(visit(parsed, [], 0)),
+        format: 'json',
+        truncated,
+        ...(truncated ? { note: PARTIAL_NOTE } : {}),
+      };
+    }
+    try {
+      let best = render(0);
+      // Reserve most of the serialized budget for the selected text, even when
+      // several nested auxiliary objects would individually fit their limits.
+      if (best.result.length > maxChars / 4) continue;
+      let lower = 0;
+      let upper = maxChars;
+      // A shared per-string cap allocates comparable document fields fairly.
+      // Measuring serialized JSON accounts for quotes, escapes, and wrappers.
+      while (lower <= upper) {
+        const middle = Math.floor((lower + upper) / 2);
+        const preview = render(middle);
+        if (preview.result.length <= maxChars) {
+          best = preview;
+          lower = middle + 1;
+        } else upper = middle - 1;
+      }
+      return best;
+    } catch {
+      // Try a narrower surrounding tree before falling back to record profiles.
+    }
+  }
+  return undefined;
+}
 
 /** Deterministic display only; execution and its saved response keep the full body. */
 export function previewResult(body: string, maxChars = 6000): ResultPreview {
@@ -42,18 +167,20 @@ export function previewResult(body: string, maxChars = 6000): ResultPreview {
   } catch {
     // The depth-limited traversal below still yields a valid JSON preview.
   }
+  const prose = prosePreview(parsed, maxChars);
+  if (prose) return prose;
   for (const profile of PROFILES) {
     let visited = 0;
     let truncated = false;
     function visit(value: unknown, depth: number): unknown {
-      if (++visited > 20000) throw new Error('Preview traversal limit');
+      if (++visited > MAX_VISITED) throw new Error('Preview traversal limit');
       if (typeof value === 'string') {
         if (value.length <= profile.string) return value;
         truncated = true;
         return `${value.slice(0, profile.string)}… [${value.length - profile.string} chars omitted]`;
       }
       if (value === null || typeof value !== 'object') return value;
-      if (depth >= 16) {
+      if (depth >= MAX_DEPTH) {
         truncated = true;
         return '[nested content omitted from preview]';
       }

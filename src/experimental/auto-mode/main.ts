@@ -14,6 +14,9 @@ import { ConfigSchema, hookOutput, runEvent, recordOutcome } from './runtime';
 import type { AutoConfig, Outcome } from './runtime';
 import { createBridgeHookOutput, normalizeBridgeEvent, serveBridge } from './bridge';
 import { writeBridgeSetup } from './setup';
+import { HookEventSchema } from './context';
+import type { HookEvent } from './context';
+import { writeProgress } from './progress';
 
 const program = new Command('tenjin-auto-mode').description(
   'Experimental local Jev → x402 runner. No backend; no global hook installation.',
@@ -199,11 +202,34 @@ for (const command of ['hook', 'run', 'bridge-hook']) {
           }, 70_000)
         : undefined;
       let bridgeOutput: Awaited<ReturnType<typeof createBridgeHookOutput>> | undefined;
+      let progress: { config: AutoConfig; event: HookEvent } | undefined;
       try {
         const { config, env } = await loadConfig(options.config as string);
         const raw = await input(options.event as string | undefined);
-        const event = command === 'bridge-hook' ? normalizeBridgeEvent(raw) : raw;
-        outcome = await runEvent(event, config, { env });
+        const event =
+          command === 'bridge-hook' ? normalizeBridgeEvent(raw) : HookEventSchema.parse(raw);
+        if (command === 'bridge-hook') {
+          progress = { config, event };
+          await writeProgress(config, event, {
+            phase: 'routing',
+            fixture: config.mode === 'fixture',
+          });
+        }
+        outcome = await runEvent(event, config, {
+          env,
+          ...(progress
+            ? {
+                onSelected: async (selected) => {
+                  await writeProgress(config, event, {
+                    phase: 'calling',
+                    provider: selected.url,
+                    args: selected.args,
+                    fixture: config.mode === 'fixture',
+                  });
+                },
+              }
+            : {}),
+        });
         await recordOutcome(config, event, outcome);
         if (command === 'bridge-hook')
           bridgeOutput = await createBridgeHookOutput(config, raw, outcome);
@@ -214,6 +240,15 @@ for (const command of ['hook', 'run', 'bridge-hook']) {
         };
       }
       clearTimeout(watchdog);
+      if (progress)
+        await writeProgress(progress.config, progress.event, {
+          phase: 'finished',
+          status: outcome.status,
+          provider: outcome.selected?.url,
+          args: outcome.selected?.args,
+          cached: outcome.execution?.cached,
+          fixture: outcome.fixture,
+        });
       json(bridgeOutput ?? (command.endsWith('hook') ? hookOutput(outcome) : outcome));
     });
 }

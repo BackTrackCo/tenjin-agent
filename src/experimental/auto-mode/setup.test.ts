@@ -32,6 +32,11 @@ it('prepares the bridge without renewing payment authority or disturbing native 
   expect(hook.hooks[0].command).toContain(
     "'/node path' '/cli'\\''s file.mjs' bridge-hook --config",
   );
+  expect(settings.statusLine).toEqual({
+    type: 'command',
+    command: `'/node path' '/tenjin-auto-status.mjs' --config '${join(directory, 'config.json')}'`,
+    refreshInterval: 1,
+  });
   const mcp = JSON.parse(await readFile(result.mcpPath, 'utf8'));
   expect(Object.keys(mcp.mcpServers)).toEqual(['x402']);
   expect(mcp.mcpServers.x402.args).toEqual([

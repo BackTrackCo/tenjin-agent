@@ -118,7 +118,7 @@ function receiptResult(outcome: Outcome) {
   }
   const parametersPreview = displayPreview(JSON.stringify(outcome.selected?.args ?? {}), 1000);
   const parameters: unknown = JSON.parse(parametersPreview.result);
-  const preview = response && displayPreview(response.body, 5000);
+  const preview = response && displayPreview(response.body, 6000);
   const delivered = {
     status,
     reason:

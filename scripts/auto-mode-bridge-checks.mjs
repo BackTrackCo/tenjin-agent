@@ -74,7 +74,7 @@ function receiptMatches(text, provider, amountAtomic, parameters, fixture) {
 function expectedPreview(outcome) {
   try {
     const parameters = previewResult(JSON.stringify(outcome.selected.args), 1000);
-    const body = previewResult(outcome.execution.response.body, 5000);
+    const body = previewResult(outcome.execution.response.body, 6000);
     return {
       parameters: JSON.parse(parameters.result),
       parametersTruncated: parameters.truncated,

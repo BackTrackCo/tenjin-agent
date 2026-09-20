@@ -20,6 +20,97 @@ function crowdedResponse() {
 }
 
 describe('bounded provider result preview', () => {
+  it.each(['markdown', 'arbitraryPayloadName'])(
+    'retains document substance in %s instead of spending its budget on metadata',
+    (field) => {
+      const heading = '# Protocol specification';
+      const overview =
+        '## Overview\nThe client requests a resource, receives payment requirements, and retries with authorization.';
+      const document =
+        `${'Navigation text. '.repeat(200).slice(0, 2700)}${heading}\n`.padEnd(4200, '.') +
+        `${overview}\n${'Protocol details. '.repeat(1700)}`;
+      const metadata = Object.fromEntries(
+        Array.from({ length: 70 }, (_, index) => [
+          `attribute${index}`,
+          `Auxiliary metadata ${index}. `.repeat(5),
+        ]),
+      );
+      const value = {
+        ok: true,
+        source: 'https://documents.example/protocol',
+        data: { success: true, data: { metadata, [field]: document } },
+      };
+      const body = JSON.stringify(value);
+      const preview = previewResult(body, 6000);
+      const parsed = JSON.parse(preview.result);
+      const delivered = parsed.data.data[field];
+      expect(document.length).toBeGreaterThan(30_000);
+      expect(delivered).toContain(heading);
+      expect(delivered).toContain(overview);
+      expect(delivered.slice(0, 4500)).toBe(document.slice(0, 4500));
+      expect(parsed).toMatchObject({ ok: true, source: value.source, data: { success: true } });
+      expect(Object.keys(parsed.data.data.metadata).length).toBeLessThan(70);
+      expect(preview.result.length).toBeLessThanOrEqual(6000);
+      expect(preview).toMatchObject({ format: 'json', truncated: true });
+      expect(preview.note).toContain('full result is saved locally');
+      expect(previewResult(body, 6000)).toEqual(preview);
+      expect(JSON.parse(body)).toEqual(value);
+    },
+  );
+
+  it('shares space across comparable long values even when they follow many small fields', () => {
+    const metadata = Object.fromEntries(
+      Array.from({ length: 70 }, (_, i) => [`label${i}`, `value${i}`]),
+    );
+    const value = {
+      success: true,
+      pages: {
+        ...metadata,
+        first: 'First document. '.repeat(2000),
+        second: 'Second document. '.repeat(2000),
+      },
+    };
+    const preview = previewResult(JSON.stringify(value));
+    const parsed = JSON.parse(preview.result);
+    expect(parsed.success).toBe(true);
+    expect(parsed.pages.first.slice(0, 2000)).toBe(value.pages.first.slice(0, 2000));
+    expect(parsed.pages.second.slice(0, 2000)).toBe(value.pages.second.slice(0, 2000));
+    expect(preview.result.length).toBeLessThanOrEqual(6000);
+    expect(preview.truncated).toBe(true);
+  });
+
+  it('narrows nested auxiliary objects before they crowd out the main document', () => {
+    const document = `${'Navigation. '.repeat(250)}\n# Actual document\n${'Substance. '.repeat(3000)}`;
+    const auxiliary = Object.fromEntries(
+      Array.from({ length: 8 }, (_, outer) => [
+        `group${outer}`,
+        Object.fromEntries(
+          Array.from({ length: 8 }, (_, inner) => [`label${inner}`, 'Metadata. '.repeat(5)]),
+        ),
+      ]),
+    );
+    const preview = previewResult(JSON.stringify({ auxiliary, document, success: true }));
+    const parsed = JSON.parse(preview.result);
+    expect(parsed.document.slice(0, 4500)).toBe(document.slice(0, 4500));
+    expect(parsed.document).toContain('# Actual document');
+    expect(parsed.success).toBe(true);
+    expect(preview.result.length).toBeLessThanOrEqual(6000);
+    expect(preview.truncated).toBe(true);
+  });
+
+  it('measures escaped prose as serialized JSON and preserves Unicode boundaries', () => {
+    const value = { root: { text: '\n"\\🙂'.repeat(6000) }, status: 200 };
+    for (const limit of [256, 1000, 6000]) {
+      const preview = previewResult(JSON.stringify(value), limit);
+      const parsed = JSON.parse(preview.result);
+      expect(parsed.status).toBe(200);
+      expect(parsed.root.text).toContain('chars omitted');
+      expect(parsed.root.text).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
+      expect(preview.result.length).toBeLessThanOrEqual(limit);
+      expect(preview.truncated).toBe(true);
+    }
+  });
+
   it('keeps both sibling asset prices despite earlier nested metadata and string arrays', () => {
     const body = JSON.stringify(crowdedResponse());
     const preview = previewResult(body);

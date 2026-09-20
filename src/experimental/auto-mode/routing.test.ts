@@ -42,6 +42,244 @@ function fieldsContract(properties: Record<string, Record<string, unknown>>) {
 }
 
 describe('Jev intent-to-call boundary', () => {
+  const pageUrl = 'https://docs.example.org/payments/how-it-works';
+  const fetchEvent: HookEvent = {
+    ...event,
+    tool_name: 'WebFetch',
+    tool_input: { url: pageUrl, prompt: 'Explain how payments work end to end.' },
+  };
+  const changedTopic: TaskContext = {
+    fingerprint: 'crypto-then-payments',
+    messages: [
+      { role: 'user', text: 'Research BTC and ETH for someone new to crypto.' },
+      { role: 'assistant', text: 'Bitcoin (BTC) and Ethereum (ETH) are different networks.' },
+      { role: 'user', text: 'Check prices for both now.' },
+      { role: 'assistant', text: 'Here are their current prices.' },
+      {
+        role: 'user',
+        text: 'Find two authoritative explanations of payments. Link both sources.',
+      },
+    ],
+  };
+
+  it('keeps page retrieval distinct from earlier topics and the broader research task', async () => {
+    const reader = fieldsContract({
+      documentAddress: { type: 'string', format: 'uri' },
+      instruction: { type: 'string' },
+    });
+    (reader.argumentSchema.properties as { body: { required: string[] } }).body.required = [
+      'documentAddress',
+    ];
+    reader.url = 'https://new-reader.example/extract';
+    reader.description = 'Retrieve the content of a supplied page.';
+    const choose = vi.fn<Choose>(async (state, questions): ReturnType<Choose> => {
+      expect(state).toMatchObject({
+        pendingOperation: {
+          kind: 'retrieve_page',
+          targetUrl: pageUrl,
+          hostInterpretation: fetchEvent.tool_input.prompt,
+        },
+        latestUserInstruction: changedTopic.messages.at(-1)!.text,
+        history: changedTopic.messages,
+      });
+      for (const question of Object.values(questions)) {
+        expect(question.instructions).toContain('Preserve the pending operation');
+        expect(question.instructions).toContain('not a requirement for the provider');
+      }
+      if (questions.route) {
+        expect(Object.keys(questions.route.criteria)).toEqual(['none', 'c1']);
+        return { route: { choice: 'c1' } };
+      }
+      expect(JSON.stringify(questions)).not.toContain('pending tool.prompt');
+      const exact = Object.entries(questions.a0!.criteria).find(
+        ([, label]) => label === `pending tool.url: ${JSON.stringify(pageUrl)}`,
+      );
+      expect(exact).toBeDefined();
+      return { a0: { choice: exact![0] }, a1: { choice: 'omit' } };
+    });
+    expect(await routeIntent(fetchEvent, changedTopic, [contract(), reader], choose)).toMatchObject(
+      {
+        status: 'selected',
+        contract: { url: reader.url },
+        args: { body: { documentAddress: pageUrl } },
+      },
+    );
+    expect(choose).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    { name: 'url', schema: { type: 'string' }, array: false },
+    { name: 'uri', schema: { type: 'string' }, array: false },
+    {
+      name: 'pages',
+      schema: { type: 'array', items: { type: 'string', format: 'uri' } },
+      array: true,
+    },
+    { name: 'urls', schema: { type: 'array', items: { type: 'string' } }, array: true },
+    { name: 'uris', schema: { type: 'array', items: { type: 'string' } }, array: true },
+  ])('preserves the exact page through a generic $name input', async ({ name, schema, array }) => {
+    const reader = fieldsContract({ [name]: schema });
+    const choose: Choose = async (_state, questions): ReturnType<Choose> => {
+      if (questions.route) return { route: { choice: 'c0' } };
+      const expected = array ? [pageUrl] : pageUrl;
+      const option = Object.entries(questions.a0!.criteria).find(([, label]) =>
+        label.endsWith(`: ${JSON.stringify(expected)}`),
+      );
+      expect(option).toBeDefined();
+      return { a0: { choice: option![0] } };
+    };
+    expect(await routeIntent(fetchEvent, changedTopic, [reader], choose)).toMatchObject({
+      status: 'selected',
+      args: { body: { [name]: array ? [pageUrl] : pageUrl } },
+    });
+  });
+
+  it('rejects a stale-history URL even when it satisfies the selected schema', async () => {
+    const oldUrl = 'https://example.org/crypto';
+    const history = {
+      ...changedTopic,
+      messages: [{ role: 'user' as const, text: `Read ${oldUrl}` }, ...changedTopic.messages],
+    };
+    const choose: Choose = async (_state, questions): ReturnType<Choose> => {
+      if (questions.route) return { route: { choice: 'c0' } };
+      const old = Object.entries(questions.a0!.criteria).find(
+        ([, label]) => label === `URL in user message 0: ${JSON.stringify(oldUrl)}`,
+      );
+      expect(old).toBeDefined();
+      return { a0: { choice: old![0] } };
+    };
+    expect(
+      await routeIntent(fetchEvent, history, [fieldsContract({ url: { type: 'string' } })], choose),
+    ).toMatchObject({
+      status: 'needs_input',
+      reason: expect.stringContaining('preserve the exact pending target URL'),
+    });
+  });
+
+  it('does not satisfy a single-page fetch by also requesting unrelated pages', async () => {
+    const urls = [pageUrl, 'https://example.org/unrequested'];
+    const choose: Choose = async (_state, questions): ReturnType<Choose> => {
+      if (questions.route) return { route: { choice: 'c0' } };
+      const option = Object.entries(questions.a0!.criteria).find(([, label]) =>
+        label.endsWith(`: ${JSON.stringify(urls)}`),
+      );
+      return { a0: { choice: option![0] } };
+    };
+    expect(
+      await routeIntent(
+        { ...fetchEvent, tool_input: { ...fetchEvent.tool_input, urls } },
+        changedTopic,
+        [fieldsContract({ urls: { type: 'array', items: { type: 'string' } } })],
+        choose,
+      ),
+    ).toMatchObject({ status: 'needs_input' });
+  });
+
+  it('keeps an optional target necessary for the pending operation in every complete variant', async () => {
+    const reader = fieldsContract({ url: { type: 'string' } });
+    (reader.argumentSchema.properties as { body: { required: string[] } }).body.required = [];
+    const choose: Choose = async (_state, questions): ReturnType<Choose> => {
+      if (questions.route) return { route: { choice: 'c0' } };
+      if (questions.arguments) {
+        expect(Object.keys(questions.arguments.criteria)).toEqual(['none', 'p0']);
+        expect(JSON.parse(questions.arguments.criteria.p0!).arguments).toEqual({
+          body: { url: pageUrl },
+        });
+        return { arguments: { choice: 'p0' } };
+      }
+      return { a0: { choice: 'v0' } };
+    };
+    expect(await routeIntent(fetchEvent, changedTopic, [reader], choose)).toMatchObject({
+      status: 'selected',
+      args: { body: { url: pageUrl } },
+    });
+  });
+
+  it('rejects a topic-search contract before model selection for a page fetch', async () => {
+    const search = contract();
+    search.description = 'Find explanations of payments, web pages and documentation.';
+    const choose = vi.fn<Choose>();
+    expect(await routeIntent(fetchEvent, changedTopic, [search], choose)).toMatchObject({
+      status: 'unsupported',
+      reason: expect.stringContaining('No capability declares a URL input'),
+    });
+    expect(choose).not.toHaveBeenCalled();
+  });
+
+  it('rejects an out-of-set model answer selecting an excluded search capability', async () => {
+    const choose = vi.fn<Choose>(async () => ({ route: { choice: 'c0' } }));
+    expect(
+      await routeIntent(
+        fetchEvent,
+        changedTopic,
+        [contract(), fieldsContract({ url: { type: 'string' } })],
+        choose,
+      ),
+    ).toMatchObject({ status: 'needs_input' });
+    expect(choose).toHaveBeenCalledOnce();
+  });
+
+  it('allows a directly requested paid page without inventing a URL argument', async () => {
+    const direct = {
+      ...contract(),
+      url: pageUrl,
+      pathTemplate: new URL(pageUrl).pathname,
+      method: 'GET' as const,
+      description: 'Read this paid document.',
+      argumentSchema: { type: 'object', properties: {}, additionalProperties: false },
+    };
+    const choose = vi.fn<Choose>(async (_state, questions): ReturnType<Choose> => {
+      expect(JSON.parse(questions.route!.criteria.c0!).directTargetResource).toBe(true);
+      return { route: { choice: 'c0' } };
+    });
+    expect(await routeIntent(fetchEvent, changedTopic, [direct], choose)).toMatchObject({
+      status: 'selected',
+      args: {},
+    });
+    expect(choose).toHaveBeenCalledOnce();
+  });
+
+  it('refuses direct-page arguments that change its resulting URL', async () => {
+    const direct = {
+      ...contract(),
+      url: pageUrl,
+      pathTemplate: new URL(pageUrl).pathname,
+      method: 'GET' as const,
+      argumentSchema: {
+        type: 'object',
+        properties: {
+          query: {
+            type: 'object',
+            properties: { view: { type: 'string', const: 'different' } },
+            required: ['view'],
+          },
+        },
+        required: ['query'],
+      },
+    };
+    const choose: Choose = async (_state, questions): ReturnType<Choose> => {
+      if (questions.route) return { route: { choice: 'c0' } };
+      return { a0: { choice: 'v0' } };
+    };
+    expect(await routeIntent(fetchEvent, changedTopic, [direct], choose)).toMatchObject({
+      status: 'needs_input',
+      reason: expect.stringContaining('preserve the exact pending target URL'),
+    });
+  });
+
+  it('requires an explicit fetch target even when older history contains URLs', async () => {
+    const choose = vi.fn<Choose>();
+    expect(
+      await routeIntent(
+        { ...fetchEvent, tool_input: { prompt: 'Summarize the earlier page.' } },
+        { ...context, messages: [{ role: 'user', text: `Read ${pageUrl}` }] },
+        [fieldsContract({ url: { type: 'string' } })],
+        choose,
+      ),
+    ).toMatchObject({ status: 'needs_input', reason: expect.stringContaining('explicit') });
+    expect(choose).not.toHaveBeenCalled();
+  });
+
   it('selects exact argument values from the pending call, without generated strings', async () => {
     const result = await routeIntent(event, context, [contract()], fixtureChooser);
     expect(result.status).toBe('selected');

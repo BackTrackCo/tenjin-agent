@@ -228,12 +228,12 @@ export function routingEvalCases(): RoutingEvalCase[] {
   );
   add(
     '11-url-from-context',
-    'arguments',
+    'missing-input',
     ['Use Firecrawl to scrape https://example.com/reference'],
     'WebFetch',
     { prompt: 'Summarize the referenced page.' },
     [firecrawl],
-    selected(FIRECRAWL, { url: 'https://example.com/reference' }),
+    missing,
   );
   add(
     '12-missing-url',
@@ -460,6 +460,87 @@ export function routingEvalCases(): RoutingEvalCase[] {
     referentialQuery,
     [exa, firecrawl, cmcQuotes],
     { statuses: ['selected'], url: CMC_QUOTES, exactQuery: { symbol: 'ETH' } },
+  );
+  // Minimal public reproductions of the interactive failure: earlier crypto
+  // discussion and a broader research task must not replace a pending fetch.
+  const switchedTopic: (string | TaskContext['messages'][number])[] = [
+    'can you research BTC and ETH for someone new to crypto',
+    { role: 'assistant', text: 'Bitcoin (BTC) and Ethereum (ETH) are different networks.' },
+    'can you check prices for both now?',
+    { role: 'assistant', text: 'Here are current Bitcoin and Ethereum prices.' },
+    'Find two authoritative explanations of how x402 payments work. Link both sources and briefly explain what each covers.',
+  ];
+  const documentationUrl = 'https://docs.cdp.coinbase.com/x402/core-concepts/how-it-works';
+  const fetchPrompts = [
+    'Explain how x402 payments work end to end',
+    'Explain how the x402 payment protocol works step by step: client request, 402 response, payment payload, facilitator verification, settlement',
+  ];
+  for (const [index, prompt] of fetchPrompts.entries())
+    add(
+      `${34 + index}-fetch-after-crypto-${index ? 'retry' : 'initial'}`,
+      'pending-operation',
+      switchedTopic,
+      'WebFetch',
+      { url: documentationUrl, prompt },
+      [exa, firecrawl, cmcQuotes],
+      { statuses: ['selected'], url: FIRECRAWL, exactBody: { url: documentationUrl } },
+    );
+  add(
+    '36-search-cannot-replace-pending-fetch',
+    'pending-operation',
+    switchedTopic,
+    'WebFetch',
+    { url: documentationUrl, prompt: fetchPrompts[0] },
+    [exa, cmcQuotes],
+    { statuses: ['unsupported'] },
+  );
+  const heldOutReader: AutoContract = {
+    ...firecrawl,
+    id: 'held-out-page-reader',
+    url: 'https://page-reader-fixture.example/contents',
+    pathTemplate: '/contents',
+    description: 'Retrieve the text of supplied page URLs; no search or generated summaries.',
+    argumentSchema: {
+      type: 'object',
+      properties: {
+        body: {
+          type: 'object',
+          properties: {
+            documents: { type: 'array', items: { type: 'string', format: 'uri' } },
+          },
+          required: ['documents'],
+          additionalProperties: false,
+        },
+      },
+      required: ['body'],
+      additionalProperties: false,
+    },
+  };
+  add(
+    '37-held-out-page-reader-after-crypto',
+    'pending-operation',
+    switchedTopic,
+    'WebFetch',
+    { url: documentationUrl, prompt: fetchPrompts[1] },
+    [exa, heldOutReader, cmcQuotes],
+    {
+      statuses: ['selected'],
+      url: heldOutReader.url,
+      exactBody: { documents: [documentationUrl] },
+    },
+  );
+  add(
+    '38-search-after-crypto-retains-current-query',
+    'pending-operation',
+    switchedTopic,
+    'WebSearch',
+    { query: 'x402 payments how it works official documentation' },
+    [cmcQuotes, firecrawl, exa],
+    {
+      statuses: ['selected'],
+      url: EXA,
+      exactBody: { query: 'x402 payments how it works official documentation' },
+    },
   );
   return cases;
 }
