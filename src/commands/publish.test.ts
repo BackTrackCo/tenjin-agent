@@ -1810,14 +1810,15 @@ describe('runPublish — a search the store could not close reports closed:false
 });
 
 /**
- * TEAM MODE. `baseUrl` is the team's own deployment and `shelfBypassSecret` is
- * set. Exactly ONE gate changes: the scan's WARN tier is skipped APART FROM
- * `secret-assignment`, because those warnings ask "is this safe to make public"
- * and a team shelf is not public, while that one asks "is this a live
- * credential" and gets the same answer on either shelf. The hard secret block
- * and the consent cascade are the same on both shelves — a team shelf is a
- * hosted database with logs and a shared door key, and `review` means the same
- * thing wherever the write lands.
+ * TEAM MODE, which is now one stored key: a qualified `shelf` in config.json.
+ * There is no second deployment and no door key, so `baseUrl` here is only the
+ * host the stub answers on. Exactly ONE gate changes: the scan's WARN tier is
+ * skipped APART FROM `secret-assignment`, because those warnings ask "is this
+ * safe to make public" and a team shelf is not public, while that one asks "is
+ * this a live credential" and gets the same answer on either shelf. The hard
+ * secret block and the consent cascade are the same on both shelves. A shelf is
+ * a row in a hosted database with logs and a membership list, and `review`
+ * means the same thing wherever the write lands.
  */
 describe('runPublish on a team shelf', () => {
   const TEAM = 'https://team.example';
@@ -1911,8 +1912,8 @@ describe('runPublish on a team shelf', () => {
     await writeShelfConfig();
     // The one warn that survives the team drop. It asks "is this a live
     // credential", not "is this safe to make public", so the block tier's own
-    // argument applies verbatim: a team shelf is a hosted Postgres with logs and
-    // a shared door key, and a leaked key there is leaked. Unlike WARN above,
+    // argument applies verbatim: a team shelf is a hosted Postgres with logs
+    // and a membership list, and a leaked key there is leaked. Unlike WARN above,
     // this body is NOT waved through under `auto`.
     const file = await writeDoc(SECRET_ASSIGN);
     const { fetch, sent } = shelfServer();

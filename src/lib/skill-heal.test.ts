@@ -85,8 +85,9 @@ function heal(io: Io, env: NodeJS.ProcessEnv = {}, dataDir?: string): Promise<He
 
 /**
  * A data dir holding one `config.json`. The heal shapes what it writes by the
- * MACHINE's mode, so a team-mode heal needs both halves of the rule
- * (settings.isTeamModeConfig): a shelf of the team's own and its door key.
+ * MACHINE's mode, and that is now one stored key: a qualified `shelf` means
+ * team mode, null means public. There is no second half to set, and no door key
+ * to set it with.
  */
 async function dataDirWith(config: Record<string, unknown>): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), 'tenjin-heal-data-'));
