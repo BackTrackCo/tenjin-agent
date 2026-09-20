@@ -253,6 +253,18 @@ export interface Deps {
    * answer (00-principles.md, principle 4).
    */
   auth(req: SignableRequest): Promise<SearchAuthResult>;
+  /**
+   * A SIGNED shelf call came back 401, so the credential `auth` handed out was
+   * rejected by the origin it was sent to. Only 401 reaches here: a 403 or a
+   * 404 is a membership answer, and re-signing cannot change either.
+   *
+   * The caller whose credential it is decides what to do. The daemon holds one
+   * delegation for its whole life, so this is where it learns to drop a stale
+   * one; a CLI invocation mints per run and has nothing to drop, which is why
+   * this is optional rather than another thing every caller must implement.
+   * It is a notification, not a retry: the leg has already recorded its row.
+   */
+  authRefused?(): void;
   /** Read per fire: the daemon reloads on a config.json mtime change. */
   config(): KernelConfig;
   clock(): number;

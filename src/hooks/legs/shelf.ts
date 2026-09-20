@@ -80,6 +80,19 @@ function statusOf(seen: Seen | null, signal: AbortSignal): LegStatus {
 }
 
 /**
+ * Was this call turned away on the SIGNATURE, as opposed to on membership?
+ *
+ * 401 alone. `statusOf` folds 401, 403 and 404 into one `refused` row because
+ * the ledger's question is "did the shelf answer", but `deps.authRefused` asks
+ * a narrower one: is the credential itself stale, so that minting a new one
+ * would help. A 403 and a 404 both say the signature was read and the wallet
+ * was not a member, and no fresh delegation changes that.
+ */
+function refusedOnSignature(seen: Seen | null): boolean {
+  return seen !== null && seen.status === 401;
+}
+
+/**
  * The sentence a refused SEARCH call writes to the ledger, or undefined when the
  * status was not a refusal. Only a call that NAMED a shelf can be refused for
  * membership, so the shelf is named in the text: it is the one fact that tells
@@ -280,6 +293,7 @@ export function searchLeg(
             budgetMs,
             signal,
             cfg.shelf,
+            () => deps.authRefused?.(),
             fetchImpl,
           );
         }
@@ -359,6 +373,9 @@ export function keysLeg(cfg: KernelConfig, keys: string[], fetchImpl?: typeof fe
         // to the sentence that names both causes.
         const refused = keysRefusedReason(seen, cfg.shelf, res.ok ? res.json : undefined);
         const reason = refused === undefined ? {} : { authError: refused };
+        // Same delegation, same origin, same staleness: a 401 here says the
+        // credential is spent exactly as it does on `/api/search`.
+        if (refusedOnSignature(seen)) deps.authRefused?.();
         if (!res.ok || res.status !== 200) return failed(['keys'], statusOf(seen, signal), reason);
         const parsed = searchResultSchema.safeParse(res.json);
         if (!parsed.success) return failed(['keys'], statusOf(seen, signal), {});
@@ -379,6 +396,7 @@ async function callShelf(
   budgetMs: number,
   signal: AbortSignal,
   shelf: string,
+  onRefused: () => void,
   fetchImpl?: typeof fetch,
 ): Promise<LegResult[]> {
   let seen: Seen | null = null;
@@ -402,6 +420,11 @@ async function callShelf(
     // was turned away, which is an operator's problem and rides to `fires.error`
     // rather than reading in the ledger as an ordinary empty answer.
     const refused = refusedReason(seen, shelf);
+    // The row is written either way; this only tells the credential's owner
+    // that the one it signed with is stale. It runs before the early return so
+    // a 401 reports on both the failure path and, impossibly but harmlessly,
+    // any future path that reads a 401 body.
+    if (refusedOnSignature(seen)) onRefused();
     if (!res.ok || res.status !== 200) {
       return failed(
         sets,

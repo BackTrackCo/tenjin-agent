@@ -70,6 +70,8 @@ let escaped: string[];
 let realFetch: typeof fetch;
 let config: KernelConfig;
 let auth: SearchAuthResult;
+/** Every `deps.authRefused` the legs raised this case. */
+let refusals: number;
 
 /** What the stub shelf answers, set per case. */
 let respond: (path: string) => { status: number; body: unknown };
@@ -130,6 +132,7 @@ beforeEach(async () => {
   db = openLoopDb(dataDir);
   requests = [];
   escaped = [];
+  refusals = 0;
   auth = { kind: 'signed', headers: { 'Tenjin-Session-Delegation': 'stub' } };
   respond = () => ({ status: 200, body: { shelf: envelope([]), public: null } });
 
@@ -171,6 +174,9 @@ beforeEach(async () => {
     arms: ARMS,
     adapters: ADAPTERS,
     auth: () => Promise.resolve(auth),
+    authRefused: () => {
+      refusals += 1;
+    },
   };
   const startedAt = Date.now();
   hook = createHookServer({
@@ -273,6 +279,48 @@ describe('the prompt arm over the real hook server', () => {
       { shelf: 'team', status: 'ok', outcome: 'hit' },
     ]);
     expect(payload.hookSpecificOutput?.additionalContext).toContain('collation flips');
+  });
+
+  /**
+   * THE 401 HAS TO REACH THE THING THAT HOLDS THE CREDENTIAL. A daemon mints
+   * one delegation and keeps it, and the origin is baked in at mint time, so
+   * after a `baseUrl` change every signed search is answered 401 for the rest
+   * of the process's life unless the refusal travels back. `write-auth.test.ts`
+   * owns what the daemon then DOES; this owns that the leg raises it at all,
+   * which is the half no unit test of either side can see.
+   *
+   * A 401 is not a 403 or a 404. All three read `refused` in the ledger, because
+   * the ledger's question is whether the shelf answered; this one asks whether
+   * the credential is worth re-minting, and only the 401 says yes.
+   */
+  it('a 401 on the signed call raises authRefused and still records the row', async () => {
+    respond = () => ({ status: 401, body: { error: { code: 'session_expired' } } });
+    await post(prompt('why did the collation flip on the image swap'));
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.signed).toBe(true);
+    expect(refusals).toBe(1);
+    const fires = await firesTo(1);
+    // The row is written either way: `authRefused` is a notification, not a
+    // retry, so nothing about this fire's outcome changed.
+    expect(fires[0]).toMatchObject({ arm: 'prompt', reason: 'no-answer' });
+    expect(String(fires[0]?.error)).toContain('answered 401');
+    expect(legRows()).toEqual([
+      { shelf: 'public', status: 'refused', outcome: 'no-answer' },
+      { shelf: 'team', status: 'refused', outcome: 'no-answer' },
+    ]);
+  });
+
+  it('a 404 on the signed call is membership, not a stale credential', async () => {
+    respond = () => ({ status: 404, body: {} });
+    await post(prompt('why did the collation flip on the image swap'));
+
+    expect(requests).toHaveLength(1);
+    // NOT RAISED. Re-minting cannot make this wallet a member, and a daemon
+    // that dropped its delegation here would decrypt the keystore for nothing.
+    expect(refusals).toBe(0);
+    const fires = await firesTo(1);
+    expect(String(fires[0]?.error)).toContain('not-a-member');
   });
 
   it('publicFallback off: one request whose body says so, and one row', async () => {

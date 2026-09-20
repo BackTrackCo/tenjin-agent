@@ -22,6 +22,7 @@ import type { WriteAuth } from '../lib/session-key';
 import { createLocalProvider } from '../lib/wallet/local';
 import { bind, derivePort, IdleTimer, openLog, shutdown, writePid } from './lifecycle';
 import { createHookServer } from './server';
+import { createWriteAuthCache } from './write-auth';
 
 /**
  * Entry for `tenjin-daemon.mjs`. One process per data dir, on loopback, that
@@ -118,30 +119,31 @@ async function main(): Promise<void> {
   // shims racing to spawn could otherwise have the loser unlink the file the
   // winner had just opened. The continuation after `await bind()` runs before
   // any connection callback, so no fire can see `deps.db` unset.
-  // ONE WriteAuth PER DAEMON, built lazily and reused: minting decrypts the
-  // keystore, and the daemon must never prompt. `createLocalProvider` with
-  // `isTTY: false` is the seam `verifyLocalWallet` uses, so the passphrase
+  // ONE WriteAuth PER DAEMON PER ORIGIN, built lazily and reused: minting
+  // decrypts the keystore, and the daemon must never prompt. `createLocalProvider`
+  // with `isTTY: false` is the seam `verifyLocalWallet` uses, so the passphrase
   // comes from `TENJIN_WALLET_PASSPHRASE` or the OS keychain or not at all.
   // A machine that cannot sign gets `unauthenticated` rows and public answers,
   // which is the whole point: a credential problem never withholds one.
-  let writeAuth: WriteAuth | null = null;
-  const mint = async (): Promise<WriteAuth> => {
-    if (writeAuth !== null) return writeAuth;
-    const provider = createLocalProvider({
-      dir: dataDir,
-      env: process.env,
-      passphrase: { isTTY: false },
-    });
-    const signer = await provider.getSigner();
-    writeAuth = resolveWriteAuth({
-      signer,
-      baseUrl: config.baseUrl,
-      dataDir,
-      scope: 'read',
-      env: process.env,
-    });
-    return writeAuth;
-  };
+  //
+  // WHY THE CACHE IS NOT JUST A `let`: the delegation bakes in the origin it
+  // was minted for, so `refreshConfig` swapping `config` underneath it is not
+  // enough. `write-auth.ts` holds the two rules that make one stale, and it is
+  // a module rather than a closure here so they can be tested without booting
+  // a daemon.
+  const writeAuth = createWriteAuthCache({
+    baseUrl: () => config.baseUrl,
+    log,
+    mint: async (baseUrl: string): Promise<WriteAuth> => {
+      const provider = createLocalProvider({
+        dir: dataDir,
+        env: process.env,
+        passphrase: { isTTY: false },
+      });
+      const signer = await provider.getSigner();
+      return resolveWriteAuth({ signer, baseUrl, dataDir, scope: 'read', env: process.env });
+    },
+  });
 
   const deps = {
     config: () => config,
@@ -150,7 +152,8 @@ async function main(): Promise<void> {
     arms: ARMS,
     adapters: ADAPTERS,
     auth: (req: SignableRequest) =>
-      searchHeaders(dataDir, req, { now: clock, env: process.env, mint }),
+      searchHeaders(dataDir, req, { now: clock, env: process.env, mint: writeAuth.get }),
+    authRefused: writeAuth.refused,
   } as Deps;
 
   const startedAt = clock();
