@@ -6,7 +6,7 @@ import {
   type SearchResult,
 } from '../../lib/agent-api';
 import { httpRequest } from '../../lib/http';
-import { trimSlash } from '../../lib/url';
+import { trimSlash, tryOriginOf } from '../../lib/url';
 import type { Answer, KernelConfig, LegResult, LegStatus, Shelf, Leg, Trigger } from '../types';
 
 /**
@@ -293,7 +293,11 @@ export function searchLeg(
             budgetMs,
             signal,
             cfg.shelf,
-            () => deps.authRefused?.(),
+            // THE ORIGIN THIS CALL WENT TO, off the URL just built. The daemon
+            // compares it against the one its delegation was minted for, and a
+            // fire that overlapped a config reload is the case where reading
+            // the live config instead would name the wrong one.
+            () => deps.authRefused?.(tryOriginOf(url)),
             fetchImpl,
           );
         }
@@ -374,8 +378,9 @@ export function keysLeg(cfg: KernelConfig, keys: string[], fetchImpl?: typeof fe
         const refused = keysRefusedReason(seen, cfg.shelf, res.ok ? res.json : undefined);
         const reason = refused === undefined ? {} : { authError: refused };
         // Same delegation, same origin, same staleness: a 401 here says the
-        // credential is spent exactly as it does on `/api/search`.
-        if (refusedOnSignature(seen)) deps.authRefused?.();
+        // credential is spent exactly as it does on `/api/search`, and it
+        // carries the origin it was sent to for the same reason.
+        if (refusedOnSignature(seen)) deps.authRefused?.(tryOriginOf(url));
         if (!res.ok || res.status !== 200) return failed(['keys'], statusOf(seen, signal), reason);
         const parsed = searchResultSchema.safeParse(res.json);
         if (!parsed.success) return failed(['keys'], statusOf(seen, signal), {});

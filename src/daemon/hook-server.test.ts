@@ -70,8 +70,8 @@ let escaped: string[];
 let realFetch: typeof fetch;
 let config: KernelConfig;
 let auth: SearchAuthResult;
-/** Every `deps.authRefused` the legs raised this case. */
-let refusals: number;
+/** The ORIGIN of every `deps.authRefused` the legs raised this case. */
+let refusals: Array<string | null>;
 
 /** What the stub shelf answers, set per case. */
 let respond: (path: string) => { status: number; body: unknown };
@@ -132,7 +132,7 @@ beforeEach(async () => {
   db = openLoopDb(dataDir);
   requests = [];
   escaped = [];
-  refusals = 0;
+  refusals = [];
   auth = { kind: 'signed', headers: { 'Tenjin-Session-Delegation': 'stub' } };
   respond = () => ({ status: 200, body: { shelf: envelope([]), public: null } });
 
@@ -174,8 +174,8 @@ beforeEach(async () => {
     arms: ARMS,
     adapters: ADAPTERS,
     auth: () => Promise.resolve(auth),
-    authRefused: () => {
-      refusals += 1;
+    authRefused: (origin) => {
+      refusals.push(origin);
     },
   };
   const startedAt = Date.now();
@@ -299,7 +299,9 @@ describe('the prompt arm over the real hook server', () => {
 
     expect(requests).toHaveLength(1);
     expect(requests[0]?.signed).toBe(true);
-    expect(refusals).toBe(1);
+    // The origin the call WENT to, not one read back from config: the daemon
+    // compares it against the origin its delegation was minted for.
+    expect(refusals).toEqual([base]);
     const fires = await firesTo(1);
     // The row is written either way: `authRefused` is a notification, not a
     // retry, so nothing about this fire's outcome changed.
@@ -318,7 +320,7 @@ describe('the prompt arm over the real hook server', () => {
     expect(requests).toHaveLength(1);
     // NOT RAISED. Re-minting cannot make this wallet a member, and a daemon
     // that dropped its delegation here would decrypt the keystore for nothing.
-    expect(refusals).toBe(0);
+    expect(refusals).toEqual([]);
     const fires = await firesTo(1);
     expect(String(fires[0]?.error)).toContain('not-a-member');
   });

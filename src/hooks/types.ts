@@ -263,8 +263,14 @@ export interface Deps {
    * one; a CLI invocation mints per run and has nothing to drop, which is why
    * this is optional rather than another thing every caller must implement.
    * It is a notification, not a retry: the leg has already recorded its row.
+   *
+   * `origin` is the origin the refused request WAS SENT TO, taken from the URL
+   * the leg built rather than read back from config. Hook fires overlap a
+   * config reload, so by the time a 401 lands the configured origin may already
+   * be a different one, holding a credential this refusal says nothing about.
+   * Null only when that URL had no http(s) origin to take.
    */
-  authRefused?(): void;
+  authRefused?(origin: string | null): void;
   /** Read per fire: the daemon reloads on a config.json mtime change. */
   config(): KernelConfig;
   clock(): number;

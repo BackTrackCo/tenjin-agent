@@ -47,6 +47,14 @@ function harness(initial: string) {
 const TEAM = 'https://team.example';
 const NEXT = 'https://shelf.example';
 
+/**
+ * What the LEG passes to `refused`: the origin of the URL the refused request
+ * was sent to. Spelled out rather than reusing the base URL constants, because
+ * the whole point of the argument is that it is not read back from config.
+ */
+const TEAM_ORIGIN = new URL(TEAM).origin;
+const NEXT_ORIGIN = new URL(NEXT).origin;
+
 describe('createWriteAuthCache', () => {
   it('mints once and reuses it while the origin holds', async () => {
     const h = harness(TEAM);
@@ -84,7 +92,7 @@ describe('createWriteAuthCache', () => {
   it('drops on a 401 so the next fire re-mints', async () => {
     const h = harness(TEAM);
     const first = await h.cache.get();
-    h.cache.refused();
+    h.cache.refused(TEAM_ORIGIN);
     const second = await h.cache.get();
     expect(h.minted).toEqual([TEAM, TEAM]);
     expect(second).not.toBe(first);
@@ -93,38 +101,61 @@ describe('createWriteAuthCache', () => {
   it('pays for one re-mint per origin and then believes the 401', async () => {
     const h = harness(TEAM);
     await h.cache.get();
-    h.cache.refused();
+    h.cache.refused(TEAM_ORIGIN);
     await h.cache.get();
     // The re-minted credential is refused too. THIS ONE IS THE SERVER'S ANSWER
     // (not a member, keys off), not a stale credential, so the keystore is not
     // decrypted again on every fire for the rest of the daemon's life.
-    h.cache.refused();
-    h.cache.refused();
+    h.cache.refused(TEAM_ORIGIN);
+    h.cache.refused(TEAM_ORIGIN);
     await h.cache.get();
     await h.cache.get();
     expect(h.minted).toEqual([TEAM, TEAM]);
   });
 
+  it('ignores a 401 from the origin the held delegation was NOT minted for', async () => {
+    const h = harness(TEAM);
+    await h.cache.get();
+    h.setBaseUrl(NEXT);
+    const fresh = await h.cache.get();
+    expect(h.minted).toEqual([TEAM, NEXT]);
+
+    // A HOOK FIRE THAT OVERLAPPED THE RELOAD. Its request went to TEAM before
+    // the swap and answers 401 now, after the fire behind it already minted for
+    // NEXT. Reading the live config here would read NEXT and throw away a
+    // credential that origin has not refused.
+    h.cache.refused(TEAM_ORIGIN);
+    expect(await h.cache.get()).toBe(fresh);
+    expect(h.minted).toEqual([TEAM, NEXT]);
+
+    // AND THE ALLOWANCE IS STILL THERE. The second half of the bug: a refusal
+    // that spent NEXT's one re-mint would leave a genuine 401 from NEXT unable
+    // to drop anything, and every hook search failing until the daemon exited.
+    h.cache.refused(NEXT_ORIGIN);
+    await h.cache.get();
+    expect(h.minted).toEqual([TEAM, NEXT, NEXT]);
+  });
+
   it('allows one more re-mint after the origin changes, because it is a new question', async () => {
     const h = harness(TEAM);
     await h.cache.get();
-    h.cache.refused();
+    h.cache.refused(TEAM_ORIGIN);
     await h.cache.get();
-    h.cache.refused(); // spent for TEAM
+    h.cache.refused(TEAM_ORIGIN); // spent for TEAM
     h.setBaseUrl(NEXT);
     await h.cache.get(); // the origin change alone re-mints
-    h.cache.refused(); // the new origin has its own one allowance
+    h.cache.refused(NEXT_ORIGIN); // the new origin has its own one allowance
     await h.cache.get();
     expect(h.minted).toEqual([TEAM, TEAM, NEXT, NEXT]);
   });
 
   it('drops nothing when it holds nothing', async () => {
     const h = harness(TEAM);
-    h.cache.refused();
+    h.cache.refused(TEAM_ORIGIN);
     await h.cache.get();
     expect(h.minted).toEqual([TEAM]);
     // And a refusal that dropped nothing has not spent the origin's allowance.
-    h.cache.refused();
+    h.cache.refused(TEAM_ORIGIN);
     await h.cache.get();
     expect(h.minted).toEqual([TEAM, TEAM]);
   });

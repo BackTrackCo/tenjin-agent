@@ -31,6 +31,13 @@ import { tryOriginOf } from '../lib/url';
  *     mints, and a second 401 for the same origin is believed. Without that
  *     bound a permanently refused shelf would decrypt the keystore on every
  *     fire, forever, for an answer that never changes.
+ *
+ *     THE REFUSAL CARRIES ITS OWN ORIGIN, because fires overlap a reload. A
+ *     request sent to the old origin can answer 401 after a later fire has
+ *     already minted for the new one, and a `refused` that read the live config
+ *     would drop that fresh credential and spend the NEW origin's one allowance
+ *     on a refusal that said nothing about it. The next genuine 401 would then
+ *     be believed, and hook searches would fail until the daemon restarted.
  */
 export interface WriteAuthCacheDeps {
   /** The live config read, so a reload is visible to the next mint. */
@@ -43,8 +50,12 @@ export interface WriteAuthCacheDeps {
 export interface WriteAuthCache {
   /** The `mint` seam `searchHeaders` takes: the cached delegation, or a new one. */
   get: () => Promise<WriteAuth>;
-  /** `Deps.authRefused`: a signed shelf call answered 401. */
-  refused: () => void;
+  /**
+   * `Deps.authRefused`: a signed shelf call answered 401, carrying the origin
+   * that request was actually SENT to. A refusal from anywhere but the origin
+   * the cached credential was minted for is ignored.
+   */
+  refused: (origin: string | null) => void;
 }
 
 export function createWriteAuthCache(deps: WriteAuthCacheDeps): WriteAuthCache {
@@ -74,12 +85,21 @@ export function createWriteAuthCache(deps: WriteAuthCacheDeps): WriteAuthCache {
       return minted;
     },
 
-    refused(): void {
-      const origin = tryOriginOf(deps.baseUrl());
+    refused(origin: string | null): void {
       // Nothing cached is nothing to drop, and a second 401 for an origin we
       // have already re-minted against is the server's answer, not a stale
       // credential.
       if (auth === null || refusedFor === origin) return;
+      // THE REFUSED REQUEST'S ORIGIN AGAINST THE CREDENTIAL'S, never against
+      // the live config: an in-flight request from before a reload is the one
+      // case where those differ, and believing it would drop a credential the
+      // refusing origin never saw and spend an allowance it never earned.
+      if (origin !== mintedFor) {
+        deps.log(
+          `write auth: ignoring a 401 from ${String(origin)}; the delegation held is for ${String(mintedFor)}`,
+        );
+        return;
+      }
       refusedFor = origin;
       auth = null;
       mintedFor = null;
