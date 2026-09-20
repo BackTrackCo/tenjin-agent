@@ -1,0 +1,280 @@
+{
+  "fetchedAt": "2026-09-20T19:56:23.815Z",
+  "source": "https://api.cdp.coinbase.com/platform/v2/x402/discovery/search",
+  "query": "CoinMarketCap",
+  "resource": {
+    "accepts": [
+      {
+        "amount": "10000000000000000",
+        "asset": "0xcE24439F2D9C6a2289F741120FE202248B666666",
+        "extra": {
+          "assetTransferMethod": "permit2-exact",
+          "name": "United Stables",
+          "signerAddress": "0x34F7a661160780Ce1346e6D7B96D2bE244590899",
+          "spenderAddress": "0x3038f7ac3b4D1a3fe886BdCB5cD01e9f6BDd8633",
+          "version": "1",
+          "x402PaymentConfigId": "69ef242e50455dcce02f3061"
+        },
+        "maxTimeoutSeconds": 30,
+        "network": "eip155:56",
+        "payTo": "0x3C5f3a6cE224BB89D72f5EB4232ecC27F67B3eeA",
+        "scheme": "exact"
+      },
+      {
+        "amount": "10000000000000000",
+        "asset": "0xcE24439F2D9C6a2289F741120FE202248B666666",
+        "extra": {
+          "assetTransferMethod": "eip3009",
+          "name": "United Stables",
+          "signerAddress": "0x34F7a661160780Ce1346e6D7B96D2bE244590899",
+          "version": "1",
+          "x402PaymentConfigId": "69ef242e50455dcce02f2e77"
+        },
+        "maxTimeoutSeconds": 30,
+        "network": "eip155:56",
+        "payTo": "0x3C5f3a6cE224BB89D72f5EB4232ecC27F67B3eeA",
+        "scheme": "exact"
+      },
+      {
+        "amount": "10000",
+        "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "extra": {
+          "assetTransferMethod": "eip3009",
+          "name": "USD Coin",
+          "version": "2",
+          "x402PaymentConfigId": "699dbab79f32ffde650104aa"
+        },
+        "maxTimeoutSeconds": 30,
+        "network": "eip155:8453",
+        "payTo": "0x3C5f3a6cE224BB89D72f5EB4232ecC27F67B3eeA",
+        "scheme": "exact"
+      },
+      {
+        "amount": "10000000000000000",
+        "asset": "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d",
+        "extra": {
+          "assetTransferMethod": "permit2-exact",
+          "name": "USD Coin",
+          "signerAddress": "0x34F7a661160780Ce1346e6D7B96D2bE244590899",
+          "spenderAddress": "0x3038f7ac3b4D1a3fe886BdCB5cD01e9f6BDd8633",
+          "version": "1",
+          "x402PaymentConfigId": "69ef242f50455dcce02f4530"
+        },
+        "maxTimeoutSeconds": 30,
+        "network": "eip155:56",
+        "payTo": "0x3C5f3a6cE224BB89D72f5EB4232ecC27F67B3eeA",
+        "scheme": "exact"
+      },
+      {
+        "amount": "10000000000000000",
+        "asset": "0x8d0D000Ee44948FC98c9B98A4FA4921476f08B0d",
+        "extra": {
+          "assetTransferMethod": "permit2-exact",
+          "name": "World Liberty Financial USD",
+          "signerAddress": "0x34F7a661160780Ce1346e6D7B96D2bE244590899",
+          "spenderAddress": "0x3038f7ac3b4D1a3fe886BdCB5cD01e9f6BDd8633",
+          "version": "1",
+          "x402PaymentConfigId": "6a0c0019f37d0e2f6c9a3610"
+        },
+        "maxTimeoutSeconds": 30,
+        "network": "eip155:56",
+        "payTo": "0x3C5f3a6cE224BB89D72f5EB4232ecC27F67B3eeA",
+        "scheme": "exact"
+      },
+      {
+        "amount": "10000000000000000",
+        "asset": "0x8d0D000Ee44948FC98c9B98A4FA4921476f08B0d",
+        "extra": {
+          "assetTransferMethod": "eip3009",
+          "name": "World Liberty Financial USD",
+          "signerAddress": "0x34F7a661160780Ce1346e6D7B96D2bE244590899",
+          "version": "1",
+          "x402PaymentConfigId": "6a0c0062f37d0e2f6c9a3612"
+        },
+        "maxTimeoutSeconds": 30,
+        "network": "eip155:56",
+        "payTo": "0x3C5f3a6cE224BB89D72f5EB4232ecC27F67B3eeA",
+        "scheme": "exact"
+      },
+      {
+        "amount": "10000000000000000",
+        "asset": "0x55d398326f99059fF775485246999027B3197955",
+        "extra": {
+          "assetTransferMethod": "permit2-exact",
+          "name": "Tether USD",
+          "signerAddress": "0x34F7a661160780Ce1346e6D7B96D2bE244590899",
+          "spenderAddress": "0x3038f7ac3b4D1a3fe886BdCB5cD01e9f6BDd8633",
+          "version": "1",
+          "x402PaymentConfigId": "69ef242f50455dcce02f3c2f"
+        },
+        "maxTimeoutSeconds": 30,
+        "network": "eip155:56",
+        "payTo": "0x3C5f3a6cE224BB89D72f5EB4232ecC27F67B3eeA",
+        "scheme": "exact"
+      }
+    ],
+    "bundleSlugs": ["crypto-market-research"],
+    "curated": true,
+    "description": "Get the latest market quotes for one or more cryptocurrencies.",
+    "extensions": {
+      "bazaar": {
+        "info": {
+          "input": {
+            "discoverable": true,
+            "method": "GET",
+            "queryParams": {
+              "convert": "USD",
+              "id": "1,1027"
+            },
+            "type": "http"
+          },
+          "output": {
+            "example": {
+              "data": {
+                "1": {
+                  "circulating_supply": 19830000,
+                  "cmc_rank": 1,
+                  "date_added": "2010-07-13T00:00:00.000Z",
+                  "id": 1,
+                  "is_active": 1,
+                  "last_updated": "2026-02-26T10:20:00.000Z",
+                  "max_supply": 21000000,
+                  "name": "Bitcoin",
+                  "quote": {
+                    "USD": {
+                      "fully_diluted_market_cap": "1437993600000",
+                      "last_updated": "2026-02-26T10:20:00.000Z",
+                      "market_cap": "1357800000000",
+                      "market_cap_dominance": 61.5,
+                      "percent_change_1h": 0.12,
+                      "percent_change_24h": 2.45,
+                      "percent_change_30d": 5.6,
+                      "percent_change_7d": -1.8,
+                      "price": 68475.88,
+                      "volume_24h": "28500000000",
+                      "volume_change_24h": -3.25
+                    }
+                  },
+                  "slug": "bitcoin",
+                  "symbol": "BTC",
+                  "total_supply": 19830000
+                },
+                "1027": {
+                  "circulating_supply": 120500000,
+                  "cmc_rank": 2,
+                  "date_added": "2015-08-07T00:00:00.000Z",
+                  "id": 1027,
+                  "is_active": 1,
+                  "last_updated": "2026-02-26T10:20:00.000Z",
+                  "name": "Ethereum",
+                  "quote": {
+                    "USD": {
+                      "fully_diluted_market_cap": "249709000000",
+                      "last_updated": "2026-02-26T10:20:00.000Z",
+                      "market_cap": "249709000000",
+                      "market_cap_dominance": 11.3,
+                      "percent_change_1h": 0.08,
+                      "percent_change_24h": 1.9,
+                      "percent_change_30d": -8.5,
+                      "percent_change_7d": -3.2,
+                      "price": 2072.28,
+                      "volume_24h": "12000000000",
+                      "volume_change_24h": -1.15
+                    }
+                  },
+                  "slug": "ethereum",
+                  "symbol": "ETH",
+                  "total_supply": 120500000
+                }
+              },
+              "status": {
+                "credit_count": 1,
+                "elapsed": 12,
+                "error_code": 0,
+                "error_message": "",
+                "timestamp": "2026-02-26T10:20:05.000Z"
+              }
+            },
+            "type": "json"
+          }
+        },
+        "schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "input": {
+              "additionalProperties": false,
+              "properties": {
+                "method": {
+                  "enum": ["GET"],
+                  "type": "string"
+                },
+                "queryParams": {
+                  "properties": {
+                    "aux": {
+                      "description": "Comma-separated list of supplemental data fields: num_market_pairs, cmc_rank, date_added, tags, platform, max_supply, circulating_supply, total_supply, is_active, is_fiat.",
+                      "type": "string"
+                    },
+                    "convert": {
+                      "description": "Optionally calculate market quotes in up to 120 currencies by passing a comma-separated list. Default: \"USD\".",
+                      "type": "string"
+                    },
+                    "convert_id": {
+                      "description": "Optionally calculate market quotes by CoinMarketCap ID instead of symbol.",
+                      "type": "string"
+                    },
+                    "id": {
+                      "description": "One or more comma-separated CoinMarketCap cryptocurrency IDs. Example: \"1,1027\".",
+                      "type": "string"
+                    },
+                    "skip_invalid": {
+                      "description": "Pass true to relax request validation and skip any invalid IDs/symbols.",
+                      "type": "boolean"
+                    },
+                    "slug": {
+                      "description": "One or more comma-separated cryptocurrency slugs. Example: \"bitcoin,ethereum\".",
+                      "type": "string"
+                    },
+                    "symbol": {
+                      "description": "One or more comma-separated cryptocurrency symbols. Example: \"BTC,ETH\".",
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                },
+                "type": {
+                  "const": "http",
+                  "type": "string"
+                }
+              },
+              "required": ["type", "method", "queryParams"],
+              "type": "object"
+            },
+            "output": {
+              "properties": {
+                "example": {
+                  "type": "object"
+                },
+                "type": {
+                  "const": "json",
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            }
+          },
+          "required": ["input"],
+          "type": "object"
+        }
+      }
+    },
+    "lastUpdated": "2026-07-21T14:34:20.044Z",
+    "quality": {
+      "l30DaysTotalCalls": 101,
+      "l30DaysUniquePayers": 29,
+      "lastCalledAt": "2026-09-19T18:21:29.41Z"
+    },
+    "resource": "https://pro-api.coinmarketcap.com/x402/v3/cryptocurrency/quotes/latest",
+    "type": "http",
+    "x402Version": 2
+  }
+}

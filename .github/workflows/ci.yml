@@ -39,6 +39,8 @@ jobs:
       # the committed fixture) run here; the LIVE walk lives in contract-drift.yml
       # (scheduled + dispatch) so a server blip can never red an unrelated PR.
       - run: pnpm run check
+      # Pure assertions only: never starts Claude, contacts providers, or pays.
+      - run: pnpm test:auto-mode-harness
       # Supply-chain advisory scan, WARN-ONLY: advisories publish against a
       # frozen lockfile, so a blocking gate reds every open PR for drift
       # unrelated to its diff. A hit annotates the run; clearing it is a

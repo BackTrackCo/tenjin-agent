@@ -55,6 +55,8 @@ export default defineConfig([
     entry: {
       'tenjin-daemon': 'src/daemon/main.ts',
       'tenjin-shim': 'src/hooks/shim-main.ts',
+      'tenjin-auto-mode': 'src/experimental/auto-mode/main.ts',
+      'tenjin-auto-mode-eval': 'src/experimental/auto-mode/routing-eval.ts',
     },
     format: ['esm'],
     target: 'node22',

@@ -1,0 +1,132 @@
+{
+  "fetchedAt": "2026-09-20T19:49:27.133Z",
+  "source": "https://api.cdp.coinbase.com/platform/v2/x402/discovery/search",
+  "query": "web search Use WebSearch to get CoinGecko’s current top cryptocurrencies by market capitalization. Report the leading two with USD prices and cite the data source.",
+  "resource": {
+    "accepts": [
+      {
+        "amount": "10000",
+        "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "description": "SYNTHORA top-crypto: Top N cryptocurrencies by market cap (default 10, max 50): rank, price, 24h change, volume and market cap in USD. Source: CoinGecko free API, keyless, timestamped.",
+        "extra": {
+          "name": "USD Coin",
+          "version": "2"
+        },
+        "maxAmountRequired": "10000",
+        "maxTimeoutSeconds": 300,
+        "mimeType": "application/json",
+        "network": "eip155:8453",
+        "payTo": "0xEf879BFD6C4AccB8F795136de90246e1EC245e06",
+        "resource": "https://api.hergertsynthora.com/v1/top-crypto",
+        "scheme": "exact"
+      }
+    ],
+    "description": "SYNTHORA top-crypto: Top N cryptocurrencies by market cap (default 10, max 50): rank, price, 24h change, volume and market cap in USD. Source: CoinGecko free API, keyless, timestamped.",
+    "extensions": {
+      "bazaar": {
+        "info": {
+          "input": {
+            "body": {
+              "limit": 10
+            },
+            "bodyType": "json",
+            "method": "POST",
+            "type": "http"
+          },
+          "output": {
+            "example": {
+              "niche": "top_crypto",
+              "ok": true,
+              "receipt": {
+                "alg": "ed25519"
+              },
+              "result": {}
+            },
+            "type": "json"
+          }
+        },
+        "schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "input": {
+              "additionalProperties": false,
+              "properties": {
+                "body": {
+                  "properties": {
+                    "limit": {
+                      "description": "top N, default 10, max 50",
+                      "type": "integer"
+                    }
+                  },
+                  "type": "object"
+                },
+                "bodyType": {
+                  "enum": ["json", "form-data", "text"],
+                  "type": "string"
+                },
+                "method": {
+                  "enum": ["POST", "PUT", "PATCH"],
+                  "type": "string"
+                },
+                "type": {
+                  "const": "http",
+                  "type": "string"
+                }
+              },
+              "required": ["type", "method", "bodyType", "body"],
+              "type": "object"
+            },
+            "output": {
+              "properties": {
+                "example": {
+                  "niche": {
+                    "type": "string"
+                  },
+                  "ok": {
+                    "type": "boolean"
+                  },
+                  "type": "object"
+                },
+                "type": {
+                  "type": "string"
+                }
+              },
+              "required": ["type"],
+              "type": "object"
+            }
+          },
+          "required": ["input"],
+          "type": "object"
+        }
+      },
+      "delivery": {
+        "behaviour": "if the service FAILS (invalid input, timeout, stale cache, withdrawn product, malformed output) you receive 402 and are NOT charged",
+        "note": "unlike the signature -- which you verify BEFORE paying -- this one is checked afterwards, on-chain, from your own wallet",
+        "order": "compute -> failure gate -> verify -> settle -> deliver",
+        "policy": "no-charge-on-service-failure",
+        "scope": "this covers service FAILURE, not verdict quality",
+        "verify": "after a request of yours FAILS, check your own wallet on Base: no USDC settlement to our payTo will exist for it. If we had charged you, the transfer would be public and permanent"
+      },
+      "signature": {
+        "alg": "ed25519",
+        "canon": "json:sort_keys+separators(,:)+ensure_ascii+utf8",
+        "envelope": "{result, attestation:{alg,pubkey,sig,canon}}",
+        "jwksUrl": "https://api.hergertsynthora.com/.well-known/jwks.json",
+        "publicKeyUrl": "https://api.hergertsynthora.com/pubkey",
+        "sigEncoding": "hex(64B raw)",
+        "verify": "recompute canon from envelope.result, then VerifyKey(bytes.fromhex(pubkey)).verify(canon, bytes.fromhex(sig)) -- no name to trust, verify the signature yourself"
+      }
+    },
+    "lastUpdated": "2026-09-08T10:11:07.207Z",
+    "quality": {
+      "l30DaysTotalCalls": 4,
+      "l30DaysUniquePayers": 3,
+      "lastCalledAt": "2026-09-08T10:11:06.726Z"
+    },
+    "resource": "https://api.hergertsynthora.com/v1/top-crypto",
+    "serviceName": "SYNTHORA",
+    "tags": ["crypto", "market-cap", "coingecko", "realtime"],
+    "type": "http",
+    "x402Version": 2
+  }
+}

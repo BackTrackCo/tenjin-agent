@@ -355,6 +355,8 @@ never authentication, and it decides no entitlement, payment, or spend.
 
 ## Developing
 
+The [local Jev → x402 experiment](./docs/auto-mode.md) routes Claude search/fetch calls through Bazaar-discovered capabilities with explicit local spending limits. It runs from a branch checkout without a backend or global hook installation.
+
 ```bash
 pnpm install
 pnpm run build

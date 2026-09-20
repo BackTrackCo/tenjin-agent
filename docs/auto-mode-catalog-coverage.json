@@ -1,0 +1,846 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-09-20T19:18:22.772Z",
+  "scope": "Mechanical input-contract compilation, not endpoint execution or universal compatibility",
+  "source": {
+    "url": "https://api.cdp.coinbase.com/platform/v2/x402",
+    "fetchedAt": "2026-09-20T19:05:47.325Z",
+    "pages": 150,
+    "reportedEndpointRecords": 14986,
+    "readEndpointRecords": 14986,
+    "paginationExhausted": true,
+    "paginationReasons": [],
+    "transactionalSnapshot": false,
+    "snapshotSha256": "eaf4bbd6c7a4d457784bcee4c836759ab2f6752a9a7861e71de08b4d0a39c4ca",
+    "snapshotBytes": 48228981
+  },
+  "denominators": {
+    "endpointRecords": 14986,
+    "distinctMethodUrlPairs": 14983,
+    "distinctEndpointOrigins": 1996,
+    "serviceCount": null,
+    "serviceCountNote": "Bazaar has no uniform service identifier; endpoint origins are reported separately and are not claimed to be services."
+  },
+  "catalog": {
+    "endpointRecords": 14986,
+    "contractValidated": 8050,
+    "unsupported": 6936,
+    "reasons": [
+      {
+        "reason": "Missing or unconstrained queryParams schema; examples are insufficient",
+        "count": 2661
+      },
+      {
+        "reason": "Missing or unconstrained body schema; examples are insufficient",
+        "count": 1816
+      },
+      {
+        "reason": "Regular-expression schema constraints require a bounded regexp primitive",
+        "count": 1092
+      },
+      {
+        "reason": "No parameter contract or explicit no-arguments declaration",
+        "count": 232
+      },
+      {
+        "reason": "Missing machine-readable input schema; documentation translation is required",
+        "count": 192
+      },
+      {
+        "reason": "Input envelope requires an undeclared property",
+        "count": 101
+      },
+      {
+        "reason": "strict mode: unknown keyword: \"example\"",
+        "count": 79
+      },
+      {
+        "reason": "URL contains unbound path parameters",
+        "count": 79
+      },
+      {
+        "reason": "Bazaar envelope constraint requires translation: category",
+        "count": 75
+      },
+      {
+        "reason": "Unsupported request binding: query",
+        "count": 47
+      },
+      {
+        "reason": "Bazaar envelope constraint requires translation: output",
+        "count": 46
+      },
+      {
+        "reason": "Fixed request bodyType contradicts input schema",
+        "count": 43
+      },
+      {
+        "reason": "strict mode: unknown keyword: \"ticker\"",
+        "count": 40
+      },
+      {
+        "reason": "Path template must bind every declared path parameter exactly",
+        "count": 34
+      },
+      {
+        "reason": "Missing or unconstrained headers schema; examples are insufficient",
+        "count": 34
+      },
+      {
+        "reason": "strict mode: unknown keyword: \"x-accepted-values\"",
+        "count": 34
+      },
+      {
+        "reason": "strict mode: unknown keyword: \"body\"",
+        "count": 20
+      },
+      {
+        "reason": "schema is invalid: data/properties/body/properties/polygon/items/items must be object,boolean",
+        "count": 18
+      },
+      {
+        "reason": "Unsupported request binding: schema",
+        "count": 12
+      },
+      {
+        "reason": "GET requests cannot carry a body",
+        "count": 12
+      },
+      {
+        "reason": "strict mode: unknown keyword: \"cnpj\"",
+        "count": 11
+      },
+      {
+        "reason": "Unsupported request binding: city",
+        "count": 11
+      },
+      {
+        "reason": "Unsupported request binding: bodyFields",
+        "count": 10
+      },
+      {
+        "reason": "queryParams.include needs an explicit scalar serialization; arrays and objects are unsupported",
+        "count": 10
+      },
+      {
+        "reason": "Unsupported or missing body encoding: form-data",
+        "count": 9
+      },
+      {
+        "reason": "Unsupported request binding: inputSchema",
+        "count": 8
+      },
+      {
+        "reason": "Unsupported response kind: http",
+        "count": 8
+      },
+      {
+        "reason": "Unsupported request binding: limit",
+        "count": 8
+      },
+      {
+        "reason": "queryParams.exclude needs an explicit scalar serialization; arrays and objects are unsupported",
+        "count": 6
+      },
+      {
+        "reason": "Unsupported request binding: cursor",
+        "count": 6
+      },
+      {
+        "reason": "strict mode: unknown keyword: \"coin\"",
+        "count": 5
+      },
+      {
+        "reason": "Unsupported request binding: agency",
+        "count": 5
+      },
+      {
+        "reason": "Path template does not reproduce the listed endpoint from published examples",
+        "count": 4
+      },
+      {
+        "reason": "strict mode: unknown keyword: \"application\"",
+        "count": 4
+      },
+      {
+        "reason": "strict mode: unknown keyword: \"pair\"",
+        "count": 4
+      },
+      {
+        "reason": "Unsupported request binding: ccn",
+        "count": 4
+      },
+      {
+        "reason": "Unsupported request binding: active",
+        "count": 4
+      },
+      {
+        "reason": "schema is invalid: data/properties/queryParams/properties/perPage/exclusiveMinimum must be number",
+        "count": 3
+      },
+      {
+        "reason": "queryParams.body needs an explicit scalar serialization; arrays and objects are unsupported",
+        "count": 3
+      },
+      {
+        "reason": "strict mode: unknown keyword: \"contentType\"",
+        "count": 3
+      },
+      {
+        "reason": "Unsupported request binding: description",
+        "count": 3
+      },
+      {
+        "reason": "strict mode: unknown keyword: \"token\"",
+        "count": 3
+      },
+      {
+        "reason": "strict mode: unknown keyword: \"address\"",
+        "count": 3
+      },
+      {
+        "reason": "Unsupported request binding: direction",
+        "count": 3
+      },
+      {
+        "reason": "queryParams.from needs an explicit scalar serialization; arrays and objects are unsupported",
+        "count": 2
+      },
+      {
+        "reason": "Unsupported request binding: discoverable",
+        "count": 2
+      },
+      {
+        "reason": "Unsupported response kind: binary",
+        "count": 2
+      },
+      {
+        "reason": "strict mode: unknown keyword: \"host\"",
+        "count": 2
+      },
+      {
+        "reason": "queryParams.format_signal needs an explicit scalar serialization; arrays and objects are unsupported",
+        "count": 2
+      },
+      {
+        "reason": "strict mode: unknown keyword: \"in\"",
+        "count": 2
+      },
+      {
+        "reason": "schema is invalid: data/properties/body/properties/height/exclusiveMinimum must be number",
+        "count": 2
+      },
+      {
+        "reason": "schema is invalid: data/properties/body/properties/limit/exclusiveMinimum must be number",
+        "count": 2
+      },
+      {
+        "reason": "queryParams.identifier needs an explicit scalar serialization; arrays and objects are unsupported",
+        "count": 2
+      },
+      {
+        "reason": "strict mode: unknown keyword: \"mint\"",
+        "count": 2
+      },
+      {
+        "reason": "strict mode: unknown keyword: \"feed\"",
+        "count": 2
+      },
+      {
+        "reason": "strict mode: unknown keyword: \"contactId\"",
+        "count": 2
+      },
+      {
+        "reason": "strict mode: unknown keyword: \"dex\"",
+        "count": 2
+      },
+      {
+        "reason": "Unsupported request binding: assignee",
+        "count": 2
+      },
+      {
+        "reason": "Unsupported request binding: added_since",
+        "count": 2
+      },
+      {
+        "reason": "Unsupported request binding: name",
+        "count": 2
+      },
+      {
+        "reason": "Unsupported request binding: certification",
+        "count": 2
+      },
+      {
+        "reason": "Unsupported request binding: closed",
+        "count": 2
+      },
+      {
+        "reason": "Unsupported request binding: county",
+        "count": 2
+      },
+      {
+        "reason": "queryParams.data needs an explicit scalar serialization; arrays and objects are unsupported",
+        "count": 2
+      },
+      {
+        "reason": "strict mode: unknown keyword: \"aliases\"",
+        "count": 1
+      },
+      {
+        "reason": "queryParams.category needs an explicit scalar serialization; arrays and objects are unsupported",
+        "count": 1
+      },
+      {
+        "reason": "Bazaar envelope constraint requires translation: name",
+        "count": 1
+      },
+      {
+        "reason": "queryParams.ticker needs an explicit scalar serialization; arrays and objects are unsupported",
+        "count": 1
+      },
+      {
+        "reason": "strict mode: unknown keyword: \"ibge\"",
+        "count": 1
+      },
+      {
+        "reason": "strict mode: unknown keyword: \"codigo\"",
+        "count": 1
+      },
+      {
+        "reason": "Unsupported request binding: current",
+        "count": 1
+      },
+      {
+        "reason": "queryParams.discovery_urls needs an explicit scalar serialization; arrays and objects are unsupported",
+        "count": 1
+      },
+      {
+        "reason": "queryParams.sources needs an explicit scalar serialization; arrays and objects are unsupported",
+        "count": 1
+      },
+      {
+        "reason": "strict mode: unknown keyword: \"keywords\"",
+        "count": 1
+      },
+      {
+        "reason": "queryParams.url needs an explicit scalar serialization; arrays and objects are unsupported",
+        "count": 1
+      },
+      {
+        "reason": "Bazaar envelope constraint requires translation: $defs",
+        "count": 1
+      },
+      {
+        "reason": "queryParams.typed_data needs an explicit scalar serialization; arrays and objects are unsupported",
+        "count": 1
+      },
+      {
+        "reason": "strict mode: unknown keyword: \"e.g. dark.\"",
+        "count": 1
+      },
+      {
+        "reason": "unknown format \"evm-address\" ignored in schema at path \"#/properties/queryParams/properties/address\"",
+        "count": 1
+      },
+      {
+        "reason": "queryParams.slots needs an explicit scalar serialization; arrays and objects are unsupported",
+        "count": 1
+      },
+      {
+        "reason": "can't resolve reference #/properties/input/properties/body/$defs/predicate from id #",
+        "count": 1
+      },
+      {
+        "reason": "queryParams.cursor needs an explicit scalar serialization; arrays and objects are unsupported",
+        "count": 1
+      },
+      {
+        "reason": "can't resolve reference #/properties/input/properties/body/$defs/sizeAxis from id #",
+        "count": 1
+      },
+      {
+        "reason": "queryParams.tickers needs an explicit scalar serialization; arrays and objects are unsupported",
+        "count": 1
+      },
+      {
+        "reason": "strict mode: unknown keyword: \"slug\"",
+        "count": 1
+      },
+      {
+        "reason": "queryParams.tokens needs an explicit scalar serialization; arrays and objects are unsupported",
+        "count": 1
+      },
+      {
+        "reason": "queryParams.urls needs an explicit scalar serialization; arrays and objects are unsupported",
+        "count": 1
+      },
+      {
+        "reason": "queryParams.reference needs an explicit scalar serialization; arrays and objects are unsupported",
+        "count": 1
+      },
+      {
+        "reason": "queryParams.include_domains needs an explicit scalar serialization; arrays and objects are unsupported",
+        "count": 1
+      },
+      {
+        "reason": "queryParams.agencies needs an explicit scalar serialization; arrays and objects are unsupported",
+        "count": 1
+      },
+      {
+        "reason": "queryParams.statements needs an explicit scalar serialization; arrays and objects are unsupported",
+        "count": 1
+      },
+      {
+        "reason": "strict mode: unknown keyword: \"x-maxUtf8Bytes\"",
+        "count": 1
+      },
+      {
+        "reason": "queryParams.constraints needs an explicit scalar serialization; arrays and objects are unsupported",
+        "count": 1
+      },
+      {
+        "reason": "schema is invalid: data/properties/body/properties/max_tokens/exclusiveMinimum must be number",
+        "count": 1
+      },
+      {
+        "reason": "schema is invalid: data/properties/body/properties/max_words/exclusiveMinimum must be number",
+        "count": 1
+      },
+      {
+        "reason": "schema is invalid: data/properties/body/properties/max_chars/exclusiveMinimum must be number",
+        "count": 1
+      },
+      {
+        "reason": "schema is invalid: data/properties/body/properties/size/exclusiveMinimum must be number",
+        "count": 1
+      },
+      {
+        "reason": "strict mode: unknown keyword: \"name\"",
+        "count": 1
+      },
+      {
+        "reason": "strict mode: unknown keyword: \"fund\"",
+        "count": 1
+      },
+      {
+        "reason": "strict mode: unknown keyword: \"series\"",
+        "count": 1
+      },
+      {
+        "reason": "strict mode: unknown keyword: \"cik\"",
+        "count": 1
+      },
+      {
+        "reason": "strict mode: unknown keyword: \"market\"",
+        "count": 1
+      },
+      {
+        "reason": "queryParams.role needs an explicit scalar serialization; arrays and objects are unsupported",
+        "count": 1
+      },
+      {
+        "reason": "strict mode: unknown keyword: \"symbol\"",
+        "count": 1
+      },
+      {
+        "reason": "strict mode: unknown keyword: \"contract\"",
+        "count": 1
+      },
+      {
+        "reason": "strict mode: unknown keyword: \"product\"",
+        "count": 1
+      },
+      {
+        "reason": "queryParams.ids needs an explicit scalar serialization; arrays and objects are unsupported",
+        "count": 1
+      },
+      {
+        "reason": "queryParams.cik needs an explicit scalar serialization; arrays and objects are unsupported",
+        "count": 1
+      },
+      {
+        "reason": "queryParams.status needs an explicit scalar serialization; arrays and objects are unsupported",
+        "count": 1
+      },
+      {
+        "reason": "queryParams.tier needs an explicit scalar serialization; arrays and objects are unsupported",
+        "count": 1
+      },
+      {
+        "reason": "queryParams.bias needs an explicit scalar serialization; arrays and objects are unsupported",
+        "count": 1
+      },
+      {
+        "reason": "strict mode: unknown keyword: \"iso\"",
+        "count": 1
+      },
+      {
+        "reason": "Unsupported request binding: designated_since",
+        "count": 1
+      },
+      {
+        "reason": "Unsupported request binding: business_name_search",
+        "count": 1
+      },
+      {
+        "reason": "Unsupported request binding: area_code",
+        "count": 1
+      },
+      {
+        "reason": "Unsupported request binding: billing_code",
+        "count": 1
+      },
+      {
+        "reason": "Unsupported request binding: ein",
+        "count": 1
+      },
+      {
+        "reason": "Unsupported response kind: object",
+        "count": 1
+      },
+      {
+        "reason": "Unsupported request binding: drug_category",
+        "count": 1
+      },
+      {
+        "reason": "Unsupported request binding: brand_name",
+        "count": 1
+      },
+      {
+        "reason": "Unsupported request binding: entity_type",
+        "count": 1
+      },
+      {
+        "reason": "Unsupported request binding: first_seen_year_max",
+        "count": 1
+      },
+      {
+        "reason": "Unsupported response kind: [object Object]",
+        "count": 1
+      },
+      {
+        "reason": "queryParams.expand needs an explicit scalar serialization; arrays and objects are unsupported",
+        "count": 1
+      },
+      {
+        "reason": "Unsupported request binding: group_id",
+        "count": 1
+      },
+      {
+        "reason": "Unsupported request binding: individuals_only",
+        "count": 1
+      },
+      {
+        "reason": "Unsupported request binding: enrollment_id",
+        "count": 1
+      },
+      {
+        "reason": "Unsupported request binding: category",
+        "count": 1
+      },
+      {
+        "reason": "Unsupported request binding: condition",
+        "count": 1
+      },
+      {
+        "reason": "Unsupported request binding: applicant",
+        "count": 1
+      },
+      {
+        "reason": "Unsupported request binding: cpc",
+        "count": 1
+      },
+      {
+        "reason": "Unsupported request binding: cit_ord",
+        "count": 1
+      },
+      {
+        "reason": "Unsupported request binding: amount_max",
+        "count": 1
+      },
+      {
+        "reason": "Unsupported request binding: cause",
+        "count": 1
+      },
+      {
+        "reason": "Unsupported request binding: commodity",
+        "count": 1
+      },
+      {
+        "reason": "Unsupported request binding: activity",
+        "count": 1
+      },
+      {
+        "reason": "Unsupported request binding: advisory_committee",
+        "count": 1
+      },
+      {
+        "reason": "Unsupported request binding: application_type",
+        "count": 1
+      },
+      {
+        "reason": "Unsupported request binding: case_status",
+        "count": 1
+      },
+      {
+        "reason": "Unsupported request binding: completed_after",
+        "count": 1
+      },
+      {
+        "reason": "Unsupported request binding: case_category",
+        "count": 1
+      },
+      {
+        "reason": "Unsupported request binding: carcinogen",
+        "count": 1
+      },
+      {
+        "reason": "Unsupported request binding: before",
+        "count": 1
+      },
+      {
+        "reason": "Unsupported request binding: applicant_type",
+        "count": 1
+      },
+      {
+        "reason": "Unsupported request binding: classification",
+        "count": 1
+      },
+      {
+        "reason": "Unsupported request binding: authority_status",
+        "count": 1
+      },
+      {
+        "reason": "Unsupported request binding: cik",
+        "count": 1
+      },
+      {
+        "reason": "queryParams.documents needs an explicit scalar serialization; arrays and objects are unsupported",
+        "count": 1
+      },
+      {
+        "reason": "queryParams.fields needs an explicit scalar serialization; arrays and objects are unsupported",
+        "count": 1
+      },
+      {
+        "reason": "queryParams.keywords needs an explicit scalar serialization; arrays and objects are unsupported",
+        "count": 1
+      },
+      {
+        "reason": "queryParams.response_schema needs an explicit scalar serialization; arrays and objects are unsupported",
+        "count": 1
+      },
+      {
+        "reason": "queryParams.commits needs an explicit scalar serialization; arrays and objects are unsupported",
+        "count": 1
+      },
+      {
+        "reason": "queryParams.categories needs an explicit scalar serialization; arrays and objects are unsupported",
+        "count": 1
+      },
+      {
+        "reason": "queryParams.after needs an explicit scalar serialization; arrays and objects are unsupported",
+        "count": 1
+      },
+      {
+        "reason": "Only HTTPS URLs without credentials or fragments are supported",
+        "count": 1
+      }
+    ],
+    "examples": [
+      {
+        "url": "https://api.onesource.io/api/chain/erc20-balance",
+        "reason": "Regular-expression schema constraints require a bounded regexp primitive"
+      },
+      {
+        "url": "https://stableenrich.dev/api/fullenrich/people-search",
+        "reason": "Missing or unconstrained body schema; examples are insufficient"
+      },
+      {
+        "url": "https://x402.ottoai.services/crypto-news",
+        "reason": "Missing or unconstrained queryParams schema; examples are insufficient"
+      },
+      {
+        "url": "https://rubric-protocol.com/v1/x402/hedera-facts/exchange-rate",
+        "reason": "Path template must bind every declared path parameter exactly"
+      },
+      {
+        "url": "https://tick.hugen.tokyo/tick/latest",
+        "reason": "Input envelope requires an undeclared property"
+      },
+      {
+        "url": "https://x402.aispace.bot/api/v1/image/generate",
+        "reason": "strict mode: unknown keyword: \"example\""
+      },
+      {
+        "url": "https://blockrun.ai/api/v1/exa/search",
+        "reason": "Fixed request bodyType contradicts input schema"
+      },
+      {
+        "url": "https://svm402.com/price/:address",
+        "reason": "Missing or unconstrained headers schema; examples are insufficient"
+      },
+      {
+        "url": "https://options.lonestaroracle.xyz/flow",
+        "reason": "Bazaar envelope constraint requires translation: category"
+      },
+      {
+        "url": "https://pro-api.coingecko.com/api/v3/x402/onchain/simple/networks/base/token_price/:address",
+        "reason": "URL contains unbound path parameters"
+      },
+      {
+        "url": "https://blockrun.ai/api/v1/pm/polymarket/markets",
+        "reason": "Unsupported request binding: query"
+      },
+      {
+        "url": "https://api.vaults.fyi/v2/vaults",
+        "reason": "schema is invalid: data/properties/queryParams/properties/perPage/exclusiveMinimum must be number"
+      }
+    ]
+  },
+  "curated": {
+    "definition": "CDP resource.curated === true in the same snapshot; not asserted to be agentic.market curated membership",
+    "endpointRecords": 86,
+    "contractValidated": 58,
+    "unsupported": 28,
+    "reasons": [
+      {
+        "reason": "Fixed request bodyType contradicts input schema",
+        "count": 10
+      },
+      {
+        "reason": "Missing machine-readable input schema; documentation translation is required",
+        "count": 7
+      },
+      {
+        "reason": "Unsupported request binding: query",
+        "count": 5
+      },
+      {
+        "reason": "Regular-expression schema constraints require a bounded regexp primitive",
+        "count": 4
+      },
+      {
+        "reason": "Missing or unconstrained body schema; examples are insufficient",
+        "count": 2
+      }
+    ],
+    "examples": [
+      {
+        "url": "https://stableenrich.dev/api/exa/search",
+        "reason": "Missing or unconstrained body schema; examples are insufficient"
+      },
+      {
+        "url": "https://stabletravel.dev/api/seats-aero/search",
+        "reason": "Regular-expression schema constraints require a bounded regexp primitive"
+      },
+      {
+        "url": "https://blockrun.ai/api/v1/exa/search",
+        "reason": "Fixed request bodyType contradicts input schema"
+      },
+      {
+        "url": "https://blockrun.ai/api/v1/pm/polymarket/markets",
+        "reason": "Unsupported request binding: query"
+      },
+      {
+        "url": "https://api.messari.io/metrics/v2/assets/roi",
+        "reason": "Missing machine-readable input schema; documentation translation is required"
+      }
+    ]
+  },
+  "capabilityInventory": {
+    "httpMethods": {
+      "GET": 8053,
+      "POST": 6929,
+      "DELETE": 2,
+      "HEAD": 1,
+      "unknown": 1
+    },
+    "x402Versions": {
+      "1": 210,
+      "2": 14776
+    },
+    "advertisedSchemeOptions": {
+      "exact": 32325,
+      "upto": 744,
+      "exact_cosmos_authz": 57,
+      "batch-settlement": 48,
+      "onchain": 12,
+      "aggr_deferred": 4,
+      "agent-pay": 1,
+      "4mica-credit": 1
+    },
+    "advertisedNetworkOptions": {
+      "eip155:8453": 15748,
+      "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp": 4654,
+      "eip155:137": 2282,
+      "eip155:42161": 2060,
+      "eip155:84532": 1002,
+      "eip155:143": 877,
+      "xrpl:0": 736,
+      "eip155:4663": 680,
+      "algorand:wGHE2Pwdvd7S12BL5FaOP20EGYesN73ktiC1qzkkit8=": 662,
+      "eip155:10": 613,
+      "eip155:43114": 610,
+      "eip155:1329": 607,
+      "stellar:pubnet": 602,
+      "eip155:42220": 600,
+      "base": 342,
+      "eip155:56": 238,
+      "eip155:480": 193,
+      "eip155:196": 187,
+      "algorand:wGHE2Pwdvd7S12BL5FaOP20EGYesN73k": 96,
+      "eip155:999": 80,
+      "nano:mainnet": 57,
+      "cosmos:noble-1": 57,
+      "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1": 38,
+      "animica:1": 34,
+      "eip155:4326": 24,
+      "eip155:1": 17,
+      "solana": 16,
+      "eip155:5042": 9,
+      "zeroclick:card": 9,
+      "eip155:42793": 8,
+      "eip155:130": 8,
+      "eip155:146": 8,
+      "eip155:1187947933": 7,
+      "eip155:1440000": 6,
+      "hyperliquid:mainnet": 5,
+      "hedera:testnet": 4,
+      "base-sepolia": 4,
+      "eip155:50": 3,
+      "cosmos:gonka-mainnet": 2,
+      "aws:base": 1,
+      "eip155:80002": 1,
+      "eip155:5042002": 1,
+      "polygon": 1,
+      "arbitrum": 1,
+      "lightning:mainnet": 1,
+      "xrpl:mainnet": 1
+    }
+  },
+  "evidence": {
+    "fixtureExecutedProviderContracts": 2,
+    "fixtureSources": ["https://api.exa.ai/search", "https://vaaya.ai/api/run/firecrawl/scrape"],
+    "fixtureSourceFile": "src/experimental/auto-mode/fixtures/cdp-demo-resources.json",
+    "quoteCheckedByThisAudit": 0,
+    "livePaidVerifiedByThisAudit": 0,
+    "signaturesByThisAudit": 0,
+    "paymentSupportInferredFromSchemas": false
+  },
+  "limitations": [
+    "Every observed record was attempted; a contract_validated result means that its declared input shape compiled, not that a seller is honest, available, permitted by policy, or semantically correct.",
+    "Missing or empty schemas, unsupported request encodings, cross-binding constraints and regexp constraints remain explicit unsupported records. No provider-specific hand editing was used.",
+    "This is a non-transactional paginated read of a changing marketplace. Stable totals and exhausted pages do not establish a permanent universal coverage claim.",
+    "agentic.market is a distinct registry; its curated membership definition was not established, and it was not substituted for CDP curated=true.",
+    "Only two fixture provider contracts have independent request expectations; the remaining catalog has not been fixture-executed or purchased.",
+    "HTTP JSON/text and explicit scalar query/path/header/form primitives do not imply support for arbitrary multipart, binary, SSE, authentication, asynchronous jobs, variable-cost schemes, or all payment networks.",
+    "The recorded snapshot allowed 200 seconds for discovery. The CLI default time cap may stop earlier; always inspect complete and reasons.",
+    "Original request metadata and envelope constraints are validated; contradictory methods/encodings and omitted parent constraints are rejected before registration."
+  ],
+  "reproduce": [
+    "pnpm run build",
+    "node dist/tenjin-auto-mode.mjs audit --pages 200 --output catalog-audit.json",
+    "node dist/tenjin-auto-mode.mjs audit --snapshot saved-cdp-snapshot.json --output catalog-audit.json"
+  ]
+}

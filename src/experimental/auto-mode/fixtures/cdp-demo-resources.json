@@ -1,0 +1,480 @@
+{
+  "fetchedAt": "2026-09-20T18:56:43.066Z",
+  "source": "https://api.cdp.coinbase.com/platform/v2/x402/discovery/search",
+  "resources": [
+    {
+      "accepts": [
+        {
+          "amount": "7000",
+          "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+          "extra": {
+            "acceptId": "legacy",
+            "breakdown": {
+              "search": 0.006999999999999999
+            },
+            "name": "USD Coin",
+            "totalUsd": 0.006999999999999999,
+            "version": "2"
+          },
+          "maxTimeoutSeconds": 60,
+          "network": "eip155:8453",
+          "payTo": "0x6d6E695b09861467c7d462f5AAF31cF3540B9192",
+          "scheme": "exact"
+        },
+        {
+          "amount": "7000",
+          "asset": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+          "extra": {
+            "acceptId": "solana-usdc-mainnet",
+            "breakdown": {
+              "search": 0.006999999999999999
+            },
+            "feePayer": "BENrLoUbndxoNMUS5JXApGMtNykLjFXXixMtpDwDR9SP",
+            "name": "USD Coin",
+            "totalUsd": 0.006999999999999999,
+            "version": "2"
+          },
+          "maxTimeoutSeconds": 60,
+          "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+          "payTo": "12Ec2cJmfR1C9uwejzxcuMhUgEC7wDrLgm1wBvvR5w9E",
+          "scheme": "exact"
+        },
+        {
+          "amount": "7000",
+          "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+          "extra": {
+            "acceptId": "base-usdc-gateway",
+            "assets": [
+              {
+                "address": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                "decimals": 6,
+                "symbol": "USDC"
+              }
+            ],
+            "breakdown": {
+              "search": 0.006999999999999999
+            },
+            "minValiditySeconds": 604800,
+            "name": "GatewayWalletBatched",
+            "totalUsd": 0.006999999999999999,
+            "verifyingContract": "0x77777777dcc4d5a8b6e418fd04d8997ef11000ee",
+            "version": "1"
+          },
+          "maxTimeoutSeconds": 604900,
+          "network": "eip155:8453",
+          "payTo": "0xB98eF29eb2be19Ae646A8FC0248255B90A332dbC",
+          "scheme": "exact"
+        },
+        {
+          "amount": "7000",
+          "asset": "0x79A02482A880bCE3F13e09Da970dC34db4CD24d1",
+          "extra": {
+            "acceptId": "worldchain-usdc-gateway",
+            "assets": [
+              {
+                "address": "0x79a02482a880bce3f13e09da970dc34db4cd24d1",
+                "decimals": 6,
+                "symbol": "USDC"
+              }
+            ],
+            "breakdown": {
+              "search": 0.006999999999999999
+            },
+            "minValiditySeconds": 604800,
+            "name": "GatewayWalletBatched",
+            "totalUsd": 0.006999999999999999,
+            "verifyingContract": "0x77777777dcc4d5a8b6e418fd04d8997ef11000ee",
+            "version": "1"
+          },
+          "maxTimeoutSeconds": 604900,
+          "network": "eip155:480",
+          "payTo": "0xB98eF29eb2be19Ae646A8FC0248255B90A332dbC",
+          "scheme": "exact"
+        },
+        {
+          "amount": "7000",
+          "asset": "0x3600000000000000000000000000000000000000",
+          "extra": {
+            "acceptId": "arc-usdc-gateway",
+            "assets": [
+              {
+                "address": "0x3600000000000000000000000000000000000000",
+                "decimals": 6,
+                "symbol": "USDC"
+              }
+            ],
+            "breakdown": {
+              "search": 0.006999999999999999
+            },
+            "minValiditySeconds": 604800,
+            "name": "GatewayWalletBatched",
+            "totalUsd": 0.006999999999999999,
+            "verifyingContract": "0x77777777dcc4d5a8b6e418fd04d8997ef11000ee",
+            "version": "1"
+          },
+          "maxTimeoutSeconds": 604900,
+          "network": "eip155:5042",
+          "payTo": "0xB98eF29eb2be19Ae646A8FC0248255B90A332dbC",
+          "scheme": "exact"
+        },
+        {
+          "amount": "7000",
+          "asset": "0x3600000000000000000000000000000000000000",
+          "extra": {
+            "acceptId": "arc-usdc-circle",
+            "assetTransferMethod": "eip3009",
+            "breakdown": {
+              "search": 0.006999999999999999
+            },
+            "name": "USDC",
+            "totalUsd": 0.006999999999999999,
+            "version": "2"
+          },
+          "maxTimeoutSeconds": 3600,
+          "network": "eip155:5042",
+          "payTo": "0xB98eF29eb2be19Ae646A8FC0248255B90A332dbC",
+          "scheme": "exact"
+        },
+        {
+          "amount": "7000",
+          "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+          "extra": {
+            "acceptId": "base-usdc-circle",
+            "assetTransferMethod": "eip3009",
+            "breakdown": {
+              "search": 0.006999999999999999
+            },
+            "name": "USD Coin",
+            "totalUsd": 0.006999999999999999,
+            "version": "2"
+          },
+          "maxTimeoutSeconds": 3600,
+          "network": "eip155:8453",
+          "payTo": "0xB98eF29eb2be19Ae646A8FC0248255B90A332dbC",
+          "scheme": "exact"
+        }
+      ],
+      "bundleSlugs": ["daily-news-search", "news-audio-briefing", "people-sourcing-enrichment"],
+      "curated": true,
+      "description": "Exa /search endpoint",
+      "extensions": {
+        "agentkit": {
+          "_options": {
+            "mode": {
+              "type": "free-trial",
+              "uses": 100
+            },
+            "network": "eip155:480",
+            "statement": "Verify your agent is backed by a real human to access Exa"
+          },
+          "info": {
+            "domain": "api.exa.ai",
+            "issuedAt": "2026-09-20T16:59:23.826Z",
+            "nonce": "dfb0882d7a958c8de07d7f777584fae8",
+            "resources": ["https://api.exa.ai/search"],
+            "statement": "Verify your agent is backed by a real human to access Exa",
+            "uri": "https://api.exa.ai/search",
+            "version": "1"
+          },
+          "schema": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "properties": {
+              "address": {
+                "type": "string"
+              },
+              "chainId": {
+                "type": "string"
+              },
+              "domain": {
+                "type": "string"
+              },
+              "expirationTime": {
+                "format": "date-time",
+                "type": "string"
+              },
+              "issuedAt": {
+                "format": "date-time",
+                "type": "string"
+              },
+              "nonce": {
+                "type": "string"
+              },
+              "notBefore": {
+                "format": "date-time",
+                "type": "string"
+              },
+              "requestId": {
+                "type": "string"
+              },
+              "resources": {
+                "items": {
+                  "format": "uri",
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "signature": {
+                "type": "string"
+              },
+              "statement": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string"
+              },
+              "uri": {
+                "format": "uri",
+                "type": "string"
+              },
+              "version": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "domain",
+              "address",
+              "uri",
+              "version",
+              "chainId",
+              "type",
+              "nonce",
+              "issuedAt",
+              "signature"
+            ],
+            "type": "object"
+          },
+          "supportedChains": [
+            {
+              "chainId": "eip155:480",
+              "type": "eip191"
+            },
+            {
+              "chainId": "eip155:480",
+              "type": "eip1271"
+            }
+          ]
+        },
+        "bazaar": {
+          "info": {
+            "input": {
+              "body": {
+                "numResults": 10,
+                "query": "example search query",
+                "type": "auto"
+              },
+              "bodyType": "json",
+              "method": "POST",
+              "type": "http"
+            },
+            "output": {
+              "example": {
+                "results": [
+                  {
+                    "score": 0.99,
+                    "title": "Example",
+                    "url": "https://example.com"
+                  }
+                ]
+              },
+              "type": "json"
+            }
+          },
+          "schema": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "properties": {
+              "input": {
+                "additionalProperties": false,
+                "properties": {
+                  "body": {
+                    "properties": {
+                      "contents": {
+                        "description": "Content fields to include: text, highlights, summary",
+                        "type": "object"
+                      },
+                      "numResults": {
+                        "description": "Number of results to return (max 10 for x402)",
+                        "type": "number"
+                      },
+                      "query": {
+                        "description": "Search query",
+                        "type": "string"
+                      },
+                      "type": {
+                        "description": "Search type: auto, keyword, neural, deep-lite, deep, deep-reasoning",
+                        "type": "string"
+                      }
+                    },
+                    "required": ["query"],
+                    "type": "object"
+                  },
+                  "bodyType": {
+                    "enum": ["json", "form-data", "text"],
+                    "type": "string"
+                  },
+                  "method": {
+                    "enum": ["POST"],
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "http",
+                    "type": "string"
+                  }
+                },
+                "required": ["type", "bodyType", "body", "method"],
+                "type": "object"
+              },
+              "output": {
+                "properties": {
+                  "example": {
+                    "type": "object"
+                  },
+                  "type": {
+                    "type": "string"
+                  }
+                },
+                "required": ["type"],
+                "type": "object"
+              }
+            },
+            "required": ["input"],
+            "type": "object"
+          }
+        }
+      },
+      "iconUrl": "https://res.cloudinary.com/bdb-prod/image/upload/c_fill,ar_1:1,w_256,h_256,f_auto,q_auto/v1780076809/bazaar-icons/41b0408e3ae73b69.png",
+      "lastUpdated": "2026-09-20T16:59:23.875Z",
+      "quality": {
+        "l30DaysTotalCalls": 5817,
+        "l30DaysUniquePayers": 79,
+        "lastCalledAt": "2026-09-20T16:59:23.661Z"
+      },
+      "resource": "https://api.exa.ai/search",
+      "serviceName": "Exa",
+      "tags": ["search", "ai", "web", "research"],
+      "type": "http",
+      "x402Version": 2
+    },
+    {
+      "accepts": [
+        {
+          "amount": "10000",
+          "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+          "extra": {
+            "name": "USD Coin",
+            "version": "2"
+          },
+          "maxTimeoutSeconds": 360,
+          "network": "eip155:8453",
+          "payTo": "0x7c655d3d3944Bd27994dD81A036C3aFB19806C40",
+          "scheme": "exact"
+        }
+      ],
+      "description": "Firecrawl — Scrape a single URL and return clean markdown/HTML.",
+      "extensions": {
+        "bazaar": {
+          "info": {
+            "input": {
+              "body": {
+                "formats": ["example"],
+                "onlyMainContent": false,
+                "url": "https://example.com",
+                "waitFor": 1
+              },
+              "bodyType": "json",
+              "method": "POST",
+              "pathParams": {},
+              "type": "http"
+            },
+            "output": {
+              "example": {
+                "charged_cents": 1,
+                "data": {},
+                "ok": true
+              },
+              "type": "json"
+            }
+          },
+          "routeTemplate": ":var1",
+          "schema": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "properties": {
+              "input": {
+                "additionalProperties": false,
+                "properties": {
+                  "body": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": true,
+                    "properties": {
+                      "formats": {
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
+                      "onlyMainContent": {
+                        "type": "boolean"
+                      },
+                      "url": {
+                        "format": "uri",
+                        "type": "string"
+                      },
+                      "waitFor": {
+                        "exclusiveMinimum": 0,
+                        "type": "integer"
+                      }
+                    },
+                    "required": ["url"],
+                    "type": "object"
+                  },
+                  "bodyType": {
+                    "enum": ["json", "form-data", "text"],
+                    "type": "string"
+                  },
+                  "method": {
+                    "enum": ["POST"],
+                    "type": "string"
+                  },
+                  "pathParams": {
+                    "type": "object"
+                  },
+                  "type": {
+                    "const": "http",
+                    "type": "string"
+                  }
+                },
+                "required": ["type", "method", "bodyType", "body"],
+                "type": "object"
+              },
+              "output": {
+                "properties": {
+                  "example": {
+                    "type": "object"
+                  },
+                  "type": {
+                    "type": "string"
+                  }
+                },
+                "required": ["type"],
+                "type": "object"
+              }
+            },
+            "required": ["input"],
+            "type": "object"
+          }
+        }
+      },
+      "iconUrl": "https://res.cloudinary.com/bdb-prod/image/upload/c_fill,ar_1:1,w_256,h_256,f_auto,q_auto/v1783358761/bazaar-icons/161e7ee036681539.png",
+      "lastUpdated": "2026-09-20T09:46:22.319Z",
+      "quality": {
+        "l30DaysTotalCalls": 71,
+        "l30DaysUniquePayers": 10,
+        "lastCalledAt": "2026-09-20T09:46:22.134Z"
+      },
+      "resource": "https://vaaya.ai/api/run/firecrawl/scrape",
+      "serviceName": "Vaaya",
+      "tags": ["firecrawl", "ai-agents", "pay-per-call"],
+      "type": "http",
+      "x402Version": 2
+    }
+  ]
+}
