@@ -4,58 +4,72 @@ import { resolve, dirname, join } from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { runClaude } from './auto-mode-headless-probe.mjs';
 import { checkDemo } from './auto-mode-demo-checks.mjs';
+import { checkBridgeDemo } from './auto-mode-bridge-checks.mjs';
 
 const { values } = parseArgs({
   options: {
     config: { type: 'string' },
-    model: { type: 'string', default: 'haiku' },
+    model: { type: 'string' },
+    transport: { type: 'string', default: 'native' },
+    'session-id': { type: 'string' },
+    resume: { type: 'string' },
     prompt: {
       type: 'string',
       default:
-        'Use WebSearch to find official x402 protocol documentation. Give two source links with a one-sentence description of each.',
+        'Find two authoritative explanations of how x402 payments work. Link both sources and briefly explain what each covers.',
     },
-    tool: { type: 'string', default: 'WebSearch' },
+    tool: { type: 'string', default: 'auto' },
   },
 });
 if (!values.config) throw new Error('--config is required');
-if (!['haiku', 'sonnet'].includes(values.model))
-  throw new Error('Demo model must be haiku or sonnet.');
+const bridge = values.transport === 'bridge';
+if (!['native', 'bridge'].includes(values.transport))
+  throw new Error('Transport must be native or bridge.');
+const model = values.model ?? (bridge ? 'sonnet' : 'haiku');
+if (!['haiku', 'sonnet'].includes(model)) throw new Error('Demo model must be haiku or sonnet.');
 if (!['WebSearch', 'WebFetch', 'auto'].includes(values.tool))
   throw new Error('Demo tool must be WebSearch, WebFetch, or auto.');
+if (bridge && model !== 'sonnet')
+  throw new Error('Native auto permission mode requires Sonnet; Haiku is unsupported.');
+if (values['session-id'] && values.resume)
+  throw new Error('Choose a new --session-id or --resume, not both.');
 const configPath = resolve(values.config);
 const directory = dirname(configPath);
 const config = JSON.parse(await readFile(configPath, 'utf8'));
-const sessionId = randomUUID();
-const artifacts = join(directory, 'runs', sessionId);
+const sessionId = values.resume ?? values['session-id'] ?? randomUUID();
+if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sessionId))
+  throw new Error('Session ID must be a UUID.');
+const artifacts = join(directory, 'runs', sessionId, ...(values.resume ? [randomUUID()] : []));
 await mkdir(artifacts, { recursive: true, mode: 0o700 });
 const args = [
   '-p',
   values.prompt,
   '--model',
-  values.model,
-  '--session-id',
+  model,
+  values.resume ? '--resume' : '--session-id',
   sessionId,
   '--tools',
-  values.tool === 'auto' ? 'WebSearch,WebFetch' : values.tool,
+  bridge ? '' : values.tool === 'auto' ? 'WebSearch,WebFetch' : values.tool,
   '--permission-mode',
-  'dontAsk',
+  bridge ? 'auto' : 'dontAsk',
+  ...(bridge ? ['--mcp-config', join(directory, 'mcp.json')] : []),
   '--strict-mcp-config',
   '--setting-sources',
   '',
   '--settings',
-  join(directory, 'settings.json'),
+  join(directory, bridge ? 'bridge-settings.json' : 'settings.json'),
   '--disable-slash-commands',
   '--no-chrome',
   '--max-budget-usd',
   '0.50',
   '--max-turns',
-  '4',
+  bridge ? '8' : '4',
   '--output-format',
   'stream-json',
   '--verbose',
   '--include-hook-events',
 ];
-const execution = await runClaude(args, directory, 120000);
+const execution = await runClaude(args, directory, bridge ? 180000 : 120000);
 await writeFile(join(artifacts, 'stream.jsonl'), execution.stdout, { mode: 0o600 });
 await writeFile(join(artifacts, 'stderr.txt'), execution.stderr, { mode: 0o600 });
 const events = execution.stdout
@@ -95,18 +109,24 @@ const {
   observedTools,
   perCallOutcomes,
   totalAmountAtomic,
-} = checkDemo({
-  events,
-  outcomesByToolUseId,
-  execution,
-  model: values.model,
-  tool: values.tool,
-  sessionId,
-});
+} = bridge
+  ? checkBridgeDemo({
+      events,
+      outcomes: Object.entries(outcomesByToolUseId).map(([id, outcome]) => ({
+        event: { tool_use_id: id, session_id: sessionId },
+        outcome,
+      })),
+      execution,
+      model,
+      sessionId,
+    })
+  : checkDemo({ events, outcomesByToolUseId, execution, model, tool: values.tool, sessionId });
 const report = {
   passed: Object.values(checks).every(Boolean),
   mode: config.mode,
-  requestedModel: values.model,
+  requestedModel: model,
+  transport: values.transport,
+  observedPermissionMode: init?.permissionMode,
   observedModel: init?.model,
   requestedTool: values.tool,
   observedTool,

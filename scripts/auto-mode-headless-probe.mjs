@@ -62,6 +62,8 @@ export async function runClaude(args, cwd, timeoutMs) {
     let stdout = '';
     let stderr = '';
     let timedOut = false;
+    let interrupted;
+    let stopping = false;
     let killTimer;
     const killGroup = (signal) => {
       try {
@@ -71,11 +73,36 @@ export async function runClaude(args, cwd, timeoutMs) {
         /* The process may already have exited. */
       }
     };
+    const stop = (signal) => {
+      if (stopping) {
+        killGroup('SIGKILL');
+        return;
+      }
+      stopping = true;
+      killGroup(signal);
+      killTimer = setTimeout(() => killGroup('SIGKILL'), 1500);
+    };
+    const interrupt = (signal) => {
+      interrupted ??= signal;
+      // Do not exit immediately: wait for child cleanup and let the caller save
+      // its report. A child that handles the signal and exits 0 is still cancelled.
+      process.exitCode = interrupted === 'SIGINT' ? 130 : 143;
+      stop(signal);
+    };
+    const onInterrupt = () => interrupt('SIGINT');
+    const onTerminate = () => interrupt('SIGTERM');
+    process.on('SIGINT', onInterrupt);
+    process.on('SIGTERM', onTerminate);
     const timer = setTimeout(() => {
       timedOut = true;
-      killGroup('SIGTERM');
-      killTimer = setTimeout(() => killGroup('SIGKILL'), 1500);
+      stop('SIGTERM');
     }, timeoutMs);
+    const cleanup = () => {
+      clearTimeout(timer);
+      clearTimeout(killTimer);
+      process.removeListener('SIGINT', onInterrupt);
+      process.removeListener('SIGTERM', onTerminate);
+    };
     child.stdout.on('data', (chunk) => {
       stdout += chunk;
     });
@@ -83,13 +110,23 @@ export async function runClaude(args, cwd, timeoutMs) {
       stderr += chunk;
     });
     child.on('error', (error) => {
-      clearTimeout(timer);
+      killGroup('SIGKILL');
+      cleanup();
       reject(error);
     });
     child.on('close', (code, signal) => {
-      clearTimeout(timer);
-      clearTimeout(killTimer);
-      accept({ code, signal, timedOut, stdout, stderr });
+      // The CLI can exit before a hook or MCP child which ignored the signal.
+      // Do not cancel the final group cleanup merely because its leader closed.
+      if (stopping) killGroup('SIGKILL');
+      cleanup();
+      accept({
+        code: interrupted ? (interrupted === 'SIGINT' ? 130 : 143) : code,
+        signal,
+        ...(interrupted ? { interrupted } : {}),
+        timedOut,
+        stdout,
+        stderr,
+      });
     });
   });
 }

@@ -39,7 +39,7 @@
   "scripts": {
     "build": "rm -rf dist && tsup",
     "test": "vitest run",
-    "test:auto-mode-harness": "node --test scripts/auto-mode-headless-probe.test.mjs scripts/auto-mode-demo-checks.test.mjs",
+    "test:auto-mode-harness": "node --test scripts/auto-mode-headless-probe.test.mjs scripts/auto-mode-demo-checks.test.mjs scripts/auto-mode-bridge-checks.test.mjs",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "format": "prettier --write .",

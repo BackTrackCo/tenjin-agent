@@ -12,6 +12,8 @@ import { writeFileAtomic } from '../../lib/atomic-json';
 import { auditResources, snapshotCatalog, discoverCandidates } from './catalog';
 import { ConfigSchema, hookOutput, runEvent, recordOutcome } from './runtime';
 import type { AutoConfig, Outcome } from './runtime';
+import { createBridgeHookOutput, normalizeBridgeEvent, serveBridge } from './bridge';
+import { writeBridgeSetup } from './setup';
 
 const program = new Command('tenjin-auto-mode').description(
   'Experimental local Jev → x402 runner. No backend; no global hook installation.',
@@ -153,7 +155,28 @@ program
     });
   });
 
-for (const command of ['hook', 'run']) {
+program
+  .command('bridge-setup')
+  .description(
+    'Write isolated bridge settings beside an existing config; preserve its policy and ledger.',
+  )
+  .requiredOption('--config <path>')
+  .action(async (options) => {
+    const configPath = resolve(options.config as string);
+    ConfigSchema.parse(JSON.parse(await readFile(configPath, 'utf8')));
+    json(await writeBridgeSetup(configPath, process.execPath, fileURLToPath(import.meta.url)));
+  });
+
+program
+  .command('bridge')
+  .description('Local stdio result carrier; never routes, signs, or requests provider data.')
+  .requiredOption('--config <path>')
+  .action(async (options) => {
+    const config = ConfigSchema.parse(JSON.parse(await readFile(options.config as string, 'utf8')));
+    await serveBridge(config);
+  });
+
+for (const command of ['hook', 'run', 'bridge-hook']) {
   program
     .command(command)
     .requiredOption('--config <path>')
@@ -162,25 +185,28 @@ for (const command of ['hook', 'run']) {
       let outcome: Outcome;
       // Finish with a denial before Claude's command-hook timeout can discard
       // our output. Durable execution state prevents re-signing on restart.
-      const watchdog =
-        command === 'hook'
-          ? setTimeout(() => {
-              json(
-                hookOutput({
-                  status: 'pending',
-                  reason:
-                    'Local execution deadline reached. Reconcile the saved attempt before retrying.',
-                }),
-              );
-              releaseOwnedLocks();
-              process.exit(0);
-            }, 70_000)
-          : undefined;
+      const watchdog = command.endsWith('hook')
+        ? setTimeout(() => {
+            json(
+              hookOutput({
+                status: 'pending',
+                reason:
+                  'Local execution deadline reached. Reconcile the saved attempt before retrying.',
+              }),
+            );
+            releaseOwnedLocks();
+            process.exit(0);
+          }, 70_000)
+        : undefined;
+      let bridgeOutput: Awaited<ReturnType<typeof createBridgeHookOutput>> | undefined;
       try {
         const { config, env } = await loadConfig(options.config as string);
-        const event = await input(options.event as string | undefined);
+        const raw = await input(options.event as string | undefined);
+        const event = command === 'bridge-hook' ? normalizeBridgeEvent(raw) : raw;
         outcome = await runEvent(event, config, { env });
         await recordOutcome(config, event, outcome);
+        if (command === 'bridge-hook')
+          bridgeOutput = await createBridgeHookOutput(config, raw, outcome);
       } catch (error) {
         outcome = {
           status: 'failed',
@@ -188,7 +214,7 @@ for (const command of ['hook', 'run']) {
         };
       }
       clearTimeout(watchdog);
-      json(command === 'hook' ? hookOutput(outcome) : outcome);
+      json(bridgeOutput ?? (command.endsWith('hook') ? hookOutput(outcome) : outcome));
     });
 }
 
