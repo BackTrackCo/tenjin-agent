@@ -1,4 +1,4 @@
-import { appendFile, readFile } from 'node:fs/promises';
+import { appendFile, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { mask } from '../../lib/redact';
@@ -7,7 +7,7 @@ import { buildExactPayment } from '../../lib/x402-pay';
 import { createLocalProvider } from '../../lib/wallet/local';
 import { buildRequest, compileResource, contractHash } from './contracts';
 import type { AutoContract } from './contracts';
-import { discoverCandidates } from './catalog';
+import { CDP_BAZAAR, discoverCandidates } from './catalog';
 import { fingerprint, HookEventSchema, readTaskContext } from './context';
 import type { HookEvent, TaskContext } from './context';
 import { createJevChooser, routeIntent } from './routing';
@@ -26,10 +26,20 @@ export const ConfigSchema = z.object({
   policyPath: z.string().min(1),
   walletDir: z.string().optional(),
   envFile: z.string().optional(),
+  catalogFile: z.string().min(1).optional(),
   model: z.string().default('jev-latest'),
   discoveryQueries: z
     .object({ WebSearch: discoveryQueries.optional(), WebFetch: discoveryQueries.optional() })
     .default({}),
+});
+const LocalCatalogSchema = z.object({
+  source: z.enum([
+    CDP_BAZAAR,
+    `${CDP_BAZAAR}/discovery/search`,
+    `${CDP_BAZAAR}/discovery/resources`,
+  ]),
+  fetchedAt: z.string().datetime(),
+  resources: z.array(z.unknown()).min(1).max(20),
 });
 export type AutoConfig = z.infer<typeof ConfigSchema>;
 export type Outcome = {
@@ -166,6 +176,46 @@ export async function routeEvent(
       const compiled = compileResource(FIXTURE_RESOURCE);
       if (compiled.status !== 'supported') throw new Error(compiled.reasons.join('; '));
       contracts = [compiled.contract];
+    } else if (config.catalogFile) {
+      // An explicitly selected local catalog is a demo input, not a claim that
+      // live semantic discovery found these resources from the user's request.
+      if ((await stat(config.catalogFile)).size > 2 * 1024 * 1024)
+        throw new Error('Local catalog exceeds 2 MiB.');
+      const raw = await readFile(config.catalogFile, 'utf8');
+      if (Buffer.byteLength(raw) > 2 * 1024 * 1024) throw new Error('Local catalog exceeds 2 MiB.');
+      const catalog = LocalCatalogSchema.parse(JSON.parse(raw));
+      const compiled = catalog.resources.map(compileResource);
+      contracts = [
+        ...new Map(
+          compiled.flatMap((entry) =>
+            entry.status === 'supported'
+              ? [[entry.contract.sourceHash, entry.contract] as const]
+              : [],
+          ),
+        ).values(),
+      ];
+      const rejected = compiled.filter((entry) => entry.status === 'unsupported');
+      await writeFileAtomic(
+        join(config.stateDir, 'catalog-last.json'),
+        JSON.stringify({
+          mode: 'local-catalog',
+          selection: 'operator-selected',
+          source: catalog.source,
+          fetchedAt: catalog.fetchedAt,
+          catalogHash: fingerprint(raw),
+          resources: catalog.resources,
+          contracts,
+          rejected,
+          partial: rejected.length > 0,
+        }),
+        { mode: 0o600, dirMode: 0o700 },
+      );
+      for (const contract of contracts)
+        await writeFileAtomic(
+          join(config.stateDir, 'contracts', `${contract.sourceHash}.json`),
+          JSON.stringify(contract),
+          { mode: 0o600, dirMode: 0o700 },
+        );
     } else {
       const configured = config.discoveryQueries[event.tool_name];
       const fallback =

@@ -28,6 +28,7 @@ interface Expected {
   requiredBody?: Record<string, unknown>;
   requiredQuery?: Record<string, unknown>;
   exactBody?: Record<string, unknown>;
+  exactQuery?: Record<string, unknown>;
 }
 export interface RoutingEvalCase {
   id: string;
@@ -100,13 +101,15 @@ export function routingEvalCases(): RoutingEvalCase[] {
   function add(
     id: string,
     category: string,
-    user: string[],
+    history: (string | TaskContext['messages'][number])[],
     tool: HookEvent['tool_name'],
     toolInput: Record<string, unknown>,
     contracts: AutoContract[],
     expected: Expected,
   ) {
-    const messages: TaskContext['messages'] = user.map((text) => ({ role: 'user', text }));
+    const messages: TaskContext['messages'] = history.map((message) =>
+      typeof message === 'string' ? { role: 'user', text: message } : message,
+    );
     cases.push({
       id,
       category,
@@ -416,6 +419,48 @@ export function routingEvalCases(): RoutingEvalCase[] {
     [exa, cmcQuotes],
     selected(EXA, { query: 'official x402 documentation payment flow' }),
   );
+  // Identical pending queries isolate history's effect on the required symbols.
+  // Labels are declared here before execution, never inferred from Jev's answers.
+  const referentialQuery = { query: 'current prices for those cryptocurrencies' };
+  add(
+    '31-history-btc-eth-prices',
+    'assistant-history',
+    [
+      { role: 'user', text: 'What are the two biggest cryptocurrencies by market cap?' },
+      { role: 'assistant', text: '1. Bitcoin (BTC)\n2. Ethereum (ETH)' },
+      { role: 'user', text: 'So what are their prices right now?' },
+    ],
+    'WebSearch',
+    referentialQuery,
+    [exa, firecrawl, cmcQuotes],
+    { statuses: ['selected'], url: CMC_QUOTES, exactQuery: { symbol: 'BTC,ETH' } },
+  );
+  add(
+    '32-history-sol-xrp-prices',
+    'assistant-history',
+    [
+      { role: 'user', text: 'What are the two biggest cryptocurrencies by market cap?' },
+      { role: 'assistant', text: '1. Solana (SOL)\n2. XRP (XRP)' },
+      { role: 'user', text: 'So what are their prices right now?' },
+    ],
+    'WebSearch',
+    referentialQuery,
+    [exa, firecrawl, cmcQuotes],
+    { statuses: ['selected'], url: CMC_QUOTES, exactQuery: { symbol: 'SOL,XRP' } },
+  );
+  add(
+    '33-history-correct-to-eth',
+    'assistant-history-correction',
+    [
+      { role: 'user', text: 'What are the two biggest cryptocurrencies by market cap?' },
+      { role: 'assistant', text: '1. Bitcoin (BTC)\n2. Ethereum (ETH)' },
+      { role: 'user', text: 'Actually, just Ethereum. What is its price?' },
+    ],
+    'WebSearch',
+    referentialQuery,
+    [exa, firecrawl, cmcQuotes],
+    { statuses: ['selected'], url: CMC_QUOTES, exactQuery: { symbol: 'ETH' } },
+  );
   return cases;
 }
 
@@ -437,6 +482,11 @@ function grade(test: RoutingEvalCase, result: RouteResult): string[] {
         failures.push(`body.${key} differs from the labeled required argument.`);
     }
     const query = result.args.query as Record<string, unknown> | undefined;
+    if (
+      test.expected.exactQuery !== undefined &&
+      JSON.stringify(query) !== JSON.stringify(test.expected.exactQuery)
+    )
+      failures.push('Query differs from the labeled exact request.');
     for (const [key, value] of Object.entries(test.expected.requiredQuery ?? {})) {
       if (JSON.stringify(query?.[key]) !== JSON.stringify(value))
         failures.push(`query.${key} differs from the labeled required argument.`);

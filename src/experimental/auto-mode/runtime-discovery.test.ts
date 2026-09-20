@@ -1,9 +1,10 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { compileResource } from './contracts';
 import type { AutoContract } from './contracts';
+import { CDP_BAZAAR } from './catalog';
 import type { discoverCandidates } from './catalog';
 import type { HookEvent, TaskContext } from './context';
 import type { Choose } from './routing';
@@ -57,9 +58,196 @@ async function config(seeds?: string | string[]) {
 }
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await Promise.all(
     directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })),
   );
+});
+
+function localResource(id: string) {
+  return {
+    ...FIXTURE_RESOURCE,
+    resource: `https://provider.example/${id}`,
+    description: `Synthetic capability ${id}`,
+  };
+}
+
+async function localCatalog(
+  resources: unknown[] = [localResource('selected')],
+  source = CDP_BAZAAR,
+) {
+  const settings = await config(['a configured seed that must not run']);
+  const catalogFile = join(settings.stateDir, 'operator-catalog.json');
+  const document = { source, fetchedAt: '2026-09-20T19:05:47.325Z', resources };
+  await writeFile(catalogFile, JSON.stringify(document));
+  return {
+    settings: ConfigSchema.parse({ ...settings, catalogFile }),
+    catalogFile,
+    document,
+  };
+}
+
+describe('operator-selected local CDP catalog', () => {
+  it.each([CDP_BAZAAR, `${CDP_BAZAAR}/discovery/search`, `${CDP_BAZAAR}/discovery/resources`])(
+    'routes a catalog from %s without network discovery and records its provenance',
+    async (source) => {
+      const { settings, document } = await localCatalog(undefined, source);
+      const discover = vi.fn<typeof discoverCandidates>();
+      const network = vi
+        .spyOn(globalThis, 'fetch')
+        .mockRejectedValue(new Error('Unexpected network'));
+      const routed = await routeEvent(event, settings, {
+        context,
+        discover,
+        choose: fixtureChooser,
+      });
+      expect(routed).toMatchObject({
+        status: 'selected',
+        contract: { url: 'https://provider.example/selected' },
+        args: { body: { query: event.tool_input.query } },
+      });
+      expect(discover).not.toHaveBeenCalled();
+      expect(network).not.toHaveBeenCalled();
+      const evidence = JSON.parse(
+        await readFile(join(settings.stateDir, 'catalog-last.json'), 'utf8'),
+      );
+      expect(evidence).toMatchObject({
+        mode: 'local-catalog',
+        source,
+        fetchedAt: document.fetchedAt,
+        resources: document.resources,
+        rejected: [],
+        partial: false,
+        selection: 'operator-selected',
+        catalogHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+      });
+      expect(evidence.contracts).toHaveLength(1);
+    },
+  );
+
+  it('deduplicates executable contracts while preserving raw and unsupported records', async () => {
+    const valid = localResource('valid');
+    const invalid = { type: 'http', resource: 'https://unknown.example/action' };
+    const { settings, document } = await localCatalog([valid, valid, invalid]);
+    const discover = vi.fn<typeof discoverCandidates>();
+    const choose = vi.fn<Choose>(async (_state, questions) => {
+      expect(Object.keys(questions.route!.criteria).sort()).toEqual(['c0', 'none']);
+      return { route: { choice: 'none' } };
+    });
+    await routeEvent(event, settings, { context, discover, choose });
+    const evidence = JSON.parse(
+      await readFile(join(settings.stateDir, 'catalog-last.json'), 'utf8'),
+    );
+    expect(evidence.resources).toEqual(document.resources);
+    expect(evidence.contracts).toHaveLength(1);
+    expect(evidence.rejected).toHaveLength(1);
+    expect(evidence.rejected[0]).toMatchObject({ status: 'unsupported', url: invalid.resource });
+    expect(evidence.rejected[0].reasons.length).toBeGreaterThan(0);
+    expect(evidence.partial).toBe(true);
+    expect(discover).not.toHaveBeenCalled();
+    expect(choose).toHaveBeenCalledTimes(1);
+  });
+
+  it('updates catalog evidence when the operator changes the file', async () => {
+    const { settings, catalogFile, document } = await localCatalog();
+    const deps = { context, discover: vi.fn<typeof discoverCandidates>(), choose: chooseNone };
+    await routeEvent(event, settings, deps);
+    const before = JSON.parse(await readFile(join(settings.stateDir, 'catalog-last.json'), 'utf8'));
+    await writeFile(
+      catalogFile,
+      JSON.stringify({ ...document, resources: [localResource('replacement')] }),
+    );
+    await routeEvent(event, settings, deps);
+    const after = JSON.parse(await readFile(join(settings.stateDir, 'catalog-last.json'), 'utf8'));
+    expect(after.catalogHash).not.toBe(before.catalogHash);
+    expect(after.contracts).toHaveLength(1);
+    expect(after.contracts[0].url).toBe('https://provider.example/replacement');
+    expect(deps.discover).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['malformed JSON', '{'],
+    [
+      'wrong source',
+      JSON.stringify({
+        source: 'https://untrusted.example/catalog',
+        fetchedAt: '2026-09-20T19:05:47.325Z',
+        resources: [localResource('valid')],
+      }),
+    ],
+    [
+      'source prefix spoof',
+      JSON.stringify({
+        source: `${CDP_BAZAAR}.evil.example`,
+        fetchedAt: '2026-09-20T19:05:47.325Z',
+        resources: [localResource('valid')],
+      }),
+    ],
+    [
+      'invalid timestamp',
+      JSON.stringify({
+        source: CDP_BAZAAR,
+        fetchedAt: 'yesterday',
+        resources: [localResource('valid')],
+      }),
+    ],
+    [
+      'empty resources',
+      JSON.stringify({ source: CDP_BAZAAR, fetchedAt: '2026-09-20T19:05:47.325Z', resources: [] }),
+    ],
+    [
+      'too many resources',
+      JSON.stringify({
+        source: CDP_BAZAAR,
+        fetchedAt: '2026-09-20T19:05:47.325Z',
+        resources: Array.from({ length: 21 }, (_, index) => localResource(`candidate-${index}`)),
+      }),
+    ],
+    ['oversized file', `${' '.repeat(2 * 1024 * 1024)}{}`],
+  ])('rejects %s before discovery or Jev', async (_name, raw) => {
+    const { settings, catalogFile } = await localCatalog();
+    await writeFile(catalogFile, raw);
+    const discover = vi.fn<typeof discoverCandidates>();
+    const choose = vi.fn<Choose>();
+    await expect(routeEvent(event, settings, { context, discover, choose })).rejects.toThrow();
+    expect(discover).not.toHaveBeenCalled();
+    expect(choose).not.toHaveBeenCalled();
+  });
+
+  it('still restricts local catalog candidates to the exact live URL and method policy', async () => {
+    const { settings } = await localCatalog([
+      localResource('wrong-method'),
+      localResource('allowed'),
+      localResource('outside-scope'),
+    ]);
+    await writeFile(
+      settings.policyPath,
+      JSON.stringify({
+        allowedResources: [
+          { url: 'https://provider.example/wrong-method', method: 'GET' },
+          { url: 'https://provider.example/allowed', method: 'POST' },
+        ],
+      }),
+    );
+    const discover = vi.fn<typeof discoverCandidates>();
+    const choose: Choose = vi.fn(async (state, questions) => {
+      if (questions.route) {
+        expect(Object.keys(questions.route.criteria).sort()).toEqual(['c0', 'none']);
+        expect(questions.route.criteria.c0).toContain('https://provider.example/allowed');
+      }
+      return fixtureChooser(state, questions);
+    });
+    const routed = await routeEvent(
+      event,
+      { ...settings, mode: 'live' },
+      { context, discover, choose },
+    );
+    expect(routed).toMatchObject({
+      status: 'selected',
+      contract: { url: 'https://provider.example/allowed', method: 'POST' },
+    });
+    expect(discover).not.toHaveBeenCalled();
+  });
 });
 
 describe('generic multi-query discovery seeds', () => {

@@ -1,8 +1,8 @@
 # Local Jev → x402 experiment
 
-This draft experiment lets Claude propose an ordinary `WebSearch` or `WebFetch`, then executes a paid Bazaar capability from a local `PreToolUse` hook. It needs no backend or MCP server. It does not install global hooks or change Tenjin's normal CLI behavior.
+This draft experiment lets Claude propose an ordinary `WebSearch` or `WebFetch` from a natural-language task, then executes a paid Bazaar capability from a local `PreToolUse` hook. The prepared MVP uses a user-approved, hand-selected local catalog of three unchanged CDP Bazaar records: Exa search, Vaaya Firecrawl scraping, and direct CoinMarketCap quotes. It needs no backend or MCP server and does not install global hooks.
 
-Jev selects the endpoint and argument values from the pending call, current session text, corrections, and schema choices. Jev's choice API cannot generate novel strings: a missing value returns `needs_input`. Code validates the selected arguments, action policy, quote, budget and attempt identity, then signs and executes. No model approves a payment. Claude receives the result as hook context while its native call is denied; Claude still interprets the returned document and continues the task.
+Jev selects the endpoint and argument values from that catalog using the pending call, current session text, prior answers, corrections, and schema choices. Jev's choice API cannot generate novel strings: it selects exact source values and bounded list compositions; a missing value returns `needs_input`. Code validates the selected arguments, action policy, quote, budget and attempt identity, then signs and executes. No model approves a payment. Claude receives the result as hook context while its native call is denied; Claude still interprets the returned document and continues the task.
 
 ## Run the prepared demo
 
@@ -22,33 +22,41 @@ claude --model haiku \
 
 The command has no `-p`, `-c`/`--continue`, `--resume`, or initial prompt. It opens the normal Claude Code UI with an empty conversation. Complete any startup trust/login screen, then check the displayed model is Haiku. **Do not paste the setup request into this session.** `dontAsk` controls tool permissions; it does not make the session headless. With the generated `ask` rules, native search/fetch fallback is denied if the hook fails. Keep those rules and the launch flags together. No `--allowedTools` override, native auto mode, or bypass mode is needed. Claude documents [interactive startup and CLI flags](https://code.claude.com/docs/en/cli-reference) and [permission modes](https://code.claude.com/docs/en/permissions).
 
-Tell the empty session only the first task below. Then type the next two tasks **one at a time in that same conversation**, waiting for each answer:
+Start with this natural dialogue. Type the first question into the empty session:
 
-1. **Search → Exa**
+```text
+What are the two biggest cryptocurrencies by market cap?
+```
 
-   ```text
-   Use WebSearch to find official x402 protocol documentation. Give two source links with a one-sentence description of each.
-   ```
+Wait for the answer, then ask:
 
-2. **Page extraction → Firecrawl through Vaaya**
+```text
+So what are their prices right now?
+```
 
-   ```text
-   Use WebFetch to read https://example.com. Summarize the page and cite its URL.
-   ```
+The follow-up deliberately relies on the preceding answer. It does not restate asset symbols, name a provider, or tell Claude which native tool to call. Jev receives the bounded transcript and pending tool request when Claude chooses to use a tool, then selects a catalog contract and available argument values. Code validates and executes that selection. This exact two-turn conversation was validated headlessly with Haiku: the first turn used Exa and Vaaya Firecrawl, and the follow-up selected CoinMarketCap with `symbol=BTC,ETH`. Both prices matched the saved response. Haiku omitted a source link in the price answer, so the strict citation gate remained failed; the ten routing/execution gates passed. The actual interactive presentation is still left for the presenter to run.
 
-3. **Situational WebSearch → direct CoinMarketCap**
+To demonstrate other tasks in the same session, enter these separately:
 
-   ```text
-   Use WebSearch to get CoinMarketCap's latest USD quotes for the symbols `BTC,ETH`. Report both prices and cite the data source.
-   ```
+**Research**
 
-The third prompt is the key demonstration: the same WebSearch hook has both search and crypto candidates, and Jev selects the structured price API for the task. Each successful step should produce an answer with sources. A native tool denial can appear in the UI because the hook supplies the fulfilled paid result as context and suppresses the original call. A denial by itself is not a successful demo; check the answer and the saved provider outcome.
+```text
+Find two authoritative explanations of how x402 payments work. Link both sources and briefly explain what each covers.
+```
+
+**Read a page**
+
+```text
+Summarize this page in two sentences and link to it: https://docs.cdp.coinbase.com/x402/core-concepts/how-it-works
+```
+
+These prompts provide tasks rather than provider or native-tool instructions. Claude chooses whether to use search or fetch; Jev chooses the executable capability. A task may result in more than one paid call. A native tool denial can appear in the UI because the hook supplies the paid result as context and suppresses the original call. A denial by itself is not a successful demo: inspect the answer and all saved provider outcomes.
 
 Vaaya advertises its service as Firecrawl scraping; the executor does not independently attest its backend implementation. Expected provider costs from the tested runs are $0.007 for Exa, $0.01 for Vaaya and $0.01 for CoinMarketCap. The live quote must still pass the current policy and listing checks. Jev and Claude inference are separate costs. **The interactive session has no headless runner's $0.50/four-turn inference cap**; the local $0.10/call and $1/run payment caps still apply. Exit Claude when the presentation is done.
 
-The two WebSearch seeds retain ordinary search and CoinMarketCap candidates. Quoted/backticked values such as `BTC,ETH` are copied into Jev's finite argument-choice set. Up to three discovery seeds run in parallel, with deterministic interleaving, deduplication and a 20-candidate cap. Legacy single-string filters still work. Omitting seeds uses the task text; Bazaar ranking can then omit a desired seller. Search failures and truncated candidate sets are recorded explicitly.
+The prepared `config.json` references `catalog.json` through `catalogFile`, with `discoveryQueries: {}`. Every matched hook sees the same three raw Bazaar records, compiled and validated normally. The catalog is hand-selected; the demo tests intent-to-capability routing, transcript-aware argument selection, and deterministic execution. It is **not evidence of automatic discovery across the Bazaar**. The live quote must still agree with the saved listing and payment policy.
 
-BTC/ETH are demo inputs, not an asset allowlist. Other quoted ticker, slug or ID lists use the same contract and provider limits. Symbols are not globally unique; explicit CoinMarketCap IDs or slugs avoid ambiguous matches. Large result sets receive an explicitly partial preview, with the complete response retained locally.
+The interpreter contains no ticker allowlist or provider-specific routing branches. Its finite argument choices come from available context and schema values; it returns `needs_input` instead of inventing an unavailable value. Symbols can be ambiguous, and explicit provider IDs or slugs may be needed for a precise request. Large result sets receive an explicitly partial preview, with the complete response retained locally.
 
 ### Let the setup agent inspect a run
 
@@ -69,9 +77,9 @@ Keep session persistence enabled: `--no-session-persistence` removes the transcr
 
 ### What was prepared separately
 
-For the 2026-09-20 preparation, the agent reused the built PR checkout and installed dependencies (Node 24.18.0, pnpm 11.11.0, Claude Code 2.1.278). It verified the existing Claude login, Jev credential presence, wallet-file presence, generated hook, three allowed routes, discovery seeds, payment caps and expiry. The existing live policy and ledger were preserved: $0.071 USDC accounted for, $0.929 remaining, and no unresolved attempts. A separate fixture directory kept validation data out of the presentation session. The clarified synthetic preflight passed all eight report checks with Haiku and no provider payment. The presentation session itself was left unopened, so it starts empty when the presenter launches it. Future preparation should report the current checks and budget rather than reuse these dated values.
+For the 2026-09-20 preparation, the agent reused the built PR checkout and installed dependencies (Node 24.18.0, pnpm 11.11.0, Claude Code 2.1.278). It verified the existing Claude login, Jev credential presence, wallet-file presence, generated hook, three allowed routes, payment caps and expiry. The initial policy and ledger were preserved with $0.071 USDC accounted for and no unresolved attempts at that checkpoint; those are historical figures, not the remaining budget after later validation. A separate fixture directory kept validation data out of the presentation session. The clarified synthetic preflight passed all eight report checks with Haiku and no provider payment. The presentation session itself was left unopened, so it starts empty when the presenter launches it. The current prepared run now references the hand-selected three-record `catalog.json`, with empty discovery queries; the existing payment policy and ledger remain in place. Future preparation should report the current checks and budget rather than reuse dated figures.
 
-The fixture preflight uses headless Claude with synthetic data and no provider payment. The recorded live paid-call evidence below also comes from headless validation. Neither means the full three-prompt interactive presentation has already been tested.
+The fixture preflight uses headless Claude with synthetic data and no provider payment. The recorded live paid-call evidence below also comes from headless validation. The natural dialogue was subsequently checked in a separate headless session, as detailed below. The interactive presentation remains unopened.
 
 ## Optional: reproduce the agent-assisted setup
 
@@ -106,13 +114,18 @@ $0.10 per call, $1 total per run and a 24-hour expiry, for exactly these routes:
 - POST https://api.exa.ai/search
 - POST https://vaaya.ai/api/run/firecrawl/scrape
 - GET https://pro-api.coinmarketcap.com/x402/v3/cryptocurrency/quotes/latest
-Use WebSearch discovery seeds "Exa web search" and "CoinMarketCap", and the
-WebFetch seed "Firecrawl scrape webpage". Reference the existing env file and
-wallet directory. Preserve a valid existing demo's config, policy and ledger;
+Use a local catalog.json with the unchanged resources from
+src/experimental/auto-mode/fixtures/cdp-demo-resources.json plus the unchanged
+resource from cdp-cmc-resource.json. Preserve their CDP source and capture
+provenance; do not rewrite provider descriptions or schemas. Pass its absolute
+path through --catalog-file and leave discoveryQueries empty. This is the
+approved hand-selected MVP catalog, not automatic discovery from the task.
+Reference the existing env file and wallet directory. Preserve a valid
+existing demo's policy and ledger when updating its catalog configuration;
 do not reset its budget or silently renew an expired run.
 
 Inspect the generated settings/config/policy and confirm the built hook path,
-three allowed routes, discovery seeds, payment caps and expiry. Keep native
+three allowed routes, unchanged three-record catalog, payment caps and expiry. Keep native
 WebSearch/WebFetch permissions set to ask. Do not change them to allow.
 
 Finish with the demo directory, model, policy expiry, fixture result, and ONE
@@ -120,8 +133,8 @@ copy-paste terminal command with real, safely quoted absolute paths to start
 a fresh, empty interactive Claude Code session. Use the launch flags in
 "Run the prepared demo" above. Do not use -p, -c/--continue, --resume or an
 initial prompt. Do not pipe in prompts, start a background process, or launch
-the interactive session inside your own tool. Give me the three presentation
-prompts above in order; no setup prompt belongs in that session. Wait for me
+the interactive session inside your own tool. Give me the natural dialogue
+and additional task prompts above; no setup prompt belongs in that session. Wait for me
 to run the actual demo.
 ```
 
@@ -140,12 +153,30 @@ node dist/tenjin-auto-mode.mjs init --directory /tmp/tenjin-auto-fixture
 node scripts/auto-mode-demo.mjs --config /tmp/tenjin-auto-fixture/config.json --model haiku \
   --prompt 'This is a synthetic hook validation. Use WebSearch once to retrieve the Northstar archive fixture. Report the fixture verification code and its supplied source URL, clearly labeled as synthetic test data.'
 
+# Combine captured CDP records unchanged; never overwrite an existing catalog.
+node --input-type=module <<'NODE'
+import { readFile, writeFile, mkdir } from 'node:fs/promises';
+const directory = '/tmp/tenjin-auto-live';
+const base = 'src/experimental/auto-mode/fixtures/';
+const demo = JSON.parse(await readFile(`${base}cdp-demo-resources.json`, 'utf8'));
+const cmc = JSON.parse(await readFile(`${base}cdp-cmc-resource.json`, 'utf8'));
+if (demo.source !== cmc.source) throw new Error('Review differing capture sources.');
+const catalog = {
+  source: demo.source,
+  fetchedAt: [demo.fetchedAt, cmc.fetchedAt].sort()[0],
+  resources: [...demo.resources, cmc.resource],
+};
+await mkdir(directory, { recursive: true, mode: 0o700 });
+await writeFile(`${directory}/catalog.json`, JSON.stringify(catalog, null, 2), {
+  flag: 'wx', mode: 0o600,
+});
+NODE
+
 node dist/tenjin-auto-mode.mjs init \
   --directory /tmp/tenjin-auto-live --mode live \
   --env-file /absolute/path/to/existing.env \
   --wallet-dir "$HOME/.tenjin" \
-  --search-query 'Exa web search' 'CoinMarketCap' \
-  --fetch-query 'Firecrawl scrape webpage' \
+  --catalog-file /tmp/tenjin-auto-live/catalog.json \
   --allow-resource POST:https://api.exa.ai/search POST:https://vaaya.ai/api/run/firecrawl/scrape GET:https://pro-api.coinmarketcap.com/x402/v3/cryptocurrency/quotes/latest
 ```
 
@@ -153,7 +184,11 @@ node dist/tenjin-auto-mode.mjs init \
 
 The fixture preflight tests delivery of synthetic hook content and its supplied URL, not factual web search. The earlier prompt did not explicitly state that purpose; Claude returned the fixture code but declined to cite the fictional source, passing seven of eight gates. The setup prompt now labels both the request and expected answer as synthetic test data.
 
-On 2026-09-20, final Haiku runs fulfilled Exa search at $0.007, Vaaya Firecrawl scrape at $0.01, and direct CoinMarketCap BTC/ETH quotes at $0.01. Each made one native tool request, suppressed its execution, fulfilled the paid request, and cited a returned URL or the actual supplying endpoint. Both crypto prices were checked against the saved provider response. The three final runs cost $0.0201938 in Claude inference. Including earlier paid diagnostics, total provider spend was $0.071 USDC; diagnostic/fixture/model-evaluation inference costs are separate. All **154 focused TypeScript tests and 11 harness tests**, the build, static checks, and package smoke passed. These are observed results, not paid CI gates.
+In the earlier explicit-tool validation on 2026-09-20, Haiku runs fulfilled Exa search at $0.007, Vaaya Firecrawl scrape at $0.01, and direct CoinMarketCap BTC/ETH quotes at $0.01. Each made one native tool request, suppressed its execution, fulfilled the paid request, and cited a returned URL or the actual supplying endpoint. Both crypto prices were checked against the saved provider response. The three final runs cost $0.0201938 in Claude inference. At that checkpoint, including earlier paid diagnostics, provider spend was $0.071 USDC; diagnostic/fixture/model-evaluation inference costs are separate. The updated branch passes **196 focused TypeScript tests and 23 harness tests**, the build, workspace static checks and package smoke. These are observed results, not paid CI gates.
+
+The natural two-turn crypto validation used a fresh persisted Haiku session and then resumed it with only “So what are their prices right now?” The first turn made one Exa search and one Vaaya fetch ($0.017); the follow-up made one CoinMarketCap request ($0.01), with exactly `symbol=BTC,ETH`. Both displayed USD prices matched the saved response to two decimals. The first turn passed all 11 transport/report gates; the follow-up passed the ten routing/execution gates but failed the source-link gate because Haiku omitted a citation. The report remains failed rather than weakening that gate. The pair cost $0.027 USDC and $0.0330173 Claude inference, excluding Jev charges. A separate natural x402 research prompt made one Exa search and two Vaaya fetches, passed all 11 gates and cost $0.027 USDC. A Markdown URL-label parsing bug in the validator was fixed and its saved result rechecked offline, without new payments.
+
+One earlier natural first turn reached the headless four-turn cap, so the conversational validation used eight turns with the existing 120-second timeout and $0.50 inference cap per invocation. The one-shot script below retains its four-turn limit. An `example.com` summary prompt produced no tool call because Haiku treated it as a placeholder; the presentation now uses a real documentation URL. These failures remain distinct from successful paid execution. Across diagnostics and validation, the preserved payment ledger accounts for **$0.189 USDC**, leaving **$0.811** under the original $1 cap, with no unresolved attempts at the final preparation checkpoint.
 
 Base transaction receipts independently confirmed the initial Exa, Vaaya and CoinMarketCap transfers. CoinMarketCap returned nonstandard `txHash`/`networkId` receipt fields, so the executor conservatively labels its settlement `unverified`; HTTP success does not become an independent settlement claim. The first crypto trial also exposed a raw-text preview that omitted ETH. Generic bounded JSON compaction fixed that, and the final trial delivered both prices while retaining explicit truncation markers and the complete response locally.
 
@@ -162,22 +197,25 @@ An initial generic WebFetch prompt returned `needs_input`. Clarifying that the s
 - The hook transport probe checks opaque fixture content and source delivery, native denial, exactly one requested call, and model identity. Haiku passed search and fetch; same-session resume passed with Haiku and Sonnet. These probes use synthetic results and explicitly explain the fixture to Claude.
 - The initial live Jev evaluation passed **25/25 fixed-label cases**, making 42 model requests and no provider requests or payments. After adding the generic-fetch regression and clarifying routing, a 26-case batch passed 23 cases with three transport errors; separate retries passed those three. All 26 labels therefore have successful evidence, but there was no clean 26/26 batch. Two additional generic-fetch repetitions hit transport errors, so repeatability is not established. Cases cover provider/argument choice, corrections, missing values, native restrictions, merchant instruction injection, and an unseen synthetic provider. Contexts are fixtures; this is not a real Claude resume semantic benchmark or a universal accuracy claim. `jev-latest` is an alias, not a pinned server revision.
 - Four additional crypto-versus-search evaluation cases passed separately, including direct CoinMarketCap with the exact `symbol=BTC,ETH` argument and ordinary documentation requests selecting Exa. The evaluation now contains 30 cases; there is no claim of a single clean 30-case live batch.
+- The final focused Jev regression batch passed **6/6 cases in 20 model requests**, with no provider requests or payments. Three new cases require exact complete query objects: an identical generic pending query resolves to `symbol=BTC,ETH` or `symbol=SOL,XRP` when only the assistant answer changes, and a later user correction narrows it to `symbol=ETH`. The other three cover generic page extraction, explicit ticker selection and documentation search. Source-span evidence points to the prior assistant answer. The evaluation contains 33 cases in total; this six-case batch is not a claim that all 33 were rerun successfully together.
+- Earlier independent field selections overfilled alternative identifiers or repeated list members. Required-key-only checks could miss extra bad fields, so the new cases grade the entire query. Sequential member choices and a final choice over complete schema-valid argument sets resolved those cases. These tests establish the demonstrated behavior, not general semantic correctness for every provider schema.
 - Deterministic tests cover quote substitution, revocation, concurrent claims, budget reservation, ambiguous transmissions, replay without signing again, schema constraints, public destination checks, and a two-step Exa/Tavily-style fixture workflow. Tavily is synthetic in these tests.
-- The live report validator requires successful process exit, the requested model, exactly one matching native call denied, a fulfilled current-event provider result, HTTP 200, and a final citation to a returned URL or the actual supplying endpoint. Structured data APIs need not invent a URL field to supply provenance. An unrelated URL or stale prior result cannot pass. These transport gates do not prove factual completeness; the final demo answers were also checked against saved provider results.
+- In `--tool auto` mode, the live report validator requires successful process exit, the requested model, one to eight distinct WebSearch/WebFetch calls, matching native denials for every call, fulfilled current-event provider outcomes, HTTP 200, and a final citation to a returned URL or an actual supplying endpoint. It records every selected provider, arguments, amount, receipt status and cache status, and sums amounts by unique tool-use ID. Explicit `--tool WebSearch` or `--tool WebFetch` mode retains the exactly-one-call gate. Structured data APIs need not invent a URL field to supply provenance. An unrelated URL or stale prior result cannot pass. These transport gates do not prove factual completeness; the final demo answers were also checked against saved provider results.
 
-The live results above were measured with the headless validation harness. They establish the paid call paths; they are not evidence that the full three-prompt interactive conversation has already been tested. The presentation instructions use interactive CLI flags checked against Claude Code 2.1.278.
+The live results above were measured headlessly. They establish the paid call paths and the specific natural follow-up described above; they are not a completed interactive presentation or a general reliability guarantee. The presentation instructions use interactive CLI flags checked against Claude Code 2.1.278.
 
-For automated revalidation, the agent can run the three paid cases through the existing harness instead of presenting them interactively. These are optional validation commands, sharing the same local payment policy:
+For automated single-task revalidation, the agent can run natural prompts with both native tools available. These optional commands share the local policy and can make multiple paid calls. They do not reproduce the two-turn dialogue above: each script invocation creates a new session.
 
 ```sh
-node scripts/auto-mode-demo.mjs --config /tmp/tenjin-auto-live/config.json --model haiku
 node scripts/auto-mode-demo.mjs --config /tmp/tenjin-auto-live/config.json --model haiku \
-  --tool WebFetch --prompt 'Use WebFetch to read https://example.com. Summarize the page and cite its URL.'
+  --tool auto --prompt 'Find two authoritative explanations of how x402 payments work. Link both sources and briefly explain what each covers.'
 node scripts/auto-mode-demo.mjs --config /tmp/tenjin-auto-live/config.json --model haiku \
-  --prompt 'Use WebSearch to get CoinMarketCap latest USD quotes for the symbols `BTC,ETH`. Report both prices and cite the data source.'
+  --tool auto --prompt 'Summarize this page in two sentences and link to it: https://docs.cdp.coinbase.com/x402/core-concepts/how-it-works'
+node scripts/auto-mode-demo.mjs --config /tmp/tenjin-auto-live/config.json --model haiku \
+  --tool auto --prompt 'What are BTC and ETH trading at in USD right now, and how have they moved over the last 24 hours? Include a source.'
 ```
 
-The harness uses only the requested tool, a persisted session, a 120-second process timeout, a $0.50 Claude inference cap and four turns. It saves Claude's stream and `runs/<session>/report.json`, verifies the observed model, and stops its child processes. `--model sonnet` is also supported; no Fable model is selected.
+With `--tool auto`, the harness exposes WebSearch and WebFetch and records the tools Claude actually uses. It validates one to eight unique calls, uses a persisted session, a 120-second process timeout, a $0.50 Claude inference cap and four turns. It saves Claude's stream and `runs/<session>/report.json`, checks each current-call outcome, verifies the observed model, and stops its child processes. `--model sonnet` is also supported; no Fable model is selected.
 
 Repeat focused checks and model evaluation without provider payments:
 
@@ -198,7 +236,9 @@ The 60-call Jev limit is a request-count limit, not a dollar budget. Network and
 
 ## Open marketplace, bounded interpreter
 
-CDP facilitator Bazaar supplies endpoint descriptions, payment advertisements, and available machine-readable input schemas. This importer generates a versioned JSON contract directly from those schemas, including provenance/source hashes. It never downloads or executes a third-party `SKILL.md`, shell program, or generated JavaScript. There are no Exa/Firecrawl routing branches or manually edited generated manifests. The public fixtures retain captured catalog records for reproducible testing.
+CDP facilitator Bazaar supplies endpoint descriptions, payment advertisements, and available machine-readable input schemas. This importer generates a versioned JSON contract directly from those schemas, including provenance/source hashes. It never downloads or executes a third-party `SKILL.md`, shell program, or generated JavaScript. There are no Exa/Firecrawl routing branches or manually edited generated manifests. The prepared demo chooses three captured records by hand, then uses the same generic compiler and router as dynamic discovery. The public fixtures retain those raw CDP records for reproducible testing.
+
+Without `catalogFile`, optional dynamic CDP discovery remains available. It accepts up to three query seeds per native tool, interleaves and deduplicates results, and caps the candidate set at 20; without seeds it queries from the task text. Search failures and truncation are recorded. Tested live queries did not reliably return the desired approved sellers, so improving retrieval is separate follow-up work. The hand-selected presentation does not establish that dynamic discovery works for arbitrary intents.
 
 The [catalog audit](./auto-mode-catalog-coverage.json) covers 14,986 endpoint records across 150 pages and 1,996 endpoint origins. **8,050 contracts validate; 6,936 are explicitly unsupported.** This is input-schema compilation, not successful endpoint execution. The API's `curated: true` subset was 58/86; it is not claimed to equal agentic.market's curated collection. Pagination completed but the service offers no transactional snapshot guarantee.
 
@@ -212,6 +252,8 @@ node dist/tenjin-auto-mode.mjs audit --output /tmp/catalog-audit.json --pages 20
 HTTP request construction supports the validated query/body/path/header contract. Live payments currently support x402 v2 `exact`, Base native USDC. Arbitrary transports, signing schemes, dynamic branches/loops, autonomous installation and prose translation are follow-ups. Automatic routing selects one contract per hook. `executeWorkflow` separately supports up to ten ordered steps with typed references to prior JSON results; it applies the same quote, policy, ledger and total-budget checks per step. Automatic multi-step planning is not wired into Jev yet.
 
 ## Operational boundaries
+
+Argument binding retains labeled source spans from user and assistant text. Assistant answers are evidence for references such as “their”; latest user corrections take priority and neither role can grant payment authority. Code can join at most eight selected members into a comma-separated string or array, across at most two fields. Members are selected in order, with previously chosen values removed. Jev then chooses a complete, schema-valid argument set: required values stay fixed, up to six proposed optional fields produce at most 64 candidate sets, and unresolved constraints remain visible. If no candidate satisfies the task, the result is `needs_input`. These are closed choices over data, not generated executable code. Serialized Jev requests and responses each have a 1 MiB limit.
 
 The transcript parser reads bounded user/assistant text from the current session, including persisted resume history. It does not retrieve other sessions, reconstruct arbitrary tool-result history, or support subagents. Missing, oversized, malformed or compacted context returns `needs_input` and asks for a fresh session. Native domain allow/block filters currently return `unsupported` instead of dropping restrictions.
 

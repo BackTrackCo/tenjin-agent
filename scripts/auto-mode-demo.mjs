@@ -20,8 +20,8 @@ const { values } = parseArgs({
 if (!values.config) throw new Error('--config is required');
 if (!['haiku', 'sonnet'].includes(values.model))
   throw new Error('Demo model must be haiku or sonnet.');
-if (!['WebSearch', 'WebFetch'].includes(values.tool))
-  throw new Error('Demo tool must be WebSearch or WebFetch.');
+if (!['WebSearch', 'WebFetch', 'auto'].includes(values.tool))
+  throw new Error('Demo tool must be WebSearch, WebFetch, or auto.');
 const configPath = resolve(values.config);
 const directory = dirname(configPath);
 const config = JSON.parse(await readFile(configPath, 'utf8'));
@@ -36,7 +36,7 @@ const args = [
   '--session-id',
   sessionId,
   '--tools',
-  values.tool,
+  values.tool === 'auto' ? 'WebSearch,WebFetch' : values.tool,
   '--permission-mode',
   'dontAsk',
   '--strict-mcp-config',
@@ -73,15 +73,31 @@ const result = events.findLast((e) => e.type === 'result');
 const calls = events.flatMap((e) =>
   e.type === 'assistant' ? (e.message?.content ?? []).filter((b) => b.type === 'tool_use') : [],
 );
-const key = createHash('sha256')
-  .update(JSON.stringify({ session: sessionId, request: calls[0]?.id, mode: config.mode }))
-  .digest('hex');
-const outcome = JSON.parse(
-  await readFile(join(config.stateDir, 'outcomes', `${key}.json`), 'utf8').catch(() => '{}'),
-);
-const { checks, citedReturnedUrls } = checkDemo({
+const outcomesByToolUseId = Object.create(null);
+for (const id of new Set(calls.map((call) => call.id))) {
+  if (typeof id !== 'string' || !id) continue;
+  const key = createHash('sha256')
+    .update(JSON.stringify({ session: sessionId, request: id, mode: config.mode }))
+    .digest('hex');
+  try {
+    outcomesByToolUseId[id] = JSON.parse(
+      await readFile(join(config.stateDir, 'outcomes', `${key}.json`), 'utf8'),
+    );
+  } catch {
+    // A missing or malformed per-event outcome must fail validation.
+  }
+}
+const outcome = calls.length === 1 ? outcomesByToolUseId[calls[0].id] : undefined;
+const {
+  checks,
+  citedReturnedUrls,
+  observedTool,
+  observedTools,
+  perCallOutcomes,
+  totalAmountAtomic,
+} = checkDemo({
   events,
-  outcome,
+  outcomesByToolUseId,
   execution,
   model: values.model,
   tool: values.tool,
@@ -92,15 +108,20 @@ const report = {
   mode: config.mode,
   requestedModel: values.model,
   observedModel: init?.model,
+  requestedTool: values.tool,
+  observedTool,
+  observedTools,
   checks,
   citedReturnedUrls,
   sessionId,
   artifacts,
-  provider: outcome.selected?.url,
-  executorStatus: outcome.status,
-  executorReason: outcome.reason,
-  amountAtomic: outcome.execution?.amountAtomic,
-  settlement: outcome.execution?.settlement,
+  provider: outcome?.selected?.url,
+  executorStatus: outcome?.status,
+  executorReason: outcome?.reason,
+  amountAtomic: outcome?.execution?.amountAtomic,
+  settlement: outcome?.execution?.settlement,
+  perCallOutcomes,
+  totalAmountAtomic,
   inferenceCostUsd: result?.total_cost_usd,
   finalText: result?.result,
   process: { exitCode: execution.code, timedOut: execution.timedOut },

@@ -62,6 +62,10 @@ program
   )
   .option('--mode <mode>', 'fixture | route (live Jev, no provider calls) | live', 'fixture')
   .option('--env-file <path>', 'Existing env file containing TYPESAFE_KEY or TYPESAFE_API_KEY')
+  .option(
+    '--catalog-file <path>',
+    'Explicitly selected local CDP catalog; skips live discovery search',
+  )
   .option('--wallet-dir <path>', 'Existing Tenjin wallet directory', join(homedir(), '.tenjin'))
   .option('--search-query <text...>', 'Optional 1–3 discovery seeds for WebSearch')
   .option('--fetch-query <text...>', 'Optional 1–3 discovery seeds for WebFetch')
@@ -93,6 +97,7 @@ program
       policyPath,
       walletDir: resolve(options.walletDir as string),
       envFile: options.envFile ? resolve(options.envFile as string) : undefined,
+      catalogFile: options.catalogFile ? resolve(options.catalogFile as string) : undefined,
       discoveryQueries: { WebSearch: options.searchQuery, WebFetch: options.fetchQuery },
     });
     // No-clobber config protects an existing experiment and its budget identity.
