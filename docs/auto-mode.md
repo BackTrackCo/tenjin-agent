@@ -4,20 +4,71 @@ This draft experiment lets Claude propose an ordinary `WebSearch` or `WebFetch`,
 
 Jev selects the endpoint and argument values from the pending call, current session text, corrections, and schema choices. Jev's choice API cannot generate novel strings: a missing value returns `needs_input`. Code validates the selected arguments, action policy, quote, budget and attempt identity, then signs and executes. No model approves a payment. Claude receives the result as hook context while its native call is denied; Claude still interprets the returned document and continues the task.
 
-## Run the demo from this branch
+## Have an agent prepare the demo
 
-Requirements: Node 24+, pnpm, authenticated Claude Code, a Jev API key (`TYPESAFE_KEY` or `TYPESAFE_API_KEY`), and an existing funded Tenjin local wallet for live requests. The env file is referenced in place; credentials are never written into the experiment config. Keep the experiment directory outside the repository.
+Paste the setup request below into your normal coding-agent conversation with local terminal access. The agent handles checkout, dependencies, configuration and a fixture preflight. You then open **interactive Claude Code** and type the demo prompts yourself.
+
+Requirements: Node 24+, pnpm, authenticated Claude Code, a Jev API key (`TYPESAFE_KEY` or `TYPESAFE_API_KEY`), and an existing funded Tenjin local wallet. On the Tenjin workspace, the existing `tenjin/.env.local` is the expected env source. Elsewhere, give the agent the env-file path if it cannot find it from your project context; never paste credentials into chat. The file is referenced in place.
+
+```text
+Prepare the local Jev → x402 demo from BackTrackCo/tenjin-agent draft PR #369
+(branch codex/local-jev-x402-auto-mode). Read docs/auto-mode.md and the
+repository instructions, then do the setup for me.
+
+Use the existing PR checkout if available. Otherwise create an isolated
+checkout of the PR branch using the workspace's worktree helper where
+available, or a separate clone. Preserve other checkouts and uncommitted work.
+Install the frozen dependencies and build the branch. Check Node, pnpm and
+Claude Code versions and existing Claude authentication. Use Haiku; no Fable.
+
+Use the existing env file and funded Tenjin local wallet. In the Tenjin
+workspace, look for tenjin/.env.local; the default wallet directory is
+~/.tenjin. Check only whether the required credentials are present. Do not
+print env contents, export the whole env file, copy credentials, create a
+wallet, or modify global Claude settings. Ask only for a missing path, login
+or funding that you cannot resolve from existing setup.
+
+Run the fixture preflight below with Haiku. Headless is fine for this setup
+check; do not run the paid presentation prompts during setup.
+
+Use the built tenjin-auto-mode init command to prepare a live demo directory
+outside the repository. Automatic payment authorization is approved within
+$0.10 per call, $1 total per run and a 24-hour expiry, for exactly these routes:
+- POST https://api.exa.ai/search
+- POST https://vaaya.ai/api/run/firecrawl/scrape
+- GET https://pro-api.coinmarketcap.com/x402/v3/cryptocurrency/quotes/latest
+Use WebSearch discovery seeds "Exa web search" and "CoinMarketCap", and the
+WebFetch seed "Firecrawl scrape webpage". Reference the existing env file and
+wallet directory. Preserve a valid existing demo's config, policy and ledger;
+do not reset its budget or silently renew an expired run.
+
+Inspect the generated settings/config/policy and confirm the built hook path,
+three allowed routes, discovery seeds, payment caps and expiry. Keep native
+WebSearch/WebFetch permissions set to ask. Do not change them to allow.
+
+Finish with the demo directory, model, policy expiry, fixture result, and ONE
+copy-paste terminal command with real, safely quoted absolute paths to start
+interactive Claude Code. Use the interactive launch flags below. Do not use
+-p, pipe in the presentation prompts, start a background process, or launch
+the interactive session inside your own tool. Give me the three prompts below
+in presentation order. Wait for me to run the actual demo.
+```
+
+An existing Claude login or wallet funding may need a human action. The setup agent should name the missing prerequisite precisely. Everything else in this recipe can be performed by the agent.
+
+### Commands for the setup agent
+
+Run from the PR checkout. Resolve the example paths before executing; choose new directories when starting a new authorized run. Reinitializing a directory is refused to preserve its budget identity.
 
 ```sh
 pnpm install --frozen-lockfile
 pnpm build
 
-# First inspect the hook with synthetic data, no Jev calls or provider payments.
+# Synthetic hook preflight: Claude inference, no Jev or provider payment.
 node dist/tenjin-auto-mode.mjs init --directory /tmp/tenjin-auto-fixture
 node scripts/auto-mode-demo.mjs --config /tmp/tenjin-auto-fixture/config.json --model haiku \
   --prompt 'Use WebSearch to find the Northstar archive verification code and cite its source.'
 
-# Use a NEW directory for the bounded live run.
 node dist/tenjin-auto-mode.mjs init \
   --directory /tmp/tenjin-auto-live --mode live \
   --env-file /absolute/path/to/existing.env \
@@ -25,27 +76,68 @@ node dist/tenjin-auto-mode.mjs init \
   --search-query 'Exa web search' 'CoinMarketCap' \
   --fetch-query 'Firecrawl scrape webpage' \
   --allow-resource POST:https://api.exa.ai/search POST:https://vaaya.ai/api/run/firecrawl/scrape GET:https://pro-api.coinmarketcap.com/x402/v3/cryptocurrency/quotes/latest
-
-node scripts/auto-mode-demo.mjs --config /tmp/tenjin-auto-live/config.json --model haiku
-node scripts/auto-mode-demo.mjs --config /tmp/tenjin-auto-live/config.json --model haiku \
-  --tool WebFetch --prompt 'Use WebFetch to read https://example.com. Summarize the page and cite its URL.'
-
-# Same WebSearch hook and candidate set; Jev can select a structured data API.
-node scripts/auto-mode-demo.mjs --config /tmp/tenjin-auto-live/config.json --model haiku \
-  --prompt 'Use WebSearch to get CoinMarketCap’s latest USD quotes for the symbols `BTC,ETH`. Report both prices and cite the data source.'
 ```
 
-The live setup automatically authorizes payments within an explicit action scope, with a **$0.10 per-call ceiling and $1 total run ceiling**, expiring after 24 hours. Exa, Vaaya and direct CoinMarketCap are the demo's selected sellers; Vaaya advertises its service as Firecrawl scraping. The executor does not independently attest Vaaya's backend implementation. These URLs are local spending scope, not an importer admission list. Keep the same directory across trials so they share the same budget. Reinitializing a directory is refused. Jev and Claude inference costs are separate; the headless script caps each Claude invocation at $0.50 and four turns.
+## Run the presentation interactively
 
-For a live presentation, start with the search command above. It uses a normal task prompt, shows Claude's answer and cited sources, and writes an auditable report. Then run the WebFetch example to show the same hook executing a different schema. Haiku is the default and its observed model is checked; `--model sonnet` is also accepted. No Fable model is selected.
+Open your own terminal and paste the resolved launch command the setup agent gives you. For the example directory above:
 
-Finish with the crypto prompt. The two WebSearch discovery seeds retain both ordinary search and CoinMarketCap candidates; Jev chooses from their real Bazaar contracts according to the task. Quoted/backticked values such as `BTC,ETH` are copied into the finite argument-choice set, so the router need not invent or parse a ticker list semantically. Up to three query seeds run in parallel, with deterministic interleaving, deduplication and a 20-candidate cap. Legacy single-string filters still work. Omitting seeds uses the task text; Bazaar ranking can then omit a desired seller. Search failures and truncated candidate sets are recorded explicitly.
+```sh
+cd /tmp/tenjin-auto-live
+claude --model haiku \
+  --tools 'WebSearch,WebFetch' \
+  --permission-mode dontAsk \
+  --settings /tmp/tenjin-auto-live/settings.json \
+  --setting-sources '' --strict-mcp-config \
+  --disable-slash-commands --no-chrome
+```
 
-BTC/ETH are demo inputs, not an asset allowlist. Other quoted ticker, slug or ID lists can be selected under the same contract and provider limits. Ticker symbols are not globally unique; explicit CoinMarketCap IDs or slugs avoid ambiguous matches. Large result sets receive an explicitly partial preview, with the complete response retained locally.
+This opens the normal Claude Code conversation UI. Complete any startup trust/login screen, then check the displayed model is Haiku. `dontAsk` controls tool permissions; it does not make the session headless. With the generated `ask` rules, native search/fetch fallback is denied if the hook fails. Keep those rules and the launch flags together. No `--allowedTools` override, native auto mode, or bypass mode is needed. Claude documents [interactive startup and CLI flags](https://code.claude.com/docs/en/cli-reference) and [permission modes](https://code.claude.com/docs/en/permissions).
 
-The script runs from the experiment directory with only the requested native tool, explicit settings, no external MCP configuration, and slash-command skills disabled. Generated settings mark native search/fetch as `ask`; headless `dontAsk` then denies native fallback if the hook fails. Managed Claude settings still apply. Keep session persistence enabled: `--no-session-persistence` removes the transcript the hook needs.
+Type these prompts **one at a time in the same conversation**, waiting for each answer:
 
-Each run saves `runs/<session>/report.json` and Claude's stream. `state/outcomes/` contains the result for each event, `state/events.jsonl` contains compact redacted decisions, and `state/run-*.json` holds payment attempts and budget accounting. Result bodies and conversation streams can contain private task data; these files stay local. Inspect `policy.json` to change caps/scope or set authorization to `disabled`. No server remains running. No teardown command is needed because registration is supplied only to those Claude invocations. Retain state for reconciling uncertain payments.
+1. **Search → Exa**
+
+   ```text
+   Use WebSearch to find official x402 protocol documentation. Give two source links with a one-sentence description of each.
+   ```
+
+2. **Page extraction → Firecrawl through Vaaya**
+
+   ```text
+   Use WebFetch to read https://example.com. Summarize the page and cite its URL.
+   ```
+
+3. **Situational WebSearch → direct CoinMarketCap**
+
+   ```text
+   Use WebSearch to get CoinMarketCap's latest USD quotes for the symbols `BTC,ETH`. Report both prices and cite the data source.
+   ```
+
+The third prompt is the key demonstration: the same WebSearch hook has both search and crypto candidates, and Jev selects the structured price API for the task. Each successful step should produce an answer with sources. A native tool denial can appear in the UI because the hook supplies the fulfilled paid result as context and suppresses the original call. A denial by itself is not a successful demo; check the answer and the saved provider outcome.
+
+Vaaya advertises its service as Firecrawl scraping; the executor does not independently attest its backend implementation. Expected provider costs from the tested runs are $0.007 for Exa, $0.01 for Vaaya and $0.01 for CoinMarketCap. The live quote must still pass the current policy and listing checks. Jev and Claude inference are separate costs. **The interactive session has no headless runner's $0.50/four-turn inference cap**; the local $0.10/call and $1/run payment caps still apply. Exit Claude when the presentation is done.
+
+The two WebSearch seeds retain ordinary search and CoinMarketCap candidates. Quoted/backticked values such as `BTC,ETH` are copied into Jev's finite argument-choice set. Up to three discovery seeds run in parallel, with deterministic interleaving, deduplication and a 20-candidate cap. Legacy single-string filters still work. Omitting seeds uses the task text; Bazaar ranking can then omit a desired seller. Search failures and truncated candidate sets are recorded explicitly.
+
+BTC/ETH are demo inputs, not an asset allowlist. Other quoted ticker, slug or ID lists use the same contract and provider limits. Symbols are not globally unique; explicit CoinMarketCap IDs or slugs avoid ambiguous matches. Large result sets receive an explicitly partial preview, with the complete response retained locally.
+
+### Let the setup agent inspect a run
+
+Keep the preparation conversation available separately. After the presentation, give it this request, replacing the directory if needed:
+
+```text
+Inspect the local Jev x402 demo artifacts in /tmp/tenjin-auto-live without
+making another provider request. For the latest presentation, report the
+selected endpoint and arguments, outcome, provider amount and receipt status
+for each call. Compare both requested crypto prices with the saved response.
+Use outcomes and ledger entries, not just a tool-denied UI message. Report
+missing evidence honestly. Do not print credentials or signed payment data.
+```
+
+Interactive hook calls write `state/outcomes/`, `state/events.jsonl` and `state/run-*.json`; Claude keeps its normal session transcript. The `runs/<session>/report.json` files belong to the headless validation script and are **not** generated by the interactive launch. Artifacts can contain private task data and stay local. Reuse the same demo directory to preserve cumulative spending. If the policy expires, return to the setup agent for an explicit new run instead of clearing the ledger. If a call is pending or its payment transmission is uncertain, inspect that attempt before retrying.
+
+Keep session persistence enabled: `--no-session-persistence` removes the transcript the hook needs. Managed settings still apply. The presentation exposes only WebSearch/WebFetch; installation, configuration and artifact inspection belong in the separate preparation conversation. To resume, start from the same directory with the same launch flags plus `--resume <session-id>`. Registration applies only to those invocations, so exiting Claude is the teardown; retain state for reconciliation.
 
 ## Validation and evidence
 
@@ -61,7 +153,21 @@ An initial generic WebFetch prompt returned `needs_input`. Clarifying that the s
 - Deterministic tests cover quote substitution, revocation, concurrent claims, budget reservation, ambiguous transmissions, replay without signing again, schema constraints, public destination checks, and a two-step Exa/Tavily-style fixture workflow. Tavily is synthetic in these tests.
 - The live report validator requires successful process exit, the requested model, exactly one matching native call denied, a fulfilled current-event provider result, HTTP 200, and a final citation to a returned URL or the actual supplying endpoint. Structured data APIs need not invent a URL field to supply provenance. An unrelated URL or stale prior result cannot pass. These transport gates do not prove factual completeness; the final demo answers were also checked against saved provider results.
 
-Repeat focused checks and unpaid model evaluation:
+The live results above were measured with the headless validation harness. They establish the paid call paths; they are not evidence that the full three-prompt interactive conversation has already been tested. The presentation instructions use interactive CLI flags checked against Claude Code 2.1.278.
+
+For automated revalidation, the agent can run the three paid cases through the existing harness instead of presenting them interactively. These are optional validation commands, sharing the same local payment policy:
+
+```sh
+node scripts/auto-mode-demo.mjs --config /tmp/tenjin-auto-live/config.json --model haiku
+node scripts/auto-mode-demo.mjs --config /tmp/tenjin-auto-live/config.json --model haiku \
+  --tool WebFetch --prompt 'Use WebFetch to read https://example.com. Summarize the page and cite its URL.'
+node scripts/auto-mode-demo.mjs --config /tmp/tenjin-auto-live/config.json --model haiku \
+  --prompt 'Use WebSearch to get CoinMarketCap latest USD quotes for the symbols `BTC,ETH`. Report both prices and cite the data source.'
+```
+
+The harness uses only the requested tool, a persisted session, a 120-second process timeout, a $0.50 Claude inference cap and four turns. It saves Claude's stream and `runs/<session>/report.json`, verifies the observed model, and stops its child processes. `--model sonnet` is also supported; no Fable model is selected.
+
+Repeat focused checks and model evaluation without provider payments:
 
 ```sh
 pnpm exec vitest run src/experimental/auto-mode
