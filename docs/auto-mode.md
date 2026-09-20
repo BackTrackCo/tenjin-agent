@@ -31,18 +31,18 @@ Only the two local x402 tools and their hook are configured. Normal user/project
 First:
 
 ```text
-Compare BTC and ETH for someone new to crypto: how do their networks work, and what is each used for? Use current sources.
+Compare BTC and ETH for someone new to crypto
 ```
 
 After the answer:
 
 ```text
-Check fresh USD quotes for both now, including their 24-hour changes and quote timestamps.
+Check price for both now
 ```
 
-The second request relies on the conversation for “both,” asks for a new observation, and does not name a service or tool. A hook can only run when Claude requests a tool. The earlier market-cap → “their prices” pair sometimes led Claude to reuse prices already returned in the first answer; that was not a second routing demonstration. This version explicitly requests fresh quotes. It does not hide fields in the first response to manufacture a reason for another call.
+The second request relies on the conversation for “both,” asks for current prices, and names no service or tool. The comparison can be answered from Claude’s existing knowledge; it establishes context, so a paid call is not required on that turn. A hook can only run when Claude requests a tool. The earlier market-cap → “their prices” pair sometimes led Claude to reuse prices already returned in the first answer; that was not a second routing demonstration. The comparison opener avoids asking for market data before the price follow-up. It does not hide fields in the first response to manufacture a reason for another call.
 
-Alternatively, keep “What are the two biggest cryptocurrencies by market cap?” as the first question and use the same **fresh quotes** follow-up. Check the saved outcomes to establish that a new request actually occurred. A new HTTP fetch does not guarantee the provider updated its market data after the user asked; show the provider's quote timestamps honestly.
+If you use the market-cap opener instead, “Check fresh quotes for both now” makes a new observation explicit when the first answer already contains prices. Check the saved outcomes to establish that a new request actually occurred. A new HTTP fetch does not guarantee the provider updated its market data after the user asked; show the provider's quote timestamps honestly.
 
 Additional natural tasks:
 
@@ -196,9 +196,11 @@ Claude Code 2.1.278 initialized `claude-sonnet-5` with `permissionMode: auto`. T
 
 The two-turn network-comparison → fresh-quotes dialogue used one persisted Sonnet session. The first turn made two Exa and two Vaaya calls ($0.034); the follow-up made two new, uncached CoinMarketCap requests, both with exactly `symbol=BTC,ETH` ($0.02). Both turns used normal successful MCP results. The first passed all 20 gates. The follow-up passed all 18 execution/receipt gates but failed the two citation gates: Sonnet named CoinMarketCap and printed its endpoint without `https://` as code rather than a clickable source. That failure remains recorded. Offline numerical validation passed all ten checks: both displayed prices and 24-hour changes matched the saved and delivered data to two decimals, and both displayed quote timestamps matched. The requests occurred after the follow-up user message; the provider's quote data was about 111 seconds old at delivery. Separate tool-use IDs can still produce semantically duplicate requests and charges; this MVP deduplicates event replay, not arbitrary semantic duplication.
 
-The three paid invocations cost $0.2466216 in Claude inference, excluding Jev. Provider spend for this validation was $0.081 USDC. At this checkpoint the preserved shared ledger accounted for $0.322 USDC, leaving $0.678 under the original $1 cap, with no unresolved attempts. These are dated preparation figures, not a promise of the remaining balance after another presentation. The actual updated interactive launch remains for the presenter; headless evidence does not establish pixel-level terminal appearance.
+The primary minimal pair was then tested exactly as written above. “Compare BTC and ETH for someone new to crypto” completed from existing knowledge with zero tool calls and zero hook/provider executions; it is a context turn, not a paid-call success. “Check price for both now” made **one** new uncached CoinMarketCap call with exactly `symbol=BTC,ETH`, cost $0.01, and returned a normal successful MCP result. All 18 execution/receipt checks passed. The answer named CoinMarketCap, and prices plus displayed percentage changes matched the saved/delivered response at the displayed precision. It had no clickable citation, so the two citation checks remain failed. The displayed 22:35 UTC time was a rounded market timestamp (quote data 22:34:58), not the 22:36:07 fetch response time. This pair cost $0.0524252 Claude inference, excluding Jev. The generic paid-call harness intentionally rejects a zero-tool first turn; a separate scenario check verifies that it established context, without weakening the paid-call gates.
 
-Focused validation now totals 222 TypeScript tests and 42 Node harness tests; the complete focused suite passed before the final summary-length regression, then the changed bridge/setup files passed again. Workspace lint, format, typecheck and package smoke passed. Cancellation tests exercise real local child groups and verify SIGINT/SIGTERM cleanup without model calls. GitHub full CI remains unrequested; the PR stays draft.
+The three paid invocations cost $0.2466216 in Claude inference, excluding Jev. Provider spend for this validation was $0.081 USDC. After the additional minimal-prompt test, the preserved shared ledger accounted for $0.332 USDC, leaving $0.668 under the original $1 cap, with no unresolved attempts. These are dated preparation figures, not a promise of the remaining balance after another presentation. The actual updated interactive launch remains for the presenter; headless evidence does not establish pixel-level terminal appearance.
+
+Focused validation now totals 222 TypeScript tests and 42 Node harness tests; the complete focused suite passed before the final summary-length regression, then the changed bridge/setup files passed again. Workspace lint, format, typecheck and package smoke passed. Cancellation tests exercise real local child groups and verify SIGINT/SIGTERM cleanup without model calls. Normal tenjin-agent PR CI runs automatically, with no `ci` label required; its build, typecheck, full tests and package smoke passed for the bridge implementation. The PR stays draft.
 
 ### Earlier evidence and limits
 
