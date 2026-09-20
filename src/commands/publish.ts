@@ -396,7 +396,7 @@ export async function runPublish(
       ),
     );
   }
-  return receipt(result, runtime.baseUrl, searches, agentId);
+  return receipt(result, runtime.baseUrl, searches, agentId, targetShelf);
 }
 
 /**
@@ -629,6 +629,7 @@ function receipt(
   baseUrl: string,
   searches: SearchReceipt[],
   agentId: string | null,
+  targetShelf: string | null,
 ): CommandResult {
   const price = toMoney(result.priceAtomic);
   const missing = missingSentences(result.cacheEligibleMissing).map(sanitizeForTerminal);
@@ -636,6 +637,14 @@ function receipt(
   const deskUrl = `${trimSlash(baseUrl)}/desk`;
   const title = sanitizeForTerminal(result.title);
   const undo = undoCommands(result.resourceId, result.status);
+  // WHERE IT LANDED, SAID OUT LOUD. The shelf left the URL: a shelf piece and a
+  // marketplace piece now come back from the same host with URLs of the same
+  // shape, so nothing in the line above distinguishes "my team can read this"
+  // from "the world can". That is the one fact an author most needs to be sure
+  // of, and inferring it from an absent `--public` is exactly the guess a
+  // receipt exists to remove. The qualified shelf name or the word `public`,
+  // and never a host, because the host is no longer the answer.
+  const destination = targetShelf ?? 'public';
   // status and url are server-sent open strings (posts-api declares both as bare
   // z.string()), so they get the same treatment as the title beside them: this
   // line is what an author reads to learn where their piece went.
@@ -646,7 +655,7 @@ function receipt(
   // deliberately lets through: a draft, which parks unfinished and is told what
   // finishing it still needs. Server warnings of every other kind still print.
   const human = [
-    `Published ${title} (${sanitizeForTerminal(result.status)}) for ${price.usd} USD → ${sanitizeForTerminal(result.url)}`,
+    `Published ${title} (${sanitizeForTerminal(result.status)}) to ${sanitizeForTerminal(destination)} for ${price.usd} USD → ${sanitizeForTerminal(result.url)}`,
     ...(missing.length > 0 ? [`Answer card incomplete: ${missing.join(' ')}`] : []),
     ...searches.filter((s) => s.closed).map(closeLine),
     undoLine(undo),
@@ -658,6 +667,10 @@ function receipt(
       resourceId: result.resourceId,
       url: result.url,
       status: result.status,
+      // The qualified shelf name, or `public`. Always present, unlike
+      // `publishedBy` below: a reader that has to tell an absent key from a
+      // public publish is back to guessing.
+      destination,
       price,
       cacheEligible,
       missing,

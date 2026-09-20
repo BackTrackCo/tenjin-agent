@@ -593,6 +593,28 @@ describe('runPublish — exit-code conformance', () => {
 });
 
 describe('runPublish — receipt + card echo', () => {
+  /**
+   * WHERE IT LANDED IS NOT IN THE URL ANY MORE. Shelf and marketplace share one
+   * host, so two pieces with the same URL shape can have completely different
+   * audiences, and the receipt is the only thing that can say which. A machine
+   * reader gets `data.destination`; a human gets it in the first line.
+   *
+   * This asserts the PUBLIC half. The shelf half is in `runPublish on a team
+   * shelf` below, and both are needed: a receipt hardcoding either word passes
+   * one of them.
+   */
+  it('names the destination as public when no shelf is configured', async () => {
+    const { fetch } = stubServer(CREATED);
+    const { provider } = spyProvider();
+    const res = await runPublish(
+      baseArgs(await writeDoc(CLEAN), { mode: 'auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider }),
+    );
+    expect(res.data).toMatchObject({ destination: 'public' });
+    expect(res.humanLines?.[0]).toContain('to public for');
+  });
+
   // A DRAFT, because the card here is deliberately incomplete and that is the
   // one publish the gate lets through: what the server reports missing is what
   // the author still has to write before it can go up.
@@ -644,7 +666,7 @@ describe('runPublish — receipt + card echo', () => {
     );
     const line = res.humanLines?.[0] ?? '';
     expect(line).toBe(
-      'Published The Answer (publisheddraft) for 0.1 USD → https://preview.example/a/iris/gpj.exe',
+      'Published The Answer (publisheddraft) to public for 0.1 USD → https://preview.example/a/iris/gpj.exe',
     );
     // eslint-disable-next-line no-control-regex
     expect(/[\u001b\u202a-\u202e]/.test(line)).toBe(false);
@@ -1877,6 +1899,10 @@ describe('runPublish on a team shelf', () => {
     // To the configured base, naming the shelf in the body.
     expect(new URL(sent[0]!.url).origin).toBe(TEAM);
     expect(sent[0]!.body?.shelf).toBe(SHELF);
+    // AND THE RECEIPT SAYS SO. The qualified name, not `public` and not a
+    // host: this is the line that tells the author only their team can read it.
+    expect(res.data).toMatchObject({ destination: SHELF });
+    expect(res.humanLines?.[0]).toContain(`to ${SHELF} for`);
     // Free by default: a teammate must not hit a 402 on their own team's finding.
     expect(sent[0]!.body?.price).toBe('0');
   });
