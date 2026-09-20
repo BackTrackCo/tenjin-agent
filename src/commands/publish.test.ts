@@ -1799,7 +1799,7 @@ describe('runPublish — a search the store could not close reports closed:false
  */
 describe('runPublish on a team shelf', () => {
   const TEAM = 'https://team.example';
-  const SHELF = 'backtrack';
+  const SHELF = 'backtrack/backtrack';
 
   interface Sent {
     url: string;
