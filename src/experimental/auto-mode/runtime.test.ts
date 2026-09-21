@@ -9,7 +9,7 @@ import { demoCatalog } from './demo-catalog';
 import math from './fixtures/cdp-math-resources.json';
 import * as localWallet from '../../lib/wallet/local';
 import * as paymentBuilder from '../../lib/x402-pay';
-import { testSigner } from '../../lib/read-test-utils';
+import { buildPaymentRequired, testSigner, testWalletProvider } from '../../lib/read-test-utils';
 import type { TenjinSigner } from '../../lib/wallet/provider';
 import type { AutoConfig, RuntimeDeps } from './runtime';
 import type { HookEvent, TaskContext } from './context';
@@ -240,13 +240,14 @@ describe('hook result delivery', () => {
       return unlocking;
     });
     const wallet = vi.spyOn(localWallet, 'createLocalProvider').mockReturnValue({
+      ...testWalletProvider(),
       getSigner,
-    } as ReturnType<typeof localWallet.createLocalProvider>);
+    });
     const build = vi.spyOn(paymentBuilder, 'buildExactPayment');
     const contract = compileResource(FIXTURE_RESOURCE);
     if (contract.status !== 'supported') throw new Error('Fixture must compile.');
     const execute = vi.fn<typeof executePaidRequest>(async (_input, dependencies) => {
-      await dependencies.signPayment({ x402Version: 2, accepts: [] });
+      await dependencies.signPayment(buildPaymentRequired().paymentRequired);
       throw new Error('An aborted wallet must not reach payment construction.');
     });
     try {
