@@ -163,6 +163,7 @@ export async function executeWorkflow(
           },
           operation: step.operation ?? 'workflow',
           advertisedAccepts: step.contract.accepts,
+          ...(step.contract.resultSchema ? { resultSchema: step.contract.resultSchema } : {}),
         },
         deps,
       );

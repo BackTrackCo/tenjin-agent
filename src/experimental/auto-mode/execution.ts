@@ -12,6 +12,7 @@ import { fsyncDir, writeFileAtomic } from '../../lib/atomic-json';
 import { withFileLock } from '../../lib/lock';
 import { USDC_ADDRESS } from '../../lib/usdc';
 import type { BuiltPayment } from '../../lib/x402-pay';
+import { validateResultBody, validateResultSchema } from './contracts';
 
 export interface AutoHttpRequest {
   url: string;
@@ -59,6 +60,8 @@ export interface PaidRequestInput {
   operation: string;
   /** Catalog terms from the pinned contract, independent of the live merchant. */
   advertisedAccepts: unknown[];
+  /** Trusted local contract condition; never derived from provider result content. */
+  resultSchema?: Record<string, unknown>;
 }
 
 export interface ExecutionResult {
@@ -495,6 +498,10 @@ export async function executePaidRequest(
     let peerDeadline: number | undefined;
     identitySchema.parse(input.identity);
     assertRequestSafe(input.request);
+    if (input.resultSchema !== undefined) {
+      stage = 'result-contract-validation';
+      validateResultSchema(input.resultSchema);
+    }
     policy = policySchema.parse(await deps.readPolicy());
     const policyHash = hash(policy);
     const key = hash([input.identity.sessionId, input.identity.requestId, input.identity.stepId]);
@@ -686,7 +693,15 @@ export async function executePaidRequest(
     if (probe.status >= 300 && probe.status <= 399)
       stop('refused', 'Endpoint redirects are refused.');
     if (probe.status >= 200 && probe.status <= 299) {
-      const result: ExecutionResult = { status: 'fulfilled', response: probe, amountAtomic: '0' };
+      const resultCheck = input.resultSchema
+        ? validateResultBody(input.resultSchema, probe.body)
+        : { valid: true };
+      const result: ExecutionResult = {
+        status: resultCheck.valid ? 'fulfilled' : 'failed',
+        ...(resultCheck.valid ? {} : { reason: `${resultCheck.reason} No automatic retry.` }),
+        response: probe,
+        amountAtomic: '0',
+      };
       await update('completed', { result });
       return result;
     }
@@ -744,11 +759,18 @@ export async function executePaidRequest(
     }
     stage = 'paid-request';
     const paid = responseSchema.parse(await transport(input.request, payment.headers));
+    const httpSuccess = paid.status >= 200 && paid.status <= 299;
+    const resultCheck =
+      httpSuccess && input.resultSchema
+        ? validateResultBody(input.resultSchema, paid.body)
+        : { valid: true };
     const result: ExecutionResult = {
-      status: paid.status >= 200 && paid.status <= 299 ? 'fulfilled' : 'failed',
-      ...(paid.status < 200 || paid.status >= 300
+      status: httpSuccess && resultCheck.valid ? 'fulfilled' : 'failed',
+      ...(!httpSuccess
         ? { reason: `Paid endpoint returned HTTP ${paid.status}; no automatic retry.` }
-        : {}),
+        : resultCheck.valid
+          ? {}
+          : { reason: `${resultCheck.reason} No automatic retry.` }),
       response: paid,
       amountAtomic: amount.toString(),
       settlement: settlement(paid),

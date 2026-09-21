@@ -5,7 +5,7 @@ import { mask } from '../../lib/redact';
 import { writeFileAtomic } from '../../lib/atomic-json';
 import { buildExactPayment } from '../../lib/x402-pay';
 import { createLocalProvider } from '../../lib/wallet/local';
-import { buildRequest, compileResource, contractHash } from './contracts';
+import { buildRequest, compileResource, contractHash, validateResultSchema } from './contracts';
 import type { AutoContract } from './contracts';
 import { CDP_BAZAAR, discoverCandidates } from './catalog';
 import { fingerprint, HookEventSchema, readTaskContext } from './context';
@@ -45,6 +45,20 @@ const LocalCatalogSchema = z.object({
   fetchedAt: z.string().datetime(),
   resources: z.array(z.unknown()).min(1).max(20),
   provenance: z.array(z.unknown()).max(20).optional(),
+  // Operator-owned curation, separate from untrusted Bazaar resource metadata.
+  resultContracts: z
+    .array(
+      z
+        .object({
+          url: z.string().url(),
+          method: z.enum(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']),
+          schema: z.record(z.string(), z.unknown()),
+          provenance: z.string().min(1).max(2000).optional(),
+        })
+        .strict(),
+    )
+    .max(20)
+    .optional(),
 });
 export type AutoConfig = z.infer<typeof ConfigSchema>;
 export type Outcome = {
@@ -206,7 +220,25 @@ export async function routeEvent(
       const raw = await readFile(config.catalogFile, 'utf8');
       if (Buffer.byteLength(raw) > 2 * 1024 * 1024) throw new Error('Local catalog exceeds 2 MiB.');
       const catalog = LocalCatalogSchema.parse(JSON.parse(raw));
-      const compiled = catalog.resources.map(compileResource);
+      const resultContracts = new Map<string, Record<string, unknown>>();
+      for (const entry of catalog.resultContracts ?? []) {
+        const key = `${entry.method}:${entry.url}`;
+        if (resultContracts.has(key)) throw new Error('Duplicate local result contract.');
+        validateResultSchema(entry.schema);
+        resultContracts.set(key, entry.schema);
+      }
+      const matched = new Set<string>();
+      const compiled = catalog.resources.map((resource) => {
+        const base = compileResource(resource);
+        if (base.status !== 'supported') return base;
+        const key = `${base.contract.method}:${base.contract.url}`;
+        const resultSchema = resultContracts.get(key);
+        if (!resultSchema) return base;
+        matched.add(key);
+        return compileResource(resource, { resultSchema });
+      });
+      if (matched.size !== resultContracts.size)
+        throw new Error('A local result contract does not match a supported resource.');
       contracts = [
         ...new Map(
           compiled.flatMap((entry) =>
@@ -227,6 +259,7 @@ export async function routeEvent(
           catalogHash: fingerprint(raw),
           resources: catalog.resources,
           provenance: catalog.provenance,
+          resultContracts: catalog.resultContracts,
           contracts,
           rejected,
           partial: rejected.length > 0,
@@ -452,6 +485,7 @@ async function runUncachedEvent(
       },
       operation: route.operation,
       advertisedAccepts: route.contract.accepts,
+      ...(route.contract.resultSchema ? { resultSchema: route.contract.resultSchema } : {}),
     },
     executionDeps,
   );

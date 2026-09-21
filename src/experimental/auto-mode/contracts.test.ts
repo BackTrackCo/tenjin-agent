@@ -6,6 +6,8 @@ import {
   compileResource,
   decodeResult,
   validateArguments,
+  validateResultBody,
+  validateResultSchema,
 } from './contracts';
 import type { AutoContract } from './contracts';
 
@@ -398,5 +400,58 @@ describe('automatic Bazaar contract generation', () => {
     });
     expect(() => decodeResult('opaque', 'application/octet-stream')).toThrow('Unsupported');
     expect(() => decodeResult('x'.repeat(128 * 1024 + 1), 'text/plain')).toThrow('limit');
+  });
+});
+
+describe('trusted application result contracts', () => {
+  const resultSchema = {
+    type: 'object',
+    properties: { success: { const: true }, items: { type: 'array', minItems: 1 } },
+    required: ['success', 'items'],
+  };
+
+  it('accepts success rules only through the trusted compiler option and fingerprints them', () => {
+    const source = listing({ method: 'POST', bodyType: 'json' }, { body });
+    const ordinary = contract(source);
+    const supplied = contract({ ...source, resultSchema });
+    expect(supplied.resultSchema).toBeUndefined();
+    expect(supplied.sourceHash).toBe(ordinary.sourceHash);
+    const rules = structuredClone(resultSchema);
+    const compiled = compileResource(source, { resultSchema: rules });
+    if (compiled.status !== 'supported') throw new Error(compiled.reasons.join('; '));
+    expect(compiled.contract.resultSchema).toEqual(resultSchema);
+    expect(compiled.contract.sourceHash).not.toBe(ordinary.sourceHash);
+    expect(compiled.contract.id).toBe(ordinary.id);
+    rules.properties.items.minItems = 2;
+    expect(compiled.contract.resultSchema).toEqual(resultSchema);
+    const changed = compileResource(source, { resultSchema: rules });
+    if (changed.status !== 'supported') throw new Error(changed.reasons.join('; '));
+    expect(changed.contract.sourceHash).not.toBe(compiled.contract.sourceHash);
+  });
+
+  it('requires the declared success conditions without coercing or repairing provider data', () => {
+    expect(validateResultBody(resultSchema, '{"success":true,"items":[1]}')).toEqual({
+      valid: true,
+    });
+    for (const value of [
+      '{"success":false,"items":[1]}',
+      '{"success":true,"items":[]}',
+      '{"success":"true","items":[1]}',
+      '{"success":true}',
+      'not JSON',
+      `{"success":true,"items":["${'x'.repeat(128 * 1024)}"]}`,
+    ])
+      expect(validateResultBody(resultSchema, value).valid).toBe(false);
+  });
+
+  it.each([
+    { type: 'unknown' },
+    { type: 'string', pattern: 'unsafe' },
+    { $ref: 'https://seller.example/schema' },
+  ])('rejects malformed or unsupported local result schemas before compilation', (schema) => {
+    expect(() => validateResultSchema(schema)).toThrow();
+    expect(compileResource(listing({ method: 'GET' }, {}), { resultSchema: schema }).status).toBe(
+      'unsupported',
+    );
   });
 });

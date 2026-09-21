@@ -1,8 +1,12 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { hookOutput, runEvent, fixtureChooser } from './runtime';
+import { hookOutput, runEvent, routeEvent, fixtureChooser, FIXTURE_RESOURCE } from './runtime';
+import { compileResource, validateResultBody } from './contracts';
+import { createBridgeHookOutput, readBridgeResult } from './bridge';
+import { demoCatalog } from './demo-catalog';
+import math from './fixtures/cdp-math-resources.json';
 import type { AutoConfig, RuntimeDeps } from './runtime';
 import type { HookEvent, TaskContext } from './context';
 import type { PaymentRequired } from '@x402/core/types';
@@ -15,6 +19,183 @@ afterEach(async () => {
   await Promise.all(
     directories.splice(0).map((path) => rm(path, { recursive: true, force: true })),
   );
+});
+
+describe('operator-owned local result contracts', () => {
+  const schema = {
+    type: 'object',
+    properties: { success: { const: true } },
+    required: ['success'],
+  };
+  const entry = {
+    url: FIXTURE_RESOURCE.resource,
+    method: 'POST',
+    schema,
+    provenance: 'Operator-selected success envelope.',
+  };
+  const context: TaskContext = {
+    messages: [{ role: 'user', text: 'Find the archive.' }],
+    fingerprint: 'catalog-result-context',
+  };
+
+  async function localCatalog(resultContracts?: unknown[], resource: unknown = FIXTURE_RESOURCE) {
+    const setup = { ...(await config()), mode: 'route' as const, catalogFile: '' };
+    setup.catalogFile = join(setup.stateDir, 'catalog.json');
+    await writeFile(
+      setup.catalogFile,
+      JSON.stringify({
+        source: 'https://api.cdp.coinbase.com/platform/v2/x402/discovery/resources',
+        fetchedAt: '2026-09-21T00:00:00.000Z',
+        resources: [resource],
+        ...(resultContracts ? { resultContracts } : {}),
+      }),
+    );
+    return setup;
+  }
+
+  it('loads trusted rules into the selected contract, persisted audit, and contract hash', async () => {
+    const setup = await localCatalog([entry]);
+    const route = await routeEvent(event, setup, { context, choose: fixtureChooser });
+    if (route.status !== 'selected') throw new Error('Expected the fixture search selection.');
+    const ordinary = compileResource(FIXTURE_RESOURCE);
+    if (ordinary.status !== 'supported') throw new Error('Fixture must compile.');
+    expect(route.contract.resultSchema).toEqual(schema);
+    expect(route.contract.sourceHash).not.toBe(ordinary.contract.sourceHash);
+    expect(route.contract.id).toBe(ordinary.contract.id);
+    const audit = JSON.parse(await readFile(join(setup.stateDir, 'catalog-last.json'), 'utf8'));
+    expect(audit.resultContracts).toEqual([entry]);
+    expect(audit.contracts).toHaveLength(1);
+    expect(audit.contracts[0].resultSchema).toEqual(schema);
+    const saved = JSON.parse(
+      await readFile(
+        join(setup.stateDir, 'contracts', `${route.contract.sourceHash}.json`),
+        'utf8',
+      ),
+    );
+    expect(saved.resultSchema).toEqual(schema);
+  });
+
+  it('does not grant raw resource resultSchema metadata authority', async () => {
+    const setup = await localCatalog(undefined, {
+      ...FIXTURE_RESOURCE,
+      resultSchema: schema,
+      resultContracts: [entry],
+    });
+    const route = await routeEvent(event, setup, { context, choose: fixtureChooser });
+    if (route.status !== 'selected') throw new Error('Expected the fixture search selection.');
+    expect(route.contract.resultSchema).toBeUndefined();
+  });
+
+  it.each([
+    ['duplicate', [entry, entry]],
+    ['unmatched URL', [{ ...entry, url: 'https://another.example/search' }]],
+    ['unmatched method', [{ ...entry, method: 'GET' }]],
+    ['malformed schema', [{ ...entry, schema: { type: 'invalid' } }]],
+    ['unsupported schema', [{ ...entry, schema: { $ref: 'https://seller.example/schema' } }]],
+  ])('rejects %s rules before selection or execution', async (_name, entries) => {
+    const setup = await localCatalog(entries as unknown[]);
+    const choose = vi.fn(fixtureChooser);
+    const execute = vi.fn<typeof executePaidRequest>();
+    await expect(runEvent(event, setup, { context, choose, execute })).rejects.toThrow();
+    expect(choose).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('forwards trusted rules and delivers a paid HTTP 200 application failure without claiming fulfillment', async () => {
+    const setup = { ...(await localCatalog([entry])), mode: 'live' as const };
+    const execute = vi.fn<typeof executePaidRequest>().mockResolvedValue({
+      status: 'failed',
+      reason:
+        'Result does not satisfy the configured application success schema. No automatic retry.',
+      amountAtomic: '7000',
+      response: {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+        body: '{"success":false}',
+      },
+      settlement: { status: 'reported' },
+    });
+    const signPayment = vi.fn(async () => {
+      throw new Error('No signing in this test.');
+    });
+    const outcome = await runEvent(event, setup, {
+      context,
+      choose: fixtureChooser,
+      execute,
+      executionDeps: {
+        stateDir: setup.stateDir,
+        signPayment,
+        readPolicy: async () => ({
+          runId: 'result-contract-test',
+          revision: '1',
+          authorization: 'auto',
+          expiresAtMs: Date.now() + 60_000,
+          maxCallAtomic: '10000',
+          maxRunAtomic: '10000',
+          allowedOperations: ['search'],
+        }),
+      },
+    });
+    expect(execute).toHaveBeenCalledOnce();
+    expect(execute.mock.calls[0]![0].resultSchema).toEqual(schema);
+    expect(outcome.status).toBe('failed');
+    expect(outcome.nativeContinuation).toBeUndefined();
+    const hook = await createBridgeHookOutput(
+      setup,
+      { ...event, tool_name: 'mcp__x402__search' },
+      outcome,
+    );
+    const delivered = await readBridgeResult(setup, 'search', hook.hookSpecificOutput.updatedInput);
+    expect(delivered.isError).toBe(true);
+    const text = delivered.content.flatMap((part) => (part.type === 'text' ? [part.text] : []));
+    expect(text[0]).not.toContain('Fulfilled by');
+    expect(JSON.parse(text[1]!)).toMatchObject({
+      status: 'failed',
+      httpStatus: 200,
+      amountAtomic: '7000',
+      settlement: { status: 'reported' },
+      result: '{"success":false}',
+    });
+    expect(signPayment).not.toHaveBeenCalled();
+  });
+
+  it('exports a minimum Wolfram success envelope rather than asserting mathematical truth', () => {
+    const catalog = demoCatalog();
+    expect(catalog.resultContracts).toEqual(math.resultContracts);
+    const rule = catalog.resultContracts[0]!;
+    expect(catalog.resources.some((resource) => resource.resource === rule.url)).toBe(true);
+    expect(
+      validateResultBody(
+        rule.schema,
+        JSON.stringify({ queryresult: { success: false, error: false, numpods: 0 } }),
+      ).valid,
+    ).toBe(false);
+    expect(
+      validateResultBody(
+        rule.schema,
+        JSON.stringify({ queryresult: { success: true, error: false, numpods: 0, pods: [] } }),
+      ).valid,
+    ).toBe(false);
+    expect(
+      validateResultBody(
+        rule.schema,
+        JSON.stringify({
+          queryresult: {
+            success: true,
+            error: false,
+            numpods: 1,
+            pods: [{ subpods: [{ plaintext: 'unverified provider answer' }] }],
+          },
+        }),
+      ).valid,
+    ).toBe(true);
+    expect(
+      validateResultBody(
+        rule.schema,
+        JSON.stringify({ queryresult: { success: true, error: true, numpods: 1, pods: [{}] } }),
+      ).valid,
+    ).toBe(false);
+  });
 });
 const event: HookEvent = {
   hook_event_name: 'PreToolUse',

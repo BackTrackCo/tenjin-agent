@@ -14,10 +14,11 @@ export function demoCatalog() {
       .sort()
       .at(-1)!,
     resources: [...research.resources, quotes.resource, ...enrichment.resources, ...math.resources],
+    resultContracts: math.resultContracts,
     provenance: captures.map((capture) =>
       Object.fromEntries(
         Object.entries(capture).filter(
-          ([key]) => !['resources', 'resource', 'companions'].includes(key),
+          ([key]) => !['resources', 'resource', 'companions', 'resultContracts'].includes(key),
         ),
       ),
     ),

@@ -41,7 +41,317 @@ function fieldsContract(properties: Record<string, Record<string, unknown>>) {
   return selected;
 }
 
+describe('source fidelity after a host argument proposal', () => {
+  const expression = 'Evaluate ∫₀¹ e^(−x²) cos(37x) dx to 12 decimal places.';
+  const proposal =
+    'Compute the integral of exp(-x^2) times cos(37*x) from zero to one, explaining the answer.';
+  const pending: HookEvent = { ...event, tool_name: 'Request', tool_input: { query: proposal } };
+  const task: TaskContext = {
+    messages: [
+      { role: 'user', text: `Use the following exact input.\n${expression}\nExplain the result.` },
+    ],
+    fingerprint: 'host-source-fidelity',
+  };
+
+  function proposeHost(questions: Parameters<Choose>[1], host: string) {
+    return Object.fromEntries(
+      Object.entries(questions).map(([key, question]) => {
+        const candidate = Object.entries(question.criteria).find(
+          ([, label]) => label === `pending tool.query: ${JSON.stringify(host)}`,
+        );
+        expect(candidate).toBeDefined();
+        return [key, { choice: candidate![0] }];
+      }),
+    );
+  }
+
+  it('corrects a whole host paraphrase to the exact user expression, including Unicode, bounds and precision', async () => {
+    let fidelityCalls = 0;
+    let correction: string | undefined;
+    const choose: Choose = async (_state, questions) => {
+      if (questions.route) return { route: { choice: 'c0' } };
+      if (questions.a0?.criteria.keep_proposal) {
+        fidelityCalls++;
+        expect(questions.a0.instructions).toContain('Preserve variables, bounds, precision');
+        const source = Object.entries(questions.a0.criteria).find(
+          ([id, label]) => id.startsWith('user_line') && label.endsWith(JSON.stringify(expression)),
+        );
+        expect(source).toBeDefined();
+        correction = source![0];
+        return { a0: { choice: correction } };
+      }
+      return proposeHost(questions, proposal);
+    };
+    const result = await routeIntent(
+      pending,
+      task,
+      [fieldsContract({ input: { type: 'string' } })],
+      choose,
+    );
+    expect(result).toMatchObject({
+      status: 'selected',
+      args: { body: { input: expression } },
+      evidence: { 'source.a0': correction },
+    });
+    expect(fidelityCalls).toBe(1);
+  });
+
+  it.each([
+    {
+      name: 'focused research substep',
+      messages: [
+        {
+          role: 'user' as const,
+          text: 'Research BTC and ETH for a newcomer.\nUse authoritative explanations.',
+        },
+      ],
+      host: 'Ethereum proof of stake explanation for beginners',
+    },
+    {
+      name: 'follow-up with resolved referents',
+      messages: [
+        { role: 'user' as const, text: 'Research these coins.\nBTC and ETH' },
+        { role: 'assistant' as const, text: 'Bitcoin and Ethereum are different networks.' },
+        { role: 'user' as const, text: 'Check prices for both now.\nUse current observations.' },
+      ],
+      host: 'Current BTC and ETH prices in USD',
+    },
+  ])('keeps a legitimate $name when Jev selects the proposal', async ({ messages, host }) => {
+    let fidelityCalls = 0;
+    const choose: Choose = async (_state, questions) => {
+      if (questions.route) return { route: { choice: 'c0' } };
+      if (questions.a0?.criteria.keep_proposal) {
+        fidelityCalls++;
+        return { a0: { choice: 'keep_proposal' } };
+      }
+      return proposeHost(questions, host);
+    };
+    expect(
+      await routeIntent(
+        { ...pending, tool_input: { query: host } },
+        { messages, fingerprint: 'legitimate-host-substep' },
+        [contract()],
+        choose,
+      ),
+    ).toMatchObject({
+      status: 'selected',
+      args: { body: { query: host } },
+      evidence: { 'source.a0': 'keep_proposal' },
+    });
+    expect(fidelityCalls).toBe(1);
+  });
+
+  it.each(['none', 'user_line999', undefined])(
+    'abstains before execution for an unresolved provenance answer %s',
+    async (choice) => {
+      const execute = vi.fn();
+      const signPayment = vi.fn(async () => {
+        throw new Error('Must not sign unresolved input.');
+      });
+      const choose: Choose = async (_state, questions) => {
+        if (questions.route) return { route: { choice: 'c0' } };
+        if (questions.a0?.criteria.keep_proposal)
+          return choice === undefined ? {} : { a0: { choice } };
+        return proposeHost(questions, proposal);
+      };
+      const result = await runEvent(
+        pending,
+        {
+          version: 1,
+          mode: 'live',
+          stateDir: '/unused',
+          policyPath: '/unused',
+          model: 'jev-latest',
+          discoveryQueries: {},
+        },
+        {
+          context: task,
+          contracts: [fieldsContract({ input: { type: 'string' } })],
+          choose,
+          execute,
+          executionDeps: {
+            stateDir: '/unused',
+            signPayment,
+            readPolicy: async () => ({
+              runId: 'fidelity-test',
+              revision: '1',
+              authorization: 'auto',
+              expiresAtMs: Date.now() + 60_000,
+              maxCallAtomic: '10000',
+              maxRunAtomic: '10000',
+              allowedOperations: ['request'],
+            }),
+          },
+        },
+      );
+      expect(result).toMatchObject({
+        status: 'needs_input',
+        reason: 'The argument source could not be resolved.',
+      });
+      expect(execute).not.toHaveBeenCalled();
+      expect(signPayment).not.toHaveBeenCalled();
+    },
+  );
+
+  it('offers only current-user lines in the follow-up, never complete lines from older history', async () => {
+    const old = 'Evaluate ∫₀² e^(−x²) cos(18x) dx to 4 decimal places.';
+    let fidelityCalls = 0;
+    const choose: Choose = async (_state, questions) => {
+      if (questions.route) return { route: { choice: 'c0' } };
+      if (questions.a0?.criteria.keep_proposal) {
+        fidelityCalls++;
+        const alternatives = Object.entries(questions.a0.criteria)
+          .filter(([id]) => id.startsWith('user_line'))
+          .map(([, value]) => value);
+        expect(alternatives.some((value) => value.includes(old))).toBe(false);
+        expect(alternatives.some((value) => value.includes(expression))).toBe(true);
+        return { a0: { choice: 'keep_proposal' } };
+      }
+      return proposeHost(questions, proposal);
+    };
+    await routeIntent(
+      pending,
+      {
+        messages: [
+          { role: 'user', text: `Earlier request:\n${old}` },
+          { role: 'assistant', text: 'Earlier output.' },
+          ...task.messages,
+        ],
+        fingerprint: 'corrected-current-user-input',
+      },
+      [fieldsContract({ input: { type: 'string' } })],
+      choose,
+    );
+    expect(fidelityCalls).toBe(1);
+  });
+
+  it('does not trigger a current-line correction solely because an older turn was multiline', async () => {
+    const choose = vi.fn<Choose>(async (_state, questions) => {
+      if (questions.route) return { route: { choice: 'c0' } };
+      expect(questions.a0?.criteria.keep_proposal).toBeUndefined();
+      return proposeHost(questions, proposal);
+    });
+    const result = await routeIntent(
+      pending,
+      {
+        messages: [
+          ...task.messages,
+          { role: 'assistant', text: 'Prior output.' },
+          { role: 'user', text: 'Now verify the same expression independently.' },
+        ],
+        fingerprint: 'single-line-followup',
+      },
+      [fieldsContract({ input: { type: 'string' } })],
+      choose,
+    );
+    expect(result).toMatchObject({ status: 'selected', args: { body: { input: proposal } } });
+    expect(choose).toHaveBeenCalledTimes(2);
+  });
+
+  it('bounds the added review and abstains when more than eight host fields need reconciliation', async () => {
+    const choose = vi.fn<Choose>(async (_state, questions) => {
+      if (questions.route) return { route: { choice: 'c0' } };
+      return proposeHost(questions, proposal);
+    });
+    const fields = Object.fromEntries(
+      Array.from({ length: 9 }, (_, index) => [`field${index}`, { type: 'string' }]),
+    );
+    const result = await routeIntent(pending, task, [fieldsContract(fields)], choose);
+    expect(result).toMatchObject({
+      status: 'needs_input',
+      reason: 'Too many ambiguous host-proposed argument sources.',
+    });
+    expect(choose).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe('Jev intent-to-call boundary', () => {
+  it.each([
+    ['pasted input', '<pasted_content id="input">\n%s\n</pasted_content id="input">'],
+    ['fenced input', 'Use this expression:\n```text\n%s\n```'],
+    ['plain multiline input', 'Calculate the following.\n  %s  \nExplain afterwards.'],
+  ])(
+    'copies a complete exact user line from %s without rewriting formal syntax',
+    async (_name, wrapper) => {
+      const expression = 'Evaluate ∫₀¹ e^(−x²) cos(37x) dx to 12 decimal places.';
+      const choose: Choose = async (_state, questions): ReturnType<Choose> => {
+        if (questions.route) return { route: { choice: 'c0' } };
+        const source = Object.entries(questions.a0!.criteria).find(
+          ([, label]) =>
+            label.startsWith('user message 0 line ') &&
+            label.endsWith(`: ${JSON.stringify(expression)}`),
+        );
+        expect(source).toBeDefined();
+        return { a0: { choice: source![0] } };
+      };
+      const result = await routeIntent(
+        {
+          ...event,
+          tool_name: 'Request',
+          tool_input: {
+            query:
+              'Compute the definite integral numerically with twelve decimal places of precision.',
+          },
+        },
+        {
+          messages: [{ role: 'user', text: wrapper.replace('%s', expression) }],
+          fingerprint: 'wrapped-formal-input',
+        },
+        [fieldsContract({ input: { type: 'string' } })],
+        choose,
+      );
+      expect(result).toMatchObject({ status: 'selected', args: { body: { input: expression } } });
+    },
+  );
+
+  it('offers multiline SQL and regex source lines without interpreting their syntax or including secret lines', async () => {
+    const sql = 'SELECT total FROM orders WHERE total > 37;';
+    const regex = String.raw`^(?:alpha|beta)\d{12}$`;
+    const secret = `api_key=sk_live_${'x'.repeat(32)}`;
+    const choose: Choose = async (_state, questions): ReturnType<Choose> => {
+      if (questions.route) return { route: { choice: 'c0' } };
+      const labels = Object.values(questions.a0!.criteria);
+      const lines = labels.filter((label) => label.startsWith('user message 0 line '));
+      expect(lines.some((label) => label.endsWith(`: ${JSON.stringify(sql)}`))).toBe(true);
+      expect(lines.some((label) => label.endsWith(`: ${JSON.stringify(regex)}`))).toBe(true);
+      expect(lines.some((label) => label.includes('[redacted'))).toBe(false);
+      expect(JSON.stringify(questions)).not.toContain('x'.repeat(32));
+      return { a0: { choice: 'omit' } };
+    };
+    expect(
+      await routeIntent(
+        event,
+        {
+          messages: [{ role: 'user', text: `${secret}\n${sql}\n${regex}` }],
+          fingerprint: 'formal-lines',
+        },
+        [fieldsContract({ input: { type: 'string' } })],
+        choose,
+      ),
+    ).toMatchObject({ status: 'needs_input' });
+  });
+
+  it('bounds multiline source candidates and never truncates a long line into an executable value', async () => {
+    const long = 'L'.repeat(2001);
+    const text = `${long}\n${Array.from({ length: 12 }, (_, i) => `formal-source-${i}`).join('\n')}`;
+    const choose: Choose = async (_state, questions): ReturnType<Choose> => {
+      if (questions.route) return { route: { choice: 'c0' } };
+      const lines = Object.values(questions.a0!.criteria).filter((label) =>
+        label.startsWith('user message 0 line '),
+      );
+      expect(lines).toHaveLength(8);
+      expect(lines.some((label) => label.includes('LLL'))).toBe(false);
+      expect(lines.at(-1)).toContain('formal-source-7');
+      return { a0: { choice: 'omit' } };
+    };
+    await routeIntent(
+      event,
+      { messages: [{ role: 'user', text }], fingerprint: 'bounded-lines' },
+      [fieldsContract({ input: { type: 'string' } })],
+      choose,
+    );
+  });
+
   const pageUrl = 'https://docs.example.org/payments/how-it-works';
   const fetchEvent: HookEvent = {
     ...event,

@@ -20,6 +20,8 @@ export interface AutoContract {
   pathTemplate: string;
   bodyEncoding?: 'json' | 'text' | 'form-urlencoded';
   responseKind: 'json' | 'text' | 'unknown';
+  /** Operator-owned success condition, never inferred from seller response fields. */
+  resultSchema?: Record<string, unknown>;
   accepts: unknown[];
   x402Version?: number;
 }
@@ -272,7 +274,10 @@ function checkFixedMetadata(
 }
 
 /** Mechanical import only: examples do not establish a required argument schema. */
-export function compileResource(value: unknown): CompileResult {
+export function compileResource(
+  value: unknown,
+  trusted: { resultSchema?: Record<string, unknown> } = {},
+): CompileResult {
   const source = record(value);
   const url =
     typeof source.resource === 'string'
@@ -440,6 +445,7 @@ export function compileResource(value: unknown): CompileResult {
     const responseType = record(record(bazaar.info).output).type ?? record(legacy.output).type;
     if (responseType !== undefined && !['json', 'text'].includes(String(responseType)))
       throw new Error(`Unsupported response kind: ${String(responseType)}`);
+    if (trusted.resultSchema !== undefined) validateResultSchema(trusted.resultSchema);
     const contractData = {
       url,
       method,
@@ -453,6 +459,9 @@ export function compileResource(value: unknown): CompileResult {
           : responseType === 'text'
             ? ('text' as const)
             : ('unknown' as const),
+      ...(trusted.resultSchema === undefined
+        ? {}
+        : { resultSchema: structuredClone(trusted.resultSchema) }),
     };
     return {
       status: 'supported',
@@ -474,6 +483,35 @@ export function compileResource(value: unknown): CompileResult {
       reasons: [error instanceof Error ? error.message : String(error)],
     };
   }
+}
+
+/** Validate trusted result rules before requesting a quote or signing a payment. */
+export function validateResultSchema(schema: Record<string, unknown>): void {
+  if (!schema || typeof schema !== 'object' || Array.isArray(schema))
+    throw new Error('A result success schema must be a JSON Schema object.');
+  validator(schema);
+}
+
+/** HTTP success and application success are separate. Unknown providers have no implicit success fields. */
+export function validateResultBody(
+  schema: Record<string, unknown>,
+  body: string,
+): { valid: boolean; reason?: string } {
+  if (Buffer.byteLength(body) > 128 * 1024)
+    return { valid: false, reason: 'Result exceeds the configured JSON validation size limit.' };
+  let value: unknown;
+  try {
+    value = JSON.parse(body) as unknown;
+    checkedSchema(value, 0, false);
+  } catch {
+    return { valid: false, reason: 'Result is not a supported bounded JSON document.' };
+  }
+  return validator(schema)(value)
+    ? { valid: true }
+    : {
+        valid: false,
+        reason: 'Result does not satisfy the configured application success schema.',
+      };
 }
 
 export function validateArguments(

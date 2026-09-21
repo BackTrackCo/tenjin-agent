@@ -140,6 +140,28 @@ async function setup(options: { cap?: string; firstBody?: string; firstStatus?: 
 }
 
 describe('bounded workflow execution', () => {
+  it('stops chaining after a paid application failure even when the next binding exists', async () => {
+    const body = '{"success":false,"results":[{"followup":"do not execute this step"}]}';
+    const { deps, signPayment, paidInputs } = await setup({ firstBody: body });
+    const workflow = chain();
+    workflow.steps[0]!.contract.resultSchema = {
+      type: 'object',
+      properties: { success: { const: true } },
+      required: ['success'],
+    };
+    const result = await executeWorkflow(workflow, deps);
+    expect(result).toMatchObject({ status: 'failed', stoppedAt: 'exa' });
+    expect(result.steps).toHaveLength(1);
+    expect(result.steps[0]!.execution).toMatchObject({
+      status: 'failed',
+      amountAtomic: '7000',
+      response: { status: 200, body },
+    });
+    expect(result.steps[0]!.value).toBeUndefined();
+    expect(paidInputs).toHaveLength(1);
+    expect(signPayment).toHaveBeenCalledOnce();
+  });
+
   it('binds Exa-style output to Tavily-style input and replays both without another signature', async () => {
     const { deps, signPayment, transport, paidInputs } = await setup();
     const workflow = chain();

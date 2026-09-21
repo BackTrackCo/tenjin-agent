@@ -289,5 +289,38 @@
         "The final answer named the provider but did not include a clickable source link; generic research citation checks did not pass."
       ]
     }
-  }
+  },
+  "resultContracts": [
+    {
+      "url": "https://wolframalpha.x402.paysponge.com/v2/query",
+      "method": "GET",
+      "provenance": "Operator-curated Wolfram Full Results success envelope; HTTP 200 with queryresult.success=false or no result pods is not task fulfillment. Preserves the original response and any reported payment. This is local validation, not a Bazaar-provided guarantee.",
+      "schema": {
+        "type": "object",
+        "required": ["queryresult"],
+        "properties": {
+          "queryresult": {
+            "type": "object",
+            "required": ["success", "error", "numpods", "pods"],
+            "properties": {
+              "success": {
+                "const": true
+              },
+              "error": {
+                "const": false
+              },
+              "numpods": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "pods": {
+                "type": "array",
+                "minItems": 1
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
 }

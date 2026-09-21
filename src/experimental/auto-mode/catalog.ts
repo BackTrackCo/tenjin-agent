@@ -131,7 +131,7 @@ export async function discoverCandidates(
   if (!Array.isArray(result.resources))
     throw new Error('Malformed CDP search response: resources missing');
   const resources = result.resources.slice(0, limit);
-  const compiled = resources.map(compileResource);
+  const compiled = resources.map((resource) => compileResource(resource));
   return {
     resources,
     contracts: compiled

@@ -117,6 +117,110 @@ async function setup(overrides: Partial<ExecutionDeps> = {}) {
 function secondInput(): PaidRequestInput {
   return { ...input, identity: { ...input.identity, requestId: 'tool-2' } };
 }
+
+describe('trusted application success validation', () => {
+  const resultSchema = {
+    type: 'object',
+    properties: { success: { const: true } },
+    required: ['success'],
+  };
+
+  it('keeps a paid HTTP 200 application failure and receipt, and blocks charged retries', async () => {
+    const response = { ...paid, body: '{"success":false,"items":[]}' };
+    const { deps, transport, signPayment, stateDir } = await setup();
+    transport.mockImplementation(async (_request, headers) => (headers ? response : challenge()));
+    const request = {
+      ...input,
+      resultSchema,
+      identity: { ...input.identity, userTurnHash: 'c'.repeat(64) },
+    };
+    const result = await executePaidRequest(request, deps);
+    expect(result).toMatchObject({
+      status: 'failed',
+      response,
+      amountAtomic: '7000',
+      settlement: { status: 'reported' },
+    });
+    expect(result.reason).toContain('application success schema');
+    expect(await executePaidRequest(request, deps)).toMatchObject({ ...result, cached: true });
+    expect(
+      await executePaidRequest(
+        {
+          ...request,
+          resultSchema: undefined,
+          identity: {
+            ...request.identity,
+            requestId: 'retry-without-success-check',
+            contractHash: 'changed-contract',
+          },
+        },
+        deps,
+      ),
+    ).toMatchObject({ status: 'pending', amountAtomic: '0' });
+    expect(signPayment).toHaveBeenCalledOnce();
+    expect(transport).toHaveBeenCalledTimes(2);
+    const ledger = JSON.parse(await readFile(await ledgerFile(stateDir), 'utf8'));
+    expect(ledger.attempts).toHaveLength(1);
+    expect(ledger.attempts[0]).toMatchObject({ state: 'completed', amountAtomic: '7000', result });
+  });
+
+  it.each(['{"success":false}', 'invalid JSON'])(
+    'preserves an unsuccessful paid body %s',
+    async (body) => {
+      const response = { ...paid, body };
+      const { deps, signPayment } = await setup({
+        transport: async (_request, headers) => (headers ? response : challenge()),
+      });
+      const result = await executePaidRequest({ ...input, resultSchema }, deps);
+      expect(result).toMatchObject({
+        status: 'failed',
+        amountAtomic: '7000',
+        response,
+        settlement: { status: 'reported' },
+      });
+      expect(signPayment).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('fulfills a body that satisfies the trusted contract and makes no assumptions without one', async () => {
+    for (const [schema, body] of [
+      [resultSchema, '{"success":true}'],
+      [undefined, '{"success":false}'],
+    ] as const) {
+      const { deps } = await setup({
+        transport: async (_request, headers) => (headers ? { ...paid, body } : challenge()),
+      });
+      expect(
+        await executePaidRequest({ ...input, ...(schema ? { resultSchema: schema } : {}) }, deps),
+      ).toMatchObject({ status: 'fulfilled', amountAtomic: '7000' });
+    }
+  });
+
+  it('validates unsigned success bodies without charging or signing', async () => {
+    const response = { ...paid, headers: {}, body: '{"success":false}' };
+    const { deps, signPayment } = await setup({ transport: async () => response });
+    expect(await executePaidRequest({ ...input, resultSchema }, deps)).toMatchObject({
+      status: 'failed',
+      amountAtomic: '0',
+      response,
+    });
+    expect(signPayment).not.toHaveBeenCalled();
+  });
+
+  it('rejects a malformed local result schema before any transport or signature', async () => {
+    const { deps, signPayment, transport } = await setup();
+    const result = await executePaidRequest(
+      { ...input, resultSchema: { type: 'string', pattern: 'unsafe' } },
+      deps,
+    );
+    expect(result).toMatchObject({
+      status: 'failed',
+      diagnostic: { stage: 'result-contract-validation' },
+    });
+    expect(signPayment).not.toHaveBeenCalled();
+    expect(transport).not.toHaveBeenCalled();
+  });
+});
 async function ledgerFile(dir: string): Promise<string> {
   return join(
     dir,
