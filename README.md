@@ -355,7 +355,7 @@ never authentication, and it decides no entitlement, payment, or spend.
 
 ## Developing
 
-The [local Jev → x402 experiment](./docs/auto-mode.md) routes Claude search/fetch calls through Bazaar-discovered capabilities with explicit local spending limits. It runs from a branch checkout without a backend or global hook installation.
+The [local Jev → x402 experiment](./docs/auto-mode.md) uses conditional prompt routing and a generic MCP request bridge: Jev selects a capability and arguments, then a local hook validates, pays and executes within explicit limits. The prepared demo uses eight curated Bazaar capabilities; optional dynamic discovery remains experimental. It runs from a branch checkout without a backend or global hook installation.
 
 ```bash
 pnpm install
