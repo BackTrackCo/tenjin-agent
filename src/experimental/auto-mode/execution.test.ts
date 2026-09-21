@@ -179,7 +179,7 @@ describe('deterministic auto payment execution', () => {
     },
   );
 
-  it('blocks changed arguments during signing, while allowing another capability in parallel', async () => {
+  it('waits for distinct arguments during signing, while allowing another capability in parallel', async () => {
     let finish!: () => void;
     const signing = new Promise<void>((resolve) => {
       finish = resolve;
@@ -201,35 +201,45 @@ describe('deterministic auto payment execution', () => {
         deps,
       ),
     ).toMatchObject({ status: 'pending', amountAtomic: '0' });
-    expect(
-      await executePaidRequest(
-        {
-          ...first,
-          request: { ...first.request, body: '{"query":"independent"}' },
-          identity: { ...first.identity, requestId: 'independent' },
-        },
-        deps,
-      ),
-    ).toMatchObject({ status: 'pending', amountAtomic: '0' });
-    expect(
-      await executePaidRequest(
-        {
-          ...first,
-          request: { ...first.request, url: 'https://vendor.example/lookup' },
-          identity: { ...first.identity, requestId: 'another-capability' },
-        },
-        deps,
-      ),
-    ).toMatchObject({ status: 'fulfilled' });
-    finish();
+    let distinctFinished = false;
+    const distinct = executePaidRequest(
+      {
+        ...first,
+        request: { ...first.request, body: '{"query":"independent"}' },
+        identity: { ...first.identity, requestId: 'independent' },
+      },
+      deps,
+    ).then((result) => {
+      distinctFinished = true;
+      return result;
+    });
+    try {
+      expect(
+        await executePaidRequest(
+          {
+            ...first,
+            request: { ...first.request, url: 'https://vendor.example/lookup' },
+            identity: { ...first.identity, requestId: 'another-capability' },
+          },
+          deps,
+        ),
+      ).toMatchObject({ status: 'fulfilled' });
+      expect(distinctFinished).toBe(false);
+      expect(signPayment).toHaveBeenCalledTimes(2);
+    } finally {
+      finish();
+      await Promise.all([running, distinct]);
+    }
     expect(await running).toMatchObject({ status: 'fulfilled' });
-    expect(signPayment).toHaveBeenCalledTimes(2);
+    expect(await distinct).toMatchObject({ status: 'fulfilled', amountAtomic: '7000' });
+    expect(signPayment).toHaveBeenCalledTimes(3);
+    expect(transport).toHaveBeenCalledTimes(6);
   });
 
   it.each(['signing', 'transmitted', 'ambiguous'])(
     'blocks changed-argument retries against a persisted %s reservation with no live owner',
     async (state) => {
-      const { deps, signPayment, transport, stateDir } = await setup();
+      const { deps, signPayment, transport, stateDir } = await setup({ peerWaitMs: 0 });
       const first = {
         ...input,
         identity: { ...input.identity, userTurnHash: 'a'.repeat(64) },
@@ -257,7 +267,181 @@ describe('deterministic auto payment execution', () => {
     },
   );
 
-  it('rechecks the retry group atomically when concurrent distinct quotes reserve payment', async () => {
+  it('bounds waiting for a persisted active peer using real time even with a fixed policy clock', async () => {
+    const { deps, signPayment, transport, stateDir } = await setup({ peerWaitMs: 40 });
+    const first = {
+      ...input,
+      identity: { ...input.identity, userTurnHash: 'a'.repeat(64) },
+    };
+    expect(await executePaidRequest(first, deps)).toMatchObject({ status: 'fulfilled' });
+    const path = await ledgerFile(stateDir);
+    const ledger = JSON.parse(await readFile(path, 'utf8'));
+    ledger.attempts[0].state = 'transmitted';
+    delete ledger.attempts[0].result;
+    await writeFile(path, JSON.stringify(ledger));
+    const started = performance.now();
+    expect(
+      await executePaidRequest(
+        {
+          ...first,
+          request: { ...first.request, body: '{"query":"distinct request"}' },
+          identity: { ...first.identity, requestId: 'bounded-wait' },
+        },
+        deps,
+      ),
+    ).toMatchObject({ status: 'pending', amountAtomic: '0' });
+    const elapsed = performance.now() - started;
+    expect(elapsed).toBeGreaterThanOrEqual(30);
+    expect(elapsed).toBeLessThan(1000);
+    expect(signPayment).toHaveBeenCalledOnce();
+    expect(transport).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(await readFile(path, 'utf8'))).toEqual(ledger);
+  });
+
+  it.each(['paid failure', 'policy revoked', 'run cap exhausted'] as const)(
+    'does not sign a queued distinct request after %s',
+    async (condition) => {
+      let release!: () => void;
+      const inFlight = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const { deps, readPolicy, signPayment, transport } = await setup({ peerWaitMs: 1000 });
+      if (condition === 'run cap exhausted')
+        readPolicy.mockResolvedValue({ ...initialPolicy, maxRunAtomic: '10000' });
+      transport.mockImplementation(async (_request, headers) => {
+        if (!headers) return challenge();
+        await inFlight;
+        return condition === 'paid failure'
+          ? { status: 500, headers: {}, body: 'Provider failed after authorization.' }
+          : paid;
+      });
+      const first = {
+        ...input,
+        identity: { ...input.identity, userTurnHash: 'a'.repeat(64) },
+      };
+      const running = executePaidRequest(first, deps);
+      await vi.waitFor(() => expect(transport).toHaveBeenCalledTimes(2));
+      const policyReadsBeforeQueue = readPolicy.mock.calls.length;
+      let queuedFinished = false;
+      const queued = executePaidRequest(
+        {
+          ...first,
+          request: { ...first.request, body: '{"query":"another request"}' },
+          identity: { ...first.identity, requestId: 'queued' },
+        },
+        deps,
+      ).then((result) => {
+        queuedFinished = true;
+        return result;
+      });
+      try {
+        await vi.waitFor(() =>
+          expect(readPolicy.mock.calls.length).toBeGreaterThan(policyReadsBeforeQueue + 1),
+        );
+        expect(queuedFinished).toBe(false);
+        expect(signPayment).toHaveBeenCalledOnce();
+        if (condition === 'policy revoked')
+          readPolicy.mockResolvedValue({
+            ...initialPolicy,
+            revision: '2',
+            authorization: 'disabled',
+          });
+      } finally {
+        release();
+        await Promise.all([running, queued]);
+      }
+      expect(await running).toMatchObject({
+        status: condition === 'paid failure' ? 'failed' : 'fulfilled',
+        amountAtomic: '7000',
+      });
+      expect(await queued).toMatchObject({
+        status:
+          condition === 'paid failure'
+            ? 'pending'
+            : condition === 'policy revoked'
+              ? 'needs_approval'
+              : 'refused',
+      });
+      if (condition === 'paid failure') expect((await queued).amountAtomic).toBe('0');
+      if (condition === 'run cap exhausted')
+        expect((await queued).reason).toContain('remaining run cap');
+      expect(signPayment).toHaveBeenCalledOnce();
+      expect(transport).toHaveBeenCalledTimes(condition === 'run cap exhausted' ? 3 : 2);
+    },
+  );
+
+  it('queues concurrent distinct quotes and serializes payment through peer fulfillment', async () => {
+    let releaseQuotes!: () => void;
+    let releaseSigning!: () => void;
+    let releaseFulfillment!: () => void;
+    const quotesReady = new Promise<void>((resolve) => {
+      releaseQuotes = resolve;
+    });
+    const signingReady = new Promise<void>((resolve) => {
+      releaseSigning = resolve;
+    });
+    const fulfillmentReady = new Promise<void>((resolve) => {
+      releaseFulfillment = resolve;
+    });
+    const { deps, signPayment, transport, stateDir } = await setup();
+    transport.mockImplementation(async (_request, headers) => {
+      if (headers) {
+        await fulfillmentReady;
+        return paid;
+      }
+      await quotesReady;
+      return challenge();
+    });
+    signPayment.mockImplementation(async () => {
+      await signingReady;
+      return { headers: { 'PAYMENT-SIGNATURE': 'fake-fixture' }, amountAtomic: 7000n };
+    });
+    const first = { ...input, identity: { ...input.identity, userTurnHash: 'a'.repeat(64) } };
+    const second = {
+      ...first,
+      request: { ...first.request, body: '{"query":"another query"}' },
+      identity: { ...first.identity, requestId: 'parallel-query' },
+    };
+    const completed: Awaited<ReturnType<typeof executePaidRequest>>[] = [];
+    const running = [first, second].map(async (request) => {
+      const result = await executePaidRequest(request, deps);
+      completed.push(result);
+      return result;
+    });
+    try {
+      await vi.waitFor(() => expect(transport).toHaveBeenCalledTimes(2));
+      releaseQuotes();
+      await vi.waitFor(() => expect(signPayment).toHaveBeenCalledOnce());
+      const ledger = JSON.parse(await readFile(await ledgerFile(stateDir), 'utf8'));
+      expect(ledger.attempts).toHaveLength(2);
+      expect(ledger.attempts).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ state: 'signing', amountAtomic: '7000' }),
+          expect.objectContaining({ state: 'prepared', amountAtomic: '0' }),
+        ]),
+      );
+      expect(completed).toHaveLength(0);
+      releaseSigning();
+      await vi.waitFor(() => expect(transport).toHaveBeenCalledTimes(3));
+      expect(signPayment).toHaveBeenCalledOnce();
+      expect(completed).toHaveLength(0);
+    } finally {
+      releaseQuotes();
+      releaseSigning();
+      releaseFulfillment();
+      await Promise.all(running);
+    }
+    expect(completed).toHaveLength(2);
+    expect(completed).toEqual(
+      Array.from({ length: 2 }, () =>
+        expect.objectContaining({ status: 'fulfilled', amountAtomic: '7000' }),
+      ),
+    );
+    expect(transport).toHaveBeenCalledTimes(4);
+    expect(signPayment).toHaveBeenCalledTimes(2);
+  });
+
+  it('cancels only its unsigned reservation when waiting for a quoted peer times out', async () => {
     let releaseQuotes!: () => void;
     let releaseSigning!: () => void;
     const quotesReady = new Promise<void>((resolve) => {
@@ -266,7 +450,7 @@ describe('deterministic auto payment execution', () => {
     const signingReady = new Promise<void>((resolve) => {
       releaseSigning = resolve;
     });
-    const { deps, signPayment, transport, stateDir } = await setup();
+    const { deps, signPayment, transport, stateDir } = await setup({ peerWaitMs: 40 });
     transport.mockImplementation(async (_request, headers) => {
       if (headers) return paid;
       await quotesReady;
@@ -288,28 +472,28 @@ describe('deterministic auto payment execution', () => {
       completed.push(result);
       return result;
     });
-    await vi.waitFor(() => expect(transport).toHaveBeenCalledTimes(2));
-    releaseQuotes();
-    await vi.waitFor(() => expect(completed).toHaveLength(1));
-    expect(completed[0]).toMatchObject({ status: 'pending', amountAtomic: '0' });
+    try {
+      await vi.waitFor(() => expect(transport).toHaveBeenCalledTimes(2));
+      releaseQuotes();
+      await vi.waitFor(() => expect(completed).toHaveLength(1));
+      expect(completed[0]).toMatchObject({ status: 'pending', amountAtomic: '0' });
+      expect(signPayment).toHaveBeenCalledOnce();
+      const ledger = JSON.parse(await readFile(await ledgerFile(stateDir), 'utf8'));
+      expect(ledger.attempts).toHaveLength(2);
+      expect(ledger.attempts).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ state: 'signing', amountAtomic: '7000' }),
+          expect.objectContaining({ state: 'cancelled', amountAtomic: '0' }),
+        ]),
+      );
+    } finally {
+      releaseQuotes();
+      releaseSigning();
+      await Promise.all(running);
+    }
+    expect(completed[1]).toMatchObject({ status: 'fulfilled', amountAtomic: '7000' });
     expect(signPayment).toHaveBeenCalledOnce();
-    const ledger = JSON.parse(await readFile(await ledgerFile(stateDir), 'utf8'));
-    expect(ledger.attempts).toHaveLength(2);
-    expect(ledger.attempts).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ state: 'signing', amountAtomic: '7000' }),
-        expect.objectContaining({ state: 'cancelled', amountAtomic: '0' }),
-      ]),
-    );
-    releaseSigning();
-    await Promise.all(running);
-    expect(completed).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ status: 'fulfilled', amountAtomic: '7000' }),
-      ]),
-    );
     expect(transport).toHaveBeenCalledTimes(3);
-    expect(signPayment).toHaveBeenCalledOnce();
   });
 
   it('signs once, retains evidence, and delivers a saved result without another HTTP request', async () => {

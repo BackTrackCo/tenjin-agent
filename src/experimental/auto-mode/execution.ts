@@ -83,6 +83,8 @@ export interface ExecutionDeps {
     paymentHeaders?: Record<string, string>,
   ) => Promise<AutoHttpResponse>;
   now?: () => number;
+  /** Total bounded wait for another request's active payment; never reclaims it. */
+  peerWaitMs?: number;
   /** Resolver seam for nested URL preflight; production leaves this unset. */
   nestedTargetValidation?: NestedTargetOptions;
 }
@@ -314,6 +316,9 @@ class StopExecution extends Error {
   }
 }
 
+/** Internal control flow only: release the ledger mutex before waiting. */
+class ActivePeer extends Error {}
+
 function stop(status: ExecutionResult['status'], reason: string): never {
   throw new StopExecution({ status, reason });
 }
@@ -483,6 +488,11 @@ export async function executePaidRequest(
   let currentState: Attempt['state'] | undefined;
   let stage = 'configuration';
   try {
+    const peerWaitMs = deps.peerWaitMs ?? 10_000;
+    if (!Number.isInteger(peerWaitMs) || peerWaitMs < 0 || peerWaitMs > 10_000)
+      throw new Error('Peer wait must be between 0 and 10000 milliseconds.');
+    // Shared by claim and reservation, independently of the injected policy clock.
+    let peerDeadline: number | undefined;
     identitySchema.parse(input.identity);
     assertRequestSafe(input.request);
     policy = policySchema.parse(await deps.readPolicy());
@@ -531,6 +541,29 @@ export async function executePaidRequest(
       });
     }
 
+    async function withReadyLedger<T>(fn: (ledger: Ledger) => Promise<T>): Promise<T> {
+      let resumed = false;
+      for (;;) {
+        if (resumed) await recheckPolicy();
+        try {
+          return await withLedger(fn);
+        } catch (error) {
+          if (!(error instanceof ActivePeer)) throw error;
+          peerDeadline ??= performance.now() + peerWaitMs;
+          const remaining = peerDeadline - performance.now();
+          if (remaining <= 0)
+            throw new StopExecution({
+              status: 'pending',
+              amountAtomic: '0',
+              reason:
+                'Another request to this service still has an unresolved payment attempt. The bounded wait expired; no new payment was made. Its saved outcome must resolve before this request can proceed.',
+            });
+          await new Promise<void>((resolve) => setTimeout(resolve, Math.min(50, remaining)));
+          resumed = true;
+        }
+      }
+    }
+
     async function persist(ledger: Ledger): Promise<void> {
       const serialized = `${JSON.stringify(ledger)}\n`;
       if (Buffer.byteLength(serialized) > 32 * 1024 * 1024)
@@ -548,17 +581,21 @@ export async function executePaidRequest(
     }
 
     function pendingRetry(ledger: Ledger): ExecutionResult | undefined {
+      const peers = retryGroup
+        ? ledger.attempts.filter(
+            (attempt) => attempt.key !== key && attempt.retryGroup === retryGroup,
+          )
+        : [];
+      // Exact duplicates and unresolved failures never become new paid attempts
+      // merely because another call finishes. Check them before waitable work.
       if (
-        retryGroup &&
-        ledger.attempts.some(
+        peers.some(
           (attempt) =>
-            attempt.key !== key &&
-            attempt.retryGroup === retryGroup &&
-            ((attempt.requestHash === requestHash &&
+            (attempt.requestHash === requestHash &&
               ['prepared', 'signing', 'transmitted'].includes(attempt.state)) ||
-              (BigInt(attempt.amountAtomic) > 0n &&
-                (['signing', 'transmitted', 'ambiguous'].includes(attempt.state) ||
-                  (attempt.state === 'completed' && attempt.result?.status !== 'fulfilled')))),
+            (BigInt(attempt.amountAtomic) > 0n &&
+              (attempt.state === 'ambiguous' ||
+                (attempt.state === 'completed' && attempt.result?.status !== 'fulfilled'))),
         )
       ) {
         return {
@@ -568,11 +605,21 @@ export async function executePaidRequest(
             'An identical request is in flight, or this service has an unresolved paid attempt in the current user turn. No new payment was made. Reconcile it before retrying; changing tool IDs or arguments does not renew authorization.',
         };
       }
+      // Different requests may obtain unsigned quotes concurrently, but only
+      // one payment in this group may be active. Wait for durable completion,
+      // then repeat every ledger/policy check; never infer success from age/PID.
+      if (
+        peers.some(
+          (attempt) =>
+            BigInt(attempt.amountAtomic) > 0n && ['signing', 'transmitted'].includes(attempt.state),
+        )
+      )
+        throw new ActivePeer();
       return undefined;
     }
 
     stage = 'claim';
-    const existing = await withLedger(async (ledger) => {
+    const existing = await withReadyLedger(async (ledger) => {
       const prior = ledger.attempts.find((attempt) => attempt.key === key);
       if (prior !== undefined && prior.fingerprint !== fingerprint) {
         stop(
@@ -650,7 +697,7 @@ export async function executePaidRequest(
     stage = 'policy-recheck';
     await recheckPolicy();
     stage = 'reserve-budget';
-    await withLedger(async (ledger) => {
+    await withReadyLedger(async (ledger) => {
       const attempt = ledger.attempts.find((item) => item.key === key)!;
       // Distinct requests may obtain unsigned quotes together, but only one
       // unresolved payment per service/user turn may reserve or sign. Recheck
