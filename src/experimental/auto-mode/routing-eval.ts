@@ -58,6 +58,7 @@ interface Expected {
   requiredQuery?: Record<string, unknown>;
   exactBody?: Record<string, unknown>;
   exactQuery?: Record<string, unknown>;
+  exactQueryAlternatives?: Record<string, unknown>[];
 }
 export interface RoutingEvalCase {
   id: string;
@@ -722,6 +723,91 @@ export function routingEvalCases(): RoutingEvalCase[] {
       test.evaluationSplit,
     );
   }
+  // Frozen before calibration: two observed host expansions plus cross-domain
+  // and narrowed-step controls. All see the same unmodified eight-capability catalog.
+  const researchPrompt = 'can you research BTC and ETH for someone new to crypto';
+  for (const [index, query] of [
+    "Research Bitcoin (BTC) and Ethereum (ETH) for someone completely new to crypto. Provide: what each is, key differences between them, current price and market cap (as of September 2026), how they're typically used, and basic risks a beginner should know before investing.",
+    'Research Bitcoin (BTC) and Ethereum (ETH) for someone completely new to crypto. Need: what each one is and how they differ, current price and market cap for both, basic use cases, and key beginner-relevant facts (e.g., supply limits, network purpose, volatility considerations). Provide a beginner-friendly overview suitable for someone with no prior crypto knowledge.',
+  ].entries()) {
+    add(
+      `${89 + index}-compound-research-observed-${index + 1}`,
+      'compound-scope',
+      [researchPrompt],
+      'Request',
+      { query },
+      expanded,
+      { statuses: ['selected'], url: EXA },
+      true,
+      'regression',
+    );
+  }
+  add(
+    '91-compound-company-research-firmographics',
+    'compound-scope',
+    ['Research Stripe for someone new to online payments.'],
+    'Request',
+    {
+      query:
+        'Research Stripe (stripe.com) for someone new to online payments. Explain what it does, its main products, business model, competitors, and key risks. Include company enrichment fields such as employee count, industry and headquarters in the overview.',
+    },
+    expanded,
+    { statuses: ['selected'], url: EXA },
+    true,
+    'regression',
+  );
+  add(
+    '92-compound-research-then-explicit-price-refresh',
+    'compound-scope',
+    [
+      researchPrompt,
+      { role: 'assistant', text: 'Bitcoin (BTC) and Ethereum (ETH) are different networks.' },
+      'Check price for both now',
+    ],
+    'Request',
+    { query: 'Current USD prices for Bitcoin BTC and Ethereum ETH.' },
+    expanded,
+    {
+      statuses: ['selected'],
+      url: CMC_QUOTES,
+      exactQueryAlternatives: [{ symbol: 'BTC,ETH' }, { symbol: 'BTC,ETH', convert: 'USD' }],
+    },
+    true,
+    'regression',
+  );
+  add(
+    '93-compound-research-needed-measurement-substep',
+    'compound-scope',
+    ['Research BTC and ETH for a newcomer, including up-to-date price quotes.'],
+    'Request',
+    { query: 'Get current USD price quotes for BTC and ETH.' },
+    expanded,
+    {
+      statuses: ['selected'],
+      url: CMC_QUOTES,
+      exactQueryAlternatives: [{ symbol: 'BTC,ETH' }, { symbol: 'BTC,ETH', convert: 'USD' }],
+    },
+    true,
+    'regression',
+  );
+  add(
+    '94-compound-company-research-then-enrichment',
+    'compound-scope',
+    [
+      'Research Stripe for someone new to online payments.',
+      {
+        role: 'assistant',
+        text: 'Stripe provides payments infrastructure; its domain is stripe.com.',
+      },
+      'Now get company enrichment data for stripe.com.',
+    ],
+    'Request',
+    { query: 'Get company enrichment for stripe.com.' },
+    expanded,
+    { statuses: ['selected'], url: hunterCompany, exactBody: { domain: 'stripe.com' } },
+    true,
+    'regression',
+  );
   return cases;
 }
 
@@ -752,6 +838,18 @@ function grade(test: RoutingEvalCase, result: RouteResult): string[] {
       if (JSON.stringify(query?.[key]) !== JSON.stringify(value))
         failures.push(`query.${key} differs from the labeled required argument.`);
     }
+    if (
+      test.expected.exactQueryAlternatives !== undefined &&
+      !test.expected.exactQueryAlternatives.some(
+        (alternative) =>
+          query !== undefined &&
+          Object.keys(query).length === Object.keys(alternative).length &&
+          Object.entries(alternative).every(
+            ([key, value]) => JSON.stringify(query[key]) === JSON.stringify(value),
+          ),
+      )
+    )
+      failures.push('Query differs from every labeled exact request alternative.');
     // Independent expected provider semantics, beyond the catalog's loose string schema.
     if (
       result.contract.url === EXA &&

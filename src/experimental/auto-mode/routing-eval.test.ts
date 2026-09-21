@@ -37,7 +37,9 @@ it('keeps frozen capability preferences, misleading-keyword cases, and identical
       expect(test.contracts.some((contract) => contract.url === test.expected.url)).toBe(true);
   }
   expect(
-    all.filter((test) => test.category !== 'native-value').every((test) => !test.nativeFallback),
+    all
+      .filter((test) => !['native-value', 'compound-scope'].includes(test.category))
+      .every((test) => !test.nativeFallback),
   ).toBe(true);
   for (const id of [
     'native-research-keyword-is-not-value',
@@ -62,7 +64,9 @@ it('keeps frozen capability preferences, misleading-keyword cases, and identical
 }, 15_000);
 
 it('labels natural math regressions without requiring provider names or engine instructions', () => {
-  const cases = routingEvalCases().filter((test) => test.evaluationSplit === 'regression');
+  const cases = routingEvalCases().filter(
+    (test) => test.category === 'native-value' && test.evaluationSplit === 'regression',
+  );
   expect(cases.map((test) => test.id)).toEqual([
     '84-paid-natural-definite-integral',
     '85-paid-natural-numerical-root',
@@ -83,6 +87,104 @@ it('labels natural math regressions without requiring provider names or engine i
   for (const test of cases.slice(2, 4)) expect(test.expected.statuses).toEqual(['native_fallback']);
   expect(cases[4]!.expected.statuses).toEqual(['native_fallback', 'needs_input']);
   expect(cases[4]!.context.messages.at(-1)?.text).toContain("don't use any paid services");
+});
+
+it('freezes compound research failures and narrowed controls against the same full catalog', () => {
+  const cases = routingEvalCases().filter((test) => test.category === 'compound-scope');
+  expect(cases.map((test) => test.id)).toEqual([
+    '89-compound-research-observed-1',
+    '90-compound-research-observed-2',
+    '91-compound-company-research-firmographics',
+    '92-compound-research-then-explicit-price-refresh',
+    '93-compound-research-needed-measurement-substep',
+    '94-compound-company-research-then-enrichment',
+  ]);
+  for (const test of cases) {
+    expect(test.nativeFallback).toBe(true);
+    expect(test.evaluationSplit).toBe('regression');
+    expect(test.contracts).toHaveLength(8);
+    expect(test.contracts).toEqual(cases[0]!.contracts);
+    expect(test.contracts.some((contract) => contract.url === test.expected.url)).toBe(true);
+  }
+  for (const test of cases.slice(0, 3))
+    expect(test.expected).toEqual({ statuses: ['selected'], url: 'https://api.exa.ai/search' });
+  for (const test of cases.slice(0, 2)) {
+    expect(test.context.messages).toEqual([
+      { role: 'user', text: 'can you research BTC and ETH for someone new to crypto' },
+    ]);
+    expect(test.event.tool_input.query).toContain('current price and market cap');
+    expect(test.event.tool_input.query).toContain('Research Bitcoin (BTC) and Ethereum (ETH)');
+  }
+  for (const test of cases.slice(3, 5))
+    expect(test.expected.exactQueryAlternatives).toEqual([
+      { symbol: 'BTC,ETH' },
+      { symbol: 'BTC,ETH', convert: 'USD' },
+    ]);
+  expect(cases[3]!.context.messages.at(-1)?.text).toBe('Check price for both now');
+  expect(cases[4]!.context.messages.at(-1)?.text).toContain('Research BTC and ETH');
+  expect(cases[4]!.event.tool_input.query).toBe('Get current USD price quotes for BTC and ETH.');
+  expect(cases[5]!.expected.exactBody).toEqual({ domain: 'stripe.com' });
+  expect(cases[5]!.context.messages.at(-1)?.text).toBe(
+    'Now get company enrichment data for stripe.com.',
+  );
+});
+
+it('accepts explicit USD quote bindings while rejecting wrong targets, currencies and extra selectors', async () => {
+  const test = routingEvalCases().find(
+    (item) => item.id === '92-compound-research-then-explicit-price-refresh',
+  )!;
+  const contract = test.contracts.find((item) => item.url === test.expected.url)!;
+  const queries = [
+    { symbol: 'BTC,ETH' },
+    { convert: 'USD', symbol: 'BTC,ETH' },
+    { symbol: 'BTC' },
+    { symbol: 'BTC,ETH', convert: 'EUR' },
+    { symbol: 'BTC,ETH', id: '1' },
+  ];
+  for (const query of queries)
+    vi.mocked(routeIntent).mockResolvedValueOnce({
+      status: 'selected',
+      operation: 'request',
+      contract,
+      args: { query },
+      evidence: {},
+    });
+  const results = await evaluateRouting(
+    choose,
+    queries.map(() => test),
+  );
+  expect(results.map((result) => result.passed)).toEqual([true, true, false, false, false]);
+  for (const result of results.slice(2))
+    expect(result.failures).toEqual([
+      'Query differs from every labeled exact request alternative.',
+    ]);
+});
+
+it('fails a valid incidental-record request when broad research was the labeled purpose', async () => {
+  const test = routingEvalCases().find((item) => item.id === '89-compound-research-observed-1')!;
+  const research = test.contracts.find((item) => item.url === test.expected.url)!;
+  const quotes = test.contracts.find((item) => item.url.includes('coinmarketcap'))!;
+  expect(quotes).toBeDefined();
+  vi.mocked(routeIntent)
+    .mockResolvedValueOnce({
+      status: 'selected',
+      operation: 'request',
+      contract: research,
+      args: { body: { query: test.event.tool_input.query } },
+      evidence: {},
+    })
+    .mockResolvedValueOnce({
+      status: 'selected',
+      operation: 'request',
+      contract: quotes,
+      args: { query: { symbol: 'BTC,ETH' } },
+      evidence: {},
+    });
+  const results = await evaluateRouting(choose, [test, test]);
+  expect(results.map((result) => result.passed)).toEqual([true, false]);
+  expect(results[1]!.failures).toEqual([
+    'Selected endpoint differs from the labeled provider/capability.',
+  ]);
 });
 
 it('requires the natural math expression and JSON output to survive argument binding', async () => {
