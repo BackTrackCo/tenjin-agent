@@ -3,11 +3,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { hookOutput, runEvent, fixtureChooser } from './runtime';
-import type { AutoConfig } from './runtime';
+import type { AutoConfig, RuntimeDeps } from './runtime';
 import type { HookEvent } from './context';
 import type { AutoContract } from './contracts';
 import type { Choose } from './routing';
-import type { executePaidRequest } from './execution';
+import type { ExecutionDeps, executePaidRequest } from './execution';
 
 const directories: string[] = [];
 afterEach(async () => {
@@ -121,6 +121,111 @@ describe('hook result delivery', () => {
       capabilityId: 'stable-endpoint-identity',
       contractHash: 'metadata-revision',
     });
+    expect(signPayment).not.toHaveBeenCalled();
+  });
+
+  it('fetches a new observation on a later user turn and only replays the same tool call', async () => {
+    const setup = { ...(await config()), mode: 'live' as const };
+    const transcriptPath = join(setup.stateDir, 'transcript.jsonl');
+    const contract: AutoContract = {
+      version: 1,
+      id: 'current-observation',
+      url: 'https://provider.example/observation',
+      method: 'GET',
+      pathTemplate: '/observation',
+      description: 'Return the current observation.',
+      sourceHash: 'observation-contract',
+      schemaSource: 'bazaar-v2',
+      responseKind: 'json',
+      accepts: [],
+      argumentSchema: { type: 'object', properties: {}, additionalProperties: false },
+    };
+    const choose = vi.fn<Choose>(async () => ({ route: { choice: 'c0' } }));
+    const transport = vi
+      .fn<NonNullable<ExecutionDeps['transport']>>()
+      .mockResolvedValueOnce({
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ observation: 'observation-v1' }),
+      })
+      .mockResolvedValueOnce({
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ observation: 'observation-v2' }),
+      });
+    const signPayment = vi.fn(async () => {
+      throw new Error('No signing in a cross-turn refresh test.');
+    });
+    const deps: RuntimeDeps = {
+      contracts: [contract],
+      choose,
+      executionDeps: {
+        stateDir: setup.stateDir,
+        readPolicy: async () => ({
+          runId: 'refresh-test',
+          revision: '1',
+          authorization: 'auto',
+          expiresAtMs: Date.now() + 60_000,
+          maxCallAtomic: '100',
+          maxRunAtomic: '100',
+          allowedOperations: ['request'],
+        }),
+        transport,
+        signPayment,
+      },
+    };
+    const user = {
+      type: 'user',
+      sessionId: event.session_id,
+      message: { content: 'Get the current observation.' },
+    };
+    await writeFile(transcriptPath, JSON.stringify(user));
+    const firstEvent: HookEvent = {
+      ...event,
+      transcript_path: transcriptPath,
+      tool_use_id: 'observation-1',
+      tool_name: 'Request',
+      tool_input: { query: 'Get the current observation.' },
+    };
+    const first = await runEvent(firstEvent, setup, deps);
+    expect(first.status).toBe('fulfilled');
+    expect(first.execution?.response?.body).toBe('{"observation":"observation-v1"}');
+    expect(first.execution?.cached).not.toBe(true);
+
+    await writeFile(
+      transcriptPath,
+      [
+        user,
+        {
+          type: 'assistant',
+          sessionId: event.session_id,
+          message: { content: 'The current observation is observation-v1.' },
+        },
+        {
+          type: 'user',
+          sessionId: event.session_id,
+          message: { content: 'Check it now.' },
+        },
+      ]
+        .map((row) => JSON.stringify(row))
+        .join('\n'),
+    );
+    const secondEvent = { ...firstEvent, tool_use_id: 'observation-2' };
+    const second = await runEvent(secondEvent, setup, deps);
+    expect(second.status).toBe('fulfilled');
+    expect(second.execution?.response?.body).toBe('{"observation":"observation-v2"}');
+    expect(second.execution?.cached).not.toBe(true);
+    expect(second.selected?.args).toEqual(first.selected?.args);
+    expect(transport).toHaveBeenCalledTimes(2);
+    expect(transport.mock.calls[1]).toEqual(transport.mock.calls[0]);
+    const routeCalls = choose.mock.calls.length;
+
+    const replay = await runEvent(secondEvent, setup, deps);
+    expect(replay.status).toBe('fulfilled');
+    expect(replay.execution?.response).toEqual(second.execution?.response);
+    expect(replay.execution?.cached).toBe(true);
+    expect(choose).toHaveBeenCalledTimes(routeCalls);
+    expect(transport).toHaveBeenCalledTimes(2);
     expect(signPayment).not.toHaveBeenCalled();
   });
 
