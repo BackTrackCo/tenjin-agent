@@ -542,6 +542,57 @@ export function routingEvalCases(): RoutingEvalCase[] {
       exactBody: { query: 'x402 payments how it works official documentation' },
     },
   );
+  const researchHistory: (string | TaskContext['messages'][number])[] = [
+    'can you research BTC and ETH for someone new to crypto',
+    {
+      role: 'assistant',
+      text: 'Bitcoin (BTC) and Ethereum (ETH) are the two networks. Sources: https://www.coingecko.com/en/coins/bitcoin and https://www.coingecko.com/en/coins/ethereum',
+    },
+    'Check price for both now',
+  ];
+  add(
+    '39-neutral-request-fresh-quotes',
+    'neutral-request',
+    researchHistory,
+    'Request',
+    { query: 'Check price for both now' },
+    [exa, firecrawl, cmcQuotes],
+    { statuses: ['selected'], url: CMC_QUOTES, exactQuery: { symbol: 'BTC,ETH' } },
+  );
+  add(
+    '40-neutral-request-source-hint-is-not-binding',
+    'neutral-request',
+    researchHistory,
+    'Request',
+    {
+      query:
+        'Get current BTC and ETH prices, perhaps from https://www.coingecko.com/en/coins/bitcoin',
+    },
+    [exa, firecrawl, cmcQuotes],
+    { statuses: ['selected'], url: CMC_QUOTES, exactQuery: { symbol: 'BTC,ETH' } },
+  );
+  add(
+    '41-neutral-request-document-reading',
+    'neutral-request',
+    switchedTopic,
+    'Request',
+    { query: `Read ${documentationUrl} and explain the payment process` },
+    [exa, firecrawl, cmcQuotes],
+    { statuses: ['selected'], url: FIRECRAWL, exactBody: { url: documentationUrl } },
+  );
+  add(
+    '42-neutral-request-research',
+    'neutral-request',
+    switchedTopic,
+    'Request',
+    { query: 'x402 payments how it works official documentation' },
+    [exa, firecrawl, cmcQuotes],
+    {
+      statuses: ['selected'],
+      url: EXA,
+      exactBody: { query: 'x402 payments how it works official documentation' },
+    },
+  );
   return cases;
 }
 

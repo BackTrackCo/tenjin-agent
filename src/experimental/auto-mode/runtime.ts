@@ -218,9 +218,10 @@ export async function routeEvent(
           { mode: 0o600, dirMode: 0o700 },
         );
     } else {
-      const configured = config.discoveryQueries[event.tool_name];
+      const configured =
+        config.discoveryQueries[event.tool_name === 'Request' ? 'WebSearch' : event.tool_name];
       const fallback =
-        `${event.tool_name === 'WebSearch' ? 'web search' : 'webpage extraction'} ${context.messages.filter((m) => m.role === 'user').at(-1)?.text ?? ''}`.slice(
+        `${event.tool_name === 'WebFetch' ? 'webpage extraction' : 'web search'} ${context.messages.filter((m) => m.role === 'user').at(-1)?.text ?? ''}`.slice(
           0,
           400,
         );
@@ -414,7 +415,7 @@ async function runUncachedEvent(
         contractHash: route.contract.sourceHash,
         contextHash: context.fingerprint,
       },
-      operation: event.tool_name === 'WebSearch' ? 'search' : 'fetch',
+      operation: route.operation,
       advertisedAccepts: route.contract.accepts,
     },
     executionDeps,

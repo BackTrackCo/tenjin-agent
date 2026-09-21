@@ -22,7 +22,7 @@ export async function writeBridgeSetup(configPath: string, nodePath: string, cli
         hooks: {
           PreToolUse: [
             {
-              matcher: '^mcp__x402__(search|fetch)$',
+              matcher: '^mcp__x402__(request|search|fetch)$',
               hooks: [{ type: 'command', command, timeout: 90 }],
             },
           ],

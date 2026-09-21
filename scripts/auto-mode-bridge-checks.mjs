@@ -4,6 +4,7 @@ import { previewResult } from '../src/experimental/auto-mode/result-preview.ts';
 import { httpUrls } from './auto-mode-demo-checks.mjs';
 
 const BRIDGE_TOOLS = new Map([
+  ['mcp__x402__request', 'Request'],
   ['mcp__x402__search', 'WebSearch'],
   ['mcp__x402__fetch', 'WebFetch'],
 ]);

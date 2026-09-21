@@ -139,6 +139,21 @@ test('accepts two real bridge calls in auto mode with matching current receipts 
   assert.equal(result.perCallOutcomes[1].settlement.status, 'unverified');
 });
 
+test('accepts neutral request handoffs and checks their distinct event identity', () => {
+  const input = fixture();
+  for (let index = 0; index < input.outcomes.length; index += 1) {
+    const call = input.events[1 + index * 2].message.content[0];
+    call.name = 'mcp__x402__request';
+    call.input = {
+      query: index === 0 ? 'Find protocol documentation' : 'Read https://docs.example/2',
+    };
+    input.outcomes[index].event.tool_name = 'Request';
+  }
+  assert.equal(checkBridgeDemo(input).passed, true);
+  input.outcomes[0].event.tool_name = 'WebSearch';
+  assert.equal(checkBridgeDemo(input).checks.sessionMatched, false);
+});
+
 test('supports the requested Haiku alias and a coalesced receipt/envelope string', () => {
   const input = fixture(1);
   input.model = 'haiku';

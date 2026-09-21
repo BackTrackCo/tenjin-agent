@@ -8,7 +8,7 @@ export const HookEventSchema = z.object({
   session_id: z.string().min(1).max(200),
   tool_use_id: z.string().min(1).max(200),
   transcript_path: z.string().min(1),
-  tool_name: z.enum(['WebSearch', 'WebFetch']),
+  tool_name: z.enum(['Request', 'WebSearch', 'WebFetch']),
   tool_input: z.record(z.string(), z.unknown()),
 });
 export type HookEvent = z.infer<typeof HookEventSchema>;

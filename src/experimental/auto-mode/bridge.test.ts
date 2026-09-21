@@ -87,6 +87,23 @@ async function client() {
 }
 
 describe('MCP hook normalization', () => {
+  it('keeps a neutral information request distinct from legacy search and page retrieval', () => {
+    expect(
+      normalizeBridgeEvent({
+        ...event,
+        tool_name: 'mcp__x402__request',
+        tool_input: {
+          query: 'Read https://source.example/article and summarize it.',
+          _receipt: 'old',
+        },
+      }),
+    ).toEqual({
+      ...event,
+      tool_name: 'Request',
+      tool_input: { query: 'Read https://source.example/article and summarize it.' },
+    });
+  });
+
   it('preserves the current request identity and removes only receipt transport metadata', () => {
     expect(
       normalizeBridgeEvent({
@@ -122,6 +139,30 @@ describe('MCP hook normalization', () => {
 });
 
 describe('request-bound local receipts', () => {
+  it('binds neutral request receipts separately from legacy search receipts', async () => {
+    const hook = await receipt({ ...event, tool_name: 'mcp__x402__request' });
+    expect(
+      (await readBridgeResult({ stateDir }, 'request', hook.updatedInput, clock)).isError,
+    ).toBe(false);
+    expect((await readBridgeResult({ stateDir }, 'search', hook.updatedInput, clock)).isError).toBe(
+      true,
+    );
+    const legacy = await receipt();
+    expect(
+      (await readBridgeResult({ stateDir }, 'request', legacy.updatedInput, clock)).isError,
+    ).toBe(true);
+    expect(
+      (
+        await readBridgeResult(
+          { stateDir },
+          'request',
+          { ...hook.updatedInput, query: 'changed' },
+          clock,
+        )
+      ).isError,
+    ).toBe(true);
+  });
+
   it('returns successful MCP content with a visible supplier, selected parameters, and amount', async () => {
     const hook = await receipt();
     expect(hook).toMatchObject({
@@ -360,38 +401,28 @@ describe('request-bound local receipts', () => {
 });
 
 describe('read-only MCP server', () => {
-  it('advertises only provider-free search and fetch, with optional hook metadata', async () => {
+  it('advertises one provider-free request tool without an execution-category choice', async () => {
     expect(BRIDGE_SERVER_NAME).toBe('x402');
     const connection = await client();
     const { tools } = await connection.listTools();
-    expect(tools.map((tool) => tool.name).sort()).toEqual(['fetch', 'search']);
-    expect(tools.find((tool) => tool.name === 'search')!.inputSchema.required).toEqual(['query']);
-    expect(tools.find((tool) => tool.name === 'fetch')!.inputSchema.required).toEqual(['url']);
+    expect(tools.map((tool) => tool.name)).toEqual(['request']);
+    expect(tools[0]!.inputSchema.required).toEqual(['query']);
+    expect(Object.keys(tools[0]!.inputSchema.properties!)).toEqual(['query', '_receipt']);
     expect(JSON.stringify(tools)).not.toMatch(/Exa|Firecrawl|CoinMarketCap|Vaaya/);
     const missing = await connection.callTool({
-      name: 'search',
+      name: 'request',
       arguments: { query: 'information' },
     });
     expect(missing.isError).toBe(true);
   });
 
-  it('delivers hook receipts through the actual MCP protocol for both tools', async () => {
+  it('delivers neutral request receipts through the actual MCP protocol', async () => {
     const connection = await client();
-    for (const tool of ['search', 'fetch'] as const) {
-      const raw =
-        tool === 'search'
-          ? event
-          : {
-              ...event,
-              tool_name: 'mcp__x402__fetch',
-              tool_input: { url: 'https://source.example/article', prompt: 'Summarize this page.' },
-            };
-      const hook = await receipt(raw);
-      const result = await connection.callTool({ name: tool, arguments: hook.updatedInput });
-      expect(result.isError).toBe(false);
-      expect(result.content).toEqual(
-        (await readBridgeResult({ stateDir }, tool, hook.updatedInput, clock)).content,
-      );
-    }
+    const hook = await receipt({ ...event, tool_name: 'mcp__x402__request' });
+    const result = await connection.callTool({ name: 'request', arguments: hook.updatedInput });
+    expect(result.isError).toBe(false);
+    expect(result.content).toEqual(
+      (await readBridgeResult({ stateDir }, 'request', hook.updatedInput, clock)).content,
+    );
   });
 });

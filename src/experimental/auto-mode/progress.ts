@@ -63,7 +63,12 @@ export async function writeProgress(
       version: 1,
       at: now,
       phase: progress.phase,
-      operation: event.tool_name === 'WebFetch' ? 'fetch' : 'search',
+      operation:
+        event.tool_name === 'Request'
+          ? 'request'
+          : event.tool_name === 'WebFetch'
+            ? 'fetch'
+            : 'search',
       status: progress.status && clean(progress.status, 60),
       provider: progress.provider && providerLabel(progress.provider),
       parameters: progress.args && clean(JSON.stringify(progress.args), 180),
@@ -111,7 +116,7 @@ export async function renderProgress(
           !Number.isFinite(row.at) ||
           row.at > now ||
           !['routing', 'calling', 'finished'].includes(row.phase) ||
-          !['search', 'fetch'].includes(row.operation) ||
+          !['request', 'search', 'fetch'].includes(row.operation) ||
           [row.provider, row.parameters, row.status].some(
             (value) => value !== undefined && typeof value !== 'string',
           )

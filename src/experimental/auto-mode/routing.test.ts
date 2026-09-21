@@ -62,6 +62,85 @@ describe('Jev intent-to-call boundary', () => {
     ],
   };
 
+  it('lets Jev select factual lookup despite a host-suggested page URL', async () => {
+    const lookup = {
+      ...event,
+      tool_name: 'Request' as const,
+      tool_input: { query: `Get the current measurement, perhaps from ${pageUrl}` },
+    };
+    const choose = vi.fn<Choose>(async (_state, questions): ReturnType<Choose> => {
+      if (questions.operation) return { operation: { choice: 'information' } };
+      if (questions.route) {
+        expect(questions.route.criteria.c0).toBeDefined();
+        return { route: { choice: 'c0' } };
+      }
+      const exact = Object.entries(questions.a0!.criteria).find(
+        ([, label]) => label === `pending tool.query: ${JSON.stringify(lookup.tool_input.query)}`,
+      )!;
+      return { a0: { choice: exact[0] } };
+    });
+    const result = await routeIntent(lookup, context, [contract()], choose);
+    expect(result).toMatchObject({
+      status: 'selected',
+      operation: 'search',
+      args: { body: { query: lookup.tool_input.query } },
+    });
+  });
+
+  it('pins Jev-selected document reading to the exact URL with generic request transport', async () => {
+    const reader = fieldsContract({ url: { type: 'string' } });
+    const lookup = {
+      ...event,
+      tool_name: 'Request' as const,
+      tool_input: { query: `Read \`${pageUrl}\` and explain the payment steps` },
+    };
+    const choose: Choose = async (_state, questions): ReturnType<Choose> => {
+      if (questions.operation) return { operation: { choice: 'page0' } };
+      if (questions.route) {
+        expect(Object.keys(questions.route.criteria)).toEqual(['none', 'c1']);
+        return { route: { choice: 'c1' } };
+      }
+      const exact = Object.entries(questions.a0!.criteria).find(
+        ([, label]) => label === `pending tool.url: ${JSON.stringify(pageUrl)}`,
+      )!;
+      return { a0: { choice: exact[0] } };
+    };
+    expect(await routeIntent(lookup, changedTopic, [contract(), reader], choose)).toMatchObject({
+      status: 'selected',
+      operation: 'fetch',
+      args: { body: { url: pageUrl } },
+    });
+  });
+
+  it('refuses unresolved document scope before capability selection', async () => {
+    const choose = vi.fn<Choose>(async () => ({ operation: { choice: 'none' } }));
+    expect(
+      await routeIntent(
+        { ...event, tool_name: 'Request', tool_input: { query: `Read or ignore ${pageUrl}` } },
+        context,
+        [contract()],
+        choose,
+      ),
+    ).toMatchObject({ status: 'needs_input' });
+    expect(choose).toHaveBeenCalledTimes(1);
+  });
+
+  it('offers exact pending URL literals for generic lookup argument binding', async () => {
+    const reader = fieldsContract({ url: { type: 'string' } });
+    const lookup = { ...event, tool_input: { query: `Get information from ${pageUrl}` } };
+    const choose: Choose = async (_state, questions): ReturnType<Choose> => {
+      if (questions.route) return { route: { choice: 'c0' } };
+      const exact = Object.entries(questions.a0!.criteria).find(
+        ([, label]) => label === `URL in pending tool.query: ${JSON.stringify(pageUrl)}`,
+      )!;
+      return { a0: { choice: exact[0] } };
+    };
+    expect(await routeIntent(lookup, context, [reader], choose)).toMatchObject({
+      status: 'selected',
+      args: { body: { url: pageUrl } },
+    });
+  });
+
   it('keeps page retrieval distinct from earlier topics and the broader research task', async () => {
     const reader = fieldsContract({
       documentAddress: { type: 'string', format: 'uri' },

@@ -5,6 +5,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { hookOutput, runEvent, fixtureChooser } from './runtime';
 import type { AutoConfig } from './runtime';
 import type { HookEvent } from './context';
+import type { AutoContract } from './contracts';
+import type { Choose } from './routing';
+import type { executePaidRequest } from './execution';
 
 const directories: string[] = [];
 afterEach(async () => {
@@ -34,6 +37,90 @@ async function config(): Promise<AutoConfig> {
 }
 
 describe('hook result delivery', () => {
+  it.each(['search', 'fetch'] as const)(
+    'authorizes a neutral Request using its Jev-selected %s scope',
+    async (operation) => {
+      const setup = { ...(await config()), mode: 'live' as const };
+      const url = 'https://source.example/article';
+      const query = `Get the requested information from ${url}`;
+      const field = operation === 'fetch' ? 'url' : 'query';
+      const contract: AutoContract = {
+        version: 1,
+        id: 'scope-fixture',
+        url: 'https://provider.example/call',
+        method: 'POST',
+        pathTemplate: '/call',
+        description: 'Synthetic information capability',
+        sourceHash: 'scope-fixture',
+        schemaSource: 'bazaar-v2',
+        bodyEncoding: 'json',
+        responseKind: 'json',
+        accepts: [],
+        argumentSchema: {
+          type: 'object',
+          properties: {
+            body: {
+              type: 'object',
+              properties: { [field]: { type: 'string' } },
+              required: [field],
+            },
+          },
+          required: ['body'],
+        },
+      };
+      const choose: Choose = async (_state, questions): Promise<Awaited<ReturnType<Choose>>> => {
+        if (questions.operation)
+          return { operation: { choice: operation === 'fetch' ? 'page0' : 'information' } };
+        if (questions.route) return { route: { choice: 'c0' } };
+        const source = Object.entries(questions.a0!.criteria).find(([, text]) =>
+          text.startsWith(`pending tool.${field}:`),
+        )!;
+        return { a0: { choice: source[0] } };
+      };
+      const execute = vi.fn<typeof executePaidRequest>().mockResolvedValue({
+        status: 'fulfilled',
+        amountAtomic: '1',
+        response: { status: 200, headers: {}, body: '{}' },
+      });
+      const signPayment = vi.fn(async () => {
+        throw new Error('No payment signing in this test.');
+      });
+      const result = await runEvent(
+        { ...event, tool_name: 'Request', tool_input: { query } },
+        setup,
+        {
+          context: { messages: [{ role: 'user', text: query }], fingerprint: 'scope-test' },
+          contracts: [contract],
+          choose,
+          execute,
+          executionDeps: {
+            stateDir: setup.stateDir,
+            readPolicy: async () => ({
+              runId: 'scope-test',
+              revision: '1',
+              authorization: 'auto',
+              expiresAtMs: Date.now() + 60_000,
+              maxCallAtomic: '100',
+              maxRunAtomic: '100',
+              allowedOperations: ['search', 'fetch'],
+            }),
+            signPayment,
+            nestedTargetValidation: {
+              resolveHostname: async () => [{ address: '93.184.216.34', family: 4 }],
+            },
+          },
+        },
+      );
+      expect(result.status).toBe('fulfilled');
+      expect(execute).toHaveBeenCalledOnce();
+      expect(execute.mock.calls[0]![0]).toMatchObject({
+        operation,
+        request: { body: JSON.stringify({ [field]: operation === 'fetch' ? url : query }) },
+      });
+      expect(signPayment).not.toHaveBeenCalled();
+    },
+  );
+
   it('replays a completed event without reading history or calling the router again', async () => {
     const setup = await config();
     const choose = vi.fn(fixtureChooser);

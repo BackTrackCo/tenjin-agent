@@ -39,6 +39,14 @@ const selected = {
   args: { body: { url: 'https://example.com/page' } },
 };
 
+it('labels neutral bridge activity as a request while showing the selected provider', async () => {
+  const config = await setup();
+  await writeProgress(config, { ...event, tool_name: 'Request' }, selected);
+  expect(await renderProgress(config, event.session_id)).toContain(
+    'request: calling reader.example/scrape',
+  );
+});
+
 it('publishes selection before execution completes, not just in the result', async () => {
   const config = await setup();
   let release!: () => void;

@@ -26,6 +26,7 @@ it('prepares the bridge without renewing payment authority or disturbing native 
   const settings = JSON.parse(await readFile(result.settingsPath, 'utf8'));
   expect(settings.hooks.PreToolUse).toHaveLength(1);
   const hook = settings.hooks.PreToolUse[0];
+  expect(new RegExp(hook.matcher).test('mcp__x402__request')).toBe(true);
   expect(new RegExp(hook.matcher).test('mcp__x402__search')).toBe(true);
   expect(new RegExp(hook.matcher).test('mcp__x402__fetch')).toBe(true);
   expect(new RegExp(hook.matcher).test('mcp__other__search')).toBe(false);

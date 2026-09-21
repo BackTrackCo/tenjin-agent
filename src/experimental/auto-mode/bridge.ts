@@ -18,7 +18,7 @@ const RECEIPT_LIFETIME_MS = 10 * 60 * 1000;
 const MAX_RECEIPT_BYTES = 65_536;
 const receiptToken = /^[a-f0-9]{64}$/;
 type BridgeConfig = Pick<AutoConfig, 'stateDir'>;
-type BridgeTool = 'search' | 'fetch';
+type BridgeTool = 'request' | 'search' | 'fetch';
 type Clock = { now?: () => number };
 
 const query = z
@@ -35,11 +35,11 @@ const fetchArgs = z
   })
   .strict();
 const BridgeEventSchema = HookEventSchema.extend({
-  tool_name: z.enum(['mcp__x402__search', 'mcp__x402__fetch']),
+  tool_name: z.enum(['mcp__x402__request', 'mcp__x402__search', 'mcp__x402__fetch']),
 });
 const ReceiptSchema = z.object({
   version: z.literal(1),
-  tool: z.enum(['search', 'fetch']),
+  tool: z.enum(['request', 'search', 'fetch']),
   requestHash: z.string().regex(receiptToken),
   createdAt: z.number().int().nonnegative(),
   expiresAt: z.number().int().nonnegative(),
@@ -50,7 +50,7 @@ const ReceiptSchema = z.object({
 
 /** Fixed property order binds exact inputs independently of MCP JSON key order. */
 function requestArgs(tool: BridgeTool, input: unknown): Record<string, unknown> {
-  if (tool === 'search') {
+  if (tool !== 'fetch') {
     const parsed = searchArgs.parse(input);
     return { query: parsed.query };
   }
@@ -61,10 +61,15 @@ function requestArgs(tool: BridgeTool, input: unknown): Record<string, unknown> 
 /** The receipt is transport metadata, never task context or a provider argument. */
 export function normalizeBridgeEvent(raw: unknown): HookEvent {
   const event = BridgeEventSchema.parse(raw);
-  const tool = event.tool_name === 'mcp__x402__search' ? 'search' : 'fetch';
+  const tool: BridgeTool =
+    event.tool_name === 'mcp__x402__request'
+      ? 'request'
+      : event.tool_name === 'mcp__x402__search'
+        ? 'search'
+        : 'fetch';
   return HookEventSchema.parse({
     ...event,
-    tool_name: tool === 'search' ? 'WebSearch' : 'WebFetch',
+    tool_name: tool === 'request' ? 'Request' : tool === 'search' ? 'WebSearch' : 'WebFetch',
     tool_input: requestArgs(tool, event.tool_input),
   });
 }
@@ -175,7 +180,12 @@ export async function createBridgeHookOutput(
   clock: Clock = {},
 ) {
   const event = normalizeBridgeEvent(raw);
-  const tool = event.tool_name === 'WebSearch' ? 'search' : 'fetch';
+  const tool: BridgeTool =
+    event.tool_name === 'Request'
+      ? 'request'
+      : event.tool_name === 'WebSearch'
+        ? 'search'
+        : 'fetch';
   const token = randomBytes(32).toString('hex');
   const createdAt = (clock.now ?? Date.now)();
   const result = receiptResult(outcome);
@@ -282,30 +292,15 @@ export function buildBridgeServer(config: BridgeConfig, clock: Clock = {}): McpS
     .optional()
     .describe('Local hook receipt; supplied automatically, omit when calling.');
   server.registerTool(
-    'search',
+    'request',
     {
-      title: 'Search for current information',
+      title: 'Request current information',
       description:
-        'Find information and sources for a query, including current factual data. The configured local hook selects an available service and returns its result.',
+        'Describe the current information need. The local hook uses the conversation to select a suitable search, structured-data, or page-reading service and its arguments. Do not choose a provider or endpoint unless the user requested one. For a specific page or document, include its exact URL in the query and state what to read. For a follow-up, describe the new information needed; the hook can resolve references from the conversation.',
       inputSchema: { query, _receipt: transportReceipt },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    (args) => readBridgeResult(config, 'search', args, clock),
-  );
-  server.registerTool(
-    'fetch',
-    {
-      title: 'Read a web page',
-      description:
-        'Retrieve content from an exact web page URL for reading or summarization. An optional prompt states what information is wanted. The configured local hook selects an available service.',
-      inputSchema: {
-        url: z.string().min(1).max(4096),
-        prompt: z.string().max(4000).optional(),
-        _receipt: transportReceipt,
-      },
-      annotations: { readOnlyHint: true, openWorldHint: true },
-    },
-    (args) => readBridgeResult(config, 'fetch', args, clock),
+    (args) => readBridgeResult(config, 'request', args, clock),
   );
   return server;
 }
