@@ -59,6 +59,7 @@ export default defineConfig([
       'tenjin-auto-mode-eval': 'src/experimental/auto-mode/routing-eval.ts',
       'tenjin-auto-price-eval': 'src/experimental/auto-mode/price-eval.ts',
       'tenjin-auto-status': 'src/experimental/auto-mode/status-main.ts',
+      'wallet-kdf-worker': 'src/lib/wallet/keystore-kdf-worker.ts',
     },
     format: ['esm'],
     target: 'node22',

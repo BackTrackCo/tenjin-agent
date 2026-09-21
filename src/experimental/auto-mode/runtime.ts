@@ -71,6 +71,8 @@ export type Outcome = {
   fixture?: boolean;
 };
 export interface RuntimeDeps {
+  /** Hook lifetime; cancellation cannot authorize a late provider request. */
+  signal?: AbortSignal;
   context?: TaskContext;
   /** Internal host availability: prompt routing may offer reasoning when no native tools exist. */
   hostReasoningOnly?: boolean;
@@ -406,6 +408,7 @@ async function runUncachedEvent(
     };
   }
   const route = await routeEvent(event, config, { ...deps, context });
+  deps.signal?.throwIfAborted();
   if (route.status !== 'selected') return route;
   const selected = {
     url: route.contract.url,
@@ -467,8 +470,11 @@ async function runUncachedEvent(
           dir: config.walletDir,
           env: deps.env ?? process.env,
           passphrase: { isTTY: false },
+          derivation: { signal: deps.signal, timeoutMs: 15_000 },
         });
-        return buildExactPayment(quote, await wallet.getSigner());
+        const signer = await wallet.getSigner();
+        deps.signal?.throwIfAborted();
+        return buildExactPayment(quote, signer);
       },
     } satisfies ExecutionDeps);
   const execution = await (deps.execute ?? executePaidRequest)(
@@ -487,8 +493,9 @@ async function runUncachedEvent(
       advertisedAccepts: route.contract.accepts,
       ...(route.contract.resultSchema ? { resultSchema: route.contract.resultSchema } : {}),
     },
-    executionDeps,
+    { ...executionDeps, ...(deps.signal ? { signal: deps.signal } : {}) },
   );
+  deps.signal?.throwIfAborted();
   const outcome: Outcome = {
     status: execution.status,
     reason: execution.reason,
@@ -578,6 +585,7 @@ export async function runEvent(
     return { ...cached.outcome, execution: { ...cached.outcome.execution, cached: true } };
   }
   const outcome = await runUncachedEvent(event, config, deps);
+  deps.signal?.throwIfAborted();
   if (outcome.status === 'fulfilled')
     await writeFileAtomic(path, JSON.stringify({ eventHash, outcome }), {
       mode: 0o600,

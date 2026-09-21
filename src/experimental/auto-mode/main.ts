@@ -245,56 +245,67 @@ for (const command of ['hook', 'run', 'bridge-hook', 'native-hook']) {
     .requiredOption('--config <path>')
     .option('--event <path>', 'Read hook event JSON from a file instead of stdin')
     .action(async (options) => {
-      let outcome: Outcome;
-      // Finish with a denial before Claude's command-hook timeout can discard
-      // our output. Durable execution state prevents re-signing on restart.
-      const watchdog = command.endsWith('hook')
-        ? setTimeout(() => {
-            json(
-              hookOutput({
-                status: 'pending',
-                reason:
-                  command === 'native-hook'
-                    ? 'Native routing check timed out. No provider request or payment was made.'
-                    : 'Local execution deadline reached. Signing or payment may already have occurred; pending is not evidence of zero spend. Do not claim no charge. Reconcile the saved attempt before retrying.',
-              }),
-            );
-            releaseOwnedLocks();
-            process.exit(0);
-          }, 70_000)
-        : undefined;
-      let bridgeOutput: Awaited<ReturnType<typeof createBridgeHookOutput>> | undefined;
-      let progress: { config: AutoConfig; event: HookEvent } | undefined;
-      try {
+      const controller = new AbortController();
+      let timedOut = false;
+      let selected: Outcome['selected'];
+      let prepared: { config: AutoConfig; event: HookEvent; raw: unknown } | undefined;
+      let watchdog: ReturnType<typeof setTimeout> | undefined;
+      // The deadline settles the same delivery path as normal execution. In
+      // particular, MCP receives a real request-bound pending receipt, not a
+      // native-tool denial with no receipt for the bridge to read.
+      const deadline = new Promise<Outcome>((resolveDeadline) => {
+        if (command.endsWith('hook'))
+          watchdog = setTimeout(() => {
+            timedOut = true;
+            controller.abort();
+            resolveDeadline({
+              status: 'pending',
+              ...(selected ? { selected } : {}),
+              reason:
+                command === 'native-hook'
+                  ? 'Native routing check timed out. No provider request or payment was made.'
+                  : 'Local execution deadline reached. Signing or payment may already have occurred; pending is not evidence of zero spend. Do not claim no charge. Reconcile the saved attempt before retrying.',
+            });
+          }, 70_000);
+      });
+      const execute = async (): Promise<Outcome> => {
         const { config, env } = await loadConfig(options.config as string);
+        controller.signal.throwIfAborted();
         const raw = await input(options.event as string | undefined);
+        controller.signal.throwIfAborted();
         const event =
           command === 'bridge-hook' ? normalizeBridgeEvent(raw) : HookEventSchema.parse(raw);
+        prepared = { config, event, raw };
         if (command === 'bridge-hook' || command === 'native-hook') {
-          progress = { config, event };
           await writeProgress(config, event, {
             phase: 'routing',
             fixture: config.mode === 'fixture',
           });
+          controller.signal.throwIfAborted();
         }
-        outcome = await (command === 'native-hook' ? runNativeGate : runEvent)(event, config, {
+        return (command === 'native-hook' ? runNativeGate : runEvent)(event, config, {
           env,
-          ...(progress
+          signal: controller.signal,
+          ...(command === 'bridge-hook' || command === 'native-hook'
             ? {
-                onSelected: async (selected) => {
+                onSelected: async (value: NonNullable<Outcome['selected']>) => {
+                  controller.signal.throwIfAborted();
+                  selected = value;
                   await writeProgress(config, event, {
                     phase: 'calling',
-                    provider: selected.url,
-                    args: selected.args,
+                    provider: value.url,
+                    args: value.args,
                     fixture: config.mode === 'fixture',
                   });
+                  controller.signal.throwIfAborted();
                 },
               }
             : {}),
         });
-        await recordOutcome(config, event, outcome);
-        if (command === 'bridge-hook')
-          bridgeOutput = await createBridgeHookOutput(config, raw, outcome);
+      };
+      let outcome: Outcome;
+      try {
+        outcome = await Promise.race([execute(), deadline]);
       } catch (error) {
         outcome = {
           status: 'failed',
@@ -302,16 +313,46 @@ for (const command of ['hook', 'run', 'bridge-hook', 'native-hook']) {
         };
       }
       clearTimeout(watchdog);
-      if (progress)
-        await writeProgress(progress.config, progress.event, {
-          phase: 'finished',
-          status: outcome.status,
-          provider: outcome.selected?.url,
-          args: outcome.selected?.args,
-          cached: outcome.execution?.cached,
-          fixture: outcome.fixture,
-        });
-      json(bridgeOutput ?? (command.endsWith('hook') ? hookOutput(outcome) : outcome));
+      // Leave room below the host's 90s limit for durable receipt delivery. If
+      // the filesystem itself stalls, stop rather than leaving an orphaned
+      // worker that can later execute after the host abandoned the request.
+      const deliveryWatchdog = command.endsWith('hook')
+        ? setTimeout(() => {
+            controller.abort();
+            releaseOwnedLocks();
+            process.exit(0);
+          }, 10_000)
+        : undefined;
+      try {
+        let bridgeOutput: Awaited<ReturnType<typeof createBridgeHookOutput>> | undefined;
+        if (prepared) {
+          const { config, event, raw } = prepared;
+          await recordOutcome(config, event, outcome);
+          if (command === 'bridge-hook')
+            bridgeOutput = await createBridgeHookOutput(config, raw, outcome);
+          if (command === 'bridge-hook' || command === 'native-hook')
+            await writeProgress(config, event, {
+              phase: 'finished',
+              status: outcome.status,
+              provider: outcome.selected?.url,
+              args: outcome.selected?.args,
+              cached: outcome.execution?.cached,
+              fixture: outcome.fixture,
+            });
+        }
+        const result = bridgeOutput ?? (command.endsWith('hook') ? hookOutput(outcome) : outcome);
+        if (timedOut) {
+          await new Promise<void>((resolveOutput) => {
+            process.stdout.write(`${JSON.stringify(result, null, 2)}\n`, () => resolveOutput());
+          });
+        } else json(result);
+      } finally {
+        clearTimeout(deliveryWatchdog);
+        if (timedOut) {
+          releaseOwnedLocks();
+          process.exit(0);
+        }
+      }
     });
 }
 

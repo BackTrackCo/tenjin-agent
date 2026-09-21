@@ -7,6 +7,10 @@ import { compileResource, validateResultBody } from './contracts';
 import { createBridgeHookOutput, readBridgeResult } from './bridge';
 import { demoCatalog } from './demo-catalog';
 import math from './fixtures/cdp-math-resources.json';
+import * as localWallet from '../../lib/wallet/local';
+import * as paymentBuilder from '../../lib/x402-pay';
+import { testSigner } from '../../lib/read-test-utils';
+import type { TenjinSigner } from '../../lib/wallet/provider';
 import type { AutoConfig, RuntimeDeps } from './runtime';
 import type { HookEvent, TaskContext } from './context';
 import type { PaymentRequired } from '@x402/core/types';
@@ -219,6 +223,83 @@ async function config(): Promise<AutoConfig> {
 }
 
 describe('hook result delivery', () => {
+  it('does not build an authorization when wallet unlocking finishes after cancellation', async () => {
+    const setup = { ...(await config()), mode: 'live' as const, walletDir: '/not-read-by-mock' };
+    setup.policyPath = join(setup.stateDir, 'policy.json');
+    await writeFile(
+      setup.policyPath,
+      JSON.stringify({ allowedResources: [{ url: FIXTURE_RESOURCE.resource, method: 'POST' }] }),
+    );
+    const controller = new AbortController();
+    let unlocked!: (signer: TenjinSigner) => void;
+    let started!: () => void;
+    const unlocking = new Promise<TenjinSigner>((resolve) => (unlocked = resolve));
+    const unlockingStarted = new Promise<void>((resolve) => (started = resolve));
+    const getSigner = vi.fn(() => {
+      started();
+      return unlocking;
+    });
+    const wallet = vi.spyOn(localWallet, 'createLocalProvider').mockReturnValue({
+      getSigner,
+    } as ReturnType<typeof localWallet.createLocalProvider>);
+    const build = vi.spyOn(paymentBuilder, 'buildExactPayment');
+    const contract = compileResource(FIXTURE_RESOURCE);
+    if (contract.status !== 'supported') throw new Error('Fixture must compile.');
+    const execute = vi.fn<typeof executePaidRequest>(async (_input, dependencies) => {
+      await dependencies.signPayment({ x402Version: 2, accepts: [] });
+      throw new Error('An aborted wallet must not reach payment construction.');
+    });
+    try {
+      const request = runEvent(event, setup, {
+        signal: controller.signal,
+        context: {
+          messages: [{ role: 'user', text: 'Find the archive.' }],
+          fingerprint: 'late-unlock',
+        },
+        contracts: [contract.contract],
+        choose: fixtureChooser,
+        execute,
+      });
+      await Promise.race([unlockingStarted, request]);
+      controller.abort();
+      unlocked(testSigner());
+      await expect(request).rejects.toMatchObject({ name: 'AbortError' });
+      expect(wallet).toHaveBeenCalledWith(
+        expect.objectContaining({ derivation: { signal: controller.signal, timeoutMs: 15_000 } }),
+      );
+      expect(getSigner).toHaveBeenCalledOnce();
+      expect(build).not.toHaveBeenCalled();
+    } finally {
+      wallet.mockRestore();
+      build.mockRestore();
+    }
+  });
+
+  it('does not execute or cache a route that finishes after hook cancellation', async () => {
+    const setup = await config();
+    const controller = new AbortController();
+    const execute = vi.fn<typeof executePaidRequest>();
+    const onSelected = vi.fn();
+    await expect(
+      runEvent(event, setup, {
+        signal: controller.signal,
+        context: {
+          messages: [{ role: 'user', text: 'Find the archive.' }],
+          fingerprint: 'cancelled-route',
+        },
+        choose: async (questions, options) => {
+          const choice = await fixtureChooser(questions, options);
+          controller.abort();
+          return choice;
+        },
+        execute,
+        onSelected,
+      }),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+    expect(execute).not.toHaveBeenCalled();
+    expect(onSelected).not.toHaveBeenCalled();
+  });
+
   it('keeps retry authorization stable across assistant/tool updates until another user turn', async () => {
     const setup = { ...(await config()), mode: 'live' as const };
     const transcriptPath = join(setup.stateDir, 'transcript.jsonl');

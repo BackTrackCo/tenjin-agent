@@ -76,6 +76,8 @@ export interface ExecutionResult {
 }
 
 export interface ExecutionDeps {
+  /** Abort before any subsequent signing/transmission; retained attempts stay conservative. */
+  signal?: AbortSignal;
   stateDir: string;
   /** Must reread structured local policy, rather than a model-provided decision. */
   readPolicy: () => Promise<AutoPolicy>;
@@ -490,7 +492,15 @@ export async function executePaidRequest(
   let policy: AutoPolicy;
   let currentState: Attempt['state'] | undefined;
   let stage = 'configuration';
+  const checkAbort = () => {
+    if (deps.signal?.aborted)
+      stop(
+        'pending',
+        'Local execution was cancelled. Do not retry until the saved attempt is reconciled.',
+      );
+  };
   try {
+    checkAbort();
     const peerWaitMs = deps.peerWaitMs ?? 10_000;
     if (!Number.isInteger(peerWaitMs) || peerWaitMs < 0 || peerWaitMs > 10_000)
       throw new Error('Peer wait must be between 0 and 10000 milliseconds.');
@@ -551,6 +561,7 @@ export async function executePaidRequest(
     async function withReadyLedger<T>(fn: (ledger: Ledger) => Promise<T>): Promise<T> {
       let resumed = false;
       for (;;) {
+        checkAbort();
         if (resumed) await recheckPolicy();
         try {
           return await withLedger(fn);
@@ -627,6 +638,7 @@ export async function executePaidRequest(
 
     stage = 'claim';
     const existing = await withReadyLedger(async (ledger) => {
+      checkAbort();
       const prior = ledger.attempts.find((attempt) => attempt.key === key);
       if (prior !== undefined && prior.fingerprint !== fingerprint) {
         stop(
@@ -678,7 +690,9 @@ export async function executePaidRequest(
     }
 
     async function recheckPolicy(): Promise<void> {
+      checkAbort();
       const fresh = policySchema.parse(await deps.readPolicy());
+      checkAbort();
       checkPolicy(fresh, input, now());
       if (hash(fresh) !== policyHash) {
         stop(
@@ -688,8 +702,10 @@ export async function executePaidRequest(
       }
     }
 
+    checkAbort();
     stage = 'unsigned-request';
     const probe = responseSchema.parse(await transport(input.request));
+    checkAbort();
     if (probe.status >= 300 && probe.status <= 399)
       stop('refused', 'Endpoint redirects are refused.');
     if (probe.status >= 200 && probe.status <= 299) {
@@ -713,6 +729,7 @@ export async function executePaidRequest(
     await recheckPolicy();
     stage = 'reserve-budget';
     await withReadyLedger(async (ledger) => {
+      checkAbort();
       const attempt = ledger.attempts.find((item) => item.key === key)!;
       // Distinct requests may obtain unsigned quotes together, but only one
       // unresolved payment per service/user turn may reserve or sign. Recheck
@@ -732,8 +749,10 @@ export async function executePaidRequest(
       await persist(ledger);
     });
     currentState = 'signing';
+    checkAbort();
     stage = 'sign-payment';
     const payment = await deps.signPayment(quote);
+    checkAbort();
     if (payment.amountAtomic !== amount)
       stop('refused', 'The signer returned an inconsistent amount.');
     try {
@@ -746,6 +765,7 @@ export async function executePaidRequest(
     }
     // Persist BEFORE the first possible network transmission. A crash in this
     // small gap conservatively counts the reservation; retry cannot sign again.
+    checkAbort();
     stage = 'record-transmission';
     await update('transmitted');
     try {
@@ -757,6 +777,7 @@ export async function executePaidRequest(
       await update('cancelled', { amountAtomic: '0' });
       throw error;
     }
+    checkAbort();
     stage = 'paid-request';
     const paid = responseSchema.parse(await transport(input.request, payment.headers));
     const httpSuccess = paid.status >= 200 && paid.status <= 299;

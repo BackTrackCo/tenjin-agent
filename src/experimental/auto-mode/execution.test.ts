@@ -118,6 +118,76 @@ function secondInput(): PaidRequestInput {
   return { ...input, identity: { ...input.identity, requestId: 'tool-2' } };
 }
 
+describe('hook cancellation', () => {
+  it('does not claim, probe or sign after an already expired hook', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const s = await setup({ signal: controller.signal });
+    expect(await executePaidRequest(input, s.deps)).toMatchObject({ status: 'pending' });
+    expect(s.readPolicy).not.toHaveBeenCalled();
+    expect(s.transport).not.toHaveBeenCalled();
+    expect(s.signPayment).not.toHaveBeenCalled();
+    expect(await readdir(s.stateDir)).toEqual([]);
+  });
+
+  it('does not reserve or sign when the unsigned response arrives after cancellation', async () => {
+    const controller = new AbortController();
+    const s = await setup({ signal: controller.signal });
+    s.transport.mockImplementation(async () => {
+      controller.abort();
+      return challenge();
+    });
+    expect(await executePaidRequest(input, s.deps)).toMatchObject({
+      status: 'pending',
+      amountAtomic: '0',
+    });
+    expect(s.transport).toHaveBeenCalledOnce();
+    expect(s.signPayment).not.toHaveBeenCalled();
+    const file = (await readdir(s.stateDir)).find((name) => name.startsWith('run-'))!;
+    const ledger = JSON.parse(await readFile(join(s.stateDir, file), 'utf8'));
+    expect(ledger.attempts).toEqual([
+      expect.objectContaining({ state: 'cancelled', amountAtomic: '0' }),
+    ]);
+  });
+
+  it('retains an unresolved reservation and never transmits a late signer result', async () => {
+    const controller = new AbortController();
+    let finishSigning!: () => void;
+    let signingStarted!: () => void;
+    const started = new Promise<void>((resolve) => (signingStarted = resolve));
+    const signing = new Promise<void>((resolve) => (finishSigning = resolve));
+    const s = await setup({ signal: controller.signal });
+    s.signPayment.mockImplementation(async (value) => {
+      signingStarted();
+      await signing;
+      return {
+        headers: { 'PAYMENT-SIGNATURE': 'fake-fixture' },
+        amountAtomic: BigInt(value.accepts[0]!.amount),
+      };
+    });
+    const attempt = executePaidRequest(input, s.deps);
+    await started;
+    controller.abort();
+    finishSigning();
+    expect(await attempt).toMatchObject({ status: 'pending', amountAtomic: '7000' });
+    expect(s.transport).toHaveBeenCalledOnce();
+    expect(s.signPayment).toHaveBeenCalledOnce();
+    const file = (await readdir(s.stateDir)).find((name) => name.startsWith('run-'))!;
+    const ledger = JSON.parse(await readFile(join(s.stateDir, file), 'utf8'));
+    expect(ledger.attempts).toEqual([
+      expect.objectContaining({ state: 'ambiguous', amountAtomic: '7000' }),
+    ]);
+    const nextDeps = { ...s.deps };
+    delete nextDeps.signal;
+    expect(await executePaidRequest(input, nextDeps)).toMatchObject({
+      status: 'pending',
+      amountAtomic: '7000',
+    });
+    expect(s.transport).toHaveBeenCalledOnce();
+    expect(s.signPayment).toHaveBeenCalledOnce();
+  });
+});
+
 describe('trusted application success validation', () => {
   const resultSchema = {
     type: 'object',
