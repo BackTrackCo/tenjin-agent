@@ -29,7 +29,7 @@ export interface PromptGateOutput {
 }
 
 export const PROMPT_BRIDGE_HINT =
-  "For the current user task, use mcp__x402__request with the task and its needed inputs before presenting the result. Preserve the user's latest constraints and corrections. The tool's PreToolUse hook chooses and executes the appropriate capability under the configured policy; the bridge returns the saved result. This routing check has not made a provider request or payment.";
+  "Jev selected an external capability for the current user task. Make mcp__x402__request your next tool call, by itself, with the complete current task and its needed inputs. Wait for its result before making any other tool call; do not run native WebSearch ahead of it or in parallel. If the result fulfills the requested step, use it without duplicating that lookup. Use native tools for that step only when the bridge explicitly returns native_fallback. For a distinct later lookup, ask the request tool first again. Preserve the user's latest constraints and corrections, including references to multiple items. The tool's PreToolUse hook chooses and executes the appropriate capability under the configured policy; the bridge returns the saved result. This routing check has not made a provider request or payment.";
 
 /** A routing-only UserPromptSubmit check. Never calls runEvent or execution
  * hooks. An uncertain decision adds no instruction and cannot initiate payment. */
