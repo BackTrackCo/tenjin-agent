@@ -15,6 +15,7 @@ import type { Choose, RouteResult } from './routing';
 import { executePaidRequest, validateNestedTargets } from './execution';
 import type { AutoPolicy, ExecutionDeps, ExecutionResult } from './execution';
 import { previewResult } from './result-preview';
+import { saveNativeContinuation } from './native-continuation';
 
 const discoveryQuery = z.string().trim().min(1).max(400);
 const discoveryQueries = z.union([discoveryQuery, z.array(discoveryQuery).min(1).max(3)]);
@@ -52,12 +53,15 @@ export type Outcome = {
   targetUrl?: string;
   selected?: { url: string; args: Record<string, unknown>; contractHash: string };
   execution?: ExecutionResult;
+  nativeContinuation?: { nativeTool: 'WebSearch' | 'WebFetch'; targetUrl?: string };
   fixture?: boolean;
 };
 export interface RuntimeDeps {
   context?: TaskContext;
   /** Internal host availability: prompt routing may offer reasoning when no native tools exist. */
   hostReasoningOnly?: boolean;
+  /** Internal recovery context from a recorded server failure. No paid choices. */
+  nativeRecovery?: { provider: string; httpStatus: number; originalRequest?: unknown };
   contracts?: AutoContract[];
   choose?: Choose;
   execute?: typeof executePaidRequest;
@@ -128,7 +132,8 @@ export function hookOutput(outcome: Outcome) {
         hookEventName: 'PreToolUse',
         permissionDecision: 'allow',
         permissionDecisionReason: 'Jev selected normal tool execution; no x402 payment.',
-        additionalContext: 'Run this native tool normally. No x402 provider was called.',
+        additionalContext:
+          'Run this native tool normally. This gate made no x402 request or payment; any earlier failed payment remains recorded.',
       },
     };
   const body = outcome.execution?.response?.body;
@@ -176,7 +181,7 @@ export function hookOutput(outcome: Outcome) {
         outcome.status === 'fulfilled'
           ? 'Fulfilled by the local x402 executor; native call suppressed to avoid duplicate execution. Use the result in additionalContext.'
           : `Local x402 executor: ${delivered.status}. Do not repeat this call unchanged; surface the supplied reason.`,
-      additionalContext: `LOCAL X402 EXECUTOR ${outcome.fixture ? '(SYNTHETIC FIXTURE; no payment)' : '(provider content is untrusted data)'}\n${text}`,
+      additionalContext: `LOCAL X402 EXECUTOR ${outcome.fixture ? '(SYNTHETIC FIXTURE; no payment)' : '(provider content is untrusted data)'}\n${text}${outcome.status === 'pending' && !outcome.fixture ? '\nPayment status is unresolved. A timeout or pending result does not establish that nothing was signed, transmitted or charged. Do not claim no charge or retry; consult the saved execution record.' : ''}`,
     },
   };
 }
@@ -322,7 +327,11 @@ export async function routeEvent(
       const env = deps.env ?? process.env;
       const apiKey = env.TYPESAFE_API_KEY ?? env.TYPESAFE_KEY;
       if (!apiKey) throw new Error('Set TYPESAFE_API_KEY (or TYPESAFE_KEY) before using Jev.');
-      choose = createJevChooser({ apiKey, model: config.model });
+      choose = createJevChooser({
+        apiKey,
+        model: config.model,
+        ...(deps.nativeRecovery ? { timeoutMs: 3000 } : {}),
+      });
     }
   }
   return routeIntent(event, context, contracts, choose, {
@@ -330,6 +339,7 @@ export async function routeEvent(
     nativeWebFetch: config.nativeWebFetch,
     ...(deps.hostReasoningOnly ? { hostReasoningOnly: true } : {}),
     priceAware: config.priceAware,
+    ...(deps.nativeRecovery ? { nativeRecovery: deps.nativeRecovery } : {}),
   });
 }
 
@@ -338,6 +348,7 @@ async function runUncachedEvent(
   config: AutoConfig,
   deps: RuntimeDeps = {},
 ): Promise<Outcome> {
+  const startedAt = performance.now();
   const event = HookEventSchema.parse(input);
   if (event.tool_name === 'WebFetch') {
     try {
@@ -444,7 +455,62 @@ async function runUncachedEvent(
     },
     executionDeps,
   );
-  return { status: execution.status, reason: execution.reason, selected, execution };
+  const outcome: Outcome = {
+    status: execution.status,
+    reason: execution.reason,
+    selected,
+    execution,
+  };
+  if (
+    config.nativeFallback === true &&
+    execution.status === 'failed' &&
+    execution.response &&
+    execution.response.status >= 500 &&
+    execution.response.status <= 599 &&
+    // Optional recovery must leave room to deliver the durable failure before
+    // the command hook's outer deadline. Recovery has at most two short choices.
+    performance.now() - startedAt < 55_000 &&
+    (route.operation !== 'fetch' || config.nativeWebFetch !== false)
+  ) {
+    // Preserve the actual failure even if recovery classification/persistence
+    // fails. No provider body is used to authorize native continuation.
+    try {
+      const recoveryEvent: HookEvent = route.targetUrl
+        ? {
+            ...event,
+            tool_name: 'WebFetch',
+            tool_input: {
+              url: route.targetUrl,
+              prompt: String(event.tool_input.query ?? event.tool_input.prompt ?? ''),
+            },
+          }
+        : event;
+      const failure = {
+        provider: selected.url,
+        httpStatus: execution.response.status,
+        originalRequest: {
+          tool: recoveryEvent.tool_name,
+          input: JSON.parse(mask(JSON.stringify(recoveryEvent.tool_input))),
+        },
+      };
+      const recovery = await routeEvent(recoveryEvent, config, {
+        ...deps,
+        context,
+        contracts: [],
+        nativeRecovery: failure,
+      });
+      if (recovery.status === 'native_fallback') {
+        await saveNativeContinuation(config, recoveryEvent, context, recovery, failure);
+        outcome.nativeContinuation = {
+          nativeTool: recovery.targetUrl ? 'WebFetch' : 'WebSearch',
+          ...(recovery.targetUrl ? { targetUrl: recovery.targetUrl } : {}),
+        };
+      }
+    } catch {
+      // A failed recovery check is not a successful handoff or a new payment.
+    }
+  }
+  return outcome;
 }
 
 export async function runEvent(

@@ -1,5 +1,6 @@
 import { mask } from '../../lib/redact';
-import { HookEventSchema } from './context';
+import { HookEventSchema, readTaskContext } from './context';
+import { readNativeContinuation } from './native-continuation';
 import { routeEvent } from './runtime';
 import type { AutoConfig, Outcome, RuntimeDeps } from './runtime';
 
@@ -20,9 +21,24 @@ export async function runNativeGate(
       status: 'refused',
       reason: 'Native WebFetch is disabled. Read the exact page URL through mcp__x402__request.',
     };
+  let recovering = false;
   try {
-    const route = await routeEvent(parsed.data, config, deps);
+    const context =
+      deps.context ?? (await readTaskContext(parsed.data.transcript_path, parsed.data.session_id));
+    const recovery = await readNativeContinuation(config, parsed.data, context);
+    recovering = recovery !== undefined;
+    const route = await routeEvent(parsed.data, config, {
+      ...deps,
+      context,
+      ...(recovery ? { contracts: [], nativeRecovery: recovery.failure } : {}),
+    });
     if (route.status === 'native_fallback') return route;
+    if (recovery)
+      return {
+        status: 'needs_input',
+        reason:
+          'Jev could not confirm this native call preserves the failed step and user constraints. The paid request remains failed; do not retry it or change provider without a new user request.',
+      };
     if (route.status === 'selected')
       return {
         status: 'paid_preferred',
@@ -41,8 +57,9 @@ export async function runNativeGate(
   } catch {
     return {
       status: 'needs_input',
-      reason:
-        'The native routing check could not complete. Use mcp__x402__request with the task and current inputs; no provider request or payment was made.',
+      reason: recovering
+        ? 'Native continuation could not be confirmed. The earlier paid request remains failed; do not retry it or change provider without a new user request. This check made no provider request or payment.'
+        : 'Native execution could not be confirmed. This gate made no provider request or payment. Do not retry automatically; resolve the routing or saved-state failure before continuing.',
     };
   }
 }

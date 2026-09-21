@@ -604,3 +604,53 @@ describe('read-only MCP server', () => {
     );
   });
 });
+
+describe('native continuation keeps the paid failure visible', () => {
+  const failed: Outcome = {
+    ...outcome,
+    status: 'failed',
+    reason: 'Paid endpoint returned HTTP 503; no automatic retry.',
+    nativeContinuation: { nativeTool: 'WebSearch' },
+    execution: {
+      status: 'failed',
+      amountAtomic: '7000',
+      settlement: { status: 'reported' },
+      response: { status: 503, headers: {}, body: 'Temporarily unavailable.' },
+    },
+  };
+  it('delivers the error, charge evidence and explicit native continuation together', async () => {
+    const config = { stateDir, nativeFallback: true, nativeWebFetch: false };
+    const hook = (await createBridgeHookOutput(config, event, failed, clock)).hookSpecificOutput;
+    const result = await readBridgeResult(config, 'search', hook.updatedInput, clock);
+    expect(result.isError).toBe(true);
+    expect(JSON.parse(texts(result)[1]!)).toMatchObject({
+      status: 'failed',
+      amountAtomic: '7000',
+      settlement: { status: 'reported' },
+      nativeContinuation: { nativeTool: 'WebSearch' },
+    });
+    expect(hook.additionalContext).toContain('without asking for permission again');
+    expect(hook.additionalContext).toContain('Do not retry the paid request');
+    expect(hook.additionalContext).not.toContain('stop rather than resubmitting');
+  });
+  it('does not present unavailable or ungrounded continuations as permission', async () => {
+    for (const value of [
+      {
+        ...failed,
+        nativeContinuation: {
+          nativeTool: 'WebFetch' as const,
+          targetUrl: 'https://example.com/page',
+        },
+      },
+      { ...failed, execution: { ...failed.execution!, response: undefined } },
+      { ...failed, status: 'pending' },
+      { ...failed, fixture: true },
+    ]) {
+      const config = { stateDir, nativeFallback: true, nativeWebFetch: false };
+      const hook = (await createBridgeHookOutput(config, event, value, clock)).hookSpecificOutput;
+      const result = await readBridgeResult(config, 'search', hook.updatedInput, clock);
+      expect(JSON.parse(texts(result)[1]!).nativeContinuation).toBeUndefined();
+      expect(hook.additionalContext).toContain('stop rather than resubmitting');
+    }
+  });
+});

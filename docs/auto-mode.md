@@ -44,7 +44,7 @@ Check whether info@stripe.com is deliverable. Don't send a message.
 ```
 
 ```text
-integrate x^2 sin(x) dx from 0 to pi
+Evaluate ∫₀¹ e^(−x²) cos(37x) dx to 12 decimal places.
 ```
 
 The prompts name the task and its input, not a provider. They do not guarantee a tool call or a particular route. The reserved `sales@example.com` test was answered without tools; it did not test the email endpoint. Use an authorized public business address when testing deliverability, and distinguish a provider's verdict from a guarantee that a future email will arrive.
@@ -352,6 +352,34 @@ A live probe launched two separate bridge-hook processes for the exact Ethereum 
 The earlier headless Sonnet two-page test passed all 20 transport/receipt/citation checks for three fulfilled calls totaling 0.03 USDC, but it was sequential and once selected Ethereum when the pending request named Coin Bureau. It therefore does not validate concurrency or correct page selection. The separate concurrent hook probe cost 0.02 USDC. That scope-selection limitation remains; the queue fix adds no routing instruction or provider-specific rule.
 
 All 88 executor tests and 44 runtime/bridge tests passed, covering distinct-request waiting, duplicate blocking, concurrent quote reservation, persisted unresolved states, bounded timeout cleanup, queued revocation, paid failure and exhausted budget. Workspace lint, formatting, typecheck and package smoke also passed. A slow or unresolved peer can still produce a truthful pending result after the bounded wait; no payment guard is bypassed to remove an error.
+
+### Harder numerical demo
+
+Use the provider-neutral prompt `Evaluate ∫₀¹ e^(−x²) cos(37x) dx to 12 decimal places.` The independently calculated answer is **−0.006801048333**. A Decimal power-series calculation and an independently implemented composite Gauss–Legendre quadrature agreed at high precision; a third, double-precision Simpson check also rounded to the same twelve decimal places. The reference and criteria were frozen before either model run.
+
+One isolated, high-effort Sonnet run with no tools, hooks, skills or MCP servers answered **+0.000000007430**, which is wrong. It printed purported command output despite making no tool calls. This is one preselected problem and one unaided response, not proof that Sonnet can never solve the integral or that Wolfram is required when local computation is available.
+
+With the same prompt in the prepared auto-mode session, Jev selected Wolfram at prompt time and again in the execution hook. One uncached Sponge/Wolfram call returned HTTP 200 for 0.02 USDC, with provider-reported settlement. Its result was `-0.00680104833279 + 0.×10^-14 i`; the real component agrees with the frozen reference at its returned precision, and the zero imaginary term is numerical residue. Claude delivered **−0.006801048333**, correctly rounded from the returned digits. It used no native tools. The raw provider result, delivered preview and final rounded answer are checked separately.
+
+The strict response harness passed 19/20 checks: the answer did not reproduce the first input pod verbatim, so that assertion remains failed. The numerical comparison is separate and does not relabel that run as a full harness pass. Claude inference cost $0.0428252 for the paid run and $0.0158234 for the unaided baseline, excluding Jev and the 0.02 USDC provider charge. An earlier sandbox attempt failed DNS before any tool call; it is infrastructure failure, not mathematical evidence. The old simple-integral timeout and its reservation were not retried or cleared.
+
+### Native continuation after a provider outage
+
+A received paid HTTP 5xx response remains a failed request, with its amount, provider response and settlement evidence preserved. When native fallback is configured, the runtime can ask Jev whether available native tools still satisfy that same step. This recovery choice offers only native continuation or abstention; it cannot select another paid service. It preserves explicit provider, source, output and privacy constraints. An ambiguous transmission, a client error, an unavailable native page reader or a failed recovery check does not produce a handoff.
+
+An approved continuation is saved privately for the current session, user turn, runtime mode and native tool, with a ten-minute expiry and an exact URL for page reads. The native hook rechecks the pending call against the original failed step with no paid candidates, so it cannot redirect the recovery back to the failed provider. A later user turn is a new decision. The bridge keeps the failed result visible, tells the host to disclose possible spending, and permits native continuation without another permission question. It does not refund, retry or rewrite the paid attempt. This is conditional failure handling, not a SessionStart instruction. Slow recovery classification is bounded and skipped when the hook has little time remaining.
+
+The September 21 Exa incident returned HTTP 503 with `SERVICE_OVERLOADED` and a provider-reported settlement for 0.007 USDC. A subsequent explicitly requested, single recovery probe through the unchanged policy and ledger returned HTTP 200 and ten results for another 0.007 USDC; the original failed charge remained accounted for. Exa's payment-quote endpoint being reachable alone would not have established search recovery.
+
+A frozen eight-case Jev-only check passed all eight expectations without provider requests or payments: BTC/ETH research, x402 source discovery and basic multiplication permitted native continuation; explicit Exa-only research, an exact page with native fetching disabled, required computational-engine evidence, Hunter deliverability fields and official CoinMarketCap API quote fields did not. These are small semantic regression checks, not a general recovery-accuracy claim. Provider transport recovery and host compliance with a native handoff are separate observations.
+
+One isolated headless Sonnet test passed 13 frozen checks: the real prompt gate selected Exa, an execution stub returned one explicitly synthetic HTTP 503 with zero charge, the real runtime saved the continuation and the real bridge delivered the failed receipt, and three native WebSearch calls passed the live Jev gate. Claude finished linked BTC/ETH research, disclosed the synthetic/no-charge failure and asked no permission question. It made no second bridge call, provider request or signature. This test used eight Jev calls and reported $0.1473692 Claude inference. It proves host continuation with simulated failure, separately from the live Exa recovery probe and the executor-ledger regression; no paid failure was deliberately generated to test the UI.
+
+The 171 focused runtime, routing, native-gate, bridge, prompt and continuation-store tests passed. A real-executor regression uses a synthetic transport and signer to show that native continuation preserves the failed paid ledger row byte-for-byte and that a changed-tool-ID retry cannot sign or transmit again. Separate tests cover classifier timeout, unavailable native tools, explicit abstention, expired/corrupt markers, and cross-session/turn/mode isolation.
+
+Search continuations currently keep one failure record per user turn. Concurrent search failures can replace earlier request evidence and make an earlier continuation decline; this does not authorize another payment. Corrupt or unreadable handoff records stop routing without suggesting a paid retry.
+
+A pending execution is not evidence of zero spend. The hook now explicitly warns the host not to infer “no charge” from a timeout. In the reported simple-integral timeout, the saved attempt remained at `signing` with 0.02 USDC reserved; the executor had not persisted its pre-transport `transmitted` state. A read-only wallet check completed in 2.35 seconds, so routine wallet decryption did not reproduce the earlier stall. The reservation remains untouched, and the stall cause is unresolved.
 
 ### Price-aware validation
 

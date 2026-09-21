@@ -1,9 +1,11 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
 import { runNativeGate } from './native-gate';
 import { compileResource } from './contracts';
+import { readTaskContext } from './context';
+import { saveNativeContinuation } from './native-continuation';
 import { FIXTURE_RESOURCE, fixtureChooser, hookOutput } from './runtime';
 import type { AutoConfig, RuntimeDeps } from './runtime';
 import type { HookEvent } from './context';
@@ -124,7 +126,7 @@ it('fails closed for disabled configuration, unsupported tools, missing context,
     (await runNativeGate(event, { ...config, nativeFallback: false }, { ...deps, choose })).status,
   ).toBe('refused');
   expect(choose).not.toHaveBeenCalled();
-  for (const outcome of [
+  const [missingContext, unresolvedChoice, unavailableChooser] = [
     await runNativeGate(
       { ...event, transcript_path: join(config.stateDir, 'missing') },
       config,
@@ -140,10 +142,49 @@ it('fails closed for disabled configuration, unsupported tools, missing context,
         throw new Error('Unavailable');
       },
     }),
-  ]) {
+  ];
+  for (const outcome of [missingContext!, unresolvedChoice!, unavailableChooser!]) {
     expect(outcome.status).not.toBe('native_fallback');
-    expect(outcome.reason).toContain('mcp__x402__request');
     expect(hookOutput(outcome).hookSpecificOutput.permissionDecision).toBe('deny');
     expect(outcome.execution).toBeUndefined();
   }
+  expect(unresolvedChoice!.reason).toContain('mcp__x402__request');
+  for (const outcome of [missingContext!, unavailableChooser!]) {
+    expect(outcome.reason).toContain('Do not retry automatically');
+    expect(outcome.reason).not.toContain('mcp__x402__request');
+  }
 });
+
+it.each(['malformed', 'symlink'])(
+  'does not suggest a paid retry when a %s recovery marker cannot be read',
+  async (corruption) => {
+    const { config, event, deps, execute, signPayment, onSelected } = await setup();
+    const context = await readTaskContext(event.transcript_path, event.session_id);
+    await saveNativeContinuation(
+      config,
+      event,
+      context,
+      { status: 'native_fallback', reason: 'Native search can continue this step.' },
+      { provider: FIXTURE_RESOURCE.resource, httpStatus: 503 },
+    );
+    const directory = join(config.stateDir, 'native-continuations');
+    const marker = join(directory, (await readdir(directory))[0]!);
+    if (corruption === 'malformed') await writeFile(marker, '{');
+    else {
+      const target = join(config.stateDir, 'invalid-recovery.json');
+      await writeFile(target, '{}');
+      await rm(marker);
+      await symlink(target, marker);
+    }
+    const choose = vi.fn(deps.choose!);
+    const result = await runNativeGate(event, config, { ...deps, choose });
+    expect(result.status).toBe('needs_input');
+    expect(result.reason).toContain('Do not retry automatically');
+    expect(result.reason).not.toContain('mcp__x402__request');
+    expect(hookOutput(result).hookSpecificOutput.permissionDecision).toBe('deny');
+    expect(choose).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+    expect(signPayment).not.toHaveBeenCalled();
+    expect(onSelected).not.toHaveBeenCalled();
+  },
+);

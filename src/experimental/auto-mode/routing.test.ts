@@ -1425,3 +1425,29 @@ describe('Jev intent-to-call boundary', () => {
     expect(cancelled).toBe(true);
   });
 });
+
+it('offers only native or abstention after a trusted provider failure', async () => {
+  const nativeRecovery = { provider: 'https://example.com/search', httpStatus: 503 };
+  const choose = vi.fn<Choose>(async (state, questions) => {
+    expect(state).toMatchObject({ nativeRecovery });
+    expect(Object.keys(questions.route!.criteria)).toEqual(['none', 'native']);
+    expect(questions.route!.instructions).toContain('Preserve required outputs');
+    expect(questions.route!.instructions).toContain(
+      'ordinary research may continue with native search',
+    );
+    return { route: { choice: 'native' } };
+  });
+  expect(
+    (
+      await routeIntent(event, context, [], choose, {
+        nativeFallback: true,
+        nativeWebFetch: false,
+        nativeRecovery,
+      })
+    ).status,
+  ).toBe('native_fallback');
+  await expect(
+    routeIntent(event, context, [contract()], choose, { nativeFallback: true, nativeRecovery }),
+  ).rejects.toThrow('cannot offer another paid capability');
+  expect(choose).toHaveBeenCalledOnce();
+});

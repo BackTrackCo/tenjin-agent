@@ -256,7 +256,7 @@ for (const command of ['hook', 'run', 'bridge-hook', 'native-hook']) {
                 reason:
                   command === 'native-hook'
                     ? 'Native routing check timed out. No provider request or payment was made.'
-                    : 'Local execution deadline reached. Reconcile the saved attempt before retrying.',
+                    : 'Local execution deadline reached. Signing or payment may already have occurred; pending is not evidence of zero spend. Do not claim no charge. Reconcile the saved attempt before retrying.',
               }),
             );
             releaseOwnedLocks();
