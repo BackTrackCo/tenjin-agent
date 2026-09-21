@@ -357,7 +357,8 @@ export function buildBridgeServer(config: BridgeConfig, clock: Clock = {}): McpS
     {
       title: 'Request an x402 service',
       description:
-        'Describe the task: research, current data, company or person enrichment, email verification, or mathematical computation. The local hook uses the conversation to select an available service and its arguments. Include concrete inputs and constraints. Do not choose a provider or endpoint unless the user requested one. For a specific page or document, include its exact URL and state what to read. For follow-ups, describe what is needed; the hook resolves conversation references.' +
+        'Describe the task: research, current data, company or person enrichment, email verification, or mathematical computation. The local hook uses the conversation to select an available service and its arguments. Include concrete inputs and constraints. Do not choose a provider or endpoint unless the user requested one. For a specific page or document, include its exact URL and state what to read. For follow-ups, describe what is needed; the hook resolves conversation references. ' +
+        'For computational requests, include the original expression and supplied variables, bounds, units and assumptions; keep explanation or formatting requests separate from the expression.' +
         (config.nativeFallback
           ? config.nativeWebFetch === false
             ? ' Call mcp__x402__request before each external lookup so Jev can compare a paid capability with native WebSearch or your own reasoning. Native WebFetch is unavailable. All page and document reads, including links returned by WebSearch, must use mcp__x402__request with the exact URL and what to read. A successful native_fallback result hands only the search or reasoning step back to you; it is not a provider result or a page-reading handoff.'

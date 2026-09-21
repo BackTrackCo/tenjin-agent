@@ -2,11 +2,7 @@ import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it } from 'vitest';
-import {
-  NATIVE_FALLBACK_INSTRUCTIONS,
-  nativeFallbackInstructions,
-  writeBridgeSetup,
-} from './setup';
+import { writeBridgeSetup } from './setup';
 
 const directories: string[] = [];
 afterEach(async () => {
@@ -28,7 +24,19 @@ it('prepares the bridge without renewing payment authority or disturbing native 
   for (const path of preserved)
     expect(await readFile(join(directory, path), 'utf8')).toBe(`preserve:${path}`);
   const settings = JSON.parse(await readFile(result.settingsPath, 'utf8'));
-  expect(settings.hooks.UserPromptSubmit).toBeUndefined();
+  expect(Object.keys(settings.hooks)).toEqual(['UserPromptSubmit', 'PreToolUse']);
+  expect(settings.hooks.UserPromptSubmit).toEqual([
+    {
+      hooks: [
+        {
+          type: 'command',
+          command: `'/node path' '/cli'\\''s file.mjs' prompt-hook --config '${join(directory, 'config.json')}'`,
+          timeout: 40,
+        },
+      ],
+    },
+  ]);
+  expect(JSON.stringify(settings.hooks)).not.toMatch(/SessionStart|native-instructions/);
   expect(settings.permissions).toBeUndefined();
   expect(result.note).toContain('--tools ""');
   expect(settings.hooks.PreToolUse).toHaveLength(1);
@@ -55,7 +63,7 @@ it('prepares the bridge without renewing payment authority or disturbing native 
   ]);
 });
 
-it('adds a fixed request-first instruction only for optional mixed native mode', async () => {
+it('keeps the classifier prompt hook independent of optional native tool gates', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'auto-bridge-mixed-'));
   directories.push(directory);
   await writeFile(join(directory, 'policy.json'), 'preserved policy');
@@ -66,17 +74,8 @@ it('adds a fixed request-first instruction only for optional mixed native mode',
     { nativeFallback: true },
   );
   const settings = JSON.parse(await readFile(result.settingsPath, 'utf8'));
-  expect(settings.hooks.UserPromptSubmit).toEqual([
-    {
-      hooks: [
-        {
-          type: 'command',
-          command: `'/node path' '/cli'\\''s file.mjs' native-instructions --config '${join(directory, 'config.json')}'`,
-          timeout: 10,
-        },
-      ],
-    },
-  ]);
+  expect(Object.keys(settings.hooks)).toEqual(['UserPromptSubmit', 'PreToolUse']);
+  expect(settings.hooks.UserPromptSubmit[0].hooks[0].command).toContain(' prompt-hook --config ');
   expect(settings.hooks.PreToolUse).toHaveLength(2);
   expect(new RegExp(settings.hooks.PreToolUse[0].matcher).test('WebSearch')).toBe(false);
   expect(new RegExp(settings.hooks.PreToolUse[0].matcher).test('WebFetch')).toBe(false);
@@ -94,13 +93,11 @@ it('adds a fixed request-first instruction only for optional mixed native mode',
   expect(result.note).toContain('--tools "WebSearch,WebFetch"');
   expect(settings.permissions).toBeUndefined();
   expect(result.note).toContain('own Jev value check');
-  expect(NATIVE_FALLBACK_INSTRUCTIONS).toContain('Before each external lookup');
-  expect(NATIVE_FALLBACK_INSTRUCTIONS).toContain('do not duplicate');
   expect(await readFile(join(directory, 'policy.json'), 'utf8')).toBe('preserved policy');
   await writeBridgeSetup(join(directory, 'config.json'), '/node path', "/cli's file.mjs");
-  expect(
-    JSON.parse(await readFile(result.settingsPath, 'utf8')).hooks.UserPromptSubmit,
-  ).toBeUndefined();
+  expect(JSON.parse(await readFile(result.settingsPath, 'utf8')).hooks.UserPromptSubmit).toEqual(
+    settings.hooks.UserPromptSubmit,
+  );
   expect(JSON.parse(await readFile(result.settingsPath, 'utf8')).hooks.PreToolUse).toHaveLength(1);
 });
 
@@ -116,18 +113,13 @@ it('keeps native search available while page reads use the bridge without changi
   });
   const settings = JSON.parse(await readFile(result.settingsPath, 'utf8'));
   expect(settings.permissions).toEqual({ deny: ['WebFetch'] });
-  expect(settings.hooks.UserPromptSubmit).toHaveLength(1);
+  expect(Object.keys(settings.hooks)).toEqual(['UserPromptSubmit', 'PreToolUse']);
   const nativeMatcher = new RegExp(settings.hooks.PreToolUse[1].matcher);
   expect(nativeMatcher.test('WebSearch')).toBe(true);
   expect(nativeMatcher.test('WebFetch')).toBe(false);
   expect(nativeMatcher.test('mcp__other__WebSearch')).toBe(false);
   expect(result.note).toContain('--tools "WebSearch"');
   expect(result.note).toContain('including search-result links');
-  expect(nativeFallbackInstructions(false)).toContain('Native WebSearch is available');
-  expect(nativeFallbackInstructions(false)).toContain('native WebFetch is unavailable');
-  expect(nativeFallbackInstructions(false)).toContain('including links returned by WebSearch');
-  expect(nativeFallbackInstructions(false)).toContain('with the exact URL');
-  expect(nativeFallbackInstructions(false)).not.toContain('requires WebFetch');
   for (const path of preserved)
     expect(await readFile(join(directory, path), 'utf8')).toBe(`preserve:${path}`);
 
@@ -136,8 +128,7 @@ it('keeps native search available while page reads use the bridge without changi
     nativeWebFetch: true,
   });
   const restored = JSON.parse(await readFile(result.settingsPath, 'utf8'));
+  expect(Object.keys(restored.hooks)).toEqual(['UserPromptSubmit', 'PreToolUse']);
   expect(restored.permissions).toBeUndefined();
   expect(new RegExp(restored.hooks.PreToolUse[1].matcher).test('WebFetch')).toBe(true);
-  expect(nativeFallbackInstructions(true)).toBe(NATIVE_FALLBACK_INSTRUCTIONS);
-  expect(nativeFallbackInstructions()).toBe(NATIVE_FALLBACK_INSTRUCTIONS);
 });

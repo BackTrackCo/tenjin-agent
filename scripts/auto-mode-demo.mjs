@@ -3,7 +3,11 @@ import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { resolve, dirname, join } from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { runClaude } from './auto-mode-headless-probe.mjs';
-import { checkDemo } from './auto-mode-demo-checks.mjs';
+import {
+  checkDemo,
+  collectPromptDecisions,
+  snapshotPromptDecisions,
+} from './auto-mode-demo-checks.mjs';
 import {
   checkBridgeDemo,
   checkBridgeRoutingDemo,
@@ -111,7 +115,13 @@ const args = [
   '--verbose',
   '--include-hook-events',
 ];
+const promptSnapshot = await snapshotPromptDecisions(config.stateDir);
 const execution = await runClaude(args, directory, bridge ? 180000 : 120000);
+const promptGate = await collectPromptDecisions(config.stateDir, {
+  snapshot: promptSnapshot,
+  sessionId,
+  prompt: values.prompt,
+});
 await writeFile(join(artifacts, 'stream.jsonl'), execution.stdout, { mode: 0o600 });
 await writeFile(join(artifacts, 'stderr.txt'), execution.stderr, { mode: 0o600 });
 const events = execution.stdout
@@ -188,6 +198,7 @@ const report = {
   observedTools,
   observedNativeTools,
   nativeToolCalls,
+  promptGate,
   checks,
   validationScope: validationScope ?? 'research',
   validationNote,

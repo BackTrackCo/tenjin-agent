@@ -544,6 +544,23 @@ describe('request-bound local receipts', () => {
 });
 
 describe('read-only MCP server', () => {
+  it.each([
+    [false, undefined],
+    [true, undefined],
+    [true, false],
+  ] as const)(
+    'describes computational inputs without directing when to call a tool (%s, %s)',
+    async (nativeFallback, nativeWebFetch) => {
+      const connection = await client(nativeFallback, nativeWebFetch);
+      const description = (await connection.listTools()).tools[0]!.description;
+      expect(description).toContain('For computational requests, include the original expression');
+      expect(description).toContain('supplied variables, bounds, units and assumptions');
+      expect(description).toContain('formatting requests separate from the expression');
+      expect(description).not.toMatch(
+        /Wolfram|nontrivial|before solving|by-hand|Computation section|Response instructions section/,
+      );
+    },
+  );
   it('advertises native handoffs only when explicitly enabled', async () => {
     const pure = await client();
     const mixed = await client(true);

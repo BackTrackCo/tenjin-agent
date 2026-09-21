@@ -1,6 +1,145 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { checkDemo, httpUrls } from './auto-mode-demo-checks.mjs';
+import { createHash, randomUUID } from 'node:crypto';
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import {
+  checkDemo,
+  collectPromptDecisions,
+  httpUrls,
+  snapshotPromptDecisions,
+} from './auto-mode-demo-checks.mjs';
+
+const auditHash = (value) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+async function promptAuditFixture(t) {
+  const stateDir = await mkdtemp(join(tmpdir(), 'auto-prompt-audit-'));
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const directory = join(stateDir, 'prompt-decisions');
+  const sessionId = 'audit-session';
+  const prompt = 'integrate x^2 sin(x) dx from 0 to pi';
+  const record = (overrides = {}) => ({
+    version: 1,
+    at: '2026-09-21T12:00:00.000Z',
+    invocationId: randomUUID(),
+    sessionHash: auditHash(sessionId),
+    promptHash: auditHash(prompt),
+    contextHash: null,
+    status: 'native_fallback',
+    injected: false,
+    ...overrides,
+  });
+  const save = async (value) => {
+    await mkdir(directory, { recursive: true });
+    await writeFile(join(directory, `${value.invocationId}.json`), JSON.stringify(value));
+  };
+  return { stateDir, directory, sessionId, prompt, record, save };
+}
+
+test('prompt audits include only fresh matching submissions and project metadata without changing checks', async (t) => {
+  const f = await promptAuditFixture(t);
+  await f.save(f.record());
+  const snapshot = await snapshotPromptDecisions(f.stateDir);
+  const selected = f.record({
+    status: 'selected',
+    injected: true,
+    stage: 'routing',
+    selectedRoute: {
+      url: 'https://compute.example/v2/query',
+      method: 'GET',
+      contractHash: 'a'.repeat(64),
+      args: { secret: 'PRIVATE_AUDIT_CANARY' },
+    },
+    prompt: 'PRIVATE_AUDIT_CANARY',
+  });
+  const native = f.record();
+  await f.save(selected);
+  await f.save(native);
+  await f.save(f.record({ sessionHash: auditHash('another-session') }));
+  await f.save(f.record({ promptHash: auditHash('another prompt') }));
+  const report = await collectPromptDecisions(f.stateDir, { ...f, snapshot });
+  assert.equal(report.status, 'complete');
+  assert.deepEqual(
+    new Set(report.decisions.map((decision) => decision.invocationId)),
+    new Set([selected.invocationId, native.invocationId]),
+  );
+  assert.deepEqual(report.decisions.find((decision) => decision.injected).selectedRoute, {
+    url: 'https://compute.example/v2/query',
+    method: 'GET',
+    contractHash: 'a'.repeat(64),
+  });
+  assert.ok(!JSON.stringify(report).includes('PRIVATE_AUDIT_CANARY'));
+  assert.ok(!JSON.stringify(report).includes('promptHash'));
+  assert.match(report.note, /do not establish tool invocation, provider execution, payment/);
+  const noTools = fixture();
+  noTools.events = noTools.events.filter((event) => !['assistant', 'user'].includes(event.type));
+  assert.equal(
+    Object.values(checkDemo({ ...noTools, promptGate: report }).checks).every(Boolean),
+    false,
+  );
+});
+
+test('prompt audits do not follow file symlinks or accept oversized, malformed, or unsafe metadata', async (t) => {
+  const f = await promptAuditFixture(t);
+  const snapshot = await snapshotPromptDecisions(f.stateDir);
+  assert.equal(snapshot.available, true);
+  await mkdir(f.directory);
+  const target = join(f.stateDir, 'outside.json');
+  const linked = f.record();
+  await writeFile(target, JSON.stringify(linked));
+  await symlink(target, join(f.directory, `${linked.invocationId}.json`));
+  await writeFile(join(f.directory, `${randomUUID()}.json`), 'x'.repeat(8193));
+  await writeFile(join(f.directory, `${randomUUID()}.json`), '{');
+  await f.save(f.record({ injected: true }));
+  for (const url of [
+    'https://user:password@compute.example/query',
+    'https://compute.example/query?token=PRIVATE_AUDIT_CANARY',
+    'https://compute.example/query#PRIVATE_AUDIT_CANARY',
+  ]) {
+    await f.save(
+      f.record({
+        status: 'selected',
+        injected: true,
+        selectedRoute: {
+          url,
+          method: 'GET',
+          contractHash: 'a'.repeat(64),
+        },
+      }),
+    );
+  }
+  const report = await collectPromptDecisions(f.stateDir, { ...f, snapshot });
+  assert.equal(report.status, 'partial');
+  assert.deepEqual(report.decisions, []);
+  assert.ok(!JSON.stringify(report).includes('PRIVATE_AUDIT_CANARY'));
+  assert.ok(!JSON.stringify(report).includes(f.stateDir));
+});
+
+test('prompt audit absence and bounds remain explicit instead of claiming execution', async (t) => {
+  const f = await promptAuditFixture(t);
+  const snapshot = await snapshotPromptDecisions(f.stateDir);
+  const empty = await collectPromptDecisions(f.stateDir, { ...f, snapshot });
+  assert.equal(empty.status, 'complete');
+  assert.deepEqual(empty.decisions, []);
+  const unavailable = await collectPromptDecisions(f.stateDir, {
+    ...f,
+    snapshot: { available: false, files: [] },
+  });
+  assert.equal(unavailable.status, 'unavailable');
+  for (let index = 0; index < 65; index++) await f.save(f.record());
+  const bounded = await collectPromptDecisions(f.stateDir, { ...f, snapshot });
+  assert.equal(bounded.status, 'partial');
+  assert.equal(bounded.decisions.length, 64);
+  const repeated = await snapshotPromptDecisions(f.stateDir);
+  const next = f.record();
+  await f.save(next);
+  const resumed = await collectPromptDecisions(f.stateDir, { ...f, snapshot: repeated });
+  assert.equal(resumed.status, 'complete');
+  assert.deepEqual(
+    resumed.decisions.map((decision) => decision.invocationId),
+    [next.invocationId],
+  );
+});
 
 function fixture() {
   return {

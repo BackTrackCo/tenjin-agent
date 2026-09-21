@@ -40,7 +40,8 @@ const nativeValueCases = z
       }),
       expected: z.enum(['paid', 'native']),
       providerUrl: z.url().optional(),
-      evaluationSplit: z.enum(['held-out', 'cross-endpoint']).optional(),
+      evaluationSplit: z.enum(['held-out', 'cross-endpoint', 'regression']).optional(),
+      allowDeferral: z.boolean().optional(),
       requiredBody: z.record(z.string(), z.unknown()).optional(),
       requiredQuery: z.record(z.string(), z.unknown()).optional(),
       rationale: z.string().min(1),
@@ -66,7 +67,12 @@ export interface RoutingEvalCase {
   contracts: AutoContract[];
   expected: Expected;
   nativeFallback?: boolean;
-  evaluationSplit?: 'held-out' | 'cross-endpoint';
+  evaluationSplit?: 'held-out' | 'cross-endpoint' | 'regression';
+}
+
+export interface RoutingEvalOptions {
+  priceAware?: boolean;
+  nativeWebFetch?: boolean;
 }
 
 function compile(value: unknown): AutoContract {
@@ -137,7 +143,7 @@ export function routingEvalCases(): RoutingEvalCase[] {
     contracts: AutoContract[],
     expected: Expected,
     nativeFallback?: boolean,
-    evaluationSplit?: 'held-out' | 'cross-endpoint',
+    evaluationSplit?: RoutingEvalCase['evaluationSplit'],
   ) {
     const messages: TaskContext['messages'] = history.map((message) =>
       typeof message === 'string' ? { role: 'user', text: message } : message,
@@ -704,7 +710,10 @@ export function routingEvalCases(): RoutingEvalCase[] {
       test.pending.tool_input,
       expanded,
       {
-        statuses: [test.expected === 'paid' ? 'selected' : 'native_fallback'],
+        statuses: [
+          test.expected === 'paid' ? 'selected' : 'native_fallback',
+          ...(test.allowDeferral ? (['needs_input'] as const) : []),
+        ],
         ...(test.providerUrl ? { url: test.providerUrl } : {}),
         ...(test.requiredBody ? { requiredBody: test.requiredBody } : {}),
         ...(test.requiredQuery ? { requiredQuery: test.requiredQuery } : {}),
@@ -762,10 +771,15 @@ export async function evaluateRouting(
   choose: Choose,
   tests = routingEvalCases(),
   onResult?: (results: unknown[]) => Promise<void>,
+  options: RoutingEvalOptions = {},
 ) {
   const results: Record<string, unknown>[] = [];
   for (const test of tests) {
     const start = Date.now();
+    const routingOptions = {
+      ...(test.nativeFallback ? { nativeFallback: true } : {}),
+      ...options,
+    };
     let selectedStrategy: 'paid' | 'native' | 'abstain' | undefined;
     const expectedStrategy = test.nativeFallback
       ? test.expected.statuses.includes('native_fallback')
@@ -792,19 +806,22 @@ export async function evaluateRouting(
         ? {
             expectedStrategy,
             selectedStrategy: selectedStrategy ?? 'not_completed',
-            strategyPassed: selectedStrategy === expectedStrategy,
+            strategyPassed:
+              selectedStrategy === expectedStrategy ||
+              (expectedStrategy === 'native' &&
+                selectedStrategy === 'abstain' &&
+                test.expected.statuses.includes('needs_input')),
           }
         : {};
     try {
-      const result = test.nativeFallback
-        ? await routeIntent(test.event, test.context, test.contracts, caseChoose, {
-            nativeFallback: true,
-          })
+      const result = Object.keys(routingOptions).length
+        ? await routeIntent(test.event, test.context, test.contracts, caseChoose, routingOptions)
         : await routeIntent(test.event, test.context, test.contracts, caseChoose);
       const failures = grade(test, result);
       results.push({
         id: test.id,
         category: test.category,
+        ...(Object.keys(options).length ? { routingOptions } : {}),
         ...(test.nativeFallback
           ? { nativeFallback: true, evaluationSplit: test.evaluationSplit ?? 'initial' }
           : {}),
@@ -827,6 +844,7 @@ export async function evaluateRouting(
       results.push({
         id: test.id,
         category: test.category,
+        ...(Object.keys(options).length ? { routingOptions } : {}),
         ...(test.nativeFallback
           ? { nativeFallback: true, evaluationSplit: test.evaluationSplit ?? 'initial' }
           : {}),
@@ -843,8 +861,8 @@ export async function evaluateRouting(
   return results;
 }
 
-/** The original 20 cases have now informed calibration; preserve the historical
- * split on each row, but report the cross-endpoint contrasts separately. */
+/** The original 20 cases and later regression cases inform calibration; preserve
+ * their row labels, but report the cross-endpoint contrasts separately. */
 export function summarizeNativeValue(results: Record<string, unknown>[]) {
   const rows = results.filter((item) => typeof item.strategyPassed === 'boolean');
   const count = (items: Record<string, unknown>[]) => ({
@@ -882,6 +900,8 @@ async function main() {
       model: { type: 'string', default: 'jev-latest' },
       case: { type: 'string', multiple: true },
       'max-calls': { type: 'string', default: '60' },
+      'price-aware': { type: 'boolean' },
+      'no-native-web-fetch': { type: 'boolean' },
     },
   });
   if (!values.output)
@@ -898,6 +918,10 @@ async function main() {
     throw new Error('--max-calls must be an integer from 1 through 60.');
   const cases = routingEvalCases().filter((test) => !values.case || values.case.includes(test.id));
   if (!cases.length) throw new Error('No requested evaluation cases matched.');
+  const routingOptions: RoutingEvalOptions = {
+    ...(values['price-aware'] ? { priceAware: true } : {}),
+    ...(values['no-native-web-fetch'] ? { nativeWebFetch: false } : {}),
+  };
   const liveChoose = createJevChooser({ apiKey, model: values.model, timeoutMs: 15_000 });
   let calls = 0;
   const choose: Choose = async (state, questions) => {
@@ -916,6 +940,9 @@ async function main() {
           version: 1,
           startedAt,
           model: values.model,
+          evaluationScope: 'routing-only',
+          hostToolUseEvaluated: false,
+          routingOptions,
           fixtureSource: fixture.source,
           fixtureFetchedAt: fixture.fetchedAt,
           cryptoFixtureSource: cryptoFixture.source,
@@ -952,7 +979,7 @@ async function main() {
       `Routing eval: ${results.length}/${cases.length} cases; ${typed.filter((item) => item.passed).length} passed; ${calls}/${maxCalls} Jev calls.\n`,
     );
   };
-  const results = await evaluateRouting(choose, cases, save);
+  const results = await evaluateRouting(choose, cases, save, routingOptions);
   process.stdout.write(
     `${JSON.stringify({ report: resolve(values.output), cases: results.length, passed: results.filter((item) => item.passed).length, jevCalls: calls, providerRequests: 0, paymentSignatures: 0 })}\n`,
   );

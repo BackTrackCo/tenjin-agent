@@ -24,7 +24,42 @@ export function fingerprint(value: unknown): string {
 /** Read only the transcript supplied by the current harness event. Fail closed on
  * partial/oversized history; do not search another session to fill the gap. */
 export async function readTaskContext(path: string, sessionId: string): Promise<TaskContext> {
-  const file = await open(path, 'r');
+  const messages = await readTranscript(path, sessionId, false);
+  return { messages, fingerprint: fingerprint(messages) };
+}
+
+/** UserPromptSubmit may precede the first transcript write. This exception is
+ * isolated from PreToolUse, and never substitutes for invalid existing history.
+ * Every submitted prompt is a new user turn, including repeated identical text. */
+export async function readPromptContext(
+  path: string,
+  sessionId: string,
+  prompt: string,
+): Promise<TaskContext> {
+  if (!prompt.trim() || prompt.length > 48_000) throw new Error('Invalid submitted prompt.');
+  const messages = await readTranscript(path, sessionId, true);
+  messages.push({ role: 'user', text: mask(prompt) });
+  checkContextSize(messages);
+  return { messages, fingerprint: fingerprint(messages) };
+}
+
+function checkContextSize(messages: TaskContext['messages']) {
+  if (JSON.stringify(messages).length > 48_000)
+    throw new Error('Task history exceeds the context limit.');
+}
+
+async function readTranscript(
+  path: string,
+  sessionId: string,
+  allowFreshEmpty: boolean,
+): Promise<TaskContext['messages']> {
+  let file;
+  try {
+    file = await open(path, 'r');
+  } catch (error) {
+    if (allowFreshEmpty && (error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw error;
+  }
   let raw: string;
   try {
     const stat = await file.stat();
@@ -38,8 +73,11 @@ export async function readTaskContext(path: string, sessionId: string): Promise<
     await file.close();
   }
   const messages: TaskContext['messages'] = [];
+  let conversationRows = 0;
   for (const line of raw.split('\n').filter((line) => line.trim())) {
     const row = JSON.parse(line) as Record<string, unknown>;
+    if (!row || typeof row !== 'object' || Array.isArray(row))
+      throw new Error('Malformed transcript record.');
     if (typeof row.sessionId === 'string' && row.sessionId !== sessionId) {
       throw new Error('Transcript belongs to a different session.');
     }
@@ -48,17 +86,32 @@ export async function readTaskContext(path: string, sessionId: string): Promise<
       throw new Error('Compacted history needs an explicit task restatement for this MVP.');
     }
     if (row.type !== 'user' && row.type !== 'assistant') continue;
+    conversationRows++;
     if (row.sessionId !== sessionId) {
       throw new Error('Transcript conversation record lacks the current session identity.');
     }
     const message = row.message as { content?: unknown; role?: string } | undefined;
-    if (!message) continue;
+    if (
+      !message ||
+      typeof message !== 'object' ||
+      Array.isArray(message) ||
+      (typeof message.content !== 'string' && !Array.isArray(message.content))
+    )
+      throw new Error('Malformed transcript conversation content.');
     const text =
       typeof message.content === 'string'
         ? message.content
         : Array.isArray(message.content)
           ? message.content
               .flatMap((part: unknown) => {
+                if (
+                  !part ||
+                  typeof part !== 'object' ||
+                  !('type' in part) ||
+                  typeof part.type !== 'string' ||
+                  (part.type === 'text' && (!('text' in part) || typeof part.text !== 'string'))
+                )
+                  throw new Error('Malformed transcript message block.');
                 if (
                   part &&
                   typeof part === 'object' &&
@@ -74,9 +127,11 @@ export async function readTaskContext(path: string, sessionId: string): Promise<
           : '';
     if (text) messages.push({ role: row.type, text: mask(text) });
   }
-  if (!messages.some((message) => message.role === 'user'))
+  if (
+    !messages.some((message) => message.role === 'user') &&
+    !(allowFreshEmpty && conversationRows === 0)
+  )
     throw new Error('No user task in transcript.');
-  if (JSON.stringify(messages).length > 48_000)
-    throw new Error('Task history exceeds the context limit.');
-  return { messages, fingerprint: fingerprint(messages) };
+  checkContextSize(messages);
+  return messages;
 }

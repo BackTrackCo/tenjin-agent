@@ -727,5 +727,120 @@
     "expected": "native",
     "evaluationSplit": "cross-endpoint",
     "rationale": "Explicit native-only and no-paid constraints override the operator preference for dedicated page extraction. This guard was added alongside that preference change."
+  },
+  {
+    "id": "paid-natural-definite-integral",
+    "context": {
+      "messages": [
+        {
+          "role": "user",
+          "text": "integrate x^2 sin(x) dx from 0 to pi"
+        }
+      ]
+    },
+    "pending": {
+      "tool_name": "Request",
+      "tool_input": {
+        "query": "integrate x^2 sin(x) dx from 0 to pi"
+      }
+    },
+    "expected": "paid",
+    "evaluationSplit": "regression",
+    "rationale": "Calibration regression from a natural user request: symbolic definite integration benefits from a computational capability without the user naming a provider or asking for engine verification.",
+    "providerUrl": "https://wolframalpha.x402.paysponge.com/v2/query",
+    "requiredQuery": {
+      "input": "integrate x^2 sin(x) dx from 0 to pi",
+      "output": "json"
+    }
+  },
+  {
+    "id": "paid-natural-numerical-root",
+    "context": {
+      "messages": [
+        {
+          "role": "user",
+          "text": "Find the root of cos(x) = x between 0 and 1 to 12 decimal places."
+        }
+      ]
+    },
+    "pending": {
+      "tool_name": "Request",
+      "tool_input": {
+        "query": "Find the root of cos(x) = x between 0 and 1 to 12 decimal places."
+      }
+    },
+    "expected": "paid",
+    "evaluationSplit": "regression",
+    "rationale": "Calibration regression: an implicit numerical root to twelve decimal places calls for computation beyond ordinary arithmetic, without provider or engine wording.",
+    "providerUrl": "https://wolframalpha.x402.paysponge.com/v2/query",
+    "requiredQuery": {
+      "input": "Find the root of cos(x) = x between 0 and 1 to 12 decimal places.",
+      "output": "json"
+    }
+  },
+  {
+    "id": "native-natural-multiplication",
+    "context": {
+      "messages": [
+        {
+          "role": "user",
+          "text": "What is 17 times 19?"
+        }
+      ]
+    },
+    "pending": {
+      "tool_name": "Request",
+      "tool_input": {
+        "query": "What is 17 times 19?"
+      }
+    },
+    "expected": "native",
+    "evaluationSplit": "regression",
+    "rationale": "Calibration regression: small integer multiplication remains ordinary host arithmetic despite computational capabilities being available."
+  },
+  {
+    "id": "native-natural-integral-explanation",
+    "context": {
+      "messages": [
+        {
+          "role": "user",
+          "text": "What does a definite integral represent?"
+        }
+      ]
+    },
+    "pending": {
+      "tool_name": "Request",
+      "tool_input": {
+        "query": "What does a definite integral represent?"
+      }
+    },
+    "expected": "native",
+    "evaluationSplit": "regression",
+    "rationale": "Calibration regression: explaining the mathematical concept requires no numerical or symbolic evaluation and can use host reasoning."
+  },
+  {
+    "id": "native-natural-integral-by-hand-correction",
+    "context": {
+      "messages": [
+        {
+          "role": "user",
+          "text": "integrate x^2 sin(x) dx from 0 to pi"
+        },
+        {
+          "role": "user",
+          "text": "Actually, work it out by hand and don't use any paid services."
+        }
+      ]
+    },
+    "pending": {
+      "tool_name": "Request",
+      "tool_input": {
+        "query": "integrate x^2 sin(x) dx from 0 to pi"
+      }
+    },
+    "expected": "native",
+    "evaluationSplit": "regression",
+    "rationale": "Calibration regression: the latest instruction explicitly requests a by-hand solution and forbids paid services. Native reasoning is preferred; explicit deferral is acceptable, but selecting a paid computation is not.",
+    "allowDeferral": true
   }
 ]

@@ -13,12 +13,13 @@ import { auditResources, snapshotCatalog, discoverCandidates } from './catalog';
 import { ConfigSchema, hookOutput, runEvent, recordOutcome } from './runtime';
 import type { AutoConfig, Outcome } from './runtime';
 import { createBridgeHookOutput, normalizeBridgeEvent, serveBridge } from './bridge';
-import { writeBridgeSetup, nativeFallbackInstructions } from './setup';
+import { writeBridgeSetup } from './setup';
 import { HookEventSchema } from './context';
 import type { HookEvent } from './context';
 import { writeProgress } from './progress';
 import { demoCatalog } from './demo-catalog';
 import { runNativeGate } from './native-gate';
+import { runPromptGate } from './prompt-gate';
 
 const program = new Command('tenjin-auto-mode').description(
   'Experimental local Jev → x402 runner. No backend; no global hook installation.',
@@ -207,21 +208,26 @@ program
   });
 
 program
-  .command('native-instructions')
-  .description('Emit fixed mixed-mode instructions; no model, wallet or network access.')
+  .command('prompt-hook')
+  .description('Ask Jev whether this user prompt merits a service; never execute or pay.')
   .requiredOption('--config <path>')
+  .option('--event <path>', 'Read hook event JSON from a file instead of stdin')
   .action(async (options) => {
-    const config = ConfigSchema.parse(JSON.parse(await readFile(options.config as string, 'utf8')));
-    json(
-      config.nativeFallback
-        ? {
-            hookSpecificOutput: {
-              hookEventName: 'UserPromptSubmit',
-              additionalContext: nativeFallbackInstructions(config.nativeWebFetch),
-            },
-          }
-        : {},
-    );
+    // Prompt classification is advisory. Finish before the host timeout without
+    // blocking the prompt or pretending a failed classifier made a decision.
+    const watchdog = setTimeout(() => {
+      json({});
+      process.exit(0);
+    }, 30_000);
+    try {
+      const { config, env } = await loadConfig(options.config as string);
+      const raw = await input(options.event as string | undefined);
+      json(await runPromptGate(raw, config, { env }));
+    } catch {
+      json({});
+    } finally {
+      clearTimeout(watchdog);
+    }
   });
 
 program

@@ -56,6 +56,8 @@ export type Outcome = {
 };
 export interface RuntimeDeps {
   context?: TaskContext;
+  /** Internal host availability: prompt routing may offer reasoning when no native tools exist. */
+  hostReasoningOnly?: boolean;
   contracts?: AutoContract[];
   choose?: Choose;
   execute?: typeof executePaidRequest;
@@ -326,6 +328,7 @@ export async function routeEvent(
   return routeIntent(event, context, contracts, choose, {
     nativeFallback: config.nativeFallback,
     nativeWebFetch: config.nativeWebFetch,
+    ...(deps.hostReasoningOnly ? { hostReasoningOnly: true } : {}),
     priceAware: config.priceAware,
   });
 }

@@ -1,4 +1,111 @@
 import { URL } from 'node:url';
+import { constants } from 'node:fs';
+import { open, opendir } from 'node:fs/promises';
+import { join } from 'node:path';
+import { createHash } from 'node:crypto';
+import { Buffer } from 'node:buffer';
+
+const auditFilename = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.json$/;
+const auditHash = (value) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+const promptAuditNote =
+  'Prompt-gate audit only; these decisions do not establish tool invocation, provider execution, payment, or task fulfillment.';
+
+/** Snapshot before launch so a resumed or repeated prompt cannot reuse old audit evidence. */
+export async function snapshotPromptDecisions(stateDir) {
+  const files = [];
+  try {
+    const directory = await opendir(join(stateDir, 'prompt-decisions'));
+    let entries = 0;
+    for await (const entry of directory) {
+      if (++entries > 2048) return { available: false, files: [] };
+      if (auditFilename.test(entry.name)) files.push(entry.name);
+    }
+    return { available: true, files };
+  } catch (error) {
+    return { available: error.code === 'ENOENT', files: [] };
+  }
+}
+
+/** Bounded, metadata-only audit collection. It never participates in pass/fail checks. */
+export async function collectPromptDecisions(stateDir, { snapshot, sessionId, prompt }) {
+  const report = { status: 'unavailable', decisions: [], note: promptAuditNote };
+  if (!snapshot.available) return report;
+  const current = await snapshotPromptDecisions(stateDir);
+  if (!current.available) return report;
+  const previous = new Set(snapshot.files);
+  const fresh = current.files.filter((name) => !previous.has(name)).sort();
+  report.status = fresh.length > 64 ? 'partial' : 'complete';
+  for (const name of fresh.slice(0, 64)) {
+    try {
+      const file = await open(
+        join(stateDir, 'prompt-decisions', name),
+        constants.O_RDONLY | constants.O_NOFOLLOW,
+      );
+      let record;
+      try {
+        const stat = await file.stat();
+        if (!stat.isFile() || stat.size > 8192) throw new Error('Invalid audit size.');
+        const buffer = Buffer.alloc(8193);
+        const { bytesRead } = await file.read(buffer, 0, buffer.length, 0);
+        if (bytesRead > 8192) throw new Error('Audit grew beyond the limit.');
+        record = JSON.parse(buffer.subarray(0, bytesRead).toString('utf8'));
+      } finally {
+        await file.close();
+      }
+      if (record.sessionHash !== auditHash(sessionId) || record.promptHash !== auditHash(prompt))
+        continue;
+      if (
+        record.version !== 1 ||
+        `${record.invocationId}.json` !== name ||
+        typeof record.at !== 'string' ||
+        record.at.length > 40 ||
+        !Number.isFinite(Date.parse(record.at)) ||
+        !['selected', 'native_fallback', 'needs_input', 'unsupported', 'error'].includes(
+          record.status,
+        ) ||
+        typeof record.injected !== 'boolean' ||
+        (record.injected && record.status !== 'selected') ||
+        (record.stage !== undefined && !['context', 'routing'].includes(record.stage))
+      )
+        throw new Error('Invalid audit metadata.');
+      let selectedRoute;
+      if (record.selectedRoute !== undefined) {
+        const selected = record.selectedRoute;
+        if (
+          record.status !== 'selected' ||
+          typeof selected?.url !== 'string' ||
+          selected.url.length > 2048 ||
+          /\s|\[redacted/i.test(selected.url) ||
+          !/^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)$/.test(selected.method) ||
+          !/^[0-9a-f]{64}$/.test(selected.contractHash)
+        )
+          throw new Error('Invalid audit selection.');
+        const url = new URL(selected.url);
+        if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash)
+          throw new Error('Unsafe audit endpoint.');
+        selectedRoute = {
+          url: url.href,
+          method: selected.method,
+          contractHash: selected.contractHash,
+        };
+      } else if (record.status === 'selected') throw new Error('Missing audit selection.');
+      report.decisions.push({
+        at: record.at,
+        invocationId: record.invocationId,
+        status: record.status,
+        injected: record.injected,
+        ...(record.stage === undefined ? {} : { stage: record.stage }),
+        ...(selectedRoute ? { selectedRoute } : {}),
+      });
+    } catch {
+      report.status = 'partial';
+    }
+  }
+  report.decisions.sort(
+    (a, b) => a.at.localeCompare(b.at) || a.invocationId.localeCompare(b.invocationId),
+  );
+  return report;
+}
 
 /** Inline Markdown labels are not destinations, even when the label is a URL. */
 function markdownDestinations(text) {

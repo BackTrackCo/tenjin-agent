@@ -3,14 +3,6 @@ import { writeFileAtomic } from '../../lib/atomic-json';
 
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 
-export const NATIVE_FALLBACK_INSTRUCTIONS =
-  'Before each external lookup or data request, call mcp__x402__request with the task and inputs so Jev can judge whether a paid service adds value. Do not choose a paid provider yourself. If the tool returns status native_fallback, use normal native tools for that same step when retrieval is needed, or answer with your own reasoning when no lookup is needed. The named native tool is a suggestion unless targetUrl is supplied; an exact targetUrl requires WebFetch of that URL. A native_fallback result is a routing decision, not retrieved information. Do not call the x402 tool again to execute that handoff. If the x402 tool already fulfilled the step, use that result and do not duplicate it with native tools. For a distinct later lookup, ask the request tool again. Never describe a native lookup as paid x402 fulfillment.';
-
-export function nativeFallbackInstructions(nativeWebFetch = true): string {
-  if (nativeWebFetch) return NATIVE_FALLBACK_INSTRUCTIONS;
-  return 'Before each external lookup or data request, call mcp__x402__request with the task and inputs so Jev can judge whether a paid service adds value. Do not choose a paid provider yourself. Native WebSearch is available; native WebFetch is unavailable. For every page or document read, including links returned by WebSearch, call mcp__x402__request with the exact URL and what to read. If the tool returns status native_fallback, use WebSearch for that same search step when retrieval is needed, or answer with your own reasoning when no lookup is needed. A native_fallback result is a routing decision, not retrieved information or permission to read pages with WebFetch. Do not call the x402 tool again to execute that search handoff. Reading a source page is a distinct step that goes through mcp__x402__request. If the x402 tool already fulfilled the step, use that result and do not duplicate it with native tools. For a distinct later lookup, ask the request tool again. Never describe a native lookup as paid x402 fulfillment.';
-}
-
 /** Install only the two local demo files. Never renew payment authorization. */
 export async function writeBridgeSetup(
   configPath: string,
@@ -35,21 +27,17 @@ export async function writeBridgeSetup(
           refreshInterval: 1,
         },
         hooks: {
-          ...(options.nativeFallback
-            ? {
-                UserPromptSubmit: [
-                  {
-                    hooks: [
-                      {
-                        type: 'command',
-                        command: `${quote(nodePath)} ${quote(cliPath)} native-instructions --config ${quote(configPath)}`,
-                        timeout: 10,
-                      },
-                    ],
-                  },
-                ],
-              }
-            : {}),
+          UserPromptSubmit: [
+            {
+              hooks: [
+                {
+                  type: 'command',
+                  command: `${quote(nodePath)} ${quote(cliPath)} prompt-hook --config ${quote(configPath)}`,
+                  timeout: 40,
+                },
+              ],
+            },
+          ],
           PreToolUse: [
             {
               matcher: '^mcp__x402__(request|search|fetch)$',
