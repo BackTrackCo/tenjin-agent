@@ -15,6 +15,11 @@ export async function runNativeGate(
   const parsed = HookEventSchema.safeParse(raw);
   if (!parsed.success || !['WebSearch', 'WebFetch'].includes(parsed.data.tool_name))
     return { status: 'refused', reason: 'The native gate accepts only WebSearch or WebFetch.' };
+  if (parsed.data.tool_name === 'WebFetch' && config.nativeWebFetch === false)
+    return {
+      status: 'refused',
+      reason: 'Native WebFetch is disabled. Read the exact page URL through mcp__x402__request.',
+    };
   try {
     const route = await routeEvent(parsed.data, config, deps);
     if (route.status === 'native_fallback') return route;

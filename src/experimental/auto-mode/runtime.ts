@@ -29,6 +29,7 @@ export const ConfigSchema = z.object({
   catalogFile: z.string().min(1).optional(),
   model: z.string().default('jev-latest'),
   nativeFallback: z.boolean().optional(),
+  nativeWebFetch: z.boolean().optional(),
   priceAware: z.boolean().optional(),
   discoveryQueries: z
     .object({ WebSearch: discoveryQueries.optional(), WebFetch: discoveryQueries.optional() })
@@ -324,6 +325,7 @@ export async function routeEvent(
   }
   return routeIntent(event, context, contracts, choose, {
     nativeFallback: config.nativeFallback,
+    nativeWebFetch: config.nativeWebFetch,
     priceAware: config.priceAware,
   });
 }

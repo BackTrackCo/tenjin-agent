@@ -60,6 +60,12 @@ if (expectation?.scope === 'native' && (!config.nativeFallback || values['routin
   throw new Error(
     'Native expectations require nativeFallback enabled and a non-routing bridge run.',
   );
+if (
+  expectation?.scope === 'native' &&
+  config.nativeWebFetch === false &&
+  expectation.tools.includes('WebFetch')
+)
+  throw new Error('Native WebFetch expectations require nativeWebFetch enabled.');
 const sessionId = values.resume ?? values['session-id'] ?? randomUUID();
 if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sessionId))
   throw new Error('Session ID must be a UUID.');
@@ -78,7 +84,9 @@ const args = [
   '--tools',
   bridge
     ? config.nativeFallback
-      ? 'WebSearch,WebFetch'
+      ? config.nativeWebFetch === false
+        ? 'WebSearch'
+        : 'WebSearch,WebFetch'
       : ''
     : values.tool === 'auto'
       ? 'WebSearch,WebFetch'
@@ -170,6 +178,8 @@ const report = {
   requestedModel: model,
   transport: values.transport,
   nativeFallbackEnabled: bridge && config.nativeFallback === true,
+  nativeWebFetchEnabled:
+    bridge && config.nativeFallback === true && config.nativeWebFetch !== false,
   priceAwareEnabled: config.priceAware === true,
   observedPermissionMode: init?.permissionMode,
   observedModel: init?.model,

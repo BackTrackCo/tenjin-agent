@@ -13,7 +13,7 @@ import { auditResources, snapshotCatalog, discoverCandidates } from './catalog';
 import { ConfigSchema, hookOutput, runEvent, recordOutcome } from './runtime';
 import type { AutoConfig, Outcome } from './runtime';
 import { createBridgeHookOutput, normalizeBridgeEvent, serveBridge } from './bridge';
-import { writeBridgeSetup, NATIVE_FALLBACK_INSTRUCTIONS } from './setup';
+import { writeBridgeSetup, nativeFallbackInstructions } from './setup';
 import { HookEventSchema } from './context';
 import type { HookEvent } from './context';
 import { writeProgress } from './progress';
@@ -89,6 +89,7 @@ program
     '--native-fallback',
     'Let Jev choose ordinary host tools when a paid capability adds little value',
   )
+  .option('--native-web-fetch', 'Also expose native WebFetch; requires --native-fallback')
   .option('--price-aware', 'Let Jev compare normalized advertised prices as a mild preference')
   .option('--env-file <path>', 'Existing env file containing TYPESAFE_KEY or TYPESAFE_API_KEY')
   .option(
@@ -103,6 +104,8 @@ program
     'Live demo action scope, e.g. POST:https://api.exa.ai/search',
   )
   .action(async (options) => {
+    if (options.nativeWebFetch && !options.nativeFallback)
+      throw new Error('--native-web-fetch requires --native-fallback.');
     const directory = resolve(options.directory as string);
     const allowedResources = ((options.allowResource ?? []) as string[]).map((entry) => {
       const split = entry.indexOf(':');
@@ -122,7 +125,9 @@ program
     const config = ConfigSchema.parse({
       version: 1,
       mode: options.mode,
-      ...(options.nativeFallback ? { nativeFallback: true } : {}),
+      ...(options.nativeFallback
+        ? { nativeFallback: true, nativeWebFetch: options.nativeWebFetch === true }
+        : {}),
       ...(options.priceAware ? { priceAware: true } : {}),
       stateDir: join(directory, 'state'),
       policyPath,
@@ -196,6 +201,7 @@ program
     json(
       await writeBridgeSetup(configPath, process.execPath, fileURLToPath(import.meta.url), {
         nativeFallback: config.nativeFallback,
+        nativeWebFetch: config.nativeWebFetch,
       }),
     );
   });
@@ -211,7 +217,7 @@ program
         ? {
             hookSpecificOutput: {
               hookEventName: 'UserPromptSubmit',
-              additionalContext: NATIVE_FALLBACK_INSTRUCTIONS,
+              additionalContext: nativeFallbackInstructions(config.nativeWebFetch),
             },
           }
         : {},

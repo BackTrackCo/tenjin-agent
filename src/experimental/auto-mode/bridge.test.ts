@@ -74,8 +74,8 @@ async function receipt(raw: unknown = event, result: Outcome = outcome) {
   return (await createBridgeHookOutput({ stateDir }, raw, result, clock)).hookSpecificOutput;
 }
 
-async function client(nativeFallback = false) {
-  const server = buildBridgeServer({ stateDir, nativeFallback }, clock);
+async function client(nativeFallback = false, nativeWebFetch?: boolean) {
+  const server = buildBridgeServer({ stateDir, nativeFallback, nativeWebFetch }, clock);
   const connection = new Client({ name: 'bridge-test', version: '0.0.0' });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(serverTransport), connection.connect(clientTransport)]);
@@ -139,6 +139,81 @@ describe('MCP hook normalization', () => {
 });
 
 describe('request-bound local receipts', () => {
+  it('delivers search handoffs without offering unavailable native page reads', async () => {
+    const config = { stateDir, nativeFallback: true, nativeWebFetch: false };
+    const raw = { ...event, tool_name: 'mcp__x402__request' };
+    const hook = (
+      await createBridgeHookOutput(
+        config,
+        raw,
+        { status: 'native_fallback', reason: 'A normal search suffices.' },
+        clock,
+      )
+    ).hookSpecificOutput;
+    const result = await readBridgeResult(config, 'request', hook.updatedInput, clock);
+    expect(result.isError).toBe(false);
+    expect(JSON.parse(texts(result)[1]!)).toMatchObject({
+      status: 'native_fallback',
+      nativeTool: 'WebSearch',
+      nativeToolRequired: false,
+      x402Executed: false,
+    });
+    expect(hook.additionalContext).toContain('Native WebFetch is unavailable');
+    expect(hook.additionalContext).toContain('including links returned by WebSearch');
+    expect(hook.additionalContext).toContain('mcp__x402__request with the exact URL');
+    expect(hook.additionalContext).not.toContain('then execute WebFetch');
+  });
+
+  it('rejects native page handoffs when WebFetch is disabled, including older saved receipts', async () => {
+    const config = { stateDir, nativeFallback: true, nativeWebFetch: false };
+    const raw = { ...event, tool_name: 'mcp__x402__request' };
+    const value: Outcome = {
+      status: 'native_fallback',
+      targetUrl: 'https://source.example/article',
+    };
+    const blocked = (await createBridgeHookOutput(config, raw, value, clock)).hookSpecificOutput;
+    const blockedResult = await readBridgeResult(config, 'request', blocked.updatedInput, clock);
+    expect(blockedResult.isError).toBe(true);
+    expect(JSON.parse(texts(blockedResult)[1]!)).toMatchObject({ status: 'failed' });
+    expect(JSON.stringify(blockedResult)).not.toContain('"nativeTool"');
+    expect(JSON.stringify(blockedResult)).not.toContain('"targetUrl"');
+
+    for (const nativeWebFetch of [undefined, true]) {
+      const legacy = { stateDir, nativeFallback: true, nativeWebFetch };
+      const saved = (await createBridgeHookOutput(legacy, raw, value, clock)).hookSpecificOutput;
+      expect((await readBridgeResult(legacy, 'request', saved.updatedInput, clock)).isError).toBe(
+        false,
+      );
+      const changed = await readBridgeResult(config, 'request', saved.updatedInput, clock);
+      expect(changed.isError).toBe(true);
+      expect(texts(changed)[0]).toContain('Native WebFetch is disabled');
+    }
+  });
+
+  it('still delivers a paid page response when native WebFetch is unavailable', async () => {
+    const config = { stateDir, nativeFallback: true, nativeWebFetch: false };
+    const raw = { ...event, tool_name: 'mcp__x402__request' };
+    const hook = (
+      await createBridgeHookOutput(
+        config,
+        raw,
+        {
+          ...outcome,
+          selected: {
+            ...outcome.selected!,
+            url: 'https://api.information.example/read',
+            args: { body: { url: 'https://source.example/article' } },
+          },
+        },
+        clock,
+      )
+    ).hookSpecificOutput;
+    const result = await readBridgeResult(config, 'request', hook.updatedInput, clock);
+    expect(result.isError).toBe(false);
+    expect(JSON.parse(texts(result)[1]!)).toMatchObject({ status: 'fulfilled' });
+    expect(texts(result)[0]).toContain('Fulfilled by api.information.example');
+  });
+
   it.each([undefined, 'https://source.example/article'])(
     'delivers an opted-in native handoff without claiming provider fulfillment (%s)',
     async (targetUrl) => {
@@ -474,6 +549,18 @@ describe('read-only MCP server', () => {
     const mixed = await client(true);
     expect((await pure.listTools()).tools[0]!.description).not.toContain('native_fallback');
     expect((await mixed.listTools()).tools[0]!.description).toContain('native_fallback');
+  });
+  it('directs every page read through the bridge when native WebFetch is disabled', async () => {
+    const searchOnly = await client(true, false);
+    const description = (await searchOnly.listTools()).tools[0]!.description;
+    expect(description).toContain('Native WebFetch is unavailable');
+    expect(description).toContain('including links returned by WebSearch');
+    expect(description).toContain('mcp__x402__request with the exact URL');
+    expect(description).not.toContain('Preserve an exact target URL when the handoff');
+    const restored = await client(true, true);
+    expect((await restored.listTools()).tools[0]!.description).toContain(
+      'Preserve an exact target URL when the handoff',
+    );
   });
   it('advertises one provider-free request tool without an execution-category choice', async () => {
     expect(BRIDGE_SERVER_NAME).toBe('x402');
