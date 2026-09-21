@@ -1,0 +1,293 @@
+{
+  "fetchedAt": "2026-09-21T01:11:03.824440Z",
+  "source": "https://api.cdp.coinbase.com/platform/v2/x402/discovery/search?query=WolframAlpha&limit=20",
+  "rawResources": [
+    {
+      "accepts": [
+        {
+          "amount": "20000",
+          "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+          "extra": {
+            "name": "USD Coin",
+            "version": "2"
+          },
+          "maxTimeoutSeconds": 300,
+          "network": "eip155:8453",
+          "payTo": "0x6302D9e6DBB22fEC3c350551568Bb39B4b35Ad57",
+          "scheme": "exact"
+        },
+        {
+          "amount": "20000",
+          "asset": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+          "extra": {
+            "feePayer": "2wKupLR9q6wXYppw8Gr2NvWxKBUqm4PPJKkQfoxHDBg4"
+          },
+          "maxTimeoutSeconds": 300,
+          "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+          "payTo": "9246XrsAEKH6hAyEQe5PvdpUL1p5Ktj9c7ySnwQn6ois",
+          "scheme": "exact"
+        }
+      ],
+      "curated": true,
+      "description": "Service: Wolfram Alpha (https://wolframalpha.x402.paysponge.com/v2/query)",
+      "extensions": {
+        "bazaar": {
+          "info": {
+            "input": {
+              "method": "GET",
+              "queryParams": {},
+              "type": "http"
+            },
+            "output": {
+              "example": {},
+              "type": "json"
+            }
+          },
+          "schema": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "additionalProperties": false,
+            "properties": {
+              "input": {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "enum": ["GET", "HEAD", "DELETE"],
+                    "type": "string"
+                  },
+                  "queryParams": {
+                    "additionalProperties": false,
+                    "properties": {},
+                    "type": "object"
+                  },
+                  "type": {
+                    "const": "http",
+                    "type": "string"
+                  }
+                },
+                "required": ["type", "method"],
+                "type": "object"
+              },
+              "output": {
+                "additionalProperties": false,
+                "properties": {
+                  "example": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "type": {
+                    "const": "json",
+                    "type": "string"
+                  }
+                },
+                "required": ["type"],
+                "type": "object"
+              }
+            },
+            "required": ["input"],
+            "type": "object"
+          }
+        }
+      },
+      "lastUpdated": "2026-07-16T18:46:35.353Z",
+      "quality": {
+        "l30DaysTotalCalls": 1,
+        "l30DaysUniquePayers": 1,
+        "lastCalledAt": "2026-08-23T01:39:46.016Z"
+      },
+      "resource": "https://wolframalpha.x402.paysponge.com/v2/query",
+      "type": "http",
+      "x402Version": 2
+    }
+  ],
+  "resources": [
+    {
+      "accepts": [
+        {
+          "amount": "20000",
+          "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+          "extra": {
+            "name": "USD Coin",
+            "version": "2"
+          },
+          "maxTimeoutSeconds": 300,
+          "network": "eip155:8453",
+          "payTo": "0x6302D9e6DBB22fEC3c350551568Bb39B4b35Ad57",
+          "scheme": "exact"
+        },
+        {
+          "amount": "20000",
+          "asset": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+          "extra": {
+            "feePayer": "2wKupLR9q6wXYppw8Gr2NvWxKBUqm4PPJKkQfoxHDBg4"
+          },
+          "maxTimeoutSeconds": 300,
+          "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+          "payTo": "9246XrsAEKH6hAyEQe5PvdpUL1p5Ktj9c7ySnwQn6ois",
+          "scheme": "exact"
+        }
+      ],
+      "curated": true,
+      "description": "Service: Wolfram Alpha (https://wolframalpha.x402.paysponge.com/v2/query)",
+      "extensions": {
+        "bazaar": {
+          "info": {
+            "input": {
+              "method": "GET",
+              "queryParams": {},
+              "type": "http"
+            },
+            "output": {
+              "example": {},
+              "type": "json"
+            }
+          },
+          "schema": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "additionalProperties": false,
+            "properties": {
+              "input": {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "enum": ["GET", "HEAD", "DELETE"],
+                    "type": "string"
+                  },
+                  "queryParams": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "input": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "The mathematical expression or computational question to answer."
+                      },
+                      "output": {
+                        "type": "string",
+                        "const": "json",
+                        "description": "Return the full result as JSON."
+                      },
+                      "format": {
+                        "type": "string",
+                        "enum": ["plaintext"],
+                        "description": "Request readable text in the individual result pods."
+                      }
+                    },
+                    "required": ["input", "output"]
+                  },
+                  "type": {
+                    "const": "http",
+                    "type": "string"
+                  }
+                },
+                "required": ["type", "method"],
+                "type": "object"
+              },
+              "output": {
+                "additionalProperties": false,
+                "properties": {
+                  "example": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "type": {
+                    "const": "json",
+                    "type": "string"
+                  }
+                },
+                "required": ["type"],
+                "type": "object"
+              }
+            },
+            "required": ["input"],
+            "type": "object"
+          }
+        }
+      },
+      "lastUpdated": "2026-07-16T18:46:35.353Z",
+      "quality": {
+        "l30DaysTotalCalls": 1,
+        "l30DaysUniquePayers": 1,
+        "lastCalledAt": "2026-08-23T01:39:46.016Z"
+      },
+      "resource": "https://wolframalpha.x402.paysponge.com/v2/query",
+      "type": "http",
+      "x402Version": 2
+    }
+  ],
+  "translations": [
+    {
+      "resource": "https://wolframalpha.x402.paysponge.com/v2/query",
+      "documentationUrl": "https://products.wolframalpha.com/api/documentation",
+      "reason": "The curated CDP record prohibits every query parameter, but Wolfram documents required input and optional output/format parameters. This operator-curated contract restores a bounded JSON/text subset without changing the endpoint, HTTP method, or payment terms. Sponge is the reseller; this is not a direct Wolfram endpoint.",
+      "fields": ["extensions.bazaar.schema.properties.input.properties.queryParams"],
+      "source": "Wolfram Full Results API Basic Parameters and Formatting Output; JSON output and plaintext pods are local supported-subset restrictions. Upstream authentication is delegated to the reseller; later paid response evidence is recorded in verification.",
+      "capturedAt": "2026-09-21T01:11:03.824440Z"
+    }
+  ],
+  "verification": {
+    "livePaidVerified": true,
+    "quoteChecked": true,
+    "providerProbe": {
+      "status": 403,
+      "reason": "Cloudflare error 1010 rejected the unsigned request before a payment quote. No payment, retry, or user-agent override was attempted."
+    },
+    "identifiedClientQuote": {
+      "status": 402,
+      "userAgent": "tenjin-cli/0.1 (local-x402-experiment)",
+      "paymentRequired": true,
+      "paidExecution": false
+    },
+    "paidExecution": {
+      "verifiedAt": "2026-09-21T01:37:09.671Z",
+      "method": "headless Claude with the local x402 bridge, Jev routing, and deterministic execution",
+      "calls": [
+        {
+          "resource": "https://wolframalpha.x402.paysponge.com/v2/query",
+          "args": {
+            "query": {
+              "input": "Compute the definite integral of x^2 * sin(x) dx from x=0 to x=pi using a symbolic/computational math engine. Return the exact value and numeric approximation.",
+              "output": "json",
+              "format": "plaintext"
+            }
+          },
+          "httpStatus": 200,
+          "querySuccess": false,
+          "queryError": false,
+          "podCount": 0,
+          "amountAtomic": "20000",
+          "settlementStatus": "reported"
+        },
+        {
+          "resource": "https://wolframalpha.x402.paysponge.com/v2/query",
+          "args": {
+            "query": {
+              "input": "integrate x^2 sin(x) dx from 0 to pi",
+              "output": "json"
+            }
+          },
+          "httpStatus": 200,
+          "querySuccess": true,
+          "queryError": false,
+          "podCount": 4,
+          "amountAtomic": "20000",
+          "settlementStatus": "reported"
+        }
+      ],
+      "totalAmountAtomic": "40000",
+      "totalUsdc": "0.04",
+      "result": {
+        "exact": "pi^2 - 4",
+        "approximate": 5.869604401089358,
+        "providerPlaintext": "integral_0^π x^2 sin(x) dx = π^2 - 4≈5.8696",
+        "finalAnswerMatched": true
+      },
+      "settlementEvidence": "provider-reported PAYMENT-RESPONSE receipts for both paid calls",
+      "chainVerified": false,
+      "caveats": [
+        "The first natural-language query returned HTTP 200 but queryresult.success=false and zero pods; it did not solve the task.",
+        "The second, simplified query returned success=true and four pods, including the expected definite integral.",
+        "The final answer named the provider but did not include a clickable source link; generic research citation checks did not pass."
+      ]
+    }
+  }
+}

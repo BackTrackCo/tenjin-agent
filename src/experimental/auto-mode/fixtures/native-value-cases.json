@@ -1,0 +1,731 @@
+[
+  {
+    "id": "paid-deep-comparative-research",
+    "context": {
+      "messages": [
+        {
+          "role": "user",
+          "text": "I am preparing an implementation memo comparing x402 payments with card payments. Research failure recovery, settlement finality, and refund handling from multiple primary sources; give me a sourced comparison rather than a quick overview."
+        }
+      ]
+    },
+    "pending": {
+      "tool_name": "Request",
+      "tool_input": {
+        "query": "Find primary-source technical evidence comparing x402 payment failures, settlement, and refunds with card payment flows."
+      }
+    },
+    "expected": "paid",
+    "rationale": "Broad technical evidence gathering and synthesis give a specialist research search service a plausible quality benefit; this is more than finding one known fact."
+  },
+  {
+    "id": "paid-authoritative-docs-reconciliation",
+    "context": {
+      "messages": [
+        {
+          "role": "user",
+          "text": "Research how x402 v2 works for someone implementing it. Compare the official protocol specification with the Coinbase developer documentation, explain the exact headers and verification/settlement sequence, and identify details a first implementation could get wrong."
+        }
+      ]
+    },
+    "pending": {
+      "tool_name": "Request",
+      "tool_input": {
+        "query": "Research the authoritative x402 v2 specification and implementation documentation for request headers, verification and settlement behavior."
+      }
+    },
+    "expected": "paid",
+    "rationale": "Multi-source protocol research and reconciliation benefit from specialist evidence retrieval; authoritative alone is not the trigger."
+  },
+  {
+    "id": "paid-fresh-multiple-crypto-quotes",
+    "context": {
+      "messages": [
+        {
+          "role": "user",
+          "text": "What are BTC and ETH trading at right now? Include USD price, 24-hour change, and the quote timestamp for both from the same market-data source."
+        }
+      ]
+    },
+    "pending": {
+      "tool_name": "Request",
+      "tool_input": {
+        "query": "Get current BTC and ETH USD quotes, 24-hour percentage changes, and timestamps."
+      }
+    },
+    "expected": "paid",
+    "rationale": "A structured market-data endpoint supplies consistent fresh measurements for both assets more directly than search snippets.",
+    "providerUrl": "https://pro-api.coinmarketcap.com/x402/v3/cryptocurrency/quotes/latest"
+  },
+  {
+    "id": "paid-company-enrichment",
+    "context": {
+      "messages": [
+        {
+          "role": "user",
+          "text": "I am qualifying stripe.com as a prospect. Get a structured company record with employee range, revenue range, industry, location, and funding information."
+        }
+      ]
+    },
+    "pending": {
+      "tool_name": "Request",
+      "tool_input": {
+        "query": "Enrich the company stripe.com with firmographics for prospect qualification."
+      }
+    },
+    "expected": "paid",
+    "rationale": "Structured business enrichment is specialist database work, not a simple public-page lookup.",
+    "providerUrl": "https://hunter.x402.paywithlocus.com/hunter/company-enrichment"
+  },
+  {
+    "id": "paid-professional-person-enrichment",
+    "context": {
+      "messages": [
+        {
+          "role": "user",
+          "text": "Enrich Tim Cook at apple.com into a professional prospect record: role, company and professional profile link. Do not request personal email addresses or personal phone numbers."
+        }
+      ]
+    },
+    "pending": {
+      "tool_name": "Request",
+      "tool_input": {
+        "query": "Get a professional enrichment record for Tim Cook at apple.com, excluding personal contact details."
+      }
+    },
+    "expected": "paid",
+    "rationale": "The task asks for matched structured person/company data; generic web search is not an equivalent enrichment service.",
+    "providerUrl": "https://apollo.x402.paywithlocus.com/apollo/people-enrichment"
+  },
+  {
+    "id": "paid-mailbox-verification",
+    "context": {
+      "messages": [
+        {
+          "role": "user",
+          "text": "Verify whether info@stripe.com is deliverable. I need the mailbox verification result, score, and MX/SMTP checks. Do not send an email."
+        }
+      ]
+    },
+    "pending": {
+      "tool_name": "Request",
+      "tool_input": {
+        "query": "Verify deliverability of info@stripe.com with mailbox, MX and SMTP checks."
+      }
+    },
+    "expected": "paid",
+    "rationale": "Search cannot perform mailbox verification; a dedicated verifier adds the required capability.",
+    "providerUrl": "https://hunter.x402.paywithlocus.com/hunter/email-verifier"
+  },
+  {
+    "id": "paid-computational-verification",
+    "context": {
+      "messages": [
+        {
+          "role": "user",
+          "text": "Use a computational math engine to independently verify the definite integral of x^2*sin(x) from 0 to pi. Return an exact value and a decimal approximation."
+        }
+      ]
+    },
+    "pending": {
+      "tool_name": "Request",
+      "tool_input": {
+        "query": "Compute integral_0^pi x^2*sin(x) dx and return the symbolic result and numeric approximation."
+      }
+    },
+    "expected": "paid",
+    "rationale": "An independent symbolic-computation result is an explicit requirement even though the host model may be able to derive the integral itself.",
+    "providerUrl": "https://wolframalpha.x402.paysponge.com/v2/query"
+  },
+  {
+    "id": "paid-history-resolves-crypto-followup",
+    "context": {
+      "messages": [
+        {
+          "role": "user",
+          "text": "What are the two biggest cryptocurrencies?"
+        },
+        {
+          "role": "assistant",
+          "text": "Bitcoin (BTC) and Ethereum (ETH) are the two we are discussing."
+        },
+        {
+          "role": "user",
+          "text": "Check price for both now."
+        }
+      ]
+    },
+    "pending": {
+      "tool_name": "Request",
+      "tool_input": {
+        "query": "Check price for both now."
+      }
+    },
+    "expected": "paid",
+    "rationale": "Conversation history resolves both to BTC and ETH, and the request now requires fresh market quotes rather than another explanatory search.",
+    "providerUrl": "https://pro-api.coinmarketcap.com/x402/v3/cryptocurrency/quotes/latest"
+  },
+  {
+    "id": "native-single-factual-lookup",
+    "context": {
+      "messages": [
+        {
+          "role": "user",
+          "text": "What is the capital of France? Just the city name."
+        }
+      ]
+    },
+    "pending": {
+      "tool_name": "WebSearch",
+      "tool_input": {
+        "query": "capital of France"
+      }
+    },
+    "expected": "native",
+    "rationale": "This is a single uncomplicated fact; paid specialist retrieval offers no material benefit."
+  },
+  {
+    "id": "native-research-keyword-is-not-value",
+    "context": {
+      "messages": [
+        {
+          "role": "user",
+          "text": "Can you research the capital of France for me? I only need the city name, not a report."
+        }
+      ]
+    },
+    "pending": {
+      "tool_name": "WebSearch",
+      "tool_input": {
+        "query": "Research the capital of France."
+      }
+    },
+    "expected": "native",
+    "rationale": "The word research does not turn a trivial one-fact lookup into a valuable paid research task."
+  },
+  {
+    "id": "paid-exact-public-page-fetch",
+    "context": {
+      "messages": [
+        {
+          "role": "user",
+          "text": "Read this exact public documentation page and tell me the names of the payment headers. I do not need any other sources: https://docs.cdp.coinbase.com/x402/core-concepts/how-it-works"
+        }
+      ]
+    },
+    "pending": {
+      "tool_name": "WebFetch",
+      "tool_input": {
+        "url": "https://docs.cdp.coinbase.com/x402/core-concepts/how-it-works",
+        "prompt": "Extract the payment header names from this page only."
+      }
+    },
+    "expected": "paid",
+    "rationale": "Operator preference changed: use a compatible dedicated page extractor for page reads even when the known public page is simple. This label changed by user instruction, not to erase a benchmark failure.",
+    "providerUrl": "https://vaaya.ai/api/run/firecrawl/scrape",
+    "requiredBody": {
+      "url": "https://docs.cdp.coinbase.com/x402/core-concepts/how-it-works"
+    }
+  },
+  {
+    "id": "native-basic-crypto-explanation",
+    "context": {
+      "messages": [
+        {
+          "role": "user",
+          "text": "In one short paragraph, explain the difference between Bitcoin and Ethereum for a beginner. No prices, current market data, or research report needed."
+        }
+      ]
+    },
+    "pending": {
+      "tool_name": "Request",
+      "tool_input": {
+        "query": "Explain the basic difference between Bitcoin and Ethereum."
+      }
+    },
+    "expected": "native",
+    "rationale": "Crypto entities alone do not justify a market-data API; the user wants a stable conceptual explanation."
+  },
+  {
+    "id": "native-quick-arithmetic",
+    "context": {
+      "messages": [
+        {
+          "role": "user",
+          "text": "What is 17 multiplied by 23? Just the answer."
+        }
+      ]
+    },
+    "pending": {
+      "tool_name": "Request",
+      "tool_input": {
+        "query": "17 * 23"
+      }
+    },
+    "expected": "native",
+    "rationale": "A trivial arithmetic answer does not need a paid symbolic engine."
+  },
+  {
+    "id": "native-latest-user-revokes-spending",
+    "context": {
+      "messages": [
+        {
+          "role": "user",
+          "text": "A paid enrichment lookup is fine if it helps qualify this company."
+        },
+        {
+          "role": "assistant",
+          "text": "I can look up a structured profile for stripe.com."
+        },
+        {
+          "role": "user",
+          "text": "Actually, do not spend anything. Use only ordinary web search or public pages for the company brief."
+        }
+      ]
+    },
+    "pending": {
+      "tool_name": "Request",
+      "tool_input": {
+        "query": "Get stripe.com employee range, industry, and location for a prospect brief."
+      }
+    },
+    "expected": "native",
+    "rationale": "The latest user correction forbids spending; earlier permission and specialist utility cannot override that."
+  },
+  {
+    "id": "native-quick-authoritative-links",
+    "context": {
+      "messages": [
+        {
+          "role": "user",
+          "text": "Just find the links to the official x402 specification and Coinbase x402 docs. I am not asking for a research report or a comparison."
+        }
+      ]
+    },
+    "pending": {
+      "tool_name": "WebSearch",
+      "tool_input": {
+        "query": "official x402 specification Coinbase developer documentation links"
+      }
+    },
+    "expected": "native",
+    "rationale": "Finding two obvious official links is a simple search; authoritative sources do not automatically make it a paid research task."
+  },
+  {
+    "id": "native-single-current-public-fact",
+    "context": {
+      "messages": [
+        {
+          "role": "user",
+          "text": "What is the latest stable Python version listed on python.org? I only need the version number and official source link."
+        }
+      ]
+    },
+    "pending": {
+      "tool_name": "WebSearch",
+      "tool_input": {
+        "query": "latest stable Python release site:python.org"
+      }
+    },
+    "expected": "native",
+    "rationale": "The answer must be fresh, but an ordinary official-site search is sufficient; freshness alone does not require a paid API."
+  },
+  {
+    "id": "paid-demo-beginner-crypto-research",
+    "context": {
+      "messages": [
+        {
+          "role": "user",
+          "text": "can you research BTC and ETH for someone new to crypto"
+        }
+      ]
+    },
+    "pending": {
+      "tool_name": "Request",
+      "tool_input": {
+        "query": "can you research BTC and ETH for someone new to crypto"
+      }
+    },
+    "expected": "paid",
+    "providerUrl": "https://api.exa.ai/search",
+    "evaluationSplit": "held-out",
+    "rationale": "The exact demo asks for research across two subjects, so source discovery and evidence coverage justify the available search specialist."
+  },
+  {
+    "id": "paid-demo-authoritative-x402-explanations",
+    "context": {
+      "messages": [
+        {
+          "role": "user",
+          "text": "Find two authoritative explanations of how x402 payments work. Link both sources and briefly explain what each covers."
+        }
+      ]
+    },
+    "pending": {
+      "tool_name": "Request",
+      "tool_input": {
+        "query": "Find two authoritative explanations of how x402 payments work. Link both sources and briefly explain what each covers."
+      }
+    },
+    "expected": "paid",
+    "providerUrl": "https://api.exa.ai/search",
+    "evaluationSplit": "held-out",
+    "rationale": "The exact demo asks to discover and evaluate two authoritative explanations, with links and source coverage; no exact pages have already been supplied."
+  },
+  {
+    "id": "native-demo-beginner-crypto-comparison",
+    "context": {
+      "messages": [
+        {
+          "role": "user",
+          "text": "Compare BTC and ETH for someone new to crypto"
+        }
+      ]
+    },
+    "pending": {
+      "tool_name": "Request",
+      "tool_input": {
+        "query": "Compare BTC and ETH for someone new to crypto"
+      }
+    },
+    "expected": "native",
+    "evaluationSplit": "held-out",
+    "rationale": "This stable conceptual comparison does not ask for research, fresh measurements, or verification; the host can explain it without a paid specialist."
+  },
+  {
+    "id": "paid-known-page-after-research",
+    "context": {
+      "messages": [
+        {
+          "role": "user",
+          "text": "Find two authoritative explanations of how x402 payments work. Link both sources and briefly explain what each covers."
+        },
+        {
+          "role": "assistant",
+          "text": "The official Coinbase developer guide is at https://docs.cdp.coinbase.com/x402/core-concepts/how-it-works. The protocol specification is another source."
+        },
+        {
+          "role": "user",
+          "text": "Now read just https://docs.cdp.coinbase.com/x402/core-concepts/how-it-works and list the payment header names. No other sources needed."
+        }
+      ]
+    },
+    "pending": {
+      "tool_name": "WebFetch",
+      "tool_input": {
+        "url": "https://docs.cdp.coinbase.com/x402/core-concepts/how-it-works",
+        "prompt": "List the payment header names from this page only."
+      }
+    },
+    "expected": "paid",
+    "evaluationSplit": "held-out",
+    "rationale": "Operator preference changed: the narrowed follow-up still reads a page, so prefer dedicated extraction while preserving its exact URL and excluding unrelated sources. This label changed by user instruction.",
+    "providerUrl": "https://vaaya.ai/api/run/firecrawl/scrape",
+    "requiredBody": {
+      "url": "https://docs.cdp.coinbase.com/x402/core-concepts/how-it-works"
+    }
+  },
+  {
+    "id": "paid-page-extraction-after-native-failure",
+    "context": {
+      "messages": [
+        {
+          "role": "user",
+          "text": "Read https://docs.cdp.coinbase.com/x402/core-concepts/how-it-works."
+        },
+        {
+          "role": "assistant",
+          "text": "The normal WebFetch tool did not return full page content; I could only obtain a short summary."
+        },
+        {
+          "role": "user",
+          "text": "The ordinary page fetch did not provide the full content. Extract https://docs.cdp.coinbase.com/x402/core-concepts/how-it-works as full clean \"markdown\", preserving headings, links and tables; do not substitute a summary."
+        }
+      ]
+    },
+    "pending": {
+      "tool_name": "WebFetch",
+      "tool_input": {
+        "url": "https://docs.cdp.coinbase.com/x402/core-concepts/how-it-works",
+        "prompt": "The ordinary page fetch did not provide the full content. Extract https://docs.cdp.coinbase.com/x402/core-concepts/how-it-works as full clean \"markdown\", preserving headings, links and tables; do not substitute a summary."
+      }
+    },
+    "expected": "paid",
+    "evaluationSplit": "cross-endpoint",
+    "rationale": "A recorded native fetch failure and a raw Markdown extraction requirement give the specialist scraper a concrete incremental capability; successful extraction is still not guaranteed.",
+    "providerUrl": "https://vaaya.ai/api/run/firecrawl/scrape",
+    "requiredBody": {
+      "url": "https://docs.cdp.coinbase.com/x402/core-concepts/how-it-works",
+      "formats": ["markdown"]
+    }
+  },
+  {
+    "id": "paid-readable-page-header-lookup",
+    "context": {
+      "messages": [
+        {
+          "role": "user",
+          "text": "Read https://docs.cdp.coinbase.com/x402/core-concepts/how-it-works and tell me which payment header the client sends. The page is accessible; I just need the header name."
+        }
+      ]
+    },
+    "pending": {
+      "tool_name": "WebFetch",
+      "tool_input": {
+        "url": "https://docs.cdp.coinbase.com/x402/core-concepts/how-it-works",
+        "prompt": "Read https://docs.cdp.coinbase.com/x402/core-concepts/how-it-works and tell me which payment header the client sends. The page is accessible; I just need the header name."
+      }
+    },
+    "expected": "paid",
+    "evaluationSplit": "cross-endpoint",
+    "rationale": "Operator preference changed: dedicated extraction is preferred for an accessible page even when only one fact is requested. This label changed by user instruction; price analysis is outside this benchmark policy.",
+    "providerUrl": "https://vaaya.ai/api/run/firecrawl/scrape",
+    "requiredBody": {
+      "url": "https://docs.cdp.coinbase.com/x402/core-concepts/how-it-works"
+    }
+  },
+  {
+    "id": "paid-name-only-company-record",
+    "context": {
+      "messages": [
+        {
+          "role": "user",
+          "text": "Enrich \"Stripe\", the payments company, into a structured prospect record with its matched domain, employee range, industry and headquarters. I do not have the domain; show the matched company identity before using it for any further lookup."
+        }
+      ]
+    },
+    "pending": {
+      "tool_name": "Request",
+      "tool_input": {
+        "query": "Enrich \"Stripe\", the payments company, into a structured prospect record with its matched domain, employee range, industry and headquarters. I do not have the domain; show the matched company identity before using it for any further lookup."
+      }
+    },
+    "expected": "paid",
+    "evaluationSplit": "cross-endpoint",
+    "rationale": "Name-only structured company matching is supported by CompanyEnrich; the domain-only alternative would require inventing or separately discovering a domain.",
+    "providerUrl": "https://stableenrich.dev/api/companyenrich/properties-enrich",
+    "requiredBody": {
+      "name": "Stripe"
+    }
+  },
+  {
+    "id": "native-company-homepage-navigation",
+    "context": {
+      "messages": [
+        {
+          "role": "user",
+          "text": "What is the official homepage for Stripe, the payments company? Just give me the URL."
+        }
+      ]
+    },
+    "pending": {
+      "tool_name": "Request",
+      "tool_input": {
+        "query": "What is the official homepage for Stripe, the payments company? Just give me the URL."
+      }
+    },
+    "expected": "native",
+    "evaluationSplit": "cross-endpoint",
+    "rationale": "Finding one company homepage is ordinary navigation, not a request for a structured business enrichment record."
+  },
+  {
+    "id": "paid-domain-company-firmographics",
+    "context": {
+      "messages": [
+        {
+          "role": "user",
+          "text": "Build a structured prospect record for stripe.com with its industry, employee range, headquarters and funding information."
+        }
+      ]
+    },
+    "pending": {
+      "tool_name": "Request",
+      "tool_input": {
+        "query": "Build a structured prospect record for stripe.com with its industry, employee range, headquarters and funding information."
+      }
+    },
+    "expected": "paid",
+    "evaluationSplit": "cross-endpoint",
+    "rationale": "The supplied domain directly binds the domain-based enrichment capability and the requested multi-field business record adds capability over one public fact. Price is not part of this routing preference.",
+    "providerUrl": "https://hunter.x402.paywithlocus.com/hunter/company-enrichment",
+    "requiredBody": {
+      "domain": "stripe.com"
+    }
+  },
+  {
+    "id": "native-person-single-public-fact",
+    "context": {
+      "messages": [
+        {
+          "role": "user",
+          "text": "Which company does Tim Cook work for? Just the company name, with one public source."
+        }
+      ]
+    },
+    "pending": {
+      "tool_name": "Request",
+      "tool_input": {
+        "query": "Which company does Tim Cook work for? Just the company name, with one public source."
+      }
+    },
+    "expected": "native",
+    "evaluationSplit": "cross-endpoint",
+    "rationale": "A single widely documented professional fact needs only ordinary search; it does not require a matched enrichment record."
+  },
+  {
+    "id": "paid-person-structured-record",
+    "context": {
+      "messages": [
+        {
+          "role": "user",
+          "text": "Enrich Tim Cook at apple.com into a structured professional record with current role, organization and professional profile URL. Do not reveal personal emails or phone numbers."
+        }
+      ]
+    },
+    "pending": {
+      "tool_name": "Request",
+      "tool_input": {
+        "query": "Enrich Tim Cook at apple.com into a structured professional record with current role, organization and professional profile URL. Do not reveal personal emails or phone numbers."
+      }
+    },
+    "expected": "paid",
+    "evaluationSplit": "cross-endpoint",
+    "rationale": "Matching and returning a structured professional record is distinct from answering one public biographical fact.",
+    "providerUrl": "https://apollo.x402.paywithlocus.com/apollo/people-enrichment",
+    "requiredBody": {
+      "first_name": "Tim",
+      "last_name": "Cook",
+      "domain": "apple.com"
+    }
+  },
+  {
+    "id": "native-email-syntax-only",
+    "context": {
+      "messages": [
+        {
+          "role": "user",
+          "text": "Does info@stripe.com look like a syntactically normal email address? Only inspect the string; do not test deliverability, query DNS, or contact a mail server."
+        }
+      ]
+    },
+    "pending": {
+      "tool_name": "Request",
+      "tool_input": {
+        "query": "Does info@stripe.com look like a syntactically normal email address? Only inspect the string; do not test deliverability, query DNS, or contact a mail server."
+      }
+    },
+    "expected": "native",
+    "evaluationSplit": "cross-endpoint",
+    "rationale": "String syntax inspection is local reasoning; a paid verifier performs extra checks the user expressly did not request."
+  },
+  {
+    "id": "paid-email-delivery-verification",
+    "context": {
+      "messages": [
+        {
+          "role": "user",
+          "text": "Verify whether info@stripe.com is deliverable and return its verification status plus MX and SMTP checks. Do not send an email."
+        }
+      ]
+    },
+    "pending": {
+      "tool_name": "Request",
+      "tool_input": {
+        "query": "Verify whether info@stripe.com is deliverable and return its verification status plus MX and SMTP checks. Do not send an email."
+      }
+    },
+    "expected": "paid",
+    "evaluationSplit": "cross-endpoint",
+    "rationale": "Actual deliverability and DNS/mailbox checks require the verifier capability; syntax inspection or web search is insufficient.",
+    "providerUrl": "https://hunter.x402.paywithlocus.com/hunter/email-verifier",
+    "requiredBody": {
+      "email": "info@stripe.com"
+    }
+  },
+  {
+    "id": "native-crypto-single-historical-fact",
+    "context": {
+      "messages": [
+        {
+          "role": "user",
+          "text": "In what year did Bitcoin (BTC) launch? Just the year and a public source; I do not need market data."
+        }
+      ]
+    },
+    "pending": {
+      "tool_name": "WebSearch",
+      "tool_input": {
+        "query": "In what year did Bitcoin (BTC) launch? Just the year and a public source; I do not need market data."
+      }
+    },
+    "expected": "native",
+    "evaluationSplit": "cross-endpoint",
+    "rationale": "A stable historical fact is not served by the live quote endpoint; ordinary source lookup is enough."
+  },
+  {
+    "id": "paid-independent-math-engine-check",
+    "context": {
+      "messages": [
+        {
+          "role": "user",
+          "text": "Independently verify \"determinant of {{1,2},{3,4}}\" with a computational math engine and return its exact result."
+        }
+      ]
+    },
+    "pending": {
+      "tool_name": "Request",
+      "tool_input": {
+        "query": "determinant of {{1,2},{3,4}}"
+      }
+    },
+    "expected": "paid",
+    "evaluationSplit": "cross-endpoint",
+    "rationale": "An external computational-engine result is explicitly required; host-only arithmetic would omit the requested independent verification.",
+    "providerUrl": "https://wolframalpha.x402.paysponge.com/v2/query",
+    "requiredQuery": {
+      "input": "determinant of {{1,2},{3,4}}",
+      "output": "json"
+    }
+  },
+  {
+    "id": "native-small-determinant-arithmetic",
+    "context": {
+      "messages": [
+        {
+          "role": "user",
+          "text": "What is the determinant of {{1,2},{3,4}}? Just calculate the value; no external verification needed."
+        }
+      ]
+    },
+    "pending": {
+      "tool_name": "Request",
+      "tool_input": {
+        "query": "determinant of {{1,2},{3,4}}"
+      }
+    },
+    "expected": "native",
+    "evaluationSplit": "cross-endpoint",
+    "rationale": "A two-by-two determinant is a short arithmetic task without the explicit external-engine requirement of its paid contrast."
+  },
+  {
+    "id": "native-only-explicit-page-reading",
+    "context": {
+      "messages": [
+        {
+          "role": "user",
+          "text": "Use only the normal WebFetch tool to read https://docs.cdp.coinbase.com/x402/core-concepts/how-it-works and list the payment header names. Do not call or pay a third-party extraction service."
+        }
+      ]
+    },
+    "pending": {
+      "tool_name": "WebFetch",
+      "tool_input": {
+        "url": "https://docs.cdp.coinbase.com/x402/core-concepts/how-it-works",
+        "prompt": "List the payment header names from this exact page using native fetching only."
+      }
+    },
+    "expected": "native",
+    "evaluationSplit": "cross-endpoint",
+    "rationale": "Explicit native-only and no-paid constraints override the operator preference for dedicated page extraction. This guard was added alongside that preference change."
+  }
+]

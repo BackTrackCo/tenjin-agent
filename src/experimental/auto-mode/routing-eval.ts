@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { parseArgs, parseEnv } from 'node:util';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { z } from 'zod';
 import { writeFileAtomic } from '../../lib/atomic-json';
 import { compileResource } from './contracts';
 import type { AutoContract } from './contracts';
@@ -14,6 +15,9 @@ import type { Choose, RouteResult } from './routing';
 import fixture from './fixtures/cdp-demo-resources.json';
 import cryptoFixture from './fixtures/cdp-crypto-resource.json';
 import cmcFixture from './fixtures/cdp-cmc-resource.json';
+import gtmFixture from './fixtures/cdp-gtm-resources.json';
+import mathFixture from './fixtures/cdp-math-resources.json';
+import nativeValueFixture from './fixtures/native-value-cases.json';
 
 const EXA = 'https://api.exa.ai/search';
 const FIRECRAWL = 'https://vaaya.ai/api/run/firecrawl/scrape';
@@ -21,9 +25,33 @@ const TAVILY = 'https://tavily-fixture.example/search';
 const ORCHID = 'https://orchid-fixture.example/find';
 const CRYPTO_MARKET = 'https://api.hergertsynthora.com/v1/top-crypto';
 const CMC_QUOTES = 'https://pro-api.coinmarketcap.com/x402/v3/cryptocurrency/quotes/latest';
+const nativeValueCases = z
+  .array(
+    z.object({
+      id: z.string().min(1),
+      context: z.object({
+        messages: z
+          .array(z.object({ role: z.enum(['user', 'assistant']), text: z.string().min(1) }))
+          .min(1),
+      }),
+      pending: z.object({
+        tool_name: z.enum(['Request', 'WebSearch', 'WebFetch']),
+        tool_input: z.record(z.string(), z.unknown()),
+      }),
+      expected: z.enum(['paid', 'native']),
+      providerUrl: z.url().optional(),
+      evaluationSplit: z.enum(['held-out', 'cross-endpoint']).optional(),
+      requiredBody: z.record(z.string(), z.unknown()).optional(),
+      requiredQuery: z.record(z.string(), z.unknown()).optional(),
+      rationale: z.string().min(1),
+    }),
+  )
+  .min(1)
+  .max(40)
+  .parse(nativeValueFixture);
 
 interface Expected {
-  statuses: ('selected' | 'needs_input' | 'unsupported')[];
+  statuses: ('selected' | 'needs_input' | 'unsupported' | 'native_fallback')[];
   url?: string;
   requiredBody?: Record<string, unknown>;
   requiredQuery?: Record<string, unknown>;
@@ -37,6 +65,8 @@ export interface RoutingEvalCase {
   context: TaskContext;
   contracts: AutoContract[];
   expected: Expected;
+  nativeFallback?: boolean;
+  evaluationSplit?: 'held-out' | 'cross-endpoint';
 }
 
 function compile(value: unknown): AutoContract {
@@ -106,6 +136,8 @@ export function routingEvalCases(): RoutingEvalCase[] {
     toolInput: Record<string, unknown>,
     contracts: AutoContract[],
     expected: Expected,
+    nativeFallback?: boolean,
+    evaluationSplit?: 'held-out' | 'cross-endpoint',
   ) {
     const messages: TaskContext['messages'] = history.map((message) =>
       typeof message === 'string' ? { role: 'user', text: message } : message,
@@ -124,6 +156,8 @@ export function routingEvalCases(): RoutingEvalCase[] {
       context: { messages, fingerprint: fingerprint(messages) },
       contracts,
       expected,
+      ...(nativeFallback ? { nativeFallback } : {}),
+      ...(evaluationSplit ? { evaluationSplit } : {}),
     });
   }
   const selected = (url: string, requiredBody: Record<string, unknown>): Expected => ({
@@ -593,6 +627,92 @@ export function routingEvalCases(): RoutingEvalCase[] {
       exactBody: { query: 'x402 payments how it works official documentation' },
     },
   );
+  const expanded = [
+    exa,
+    firecrawl,
+    cmcQuotes,
+    ...gtmFixture.resources.map(compile),
+    ...mathFixture.resources.map(compile),
+  ];
+  const hunterCompany = gtmFixture.resources[0]!.resource;
+  const hunterEmail = gtmFixture.resources[1]!.resource;
+  const apollo = gtmFixture.resources[2]!.resource;
+  const wolfram = mathFixture.resources[0]!.resource;
+  add(
+    '43-company-enrichment',
+    'expanded-catalog',
+    ['Get company enrichment data for stripe.com to prepare a sales brief.'],
+    'Request',
+    { query: 'Company enrichment for stripe.com' },
+    expanded,
+    selected(hunterCompany, { domain: 'stripe.com' }),
+  );
+  add(
+    '44-email-verification',
+    'expanded-catalog',
+    ['Check whether sales@example.com is a deliverable email address.'],
+    'Request',
+    { query: 'Verify sales@example.com for email deliverability' },
+    expanded,
+    selected(hunterEmail, { email: 'sales@example.com' }),
+  );
+  add(
+    '45-person-enrichment',
+    'expanded-catalog',
+    ['Find professional enrichment data for Tim Cook at apple.com.'],
+    'Request',
+    { query: 'Professional person enrichment for Tim Cook at apple.com' },
+    expanded,
+    selected(apollo, { first_name: 'Tim', last_name: 'Cook', domain: 'apple.com' }),
+  );
+  add(
+    '46-computation',
+    'expanded-catalog',
+    [
+      'Compute the integral of x^2 sin(x) from 0 to pi and verify the exact result with a computational engine.',
+    ],
+    'Request',
+    { query: 'integrate x^2 sin(x) from 0 to pi' },
+    expanded,
+    {
+      statuses: ['selected'],
+      url: wolfram,
+      requiredQuery: { input: 'integrate x^2 sin(x) from 0 to pi', output: 'json' },
+    },
+  );
+  add(
+    '49-company-reference',
+    'expanded-catalog',
+    [
+      'We are preparing a sales brief for stripe.com.',
+      { role: 'assistant', text: 'I can look up the company profile.' },
+      'Get the company enrichment data now.',
+    ],
+    'Request',
+    { query: 'Get company enrichment data for that business.' },
+    expanded,
+    selected(hunterCompany, { domain: 'stripe.com' }),
+  );
+  // Value labels are frozen before execution. Every case sees the same full
+  // catalog; ordinary lookup keywords alone cannot hide paid alternatives.
+  for (const [index, test] of nativeValueCases.entries()) {
+    add(
+      `${51 + index}-${test.id}`,
+      'native-value',
+      test.context.messages,
+      test.pending.tool_name,
+      test.pending.tool_input,
+      expanded,
+      {
+        statuses: [test.expected === 'paid' ? 'selected' : 'native_fallback'],
+        ...(test.providerUrl ? { url: test.providerUrl } : {}),
+        ...(test.requiredBody ? { requiredBody: test.requiredBody } : {}),
+        ...(test.requiredQuery ? { requiredQuery: test.requiredQuery } : {}),
+      },
+      true,
+      test.evaluationSplit,
+    );
+  }
   return cases;
 }
 
@@ -601,7 +721,7 @@ function grade(test: RoutingEvalCase, result: RouteResult): string[] {
   if (!test.expected.statuses.includes(result.status))
     failures.push(`Expected ${test.expected.statuses.join('|')}, got ${result.status}.`);
   if (result.status === 'selected') {
-    if (test.expected.url !== result.contract.url)
+    if (test.expected.url !== undefined && test.expected.url !== result.contract.url)
       failures.push('Selected endpoint differs from the labeled provider/capability.');
     const body = result.args.body as Record<string, unknown> | undefined;
     if (
@@ -646,12 +766,49 @@ export async function evaluateRouting(
   const results: Record<string, unknown>[] = [];
   for (const test of tests) {
     const start = Date.now();
+    let selectedStrategy: 'paid' | 'native' | 'abstain' | undefined;
+    const expectedStrategy = test.nativeFallback
+      ? test.expected.statuses.includes('native_fallback')
+        ? 'native'
+        : 'paid'
+      : undefined;
+    const caseChoose: Choose = test.nativeFallback
+      ? async (state, questions) => {
+          const answers = await choose(state, questions);
+          if (questions.route) {
+            const choice = answers.route?.choice;
+            selectedStrategy =
+              choice === 'native' && Object.hasOwn(questions.route.criteria, choice)
+                ? 'native'
+                : choice && /^c\d+$/.test(choice) && Object.hasOwn(questions.route.criteria, choice)
+                  ? 'paid'
+                  : 'abstain';
+          }
+          return answers;
+        }
+      : choose;
+    const strategyResult = () =>
+      expectedStrategy
+        ? {
+            expectedStrategy,
+            selectedStrategy: selectedStrategy ?? 'not_completed',
+            strategyPassed: selectedStrategy === expectedStrategy,
+          }
+        : {};
     try {
-      const result = await routeIntent(test.event, test.context, test.contracts, choose);
+      const result = test.nativeFallback
+        ? await routeIntent(test.event, test.context, test.contracts, caseChoose, {
+            nativeFallback: true,
+          })
+        : await routeIntent(test.event, test.context, test.contracts, caseChoose);
       const failures = grade(test, result);
       results.push({
         id: test.id,
         category: test.category,
+        ...(test.nativeFallback
+          ? { nativeFallback: true, evaluationSplit: test.evaluationSplit ?? 'initial' }
+          : {}),
+        ...strategyResult(),
         expected: test.expected,
         passed: failures.length === 0,
         failures,
@@ -670,6 +827,10 @@ export async function evaluateRouting(
       results.push({
         id: test.id,
         category: test.category,
+        ...(test.nativeFallback
+          ? { nativeFallback: true, evaluationSplit: test.evaluationSplit ?? 'initial' }
+          : {}),
+        ...strategyResult(),
         expected: test.expected,
         passed: false,
         failures: ['Routing raised an error.'],
@@ -680,6 +841,37 @@ export async function evaluateRouting(
     await onResult?.(results);
   }
   return results;
+}
+
+/** The original 20 cases have now informed calibration; preserve the historical
+ * split on each row, but report the cross-endpoint contrasts separately. */
+export function summarizeNativeValue(results: Record<string, unknown>[]) {
+  const rows = results.filter((item) => typeof item.strategyPassed === 'boolean');
+  const count = (items: Record<string, unknown>[]) => ({
+    completedCases: items.length,
+    strategyPassed: items.filter((item) => item.strategyPassed === true).length,
+    fullRoutingPassed: items.filter((item) => item.passed === true).length,
+  });
+  const group = (key: (item: Record<string, unknown>) => string) => {
+    const groups = new Map<string, Record<string, unknown>[]>();
+    for (const row of rows) {
+      const name = key(row);
+      const items = groups.get(name) ?? [];
+      items.push(row);
+      groups.set(name, items);
+    }
+    return Object.fromEntries([...groups].map(([name, items]) => [name, count(items)]));
+  };
+  return {
+    ...count(rows),
+    byEvaluationCohort: group((item) =>
+      item.evaluationSplit === 'cross-endpoint' ? 'cross-endpoint' : 'calibration',
+    ),
+    byExpectedProvider: group((item) => {
+      const url = (item.expected as Expected | undefined)?.url;
+      return url ?? (item.expectedStrategy === 'native' ? 'native' : 'any-paid');
+    }),
+  };
 }
 
 async function main() {
@@ -715,7 +907,8 @@ async function main() {
   };
   const startedAt = new Date().toISOString();
   const save = async (results: unknown[]) => {
-    const typed = results as { passed: boolean }[];
+    const typed = results as { passed: boolean; strategyPassed?: boolean }[];
+    const valueResults = typed.filter((item) => item.strategyPassed !== undefined);
     await writeFileAtomic(
       resolve(values.output!),
       JSON.stringify(
@@ -729,6 +922,13 @@ async function main() {
           cryptoFixtureFetchedAt: cryptoFixture.fetchedAt,
           cmcFixtureSource: cmcFixture.source,
           cmcFixtureFetchedAt: cmcFixture.fetchedAt,
+          expandedCatalogSources: [gtmFixture, mathFixture].map((source) => ({
+            source: source.source,
+            fetchedAt: source.fetchedAt,
+          })),
+          ...(cases.some((test) => test.nativeFallback)
+            ? { nativeValueFixtureHash: fingerprint(nativeValueFixture) }
+            : {}),
           providerRequests: 0,
           paymentSignatures: 0,
           maxJevCalls: maxCalls,
@@ -736,6 +936,11 @@ async function main() {
           expectedCases: cases.length,
           completedCases: results.length,
           passed: typed.filter((item) => item.passed).length,
+          ...(valueResults.length
+            ? {
+                nativeValue: summarizeNativeValue(results as Record<string, unknown>[]),
+              }
+            : {}),
           results,
         },
         null,

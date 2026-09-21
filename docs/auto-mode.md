@@ -1,12 +1,90 @@
 # Local Jev → x402 experiment
 
-This draft routes ordinary research, page-reading and price requests through a local `PreToolUse` hook. Jev selects a capability and its arguments; code validates the request, authorization, quote and budget, then pays and executes. A tiny local stdio MCP bridge returns the saved result as a successful tool response. It has no hosted backend and cannot route, sign or call a provider itself.
+This draft routes research, page-reading, pricing, enrichment and computation requests through a local `PreToolUse` hook. Jev selects a capability and its arguments; code validates the request, authorization, quote and budget, then pays and executes. A tiny local stdio MCP bridge returns the saved result as a successful tool response. It has no hosted backend and cannot route, sign or call a provider itself.
 
-The prepared demo uses three hand-selected, unchanged CDP Bazaar listings: Exa search, Firecrawl scraping advertised by Vaaya, and direct CoinMarketCap quotes. Claude sees one generic `request` tool and describes the information it needs. Jev selects whether a search, structured-data endpoint, or page reader fits that request, then chooses the provider and arguments. This demonstrates routing within that catalog, not automatic discovery across the entire Bazaar.
+The demo has eight capabilities: Exa search, Vaaya/Firecrawl scraping, CoinMarketCap quotes, four GTM enrichment endpoints and Wolfram Alpha through Sponge. Seven are unchanged CDP Bazaar listings. Wolfram requires an explicit, documented input translation. Claude sees one generic `request` tool and describes what it needs; Jev selects the capability and arguments. This demonstrates routing within the curated catalog, not automatic discovery across the entire Bazaar.
 
 The single entrypoint keeps Claude from prematurely choosing page scraping when the user asked for current facts. A requested page URL can be included in the query; Jev distinguishes reading that document from using a previously cited page as an optional source. Legacy search/fetch receipt delivery remains supported internally but those tools are not advertised.
 
 Jev receives the pending request and bounded user/assistant text from the current session, including prior answers and corrections. Its choice API selects exact available values and bounded list compositions; it cannot generate arbitrary new arguments. A missing value returns `needs_input`. Payment authorization is deterministic and automatic within the local policy. Claude interprets the returned content and decides how to continue.
+
+Optional mixed mode also lets Jev choose ordinary Claude tools when they suit the task. The current preference is capability and fidelity first: use a compatible dedicated page extractor for page reads, even simple known pages, without optimizing routing for price. Native search and host reasoning remain available, and explicit no-paid/native-only instructions take precedence. Spending authorization and hard limits still run in code. The default setup below continues to expose only the x402 bridge. See the mixed-mode setup before enabling native tools.
+
+## Endpoint catalog
+
+| Capability                            | Supplying endpoint                 | Advertised USDC | Observed support                                  |
+| ------------------------------------- | ---------------------------------- | --------------: | ------------------------------------------------- |
+| Web search                            | Exa                                |          $0.007 | Paid research requests verified                   |
+| Page reading                          | Vaaya/Firecrawl                    |           $0.01 | Paid exact-page requests verified                 |
+| Cryptocurrency quotes                 | CoinMarketCap                      |           $0.01 | Paid BTC/ETH quotes verified                      |
+| Company enrichment by domain          | Hunter through Locus               |          $0.013 | Paid Stripe company profile returned              |
+| Email verification                    | Hunter through Locus               |          $0.008 | Paid public-address verification returned         |
+| Person enrichment                     | Apollo through Locus               |          $0.038 | Paid professional profile returned                |
+| Company enrichment by name/social URL | CompanyEnrich through StableEnrich |           $0.06 | Paid Stripe company profile returned              |
+| Mathematical computation              | Wolfram Alpha through Sponge       |           $0.02 | Paid integral result verified on the second query |
+
+These are catalog prices, not guarantees of current availability or fulfillment. Exact live quotes must match the catalog and spending policy. Reseller names identify the actual supplier, not an independent attestation of its upstream implementation. [Locus lists Hunter and Apollo](https://paywithlocus.com/tools), and [StableEnrich documents CompanyEnrich](https://stableenrich.dev/docs).
+
+Wolfram's raw Bazaar schema prohibited all query arguments. Its translated contract uses the [documented Full Results input/output parameters](https://products.wolframalpha.com/api/documentation), with JSON output. The fixture retains the raw record and enumerates the translation. An initial unsigned attempt returned HTTP 403; adding an honest `tenjin-cli/0.1 (local-x402-experiment)` User-Agent restored the HTTP 402 quote for Sponge and Locus. The subsequent paid computation is described below. This is explicit MVP curation, not automatic translation of the whole marketplace.
+
+Natural prompts for separate manual sessions:
+
+```text
+Look up company details for stripe.com for a quick sales brief.
+```
+
+```text
+Look up a company profile for Stripe.
+```
+
+```text
+Check whether info@stripe.com is deliverable. Don't send a message.
+```
+
+```text
+Verify the integral of x^2 sin(x) from 0 to pi with a computational engine.
+```
+
+The prompts name the task and its input, not a provider. They do not guarantee a tool call or a particular route. The reserved `sales@example.com` test was answered without tools; it did not test the email endpoint. Use an authorized public business address when testing deliverability, and distinguish a provider's verdict from a guarantee that a future email will arrive.
+
+Export all eight capabilities locally with `node dist/tenjin-auto-mode.mjs demo-catalog --output /tmp/expanded-catalog.json`. This refuses to overwrite an existing file and preserves capture/translation provenance. For an existing prepared demo, have the setup agent review and replace its catalog and set its resource scopes to the eight exact method/URL pairs below. Add the `request` operation and bump the policy revision if needed. Preserve the run ID, expiry, caps and ledger, including unresolved reservations. Do not initialize another budget or clear prior attempts when changing the catalog.
+
+Generic requests use the `request` policy operation; exact page reads continue to use `fetch`, and legacy native searches use `search`. An older search/fetch-only policy must explicitly add `request`. For one user turn, an unresolved paid failure blocks another call to the same capability even if Claude changes tool IDs or arguments. Identical in-flight calls are also blocked; independent parallel calls and new explicit user turns retain their own identities. This guard is deterministic and does not ask Jev to authorize a retry.
+
+### Expansion test evidence
+
+The current eight-capability catalog passed seven live Jev routing cases in 20 model requests: company enrichment, email verification, person enrichment, computation, company-reference resolution, plus the existing price and exact-document regressions. The batch made zero provider requests or payment signatures. These are observed choices with native fallback disabled, not paid-versus-native benchmark results. Headless Sonnet auto-mode runs also validated company and math routing using the real transcript with zero provider execution. Four GTM unsigned quotes matched their advertised Base USDC terms.
+
+Paid headless tests then produced these results:
+
+| Task                                      | Saved provider result                                                                                                 | Payment evidence                                   | Strict research harness                                                                                                |
+| ----------------------------------------- | --------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| Company lookup by `stripe.com`            | Hunter/Locus returned a nonempty company profile, HTTP 200                                                            | $0.013; reported settlement                        | Execution/receipt checks passed; both clickable-citation checks failed                                                 |
+| Company lookup by `Stripe`                | CompanyEnrich/StableEnrich returned a nonempty profile, HTTP 200                                                      | $0.06; reported settlement                         | Execution/receipt checks passed; exact citation-destination check failed because a returned tracking query was removed |
+| Public business email verification        | Hunter/Locus returned `valid`, score 100, HTTP 200 for `info@stripe.com`; no message sent                             | $0.008; reported settlement                        | Execution/receipt checks passed; both clickable-citation checks failed                                                 |
+| Definite integral                         | First Wolfram response had no result; second returned `π² − 4 ≈ 5.8696`, matching an independent antiderivative check | Two $0.02 calls, $0.04 total; reported settlements | Execution/receipt checks passed; both clickable-citation checks failed                                                 |
+| Natural professional-person lookup        | First call needed input; Claude then selected a Vaaya/Firecrawl public biography lookup                               | $0.01 for the page read                            | This did not exercise Apollo paid enrichment and is not an Apollo success                                              |
+| Subsequent professional-person enrichment | Apollo/Locus returned a matched professional profile for Tim Cook at `apple.com`, HTTP 200                            | $0.038; reported settlement                        | All 20 checks passed, including clickable citations                                                                    |
+
+These receipts are provider-reported; settlement was not independently queried on-chain for this expansion. Successful enrichment delivery does not establish the independent accuracy of every profile field. The CompanyEnrich result contained conflicting employee/location fields, which the answer disclosed. Apollo returned a role that conflicted with the separately fetched official biography in the saved runs; profile freshness was not independently resolved. The Apollo request explicitly disabled personal-email and phone-number enrichment. Wolfram's second response verified the mathematical result, but its first paid response did not, and the final prose abandoned a manual derivation before restating the correct value. Transport success, task evidence and citation presentation remain separate checks.
+
+### Headless validation for the expanded catalog
+
+Run headless Sonnet in auto mode with the isolated bridge; keep manual presentation sessions empty and interactive. Use a config with `mode: "route"` for routing-only tests. `--routing-only --expectation /tmp/expectation.json` validates the chosen endpoint and exact arguments without provider requests, payments or task-completion claims. It appends a validation-only system instruction to stop after a prepared selection, keeps the user's prompt unchanged, and allows two Claude turns for selection and acknowledgment. An expectation can be:
+
+```json
+{
+  "scope": "routing",
+  "providers": [
+    {
+      "url": "https://hunter.x402.paywithlocus.com/hunter/company-enrichment",
+      "assertions": [{ "pointer": "/body/domain", "equals": "stripe.com" }]
+    }
+  ]
+}
+```
+
+Live expectations use `scope: "response"`, explicit `httpStatuses`, and response JSON-pointer assertions. At least one returned scalar per provider must appear in the final answer (`inAnswer: true`). Use this explicit mode for enrichment fields or numerical answers; it retains session, model, auto-mode, payment, receipt and per-call checks. Without an expectation file, the research citation checks remain required. Saved runs that failed those checks remain failed; the task-specific evidence above does not retroactively turn them into research-harness passes.
 
 ## Run the prepared demo
 
@@ -30,7 +108,7 @@ Only the local x402 `request` tool and its hook are configured. Normal user/proj
 
 If the terminal wraps `claude` to inject integration hooks, use the resolved official Claude executable in the launch command. The terminal wrapper can add hooks independently of the settings flags above.
 
-The bridge deliberately exposes one information-request tool. A host-selected page fetch had pinned the previous demo to CoinGecko URLs before Jev could consider CoinMarketCap; tool descriptions alone did not reliably prevent that. Jev now resolves whether a supplied URL is a requested document or only a suggested source for fresh data. Document requests retain deterministic exact-URL binding, and the selected operation still goes through the spending policy. No provider or cryptocurrency names are hardcoded into this routing distinction.
+The bridge exposes one generic task-request tool. A host-selected page fetch had pinned the previous demo to CoinGecko URLs before Jev could consider CoinMarketCap; tool descriptions alone did not reliably prevent that. Jev now resolves whether a supplied URL is a requested document or only a suggested source for fresh data. Document requests retain deterministic exact-URL binding, and the selected operation still goes through the spending policy. No provider or cryptocurrency names are hardcoded into this routing distinction.
 
 The four focused live Jev cases for this handoff passed in 16 model requests with no provider calls: the generic price follow-up selected CoinMarketCap with `symbol=BTC,ETH`; the same need with a suggested CoinGecko page still selected CoinMarketCap; an explicit x402 document request selected Vaaya with the exact URL; and x402 source discovery selected Exa. In the subsequent interactive recording, the research opener and unchanged price follow-up each made a separate successful CoinMarketCap request for `BTC,ETH`, costing $0.01 each. The follow-up's displayed prices and percentage changes matched the delivered quotes; its provider data was about 101 seconds old and the displayed timestamp identified the quote minute. This is observed behavior, not a guarantee of identical model choices on every run.
 
@@ -66,9 +144,11 @@ While a request is running, the footer shows selection progress, then the select
 
 A successful tool response starts with a short receipt identifying the actual supplying service/host, selected parameters and USDC amount. Long parameters are abbreviated there; full arguments remain in local outcomes. The bounded result envelope includes provider provenance and marks provider content as untrusted. Vaaya's listing advertises Firecrawl; that does not independently attest its backend implementation. Failed, refused or unresolved calls remain errors.
 
+Firecrawl's own CLI default integration uses a different mechanism: `setup defaults` / `make default` adds native `WebSearch` and `WebFetch` to Claude's permission deny list, while its skill guides Claude to the Firecrawl CLI. It does not replace successful native results through a hook. The mixed mode here keeps native tools available behind a per-call Jev gate; the local MCP tool carries paid results. [Firecrawl CLI implementation](https://github.com/firecrawl/cli/blob/6ff1658539fd676c7ebff23d7a1490f93d668f99/src/utils/web-defaults.ts).
+
 The legacy hook-only transport denied Claude's native search/fetch after fulfilling the paid request; Claude rendered that as red `Error`. The bridge instead lets a local result carrier complete successfully. [PreToolUse supports input updates and permission decisions](https://code.claude.com/docs/en/hooks#pretooluse-decision-control), not successful native-tool result replacement. PostToolUse replacement runs after the original tool has already executed, so it would duplicate work here.
 
-Tested provider prices were $0.007 Exa, $0.01 Vaaya and $0.01 CoinMarketCap per call. Every live quote must still pass the current listing and policy checks. Jev and Claude inference are separate costs. The interactive session does not inherit the headless runner's inference/turn caps. The local policy caps payments at $0.10/call and $1/run, with a 24-hour expiry established at initialization.
+Tested provider prices were $0.007 Exa, $0.01 Vaaya and $0.01 CoinMarketCap per call. Every live quote must still pass the current listing and policy checks. Jev and Claude inference are separate costs. The interactive session does not inherit the headless runner's inference/turn caps. New policies default to $0.10/call and $1/run, with a 24-hour expiry established at initialization. An existing validation run was explicitly authorized for a $5 total cap; that is an operator-approved exception, not the default. Preserve the actual existing policy rather than resetting its budget or silently changing its cap.
 
 ### Inspect after the demo
 
@@ -107,14 +187,13 @@ path, login or funding prerequisite.
 Run the synthetic bridge preflight below headlessly, without provider payments.
 Preserve a valid existing demo's policy and ledger. For an explicitly new run,
 initialize a directory outside the repository with automatic payments limited
-to $0.10/call, $1 total, 24 hours, and exactly these resources:
-- POST https://api.exa.ai/search
-- POST https://vaaya.ai/api/run/firecrawl/scrape
-- GET https://pro-api.coinmarketcap.com/x402/v3/cryptocurrency/quotes/latest
+to $0.10/call, $1 total, 24 hours, and the eight exact method/URL scopes in
+the exported demo catalog. Do not raise caps to fit a quote. An existing
+operator-approved $5 cap stays in that existing policy; do not create a new
+run to bypass its ledger or reservations.
 
-Create catalog.json from the unchanged resources in
-src/experimental/auto-mode/fixtures/cdp-demo-resources.json and the resource in
-cdp-cmc-resource.json. Preserve source/capture provenance. Pass --catalog-file
+Run demo-catalog --output <new-catalog-path> to export all eight capabilities
+with raw captures and explicit schema-translation provenance. Pass --catalog-file
 and leave discoveryQueries empty. This is a hand-selected Bazaar catalog.
 Reference the env and wallet in place. Never reset a ledger or silently renew
 an expired policy. Run bridge-setup on the config to create only isolated
@@ -146,27 +225,9 @@ node scripts/auto-mode-demo.mjs --transport bridge --model sonnet \
 
 Create the local catalog before initializing a new authorized live run:
 
-```js
-// Run as an ES module from the checkout; replace the directory as needed.
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
-const directory = '/tmp/tenjin-auto-live';
-const base = 'src/experimental/auto-mode/fixtures/';
-const demo = JSON.parse(await readFile(base + 'cdp-demo-resources.json', 'utf8'));
-const cmc = JSON.parse(await readFile(base + 'cdp-cmc-resource.json', 'utf8'));
-await mkdir(directory, { recursive: true, mode: 0o700 });
-await writeFile(
-  `${directory}/catalog.json`,
-  JSON.stringify(
-    {
-      source: demo.source,
-      fetchedAt: demo.fetchedAt,
-      resources: [...demo.resources, cmc.resource],
-    },
-    null,
-    2,
-  ),
-  { flag: 'wx', mode: 0o600 },
-);
+```sh
+mkdir -p /tmp/tenjin-auto-live
+node dist/tenjin-auto-mode.mjs demo-catalog --output /tmp/tenjin-auto-live/catalog.json
 ```
 
 ```sh
@@ -174,15 +235,63 @@ node dist/tenjin-auto-mode.mjs init \
   --directory /tmp/tenjin-auto-live --mode live \
   --env-file /absolute/path/to/existing.env --wallet-dir /absolute/path/to/existing/wallet \
   --catalog-file /tmp/tenjin-auto-live/catalog.json \
-  --allow-resource POST:https://api.exa.ai/search POST:https://vaaya.ai/api/run/firecrawl/scrape GET:https://pro-api.coinmarketcap.com/x402/v3/cryptocurrency/quotes/latest
+  --allow-resource POST:https://api.exa.ai/search POST:https://vaaya.ai/api/run/firecrawl/scrape GET:https://pro-api.coinmarketcap.com/x402/v3/cryptocurrency/quotes/latest POST:https://hunter.x402.paywithlocus.com/hunter/company-enrichment POST:https://hunter.x402.paywithlocus.com/hunter/email-verifier POST:https://apollo.x402.paywithlocus.com/apollo/people-enrichment POST:https://stableenrich.dev/api/companyenrich/properties-enrich GET:https://wolframalpha.x402.paysponge.com/v2/query
 node dist/tenjin-auto-mode.mjs bridge-setup --config /tmp/tenjin-auto-live/config.json
 ```
 
-For an existing prepared run, use **only `bridge-setup`** to add/update the bridge configuration. It adds the isolated footer and MCP configuration without changing config, policy, ledger, catalog or the legacy native settings. Restart Claude with the launch command above to load the updated configuration; an already-running session keeps its existing settings. The bridge starts as Claude's child process and reads config without importing credentials from the env file. The hook separately loads only the required Jev/wallet credential keys.
+For an existing prepared run, update the catalog and approved exact resource scopes as described above, then run **`bridge-setup`, not `init`**. `bridge-setup` adds the isolated footer and MCP configuration without changing config, policy, ledger, catalog or the legacy native settings. Restart Claude with the launch command above to load the updated configuration; an already-running session keeps its existing settings. The bridge starts as Claude's child process and reads config without importing credentials from the env file. The hook separately loads only the required Jev/wallet credential keys.
+
+### Optional paid-versus-native routing
+
+For a newly authorized run, add `--native-fallback` to the `init` command above. For an existing prepared run, have the setup agent set `"nativeFallback": true` in its config while preserving every other setting, the policy and ledger. Run `bridge-setup` again, including when upgrading an earlier mixed-mode setup. This installs a fixed local `UserPromptSubmit` instruction asking Claude to submit each lookup through the generic `request` tool first, plus a `PreToolUse` hook for every attempted `WebSearch` and `WebFetch`. The instruction hook itself makes no model, wallet or network call; the native-tool hook asks Jev to judge the actual pending lookup before allowing it.
+
+Launch the same empty interactive session with only the native web tools additionally exposed:
+
+```sh
+cd /tmp/tenjin-auto-live
+claude --model sonnet \
+  --permission-mode auto --tools WebSearch,WebFetch \
+  --settings /tmp/tenjin-auto-live/bridge-settings.json \
+  --mcp-config /tmp/tenjin-auto-live/mcp.json \
+  --setting-sources '' --strict-mcp-config \
+  --disable-slash-commands --no-chrome
+```
+
+Jev compares the eight paid capabilities with the ordinary host alternative using capability and fidelity, without minimizing price. A compatible dedicated extractor is preferred for page reads, including simple summaries of known public pages. This is a default preference, not an unconditional provider rule: explicit no-paid/native-only instructions and actual capability constraints still apply. Simple factual searches and host reasoning can remain native; structured fresh quotes, enrichment, deeper source research and computational-engine checks favor suitable specialists. The task and requested evidence matter, not keywords such as “research.” The host still interprets results and handles ambiguity; Jev does not generate arbitrary new argument values or grant spending authority. Quote validation, spending caps and payment authorization remain deterministic even though price is not the routing objective.
+
+The preference accounts for what the native tools return. Claude documents that WebFetch usually returns a smaller model's extracted answer rather than the raw page, and truncates large pages. [Official WebFetch behavior](https://code.claude.com/docs/en/tools-reference#webfetch-tool-behavior). Firecrawl documents Markdown/HTML extraction and page metadata, which support preferring a dedicated extractor for page reading. [Official Firecrawl scraping documentation](https://docs.firecrawl.dev/features/scrape). The Vaaya reseller contract exposes only its declared subset; these upstream docs do not prove that the reseller supports every Firecrawl feature. Jev receives native capability descriptions and generic fidelity rules, including missing fields or a reported native failure. The preference does not guarantee any provider's fulfillment.
+
+When Jev chooses native through the bridge, it returns a successful `native_fallback` receipt without calling or paying an x402 provider. Claude can then execute its normal `WebSearch` or `WebFetch`, or answer using its own reasoning when appropriate. Every actual native call receives its own Jev check, including calls that skipped the suggested request-first flow. A native choice allows that call normally. A paid preference denies the native call and directs Claude to the MCP request tool; this gate never executes or pays the provider itself. A denied attempt can appear red if Claude bypasses request-first and Jev prefers a specialist.
+
+These decisions still use Jev inference, and Claude/native-tool charges remain separate; zero x402 payment does not mean zero cost. The request-first instruction improves the presentation, while the native hook guards the two supported native tools. Neither can force Claude to request a tool at all. In one test Claude answered a known Toronto webpage question without any tool call; that is not a Jev-native-routing demonstration. Validate the saved Jev decision and actual successful native tool result instead of inferring tool use from the final prose. The default bridge-only configuration keeps native tools hidden. To restore it, remove or disable `nativeFallback`, rerun `bridge-setup`, and return to `--tools ''` without changing the payment ledger.
 
 ## Validation
 
-The bridge harness checks actual auto mode and model identity, absence of native search/fetch, one to eight distinct MCP calls, successful corresponding tool results, current-event fulfilled outcomes, HTTP 200, valid amounts, receipt provenance/parameters and a final citation to a returned URL or supplying endpoint. It saves streams/reports and closes the Claude process group. Missing citations remain failed checks. Optional `--session-id <uuid>` then `--resume <same-uuid>` supports two-turn headless validation; the actual presentation starts empty without either flag.
+For paid research, the bridge harness checks actual auto mode and model identity, absence of native search/fetch, one to eight distinct MCP calls, successful corresponding tool results, current-event fulfilled outcomes, HTTP 200, valid amounts, receipt provenance/parameters and a final citation to a returned URL or supplying endpoint. It saves streams/reports and closes the Claude process group. Missing citations remain failed checks. Optional `--session-id <uuid>` then `--resume <same-uuid>` supports two-turn headless validation; the actual presentation starts empty without either flag.
+
+To validate native fallback with the mixed-mode config, use `--transport bridge --expectation /tmp/native-expectation.json`, with an expectation such as:
+
+```json
+{ "scope": "native", "tools": ["WebSearch"] }
+```
+
+The allowed tool list can contain `WebFetch` or both tools. This checker requires actual successful native execution after the corresponding saved Jev gate decision, matching handoff evidence when MCP was used, and no x402 executor or provider result. A direct native call without its gate evidence fails. An answer with no tools also fails. Older recordings from the instruction-only setup do not establish the new gate behavior. Paid response expectations remain separate from this native checker.
+
+### Mixed-mode validation
+
+The current capability-first policy passed all 33 labeled routing cases: 20/20 in 40 Jev calls and 13/13 in 24 calls, with zero provider requests or payment signatures. Both the paid/native choices and complete arguments matched. Three unchanged page-reading prompts now expect the dedicated extractor because the operator preference changed; a new explicit native-only/no-paid page case still selects native. This is a calibrated regression set, not an independent performance estimate. Earlier 15/16, 19/20 and argument-binding failures remain recorded. Generic binding rules were corrected to preserve explicit formats and distinguish serialization formats from content elements such as headings or tables.
+
+A new ordinary-page headless run confirmed the changed default: Jev selected Firecrawl, paid $0.01, and delivered HTTP 200 with Markdown and page metadata. It passed 19/20 checks. The remaining failure was exact title presentation: Claude shortened `How x402 works - Coinbase Developer Documentation` to `How x402 works`, despite receiving the full title. Citation validation passed. This establishes routing and delivery, not perfect host formatting.
+
+The completed eight-capability mixed-mode batch passed explicit response expectations for Hunter company enrichment ($0.013), CompanyEnrich ($0.06), Apollo person enrichment ($0.038), Hunter email verification ($0.008), CoinMarketCap BTC/ETH quotes ($0.01), Wolfram computation ($0.02), Exa research ($0.007), and Vaaya/Firecrawl page extraction ($0.01). Those eight successful provider calls totaled $0.166 USDC, excluding earlier attempts and the subsequent $0.01 ordinary-page run above. Each used one paid bridge request and checked returned public fields against the final answer. Wolfram received `integrate x^2 sin(x) dx from 0 to pi` and returned `π² − 4 ≈ 5.8696`; the answer quoted the engine's result verbatim and correctly checked the antiderivative. These checks verify response shape and at least one exact returned scalar; they do not independently establish every profile field's freshness or every rounded market number. Compatible settlement receipts were provider-reported; CoinMarketCap's receipt remained unverified.
+
+The earlier mixed-mode math attempt selected Wolfram but its unsigned quote request timed out after 20 seconds, before any signed payment. It then tried native tools under the instruction-only setup, so that failed run remains recorded. The bypass motivated the native `PreToolUse` gate; the subsequent gated math run is the separate successful result above.
+
+Both gated native paths also passed: a Toronto current-weather lookup used the MCP native handoff, its own native gate, and actual `WebSearch`; an exact `https://example.com` page read used the handoff, native gate and actual `WebFetch`. Each made zero x402 provider requests or payments. The WebFetch run is transport evidence under the previous preference; an ordinary page read now prefers the dedicated extractor unless a constraint such as native-only changes the choice. The earlier zero-tool Toronto answer is still excluded from this evidence.
+
+The initial mixed-mode full-Markdown test failed: Jev repeatedly chose native despite the required output, and no Firecrawl payment occurred. An intermediate paid attempt also exposed a preview that omitted the page title. After the generic fidelity and preview corrections, the final run selected Firecrawl and passed its execution and response expectations, including the returned title. Its citation checker initially included the closing backtick of a code-wrapped URL. Correcting that parser and regrading the same saved stream produced all 20 passing checks, without another provider request or payment. The original report and input hashes remain preserved; the earlier routing and preview failures remain separate records.
+
+Focused validation passed 247 TypeScript tests across 14 relevant files; the nine policy/fixture tests passed again after the preference change. All 60 Node harness tests and workspace lint, formatting, typecheck and package smoke passed. Live routing and provider runs are opt-in; ordinary tests and CI do not make paid requests.
 
 ```sh
 node scripts/auto-mode-demo.mjs --transport bridge --model sonnet \
@@ -202,9 +311,9 @@ pnpm test:auto-mode-harness
 
 ### Bridge validation on 2026-09-20
 
-The interactive report exposed two separate failures: exact page-fetch requests could select a search contract, and a successful 32,014-character GitHub scrape delivered only 160 original Markdown characters because metadata crowded out the document. Fetch routing now preserves the immediate page-reading operation and exact URL. Contracts need a declared URL input (including URI-format and URL-array fields) or must directly serve that exact resource. The fetch interpretation prompt stays with Claude instead of becoming a provider argument. Jev still judges semantic suitability; these guards do not establish that every URL-taking service retrieves pages. Generic previews now reserve most of their bounded space for a few dominant prose strings, independently of provider and field names. The saved GitHub response retains 5,274 Markdown characters, including the specification overview and payment flow, in a 6,000-character valid JSON preview. Both primary BTC/ETH quote objects remain intact in the saved structured-data regression.
+The interactive report exposed two separate failures: exact page-fetch requests could select a search contract, and a successful 32,014-character GitHub scrape delivered only 160 original Markdown characters because metadata crowded out the document. Fetch routing now preserves the immediate page-reading operation and exact URL. Contracts need a declared URL input (including URI-format and URL-array fields) or must directly serve that exact resource. The fetch interpretation prompt stays with Claude instead of becoming a provider argument. Jev still judges semantic suitability; these guards do not establish that every URL-taking service retrieves pages. Generic previews allocate prose space by value size and also prioritize a bounded set of common provenance fields such as titles and source URLs. That display priority is provider-independent and does not affect routing. At the earlier checkpoint, the saved GitHub response retained 5,274 Markdown characters, including the specification overview and payment flow, in a 6,000-character valid JSON preview. Both primary BTC/ETH quote objects remain intact in the saved structured-data regression.
 
-After these fixes, the exact x402 research prompt passed all 20 gates in a fresh Sonnet auto-mode run: one Exa search and two Vaaya fetches, all HTTP 200 and normal successful tool results, with two valid final citations. Provider cost was $0.027 USDC; Claude inference was $0.0459896, excluding Jev. A separate live routing batch passed 10/10 cases in 22 Jev requests and no provider calls, including both failed fetch prompts after synthetic crypto/research history, a held-out URL-array reader and existing quote/history cases. The complete evaluation now contains 38 cases; this is not a claim of a single clean 38-case live batch.
+After these fixes, the exact x402 research prompt passed all 20 gates in a fresh Sonnet auto-mode run: one Exa search and two Vaaya fetches, all HTTP 200 and normal successful tool results, with two valid final citations. Provider cost was $0.027 USDC; Claude inference was $0.0459896, excluding Jev. A separate live routing batch passed 10/10 cases in 22 Jev requests and no provider calls, including both failed fetch prompts after synthetic crypto/research history, a held-out URL-array reader and existing quote/history cases. At that earlier checkpoint the evaluation contained 38 cases; this was not a single clean 38-case live batch.
 
 An interactive synthetic PTY probe verified that Claude Code 2.1.278 renders a selected service in the status footer during a running PreToolUse hook, before hook completion. The first selected-service frame appeared 304 ms after the synthetic hook started. It made no provider payments; the two model attempts cost $0.0846606 total. Focused tests additionally verify the production progress writer publishes before execution finishes, isolates sessions/concurrent calls, bounds output, masks credentials/control characters, and keeps fresh completions visible alongside stale calls. This establishes the footer mechanism separately from the paid headless transport test.
 
@@ -218,7 +327,7 @@ An earlier minimal pair used the comparison opener, not the research opener now 
 
 The three paid invocations cost $0.2466216 in Claude inference, excluding Jev. Provider spend for this validation was $0.081 USDC. At the earlier comparison-only checkpoint, the preserved shared ledger accounted for $0.332 USDC, leaving $0.668 under the original $1 cap, with no unresolved attempts. These are dated preparation figures, not a promise of the remaining balance after another presentation. The actual updated interactive launch remains for the presenter; headless evidence does not establish pixel-level terminal appearance.
 
-Focused validation now totals 247 TypeScript tests and 42 Node harness tests; the 246-test suite passed before the final stale-progress regression, then all six progress tests passed again. Workspace lint, format, typecheck and package smoke passed. Cancellation tests exercise real local child groups and verify SIGINT/SIGTERM cleanup without model calls. Normal tenjin-agent PR CI runs automatically, with no `ci` label required; its build, typecheck, full tests and package smoke passed for the bridge implementation. The PR stays draft.
+At that earlier bridge checkpoint, focused validation totaled 247 TypeScript tests and 42 Node harness tests; the 246-test suite passed before the final stale-progress regression, then all six progress tests passed again. Workspace lint, format, typecheck and package smoke passed. Cancellation tests exercise real local child groups and verify SIGINT/SIGTERM cleanup without model calls. Normal tenjin-agent PR CI runs automatically, with no `ci` label required; its build, typecheck, full tests and package smoke passed for the bridge implementation. The PR stays draft.
 
 ### Earlier evidence and limits
 
@@ -238,6 +347,6 @@ For exact page fetching, code filters out contracts without a declared target UR
 
 Jev chooses source spans and schema values, can compose up to eight selected members across two fields, and finally selects a complete schema-valid argument set. Up to six optional fields yield at most 64 candidate sets. No payment judgment is delegated to a model. Requests/responses to Jev have a 1 MiB bound. Current-session user/assistant text is bounded; tool-result history, other sessions, subagents and compacted/malformed/oversized transcripts are unsupported. Native domain filters are rejected rather than dropped.
 
-Payment execution supports x402 v2 `exact`, Base native USDC, validated HTTP query/body/path/header contracts and explicit action scope. A lock claims each attempt; budget is reserved before signing and policy rechecked before signing/transmission. Ambiguous transmissions retain their reservation and are never automatically re-signed. Replaying a completed event returns cached evidence; a new tool-use ID is a new request. A separate typed workflow executor supports up to ten ordered steps and prior-result bindings; automatic multi-step Jev planning is not wired in. The Exa/Tavily chain test is synthetic.
+Payment execution supports x402 v2 `exact`, Base native USDC, validated HTTP query/body/path/header contracts and explicit action scope. A lock claims each attempt; budget is reserved before signing and policy rechecked before signing/transmission. Ambiguous transmissions retain their reservation and are never automatically re-signed. Replaying a completed event returns cached evidence. Within the same user turn, an unresolved paid attempt blocks another request to that capability even with a new tool-use ID or changed arguments; other capabilities can proceed independently. This does not deduplicate all semantically equivalent successful requests. A separate typed workflow executor supports up to ten ordered steps and prior-result bindings; automatic multi-step Jev planning is not wired in. The Exa/Tavily chain test is synthetic.
 
 Provider connections validate DNS/destinations and reject private addresses, credentials, custom ports and redirects. Nested scraper targets receive public HTTPS/DNS checks, which cannot control the remote scraper's later behavior. Provider results are untrusted. The local receipt files, wallet and policy are not isolation from malicious code running as the same OS user. The hook has a 70-second deadline under Claude's 90-second hook timeout. The bridge fails closed without a valid result receipt; it cannot force Claude to request a tool or to interpret the result correctly.

@@ -13,10 +13,12 @@ import { auditResources, snapshotCatalog, discoverCandidates } from './catalog';
 import { ConfigSchema, hookOutput, runEvent, recordOutcome } from './runtime';
 import type { AutoConfig, Outcome } from './runtime';
 import { createBridgeHookOutput, normalizeBridgeEvent, serveBridge } from './bridge';
-import { writeBridgeSetup } from './setup';
+import { writeBridgeSetup, NATIVE_FALLBACK_INSTRUCTIONS } from './setup';
 import { HookEventSchema } from './context';
 import type { HookEvent } from './context';
 import { writeProgress } from './progress';
+import { demoCatalog } from './demo-catalog';
+import { runNativeGate } from './native-gate';
 
 const program = new Command('tenjin-auto-mode').description(
   'Experimental local Jev → x402 runner. No backend; no global hook installation.',
@@ -60,12 +62,33 @@ async function input(path?: string): Promise<unknown> {
 }
 
 program
+  .command('demo-catalog')
+  .description(
+    'Export the curated MVP catalog and explicit translation provenance, without networking.',
+  )
+  .requiredOption('--output <path>', 'New catalog file; refuses to overwrite existing files')
+  .action(async (options) => {
+    const catalog = demoCatalog();
+    const output = resolve(options.output as string);
+    await writeFile(output, `${JSON.stringify(catalog, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
+    json({
+      output,
+      resources: catalog.resources.length,
+      note: 'Operator-curated inputs; contract and routing validation do not establish provider fulfillment.',
+    });
+  });
+
+program
   .command('init')
   .requiredOption(
     '--directory <path>',
     'New local experiment directory (must not contain config.json)',
   )
   .option('--mode <mode>', 'fixture | route (live Jev, no provider calls) | live', 'fixture')
+  .option(
+    '--native-fallback',
+    'Let Jev choose ordinary host tools when a paid capability adds little value',
+  )
   .option('--env-file <path>', 'Existing env file containing TYPESAFE_KEY or TYPESAFE_API_KEY')
   .option(
     '--catalog-file <path>',
@@ -98,6 +121,7 @@ program
     const config = ConfigSchema.parse({
       version: 1,
       mode: options.mode,
+      ...(options.nativeFallback ? { nativeFallback: true } : {}),
       stateDir: join(directory, 'state'),
       policyPath,
       walletDir: resolve(options.walletDir as string),
@@ -120,7 +144,7 @@ program
           expiresAtMs: Date.now() + 24 * 60 * 60 * 1000,
           maxCallAtomic: '100000',
           maxRunAtomic: '1000000',
-          allowedOperations: ['search', 'fetch'],
+          allowedOperations: ['request', 'search', 'fetch'],
           ...(allowedResources.length ? { allowedResources } : {}),
         },
         null,
@@ -166,8 +190,30 @@ program
   .requiredOption('--config <path>')
   .action(async (options) => {
     const configPath = resolve(options.config as string);
-    ConfigSchema.parse(JSON.parse(await readFile(configPath, 'utf8')));
-    json(await writeBridgeSetup(configPath, process.execPath, fileURLToPath(import.meta.url)));
+    const config = ConfigSchema.parse(JSON.parse(await readFile(configPath, 'utf8')));
+    json(
+      await writeBridgeSetup(configPath, process.execPath, fileURLToPath(import.meta.url), {
+        nativeFallback: config.nativeFallback,
+      }),
+    );
+  });
+
+program
+  .command('native-instructions')
+  .description('Emit fixed mixed-mode instructions; no model, wallet or network access.')
+  .requiredOption('--config <path>')
+  .action(async (options) => {
+    const config = ConfigSchema.parse(JSON.parse(await readFile(options.config as string, 'utf8')));
+    json(
+      config.nativeFallback
+        ? {
+            hookSpecificOutput: {
+              hookEventName: 'UserPromptSubmit',
+              additionalContext: NATIVE_FALLBACK_INSTRUCTIONS,
+            },
+          }
+        : {},
+    );
   });
 
 program
@@ -179,7 +225,7 @@ program
     await serveBridge(config);
   });
 
-for (const command of ['hook', 'run', 'bridge-hook']) {
+for (const command of ['hook', 'run', 'bridge-hook', 'native-hook']) {
   program
     .command(command)
     .requiredOption('--config <path>')
@@ -194,7 +240,9 @@ for (const command of ['hook', 'run', 'bridge-hook']) {
               hookOutput({
                 status: 'pending',
                 reason:
-                  'Local execution deadline reached. Reconcile the saved attempt before retrying.',
+                  command === 'native-hook'
+                    ? 'Native routing check timed out. No provider request or payment was made.'
+                    : 'Local execution deadline reached. Reconcile the saved attempt before retrying.',
               }),
             );
             releaseOwnedLocks();
@@ -208,14 +256,14 @@ for (const command of ['hook', 'run', 'bridge-hook']) {
         const raw = await input(options.event as string | undefined);
         const event =
           command === 'bridge-hook' ? normalizeBridgeEvent(raw) : HookEventSchema.parse(raw);
-        if (command === 'bridge-hook') {
+        if (command === 'bridge-hook' || command === 'native-hook') {
           progress = { config, event };
           await writeProgress(config, event, {
             phase: 'routing',
             fixture: config.mode === 'fixture',
           });
         }
-        outcome = await runEvent(event, config, {
+        outcome = await (command === 'native-hook' ? runNativeGate : runEvent)(event, config, {
           env,
           ...(progress
             ? {

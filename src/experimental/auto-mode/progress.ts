@@ -154,7 +154,9 @@ export async function renderProgress(
           ? 'calling'
           : row.cached
             ? 'cached'
-            : row.status;
+            : row.status === 'native_fallback'
+              ? 'native tools (no x402 payment)'
+              : row.status;
     return bounded(
       `x402 · ${row.fixture ? 'fixture · ' : ''}${row.operation}: ${clean(stage ?? 'unknown', 60)}` +
         (row.provider ? ` ${clean(row.provider, 110)}` : '') +

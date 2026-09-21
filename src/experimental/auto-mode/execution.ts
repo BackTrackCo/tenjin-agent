@@ -46,7 +46,11 @@ export interface AutoRequestIdentity {
   requestId: string;
   stepId: string;
   contractHash: string;
+  /** Stable URL/method capability identity, independent of seller metadata revisions. */
+  capabilityId?: string;
   contextHash: string;
+  /** Fingerprint of user messages only; assistant/tool retries cannot renew it. */
+  userTurnHash?: string;
 }
 
 export interface PaidRequestInput {
@@ -226,7 +230,9 @@ const identitySchema = z.object({
   requestId: id,
   stepId: id,
   contractHash: id,
+  capabilityId: id.optional(),
   contextHash: id,
+  userTurnHash: z.string().length(64).optional(),
 });
 const responseSchema = z.object({
   status: z.number().int().min(100).max(599),
@@ -254,6 +260,8 @@ const attemptSchema = z
   .object({
     key: z.string().length(64),
     fingerprint: z.string().length(64),
+    retryGroup: z.string().length(64).optional(),
+    requestHash: z.string().length(64).optional(),
     policyRevision: id,
     policyHash: z.string().length(64),
     state: z.enum(['prepared', 'signing', 'transmitted', 'completed', 'cancelled', 'ambiguous']),
@@ -331,6 +339,7 @@ function checkPolicy(policy: AutoPolicy, input: PaidRequestInput, now: number): 
       const allowed = new URL(scope.url);
       return (
         scope.method === input.request.method &&
+        allowed.protocol === 'https:' &&
         allowed.origin === request.origin &&
         allowed.pathname === request.pathname &&
         (allowed.search === '' || allowed.search === request.search) &&
@@ -480,6 +489,14 @@ export async function executePaidRequest(
     const policyHash = hash(policy);
     const key = hash([input.identity.sessionId, input.identity.requestId, input.identity.stepId]);
     const fingerprint = hash(input);
+    const resource = new URL(input.request.url);
+    const capabilityId =
+      input.identity.capabilityId ??
+      hash([input.request.method, resource.origin, resource.pathname]);
+    const retryGroup =
+      input.identity.userTurnHash &&
+      hash([input.identity.sessionId, input.identity.userTurnHash, capabilityId]);
+    const requestHash = hash(input.request);
     ledgerPath = join(deps.stateDir, `run-${hash(policy.runId)}.json`);
     const path = ledgerPath;
     await mkdir(deps.stateDir, { recursive: true, mode: 0o700 });
@@ -530,6 +547,30 @@ export async function executePaidRequest(
       if (process.platform !== 'win32') await fsyncDir(deps.stateDir);
     }
 
+    function pendingRetry(ledger: Ledger): ExecutionResult | undefined {
+      if (
+        retryGroup &&
+        ledger.attempts.some(
+          (attempt) =>
+            attempt.key !== key &&
+            attempt.retryGroup === retryGroup &&
+            ((attempt.requestHash === requestHash &&
+              ['prepared', 'signing', 'transmitted'].includes(attempt.state)) ||
+              (BigInt(attempt.amountAtomic) > 0n &&
+                (['signing', 'transmitted', 'ambiguous'].includes(attempt.state) ||
+                  (attempt.state === 'completed' && attempt.result?.status !== 'fulfilled')))),
+        )
+      ) {
+        return {
+          status: 'pending',
+          amountAtomic: '0',
+          reason:
+            'An identical request is in flight, or this service has an unresolved paid attempt in the current user turn. No new payment was made. Reconcile it before retrying; changing tool IDs or arguments does not renew authorization.',
+        };
+      }
+      return undefined;
+    }
+
     stage = 'claim';
     const existing = await withLedger(async (ledger) => {
       const prior = ledger.attempts.find((attempt) => attempt.key === key);
@@ -549,11 +590,14 @@ export async function executePaidRequest(
         };
       }
       checkPolicy(policy, input, now());
+      const retry = pendingRetry(ledger);
+      if (retry) return retry;
       if (ledger.attempts.length >= 1000)
         stop('refused', 'This run has reached its attempt limit.');
       const attempt: Attempt = {
         key,
         fingerprint,
+        ...(retryGroup ? { retryGroup, requestHash } : {}),
         policyRevision: policy.revision,
         policyHash,
         state: 'prepared',
@@ -608,6 +652,11 @@ export async function executePaidRequest(
     stage = 'reserve-budget';
     await withLedger(async (ledger) => {
       const attempt = ledger.attempts.find((item) => item.key === key)!;
+      // Distinct requests may obtain unsigned quotes together, but only one
+      // unresolved payment per service/user turn may reserve or sign. Recheck
+      // under the reservation lock: both callers may have passed the claim.
+      const retry = pendingRetry(ledger);
+      if (retry) throw new StopExecution(retry);
       const spent = ledger.attempts.reduce((sum, item) => sum + BigInt(item.amountAtomic), 0n);
       if (amount > BigInt(policy.maxCallAtomic))
         stop('refused', 'The quote exceeds the per-call cap.');
@@ -709,17 +758,36 @@ export async function executePaidRequest(
           const ledger = ledgerSchema.parse(JSON.parse(await readFile(path, 'utf8')));
           const attempt = ledger.attempts.find((item) => item.key === attemptedKey);
           if (attempt !== undefined && attempt.state !== 'completed') {
-            const ambiguous = attempt.state === 'signing' || attempt.state === 'transmitted';
+            const ambiguous = ['signing', 'transmitted', 'ambiguous'].includes(attempt.state);
+            const unsigned = attempt.state === 'prepared' && BigInt(attempt.amountAtomic) === 0n;
+            if (!ambiguous && !unsigned) return;
             attempt.state = ambiguous ? 'ambiguous' : 'cancelled';
             if (ambiguous) {
               result.amountAtomic = attempt.amountAtomic;
               result.reason = `${result.reason ?? 'Execution failed.'} Signing or transmission may have occurred; retained budget requires reconciliation.`;
-            } else attempt.amountAtomic = '0';
-            attempt.result = result;
+            }
+            const savedResult: ExecutionResult = unsigned
+              ? {
+                  ...result,
+                  amountAtomic: '0',
+                  reason: `${result.reason ?? 'Execution failed.'} No payment was signed or sent for this attempt.`,
+                }
+              : result;
+            attempt.result = savedResult;
             await writeFileAtomic(path, `${JSON.stringify(ledger)}\n`, {
               mode: 0o600,
               dirMode: 0o700,
             });
+            const handle = await open(path, 'r');
+            try {
+              await handle.sync();
+            } finally {
+              await handle.close();
+            }
+            if (process.platform !== 'win32') await fsyncDir(deps.stateDir);
+            // Do not assert zero payment when reading or durably saving the
+            // pre-signing cancellation failed. Signed states stay ambiguous.
+            if (unsigned) Object.assign(result, savedResult);
           }
         });
       } catch {
@@ -841,7 +909,14 @@ export async function safeHttpsTransport(
     // expose net.Socket's autoSelectFamily option in the installed Node types.
     const options: RequestOptions & { autoSelectFamily: true } = {
       method: request.method,
-      headers: { ...request.headers, ...paymentHeaders, 'Accept-Encoding': 'identity' },
+      headers: {
+        ...request.headers,
+        ...paymentHeaders,
+        'Accept-Encoding': 'identity',
+        // Public automation APIs can reject anonymous HTTP clients. Identify
+        // this runner honestly; never inherit a model-supplied browser identity.
+        'User-Agent': 'tenjin-cli/0.1 (local-x402-experiment)',
+      },
       signal,
       agent: false,
       autoSelectFamily: true,

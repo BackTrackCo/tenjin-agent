@@ -79,6 +79,64 @@ describe('bounded provider result preview', () => {
     expect(preview.truncated).toBe(true);
   });
 
+  it('retains late provenance scalars alongside dominant prose under the same budget', () => {
+    const metadata = {
+      ...Object.fromEntries(
+        Array.from({ length: 40 }, (_, index) => [
+          `og:image:${index}`,
+          `https://images.example/social-preview-${index}.png`,
+        ]),
+      ),
+      title: 'How the payment protocol works — Developer documentation',
+      sourceURL: 'https://docs.example/payment-protocol/how-it-works',
+      statusCode: 200,
+    };
+    const document =
+      '# Payment protocol\n' +
+      'The client requests a resource and receives payment requirements. '.repeat(700);
+    const value = { ok: true, data: { success: true, data: { metadata, markdown: document } } };
+    const body = JSON.stringify(value);
+    const preview = previewResult(body);
+    const parsed = JSON.parse(preview.result);
+    expect(parsed.data.data.metadata).toMatchObject({
+      title: metadata.title,
+      sourceURL: metadata.sourceURL,
+      statusCode: 200,
+    });
+    expect(parsed.data.data.markdown.slice(0, 4500)).toBe(document.slice(0, 4500));
+    expect(Object.keys(parsed.data.data.metadata).length).toBeLessThan(
+      Object.keys(metadata).length,
+    );
+    expect(preview.result.length).toBeLessThanOrEqual(6000);
+    expect(preview.truncated).toBe(true);
+    expect(previewResult(body)).toEqual(preview);
+    expect(JSON.parse(body)).toEqual(value);
+  });
+
+  it('preserves bounded provenance ancestors and does not let repeated URL fields consume prose', () => {
+    const value = {
+      images: Array.from({ length: 60 }, (_, index) => ({
+        url: `https://images.example/${index}.png`,
+      })),
+      ...Object.fromEntries(
+        Array.from({ length: 10 }, (_, index) => [`field${index}`, 'auxiliary']),
+      ),
+      details: {
+        title: 'Canonical document title',
+        source_url: 'https://docs.example/canonical',
+        status_code: 200,
+      },
+      document: 'Verified document substance. '.repeat(2000),
+    };
+    const preview = previewResult(JSON.stringify(value));
+    const parsed = JSON.parse(preview.result);
+    expect(parsed.details).toEqual(value.details);
+    expect(parsed.images.length).toBeLessThan(10);
+    expect(parsed.document.slice(0, 4500)).toBe(value.document.slice(0, 4500));
+    expect(preview.result.length).toBeLessThanOrEqual(6000);
+    expect(preview.truncated).toBe(true);
+  });
+
   it('narrows nested auxiliary objects before they crowd out the main document', () => {
     const document = `${'Navigation. '.repeat(250)}\n# Actual document\n${'Substance. '.repeat(3000)}`;
     const auxiliary = Object.fromEntries(

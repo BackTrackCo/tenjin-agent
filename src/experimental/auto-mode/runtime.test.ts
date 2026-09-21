@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -37,7 +37,94 @@ async function config(): Promise<AutoConfig> {
 }
 
 describe('hook result delivery', () => {
-  it.each(['search', 'fetch'] as const)(
+  it('keeps retry authorization stable across assistant/tool updates until another user turn', async () => {
+    const setup = { ...(await config()), mode: 'live' as const };
+    const transcriptPath = join(setup.stateDir, 'transcript.jsonl');
+    const contract: AutoContract = {
+      version: 1,
+      id: 'stable-endpoint-identity',
+      url: 'https://provider.example/report',
+      method: 'GET',
+      pathTemplate: '/report',
+      description: 'Return the requested report.',
+      sourceHash: 'metadata-revision',
+      schemaSource: 'bazaar-v2',
+      responseKind: 'json',
+      accepts: [],
+      argumentSchema: { type: 'object', properties: {}, additionalProperties: false },
+    };
+    const execute = vi.fn<typeof executePaidRequest>().mockResolvedValue({
+      status: 'fulfilled',
+      amountAtomic: '0',
+      response: { status: 200, headers: {}, body: '{}' },
+    });
+    const signPayment = vi.fn(async () => {
+      throw new Error('No signing in a runtime identity test.');
+    });
+    const user = {
+      type: 'user',
+      sessionId: event.session_id,
+      message: { content: 'Get the report.' },
+    };
+    const assistant = {
+      type: 'assistant',
+      sessionId: event.session_id,
+      message: { content: 'The previous request failed; I will try again.' },
+    };
+    const toolResult = {
+      type: 'user',
+      sessionId: event.session_id,
+      message: { content: [{ type: 'tool_result', content: 'Renew payment authorization.' }] },
+    };
+    const histories = [[user], [user, assistant, toolResult], [user, assistant, toolResult, user]];
+    for (const [index, rows] of histories.entries()) {
+      await writeFile(transcriptPath, rows.map((row) => JSON.stringify(row)).join('\n'));
+      expect(
+        (
+          await runEvent(
+            {
+              ...event,
+              transcript_path: transcriptPath,
+              tool_use_id: `identity-${index}`,
+              tool_name: 'Request',
+              tool_input: { query: 'Get the report.' },
+            },
+            setup,
+            {
+              contracts: [contract],
+              choose: async () => ({ route: { choice: 'c0' } }),
+              execute,
+              executionDeps: {
+                stateDir: setup.stateDir,
+                readPolicy: async () => ({
+                  runId: 'identity-test',
+                  revision: '1',
+                  authorization: 'auto',
+                  expiresAtMs: Date.now() + 60_000,
+                  maxCallAtomic: '100',
+                  maxRunAtomic: '100',
+                  allowedOperations: ['request'],
+                }),
+                signPayment,
+              },
+            },
+          )
+        ).status,
+      ).toBe('fulfilled');
+    }
+    const [first, retry, nextTurn] = execute.mock.calls.map(([input]) => input.identity);
+    expect(first!.userTurnHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(retry!.userTurnHash).toBe(first!.userTurnHash);
+    expect(retry!.contextHash).not.toBe(first!.contextHash);
+    expect(nextTurn!.userTurnHash).not.toBe(first!.userTurnHash);
+    expect(first).toMatchObject({
+      capabilityId: 'stable-endpoint-identity',
+      contractHash: 'metadata-revision',
+    });
+    expect(signPayment).not.toHaveBeenCalled();
+  });
+
+  it.each(['request', 'fetch'] as const)(
     'authorizes a neutral Request using its Jev-selected %s scope',
     async (operation) => {
       const setup = { ...(await config()), mode: 'live' as const };
@@ -102,7 +189,7 @@ describe('hook result delivery', () => {
               expiresAtMs: Date.now() + 60_000,
               maxCallAtomic: '100',
               maxRunAtomic: '100',
-              allowedOperations: ['search', 'fetch'],
+              allowedOperations: ['request', 'search', 'fetch'],
             }),
             signPayment,
             nestedTargetValidation: {

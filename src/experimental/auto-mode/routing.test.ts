@@ -82,7 +82,7 @@ describe('Jev intent-to-call boundary', () => {
     const result = await routeIntent(lookup, context, [contract()], choose);
     expect(result).toMatchObject({
       status: 'selected',
-      operation: 'search',
+      operation: 'request',
       args: { body: { query: lookup.tool_input.query } },
     });
   });
@@ -139,6 +139,115 @@ describe('Jev intent-to-call boundary', () => {
       status: 'selected',
       args: { body: { url: pageUrl } },
     });
+  });
+
+  it.each([
+    {
+      text: 'Enrich stripe.com for a sales brief.',
+      field: 'domain',
+      value: 'stripe.com',
+      schema: { type: 'string' },
+    },
+    {
+      text: 'Verify sales@example.com before outreach.',
+      field: 'email',
+      value: 'sales@example.com',
+      schema: { type: 'string', format: 'email' },
+    },
+    {
+      text: 'Calculate 5 observations at a 16:9 ratio.',
+      field: 'count',
+      value: 5,
+      schema: { type: 'integer', minimum: 1, maximum: 10 },
+    },
+    {
+      text: 'Calculate a 16:9 ratio.',
+      field: 'ratio',
+      value: '16:9',
+      schema: { type: 'string' },
+    },
+    { text: 'Set count to 5.', field: 'count', value: 5, schema: { type: 'integer' } },
+  ])(
+    'binds literal $field values without generating or coercing arguments',
+    async ({ text, field, value, schema }) => {
+      const choose: Choose = async (_state, questions): ReturnType<Choose> => {
+        if (questions.route) return { route: { choice: 'c0' } };
+        const source = Object.entries(questions.a0!.criteria).find(([, label]) =>
+          label.endsWith(`: ${JSON.stringify(value)}`),
+        );
+        expect(source).toBeDefined();
+        return { a0: { choice: source![0] } };
+      };
+      expect(
+        await routeIntent(
+          { ...event, tool_name: 'Request', tool_input: { query: text } },
+          { messages: [{ role: 'user', text }], fingerprint: 'literal-input' },
+          [fieldsContract({ [field]: schema })],
+          choose,
+        ),
+      ).toMatchObject({
+        status: 'selected',
+        operation: 'request',
+        args: { body: { [field]: value } },
+      });
+    },
+  );
+
+  it('does not turn number words, unsafe integers or secret fragments into numeric arguments', async () => {
+    const choose: Choose = async (_state, questions): ReturnType<Choose> => {
+      if (questions.route) return { route: { choice: 'c0' } };
+      expect(Object.keys(questions.a0!.criteria)).toEqual(['omit']);
+      return { a0: { choice: 'omit' } };
+    };
+    expect(
+      await routeIntent(
+        {
+          ...event,
+          tool_name: 'Request',
+          tool_input: {
+            query:
+              'Set count to five; id 9007199254740993; count 1,000; tiny 1e-400; API_KEY=1234567890abcdef',
+          },
+        },
+        { messages: [], fingerprint: 'no-numeric-input' },
+        [fieldsContract({ count: { type: 'integer' } })],
+        choose,
+      ),
+    ).toMatchObject({ status: 'needs_input' });
+  });
+
+  it('preserves history identifiers when numeric observations exceed the candidate budget', async () => {
+    const choose: Choose = async (_state, questions): ReturnType<Choose> => {
+      if (questions.route) return { route: { choice: 'c0' } };
+      const source = Object.entries(questions.a0!.criteria).find(([, label]) =>
+        label.endsWith(': "BTC"'),
+      );
+      expect(source).toBeDefined();
+      expect(Object.values(questions.a0!.criteria).some((label) => label.endsWith(': "ETH"'))).toBe(
+        true,
+      );
+      return { a0: { choice: source![0] } };
+    };
+    expect(
+      await routeIntent(
+        {
+          ...event,
+          tool_name: 'Request',
+          tool_input: { query: 'Check the first coin price now.' },
+        },
+        {
+          messages: [
+            {
+              role: 'assistant',
+              text: `Bitcoin (BTC), Ethereum (ETH). Observations: ${Array.from({ length: 25 }, (_, index) => `${index + 1}.`).join(' ')}`,
+            },
+          ],
+          fingerprint: 'numeric-history',
+        },
+        [fieldsContract({ symbol: { type: 'string' } })],
+        choose,
+      ),
+    ).toMatchObject({ status: 'selected', args: { body: { symbol: 'BTC' } } });
   });
 
   it('keeps page retrieval distinct from earlier topics and the broader research task', async () => {

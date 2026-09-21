@@ -74,8 +74,8 @@ async function receipt(raw: unknown = event, result: Outcome = outcome) {
   return (await createBridgeHookOutput({ stateDir }, raw, result, clock)).hookSpecificOutput;
 }
 
-async function client() {
-  const server = buildBridgeServer({ stateDir }, clock);
+async function client(nativeFallback = false) {
+  const server = buildBridgeServer({ stateDir, nativeFallback }, clock);
   const connection = new Client({ name: 'bridge-test', version: '0.0.0' });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(serverTransport), connection.connect(clientTransport)]);
@@ -139,6 +139,74 @@ describe('MCP hook normalization', () => {
 });
 
 describe('request-bound local receipts', () => {
+  it.each([undefined, 'https://source.example/article'])(
+    'delivers an opted-in native handoff without claiming provider fulfillment (%s)',
+    async (targetUrl) => {
+      const config = { stateDir, nativeFallback: true };
+      const raw = { ...event, tool_name: 'mcp__x402__request' };
+      const hook = (
+        await createBridgeHookOutput(
+          config,
+          raw,
+          {
+            status: 'native_fallback',
+            reason: 'Normal tools suffice; no x402 execution.',
+            ...(targetUrl === undefined ? {} : { targetUrl }),
+          },
+          clock,
+        )
+      ).hookSpecificOutput;
+      const result = await readBridgeResult(config, 'request', hook.updatedInput, clock);
+      expect(result.isError).toBe(false);
+      expect(texts(result)[0]).toContain('Jev selected normal tools or host reasoning');
+      expect(texts(result)[0]).not.toContain('Fulfilled by');
+      expect(JSON.parse(texts(result)[1]!)).toEqual({
+        status: 'native_fallback',
+        reason: 'Normal tools suffice; no x402 execution.',
+        nativeTool: targetUrl === undefined ? 'WebSearch' : 'WebFetch',
+        nativeToolRequired: targetUrl !== undefined,
+        ...(targetUrl === undefined ? {} : { targetUrl }),
+        x402Executed: false,
+      });
+      expect(hook.additionalContext).toContain('Use native tools if this step needs retrieval');
+      expect(hook.additionalContext).toContain('no x402 provider result');
+      expect(JSON.stringify(result)).not.toContain('amountAtomic');
+    },
+  );
+
+  it('refuses native success without opt-in or with execution, fixture, selected provider or unsafe target data', async () => {
+    const raw = { ...event, tool_name: 'mcp__x402__request' };
+    const native: Outcome = { status: 'native_fallback', reason: 'Normal tools suffice.' };
+    for (const [config, value] of [
+      [{ stateDir }, native],
+      [
+        { stateDir, nativeFallback: true },
+        { ...native, execution: outcome.execution },
+      ],
+      [
+        { stateDir, nativeFallback: true },
+        { ...native, selected: outcome.selected },
+      ],
+      [
+        { stateDir, nativeFallback: true },
+        { ...native, fixture: true },
+      ],
+      [
+        { stateDir, nativeFallback: true },
+        { ...native, targetUrl: 'http://source.example/' },
+      ],
+      [
+        { stateDir, nativeFallback: true },
+        { ...native, targetUrl: 'https://user:password@source.example/' },
+      ],
+    ] as const) {
+      const hook = (await createBridgeHookOutput(config, raw, value, clock)).hookSpecificOutput;
+      expect((await readBridgeResult(config, 'request', hook.updatedInput, clock)).isError).toBe(
+        true,
+      );
+    }
+  });
+
   it('binds neutral request receipts separately from legacy search receipts', async () => {
     const hook = await receipt({ ...event, tool_name: 'mcp__x402__request' });
     expect(
@@ -401,6 +469,12 @@ describe('request-bound local receipts', () => {
 });
 
 describe('read-only MCP server', () => {
+  it('advertises native handoffs only when explicitly enabled', async () => {
+    const pure = await client();
+    const mixed = await client(true);
+    expect((await pure.listTools()).tools[0]!.description).not.toContain('native_fallback');
+    expect((await mixed.listTools()).tools[0]!.description).toContain('native_fallback');
+  });
   it('advertises one provider-free request tool without an execution-category choice', async () => {
     expect(BRIDGE_SERVER_NAME).toBe('x402');
     const connection = await client();

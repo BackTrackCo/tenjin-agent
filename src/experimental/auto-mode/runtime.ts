@@ -28,6 +28,7 @@ export const ConfigSchema = z.object({
   envFile: z.string().optional(),
   catalogFile: z.string().min(1).optional(),
   model: z.string().default('jev-latest'),
+  nativeFallback: z.boolean().optional(),
   discoveryQueries: z
     .object({ WebSearch: discoveryQueries.optional(), WebFetch: discoveryQueries.optional() })
     .default({}),
@@ -40,11 +41,13 @@ const LocalCatalogSchema = z.object({
   ]),
   fetchedAt: z.string().datetime(),
   resources: z.array(z.unknown()).min(1).max(20),
+  provenance: z.array(z.unknown()).max(20).optional(),
 });
 export type AutoConfig = z.infer<typeof ConfigSchema>;
 export type Outcome = {
   status: string;
   reason?: string;
+  targetUrl?: string;
   selected?: { url: string; args: Record<string, unknown>; contractHash: string };
   execution?: ExecutionResult;
   fixture?: boolean;
@@ -115,6 +118,15 @@ export const fixtureChooser: Choose = async (_state, questions) =>
   );
 
 export function hookOutput(outcome: Outcome) {
+  if (outcome.status === 'native_fallback')
+    return {
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: 'allow',
+        permissionDecisionReason: 'Jev selected normal tool execution; no x402 payment.',
+        additionalContext: 'Run this native tool normally. No x402 provider was called.',
+      },
+    };
   const body = outcome.execution?.response?.body;
   let previewLimit = 6000;
   const preview = body === undefined ? undefined : previewResult(body, previewLimit);
@@ -205,6 +217,7 @@ export async function routeEvent(
           fetchedAt: catalog.fetchedAt,
           catalogHash: fingerprint(raw),
           resources: catalog.resources,
+          provenance: catalog.provenance,
           contracts,
           rejected,
           partial: rejected.length > 0,
@@ -308,7 +321,7 @@ export async function routeEvent(
       choose = createJevChooser({ apiKey, model: config.model });
     }
   }
-  return routeIntent(event, context, contracts, choose);
+  return routeIntent(event, context, contracts, choose, { nativeFallback: config.nativeFallback });
 }
 
 async function runUncachedEvent(
@@ -413,7 +426,9 @@ async function runUncachedEvent(
         requestId: event.tool_use_id,
         stepId: '0',
         contractHash: route.contract.sourceHash,
+        capabilityId: route.contract.id,
         contextHash: context.fingerprint,
+        userTurnHash: fingerprint(context.messages.filter((message) => message.role === 'user')),
       },
       operation: route.operation,
       advertisedAccepts: route.contract.accepts,

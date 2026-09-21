@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { checkBridgeDemo } from './auto-mode-bridge-checks.mjs';
+import {
+  checkBridgeDemo,
+  checkBridgeRoutingDemo,
+  checkBridgeNativeDemo,
+  parseBridgeExpectation,
+} from './auto-mode-bridge-checks.mjs';
 import { previewResult } from '../src/experimental/auto-mode/result-preview.ts';
 
 function fixture(count = 2) {
@@ -495,4 +500,445 @@ test('requires an actual final answer and refuses malformed payment amounts', ()
     assert.equal(result.checks.amountsValid, false);
     assert.equal(result.totalAmountAtomic, undefined);
   }
+});
+
+function responseExpectation() {
+  return {
+    scope: 'response',
+    providers: [
+      {
+        url: 'https://provider.example/service-1',
+        httpStatuses: [200],
+        assertions: [{ pointer: '/value', equals: 42, inAnswer: true }],
+      },
+    ],
+  };
+}
+
+function setProviderBody(input, body, status = 200) {
+  const serialized = typeof body === 'string' ? body : JSON.stringify(body);
+  input.outcomes[0].outcome.execution.response = { status, body: serialized };
+  updateEnvelope(input, (envelope) => {
+    const preview = previewResult(serialized, 6000);
+    envelope.httpStatus = status;
+    envelope.result = preview.result;
+    envelope.resultFormat = preview.format;
+    envelope.truncated = preview.truncated;
+    envelope.previewNote = preview.note;
+  });
+}
+
+test('explicit response expectations validate returned numerical evidence without requiring a citation', () => {
+  const input = fixture(1);
+  input.expectation = responseExpectation();
+  setProviderBody(input, { value: 42 });
+  input.events.at(-1).result = 'The result is 42.';
+  const result = checkBridgeDemo(input);
+  assert.equal(result.passed, true);
+  assert.equal(result.validationScope, 'response');
+  assert.equal(result.checks.responseExpectationMatched, true);
+  assert.equal(Object.hasOwn(result.checks, 'citesSource'), false);
+  for (const answer of [
+    'The result is 142.',
+    'The result is 420.',
+    'The result is 42.5.',
+    'The result is 1,042.',
+    'The result is -42.',
+    'No calculation available.',
+  ]) {
+    input.events.at(-1).result = answer;
+    assert.equal(checkBridgeDemo(input).checks.responseExpectationMatched, false);
+  }
+  input.events.at(-1).result = 'The result is 42. [Source](https://invented.example/)';
+  assert.equal(checkBridgeDemo(input).checks.citationDestinationsValid, false);
+});
+
+test('response predicates require the intended provider and fresh response, not answer text alone', () => {
+  const input = fixture(1);
+  input.expectation = responseExpectation();
+  input.events.at(-1).result = 'The result is 42.';
+  setProviderBody(input, { value: 41 });
+  assert.equal(checkBridgeDemo(input).checks.responseExpectationMatched, false);
+  setProviderBody(input, { value: 42 });
+  input.expectation.providers[0].url = 'https://other.example/service';
+  assert.equal(checkBridgeDemo(input).checks.responseExpectationMatched, false);
+  input.expectation = responseExpectation();
+  input.outcomes = [];
+  assert.equal(checkBridgeDemo(input).passed, false);
+});
+
+test('response expectations preserve exact HTTP statuses and require returned string evidence', () => {
+  const input = fixture(1);
+  input.expectation = responseExpectation();
+  input.expectation.providers[0].assertions = [
+    { pointer: '/company/name', type: 'string', inAnswer: true },
+  ];
+  setProviderBody(input, { company: { name: 'Northstar Labs' } });
+  input.events.at(-1).result = 'The company is Northstar Labs.';
+  assert.equal(checkBridgeDemo(input).passed, true);
+  input.events.at(-1).result = 'Company details are available.';
+  assert.equal(checkBridgeDemo(input).checks.responseExpectationMatched, false);
+  input.events.at(-1).result = 'The company is Northstar Labs.';
+  setProviderBody(input, { company: { name: 'Northstar Labs' } }, 201);
+  assert.equal(checkBridgeDemo(input).checks.providerReturned, false);
+  assert.equal(checkBridgeDemo(input).checks.responseExpectationMatched, false);
+  input.expectation.providers[0].httpStatuses = [201];
+  assert.equal(checkBridgeDemo(input).passed, true);
+  setProviderBody(input, { company: { name: '' } }, 201);
+  assert.equal(checkBridgeDemo(input).checks.responseExpectationMatched, false);
+});
+
+test('expectation matching supports plain text and escaped JSON pointers without inherited properties', () => {
+  const input = fixture(1);
+  input.expectation = responseExpectation();
+  input.expectation.providers[0].assertions = [{ pointer: '', equals: 'x = 42', inAnswer: true }];
+  setProviderBody(input, 'x = 42');
+  input.events.at(-1).result = 'The computation returned x = 42.';
+  assert.equal(checkBridgeDemo(input).passed, true);
+  input.expectation.providers[0].assertions = [
+    { pointer: '/a~1b/~0c', equals: 42, inAnswer: true },
+  ];
+  setProviderBody(input, { 'a/b': { '~c': 42 } });
+  assert.equal(checkBridgeDemo(input).passed, true);
+  input.expectation.providers[0].assertions = [
+    { pointer: '/constructor', type: 'string', inAnswer: true },
+  ];
+  assert.equal(checkBridgeDemo(input).checks.responseExpectationMatched, false);
+});
+
+test('malformed or vacuous expectations are rejected before an execution starts', () => {
+  for (const mutate of [
+    (value) => {
+      value.scope = 'done';
+    },
+    (value) => {
+      value.providers = [];
+    },
+    (value) => {
+      value.providers.push(globalThis.structuredClone(value.providers[0]));
+    },
+    (value) => {
+      value.providers[0].httpStatuses = [500];
+    },
+    (value) => {
+      value.providers[0].httpStatuses = [];
+    },
+    (value) => {
+      value.providers[0].assertions = [];
+    },
+    (value) => {
+      value.providers[0].assertions[0].pointer = '/bad~2escape';
+    },
+    (value) => {
+      delete value.providers[0].assertions[0].inAnswer;
+    },
+    (value) => {
+      value.providers[0].assertions[0].equals = '';
+    },
+    (value) => {
+      value.providers[0].assertions[0].type = 'string';
+    },
+    (value) => {
+      value.skipFailures = true;
+    },
+  ]) {
+    const value = responseExpectation();
+    mutate(value);
+    assert.throws(() => parseBridgeExpectation(value));
+  }
+});
+
+function routingFixture() {
+  const input = fixture(1);
+  input.expectation = {
+    scope: 'routing',
+    providers: [
+      {
+        url: 'https://provider.example/service-1',
+        assertions: [{ pointer: '/body/query', equals: 'protocol documentation' }],
+      },
+    ],
+  };
+  input.outcomes[0].outcome.status = 'prepared';
+  delete input.outcomes[0].outcome.execution;
+  toolResult(input).is_error = true;
+  toolResult(input).content.shift();
+  toolResult(input).content[0].text = JSON.stringify({
+    status: 'prepared',
+    provider: input.outcomes[0].outcome.selected.url,
+    parameters: input.outcomes[0].outcome.selected.args,
+    parametersTruncated: false,
+    providerContentUntrusted: true,
+  });
+  input.events.at(-1).result = 'This was a routing-only trial.';
+  return input;
+}
+
+test('routing-only validation verifies prepared arguments without claiming provider fulfillment', () => {
+  const result = checkBridgeRoutingDemo(routingFixture());
+  assert.equal(result.passed, true);
+  assert.equal(result.validationScope, 'routing');
+  assert.equal(result.checks.noProviderExecution, true);
+  assert.equal(result.perCallOutcomes[0].executorStatus, 'prepared');
+  assert.equal(Object.hasOwn(result, 'totalAmountAtomic'), false);
+  assert.throws(() => checkBridgeDemo(routingFixture()));
+  const live = fixture(1);
+  live.expectation = responseExpectation();
+  assert.throws(() => checkBridgeRoutingDemo(live));
+});
+
+test('routing-only accepts the observed combined prepared receipt and refuses arbitrary prose prefixes', () => {
+  const input = routingFixture();
+  const envelope = toolResult(input).content[0].text;
+  toolResult(input).content = `Local x402 result: prepared\n${envelope}`;
+  assert.equal(checkBridgeRoutingDemo(input).passed, true);
+  for (const prefix of [
+    'Other prose',
+    'Local x402 result: fulfilled',
+    'Local x402 result: failed',
+  ]) {
+    toolResult(input).content = `${prefix}\n${envelope}`;
+    assert.equal(checkBridgeRoutingDemo(input).checks.preparedResultsDelivered, false);
+  }
+});
+
+test('routing-only rejects execution, wrong routes, stale IDs, unacknowledged errors, and argument fabrication', () => {
+  for (const mutate of [
+    (input) => {
+      input.outcomes[0].outcome.execution = { status: 'fulfilled' };
+    },
+    (input) => {
+      input.outcomes[0].outcome.status = 'failed';
+    },
+    (input) => {
+      input.outcomes[0].outcome.fixture = true;
+    },
+    (input) => {
+      input.outcomes[0].event.session_id = 'previous-session';
+    },
+    (input) => {
+      input.outcomes[0].event.tool_use_id = 'previous-call';
+    },
+    (input) => {
+      input.expectation.providers[0].url = 'https://wrong.example/';
+    },
+    (input) => {
+      input.expectation.providers[0].assertions[0].equals = 'another query';
+    },
+    (input) => {
+      toolResult(input).is_error = false;
+    },
+    (input) => {
+      const envelope = JSON.parse(toolResult(input).content[0].text);
+      envelope.parameters = { body: { query: 'fabricated' } };
+      toolResult(input).content[0].text = JSON.stringify(envelope);
+    },
+  ]) {
+    const input = routingFixture();
+    mutate(input);
+    assert.equal(checkBridgeRoutingDemo(input).passed, false);
+  }
+});
+
+function nativeFixture(tool = 'WebSearch') {
+  const input = fixture(1);
+  input.expectation = { scope: 'native', tools: [tool] };
+  input.events[0].tools = ['mcp__x402__request', 'WebSearch', 'WebFetch'];
+  input.events[1].message.content[0].name = 'mcp__x402__request';
+  input.outcomes[0].event.tool_name = 'Request';
+  const targetUrl = tool === 'WebFetch' ? 'https://docs.example/native' : undefined;
+  input.outcomes[0].outcome = {
+    status: 'native_fallback',
+    reason: 'Normal tools suffice.',
+    ...(targetUrl ? { targetUrl } : {}),
+  };
+  toolResult(input).content = [
+    { type: 'text', text: 'Jev selected normal tools or host reasoning; no x402 execution.' },
+    {
+      type: 'text',
+      text: JSON.stringify({
+        status: 'native_fallback',
+        reason: 'Normal tools suffice.',
+        nativeTool: tool,
+        nativeToolRequired: Boolean(targetUrl),
+        ...(targetUrl ? { targetUrl } : {}),
+        x402Executed: false,
+      }),
+    },
+  ];
+  input.events.splice(
+    3,
+    0,
+    {
+      type: 'assistant',
+      message: {
+        content: [
+          {
+            type: 'tool_use',
+            id: 'native-1',
+            name: tool,
+            input:
+              tool === 'WebFetch'
+                ? { url: targetUrl, prompt: 'Read this document.' }
+                : { query: 'Official example site' },
+          },
+        ],
+      },
+    },
+    {
+      type: 'user',
+      message: {
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: 'native-1',
+            is_error: false,
+            content: 'The native lookup returned https://docs.example/native and its title.',
+          },
+        ],
+      },
+    },
+  );
+  input.events.at(-1).result = 'The official page is https://docs.example/native.';
+  input.outcomes.push({
+    event: { tool_use_id: 'native-1', session_id: input.sessionId, tool_name: tool },
+    outcome: JSON.parse(JSON.stringify(input.outcomes[0].outcome)),
+  });
+  return input;
+}
+
+test('native validation requires an observed Jev handoff followed by actual successful native execution', () => {
+  for (const tool of ['WebSearch', 'WebFetch']) {
+    const result = checkBridgeNativeDemo(nativeFixture(tool));
+    assert.equal(result.passed, true);
+    assert.equal(result.validationScope, 'native');
+    assert.equal(result.totalAmountAtomic, '0');
+    assert.deepEqual(result.observedNativeTools, [tool]);
+    assert.equal(result.nativeToolCalls[0].toolUseId, 'native-1');
+    assert.equal(result.perCallOutcomes[0].executorStatus, 'native_fallback');
+    assert.throws(() => checkBridgeDemo(nativeFixture(tool)));
+  }
+  const input = nativeFixture();
+  toolResult(input).content = toolResult(input)
+    .content.map((item) => item.text)
+    .join('\n');
+  assert.equal(checkBridgeNativeDemo(input).passed, true);
+});
+
+test('a direct native call passes only with its own current Jev gate outcome', () => {
+  const direct = nativeFixture();
+  direct.events.splice(1, 2);
+  direct.outcomes.shift();
+  assert.equal(checkBridgeNativeDemo(direct).passed, true);
+  assert.equal(checkBridgeNativeDemo(direct).nativeToolCalls[0].gateStatus, 'native_fallback');
+  direct.outcomes = [];
+  assert.equal(checkBridgeNativeDemo(direct).checks.nativeAfterJevDecision, false);
+  assert.equal(checkBridgeNativeDemo(direct).passed, false);
+});
+
+test('missing native gate, concurrent preflight, and unconsumed handoffs fail native validation', () => {
+  const bypass = nativeFixture();
+  bypass.outcomes.pop();
+  assert.equal(checkBridgeNativeDemo(bypass).checks.nativeAfterJevDecision, false);
+  assert.equal(checkBridgeNativeDemo(bypass).passed, false);
+  const concurrent = nativeFixture();
+  concurrent.events[1].message.content.push(concurrent.events[3].message.content[0]);
+  concurrent.events.splice(3, 1);
+  assert.equal(checkBridgeNativeDemo(concurrent).checks.everyHandoffExecuted, false);
+  const unused = nativeFixture();
+  unused.events.splice(3, 2);
+  assert.equal(checkBridgeNativeDemo(unused).checks.everyHandoffExecuted, false);
+});
+
+test('native gate outcomes cannot be duplicated, stale, selected, paid, or associated with another tool', () => {
+  for (const mutate of [
+    (input) => input.outcomes.push(JSON.parse(JSON.stringify(input.outcomes[1]))),
+    (input) => {
+      input.outcomes[1].event.session_id = 'another-session';
+    },
+    (input) => {
+      input.outcomes[1].event.tool_name = 'WebFetch';
+    },
+    (input) => {
+      input.outcomes[1].outcome.status = 'paid_preferred';
+    },
+    (input) => {
+      input.outcomes[1].outcome.selected = { url: 'https://paid.example/' };
+    },
+    (input) => {
+      input.outcomes[1].outcome.execution = { status: 'fulfilled' };
+    },
+    (input) => {
+      input.outcomes[1].outcome.fixture = true;
+    },
+  ]) {
+    const input = nativeFixture();
+    mutate(input);
+    assert.equal(checkBridgeNativeDemo(input).passed, false);
+  }
+});
+
+test('native validation refuses paid execution, stale outcomes, receipt mutation and failed native calls', () => {
+  for (const mutate of [
+    (input) => {
+      input.outcomes[0].outcome.execution = { status: 'fulfilled', amountAtomic: '7000' };
+    },
+    (input) => {
+      input.outcomes[0].outcome.selected = { url: 'https://provider.example/' };
+    },
+    (input) => {
+      input.outcomes[0].outcome.fixture = true;
+    },
+    (input) => {
+      input.outcomes[0].outcome.status = 'fulfilled';
+    },
+    (input) => {
+      input.outcomes[0].event.session_id = 'old-session';
+    },
+    (input) => {
+      input.events[4].message.content[0].is_error = true;
+    },
+    (input) => {
+      input.events[3].message.content[0].name = 'Bash';
+    },
+    (input) => {
+      updateEnvelope(input, (envelope) => {
+        envelope.x402Executed = true;
+      });
+    },
+    (input) => {
+      updateEnvelope(input, (envelope) => {
+        envelope.amountAtomic = '0';
+      });
+    },
+    (input) => {
+      input.events[0].permissionMode = 'dontAsk';
+    },
+  ]) {
+    const input = nativeFixture();
+    mutate(input);
+    assert.equal(checkBridgeNativeDemo(input).passed, false);
+  }
+  const wrongTarget = nativeFixture('WebFetch');
+  wrongTarget.events[3].message.content[0].input.url = 'https://wrong.example/';
+  assert.equal(checkBridgeNativeDemo(wrongTarget).checks.nativeAfterJevDecision, false);
+});
+
+test('native handoffs cannot leak their opaque receipt in a native query', () => {
+  const input = nativeFixture();
+  input.events[1].message.content[0].input._receipt = 'private-routing-receipt';
+  input.events[3].message.content[0].input.query += ' private-routing-receipt';
+  assert.equal(checkBridgeNativeDemo(input).checks.noReceiptTokenLeak, false);
+});
+
+test('native expectations require explicit supported tool names and reject vacuous schemas', () => {
+  assert.deepEqual(parseBridgeExpectation({ scope: 'native', tools: ['WebSearch', 'WebFetch'] }), {
+    scope: 'native',
+    tools: ['WebSearch', 'WebFetch'],
+  });
+  for (const tools of [[], ['Bash'], ['WebSearch', 'WebSearch'], ['WebSearch', 'WebFetch', 'Bash']])
+    assert.throws(() => parseBridgeExpectation({ scope: 'native', tools }));
+  assert.throws(() =>
+    parseBridgeExpectation({ scope: 'native', tools: ['WebSearch'], providers: [] }),
+  );
 });

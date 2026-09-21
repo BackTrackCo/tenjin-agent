@@ -103,6 +103,39 @@ test('unrelated, host-suffix, or merely prefix-sharing citations do not pass', (
   }
 });
 
+test('paired inline-code URL wrappers preserve exact citation destinations', () => {
+  const input = fixture();
+  for (const text of [
+    '`https://docs.example/protocol`',
+    'Source: `https://docs.example/protocol`.',
+    '``https://docs.example/protocol``',
+    '````https://docs.example/protocol````',
+  ]) {
+    input.events.at(-1).result = text;
+    assert.equal(checkDemo(input).checks.citesSource, true);
+    assert.deepEqual(httpUrls(text), ['https://docs.example/protocol']);
+  }
+  for (const destination of [
+    'https://docs.example.evil/protocol',
+    'https://docs.example/protocol-invented',
+  ]) {
+    input.events.at(-1).result = '`' + destination + '`';
+    assert.equal(checkDemo(input).checks.citesSource, false);
+  }
+});
+
+test('inline-code parsing does not strip genuine URL backticks or mismatched delimiters', () => {
+  for (const [text, url] of [
+    ['https://docs.example/path`', 'https://docs.example/path`'],
+    ['https://docs.example/part`one`two', 'https://docs.example/part`one`two'],
+    ['`https://docs.example/path``', 'https://docs.example/path``'],
+    ['``https://docs.example/path`', 'https://docs.example/path`'],
+    ['\\`https://docs.example/path`', 'https://docs.example/path`'],
+    ['``https://docs.example/part`one``', 'https://docs.example/part`one'],
+  ])
+    assert.deepEqual(httpUrls(text), [url.replaceAll('`', '%60')]);
+});
+
 test('supports generic text or nested Markdown provider results', () => {
   const input = fixture();
   input.outcome.execution.response.body = 'See [Protocol](https://docs.example/protocol).';

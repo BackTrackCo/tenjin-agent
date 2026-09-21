@@ -1,0 +1,446 @@
+{
+  "fetchedAt": "2026-09-21T01:08:15.009942Z",
+  "source": "https://api.cdp.coinbase.com/platform/v2/x402/discovery/resources",
+  "sourcePages": [
+    "https://api.cdp.coinbase.com/platform/v2/x402/discovery/resources?limit=100&offset=9600",
+    "https://api.cdp.coinbase.com/platform/v2/x402/discovery/resources?limit=100&offset=11400",
+    "https://api.cdp.coinbase.com/platform/v2/x402/discovery/resources?limit=100&offset=4400",
+    "https://api.cdp.coinbase.com/platform/v2/x402/discovery/resources?limit=100&offset=1200"
+  ],
+  "resources": [
+    {
+      "accepts": [
+        {
+          "amount": "13000",
+          "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+          "extra": {
+            "name": "USD Coin",
+            "version": "2"
+          },
+          "maxTimeoutSeconds": 300,
+          "network": "eip155:8453",
+          "payTo": "0x3C5CBe28ECA3b96023c45D3f877da834F1C7d5fA",
+          "scheme": "exact"
+        }
+      ],
+      "description": "Locus public pay-per-use API",
+      "extensions": {
+        "bazaar": {
+          "info": {
+            "input": {
+              "body": {
+                "domain": "example.com"
+              },
+              "bodyType": "json",
+              "method": "POST",
+              "type": "http"
+            },
+            "output": {
+              "example": {
+                "data": {},
+                "payment": {
+                  "authorizedMaxUsdc": "0.001000",
+                  "scheme": "exact",
+                  "settledUsdc": "0.001000"
+                },
+                "request": {
+                  "id": "00000000-0000-4000-8000-000000000000",
+                  "statusUrl": "/requests/00000000-0000-4000-8000-000000000000"
+                },
+                "success": true
+              },
+              "type": "json"
+            }
+          },
+          "schema": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "properties": {
+              "input": {
+                "additionalProperties": false,
+                "properties": {
+                  "body": {
+                    "additionalProperties": true,
+                    "properties": {
+                      "domain": {
+                        "description": "Company domain (e.g. \"stripe.com\")",
+                        "type": "string"
+                      }
+                    },
+                    "required": ["domain"],
+                    "type": "object"
+                  },
+                  "bodyType": {
+                    "enum": ["json", "form-data", "text"],
+                    "type": "string"
+                  },
+                  "method": {
+                    "enum": ["POST"],
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "http",
+                    "type": "string"
+                  }
+                },
+                "required": ["type", "method", "bodyType", "body"],
+                "type": "object"
+              },
+              "output": {
+                "properties": {
+                  "example": {
+                    "type": "object"
+                  },
+                  "type": {
+                    "type": "string"
+                  }
+                },
+                "required": ["type"],
+                "type": "object"
+              }
+            },
+            "required": ["input"],
+            "type": "object"
+          }
+        }
+      },
+      "lastUpdated": "2026-09-03T17:22:37.14Z",
+      "quality": {
+        "l30DaysTotalCalls": 7,
+        "l30DaysUniquePayers": 1,
+        "lastCalledAt": "2026-09-03T17:22:36.716Z"
+      },
+      "resource": "https://hunter.x402.paywithlocus.com/hunter/company-enrichment",
+      "serviceName": "Locus x402 Services",
+      "type": "http",
+      "x402Version": 2
+    },
+    {
+      "accepts": [
+        {
+          "amount": "8000",
+          "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+          "extra": {
+            "name": "USD Coin",
+            "version": "2"
+          },
+          "maxTimeoutSeconds": 300,
+          "network": "eip155:8453",
+          "payTo": "0x3C5CBe28ECA3b96023c45D3f877da834F1C7d5fA",
+          "scheme": "exact"
+        }
+      ],
+      "description": "Locus public pay-per-use API",
+      "extensions": {
+        "bazaar": {
+          "info": {
+            "input": {
+              "body": {
+                "email": "tcook@apple.com"
+              },
+              "bodyType": "json",
+              "method": "POST",
+              "type": "http"
+            }
+          },
+          "schema": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "properties": {
+              "input": {
+                "additionalProperties": false,
+                "properties": {
+                  "body": {
+                    "additionalProperties": true,
+                    "properties": {
+                      "email": {
+                        "type": "string"
+                      }
+                    },
+                    "required": ["email"],
+                    "type": "object"
+                  },
+                  "bodyType": {
+                    "enum": ["json", "form-data", "text"],
+                    "type": "string"
+                  },
+                  "method": {
+                    "enum": ["POST"],
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "http",
+                    "type": "string"
+                  }
+                },
+                "required": ["type", "method", "bodyType", "body"],
+                "type": "object"
+              }
+            },
+            "required": ["input"],
+            "type": "object"
+          }
+        }
+      },
+      "lastUpdated": "2026-09-18T15:14:54.678Z",
+      "quality": {
+        "l30DaysTotalCalls": 150,
+        "l30DaysUniquePayers": 3,
+        "lastCalledAt": "2026-09-18T15:14:54.277Z"
+      },
+      "resource": "https://hunter.x402.paywithlocus.com/hunter/email-verifier",
+      "serviceName": "Locus x402 Services",
+      "type": "http",
+      "x402Version": 2
+    },
+    {
+      "accepts": [
+        {
+          "amount": "38000",
+          "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+          "extra": {
+            "name": "USD Coin",
+            "version": "2"
+          },
+          "maxTimeoutSeconds": 300,
+          "network": "eip155:8453",
+          "payTo": "0x3C5CBe28ECA3b96023c45D3f877da834F1C7d5fA",
+          "scheme": "exact"
+        }
+      ],
+      "description": "Locus public pay-per-use API",
+      "extensions": {
+        "bazaar": {
+          "info": {
+            "input": {
+              "body": {
+                "domain": "apple.com",
+                "first_name": "Tim",
+                "last_name": "Cook"
+              },
+              "bodyType": "json",
+              "method": "POST",
+              "type": "http"
+            }
+          },
+          "schema": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "properties": {
+              "input": {
+                "additionalProperties": false,
+                "properties": {
+                  "body": {
+                    "additionalProperties": true,
+                    "allOf": [
+                      {
+                        "anyOf": [
+                          {
+                            "required": ["email"]
+                          },
+                          {
+                            "required": ["linkedin_url"]
+                          },
+                          {
+                            "required": ["id"]
+                          },
+                          {
+                            "required": ["first_name", "last_name"]
+                          },
+                          {
+                            "required": ["organization_name"]
+                          },
+                          {
+                            "required": ["domain"]
+                          }
+                        ]
+                      }
+                    ],
+                    "properties": {
+                      "domain": {
+                        "type": "string"
+                      },
+                      "email": {
+                        "type": "string"
+                      },
+                      "first_name": {
+                        "type": "string"
+                      },
+                      "id": {
+                        "type": "string"
+                      },
+                      "last_name": {
+                        "type": "string"
+                      },
+                      "linkedin_url": {
+                        "type": "string"
+                      },
+                      "organization_name": {
+                        "type": "string"
+                      },
+                      "reveal_personal_emails": {
+                        "type": "boolean"
+                      },
+                      "reveal_phone_number": {
+                        "type": "boolean"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "bodyType": {
+                    "enum": ["json", "form-data", "text"],
+                    "type": "string"
+                  },
+                  "method": {
+                    "enum": ["POST"],
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "http",
+                    "type": "string"
+                  }
+                },
+                "required": ["type", "method", "bodyType", "body"],
+                "type": "object"
+              }
+            },
+            "required": ["input"],
+            "type": "object"
+          }
+        }
+      },
+      "lastUpdated": "2026-09-09T22:43:01.825Z",
+      "quality": {
+        "l30DaysTotalCalls": 586,
+        "l30DaysUniquePayers": 9,
+        "lastCalledAt": "2026-09-09T22:43:01.63Z"
+      },
+      "resource": "https://apollo.x402.paywithlocus.com/apollo/people-enrichment",
+      "serviceName": "Locus x402 Services",
+      "type": "http",
+      "x402Version": 2
+    },
+    {
+      "accepts": [
+        {
+          "amount": "60000",
+          "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+          "extra": {
+            "name": "USD Coin",
+            "version": "2"
+          },
+          "maxTimeoutSeconds": 300,
+          "network": "eip155:8453",
+          "payTo": "0x325bdF6F7efAB24a2210c48c1b64cAb2eAe1d430",
+          "scheme": "exact"
+        },
+        {
+          "amount": "60000",
+          "asset": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+          "extra": {
+            "feePayer": "CjNFTjvBhbJJd2B5ePPMHRLx1ELZpa8dwQgGL727eKww",
+            "lastValidBlockHeight": "425299123",
+            "recentBlockhash": "GXDpZLLXCdiS789hmrXwxMHf4YzKWaxfh37DgXNfvLSQ"
+          },
+          "maxTimeoutSeconds": 300,
+          "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+          "payTo": "8EgACpZ16XWEt7YjJPsh1ZheVRZUGmmwQ8nJdmA1o5w4",
+          "scheme": "exact"
+        }
+      ],
+      "description": "CompanyEnrich Enrich by properties — match by name or social URL when domain is unknown. Best-match disambiguation; verify returned domain before downstream people searches. employees/revenue are range strings. expand: workforce adds +5 upstream credits.",
+      "extensions": {
+        "bazaar": {
+          "info": {
+            "input": {
+              "body": {},
+              "bodyType": "json",
+              "method": "POST",
+              "type": "http"
+            }
+          },
+          "schema": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "properties": {
+              "input": {
+                "additionalProperties": false,
+                "properties": {
+                  "body": {
+                    "$schema": "https://json-schema.org/draft/2020-12/schema",
+                    "additionalProperties": false,
+                    "properties": {
+                      "excludeFields": {
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
+                      "expand": {
+                        "description": "Optional workforce breakdown (+5 upstream credits). Verify returned domain matches intent before trusting workforce data.",
+                        "enum": ["workforce"],
+                        "type": "string"
+                      },
+                      "facebookUrl": {
+                        "description": "Facebook company URL.",
+                        "type": "string"
+                      },
+                      "instagramUrl": {
+                        "description": "Instagram company URL.",
+                        "type": "string"
+                      },
+                      "linkedinId": {
+                        "description": "LinkedIn company ID.",
+                        "type": "string"
+                      },
+                      "linkedinUrl": {
+                        "description": "LinkedIn company page URL.",
+                        "type": "string"
+                      },
+                      "name": {
+                        "description": "Company name. Best-match disambiguation when ambiguous.",
+                        "type": "string"
+                      },
+                      "twitterUrl": {
+                        "description": "Twitter/X company URL.",
+                        "type": "string"
+                      },
+                      "youTubeUrl": {
+                        "description": "YouTube channel URL.",
+                        "type": "string"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "bodyType": {
+                    "enum": ["json", "form-data", "text"],
+                    "type": "string"
+                  },
+                  "method": {
+                    "enum": ["POST", "PUT", "PATCH"],
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "http",
+                    "type": "string"
+                  }
+                },
+                "required": ["type", "method", "bodyType", "body"],
+                "type": "object"
+              }
+            },
+            "required": ["input"],
+            "type": "object"
+          }
+        }
+      },
+      "lastUpdated": "2026-09-15T13:18:36.845Z",
+      "quality": {
+        "l30DaysTotalCalls": 20,
+        "l30DaysUniquePayers": 8,
+        "lastCalledAt": "2026-09-15T13:18:36.66Z"
+      },
+      "resource": "https://stableenrich.dev/api/companyenrich/properties-enrich",
+      "serviceName": "StableEnrich",
+      "tags": ["Companyenrich"],
+      "type": "http",
+      "x402Version": 2
+    }
+  ]
+}

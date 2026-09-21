@@ -27,10 +27,17 @@ export function httpUrls(value) {
           candidate = candidate.slice(0, -1);
         candidate = candidate.replace(/\]+$/, '');
         // Only remove a paired Markdown wrapper immediately surrounding this
-        // URL. A trailing star in an ordinary URL remains part of its path.
-        const emphasis = text.slice(0, match.index).match(/(\*{1,3}|_{1,3})$/)?.[0];
-        if (emphasis && candidate.endsWith(emphasis))
-          candidate = candidate.slice(0, -emphasis.length);
+        // URL. Literal stars/backticks in an ordinary URL remain in its path.
+        const prefix = text.slice(0, match.index);
+        const wrapper = prefix.match(/(\*{1,3}|_{1,3}|`+)$/)?.[0];
+        if (wrapper?.startsWith('`')) {
+          const escapes = prefix.slice(0, -wrapper.length).match(/\\+$/)?.[0].length ?? 0;
+          // Code-span delimiters must have exactly equal run lengths. Keep
+          // internal backticks, unmatched runs, and escaped opening delimiters.
+          if (escapes % 2 === 0 && candidate.match(/`+$/)?.[0] === wrapper)
+            candidate = candidate.slice(0, -wrapper.length);
+        } else if (wrapper && candidate.endsWith(wrapper))
+          candidate = candidate.slice(0, -wrapper.length);
         try {
           const url = new URL(candidate);
           if (url.username || url.password || !['http:', 'https:'].includes(url.protocol)) continue;

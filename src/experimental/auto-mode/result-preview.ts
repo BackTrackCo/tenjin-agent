@@ -19,17 +19,45 @@ const PROFILES = [
 ];
 const MAX_VISITED = 20_000;
 const MAX_DEPTH = 16;
+// Small provenance scalars remain useful when a document has verbose metadata.
+// Rank common keys globally so a list of incidental URLs cannot displace a late
+// title or source URL. This is display priority, never provider-specific routing.
+const PROVENANCE_KEYS = [
+  'title',
+  'sourceurl',
+  'statuscode',
+  'name',
+  'url',
+  'canonicalurl',
+  'source',
+  'status',
+];
+const MAX_PROVENANCE_FIELDS = 8;
 
 /** A few dominant strings usually carry a document rather than tabular data.
- * Allocate by value size, never by provider, field names, or text instructions.
+ * Allocate prose by value size, never by provider or text instructions.
  * The structural profiles below still handle responses with many peer records. */
 function prosePreview(parsed: unknown, maxChars: number): ResultPreview | undefined {
   type Path = Array<string | number>;
   const candidates: Array<{ path: Path; length: number }> = [];
+  const provenance: Array<{ path: Path; rank: number }> = [];
   let visited = 0;
   let stringChars = 0;
   function scan(value: unknown, path: Path, depth: number): void {
     if (++visited > MAX_VISITED) throw new Error('Preview traversal limit');
+    const key = path.at(-1);
+    const rank =
+      typeof key === 'string' ? PROVENANCE_KEYS.indexOf(key.replaceAll('_', '').toLowerCase()) : -1;
+    if (
+      rank >= 0 &&
+      (typeof value === 'number' ||
+        typeof value === 'boolean' ||
+        (typeof value === 'string' && value.length <= 512))
+    ) {
+      provenance.push({ path, rank });
+      provenance.sort((a, b) => a.rank - b.rank);
+      provenance.length = Math.min(provenance.length, MAX_PROVENANCE_FIELDS);
+    }
     if (typeof value === 'string') {
       stringChars += value.length;
       if (value.length >= Math.max(1024, maxChars / 2)) {
@@ -56,17 +84,18 @@ function prosePreview(parsed: unknown, maxChars: number): ResultPreview | undefi
   )
     return undefined;
   const prosePaths = new Set(candidates.map(({ path }) => JSON.stringify(path)));
+  const provenancePaths = new Set(provenance.map(({ path }) => JSON.stringify(path)));
   const ancestors = new Set<string>();
-  for (const { path } of candidates)
+  for (const { path } of [...candidates, ...provenance])
     for (let length = 0; length <= path.length; length++)
       ancestors.add(JSON.stringify(path.slice(0, length)));
 
   // Auxiliary breadth is bounded independently from the long text. In particular,
   // seventy metadata leaves must not each consume the document's string budget.
   for (const profile of [
-    { list: 2, properties: 8, string: 64 },
-    { list: 1, properties: 4, string: 48 },
-    { list: 1, properties: 2, string: 24 },
+    { list: 2, properties: 8, string: 64, provenance: 256 },
+    { list: 1, properties: 4, string: 48, provenance: 128 },
+    { list: 1, properties: 2, string: 24, provenance: 64 },
   ]) {
     function render(proseLimit: number): ResultPreview {
       let count = 0;
@@ -74,7 +103,12 @@ function prosePreview(parsed: unknown, maxChars: number): ResultPreview | undefi
       function visit(value: unknown, path: Path, depth: number): unknown {
         if (++count > MAX_VISITED) throw new Error('Preview traversal limit');
         if (typeof value === 'string') {
-          const limit = prosePaths.has(JSON.stringify(path)) ? proseLimit : profile.string;
+          const identity = JSON.stringify(path);
+          const limit = prosePaths.has(identity)
+            ? proseLimit
+            : provenancePaths.has(identity)
+              ? profile.provenance
+              : profile.string;
           if (value.length <= limit) return value;
           let end = limit;
           // Do not split an astral character at the display boundary.

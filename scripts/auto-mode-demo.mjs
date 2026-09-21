@@ -4,7 +4,12 @@ import { resolve, dirname, join } from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { runClaude } from './auto-mode-headless-probe.mjs';
 import { checkDemo } from './auto-mode-demo-checks.mjs';
-import { checkBridgeDemo } from './auto-mode-bridge-checks.mjs';
+import {
+  checkBridgeDemo,
+  checkBridgeRoutingDemo,
+  checkBridgeNativeDemo,
+  parseBridgeExpectation,
+} from './auto-mode-bridge-checks.mjs';
 
 const { values } = parseArgs({
   options: {
@@ -13,6 +18,8 @@ const { values } = parseArgs({
     transport: { type: 'string', default: 'native' },
     'session-id': { type: 'string' },
     resume: { type: 'string' },
+    expectation: { type: 'string' },
+    'routing-only': { type: 'boolean', default: false },
     prompt: {
       type: 'string',
       default:
@@ -36,11 +43,31 @@ if (values['session-id'] && values.resume)
 const configPath = resolve(values.config);
 const directory = dirname(configPath);
 const config = JSON.parse(await readFile(configPath, 'utf8'));
+const expectation = values.expectation
+  ? parseBridgeExpectation(JSON.parse(await readFile(resolve(values.expectation), 'utf8')))
+  : undefined;
+if ((expectation || values['routing-only']) && !bridge)
+  throw new Error('Explicit expectations and routing-only validation require bridge transport.');
+if (values['routing-only']) {
+  if (config.mode !== 'route' || expectation?.scope !== 'routing')
+    throw new Error(
+      '--routing-only requires config mode route and an expectation with scope routing.',
+    );
+} else if (expectation?.scope === 'routing' || config.mode === 'route') {
+  throw new Error('Route mode requires explicit --routing-only and a routing expectation.');
+}
+if (expectation?.scope === 'native' && (!config.nativeFallback || values['routing-only']))
+  throw new Error(
+    'Native expectations require nativeFallback enabled and a non-routing bridge run.',
+  );
 const sessionId = values.resume ?? values['session-id'] ?? randomUUID();
 if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sessionId))
   throw new Error('Session ID must be a UUID.');
 const artifacts = join(directory, 'runs', sessionId, ...(values.resume ? [randomUUID()] : []));
 await mkdir(artifacts, { recursive: true, mode: 0o700 });
+const routingSystemInstruction = values['routing-only']
+  ? 'Validation context: This is a routing-only trial. Use the available x402 tool for the user request normally. A result with status prepared records the selected provider and arguments without executing a provider request or payment. Once you receive prepared, stop calling tools and briefly report that selection as a routing-only result. Do not retry a prepared selection, request execution, invent provider output, or claim that the user task was fulfilled.'
+  : undefined;
 const args = [
   '-p',
   values.prompt,
@@ -49,7 +76,13 @@ const args = [
   values.resume ? '--resume' : '--session-id',
   sessionId,
   '--tools',
-  bridge ? '' : values.tool === 'auto' ? 'WebSearch,WebFetch' : values.tool,
+  bridge
+    ? config.nativeFallback
+      ? 'WebSearch,WebFetch'
+      : ''
+    : values.tool === 'auto'
+      ? 'WebSearch,WebFetch'
+      : values.tool,
   '--permission-mode',
   bridge ? 'auto' : 'dontAsk',
   ...(bridge ? ['--mcp-config', join(directory, 'mcp.json')] : []),
@@ -60,10 +93,11 @@ const args = [
   join(directory, bridge ? 'bridge-settings.json' : 'settings.json'),
   '--disable-slash-commands',
   '--no-chrome',
+  ...(routingSystemInstruction ? ['--append-system-prompt', routingSystemInstruction] : []),
   '--max-budget-usd',
   '0.50',
   '--max-turns',
-  bridge ? '8' : '4',
+  values['routing-only'] ? '2' : bridge ? '8' : '4',
   '--output-format',
   'stream-json',
   '--verbose',
@@ -109,8 +143,16 @@ const {
   observedTools,
   perCallOutcomes,
   totalAmountAtomic,
+  validationScope,
+  validationNote,
+  observedNativeTools,
+  nativeToolCalls,
 } = bridge
-  ? checkBridgeDemo({
+  ? (values['routing-only']
+      ? checkBridgeRoutingDemo
+      : expectation?.scope === 'native'
+        ? checkBridgeNativeDemo
+        : checkBridgeDemo)({
       events,
       outcomes: Object.entries(outcomesByToolUseId).map(([id, outcome]) => ({
         event: { tool_use_id: id, session_id: sessionId },
@@ -119,6 +161,7 @@ const {
       execution,
       model,
       sessionId,
+      expectation,
     })
   : checkDemo({ events, outcomesByToolUseId, execution, model, tool: values.tool, sessionId });
 const report = {
@@ -126,12 +169,19 @@ const report = {
   mode: config.mode,
   requestedModel: model,
   transport: values.transport,
+  nativeFallbackEnabled: bridge && config.nativeFallback === true,
   observedPermissionMode: init?.permissionMode,
   observedModel: init?.model,
   requestedTool: values.tool,
   observedTool,
   observedTools,
+  observedNativeTools,
+  nativeToolCalls,
   checks,
+  validationScope: validationScope ?? 'research',
+  validationNote,
+  routingSystemInstruction,
+  expectation,
   citedReturnedUrls,
   sessionId,
   artifacts,
