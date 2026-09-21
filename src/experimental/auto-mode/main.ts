@@ -89,6 +89,7 @@ program
     '--native-fallback',
     'Let Jev choose ordinary host tools when a paid capability adds little value',
   )
+  .option('--price-aware', 'Let Jev compare normalized advertised prices as a mild preference')
   .option('--env-file <path>', 'Existing env file containing TYPESAFE_KEY or TYPESAFE_API_KEY')
   .option(
     '--catalog-file <path>',
@@ -122,6 +123,7 @@ program
       version: 1,
       mode: options.mode,
       ...(options.nativeFallback ? { nativeFallback: true } : {}),
+      ...(options.priceAware ? { priceAware: true } : {}),
       stateDir: join(directory, 'state'),
       policyPath,
       walletDir: resolve(options.walletDir as string),

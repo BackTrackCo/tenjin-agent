@@ -1,0 +1,275 @@
+{
+  "version": 1,
+  "disclosure": "Routing-only synthetic price sensitivity experiment. Current prices are captured Bazaar offers, not live quotes. High synthetic amounts may exceed the unchanged $0.10 execution cap and never authorize payment. No provider or signer is invoked. Optional-benefit switching thresholds are observations, not objective ground truth. Held-out cases must remain unrun until the calibration prompt is frozen.",
+  "groups": [
+    {
+      "id": "research-discovery",
+      "cohort": "calibration",
+      "kind": "optional-benefit",
+      "providerUrl": "https://api.exa.ai/search",
+      "task": {
+        "user": "Research x402 protocol adoption and compare implementation tradeoffs using independent primary sources. Ordinary search is acceptable if it can gather the evidence.",
+        "tool": "Request",
+        "input": {
+          "query": "x402 protocol adoption implementation tradeoffs primary sources"
+        }
+      },
+      "variants": [
+        {
+          "id": "current"
+        },
+        {
+          "id": "high",
+          "amountAtomic": "10000000"
+        }
+      ],
+      "requiredBody": {
+        "query": "x402 protocol adoption implementation tradeoffs primary sources"
+      }
+    },
+    {
+      "id": "accessible-page-read",
+      "cohort": "calibration",
+      "kind": "optional-benefit",
+      "providerUrl": "https://vaaya.ai/api/run/firecrawl/scrape",
+      "task": {
+        "user": "Read https://docs.cdp.coinbase.com/x402/core-concepts/how-it-works and explain the request and payment-response headers. The page is public and accessible; a concise extracted answer is sufficient.",
+        "tool": "WebFetch",
+        "input": {
+          "url": "https://docs.cdp.coinbase.com/x402/core-concepts/how-it-works",
+          "prompt": "Read https://docs.cdp.coinbase.com/x402/core-concepts/how-it-works and explain the request and payment-response headers. The page is public and accessible; a concise extracted answer is sufficient."
+        }
+      },
+      "variants": [
+        {
+          "id": "current"
+        },
+        {
+          "id": "high",
+          "amountAtomic": "2000000"
+        }
+      ],
+      "requiredBody": {
+        "url": "https://docs.cdp.coinbase.com/x402/core-concepts/how-it-works"
+      }
+    },
+    {
+      "id": "fresh-market-quotes",
+      "cohort": "calibration",
+      "kind": "essential",
+      "providerUrl": "https://pro-api.coinmarketcap.com/x402/v3/cryptocurrency/quotes/latest",
+      "task": {
+        "user": "Get a structured current USD quote record for BTC and ETH from one market-data service, including price, 24-hour change and the timestamp. Search snippets do not meet this requirement.",
+        "tool": "Request",
+        "input": {
+          "query": "Current BTC and ETH USD quote records with 24-hour change and timestamp"
+        }
+      },
+      "variants": [
+        {
+          "id": "current"
+        },
+        {
+          "id": "high",
+          "amountAtomic": "2000000"
+        }
+      ],
+      "requiredQuery": {
+        "symbol": "BTC,ETH"
+      }
+    },
+    {
+      "id": "company-domain-record",
+      "cohort": "calibration",
+      "kind": "essential",
+      "providerUrl": "https://hunter.x402.paywithlocus.com/hunter/company-enrichment",
+      "task": {
+        "user": "Retrieve a structured company enrichment record for stripe.com including employee range, industry, headquarters and funding. A summary assembled from ordinary search is not a substitute.",
+        "tool": "Request",
+        "input": {
+          "query": "Structured company enrichment for stripe.com"
+        }
+      },
+      "variants": [
+        {
+          "id": "current"
+        },
+        {
+          "id": "high",
+          "amountAtomic": "2000000"
+        }
+      ],
+      "requiredBody": {
+        "domain": "stripe.com"
+      }
+    },
+    {
+      "id": "mailbox-deliverability",
+      "cohort": "calibration",
+      "kind": "essential",
+      "providerUrl": "https://hunter.x402.paywithlocus.com/hunter/email-verifier",
+      "task": {
+        "user": "Verify deliverability of info@stripe.com using mailbox and MX/SMTP checks; do not send an email. Looking at the address syntax is not verification.",
+        "tool": "Request",
+        "input": {
+          "query": "Verify info@stripe.com deliverability with MX and SMTP checks"
+        }
+      },
+      "variants": [
+        {
+          "id": "current"
+        },
+        {
+          "id": "high",
+          "amountAtomic": "2000000"
+        }
+      ],
+      "requiredBody": {
+        "email": "info@stripe.com"
+      }
+    },
+    {
+      "id": "independent-computation",
+      "cohort": "calibration",
+      "kind": "essential",
+      "providerUrl": "https://wolframalpha.x402.paysponge.com/v2/query",
+      "task": {
+        "user": "Independently verify the integral of x^2 sin(x) from 0 to pi using a computational math engine. I need the engine result, not just the host model derivation.",
+        "tool": "Request",
+        "input": {
+          "query": "integrate x^2 sin(x) from 0 to pi"
+        }
+      },
+      "variants": [
+        {
+          "id": "current"
+        },
+        {
+          "id": "high",
+          "amountAtomic": "2000000"
+        }
+      ],
+      "requiredQuery": {
+        "input": "integrate x^2 sin(x) from 0 to pi",
+        "output": "json"
+      }
+    },
+    {
+      "id": "professional-record",
+      "cohort": "heldout",
+      "kind": "essential",
+      "providerUrl": "https://apollo.x402.paywithlocus.com/apollo/people-enrichment",
+      "task": {
+        "user": "Enrich Tim Cook at apple.com into a matched professional record with role, employer and professional profile URL. Do not reveal personal emails or phone numbers; a search summary is not a matched record.",
+        "tool": "Request",
+        "input": {
+          "query": "Professional record for Tim Cook at apple.com"
+        }
+      },
+      "variants": [
+        {
+          "id": "current"
+        },
+        {
+          "id": "high",
+          "amountAtomic": "2000000"
+        }
+      ],
+      "requiredBody": {
+        "first_name": "Tim",
+        "last_name": "Cook",
+        "domain": "apple.com"
+      }
+    },
+    {
+      "id": "name-based-company-match",
+      "cohort": "heldout",
+      "kind": "essential",
+      "providerUrl": "https://stableenrich.dev/api/companyenrich/properties-enrich",
+      "task": {
+        "user": "Find a matched structured company record for \"Stripe\", the payments company, including its domain, employee range and headquarters. The domain is not supplied; show the returned identity before any further lookup.",
+        "tool": "Request",
+        "input": {
+          "query": "Structured company enrichment by name for \"Stripe\", the payments company"
+        }
+      },
+      "variants": [
+        {
+          "id": "current"
+        },
+        {
+          "id": "high",
+          "amountAtomic": "2000000"
+        }
+      ],
+      "requiredBody": {
+        "name": "Stripe"
+      }
+    },
+    {
+      "id": "equivalent-search-price-swap",
+      "cohort": "heldout",
+      "kind": "equivalent-offers",
+      "providerUrl": "https://api.exa.ai/search",
+      "task": {
+        "user": "Use one of the two equivalent search services to find current primary-source work on sodium-ion batteries. Both services meet the same evidence requirements.",
+        "tool": "Request",
+        "input": {
+          "query": "current sodium-ion battery research primary sources"
+        }
+      },
+      "requiredBody": {
+        "query": "current sodium-ion battery research primary sources"
+      },
+      "variants": [
+        {
+          "id": "first-cheaper",
+          "aliasPrices": ["7000", "700000"]
+        },
+        {
+          "id": "second-cheaper",
+          "aliasPrices": ["700000", "7000"]
+        }
+      ],
+      "equivalenceDisclosure": "Synthetic aliases have identical declared capabilities and schemas by construction; this is not a claim about interchangeable real providers."
+    },
+    {
+      "id": "simple-fact-low-price",
+      "cohort": "heldout",
+      "kind": "native-control",
+      "providerUrl": "https://api.exa.ai/search",
+      "task": {
+        "user": "What is the capital of France? Just the city name.",
+        "tool": "Request",
+        "input": {
+          "query": "capital of France"
+        }
+      },
+      "variants": [
+        {
+          "id": "cheap",
+          "amountAtomic": "1"
+        }
+      ]
+    },
+    {
+      "id": "explicit-no-paid-low-price",
+      "cohort": "heldout",
+      "kind": "native-control",
+      "providerUrl": "https://hunter.x402.paywithlocus.com/hunter/company-enrichment",
+      "task": {
+        "user": "Use only ordinary search and public pages for a brief description of stripe.com. Do not pay for an enrichment service.",
+        "tool": "Request",
+        "input": {
+          "query": "Describe stripe.com using public information only"
+        }
+      },
+      "variants": [
+        {
+          "id": "cheap",
+          "amountAtomic": "1"
+        }
+      ]
+    }
+  ]
+}

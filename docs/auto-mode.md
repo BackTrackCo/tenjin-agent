@@ -8,7 +8,7 @@ The single entrypoint keeps Claude from prematurely choosing page scraping when 
 
 Jev receives the pending request and bounded user/assistant text from the current session, including prior answers and corrections. Its choice API selects exact available values and bounded list compositions; it cannot generate arbitrary new arguments. A missing value returns `needs_input`. Payment authorization is deterministic and automatic within the local policy. Claude interprets the returned content and decides how to continue.
 
-Optional mixed mode also lets Jev choose ordinary Claude tools when they suit the task. The current preference is capability and fidelity first: use a compatible dedicated page extractor for page reads, even simple known pages, without optimizing routing for price. Native search and host reasoning remain available, and explicit no-paid/native-only instructions take precedence. Spending authorization and hard limits still run in code. The default setup below continues to expose only the x402 bridge. See the mixed-mode setup before enabling native tools.
+Optional mixed mode also lets Jev choose ordinary Claude tools when they suit the task. The default preference is capability and fidelity first: use a compatible dedicated page extractor for page reads, even simple known pages. Optional `priceAware` adds a mild price comparison after capability fit. Native search and host reasoning remain available in mixed mode, and explicit no-paid/native-only instructions take precedence. Spending authorization and hard limits still run in code. The default setup below continues to expose only the x402 bridge. See the mixed-mode setup before enabling native tools.
 
 ## Endpoint catalog
 
@@ -257,13 +257,23 @@ claude --model sonnet \
   --disable-slash-commands --no-chrome
 ```
 
-Jev compares the eight paid capabilities with the ordinary host alternative using capability and fidelity, without minimizing price. A compatible dedicated extractor is preferred for page reads, including simple summaries of known public pages. This is a default preference, not an unconditional provider rule: explicit no-paid/native-only instructions and actual capability constraints still apply. Simple factual searches and host reasoning can remain native; structured fresh quotes, enrichment, deeper source research and computational-engine checks favor suitable specialists. The task and requested evidence matter, not keywords such as “research.” The host still interprets results and handles ambiguity; Jev does not generate arbitrary new argument values or grant spending authority. Quote validation, spending caps and payment authorization remain deterministic even though price is not the routing objective.
+With `priceAware` omitted or false, Jev compares the eight paid capabilities with the ordinary host alternative using capability and fidelity, without minimizing price. A compatible dedicated extractor is preferred for page reads, including simple summaries of known public pages. This is a default preference, not an unconditional provider rule: explicit no-paid/native-only instructions and actual capability constraints still apply. Simple factual searches and host reasoning can remain native; structured fresh quotes, enrichment, deeper source research and computational-engine checks favor suitable specialists. The task and requested evidence matter, not keywords such as “research.” The host still interprets results and handles ambiguity; Jev does not generate arbitrary new argument values or grant spending authority. Quote validation, spending caps and payment authorization remain deterministic in both routing modes.
 
 The preference accounts for what the native tools return. Claude documents that WebFetch usually returns a smaller model's extracted answer rather than the raw page, and truncates large pages. [Official WebFetch behavior](https://code.claude.com/docs/en/tools-reference#webfetch-tool-behavior). Firecrawl documents Markdown/HTML extraction and page metadata, which support preferring a dedicated extractor for page reading. [Official Firecrawl scraping documentation](https://docs.firecrawl.dev/features/scrape). The Vaaya reseller contract exposes only its declared subset; these upstream docs do not prove that the reseller supports every Firecrawl feature. Jev receives native capability descriptions and generic fidelity rules, including missing fields or a reported native failure. The preference does not guarantee any provider's fulfillment.
 
 When Jev chooses native through the bridge, it returns a successful `native_fallback` receipt without calling or paying an x402 provider. Claude can then execute its normal `WebSearch` or `WebFetch`, or answer using its own reasoning when appropriate. Every actual native call receives its own Jev check, including calls that skipped the suggested request-first flow. A native choice allows that call normally. A paid preference denies the native call and directs Claude to the MCP request tool; this gate never executes or pays the provider itself. A denied attempt can appear red if Claude bypasses request-first and Jev prefers a specialist.
 
 These decisions still use Jev inference, and Claude/native-tool charges remain separate; zero x402 payment does not mean zero cost. The request-first instruction improves the presentation, while the native hook guards the two supported native tools. Neither can force Claude to request a tool at all. In one test Claude answered a known Toronto webpage question without any tool call; that is not a Jev-native-routing demonstration. Validate the saved Jev decision and actual successful native tool result instead of inferring tool use from the final prose. The default bridge-only configuration keeps native tools hidden. To restore it, remove or disable `nativeFallback`, rerun `bridge-setup`, and return to `--tools ''` without changing the payment ledger.
+
+### Optional mild price awareness
+
+For a newly authorized run, add `--price-aware` to `init`. For an existing run, have the setup agent set `"priceAware": true` in its config while preserving the rest of the config, payment policy and ledger; do not run `init` again or renew its budget. Set it to false or omit it to restore capability-first routing. This option does not expose native tools or change the launch command. `nativeFallback` controls native availability separately: with both options enabled, Jev can compare a paid specialist with an adequate native alternative; with only `priceAware`, it compares the available paid capabilities.
+
+Before Jev selects a route, code summarizes supported advertised offers for exact Base USDC payments. Amounts are normalized with `BigInt` and six-decimal USDC units, without floating-point rounding. These are per-request advertised ceilings, not live quotes or whole-task cost estimates. When all supported alternatives have valid prices, the comparison uses their conservative maximum and also supplies the range. For example, offers capped at 0.01 and 0.10 USDC produce a 0.10 USDC comparison ceiling: the server need not offer the cheaper alternative in its live quote. Missing, invalid or partially priced supported alternatives make the overall price unknown; a known subrange is not a complete upper bound. Unknown never means free.
+
+Price is a mild preference after capability fit. The contextual policy favors useful research coverage or page extraction at fractional-cent or few-cent prices; dollars for an ordinary search or short summary need a concrete benefit beyond what adequate native tools provide. These are semantic preferences, not deterministic tariff thresholds. Modest charges can also justify structured data or independent computation. A substantial premium for convenience can favor an adequate native alternative when available, but it cannot justify dropping required raw content, verification, a computational-engine check or an explicit source constraint. A higher price does not establish better quality. The same policy applies across the eight capabilities without provider-specific rules. Native tools have no x402 provider charge; their inference/tool costs are unknown, not zero.
+
+The MCP route and native gate use the same preference. Neither the advertised-price summary nor Jev's decision authorizes spending. The executor still obtains and validates the actual quote, checks resource scope and spending limits, reserves the budget and controls signing and transmission. Enabling price awareness does not change those checks, cached paid results, unresolved reservations or retry identity.
 
 ## Validation
 
@@ -279,7 +289,7 @@ The allowed tool list can contain `WebFetch` or both tools. This checker require
 
 ### Mixed-mode validation
 
-The current capability-first policy passed all 33 labeled routing cases: 20/20 in 40 Jev calls and 13/13 in 24 calls, with zero provider requests or payment signatures. Both the paid/native choices and complete arguments matched. Three unchanged page-reading prompts now expect the dedicated extractor because the operator preference changed; a new explicit native-only/no-paid page case still selects native. This is a calibrated regression set, not an independent performance estimate. Earlier 15/16, 19/20 and argument-binding failures remain recorded. Generic binding rules were corrected to preserve explicit formats and distinguish serialization formats from content elements such as headings or tables.
+With price awareness off, the capability-first policy passed all 33 labeled routing cases: 20/20 in 40 Jev calls and 13/13 in 24 calls, with zero provider requests or payment signatures. Both the paid/native choices and complete arguments matched. Three unchanged page-reading prompts now expect the dedicated extractor because the operator preference changed; a new explicit native-only/no-paid page case still selects native. This is a calibrated regression set, not an independent performance estimate. Earlier 15/16, 19/20 and argument-binding failures remain recorded. Generic binding rules were corrected to preserve explicit formats and distinguish serialization formats from content elements such as headings or tables.
 
 A new ordinary-page headless run confirmed the changed default: Jev selected Firecrawl, paid $0.01, and delivered HTTP 200 with Markdown and page metadata. It passed 19/20 checks. The remaining failure was exact title presentation: Claude shortened `How x402 works - Coinbase Developer Documentation` to `How x402 works`, despite receiving the full title. Citation validation passed. This establishes routing and delivery, not perfect host formatting.
 
@@ -291,7 +301,42 @@ Both gated native paths also passed: a Toronto current-weather lookup used the M
 
 The initial mixed-mode full-Markdown test failed: Jev repeatedly chose native despite the required output, and no Firecrawl payment occurred. An intermediate paid attempt also exposed a preview that omitted the page title. After the generic fidelity and preview corrections, the final run selected Firecrawl and passed its execution and response expectations, including the returned title. Its citation checker initially included the closing backtick of a code-wrapped URL. Correcting that parser and regrading the same saved stream produced all 20 passing checks, without another provider request or payment. The original report and input hashes remain preserved; the earlier routing and preview failures remain separate records.
 
-Focused validation passed 247 TypeScript tests across 14 relevant files; the nine policy/fixture tests passed again after the preference change. All 60 Node harness tests and workspace lint, formatting, typecheck and package smoke passed. Live routing and provider runs are opt-in; ordinary tests and CI do not make paid requests.
+Before optional price awareness, focused validation passed 247 TypeScript tests across 14 relevant files; the nine policy/fixture tests passed again after the preference change. All 60 Node harness tests and workspace lint, formatting, typecheck and package smoke passed. Live routing and provider runs are opt-in; ordinary tests and CI do not make paid requests.
+
+### Price-aware validation
+
+The frozen price policy completed 12 calibration cases and then eight held-out cases, with no provider requests or payment signatures. Instructions were frozen before the held-out run. These cohorts test different properties and should not be combined into a marketplace accuracy claim:
+
+| Cohort      | Decisions matching expectations | Complete selected-route bindings | Native choices | Jev calls |
+| ----------- | ------------------------------- | -------------------------------- | -------------- | --------- |
+| Calibration | 12/12                           | 10/10                            | 2              | 28        |
+| Held out    | 8/8                             | 6/6                              | 2              | 18        |
+
+The calibration run showed two price-only switches: ordinary Exa research changed from paid at 0.007 USDC to native at a synthetic 10 USDC, and a page summary changed from Firecrawl at 0.01 USDC to native at a synthetic 2 USDC. Required CoinMarketCap quotes, Hunter company records, Hunter email verification and Wolfram computation retained the specialist at current and synthetic 2 USDC prices. The high-price offers were never executed and did not change payment caps.
+
+In the held-out run, required Apollo and CompanyEnrich records retained the specialist at their current 0.038/0.06 USDC prices and at synthetic 2 USDC. Two equivalently described synthetic search offers at 0.007 and 0.70 USDC selected the cheaper offer when their price positions were swapped. A trivial fact and an explicit no-paid task stayed native even with a 0.000001 USDC specialist offer. This small held-out set checks capability preservation, equivalent-offer preference and native controls; it is not a broad estimate of price sensitivity.
+
+Earlier calibration reports remain preserved. The initial run matched 11/12 decision expectations while showing no price-only switches; intermediate instructions made the research pair both native or both paid. Only the final frozen calibration produced both intended optional-benefit switches while preserving the required capabilities. The 12 calibration cases were used for tuning, and the eight held-out cases are now known; future reruns are regression evidence, not a fresh held-out sample. The earlier 33-case capability-first result used price awareness off and remains separate.
+
+Offline validation passed 144 focused tests across eight relevant files, including the 30 price-normalizer tests, plus all 60 Node harness tests and workspace lint, formatting, typecheck and package smoke. Under an earlier price prompt, headless Exa research (0.007 USDC), Hunter company enrichment (0.013 USDC) and native search passed their checks. With the final frozen policy, headless Sonnet research selected Exa and Firecrawl and successfully delivered one response from each (0.017 USDC total for those fulfilled calls). The whole research run remains failed: Claude first attempted native fetches that the gate redirected, then issued two concurrent Firecrawl calls; the in-flight service guard blocked the second with no new payment. It is not a clean end-to-end success. The separate final native-weather run passed all 17 checks with actual WebSearch and no x402 request or payment. Routing calibration does not establish frictionless tool orchestration.
+
+From the built PR checkout, run the calibration cohort first. This invokes Jev and can incur inference charges, but never executes a provider or signs a payment:
+
+```sh
+node dist/tenjin-auto-price-eval.mjs --cohort calibration \
+  --env-file /absolute/path/to/existing.env --max-calls 60 \
+  --output /tmp/price-calibration-01.json
+```
+
+Use calibration results to refine the instructions, then freeze the instructions, case labels and code revision before inspecting or running the held-out cohort. Run it separately against that frozen version:
+
+```sh
+node dist/tenjin-auto-price-eval.mjs --cohort heldout \
+  --env-file /absolute/path/to/existing.env --max-calls 60 \
+  --output /tmp/price-heldout-01.json
+```
+
+The default model is `jev-latest`; `--model` can select an explicit model. Save each attempt to a new report path because the evaluator writes intermediate results to its output file. Retain failed and partial reports. Synthetic high-price offers are routing inputs only and are never executed. Review price-only choice changes separately from capability-preservation and equivalent-offer invariants: those invariants can pass while low and high prices produce the same choice, so their success alone does not demonstrate price sensitivity. Report deferrals and incomplete argument binding separately too. These small, curated cohorts do not estimate broad marketplace accuracy. Once held-out results inform an instruction change, label subsequent reruns as calibration or use a fresh held-out set.
 
 ```sh
 node scripts/auto-mode-demo.mjs --transport bridge --model sonnet \

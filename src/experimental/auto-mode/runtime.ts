@@ -29,6 +29,7 @@ export const ConfigSchema = z.object({
   catalogFile: z.string().min(1).optional(),
   model: z.string().default('jev-latest'),
   nativeFallback: z.boolean().optional(),
+  priceAware: z.boolean().optional(),
   discoveryQueries: z
     .object({ WebSearch: discoveryQueries.optional(), WebFetch: discoveryQueries.optional() })
     .default({}),
@@ -321,7 +322,10 @@ export async function routeEvent(
       choose = createJevChooser({ apiKey, model: config.model });
     }
   }
-  return routeIntent(event, context, contracts, choose, { nativeFallback: config.nativeFallback });
+  return routeIntent(event, context, contracts, choose, {
+    nativeFallback: config.nativeFallback,
+    priceAware: config.priceAware,
+  });
 }
 
 async function runUncachedEvent(

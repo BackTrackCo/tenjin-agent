@@ -170,6 +170,7 @@ const report = {
   requestedModel: model,
   transport: values.transport,
   nativeFallbackEnabled: bridge && config.nativeFallback === true,
+  priceAwareEnabled: config.priceAware === true,
   observedPermissionMode: init?.permissionMode,
   observedModel: init?.model,
   requestedTool: values.tool,
