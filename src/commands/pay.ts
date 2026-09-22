@@ -699,8 +699,10 @@ function deliver(url: string, lane: Lane, res: HttpResponse, opts: DeliverOpts):
         : {}),
     ...(settlementTxHash !== undefined ? { settlementTxHash } : {}),
     // Beside the body, never instead of it: the caller gets the product AND the
-    // fact that its shape was never checked.
-    ...(opts.caveat !== undefined ? { resultCaveat: opts.caveat } : {}),
+    // fact that its shape was never checked. The flag is what a machine reads:
+    // a caller branching on a delivery must not have to match on prose, which
+    // is how an unchecked body passed for a checked one one layer up.
+    ...(opts.caveat !== undefined ? { resultUnverified: true, resultCaveat: opts.caveat } : {}),
     // The body is the product: JSON when the endpoint spoke it, raw text always.
     ...(res.json !== undefined ? { body: res.json } : {}),
     bodyText: res.text,

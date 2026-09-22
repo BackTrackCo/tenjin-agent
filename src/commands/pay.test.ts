@@ -1008,8 +1008,15 @@ describe('runPay, the success rule on every delivery', () => {
       provider: testWalletProvider(),
       authorizer,
     });
-    const data = result.data as { paid: boolean; resultCaveat?: string; bodyText: string };
+    const data = result.data as {
+      paid: boolean;
+      resultUnverified?: boolean;
+      resultCaveat?: string;
+      bodyText: string;
+    };
     expect(data.paid).toBe(true);
+    // The FLAG is what a machine branches on; the caveat is the prose beside it.
+    expect(data.resultUnverified).toBe(true);
     // The body is delivered whole, not a preview of it.
     expect(data.bodyText).toBe(JSON.stringify(OVERSIZED));
     // The caveat states the byte count and that the check was skipped.
@@ -1027,8 +1034,13 @@ describe('runPay, the success rule on every delivery', () => {
       ...PUBLIC_DNS,
       fetchImpl: fetch,
     });
-    const data = result.data as { paid: boolean; resultCaveat?: string };
+    const data = result.data as {
+      paid: boolean;
+      resultUnverified?: boolean;
+      resultCaveat?: string;
+    };
     expect(data.paid).toBe(false);
+    expect(data.resultUnverified).toBe(true);
     expect(data.resultCaveat).toContain('not checked');
   });
 

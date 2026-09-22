@@ -725,16 +725,24 @@ describe('a paid 2xx that fails its result contract', () => {
 
   /**
    * The lookup was paid for twice over (the fee and the provider price) before
-   * the body was measured, so a body past the client's validation limit comes
-   * back as a fulfilled result carrying the caveat, never as a failure with the
-   * product thrown away. The model reading the envelope is what discounts it.
+   * the body was measured, so the product still comes back whole. What it must
+   * NOT come back as is `fulfilled`: a provider can pad a body that fails its
+   * contract past the validation limit, and a caveat inside a success envelope
+   * never reaches code that branches on the status.
    */
-  it('fulfils a result too large to validate, with the caveat in the envelope', async () => {
-    const oversized = JSON.stringify({ success: true, blob: 'x'.repeat(200 * 1024) });
+  it.each([
+    ['one that would satisfy its schema', { success: true }],
+    ['one that would FAIL its schema', { success: false, reason: 'no match' }],
+  ])('reports a result too large to validate as unverified, %s', async (_label, shape) => {
+    const oversized = JSON.stringify({ ...shape, blob: 'x'.repeat(200 * 1024) });
     const result = await runRequestTool({ query: 'q' }, deps(legsFor(oversized)));
-    expect(result.isError).toBe(false);
-    expect(result.envelope).toMatchObject({ status: 'fulfilled' });
+    // Both are the same answer, because which one this is cannot be known.
+    expect(result.envelope).toMatchObject({ status: 'unverified' });
+    expect(result.isError).toBe(true);
+    expect(result.summary).toContain('Unverified');
+    // The body is still delivered, whole, with what was paid for it.
     expect(result.envelope.result).toBe(oversized);
+    expect(result.envelope.cost).toEqual(['router fee 0.001 USD', 'provider price 0.01 USD']);
     expect(String(result.envelope.resultCaveat)).toContain('not checked');
     expect(String(result.envelope.resultCaveat)).toContain(String(Buffer.byteLength(oversized)));
   });

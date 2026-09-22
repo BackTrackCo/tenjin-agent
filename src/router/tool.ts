@@ -160,22 +160,47 @@ export async function runRequestTool(
       bodyText?: string;
       amountPaid?: { atomic: string };
       /** Set when the body was delivered without its success rule having run. */
+      resultUnverified?: boolean;
       resultCaveat?: string;
     };
     const providerAtomic = BigInt(data.amountPaid?.atomic ?? '0');
+    const costs = costLines(routerFeeAtomic, providerAtomic);
+    // UNVERIFIED IS NOT FULFILLED. A body the success rule could not be run
+    // against may be exactly the contract failure the rule exists to catch, and
+    // a caveat inside a `fulfilled` envelope does not reach code that branches
+    // on the status: a provider could pad a broken answer past the validation
+    // limit and have it read as a checked, paid result. So the status says what
+    // is true, and `isError` carries it to consumers that read nothing else.
+    // The body still rides along, whole: the money moved, and truncating or
+    // withholding the product would be a second loss on top of the first.
+    if (data.resultUnverified === true) {
+      return withKey(
+        {
+          isError: true,
+          summary: `Unverified result from ${supplierOf(built.url)} \u00b7 ${costs.join(' \u00b7 ')}`,
+          envelope: {
+            status: 'unverified',
+            supplier: supplierOf(built.url),
+            parameters: contract.arguments,
+            cost: costs,
+            result: data.bodyText ?? '',
+            ...(data.resultCaveat !== undefined ? { resultCaveat: data.resultCaveat } : {}),
+            providerContentUntrusted: true,
+          },
+        },
+        sessionKey,
+      );
+    }
     return withKey(
       {
         isError: false,
-        summary: `Fulfilled by ${supplierOf(built.url)} \u00b7 ${costLines(routerFeeAtomic, providerAtomic).join(' \u00b7 ')}`,
+        summary: `Fulfilled by ${supplierOf(built.url)} \u00b7 ${costs.join(' \u00b7 ')}`,
         envelope: {
           status: 'fulfilled',
           supplier: supplierOf(built.url),
           parameters: contract.arguments,
-          cost: costLines(routerFeeAtomic, providerAtomic),
+          cost: costs,
           result: data.bodyText ?? '',
-          // The model reading this is the one that has to discount an unchecked
-          // result, so the caveat travels in the envelope beside the body.
-          ...(data.resultCaveat !== undefined ? { resultCaveat: data.resultCaveat } : {}),
           providerContentUntrusted: true,
         },
       },
