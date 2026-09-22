@@ -18,9 +18,9 @@ It is a tool grant, not a spending grant. Every payment the tool makes still pas
 
 Four numbers and a file, all local, none of them readable or raisable by the router:
 
-- **`maxAutoSpend`** is the ceiling on one call. `tenjin install` sets it to 0.10 USD when your config file does not already name it.
-- **`sessionBudget`** is a rolling 24 hour ceiling on everything. `tenjin install` sets it to 1.00 USD on the same terms.
-- **`confirm`** decides when a human is asked. `tenjin install` sets `above:100000`, which auto-approves at or below 0.10 USD, and it NEVER changes a `confirm` you wrote yourself.
+- **`maxAutoSpend`** is the ceiling on one call. `tenjin install` sets it to 0.25 USD when your config file does not already name it.
+- **`sessionBudget`** is a rolling 24 hour ceiling on everything. `tenjin install` sets it to 5.00 USD on the same terms.
+- **`confirm`** decides when a human is asked. `tenjin install` sets `above:250000`, which auto-approves at or below 0.25 USD, and it NEVER changes a `confirm` you wrote yourself.
 - **`spend.json`** is the ledger. A reservation counts the money the moment an authorization is built, under a cross-process file lock, so two commands cannot each spend the last of the budget.
 
 The `request` tool has nobody to ask, so it answers its own confirm prompt with no. Under `confirm always` it returns `needs_approval` with the amount and the command that changes it, and pays nothing.
