@@ -52,13 +52,15 @@ describe('the router MCP server', () => {
     const fetchImpl = router({
       schemaVersion: 1,
       routerVersion: '2026-09-23.1',
-      action: 'native',
-      description: 'Your own tools cover this.',
-      diagnostics: {
-        reasonCode: 'native_sufficient',
-        stage: 'capability',
-        missing: [],
-        nextAction: '',
+      decision: {
+        action: 'native',
+        reason: 'Your own tools cover this.',
+        diagnostics: {
+          reasonCode: 'native_sufficient',
+          stage: 'capability',
+          missing: [],
+          nextAction: '',
+        },
       },
     });
     const server = buildRouterMcpServer({
@@ -122,13 +124,15 @@ describe('the base URL the MCP server routes against', () => {
         JSON.stringify({
           schemaVersion: 1,
           routerVersion: 'v',
-          action: 'native',
-          description: 'covered',
-          diagnostics: {
-            reasonCode: 'native_sufficient',
-            stage: 'capability',
-            missing: [],
-            nextAction: '',
+          decision: {
+            action: 'native',
+            reason: 'covered',
+            diagnostics: {
+              reasonCode: 'native_sufficient',
+              stage: 'capability',
+              missing: [],
+              nextAction: '',
+            },
           },
         }),
         { status: 200, headers: { 'content-type': 'application/json' } },

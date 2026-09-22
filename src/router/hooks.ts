@@ -238,7 +238,7 @@ async function decide(
     warn(`tenjin hook: ${baseUrl}${ROUTER_PATH} ${outcome.reason}`);
     return null;
   }
-  return outcome.decision;
+  return outcome.decision.decision;
 }
 
 /** The hooks write their own protocol answer on stdout and nothing else. */

@@ -92,14 +92,15 @@ export async function runRequestTool(
       ...(fresh.errorCode !== undefined ? { errorCode: fresh.errorCode } : {}),
     });
   }
-  const decision = fresh.decision;
+  const { decision, note } = fresh.decision;
 
   if (decision.action !== 'execute' || decision.contract === undefined) {
     return fail(
       decision.action === 'native' ? 'native' : 'needs_input',
-      decision.description ?? 'The router did not select a paid capability.',
+      decision.reason ?? decision.description ?? 'The router did not select a paid capability.',
       {
         ...(decision.diagnostics !== undefined ? { diagnostics: decision.diagnostics } : {}),
+        ...(note !== undefined ? { note } : {}),
       },
     );
   }
@@ -112,7 +113,7 @@ export async function runRequestTool(
   // Bazaar lane asks for. It carries NO price: the advertised-price check and
   // the live-versus-advertised check are gone, and `gateSpend` caps the amount
   // actually signed. A ceiling the server states is not a ceiling.
-  const terms: AdvertisedTerms = { source: decision.provider ?? 'a routing decision' };
+  const terms: AdvertisedTerms = { source: decision.description ?? 'a routing decision' };
 
   try {
     // The request is the server's, sent verbatim: the only thing built here is
@@ -149,6 +150,7 @@ export async function runRequestTool(
       supplier: supplierOf(built.url),
       ...(contract.arguments !== undefined ? { parameters: contract.arguments } : {}),
       cost: costLines(providerAtomic),
+      ...(note !== undefined ? { note } : {}),
       result: data.bodyText ?? '',
       providerContentUntrusted: true,
     };
@@ -315,6 +317,8 @@ interface FailExtras {
   errorCode?: string;
   /** What stopped a non-execute decision, in the backend's own terms. */
   diagnostics?: DecisionDiagnostics;
+  /** The backend's plain sentence about the call itself, such as a dead id. */
+  note?: string;
 }
 
 /** The headline: calm for a routine outcome, explicit for a real failure. */
@@ -361,6 +365,7 @@ function fail(status: FailStatus, reason: string, extras: FailExtras = {}): Requ
       // What LEFT, not what was delivered: an authorization that was
       // transmitted is money at risk whether or not a result came back.
       cost: costLines(extras.providerAtomic ?? 0n),
+      ...(extras.note !== undefined ? { note: extras.note } : {}),
       ...(extras.settlement !== undefined ? { settlement: extras.settlement } : {}),
       ...(extras.diagnosis !== undefined ? { diagnosis: extras.diagnosis } : {}),
       providerContentUntrusted: true,

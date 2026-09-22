@@ -45,6 +45,17 @@ const ContractSchema = z.object({
   arguments: z.record(z.string(), z.unknown()).optional(),
   argumentSchema: z.record(z.string(), z.unknown()).optional(),
   resultSchema: z.record(z.string(), z.unknown()).optional(),
+  /** What the capability says it costs. DISPLAY ONLY: the amount actually
+   *  signed is what `gateSpend` caps, and a price a server states is not a
+   *  ceiling anyone holds it to. */
+  advertised: z
+    .object({
+      network: z.string().min(1).max(64),
+      asset: z.string().min(1).max(128),
+      maxAmountAtomic: z.string().regex(/^\d+$/),
+    })
+    .optional(),
+  registryListed: z.boolean().optional(),
   request: RequestSchema,
 });
 export type DecisionContract = z.infer<typeof ContractSchema>;
@@ -65,44 +76,65 @@ export type DecisionDiagnostics = z.infer<typeof DiagnosticsSchema>;
 /**
  * STRICT, so a field in the wrong place fails loudly and names itself rather
  * than being dropped into a shape check that then blames the whole response.
- * Both repos ship together and share the wire fixtures, so a field added on one
- * side fails a fixture test before it can reach a session.
+ * Three divergences have cost a round trip each, which is why both repos parse
+ * the same fixtures with their own parser rather than a shared one.
+ *
+ * ONE SHAPE, TWO ANSWERS. The hook's call gets `{action:'execute', id}` and
+ * nothing else, because at gate time there is no capability, no price and no
+ * contract to name. The tool's call gets the decision: the capability, its
+ * price and the contract together, so a caller cannot approve one offer and
+ * receive another. Every non-execute answer carries `diagnostics`, nested
+ * inside `decision` beside the action it explains.
  */
 const DecisionSchema = z.strictObject({
   schemaVersion: z.literal(1),
   routerVersion: z.string().min(1).max(64),
-  /**
-   * The turn id, and an OPAQUE HANDLE by construction. It is the one piece of
-   * server text this client puts in a model-facing line, so the shape is
-   * checked here rather than escaped later: the backend's ids are uuids, and
-   * anything outside this alphabet is a protocol error that costs the turn its
-   * hint (the hook then says to call `request` with the query alone).
-   */
-  id: z
-    .string()
-    .regex(/^[A-Za-z0-9_-]{8,64}$/)
-    .optional(),
-  action: z.enum(['native', 'execute', 'needs_input']),
-  /** One plain line naming what the decision does, for the result. */
-  description: z.string().max(300).optional(),
-  /** Who would be paid, for that same line. */
-  provider: z.string().max(120).optional(),
-  /** What the provider charges, atomic USDC. DISPLAY ONLY: the only cap on a
-   *  payment is the local spend policy, never a price a server advertised. */
-  providerPriceAtomic: z.string().regex(/^\d+$/).optional(),
-  category: z.string().max(64).optional(),
-  /** Present when the backend bound the call before answering; otherwise the
-   *  tool fetches it by id. */
-  contract: ContractSchema.optional(),
-  diagnostics: DiagnosticsSchema.optional(),
+  decision: z.strictObject({
+    action: z.enum(['native', 'execute', 'needs_input']),
+    /**
+     * The turn id, and an OPAQUE HANDLE by construction. It is the one piece of
+     * server text this client puts in a model-facing line, so the shape is
+     * checked here rather than escaped later: the backend mints uuids, and
+     * anything outside this alphabet is a protocol error that costs the turn
+     * its hint (the hook then says to call `request` with the query alone).
+     */
+    id: z
+      .string()
+      .regex(/^[A-Za-z0-9_-]{8,64}$/)
+      .optional(),
+    capabilityId: z.string().min(1).max(200).optional(),
+    category: z.string().max(64).optional(),
+    /** One plain line naming the capability and who serves it. */
+    description: z.string().max(300).optional(),
+    /** What the provider charges, atomic USDC. Display only. */
+    providerPriceAtomic: z.string().regex(/^\d+$/).optional(),
+    reason: z.string().max(2_000).optional(),
+    contract: ContractSchema.optional(),
+    diagnostics: DiagnosticsSchema.optional(),
+  }),
+  /** A plain sentence about the call itself, such as an id that had expired.
+   *  Never a failure: the decision beside it still ran. */
+  note: z.string().max(500).optional(),
   jev: z.object({ calls: z.number(), latencyMs: z.number() }).optional(),
 });
-export type Decision = z.infer<typeof DecisionSchema>;
+export type DecisionResponse = z.infer<typeof DecisionSchema>;
+export type Decision = DecisionResponse['decision'];
 
 /** The parser, exposed so the shared wire fixtures are checked against the
  *  same schema production parses with rather than against a copy of it. */
 export function parseDecisionForTests(value: unknown): { success: boolean } {
   return { success: DecisionSchema.safeParse(value).success };
+}
+
+/**
+ * The gate's own reading of this turn, travelling as EVIDENCE for the lookup it
+ * was produced for. The backend may refine or reject it, and it authorizes no
+ * money: the local spend policy does that. Optional on both call forms.
+ */
+export interface GateHint {
+  category: string;
+  turnId: string;
+  lookupId: string;
 }
 
 export interface DecisionDeps {
@@ -113,7 +145,7 @@ export interface DecisionDeps {
   timeoutMs?: number;
 }
 
-export type DecisionOutcome<T = Decision> =
+export type DecisionOutcome<T = DecisionResponse> =
   | { status: 'decided'; decision: T }
   /** Nothing was paid and nothing could be: the endpoint is free, so a failure
    *  here costs the turn a routing answer and nothing else. */
@@ -131,7 +163,7 @@ export type DecisionOutcome<T = Decision> =
  * the raw prompt, measured on jev-1.13.0.
  */
 export async function requestDecision(
-  request: { query?: string; packet?: Packet; id?: string },
+  request: { query?: string; packet?: Packet; id?: string; gateHint?: GateHint },
   deps: DecisionDeps,
 ): Promise<DecisionOutcome> {
   const url = new URL(ROUTER_PATH, deps.baseUrl).toString();
@@ -144,6 +176,7 @@ export async function requestDecision(
       ...(request.query !== undefined ? { query: request.query } : {}),
       ...(request.packet !== undefined ? { packet: request.packet } : {}),
       ...(request.id !== undefined ? { id: request.id } : {}),
+      ...(request.gateHint !== undefined ? { gateHint: request.gateHint } : {}),
     },
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   };

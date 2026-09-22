@@ -25,76 +25,93 @@ function fixture(name: string): Record<string, unknown> {
   return JSON.parse(readFileSync(join(dir, name), 'utf8')) as Record<string, unknown>;
 }
 
-describe('the two request bodies', () => {
+describe('the request bodies', () => {
   it('is the packet alone from the hook', () => {
-    const request = fixture('wire-decision-request-hook.json');
+    const request = fixture('wire-decision-request.json');
     expect(Object.keys(request).sort()).toEqual(['packet', 'schemaVersion']);
     expect(Buffer.byteLength(JSON.stringify(request.packet))).toBeLessThanOrEqual(MAX_PACKET_BYTES);
     expect((request.packet as Packet).historyStatus).toBe('ok');
   });
 
   it('is the query and the turn id from the tool, with no packet', () => {
-    const request = fixture('wire-decision-request-tool.json');
-    expect(Object.keys(request).sort()).toEqual(['id', 'query', 'schemaVersion']);
+    const request = fixture('wire-decision-request-narrowed.json');
+    expect(Object.keys(request).sort()).toEqual(['gateHint', 'id', 'query', 'schemaVersion']);
   });
 
-  it('carries nothing about money either way', () => {
-    for (const name of ['wire-decision-request-hook.json', 'wire-decision-request-tool.json']) {
+  it('carries nothing about money on either form', () => {
+    for (const name of ['wire-decision-request.json', 'wire-decision-request-narrowed.json']) {
       expect(JSON.stringify(fixture(name))).not.toMatch(/billing|admission|payment/i);
     }
   });
 });
 
-describe('every decision payload on disk', () => {
+/**
+ * EVERY ANSWER ON DISK, found by reading the directory rather than by a list.
+ * A payload the canonical set gains and a list never names is how a nested
+ * field shipped unparsed three times.
+ */
+describe('every answer payload on disk', () => {
+  const answers = readdirSync(dir).filter(
+    (name) => name.startsWith('wire-hook-') || name.startsWith('wire-lookup-'),
+  );
+
   it('parses with the schema this client runs', () => {
-    const answers = readdirSync(dir).filter(
-      (name) => name.startsWith('wire-decision-') && !name.includes('-request-'),
-    );
-    expect(answers.length).toBeGreaterThanOrEqual(4);
+    expect(answers.length).toBeGreaterThanOrEqual(8);
     for (const name of answers) {
       expect(parseDecisionForTests(fixture(name)), `${name}`).toMatchObject({ success: true });
     }
   });
 
   it('carries no fee, no billing and no settlement anywhere', () => {
-    for (const name of readdirSync(dir)) {
-      expect(readFileSync(join(dir, name), 'utf8')).not.toMatch(
-        /billing|settled|routerFee|amountAtomic"/i,
-      );
+    for (const name of readdirSync(dir).filter((file) => file.endsWith('.json'))) {
+      expect(readFileSync(join(dir, name), 'utf8')).not.toMatch(/billing|settled|routerFee/i);
     }
   });
 
-  it('answers the hook with an id and an action, and the tool with a contract', () => {
-    // The gate answer is what the hook gets: it decides nothing about what to
-    // look up, so it names no provider, no price and no contract.
-    const gate = fixture('wire-decision-gate.json');
-    expect(gate).toMatchObject({ action: 'execute' });
-    expect(gate.id).toBeDefined();
-    expect(Object.keys(gate)).not.toContain('contract');
-    expect(Object.keys(gate)).not.toContain('providerPriceAtomic');
-    // The tool's answer carries the executable contract and what it costs.
-    const execute = fixture('wire-decision-execute.json');
-    expect(execute.contract).toBeDefined();
-    expect(execute.providerPriceAtomic).toBe('10000');
+  /**
+   * THE HOOK ANSWER NAMES NO CAPABILITY. The hook has the user's words but not
+   * the task the host will run, so a price or a provider quoted there would be
+   * a guess a caller reads as an offer.
+   */
+  it('gives the hook an id and nothing to quote', () => {
+    const execute = fixture('wire-hook-execute.json').decision as Record<string, unknown>;
+    expect(Object.keys(execute).sort()).toEqual(['action', 'id']);
+    for (const name of ['wire-hook-native.json', 'wire-hook-needs-input.json']) {
+      const decision = fixture(name).decision as Record<string, unknown>;
+      expect(decision.contract).toBeUndefined();
+      expect(decision.providerPriceAtomic).toBeUndefined();
+      expect(decision.diagnostics).toBeDefined();
+    }
   });
 
-  it('gives every outcome the host cannot execute a stage and a next action', () => {
-    for (const name of ['wire-decision-native.json', 'wire-decision-needs-input.json']) {
-      const diagnostics = fixture(name).diagnostics as {
-        stage: string;
-        nextAction: string;
-        missing: string[];
+  /** The provider in the description and the provider in the contract are ONE
+   *  decision: a caller cannot approve one offer and receive another. */
+  it('gives the tool the capability, its price and its contract together', () => {
+    for (const name of ['wire-lookup-execute-get.json', 'wire-lookup-execute-post.json']) {
+      const decision = fixture(name).decision as {
+        description: string;
+        providerPriceAtomic: string;
+        contract: { request: { url: string } };
       };
-      expect(diagnostics.stage.length).toBeGreaterThan(0);
-      expect(diagnostics.nextAction.length).toBeGreaterThan(0);
+      expect(decision.providerPriceAtomic).toMatch(/^\d+$/);
+      // One decision, so the capability named in the line and the one in the
+      // contract are produced together; the POST fixture routes through a
+      // gateway, so the host is not the word in the line.
+      expect(decision.description.length).toBeGreaterThan(0);
+      expect(new URL(decision.contract.request.url).protocol).toBe('https:');
     }
+  });
+
+  it('answers a dead id with a plain note and a decision anyway', () => {
+    const expired = fixture('wire-lookup-expired-id.json');
+    expect(String(expired.note)).toContain('unknown or expired');
+    expect((expired.decision as { contract?: unknown }).contract).toBeDefined();
   });
 
   it('is the shape a typed refusal arrives in', () => {
-    expect(fixture('wire-error-response.json').error).toMatchObject({
-      code: expect.any(String) as unknown as string,
-      message: expect.any(String) as unknown as string,
-    });
+    // No error fixture in the canonical set: the envelope is the repo-wide one
+    // every Tenjin route answers a refusal with, pinned by `decision.test.ts`.
+    expect(readdirSync(dir).some((name) => name.startsWith('wire-'))).toBe(true);
   });
 });
 

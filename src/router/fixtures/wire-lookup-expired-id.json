@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "routerVersion": "2026-09-23.1",
+  "decision": {
+    "action": "execute",
+    "capabilityId": "cmc-quotes",
+    "category": "crypto price quote",
+    "description": "crypto price quote via pro-api.coinmarketcap.com",
+    "providerPriceAtomic": "10000",
+    "contract": {
+      "method": "GET",
+      "url": "https://pro-api.coinmarketcap.com/x402/v3/cryptocurrency/quotes/latest",
+      "arguments": {
+        "symbol": "BTC,ETH",
+        "convert": "USD"
+      },
+      "argumentSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "symbol": {
+            "type": "string"
+          },
+          "convert": {
+            "type": "string"
+          }
+        },
+        "required": ["symbol"],
+        "additionalProperties": false
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "type": "object"
+          }
+        },
+        "required": ["data"]
+      },
+      "advertised": {
+        "network": "eip155:8453",
+        "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "maxAmountAtomic": "10000"
+      },
+      "registryListed": true,
+      "request": {
+        "url": "https://pro-api.coinmarketcap.com/x402/v3/cryptocurrency/quotes/latest?symbol=BTC%2CETH&convert=USD",
+        "method": "GET",
+        "headers": {
+          "accept": "application/json"
+        }
+      }
+    }
+  },
+  "note": "That decision id was unknown or expired, so this decision was made from the query alone.",
+  "jev": {
+    "calls": 3,
+    "latencyMs": 1400
+  }
+}

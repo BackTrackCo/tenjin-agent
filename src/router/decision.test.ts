@@ -59,24 +59,22 @@ function net(body: unknown, status = 200): { fetchImpl: typeof fetch; calls: Cal
 const NATIVE = {
   schemaVersion: 1,
   routerVersion: '2026-09-23.1',
-  action: 'native',
-  diagnostics: {
-    reasonCode: 'native_sufficient',
-    stage: 'capability',
-    missing: [],
-    nextAction: 'Answer with your own tools.',
+  decision: {
+    action: 'native',
+    reason: 'The host assistant and its own tools are enough.',
+    diagnostics: {
+      reasonCode: 'native_sufficient',
+      stage: 'capability',
+      missing: [],
+      nextAction: 'Answer with your own tools.',
+    },
   },
 };
 
 const EXECUTE = {
   schemaVersion: 1,
   routerVersion: '2026-09-23.1',
-  id: 'k3f9-abcd',
-  action: 'execute',
-  description: 'BTC and ETH quotes ready',
-  provider: 'CoinMarketCap',
-  providerPriceAtomic: '10000',
-  category: 'crypto price quote',
+  decision: { action: 'execute', id: 'k3f9-abcd' },
 };
 
 describe('one free decision', () => {
@@ -148,7 +146,7 @@ describe('one free decision', () => {
    * nested one level deeper than the client expected shipped three times.
    */
   it('refuses a body with a field in the wrong place', async () => {
-    const { fetchImpl } = net({ ...NATIVE, decision: { action: 'native' } });
+    const { fetchImpl } = net({ ...NATIVE, action: 'native' });
     const outcome = await requestDecision(
       { packet: packetForText('q') },
       { ctx: ctx(), baseUrl: BASE, fetchImpl },

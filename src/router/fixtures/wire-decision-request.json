@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "packet": {
+    "current": {
+      "role": "user",
+      "text": "check the BTC and ETH prices in USD"
+    },
+    "history": [],
+    "literalUrls": [],
+    "historyStatus": "ok"
+  }
+}

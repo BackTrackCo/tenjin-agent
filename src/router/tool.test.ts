@@ -81,26 +81,29 @@ function decision(over: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     schemaVersion: 1,
     routerVersion: '2026-09-23.1',
-    id: 'k3f9-abcd',
-    action: 'execute',
-    description: 'BTC and ETH quotes ready',
-    provider: 'CoinMarketCap',
-    providerPriceAtomic: '10000',
-    contract: contract(),
-    ...over,
+    decision: {
+      action: 'execute',
+      capabilityId: 'cmc-quotes',
+      description: 'crypto price quote via pro-api.example.test',
+      providerPriceAtomic: '10000',
+      contract: contract(),
+      ...over,
+    },
   };
 }
 
 const NATIVE = {
   schemaVersion: 1,
   routerVersion: 'v',
-  action: 'native',
-  description: 'Your own tools cover this.',
-  diagnostics: {
-    reasonCode: 'native_sufficient',
-    stage: 'capability',
-    missing: [],
-    nextAction: '',
+  decision: {
+    action: 'native',
+    reason: 'Your own tools cover this.',
+    diagnostics: {
+      reasonCode: 'native_sufficient',
+      stage: 'capability',
+      missing: [],
+      nextAction: '',
+    },
   },
 };
 
@@ -242,13 +245,15 @@ describe('routing outcomes that buy nothing', () => {
         body: {
           schemaVersion: 1,
           routerVersion: 'v',
-          action: 'needs_input',
-          description: 'Name the company to enrich.',
-          diagnostics: {
-            reasonCode: 'missing_required_argument',
-            stage: 'bind',
-            missing: ['company_domain'],
-            nextAction: 'Ask the user for the company domain, then call request again.',
+          decision: {
+            action: 'needs_input',
+            reason: 'Name the company to enrich.',
+            diagnostics: {
+              reasonCode: 'missing_required_argument',
+              stage: 'bind',
+              missing: ['company_domain'],
+              nextAction: 'Ask the user for the company domain, then call request again.',
+            },
           },
         },
       },
