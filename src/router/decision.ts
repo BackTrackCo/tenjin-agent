@@ -117,7 +117,9 @@ export interface DecisionDeps {
 
 export type DecisionOutcome =
   | { status: 'decided'; response: DecisionResponse; amountAtomic: bigint; probed: boolean }
-  | { status: 'needs_approval'; reason: string }
+  /** `committedAtomic` is what a FIRST attempt already transmitted when the
+   *  retry's fresh terms failed the gate; zero on an ordinary refusal. */
+  | { status: 'needs_approval'; reason: string; committedAtomic: bigint }
   /** `committedAtomic` is what the ledger already counted for this attempt, so
    *  the tool can report the fee a post-transmission failure still owes. */
   | { status: 'failed'; reason: string; committedAtomic: bigint };
@@ -194,7 +196,10 @@ export async function requestDecision(
   if (retried.status === 'decided') {
     return { ...retried, amountAtomic: spent + retried.amountAtomic, probed };
   }
-  return retried;
+  // `needs_approval` too: the fresh terms failing the gate does not un-transmit
+  // the first authorization, and a receipt reporting zero there would tell the
+  // model a call was free that the ledger has already counted.
+  return { ...retried, committedAtomic: spent + retried.committedAtomic };
 }
 
 type Attempt =
@@ -239,7 +244,11 @@ async function payOnce(
       notConfirmedMessage: 'The routing fee needs approval.',
     });
   } catch (err) {
-    return { status: 'needs_approval', reason: err instanceof Error ? err.message : String(err) };
+    return {
+      status: 'needs_approval',
+      reason: err instanceof Error ? err.message : String(err),
+      committedAtomic: NO_FEE,
+    };
   }
 
   let payment: Awaited<ReturnType<typeof buildExactPayment>>;

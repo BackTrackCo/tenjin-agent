@@ -589,3 +589,51 @@ describe('the routing fee a failure still owes', () => {
     expect(opened).toHaveBeenCalled();
   });
 });
+
+describe('a retry whose fresh terms fail the gate', () => {
+  it('still reports the fee the first attempt transmitted', async () => {
+    const cache = new RequirementsCache();
+    cache.set(
+      `${ROUTER}/api/x402-router`,
+      buildPaymentRequired({ amount: '1000' }).paymentRequired,
+    );
+    // Allow the first authorization, refuse the re-priced one: the first has
+    // already left, so the receipt owes its amount whatever the second does.
+    let calls = 0;
+    const auth: SpendAuthorizer = {
+      policyEnforcement: 'client-only',
+      authorize: vi.fn(async (req): Promise<SpendAuthorization> => {
+        calls++;
+        return {
+          decision: calls === 1 ? 'allow' : 'deny',
+          reason: calls === 1 ? 'within_policy' : 'session_budget_exceeded',
+          message: 'over budget',
+          amountAtomic: req.amountAtomic,
+          sessionSpentAtomic: 0n,
+          sessionBudgetAtomic: 0n,
+          policyEnforcement: 'client-only',
+          ...(calls === 1 ? { reservationId: 'rsv' } : {}),
+        };
+      }),
+      commit: vi.fn(async () => undefined),
+      release: vi.fn(async () => undefined),
+    };
+    const fetchImpl = (async () =>
+      new Response('{}', {
+        status: 402,
+        headers: {
+          'content-type': 'application/json',
+          'PAYMENT-REQUIRED': encodePaymentRequiredHeader(
+            buildPaymentRequired({ amount: '2000' }).paymentRequired,
+          ),
+        },
+      })) as typeof fetch;
+    const result = await runRequestTool({ query: 'q' }, { ...deps(fetchImpl, auth), cache });
+    expect(result.envelope).toMatchObject({
+      status: 'needs_approval',
+      cost: ['router fee 0.001 USD', 'provider price 0 USD'],
+    });
+    expect(auth.commit).toHaveBeenCalledTimes(1);
+    expect(auth.release).not.toHaveBeenCalled();
+  });
+});

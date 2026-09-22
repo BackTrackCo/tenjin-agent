@@ -100,7 +100,7 @@ export async function runRequestTool(
     },
   );
   if (outcome.status === 'needs_approval') {
-    return withKey(fail('needs_approval', outcome.reason), sessionKey);
+    return withKey(fail('needs_approval', outcome.reason, outcome.committedAtomic), sessionKey);
   }
   if (outcome.status === 'failed') {
     return withKey(fail('failed', outcome.reason, outcome.committedAtomic), sessionKey);
