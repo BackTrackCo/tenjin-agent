@@ -118,19 +118,22 @@ const DECISION = {
   schemaVersion: 1,
   routerVersion: '2026-09-23.1',
   requestId: 'r-1',
-  decision: { action: 'native', reason: 'Your own tools cover this.' },
+  decision: {
+    action: 'native',
+    reason: 'Your own tools cover this.',
+    diagnostics: {
+      reasonCode: 'native_sufficient',
+      stage: 'capability',
+      missing: [],
+      nextAction: 'Continue with your own tools.',
+    },
+  },
   billing: {
     settled: false,
     amountAtomic: '0',
     asset: USDC,
     network: 'eip155:8453',
     reasonCode: 'waived_native',
-  },
-  diagnostics: {
-    reasonCode: 'covered_by_host_tools',
-    stage: 'capability',
-    missing: [],
-    nextAction: 'Continue with your own tools.',
   },
 };
 

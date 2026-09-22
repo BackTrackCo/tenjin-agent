@@ -104,7 +104,19 @@ function decision(over: Record<string, unknown> = {}): unknown {
     schemaVersion: 1,
     routerVersion: '2026-09-23.1',
     requestId: 'r-1',
-    decision: decisionFields,
+    decision: {
+      ...decisionFields,
+      ...(executed
+        ? {}
+        : {
+            diagnostics: diagnostics ?? {
+              reasonCode: inner.action === 'native' ? 'native_sufficient' : 'unresolved_intent',
+              stage: inner.action === 'native' ? 'capability' : 'bind',
+              missing: [],
+              nextAction: '',
+            },
+          }),
+    },
     billing: billing ?? {
       settled: executed,
       amountAtomic: executed ? '1000' : '0',
@@ -112,16 +124,6 @@ function decision(over: Record<string, unknown> = {}): unknown {
       network: 'eip155:8453',
       reasonCode: executed ? 'executed' : `waived_${String(decisionFields.action)}`,
     },
-    ...(executed
-      ? {}
-      : {
-          diagnostics: diagnostics ?? {
-            reasonCode: inner.action === 'native' ? 'covered_by_host_tools' : 'unresolved_intent',
-            stage: inner.action === 'native' ? 'capability' : 'bind',
-            missing: [],
-            nextAction: '',
-          },
-        }),
   };
 }
 

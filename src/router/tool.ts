@@ -175,9 +175,7 @@ export async function runRequestTool(
         0n,
         {
           ...exposure,
-          ...(outcome.response.diagnostics !== undefined
-            ? { diagnostics: outcome.response.diagnostics }
-            : {}),
+          ...(decision.diagnostics !== undefined ? { diagnostics: decision.diagnostics } : {}),
         },
       ),
       sessionKey,

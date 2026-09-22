@@ -111,6 +111,10 @@ const DecisionResponseSchema = z
       capabilityId: z.string().min(1).max(200).optional(),
       contract: ContractSchema.optional(),
       reason: z.string().max(2_000).optional(),
+      /** Required on every outcome this client cannot execute, and filed beside
+       *  the decision it explains rather than beside the money, which is where
+       *  the shared wire fixtures put it. */
+      diagnostics: DiagnosticsSchema.optional(),
     }),
     /**
      * REQUIRED, NOT OPTIONAL. Nothing is released and there are no old clients
@@ -119,16 +123,13 @@ const DecisionResponseSchema = z
      * of guessing at what it was charged.
      */
     billing: BillingSchema,
-    /** Required on every outcome this client cannot execute, which is where the
-     *  host needs the reason, the stage and the missing field. */
-    diagnostics: DiagnosticsSchema.optional(),
     jev: z.object({ calls: z.number(), latencyMs: z.number() }).optional(),
   })
   .superRefine((value, ctx) => {
-    if (value.decision.action !== 'execute' && value.diagnostics === undefined) {
+    if (value.decision.action !== 'execute' && value.decision.diagnostics === undefined) {
       ctx.addIssue({
         code: 'custom',
-        path: ['diagnostics'],
+        path: ['decision', 'diagnostics'],
         message: 'a non-execute decision must carry diagnostics',
       });
     }

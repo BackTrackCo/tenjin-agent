@@ -3,9 +3,10 @@ import { describe, expect, it } from 'vitest';
 import gateRequest from './fixtures/wire-gate-request.json' with { type: 'json' };
 import decisionGet from './fixtures/wire-decision-get.json' with { type: 'json' };
 import decisionPost from './fixtures/wire-decision-post.json' with { type: 'json' };
-import decisionNativeWaived from './fixtures/wire-decision-native-waived.json' with { type: 'json' };
-import decisionNeedsInput from './fixtures/wire-decision-needs-input-waived.json' with { type: 'json' };
-import decisionContextualUrl from './fixtures/wire-decision-contextual-url.json' with { type: 'json' };
+import decisionNative from './fixtures/wire-decision-native.json' with { type: 'json' };
+import decisionNeedsInput from './fixtures/wire-decision-needs-input.json' with { type: 'json' };
+import decisionUnsupported from './fixtures/wire-decision-unsupported.json' with { type: 'json' };
+import decisionClassifier from './fixtures/wire-decision-classifier-unavailable.json' with { type: 'json' };
 import errorResponse from './fixtures/wire-error-response.json' with { type: 'json' };
 import { buildGateBody, GATE_TIMEOUT_MS } from './gate';
 import { MAX_PACKET_BYTES, type Packet } from './context';
@@ -82,9 +83,10 @@ describe('the paid decision body', () => {
     for (const fixture of [
       decisionGet,
       decisionPost,
-      decisionNativeWaived,
+      decisionNative,
       decisionNeedsInput,
-      decisionContextualUrl,
+      decisionUnsupported,
+      decisionClassifier,
     ]) {
       expect(parseDecisionForTests(fixture).success).toBe(true);
     }
@@ -111,13 +113,20 @@ describe('the billing and diagnostics contract', () => {
 
   it('refuses a non-execute decision with no diagnostics', async () => {
     const { parseDecisionForTests } = await import('./decision');
-    const { diagnostics, ...withoutDiagnostics } = decisionNativeWaived as Record<string, unknown>;
+    const { diagnostics, ...decisionFields } = decisionNative.decision as Record<string, unknown>;
     expect(diagnostics).toBeDefined();
-    expect(parseDecisionForTests(withoutDiagnostics).success).toBe(false);
+    expect(parseDecisionForTests({ ...decisionNative, decision: decisionFields }).success).toBe(
+      false,
+    );
   });
 
   it('carries a waived fee on every outcome the router cannot execute', () => {
-    for (const fixture of [decisionNativeWaived, decisionNeedsInput, decisionContextualUrl]) {
+    for (const fixture of [
+      decisionNative,
+      decisionNeedsInput,
+      decisionUnsupported,
+      decisionClassifier,
+    ]) {
       expect(fixture.decision.action).not.toBe('execute');
       expect(fixture.billing.settled).toBe(false);
       expect(fixture.billing.amountAtomic).toBe('0');
@@ -126,10 +135,23 @@ describe('the billing and diagnostics contract', () => {
     expect(decisionGet.billing).toMatchObject({ settled: true, reasonCode: 'executed' });
   });
 
-  it('names one of the four target outcomes in a diagnostics reasonCode', () => {
-    const split = ['page_target', 'contextual_url', 'unresolved_intent', 'classifier_failure'];
-    expect(split).toContain(decisionContextualUrl.diagnostics.reasonCode);
-    expect(split).toContain(decisionNeedsInput.diagnostics.reasonCode);
+  /** Every waived outcome names the stage that stopped and one next action, so
+   *  a host is never left with "could not resolve the scope" and nothing else. */
+  it('gives every waived outcome a stage and a next action', () => {
+    for (const fixture of [
+      decisionNative,
+      decisionNeedsInput,
+      decisionUnsupported,
+      decisionClassifier,
+    ]) {
+      const diagnostics = fixture.decision.diagnostics;
+      expect(diagnostics.stage.length).toBeGreaterThan(0);
+      expect(diagnostics.nextAction.length).toBeGreaterThan(0);
+    }
+    // The classifier's own failure is never reported as a field the user withheld.
+    expect(decisionClassifier.decision.diagnostics.reasonCode).toBe('classifier_failure');
+    expect(decisionClassifier.decision.diagnostics.missing).toEqual([]);
+    expect(decisionNeedsInput.decision.diagnostics.missing.length).toBeGreaterThan(0);
   });
 
   it('is the shape a typed refusal arrives in', () => {
