@@ -416,8 +416,20 @@ export async function readMcpEntry(
   home: string,
 ): Promise<{ found: boolean; state: McpEntryState }> {
   const path = scope === 'project' ? join(cwd, '.mcp.json') : join(home, '.claude.json');
-  const raw = await readFile(path, 'utf8').catch(() => null);
-  if (raw === null) return { found: false, state: 'absent' };
+  // ONLY "it is not there" is an absence. A permission or filesystem error on a
+  // file that DOES exist says nothing about what is registered in it, and
+  // treating it as missing sent the refresh on to `claude mcp add` over a
+  // registration it had never read: a failed add then looked like a machine
+  // that simply lacks the tooling, and `tenjin update` exited 0 over whatever
+  // was actually in there.
+  let raw: string;
+  try {
+    raw = await readFile(path, 'utf8');
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return { found: false, state: 'absent' };
+    return { found: true, state: 'unreadable' };
+  }
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);

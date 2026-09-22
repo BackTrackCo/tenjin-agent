@@ -1090,4 +1090,41 @@ describe('the MCP registration is reconciled, not re-added', () => {
       mcp: { registered: false, reconciled: 'unrepaired' },
     });
   });
+
+  /**
+   * A READ ERROR IS NOT AN ABSENCE. Only ENOENT is. A registration file that
+   * exists and cannot be read says nothing about what is registered in it, and
+   * calling that "missing" sent the refresh on to `claude mcp add` over a file
+   * it had never read: the failed add then looked like a machine that merely
+   * lacks the tooling, and `tenjin update` exited 0 over whatever was in there.
+   *
+   * The fixture is a DIRECTORY at the file's path (EISDIR), because that is a
+   * real filesystem error on every machine, including one running as root where
+   * a `chmod 000` file stays readable.
+   */
+  it('treats a registration file it cannot read as unreadable rather than missing', async () => {
+    const fs = await import('node:fs/promises');
+    const cwd = join(home, 'project');
+    await fs.mkdir(join(cwd, '.mcp.json'), { recursive: true });
+    const registerMcp = vi.fn(async () => undefined);
+    const result = await runRouterInstall({ project: true }, ctx(), deps({ cwd, registerMcp }));
+    expect(registerMcp).not.toHaveBeenCalled();
+    expect(result.data).toMatchObject({ mcp: { registered: false, reconciled: 'unrepaired' } });
+  });
+
+  it('fails the refresh, rather than claiming convergence, over an unreadable registration', async () => {
+    const fs = await import('node:fs/promises');
+    const cwd = join(home, 'project');
+    await fs.mkdir(cwd, { recursive: true });
+    await runRouterInstall({ project: true }, ctx(), deps({ cwd }));
+    await fs.mkdir(join(cwd, '.mcp.json'), { recursive: true });
+
+    const registerMcp = vi.fn(async () => undefined);
+    const err = await runRouterInstall({ refresh: true }, ctx(), deps({ cwd, registerMcp })).catch(
+      (e: unknown) => e,
+    );
+    expect((err as CliError).code).toBe('REFUSED');
+    expect((err as CliError).message).toContain('could not repair');
+    expect(registerMcp).not.toHaveBeenCalled();
+  });
 });
