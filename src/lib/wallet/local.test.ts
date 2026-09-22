@@ -321,6 +321,26 @@ describe('createLocalProvider.getSigner', () => {
     await expect(stat(passphraseBlobPath(dataDir))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
+  it('preserves KDF cancellation without migrating a legacy credential', async () => {
+    const key = generatePrivateKey();
+    const record = await encryptedRecord(key);
+    await writeWalletRecord(dataDir, record);
+    const exec = vi.fn<ExecFn>(async (_file, args) => {
+      if (args[0] !== 'find-generic-password') throw new Error('unexpected store mutation');
+      if (args[args.indexOf('-a') + 1] !== 'wallet') throw new Error('not found');
+      return { stdout: KNOWN_PASSPHRASE, stderr: '' };
+    });
+    const provider = createLocalProvider({
+      dir: dataDir,
+      env: {},
+      passphrase: { platform: 'darwin', isTTY: false, exec },
+      derivation: { signal: AbortSignal.abort() },
+    });
+    await expect(provider.getSigner()).rejects.toMatchObject({ name: 'AbortError' });
+    expect(exec).toHaveBeenCalledTimes(2);
+    expect(exec.mock.calls.every((call) => call[1][0] === 'find-generic-password')).toBe(true);
+  });
+
   it('throws WALLET_MISSING with no credential', async () => {
     const provider = createLocalProvider({ dir: dataDir, env: {} });
     const err = (await provider.getSigner().catch((e) => e)) as CliError;
@@ -343,6 +363,19 @@ describe('createLocalProvider.getSigner', () => {
 // the loss only surfaced at the first signing. `verify` is the read-only, never-
 // prompting answer to "can this wallet actually sign?".
 describe('verifyLocalWallet', () => {
+  it('reports cancelled derivation as unverified instead of a broken password', async () => {
+    await writeWalletRecord(dataDir, await encryptedRecord(generatePrivateKey()));
+    await expect(
+      verifyLocalWallet({
+        ...envPass(KNOWN_PASSPHRASE),
+        derivation: { signal: AbortSignal.abort() },
+      }),
+    ).resolves.toEqual({
+      status: 'unverified',
+      detail: 'keystore verification was cancelled or timed out',
+    });
+  });
+
   it('verifies a keystore the resolved passphrase opens', async () => {
     const key = generatePrivateKey();
     await writeWalletRecord(dataDir, await encryptedRecord(key));

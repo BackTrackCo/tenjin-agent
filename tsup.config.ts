@@ -55,6 +55,10 @@ export default defineConfig([
     entry: {
       'tenjin-daemon': 'src/daemon/main.ts',
       'tenjin-shim': 'src/hooks/shim-main.ts',
+      // The keystore KDF worker (src/lib/wallet/keystore-kdf.ts) belongs here
+      // for the same reason: `new Worker(url)` loads one file with no sibling
+      // chunks beside it.
+      'wallet-kdf-worker': 'src/lib/wallet/keystore-kdf-worker.ts',
     },
     format: ['esm'],
     target: 'node22',
