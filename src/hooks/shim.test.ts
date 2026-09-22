@@ -258,6 +258,7 @@ describe('daemonEnv', () => {
       HTTPS_PROXY: 'http://p:1',
       no_proxy: 'localhost',
       NODE_USE_ENV_PROXY: '1',
+      NODE_EXTRA_CA_CERTS: '/etc/ssl/corp.pem',
       NODE_OPTIONS: '--require=/tmp/instrument.js',
       CLAUDE_CODE_SESSION_ID: 'sess-1',
       TENJIN_DATA_DIR: '/somewhere/else',
@@ -270,6 +271,7 @@ describe('daemonEnv', () => {
       HTTPS_PROXY: 'http://p:1',
       no_proxy: 'localhost',
       NODE_USE_ENV_PROXY: '1',
+      NODE_EXTRA_CA_CERTS: '/etc/ssl/corp.pem',
       TENJIN_DATA_DIR: dir,
     });
   });

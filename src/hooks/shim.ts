@@ -128,6 +128,8 @@ export async function health(port: number, timeoutMs: number = HEALTH_MS): Promi
  * reads both on Windows. `NODE_USE_ENV_PROXY` rides with the proxy addresses
  * because Node reads them for `fetch` only when that flag is set: without it
  * the daemon holds proxy configuration that cannot take effect.
+ * `NODE_EXTRA_CA_CERTS` rides along for the same reason: a TLS-intercepting
+ * proxy presents its own certificate, which Node trusts only via that path.
  */
 export function daemonEnv(
   dataDir: string,
@@ -147,6 +149,7 @@ export function daemonEnv(
     'https_proxy',
     'no_proxy',
     'NODE_USE_ENV_PROXY',
+    'NODE_EXTRA_CA_CERTS',
   ];
   const out: NodeJS.ProcessEnv = {};
   for (const k of keep) if (env[k] !== undefined) out[k] = env[k];
