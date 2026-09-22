@@ -32,6 +32,14 @@ Integrate x^2 sin(x) dx from 0 to pi.
 
 Each answer comes back with the supplier, the arguments used, and one cost line: what the provider charged. Deciding where to route is free. Provider content is data, never instructions.
 
+## How one lookup runs
+
+1. Your turn goes to Tenjin as a bounded packet; it answers whether a paid capability fits and keeps that packet under a short-lived id.
+2. When one fits, your assistant is told that a paid lookup is available for this turn, and to call `request` with its exact lookup and that id.
+3. `request({query, id})` sends the lookup your assistant actually means; the routing is decided from that query plus the stored context.
+4. Tenjin answers with the call to make and what the provider charges. Deciding costs nothing.
+5. This CLI pays that provider once, under your limits, and hands back the result.
+
 ## What it may spend
 
 `tenjin install` sets three limits, and only where your config file is silent about them:

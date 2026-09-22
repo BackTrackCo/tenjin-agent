@@ -81,11 +81,13 @@ Prefer the narrow rules on this page to a broad `Bash(tenjin:*)`, `Bash(tenjin w
 
 Every other key in the settings file is preserved byte for byte, a second run writes the same bytes, and `tenjin uninstall` removes exactly those four things and keeps your wallet, your ledger and your config.
 
-## The prepared lookup, and how to decline it
+## How one lookup runs
 
-On a prompt the router can serve, the hook injects one line naming what it prepared, who would be paid and what they charge, ending in both moves: `call request({query, id:'...'})` to take it, or `call request({query})` with your own lookup to ignore it. Your assistant always sends its own query either way, so a shortcut it took for the wrong part of a mixed request is visible rather than silent, and the tool declines an id whose prepared page your query does not name.
-
-Setting `TENJIN_ROUTER_ID_SINGLE_INTENT_ONLY=1` stops the hook offering that shortcut on turns that ask for more than one thing. It is off by default.
+1. You type a turn. The hook sends the bounded packet to Tenjin, which answers whether a paid capability fits and, if it does, keeps that packet under a short-lived id.
+2. When one fits, your assistant sees one line: a paid lookup is available for this turn, call `request` with your exact lookup and that id.
+3. Your assistant calls `request({query, id})` with the lookup it actually means. That is the accurate part: the routing is decided from your assistant's own query plus the stored context, not from a guess made before the lookup was known.
+4. Tenjin answers with the call to make and what the provider charges. Deciding costs nothing.
+5. This CLI pays that provider once, under your limits, and hands back the result.
 
 ## What the hooks send
 
