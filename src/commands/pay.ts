@@ -143,7 +143,13 @@ export async function runPay(
   };
 
   const probe = await httpRequest(url, fetchOpts);
-  if (!probe.ok) throw fetchFailureToCliError(probe);
+  // The unpaid leg says so itself: the transport is shared with the paid retry
+  // and asserts nothing about money either way.
+  if (!probe.ok) {
+    throw fetchFailureToCliError(probe, {
+      fix: `Nothing was sent and nothing was paid. ${legFix(probe)}`,
+    });
+  }
   if (probe.status >= 200 && probe.status < 300) {
     assertUsableResult(args.resultSchema, probe.text, probe.status, 'free');
     return deliver(url, lane, probe, { paid: false, printBody: args.printBody === true });
@@ -297,7 +303,9 @@ export async function runPay(
   // code survive; only the fix and the amounts are this leg's to state.
   if (!paid.ok) {
     throw fetchFailureToCliError(paid, {
-      fix: 'The signed payment already left and is counted against the session budget; whether it settled is unknown. Do not simply retry: each attempt signs a fresh authorization.',
+      fix:
+        'The authorization was transmitted and settlement is unknown; it is counted against the session budget. ' +
+        `Do not simply retry: each attempt signs a fresh authorization. ${legFix(paid)}`,
       details: { amountAtomic: payment.amountAtomic.toString(), settlement: 'unknown' },
     });
   }
@@ -475,6 +483,14 @@ function assertUsableResult(
     fix: `Nothing was paid on this ${how} delivery. The endpoint answered ${status} with a body that fails the success rule it was asked under.`,
     details: { status, reason: check.reason, paid: false },
   });
+}
+
+/** The transport's own remedy, when it has one, appended after the leg's
+ *  payment sentence so the two never contradict each other. */
+function legFix(failure: { kind: string }): string {
+  return failure.kind === 'oversized-header'
+    ? 'Raising `--max-http-header-size` on the node process that runs this CLI would let the header be read; that is an operator decision, not a default this build changes.'
+    : '';
 }
 
 /**

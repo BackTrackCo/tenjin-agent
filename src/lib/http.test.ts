@@ -949,7 +949,11 @@ describe('a 402 challenge too large for this process to read', () => {
       // The ORIGIN, not the path: the whole host answers this way.
       expect(failure.message).toContain('https://api.example.test');
       expect(failure.message).not.toContain('/v1/run/thing');
-      expect(failure.message).toContain('nothing was sent');
+      // The transport says what it could not read and NOTHING about payment:
+      // it serves the unpaid probe and the paid retry alike, so either claim
+      // would be wrong on one of them. The leg adds that sentence.
+      expect(failure.message).toContain('could not be read');
+      expect(failure.message).not.toMatch(/nothing was (sent|paid)|authorization/i);
     },
   );
 
@@ -961,9 +965,9 @@ describe('a 402 challenge too large for this process to read', () => {
     const err = fetchFailureToCliError(result as Extract<typeof result, { ok: false }>);
     expect(err.code).toBe('CHALLENGE_TOO_LARGE');
     expect(exitCodeFor(err.code)).toBe(3);
-    expect(err.fix).toContain('Nothing was paid');
     expect(err.fix).toContain('--max-http-header-size');
     expect(err.fix).not.toMatch(/try again|retry/i);
+    expect(err.fix).not.toMatch(/nothing was (sent|paid)|authorization/i);
   });
 
   it('is still a plain network failure when the abort is anything else', async () => {

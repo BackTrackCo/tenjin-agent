@@ -1041,8 +1041,11 @@ describe('runPay, a transport failure after the payment was transmitted', () => 
       amountAtomic: '100000',
       settlement: 'unknown',
     });
-    expect((err as CliError).fix).not.toContain('Nothing was paid');
-    expect((err as CliError).fix).toContain('already left');
+    expect((err as CliError).fix).not.toMatch(/nothing was (sent|paid)/i);
+    expect((err as CliError).fix).toContain('authorization was transmitted');
+    expect((err as CliError).fix).toContain('settlement is unknown');
+    // The transport's remedy still rides along, after the leg's own sentence.
+    expect((err as CliError).fix).toContain('--max-http-header-size');
     expect(authorizer.commit).toHaveBeenCalled();
   });
 
@@ -1060,7 +1063,8 @@ describe('runPay, a transport failure after the payment was transmitted', () => 
       authorizer,
     }).catch((e: unknown) => e);
     expect((err as CliError).code).toBe('CHALLENGE_TOO_LARGE');
-    expect((err as CliError).fix).toContain('Nothing was paid');
+    expect((err as CliError).fix).toContain('Nothing was sent and nothing was paid');
+    expect((err as CliError).fix).toContain('--max-http-header-size');
     expect((err as CliError).details).toBeUndefined();
     expect(authorizer.commit).not.toHaveBeenCalled();
   });

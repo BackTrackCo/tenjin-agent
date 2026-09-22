@@ -623,10 +623,12 @@ export function fetchFailureToCliError(
           : 'API_UNREACHABLE';
   // The one failure with a remedy nobody can apply from inside the process, so
   // it names the operator's knob rather than suggesting a retry.
+  // The knob, with no claim about payment: a caller that knows its leg passes
+  // its own `fix` and says what happened to the money there.
   const fix =
     opts.fix ??
     (failure.kind === 'oversized-header'
-      ? 'Nothing was paid. Raising `--max-http-header-size` on the node process that runs this CLI would let the challenge be read; that is an operator decision, not a default this build changes.'
+      ? 'Raising `--max-http-header-size` on the node process that runs this CLI would let the header be read; that is an operator decision, not a default this build changes.'
       : undefined);
   return new CliError(code, failure.message, {
     ...(fix !== undefined ? { fix } : {}),
@@ -663,8 +665,16 @@ function isHeaderOverflow(err: unknown): boolean {
   });
 }
 
-/** The named refusal for that case. NOT a `network` failure: nothing is wrong
- *  with the connection, and a caller that retries gets the same 52 KB again. */
+/**
+ * The named refusal for that case. NOT a `network` failure: nothing is wrong
+ * with the connection, and a caller that retries gets the same 52 KB again.
+ *
+ * SAYS NOTHING ABOUT PAYMENT. This transport serves the unpaid probe and the
+ * paid retry alike and cannot tell them apart, so a message asserting either
+ * way is wrong on one of them: it read as "nothing was sent" on a leg where a
+ * signed authorization had already left. The leg adds that sentence, because
+ * the leg is what knows; see `runPay`.
+ */
 function oversizedHeaderFailure(url: string): FetchJsonFailure {
   let origin = url;
   try {
@@ -676,9 +686,8 @@ function oversizedHeaderFailure(url: string): FetchJsonFailure {
     ok: false,
     kind: 'oversized-header',
     message:
-      `${origin} answered with response headers larger than this process will read. ` +
+      `${origin} answered with a response header block larger than this process will read. ` +
       'An x402 challenge travels in a header, and a seller that embeds its whole output ' +
-      'schema in one can exceed the limit, so the payment terms could not be read and ' +
-      'nothing was sent.',
+      'schema in one can exceed the limit, so the response could not be read.',
   };
 }
