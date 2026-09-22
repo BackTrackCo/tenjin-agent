@@ -283,3 +283,16 @@ async function readLedger(path: string): Promise<LedgerRead> {
     corrupt: field !== undefined && field.length > 0 ? `${field}: ${message}` : message,
   };
 }
+
+export interface SpendSummary {
+  windowStartMs: number;
+  committedAtomic: string;
+  reservations: { amountAtomic: string; atMs: number; requestKey?: string }[];
+}
+
+/** The ledger as a reader sees it, for `tenjin status`. `null` for absent or
+ *  unreadable, which is the same thing to a report: nothing to show. */
+export async function readSpendSummary(dir: string): Promise<SpendSummary | null> {
+  const { ledger } = await readLedger(spendLedgerPath(dir));
+  return ledger;
+}

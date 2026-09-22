@@ -90,3 +90,47 @@ async function pruneExpired(dataDir: string, now: () => number): Promise<void> {
       }),
   );
 }
+
+export interface LatestPacket {
+  /** The opaque per-session key this packet was filed under. */
+  key: string;
+  packet: Packet;
+}
+
+/**
+ * The newest packet on this machine, for a reader that has no session id of its
+ * own: the MCP server is started per session by the harness and never told
+ * which one it serves. `onlyKey` is how it stops guessing after the first
+ * answer, so a second session on the same machine can bleed into at most one
+ * tool call rather than every one.
+ */
+export async function readLatestPacket(
+  dataDir: string,
+  opts: { now?: () => number; onlyKey?: string } = {},
+): Promise<LatestPacket | null> {
+  const now = opts.now ?? Date.now;
+  const dir = routerStateDir(dataDir);
+  let names: string[];
+  try {
+    names = (await readdir(dir)).filter((name) => name.endsWith('.json'));
+  } catch {
+    return null;
+  }
+  let best: { key: string; at: number } | null = null;
+  for (const name of names) {
+    const key = name.slice(0, -'.json'.length);
+    if (opts.onlyKey !== undefined && key !== opts.onlyKey) continue;
+    const found = await stat(join(dir, name)).catch(() => null);
+    if (found === null || now() - found.mtimeMs > MAX_AGE_MS) continue;
+    if (best === null || found.mtimeMs > best.at) best = { key, at: found.mtimeMs };
+  }
+  if (best === null) return null;
+  try {
+    const raw = await readFile(join(dir, `${best.key}.json`), 'utf8');
+    const parsed = FileSchema.safeParse(JSON.parse(raw));
+    if (!parsed.success || now() - parsed.data.writtenAtMs > MAX_AGE_MS) return null;
+    return { key: best.key, packet: parsed.data.packet };
+  } catch {
+    return null;
+  }
+}
