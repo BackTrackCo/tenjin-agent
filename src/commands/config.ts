@@ -785,11 +785,20 @@ export async function persistRouterProject(
   });
 }
 
-/** The spend keys `tenjin install` settles for the router, in atomic USDC. */
+/**
+ * The spend keys `tenjin install` settles for the router, in atomic USDC.
+ *
+ * SIZED FOR A REAL SESSION, not for a demo. At 0.10 and 1.00 a research turn
+ * stalled after about twenty lookups on a refusal the user had done nothing to
+ * deserve; 0.25 a call inside 5.00 a day is the alpha's answer, and `confirm`
+ * stays above the per-call cap so nothing under it ever asks. The cap is also
+ * the whole money story: a wrong or hostile decision spends at most one
+ * `maxAutoSpend` inside `sessionBudget`, whatever it names as a destination.
+ */
 export const ROUTER_DEFAULTS = {
-  maxAutoSpend: '100000',
-  sessionBudget: '1000000',
-  confirm: 'above:100000',
+  maxAutoSpend: '250000',
+  sessionBudget: '5000000',
+  confirm: 'above:250000',
 } as const;
 
 export interface RouterDefaultsResult {

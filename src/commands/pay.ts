@@ -66,9 +66,16 @@ const BODY_PREVIEW_CHARS = 1200;
  * exceed the amount. A caller with no such terms keeps `assertRegistryVerified`.
  */
 export interface AdvertisedTerms {
-  network: string;
-  asset: string;
-  maxAmountAtomic: string;
+  /** Pins the deal's chain and token when the caller was told them. */
+  network?: string;
+  asset?: string;
+  /**
+   * A ceiling the caller was quoted, when there was one. OPTIONAL since the
+   * router stopped quoting a price it could not hold anyone to: the amount
+   * actually signed meets `maxAutoSpend` and `sessionBudget` in `gateSpend`,
+   * and that deterministic local policy is the only payment authority.
+   */
+  maxAmountAtomic?: string;
   /** The advertised recipient, when the caller was given one. Checked exactly. */
   payTo?: string;
   /** Free-text provenance for the payee label, e.g. a registry name. */
@@ -555,13 +562,16 @@ function legFix(failure: { kind: string }): string {
 /** Nothing this caller may pay: no entry at all, or none on the advertised
  *  scheme, network and asset. Refused before a signer is even opened. */
 function noMatchingEntry(challenge: PaymentRequired, terms: AdvertisedTerms | undefined): CliError {
-  // No terms: the 402 simply advertises nothing this wallet can pay, which the
-  // shared refusal already names in the SDK's own vocabulary.
-  if (terms === undefined) return noPayableRequirement(challenge.accepts);
+  // No terms, or terms that pinned no chain and no token: the 402 simply
+  // advertises nothing this wallet can pay, which the shared refusal already
+  // names in the SDK's own vocabulary.
+  if (terms === undefined || (terms.network === undefined && terms.asset === undefined)) {
+    return noPayableRequirement(challenge.accepts);
+  }
   const advertised = challenge.accepts.map((a) => `${a.scheme}/${a.network}/${a.asset}`);
   return new CliError(
     'REGISTRY_MISMATCH',
-    `The 402 advertises nothing on ${terms.network} in ${terms.asset}, which is what this call was authorized against.`,
+    `The 402 advertises nothing on ${terms.network ?? 'any supported chain'} in ${terms.asset ?? 'any supported token'}, which is what this call was authorized against.`,
     {
       fix: 'Nothing was signed. The endpoint changed the deal since those terms were issued; ask for a fresh decision.',
       details: { advertised, terms },
@@ -597,12 +607,14 @@ function selectRequirement(
 function assertWithinTerms(terms: AdvertisedTerms, requirement: PaymentRequirements): string {
   // Scheme, network and asset already matched: `selectRequirement` chose this
   // entry BY them. What is left is the deal's price and its destination.
-  const mismatch =
-    BigInt(requirement.amount) > BigInt(terms.maxAmountAtomic)
-      ? `amount ${requirement.amount} over the advertised ${terms.maxAmountAtomic}`
-      : terms.payTo !== undefined && requirement.payTo.toLowerCase() !== terms.payTo.toLowerCase()
-        ? `payTo ${requirement.payTo}`
-        : undefined;
+  const overQuote =
+    terms.maxAmountAtomic !== undefined &&
+    BigInt(requirement.amount) > BigInt(terms.maxAmountAtomic);
+  const mismatch = overQuote
+    ? `amount ${requirement.amount} over the advertised ${terms.maxAmountAtomic ?? '0'}`
+    : terms.payTo !== undefined && requirement.payTo.toLowerCase() !== terms.payTo.toLowerCase()
+      ? `payTo ${requirement.payTo}`
+      : undefined;
   if (mismatch !== undefined) {
     throw new CliError(
       'REGISTRY_MISMATCH',

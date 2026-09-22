@@ -1,26 +1,13 @@
 {
   "schemaVersion": 1,
   "routerVersion": "2026-09-23.1",
-  "requestId": "2f1c9d64-0f9a-4c53-9a4e-4a1d7d2a9b01",
-  "decision": {
-    "action": "needs_input",
-    "reason": "Missing required value: body.records.0.emails. Jev cannot invent free-form arguments.",
-    "diagnostics": {
-      "reasonCode": "missing_required_argument",
-      "stage": "bind",
-      "missing": ["body.records.0.emails"],
-      "nextAction": "Supply the named argument in the next user message and resend the lookup."
-    }
+  "action": "needs_input",
+  "description": "Missing required value: body.records.0.emails.",
+  "diagnostics": {
+    "reasonCode": "missing_required_argument",
+    "stage": "bind",
+    "missing": ["body.records.0.emails"],
+    "nextAction": "Supply the named argument in the next user message and resend the lookup."
   },
-  "billing": {
-    "settled": false,
-    "amountAtomic": "0",
-    "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-    "network": "eip155:8453",
-    "reasonCode": "waived_needs_input"
-  },
-  "jev": {
-    "calls": 2,
-    "latencyMs": 540
-  }
+  "jev": { "calls": 2, "latencyMs": 540 }
 }

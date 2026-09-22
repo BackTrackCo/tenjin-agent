@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto';
 import { runPay, type AdvertisedTerms, type PayDeps } from '../commands/pay';
 import { CliError } from '../lib/errors';
 import { toMoney } from '../lib/money';
@@ -8,29 +7,31 @@ import type { SpendAuthorizer, WalletProvider } from '../lib/wallet';
 import type { TenjinSigner } from '../lib/wallet/provider';
 import type { CommandContext } from '../context';
 import {
+  fetchPrepared,
   requestDecision,
+  type Decision,
   type DecisionContract,
   type DecisionDiagnostics,
-  type RequirementsCache,
+  type PreparedDecision,
 } from './decision';
-import {
-  consumeGateHint,
-  lookupKeyOf,
-  readLatestPacket,
-  recordNativeContinuation,
-} from './session-file';
 import { MAX_MESSAGE_CHARS, packetForText } from './context';
 
 /**
- * The `request` tool's handler: one paid decision, then one paid provider call,
- * then the result.
+ * The `request` tool: one free decision per lookup, then ONE payment, to the
+ * provider.
  *
- * WHAT IS CHECKED LOCALLY, BEFORE ANYTHING IS SIGNED FOR THE PROVIDER: the
- * decision's arguments against the schema it carries, its success rule against
- * the compiler, its advertised amount against `maxAutoSpend`, and its
- * destination against the shared preflight inside `runPay`. A live 402 above
- * the advertised terms is refused there too. A hostile backend can therefore
- * name any origin, and spend at most one `maxAutoSpend` inside `sessionBudget`.
+ * THE QUERY IS ALWAYS SENT AND THE ID IS ONLY A SHORTCUT. With an id, the tool
+ * runs the decision the hook already prepared and never re-decides. Without
+ * one, or when the id was prepared for an obviously different target, it asks
+ * for exactly one fresh decision from the query and the turn's packet, which is
+ * the pair the routing corpus is calibrated on.
+ *
+ * WHAT IS CHECKED LOCALLY, BEFORE ANYTHING IS SIGNED: the decision's arguments
+ * against the schema it carries, its success rule against the compiler, its
+ * destination against the shared preflight inside `runPay`, and the amount
+ * actually signed against `maxAutoSpend` and `sessionBudget` in `gateSpend`.
+ * That last one is the whole money story: a hostile backend can name any
+ * origin and spend at most one `maxAutoSpend` inside the daily budget.
  *
  * `needs_approval` is a LOCAL outcome only. The server never sends it: it is
  * what a price over the cap, an exhausted budget or an explicit `confirm:
@@ -39,24 +40,19 @@ import { MAX_MESSAGE_CHARS, packetForText } from './context';
 
 export interface RequestToolArgs {
   query: string;
+  /** The prepared decision from the hook's line. A shortcut, never authority. */
+  id?: string;
 }
 
 export interface RequestToolDeps {
   ctx: CommandContext;
-  signer: TenjinSigner;
-  /** The SAME provider the decision leg used. `runPay` opens its own otherwise,
-   *  and the local one re-runs scrypt per process, which is the 2.3 s the MCP
-   *  server's background unlock exists to hide. */
+  /** The SAME provider the MCP server pre-warmed. `runPay` opens its own
+   *  otherwise, and the local one re-runs scrypt per process, which is the
+   *  2.3 s the background unlock exists to hide. */
   provider?: WalletProvider;
+  signer?: TenjinSigner;
   authorizer: SpendAuthorizer;
-  cache: RequirementsCache;
   fetchImpl?: typeof fetch;
-  /** Set once the process has answered from one session's packet. */
-  sessionKey?: string;
-  /** When the reading process started; a packet older than it is another
-   *  window's. Omitted by a caller that has no such boundary. */
-  startedAtMs?: number;
-  now?: () => number;
   /** Test seam forwarded to the provider leg. */
   payDeps?: PayDeps;
 }
@@ -65,8 +61,6 @@ export interface RequestToolResult {
   isError: boolean;
   summary: string;
   envelope: Record<string, unknown>;
-  /** The session key this call bound to, for the caller to latch onto. */
-  sessionKey?: string;
 }
 
 export async function runRequestTool(
@@ -81,124 +75,73 @@ export async function runRequestTool(
     );
   }
   const settings = await resolveContextSettings(deps.ctx);
-  const latest = await readLatestPacket(deps.ctx.dataDir, {
-    ...(deps.now !== undefined ? { now: deps.now } : {}),
-    ...(deps.sessionKey !== undefined
-      ? { onlyKey: deps.sessionKey }
-      : deps.startedAtMs !== undefined
-        ? { sinceMs: deps.startedAtMs }
-        : {}),
-  });
-  const sessionKey = latest?.key ?? deps.sessionKey;
+  const decisionDeps = {
+    ctx: deps.ctx,
+    baseUrl: settings.baseUrl,
+    ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+  };
 
-  // THE GATE'S CATEGORY FOR THIS TURN, AS EVIDENCE FOR THIS LOOKUP. Consumed,
-  // so the second lookup of a turn and any parallel one send none: evidence
-  // about one question is not evidence about the next. It never authorizes
-  // money, which stays with the local spend policy, and the backend is free to
-  // refine or reject it.
-  const category =
-    latest !== null && sessionKey !== undefined
-      ? await consumeGateHint(deps.ctx.dataDir, sessionKey, latest.writtenAtMs, deps.now)
-      : null;
-
-  const outcome = await requestDecision(
-    // No packet is the subagent, restarted-session and expired-packet path the
-    // plan calls "route on query alone": the query becomes the current message,
-    // because the server refuses an empty one and the fee is already spent.
-    {
-      requestId: randomUUID(),
-      query,
-      packet: latest?.packet ?? packetForText(query.slice(0, MAX_MESSAGE_CHARS)),
-      ...(category !== null && latest !== null
-        ? {
-            gateHint: {
-              category,
-              turnId: String(latest.writtenAtMs),
-              lookupId: lookupKeyOf(query),
-            },
-          }
-        : {}),
-    },
-    {
-      ctx: deps.ctx,
-      baseUrl: settings.baseUrl,
-      signer: deps.signer,
-      authorizer: deps.authorizer,
-      cache: deps.cache,
-      ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
-    },
-  );
-  if (outcome.status === 'needs_approval') {
-    return withKey(fail('needs_approval', outcome.reason, outcome.committedAtomic), sessionKey);
-  }
-  if (outcome.status === 'failed') {
-    return withKey(
-      fail('failed', outcome.reason, outcome.committedAtomic, 0n, {
-        // The backend's own stable code, so a host reads a typed refusal rather
-        // than guessing at prose.
-        ...(outcome.errorCode !== undefined ? { errorCode: outcome.errorCode } : {}),
-      }),
-      sessionKey,
-    );
-  }
-
-  // TWO NUMBERS, AND THE FEE IS THE SETTLED ONE. The router waives the fee for
-  // every outcome it cannot execute, so reporting the signed amount as a charge
-  // would tell the model a `native` answer cost money it was not charged. The
-  // authorization still left, so the exposure rides along whenever it differs.
-  const routerFeeAtomic = outcome.settledAtomic;
-  const routerExposureAtomic = outcome.amountAtomic;
-  const exposure =
-    routerExposureAtomic === routerFeeAtomic ? {} : { exposureAtomic: routerExposureAtomic };
-  const { decision } = outcome.response;
-  if (decision.action !== 'execute' || decision.contract === undefined) {
-    // An explicit `native` was BOUGHT for this exact lookup in this turn, so
-    // the PreToolUse hook must not ask the gate about it again and be told to
-    // redirect the call the same decision just permitted. Recorded only for
-    // `native`, only against this session's current packet stamp, and only for
-    // this query; `needs_input` gets nothing, because unresolved scope is a
-    // question for the user, never standing permission.
-    if (decision.action === 'native' && sessionKey !== undefined && latest !== null) {
-      await recordNativeContinuation(
-        deps.ctx.dataDir,
-        sessionKey,
-        latest.writtenAtMs,
-        query,
-        deps.now,
-      ).catch(() => undefined);
+  // THE FAST PATH. An id the hook handed out runs the decision that was already
+  // made for this turn. A `pending` row means the background binder has not
+  // finished, and an expired or failed one is not an error: both fall through
+  // to one fresh decision from the query, which is the accurate path anyway.
+  let decision: Decision | PreparedDecision | null = null;
+  let usedId = false;
+  if (args.id !== undefined && args.id.length > 0) {
+    const prepared = await fetchPrepared(args.id, decisionDeps);
+    if (
+      prepared.status === 'decided' &&
+      usable(prepared.decision) &&
+      matches(prepared.decision, query)
+    ) {
+      decision = prepared.decision;
+      usedId = true;
     }
-    return withKey(
-      fail(
-        decision.action === 'native' ? 'native' : 'needs_input',
-        decision.reason ?? 'The router did not select a paid capability.',
-        routerFeeAtomic,
-        0n,
-        {
-          ...exposure,
-          ...(decision.diagnostics !== undefined ? { diagnostics: decision.diagnostics } : {}),
-        },
-      ),
-      sessionKey,
+  }
+
+  if (decision === null) {
+    // No packet of our own: the backend holds the turn's packet against the id,
+    // and the query the model sends is the current message when it does not.
+    const fresh = await requestDecision(
+      {
+        query,
+        packet: packetForText(query.slice(0, MAX_MESSAGE_CHARS)),
+        ...(args.id !== undefined ? { id: args.id } : {}),
+      },
+      decisionDeps,
+    );
+    if (fresh.status === 'failed') {
+      return fail('failed', fresh.reason, {
+        ...(fresh.errorCode !== undefined ? { errorCode: fresh.errorCode } : {}),
+      });
+    }
+    decision = fresh.decision;
+  }
+
+  if (decision.action !== 'execute' || decision.contract === undefined) {
+    return fail(
+      decision.action === 'native' ? 'native' : 'needs_input',
+      decision.description ?? 'The router did not select a paid capability.',
+      {
+        ...(decision.diagnostics !== undefined ? { diagnostics: decision.diagnostics } : {}),
+        usedPreparedDecision: usedId,
+      },
     );
   }
 
   const contract = decision.contract;
-  const refusal = checkContract(contract, BigInt(settings.policy.maxAutoSpendAtomic));
-  if (refusal !== null)
-    return withKey(fail(refusal.status, refusal.reason, routerFeeAtomic, 0n, exposure), sessionKey);
+  const refusal = checkContract(contract);
+  if (refusal !== null) return fail(refusal.status, refusal.reason);
 
-  const terms: AdvertisedTerms = {
-    network: contract.advertised.network,
-    asset: contract.advertised.asset,
-    maxAmountAtomic: contract.advertised.maxAmountAtomic,
-    source: decision.capabilityId ?? 'a routing decision',
-  };
+  // The router handed this caller the destination, which is the provenance the
+  // Bazaar lane asks for. It carries NO price: the advertised-price check and
+  // the live-versus-advertised check are gone, and `gateSpend` caps the amount
+  // actually signed. A ceiling the server states is not a ceiling.
+  const terms: AdvertisedTerms = { source: decision.provider ?? 'a routing decision' };
 
   try {
     // The request is the server's, sent verbatim: the only thing built here is
-    // the decision about whether to send it, and the fee is already committed
-    // by this point, so a refusal has to come back as the envelope that names
-    // it rather than as a throw out of the tool.
+    // the decision about whether to send it.
     const built = contract.request;
     const paid = await runPay(
       {
@@ -207,7 +150,7 @@ export async function runRequestTool(
         headers: built.headers,
         ...(built.body !== undefined ? { rawBody: built.body } : {}),
         terms,
-        requestKey: `${decision.capabilityId ?? 'capability'}:${canonicalHash(contract.arguments)}`,
+        requestKey: `${decision.id ?? 'lookup'}:${canonicalHash(contract.arguments ?? {})}`,
         ...(contract.resultSchema !== undefined ? { resultSchema: contract.resultSchema } : {}),
         printBody: true,
       },
@@ -227,54 +170,37 @@ export async function runRequestTool(
       resultCaveat?: string;
     };
     const providerAtomic = BigInt(data.amountPaid?.atomic ?? '0');
-    const costs = costLines(routerFeeAtomic, providerAtomic);
+    const base = {
+      supplier: supplierOf(built.url),
+      ...(contract.arguments !== undefined ? { parameters: contract.arguments } : {}),
+      cost: costLines(providerAtomic),
+      usedPreparedDecision: usedId,
+      result: data.bodyText ?? '',
+      providerContentUntrusted: true,
+    };
     // UNVERIFIED IS NOT FULFILLED. A body the success rule could not be run
     // against may be exactly the contract failure the rule exists to catch, and
     // a caveat inside a `fulfilled` envelope does not reach code that branches
     // on the status: a provider could pad a broken answer past the validation
-    // limit and have it read as a checked, paid result. So the status says what
-    // is true, and `isError` carries it to consumers that read nothing else.
-    // The body still rides along, whole: the money moved, and truncating or
-    // withholding the product would be a second loss on top of the first.
+    // limit and have it read as a checked, paid result. The body still rides
+    // along whole, because the money moved and withholding the product would be
+    // a second loss on top of the first.
     if (data.resultUnverified === true) {
-      return withKey(
-        {
-          isError: true,
-          summary: `Unverified result from ${supplierOf(built.url)} \u00b7 ${costs.join(' \u00b7 ')}`,
-          envelope: {
-            status: 'unverified',
-            supplier: supplierOf(built.url),
-            parameters: contract.arguments,
-            cost: costs,
-            ...(routerExposureAtomic !== routerFeeAtomic
-              ? { authorizationExposure: toMoney(routerExposureAtomic.toString()).usd }
-              : {}),
-            result: data.bodyText ?? '',
-            ...(data.resultCaveat !== undefined ? { resultCaveat: data.resultCaveat } : {}),
-            providerContentUntrusted: true,
-          },
-        },
-        sessionKey,
-      );
-    }
-    return withKey(
-      {
-        isError: false,
-        summary: `Fulfilled by ${supplierOf(built.url)} \u00b7 ${costs.join(' \u00b7 ')}`,
+      return {
+        isError: true,
+        summary: `Unverified result from ${base.supplier} · ${base.cost.join(' · ')}`,
         envelope: {
-          status: 'fulfilled',
-          supplier: supplierOf(built.url),
-          parameters: contract.arguments,
-          cost: costs,
-          ...(routerExposureAtomic !== routerFeeAtomic
-            ? { authorizationExposure: toMoney(routerExposureAtomic.toString()).usd }
-            : {}),
-          result: data.bodyText ?? '',
-          providerContentUntrusted: true,
+          status: 'unverified',
+          ...base,
+          ...(data.resultCaveat !== undefined ? { resultCaveat: data.resultCaveat } : {}),
         },
-      },
-      sessionKey,
-    );
+      };
+    }
+    return {
+      isError: false,
+      summary: `Fulfilled by ${base.supplier} · ${base.cost.join(' · ')}`,
+      envelope: { status: 'fulfilled', ...base },
+    };
   } catch (err) {
     const cli = err instanceof CliError ? err : undefined;
     const status = cli?.code === 'POLICY_REFUSED' ? 'needs_approval' : 'failed';
@@ -287,24 +213,57 @@ export async function runRequestTool(
       settlement?: string;
       diagnosis?: Record<string, unknown>;
     };
-    const providerAtomic = BigInt(detail.amountAtomic ?? '0');
-    return withKey(
-      fail(status, reason, routerFeeAtomic, providerAtomic, {
-        ...exposure,
-        ...(detail.settlement !== undefined ? { settlement: detail.settlement } : {}),
-        ...(detail.diagnosis !== undefined ? { diagnosis: detail.diagnosis } : {}),
-      }),
-      sessionKey,
-    );
+    return fail(status, reason, {
+      providerAtomic: BigInt(detail.amountAtomic ?? '0'),
+      ...(detail.settlement !== undefined ? { settlement: detail.settlement } : {}),
+      ...(detail.diagnosis !== undefined ? { diagnosis: detail.diagnosis } : {}),
+      usedPreparedDecision: usedId,
+    });
+  }
+}
+
+/** A prepared row this tool can act on at all. */
+function usable(prepared: PreparedDecision): boolean {
+  if (prepared.state === 'pending' || prepared.state === 'binding_failed') return false;
+  if (prepared.state === 'expired') return false;
+  return prepared.action !== 'execute' || prepared.contract !== undefined;
+}
+
+/**
+ * THE ONE MISMATCH RULE, and it is deliberately blunt: when the query names an
+ * explicit http(s) URL and the prepared call targets a DIFFERENT one, the id
+ * was prepared for another lookup and is ignored. No new classifier call, no
+ * topic guessing; anything subtler is the backend's to catch, since it compares
+ * the incoming query with the prepared one and re-decides when they differ.
+ */
+export function matches(prepared: PreparedDecision, query: string): boolean {
+  const asked = firstUrl(query);
+  if (asked === null) return true;
+  const target = prepared.contract !== undefined ? firstUrl(prepared.contract.request.url) : null;
+  const inside =
+    prepared.contract !== undefined
+      ? firstUrl(JSON.stringify(prepared.contract.arguments ?? {}))
+      : null;
+  if (target === null && inside === null) return true;
+  return asked === target || asked === inside;
+}
+
+/** The first http(s) URL in a string, compared by origin and path only: a
+ *  tracking parameter is not a different page. */
+function firstUrl(text: string): string | null {
+  const match = /https?:\/\/[^\s"'<>)\]]+/i.exec(text);
+  if (match === null) return null;
+  try {
+    const url = new URL(match[0]);
+    return `${url.protocol}//${url.host.toLowerCase()}${url.pathname.replace(/\/$/, '')}`;
+  } catch {
+    return null;
   }
 }
 
 type FailStatus = 'failed' | 'needs_approval' | 'needs_input' | 'native';
 
-function checkContract(
-  contract: DecisionContract,
-  maxAutoSpendAtomic: bigint,
-): { status: FailStatus; reason: string } | null {
+function checkContract(contract: DecisionContract): { status: FailStatus; reason: string } | null {
   const built = contract.request;
   if (built.method !== 'GET' && built.method !== 'POST') {
     return {
@@ -322,12 +281,14 @@ function checkContract(
   if (built.method === 'GET' && built.body !== undefined) {
     return { status: 'failed', reason: 'The decision puts a body on a GET.' };
   }
-  const check = validateAgainstSchema(contract.argumentSchema, contract.arguments);
-  if (!check.valid) {
-    return {
-      status: 'failed',
-      reason: `The decision's arguments fail its own schema: ${check.errors[0]}`,
-    };
+  if (contract.argumentSchema !== undefined) {
+    const check = validateAgainstSchema(contract.argumentSchema, contract.arguments ?? {});
+    if (!check.valid) {
+      return {
+        status: 'failed',
+        reason: `The decision's arguments fail its own schema: ${check.errors[0]}`,
+      };
+    }
   }
   if (contract.resultSchema !== undefined) {
     try {
@@ -345,12 +306,6 @@ function checkContract(
     new URL(built.url);
   } catch {
     return { status: 'failed', reason: 'The decision names a URL this build cannot parse.' };
-  }
-  if (BigInt(contract.advertised.maxAmountAtomic) > maxAutoSpendAtomic) {
-    return {
-      status: 'needs_approval',
-      reason: `The capability advertises ${toMoney(contract.advertised.maxAmountAtomic).usd} USD, above maxAutoSpend. Raise it with \`tenjin config set maxAutoSpend <usd>\` if that price is acceptable.`,
-    };
   }
   return null;
 }
@@ -378,32 +333,33 @@ function supplierOf(url: string): string {
   }
 }
 
-export function costLines(routerFeeAtomic: bigint, providerAtomic: bigint): string[] {
-  return [
-    `router fee ${toMoney(routerFeeAtomic.toString()).usd} USD`,
-    `provider price ${toMoney(providerAtomic.toString()).usd} USD`,
-  ];
+/** ONE COST LINE, because there is one payment: the provider's. */
+export function costLines(providerAtomic: bigint): string[] {
+  return [`provider price ${toMoney(providerAtomic.toString()).usd} USD`];
 }
 
 /**
  * ROUTINE CONTROL OUTCOMES, not failures of this tool. A routing decision was
- * delivered, and it says the turn continues somewhere else: with the host's own
- * tools, with a question for the user, or with an approval only the user gives.
- * The MCP error flag is for what went WRONG, and raising it on these three put
- * a red box in front of the user on the most ordinary answer the router has.
- *
- * Genuine request, provider and schema failures stay errors, and so does a paid
- * body that could not be verified: delivering a routing outcome is not a claim
- * that a provider fulfilled anything.
+ * delivered and it says the turn continues somewhere else: with the host's own
+ * tools, with a question for the user, or with an approval the user gives. The
+ * MCP error flag is for what went WRONG, and raising it on these three put a
+ * red box in front of the user on the most ordinary answer the router has.
  */
 const ROUTINE: ReadonlySet<FailStatus> = new Set(['native', 'needs_input', 'needs_approval']);
 
+/** One short line saying what the host does next, per routine outcome. */
+const NEXT_STEP: Record<string, string> = {
+  native: 'Continue with your own tools. Nothing was bought.',
+  needs_input:
+    'Ask the user for the missing detail, then call `request` again with it. Nothing was bought.',
+  needs_approval:
+    'Report the command above to the user; this build will not raise a spend limit on its own.',
+};
+
 /**
- * The four outcomes the target step now splits into (contract amendment
- * 2026-09-23), each with the step that actually follows from it. The backend's
- * own `nextAction` wins whenever it sent one; this is what a host is told when
- * the code arrives without it, and it is the difference between "could not
- * resolve the scope" and knowing whether to re-ask, re-query or move on.
+ * The four outcomes the target step splits into, each with the step that
+ * actually follows from it. The backend's own `nextAction` wins whenever it
+ * sent one; this is what a host is told when the code arrives without it.
  */
 const NEXT_STEP_BY_REASON: Record<string, string> = {
   page_target: 'That URL is the lookup itself; call `request` again with the URL as the query.',
@@ -415,27 +371,8 @@ const NEXT_STEP_BY_REASON: Record<string, string> = {
     'The router could not classify this one and charged nothing. Continue with your own tools, or call `request` once more.',
 };
 
-/** One short line saying what the host does next, per routine outcome. */
-const NEXT_STEP: Record<string, string> = {
-  native: 'Continue with your own tools. Nothing was bought.',
-  needs_input:
-    'Ask the user for the missing detail, then call `request` again with it. Nothing was bought.',
-  needs_approval:
-    'Report the command above to the user; this build will not raise a spend limit on its own.',
-};
-
-/** The headline: calm for a routine outcome, explicit for a real failure. */
-function summaryFor(status: FailStatus, reason: string): string {
-  if (status === 'native') return `No paid lookup needed: ${reason}`;
-  if (status === 'needs_input') return `More input needed: ${reason}`;
-  if (status === 'needs_approval') return `Approval needed: ${reason}`;
-  return `x402 request ${status}: ${reason}`;
-}
-
 interface FailExtras {
-  /** What was AUTHORIZED when that is more than what settled: a waived fee
-   *  leaves a signed authorization behind, and the host is told so. */
-  exposureAtomic?: bigint;
+  providerAtomic?: bigint;
   settlement?: string;
   /** Which rule failed, whether the body was JSON, its size and a bounded
    *  redacted preview: what tells a parse miss from an HTML error page. */
@@ -444,6 +381,16 @@ interface FailExtras {
   errorCode?: string;
   /** What stopped a non-execute decision, in the backend's own terms. */
   diagnostics?: DecisionDiagnostics;
+  /** Whether this answer came from the hook's prepared decision. */
+  usedPreparedDecision?: boolean;
+}
+
+/** The headline: calm for a routine outcome, explicit for a real failure. */
+function summaryFor(status: FailStatus, reason: string): string {
+  if (status === 'native') return `No paid lookup needed: ${reason}`;
+  if (status === 'needs_input') return `More input needed: ${reason}`;
+  if (status === 'needs_approval') return `Approval needed: ${reason}`;
+  return `x402 request ${status}: ${reason}`;
 }
 
 /** The backend's own instruction, then the one its reasonCode implies, then the
@@ -456,13 +403,7 @@ function nextStepFor(status: FailStatus, diagnostics: DecisionDiagnostics | unde
   return byReason ?? NEXT_STEP[status] ?? '';
 }
 
-function fail(
-  status: FailStatus,
-  reason: string,
-  routerFeeAtomic = 0n,
-  providerAtomic = 0n,
-  extras: FailExtras = {},
-): RequestToolResult {
+function fail(status: FailStatus, reason: string, extras: FailExtras = {}): RequestToolResult {
   const routine = ROUTINE.has(status);
   const { diagnostics } = extras;
   return {
@@ -472,10 +413,9 @@ function fail(
       status,
       reason,
       ...(extras.errorCode !== undefined ? { errorCode: extras.errorCode } : {}),
-      // The status is the fact; the next step is what to do about it. A routine
-      // outcome carries both, because an answer with no instruction is what
-      // makes a model treat an ordinary `native` as a dead end. The BACKEND'S
-      // own next action wins when it sent one: it knows which field is missing.
+      // The status is the fact; the next step is what to do about it. The
+      // BACKEND'S own next action wins when it sent one: it knows which field
+      // is missing.
       ...(routine || diagnostics !== undefined
         ? { nextStep: nextStepFor(status, diagnostics) }
         : {}),
@@ -486,22 +426,15 @@ function fail(
             ...(diagnostics.missing.length > 0 ? { missing: diagnostics.missing } : {}),
           }
         : {}),
-      // WHAT WAS CHARGED, not what was authorized: the router waives the fee on
-      // every outcome it cannot execute, and reporting the signed amount there
-      // told the model an answer cost money it was never charged.
-      cost: costLines(routerFeeAtomic, providerAtomic),
-      // And what LEFT, whenever the two differ. A signed authorization is a
-      // bearer instrument; a body saying "no charge" does not revoke it.
-      ...(extras.exposureAtomic !== undefined
-        ? { authorizationExposure: toMoney(extras.exposureAtomic.toString()).usd }
+      // What LEFT, not what was delivered: an authorization that was
+      // transmitted is money at risk whether or not a result came back.
+      cost: costLines(extras.providerAtomic ?? 0n),
+      ...(extras.usedPreparedDecision !== undefined
+        ? { usedPreparedDecision: extras.usedPreparedDecision }
         : {}),
       ...(extras.settlement !== undefined ? { settlement: extras.settlement } : {}),
       ...(extras.diagnosis !== undefined ? { diagnosis: extras.diagnosis } : {}),
       providerContentUntrusted: true,
     },
   };
-}
-
-function withKey(result: RequestToolResult, sessionKey: string | undefined): RequestToolResult {
-  return sessionKey === undefined ? result : { ...result, sessionKey };
 }

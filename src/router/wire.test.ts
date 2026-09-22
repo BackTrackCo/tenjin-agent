@@ -2,168 +2,93 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import gateRequest from './fixtures/wire-gate-request.json' with { type: 'json' };
-import decisionGet from './fixtures/wire-decision-get.json' with { type: 'json' };
-import decisionPost from './fixtures/wire-decision-post.json' with { type: 'json' };
-import decisionNative from './fixtures/wire-decision-native.json' with { type: 'json' };
-import decisionNeedsInput from './fixtures/wire-decision-needs-input.json' with { type: 'json' };
-import decisionUnsupported from './fixtures/wire-decision-unsupported.json' with { type: 'json' };
-import decisionClassifier from './fixtures/wire-decision-classifier-unavailable.json' with { type: 'json' };
-import errorResponse from './fixtures/wire-error-response.json' with { type: 'json' };
-import { buildGateBody, GATE_TIMEOUT_MS } from './gate';
+import { parseDecisionForTests, parsePreparedForTests } from './decision';
+import { GATE_TIMEOUT_MS } from './gate';
 import { MAX_PACKET_BYTES, type Packet } from './context';
 import { STDIN_TIMEOUT_MS } from './hook-command';
 import { HOOK_TIMEOUT_SECONDS } from './install';
 
 /**
- * The wire, pinned to bytes. These three fixtures are the SHARED ones: the same
- * files live beside tenjin's `lib/x402-router/wire.ts`, which parses them with
- * the schemas this client writes against, so a rename on either side fails a
- * test in both repos instead of 400ing a paid request in production.
+ * The wire, pinned to bytes. These payloads are the SHARED ones: the same
+ * shapes live beside tenjin's `lib/x402-router/`, which parses them with the
+ * schemas this client writes against, so a rename on either side fails a test
+ * in both repos instead of 400ing a lookup in production.
+ *
+ * THEY ARE READ FROM THE DIRECTORY, never from a hand-written import list. A
+ * payload the canonical set gains and a list never names is how a nested field
+ * shipped unparsed three times.
  */
 
-describe('the gate request body', () => {
-  it('is exactly schemaVersion, source and packet, with the pending call inside', () => {
-    const packet = gateRequest.packet as unknown as Packet;
-    const built = buildGateBody({ source: 'native', packet });
-    expect(built).toEqual(gateRequest);
-    // The server reads this with a STRICT object: a pending call beside the
-    // packet is a 400, which `askGate` maps to null and the native hook reads
-    // as allow, so every redirect would be silently dead.
-    expect(Object.keys(built).sort()).toEqual(['packet', 'schemaVersion', 'source']);
-    expect((built.packet as Packet).pendingCall).toEqual({
-      tool: 'WebSearch',
-      query: 'btc eth price today',
-    });
-  });
+const dir = fileURLToPath(new URL('./fixtures/', import.meta.url));
 
-  it('keeps a prompt body free of the pending call', () => {
-    const rest = { ...gateRequest.packet, pendingCall: undefined };
-    delete (rest as { pendingCall?: unknown }).pendingCall;
-    const built = buildGateBody({ source: 'prompt', packet: rest as unknown as Packet });
-    expect(built).toEqual({ schemaVersion: 1, source: 'prompt', packet: rest });
+function fixture(name: string): Record<string, unknown> {
+  return JSON.parse(readFileSync(join(dir, name), 'utf8')) as Record<string, unknown>;
+}
+
+function namesStartingWith(prefix: string): string[] {
+  return readdirSync(dir).filter((name) => name.startsWith(prefix));
+}
+
+describe('the decision request body', () => {
+  it('is the query and the packet, and nothing about money', () => {
+    const request = fixture('wire-decision-request.json');
+    expect(Object.keys(request).sort()).toEqual(['packet', 'query', 'schemaVersion']);
+    // No fee means no admission token, no billing and no payment header.
+    expect(JSON.stringify(request)).not.toMatch(/billing|admission|payment/i);
   });
 
   it('fits the packet cap the server enforces', () => {
-    expect(Buffer.byteLength(JSON.stringify(gateRequest.packet))).toBeLessThanOrEqual(
-      MAX_PACKET_BYTES,
-    );
+    const request = fixture('wire-decision-request.json');
+    expect(Buffer.byteLength(JSON.stringify(request.packet))).toBeLessThanOrEqual(MAX_PACKET_BYTES);
+    expect((request.packet as Packet).historyStatus).toBe('ok');
   });
 });
 
-describe('the paid decision body', () => {
-  it.each([
-    ['a GET capability', decisionGet],
-    ['a POST capability', decisionPost],
-  ])('carries flat arguments and a finished request for %s', (_label, fixture) => {
-    const contract = fixture.decision.contract as Record<string, unknown>;
-    const built = contract.request as Record<string, unknown>;
-    // Flat, keyed by argument name: the binding-keyed shape the first draft of
-    // the server used would pass this client's Ajv check and then be sent as a
-    // body nobody's schema describes.
-    expect(Object.keys(contract.arguments as object)).not.toContain('body');
-    expect(Object.keys(contract.arguments as object)).not.toContain('query');
-    expect(Object.keys(built).sort()).toEqual(
-      built.body === undefined
-        ? ['headers', 'method', 'url']
-        : ['body', 'headers', 'method', 'url'],
+describe('every decision payload on disk', () => {
+  it('parses with the schema this client runs', () => {
+    const decisions = namesStartingWith('wire-decision-').filter(
+      (name) => name !== 'wire-decision-request.json',
     );
-    for (const name of Object.keys(built.headers as object)) {
-      expect(['accept', 'content-type']).toContain(name);
+    const prepared = namesStartingWith('wire-prepared-');
+    expect(decisions.length).toBeGreaterThanOrEqual(3);
+    expect(prepared.length).toBeGreaterThanOrEqual(2);
+    for (const name of decisions) {
+      expect(parseDecisionForTests(fixture(name)), `${name}`).toMatchObject({ success: true });
+    }
+    for (const name of prepared) {
+      expect(parsePreparedForTests(fixture(name)), `${name}`).toMatchObject({ success: true });
     }
   });
 
-  it('puts the GET arguments on the URL the server built, not the client', () => {
-    const built = decisionGet.decision.contract.request;
-    expect(built.url).toContain('symbol=BTC%2CETH');
-    expect(built.url).toContain('convert=USD');
-    expect('body' in built).toBe(false);
-  });
-
-  /**
-   * EVERY decision fixture on disk, found by reading the directory rather than
-   * by listing them here. A payload the canonical set gained and this test
-   * never named is how a nested field shipped unparsed three times: an
-   * unlisted fixture now fails this test instead of a paid request.
-   */
-  it('is what the schema in this repo accepts, as committed', async () => {
-    const { parseDecisionForTests } = await import('./decision');
-    const dir = fileURLToPath(new URL('./fixtures/', import.meta.url));
-    const names = readdirSync(dir).filter((name) => name.startsWith('wire-decision-'));
-    expect(names.length).toBeGreaterThanOrEqual(6);
-    for (const name of names) {
-      const fixture: unknown = JSON.parse(readFileSync(join(dir, name), 'utf8'));
-      expect(
-        parseDecisionForTests(fixture),
-        `${name} must parse with the schema this client runs`,
-      ).toMatchObject({ success: true });
+  it('carries no fee, no billing and no settlement anywhere', () => {
+    for (const name of readdirSync(dir)) {
+      expect(readFileSync(join(dir, name), 'utf8')).not.toMatch(
+        /billing|settled|routerFee|amountAtomic"/i,
+      );
     }
-    // And the fixture files on disk are the bytes, not a re-serialization.
-    const raw = readFileSync(new URL('./fixtures/wire-decision-get.json', import.meta.url), 'utf8');
-    expect(JSON.parse(raw)).toEqual(decisionGet);
-  });
-});
-
-/**
- * THE 2026-09-23 LOOKUP CONTRACT, pinned to bytes like everything else here.
- * `billing` rides on every 200 and `diagnostics` on every outcome this client
- * cannot execute; both are REQUIRED, because nothing is released and there is
- * no older server to be compatible with. A response missing either is a
- * protocol error, not a legacy path.
- */
-describe('the billing and diagnostics contract', () => {
-  it('refuses a decision with no billing at all', async () => {
-    const { parseDecisionForTests } = await import('./decision');
-    const { billing, ...withoutBilling } = decisionGet as Record<string, unknown>;
-    expect(billing).toBeDefined();
-    expect(parseDecisionForTests(withoutBilling).success).toBe(false);
   });
 
-  it('refuses a non-execute decision with no diagnostics', async () => {
-    const { parseDecisionForTests } = await import('./decision');
-    const { diagnostics, ...decisionFields } = decisionNative.decision as Record<string, unknown>;
-    expect(diagnostics).toBeDefined();
-    expect(parseDecisionForTests({ ...decisionNative, decision: decisionFields }).success).toBe(
-      false,
-    );
-  });
-
-  it('carries a waived fee on every outcome the router cannot execute', () => {
-    for (const fixture of [
-      decisionNative,
-      decisionNeedsInput,
-      decisionUnsupported,
-      decisionClassifier,
-    ]) {
-      expect(fixture.decision.action).not.toBe('execute');
-      expect(fixture.billing.settled).toBe(false);
-      expect(fixture.billing.amountAtomic).toBe('0');
-      expect(fixture.billing.reasonCode.startsWith('waived_')).toBe(true);
-    }
-    expect(decisionGet.billing).toMatchObject({ settled: true, reasonCode: 'executed' });
-  });
-
-  /** Every waived outcome names the stage that stopped and one next action, so
-   *  a host is never left with "could not resolve the scope" and nothing else. */
-  it('gives every waived outcome a stage and a next action', () => {
-    for (const fixture of [
-      decisionNative,
-      decisionNeedsInput,
-      decisionUnsupported,
-      decisionClassifier,
-    ]) {
-      const diagnostics = fixture.decision.diagnostics;
+  it('gives every outcome the host cannot execute a stage and a next action', () => {
+    for (const name of ['wire-decision-native.json', 'wire-decision-needs-input.json']) {
+      const diagnostics = fixture(name).diagnostics as {
+        stage: string;
+        nextAction: string;
+        missing: string[];
+      };
       expect(diagnostics.stage.length).toBeGreaterThan(0);
       expect(diagnostics.nextAction.length).toBeGreaterThan(0);
     }
     // The classifier's own failure is never reported as a field the user withheld.
-    expect(decisionClassifier.decision.diagnostics.reasonCode).toBe('classifier_failure');
-    expect(decisionClassifier.decision.diagnostics.missing).toEqual([]);
-    expect(decisionNeedsInput.decision.diagnostics.missing.length).toBeGreaterThan(0);
+    const failed = fixture('wire-prepared-binding-failed.json').diagnostics as {
+      reasonCode: string;
+      missing: string[];
+    };
+    expect(failed.reasonCode).toBe('classifier_failure');
+    expect(failed.missing).toEqual([]);
   });
 
   it('is the shape a typed refusal arrives in', () => {
-    expect(errorResponse.error).toMatchObject({
+    expect(fixture('wire-error-response.json').error).toMatchObject({
       code: expect.any(String) as unknown as string,
       message: expect.any(String) as unknown as string,
     });
@@ -171,7 +96,7 @@ describe('the billing and diagnostics contract', () => {
 });
 
 describe('the hook time budget', () => {
-  it('fits stdin plus the gate inside the timeout install writes', () => {
+  it('fits stdin plus the decision inside the timeout install writes', () => {
     const budget = HOOK_TIMEOUT_SECONDS * 1_000;
     expect(STDIN_TIMEOUT_MS + GATE_TIMEOUT_MS).toBeLessThan(budget);
     // Node's boot and the transcript read happen inside the same budget, so the

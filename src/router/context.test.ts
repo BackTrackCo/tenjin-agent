@@ -3,7 +3,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { MAX_PACKET_BYTES, buildPromptPacket, literalUrlsIn } from './context';
-import { readSessionPacket, writeSessionPacket } from './session-file';
 
 const dirs: string[] = [];
 async function transcript(rows: unknown[]): Promise<string> {
@@ -12,11 +11,6 @@ async function transcript(rows: unknown[]): Promise<string> {
   const path = join(dir, 'session.jsonl');
   await writeFile(path, rows.map((r) => JSON.stringify(r)).join('\n'));
   return path;
-}
-async function tempDir(): Promise<string> {
-  const dir = await mkdtemp(join(tmpdir(), 'router-state-'));
-  dirs.push(dir);
-  return dir;
 }
 afterEach(async () => {
   await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
@@ -131,69 +125,6 @@ describe('the prompt packet', () => {
       historyStatus: 'ok',
       history: [],
     });
-  });
-});
-
-describe('the session packet file', () => {
-  it('round-trips a packet and keeps the session id out of the path', async () => {
-    const dir = await tempDir();
-    const packet = await buildPromptPacket(undefined, 's', 'hello');
-    await writeSessionPacket(dir, 'session/../../escape', packet);
-    expect(await readSessionPacket(dir, 'session/../../escape')).toEqual(packet);
-    expect(await readSessionPacket(dir, 'another-session')).toBeNull();
-  });
-
-  it('expires an old packet rather than routing on stale conversation', async () => {
-    const dir = await tempDir();
-    const packet = await buildPromptPacket(undefined, 's', 'hello');
-    await writeSessionPacket(dir, 's', packet, () => 0);
-    expect(await readSessionPacket(dir, 's', () => 13 * 60 * 60 * 1000)).toBeNull();
-  });
-
-  it('reads nothing back from a corrupt file', async () => {
-    const dir = await tempDir();
-    await writeSessionPacket(dir, 's', await buildPromptPacket(undefined, 's', 'hello'));
-    const { routerStateDir } = await import('./session-file');
-    const { readdir } = await import('node:fs/promises');
-    const [name] = await readdir(routerStateDir(dir));
-    await writeFile(join(routerStateDir(dir), name!), '{ not json');
-    expect(await readSessionPacket(dir, 's')).toBeNull();
-  });
-});
-
-describe('reading a packet without a session id', () => {
-  it('never guesses between two sessions sharing one data directory', async () => {
-    const { readLatestPacket } = await import('./session-file');
-    const dir = await tempDir();
-    // `sinceMs` is the proof of ownership: this process started before the
-    // packet it may read, and a lone file proves nothing on its own.
-    const started = Date.now() - 1;
-    await writeSessionPacket(dir, 'session-a', await buildPromptPacket(undefined, 'a', 'mine'));
-    const only = await readLatestPacket(dir, { sinceMs: started });
-    expect(only?.packet.current.text).toBe('mine');
-    // With no latch and no process boundary there is nothing to prove it with.
-    expect(await readLatestPacket(dir)).toBeNull();
-
-    await writeSessionPacket(dir, 'session-b', await buildPromptPacket(undefined, 'b', 'theirs'));
-    expect(await readLatestPacket(dir, { sinceMs: started })).toBeNull();
-    // Once a call has bound to a session, a second session changes nothing.
-    expect((await readLatestPacket(dir, { onlyKey: only!.key }))?.packet.current.text).toBe('mine');
-  });
-
-  it('ignores an expired packet when deciding whether a session is ambiguous', async () => {
-    const { readLatestPacket } = await import('./session-file');
-    const dir = await tempDir();
-    await writeSessionPacket(dir, 'old', await buildPromptPacket(undefined, 'o', 'stale'), () => 0);
-    const later = 13 * 60 * 60 * 1000;
-    await writeSessionPacket(
-      dir,
-      'fresh',
-      await buildPromptPacket(undefined, 'f', 'current'),
-      () => later,
-    );
-    expect(
-      (await readLatestPacket(dir, { now: () => later, sinceMs: later - 1 }))?.packet.current.text,
-    ).toBe('current');
   });
 });
 

@@ -4,10 +4,9 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { buildPaymentRequired, testWalletProvider } from '../lib/read-test-utils';
+import { testWalletProvider } from '../lib/read-test-utils';
 import type { SpendAuthorization, SpendAuthorizer } from '../lib/wallet';
 import { buildRouterMcpServer } from './mcp';
-import { RequirementsCache } from './decision';
 
 let dir: string;
 beforeEach(async () => {
@@ -39,23 +38,13 @@ function authorizer(): SpendAuthorizer {
   };
 }
 
-/** Every leg answers 402 unpaid, then the scripted paid body. */
-function router(paidBody: unknown): typeof fetch {
-  return (async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
-    if (!new Headers(init?.headers ?? {}).has('payment-signature')) {
-      return new Response('{}', {
-        status: 402,
-        headers: {
-          'content-type': 'application/json',
-          'PAYMENT-REQUIRED': buildPaymentRequired({ amount: '1000' }).header,
-        },
-      });
-    }
-    return new Response(JSON.stringify(paidBody), {
+/** The one free decision this server asks for; no 402, nothing signed. */
+function router(body: unknown): typeof fetch {
+  return (async () =>
+    new Response(JSON.stringify(body), {
       status: 200,
       headers: { 'content-type': 'application/json' },
-    });
-  }) as typeof fetch;
+    })) as typeof fetch;
 }
 
 describe('the router MCP server', () => {
@@ -63,23 +52,13 @@ describe('the router MCP server', () => {
     const fetchImpl = router({
       schemaVersion: 1,
       routerVersion: '2026-09-23.1',
-      requestId: 'r-1',
-      decision: {
-        action: 'native',
-        reason: 'Your own tools cover this.',
-        diagnostics: {
-          reasonCode: 'native_sufficient',
-          stage: 'capability',
-          missing: [],
-          nextAction: '',
-        },
-      },
-      billing: {
-        settled: false,
-        amountAtomic: '0',
-        asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
-        network: 'eip155:8453',
-        reasonCode: 'waived_native',
+      action: 'native',
+      description: 'Your own tools cover this.',
+      diagnostics: {
+        reasonCode: 'native_sufficient',
+        stage: 'capability',
+        missing: [],
+        nextAction: '',
       },
     });
     const server = buildRouterMcpServer({
@@ -87,7 +66,6 @@ describe('the router MCP server', () => {
       handlerDeps: {
         signer: await testWalletProvider().getSigner(),
         authorizer: authorizer(),
-        cache: new RequirementsCache(),
         fetchImpl,
         payDeps: { fetchImpl },
       },
@@ -119,7 +97,6 @@ describe('the router MCP server', () => {
       handlerDeps: {
         signer: await testWalletProvider().getSigner(),
         authorizer: authorizer(),
-        cache: new RequirementsCache(),
       },
     });
     // No wallet exists under this data dir, so a background unlock would throw.
@@ -139,38 +116,19 @@ describe('the base URL the MCP server routes against', () => {
       }),
     );
     const seen: string[] = [];
-    const fetchImpl = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const fetchImpl = (async (input: Parameters<typeof fetch>[0]) => {
       seen.push(String(input));
-      if (!new Headers(init?.headers ?? {}).has('payment-signature')) {
-        return new Response('{}', {
-          status: 402,
-          headers: {
-            'content-type': 'application/json',
-            'PAYMENT-REQUIRED': buildPaymentRequired({ amount: '1000' }).header,
-          },
-        });
-      }
       return new Response(
         JSON.stringify({
           schemaVersion: 1,
           routerVersion: 'v',
-          requestId: 'r',
-          decision: {
-            action: 'native',
-            reason: 'covered',
-            diagnostics: {
-              reasonCode: 'native_sufficient',
-              stage: 'capability',
-              missing: [],
-              nextAction: '',
-            },
-          },
-          billing: {
-            settled: false,
-            amountAtomic: '0',
-            asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
-            network: 'eip155:8453',
-            reasonCode: 'waived_native',
+          action: 'native',
+          description: 'covered',
+          diagnostics: {
+            reasonCode: 'native_sufficient',
+            stage: 'capability',
+            missing: [],
+            nextAction: '',
           },
         }),
         { status: 200, headers: { 'content-type': 'application/json' } },
@@ -185,7 +143,6 @@ describe('the base URL the MCP server routes against', () => {
         handlerDeps: {
           signer: await testWalletProvider().getSigner(),
           authorizer: authorizer(),
-          cache: new RequirementsCache(),
           fetchImpl,
           payDeps: { fetchImpl },
         },
@@ -209,21 +166,19 @@ describe('the base URL the MCP server routes against', () => {
 });
 
 /**
- * TWO RULES, AND THE ORDER MATTERS. What to send is one concrete lookup, which
- * is what lets a mixed turn route at all; how to write it is verbatim, because
- * the router binds the query text and a provider parses it. The live smoke lost
- * a Wolfram turn when the model sent "Evaluate the definite integral ∫₀¹ ..."
- * for a user who wrote "Evaluate ∫₀¹ ...": zero pods, and billed.
+ * ONE LOOKUP, AND THE MODEL'S OWN WORDS FOR IT. The rule used to demand the
+ * user's whole request, and then grew a second half forbidding any rewording,
+ * which is neither enforceable nor necessary now that the backend holds the
+ * turn's packet and compares the query it gets with the one it prepared.
  */
-describe('the tool tells the model what to send and not to rephrase', () => {
-  it('puts the scope rule then the verbatim rule, in the instructions and on the parameter', async () => {
-    const { SCOPE_RULE, VERBATIM_RULE } = await import('./mcp');
+describe('what the tool tells the model to send', () => {
+  it('asks for one lookup, and offers the id as a shortcut beside it', async () => {
+    const { SCOPE_RULE } = await import('./mcp');
     const server = buildRouterMcpServer({
       dataDir: dir,
       handlerDeps: {
         signer: await testWalletProvider().getSigner(),
         authorizer: authorizer(),
-        cache: new RequirementsCache(),
       },
     });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -233,24 +188,20 @@ describe('the tool tells the model what to send and not to rephrase', () => {
       const tools = await client.listTools();
       const request = tools.tools.find((t) => t.name === 'request')!;
       expect(request.description?.startsWith(SCOPE_RULE)).toBe(true);
-      expect(request.description).toContain(VERBATIM_RULE);
       const schema = request.inputSchema as unknown as {
-        properties: { query: { description: string } };
+        properties: { query: { description: string }; id?: { description: string } };
+        required?: string[];
       };
+      // The query is always required; the id never is.
       expect(schema.properties.query.description).toContain(SCOPE_RULE);
-      expect(schema.properties.query.description).toContain(VERBATIM_RULE);
-      // One lookup, not the whole turn: neither rule may ask for the latter.
-      for (const phrase of ['one concrete external lookup', 'A mixed turn is not one lookup']) {
-        expect(SCOPE_RULE).toContain(phrase);
-      }
-      for (const text of [SCOPE_RULE, VERBATIM_RULE]) {
-        expect(text).not.toContain("the user's request verbatim");
-        expect(text).not.toContain('whole request');
-      }
-      // And the verbatim rule still names the failure it exists to prevent.
-      for (const phrase of ['VERBATIM', 'no paraphrase', 'Evaluate the definite integral']) {
-        expect(VERBATIM_RULE).toContain(phrase);
-      }
+      expect(schema.required).toEqual(['query']);
+      expect(schema.properties.id?.description).toContain('shortcut');
+      // One lookup, not the whole turn, and no blanket ban on wording.
+      expect(SCOPE_RULE).toContain('one concrete external lookup');
+      expect(SCOPE_RULE).toContain('A mixed turn is not one lookup');
+      expect(SCOPE_RULE).not.toContain("the user's request verbatim");
+      // Deciding is free now, and the instructions say so.
+      expect(request.description).toContain('Deciding what to route is free');
     } finally {
       await client.close();
       await server.close();

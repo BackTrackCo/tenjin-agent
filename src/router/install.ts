@@ -1,11 +1,10 @@
 import { execFile } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { promisify } from 'node:util';
 import { claudeAdapter } from '../adapters/claude';
-import { persistRouterDefaults, persistRouterProject } from '../commands/config';
+import { persistRouterDefaults } from '../commands/config';
 import type { RouterDefaultsResult } from '../commands/config';
 import { CliError } from '../lib/errors';
 import { appendAllowlistRules, claudeSettingsPath } from '../lib/harness-permissions';
@@ -20,9 +19,6 @@ import { toMoney } from '../lib/money';
 import { resolveContextSettings } from '../lib/settings';
 import type { SpendPolicy } from '../lib/policy';
 import { onPath } from '../lib/skill-wiring';
-import { loadRawConfig } from '../lib/config';
-import { configPath } from '../lib/paths';
-import type { PartialConfig } from '../lib/config';
 import type { CommandContext, CommandResult } from '../context';
 
 /**
@@ -177,17 +173,20 @@ export async function runRouterInstall(
   const cwd = deps.cwd ?? process.cwd();
   // A refresh converges EVERY install this machine has, in the scope each one
   // was made in. `tenjin update` spawns it from the HOME directory, so looking
-  // around cwd would miss a project install entirely; the projects are read
-  // from the list `install --project` recorded. A refresh that silently moved a
-  // project install to user scope would also leave two installations and
-  // double-fire every hook.
-  // `project` UNSET means "work it out"; an explicit true or false is a single
-  // target, which is what the fan-out below passes back in. Without that
-  // distinction the user-scope leg would re-enter here forever.
-  if (args.refresh === true && args.project === undefined) {
-    return refreshEveryInstall(ctx, deps, home, cwd, env);
-  }
-  const project = args.project === true;
+  // ONE SCOPE, THE ONE THIS RAN IN. `--refresh` converges the install whose
+  // settings file is here: home by default, this project under `--project`.
+  // The fan-out across recorded projects is gone with the list it read, along
+  // with a failure mode where one project's broken JSON decided what every
+  // other install got. `tenjin update` is a binary swap plus this, nothing more.
+  // With no flag, a refresh converges the install that is actually HERE: the
+  // project file when this directory carries our entries, the home file
+  // otherwise. `--project` and its absence are still explicit targets, so
+  // nothing silently moves an install from one scope to the other.
+  const project =
+    args.project ??
+    (args.refresh === true &&
+      (await probeOurEntries(routerSettingsPath({ project: true, cwd }), ctx.dataDir)).state ===
+        'present');
   const settingsPath = routerSettingsPath({
     ...(project ? { project: true } : {}),
     homeDir: home,
@@ -260,8 +259,6 @@ export async function runRouterInstall(
     };
   }
   const spend = await persistRouterDefaults(ctx.dataDir);
-  // Remembered so `tenjin update` can find this project again from anywhere.
-  if (project) await persistRouterProject(ctx.dataDir, cwd);
   // Read back AFTER the write: a machine that already carried its own caps
   // keeps them, and a readout quoting the defaults would describe limits this
   // run did not set.
@@ -499,147 +496,6 @@ function lines(
   ];
   if (hooks.warning !== undefined) out.push(`! ${hooks.warning}`);
   return out;
-}
-
-/**
- * Converge every install on this machine: the user one when it exists, and each
- * recorded project whose settings file still carries our entries. A project
- * that no longer does is forgotten, so the list cannot grow stale.
- *
- * Refusing only when NOTHING was found keeps `tenjin update`'s contract: it
- * reads the child's exit code, and a machine with a project install must not
- * report "nothing is installed here".
- */
-async function refreshEveryInstall(
-  ctx: CommandContext,
-  deps: RouterInstallDeps,
-  home: string,
-  cwd: string,
-  env: NodeJS.ProcessEnv,
-): Promise<CommandResult> {
-  // NOT caught. An absent config.json is an empty one and refreshing the user
-  // install from it is right, which `loadRawConfig` already encodes by
-  // returning {} for ENOENT only. Anything else means the recorded project
-  // installs are unreadable, and swallowing it made `tenjin update` refresh the
-  // user scope and exit 0 while every project install silently stayed behind.
-  const config = await loadRawConfig(ctx.dataDir).catch((cause: unknown) => {
-    const recorded = recordedProjectsRaw(ctx.dataDir);
-    throw new CliError(
-      'CONFIG_INVALID',
-      `Could not read ${configPath(ctx.dataDir)}, so ${
-        recorded === undefined
-          ? 'no project install was refreshed'
-          : `these project installs were not refreshed: ${recorded.join(', ')}`
-      }.`,
-      {
-        fix: `Fix or delete ${configPath(ctx.dataDir)}, then re-run: tenjin update`,
-        cause,
-      },
-    );
-  });
-  const targets: { project: boolean; dir: string }[] = [];
-  const skipped: string[] = [];
-  const homePath = routerSettingsPath({ homeDir: home });
-  const homeProbe = await probeOurEntries(homePath, ctx.dataDir);
-  if (homeProbe.state === 'present') targets.push({ project: false, dir: home });
-  else if (homeProbe.state === 'unreadable') {
-    skipped.push(`skipped ${homePath}: it could not be inspected (${homeProbe.reason})`);
-  }
-  for (const dir of config.install?.routerProjects ?? []) {
-    const path = routerSettingsPath({ project: true, cwd: dir });
-    const probe = await probeOurEntries(path, ctx.dataDir);
-    if (probe.state === 'present') {
-      targets.push({ project: true, dir });
-      continue;
-    }
-    // KEPT, not forgotten. A settings file this run could not inspect says
-    // nothing about whether the install is there, and pruning on it is
-    // irreversible: repairing the file later would not put the project back.
-    // Reported instead, so an operator sees which install went unrefreshed.
-    if (probe.state === 'unreadable') {
-      skipped.push(
-        `skipped ${dir}: its settings file could not be inspected (${probe.reason}) (still recorded)`,
-      );
-      continue;
-    }
-    // Forgetting a project keeps the list from growing stale, but it is a
-    // change to what the next `tenjin update` covers, so say it out loud, and
-    // only once the config write went through: a failed write keeps the entry.
-    const why = existsSync(dir)
-      ? 'no Tenjin hook entries are registered there'
-      : 'the directory is gone';
-    const forgotten = await persistRouterProject(ctx.dataDir, dir, false).then(
-      () => true,
-      () => false,
-    );
-    skipped.push(`skipped ${dir}: ${why} (${forgotten ? 'forgotten' : 'still recorded'})`);
-  }
-  // The directory this ran in, when it is a project install nobody recorded: an
-  // install from before this list existed still refreshes, and is remembered.
-  // Skipped when that path IS the user's file, which is what `cwd` is when
-  // `tenjin update` spawns this from the home directory.
-  const here = routerSettingsPath({ project: true, cwd });
-  if (
-    here !== routerSettingsPath({ homeDir: home }) &&
-    !targets.some((t) => t.project && t.dir === cwd) &&
-    (await probeOurEntries(here, ctx.dataDir)).state === 'present'
-  ) {
-    targets.push({ project: true, dir: cwd });
-    await persistRouterProject(ctx.dataDir, cwd).catch(() => undefined);
-  }
-
-  if (targets.length === 0) {
-    // "Nothing is registered" and "nothing could be read" are different
-    // machines, and only the first of them is fixed by installing again.
-    const unreadable = skipped.filter((line) => line.includes('could not be inspected'));
-    throw new CliError(
-      'REFUSED',
-      unreadable.length === 0
-        ? `Nothing to refresh for ${ctx.dataDir}: no Tenjin hook entries are registered here.`
-        : `Nothing could be refreshed for ${ctx.dataDir}: ${unreadable.join('; ')}.`,
-      {
-        fix:
-          unreadable.length === 0
-            ? 'Run `tenjin install` to set this machine up.'
-            : 'Fix the settings files named above, then re-run: tenjin update',
-      },
-    );
-  }
-
-  const results: CommandResult[] = [];
-  for (const target of targets) {
-    results.push(
-      await runRouterInstall({ refresh: true, project: target.project }, ctx, {
-        ...deps,
-        homeDir: home,
-        cwd: target.dir,
-        env,
-      }),
-    );
-  }
-  return {
-    data: { refresh: true, installs: results.map((r) => r.data), skipped },
-    humanLines: [...results.flatMap((r) => r.humanLines ?? []), ...skipped],
-  };
-}
-
-/**
- * The recorded project installs, read past whatever made the config unreadable,
- * so the failure can name them. Undefined when even that much is unavailable,
- * which is the honest answer for a file with broken JSON syntax.
- */
-function recordedProjectsRaw(dataDir: string): string[] | undefined {
-  try {
-    const parsed: unknown = JSON.parse(readFileSync(configPath(dataDir), 'utf8'));
-    const projects = (parsed as PartialConfig | null)?.install?.routerProjects;
-    return Array.isArray(projects) &&
-      projects.every((d) => typeof d === 'string') &&
-      projects.length > 0
-      ? projects
-      : undefined;
-  } catch {
-    return undefined;
-  }
 }
 
 /**
