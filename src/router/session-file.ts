@@ -1,5 +1,5 @@
-import { readFile, readdir, rm } from 'node:fs/promises';
-import { createHash } from 'node:crypto';
+import { readFile, readdir, rename, rm } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { writeFileAtomic } from '../lib/atomic-json';
@@ -248,9 +248,18 @@ export async function writeGateHint(
 }
 
 /**
- * The category for THIS turn, removed as it is read. One-shot by construction:
+ * The category for THIS turn, claimed as it is read. One-shot by construction:
  * a second lookup in the same turn, or a parallel one, finds nothing and sends
  * no evidence rather than evidence about somebody else's question.
+ *
+ * CLAIMED BY RENAME, because reading and then deleting is two steps and two
+ * concurrent lookups both completed the read before either delete landed: both
+ * attached the same category to different questions, and the router classified
+ * the second one on evidence gathered for the first. A rename of the original
+ * name can succeed only once, so the winner takes the file and every other
+ * caller gets ENOENT and sends nothing. The claimed name keeps the suffix, so
+ * a crash between the rename and the read still leaves a file the pruner ages
+ * out rather than an orphan.
  */
 export async function consumeGateHint(
   dataDir: string,
@@ -258,16 +267,23 @@ export async function consumeGateHint(
   turnStamp: number,
   now: () => number = Date.now,
 ): Promise<string | null> {
-  const path = gateHintPath(dataDir, sessionKey);
+  const claimed = gateHintPath(dataDir, `${sessionKey}.${randomUUID()}`);
   try {
-    const parsed = GateHintSchema.safeParse(JSON.parse(await readFile(path, 'utf8')));
-    await rm(path, { force: true }).catch(() => undefined);
+    await rename(gateHintPath(dataDir, sessionKey), claimed);
+  } catch {
+    // No hint for this turn, or another lookup claimed it first.
+    return null;
+  }
+  try {
+    const parsed = GateHintSchema.safeParse(JSON.parse(await readFile(claimed, 'utf8')));
     if (!parsed.success) return null;
     if (parsed.data.turnStamp !== turnStamp) return null;
     if (now() - parsed.data.writtenAtMs > CONTINUATION_MAX_AGE_MS) return null;
     return parsed.data.category;
   } catch {
     return null;
+  } finally {
+    await rm(claimed, { force: true }).catch(() => undefined);
   }
 }
 

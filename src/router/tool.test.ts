@@ -1365,6 +1365,27 @@ describe('the gate hint that rides with the first lookup of a turn', () => {
     expect(second.bodies[0]!.gateHint).toBeUndefined();
   });
 
+  /**
+   * TWO LOOKUPS AT ONCE. Reading the hint and then deleting it are two steps,
+   * and both callers completed the read before either delete landed: the same
+   * category and turn id rode two different lookup ids, so the router
+   * classified the second question on evidence gathered for the first. The
+   * claim is a rename now, which exactly one caller can win.
+   */
+  it('gives the hint to exactly one of two concurrent lookups', async () => {
+    const { consumeGateHint, writeGateHint, sessionKeyOf } = await import('./session-file');
+    const turnStamp = Date.now();
+    await writeGateHint(dir, 'sess-1', turnStamp, 'crypto price quote');
+    const key = sessionKeyOf('sess-1');
+    const [first, second] = await Promise.all([
+      consumeGateHint(dir, key, turnStamp),
+      consumeGateHint(dir, key, turnStamp),
+    ]);
+    expect([first, second].filter((c) => c !== null)).toEqual(['crypto price quote']);
+    // And nothing is left for a third.
+    expect(await consumeGateHint(dir, key, turnStamp)).toBeNull();
+  });
+
   it('sends none when the gate named no category for this turn', async () => {
     const { runPromptHook } = await import('./hooks');
     const started = Date.now() - 1;
