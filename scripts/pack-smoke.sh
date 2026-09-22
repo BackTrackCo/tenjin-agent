@@ -322,7 +322,7 @@ team_fail() {
 # in place heals the DEVELOPER'S OWN skills — and here it would heal them to the
 # team arm. `CI` set is the heal's own off switch, so this run cannot write
 # skills anywhere; only the run below, which is the one under test, clears it.
-HOME="$TEAM_HOME" TENJIN_DATA_DIR="$TEAM_DATA" CI=1 "$BIN" config set shelf pack-smoke --json >/dev/null 2>&1 ||
+HOME="$TEAM_HOME" TENJIN_DATA_DIR="$TEAM_DATA" CI=1 "$BIN" config set shelf pack-smoke/pack-smoke --json >/dev/null 2>&1 ||
   team_fail "'tenjin config set shelf' failed"
 
 HOME="$TEAM_HOME" TENJIN_DATA_DIR="$TEAM_DATA" CI= "$BIN" config --json >/dev/null 2>&1 ||

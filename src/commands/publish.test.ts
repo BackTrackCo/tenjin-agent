@@ -593,6 +593,28 @@ describe('runPublish — exit-code conformance', () => {
 });
 
 describe('runPublish — receipt + card echo', () => {
+  /**
+   * WHERE IT LANDED IS NOT IN THE URL ANY MORE. Shelf and marketplace share one
+   * host, so two pieces with the same URL shape can have completely different
+   * audiences, and the receipt is the only thing that can say which. A machine
+   * reader gets `data.destination`; a human gets it in the first line.
+   *
+   * This asserts the PUBLIC half. The shelf half is in `runPublish on a team
+   * shelf` below, and both are needed: a receipt hardcoding either word passes
+   * one of them.
+   */
+  it('names the destination as public when no shelf is configured', async () => {
+    const { fetch } = stubServer(CREATED);
+    const { provider } = spyProvider();
+    const res = await runPublish(
+      baseArgs(await writeDoc(CLEAN), { mode: 'auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider }),
+    );
+    expect(res.data).toMatchObject({ destination: 'public' });
+    expect(res.humanLines?.[0]).toContain('to public for');
+  });
+
   // A DRAFT, because the card here is deliberately incomplete and that is the
   // one publish the gate lets through: what the server reports missing is what
   // the author still has to write before it can go up.
@@ -644,7 +666,7 @@ describe('runPublish — receipt + card echo', () => {
     );
     const line = res.humanLines?.[0] ?? '';
     expect(line).toBe(
-      'Published The Answer (publisheddraft) for 0.1 USD → https://preview.example/a/iris/gpj.exe',
+      'Published The Answer (publisheddraft) to public for 0.1 USD → https://preview.example/a/iris/gpj.exe',
     );
     // eslint-disable-next-line no-control-regex
     expect(/[\u001b\u202a-\u202e]/.test(line)).toBe(false);
@@ -1788,18 +1810,19 @@ describe('runPublish — a search the store could not close reports closed:false
 });
 
 /**
- * TEAM MODE. `baseUrl` is the team's own deployment and `shelfBypassSecret` is
- * set. Exactly ONE gate changes: the scan's WARN tier is skipped APART FROM
- * `secret-assignment`, because those warnings ask "is this safe to make public"
- * and a team shelf is not public, while that one asks "is this a live
- * credential" and gets the same answer on either shelf. The hard secret block
- * and the consent cascade are the same on both shelves — a team shelf is a
- * hosted database with logs and a shared door key, and `review` means the same
- * thing wherever the write lands.
+ * TEAM MODE, which is now one stored key: a qualified `shelf` in config.json.
+ * There is no second deployment and no door key, so `baseUrl` here is only the
+ * host the stub answers on. Exactly ONE gate changes: the scan's WARN tier is
+ * skipped APART FROM `secret-assignment`, because those warnings ask "is this
+ * safe to make public" and a team shelf is not public, while that one asks "is
+ * this a live credential" and gets the same answer on either shelf. The hard
+ * secret block and the consent cascade are the same on both shelves. A shelf is
+ * a row in a hosted database with logs and a membership list, and `review`
+ * means the same thing wherever the write lands.
  */
 describe('runPublish on a team shelf', () => {
   const TEAM = 'https://team.example';
-  const SHELF = 'backtrack';
+  const SHELF = 'backtrack/backtrack';
 
   interface Sent {
     url: string;
@@ -1877,6 +1900,10 @@ describe('runPublish on a team shelf', () => {
     // To the configured base, naming the shelf in the body.
     expect(new URL(sent[0]!.url).origin).toBe(TEAM);
     expect(sent[0]!.body?.shelf).toBe(SHELF);
+    // AND THE RECEIPT SAYS SO. The qualified name, not `public` and not a
+    // host: this is the line that tells the author only their team can read it.
+    expect(res.data).toMatchObject({ destination: SHELF });
+    expect(res.humanLines?.[0]).toContain(`to ${SHELF} for`);
     // Free by default: a teammate must not hit a 402 on their own team's finding.
     expect(sent[0]!.body?.price).toBe('0');
   });
@@ -1885,8 +1912,8 @@ describe('runPublish on a team shelf', () => {
     await writeShelfConfig();
     // The one warn that survives the team drop. It asks "is this a live
     // credential", not "is this safe to make public", so the block tier's own
-    // argument applies verbatim: a team shelf is a hosted Postgres with logs and
-    // a shared door key, and a leaked key there is leaked. Unlike WARN above,
+    // argument applies verbatim: a team shelf is a hosted Postgres with logs
+    // and a membership list, and a leaked key there is leaked. Unlike WARN above,
     // this body is NOT waved through under `auto`.
     const file = await writeDoc(SECRET_ASSIGN);
     const { fetch, sent } = shelfServer();

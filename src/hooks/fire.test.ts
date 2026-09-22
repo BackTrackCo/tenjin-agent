@@ -323,12 +323,10 @@ describe('runFire: a hit', () => {
   });
 
   it('stores what was SENT: the row is the text the leg was handed, verbatim', async () => {
-    // `question()` made the only cut, at the trigger's bound, before the plan
-    // carried the text here. The row repeats no cut of its own, so a dispatch
-    // work order is stored past the 512 the ledger used to stop at and a prompt
-    // is stored at the length `question()` already cut it to.
+    // `question()` made the only cut before the plan carried the text here; the
+    // row repeats no cut of its own.
     const db = await freshDb();
-    const paste = 'why is vitest slow '.repeat(600).trim();
+    const paste = 'why is vitest slow '.repeat(300).trim();
     const seen: string[] = [];
     const armFor = (q: Question): Arm => {
       const leg = strongLeg('res-long');
@@ -354,17 +352,13 @@ describe('runFire: a hit', () => {
       };
     };
 
-    const dispatched = question(paste, 'dispatch');
-    expect(dispatched.text.length).toBeGreaterThan(512);
-    (await runFire(input(), deps(db, [armFor(dispatched)]))).commit();
-
-    const asked = question(paste, 'prompt');
-    expect(asked.text.length).toBeLessThanOrEqual(512);
+    const asked = question(paste);
+    expect(asked.text).toBe(paste);
     (await runFire(input(), deps(db, [armFor(asked)]))).commit();
 
-    // Stored == sent, for both, and nothing the leg never saw is in the ledger.
+    // Stored == sent, and nothing the leg never saw is in the ledger.
     const stored = fireRows(db).map((r) => r.question);
-    expect(stored).toEqual([dispatched.text, asked.text]);
+    expect(stored).toEqual([paste]);
     expect(seen).toEqual(stored);
   });
 

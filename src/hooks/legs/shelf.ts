@@ -6,7 +6,7 @@ import {
   type SearchResult,
 } from '../../lib/agent-api';
 import { httpRequest } from '../../lib/http';
-import { trimSlash } from '../../lib/url';
+import { trimSlash, tryOriginOf } from '../../lib/url';
 import type { Answer, KernelConfig, LegResult, LegStatus, Shelf, Leg, Trigger } from '../types';
 
 /**
@@ -25,9 +25,11 @@ import type { Answer, KernelConfig, LegResult, LegStatus, Shelf, Leg, Trigger } 
  * signature, a non-JSON body and a JSON body of the wrong shape are five
  * different facts and used to be one silent miss.
  *
- * THE LEG SENDS `Question.text` WHOLE. The cut to the trigger's bound is
- * `question()`'s, made once when the plan is built, so what the leg sends, what
- * the ledger stores and what the claim key hashes are one string.
+ * THE LEG SENDS `Question.text` WHOLE. The cut to the shelf's bound is
+ * `question()`'s (`hooks/question.ts`), made once when the plan is built, so
+ * what the leg sends, what the ledger stores and what the claim key hashes are
+ * one string. `buildSearchRequest` still throws `USAGE` past the bound, as the
+ * last guard against a question that skipped that path.
  */
 
 /** Candidates asked for, so a search `verdict` can take a strong rank 2 or 3
@@ -75,6 +77,19 @@ function statusOf(seen: Seen | null, signal: AbortSignal): LegStatus {
   // error template, a proxy. A 200 that IS JSON and still failed to parse is
   // the contract drifting, which is the same fact as a missing field.
   return seen.json ? 'bad_shape' : 'bad_json';
+}
+
+/**
+ * Was this call turned away on the SIGNATURE, as opposed to on membership?
+ *
+ * 401 alone. `statusOf` folds 401, 403 and 404 into one `refused` row because
+ * the ledger's question is "did the shelf answer", but `deps.authRefused` asks
+ * a narrower one: is the credential itself stale, so that minting a new one
+ * would help. A 403 and a 404 both say the signature was read and the wallet
+ * was not a member, and no fresh delegation changes that.
+ */
+function refusedOnSignature(seen: Seen | null): boolean {
+  return seen !== null && seen.status === 401;
 }
 
 /**
@@ -279,6 +294,11 @@ export function searchLeg(
             budgetMs,
             signal,
             cfg.shelf,
+            // THE ORIGIN THIS CALL WENT TO, off the URL just built. The daemon
+            // compares it against the one its delegation was minted for, and a
+            // fire that overlapped a config reload is the case where reading
+            // the live config instead would name the wrong one.
+            () => deps.authRefused?.(tryOriginOf(url)),
             fetchImpl,
           );
         }
@@ -358,6 +378,10 @@ export function keysLeg(cfg: KernelConfig, keys: string[], fetchImpl?: typeof fe
         // to the sentence that names both causes.
         const refused = keysRefusedReason(seen, cfg.shelf, res.ok ? res.json : undefined);
         const reason = refused === undefined ? {} : { authError: refused };
+        // Same delegation, same origin, same staleness: a 401 here says the
+        // credential is spent exactly as it does on `/api/search`, and it
+        // carries the origin it was sent to for the same reason.
+        if (refusedOnSignature(seen)) deps.authRefused?.(tryOriginOf(url));
         if (!res.ok || res.status !== 200) return failed(['keys'], statusOf(seen, signal), reason);
         const parsed = searchResultSchema.safeParse(res.json);
         if (!parsed.success) return failed(['keys'], statusOf(seen, signal), {});
@@ -378,6 +402,7 @@ async function callShelf(
   budgetMs: number,
   signal: AbortSignal,
   shelf: string,
+  onRefused: () => void,
   fetchImpl?: typeof fetch,
 ): Promise<LegResult[]> {
   let seen: Seen | null = null;
@@ -401,6 +426,11 @@ async function callShelf(
     // was turned away, which is an operator's problem and rides to `fires.error`
     // rather than reading in the ledger as an ordinary empty answer.
     const refused = refusedReason(seen, shelf);
+    // The row is written either way; this only tells the credential's owner
+    // that the one it signed with is stale. It runs before the early return so
+    // a 401 reports on both the failure path and, impossibly but harmlessly,
+    // any future path that reads a 401 body.
+    if (refusedOnSignature(seen)) onRefused();
     if (!res.ok || res.status !== 200) {
       return failed(
         sets,

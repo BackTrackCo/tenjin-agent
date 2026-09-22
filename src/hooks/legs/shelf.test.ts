@@ -225,7 +225,7 @@ describe('searchLeg: one call, two sets', () => {
 
   it('sends `Question.text` whole: the cut was made once, upstream', async () => {
     const { fetchImpl, calls } = stub(() => json(200, twoList([], [])));
-    const asked = question('collation '.repeat(600).trim(), 'dispatch');
+    const asked = question('collation '.repeat(600).trim());
     expect(asked.text.length).toBeGreaterThan(512);
     const results = await searchLeg('dispatch', CONFIG, {}, fetchImpl).request(
       asked,

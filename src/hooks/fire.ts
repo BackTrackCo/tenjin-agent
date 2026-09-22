@@ -123,7 +123,7 @@ export async function runFire(
         const plan = planned;
         asked = plan.question;
         questionKey = plan.question.questionKey;
-        // Exactly the wire text: `question()` already cut it to the trigger's
+        // Exactly the wire text: `question()` already cut it to the shelf's
         // bound, so the row reads as what this fire asked and nothing more.
         question = plan.question.text;
         const gated = gates(ctx, plan);

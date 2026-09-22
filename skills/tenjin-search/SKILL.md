@@ -91,10 +91,8 @@ tenjin search "<generalized question>" --json --limit 5 [--fresh-within P30D] [-
   strip private identifiers, internal service names, account names, secrets. If it
   cannot be generalized without leaking, do not search.
 <!-- /tenjin:when -->
-- Send one complete natural-language sentence, under 512 characters. Matching
-  runs on wording AND meaning, so keywords drop the words it needs; past the cap
-  the CLI sends the first 512 characters, cut at a whole word, so the question
-  itself has to come first.
+- Send one complete natural-language sentence. Matching runs on wording AND
+  meaning, so keywords drop the words it needs.
 - The answer is `matched` plus `items`. `matched: 0` is a miss — move on.
 - An item is a lean hit: `resourceId`, `url`, `slug`, `title`, `artifactType`,
   `price`, `asOf`, `validUntil`, `matchReasons`, `estimatedTokens`,

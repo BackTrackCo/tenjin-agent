@@ -118,26 +118,14 @@ export interface SearchRequestBody {
   includePublic?: boolean;
 }
 
-/** The server's query bound for every trigger but `dispatch` (`SEARCH_QUERY_MAX_CHARS`). */
-export const QUERY_MAX = 512;
-/** The server's bound for a decision-view `dispatch` query (`DISPATCH_QUERY_MAX_CHARS`):
- *  a whole work order, which the shelf splits into sentence sub-queries and
- *  reranks against in full (tenjin#844, tenjin-agent#346). */
-export const DISPATCH_QUERY_MAX = 8000;
-
-/** How much of a question the shelf will read for this trigger. The bound is
- *  the TRIGGER's and not any arm's or the CLI's, so it is spelled once, here,
- *  beside the request it bounds; every caller cuts to it before building. */
-export function queryMax(trigger: SearchRequestBody['trigger']): number {
-  return trigger === 'dispatch' ? DISPATCH_QUERY_MAX : QUERY_MAX;
-}
+/** The server's query bound (`SEARCH_QUERY_MAX_CHARS`), the same for every trigger. */
+export const QUERY_MAX = 8000;
 
 export function buildSearchRequest(input: SearchInput): SearchRequestBody {
   const question = input.question.trim();
-  const max = queryMax(input.trigger ?? 'cli');
-  if (question.length === 0 || question.length > max) {
-    throw new CliError('USAGE', `question must be 1 to ${max} characters`, {
-      fix: `Pass a non-empty question under ${max} characters.`,
+  if (question.length === 0 || question.length > QUERY_MAX) {
+    throw new CliError('USAGE', `question must be 1 to ${QUERY_MAX} characters`, {
+      fix: `Pass a non-empty question under ${QUERY_MAX} characters.`,
     });
   }
   if (input.freshWithin !== undefined) {

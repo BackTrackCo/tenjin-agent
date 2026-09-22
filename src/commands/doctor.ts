@@ -111,17 +111,17 @@ const FIX_POINT_AT_TENJIN_API =
 const FIX_CHECK_NETWORK_AND_BASE_URL =
   'Check your network connection and the configured base URL (`tenjin config get baseUrl`).';
 /**
- * A keyed probe was redirected, but to the SAME host it asked for: an `http://`
- * base URL that 301s to https, or a host normalising to its canonical name. The
- * key was refused by nothing here, so the rotate line would invert #218 all over
- * again, blaming the setting that was right. `baseUrl` is the one that moves.
+ * A probe was redirected, but to the SAME host it asked for: an `http://` base
+ * URL that 301s to https, or a host normalising to its canonical name. Nothing
+ * was refused, so a line about credentials would blame the setting that was
+ * right (#218). `baseUrl` is the one that moves.
  */
 const FIX_FOLLOW_REDIRECT_IN_BASE_URL =
   'That URL redirects: point the configured base URL at the canonical host it names (`tenjin config set baseUrl <url>`).';
 /**
- * The same page, from a URL where the team key is not the answer. Naming
- * `baseUrl` would be wrong too: something answered, it just was not Tenjin. So
- * this describes what happened rather than prescribing a setting.
+ * The same page from a URL where no setting of this machine's is the answer.
+ * Naming `baseUrl` would be wrong too: something answered, it just was not
+ * Tenjin. So this describes what happened rather than prescribing a setting.
  */
 const FIX_PAGE_NOT_THE_API =
   'Something answered with a page instead of the API (a proxy, a captive portal, or a sign-in wall); check your network path and the configured base URL (`tenjin config get baseUrl`).';
@@ -634,31 +634,25 @@ async function loadConfigForDoctor(
  * three baseUrl probes so `--json` cannot carry two verdicts about one machine.
  *
  * Returns undefined when no gate story applies and the caller's ordinary fix
- * stands. The page is a fact about the response; whether the team key fixes it
- * is a fact about the CONFIG, and only the second one licenses naming the key.
- * On the public marketplace the key is inert (`resolveShelfBypass` refuses it),
- * and an override pointing anywhere but the configured shelf carries none, so
- * both get the neutral line instead. An override that REPEATS the configured
- * shelf does carry the key, so it earns the same wording a configured base URL
- * does: the pair is issued on the origins matching, not on where the value came
- * from. Where the key IS the remedy, what the probe DID decides the
- * wording: `bypass` present means the key was sent and did not get past
- * (whether the gate answered 200 HTML, 401/403, or the blocked 30x
- * interstitial), so "set it" would prescribe the config this machine already
- * has; absent means setting it is the move.
+ * stands. This used to have a third arm that named the team's door key, and
+ * branched on the config to decide whether naming it was honest. There is no
+ * door key now: a shelf is a row on the one deployment, membership is the
+ * wallet's, and a machine reaches the API the same way whether or not it is on
+ * a shelf. So a gate in front of that API is a network or base URL story for
+ * everyone, and there is nothing left for this to ask the config about. Two
+ * arms remain and both are facts about the RESPONSE alone.
  *
  * A blocked redirect qualifies only when its `Location` LEAVES the host asked
- * for. The transport refuses to follow any 3xx while carrying the key, so the
- * status alone says nothing about the key: a same-host hop is what an `http://`
- * base URL or a non-canonical host name gets, with a perfectly good secret.
+ * for. The transport follows no 3xx here, so the status alone says nothing: a
+ * same-host hop is what an `http://` base URL or a non-canonical host name
+ * gets, and pointing `baseUrl` at the canonical host is the whole remedy.
  *
- * A same-origin JSON 401/403 is deliberately NOT a gate: an API refusing in its
- * own envelope is an honest refusal, and the transport keeps `gateSuspected`
- * false on it. But on a machine where the door key is the remedy, the missing or
- * stale key is the likeliest thing being refused, so the REMEDY still names it
- * while the classification stays put. Nothing here reads `kind` or the gate
- * flags to say what happened; the detail lines do that, and they say only what
- * the transport saw.
+ * A same-origin JSON 401/403 is deliberately NOT a gate, and now keeps that
+ * classification all the way to the remedy: an API refusing in its own envelope
+ * is an honest refusal, the transport keeps `gateSuspected` false on it, and
+ * this returns undefined so the caller's ordinary fix prints. Nothing here
+ * reads `kind` or the gate flags to say what HAPPENED; the detail lines do
+ * that, and they say only what the transport saw.
  */
 function shelfGateFix(res: FetchJsonFailure): string | undefined {
   const blocked = res.kind === 'blocked-redirect';
