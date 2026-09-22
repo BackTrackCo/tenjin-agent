@@ -10,8 +10,10 @@ import type { Io } from '../lib/output';
  */
 
 const MAX_EVENT_BYTES = 1_000_000;
-/** Half the hook's 3 s budget, leaving the gate its 1.5 s; `wire.test.ts` pins
- *  the sum against the timeout `install` writes. */
+/** One fifth of the hook's 5 s budget, leaving the gate its 3.5 s; `wire.test.ts`
+ *  pins the sum against the timeout `install` writes. The harness writes its
+ *  event immediately, so this wait is a liveness check rather than a budget to
+ *  spend: every second it holds is a second the gate does not get. */
 export const STDIN_TIMEOUT_MS = 1_000;
 
 export type HookKind = 'prompt' | 'native';

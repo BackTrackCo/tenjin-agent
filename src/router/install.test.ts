@@ -96,11 +96,11 @@ describe('tenjin install', () => {
     const settings = await readSettings();
     const hooks = settings.hooks as Record<string, { matcher?: string; hooks: unknown[] }[]>;
     expect(hooks.UserPromptSubmit![0]!.hooks).toEqual([
-      { type: 'command', command: 'tenjin hook prompt', timeout: 3 },
+      { type: 'command', command: 'tenjin hook prompt', timeout: 5 },
     ]);
     expect(hooks.PreToolUse![0]).toMatchObject({
       matcher: 'WebSearch|WebFetch',
-      hooks: [{ type: 'command', command: 'tenjin hook native', timeout: 3 }],
+      hooks: [{ type: 'command', command: 'tenjin hook native', timeout: 5 }],
     });
     expect((settings.permissions as { allow: string[] }).allow).toContain(ALLOW_RULE);
     expect(registerMcp).toHaveBeenCalledWith(MCP_ADD_COMMAND, {
@@ -693,9 +693,48 @@ describe('tenjin update re-applies the install', () => {
     // ONE entry, the current shape: rewritten in place, never appended beside.
     expect(prompt).toHaveLength(1);
     expect(prompt![0]!.hooks).toEqual([
-      { type: 'command', command: 'tenjin hook prompt', timeout: 3 },
+      { type: 'command', command: 'tenjin hook prompt', timeout: 5 },
     ]);
     expect(JSON.stringify(after)).not.toContain('/old/path/tenjin');
+  });
+
+  /**
+   * The timeout is the harness's kill budget, so an entry left at the old 3 s
+   * would abort the gate mid-answer and cost that turn its hint silently. It is
+   * the writer's to converge, not the user's: every route that writes the plan
+   * has to raise it, including the refresh `tenjin update` spawns.
+   */
+  it.each([
+    ['install', {}],
+    ['install --refresh (what `tenjin update` spawns)', { refresh: true }],
+  ])('raises an entry still carrying the old 3 s timeout on %s', async (_label, args) => {
+    const fs = await import('node:fs/promises');
+    await runRouterInstall({}, ctx(), deps());
+    const settings = await readSettings();
+    for (const [event, matcher] of [
+      ['UserPromptSubmit', undefined],
+      ['PreToolUse', 'WebSearch|WebFetch'],
+    ] as const) {
+      const command = event === 'UserPromptSubmit' ? 'tenjin hook prompt' : 'tenjin hook native';
+      (settings.hooks as Record<string, unknown[]>)[event] = [
+        {
+          ...(matcher !== undefined ? { matcher } : {}),
+          hooks: [{ type: 'command', command, timeout: 3 }],
+        },
+      ];
+    }
+    await fs.writeFile(settingsPath(), JSON.stringify(settings, null, 2) + '\n');
+
+    await runRouterInstall(args, ctx(), deps());
+    const after = (await readSettings()).hooks as Record<string, { hooks: unknown[] }[]>;
+    expect(after.UserPromptSubmit).toHaveLength(1);
+    expect(after.UserPromptSubmit![0]!.hooks).toEqual([
+      { type: 'command', command: 'tenjin hook prompt', timeout: 5 },
+    ]);
+    expect(after.PreToolUse).toHaveLength(1);
+    expect(after.PreToolUse![0]!.hooks).toEqual([
+      { type: 'command', command: 'tenjin hook native', timeout: 5 },
+    ]);
   });
 
   it('stays in the project scope it was installed into, with no flag', async () => {

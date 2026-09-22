@@ -14,10 +14,18 @@ import type { Packet } from './context';
  */
 
 export const GATE_PATH = '/api/x402-router/prepare';
-/** The hook's whole budget is 3 s (the timeout `install` writes). Stdin waits
- *  up to 2 s of it, so the gate gets 1.5 s and the two together still leave
- *  room for node's boot and the transcript read; `hooks.test.ts` pins the sum. */
-export const GATE_TIMEOUT_MS = 1_500;
+/**
+ * The hook's whole budget is 5 s (the timeout `install` writes). Stdin waits up
+ * to 1 s of it, so the gate gets 3.5 s and the two together still leave 500 ms
+ * for node's boot and the transcript read; `wire.test.ts` pins the sum.
+ *
+ * AN ABORT HERE IS A LOST HINT, not a lost turn: `askGate` maps it to `null`,
+ * the turn proceeds with nothing injected, and the hint is the only thing that
+ * makes the model reach for `request`. One of four live prompts was swallowed
+ * that way at a 1.5 s abort against a backend measured at 0.4 to 0.5 s, so the
+ * gate now holds the slack the harness budget was already leaving unused.
+ */
+export const GATE_TIMEOUT_MS = 3_500;
 
 /** The task vocabulary the gate answers in. Providers are never named. */
 export const CATEGORIES = [

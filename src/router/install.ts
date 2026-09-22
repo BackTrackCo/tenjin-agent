@@ -36,7 +36,17 @@ import type { CommandContext, CommandResult } from '../context';
 
 const exec = promisify(execFile);
 
-export const HOOK_TIMEOUT_SECONDS = 3;
+/**
+ * The harness's kill budget for each hook entry, and the number every other
+ * wait inside the hook is cut from: 1 s of stdin plus 3.5 s of gate, with
+ * 500 ms left for node's boot and the transcript read (`wire.test.ts` pins it).
+ * Raised from 3 s because a gate abort costs the turn its hint silently.
+ *
+ * A machine carrying the old number is converged by the writer, not by the
+ * user: the entries are ours by marker, so `install`, `install --refresh` and
+ * the refresh `tenjin update` spawns all rewrite them in place.
+ */
+export const HOOK_TIMEOUT_SECONDS = 5;
 export const MCP_SERVER_NAME = 'x402';
 export const ALLOW_RULE = 'mcp__x402__request';
 /**
