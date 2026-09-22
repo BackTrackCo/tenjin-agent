@@ -27,30 +27,18 @@ function fixture(name: string): Record<string, unknown> {
 
 describe('the request bodies', () => {
   /**
-   * THE ROUTE READS THIS WITH A STRICT OBJECT, so a missing `source` and an
-   * extra field are both a 400, and a 400 is a turn with no hint. The builder
-   * is checked against the canonical bytes rather than against a description
-   * of them.
+   * THE ROUTE READS THIS WITH A STRICT OBJECT, so an extra field is a 400 and
+   * a 400 is a turn with no hint. Which hook is asking is not a field: the
+   * route reads it from `packet.pendingCall`, which the native hook sets.
    */
-  it('is exactly schemaVersion, source and packet, built from one function', () => {
-    const canonical = fixture('wire-gate-request.json');
-    const built = buildHookBody('native', canonical.packet as Packet);
+  it('is exactly schemaVersion and the packet, for both hooks', () => {
+    const canonical = fixture('wire-decision-request.json');
+    const built = buildHookBody(canonical.packet as Packet);
     expect(built).toEqual(canonical);
-    expect(Object.keys(built).sort()).toEqual(['packet', 'schemaVersion', 'source']);
-    // The pending native call travels INSIDE the packet, never beside it.
-    expect((built.packet as Packet).pendingCall).toEqual({
-      tool: 'WebSearch',
-      query: 'btc eth price today',
-    });
+    expect(Object.keys(built).sort()).toEqual(['packet', 'schemaVersion']);
   });
 
-  it('carries the prompt source when the prompt hook asks', () => {
-    const built = buildHookBody('prompt', fixture('wire-decision-request.json').packet as Packet);
-    expect(built.source).toBe('prompt');
-    expect(built.schemaVersion).toBe(1);
-  });
-
-  it('is the packet and its source from the hook', () => {
+  it('fits the packet cap the server enforces', () => {
     const request = fixture('wire-decision-request.json');
     expect(Buffer.byteLength(JSON.stringify(request.packet))).toBeLessThanOrEqual(MAX_PACKET_BYTES);
     expect((request.packet as Packet).historyStatus).toBe('ok');

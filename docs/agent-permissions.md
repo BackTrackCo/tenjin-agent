@@ -33,9 +33,9 @@ tenjin config set sessionBudget 2.00
 
 ## What bounds a ROUTER payment, on top of that
 
-The routing decision comes from a server. These four checks are what keep a wrong or hostile one from being worth anything:
+The routing decision comes from a server, and it is free: it proposes, it never authorizes. These checks are what keep a wrong or hostile one from being worth anything:
 
-- The decision carries the terms it was priced against. A live 402 naming another network, another asset, or a higher amount is refused before a signature exists.
+- The amount actually signed has to fit `maxAutoSpend` and the day's `sessionBudget`. That is the whole money rule: a price the decision quotes is information, not a ceiling anyone is held to, so a provider charging more than it quoted is paid only if the real amount is inside your limits.
 - The decision's arguments have to satisfy the JSON Schema the decision itself carries, compiled with remote references and regular-expression keywords refused.
 - The destination has to be a public HTTPS endpoint whose name resolves to a public address. This is a check, not a pin: the request resolves the name again on its own, so a host that answers publicly at check time and privately a moment later is not closed by it. See [safety-model.md](./safety-model.md).
 - A 2xx whose body fails the decision's own success rule is a paid failure, not a delivery.
@@ -91,11 +91,13 @@ Every other key in the settings file is preserved byte for byte, a second run wr
 
 ## What the hooks send
 
-- On every prompt, and on every native `WebSearch` or `WebFetch`: the bounded text of the current turn, at most six prior messages and 16 KiB, redacted for obvious secrets, to Tenjin's free gate. Tool results never travel: a tool result is other people's content, and a packet carrying it would be a channel from a fetched page into a routing decision.
-- Slash commands and one-word acknowledgements never reach the gate at all.
-- On a paid lookup: the capability chosen, a hash of the contract, a hash of the arguments, your wallet address, the amount and the transaction hash are kept. No prompt text, no arguments and no hint text are stored.
+- On every prompt, and on every native `WebSearch` or `WebFetch`: the bounded text of the current turn, at most six prior messages and 16 KiB, redacted for obvious secrets. Tool results never travel: a tool result is other people's content, and a packet carrying it would be a channel from a fetched page into a routing decision.
+- A native call sends that same bounded turn WITH the call it is about attached, read from this session's own transcript. That is how a restriction you stated in your own words, such as asking for native tools only, reaches the decision about a bare URL your assistant is fetching.
+- Slash commands and one-word acknowledgements are never sent at all.
+- The packet is stored on the backend against the decision id for 15 minutes, so the lookup your assistant sends next is decided with the context you gave; it goes when the id expires.
+- On a paid lookup: the capability chosen, a hash of the contract, a hash of the arguments, your wallet address, the amount and the transaction hash are kept.
 
-The gate's answer can put one line into your session. It is checked against a fixed shape built from eight task category names before it is emitted, and a line that does not match is dropped.
+The answer can put one line into your session: that a paid lookup is available for this turn, and the id that carries your context to it. It names no provider and no price, because at that point the lookup itself has not been decided.
 
 ## Wallet passphrase storage
 

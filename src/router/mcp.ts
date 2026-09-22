@@ -6,7 +6,6 @@ import pkg from '../../package.json';
 import { dataDir as defaultDataDir } from '../lib/paths';
 import { resolveContextSettings } from '../lib/settings';
 import { resolveSpendAuthorizer, resolveWalletProvider } from '../lib/wallet';
-import type { TenjinSigner } from '../lib/wallet/provider';
 import type { CommandContext, GlobalFlags } from '../context';
 import { runRequestTool, type RequestToolDeps } from './tool';
 
@@ -70,18 +69,12 @@ function buildContext(opts: RouterMcpOptions): CommandContext {
 export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
   const ctx = buildContext(opts);
   const provider = resolveWalletProvider(ctx);
-  let signerPromise: Promise<TenjinSigner> | undefined;
-  const signer = (): Promise<TenjinSigner> => {
-    signerPromise ??= provider.getSigner();
-    return signerPromise;
-  };
-  // The background unlock. Its rejection is swallowed here and re-raised by the
-  // first tool call that actually needs a signer, so start-up never fails.
-  if (opts.handlerDeps?.signer === undefined) {
-    signerPromise = provider.getSigner();
-    signerPromise.catch(() => {
-      signerPromise = undefined;
-    });
+  // THE PREWARM, and nothing else. It runs the scrypt derivation while the
+  // session is idle so a paid lookup does not wait 2.3 s for it, and its
+  // rejection is swallowed: a machine with no wallet still routes, because
+  // deciding is free and only the paying leg needs a key.
+  if (opts.handlerDeps?.provider === undefined) {
+    void provider.getSigner().catch(() => undefined);
   }
   const server = new McpServer(
     { name: 'x402', version: pkg.version },
@@ -121,10 +114,13 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
         { query, ...(id !== undefined ? { id } : {}) },
         {
           ctx,
-          signer: opts.handlerDeps?.signer ?? (await signer()),
-          // The SAME provider this server pre-warmed, so the paying leg does
-          // not run the key derivation a second time.
-          ...(opts.handlerDeps?.signer === undefined ? { provider } : {}),
+          // THE WALLET IS THE PAYING LEG'S TO OPEN, not this handler's. Routing
+          // is free, so a missing or locked wallet must not stop a `native` or
+          // a `needs_input` answer from being delivered; `runPay` requires a
+          // signer only once a provider actually needs signing. The prewarm
+          // above stays best effort and this just hands the provider along, so
+          // a paid lookup still skips the second key derivation.
+          provider,
           authorizer,
           ...(opts.handlerDeps?.fetchImpl !== undefined
             ? { fetchImpl: opts.handlerDeps.fetchImpl }

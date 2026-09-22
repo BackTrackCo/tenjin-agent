@@ -113,20 +113,16 @@ describe('one free decision', () => {
     expect(JSON.stringify(body)).not.toContain('billing');
   });
 
-  it('carries the packet and its source from the hook, with no query', async () => {
+  it('carries the packet alone from the hook, with no query', async () => {
     const { fetchImpl, calls } = net(NATIVE);
     await requestDecision(
       'hook',
-      { source: 'prompt', packet: packetForText('what is the weather') },
+      { packet: packetForText('what is the weather') },
       { ctx: ctx(), baseUrl: BASE, fetchImpl },
     );
-    // Strict on the route: exactly these three, and `source` says which hook.
-    expect(Object.keys(calls[0]!.body as object).sort()).toEqual([
-      'packet',
-      'schemaVersion',
-      'source',
-    ]);
-    expect((calls[0]!.body as { source: string }).source).toBe('prompt');
+    // Strict on the route: exactly these two. Which hook is asking is read
+    // from `packet.pendingCall`, not from a field beside it.
+    expect(Object.keys(calls[0]!.body as object).sort()).toEqual(['packet', 'schemaVersion']);
   });
 
   it('sends the query and the turn id from the tool, with no packet of its own', async () => {
@@ -153,7 +149,7 @@ describe('one free decision', () => {
     });
     const outcome = await requestDecision(
       'hook',
-      { source: 'prompt', packet: packetForText('q') },
+      { packet: packetForText('q') },
       { ctx: ctx(), baseUrl: BASE, fetchImpl },
     );
     expect(outcome).toMatchObject({ status: 'failed' });
@@ -180,7 +176,7 @@ describe('one free decision', () => {
     );
     const outcome = await requestDecision(
       'hook',
-      { source: 'prompt', packet: packetForText('q') },
+      { packet: packetForText('q') },
       { ctx: ctx(), baseUrl: BASE, fetchImpl },
     );
     expect(outcome).toMatchObject({ status: 'failed', errorCode: 'packet_too_large' });
@@ -191,7 +187,7 @@ describe('one free decision', () => {
     const { fetchImpl } = net({ nope: true }, 500);
     const outcome = await requestDecision(
       'hook',
-      { source: 'prompt', packet: packetForText('q') },
+      { packet: packetForText('q') },
       { ctx: ctx(), baseUrl: BASE, fetchImpl },
     );
     expect(outcome).toMatchObject({ status: 'failed' });
@@ -208,7 +204,7 @@ describe('one free decision', () => {
     const { fetchImpl } = net({ ...NATIVE, action: 'native' });
     const outcome = await requestDecision(
       'hook',
-      { source: 'prompt', packet: packetForText('q') },
+      { packet: packetForText('q') },
       { ctx: ctx(), baseUrl: BASE, fetchImpl },
     );
     expect(outcome).toMatchObject({ status: 'failed' });

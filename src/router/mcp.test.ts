@@ -212,3 +212,43 @@ describe('what the tool tells the model to send', () => {
     }
   });
 });
+
+/**
+ * ROUTING IS FREE, SO A WALLET IS THE PAYING LEG'S PROBLEM. The handler used to
+ * open the wallet before the tool ran, which meant a machine with no wallet, or
+ * a locked one, could not even be told that its own tools cover the task.
+ */
+describe('a free answer on a machine with no wallet', () => {
+  it('delivers a native decision without ever opening one', async () => {
+    const fetchImpl = router({
+      schemaVersion: 1,
+      routerVersion: '2026-09-23.1',
+      decision: {
+        action: 'native',
+        reason: 'Your own tools cover this.',
+        diagnostics: {
+          reasonCode: 'native_sufficient',
+          stage: 'capability',
+          missing: [],
+          nextAction: '',
+        },
+      },
+    });
+    // No wallet under this data dir at all: `getSigner` throws WALLET_MISSING.
+    const server = buildRouterMcpServer({
+      dataDir: dir,
+      handlerDeps: { authorizer: authorizer(), fetchImpl },
+    });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: 'test', version: '0.0.0' });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const called = await client.callTool({ name: 'request', arguments: { query: 'weather' } });
+      expect(called.isError).toBe(false);
+      expect(called.structuredContent).toMatchObject({ status: 'native' });
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+});

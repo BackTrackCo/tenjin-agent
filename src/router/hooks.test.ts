@@ -98,10 +98,10 @@ describe('the prompt hook', () => {
     expect(calls).toHaveLength(1);
     const sent = calls[0] as { url: string; body: Record<string, unknown> };
     expect(sent.url).toBe(`${BASE}${ROUTER_PATH}`);
-    // The route reads a STRICT object: a missing `source` is a 400, which is a
+    // The route reads a STRICT object: an extra field is a 400, which is a
     // turn with no hint.
-    expect(Object.keys(sent.body).sort()).toEqual(['packet', 'schemaVersion', 'source']);
-    expect(sent.body.source).toBe('prompt');
+    expect(Object.keys(sent.body).sort()).toEqual(['packet', 'schemaVersion']);
+    expect((sent.body.packet as { pendingCall?: unknown }).pendingCall).toBeUndefined();
   });
 
   it('says nothing at all on native', async () => {
@@ -201,11 +201,14 @@ describe('the native hook', () => {
     });
     expect(out.decision).toBe('deny');
     expect(out.id).toBe('k3f9-abcd');
-    // The native hook says which hook it is, and sends the pending call inside
-    // the packet rather than beside it.
+    // The pending call rides INSIDE the packet: that is what tells the route
+    // this is the native hook asking.
     const sent = calls[0] as { body: Record<string, unknown> };
-    expect(sent.body.source).toBe('native');
-    expect((sent.body.packet as { pendingCall?: unknown }).pendingCall).toBeDefined();
+    expect(Object.keys(sent.body).sort()).toEqual(['packet', 'schemaVersion']);
+    expect((sent.body.packet as { pendingCall?: unknown }).pendingCall).toEqual({
+      tool: 'WebFetch',
+      url: 'https://example.test/spec',
+    });
     const reason = (out.response as { hookSpecificOutput: { permissionDecisionReason: string } })
       .hookSpecificOutput.permissionDecisionReason;
     expect(reason).toContain('id:"k3f9-abcd"');
@@ -275,5 +278,77 @@ describe('an id that is not an opaque handle', () => {
   it('encodes the id it does carry, whatever a later schema allows', () => {
     // Belt and braces: the schema pins the alphabet, and this pins the line.
     expect(hintLine('abc"def-123')).toContain('id:"abc\\"def-123"');
+  });
+});
+
+/**
+ * THE USER'S WORDS REACH BOTH GATES. Building the native packet from the tool
+ * argument alone made the search string the entire conversation, so a turn
+ * saying "native tools only, no paid services" gated the prompt and never
+ * reached the call it was about: the same session could then be redirected to
+ * a paid provider on a bare URL.
+ */
+describe('the native hook reads the turn it belongs to', () => {
+  async function transcript(rows: unknown[]): Promise<string> {
+    const fs = await import('node:fs/promises');
+    const path = join(dir, 'session.jsonl');
+    await fs.writeFile(path, rows.map((row) => JSON.stringify(row)).join('\n'));
+    return path;
+  }
+
+  function row(role: 'user' | 'assistant', text: string): unknown {
+    return { type: role, sessionId: 'sess-1', message: { content: [{ type: 'text', text }] } };
+  }
+
+  it('sends the restriction the user gave, not just the URL', async () => {
+    const path = await transcript([
+      row('user', 'Use native tools only, no paid services, for the rest of this task.'),
+      row('assistant', 'Understood, I will use my own tools.'),
+    ]);
+    const { fetchImpl, calls } = router(NATIVE);
+    await runNativeHook(
+      {
+        ...(nativeEvent('https://example.test/spec', 'WebFetch') as object),
+        transcript_path: path,
+      },
+      { dataDir: dir, baseUrl: BASE, fetchImpl },
+    );
+    const sent = calls[0] as { body: { packet: Record<string, unknown> } };
+    // The user's own sentence is the current message, and the call it is about
+    // rides inside the packet as the proposed operation.
+    expect(JSON.stringify(sent.body.packet)).toContain('no paid services');
+    expect(sent.body.packet.historyStatus).toBe('ok');
+    expect(sent.body.packet.pendingCall).toEqual({
+      tool: 'WebFetch',
+      url: 'https://example.test/spec',
+    });
+  });
+
+  it('carries the prompt turn into the native call that follows it', async () => {
+    const prompt = router(EXECUTE);
+    await runPromptHook(
+      { ...(promptEvent('find alpha leads for an x402 product') as object) },
+      { dataDir: dir, baseUrl: BASE, fetchImpl: prompt.fetchImpl },
+    );
+    const path = await transcript([row('user', 'find alpha leads for an x402 product')]);
+    const native = router(NATIVE);
+    await runNativeHook(
+      { ...(nativeEvent('x402 startups hiring') as object), transcript_path: path },
+      { dataDir: dir, baseUrl: BASE, fetchImpl: native.fetchImpl },
+    );
+    const sent = native.calls[0] as { body: { packet: { current: { text: string } } } };
+    expect(sent.body.packet.current.text).toBe('find alpha leads for an x402 product');
+  });
+
+  it('falls back to the call itself when there is no transcript to read', async () => {
+    const { fetchImpl, calls } = router(NATIVE);
+    await runNativeHook(nativeEvent('btc price today'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+    const sent = calls[0] as { body: { packet: Record<string, unknown> } };
+    expect((sent.body.packet.current as { text: string }).text).toBe('btc price today');
+    expect(sent.body.packet.historyStatus).toBe('unavailable');
   });
 });

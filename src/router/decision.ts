@@ -150,17 +150,18 @@ export type ToolDecision = ToolResponse['decision'];
 /** Which call this is, and therefore which answer is legal for it. */
 export type CallKind = 'hook' | 'tool';
 
-/** Which hook is asking. The route takes a STRICT object, so this is required
- *  and there is no third value: `wire-gate-request.json` pins the shape. */
-export type HookSource = 'prompt' | 'native';
-
 /**
  * The exact body the hook call sends, spelled once and pinned to the shared
- * fixture. The route reads it with a strict object, so a missing `source` and
- * an extra field are both a 400, and a 400 is a turn with no hint.
+ * fixtures. The route reads it with a strict object, so an extra field is a
+ * 400, and a 400 is a turn with no hint.
+ *
+ * ONE BODY FOR BOTH HOOKS. Which hook is asking is not a field: the route reads
+ * it from `packet.pendingCall`, which the native hook sets and the prompt hook
+ * does not. A `source` beside the packet was the `/prepare` route's shape, and
+ * that route is gone.
  */
-export function buildHookBody(source: HookSource, packet: Packet): Record<string, unknown> {
-  return { schemaVersion: 1, source, packet };
+export function buildHookBody(packet: Packet): Record<string, unknown> {
+  return { schemaVersion: 1, packet };
 }
 
 /** The parsers, exposed so the shared wire fixtures are checked against the
@@ -208,7 +209,7 @@ export type DecisionOutcome<T> =
  */
 export async function requestDecision(
   kind: 'hook',
-  request: { source: HookSource; packet: Packet },
+  request: { packet: Packet },
   deps: DecisionDeps,
 ): Promise<DecisionOutcome<HookResponse>>;
 export async function requestDecision(
@@ -219,7 +220,6 @@ export async function requestDecision(
 export async function requestDecision(
   kind: CallKind,
   request: {
-    source?: HookSource;
     query?: string;
     packet?: Packet;
     id?: string;
@@ -234,7 +234,7 @@ export async function requestDecision(
     blockRedirects: true,
     jsonBody:
       kind === 'hook'
-        ? buildHookBody(request.source ?? 'prompt', request.packet as Packet)
+        ? buildHookBody(request.packet as Packet)
         : {
             schemaVersion: 1,
             query: request.query,

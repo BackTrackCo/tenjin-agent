@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { loadRawConfig, resolveSettings } from '../lib/config';
 import type { PartialConfig } from '../lib/config';
-import { buildPromptPacket, fit, packetForText, type Packet, type PendingCall } from './context';
+import { buildNativePacket, buildPromptPacket, type Packet, type PendingCall } from './context';
 import { requestDecision, ROUTER_PATH, type HookDecision } from './decision';
 import { GATE_TIMEOUT_MS } from './gate';
 
@@ -29,6 +29,10 @@ const PromptEventSchema = z.object({
 
 const NativeEventSchema = z.object({
   session_id: z.string().min(1).max(200),
+  /** The harness's own path for THIS session: the native decision reads the
+   *  same bounded history the prompt one does, so a restriction the user gave
+   *  reaches both gates. */
+  transcript_path: z.string().optional(),
   tool_name: z.enum(['WebSearch', 'WebFetch']),
   tool_input: z.record(z.string(), z.unknown()),
 });
@@ -143,7 +147,7 @@ export async function runPromptHook(raw: unknown, deps: HookDeps): Promise<Promp
   if (skipped !== null) return { response: null, skipped };
 
   const packet = await buildPromptPacket(event.transcript_path, event.session_id, event.prompt);
-  const outcome = await decide('prompt', packet, deps);
+  const outcome = await decide(packet, deps);
   if (outcome === null) return injection(FALLBACK_LINE);
   const decision = outcome;
   if (decision.action === 'native') return { response: null, action: 'native' };
@@ -181,12 +185,11 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
   const event = parsed.data;
   const pending = pendingCallOf(event.tool_name, event.tool_input);
   if (pending === null) return { response: null, decision: 'allow' };
-  const subject = 'query' in pending ? pending.query : pending.url;
-
-  // The call's own text IS the query here: a native call states its lookup, so
-  // there is nothing to guess and no stored packet to find.
-  const packet: Packet = fit({ ...packetForText(subject), pendingCall: pending });
-  const outcome = await decide('native', packet, deps);
+  // THE USER'S WORDS COME WITH IT. Building this from the tool argument alone
+  // made the search string the whole conversation, so "native tools only, no
+  // paid services" never reached this gate.
+  const packet = await buildNativePacket(event.transcript_path, event.session_id, pending);
+  const outcome = await decide(packet, deps);
   if (outcome === null || outcome.action !== 'execute') {
     return {
       response: null,
@@ -218,16 +221,12 @@ export function redirectReason(pending: PendingCall, decision: HookDecision): st
 }
 
 /** One free decision, with the hook's own deadline and its own silence. */
-async function decide(
-  source: 'prompt' | 'native',
-  packet: Packet,
-  deps: HookDeps,
-): Promise<HookDecision | null> {
+async function decide(packet: Packet, deps: HookDeps): Promise<HookDecision | null> {
   const baseUrl = await resolveBaseUrl(deps);
   const warn = deps.warn ?? ((line: string) => process.stderr.write(`${line}\n`));
   const outcome = await requestDecision(
     'hook',
-    { source, packet },
+    { packet },
     {
       ctx: {
         flags: { json: true, timeout: deps.timeoutMs ?? GATE_TIMEOUT_MS },

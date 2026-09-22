@@ -131,6 +131,46 @@ export async function buildPromptPacket(
   });
 }
 
+/**
+ * Build the packet for a native call the host is about to make. SAME BOUNDS as
+ * a prompt packet, and the same reader: the six most recent messages, 16 KiB,
+ * masked, with tool results excluded.
+ *
+ * THE USER'S WORDS ARE WHAT CARRY THEIR AUTHORITY. Building this packet from
+ * the tool argument alone made the search string the entire conversation, so a
+ * turn that said "native tools only, no paid services" reached the prompt gate
+ * and never reached this one: the same session could then be redirected to a
+ * paid provider on a bare URL. Reading the transcript at the hook event is not
+ * session guessing; the harness hands this hook the path to its own session.
+ *
+ * The pending call rides INSIDE the packet as the proposed operation, which is
+ * the shape the route takes and the one `wire-gate-request.json` pins.
+ */
+export async function buildNativePacket(
+  transcriptPath: string | undefined,
+  sessionId: string,
+  pending: PendingCall,
+): Promise<Packet> {
+  const subject = 'query' in pending ? pending.query : pending.url;
+  const read = await readHistory(transcriptPath, sessionId);
+  const messages = read ?? [];
+  // The most recent user message is the turn this call belongs to; everything
+  // before it is context. With no transcript the call speaks for itself, which
+  // is what this hook did before it could read one.
+  const lastUser = messages
+    .map((message, index) => ({ message, index }))
+    .filter((entry) => entry.message.role === 'user');
+  const current = lastUser.at(-1);
+  const bounded = mask(subject).slice(0, MAX_MESSAGE_CHARS);
+  return fit({
+    current: current?.message ?? { role: 'user', text: bounded },
+    history: current === undefined ? messages : messages.slice(0, current.index),
+    literalUrls: literalUrlsIn(`${current?.message.text ?? ''}\n${bounded}`),
+    historyStatus: read === null ? 'unavailable' : 'ok',
+    pendingCall: pending,
+  });
+}
+
 /** `null` means "cannot be vouched for"; an empty array is a genuinely fresh session. */
 async function readHistory(
   path: string | undefined,
