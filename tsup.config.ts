@@ -73,12 +73,19 @@ export default defineConfig([
   // single-file bundle `tenjin daemon start` copies into ~/.tenjin/hooks, but
   // unlike the two above it is never spawned — a repo's OWN vitest config
   // imports it by absolute path, so it is loaded into the user's vitest
-  // process. No `banner` for exactly that reason: it imports `node:fs` and
-  // nothing else, and a commander shim it never uses has no business in
+  // process. No shared `banner` for exactly that reason: it imports `node:fs`
+  // and nothing else, and a commander shim it never uses has no business in
   // someone else's test run. `node20`, the same floor the CLI entry keeps, so
   // a repo on an older runtime than this daemon's can still load it.
   {
     entry: { 'tenjin-vitest-reporter': 'src/hooks/failure/vitest-reporter.ts' },
+    // EXPLICITLY EMPTY, not merely absent. tsup's `build()` API carries options
+    // from a previous build in the same process, so a config that just omits
+    // `banner` can inherit the daemon block's `createRequire` preamble above,
+    // and esbuild splices it in at a position that breaks the file: the smoke
+    // test that imports this bundle failed intermittently on a syntax error
+    // inside an otherwise complete file. Saying `{}` is what stops it inheriting.
+    banner: {},
     format: ['esm'],
     target: 'node20',
     platform: 'node',
