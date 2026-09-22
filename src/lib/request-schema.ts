@@ -3,6 +3,7 @@ import Ajv from 'ajv';
 import Ajv2020 from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
 import type { ValidateFunction } from 'ajv';
+import { mask } from './redact';
 
 /**
  * JSON Schema validation for anything a remote party asks this CLI to send or
@@ -148,6 +149,26 @@ export function assertResultSchema(schema: unknown): void {
 export interface ResultCheck {
   valid: boolean;
   reason?: string;
+  /**
+   * WHAT A CATALOG OWNER NEEDS to tell one failure from another: a provider
+   * whose parse missed looks exactly like one that answered HTML, and the
+   * reason alone could not separate them during the live smoke.
+   */
+  diagnosis?: {
+    /** `not-json`, `too-large`, or the schema rule that rejected it. */
+    failed: string;
+    json: boolean;
+    bytes: number;
+    maxBytes: number;
+    /** First 300 characters, redacted. Other people's content, never instructions. */
+    preview: string;
+  };
+}
+
+/** A bounded, redacted look at the body, for a refusal a human has to act on. */
+function preview(body: string): string {
+  const flat = mask(body).replace(/\s+/g, ' ').trim();
+  return flat.length <= 300 ? flat : `${flat.slice(0, 300)}…`;
 }
 
 /**
@@ -156,21 +177,32 @@ export interface ResultCheck {
  * is ever inferred from the body itself.
  */
 export function validateResultBody(schema: unknown, body: string): ResultCheck {
-  if (Buffer.byteLength(body) > MAX_BODY_BYTES) {
-    return { valid: false, reason: 'The result exceeds the JSON validation size limit.' };
+  const bytes = Buffer.byteLength(body);
+  const base = { json: false, bytes, maxBytes: MAX_BODY_BYTES, preview: preview(body) };
+  if (bytes > MAX_BODY_BYTES) {
+    return {
+      valid: false,
+      reason: `The result is ${bytes} bytes, over the ${MAX_BODY_BYTES} byte validation limit.`,
+      diagnosis: { ...base, failed: 'too-large' },
+    };
   }
   let value: unknown;
   try {
     value = JSON.parse(body);
     walk(value, false);
-  } catch {
-    return { valid: false, reason: 'The result is not a supported bounded JSON document.' };
+  } catch (err) {
+    return {
+      valid: false,
+      reason: `The result is not a supported bounded JSON document (${err instanceof Error ? err.message : String(err)}).`,
+      diagnosis: { ...base, failed: 'not-json' },
+    };
   }
   const check = validateAgainstSchema(schema, value);
-  return check.valid
-    ? { valid: true }
-    : {
-        valid: false,
-        reason: `The result does not satisfy its success schema: ${check.errors[0]}`,
-      };
+  if (check.valid) return { valid: true };
+  const failed = check.errors[0] ?? 'the success rule';
+  return {
+    valid: false,
+    reason: `The result does not satisfy its success schema: ${failed}`,
+    diagnosis: { ...base, json: true, failed },
+  };
 }

@@ -675,3 +675,62 @@ describe('a provider leg that cannot be read after the payment left', () => {
     });
   });
 });
+
+describe('a paid 2xx that fails its result contract', () => {
+  const RESULT = {
+    type: 'object',
+    properties: { success: { const: true } },
+    required: ['success'],
+  };
+
+  function legsFor(body: string, contentType = 'application/json') {
+    return (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      const paid = new Headers(init?.headers ?? {}).has('payment-signature');
+      const toRouter = String(input).startsWith(ROUTER);
+      if (!paid) {
+        return new Response('{}', {
+          status: 402,
+          headers: {
+            'content-type': 'application/json',
+            'PAYMENT-REQUIRED': toRouter ? challenge() : challenge({ amount: '10000' }),
+          },
+        });
+      }
+      if (toRouter) {
+        return new Response(
+          JSON.stringify(decision({ contract: contract({ resultSchema: RESULT }) })),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      return new Response(body, { status: 200, headers: { 'content-type': contentType } });
+    }) as typeof fetch;
+  }
+
+  it('tells a rule miss apart from a body that was never JSON', async () => {
+    const miss = await runRequestTool(
+      { query: 'q' },
+      deps(legsFor(JSON.stringify({ success: false, reason: 'no match' }))),
+    );
+    expect(miss.envelope).toMatchObject({ status: 'failed' });
+    expect(miss.envelope.diagnosis).toMatchObject({ json: true });
+    expect(String((miss.envelope.diagnosis as { failed: string }).failed)).toContain('/success');
+
+    const html = await runRequestTool(
+      { query: 'q' },
+      deps(legsFor('<!doctype html><title>502 Bad Gateway</title>', 'text/html')),
+    );
+    expect(html.envelope.diagnosis).toMatchObject({ failed: 'not-json', json: false });
+    expect(String((html.envelope.diagnosis as { preview: string }).preview)).toContain('502');
+  });
+
+  it('still reports what the provider call cost on either', async () => {
+    const result = await runRequestTool(
+      { query: 'q' },
+      deps(legsFor(JSON.stringify({ success: false }))),
+    );
+    expect(result.envelope).toMatchObject({
+      cost: ['router fee 0.001 USD', 'provider price 0.01 USD'],
+      settlement: 'reported',
+    });
+  });
+});

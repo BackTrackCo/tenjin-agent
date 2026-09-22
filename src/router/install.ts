@@ -141,8 +141,16 @@ export async function runRouterInstall(
     });
   }
   const cwd = deps.cwd ?? process.cwd();
+  // A refresh follows the install it is refreshing. `tenjin update` spawns it
+  // with no flags, so the scope is DETECTED: whichever settings file already
+  // carries entries of ours is the one this machine installed into, and a
+  // refresh that silently moved a project install to user scope would leave
+  // two installations and double-fire every hook.
+  const project =
+    args.project === true ||
+    (args.refresh === true && (await detectProjectInstall(home, cwd, ctx.dataDir)));
   const settingsPath = routerSettingsPath({
-    ...(args.project === true ? { project: true } : {}),
+    ...(project ? { project: true } : {}),
     homeDir: home,
     cwd,
   });
@@ -162,15 +170,36 @@ export async function runRouterInstall(
     plan: routerHookPlan(),
     settingsPath,
   });
+  const permissions = await ensureAllowRule(settingsPath);
+  const mcp = await registerMcpServer(deps, env, project, cwd);
   if (args.refresh === true) {
+    // The SAME writers, minus the one that decides anything: the entries are
+    // rewritten in place by their ownership marker so an upgrade never
+    // duplicates them, the rule and the registration are re-checked because a
+    // new version can change either, and `config.json`, the wallet and
+    // `spend.json` are not touched at all. Widening an agent's spend policy
+    // during an unattended upgrade is not a convergence.
+    // WRITTEN, not merely re-checked: `claude mcp add` is idempotent and
+    // reports no difference either way, so the registration is always a
+    // re-check and never counts as a change.
+    const rewritten = [
+      ...(hooks.wrote ? ['hook entries'] : []),
+      ...(permissions.added ? ['the permission rule'] : []),
+    ];
     return {
-      data: { settingsPath, hooks, refresh: true },
-      humanLines: [`Refreshed ${hooks.entries} hook entries in ${settingsPath}.`],
+      data: { settingsPath, hooks, permissions, mcp, refresh: true, scope: mcpScope(project) },
+      humanLines: [
+        rewritten.length === 0
+          ? `Already current: ${hooks.entries} hook entries in ${settingsPath}, nothing rewritten.`
+          : `Rewrote ${rewritten.join(' and ')} in ${settingsPath}.`,
+        mcp.registered
+          ? `Re-checked the ${MCP_SERVER_NAME} MCP registration (${mcpScope(project)} scope).`
+          : `mcp: run ${mcp.command}`,
+        'Your wallet, spend ledger and config were not touched.',
+      ],
     };
   }
-  const permissions = await ensureAllowRule(settingsPath);
   const spend = await persistRouterDefaults(ctx.dataDir);
-  const mcp = await registerMcpServer(deps, env, args.project === true, cwd);
   // Read back AFTER the write: a machine that already carried its own caps
   // keeps them, and a readout quoting the defaults would describe limits this
   // run did not set.
@@ -308,6 +337,13 @@ function lines(
   ];
   if (hooks.warning !== undefined) out.push(`! ${hooks.warning}`);
   return out;
+}
+
+/** Does the PROJECT file carry our entries while the home one does not? That
+ *  is a project install, and a refresh has to stay in it. */
+async function detectProjectInstall(home: string, cwd: string, dataDir: string): Promise<boolean> {
+  if (await hasOurEntries(routerSettingsPath({ homeDir: home }), dataDir)) return false;
+  return hasOurEntries(routerSettingsPath({ project: true, cwd }), dataDir);
 }
 
 async function hasOurEntries(path: string, dataDir: string): Promise<boolean> {

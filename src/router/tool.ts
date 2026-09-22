@@ -180,10 +180,14 @@ export async function runRequestTool(
     // A provider failure AFTER transmission carries the amount at risk on its
     // details. Reporting zero there told the model the call was free when the
     // ledger had already counted it.
-    const detail = (cli?.details ?? {}) as { amountAtomic?: string; settlement?: string };
+    const detail = (cli?.details ?? {}) as {
+      amountAtomic?: string;
+      settlement?: string;
+      diagnosis?: Record<string, unknown>;
+    };
     const providerAtomic = BigInt(detail.amountAtomic ?? '0');
     return withKey(
-      fail(status, reason, routerFeeAtomic, providerAtomic, detail.settlement),
+      fail(status, reason, routerFeeAtomic, providerAtomic, detail.settlement, detail.diagnosis),
       sessionKey,
     );
   }
@@ -281,6 +285,9 @@ function fail(
   routerFeeAtomic = 0n,
   providerAtomic = 0n,
   settlement?: string,
+  /** Which rule failed, whether the body was JSON, its size and a bounded
+   *  redacted preview: what tells a parse miss from an HTML error page. */
+  diagnosis?: Record<string, unknown>,
 ): RequestToolResult {
   return {
     isError: true,
@@ -292,6 +299,7 @@ function fail(
       // transmitted is money at risk whether or not a result came back.
       cost: costLines(routerFeeAtomic, providerAtomic),
       ...(settlement !== undefined ? { settlement } : {}),
+      ...(diagnosis !== undefined ? { diagnosis } : {}),
       providerContentUntrusted: true,
     },
   };

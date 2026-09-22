@@ -8,7 +8,7 @@ import { CliError } from '../lib/errors';
 import { knownDeploymentOrigins } from '../lib/production-origin';
 import { encodePaymentRequiredHeader } from '@x402/core/http';
 import { parseSIWxHeader } from '@x402/extensions/sign-in-with-x';
-import type { PaymentRequired } from '@x402/core/types';
+import type { PaymentRequired, PaymentRequirements } from '@x402/core/types';
 import { buildPaymentRequired, testWalletProvider, withBuilderCode } from '../lib/read-test-utils';
 import { TENJIN_CLI_BUILDER_CODE } from '../lib/x402-pay';
 import type { SpendAuthorizer, SpendAuthorization } from '../lib/wallet';
@@ -1067,5 +1067,156 @@ describe('runPay, a transport failure after the payment was transmitted', () => 
     expect((err as CliError).fix).toContain('--max-http-header-size');
     expect((err as CliError).details).toBeUndefined();
     expect(authorizer.commit).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * A 402 may advertise several entries in any order. CoinMarketCap's lists
+ * seven with BNB chain first and the Base USDC entry third, so taking
+ * `accepts[0]` compared an 18-decimal BNB entry against terms issued for Base
+ * USDC and refused every quote before anything was signed.
+ */
+describe('runPay, a 402 that advertises several chains', () => {
+  const BNB = '0x55d398326f99059fF775485246999027B3197955';
+  const USDC_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
+  const TERMS = { network: 'eip155:8453', asset: USDC_BASE, maxAmountAtomic: '10000' };
+
+  /** Shaped like the live CoinMarketCap challenge: BNB first, Base USDC third. */
+  function multiChain(over: Partial<PaymentRequirements>[] = []): string {
+    const entry = (o: Partial<PaymentRequirements>): PaymentRequirements =>
+      ({
+        scheme: 'exact',
+        network: 'eip155:56',
+        asset: BNB,
+        amount: '10000000000000000',
+        payTo: '0x1111111111111111111111111111111111111111',
+        maxTimeoutSeconds: 300,
+        extra: { name: 'USD Coin', version: '2' },
+        ...o,
+      }) as PaymentRequirements;
+    const accepts = [
+      entry({}),
+      entry({ asset: '0x2222222222222222222222222222222222222222' }),
+      entry({ network: 'eip155:8453', asset: USDC_BASE, amount: '10000' }),
+      entry({ network: 'eip155:137' }),
+      ...over.map(entry),
+    ];
+    return buildPaymentRequired({}, { accepts } as never).header;
+  }
+
+  it('pays the entry the terms name, not the first one listed', async () => {
+    await writeConfig();
+    const { fetch, calls } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': multiChain() }),
+      json(200, { data: { BTC: 1 } }),
+    ]);
+    const result = await runPay({ url: FOREIGN_URL, terms: TERMS }, makeCtx(), {
+      ...PUBLIC_DNS,
+      fetchImpl: fetch,
+      provider: testWalletProvider(),
+      authorizer: fakeAuthorizer('allow'),
+    });
+    const data = result.data as { paid: boolean; amountPaid: { atomic: string }; network: string };
+    expect(data.paid).toBe(true);
+    // The Base USDC entry: 0.01, not the 18-decimal BNB amount listed first.
+    expect(data.amountPaid.atomic).toBe('10000');
+    expect(data.network).toBe('eip155:8453');
+    expect(calls).toHaveLength(2);
+  });
+
+  it('signs the entry it checked, so the two can never be different deals', async () => {
+    await writeConfig();
+    const { fetch, calls } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': multiChain() }),
+      json(200, { ok: true }),
+    ]);
+    await runPay({ url: FOREIGN_URL, terms: TERMS }, makeCtx(), {
+      ...PUBLIC_DNS,
+      fetchImpl: fetch,
+      provider: testWalletProvider(),
+      authorizer: fakeAuthorizer('allow'),
+    });
+    const header = calls[1]!.headers['payment-signature']!;
+    const payload = JSON.parse(Buffer.from(header, 'base64').toString('utf8')) as {
+      network?: string;
+      accepted?: { network?: string };
+    };
+    expect(JSON.stringify(payload)).toContain('eip155:8453');
+    expect(JSON.stringify(payload)).not.toContain('eip155:56');
+  });
+
+  it('refuses when no entry is on the advertised network and asset', async () => {
+    await writeConfig();
+    const { fetch, calls } = scriptedFetch([
+      json(
+        402,
+        {},
+        {
+          'PAYMENT-REQUIRED': buildPaymentRequired({ network: 'eip155:56' as const, asset: BNB })
+            .header,
+        },
+      ),
+    ]);
+    const authorizer = fakeAuthorizer('allow');
+    const err = await runPay({ url: FOREIGN_URL, terms: TERMS }, makeCtx(), {
+      ...PUBLIC_DNS,
+      fetchImpl: fetch,
+      provider: testWalletProvider(),
+      authorizer,
+    }).catch((e: unknown) => e);
+    expect((err as CliError).code).toBe('REGISTRY_MISMATCH');
+    expect((err as CliError).message).toContain('eip155:8453');
+    expect(calls).toHaveLength(1);
+    expect(authorizer.authorize).not.toHaveBeenCalled();
+  });
+
+  it('still refuses a MATCHING entry that costs more than advertised', async () => {
+    await writeConfig();
+    const { fetch } = scriptedFetch([
+      json(
+        402,
+        {},
+        {
+          'PAYMENT-REQUIRED': multiChain([
+            { network: 'eip155:8453', asset: USDC_BASE, amount: '99999' },
+          ]),
+        },
+      ),
+    ]);
+    const err = await runPay(
+      { url: FOREIGN_URL, terms: { ...TERMS, maxAmountAtomic: '9999' } },
+      makeCtx(),
+      { ...PUBLIC_DNS, fetchImpl: fetch, provider: testWalletProvider() },
+    ).catch((e: unknown) => e);
+    expect((err as CliError).code).toBe('REGISTRY_MISMATCH');
+    expect((err as CliError).message).toContain('over the advertised');
+  });
+
+  it('checks payTo against the chosen entry when the terms pin one', async () => {
+    await writeConfig();
+    const { fetch } = scriptedFetch([json(402, {}, { 'PAYMENT-REQUIRED': multiChain() })]);
+    const err = await runPay(
+      {
+        url: FOREIGN_URL,
+        terms: { ...TERMS, payTo: '0x9999999999999999999999999999999999999999' },
+      },
+      makeCtx(),
+      { ...PUBLIC_DNS, fetchImpl: fetch, provider: testWalletProvider() },
+    ).catch((e: unknown) => e);
+    expect((err as CliError).message).toContain('payTo');
+  });
+
+  it('leaves the no-terms lanes taking the first entry, as before', async () => {
+    const { fetch } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': buildPaymentRequired().header }),
+      json(200, { ok: true }),
+    ]);
+    const result = await runPay({ url: TENJIN_URL }, makeCtx(), {
+      ...PUBLIC_DNS,
+      fetchImpl: fetch,
+      provider: testWalletProvider(),
+      authorizer: fakeAuthorizer('allow'),
+    });
+    expect((result.data as { amountPaid: { atomic: string } }).amountPaid.atomic).toBe('100000');
   });
 });

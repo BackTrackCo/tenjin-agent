@@ -64,7 +64,13 @@ If the backend is down the gate stays silent, your native tools keep working, an
 tenjin uninstall
 ```
 
-That removes the hook entries, the permission rule and the MCP registration. Your wallet, your spend ledger and your config stay. `tenjin update` pulls the newest published version.
+That removes the hook entries, the permission rule and the MCP registration. Your wallet, your spend ledger and your config stay.
+
+```bash
+tenjin update
+```
+
+That pulls the newest published version and re-applies the wiring for it: the hook entries are rewritten in place to whatever the new version needs, never duplicated, the permission rule and the MCP registration are re-checked in the scope you installed into, and your wallet, spend ledger and config are not touched.
 
 ## Paying an endpoint yourself
 

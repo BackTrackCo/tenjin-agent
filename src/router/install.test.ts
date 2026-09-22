@@ -222,8 +222,11 @@ describe('tenjin install --refresh', () => {
     const registerMcp = vi.fn(async () => undefined);
     const result = await runRouterInstall({ refresh: true }, ctx(), deps({ registerMcp }));
     expect(result.data).toMatchObject({ refresh: true });
-    expect(registerMcp).not.toHaveBeenCalled();
+    // The registration IS re-checked: a new version can change the command it
+    // registers. What a refresh must never do is decide anything about money.
+    expect(registerMcp).toHaveBeenCalled();
     expect((await loadRawConfig(data)).maxAutoSpend).toBe('1');
+    expect(result.humanLines?.join('\n')).toContain('were not touched');
   });
 
   it('refuses on a machine that never installed', async () => {
@@ -646,5 +649,110 @@ describe('doctor checks that the registration launches the router', () => {
     const check = await mcpDetail(home, cwd, ctx);
     expect(check.status).toBe('ok');
     expect(check.detail).toContain('`tenjin mcp`');
+  });
+});
+
+/**
+ * The upgrade path a user actually walks: router version N to N+1. `tenjin
+ * update` swaps the binary and re-runs this writer, which owns its entries by
+ * their marker, so it rewrites rather than appends.
+ */
+describe('tenjin update re-applies the install', () => {
+  it('is a no-op by bytes when nothing changed', async () => {
+    const fs = await import('node:fs/promises');
+    await runRouterInstall({}, ctx(), deps());
+    const before = await fs.readFile(settingsPath(), 'utf8');
+    const result = await runRouterInstall({ refresh: true }, ctx(), deps());
+    expect(await fs.readFile(settingsPath(), 'utf8')).toBe(before);
+    expect((result.data as { hooks: { wrote: boolean } }).hooks.wrote).toBe(false);
+    expect(result.humanLines?.join('\n')).toContain('Already current');
+  });
+
+  it('rewrites the entries ONCE when the new version changes their shape', async () => {
+    const fs = await import('node:fs/promises');
+    await runRouterInstall({}, ctx(), deps());
+    // An older layout: our marker, a different command shape and timeout.
+    const settings = await readSettings();
+    (settings.hooks as Record<string, unknown[]>).UserPromptSubmit = [
+      { hooks: [{ type: 'command', command: '/old/path/tenjin hook prompt', timeout: 10 }] },
+    ];
+    await fs.writeFile(settingsPath(), JSON.stringify(settings, null, 2) + '\n');
+
+    const result = await runRouterInstall({ refresh: true }, ctx(), deps());
+    expect((result.data as { hooks: { wrote: boolean } }).hooks.wrote).toBe(true);
+    const after = await readSettings();
+    const prompt = (after.hooks as Record<string, { hooks: { command: string }[] }[]>)
+      .UserPromptSubmit;
+    // ONE entry, the current shape: rewritten in place, never appended beside.
+    expect(prompt).toHaveLength(1);
+    expect(prompt![0]!.hooks).toEqual([
+      { type: 'command', command: 'tenjin hook prompt', timeout: 3 },
+    ]);
+    expect(JSON.stringify(after)).not.toContain('/old/path/tenjin');
+  });
+
+  it('stays in the project scope it was installed into, with no flag', async () => {
+    const fs = await import('node:fs/promises');
+    const cwd = join(home, 'project');
+    await fs.mkdir(cwd, { recursive: true });
+    await runRouterInstall({ project: true }, ctx(), deps({ cwd }));
+    const homeBefore = await fs.readFile(settingsPath(), 'utf8').catch(() => null);
+
+    const registerMcp = vi.fn(async () => undefined);
+    const result = await runRouterInstall({ refresh: true }, ctx(), deps({ cwd, registerMcp }));
+    expect(result.data).toMatchObject({
+      settingsPath: join(cwd, '.claude', 'settings.json'),
+      scope: 'project',
+    });
+    expect(registerMcp).toHaveBeenCalledWith('claude mcp add x402 -s project -- tenjin mcp', {
+      scope: 'project',
+      cwd,
+    });
+    // The user's file is exactly as it was, including still absent.
+    expect(await fs.readFile(settingsPath(), 'utf8').catch(() => null)).toBe(homeBefore);
+  });
+
+  it('leaves the wallet, the ledger and the config alone', async () => {
+    const fs = await import('node:fs/promises');
+    await runRouterInstall({}, ctx(), deps());
+    await fs.writeFile(join(data, 'wallet.json'), '{"keystore":"kept"}');
+    await fs.writeFile(join(data, 'spend.json'), '{"schemaVersion":2}');
+    await fs.writeFile(join(data, 'config.json'), JSON.stringify({ maxAutoSpend: '1' }));
+    const before = await Promise.all(
+      ['wallet.json', 'spend.json', 'config.json'].map((f) => fs.readFile(join(data, f), 'utf8')),
+    );
+    await runRouterInstall({ refresh: true }, ctx(), deps());
+    const after = await Promise.all(
+      ['wallet.json', 'spend.json', 'config.json'].map((f) => fs.readFile(join(data, f), 'utf8')),
+    );
+    expect(after).toEqual(before);
+  });
+
+  it('doctor passes after an update, in both scopes', async () => {
+    const fs = await import('node:fs/promises');
+    const { runRouterDoctor } = await import('./doctor');
+    const cwd = join(home, 'project');
+    await fs.mkdir(cwd, { recursive: true });
+    await runRouterInstall({ project: true }, ctx(), deps({ cwd }));
+    await fs.writeFile(
+      join(cwd, '.mcp.json'),
+      JSON.stringify({ mcpServers: { x402: { command: 'tenjin', args: ['mcp'] } } }),
+    );
+    await runRouterInstall({ refresh: true }, ctx(), deps({ cwd }));
+    const check = await mcpDetail(home, cwd, ctx);
+    expect(check.status).toBe('ok');
+    const out = await runRouterDoctor(ctx(), {
+      homeDir: home,
+      cwd,
+      project: true,
+      env: {},
+      which: () => true,
+      fetchImpl: probe402,
+    }).catch((e: unknown) => e);
+    const checks =
+      out instanceof CliError
+        ? (out.details as { checks: { name: string; status: string }[] })
+        : (out as { data: { checks: { name: string; status: string }[] } }).data;
+    expect(checks.checks.find((c) => c.name === 'hooks')?.status).toBe('ok');
   });
 });

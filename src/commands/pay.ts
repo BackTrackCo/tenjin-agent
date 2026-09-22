@@ -21,7 +21,14 @@ import {
   type SpendAuthorizer,
   type WalletProvider,
 } from '../lib/wallet';
-import { buildExactPayment } from '../lib/x402-pay';
+import {
+  buildExactPayment,
+  createPayerClient,
+  noPayableRequirement,
+  selectPayableRequirement,
+} from '../lib/x402-pay';
+import type { x402Client } from '@x402/core/client';
+import type { TenjinSigner } from '../lib/wallet/provider';
 import type { CommandContext, CommandResult } from '../context';
 
 /**
@@ -62,6 +69,8 @@ export interface AdvertisedTerms {
   network: string;
   asset: string;
   maxAmountAtomic: string;
+  /** The advertised recipient, when the caller was given one. Checked exactly. */
+  payTo?: string;
   /** Free-text provenance for the payee label, e.g. a registry name. */
   source?: string;
 }
@@ -118,6 +127,9 @@ export async function runPay(
   const settings = await resolveContextSettings(ctx);
   const maxPriceAtomic =
     args.maxPrice !== undefined ? BigInt(parseUsdToAtomic(args.maxPrice)) : undefined;
+  // Filled once the wallet is opened; the payer client closes over it so
+  // selection can run first without one.
+  const openedSigner: { current?: TenjinSigner } = {};
   const url = args.url.trim();
   const lane = resolveLane(url, settings);
   // BEFORE the probe, and only on the third-party lane: the configured base URL
@@ -162,11 +174,13 @@ export async function runPay(
   }
 
   const paymentRequired = decodeChallenge(probe, url);
-  const requirement = paymentRequired.accepts[0];
+  // The client is built BEFORE the wallet is opened on purpose: selection needs
+  // only the registered networks and the policies, never a key, so an
+  // unpayable or unverifiable deal is refused before a signer exists.
+  const payer = createPayerClient(() => signerOrThrow(openedSigner));
+  const requirement = selectRequirement(payer.core, paymentRequired, args.terms);
   if (requirement === undefined) {
-    throw new CliError('PAYMENT_FAILED', 'The 402 advertised no payment requirements.', {
-      fix: 'The endpoint looks misconfigured.',
-    });
+    throw noMatchingEntry(paymentRequired, args.terms);
   }
   // The FIRST-SEEN amount: a later challenge may never cost more than this.
   const firstSeenAmount = BigInt(requirement.amount);
@@ -188,6 +202,7 @@ export async function runPay(
   );
   await describeWallet(provider); // WALLET_MISSING with its own fix if none exists
   const signer = await provider.getSigner();
+  openedSigner.current = signer;
 
   // The standard sign-in-with-x extension, same sequence as `buy`: when the 402
   // advertises it, an entitled wallet re-reads FREE before any payment exists,
@@ -225,11 +240,9 @@ export async function runPay(
       );
     }
     effectiveChallenge = decodeChallenge(recheck, url);
-    const fresh = effectiveChallenge.accepts[0];
+    const fresh = selectRequirement(payer.core, effectiveChallenge, args.terms);
     if (fresh === undefined) {
-      throw new CliError('PAYMENT_FAILED', 'The fresh 402 advertised no payment requirements.', {
-        fix: 'The endpoint looks misconfigured.',
-      });
+      throw noMatchingEntry(effectiveChallenge, args.terms);
     }
     // Refuse a price bump between the first look and signing, exactly as `buy`.
     if (BigInt(fresh.amount) > firstSeenAmount) {
@@ -278,7 +291,11 @@ export async function runPay(
   // nothing can move. That is the last point where releasing is honest.
   let payment: Awaited<ReturnType<typeof buildExactPayment>>;
   try {
-    payment = await buildExactPayment(effectiveChallenge, signer);
+    // The SIGNED entry is the CHECKED entry, by construction: the challenge is
+    // narrowed to the one selection everything above ran against, so a seller
+    // advertising several chains cannot have one entry priced and another
+    // signed. Without this the builder re-picked `accepts[0]`.
+    payment = await buildExactPayment(effectiveChallenge, signer, effectiveRequirement);
   } catch (err) {
     await authorizer.release(reservationId);
     throw err;
@@ -318,6 +335,7 @@ export async function runPay(
           details: {
             status: paid.status,
             reason: check.reason,
+            ...(check.diagnosis !== undefined ? { diagnosis: check.diagnosis } : {}),
             amountAtomic: payment.amountAtomic.toString(),
             settlement: 'reported',
           },
@@ -481,7 +499,12 @@ function assertUsableResult(
   if (check.valid) return;
   throw new CliError('CONTRACT_MISMATCH', 'The response is not a usable result.', {
     fix: `Nothing was paid on this ${how} delivery. The endpoint answered ${status} with a body that fails the success rule it was asked under.`,
-    details: { status, reason: check.reason, paid: false },
+    details: {
+      status,
+      reason: check.reason,
+      ...(check.diagnosis !== undefined ? { diagnosis: check.diagnosis } : {}),
+      paid: false,
+    },
   });
 }
 
@@ -493,6 +516,42 @@ function legFix(failure: { kind: string }): string {
     : '';
 }
 
+/** Nothing this caller may pay: no entry at all, or none on the advertised
+ *  scheme, network and asset. Refused before a signer is even opened. */
+function noMatchingEntry(challenge: PaymentRequired, terms: AdvertisedTerms | undefined): CliError {
+  // No terms: the 402 simply advertises nothing this wallet can pay, which the
+  // shared refusal already names in the SDK's own vocabulary.
+  if (terms === undefined) return noPayableRequirement(challenge.accepts);
+  const advertised = challenge.accepts.map((a) => `${a.scheme}/${a.network}/${a.asset}`);
+  return new CliError(
+    'REGISTRY_MISMATCH',
+    `The 402 advertises nothing on ${terms.network} in ${terms.asset}, which is what this call was authorized against.`,
+    {
+      fix: 'Nothing was signed. The endpoint changed the deal since those terms were issued; ask for a fresh decision.',
+      details: { advertised, terms },
+    },
+  );
+}
+
+/**
+ * WHICH advertised entry this call is about, from the SDK's own selection
+ * (`src/lib/x402-pay.ts`): the registered networks, the `exact` scheme and the
+ * canonical-USDC policy, narrowed further by advertised terms when the caller
+ * has them. Every paying path asks this one question, so a 402 that lists
+ * seven entries cannot have one priced and another signed.
+ */
+function selectRequirement(
+  core: x402Client,
+  challenge: PaymentRequired,
+  terms: AdvertisedTerms | undefined,
+): PaymentRequirements | undefined {
+  return selectPayableRequirement(
+    core,
+    challenge,
+    terms === undefined ? undefined : { network: terms.network, asset: terms.asset },
+  );
+}
+
 /**
  * The advertised-terms gate. Same shape of answer as the registry gate and the
  * same failure code, because it answers the same question: is the live 402 the
@@ -500,16 +559,14 @@ function legFix(failure: { kind: string }): string {
  * most on the amount. Returns the label the payee line names.
  */
 function assertWithinTerms(terms: AdvertisedTerms, requirement: PaymentRequirements): string {
+  // Scheme, network and asset already matched: `selectRequirement` chose this
+  // entry BY them. What is left is the deal's price and its destination.
   const mismatch =
-    requirement.scheme !== 'exact'
-      ? `scheme ${requirement.scheme}`
-      : requirement.network !== terms.network
-        ? `network ${requirement.network}`
-        : requirement.asset.toLowerCase() !== terms.asset.toLowerCase()
-          ? `asset ${requirement.asset}`
-          : BigInt(requirement.amount) > BigInt(terms.maxAmountAtomic)
-            ? `amount ${requirement.amount} over the advertised ${terms.maxAmountAtomic}`
-            : undefined;
+    BigInt(requirement.amount) > BigInt(terms.maxAmountAtomic)
+      ? `amount ${requirement.amount} over the advertised ${terms.maxAmountAtomic}`
+      : terms.payTo !== undefined && requirement.payTo.toLowerCase() !== terms.payTo.toLowerCase()
+        ? `payTo ${requirement.payTo}`
+        : undefined;
   if (mismatch !== undefined) {
     throw new CliError(
       'REGISTRY_MISMATCH',
@@ -629,4 +686,12 @@ function settlementTx(res: HttpResponse): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+/** The signer, once the wallet has been opened. Selection never reaches it. */
+function signerOrThrow(held: { current?: TenjinSigner }): TenjinSigner {
+  if (held.current === undefined) {
+    throw new CliError('INTERNAL', 'The payment was built before the wallet was opened.');
+  }
+  return held.current;
 }
