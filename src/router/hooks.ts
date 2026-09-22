@@ -102,8 +102,11 @@ export const FALLBACK_LINE = 'call request({query}) for lookups';
  * different URLs, which the failing case did not.
  */
 export function hintLine(id: string | undefined): string {
-  const carry = id !== undefined ? `, id:'${id}'` : '';
-  return `A paid lookup is available for this turn: call request({query:'<your exact lookup>'${carry}})`;
+  // JSON-encoded even though the schema already pins the alphabet: this string
+  // is server text landing in the model's context, and one layer that cannot be
+  // skipped by a future schema change is worth its two characters.
+  const carry = id !== undefined ? `, id:${JSON.stringify(id)}` : '';
+  return `A paid lookup is available for this turn: call request({query:"<your exact lookup>"${carry}})`;
 }
 
 /** What a `needs_input` decision leaves the host to do, in one line. */

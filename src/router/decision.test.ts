@@ -71,7 +71,7 @@ const NATIVE = {
 const EXECUTE = {
   schemaVersion: 1,
   routerVersion: '2026-09-23.1',
-  id: 'k3f9',
+  id: 'k3f9-abcd',
   action: 'execute',
   description: 'BTC and ETH quotes ready',
   provider: 'CoinMarketCap',
@@ -110,7 +110,7 @@ describe('one free decision', () => {
   it('sends the query and the turn id from the tool, with no packet of its own', async () => {
     const { fetchImpl, calls } = net(EXECUTE);
     await requestDecision(
-      { query: 'BTC and ETH price', id: 'k3f9' },
+      { query: 'BTC and ETH price', id: 'k3f9-abcd' },
       { ctx: ctx(), baseUrl: BASE, fetchImpl },
     );
     // The packet lives on the backend against the id; the client keeps none.

@@ -81,7 +81,7 @@ function decision(over: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     schemaVersion: 1,
     routerVersion: '2026-09-23.1',
-    id: 'k3f9',
+    id: 'k3f9-abcd',
     action: 'execute',
     description: 'BTC and ETH quotes ready',
     provider: 'CoinMarketCap',
@@ -168,7 +168,7 @@ describe('the request tool, one decision and one payment per lookup', () => {
       ...providerLegs(),
     ]);
     const result = await runRequestTool(
-      { query: 'BTC and ETH price', id: 'k3f9' },
+      { query: 'BTC and ETH price', id: 'k3f9-abcd' },
       deps(fetchImpl),
     );
 

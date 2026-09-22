@@ -71,8 +71,17 @@ export type DecisionDiagnostics = z.infer<typeof DiagnosticsSchema>;
 const DecisionSchema = z.strictObject({
   schemaVersion: z.literal(1),
   routerVersion: z.string().min(1).max(64),
-  /** The decision id: the FAST path, never the accurate one. */
-  id: z.string().min(1).max(200).optional(),
+  /**
+   * The turn id, and an OPAQUE HANDLE by construction. It is the one piece of
+   * server text this client puts in a model-facing line, so the shape is
+   * checked here rather than escaped later: the backend's ids are uuids, and
+   * anything outside this alphabet is a protocol error that costs the turn its
+   * hint (the hook then says to call `request` with the query alone).
+   */
+  id: z
+    .string()
+    .regex(/^[A-Za-z0-9_-]{8,64}$/)
+    .optional(),
   action: z.enum(['native', 'execute', 'needs_input']),
   /** One plain line naming what the decision does, for the result. */
   description: z.string().max(300).optional(),
