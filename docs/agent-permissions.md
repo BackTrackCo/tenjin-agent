@@ -7,8 +7,8 @@ forbid working around a denial, so a denied `tenjin search` just stops.
 
 Pre-clearing the free verbs once fixes that. This page is the full reasoning
 behind which verbs are on that list, which two are separate opt-ins, and which are
-never recommended at all, and it is where `tenjin install` sends you. The [README](../README.md#permissions) carries the paste block and the
-three-tier summary.
+never recommended at all, and it is where `tenjin install` sends you. The
+[README](../README.md) carries the quick start.
 
 ## The free tier
 
@@ -173,14 +173,9 @@ same as saying the caps stop an allowlisted `buy`.
 
 ## The router's one rule: `mcp__x402__request`
 
-`tenjin install` writes exactly one rule, and it is the only thing the router
-product adds to your allowlist:
-
-```
-mcp__x402__request
-```
-
-It clears the tool, never a price. Every payment that tool makes goes through
+`tenjin install` writes exactly one rule, `mcp__x402__request`, and it is the
+only thing the router product adds to your allowlist. It clears the tool, never
+a price. Every payment that tool makes goes through
 the same gate as `tenjin pay`: `maxAutoSpend` is the ceiling on one call,
 `sessionBudget` is the rolling 24 hour ceiling on all of them, `confirm`
 decides when a human is asked, and a reservation in `spend.json` counts the
@@ -203,8 +198,13 @@ A compromised backend can therefore name any origin it likes, and spend at most
 one `maxAutoSpend` per call inside `sessionBudget`. Set both to numbers you
 would not mind losing.
 
-`Bash(tenjin pay:*)` is a separate opt-in, for an endpoint you name yourself. It
-runs the same gate, and outside the configured base URL it pays only what a
+Paying an endpoint you name yourself is a separate opt-in:
+
+```
+Bash(tenjin pay:*)
+```
+
+It runs the same gate, and outside the configured base URL it pays only what a
 configured registry lists with terms the live 402 does not exceed, which is why
 `bazaarPay` stays off unless you mean it.
 
@@ -433,8 +433,8 @@ damage, so never pass one.
 ## Running the local MCP server instead?
 
 That is a different permission surface: the harness gates tools there, and these
-Bash rules do not apply. If you follow the
-[MCP section](../README.md#local-stdio-mcp-server) as well, leave
+Bash rules do not apply. If a build registers the shelf
+MCP server as well, leave
 `mcp__tenjin__tenjin_publish`, `mcp__tenjin__tenjin_edit`,
 `mcp__tenjin__tenjin_delete`, and `mcp__tenjin__tenjin_wallet` gated, and treat
 `mcp__tenjin__tenjin_buy` as the same opt-in decision as the `buy` line above.

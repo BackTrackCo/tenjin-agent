@@ -32,7 +32,6 @@
   "files": [
     "dist",
     "docs",
-    "skills",
     "NOTICE.md"
   ],
   "packageManager": "pnpm@11.11.0",

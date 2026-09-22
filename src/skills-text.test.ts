@@ -9,7 +9,7 @@ import {
   SHIPPED_SKILL_FILES,
 } from './lib/skills-source';
 import { renderSkillMarkdown } from './lib/skill-materialize';
-import { PUBLISH_MODE_CHOICES, PUBLISH_MODE_QUESTION, WALLET_QUESTION } from './commands/install';
+import { PUBLISH_MODE_CHOICES } from './commands/install';
 import {
   ALWAYS_SAFE_ALLOWLIST,
   MCP_CAVEAT,
@@ -618,13 +618,10 @@ describe('the published docs do not drift from the allowlist constants', () => {
     expect(PERMISSIONS_DOC).toContain(`The free tier is ${count} rules`);
     expect(PERMISSIONS_DOC).toContain(`writes the ${count} rules`);
     expect(PERMISSIONS_DOC).toContain(`All ${count} are safe to hand over`);
-    expect(README).toContain(`The ${count} free verbs above`);
   });
 
-  it('the README pastes exactly the free tier, and never an opt-in line', () => {
-    expect(fencedRules(README).sort()).toEqual(ALWAYS_SAFE_ALLOWLIST.map((e) => e.rule).sort());
-  });
-
+  // The README is the router product's quick start and pastes no allowlist at
+  // all, so the paste guard lives on the permissions doc alone.
   it('the permissions doc pastes exactly the recommended rules, no more', () => {
     expect(fencedRules(PERMISSIONS_DOC).sort()).toEqual([...recommendedRules()].sort());
   });
@@ -665,7 +662,6 @@ describe('the published docs do not drift from the allowlist constants', () => {
     // repeat it to users verbatim.
     expect(PERMISSIONS_DOC).toMatch(/`tenjin doctor` decrypts\s*locally/i);
     expect(read('tenjin-search', PERMISSIONS_REF)).toMatch(/`doctor` may decrypt locally/i);
-    expect(README).toMatch(/`doctor`\s*decrypts locally/i);
     expect(PERMISSIONS_DOC).toMatch(/`tenjin search` POSTs[\s\S]{0,120}`tenjin outcome` POSTs/);
   });
 
@@ -710,7 +706,7 @@ describe('the published docs do not drift from the allowlist constants', () => {
   // Both pages quote it, and a quote is exactly the thing that goes stale
   // silently, so it is compared against the shipped constant with markdown
   // wrapping normalized away.
-  it('both pages quote the consent the CLI actually asks for', () => {
+  it('the permissions doc quotes the consent the CLI actually asks for', () => {
     const flatten = (s: string): string =>
       s
         .replace(/^\s*>\s?/gm, '')
@@ -718,7 +714,6 @@ describe('the published docs do not drift from the allowlist constants', () => {
         .replace(/\s+/g, ' ');
     const auto = PUBLISH_MODE_CHOICES.find((c) => c.value === 'auto');
     const hint = flatten(auto?.hint ?? '');
-    expect(flatten(README)).toContain(hint);
     expect(flatten(PERMISSIONS_DOC)).toContain(hint);
   });
 
@@ -734,22 +729,6 @@ describe('the published docs do not drift from the allowlist constants', () => {
     );
     expect(tools).toContain('mcp__tenjin__tenjin_buy');
     for (const tool of new Set(tools)) expect(PERMISSIONS_DOC).toContain(tool);
-  });
-
-  // The README quotes both prompts, so both are pinned to their shipped constants.
-  it('the README quotes the publish-mode and wallet prompts the CLI actually asks', () => {
-    const flatten = (s: string): string =>
-      s
-        .replace(/^\s*>\s?/gm, '')
-        .replace(/[`*"]/g, '')
-        .replace(/\s+/g, ' ');
-    const readme = flatten(README);
-    expect(readme).toContain(flatten(PUBLISH_MODE_QUESTION));
-    expect(readme).toContain(flatten(WALLET_QUESTION));
-    for (const c of PUBLISH_MODE_CHOICES) {
-      expect(readme).toContain(flatten(c.label));
-      if ('hint' in c && c.hint !== undefined) expect(readme).toContain(flatten(c.hint));
-    }
   });
 
   // A path-substring check cannot see a renamed heading, so every relative
