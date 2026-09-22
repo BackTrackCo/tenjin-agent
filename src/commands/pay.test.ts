@@ -1005,3 +1005,63 @@ describe('runPay, the success rule on every delivery', () => {
     });
   });
 });
+
+// The paid leg's transport failures are post-transmission outcomes: the
+// authorization has left and the reservation is committed, so the receipt owes
+// the amount whatever the transport said.
+describe('runPay, a transport failure after the payment was transmitted', () => {
+  it('carries the amount and settlement unknown when the paid leg cannot be read', async () => {
+    const fixture = buildPaymentRequired();
+    let call = 0;
+    const fetchImpl = (async (_input: unknown, init?: RequestInit) => {
+      call += 1;
+      if (!new Headers(init?.headers ?? {}).has('payment-signature')) {
+        return new Response('{}', {
+          status: 402,
+          headers: { 'content-type': 'application/json', 'PAYMENT-REQUIRED': fixture.header },
+        });
+      }
+      // The provider's own 402 was readable; its 200 is not, because its
+      // headers overflow. The money has already gone either way.
+      throw Object.assign(new TypeError('fetch failed'), {
+        cause: new Error('Headers Overflow Error'),
+      });
+    }) as typeof fetch;
+    const authorizer = fakeAuthorizer('allow');
+    const err = await runPay({ url: TENJIN_URL }, makeCtx(), {
+      ...PUBLIC_DNS,
+      fetchImpl,
+      provider: testWalletProvider(),
+      authorizer,
+    }).catch((e: unknown) => e);
+    expect(call).toBe(2);
+    expect(err).toBeInstanceOf(CliError);
+    expect((err as CliError).code).toBe('CHALLENGE_TOO_LARGE');
+    expect((err as CliError).details).toMatchObject({
+      amountAtomic: '100000',
+      settlement: 'unknown',
+    });
+    expect((err as CliError).fix).not.toContain('Nothing was paid');
+    expect((err as CliError).fix).toContain('already left');
+    expect(authorizer.commit).toHaveBeenCalled();
+  });
+
+  it('still says nothing was paid when the PROBE is the leg that overflows', async () => {
+    const fetchImpl = (async () => {
+      throw Object.assign(new TypeError('fetch failed'), {
+        cause: new Error('Headers Overflow Error'),
+      });
+    }) as typeof fetch;
+    const authorizer = fakeAuthorizer('allow');
+    const err = await runPay({ url: TENJIN_URL }, makeCtx(), {
+      ...PUBLIC_DNS,
+      fetchImpl,
+      provider: testWalletProvider(),
+      authorizer,
+    }).catch((e: unknown) => e);
+    expect((err as CliError).code).toBe('CHALLENGE_TOO_LARGE');
+    expect((err as CliError).fix).toContain('Nothing was paid');
+    expect((err as CliError).details).toBeUndefined();
+    expect(authorizer.commit).not.toHaveBeenCalled();
+  });
+});

@@ -290,7 +290,17 @@ export async function runPay(
     headers: { ...headers, ...payment.headers },
   });
   await authorizer.commit(reservationId, payment.amountAtomic);
-  if (!paid.ok) throw fetchFailureToCliError(paid);
+  // A TRANSPORT failure on this leg is a post-transmission outcome like any
+  // other: the authorization has left, the reservation is committed above, and
+  // a receipt that said nothing was paid would report a provider cost of zero
+  // for money the ledger has already counted. The transport's own reason and
+  // code survive; only the fix and the amounts are this leg's to state.
+  if (!paid.ok) {
+    throw fetchFailureToCliError(paid, {
+      fix: 'The signed payment already left and is counted against the session budget; whether it settled is unknown. Do not simply retry: each attempt signs a fresh authorization.',
+      details: { amountAtomic: payment.amountAtomic.toString(), settlement: 'unknown' },
+    });
+  }
   if (paid.status >= 200 && paid.status < 300) {
     if (args.resultSchema !== undefined) {
       const check = validateResultBody(args.resultSchema, paid.text);

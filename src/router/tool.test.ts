@@ -637,3 +637,41 @@ describe('a retry whose fresh terms fail the gate', () => {
     expect(auth.release).not.toHaveBeenCalled();
   });
 });
+
+describe('a provider leg that cannot be read after the payment left', () => {
+  it('reports the provider amount, not zero', async () => {
+    let call = 0;
+    const fetchImpl = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      const paid = new Headers(init?.headers ?? {}).has('payment-signature');
+      const toRouter = String(input).startsWith(ROUTER);
+      call += 1;
+      if (!paid) {
+        return new Response('{}', {
+          status: 402,
+          headers: {
+            'content-type': 'application/json',
+            'PAYMENT-REQUIRED': toRouter ? challenge() : challenge({ amount: '10000' }),
+          },
+        });
+      }
+      if (toRouter) {
+        return new Response(JSON.stringify(decision()), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      throw Object.assign(new TypeError('fetch failed'), {
+        cause: new Error('Headers Overflow Error'),
+      });
+    }) as typeof fetch;
+    const auth = authorizer();
+    const result = await runRequestTool({ query: 'q' }, deps(fetchImpl, auth));
+    expect(call).toBe(4);
+    // Router fee AND the provider authorization that left, both on the receipt.
+    expect(result.envelope).toMatchObject({
+      status: 'failed',
+      cost: ['router fee 0.001 USD', 'provider price 0.01 USD'],
+      settlement: 'unknown',
+    });
+  });
+});
