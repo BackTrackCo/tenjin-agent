@@ -4,10 +4,12 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   FALLBACK_LINE,
+  looksSingleIntent,
+  preparedLine,
   promptSkipReason,
   runNativeHook,
   runPromptHook,
-  preparedLine,
+  SINGLE_INTENT_ONLY_ENV,
 } from './hooks';
 import { ROUTER_PATH } from './decision';
 
@@ -226,5 +228,61 @@ describe('the prepared line', () => {
         description: 'quotes ready',
       }),
     ).toContain("call request({query, id:'x1'})");
+  });
+});
+
+/**
+ * THE FLAG IS OFF, AND IT IS HERE SO THE SMOKE CAN TURN IT ON. The worry is a
+ * mixed turn where the model takes the prepared id for a different part of the
+ * request; the tool already declines an id whose page the query does not name,
+ * and the smoke counts the mismatched ids taken anyway. This is what a non-zero
+ * count switches on, with no second design round.
+ */
+describe('offering the id only on single-intent turns', () => {
+  const MIXED = 'What do you think of the product, and find me alpha leads?';
+
+  it('offers the id on a mixed turn by default', async () => {
+    const { fetchImpl } = router(EXECUTE);
+    const out = await runPromptHook(promptEvent(MIXED), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+      env: {},
+    });
+    expect(out.id).toBe('k3f9');
+  });
+
+  it('withholds it on a mixed turn once the flag is set, and still names the lookup', async () => {
+    const { fetchImpl } = router(EXECUTE);
+    const out = await runPromptHook(promptEvent(MIXED), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+      env: { [SINGLE_INTENT_ONLY_ENV]: '1' },
+    });
+    expect(out.id).toBeUndefined();
+    const line = (out.response as { hookSpecificOutput: { additionalContext: string } })
+      .hookSpecificOutput.additionalContext;
+    expect(line).toContain('read the page https://example.test/spec');
+    expect(line).not.toContain('id:');
+  });
+
+  it('still offers it for one plain ask under the flag', async () => {
+    const { fetchImpl } = router(EXECUTE);
+    const out = await runPromptHook(promptEvent('read https://example.test/spec'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+      env: { [SINGLE_INTENT_ONLY_ENV]: '1' },
+    });
+    expect(out.id).toBe('k3f9');
+  });
+
+  it.each([
+    ['one plain ask', 'read https://example.test/spec', true],
+    ['two sentences', 'Read the spec. Then find leads.', false],
+    ['a joined clause', 'read the spec and find leads', false],
+  ])('reads %s', (_label, prompt, expected) => {
+    expect(looksSingleIntent(prompt)).toBe(expected);
   });
 });

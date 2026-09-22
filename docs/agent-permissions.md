@@ -81,6 +81,12 @@ Prefer the narrow rules on this page to a broad `Bash(tenjin:*)`, `Bash(tenjin w
 
 Every other key in the settings file is preserved byte for byte, a second run writes the same bytes, and `tenjin uninstall` removes exactly those four things and keeps your wallet, your ledger and your config.
 
+## The prepared lookup, and how to decline it
+
+On a prompt the router can serve, the hook injects one line naming what it prepared, who would be paid and what they charge, ending in both moves: `call request({query, id:'...'})` to take it, or `call request({query})` with your own lookup to ignore it. Your assistant always sends its own query either way, so a shortcut it took for the wrong part of a mixed request is visible rather than silent, and the tool declines an id whose prepared page your query does not name.
+
+Setting `TENJIN_ROUTER_ID_SINGLE_INTENT_ONLY=1` stops the hook offering that shortcut on turns that ask for more than one thing. It is off by default.
+
 ## What the hooks send
 
 - On every prompt, and on every native `WebSearch` or `WebFetch`: the bounded text of the current turn, at most six prior messages and 16 KiB, redacted for obvious secrets, to Tenjin's free gate. Tool results never travel: a tool result is other people's content, and a packet carrying it would be a channel from a fetched page into a routing decision.

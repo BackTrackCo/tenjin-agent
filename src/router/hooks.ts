@@ -91,13 +91,43 @@ async function resolveBaseUrl(deps: HookDeps): Promise<string> {
 export const FALLBACK_LINE = 'call request({query}) for lookups';
 
 /**
+ * OFF BY DEFAULT, AND HERE SO THE SMOKE CAN FLIP IT WITHOUT A DESIGN ROUND.
+ * The worry is a mixed turn: the hook prepares one lookup, and the model takes
+ * the id for a different part of the request. The tool already declines an id
+ * whose prepared page the query does not name, and the smoke counts every
+ * mismatched id that was taken anyway. If that count is above zero on the
+ * release run, set this and ids stop being offered on turns that ask for more
+ * than one thing.
+ */
+export const SINGLE_INTENT_ONLY_ENV = 'TENJIN_ROUTER_ID_SINGLE_INTENT_ONLY';
+
+function idsAreOffered(prompt: string, env: NodeJS.ProcessEnv): boolean {
+  const flag = env[SINGLE_INTENT_ONLY_ENV];
+  if (flag === undefined || flag === '' || flag === '0' || flag === 'false') return true;
+  return looksSingleIntent(prompt);
+}
+
+/**
+ * One ask, by the two marks that actually separate them: a second sentence,
+ * and a clause joined onto the first. Crude on purpose. It decides nothing
+ * while the flag is off, and when the flag is on the cost of being wrong is
+ * one lookup that carries no shortcut.
+ */
+export function looksSingleIntent(prompt: string): boolean {
+  const trimmed = prompt.trim();
+  const sentences = trimmed.split(/[.?!]+\s+/).filter((part) => part.trim().length > 0);
+  if (sentences.length > 1) return false;
+  return !/[;]|\band\b|\balso\b|\bplus\b|\bthen\b/i.test(trimmed);
+}
+
+/**
  * A PREPARED DECISION HAS TO BE EASY TO DECLINE. The line names exactly what
  * was prepared, who would be paid and what they charge, then gives both moves:
  * take it with the id, or ignore it and send your own lookup. Claude always
  * sends its own query either way, so a mismatched id is visible to the tool and
  * to the smoke rather than hidden inside a fast path.
  */
-export function preparedLine(decision: Decision): string {
+export function preparedLine(decision: Decision, offerId = true): string {
   const what = (decision.description ?? 'a paid lookup').trim();
   const via = decision.provider !== undefined ? ` via ${decision.provider}` : '';
   const price =
@@ -105,7 +135,7 @@ export function preparedLine(decision: Decision): string {
       ? ` ($${toMoney(decision.providerPriceAtomic).usd})`
       : '';
   const take =
-    decision.id !== undefined
+    decision.id !== undefined && offerId
       ? `If that is what you need, call request({query, id:'${decision.id}'})`
       : 'If that is what you need, call request({query})';
   return `Prepared: ${what}${via}${price}. ${take}; otherwise call request({query}) with your own lookup.`;
@@ -148,10 +178,12 @@ export async function runPromptHook(raw: unknown, deps: HookDeps): Promise<Promp
   if (outcome === null) return injection(FALLBACK_LINE);
   const decision = outcome;
   if (decision.action === 'native') return { response: null, action: 'native' };
-  const line = decision.action === 'execute' ? preparedLine(decision) : clarificationLine(decision);
+  const offerId = idsAreOffered(event.prompt, deps.env ?? process.env);
+  const line =
+    decision.action === 'execute' ? preparedLine(decision, offerId) : clarificationLine(decision);
   return {
     action: decision.action,
-    ...(decision.id !== undefined ? { id: decision.id } : {}),
+    ...(decision.id !== undefined && offerId ? { id: decision.id } : {}),
     ...injection(line),
   };
 }
