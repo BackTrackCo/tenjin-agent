@@ -1,7 +1,5 @@
 import { execFile } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { CliError } from '../lib/errors';
 import { inspectHooksFile, ownsHookEntry } from '../lib/harness-hooks';
@@ -18,7 +16,9 @@ import {
   MCP_SERVER_NAME,
   mcpAddCommand,
   mcpScope,
+  readMcpEntry,
   routerSettingsPath,
+  type McpEntryState,
 } from './install';
 
 /**
@@ -212,6 +212,17 @@ async function mcpCheck(
       fix: `Remove it and re-run \`tenjin install\`${project ? ' --project' : ''}, or: ${add}`,
     };
   }
+  // A file that is there and unreadable is not an absence: "run install" would
+  // be the wrong instruction, since `install` refuses to write over it too.
+  if (state === 'unreadable') {
+    return {
+      name: 'mcp',
+      status: 'fail',
+      required: true,
+      detail: `${where} could not be read, so whether ${MCP_SERVER_NAME} is registered is unknown`,
+      fix: `Fix the JSON in ${where}, then re-run \`tenjin install\`${project ? ' --project' : ''}.`,
+    };
+  }
   // Absent. On USER scope the file may simply not be where this build looks,
   // so the harness's own answer is worth asking before calling it missing.
   if (scope === 'user') {
@@ -249,43 +260,6 @@ async function claudeHasServer(opts: { scope: 'user' | 'project'; cwd: string })
     cwd: opts.cwd,
   });
   return stdout.includes(MCP_SERVER_NAME) && !/no mcp server/i.test(stdout);
-}
-
-export type McpEntryState = 'ok' | 'absent' | 'wrong-command';
-
-export function classifyMcpEntry(entry: unknown): McpEntryState {
-  if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) return 'absent';
-  const { command, args } = entry as { command?: unknown; args?: unknown };
-  if (typeof command !== 'string' || command.length === 0) return 'wrong-command';
-  // The basename, so `/opt/homebrew/bin/tenjin` and a bare `tenjin` both pass.
-  const binary = command.split(/[\\/]/).pop();
-  const runsRouter =
-    binary === 'tenjin' && Array.isArray(args) && args.length === 1 && args[0] === 'mcp';
-  return runsRouter ? 'ok' : 'wrong-command';
-}
-
-/** The file each scope writes: the project's own `.mcp.json`, or the user's
- *  `~/.claude.json`. Neither can inherit from the other. */
-async function readMcpEntry(
-  scope: 'user' | 'project',
-  cwd: string,
-  home: string,
-): Promise<{ found: boolean; state: McpEntryState }> {
-  const path = scope === 'project' ? join(cwd, '.mcp.json') : join(home, '.claude.json');
-  const raw = await readFile(path, 'utf8').catch(() => null);
-  if (raw === null) return { found: false, state: 'absent' };
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    const servers = (parsed as { mcpServers?: unknown } | null)?.mcpServers;
-    if (servers === null || typeof servers !== 'object' || Array.isArray(servers)) {
-      return { found: true, state: 'absent' };
-    }
-    const entry = (servers as Record<string, unknown>)[MCP_SERVER_NAME];
-    if (entry === undefined) return { found: true, state: 'absent' };
-    return { found: true, state: classifyMcpEntry(entry) };
-  } catch {
-    return { found: true, state: 'absent' };
-  }
 }
 
 function spendCheck(maxAutoSpendAtomic: bigint, sessionBudgetAtomic: bigint): RouterCheck {

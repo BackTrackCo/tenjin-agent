@@ -626,7 +626,7 @@ describe('doctor checks that the registration launches the router', () => {
     ['a bare command', { command: 'tenjin', args: ['mcp'] }, 'ok'],
     ['an absolute install path', { command: '/opt/homebrew/bin/tenjin', args: ['mcp'] }, 'ok'],
   ])('classifies %s', async (_label, entry, expected) => {
-    const { classifyMcpEntry } = await import('./doctor');
+    const { classifyMcpEntry } = await import('./install');
     expect(classifyMcpEntry(entry)).toBe(expected);
   });
 
@@ -941,5 +941,153 @@ describe('update reaches a project install from anywhere', () => {
       runRouterInstall({ refresh: true }, ctx(), deps({ cwd: home })),
     ).rejects.toMatchObject({ code: 'REFUSED' });
     expect((await loadRawConfig(data)).install?.routerProjects).toEqual([]);
+  });
+
+  /**
+   * UNREADABLE IS NOT ABSENT. Pruning on a settings file this run could not
+   * parse is irreversible: repairing the file afterwards does not put the
+   * project back, and every later `tenjin update` from HOME silently skips it.
+   */
+  it('keeps a recorded project whose settings file cannot be parsed, and visits it once repaired', async () => {
+    const fs = await import('node:fs/promises');
+    const cwd = join(home, 'project');
+    await fs.mkdir(cwd, { recursive: true });
+    await runRouterInstall({}, ctx(), deps());
+    await runRouterInstall({ project: true }, ctx(), deps({ cwd }));
+    const projectSettings = join(cwd, '.claude', 'settings.json');
+    const good = await fs.readFile(projectSettings, 'utf8');
+    await fs.writeFile(projectSettings, '{ not json');
+
+    const first = await runRouterInstall({ refresh: true }, ctx(), deps({ cwd: home }));
+    const skipped = (first.data as { skipped: string[] }).skipped;
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0]).toContain(cwd);
+    expect(skipped[0]).toContain('could not be inspected');
+    expect(skipped[0]).toContain('still recorded');
+    // The user install still converged, and the project is still on the list.
+    expect((first.data as { installs: unknown[] }).installs).toHaveLength(1);
+    expect((await loadRawConfig(data)).install?.routerProjects).toEqual([cwd]);
+
+    // Repaired between the two refreshes: the second one visits it again.
+    await fs.writeFile(projectSettings, good);
+    const second = await runRouterInstall({ refresh: true }, ctx(), deps({ cwd: home }));
+    const paths = (second.data as { installs: { settingsPath: string }[] }).installs.map(
+      (i) => i.settingsPath,
+    );
+    expect(paths).toContain(projectSettings);
+    expect((second.data as { skipped: string[] }).skipped).toEqual([]);
+  });
+
+  it('refuses a single-scope refresh over an unparsable settings file instead of calling it unwired', async () => {
+    const fs = await import('node:fs/promises');
+    await runRouterInstall({}, ctx(), deps());
+    await fs.writeFile(settingsPath(), '{ not json');
+    const err = await runRouterInstall({ refresh: true, project: false }, ctx(), deps()).catch(
+      (e: unknown) => e,
+    );
+    expect((err as CliError).code).toBe('CONFIG_INVALID');
+    expect((err as CliError).message).toContain(settingsPath());
+  });
+});
+
+/**
+ * `claude mcp add` is NOT idempotent: Claude Code 2.1.280 exits 1 on a second
+ * identical add ("MCP server x402 already exists in .mcp.json"). The mock below
+ * reproduces that, so a run that re-adds blindly fails the test the way the
+ * real CLI fails the machine.
+ */
+describe('the MCP registration is reconciled, not re-added', () => {
+  /** An `add` that behaves like the real one: it refuses an existing entry. */
+  function addOnce(existing: { present: boolean }) {
+    return vi.fn(async () => {
+      if (existing.present) {
+        throw new Error(`MCP server x402 already exists in .mcp.json`);
+      }
+      existing.present = true;
+    });
+  }
+
+  async function writeMcpJson(cwd: string, entry: unknown): Promise<void> {
+    const fs = await import('node:fs/promises');
+    await fs.writeFile(join(cwd, '.mcp.json'), JSON.stringify({ mcpServers: { x402: entry } }));
+  }
+
+  it('spawns nothing when the scope already registers `tenjin mcp`', async () => {
+    const fs = await import('node:fs/promises');
+    const cwd = join(home, 'project');
+    await fs.mkdir(cwd, { recursive: true });
+    await runRouterInstall({ project: true }, ctx(), deps({ cwd }));
+    await writeMcpJson(cwd, { command: 'tenjin', args: ['mcp'] });
+
+    const registerMcp = addOnce({ present: true });
+    const result = await runRouterInstall({ refresh: true }, ctx(), deps({ cwd, registerMcp }));
+    expect(registerMcp).not.toHaveBeenCalled();
+    expect(onlyInstall(result).mcp).toMatchObject({
+      registered: true,
+      reconciled: 'already-registered',
+    });
+    expect(result.humanLines?.join('\n')).not.toContain('claude mcp add');
+  });
+
+  it('removes and re-adds a same-name entry that launches something else', async () => {
+    const fs = await import('node:fs/promises');
+    const cwd = join(home, 'project');
+    await fs.mkdir(cwd, { recursive: true });
+    await runRouterInstall({ project: true }, ctx(), deps({ cwd }));
+    await writeMcpJson(cwd, { command: 'node', args: ['stale.js'] });
+
+    const existing = { present: true };
+    const registerMcp = addOnce(existing);
+    const removeMcp = vi.fn(async () => {
+      existing.present = false;
+    });
+    const result = await runRouterInstall(
+      { refresh: true },
+      ctx(),
+      deps({ cwd, registerMcp, removeMcp }),
+    );
+    expect(removeMcp).toHaveBeenCalledWith({ scope: 'project', cwd });
+    expect(registerMcp).toHaveBeenCalledTimes(1);
+    expect(onlyInstall(result).mcp).toMatchObject({ registered: true, reconciled: 'repaired' });
+  });
+
+  it('adds when the scope has no entry at all', async () => {
+    const fs = await import('node:fs/promises');
+    const cwd = join(home, 'project');
+    await fs.mkdir(cwd, { recursive: true });
+    const registerMcp = addOnce({ present: false });
+    const result = await runRouterInstall({ project: true }, ctx(), deps({ cwd, registerMcp }));
+    expect(registerMcp).toHaveBeenCalledTimes(1);
+    expect(result.data).toMatchObject({ mcp: { registered: true, reconciled: 'added' } });
+  });
+
+  it('fails the refresh when a stale entry could not be repaired', async () => {
+    const fs = await import('node:fs/promises');
+    const cwd = join(home, 'project');
+    await fs.mkdir(cwd, { recursive: true });
+    await runRouterInstall({ project: true }, ctx(), deps({ cwd }));
+    await writeMcpJson(cwd, { command: 'node', args: ['stale.js'] });
+
+    const removeMcp = vi.fn(async () => {
+      throw new Error('claude mcp remove failed');
+    });
+    const err = await runRouterInstall({ refresh: true }, ctx(), deps({ cwd, removeMcp })).catch(
+      (e: unknown) => e,
+    );
+    expect((err as CliError).code).toBe('REFUSED');
+    expect((err as CliError).message).toContain('could not repair');
+  });
+
+  it('refuses to write over a registration file it cannot parse', async () => {
+    const fs = await import('node:fs/promises');
+    const cwd = join(home, 'project');
+    await fs.mkdir(cwd, { recursive: true });
+    await fs.writeFile(join(cwd, '.mcp.json'), '{ not json');
+    const registerMcp = vi.fn(async () => undefined);
+    const result = await runRouterInstall({ project: true }, ctx(), deps({ cwd, registerMcp }));
+    expect(registerMcp).not.toHaveBeenCalled();
+    expect(result.data).toMatchObject({
+      mcp: { registered: false, reconciled: 'unrepaired' },
+    });
   });
 });

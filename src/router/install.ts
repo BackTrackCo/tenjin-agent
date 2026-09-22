@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { promisify } from 'node:util';
@@ -129,6 +130,15 @@ export interface RouterInstallDeps {
     command: string,
     opts: { scope: 'user' | 'project'; cwd: string },
   ) => Promise<void>;
+  /** Runs `claude mcp remove`, the only safe way past a same-name entry that
+   *  launches something else: `add` refuses to overwrite one. */
+  removeMcp?: (opts: { scope: 'user' | 'project'; cwd: string }) => Promise<void>;
+  /** Reads the registration the scope's own file holds; tests inject it. */
+  readMcpEntry?: (
+    scope: 'user' | 'project',
+    cwd: string,
+    home: string,
+  ) => Promise<{ found: boolean; state: McpEntryState }>;
 }
 
 export interface McpRegistration {
@@ -139,6 +149,18 @@ export interface McpRegistration {
   scope: 'user' | 'project';
   /** The command to run by hand, when this run could not. */
   command: string;
+  /**
+   * WHAT THIS RUN ACTUALLY DID, which `registered` alone cannot say:
+   * `already-registered` (the scope's file already launches `tenjin mcp`, and
+   * nothing was spawned), `added`, `repaired` (a same-name entry launching
+   * something else was removed and re-added), `unrepaired` (a registration this
+   * run KNOWS is wrong or unreadable and could not fix) or `unavailable` (it is
+   * simply not there and this machine could not add it, e.g. no `claude` on
+   * PATH). A refresh fails on `unrepaired`, because reporting convergence over
+   * a registration that launches something else is the thing to avoid; it still
+   * only prints the manual command for `unavailable`.
+   */
+  reconciled: 'already-registered' | 'added' | 'repaired' | 'unrepaired' | 'unavailable';
   reason?: string;
 }
 
@@ -174,12 +196,22 @@ export async function runRouterInstall(
     cwd,
   });
 
-  if (args.refresh === true && !(await hasOurEntries(settingsPath, ctx.dataDir))) {
-    throw new CliError(
-      'REFUSED',
-      `Nothing to refresh in ${settingsPath}: no Tenjin hook entries are registered here.`,
-      { fix: 'Run `tenjin install` to set this machine up.' },
-    );
+  if (args.refresh === true) {
+    const probe = await probeOurEntries(settingsPath, ctx.dataDir);
+    // An unreadable file is not an absence, and telling someone to install over
+    // it is the wrong instruction: the writer would refuse it too.
+    if (probe.state === 'unreadable') {
+      throw new CliError('CONFIG_INVALID', `Could not inspect ${settingsPath}: ${probe.reason}`, {
+        fix: `Fix ${settingsPath}, then re-run: tenjin update`,
+      });
+    }
+    if (probe.state === 'absent') {
+      throw new CliError(
+        'REFUSED',
+        `Nothing to refresh in ${settingsPath}: no Tenjin hook entries are registered here.`,
+        { fix: 'Run `tenjin install` to set this machine up.' },
+      );
+    }
   }
   const hooks = await writeHooks({
     adapter: claudeAdapter,
@@ -190,7 +222,7 @@ export async function runRouterInstall(
     settingsPath,
   });
   const permissions = await ensureAllowRule(settingsPath);
-  const mcp = await registerMcpServer(deps, env, project, cwd);
+  const mcp = await registerMcpServer(deps, env, project, cwd, home);
   if (args.refresh === true) {
     // The SAME writers, minus the one that decides anything: the entries are
     // rewritten in place by their ownership marker so an upgrade never
@@ -198,13 +230,24 @@ export async function runRouterInstall(
     // new version can change either, and `config.json`, the wallet and
     // `spend.json` are not touched at all. Widening an agent's spend policy
     // during an unattended upgrade is not a convergence.
-    // WRITTEN, not merely re-checked: `claude mcp add` is idempotent and
-    // reports no difference either way, so the registration is always a
-    // re-check and never counts as a change.
+    // RECONCILED, not re-added: `claude mcp add` exits 1 on an existing entry,
+    // so the registration is read first and only written when it is missing or
+    // wrong (see {@link registerMcpServer}).
     const rewritten = [
       ...(hooks.wrote ? ['hook entries'] : []),
       ...(permissions.added ? ['the permission rule'] : []),
+      ...(mcp.reconciled === 'repaired' ? ['the MCP registration'] : []),
     ];
+    // A registration this run KNOWS is wrong and could not repair is not a
+    // converged install, and `tenjin update` reporting success over it is how
+    // a machine keeps a stale `x402` server across upgrade after upgrade.
+    if (mcp.reconciled === 'unrepaired') {
+      throw new CliError(
+        'REFUSED',
+        `The ${MCP_SERVER_NAME} MCP registration (${mcpScope(project)} scope) is not the router's and this run could not repair it: ${mcp.reason ?? 'unknown reason'}.`,
+        { fix: `Run: ${mcp.command}`, details: { settingsPath, hooks, permissions, mcp } },
+      );
+    }
     return {
       data: { settingsPath, hooks, permissions, mcp, refresh: true, scope: mcpScope(project) },
       humanLines: [
@@ -212,7 +255,7 @@ export async function runRouterInstall(
           ? `Already current: ${hooks.entries} hook entries in ${settingsPath}, nothing rewritten.`
           : `Rewrote ${rewritten.join(' and ')} in ${settingsPath}.`,
         mcp.registered
-          ? `Re-checked the ${MCP_SERVER_NAME} MCP registration (${mcpScope(project)} scope).`
+          ? `Re-checked the ${MCP_SERVER_NAME} MCP registration (${mcpScope(project)} scope): ${mcp.reconciled}.`
           : `mcp: run ${mcp.command}`,
         'Your wallet, spend ledger and config were not touched.',
       ],
@@ -268,36 +311,136 @@ async function ensureAllowRule(path: string): Promise<AllowRuleResult> {
   };
 }
 
+/**
+ * RECONCILE, do not re-add blindly. `claude mcp add` is not idempotent: Claude
+ * Code 2.1.280 exits 1 on a second identical add with "MCP server x402 already
+ * exists in .mcp.json". Running it unconditionally therefore reported a
+ * perfectly healthy machine as an unregistered one and printed a repair command
+ * that would fail the same way, while a same-name entry launching something
+ * else never converged, because `add` refuses to overwrite it.
+ *
+ * So the scope's own file is read first: an entry that already launches
+ * `tenjin mcp` is the goal state and nothing is spawned; a stale one is removed
+ * and re-added; a file that cannot be read is refused out loud rather than
+ * written over.
+ */
 async function registerMcpServer(
   deps: RouterInstallDeps,
   env: NodeJS.ProcessEnv,
   project: boolean,
   cwd: string,
+  home: string,
 ): Promise<McpRegistration> {
   const scope = mcpScope(project);
   const command = mcpAddCommand(project);
+  const base = { name: MCP_SERVER_NAME, scope, command };
+  const existing = await (deps.readMcpEntry ?? readMcpEntry)(scope, cwd, home);
+  if (existing.state === 'ok') {
+    return { ...base, registered: true, reconciled: 'already-registered' };
+  }
+  if (existing.state === 'unreadable') {
+    return {
+      ...base,
+      registered: false,
+      reconciled: 'unrepaired',
+      reason: `the ${scope}-scope registration file could not be read, so nothing was written over it`,
+    };
+  }
   const which = deps.which ?? ((bin: string) => onPath(bin, env));
   if (!which('claude')) {
     return {
-      name: MCP_SERVER_NAME,
+      ...base,
       registered: false,
-      scope,
-      command,
+      // A machine with no `claude` on PATH cannot be wired by this run either
+      // way; that is not the same as finding a registration that is WRONG,
+      // which is what a refresh is entitled to fail on.
+      reconciled: existing.state === 'wrong-command' ? 'unrepaired' : 'unavailable',
       reason: 'the `claude` binary is not on PATH',
     };
   }
+  if (existing.state === 'wrong-command') {
+    try {
+      await (deps.removeMcp ?? runClaudeMcpRemove)({ scope, cwd });
+    } catch (err) {
+      return {
+        ...base,
+        registered: false,
+        reconciled: 'unrepaired',
+        command: `${mcpRemoveCommand(project)} && ${command}`,
+        reason: `a ${MCP_SERVER_NAME} entry that launches something else could not be removed: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+  }
   try {
     await (deps.registerMcp ?? runClaudeMcpAdd)(command, { scope, cwd });
-    return { name: MCP_SERVER_NAME, registered: true, scope, command };
+    return {
+      ...base,
+      registered: true,
+      reconciled: existing.state === 'wrong-command' ? 'repaired' : 'added',
+    };
   } catch (err) {
     return {
-      name: MCP_SERVER_NAME,
+      ...base,
       registered: false,
-      scope,
-      command,
+      reconciled: existing.state === 'wrong-command' ? 'unrepaired' : 'unavailable',
       reason: err instanceof Error ? err.message : String(err),
     };
   }
+}
+
+export type McpEntryState = 'ok' | 'absent' | 'wrong-command' | 'unreadable';
+
+/**
+ * What an entry named `x402` actually launches. The name proves nothing: a
+ * stale entry pointing at another binary would read as a working request tool.
+ */
+export function classifyMcpEntry(entry: unknown): McpEntryState {
+  if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) return 'absent';
+  const { command, args } = entry as { command?: unknown; args?: unknown };
+  if (typeof command !== 'string' || command.length === 0) return 'wrong-command';
+  // The basename, so `/opt/homebrew/bin/tenjin` and a bare `tenjin` both pass.
+  const binary = command.split(/[\\/]/).pop();
+  const runsRouter =
+    binary === 'tenjin' && Array.isArray(args) && args.length === 1 && args[0] === 'mcp';
+  return runsRouter ? 'ok' : 'wrong-command';
+}
+
+/**
+ * The file each scope writes: the project's own `.mcp.json`, or the user's
+ * `~/.claude.json`. Neither can inherit from the other. Shared by `install`,
+ * which reconciles against it, and `doctor`, which reports it.
+ */
+export async function readMcpEntry(
+  scope: 'user' | 'project',
+  cwd: string,
+  home: string,
+): Promise<{ found: boolean; state: McpEntryState }> {
+  const path = scope === 'project' ? join(cwd, '.mcp.json') : join(home, '.claude.json');
+  const raw = await readFile(path, 'utf8').catch(() => null);
+  if (raw === null) return { found: false, state: 'absent' };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    // NOT an absence: the harness's own file is there and unreadable to this
+    // build, so neither "register it" nor "it is missing" is a true statement.
+    return { found: true, state: 'unreadable' };
+  }
+  const servers = (parsed as { mcpServers?: unknown } | null)?.mcpServers;
+  if (servers === undefined) return { found: true, state: 'absent' };
+  if (servers === null || typeof servers !== 'object' || Array.isArray(servers)) {
+    return { found: true, state: 'unreadable' };
+  }
+  const entry = (servers as Record<string, unknown>)[MCP_SERVER_NAME];
+  if (entry === undefined) return { found: true, state: 'absent' };
+  return { found: true, state: classifyMcpEntry(entry) };
+}
+
+async function runClaudeMcpRemove(opts: { scope: 'user' | 'project'; cwd: string }): Promise<void> {
+  await exec('claude', ['mcp', 'remove', MCP_SERVER_NAME, '-s', opts.scope], {
+    timeout: 20_000,
+    cwd: opts.cwd,
+  });
 }
 
 /** Project scope is decided by the working directory as well as the flag:
@@ -398,12 +541,27 @@ async function refreshEveryInstall(
   });
   const targets: { project: boolean; dir: string }[] = [];
   const skipped: string[] = [];
-  if (await hasOurEntries(routerSettingsPath({ homeDir: home }), ctx.dataDir)) {
-    targets.push({ project: false, dir: home });
+  const homePath = routerSettingsPath({ homeDir: home });
+  const homeProbe = await probeOurEntries(homePath, ctx.dataDir);
+  if (homeProbe.state === 'present') targets.push({ project: false, dir: home });
+  else if (homeProbe.state === 'unreadable') {
+    skipped.push(`skipped ${homePath}: it could not be inspected (${homeProbe.reason})`);
   }
   for (const dir of config.install?.routerProjects ?? []) {
-    if (await hasOurEntries(routerSettingsPath({ project: true, cwd: dir }), ctx.dataDir)) {
+    const path = routerSettingsPath({ project: true, cwd: dir });
+    const probe = await probeOurEntries(path, ctx.dataDir);
+    if (probe.state === 'present') {
       targets.push({ project: true, dir });
+      continue;
+    }
+    // KEPT, not forgotten. A settings file this run could not inspect says
+    // nothing about whether the install is there, and pruning on it is
+    // irreversible: repairing the file later would not put the project back.
+    // Reported instead, so an operator sees which install went unrefreshed.
+    if (probe.state === 'unreadable') {
+      skipped.push(
+        `skipped ${dir}: its settings file could not be inspected (${probe.reason}) (still recorded)`,
+      );
       continue;
     }
     // Forgetting a project keeps the list from growing stale, but it is a
@@ -426,17 +584,27 @@ async function refreshEveryInstall(
   if (
     here !== routerSettingsPath({ homeDir: home }) &&
     !targets.some((t) => t.project && t.dir === cwd) &&
-    (await hasOurEntries(here, ctx.dataDir))
+    (await probeOurEntries(here, ctx.dataDir)).state === 'present'
   ) {
     targets.push({ project: true, dir: cwd });
     await persistRouterProject(ctx.dataDir, cwd).catch(() => undefined);
   }
 
   if (targets.length === 0) {
+    // "Nothing is registered" and "nothing could be read" are different
+    // machines, and only the first of them is fixed by installing again.
+    const unreadable = skipped.filter((line) => line.includes('could not be inspected'));
     throw new CliError(
       'REFUSED',
-      `Nothing to refresh for ${ctx.dataDir}: no Tenjin hook entries are registered here.`,
-      { fix: 'Run `tenjin install` to set this machine up.' },
+      unreadable.length === 0
+        ? `Nothing to refresh for ${ctx.dataDir}: no Tenjin hook entries are registered here.`
+        : `Nothing could be refreshed for ${ctx.dataDir}: ${unreadable.join('; ')}.`,
+      {
+        fix:
+          unreadable.length === 0
+            ? 'Run `tenjin install` to set this machine up.'
+            : 'Fix the settings files named above, then re-run: tenjin update',
+      },
     );
   }
 
@@ -476,12 +644,29 @@ function recordedProjectsRaw(dataDir: string): string[] | undefined {
   }
 }
 
-async function hasOurEntries(path: string, dataDir: string): Promise<boolean> {
+/**
+ * THREE ANSWERS, NOT TWO. A settings file that cannot be read or parsed is not
+ * a file without our entries, and collapsing the two let `refreshEveryInstall`
+ * read a momentarily broken project settings file as confirmed absence and
+ * strike the project off `install.routerProjects` for good: repairing the file
+ * afterwards did not bring it back, so every later `tenjin update` from HOME
+ * silently skipped it.
+ */
+type EntriesProbe =
+  { state: 'present' } | { state: 'absent' } | { state: 'unreadable'; reason: string };
+
+async function probeOurEntries(path: string, dataDir: string): Promise<EntriesProbe> {
   const found = await inspectHooksFile(path);
-  if ('refusal' in found) return false;
-  return Object.values(found.hooks).some((list) =>
+  if ('refusal' in found) {
+    // `unreadable` here is the inspection's own vocabulary for "the file exists
+    // and this build could not use it"; a file that is simply not there comes
+    // back as an empty, readable inspection rather than a refusal.
+    return { state: 'unreadable', reason: found.refusal.reason };
+  }
+  const present = Object.values(found.hooks).some((list) =>
     list.some((entry) => ownsHookEntry(entry, dataDir)),
   );
+  return present ? { state: 'present' } : { state: 'absent' };
 }
 
 /** Shared with `uninstall`: the prune this module's writer already performs. */
