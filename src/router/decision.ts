@@ -175,20 +175,33 @@ export async function requestDecision(
   if (attempt.status !== 'stale') return { ...attempt, probed } as DecisionOutcome;
 
   // One retry, from the challenge the endpoint just re-advertised, with every
-  // spending check run again on the new terms and the same request id.
+  // spending check run again on the new terms and the same request id. The
+  // stale attempt's amount rides along so the caller reports EVERYTHING that
+  // was transmitted for this one decision, not just the attempt that answered.
   deps.cache.set(url, attempt.challenge);
+  const spent = attempt.committedAtomic;
   const retried = await payOnce(url, options, attempt.challenge, deps);
   if (retried.status === 'stale') {
     return {
       status: 'failed',
       reason: 'The router endpoint keeps re-pricing this request.',
-      committedAtomic: NO_FEE,
+      committedAtomic: spent + retried.committedAtomic,
     };
   }
-  return { ...retried, probed } as DecisionOutcome;
+  if (retried.status === 'failed') {
+    return { ...retried, committedAtomic: spent + retried.committedAtomic };
+  }
+  if (retried.status === 'decided') {
+    return { ...retried, amountAtomic: spent + retried.amountAtomic, probed };
+  }
+  return retried;
 }
 
-type Attempt = DecisionOutcome | { status: 'stale'; challenge: PaymentRequired };
+type Attempt =
+  | DecisionOutcome
+  /** The authorization for this attempt WAS transmitted; `committedAtomic` is
+   *  what the ledger counted for it, and the retry carries it forward. */
+  | { status: 'stale'; challenge: PaymentRequired; committedAtomic: bigint };
 
 const NO_FEE = 0n;
 
@@ -259,10 +272,15 @@ async function payOnce(
     if (!settlementReported && fresh !== null) {
       // A fresh challenge before the handler ran means the requirements this
       // attempt was built against were stale, and the retry below signs the new
-      // ones. Releasing first is what keeps ONE decision costing ONE fee: the
-      // old committed reservation would otherwise stand beside the retry's.
-      await deps.authorizer.release(reservationId);
-      return { status: 'stale', challenge: fresh };
+      // ones. THE FIRST AUTHORIZATION STILL COUNTS. It was transmitted, and a
+      // signed EIP-3009 authorization is a bearer instrument: a 402 is the
+      // counterparty's claim that it will not settle, not proof. Releasing here
+      // is exactly the hole `runPay` documents at its own paid leg, where a
+      // hostile seller answers 402 after each signature while `sessionBudget`
+      // counts none of what it is stacking up. So this commits and hands the
+      // amount to the retry, which reports the pair rather than the last one.
+      await deps.authorizer.commit(reservationId, fee);
+      return { status: 'stale', challenge: fresh, committedAtomic: fee };
     }
     await deps.authorizer.commit(reservationId, fee);
     return {

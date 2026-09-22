@@ -520,7 +520,7 @@ describe('the routing fee a failure still owes', () => {
     });
   });
 
-  it('charges one fee for a decision that had to be re-signed on fresh terms', async () => {
+  it('keeps BOTH transmitted authorizations counted when terms moved, and reports the pair', async () => {
     const cache = new RequirementsCache();
     cache.set(
       `${ROUTER}/api/x402-router`,
@@ -546,11 +546,15 @@ describe('the routing fee a failure still owes', () => {
         headers: { 'content-type': 'application/json' },
       });
     }) as typeof fetch;
-    await runRequestTool({ query: 'q' }, { ...deps(fetchImpl, auth), cache });
-    // The stale attempt's reservation is released, not committed: one decision
-    // costs one fee even when the cached terms had moved on.
-    expect(auth.release).toHaveBeenCalledTimes(1);
-    expect(auth.commit).toHaveBeenCalledTimes(1);
+    const result = await runRequestTool({ query: 'q' }, { ...deps(fetchImpl, auth), cache });
+    // Both authorizations LEFT the process, so both stay counted: a 402 is the
+    // counterparty saying it will not settle, never proof that it cannot. The
+    // receipt names the pair rather than the attempt that answered.
+    expect(auth.release).not.toHaveBeenCalled();
+    expect(auth.commit).toHaveBeenCalledTimes(2);
+    expect(result.envelope).toMatchObject({
+      cost: ['router fee 0.003 USD', 'provider price 0 USD'],
+    });
   });
 
   it('hands the provider leg the wallet the decision already unlocked', async () => {
