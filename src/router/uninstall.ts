@@ -1,14 +1,13 @@
 import { execFile } from 'node:child_process';
 import { homedir } from 'node:os';
 import { readFile, stat } from 'node:fs/promises';
-import { isAbsolute, join } from 'node:path';
+import { isAbsolute } from 'node:path';
 import { promisify } from 'node:util';
 import { writeFileAtomic } from '../lib/atomic-json';
-import { claudeSettingsPath } from '../lib/harness-permissions';
 import { inspectHooksFile, pruneHooks } from '../lib/harness-hooks';
 import { onPath } from '../lib/skill-wiring';
 import type { CommandContext, CommandResult } from '../context';
-import { ALLOW_RULE, MCP_SERVER_NAME } from './install';
+import { ALLOW_RULE, MCP_SERVER_NAME, routerSettingsPath } from './install';
 
 /**
  * `tenjin uninstall`: take out the hook entries, the allow rule and the MCP
@@ -42,10 +41,11 @@ export async function runRouterUninstall(
   const env = deps.env ?? process.env;
   const home = deps.homeDir ?? homedir();
   if (!isAbsolute(home)) throw new Error('The home directory is not an absolute path.');
-  const settingsPath =
-    args.project === true
-      ? join(deps.cwd ?? process.cwd(), '.claude', 'settings.json')
-      : claudeSettingsPath(home);
+  const settingsPath = routerSettingsPath({
+    ...(args.project === true ? { project: true } : {}),
+    homeDir: home,
+    ...(deps.cwd !== undefined ? { cwd: deps.cwd } : {}),
+  });
 
   const removed = await removeFromSettings(settingsPath, ctx.dataDir);
   const mcp = await removeMcpServer(deps, env);

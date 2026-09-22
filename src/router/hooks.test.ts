@@ -302,3 +302,46 @@ describe('the hook handlers as a module', () => {
     }
   });
 });
+
+describe('a packet already at the cap, with a pending call to attach', () => {
+  it('re-fits so the gate is never sent an over-cap packet', async () => {
+    const { MAX_PACKET_BYTES, buildPromptPacket } = await import('./context');
+    const { writeSessionPacket } = await import('./session-file');
+    // A prompt long enough that `fit` trims it to exactly the cap. Attaching
+    // the pending call to what it returned is what used to push it over, and
+    // the server refuses rather than truncates: a 400 reads as null, and null
+    // reads as allow, so the redirect died with no trace.
+    const stored = await buildPromptPacket(undefined, 'sess-1', 'x'.repeat(60_000));
+    const pending = { tool: 'WebSearch' as const, query: 'q'.repeat(3_000) };
+    // The stored packet is at the cap, and attaching the call puts it over:
+    // that is the state this exists to catch.
+    expect(Buffer.byteLength(JSON.stringify(stored))).toBeLessThanOrEqual(MAX_PACKET_BYTES);
+    expect(Buffer.byteLength(JSON.stringify({ ...stored, pendingCall: pending }))).toBeGreaterThan(
+      MAX_PACKET_BYTES,
+    );
+    await writeSessionPacket(dir, 'sess-1', stored);
+
+    const { fetchImpl, calls } = gate(EXECUTE);
+    const out = await runNativeHook(nativeEvent('WebSearch', { query: pending.query }), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+    expect(out.decision).toBe('deny');
+    const sent = (calls[0] as { body: { packet: unknown } }).body.packet;
+    expect(Buffer.byteLength(JSON.stringify(sent))).toBeLessThanOrEqual(MAX_PACKET_BYTES);
+    expect((sent as { pendingCall?: unknown }).pendingCall).toMatchObject({ tool: 'WebSearch' });
+  });
+
+  it('keeps the query-only fallback inside the cap too', async () => {
+    const { MAX_PACKET_BYTES } = await import('./context');
+    const { fetchImpl, calls } = gate(NATIVE);
+    await runNativeHook(nativeEvent('WebFetch', { url: `https://x.test/${'p'.repeat(3_500)}` }), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+    const sent = (calls[0] as { body: { packet: unknown } }).body.packet;
+    expect(Buffer.byteLength(JSON.stringify(sent))).toBeLessThanOrEqual(MAX_PACKET_BYTES);
+  });
+});

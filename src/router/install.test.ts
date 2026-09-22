@@ -397,3 +397,64 @@ describe('the install readout and the status window', () => {
     ).toBe('0');
   });
 });
+
+describe('doctor on a --project install', () => {
+  it('reads the project settings file, not the home one', async () => {
+    const { runRouterDoctor } = await import('./doctor');
+    const cwd = join(home, 'project');
+    await import('node:fs/promises').then((fs) => fs.mkdir(cwd, { recursive: true }));
+    await runRouterInstall({ project: true }, ctx(), deps({ cwd }));
+    const fetchImpl = (async () =>
+      new Response('{}', {
+        status: 402,
+        headers: { 'content-type': 'application/json' },
+      })) as typeof fetch;
+
+    // The home file has nothing in it: a doctor that looked there would report
+    // a correctly wired machine as unwired and exit 3.
+    const blind = await runRouterDoctor(ctx(), {
+      homeDir: home,
+      env: {},
+      which: () => true,
+      readMcp: async () => true,
+      fetchImpl,
+    }).catch((e: unknown) => e);
+    const blindChecks = (blind as CliError).details as {
+      checks: { name: string; status: string }[];
+    };
+    expect(blindChecks.checks.find((c) => c.name === 'hooks')?.status).toBe('fail');
+
+    const aware = await runRouterDoctor(ctx(), {
+      homeDir: home,
+      cwd,
+      project: true,
+      env: {},
+      which: () => true,
+      readMcp: async () => true,
+      fetchImpl,
+    }).catch((e: unknown) => e);
+    const checks =
+      aware instanceof CliError
+        ? (aware.details as { checks: { name: string; status: string; detail: string }[] })
+        : (aware as { data: { checks: { name: string; status: string; detail: string }[] } }).data;
+    const hooks = checks.checks.find((c) => c.name === 'hooks');
+    expect(hooks?.status).toBe('ok');
+    expect(hooks?.detail).toContain('UserPromptSubmit');
+  });
+
+  it('names the file it looked in, so the two installs are told apart', async () => {
+    const { runRouterDoctor } = await import('./doctor');
+    const cwd = join(home, 'other');
+    const fetchImpl = (async () => new Response('{}', { status: 402 })) as typeof fetch;
+    const err = await runRouterDoctor(ctx(), {
+      homeDir: home,
+      cwd,
+      project: true,
+      env: {},
+      which: () => false,
+      fetchImpl,
+    }).catch((e: unknown) => e);
+    const details = (err as CliError).details as { settingsPath: string };
+    expect(details.settingsPath).toBe(join(cwd, '.claude', 'settings.json'));
+  });
+});

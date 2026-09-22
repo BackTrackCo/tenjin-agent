@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { CONFIG_DEFAULTS, loadRawConfig } from '../lib/config';
 import type { PartialConfig } from '../lib/config';
-import { buildPromptPacket, packetForText, type Packet, type PendingCall } from './context';
+import { buildPromptPacket, fit, packetForText, type Packet, type PendingCall } from './context';
 import { askGate, type GateDeps } from './gate';
 import { readSessionPacket, writeSessionPacket } from './session-file';
 
@@ -136,10 +136,15 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
   // No packet is the subagent and restarted-session path: the call's own query
   // or URL becomes the current message, because an empty one is refused.
   const prior = await readSessionPacket(deps.dataDir, event.session_id, deps.now);
-  const packet: Packet = {
+  // `fit` AGAIN, on the packet this hook actually sends. The stored one was
+  // measured without a pending call, so one that landed on the cap is over it
+  // the moment this attaches the call, and an over-cap packet is a 400 that
+  // `askGate` reads as null and this reads as allow: the redirect would die
+  // with no trace, exactly as it did when the call travelled beside the packet.
+  const packet: Packet = fit({
     ...(prior ?? packetForText('query' in pending ? pending.query : pending.url)),
     pendingCall: pending,
-  };
+  });
   const answer = await askGate(await resolveBaseUrl(deps), { source: 'native', packet }, deps);
   if (answer === null || answer.action !== 'execute') {
     return {

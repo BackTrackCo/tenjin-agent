@@ -59,18 +59,20 @@ Learn more:
     .description(
       'Check the six things a lookup needs: the Node floor, the hook entries and the permission rule, the MCP registration, the spend limits, the wallet, and the router endpoint answering its 402. It prints one line per check with a fix for each failure, and exits nonzero if a required one fails.',
     )
+    .option('--project', "check this project's .claude/settings.json, as --project installed it")
     .addHelpText(
       'after',
       `
 Examples:
   $ tenjin doctor
+  $ tenjin doctor --project
   $ tenjin doctor --json
 `,
     )
     .action(async function (this: Command) {
       await runCommand('doctor', this, async (ctx) => {
         const { runRouterDoctor } = await import('../router/doctor');
-        return runRouterDoctor(ctx);
+        return runRouterDoctor(ctx, this.opts().project === true ? { project: true } : {});
       });
     });
 

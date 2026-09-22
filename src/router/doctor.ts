@@ -1,9 +1,7 @@
 import { execFile } from 'node:child_process';
-import { homedir } from 'node:os';
 import { promisify } from 'node:util';
 import { CliError } from '../lib/errors';
 import { inspectHooksFile, ownsHookEntry } from '../lib/harness-hooks';
-import { claudeSettingsPath } from '../lib/harness-permissions';
 import { httpRequest } from '../lib/http';
 import { toMoney } from '../lib/money';
 import { resolveContextSettings } from '../lib/settings';
@@ -12,7 +10,7 @@ import { describeWallet, resolveWalletProvider } from '../lib/wallet';
 import { walletFileExists } from '../lib/wallet/store';
 import type { CommandContext, CommandResult } from '../context';
 import { ROUTER_PATH } from './decision';
-import { ALLOW_RULE, MCP_ADD_COMMAND, MCP_SERVER_NAME } from './install';
+import { ALLOW_RULE, MCP_ADD_COMMAND, MCP_SERVER_NAME, routerSettingsPath } from './install';
 
 /**
  * `tenjin doctor` for the router product: the six things that decide whether a
@@ -38,6 +36,9 @@ export interface RouterCheck {
 
 export interface RouterDoctorDeps {
   homeDir?: string;
+  cwd?: string;
+  /** Look at this project's `.claude/settings.json`, as `--project` installed it. */
+  project?: boolean;
   env?: NodeJS.ProcessEnv;
   which?: (bin: string) => boolean;
   fetchImpl?: typeof fetch;
@@ -54,17 +55,24 @@ export async function runRouterDoctor(
   deps: RouterDoctorDeps = {},
 ): Promise<CommandResult> {
   const env = deps.env ?? process.env;
-  const home = deps.homeDir ?? homedir();
   const settings = await resolveContextSettings(ctx);
+  // The SAME resolution `install` and `uninstall` use. Reading the home file
+  // only made a correctly wired `--project` install, which the README tells
+  // people to do, fail a required check and exit 3.
+  const settingsPath = routerSettingsPath({
+    ...(deps.project === true ? { project: true } : {}),
+    ...(deps.homeDir !== undefined ? { homeDir: deps.homeDir } : {}),
+    ...(deps.cwd !== undefined ? { cwd: deps.cwd } : {}),
+  });
   const checks: RouterCheck[] = [nodeCheck(deps.nodeVersion ?? process.version)];
-  checks.push(await hooksCheck(home, ctx.dataDir));
+  checks.push(await hooksCheck(settingsPath, ctx.dataDir));
   checks.push(await mcpCheck(deps, env));
   checks.push(spendCheck(settings.policy.maxAutoSpendAtomic, settings.policy.sessionBudgetAtomic));
   checks.push(...(await walletCheck(ctx)));
   checks.push(await routerCheck(settings.baseUrl, ctx.flags.timeout, deps.fetchImpl));
 
   const failure = checks.find((c) => c.status === 'fail' && c.required);
-  const data = { checks, dataDir: ctx.dataDir, baseUrl: settings.baseUrl };
+  const data = { checks, dataDir: ctx.dataDir, baseUrl: settings.baseUrl, settingsPath };
   if (failure !== undefined) {
     // REFUSED, the exit-3 class: a machine this command found unready is
     // understood and refused, not a runtime failure of the command itself.
@@ -101,8 +109,7 @@ function nodeCheck(version: string): RouterCheck {
       };
 }
 
-async function hooksCheck(home: string, dataDir: string): Promise<RouterCheck> {
-  const path = claudeSettingsPath(home);
+async function hooksCheck(path: string, dataDir: string): Promise<RouterCheck> {
   const found = await inspectHooksFile(path);
   if ('refusal' in found) {
     return {

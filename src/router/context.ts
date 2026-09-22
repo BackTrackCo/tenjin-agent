@@ -69,8 +69,13 @@ export function literalUrlsIn(text: string): string[] {
  * Bring the packet inside the server's caps: oldest history first, then the
  * current message itself, measured on the WHOLE packet rather than on the two
  * message lists, because `literalUrls` and a pending call are bytes too.
+ *
+ * EXPORTED BECAUSE ATTACHING ANYTHING RE-OPENS THE QUESTION. A packet this
+ * returned at exactly the cap is over it the moment a caller adds a field, and
+ * the server refuses rather than truncates, so every caller that adds one runs
+ * this again on what it is actually going to send.
  */
-function fit(packet: Packet): Packet {
+export function fit(packet: Packet): Packet {
   const next: Packet = { ...packet, history: packet.history.slice(-MAX_HISTORY) };
   while (next.history.length > 0 && Buffer.byteLength(JSON.stringify(next)) > MAX_PACKET_BYTES) {
     next.history = next.history.slice(1);

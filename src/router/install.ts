@@ -37,6 +37,19 @@ export const MCP_SERVER_NAME = 'x402';
 export const ALLOW_RULE = 'mcp__x402__request';
 export const MCP_ADD_COMMAND = `claude mcp add ${MCP_SERVER_NAME} -s user -- tenjin mcp`;
 
+/**
+ * Which settings file this machine's router wiring lives in, spelled once so
+ * `install`, `uninstall` and `doctor` can never disagree about where to look.
+ * A doctor reading the home file on a `--project` install reported a correctly
+ * wired machine as unwired and exited 3.
+ */
+export function routerSettingsPath(
+  opts: { project?: boolean; homeDir?: string; cwd?: string } = {},
+): string {
+  if (opts.project === true) return join(opts.cwd ?? process.cwd(), '.claude', 'settings.json');
+  return claudeSettingsPath(opts.homeDir ?? homedir());
+}
+
 /** The two entries, spelled once so `uninstall` and the tests read the same list. */
 export function routerHookPlan(): unknown[] {
   const handler = (command: string) => [
@@ -96,10 +109,11 @@ export async function runRouterInstall(
       fix: 'Set HOME to your home directory (`export HOME=...`), then re-run `tenjin install`.',
     });
   }
-  const settingsPath =
-    args.project === true
-      ? join(deps.cwd ?? process.cwd(), '.claude', 'settings.json')
-      : claudeSettingsPath(home);
+  const settingsPath = routerSettingsPath({
+    ...(args.project === true ? { project: true } : {}),
+    homeDir: home,
+    ...(deps.cwd !== undefined ? { cwd: deps.cwd } : {}),
+  });
 
   if (args.refresh === true && !(await hasOurEntries(settingsPath, ctx.dataDir))) {
     throw new CliError(
