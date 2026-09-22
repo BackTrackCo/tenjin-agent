@@ -2,7 +2,9 @@ import { decodePaymentRequiredHeader, decodePaymentResponseHeader } from '@x402/
 import { SIGN_IN_WITH_X } from '@x402/extensions/sign-in-with-x';
 import type { PaymentRequired, PaymentRequirements } from '@x402/core/types';
 import { verifyAgainstRegistries } from '../lib/bazaar';
+import { assertPublicDestination, type DestinationOptions } from '../lib/destination';
 import { CliError } from '../lib/errors';
+import { validateResultBody } from '../lib/request-schema';
 import { fetchFailureToCliError, httpRequest } from '../lib/http';
 import type { HttpResponse } from '../lib/http';
 import { parseUsdToAtomic, toMoney } from '../lib/money';
@@ -49,6 +51,21 @@ const PAYMENT_RESPONSE_HEADER = 'PAYMENT-RESPONSE';
 /** Terminal preview cap; `--print-body` lifts it. The machine body is never cut. */
 const BODY_PREVIEW_CHARS = 1200;
 
+/**
+ * What a caller was told this endpoint costs, BEFORE the live 402 is seen. It
+ * stands in for the registry lookup on a lane that has one from elsewhere (the
+ * router's paid decision carries it), and it is a ceiling, never a licence: the
+ * live requirement has to match the network and asset exactly and may not
+ * exceed the amount. A caller with no such terms keeps `assertRegistryVerified`.
+ */
+export interface AdvertisedTerms {
+  network: string;
+  asset: string;
+  maxAmountAtomic: string;
+  /** Free-text provenance for the payee label, e.g. a registry name. */
+  source?: string;
+}
+
 export interface PayArgs {
   url: string;
   /** GET (default) or POST; POST is implied when --data is given. */
@@ -61,6 +78,16 @@ export interface PayArgs {
   yes?: boolean;
   /** Print the full body to the terminal instead of the capped preview. */
   printBody?: boolean;
+  /** Advertised terms that replace the registry lookup on this call. */
+  terms?: AdvertisedTerms;
+  /** The same-turn duplicate guard's identity for this request. */
+  requestKey?: string;
+  /**
+   * The caller's APPLICATION success rule for the delivered body. A 2xx whose
+   * body fails it is a paid failure, not a delivery: the money already moved,
+   * so the refusal says so instead of handing back a body nobody vouched for.
+   */
+  resultSchema?: unknown;
 }
 
 export interface PayDeps {
@@ -68,6 +95,8 @@ export interface PayDeps {
   provider?: WalletProvider;
   authorizer?: SpendAuthorizer;
   confirm?: (prompt: string) => Promise<boolean>;
+  /** Resolver seam for the destination preflight; production leaves it unset. */
+  destination?: DestinationOptions;
 }
 
 type Lane = 'tenjin' | 'bazaar';
@@ -82,6 +111,11 @@ export async function runPay(
     args.maxPrice !== undefined ? BigInt(parseUsdToAtomic(args.maxPrice)) : undefined;
   const url = args.url.trim();
   const lane = resolveLane(url, settings);
+  // BEFORE the probe, and only on the third-party lane: the configured base URL
+  // is the operator's own deployment and is legitimately a local origin in
+  // development, while any other host is a destination something else chose, so
+  // that is the one that has to prove it is not on this network.
+  if (lane === 'bazaar') await assertPublicDestination(url, deps.destination ?? {});
   const method = resolveMethod(args);
   const jsonBody = parseBody(args.data);
 
@@ -122,8 +156,11 @@ export async function runPay(
   // The Bazaar lane's registry check runs BEFORE the wallet is even opened:
   // an unverifiable deal must not reach a signer.
   let registry: string | undefined;
+  let termsLabel: string | undefined;
   if (lane === 'bazaar') {
-    registry = await assertRegistryVerified(settings, url, requirement, ctx.flags.timeout, ctx);
+    if (args.terms !== undefined) termsLabel = assertWithinTerms(args.terms, requirement);
+    else
+      registry = await assertRegistryVerified(settings, url, requirement, ctx.flags.timeout, ctx);
   }
 
   const provider = resolveWalletProvider(
@@ -188,7 +225,8 @@ export async function runPay(
     // The Bazaar lane verifies the challenge it will actually SIGN: the store
     // answers this without a network round trip in the common case.
     if (lane === 'bazaar') {
-      registry = await assertRegistryVerified(settings, url, fresh, ctx.flags.timeout, ctx);
+      if (args.terms !== undefined) termsLabel = assertWithinTerms(args.terms, fresh);
+      else registry = await assertRegistryVerified(settings, url, fresh, ctx.flags.timeout, ctx);
     }
   }
   const amountAtomic = BigInt(effectiveRequirement.amount);
@@ -200,13 +238,15 @@ export async function runPay(
   );
   // The host is the creator identity here (`allowlistCreators` users pin
   // hosts); the gate itself is shared with `buy` so the two verbs cannot drift.
-  const via = registry !== undefined ? ` (listed on ${sanitizeForTerminal(registry)})` : '';
+  const verifiedVia = registry ?? termsLabel;
+  const via = verifiedVia !== undefined ? ` (${sanitizeForTerminal(verifiedVia)})` : '';
   const reservationId = await gateSpend({
     ctx,
     authorizer,
     amountAtomic,
     creator: host,
     ...(maxPriceAtomic !== undefined ? { maxPriceAtomic } : {}),
+    ...(args.requestKey !== undefined ? { requestKey: args.requestKey } : {}),
     yes: args.yes === true,
     ...(deps.confirm !== undefined ? { confirm: deps.confirm } : {}),
     payeeLabel: `${sanitizeForTerminal(host)}${via}`,
@@ -235,6 +275,15 @@ export async function runPay(
   await authorizer.commit(reservationId, payment.amountAtomic);
   if (!paid.ok) throw fetchFailureToCliError(paid);
   if (paid.status >= 200 && paid.status < 300) {
+    if (args.resultSchema !== undefined) {
+      const check = validateResultBody(args.resultSchema, paid.text);
+      if (!check.valid) {
+        throw new CliError('CONTRACT_MISMATCH', `The paid response is not a usable result.`, {
+          fix: 'The payment has already settled and is counted against the session budget. Do not retry blind: the endpoint answered 2xx with a body that fails the success rule it was paid under.',
+          details: { status: paid.status, reason: check.reason },
+        });
+      }
+    }
     return deliver(url, lane, paid, {
       paid: true,
       amountAtomic: payment.amountAtomic,
@@ -341,6 +390,36 @@ function decodeChallenge(res: HttpResponse, url: string): PaymentRequired {
       cause: err,
     });
   }
+}
+
+/**
+ * The advertised-terms gate. Same shape of answer as the registry gate and the
+ * same failure code, because it answers the same question: is the live 402 the
+ * deal this call was authorized against? Exact on scheme, network and asset, at
+ * most on the amount. Returns the label the payee line names.
+ */
+function assertWithinTerms(terms: AdvertisedTerms, requirement: PaymentRequirements): string {
+  const mismatch =
+    requirement.scheme !== 'exact'
+      ? `scheme ${requirement.scheme}`
+      : requirement.network !== terms.network
+        ? `network ${requirement.network}`
+        : requirement.asset.toLowerCase() !== terms.asset.toLowerCase()
+          ? `asset ${requirement.asset}`
+          : BigInt(requirement.amount) > BigInt(terms.maxAmountAtomic)
+            ? `amount ${requirement.amount} over the advertised ${terms.maxAmountAtomic}`
+            : undefined;
+  if (mismatch !== undefined) {
+    throw new CliError(
+      'REGISTRY_MISMATCH',
+      `The live 402 exceeds the terms this call was authorized against (${mismatch}).`,
+      {
+        fix: 'Nothing was signed. The endpoint changed its deal since those terms were issued; ask for a fresh decision.',
+        details: { advertised: terms, live: requirement },
+      },
+    );
+  }
+  return terms.source ?? 'the advertised terms';
 }
 
 /** The registry gate: only a `verified` outcome returns; everything else throws. */

@@ -38,6 +38,16 @@ const REGISTRY = 'https://registry.test';
 
 const RESERVATION = 'rsv-test';
 
+/**
+ * The Bazaar lane resolves its destination before it probes, and `.example`
+ * names never resolve, so every call here carries a public answer. The guard
+ * itself is tested against the real resolver in lib/destination.test.ts, and
+ * the refusal path is tested below with a private answer.
+ */
+const PUBLIC_DNS = {
+  destination: { resolveHostname: async () => [{ address: '93.184.216.34', family: 4 }] },
+};
+
 function fakeAuthorizer(
   decision: SpendAuthorization['decision'],
   reason = 'within_policy',
@@ -145,7 +155,10 @@ async function writeConfig(over: Record<string, unknown> = {}): Promise<void> {
 describe('runPay, tenjin lane', () => {
   it('delivers a free 2xx without touching the wallet', async () => {
     const { fetch, calls } = scriptedFetch([json(200, { answer: 42 })]);
-    const result = await runPay({ url: TENJIN_URL }, makeCtx(), { fetchImpl: fetch });
+    const result = await runPay({ url: TENJIN_URL }, makeCtx(), {
+      ...PUBLIC_DNS,
+      fetchImpl: fetch,
+    });
     const data = result.data as { paid: boolean; status: number; body: unknown; lane: string };
     expect(data.paid).toBe(false);
     expect(data.status).toBe(200);
@@ -161,7 +174,10 @@ describe('runPay, tenjin lane', () => {
     const sibling = knownDeploymentOrigins().find((o) => o !== new URL(TENJIN_URL).origin);
     expect(sibling).toBeDefined();
     const { fetch, calls } = scriptedFetch([json(200, { answer: 42 })]);
-    const result = await runPay({ url: `${sibling}/api/answer` }, makeCtx(), { fetchImpl: fetch });
+    const result = await runPay({ url: `${sibling}/api/answer` }, makeCtx(), {
+      ...PUBLIC_DNS,
+      fetchImpl: fetch,
+    });
     const data = result.data as { lane: string; status: number };
     expect(data.lane).toBe('tenjin');
     expect(data.status).toBe(200);
@@ -176,6 +192,7 @@ describe('runPay, tenjin lane', () => {
     ]);
     const authorizer = fakeAuthorizer('allow');
     const result = await runPay({ url: TENJIN_URL, data: '{"question":"q"}' }, makeCtx(), {
+      ...PUBLIC_DNS,
       fetchImpl: fetch,
       provider: testWalletProvider(),
       authorizer,
@@ -198,6 +215,7 @@ describe('runPay, tenjin lane', () => {
       json(200, { ok: true }),
     ]);
     await runPay({ url: TENJIN_URL }, makeCtx(), {
+      ...PUBLIC_DNS,
       fetchImpl: fetch,
       provider: testWalletProvider(),
       authorizer: fakeAuthorizer('allow'),
@@ -219,6 +237,7 @@ describe('runPay, tenjin lane', () => {
     const authorizer = fakeAuthorizer('allow');
     await expect(
       runPay({ url: TENJIN_URL }, makeCtx(), {
+        ...PUBLIC_DNS,
         fetchImpl: fetch,
         provider: testWalletProvider(),
         authorizer,
@@ -233,6 +252,7 @@ describe('runPay, tenjin lane', () => {
     const { fetch, calls } = scriptedFetch([json(402, {}, { 'PAYMENT-REQUIRED': fixture.header })]);
     await expect(
       runPay({ url: TENJIN_URL }, makeCtx(), {
+        ...PUBLIC_DNS,
         fetchImpl: fetch,
         provider: testWalletProvider(),
         authorizer: fakeAuthorizer('deny', 'price_cap_exceeded'),
@@ -247,6 +267,7 @@ describe('runPay, tenjin lane', () => {
     const authorizer = fakeAuthorizer('confirm');
     await expect(
       runPay({ url: TENJIN_URL }, makeCtx(), {
+        ...PUBLIC_DNS,
         fetchImpl: fetch,
         provider: testWalletProvider(),
         authorizer,
@@ -262,6 +283,7 @@ describe('runPay, tenjin lane', () => {
     const { fetch } = scriptedFetch([json(402, {}, { 'PAYMENT-REQUIRED': fixture.header })]);
     await expect(
       runPay({ url: TENJIN_URL }, makeCtx({}, false), {
+        ...PUBLIC_DNS,
         fetchImpl: fetch,
         provider: testWalletProvider(),
         authorizer: fakeAuthorizer('confirm'),
@@ -273,22 +295,22 @@ describe('runPay, tenjin lane', () => {
     const { fetch } = scriptedFetch([
       new Response(null, { status: 308, headers: { location: 'https://elsewhere.example/' } }),
     ]);
-    await expect(runPay({ url: TENJIN_URL }, makeCtx(), { fetchImpl: fetch })).rejects.toThrow(
-      /redirected/,
-    );
+    await expect(
+      runPay({ url: TENJIN_URL }, makeCtx(), { ...PUBLIC_DNS, fetchImpl: fetch }),
+    ).rejects.toThrow(/redirected/);
   });
 
   it('a non-402 error status is API_UNREACHABLE', async () => {
     const { fetch } = scriptedFetch([json(500, { error: 'boom' })]);
     await expect(
-      runPay({ url: TENJIN_URL }, makeCtx(), { fetchImpl: fetch }),
+      runPay({ url: TENJIN_URL }, makeCtx(), { ...PUBLIC_DNS, fetchImpl: fetch }),
     ).rejects.toMatchObject({ code: 'API_UNREACHABLE' });
   });
 
   it('a 402 with no PAYMENT-REQUIRED header is CONTRACT_MISMATCH', async () => {
     const { fetch } = scriptedFetch([json(402, { error: 'pay' })]);
     await expect(
-      runPay({ url: TENJIN_URL }, makeCtx(), { fetchImpl: fetch }),
+      runPay({ url: TENJIN_URL }, makeCtx(), { ...PUBLIC_DNS, fetchImpl: fetch }),
     ).rejects.toMatchObject({ code: 'CONTRACT_MISMATCH' });
   });
 });
@@ -309,6 +331,7 @@ describe('runPay, builder-code attribution', () => {
       json(200, { ok: true }),
     ]);
     await runPay({ url: TENJIN_URL }, makeCtx(), {
+      ...PUBLIC_DNS,
       fetchImpl: fetch,
       provider: testWalletProvider(),
       authorizer: fakeAuthorizer('allow'),
@@ -327,6 +350,7 @@ describe('runPay, builder-code attribution', () => {
       json(200, { ok: true }),
     ]);
     await runPay({ url: TENJIN_URL }, makeCtx(), {
+      ...PUBLIC_DNS,
       fetchImpl: fetch,
       provider: testWalletProvider(),
       authorizer: fakeAuthorizer('allow'),
@@ -351,6 +375,7 @@ describe('runPay, builder-code attribution', () => {
       json(200, { ok: true }),
     ]);
     await runPay({ url: TENJIN_URL }, makeCtx(), {
+      ...PUBLIC_DNS,
       fetchImpl: fetch,
       provider: testWalletProvider(),
       authorizer: fakeAuthorizer('allow'),
@@ -370,6 +395,7 @@ describe('runPay, builder-code attribution', () => {
       json(200, { enriched: true }),
     ]);
     const result = await runPay({ url: FOREIGN_URL }, makeCtx(), {
+      ...PUBLIC_DNS,
       fetchImpl: fetch,
       provider: testWalletProvider(),
       authorizer: fakeAuthorizer('allow'),
@@ -406,6 +432,7 @@ describe('runPay, the sign-in-with-x extension', () => {
     ]);
     const authorizer = fakeAuthorizer('allow');
     const result = await runPay({ url: TENJIN_URL }, makeCtx(), {
+      ...PUBLIC_DNS,
       fetchImpl: fetch,
       provider: testWalletProvider(),
       authorizer,
@@ -431,6 +458,7 @@ describe('runPay, the sign-in-with-x extension', () => {
     ]);
     const authorizer = fakeAuthorizer('allow');
     const result = await runPay({ url: TENJIN_URL }, makeCtx(), {
+      ...PUBLIC_DNS,
       fetchImpl: fetch,
       provider: testWalletProvider(),
       authorizer,
@@ -453,6 +481,7 @@ describe('runPay, the sign-in-with-x extension', () => {
     const authorizer = fakeAuthorizer('allow');
     await expect(
       runPay({ url: TENJIN_URL }, makeCtx(), {
+        ...PUBLIC_DNS,
         fetchImpl: fetch,
         provider: testWalletProvider(),
         authorizer,
@@ -470,6 +499,7 @@ describe('runPay, the sign-in-with-x extension', () => {
       json(200, { enriched: 'yours already' }),
     ]);
     const result = await runPay({ url: FOREIGN_URL }, makeCtx(), {
+      ...PUBLIC_DNS,
       fetchImpl: fetch,
       provider: testWalletProvider(),
       authorizer: fakeAuthorizer('allow'),
@@ -488,7 +518,7 @@ describe('runPay, usage errors', () => {
   it('rejects a non-JSON --data before any network', async () => {
     const { fetch, calls } = scriptedFetch([]);
     await expect(
-      runPay({ url: TENJIN_URL, data: 'not json' }, makeCtx(), { fetchImpl: fetch }),
+      runPay({ url: TENJIN_URL, data: 'not json' }, makeCtx(), { ...PUBLIC_DNS, fetchImpl: fetch }),
     ).rejects.toMatchObject({ code: 'USAGE' });
     expect(calls).toHaveLength(0);
   });
@@ -496,10 +526,13 @@ describe('runPay, usage errors', () => {
   it('rejects GET with a body, and unsupported methods', async () => {
     const { fetch } = scriptedFetch([]);
     await expect(
-      runPay({ url: TENJIN_URL, method: 'GET', data: '{}' }, makeCtx(), { fetchImpl: fetch }),
+      runPay({ url: TENJIN_URL, method: 'GET', data: '{}' }, makeCtx(), {
+        ...PUBLIC_DNS,
+        fetchImpl: fetch,
+      }),
     ).rejects.toMatchObject({ code: 'USAGE' });
     await expect(
-      runPay({ url: TENJIN_URL, method: 'DELETE' }, makeCtx(), { fetchImpl: fetch }),
+      runPay({ url: TENJIN_URL, method: 'DELETE' }, makeCtx(), { ...PUBLIC_DNS, fetchImpl: fetch }),
     ).rejects.toMatchObject({ code: 'USAGE' });
   });
 });
@@ -508,7 +541,7 @@ describe('runPay, bazaar lane', () => {
   it('refuses a foreign origin while the toggle is off, before any network', async () => {
     const { fetch, calls } = scriptedFetch([]);
     await expect(
-      runPay({ url: FOREIGN_URL }, makeCtx(), { fetchImpl: fetch }),
+      runPay({ url: FOREIGN_URL }, makeCtx(), { ...PUBLIC_DNS, fetchImpl: fetch }),
     ).rejects.toMatchObject({ code: 'USAGE' });
     expect(calls).toHaveLength(0);
   });
@@ -522,6 +555,7 @@ describe('runPay, bazaar lane', () => {
       json(200, { enriched: true }),
     ]);
     const result = await runPay({ url: FOREIGN_URL }, makeCtx(), {
+      ...PUBLIC_DNS,
       fetchImpl: fetch,
       provider: testWalletProvider(),
       authorizer: fakeAuthorizer('allow'),
@@ -551,6 +585,7 @@ describe('runPay, bazaar lane', () => {
     const authorizer = fakeAuthorizer('allow');
     try {
       await runPay({ url: FOREIGN_URL }, makeCtx(), {
+        ...PUBLIC_DNS,
         fetchImpl: fetch,
         provider: testWalletProvider(),
         authorizer,
@@ -590,6 +625,7 @@ describe('runPay, bazaar lane', () => {
     const authorizer = fakeAuthorizer('allow');
     await expect(
       runPay({ url: FOREIGN_URL }, makeCtx(), {
+        ...PUBLIC_DNS,
         fetchImpl: fetch,
         provider: testWalletProvider(),
         authorizer,
@@ -610,7 +646,7 @@ describe('runPay, bazaar lane', () => {
     const provider = testWalletProvider();
     const getSigner = vi.spyOn(provider, 'getSigner');
     await expect(
-      runPay({ url: FOREIGN_URL }, makeCtx(), { fetchImpl: fetch, provider }),
+      runPay({ url: FOREIGN_URL }, makeCtx(), { ...PUBLIC_DNS, fetchImpl: fetch, provider }),
     ).rejects.toMatchObject({ code: 'REGISTRY_MISMATCH' });
     expect(getSigner).not.toHaveBeenCalled();
     expect(calls).toHaveLength(1);
@@ -624,7 +660,7 @@ describe('runPay, bazaar lane', () => {
     const fixture = buildPaymentRequired();
     const { fetch } = scriptedFetch([json(402, {}, { 'PAYMENT-REQUIRED': fixture.header })]);
     await expect(
-      runPay({ url: FOREIGN_URL }, makeCtx(), { fetchImpl: fetch }),
+      runPay({ url: FOREIGN_URL }, makeCtx(), { ...PUBLIC_DNS, fetchImpl: fetch }),
     ).rejects.toMatchObject({ code: 'USAGE' });
   });
 
@@ -636,7 +672,7 @@ describe('runPay, bazaar lane', () => {
     const fixture = buildPaymentRequired();
     const { fetch } = scriptedFetch([json(402, {}, { 'PAYMENT-REQUIRED': fixture.header })]);
     await expect(
-      runPay({ url: FOREIGN_URL }, makeCtx(), { fetchImpl: fetch }),
+      runPay({ url: FOREIGN_URL }, makeCtx(), { ...PUBLIC_DNS, fetchImpl: fetch }),
     ).rejects.toMatchObject({ code: 'NETWORK_ERROR' });
   });
 
@@ -644,7 +680,7 @@ describe('runPay, bazaar lane', () => {
     await writeConfig();
     const { fetch, calls } = scriptedFetch([]);
     await expect(
-      runPay({ url: 'http://seller.example/api' }, makeCtx(), { fetchImpl: fetch }),
+      runPay({ url: 'http://seller.example/api' }, makeCtx(), { ...PUBLIC_DNS, fetchImpl: fetch }),
     ).rejects.toMatchObject({ code: 'USAGE' });
     expect(calls).toHaveLength(0);
   });
@@ -668,7 +704,12 @@ describe('runPay, bazaar lane', () => {
       // Query strings ride the request, not the listed identity.
       { url: `${FOREIGN_URL}?q=hello` },
       makeCtx(),
-      { fetchImpl: fetch, provider: testWalletProvider(), authorizer: fakeAuthorizer('allow') },
+      {
+        ...PUBLIC_DNS,
+        fetchImpl: fetch,
+        provider: testWalletProvider(),
+        authorizer: fakeAuthorizer('allow'),
+      },
     );
     const data = result.data as { paid: boolean; registry: string };
     expect(data.paid).toBe(true);
@@ -688,7 +729,7 @@ describe('runPay, bazaar lane', () => {
     const fixture = buildPaymentRequired();
     const { fetch } = scriptedFetch([json(402, {}, { 'PAYMENT-REQUIRED': fixture.header })]);
     await expect(
-      runPay({ url: FOREIGN_URL }, makeCtx(), { fetchImpl: fetch }),
+      runPay({ url: FOREIGN_URL }, makeCtx(), { ...PUBLIC_DNS, fetchImpl: fetch }),
     ).rejects.toMatchObject({ code: 'USAGE' });
   });
 
@@ -709,7 +750,7 @@ describe('runPay, bazaar lane', () => {
     const fixture = buildPaymentRequired();
     const { fetch } = scriptedFetch([json(402, {}, { 'PAYMENT-REQUIRED': fixture.header })]);
     await expect(
-      runPay({ url: FOREIGN_URL }, makeCtx(), { fetchImpl: fetch }),
+      runPay({ url: FOREIGN_URL }, makeCtx(), { ...PUBLIC_DNS, fetchImpl: fetch }),
     ).rejects.toMatchObject({ code: 'USAGE' });
   });
 
@@ -739,7 +780,7 @@ describe('runPay, bazaar lane', () => {
     const fixture = buildPaymentRequired();
     const { fetch } = scriptedFetch([json(402, {}, { 'PAYMENT-REQUIRED': fixture.header })]);
     await expect(
-      runPay({ url: FOREIGN_URL }, makeCtx(), { fetchImpl: fetch }),
+      runPay({ url: FOREIGN_URL }, makeCtx(), { ...PUBLIC_DNS, fetchImpl: fetch }),
     ).rejects.toMatchObject({ code: 'USAGE' });
   });
 
@@ -758,19 +799,141 @@ describe('runPay, bazaar lane', () => {
     const fixture = buildPaymentRequired(); // live asks 100000
     const { fetch } = scriptedFetch([json(402, {}, { 'PAYMENT-REQUIRED': fixture.header })]);
     await expect(
-      runPay({ url: FOREIGN_URL }, makeCtx(), { fetchImpl: fetch }),
+      runPay({ url: FOREIGN_URL }, makeCtx(), { ...PUBLIC_DNS, fetchImpl: fetch }),
     ).rejects.toMatchObject({ code: 'REGISTRY_MISMATCH' });
   });
 
   it('the toggle-off fix names the operator act, never the URL that failed', async () => {
     const { fetch } = scriptedFetch([]);
     try {
-      await runPay({ url: FOREIGN_URL }, makeCtx(), { fetchImpl: fetch });
+      await runPay({ url: FOREIGN_URL }, makeCtx(), { ...PUBLIC_DNS, fetchImpl: fetch });
       expect.unreachable();
     } catch (err) {
       expect(err).toBeInstanceOf(CliError);
       expect((err as CliError).fix).toContain('tenjin config set bazaarPay on');
       expect((err as CliError).fix).not.toContain('seller.example');
     }
+  });
+});
+
+// The three checks PR 2 moved out of the draft auto-mode experiment into the
+// shared money path, exercised where every caller meets them.
+describe('runPay, the shared request gate', () => {
+  const USDC = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
+  const TERMS = { network: 'eip155:8453', asset: USDC, maxAmountAtomic: '100000' };
+
+  it('refuses a destination whose name resolves onto this network, before any probe', async () => {
+    await writeConfig();
+    const { fetch, calls } = scriptedFetch([]);
+    await expect(
+      runPay({ url: FOREIGN_URL }, makeCtx(), {
+        destination: { resolveHostname: async () => [{ address: '127.0.0.1', family: 4 }] },
+        fetchImpl: fetch,
+      }),
+    ).rejects.toThrow('private or unsupported network address');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('pays on advertised terms without consulting a registry', async () => {
+    await writeConfig();
+    const registry = stubRegistry(() => json(500, {}));
+    const fixture = buildPaymentRequired();
+    const { fetch } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': fixture.header }),
+      json(200, { data: { BTC: 1 } }),
+    ]);
+    let prompt = '';
+    const result = await runPay(
+      { url: FOREIGN_URL, terms: { ...TERMS, source: 'a decision' } },
+      makeCtx(),
+      {
+        ...PUBLIC_DNS,
+        fetchImpl: fetch,
+        provider: testWalletProvider(),
+        authorizer: fakeAuthorizer('confirm'),
+        confirm: async (line) => {
+          prompt = line;
+          return true;
+        },
+      },
+    );
+    expect((result.data as { paid: boolean }).paid).toBe(true);
+    // The human approving the spend is told what vouched for the price.
+    expect(prompt).toContain('a decision');
+    expect(registry.urls).toHaveLength(0);
+  });
+
+  it.each([
+    ['a higher live amount', { amount: '100001' }],
+    ['another asset', { asset: '0x2222222222222222222222222222222222222222' }],
+    ['another network', { network: 'eip155:84532' as const }],
+  ])('refuses %s against the advertised terms, signing nothing', async (_label, over) => {
+    await writeConfig();
+    const fixture = buildPaymentRequired(over);
+    const { fetch, calls } = scriptedFetch([json(402, {}, { 'PAYMENT-REQUIRED': fixture.header })]);
+    const authorizer = fakeAuthorizer('allow');
+    await expect(
+      runPay({ url: FOREIGN_URL, terms: TERMS }, makeCtx(), {
+        ...PUBLIC_DNS,
+        fetchImpl: fetch,
+        provider: testWalletProvider(),
+        authorizer,
+      }),
+    ).rejects.toMatchObject({ code: 'REGISTRY_MISMATCH' });
+    expect(calls).toHaveLength(1);
+    expect(authorizer.authorize).not.toHaveBeenCalled();
+  });
+
+  it('carries the duplicate-guard key into the authorizer', async () => {
+    const fixture = buildPaymentRequired();
+    const { fetch } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': fixture.header }),
+      json(200, { ok: true }),
+    ]);
+    const authorizer = fakeAuthorizer('allow');
+    await runPay({ url: TENJIN_URL, requestKey: 'cap:args' }, makeCtx(), {
+      ...PUBLIC_DNS,
+      fetchImpl: fetch,
+      provider: testWalletProvider(),
+      authorizer,
+    });
+    expect(authorizer.authorize).toHaveBeenCalledWith(
+      expect.objectContaining({ requestKey: 'cap:args' }),
+    );
+  });
+
+  it('reports a denied duplicate with the reason, paying nothing', async () => {
+    const fixture = buildPaymentRequired();
+    const { fetch, calls } = scriptedFetch([json(402, {}, { 'PAYMENT-REQUIRED': fixture.header })]);
+    const err = await runPay({ url: TENJIN_URL, requestKey: 'cap:args' }, makeCtx(), {
+      ...PUBLIC_DNS,
+      fetchImpl: fetch,
+      provider: testWalletProvider(),
+      authorizer: fakeAuthorizer('deny', 'duplicate_in_flight'),
+    }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(CliError);
+    expect((err as CliError).code).toBe('POLICY_REFUSED');
+    expect((err as CliError).fix).toContain('in-flight');
+    expect(calls).toHaveLength(1);
+  });
+
+  it('treats a 2xx that fails its success schema as a paid failure', async () => {
+    const fixture = buildPaymentRequired();
+    const { fetch } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': fixture.header }),
+      json(200, { status: 'error' }),
+    ]);
+    const authorizer = fakeAuthorizer('allow');
+    const err = await runPay(
+      {
+        url: TENJIN_URL,
+        resultSchema: { type: 'object', properties: { data: {} }, required: ['data'] },
+      },
+      makeCtx(),
+      { ...PUBLIC_DNS, fetchImpl: fetch, provider: testWalletProvider(), authorizer },
+    ).catch((e: unknown) => e);
+    expect((err as CliError).code).toBe('CONTRACT_MISMATCH');
+    // The authorization already left, so the spend stays accounted.
+    expect(authorizer.commit).toHaveBeenCalled();
   });
 });

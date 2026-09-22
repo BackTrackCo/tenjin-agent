@@ -38,6 +38,17 @@ export interface SpendRequest {
   creator: string;
   /** The caller's `--max-price` cap, if any. */
   maxPriceAtomic?: bigint;
+  /**
+   * THE SAME-TURN DUPLICATE GUARD. An opaque identity for the request being
+   * paid for (its destination and its exact arguments), recorded on the
+   * reservation. A second authorization carrying a key an unexpired reservation
+   * already holds is DENIED rather than reserved, so one in-flight payment can
+   * never become two because a caller retried, a harness re-fired, or a second
+   * process asked for the same thing. Same lock and same file as the budget, so
+   * the check is atomic across the per-command processes an agent spawns; the
+   * reservation TTL is what bounds "same turn". Omit it and nothing changes.
+   */
+  requestKey?: string;
 }
 
 export interface SpendAuthorization {
@@ -74,6 +85,8 @@ const ReservationSchema = z.object({
   id: z.string(),
   amountAtomic: z.string().regex(/^\d+$/),
   atMs: z.number(),
+  /** Optional so a ledger written by an older build still parses. */
+  requestKey: z.string().optional(),
 });
 type Reservation = z.infer<typeof ReservationSchema>;
 
@@ -155,6 +168,21 @@ export function createLocalSpendAuthorizer(deps: LocalSpendAuthorizerDeps): Spen
     async authorize(req: SpendRequest): Promise<SpendAuthorization> {
       return withLedger(async (ledger) => {
         const sessionSpentAtomic = spentOf(ledger);
+        if (
+          req.requestKey !== undefined &&
+          ledger.reservations.some((r) => r.requestKey === req.requestKey)
+        ) {
+          return {
+            decision: 'deny',
+            reason: 'duplicate_in_flight',
+            message:
+              'An identical request already holds a reservation in this turn. No second payment was made.',
+            amountAtomic: req.amountAtomic,
+            sessionSpentAtomic,
+            sessionBudgetAtomic: deps.policy.sessionBudgetAtomic,
+            policyEnforcement: 'client-only',
+          };
+        }
         const evaluation = evaluateSpendPolicy(deps.policy, {
           amountAtomic: req.amountAtomic,
           creator: req.creator,
@@ -177,6 +205,7 @@ export function createLocalSpendAuthorizer(deps: LocalSpendAuthorizerDeps): Spen
           id: randomUUID(),
           amountAtomic: req.amountAtomic.toString(),
           atMs: now(),
+          ...(req.requestKey !== undefined ? { requestKey: req.requestKey } : {}),
         };
         await persist({ ...ledger, reservations: [...ledger.reservations, reservation] });
         return { ...base, reservationId: reservation.id };

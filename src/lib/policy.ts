@@ -42,8 +42,15 @@ export interface SpendRequest {
  */
 export type SpendDecision = 'allow' | 'confirm' | 'deny';
 
+/**
+ * `duplicate_in_flight` is the one reason this pure evaluator never returns: it
+ * is a fact about the ledger (an identical request already holds a reservation
+ * in this turn), so the authorizer raises it. It lives in the union because
+ * every caller renders a decision's reason from one vocabulary.
+ */
 export type PolicyReason =
   | 'within_policy'
+  | 'duplicate_in_flight'
   | 'price_cap_exceeded'
   | 'not_allowlisted'
   | 'session_budget_exceeded'
