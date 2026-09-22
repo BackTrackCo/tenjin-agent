@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { loadRawConfig, resolveSettings } from '../lib/config';
 import type { PartialConfig } from '../lib/config';
 import { buildPromptPacket, fit, packetForText, type Packet, type PendingCall } from './context';
-import { requestDecision, ROUTER_PATH, type Decision } from './decision';
+import { requestDecision, ROUTER_PATH, type HookDecision } from './decision';
 import { GATE_TIMEOUT_MS } from './gate';
 
 /**
@@ -110,10 +110,11 @@ export function hintLine(id: string | undefined): string {
 }
 
 /** What a `needs_input` decision leaves the host to do, in one line. */
-export function clarificationLine(decision: Decision): string {
-  const next = decision.diagnostics?.nextAction.trim() ?? '';
+export function clarificationLine(decision: HookDecision): string {
+  if (decision.action === 'execute') return FALLBACK_LINE;
+  const next = decision.diagnostics.nextAction.trim();
   if (next.length > 0) return next;
-  const missing = decision.diagnostics?.missing ?? [];
+  const { missing } = decision.diagnostics;
   if (missing.length > 0) {
     return `Ask the user for ${missing.slice(0, 3).join(', ')}, then call request({query}).`;
   }
@@ -124,7 +125,7 @@ export interface PromptHookOutcome {
   /** What the harness is told, or null for "nothing to say". */
   response: unknown | null;
   skipped?: PromptSkip;
-  action?: Decision['action'];
+  action?: HookDecision['action'];
   /** The turn id, for the smoke to correlate against. */
   id?: string;
 }
@@ -142,16 +143,14 @@ export async function runPromptHook(raw: unknown, deps: HookDeps): Promise<Promp
   if (skipped !== null) return { response: null, skipped };
 
   const packet = await buildPromptPacket(event.transcript_path, event.session_id, event.prompt);
-  const outcome = await decide({ packet }, deps);
+  const outcome = await decide(packet, deps);
   if (outcome === null) return injection(FALLBACK_LINE);
   const decision = outcome;
   if (decision.action === 'native') return { response: null, action: 'native' };
-  const line = decision.action === 'execute' ? hintLine(decision.id) : clarificationLine(decision);
-  return {
-    action: decision.action,
-    ...(decision.id !== undefined ? { id: decision.id } : {}),
-    ...injection(line),
-  };
+  if (decision.action === 'needs_input') {
+    return { action: 'needs_input', ...injection(clarificationLine(decision)) };
+  }
+  return { action: 'execute', id: decision.id, ...injection(hintLine(decision.id)) };
 }
 
 function injection(line: string): { response: unknown } {
@@ -165,7 +164,7 @@ function injection(line: string): { response: unknown } {
 export interface NativeHookOutcome {
   response: unknown | null;
   decision: 'allow' | 'deny';
-  action?: Decision['action'];
+  action?: HookDecision['action'];
   id?: string;
 }
 
@@ -187,7 +186,7 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
   // The call's own text IS the query here: a native call states its lookup, so
   // there is nothing to guess and no stored packet to find.
   const packet: Packet = fit({ ...packetForText(subject), pendingCall: pending });
-  const outcome = await decide({ query: subject, packet }, deps);
+  const outcome = await decide(packet, deps);
   if (outcome === null || outcome.action !== 'execute') {
     return {
       response: null,
@@ -205,35 +204,37 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
     },
     decision: 'deny',
     action: 'execute',
-    ...(outcome.id !== undefined ? { id: outcome.id } : {}),
+    id: outcome.id,
   };
 }
 
 /** What the harness shows in place of the denied call: what was prepared, the
  *  id that runs it, and the subject either way, since a WebFetch carries no
  *  query and a bare "call request" leaves the model nothing to carry across. */
-export function redirectReason(pending: PendingCall, decision: Decision): string {
+export function redirectReason(pending: PendingCall, decision: HookDecision): string {
   const subject = 'query' in pending ? pending.query : pending.url;
-  return `${hintLine(decision.id)}\nQuery: ${subject.slice(0, 500)}`;
+  const id = decision.action === 'execute' ? decision.id : undefined;
+  return `${hintLine(id)}\nQuery: ${subject.slice(0, 500)}`;
 }
 
 /** One free decision, with the hook's own deadline and its own silence. */
-async function decide(
-  request: { query?: string; packet: Packet },
-  deps: HookDeps,
-): Promise<Decision | null> {
+async function decide(packet: Packet, deps: HookDeps): Promise<HookDecision | null> {
   const baseUrl = await resolveBaseUrl(deps);
   const warn = deps.warn ?? ((line: string) => process.stderr.write(`${line}\n`));
-  const outcome = await requestDecision(request, {
-    ctx: {
-      flags: { json: true, timeout: deps.timeoutMs ?? GATE_TIMEOUT_MS },
-      dataDir: deps.dataDir,
-      io: { stdout: nullStream(), stderr: nullStream(), isTTY: false },
+  const outcome = await requestDecision(
+    'hook',
+    { packet },
+    {
+      ctx: {
+        flags: { json: true, timeout: deps.timeoutMs ?? GATE_TIMEOUT_MS },
+        dataDir: deps.dataDir,
+        io: { stdout: nullStream(), stderr: nullStream(), isTTY: false },
+      },
+      baseUrl,
+      timeoutMs: deps.timeoutMs ?? GATE_TIMEOUT_MS,
+      ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
     },
-    baseUrl,
-    timeoutMs: deps.timeoutMs ?? GATE_TIMEOUT_MS,
-    ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
-  });
+  );
   if (outcome.status === 'failed') {
     warn(`tenjin hook: ${baseUrl}${ROUTER_PATH} ${outcome.reason}`);
     return null;

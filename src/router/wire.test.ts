@@ -2,7 +2,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { parseDecisionForTests } from './decision';
+import { parseForTests } from './decision';
 import { GATE_TIMEOUT_MS } from './gate';
 import { MAX_PACKET_BYTES, type Packet } from './context';
 import { STDIN_TIMEOUT_MS } from './hook-command';
@@ -50,16 +50,60 @@ describe('the request bodies', () => {
  * A payload the canonical set gains and a list never names is how a nested
  * field shipped unparsed three times.
  */
+/**
+ * ONE VARIANT PER ANSWER. Optional fields made every shape legal: an `execute`
+ * with no contract parsed and reached the host as a routine `needs_input`, a
+ * non-execute with no diagnostics parsed with nothing to act on, and a hook
+ * answer carrying a contract parsed as though the hook had quoted a price. Each
+ * fixture must now match exactly one variant of exactly one parser.
+ */
 describe('every answer payload on disk', () => {
-  const answers = readdirSync(dir).filter(
-    (name) => name.startsWith('wire-hook-') || name.startsWith('wire-lookup-'),
-  );
+  const hookAnswers = readdirSync(dir).filter((name) => name.startsWith('wire-hook-'));
+  const toolAnswers = readdirSync(dir).filter((name) => name.startsWith('wire-lookup-'));
 
-  it('parses with the schema this client runs', () => {
-    expect(answers.length).toBeGreaterThanOrEqual(8);
-    for (const name of answers) {
-      expect(parseDecisionForTests(fixture(name)), `${name}`).toMatchObject({ success: true });
+  it('parses each answer with its own call, and NOT with the other', () => {
+    expect(hookAnswers.length).toBeGreaterThanOrEqual(3);
+    expect(toolAnswers.length).toBeGreaterThanOrEqual(5);
+    for (const name of hookAnswers) {
+      expect(parseForTests('hook', fixture(name)), `${name} is a hook answer`).toMatchObject({
+        success: true,
+      });
     }
+    for (const name of toolAnswers) {
+      expect(parseForTests('tool', fixture(name)), `${name} is a tool answer`).toMatchObject({
+        success: true,
+      });
+    }
+    // An execute answer belongs to one call only: the hook's carries an id and
+    // no contract, the tool's a contract and no id.
+    expect(parseForTests('tool', fixture('wire-hook-execute.json')).success).toBe(false);
+    expect(parseForTests('hook', fixture('wire-lookup-execute-get.json')).success).toBe(false);
+  });
+
+  it.each([
+    ['contract', 'wire-lookup-execute-get.json', 'tool'],
+    ['capabilityId', 'wire-lookup-execute-post.json', 'tool'],
+    ['providerPriceAtomic', 'wire-lookup-expired-id.json', 'tool'],
+    ['diagnostics', 'wire-lookup-needs-input.json', 'tool'],
+    ['diagnostics', 'wire-hook-native.json', 'hook'],
+    ['id', 'wire-hook-execute.json', 'hook'],
+  ])('refuses an answer missing %s', (field, name, kind) => {
+    const payload = fixture(name);
+    const decision = { ...(payload.decision as Record<string, unknown>) };
+    expect(decision[field]).toBeDefined();
+    delete decision[field];
+    expect(parseForTests(kind as 'hook' | 'tool', { ...payload, decision }).success).toBe(false);
+  });
+
+  it('refuses an unknown key on either side of the envelope', () => {
+    const payload = fixture('wire-hook-execute.json');
+    expect(parseForTests('hook', { ...payload, surprise: 1 }).success).toBe(false);
+    expect(
+      parseForTests('hook', {
+        ...payload,
+        decision: { ...(payload.decision as object), contract: {} },
+      }).success,
+    ).toBe(false);
   });
 
   it('carries no fee, no billing and no settlement anywhere', () => {
@@ -76,15 +120,9 @@ describe('every answer payload on disk', () => {
   it('gives the hook an id and nothing to quote', () => {
     const execute = fixture('wire-hook-execute.json').decision as Record<string, unknown>;
     expect(Object.keys(execute).sort()).toEqual(['action', 'id']);
-    for (const name of ['wire-hook-native.json', 'wire-hook-needs-input.json']) {
-      const decision = fixture(name).decision as Record<string, unknown>;
-      expect(decision.contract).toBeUndefined();
-      expect(decision.providerPriceAtomic).toBeUndefined();
-      expect(decision.diagnostics).toBeDefined();
-    }
   });
 
-  /** The provider in the description and the provider in the contract are ONE
+  /** The capability in the description and the one in the contract are ONE
    *  decision: a caller cannot approve one offer and receive another. */
   it('gives the tool the capability, its price and its contract together', () => {
     for (const name of ['wire-lookup-execute-get.json', 'wire-lookup-execute-post.json']) {
@@ -94,9 +132,6 @@ describe('every answer payload on disk', () => {
         contract: { request: { url: string } };
       };
       expect(decision.providerPriceAtomic).toMatch(/^\d+$/);
-      // One decision, so the capability named in the line and the one in the
-      // contract are produced together; the POST fixture routes through a
-      // gateway, so the host is not the word in the line.
       expect(decision.description.length).toBeGreaterThan(0);
       expect(new URL(decision.contract.request.url).protocol).toBe('https:');
     }
@@ -105,13 +140,7 @@ describe('every answer payload on disk', () => {
   it('answers a dead id with a plain note and a decision anyway', () => {
     const expired = fixture('wire-lookup-expired-id.json');
     expect(String(expired.note)).toContain('unknown or expired');
-    expect((expired.decision as { contract?: unknown }).contract).toBeDefined();
-  });
-
-  it('is the shape a typed refusal arrives in', () => {
-    // No error fixture in the canonical set: the envelope is the repo-wide one
-    // every Tenjin route answers a refusal with, pinned by `decision.test.ts`.
-    expect(readdirSync(dir).some((name) => name.startsWith('wire-'))).toBe(true);
+    expect(parseForTests('tool', expired).success).toBe(true);
   });
 });
 

@@ -28,7 +28,20 @@ function router(body: unknown, status = 200): { fetchImpl: typeof fetch; calls: 
   return { fetchImpl, calls };
 }
 
-const NATIVE = { schemaVersion: 1, routerVersion: 'v', decision: { action: 'native' } };
+const NATIVE = {
+  schemaVersion: 1,
+  routerVersion: 'v',
+  decision: {
+    action: 'native',
+    reason: 'The host assistant and its own tools are enough.',
+    diagnostics: {
+      reasonCode: 'native_sufficient',
+      stage: 'capability',
+      missing: [],
+      nextAction: 'Answer with your own tools.',
+    },
+  },
+};
 const EXECUTE = {
   schemaVersion: 1,
   routerVersion: 'v',

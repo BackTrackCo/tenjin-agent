@@ -74,56 +74,87 @@ const DiagnosticsSchema = z.object({
 export type DecisionDiagnostics = z.infer<typeof DiagnosticsSchema>;
 
 /**
- * STRICT, so a field in the wrong place fails loudly and names itself rather
- * than being dropped into a shape check that then blames the whole response.
- * Three divergences have cost a round trip each, which is why both repos parse
- * the same fixtures with their own parser rather than a shared one.
+ * ONE VARIANT PER ANSWER, DISCRIMINATED ON THE ACTION. Optional fields made
+ * every shape legal: an `execute` with no contract parsed and came back to the
+ * host as a routine `needs_input`, a non-execute with no diagnostics parsed
+ * with nothing to act on, and a hook answer carrying a contract parsed as
+ * though the hook had quoted a price. Each of those is drift the shared
+ * fixtures exist to catch, so each is now a parse failure that names itself.
  *
- * ONE SHAPE, TWO ANSWERS. The hook's call gets `{action:'execute', id}` and
- * nothing else, because at gate time there is no capability, no price and no
- * contract to name. The tool's call gets the decision: the capability, its
- * price and the contract together, so a caller cannot approve one offer and
- * receive another. Every non-execute answer carries `diagnostics`, nested
- * inside `decision` beside the action it explains.
+ * The two calls ask different questions and get different answers, so they get
+ * different parsers. The HOOK asks whether a paid lookup is worth offering: an
+ * id, or a reason it is not. The TOOL asks for the decision: the capability,
+ * its price and the contract together, so a caller cannot approve one offer and
+ * receive another.
  */
-const DecisionSchema = z.strictObject({
-  schemaVersion: z.literal(1),
-  routerVersion: z.string().min(1).max(64),
-  decision: z.strictObject({
-    action: z.enum(['native', 'execute', 'needs_input']),
-    /**
-     * The turn id, and an OPAQUE HANDLE by construction. It is the one piece of
-     * server text this client puts in a model-facing line, so the shape is
-     * checked here rather than escaped later: the backend mints uuids, and
-     * anything outside this alphabet is a protocol error that costs the turn
-     * its hint (the hook then says to call `request` with the query alone).
-     */
-    id: z
-      .string()
-      .regex(/^[A-Za-z0-9_-]{8,64}$/)
-      .optional(),
-    capabilityId: z.string().min(1).max(200).optional(),
-    category: z.string().max(64).optional(),
-    /** One plain line naming the capability and who serves it. */
-    description: z.string().max(300).optional(),
-    /** What the provider charges, atomic USDC. Display only. */
-    providerPriceAtomic: z.string().regex(/^\d+$/).optional(),
-    reason: z.string().max(2_000).optional(),
-    contract: ContractSchema.optional(),
-    diagnostics: DiagnosticsSchema.optional(),
-  }),
-  /** A plain sentence about the call itself, such as an id that had expired.
-   *  Never a failure: the decision beside it still ran. */
-  note: z.string().max(500).optional(),
-  jev: z.object({ calls: z.number(), latencyMs: z.number() }).optional(),
-});
-export type DecisionResponse = z.infer<typeof DecisionSchema>;
-export type Decision = DecisionResponse['decision'];
+const IdSchema = z
+  .string()
+  .regex(/^[A-Za-z0-9_-]{8,64}$/)
+  .describe(
+    'The turn id, an OPAQUE HANDLE: it is the one piece of server text this ' +
+      'client puts in a model-facing line, so the alphabet is pinned here ' +
+      'rather than escaped later.',
+  );
 
-/** The parser, exposed so the shared wire fixtures are checked against the
- *  same schema production parses with rather than against a copy of it. */
-export function parseDecisionForTests(value: unknown): { success: boolean } {
-  return { success: DecisionSchema.safeParse(value).success };
+/** Every non-execute answer carries these, beside the action they explain. */
+const RefusedSchema = z.strictObject({
+  reason: z.string().max(2_000).optional(),
+  diagnostics: DiagnosticsSchema,
+});
+
+const HookDecisionSchema = z.discriminatedUnion('action', [
+  /** The hook answer names NO capability, price or contract: at gate time the
+   *  task the host will run does not exist yet, and anything quoted there is a
+   *  guess a caller reads as an offer. */
+  z.strictObject({ action: z.literal('execute'), id: IdSchema }),
+  RefusedSchema.extend({ action: z.literal('native') }),
+  RefusedSchema.extend({ action: z.literal('needs_input') }),
+]);
+
+const ToolDecisionSchema = z.discriminatedUnion('action', [
+  z.strictObject({
+    action: z.literal('execute'),
+    capabilityId: z.string().min(1).max(200),
+    category: z.string().min(1).max(64),
+    /** One plain line naming the capability and who serves it. */
+    description: z.string().min(1).max(300),
+    /** What the provider charges, atomic USDC. DISPLAY ONLY: the amount
+     *  actually signed is what `gateSpend` caps. */
+    providerPriceAtomic: z.string().regex(/^\d+$/),
+    contract: ContractSchema,
+  }),
+  RefusedSchema.extend({ action: z.literal('native') }),
+  RefusedSchema.extend({ action: z.literal('needs_input') }),
+]);
+
+function envelope<T extends z.ZodTypeAny>(decision: T) {
+  return z.strictObject({
+    schemaVersion: z.literal(1),
+    routerVersion: z.string().min(1).max(64),
+    decision,
+    /** A plain sentence about the CALL, such as an id that had expired. Never a
+     *  failure: the decision beside it ran anyway. */
+    note: z.string().max(500).optional(),
+    jev: z.object({ calls: z.number(), latencyMs: z.number() }).optional(),
+  });
+}
+
+const HookResponseSchema = envelope(HookDecisionSchema);
+const ToolResponseSchema = envelope(ToolDecisionSchema);
+
+export type HookResponse = z.infer<typeof HookResponseSchema>;
+export type ToolResponse = z.infer<typeof ToolResponseSchema>;
+export type HookDecision = HookResponse['decision'];
+export type ToolDecision = ToolResponse['decision'];
+
+/** Which call this is, and therefore which answer is legal for it. */
+export type CallKind = 'hook' | 'tool';
+
+/** The parsers, exposed so the shared wire fixtures are checked against the
+ *  same schemas production parses with rather than against a copy of them. */
+export function parseForTests(kind: CallKind, value: unknown): { success: boolean } {
+  const schema = kind === 'hook' ? HookResponseSchema : ToolResponseSchema;
+  return { success: schema.safeParse(value).success };
 }
 
 /**
@@ -145,7 +176,7 @@ export interface DecisionDeps {
   timeoutMs?: number;
 }
 
-export type DecisionOutcome<T = DecisionResponse> =
+export type DecisionOutcome<T> =
   | { status: 'decided'; decision: T }
   /** Nothing was paid and nothing could be: the endpoint is free, so a failure
    *  here costs the turn a routing answer and nothing else. */
@@ -163,9 +194,20 @@ export type DecisionOutcome<T = DecisionResponse> =
  * the raw prompt, measured on jev-1.13.0.
  */
 export async function requestDecision(
+  kind: 'hook',
+  request: { packet: Packet; gateHint?: GateHint },
+  deps: DecisionDeps,
+): Promise<DecisionOutcome<HookResponse>>;
+export async function requestDecision(
+  kind: 'tool',
+  request: { query: string; id?: string; gateHint?: GateHint },
+  deps: DecisionDeps,
+): Promise<DecisionOutcome<ToolResponse>>;
+export async function requestDecision(
+  kind: CallKind,
   request: { query?: string; packet?: Packet; id?: string; gateHint?: GateHint },
   deps: DecisionDeps,
-): Promise<DecisionOutcome> {
+): Promise<DecisionOutcome<HookResponse | ToolResponse>> {
   const url = new URL(ROUTER_PATH, deps.baseUrl).toString();
   const options: HttpRequestOptions = {
     method: 'POST',
@@ -180,7 +222,10 @@ export async function requestDecision(
     },
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   };
-  return readDecision(await httpRequest(url, options), DecisionSchema);
+  return readDecision(
+    await httpRequest(url, options),
+    kind === 'hook' ? HookResponseSchema : ToolResponseSchema,
+  );
 }
 
 function readDecision<T extends z.ZodTypeAny>(

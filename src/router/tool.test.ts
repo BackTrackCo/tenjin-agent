@@ -84,6 +84,7 @@ function decision(over: Record<string, unknown> = {}): Record<string, unknown> {
     decision: {
       action: 'execute',
       capabilityId: 'cmc-quotes',
+      category: 'crypto price quote',
       description: 'crypto price quote via pro-api.example.test',
       providerPriceAtomic: '10000',
       contract: contract(),

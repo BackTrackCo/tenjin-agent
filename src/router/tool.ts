@@ -84,6 +84,7 @@ export async function runRequestTool(
   // mixed turn it paid for the wrong lookup: the only thing the client could
   // check was whether the two named different URLs, which that case did not.
   const fresh = await requestDecision(
+    'tool',
     { query, ...(args.id !== undefined && args.id.length > 0 ? { id: args.id } : {}) },
     decisionDeps,
   );
@@ -94,14 +95,13 @@ export async function runRequestTool(
   }
   const { decision, note } = fresh.decision;
 
-  if (decision.action !== 'execute' || decision.contract === undefined) {
+  if (decision.action !== 'execute') {
+    // Both non-execute arms carry diagnostics by construction now: an answer
+    // without them does not parse, so there is nothing to fall back to here.
     return fail(
       decision.action === 'native' ? 'native' : 'needs_input',
-      decision.reason ?? decision.description ?? 'The router did not select a paid capability.',
-      {
-        ...(decision.diagnostics !== undefined ? { diagnostics: decision.diagnostics } : {}),
-        ...(note !== undefined ? { note } : {}),
-      },
+      decision.reason ?? 'The router did not select a paid capability.',
+      { diagnostics: decision.diagnostics, ...(note !== undefined ? { note } : {}) },
     );
   }
 
@@ -113,7 +113,7 @@ export async function runRequestTool(
   // Bazaar lane asks for. It carries NO price: the advertised-price check and
   // the live-versus-advertised check are gone, and `gateSpend` caps the amount
   // actually signed. A ceiling the server states is not a ceiling.
-  const terms: AdvertisedTerms = { source: decision.description ?? 'a routing decision' };
+  const terms: AdvertisedTerms = { source: decision.description };
 
   try {
     // The request is the server's, sent verbatim: the only thing built here is
@@ -126,7 +126,7 @@ export async function runRequestTool(
         headers: built.headers,
         ...(built.body !== undefined ? { rawBody: built.body } : {}),
         terms,
-        requestKey: `${decision.id ?? 'lookup'}:${canonicalHash(contract.arguments ?? {})}`,
+        requestKey: `${decision.capabilityId}:${canonicalHash(contract.arguments ?? {})}`,
         ...(contract.resultSchema !== undefined ? { resultSchema: contract.resultSchema } : {}),
         printBody: true,
       },

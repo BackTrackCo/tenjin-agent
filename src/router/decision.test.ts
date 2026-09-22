@@ -71,17 +71,35 @@ const NATIVE = {
   },
 };
 
-const EXECUTE = {
+const HOOK_EXECUTE = {
   schemaVersion: 1,
   routerVersion: '2026-09-23.1',
   decision: { action: 'execute', id: 'k3f9-abcd' },
 };
 
+const TOOL_EXECUTE = {
+  schemaVersion: 1,
+  routerVersion: '2026-09-23.1',
+  decision: {
+    action: 'execute',
+    capabilityId: 'cmc-quotes',
+    category: 'crypto price quote',
+    description: 'crypto price quote via pro-api.example.test',
+    providerPriceAtomic: '10000',
+    contract: {
+      method: 'GET',
+      url: 'https://pro-api.example.test/quotes',
+      request: { url: 'https://pro-api.example.test/quotes', method: 'GET', headers: {} },
+    },
+  },
+};
+
 describe('one free decision', () => {
   it('sends the query and the packet, and nothing about money', async () => {
-    const { fetchImpl, calls } = net(EXECUTE);
+    const { fetchImpl, calls } = net(TOOL_EXECUTE);
     const outcome = await requestDecision(
-      { query: 'BTC and ETH price', packet: packetForText('BTC and ETH price') },
+      'tool',
+      { query: 'BTC and ETH price' },
       { ctx: ctx(), baseUrl: BASE, fetchImpl },
     );
 
@@ -91,7 +109,6 @@ describe('one free decision', () => {
     expect(calls[0]!.method).toBe('POST');
     const body = calls[0]!.body as Record<string, unknown>;
     expect(body).toMatchObject({ schemaVersion: 1, query: 'BTC and ETH price' });
-    expect(body.packet).toBeDefined();
     // One call, and no 402 probe before it: this route is free.
     expect(JSON.stringify(body)).not.toContain('billing');
   });
@@ -99,6 +116,7 @@ describe('one free decision', () => {
   it('carries the packet alone from the hook, with no query', async () => {
     const { fetchImpl, calls } = net(NATIVE);
     await requestDecision(
+      'hook',
       { packet: packetForText('what is the weather') },
       { ctx: ctx(), baseUrl: BASE, fetchImpl },
     );
@@ -106,8 +124,9 @@ describe('one free decision', () => {
   });
 
   it('sends the query and the turn id from the tool, with no packet of its own', async () => {
-    const { fetchImpl, calls } = net(EXECUTE);
+    const { fetchImpl, calls } = net(TOOL_EXECUTE);
     await requestDecision(
+      'tool',
       { query: 'BTC and ETH price', id: 'k3f9-abcd' },
       { ctx: ctx(), baseUrl: BASE, fetchImpl },
     );
@@ -116,12 +135,45 @@ describe('one free decision', () => {
     expect(calls[0]!.method).toBe('POST');
   });
 
+  /**
+   * ONE VARIANT PER ANSWER. Optional fields made every shape legal: an execute
+   * with no contract came back to the host as a routine needs_input, and a hook
+   * answer quoting a price parsed as though the hook knew the task.
+   */
+  it('refuses a hook answer that quotes a capability it cannot know', async () => {
+    const { fetchImpl } = net({
+      ...HOOK_EXECUTE,
+      decision: { ...HOOK_EXECUTE.decision, providerPriceAtomic: '10000' },
+    });
+    const outcome = await requestDecision(
+      'hook',
+      { packet: packetForText('q') },
+      { ctx: ctx(), baseUrl: BASE, fetchImpl },
+    );
+    expect(outcome).toMatchObject({ status: 'failed' });
+  });
+
+  it('refuses a tool execute with no contract', async () => {
+    const decision = { ...TOOL_EXECUTE.decision } as Record<string, unknown>;
+    delete decision.contract;
+    const { fetchImpl } = net({ ...TOOL_EXECUTE, decision });
+    const outcome = await requestDecision(
+      'tool',
+      { query: 'q' },
+      { ctx: ctx(), baseUrl: BASE, fetchImpl },
+    );
+    // Not a routine needs_input: a contractless execute is a protocol error.
+    expect(outcome).toMatchObject({ status: 'failed' });
+    expect((outcome as { reason: string }).reason).toContain('cannot read');
+  });
+
   it('surfaces a typed refusal by its own code and message', async () => {
     const { fetchImpl } = net(
       { error: { code: 'packet_too_large', message: 'The packet exceeds the 16 KiB bound.' } },
       400,
     );
     const outcome = await requestDecision(
+      'hook',
       { packet: packetForText('q') },
       { ctx: ctx(), baseUrl: BASE, fetchImpl },
     );
@@ -132,6 +184,7 @@ describe('one free decision', () => {
   it('falls back to the status line when a refusal carries no code', async () => {
     const { fetchImpl } = net({ nope: true }, 500);
     const outcome = await requestDecision(
+      'hook',
       { packet: packetForText('q') },
       { ctx: ctx(), baseUrl: BASE, fetchImpl },
     );
@@ -148,6 +201,7 @@ describe('one free decision', () => {
   it('refuses a body with a field in the wrong place', async () => {
     const { fetchImpl } = net({ ...NATIVE, action: 'native' });
     const outcome = await requestDecision(
+      'hook',
       { packet: packetForText('q') },
       { ctx: ctx(), baseUrl: BASE, fetchImpl },
     );
