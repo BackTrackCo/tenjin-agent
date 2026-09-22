@@ -275,11 +275,11 @@ beforeAll(async () => {
   }
   // Both single-file configs: `installDaemonFiles` copies all three, so a
   // missing one would fail the fixture before a single case ran.
-  // SEPARATE OUT DIRS, then one copy. Two `build()` calls in one process over
-  // one directory let the first block's options reach the second: the reporter
-  // came out carrying the daemon's `createRequire` banner, and intermittently
-  // at a different length, which vitest then refused to parse when it imported
-  // the copy. Each block owns its own output, and the files are collected after.
+  // Separate out dirs, then one copy, so neither block can observe the other's
+  // output. The banner each block pins is what keeps them independent: tsup's
+  // `build()` API carries options across calls in one process, so the reporter
+  // used to come out with the daemon's `createRequire` preamble spliced in at a
+  // position that broke the file, and the assertion below is the tripwire.
   const daemonOutDir = await mkdtemp(join(tmpdir(), 'tenjin-b-smoke-daemon-'));
   const reporterOutDir = await mkdtemp(join(tmpdir(), 'tenjin-b-smoke-reporter-'));
   await build({ ...daemonConfig, outDir: daemonOutDir, silent: true });
@@ -293,6 +293,27 @@ beforeAll(async () => {
   }
   await rm(daemonOutDir, { recursive: true, force: true });
   await rm(reporterOutDir, { recursive: true, force: true });
+
+  // Two `build()` calls in one process used to write the reporter's output path
+  // twice with DIFFERENT content: tsup leaked the daemon block's `createRequire`
+  // banner into one of them, and the two writes interleaved into a file that is
+  // byte-complete and ends correctly while its middle is spliced (the shorter
+  // bundle, then the longer one's 127-byte tail). Node refused to parse it, in
+  // a file nothing on disk showed as truncated. `banner: {}` on each block in
+  // tsup.config.ts is the fix, because it leaves only one possible content; the
+  // two checks here are the tripwire if another option ever diverges. A spliced
+  // bundle always duplicates the tail, so one `export {` is the structural test.
+  const reporterBundle = await readFile(join(tmpOutDir, 'tenjin-vitest-reporter.mjs'), 'utf8');
+  if (reporterBundle.includes('__tenjinCreateRequire')) {
+    throw new Error(
+      "the reporter bundle carries the daemon block's createRequire banner: tsup leaked options between builds again, pin `banner: {}` on that block in tsup.config.ts",
+    );
+  }
+  if (reporterBundle.split('export {').length !== 2) {
+    throw new Error(
+      `the reporter bundle has ${reporterBundle.split('export {').length - 1} export blocks: two tsup builds wrote this path with different content and spliced it`,
+    );
+  }
 
   dataDir = await mkdtemp(join(tmpdir(), 'tenjin-b-smoke-data-'));
   // Every arm is pinned off rather than defaulted: they are on out of the box

@@ -814,6 +814,54 @@ describe('update reaches a project install from anywhere', () => {
     );
   });
 
+  it('fails the refresh when config.json is unreadable, naming the file and the project', async () => {
+    const fs = await import('node:fs/promises');
+    const cwd = join(home, 'project');
+    await fs.mkdir(cwd, { recursive: true });
+    await runRouterInstall({}, ctx(), deps());
+    await runRouterInstall({ project: true }, ctx(), deps({ cwd }));
+
+    // Schema-invalid, not syntax-invalid: the recorded projects are still
+    // readable, so the error has to name the one that went unrefreshed.
+    const config = join(data, 'config.json');
+    await fs.writeFile(
+      config,
+      JSON.stringify({ install: { routerProjects: [cwd] }, loop: { port: 'nope' } }),
+    );
+    const err = await runRouterInstall({ refresh: true }, ctx(), deps({ cwd: home })).catch(
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(CliError);
+    expect((err as CliError).code).toBe('CONFIG_INVALID');
+    expect((err as CliError).message).toContain(config);
+    expect((err as CliError).message).toContain(cwd);
+  });
+
+  it('refreshes the user install when there is no config.json at all', async () => {
+    const fs = await import('node:fs/promises');
+    await runRouterInstall({}, ctx(), deps());
+    await fs.rm(join(data, 'config.json'), { force: true });
+    const result = await runRouterInstall({ refresh: true }, ctx(), deps({ cwd: home }));
+    const installs = (result.data as { installs: { settingsPath: string }[] }).installs;
+    expect(installs.map((i) => i.settingsPath)).toEqual([settingsPath()]);
+  });
+
+  it('reports a recorded project whose directory is gone as skipped', async () => {
+    const fs = await import('node:fs/promises');
+    const cwd = join(home, 'project');
+    await fs.mkdir(cwd, { recursive: true });
+    await runRouterInstall({}, ctx(), deps());
+    await runRouterInstall({ project: true }, ctx(), deps({ cwd }));
+    await fs.rm(cwd, { recursive: true, force: true });
+
+    const result = await runRouterInstall({ refresh: true }, ctx(), deps({ cwd: home }));
+    expect((result.data as { skipped: string[] }).skipped).toEqual([
+      `skipped ${cwd}: the directory is gone (forgotten)`,
+    ]);
+    expect(result.humanLines).toContain(`skipped ${cwd}: the directory is gone (forgotten)`);
+    expect((await loadRawConfig(data)).install?.routerProjects).toEqual([]);
+  });
+
   it('forgets a project whose entries are gone, and after uninstall --project', async () => {
     const fs = await import('node:fs/promises');
     const cwd = join(home, 'project');

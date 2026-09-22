@@ -79,6 +79,13 @@ export default defineConfig([
   // a repo on an older runtime than this daemon's can still load it.
   {
     entry: { 'tenjin-vitest-reporter': 'src/hooks/failure/vitest-reporter.ts' },
+    // EXPLICITLY EMPTY, not merely absent. tsup's `build()` API carries options
+    // from a previous build in the same process, so a config that just omits
+    // `banner` can inherit the daemon block's `createRequire` preamble, and
+    // esbuild splices it in at a position that breaks the file: the smoke test
+    // that imports this bundle failed intermittently on a syntax error inside
+    // an otherwise complete file. Saying `{}` is what makes it not inherit.
+    banner: {},
     format: ['esm'],
     target: 'node20',
     platform: 'node',
@@ -101,6 +108,8 @@ export default defineConfig([
   // worker thread.
   {
     entry: { 'wallet-kdf-worker': 'src/lib/wallet/keystore-kdf-worker.ts' },
+    /** Explicitly empty, for the reason on the reporter block above. */
+    banner: {},
     format: ['esm'],
     target: 'node22',
     platform: 'node',

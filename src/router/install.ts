@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { promisify } from 'node:util';
@@ -19,6 +20,7 @@ import { resolveContextSettings } from '../lib/settings';
 import type { SpendPolicy } from '../lib/policy';
 import { onPath } from '../lib/skill-wiring';
 import { loadRawConfig } from '../lib/config';
+import { configPath } from '../lib/paths';
 import type { PartialConfig } from '../lib/config';
 import type { CommandContext, CommandResult } from '../context';
 
@@ -364,17 +366,44 @@ async function refreshEveryInstall(
   cwd: string,
   env: NodeJS.ProcessEnv,
 ): Promise<CommandResult> {
-  const config = await loadRawConfig(ctx.dataDir).catch(() => ({}) as PartialConfig);
+  // NOT caught. An absent config.json is an empty one and refreshing the user
+  // install from it is right, which `loadRawConfig` already encodes by
+  // returning {} for ENOENT only. Anything else means the recorded project
+  // installs are unreadable, and swallowing it made `tenjin update` refresh the
+  // user scope and exit 0 while every project install silently stayed behind.
+  const config = await loadRawConfig(ctx.dataDir).catch((cause: unknown) => {
+    const recorded = recordedProjectsRaw(ctx.dataDir);
+    throw new CliError(
+      'CONFIG_INVALID',
+      `Could not read ${configPath(ctx.dataDir)}, so ${
+        recorded === undefined
+          ? 'no project install was refreshed'
+          : `these project installs were not refreshed: ${recorded.join(', ')}`
+      }.`,
+      {
+        fix: `Fix or delete ${configPath(ctx.dataDir)}, then re-run: tenjin update`,
+        cause,
+      },
+    );
+  });
   const targets: { project: boolean; dir: string }[] = [];
+  const skipped: string[] = [];
   if (await hasOurEntries(routerSettingsPath({ homeDir: home }), ctx.dataDir)) {
     targets.push({ project: false, dir: home });
   }
   for (const dir of config.install?.routerProjects ?? []) {
     if (await hasOurEntries(routerSettingsPath({ project: true, cwd: dir }), ctx.dataDir)) {
       targets.push({ project: true, dir });
-    } else {
-      await persistRouterProject(ctx.dataDir, dir, false).catch(() => undefined);
+      continue;
     }
+    // Forgetting a project keeps the list from growing stale, but it is a
+    // change to what the next `tenjin update` covers, so say it out loud.
+    skipped.push(
+      `skipped ${dir}: ${
+        existsSync(dir) ? 'no Tenjin hook entries are registered there' : 'the directory is gone'
+      } (forgotten)`,
+    );
+    await persistRouterProject(ctx.dataDir, dir, false).catch(() => undefined);
   }
   // The directory this ran in, when it is a project install nobody recorded: an
   // install from before this list existed still refreshes, and is remembered.
@@ -410,9 +439,28 @@ async function refreshEveryInstall(
     );
   }
   return {
-    data: { refresh: true, installs: results.map((r) => r.data) },
-    humanLines: results.flatMap((r) => r.humanLines ?? []),
+    data: { refresh: true, installs: results.map((r) => r.data), skipped },
+    humanLines: [...results.flatMap((r) => r.humanLines ?? []), ...skipped],
   };
+}
+
+/**
+ * The recorded project installs, read past whatever made the config unreadable,
+ * so the failure can name them. Undefined when even that much is unavailable,
+ * which is the honest answer for a file with broken JSON syntax.
+ */
+function recordedProjectsRaw(dataDir: string): string[] | undefined {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(configPath(dataDir), 'utf8'));
+    const projects = (parsed as PartialConfig | null)?.install?.routerProjects;
+    return Array.isArray(projects) &&
+      projects.every((d) => typeof d === 'string') &&
+      projects.length > 0
+      ? projects
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 async function hasOurEntries(path: string, dataDir: string): Promise<boolean> {
