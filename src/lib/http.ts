@@ -135,7 +135,7 @@ export interface FetchJsonSuccess {
  */
 export interface FetchJsonFailure {
   ok: false;
-  kind: 'network' | 'timeout' | 'http' | 'invalid-json' | 'blocked-redirect';
+  kind: 'network' | 'timeout' | 'http' | 'invalid-json' | 'blocked-redirect' | 'oversized-header';
   status?: number;
   requestId?: string;
   message: string;
@@ -530,9 +530,13 @@ export async function httpRequest(url: string, opts: HttpRequestOptions): Promis
         ...(pinned ? { redirect: 'manual' as const } : {}),
       });
     } catch (err) {
-      return timedOut
-        ? timeoutFailure(url, opts.timeoutMs)
-        : { ok: false, kind: 'network', message: `Request to ${url} failed: ${errorMessage(err)}` };
+      if (timedOut) return timeoutFailure(url, opts.timeoutMs);
+      if (isHeaderOverflow(err)) return oversizedHeaderFailure(url);
+      return {
+        ok: false,
+        kind: 'network',
+        message: `Request to ${url} failed: ${errorMessage(err)}`,
+      };
     }
 
     const requestId = res.headers.get('x-request-id') ?? undefined;
@@ -614,13 +618,67 @@ export function fetchFailureToCliError(
       ? 'NETWORK_ERROR'
       : failure.kind === 'invalid-json'
         ? 'CONTRACT_MISMATCH'
-        : 'API_UNREACHABLE';
+        : failure.kind === 'oversized-header'
+          ? 'CHALLENGE_TOO_LARGE'
+          : 'API_UNREACHABLE';
+  // The one failure with a remedy nobody can apply from inside the process, so
+  // it names the operator's knob rather than suggesting a retry.
+  const fix =
+    opts.fix ??
+    (failure.kind === 'oversized-header'
+      ? 'Nothing was paid. Raising `--max-http-header-size` on the node process that runs this CLI would let the challenge be read; that is an operator decision, not a default this build changes.'
+      : undefined);
   return new CliError(code, failure.message, {
-    ...(opts.fix !== undefined ? { fix: opts.fix } : {}),
+    ...(fix !== undefined ? { fix } : {}),
     ...(opts.details !== undefined ? { details: opts.details } : {}),
   });
 }
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * Does this transport failure mean the response HEADERS were too big for this
+ * process to read?
+ *
+ * Node caps them at 16 KiB unless `--max-http-header-size` says otherwise, and
+ * an x402 challenge is a header: a seller that embeds its whole output schema
+ * in one can exceed the cap on its own (AnyAPI's is 52 KB, measured
+ * 2026-09-22). undici then aborts the request and the generic path reported
+ * `fetch failed` with no status and nothing naming the cause, which reads as
+ * "the endpoint is down" for a seller that is answering perfectly.
+ *
+ * The message is undici's, matched on its stable text and on the code it
+ * attaches; the CAUSE is the one that carries either, so both are checked.
+ */
+function isHeaderOverflow(err: unknown): boolean {
+  const seen = [err, (err as { cause?: unknown } | null)?.cause];
+  return seen.some((candidate) => {
+    if (candidate === null || typeof candidate !== 'object') return false;
+    const code = (candidate as { code?: unknown }).code;
+    if (code === 'UND_ERR_HEADERS_OVERFLOW' || code === 'HPE_HEADER_OVERFLOW') return true;
+    const message = (candidate as { message?: unknown }).message;
+    return typeof message === 'string' && /headers overflow|header overflow/i.test(message);
+  });
+}
+
+/** The named refusal for that case. NOT a `network` failure: nothing is wrong
+ *  with the connection, and a caller that retries gets the same 52 KB again. */
+function oversizedHeaderFailure(url: string): FetchJsonFailure {
+  let origin = url;
+  try {
+    origin = new URL(url).origin;
+  } catch {
+    // Keep the raw string; this is a diagnostic, not a destination.
+  }
+  return {
+    ok: false,
+    kind: 'oversized-header',
+    message:
+      `${origin} answered with response headers larger than this process will read. ` +
+      'An x402 challenge travels in a header, and a seller that embeds its whole output ' +
+      'schema in one can exceed the limit, so the payment terms could not be read and ' +
+      'nothing was sent.',
+  };
 }
