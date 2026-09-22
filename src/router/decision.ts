@@ -96,17 +96,27 @@ export type DecisionBilling = z.infer<typeof BillingSchema>;
 const DiagnosticsSchema = z.object({
   reasonCode: z.string().min(1).max(64),
   stage: z.string().min(1).max(32),
-  missing: z.array(z.string().max(200)).max(20),
+  missing: z.array(z.string().max(200)).max(60),
   nextAction: z.string().max(500),
 });
 export type DecisionDiagnostics = z.infer<typeof DiagnosticsSchema>;
 
+/**
+ * STRICT, AT BOTH LEVELS. A non-strict object drops a field it does not know,
+ * which is how `diagnostics` nested one level deeper than this build expected
+ * turned every waived decision into "a decision this build cannot read": the
+ * field vanished, the shape check failed, and a waived fee was booked as
+ * settled. A field in the wrong place must fail loudly and name itself.
+ *
+ * The two repos ship together and share these fixtures, so an added field
+ * fails a fixture test here before it can reach anybody's session.
+ */
 const DecisionResponseSchema = z
-  .object({
+  .strictObject({
     schemaVersion: z.literal(1),
     routerVersion: z.string().min(1).max(64),
     requestId: z.string().min(1).max(200),
-    decision: z.object({
+    decision: z.strictObject({
       action: z.enum(['native', 'execute', 'needs_input']),
       capabilityId: z.string().min(1).max(200).optional(),
       contract: ContractSchema.optional(),

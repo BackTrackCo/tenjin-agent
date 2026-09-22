@@ -1,4 +1,6 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import gateRequest from './fixtures/wire-gate-request.json' with { type: 'json' };
 import decisionGet from './fixtures/wire-decision-get.json' with { type: 'json' };
@@ -78,17 +80,23 @@ describe('the paid decision body', () => {
     expect('body' in built).toBe(false);
   });
 
+  /**
+   * EVERY decision fixture on disk, found by reading the directory rather than
+   * by listing them here. A payload the canonical set gained and this test
+   * never named is how a nested field shipped unparsed three times: an
+   * unlisted fixture now fails this test instead of a paid request.
+   */
   it('is what the schema in this repo accepts, as committed', async () => {
     const { parseDecisionForTests } = await import('./decision');
-    for (const fixture of [
-      decisionGet,
-      decisionPost,
-      decisionNative,
-      decisionNeedsInput,
-      decisionUnsupported,
-      decisionClassifier,
-    ]) {
-      expect(parseDecisionForTests(fixture).success).toBe(true);
+    const dir = fileURLToPath(new URL('./fixtures/', import.meta.url));
+    const names = readdirSync(dir).filter((name) => name.startsWith('wire-decision-'));
+    expect(names.length).toBeGreaterThanOrEqual(6);
+    for (const name of names) {
+      const fixture: unknown = JSON.parse(readFileSync(join(dir, name), 'utf8'));
+      expect(
+        parseDecisionForTests(fixture),
+        `${name} must parse with the schema this client runs`,
+      ).toMatchObject({ success: true });
     }
     // And the fixture files on disk are the bytes, not a re-serialization.
     const raw = readFileSync(new URL('./fixtures/wire-decision-get.json', import.meta.url), 'utf8');
