@@ -1,0 +1,60 @@
+import { runNativeHook, runPromptHook, type HookDeps } from './hooks';
+import type { Io } from '../lib/output';
+
+/**
+ * `tenjin hook prompt` and `tenjin hook native`. The harness writes its event on
+ * stdin and reads a JSON object (or nothing) from stdout, so these two commands
+ * bypass the CLI's envelope entirely. They never fail the turn: a stdin that
+ * never arrives, an unreadable event or a handler that throws all exit 0 with
+ * an empty stdout, which the harness reads as "no opinion".
+ */
+
+const MAX_EVENT_BYTES = 1_000_000;
+const STDIN_TIMEOUT_MS = 2_000;
+
+export type HookKind = 'prompt' | 'native';
+
+export interface HookCommandDeps extends HookDeps {
+  /** Test seam for the harness event; production reads stdin. */
+  readEvent?: () => Promise<string>;
+}
+
+export async function runHookCommand(kind: HookKind, io: Io, deps: HookCommandDeps): Promise<void> {
+  let response: unknown;
+  try {
+    const raw = await (deps.readEvent ?? readStdin)();
+    const event: unknown = JSON.parse(raw);
+    const outcome =
+      kind === 'prompt' ? await runPromptHook(event, deps) : await runNativeHook(event, deps);
+    response = outcome.response;
+  } catch {
+    response = null;
+  }
+  if (response !== null) io.stdout.write(`${JSON.stringify(response)}\n`);
+}
+
+async function readStdin(): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    const timer = setTimeout(() => reject(new Error('no harness event')), STDIN_TIMEOUT_MS);
+    const done = (value: string): void => {
+      clearTimeout(timer);
+      resolve(value);
+    };
+    process.stdin.on('data', (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > MAX_EVENT_BYTES) {
+        clearTimeout(timer);
+        reject(new Error('harness event too large'));
+        return;
+      }
+      chunks.push(chunk);
+    });
+    process.stdin.once('end', () => done(Buffer.concat(chunks).toString('utf8')));
+    process.stdin.once('error', () => {
+      clearTimeout(timer);
+      reject(new Error('harness event unreadable'));
+    });
+  });
+}
