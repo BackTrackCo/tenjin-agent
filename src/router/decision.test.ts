@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { decodePaymentSignatureHeader, encodePaymentRequiredHeader } from '@x402/core/http';
 import type { PaymentRequired, PaymentRequirements } from '@x402/core/types';
 import { testWalletProvider } from '../lib/read-test-utils';
+import { resolveSpendAuthorizer } from '../lib/wallet';
 import type { SpendAuthorization, SpendAuthorizer } from '../lib/wallet';
 import type { TenjinSigner } from '../lib/wallet/provider';
 import type { CommandContext } from '../context';
@@ -206,6 +207,42 @@ describe('the paid routing decision on a multi-entry 402', () => {
     expect((outcome as { committedAtomic: bigint }).committedAtomic).toBe(0n);
     expect(auth.authorize).not.toHaveBeenCalled();
     expect(auth.commit).not.toHaveBeenCalled();
+    expect(signatures).toEqual([]);
+  });
+
+  /**
+   * THE CAP BYPASS, in the shape it was reproduced offline: a real $0.10
+   * per-call cap, an unsupported first offer at $0.001 and a supported Base
+   * USDC offer at $1. `accepts[0]` pricing reserved $0.001, signed $1 and
+   * returned `decided` with the ledger counting the reservation. Selecting
+   * first puts the $1 in front of the policy, which refuses it, and nothing is
+   * signed. The authorizer here is the production one, not a permissive stub.
+   */
+  it('puts the SELECTED amount in front of the cap, so a $1 second offer cannot ride in under a $0.001 first one', async () => {
+    const cheapUnsupported: PaymentRequirements = { ...BNB_FIRST, amount: '1000' };
+    const dearBaseUsdc: PaymentRequirements = { ...BASE_USDC, amount: '1000000' };
+    const authorizer = resolveSpendAuthorizer(ctx(), {
+      maxAutoSpendAtomic: 100_000n,
+      sessionBudgetAtomic: 100_000n,
+      confirm: { mode: 'above' as const, thresholdAtomic: 100_000n },
+      allowlistCreators: [],
+    });
+    const { fetchImpl, signatures } = net([cheapUnsupported, dearBaseUsdc]);
+    const outcome = await requestDecision(
+      { requestId: 'r-1', query: 'price of BTC', packet: packetForText('price of BTC') },
+      {
+        ctx: ctx(),
+        baseUrl: ROUTER,
+        signer,
+        authorizer,
+        cache: new RequirementsCache(),
+        fetchImpl,
+      },
+    );
+
+    expect(outcome.status).toBe('needs_approval');
+    expect((outcome as { committedAtomic: bigint }).committedAtomic).toBe(0n);
+    // Nothing was signed, so nothing could settle at either price.
     expect(signatures).toEqual([]);
   });
 
