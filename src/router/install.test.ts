@@ -862,6 +862,26 @@ describe('update reaches a project install from anywhere', () => {
     expect((await loadRawConfig(data)).install?.routerProjects).toEqual([]);
   });
 
+  it('keeps a gone project recorded when the config write fails, and says so', async () => {
+    const fs = await import('node:fs/promises');
+    const cwd = join(home, 'project');
+    await fs.mkdir(cwd, { recursive: true });
+    await runRouterInstall({}, ctx(), deps());
+    await runRouterInstall({ project: true }, ctx(), deps({ cwd }));
+    await fs.rm(cwd, { recursive: true, force: true });
+
+    await fs.chmod(data, 0o555);
+    try {
+      const result = await runRouterInstall({ refresh: true }, ctx(), deps({ cwd: home }));
+      expect((result.data as { skipped: string[] }).skipped).toEqual([
+        `skipped ${cwd}: the directory is gone (still recorded)`,
+      ]);
+    } finally {
+      await fs.chmod(data, 0o755);
+    }
+    expect((await loadRawConfig(data)).install?.routerProjects).toEqual([cwd]);
+  });
+
   it('forgets a project whose entries are gone, and after uninstall --project', async () => {
     const fs = await import('node:fs/promises');
     const cwd = join(home, 'project');

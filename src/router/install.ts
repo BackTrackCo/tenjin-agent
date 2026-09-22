@@ -397,13 +397,16 @@ async function refreshEveryInstall(
       continue;
     }
     // Forgetting a project keeps the list from growing stale, but it is a
-    // change to what the next `tenjin update` covers, so say it out loud.
-    skipped.push(
-      `skipped ${dir}: ${
-        existsSync(dir) ? 'no Tenjin hook entries are registered there' : 'the directory is gone'
-      } (forgotten)`,
+    // change to what the next `tenjin update` covers, so say it out loud, and
+    // only once the config write went through: a failed write keeps the entry.
+    const why = existsSync(dir)
+      ? 'no Tenjin hook entries are registered there'
+      : 'the directory is gone';
+    const forgotten = await persistRouterProject(ctx.dataDir, dir, false).then(
+      () => true,
+      () => false,
     );
-    await persistRouterProject(ctx.dataDir, dir, false).catch(() => undefined);
+    skipped.push(`skipped ${dir}: ${why} (${forgotten ? 'forgotten' : 'still recorded'})`);
   }
   // The directory this ran in, when it is a project install nobody recorded: an
   // install from before this list existed still refreshes, and is remembered.
