@@ -76,15 +76,20 @@ export function literalUrlsIn(text: string): string[] {
  * this again on what it is actually going to send.
  */
 export function fit(packet: Packet): Packet {
+  const size = (value: Packet): number => Buffer.byteLength(JSON.stringify(value));
   const next: Packet = { ...packet, history: packet.history.slice(-MAX_HISTORY) };
-  while (next.history.length > 0 && Buffer.byteLength(JSON.stringify(next)) > MAX_PACKET_BYTES) {
+  // In order of what is cheapest to lose. History first: a prior turn is
+  // context. Then the literal URLs, which are a convenience the server can
+  // re-derive from the text. The current message LAST, because it is the task
+  // itself, and only down to one character, so a packet is never empty.
+  while (next.history.length > 0 && size(next) > MAX_PACKET_BYTES) {
     next.history = next.history.slice(1);
   }
-  while (
-    Buffer.byteLength(JSON.stringify(next)) > MAX_PACKET_BYTES &&
-    next.current.text.length > 1
-  ) {
-    const over = Buffer.byteLength(JSON.stringify(next)) - MAX_PACKET_BYTES;
+  while (next.literalUrls.length > 0 && size(next) > MAX_PACKET_BYTES) {
+    next.literalUrls = next.literalUrls.slice(0, -1);
+  }
+  while (size(next) > MAX_PACKET_BYTES && next.current.text.length > 1) {
+    const over = size(next) - MAX_PACKET_BYTES;
     const keep = Math.max(1, next.current.text.length - Math.max(over, 1));
     next.current = { ...next.current, text: next.current.text.slice(0, keep) };
   }

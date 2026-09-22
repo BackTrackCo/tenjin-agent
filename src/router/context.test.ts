@@ -239,3 +239,42 @@ describe('the bounds the server also enforces', () => {
     expect(literalUrlsIn('see https://example.test/ok')).toEqual(['https://example.test/ok']);
   });
 });
+
+describe('what a packet gives up to fit', () => {
+  it('drops literal URLs before the task text, and fits even at eight full-length ones', async () => {
+    const { fit, MAX_PACKET_BYTES } = await import('./context');
+    const urls = Array.from(
+      { length: 8 },
+      (_, i) => `https://example.test/${'p'.repeat(1_970)}${i}`,
+    );
+    const packet = {
+      current: { role: 'user' as const, text: 'read that page for me' },
+      history: [],
+      literalUrls: urls,
+      historyStatus: 'ok' as const,
+      pendingCall: { tool: 'WebFetch' as const, url: urls[0]! },
+    };
+    // Nothing else is left to give: no history, and a short current message.
+    expect(Buffer.byteLength(JSON.stringify(packet))).toBeGreaterThan(MAX_PACKET_BYTES);
+    const fitted = fit(packet);
+    expect(Buffer.byteLength(JSON.stringify(fitted))).toBeLessThanOrEqual(MAX_PACKET_BYTES);
+    // The URLs went; the task and the pending call stayed.
+    expect(fitted.literalUrls.length).toBeLessThan(urls.length);
+    expect(fitted.current.text).toBe('read that page for me');
+    expect(fitted.pendingCall).toEqual(packet.pendingCall);
+  });
+
+  it('gives up history before URLs, and URLs before the task', async () => {
+    const { fit, MAX_PACKET_BYTES } = await import('./context');
+    const fitted = fit({
+      current: { role: 'user', text: 'x'.repeat(200) },
+      history: [{ role: 'user', text: 'h'.repeat(16_000) }],
+      literalUrls: [`https://example.test/${'p'.repeat(1_900)}`],
+      historyStatus: 'ok',
+    });
+    expect(Buffer.byteLength(JSON.stringify(fitted))).toBeLessThanOrEqual(MAX_PACKET_BYTES);
+    expect(fitted.history).toHaveLength(0);
+    expect(fitted.literalUrls).toHaveLength(1);
+    expect(fitted.current.text).toHaveLength(200);
+  });
+});
