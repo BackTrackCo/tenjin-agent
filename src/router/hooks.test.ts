@@ -345,3 +345,110 @@ describe('a packet already at the cap, with a pending call to attach', () => {
     expect(Buffer.byteLength(JSON.stringify(sent))).toBeLessThanOrEqual(MAX_PACKET_BYTES);
   });
 });
+
+/**
+ * The gate is asked at the URL the CLI would use, not at whatever the config
+ * file happens to say. A session pointed elsewhere by `TENJIN_BASE_URL` had its
+ * prompts gated against the file instead; on a machine whose file named a
+ * protected deployment that was a 401, and a 401 is a null answer, and a null
+ * answer is silence.
+ */
+describe('the base URL the hooks ask at', () => {
+  const ENV_URL = 'https://tenjin.sh';
+  const FILE_URL = 'https://shelf.example.test';
+
+  beforeEach(async () => {
+    const fs = await import('node:fs/promises');
+    await fs.writeFile(join(dir, 'config.json'), JSON.stringify({ baseUrl: FILE_URL }));
+  });
+
+  it.each([
+    ['the prompt hook', 'prompt'],
+    ['the native hook', 'native'],
+  ] as const)('honours TENJIN_BASE_URL over the config file in %s', async (_label, kind) => {
+    const { fetchImpl, calls } = gate(NATIVE);
+    const deps = { dataDir: dir, env: { TENJIN_BASE_URL: ENV_URL }, fetchImpl };
+    if (kind === 'prompt') await runPromptHook(promptEvent('check prices'), deps);
+    else await runNativeHook(nativeEvent('WebSearch', { query: 'q' }), deps);
+    expect((calls[0] as { url: string }).url).toBe(`${ENV_URL}/api/x402-router/prepare`);
+  });
+
+  it.each([
+    ['the prompt hook', 'prompt'],
+    ['the native hook', 'native'],
+  ] as const)('falls back to the config file with no env in %s', async (_label, kind) => {
+    const { fetchImpl, calls } = gate(NATIVE);
+    const deps = { dataDir: dir, env: {}, fetchImpl };
+    if (kind === 'prompt') await runPromptHook(promptEvent('check prices'), deps);
+    else await runNativeHook(nativeEvent('WebSearch', { query: 'q' }), deps);
+    expect((calls[0] as { url: string }).url).toBe(`${FILE_URL}/api/x402-router/prepare`);
+  });
+
+  it('lets an explicit override beat both', async () => {
+    const { fetchImpl, calls } = gate(NATIVE);
+    await runPromptHook(promptEvent('check prices'), {
+      dataDir: dir,
+      baseUrl: 'https://flag.example.test',
+      env: { TENJIN_BASE_URL: ENV_URL },
+      fetchImpl,
+    });
+    expect((calls[0] as { url: string }).url).toContain('https://flag.example.test');
+  });
+});
+
+describe('a gate that answers nothing says why on stderr', () => {
+  it.each([
+    ['a 401', 401, 'answered 401'],
+    ['a 500', 500, 'answered 500'],
+  ])('names the URL and the status on %s', async (_label, status, expected) => {
+    const { fetchImpl } = gate({ error: 'no' }, status);
+    const lines: string[] = [];
+    const out = await runPromptHook(promptEvent('check prices'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+      warn: (line) => lines.push(line),
+    });
+    // Nothing on the harness's own channel changes.
+    expect(out.response).toBeNull();
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain(`${BASE}/api/x402-router/prepare`);
+    expect(lines[0]).toContain(expected);
+  });
+
+  it('names an unreadable body and an unreachable host too', async () => {
+    const lines: string[] = [];
+    const bad = gate({ schemaVersion: 99 });
+    await runNativeHook(nativeEvent('WebSearch', { query: 'q' }), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl: bad.fetchImpl,
+      warn: (line) => lines.push(line),
+    });
+    expect(lines[0]).toContain('cannot read');
+
+    const dead: typeof fetch = (async () => {
+      throw new Error('ECONNREFUSED');
+    }) as typeof fetch;
+    await runNativeHook(nativeEvent('WebSearch', { query: 'q' }), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl: dead,
+      warn: (line) => lines.push(line),
+    });
+    expect(lines[1]).toContain('could not be reached');
+    expect(lines[1]).toContain('ECONNREFUSED');
+  });
+
+  it('says nothing at all when the gate answers normally', async () => {
+    const { fetchImpl } = gate(NATIVE);
+    const lines: string[] = [];
+    await runPromptHook(promptEvent('check prices'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+      warn: (line) => lines.push(line),
+    });
+    expect(lines).toEqual([]);
+  });
+});

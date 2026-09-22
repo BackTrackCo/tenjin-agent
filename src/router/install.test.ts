@@ -30,6 +30,44 @@ function ctx(): CommandContext {
   };
 }
 
+const probe402 = (async () =>
+  new Response('{}', {
+    status: 402,
+    headers: { 'content-type': 'application/json' },
+  })) as typeof fetch;
+
+/** The `mcp` check from a doctor run over a project install. */
+async function mcpDetail(
+  home: string,
+  cwd: string,
+  ctx: () => CommandContext,
+): Promise<{ status: string; detail: string }> {
+  return runRouterDoctorFor(home, cwd, ctx);
+}
+
+async function runRouterDoctorFor(
+  home: string,
+  cwd: string,
+  ctx: () => CommandContext,
+  extra: Record<string, unknown> = {},
+): Promise<{ status: string; detail: string }> {
+  const { runRouterDoctor } = await import('./doctor');
+  const out = await runRouterDoctor(ctx(), {
+    homeDir: home,
+    cwd,
+    project: true,
+    env: {},
+    which: () => true,
+    fetchImpl: probe402,
+    ...extra,
+  }).catch((e: unknown) => e);
+  const checks =
+    out instanceof CliError
+      ? (out.details as { checks: { name: string; status: string; detail: string }[] })
+      : (out as { data: { checks: { name: string; status: string; detail: string }[] } }).data;
+  return checks.checks.find((c) => c.name === 'mcp')!;
+}
+
 const settingsPath = () => join(home, '.claude', 'settings.json');
 const readSettings = async (): Promise<Record<string, unknown>> =>
   JSON.parse(await readFile(settingsPath(), 'utf8')) as Record<string, unknown>;
@@ -541,74 +579,7 @@ describe('--project scopes the MCP registration too', () => {
     expect(result.humanLines?.join('\n')).toContain('claude mcp add x402 -s project');
   });
 
-  it('doctor reads back the same scope it was installed at', async () => {
-    const { runRouterDoctor } = await import('./doctor');
-    const cwd = join(home, 'project');
-    await import('node:fs/promises').then((fs) => fs.mkdir(cwd, { recursive: true }));
-    await runRouterInstall({ project: true }, ctx(), deps({ cwd }));
-    const readMcp = vi.fn(async () => true);
-    const fetchImpl = (async () =>
-      new Response('{}', {
-        status: 402,
-        headers: { 'content-type': 'application/json' },
-      })) as typeof fetch;
-    const out = await runRouterDoctor(ctx(), {
-      homeDir: home,
-      cwd,
-      project: true,
-      env: {},
-      which: () => true,
-      readMcp,
-      fetchImpl,
-    }).catch((e: unknown) => e);
-    expect(readMcp).toHaveBeenCalledWith({ scope: 'project', cwd });
-    const checks =
-      out instanceof CliError
-        ? (out.details as { checks: { name: string; detail: string }[] })
-        : (out as { data: { checks: { name: string; detail: string }[] } }).data;
-    expect(checks.checks.find((c) => c.name === 'mcp')?.detail).toContain('project scope');
-  });
-});
-
-describe('doctor verifies the scope it was asked about', () => {
-  const probe402 = (async () =>
-    new Response('{}', {
-      status: 402,
-      headers: { 'content-type': 'application/json' },
-    })) as typeof fetch;
-
-  async function mcpDetail(cwd: string): Promise<{ status: string; detail: string }> {
-    const { runRouterDoctor } = await import('./doctor');
-    const out = await runRouterDoctor(ctx(), {
-      homeDir: home,
-      cwd,
-      project: true,
-      env: {},
-      which: () => true,
-      fetchImpl: probe402,
-    }).catch((e: unknown) => e);
-    const checks =
-      out instanceof CliError
-        ? (out.details as { checks: { name: string; status: string; detail: string }[] })
-        : (out as { data: { checks: { name: string; status: string; detail: string }[] } }).data;
-    return checks.checks.find((c) => c.name === 'mcp')!;
-  }
-
-  it('does not count an inherited user-scope server as a project registration', async () => {
-    const fs = await import('node:fs/promises');
-    const cwd = join(home, 'project');
-    await fs.mkdir(cwd, { recursive: true });
-    await runRouterInstall({ project: true }, ctx(), deps({ cwd }));
-    // The user's own file HAS the server; the project's does not. `claude mcp
-    // get` resolves across scopes and would answer yes here, which would pass
-    // a project install whose `.mcp.json` was never written.
-    await fs.writeFile(join(home, '.claude.json'), '{"mcpServers":{"x402":{}}}\n');
-    const check = await mcpDetail(cwd);
-    expect(check.status).toBe('fail');
-    expect(check.detail).toContain("project's .mcp.json");
-  });
-
-  it('passes once the project file actually names it', async () => {
+  it('doctor reads the project file, not the harness, for a project install', async () => {
     const fs = await import('node:fs/promises');
     const cwd = join(home, 'project');
     await fs.mkdir(cwd, { recursive: true });
@@ -617,21 +588,63 @@ describe('doctor verifies the scope it was asked about', () => {
       join(cwd, '.mcp.json'),
       JSON.stringify({ mcpServers: { x402: { command: 'tenjin', args: ['mcp'] } } }),
     );
-    const check = await mcpDetail(cwd);
-    expect(check.status).toBe('ok');
-    expect(check.detail).toContain('project scope');
+    const readMcp = vi.fn(async () => true);
+    const out = await runRouterDoctorFor(home, cwd, ctx, { readMcp });
+    // The file the scope writes is the authority; `claude mcp get` resolves
+    // ACROSS scopes and would say yes for a user-scope server here.
+    expect(readMcp).not.toHaveBeenCalled();
+    expect(out.status).toBe('ok');
+    expect(out.detail).toContain('project scope');
+  });
+});
+
+/**
+ * An entry named `x402` proves nothing about what it runs. A stale one pointing
+ * at another binary, or an empty object, would read as a working request tool
+ * and send the operator looking anywhere but at the registration.
+ */
+describe('doctor checks that the registration launches the router', () => {
+  it.each([
+    ['an empty entry', {}, 'wrong-command'],
+    ['another binary', { command: 'node', args: ['thing.js'] }, 'wrong-command'],
+    [
+      'the right binary with the wrong args',
+      { command: 'tenjin', args: ['mcp', '--x'] },
+      'wrong-command',
+    ],
+    ['no args at all', { command: 'tenjin' }, 'wrong-command'],
+    ['a bare command', { command: 'tenjin', args: ['mcp'] }, 'ok'],
+    ['an absolute install path', { command: '/opt/homebrew/bin/tenjin', args: ['mcp'] }, 'ok'],
+  ])('classifies %s', async (_label, entry, expected) => {
+    const { classifyMcpEntry } = await import('./doctor');
+    expect(classifyMcpEntry(entry)).toBe(expected);
   });
 
   it.each([
-    ['a file that is not JSON', 'not json'],
-    ['a file naming another server', '{"mcpServers":{"someone-else":{}}}'],
-    ['a file with no servers block', '{}'],
-  ])('reads %s as not registered', async (_label, body) => {
+    ['an empty entry', { mcpServers: { x402: {} } }],
+    ['another binary', { mcpServers: { x402: { command: 'node', args: ['other.js'] } } }],
+  ])('fails with the named reason on %s', async (_label, file) => {
     const fs = await import('node:fs/promises');
     const cwd = join(home, 'project');
     await fs.mkdir(cwd, { recursive: true });
     await runRouterInstall({ project: true }, ctx(), deps({ cwd }));
-    await fs.writeFile(join(cwd, '.mcp.json'), body);
-    expect((await mcpDetail(cwd)).status).toBe('fail');
+    await fs.writeFile(join(cwd, '.mcp.json'), JSON.stringify(file));
+    const check = await mcpDetail(home, cwd, ctx);
+    expect(check.status).toBe('fail');
+    expect(check.detail).toContain('registered but not `tenjin mcp`');
+  });
+
+  it('passes and says what it runs on the correct entry', async () => {
+    const fs = await import('node:fs/promises');
+    const cwd = join(home, 'project');
+    await fs.mkdir(cwd, { recursive: true });
+    await runRouterInstall({ project: true }, ctx(), deps({ cwd }));
+    await fs.writeFile(
+      join(cwd, '.mcp.json'),
+      JSON.stringify({ mcpServers: { x402: { command: 'tenjin', args: ['mcp'] } } }),
+    );
+    const check = await mcpDetail(home, cwd, ctx);
+    expect(check.status).toBe('ok');
+    expect(check.detail).toContain('`tenjin mcp`');
   });
 });

@@ -107,3 +107,68 @@ describe('the router MCP server', () => {
     await expect(server.close()).resolves.toBeUndefined();
   });
 });
+
+describe('the base URL the MCP server routes against', () => {
+  it('honours TENJIN_BASE_URL over the config file, like every other command', async () => {
+    const fs = await import('node:fs/promises');
+    await fs.writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({
+        bazaarPay: true,
+        maxAutoSpend: '100000',
+        baseUrl: 'https://file.example.test',
+      }),
+    );
+    const seen: string[] = [];
+    const fetchImpl = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      seen.push(String(input));
+      if (!new Headers(init?.headers ?? {}).has('payment-signature')) {
+        return new Response('{}', {
+          status: 402,
+          headers: {
+            'content-type': 'application/json',
+            'PAYMENT-REQUIRED': buildPaymentRequired({ amount: '1000' }).header,
+          },
+        });
+      }
+      return new Response(
+        JSON.stringify({
+          schemaVersion: 1,
+          routerVersion: 'v',
+          requestId: 'r',
+          decision: { action: 'native', reason: 'covered' },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    }) as typeof fetch;
+
+    const prior = process.env.TENJIN_BASE_URL;
+    process.env.TENJIN_BASE_URL = 'https://env.example.test';
+    try {
+      const server = buildRouterMcpServer({
+        dataDir: dir,
+        handlerDeps: {
+          signer: await testWalletProvider().getSigner(),
+          authorizer: authorizer(),
+          cache: new RequirementsCache(),
+          fetchImpl,
+          payDeps: { fetchImpl },
+        },
+      });
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      const client = new Client({ name: 'test', version: '0.0.0' });
+      await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+      try {
+        await client.callTool({ name: 'request', arguments: { query: 'anything' } });
+      } finally {
+        await client.close();
+        await server.close();
+      }
+    } finally {
+      if (prior === undefined) delete process.env.TENJIN_BASE_URL;
+      else process.env.TENJIN_BASE_URL = prior;
+    }
+    expect(seen[0]).toBe('https://env.example.test/api/x402-router');
+    expect(seen.every((u) => !u.startsWith('https://file.example.test'))).toBe(true);
+  });
+});

@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { CliError } from '../lib/errors';
@@ -50,8 +51,15 @@ export interface RouterDoctorDeps {
   env?: NodeJS.ProcessEnv;
   which?: (bin: string) => boolean;
   fetchImpl?: typeof fetch;
-  /** Reads back the MCP registration; tests inject it so nothing is spawned. */
+  /** The harness's own read-back, for a user-scope registration this build
+   *  cannot find on disk; tests inject it so nothing is spawned. */
   readMcp?: (opts: { scope: 'user' | 'project'; cwd: string }) => Promise<boolean>;
+  /** Reads the registration entry from the file the scope writes. */
+  readMcpEntry?: (
+    scope: 'user' | 'project',
+    cwd: string,
+    home: string,
+  ) => Promise<{ found: boolean; state: McpEntryState }>;
   /** Node's own version, for the floor check. */
   nodeVersion?: string;
 }
@@ -74,7 +82,15 @@ export async function runRouterDoctor(
   });
   const checks: RouterCheck[] = [nodeCheck(deps.nodeVersion ?? process.version)];
   checks.push(await hooksCheck(settingsPath, ctx.dataDir));
-  checks.push(await mcpCheck(deps, env, deps.project === true, deps.cwd ?? process.cwd()));
+  checks.push(
+    await mcpCheck(
+      deps,
+      env,
+      deps.project === true,
+      deps.cwd ?? process.cwd(),
+      deps.homeDir ?? homedir(),
+    ),
+  );
   checks.push(spendCheck(settings.policy.maxAutoSpendAtomic, settings.policy.sessionBudgetAtomic));
   checks.push(...(await walletCheck(ctx)));
   checks.push(await routerCheck(settings.baseUrl, ctx.flags.timeout, deps.fetchImpl));
@@ -172,73 +188,104 @@ async function mcpCheck(
   env: NodeJS.ProcessEnv,
   project: boolean,
   cwd: string,
+  home: string,
 ): Promise<RouterCheck> {
-  // Read back in the SAME scope the install wrote, or a project install reads
-  // as unregistered and a user one as registered when neither is true.
   const scope = mcpScope(project);
   const add = mcpAddCommand(project);
-  const which = deps.which ?? ((bin: string) => onPath(bin, env));
-  if (!which('claude')) {
+  const where = scope === 'project' ? "this project's .mcp.json" : '~/.claude.json';
+  const { found, state } = await (deps.readMcpEntry ?? readMcpEntry)(scope, cwd, home);
+
+  if (state === 'ok') {
     return {
       name: 'mcp',
-      status: 'warn',
-      required: false,
-      detail: 'the `claude` binary is not on PATH, so the registration cannot be read back',
-      fix: `Register it yourself: ${add}`,
+      status: 'ok',
+      required: true,
+      detail: `${MCP_SERVER_NAME} registered (${scope} scope), running \`tenjin mcp\``,
     };
   }
-  const registered = await (deps.readMcp ?? claudeHasServer)({ scope, cwd }).catch(() => false);
-  return registered
-    ? {
-        name: 'mcp',
-        status: 'ok',
-        required: true,
-        detail: `${MCP_SERVER_NAME} registered (${scope} scope)`,
+  if (state === 'wrong-command') {
+    return {
+      name: 'mcp',
+      status: 'fail',
+      required: true,
+      detail: `${MCP_SERVER_NAME} registered but not \`tenjin mcp\`: the entry in ${where} launches something else, so the request tool is not there`,
+      fix: `Remove it and re-run \`tenjin install\`${project ? ' --project' : ''}, or: ${add}`,
+    };
+  }
+  // Absent. On USER scope the file may simply not be where this build looks,
+  // so the harness's own answer is worth asking before calling it missing.
+  if (scope === 'user') {
+    const which = deps.which ?? ((bin: string) => onPath(bin, env));
+    if (which('claude')) {
+      const seen = await (deps.readMcp ?? claudeHasServer)({ scope, cwd }).catch(() => false);
+      if (seen) {
+        return {
+          name: 'mcp',
+          status: 'warn',
+          required: false,
+          detail: `${MCP_SERVER_NAME} is registered somewhere this check cannot read, so what it launches was not verified`,
+          fix: `Re-run \`tenjin install\` to write a registration this build can check, or: ${add}`,
+        };
       }
-    : {
-        name: 'mcp',
-        status: 'fail',
-        required: true,
-        detail:
-          scope === 'project'
-            ? `${MCP_SERVER_NAME} is not in this project's .mcp.json, so there is no request tool here`
-            : `${MCP_SERVER_NAME} is not registered at user scope, so there is no request tool`,
-        fix: `Run \`tenjin install\`, or: ${add}`,
-      };
-}
-
-/**
- * Is the server registered AT THIS SCOPE?
- *
- * `claude mcp get` resolves across scopes, so run inside a project it answers
- * yes for a server inherited from the user's own file. Asked about a project
- * install that is what "registered" would have meant: the project's `.mcp.json`
- * could be missing entirely and doctor would pass, hiding exactly the half-done
- * install it exists to find. Project scope is therefore read from the file that
- * scope writes, which needs no subprocess and cannot inherit; user scope keeps
- * the read-back, where inheritance is not a question.
- */
-async function claudeHasServer(opts: { scope: 'user' | 'project'; cwd: string }): Promise<boolean> {
-  if (opts.scope === 'project') {
-    const raw = await readFile(join(opts.cwd, '.mcp.json'), 'utf8').catch(() => null);
-    if (raw === null) return false;
-    try {
-      const parsed: unknown = JSON.parse(raw);
-      const servers = (parsed as { mcpServers?: unknown } | null)?.mcpServers;
-      return (
-        servers !== null &&
-        typeof servers === 'object' &&
-        Object.hasOwn(servers as object, MCP_SERVER_NAME)
-      );
-    } catch {
-      return false;
     }
   }
+  return {
+    name: 'mcp',
+    status: 'fail',
+    required: true,
+    detail: found
+      ? `${MCP_SERVER_NAME} is not in ${where}, so there is no request tool`
+      : `${where} does not exist, so ${MCP_SERVER_NAME} is not registered`,
+    fix: `Run \`tenjin install\`${project ? ' --project' : ''}, or: ${add}`,
+  };
+}
+
+/** The harness's own answer, for a user-scope registration this build cannot
+ *  find on disk. It resolves across scopes, which is why it is a last resort
+ *  and only ever downgrades the verdict to a warn. */
+async function claudeHasServer(opts: { scope: 'user' | 'project'; cwd: string }): Promise<boolean> {
   const { stdout } = await exec('claude', ['mcp', 'get', MCP_SERVER_NAME], {
     timeout: 15_000,
     cwd: opts.cwd,
   });
   return stdout.includes(MCP_SERVER_NAME) && !/no mcp server/i.test(stdout);
+}
+
+export type McpEntryState = 'ok' | 'absent' | 'wrong-command';
+
+export function classifyMcpEntry(entry: unknown): McpEntryState {
+  if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) return 'absent';
+  const { command, args } = entry as { command?: unknown; args?: unknown };
+  if (typeof command !== 'string' || command.length === 0) return 'wrong-command';
+  // The basename, so `/opt/homebrew/bin/tenjin` and a bare `tenjin` both pass.
+  const binary = command.split(/[\\/]/).pop();
+  const runsRouter =
+    binary === 'tenjin' && Array.isArray(args) && args.length === 1 && args[0] === 'mcp';
+  return runsRouter ? 'ok' : 'wrong-command';
+}
+
+/** The file each scope writes: the project's own `.mcp.json`, or the user's
+ *  `~/.claude.json`. Neither can inherit from the other. */
+async function readMcpEntry(
+  scope: 'user' | 'project',
+  cwd: string,
+  home: string,
+): Promise<{ found: boolean; state: McpEntryState }> {
+  const path = scope === 'project' ? join(cwd, '.mcp.json') : join(home, '.claude.json');
+  const raw = await readFile(path, 'utf8').catch(() => null);
+  if (raw === null) return { found: false, state: 'absent' };
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    const servers = (parsed as { mcpServers?: unknown } | null)?.mcpServers;
+    if (servers === null || typeof servers !== 'object' || Array.isArray(servers)) {
+      return { found: true, state: 'absent' };
+    }
+    const entry = (servers as Record<string, unknown>)[MCP_SERVER_NAME];
+    if (entry === undefined) return { found: true, state: 'absent' };
+    return { found: true, state: classifyMcpEntry(entry) };
+  } catch {
+    return { found: true, state: 'absent' };
+  }
 }
 
 function spendCheck(maxAutoSpendAtomic: bigint, sessionBudgetAtomic: bigint): RouterCheck {

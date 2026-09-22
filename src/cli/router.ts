@@ -27,7 +27,12 @@ export function registerRouter(reg: Registration): void {
       .action(async function (this: Command) {
         const ctx = buildContext(this);
         const { runHookCommand } = await import('../router/hook-command');
-        await runHookCommand(name, io, { dataDir: ctx.dataDir });
+        // The flag rides too, so `--base-url` reaches the gate the same way it
+        // reaches every other command; the env layer is read inside.
+        await runHookCommand(name, io, {
+          dataDir: ctx.dataDir,
+          ...(ctx.flags.baseUrl !== undefined ? { baseUrl: ctx.flags.baseUrl } : {}),
+        });
       });
   }
 

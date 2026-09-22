@@ -79,6 +79,9 @@ export function buildGateBody(request: GateRequest): Record<string, unknown> {
 export interface GateDeps {
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
+  /** Called with WHY the answer was null. The callers are silent by contract,
+   *  so this is the only place a dead gate can say anything at all. */
+  onFailure?: (detail: string) => void;
 }
 
 /**
@@ -102,16 +105,23 @@ export async function askGate(
       signal: controller.signal,
       redirect: 'error',
     });
-    if (!response.ok) return null;
+    if (!response.ok) {
+      deps.onFailure?.(`answered ${response.status}`);
+      return null;
+    }
     const parsed = GateResponseSchema.safeParse(await response.json());
-    if (!parsed.success) return null;
+    if (!parsed.success) {
+      deps.onFailure?.(`answered ${response.status} with a body this build cannot read`);
+      return null;
+    }
     const { action, routerVersion, hint } = parsed.data;
     return {
       action,
       routerVersion,
       ...(hint !== undefined && isWellFormedHint(hint) ? { hint } : {}),
     };
-  } catch {
+  } catch (err) {
+    deps.onFailure?.(`could not be reached (${err instanceof Error ? err.message : String(err)})`);
     return null;
   } finally {
     clearTimeout(timer);

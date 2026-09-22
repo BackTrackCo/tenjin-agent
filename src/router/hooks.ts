@@ -1,8 +1,8 @@
 import { z } from 'zod';
-import { CONFIG_DEFAULTS, loadRawConfig } from '../lib/config';
+import { loadRawConfig, resolveSettings } from '../lib/config';
 import type { PartialConfig } from '../lib/config';
 import { buildPromptPacket, fit, packetForText, type Packet, type PendingCall } from './context';
-import { askGate, type GateDeps } from './gate';
+import { askGate, GATE_PATH, type GateDeps } from './gate';
 import { readSessionPacket, writeSessionPacket } from './session-file';
 
 /**
@@ -50,15 +50,33 @@ export function promptSkipReason(prompt: string): PromptSkip | null {
 
 export interface HookDeps extends GateDeps {
   dataDir: string;
-  /** Overrides the configured base URL; tests point it at a local stub. */
+  /** Overrides the resolved base URL entirely; tests point it at a local stub. */
   baseUrl?: string;
+  /** The environment the base URL precedence reads `TENJIN_BASE_URL` from. */
+  env?: NodeJS.ProcessEnv;
   now?: () => number;
+  /**
+   * Where a silent gate says why. The harness keeps hook stderr in its log, so
+   * one line there is the difference between "the feature is off" and "the
+   * gate answered 401 at this URL". Never stdout: that is the harness's
+   * protocol channel.
+   */
+  warn?: (line: string) => void;
 }
 
+/**
+ * The CLI's ONE precedence, not a second copy of it: flag, then
+ * `TENJIN_BASE_URL`, then the config file, then the production default. The
+ * hook read the file alone, so a session pointed somewhere by the environment
+ * had its prompts gated against whatever the file said instead; on a machine
+ * whose file named a protected deployment that was a 401, and a 401 is a null
+ * answer, and a null answer is silence. `resolveSettings` is the same function
+ * `tenjin config` reports from, so the two can no longer disagree.
+ */
 async function resolveBaseUrl(deps: HookDeps): Promise<string> {
   if (deps.baseUrl !== undefined) return deps.baseUrl;
   const config: PartialConfig = await loadRawConfig(deps.dataDir).catch(() => ({}));
-  return config.baseUrl ?? CONFIG_DEFAULTS.baseUrl;
+  return resolveSettings({ config, flags: {}, env: deps.env ?? process.env }).baseUrl.value;
 }
 
 export interface PromptHookOutcome {
@@ -86,7 +104,12 @@ export async function runPromptHook(raw: unknown, deps: HookDeps): Promise<Promp
   const skipped = promptSkipReason(event.prompt);
   if (skipped !== null) return { response: null, skipped, packetWritten: written };
 
-  const answer = await askGate(await resolveBaseUrl(deps), { source: 'prompt', packet }, deps);
+  const baseUrl = await resolveBaseUrl(deps);
+  const answer = await askGate(
+    baseUrl,
+    { source: 'prompt', packet },
+    withDiagnostic(deps, baseUrl),
+  );
   if (answer === null) return { response: null, packetWritten: written };
   if (answer.action !== 'execute' || answer.hint === undefined) {
     return { response: null, gateAction: answer.action, packetWritten: written };
@@ -100,6 +123,19 @@ export async function runPromptHook(raw: unknown, deps: HookDeps): Promise<Promp
     },
     gateAction: answer.action,
     packetWritten: written,
+  };
+}
+
+/**
+ * The gate's failures are silent by contract, and silence is indistinguishable
+ * from "no capability fits". This puts the reason on stderr where the harness
+ * logs it, and changes nothing a caller sees.
+ */
+function withDiagnostic(deps: HookDeps, baseUrl: string): HookDeps {
+  const warn = deps.warn ?? ((line: string) => process.stderr.write(`${line}\n`));
+  return {
+    ...deps,
+    onFailure: (detail) => warn(`tenjin hook: gate at ${baseUrl}${GATE_PATH} ${detail}`),
   };
 }
 
@@ -145,7 +181,12 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
     ...(prior ?? packetForText('query' in pending ? pending.query : pending.url)),
     pendingCall: pending,
   });
-  const answer = await askGate(await resolveBaseUrl(deps), { source: 'native', packet }, deps);
+  const baseUrl = await resolveBaseUrl(deps);
+  const answer = await askGate(
+    baseUrl,
+    { source: 'native', packet },
+    withDiagnostic(deps, baseUrl),
+  );
   if (answer === null || answer.action !== 'execute') {
     return {
       response: null,
