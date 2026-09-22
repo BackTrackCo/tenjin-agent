@@ -172,3 +172,42 @@ describe('the base URL the MCP server routes against', () => {
     expect(seen.every((u) => !u.startsWith('https://file.example.test'))).toBe(true);
   });
 });
+
+/**
+ * The router BINDS the query text and a provider parses it, so a paraphrase is
+ * a failed paid call: the live smoke lost a Wolfram turn when the model sent
+ * "Evaluate the definite integral ∫₀¹ ..." for a user who wrote "Evaluate ∫₀¹
+ * ...", and Wolfram returned zero pods and billed for it.
+ */
+describe('the tool tells the model not to rephrase', () => {
+  it('puts the verbatim rule first, in the instructions and on the parameter', async () => {
+    const { VERBATIM_RULE } = await import('./mcp');
+    const server = buildRouterMcpServer({
+      dataDir: dir,
+      handlerDeps: {
+        signer: await testWalletProvider().getSigner(),
+        authorizer: authorizer(),
+        cache: new RequirementsCache(),
+      },
+    });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: 'test', version: '0.0.0' });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const tools = await client.listTools();
+      const request = tools.tools.find((t) => t.name === 'request')!;
+      expect(request.description?.startsWith(VERBATIM_RULE)).toBe(true);
+      const schema = request.inputSchema as unknown as {
+        properties: { query: { description: string } };
+      };
+      expect(schema.properties.query.description).toContain(VERBATIM_RULE);
+      // The rule names the failure it exists to prevent.
+      for (const phrase of ['verbatim', 'do not rephrase', 'Evaluate the definite integral']) {
+        expect(VERBATIM_RULE).toContain(phrase);
+      }
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+});
