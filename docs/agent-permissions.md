@@ -171,20 +171,42 @@ tenjin config set sessionBudget 2.00
 The allowlist line itself never raises a spend cap. That is true, and it is not the
 same as saying the caps stop an allowlisted `buy`.
 
-## Opt-in: `tenjin pay`
+## The router's one rule: `mcp__x402__request`
 
-The generic x402 payment verb is its own opt-in, with everything above applying
-unchanged:
+`tenjin install` writes exactly one rule, and it is the only thing the router
+product adds to your allowlist:
 
 ```
-Bash(tenjin pay:*)
+mcp__x402__request
 ```
 
-Two differences from `buy`. The destination set is wider: the configured base
-URL always, and with `bazaarPay` on, any registry-listed foreign seller. And
-there is no library dedupe: `pay` has no owned-content re-read, so a looping
-agent pays on every call, bounded only by `maxAutoSpend`, `sessionBudget`, and
-`--max-price`. Leave `bazaarPay` off unless you mean it.
+It clears the tool, never a price. Every payment that tool makes goes through
+the same gate as `tenjin pay`: `maxAutoSpend` is the ceiling on one call,
+`sessionBudget` is the rolling 24 hour ceiling on all of them, `confirm`
+decides when a human is asked, and a reservation in `spend.json` counts the
+money the moment an authorization is built rather than when it settles. The
+tool cannot answer a confirmation, so under `confirm always` it returns
+`needs_approval` with the amount and the command that changes it, and pays
+nothing.
+
+Three more bounds apply to a router payment and to nothing else:
+
+- The paid decision carries the terms it was priced against. A live 402 that
+  names another network, another asset, or a higher amount is refused before a
+  signature exists.
+- The decision's arguments are validated against the schema the decision itself
+  carries, and its destination has to resolve to a public address.
+- An identical request already in flight in the same turn is denied rather than
+  paid twice.
+
+A compromised backend can therefore name any origin it likes, and spend at most
+one `maxAutoSpend` per call inside `sessionBudget`. Set both to numbers you
+would not mind losing.
+
+`Bash(tenjin pay:*)` is a separate opt-in, for an endpoint you name yourself. It
+runs the same gate, and outside the configured base URL it pays only what a
+configured registry lists with terms the live 402 does not exceed, which is why
+`bazaarPay` stays off unless you mean it.
 
 ## Never recommended
 

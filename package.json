@@ -3,7 +3,7 @@
   "version": "0.1.0-alpha.15",
   "mcpName": "blog.tenjin/tenjin",
   "type": "module",
-  "description": "Tenjin agent CLI for the x402 knowledge marketplace.",
+  "description": "x402 router for coding agents: one paid decision per lookup, a local wallet that pays each provider per call in USDC on Base.",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/BackTrackCo/tenjin-agent.git"

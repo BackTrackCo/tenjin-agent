@@ -193,7 +193,9 @@ export function buildProgram(
 
   program
     .name('tenjin')
-    .description('Tenjin agent CLI for the x402 knowledge marketplace.')
+    .description(
+      'x402 router for coding agents: one paid decision per lookup, a local wallet that pays each provider per call in USDC on Base.',
+    )
     // Everything the root itself takes prints in one block, so the five command
     // groups below are the only other lists on `tenjin --help`.
     .optionsGroup('Global options:')
