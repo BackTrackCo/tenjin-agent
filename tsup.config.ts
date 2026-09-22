@@ -55,10 +55,6 @@ export default defineConfig([
     entry: {
       'tenjin-daemon': 'src/daemon/main.ts',
       'tenjin-shim': 'src/hooks/shim-main.ts',
-      // The keystore KDF worker (src/lib/wallet/keystore-kdf.ts) belongs here
-      // for the same reason: `new Worker(url)` loads one file with no sibling
-      // chunks beside it.
-      'wallet-kdf-worker': 'src/lib/wallet/keystore-kdf-worker.ts',
     },
     format: ['esm'],
     target: 'node22',
@@ -85,6 +81,28 @@ export default defineConfig([
     entry: { 'tenjin-vitest-reporter': 'src/hooks/failure/vitest-reporter.ts' },
     format: ['esm'],
     target: 'node20',
+    platform: 'node',
+    removeNodeProtocol: false,
+    splitting: false,
+    sourcemap: false,
+    minify: false,
+    clean: false,
+    dts: false,
+    outDir: 'dist',
+    outExtension: () => ({ js: '.mjs' }),
+  },
+  // The keystore KDF worker (src/lib/wallet/keystore-kdf.ts): a fourth
+  // single-file bundle, loaded by `new Worker(url)` from the main dist with no
+  // sibling chunks beside it. Its OWN config rather than an extra entry beside
+  // the daemon's, because tsup carries the daemon block's banner across a
+  // second build in the same process and the smoke test's reporter bundle
+  // picked it up. No banner here either: this file imports `ox/Keystore` and
+  // node builtins, and a commander shim it never uses has no business in a
+  // worker thread.
+  {
+    entry: { 'wallet-kdf-worker': 'src/lib/wallet/keystore-kdf-worker.ts' },
+    format: ['esm'],
+    target: 'node22',
     platform: 'node',
     removeNodeProtocol: false,
     splitting: false,
