@@ -569,3 +569,69 @@ describe('--project scopes the MCP registration too', () => {
     expect(checks.checks.find((c) => c.name === 'mcp')?.detail).toContain('project scope');
   });
 });
+
+describe('doctor verifies the scope it was asked about', () => {
+  const probe402 = (async () =>
+    new Response('{}', {
+      status: 402,
+      headers: { 'content-type': 'application/json' },
+    })) as typeof fetch;
+
+  async function mcpDetail(cwd: string): Promise<{ status: string; detail: string }> {
+    const { runRouterDoctor } = await import('./doctor');
+    const out = await runRouterDoctor(ctx(), {
+      homeDir: home,
+      cwd,
+      project: true,
+      env: {},
+      which: () => true,
+      fetchImpl: probe402,
+    }).catch((e: unknown) => e);
+    const checks =
+      out instanceof CliError
+        ? (out.details as { checks: { name: string; status: string; detail: string }[] })
+        : (out as { data: { checks: { name: string; status: string; detail: string }[] } }).data;
+    return checks.checks.find((c) => c.name === 'mcp')!;
+  }
+
+  it('does not count an inherited user-scope server as a project registration', async () => {
+    const fs = await import('node:fs/promises');
+    const cwd = join(home, 'project');
+    await fs.mkdir(cwd, { recursive: true });
+    await runRouterInstall({ project: true }, ctx(), deps({ cwd }));
+    // The user's own file HAS the server; the project's does not. `claude mcp
+    // get` resolves across scopes and would answer yes here, which would pass
+    // a project install whose `.mcp.json` was never written.
+    await fs.writeFile(join(home, '.claude.json'), '{"mcpServers":{"x402":{}}}\n');
+    const check = await mcpDetail(cwd);
+    expect(check.status).toBe('fail');
+    expect(check.detail).toContain("project's .mcp.json");
+  });
+
+  it('passes once the project file actually names it', async () => {
+    const fs = await import('node:fs/promises');
+    const cwd = join(home, 'project');
+    await fs.mkdir(cwd, { recursive: true });
+    await runRouterInstall({ project: true }, ctx(), deps({ cwd }));
+    await fs.writeFile(
+      join(cwd, '.mcp.json'),
+      JSON.stringify({ mcpServers: { x402: { command: 'tenjin', args: ['mcp'] } } }),
+    );
+    const check = await mcpDetail(cwd);
+    expect(check.status).toBe('ok');
+    expect(check.detail).toContain('project scope');
+  });
+
+  it.each([
+    ['a file that is not JSON', 'not json'],
+    ['a file naming another server', '{"mcpServers":{"someone-else":{}}}'],
+    ['a file with no servers block', '{}'],
+  ])('reads %s as not registered', async (_label, body) => {
+    const fs = await import('node:fs/promises');
+    const cwd = join(home, 'project');
+    await fs.mkdir(cwd, { recursive: true });
+    await runRouterInstall({ project: true }, ctx(), deps({ cwd }));
+    await fs.writeFile(join(cwd, '.mcp.json'), body);
+    expect((await mcpDetail(cwd)).status).toBe('fail');
+  });
+});

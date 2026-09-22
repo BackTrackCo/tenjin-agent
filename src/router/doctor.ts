@@ -1,4 +1,6 @@
 import { execFile } from 'node:child_process';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { CliError } from '../lib/errors';
 import { inspectHooksFile, ownsHookEntry } from '../lib/harness-hooks';
@@ -197,17 +199,46 @@ async function mcpCheck(
         name: 'mcp',
         status: 'fail',
         required: true,
-        detail: `${MCP_SERVER_NAME} is not registered at ${scope} scope, so there is no request tool`,
+        detail:
+          scope === 'project'
+            ? `${MCP_SERVER_NAME} is not in this project's .mcp.json, so there is no request tool here`
+            : `${MCP_SERVER_NAME} is not registered at user scope, so there is no request tool`,
         fix: `Run \`tenjin install\`, or: ${add}`,
       };
 }
 
+/**
+ * Is the server registered AT THIS SCOPE?
+ *
+ * `claude mcp get` resolves across scopes, so run inside a project it answers
+ * yes for a server inherited from the user's own file. Asked about a project
+ * install that is what "registered" would have meant: the project's `.mcp.json`
+ * could be missing entirely and doctor would pass, hiding exactly the half-done
+ * install it exists to find. Project scope is therefore read from the file that
+ * scope writes, which needs no subprocess and cannot inherit; user scope keeps
+ * the read-back, where inheritance is not a question.
+ */
 async function claudeHasServer(opts: { scope: 'user' | 'project'; cwd: string }): Promise<boolean> {
+  if (opts.scope === 'project') {
+    const raw = await readFile(join(opts.cwd, '.mcp.json'), 'utf8').catch(() => null);
+    if (raw === null) return false;
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      const servers = (parsed as { mcpServers?: unknown } | null)?.mcpServers;
+      return (
+        servers !== null &&
+        typeof servers === 'object' &&
+        Object.hasOwn(servers as object, MCP_SERVER_NAME)
+      );
+    } catch {
+      return false;
+    }
+  }
   const { stdout } = await exec('claude', ['mcp', 'get', MCP_SERVER_NAME], {
     timeout: 15_000,
     cwd: opts.cwd,
   });
-  return stdout.includes(MCP_SERVER_NAME);
+  return stdout.includes(MCP_SERVER_NAME) && !/no mcp server/i.test(stdout);
 }
 
 function spendCheck(maxAutoSpendAtomic: bigint, sessionBudgetAtomic: bigint): RouterCheck {
