@@ -937,3 +937,71 @@ describe('runPay, the shared request gate', () => {
     expect(authorizer.commit).toHaveBeenCalled();
   });
 });
+
+// The success rule applies to every delivery this command makes, not only the
+// paid one: a wallet that is already entitled would otherwise be handed an
+// error body as a fulfilled result.
+describe('runPay, the success rule on every delivery', () => {
+  const SCHEMA = {
+    type: 'object',
+    properties: { success: { const: true } },
+    required: ['success'],
+  };
+
+  it('refuses a free 2xx whose body fails the rule, paying nothing', async () => {
+    const { fetch, calls } = scriptedFetch([json(200, { success: false })]);
+    const err = await runPay({ url: TENJIN_URL, resultSchema: SCHEMA }, makeCtx(), {
+      ...PUBLIC_DNS,
+      fetchImpl: fetch,
+    }).catch((e: unknown) => e);
+    expect((err as CliError).code).toBe('CONTRACT_MISMATCH');
+    expect((err as CliError).details).toMatchObject({ paid: false });
+    expect(calls).toHaveLength(1);
+  });
+
+  it('refuses an entitled 2xx whose body fails the rule', async () => {
+    const siwx = (): Partial<PaymentRequired> => ({
+      extensions: { 'sign-in-with-x': { info: { domain: new URL(TENJIN_URL).host } } },
+    });
+    const { fetch } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': buildPaymentRequired({}, siwx()).header }),
+      json(200, { success: false }),
+    ]);
+    const authorizer = fakeAuthorizer('allow');
+    const err = await runPay({ url: TENJIN_URL, resultSchema: SCHEMA }, makeCtx(), {
+      ...PUBLIC_DNS,
+      fetchImpl: fetch,
+      provider: testWalletProvider(),
+      authorizer,
+    }).catch((e: unknown) => e);
+    expect((err as CliError).code).toBe('CONTRACT_MISMATCH');
+    expect(authorizer.commit).not.toHaveBeenCalled();
+  });
+
+  it('delivers a free 2xx that satisfies the rule', async () => {
+    const { fetch } = scriptedFetch([json(200, { success: true })]);
+    const result = await runPay({ url: TENJIN_URL, resultSchema: SCHEMA }, makeCtx(), {
+      ...PUBLIC_DNS,
+      fetchImpl: fetch,
+    });
+    expect((result.data as { paid: boolean }).paid).toBe(false);
+  });
+
+  it('carries the transmitted amount on a paid failure, with settlement unknown', async () => {
+    const fixture = buildPaymentRequired();
+    const { fetch } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': fixture.header }),
+      json(500, { error: 'provider down' }),
+    ]);
+    const err = await runPay({ url: TENJIN_URL }, makeCtx(), {
+      ...PUBLIC_DNS,
+      fetchImpl: fetch,
+      provider: testWalletProvider(),
+      authorizer: fakeAuthorizer('allow'),
+    }).catch((e: unknown) => e);
+    expect((err as CliError).details).toMatchObject({
+      amountAtomic: '100000',
+      settlement: 'unknown',
+    });
+  });
+});

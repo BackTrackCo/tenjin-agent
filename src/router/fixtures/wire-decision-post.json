@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "routerVersion": "2026-09-22.1",
+  "requestId": "0199aaaa-bbbb-7ccc-8ddd-ffffffffffff",
+  "decision": {
+    "action": "execute",
+    "capabilityId": "vaaya-scrape",
+    "reason": "Reading the exact page fits this request.",
+    "contract": {
+      "method": "POST",
+      "url": "https://vaaya.ai/api/run/firecrawl/scrape",
+      "arguments": { "url": "https://example.test/spec", "formats": "markdown" },
+      "argumentSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": { "url": { "type": "string" }, "formats": { "type": "string" } },
+        "required": ["url"],
+        "additionalProperties": false
+      },
+      "advertised": {
+        "network": "eip155:8453",
+        "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "maxAmountAtomic": "10000"
+      },
+      "registryListed": true,
+      "request": {
+        "url": "https://vaaya.ai/api/run/firecrawl/scrape",
+        "method": "POST",
+        "headers": { "accept": "application/json", "content-type": "application/json" },
+        "body": "{\"url\":\"https://example.test/spec\",\"formats\":\"markdown\"}"
+      }
+    }
+  },
+  "jev": { "calls": 3, "latencyMs": 1400 }
+}

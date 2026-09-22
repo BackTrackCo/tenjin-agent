@@ -55,13 +55,9 @@ Learn more:
       });
     });
 
-  leaf(SETUP, 'doctor', 'check the local environment and API reachability')
+  leaf(SETUP, 'doctor', 'check this machine can run a lookup')
     .description(
-      'Check this machine: config, wallet, skills, hook wiring, the daemon, and Tenjin API reachability. Prints one line per check with a fix for each failure, and exits nonzero if any check fails.',
-    )
-    .option(
-      '--prune',
-      'run the loop ledger through its retention rule and delete the retired state store, instead of the checks',
+      'Check the six things a lookup needs: the Node floor, the hook entries and the permission rule, the MCP registration, the spend limits, the wallet, and the router endpoint answering its 402. It prints one line per check with a fix for each failure, and exits nonzero if a required one fails.',
     )
     .addHelpText(
       'after',
@@ -73,12 +69,8 @@ Examples:
     )
     .action(async function (this: Command) {
       await runCommand('doctor', this, async (ctx) => {
-        if (this.opts().prune === true) {
-          const { runDoctorPrune } = await import('../commands/doctor');
-          return runDoctorPrune(ctx);
-        }
-        const { runDoctor } = await import('../commands/doctor');
-        return runDoctor(ctx);
+        const { runRouterDoctor } = await import('../router/doctor');
+        return runRouterDoctor(ctx);
       });
     });
 

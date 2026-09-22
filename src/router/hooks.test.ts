@@ -194,9 +194,20 @@ describe('the native hook', () => {
       fetchImpl,
     });
     expect(out).toMatchObject({ response: null, decision: 'allow' });
+    // INSIDE the packet: the server reads the gate body as a strict object of
+    // `schemaVersion`, `source` and `packet`, so a pending call beside it 400s
+    // and the redirect dies silently. `wire.test.ts` pins the bytes.
     expect(calls[0]).toMatchObject({
-      body: { source: 'native', pendingCall: { tool: 'WebSearch', query: 'weather in Lisbon' } },
+      body: {
+        source: 'native',
+        packet: { pendingCall: { tool: 'WebSearch', query: 'weather in Lisbon' } },
+      },
     });
+    expect(Object.keys((calls[0] as { body: object }).body).sort()).toEqual([
+      'packet',
+      'schemaVersion',
+      'source',
+    ]);
   });
 
   it('denies with the redirect when the gate says execute', async () => {
@@ -207,13 +218,14 @@ describe('the native hook', () => {
       fetchImpl,
     });
     expect(out.decision).toBe('deny');
-    expect(out.response).toEqual({
-      hookSpecificOutput: {
-        hookEventName: 'PreToolUse',
-        permissionDecision: 'deny',
-        permissionDecisionReason: REDIRECT_REASON,
-      },
-    });
+    // The gate's own line when it sent one, and the subject either way: a
+    // WebFetch carries no query, so a bare "call request" leaves the model
+    // nothing to carry across.
+    const reason = (out.response as { hookSpecificOutput: { permissionDecisionReason: string } })
+      .hookSpecificOutput.permissionDecisionReason;
+    expect(reason).toContain(HINT);
+    expect(reason).toContain('Query: https://example.com/a');
+    expect(REDIRECT_REASON).toContain('Call request');
   });
 
   it('allows on every gate failure', async () => {

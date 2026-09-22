@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { CONFIG_DEFAULTS, loadRawConfig } from '../lib/config';
 import type { PartialConfig } from '../lib/config';
-import { buildPromptPacket, type Packet, type PendingCall } from './context';
+import { buildPromptPacket, packetForText, type Packet, type PendingCall } from './context';
 import { askGate, type GateDeps } from './gate';
 import { readSessionPacket, writeSessionPacket } from './session-file';
 
@@ -106,6 +106,14 @@ export async function runPromptHook(raw: unknown, deps: HookDeps): Promise<Promp
 export const REDIRECT_REASON =
   'A paid capability fits this better. Call request with this query, alone, and wait for its result.';
 
+/** What the harness shows in place of the denied call: the gate's own line when
+ *  it sent one, and the subject either way, since a WebFetch carries no query
+ *  and a bare "call request" leaves the model nothing to carry across. */
+export function redirectReason(pending: PendingCall, hint: string | undefined): string {
+  const subject = 'query' in pending ? pending.query : pending.url;
+  return `${hint ?? REDIRECT_REASON}\nQuery: ${subject.slice(0, 500)}`;
+}
+
 export interface NativeHookOutcome {
   response: unknown | null;
   decision: 'allow' | 'deny';
@@ -125,18 +133,14 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
   const pending = pendingCallOf(event.tool_name, event.tool_input);
   if (pending === null) return { response: null, decision: 'allow' };
 
+  // No packet is the subagent and restarted-session path: the call's own query
+  // or URL becomes the current message, because an empty one is refused.
   const prior = await readSessionPacket(deps.dataDir, event.session_id, deps.now);
-  const packet: Packet = prior ?? {
-    current: { role: 'user', text: '' },
-    history: [],
-    literalUrls: [],
-    historyStatus: 'unavailable',
+  const packet: Packet = {
+    ...(prior ?? packetForText('query' in pending ? pending.query : pending.url)),
+    pendingCall: pending,
   };
-  const answer = await askGate(
-    await resolveBaseUrl(deps),
-    { source: 'native', packet, pendingCall: pending },
-    deps,
-  );
+  const answer = await askGate(await resolveBaseUrl(deps), { source: 'native', packet }, deps);
   if (answer === null || answer.action !== 'execute') {
     return {
       response: null,
@@ -149,7 +153,7 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
       hookSpecificOutput: {
         hookEventName: 'PreToolUse',
         permissionDecision: 'deny',
-        permissionDecisionReason: REDIRECT_REASON,
+        permissionDecisionReason: redirectReason(pending, answer.hint),
       },
     },
     decision: 'deny',
@@ -157,11 +161,13 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
   };
 }
 
-function pendingCallOf(tool: string, input: Record<string, unknown>): PendingCall | null {
-  if (tool === 'WebSearch') {
-    const query = input.query;
-    return typeof query === 'string' && query.length > 0 ? { tool, query } : null;
-  }
-  const url = input.url;
-  return typeof url === 'string' && url.length > 0 ? { tool, url } : null;
+function pendingCallOf(
+  tool: 'WebSearch' | 'WebFetch',
+  input: Record<string, unknown>,
+): PendingCall | null {
+  const value = tool === 'WebSearch' ? input.query : input.url;
+  if (typeof value !== 'string') return null;
+  const bounded = value.trim().slice(0, 4_000);
+  if (bounded.length === 0) return null;
+  return tool === 'WebSearch' ? { tool, query: bounded } : { tool, url: bounded };
 }

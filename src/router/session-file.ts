@@ -1,4 +1,4 @@
-import { readFile, readdir, rm, stat } from 'node:fs/promises';
+import { readFile, readdir, rm } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { z } from 'zod';
@@ -71,6 +71,9 @@ export async function readSessionPacket(
   }
 }
 
+/** Age by the STAMP the writer put in the file, the same value the reader
+ *  judges by: an mtime moves when a file is copied or touched, and pruning on
+ *  one clock while reading on another can delete a packet just written. */
 async function pruneExpired(dataDir: string, now: () => number): Promise<void> {
   const dir = routerStateDir(dataDir);
   let entries: string[];
@@ -84,8 +87,12 @@ async function pruneExpired(dataDir: string, now: () => number): Promise<void> {
       .filter((name) => name.endsWith('.json'))
       .map(async (name) => {
         const path = join(dir, name);
-        const found = await stat(path).catch(() => null);
-        if (found === null || now() - found.mtimeMs <= MAX_AGE_MS) return;
+        try {
+          const parsed = FileSchema.safeParse(JSON.parse(await readFile(path, 'utf8')));
+          if (parsed.success && now() - parsed.data.writtenAtMs <= MAX_AGE_MS) return;
+        } catch {
+          // Unreadable or malformed: nothing will ever route on it.
+        }
         await rm(path, { force: true }).catch(() => undefined);
       }),
   );
@@ -101,18 +108,23 @@ export interface LatestPacket {
  * The packet for a reader that has no session id of its own: the MCP server is
  * started per session by the harness and never told which one it serves.
  *
- * IT NEVER GUESSES BETWEEN SESSIONS. Exactly one unexpired packet is this
- * session's; two or more mean two Claude sessions share this data directory and
- * nothing here can tell them apart, so the reader gets `null` and routes on the
- * query alone rather than sending one session's conversation to a paid decision
- * made for another. `onlyKey` is the latch: once a call has bound to a session,
- * later calls read that one and are unaffected by a second session starting.
+ * OWNERSHIP IS PROVED, NEVER INFERRED. A caller with no latch must supply
+ * `sinceMs`, the instant its own process began, and only a packet written after
+ * that can be its session's: one file being the only file proves nothing, since
+ * the sole packet on the machine may be another window's and a subagent has no
+ * packet at all. With no `sinceMs` and no latch the answer is `null`, and the
+ * caller routes on its query alone. `onlyKey` is the latch: once a call has
+ * bound to a session, later calls read that one and a second window starting
+ * changes nothing.
  */
 export async function readLatestPacket(
   dataDir: string,
-  opts: { now?: () => number; onlyKey?: string } = {},
+  opts: { now?: () => number; onlyKey?: string; sinceMs?: number } = {},
 ): Promise<LatestPacket | null> {
   const now = opts.now ?? Date.now;
+  // No latch and no process boundary: nothing here could prove a packet is the
+  // caller's, so it gets none rather than somebody else's conversation.
+  if (opts.onlyKey === undefined && opts.sinceMs === undefined) return null;
   const dir = routerStateDir(dataDir);
   let names: string[];
   try {
@@ -132,6 +144,10 @@ export async function readLatestPacket(
       if (Buffer.byteLength(raw) > MAX_PACKET_BYTES * 4) continue;
       const parsed = FileSchema.safeParse(JSON.parse(raw));
       if (!parsed.success || now() - parsed.data.writtenAtMs > MAX_AGE_MS) continue;
+      // `sinceMs` is how an unlatched process proves a packet is ITS OWN: a
+      // session it serves wrote a prompt after it started, and one that was
+      // already there when it started belongs to somebody else's window.
+      if (opts.sinceMs !== undefined && parsed.data.writtenAtMs < opts.sinceMs) continue;
       live.push({ key, packet: parsed.data.packet });
     } catch {
       continue;

@@ -290,9 +290,27 @@ export interface SpendSummary {
   reservations: { amountAtomic: string; atMs: number; requestKey?: string }[];
 }
 
-/** The ledger as a reader sees it, for `tenjin status`. `null` for absent or
- *  unreadable, which is the same thing to a report: nothing to show. */
-export async function readSpendSummary(dir: string): Promise<SpendSummary | null> {
+/**
+ * The ledger AS AN AUTHORIZATION WOULD SEE IT, for `tenjin status`. Read-only,
+ * and it applies the same two expiries the authorizer applies before it
+ * evaluates a spend: a rolling window that has run out reads as a fresh one,
+ * and reservations past their TTL are gone. Summing the raw file instead
+ * reported spend as current, and crashed reservations as open, until the next
+ * payment happened to rewrite it.
+ *
+ * `null` for absent or unreadable, which is the same thing to a report.
+ */
+export async function readSpendSummary(
+  dir: string,
+  opts: { now?: () => number; windowMs?: number } = {},
+): Promise<SpendSummary | null> {
   const { ledger } = await readLedger(spendLedgerPath(dir));
-  return ledger;
+  if (ledger === null) return null;
+  const nowMs = (opts.now ?? Date.now)();
+  const windowMs = opts.windowMs ?? DEFAULT_WINDOW_MS;
+  if (nowMs - ledger.windowStartMs >= windowMs) return emptyLedger(nowMs);
+  return {
+    ...ledger,
+    reservations: ledger.reservations.filter((r) => nowMs - r.atMs < RESERVATION_TTL_MS),
+  };
 }

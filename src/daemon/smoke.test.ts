@@ -1,8 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
-import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { copyFile, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -275,8 +275,24 @@ beforeAll(async () => {
   }
   // Both single-file configs: `installDaemonFiles` copies all three, so a
   // missing one would fail the fixture before a single case ran.
-  await build({ ...daemonConfig, outDir: tmpOutDir, silent: true });
-  await build({ ...reporterConfig, outDir: tmpOutDir, silent: true });
+  // SEPARATE OUT DIRS, then one copy. Two `build()` calls in one process over
+  // one directory let the first block's options reach the second: the reporter
+  // came out carrying the daemon's `createRequire` banner, and intermittently
+  // at a different length, which vitest then refused to parse when it imported
+  // the copy. Each block owns its own output, and the files are collected after.
+  const daemonOutDir = await mkdtemp(join(tmpdir(), 'tenjin-b-smoke-daemon-'));
+  const reporterOutDir = await mkdtemp(join(tmpdir(), 'tenjin-b-smoke-reporter-'));
+  await build({ ...daemonConfig, outDir: daemonOutDir, silent: true });
+  await build({ ...reporterConfig, outDir: reporterOutDir, silent: true });
+  for (const [from, name] of [
+    [daemonOutDir, 'tenjin-daemon.mjs'],
+    [daemonOutDir, 'tenjin-shim.mjs'],
+    [reporterOutDir, 'tenjin-vitest-reporter.mjs'],
+  ] as const) {
+    await copyFile(join(from, name), join(tmpOutDir, name));
+  }
+  await rm(daemonOutDir, { recursive: true, force: true });
+  await rm(reporterOutDir, { recursive: true, force: true });
 
   dataDir = await mkdtemp(join(tmpdir(), 'tenjin-b-smoke-data-'));
   // Every arm is pinned off rather than defaulted: they are on out of the box
@@ -1107,30 +1123,40 @@ describe('the built vitest reporter bundle', () => {
   it('writes .vitest-report.json in the shape test-identity.ts reads', async () => {
     const path = vitestReporterPath(dataDir);
     expect(existsSync(path)).toBe(true);
-    // No node_modules beside it and no bundler: a bare dynamic import is the
-    // same thing vitest does with the path in a repo's own config.
-    const mod = (await import(pathToFileURL(path).href)) as {
-      default: new (options?: { outputFile?: string }) => {
-        onInit(): void;
-        onTestRunEnd(modules: unknown[], unhandled: unknown[]): void;
-      };
-    };
+    // Driven in a REAL node process, which is what vitest does with this path
+    // in a repo's own config: it loads the file itself, with no node_modules
+    // beside it and no bundler in front of it. Importing it from inside this
+    // suite instead put vite's import analysis in the way, and vitest decides
+    // per run whether a file outside the project root is transformed or
+    // externalized, so the same bytes parsed on one run and not the next.
     const outputFile = join(dataDir, 'smoke-report.json');
-    const reporter = new mod.default({ outputFile });
-    reporter.onInit();
-    reporter.onTestRunEnd(
-      [
-        {
-          moduleId: join(dataDir, 'src/lib/http.test.ts'),
-          children: {
-            allTests: () => [
-              { name: 'gives up after three', parent: { type: 'suite', fullName: 'retries' } },
-            ],
+    const driver = `
+      const { default: Reporter } = await import(${JSON.stringify(pathToFileURL(path).href)});
+      const reporter = new Reporter({ outputFile: ${JSON.stringify(outputFile)} });
+      reporter.onInit();
+      reporter.onTestRunEnd(
+        [
+          {
+            moduleId: ${JSON.stringify(join(dataDir, 'src/lib/http.test.ts'))},
+            children: {
+              allTests: () => [
+                { name: 'gives up after three', parent: { type: 'suite', fullName: 'retries' } },
+              ],
+            },
           },
-        },
-      ],
-      [],
-    );
+        ],
+        [],
+      );
+    `;
+    await new Promise<void>((resolve, reject) => {
+      execFile(
+        process.execPath,
+        ['--input-type=module', '-e', driver],
+        { timeout: 20_000 },
+        (error, _stdout, stderr) =>
+          error === null ? resolve() : reject(new Error(`${error.message}\n${stderr}`)),
+      );
+    });
 
     const report = JSON.parse(await readFile(outputFile, 'utf8')) as {
       startTime: number;

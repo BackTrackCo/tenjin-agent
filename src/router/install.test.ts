@@ -260,3 +260,140 @@ describe('a settings file this writer will not touch', () => {
     );
   });
 });
+
+describe('the doctor this release registers', () => {
+  it('checks the router wiring and prescribes no command the CLI lacks', async () => {
+    const { runRouterDoctor } = await import('./doctor');
+    await runRouterInstall({}, ctx(), deps());
+    await writeFile(join(data, 'wallet.json'), '{"not":"a wallet"}');
+    const fetchImpl = (async () =>
+      new Response('{}', {
+        status: 402,
+        headers: { 'content-type': 'application/json' },
+      })) as typeof fetch;
+    const result = await runRouterDoctor(ctx(), {
+      homeDir: home,
+      env: {},
+      which: () => true,
+      readMcp: async () => true,
+      fetchImpl,
+    }).catch((e: unknown) => e);
+    const data_ =
+      result instanceof CliError
+        ? (result.details as { checks: { name: string; fix?: string }[] })
+        : (result as { data: { checks: { name: string; fix?: string }[] } }).data;
+    const names = data_.checks.map((c) => c.name);
+    expect(names).toEqual(['node', 'hooks', 'mcp', 'spend', 'wallet', 'router']);
+    const fixes = data_.checks.map((c) => c.fix ?? '').join(' ');
+    for (const gone of ['tenjin daemon', 'tenjin search', 'tenjin publish', 'tenjin hooks']) {
+      expect(fixes).not.toContain(gone);
+    }
+  });
+
+  it('fails with the command that fixes it on a machine that never installed', async () => {
+    const { runRouterDoctor } = await import('./doctor');
+    const fetchImpl = (async () => new Response('{}', { status: 402 })) as typeof fetch;
+    const err = await runRouterDoctor(ctx(), {
+      homeDir: home,
+      env: {},
+      which: () => false,
+      fetchImpl,
+    }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(CliError);
+    expect((err as CliError).fix).toContain('tenjin install');
+  });
+
+  it('reports the router endpoint answering anything but a 402 as a failure', async () => {
+    const { runRouterDoctor } = await import('./doctor');
+    await runRouterInstall({}, ctx(), deps());
+    await writeFile(join(data, 'wallet.json'), '{"not":"a wallet"}');
+    const fetchImpl = (async () => new Response('{}', { status: 404 })) as typeof fetch;
+    const err = await runRouterDoctor(ctx(), {
+      homeDir: home,
+      env: {},
+      which: () => true,
+      readMcp: async () => true,
+      fetchImpl,
+    }).catch((e: unknown) => e);
+    // The throw names the FIRST required failure, so the router's own verdict is
+    // read off the check list every doctor envelope carries.
+    const checks = (err as CliError).details as { checks: { name: string; detail: string }[] };
+    const router = checks.checks.find((c) => c.name === 'router');
+    expect(router?.detail).toContain('paid routing looks turned off');
+  });
+});
+
+describe('the permission rule goes through the shared writer', () => {
+  it('leaves a settings file it cannot parse exactly as it is', async () => {
+    await writeFile(settingsPath(), '{ not json');
+    const result = await runRouterInstall({}, ctx(), deps());
+    expect(await readFile(settingsPath(), 'utf8')).toBe('{ not json');
+    expect((result.data as { permissions: { added: boolean } }).permissions.added).toBe(false);
+  });
+
+  it('refuses a permissions key that is not an object rather than replacing it', async () => {
+    await writeFile(settingsPath(), JSON.stringify({ permissions: 'nope' }, null, 2) + '\n');
+    const result = await runRouterInstall({}, ctx(), deps());
+    const settings = await readSettings();
+    expect(settings.permissions).toBe('nope');
+    expect(
+      (result.data as { permissions: { warning?: string } }).permissions.warning,
+    ).toBeDefined();
+  });
+});
+
+describe('the install readout and the status window', () => {
+  it('prints the limits actually in force, not the defaults it would have set', async () => {
+    await writeFile(
+      join(data, 'config.json'),
+      JSON.stringify({ maxAutoSpend: '1000000', sessionBudget: '10000000' }),
+    );
+    const result = await runRouterInstall({}, ctx(), deps());
+    const text = result.humanLines!.join('\n');
+    expect(text).toContain('at most 1 USD per call');
+    expect(text).toContain('10 USD a day');
+    expect(text).not.toContain('0.1 USD per call');
+    expect(result.data).toMatchObject({
+      spend: { effective: { maxAutoSpend: '1', sessionBudget: '10' } },
+    });
+  });
+
+  it('says so when an existing config has no daily ceiling at all', async () => {
+    await writeFile(
+      join(data, 'config.json'),
+      JSON.stringify({ maxAutoSpend: '500000', sessionBudget: '0' }),
+    );
+    const result = await runRouterInstall({}, ctx(), deps());
+    expect(result.humanLines!.join('\n')).toContain('no daily ceiling');
+  });
+
+  it('status applies the same expiry an authorization would', async () => {
+    const { runRouterStatus } = await import('./status');
+    const { createLocalSpendAuthorizer } = await import('../lib/wallet/spend');
+    const auth = createLocalSpendAuthorizer({
+      dir: data,
+      policy: {
+        maxAutoSpendAtomic: 1_000_000n,
+        sessionBudgetAtomic: 1_000_000n,
+        confirm: { mode: 'above', thresholdAtomic: 1_000_000n },
+        allowlistCreators: [],
+      },
+    });
+    await auth.authorize({ amountAtomic: 10_000n, creator: 's', requestKey: 'k' });
+    const fresh = await runRouterStatus(ctx());
+    expect((fresh.data as { inFlight: unknown[] }).inFlight).toHaveLength(1);
+
+    // Eleven minutes on, that reservation is past its TTL and an authorization
+    // would not count it; the readout must not either.
+    const later = Date.now() + 11 * 60 * 1000;
+    const aged = await runRouterStatus(ctx(), { now: () => later });
+    expect((aged.data as { inFlight: unknown[] }).inFlight).toHaveLength(0);
+
+    // A day on, the whole window has rolled over.
+    const nextDay = Date.now() + 25 * 60 * 60 * 1000;
+    const rolled = await runRouterStatus(ctx(), { now: () => nextDay });
+    expect(
+      (rolled.data as { window: { committed: { atomic: string } } }).window.committed.atomic,
+    ).toBe('0');
+  });
+});

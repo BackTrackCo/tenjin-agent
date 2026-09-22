@@ -139,7 +139,7 @@ describe('main', () => {
 
     const leafHelp = captureIo();
     expect(await main(['doctor', '--help'], leafHelp.io)).toBe(0);
-    expect(leafHelp.stdout()).toContain('--prune');
+    expect(leafHelp.stdout()).toContain('Check the six things a lookup needs');
     expect(leafHelp.stdout()).not.toContain('--base-url');
   });
 

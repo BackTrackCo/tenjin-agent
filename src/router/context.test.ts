@@ -165,12 +165,17 @@ describe('reading a packet without a session id', () => {
   it('never guesses between two sessions sharing one data directory', async () => {
     const { readLatestPacket } = await import('./session-file');
     const dir = await tempDir();
+    // `sinceMs` is the proof of ownership: this process started before the
+    // packet it may read, and a lone file proves nothing on its own.
+    const started = Date.now() - 1;
     await writeSessionPacket(dir, 'session-a', await buildPromptPacket(undefined, 'a', 'mine'));
-    const only = await readLatestPacket(dir);
+    const only = await readLatestPacket(dir, { sinceMs: started });
     expect(only?.packet.current.text).toBe('mine');
+    // With no latch and no process boundary there is nothing to prove it with.
+    expect(await readLatestPacket(dir)).toBeNull();
 
     await writeSessionPacket(dir, 'session-b', await buildPromptPacket(undefined, 'b', 'theirs'));
-    expect(await readLatestPacket(dir)).toBeNull();
+    expect(await readLatestPacket(dir, { sinceMs: started })).toBeNull();
     // Once a call has bound to a session, a second session changes nothing.
     expect((await readLatestPacket(dir, { onlyKey: only!.key }))?.packet.current.text).toBe('mine');
   });
@@ -186,8 +191,51 @@ describe('reading a packet without a session id', () => {
       await buildPromptPacket(undefined, 'f', 'current'),
       () => later,
     );
-    expect((await readLatestPacket(dir, { now: () => later }))?.packet.current.text).toBe(
-      'current',
+    expect(
+      (await readLatestPacket(dir, { now: () => later, sinceMs: later - 1 }))?.packet.current.text,
+    ).toBe('current');
+  });
+});
+
+describe('the bounds the server also enforces', () => {
+  it('trims the current message to the message cap, not just the history', async () => {
+    const { MAX_MESSAGE_CHARS, packetForText } = await import('./context');
+    const packet = await buildPromptPacket(undefined, 's', 'x'.repeat(40_000));
+    expect(packet.current.text.length).toBeLessThanOrEqual(MAX_MESSAGE_CHARS);
+    expect(Buffer.byteLength(JSON.stringify(packet))).toBeLessThanOrEqual(MAX_PACKET_BYTES);
+    expect(packetForText('y'.repeat(40_000)).current.text.length).toBeLessThanOrEqual(
+      MAX_MESSAGE_CHARS,
     );
+  });
+
+  it('measures the whole packet, literal URLs and pending call included', async () => {
+    const { packetForText } = await import('./context');
+    const urls = Array.from(
+      { length: 8 },
+      (_, i) => `https://example.test/${'p'.repeat(1_900)}${i}`,
+    );
+    const packet = {
+      ...packetForText('x'.repeat(14_000)),
+      literalUrls: urls,
+      pendingCall: { tool: 'WebSearch' as const, query: 'q'.repeat(1_000) },
+    };
+    const path = await transcript([user('earlier turn')]);
+    const built = await buildPromptPacket(path, 's', 'x'.repeat(15_000));
+    expect(Buffer.byteLength(JSON.stringify(built))).toBeLessThanOrEqual(MAX_PACKET_BYTES);
+    // The raw object above is what an unmeasured build would have sent.
+    expect(Buffer.byteLength(JSON.stringify(packet))).toBeGreaterThan(MAX_PACKET_BYTES);
+  });
+
+  it('never sends an empty current message, which the server refuses', async () => {
+    const { packetForText } = await import('./context');
+    expect((await buildPromptPacket(undefined, 's', '   ')).current.text.length).toBeGreaterThan(0);
+    expect(packetForText('').current.text.length).toBeGreaterThan(0);
+    expect(packetForText('  \n ').current.text.length).toBeGreaterThan(0);
+  });
+
+  it('bounds each literal URL to what the server accepts', async () => {
+    const { literalUrlsIn } = await import('./context');
+    expect(literalUrlsIn(`https://example.test/${'p'.repeat(3_000)}`)).toEqual([]);
+    expect(literalUrlsIn('see https://example.test/ok')).toEqual(['https://example.test/ok']);
   });
 });

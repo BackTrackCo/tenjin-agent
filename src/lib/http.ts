@@ -398,6 +398,14 @@ export interface HttpRequestOptions {
   callerUserAgent?: string;
   /** A JSON body (POST); serialized with a content-type header set automatically. */
   jsonBody?: unknown;
+  /**
+   * A body the CALLER already encoded, sent byte for byte with no content-type
+   * of this transport's choosing: the router's provider leg is handed a request
+   * the server built, and re-encoding it would make the bytes signed for and
+   * the bytes sent two different things. The caller's own `headers` carry the
+   * content type. Ignored when `jsonBody` is set.
+   */
+  rawBody?: string;
   fetchImpl?: typeof fetch;
   /**
    * A caller's own abort, combined with (never replacing) `timeoutMs`. The loop's
@@ -459,6 +467,8 @@ function prepareRequest(url: string, opts: HttpRequestOptions): PreparedRequest 
     if (opts.jsonBody !== undefined) {
       body = JSON.stringify(opts.jsonBody);
       merged.set('content-type', 'application/json');
+    } else if (opts.rawBody !== undefined) {
+      body = opts.rawBody;
     }
     const wantsAccept = opts.method === 'POST' || opts.method === 'PUT' || body !== undefined;
     if (wantsAccept && !merged.has('accept')) merged.set('accept', 'application/json');

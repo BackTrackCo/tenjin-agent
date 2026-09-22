@@ -9,10 +9,8 @@ import {
   SHIPPED_SKILL_FILES,
 } from './lib/skills-source';
 import { renderSkillMarkdown } from './lib/skill-materialize';
-import { PUBLISH_MODE_CHOICES } from './commands/install';
 import {
   ALWAYS_SAFE_ALLOWLIST,
-  MCP_CAVEAT,
   NEVER_ALLOWLISTED,
   OPT_IN_ALLOWLIST,
   recommendedRules,
@@ -574,15 +572,18 @@ describe('the vendored hosted mirror is never hand-edited', () => {
   });
 });
 
-describe('the published docs do not drift from the allowlist constants', () => {
-  // The rules are hand-copied into the docs, so without this the module can
-  // change and the published docs silently keep recommending the old set. The
-  // README carries the free-verb paste block and a three-tier summary; the two
-  // opt-in lines and the whole rationale live in docs/agent-permissions.md.
+/**
+ * The permissions doc is the ROUTER's now. Its old guards pinned it to the
+ * shelf's nine-rule allowlist and its publish-mode consent, none of which this
+ * release registers, so what they were protecting is what moved. These pin the
+ * page against the constants it actually documents: one tool rule, one opt-in
+ * shell rule, the flag caveat, and no verb the CLI no longer has.
+ */
+describe('the permissions doc matches the product this release ships', () => {
   const root = fileURLToPath(new URL('..', import.meta.url));
-  const README = readFileSync(join(root, 'README.md'), 'utf8');
   const PERMISSIONS_DOC = readFileSync(join(root, 'docs', 'agent-permissions.md'), 'utf8');
 
+  /** The `Bash(...)` lines inside fenced blocks: what an operator pastes. */
   function fencedRules(text: string): string[] {
     const out: string[] = [];
     let inFence = false;
@@ -596,203 +597,76 @@ describe('the published docs do not drift from the allowlist constants', () => {
     return out;
   }
 
-  it('every spelled-out tier count in the prose matches the constant', () => {
-    // Round-3 finding on #130: a merge fixed the constants and left four prose
-    // sentences describing the old tier size. Pin the number word to the array.
-    const words = [
-      'zero',
-      'one',
-      'two',
-      'three',
-      'four',
-      'five',
-      'six',
-      'seven',
-      'eight',
-      'nine',
-      'ten',
-      'eleven',
-      'twelve',
-    ];
-    const count = words[ALWAYS_SAFE_ALLOWLIST.length]!;
-    expect(PERMISSIONS_DOC).toContain(`The free tier is ${count} rules`);
-    expect(PERMISSIONS_DOC).toContain(`writes the ${count} rules`);
-    expect(PERMISSIONS_DOC).toContain(`All ${count} are safe to hand over`);
+  it('names the one rule install writes, and the router MCP server', async () => {
+    const { ALLOW_RULE, MCP_ADD_COMMAND } = await import('./router/install');
+    expect(fencedRules(PERMISSIONS_DOC)).toEqual(['Bash(tenjin pay:*)']);
+    expect(PERMISSIONS_DOC).toContain(ALLOW_RULE);
+    expect(PERMISSIONS_DOC).toContain(MCP_ADD_COMMAND);
   });
 
-  // The README is the router product's quick start and pastes no allowlist at
-  // all, so the paste guard lives on the permissions doc alone.
-  it('the permissions doc pastes exactly the recommended rules, no more', () => {
-    expect(fencedRules(PERMISSIONS_DOC).sort()).toEqual([...recommendedRules()].sort());
-  });
-
-  it('the permissions doc names every excluded verb in prose', () => {
-    for (const e of NEVER_ALLOWLISTED) {
-      for (const verb of e.command.split(' / ')) expect(PERMISSIONS_DOC).toContain(verb.trim());
+  it('states the caps install sets, from the constants install writes', async () => {
+    const { ROUTER_DEFAULTS } = await import('./commands/config');
+    const { toMoney } = await import('./lib/money');
+    // Compared as NUMBERS: the page writes 0.10 where `toMoney` renders 0.1, and
+    // what must not drift is the amount, not its trailing zero.
+    const stated = [...PERMISSIONS_DOC.matchAll(/([\d.]+) USD/g)].map((m) => Number(m[1]));
+    for (const key of ['maxAutoSpend', 'sessionBudget'] as const) {
+      expect(stated, `the page never states ${key}`).toContain(
+        Number(toMoney(ROUTER_DEFAULTS[key]).usd),
+      );
     }
+    expect(PERMISSIONS_DOC).toContain(ROUTER_DEFAULTS.confirm);
   });
 
-  it('the permissions doc states the flag caveat and the unattended-spend correction', () => {
+  it('keeps the flag caveat, which is why a prefix rule is not a host grant', () => {
     expect(PERMISSIONS_DOC).toContain('--base-url');
     expect(PERMISSIONS_DOC).toMatch(/A prefix rule pins the verb, not the flags/i);
-    expect(PERMISSIONS_DOC).toMatch(
-      /that line authorizes\s*unattended spending up to your wallet balance/i,
-    );
-    expect(PERMISSIONS_DOC).toMatch(
-      /`sessionBudget` is `0`, which the policy reads as \*\*no\s*ceiling/i,
-    );
-    expect(PERMISSIONS_DOC).not.toMatch(/a human is still on every purchase/i);
   });
 
-  it('every free verb is explained by name in the permissions doc', () => {
-    for (const e of ALWAYS_SAFE_ALLOWLIST) expect(PERMISSIONS_DOC).toContain(e.command);
-  });
-
-  // These three claims were pinned against the block `doctor` used to print. The
-  // block is gone (#81) and the page is now the only place they are made, so the
-  // pins move with them rather than being dropped.
-
-  // search and outcome both POST. Pre-clearing them is defensible; calling them
-  // read-only in order to justify it is not.
-  it('the permissions doc does not call the free set read-only', () => {
-    expect(PERMISSIONS_DOC).not.toMatch(/free, read-only verbs/i);
-    expect(PERMISSIONS_DOC).toMatch(/None of those can spend;/i);
-    // Every surface that states the tier also names doctor's local decrypt, or
-    // the tier reads as no key access at all. The skill is here because agents
-    // repeat it to users verbatim.
-    expect(PERMISSIONS_DOC).toMatch(/`tenjin doctor` decrypts\s*locally/i);
-    expect(read('tenjin-search', PERMISSIONS_REF)).toMatch(/`doctor` may decrypt locally/i);
-    expect(PERMISSIONS_DOC).toMatch(/`tenjin search` POSTs[\s\S]{0,120}`tenjin outcome` POSTs/);
-  });
-
-  // The old definition said "no wallet, no signing, no payment". `read` signs
-  // (P-256, with a delegation it loaded), so that sentence would be a false claim
-  // on the page an operator pastes from. Pinned as a negative: the tier is defined
-  // by what it CANNOT do, and signing left the list.
-  it('the permissions doc never claims the safe verbs sign nothing', () => {
-    // Scoped to the paragraph that DEFINES the tier. "No wallet, no signing, no
-    // payment" is still true of `tenjin search` and is still that verb's own
-    // note; what it may never be again is the whole tier's definition.
-    const definition = PERMISSIONS_DOC.slice(
-      PERMISSIONS_DOC.indexOf('## The free tier'),
-      PERMISSIONS_DOC.indexOf('### What each verb actually does'),
-    );
-    expect(definition).not.toMatch(/no wallet, no signing, no payment/i);
-    expect(PERMISSIONS_DOC).toMatch(/wallet-derived credential/i);
-    expect(PERMISSIONS_DOC).toMatch(/wrong curve/i);
-    // And it must not offer the scope as the reason the file is safe to hold.
-    expect(PERMISSIONS_DOC).toMatch(/scope is not a containment boundary/i);
-  });
-
-  it('the permissions doc tells the operator where the lines go', () => {
-    expect(PERMISSIONS_DOC).toContain('.claude/settings.json');
-  });
-
-  // Every exclusion needs its REASON on the page, not just the verb name: the
-  // list above proves the verb is mentioned, which a stray reference satisfies.
-  it('the permissions doc gives a reason for every excluded verb', () => {
-    const table = PERMISSIONS_DOC.slice(PERMISSIONS_DOC.indexOf('## Never recommended'));
-    for (const e of NEVER_ALLOWLISTED) {
-      for (const verb of e.command.split(' / ')) expect(table).toContain(verb.trim());
+  it('names no verb this release does not register', () => {
+    for (const gone of [
+      'tenjin search',
+      'tenjin publish',
+      'tenjin edit',
+      'tenjin delete',
+      'tenjin buy',
+      'tenjin read',
+      'tenjin outcome',
+      'tenjin discover',
+      'tenjin daemon',
+      'tenjin hooks',
+      'mcp__tenjin__',
+    ]) {
+      expect(PERMISSIONS_DOC, `the permissions doc still names ${gone}`).not.toContain(gone);
     }
   });
 
-  it('the README still points at the doc the detail moved to', () => {
-    expect(README).toContain('docs/agent-permissions.md');
+  it('gives a reason for every verb it tells you not to allowlist', () => {
+    const table = PERMISSIONS_DOC.slice(PERMISSIONS_DOC.indexOf('## Never recommended'));
+    for (const verb of [
+      'tenjin wallet send',
+      'tenjin wallet create',
+      'tenjin config set',
+      'tenjin install',
+      'tenjin uninstall',
+      'tenjin update',
+    ]) {
+      expect(table).toContain(verb);
+    }
+    expect(table).toMatch(/Moves USDC out of the wallet/);
   });
 
-  // The `auto` hint IS the consent for the harness allowlist: it is the only
-  // place the operator is told that this mode adds the publish and edit rules.
-  // Both pages quote it, and a quote is exactly the thing that goes stale
-  // silently, so it is compared against the shipped constant with markdown
-  // wrapping normalized away.
-  it('the permissions doc quotes the consent the CLI actually asks for', () => {
-    const flatten = (s: string): string =>
-      s
-        .replace(/^\s*>\s?/gm, '')
-        .replace(/[`*]/g, '')
-        .replace(/\s+/g, ' ');
-    const auto = PUBLISH_MODE_CHOICES.find((c) => c.value === 'auto');
-    const hint = flatten(auto?.hint ?? '');
-    expect(flatten(PERMISSIONS_DOC)).toContain(hint);
-  });
-
-  // The MCP section is a SECURITY list: a tool missing from it reads as "safe to
-  // leave ungated". Pinned to MCP_CAVEAT so the page cannot drop a tool (edit
-  // went missing once) without failing here.
-  it('the permissions doc names every MCP tool MCP_CAVEAT gates', () => {
-    // MCP_CAVEAT spells some tools fully prefixed and some bare (`tenjin_buy`),
-    // so both spellings are captured and normalized to the full tool name; the
-    // doc must carry every one, buy included.
-    const tools = [...MCP_CAVEAT.join(' ').matchAll(/(?:mcp__tenjin__)?tenjin_[a-z_]+/g)].map(
-      (m) => (m[0].startsWith('mcp__') ? m[0] : `mcp__tenjin__${m[0]}`),
-    );
-    expect(tools).toContain('mcp__tenjin__tenjin_buy');
-    for (const tool of new Set(tools)) expect(PERMISSIONS_DOC).toContain(tool);
-  });
-
-  // A path-substring check cannot see a renamed heading, so every relative
-  // .md link is resolved for real: the target file must exist and a
-  // #fragment must match a heading's GitHub slug in that file.
-  it('every relative markdown .md link resolves, fragment included', () => {
-    const slug = (h: string): string =>
-      h
-        .toLowerCase()
-        .trim()
-        .replace(/[^\w\s-]/g, '')
-        .replace(/\s+/g, '-');
-    // Fence-aware: a `# comment` inside a code block is not a heading.
-    const headingSlugs = (text: string): Set<string> => {
-      const out = new Set<string>();
-      let inFence = false;
-      for (const l of text.split('\n')) {
-        if (/^\s*(```|~~~)/.test(l)) inFence = !inFence;
-        else if (!inFence && /^#{1,6} /.test(l)) out.add(slug(l.replace(/^#{1,6} /, '')));
-      }
-      return out;
-    };
-    const check = (fromDir: string, text: string): void => {
-      for (const m of text.matchAll(/\]\((\.{1,2}\/[^)#\s]+?\.md)(#[^)]+)?\)/g)) {
-        const rel = m[1];
-        if (rel === undefined) continue; // group 1 always captures on a match
-        const target = join(fromDir, rel);
-        expect(existsSync(target), `${rel} does not exist`).toBe(true);
-        if (m[2] !== undefined) {
-          const frag = m[2].slice(1);
-          expect(
-            headingSlugs(readFileSync(target, 'utf8')).has(frag),
-            `${m[1]}${m[2]}: no heading slugs to ${frag}`,
-          ).toBe(true);
-        }
-      }
-    };
-    check(root, README);
-    check(join(root, 'docs'), PERMISSIONS_DOC);
-  });
-
-  it('no page calls the free tier read-only or says it cannot touch your wallet', () => {
-    // The tier claim lib/permissions.ts refuses. "read-only" survives elsewhere
-    // in both files as an honest description of ONE verb (`config get`,
-    // `wallet balance`), so this pins the tier-level phrasings only.
-    for (const text of [README, PERMISSIONS_DOC]) {
-      expect(text).not.toMatch(/\d+ read-only commands/i);
-      expect(text).not.toMatch(/free,? read-only verbs/i);
-      expect(text).not.toMatch(/touch your wallet/i);
+  it('still resolves every relative markdown link it carries', () => {
+    for (const match of PERMISSIONS_DOC.matchAll(/\]\((\.[^)]+\.md)\)/g)) {
+      const target = fileURLToPath(
+        new URL(`../docs/${match[1]!.replace(/^\.\//, '')}`, import.meta.url),
+      );
+      expect(existsSync(target), `${match[1]!} does not resolve`).toBe(true);
     }
   });
 });
 
-/**
- * Source with comments removed and everything else kept, one entry per input
- * line so an offender can be reported at its line number.
- *
- * A character scanner rather than the line-prefix heuristic this started as. The
- * heuristic skipped whole lines, which silently dropped code sitting after a
- * closing block comment on the same line, and it would have truncated a line at
- * the `//` inside an `https://` URL. Both are FALSE NEGATIVES on a test whose
- * only job is to fail, so string literals are tracked as well, and the scanner
- * is pinned directly by its own table below instead of only through its effect.
- */
+/** The comment stripper the `--base-url` sweep runs on, and its own tests. */
 function stripComments(source: string): string[] {
   type State = 'code' | 'block' | "'" | '"' | '`';
   let state: State = 'code';

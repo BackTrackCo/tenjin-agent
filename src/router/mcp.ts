@@ -6,7 +6,6 @@ import pkg from '../../package.json';
 import { dataDir as defaultDataDir } from '../lib/paths';
 import { resolveContextSettings } from '../lib/settings';
 import { resolveSpendAuthorizer, resolveWalletProvider } from '../lib/wallet';
-import type { SpendAuthorizer } from '../lib/wallet';
 import type { TenjinSigner } from '../lib/wallet/provider';
 import type { CommandContext, GlobalFlags } from '../context';
 import { RequirementsCache } from './decision';
@@ -56,6 +55,10 @@ function buildContext(opts: RouterMcpOptions): CommandContext {
 export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
   const ctx = buildContext(opts);
   const cache = opts.handlerDeps?.cache ?? new RequirementsCache();
+  // The instant this process began. A packet older than it belongs to a window
+  // that was already running, so this server never routes on it before it has
+  // latched onto a session of its own.
+  const startedAtMs = Date.now();
   const provider = resolveWalletProvider(ctx);
   let signerPromise: Promise<TenjinSigner> | undefined;
   const signer = (): Promise<TenjinSigner> => {
@@ -70,7 +73,6 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
       signerPromise = undefined;
     });
   }
-  let authorizer: SpendAuthorizer | undefined = opts.handlerDeps?.authorizer;
   let sessionKey: string | undefined;
 
   const server = new McpServer(
@@ -89,15 +91,24 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
       },
     },
     async ({ query }): Promise<CallToolResult> => {
+      // Resolved per call, from settings read now: the refusal this tool returns
+      // names `tenjin config set sessionBudget`, and a policy frozen at the
+      // first call would leave that command with no effect until the harness
+      // restarts the server.
       const settings = await resolveContextSettings(ctx);
-      authorizer ??= resolveSpendAuthorizer(ctx, settings.policy);
+      const authorizer =
+        opts.handlerDeps?.authorizer ?? resolveSpendAuthorizer(ctx, settings.policy);
       const result = await runRequestTool(
         { query },
         {
           ctx,
           signer: opts.handlerDeps?.signer ?? (await signer()),
+          // The SAME provider the decision leg unlocked, so the provider leg
+          // does not pay for the key derivation a second time.
+          ...(opts.handlerDeps?.signer === undefined ? { provider } : {}),
           authorizer,
           cache,
+          startedAtMs,
           ...(sessionKey !== undefined ? { sessionKey } : {}),
           ...(opts.handlerDeps?.fetchImpl !== undefined
             ? { fetchImpl: opts.handlerDeps.fetchImpl }

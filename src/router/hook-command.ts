@@ -10,7 +10,9 @@ import type { Io } from '../lib/output';
  */
 
 const MAX_EVENT_BYTES = 1_000_000;
-const STDIN_TIMEOUT_MS = 2_000;
+/** Half the hook's 3 s budget, leaving the gate its 1.5 s; `wire.test.ts` pins
+ *  the sum against the timeout `install` writes. */
+export const STDIN_TIMEOUT_MS = 1_000;
 
 export type HookKind = 'prompt' | 'native';
 

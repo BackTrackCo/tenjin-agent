@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { Packet, PendingCall } from './context';
+import type { Packet } from './context';
 
 /**
  * The free gate, `POST /api/x402-router/prepare`. One question: would a catalog
@@ -14,7 +14,10 @@ import type { Packet, PendingCall } from './context';
  */
 
 export const GATE_PATH = '/api/x402-router/prepare';
-export const GATE_TIMEOUT_MS = 2_500;
+/** The hook's whole budget is 3 s (the timeout `install` writes). Stdin waits
+ *  up to 2 s of it, so the gate gets 1.5 s and the two together still leave
+ *  room for node's boot and the transcript read; `hooks.test.ts` pins the sum. */
+export const GATE_TIMEOUT_MS = 1_500;
 
 /** The task vocabulary the gate answers in. Providers are never named. */
 export const CATEGORIES = [
@@ -58,8 +61,19 @@ export function isWellFormedHint(hint: string): boolean {
 
 export interface GateRequest {
   source: 'prompt' | 'native';
+  /** The pending native call travels INSIDE this; see {@link buildGateBody}. */
   packet: Packet;
-  pendingCall?: PendingCall;
+}
+
+/**
+ * The exact body the gate takes. The server reads it with a STRICT object of
+ * `schemaVersion`, `source` and `packet` (tenjin `lib/x402-router/wire.ts`), so
+ * a pending call sent beside the packet is a 400 and, because `askGate` maps a
+ * non-200 to `null` and a null answer allows, a silently dead native gate.
+ * Spelled here and pinned by a fixture both sides share.
+ */
+export function buildGateBody(request: GateRequest): Record<string, unknown> {
+  return { schemaVersion: 1, source: request.source, packet: request.packet };
 }
 
 export interface GateDeps {
@@ -84,12 +98,7 @@ export async function askGate(
     const response = await doFetch(new URL(GATE_PATH, baseUrl).toString(), {
       method: 'POST',
       headers: { 'content-type': 'application/json', accept: 'application/json' },
-      body: JSON.stringify({
-        schemaVersion: 1,
-        source: request.source,
-        packet: request.packet,
-        ...(request.pendingCall !== undefined ? { pendingCall: request.pendingCall } : {}),
-      }),
+      body: JSON.stringify(buildGateBody(request)),
       signal: controller.signal,
       redirect: 'error',
     });

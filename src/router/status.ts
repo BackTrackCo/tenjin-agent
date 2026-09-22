@@ -24,7 +24,9 @@ export async function runRouterStatus(
 ): Promise<CommandResult> {
   const now = deps.now ?? Date.now;
   const settings = await resolveContextSettings(ctx);
-  const ledger = await readSpendSummary(ctx.dataDir);
+  // The same projection an authorization would make, so what this prints is
+  // what the next lookup would actually be measured against.
+  const ledger = await readSpendSummary(ctx.dataDir, { now });
   const committedAtomic = BigInt(ledger?.committedAtomic ?? '0');
   const reservedAtomic = (ledger?.reservations ?? []).reduce(
     (sum, r) => sum + BigInt(r.amountAtomic),

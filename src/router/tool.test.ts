@@ -60,9 +60,22 @@ function authorizer(decision: SpendAuthorization['decision'] = 'allow'): SpendAu
 }
 
 function contract(over: Record<string, unknown> = {}): Record<string, unknown> {
+  const args = (over.arguments ?? { symbol: 'BTC,ETH', convert: 'USD' }) as Record<string, unknown>;
+  // The server builds the request; the client sends it verbatim. Built here the
+  // way the server does so a fixture cannot drift from what production sends.
+  const built = new URL(PROVIDER);
+  for (const [key, value] of Object.entries(args)) {
+    if (value !== null && typeof value !== 'object') built.searchParams.set(key, String(value));
+  }
   return {
     method: 'GET',
     url: PROVIDER,
+    request: {
+      url: built.toString(),
+      method: 'GET',
+      headers: { accept: 'application/json' },
+      ...((over.request as Record<string, unknown> | undefined) ?? {}),
+    },
     arguments: { symbol: 'BTC,ETH', convert: 'USD' },
     argumentSchema: {
       type: 'object',
@@ -177,7 +190,14 @@ describe('the request tool', () => {
       'a success rule this build will not compile',
       { contract: contract({ resultSchema: { type: 'string', pattern: '^(a+)+$' } }) },
     ],
-    ['a method this build does not execute', { contract: contract({ method: 'DELETE' }) }],
+    [
+      'a method this build does not execute',
+      { contract: contract({ request: { method: 'DELETE' } }) },
+    ],
+    [
+      'a header this build will not send',
+      { contract: contract({ request: { headers: { authorization: 'Bearer x' } } }) },
+    ],
   ])('refuses %s, signing nothing for the provider', async (_label, over) => {
     const { fetchImpl, calls } = net([
       { url: ROUTER, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge() } },
@@ -269,13 +289,19 @@ describe('the request tool', () => {
     }) as typeof fetch;
     await runRequestTool({ query: 'q' }, deps(record));
     expect(bodies[0]).toMatchObject({ packet: { historyStatus: 'unavailable' } });
+    // And the current message is the query, never the empty string the server
+    // refuses after the fee has settled.
+    expect((bodies[0] as { packet: { current: { text: string } } }).packet.current.text).toBe('q');
 
+    const started = Date.now() - 1;
     await writeSessionPacket(
       dir,
       'sess-1',
       await buildPromptPacket(undefined, 'sess-1', 'BTC too'),
     );
-    await runRequestTool({ query: 'q' }, deps(record));
+    // `startedAtMs` is the proof the packet is this process's: written after it
+    // began. Without it the tool routes on the query alone, whatever is there.
+    await runRequestTool({ query: 'q' }, { ...deps(record), startedAtMs: started });
     expect(JSON.stringify(bodies[1])).toContain('BTC too');
   });
 
@@ -456,8 +482,8 @@ describe('a fresh install, end to end through the local spend policy', () => {
 
 describe('a contract this build cannot turn into a request', () => {
   it.each([
-    ['a URL that will not parse', { url: 'not a url' }],
-    ['a GET argument with no query form', { arguments: { symbol: { nested: true } } }],
+    ['a URL that will not parse', { request: { url: 'not a url' } }],
+    ['a body on a GET', { request: { body: '{}' } }],
   ])('returns %s as a structured failure carrying the routing fee', async (_label, over) => {
     const { fetchImpl } = net([
       { url: ROUTER, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge() } },
@@ -469,5 +495,93 @@ describe('a contract this build cannot turn into a request', () => {
       status: 'failed',
       cost: ['router fee 0.001 USD', 'provider price 0 USD'],
     });
+  });
+});
+
+describe('the routing fee a failure still owes', () => {
+  it('reports the committed fee on a post-transmission failure', async () => {
+    const { fetchImpl } = net([
+      { url: ROUTER, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge() } },
+      { url: ROUTER, status: 500, body: { error: 'down' } },
+    ]);
+    const result = await runRequestTool({ query: 'q' }, deps(fetchImpl));
+    expect(result.envelope).toMatchObject({
+      status: 'failed',
+      cost: ['router fee 0.001 USD', 'provider price 0 USD'],
+    });
+  });
+
+  it('reports no fee when nothing was ever transmitted', async () => {
+    const { fetchImpl } = net([{ url: ROUTER, status: 500, body: { error: 'down' } }]);
+    const result = await runRequestTool({ query: 'q' }, deps(fetchImpl));
+    expect(result.envelope).toMatchObject({
+      status: 'failed',
+      cost: ['router fee 0 USD', 'provider price 0 USD'],
+    });
+  });
+
+  it('charges one fee for a decision that had to be re-signed on fresh terms', async () => {
+    const cache = new RequirementsCache();
+    cache.set(
+      `${ROUTER}/api/x402-router`,
+      buildPaymentRequired({ amount: '1000' }).paymentRequired,
+    );
+    const auth = authorizer();
+    let attempt = 0;
+    const fetchImpl = (async () => {
+      attempt++;
+      if (attempt === 1) {
+        return new Response('{}', {
+          status: 402,
+          headers: {
+            'content-type': 'application/json',
+            'PAYMENT-REQUIRED': encodePaymentRequiredHeader(
+              buildPaymentRequired({ amount: '2000' }).paymentRequired,
+            ),
+          },
+        });
+      }
+      return new Response(JSON.stringify(decision({ action: 'native', contract: undefined })), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as typeof fetch;
+    await runRequestTool({ query: 'q' }, { ...deps(fetchImpl, auth), cache });
+    // The stale attempt's reservation is released, not committed: one decision
+    // costs one fee even when the cached terms had moved on.
+    expect(auth.release).toHaveBeenCalledTimes(1);
+    expect(auth.commit).toHaveBeenCalledTimes(1);
+  });
+
+  it('hands the provider leg the wallet the decision already unlocked', async () => {
+    const provider = testWalletProvider();
+    const opened = vi.spyOn(provider, 'getSigner');
+    const { fetchImpl } = net([
+      { url: ROUTER, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge() } },
+      { url: ROUTER, status: 200, body: decision() },
+      {
+        url: PROVIDER,
+        status: 402,
+        body: {},
+        headers: { 'PAYMENT-REQUIRED': challenge({ amount: '10000' }) },
+      },
+      { url: PROVIDER, status: 200, body: { data: { BTC: 1 } } },
+    ]);
+    const auth = authorizer();
+    const result = await runRequestTool(
+      { query: 'q' },
+      {
+        ctx: ctx(),
+        signer,
+        provider,
+        authorizer: auth,
+        cache: new RequirementsCache(),
+        fetchImpl,
+        payDeps: { fetchImpl, authorizer: auth, destination: PUBLIC },
+      },
+    );
+    expect(result.envelope).toMatchObject({ status: 'fulfilled' });
+    // The provider leg used the injected one; nothing opened a second wallet.
+    expect(opened).toHaveBeenCalled();
   });
 });

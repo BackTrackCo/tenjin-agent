@@ -1,14 +1,12 @@
 import { execFile } from 'node:child_process';
 import { homedir } from 'node:os';
-import { readFile, stat } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 import { promisify } from 'node:util';
 import { claudeAdapter } from '../adapters/claude';
-import { persistRouterDefaults, ROUTER_DEFAULTS } from '../commands/config';
+import { persistRouterDefaults } from '../commands/config';
 import type { RouterDefaultsResult } from '../commands/config';
-import { writeFileAtomic } from '../lib/atomic-json';
 import { CliError } from '../lib/errors';
-import { claudeSettingsPath } from '../lib/harness-permissions';
+import { appendAllowlistRules, claudeSettingsPath } from '../lib/harness-permissions';
 import {
   inspectHooksFile,
   ownsHookEntry,
@@ -17,6 +15,8 @@ import {
   type HooksResult,
 } from '../lib/harness-hooks';
 import { toMoney } from '../lib/money';
+import { resolveContextSettings } from '../lib/settings';
+import type { SpendPolicy } from '../lib/policy';
 import { onPath } from '../lib/skill-wiring';
 import type { CommandContext, CommandResult } from '../context';
 
@@ -125,9 +125,23 @@ export async function runRouterInstall(
   const permissions = await ensureAllowRule(settingsPath);
   const spend = await persistRouterDefaults(ctx.dataDir);
   const mcp = await registerMcpServer(deps, env);
+  // Read back AFTER the write: a machine that already carried its own caps
+  // keeps them, and a readout quoting the defaults would describe limits this
+  // run did not set.
+  const effective = await resolveContextSettings(ctx);
 
-  const data = { settingsPath, hooks, permissions, spend, mcp, disclosure: DISCLOSURE };
-  return { data, humanLines: lines(settingsPath, hooks, permissions, spend, mcp) };
+  const data = {
+    settingsPath,
+    hooks,
+    permissions,
+    spend: { ...spend, effective: effectiveLimits(effective.policy) },
+    mcp,
+    disclosure: DISCLOSURE,
+  };
+  return {
+    data,
+    humanLines: lines(settingsPath, hooks, permissions, spend, mcp, effective.policy),
+  };
 }
 
 export interface AllowRuleResult {
@@ -139,56 +153,23 @@ export interface AllowRuleResult {
 }
 
 /**
- * Add the one permission rule, keeping every other key. Read-modify-write over
- * the same file the hooks went into, one step later: a rule that is already
- * there is left alone and the file is not rewritten.
+ * The one permission rule, through the shared allowlist writer rather than a
+ * third hand-rolled one: it resolves a symlinked settings.json before the
+ * rename, refuses a file it cannot parse, and compares the bytes it read before
+ * committing, none of which a local copy of the merge would have.
  */
 async function ensureAllowRule(path: string): Promise<AllowRuleResult> {
-  let settings: Record<string, unknown> = {};
-  let raw: string | null = null;
-  try {
-    raw = await readFile(path, 'utf8');
-    const parsed: unknown = JSON.parse(raw);
-    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      return { path, rule: ALLOW_RULE, added: false, warning: `${path} is not a JSON object.` };
-    }
-    settings = parsed as Record<string, unknown>;
-  } catch (err) {
-    if (raw !== null) {
-      return {
-        path,
-        rule: ALLOW_RULE,
-        added: false,
-        warning: `${path} could not be parsed (${err instanceof Error ? err.message : String(err)}).`,
-      };
-    }
-  }
-  const permissions =
-    settings.permissions !== null &&
-    typeof settings.permissions === 'object' &&
-    !Array.isArray(settings.permissions)
-      ? (settings.permissions as Record<string, unknown>)
-      : {};
-  const allow = Array.isArray(permissions.allow) ? permissions.allow : [];
-  if (allow.includes(ALLOW_RULE)) return { path, rule: ALLOW_RULE, added: false };
-  const next = {
-    ...settings,
-    permissions: { ...permissions, allow: [...allow, ALLOW_RULE] },
+  const result = await appendAllowlistRules(path, [ALLOW_RULE]);
+  return {
+    path: result.path,
+    rule: ALLOW_RULE,
+    added: result.added.length > 0,
+    ...(result.warning !== undefined
+      ? { warning: result.warning }
+      : result.skipped !== undefined
+        ? { warning: `${result.path} was left untouched (${result.skipped}).` }
+        : {}),
   };
-  const mode = await stat(path)
-    .then((found) => ({ mode: found.mode & 0o777 }))
-    .catch(() => ({}));
-  try {
-    await writeFileAtomic(path, `${JSON.stringify(next, null, 2)}\n`, mode);
-  } catch (err) {
-    return {
-      path,
-      rule: ALLOW_RULE,
-      added: false,
-      warning: `${path} could not be written (${err instanceof Error ? err.message : String(err)}).`,
-    };
-  }
-  return { path, rule: ALLOW_RULE, added: true };
 }
 
 async function registerMcpServer(
@@ -223,12 +204,28 @@ async function runClaudeMcpAdd(): Promise<void> {
   });
 }
 
+interface EffectiveLimits {
+  maxAutoSpend: string;
+  sessionBudget: string;
+}
+
+function effectiveLimits(policy: SpendPolicy): EffectiveLimits {
+  return {
+    maxAutoSpend: toMoney(policy.maxAutoSpendAtomic.toString()).usd,
+    sessionBudget:
+      policy.sessionBudgetAtomic === 0n
+        ? 'no daily ceiling'
+        : toMoney(policy.sessionBudgetAtomic.toString()).usd,
+  };
+}
+
 function lines(
   settingsPath: string,
   hooks: HooksResult,
   permissions: AllowRuleResult,
   spend: RouterDefaultsResult,
   mcp: McpRegistration,
+  policy: SpendPolicy,
 ): string[] {
   const out = [
     hooks.skipped === undefined
@@ -240,8 +237,11 @@ function lines(
     mcp.registered
       ? `mcp: ${MCP_SERVER_NAME} registered`
       : `mcp: not registered (${mcp.reason ?? 'unknown'}); run: ${mcp.command}`,
-    `spend: at most ${toMoney(ROUTER_DEFAULTS.maxAutoSpend).usd} USD per call inside ${toMoney(ROUTER_DEFAULTS.sessionBudget).usd} USD a day` +
-      (spend.kept.length > 0 ? ` (kept your ${spend.kept.join(', ')})` : ''),
+    `spend: at most ${effectiveLimits(policy).maxAutoSpend} USD per call, ${
+      policy.sessionBudgetAtomic === 0n
+        ? 'no daily ceiling'
+        : `${effectiveLimits(policy).sessionBudget} USD a day`
+    }` + (spend.kept.length > 0 ? ` (kept your ${spend.kept.join(', ')})` : ''),
     '',
     ...DISCLOSURE,
     '',

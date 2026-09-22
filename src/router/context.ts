@@ -20,9 +20,12 @@ import { mask } from '../lib/redact';
 
 export const MAX_HISTORY = 6;
 export const MAX_PACKET_BYTES = 16 * 1024;
+/** Every bound here is the server's own (tenjin `lib/x402-router/wire.ts`). A
+ *  packet this side lets through and that side refuses is a paid 400. */
+export const MAX_MESSAGE_CHARS = 16_000;
 const MAX_TRANSCRIPT_BYTES = 4_000_000;
-const MAX_PROMPT_CHARS = 48_000;
 const MAX_LITERAL_URLS = 8;
+const MAX_LITERAL_URL_CHARS = 2_000;
 
 export type PacketRole = 'user' | 'assistant';
 export interface PacketMessage {
@@ -38,10 +41,12 @@ export interface Packet {
   /** Absolute http(s) URLs written literally in the current message. */
   literalUrls: string[];
   historyStatus: HistoryStatus;
+  pendingCall?: PendingCall;
 }
 
-/** The pending native call a `tenjin hook native` packet describes. */
-export type PendingCall = { tool: string; query: string } | { tool: string; url: string };
+/** The pending native call, INSIDE the packet: the gate request is a strict
+ *  object with exactly `schemaVersion`, `source` and `packet`. */
+export type PendingCall = { tool: 'WebSearch'; query: string } | { tool: 'WebFetch'; url: string };
 
 const URL_RE = /\bhttps?:\/\/[^\s<>"'`)\]]+/gi;
 
@@ -50,7 +55,8 @@ export function literalUrlsIn(text: string): string[] {
   for (const match of text.matchAll(URL_RE)) {
     const candidate = match[0].replace(/[.,;:!?]+$/, '');
     try {
-      found.add(new URL(candidate).toString());
+      const normalized = new URL(candidate).toString();
+      if (normalized.length <= MAX_LITERAL_URL_CHARS) found.add(normalized);
     } catch {
       continue;
     }
@@ -59,16 +65,40 @@ export function literalUrlsIn(text: string): string[] {
   return [...found];
 }
 
-/** Drop the oldest messages until the whole packet fits its byte cap. */
-function fit(current: PacketMessage, history: PacketMessage[]): PacketMessage[] {
-  const kept = history.slice(-MAX_HISTORY);
-  while (
-    kept.length > 0 &&
-    Buffer.byteLength(JSON.stringify({ current, kept })) > MAX_PACKET_BYTES
-  ) {
-    kept.shift();
+/**
+ * Bring the packet inside the server's caps: oldest history first, then the
+ * current message itself, measured on the WHOLE packet rather than on the two
+ * message lists, because `literalUrls` and a pending call are bytes too.
+ */
+function fit(packet: Packet): Packet {
+  const next: Packet = { ...packet, history: packet.history.slice(-MAX_HISTORY) };
+  while (next.history.length > 0 && Buffer.byteLength(JSON.stringify(next)) > MAX_PACKET_BYTES) {
+    next.history = next.history.slice(1);
   }
-  return kept;
+  while (
+    Buffer.byteLength(JSON.stringify(next)) > MAX_PACKET_BYTES &&
+    next.current.text.length > 1
+  ) {
+    const over = Buffer.byteLength(JSON.stringify(next)) - MAX_PACKET_BYTES;
+    const keep = Math.max(1, next.current.text.length - Math.max(over, 1));
+    next.current = { ...next.current, text: next.current.text.slice(0, keep) };
+  }
+  return next;
+}
+
+/**
+ * A packet for a caller that has no conversation to send: the query itself is
+ * the current message, because the server's message text is `min(1)` and an
+ * empty one is a 400 after the routing fee has already settled.
+ */
+export function packetForText(text: string): Packet {
+  const bounded = text.trim().slice(0, MAX_MESSAGE_CHARS);
+  return fit({
+    current: { role: 'user', text: bounded.length > 0 ? bounded : '(no task text)' },
+    history: [],
+    literalUrls: literalUrlsIn(bounded),
+    historyStatus: 'unavailable',
+  });
 }
 
 /**
@@ -80,32 +110,15 @@ export async function buildPromptPacket(
   sessionId: string,
   prompt: string,
 ): Promise<Packet> {
-  const text = mask(prompt.slice(0, MAX_PROMPT_CHARS));
-  const current: PacketMessage = { role: 'user', text };
+  const masked = mask(prompt.trim()).slice(0, MAX_MESSAGE_CHARS);
+  const text = masked.length > 0 ? masked : '(empty prompt)';
   const read = await readHistory(transcriptPath, sessionId);
-  return {
-    current,
-    history: read === null ? [] : fit(current, read),
+  return fit({
+    current: { role: 'user', text },
+    history: read ?? [],
     literalUrls: literalUrlsIn(text),
     historyStatus: read === null ? 'unavailable' : 'ok',
-  };
-}
-
-/**
- * Re-derive a packet for a native tool call from a packet the prompt hook
- * already wrote. The pending call is the caller's, not this module's: the hook
- * sends it beside the packet.
- */
-export function packetForNativeCall(prior: Packet | null): Packet {
-  if (prior === null) {
-    return {
-      current: { role: 'user', text: '' },
-      history: [],
-      literalUrls: [],
-      historyStatus: 'unavailable',
-    };
-  }
-  return prior;
+  });
 }
 
 /** `null` means "cannot be vouched for"; an empty array is a genuinely fresh session. */
@@ -154,7 +167,8 @@ function parseRows(raw: string, sessionId: string): PacketMessage[] {
     if (row.type !== 'user' && row.type !== 'assistant') continue;
     if (row.sessionId !== sessionId) throw new Error('unidentified conversation row');
     const text = textOf(row.message);
-    if (text.length > 0) messages.push({ role: row.type, text: mask(text) });
+    const bounded = mask(text).slice(0, MAX_MESSAGE_CHARS);
+    if (bounded.length > 0) messages.push({ role: row.type, text: bounded });
   }
   return messages;
 }

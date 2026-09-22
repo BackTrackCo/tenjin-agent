@@ -30,9 +30,29 @@ export const ROUTER_PATH = '/api/x402-router';
 const PAYMENT_REQUIRED_HEADER = 'PAYMENT-REQUIRED';
 const PAYMENT_RESPONSE_HEADER = 'PAYMENT-RESPONSE';
 
+/**
+ * THE REQUEST IS THE SERVER'S TO BUILD. It owns the capability records and the
+ * binding rules, so it returns the finished call and this client sends it
+ * verbatim: no query assembly, no body encoding, no header invention here. What
+ * the client still owns is everything that decides whether to send it at all,
+ * which is the destination preflight, the argument and result validation, and
+ * every spending check.
+ */
+const RequestSchema = z.object({
+  url: z.string().min(1).max(16_384),
+  method: z.enum(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']),
+  headers: z.record(z.string(), z.string()),
+  body: z
+    .string()
+    .max(256 * 1024)
+    .optional(),
+});
+export type DecisionRequestShape = z.infer<typeof RequestSchema>;
+
 const ContractSchema = z.object({
   method: z.enum(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']),
   url: z.string().min(1).max(16_384),
+  /** Flat, for display and for the schema check; never re-encoded into a call. */
   arguments: z.record(z.string(), z.unknown()),
   argumentSchema: z.record(z.string(), z.unknown()),
   resultSchema: z.record(z.string(), z.unknown()).optional(),
@@ -42,6 +62,7 @@ const ContractSchema = z.object({
     maxAmountAtomic: z.string().regex(/^\d+$/),
   }),
   registryListed: z.boolean().optional(),
+  request: RequestSchema,
 });
 export type DecisionContract = z.infer<typeof ContractSchema>;
 
@@ -58,6 +79,12 @@ const DecisionResponseSchema = z.object({
   jev: z.object({ calls: z.number(), latencyMs: z.number() }).optional(),
 });
 export type DecisionResponse = z.infer<typeof DecisionResponseSchema>;
+
+/** The decision parser, exposed so the shared wire fixtures are checked against
+ *  the same schema production parses with rather than a copy of it. */
+export function parseDecisionForTests(value: unknown): { success: boolean } {
+  return { success: DecisionResponseSchema.safeParse(value).success };
+}
 
 /** One decoded challenge per resource URL, for this process only. */
 export class RequirementsCache {
@@ -91,7 +118,9 @@ export interface DecisionDeps {
 export type DecisionOutcome =
   | { status: 'decided'; response: DecisionResponse; amountAtomic: bigint; probed: boolean }
   | { status: 'needs_approval'; reason: string }
-  | { status: 'failed'; reason: string; feeMaySettle?: boolean };
+  /** `committedAtomic` is what the ledger already counted for this attempt, so
+   *  the tool can report the fee a post-transmission failure still owes. */
+  | { status: 'failed'; reason: string; committedAtomic: bigint };
 
 export async function requestDecision(
   request: DecisionRequest,
@@ -115,13 +144,28 @@ export async function requestDecision(
   let probed = false;
   if (challenge === undefined) {
     const probe = await httpRequest(url, options);
-    if (!probe.ok) return { status: 'failed', reason: fetchFailureToCliError(probe).message };
+    if (!probe.ok) {
+      return {
+        status: 'failed',
+        reason: fetchFailureToCliError(probe).message,
+        committedAtomic: NO_FEE,
+      };
+    }
     if (probe.status !== 402) {
-      return { status: 'failed', reason: `The router endpoint answered ${probe.status}.` };
+      return {
+        status: 'failed',
+        reason: `The router endpoint answered ${probe.status}.`,
+        committedAtomic: NO_FEE,
+      };
     }
     const decoded = decodeChallenge(probe);
-    if (decoded === null)
-      return { status: 'failed', reason: 'The 402 carried no usable challenge.' };
+    if (decoded === null) {
+      return {
+        status: 'failed',
+        reason: 'The 402 carried no usable challenge.',
+        committedAtomic: NO_FEE,
+      };
+    }
     challenge = decoded;
     probed = true;
     deps.cache.set(url, decoded);
@@ -135,12 +179,18 @@ export async function requestDecision(
   deps.cache.set(url, attempt.challenge);
   const retried = await payOnce(url, options, attempt.challenge, deps);
   if (retried.status === 'stale') {
-    return { status: 'failed', reason: 'The router endpoint keeps re-pricing this request.' };
+    return {
+      status: 'failed',
+      reason: 'The router endpoint keeps re-pricing this request.',
+      committedAtomic: NO_FEE,
+    };
   }
   return { ...retried, probed } as DecisionOutcome;
 }
 
 type Attempt = DecisionOutcome | { status: 'stale'; challenge: PaymentRequired };
+
+const NO_FEE = 0n;
 
 async function payOnce(
   url: string,
@@ -151,7 +201,11 @@ async function payOnce(
   const requirement = challenge.accepts[0];
   if (requirement === undefined) {
     deps.cache.clear(url);
-    return { status: 'failed', reason: 'The router challenge advertised no payment requirements.' };
+    return {
+      status: 'failed',
+      reason: 'The router challenge advertised no payment requirements.',
+      committedAtomic: NO_FEE,
+    };
   }
   const amountAtomic = BigInt(requirement.amount);
   const host = new URL(url).host;
@@ -181,36 +235,50 @@ async function payOnce(
   } catch (err) {
     await deps.authorizer.release(reservationId);
     deps.cache.clear(url);
-    return { status: 'failed', reason: err instanceof Error ? err.message : String(err) };
+    return {
+      status: 'failed',
+      reason: err instanceof Error ? err.message : String(err),
+      committedAtomic: NO_FEE,
+    };
   }
 
   const paid = await httpRequest(url, { ...options, headers: payment.headers });
-  await deps.authorizer.commit(reservationId, payment.amountAtomic);
+  const fee = payment.amountAtomic;
   if (!paid.ok) {
+    await deps.authorizer.commit(reservationId, fee);
     return {
       status: 'failed',
       reason:
         'The router response was lost after the authorization was transmitted; the routing fee may have settled.',
-      feeMaySettle: true,
+      committedAtomic: fee,
     };
   }
   if (paid.status === 402) {
     const settlementReported = paid.header(PAYMENT_RESPONSE_HEADER) !== undefined;
     const fresh = decodeChallenge(paid);
-    if (!settlementReported && fresh !== null) return { status: 'stale', challenge: fresh };
+    if (!settlementReported && fresh !== null) {
+      // A fresh challenge before the handler ran means the requirements this
+      // attempt was built against were stale, and the retry below signs the new
+      // ones. Releasing first is what keeps ONE decision costing ONE fee: the
+      // old committed reservation would otherwise stand beside the retry's.
+      await deps.authorizer.release(reservationId);
+      return { status: 'stale', challenge: fresh };
+    }
+    await deps.authorizer.commit(reservationId, fee);
     return {
       status: 'failed',
       reason: settlementReported
         ? 'The routing payment did not settle; nothing was signed again.'
         : 'The router answered 402 with no usable challenge.',
-      feeMaySettle: true,
+      committedAtomic: fee,
     };
   }
+  await deps.authorizer.commit(reservationId, fee);
   if (paid.status < 200 || paid.status >= 300) {
     return {
       status: 'failed',
       reason: `The router endpoint answered ${paid.status}.`,
-      feeMaySettle: true,
+      committedAtomic: fee,
     };
   }
   const parsed = DecisionResponseSchema.safeParse(paid.json);
@@ -218,15 +286,10 @@ async function payOnce(
     return {
       status: 'failed',
       reason: 'The router returned a decision this build cannot read.',
-      feeMaySettle: true,
+      committedAtomic: fee,
     };
   }
-  return {
-    status: 'decided',
-    response: parsed.data,
-    amountAtomic: payment.amountAtomic,
-    probed: false,
-  };
+  return { status: 'decided', response: parsed.data, amountAtomic: fee, probed: false };
 }
 
 function decodeChallenge(response: HttpResponse): PaymentRequired | null {

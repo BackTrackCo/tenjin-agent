@@ -80,6 +80,15 @@ export interface PayArgs {
   printBody?: boolean;
   /** Advertised terms that replace the registry lookup on this call. */
   terms?: AdvertisedTerms;
+  /**
+   * Request headers a caller was handed rather than composed: the router's
+   * provider leg sends the decision's own `accept` and `content-type`. Only
+   * those two names are accepted, so nothing can smuggle a credential or a
+   * payment header in beside the one this command signs.
+   */
+  headers?: Record<string, string>;
+  /** A body the caller already encoded; sent byte for byte. Needs `-X POST`. */
+  rawBody?: string;
   /** The same-turn duplicate guard's identity for this request. */
   requestKey?: string;
   /**
@@ -118,6 +127,7 @@ export async function runPay(
   if (lane === 'bazaar') await assertPublicDestination(url, deps.destination ?? {});
   const method = resolveMethod(args);
   const jsonBody = parseBody(args.data);
+  const headers = callerHeaders(args.headers);
 
   const fetchOpts = {
     timeoutMs: ctx.flags.timeout,
@@ -127,12 +137,15 @@ export async function runPay(
     blockRedirects: true as const,
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
     ...(jsonBody !== undefined ? { jsonBody } : {}),
+    ...(jsonBody === undefined && args.rawBody !== undefined ? { rawBody: args.rawBody } : {}),
+    ...(Object.keys(headers).length > 0 ? { headers } : {}),
     method,
   };
 
   const probe = await httpRequest(url, fetchOpts);
   if (!probe.ok) throw fetchFailureToCliError(probe);
   if (probe.status >= 200 && probe.status < 300) {
+    assertUsableResult(args.resultSchema, probe.text, probe.status, 'free');
     return deliver(url, lane, probe, { paid: false, printBody: args.printBody === true });
   }
   if (probe.status !== 402) {
@@ -184,10 +197,11 @@ export async function runPay(
     });
     const recheck = await httpRequest(url, {
       ...fetchOpts,
-      headers: { [SIWX_HEADER]: siwxHeader },
+      headers: { ...headers, [SIWX_HEADER]: siwxHeader },
     });
     if (!recheck.ok) throw fetchFailureToCliError(recheck);
     if (recheck.status >= 200 && recheck.status < 300) {
+      assertUsableResult(args.resultSchema, recheck.text, recheck.status, 'entitled');
       return deliver(url, lane, recheck, {
         paid: false,
         entitled: true,
@@ -271,7 +285,10 @@ export async function runPay(
   // hostile registry-listed seller answer 402 after each signature while
   // sessionBudget counted zero of the authorizations it was stacking up.
   // (httpRequest never throws on transport failure; it returns ok:false.)
-  const paid = await httpRequest(url, { ...fetchOpts, headers: payment.headers });
+  const paid = await httpRequest(url, {
+    ...fetchOpts,
+    headers: { ...headers, ...payment.headers },
+  });
   await authorizer.commit(reservationId, payment.amountAtomic);
   if (!paid.ok) throw fetchFailureToCliError(paid);
   if (paid.status >= 200 && paid.status < 300) {
@@ -280,7 +297,12 @@ export async function runPay(
       if (!check.valid) {
         throw new CliError('CONTRACT_MISMATCH', `The paid response is not a usable result.`, {
           fix: 'The payment has already settled and is counted against the session budget. Do not retry blind: the endpoint answered 2xx with a body that fails the success rule it was paid under.',
-          details: { status: paid.status, reason: check.reason },
+          details: {
+            status: paid.status,
+            reason: check.reason,
+            amountAtomic: payment.amountAtomic.toString(),
+            settlement: 'reported',
+          },
         });
       }
     }
@@ -302,7 +324,14 @@ export async function runPay(
       : `The endpoint answered ${paid.status} on the paid request; whether it settled is unknown.`,
     {
       fix: 'The signed payment already left and is counted against the session budget; the endpoint may still settle it. Do not simply retry: each attempt signs a fresh authorization. Verify the endpoint (and this listing, if Bazaar) before paying again.',
-      details: { status: paid.status, body: paid.json },
+      // The amount rides on the failure so a caller can report what is at risk
+      // rather than a zero. Settlement is unknown by construction here.
+      details: {
+        status: paid.status,
+        body: paid.json,
+        amountAtomic: payment.amountAtomic.toString(),
+        settlement: 'unknown',
+      },
     },
   );
 }
@@ -353,12 +382,37 @@ function resolveMethod(args: PayArgs): 'GET' | 'POST' {
       fix: 'Use -X GET or -X POST.',
     });
   }
-  if (method === 'GET' && args.data !== undefined) {
+  if (method === 'GET' && (args.data !== undefined || args.rawBody !== undefined)) {
     throw new CliError('USAGE', 'A request body needs -X POST.', {
       fix: 'Drop --data, or pass -X POST.',
     });
   }
   return method;
+}
+
+/**
+ * The caller's headers, or a refusal. Two names only: everything else on this
+ * request is either this command's to set (the payment signature, the user
+ * agent, the shelf bypass) or nobody's.
+ */
+function callerHeaders(headers: Record<string, string> | undefined): Record<string, string> {
+  if (headers === undefined) return {};
+  const allowed = new Set(['accept', 'content-type']);
+  const out: Record<string, string> = {};
+  for (const [name, value] of Object.entries(headers)) {
+    const lowered = name.toLowerCase();
+    if (!allowed.has(lowered) || value.length > 1_024 || /[\r\n]/.test(value)) {
+      throw new CliError(
+        'USAGE',
+        `This command will not send the header ${JSON.stringify(name)}.`,
+        {
+          fix: 'Only bounded accept and content-type headers ride on a paid request.',
+        },
+      );
+    }
+    out[lowered] = value;
+  }
+  return out;
 }
 
 function parseBody(data: string | undefined): unknown {
@@ -390,6 +444,27 @@ function decodeChallenge(res: HttpResponse, url: string): PaymentRequired {
       cause: err,
     });
   }
+}
+
+/**
+ * The caller's success rule, on EVERY delivery this command makes: a body that
+ * fails it is not a result, whether it arrived free, by entitlement or paid.
+ * Applying it only to the paid branch let a `{success:false}` body come back as
+ * `fulfilled` the moment the wallet was already entitled.
+ */
+function assertUsableResult(
+  schema: unknown,
+  body: string,
+  status: number,
+  how: 'free' | 'entitled',
+): void {
+  if (schema === undefined) return;
+  const check = validateResultBody(schema, body);
+  if (check.valid) return;
+  throw new CliError('CONTRACT_MISMATCH', 'The response is not a usable result.', {
+    fix: `Nothing was paid on this ${how} delivery. The endpoint answered ${status} with a body that fails the success rule it was asked under.`,
+    details: { status, reason: check.reason, paid: false },
+  });
 }
 
 /**

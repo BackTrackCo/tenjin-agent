@@ -79,35 +79,46 @@ if [ "$GOT_VERSION" != "$EXPECTED_VERSION" ]; then
 fi
 echo "pack-smoke: --version -> $GOT_VERSION (ok)"
 
-# 1b) The bundle must keep `node:sqlite` under its `node:` name. tsup's default
-# `removeNodeProtocol` once shipped it as `import("sqlite")`, which resolves to
-# nothing, so every CLI-side store open failed open while the daemon kept working
-# (tenjin-agent#225). Asserted on BEHAVIOUR, not bundle text: the packed CLI
-# proves the specifier survived by doing the thing it is for — `doctor --json`
-# reports the `store` check `ok` iff `loop.db` opened through node:sqlite.
-# Doctor's other checks may fail here (no network, no wallet); the check list
-# rides on both the success envelope and the failure envelope's `details`, so
-# only the one check is read. The positive grep stays as a cheap early signal
-# that names the bundler when the behaviour check trips.
-if ! grep -rq '"node:sqlite"' ./node_modules/tenjin-cli/dist/; then
-  echo "pack-smoke: FAIL — dist has no \"node:sqlite\" specifier at all; tsup must keep the node: prefix (removeNodeProtocol: false)" >&2
+# The `node:sqlite` check that used to sit here proved tsup kept the `node:`
+# prefix by opening the loop store through the packed doctor. That store is the
+# shelf's and this release registers nothing that reads it, so the same
+# invariant is proved by 1c instead: the packed worker is loaded by URL and
+# imports `node:worker_threads`, so a stripped prefix fails there too.
+
+# 1c) The keystore KDF worker, by its RUNTIME PATH. `keystore-kdf.ts` resolves
+# `./wallet-kdf-worker.mjs` beside its own chunk and hands it to `new Worker`,
+# so a `files` entry or a tsup block that stopped emitting it would leave every
+# wallet unlock throwing at the first signature, with every source-tree test
+# green. Asserted on behaviour: the packed worker derives a key from a keystore
+# on stdin-free workerData and returns the hex the parent expects.
+[ -f "./node_modules/tenjin-cli/dist/wallet-kdf-worker.mjs" ] || {
+  echo "pack-smoke: FAIL — dist/wallet-kdf-worker.mjs missing from the installed package" >&2
   exit 1
-fi
-set +e
-DOCTOR_OUT="$("$BIN" doctor --json 2>/dev/null)"
-set -e
-printf '%s' "$DOCTOR_OUT" | node -e '
-  let s = "";
-  process.stdin.on("data", (d) => (s += d)).on("end", () => {
-    let o;
-    try { o = JSON.parse(s); } catch { console.error("pack-smoke: FAIL — doctor --json did not print JSON"); process.exit(1); }
-    const checks = (o.data && o.data.checks) || (o.error && o.error.details && o.error.details.checks) || [];
-    const c = checks.find((x) => x && x.name === "store");
-    if (!c) { console.error("pack-smoke: FAIL — doctor reported no store check"); process.exit(1); }
-    if (c.status !== "ok") { console.error("pack-smoke: FAIL — packed CLI cannot load node:sqlite: " + c.detail); process.exit(1); }
-    console.log("pack-smoke: packed doctor loads node:sqlite (" + c.detail + ") (ok)");
+}
+# A PBKDF2 keystore and the key it derives, both fixed: the consumer sandbox has
+# no `ox` of its own, and the worker bundles the one that matters. A wrong key
+# here means the packed worker is not the KDF the wallet was encrypted with.
+KDF_KEYSTORE='{"crypto": {"cipher": "aes-128-ctr", "ciphertext": "908d830584a9ece93fa07b7e900423a136c9f0eb101ec884f9f7ed4198df5a05", "cipherparams": {"iv": "03030303030303030303030303030303"}, "kdf": "pbkdf2", "kdfparams": {"c": 1024, "dklen": 32, "prf": "hmac-sha256", "salt": "0707070707070707070707070707070707070707070707070707070707070707"}, "mac": "d16c240f4b901d3daf5a81af7835a7c600bddbde1cf3ad82e7ca0369acf167dc"}, "id": "fd2890d5-c26b-4333-8449-f948ad996e62", "version": 3}'
+KDF_EXPECTED='0x824d7d885002e6070efafa3288922e189ffee45189abc699b2f4eb10cb83e565'
+KDF_KEYSTORE="$KDF_KEYSTORE" KDF_EXPECTED="$KDF_EXPECTED" node --input-type=module -e '
+  import { Worker } from "node:worker_threads";
+  const keystore = JSON.parse(process.env.KDF_KEYSTORE);
+  const url = new URL("./node_modules/tenjin-cli/dist/wallet-kdf-worker.mjs", import.meta.url);
+  const worker = new Worker(url, { workerData: { keystore, password: "pack smoke" }, execArgv: [] });
+  const message = await new Promise((resolve, reject) => {
+    worker.once("message", resolve);
+    worker.once("error", reject);
+    worker.once("exit", () => reject(new Error("worker exited with no result")));
   });
-'
+  await worker.terminate();
+  if (message.key !== process.env.KDF_EXPECTED) {
+    throw new Error("the packed worker derived " + JSON.stringify(message) + ", expected " + process.env.KDF_EXPECTED);
+  }
+' || {
+  echo "pack-smoke: FAIL — the packed keystore worker did not derive its key" >&2
+  exit 1
+}
+echo "pack-smoke: packed wallet-kdf-worker.mjs derives the expected key (ok)"
 
 # 2) `tenjin config` exits 0 and prints a JSON envelope carrying schemaVersion.
 # JSON is validated by node (not jq — not guaranteed on a runner): a fixed script

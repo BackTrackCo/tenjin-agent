@@ -4,12 +4,12 @@ import { CliError } from '../lib/errors';
 import { toMoney } from '../lib/money';
 import { assertResultSchema, canonicalHash, validateAgainstSchema } from '../lib/request-schema';
 import { resolveContextSettings } from '../lib/settings';
-import type { SpendAuthorizer } from '../lib/wallet';
+import type { SpendAuthorizer, WalletProvider } from '../lib/wallet';
 import type { TenjinSigner } from '../lib/wallet/provider';
 import type { CommandContext } from '../context';
 import { requestDecision, type DecisionContract, type RequirementsCache } from './decision';
 import { readLatestPacket } from './session-file';
-import type { Packet } from './context';
+import { MAX_MESSAGE_CHARS, packetForText } from './context';
 
 /**
  * The `request` tool's handler: one paid decision, then one paid provider call,
@@ -34,11 +34,18 @@ export interface RequestToolArgs {
 export interface RequestToolDeps {
   ctx: CommandContext;
   signer: TenjinSigner;
+  /** The SAME provider the decision leg used. `runPay` opens its own otherwise,
+   *  and the local one re-runs scrypt per process, which is the 2.3 s the MCP
+   *  server's background unlock exists to hide. */
+  provider?: WalletProvider;
   authorizer: SpendAuthorizer;
   cache: RequirementsCache;
   fetchImpl?: typeof fetch;
   /** Set once the process has answered from one session's packet. */
   sessionKey?: string;
+  /** When the reading process started; a packet older than it is another
+   *  window's. Omitted by a caller that has no such boundary. */
+  startedAtMs?: number;
   now?: () => number;
   /** Test seam forwarded to the provider leg. */
   payDeps?: PayDeps;
@@ -52,18 +59,11 @@ export interface RequestToolResult {
   sessionKey?: string;
 }
 
-const EMPTY_PACKET: Packet = {
-  current: { role: 'user', text: '' },
-  history: [],
-  literalUrls: [],
-  historyStatus: 'unavailable',
-};
-
 export async function runRequestTool(
   args: RequestToolArgs,
   deps: RequestToolDeps,
 ): Promise<RequestToolResult> {
-  const query = args.query.trim();
+  const query = args.query.trim().slice(0, 8_000);
   if (query.length === 0) {
     return fail(
       'needs_input',
@@ -73,12 +73,23 @@ export async function runRequestTool(
   const settings = await resolveContextSettings(deps.ctx);
   const latest = await readLatestPacket(deps.ctx.dataDir, {
     ...(deps.now !== undefined ? { now: deps.now } : {}),
-    ...(deps.sessionKey !== undefined ? { onlyKey: deps.sessionKey } : {}),
+    ...(deps.sessionKey !== undefined
+      ? { onlyKey: deps.sessionKey }
+      : deps.startedAtMs !== undefined
+        ? { sinceMs: deps.startedAtMs }
+        : {}),
   });
   const sessionKey = latest?.key ?? deps.sessionKey;
 
   const outcome = await requestDecision(
-    { requestId: randomUUID(), query, packet: latest?.packet ?? EMPTY_PACKET },
+    // No packet is the subagent, restarted-session and expired-packet path the
+    // plan calls "route on query alone": the query becomes the current message,
+    // because the server refuses an empty one and the fee is already spent.
+    {
+      requestId: randomUUID(),
+      query,
+      packet: latest?.packet ?? packetForText(query.slice(0, MAX_MESSAGE_CHARS)),
+    },
     {
       ctx: deps.ctx,
       baseUrl: settings.baseUrl,
@@ -91,7 +102,9 @@ export async function runRequestTool(
   if (outcome.status === 'needs_approval') {
     return withKey(fail('needs_approval', outcome.reason), sessionKey);
   }
-  if (outcome.status === 'failed') return withKey(fail('failed', outcome.reason), sessionKey);
+  if (outcome.status === 'failed') {
+    return withKey(fail('failed', outcome.reason, outcome.committedAtomic), sessionKey);
+  }
 
   const routerFeeAtomic = outcome.amountAtomic;
   const { decision } = outcome.response;
@@ -119,16 +132,17 @@ export async function runRequestTool(
   };
 
   try {
-    // Inside the try, because the routing fee is already committed by here: a
-    // contract this build cannot turn into a request has to come back as the
-    // structured failure carrying that cost, never as a throw out of the tool.
-    const body = contract.method === 'GET' ? undefined : JSON.stringify(contract.arguments);
-    const url = contract.method === 'GET' ? withQuery(contract) : contract.url;
+    // The request is the server's, sent verbatim: the only thing built here is
+    // the decision about whether to send it, and the fee is already committed
+    // by this point, so a refusal has to come back as the envelope that names
+    // it rather than as a throw out of the tool.
+    const built = contract.request;
     const paid = await runPay(
       {
-        url,
-        method: contract.method,
-        ...(body !== undefined ? { data: body } : {}),
+        url: built.url,
+        method: built.method,
+        headers: built.headers,
+        ...(built.body !== undefined ? { rawBody: built.body } : {}),
         terms,
         requestKey: `${decision.capabilityId ?? 'capability'}:${canonicalHash(contract.arguments)}`,
         ...(contract.resultSchema !== undefined ? { resultSchema: contract.resultSchema } : {}),
@@ -137,6 +151,8 @@ export async function runRequestTool(
       deps.ctx,
       {
         ...(deps.payDeps ?? {}),
+        ...(deps.provider !== undefined ? { provider: deps.provider } : {}),
+        authorizer: deps.payDeps?.authorizer ?? deps.authorizer,
         confirm: async () => false,
       },
     );
@@ -145,10 +161,10 @@ export async function runRequestTool(
     return withKey(
       {
         isError: false,
-        summary: `Fulfilled by ${supplierOf(contract.url)} · ${costLines(routerFeeAtomic, providerAtomic).join(' · ')}`,
+        summary: `Fulfilled by ${supplierOf(built.url)} \u00b7 ${costLines(routerFeeAtomic, providerAtomic).join(' \u00b7 ')}`,
         envelope: {
           status: 'fulfilled',
-          supplier: supplierOf(contract.url),
+          supplier: supplierOf(built.url),
           parameters: contract.arguments,
           cost: costLines(routerFeeAtomic, providerAtomic),
           result: data.bodyText ?? '',
@@ -161,7 +177,15 @@ export async function runRequestTool(
     const cli = err instanceof CliError ? err : undefined;
     const status = cli?.code === 'POLICY_REFUSED' ? 'needs_approval' : 'failed';
     const reason = cli !== undefined ? `${cli.message} ${cli.fix ?? ''}`.trim() : String(err);
-    return withKey(fail(status, reason, routerFeeAtomic), sessionKey);
+    // A provider failure AFTER transmission carries the amount at risk on its
+    // details. Reporting zero there told the model the call was free when the
+    // ledger had already counted it.
+    const detail = (cli?.details ?? {}) as { amountAtomic?: string; settlement?: string };
+    const providerAtomic = BigInt(detail.amountAtomic ?? '0');
+    return withKey(
+      fail(status, reason, routerFeeAtomic, providerAtomic, detail.settlement),
+      sessionKey,
+    );
   }
 }
 
@@ -171,11 +195,22 @@ function checkContract(
   contract: DecisionContract,
   maxAutoSpendAtomic: bigint,
 ): { status: FailStatus; reason: string } | null {
-  if (contract.method !== 'GET' && contract.method !== 'POST') {
+  const built = contract.request;
+  if (built.method !== 'GET' && built.method !== 'POST') {
     return {
       status: 'failed',
-      reason: `This build executes GET and POST only, not ${contract.method}.`,
+      reason: `This build executes GET and POST only, not ${built.method}.`,
     };
+  }
+  const header = unsafeHeader(built.headers);
+  if (header !== null) {
+    return {
+      status: 'failed',
+      reason: `The decision sets a header this build will not send: ${header}`,
+    };
+  }
+  if (built.method === 'GET' && built.body !== undefined) {
+    return { status: 'failed', reason: 'The decision puts a body on a GET.' };
   }
   const check = validateAgainstSchema(contract.argumentSchema, contract.arguments);
   if (!check.valid) {
@@ -195,9 +230,9 @@ function checkContract(
     }
   }
   try {
-    // The decision's URL is a string on the wire. Parsing it here keeps a
-    // malformed one a refusal rather than a throw from the request build.
-    new URL(contract.url);
+    // Parsed above every signature: a URL the paying leg cannot read is a
+    // refusal here, never a throw from inside it.
+    new URL(built.url);
   } catch {
     return { status: 'failed', reason: 'The decision names a URL this build cannot parse.' };
   }
@@ -210,20 +245,19 @@ function checkContract(
   return null;
 }
 
-/** Arguments become query parameters on a GET, a JSON body otherwise. A value
- *  that is not a scalar has no query form and is refused by the URL build. */
-function withQuery(contract: DecisionContract): string {
-  const url = new URL(contract.url);
-  for (const [key, value] of Object.entries(contract.arguments)) {
-    if (value === null || typeof value === 'object') {
-      throw new CliError(
-        'CONTRACT_MISMATCH',
-        `The decision binds ${key} to a value a GET cannot carry.`,
-      );
-    }
-    url.searchParams.set(key, String(value));
+/**
+ * The only headers a routing decision may put on the wire. Authentication,
+ * transport and payment headers are this client's to set or nobody's, so a
+ * decision naming one is refused rather than quietly filtered.
+ */
+const SENDABLE_HEADERS = new Set(['accept', 'content-type']);
+
+function unsafeHeader(headers: Record<string, string>): string | null {
+  for (const [name, value] of Object.entries(headers)) {
+    if (!SENDABLE_HEADERS.has(name.toLowerCase())) return name;
+    if (value.length > 1_024 || /[\r\n]/.test(value)) return name;
   }
-  return url.toString();
+  return null;
 }
 
 function supplierOf(url: string): string {
@@ -241,14 +275,23 @@ export function costLines(routerFeeAtomic: bigint, providerAtomic: bigint): stri
   ];
 }
 
-function fail(status: FailStatus, reason: string, routerFeeAtomic = 0n): RequestToolResult {
+function fail(
+  status: FailStatus,
+  reason: string,
+  routerFeeAtomic = 0n,
+  providerAtomic = 0n,
+  settlement?: string,
+): RequestToolResult {
   return {
     isError: true,
     summary: `x402 request ${status}: ${reason}`,
     envelope: {
       status,
       reason,
-      cost: costLines(routerFeeAtomic, 0n),
+      // What LEFT, not what was delivered: an authorization that was
+      // transmitted is money at risk whether or not a result came back.
+      cost: costLines(routerFeeAtomic, providerAtomic),
+      ...(settlement !== undefined ? { settlement } : {}),
       providerContentUntrusted: true,
     },
   };
