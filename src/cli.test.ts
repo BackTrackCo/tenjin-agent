@@ -1,28 +1,10 @@
 import { describe, it, expect, afterAll, afterEach, beforeAll, beforeEach, vi } from 'vitest';
-import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 
-/**
- * Where the self-heal resolves its packaged skills from. Empty means the real
- * resolution, which from a source checkout is a working tree the heal refuses;
- * the heal case below points it at a packaged LAYOUT instead, because that
- * refusal is by directory shape and nothing else here can produce one.
- */
-const skillsSrc = vi.hoisted(() => ({ dir: '' }));
-vi.mock('./lib/skills-source', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('./lib/skills-source')>();
-  return {
-    ...actual,
-    resolveSkillsSource: (startDir: string) =>
-      skillsSrc.dir === '' ? actual.resolveSkillsSource(startDir) : skillsSrc.dir,
-  };
-});
 import { main } from './cli';
-import { renderSkillMarkdown } from './lib/skill-materialize';
-import { resolveSkillsSource } from './lib/skills-source';
 import { PERMISSIONS_DOC_URL } from './lib/permissions';
 import type { Io } from './lib/output';
 
@@ -386,71 +368,3 @@ describe('the update nudge and `install --refresh`', () => {
     expect(fetched).toBe(1);
   });
 });
-
-describe('skills self-heal', () => {
-  const wiredPath = (): string =>
-    join(process.env.HOME!, '.claude', 'skills', 'tenjin-search', 'SKILL.md');
-  const STALE = '---\nname: tenjin-search\n---\n\nstale\n';
-
-  // The file-level CI=1 would skip the heal outright and make both cases below
-  // pass for the wrong reason, so this block clears it. Every case here stays off
-  // a TTY, which is what keeps the update nudge (TTY-gated, unlike the heal) from
-  // reaching the network once CI is out of the way.
-  beforeEach(async () => {
-    process.env.CI = '';
-    await mkdir(join(process.env.HOME!, '.claude', 'skills', 'tenjin-search'), { recursive: true });
-    await writeFile(wiredPath(), STALE);
-  });
-  afterEach(async () => {
-    process.env.CI = '1';
-    skillsSrc.dir = '';
-    await rm(join(process.env.HOME!, '.claude'), { recursive: true, force: true });
-  });
-
-  /**
-   * The packaged shape the heal insists on: a `skills/` whose parent holds no
-   * `src/`. Copied out of the real one, so what lands is the bytes this build
-   * ships.
-   */
-  async function packagedLayout(): Promise<string> {
-    const real = resolveSkillsSource(fileURLToPath(new URL('.', import.meta.url)));
-    const dir = join(sandbox, 'pkg', 'skills');
-    await cp(real, dir, { recursive: true });
-    return dir;
-  }
-
-  // A heal that RAN: the packaged-layout copy below passes the source-checkout
-  // discriminator, so the file is genuinely rewritten while this asserts stdout.
-  // Without it the case would pass on a heal that never happened.
-  it('heals a stale skill and still emits exactly one JSON object, exit 0', async () => {
-    skillsSrc.dir = await packagedLayout();
-    const cap = captureIo();
-    expect(await main(['config', '--json'], cap.io)).toBe(0);
-    const parsed = JSON.parse(cap.stdout()) as { ok: boolean };
-    expect(parsed.ok).toBe(true);
-    // RENDERED for this machine's mode, not the raw packaged bytes: the heal
-    // materializes what it writes (lib/skill-materialize), and this run has no
-    // team shelf configured, so the public arm is what should have landed.
-    expect(await readFile(wiredPath(), 'utf8')).toBe(
-      renderSkillMarkdown(
-        await readFile(join(skillsSrc.dir, 'tenjin-search', 'SKILL.md'), 'utf8'),
-        { teamMode: false },
-      ),
-    );
-    expect(cap.stderr()).toContain('Updated');
-  });
-
-  // This suite runs from the source tree, which is exactly the case the heal
-  // declines: a checkout's skills/ can be half-edited, and nobody installed it.
-  it('does not heal from a source checkout', async () => {
-    const cap = captureIo();
-    expect(await main(['config'], cap.io)).toBe(0);
-    expect(await readFile(wiredPath(), 'utf8')).toBe(STALE);
-  });
-});
-
-/**
- * The retraction verb the CLI simply did not have (#221): an agent asked to take
- * a publish back got `unknown command 'delete'`. These are dispatcher-level only
- * — routing and the edge check that fires before any wallet or network touch.
- */

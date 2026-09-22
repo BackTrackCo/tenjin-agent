@@ -171,24 +171,6 @@ export function buildProgram(
     if (command !== 'update' && !refreshRun) {
       await maybeUpdate({ dir: dataDir(process.env), io, json });
     }
-    // Every command but `install` is a chance to catch up a skill left stale by
-    // an upgrade; `install` has just written the same bytes from the same source.
-    // Lazily imported, like the command bodies, to keep it off the boot path, and
-    // the import is INSIDE the guard: a chunk that is missing or corrupt (a
-    // half-unpacked upgrade) would otherwise reject here, after the envelope, and
-    // turn a finished command into a second envelope and a nonzero exit.
-    if (command !== 'install') {
-      try {
-        const { healWiredSkills } = await import('./lib/skill-heal');
-        // The data dir, because the skill text it writes is shaped by the machine's
-        // configured mode (lib/skill-materialize). Resolved the same way the update
-        // nudge above resolves it, and for the same reason: a failed buildContext
-        // leaves no ctx to read one from.
-        await healWiredSkills({ io, dataDir: dataDir(process.env) });
-      } catch {
-        // Nothing here is the command's business.
-      }
-    }
   };
 
   program
