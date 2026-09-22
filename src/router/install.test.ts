@@ -1029,26 +1029,50 @@ describe('the MCP registration is reconciled, not re-added', () => {
     expect(result.humanLines?.join('\n')).not.toContain('claude mcp add');
   });
 
-  it('removes and re-adds a same-name entry that launches something else', async () => {
+  /**
+   * A REGISTRATION THIS COMMAND DID NOT WRITE IS NOT ITS TO DELETE. An `x402`
+   * entry pointing at another binary may be a tool of the user's that happens
+   * to share the name, and an installer that removes it to make room has
+   * destroyed configuration nobody asked it to touch. It refuses, names the
+   * conflict, and prints the two commands that resolve it.
+   */
+  it('refuses a same-name entry that launches something else, and removes nothing', async () => {
     const fs = await import('node:fs/promises');
     const cwd = join(home, 'project');
     await fs.mkdir(cwd, { recursive: true });
     await runRouterInstall({ project: true }, ctx(), deps({ cwd }));
     await writeMcpJson(cwd, { command: 'node', args: ['stale.js'] });
 
-    const existing = { present: true };
-    const registerMcp = addOnce(existing);
-    const removeMcp = vi.fn(async () => {
-      existing.present = false;
-    });
-    const result = await runRouterInstall(
-      { refresh: true },
-      ctx(),
-      deps({ cwd, registerMcp, removeMcp }),
+    const registerMcp = addOnce({ present: true });
+    const result = await runRouterInstall({ project: true }, ctx(), deps({ cwd, registerMcp }));
+    expect(registerMcp).not.toHaveBeenCalled();
+    const mcp = (result.data as { mcp: Record<string, unknown> }).mcp;
+    expect(mcp).toMatchObject({ registered: false, reconciled: 'unrepaired' });
+    expect(String(mcp.reason)).toContain('will not remove a registration it did not write');
+    // Both commands, in the order they have to be run.
+    expect(String(mcp.command)).toContain('claude mcp remove x402 -s project');
+    expect(String(mcp.command)).toContain('claude mcp add x402 -s project -- tenjin mcp');
+    // And the entry is exactly as it was.
+    const after = JSON.parse(await fs.readFile(join(cwd, '.mcp.json'), 'utf8')) as {
+      mcpServers: { x402: unknown };
+    };
+    expect(after.mcpServers.x402).toEqual({ command: 'node', args: ['stale.js'] });
+  });
+
+  it('repairs nothing and fails the refresh while that entry stands', async () => {
+    const fs = await import('node:fs/promises');
+    const cwd = join(home, 'project');
+    await fs.mkdir(cwd, { recursive: true });
+    await runRouterInstall({ project: true }, ctx(), deps({ cwd }));
+    await writeMcpJson(cwd, { command: 'node', args: ['stale.js'] });
+
+    const registerMcp = addOnce({ present: true });
+    const err = await runRouterInstall({ refresh: true }, ctx(), deps({ cwd, registerMcp })).catch(
+      (e: unknown) => e,
     );
-    expect(removeMcp).toHaveBeenCalledWith({ scope: 'project', cwd });
-    expect(registerMcp).toHaveBeenCalledTimes(1);
-    expect(onlyInstall(result).mcp).toMatchObject({ registered: true, reconciled: 'repaired' });
+    expect((err as CliError).code).toBe('REFUSED');
+    expect((err as CliError).message).toContain('could not repair');
+    expect(registerMcp).not.toHaveBeenCalled();
   });
 
   it('adds when the scope has no entry at all', async () => {
@@ -1059,23 +1083,6 @@ describe('the MCP registration is reconciled, not re-added', () => {
     const result = await runRouterInstall({ project: true }, ctx(), deps({ cwd, registerMcp }));
     expect(registerMcp).toHaveBeenCalledTimes(1);
     expect(result.data).toMatchObject({ mcp: { registered: true, reconciled: 'added' } });
-  });
-
-  it('fails the refresh when a stale entry could not be repaired', async () => {
-    const fs = await import('node:fs/promises');
-    const cwd = join(home, 'project');
-    await fs.mkdir(cwd, { recursive: true });
-    await runRouterInstall({ project: true }, ctx(), deps({ cwd }));
-    await writeMcpJson(cwd, { command: 'node', args: ['stale.js'] });
-
-    const removeMcp = vi.fn(async () => {
-      throw new Error('claude mcp remove failed');
-    });
-    const err = await runRouterInstall({ refresh: true }, ctx(), deps({ cwd, removeMcp })).catch(
-      (e: unknown) => e,
-    );
-    expect((err as CliError).code).toBe('REFUSED');
-    expect((err as CliError).message).toContain('could not repair');
   });
 
   it('refuses to write over a registration file it cannot parse', async () => {

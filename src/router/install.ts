@@ -130,9 +130,6 @@ export interface RouterInstallDeps {
     command: string,
     opts: { scope: 'user' | 'project'; cwd: string },
   ) => Promise<void>;
-  /** Runs `claude mcp remove`, the only safe way past a same-name entry that
-   *  launches something else: `add` refuses to overwrite one. */
-  removeMcp?: (opts: { scope: 'user' | 'project'; cwd: string }) => Promise<void>;
   /** Reads the registration the scope's own file holds; tests inject it. */
   readMcpEntry?: (
     scope: 'user' | 'project',
@@ -153,12 +150,13 @@ export interface McpRegistration {
    * WHAT THIS RUN ACTUALLY DID, which `registered` alone cannot say:
    * `already-registered` (the scope's file already launches `tenjin mcp`, and
    * nothing was spawned), `added`, `repaired` (a same-name entry launching
-   * something else was removed and re-added), `unrepaired` (a registration this
-   * run KNOWS is wrong or unreadable and could not fix) or `unavailable` (it is
-   * simply not there and this machine could not add it, e.g. no `claude` on
-   * PATH). A refresh fails on `unrepaired`, because reporting convergence over
-   * a registration that launches something else is the thing to avoid; it still
-   * only prints the manual command for `unavailable`.
+   * something else was removed and re-added, which only `uninstall` does now),
+   * `unrepaired` (a registration this run KNOWS is wrong or unreadable and will
+   * not touch) or `unavailable` (it is simply not there and this machine could
+   * not add it, e.g. no `claude` on PATH). A refresh fails on `unrepaired`,
+   * because reporting convergence over a registration that launches something
+   * else is the thing to avoid; it still only prints the manual command for
+   * `unavailable`.
    */
   reconciled: 'already-registered' | 'added' | 'repaired' | 'unrepaired' | 'unavailable';
   reason?: string;
@@ -320,9 +318,14 @@ async function ensureAllowRule(path: string): Promise<AllowRuleResult> {
  * else never converged, because `add` refuses to overwrite it.
  *
  * So the scope's own file is read first: an entry that already launches
- * `tenjin mcp` is the goal state and nothing is spawned; a stale one is removed
- * and re-added; a file that cannot be read is refused out loud rather than
- * written over.
+ * `tenjin mcp` is the goal state and nothing is spawned, and a file that cannot
+ * be read is refused out loud rather than written over.
+ *
+ * AN `x402` ENTRY THAT LAUNCHES SOMETHING ELSE IS SOMEBODY ELSE'S. This command
+ * will not delete it. It may be another tool of the user's that happens to
+ * share the name, and an installer that removes a registration nobody asked it
+ * to touch has destroyed configuration to make its own output look tidy. The
+ * conflict is reported with the exact two commands to run, and the user decides.
  */
 async function registerMcpServer(
   deps: RouterInstallDeps,
@@ -346,43 +349,33 @@ async function registerMcpServer(
       reason: `the ${scope}-scope registration file could not be read, so nothing was written over it`,
     };
   }
+  // REFUSED, NOT REPLACED. Nothing of the user's is removed to make room.
+  if (existing.state === 'wrong-command') {
+    return {
+      ...base,
+      registered: false,
+      reconciled: 'unrepaired',
+      command: `${mcpRemoveCommand(project)} && ${command}`,
+      reason: `an MCP server named ${MCP_SERVER_NAME} is already registered at ${scope} scope and launches something else. This command will not remove a registration it did not write; run the two commands above if that entry is stale`,
+    };
+  }
   const which = deps.which ?? ((bin: string) => onPath(bin, env));
   if (!which('claude')) {
     return {
       ...base,
       registered: false,
-      // A machine with no `claude` on PATH cannot be wired by this run either
-      // way; that is not the same as finding a registration that is WRONG,
-      // which is what a refresh is entitled to fail on.
-      reconciled: existing.state === 'wrong-command' ? 'unrepaired' : 'unavailable',
+      reconciled: 'unavailable',
       reason: 'the `claude` binary is not on PATH',
     };
   }
-  if (existing.state === 'wrong-command') {
-    try {
-      await (deps.removeMcp ?? runClaudeMcpRemove)({ scope, cwd });
-    } catch (err) {
-      return {
-        ...base,
-        registered: false,
-        reconciled: 'unrepaired',
-        command: `${mcpRemoveCommand(project)} && ${command}`,
-        reason: `a ${MCP_SERVER_NAME} entry that launches something else could not be removed: ${err instanceof Error ? err.message : String(err)}`,
-      };
-    }
-  }
   try {
     await (deps.registerMcp ?? runClaudeMcpAdd)(command, { scope, cwd });
-    return {
-      ...base,
-      registered: true,
-      reconciled: existing.state === 'wrong-command' ? 'repaired' : 'added',
-    };
+    return { ...base, registered: true, reconciled: 'added' };
   } catch (err) {
     return {
       ...base,
       registered: false,
-      reconciled: existing.state === 'wrong-command' ? 'unrepaired' : 'unavailable',
+      reconciled: 'unavailable',
       reason: err instanceof Error ? err.message : String(err),
     };
   }
@@ -446,13 +439,6 @@ export async function readMcpEntry(
   const entry = (servers as Record<string, unknown>)[MCP_SERVER_NAME];
   if (entry === undefined) return { found: true, state: 'absent' };
   return { found: true, state: classifyMcpEntry(entry) };
-}
-
-async function runClaudeMcpRemove(opts: { scope: 'user' | 'project'; cwd: string }): Promise<void> {
-  await exec('claude', ['mcp', 'remove', MCP_SERVER_NAME, '-s', opts.scope], {
-    timeout: 20_000,
-    cwd: opts.cwd,
-  });
 }
 
 /** Project scope is decided by the working directory as well as the flag:
