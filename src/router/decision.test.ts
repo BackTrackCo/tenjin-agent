@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { CommandContext } from '../context';
 import { packetForText } from './context';
-import { fetchPrepared, preparedPath, requestDecision, ROUTER_PATH } from './decision';
+import { requestDecision, ROUTER_PATH } from './decision';
 
 /**
  * THE DECISION IS FREE. No 402 on this route, no challenge to decode, no
@@ -107,17 +107,15 @@ describe('one free decision', () => {
     expect(Object.keys(calls[0]!.body as object).sort()).toEqual(['packet', 'schemaVersion']);
   });
 
-  it('fetches a prepared decision by id, free, with a GET', async () => {
-    const { fetchImpl, calls } = net({ ...EXECUTE, state: 'ready' });
-    const outcome = await fetchPrepared('k3f9', { ctx: ctx(), baseUrl: BASE, fetchImpl });
-    expect(outcome.status).toBe('decided');
-    expect(calls[0]!.url).toBe(`${BASE}${preparedPath('k3f9')}`);
-    expect(calls[0]!.method).toBe('GET');
-    expect(calls[0]!.body).toBeUndefined();
-  });
-
-  it('escapes an id rather than letting it shape the path', () => {
-    expect(preparedPath('../../admin')).toBe(`${ROUTER_PATH}/..%2F..%2Fadmin`);
+  it('sends the query and the turn id from the tool, with no packet of its own', async () => {
+    const { fetchImpl, calls } = net(EXECUTE);
+    await requestDecision(
+      { query: 'BTC and ETH price', id: 'k3f9' },
+      { ctx: ctx(), baseUrl: BASE, fetchImpl },
+    );
+    // The packet lives on the backend against the id; the client keeps none.
+    expect(Object.keys(calls[0]!.body as object).sort()).toEqual(['id', 'query', 'schemaVersion']);
+    expect(calls[0]!.method).toBe('POST');
   });
 
   it('surfaces a typed refusal by its own code and message', async () => {

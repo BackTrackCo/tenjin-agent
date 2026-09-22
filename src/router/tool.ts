@@ -6,16 +6,7 @@ import { resolveContextSettings } from '../lib/settings';
 import type { SpendAuthorizer, WalletProvider } from '../lib/wallet';
 import type { TenjinSigner } from '../lib/wallet/provider';
 import type { CommandContext } from '../context';
-import {
-  fetchPrepared,
-  requestDecision,
-  type Decision,
-  type DecisionContract,
-  type DecisionDiagnostics,
-  type PreparedDecision,
-} from './decision';
-import { MAX_MESSAGE_CHARS, packetForText } from './context';
-import { issuedHere } from './issued-ids';
+import { requestDecision, type DecisionContract, type DecisionDiagnostics } from './decision';
 
 /**
  * The `request` tool: one free decision per lookup, then ONE payment, to the
@@ -82,58 +73,26 @@ export async function runRequestTool(
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   };
 
-  // THE FAST PATH. An id the hook handed out runs the decision that was already
-  // made for this turn. A `pending` row means the background binder has not
-  // finished, and an expired or failed one is not an error: both fall through
-  // to one fresh decision from the query, which is the accurate path anyway.
-  let decision: Decision | PreparedDecision | null = null;
-  let usedId = false;
-  let idIgnored: string | undefined;
-  if (args.id !== undefined && args.id.length > 0) {
-    // AN ID IS ONLY A SHORTCUT THIS MACHINE OFFERED. Accepting one from
-    // anywhere lets a fetched page, or somebody else's message, name an id and
-    // have this wallet pay for a contract nobody here asked for. An id that is
-    // not on the list is not an error: the query path runs and the lookup still
-    // happens, which is also what an expired one gets.
-    const issued = await issuedHere(deps.ctx.dataDir, args.id);
-    if (issued === null) {
-      idIgnored = 'that id was not offered on this machine, so the query decided this lookup';
-    } else if (mismatchedTarget(issued.target, query)) {
-      idIgnored = 'that id was prepared for a different page, so the query decided this lookup';
-    } else {
-      const prepared = await fetchPrepared(args.id, decisionDeps);
-      if (
-        prepared.status === 'decided' &&
-        usable(prepared.decision) &&
-        matches(prepared.decision, query)
-      ) {
-        decision = prepared.decision;
-        usedId = true;
-      } else {
-        idIgnored = 'that prepared decision was not usable, so the query decided this lookup';
-      }
-    }
+  // ONE CALL, ONE DECISION. The query the model wrote goes to the backend with
+  // the turn id when it has one, and the backend decides from that query plus
+  // the packet it stored under that id. Nothing is fetched by id and nothing is
+  // waited for: an id the backend does not know is its own plain note, and the
+  // decision still runs from the query.
+  //
+  // THE SHORTCUT IS GONE ON PURPOSE. Running a decision the gate prepared from
+  // the whole turn measures 53 of 56 against 55 of 56 for this pair, and on a
+  // mixed turn it paid for the wrong lookup: the only thing the client could
+  // check was whether the two named different URLs, which that case did not.
+  const fresh = await requestDecision(
+    { query, ...(args.id !== undefined && args.id.length > 0 ? { id: args.id } : {}) },
+    decisionDeps,
+  );
+  if (fresh.status === 'failed') {
+    return fail('failed', fresh.reason, {
+      ...(fresh.errorCode !== undefined ? { errorCode: fresh.errorCode } : {}),
+    });
   }
-
-  if (decision === null) {
-    // No packet of our own: the backend holds the turn's packet against the id,
-    // and the query the model sends is the current message when it does not.
-    const fresh = await requestDecision(
-      {
-        query,
-        packet: packetForText(query.slice(0, MAX_MESSAGE_CHARS)),
-        ...(args.id !== undefined ? { id: args.id } : {}),
-      },
-      decisionDeps,
-    );
-    if (fresh.status === 'failed') {
-      return fail('failed', fresh.reason, {
-        ...(fresh.errorCode !== undefined ? { errorCode: fresh.errorCode } : {}),
-        ...(idIgnored !== undefined ? { idIgnored } : {}),
-      });
-    }
-    decision = fresh.decision;
-  }
+  const decision = fresh.decision;
 
   if (decision.action !== 'execute' || decision.contract === undefined) {
     return fail(
@@ -141,8 +100,6 @@ export async function runRequestTool(
       decision.description ?? 'The router did not select a paid capability.',
       {
         ...(decision.diagnostics !== undefined ? { diagnostics: decision.diagnostics } : {}),
-        usedPreparedDecision: usedId,
-        ...(idIgnored !== undefined ? { idIgnored } : {}),
       },
     );
   }
@@ -192,8 +149,6 @@ export async function runRequestTool(
       supplier: supplierOf(built.url),
       ...(contract.arguments !== undefined ? { parameters: contract.arguments } : {}),
       cost: costLines(providerAtomic),
-      usedPreparedDecision: usedId,
-      ...(idIgnored !== undefined ? { idIgnored } : {}),
       result: data.bodyText ?? '',
       providerContentUntrusted: true,
     };
@@ -236,56 +191,7 @@ export async function runRequestTool(
       providerAtomic: BigInt(detail.amountAtomic ?? '0'),
       ...(detail.settlement !== undefined ? { settlement: detail.settlement } : {}),
       ...(detail.diagnosis !== undefined ? { diagnosis: detail.diagnosis } : {}),
-      usedPreparedDecision: usedId,
-      ...(idIgnored !== undefined ? { idIgnored } : {}),
     });
-  }
-}
-
-/** The prepared line named a page and the query names another one: the id
- *  belongs to a different lookup, so the query decides this one. */
-function mismatchedTarget(target: string | undefined, query: string): boolean {
-  if (target === undefined) return false;
-  const asked = firstUrl(query);
-  return asked !== null && asked !== firstUrl(target);
-}
-
-/** A prepared row this tool can act on at all. */
-function usable(prepared: PreparedDecision): boolean {
-  if (prepared.state === 'pending' || prepared.state === 'binding_failed') return false;
-  if (prepared.state === 'expired') return false;
-  return prepared.action !== 'execute' || prepared.contract !== undefined;
-}
-
-/**
- * THE ONE MISMATCH RULE, and it is deliberately blunt: when the query names an
- * explicit http(s) URL and the prepared call targets a DIFFERENT one, the id
- * was prepared for another lookup and is ignored. No new classifier call, no
- * topic guessing; anything subtler is the backend's to catch, since it compares
- * the incoming query with the prepared one and re-decides when they differ.
- */
-export function matches(prepared: PreparedDecision, query: string): boolean {
-  const asked = firstUrl(query);
-  if (asked === null) return true;
-  const target = prepared.contract !== undefined ? firstUrl(prepared.contract.request.url) : null;
-  const inside =
-    prepared.contract !== undefined
-      ? firstUrl(JSON.stringify(prepared.contract.arguments ?? {}))
-      : null;
-  if (target === null && inside === null) return true;
-  return asked === target || asked === inside;
-}
-
-/** The first http(s) URL in a string, compared by origin and path only: a
- *  tracking parameter is not a different page. */
-function firstUrl(text: string): string | null {
-  const match = /https?:\/\/[^\s"'<>)\]]+/i.exec(text);
-  if (match === null) return null;
-  try {
-    const url = new URL(match[0]);
-    return `${url.protocol}//${url.host.toLowerCase()}${url.pathname.replace(/\/$/, '')}`;
-  } catch {
-    return null;
   }
 }
 
@@ -409,10 +315,6 @@ interface FailExtras {
   errorCode?: string;
   /** What stopped a non-execute decision, in the backend's own terms. */
   diagnostics?: DecisionDiagnostics;
-  /** Whether this answer came from the hook's prepared decision. */
-  usedPreparedDecision?: boolean;
-  /** Why an id that was sent did not run, in one line. */
-  idIgnored?: string;
 }
 
 /** The headline: calm for a routine outcome, explicit for a real failure. */
@@ -459,10 +361,6 @@ function fail(status: FailStatus, reason: string, extras: FailExtras = {}): Requ
       // What LEFT, not what was delivered: an authorization that was
       // transmitted is money at risk whether or not a result came back.
       cost: costLines(extras.providerAtomic ?? 0n),
-      ...(extras.usedPreparedDecision !== undefined
-        ? { usedPreparedDecision: extras.usedPreparedDecision }
-        : {}),
-      ...(extras.idIgnored !== undefined ? { idIgnored: extras.idIgnored } : {}),
       ...(extras.settlement !== undefined ? { settlement: extras.settlement } : {}),
       ...(extras.diagnosis !== undefined ? { diagnosis: extras.diagnosis } : {}),
       providerContentUntrusted: true,

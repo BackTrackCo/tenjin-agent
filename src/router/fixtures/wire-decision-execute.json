@@ -7,5 +7,46 @@
   "provider": "CoinMarketCap",
   "providerPriceAtomic": "10000",
   "category": "crypto price quote",
-  "jev": { "calls": 2, "latencyMs": 900 }
+  "jev": {
+    "calls": 2,
+    "latencyMs": 900
+  },
+  "contract": {
+    "method": "GET",
+    "url": "https://pro-api.coinmarketcap.com/x402/v3/cryptocurrency/quotes/latest",
+    "arguments": {
+      "symbol": "BTC,ETH",
+      "convert": "USD"
+    },
+    "argumentSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "symbol": {
+          "type": "string"
+        },
+        "convert": {
+          "type": "string"
+        }
+      },
+      "required": ["symbol"],
+      "additionalProperties": false
+    },
+    "resultSchema": {
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "object"
+        }
+      },
+      "required": ["data"]
+    },
+    "request": {
+      "url": "https://pro-api.coinmarketcap.com/x402/v3/cryptocurrency/quotes/latest?symbol=BTC%2CETH&convert=USD",
+      "method": "GET",
+      "headers": {
+        "accept": "application/json"
+      }
+    }
+  }
 }

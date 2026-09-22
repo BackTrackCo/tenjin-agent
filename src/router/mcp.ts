@@ -31,7 +31,7 @@ import { runRequestTool, type RequestToolDeps } from './tool';
  * half forbidding any rewording at all, which is neither enforceable nor
  * necessary: the backend is what binds the call, it holds the turn's packet
  * against the decision id, and it compares the query it is given with the one
- * it prepared. What the host owes is the immediate operation and the inputs
+ * it stored. What the host owes is the immediate operation and the inputs
  * that belong to it, exactly as the user gave them where they are exact, which
  * is one sentence rather than two rules.
  */
@@ -103,9 +103,9 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
           .string()
           .optional()
           .describe(
-            'The prepared decision from a hook line, when one named this lookup. It is a ' +
-              'shortcut: the tool runs that decision instead of making a new one. Leave it ' +
-              'out, or send a different query, and the tool decides from your query instead.',
+            'The turn id from a hook line, when one is there. It only tells the router which ' +
+              "turn's context to decide with; your query is what is routed. Leave it out and " +
+              'the lookup is decided from the query alone.',
           ),
       },
     },

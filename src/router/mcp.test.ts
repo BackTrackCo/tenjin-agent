@@ -172,7 +172,7 @@ describe('the base URL the MCP server routes against', () => {
  * turn's packet and compares the query it gets with the one it prepared.
  */
 describe('what the tool tells the model to send', () => {
-  it('asks for one lookup, and offers the id as a shortcut beside it', async () => {
+  it('asks for one lookup, with the turn id beside it', async () => {
     const { SCOPE_RULE } = await import('./mcp');
     const server = buildRouterMcpServer({
       dataDir: dir,
@@ -195,7 +195,7 @@ describe('what the tool tells the model to send', () => {
       // The query is always required; the id never is.
       expect(schema.properties.query.description).toContain(SCOPE_RULE);
       expect(schema.required).toEqual(['query']);
-      expect(schema.properties.id?.description).toContain('shortcut');
+      expect(schema.properties.id?.description).toContain("turn's context");
       // One lookup, not the whole turn, and no blanket ban on wording.
       expect(SCOPE_RULE).toContain('one concrete external lookup');
       expect(SCOPE_RULE).toContain('A mixed turn is not one lookup');

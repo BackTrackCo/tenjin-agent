@@ -6,14 +6,8 @@ import { buildPaymentRequired, testWalletProvider } from '../lib/read-test-utils
 import { resolveSpendAuthorizer } from '../lib/wallet';
 import type { SpendAuthorization, SpendAuthorizer } from '../lib/wallet';
 import type { CommandContext } from '../context';
-import { runRequestTool, matches } from './tool';
-import { preparedPath, ROUTER_PATH } from './decision';
-import { recordIssuedId } from './issued-ids';
-
-/** What the hook does before it offers an id: write down what it offered. */
-async function offered(id: string, target?: string): Promise<void> {
-  await recordIssuedId(dir, { id, ...(target !== undefined ? { target } : {}) });
-}
+import { runRequestTool } from './tool';
+import { ROUTER_PATH } from './decision';
 
 /**
  * The `request` tool after the fee: ONE free decision, then ONE payment, to the
@@ -35,7 +29,6 @@ afterEach(async () => {
 
 const ROUTER = 'https://tenjin.sh';
 const PROVIDER = 'https://pro-api.example.test/x402/v3/quotes';
-const PAGE = 'https://example.test/spec';
 
 function ctx(): CommandContext {
   const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
@@ -168,13 +161,12 @@ function providerLegs(body: unknown = { data: { BTC: 1 } }): Leg[] {
   ];
 }
 
-describe('the request tool, one payment per lookup', () => {
-  it('runs the prepared decision for a matching id and pays the provider once', async () => {
+describe('the request tool, one decision and one payment per lookup', () => {
+  it('sends the query and the turn id, and pays the provider once', async () => {
     const { fetchImpl, calls } = net([
-      { url: ROUTER, status: 200, body: { ...decision(), state: 'ready' } },
+      { url: ROUTER, status: 200, body: decision() },
       ...providerLegs(),
     ]);
-    await offered('k3f9');
     const result = await runRequestTool(
       { query: 'BTC and ETH price', id: 'k3f9' },
       deps(fetchImpl),
@@ -183,77 +175,32 @@ describe('the request tool, one payment per lookup', () => {
     expect(result.isError).toBe(false);
     expect(result.envelope).toMatchObject({
       status: 'fulfilled',
-      usedPreparedDecision: true,
-      // ONE cost line: the router took nothing.
+      // ONE cost line: the decision took nothing.
       cost: ['provider price 0.01 USD'],
     });
-    // The decision was fetched by id, free, and never re-decided.
-    expect(calls[0]!.url).toBe(`${ROUTER}${preparedPath('k3f9')}`);
-    expect(calls[0]!.method).toBe('GET');
+    // One decision call, no fetch by id and nothing waited for.
+    expect(calls).toHaveLength(3);
+    expect(calls[0]!.method).toBe('POST');
+    expect(calls[0]!.url).toBe(`${ROUTER}${ROUTER_PATH}`);
     expect(calls.filter((c) => c.paid)).toHaveLength(1);
-    expect(calls.every((c) => !c.url.startsWith(`${ROUTER}${ROUTER_PATH}?`))).toBe(true);
   });
 
-  it('makes exactly one fresh decision when there is no id', async () => {
+  it('works the same with no id at all', async () => {
     const { fetchImpl, calls } = net([
       { url: ROUTER, status: 200, body: decision() },
       ...providerLegs(),
     ]);
     const result = await runRequestTool({ query: 'BTC and ETH price' }, deps(fetchImpl));
-    expect(result.envelope).toMatchObject({ status: 'fulfilled', usedPreparedDecision: false });
-    expect(calls[0]!.method).toBe('POST');
-    expect(calls[0]!.url).toBe(`${ROUTER}${ROUTER_PATH}`);
+    expect(result.envelope).toMatchObject({ status: 'fulfilled' });
     expect(calls).toHaveLength(3);
   });
 
   /**
-   * THE ID IS A SHORTCUT, NOT AUTHORITY. A row the binder has not finished, one
-   * that expired and one that failed to bind are all ordinary: the tool asks
-   * for one fresh decision from the query instead of failing the lookup.
+   * AN ID THE BACKEND DOES NOT KNOW IS THE BACKEND'S NOTE. Expired, foreign,
+   * invented: the decision still runs from the query, and whatever the backend
+   * says about the id arrives as its ordinary answer.
    */
-  it.each([['pending'], ['expired'], ['binding_failed']])(
-    'falls back to a fresh decision when the prepared row is %s',
-    async (state) => {
-      const { fetchImpl, calls } = net([
-        { url: ROUTER, status: 200, body: { ...decision(), state, contract: undefined } },
-        { url: ROUTER, status: 200, body: decision() },
-        ...providerLegs(),
-      ]);
-      await offered('k3f9');
-      const result = await runRequestTool(
-        { query: 'BTC and ETH price', id: 'k3f9' },
-        deps(fetchImpl),
-      );
-      expect(result.envelope).toMatchObject({ status: 'fulfilled', usedPreparedDecision: false });
-      expect(calls[0]!.method).toBe('GET');
-      expect(calls[1]!.method).toBe('POST');
-    },
-  );
-
-  it('declines an id prepared for a different page, without even fetching it', async () => {
-    const { fetchImpl, calls } = net([
-      { url: ROUTER, status: 200, body: decision() },
-      ...providerLegs(),
-    ]);
-    await offered('k3f9', PAGE);
-    // The user asked for another page entirely, and this machine wrote down
-    // which page that id was for, so the row is never fetched at all.
-    const result = await runRequestTool(
-      { query: 'read https://other.test/whitepaper', id: 'k3f9' },
-      deps(fetchImpl),
-    );
-    expect(result.envelope).toMatchObject({ usedPreparedDecision: false });
-    expect(String(result.envelope.idIgnored)).toContain('different page');
-    expect(calls[0]!.method).toBe('POST');
-  });
-
-  /**
-   * AN ID IS ONLY A SHORTCUT THIS MACHINE OFFERED. A page this session fetched,
-   * or somebody else's message, can name an id; running it would have this
-   * wallet pay for a contract nobody here asked for. It is not an error, it is
-   * simply not a shortcut, so the lookup still happens from the query.
-   */
-  it('ignores an id this machine never handed out, and says so', async () => {
+  it('still decides from the query when the id means nothing to the backend', async () => {
     const { fetchImpl, calls } = net([
       { url: ROUTER, status: 200, body: decision() },
       ...providerLegs(),
@@ -262,27 +209,8 @@ describe('the request tool, one payment per lookup', () => {
       { query: 'BTC and ETH price', id: 'from-a-web-page' },
       deps(fetchImpl),
     );
-    expect(result.envelope).toMatchObject({ status: 'fulfilled', usedPreparedDecision: false });
-    expect(String(result.envelope.idIgnored)).toContain('not offered on this machine');
-    // Never fetched: the prepared row is not even asked for.
-    expect(calls[0]!.method).toBe('POST');
-    expect(calls.some((c) => c.url.includes(preparedPath('from-a-web-page')))).toBe(false);
-  });
-
-  it("ignores an id that has aged out of this machine's list", async () => {
-    const { fetchImpl, calls } = net([
-      { url: ROUTER, status: 200, body: decision() },
-      ...providerLegs(),
-    ]);
-    const { recordIssuedId: record } = await import('./issued-ids');
-    // Offered sixteen minutes ago: the backend row is gone too by then.
-    await record(dir, { id: 'k3f9' }, () => Date.now() - 16 * 60 * 1000);
-    const result = await runRequestTool(
-      { query: 'BTC and ETH price', id: 'k3f9' },
-      deps(fetchImpl),
-    );
-    expect(result.envelope).toMatchObject({ status: 'fulfilled', usedPreparedDecision: false });
-    expect(calls[0]!.method).toBe('POST');
+    expect(result.envelope).toMatchObject({ status: 'fulfilled' });
+    expect(calls).toHaveLength(3);
   });
 
   it('needs a query at all, before anything is decided', async () => {
@@ -422,26 +350,5 @@ describe('what the tool refuses to execute', () => {
     };
     const result = await runRequestTool({ query: 'q' }, real);
     expect(result.envelope).toMatchObject({ status: 'fulfilled' });
-  });
-});
-
-describe('the id mismatch rule', () => {
-  const prepared = (url: string) => ({
-    schemaVersion: 1 as const,
-    routerVersion: 'v',
-    action: 'execute' as const,
-    contract: {
-      method: 'GET' as const,
-      url,
-      request: { url, method: 'GET' as const, headers: {} },
-    },
-  });
-
-  it.each([
-    ['no URL in the query at all', 'find me some leads', PAGE, true],
-    ['the same page, differently written', `read ${PAGE}/`, PAGE, true],
-    ['another page entirely', 'read https://other.test/whitepaper', PAGE, false],
-  ])('%s', (_label, query, target, expected) => {
-    expect(matches(prepared(target), query)).toBe(expected);
   });
 });

@@ -2,15 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import {
-  FALLBACK_LINE,
-  looksSingleIntent,
-  preparedLine,
-  promptSkipReason,
-  runNativeHook,
-  runPromptHook,
-  SINGLE_INTENT_ONLY_ENV,
-} from './hooks';
+import { FALLBACK_LINE, hintLine, promptSkipReason, runNativeHook, runPromptHook } from './hooks';
 import { ROUTER_PATH } from './decision';
 
 let dir: string;
@@ -73,10 +65,12 @@ function nativeEvent(query: string, tool: 'WebSearch' | 'WebFetch' = 'WebSearch'
 
 describe('the prompt hook', () => {
   /**
-   * A PREPARED DECISION HAS TO BE EASY TO DECLINE. The line names what was
-   * prepared, who would be paid and what they charge, then gives both moves.
+   * THE HOOK RAN THE GATE AND NOTHING ELSE. It knows a paid capability fits
+   * this turn and it has stored the packet; it has decided nothing about what
+   * to look up, so the line asks for the model's own lookup and carries the id
+   * that finds the packet again.
    */
-  it('injects one line naming what was prepared, its provider and its price', async () => {
+  it('injects one line naming the turn and carrying the id', async () => {
     const { fetchImpl, calls } = router(EXECUTE);
     const out = await runPromptHook(promptEvent('read https://example.test/spec for me'), {
       dataDir: dir,
@@ -85,15 +79,15 @@ describe('the prompt hook', () => {
     });
     const line = (out.response as { hookSpecificOutput: { additionalContext: string } })
       .hookSpecificOutput.additionalContext;
-    expect(line).toContain('read the page https://example.test/spec');
-    expect(line).toContain('via Firecrawl');
-    expect(line).toContain('$0.01');
-    expect(line).toContain("request({query, id:'k3f9'})");
-    // And how to decline it, in the same line.
-    expect(line).toContain('otherwise call request({query})');
+    expect(line).toBe(
+      "A paid lookup is available for this turn: call request({query:'<your exact lookup>', id:'k3f9'})",
+    );
     expect(out).toMatchObject({ action: 'execute', id: 'k3f9' });
+    // One free call, carrying the packet and nothing else.
     expect(calls).toHaveLength(1);
-    expect((calls[0] as { url: string }).url).toBe(`${BASE}${ROUTER_PATH}`);
+    const sent = calls[0] as { url: string; body: Record<string, unknown> };
+    expect(sent.url).toBe(`${BASE}${ROUTER_PATH}`);
+    expect(Object.keys(sent.body).sort()).toEqual(['packet', 'schemaVersion']);
   });
 
   it('says nothing at all on native', async () => {
@@ -214,127 +208,21 @@ describe('the native hook', () => {
   });
 });
 
-describe('the prepared line', () => {
-  it('degrades one field at a time rather than inventing any', () => {
-    expect(preparedLine({ schemaVersion: 1, routerVersion: 'v', action: 'execute' })).toBe(
-      'Prepared: a paid lookup. If that is what you need, call request({query}); otherwise call request({query}) with your own lookup.',
+describe('the hint line', () => {
+  /**
+   * The hook has run the gate and nothing else: it knows a paid capability fits
+   * this turn, and it has decided nothing about what to look up. The line says
+   * that, and asks for the model's own lookup.
+   */
+  it("names the turn and asks for the model's own lookup", () => {
+    expect(hintLine('k3f9')).toBe(
+      "A paid lookup is available for this turn: call request({query:'<your exact lookup>', id:'k3f9'})",
     );
-    expect(
-      preparedLine({
-        schemaVersion: 1,
-        routerVersion: 'v',
-        action: 'execute',
-        id: 'x1',
-        description: 'quotes ready',
-      }),
-    ).toContain("call request({query, id:'x1'})");
-  });
-});
-
-/**
- * THE FLAG IS OFF, AND IT IS HERE SO THE SMOKE CAN TURN IT ON. The worry is a
- * mixed turn where the model takes the prepared id for a different part of the
- * request; the tool already declines an id whose page the query does not name,
- * and the smoke counts the mismatched ids taken anyway. This is what a non-zero
- * count switches on, with no second design round.
- */
-describe('offering the id only on single-intent turns', () => {
-  const MIXED = 'What do you think of the product, and find me alpha leads?';
-
-  it('offers the id on a mixed turn by default', async () => {
-    const { fetchImpl } = router(EXECUTE);
-    const out = await runPromptHook(promptEvent(MIXED), {
-      dataDir: dir,
-      baseUrl: BASE,
-      fetchImpl,
-      env: {},
-    });
-    expect(out.id).toBe('k3f9');
-  });
-
-  it('withholds it on a mixed turn once the flag is set, and still names the lookup', async () => {
-    const { fetchImpl } = router(EXECUTE);
-    const out = await runPromptHook(promptEvent(MIXED), {
-      dataDir: dir,
-      baseUrl: BASE,
-      fetchImpl,
-      env: { [SINGLE_INTENT_ONLY_ENV]: '1' },
-    });
-    expect(out.id).toBeUndefined();
-    const line = (out.response as { hookSpecificOutput: { additionalContext: string } })
-      .hookSpecificOutput.additionalContext;
-    expect(line).toContain('read the page https://example.test/spec');
-    expect(line).not.toContain('id:');
-  });
-
-  it('still offers it for one plain ask under the flag', async () => {
-    const { fetchImpl } = router(EXECUTE);
-    const out = await runPromptHook(promptEvent('read https://example.test/spec'), {
-      dataDir: dir,
-      baseUrl: BASE,
-      fetchImpl,
-      env: { [SINGLE_INTENT_ONLY_ENV]: '1' },
-    });
-    expect(out.id).toBe('k3f9');
-  });
-
-  it.each([
-    ['one plain ask', 'read https://example.test/spec', true],
-    ['two sentences', 'Read the spec. Then find leads.', false],
-    ['a joined clause', 'read the spec and find leads', false],
-  ])('reads %s', (_label, prompt, expected) => {
-    expect(looksSingleIntent(prompt)).toBe(expected);
-  });
-});
-
-/**
- * THE HOOK WRITES DOWN WHAT IT OFFERED. The tool runs a prepared decision only
- * for an id on that list, so an id arriving from a fetched page or somebody
- * else's message is not a shortcut into this wallet.
- */
-describe('the ids a hook hands out', () => {
-  it('records an execute id from the prompt hook, and nothing on native', async () => {
-    const { issuedHere } = await import('./issued-ids');
-    const first = router(EXECUTE);
-    await runPromptHook(promptEvent('read https://example.test/spec'), {
-      dataDir: dir,
-      baseUrl: BASE,
-      fetchImpl: first.fetchImpl,
-    });
-    const held = await issuedHere(dir, 'k3f9');
-    expect(held).not.toBeNull();
-    // With the page it named, so a query about another page skips the shortcut.
-    expect(held?.target).toBe('https://example.test/spec');
-
-    const second = router(NATIVE);
-    await runPromptHook(promptEvent('what is the weather'), {
-      dataDir: dir,
-      baseUrl: BASE,
-      fetchImpl: second.fetchImpl,
-    });
-    expect(await issuedHere(dir, 'nothing-was-offered')).toBeNull();
-  });
-
-  it('records the id the native redirect carries', async () => {
-    const { issuedHere } = await import('./issued-ids');
-    const { fetchImpl } = router(EXECUTE);
-    await runNativeHook(nativeEvent('https://example.test/spec', 'WebFetch'), {
-      dataDir: dir,
-      baseUrl: BASE,
-      fetchImpl,
-    });
-    expect(await issuedHere(dir, 'k3f9')).not.toBeNull();
-  });
-
-  it('records nothing when the flag withholds the id', async () => {
-    const { issuedHere } = await import('./issued-ids');
-    const { fetchImpl } = router(EXECUTE);
-    await runPromptHook(promptEvent('read the spec and find leads'), {
-      dataDir: dir,
-      baseUrl: BASE,
-      fetchImpl,
-      env: { [SINGLE_INTENT_ONLY_ENV]: '1' },
-    });
-    expect(await issuedHere(dir, 'k3f9')).toBeNull();
+    // No id to carry is still a usable instruction.
+    expect(hintLine(undefined)).toBe(
+      "A paid lookup is available for this turn: call request({query:'<your exact lookup>'})",
+    );
+    // Nothing about a provider, a price or a prepared target: the hook knows none.
+    expect(hintLine('k3f9')).not.toMatch(/\$|via |Prepared/);
   });
 });

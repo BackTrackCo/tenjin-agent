@@ -4,8 +4,6 @@ import type { PartialConfig } from '../lib/config';
 import { buildPromptPacket, fit, packetForText, type Packet, type PendingCall } from './context';
 import { requestDecision, ROUTER_PATH, type Decision } from './decision';
 import { GATE_TIMEOUT_MS } from './gate';
-import { recordIssuedId } from './issued-ids';
-import { toMoney } from '../lib/money';
 
 /**
  * The two hook handlers. Between them they do exactly three things: build the
@@ -92,54 +90,20 @@ async function resolveBaseUrl(deps: HookDeps): Promise<string> {
 export const FALLBACK_LINE = 'call request({query}) for lookups';
 
 /**
- * OFF BY DEFAULT, AND HERE SO THE SMOKE CAN FLIP IT WITHOUT A DESIGN ROUND.
- * The worry is a mixed turn: the hook prepares one lookup, and the model takes
- * the id for a different part of the request. The tool already declines an id
- * whose prepared page the query does not name, and the smoke counts every
- * mismatched id that was taken anyway. If that count is above zero on the
- * release run, set this and ids stop being offered on turns that ask for more
- * than one thing.
+ * THE HINT NAMES THE TURN, NOT A LOOKUP. The hook has only run the gate: it
+ * knows a paid capability fits this turn and it has stored the packet, and it
+ * has decided nothing about WHAT to look up. So the line says exactly that, and
+ * asks for the model's own lookup.
+ *
+ * The prepared-decision shortcut that used to live here is gone. It answered
+ * from the gate's reading of the whole turn, which measures 53 of 56 against 55
+ * of 56 for the model's query plus this packet, and on a mixed turn it paid for
+ * the wrong lookup: the client could only reject it when the two named
+ * different URLs, which the failing case did not.
  */
-export const SINGLE_INTENT_ONLY_ENV = 'TENJIN_ROUTER_ID_SINGLE_INTENT_ONLY';
-
-function idsAreOffered(prompt: string, env: NodeJS.ProcessEnv): boolean {
-  const flag = env[SINGLE_INTENT_ONLY_ENV];
-  if (flag === undefined || flag === '' || flag === '0' || flag === 'false') return true;
-  return looksSingleIntent(prompt);
-}
-
-/**
- * One ask, by the two marks that actually separate them: a second sentence,
- * and a clause joined onto the first. Crude on purpose. It decides nothing
- * while the flag is off, and when the flag is on the cost of being wrong is
- * one lookup that carries no shortcut.
- */
-export function looksSingleIntent(prompt: string): boolean {
-  const trimmed = prompt.trim();
-  const sentences = trimmed.split(/[.?!]+\s+/).filter((part) => part.trim().length > 0);
-  if (sentences.length > 1) return false;
-  return !/[;]|\band\b|\balso\b|\bplus\b|\bthen\b/i.test(trimmed);
-}
-
-/**
- * A PREPARED DECISION HAS TO BE EASY TO DECLINE. The line names exactly what
- * was prepared, who would be paid and what they charge, then gives both moves:
- * take it with the id, or ignore it and send your own lookup. Claude always
- * sends its own query either way, so a mismatched id is visible to the tool and
- * to the smoke rather than hidden inside a fast path.
- */
-export function preparedLine(decision: Decision, offerId = true): string {
-  const what = (decision.description ?? 'a paid lookup').trim();
-  const via = decision.provider !== undefined ? ` via ${decision.provider}` : '';
-  const price =
-    decision.providerPriceAtomic !== undefined
-      ? ` ($${toMoney(decision.providerPriceAtomic).usd})`
-      : '';
-  const take =
-    decision.id !== undefined && offerId
-      ? `If that is what you need, call request({query, id:'${decision.id}'})`
-      : 'If that is what you need, call request({query})';
-  return `Prepared: ${what}${via}${price}. ${take}; otherwise call request({query}) with your own lookup.`;
+export function hintLine(id: string | undefined): string {
+  const carry = id !== undefined ? `, id:'${id}'` : '';
+  return `A paid lookup is available for this turn: call request({query:'<your exact lookup>'${carry}})`;
 }
 
 /** What a `needs_input` decision leaves the host to do, in one line. */
@@ -158,7 +122,7 @@ export interface PromptHookOutcome {
   response: unknown | null;
   skipped?: PromptSkip;
   action?: Decision['action'];
-  /** The prepared decision id, for the smoke to correlate against. */
+  /** The turn id, for the smoke to correlate against. */
   id?: string;
 }
 
@@ -179,38 +143,12 @@ export async function runPromptHook(raw: unknown, deps: HookDeps): Promise<Promp
   if (outcome === null) return injection(FALLBACK_LINE);
   const decision = outcome;
   if (decision.action === 'native') return { response: null, action: 'native' };
-  const offerId = idsAreOffered(event.prompt, deps.env ?? process.env);
-  if (offerId) await remember(decision, deps);
-  const line =
-    decision.action === 'execute' ? preparedLine(decision, offerId) : clarificationLine(decision);
+  const line = decision.action === 'execute' ? hintLine(decision.id) : clarificationLine(decision);
   return {
     action: decision.action,
-    ...(decision.id !== undefined && offerId ? { id: decision.id } : {}),
+    ...(decision.id !== undefined ? { id: decision.id } : {}),
     ...injection(line),
   };
-}
-
-/**
- * WHAT THIS MACHINE OFFERED, written down before it is offered. The tool runs a
- * prepared decision only for an id on that list, so an id arriving from a
- * fetched page or somebody else's message is not a shortcut into this wallet.
- * Best effort: a write that fails costs the next call its shortcut, never the
- * lookup.
- */
-async function remember(decision: Decision, deps: HookDeps): Promise<void> {
-  if (decision.id === undefined || decision.action !== 'execute') return;
-  const target = firstUrl(decision.description ?? '');
-  await recordIssuedId(
-    deps.dataDir,
-    { id: decision.id, ...(target !== null ? { target } : {}) },
-    deps.now ?? Date.now,
-  ).catch(() => undefined);
-}
-
-/** The first http(s) URL in a string, or null. */
-function firstUrl(text: string): string | null {
-  const match = /https?:\/\/[^\s"'<>)\]]+/i.exec(text);
-  return match === null ? null : match[0];
 }
 
 function injection(line: string): { response: unknown } {
@@ -254,7 +192,6 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
       ...(outcome !== null ? { action: outcome.action } : {}),
     };
   }
-  await remember(outcome, deps);
   return {
     response: {
       hookSpecificOutput: {
@@ -274,7 +211,7 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
  *  query and a bare "call request" leaves the model nothing to carry across. */
 export function redirectReason(pending: PendingCall, decision: Decision): string {
   const subject = 'query' in pending ? pending.query : pending.url;
-  return `${preparedLine(decision)}\nQuery: ${subject.slice(0, 500)}`;
+  return `${hintLine(decision.id)}\nQuery: ${subject.slice(0, 500)}`;
 }
 
 /** One free decision, with the hook's own deadline and its own silence. */

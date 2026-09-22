@@ -23,11 +23,6 @@ import type { Packet } from './context';
 
 export const ROUTER_PATH = '/api/x402-router';
 
-/** `GET /api/x402-router/{id}`: the prepared decision, still free. */
-export function preparedPath(id: string): string {
-  return `${ROUTER_PATH}/${encodeURIComponent(id)}`;
-}
-
 /**
  * The request the server builds and this client sends verbatim. Query assembly,
  * body encoding and header choice are the server's; what stays here is every
@@ -79,7 +74,7 @@ const DecisionSchema = z.strictObject({
   /** The decision id: the FAST path, never the accurate one. */
   id: z.string().min(1).max(200).optional(),
   action: z.enum(['native', 'execute', 'needs_input']),
-  /** One plain line naming what was prepared, for the hook to show. */
+  /** One plain line naming what the decision does, for the result. */
   description: z.string().max(300).optional(),
   /** Who would be paid, for that same line. */
   provider: z.string().max(120).optional(),
@@ -95,20 +90,10 @@ const DecisionSchema = z.strictObject({
 });
 export type Decision = z.infer<typeof DecisionSchema>;
 
-/** `GET /api/x402-router/{id}`. `pending` means the background binder has not
- *  finished yet; every other state is final for this id. */
-const PreparedSchema = DecisionSchema.extend({
-  state: z.enum(['ready', 'pending', 'binding_failed', 'expired']).optional(),
-});
-export type PreparedDecision = z.infer<typeof PreparedSchema>;
-
-/** The parsers, exposed so the shared wire fixtures are checked against the
- *  same schemas production parses with rather than against a copy of them. */
+/** The parser, exposed so the shared wire fixtures are checked against the
+ *  same schema production parses with rather than against a copy of it. */
 export function parseDecisionForTests(value: unknown): { success: boolean } {
   return { success: DecisionSchema.safeParse(value).success };
-}
-export function parsePreparedForTests(value: unknown): { success: boolean } {
-  return { success: PreparedSchema.safeParse(value).success };
 }
 
 export interface DecisionDeps {
@@ -125,9 +110,19 @@ export type DecisionOutcome<T = Decision> =
    *  here costs the turn a routing answer and nothing else. */
   | { status: 'failed'; reason: string; errorCode?: string };
 
-/** One free decision, from a query, the turn's packet, or both. */
+/**
+ * ONE FREE CALL, IN TWO FORMS. The hook sends `{ packet }`: the backend runs
+ * the gate, and on `execute` stores that packet under an id. The tool sends
+ * `{ query, id? }`: the backend makes THE decision from that query plus the
+ * packet it stored, and answers with the contract to run.
+ *
+ * The tool never sends a packet of its own. The turn's context lives on the
+ * backend against the id, and the query the model wrote is what the routing
+ * corpus is calibrated against: 55 of 56 for query plus packet, 53 of 56 for
+ * the raw prompt, measured on jev-1.13.0.
+ */
 export async function requestDecision(
-  request: { query?: string; packet: Packet; id?: string },
+  request: { query?: string; packet?: Packet; id?: string },
   deps: DecisionDeps,
 ): Promise<DecisionOutcome> {
   const url = new URL(ROUTER_PATH, deps.baseUrl).toString();
@@ -138,27 +133,12 @@ export async function requestDecision(
     jsonBody: {
       schemaVersion: 1,
       ...(request.query !== undefined ? { query: request.query } : {}),
-      packet: request.packet,
+      ...(request.packet !== undefined ? { packet: request.packet } : {}),
       ...(request.id !== undefined ? { id: request.id } : {}),
     },
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   };
   return readDecision(await httpRequest(url, options), DecisionSchema);
-}
-
-/** The prepared decision for an id. Free, and it refuses an expired id. */
-export async function fetchPrepared(
-  id: string,
-  deps: DecisionDeps,
-): Promise<DecisionOutcome<PreparedDecision>> {
-  const url = new URL(preparedPath(id), deps.baseUrl).toString();
-  const response = await httpRequest(url, {
-    method: 'GET',
-    timeoutMs: deps.timeoutMs ?? deps.ctx.flags.timeout,
-    blockRedirects: true,
-    ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
-  });
-  return readDecision(response, PreparedSchema);
 }
 
 function readDecision<T extends z.ZodTypeAny>(
