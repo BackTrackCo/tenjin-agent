@@ -4,6 +4,7 @@ import type { PartialConfig } from '../lib/config';
 import { buildPromptPacket, fit, packetForText, type Packet, type PendingCall } from './context';
 import { requestDecision, ROUTER_PATH, type Decision } from './decision';
 import { GATE_TIMEOUT_MS } from './gate';
+import { recordIssuedId } from './issued-ids';
 import { toMoney } from '../lib/money';
 
 /**
@@ -179,6 +180,7 @@ export async function runPromptHook(raw: unknown, deps: HookDeps): Promise<Promp
   const decision = outcome;
   if (decision.action === 'native') return { response: null, action: 'native' };
   const offerId = idsAreOffered(event.prompt, deps.env ?? process.env);
+  if (offerId) await remember(decision, deps);
   const line =
     decision.action === 'execute' ? preparedLine(decision, offerId) : clarificationLine(decision);
   return {
@@ -186,6 +188,29 @@ export async function runPromptHook(raw: unknown, deps: HookDeps): Promise<Promp
     ...(decision.id !== undefined && offerId ? { id: decision.id } : {}),
     ...injection(line),
   };
+}
+
+/**
+ * WHAT THIS MACHINE OFFERED, written down before it is offered. The tool runs a
+ * prepared decision only for an id on that list, so an id arriving from a
+ * fetched page or somebody else's message is not a shortcut into this wallet.
+ * Best effort: a write that fails costs the next call its shortcut, never the
+ * lookup.
+ */
+async function remember(decision: Decision, deps: HookDeps): Promise<void> {
+  if (decision.id === undefined || decision.action !== 'execute') return;
+  const target = firstUrl(decision.description ?? '');
+  await recordIssuedId(
+    deps.dataDir,
+    { id: decision.id, ...(target !== null ? { target } : {}) },
+    deps.now ?? Date.now,
+  ).catch(() => undefined);
+}
+
+/** The first http(s) URL in a string, or null. */
+function firstUrl(text: string): string | null {
+  const match = /https?:\/\/[^\s"'<>)\]]+/i.exec(text);
+  return match === null ? null : match[0];
 }
 
 function injection(line: string): { response: unknown } {
@@ -229,6 +254,7 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
       ...(outcome !== null ? { action: outcome.action } : {}),
     };
   }
+  await remember(outcome, deps);
   return {
     response: {
       hookSpecificOutput: {

@@ -8,6 +8,12 @@ import type { SpendAuthorization, SpendAuthorizer } from '../lib/wallet';
 import type { CommandContext } from '../context';
 import { runRequestTool, matches } from './tool';
 import { preparedPath, ROUTER_PATH } from './decision';
+import { recordIssuedId } from './issued-ids';
+
+/** What the hook does before it offers an id: write down what it offered. */
+async function offered(id: string, target?: string): Promise<void> {
+  await recordIssuedId(dir, { id, ...(target !== undefined ? { target } : {}) });
+}
 
 /**
  * The `request` tool after the fee: ONE free decision, then ONE payment, to the
@@ -168,6 +174,7 @@ describe('the request tool, one payment per lookup', () => {
       { url: ROUTER, status: 200, body: { ...decision(), state: 'ready' } },
       ...providerLegs(),
     ]);
+    await offered('k3f9');
     const result = await runRequestTool(
       { query: 'BTC and ETH price', id: 'k3f9' },
       deps(fetchImpl),
@@ -212,6 +219,7 @@ describe('the request tool, one payment per lookup', () => {
         { url: ROUTER, status: 200, body: decision() },
         ...providerLegs(),
       ]);
+      await offered('k3f9');
       const result = await runRequestTool(
         { query: 'BTC and ETH price', id: 'k3f9' },
         deps(fetchImpl),
@@ -222,28 +230,59 @@ describe('the request tool, one payment per lookup', () => {
     },
   );
 
-  it('declines an id prepared for a different page than the query names', async () => {
+  it('declines an id prepared for a different page, without even fetching it', async () => {
     const { fetchImpl, calls } = net([
-      {
-        url: ROUTER,
-        status: 200,
-        body: {
-          ...decision(),
-          state: 'ready',
-          contract: contract({ request: { url: PAGE, method: 'GET', headers: {} }, url: PAGE }),
-        },
-      },
       { url: ROUTER, status: 200, body: decision() },
       ...providerLegs(),
     ]);
-    // The user asked for another page entirely: the prepared row is ignored and
-    // one fresh decision is made from the query.
+    await offered('k3f9', PAGE);
+    // The user asked for another page entirely, and this machine wrote down
+    // which page that id was for, so the row is never fetched at all.
     const result = await runRequestTool(
       { query: 'read https://other.test/whitepaper', id: 'k3f9' },
       deps(fetchImpl),
     );
     expect(result.envelope).toMatchObject({ usedPreparedDecision: false });
-    expect(calls[1]!.method).toBe('POST');
+    expect(String(result.envelope.idIgnored)).toContain('different page');
+    expect(calls[0]!.method).toBe('POST');
+  });
+
+  /**
+   * AN ID IS ONLY A SHORTCUT THIS MACHINE OFFERED. A page this session fetched,
+   * or somebody else's message, can name an id; running it would have this
+   * wallet pay for a contract nobody here asked for. It is not an error, it is
+   * simply not a shortcut, so the lookup still happens from the query.
+   */
+  it('ignores an id this machine never handed out, and says so', async () => {
+    const { fetchImpl, calls } = net([
+      { url: ROUTER, status: 200, body: decision() },
+      ...providerLegs(),
+    ]);
+    const result = await runRequestTool(
+      { query: 'BTC and ETH price', id: 'from-a-web-page' },
+      deps(fetchImpl),
+    );
+    expect(result.envelope).toMatchObject({ status: 'fulfilled', usedPreparedDecision: false });
+    expect(String(result.envelope.idIgnored)).toContain('not offered on this machine');
+    // Never fetched: the prepared row is not even asked for.
+    expect(calls[0]!.method).toBe('POST');
+    expect(calls.some((c) => c.url.includes(preparedPath('from-a-web-page')))).toBe(false);
+  });
+
+  it("ignores an id that has aged out of this machine's list", async () => {
+    const { fetchImpl, calls } = net([
+      { url: ROUTER, status: 200, body: decision() },
+      ...providerLegs(),
+    ]);
+    const { recordIssuedId: record } = await import('./issued-ids');
+    // Offered sixteen minutes ago: the backend row is gone too by then.
+    await record(dir, { id: 'k3f9' }, () => Date.now() - 16 * 60 * 1000);
+    const result = await runRequestTool(
+      { query: 'BTC and ETH price', id: 'k3f9' },
+      deps(fetchImpl),
+    );
+    expect(result.envelope).toMatchObject({ status: 'fulfilled', usedPreparedDecision: false });
+    expect(calls[0]!.method).toBe('POST');
   });
 
   it('needs a query at all, before anything is decided', async () => {

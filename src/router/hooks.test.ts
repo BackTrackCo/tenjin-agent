@@ -286,3 +286,55 @@ describe('offering the id only on single-intent turns', () => {
     expect(looksSingleIntent(prompt)).toBe(expected);
   });
 });
+
+/**
+ * THE HOOK WRITES DOWN WHAT IT OFFERED. The tool runs a prepared decision only
+ * for an id on that list, so an id arriving from a fetched page or somebody
+ * else's message is not a shortcut into this wallet.
+ */
+describe('the ids a hook hands out', () => {
+  it('records an execute id from the prompt hook, and nothing on native', async () => {
+    const { issuedHere } = await import('./issued-ids');
+    const first = router(EXECUTE);
+    await runPromptHook(promptEvent('read https://example.test/spec'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl: first.fetchImpl,
+    });
+    const held = await issuedHere(dir, 'k3f9');
+    expect(held).not.toBeNull();
+    // With the page it named, so a query about another page skips the shortcut.
+    expect(held?.target).toBe('https://example.test/spec');
+
+    const second = router(NATIVE);
+    await runPromptHook(promptEvent('what is the weather'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl: second.fetchImpl,
+    });
+    expect(await issuedHere(dir, 'nothing-was-offered')).toBeNull();
+  });
+
+  it('records the id the native redirect carries', async () => {
+    const { issuedHere } = await import('./issued-ids');
+    const { fetchImpl } = router(EXECUTE);
+    await runNativeHook(nativeEvent('https://example.test/spec', 'WebFetch'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+    expect(await issuedHere(dir, 'k3f9')).not.toBeNull();
+  });
+
+  it('records nothing when the flag withholds the id', async () => {
+    const { issuedHere } = await import('./issued-ids');
+    const { fetchImpl } = router(EXECUTE);
+    await runPromptHook(promptEvent('read the spec and find leads'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+      env: { [SINGLE_INTENT_ONLY_ENV]: '1' },
+    });
+    expect(await issuedHere(dir, 'k3f9')).toBeNull();
+  });
+});

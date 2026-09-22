@@ -15,6 +15,7 @@ import {
   type PreparedDecision,
 } from './decision';
 import { MAX_MESSAGE_CHARS, packetForText } from './context';
+import { issuedHere } from './issued-ids';
 
 /**
  * The `request` tool: one free decision per lookup, then ONE payment, to the
@@ -87,15 +88,30 @@ export async function runRequestTool(
   // to one fresh decision from the query, which is the accurate path anyway.
   let decision: Decision | PreparedDecision | null = null;
   let usedId = false;
+  let idIgnored: string | undefined;
   if (args.id !== undefined && args.id.length > 0) {
-    const prepared = await fetchPrepared(args.id, decisionDeps);
-    if (
-      prepared.status === 'decided' &&
-      usable(prepared.decision) &&
-      matches(prepared.decision, query)
-    ) {
-      decision = prepared.decision;
-      usedId = true;
+    // AN ID IS ONLY A SHORTCUT THIS MACHINE OFFERED. Accepting one from
+    // anywhere lets a fetched page, or somebody else's message, name an id and
+    // have this wallet pay for a contract nobody here asked for. An id that is
+    // not on the list is not an error: the query path runs and the lookup still
+    // happens, which is also what an expired one gets.
+    const issued = await issuedHere(deps.ctx.dataDir, args.id);
+    if (issued === null) {
+      idIgnored = 'that id was not offered on this machine, so the query decided this lookup';
+    } else if (mismatchedTarget(issued.target, query)) {
+      idIgnored = 'that id was prepared for a different page, so the query decided this lookup';
+    } else {
+      const prepared = await fetchPrepared(args.id, decisionDeps);
+      if (
+        prepared.status === 'decided' &&
+        usable(prepared.decision) &&
+        matches(prepared.decision, query)
+      ) {
+        decision = prepared.decision;
+        usedId = true;
+      } else {
+        idIgnored = 'that prepared decision was not usable, so the query decided this lookup';
+      }
     }
   }
 
@@ -113,6 +129,7 @@ export async function runRequestTool(
     if (fresh.status === 'failed') {
       return fail('failed', fresh.reason, {
         ...(fresh.errorCode !== undefined ? { errorCode: fresh.errorCode } : {}),
+        ...(idIgnored !== undefined ? { idIgnored } : {}),
       });
     }
     decision = fresh.decision;
@@ -125,6 +142,7 @@ export async function runRequestTool(
       {
         ...(decision.diagnostics !== undefined ? { diagnostics: decision.diagnostics } : {}),
         usedPreparedDecision: usedId,
+        ...(idIgnored !== undefined ? { idIgnored } : {}),
       },
     );
   }
@@ -175,6 +193,7 @@ export async function runRequestTool(
       ...(contract.arguments !== undefined ? { parameters: contract.arguments } : {}),
       cost: costLines(providerAtomic),
       usedPreparedDecision: usedId,
+      ...(idIgnored !== undefined ? { idIgnored } : {}),
       result: data.bodyText ?? '',
       providerContentUntrusted: true,
     };
@@ -218,8 +237,17 @@ export async function runRequestTool(
       ...(detail.settlement !== undefined ? { settlement: detail.settlement } : {}),
       ...(detail.diagnosis !== undefined ? { diagnosis: detail.diagnosis } : {}),
       usedPreparedDecision: usedId,
+      ...(idIgnored !== undefined ? { idIgnored } : {}),
     });
   }
+}
+
+/** The prepared line named a page and the query names another one: the id
+ *  belongs to a different lookup, so the query decides this one. */
+function mismatchedTarget(target: string | undefined, query: string): boolean {
+  if (target === undefined) return false;
+  const asked = firstUrl(query);
+  return asked !== null && asked !== firstUrl(target);
 }
 
 /** A prepared row this tool can act on at all. */
@@ -383,6 +411,8 @@ interface FailExtras {
   diagnostics?: DecisionDiagnostics;
   /** Whether this answer came from the hook's prepared decision. */
   usedPreparedDecision?: boolean;
+  /** Why an id that was sent did not run, in one line. */
+  idIgnored?: string;
 }
 
 /** The headline: calm for a routine outcome, explicit for a real failure. */
@@ -432,6 +462,7 @@ function fail(status: FailStatus, reason: string, extras: FailExtras = {}): Requ
       ...(extras.usedPreparedDecision !== undefined
         ? { usedPreparedDecision: extras.usedPreparedDecision }
         : {}),
+      ...(extras.idIgnored !== undefined ? { idIgnored: extras.idIgnored } : {}),
       ...(extras.settlement !== undefined ? { settlement: extras.settlement } : {}),
       ...(extras.diagnosis !== undefined ? { diagnosis: extras.diagnosis } : {}),
       providerContentUntrusted: true,
