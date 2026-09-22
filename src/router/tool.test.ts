@@ -881,27 +881,28 @@ describe('an explicit native decision and the matching continuation', () => {
     }) as typeof fetch;
   }
 
-  function nativeEvent(query: string): unknown {
+  function nativeEvent(subject: string, tool: 'WebSearch' | 'WebFetch' = 'WebSearch'): unknown {
     return {
       hook_event_name: 'PreToolUse',
       session_id: 'sess-1',
-      tool_name: 'WebSearch',
-      tool_input: { query },
+      tool_name: tool,
+      tool_input: tool === 'WebSearch' ? { query: subject } : { url: subject },
     };
   }
 
   /** One turn: the prompt hook's packet, then the tool's paid decision. */
-  async function turn(action: 'native' | 'needs_input', stamp = Date.now()): Promise<void> {
+  async function turn(
+    action: 'native' | 'needs_input',
+    stamp = Date.now(),
+    query = LOOKUP,
+  ): Promise<void> {
     await writeSessionPacket(
       dir,
       'sess-1',
-      await buildPromptPacket(undefined, 'sess-1', `please ${LOOKUP}`),
+      await buildPromptPacket(undefined, 'sess-1', `please ${query}`),
       () => stamp,
     );
-    await runRequestTool(
-      { query: LOOKUP },
-      { ...deps(routerAnswering(action)), startedAtMs: stamp - 1 },
-    );
+    await runRequestTool({ query }, { ...deps(routerAnswering(action)), startedAtMs: stamp - 1 });
   }
 
   it('allows the same lookup in the same turn without asking the gate again', async () => {
@@ -919,17 +920,13 @@ describe('an explicit native decision and the matching continuation', () => {
     expect(gate.calls).toHaveLength(0);
   });
 
-  it('matches through whitespace and case, and nothing else', async () => {
+  it('matches through re-wrapped whitespace, and nothing else', async () => {
     const { runNativeHook } = await import('./hooks');
     await turn('native');
     const same = redirectingGate();
     const rewrapped = await runNativeHook(
-      nativeEvent(`  Agent Startups   shipping X402 in the last month `),
-      {
-        dataDir: dir,
-        baseUrl: ROUTER,
-        fetchImpl: same.fetchImpl,
-      },
+      nativeEvent(`  agent startups   shipping x402\n in the last month `),
+      { dataDir: dir, baseUrl: ROUTER, fetchImpl: same.fetchImpl },
     );
     expect(rewrapped).toMatchObject({ decision: 'allow', via: 'continuation' });
     expect(same.calls).toHaveLength(0);
@@ -943,6 +940,40 @@ describe('an explicit native decision and the matching continuation', () => {
     // A different question is a different decision: asked, and redirected.
     expect(other.calls).toHaveLength(1);
     expect(different.decision).toBe('deny');
+  });
+
+  /**
+   * THE KEY GRANTS A BYPASS, so it may only collapse what is the same lookup by
+   * definition. A path is case-sensitive on most servers: lowercasing the whole
+   * string gave `/Report` and `/report` one key, and a grant for one page would
+   * have let the other skip the gate. Scheme and host are case-insensitive by
+   * definition and still match.
+   */
+  it('does not let a different path case inherit the grant', async () => {
+    const { runNativeHook } = await import('./hooks');
+    await turn('native', Date.now(), 'https://example.com/Report');
+    const gate = redirectingGate();
+    const out = await runNativeHook(nativeEvent('https://example.com/report', 'WebFetch'), {
+      dataDir: dir,
+      baseUrl: ROUTER,
+      fetchImpl: gate.fetchImpl,
+    });
+    expect(gate.calls).toHaveLength(1);
+    expect(out.decision).toBe('deny');
+    expect(out.via).toBeUndefined();
+  });
+
+  it('allows the same URL written with a different host case', async () => {
+    const { runNativeHook } = await import('./hooks');
+    await turn('native', Date.now(), 'https://example.com/Report');
+    const gate = redirectingGate();
+    const out = await runNativeHook(nativeEvent('HTTPS://ExAmPlE.COM/Report', 'WebFetch'), {
+      dataDir: dir,
+      baseUrl: ROUTER,
+      fetchImpl: gate.fetchImpl,
+    });
+    expect(out).toMatchObject({ decision: 'allow', via: 'continuation' });
+    expect(gate.calls).toHaveLength(0);
   });
 
   it('does not survive the next user turn', async () => {

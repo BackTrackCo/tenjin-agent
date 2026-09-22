@@ -156,12 +156,38 @@ function continuationPath(dataDir: string, sessionKey: string): string {
 
 /**
  * The identity of one lookup, for matching a tool query against a later native
- * call. Whitespace and case are normalized because a harness may re-wrap the
- * same search; nothing else is, so two different questions never collide.
+ * call. This key GRANTS A BYPASS of the redirect, so it collapses only what is
+ * the same lookup by definition: surrounding and repeated whitespace, which a
+ * harness may re-wrap, and the two URL components RFC 3986 defines as
+ * case-insensitive, the scheme and the host.
+ *
+ * CASE IS OTHERWISE PART OF THE LOOKUP. Lowercasing the whole string gave
+ * `https://example.com/Report` and `https://example.com/report` one key, and a
+ * path is case-sensitive on most servers: a `native` grant for one page would
+ * have let the other skip the gate in the same turn.
  */
 export function lookupKeyOf(text: string): string {
-  const normalized = text.trim().replace(/\s+/g, ' ').toLowerCase();
-  return createHash('sha256').update(normalized).digest('hex').slice(0, 32);
+  const collapsed = text.trim().replace(/\s+/g, ' ');
+  return createHash('sha256').update(lowerSchemeAndHost(collapsed)).digest('hex').slice(0, 32);
+}
+
+/**
+ * `scheme://[userinfo@]host[:port]` lowercased, and every byte after it left
+ * exactly as written. Parsed by hand rather than through `URL`, whose `href`
+ * also rewrites the path: percent-encoding and a trailing slash are not this
+ * function's to decide, and the whole point here is to change as little as
+ * possible. Userinfo keeps its case, being case-sensitive like the path.
+ */
+function lowerSchemeAndHost(text: string): string {
+  const parts = /^([A-Za-z][A-Za-z0-9+.-]*:\/\/)([^/?#]*)([\s\S]*)$/.exec(text);
+  if (parts === null) return text;
+  const scheme = parts[1]!.toLowerCase();
+  if (scheme !== 'http://' && scheme !== 'https://') return text;
+  const authority = parts[2]!;
+  const at = authority.lastIndexOf('@');
+  const userinfo = at === -1 ? '' : authority.slice(0, at + 1);
+  const host = authority.slice(at + 1).toLowerCase();
+  return `${scheme}${userinfo}${host}${parts[3]!}`;
 }
 
 /** Record that THIS lookup was explicitly answered `native` in THIS turn. */
