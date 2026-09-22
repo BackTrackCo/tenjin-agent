@@ -764,6 +764,48 @@ export async function persistBazaarPay(dir: string, enabled: boolean): Promise<v
   await persist(dir, (existing) => ({ ...existing, bazaarPay: enabled }));
 }
 
+/** The spend keys `tenjin install` settles for the router, in atomic USDC. */
+export const ROUTER_DEFAULTS = {
+  maxAutoSpend: '100000',
+  sessionBudget: '1000000',
+  confirm: 'above:100000',
+} as const;
+
+export interface RouterDefaultsResult {
+  /** Keys this run wrote, because the file did not name them. */
+  set: string[];
+  /** Keys the operator had already written, left exactly as they are. */
+  kept: string[];
+}
+
+/**
+ * The router's spend defaults, written ONLY where the file is silent. A
+ * `confirm` the operator put in `config.json` is never touched, which is why
+ * an explicit `always` keeps returning `needs_approval` from the tool handler
+ * instead of being quietly loosened by an install.
+ *
+ * `bazaarPay` is different and is turned on either way: it is the lane the
+ * router pays providers through, so an install that left it off would wire a
+ * product that refuses every lookup.
+ */
+export async function persistRouterDefaults(dir: string): Promise<RouterDefaultsResult> {
+  const result: RouterDefaultsResult = { set: [], kept: [] };
+  await persist(dir, (existing) => {
+    const next: PartialConfig = { ...existing, bazaarPay: true };
+    for (const [key, value] of Object.entries(ROUTER_DEFAULTS) as [
+      keyof typeof ROUTER_DEFAULTS,
+      string,
+    ][]) {
+      if (existing[key] === undefined) {
+        next[key] = value;
+        result.set.push(key);
+      } else result.kept.push(key);
+    }
+    return next;
+  });
+  return result;
+}
+
 /**
  * Record the settled harness selection through the same locked merge-write. It
  * replaces the previous record rather than unioning with it: the last operator
