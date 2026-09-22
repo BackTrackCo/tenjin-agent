@@ -963,6 +963,22 @@ describe('an explicit native decision and the matching continuation', () => {
     expect(out.via).toBeUndefined();
   });
 
+  it('does not let a query that merely starts with a URL inherit the grant', async () => {
+    const { runNativeHook } = await import('./hooks');
+    // The host ends at the first whitespace: what follows is the lookup, and
+    // its case is as much part of it as any other word's.
+    await turn('native', Date.now(), 'https://example.com Report');
+    const gate = redirectingGate();
+    const out = await runNativeHook(nativeEvent('https://example.com report'), {
+      dataDir: dir,
+      baseUrl: ROUTER,
+      fetchImpl: gate.fetchImpl,
+    });
+    expect(gate.calls).toHaveLength(1);
+    expect(out.decision).toBe('deny');
+    expect(out.via).toBeUndefined();
+  });
+
   it('allows the same URL written with a different host case', async () => {
     const { runNativeHook } = await import('./hooks');
     await turn('native', Date.now(), 'https://example.com/Report');

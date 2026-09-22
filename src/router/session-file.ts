@@ -177,9 +177,14 @@ export function lookupKeyOf(text: string): string {
  * also rewrites the path: percent-encoding and a trailing slash are not this
  * function's to decide, and the whole point here is to change as little as
  * possible. Userinfo keeps its case, being case-sensitive like the path.
+ *
+ * THE AUTHORITY STOPS AT WHITESPACE, not only at `/?#`. A lookup is often a
+ * sentence that merely begins with a URL, and an authority that ran to the
+ * first slash swallowed the words after it: `https://example.com Report` and
+ * `https://example.com report` were lowercased whole and shared one grant.
  */
 function lowerSchemeAndHost(text: string): string {
-  const parts = /^([A-Za-z][A-Za-z0-9+.-]*:\/\/)([^/?#]*)([\s\S]*)$/.exec(text);
+  const parts = /^([A-Za-z][A-Za-z0-9+.-]*:\/\/)([^/?#\s]*)([\s\S]*)$/.exec(text);
   if (parts === null) return text;
   const scheme = parts[1]!.toLowerCase();
   if (scheme !== 'http://' && scheme !== 'https://') return text;
