@@ -764,6 +764,27 @@ export async function persistBazaarPay(dir: string, enabled: boolean): Promise<v
   await persist(dir, (existing) => ({ ...existing, bazaarPay: enabled }));
 }
 
+/**
+ * Remember, or forget, a project directory this machine wired with
+ * `install --project`. `tenjin update` spawns its refresh from the HOME
+ * directory, so a project install is unfindable by looking around; this list is
+ * how a later refresh reaches it. Absolute paths, de-duplicated, and pruned
+ * when a project is uninstalled or its settings file stops carrying our
+ * entries.
+ */
+export async function persistRouterProject(
+  dir: string,
+  projectDir: string,
+  present = true,
+): Promise<void> {
+  await persist(dir, (existing) => {
+    const known = new Set(existing.install?.routerProjects ?? []);
+    if (present) known.add(projectDir);
+    else known.delete(projectDir);
+    return { ...existing, install: { ...existing.install, routerProjects: [...known].sort() } };
+  });
+}
+
 /** The spend keys `tenjin install` settles for the router, in atomic USDC. */
 export const ROUTER_DEFAULTS = {
   maxAutoSpend: '100000',

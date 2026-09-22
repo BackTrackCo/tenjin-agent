@@ -36,6 +36,13 @@ const probe402 = (async () =>
     headers: { 'content-type': 'application/json' },
   })) as typeof fetch;
 
+/** The one install a refresh converged, out of the list it returns. */
+function onlyInstall(result: { data: unknown }): Record<string, unknown> {
+  const installs = (result.data as { installs?: Record<string, unknown>[] }).installs;
+  expect(installs).toHaveLength(1);
+  return installs![0]!;
+}
+
 /** The `mcp` check from a doctor run over a project install. */
 async function mcpDetail(
   home: string,
@@ -221,7 +228,7 @@ describe('tenjin install --refresh', () => {
     await writeFile(join(data, 'config.json'), JSON.stringify({ maxAutoSpend: '1' }));
     const registerMcp = vi.fn(async () => undefined);
     const result = await runRouterInstall({ refresh: true }, ctx(), deps({ registerMcp }));
-    expect(result.data).toMatchObject({ refresh: true });
+    expect(onlyInstall(result)).toMatchObject({ refresh: true });
     // The registration IS re-checked: a new version can change the command it
     // registers. What a refresh must never do is decide anything about money.
     expect(registerMcp).toHaveBeenCalled();
@@ -664,7 +671,7 @@ describe('tenjin update re-applies the install', () => {
     const before = await fs.readFile(settingsPath(), 'utf8');
     const result = await runRouterInstall({ refresh: true }, ctx(), deps());
     expect(await fs.readFile(settingsPath(), 'utf8')).toBe(before);
-    expect((result.data as { hooks: { wrote: boolean } }).hooks.wrote).toBe(false);
+    expect((onlyInstall(result) as { hooks: { wrote: boolean } }).hooks.wrote).toBe(false);
     expect(result.humanLines?.join('\n')).toContain('Already current');
   });
 
@@ -679,7 +686,7 @@ describe('tenjin update re-applies the install', () => {
     await fs.writeFile(settingsPath(), JSON.stringify(settings, null, 2) + '\n');
 
     const result = await runRouterInstall({ refresh: true }, ctx(), deps());
-    expect((result.data as { hooks: { wrote: boolean } }).hooks.wrote).toBe(true);
+    expect((onlyInstall(result) as { hooks: { wrote: boolean } }).hooks.wrote).toBe(true);
     const after = await readSettings();
     const prompt = (after.hooks as Record<string, { hooks: { command: string }[] }[]>)
       .UserPromptSubmit;
@@ -700,7 +707,7 @@ describe('tenjin update re-applies the install', () => {
 
     const registerMcp = vi.fn(async () => undefined);
     const result = await runRouterInstall({ refresh: true }, ctx(), deps({ cwd, registerMcp }));
-    expect(result.data).toMatchObject({
+    expect(onlyInstall(result)).toMatchObject({
       settingsPath: join(cwd, '.claude', 'settings.json'),
       scope: 'project',
     });
@@ -754,5 +761,78 @@ describe('tenjin update re-applies the install', () => {
         ? (out.details as { checks: { name: string; status: string }[] })
         : (out as { data: { checks: { name: string; status: string }[] } }).data;
     expect(checks.checks.find((c) => c.name === 'hooks')?.status).toBe('ok');
+  });
+});
+
+/**
+ * `tenjin update` spawns its refresh from the HOME directory, which is the one
+ * place a project install can never be found by looking around. So the project
+ * is remembered at install time; without it a project-only machine refreshed
+ * nothing and reported success while its hooks stayed on the old build.
+ */
+describe('update reaches a project install from anywhere', () => {
+  it('refreshes a project-only machine when the refresh runs from home', async () => {
+    const fs = await import('node:fs/promises');
+    const cwd = join(home, 'project');
+    await fs.mkdir(cwd, { recursive: true });
+    await runRouterInstall({ project: true }, ctx(), deps({ cwd }));
+    expect((await loadRawConfig(data)).install?.routerProjects).toEqual([cwd]);
+
+    // An older entry shape in the PROJECT file, and a refresh run from home.
+    const project = JSON.parse(
+      await fs.readFile(join(cwd, '.claude', 'settings.json'), 'utf8'),
+    ) as Record<string, unknown>;
+    (project.hooks as Record<string, unknown[]>).UserPromptSubmit = [
+      { hooks: [{ type: 'command', command: '/old/tenjin hook prompt', timeout: 10 }] },
+    ];
+    await fs.writeFile(
+      join(cwd, '.claude', 'settings.json'),
+      JSON.stringify(project, null, 2) + '\n',
+    );
+
+    const result = await runRouterInstall({ refresh: true }, ctx(), deps({ cwd: home }));
+    const after = JSON.parse(
+      await fs.readFile(join(cwd, '.claude', 'settings.json'), 'utf8'),
+    ) as Record<string, unknown>;
+    const prompt = (after.hooks as Record<string, { hooks: { command: string }[] }[]>)
+      .UserPromptSubmit;
+    expect(prompt).toHaveLength(1);
+    expect(prompt![0]!.hooks[0]!.command).toBe('tenjin hook prompt');
+    expect(onlyInstall(result)).toMatchObject({ scope: 'project' });
+  });
+
+  it('refreshes BOTH a user and a project install in one run', async () => {
+    const fs = await import('node:fs/promises');
+    const cwd = join(home, 'project');
+    await fs.mkdir(cwd, { recursive: true });
+    await runRouterInstall({}, ctx(), deps());
+    await runRouterInstall({ project: true }, ctx(), deps({ cwd }));
+    const result = await runRouterInstall({ refresh: true }, ctx(), deps({ cwd: home }));
+    const installs = (result.data as { installs: { settingsPath: string }[] }).installs;
+    expect(installs.map((i) => i.settingsPath).sort()).toEqual(
+      [settingsPath(), join(cwd, '.claude', 'settings.json')].sort(),
+    );
+  });
+
+  it('forgets a project whose entries are gone, and after uninstall --project', async () => {
+    const fs = await import('node:fs/promises');
+    const cwd = join(home, 'project');
+    await fs.mkdir(cwd, { recursive: true });
+    await runRouterInstall({ project: true }, ctx(), deps({ cwd }));
+    await runRouterUninstall({ project: true }, ctx(), {
+      homeDir: home,
+      cwd,
+      env: {},
+      which: () => false,
+    });
+    expect((await loadRawConfig(data)).install?.routerProjects).toEqual([]);
+
+    // And a stale entry in the list is pruned by the refresh that misses it.
+    await runRouterInstall({ project: true }, ctx(), deps({ cwd }));
+    await fs.rm(join(cwd, '.claude'), { recursive: true, force: true });
+    await expect(
+      runRouterInstall({ refresh: true }, ctx(), deps({ cwd: home })),
+    ).rejects.toMatchObject({ code: 'REFUSED' });
+    expect((await loadRawConfig(data)).install?.routerProjects).toEqual([]);
   });
 });

@@ -3,7 +3,7 @@ import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { promisify } from 'node:util';
 import { claudeAdapter } from '../adapters/claude';
-import { persistRouterDefaults } from '../commands/config';
+import { persistRouterDefaults, persistRouterProject } from '../commands/config';
 import type { RouterDefaultsResult } from '../commands/config';
 import { CliError } from '../lib/errors';
 import { appendAllowlistRules, claudeSettingsPath } from '../lib/harness-permissions';
@@ -18,6 +18,8 @@ import { toMoney } from '../lib/money';
 import { resolveContextSettings } from '../lib/settings';
 import type { SpendPolicy } from '../lib/policy';
 import { onPath } from '../lib/skill-wiring';
+import { loadRawConfig } from '../lib/config';
+import type { PartialConfig } from '../lib/config';
 import type { CommandContext, CommandResult } from '../context';
 
 /**
@@ -141,14 +143,19 @@ export async function runRouterInstall(
     });
   }
   const cwd = deps.cwd ?? process.cwd();
-  // A refresh follows the install it is refreshing. `tenjin update` spawns it
-  // with no flags, so the scope is DETECTED: whichever settings file already
-  // carries entries of ours is the one this machine installed into, and a
-  // refresh that silently moved a project install to user scope would leave
-  // two installations and double-fire every hook.
-  const project =
-    args.project === true ||
-    (args.refresh === true && (await detectProjectInstall(home, cwd, ctx.dataDir)));
+  // A refresh converges EVERY install this machine has, in the scope each one
+  // was made in. `tenjin update` spawns it from the HOME directory, so looking
+  // around cwd would miss a project install entirely; the projects are read
+  // from the list `install --project` recorded. A refresh that silently moved a
+  // project install to user scope would also leave two installations and
+  // double-fire every hook.
+  // `project` UNSET means "work it out"; an explicit true or false is a single
+  // target, which is what the fan-out below passes back in. Without that
+  // distinction the user-scope leg would re-enter here forever.
+  if (args.refresh === true && args.project === undefined) {
+    return refreshEveryInstall(ctx, deps, home, cwd, env);
+  }
+  const project = args.project === true;
   const settingsPath = routerSettingsPath({
     ...(project ? { project: true } : {}),
     homeDir: home,
@@ -200,6 +207,8 @@ export async function runRouterInstall(
     };
   }
   const spend = await persistRouterDefaults(ctx.dataDir);
+  // Remembered so `tenjin update` can find this project again from anywhere.
+  if (project) await persistRouterProject(ctx.dataDir, cwd);
   // Read back AFTER the write: a machine that already carried its own caps
   // keeps them, and a readout quoting the defaults would describe limits this
   // run did not set.
@@ -339,11 +348,71 @@ function lines(
   return out;
 }
 
-/** Does the PROJECT file carry our entries while the home one does not? That
- *  is a project install, and a refresh has to stay in it. */
-async function detectProjectInstall(home: string, cwd: string, dataDir: string): Promise<boolean> {
-  if (await hasOurEntries(routerSettingsPath({ homeDir: home }), dataDir)) return false;
-  return hasOurEntries(routerSettingsPath({ project: true, cwd }), dataDir);
+/**
+ * Converge every install on this machine: the user one when it exists, and each
+ * recorded project whose settings file still carries our entries. A project
+ * that no longer does is forgotten, so the list cannot grow stale.
+ *
+ * Refusing only when NOTHING was found keeps `tenjin update`'s contract: it
+ * reads the child's exit code, and a machine with a project install must not
+ * report "nothing is installed here".
+ */
+async function refreshEveryInstall(
+  ctx: CommandContext,
+  deps: RouterInstallDeps,
+  home: string,
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+): Promise<CommandResult> {
+  const config = await loadRawConfig(ctx.dataDir).catch(() => ({}) as PartialConfig);
+  const targets: { project: boolean; dir: string }[] = [];
+  if (await hasOurEntries(routerSettingsPath({ homeDir: home }), ctx.dataDir)) {
+    targets.push({ project: false, dir: home });
+  }
+  for (const dir of config.install?.routerProjects ?? []) {
+    if (await hasOurEntries(routerSettingsPath({ project: true, cwd: dir }), ctx.dataDir)) {
+      targets.push({ project: true, dir });
+    } else {
+      await persistRouterProject(ctx.dataDir, dir, false).catch(() => undefined);
+    }
+  }
+  // The directory this ran in, when it is a project install nobody recorded: an
+  // install from before this list existed still refreshes, and is remembered.
+  // Skipped when that path IS the user's file, which is what `cwd` is when
+  // `tenjin update` spawns this from the home directory.
+  const here = routerSettingsPath({ project: true, cwd });
+  if (
+    here !== routerSettingsPath({ homeDir: home }) &&
+    !targets.some((t) => t.project && t.dir === cwd) &&
+    (await hasOurEntries(here, ctx.dataDir))
+  ) {
+    targets.push({ project: true, dir: cwd });
+    await persistRouterProject(ctx.dataDir, cwd).catch(() => undefined);
+  }
+
+  if (targets.length === 0) {
+    throw new CliError(
+      'REFUSED',
+      `Nothing to refresh for ${ctx.dataDir}: no Tenjin hook entries are registered here.`,
+      { fix: 'Run `tenjin install` to set this machine up.' },
+    );
+  }
+
+  const results: CommandResult[] = [];
+  for (const target of targets) {
+    results.push(
+      await runRouterInstall({ refresh: true, project: target.project }, ctx, {
+        ...deps,
+        homeDir: home,
+        cwd: target.dir,
+        env,
+      }),
+    );
+  }
+  return {
+    data: { refresh: true, installs: results.map((r) => r.data) },
+    humanLines: results.flatMap((r) => r.humanLines ?? []),
+  };
 }
 
 async function hasOurEntries(path: string, dataDir: string): Promise<boolean> {

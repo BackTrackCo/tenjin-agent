@@ -3,6 +3,7 @@ import { homedir } from 'node:os';
 import { readFile, stat } from 'node:fs/promises';
 import { isAbsolute } from 'node:path';
 import { promisify } from 'node:util';
+import { persistRouterProject } from '../commands/config';
 import { writeFileAtomic } from '../lib/atomic-json';
 import { inspectHooksFile, pruneHooks } from '../lib/harness-hooks';
 import { onPath } from '../lib/skill-wiring';
@@ -56,6 +57,11 @@ export async function runRouterUninstall(
   });
 
   const removed = await removeFromSettings(settingsPath, ctx.dataDir);
+  // Forgotten, so a later `tenjin update` does not go looking for a project
+  // this machine no longer wires.
+  if (args.project === true) {
+    await persistRouterProject(ctx.dataDir, cwd, false).catch(() => undefined);
+  }
   // The SAME scope the install used, or a `--project` uninstall would leave the
   // project's registration behind and reach into the user's file instead.
   const mcp = await removeMcpServer(deps, env, args.project === true, cwd);
