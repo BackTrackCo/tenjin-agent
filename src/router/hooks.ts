@@ -143,7 +143,7 @@ export async function runPromptHook(raw: unknown, deps: HookDeps): Promise<Promp
   if (skipped !== null) return { response: null, skipped };
 
   const packet = await buildPromptPacket(event.transcript_path, event.session_id, event.prompt);
-  const outcome = await decide(packet, deps);
+  const outcome = await decide('prompt', packet, deps);
   if (outcome === null) return injection(FALLBACK_LINE);
   const decision = outcome;
   if (decision.action === 'native') return { response: null, action: 'native' };
@@ -186,7 +186,7 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
   // The call's own text IS the query here: a native call states its lookup, so
   // there is nothing to guess and no stored packet to find.
   const packet: Packet = fit({ ...packetForText(subject), pendingCall: pending });
-  const outcome = await decide(packet, deps);
+  const outcome = await decide('native', packet, deps);
   if (outcome === null || outcome.action !== 'execute') {
     return {
       response: null,
@@ -218,12 +218,16 @@ export function redirectReason(pending: PendingCall, decision: HookDecision): st
 }
 
 /** One free decision, with the hook's own deadline and its own silence. */
-async function decide(packet: Packet, deps: HookDeps): Promise<HookDecision | null> {
+async function decide(
+  source: 'prompt' | 'native',
+  packet: Packet,
+  deps: HookDeps,
+): Promise<HookDecision | null> {
   const baseUrl = await resolveBaseUrl(deps);
   const warn = deps.warn ?? ((line: string) => process.stderr.write(`${line}\n`));
   const outcome = await requestDecision(
     'hook',
-    { packet },
+    { source, packet },
     {
       ctx: {
         flags: { json: true, timeout: deps.timeoutMs ?? GATE_TIMEOUT_MS },

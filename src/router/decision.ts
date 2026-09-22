@@ -150,6 +150,19 @@ export type ToolDecision = ToolResponse['decision'];
 /** Which call this is, and therefore which answer is legal for it. */
 export type CallKind = 'hook' | 'tool';
 
+/** Which hook is asking. The route takes a STRICT object, so this is required
+ *  and there is no third value: `wire-gate-request.json` pins the shape. */
+export type HookSource = 'prompt' | 'native';
+
+/**
+ * The exact body the hook call sends, spelled once and pinned to the shared
+ * fixture. The route reads it with a strict object, so a missing `source` and
+ * an extra field are both a 400, and a 400 is a turn with no hint.
+ */
+export function buildHookBody(source: HookSource, packet: Packet): Record<string, unknown> {
+  return { schemaVersion: 1, source, packet };
+}
+
 /** The parsers, exposed so the shared wire fixtures are checked against the
  *  same schemas production parses with rather than against a copy of them. */
 export function parseForTests(kind: CallKind, value: unknown): { success: boolean } {
@@ -195,7 +208,7 @@ export type DecisionOutcome<T> =
  */
 export async function requestDecision(
   kind: 'hook',
-  request: { packet: Packet; gateHint?: GateHint },
+  request: { source: HookSource; packet: Packet },
   deps: DecisionDeps,
 ): Promise<DecisionOutcome<HookResponse>>;
 export async function requestDecision(
@@ -205,7 +218,13 @@ export async function requestDecision(
 ): Promise<DecisionOutcome<ToolResponse>>;
 export async function requestDecision(
   kind: CallKind,
-  request: { query?: string; packet?: Packet; id?: string; gateHint?: GateHint },
+  request: {
+    source?: HookSource;
+    query?: string;
+    packet?: Packet;
+    id?: string;
+    gateHint?: GateHint;
+  },
   deps: DecisionDeps,
 ): Promise<DecisionOutcome<HookResponse | ToolResponse>> {
   const url = new URL(ROUTER_PATH, deps.baseUrl).toString();
@@ -213,13 +232,15 @@ export async function requestDecision(
     method: 'POST',
     timeoutMs: deps.timeoutMs ?? deps.ctx.flags.timeout,
     blockRedirects: true,
-    jsonBody: {
-      schemaVersion: 1,
-      ...(request.query !== undefined ? { query: request.query } : {}),
-      ...(request.packet !== undefined ? { packet: request.packet } : {}),
-      ...(request.id !== undefined ? { id: request.id } : {}),
-      ...(request.gateHint !== undefined ? { gateHint: request.gateHint } : {}),
-    },
+    jsonBody:
+      kind === 'hook'
+        ? buildHookBody(request.source ?? 'prompt', request.packet as Packet)
+        : {
+            schemaVersion: 1,
+            query: request.query,
+            ...(request.id !== undefined ? { id: request.id } : {}),
+            ...(request.gateHint !== undefined ? { gateHint: request.gateHint } : {}),
+          },
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   };
   return readDecision(

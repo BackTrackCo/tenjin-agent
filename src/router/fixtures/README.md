@@ -64,19 +64,20 @@ a lookup is the caller's own, to the provider.
 
 Take these from here; do not re-derive them.
 
-| field                           | bound                                                |
-| ------------------------------- | ---------------------------------------------------- |
-| `packet` serialized             | 16384 bytes, refused rather than truncated           |
-| `packet.history`                | 6 messages                                           |
-| message `text`                  | 16000 characters                                     |
-| `packet.literalUrls`            | 8 entries, each 2000 characters                      |
-| `query`                         | 1 to 8000 characters                                 |
-| `pendingCall.query` / `.url`    | 1 to 4000 characters                                 |
-| `gateHint.turnId` / `.lookupId` | 1 to 64 characters                                   |
-| `diagnostics.missing`           | 60 entries, each non-empty                           |
-| `id`                            | a uuid the server minted; a client never invents one |
-| decision lifetime               | 15 minutes from the POST that created it             |
-| GET wait for a pending binder   | about 2 seconds, then `state: 'pending'`             |
+| field                           | bound                                                   |
+| ------------------------------- | ------------------------------------------------------- |
+| `schemaVersion`                 | exactly `1`, on every request and response              |
+| `source` (gate request only)    | `prompt` or `native`; `native` is the pending-call form |
+| `packet` serialized             | 16384 bytes, refused rather than truncated              |
+| `packet.history`                | 6 messages                                              |
+| message `text`                  | 16000 characters                                        |
+| `packet.literalUrls`            | 8 entries, each 2000 characters                         |
+| `query`                         | 1 to 8000 characters                                    |
+| `pendingCall.query` / `.url`    | 1 to 4000 characters                                    |
+| `gateHint.turnId` / `.lookupId` | 1 to 64 characters                                      |
+| `diagnostics.missing`           | 60 entries, each non-empty                              |
+| `id`                            | a uuid the server minted; a client never invents one    |
+| id lifetime                     | 15 minutes from the hook call that created it           |
 
 The enumerated values live in code: `ROUTER_CATEGORIES` in `wire.ts`,
 `DIAGNOSTIC_CODES` and `DIAGNOSTIC_STAGES` in `diagnostics.ts`.

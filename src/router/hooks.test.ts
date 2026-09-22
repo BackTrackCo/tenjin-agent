@@ -98,7 +98,10 @@ describe('the prompt hook', () => {
     expect(calls).toHaveLength(1);
     const sent = calls[0] as { url: string; body: Record<string, unknown> };
     expect(sent.url).toBe(`${BASE}${ROUTER_PATH}`);
-    expect(Object.keys(sent.body).sort()).toEqual(['packet', 'schemaVersion']);
+    // The route reads a STRICT object: a missing `source` is a 400, which is a
+    // turn with no hint.
+    expect(Object.keys(sent.body).sort()).toEqual(['packet', 'schemaVersion', 'source']);
+    expect(sent.body.source).toBe('prompt');
   });
 
   it('says nothing at all on native', async () => {
@@ -190,7 +193,7 @@ describe('the native hook', () => {
   });
 
   it('redirects a clear execute and carries the id into the redirect', async () => {
-    const { fetchImpl } = router(EXECUTE);
+    const { fetchImpl, calls } = router(EXECUTE);
     const out = await runNativeHook(nativeEvent('https://example.test/spec', 'WebFetch'), {
       dataDir: dir,
       baseUrl: BASE,
@@ -198,6 +201,11 @@ describe('the native hook', () => {
     });
     expect(out.decision).toBe('deny');
     expect(out.id).toBe('k3f9-abcd');
+    // The native hook says which hook it is, and sends the pending call inside
+    // the packet rather than beside it.
+    const sent = calls[0] as { body: Record<string, unknown> };
+    expect(sent.body.source).toBe('native');
+    expect((sent.body.packet as { pendingCall?: unknown }).pendingCall).toBeDefined();
     const reason = (out.response as { hookSpecificOutput: { permissionDecisionReason: string } })
       .hookSpecificOutput.permissionDecisionReason;
     expect(reason).toContain('id:"k3f9-abcd"');
