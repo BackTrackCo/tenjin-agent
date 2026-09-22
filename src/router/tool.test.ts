@@ -453,3 +453,21 @@ describe('a fresh install, end to end through the local spend policy', () => {
     ).toBe(before);
   });
 });
+
+describe('a contract this build cannot turn into a request', () => {
+  it.each([
+    ['a URL that will not parse', { url: 'not a url' }],
+    ['a GET argument with no query form', { arguments: { symbol: { nested: true } } }],
+  ])('returns %s as a structured failure carrying the routing fee', async (_label, over) => {
+    const { fetchImpl } = net([
+      { url: ROUTER, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge() } },
+      { url: ROUTER, status: 200, body: decision({ contract: contract(over) }) },
+    ]);
+    const result = await runRequestTool({ query: 'q' }, deps(fetchImpl));
+    expect(result.isError).toBe(true);
+    expect(result.envelope).toMatchObject({
+      status: 'failed',
+      cost: ['router fee 0.001 USD', 'provider price 0 USD'],
+    });
+  });
+});

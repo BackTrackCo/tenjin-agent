@@ -160,3 +160,34 @@ describe('the session packet file', () => {
     expect(await readSessionPacket(dir, 's')).toBeNull();
   });
 });
+
+describe('reading a packet without a session id', () => {
+  it('never guesses between two sessions sharing one data directory', async () => {
+    const { readLatestPacket } = await import('./session-file');
+    const dir = await tempDir();
+    await writeSessionPacket(dir, 'session-a', await buildPromptPacket(undefined, 'a', 'mine'));
+    const only = await readLatestPacket(dir);
+    expect(only?.packet.current.text).toBe('mine');
+
+    await writeSessionPacket(dir, 'session-b', await buildPromptPacket(undefined, 'b', 'theirs'));
+    expect(await readLatestPacket(dir)).toBeNull();
+    // Once a call has bound to a session, a second session changes nothing.
+    expect((await readLatestPacket(dir, { onlyKey: only!.key }))?.packet.current.text).toBe('mine');
+  });
+
+  it('ignores an expired packet when deciding whether a session is ambiguous', async () => {
+    const { readLatestPacket } = await import('./session-file');
+    const dir = await tempDir();
+    await writeSessionPacket(dir, 'old', await buildPromptPacket(undefined, 'o', 'stale'), () => 0);
+    const later = 13 * 60 * 60 * 1000;
+    await writeSessionPacket(
+      dir,
+      'fresh',
+      await buildPromptPacket(undefined, 'f', 'current'),
+      () => later,
+    );
+    expect((await readLatestPacket(dir, { now: () => later }))?.packet.current.text).toBe(
+      'current',
+    );
+  });
+});

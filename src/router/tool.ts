@@ -117,10 +117,13 @@ export async function runRequestTool(
     maxAmountAtomic: contract.advertised.maxAmountAtomic,
     source: decision.capabilityId ?? 'a routing decision',
   };
-  const body = contract.method === 'GET' ? undefined : JSON.stringify(contract.arguments);
-  const url = contract.method === 'GET' ? withQuery(contract) : contract.url;
 
   try {
+    // Inside the try, because the routing fee is already committed by here: a
+    // contract this build cannot turn into a request has to come back as the
+    // structured failure carrying that cost, never as a throw out of the tool.
+    const body = contract.method === 'GET' ? undefined : JSON.stringify(contract.arguments);
+    const url = contract.method === 'GET' ? withQuery(contract) : contract.url;
     const paid = await runPay(
       {
         url,
@@ -190,6 +193,13 @@ function checkContract(
         reason: `The decision's success rule is unusable: ${String(err)}`,
       };
     }
+  }
+  try {
+    // The decision's URL is a string on the wire. Parsing it here keeps a
+    // malformed one a refusal rather than a throw from the request build.
+    new URL(contract.url);
+  } catch {
+    return { status: 'failed', reason: 'The decision names a URL this build cannot parse.' };
   }
   if (BigInt(contract.advertised.maxAmountAtomic) > maxAutoSpendAtomic) {
     return {

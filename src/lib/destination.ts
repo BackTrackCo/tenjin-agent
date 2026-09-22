@@ -13,10 +13,16 @@ import { CliError } from './errors';
  * local network, which is the shape a hostile registry listing or a hostile
  * routing decision would take.
  *
- * WHAT IT IS NOT. A resolved address is checked, not pinned: `fetch` resolves
- * again on its own, so a name that flips between the two answers is not closed
- * by this. Nor does it isolate a remote scraper, which follows its own
- * redirects on its own server. It removes the easy local target, no more.
+ * WHAT IT IS NOT. A resolved address is checked, NOT PINNED. `fetch` resolves
+ * the name again on its own, so a host that answers publicly here and privately
+ * a moment later is not closed by this, and neither is a remote scraper
+ * following its own redirects on its own server. Closing the first needs a
+ * transport that connects to the address it validated (`node:https` with a
+ * `lookup` override, as the draft experiment's `safeHttpsTransport` did), which
+ * the plan for this release deliberately left unported. What this does remove
+ * is the easy local target: `http://`, credentials, a custom port, a literal
+ * private address, a `.localhost`/`.internal` name, and a public name whose
+ * only answers are private. Documented in docs/safety-model.md as a bound.
  */
 
 const blockedV4 = new BlockList();

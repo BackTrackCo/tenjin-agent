@@ -98,11 +98,15 @@ export interface LatestPacket {
 }
 
 /**
- * The newest packet on this machine, for a reader that has no session id of its
- * own: the MCP server is started per session by the harness and never told
- * which one it serves. `onlyKey` is how it stops guessing after the first
- * answer, so a second session on the same machine can bleed into at most one
- * tool call rather than every one.
+ * The packet for a reader that has no session id of its own: the MCP server is
+ * started per session by the harness and never told which one it serves.
+ *
+ * IT NEVER GUESSES BETWEEN SESSIONS. Exactly one unexpired packet is this
+ * session's; two or more mean two Claude sessions share this data directory and
+ * nothing here can tell them apart, so the reader gets `null` and routes on the
+ * query alone rather than sending one session's conversation to a paid decision
+ * made for another. `onlyKey` is the latch: once a call has bound to a session,
+ * later calls read that one and are unaffected by a second session starting.
  */
 export async function readLatestPacket(
   dataDir: string,
@@ -116,21 +120,22 @@ export async function readLatestPacket(
   } catch {
     return null;
   }
-  let best: { key: string; at: number } | null = null;
+  // Age is read from the packet the writer stamped, not from the file's mtime:
+  // a copy or a `touch` moves the one and not the other, and this decides
+  // whether a conversation is current enough to pay a decision over.
+  const live: LatestPacket[] = [];
   for (const name of names) {
     const key = name.slice(0, -'.json'.length);
     if (opts.onlyKey !== undefined && key !== opts.onlyKey) continue;
-    const found = await stat(join(dir, name)).catch(() => null);
-    if (found === null || now() - found.mtimeMs > MAX_AGE_MS) continue;
-    if (best === null || found.mtimeMs > best.at) best = { key, at: found.mtimeMs };
+    try {
+      const raw = await readFile(join(dir, name), 'utf8');
+      if (Buffer.byteLength(raw) > MAX_PACKET_BYTES * 4) continue;
+      const parsed = FileSchema.safeParse(JSON.parse(raw));
+      if (!parsed.success || now() - parsed.data.writtenAtMs > MAX_AGE_MS) continue;
+      live.push({ key, packet: parsed.data.packet });
+    } catch {
+      continue;
+    }
   }
-  if (best === null) return null;
-  try {
-    const raw = await readFile(join(dir, `${best.key}.json`), 'utf8');
-    const parsed = FileSchema.safeParse(JSON.parse(raw));
-    if (!parsed.success || now() - parsed.data.writtenAtMs > MAX_AGE_MS) return null;
-    return { key: best.key, packet: parsed.data.packet };
-  } catch {
-    return null;
-  }
+  return live.length === 1 ? live[0]! : null;
 }
