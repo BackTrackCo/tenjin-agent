@@ -987,6 +987,51 @@ describe('runPay, the success rule on every delivery', () => {
     expect((result.data as { paid: boolean }).paid).toBe(false);
   });
 
+  /**
+   * A body past the client's 128 KiB validation limit is not evidence the
+   * endpoint broke its contract: the limit is ours, the rule never ran, and on
+   * the paid leg the authorization has already settled. Refusing it charged the
+   * caller and threw the product away.
+   */
+  const OVERSIZED = { success: true, blob: 'x'.repeat(200 * 1024) };
+
+  it('delivers a PAID 2xx too large to validate, with the caveat, and keeps the charge', async () => {
+    const fixture = buildPaymentRequired();
+    const { fetch } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': fixture.header }),
+      json(200, OVERSIZED),
+    ]);
+    const authorizer = fakeAuthorizer('allow');
+    const result = await runPay({ url: TENJIN_URL, resultSchema: SCHEMA }, makeCtx(), {
+      ...PUBLIC_DNS,
+      fetchImpl: fetch,
+      provider: testWalletProvider(),
+      authorizer,
+    });
+    const data = result.data as { paid: boolean; resultCaveat?: string; bodyText: string };
+    expect(data.paid).toBe(true);
+    // The body is delivered whole, not a preview of it.
+    expect(data.bodyText).toBe(JSON.stringify(OVERSIZED));
+    // The caveat states the byte count and that the check was skipped.
+    expect(data.resultCaveat).toContain(String(Buffer.byteLength(JSON.stringify(OVERSIZED))));
+    expect(data.resultCaveat).toContain('not checked');
+    expect(data.resultCaveat).toContain('unverified');
+    expect(result.humanLines?.some((line) => line.includes('unverified'))).toBe(true);
+    // The ledger is unchanged by this: the money moved either way.
+    expect(authorizer.commit).toHaveBeenCalledWith(RESERVATION, 100000n);
+  });
+
+  it('delivers a free 2xx too large to validate with the same caveat', async () => {
+    const { fetch } = scriptedFetch([json(200, OVERSIZED)]);
+    const result = await runPay({ url: TENJIN_URL, resultSchema: SCHEMA }, makeCtx(), {
+      ...PUBLIC_DNS,
+      fetchImpl: fetch,
+    });
+    const data = result.data as { paid: boolean; resultCaveat?: string };
+    expect(data.paid).toBe(false);
+    expect(data.resultCaveat).toContain('not checked');
+  });
+
   it('carries the transmitted amount on a paid failure, with settlement unknown', async () => {
     const fixture = buildPaymentRequired();
     const { fetch } = scriptedFetch([

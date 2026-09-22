@@ -148,6 +148,15 @@ export function assertResultSchema(schema: unknown): void {
 
 export interface ResultCheck {
   valid: boolean;
+  /**
+   * The check could not RUN, as against running and rejecting the body. The
+   * size limit is this client's constant and the caller's success rule knows
+   * nothing about it, so an over-limit body is not evidence the endpoint broke
+   * its contract, and on a paid delivery the money has already moved by the
+   * time it is measured. Callers deliver these with a caveat rather than
+   * refusing them; a `valid: false` without it is a real contract failure.
+   */
+  unvalidated?: boolean;
   reason?: string;
   /**
    * WHAT A CATALOG OWNER NEEDS to tell one failure from another: a provider
@@ -180,9 +189,11 @@ export function validateResultBody(schema: unknown, body: string): ResultCheck {
   const bytes = Buffer.byteLength(body);
   const base = { json: false, bytes, maxBytes: MAX_BODY_BYTES, preview: preview(body) };
   if (bytes > MAX_BODY_BYTES) {
+    // NOT a contract failure: nothing was checked. See {@link ResultCheck.unvalidated}.
     return {
       valid: false,
-      reason: `The result is ${bytes} bytes, over the ${MAX_BODY_BYTES} byte validation limit.`,
+      unvalidated: true,
+      reason: `The result is ${bytes} bytes, over the ${MAX_BODY_BYTES} byte validation limit, so its success schema was not checked.`,
       diagnosis: { ...base, failed: 'too-large' },
     };
   }

@@ -723,6 +723,22 @@ describe('a paid 2xx that fails its result contract', () => {
     expect(String((html.envelope.diagnosis as { preview: string }).preview)).toContain('502');
   });
 
+  /**
+   * The lookup was paid for twice over (the fee and the provider price) before
+   * the body was measured, so a body past the client's validation limit comes
+   * back as a fulfilled result carrying the caveat, never as a failure with the
+   * product thrown away. The model reading the envelope is what discounts it.
+   */
+  it('fulfils a result too large to validate, with the caveat in the envelope', async () => {
+    const oversized = JSON.stringify({ success: true, blob: 'x'.repeat(200 * 1024) });
+    const result = await runRequestTool({ query: 'q' }, deps(legsFor(oversized)));
+    expect(result.isError).toBe(false);
+    expect(result.envelope).toMatchObject({ status: 'fulfilled' });
+    expect(result.envelope.result).toBe(oversized);
+    expect(String(result.envelope.resultCaveat)).toContain('not checked');
+    expect(String(result.envelope.resultCaveat)).toContain(String(Buffer.byteLength(oversized)));
+  });
+
   it('still reports what the provider call cost on either', async () => {
     const result = await runRequestTool(
       { query: 'q' },

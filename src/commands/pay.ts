@@ -4,7 +4,7 @@ import type { PaymentRequired, PaymentRequirements } from '@x402/core/types';
 import { verifyAgainstRegistries } from '../lib/bazaar';
 import { assertPublicDestination, type DestinationOptions } from '../lib/destination';
 import { CliError } from '../lib/errors';
-import { validateResultBody } from '../lib/request-schema';
+import { validateResultBody, type ResultCheck } from '../lib/request-schema';
 import { fetchFailureToCliError, httpRequest } from '../lib/http';
 import type { HttpResponse } from '../lib/http';
 import { parseUsdToAtomic, toMoney } from '../lib/money';
@@ -104,6 +104,9 @@ export interface PayArgs {
    * The caller's APPLICATION success rule for the delivered body. A 2xx whose
    * body fails it is a paid failure, not a delivery: the money already moved,
    * so the refusal says so instead of handing back a body nobody vouched for.
+   * A body the rule could not be RUN against, because it is past this client's
+   * own validation limit, is delivered with `resultCaveat` instead: that limit
+   * is ours, not the endpoint's, and the payment has already settled.
    */
   resultSchema?: unknown;
 }
@@ -163,8 +166,12 @@ export async function runPay(
     });
   }
   if (probe.status >= 200 && probe.status < 300) {
-    assertUsableResult(args.resultSchema, probe.text, probe.status, 'free');
-    return deliver(url, lane, probe, { paid: false, printBody: args.printBody === true });
+    const caveat = assertUsableResult(args.resultSchema, probe.text, probe.status, 'free');
+    return deliver(url, lane, probe, {
+      paid: false,
+      ...(caveat !== undefined ? { caveat } : {}),
+      printBody: args.printBody === true,
+    });
   }
   if (probe.status !== 402) {
     throw new CliError('API_UNREACHABLE', `${url} answered ${probe.status}.`, {
@@ -222,10 +229,16 @@ export async function runPay(
     });
     if (!recheck.ok) throw fetchFailureToCliError(recheck);
     if (recheck.status >= 200 && recheck.status < 300) {
-      assertUsableResult(args.resultSchema, recheck.text, recheck.status, 'entitled');
+      const caveat = assertUsableResult(
+        args.resultSchema,
+        recheck.text,
+        recheck.status,
+        'entitled',
+      );
       return deliver(url, lane, recheck, {
         paid: false,
         entitled: true,
+        ...(caveat !== undefined ? { caveat } : {}),
         printBody: args.printBody === true,
       });
     }
@@ -327,9 +340,16 @@ export async function runPay(
     });
   }
   if (paid.status >= 200 && paid.status < 300) {
+    let caveat: string | undefined;
     if (args.resultSchema !== undefined) {
       const check = validateResultBody(args.resultSchema, paid.text);
-      if (!check.valid) {
+      // A body PAST THE VALIDATION LIMIT is not a broken contract: the limit is
+      // this client's constant, the endpoint's success rule never ran, and the
+      // payment has already settled. Refusing it charged the caller and threw
+      // the product away. It is delivered with the caveat instead, and the cap
+      // itself is unchanged: raising it silently is a different decision.
+      if (check.unvalidated === true) caveat = unvalidatedCaveat(check);
+      else if (!check.valid) {
         throw new CliError('CONTRACT_MISMATCH', `The paid response is not a usable result.`, {
           fix: 'The payment has already settled and is counted against the session budget. Do not retry blind: the endpoint answered 2xx with a body that fails the success rule it was paid under.',
           details: {
@@ -347,6 +367,7 @@ export async function runPay(
       amountAtomic: payment.amountAtomic,
       requirement: effectiveRequirement,
       ...(registry !== undefined ? { registry } : {}),
+      ...(caveat !== undefined ? { caveat } : {}),
       printBody: args.printBody === true,
     });
   }
@@ -487,16 +508,21 @@ function decodeChallenge(res: HttpResponse, url: string): PaymentRequired {
  * fails it is not a result, whether it arrived free, by entitlement or paid.
  * Applying it only to the paid branch let a `{success:false}` body come back as
  * `fulfilled` the moment the wallet was already entitled.
+ *
+ * Returns the caveat for a body the rule could not be RUN against, so the three
+ * branches treat an over-limit body the same way; `undefined` when the rule
+ * passed or there was none.
  */
 function assertUsableResult(
   schema: unknown,
   body: string,
   status: number,
   how: 'free' | 'entitled',
-): void {
-  if (schema === undefined) return;
+): string | undefined {
+  if (schema === undefined) return undefined;
   const check = validateResultBody(schema, body);
-  if (check.valid) return;
+  if (check.valid) return undefined;
+  if (check.unvalidated === true) return unvalidatedCaveat(check);
   throw new CliError('CONTRACT_MISMATCH', 'The response is not a usable result.', {
     fix: `Nothing was paid on this ${how} delivery. The endpoint answered ${status} with a body that fails the success rule it was asked under.`,
     details: {
@@ -506,6 +532,16 @@ function assertUsableResult(
       paid: false,
     },
   });
+}
+
+/**
+ * What the caller is told INSTEAD of a refusal when the success rule could not
+ * run: the byte count, that the check was skipped, and that the body in hand is
+ * unverified. It rides in the result rather than only in a log, because the
+ * agent reading the envelope is the one that has to discount it.
+ */
+function unvalidatedCaveat(check: ResultCheck): string {
+  return `${check.reason ?? 'The result could not be validated.'} The body is delivered unverified: its shape was never checked against the success rule.`;
 }
 
 /** The transport's own remedy, when it has one, appended after the leg's
@@ -625,7 +661,10 @@ async function assertRegistryVerified(
 
 /** Discriminated on `paid`: a paid delivery always carries what it paid and to
  *  whom, so no branch ever reaches for an amount that might not be there. */
-type DeliverOpts =
+type DeliverOpts = {
+  /** Set when the body is delivered UNVERIFIED: the success rule could not run. */
+  caveat?: string;
+} & (
   | {
       paid: false;
       /** Free because the wallet was already entitled (SIWX), not free-of-price. */
@@ -638,7 +677,8 @@ type DeliverOpts =
       requirement: PaymentRequirements;
       registry?: string;
       printBody: boolean;
-    };
+    }
+);
 
 function deliver(url: string, lane: Lane, res: HttpResponse, opts: DeliverOpts): CommandResult {
   const settlementTxHash = opts.paid ? settlementTx(res) : undefined;
@@ -658,6 +698,9 @@ function deliver(url: string, lane: Lane, res: HttpResponse, opts: DeliverOpts):
         ? { entitled: true }
         : {}),
     ...(settlementTxHash !== undefined ? { settlementTxHash } : {}),
+    // Beside the body, never instead of it: the caller gets the product AND the
+    // fact that its shape was never checked.
+    ...(opts.caveat !== undefined ? { resultCaveat: opts.caveat } : {}),
     // The body is the product: JSON when the endpoint spoke it, raw text always.
     ...(res.json !== undefined ? { body: res.json } : {}),
     bodyText: res.text,
@@ -673,7 +716,14 @@ function deliver(url: string, lane: Lane, res: HttpResponse, opts: DeliverOpts):
     opts.printBody || body.length <= BODY_PREVIEW_CHARS
       ? body
       : `${body.slice(0, BODY_PREVIEW_CHARS)}\n… truncated; run with --print-body or --json for the full body`;
-  return { data, humanLines: [headline, ...(preview.length > 0 ? [preview] : [])] };
+  return {
+    data,
+    humanLines: [
+      headline,
+      ...(opts.caveat !== undefined ? [sanitizeForTerminal(opts.caveat)] : []),
+      ...(preview.length > 0 ? [preview] : []),
+    ],
+  };
 }
 
 function settlementTx(res: HttpResponse): string | undefined {

@@ -156,7 +156,12 @@ export async function runRequestTool(
         confirm: async () => false,
       },
     );
-    const data = paid.data as { bodyText?: string; amountPaid?: { atomic: string } };
+    const data = paid.data as {
+      bodyText?: string;
+      amountPaid?: { atomic: string };
+      /** Set when the body was delivered without its success rule having run. */
+      resultCaveat?: string;
+    };
     const providerAtomic = BigInt(data.amountPaid?.atomic ?? '0');
     return withKey(
       {
@@ -168,6 +173,9 @@ export async function runRequestTool(
           parameters: contract.arguments,
           cost: costLines(routerFeeAtomic, providerAtomic),
           result: data.bodyText ?? '',
+          // The model reading this is the one that has to discount an unchecked
+          // result, so the caveat travels in the envelope beside the body.
+          ...(data.resultCaveat !== undefined ? { resultCaveat: data.resultCaveat } : {}),
           providerContentUntrusted: true,
         },
       },

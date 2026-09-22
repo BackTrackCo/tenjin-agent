@@ -124,6 +124,26 @@ describe('what a failed result contract reports', () => {
     expect(check.diagnosis!.bytes).toBeGreaterThan(128 * 1024);
   });
 
+  /**
+   * COULD NOT CHECK, not "failed the check". The limit is this client's own
+   * constant, which the caller's success rule knows nothing about, so callers
+   * deliver such a body with a caveat rather than calling the endpoint's
+   * contract broken (and, on a paid leg, charging for a discarded result).
+   */
+  it('marks an over-limit body unvalidated, and a rejected one not', () => {
+    const tooLarge = validateResultBody(schema, JSON.stringify({ blob: 'x'.repeat(200 * 1024) }));
+    expect(tooLarge.valid).toBe(false);
+    expect(tooLarge.unvalidated).toBe(true);
+    expect(tooLarge.reason).toContain('not checked');
+
+    const rejected = validateResultBody(schema, JSON.stringify({ success: false }));
+    expect(rejected.valid).toBe(false);
+    expect(rejected.unvalidated).toBeUndefined();
+
+    const notJson = validateResultBody(schema, '<html>502</html>');
+    expect(notJson.unvalidated).toBeUndefined();
+  });
+
   it('redacts anything that looks like a key out of the preview', () => {
     const secret = `ghp_${'A'.repeat(36)}`;
     const check = validateResultBody(schema, `not json, token ${secret}`);
