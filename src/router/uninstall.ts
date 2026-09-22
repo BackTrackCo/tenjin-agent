@@ -7,7 +7,13 @@ import { writeFileAtomic } from '../lib/atomic-json';
 import { inspectHooksFile, pruneHooks } from '../lib/harness-hooks';
 import { onPath } from '../lib/skill-wiring';
 import type { CommandContext, CommandResult } from '../context';
-import { ALLOW_RULE, MCP_SERVER_NAME, routerSettingsPath } from './install';
+import {
+  ALLOW_RULE,
+  MCP_SERVER_NAME,
+  mcpRemoveCommand,
+  mcpScope,
+  routerSettingsPath,
+} from './install';
 
 /**
  * `tenjin uninstall`: take out the hook entries, the allow rule and the MCP
@@ -19,7 +25,8 @@ import { ALLOW_RULE, MCP_SERVER_NAME, routerSettingsPath } from './install';
  */
 
 const exec = promisify(execFile);
-export const MCP_REMOVE_COMMAND = `claude mcp remove ${MCP_SERVER_NAME} -s user`;
+/** The user-scope form; `--project` removes at project scope symmetrically. */
+export const MCP_REMOVE_COMMAND = mcpRemoveCommand();
 
 export interface RouterUninstallArgs {
   project?: boolean;
@@ -30,7 +37,7 @@ export interface RouterUninstallDeps {
   cwd?: string;
   env?: NodeJS.ProcessEnv;
   which?: (bin: string) => boolean;
-  removeMcp?: () => Promise<void>;
+  removeMcp?: (opts: { scope: 'user' | 'project'; cwd: string }) => Promise<void>;
 }
 
 export async function runRouterUninstall(
@@ -41,14 +48,17 @@ export async function runRouterUninstall(
   const env = deps.env ?? process.env;
   const home = deps.homeDir ?? homedir();
   if (!isAbsolute(home)) throw new Error('The home directory is not an absolute path.');
+  const cwd = deps.cwd ?? process.cwd();
   const settingsPath = routerSettingsPath({
     ...(args.project === true ? { project: true } : {}),
     homeDir: home,
-    ...(deps.cwd !== undefined ? { cwd: deps.cwd } : {}),
+    cwd,
   });
 
   const removed = await removeFromSettings(settingsPath, ctx.dataDir);
-  const mcp = await removeMcpServer(deps, env);
+  // The SAME scope the install used, or a `--project` uninstall would leave the
+  // project's registration behind and reach into the user's file instead.
+  const mcp = await removeMcpServer(deps, env, args.project === true, cwd);
   const data = {
     settingsPath,
     ...removed,
@@ -61,7 +71,9 @@ export async function runRouterUninstall(
       removed.warning === undefined
         ? `removed ${removed.events.length > 0 ? removed.events.join(', ') : 'no'} hook entries and ${removed.ruleRemoved ? 'the' : 'no'} permission rule from ${settingsPath}`
         : `${settingsPath} was left untouched (${removed.warning})`,
-      mcp.removed ? `removed the ${MCP_SERVER_NAME} MCP server` : `mcp: run ${MCP_REMOVE_COMMAND}`,
+      mcp.removed
+        ? `removed the ${MCP_SERVER_NAME} MCP server (${mcp.scope} scope)`
+        : `mcp: run ${mcp.command}`,
       'Your wallet, spend ledger and config are kept.',
     ],
   };
@@ -124,27 +136,31 @@ async function removeFromSettings(path: string, dataDir: string): Promise<Settin
 async function removeMcpServer(
   deps: RouterUninstallDeps,
   env: NodeJS.ProcessEnv,
-): Promise<{ removed: boolean; command: string; reason?: string }> {
+  project: boolean,
+  cwd: string,
+): Promise<{ removed: boolean; scope: 'user' | 'project'; command: string; reason?: string }> {
+  const scope = mcpScope(project);
+  const command = mcpRemoveCommand(project);
   const which = deps.which ?? ((bin: string) => onPath(bin, env));
   if (!which('claude')) {
-    return {
-      removed: false,
-      command: MCP_REMOVE_COMMAND,
-      reason: 'the `claude` binary is not on PATH',
-    };
+    return { removed: false, scope, command, reason: 'the `claude` binary is not on PATH' };
   }
   try {
-    await (deps.removeMcp ?? runClaudeMcpRemove)();
-    return { removed: true, command: MCP_REMOVE_COMMAND };
+    await (deps.removeMcp ?? runClaudeMcpRemove)({ scope, cwd });
+    return { removed: true, scope, command };
   } catch (err) {
     return {
       removed: false,
-      command: MCP_REMOVE_COMMAND,
+      scope,
+      command,
       reason: err instanceof Error ? err.message : String(err),
     };
   }
 }
 
-async function runClaudeMcpRemove(): Promise<void> {
-  await exec('claude', ['mcp', 'remove', MCP_SERVER_NAME, '-s', 'user'], { timeout: 20_000 });
+async function runClaudeMcpRemove(opts: { scope: 'user' | 'project'; cwd: string }): Promise<void> {
+  await exec('claude', ['mcp', 'remove', MCP_SERVER_NAME, '-s', opts.scope], {
+    timeout: 20_000,
+    cwd: opts.cwd,
+  });
 }

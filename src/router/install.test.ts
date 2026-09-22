@@ -58,7 +58,10 @@ describe('tenjin install', () => {
       hooks: [{ type: 'command', command: 'tenjin hook native', timeout: 3 }],
     });
     expect((settings.permissions as { allow: string[] }).allow).toContain(ALLOW_RULE);
-    expect(registerMcp).toHaveBeenCalledWith(MCP_ADD_COMMAND);
+    expect(registerMcp).toHaveBeenCalledWith(MCP_ADD_COMMAND, {
+      scope: 'user',
+      cwd: expect.any(String) as unknown as string,
+    });
     expect(JSON.stringify(result.data)).not.toContain('daemon');
   });
 
@@ -456,5 +459,113 @@ describe('doctor on a --project install', () => {
     }).catch((e: unknown) => e);
     const details = (err as CliError).details as { settingsPath: string };
     expect(details.settingsPath).toBe(join(cwd, '.claude', 'settings.json'));
+  });
+});
+
+/**
+ * A `--project` run touches this project and nothing else. The hooks already
+ * went to the project settings file; the MCP registration has to follow them,
+ * or the run reaches into `~/.claude.json` and `uninstall --project` leaves
+ * that behind.
+ */
+describe('--project scopes the MCP registration too', () => {
+  const userFiles = async (): Promise<Record<string, string | null>> => {
+    const fs = await import('node:fs/promises');
+    const out: Record<string, string | null> = {};
+    for (const rel of ['.claude.json', '.claude/settings.json', '.claude/.mcp.json']) {
+      out[rel] = await fs.readFile(join(home, rel), 'utf8').catch(() => null);
+    }
+    return out;
+  };
+
+  it('registers at project scope, in the project directory', async () => {
+    const cwd = join(home, 'project');
+    await import('node:fs/promises').then((fs) => fs.mkdir(cwd, { recursive: true }));
+    const registerMcp = vi.fn(async () => undefined);
+    const result = await runRouterInstall({ project: true }, ctx(), deps({ cwd, registerMcp }));
+    expect(registerMcp).toHaveBeenCalledWith('claude mcp add x402 -s project -- tenjin mcp', {
+      scope: 'project',
+      cwd,
+    });
+    expect(result.data).toMatchObject({ mcp: { scope: 'project', registered: true } });
+  });
+
+  it('leaves every user-scope file byte-identical across install and uninstall', async () => {
+    const cwd = join(home, 'project');
+    const fs = await import('node:fs/promises');
+    await fs.mkdir(cwd, { recursive: true });
+    // A user-scope machine that already has its own MCP registration and its
+    // own settings: neither may move because a project install ran.
+    await fs.writeFile(join(home, '.claude.json'), '{"mcpServers":{"someone-else":{}}}\n');
+    await fs.writeFile(join(home, '.claude', 'settings.json'), '{"model":"opus"}\n');
+    const before = await userFiles();
+
+    await runRouterInstall({ project: true }, ctx(), deps({ cwd }));
+    expect(await userFiles()).toEqual(before);
+
+    await runRouterUninstall({ project: true }, ctx(), {
+      homeDir: home,
+      cwd,
+      env: {},
+      which: () => true,
+      removeMcp: vi.fn(async () => undefined),
+    });
+    expect(await userFiles()).toEqual(before);
+  });
+
+  it('removes at project scope, from the project directory', async () => {
+    const cwd = join(home, 'project');
+    await import('node:fs/promises').then((fs) => fs.mkdir(cwd, { recursive: true }));
+    await runRouterInstall({ project: true }, ctx(), deps({ cwd }));
+    const removeMcp = vi.fn(async () => undefined);
+    const result = await runRouterUninstall({ project: true }, ctx(), {
+      homeDir: home,
+      cwd,
+      env: {},
+      which: () => true,
+      removeMcp,
+    });
+    expect(removeMcp).toHaveBeenCalledWith({ scope: 'project', cwd });
+    expect(result.data).toMatchObject({ mcp: { scope: 'project', removed: true } });
+    expect(result.humanLines?.join('\n')).toContain('project scope');
+  });
+
+  it('names the project-scope command by hand when the claude binary is absent', async () => {
+    const cwd = join(home, 'project');
+    await import('node:fs/promises').then((fs) => fs.mkdir(cwd, { recursive: true }));
+    const result = await runRouterInstall(
+      { project: true },
+      ctx(),
+      deps({ cwd, which: () => false }),
+    );
+    expect(result.humanLines?.join('\n')).toContain('claude mcp add x402 -s project');
+  });
+
+  it('doctor reads back the same scope it was installed at', async () => {
+    const { runRouterDoctor } = await import('./doctor');
+    const cwd = join(home, 'project');
+    await import('node:fs/promises').then((fs) => fs.mkdir(cwd, { recursive: true }));
+    await runRouterInstall({ project: true }, ctx(), deps({ cwd }));
+    const readMcp = vi.fn(async () => true);
+    const fetchImpl = (async () =>
+      new Response('{}', {
+        status: 402,
+        headers: { 'content-type': 'application/json' },
+      })) as typeof fetch;
+    const out = await runRouterDoctor(ctx(), {
+      homeDir: home,
+      cwd,
+      project: true,
+      env: {},
+      which: () => true,
+      readMcp,
+      fetchImpl,
+    }).catch((e: unknown) => e);
+    expect(readMcp).toHaveBeenCalledWith({ scope: 'project', cwd });
+    const checks =
+      out instanceof CliError
+        ? (out.details as { checks: { name: string; detail: string }[] })
+        : (out as { data: { checks: { name: string; detail: string }[] } }).data;
+    expect(checks.checks.find((c) => c.name === 'mcp')?.detail).toContain('project scope');
   });
 });

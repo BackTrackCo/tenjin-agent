@@ -10,7 +10,13 @@ import { describeWallet, resolveWalletProvider } from '../lib/wallet';
 import { walletFileExists } from '../lib/wallet/store';
 import type { CommandContext, CommandResult } from '../context';
 import { ROUTER_PATH } from './decision';
-import { ALLOW_RULE, MCP_ADD_COMMAND, MCP_SERVER_NAME, routerSettingsPath } from './install';
+import {
+  ALLOW_RULE,
+  MCP_SERVER_NAME,
+  mcpAddCommand,
+  mcpScope,
+  routerSettingsPath,
+} from './install';
 
 /**
  * `tenjin doctor` for the router product: the six things that decide whether a
@@ -43,7 +49,7 @@ export interface RouterDoctorDeps {
   which?: (bin: string) => boolean;
   fetchImpl?: typeof fetch;
   /** Reads back the MCP registration; tests inject it so nothing is spawned. */
-  readMcp?: () => Promise<boolean>;
+  readMcp?: (opts: { scope: 'user' | 'project'; cwd: string }) => Promise<boolean>;
   /** Node's own version, for the floor check. */
   nodeVersion?: string;
 }
@@ -66,7 +72,7 @@ export async function runRouterDoctor(
   });
   const checks: RouterCheck[] = [nodeCheck(deps.nodeVersion ?? process.version)];
   checks.push(await hooksCheck(settingsPath, ctx.dataDir));
-  checks.push(await mcpCheck(deps, env));
+  checks.push(await mcpCheck(deps, env, deps.project === true, deps.cwd ?? process.cwd()));
   checks.push(spendCheck(settings.policy.maxAutoSpendAtomic, settings.policy.sessionBudgetAtomic));
   checks.push(...(await walletCheck(ctx)));
   checks.push(await routerCheck(settings.baseUrl, ctx.flags.timeout, deps.fetchImpl));
@@ -159,7 +165,16 @@ function allowRules(settings: Record<string, unknown>): string[] {
   return Array.isArray(allow) ? allow.filter((r): r is string => typeof r === 'string') : [];
 }
 
-async function mcpCheck(deps: RouterDoctorDeps, env: NodeJS.ProcessEnv): Promise<RouterCheck> {
+async function mcpCheck(
+  deps: RouterDoctorDeps,
+  env: NodeJS.ProcessEnv,
+  project: boolean,
+  cwd: string,
+): Promise<RouterCheck> {
+  // Read back in the SAME scope the install wrote, or a project install reads
+  // as unregistered and a user one as registered when neither is true.
+  const scope = mcpScope(project);
+  const add = mcpAddCommand(project);
   const which = deps.which ?? ((bin: string) => onPath(bin, env));
   if (!which('claude')) {
     return {
@@ -167,23 +182,31 @@ async function mcpCheck(deps: RouterDoctorDeps, env: NodeJS.ProcessEnv): Promise
       status: 'warn',
       required: false,
       detail: 'the `claude` binary is not on PATH, so the registration cannot be read back',
-      fix: `Register it yourself: ${MCP_ADD_COMMAND}`,
+      fix: `Register it yourself: ${add}`,
     };
   }
-  const registered = await (deps.readMcp ?? claudeHasServer)().catch(() => false);
+  const registered = await (deps.readMcp ?? claudeHasServer)({ scope, cwd }).catch(() => false);
   return registered
-    ? { name: 'mcp', status: 'ok', required: true, detail: `${MCP_SERVER_NAME} registered` }
+    ? {
+        name: 'mcp',
+        status: 'ok',
+        required: true,
+        detail: `${MCP_SERVER_NAME} registered (${scope} scope)`,
+      }
     : {
         name: 'mcp',
         status: 'fail',
         required: true,
-        detail: `${MCP_SERVER_NAME} is not registered, so there is no request tool`,
-        fix: `Run \`tenjin install\`, or: ${MCP_ADD_COMMAND}`,
+        detail: `${MCP_SERVER_NAME} is not registered at ${scope} scope, so there is no request tool`,
+        fix: `Run \`tenjin install\`, or: ${add}`,
       };
 }
 
-async function claudeHasServer(): Promise<boolean> {
-  const { stdout } = await exec('claude', ['mcp', 'get', MCP_SERVER_NAME], { timeout: 15_000 });
+async function claudeHasServer(opts: { scope: 'user' | 'project'; cwd: string }): Promise<boolean> {
+  const { stdout } = await exec('claude', ['mcp', 'get', MCP_SERVER_NAME], {
+    timeout: 15_000,
+    cwd: opts.cwd,
+  });
   return stdout.includes(MCP_SERVER_NAME);
 }
 

@@ -76,7 +76,7 @@ Prefer the narrow rules on this page to a broad `Bash(tenjin:*)`, `Bash(tenjin w
 
 1. Two hook entries in `~/.claude/settings.json` (`--project` writes the project file instead): `UserPromptSubmit` running `tenjin hook prompt`, and `PreToolUse` on `WebSearch|WebFetch` running `tenjin hook native`. Both are plain command entries with a 3 second timeout. No daemon, no background process, no generated script.
 2. The `mcp__x402__request` rule in `permissions.allow`. Nothing goes into `permissions.deny`, so localhost, intranet and private pages stay reachable by WebFetch whenever the gate says to use your native tools.
-3. The `x402` MCP server, through `claude mcp add x402 -s user -- tenjin mcp` when the `claude` binary is on PATH, and printed for you to run when it is not.
+3. The `x402` MCP server, through `claude mcp add x402 -s user -- tenjin mcp` when the `claude` binary is on PATH, and printed for you to run when it is not. Under `--project` it registers at project scope instead, from the project directory, so the server lands in that project's `.mcp.json` and your `~/.claude.json` is not touched; `tenjin uninstall --project` removes it from the same place.
 4. The three spend keys above, only where your config file is silent, plus `bazaarPay` on, which is the lane the router pays providers through.
 
 Every other key in the settings file is preserved byte for byte, a second run writes the same bytes, and `tenjin uninstall` removes exactly those four things and keeps your wallet, your ledger and your config.
