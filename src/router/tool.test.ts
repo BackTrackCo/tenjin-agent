@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { encodePaymentRequiredHeader } from '@x402/core/http';
 import type { PaymentRequired } from '@x402/core/types';
 import { buildPaymentRequired, testWalletProvider } from '../lib/read-test-utils';
+import { resolveSpendAuthorizer } from '../lib/wallet';
 import type { SpendAuthorization, SpendAuthorizer } from '../lib/wallet';
 import type { TenjinSigner } from '../lib/wallet/provider';
 import type { CommandContext } from '../context';
@@ -388,6 +389,65 @@ describe('the session 402 requirements cache', () => {
     const result = await runRequestTool({ query: 'q' }, deps(fetchImpl, authorizer('confirm')));
     expect(result.envelope).toMatchObject({ status: 'needs_approval' });
     expect(calls.every((c) => !c.paid)).toBe(true);
+    expect(
+      await import('node:fs/promises').then((fs) => fs.readFile(join(dir, 'config.json'), 'utf8')),
+    ).toBe(before);
+  });
+});
+
+// The install defaults are only useful if a lookup actually goes through under
+// them, with the REAL authorizer and no confirm seam anywhere.
+describe('a fresh install, end to end through the local spend policy', () => {
+  it('pays without a prompt under the defaults, and refuses under an explicit confirm always', async () => {
+    const { runRouterInstall } = await import('./install');
+    const home = join(dir, 'home');
+    await import('node:fs/promises').then((fs) =>
+      fs.mkdir(join(home, '.claude'), { recursive: true }),
+    );
+    await import('node:fs/promises').then((fs) => fs.rm(join(dir, 'config.json'), { force: true }));
+    await runRouterInstall({}, ctx(), { homeDir: home, env: {}, which: () => false });
+
+    const legs = () =>
+      net([
+        { url: ROUTER, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge() } },
+        { url: ROUTER, status: 200, body: decision() },
+        {
+          url: PROVIDER,
+          status: 402,
+          body: {},
+          headers: { 'PAYMENT-REQUIRED': challenge({ amount: '10000' }) },
+        },
+        { url: PROVIDER, status: 200, body: { data: { BTC: 1 } } },
+      ]);
+    const real = (fetchImpl: typeof fetch) => ({
+      ctx: ctx(),
+      signer,
+      authorizer: resolveSpendAuthorizer(ctx(), {
+        maxAutoSpendAtomic: 100_000n,
+        sessionBudgetAtomic: 1_000_000n,
+        confirm: { mode: 'above' as const, thresholdAtomic: 100_000n },
+        allowlistCreators: [],
+      }),
+      cache: new RequirementsCache(),
+      fetchImpl,
+      payDeps: { fetchImpl, provider: testWalletProvider(), destination: PUBLIC },
+    });
+    const first = legs();
+    const paid = await runRequestTool({ query: 'BTC and ETH' }, real(first.fetchImpl));
+    expect(paid.envelope).toMatchObject({ status: 'fulfilled' });
+
+    const before = await import('node:fs/promises').then((fs) =>
+      fs.readFile(join(dir, 'config.json'), 'utf8'),
+    );
+    const strict = { ...real(legs().fetchImpl) };
+    strict.authorizer = resolveSpendAuthorizer(ctx(), {
+      maxAutoSpendAtomic: 100_000n,
+      sessionBudgetAtomic: 1_000_000n,
+      confirm: { mode: 'always' as const },
+      allowlistCreators: [],
+    });
+    const refused = await runRequestTool({ query: 'BTC and ETH' }, strict);
+    expect(refused.envelope).toMatchObject({ status: 'needs_approval' });
     expect(
       await import('node:fs/promises').then((fs) => fs.readFile(join(dir, 'config.json'), 'utf8')),
     ).toBe(before);
