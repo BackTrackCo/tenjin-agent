@@ -3372,7 +3372,18 @@
       },
       "PhoneLookupResult": {
         "type": "object",
-        "required": ["product", "phoneNumber", "valid"],
+        "required": [
+          "product",
+          "phoneNumber",
+          "valid",
+          "carrier",
+          "lineType",
+          "mobileNetwork",
+          "countryCode",
+          "nationalFormat",
+          "location",
+          "portedCarrier"
+        ],
         "description": "A successful lookup, and the only 200 this endpoint returns: a product that produced nothing answers 404 for free instead. `callerName` is present ONLY on the \"name\" product — the carrier tier omits the key even when a name exists.",
         "properties": {
           "product": {
@@ -3420,6 +3431,7 @@
           },
           "location": {
             "type": "object",
+            "required": ["city", "state"],
             "description": "Rate-center origin, not the subscriber address. Either field is null when the number has no LERG locality.",
             "properties": {
               "city": {
