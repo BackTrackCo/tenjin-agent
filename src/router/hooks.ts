@@ -3,7 +3,12 @@ import { loadRawConfig, resolveSettings } from '../lib/config';
 import type { PartialConfig } from '../lib/config';
 import { buildPromptPacket, fit, packetForText, type Packet, type PendingCall } from './context';
 import { askGate, GATE_PATH, type GateDeps } from './gate';
-import { readSessionPacket, writeSessionPacket } from './session-file';
+import {
+  nativeContinuationHolds,
+  readSessionPacketFile,
+  sessionKeyOf,
+  writeSessionPacket,
+} from './session-file';
 
 /**
  * The two hook handlers. Between them they do exactly three things: build the
@@ -154,6 +159,9 @@ export interface NativeHookOutcome {
   response: unknown | null;
   decision: 'allow' | 'deny';
   gateAction?: string;
+  /** `continuation` when a paid `native` decision for this exact lookup in this
+   *  turn answered it, so the gate was not asked at all. */
+  via?: 'continuation';
 }
 
 /**
@@ -171,14 +179,35 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
 
   // No packet is the subagent and restarted-session path: the call's own query
   // or URL becomes the current message, because an empty one is refused.
-  const prior = await readSessionPacket(deps.dataDir, event.session_id, deps.now);
+  const stored = await readSessionPacketFile(deps.dataDir, event.session_id, deps.now);
+  const prior = stored?.packet ?? null;
+  const subject = 'query' in pending ? pending.query : pending.url;
+  // A PAID DECISION MAY HAVE ANSWERED THIS ALREADY. When the `request` tool
+  // bought a `native` decision for this exact lookup in this exact turn, asking
+  // the gate again can contradict it and deny the call that decision permitted,
+  // which the user sees as a blocked tool on a lookup they paid to be told they
+  // did not need to route. The record is scoped to the session, the turn stamp
+  // and the lookup text: a different query, a later prompt, an expired record
+  // or no packet at all all fall through to the gate as before.
+  if (
+    stored !== null &&
+    (await nativeContinuationHolds(
+      deps.dataDir,
+      sessionKeyOf(event.session_id),
+      stored.writtenAtMs,
+      subject,
+      deps.now,
+    ))
+  ) {
+    return { response: null, decision: 'allow', gateAction: 'native', via: 'continuation' };
+  }
   // `fit` AGAIN, on the packet this hook actually sends. The stored one was
   // measured without a pending call, so one that landed on the cap is over it
   // the moment this attaches the call, and an over-cap packet is a 400 that
   // `askGate` reads as null and this reads as allow: the redirect would die
   // with no trace, exactly as it did when the call travelled beside the packet.
   const packet: Packet = fit({
-    ...(prior ?? packetForText('query' in pending ? pending.query : pending.url)),
+    ...(prior ?? packetForText(subject)),
     pendingCall: pending,
   });
   const baseUrl = await resolveBaseUrl(deps);

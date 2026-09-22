@@ -167,18 +167,43 @@ describe('the request tool', () => {
     expect(calls[3]!.url).toContain('symbol=BTC%2CETH');
   });
 
+  /**
+   * A ROUTING OUTCOME IS NOT A TOOL FAILURE. `native`, `needs_input` and
+   * `needs_approval` are the router answering; raising the MCP error flag on
+   * them put a red box in front of the user on the most ordinary answer there
+   * is. The status still says what happened, the next step says what to do, and
+   * the routing fee is still reported.
+   */
   it.each([
-    ['native', { action: 'native', reason: 'Your own tools cover this.' }],
-    ['needs_input', { action: 'needs_input', reason: 'Name the coins.' }],
-  ])('returns %s as a tool error without paying a provider', async (status, over) => {
-    const { fetchImpl, calls } = net([
+    ['native', { action: 'native', reason: 'Your own tools cover this.' }, 'Continue with'],
+    ['needs_input', { action: 'needs_input', reason: 'Name the coins.' }, 'Ask the user'],
+  ])(
+    'returns %s as a normal result with its status, next step and cost',
+    async (status, over, nextStep) => {
+      const { fetchImpl, calls } = net([
+        { url: ROUTER, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge() } },
+        { url: ROUTER, status: 200, body: decision({ ...over, contract: undefined }) },
+      ]);
+      const result = await runRequestTool({ query: 'something' }, deps(fetchImpl));
+      expect(result.isError).toBe(false);
+      expect(result.summary).not.toContain('x402 request');
+      expect(result.envelope).toMatchObject({ status, reason: over.reason });
+      expect(String(result.envelope.nextStep)).toContain(nextStep);
+      // Truthful either way: the decision itself was paid for.
+      expect(result.envelope.cost).toEqual(['router fee 0.001 USD', 'provider price 0 USD']);
+      expect(calls).toHaveLength(2);
+    },
+  );
+
+  it('still marks a genuine failure as an error', async () => {
+    const { fetchImpl } = net([
       { url: ROUTER, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge() } },
-      { url: ROUTER, status: 200, body: decision({ ...over, contract: undefined }) },
+      { url: ROUTER, status: 200, body: { nope: true } },
     ]);
     const result = await runRequestTool({ query: 'something' }, deps(fetchImpl));
     expect(result.isError).toBe(true);
-    expect(result.envelope).toMatchObject({ status, reason: over.reason });
-    expect(calls).toHaveLength(2);
+    expect(result.envelope).toMatchObject({ status: 'failed' });
+    expect(result.envelope.nextStep).toBeUndefined();
   });
 
   it.each([
@@ -756,5 +781,203 @@ describe('a paid 2xx that fails its result contract', () => {
       cost: ['router fee 0.001 USD', 'provider price 0.01 USD'],
       settlement: 'reported',
     });
+  });
+});
+
+/**
+ * ONE LOOKUP, NOT THE WHOLE TURN. The instruction used to demand the user's
+ * entire request, which sent strategy, opinions and repository context to the
+ * router as one operation. The host may now narrow to the sub-request that
+ * needs the outside world, and NOTHING IS LOST BY IT: the authoritative packet
+ * the prompt hook wrote still travels beside the query, contextual URLs and
+ * all, so the server sees what was not sent as the lookup.
+ */
+describe('a narrowed query with the whole packet behind it', () => {
+  it('sends the sub-request as the query and the unchanged packet as the context', async () => {
+    const bodies: Record<string, unknown>[] = [];
+    const fetchImpl = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      if (!new Headers(init?.headers ?? {}).has('payment-signature')) {
+        return new Response('{}', {
+          status: 402,
+          headers: { 'content-type': 'application/json', 'PAYMENT-REQUIRED': challenge() },
+        });
+      }
+      bodies.push(JSON.parse(String(init?.body ?? 'null')) as Record<string, unknown>);
+      return new Response(JSON.stringify(decision({ action: 'native', contract: undefined })), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as typeof fetch;
+
+    const mixed =
+      'Here is my product strategy for the alpha, my opinion on the pricing page, and ' +
+      'the PR https://github.com/BackTrackCo/tenjin-agent/pull/370 for context. Also find ' +
+      'agent startups shipping x402 in the last month.';
+    const started = Date.now() - 1;
+    await writeSessionPacket(dir, 'sess-1', await buildPromptPacket(undefined, 'sess-1', mixed));
+
+    const narrow = 'find agent startups shipping x402 in the last month';
+    await runRequestTool({ query: narrow }, { ...deps(fetchImpl), startedAtMs: started });
+
+    const sent = bodies[0] as {
+      query: string;
+      packet: { current: { text: string }; literalUrls: string[] };
+    };
+    // The lookup is the sub-request, copied as written.
+    expect(sent.query).toBe(narrow);
+    // The packet is the authoritative one, not a copy of the narrowed query:
+    // the whole turn and its literal URL are still what the server binds from.
+    expect(sent.packet.current.text).toBe(mixed);
+    expect(sent.packet.literalUrls).toContain(
+      'https://github.com/BackTrackCo/tenjin-agent/pull/370',
+    );
+  });
+});
+
+/**
+ * THE PAID `native` DECISION HAS TO REACH THE HOOK. Without it the PreToolUse
+ * hook asked the gate again about the very search the decision had just
+ * permitted, and a gate answering `execute` denied it: the user sees a blocked
+ * tool on a lookup they paid to be told they did not need to route.
+ *
+ * The bypass is deliberately narrow, so each boundary is pinned below.
+ */
+describe('an explicit native decision and the matching continuation', () => {
+  const LOOKUP = 'agent startups shipping x402 in the last month';
+
+  /** A gate that always redirects, and records whether it was asked at all. */
+  function redirectingGate(): { fetchImpl: typeof fetch; calls: unknown[] } {
+    const calls: unknown[] = [];
+    const fetchImpl = (async (input: Parameters<typeof fetch>[0]) => {
+      calls.push(String(input));
+      return new Response(
+        JSON.stringify({
+          schemaVersion: 1,
+          routerVersion: 'v',
+          action: 'execute',
+          hint: 'A web research capability fits this request. Call request with the research question, alone, and wait for its result.',
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    }) as typeof fetch;
+    return { fetchImpl, calls };
+  }
+
+  /** The paid decision leg, answering `native` or `needs_input` for `query`. */
+  function routerAnswering(action: 'native' | 'needs_input'): typeof fetch {
+    return (async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      if (!new Headers(init?.headers ?? {}).has('payment-signature')) {
+        return new Response('{}', {
+          status: 402,
+          headers: { 'content-type': 'application/json', 'PAYMENT-REQUIRED': challenge() },
+        });
+      }
+      return new Response(
+        JSON.stringify(
+          decision({ action, reason: 'Your own tools cover this.', contract: undefined }),
+        ),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    }) as typeof fetch;
+  }
+
+  function nativeEvent(query: string): unknown {
+    return {
+      hook_event_name: 'PreToolUse',
+      session_id: 'sess-1',
+      tool_name: 'WebSearch',
+      tool_input: { query },
+    };
+  }
+
+  /** One turn: the prompt hook's packet, then the tool's paid decision. */
+  async function turn(action: 'native' | 'needs_input', stamp = Date.now()): Promise<void> {
+    await writeSessionPacket(
+      dir,
+      'sess-1',
+      await buildPromptPacket(undefined, 'sess-1', `please ${LOOKUP}`),
+      () => stamp,
+    );
+    await runRequestTool(
+      { query: LOOKUP },
+      { ...deps(routerAnswering(action)), startedAtMs: stamp - 1 },
+    );
+  }
+
+  it('allows the same lookup in the same turn without asking the gate again', async () => {
+    const { runNativeHook } = await import('./hooks');
+    await turn('native');
+    const gate = redirectingGate();
+    const out = await runNativeHook(nativeEvent(LOOKUP), {
+      dataDir: dir,
+      baseUrl: ROUTER,
+      fetchImpl: gate.fetchImpl,
+    });
+    expect(out).toMatchObject({ decision: 'allow', gateAction: 'native', via: 'continuation' });
+    // Not merely allowed: the gate was never asked, so it could not contradict
+    // the decision this session already paid for.
+    expect(gate.calls).toHaveLength(0);
+  });
+
+  it('matches through whitespace and case, and nothing else', async () => {
+    const { runNativeHook } = await import('./hooks');
+    await turn('native');
+    const same = redirectingGate();
+    const rewrapped = await runNativeHook(
+      nativeEvent(`  Agent Startups   shipping X402 in the last month `),
+      {
+        dataDir: dir,
+        baseUrl: ROUTER,
+        fetchImpl: same.fetchImpl,
+      },
+    );
+    expect(rewrapped).toMatchObject({ decision: 'allow', via: 'continuation' });
+    expect(same.calls).toHaveLength(0);
+
+    const other = redirectingGate();
+    const different = await runNativeHook(nativeEvent('best pricing page examples'), {
+      dataDir: dir,
+      baseUrl: ROUTER,
+      fetchImpl: other.fetchImpl,
+    });
+    // A different question is a different decision: asked, and redirected.
+    expect(other.calls).toHaveLength(1);
+    expect(different.decision).toBe('deny');
+  });
+
+  it('does not survive the next user turn', async () => {
+    const { runNativeHook } = await import('./hooks');
+    const first = Date.now();
+    await turn('native', first);
+    // The user says something else: the prompt hook rewrites the packet, and
+    // the stamp the continuation was granted against is gone.
+    await writeSessionPacket(
+      dir,
+      'sess-1',
+      await buildPromptPacket(undefined, 'sess-1', 'actually, ignore that'),
+      () => first + 5_000,
+    );
+    const gate = redirectingGate();
+    const out = await runNativeHook(nativeEvent(LOOKUP), {
+      dataDir: dir,
+      baseUrl: ROUTER,
+      fetchImpl: gate.fetchImpl,
+    });
+    expect(gate.calls).toHaveLength(1);
+    expect(out.decision).toBe('deny');
+  });
+
+  it('is never granted by needs_input', async () => {
+    const { runNativeHook } = await import('./hooks');
+    await turn('needs_input');
+    const gate = redirectingGate();
+    const out = await runNativeHook(nativeEvent(LOOKUP), {
+      dataDir: dir,
+      baseUrl: ROUTER,
+      fetchImpl: gate.fetchImpl,
+    });
+    // Unresolved scope is a question for the user, never standing permission.
+    expect(gate.calls).toHaveLength(1);
+    expect(out.decision).toBe('deny');
   });
 });

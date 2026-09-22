@@ -8,7 +8,7 @@ import type { SpendAuthorizer, WalletProvider } from '../lib/wallet';
 import type { TenjinSigner } from '../lib/wallet/provider';
 import type { CommandContext } from '../context';
 import { requestDecision, type DecisionContract, type RequirementsCache } from './decision';
-import { readLatestPacket } from './session-file';
+import { readLatestPacket, recordNativeContinuation } from './session-file';
 import { MAX_MESSAGE_CHARS, packetForText } from './context';
 
 /**
@@ -109,6 +109,21 @@ export async function runRequestTool(
   const routerFeeAtomic = outcome.amountAtomic;
   const { decision } = outcome.response;
   if (decision.action !== 'execute' || decision.contract === undefined) {
+    // An explicit `native` was BOUGHT for this exact lookup in this turn, so
+    // the PreToolUse hook must not ask the gate about it again and be told to
+    // redirect the call the same decision just permitted. Recorded only for
+    // `native`, only against this session's current packet stamp, and only for
+    // this query; `needs_input` gets nothing, because unresolved scope is a
+    // question for the user, never standing permission.
+    if (decision.action === 'native' && sessionKey !== undefined && latest !== null) {
+      await recordNativeContinuation(
+        deps.ctx.dataDir,
+        sessionKey,
+        latest.writtenAtMs,
+        query,
+        deps.now,
+      ).catch(() => undefined);
+    }
     return withKey(
       fail(
         decision.action === 'native' ? 'native' : 'needs_input',
@@ -312,6 +327,36 @@ export function costLines(routerFeeAtomic: bigint, providerAtomic: bigint): stri
   ];
 }
 
+/**
+ * ROUTINE CONTROL OUTCOMES, not failures of this tool. A routing decision was
+ * delivered, and it says the turn continues somewhere else: with the host's own
+ * tools, with a question for the user, or with an approval only the user gives.
+ * The MCP error flag is for what went WRONG, and raising it on these three put
+ * a red box in front of the user on the most ordinary answer the router has.
+ *
+ * Genuine request, provider and schema failures stay errors, and so does a paid
+ * body that could not be verified: delivering a routing outcome is not a claim
+ * that a provider fulfilled anything.
+ */
+const ROUTINE: ReadonlySet<FailStatus> = new Set(['native', 'needs_input', 'needs_approval']);
+
+/** One short line saying what the host does next, per routine outcome. */
+const NEXT_STEP: Record<string, string> = {
+  native: 'Continue with your own tools. Nothing was bought.',
+  needs_input:
+    'Ask the user for the missing detail, then call `request` again with it. Nothing was bought.',
+  needs_approval:
+    'Report the command above to the user; this build will not raise a spend limit on its own.',
+};
+
+/** The headline: calm for a routine outcome, explicit for a real failure. */
+function summaryFor(status: FailStatus, reason: string): string {
+  if (status === 'native') return `No paid lookup needed: ${reason}`;
+  if (status === 'needs_input') return `More input needed: ${reason}`;
+  if (status === 'needs_approval') return `Approval needed: ${reason}`;
+  return `x402 request ${status}: ${reason}`;
+}
+
 function fail(
   status: FailStatus,
   reason: string,
@@ -322,14 +367,21 @@ function fail(
    *  redacted preview: what tells a parse miss from an HTML error page. */
   diagnosis?: Record<string, unknown>,
 ): RequestToolResult {
+  const routine = ROUTINE.has(status);
   return {
-    isError: true,
-    summary: `x402 request ${status}: ${reason}`,
+    isError: !routine,
+    summary: summaryFor(status, reason),
     envelope: {
       status,
       reason,
+      // The status is the fact; the next step is what to do about it. A routine
+      // outcome carries both, because an answer with no instruction is what
+      // makes a model treat an ordinary `native` as a dead end.
+      ...(routine ? { nextStep: NEXT_STEP[status] ?? '' } : {}),
       // What LEFT, not what was delivered: an authorization that was
-      // transmitted is money at risk whether or not a result came back.
+      // transmitted is money at risk whether or not a result came back. The
+      // same fields on a routine outcome, which is the point: a `native`
+      // decision still cost the routing fee, and saying so is not an error.
       cost: costLines(routerFeeAtomic, providerAtomic),
       ...(settlement !== undefined ? { settlement } : {}),
       ...(diagnosis !== undefined ? { diagnosis } : {}),

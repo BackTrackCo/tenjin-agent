@@ -83,10 +83,13 @@ describe('the router MCP server', () => {
       const tools = await client.listTools();
       expect(tools.tools.map((t) => t.name)).toEqual(['request']);
       const called = await client.callTool({ name: 'request', arguments: { query: 'weather' } });
-      expect(called.isError).toBe(true);
+      // A `native` decision is a routing outcome delivered, not a tool failure:
+      // the MCP error flag stays down and the status carries the fact.
+      expect(called.isError).toBe(false);
       expect(called.structuredContent).toMatchObject({
         status: 'native',
         reason: 'Your own tools cover this.',
+        nextStep: 'Continue with your own tools. Nothing was bought.',
       });
     } finally {
       await client.close();
@@ -174,14 +177,15 @@ describe('the base URL the MCP server routes against', () => {
 });
 
 /**
- * The router BINDS the query text and a provider parses it, so a paraphrase is
- * a failed paid call: the live smoke lost a Wolfram turn when the model sent
- * "Evaluate the definite integral ∫₀¹ ..." for a user who wrote "Evaluate ∫₀¹
- * ...", and Wolfram returned zero pods and billed for it.
+ * TWO RULES, AND THE ORDER MATTERS. What to send is one concrete lookup, which
+ * is what lets a mixed turn route at all; how to write it is verbatim, because
+ * the router binds the query text and a provider parses it. The live smoke lost
+ * a Wolfram turn when the model sent "Evaluate the definite integral ∫₀¹ ..."
+ * for a user who wrote "Evaluate ∫₀¹ ...": zero pods, and billed.
  */
-describe('the tool tells the model not to rephrase', () => {
-  it('puts the verbatim rule first, in the instructions and on the parameter', async () => {
-    const { VERBATIM_RULE } = await import('./mcp');
+describe('the tool tells the model what to send and not to rephrase', () => {
+  it('puts the scope rule then the verbatim rule, in the instructions and on the parameter', async () => {
+    const { SCOPE_RULE, VERBATIM_RULE } = await import('./mcp');
     const server = buildRouterMcpServer({
       dataDir: dir,
       handlerDeps: {
@@ -196,13 +200,23 @@ describe('the tool tells the model not to rephrase', () => {
     try {
       const tools = await client.listTools();
       const request = tools.tools.find((t) => t.name === 'request')!;
-      expect(request.description?.startsWith(VERBATIM_RULE)).toBe(true);
+      expect(request.description?.startsWith(SCOPE_RULE)).toBe(true);
+      expect(request.description).toContain(VERBATIM_RULE);
       const schema = request.inputSchema as unknown as {
         properties: { query: { description: string } };
       };
+      expect(schema.properties.query.description).toContain(SCOPE_RULE);
       expect(schema.properties.query.description).toContain(VERBATIM_RULE);
-      // The rule names the failure it exists to prevent.
-      for (const phrase of ['verbatim', 'do not rephrase', 'Evaluate the definite integral']) {
+      // One lookup, not the whole turn: neither rule may ask for the latter.
+      for (const phrase of ['one concrete external lookup', 'A mixed turn is not one lookup']) {
+        expect(SCOPE_RULE).toContain(phrase);
+      }
+      for (const text of [SCOPE_RULE, VERBATIM_RULE]) {
+        expect(text).not.toContain("the user's request verbatim");
+        expect(text).not.toContain('whole request');
+      }
+      // And the verbatim rule still names the failure it exists to prevent.
+      for (const phrase of ['VERBATIM', 'no paraphrase', 'Evaluate the definite integral']) {
         expect(VERBATIM_RULE).toContain(phrase);
       }
     } finally {
