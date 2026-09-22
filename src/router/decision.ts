@@ -6,7 +6,12 @@ import type { HttpRequestOptions, HttpResponse } from '../lib/http';
 import { gateSpend } from '../lib/spend-gate';
 import type { SpendAuthorizer } from '../lib/wallet';
 import type { TenjinSigner } from '../lib/wallet/provider';
-import { buildExactPayment } from '../lib/x402-pay';
+import {
+  buildExactPayment,
+  createPayerClient,
+  noPayableRequirement,
+  selectPayableRequirement,
+} from '../lib/x402-pay';
 import type { CommandContext } from '../context';
 import type { Packet } from './context';
 
@@ -216,12 +221,20 @@ async function payOnce(
   challenge: PaymentRequired,
   deps: DecisionDeps,
 ): Promise<Attempt> {
-  const requirement = challenge.accepts[0];
+  // ONE SELECTION, so the CHECKED entry is the SIGNED entry. The fee gate, the
+  // reservation and the ledger all run on the requirement chosen here, and that
+  // same requirement goes to `buildExactPayment` as `only`, exactly as `runPay`
+  // and `runBuy` do. Pricing `accepts[0]` and then letting the builder re-select
+  // through the SDK's canonical-USDC policy meant a router 402 whose first entry
+  // sits on an unsupported network or asset had `maxAutoSpend`, the confirm and
+  // the ledger evaluated on one entry while the authorization carried another.
+  const { core } = createPayerClient(() => deps.signer);
+  const requirement = selectPayableRequirement(core, challenge);
   if (requirement === undefined) {
     deps.cache.clear(url);
     return {
       status: 'failed',
-      reason: 'The router challenge advertised no payment requirements.',
+      reason: noPayableRequirement(challenge.accepts).message,
       committedAtomic: NO_FEE,
     };
   }
@@ -253,7 +266,7 @@ async function payOnce(
 
   let payment: Awaited<ReturnType<typeof buildExactPayment>>;
   try {
-    payment = await buildExactPayment(challenge, deps.signer);
+    payment = await buildExactPayment(challenge, deps.signer, requirement);
   } catch (err) {
     await deps.authorizer.release(reservationId);
     deps.cache.clear(url);
