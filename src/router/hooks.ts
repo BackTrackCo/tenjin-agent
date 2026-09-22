@@ -7,6 +7,7 @@ import {
   nativeContinuationHolds,
   readSessionPacketFile,
   sessionKeyOf,
+  writeGateHint,
   writeSessionPacket,
 } from './session-file';
 
@@ -102,10 +103,13 @@ export async function runPromptHook(raw: unknown, deps: HookDeps): Promise<Promp
   if (!parsed.success) return { response: null, packetWritten: false };
   const event = parsed.data;
   const packet = await buildPromptPacket(event.transcript_path, event.session_id, event.prompt);
-  const written = await writeSessionPacket(deps.dataDir, event.session_id, packet, deps.now).then(
-    () => true,
-    () => false,
-  );
+  const turnStamp = await writeSessionPacket(
+    deps.dataDir,
+    event.session_id,
+    packet,
+    deps.now,
+  ).catch(() => null);
+  const written = turnStamp !== null;
   const skipped = promptSkipReason(event.prompt);
   if (skipped !== null) return { response: null, skipped, packetWritten: written };
 
@@ -118,6 +122,15 @@ export async function runPromptHook(raw: unknown, deps: HookDeps): Promise<Promp
   if (answer === null) return { response: null, packetWritten: written };
   if (answer.action !== 'execute' || answer.hint === undefined) {
     return { response: null, gateAction: answer.action, packetWritten: written };
+  }
+  // The category this gate just named, left for the FIRST paid decision of this
+  // turn to send as evidence. Best effort and never on the critical path: a
+  // hint that cannot be stored costs the decision a piece of evidence, never
+  // the turn. See `consumeGateHint` for why it is one-shot.
+  if (turnStamp !== null && answer.category !== undefined) {
+    await writeGateHint(deps.dataDir, event.session_id, turnStamp, answer.category, deps.now).catch(
+      () => undefined,
+    );
   }
   return {
     response: {

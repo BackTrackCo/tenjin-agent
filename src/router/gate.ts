@@ -55,16 +55,30 @@ export interface GateAnswer {
   routerVersion: string;
   /** Present only when it passed {@link isWellFormedHint}. */
   hint?: string;
+  /** The one task category the hint named, present exactly when the hint is.
+   *  It travels to the paid decision as evidence for that same lookup. */
+  category?: string;
 }
 
 export function isWellFormedHint(hint: string): boolean {
-  if (hint.length === 0 || hint.length > MAX_HINT_CHARS) return false;
-  if (/[\p{Cc}\p{Cf}]/u.test(hint)) return false;
-  if (/[`<>*_[\]{}\\]/.test(hint)) return false;
-  if (!hint.includes('Call request')) return false;
-  if (!hint.endsWith(HINT_TAIL)) return false;
+  return categoryOf(hint) !== undefined;
+}
+
+/**
+ * The ONE category a well-formed hint names, or undefined for a hint this
+ * build will not emit. Shape and category are one question, not two: the hint
+ * is well formed exactly when exactly one category is in it, and that category
+ * is what travels to the paid decision as evidence.
+ */
+export function categoryOf(hint: string): string | undefined {
+  if (hint.length === 0 || hint.length > MAX_HINT_CHARS) return undefined;
+  if (/[\p{Cc}\p{Cf}]/u.test(hint)) return undefined;
+  if (/[`<>*_[\]{}\\]/.test(hint)) return undefined;
+  if (!hint.includes('Call request')) return undefined;
+  if (!hint.endsWith(HINT_TAIL)) return undefined;
   const lowered = hint.toLowerCase();
-  return CATEGORIES.filter((category) => lowered.includes(category)).length === 1;
+  const named = CATEGORIES.filter((category) => lowered.includes(category));
+  return named.length === 1 ? named[0] : undefined;
 }
 
 export interface GateRequest {
@@ -123,10 +137,11 @@ export async function askGate(
       return null;
     }
     const { action, routerVersion, hint } = parsed.data;
+    const category = hint !== undefined ? categoryOf(hint) : undefined;
     return {
       action,
       routerVersion,
-      ...(hint !== undefined && isWellFormedHint(hint) ? { hint } : {}),
+      ...(hint !== undefined && category !== undefined ? { hint, category } : {}),
     };
   } catch (err) {
     deps.onFailure?.(`could not be reached (${err instanceof Error ? err.message : String(err)})`);

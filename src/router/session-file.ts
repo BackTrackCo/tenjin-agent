@@ -42,18 +42,22 @@ function packetPath(dataDir: string, sessionId: string): string {
   return join(routerStateDir(dataDir), `${sessionKeyOf(sessionId)}.json`);
 }
 
+/** Returns the stamp it wrote, which is this turn's identity for everything
+ *  scoped to one turn (the gate hint and the native continuation). */
 export async function writeSessionPacket(
   dataDir: string,
   sessionId: string,
   packet: Packet,
   now: () => number = Date.now,
-): Promise<void> {
-  const body = JSON.stringify({ schemaVersion: 1, writtenAtMs: now(), packet });
+): Promise<number> {
+  const writtenAtMs = now();
+  const body = JSON.stringify({ schemaVersion: 1, writtenAtMs, packet });
   await writeFileAtomic(packetPath(dataDir, sessionId), `${body}\n`, {
     mode: 0o600,
     dirMode: 0o700,
   });
   await pruneExpired(dataDir, now);
+  return writtenAtMs;
 }
 
 /** `null` for absent, unreadable, malformed or expired; the caller then routes
@@ -103,11 +107,15 @@ async function pruneExpired(dataDir: string, now: () => number): Promise<void> {
   }
   await Promise.all(
     entries.map(async (name) => {
-      const continuation = name.endsWith(CONTINUATION_SUFFIX);
-      if (!continuation && !name.endsWith('.json')) return;
+      const turnScoped = name.endsWith(CONTINUATION_SUFFIX) || name.endsWith(GATE_HINT_SUFFIX);
+      if (!turnScoped && !name.endsWith('.json')) return;
       const path = join(dir, name);
-      const maxAge = continuation ? CONTINUATION_MAX_AGE_MS : MAX_AGE_MS;
-      const schema = continuation ? ContinuationSchema : FileSchema;
+      const maxAge = turnScoped ? CONTINUATION_MAX_AGE_MS : MAX_AGE_MS;
+      const schema = name.endsWith(GATE_HINT_SUFFIX)
+        ? GateHintSchema
+        : turnScoped
+          ? ContinuationSchema
+          : FileSchema;
       try {
         const parsed = schema.safeParse(JSON.parse(await readFile(path, 'utf8')));
         if (parsed.success && now() - parsed.data.writtenAtMs <= maxAge) return;
@@ -193,6 +201,74 @@ function lowerSchemeAndHost(text: string): string {
   const userinfo = at === -1 ? '' : authority.slice(0, at + 1);
   const host = authority.slice(at + 1).toLowerCase();
   return `${scheme}${userinfo}${host}${parts[3]!}`;
+}
+
+/**
+ * THE GATE'S CATEGORY, WAITING FOR THE LOOKUP IT BELONGS TO. The free prompt
+ * gate classifies the turn before any tool call; the paid decision happens in a
+ * different process and would otherwise never see that answer, which is how the
+ * gate and the binder came to contradict each other inside one turn.
+ *
+ * ONE HINT, ONE LOOKUP. It is written per turn and CONSUMED by the first
+ * decision that uses it, so a later or parallel lookup in the same turn carries
+ * none: evidence gathered about one question is not evidence about the next.
+ * It is never payment authority, and the backend may ignore it.
+ */
+const GATE_HINT_SUFFIX = '.gatehint';
+
+const GateHintSchema = z.object({
+  schemaVersion: z.literal(1),
+  writtenAtMs: z.number(),
+  turnStamp: z.number(),
+  category: z.string().min(1).max(64),
+});
+
+function gateHintPath(dataDir: string, sessionKey: string): string {
+  return join(routerStateDir(dataDir), `${sessionKey}${GATE_HINT_SUFFIX}`);
+}
+
+/** Leave the category this turn's gate named, for the first lookup that follows. */
+export async function writeGateHint(
+  dataDir: string,
+  sessionId: string,
+  turnStamp: number,
+  category: string,
+  now: () => number = Date.now,
+): Promise<void> {
+  const body = JSON.stringify({
+    schemaVersion: 1,
+    writtenAtMs: now(),
+    turnStamp,
+    category,
+  });
+  await writeFileAtomic(gateHintPath(dataDir, sessionKeyOf(sessionId)), `${body}\n`, {
+    mode: 0o600,
+    dirMode: 0o700,
+  });
+}
+
+/**
+ * The category for THIS turn, removed as it is read. One-shot by construction:
+ * a second lookup in the same turn, or a parallel one, finds nothing and sends
+ * no evidence rather than evidence about somebody else's question.
+ */
+export async function consumeGateHint(
+  dataDir: string,
+  sessionKey: string,
+  turnStamp: number,
+  now: () => number = Date.now,
+): Promise<string | null> {
+  const path = gateHintPath(dataDir, sessionKey);
+  try {
+    const parsed = GateHintSchema.safeParse(JSON.parse(await readFile(path, 'utf8')));
+    await rm(path, { force: true }).catch(() => undefined);
+    if (!parsed.success) return null;
+    if (parsed.data.turnStamp !== turnStamp) return null;
+    if (now() - parsed.data.writtenAtMs > CONTINUATION_MAX_AGE_MS) return null;
+    return parsed.data.category;
+  } catch {
+    return null;
+  }
 }
 
 /** Record that THIS lookup was explicitly answered `native` in THIS turn. */

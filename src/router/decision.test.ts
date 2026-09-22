@@ -112,11 +112,26 @@ function challengeHeader(accepts: PaymentRequirements[]): string {
   return encodePaymentRequiredHeader(paymentRequired);
 }
 
+/** A waived `native` decision in the 2026-09-23 wire shape: `billing` on every
+ *  200, `diagnostics` on every outcome this client cannot execute. */
 const DECISION = {
   schemaVersion: 1,
-  routerVersion: '2026-09-22.1',
+  routerVersion: '2026-09-23.1',
   requestId: 'r-1',
   decision: { action: 'native', reason: 'Your own tools cover this.' },
+  billing: {
+    settled: false,
+    amountAtomic: '0',
+    asset: USDC,
+    network: 'eip155:8453',
+    reasonCode: 'waived_native',
+  },
+  diagnostics: {
+    reasonCode: 'covered_by_host_tools',
+    stage: 'capability',
+    missing: [],
+    nextAction: 'Continue with your own tools.',
+  },
 };
 
 /** The probe 402 with `accepts`, then the paid 200 carrying a decision. */
@@ -193,9 +208,13 @@ describe('the paid routing decision on a multi-entry 402', () => {
       .authorization;
     expect(authorization.value).toBe(BASE_USDC.amount);
     expect(authorization.to).toBe(BASE_USDC.payTo);
-    // And the ledger, on that same amount.
-    expect(auth.commit).toHaveBeenCalledWith('rsv', BigInt(BASE_USDC.amount));
+    // And the ledger: the EXPOSURE is the selected entry's amount, while the
+    // settled figure is zero, because this decision is a waived `native` one.
+    expect(auth.commit).toHaveBeenCalledWith('rsv', BigInt(BASE_USDC.amount), {
+      settledAtomic: 0n,
+    });
     expect((outcome as { amountAtomic: bigint }).amountAtomic).toBe(BigInt(BASE_USDC.amount));
+    expect((outcome as { settledAtomic: bigint }).settledAtomic).toBe(0n);
   });
 
   it('refuses a 402 with no payable entry before anything is reserved', async () => {

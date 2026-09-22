@@ -1,0 +1,6 @@
+{
+  "error": {
+    "code": "packet_too_large",
+    "message": "The packet exceeds the 16 KiB bound; send the current turn only."
+  }
+}

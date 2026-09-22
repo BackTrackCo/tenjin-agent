@@ -76,7 +76,14 @@ export interface SpendAuthorizer {
    * prompt), the settled amount is still recorded rather than silently lost
    * from the rolling budget.
    */
-  commit(reservationId: string | undefined, amountAtomic: bigint): Promise<void>;
+  commit(
+    reservationId: string | undefined,
+    amountAtomic: bigint,
+    /** What the counterparty reported actually taking, when it said so at all.
+     *  Omitted means "assume it took what was authorized", the conservative
+     *  reading every caller had before the router began waiving fees. */
+    opts?: { settledAtomic?: bigint },
+  ): Promise<void>;
   /** Drop an unused reservation (a decline, a 409, or a failed payment). */
   release(reservationId: string | undefined): Promise<void>;
 }
@@ -93,13 +100,33 @@ type Reservation = z.infer<typeof ReservationSchema>;
 const LedgerSchema = z.object({
   schemaVersion: z.literal(2),
   windowStartMs: z.number(),
+  /**
+   * EXPOSURE: every authorization this window transmitted. A signed EIP-3009
+   * authorization is a bearer instrument, so this is what the budget counts,
+   * whatever any counterparty later says it took.
+   */
   committedAtomic: z.string().regex(/^\d+$/),
+  /**
+   * SETTLED: what counterparties reported actually taking, which the router's
+   * waived outcomes made a different number from the line above (2026-09-23
+   * lookup contract). Optional so a ledger an older build wrote still parses;
+   * absent means "everything committed was settled", which is what that build
+   * assumed. Reporting only, never a budget input: under-counting exposure
+   * because a server said "no charge" is exactly the hole this avoids.
+   */
+  settledAtomic: z.string().regex(/^\d+$/).optional(),
   reservations: z.array(ReservationSchema),
 });
 type Ledger = z.infer<typeof LedgerSchema>;
 
 function emptyLedger(nowMs: number): Ledger {
-  return { schemaVersion: 2, windowStartMs: nowMs, committedAtomic: '0', reservations: [] };
+  return {
+    schemaVersion: 2,
+    windowStartMs: nowMs,
+    committedAtomic: '0',
+    settledAtomic: '0',
+    reservations: [],
+  };
 }
 
 export interface LocalSpendAuthorizerDeps {
@@ -211,7 +238,11 @@ export function createLocalSpendAuthorizer(deps: LocalSpendAuthorizerDeps): Spen
         return { ...base, reservationId: reservation.id };
       });
     },
-    async commit(reservationId: string | undefined, amountAtomic: bigint): Promise<void> {
+    async commit(
+      reservationId: string | undefined,
+      amountAtomic: bigint,
+      opts: { settledAtomic?: bigint } = {},
+    ): Promise<void> {
       // No reservation id means no budget ceiling was in force at authorize
       // time; the settled spend still counts against any FUTURE budget window.
       await withLedger(async (ledger) => {
@@ -219,10 +250,17 @@ export function createLocalSpendAuthorizer(deps: LocalSpendAuthorizerDeps): Spen
           reservationId !== undefined
             ? ledger.reservations.find((r) => r.id === reservationId)
             : undefined;
-        const settled = reservation !== undefined ? BigInt(reservation.amountAtomic) : amountAtomic;
+        const exposure =
+          reservation !== undefined ? BigInt(reservation.amountAtomic) : amountAtomic;
+        // TWO NUMBERS, ON PURPOSE. The budget keeps counting what left; the
+        // settled total records what was taken, and they differ whenever a
+        // counterparty waives a fee against an authorization already sent.
+        const settled = opts.settledAtomic ?? exposure;
+        const settledSoFar = BigInt(ledger.settledAtomic ?? ledger.committedAtomic);
         await persist({
           ...ledger,
-          committedAtomic: (BigInt(ledger.committedAtomic) + settled).toString(),
+          committedAtomic: (BigInt(ledger.committedAtomic) + exposure).toString(),
+          settledAtomic: (settledSoFar + settled).toString(),
           reservations:
             reservationId !== undefined
               ? ledger.reservations.filter((r) => r.id !== reservationId)

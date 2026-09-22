@@ -7,8 +7,18 @@ import { resolveContextSettings } from '../lib/settings';
 import type { SpendAuthorizer, WalletProvider } from '../lib/wallet';
 import type { TenjinSigner } from '../lib/wallet/provider';
 import type { CommandContext } from '../context';
-import { requestDecision, type DecisionContract, type RequirementsCache } from './decision';
-import { readLatestPacket, recordNativeContinuation } from './session-file';
+import {
+  requestDecision,
+  type DecisionContract,
+  type DecisionDiagnostics,
+  type RequirementsCache,
+} from './decision';
+import {
+  consumeGateHint,
+  lookupKeyOf,
+  readLatestPacket,
+  recordNativeContinuation,
+} from './session-file';
 import { MAX_MESSAGE_CHARS, packetForText } from './context';
 
 /**
@@ -81,6 +91,16 @@ export async function runRequestTool(
   });
   const sessionKey = latest?.key ?? deps.sessionKey;
 
+  // THE GATE'S CATEGORY FOR THIS TURN, AS EVIDENCE FOR THIS LOOKUP. Consumed,
+  // so the second lookup of a turn and any parallel one send none: evidence
+  // about one question is not evidence about the next. It never authorizes
+  // money, which stays with the local spend policy, and the backend is free to
+  // refine or reject it.
+  const category =
+    latest !== null && sessionKey !== undefined
+      ? await consumeGateHint(deps.ctx.dataDir, sessionKey, latest.writtenAtMs, deps.now)
+      : null;
+
   const outcome = await requestDecision(
     // No packet is the subagent, restarted-session and expired-packet path the
     // plan calls "route on query alone": the query becomes the current message,
@@ -89,6 +109,15 @@ export async function runRequestTool(
       requestId: randomUUID(),
       query,
       packet: latest?.packet ?? packetForText(query.slice(0, MAX_MESSAGE_CHARS)),
+      ...(category !== null && latest !== null
+        ? {
+            gateHint: {
+              category,
+              turnId: String(latest.writtenAtMs),
+              lookupId: lookupKeyOf(query),
+            },
+          }
+        : {}),
     },
     {
       ctx: deps.ctx,
@@ -103,10 +132,24 @@ export async function runRequestTool(
     return withKey(fail('needs_approval', outcome.reason, outcome.committedAtomic), sessionKey);
   }
   if (outcome.status === 'failed') {
-    return withKey(fail('failed', outcome.reason, outcome.committedAtomic), sessionKey);
+    return withKey(
+      fail('failed', outcome.reason, outcome.committedAtomic, 0n, {
+        // The backend's own stable code, so a host reads a typed refusal rather
+        // than guessing at prose.
+        ...(outcome.errorCode !== undefined ? { errorCode: outcome.errorCode } : {}),
+      }),
+      sessionKey,
+    );
   }
 
-  const routerFeeAtomic = outcome.amountAtomic;
+  // TWO NUMBERS, AND THE FEE IS THE SETTLED ONE. The router waives the fee for
+  // every outcome it cannot execute, so reporting the signed amount as a charge
+  // would tell the model a `native` answer cost money it was not charged. The
+  // authorization still left, so the exposure rides along whenever it differs.
+  const routerFeeAtomic = outcome.settledAtomic;
+  const routerExposureAtomic = outcome.amountAtomic;
+  const exposure =
+    routerExposureAtomic === routerFeeAtomic ? {} : { exposureAtomic: routerExposureAtomic };
   const { decision } = outcome.response;
   if (decision.action !== 'execute' || decision.contract === undefined) {
     // An explicit `native` was BOUGHT for this exact lookup in this turn, so
@@ -129,6 +172,13 @@ export async function runRequestTool(
         decision.action === 'native' ? 'native' : 'needs_input',
         decision.reason ?? 'The router did not select a paid capability.',
         routerFeeAtomic,
+        0n,
+        {
+          ...exposure,
+          ...(outcome.response.diagnostics !== undefined
+            ? { diagnostics: outcome.response.diagnostics }
+            : {}),
+        },
       ),
       sessionKey,
     );
@@ -137,7 +187,7 @@ export async function runRequestTool(
   const contract = decision.contract;
   const refusal = checkContract(contract, BigInt(settings.policy.maxAutoSpendAtomic));
   if (refusal !== null)
-    return withKey(fail(refusal.status, refusal.reason, routerFeeAtomic), sessionKey);
+    return withKey(fail(refusal.status, refusal.reason, routerFeeAtomic, 0n, exposure), sessionKey);
 
   const terms: AdvertisedTerms = {
     network: contract.advertised.network,
@@ -198,6 +248,9 @@ export async function runRequestTool(
             supplier: supplierOf(built.url),
             parameters: contract.arguments,
             cost: costs,
+            ...(routerExposureAtomic !== routerFeeAtomic
+              ? { authorizationExposure: toMoney(routerExposureAtomic.toString()).usd }
+              : {}),
             result: data.bodyText ?? '',
             ...(data.resultCaveat !== undefined ? { resultCaveat: data.resultCaveat } : {}),
             providerContentUntrusted: true,
@@ -215,6 +268,9 @@ export async function runRequestTool(
           supplier: supplierOf(built.url),
           parameters: contract.arguments,
           cost: costs,
+          ...(routerExposureAtomic !== routerFeeAtomic
+            ? { authorizationExposure: toMoney(routerExposureAtomic.toString()).usd }
+            : {}),
           result: data.bodyText ?? '',
           providerContentUntrusted: true,
         },
@@ -235,7 +291,11 @@ export async function runRequestTool(
     };
     const providerAtomic = BigInt(detail.amountAtomic ?? '0');
     return withKey(
-      fail(status, reason, routerFeeAtomic, providerAtomic, detail.settlement, detail.diagnosis),
+      fail(status, reason, routerFeeAtomic, providerAtomic, {
+        ...exposure,
+        ...(detail.settlement !== undefined ? { settlement: detail.settlement } : {}),
+        ...(detail.diagnosis !== undefined ? { diagnosis: detail.diagnosis } : {}),
+      }),
       sessionKey,
     );
   }
@@ -340,6 +400,23 @@ export function costLines(routerFeeAtomic: bigint, providerAtomic: bigint): stri
  */
 const ROUTINE: ReadonlySet<FailStatus> = new Set(['native', 'needs_input', 'needs_approval']);
 
+/**
+ * The four outcomes the target step now splits into (contract amendment
+ * 2026-09-23), each with the step that actually follows from it. The backend's
+ * own `nextAction` wins whenever it sent one; this is what a host is told when
+ * the code arrives without it, and it is the difference between "could not
+ * resolve the scope" and knowing whether to re-ask, re-query or move on.
+ */
+const NEXT_STEP_BY_REASON: Record<string, string> = {
+  page_target: 'That URL is the lookup itself; call `request` again with the URL as the query.',
+  contextual_url:
+    'The URL was background, not the target; call `request` again with the question as the query.',
+  unresolved_intent:
+    'Ask the user for the scope choice or field named above, then call `request` again with it.',
+  classifier_failure:
+    'The router could not classify this one and charged nothing. Continue with your own tools, or call `request` once more.',
+};
+
 /** One short line saying what the host does next, per routine outcome. */
 const NEXT_STEP: Record<string, string> = {
   native: 'Continue with your own tools. Nothing was bought.',
@@ -357,34 +434,71 @@ function summaryFor(status: FailStatus, reason: string): string {
   return `x402 request ${status}: ${reason}`;
 }
 
+interface FailExtras {
+  /** What was AUTHORIZED when that is more than what settled: a waived fee
+   *  leaves a signed authorization behind, and the host is told so. */
+  exposureAtomic?: bigint;
+  settlement?: string;
+  /** Which rule failed, whether the body was JSON, its size and a bounded
+   *  redacted preview: what tells a parse miss from an HTML error page. */
+  diagnosis?: Record<string, unknown>;
+  /** The backend's own stable error code, from a typed non-2xx body. */
+  errorCode?: string;
+  /** What stopped a non-execute decision, in the backend's own terms. */
+  diagnostics?: DecisionDiagnostics;
+}
+
+/** The backend's own instruction, then the one its reasonCode implies, then the
+ *  generic one for the outcome. Never empty while any of the three exists. */
+function nextStepFor(status: FailStatus, diagnostics: DecisionDiagnostics | undefined): string {
+  const fromServer = diagnostics?.nextAction.trim() ?? '';
+  if (fromServer.length > 0) return fromServer;
+  const byReason =
+    diagnostics !== undefined ? NEXT_STEP_BY_REASON[diagnostics.reasonCode] : undefined;
+  return byReason ?? NEXT_STEP[status] ?? '';
+}
+
 function fail(
   status: FailStatus,
   reason: string,
   routerFeeAtomic = 0n,
   providerAtomic = 0n,
-  settlement?: string,
-  /** Which rule failed, whether the body was JSON, its size and a bounded
-   *  redacted preview: what tells a parse miss from an HTML error page. */
-  diagnosis?: Record<string, unknown>,
+  extras: FailExtras = {},
 ): RequestToolResult {
   const routine = ROUTINE.has(status);
+  const { diagnostics } = extras;
   return {
     isError: !routine,
     summary: summaryFor(status, reason),
     envelope: {
       status,
       reason,
+      ...(extras.errorCode !== undefined ? { errorCode: extras.errorCode } : {}),
       // The status is the fact; the next step is what to do about it. A routine
       // outcome carries both, because an answer with no instruction is what
-      // makes a model treat an ordinary `native` as a dead end.
-      ...(routine ? { nextStep: NEXT_STEP[status] ?? '' } : {}),
-      // What LEFT, not what was delivered: an authorization that was
-      // transmitted is money at risk whether or not a result came back. The
-      // same fields on a routine outcome, which is the point: a `native`
-      // decision still cost the routing fee, and saying so is not an error.
+      // makes a model treat an ordinary `native` as a dead end. The BACKEND'S
+      // own next action wins when it sent one: it knows which field is missing.
+      ...(routine || diagnostics !== undefined
+        ? { nextStep: nextStepFor(status, diagnostics) }
+        : {}),
+      ...(diagnostics !== undefined
+        ? {
+            reasonCode: diagnostics.reasonCode,
+            stage: diagnostics.stage,
+            ...(diagnostics.missing.length > 0 ? { missing: diagnostics.missing } : {}),
+          }
+        : {}),
+      // WHAT WAS CHARGED, not what was authorized: the router waives the fee on
+      // every outcome it cannot execute, and reporting the signed amount there
+      // told the model an answer cost money it was never charged.
       cost: costLines(routerFeeAtomic, providerAtomic),
-      ...(settlement !== undefined ? { settlement } : {}),
-      ...(diagnosis !== undefined ? { diagnosis } : {}),
+      // And what LEFT, whenever the two differ. A signed authorization is a
+      // bearer instrument; a body saying "no charge" does not revoke it.
+      ...(extras.exposureAtomic !== undefined
+        ? { authorizationExposure: toMoney(extras.exposureAtomic.toString()).usd }
+        : {}),
+      ...(extras.settlement !== undefined ? { settlement: extras.settlement } : {}),
+      ...(extras.diagnosis !== undefined ? { diagnosis: extras.diagnosis } : {}),
       providerContentUntrusted: true,
     },
   };

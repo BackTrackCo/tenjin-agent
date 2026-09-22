@@ -89,12 +89,39 @@ function contract(over: Record<string, unknown> = {}): Record<string, unknown> {
   };
 }
 
+/**
+ * A decision as the 2026-09-23 contract puts it on the wire: `billing` on every
+ * 200, settled only for an executable decision, and `diagnostics` on every
+ * outcome this client cannot execute. `billing` and `diagnostics` here can be
+ * overridden per test, and the defaults follow the action so a fixture cannot
+ * claim a fee for an answer the router waives.
+ */
 function decision(over: Record<string, unknown> = {}): unknown {
+  const inner = { action: 'execute', capabilityId: 'cmc-quotes', contract: contract(), ...over };
+  const executed = inner.action === 'execute';
+  const { billing, diagnostics, ...decisionFields } = inner as Record<string, unknown>;
   return {
     schemaVersion: 1,
-    routerVersion: '2026-09-22.1',
+    routerVersion: '2026-09-23.1',
     requestId: 'r-1',
-    decision: { action: 'execute', capabilityId: 'cmc-quotes', contract: contract(), ...over },
+    decision: decisionFields,
+    billing: billing ?? {
+      settled: executed,
+      amountAtomic: executed ? '1000' : '0',
+      asset: USDC,
+      network: 'eip155:8453',
+      reasonCode: executed ? 'executed' : `waived_${String(decisionFields.action)}`,
+    },
+    ...(executed
+      ? {}
+      : {
+          diagnostics: diagnostics ?? {
+            reasonCode: inner.action === 'native' ? 'covered_by_host_tools' : 'unresolved_intent',
+            stage: inner.action === 'native' ? 'capability' : 'bind',
+            missing: [],
+            nextAction: '',
+          },
+        }),
   };
 }
 
@@ -178,7 +205,7 @@ describe('the request tool', () => {
     ['native', { action: 'native', reason: 'Your own tools cover this.' }, 'Continue with'],
     ['needs_input', { action: 'needs_input', reason: 'Name the coins.' }, 'Ask the user'],
   ])(
-    'returns %s as a normal result with its status, next step and cost',
+    'returns %s as a normal result with its status, next step and waived fee',
     async (status, over, nextStep) => {
       const { fetchImpl, calls } = net([
         { url: ROUTER, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge() } },
@@ -189,8 +216,10 @@ describe('the request tool', () => {
       expect(result.summary).not.toContain('x402 request');
       expect(result.envelope).toMatchObject({ status, reason: over.reason });
       expect(String(result.envelope.nextStep)).toContain(nextStep);
-      // Truthful either way: the decision itself was paid for.
-      expect(result.envelope.cost).toEqual(['router fee 0.001 USD', 'provider price 0 USD']);
+      // THE FEE IS WHAT SETTLED. The router waives an outcome it cannot execute,
+      // and the authorization it never took rides separately as exposure.
+      expect(result.envelope.cost).toEqual(['router fee 0 USD', 'provider price 0 USD']);
+      expect(result.envelope.authorizationExposure).toBe('0.001');
       expect(calls).toHaveLength(2);
     },
   );
@@ -577,8 +606,12 @@ describe('the routing fee a failure still owes', () => {
     // receipt names the pair rather than the attempt that answered.
     expect(auth.release).not.toHaveBeenCalled();
     expect(auth.commit).toHaveBeenCalledTimes(2);
+    // The second attempt was waived (a `native` answer), so the reported FEE is
+    // the stale attempt alone, while the EXPOSURE is both authorizations: a 402
+    // is not a statement that the first one cannot settle.
     expect(result.envelope).toMatchObject({
-      cost: ['router fee 0.003 USD', 'provider price 0 USD'],
+      cost: ['router fee 0.001 USD', 'provider price 0 USD'],
+      authorizationExposure: '0.003',
     });
   });
 
@@ -1026,5 +1059,324 @@ describe('an explicit native decision and the matching continuation', () => {
     // Unresolved scope is a question for the user, never standing permission.
     expect(gate.calls).toHaveLength(1);
     expect(out.decision).toBe('deny');
+  });
+});
+
+/**
+ * THE 2026-09-23 LOOKUP CONTRACT, from the client side. The router settles only
+ * a decision it can execute and waives everything else BEFORE settlement, so
+ * what this tool reports as a fee and what it counts as exposure stop being the
+ * same number. The signed authorization still left the process either way.
+ */
+describe('billing: what settled, and what was merely authorized', () => {
+  function answering(body: unknown, status = 200): typeof fetch {
+    return (async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      if (!new Headers(init?.headers ?? {}).has('payment-signature')) {
+        return new Response('{}', {
+          status: 402,
+          headers: { 'content-type': 'application/json', 'PAYMENT-REQUIRED': challenge() },
+        });
+      }
+      return new Response(JSON.stringify(body), {
+        status,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as typeof fetch;
+  }
+
+  it.each([
+    ['needs_input', 'needs_input', 'waived_needs_input'],
+    ['native', 'native', 'waived_native'],
+  ])(
+    'reports a waived %s as no fee, with the authorization still shown',
+    async (_l, action, code) => {
+      const auth = authorizer();
+      const result = await runRequestTool(
+        { query: 'q' },
+        deps(
+          answering(
+            decision({
+              action,
+              contract: undefined,
+              billing: {
+                settled: false,
+                amountAtomic: '0',
+                asset: USDC,
+                network: 'eip155:8453',
+                reasonCode: code,
+              },
+            }),
+          ),
+          auth,
+        ),
+      );
+      expect(result.envelope.cost).toEqual(['router fee 0 USD', 'provider price 0 USD']);
+      expect(result.envelope.authorizationExposure).toBe('0.001');
+      // The ledger keeps both: exposure against the budget, settled for the truth.
+      expect(auth.commit).toHaveBeenCalledWith('rsv', 1000n, { settledAtomic: 0n });
+    },
+  );
+
+  it('reports an executed decision at the fee the backend says it took', async () => {
+    const auth = authorizer();
+    const result = await runRequestTool(
+      { query: 'q' },
+      deps(
+        answering(
+          decision({
+            billing: {
+              settled: true,
+              amountAtomic: '1000',
+              asset: USDC,
+              network: 'eip155:8453',
+              reasonCode: 'executed',
+            },
+          }),
+        ),
+        auth,
+      ),
+    );
+    // No exposure line: nothing diverged, so there is nothing extra to say.
+    expect(result.envelope.authorizationExposure).toBeUndefined();
+    expect(String(result.envelope.cost)).toContain('router fee 0.001 USD');
+    expect(auth.commit).toHaveBeenCalledWith('rsv', 1000n, { settledAtomic: 1000n });
+  });
+
+  it('never lets a body claim MORE than the signature authorized', async () => {
+    const auth = authorizer();
+    await runRequestTool(
+      { query: 'q' },
+      deps(
+        answering(
+          decision({
+            billing: {
+              settled: true,
+              amountAtomic: '999999999',
+              asset: USDC,
+              network: 'eip155:8453',
+              reasonCode: 'executed',
+            },
+          }),
+        ),
+        auth,
+      ),
+    );
+    // The signature is the ceiling on what can move, whatever the body says.
+    expect(auth.commit).toHaveBeenCalledWith('rsv', 1000n, { settledAtomic: 1000n });
+  });
+
+  /**
+   * NO OLD SERVERS EXIST (contract amendment 2026-09-23), so a 200 without
+   * `billing` is a protocol error rather than a legacy path to be tolerated.
+   * The exposure is still committed in full: nothing about an unreadable body
+   * says the authorization it answered was not settled.
+   */
+  it('refuses a decision with no billing, and still counts the authorization', async () => {
+    const auth = authorizer();
+    const body = decision({ action: 'native', contract: undefined }) as Record<string, unknown>;
+    delete body.billing;
+    const result = await runRequestTool({ query: 'q' }, deps(answering(body), auth));
+    expect(result.isError).toBe(true);
+    expect(result.envelope).toMatchObject({ status: 'failed' });
+    expect(String(result.envelope.reason)).toContain('cannot read');
+    expect(auth.commit).toHaveBeenCalledWith('rsv', 1000n, { settledAtomic: 1000n });
+  });
+
+  it('surfaces a typed refusal by its own code and message, never as a bare status', async () => {
+    const result = await runRequestTool(
+      { query: 'q' },
+      deps(
+        answering(
+          {
+            error: {
+              code: 'packet_too_large',
+              message: 'The packet exceeds the 16 KiB bound; send the current turn only.',
+            },
+          },
+          400,
+        ),
+      ),
+    );
+    expect(result.isError).toBe(true);
+    expect(result.envelope.errorCode).toBe('packet_too_large');
+    expect(String(result.envelope.reason)).toContain('16 KiB bound');
+    expect(String(result.envelope.reason)).toContain('400');
+  });
+
+  it('falls back to the status line when a non-2xx body carries no code', async () => {
+    const result = await runRequestTool({ query: 'q' }, deps(answering({ nope: true }, 500)));
+    expect(result.envelope.errorCode).toBeUndefined();
+    expect(String(result.envelope.reason)).toContain('answered 500');
+  });
+});
+
+/**
+ * DIAGNOSTICS ARE THE POINT OF A NON-EXECUTE OUTCOME. "Jev could not resolve
+ * the requested information scope" told a host nothing and taught a model to
+ * stop calling the tool; the reason code, the stage that stopped, the missing
+ * field and one concrete next action are what make it actionable.
+ */
+describe('diagnostics on an outcome the router could not execute', () => {
+  function withDiagnostics(over: Record<string, unknown>): typeof fetch {
+    return (async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      if (!new Headers(init?.headers ?? {}).has('payment-signature')) {
+        return new Response('{}', {
+          status: 402,
+          headers: { 'content-type': 'application/json', 'PAYMENT-REQUIRED': challenge() },
+        });
+      }
+      return new Response(
+        JSON.stringify(
+          decision({
+            action: 'needs_input',
+            reason: 'Name the company to enrich.',
+            contract: undefined,
+            diagnostics: over,
+          }),
+        ),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    }) as typeof fetch;
+  }
+
+  it("carries the backend's reason, stage, missing field and next action", async () => {
+    const result = await runRequestTool(
+      { query: 'enrich them' },
+      deps(
+        withDiagnostics({
+          reasonCode: 'unresolved_intent',
+          stage: 'bind',
+          missing: ['company_domain'],
+          nextAction: 'Ask the user for the company domain, then call request again with it.',
+        }),
+      ),
+    );
+    expect(result.isError).toBe(false);
+    expect(result.envelope).toMatchObject({
+      status: 'needs_input',
+      reasonCode: 'unresolved_intent',
+      stage: 'bind',
+      missing: ['company_domain'],
+      nextStep: 'Ask the user for the company domain, then call request again with it.',
+    });
+  });
+
+  it.each([
+    ['page_target', 'the URL as the query'],
+    ['contextual_url', 'the question as the query'],
+    ['unresolved_intent', 'scope choice or field'],
+    ['classifier_failure', 'charged nothing'],
+  ])('knows the next step for %s when the backend sent none', async (reasonCode, phrase) => {
+    const result = await runRequestTool(
+      { query: 'q' },
+      deps(withDiagnostics({ reasonCode, stage: 'target', missing: [], nextAction: '' })),
+    );
+    expect(String(result.envelope.nextStep)).toContain(phrase);
+  });
+});
+
+/**
+ * THE GATE'S CATEGORY, TRAVELLING AS EVIDENCE FOR ONE LOOKUP. The free prompt
+ * gate classified this turn; sending that with the paid decision is what stops
+ * the gate and the binder contradicting each other. It is never payment
+ * authority, and it belongs to the lookup it was produced for: the second
+ * lookup of a turn, and any parallel one, send none.
+ */
+describe('the gate hint that rides with the first lookup of a turn', () => {
+  const HINT =
+    'A crypto price quote fits this request. Call request with the coins and currency, alone, and wait for its result.';
+
+  function recording(): { fetchImpl: typeof fetch; bodies: Record<string, unknown>[] } {
+    const bodies: Record<string, unknown>[] = [];
+    const fetchImpl = (async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      if (!new Headers(init?.headers ?? {}).has('payment-signature')) {
+        return new Response('{}', {
+          status: 402,
+          headers: { 'content-type': 'application/json', 'PAYMENT-REQUIRED': challenge() },
+        });
+      }
+      bodies.push(JSON.parse(String(init?.body ?? 'null')) as Record<string, unknown>);
+      return new Response(JSON.stringify(decision({ action: 'native', contract: undefined })), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as typeof fetch;
+    return { fetchImpl, bodies };
+  }
+
+  /** The prompt hook's own gate, answering `execute` with a well-formed hint. */
+  function promptGate(): typeof fetch {
+    return (async () =>
+      new Response(
+        JSON.stringify({
+          schemaVersion: 1,
+          routerVersion: '2026-09-23.1',
+          action: 'execute',
+          hint: HINT,
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      )) as typeof fetch;
+  }
+
+  async function gatedTurn(prompt: string): Promise<number> {
+    const { runPromptHook } = await import('./hooks');
+    const started = Date.now() - 1;
+    await runPromptHook(
+      { hook_event_name: 'UserPromptSubmit', session_id: 'sess-1', prompt },
+      { dataDir: dir, baseUrl: ROUTER, fetchImpl: promptGate() },
+    );
+    return started;
+  }
+
+  it('sends the category, the turn and the lookup it is evidence for', async () => {
+    const started = await gatedTurn('check BTC and ETH prices');
+    const { fetchImpl, bodies } = recording();
+    await runRequestTool(
+      { query: 'BTC and ETH price' },
+      { ...deps(fetchImpl), startedAtMs: started },
+    );
+
+    const { lookupKeyOf } = await import('./session-file');
+    expect(bodies[0]!.gateHint).toEqual({
+      category: 'crypto price quote',
+      turnId: expect.any(String) as unknown as string,
+      lookupId: lookupKeyOf('BTC and ETH price'),
+    });
+  });
+
+  it('never rides a second or parallel lookup in the same turn', async () => {
+    const started = await gatedTurn('check BTC and ETH prices');
+    const first = recording();
+    await runRequestTool(
+      { query: 'BTC price' },
+      { ...deps(first.fetchImpl), startedAtMs: started },
+    );
+    expect(first.bodies[0]!.gateHint).toBeDefined();
+
+    // Same turn, a different question: evidence about one lookup is not
+    // evidence about the next, so the hint is gone after the first use.
+    const second = recording();
+    await runRequestTool(
+      { query: 'ETH price' },
+      { ...deps(second.fetchImpl), startedAtMs: started },
+    );
+    expect(second.bodies[0]!.gateHint).toBeUndefined();
+  });
+
+  it('sends none when the gate named no category for this turn', async () => {
+    const { runPromptHook } = await import('./hooks');
+    const started = Date.now() - 1;
+    const silent = (async () =>
+      new Response(JSON.stringify({ schemaVersion: 1, routerVersion: 'v', action: 'native' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })) as typeof fetch;
+    await runPromptHook(
+      { hook_event_name: 'UserPromptSubmit', session_id: 'sess-1', prompt: 'hello there' },
+      { dataDir: dir, baseUrl: ROUTER, fetchImpl: silent },
+    );
+    const { fetchImpl, bodies } = recording();
+    await runRequestTool({ query: 'q' }, { ...deps(fetchImpl), startedAtMs: started });
+    expect(bodies[0]!.gateHint).toBeUndefined();
   });
 });

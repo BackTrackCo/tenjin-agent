@@ -71,18 +71,68 @@ const ContractSchema = z.object({
 });
 export type DecisionContract = z.infer<typeof ContractSchema>;
 
-const DecisionResponseSchema = z.object({
-  schemaVersion: z.literal(1),
-  routerVersion: z.string().min(1).max(64),
-  requestId: z.string().min(1).max(200),
-  decision: z.object({
-    action: z.enum(['native', 'execute', 'needs_input']),
-    capabilityId: z.string().min(1).max(200).optional(),
-    contract: ContractSchema.optional(),
-    reason: z.string().max(2_000).optional(),
-  }),
-  jev: z.object({ calls: z.number(), latencyMs: z.number() }).optional(),
+/**
+ * WHAT THE BACKEND SAYS IT CHARGED, which is not what this client signed for.
+ * The router settles only an executable decision: `needs_input`, `native`, an
+ * unsupported task and a classifier outage are decided before settlement and
+ * waived. The signed authorization still LEFT, so it stays counted as exposure;
+ * this is what to report as the actual fee (2026-09-23 lookup contract).
+ *
+ * `reasonCode` is read as a free string on purpose. The contract enumerates
+ * five values today, and a build that refused an unknown sixth would turn a
+ * perfectly good decision into a failure over a label it only displays.
+ */
+const BillingSchema = z.object({
+  settled: z.boolean(),
+  amountAtomic: z.string().regex(/^\d+$/),
+  asset: z.string().min(1).max(128),
+  network: z.string().min(1).max(64),
+  reasonCode: z.string().min(1).max(64),
 });
+export type DecisionBilling = z.infer<typeof BillingSchema>;
+
+/** What stopped a non-execute outcome, in terms the host can act on. Same
+ *  forward-compatibility rule as `billing`: strings, not enums. */
+const DiagnosticsSchema = z.object({
+  reasonCode: z.string().min(1).max(64),
+  stage: z.string().min(1).max(32),
+  missing: z.array(z.string().max(200)).max(20),
+  nextAction: z.string().max(500),
+});
+export type DecisionDiagnostics = z.infer<typeof DiagnosticsSchema>;
+
+const DecisionResponseSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    routerVersion: z.string().min(1).max(64),
+    requestId: z.string().min(1).max(200),
+    decision: z.object({
+      action: z.enum(['native', 'execute', 'needs_input']),
+      capabilityId: z.string().min(1).max(200).optional(),
+      contract: ContractSchema.optional(),
+      reason: z.string().max(2_000).optional(),
+    }),
+    /**
+     * REQUIRED, NOT OPTIONAL. Nothing is released and there are no old clients
+     * (contract amendment 2026-09-23), so a response without `billing` is a
+     * protocol error rather than an older server, and this build says so instead
+     * of guessing at what it was charged.
+     */
+    billing: BillingSchema,
+    /** Required on every outcome this client cannot execute, which is where the
+     *  host needs the reason, the stage and the missing field. */
+    diagnostics: DiagnosticsSchema.optional(),
+    jev: z.object({ calls: z.number(), latencyMs: z.number() }).optional(),
+  })
+  .superRefine((value, ctx) => {
+    if (value.decision.action !== 'execute' && value.diagnostics === undefined) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['diagnostics'],
+        message: 'a non-execute decision must carry diagnostics',
+      });
+    }
+  });
 export type DecisionResponse = z.infer<typeof DecisionResponseSchema>;
 
 /** The decision parser, exposed so the shared wire fixtures are checked against
@@ -105,10 +155,31 @@ export class RequirementsCache {
   }
 }
 
+/**
+ * THE GATE'S ANSWER, TRAVELLING AS EVIDENCE. The free prompt gate already
+ * classified this turn, and sending that category with the paid decision is
+ * what stops the gate and the binder contradicting each other inside one turn.
+ *
+ * EVIDENCE, NOT A COMMAND AND NOT PAYMENT AUTHORITY. The backend may refine or
+ * reject it; the client's own spend policy remains the only thing that
+ * authorizes money. It is bound to ONE lookup by `turnId` and `lookupId`, and
+ * the caller that supplies it must not reuse it for a later or parallel lookup
+ * (see `consumeGateHint`, which is one-shot for exactly that reason).
+ */
+export interface GateHint {
+  /** One of the gate's eight task categories, as the hint named it. */
+  category: string;
+  /** The turn this category was produced in: the packet stamp. */
+  turnId: string;
+  /** The lookup it is evidence for. */
+  lookupId: string;
+}
+
 export interface DecisionRequest {
   requestId: string;
   query: string;
   packet: Packet;
+  gateHint?: GateHint;
 }
 
 export interface DecisionDeps {
@@ -121,13 +192,26 @@ export interface DecisionDeps {
 }
 
 export type DecisionOutcome =
-  | { status: 'decided'; response: DecisionResponse; amountAtomic: bigint; probed: boolean }
+  | {
+      status: 'decided';
+      response: DecisionResponse;
+      /** WHAT WAS AUTHORIZED AND TRANSMITTED, always. A signed EIP-3009
+       *  authorization is a bearer instrument, and a body saying "no charge"
+       *  does not revoke it, so this is what the session budget counts. */
+      amountAtomic: bigint;
+      /** WHAT THE BACKEND SAYS IT ACTUALLY TOOK: `billing.amountAtomic` when it
+       *  settled, zero when it waived, and the full exposure for a backend that
+       *  sends no `billing` at all, which is today's conservative reporting. */
+      settledAtomic: bigint;
+      probed: boolean;
+    }
   /** `committedAtomic` is what a FIRST attempt already transmitted when the
    *  retry's fresh terms failed the gate; zero on an ordinary refusal. */
   | { status: 'needs_approval'; reason: string; committedAtomic: bigint }
   /** `committedAtomic` is what the ledger already counted for this attempt, so
-   *  the tool can report the fee a post-transmission failure still owes. */
-  | { status: 'failed'; reason: string; committedAtomic: bigint };
+   *  the tool can report the fee a post-transmission failure still owes.
+   *  `errorCode` is the backend's own stable code when its body carried one. */
+  | { status: 'failed'; reason: string; committedAtomic: bigint; errorCode?: string };
 
 export async function requestDecision(
   request: DecisionRequest,
@@ -143,6 +227,7 @@ export async function requestDecision(
       requestId: request.requestId,
       query: request.query,
       packet: request.packet,
+      ...(request.gateHint !== undefined ? { gateHint: request.gateHint } : {}),
     },
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   };
@@ -199,7 +284,14 @@ export async function requestDecision(
     return { ...retried, committedAtomic: spent + retried.committedAtomic };
   }
   if (retried.status === 'decided') {
-    return { ...retried, amountAtomic: spent + retried.amountAtomic, probed };
+    // The stale attempt carries no billing of its own: a 402 is not a statement
+    // that nothing settled, so its amount counts as exposure AND as settled.
+    return {
+      ...retried,
+      amountAtomic: spent + retried.amountAtomic,
+      settledAtomic: spent + retried.settledAtomic,
+      probed,
+    };
   }
   // `needs_approval` too: the fresh terms failing the gate does not un-transmit
   // the first authorization, and a receipt reporting zero there would tell the
@@ -313,15 +405,28 @@ async function payOnce(
       committedAtomic: fee,
     };
   }
-  await deps.authorizer.commit(reservationId, fee);
-  if (paid.status < 200 || paid.status >= 300) {
+  const parsed =
+    paid.status >= 200 && paid.status < 300 ? DecisionResponseSchema.safeParse(paid.json) : null;
+  // THE EXPOSURE IS COMMITTED WHATEVER THE BODY SAYS; the settled amount is the
+  // backend's own claim about what it took, clamped by what this client
+  // actually authorized. A response cannot raise a charge above the signature,
+  // and a waived decision reports zero settled against the same exposure.
+  const settled = parsed?.success === true ? settledAmount(parsed.data.billing, fee) : fee;
+  await deps.authorizer.commit(reservationId, fee, { settledAtomic: settled });
+  if (parsed === null) {
+    const named = errorOf(paid.json);
     return {
       status: 'failed',
-      reason: `The router endpoint answered ${paid.status}.`,
+      // The backend's own code and message, never a bare status line: a typed
+      // refusal the host could act on was arriving as "answered 400".
+      reason:
+        named === null
+          ? `The router endpoint answered ${paid.status}.`
+          : `The router endpoint answered ${paid.status} (${named.code}): ${named.message}`,
       committedAtomic: fee,
+      ...(named !== null ? { errorCode: named.code } : {}),
     };
   }
-  const parsed = DecisionResponseSchema.safeParse(paid.json);
   if (!parsed.success) {
     return {
       status: 'failed',
@@ -329,7 +434,38 @@ async function payOnce(
       committedAtomic: fee,
     };
   }
-  return { status: 'decided', response: parsed.data, amountAtomic: fee, probed: false };
+  return {
+    status: 'decided',
+    response: parsed.data,
+    amountAtomic: fee,
+    settledAtomic: settled,
+    probed: false,
+  };
+}
+
+/**
+ * What actually settled, from a response that parsed and therefore carries
+ * `billing`. A body claiming MORE than the signature authorized is clamped to
+ * it: the signature is the ceiling on what can move, whatever the body says.
+ * A response that did not parse never reaches here, and its exposure is
+ * committed in full, which is the conservative reading.
+ */
+function settledAmount(billing: DecisionBilling, exposure: bigint): bigint {
+  if (!billing.settled) return NO_FEE;
+  const claimed = BigInt(billing.amountAtomic);
+  return claimed < exposure ? claimed : exposure;
+}
+
+/** `{ error: { code, message } }`, the envelope every Tenjin route answers a
+ *  refusal with. Anything else reads as no code rather than as a guess. */
+function errorOf(body: unknown): { code: string; message: string } | null {
+  if (body === null || typeof body !== 'object') return null;
+  const error = (body as { error?: unknown }).error;
+  if (error === null || typeof error !== 'object') return null;
+  const { code, message } = error as { code?: unknown; message?: unknown };
+  if (typeof code !== 'string' || code.length === 0 || code.length > 64) return null;
+  const text = typeof message === 'string' ? message.slice(0, 500) : '';
+  return { code, message: text };
 }
 
 function decodeChallenge(response: HttpResponse): PaymentRequired | null {

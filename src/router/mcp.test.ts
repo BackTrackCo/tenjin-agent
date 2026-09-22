@@ -62,9 +62,22 @@ describe('the router MCP server', () => {
   it('advertises one request tool and answers it, then closes cleanly', async () => {
     const fetchImpl = router({
       schemaVersion: 1,
-      routerVersion: '2026-09-22.1',
+      routerVersion: '2026-09-23.1',
       requestId: 'r-1',
       decision: { action: 'native', reason: 'Your own tools cover this.' },
+      billing: {
+        settled: false,
+        amountAtomic: '0',
+        asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+        network: 'eip155:8453',
+        reasonCode: 'waived_native',
+      },
+      diagnostics: {
+        reasonCode: 'covered_by_host_tools',
+        stage: 'capability',
+        missing: [],
+        nextAction: '',
+      },
     });
     const server = buildRouterMcpServer({
       dataDir: dir,
@@ -140,6 +153,19 @@ describe('the base URL the MCP server routes against', () => {
           routerVersion: 'v',
           requestId: 'r',
           decision: { action: 'native', reason: 'covered' },
+          billing: {
+            settled: false,
+            amountAtomic: '0',
+            asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+            network: 'eip155:8453',
+            reasonCode: 'waived_native',
+          },
+          diagnostics: {
+            reasonCode: 'covered_by_host_tools',
+            stage: 'capability',
+            missing: [],
+            nextAction: '',
+          },
         }),
         { status: 200, headers: { 'content-type': 'application/json' } },
       );
