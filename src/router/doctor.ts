@@ -5,6 +5,7 @@ import { CliError } from '../lib/errors';
 import { inspectHooksFile, ownsHookEntry } from '../lib/harness-hooks';
 import { httpRequest } from '../lib/http';
 import { toMoney } from '../lib/money';
+import { PRODUCTION_ORIGIN } from '../lib/production-origin';
 import { resolveContextSettings } from '../lib/settings';
 import { onPath } from '../lib/skill-wiring';
 import { describeWallet, resolveWalletProvider } from '../lib/wallet';
@@ -316,9 +317,10 @@ async function walletCheck(ctx: CommandContext): Promise<RouterCheck[]> {
 }
 
 /**
- * The router endpoint's own 402, which is free and rate-limited: a 402 proves
- * the route is deployed and turned on, and anything else names what a lookup
- * would hit. Nothing is signed and no Jev request is spent.
+ * One cheap request to the free decision route with an empty body. It checks
+ * the route is reachable and enabled, not that it routes: a 400 is the route
+ * refusing that body, and a 404 is the route switched off. Nothing is signed
+ * and no Jev request is spent.
  */
 async function routerCheck(
   baseUrl: string,
@@ -333,23 +335,36 @@ async function routerCheck(
     jsonBody: {},
     ...(fetchImpl !== undefined ? { fetchImpl } : {}),
   });
-  if (!probe.ok) {
-    return {
-      name: 'router',
-      status: 'fail',
-      required: true,
-      detail: `${url} is unreachable (${probe.message})`,
-      fix: 'Check your connection, and that the configured base URL names a Tenjin deployment (`tenjin config get baseUrl`).',
-    };
-  }
-  if (probe.status === 402) {
-    return { name: 'router', status: 'ok', required: true, detail: `${url} answers 402` };
-  }
-  return {
+  const fail = (detail: string, fix: string): RouterCheck => ({
     name: 'router',
     status: 'fail',
     required: true,
-    detail: `${url} answered ${probe.status}; paid routing looks turned off there`,
-    fix: 'Nothing local fixes this: paid routing is off at that deployment. Try again later.',
-  };
+    detail,
+    fix,
+  });
+  const checkBase =
+    'Check that the configured base URL names the Tenjin router (`tenjin config get baseUrl`), then try again later.';
+  if (!probe.ok) {
+    return fail(`the router at ${url} is unreachable or erroring (${probe.message})`, checkBase);
+  }
+  // 429 is the route's own rate limit: proof the router is there.
+  if (probe.status === 200 || probe.status === 400 || probe.status === 429) {
+    return { name: 'router', status: 'ok', required: true, detail: `${url} is live` };
+  }
+  if (probe.status === 404) {
+    return fail(`the router is not enabled at ${url}`, checkBase);
+  }
+  if (probe.status === 401 || probe.status === 403) {
+    return fail(
+      `${url} is not a Tenjin router (it asked for credentials)`,
+      `Set the router URL with \`tenjin config set baseUrl ${PRODUCTION_ORIGIN}\`.`,
+    );
+  }
+  if (probe.status >= 500) {
+    return fail(`the router at ${url} is unreachable or erroring (${probe.status})`, checkBase);
+  }
+  return fail(
+    `${url} answered ${probe.status}, which a Tenjin router does not`,
+    'Check that the configured base URL names a Tenjin deployment (`tenjin config get baseUrl`).',
+  );
 }

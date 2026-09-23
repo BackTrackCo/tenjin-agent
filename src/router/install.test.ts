@@ -30,9 +30,9 @@ function ctx(): CommandContext {
   };
 }
 
-const probe402 = (async () =>
+const probe400 = (async () =>
   new Response('{}', {
-    status: 402,
+    status: 400,
     headers: { 'content-type': 'application/json' },
   })) as typeof fetch;
 
@@ -63,7 +63,7 @@ async function runRouterDoctorFor(
     project: true,
     env: {},
     which: () => true,
-    fetchImpl: probe402,
+    fetchImpl: probe400,
     ...extra,
   }).catch((e: unknown) => e);
   const checks =
@@ -317,7 +317,7 @@ describe('the doctor this release registers', () => {
     await writeFile(join(data, 'wallet.json'), '{"not":"a wallet"}');
     const fetchImpl = (async () =>
       new Response('{}', {
-        status: 402,
+        status: 400,
         headers: { 'content-type': 'application/json' },
       })) as typeof fetch;
     const result = await runRouterDoctor(ctx(), {
@@ -341,7 +341,7 @@ describe('the doctor this release registers', () => {
 
   it('fails with the command that fixes it on a machine that never installed', async () => {
     const { runRouterDoctor } = await import('./doctor');
-    const fetchImpl = (async () => new Response('{}', { status: 402 })) as typeof fetch;
+    const fetchImpl = (async () => new Response('{}', { status: 400 })) as typeof fetch;
     const err = await runRouterDoctor(ctx(), {
       homeDir: home,
       env: {},
@@ -352,11 +352,15 @@ describe('the doctor this release registers', () => {
     expect((err as CliError).fix).toContain('tenjin install');
   });
 
-  it('reports the router endpoint answering anything but a 402 as a failure', async () => {
+  it.each([
+    [404, 'the router is not enabled at'],
+    [401, 'is not a Tenjin router (it asked for credentials)'],
+    [503, 'is unreachable or erroring (503)'],
+  ])('reports the router endpoint answering %i as a failure', async (status, detail) => {
     const { runRouterDoctor } = await import('./doctor');
     await runRouterInstall({}, ctx(), deps());
     await writeFile(join(data, 'wallet.json'), '{"not":"a wallet"}');
-    const fetchImpl = (async () => new Response('{}', { status: 404 })) as typeof fetch;
+    const fetchImpl = (async () => new Response('{}', { status })) as typeof fetch;
     const err = await runRouterDoctor(ctx(), {
       homeDir: home,
       env: {},
@@ -368,7 +372,7 @@ describe('the doctor this release registers', () => {
     // read off the check list every doctor envelope carries.
     const checks = (err as CliError).details as { checks: { name: string; detail: string }[] };
     const router = checks.checks.find((c) => c.name === 'router');
-    expect(router?.detail).toContain('paid routing looks turned off');
+    expect(router?.detail).toContain(detail);
   });
 });
 
@@ -455,7 +459,7 @@ describe('doctor on a --project install', () => {
     await runRouterInstall({ project: true }, ctx(), deps({ cwd }));
     const fetchImpl = (async () =>
       new Response('{}', {
-        status: 402,
+        status: 400,
         headers: { 'content-type': 'application/json' },
       })) as typeof fetch;
 
@@ -494,7 +498,7 @@ describe('doctor on a --project install', () => {
   it('names the file it looked in, so the two installs are told apart', async () => {
     const { runRouterDoctor } = await import('./doctor');
     const cwd = join(home, 'other');
-    const fetchImpl = (async () => new Response('{}', { status: 402 })) as typeof fetch;
+    const fetchImpl = (async () => new Response('{}', { status: 400 })) as typeof fetch;
     const err = await runRouterDoctor(ctx(), {
       homeDir: home,
       cwd,
@@ -791,7 +795,7 @@ describe('tenjin update re-applies the install', () => {
       project: true,
       env: {},
       which: () => true,
-      fetchImpl: probe402,
+      fetchImpl: probe400,
     }).catch((e: unknown) => e);
     const checks =
       out instanceof CliError
