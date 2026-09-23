@@ -15,10 +15,9 @@ import { GATE_TIMEOUT_MS } from './gate';
  * every prompt and every native search, and their cost is the product's floor.
  * The decision is free, so nothing on this path can spend anything either.
  *
- * EVERY FAILURE IS SILENT, or at worst one fallback line. A backend that is
- * down, slow or answering nonsense leaves the native call allowed and the
- * prompt carrying `call request({query}) for lookups`, which is the same thing
- * the model would do on its own. The user's turn is never blocked by this.
+ * EVERY FAILURE IS SILENT. A backend that is down, slow or answering nonsense
+ * leaves the native call allowed and the prompt unchanged; the cause goes to
+ * stderr. The user's turn is never blocked by this.
  */
 
 const PromptEventSchema = z.object({
