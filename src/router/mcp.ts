@@ -102,9 +102,9 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
           .string()
           .optional()
           .describe(
-            'The turn id from a hook line, when one is there. It only tells the router which ' +
-              "turn's context to decide with; your query is what is routed. Leave it out and " +
-              'the lookup is decided from the query alone.',
+            'The turn id from a hook line, when one is there. It names the service that line ' +
+              'offered, and a call carrying it runs that service on your query. Leave it out ' +
+              'for a different task, and the lookup is decided from the query alone.',
           ),
       },
     },
