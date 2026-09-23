@@ -143,7 +143,9 @@ export const NEAR_EMPTY_BYTES = 64;
  * everything else is `null`, which means the router is never asked:
  *
  * - a failed call (PostToolUseFailure), unless the user interrupted it;
- * - WebFetch answering `code >= 400`;
+ * - WebFetch refused or failing upstream: 401, 402, 403, 429 or any 5xx. A
+ *   404 or 410 is not one: a page that is missing is missing for a paid
+ *   reader too;
  * - WebFetch answering 2xx, or no code, with under {@link NEAR_EMPTY_BYTES};
  * - WebSearch answering with no result links at all.
  *
@@ -172,7 +174,7 @@ export function shortfallOf(event: {
       ...(code !== undefined ? { code } : {}),
       ...(bytes !== undefined ? { bytes } : {}),
     };
-    if (code !== undefined && code >= 400) return outcome;
+    if (code !== undefined && isShortStatus(code)) return outcome;
     const success = code === undefined || (code >= 200 && code < 300);
     return success && bytes !== undefined && bytes < NEAR_EMPTY_BYTES ? outcome : null;
   }
@@ -186,6 +188,14 @@ export function shortfallOf(event: {
       (entry as { content: unknown[] }).content.length > 0,
   );
   return linked ? null : { error: 'Web search returned no results' };
+}
+
+/** The statuses a paid reader can get past: auth walls, paywalls, bot blocks,
+ *  rate limits and upstream failures. Every other 4xx is the page's answer. */
+const SHORT_STATUSES = new Set([401, 402, 403, 429]);
+
+function isShortStatus(code: number): boolean {
+  return SHORT_STATUSES.has(code) || (code >= 500 && code <= 599);
 }
 
 function wholeNumber(value: unknown, max: number): number | undefined {

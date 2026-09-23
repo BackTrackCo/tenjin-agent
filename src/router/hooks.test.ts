@@ -430,28 +430,27 @@ describe('shortfallOf', () => {
   const fetchWith = (tool_response: unknown) =>
     shortfallOf({ hook_event_name: 'PostToolUse', tool_name: 'WebFetch', tool_response });
 
+  // What the harness reported IS the outcome sent: nothing is added or dropped.
   it.each([
-    [
-      { code: 402, bytes: 0 },
-      { code: 402, bytes: 0 },
-    ],
-    [
-      { code: 404, bytes: 0 },
-      { code: 404, bytes: 0 },
-    ],
-    [{ code: 500 }, { code: 500 }],
-    [
-      { code: 200, bytes: NEAR_EMPTY_BYTES - 1 },
-      { code: 200, bytes: NEAR_EMPTY_BYTES - 1 },
-    ],
-    [{ bytes: 0 }, { bytes: 0 }],
-  ])('counts WebFetch %j as short', (response, outcome) => {
-    expect(fetchWith(response)).toEqual(outcome);
+    [{ code: 401, bytes: 0 }],
+    [{ code: 402, bytes: 0 }],
+    [{ code: 403, bytes: 12 }],
+    [{ code: 429, bytes: 0 }],
+    [{ code: 500 }],
+    [{ code: 503, bytes: 900 }],
+    [{ code: 200, bytes: NEAR_EMPTY_BYTES - 1 }],
+    [{ bytes: 0 }],
+  ])('counts WebFetch %j as short', (response) => {
+    expect(fetchWith(response)).toEqual(response);
   });
 
   it.each([
     [{ code: 200, bytes: NEAR_EMPTY_BYTES }],
     [{ code: 302, bytes: 0 }],
+    // Missing is missing for a paid reader too, and a malformed request is ours.
+    [{ code: 404, bytes: 0 }],
+    [{ code: 410, bytes: 0 }],
+    [{ code: 400, bytes: 0 }],
     [{ code: 200 }],
     [{ code: 'nope', bytes: -1 }],
     [null],
