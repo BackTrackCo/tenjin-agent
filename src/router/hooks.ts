@@ -86,25 +86,6 @@ async function resolveBaseUrl(deps: HookDeps): Promise<string> {
   return resolveSettings({ config, flags: {}, env: deps.env ?? process.env }).baseUrl.value;
 }
 
-/**
- * THE ONE FALLBACK. A decision that did not arrive inside the hook's budget is
- * not a dead turn: the model is told to call `request` with its own query, and
- * the tool makes the decision instead. There is no second path here.
- */
-export const FALLBACK_LINE = 'call request({query}) for lookups';
-
-/** What a `needs_input` decision leaves the host to do, in one line. */
-export function clarificationLine(decision: HookDecision): string {
-  if (decision.action === 'execute') return FALLBACK_LINE;
-  const next = decision.diagnostics.nextAction.trim();
-  if (next.length > 0) return next;
-  const { missing } = decision.diagnostics;
-  if (missing.length > 0) {
-    return `Ask the user for ${missing.slice(0, 3).join(', ')}, then call request({query}).`;
-  }
-  return `Ask the user what to look up, then ${FALLBACK_LINE}.`;
-}
-
 export interface PromptHookOutcome {
   /** What the harness is told, or null for "nothing to say". */
   response: unknown | null;
@@ -116,8 +97,10 @@ export interface PromptHookOutcome {
 
 /**
  * `tenjin hook prompt` (UserPromptSubmit). One free decision from the user's
- * own words. `native` is silence: no line, no row, nothing to decline. Only an
- * `execute` gets the prepared line, and only a `needs_input` gets the question.
+ * own words. Only an `execute` gets a line, the server's hint verbatim.
+ * `native`, `needs_input` and a decision that failed or timed out are silence:
+ * a turn with no lookup carries nothing extra, and `decide` has already written
+ * any failure cause to stderr.
  */
 export async function runPromptHook(raw: unknown, deps: HookDeps): Promise<PromptHookOutcome> {
   const parsed = PromptEventSchema.safeParse(raw);
@@ -128,13 +111,9 @@ export async function runPromptHook(raw: unknown, deps: HookDeps): Promise<Promp
 
   const packet = await buildPromptPacket(event.transcript_path, event.session_id, event.prompt);
   const outcome = await decide(packet, deps);
-  if (outcome === null) return injection(FALLBACK_LINE);
-  const decision = outcome;
-  if (decision.action === 'native') return { response: null, action: 'native' };
-  if (decision.action === 'needs_input') {
-    return { action: 'needs_input', ...injection(clarificationLine(decision)) };
-  }
-  return { action: 'execute', id: decision.id, ...injection(decision.hint) };
+  if (outcome === null) return { response: null };
+  if (outcome.action !== 'execute') return { response: null, action: outcome.action };
+  return { action: 'execute', id: outcome.id, ...injection(outcome.hint) };
 }
 
 function injection(line: string): { response: unknown } {
