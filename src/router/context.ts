@@ -48,6 +48,11 @@ export interface Packet {
  *  object with exactly `schemaVersion`, `source` and `packet`. */
 export type PendingCall = { tool: 'WebSearch'; query: string } | { tool: 'WebFetch'; url: string };
 
+/** The longest native argument the route accepts, and therefore the longest one
+ *  a redirect can hand back intact. Past it the hook allows the call rather
+ *  than proposing a shortened, different lookup. */
+export const MAX_PENDING_CHARS = 4_000;
+
 const URL_RE = /\bhttps?:\/\/[^\s<>"'`)\]]+/gi;
 
 export function literalUrlsIn(text: string): string[] {
