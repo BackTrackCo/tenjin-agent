@@ -1,8 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
-import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { copyFile, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -275,8 +275,45 @@ beforeAll(async () => {
   }
   // Both single-file configs: `installDaemonFiles` copies all three, so a
   // missing one would fail the fixture before a single case ran.
-  await build({ ...daemonConfig, outDir: tmpOutDir, silent: true });
-  await build({ ...reporterConfig, outDir: tmpOutDir, silent: true });
+  // Separate out dirs, then one copy, so neither block can observe the other's
+  // output. The banner each block pins is what keeps them independent: tsup's
+  // `build()` API carries options across calls in one process, so the reporter
+  // used to come out with the daemon's `createRequire` preamble spliced in at a
+  // position that broke the file, and the assertion below is the tripwire.
+  const daemonOutDir = await mkdtemp(join(tmpdir(), 'tenjin-b-smoke-daemon-'));
+  const reporterOutDir = await mkdtemp(join(tmpdir(), 'tenjin-b-smoke-reporter-'));
+  await build({ ...daemonConfig, outDir: daemonOutDir, silent: true });
+  await build({ ...reporterConfig, outDir: reporterOutDir, silent: true });
+  for (const [from, name] of [
+    [daemonOutDir, 'tenjin-daemon.mjs'],
+    [daemonOutDir, 'tenjin-shim.mjs'],
+    [reporterOutDir, 'tenjin-vitest-reporter.mjs'],
+  ] as const) {
+    await copyFile(join(from, name), join(tmpOutDir, name));
+  }
+  await rm(daemonOutDir, { recursive: true, force: true });
+  await rm(reporterOutDir, { recursive: true, force: true });
+
+  // Two `build()` calls in one process used to write the reporter's output path
+  // twice with DIFFERENT content: tsup leaked the daemon block's `createRequire`
+  // banner into one of them, and the two writes interleaved into a file that is
+  // byte-complete and ends correctly while its middle is spliced (the shorter
+  // bundle, then the longer one's 127-byte tail). Node refused to parse it, in
+  // a file nothing on disk showed as truncated. `banner: {}` on each block in
+  // tsup.config.ts is the fix, because it leaves only one possible content; the
+  // two checks here are the tripwire if another option ever diverges. A spliced
+  // bundle always duplicates the tail, so one `export {` is the structural test.
+  const reporterBundle = await readFile(join(tmpOutDir, 'tenjin-vitest-reporter.mjs'), 'utf8');
+  if (reporterBundle.includes('__tenjinCreateRequire')) {
+    throw new Error(
+      "the reporter bundle carries the daemon block's createRequire banner: tsup leaked options between builds again, pin `banner: {}` on that block in tsup.config.ts",
+    );
+  }
+  if (reporterBundle.split('export {').length !== 2) {
+    throw new Error(
+      `the reporter bundle has ${reporterBundle.split('export {').length - 1} export blocks: two tsup builds wrote this path with different content and spliced it`,
+    );
+  }
 
   dataDir = await mkdtemp(join(tmpdir(), 'tenjin-b-smoke-data-'));
   // Every arm is pinned off rather than defaulted: they are on out of the box
@@ -1107,30 +1144,40 @@ describe('the built vitest reporter bundle', () => {
   it('writes .vitest-report.json in the shape test-identity.ts reads', async () => {
     const path = vitestReporterPath(dataDir);
     expect(existsSync(path)).toBe(true);
-    // No node_modules beside it and no bundler: a bare dynamic import is the
-    // same thing vitest does with the path in a repo's own config.
-    const mod = (await import(pathToFileURL(path).href)) as {
-      default: new (options?: { outputFile?: string }) => {
-        onInit(): void;
-        onTestRunEnd(modules: unknown[], unhandled: unknown[]): void;
-      };
-    };
+    // Driven in a REAL node process, which is what vitest does with this path
+    // in a repo's own config: it loads the file itself, with no node_modules
+    // beside it and no bundler in front of it. Importing it from inside this
+    // suite instead put vite's import analysis in the way, and vitest decides
+    // per run whether a file outside the project root is transformed or
+    // externalized, so the same bytes parsed on one run and not the next.
     const outputFile = join(dataDir, 'smoke-report.json');
-    const reporter = new mod.default({ outputFile });
-    reporter.onInit();
-    reporter.onTestRunEnd(
-      [
-        {
-          moduleId: join(dataDir, 'src/lib/http.test.ts'),
-          children: {
-            allTests: () => [
-              { name: 'gives up after three', parent: { type: 'suite', fullName: 'retries' } },
-            ],
+    const driver = `
+      const { default: Reporter } = await import(${JSON.stringify(pathToFileURL(path).href)});
+      const reporter = new Reporter({ outputFile: ${JSON.stringify(outputFile)} });
+      reporter.onInit();
+      reporter.onTestRunEnd(
+        [
+          {
+            moduleId: ${JSON.stringify(join(dataDir, 'src/lib/http.test.ts'))},
+            children: {
+              allTests: () => [
+                { name: 'gives up after three', parent: { type: 'suite', fullName: 'retries' } },
+              ],
+            },
           },
-        },
-      ],
-      [],
-    );
+        ],
+        [],
+      );
+    `;
+    await new Promise<void>((resolve, reject) => {
+      execFile(
+        process.execPath,
+        ['--input-type=module', '-e', driver],
+        { timeout: 20_000 },
+        (error, _stdout, stderr) =>
+          error === null ? resolve() : reject(new Error(`${error.message}\n${stderr}`)),
+      );
+    });
 
     const report = JSON.parse(await readFile(outputFile, 'utf8')) as {
       startTime: number;

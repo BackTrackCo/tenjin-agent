@@ -255,3 +255,73 @@ describe('createLocalSpendAuthorizer', () => {
     expect(next.decision).toBe('deny');
   });
 });
+
+describe('the same-turn duplicate guard', () => {
+  it('denies a second authorization for a request already reserved', async () => {
+    const auth = createLocalSpendAuthorizer({
+      dir,
+      policy: policy({ sessionBudgetAtomic: 1_000_000n }),
+    });
+    const first = await auth.authorize({
+      amountAtomic: 10_000n,
+      creator: 'seller.example',
+      requestKey: 'cmc-quotes:abc',
+    });
+    expect(first.decision).toBe('allow');
+    const second = await auth.authorize({
+      amountAtomic: 10_000n,
+      creator: 'seller.example',
+      requestKey: 'cmc-quotes:abc',
+    });
+    expect(second).toMatchObject({ decision: 'deny', reason: 'duplicate_in_flight' });
+    // A different request in the same turn is untouched by the guard.
+    const other = await auth.authorize({
+      amountAtomic: 10_000n,
+      creator: 'seller.example',
+      requestKey: 'cmc-quotes:def',
+    });
+    expect(other.decision).toBe('allow');
+  });
+
+  it('frees the key once its reservation resolves, either way', async () => {
+    const auth = createLocalSpendAuthorizer({
+      dir,
+      policy: policy({ sessionBudgetAtomic: 1_000_000n }),
+    });
+    const req = { amountAtomic: 10_000n, creator: 'seller.example', requestKey: 'k' };
+    const first = await auth.authorize(req);
+    await auth.release(first.reservationId);
+    const second = await auth.authorize(req);
+    expect(second.decision).toBe('allow');
+    await auth.commit(second.reservationId, 10_000n);
+    expect((await auth.authorize(req)).decision).toBe('allow');
+  });
+
+  it('guards nothing when the caller supplies no key', async () => {
+    const auth = createLocalSpendAuthorizer({
+      dir,
+      policy: policy({ sessionBudgetAtomic: 1_000_000n }),
+    });
+    await auth.authorize({ amountAtomic: 10_000n, creator: 'seller.example' });
+    const second = await auth.authorize({ amountAtomic: 10_000n, creator: 'seller.example' });
+    expect(second.decision).toBe('allow');
+  });
+
+  it('serializes across processes: the key is in the shared ledger file', async () => {
+    const one = createLocalSpendAuthorizer({
+      dir,
+      policy: policy({ sessionBudgetAtomic: 1_000_000n }),
+    });
+    const two = createLocalSpendAuthorizer({
+      dir,
+      policy: policy({ sessionBudgetAtomic: 1_000_000n }),
+    });
+    await one.authorize({ amountAtomic: 10_000n, creator: 's', requestKey: 'shared' });
+    const blocked = await two.authorize({
+      amountAtomic: 10_000n,
+      creator: 's',
+      requestKey: 'shared',
+    });
+    expect(blocked.reason).toBe('duplicate_in_flight');
+  });
+});

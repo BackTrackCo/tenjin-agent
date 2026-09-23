@@ -765,6 +765,78 @@ export async function persistBazaarPay(dir: string, enabled: boolean): Promise<v
 }
 
 /**
+ * Remember, or forget, a project directory this machine wired with
+ * `install --project`. `tenjin update` spawns its refresh from the HOME
+ * directory, so a project install is unfindable by looking around; this list is
+ * how a later refresh reaches it. Absolute paths, de-duplicated, and pruned
+ * when a project is uninstalled or its settings file stops carrying our
+ * entries.
+ */
+export async function persistRouterProject(
+  dir: string,
+  projectDir: string,
+  present = true,
+): Promise<void> {
+  await persist(dir, (existing) => {
+    const known = new Set(existing.install?.routerProjects ?? []);
+    if (present) known.add(projectDir);
+    else known.delete(projectDir);
+    return { ...existing, install: { ...existing.install, routerProjects: [...known].sort() } };
+  });
+}
+
+/**
+ * The spend keys `tenjin install` settles for the router, in atomic USDC.
+ *
+ * SIZED FOR A REAL SESSION, not for a demo. At 0.10 and 1.00 a research turn
+ * stalled after about twenty lookups on a refusal the user had done nothing to
+ * deserve; 0.25 a call inside 5.00 a day is the alpha's answer, and `confirm`
+ * stays above the per-call cap so nothing under it ever asks. The cap is also
+ * the whole money story: a wrong or hostile decision spends at most one
+ * `maxAutoSpend` inside `sessionBudget`, whatever it names as a destination.
+ */
+export const ROUTER_DEFAULTS = {
+  maxAutoSpend: '250000',
+  sessionBudget: '5000000',
+  confirm: 'above:250000',
+} as const;
+
+export interface RouterDefaultsResult {
+  /** Keys this run wrote, because the file did not name them. */
+  set: string[];
+  /** Keys the operator had already written, left exactly as they are. */
+  kept: string[];
+}
+
+/**
+ * The router's spend defaults, written ONLY where the file is silent. A
+ * `confirm` the operator put in `config.json` is never touched, which is why
+ * an explicit `always` keeps returning `needs_approval` from the tool handler
+ * instead of being quietly loosened by an install.
+ *
+ * `bazaarPay` is different and is turned on either way: it is the lane the
+ * router pays providers through, so an install that left it off would wire a
+ * product that refuses every lookup.
+ */
+export async function persistRouterDefaults(dir: string): Promise<RouterDefaultsResult> {
+  const result: RouterDefaultsResult = { set: [], kept: [] };
+  await persist(dir, (existing) => {
+    const next: PartialConfig = { ...existing, bazaarPay: true };
+    for (const [key, value] of Object.entries(ROUTER_DEFAULTS) as [
+      keyof typeof ROUTER_DEFAULTS,
+      string,
+    ][]) {
+      if (existing[key] === undefined) {
+        next[key] = value;
+        result.set.push(key);
+      } else result.kept.push(key);
+    }
+    return next;
+  });
+  return result;
+}
+
+/**
  * Record the settled harness selection through the same locked merge-write. It
  * replaces the previous record rather than unioning with it: the last operator
  * answer is the current intent. Doctor still re-probes detection independently;

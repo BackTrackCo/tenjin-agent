@@ -22,6 +22,8 @@ export interface SpendGateInput {
   /** The policy's creator identity (a handle for buy, the target host for pay). */
   creator: string;
   maxPriceAtomic?: bigint;
+  /** The same-turn duplicate guard's identity for this request; see SpendRequest. */
+  requestKey?: string;
   /** --yes: bypasses the interactive confirm only, never a cap or a deny. */
   yes: boolean;
   /** Interactive-confirm seam; defaults to a TTY y/n prompt. */
@@ -47,6 +49,7 @@ export async function gateSpend(input: SpendGateInput): Promise<string | undefin
     amountAtomic,
     creator: input.creator,
     ...(input.maxPriceAtomic !== undefined ? { maxPriceAtomic: input.maxPriceAtomic } : {}),
+    ...(input.requestKey !== undefined ? { requestKey: input.requestKey } : {}),
   });
   if (authorization.decision === 'deny') {
     throw new CliError('POLICY_REFUSED', authorization.message, {
@@ -76,6 +79,8 @@ function policyFix(reason: string, allowlistSubject: string): string {
       return `Add ${allowlistSubject} to allowlistCreators, or clear the allowlist.`;
     case 'session_budget_exceeded':
       return 'Raise sessionBudget with `tenjin config set sessionBudget <usd>`, or wait for the window to roll over.';
+    case 'duplicate_in_flight':
+      return 'Let the in-flight request finish and read its result; retrying the same request does not renew authorization.';
     default:
       return 'Adjust your spend policy with `tenjin config set`.';
   }

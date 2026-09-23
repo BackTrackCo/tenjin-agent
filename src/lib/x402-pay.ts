@@ -1,8 +1,9 @@
 import { x402Client, x402HTTPClient } from '@x402/core/client';
+import type { PaymentPolicy } from '@x402/core/client';
 import { ExactEvmScheme } from '@x402/evm';
 import { BuilderCodeClientExtension } from '@x402/extensions/builder-code';
 import type { ClientEvmSigner } from '@x402/evm';
-import type { PaymentRequired } from '@x402/core/types';
+import type { PaymentRequired, PaymentRequirements } from '@x402/core/types';
 import type { TypedDataDefinition } from 'viem';
 import { getAddress } from 'viem';
 import { CliError } from './errors';
@@ -17,16 +18,6 @@ import type { TenjinSigner } from './wallet/provider';
  * touches the network, the signature is an offline EIP-712/EIP-3009 authorization
  * the facilitator settles.
  */
-
-/** Adapt the wallet seam's signer to the x402 EVM client signer. Only the base
- *  flow's two members are needed; the optional RPC helpers stay unset (no gas
- *  sponsoring on this path). */
-function toClientSigner(signer: TenjinSigner): ClientEvmSigner {
-  return {
-    address: signer.address,
-    signTypedData: (message) => signer.signTypedData(message as unknown as TypedDataDefinition),
-  };
-}
 
 export interface BuiltPayment {
   /** The `PAYMENT-SIGNATURE` header(s) to attach to the paid re-request. */
@@ -98,68 +89,176 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+/**
+ * THE SDK OWNS SELECTION AND PAYLOAD; THIS FILE OWNS WHAT THIS WALLET HOLDS.
+ *
+ * `x402Client.selectPaymentRequirements` filters a 402's `accepts` to the
+ * (network, scheme) pairs registered on the client, runs the registered
+ * policies, and picks from what survives. Registering the exact EVM scheme for
+ * the Base networks therefore IS the selection rule, and the canonical-USDC pin
+ * below is a policy, which the SDK applies as a veto and never as a licence.
+ *
+ * It replaces a hand-rolled `accepts[0]`, which registered the scheme for
+ * whatever network the FIRST entry named and then agreed that entry was
+ * supported. Against CoinMarketCap, whose live 402 lists seven entries with BNB
+ * chain first and Base USDC third, every quote was priced against an
+ * 18-decimal BNB entry and refused before anything was signed.
+ */
+export function createPayerClient(getSigner: () => TenjinSigner): {
+  core: x402Client;
+  http: x402HTTPClient;
+  builderCodeKey: string;
+} {
+  // LAZY, so selection can run before the wallet is opened: the price check and
+  // the advertised-terms check both happen before a signer exists on purpose,
+  // and neither reads an address.
+  const lazy: ClientEvmSigner = {
+    get address() {
+      return getSigner().address;
+    },
+    signTypedData: (message) =>
+      getSigner().signTypedData(message as unknown as TypedDataDefinition),
+  };
+  const core = new x402Client();
+  for (const network of Object.keys(ALLOWED_USDC_BY_NETWORK)) {
+    core.register(network as `${string}:${string}`, new ExactEvmScheme(lazy));
+  }
+  core.registerPolicy(canonicalUsdcOnly);
+  // The SDK fires this hook only for sellers whose 402 advertises
+  // `builder-code`, so a seller that never declared it still gets an
+  // extension-free payload. That gating is why attribution stays spec-clean.
+  const builderCode = new BuilderCodeClientExtension(TENJIN_CLI_BUILDER_CODE);
+  core.registerExtension(builderCode);
+  return { core, http: new x402HTTPClient(core), builderCodeKey: builderCode.key };
+}
+
+/**
+ * A VETO, in the SDK's own vocabulary: the scheme registration already limits
+ * the networks, and this drops any entry on one of them whose asset is not that
+ * network's canonical USDC. Without it a seller could advertise `exact` on Base
+ * in a token of its choosing, and the signed EIP-3009 authorization is valid
+ * against that token's contract directly, no facilitator required.
+ */
+const canonicalUsdcOnly: PaymentPolicy = (_version, requirements) =>
+  requirements.filter((requirement) => {
+    const allowed = ALLOWED_USDC_BY_NETWORK[requirement.network];
+    if (allowed === undefined) return false;
+    try {
+      return getAddress(requirement.asset) === getAddress(allowed);
+    } catch {
+      return false;
+    }
+  });
+
+/**
+ * The entry the SDK would pay, or undefined when it would pay none. The SDK
+ * throws on an empty selection; callers here have their own named refusals, so
+ * the throw becomes an absence. `want` narrows it to a caller's advertised
+ * terms, which is a further veto and never a widening.
+ */
+export function selectPayableRequirement(
+  core: x402Client,
+  paymentRequired: PaymentRequired,
+  want?: { network?: string; asset?: string },
+): PaymentRequirements | undefined {
+  const approved = supportedEntries(paymentRequired);
+  if (want === undefined) return sdkSelect(core, paymentRequired) ?? approved[0];
+  // A caller holding terms wants the supported entry that matches THEM, so the
+  // search runs over the same policy-approved set the SDK would choose from
+  // rather than over the raw list.
+  return approved.find(
+    (r) =>
+      (want.network === undefined || r.network === want.network) &&
+      (want.asset === undefined || sameAsset(r.asset, want.asset)),
+  );
+}
+
+/**
+ * The entries the SDK's selection would consider: the registered networks, the
+ * `exact` scheme, and the canonical-USDC policy. Spelled here because the
+ * SDK's own `selectPaymentRequirements` is typed private at 2.17.0, so this is
+ * the set the adapter below falls back to and the set a terms-narrowed search
+ * runs over; the SIGNATURE always goes through the SDK either way.
+ */
+function supportedEntries(paymentRequired: PaymentRequired): PaymentRequirements[] {
+  return canonicalUsdcOnly(paymentRequired.x402Version, paymentRequired.accepts).filter(
+    (r) => r.scheme === 'exact' && ALLOWED_USDC_BY_NETWORK[r.network] !== undefined,
+  );
+}
+
+/**
+ * The SDK's own selector when it is reachable. `selectPaymentRequirements` is
+ * public at runtime and carries the registered schemes, the policies and the
+ * configured selector, which is exactly the decision wanted here; it is only
+ * typed private, so the call is adapted rather than reimplemented, and an SDK
+ * that ever removes it degrades to {@link supportedEntries} rather than
+ * breaking. A test pins the two agreeing on a multi-network challenge.
+ */
+function sdkSelect(
+  core: x402Client,
+  paymentRequired: PaymentRequired,
+): PaymentRequirements | undefined {
+  const select = (
+    core as unknown as {
+      selectPaymentRequirements?: (
+        version: number,
+        accepts: readonly PaymentRequirements[],
+      ) => PaymentRequirements;
+    }
+  ).selectPaymentRequirements;
+  if (typeof select !== 'function') return undefined;
+  try {
+    return select.call(core, paymentRequired.x402Version, paymentRequired.accepts);
+  } catch {
+    return undefined;
+  }
+}
+
+function sameAsset(a: string, b: string): boolean {
+  try {
+    return getAddress(a) === getAddress(b);
+  } catch {
+    return a.toLowerCase() === b.toLowerCase();
+  }
+}
+
+/** The named refusal when a 402 advertises nothing this wallet can pay. */
+export function noPayableRequirement(accepts: readonly PaymentRequirements[]): CliError {
+  const advertised = accepts.map((a) => `${a.scheme}/${a.network}/${a.asset}`);
+  return new CliError(
+    'PAYMENT_FAILED',
+    accepts.length === 0
+      ? 'The 402 advertised no payment requirements.'
+      : 'The 402 advertises nothing this CLI can pay: it lists no exact-scheme entry in canonical USDC on Base.',
+    {
+      fix: 'Only USDC on Base (eip155:8453), or Base Sepolia for previews, is supported. Nothing was signed.',
+      ...(accepts.length > 0 ? { details: { advertised } } : {}),
+    },
+  );
+}
+
+/**
+ * Build the `PAYMENT-SIGNATURE` header for the entry the SDK selects, or for
+ * `only` when the caller has already selected one and wants that exact deal
+ * signed. Selection, payload construction and header encoding are all the
+ * SDK's; what stays here is which networks and assets this wallet holds.
+ */
 export async function buildExactPayment(
   paymentRequired: PaymentRequired,
   signer: TenjinSigner,
+  only?: PaymentRequirements,
 ): Promise<BuiltPayment> {
-  const requirement = paymentRequired.accepts[0];
-  if (requirement === undefined) {
-    throw new CliError('PAYMENT_FAILED', 'The 402 advertised no payment requirements.', {
-      fix: 'The resource may be misconfigured; try another candidate.',
-    });
-  }
-  if (requirement.scheme !== 'exact') {
-    throw new CliError('PAYMENT_FAILED', `Unsupported payment scheme "${requirement.scheme}".`, {
-      fix: 'This CLI pays the x402 exact scheme only.',
-    });
-  }
-  const allowedAsset = ALLOWED_USDC_BY_NETWORK[requirement.network];
-  if (allowedAsset === undefined) {
-    throw new CliError(
-      'PAYMENT_FAILED',
-      `The 402 names a chain this CLI will not pay on: ${requirement.network}.`,
-      {
-        fix: 'Only USDC on Base (eip155:8453) or Base Sepolia previews (eip155:84532) is supported.',
-      },
-    );
-  }
-  let assetChecksummed: string;
-  try {
-    assetChecksummed = getAddress(requirement.asset);
-  } catch {
-    throw new CliError(
-      'PAYMENT_FAILED',
-      `The 402 names an invalid asset address: ${JSON.stringify(requirement.asset)}.`,
-    );
-  }
-  if (assetChecksummed !== getAddress(allowedAsset)) {
-    throw new CliError(
-      'PAYMENT_FAILED',
-      `The 402 names an asset this CLI will not pay: ${assetChecksummed} on ${requirement.network}.`,
-      {
-        fix: 'Only canonical USDC is supported; the resource or server looks misconfigured or hostile.',
-      },
-    );
-  }
+  const { core, http, builderCodeKey } = createPayerClient(() => signer);
+  const requirement = only ?? selectPayableRequirement(core, paymentRequired);
+  if (requirement === undefined) throw noPayableRequirement(paymentRequired.accepts);
 
-  const core = new x402Client();
-  core.register(requirement.network, new ExactEvmScheme(toClientSigner(signer)));
-  // The SDK fires this hook only for sellers whose 402 advertises `builder-code`,
-  // so a seller that never declared the extension still gets an extension-free
-  // payload. That gating is why attribution stays spec-clean; hand-setting
-  // `payload.extensions` here would stuff the key onto sellers who never asked.
-  const builderCode = new BuilderCodeClientExtension(TENJIN_CLI_BUILDER_CODE);
-  core.registerExtension(builderCode);
-  const http = new x402HTTPClient(core);
-
-  // Sign EXACTLY the requirement the price check ran against: pass a single-accept
-  // challenge so createPaymentPayload cannot re-select a different (e.g. costlier)
-  // accepts entry between the check and the signature. Narrow `accepts` only: the
-  // builder-code entry must survive into `bound`, or the hook never fires.
+  // A single-accept challenge, so nothing can re-select a different or costlier
+  // entry between the check and the signature. Narrow `accepts` only, or the
+  // builder-code hook never fires.
   const bound: PaymentRequired = {
     ...paymentRequired,
     accepts: [requirement],
-    extensions: withoutSellerServiceCodes(paymentRequired.extensions, builderCode.key),
+    extensions: withoutSellerServiceCodes(paymentRequired.extensions, builderCodeKey),
   };
 
   let headers: Record<string, string>;

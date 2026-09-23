@@ -7,7 +7,7 @@ import {
   SHELF_BYPASS_HEADER,
 } from './http';
 import { SIWX_HEADER } from './siwx';
-import { CliError } from './errors';
+import { CliError, exitCodeFor } from './errors';
 import { CALLER_USER_AGENT_ENV, TENJIN_PRODUCT, TENJIN_USER_AGENT } from './client-meta';
 import type { FetchJsonFailure, HttpRequestOptions } from './http';
 
@@ -906,5 +906,77 @@ describe('the team shelf bypass header', () => {
     });
     expect(rec.seen[0]?.[SHELF_BYPASS_HEADER]).toBe(SECRET);
     expect(rec.seen[1]?.[SHELF_BYPASS_HEADER]).toBe('planted');
+  });
+});
+
+/**
+ * An x402 challenge travels in a response header, and Node reads at most 16 KiB
+ * of headers unless `--max-http-header-size` says otherwise. A seller that
+ * embeds its whole output schema in the challenge can exceed that on its own
+ * (AnyAPI's is 52 KB, measured 2026-09-22), and undici then aborts the request:
+ * the generic path reported `fetch failed` with no status and nothing naming
+ * the cause, which reads as "the endpoint is down" for a seller that is
+ * answering perfectly.
+ */
+describe('a 402 challenge too large for this process to read', () => {
+  const overflow = (shape: 'direct' | 'cause' | 'code'): typeof fetch =>
+    (async () => {
+      if (shape === 'code') {
+        throw Object.assign(new TypeError('fetch failed'), {
+          cause: Object.assign(new Error('unexpected'), { code: 'UND_ERR_HEADERS_OVERFLOW' }),
+        });
+      }
+      if (shape === 'cause') {
+        throw Object.assign(new TypeError('fetch failed'), {
+          cause: new Error('Headers Overflow Error'),
+        });
+      }
+      throw new Error('Headers Overflow Error');
+    }) as typeof fetch;
+
+  it.each(['direct', 'cause', 'code'] as const)(
+    'names it rather than reporting a dead connection (%s)',
+    async (shape) => {
+      const result = await httpRequest('https://api.example.test/v1/run/thing', {
+        method: 'POST',
+        timeoutMs: 5_000,
+        jsonBody: {},
+        fetchImpl: overflow(shape),
+      });
+      expect(result.ok).toBe(false);
+      const failure = result as Extract<typeof result, { ok: false }>;
+      expect(failure.kind).toBe('oversized-header');
+      // The ORIGIN, not the path: the whole host answers this way.
+      expect(failure.message).toContain('https://api.example.test');
+      expect(failure.message).not.toContain('/v1/run/thing');
+      // The transport says what it could not read and NOTHING about payment:
+      // it serves the unpaid probe and the paid retry alike, so either claim
+      // would be wrong on one of them. The leg adds that sentence.
+      expect(failure.message).toContain('could not be read');
+      expect(failure.message).not.toMatch(/nothing was (sent|paid)|authorization/i);
+    },
+  );
+
+  it('maps to CHALLENGE_TOO_LARGE with the operator knob, not a retry', async () => {
+    const result = await httpRequest('https://api.example.test/pay', {
+      timeoutMs: 5_000,
+      fetchImpl: overflow('cause'),
+    });
+    const err = fetchFailureToCliError(result as Extract<typeof result, { ok: false }>);
+    expect(err.code).toBe('CHALLENGE_TOO_LARGE');
+    expect(exitCodeFor(err.code)).toBe(3);
+    expect(err.fix).toContain('--max-http-header-size');
+    expect(err.fix).not.toMatch(/try again|retry/i);
+    expect(err.fix).not.toMatch(/nothing was (sent|paid)|authorization/i);
+  });
+
+  it('is still a plain network failure when the abort is anything else', async () => {
+    const result = await httpRequest('https://api.example.test/pay', {
+      timeoutMs: 5_000,
+      fetchImpl: (async () => {
+        throw new Error('socket hang up');
+      }) as typeof fetch,
+    });
+    expect((result as Extract<typeof result, { ok: false }>).kind).toBe('network');
   });
 });

@@ -59,6 +59,11 @@ const EXIT_BY_CODE: Record<ErrorCode, ExitCode> = {
   UPDATE_FAILED: 1,
   // Refused BEFORE any signature existed: the Bazaar lane's fail-closed check.
   REGISTRY_MISMATCH: 3,
+  // The seller's 402 challenge does not fit this process's header limit, so the
+  // terms could not be read and nothing was sent. Understood and refused (3),
+  // not a transport failure: the connection was fine and a retry changes
+  // nothing without an operator raising `--max-http-header-size`.
+  CHALLENGE_TOO_LARGE: 3,
 };
 
 export function exitCodeFor(code: ErrorCode): ExitCode {

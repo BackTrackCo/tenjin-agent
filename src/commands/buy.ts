@@ -6,7 +6,12 @@ import { findSearchForResource } from '../lib/searches';
 import { fetchRead, type Preview } from '../lib/read-client';
 import type { ShelfBypass } from '../lib/http';
 import { buildSiwxHeader } from '../lib/siwx';
-import { buildExactPayment } from '../lib/x402-pay';
+import {
+  buildExactPayment,
+  createPayerClient,
+  noPayableRequirement,
+  selectPayableRequirement,
+} from '../lib/x402-pay';
 import { gateSpend } from '../lib/spend-gate';
 import { findDelivered, findDeliveredByUrl } from '../lib/library';
 import {
@@ -133,11 +138,17 @@ export async function runBuy(
 
   // A paid resource. From here a wallet is required. Capture the FIRST-SEEN amount
   // (and the chain to sign SIWX over) so a later price bump is detectable.
-  const firstRequirement = first.paymentRequired.accepts[0];
+  // The SDK's selection, not `accepts[0]`: Tenjin's own 402 advertises one
+  // Base entry so this picks the same one, and a resource that ever lists
+  // several cannot have one priced and another signed.
+  const firstRequirement = selectPayableRequirement(
+    createPayerClient(() => {
+      throw new CliError('INTERNAL', 'Selection must not open the wallet.');
+    }).core,
+    first.paymentRequired,
+  );
   if (firstRequirement === undefined) {
-    throw new CliError('PAYMENT_FAILED', 'The 402 advertised no payment requirements.', {
-      fix: 'Try another candidate; this resource looks misconfigured.',
-    });
+    throw noPayableRequirement(first.paymentRequired.accepts);
   }
   const firstSeenAmount = BigInt(firstRequirement.amount);
 
@@ -183,12 +194,13 @@ export async function runBuy(
 
   // The FRESH challenge the payment is built and priced against.
   const paymentRequired = recheck.paymentRequired;
-  const requirement = paymentRequired.accepts[0];
-  if (requirement === undefined) {
-    throw new CliError('PAYMENT_FAILED', 'The fresh 402 advertised no payment requirements.', {
-      fix: 'Try another candidate; this resource looks misconfigured.',
-    });
-  }
+  const requirement = selectPayableRequirement(
+    createPayerClient(() => {
+      throw new CliError('INTERNAL', 'Selection must not open the wallet.');
+    }).core,
+    paymentRequired,
+  );
+  if (requirement === undefined) throw noPayableRequirement(paymentRequired.accepts);
   const amountAtomic = BigInt(requirement.amount);
   // Refuse a price bump between the first look and signing: never sign a challenge
   // that costs more than what was first advertised.
@@ -230,7 +242,7 @@ export async function runBuy(
   // 5. Pay: build the exact-scheme authorization (bound to the FRESH requirement)
   //    and re-request with it. Any non-settlement outcome releases the reservation.
   try {
-    const payment = await buildExactPayment(paymentRequired, signer);
+    const payment = await buildExactPayment(paymentRequired, signer, requirement);
     const paid = await fetchRead(ref.url, {
       ...fetchOpts,
       paymentHeaders: payment.headers,

@@ -93,7 +93,11 @@ export function installDaemonFiles(dataDir: string, bundleDir: string): { writte
     // file and fails on a syntax error it can do nothing about. A rename is
     // atomic, so a reader gets the old bundle or the new one and never a
     // fragment of both (tenjin-agent#342).
-    const staged = `${dest}.${process.pid}.tmp`;
+    // Unique per CALL, not per process: two copies running in one process (a
+    // command and a test driving the same writer) shared one staging path, and
+    // the second truncating it while the first renamed left a fragment at the
+    // destination, which is the very outcome the rename exists to prevent.
+    const staged = `${dest}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
     copyFileSync(src, staged);
     renameSync(staged, dest);
     written.push(dest);

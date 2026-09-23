@@ -37,6 +37,14 @@ import { hooksDir, shimBundlePath } from './paths';
 /** Every basename this CLI puts in the hooks dir. */
 const OUR_HOOK_FILES: readonly string[] = ['tenjin-daemon.mjs', 'tenjin-shim.mjs'];
 
+/**
+ * The router's entries are a plain command line rather than a file under our
+ * hooks dir, so ownership needs this third marker. It also SWEEPS: a machine
+ * that carried the daemon's shim entries or its loopback URLs still matches on
+ * the two older markers, so one install replaces whatever was there.
+ */
+const OUR_HOOK_COMMAND = 'tenjin hook ';
+
 /** `http://127.0.0.1:<port>/hook/<harness>`, the only URL we ever register. */
 const LOOP_URL_RE = new RegExp(`^http://127\\.0\\.0\\.1:\\d+/hook/(?:${HARNESSES.join('|')})$`);
 
@@ -156,6 +164,7 @@ function ownsHandler(handler: unknown, dataDir: string): boolean {
   if (typeof url === 'string' && LOOP_URL_RE.test(url)) return true;
   const command = handler.command;
   if (typeof command !== 'string') return false;
+  if (command.includes(OUR_HOOK_COMMAND)) return true;
   if (OUR_HOOK_FILES.some((file) => command.includes(file))) return true;
   return command.includes(hooksDir(resolve(dataDir)));
 }
@@ -429,6 +438,17 @@ export interface WriteHooksOptions {
   bundleDir?: string;
   /** Seam for step 1-3: bundles, token, a healthy daemon. Tests inject it. */
   start?: (dataDir: string, deps: DaemonDeps) => Promise<DaemonStart>;
+  /**
+   * The entries to write, each `{ event, matcher?, hooks }`. Supplying them
+   * makes this a PLAIN WRITE: no daemon is started, no token is read and no
+   * loopback URL exists, which is what the router's two command entries need.
+   * Omitting them keeps the legacy daemon path for the shelf product, whose
+   * registration this release no longer loads.
+   */
+  plan?: unknown[];
+  /** The hooks file to write, when it is not the harness's own user-level one
+   *  (`tenjin install --project`). Only meaningful beside `plan`. */
+  settingsPath?: string;
 }
 
 /**
@@ -448,13 +468,16 @@ export async function writeHooks(opts: WriteHooksOptions): Promise<HooksResult> 
   const env = opts.env ?? process.env;
   const harness = adapter.id;
   const dir = hooksDir(dataDir);
-  const declaredPath = adapter.registrar.configPath(homeDir, env);
+  const declaredPath = opts.settingsPath ?? adapter.registrar.configPath(homeDir, env);
   // The DECLARED path, not the one `inspectHooksFile` resolves symlinks to:
   // the harness discovers its hooks file at the declared name, so that is the
   // source path its own trust browser shows, and telling the operator to look
   // for the link's target would send them hunting for a line that is not there.
   const steps = adapter.registrar.activation?.(declaredPath);
   const activation = steps !== undefined ? { activation: steps } : {};
+
+  if (opts.plan !== undefined)
+    return writePlainEntries(opts, opts.plan, declaredPath, dir, activation);
 
   // Steps 1-3. A daemon that will not come up is reported as a skip rather than
   // thrown: install has already written skills and permissions, and the remedy
@@ -594,4 +617,84 @@ export async function hookBundlesPresent(dataDir: string): Promise<boolean> {
     () => true,
     () => false,
   );
+}
+
+/**
+ * The plain write: drop every entry of ours, append the caller's, keep every
+ * other key in the file byte for byte. No daemon, no token, no port. The
+ * refusals are the daemon path's own (unresolvable, unreadable, unparsable,
+ * unexpected shape, changed underneath, unwritable), because a hooks file this
+ * module will not write is a hooks file this module will not write.
+ */
+async function writePlainEntries(
+  opts: WriteHooksOptions,
+  plan: unknown[],
+  declaredPath: string,
+  dir: string,
+  activation: { activation?: string[] },
+): Promise<HooksResult> {
+  const harness = opts.adapter.id;
+  const found = await inspectHooksFile(declaredPath);
+  if ('refusal' in found) {
+    return skip(found.refusal.reason, {
+      harness,
+      path: found.refusal.path,
+      hooksDir: dir,
+      warning: found.refusal.message,
+      fix: fixFor(found.refusal.reason),
+    });
+  }
+  const { path, raw, settings, hooks } = found;
+  const nextHooks = pruneHooks(hooks, opts.dataDir).next;
+  for (const [event, mine] of groupPlan(plan)) {
+    const kept = nextHooks[event];
+    nextHooks[event] = Array.isArray(kept) ? [...kept, ...mine] : mine;
+  }
+  const next = `${JSON.stringify({ ...settings, hooks: nextHooks }, null, 2)}\n`;
+  const result: HooksResult = {
+    harness,
+    path,
+    hooksDir: dir,
+    entries: plan.length,
+    wrote: next !== raw,
+    ...activation,
+  };
+  if (next === raw) {
+    await tightenFile(path);
+    return result;
+  }
+  if ((await readFile(path, 'utf8').catch(() => null)) !== raw) {
+    return skip('changed-since-read', {
+      harness,
+      path,
+      hooksDir: dir,
+      warning: `${path} changed while it was being updated, so no hooks were registered. Re-run \`tenjin install\`.`,
+      fix: fixFor('changed-since-read'),
+    });
+  }
+  try {
+    await writeFileAtomic(path, next, { mode: 0o600 });
+  } catch (err) {
+    return skip('unwritable', {
+      harness,
+      path,
+      hooksDir: dir,
+      warning: `${path} could not be written (${err instanceof Error ? err.message : String(err)}); no hook entry was registered.`,
+      fix: fixFor('unwritable'),
+    });
+  }
+  return result;
+}
+
+/** `{ event, ...entry }[]` to a map of event to entries, in plan order. */
+function groupPlan(plan: unknown[]): Map<string, unknown[]> {
+  const planned = new Map<string, unknown[]>();
+  for (const item of plan) {
+    if (!isPlainObject(item) || typeof item.event !== 'string') continue;
+    const { event, ...entry } = item;
+    const list = planned.get(event) ?? [];
+    list.push(entry);
+    planned.set(event, list);
+  }
+  return planned;
 }

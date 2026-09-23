@@ -214,6 +214,18 @@ const InstallConfigSchema = z.object({
    * otherwise) is never shadowed by a stale decline.
    */
   grantDeclined: z.array(z.string()),
+  /**
+   * Absolute directories a `tenjin install --project` wired, so `tenjin update`
+   * can refresh them. It spawns `install --refresh` from the HOME directory,
+   * which is the one place a project install can never be found by looking
+   * around: without this list a project-only machine refreshed nothing and
+   * reported success while its hooks stayed on the old build.
+   *
+   * A LIST, because one machine can wire several projects, and entries are
+   * dropped by `tenjin uninstall --project` and by any refresh that finds the
+   * project's settings file no longer carries our entries.
+   */
+  routerProjects: z.array(z.string()),
 });
 
 /**
@@ -399,7 +411,7 @@ export const CONFIG_DEFAULTS: Config = {
   bazaarPay: false,
   bazaarRegistries: DEFAULT_BAZAAR_REGISTRIES,
   publish: { mode: 'review', defaultPrice: '100000', ackServerWarnings: 'mode' },
-  install: { harness: [], grantDeclined: [] },
+  install: { harness: [], grantDeclined: [], routerProjects: [] },
   // Every hook is on out of the box: a vanilla install turns the whole loop on,
   // and the disclosure and the undo ride the install output. `false` leaves the
   // registered entries inert without touching settings.json, so any of these is
@@ -531,6 +543,7 @@ export async function loadConfig(dir: string): Promise<Config> {
     },
     install: {
       harness: raw.install?.harness ?? CONFIG_DEFAULTS.install.harness,
+      routerProjects: raw.install?.routerProjects ?? CONFIG_DEFAULTS.install.routerProjects,
       grantDeclined: resolveGrantDeclined(raw.install?.grantDeclined),
     },
     hooks: resolveHooksConfig(raw),

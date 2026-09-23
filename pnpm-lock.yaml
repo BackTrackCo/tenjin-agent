@@ -45,6 +45,12 @@ importers:
       '@x402/extensions':
         specifier: 2.17.0
         version: 2.17.0(typescript@6.0.3)
+      ajv:
+        specifier: ^8.20.0
+        version: 8.20.0
+      ajv-formats:
+        specifier: ^3.0.1
+        version: 3.0.1(ajv@8.20.0)
       commander:
         specifier: ^14.0.1
         version: 14.0.3
@@ -4037,7 +4043,7 @@ snapshots:
   vite@8.1.4(@types/node@25.9.5)(esbuild@0.28.1):
     dependencies:
       lightningcss: 1.32.0
-      picomatch: 4.0.5
+      picomatch: 4.0.7
       postcss: 8.5.23
       rolldown: 1.1.5
       tinyglobby: 0.2.17

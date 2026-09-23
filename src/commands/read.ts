@@ -133,7 +133,15 @@ export async function runRead(
     });
   }
 
-  // A paid resource. Capture the advertised price: it is what the refusal reports.
+  // A paid resource. Capture the advertised price: it is what the refusal
+  // reports, and the ONLY thing this entry is used for.
+  //
+  // DELIBERATELY NOT the shared SDK selection every paying path uses. That
+  // lives in `lib/x402-pay`, and this module may never reach it: the boundary
+  // test below is what keeps a command named `read` incapable of spending. The
+  // cost is cosmetic and bounded to this refusal: if a resource ever advertised
+  // several entries, the price named here could be the wrong one, on a path
+  // where no money moves either way.
   const firstRequirement = first.paymentRequired.accepts[0];
   if (firstRequirement === undefined) {
     throw new CliError('PAYMENT_FAILED', 'The 402 advertised no payment requirements.', {

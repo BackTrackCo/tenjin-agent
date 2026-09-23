@@ -232,9 +232,17 @@ describe('hooks block: seven booleans, one per arm', () => {
 });
 
 describe('install block', () => {
-  it('defaults to no recorded harness and no recorded decline', async () => {
-    expect(CONFIG_DEFAULTS.install).toEqual({ harness: [], grantDeclined: [] });
-    expect((await loadConfig(dir)).install).toEqual({ harness: [], grantDeclined: [] });
+  it('defaults to no recorded harness, decline or wired project', async () => {
+    expect(CONFIG_DEFAULTS.install).toEqual({
+      harness: [],
+      grantDeclined: [],
+      routerProjects: [],
+    });
+    expect((await loadConfig(dir)).install).toEqual({
+      harness: [],
+      grantDeclined: [],
+      routerProjects: [],
+    });
   });
 
   it('reads back the recorded targets', async () => {

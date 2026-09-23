@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "query": "BTC and ETH spot price in USD",
+  "id": "0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d01",
+  "gateHint": {
+    "category": "crypto price quote",
+    "turnId": "turn-7f3a",
+    "lookupId": "lookup-2c19"
+  }
+}

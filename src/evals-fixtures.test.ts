@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { buildProgram } from './cli';
+import { buildProgram, PRODUCTS } from './cli';
+import { registerShelf } from './cli/shelf';
 import { searchCandidateSchema } from './lib/agent-api';
 import { PACKAGED_SKILL_NAMES, SHIPPED_SKILL_FILES } from './lib/skills-source';
 import type { Io } from './lib/output';
@@ -125,7 +126,10 @@ interface Registry {
 function registry(): Registry {
   const sink = { write: () => true } as unknown as NodeJS.WritableStream;
   const io: Io = { stdout: sink, stderr: sink, isTTY: false };
-  const program = buildProgram(io, () => {});
+  // Every product, including the shelf this release does not register: the
+  // sources this guard reads are the shelf's own skills and eval fixtures, and
+  // they go with it when the follow-up deletes it.
+  const program = buildProgram(io, () => {}, [...PRODUCTS, registerShelf]);
   const reg: Registry = { verbs: new Set(), pairs: new Set(), parents: new Set() };
   for (const command of program.commands) {
     reg.verbs.add(command.name());
