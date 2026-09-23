@@ -189,6 +189,17 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
   // made the search string the whole conversation, so "native tools only, no
   // paid services" never reached this gate.
   const packet = await buildNativePacket(event.transcript_path, event.session_id, pending);
+  // AND WHEN THEY CANNOT BE READ, THE CALL RUNS. Routing a redirect on the tool
+  // argument alone is how an instruction the user gave this turn gets
+  // overruled by a decision that never saw it. A native call the user's own
+  // assistant chose is the safe default; the only cost is a lookup this turn
+  // does not route.
+  if (packet.historyStatus !== 'ok') {
+    (deps.warn ?? ((line: string) => process.stderr.write(`${line}\n`)))(
+      "tenjin hook: this session's transcript could not be read, so the native call runs unrouted",
+    );
+    return { response: null, decision: 'allow' };
+  }
   const outcome = await decide(packet, deps);
   if (outcome === null || outcome.action !== 'execute') {
     return {

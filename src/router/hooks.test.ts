@@ -65,6 +65,26 @@ function promptEvent(prompt: string): unknown {
   return { hook_event_name: 'UserPromptSubmit', session_id: 'sess-1', prompt };
 }
 
+/** A transcript this session owns, for the native hook to read its turn from. */
+async function transcriptFor(rows: unknown[]): Promise<string> {
+  const fs = await import('node:fs/promises');
+  const path = join(dir, `session-${String(rows.length)}-${String(Math.random())}.jsonl`);
+  await fs.writeFile(path, rows.map((row) => JSON.stringify(row)).join('\n'));
+  return path;
+}
+
+/** A native event whose session CAN be read: the fail-safe path is allow, so a
+ *  test about routing has to give the hook a turn to route with. */
+async function readableEvent(
+  subject: string,
+  tool: 'WebSearch' | 'WebFetch' = 'WebSearch',
+): Promise<unknown> {
+  const path = await transcriptFor([
+    { type: 'user', sessionId: 'sess-1', message: { content: `please ${subject}` } },
+  ]);
+  return { ...(nativeEvent(subject, tool) as object), transcript_path: path };
+}
+
 function nativeEvent(query: string, tool: 'WebSearch' | 'WebFetch' = 'WebSearch'): unknown {
   return {
     hook_event_name: 'PreToolUse',
@@ -170,7 +190,7 @@ describe('the native hook', () => {
     ['needs_input', NEEDS_INPUT],
   ])('allows the call on %s', async (_label, body) => {
     const { fetchImpl } = router(body);
-    const out = await runNativeHook(nativeEvent('btc price today'), {
+    const out = await runNativeHook(await readableEvent('btc price today'), {
       dataDir: dir,
       baseUrl: BASE,
       fetchImpl,
@@ -183,7 +203,7 @@ describe('the native hook', () => {
     ['a body this build cannot read', { schemaVersion: 2 }, 200],
   ])('allows the call on %s', async (_label, body, status) => {
     const { fetchImpl } = router(body, status);
-    const out = await runNativeHook(nativeEvent('btc price today'), {
+    const out = await runNativeHook(await readableEvent('btc price today'), {
       dataDir: dir,
       baseUrl: BASE,
       fetchImpl,
@@ -194,11 +214,16 @@ describe('the native hook', () => {
 
   it('redirects a clear execute and carries the id into the redirect', async () => {
     const { fetchImpl, calls } = router(EXECUTE);
-    const out = await runNativeHook(nativeEvent('https://example.test/spec', 'WebFetch'), {
-      dataDir: dir,
-      baseUrl: BASE,
-      fetchImpl,
-    });
+    const path = await transcriptFor([
+      { type: 'user', sessionId: 'sess-1', message: { content: 'read that spec for me' } },
+    ]);
+    const out = await runNativeHook(
+      {
+        ...(nativeEvent('https://example.test/spec', 'WebFetch') as object),
+        transcript_path: path,
+      },
+      { dataDir: dir, baseUrl: BASE, fetchImpl },
+    );
     expect(out.decision).toBe('deny');
     expect(out.id).toBe('k3f9-abcd');
     // The pending call rides INSIDE the packet: that is what tells the route
@@ -289,19 +314,12 @@ describe('an id that is not an opaque handle', () => {
  * a paid provider on a bare URL.
  */
 describe('the native hook reads the turn it belongs to', () => {
-  async function transcript(rows: unknown[]): Promise<string> {
-    const fs = await import('node:fs/promises');
-    const path = join(dir, 'session.jsonl');
-    await fs.writeFile(path, rows.map((row) => JSON.stringify(row)).join('\n'));
-    return path;
-  }
-
   function row(role: 'user' | 'assistant', text: string): unknown {
     return { type: role, sessionId: 'sess-1', message: { content: [{ type: 'text', text }] } };
   }
 
   it('sends the restriction the user gave, not just the URL', async () => {
-    const path = await transcript([
+    const path = await transcriptFor([
       row('user', 'Use native tools only, no paid services, for the rest of this task.'),
       row('assistant', 'Understood, I will use my own tools.'),
     ]);
@@ -330,7 +348,7 @@ describe('the native hook reads the turn it belongs to', () => {
       { ...(promptEvent('find alpha leads for an x402 product') as object) },
       { dataDir: dir, baseUrl: BASE, fetchImpl: prompt.fetchImpl },
     );
-    const path = await transcript([row('user', 'find alpha leads for an x402 product')]);
+    const path = await transcriptFor([row('user', 'find alpha leads for an x402 product')]);
     const native = router(NATIVE);
     await runNativeHook(
       { ...(nativeEvent('x402 startups hiring') as object), transcript_path: path },
@@ -340,15 +358,23 @@ describe('the native hook reads the turn it belongs to', () => {
     expect(sent.body.packet.current.text).toBe('find alpha leads for an x402 product');
   });
 
-  it('falls back to the call itself when there is no transcript to read', async () => {
-    const { fetchImpl, calls } = router(NATIVE);
-    await runNativeHook(nativeEvent('btc price today'), {
+  /**
+   * FAIL SAFE IS ALLOW. Routing on the tool argument alone is how an
+   * instruction the user gave this turn gets overruled by a decision that
+   * never saw it, so a transcript this build cannot read means the native call
+   * simply runs. The only cost is a lookup that goes unrouted.
+   */
+  it('allows the call outright when the turn cannot be read', async () => {
+    const { fetchImpl, calls } = router(EXECUTE);
+    const out = await runNativeHook(nativeEvent('btc price today'), {
       dataDir: dir,
       baseUrl: BASE,
       fetchImpl,
+      warn: () => undefined,
     });
-    const sent = calls[0] as { body: { packet: Record<string, unknown> } };
-    expect((sent.body.packet.current as { text: string }).text).toBe('btc price today');
-    expect(sent.body.packet.historyStatus).toBe('unavailable');
+    expect(out).toMatchObject({ decision: 'allow', response: null });
+    // Never asked: a decision made without the user's words is the thing being
+    // avoided, not something to ask for and then ignore.
+    expect(calls).toHaveLength(0);
   });
 });

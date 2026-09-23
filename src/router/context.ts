@@ -203,20 +203,46 @@ async function readHistory(
   }
 }
 
+/**
+ * TOLERANT BY ROW, STRICT BY CONTENT. Every rule below still holds about what
+ * may enter a packet: no other session's text, no subagent's, no tool results.
+ * What changed is the blast radius of one bad row. Rejecting the whole
+ * transcript over a compaction boundary or a sidechain line meant the native
+ * hook routed on the tool argument alone, which is exactly how a current-turn
+ * "native tools only" instruction went missing from the decision it was about.
+ *
+ * A compaction boundary is not a reason to read nothing: the rows after it are
+ * the live context, so the collected messages start again there.
+ */
 function parseRows(raw: string, sessionId: string): PacketMessage[] {
-  const messages: PacketMessage[] = [];
+  let messages: PacketMessage[] = [];
   for (const line of raw.split('\n')) {
     if (line.trim().length === 0) continue;
-    const row = JSON.parse(line) as Record<string, unknown>;
-    if (row === null || typeof row !== 'object' || Array.isArray(row)) throw new Error('malformed');
-    if (typeof row.sessionId === 'string' && row.sessionId !== sessionId) {
-      throw new Error('another session');
+    let row: Record<string, unknown>;
+    try {
+      row = JSON.parse(line) as Record<string, unknown>;
+    } catch {
+      continue; // One unreadable line is one line, not the conversation.
     }
-    if (row.isSidechain === true) throw new Error('sidechain');
-    if (row.type === 'system' && row.subtype === 'compact_boundary') throw new Error('compacted');
+    if (row === null || typeof row !== 'object' || Array.isArray(row)) continue;
+    // Everything before the boundary belongs to a context that was summarized
+    // away; what follows is the turn in play.
+    if (row.type === 'system' && row.subtype === 'compact_boundary') {
+      messages = [];
+      continue;
+    }
+    // Never ours to read: another window's rows and a subagent's are skipped
+    // rather than allowed to void the file.
+    if (typeof row.sessionId === 'string' && row.sessionId !== sessionId) continue;
+    if (row.isSidechain === true) continue;
     if (row.type !== 'user' && row.type !== 'assistant') continue;
-    if (row.sessionId !== sessionId) throw new Error('unidentified conversation row');
-    const text = textOf(row.message);
+    if (row.sessionId !== sessionId) continue;
+    let text: string;
+    try {
+      text = textOf(row.message);
+    } catch {
+      continue; // A row this build cannot read contributes nothing, and no more.
+    }
     const bounded = mask(text).slice(0, MAX_MESSAGE_CHARS);
     if (bounded.length > 0) messages.push({ role: row.type, text: bounded });
   }

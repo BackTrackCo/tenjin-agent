@@ -11,7 +11,9 @@ valid, then copy them across. `ROUTER_VERSION` is `2026-09-23.1`.
 
 ## The two calls
 
-A lookup is two calls to one route, and they ask different questions.
+A lookup is two calls to ONE route, and they ask different questions. There is
+no separate gate endpoint: each call has one schema and one set of fixtures,
+parsed by the handler that serves it.
 
 | call | request                                  | answer                                                                                                  |
 | ---- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------- |
@@ -64,20 +66,20 @@ a lookup is the caller's own, to the provider.
 
 Take these from here; do not re-derive them.
 
-| field                           | bound                                                   |
-| ------------------------------- | ------------------------------------------------------- |
-| `schemaVersion`                 | exactly `1`, on every request and response              |
-| `source` (gate request only)    | `prompt` or `native`; `native` is the pending-call form |
-| `packet` serialized             | 16384 bytes, refused rather than truncated              |
-| `packet.history`                | 6 messages                                              |
-| message `text`                  | 16000 characters                                        |
-| `packet.literalUrls`            | 8 entries, each 2000 characters                         |
-| `query`                         | 1 to 8000 characters                                    |
-| `pendingCall.query` / `.url`    | 1 to 4000 characters                                    |
-| `gateHint.turnId` / `.lookupId` | 1 to 64 characters                                      |
-| `diagnostics.missing`           | 60 entries, each non-empty                              |
-| `id`                            | a uuid the server minted; a client never invents one    |
-| id lifetime                     | 15 minutes from the hook call that created it           |
+| field                           | bound                                                      |
+| ------------------------------- | ---------------------------------------------------------- |
+| `schemaVersion`                 | exactly `1`, on every request and response                 |
+| hook vs native hook             | read from `packet.pendingCall`; there is no `source` field |
+| `packet` serialized             | 16384 bytes, refused rather than truncated                 |
+| `packet.history`                | 6 messages                                                 |
+| message `text`                  | 16000 characters                                           |
+| `packet.literalUrls`            | 8 entries, each 2000 characters                            |
+| `query`                         | 1 to 8000 characters                                       |
+| `pendingCall.query` / `.url`    | 1 to 4000 characters                                       |
+| `gateHint.turnId` / `.lookupId` | 1 to 64 characters                                         |
+| `diagnostics.missing`           | 60 entries, each non-empty                                 |
+| `id`                            | a uuid the server minted; a client never invents one       |
+| id lifetime                     | 15 minutes from the hook call that created it              |
 
 The enumerated values live in code: `ROUTER_CATEGORIES` in `wire.ts`,
 `DIAGNOSTIC_CODES` and `DIAGNOSTIC_STAGES` in `diagnostics.ts`.

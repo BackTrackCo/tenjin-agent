@@ -164,6 +164,21 @@ export function buildHookBody(packet: Packet): Record<string, unknown> {
   return { schemaVersion: 1, packet };
 }
 
+/** The exact body the tool call sends. `id` is the turn whose packet decides
+ *  with this query; `gateHint` is evidence, never authority. */
+export function buildToolBody(request: {
+  query: string;
+  id?: string;
+  gateHint?: GateHint;
+}): Record<string, unknown> {
+  return {
+    schemaVersion: 1,
+    query: request.query,
+    ...(request.id !== undefined ? { id: request.id } : {}),
+    ...(request.gateHint !== undefined ? { gateHint: request.gateHint } : {}),
+  };
+}
+
 /** The parsers, exposed so the shared wire fixtures are checked against the
  *  same schemas production parses with rather than against a copy of them. */
 export function parseForTests(kind: CallKind, value: unknown): { success: boolean } {
@@ -235,12 +250,11 @@ export async function requestDecision(
     jsonBody:
       kind === 'hook'
         ? buildHookBody(request.packet as Packet)
-        : {
-            schemaVersion: 1,
-            query: request.query,
+        : buildToolBody({
+            query: request.query as string,
             ...(request.id !== undefined ? { id: request.id } : {}),
             ...(request.gateHint !== undefined ? { gateHint: request.gateHint } : {}),
-          },
+          }),
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   };
   return readDecision(

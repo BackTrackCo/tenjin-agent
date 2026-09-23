@@ -92,20 +92,47 @@ describe('the prompt packet', () => {
     expect(literalUrlsIn('no links here')).toEqual([]);
   });
 
+  /**
+   * ONE BAD ROW IS ONE ROW. These are all skipped and the conversation around
+   * them survives: rejecting the whole transcript over a sidechain line or a
+   * compaction boundary is how a current-turn instruction went missing from
+   * the decision it was about.
+   */
   it.each([
-    ['another session', [{ type: 'user', sessionId: 'other', message: { content: 'hi' } }]],
+    ['another session', { type: 'user', sessionId: 'other', message: { content: 'theirs' } }],
     [
       'a subagent sidechain',
-      [{ type: 'user', sessionId: 's', isSidechain: true, message: { content: 'hi' } }],
+      { type: 'user', sessionId: 's', isSidechain: true, message: { content: 'subagent' } },
     ],
-    ['a compaction boundary', [{ type: 'system', subtype: 'compact_boundary' }]],
-    ['an unidentified conversation row', [{ type: 'user', message: { content: 'hi' } }]],
-    ['a malformed message', [{ type: 'user', sessionId: 's', message: { content: 17 } }]],
-  ])('reports %s as unavailable instead of routing on it', async (_label, rows) => {
-    const path = await transcript(rows);
+    ['an unidentified conversation row', { type: 'user', message: { content: 'unowned' } }],
+    ['a malformed message', { type: 'user', sessionId: 's', message: { content: 17 } }],
+    ['a line that is not JSON at all', 'not json'],
+  ])('skips %s and keeps the rest of the turn', async (_label, bad) => {
+    const path = await transcript([
+      { type: 'user', sessionId: 's', message: { content: 'native tools only, no paid services' } },
+      bad,
+      { type: 'assistant', sessionId: 's', message: { content: 'understood' } },
+    ]);
     const packet = await buildPromptPacket(path, 's', 'go');
-    expect(packet).toMatchObject({ historyStatus: 'unavailable', history: [] });
-    expect(packet.current.text).toBe('go');
+    expect(packet.historyStatus).toBe('ok');
+    expect(packet.history.map((m) => m.text)).toEqual([
+      'native tools only, no paid services',
+      'understood',
+    ]);
+    expect(JSON.stringify(packet)).not.toMatch(/theirs|subagent|unowned/);
+  });
+
+  /** The rows before a boundary belong to a context that was summarized away;
+   *  what follows is the turn in play, so reading starts again there. */
+  it('keeps what follows a compaction boundary and drops what precedes it', async () => {
+    const path = await transcript([
+      { type: 'user', sessionId: 's', message: { content: 'ancient history' } },
+      { type: 'system', subtype: 'compact_boundary' },
+      { type: 'user', sessionId: 's', message: { content: 'native tools only' } },
+    ]);
+    const packet = await buildPromptPacket(path, 's', 'go');
+    expect(packet.historyStatus).toBe('ok');
+    expect(packet.history.map((m) => m.text)).toEqual(['native tools only']);
   });
 
   it('never blocks the turn on a missing or oversized transcript', async () => {

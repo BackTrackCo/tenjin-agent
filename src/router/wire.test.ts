@@ -2,7 +2,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { buildHookBody, parseForTests } from './decision';
+import { buildHookBody, buildToolBody, parseForTests } from './decision';
 import { GATE_TIMEOUT_MS } from './gate';
 import { MAX_PACKET_BYTES, type Packet } from './context';
 import { STDIN_TIMEOUT_MS } from './hook-command';
@@ -27,40 +27,53 @@ function fixture(name: string): Record<string, unknown> {
 
 describe('the request bodies', () => {
   /**
-   * THE ROUTE READS THIS WITH A STRICT OBJECT, so an extra field is a 400 and
+   * THE ROUTE READS THESE WITH STRICT OBJECTS, so an extra field is a 400 and
    * a 400 is a turn with no hint. Which hook is asking is not a field: the
-   * route reads it from `packet.pendingCall`, which the native hook sets.
+   * route reads it from `packet.pendingCall`, which the native hook sets and
+   * the prompt hook does not.
    */
-  it('is exactly schemaVersion and the packet, for both hooks', () => {
-    const canonical = fixture('wire-decision-request.json');
-    const built = buildHookBody(canonical.packet as Packet);
-    expect(built).toEqual(canonical);
-    expect(Object.keys(built).sort()).toEqual(['packet', 'schemaVersion']);
+  it.each([['wire-hook-request-prompt.json'], ['wire-hook-request-native.json']])(
+    'builds %s byte for byte',
+    (name) => {
+      const canonical = fixture(name);
+      expect(buildHookBody(canonical.packet as Packet)).toEqual(canonical);
+    },
+  );
+
+  it('tells the two hook bodies apart only by the pending call', () => {
+    const prompt = fixture('wire-hook-request-prompt.json').packet as Packet;
+    const native = fixture('wire-hook-request-native.json').packet as Packet;
+    expect(prompt.pendingCall).toBeUndefined();
+    expect(native.pendingCall).toEqual({ tool: 'WebSearch', query: 'btc eth price today' });
+    for (const packet of [prompt, native]) {
+      expect(Object.keys(buildHookBody(packet)).sort()).toEqual(['packet', 'schemaVersion']);
+      expect(Buffer.byteLength(JSON.stringify(packet))).toBeLessThanOrEqual(MAX_PACKET_BYTES);
+      expect(packet.historyStatus).toBe('ok');
+    }
   });
 
-  it('fits the packet cap the server enforces', () => {
-    const request = fixture('wire-decision-request.json');
-    expect(Buffer.byteLength(JSON.stringify(request.packet))).toBeLessThanOrEqual(MAX_PACKET_BYTES);
-    expect((request.packet as Packet).historyStatus).toBe('ok');
+  it('builds the tool request byte for byte', () => {
+    const canonical = fixture('wire-tool-request.json');
+    expect(
+      buildToolBody({
+        query: canonical.query as string,
+        id: canonical.id as string,
+        gateHint: canonical.gateHint as never,
+      }),
+    ).toEqual(canonical);
   });
 
-  it('is the query and the turn id from the tool, with no packet', () => {
-    const request = fixture('wire-decision-request-narrowed.json');
-    expect(Object.keys(request).sort()).toEqual(['gateHint', 'id', 'query', 'schemaVersion']);
-  });
-
-  it('carries nothing about money on either form', () => {
-    for (const name of ['wire-decision-request.json', 'wire-decision-request-narrowed.json']) {
+  it('carries nothing about money on any form', () => {
+    for (const name of [
+      'wire-hook-request-prompt.json',
+      'wire-hook-request-native.json',
+      'wire-tool-request.json',
+    ]) {
       expect(JSON.stringify(fixture(name))).not.toMatch(/billing|admission|payment/i);
     }
   });
 });
 
-/**
- * EVERY ANSWER ON DISK, found by reading the directory rather than by a list.
- * A payload the canonical set gains and a list never names is how a nested
- * field shipped unparsed three times.
- */
 /**
  * ONE VARIANT PER ANSWER. Optional fields made every shape legal: an `execute`
  * with no contract parsed and reached the host as a routine `needs_input`, a
@@ -69,7 +82,9 @@ describe('the request bodies', () => {
  * fixture must now match exactly one variant of exactly one parser.
  */
 describe('every answer payload on disk', () => {
-  const hookAnswers = readdirSync(dir).filter((name) => name.startsWith('wire-hook-'));
+  const hookAnswers = readdirSync(dir).filter(
+    (name) => name.startsWith('wire-hook-') && !name.startsWith('wire-hook-request-'),
+  );
   const toolAnswers = readdirSync(dir).filter((name) => name.startsWith('wire-lookup-'));
 
   it('parses each answer with its own call, and NOT with the other', () => {
