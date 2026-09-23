@@ -28,7 +28,7 @@ description: >-
 <!-- /tenjin:when -->
   (tenjin-cli on npm): without it this skill does not apply and must not fire,
   not even to route the question; the hosted skill at
-  https://tenjin.blog/skills.md is the CLI-less path.
+  https://tenjin.sh/skills.md is the CLI-less path.
 ---
 
 # Tenjin search: one search before you regenerate

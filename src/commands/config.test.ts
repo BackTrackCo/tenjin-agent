@@ -115,7 +115,7 @@ describe('runConfigList', () => {
       expect(d[`hooks.${arm}`]).toEqual({ value: true, source: 'default' });
     }
     expect(d['update.mode']).toEqual({ value: 'nudge', source: 'default' });
-    expect(d.publicShelfUrl).toEqual({ value: 'https://tenjin.blog', source: 'default' });
+    expect(d.publicShelfUrl).toEqual({ value: 'https://tenjin.sh', source: 'default' });
     // REDACTED even here, on a fresh dir where the value is empty: the rendered
     // shape must not depend on whether there is a secret to leak.
     expect(d.shelfBypassSecret).toEqual({ value: 'unset', source: 'default' });

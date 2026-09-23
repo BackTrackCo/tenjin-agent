@@ -19,7 +19,7 @@ import { sessionPath } from './paths';
  * note in `permissions.ts`.
  *
  * Byte-exact against the "Auth — session keys" contract in
- * https://tenjin.blog/llms-full.txt (D35). P-256 signing is node:crypto webcrypto.
+ * https://tenjin.sh/llms-full.txt (D35). P-256 signing is node:crypto webcrypto.
  */
 
 /** The delegation scopes the server recognizes. */

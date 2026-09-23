@@ -106,12 +106,12 @@ function tryOrigin(url: string): string | undefined {
  *
  * SECOND RULE: THE TEAM SHELF MUST BE A SHELF OF ITS OWN. Team mode was keyed on
  * a non-empty secret alone, and both `baseUrl` and `publicShelfUrl` default to
- * tenjin.blog, so the two-command day-0 setup run in the other order — or the
+ * tenjin.sh, so the two-command day-0 setup run in the other order — or the
  * secret line alone on a second machine — put a machine in "team mode" pointed
  * at the PUBLIC MARKETPLACE. Team mode is precisely the mode that skips the
  * publish scan, skips the confirm cascade and prices at 0, so under
  * `publish.mode full-auto` that misconfiguration auto-publishes internal
- * codebase notes to tenjin.blog, unscanned and unacknowledged; it also posts the
+ * codebase notes to tenjin.sh, unscanned and unacknowledged; it also posts the
  * team's key to the public marketplace and searches one origin twice per fire.
  * A secret with no private shelf behind it is a setup that is not finished, so
  * it fails safe to public mode rather than half-on. `tenjin doctor` and
@@ -138,8 +138,8 @@ export function resolveShelfBypass(
  *
  * The compare `resource-ref` already makes to no-op its second-origin allowance,
  * plus the production origin itself: a `publicShelfUrl` pointed somewhere else
- * must not make tenjin.blog read as private. `isSameDeployment` rather than `===`
- * so an alias of production (tenjin.sh) is not a loophole.
+ * must not make tenjin.sh read as private. `isSameDeployment` rather than `===`
+ * so an alias of production (tenjin.blog) is not a loophole.
  */
 export function isTeamShelfOrigin(origin: string, publicShelfUrl: string): boolean {
   if (isSameDeployment(origin, PRODUCTION_ORIGIN)) return false;
@@ -161,7 +161,7 @@ export function isTeamShelfOrigin(origin: string, publicShelfUrl: string): boole
  *
  * A secret with `baseUrl` still on the marketplace is NOT team mode, per
  * {@link isTeamShelfOrigin}: that half-set state runs as ordinary public mode
- * rather than treating tenjin.blog as a private shelf.
+ * rather than treating tenjin.sh as a private shelf.
  */
 export function isTeamModeConfig(config: PartialConfig): boolean {
   const secret = config.shelfBypassSecret ?? CONFIG_DEFAULTS.shelfBypassSecret;

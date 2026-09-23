@@ -65,7 +65,7 @@ describe('isSameDeployment', () => {
    * the same reason. Removal runbook: docs/safety-model.md.
    */
   it('is exactly the two deployment origins, and nothing has crept in', () => {
-    expect(knownDeploymentOrigins()).toEqual([PRODUCTION_ORIGIN, 'https://tenjin.sh']);
+    expect(knownDeploymentOrigins()).toEqual([PRODUCTION_ORIGIN, 'https://tenjin.blog']);
   });
 
   it('lists the production origin and at least one alias for the cutover', () => {

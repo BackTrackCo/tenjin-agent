@@ -975,10 +975,13 @@ describe('the public render did not move', () => {
   //
   // tenjin-search moved 2026-09-14: its question bullet no longer names a 512
   // cap, because the shelf takes 8,000 characters on every trigger.
+  //
+  // Both moved 2026-09-23 with the origin flip: the one skills.md link each page
+  // carries now names tenjin.sh. No criteria changed.
   it('renders the exact bytes a public install shipped before team mode existed', () => {
     expect(Object.fromEntries(SHAPED_SKILLS.map((n) => [n, digest(read(n))]))).toEqual({
-      'tenjin-search': 'b68bf006e5c7dfe0d53a3bbbd2651198',
-      'tenjin-publish': '3c7bc8ca8ddde86353f7019928b81ee2',
+      'tenjin-search': '69a7a0657ad6e66b37d06ddcd54809a1',
+      'tenjin-publish': '99540621436063f856b458332c705f0c',
     });
   });
 

@@ -318,7 +318,7 @@ describe('caller User-Agent handoff', () => {
     return { fetchImpl, calls };
   }
 
-  const COMPOSED = `${TENJIN_PRODUCT} codex/1.2.0 (+https://tenjin.blog)`;
+  const COMPOSED = `${TENJIN_PRODUCT} codex/1.2.0 (+https://tenjin.sh)`;
 
   afterEach(() => {
     vi.unstubAllEnvs();

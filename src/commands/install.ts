@@ -1605,7 +1605,7 @@ async function promptHarnesses(choices: readonly HarnessChoice[]): Promise<Harne
 /**
  * Wire one harness target. EVERY packaged skill is written on every run,
  * unconditionally: an existing Tenjin skill in the target (typically the hosted
- * zero-install one from tenjin.blog/skills.md) is never a reason to skip, because
+ * zero-install one from tenjin.sh/skills.md) is never a reason to skip, because
  * install on such a machine is the UPGRADE path (#35). The hosted mirror is kept
  * and refreshed rather than removed (roadmap G4: it is the permanent zero-install
  * curriculum); the two CLI adapter skills land beside it and supersede it while
@@ -1745,7 +1745,7 @@ function paint(io: Io, format: Parameters<typeof styleText>[0], text: string): s
  * with nothing written rather than mid-copy.
  *
  * The model-invocable assertion covers only CLI_SKILL_NAMES. The hosted `tenjin`
- * mirror is written verbatim from tenjin.blog/skills.md by scripts/sync-skill.mjs
+ * mirror is written verbatim from tenjin.sh/skills.md by scripts/sync-skill.mjs
  * and its frontmatter is not authored here: if upstream ever adds
  * `disable-model-invocation: true` (a plausible way to say "prefer the CLI
  * skills"), asserting on it would hard-fail every install with a fix that cannot

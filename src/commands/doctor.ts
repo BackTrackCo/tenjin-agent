@@ -965,7 +965,7 @@ async function checkSkills(
  * would make the check quietly green on exactly the install doctor should describe.
  *
  * Only the ADAPTERS are compared: the hosted mirror is a copy of
- * tenjin.blog/skills.md that an operator may legitimately have re-fetched newer
+ * tenjin.sh/skills.md that an operator may legitimately have re-fetched newer
  * than this package ships.
  *
  * This is also where a skill the post-command self-heal could NOT rewrite
@@ -1077,7 +1077,7 @@ function fixFor(home: string, dirs: HarnessWiring[]): string {
  * its own and no secret. The CLI fails the first safe to public mode —
  * publishes keep the client scan and the confirm cascade — but silently, and an
  * operator who believes they are on the team shelf would keep writing internal
- * notes at a command that sends them to tenjin.blog. The second half is the one
+ * notes at a command that sends them to tenjin.sh. The second half is the one
  * that breaks every network probe (see {@link halfWiredShelfWarn}). Warn, never
  * fail, for both: each is a working machine, just not the one they configured.
  *
