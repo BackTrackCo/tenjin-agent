@@ -77,12 +77,18 @@ const settingsPath = () => join(home, '.claude', 'settings.json');
 const readSettings = async (): Promise<Record<string, unknown>> =>
   JSON.parse(await readFile(settingsPath(), 'utf8')) as Record<string, unknown>;
 
+const ADDRESS = '0x3c0D84055994c3062819Ce8730869D0aDeA4c3Bf';
+
+/** Wallet seams are always stubbed: the real create writes to the OS keychain. */
 function deps(over: Record<string, unknown> = {}) {
   return {
     homeDir: home,
     env: {},
     which: () => true,
     registerMcp: vi.fn(async () => undefined),
+    walletExists: async () => false,
+    createWallet: vi.fn(async () => ADDRESS),
+    walletAddress: async () => ADDRESS,
     ...over,
   };
 }
@@ -199,13 +205,58 @@ describe('tenjin install', () => {
     expect(result.humanLines?.join('\n')).toContain(MCP_ADD_COMMAND);
   });
 
-  it('states what leaves the machine and what is kept', async () => {
+  it('prints a short summary: set up, the new wallet, the limits, the next step', async () => {
     const result = await runRouterInstall({}, ctx(), deps());
+    expect(result.humanLines).toEqual([
+      '✓ Tenjin is set up for Claude Code',
+      `✓ Wallet created: ${ADDRESS}`,
+      '  Spends at most $0.25 a lookup, $5 a day',
+      '',
+      'Next: tenjin wallet fund, then restart Claude Code',
+    ]);
+    // The data-handling detail is not dropped, it moves to --json and the docs.
+    expect(result.data).toMatchObject({ disclosure: expect.any(Array) });
+  });
+
+  it('creates a wallet when there is none, without asking', async () => {
+    const createWallet = vi.fn(async () => ADDRESS);
+    const confirmWallet = vi.fn(async () => false);
+    const result = await runRouterInstall({}, ctx(), deps({ createWallet, confirmWallet }));
+    expect(createWallet).toHaveBeenCalledOnce();
+    expect(confirmWallet).not.toHaveBeenCalled();
+    expect(result.data).toMatchObject({ wallet: { status: 'created', address: ADDRESS } });
+  });
+
+  it('keeps the wallet this machine already has', async () => {
+    const createWallet = vi.fn(async () => ADDRESS);
+    const result = await runRouterInstall(
+      {},
+      ctx(),
+      deps({ createWallet, walletExists: async () => true }),
+    );
+    expect(createWallet).not.toHaveBeenCalled();
+    expect(result.data).toMatchObject({ wallet: { status: 'existing', address: ADDRESS } });
+    expect(result.humanLines).toContain(`✓ Wallet: ${ADDRESS}`);
+    expect(result.humanLines!.at(-1)).toBe('Next: restart Claude Code');
+  });
+
+  it('creates no wallet with --no-wallet', async () => {
+    const createWallet = vi.fn(async () => ADDRESS);
+    const result = await runRouterInstall({ noWallet: true }, ctx(), deps({ createWallet }));
+    expect(createWallet).not.toHaveBeenCalled();
+    expect(result.data).toMatchObject({ wallet: { status: 'skipped', reason: 'flag' } });
+    expect(result.humanLines!.join('\n')).toContain('tenjin wallet create');
+  });
+
+  it('still succeeds, with the fix, when the wallet cannot be created', async () => {
+    const createWallet = vi.fn(async () => {
+      throw new Error('disk full');
+    });
+    const result = await runRouterInstall({}, ctx(), deps({ createWallet }));
     const text = result.humanLines!.join('\n');
-    expect(text).toContain('sent to Tenjin for the free routing gate');
-    expect(text).toContain('a hash of the arguments, and your wallet address');
-    expect(text).toContain('your private key');
-    expect(text).toContain('tenjin uninstall');
+    expect(text).toContain('No wallet was created');
+    expect(text).toContain('disk full');
+    expect(text).toContain('tenjin wallet create');
   });
 
   it('writes into the project settings file with --project', async () => {
@@ -231,7 +282,7 @@ describe('tenjin install --refresh', () => {
     // registers. What a refresh must never do is decide anything about money.
     expect(registerMcp).toHaveBeenCalled();
     expect((await loadRawConfig(data)).maxAutoSpend).toBe('1');
-    expect(result.humanLines?.join('\n')).toContain('were not touched');
+    expect(result.humanLines).toEqual(['✓ Tenjin is up to date']);
   });
 
   it('refuses on a machine that never installed', async () => {
@@ -300,7 +351,12 @@ describe('a settings file this writer will not touch', () => {
     const result = await runRouterInstall({}, ctx(), deps());
     expect((result.data as { hooks: { skipped?: string } }).hooks.skipped).toBe('unparsable');
     expect(await readFile(settingsPath(), 'utf8')).toBe('{ not json');
-    expect(result.humanLines?.join('\n')).toContain('left untouched');
+    const text = result.humanLines!.join('\n');
+    expect(text).toContain('left exactly as it is');
+    expect(text).toContain('could not finish setting up');
+    expect(text).not.toContain('✓ Tenjin is set up');
+    // One file, one warning: the permission writer's copy is not repeated.
+    expect(text.match(/is not valid JSON/g)).toHaveLength(1);
   });
 
   it('throws nothing an operator cannot act on when HOME is relative', async () => {
@@ -399,9 +455,8 @@ describe('the install readout and the status window', () => {
     );
     const result = await runRouterInstall({}, ctx(), deps());
     const text = result.humanLines!.join('\n');
-    expect(text).toContain('at most 1 USD per call');
-    expect(text).toContain('10 USD a day');
-    expect(text).not.toContain('0.1 USD per call');
+    expect(text).toContain('at most $1 a lookup, $10 a day');
+    expect(text).not.toContain('$0.25');
     expect(result.data).toMatchObject({
       spend: { effective: { maxAutoSpend: '1', sessionBudget: '10' } },
     });
@@ -413,7 +468,7 @@ describe('the install readout and the status window', () => {
       JSON.stringify({ maxAutoSpend: '500000', sessionBudget: '0' }),
     );
     const result = await runRouterInstall({}, ctx(), deps());
-    expect(result.humanLines!.join('\n')).toContain('no daily ceiling');
+    expect(result.humanLines!.join('\n')).toContain('no daily limit');
   });
 
   it('status applies the same expiry an authorization would', async () => {
@@ -670,7 +725,7 @@ describe('tenjin update re-applies the install', () => {
     const result = await runRouterInstall({ refresh: true }, ctx(), deps());
     expect(await fs.readFile(settingsPath(), 'utf8')).toBe(before);
     expect((onlyInstall(result) as { hooks: { wrote: boolean } }).hooks.wrote).toBe(false);
-    expect(result.humanLines?.join('\n')).toContain('Already current');
+    expect(result.humanLines).toEqual(['✓ Tenjin is up to date']);
   });
 
   it('rewrites the entries ONCE when the new version changes their shape', async () => {

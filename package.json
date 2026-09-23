@@ -47,7 +47,7 @@
     "pack-smoke": "bash scripts/pack-smoke.sh",
     "changeset": "changeset",
     "prepublishOnly": "pnpm run build",
-    "prepare": "git config core.hooksPath .githooks || true"
+    "githooks": "git config core.hooksPath .githooks"
   },
   "devDependencies": {
     "@changesets/cli": "^2.31.1",

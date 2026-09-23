@@ -5,7 +5,6 @@ import { isAbsolute, join } from 'node:path';
 import { promisify } from 'node:util';
 import { claudeAdapter } from '../adapters/claude';
 import { persistRouterDefaults } from '../commands/config';
-import type { RouterDefaultsResult } from '../commands/config';
 import { CliError } from '../lib/errors';
 import { appendAllowlistRules, claudeSettingsPath } from '../lib/harness-permissions';
 import {
@@ -16,14 +15,16 @@ import {
   type HooksResult,
 } from '../lib/harness-hooks';
 import { toMoney } from '../lib/money';
+import { paint } from '../lib/output';
 import { resolveContextSettings } from '../lib/settings';
 import type { SpendPolicy } from '../lib/policy';
 import { onPath } from '../lib/skill-wiring';
+import type { WalletDeps, WalletOutcome } from '../commands/install-wallet';
 import type { CommandContext, CommandResult } from '../context';
 
 /**
  * `tenjin install` for the router product: two hook entries, one MCP server,
- * one permission rule, the spend defaults, and the disclosure.
+ * one permission rule, the spend defaults, and a wallet when there is none.
  *
  * WHAT IT WRITES IS WHAT IT SAYS. There is no skill to materialize, no daemon
  * to start and no background process of any kind: the hooks are plain command
@@ -111,9 +112,11 @@ export interface RouterInstallArgs {
    * the binary, so the flag's name and meaning are a compatibility contract.
    */
   refresh?: boolean;
+  /** Create no wallet, for CI and scripted machines. */
+  noWallet?: boolean;
 }
 
-export interface RouterInstallDeps {
+export interface RouterInstallDeps extends WalletDeps {
   homeDir?: string;
   cwd?: string;
   env?: NodeJS.ProcessEnv;
@@ -230,11 +233,6 @@ export async function runRouterInstall(
     // RECONCILED, not re-added: `claude mcp add` exits 1 on an existing entry,
     // so the registration is read first and only written when it is missing or
     // wrong (see {@link registerMcpServer}).
-    const rewritten = [
-      ...(hooks.wrote ? ['hook entries'] : []),
-      ...(permissions.added ? ['the permission rule'] : []),
-      ...(mcp.reconciled === 'repaired' ? ['the MCP registration'] : []),
-    ];
     // A registration this run KNOWS is wrong and could not repair is not a
     // converged install, and `tenjin update` reporting success over it is how
     // a machine keeps a stale `x402` server across upgrade after upgrade.
@@ -248,17 +246,17 @@ export async function runRouterInstall(
     return {
       data: { settingsPath, hooks, permissions, mcp, refresh: true, scope: mcpScope(project) },
       humanLines: [
-        rewritten.length === 0
-          ? `Already current: ${hooks.entries} hook entries in ${settingsPath}, nothing rewritten.`
-          : `Rewrote ${rewritten.join(' and ')} in ${settingsPath}.`,
-        mcp.registered
-          ? `Re-checked the ${MCP_SERVER_NAME} MCP registration (${mcpScope(project)} scope): ${mcp.reconciled}.`
-          : `mcp: run ${mcp.command}`,
-        'Your wallet, spend ledger and config were not touched.',
+        `${paint(ctx.io, 'green', '✓')} Tenjin is up to date`,
+        ...problems(ctx, hooks, permissions, mcp),
       ],
     };
   }
   const spend = await persistRouterDefaults(ctx.dataDir);
+  // The shelf install's wallet step, unchanged except that it never asks: a
+  // lookup cannot be paid without a wallet, so install makes one. A failure is
+  // reported, never fatal; everything above is useful without it.
+  const { resolveWallet } = await import('../commands/install-wallet');
+  const wallet = await resolveWallet(ctx, deps, args.noWallet === true ? 'flag' : undefined, false);
   // Read back AFTER the write: a machine that already carried its own caps
   // keeps them, and a readout quoting the defaults would describe limits this
   // run did not set.
@@ -270,11 +268,12 @@ export async function runRouterInstall(
     permissions,
     spend: { ...spend, effective: effectiveLimits(effective.policy) },
     mcp,
+    wallet,
     disclosure: DISCLOSURE,
   };
   return {
     data,
-    humanLines: lines(settingsPath, hooks, permissions, spend, mcp, effective.policy),
+    humanLines: lines(ctx, { project, hooks, permissions, mcp, wallet, policy: effective.policy }),
   };
 }
 
@@ -465,36 +464,84 @@ function effectiveLimits(policy: SpendPolicy): EffectiveLimits {
   };
 }
 
+/**
+ * A few lines a first-time user can read at a glance: it worked, here is your
+ * wallet, here is the one thing to do next. The file paths, entry counts and
+ * data-handling detail stay in `--json` and the docs; the terminal only grows
+ * a line when something needs the user.
+ */
 function lines(
-  settingsPath: string,
+  ctx: CommandContext,
+  s: {
+    project: boolean;
+    hooks: HooksResult;
+    permissions: AllowRuleResult;
+    mcp: McpRegistration;
+    wallet: WalletOutcome;
+    policy: SpendPolicy;
+  },
+): string[] {
+  const ok = paint(ctx.io, 'green', '✓');
+  const limits = effectiveLimits(s.policy);
+  const daily =
+    s.policy.sessionBudgetAtomic === 0n ? 'no daily limit' : `$${limits.sessionBudget} a day`;
+  // A settings file this run would not write to means nothing was set up, so
+  // the first line must not say it was.
+  const blocked = s.hooks.skipped !== undefined;
+  const where = s.project ? ' in this project' : '';
+  return [
+    blocked
+      ? paint(ctx.io, 'yellow', `! Tenjin could not finish setting up Claude Code${where}`)
+      : `${ok} Tenjin is set up for Claude Code${where}`,
+    ...walletLines(ctx, ok, s.wallet),
+    `  Spends at most $${limits.maxAutoSpend} a lookup, ${daily}`,
+    ...problems(ctx, s.hooks, s.permissions, s.mcp),
+    '',
+    blocked
+      ? 'Next: fix the file above, then run tenjin install again'
+      : s.wallet.status === 'created'
+        ? `Next: ${paint(ctx.io, 'bold', 'tenjin wallet fund')}, then restart Claude Code`
+        : 'Next: restart Claude Code',
+  ];
+}
+
+function walletLines(ctx: CommandContext, ok: string, w: WalletOutcome): string[] {
+  if (w.status === 'created') return [`${ok} Wallet created: ${w.address}`];
+  if (w.status === 'existing') return [`${ok} Wallet: ${w.address}`];
+  if (w.reason === 'flag') return ['  No wallet yet. Create one with: tenjin wallet create'];
+  return [
+    paint(ctx.io, 'yellow', `! No wallet was created. ${w.warning ?? ''}`.trimEnd()),
+    `  ${w.fix ?? 'Create one with: tenjin wallet create'}`,
+  ];
+}
+
+/** Only what needs the user, each with the command that fixes it. */
+function problems(
+  ctx: CommandContext,
   hooks: HooksResult,
   permissions: AllowRuleResult,
-  spend: RouterDefaultsResult,
   mcp: McpRegistration,
-  policy: SpendPolicy,
 ): string[] {
-  const out = [
-    hooks.skipped === undefined
-      ? `hooks: ${hooks.entries} entries in ${settingsPath}`
-      : `hooks: ${settingsPath} was left untouched (${hooks.skipped}); fix it, then re-run: tenjin install`,
-    permissions.warning === undefined
-      ? `permissions: ${ALLOW_RULE} allowed`
-      : `permissions: ${permissions.warning}`,
-    mcp.registered
-      ? `mcp: ${MCP_SERVER_NAME} registered`
-      : `mcp: not registered (${mcp.reason ?? 'unknown'}); run: ${mcp.command}`,
-    `spend: at most ${effectiveLimits(policy).maxAutoSpend} USD per call, ${
-      policy.sessionBudgetAtomic === 0n
-        ? 'no daily ceiling'
-        : `${effectiveLimits(policy).sessionBudget} USD a day`
-    }` + (spend.kept.length > 0 ? ` (kept your ${spend.kept.join(', ')})` : ''),
-    '',
-    ...DISCLOSURE,
-    '',
-    'Fund it with `tenjin wallet fund`, check it with `tenjin status`, undo it with `tenjin uninstall`.',
-    'Restart Claude Code to load the hooks.',
-  ];
-  if (hooks.warning !== undefined) out.push(`! ${hooks.warning}`);
+  const warn = (text: string) => paint(ctx.io, 'yellow', `! ${text}`);
+  const out: string[] = [];
+  // The hooks and the permission rule share one settings file, so a file this
+  // run would not touch is reported once, not once per writer.
+  if (hooks.skipped !== undefined) {
+    out.push(
+      warn(
+        hooks.warning ??
+          `${hooks.path ?? 'Your Claude Code settings file'} was left untouched (${hooks.skipped}).`,
+      ),
+    );
+  } else {
+    if (hooks.warning !== undefined) out.push(warn(hooks.warning));
+    if (permissions.warning !== undefined) out.push(warn(permissions.warning));
+  }
+  if (!mcp.registered) {
+    // The reason stays in --json: raw exec output is noise here, the fix is not.
+    out.push(warn('Could not add the request tool to Claude Code. Run:'));
+    out.push(`  ${mcp.command}`);
+  }
   return out;
 }
 
