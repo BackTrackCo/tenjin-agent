@@ -1,13 +1,7 @@
 import { z } from 'zod';
 import { loadRawConfig, resolveSettings } from '../lib/config';
 import type { PartialConfig } from '../lib/config';
-import {
-  buildNativePacket,
-  buildPromptPacket,
-  MAX_PENDING_CHARS,
-  type Packet,
-  type PendingCall,
-} from './context';
+import { buildNativePacket, buildPromptPacket, type Packet, type PendingCall } from './context';
 import { requestDecision, ROUTER_PATH, type HookDecision } from './decision';
 import { GATE_TIMEOUT_MS } from './gate';
 
@@ -189,17 +183,8 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
   const parsed = NativeEventSchema.safeParse(raw);
   if (!parsed.success) return { response: null, decision: 'allow' };
   const event = parsed.data;
-  const call = pendingCallOf(event.tool_name, event.tool_input);
-  if (call.kind === 'none') return { response: null, decision: 'allow' };
-  if (call.kind === 'long') {
-    // Too long to hand back whole, so there is nothing honest to redirect to:
-    // the call runs as the user's assistant wrote it.
-    warnOf(deps)(
-      `tenjin hook: this ${event.tool_name} argument is over ${String(MAX_PENDING_CHARS)} characters, so the call runs unrouted`,
-    );
-    return { response: null, decision: 'allow' };
-  }
-  const pending = call.pending;
+  const pending = pendingCallOf(event.tool_name, event.tool_input);
+  if (pending === null) return { response: null, decision: 'allow' };
   // THE USER'S WORDS COME WITH IT. Building this from the tool argument alone
   // made the search string the whole conversation, so "native tools only, no
   // paid services" never reached this gate.
@@ -250,10 +235,7 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
  * escapes both, which also keeps the line one line.
  */
 export function redirectReason(pending: PendingCall, decision: HookDecision): string {
-  // WHOLE, NEVER TRIMMED. A shortened query is a different lookup, and the
-  // model would have paid for that one instead; the argument is already inside
-  // the bound the route accepts, because a longer one never reaches here.
-  const subject = 'query' in pending ? pending.query : pending.url;
+  const subject = ('query' in pending ? pending.query : pending.url).slice(0, 500);
   const what = 'query' in pending ? 'search' : 'page';
   const id = decision.action === 'execute' ? decision.id : undefined;
   const carry = id !== undefined ? `, id: ${JSON.stringify(id)}` : '';
@@ -264,15 +246,10 @@ export function redirectReason(pending: PendingCall, decision: HookDecision): st
   );
 }
 
-/** Where a silent hook says why: the harness keeps stderr in its log. */
-function warnOf(deps: HookDeps): (line: string) => void {
-  return deps.warn ?? ((line: string) => process.stderr.write(`${line}\n`));
-}
-
 /** One free decision, with the hook's own deadline and its own silence. */
 async function decide(packet: Packet, deps: HookDeps): Promise<HookDecision | null> {
   const baseUrl = await resolveBaseUrl(deps);
-  const warn = warnOf(deps);
+  const warn = deps.warn ?? ((line: string) => process.stderr.write(`${line}\n`));
   const outcome = await requestDecision(
     'hook',
     { packet },
@@ -299,23 +276,13 @@ function nullStream(): NodeJS.WritableStream {
   return { write: () => true } as unknown as NodeJS.WritableStream;
 }
 
-/** A native call this hook can act on, `null` for one it cannot read, and
- *  `too-long` for an argument past the bound the route accepts. */
-type PendingOutcome = { kind: 'call'; pending: PendingCall } | { kind: 'none' } | { kind: 'long' };
-
 function pendingCallOf(
   tool: 'WebSearch' | 'WebFetch',
   input: Record<string, unknown>,
-): PendingOutcome {
+): PendingCall | null {
   const value = tool === 'WebSearch' ? input.query : input.url;
-  if (typeof value !== 'string') return { kind: 'none' };
-  const trimmed = value.trim();
-  if (trimmed.length === 0) return { kind: 'none' };
-  // MEASURED BEFORE ANYTHING IS CUT. Slicing here would route, and then
-  // redirect, on a lookup the user never asked for.
-  if (trimmed.length > MAX_PENDING_CHARS) return { kind: 'long' };
-  return {
-    kind: 'call',
-    pending: tool === 'WebSearch' ? { tool, query: trimmed } : { tool, url: trimmed },
-  };
+  if (typeof value !== 'string') return null;
+  const bounded = value.trim().slice(0, 4_000);
+  if (bounded.length === 0) return null;
+  return tool === 'WebSearch' ? { tool, query: bounded } : { tool, url: bounded };
 }
