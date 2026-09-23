@@ -5,6 +5,7 @@ import { CliError } from '../lib/errors';
 import { inspectHooksFile, ownsHookEntry } from '../lib/harness-hooks';
 import { httpRequest } from '../lib/http';
 import { toMoney } from '../lib/money';
+import { PRODUCTION_ORIGIN } from '../lib/production-origin';
 import { resolveContextSettings } from '../lib/settings';
 import { onPath } from '../lib/skill-wiring';
 import { describeWallet, resolveWalletProvider } from '../lib/wallet';
@@ -341,24 +342,26 @@ async function routerCheck(
     detail,
     fix,
   });
-  const retry = 'Nothing local fixes this. Try again later.';
+  const checkBase =
+    'Check that the configured base URL names the Tenjin router (`tenjin config get baseUrl`), then try again later.';
   if (!probe.ok) {
-    return fail(`the router at ${url} is unreachable or erroring (${probe.message})`, retry);
+    return fail(`the router at ${url} is unreachable or erroring (${probe.message})`, checkBase);
   }
-  if (probe.status === 200 || probe.status === 400) {
+  // 429 is the route's own rate limit: proof the router is there.
+  if (probe.status === 200 || probe.status === 400 || probe.status === 429) {
     return { name: 'router', status: 'ok', required: true, detail: `${url} is live` };
   }
   if (probe.status === 404) {
-    return fail(`the router is not enabled at ${url}`, retry);
+    return fail(`the router is not enabled at ${url}`, checkBase);
   }
   if (probe.status === 401 || probe.status === 403) {
     return fail(
       `${url} is not a Tenjin router (it asked for credentials)`,
-      'Set the router URL with `tenjin config set baseUrl https://tenjin.sh`.',
+      `Set the router URL with \`tenjin config set baseUrl ${PRODUCTION_ORIGIN}\`.`,
     );
   }
   if (probe.status >= 500) {
-    return fail(`the router at ${url} is unreachable or erroring (${probe.status})`, retry);
+    return fail(`the router at ${url} is unreachable or erroring (${probe.status})`, checkBase);
   }
   return fail(
     `${url} answered ${probe.status}, which a Tenjin router does not`,
