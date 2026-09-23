@@ -28,10 +28,12 @@ import {
  * leaves the native call allowed and the prompt unchanged; the cause goes to
  * stderr. The user's turn is never blocked by this.
  *
- * AND NOTHING IS EVER DENIED. A paid lookup is an OFFER beside the free tool,
- * never a replacement for it: a denied WebFetch stranded every subagent that
- * could not reach `request` (tenjin-agent#377) and painted the main agent's
- * transcript red. The free tool runs, and the agent picks.
+ * AND NOTHING IS EVER DENIED, OR ALLOWED. A paid lookup is an OFFER beside the
+ * free tool, never a replacement for it: a denied WebFetch stranded every
+ * subagent that could not reach `request` (tenjin-agent#377) and painted the
+ * main agent's transcript red. No arm returns a `permissionDecision` either:
+ * an `allow` would skip the user's own permission rules for the call, so the
+ * harness's normal flow decides whether it runs, and the agent picks.
  */
 
 const PromptEventSchema = z.object({
@@ -190,8 +192,8 @@ export interface NativeHookOutcome {
 }
 
 /**
- * `tenjin hook native` (PreToolUse on `WebSearch|WebFetch`). THE CALL ALWAYS
- * RUNS. On a clear `execute` it runs with the server's offer beside it, carrying
+ * `tenjin hook native` (PreToolUse on `WebSearch|WebFetch`). THE CALL IS NEVER
+ * STOPPED. On a clear `execute` it runs with the server's offer beside it, carrying
  * the id so a lookup the agent then chooses runs the decision just made rather
  * than paying for a second one. Anything else, including silence, a slow
  * backend and a `needs_input`, is no output at all.
@@ -236,7 +238,6 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
     response: {
       hookSpecificOutput: {
         hookEventName: 'PreToolUse',
-        permissionDecision: 'allow',
         // THE SERVER'S LINE, VERBATIM, framed as the option it is. It already
         // carries the id and the exact search or URL this call is making.
         additionalContext: nativeOffer(event.tool_name, outcome.hint),
@@ -292,7 +293,6 @@ export async function runDelegationHook(
     response: {
       hookSpecificOutput: {
         hookEventName: 'PreToolUse',
-        permissionDecision: 'allow',
         // The whole input, with one line appended: `updatedInput` replaces it.
         updatedInput: {
           ...event.tool_input,

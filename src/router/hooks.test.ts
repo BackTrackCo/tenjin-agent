@@ -254,10 +254,10 @@ describe('the native hook', () => {
     });
     const output = (
       out.response as {
-        hookSpecificOutput: { permissionDecision: string; additionalContext: string };
+        hookSpecificOutput: { permissionDecision?: string; additionalContext: string };
       }
     ).hookSpecificOutput;
-    expect(output.permissionDecision).toBe('allow');
+    expect(output.permissionDecision).toBeUndefined();
     // The server's line, whole and untouched, framed as an option: it already
     // names the URL and the id, and the client adds no provider or price.
     expect(output.additionalContext).toBe(
@@ -691,13 +691,13 @@ describe('the delegation hook', () => {
         out.response as {
           hookSpecificOutput: {
             hookEventName: string;
-            permissionDecision: string;
+            permissionDecision?: string;
             updatedInput: Record<string, unknown>;
           };
         }
       ).hookSpecificOutput;
       expect(output.hookEventName).toBe('PreToolUse');
-      expect(output.permissionDecision).toBe('allow');
+      expect(output.permissionDecision).toBeUndefined();
       expect(output.updatedInput).toEqual({
         description: 'read the spec',
         subagent_type: 'general-purpose',
@@ -757,14 +757,17 @@ describe('the delegation hook', () => {
   });
 });
 
-/** Every arm, every answer, main agent and subagent alike: never a deny. */
+/**
+ * Every arm, every answer, main agent and subagent alike: never a deny, and no
+ * permission decision at all, so the user's own permission rules still apply.
+ */
 describe('no hook path', () => {
   it.each([
     ['execute', EXECUTE, 200],
     ['native', NATIVE, 200],
     ['needs_input', NEEDS_INPUT, 200],
     ['a refusal', { error: { code: 'nope', message: 'no' } }, 503],
-  ])('denies anything on %s', async (_label, body, status) => {
+  ])('denies or decides nothing on %s', async (_label, body, status) => {
     const { fetchImpl } = router(body, status);
     const deps = { dataDir: dir, baseUrl: BASE, fetchImpl, warn: () => undefined };
     const fs = await import('node:fs/promises');
@@ -788,6 +791,9 @@ describe('no hook path', () => {
     ];
     for (const out of outputs) {
       expect(JSON.stringify(out.response ?? {})).not.toContain('deny');
+      expect(JSON.stringify(out.response ?? {})).not.toContain('permissionDecision');
     }
+    // The execute case really did produce output to check.
+    if (_label === 'execute') expect(outputs.some((out) => out.response !== null)).toBe(true);
   });
 });
