@@ -2,7 +2,14 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { FALLBACK_LINE, hintLine, promptSkipReason, runNativeHook, runPromptHook } from './hooks';
+import {
+  FALLBACK_LINE,
+  hintLine,
+  promptSkipReason,
+  redirectReason,
+  runNativeHook,
+  runPromptHook,
+} from './hooks';
 import { ROUTER_PATH } from './decision';
 
 let dir: string;
@@ -236,10 +243,12 @@ describe('the native hook', () => {
     });
     const reason = (out.response as { hookSpecificOutput: { permissionDecisionReason: string } })
       .hookSpecificOutput.permissionDecisionReason;
-    expect(reason).toContain('id:"k3f9-abcd"');
-    // The subject rides along: a WebFetch carries no query, and a bare "call
-    // request" leaves the model nothing to carry across.
-    expect(reason).toContain('https://example.test/spec');
+    // COPYABLE, not a template: the live smoke followed the redirect by id once
+    // in seven while the line carried a `<your exact lookup>` placeholder.
+    expect(reason).toBe(
+      'Paid lookup available for this page. Call request({query: "https://example.test/spec", id: "k3f9-abcd"}) instead; native tools stay allowed for anything else.',
+    );
+    expect(reason.split('\n')).toHaveLength(1);
   });
 
   it('allows an event it cannot read rather than blocking a tool', async () => {
@@ -376,5 +385,37 @@ describe('the native hook reads the turn it belongs to', () => {
     // Never asked: a decision made without the user's words is the thing being
     // avoided, not something to ask for and then ignore.
     expect(calls).toHaveLength(0);
+  });
+});
+
+/**
+ * THE REDIRECT LINE IS COPY PASTE. It carries the exact argument that was
+ * denied and the id holding this turn's context, both JSON-encoded, because a
+ * query is the user's own text and this line lands in the model's context.
+ */
+describe('the redirect line', () => {
+  const EXECUTED = { action: 'execute' as const, id: 'k3f9-abcd' };
+
+  it('carries a search query verbatim', () => {
+    expect(redirectReason({ tool: 'WebSearch', query: 'x402 facilitators 2026' }, EXECUTED)).toBe(
+      'Paid lookup available for this search. Call request({query: "x402 facilitators 2026", id: "k3f9-abcd"}) instead; native tools stay allowed for anything else.',
+    );
+  });
+
+  it('carries a fetched URL verbatim', () => {
+    expect(redirectReason({ tool: 'WebFetch', url: 'https://example.test/a?b=c' }, EXECUTED)).toBe(
+      'Paid lookup available for this page. Call request({query: "https://example.test/a?b=c", id: "k3f9-abcd"}) instead; native tools stay allowed for anything else.',
+    );
+  });
+
+  it('encodes a query carrying quotes or a newline, and stays one line', () => {
+    const line = redirectReason(
+      { tool: 'WebSearch', query: 'who said "no paid services"\nand when' },
+      EXECUTED,
+    );
+    expect(line.split('\n')).toHaveLength(1);
+    expect(line).toContain('who said \\"no paid services\\"\\nand when');
+    // The id is encoded too, on top of the alphabet the schema pins.
+    expect(line).toContain('id: "k3f9-abcd"');
   });
 });

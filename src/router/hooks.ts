@@ -222,13 +222,28 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
   };
 }
 
-/** What the harness shows in place of the denied call: what was prepared, the
- *  id that runs it, and the subject either way, since a WebFetch carries no
- *  query and a bare "call request" leaves the model nothing to carry across. */
+/**
+ * WHAT THE HARNESS SHOWS IN PLACE OF THE DENIED CALL, and it has one job: be
+ * copyable. The live smoke followed the redirect by id once in seven: the line
+ * carried a `<your exact lookup>` placeholder, so the model retyped the search
+ * in its own words four times and abandoned two redirects outright. It now
+ * carries the exact argument that was denied and the id that holds this turn's
+ * context, both JSON-encoded, on one line.
+ *
+ * Encoded, not interpolated: the query is the user's text and may hold quotes
+ * or newlines, and this line lands in the model's context. `JSON.stringify`
+ * escapes both, which also keeps the line one line.
+ */
 export function redirectReason(pending: PendingCall, decision: HookDecision): string {
-  const subject = 'query' in pending ? pending.query : pending.url;
+  const subject = ('query' in pending ? pending.query : pending.url).slice(0, 500);
+  const what = 'query' in pending ? 'search' : 'page';
   const id = decision.action === 'execute' ? decision.id : undefined;
-  return `${hintLine(id)}\nQuery: ${subject.slice(0, 500)}`;
+  const carry = id !== undefined ? `, id: ${JSON.stringify(id)}` : '';
+  return (
+    `Paid lookup available for this ${what}. ` +
+    `Call request({query: ${JSON.stringify(subject)}${carry}}) instead; ` +
+    'native tools stay allowed for anything else.'
+  );
 }
 
 /** One free decision, with the hook's own deadline and its own silence. */
