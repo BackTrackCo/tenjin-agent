@@ -36,7 +36,7 @@ tenjin config set sessionBudget 2.00
 The routing decision comes from a server, and it is free: it proposes, it never authorizes. These checks are what keep a wrong or hostile one from being worth anything:
 
 - The amount actually signed has to fit `maxAutoSpend` and the day's `sessionBudget`. That is the whole money rule: a price the decision quotes is information, not a ceiling anyone is held to, so a provider charging more than it quoted is paid only if the real amount is inside your limits.
-- The decision's arguments have to satisfy the JSON Schema the decision itself carries, compiled with remote references and regular-expression keywords refused.
+- The backend binds the call and validates its arguments against the capability's own schema, then sends the finished request; this CLI sends it as given and never rebuilds it, so there is no second copy of that rule here to drift from the first.
 - The destination has to be a public HTTPS endpoint whose name resolves to a public address. This is a check, not a pin: the request resolves the name again on its own, so a host that answers publicly at check time and privately a moment later is not closed by it. See [safety-model.md](./safety-model.md).
 - A 2xx whose body fails the decision's own success rule is a paid failure, not a delivery.
 
