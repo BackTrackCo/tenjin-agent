@@ -21,6 +21,7 @@ import {
   routerSettingsPath,
   type McpEntryState,
 } from './install';
+import { inspectStatusLine, STATUS_LINE_COMMAND } from './status-line-wiring';
 
 /**
  * `tenjin doctor` for the router product: the six things that decide whether a
@@ -83,6 +84,7 @@ export async function runRouterDoctor(
   });
   const checks: RouterCheck[] = [nodeCheck(deps.nodeVersion ?? process.version)];
   checks.push(await hooksCheck(settingsPath, ctx.dataDir));
+  checks.push(await statusLineCheck(settingsPath));
   checks.push(
     await mcpCheck(
       deps,
@@ -132,6 +134,46 @@ function nodeCheck(version: string): RouterCheck {
         detail: `${version} is below the Node ${NODE_FLOOR} floor.`,
         fix: `Install Node ${NODE_FLOOR} or newer, then re-run \`tenjin doctor\`.`,
       };
+}
+
+/**
+ * The live footer, which is the one check here that is never required: a lookup
+ * runs exactly the same without it. It reports what is in the file, including a
+ * status line of the user's that this CLI deliberately did not touch.
+ */
+async function statusLineCheck(path: string): Promise<RouterCheck> {
+  const found = await inspectStatusLine(path);
+  const name = 'status line';
+  if (found.warning !== undefined) {
+    return { name, status: 'warn', required: false, detail: found.warning };
+  }
+  switch (found.state) {
+    case 'ours':
+      return { name, status: 'ok', required: false, detail: `\`${STATUS_LINE_COMMAND}\`` };
+    case 'composed':
+      return {
+        name,
+        status: 'ok',
+        required: false,
+        detail: 'yours, with the x402 footer appended',
+      };
+    case 'foreign':
+      return {
+        name,
+        status: 'warn',
+        required: false,
+        detail: 'yours is registered and was left alone, so there is no live x402 footer',
+        fix: 'Run `tenjin install --status-line compose` to show both.',
+      };
+    default:
+      return {
+        name,
+        status: 'warn',
+        required: false,
+        detail: 'not registered, so lookups run without the live footer',
+        fix: 'Run `tenjin install` to register it.',
+      };
+  }
 }
 
 async function hooksCheck(path: string, dataDir: string): Promise<RouterCheck> {

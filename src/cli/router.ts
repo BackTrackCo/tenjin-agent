@@ -46,6 +46,16 @@ export function registerRouter(reg: Registration): void {
       await runRouterMcpServer({ dataDir: ctx.dataDir, flags: ctx.flags });
     });
 
+  leaf(INTEGRATION, 'status-line', "the live footer, for Claude Code's status line")
+    .description(
+      "Print one line naming what this session is looking up right now: the provider actually being called, its bounded parameters, and what it cost. It reads Claude Code's status event on stdin for the session identity, reads that session's own progress records, writes nothing, and prints `x402 · ready` when this session has no activity. `tenjin install` registers it; you never run it by hand.",
+    )
+    .action(async function (this: Command) {
+      const ctx = buildContext(this);
+      const { runStatusLine } = await import('../router/status-line');
+      await runStatusLine(io, { dataDir: ctx.dataDir });
+    });
+
   leaf(SETUP, 'status', 'what this machine has spent, and what is still open')
     .description(
       'Report the rolling 24h spend window from spend.json: what has settled, what is reserved by a request still in flight, and the per-call and per-day caps in force.',

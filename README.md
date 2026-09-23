@@ -37,6 +37,18 @@ Integrate x^2 sin(x) dx from 0 to pi.
 
 Each answer says who supplied it and what it cost. Picking a provider is free; you only pay the provider.
 
+## Live status line
+
+While a lookup runs, the bottom of your terminal names it:
+
+```text
+x402 · request: calling pro-api.coinmarketcap.com/x402/v3/cryptocurrency/quotes/latest · {"query":{"symbol":"BTC,ETH"}}
+```
+
+`selecting service` while a provider is being picked, then the endpoint actually called with its parameters, then the outcome and the price. Each state stays until the next one, and about ten seconds later the line is `x402 · ready` again. The routing gate has its own states, `x402 · prompt:` and `x402 · search:`, so a turn that stays on your own tools says so. It reads local files only: no network call, no wallet, and nothing it does can affect a lookup or a payment.
+
+`tenjin install` sets it as Claude Code's [status line](https://code.claude.com/docs/en/statusline) only if you do not already have one. If you do, yours is left exactly as it is and the install prints the command that shows both; `tenjin install --status-line compose` writes that command for you, and `--status-line skip` leaves the setting alone.
+
 ## Spending limits
 
 Out of the box, a single lookup can cost at most $0.25 and everything together at most $5 a day, with no prompts under that. Change them any time:

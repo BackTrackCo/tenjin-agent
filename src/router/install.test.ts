@@ -6,6 +6,7 @@ import { loadRawConfig } from '../lib/config';
 import { CliError } from '../lib/errors';
 import { ALLOW_RULE, MCP_ADD_COMMAND, runRouterInstall } from './install';
 import { runRouterUninstall } from './uninstall';
+import { STATUS_LINE_COMMAND } from './status-line-wiring';
 import type { CommandContext } from '../context';
 
 let home: string;
@@ -207,6 +208,7 @@ describe('tenjin install', () => {
       '! Almost done: Claude Code needs one command',
       `✓ Wallet created: ${ADDRESS}`,
       '  Spends at most $0.25 a lookup, $5 a day',
+      '  Live status line on: each lookup names its provider while it runs',
       '! Could not add the request tool to Claude Code. Run:',
       `  ${MCP_ADD_COMMAND}`,
       '',
@@ -228,6 +230,7 @@ describe('tenjin install', () => {
       '✓ Tenjin is set up for Claude Code',
       `✓ Wallet created: ${ADDRESS}`,
       '  Spends at most $0.25 a lookup, $5 a day',
+      '  Live status line on: each lookup names its provider while it runs',
       '',
       'Next: tenjin wallet fund, then restart Claude Code',
     ]);
@@ -405,7 +408,7 @@ describe('the doctor this release registers', () => {
         ? (result.details as { checks: { name: string; fix?: string }[] })
         : (result as { data: { checks: { name: string; fix?: string }[] } }).data;
     const names = data_.checks.map((c) => c.name);
-    expect(names).toEqual(['node', 'hooks', 'mcp', 'spend', 'wallet', 'router']);
+    expect(names).toEqual(['node', 'hooks', 'status line', 'mcp', 'spend', 'wallet', 'router']);
     const fixes = data_.checks.map((c) => c.fix ?? '').join(' ');
     for (const gone of ['tenjin daemon', 'tenjin search', 'tenjin publish', 'tenjin hooks']) {
       expect(fixes).not.toContain(gone);
@@ -1075,5 +1078,65 @@ describe('the MCP registration is reconciled, not re-added', () => {
     expect((err as CliError).code).toBe('REFUSED');
     expect((err as CliError).message).toContain('could not repair');
     expect(registerMcp).not.toHaveBeenCalled();
+  });
+});
+
+describe('the live status line', () => {
+  it('is registered by a fresh install, with a one-second refresh', async () => {
+    const result = await runRouterInstall({}, ctx(), deps());
+
+    expect((await readSettings()).statusLine).toEqual({
+      type: 'command',
+      command: STATUS_LINE_COMMAND,
+      refreshInterval: 1,
+    });
+    expect((result.humanLines ?? []).join('\n')).toContain('status line');
+  });
+
+  it('leaves a status line the user already set, and prints the composition', async () => {
+    const mine = { type: 'command', command: 'starship prompt' };
+    await writeFile(settingsPath(), JSON.stringify({ statusLine: mine }, null, 2));
+
+    const result = await runRouterInstall({}, ctx(), deps());
+
+    expect((await readSettings()).statusLine).toEqual(mine);
+    const printed = (result.humanLines ?? []).join('\n');
+    expect(printed).toContain('left exactly as it is');
+    expect(printed).toContain('starship prompt');
+    expect(printed).toContain(STATUS_LINE_COMMAND);
+  });
+
+  it('is added by --status-line compose, wrapping what was there', async () => {
+    await writeFile(
+      settingsPath(),
+      JSON.stringify({ statusLine: { type: 'command', command: 'starship prompt' } }, null, 2),
+    );
+
+    await runRouterInstall({ statusLine: 'compose' }, ctx(), deps());
+
+    const written = (await readSettings()).statusLine as { command: string };
+    expect(written.command).toContain('starship prompt');
+    expect(written.command).toContain(STATUS_LINE_COMMAND);
+  });
+
+  it('is not added by a refresh on a machine that never had one', async () => {
+    await runRouterInstall({}, ctx(), deps());
+    const settings = await readSettings();
+    delete settings.statusLine;
+    await writeFile(settingsPath(), `${JSON.stringify(settings, null, 2)}\n`);
+
+    await runRouterInstall({ refresh: true }, ctx(), deps());
+
+    expect((await readSettings()).statusLine).toBeUndefined();
+  });
+
+  it('is removed by uninstall, with the rest of the file intact', async () => {
+    await runRouterInstall({}, ctx(), deps());
+
+    await runRouterUninstall({}, ctx(), { homeDir: home, env: {}, which: () => false });
+
+    const settings = await readSettings();
+    expect(settings.statusLine).toBeUndefined();
+    expect(settings.hooks).toEqual({});
   });
 });

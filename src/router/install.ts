@@ -21,6 +21,7 @@ import type { SpendPolicy } from '../lib/policy';
 import { onPath } from '../lib/skill-wiring';
 import type { WalletDeps, WalletOutcome } from '../commands/install-wallet';
 import type { CommandContext, CommandResult } from '../context';
+import { ensureStatusLine, type StatusLineMode, type StatusLineResult } from './status-line-wiring';
 
 /**
  * `tenjin install` for the router product: two hook entries, one MCP server,
@@ -112,6 +113,13 @@ export interface RouterInstallArgs {
    * the binary, so the flag's name and meaning are a compatibility contract.
    */
   refresh?: boolean;
+  /**
+   * What to do about Claude Code's `statusLine`. Absent is the default path:
+   * write ours when the key is free, and print the composition line when it is
+   * not. `compose` wraps the status line already there and appends ours;
+   * `skip` leaves the key alone entirely.
+   */
+  statusLine?: StatusLineMode;
   /** Create no wallet, for CI and scripted machines. */
   noWallet?: boolean;
 }
@@ -222,6 +230,10 @@ export async function runRouterInstall(
     settingsPath,
   });
   const permissions = await ensureAllowRule(settingsPath);
+  const statusLine = await ensureStatusLine(settingsPath, {
+    ...(args.statusLine !== undefined ? { mode: args.statusLine } : {}),
+    ...(args.refresh === true ? { refreshOnly: true } : {}),
+  });
   const mcp = await registerMcpServer(deps, env, project, cwd, home);
   if (args.refresh === true) {
     // The SAME writers, minus the one that decides anything: the entries are
@@ -244,8 +256,16 @@ export async function runRouterInstall(
       );
     }
     return {
-      data: { settingsPath, hooks, permissions, mcp, refresh: true, scope: mcpScope(project) },
-      humanLines: refreshLines(ctx, problems(ctx, hooks, permissions, mcp)),
+      data: {
+        settingsPath,
+        hooks,
+        permissions,
+        statusLine,
+        mcp,
+        refresh: true,
+        scope: mcpScope(project),
+      },
+      humanLines: refreshLines(ctx, problems(ctx, hooks, permissions, statusLine, mcp)),
     };
   }
   const spend = await persistRouterDefaults(ctx.dataDir);
@@ -263,6 +283,7 @@ export async function runRouterInstall(
     settingsPath,
     hooks,
     permissions,
+    statusLine,
     spend: { ...spend, effective: effectiveLimits(effective.policy) },
     mcp,
     wallet,
@@ -270,7 +291,15 @@ export async function runRouterInstall(
   };
   return {
     data,
-    humanLines: lines(ctx, { project, hooks, permissions, mcp, wallet, policy: effective.policy }),
+    humanLines: lines(ctx, {
+      project,
+      hooks,
+      permissions,
+      statusLine,
+      mcp,
+      wallet,
+      policy: effective.policy,
+    }),
   };
 }
 
@@ -461,6 +490,24 @@ function effectiveLimits(policy: SpendPolicy): EffectiveLimits {
   };
 }
 
+/** Only the status-line state that needs the user: one this install would not
+ *  touch, with the command that adds the footer beside it. */
+export function statusLineProblems(ctx: CommandContext, result: StatusLineResult): string[] {
+  const warn = (text: string) => paint(ctx.io, 'yellow', `! ${text}`);
+  if (result.warning !== undefined) {
+    return [warn(`The live status line was not registered (${result.warning})`)];
+  }
+  if (result.state !== 'foreign') return [];
+  return [
+    warn('You already have a status line, so it was left exactly as it is.'),
+    '  To show the live x402 footer beside it, run:',
+    '  tenjin install --status-line compose',
+    ...(result.compose === undefined
+      ? []
+      : ['  or set this command yourself:', `  ${result.compose}`]),
+  ];
+}
+
 /**
  * A few lines a first-time user can read at a glance: it worked, here is your
  * wallet, here is the one thing to do next. The file paths, entry counts and
@@ -473,6 +520,7 @@ function lines(
     project: boolean;
     hooks: HooksResult;
     permissions: AllowRuleResult;
+    statusLine: StatusLineResult;
     mcp: McpRegistration;
     wallet: WalletOutcome;
     policy: SpendPolicy;
@@ -497,7 +545,10 @@ function lines(
         : `${ok} Tenjin is set up for Claude Code${where}`,
     ...walletLines(ctx, ok, s.wallet),
     `  Spends at most $${limits.maxAutoSpend} a lookup, ${daily}`,
-    ...problems(ctx, s.hooks, s.permissions, s.mcp),
+    ...(s.statusLine.state === 'ours' || s.statusLine.state === 'composed'
+      ? ['  Live status line on: each lookup names its provider while it runs']
+      : []),
+    ...problems(ctx, s.hooks, s.permissions, s.statusLine, s.mcp),
     '',
     blocked
       ? 'Next: fix the file above, then run tenjin install again'
@@ -532,6 +583,7 @@ function problems(
   ctx: CommandContext,
   hooks: HooksResult,
   permissions: AllowRuleResult,
+  statusLine: StatusLineResult,
   mcp: McpRegistration,
 ): string[] {
   const warn = (text: string) => paint(ctx.io, 'yellow', `! ${text}`);
@@ -554,6 +606,7 @@ function problems(
     out.push(warn('Could not add the request tool to Claude Code. Run:'));
     out.push(`  ${mcp.command}`);
   }
+  out.push(...statusLineProblems(ctx, statusLine));
   return out;
 }
 

@@ -4,6 +4,15 @@ import type { PartialConfig } from '../lib/config';
 import { buildNativePacket, buildPromptPacket, type Packet, type PendingCall } from './context';
 import { requestDecision, ROUTER_PATH, type HookDecision } from './decision';
 import { GATE_TIMEOUT_MS } from './gate';
+import {
+  bindDecision,
+  newCallId,
+  noteSession,
+  pruneProgress,
+  pruneSessions,
+  sessionDir,
+  writeProgress,
+} from './progress';
 
 /**
  * The two hook handlers. Between them they do exactly three things: build the
@@ -109,7 +118,9 @@ export async function runPromptHook(raw: unknown, deps: HookDeps): Promise<Promp
   if (skipped !== null) return { response: null, skipped };
 
   const packet = await buildPromptPacket(event.transcript_path, event.session_id, event.prompt);
+  const footer = await openFooter(deps, event.session_id, 'prompt');
   const outcome = await decide(packet, deps);
+  await footer.close(outcome);
   if (outcome === null) return { response: null };
   if (outcome.action !== 'execute') return { response: null, action: outcome.action };
   return { action: 'execute', id: outcome.id, ...injection(outcome.hint) };
@@ -158,7 +169,9 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
     );
     return { response: null, decision: 'allow' };
   }
+  const footer = await openFooter(deps, event.session_id, 'search');
   const outcome = await decide(packet, deps);
+  await footer.close(outcome);
   if (outcome === null || outcome.action !== 'execute') {
     return {
       response: null,
@@ -181,6 +194,60 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
     action: 'execute',
     id: outcome.id,
   };
+}
+
+/**
+ * THE HOOK STAGE, WHICH IS THE ONE THE DEMO OPENS WITH. The decision is in
+ * flight for about a second, and at a one-second refresh a state that is
+ * written and then erased inside that second is a state nobody ever sees. So
+ * the record is not cleared: `selecting service` is REPLACED by what the
+ * decision turned out to be, and that outcome holds the line until the next
+ * state arrives or its hold runs out.
+ *
+ * Display only. Every write inside swallows its own failure, and an `execute`
+ * also leaves the id-to-session binding the tool resolves its progress through.
+ */
+async function openFooter(
+  deps: HookDeps,
+  sessionId: string,
+  operation: 'prompt' | 'search',
+): Promise<{ close: (decision: HookDecision | null) => Promise<void> }> {
+  const now = (): number => deps.now?.() ?? Date.now();
+  const directory = sessionDir(deps.dataDir, sessionId);
+  const callId = newCallId();
+  await noteSession(deps.dataDir, sessionId, now());
+  await writeProgress(
+    directory,
+    callId,
+    { phase: 'routing', operation, outcome: 'selecting service' },
+    now(),
+  );
+  await pruneProgress(directory, now());
+  // The root, not just this session: a directory per session ever opened would
+  // eventually be more than the resolver can scan.
+  await pruneSessions(deps.dataDir, now());
+  return {
+    close: async (decision) => {
+      await writeProgress(
+        directory,
+        callId,
+        { phase: 'done', operation, outcome: hookOutcome(decision) },
+        now(),
+      );
+      if (decision !== null && decision.action === 'execute') {
+        await bindDecision(deps.dataDir, sessionId, decision.id, now());
+      }
+    },
+  };
+}
+
+/** What the gate decided, in the footer's own words. A silent backend is not a
+ *  blank line: the turn runs on native tools and the footer says which. */
+function hookOutcome(decision: HookDecision | null): string {
+  if (decision === null) return 'native tools (router unavailable)';
+  if (decision.action === 'execute') return `paid lookup offered (${decision.provider})`;
+  if (decision.action === 'native') return 'native tools (no x402 payment)';
+  return 'needs input';
 }
 
 /** One free decision, with the hook's own deadline and its own silence. */
