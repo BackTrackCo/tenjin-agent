@@ -85,6 +85,36 @@ function ours(): Record<string, unknown> {
 }
 
 const shQuote = (value: string): string => `'${value.replaceAll("'", String.raw`'\''`)}'`;
+const shUnquote = (value: string): string => value.replaceAll(String.raw`'\''`, "'");
+
+/** The inner script, with the user's own command as the one hole in it. */
+function composedScript(existing: string): string {
+  return [
+    'event=$(cat)',
+    `yours=$(printf %s "$event" | ${existing})`,
+    `tenjin=$(printf %s "$event" | ${STATUS_LINE_COMMAND})`,
+    'printf %s "$yours${tenjin:+ · $tenjin}"',
+  ].join('; ');
+}
+
+/**
+ * The command a composition was built from, or null when this is not a
+ * composition this build wrote. It is the exact inverse of
+ * {@link composeCommand}: a hand-edited line matches nothing and is kept whole,
+ * because guessing at someone's shell is how an uninstall breaks a prompt.
+ */
+export function decomposeCommand(command: string): string | null {
+  const trimmed = command.trim();
+  if (!trimmed.startsWith("sh -c '") || !trimmed.endsWith("'")) return null;
+  const script = shUnquote(trimmed.slice("sh -c '".length, -1));
+  const prefix = 'event=$(cat); yours=$(printf %s "$event" | ';
+  if (!script.startsWith(prefix)) return null;
+  const rest = script.slice(prefix.length);
+  const suffix = `); tenjin=$(printf %s "$event" | ${STATUS_LINE_COMMAND}); printf %s "$yours\${tenjin:+ · $tenjin}"`;
+  if (!rest.endsWith(suffix)) return null;
+  const existing = rest.slice(0, -suffix.length);
+  return existing.length > 0 && composedScript(existing) === script ? existing : null;
+}
 
 /**
  * The user's status line with ours appended after a separator, on one line.
@@ -95,26 +125,24 @@ const shQuote = (value: string): string => `'${value.replaceAll("'", String.raw`
  * separator goes with it, so a quiet session looks exactly as it did before.
  */
 export function composeCommand(existing: string): string {
-  const inner = [
-    'event=$(cat)',
-    `yours=$(printf %s "$event" | ${existing})`,
-    `tenjin=$(printf %s "$event" | ${STATUS_LINE_COMMAND})`,
-    'printf %s "$yours${tenjin:+ · $tenjin}"',
-  ].join('; ');
-  return `sh -c ${shQuote(inner)}`;
+  return `sh -c ${shQuote(composedScript(existing))}`;
 }
 
-/** What a foreign status line's owner is told to set, verbatim. */
-function composeFor(value: unknown): string | undefined {
+/** The command a status-line setting runs, in either shape it can take. */
+function commandOf(value: unknown): string | undefined {
   const command =
     typeof value === 'string'
       ? value
       : typeof value === 'object' && value !== null && !Array.isArray(value)
         ? (value as { command?: unknown }).command
         : undefined;
-  return typeof command === 'string' && command.trim().length > 0
-    ? composeCommand(command.trim())
-    : undefined;
+  return typeof command === 'string' && command.trim().length > 0 ? command.trim() : undefined;
+}
+
+/** What a foreign status line's owner is told to set, verbatim. */
+function composeFor(value: unknown): string | undefined {
+  const command = commandOf(value);
+  return command === undefined ? undefined : composeCommand(command);
 }
 
 export interface EnsureStatusLineOpts {
@@ -145,9 +173,15 @@ export async function ensureStatusLine(
   if (opts.mode === 'compose') {
     const composed = composeFor(current);
     if (composed === undefined) return writeStatusLine(found, ours(), 'ours');
+    // THEIR OBJECT, with the command swapped. Rebuilding it from ours would
+    // drop whatever else they had set on it, such as their own padding.
+    const base =
+      typeof current === 'object' && current !== null && !Array.isArray(current)
+        ? (current as Record<string, unknown>)
+        : ours();
     return state === 'composed'
       ? { path, state, wrote: false, command: composed }
-      : writeStatusLine(found, { ...ours(), command: composed }, 'composed');
+      : writeStatusLine(found, { ...base, command: composed }, 'composed');
   }
   if (state === 'foreign') {
     // NOT REPLACED, AND NOT WRITTEN AROUND. The user keeps what they set, and
@@ -168,12 +202,21 @@ export async function removeStatusLine(settingsPath: string): Promise<StatusLine
     return { path: settingsPath, state: 'absent', wrote: false, warning: found.refusal.reason };
   }
   const { path, settings } = found;
-  const state = classifyStatusLine(settings.statusLine);
-  // A COMPOSED LINE IS THE USER'S TEXT. Deleting it would take their own status
-  // line with it, so it is reported and left; the composition names the command
-  // to edit.
-  if (state !== 'ours') return { path, state, wrote: false };
-  return writeStatusLine(found, undefined, 'absent');
+  const current = settings.statusLine;
+  const state = classifyStatusLine(current);
+  if (state === 'ours') return writeStatusLine(found, undefined, 'absent');
+  // A COMPOSED LINE IS MOSTLY THE USER'S TEXT, so it is not deleted: the half
+  // this build wrote is unwound and their own command is put back exactly as it
+  // was. A composition that was hand-edited since inverts to nothing and is
+  // left whole, because guessing at someone's shell is the worse failure.
+  if (state === 'composed') {
+    const command = commandOf(current);
+    const original = command === undefined ? null : decomposeCommand(command);
+    if (original === null) return { path, state, wrote: false };
+    const kept = { ...(current as Record<string, unknown>), command: original };
+    return writeStatusLine(found, kept, 'foreign');
+  }
+  return { path, state, wrote: false };
 }
 
 /** What `doctor` reports, without writing anything. */

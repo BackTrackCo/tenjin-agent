@@ -10,15 +10,16 @@ import { SETUP, WALLET, type Registration } from './registration';
 export function registerCore(reg: Registration): void {
   const { runCommand, leaf, addGlobalFlags } = reg;
 
-  leaf(SETUP, 'install', 'wire the x402 router into this machine')
+  leaf(SETUP, 'install', 'set up Tenjin for Claude Code and create a wallet')
     .description(
-      'Wire Claude Code to the Tenjin x402 router: two hook entries, the `x402` MCP server and its permission rule, and the spend defaults that bound what a lookup may cost. It prints what leaves this machine before you use it.',
+      'Set up Claude Code to use Tenjin: two hook entries, the `x402` MCP server and its permission rule, spend limits for each lookup, and a wallet if this machine has none.',
     )
     .option('--project', "write into this project's .claude/settings.json instead of your home one")
+    .option('--no-wallet', 'create no wallet')
     .option('--refresh', 're-register the hook entries this machine already has; add nothing')
     .option(
       '--status-line <mode>',
-      'the live footer: `own` registers it, `compose` appends it to the status line you already have, `skip` leaves the setting alone',
+      'the live footer: `own` registers it when you have no status line of your own, `compose` appends it to the one you do have, `skip` leaves the setting alone',
     )
     .addHelpText(
       'after',
@@ -44,6 +45,7 @@ Learn more:
             ...(o.statusLine !== undefined
               ? { statusLine: statusLineMode(String(o.statusLine)) }
               : {}),
+            ...(o.wallet === false ? { noWallet: true } : {}),
           },
           ctx,
         );

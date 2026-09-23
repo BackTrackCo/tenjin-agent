@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -9,8 +10,10 @@ import {
   noteSession,
   openLookupFooter,
   pruneProgress,
+  pruneSessions,
   renderProgress,
   resolveProgressSession,
+  SESSION_ACTIVE_MS,
   sessionDir,
   STALE_AFTER_MS,
   writeProgress,
@@ -245,5 +248,29 @@ describe('housekeeping', () => {
 
   it('gives every call its own record', () => {
     expect(newCallId()).not.toBe(newCallId());
+  });
+});
+
+describe('sessions that are over', () => {
+  it('drops their directories, and keeps a live one', async () => {
+    await noteSession(dir, 'live', NOW);
+    await noteSession(dir, 'gone', NOW - SESSION_ACTIVE_MS - 1);
+    await writeProgress(sessionDir(dir, 'gone'), 'old', { phase: 'routing' }, NOW - EXPIRY_MS - 1);
+
+    await pruneSessions(dir, NOW);
+
+    expect(existsSync(sessionDir(dir, 'live'))).toBe(true);
+    expect(existsSync(sessionDir(dir, 'gone'))).toBe(false);
+    // ...so the one that is left can still claim an id-less call.
+    expect(await resolveProgressSession(dir, { now: NOW })).toBe(sessionDir(dir, 'live'));
+  });
+
+  it('keeps a quiet session that still has a call inside the display window', async () => {
+    await noteSession(dir, 'quiet', NOW - SESSION_ACTIVE_MS - 1);
+    await writeProgress(sessionDir(dir, 'quiet'), 'call-1', { phase: 'calling' }, NOW);
+
+    await pruneSessions(dir, NOW);
+
+    expect(await renderProgress(dir, 'quiet', { now: NOW })).toBe('x402 · request: calling');
   });
 });

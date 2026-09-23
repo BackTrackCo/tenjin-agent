@@ -10,6 +10,7 @@ import {
   newCallId,
   noteSession,
   pruneProgress,
+  pruneSessions,
   sessionDir,
   writeProgress,
 } from './progress';
@@ -24,10 +25,9 @@ import {
  * every prompt and every native search, and their cost is the product's floor.
  * The decision is free, so nothing on this path can spend anything either.
  *
- * EVERY FAILURE IS SILENT, or at worst one fallback line. A backend that is
- * down, slow or answering nonsense leaves the native call allowed and the
- * prompt carrying `call request({query}) for lookups`, which is the same thing
- * the model would do on its own. The user's turn is never blocked by this.
+ * EVERY FAILURE IS SILENT. A backend that is down, slow or answering nonsense
+ * leaves the native call allowed and the prompt unchanged; the cause goes to
+ * stderr. The user's turn is never blocked by this.
  */
 
 const PromptEventSchema = z.object({
@@ -95,25 +95,6 @@ async function resolveBaseUrl(deps: HookDeps): Promise<string> {
   return resolveSettings({ config, flags: {}, env: deps.env ?? process.env }).baseUrl.value;
 }
 
-/**
- * THE ONE FALLBACK. A decision that did not arrive inside the hook's budget is
- * not a dead turn: the model is told to call `request` with its own query, and
- * the tool makes the decision instead. There is no second path here.
- */
-export const FALLBACK_LINE = 'call request({query}) for lookups';
-
-/** What a `needs_input` decision leaves the host to do, in one line. */
-export function clarificationLine(decision: HookDecision): string {
-  if (decision.action === 'execute') return FALLBACK_LINE;
-  const next = decision.diagnostics.nextAction.trim();
-  if (next.length > 0) return next;
-  const { missing } = decision.diagnostics;
-  if (missing.length > 0) {
-    return `Ask the user for ${missing.slice(0, 3).join(', ')}, then call request({query}).`;
-  }
-  return `Ask the user what to look up, then ${FALLBACK_LINE}.`;
-}
-
 export interface PromptHookOutcome {
   /** What the harness is told, or null for "nothing to say". */
   response: unknown | null;
@@ -125,8 +106,10 @@ export interface PromptHookOutcome {
 
 /**
  * `tenjin hook prompt` (UserPromptSubmit). One free decision from the user's
- * own words. `native` is silence: no line, no row, nothing to decline. Only an
- * `execute` gets the prepared line, and only a `needs_input` gets the question.
+ * own words. Only an `execute` gets a line, the server's hint verbatim.
+ * `native`, `needs_input` and a decision that failed or timed out are silence:
+ * a turn with no lookup carries nothing extra, and `decide` has already written
+ * any failure cause to stderr.
  */
 export async function runPromptHook(raw: unknown, deps: HookDeps): Promise<PromptHookOutcome> {
   const parsed = PromptEventSchema.safeParse(raw);
@@ -139,13 +122,9 @@ export async function runPromptHook(raw: unknown, deps: HookDeps): Promise<Promp
   const footer = await openFooter(deps, event.session_id);
   const outcome = await decide(packet, deps);
   await footer.close(outcome);
-  if (outcome === null) return injection(FALLBACK_LINE);
-  const decision = outcome;
-  if (decision.action === 'native') return { response: null, action: 'native' };
-  if (decision.action === 'needs_input') {
-    return { action: 'needs_input', ...injection(clarificationLine(decision)) };
-  }
-  return { action: 'execute', id: decision.id, ...injection(decision.hint) };
+  if (outcome === null) return { response: null };
+  if (outcome.action !== 'execute') return { response: null, action: outcome.action };
+  return { action: 'execute', id: outcome.id, ...injection(outcome.hint) };
 }
 
 function injection(line: string): { response: unknown } {
@@ -234,6 +213,9 @@ async function openFooter(
   await noteSession(deps.dataDir, sessionId, now());
   await writeProgress(directory, callId, { phase: 'routing' }, now());
   await pruneProgress(directory, now());
+  // The root, not just this session: a directory per session ever opened would
+  // eventually be more than the resolver can scan.
+  await pruneSessions(deps.dataDir, now());
   return {
     close: async (decision) => {
       await clearProgress(directory, callId);

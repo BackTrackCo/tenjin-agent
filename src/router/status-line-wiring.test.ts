@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   classifyStatusLine,
   composeCommand,
+  decomposeCommand,
   ensureStatusLine,
   inspectStatusLine,
   removeStatusLine,
@@ -95,10 +96,17 @@ describe('installing the status line', () => {
     expect(await readFile(settingsPath, 'utf8')).toBe(raw);
   });
 
-  it('escapes a quote in the status line it wraps', async () => {
+  it('escapes a quote in the status line it wraps, and can undo it', async () => {
     const command = `echo 'it''s mine'`;
     expect(composeCommand(command)).toContain(String.raw`'\''`);
     expect(composeCommand(command).startsWith("sh -c '")).toBe(true);
+    expect(decomposeCommand(composeCommand(command))).toBe(command);
+  });
+
+  it('undoes nothing it did not write', () => {
+    for (const command of ['starship prompt', "sh -c 'echo hi'", 'tenjin status-line']) {
+      expect(decomposeCommand(command)).toBeNull();
+    }
   });
 
   it('refuses a mode it does not know', () => {
@@ -152,9 +160,24 @@ describe('uninstalling the status line', () => {
     expect(await settings()).toEqual({ model: 'opus' });
   });
 
-  it('keeps a composed line, because the user wrote most of it', async () => {
+  it('unwinds a composition, putting the user command back as it was', async () => {
     await writeFile(settingsPath, JSON.stringify({ statusLine: MINE }, null, 2));
     await ensureStatusLine(settingsPath, { mode: 'compose' });
+
+    const result = await removeStatusLine(settingsPath);
+
+    expect(result).toMatchObject({ state: 'foreign', wrote: true });
+    expect((await settings()).statusLine).toEqual(MINE);
+  });
+
+  it('keeps a composition that was edited since, rather than guessing', async () => {
+    await writeFile(settingsPath, JSON.stringify({ statusLine: MINE }, null, 2));
+    await ensureStatusLine(settingsPath, { mode: 'compose' });
+    const edited = `${((await settings()).statusLine as { command: string }).command} # mine now`;
+    await writeFile(
+      settingsPath,
+      JSON.stringify({ statusLine: { type: 'command', command: edited } }, null, 2),
+    );
     const raw = await readFile(settingsPath, 'utf8');
 
     const result = await removeStatusLine(settingsPath);

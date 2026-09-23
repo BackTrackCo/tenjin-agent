@@ -5,7 +5,6 @@ import { isAbsolute, join } from 'node:path';
 import { promisify } from 'node:util';
 import { claudeAdapter } from '../adapters/claude';
 import { persistRouterDefaults } from '../commands/config';
-import type { RouterDefaultsResult } from '../commands/config';
 import { CliError } from '../lib/errors';
 import { appendAllowlistRules, claudeSettingsPath } from '../lib/harness-permissions';
 import {
@@ -16,20 +15,17 @@ import {
   type HooksResult,
 } from '../lib/harness-hooks';
 import { toMoney } from '../lib/money';
+import { paint } from '../lib/output';
 import { resolveContextSettings } from '../lib/settings';
 import type { SpendPolicy } from '../lib/policy';
 import { onPath } from '../lib/skill-wiring';
+import type { WalletDeps, WalletOutcome } from '../commands/install-wallet';
 import type { CommandContext, CommandResult } from '../context';
-import {
-  ensureStatusLine,
-  STATUS_LINE_COMMAND,
-  type StatusLineMode,
-  type StatusLineResult,
-} from './status-line-wiring';
+import { ensureStatusLine, type StatusLineMode, type StatusLineResult } from './status-line-wiring';
 
 /**
  * `tenjin install` for the router product: two hook entries, one MCP server,
- * one permission rule, the spend defaults, and the disclosure.
+ * one permission rule, the spend defaults, and a wallet when there is none.
  *
  * WHAT IT WRITES IS WHAT IT SAYS. There is no skill to materialize, no daemon
  * to start and no background process of any kind: the hooks are plain command
@@ -124,9 +120,11 @@ export interface RouterInstallArgs {
    * `skip` leaves the key alone entirely.
    */
   statusLine?: StatusLineMode;
+  /** Create no wallet, for CI and scripted machines. */
+  noWallet?: boolean;
 }
 
-export interface RouterInstallDeps {
+export interface RouterInstallDeps extends WalletDeps {
   homeDir?: string;
   cwd?: string;
   env?: NodeJS.ProcessEnv;
@@ -247,12 +245,6 @@ export async function runRouterInstall(
     // RECONCILED, not re-added: `claude mcp add` exits 1 on an existing entry,
     // so the registration is read first and only written when it is missing or
     // wrong (see {@link registerMcpServer}).
-    const rewritten = [
-      ...(hooks.wrote ? ['hook entries'] : []),
-      ...(permissions.added ? ['the permission rule'] : []),
-      ...(statusLine.wrote ? ['the status line'] : []),
-      ...(mcp.reconciled === 'repaired' ? ['the MCP registration'] : []),
-    ];
     // A registration this run KNOWS is wrong and could not repair is not a
     // converged install, and `tenjin update` reporting success over it is how
     // a machine keeps a stale `x402` server across upgrade after upgrade.
@@ -273,18 +265,15 @@ export async function runRouterInstall(
         refresh: true,
         scope: mcpScope(project),
       },
-      humanLines: [
-        rewritten.length === 0
-          ? `Already current: ${hooks.entries} hook entries in ${settingsPath}, nothing rewritten.`
-          : `Rewrote ${rewritten.join(' and ')} in ${settingsPath}.`,
-        mcp.registered
-          ? `Re-checked the ${MCP_SERVER_NAME} MCP registration (${mcpScope(project)} scope): ${mcp.reconciled}.`
-          : `mcp: run ${mcp.command}`,
-        'Your wallet, spend ledger and config were not touched.',
-      ],
+      humanLines: refreshLines(ctx, problems(ctx, hooks, permissions, statusLine, mcp)),
     };
   }
   const spend = await persistRouterDefaults(ctx.dataDir);
+  // The shelf install's wallet step, unchanged except that it never asks: a
+  // lookup cannot be paid without a wallet, so install makes one. A failure is
+  // reported, never fatal; everything above is useful without it.
+  const { resolveWallet } = await import('../commands/install-wallet');
+  const wallet = await resolveWallet(ctx, deps, args.noWallet === true ? 'flag' : undefined, false);
   // Read back AFTER the write: a machine that already carried its own caps
   // keeps them, and a readout quoting the defaults would describe limits this
   // run did not set.
@@ -297,11 +286,20 @@ export async function runRouterInstall(
     statusLine,
     spend: { ...spend, effective: effectiveLimits(effective.policy) },
     mcp,
+    wallet,
     disclosure: DISCLOSURE,
   };
   return {
     data,
-    humanLines: lines(settingsPath, hooks, permissions, statusLine, spend, mcp, effective.policy),
+    humanLines: lines(ctx, {
+      project,
+      hooks,
+      permissions,
+      statusLine,
+      mcp,
+      wallet,
+      policy: effective.policy,
+    }),
   };
 }
 
@@ -492,62 +490,123 @@ function effectiveLimits(policy: SpendPolicy): EffectiveLimits {
   };
 }
 
-/** What the status line did. The `foreign` case is the one that matters: it
- *  names the command to run, because this install touched nothing. */
-export function statusLineLines(result: StatusLineResult): string[] {
+/** Only the status-line state that needs the user: one this install would not
+ *  touch, with the command that adds the footer beside it. */
+export function statusLineProblems(ctx: CommandContext, result: StatusLineResult): string[] {
+  const warn = (text: string) => paint(ctx.io, 'yellow', `! ${text}`);
   if (result.warning !== undefined) {
-    return [`status line: not registered (${result.warning})`];
+    return [warn(`The live status line was not registered (${result.warning})`)];
   }
-  if (result.state === 'foreign') {
-    return [
-      'status line: you already have one, so it was left exactly as it is.',
-      ...(result.compose === undefined
-        ? [`  To add the live x402 footer, run \`${STATUS_LINE_COMMAND}\` from it.`]
-        : [
-            '  To show the live x402 footer beside it, re-run with `--status-line compose`, or set:',
-            `  ${result.compose}`,
-          ]),
-    ];
-  }
-  if (result.state === 'composed') {
-    return ['status line: the x402 footer runs alongside the one you already had'];
-  }
-  if (result.state === 'absent') return ['status line: not registered'];
-  return [`status line: \`${STATUS_LINE_COMMAND}\`, refreshed once a second`];
+  if (result.state !== 'foreign') return [];
+  return [
+    warn('You already have a status line, so it was left exactly as it is.'),
+    '  To show the live x402 footer beside it, run:',
+    '  tenjin install --status-line compose',
+    ...(result.compose === undefined
+      ? []
+      : ['  or set this command yourself:', `  ${result.compose}`]),
+  ];
 }
 
+/**
+ * A few lines a first-time user can read at a glance: it worked, here is your
+ * wallet, here is the one thing to do next. The file paths, entry counts and
+ * data-handling detail stay in `--json` and the docs; the terminal only grows
+ * a line when something needs the user.
+ */
 function lines(
-  settingsPath: string,
+  ctx: CommandContext,
+  s: {
+    project: boolean;
+    hooks: HooksResult;
+    permissions: AllowRuleResult;
+    statusLine: StatusLineResult;
+    mcp: McpRegistration;
+    wallet: WalletOutcome;
+    policy: SpendPolicy;
+  },
+): string[] {
+  const ok = paint(ctx.io, 'green', '✓');
+  const limits = effectiveLimits(s.policy);
+  const daily =
+    s.policy.sessionBudgetAtomic === 0n ? 'no daily limit' : `$${limits.sessionBudget} a day`;
+  // The first line only says "set up" when it is: a settings file this run
+  // would not write to means nothing was set up, and hooks without the MCP
+  // server point at a `request` tool that is not there.
+  const blocked = s.hooks.skipped !== undefined;
+  const needsMcp = !blocked && !s.mcp.registered;
+  const where = s.project ? ' in this project' : '';
+  const fund = paint(ctx.io, 'bold', 'tenjin wallet fund');
+  return [
+    blocked
+      ? paint(ctx.io, 'yellow', `! Tenjin could not finish setting up Claude Code${where}`)
+      : needsMcp
+        ? paint(ctx.io, 'yellow', '! Almost done: Claude Code needs one command')
+        : `${ok} Tenjin is set up for Claude Code${where}`,
+    ...walletLines(ctx, ok, s.wallet),
+    `  Spends at most $${limits.maxAutoSpend} a lookup, ${daily}`,
+    ...(s.statusLine.state === 'ours' || s.statusLine.state === 'composed'
+      ? ['  Live status line on: each lookup names its provider while it runs']
+      : []),
+    ...problems(ctx, s.hooks, s.permissions, s.statusLine, s.mcp),
+    '',
+    blocked
+      ? 'Next: fix the file above, then run tenjin install again'
+      : needsMcp
+        ? s.wallet.status === 'created'
+          ? `Next: run the command above and ${fund}, then restart Claude Code`
+          : 'Next: run the command above, then restart Claude Code'
+        : s.wallet.status === 'created'
+          ? `Next: ${fund}, then restart Claude Code`
+          : 'Next: restart Claude Code',
+  ];
+}
+
+/** "Up to date" only when nothing below it needs the user. */
+function refreshLines(ctx: CommandContext, issues: string[]): string[] {
+  if (issues.length === 0) return [`${paint(ctx.io, 'green', '✓')} Tenjin is up to date`];
+  return [paint(ctx.io, 'yellow', '! Tenjin is updated, but needs one fix'), ...issues];
+}
+
+function walletLines(ctx: CommandContext, ok: string, w: WalletOutcome): string[] {
+  if (w.status === 'created') return [`${ok} Wallet created: ${w.address}`];
+  if (w.status === 'existing') return [`${ok} Wallet: ${w.address}`];
+  if (w.reason === 'flag') return ['  No wallet yet. Create one with: tenjin wallet create'];
+  return [
+    paint(ctx.io, 'yellow', `! No wallet was created. ${w.warning ?? ''}`.trimEnd()),
+    `  ${w.fix ?? 'Create one with: tenjin wallet create'}`,
+  ];
+}
+
+/** Only what needs the user, each with the command that fixes it. */
+function problems(
+  ctx: CommandContext,
   hooks: HooksResult,
   permissions: AllowRuleResult,
   statusLine: StatusLineResult,
-  spend: RouterDefaultsResult,
   mcp: McpRegistration,
-  policy: SpendPolicy,
 ): string[] {
-  const out = [
-    hooks.skipped === undefined
-      ? `hooks: ${hooks.entries} entries in ${settingsPath}`
-      : `hooks: ${settingsPath} was left untouched (${hooks.skipped}); fix it, then re-run: tenjin install`,
-    permissions.warning === undefined
-      ? `permissions: ${ALLOW_RULE} allowed`
-      : `permissions: ${permissions.warning}`,
-    mcp.registered
-      ? `mcp: ${MCP_SERVER_NAME} registered`
-      : `mcp: not registered (${mcp.reason ?? 'unknown'}); run: ${mcp.command}`,
-    ...statusLineLines(statusLine),
-    `spend: at most ${effectiveLimits(policy).maxAutoSpend} USD per call, ${
-      policy.sessionBudgetAtomic === 0n
-        ? 'no daily ceiling'
-        : `${effectiveLimits(policy).sessionBudget} USD a day`
-    }` + (spend.kept.length > 0 ? ` (kept your ${spend.kept.join(', ')})` : ''),
-    '',
-    ...DISCLOSURE,
-    '',
-    'Fund it with `tenjin wallet fund`, check it with `tenjin status`, undo it with `tenjin uninstall`.',
-    'Restart Claude Code to load the hooks.',
-  ];
-  if (hooks.warning !== undefined) out.push(`! ${hooks.warning}`);
+  const warn = (text: string) => paint(ctx.io, 'yellow', `! ${text}`);
+  const out: string[] = [];
+  // The hooks and the permission rule share one settings file, so a file this
+  // run would not touch is reported once, not once per writer.
+  if (hooks.skipped !== undefined) {
+    out.push(
+      warn(
+        hooks.warning ??
+          `${hooks.path ?? 'Your Claude Code settings file'} was left untouched (${hooks.skipped}).`,
+      ),
+    );
+  } else {
+    if (hooks.warning !== undefined) out.push(warn(hooks.warning));
+    if (permissions.warning !== undefined) out.push(warn(permissions.warning));
+  }
+  if (!mcp.registered) {
+    // The reason stays in --json: raw exec output is noise here, the fix is not.
+    out.push(warn('Could not add the request tool to Claude Code. Run:'));
+    out.push(`  ${mcp.command}`);
+  }
+  out.push(...statusLineProblems(ctx, statusLine));
   return out;
 }
 

@@ -47,6 +47,9 @@ export const EXPIRY_MS = 10 * 60_000;
 export const SESSION_ACTIVE_MS = 10 * 60_000;
 /** Above this many files a session directory is reported rather than scanned. */
 const MAX_RECORDS = 256;
+/** A ceiling on the root scan. {@link pruneSessions} keeps it far below this:
+ *  a directory is one LIVE session, not one session this machine ever had. */
+const MAX_SESSIONS = 4_096;
 /** A record larger than this is damaged or not ours; it is skipped unread. */
 const MAX_RECORD_BYTES = 4_096;
 
@@ -189,7 +192,7 @@ export async function resolveProgressSession(
     names = [];
     for await (const entry of directory) {
       if (entry.isDirectory() && /^[a-f0-9]{64}$/.test(entry.name)) names.push(entry.name);
-      if (names.length > MAX_RECORDS) break;
+      if (names.length >= MAX_SESSIONS) break;
     }
   } catch {
     return null;
@@ -312,6 +315,52 @@ export async function pruneProgress(directory: string, now = Date.now()): Promis
   } catch {
     // Housekeeping only. Nothing downstream depends on it having run.
   }
+}
+
+/**
+ * Remove the directories of sessions that are over.
+ *
+ * WITHOUT THIS THE ROOT ONLY GROWS, one directory per session this machine has
+ * ever had, and a root big enough to hit {@link MAX_SESSIONS} would leave
+ * {@link resolveProgressSession} scanning an arbitrary subset that need not
+ * contain the session asking. Run from the hook, which is the one writer that
+ * fires on every turn; a directory whose session is still live is never touched.
+ */
+export async function pruneSessions(dataDir: string, now = Date.now()): Promise<void> {
+  const root = join(dataDir, PROGRESS_DIR);
+  try {
+    const directory = await opendir(root);
+    let seen = 0;
+    for await (const entry of directory) {
+      if (++seen > MAX_SESSIONS) return;
+      if (!entry.isDirectory() || !/^[a-f0-9]{64}$/.test(entry.name)) continue;
+      const path = join(root, entry.name);
+      const session = await readStamp(join(path, SESSION_FILE));
+      if (session !== null && now - session.at <= SESSION_ACTIVE_MS) continue;
+      // The touch is gone or old, so the only thing that can keep this
+      // directory is a record still inside the renderer's window.
+      if (await hasLiveRecord(path, now)) continue;
+      await rm(path, { recursive: true, force: true }).catch(() => undefined);
+    }
+  } catch {
+    // Housekeeping only. Nothing downstream depends on it having run.
+  }
+}
+
+async function hasLiveRecord(directory: string, now: number): Promise<boolean> {
+  try {
+    const dir = await opendir(directory);
+    let count = 0;
+    for await (const entry of dir) {
+      if (++count > MAX_RECORDS) return true;
+      if (!entry.isFile() || entry.name === SESSION_FILE) continue;
+      const record = await readStamp(join(directory, entry.name));
+      if (record !== null && now - record.at <= EXPIRY_MS) return true;
+    }
+  } catch {
+    return true;
+  }
+  return false;
 }
 
 /**
