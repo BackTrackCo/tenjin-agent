@@ -139,13 +139,30 @@ describe('every answer payload on disk', () => {
   });
 
   /**
-   * THE HOOK ANSWER NAMES NO CAPABILITY. The hook has the user's words but not
-   * the task the host will run, so a price or a provider quoted there would be
-   * a guess a caller reads as an offer.
+   * THE HOOK ANSWER NAMES THE SERVICE, NOT THE CALL. It says which capability
+   * serves the category it chose, what that service does and what it charges,
+   * because a line naming the task and the service is followed where a generic
+   * one is not. It still carries no contract: the task the host will run does
+   * not exist at gate time.
    */
-  it('gives the hook an id and nothing to quote', () => {
+  it('gives the hook the service, its price and one ready line', () => {
     const execute = fixture('wire-hook-execute.json').decision as Record<string, unknown>;
-    expect(Object.keys(execute).sort()).toEqual(['action', 'id']);
+    expect(Object.keys(execute).sort()).toEqual([
+      'action',
+      'capabilityDescription',
+      'capabilityId',
+      'category',
+      'endpoint',
+      'hint',
+      'id',
+      'provider',
+      'providerPriceAtomic',
+      'usage',
+    ]);
+    expect(execute.contract).toBeUndefined();
+    // The server's own line, carrying the service, the price and the endpoint.
+    expect(String(execute.hint)).toContain(String(execute.provider));
+    expect(String(execute.hint)).toContain(String(execute.endpoint));
   });
 
   /** The capability in the description and the one in the contract are ONE

@@ -74,7 +74,18 @@ const NATIVE = {
 const HOOK_EXECUTE = {
   schemaVersion: 1,
   routerVersion: '2026-09-23.1',
-  decision: { action: 'execute', id: 'k3f9-abcd' },
+  decision: {
+    action: 'execute',
+    id: 'k3f9-abcd',
+    capabilityId: 'cmc-quotes',
+    category: 'crypto price quote',
+    provider: 'CoinMarketCap',
+    capabilityDescription: 'latest market quotes for one or more cryptocurrencies',
+    endpoint: 'https://pro-api.example.test/quotes',
+    providerPriceAtomic: '10000',
+    usage: 'the coins and currency',
+    hint: 'CoinMarketCap fits this. Call request({query: <the coins and currency>, id}) alone.',
+  },
 };
 
 const TOOL_EXECUTE = {
@@ -84,6 +95,9 @@ const TOOL_EXECUTE = {
     action: 'execute',
     capabilityId: 'cmc-quotes',
     category: 'crypto price quote',
+    provider: 'CoinMarketCap',
+    capabilityDescription: 'latest market quotes for one or more cryptocurrencies',
+    endpoint: 'https://pro-api.example.test/quotes',
     description: 'crypto price quote via pro-api.example.test',
     providerPriceAtomic: '10000',
     contract: {
@@ -142,10 +156,12 @@ describe('one free decision', () => {
    * with no contract came back to the host as a routine needs_input, and a hook
    * answer quoting a price parsed as though the hook knew the task.
    */
-  it('refuses a hook answer that quotes a capability it cannot know', async () => {
+  it('refuses a hook answer carrying a contract it cannot have', async () => {
+    // The gate names the service it chose; the CONTRACT is the tool call's,
+    // because at gate time the task the host will run does not exist yet.
     const { fetchImpl } = net({
       ...HOOK_EXECUTE,
-      decision: { ...HOOK_EXECUTE.decision, providerPriceAtomic: '10000' },
+      decision: { ...HOOK_EXECUTE.decision, contract: { method: 'GET', url: 'https://x.test' } },
     });
     const outcome = await requestDecision(
       'hook',

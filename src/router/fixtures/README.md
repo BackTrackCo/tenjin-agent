@@ -15,17 +15,27 @@ A lookup is two calls to ONE route, and they ask different questions. There is
 no separate gate endpoint: each call has one schema and one set of fixtures,
 parsed by the handler that serves it.
 
-| call | request                                  | answer                                                                                                  |
-| ---- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| hook | `{schemaVersion, packet, gateHint?}`     | is a paid lookup worth offering? `{action:'execute', id}`, or `native` / `needs_input` with diagnostics |
-| tool | `{schemaVersion, query, id?, gateHint?}` | the decision: the capability, its price and the contract together, or `native` / `needs_input`          |
+| call | request                                  | answer                                                                                                                            |
+| ---- | ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| hook | `{schemaVersion, packet, gateHint?}`     | is a paid lookup worth offering? `execute` with the id, the capability and a `hint`, or `native` / `needs_input` with diagnostics |
+| tool | `{schemaVersion, query, id?, gateHint?}` | the decision: the capability, its price and the contract together, or `native` / `needs_input`                                    |
 
-The hook answer carries **no** capability, price or contract. The hook has the
-user's words but not the task the host will run, so anything quoted there would
-be a guess a caller reads as an offer. The tool call makes the one decision,
-from its query plus the packet the id is holding. That pair is what the routing
-corpus is calibrated on: **55 of 56** against **53 of 56** from the prompt alone,
-with the misses in exactly the mixed turns a shortcut looks fastest on.
+Both `execute` answers name the capability: `capabilityId`, `category`,
+`provider` (the service's own name, such as `Wolfram Alpha`),
+`capabilityDescription` (one line saying what it can do), `endpoint` (the x402
+URL the lookup pays) and `providerPriceAtomic`. The hook answer adds the `id`,
+`usage` (what to pass in `query`) and `hint`, one line saying all of it for the
+host to inject: a line naming the service and the task is followed where a
+generic one is not. `routerCatalogListing()` in `catalog.ts` lists the same
+fields for every capability.
+
+The hook answer carries **no** contract. The hook has the user's words but not
+the task the host will run, so it names the one capability serving the gate's
+category and binds nothing. The tool call makes the one decision, from its
+query plus the packet the id is holding, and may choose a different capability.
+That pair is what the routing corpus is calibrated on: **55 of 56** against
+**53 of 56** from the prompt alone, with the misses in exactly the mixed turns a
+shortcut looks fastest on.
 
 There is no prepared decision, no background binding, and no id to poll.
 
@@ -41,7 +51,7 @@ is valid and is the fallback for an id that has expired; the answer says so in
 | `wire-gate-request.json`              | the free gate request, including a pending native call            |
 | `wire-decision-request.json`          | the hook call: a packet, no query                                 |
 | `wire-decision-request-narrowed.json` | the tool call: the query and the id                               |
-| `wire-hook-execute.json`              | hook answer: the id, and nothing else                             |
+| `wire-hook-execute.json`              | hook answer: the id, the capability, `usage` and the `hint` line  |
 | `wire-hook-native.json`               | hook answer: the host's own tools are enough                      |
 | `wire-hook-needs-input.json`          | hook answer: the turn names no task a capability serves           |
 | `wire-lookup-execute-get.json`        | tool answer: a GET contract with its built query string           |
@@ -52,9 +62,9 @@ is valid and is the fallback for an id that has expired; the answer says so in
 
 Two rules the fixtures exist to hold:
 
-- **The provider named in `description` and the provider in `contract` are one
-  decision.** They are produced together, so a caller cannot approve one offer
-  and receive another.
+- **In a tool answer, `provider`, `endpoint`, `description` and `contract` are
+  one decision.** They are produced together, so a caller cannot approve one
+  offer and receive another.
 - **Every non-execute answer carries `diagnostics`, nested inside `decision`.**
   That is the intended shape: they sit on the union's non-execute arms so a
   contractless outcome without diagnostics does not typecheck.
@@ -80,6 +90,8 @@ Take these from here; do not re-derive them.
 | `diagnostics.missing`           | 60 entries, each non-empty                                 |
 | `id`                            | a uuid the server minted; a client never invents one       |
 | id lifetime                     | 15 minutes from the hook call that created it              |
+
+Expired packets are unreadable after 15 minutes (the route refuses an expired id) and are deleted by the next router request or the daily cleanup, whichever comes first.
 
 The enumerated values live in code: `ROUTER_CATEGORIES` in `wire.ts`,
 `DIAGNOSTIC_CODES` and `DIAGNOSTIC_STAGES` in `diagnostics.ts`.

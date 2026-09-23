@@ -4,6 +4,7 @@ import type { PartialConfig } from '../lib/config';
 import { buildNativePacket, buildPromptPacket, type Packet, type PendingCall } from './context';
 import { requestDecision, ROUTER_PATH, type HookDecision } from './decision';
 import { GATE_TIMEOUT_MS } from './gate';
+import { toMoney } from '../lib/money';
 
 /**
  * The two hook handlers. Between them they do exactly three things: build the
@@ -94,23 +95,18 @@ async function resolveBaseUrl(deps: HookDeps): Promise<string> {
 export const FALLBACK_LINE = 'call request({query}) for lookups';
 
 /**
- * THE HINT NAMES THE TURN, NOT A LOOKUP. The hook has only run the gate: it
- * knows a paid capability fits this turn and it has stored the packet, and it
- * has decided nothing about WHAT to look up. So the line says exactly that, and
- * asks for the model's own lookup.
+ * THE SERVER'S OWN LINE, SAID ONCE. The gate knows which capability serves the
+ * category it chose, so it writes the line: the service, what it does, the
+ * price, the endpoint and what to put in `query`. A line naming the task and
+ * the service is followed 40 times in 40 where a generic one is followed 8 to
+ * 20, which is why this client no longer writes its own.
  *
- * The prepared-decision shortcut that used to live here is gone. It answered
- * from the gate's reading of the whole turn, which measures 53 of 56 against 55
- * of 56 for the model's query plus this packet, and on a mixed turn it paid for
- * the wrong lookup: the client could only reject it when the two named
- * different URLs, which the failing case did not.
+ * The only thing done to it here is the id. The server writes `id` as a
+ * parameter NAME, since it is describing the call rather than making one, so
+ * the real id is substituted where that name stands.
  */
-export function hintLine(id: string | undefined): string {
-  // JSON-encoded even though the schema already pins the alphabet: this string
-  // is server text landing in the model's context, and one layer that cannot be
-  // skipped by a future schema change is worth its two characters.
-  const carry = id !== undefined ? `, id:${JSON.stringify(id)}` : '';
-  return `A paid lookup is available for this turn: call request({query:"<your exact lookup>"${carry}})`;
+export function hintLine(decision: { hint: string; id: string }): string {
+  return decision.hint.replace(/\bid\b(?=\s*[},])/, `id: ${JSON.stringify(decision.id)}`);
 }
 
 /** What a `needs_input` decision leaves the host to do, in one line. */
@@ -154,7 +150,7 @@ export async function runPromptHook(raw: unknown, deps: HookDeps): Promise<Promp
   if (decision.action === 'needs_input') {
     return { action: 'needs_input', ...injection(clarificationLine(decision)) };
   }
-  return { action: 'execute', id: decision.id, ...injection(hintLine(decision.id)) };
+  return { action: 'execute', id: decision.id, ...injection(hintLine(decision)) };
 }
 
 function injection(line: string): { response: unknown } {
@@ -224,25 +220,23 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
 
 /**
  * WHAT THE HARNESS SHOWS IN PLACE OF THE DENIED CALL, and it has one job: be
- * copyable. The live smoke followed the redirect by id once in seven: the line
- * carried a `<your exact lookup>` placeholder, so the model retyped the search
- * in its own words four times and abandoned two redirects outright. It now
- * carries the exact argument that was denied and the id that holds this turn's
- * context, both JSON-encoded, on one line.
- *
- * Encoded, not interpolated: the query is the user's text and may hold quotes
- * or newlines, and this line lands in the model's context. `JSON.stringify`
- * escapes both, which also keeps the line one line.
+ * copyable. The live smoke followed a redirect by id once in seven while this
+ * line named neither the service nor what it does. It now says both, with the
+ * price, what the service wants in `query`, the exact argument that was denied
+ * and the id, JSON-encoded, on one line.
  */
 export function redirectReason(pending: PendingCall, decision: HookDecision): string {
   const subject = ('query' in pending ? pending.query : pending.url).slice(0, 500);
-  const what = 'query' in pending ? 'search' : 'page';
-  const id = decision.action === 'execute' ? decision.id : undefined;
-  const carry = id !== undefined ? `, id: ${JSON.stringify(id)}` : '';
+  if (decision.action !== 'execute') {
+    // Unreachable: a redirect only happens on `execute`. It still says
+    // something a host can act on rather than nothing.
+    return `Paid lookup available. Call request({query: ${JSON.stringify(subject)}}) instead.`;
+  }
   return (
-    `Paid lookup available for this ${what}. ` +
-    `Call request({query: ${JSON.stringify(subject)}${carry}}) instead; ` +
-    'native tools stay allowed for anything else.'
+    `${decision.provider} fits this better: ${decision.capabilityDescription}. ` +
+    `$${toMoney(decision.providerPriceAtomic).usd} for ${decision.usage}. ` +
+    `Call request({query: ${JSON.stringify(subject)}, id: ${JSON.stringify(decision.id)}}) ` +
+    'instead; native tools stay allowed for anything else.'
   );
 }
 

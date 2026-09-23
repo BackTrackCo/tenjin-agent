@@ -49,10 +49,27 @@ const NATIVE = {
     },
   },
 };
+const HINT =
+  'Firecrawl fits this: scrapes one public URL and returns its content as clean markdown or HTML. ' +
+  '$0.01 via https://vaaya.ai/api/run/firecrawl/scrape . ' +
+  'Call request({query: <the page URL>, id}) alone and wait for its result.';
+
 const EXECUTE = {
   schemaVersion: 1,
   routerVersion: 'v',
-  decision: { action: 'execute', id: 'k3f9-abcd' },
+  decision: {
+    action: 'execute',
+    id: 'k3f9-abcd',
+    capabilityId: 'vaaya-scrape',
+    category: 'read an exact page',
+    provider: 'Firecrawl',
+    capabilityDescription:
+      'scrapes one public URL and returns its content as clean markdown or HTML',
+    endpoint: 'https://vaaya.ai/api/run/firecrawl/scrape',
+    providerPriceAtomic: '10000',
+    usage: 'the page URL',
+    hint: HINT,
+  },
 };
 const NEEDS_INPUT = {
   schemaVersion: 1,
@@ -117,9 +134,11 @@ describe('the prompt hook', () => {
     });
     const line = (out.response as { hookSpecificOutput: { additionalContext: string } })
       .hookSpecificOutput.additionalContext;
-    expect(line).toBe(
-      'A paid lookup is available for this turn: call request({query:"<your exact lookup>", id:"k3f9-abcd"})',
-    );
+    // The server's own line, verbatim, with the real id where it wrote the
+    // parameter name.
+    expect(line).toBe(HINT.replace('id}', 'id: "k3f9-abcd"}'));
+    expect(line).toContain('Firecrawl fits this');
+    expect(line).toContain('$0.01');
     expect(out).toMatchObject({ action: 'execute', id: 'k3f9-abcd' });
     // One free call, carrying the packet and nothing else.
     expect(calls).toHaveLength(1);
@@ -246,7 +265,9 @@ describe('the native hook', () => {
     // COPYABLE, not a template: the live smoke followed the redirect by id once
     // in seven while the line carried a `<your exact lookup>` placeholder.
     expect(reason).toBe(
-      'Paid lookup available for this page. Call request({query: "https://example.test/spec", id: "k3f9-abcd"}) instead; native tools stay allowed for anything else.',
+      'Firecrawl fits this better: scrapes one public URL and returns its content as clean markdown or HTML. ' +
+        '$0.01 for the page URL. ' +
+        'Call request({query: "https://example.test/spec", id: "k3f9-abcd"}) instead; native tools stay allowed for anything else.',
     );
     expect(reason.split('\n')).toHaveLength(1);
   });
@@ -265,21 +286,18 @@ describe('the native hook', () => {
 });
 
 describe('the hint line', () => {
-  /**
-   * The hook has run the gate and nothing else: it knows a paid capability fits
-   * this turn, and it has decided nothing about what to look up. The line says
-   * that, and asks for the model's own lookup.
-   */
-  it("names the turn and asks for the model's own lookup", () => {
-    expect(hintLine('k3f9-abcd')).toBe(
-      'A paid lookup is available for this turn: call request({query:"<your exact lookup>", id:"k3f9-abcd"})',
+  /** The server writes the line, and writes `id` as a parameter name because it
+   *  is describing the call rather than making one. The client substitutes the
+   *  real id and changes nothing else. */
+  it('prints the server line with the real id in it', () => {
+    expect(hintLine({ hint: HINT, id: 'k3f9-abcd' })).toBe(HINT.replace('id}', 'id: "k3f9-abcd"}'));
+    expect(hintLine({ hint: HINT, id: 'k3f9-abcd' })).toContain('Firecrawl fits this');
+  });
+
+  it('leaves a line that names no id parameter alone', () => {
+    expect(hintLine({ hint: 'Call request({query: <the coins>}) alone.', id: 'k3f9-abcd' })).toBe(
+      'Call request({query: <the coins>}) alone.',
     );
-    // No id to carry is still a usable instruction.
-    expect(hintLine(undefined)).toBe(
-      'A paid lookup is available for this turn: call request({query:"<your exact lookup>"})',
-    );
-    // Nothing about a provider, a price or a prepared target: the hook knows none.
-    expect(hintLine('k3f9-abcd')).not.toMatch(/\$|via |Prepared/);
   });
 });
 
@@ -309,9 +327,11 @@ describe('an id that is not an opaque handle', () => {
     expect(out.id).toBeUndefined();
   });
 
-  it('encodes the id it does carry, whatever a later schema allows', () => {
+  it('encodes the id it substitutes, whatever a later schema allows', () => {
     // Belt and braces: the schema pins the alphabet, and this pins the line.
-    expect(hintLine('abc"def-123')).toContain('id:"abc\\"def-123"');
+    expect(hintLine({ hint: 'Call request({query: <x>, id}).', id: 'abc"def-123' })).toContain(
+      'id: "abc\\"def-123"',
+    );
   });
 });
 
@@ -389,33 +409,38 @@ describe('the native hook reads the turn it belongs to', () => {
 });
 
 /**
- * THE REDIRECT LINE IS COPY PASTE. It carries the exact argument that was
- * denied and the id holding this turn's context, both JSON-encoded, because a
- * query is the user's own text and this line lands in the model's context.
+ * THE REDIRECT LINE IS COPY PASTE, AND IT NAMES THE SERVICE. The live smoke
+ * followed a redirect by id once in seven while it named neither the service
+ * nor what it does.
  */
 describe('the redirect line', () => {
-  const EXECUTED = { action: 'execute' as const, id: 'k3f9-abcd' };
+  const EXECUTED = {
+    action: 'execute' as const,
+    id: 'k3f9-abcd',
+    capabilityId: 'exa-search',
+    category: 'web research',
+    provider: 'Exa',
+    capabilityDescription: 'web search that returns ranked source pages',
+    endpoint: 'https://api.exa.ai/search',
+    providerPriceAtomic: '10000',
+    usage: 'the research question',
+    hint: 'unused here',
+  };
 
-  it('carries a search query verbatim', () => {
+  it('names the service, what it does, the price and the denied query', () => {
     expect(redirectReason({ tool: 'WebSearch', query: 'x402 facilitators 2026' }, EXECUTED)).toBe(
-      'Paid lookup available for this search. Call request({query: "x402 facilitators 2026", id: "k3f9-abcd"}) instead; native tools stay allowed for anything else.',
+      'Exa fits this better: web search that returns ranked source pages. ' +
+        '$0.01 for the research question. ' +
+        'Call request({query: "x402 facilitators 2026", id: "k3f9-abcd"}) instead; native tools stay allowed for anything else.',
     );
   });
 
-  it('carries a fetched URL verbatim', () => {
-    expect(redirectReason({ tool: 'WebFetch', url: 'https://example.test/a?b=c' }, EXECUTED)).toBe(
-      'Paid lookup available for this page. Call request({query: "https://example.test/a?b=c", id: "k3f9-abcd"}) instead; native tools stay allowed for anything else.',
-    );
-  });
-
-  it('encodes a query carrying quotes or a newline, and stays one line', () => {
+  it('carries a fetched URL verbatim, encoded, on one line', () => {
     const line = redirectReason(
-      { tool: 'WebSearch', query: 'who said "no paid services"\nand when' },
+      { tool: 'WebFetch', url: 'https://example.test/a?b="c"' },
       EXECUTED,
     );
+    expect(line).toContain('"https://example.test/a?b=\\"c\\""');
     expect(line.split('\n')).toHaveLength(1);
-    expect(line).toContain('who said \\"no paid services\\"\\nand when');
-    // The id is encoded too, on top of the alphabet the schema pins.
-    expect(line).toContain('id: "k3f9-abcd"');
   });
 });

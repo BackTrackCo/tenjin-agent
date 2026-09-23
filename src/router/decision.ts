@@ -102,11 +102,35 @@ const RefusedSchema = z.strictObject({
   diagnostics: DiagnosticsSchema,
 });
 
+/**
+ * WHAT THE SERVICE IS, AND WHAT IT DOES. The hook answer used to be an id and
+ * nothing else, so the line the host injected could only say "a paid lookup is
+ * available", which a model follows 8 to 20 times in 40 where a line naming the
+ * task and the service is followed 40 in 40. The gate knows which capability
+ * serves the category it chose, so it now says so; the CONTRACT is still not
+ * here, because the task the host will run does not exist yet.
+ */
+const CapabilityFields = {
+  capabilityId: z.string().min(1).max(200),
+  category: z.string().min(1).max(64),
+  /** The service's own name, not the x402 reseller in front of it. */
+  provider: z.string().min(1).max(120),
+  capabilityDescription: z.string().min(1).max(500),
+  /** The x402 URL a lookup pays. */
+  endpoint: z.string().min(1).max(2_048),
+  providerPriceAtomic: z.string().regex(/^\d+$/),
+};
+
 const HookDecisionSchema = z.discriminatedUnion('action', [
-  /** The hook answer names NO capability, price or contract: at gate time the
-   *  task the host will run does not exist yet, and anything quoted there is a
-   *  guess a caller reads as an offer. */
-  z.strictObject({ action: z.literal('execute'), id: IdSchema }),
+  z.strictObject({
+    action: z.literal('execute'),
+    id: IdSchema,
+    ...CapabilityFields,
+    /** What to pass in `query`, in the service's own terms. */
+    usage: z.string().min(1).max(300),
+    /** The server's own line, said once so the client does not re-say it. */
+    hint: z.string().min(1).max(1_000),
+  }),
   RefusedSchema.extend({ action: z.literal('native') }),
   RefusedSchema.extend({ action: z.literal('needs_input') }),
 ]);
@@ -114,13 +138,9 @@ const HookDecisionSchema = z.discriminatedUnion('action', [
 const ToolDecisionSchema = z.discriminatedUnion('action', [
   z.strictObject({
     action: z.literal('execute'),
-    capabilityId: z.string().min(1).max(200),
-    category: z.string().min(1).max(64),
+    ...CapabilityFields,
     /** One plain line naming the capability and who serves it. */
     description: z.string().min(1).max(300),
-    /** What the provider charges, atomic USDC. DISPLAY ONLY: the amount
-     *  actually signed is what `gateSpend` caps. */
-    providerPriceAtomic: z.string().regex(/^\d+$/),
     contract: ContractSchema,
   }),
   RefusedSchema.extend({ action: z.literal('native') }),

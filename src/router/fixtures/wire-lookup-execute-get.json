@@ -5,6 +5,9 @@
     "action": "execute",
     "capabilityId": "cmc-quotes",
     "category": "crypto price quote",
+    "provider": "CoinMarketCap",
+    "capabilityDescription": "latest market quotes (price, market cap, 24h volume, percent changes) for one or more cryptocurrencies",
+    "endpoint": "https://pro-api.coinmarketcap.com/x402/v3/cryptocurrency/quotes/latest",
     "description": "crypto price quote via pro-api.coinmarketcap.com",
     "providerPriceAtomic": "10000",
     "contract": {
