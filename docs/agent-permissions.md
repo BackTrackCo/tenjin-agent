@@ -113,6 +113,8 @@ When your assistant delegates, the task it hands over is routed before the subag
 
 A subagent cannot reach you to approve a spend, so it is only offered lookups your spend policy would pay without asking: within `maxAutoSpend` and the `confirm` threshold, inside the day's `sessionBudget`, and to a host `allowlistCreators` permits. Its payments run through the same ledger and the same caps as the lead's, because the lock is on the file rather than on the process. A subagent is not a second budget.
 
+A custom subagent whose definition (`.claude/agents/<name>.md` in the project, `~/.claude/agents/<name>.md`, or an installed plugin's) lists `tools:` without `mcp__x402__request` is never offered a lookup, and its native calls and delegated tasks are not sent to the router at all. Built-in agents and definitions with no `tools:` line inherit every tool and are offered lookups as usual. `tenjin doctor` names your own agents that leave the tool out; add `mcp__x402__request` to their `tools:` to allow paid lookups there. Nothing here edits your agent files.
+
 ## Not the same as `allowlistCreators`
 
 `allowlistCreators` is a spend-policy key that restricts which hosts may be paid at all. The permission rule on this page is a harness setting about which tool may run. They are separate gates and neither substitutes for the other.

@@ -890,6 +890,52 @@ describe('a subagent', () => {
     expect(JSON.stringify(out.response)).toContain(HINT.slice(0, 40));
   });
 
+  /**
+   * A SUBAGENT WHOSE DEFINITION LEAVES THE TOOL OUT is offered nothing and
+   * costs no router call. The fixture's subagent is `restricted-reader`, the
+   * #377 reproduction's custom type; `dir` stands in for the home directory.
+   */
+  async function defineReader(tools: string): Promise<void> {
+    const fs = await import('node:fs/promises');
+    const folder = join(dir, '.claude', 'agents');
+    await fs.mkdir(folder, { recursive: true });
+    await fs.writeFile(
+      join(folder, 'restricted-reader.md'),
+      `---\nname: restricted-reader\ndescription: reads pages\ntools: ${tools}\n---\nRead.\n`,
+    );
+  }
+
+  it('is not offered a lookup, or routed at all, when its tools exclude request', async () => {
+    await setConfig(ROUTER_POLICY);
+    await defineReader('WebFetch');
+    const path = await parentTranscript();
+    await subagentTranscript('a1', 'Read this page for me.');
+    const { fetchImpl, calls } = router(EXECUTE);
+    const out = await runShortfallHook(subagentFetch(path, 'a1'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+      homeDir: dir,
+    });
+    expect(out).toMatchObject({ response: null, noRequestTool: true });
+    expect(calls).toHaveLength(0);
+  });
+
+  it('is offered a lookup when its tools include request', async () => {
+    await setConfig(ROUTER_POLICY);
+    await defineReader('WebFetch, mcp__x402__request');
+    const path = await parentTranscript();
+    await subagentTranscript('a1', 'Read this page for me.');
+    const { fetchImpl } = router(EXECUTE);
+    const out = await runShortfallHook(subagentFetch(path, 'a1'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+      homeDir: dir,
+    });
+    expect(out.response).not.toBeNull();
+  });
+
   it('leaves the main agent its offer whatever the policy', async () => {
     await setConfig({ maxAutoSpend: '0', confirm: 'always' });
     const { fetchImpl } = router(EXECUTE);
@@ -998,6 +1044,29 @@ describe('the delegation hook', () => {
     expect((await runDelegationHook(unreadable, deps)).response).toBeNull();
     expect((await runDelegationHook({ hook_event_name: 'PreToolUse' }, deps)).response).toBe(null);
     expect(calls).toHaveLength(0);
+  });
+
+  it.each([
+    ['a custom type whose tools exclude request', 'restricted-reader', 0],
+    ['a built-in type', 'general-purpose', 1],
+    ['a type with no definition', 'nowhere-defined', 1],
+  ])('asks about a task for %s only when it can act', async (_label, type, asked) => {
+    const fs = await import('node:fs/promises');
+    const folder = join(dir, '.claude', 'agents');
+    await fs.mkdir(folder, { recursive: true });
+    await fs.writeFile(
+      join(folder, 'restricted-reader.md'),
+      '---\nname: restricted-reader\ndescription: reads\ntools: WebFetch\n---\n',
+    );
+    const { fetchImpl, calls } = router(EXECUTE);
+    const out = await runDelegationHook(await delegation({ prompt: TASK, subagent_type: type }), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+      homeDir: dir,
+    });
+    expect(calls).toHaveLength(asked);
+    expect(out.response === null).toBe(asked === 0);
   });
 
   it('withholds an offer the subagent could not pay for alone', async () => {

@@ -1,3 +1,4 @@
+import { homedir } from 'node:os';
 import { z } from 'zod';
 import { loadRawConfig, resolveSettings } from '../lib/config';
 import type { PartialConfig } from '../lib/config';
@@ -16,6 +17,7 @@ import {
 import { requestDecision, ROUTER_PATH, type HookDecision } from './decision';
 import { GATE_TIMEOUT_MS } from './gate';
 import { REQUEST_TOOL } from './names';
+import { requestToolAccess, type AgentLookup } from './agent-tools';
 import {
   bindDecision,
   newCallId,
@@ -74,6 +76,9 @@ const ShortfallEventSchema = z.object({
   /** Present only inside a subagent, which is the one caller that cannot reach
    *  the user to approve a spend. */
   agent_id: z.string().min(1).max(200).optional(),
+  /** The subagent's type, which names its definition file. */
+  agent_type: z.string().min(1).max(200).optional(),
+  cwd: z.string().optional(),
 });
 
 const DelegationEventSchema = z.object({
@@ -82,6 +87,7 @@ const DelegationEventSchema = z.object({
   /** `Task` is the tool's older name; the matcher `install` writes takes both. */
   tool_name: z.enum(['Agent', 'Task']),
   tool_input: z.record(z.string(), z.unknown()),
+  cwd: z.string().optional(),
 });
 
 /** Acknowledgements that cannot be a lookup; `install` never gates them. */
@@ -217,6 +223,9 @@ export interface HookDeps {
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
   now?: () => number;
+  /** Where `~/.claude` is, for the user's agent definitions; tests point it
+   *  at a scratch directory. */
+  homeDir?: string;
   /**
    * Where a silent failure says why. The harness keeps hook stderr in its log,
    * so one line there is the difference between "the feature is off" and "the
@@ -267,6 +276,10 @@ async function wouldAutoExecute(
   } catch {
     return false;
   }
+}
+
+function agentLookup(cwd: string | undefined, deps: HookDeps): AgentLookup {
+  return { ...(cwd !== undefined ? { cwd } : {}), homeDir: deps.homeDir ?? homedir() };
 }
 
 /** The context the hook's own library calls run in: JSON, silent, no TTY. */
@@ -327,6 +340,8 @@ export interface ShortfallHookOutcome {
   id?: string;
   /** An `execute` whose offer was not shown: a subagent spend that would need approval. */
   withheld?: true;
+  /** No router call at all: the subagent's definition leaves the request tool out. */
+  noRequestTool?: true;
 }
 
 /**
@@ -352,6 +367,14 @@ export async function runShortfallHook(
   if (nativeOutcome === null) return { response: null };
   const pending = pendingCallOf(event.tool_name, event.tool_input);
   if (pending === null) return { response: null };
+  // A SUBAGENT THAT CANNOT CALL THE TOOL IS OFFERED NOTHING, and costs nothing:
+  // this is decided before the router is asked.
+  if (
+    event.agent_id !== undefined &&
+    (await requestToolAccess(event.agent_type, agentLookup(event.cwd, deps))) === 'excluded'
+  ) {
+    return { response: null, nativeOutcome, noRequestTool: true };
+  }
   // THE USER'S WORDS COME WITH IT. Building this from the tool argument alone
   // made the search string the whole conversation, so "native tools only, no
   // paid services" never reached this gate. Inside a subagent, its own task
@@ -404,6 +427,7 @@ export interface DelegationHookOutcome {
   action?: HookDecision['action'];
   id?: string;
   withheld?: true;
+  noRequestTool?: true;
 }
 
 /**
@@ -425,6 +449,16 @@ export async function runDelegationHook(
   const event = parsed.data;
   const task = event.tool_input.prompt;
   if (typeof task !== 'string' || task.trim().length === 0) return { response: null };
+  // The subagent this task goes to is the one that would have to make the
+  // call. With no type the harness runs its general-purpose agent, which
+  // inherits every tool.
+  const subagentType = event.tool_input.subagent_type;
+  if (
+    typeof subagentType === 'string' &&
+    (await requestToolAccess(subagentType, agentLookup(event.cwd, deps))) === 'excluded'
+  ) {
+    return { response: null, noRequestTool: true };
+  }
   const packet = await buildPromptPacket(event.transcript_path, event.session_id, task);
   // The native hook's rule, for the same reason: a delegation routed without
   // the user's words could offer what they just ruled out.

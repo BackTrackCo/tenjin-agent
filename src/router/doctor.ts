@@ -11,6 +11,7 @@ import { onPath } from '../lib/skill-wiring';
 import { describeWallet, resolveWalletProvider } from '../lib/wallet';
 import { walletFileExists } from '../lib/wallet/store';
 import type { CommandContext, CommandResult } from '../context';
+import { agentsWithoutRequestTool } from './agent-tools';
 import { ROUTER_PATH } from './decision';
 import {
   ALLOW_RULE,
@@ -22,6 +23,7 @@ import {
   routerSettingsPath,
   type McpEntryState,
 } from './install';
+import { REQUEST_TOOL } from './names';
 import { inspectStatusLine, STATUS_LINE_COMMAND } from './status-line-wiring';
 
 /**
@@ -98,6 +100,8 @@ export async function runRouterDoctor(
   checks.push(spendCheck(settings.policy.maxAutoSpendAtomic, settings.policy.sessionBudgetAtomic));
   checks.push(...(await walletCheck(ctx)));
   checks.push(await routerCheck(settings.baseUrl, ctx.flags.timeout, deps.fetchImpl));
+  const agents = await subagentsCheck(deps.cwd ?? process.cwd(), deps.homeDir ?? homedir());
+  if (agents !== null) checks.push(agents);
 
   const failure = checks.find((c) => c.status === 'fail' && c.required);
   const data = { checks, dataDir: ctx.dataDir, baseUrl: settings.baseUrl, settingsPath };
@@ -121,6 +125,23 @@ export async function runRouterDoctor(
         ? `${checks.length} checks, all pass.`
         : `${checks.length} checks, ${bad} to look at.`,
     ],
+  };
+}
+
+/**
+ * INFORMATIONAL, NEVER A FAILURE. A custom agent whose `tools:` leave the
+ * request tool out is a choice its author may have meant, so this names those
+ * agents and the one line that would change it, and counts as passing. It is
+ * absent when there is nothing to name. The files are only read.
+ */
+async function subagentsCheck(cwd: string, homeDir: string): Promise<RouterCheck | null> {
+  const excluded = await agentsWithoutRequestTool({ cwd, homeDir });
+  if (excluded.length === 0) return null;
+  return {
+    name: 'subagents',
+    status: 'ok',
+    required: false,
+    detail: `${excluded.join(', ')} ${excluded.length === 1 ? 'is' : 'are'} offered no paid lookups: add ${REQUEST_TOOL} to tools: to allow paid lookups there`,
   };
 }
 

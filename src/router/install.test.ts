@@ -444,6 +444,41 @@ describe('a settings file this writer will not touch', () => {
 });
 
 describe('the doctor this release registers', () => {
+  /**
+   * INFORMATIONAL: a custom agent that leaves the request tool out is named,
+   * with the line that would change it, and never counts against the machine.
+   * The file itself is only read.
+   */
+  it('names custom agents whose tools exclude the request tool, as a pass', async () => {
+    const fs = await import('node:fs/promises');
+    const { runRouterDoctor } = await import('./doctor');
+    await runRouterInstall({}, ctx(), deps());
+    const agents = join(home, '.claude', 'agents');
+    await fs.mkdir(agents, { recursive: true });
+    const reader = '---\nname: reader\ndescription: reads\ntools: Read, WebFetch\n---\nRead.\n';
+    await fs.writeFile(join(agents, 'reader.md'), reader);
+    await fs.writeFile(join(agents, 'free.md'), '---\nname: free\ndescription: all\n---\n');
+    const result = await runRouterDoctor(ctx(), {
+      homeDir: home,
+      cwd: home,
+      env: {},
+      which: () => true,
+      readMcp: async () => true,
+      fetchImpl: probe400,
+    }).catch((e: unknown) => e);
+    type Check = { name: string; status: string; required: boolean; detail: string };
+    const checks =
+      result instanceof CliError
+        ? (result.details as { checks: Check[] }).checks
+        : (result as { data: { checks: Check[] } }).data.checks;
+    const line = checks.find((c) => c.name === 'subagents');
+    expect(line).toMatchObject({ status: 'ok', required: false });
+    expect(line?.detail).toBe(
+      'reader is offered no paid lookups: add mcp__x402__request to tools: to allow paid lookups there',
+    );
+    expect(await fs.readFile(join(agents, 'reader.md'), 'utf8')).toBe(reader);
+  });
+
   it('checks the router wiring and prescribes no command the CLI lacks', async () => {
     const { runRouterDoctor } = await import('./doctor');
     await runRouterInstall({}, ctx(), deps());
@@ -455,6 +490,7 @@ describe('the doctor this release registers', () => {
       })) as typeof fetch;
     const result = await runRouterDoctor(ctx(), {
       homeDir: home,
+      cwd: home,
       env: {},
       which: () => true,
       readMcp: async () => true,
