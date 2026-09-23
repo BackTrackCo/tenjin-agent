@@ -289,10 +289,10 @@ describe('the shortfall hook', () => {
   it('offers the lookup after a failed call, carrying its error', async () => {
     const { fetchImpl, calls } = router(EXECUTE);
     const base = (await readableEvent('https://x.test/a', 'WebFetch')) as Record<string, unknown>;
-    const { tool_response: _dropped, ...rest } = base;
     const out = await runShortfallHook(
       {
-        ...rest,
+        ...base,
+        tool_response: undefined,
         hook_event_name: 'PostToolUseFailure',
         error: 'getaddrinfo ENOTFOUND x.test',
         is_interrupt: false,
