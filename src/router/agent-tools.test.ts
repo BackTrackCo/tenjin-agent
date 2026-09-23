@@ -36,10 +36,20 @@ describe('what a definition says about the request tool', () => {
     ['a block list without it', 'tools:\n  - Read\n  - WebFetch\n', 'excluded'],
     ['a block list with the server', 'tools:\n  - Read\n  - mcp__x402\n', 'allowed'],
     ['the server wildcard', 'tools: mcp__x402__*\n', 'allowed'],
+    ['every MCP tool', 'tools: Read, mcp__*\n', 'allowed'],
+    ['a partial prefix of the server', 'tools: mcp__x4*\n', 'allowed'],
     ['every tool', 'tools: "*"\n', 'allowed'],
     ['another server only', 'tools: mcp__other__request\n', 'excluded'],
+    ["another server's wildcard", 'tools: mcp__other__*\n', 'excluded'],
+    ['a wildcard the name does not start with', 'tools: x402*\n', 'excluded'],
+    ['a wildcard inside a list', 'tools:\n  - Read\n  - mcp__*\n', 'allowed'],
     ['an empty list', 'tools: []\n', 'excluded'],
     ['no tools: but it is disallowed', 'disallowedTools: mcp__x402__request\n', 'excluded'],
+    ['every MCP tool disallowed', 'disallowedTools: mcp__*\n', 'excluded'],
+    ['the server disallowed by wildcard', 'disallowedTools: mcp__x402__*\n', 'excluded'],
+    ['the bare server disallowed', 'disallowedTools: mcp__x402\n', 'excluded'],
+    ['another server disallowed', 'disallowedTools: mcp__other__*\n', 'allowed'],
+    ['allowed by wildcard, then disallowed', 'tools: "*"\ndisallowedTools: mcp__*\n', 'excluded'],
   ] as const)('%s', (_label, frontmatter, expected) => {
     expect(accessOf(agent('a', frontmatter))).toBe(expected);
   });

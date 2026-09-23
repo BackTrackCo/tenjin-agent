@@ -53,13 +53,17 @@ export function accessOf(definition: string): RequestToolAccess {
   if (disallowed !== undefined && disallowed.some(namesRequestTool)) return 'excluded';
   const tools = listField(frontmatter, 'tools');
   if (tools === undefined) return 'allowed';
-  return tools.some((tool) => tool === '*' || namesRequestTool(tool)) ? 'allowed' : 'excluded';
+  return tools.some(namesRequestTool) ? 'allowed' : 'excluded';
 }
 
-/** The tool itself, the whole server, or a wildcard over the server. */
+/**
+ * Does one `tools:` or `disallowedTools:` entry cover the request tool? The
+ * tool itself, the bare server, or any `*`-suffixed pattern the tool's name
+ * starts with: `*`, `mcp__*`, `mcp__x402__*` and every prefix between.
+ */
 function namesRequestTool(tool: string): boolean {
-  const server = `mcp__${MCP_SERVER_NAME}`;
-  return tool === REQUEST_TOOL || tool === server || tool === `${server}__*`;
+  if (tool === REQUEST_TOOL || tool === `mcp__${MCP_SERVER_NAME}`) return true;
+  return tool.endsWith('*') && REQUEST_TOOL.startsWith(tool.slice(0, -1));
 }
 
 /**
