@@ -191,7 +191,15 @@ describe('what the tool tells the model to send', () => {
     try {
       const tools = await client.listTools();
       const request = tools.tools.find((t) => t.name === 'request')!;
-      expect(request.description?.startsWith(SCOPE_RULE)).toBe(true);
+      // ONE GENERIC SENTENCE, and no catalog here: the client is not a second
+      // source of what services exist, and the hook line names the one that
+      // fits the turn.
+      expect(request.description?.startsWith("Paid lookups through Tenjin's router")).toBe(true);
+      expect(request.description).toContain('a hook line names the service and how to call it');
+      for (const name of ['Exa', 'Firecrawl', 'CoinMarketCap', 'Wolfram', 'Hunter', 'Minerva']) {
+        expect(request.description).not.toContain(name);
+      }
+      expect(request.description).toContain(SCOPE_RULE);
       const schema = request.inputSchema as unknown as {
         properties: { query: { description: string }; id?: { description: string } };
         required?: string[];
