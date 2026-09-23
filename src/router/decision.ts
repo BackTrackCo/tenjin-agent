@@ -109,22 +109,44 @@ const CapabilityFields = {
 };
 
 const HookDecisionSchema = z.discriminatedUnion('action', [
-  z.strictObject({
-    action: z.literal('execute'),
-    id: IdSchema,
-    ...CapabilityFields,
-    /** The x402 URL a lookup would pay, for the line the server writes. */
-    endpoint: z.string().min(1).max(2_048),
-    /** What to pass in `query`, in the service's own terms. */
-    usage: z.string().min(1).max(300),
-    /**
-     * THE LINE, FINISHED. The server writes it with the real id in it and, on a
-     * native call, the exact search or URL that was denied. The client injects
-     * it and composes nothing, which is why there is no hint builder here any
-     * more: two sides writing the same sentence is how they drift.
-     */
-    hint: z.string().min(1).max(1_000),
-  }),
+  z
+    .strictObject({
+      action: z.literal('execute'),
+      id: IdSchema,
+      ...CapabilityFields,
+      /** The x402 URL a lookup would pay, for the line the server writes. */
+      endpoint: z.string().min(1).max(2_048),
+      /** What to pass in `query`, in the service's own terms. */
+      usage: z.string().min(1).max(300),
+      /**
+       * THE LINE, FINISHED. The server writes it with the real id in it and, on a
+       * native call, the exact search or URL that was denied. The client injects
+       * it and composes nothing, which is why there is no hint builder here any
+       * more: two sides writing the same sentence is how they drift.
+       */
+      hint: z.string().min(1).max(1_000),
+    })
+    .superRefine((decision, ctx) => {
+      // STRUCTURE, NEVER WORDING. This line lands in the model's context
+      // verbatim, so the shape is checked the way the id's alphabet is: one
+      // line, no control characters, and it has to be the call it claims to be,
+      // naming the id this same answer carries. A hint that fails any of these
+      // is a protocol error and the turn falls back to the generic line; nothing
+      // here rewrites a word of a hint that passes.
+      if (/[\p{Cc}\p{Cf}]/u.test(decision.hint)) {
+        ctx.addIssue({ code: 'custom', path: ['hint'], message: 'a hint is one plain line' });
+      }
+      if (!decision.hint.includes('request({')) {
+        ctx.addIssue({ code: 'custom', path: ['hint'], message: 'a hint names the call to make' });
+      }
+      if (!decision.hint.includes(decision.id)) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['hint'],
+          message: "a hint carries this answer's own id",
+        });
+      }
+    }),
   RefusedSchema.extend({ action: z.literal('native') }),
   RefusedSchema.extend({ action: z.literal('needs_input') }),
 ]);
