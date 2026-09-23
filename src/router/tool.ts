@@ -1,7 +1,7 @@
 import { runPay, type AdvertisedTerms, type PayDeps } from '../commands/pay';
 import { CliError } from '../lib/errors';
 import { toMoney } from '../lib/money';
-import { assertResultSchema, canonicalHash, validateAgainstSchema } from '../lib/request-schema';
+import { assertResultSchema, canonicalHash } from '../lib/request-schema';
 import { resolveContextSettings } from '../lib/settings';
 import type { SpendAuthorizer, WalletProvider } from '../lib/wallet';
 import type { TenjinSigner } from '../lib/wallet/provider';
@@ -113,7 +113,7 @@ export async function runRequestTool(
   // Bazaar lane asks for. It carries NO price: the advertised-price check and
   // the live-versus-advertised check are gone, and `gateSpend` caps the amount
   // actually signed. A ceiling the server states is not a ceiling.
-  const terms: AdvertisedTerms = { source: decision.description };
+  const terms: AdvertisedTerms = { source: decision.provider };
 
   try {
     // The request is the server's, sent verbatim: the only thing built here is
@@ -217,15 +217,10 @@ function checkContract(contract: DecisionContract): { status: FailStatus; reason
   if (built.method === 'GET' && built.body !== undefined) {
     return { status: 'failed', reason: 'The decision puts a body on a GET.' };
   }
-  if (contract.argumentSchema !== undefined) {
-    const check = validateAgainstSchema(contract.argumentSchema, contract.arguments ?? {});
-    if (!check.valid) {
-      return {
-        status: 'failed',
-        reason: `The decision's arguments fail its own schema: ${check.errors[0]}`,
-      };
-    }
-  }
+  // The arguments are NOT re-validated here. The server binds them against the
+  // capability's own schema and builds `request` from the result; this client
+  // never re-encodes them, so a second check against a schema the answer no
+  // longer carries would be checking a copy of somebody else's rule.
   if (contract.resultSchema !== undefined) {
     try {
       assertResultSchema(contract.resultSchema);

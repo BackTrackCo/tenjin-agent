@@ -59,15 +59,7 @@ function authorizer(decision: SpendAuthorization['decision'] = 'allow'): SpendAu
 
 function contract(over: Record<string, unknown> = {}): Record<string, unknown> {
   return {
-    method: 'GET',
-    url: PROVIDER,
     arguments: { symbol: 'BTC,ETH', convert: 'USD' },
-    argumentSchema: {
-      type: 'object',
-      properties: { symbol: { type: 'string' }, convert: { type: 'string' } },
-      required: ['symbol'],
-      additionalProperties: false,
-    },
     request: {
       url: `${PROVIDER}?symbol=BTC%2CETH&convert=USD`,
       method: 'GET',
@@ -87,8 +79,6 @@ function decision(over: Record<string, unknown> = {}): Record<string, unknown> {
       category: 'crypto price quote',
       provider: 'CoinMarketCap',
       capabilityDescription: 'latest market quotes for one or more cryptocurrencies',
-      endpoint: PROVIDER,
-      description: 'crypto price quote via pro-api.example.test',
       providerPriceAtomic: '10000',
       contract: contract(),
       ...over,
@@ -299,7 +289,6 @@ describe('what the tool refuses to execute', () => {
         request: { url: PROVIDER, method: 'GET', headers: { authorization: 'Bearer x' } },
       }),
     ],
-    ['arguments that fail their own schema', contract({ arguments: { convert: 'USD' } })],
     [
       'a URL this build cannot parse',
       contract({ request: { url: 'not a url', method: 'GET', headers: {} } }),

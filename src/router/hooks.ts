@@ -4,7 +4,6 @@ import type { PartialConfig } from '../lib/config';
 import { buildNativePacket, buildPromptPacket, type Packet, type PendingCall } from './context';
 import { requestDecision, ROUTER_PATH, type HookDecision } from './decision';
 import { GATE_TIMEOUT_MS } from './gate';
-import { toMoney } from '../lib/money';
 
 /**
  * The two hook handlers. Between them they do exactly three things: build the
@@ -94,21 +93,6 @@ async function resolveBaseUrl(deps: HookDeps): Promise<string> {
  */
 export const FALLBACK_LINE = 'call request({query}) for lookups';
 
-/**
- * THE SERVER'S OWN LINE, SAID ONCE. The gate knows which capability serves the
- * category it chose, so it writes the line: the service, what it does, the
- * price, the endpoint and what to put in `query`. A line naming the task and
- * the service is followed 40 times in 40 where a generic one is followed 8 to
- * 20, which is why this client no longer writes its own.
- *
- * The only thing done to it here is the id. The server writes `id` as a
- * parameter NAME, since it is describing the call rather than making one, so
- * the real id is substituted where that name stands.
- */
-export function hintLine(decision: { hint: string; id: string }): string {
-  return decision.hint.replace(/\bid\b(?=\s*[},])/, `id: ${JSON.stringify(decision.id)}`);
-}
-
 /** What a `needs_input` decision leaves the host to do, in one line. */
 export function clarificationLine(decision: HookDecision): string {
   if (decision.action === 'execute') return FALLBACK_LINE;
@@ -150,7 +134,7 @@ export async function runPromptHook(raw: unknown, deps: HookDeps): Promise<Promp
   if (decision.action === 'needs_input') {
     return { action: 'needs_input', ...injection(clarificationLine(decision)) };
   }
-  return { action: 'execute', id: decision.id, ...injection(hintLine(decision)) };
+  return { action: 'execute', id: decision.id, ...injection(decision.hint) };
 }
 
 function injection(line: string): { response: unknown } {
@@ -209,35 +193,16 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
       hookSpecificOutput: {
         hookEventName: 'PreToolUse',
         permissionDecision: 'deny',
-        permissionDecisionReason: redirectReason(pending, outcome),
+        // THE SERVER'S LINE, VERBATIM. It already carries the id and, on a
+        // native call, the exact search or URL that was denied, so there is
+        // nothing left here to compose and nothing to trim.
+        permissionDecisionReason: outcome.hint,
       },
     },
     decision: 'deny',
     action: 'execute',
     id: outcome.id,
   };
-}
-
-/**
- * WHAT THE HARNESS SHOWS IN PLACE OF THE DENIED CALL, and it has one job: be
- * copyable. The live smoke followed a redirect by id once in seven while this
- * line named neither the service nor what it does. It now says both, with the
- * price, what the service wants in `query`, the exact argument that was denied
- * and the id, JSON-encoded, on one line.
- */
-export function redirectReason(pending: PendingCall, decision: HookDecision): string {
-  const subject = ('query' in pending ? pending.query : pending.url).slice(0, 500);
-  if (decision.action !== 'execute') {
-    // Unreachable: a redirect only happens on `execute`. It still says
-    // something a host can act on rather than nothing.
-    return `Paid lookup available. Call request({query: ${JSON.stringify(subject)}}) instead.`;
-  }
-  return (
-    `${decision.provider} fits this better: ${decision.capabilityDescription}. ` +
-    `$${toMoney(decision.providerPriceAtomic).usd} for ${decision.usage}. ` +
-    `Call request({query: ${JSON.stringify(subject)}, id: ${JSON.stringify(decision.id)}}) ` +
-    'instead; native tools stay allowed for anything else.'
-  );
 }
 
 /** One free decision, with the hook's own deadline and its own silence. */

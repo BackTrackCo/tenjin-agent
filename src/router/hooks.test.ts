@@ -2,14 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import {
-  FALLBACK_LINE,
-  hintLine,
-  promptSkipReason,
-  redirectReason,
-  runNativeHook,
-  runPromptHook,
-} from './hooks';
+import { FALLBACK_LINE, promptSkipReason, runNativeHook, runPromptHook } from './hooks';
 import { ROUTER_PATH } from './decision';
 
 let dir: string;
@@ -52,7 +45,7 @@ const NATIVE = {
 const HINT =
   'Firecrawl fits this: scrapes one public URL and returns its content as clean markdown or HTML. ' +
   '$0.01 via https://vaaya.ai/api/run/firecrawl/scrape . ' +
-  'Call request({query: <the page URL>, id}) alone and wait for its result.';
+  'Call request({query: "https://example.test/spec", id: "k3f9-abcd"}) alone and wait for its result.';
 
 const EXECUTE = {
   schemaVersion: 1,
@@ -134,11 +127,9 @@ describe('the prompt hook', () => {
     });
     const line = (out.response as { hookSpecificOutput: { additionalContext: string } })
       .hookSpecificOutput.additionalContext;
-    // The server's own line, verbatim, with the real id where it wrote the
-    // parameter name.
-    expect(line).toBe(HINT.replace('id}', 'id: "k3f9-abcd"}'));
-    expect(line).toContain('Firecrawl fits this');
-    expect(line).toContain('$0.01');
+    // The server's own line, verbatim: it already carries the real id, and the
+    // client composes nothing.
+    expect(line).toBe(HINT);
     expect(out).toMatchObject({ action: 'execute', id: 'k3f9-abcd' });
     // One free call, carrying the packet and nothing else.
     expect(calls).toHaveLength(1);
@@ -264,12 +255,9 @@ describe('the native hook', () => {
       .hookSpecificOutput.permissionDecisionReason;
     // COPYABLE, not a template: the live smoke followed the redirect by id once
     // in seven while the line carried a `<your exact lookup>` placeholder.
-    expect(reason).toBe(
-      'Firecrawl fits this better: scrapes one public URL and returns its content as clean markdown or HTML. ' +
-        '$0.01 for the page URL. ' +
-        'Call request({query: "https://example.test/spec", id: "k3f9-abcd"}) instead; native tools stay allowed for anything else.',
-    );
-    expect(reason.split('\n')).toHaveLength(1);
+    // The same line the server wrote, which already names the denied URL and
+    // the id. Nothing here trims it or rewrites it.
+    expect(reason).toBe(HINT);
   });
 
   it('allows an event it cannot read rather than blocking a tool', async () => {
@@ -282,22 +270,6 @@ describe('the native hook', () => {
       await runNativeHook({ ...(nativeEvent('x') as object), tool_input: {} }, deps),
     ).toMatchObject({ decision: 'allow' });
     expect(calls).toHaveLength(0);
-  });
-});
-
-describe('the hint line', () => {
-  /** The server writes the line, and writes `id` as a parameter name because it
-   *  is describing the call rather than making one. The client substitutes the
-   *  real id and changes nothing else. */
-  it('prints the server line with the real id in it', () => {
-    expect(hintLine({ hint: HINT, id: 'k3f9-abcd' })).toBe(HINT.replace('id}', 'id: "k3f9-abcd"}'));
-    expect(hintLine({ hint: HINT, id: 'k3f9-abcd' })).toContain('Firecrawl fits this');
-  });
-
-  it('leaves a line that names no id parameter alone', () => {
-    expect(hintLine({ hint: 'Call request({query: <the coins>}) alone.', id: 'k3f9-abcd' })).toBe(
-      'Call request({query: <the coins>}) alone.',
-    );
   });
 });
 
@@ -325,13 +297,6 @@ describe('an id that is not an opaque handle', () => {
       .hookSpecificOutput.additionalContext;
     expect(line).toBe(FALLBACK_LINE);
     expect(out.id).toBeUndefined();
-  });
-
-  it('encodes the id it substitutes, whatever a later schema allows', () => {
-    // Belt and braces: the schema pins the alphabet, and this pins the line.
-    expect(hintLine({ hint: 'Call request({query: <x>, id}).', id: 'abc"def-123' })).toContain(
-      'id: "abc\\"def-123"',
-    );
   });
 });
 
@@ -405,42 +370,5 @@ describe('the native hook reads the turn it belongs to', () => {
     // Never asked: a decision made without the user's words is the thing being
     // avoided, not something to ask for and then ignore.
     expect(calls).toHaveLength(0);
-  });
-});
-
-/**
- * THE REDIRECT LINE IS COPY PASTE, AND IT NAMES THE SERVICE. The live smoke
- * followed a redirect by id once in seven while it named neither the service
- * nor what it does.
- */
-describe('the redirect line', () => {
-  const EXECUTED = {
-    action: 'execute' as const,
-    id: 'k3f9-abcd',
-    capabilityId: 'exa-search',
-    category: 'web research',
-    provider: 'Exa',
-    capabilityDescription: 'web search that returns ranked source pages',
-    endpoint: 'https://api.exa.ai/search',
-    providerPriceAtomic: '10000',
-    usage: 'the research question',
-    hint: 'unused here',
-  };
-
-  it('names the service, what it does, the price and the denied query', () => {
-    expect(redirectReason({ tool: 'WebSearch', query: 'x402 facilitators 2026' }, EXECUTED)).toBe(
-      'Exa fits this better: web search that returns ranked source pages. ' +
-        '$0.01 for the research question. ' +
-        'Call request({query: "x402 facilitators 2026", id: "k3f9-abcd"}) instead; native tools stay allowed for anything else.',
-    );
-  });
-
-  it('carries a fetched URL verbatim, encoded, on one line', () => {
-    const line = redirectReason(
-      { tool: 'WebFetch', url: 'https://example.test/a?b="c"' },
-      EXECUTED,
-    );
-    expect(line).toContain('"https://example.test/a?b=\\"c\\""');
-    expect(line.split('\n')).toHaveLength(1);
   });
 });

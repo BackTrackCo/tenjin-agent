@@ -57,10 +57,10 @@ const SERVICES = [
   'read an exact page (Firecrawl): scrapes one public URL and returns its content as clean markdown or HTML',
   'crypto price quote (CoinMarketCap): latest market quotes (price, market cap, 24h volume, percent changes) for one or more cryptocurrencies',
   'company profile by domain (CompanyEnrich): a full company profile from its domain, with employee and revenue figures as ranges',
-  'company match by name or social URL (CompanyEnrich): the best-matching company profile when the domain is unknown',
-  'email verification (Hunter): checks whether an email address is deliverable',
-  'person enrichment (Minerva): a person record from a full name plus an email address, or a Minerva person ID',
-  'computation (Wolfram Alpha): exact and numeric math, unit conversions, and curated facts and data',
+  'company match by name or social URL (CompanyEnrich): the best-matching company profile from its name or a social URL when the domain is unknown',
+  'email verification (Hunter): checks whether an email address is deliverable (valid, invalid, accept-all, webmail, disposable or unknown)',
+  "person enrichment (Minerva): a person's record (work history, education, contact details, demographics) from a full name plus an email address, or a Minerva person ID",
+  'computation (Wolfram Alpha): exact and numeric math (integrals, equations, series), unit conversions, and curated facts and data',
 ];
 
 const INSTRUCTIONS =

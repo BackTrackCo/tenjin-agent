@@ -22,12 +22,20 @@ parsed by the handler that serves it.
 
 Both `execute` answers name the capability: `capabilityId`, `category`,
 `provider` (the service's own name, such as `Wolfram Alpha`),
-`capabilityDescription` (one line saying what it can do), `endpoint` (the x402
-URL the lookup pays) and `providerPriceAtomic`. The hook answer adds the `id`,
-`usage` (what to pass in `query`) and `hint`, one line saying all of it for the
-host to inject: a line naming the service and the task is followed where a
-generic one is not. `routerCatalogListing()` in `catalog.ts` lists the same
-fields for every capability.
+`capabilityDescription` (one line saying what it can do) and
+`providerPriceAtomic`.
+
+The hook answer adds the `id`, `endpoint` (the x402 URL the lookup pays),
+`usage` (what to pass in `query`) and `hint`, the one line the host injects
+verbatim: a line naming the service and the task is followed where a generic
+one is not. For the prompt hook it asks for `request({query: <usage>, id})`;
+for a denied native call it asks for `request` with that call's own search or
+URL as the query, and leaves native tools allowed for anything else. The
+server builds both lines, with the real id in them.
+
+The tool answer adds `contract`: `request`, the exact HTTP call to send
+verbatim; `arguments`, the flat view of what was bound; and `resultSchema`,
+when the capability declares one, to reject a paid non-answer.
 
 The hook answer carries **no** contract. The hook has the user's words but not
 the task the host will run, so it names the one capability serving the gate's
@@ -62,9 +70,8 @@ is valid and is the fallback for an id that has expired; the answer says so in
 
 Two rules the fixtures exist to hold:
 
-- **In a tool answer, `provider`, `endpoint`, `description` and `contract` are
-  one decision.** They are produced together, so a caller cannot approve one
-  offer and receive another.
+- **In a tool answer, `provider` and `contract` are one decision.** They are
+  produced together, so a caller cannot approve one offer and receive another.
 - **Every non-execute answer carries `diagnostics`, nested inside `decision`.**
   That is the intended shape: they sit on the union's non-execute arms so a
   contractless outcome without diagnostics does not typecheck.

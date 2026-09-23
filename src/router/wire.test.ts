@@ -160,9 +160,11 @@ describe('every answer payload on disk', () => {
       'usage',
     ]);
     expect(execute.contract).toBeUndefined();
-    // The server's own line, carrying the service, the price and the endpoint.
+    // THE LINE IS FINISHED. It names the service and the endpoint and already
+    // carries the real id, so the client injects it and composes nothing.
     expect(String(execute.hint)).toContain(String(execute.provider));
     expect(String(execute.hint)).toContain(String(execute.endpoint));
+    expect(String(execute.hint)).toContain(`id: "${String(execute.id)}"`);
   });
 
   /** The capability in the description and the one in the contract are ONE
@@ -170,12 +172,15 @@ describe('every answer payload on disk', () => {
   it('gives the tool the capability, its price and its contract together', () => {
     for (const name of ['wire-lookup-execute-get.json', 'wire-lookup-execute-post.json']) {
       const decision = fixture(name).decision as {
-        description: string;
+        provider: string;
+        capabilityDescription: string;
         providerPriceAtomic: string;
         contract: { request: { url: string } };
       };
       expect(decision.providerPriceAtomic).toMatch(/^\d+$/);
-      expect(decision.description.length).toBeGreaterThan(0);
+      expect(decision.provider.length).toBeGreaterThan(0);
+      expect(decision.capabilityDescription.length).toBeGreaterThan(0);
+      // The contract is the built request and what it sent, nothing to rebuild.
       expect(new URL(decision.contract.request.url).protocol).toBe('https:');
     }
   });

@@ -97,12 +97,8 @@ const TOOL_EXECUTE = {
     category: 'crypto price quote',
     provider: 'CoinMarketCap',
     capabilityDescription: 'latest market quotes for one or more cryptocurrencies',
-    endpoint: 'https://pro-api.example.test/quotes',
-    description: 'crypto price quote via pro-api.example.test',
     providerPriceAtomic: '10000',
     contract: {
-      method: 'GET',
-      url: 'https://pro-api.example.test/quotes',
       request: { url: 'https://pro-api.example.test/quotes', method: 'GET', headers: {} },
     },
   },

@@ -7,29 +7,11 @@
     "category": "crypto price quote",
     "provider": "CoinMarketCap",
     "capabilityDescription": "latest market quotes (price, market cap, 24h volume, percent changes) for one or more cryptocurrencies",
-    "endpoint": "https://pro-api.coinmarketcap.com/x402/v3/cryptocurrency/quotes/latest",
-    "description": "crypto price quote via pro-api.coinmarketcap.com",
     "providerPriceAtomic": "10000",
     "contract": {
-      "method": "GET",
-      "url": "https://pro-api.coinmarketcap.com/x402/v3/cryptocurrency/quotes/latest",
       "arguments": {
         "symbol": "BTC,ETH",
         "convert": "USD"
-      },
-      "argumentSchema": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "type": "object",
-        "properties": {
-          "symbol": {
-            "type": "string"
-          },
-          "convert": {
-            "type": "string"
-          }
-        },
-        "required": ["symbol"],
-        "additionalProperties": false
       },
       "resultSchema": {
         "type": "object",
@@ -40,12 +22,6 @@
         },
         "required": ["data"]
       },
-      "advertised": {
-        "network": "eip155:8453",
-        "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-        "maxAmountAtomic": "10000"
-      },
-      "registryListed": true,
       "request": {
         "url": "https://pro-api.coinmarketcap.com/x402/v3/cryptocurrency/quotes/latest?symbol=BTC%2CETH&convert=USD",
         "method": "GET",

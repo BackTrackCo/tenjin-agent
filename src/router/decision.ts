@@ -39,23 +39,10 @@ const RequestSchema = z.object({
 });
 
 const ContractSchema = z.object({
-  method: z.enum(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']),
-  url: z.string().min(1).max(16_384),
-  /** Flat, for display and for the schema check; never re-encoded into a call. */
+  /** Flat, for display and for the result check; never re-encoded into a call:
+   *  the server built `request` from them and this client sends that verbatim. */
   arguments: z.record(z.string(), z.unknown()).optional(),
-  argumentSchema: z.record(z.string(), z.unknown()).optional(),
   resultSchema: z.record(z.string(), z.unknown()).optional(),
-  /** What the capability says it costs. DISPLAY ONLY: the amount actually
-   *  signed is what `gateSpend` caps, and a price a server states is not a
-   *  ceiling anyone holds it to. */
-  advertised: z
-    .object({
-      network: z.string().min(1).max(64),
-      asset: z.string().min(1).max(128),
-      maxAmountAtomic: z.string().regex(/^\d+$/),
-    })
-    .optional(),
-  registryListed: z.boolean().optional(),
   request: RequestSchema,
 });
 export type DecisionContract = z.infer<typeof ContractSchema>;
@@ -116,8 +103,8 @@ const CapabilityFields = {
   /** The service's own name, not the x402 reseller in front of it. */
   provider: z.string().min(1).max(120),
   capabilityDescription: z.string().min(1).max(500),
-  /** The x402 URL a lookup pays. */
-  endpoint: z.string().min(1).max(2_048),
+  /** What the provider charges, atomic USDC. DISPLAY ONLY: the amount actually
+   *  signed is what `gateSpend` caps. */
   providerPriceAtomic: z.string().regex(/^\d+$/),
 };
 
@@ -126,9 +113,16 @@ const HookDecisionSchema = z.discriminatedUnion('action', [
     action: z.literal('execute'),
     id: IdSchema,
     ...CapabilityFields,
+    /** The x402 URL a lookup would pay, for the line the server writes. */
+    endpoint: z.string().min(1).max(2_048),
     /** What to pass in `query`, in the service's own terms. */
     usage: z.string().min(1).max(300),
-    /** The server's own line, said once so the client does not re-say it. */
+    /**
+     * THE LINE, FINISHED. The server writes it with the real id in it and, on a
+     * native call, the exact search or URL that was denied. The client injects
+     * it and composes nothing, which is why there is no hint builder here any
+     * more: two sides writing the same sentence is how they drift.
+     */
     hint: z.string().min(1).max(1_000),
   }),
   RefusedSchema.extend({ action: z.literal('native') }),
@@ -139,8 +133,6 @@ const ToolDecisionSchema = z.discriminatedUnion('action', [
   z.strictObject({
     action: z.literal('execute'),
     ...CapabilityFields,
-    /** One plain line naming the capability and who serves it. */
-    description: z.string().min(1).max(300),
     contract: ContractSchema,
   }),
   RefusedSchema.extend({ action: z.literal('native') }),

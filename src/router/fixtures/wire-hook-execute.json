@@ -11,7 +11,7 @@
     "endpoint": "https://wolframalpha.x402.paysponge.com/v2/query",
     "providerPriceAtomic": "20000",
     "usage": "the expression exactly as written",
-    "hint": "Wolfram Alpha fits this: exact and numeric math (integrals, equations, series), unit conversions, and curated facts and data. $0.02 via https://wolframalpha.x402.paysponge.com/v2/query . Call request({query: <the expression exactly as written>, id}) alone and wait for its result."
+    "hint": "Wolfram Alpha fits this: exact and numeric math (integrals, equations, series), unit conversions, and curated facts and data. $0.02 via https://wolframalpha.x402.paysponge.com/v2/query . Call request({query: <the expression exactly as written>, id: \"0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d01\"}) alone and wait for its result."
   },
   "jev": {
     "calls": 1,

@@ -7,36 +7,12 @@
     "category": "read an exact page",
     "provider": "Firecrawl",
     "capabilityDescription": "scrapes one public URL and returns its content as clean markdown or HTML",
-    "endpoint": "https://vaaya.ai/api/run/firecrawl/scrape",
-    "description": "read an exact page via vaaya.ai",
     "providerPriceAtomic": "10000",
     "contract": {
-      "method": "POST",
-      "url": "https://vaaya.ai/api/run/firecrawl/scrape",
       "arguments": {
         "url": "https://example.test/spec",
         "formats": "markdown"
       },
-      "argumentSchema": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "type": "object",
-        "properties": {
-          "url": {
-            "type": "string"
-          },
-          "formats": {
-            "type": "string"
-          }
-        },
-        "required": ["url"],
-        "additionalProperties": false
-      },
-      "advertised": {
-        "network": "eip155:8453",
-        "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-        "maxAmountAtomic": "10000"
-      },
-      "registryListed": true,
       "request": {
         "url": "https://vaaya.ai/api/run/firecrawl/scrape",
         "method": "POST",
