@@ -12,7 +12,7 @@ export function registerCore(reg: Registration): void {
 
   leaf(SETUP, 'install', 'set up Tenjin for Claude Code and create a wallet')
     .description(
-      'Set up Claude Code to use Tenjin: two hook entries, the `x402` MCP server and its permission rule, spend limits for each lookup, and a wallet if this machine has none.',
+      'Set up Claude Code to use Tenjin: three hook entries, the `x402` MCP server and its permission rule, spend limits for each lookup, and a wallet if this machine has none.',
     )
     .option('--project', "write into this project's .claude/settings.json instead of your home one")
     .option('--no-wallet', 'create no wallet')

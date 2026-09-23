@@ -95,7 +95,7 @@ function deps(over: Record<string, unknown> = {}) {
 }
 
 describe('tenjin install', () => {
-  it('writes the two hook entries, the allow rule and the MCP registration', async () => {
+  it('writes the three hook entries, the allow rule and the MCP registration', async () => {
     const registerMcp = vi.fn(async () => undefined);
     const result = await runRouterInstall({}, ctx(), deps({ registerMcp }));
     const settings = await readSettings();
@@ -106,6 +106,10 @@ describe('tenjin install', () => {
     expect(hooks.PreToolUse![0]).toMatchObject({
       matcher: 'WebSearch|WebFetch',
       hooks: [{ type: 'command', command: 'tenjin hook native', timeout: 5 }],
+    });
+    expect(hooks.PreToolUse![1]).toEqual({
+      matcher: 'Agent|Task',
+      hooks: [{ type: 'command', command: 'tenjin hook agent', timeout: 5 }],
     });
     expect((settings.permissions as { allow: string[] }).allow).toContain(ALLOW_RULE);
     expect(registerMcp).toHaveBeenCalledWith(MCP_ADD_COMMAND, {
@@ -808,9 +812,13 @@ describe('tenjin update re-applies the install', () => {
     expect(after.UserPromptSubmit![0]!.hooks).toEqual([
       { type: 'command', command: 'tenjin hook prompt', timeout: 5 },
     ]);
-    expect(after.PreToolUse).toHaveLength(1);
+    // And an install from before the delegation arm gains it on the same pass.
+    expect(after.PreToolUse).toHaveLength(2);
     expect(after.PreToolUse![0]!.hooks).toEqual([
       { type: 'command', command: 'tenjin hook native', timeout: 5 },
+    ]);
+    expect(after.PreToolUse![1]!.hooks).toEqual([
+      { type: 'command', command: 'tenjin hook agent', timeout: 5 },
     ]);
   });
 
@@ -877,6 +885,38 @@ describe('tenjin update re-applies the install', () => {
         ? (out.details as { checks: { name: string; status: string }[] })
         : (out as { data: { checks: { name: string; status: string }[] } }).data;
     expect(checks.checks.find((c) => c.name === 'hooks')?.status).toBe('ok');
+  });
+
+  it('doctor names a missing delegation entry and the refresh that adds it', async () => {
+    const fs = await import('node:fs/promises');
+    const { runRouterDoctor } = await import('./doctor');
+    const cwd = join(home, 'project');
+    await fs.mkdir(cwd, { recursive: true });
+    await runRouterInstall({ project: true }, ctx(), deps({ cwd }));
+    const path = join(cwd, '.claude', 'settings.json');
+    const settings = JSON.parse(await fs.readFile(path, 'utf8')) as {
+      hooks: Record<string, { matcher?: string }[]>;
+    };
+    settings.hooks.PreToolUse = settings.hooks.PreToolUse!.filter(
+      (e) => e.matcher !== 'Agent|Task',
+    );
+    await fs.writeFile(path, JSON.stringify(settings, null, 2) + '\n');
+    const out = await runRouterDoctor(ctx(), {
+      homeDir: home,
+      cwd,
+      project: true,
+      env: {},
+      which: () => true,
+      fetchImpl: probe400,
+    }).catch((e: unknown) => e);
+    type Check = { name: string; status: string; detail: string; fix?: string };
+    const checks =
+      out instanceof CliError
+        ? (out.details as { checks: Check[] })
+        : (out as { data: { checks: Check[] } }).data;
+    const hooks = checks.checks.find((c) => c.name === 'hooks');
+    expect(hooks).toMatchObject({ status: 'warn', fix: 'Run `tenjin install --refresh`.' });
+    expect(hooks?.detail).toContain('Agent|Task');
   });
 });
 

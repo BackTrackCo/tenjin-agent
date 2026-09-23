@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { promptSkipReason, runNativeHook, runPromptHook } from './hooks';
+import { promptSkipReason, runDelegationHook, runNativeHook, runPromptHook } from './hooks';
 import { ROUTER_PATH } from './decision';
 import { renderProgress, resolveProgressSession, sessionDir } from './progress';
 
@@ -198,24 +198,24 @@ describe('the prompt hook', () => {
 });
 
 describe('the native hook', () => {
-  /** ALLOW IS THE DEFAULT and a redirect is the exception. */
+  /** NO OUTPUT IS THE DEFAULT, and an offer is the exception. */
   it.each([
     ['native', NATIVE],
     ['needs_input', NEEDS_INPUT],
-  ])('allows the call on %s', async (_label, body) => {
+  ])('says nothing on %s', async (_label, body) => {
     const { fetchImpl } = router(body);
     const out = await runNativeHook(await readableEvent('btc price today'), {
       dataDir: dir,
       baseUrl: BASE,
       fetchImpl,
     });
-    expect(out).toMatchObject({ decision: 'allow', response: null });
+    expect(out.response).toBeNull();
   });
 
   it.each([
     ['a refusal', { error: { code: 'nope', message: 'no' } }, 503],
     ['a body this build cannot read', { schemaVersion: 2 }, 200],
-  ])('allows the call on %s', async (_label, body, status) => {
+  ])('says nothing on %s', async (_label, body, status) => {
     const { fetchImpl } = router(body, status);
     const out = await runNativeHook(await readableEvent('btc price today'), {
       dataDir: dir,
@@ -223,10 +223,14 @@ describe('the native hook', () => {
       fetchImpl,
       warn: () => undefined,
     });
-    expect(out.decision).toBe('allow');
+    expect(out.response).toBeNull();
   });
 
-  it('redirects a clear execute and carries the id into the redirect', async () => {
+  /**
+   * THE CALL RUNS, AND THE OFFER SITS BESIDE IT. A deny stranded every
+   * subagent that could not reach `request` (tenjin-agent#377).
+   */
+  it('runs the call on a clear execute and offers the lookup beside it', async () => {
     const { fetchImpl, calls } = router(EXECUTE);
     const path = await transcriptFor([
       { type: 'user', sessionId: 'sess-1', message: { content: 'read that spec for me' } },
@@ -238,7 +242,7 @@ describe('the native hook', () => {
       },
       { dataDir: dir, baseUrl: BASE, fetchImpl },
     );
-    expect(out.decision).toBe('deny');
+    expect(out.action).toBe('execute');
     expect(out.id).toBe('k3f9-abcd');
     // The pending call rides INSIDE the packet: that is what tells the route
     // this is the native hook asking.
@@ -248,24 +252,28 @@ describe('the native hook', () => {
       tool: 'WebFetch',
       url: 'https://example.test/spec',
     });
-    const reason = (out.response as { hookSpecificOutput: { permissionDecisionReason: string } })
-      .hookSpecificOutput.permissionDecisionReason;
-    // COPYABLE, not a template: the live smoke followed the redirect by id once
-    // in seven while the line carried a `<your exact lookup>` placeholder.
-    // The same line the server wrote, which already names the denied URL and
-    // the id. Nothing here trims it or rewrites it.
-    expect(reason).toBe(HINT);
+    const output = (
+      out.response as {
+        hookSpecificOutput: { permissionDecision: string; additionalContext: string };
+      }
+    ).hookSpecificOutput;
+    expect(output.permissionDecision).toBe('allow');
+    // The server's line, whole and untouched, framed as an option: it already
+    // names the URL and the id, and the client adds no provider or price.
+    expect(output.additionalContext).toBe(
+      `Your WebFetch call is running as usual. Optional, only if its result falls short: ${HINT}`,
+    );
   });
 
   it('allows an event it cannot read rather than blocking a tool', async () => {
     const { fetchImpl, calls } = router(EXECUTE);
     const deps = { dataDir: dir, baseUrl: BASE, fetchImpl };
     expect(await runNativeHook({ hook_event_name: 'PreToolUse' }, deps)).toMatchObject({
-      decision: 'allow',
+      response: null,
     });
     expect(
       await runNativeHook({ ...(nativeEvent('x') as object), tool_input: {} }, deps),
-    ).toMatchObject({ decision: 'allow' });
+    ).toMatchObject({ response: null });
     expect(calls).toHaveLength(0);
   });
 });
@@ -361,7 +369,7 @@ describe('the native hook reads the turn it belongs to', () => {
       fetchImpl,
       warn: () => undefined,
     });
-    expect(out).toMatchObject({ decision: 'allow', response: null });
+    expect(out).toMatchObject({ response: null });
     // Never asked: a decision made without the user's words is the thing being
     // avoided, not something to ask for and then ignore.
     expect(calls).toHaveLength(0);
@@ -405,7 +413,7 @@ describe('a hint that is not one honest line', () => {
       warn: () => undefined,
     });
     // Nothing to show in place of the call, so the call runs.
-    expect(out).toMatchObject({ decision: 'allow', response: null });
+    expect(out).toMatchObject({ response: null });
   });
 });
 
@@ -461,7 +469,7 @@ describe('what the hook leaves for the status line', () => {
       fetchImpl,
     });
 
-    expect(out).toMatchObject({ decision: 'allow', response: null });
+    expect(out).toMatchObject({ response: null });
     expect(await renderProgress(dir, 'sess-1')).toBe(
       'x402 · search: native tools (no x402 payment)',
     );
@@ -493,5 +501,293 @@ describe('what the hook leaves for the status line', () => {
 
     expect(out.action).toBe('execute');
     expect(out.id).toBe('k3f9-abcd');
+  });
+});
+
+/**
+ * SUBAGENTS. The harness hands a subagent's hooks the PARENT's transcript path
+ * plus the subagent's own `agent_id`; the subagent's rows live beside it under
+ * `<session>/subagents/agent-<id>.jsonl`, opening with the delegated task.
+ */
+describe('a subagent', () => {
+  async function setConfig(values: Record<string, unknown>): Promise<void> {
+    const fs = await import('node:fs/promises');
+    await fs.writeFile(join(dir, 'config.json'), JSON.stringify(values));
+  }
+
+  async function parentTranscript(): Promise<string> {
+    const fs = await import('node:fs/promises');
+    const path = join(dir, 'sess-1.jsonl');
+    await fs.writeFile(
+      path,
+      JSON.stringify({
+        type: 'user',
+        sessionId: 'sess-1',
+        message: { content: 'Look into the CDP x402 docs with two helpers.' },
+      }),
+    );
+    return path;
+  }
+
+  async function subagentTranscript(agentId: string, task: string): Promise<void> {
+    const fs = await import('node:fs/promises');
+    const folder = join(dir, 'sess-1', 'subagents');
+    await fs.mkdir(folder, { recursive: true });
+    const base = { sessionId: 'sess-1', isSidechain: true, agentId };
+    const rows = [
+      { ...base, type: 'user', message: { role: 'user', content: task } },
+      // The harness's own reminder is not the task.
+      { ...base, type: 'user', isMeta: true, message: { content: '<system-reminder>x' } },
+      // Another subagent's row never leaks in, even in this file.
+      { ...base, agentId: 'other', type: 'user', message: { content: 'SOMEONE ELSE' } },
+    ];
+    await fs.writeFile(
+      join(folder, `agent-${agentId}.jsonl`),
+      rows.map((r) => JSON.stringify(r)).join('\n'),
+    );
+  }
+
+  function subagentFetch(transcriptPath: string, agentId: string): unknown {
+    return {
+      ...(nativeEvent('https://docs.cdp.coinbase.com/x402/welcome', 'WebFetch') as object),
+      transcript_path: transcriptPath,
+      agent_id: agentId,
+      agent_type: 'restricted-reader',
+    };
+  }
+
+  /** The #377 regression: two assignments, one URL, two different packets. */
+  it('routes its native call on its own task, not the parent turn', async () => {
+    const path = await parentTranscript();
+    await subagentTranscript('a1', 'Read the page with native tools only. No paid services.');
+    await subagentTranscript('b2', 'Extract the page as clean markdown with a specialist.');
+    const { fetchImpl, calls } = router(NATIVE);
+    const deps = { dataDir: dir, baseUrl: BASE, fetchImpl };
+    await runNativeHook(subagentFetch(path, 'a1'), deps);
+    await runNativeHook(subagentFetch(path, 'b2'), deps);
+
+    const [a, b] = calls as { body: { packet: { current: { text: string }; history: unknown } } }[];
+    expect(JSON.stringify(a!.body)).not.toBe(JSON.stringify(b!.body));
+    expect(a!.body.packet.current.text).toBe(
+      'Read the page with native tools only. No paid services.',
+    );
+    expect(b!.body.packet.current.text).toBe(
+      'Extract the page as clean markdown with a specialist.',
+    );
+    // The parent's turn stays in front of it, so a restriction given there
+    // still reaches the call.
+    expect(JSON.stringify(a!.body.packet.history)).toContain('CDP x402 docs');
+    for (const call of [a, b]) {
+      expect(JSON.stringify(call)).not.toContain('SOMEONE ELSE');
+      expect(JSON.stringify(call)).not.toContain('system-reminder');
+    }
+  });
+
+  it("falls back to the parent's turn when its own transcript is missing", async () => {
+    const path = await parentTranscript();
+    const { fetchImpl, calls } = router(NATIVE);
+    await runNativeHook(subagentFetch(path, 'gone'), { dataDir: dir, baseUrl: BASE, fetchImpl });
+    const sent = calls[0] as { body: { packet: { current: { text: string } } } };
+    expect(sent.body.packet.current.text).toBe('Look into the CDP x402 docs with two helpers.');
+  });
+
+  it('refuses an agent id that is not one path segment', async () => {
+    const path = await parentTranscript();
+    await subagentTranscript('a1', 'the real task');
+    const { fetchImpl, calls } = router(NATIVE);
+    await runNativeHook(subagentFetch(path, '../subagents/agent-a1'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+    expect(JSON.stringify(calls[0])).not.toContain('the real task');
+  });
+
+  /**
+   * A SUBAGENT CANNOT REACH THE USER, so an offer it would need approval for
+   * is not shown at all. The fixture's provider price is 10000 atomic.
+   */
+  it('is not offered a lookup above maxAutoSpend', async () => {
+    await setConfig({ maxAutoSpend: '9999' });
+    const path = await parentTranscript();
+    await subagentTranscript('a1', 'Read this page for me.');
+    const { fetchImpl } = router(EXECUTE);
+    const out = await runNativeHook(subagentFetch(path, 'a1'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+    expect(out).toMatchObject({ response: null, action: 'execute', withheld: true });
+    expect(await renderProgress(dir, 'sess-1')).toBe(
+      'x402 · search: native tools (offer above auto-spend)',
+    );
+  });
+
+  it('is offered a lookup at or below maxAutoSpend', async () => {
+    await setConfig({ maxAutoSpend: '10000' });
+    const path = await parentTranscript();
+    await subagentTranscript('a1', 'Read this page for me.');
+    const { fetchImpl } = router(EXECUTE);
+    const out = await runNativeHook(subagentFetch(path, 'a1'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+    expect(out.withheld).toBeUndefined();
+    expect(JSON.stringify(out.response)).toContain(HINT.slice(0, 40));
+  });
+
+  it('leaves the main agent its offer whatever the cap', async () => {
+    await setConfig({ maxAutoSpend: '0' });
+    const { fetchImpl } = router(EXECUTE);
+    const out = await runNativeHook(await readableEvent('https://example.test/spec', 'WebFetch'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+    expect(out.response).not.toBeNull();
+  });
+});
+
+describe('the delegation hook', () => {
+  const TASK = 'Read https://example.test/spec and summarize the auth section.';
+
+  async function delegation(
+    toolInput: Record<string, unknown> = {
+      description: 'read the spec',
+      prompt: TASK,
+      subagent_type: 'general-purpose',
+    },
+    toolName = 'Agent',
+  ): Promise<unknown> {
+    const path = await transcriptFor([
+      { type: 'user', sessionId: 'sess-1', message: { content: 'No paid services this time.' } },
+    ]);
+    return {
+      hook_event_name: 'PreToolUse',
+      session_id: 'sess-1',
+      transcript_path: path,
+      tool_name: toolName,
+      tool_input: toolInput,
+    };
+  }
+
+  beforeEach(async () => {
+    const fs = await import('node:fs/promises');
+    await fs.writeFile(join(dir, 'config.json'), JSON.stringify({ maxAutoSpend: '250000' }));
+  });
+
+  it.each(['Agent', 'Task'])(
+    'appends the offer to the %s task and keeps every other field',
+    async (tool) => {
+      const { fetchImpl, calls } = router(EXECUTE);
+      const out = await runDelegationHook(await delegation(undefined, tool), {
+        dataDir: dir,
+        baseUrl: BASE,
+        fetchImpl,
+      });
+      expect(out).toMatchObject({ action: 'execute', id: 'k3f9-abcd' });
+      const output = (
+        out.response as {
+          hookSpecificOutput: {
+            hookEventName: string;
+            permissionDecision: string;
+            updatedInput: Record<string, unknown>;
+          };
+        }
+      ).hookSpecificOutput;
+      expect(output.hookEventName).toBe('PreToolUse');
+      expect(output.permissionDecision).toBe('allow');
+      expect(output.updatedInput).toEqual({
+        description: 'read the spec',
+        subagent_type: 'general-purpose',
+        prompt: `${TASK}\n\nOptional, if your own tools fall short: ${HINT} Your own tools are fine when they are enough.`,
+      });
+      // The task is the current message, the parent's turn is history, and
+      // it is the ordinary hook body: no pending call, nothing new on the wire.
+      const sent = calls[0] as { body: Record<string, unknown> };
+      expect(Object.keys(sent.body).sort()).toEqual(['packet', 'schemaVersion']);
+      const packet = sent.body.packet as {
+        current: { text: string };
+        history: unknown;
+        pendingCall?: unknown;
+      };
+      expect(packet.current.text).toBe(TASK);
+      expect(JSON.stringify(packet.history)).toContain('No paid services this time.');
+      expect(packet.pendingCall).toBeUndefined();
+    },
+  );
+
+  it.each([
+    ['native', NATIVE, 200],
+    ['needs_input', NEEDS_INPUT, 200],
+    ['a refusal', { error: { code: 'nope', message: 'no' } }, 503],
+    ['a body this build cannot read', { schemaVersion: 2 }, 200],
+  ])('says nothing on %s', async (_label, body, status) => {
+    const { fetchImpl } = router(body, status);
+    const out = await runDelegationHook(await delegation(), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+      warn: () => undefined,
+    });
+    expect(out.response).toBeNull();
+  });
+
+  it('says nothing, and asks nothing, without a task or a readable turn', async () => {
+    const { fetchImpl, calls } = router(EXECUTE);
+    const deps = { dataDir: dir, baseUrl: BASE, fetchImpl };
+    expect((await runDelegationHook(await delegation({ prompt: '  ' }), deps)).response).toBe(null);
+    const unreadable = { ...((await delegation()) as object), transcript_path: undefined };
+    expect((await runDelegationHook(unreadable, deps)).response).toBeNull();
+    expect((await runDelegationHook({ hook_event_name: 'PreToolUse' }, deps)).response).toBe(null);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('withholds an offer the subagent could not pay for alone', async () => {
+    const fs = await import('node:fs/promises');
+    await fs.writeFile(join(dir, 'config.json'), JSON.stringify({ maxAutoSpend: '9999' }));
+    const { fetchImpl } = router(EXECUTE);
+    const out = await runDelegationHook(await delegation(), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+    expect(out).toMatchObject({ response: null, withheld: true });
+  });
+});
+
+/** Every arm, every answer, main agent and subagent alike: never a deny. */
+describe('no hook path', () => {
+  it.each([
+    ['execute', EXECUTE, 200],
+    ['native', NATIVE, 200],
+    ['needs_input', NEEDS_INPUT, 200],
+    ['a refusal', { error: { code: 'nope', message: 'no' } }, 503],
+  ])('denies anything on %s', async (_label, body, status) => {
+    const { fetchImpl } = router(body, status);
+    const deps = { dataDir: dir, baseUrl: BASE, fetchImpl, warn: () => undefined };
+    const fs = await import('node:fs/promises');
+    await fs.writeFile(join(dir, 'config.json'), JSON.stringify({ maxAutoSpend: '250000' }));
+    const events = [
+      await readableEvent('btc price today'),
+      await readableEvent('https://example.test/spec', 'WebFetch'),
+      { ...((await readableEvent('btc price today')) as object), agent_id: 'a1' },
+    ];
+    const outputs = [
+      ...(await Promise.all(events.map((event) => runNativeHook(event, deps)))),
+      await runDelegationHook(
+        {
+          session_id: 'sess-1',
+          transcript_path: (events[0] as { transcript_path: string }).transcript_path,
+          tool_name: 'Agent',
+          tool_input: { prompt: 'check the btc price' },
+        },
+        deps,
+      ),
+    ];
+    for (const out of outputs) {
+      expect(JSON.stringify(out.response ?? {})).not.toContain('deny');
+    }
   });
 });

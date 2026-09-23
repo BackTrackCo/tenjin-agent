@@ -15,7 +15,7 @@ import {
 } from './progress';
 
 /**
- * The two hook handlers. Between them they do exactly three things: build the
+ * The three hook handlers. Between them they do exactly three things: build the
  * bounded packet, ask for one free decision, and say one thing back to the
  * harness.
  *
@@ -27,6 +27,11 @@ import {
  * EVERY FAILURE IS SILENT. A backend that is down, slow or answering nonsense
  * leaves the native call allowed and the prompt unchanged; the cause goes to
  * stderr. The user's turn is never blocked by this.
+ *
+ * AND NOTHING IS EVER DENIED. A paid lookup is an OFFER beside the free tool,
+ * never a replacement for it: a denied WebFetch stranded every subagent that
+ * could not reach `request` (tenjin-agent#377) and painted the main agent's
+ * transcript red. The free tool runs, and the agent picks.
  */
 
 const PromptEventSchema = z.object({
@@ -42,6 +47,17 @@ const NativeEventSchema = z.object({
    *  reaches both gates. */
   transcript_path: z.string().optional(),
   tool_name: z.enum(['WebSearch', 'WebFetch']),
+  tool_input: z.record(z.string(), z.unknown()),
+  /** Present only inside a subagent, which is the one caller that cannot reach
+   *  the user to approve a spend. */
+  agent_id: z.string().min(1).max(200).optional(),
+});
+
+const DelegationEventSchema = z.object({
+  session_id: z.string().min(1).max(200),
+  transcript_path: z.string().optional(),
+  /** `Task` is the tool's older name; the matcher `install` writes takes both. */
+  tool_name: z.enum(['Agent', 'Task']),
   tool_input: z.record(z.string(), z.unknown()),
 });
 
@@ -61,6 +77,16 @@ export function promptSkipReason(prompt: string): PromptSkip | null {
   if (trimmed.startsWith('/')) return 'slash';
   const normalized = trimmed.toLowerCase().replace(/[.!,]+$/, '');
   return ACKNOWLEDGEMENTS.has(normalized) ? 'acknowledgement' : null;
+}
+
+/** Where the offer sits beside the free tool. The hint itself is the server's
+ *  line, verbatim: this client names no provider and no price of its own. */
+function nativeOffer(tool: 'WebSearch' | 'WebFetch', hint: string): string {
+  return `Your ${tool} call is running as usual. Optional, only if its result falls short: ${hint}`;
+}
+
+function delegationOffer(hint: string): string {
+  return `Optional, if your own tools fall short: ${hint} Your own tools are fine when they are enough.`;
 }
 
 export interface HookDeps {
@@ -92,6 +118,27 @@ async function resolveBaseUrl(deps: HookDeps): Promise<string> {
   if (deps.baseUrl !== undefined) return deps.baseUrl;
   const config: PartialConfig = await loadRawConfig(deps.dataDir).catch(() => ({}));
   return resolveSettings({ config, flags: {}, env: deps.env ?? process.env }).baseUrl.value;
+}
+
+/**
+ * A SUBAGENT IS OFFERED ONLY WHAT IT CAN PAY FOR ALONE. It cannot reach the
+ * user, so an offer above `maxAutoSpend` would end in a `needs_approval` nobody
+ * sees; the parent can still make that lookup itself. The provider price is
+ * display-grade, and the amount actually signed is still `gateSpend`'s to cap,
+ * so this only decides whether the line is worth showing. A config that cannot
+ * be read shows none.
+ */
+async function withinAutoSpend(
+  decision: { providerPriceAtomic: string },
+  deps: HookDeps,
+): Promise<boolean> {
+  try {
+    const config: PartialConfig = await loadRawConfig(deps.dataDir);
+    const cap = resolveSettings({ config, flags: {}, env: deps.env ?? process.env }).maxAutoSpend;
+    return BigInt(decision.providerPriceAtomic) <= BigInt(cap.value);
+  } catch {
+    return false;
+  }
 }
 
 export interface PromptHookOutcome {
@@ -136,61 +183,123 @@ function injection(line: string): { response: unknown } {
 
 export interface NativeHookOutcome {
   response: unknown | null;
-  decision: 'allow' | 'deny';
   action?: HookDecision['action'];
   id?: string;
+  /** An `execute` whose offer was not shown: a subagent above `maxAutoSpend`. */
+  withheld?: true;
 }
 
 /**
- * `tenjin hook native` (PreToolUse on `WebSearch|WebFetch`). ALLOW IS THE
- * DEFAULT and a redirect is the exception: it fires only on a clear `execute`,
- * and it carries the id so the redirected call runs the decision that was just
- * made rather than paying for a second one. Anything else, including silence,
- * a slow backend and a `needs_input`, lets the native call run.
+ * `tenjin hook native` (PreToolUse on `WebSearch|WebFetch`). THE CALL ALWAYS
+ * RUNS. On a clear `execute` it runs with the server's offer beside it, carrying
+ * the id so a lookup the agent then chooses runs the decision just made rather
+ * than paying for a second one. Anything else, including silence, a slow
+ * backend and a `needs_input`, is no output at all.
  */
 export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<NativeHookOutcome> {
   const parsed = NativeEventSchema.safeParse(raw);
-  if (!parsed.success) return { response: null, decision: 'allow' };
+  if (!parsed.success) return { response: null };
   const event = parsed.data;
   const pending = pendingCallOf(event.tool_name, event.tool_input);
-  if (pending === null) return { response: null, decision: 'allow' };
+  if (pending === null) return { response: null };
   // THE USER'S WORDS COME WITH IT. Building this from the tool argument alone
   // made the search string the whole conversation, so "native tools only, no
-  // paid services" never reached this gate.
-  const packet = await buildNativePacket(event.transcript_path, event.session_id, pending);
-  // AND WHEN THEY CANNOT BE READ, THE CALL RUNS. Routing a redirect on the tool
-  // argument alone is how an instruction the user gave this turn gets
-  // overruled by a decision that never saw it. A native call the user's own
-  // assistant chose is the safe default; the only cost is a lookup this turn
-  // does not route.
+  // paid services" never reached this gate. Inside a subagent, its own task
+  // comes first: see `buildNativePacket`.
+  const packet = await buildNativePacket(
+    event.transcript_path,
+    event.session_id,
+    pending,
+    event.agent_id,
+  );
+  // AND WHEN THEY CANNOT BE READ, NOTHING IS OFFERED. An offer routed on the
+  // tool argument alone is how an instruction the user gave this turn gets
+  // overruled by a decision that never saw it.
   if (packet.historyStatus !== 'ok') {
     (deps.warn ?? ((line: string) => process.stderr.write(`${line}\n`)))(
       "tenjin hook: this session's transcript could not be read, so the native call runs unrouted",
     );
-    return { response: null, decision: 'allow' };
+    return { response: null };
   }
   const footer = await openFooter(deps, event.session_id, 'search');
   const outcome = await decide(packet, deps);
-  await footer.close(outcome);
   if (outcome === null || outcome.action !== 'execute') {
-    return {
-      response: null,
-      decision: 'allow',
-      ...(outcome !== null ? { action: outcome.action } : {}),
-    };
+    await footer.close(outcome);
+    return { response: null, ...(outcome !== null ? { action: outcome.action } : {}) };
   }
+  if (event.agent_id !== undefined && !(await withinAutoSpend(outcome, deps))) {
+    await footer.close(outcome, { withheld: true });
+    return { response: null, action: 'execute', withheld: true };
+  }
+  await footer.close(outcome);
   return {
     response: {
       hookSpecificOutput: {
         hookEventName: 'PreToolUse',
-        permissionDecision: 'deny',
-        // THE SERVER'S LINE, VERBATIM. It already carries the id and, on a
-        // native call, the exact search or URL that was denied, so there is
-        // nothing left here to compose and nothing to trim.
-        permissionDecisionReason: outcome.hint,
+        permissionDecision: 'allow',
+        // THE SERVER'S LINE, VERBATIM, framed as the option it is. It already
+        // carries the id and the exact search or URL this call is making.
+        additionalContext: nativeOffer(event.tool_name, outcome.hint),
       },
     },
-    decision: 'deny',
+    action: 'execute',
+    id: outcome.id,
+  };
+}
+
+export interface DelegationHookOutcome {
+  response: unknown | null;
+  action?: HookDecision['action'];
+  id?: string;
+  withheld?: true;
+}
+
+/**
+ * `tenjin hook agent` (PreToolUse on `Agent|Task`). The one moment a subagent's
+ * whole assignment is visible: its task prompt IS the current message, and the
+ * parent's own turn is the history, so the router decides on exactly what the
+ * subagent will do. On a clear `execute` the offer is appended to that task as
+ * one optional line, which reaches the subagent as part of its instructions
+ * from its parent, before it starts. Anything else is no output at all.
+ *
+ * The subagent will be the payer, so the same auto-spend rule applies here.
+ */
+export async function runDelegationHook(
+  raw: unknown,
+  deps: HookDeps,
+): Promise<DelegationHookOutcome> {
+  const parsed = DelegationEventSchema.safeParse(raw);
+  if (!parsed.success) return { response: null };
+  const event = parsed.data;
+  const task = event.tool_input.prompt;
+  if (typeof task !== 'string' || task.trim().length === 0) return { response: null };
+  const packet = await buildPromptPacket(event.transcript_path, event.session_id, task);
+  // The native hook's rule, for the same reason: a delegation routed without
+  // the user's words could offer what they just ruled out.
+  if (packet.historyStatus !== 'ok') return { response: null };
+  const footer = await openFooter(deps, event.session_id, 'delegate');
+  const outcome = await decide(packet, deps);
+  if (outcome === null || outcome.action !== 'execute') {
+    await footer.close(outcome);
+    return { response: null, ...(outcome !== null ? { action: outcome.action } : {}) };
+  }
+  if (!(await withinAutoSpend(outcome, deps))) {
+    await footer.close(outcome, { withheld: true });
+    return { response: null, action: 'execute', withheld: true };
+  }
+  await footer.close(outcome);
+  return {
+    response: {
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: 'allow',
+        // The whole input, with one line appended: `updatedInput` replaces it.
+        updatedInput: {
+          ...event.tool_input,
+          prompt: `${task}\n\n${delegationOffer(outcome.hint)}`,
+        },
+      },
+    },
     action: 'execute',
     id: outcome.id,
   };
@@ -210,8 +319,10 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
 async function openFooter(
   deps: HookDeps,
   sessionId: string,
-  operation: 'prompt' | 'search',
-): Promise<{ close: (decision: HookDecision | null) => Promise<void> }> {
+  operation: 'prompt' | 'search' | 'delegate',
+): Promise<{
+  close: (decision: HookDecision | null, opts?: { withheld?: boolean }) => Promise<void>;
+}> {
   const now = (): number => deps.now?.() ?? Date.now();
   const directory = sessionDir(deps.dataDir, sessionId);
   const callId = newCallId();
@@ -227,14 +338,19 @@ async function openFooter(
   // eventually be more than the resolver can scan.
   await pruneSessions(deps.dataDir, now());
   return {
-    close: async (decision) => {
+    close: async (decision, opts) => {
+      const withheld = opts?.withheld === true;
       await writeProgress(
         directory,
         callId,
-        { phase: 'done', operation, outcome: hookOutcome(decision) },
+        {
+          phase: 'done',
+          operation,
+          outcome: withheld ? 'native tools (offer above auto-spend)' : hookOutcome(decision),
+        },
         now(),
       );
-      if (decision !== null && decision.action === 'execute') {
+      if (!withheld && decision !== null && decision.action === 'execute') {
         await bindDecision(deps.dataDir, sessionId, decision.id, now());
       }
     },

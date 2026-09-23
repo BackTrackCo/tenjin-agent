@@ -24,7 +24,7 @@ import type { CommandContext, CommandResult } from '../context';
 import { ensureStatusLine, type StatusLineMode, type StatusLineResult } from './status-line-wiring';
 
 /**
- * `tenjin install` for the router product: two hook entries, one MCP server,
+ * `tenjin install` for the router product: three hook entries, one MCP server,
  * one permission rule, the spend defaults, and a wallet when there is none.
  *
  * WHAT IT WRITES IS WHAT IT SAYS. There is no skill to materialize, no daemon
@@ -86,7 +86,10 @@ export function routerSettingsPath(
   return claudeSettingsPath(opts.homeDir ?? homedir());
 }
 
-/** The two entries, spelled once so `uninstall` and the tests read the same list. */
+/** The subagent tool, under its current name and its older one. */
+export const DELEGATION_MATCHER = 'Agent|Task';
+
+/** The three entries, spelled once so `uninstall` and the tests read the same list. */
 export function routerHookPlan(): unknown[] {
   const handler = (command: string) => [
     { type: 'command', command, timeout: HOOK_TIMEOUT_SECONDS },
@@ -94,11 +97,12 @@ export function routerHookPlan(): unknown[] {
   return [
     { event: 'UserPromptSubmit', hooks: handler('tenjin hook prompt') },
     { event: 'PreToolUse', matcher: 'WebSearch|WebFetch', hooks: handler('tenjin hook native') },
+    { event: 'PreToolUse', matcher: DELEGATION_MATCHER, hooks: handler('tenjin hook agent') },
   ];
 }
 
 export const DISCLOSURE: readonly string[] = [
-  'What leaves this machine: the bounded text of each prompt and each native search query or URL, sent to Tenjin for the free routing gate.',
+  'What leaves this machine: the bounded text of each prompt, each native search query or URL, and each task handed to a subagent, sent to Tenjin for the free routing gate.',
   'What is kept when a lookup is paid: the capability chosen, a hash of the contract, a hash of the arguments, and your wallet address. No prompt text, no arguments, no hint text.',
   'What never leaves: your private key. It is decrypted in this CLI to sign, and never sent anywhere.',
 ];

@@ -14,6 +14,7 @@ import type { CommandContext, CommandResult } from '../context';
 import { ROUTER_PATH } from './decision';
 import {
   ALLOW_RULE,
+  DELEGATION_MATCHER,
   MCP_SERVER_NAME,
   mcpAddCommand,
   mcpScope,
@@ -207,6 +208,22 @@ async function hooksCheck(path: string, dataDir: string): Promise<RouterCheck> {
       required: false,
       detail: `${events.join(' and ')} registered, but ${ALLOW_RULE} is not allowed, so every lookup asks`,
       fix: 'Run `tenjin install` to write the permission rule.',
+    };
+  }
+  // An install from before the delegation arm still routes the main agent, so
+  // this is a warning with its one-command remedy, not a failure.
+  const delegation = (found.hooks.PreToolUse ?? []).some(
+    (entry) =>
+      ownsHookEntry(entry, dataDir) &&
+      (entry as { matcher?: unknown }).matcher === DELEGATION_MATCHER,
+  );
+  if (!delegation) {
+    return {
+      name: 'hooks',
+      status: 'warn',
+      required: false,
+      detail: `${events.join(' and ')} registered, but not the ${DELEGATION_MATCHER} entry, so a subagent's task is never offered a paid lookup`,
+      fix: 'Run `tenjin install --refresh`.',
     };
   }
   return {
