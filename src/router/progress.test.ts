@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -272,5 +272,23 @@ describe('sessions that are over', () => {
     await pruneSessions(dir, NOW);
 
     expect(await renderProgress(dir, 'quiet', { now: NOW })).toBe('x402 · request: calling');
+  });
+});
+
+describe('when the display itself fails', () => {
+  it('prints nothing, rather than a state it could not read', async () => {
+    const session = sessionDir(dir, 'session-a');
+    await writeProgress(session, 'call-1', { phase: 'routing' }, NOW);
+    await chmod(session, 0o000);
+
+    try {
+      expect(await renderProgress(dir, 'session-a', { now: NOW })).toBe('');
+    } finally {
+      await chmod(session, 0o700);
+    }
+  });
+
+  it('still says ready for a session that has looked nothing up', async () => {
+    expect(await renderProgress(dir, 'never-used', { now: NOW })).toBe('x402 · ready');
   });
 });

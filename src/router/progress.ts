@@ -389,8 +389,12 @@ export async function renderProgress(
       const record = await readCall(join(directory, entry.name));
       if (record !== null && now - record.at <= EXPIRY_MS) records.push(record);
     }
-  } catch {
-    return READY;
+  } catch (error) {
+    // A SESSION WITH NO DIRECTORY IS IDLE, not broken: it has simply not looked
+    // anything up yet, and the router being on is the thing the idle line says.
+    // Any OTHER read failure is this display failing, and a display that failed
+    // prints nothing rather than a status it did not read.
+    return (error as NodeJS.ErrnoException).code === 'ENOENT' ? READY : '';
   }
   const running = records
     .filter((row) => row.phase !== 'done' && now - row.at <= STALE_AFTER_MS)
