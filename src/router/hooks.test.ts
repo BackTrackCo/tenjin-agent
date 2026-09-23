@@ -263,7 +263,7 @@ describe('the native hook', () => {
     // The server's line, whole and untouched, framed as an option: it already
     // names the URL and the id, and the client adds no provider or price.
     expect(output.additionalContext).toBe(
-      `Your WebFetch call is running as usual; a paid alternative is optional. ${HINT}`,
+      `Your WebFetch call is running as usual. Optional: ${HINT}`,
     );
   });
 

@@ -89,7 +89,7 @@ export function promptSkipReason(prompt: string): PromptSkip | null {
  *  line, verbatim: this client names no provider and no price of its own, and
  *  no condition either, because the server's line already says when to call. */
 function nativeOffer(tool: 'WebSearch' | 'WebFetch', hint: string): string {
-  return `Your ${tool} call is running as usual; a paid alternative is optional. ${hint}`;
+  return `Your ${tool} call is running as usual. Optional: ${hint}`;
 }
 
 function delegationOffer(hint: string): string {
