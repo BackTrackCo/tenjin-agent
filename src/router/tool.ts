@@ -32,7 +32,8 @@ import { requestDecision, type DecisionContract, type DecisionDiagnostics } from
 
 export interface RequestToolArgs {
   query: string;
-  /** The prepared decision from the hook's line. A shortcut, never authority. */
+  /** The turn id from the hook's line. It names the service that line offered, and
+   *  the server runs that one; it grants nothing locally, every cap still applies. */
   id?: string;
 }
 
