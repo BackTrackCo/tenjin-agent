@@ -245,10 +245,7 @@ export async function runRouterInstall(
     }
     return {
       data: { settingsPath, hooks, permissions, mcp, refresh: true, scope: mcpScope(project) },
-      humanLines: [
-        `${paint(ctx.io, 'green', '✓')} Tenjin is up to date`,
-        ...problems(ctx, hooks, permissions, mcp),
-      ],
+      humanLines: refreshLines(ctx, problems(ctx, hooks, permissions, mcp)),
     };
   }
   const spend = await persistRouterDefaults(ctx.dataDir);
@@ -485,24 +482,39 @@ function lines(
   const limits = effectiveLimits(s.policy);
   const daily =
     s.policy.sessionBudgetAtomic === 0n ? 'no daily limit' : `$${limits.sessionBudget} a day`;
-  // A settings file this run would not write to means nothing was set up, so
-  // the first line must not say it was.
+  // The first line only says "set up" when it is: a settings file this run
+  // would not write to means nothing was set up, and hooks without the MCP
+  // server point at a `request` tool that is not there.
   const blocked = s.hooks.skipped !== undefined;
+  const needsMcp = !blocked && !s.mcp.registered;
   const where = s.project ? ' in this project' : '';
+  const fund = paint(ctx.io, 'bold', 'tenjin wallet fund');
   return [
     blocked
       ? paint(ctx.io, 'yellow', `! Tenjin could not finish setting up Claude Code${where}`)
-      : `${ok} Tenjin is set up for Claude Code${where}`,
+      : needsMcp
+        ? paint(ctx.io, 'yellow', '! Almost done: Claude Code needs one command')
+        : `${ok} Tenjin is set up for Claude Code${where}`,
     ...walletLines(ctx, ok, s.wallet),
     `  Spends at most $${limits.maxAutoSpend} a lookup, ${daily}`,
     ...problems(ctx, s.hooks, s.permissions, s.mcp),
     '',
     blocked
       ? 'Next: fix the file above, then run tenjin install again'
-      : s.wallet.status === 'created'
-        ? `Next: ${paint(ctx.io, 'bold', 'tenjin wallet fund')}, then restart Claude Code`
-        : 'Next: restart Claude Code',
+      : needsMcp
+        ? s.wallet.status === 'created'
+          ? `Next: run the command above and ${fund}, then restart Claude Code`
+          : 'Next: run the command above, then restart Claude Code'
+        : s.wallet.status === 'created'
+          ? `Next: ${fund}, then restart Claude Code`
+          : 'Next: restart Claude Code',
   ];
+}
+
+/** "Up to date" only when nothing below it needs the user. */
+function refreshLines(ctx: CommandContext, issues: string[]): string[] {
+  if (issues.length === 0) return [`${paint(ctx.io, 'green', '✓')} Tenjin is up to date`];
+  return [paint(ctx.io, 'yellow', '! Tenjin is updated, but needs one fix'), ...issues];
 }
 
 function walletLines(ctx: CommandContext, ok: string, w: WalletOutcome): string[] {

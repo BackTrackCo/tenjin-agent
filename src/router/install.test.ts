@@ -202,7 +202,24 @@ describe('tenjin install', () => {
   it('prints the command to run when the claude binary is absent', async () => {
     const result = await runRouterInstall({}, ctx(), deps({ which: () => false }));
     expect(result.data).toMatchObject({ mcp: { registered: false, command: MCP_ADD_COMMAND } });
-    expect(result.humanLines?.join('\n')).toContain(MCP_ADD_COMMAND);
+    // Not "set up": the hooks would point at a request tool that is not there.
+    expect(result.humanLines).toEqual([
+      '! Almost done: Claude Code needs one command',
+      `✓ Wallet created: ${ADDRESS}`,
+      '  Spends at most $0.25 a lookup, $5 a day',
+      '! Could not add the request tool to Claude Code. Run:',
+      `  ${MCP_ADD_COMMAND}`,
+      '',
+      'Next: run the command above and tenjin wallet fund, then restart Claude Code',
+    ]);
+  });
+
+  it('does not report a refresh as up to date when the registration is missing', async () => {
+    await runRouterInstall({}, ctx(), deps());
+    const result = await runRouterInstall({ refresh: true }, ctx(), deps({ which: () => false }));
+    const text = result.humanLines!.join('\n');
+    expect(text).not.toContain('up to date');
+    expect(text).toContain(MCP_ADD_COMMAND);
   });
 
   it('prints a short summary: set up, the new wallet, the limits, the next step', async () => {
