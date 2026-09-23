@@ -3,13 +3,16 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
+  HINT_SOURCE,
   NEAR_EMPTY_BYTES,
   promptSkipReason,
   runDelegationHook,
   runPromptHook,
   runShortfallHook,
   shortfallOf,
+  toolNamed,
 } from './hooks';
+import { MCP_SERVER_NAME, REQUEST_TOOL } from './names';
 import { runHookCommand } from './hook-command';
 import { ROUTER_PATH } from './decision';
 import { renderProgress, resolveProgressSession, sessionDir } from './progress';
@@ -57,6 +60,8 @@ const HINT =
   'Firecrawl fits this: scrapes one public URL and returns its content as clean markdown or HTML. ' +
   '$0.01 via https://vaaya.ai/api/run/firecrawl/scrape . ' +
   'Call request({query: "https://example.test/spec", id: "k3f9-abcd"}) alone and wait for its result.';
+/** The same line as the host sees it: attributed, and naming the real tool. */
+const SEEN = HINT_SOURCE + ': ' + HINT.replace('request({', 'mcp__x402__request({');
 
 const EXECUTE = {
   schemaVersion: 1,
@@ -147,9 +152,9 @@ describe('the prompt hook', () => {
     });
     const line = (out.response as { hookSpecificOutput: { additionalContext: string } })
       .hookSpecificOutput.additionalContext;
-    // The server's own line, verbatim: it already carries the real id, and the
-    // client composes nothing.
-    expect(line).toBe(HINT);
+    // The server's own line, attributed to its source and naming the tool the
+    // harness actually exposes; every other word, id included, is the server's.
+    expect(line).toBe(SEEN);
     expect(out).toMatchObject({ action: 'execute', id: 'k3f9-abcd' });
     // One free call, carrying the packet and nothing else.
     expect(calls).toHaveLength(1);
@@ -283,7 +288,9 @@ describe('the shortfall hook', () => {
     expect(output.permissionDecision).toBeUndefined();
     // The server's line, whole and untouched, framed as an option: it already
     // names the URL and the id, and the client adds no provider or price.
-    expect(output.additionalContext).toBe(`Your WebFetch call came back short. Optional: ${HINT}`);
+    expect(output.additionalContext).toBe(
+      `${HINT_SOURCE}: your WebFetch call came back short. Optional: ${SEEN.slice(HINT_SOURCE.length + 2)}`,
+    );
   });
 
   it('offers the lookup after a failed call, carrying its error', async () => {
@@ -389,6 +396,32 @@ describe('the shortfall hook', () => {
       await runShortfallHook({ ...(nativeEvent('x') as object), tool_input: {} }, deps),
     ).toMatchObject({ response: null });
     expect(calls).toHaveLength(0);
+  });
+});
+
+/**
+ * THE TOOL NAME IS THE ONE THE HARNESS EXPOSES, derived from the name
+ * `install` registers the server under, and only the call is rewritten.
+ */
+describe('the tool name in a hint', () => {
+  it('comes from the registered server name', () => {
+    expect(REQUEST_TOOL).toBe(`mcp__${MCP_SERVER_NAME}__request`);
+    expect(REQUEST_TOOL).toBe('mcp__x402__request');
+  });
+
+  it('rewrites every bare call and nothing else', () => {
+    const research =
+      'Exa fits this: search. $0.007 via https://exa.test/search . ' +
+      'Call request({query: <the research question>, id: "k3f9-abcd"}) alone and wait for its result. ' +
+      'Read ordinary pages with WebFetch; use request({query: <the page URL>}) only for a page WebFetch cannot read.';
+    expect(toolNamed(research)).toBe(research.replaceAll('request({', 'mcp__x402__request({'));
+    // Already qualified, or a word that merely ends in "request": untouched.
+    expect(toolNamed('call mcp__x402__request({query: "q"})')).toBe(
+      'call mcp__x402__request({query: "q"})',
+    );
+    expect(toolNamed('a subrequest({a}) and the request tool')).toBe(
+      'a subrequest({a}) and the request tool',
+    );
   });
 });
 
@@ -925,7 +958,7 @@ describe('the delegation hook', () => {
       expect(output.updatedInput).toEqual({
         description: 'read the spec',
         subagent_type: 'general-purpose',
-        prompt: `${TASK}\n\nOptional, if your own tools fall short: ${HINT} Your own tools are fine when they are enough.`,
+        prompt: `${TASK}\n\n${HINT_SOURCE}, optional if your own tools fall short: ${SEEN.slice(HINT_SOURCE.length + 2)} Your own tools are fine when they are enough.`,
       });
       // The task is the current message, the parent's turn is history, and
       // it is the ordinary hook body: no pending call, nothing new on the wire.

@@ -85,7 +85,7 @@ Every other key in the settings file is preserved byte for byte, a second run wr
 ## How one lookup runs
 
 1. You type a turn. The hook sends the bounded packet to Tenjin, which answers whether a paid capability fits and, if it does, keeps that packet under a short-lived id.
-2. When one fits, your assistant sees one line: a paid lookup is available for this turn, call `request` with your exact lookup and that id.
+2. When one fits, your assistant sees one line, opening with `Tenjin router (installed by the user):`, that names the service and the call to make: `mcp__x402__request` with your exact lookup and that id.
 3. Your assistant calls `request({query, id})` with the lookup it actually means. That is the accurate part: the routing is decided from your assistant's own query plus the stored context, not from a guess made before the lookup was known.
 4. Tenjin answers with the call to make and what the provider charges. Deciding costs nothing.
 5. This CLI pays that provider once, under your limits, and hands back the result.
@@ -99,7 +99,7 @@ Every other key in the settings file is preserved byte for byte, a second run wr
 - The packet is stored on the backend against the decision id, so the lookup your assistant sends next is decided with the context you gave. Expired packets are unreadable after 15 minutes (the route refuses an expired id) and are deleted by the next router request or the daily cleanup, whichever comes first.
 - On a paid lookup: the capability chosen, a hash of the contract, a hash of the arguments, your wallet address, the amount and the transaction hash are kept.
 
-The answer can put one line into your session: that a paid lookup is available for this turn, and the id that carries your context to it. It names no provider and no price, because at that point the lookup itself has not been decided.
+The answer can put one line into your session, or into a task your assistant delegates: the service that fits, what it does, its listed price, and the `mcp__x402__request` call carrying the id that brings your context to it. The line says it comes from the Tenjin router you installed, and it is an option: your assistant's own tools keep working. Which service actually runs, and what it costs, is decided when your assistant makes that call, under your spend policy.
 
 ## Wallet passphrase storage
 

@@ -15,6 +15,7 @@ import {
 } from './context';
 import { requestDecision, ROUTER_PATH, type HookDecision } from './decision';
 import { GATE_TIMEOUT_MS } from './gate';
+import { REQUEST_TOOL } from './names';
 import {
   bindDecision,
   newCallId,
@@ -101,11 +102,30 @@ export function promptSkipReason(prompt: string): PromptSkip | null {
   return ACKNOWLEDGEMENTS.has(normalized) ? 'acknowledgement' : null;
 }
 
-/** Where the offer sits after the free tool came back short. The hint itself
- *  is the server's line, verbatim: this client names no provider and no price
- *  of its own. */
+/**
+ * EVERY LINE SAYS WHERE IT CAME FROM AND NAMES THE REAL TOOL. An unattributed
+ * line asking for a call the model cannot find by that name reads like an
+ * injection, and a subagent looking for `request` in its tool list finds
+ * nothing. So each line opens with its source, and the server's `request({`
+ * becomes the name the harness actually exposes, from the one place `install`
+ * registers it. The server's words are otherwise untouched: this client names
+ * no provider and no price of its own.
+ */
+export const HINT_SOURCE = 'Tenjin router (installed by the user)';
+
+const BARE_CALL_RE = /(?<![\w$])request\(\{/g;
+
+export function toolNamed(hint: string): string {
+  return hint.replace(BARE_CALL_RE, `${REQUEST_TOOL}({`);
+}
+
+function promptLine(hint: string): string {
+  return `${HINT_SOURCE}: ${toolNamed(hint)}`;
+}
+
+/** Where the offer sits after the free tool came back short. */
 function shortfallOffer(tool: 'WebSearch' | 'WebFetch', hint: string): string {
-  return `Your ${tool} call came back short. Optional: ${hint}`;
+  return `${HINT_SOURCE}: your ${tool} call came back short. Optional: ${toolNamed(hint)}`;
 }
 
 /**
@@ -175,7 +195,7 @@ function wholeNumber(value: unknown, max: number): number | undefined {
 }
 
 function delegationOffer(hint: string): string {
-  return `Optional, if your own tools fall short: ${hint} Your own tools are fine when they are enough.`;
+  return `${HINT_SOURCE}, optional if your own tools fall short: ${toolNamed(hint)} Your own tools are fine when they are enough.`;
 }
 
 export interface HookDeps {
@@ -259,7 +279,7 @@ export interface PromptHookOutcome {
 
 /**
  * `tenjin hook prompt` (UserPromptSubmit). One free decision from the user's
- * own words. Only an `execute` gets a line, the server's hint verbatim.
+ * own words. Only an `execute` gets a line: the server's hint, attributed.
  * `native`, `needs_input` and a decision that failed or timed out are silence:
  * a turn with no lookup carries nothing extra, and `decide` has already written
  * any failure cause to stderr.
@@ -277,7 +297,7 @@ export async function runPromptHook(raw: unknown, deps: HookDeps): Promise<Promp
   await footer.close(outcome);
   if (outcome === null) return { response: null };
   if (outcome.action !== 'execute') return { response: null, action: outcome.action };
-  return { action: 'execute', id: outcome.id, ...injection(outcome.hint) };
+  return { action: 'execute', id: outcome.id, ...injection(promptLine(outcome.hint)) };
 }
 
 function injection(line: string): { response: unknown } {
@@ -358,8 +378,8 @@ export async function runShortfallHook(
     response: {
       hookSpecificOutput: {
         hookEventName: event.hook_event_name,
-        // THE SERVER'S LINE, VERBATIM, framed as the option it is. It already
-        // carries the id and the exact search or URL that came back short.
+        // THE SERVER'S LINE, attributed and framed as the option it is. It
+        // already carries the id and the exact search or URL that came back short.
         additionalContext: shortfallOffer(event.tool_name, outcome.hint),
       },
     },

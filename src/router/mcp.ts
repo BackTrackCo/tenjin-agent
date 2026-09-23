@@ -7,6 +7,7 @@ import { dataDir as defaultDataDir } from '../lib/paths';
 import { resolveContextSettings } from '../lib/settings';
 import { resolveSpendAuthorizer, resolveWalletProvider } from '../lib/wallet';
 import type { CommandContext, GlobalFlags } from '../context';
+import { MCP_SERVER_NAME } from './names';
 import { runRequestTool, type RequestToolDeps } from './tool';
 
 /**
@@ -87,7 +88,7 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
     void provider.getSigner().catch(() => undefined);
   }
   const server = new McpServer(
-    { name: 'x402', version: pkg.version },
+    { name: MCP_SERVER_NAME, version: pkg.version },
     { capabilities: { tools: {} }, instructions: INSTRUCTIONS },
   );
   server.registerTool(

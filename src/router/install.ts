@@ -21,6 +21,7 @@ import type { SpendPolicy } from '../lib/policy';
 import { onPath } from '../lib/skill-wiring';
 import type { WalletDeps, WalletOutcome } from '../commands/install-wallet';
 import type { CommandContext, CommandResult } from '../context';
+import { MCP_SERVER_NAME, REQUEST_TOOL } from './names';
 import { ensureStatusLine, type StatusLineMode, type StatusLineResult } from './status-line-wiring';
 
 /**
@@ -46,8 +47,8 @@ const exec = promisify(execFile);
  * the refresh `tenjin update` spawns all rewrite them in place.
  */
 export const HOOK_TIMEOUT_SECONDS = 5;
-export const MCP_SERVER_NAME = 'x402';
-export const ALLOW_RULE = 'mcp__x402__request';
+export { MCP_SERVER_NAME };
+export const ALLOW_RULE = REQUEST_TOOL;
 /**
  * The MCP registration follows the SAME SCOPE the hook entries do. A
  * `--project` install that wrote its hooks into the project and then registered
