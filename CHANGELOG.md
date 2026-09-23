@@ -1,5 +1,1013 @@
 # tenjin-cli
 
+## 0.1.0-alpha.16
+
+### Minor Changes
+
+- 720f868: Grade a finding against the transcript it actually landed in, including a
+  subagent's own.
+
+  **Every arm now records the subagent it fired inside.** The harness stamps
+  `agent_id` on a hook input that fires inside a subagent and leaves it off in the
+  main session, while `session_id` stays the parent's either way — so until now a
+  row written inside a child pointed only at a parent transcript that holds no
+  word of what the child did. `events`, `injections`, `searches` and
+  `pairing_closes` all gain an `agent_id` column in one step, and the prompt,
+  failure, pass, edit, research, dispatch and subagent arms all stamp it. The
+  subagent arm records the child the finding was relayed TO, which is the file the
+  verdict has to come out of; the close on a pairing records the worker that made
+  it, and counts for nothing — the promotion to `verified` still asks for two
+  independent SESSIONS, because two subagents of one conversation are one laptop
+  in one checkout.
+
+  **Schema version 2, and tenjin-agent#247 is what it is.** Anything after this
+  takes version 3. A fresh file is CREATED at the current shape and steps nothing;
+  a file that already exists is altered in place by the first open of either the
+  CLI or a hook, keeping every row. The step also BACKFILLS `events.agent_id` from
+  the `data.agentId` that tenjin-agent#242 has been writing since 2026-08-28, so
+  the fortnight of rows in between are still the worker's rather than the lead's.
+  `ALTER TABLE ADD COLUMN` is not idempotent, so the version is re-read inside the
+  `BEGIN IMMEDIATE` and the create and migrate branches are exclusive — pinned by
+  a dozen hook processes racing one version 1 file, and by a version 1 hook core
+  writing to a version 2 file, which is the ordinary state of a machine that
+  upgraded the CLI without re-running `tenjin install`.
+
+  **One identity, parsed once.** The prelude has a single reader, `identityOf`,
+  answering the session and the agent together; an id that is not `[A-Za-z0-9_-]`
+  of 1–128 characters is refused rather than stripped, because it is also a
+  transcript filename and stripping a separator out of one id spells another id
+  exactly. `NULL` is the main session everywhere and never "unknown", with the one
+  place it becomes the `''` a `session_state` key segment needs spelled out as
+  `agentKey` — so `edited::<path>`, `edits::<path>` and `replayed::<head>` are
+  byte-for-byte the keys the lead's rows already sit under. The importance score
+  reads the `events` column instead of a JSON field, which is what makes "this
+  child was shown a finding" and "this child then fixed something" the same worker
+  rather than two.
+
+  **An id the harness stamps but this build cannot use is not the lead.** It fails
+  the bound, so it names no transcript and no partition; filing the fire under the
+  main session instead would hand a child's search, edit or close to its parent,
+  and the score would then read that work as the lead's. Every arm drops such a
+  fire whole — no lookup, no event row, no decision row — rather than inventing a
+  reason bucket for a row that should not exist.
+
+  **`tenjin grade` reads that file.** A row with an agent id is judged against
+  `<session>/subagents/agent-<id>.jsonl`, never the parent's. A relayed finding has
+  no anchor row in any transcript — the child is handed it as its opening context
+  and nothing records it — so it is judged from the child's first tool call onward,
+  by the same evidence rules everything else gets. It also leaves no injected text
+  on disk, so its span evidence comes from the piece's title alone, which usually
+  means a relayed finding is judged on the strong evidence (an explicit read, or
+  the URL) or not at all.
+
+  **`unobserved` narrows to what it always meant:** nothing to read and nothing
+  that ever will be. Every subagent injection used to land there unconditionally,
+  which closed the whole handoff as never-seen; now only a relayed row with no
+  agent id recorded does — rows written before this version, or by an arm that
+  could read none off its input. `--explain` names the agent and the file that
+  answered.
+
+- 79b8862: Codex runs the same loop. `tenjin install` on a machine with Codex writes seven `command` entries to `~/.codex/hooks.json` (or `$CODEX_HOME/hooks.json`), all through the shim, beside the Claude Code set; `doctor` reports them as configured and observed in the ledger; `uninstall` removes only the entries it wrote. The daemon serves `/hook/codex` with an adapter built on payloads captured from codex-cli 0.153.4: root prompt lookups, per-child identity through `agent_id`, multi-file `apply_patch` edits marked in one fire, and the capture ask delivered as a Stop `decision: block`.
+
+  Shared boundary corrections that a second harness forced: the tool an arm reads is canonical (`command`, `paths`, `task`, `query`, `url`) rather than a vendor argument bag; a stored session is namespaced by harness (`claude:<id>`, `codex:<id>`), so `loop.db` state from before this release does not join new sessions; `tenjin search` stamps the thread it ran inside (`CODEX_THREAD_ID`) as `agent_id`, and the capture ask names a CLI miss only to the actor that opened it. A Codex shell result carries no exit status, so its completion stays unknown (an error marker is still a failure) and no pairing closes on it; the spawn tool's task is opaque on the wire, so no dispatch handoff runs for Codex.
+
+- 00b382a: Take a publish back from the CLI. `tenjin delete <postId>` removes one of your own
+  pieces through the owner-scoped soft-delete at `DELETE /api/posts/<id>`, and
+  `tenjin edit <postId> --status draft|published` is the reversible half: `draft`
+  unpublishes without losing the id or the body, `published` puts a draft up. Both
+  reuse `edit`'s signing path, and the MCP server exposes them as `tenjin_delete`
+  (annotated destructive) and a `status` argument on `tenjin_edit`.
+
+  **`delete` confirms in every mode, and never reads `publish.mode`.** The mode is
+  consent to publish, not consent to destroy, so `full-auto` asks here exactly as
+  `review` does. At a terminal it asks `y/N` inline; anywhere else, including under
+  an agent or the MCP server, it refuses with `NEEDS_CONFIRMATION` (exit 3) carrying
+  the title, status, url, the `--yes` command that confirms, and the reversible
+  `--status draft` alternative, which is the same exit-3 channel `publish` and `edit`
+  already use. `--status` is an ordinary change flag by contrast: it diffs, it prunes
+  when it already matches, and it rides the ordinary `publish.mode` gate.
+
+  Every successful `tenjin publish` now prints the exact undo commands with the real
+  post id, and carries them on the `--json` envelope as `data.undo`, so an agent
+  reporting a publish hands over a real command instead of guessing one. The printed
+  removal command carries no `--yes`: it starts the undo, so each surface's own
+  confirmation still runs, and `--yes` appears only in a refusal payload's
+  `confirmCommand`, which answers a question the user has already been shown.
+
+  A server refusal after the confirmation is the new `DELETE_FAILED` (exit 4), whose
+  message says the piece is still live. No refused delete leaves a write credential
+  behind: the owner-scoped read that the preview is built from signs with a
+  `read`-scoped session, and only an actual approval mints `read+write`, so both a
+  headless refusal and a declined prompt end with nothing on disk that a later write
+  could reuse. An approved prompt pays one extra in-memory signature for that, with
+  no second keystore prompt and no extra round trip. `tenjin delete` is never
+  allowlisted: no mode carries it, and it is not delegable to a subagent.
+
+  Promoting a draft settles what the draft publish deferred. `edit --status
+published` re-scans the stored body at the block tier (a draft made on the web
+  desk was never scanned locally), claims the searches a
+  `publish --draft --search-id` parked on the draft (the ids ride the same PUT and
+  their local loops close), and writes the same-body dedup marker, so the next
+  publish of the promoted body dedups instead of creating a duplicate. The
+  server-returned post id is shape-checked as a uuid before it can reach the undo
+  line or the delete confirm payload.
+
+- 9656c04: The failure arm fires behind a fixed allowlist of command heads; every search names its arm; `publish --key` (tenjin-agent#212, PR A).
+
+  **The allowlist is fixed.** `git` is no longer a head the arm fires behind: every record it opened had come from `git show … | grep ENOENT` over source that merely mentions an errno. `node`, `deno`, `python` and `python3` count only when their first argument is a file or their own test runner (`node --test`, `deno test`), so `python3 -c`, `node -e` and a piped stdin never do; `python3 -m pytest` and `python -m unittest` are read as `pytest` and `unittest`, the module being the program.
+
+  **`tenjin search` names itself too.** The hook arms already send `trigger` on each `/api/search` body; this release adds the manual half, so `tenjin search` and the MCP `search` tool over it send `cli` explicitly rather than relying on the server's default. The arms that send one are `research`, `dispatch`, `prompt` and `failure`. Telemetry only; a shelf that predates the field records `cli`.
+
+  **`tenjin publish --key <kind=value>`** (repeatable, up to 32; the MCP publish tool's `key`) sends exact-match keys on the post body — `fingerprint`, `package_version`, `command_head`, `repo` — bounded before the wallet signs. Keys go out unverified; `verified` is the shelf's own claim about a key. A shelf with `KNOWLEDGE_KEYS` off refuses a keyed body as `keys_disabled`, and a verified key another published piece holds comes back as "`<kind> <key>` is already verified on `<id>`; publish it unverified"; neither is retried.
+
+- 861a48f: The turn-end ask names the failures this turn HIT, off the ledger row the failure already left.
+
+  **Nothing new is stored.** The deleted `pairings` table is replaced by no table at all: `fires` already carries a failure's question key and its masked error line on every outcome, so the row the arm leaves behind is the whole record. The ask reads it back per actor.
+
+  **The line asserts nothing.** "You fixed `<line>`" was a claim the machine could not make — behind it was a pairing closed by the next passing run of the same command, which is "something passed later", not "you understood it". The line now says only what the row says: this came up, and the shelf had nothing for it. The publish is offered conditioned on the agent's own judgement, with `--key fingerprint=` filled in when the failure has a fingerprint to file under.
+
+  **A failure's question key is composed, not hashed over the line alone.** `sig_v1:<hash>|sig_v1_test:<hash>|line:<hash>`, in that order, and any part may be absent. A key over the error line alone is the same bytes for the identical TypeError in two different files, and the once-per-question gate then serves the second failure the first's cached miss — its fingerprint sitting right there, never resolved. The fingerprints in front of the line hash are what keep them apart.
+
+  **A child's failures go to the child, not to the lead** (principle 5): the actor that hit the wall is the one that can explain it. The lead no longer sees what its children hit.
+
+  **The ask re-arms on a new failure, and only on a new one.** An actor asked at its first stop and then sent into a wall it had to climb out of is asked again, the same way a child's newer finding re-arms the lead. In practice that is the lead's: an already-asked child is on its answer turn and is harvested instead. A failure the last ask already named is not repeated and does not re-arm anything, however many times the same command is re-run — the line says a failure came up this turn, and re-offering its `--key fingerprint=` would ask for a publish the agent may already have made.
+
+- 861a48f: The failure arm gets a second round: when neither fingerprint resolves, it asks the team shelf in WORDS, using the failure's own error line.
+
+  **Two rounds, ordered, never merged.** Round one is `/api/keys/resolve` under `sig_v1` and `sig_v1_test`. Round two runs only when round one answered nothing (the kernel already stops at the first stage that answers) and sends the error line as the runner printed it, masked, to `/api/search`. A key resolves a failure someone already published a key for; the write-up a teammate wrote about the same error in prose carries no fingerprint at all and used to be unreachable from a failing command.
+
+  **A round-one answer this actor has already been shown still ends the plan.** The kernel stops at the first stage that answers, and it discovers the piece was already injected once only afterwards, so that failure gets no words round and is not named at turn end either. It is the kernel's own selection rule rather than the arm's, and it is unchanged here.
+
+  **`sig_v1` normalizes the frame it keys on.** The message half was already reduced — hex runs to `H`, digits to `N` — and the top-frame basename was concatenated raw, so a stack through a bundler-generated file (`chunk-4f2a91.js`) keyed the identical failure differently on every rebuild and resolved nothing it had been published under. The frame now goes through the same reduction, which also folds `main2.rs` and `main3.rs` together: a piece published under a `sig_v1` whose frame carried digits has to be re-keyed to resolve again.
+
+  **The team shelf only.** There is no public leg in either round: the marketplace holds none of this team's errors, and every hit in a 150-search census of this shelf came from the team side. The verdict is unchanged too — the shelf's own `strong`, no relaxed acceptance rule.
+
+  **A failure with an error line but no fingerprint now asks something.** `sigV1` refuses a line with no errno and no frame, and the arm used to fall silent there; it now asks in words.
+
+  **The once-per-question gate now keys on the error line as well as the fingerprints**, so two failures with different messages are two questions, and so are two failures that print the same message from different files.
+
+  **A totals row is no longer the end of the scan.** When the last error-shaped line is a runner's totals row and its block holds no diagnostic, the search now continues into the failure block the same run printed directly above it, across up to four blank lines. The arm splices stdout, stderr and the failure string with a newline apiece, which turns the single blank vitest prints before its summary into two — and two blanks are a block boundary, so a vitest failure with an ENOENT and a frame three lines up used to key nothing at all. The hop is one block and requires a runner header, so a totals-only output, or one with free text or an earlier command's error above it, still yields nothing.
+
+- 6788644: One redact module, one rule table. `src/lib/redact.ts` replaces `scan.ts`: `findings(text,
+scope)` is the publish scan with the audience as a parameter (`publish` reports every rule,
+  `team` reports only the rows scoped to it, so `publish`, `edit` and `sync` pass a scope and
+  filter nothing), and `mask(text)` is the new query-side verb the hook templates render inline
+  from the same table. `redact-rules.json` carries `scopes: ('query' | 'publish' | 'team')[]` per
+  rule instead of a `teamSurvives` flag; `secret-assignment` gains a second entry for the
+  space-separated `--api-key <v>` flag form, so a flag-passed key is caught on a team shelf
+  (tenjin-agent#281).
+  One fixture set, `redact.fixtures.json`, replaces `scan-corpus.json`.
+
+  **`mask()` is precise, and it masks rather than deletes.** For a query, only the rows scoped
+  `query` — vendor-prefixed tokens (`ghp_…`, `sk-ant-…`, `AKIA…`), a password inside a connection
+  URI, an `Authorization: Bearer` header, and a `NAME=value` secret assignment — are replaced,
+  each by a masked stub (`ghp_…[redacted 36 chars]`) that keeps the type-identifying prefix, never
+  the matched value. Nothing else is touched: a path, a hostname, an IPv4 literal, a commit SHA,
+  an env-var name, an email address and ordinary prose all ship whole, because those are the
+  identifiers the shelf's search ranks on. Measured on 3,760 real prompts before this decision:
+  the old scrub altered 604 of them and deleted 1,032 paths, URLs and ids to stop 2 vendor tokens
+  total. The hook templates (`push-scripts.ts`, `hook-scripts.ts`) now render `mask()` inline from
+  the table's `query` rows at generation time, replacing the standalone `SECRET_*_RE` list and
+  `scrub(text, mode)` entirely; every caller that used to pass `'secretsOnly'` now calls `mask()`.
+
+  **Publishing: the local scan is warn-only, and the marketplace is the only blocker.** `publish`
+  and `edit` route every local finding through the standing `publish.mode` consent flow — `review`
+  asks, `auto` returns `NEEDS_CONFIRMATION`, `full-auto` clears it — including a block-tier shape;
+  the local hard-block branch and its "never clearable" wording are gone. The marketplace's own
+  ingest scan is the one place a write can still be refused outright (`PUBLISH_BLOCKED`, vendor
+  tokens, private keys, seed phrases, DB passwords, bearer headers), unchanged, and no `--yes` or
+  mode clears that. `sync` stops scanning locally: it sends every Fix note now, and the server's
+  existing refusal is counted under `skipped`, as before, and covers what a local scan used to hold back.
+
+  **Which rows a shelf flags is data.** `team` scope (both the local flag list and the shelf's own
+  "is this safe to make public" triage) is now the block-tier rows plus `secret-assignment` (and
+  `hex32-value`, `raw-private-key`'s warn form) — down from six survivors to two; `high-entropy-
+string`, `env-dump-block` and `embedded-instruction` are public-only. `private-repo-reference`
+  and `scan-context.ts` are deleted: a public-only nicety about the author's own repo slug, and the
+  only rule that needed caller context.
+
+  Docs, the `tenjin-publish` skill and `docs/safety-model.md` are
+  updated to match: no more local "hard block", the team-shelf survivor list, and the hook
+  template's masked-not-deleted behavior.
+
+- 35ab151: The CLI reads and writes `loop.db` (PR E).
+
+  `state.db` is gone: the search record, the publish-dedup facts and the loop's own reports all live on the loop database the daemon already owns, and `tenjin doctor --prune` deletes the retired store and the five files it replaced rather than importing them. `tenjin sync` is deleted — the failure arm keys a failure exactly, once, and a fix this session closed is named in the turn-end ask with the key it was recorded under, for the agent to publish itself with `publish --key fingerprint=<key>`, which stamps the pairing. `outcome --last` and the per-session importance report are deleted: the CLI knows the harness session but never the agent inside it, so in a fan-out either one could rate a sibling's work.
+
+- c646d9a: The loop daemon and its kernel (PR B of the loop redesign). `tenjin daemon
+start|stop|status` runs one local process per data dir, bound on 127.0.0.1 with
+  a derived port and a bearer token, that serves every hook fire on the machine
+  through `POST /hook/claude` and exits after `loop.idle_exit_min` minutes without
+  one. The kernel is one lifecycle for every arm (`runFire`: actor, deadline,
+  gates, staged legs, one ledger row) over a new `~/.tenjin/loop.db`; the Claude
+  Code adapter decodes the native hook payload and encodes the response. Config
+  gains `loop.*` (four budget numbers plus `idle_exit_min` and `port`) and
+  `team.publicFallback`. Nothing is wired into a harness settings file yet: the
+  arms and the install wiring are the next PR, and the existing hook scripts keep
+  running unchanged.
+- 6ed0a53: The local and handoff arms on the kernel (PR D of the loop redesign). Every
+  hook entry `install` registered now has an arm behind it; nothing to install,
+  nothing to restart.
+
+  **What an agent sees differently.** A failing build, test or lint command is
+  matched in one round against this machine's own error-to-fix record and the
+  team shelf's fingerprint keys, the teammate's piece first; a pairing this
+  machine closed before comes back as a record inside the same fence every other
+  answer uses. A child you dispatch opens with the piece its work order matched,
+  whole when free, and its parent hears nothing about it. A child that did work
+  (any search, fetch, read or edit of its own, or a work order no shelf could
+  answer) is asked once, when it stops, to publish while it still holds the
+  evidence, and a `# ` heading inside its fallback fence is its title. Your own
+  turn end asks once per session, lists what this session's children queued, and
+  re-arms only when a child queues something new. A session opens with the
+  search-first primer again, team or public by your shelf.
+
+  **What is gone.** The ask no longer waits for running children, reads no
+  transcript, and names no finding from another session; a person lists the
+  machine's whole queue with `tenjin publish --finding`. The failure arm remembers
+  nothing about a shelf that refused keys and asks again next time; a checkout
+  with no git origin still sends its fine keys. Every timer, cap and slice those
+  arms carried in the generated scripts is deleted; the loop keeps one clock, the
+  fire deadline.
+
+- 9e69d8b: The lookup arms and the install cutover (PR C of the loop redesign). Claude Code's
+  hook entries are now **eleven**, written by `tenjin install` as one whole set: nine
+  POST the harness's own payload to the loop daemon on `127.0.0.1`, and two run the
+  shim so a daemon is up before the turn's first tool call. Nothing spawns a
+  generated `.mjs` script any more. Three arms answer over one factory, one search
+  leg and one delivery: `prompt` (your prompt, before the turn starts), `research`
+  and `fetch` (a `WebSearch` query, and a `WebFetch`'s url plus its prompt —
+  separate arms with separate claims, so a run of page fetches cannot spend the
+  search's), and `context`, which asks nothing and only stamps the local marks the
+  other arms read. The failure, dispatch, subagent, stop and
+  primer arms land in the next release; until then their entries fire, and the
+  daemon records each fire and answers with nothing.
+
+  **What an agent sees differently.** Every question is masked and nothing else is
+  stripped, the WebSearch query included — it used to travel raw. A search query is
+  never condensed (condensing damaged 131 of 184 real ones; `pgvector testcontainer
+collation` came out empty), and neither is a prompt. A hit is the first of three
+  candidates the shelf marks `strong`, so a strong rank 2 lands over an un-strong
+  rank 1; with none of the three marked strong nothing is injected — the fire is a
+  miss, reason `no-hit`, because the client has no quality rule of its own and rank 1
+  on nobody's word is not an answer, though the leg row still records what the shelf
+  offered. `confidence` and `corroborated` are no longer read on this side; each
+  leg row records the shelf's `calibration`, so a lookup whose meaning step never ran
+  is not mistaken for an empty shelf. A finding arrives **whole** when the shelf
+  sends a body — free rows carry one, paid rows do not — with no per-session cap on
+  full bodies and no second request to fetch one; a shelf that sends none yet gives
+  pointers, as before. The shelf sends the whole free piece and the CLIENT owns the
+  cut, at 6,000 characters on a word boundary, because what a long body costs is the
+  reading agent's context and the shelf cannot see that budget; a cut body carries one
+  line naming the resource id, which is how the agent learns it has a preview and that
+  `tenjin read <id>` is the rest. Nothing published today is long enough to reach it. **The client-side rate limit is deleted**: it refused 246
+  research fires for every 25 that reached an agent, and the runaway guard is the
+  shelf's own 429, recorded as `rate-server`. The loop keeps two numbers,
+  `loop.human_wait_ms` and `loop.tool_wait_ms`; `loop.rate_per_min` and `loop.burst`
+  are gone.
+
+  **What an operator does: run `tenjin install`.** That is the whole upgrade.
+  Install converges rather than merges — it drops every entry of ours, appends the
+  eleven, and deletes the previous release's eight generated scripts by name — so a
+  re-run is byte-identical and **`tenjin uninstall` first is not needed**. It brings
+  a healthy daemon up _before_ it writes `settings.json`, because Claude Code picks
+  that file up through a watcher and an entry naming a daemon that is not there turns
+  a live session's next tool call into an `HTTP hook error`; the file is written mode
+  0600, since it now carries the daemon token as a literal. Turning an arm on or off
+  is a config write and nothing else — no wiring step, no re-install, effective on
+  your next prompt, and it neither adds nor removes an entry. `tenjin update` fetches the
+  new build and refreshes the profile it ran under; the bundles are the same bytes for
+  every profile now, so there is nothing to hunt for. `tenjin uninstall` takes the
+  entries out first, then stops the daemon and removes its files, keeping `loop.db`.
+  `tenjin doctor` compares the port the entries name to the daemon
+  answering `/health`, and warns on a settings file wider than 0600.
+
+  **Hermes is gone.** `tenjin install --harness hermes`, its Python plugin and its
+  native wiring are deleted; nobody used it, and the adapter comes back against the
+  frozen kernel if anyone ever does. `loop.db` is deleted rather than migrated across
+  this series.
+
+- b230842: One hook surface, and install and doctor reshaped around it (PR E2).
+
+  **Seven config keys, one per arm, all on out of the box.** `hooks.prompt`
+  (`UserPromptSubmit`), `hooks.web-search` (`WebSearch`), `hooks.web-fetch`
+  (`WebFetch`), `hooks.subagent` (the dispatch and the child's start),
+  `hooks.failure` (a failing command), `hooks.publish` (the turn-end ask, to you
+  and to each subagent) and `hooks.primer` (`SessionStart`), each a boolean
+  defaulting to `true` and named for what the arm does rather than for the event
+  it rides. The context arm is bookkeeping for `failure` and `publish` and runs
+  while either is on. **Deleted: `hooks.push`, `hooks.webSearch`,
+  `hooks.agentDispatch`, `hooks.capture`, `hooks.sessionPrimer` and the `remind`
+  mode** — five grouped keys over nine arms meant six of them refused to run until
+  something set `hooks.push`, and `remind` was a privacy state that "text leaves
+  as written" had already made empty. `install` writes no hooks key at all, and
+  the `--search-hooks` flag goes with the prompt it settled: everything is on, and
+  there is one place to change it.
+
+  **`tenjin hooks`** is that place. It prints one row per arm — `ARM`, `STATE`,
+  `EVENT`, `FIRED 7d`, `HIT 7d`, counted off `loop.db` — plus a last line naming
+  the daemon behind them, with `--json`. `tenjin hooks enable|disable <arm>` writes the same
+  boolean `tenjin config set hooks.<arm>` writes, through the same locked merge;
+  the daemon re-reads it per fire, so nothing restarts and nothing re-installs.
+
+  **`tenjin grade` moves to the top level** and keeps its flags: it is a report
+  about the loop's precision, not a switch. **`tenjin push` and `tenjin state
+query` are deleted** — `tenjin hooks` answers what the status half was asked,
+  and `sqlite3 ~/.tenjin/loop.db` answers the rest (the wrapper existed for a
+  `sqlite3 -readonly` quirk on a database that no longer exists). **`tenjin send`
+  becomes `tenjin wallet send`**, beside the rest of the wallet verbs; the
+  permission rules, the never-allowlisted list and both skill references follow.
+
+  **`tenjin session start` is deleted, and `tenjin read` mints its read session on
+  demand** the way `publish` and `edit` already do: one keystore unlock, a 24-hour
+  delegated key cached 0600 for that origin, presented free on every later read,
+  through the same `resolveWriteAuth`/`session-key.ts` path the writes take. No
+  SIWX code is duplicated for reading. `read` is auto-allowed by default and now
+  opens the keystore and signs, which `docs/agent-permissions.md` says in as many
+  words; the test pin that `read` never reached the wallet goes, since `publish`
+  was auto-allowed with full wallet access already and the pin bought nothing. The
+  mint is pinned the way `wallet fund` is: `read` presents and mints only against
+  `baseUrl` or `publicShelfUrl` as the CONFIG FILE names them, so an allowlisted
+  `read --base-url <host>` still fetches a free piece from that host and signs
+  nothing for it. The refusal's `entitlementCheck` loses `not_performed` and gains
+  `no_wallet` and `origin_not_configured`, and no fix line names a session
+  command.
+
+  **Install asks two things** — the publish mode (which is also the consent for
+  the harness allowlist) and whether to create a wallet — and prints ten rows. The
+  hooks row is now what an operator can act on: `7 enabled; change: tenjin hooks
+disable <arm>`.
+
+  **Doctor is grouped**: Environment, Shelf, Hooks, Wallet, one line per check and
+  a `fix:` line only under a warn or a fail. `store` opens `loop.db`, which proves
+  the `node:sqlite` module, the file and its shape in one go, so the separate
+  module probe goes; `api` and `search` are two verdicts on one `openapi.json`
+  fetch; the `test-reporters` project lint goes, leaving the vitest-reporter regex
+  one home in `test-identity.ts`; the session-key check goes with the verb.
+  `--prune` and `--json` are unchanged.
+
+  **Help is the reference now, and `docs/command-reference.md` is deleted.**
+  `tenjin --help` groups every command under Setup, Search and read, Publish,
+  Wallet and Integration, one line each, with the three global flags listed once
+  and examples and pointers at the end; each command's own help is a usage line,
+  at most two sentences, its flags, and an example where the flags are not
+  obvious. The four commands that page alone documented — `pay`, `discover`,
+  `delete` and `daemon` — say their piece there now, `tenjin hooks` prints the
+  arms, `docs/agent-permissions.md` describes each one in a line — when it fires,
+  what it does, what leaves the machine — and the README and
+  `docs/safety-model.md` carry the rest. `tenjin help <command>` stays, filed
+  under Setup rather than left ungrouped, because gh, git, cargo and docker all
+  take both spellings. The audit that came with the reshape took the dead surface
+  with it: `(default: [])` stops trailing the nine repeatable flags, and the
+  globals still parse after a subcommand without being re-listed under every one. The README's "Core commands" list, which
+  restated all of this and had fallen behind it, goes the same way, and the arm
+  table stays what `tenjin hooks` prints rather than a snapshot in help.
+
+- f3f888a: No scrubbing: an agent's question is now exactly what it typed, with its secrets
+  masked, and nothing else (PR C2 of the loop redesign). Every hook's text goes
+  through `mask` and then the search leg's cut at the shelf's 512 characters on a
+  word boundary. That is the whole list. A prompt is not condensed, a url is not
+  split into words, a file name is not turned into a phrase, and no arm invents a
+  question out of something it read.
+
+  **What an agent sees differently.** Your prompt travels as the sentence you
+  typed, so the shelf ranks on your words rather than on this machine's summary of
+  them — condensing dropped stopwords and short clauses, and a summary is a
+  different question. The two length skips are gone with it: a 78-character
+  question is a question and gets asked, and a 5,000-character paste is asked
+  about too, cut at 512 like everything else. Three prompt skips remain, each its
+  own reason on the row: `slash` (a harness command), `words` (fewer than three
+  words of three characters once masked), and a new `harness` for text the tooling
+  sent through the prompt channel — `<task-notification>`, `<agent-message`,
+  `[SYSTEM NOTIFICATION`. A `WebFetch` now asks about the page's address and the
+  prompt attached to it, both as written; the address stops at its first `?` or `#`; everything after that character is dropped,
+  because a signed url keeps its credential in a parameter value whose shape
+  masking has no rule for. The `identifiers` list is no longer sent beside the
+  query at all: the shelf lifts identifiers out of the query itself, so sending a
+  second, client-computed copy only added a way for the two to disagree.
+
+  **The read and churn lookups are deleted.** Reading a source file no longer
+  asks the shelf about a package it imports, and the fourth edit of one file no
+  longer asks about the file. Both invented a question out of a file rather than
+  carrying one an agent asked, and neither ever produced the precision number that
+  was the reason to keep them log-only. `trigger` on the wire is now `prompt` or
+  `research`, and `read` and `churn` are gone from it.
+
+  **The context arm stays, and only writes marks.** It is registered on the same
+  events and still stamps what other arms read: a `Bash` call's start time
+  (`bashstart`), every edited path (`edited:`), and the lead's own inspection and
+  mutation activity (`activity:`). It asks nothing, so every fire on it is
+  recorded with the reason `no-question` — which is the truth, not a silent exit.
+  The per-file edit counter that fed the fourth-edit trigger is gone with the
+  trigger.
+
+  Owner decision, 2026-09-06: minimal alteration of what leaves the machine. A
+  transform that is not masking is a guess about what the agent meant, and a guess
+  this side makes is one the shelf never gets to see past.
+
+- 4564f3f: Two account verbs, so a CLI-only publisher is not listed under a bare 0x address
+  (tenjin-agent#208). `tenjin profile` shows the handle, display name, and bio behind
+  the wallet; `tenjin profile set --handle <h> [--display-name <n>] [--bio <t>]`
+  claims or renames the handle and sets the rest (omitted flags keep their stored
+  value). `tenjin stats` prints this month's earnings, full reads, and glances. All
+  three ride the same session-key auth `publish` and `edit` use, so a team shelf
+  needs nothing extra and a cached session means no wallet prompt. No consent gate
+  and no permission-tier entry: these are operator-invoked account edits, not content.
+- c223903: **Breaking.** A finding is a publish document, and that is the only shape:
+  frontmatter carrying `title` plus the answer-card keys, then the body.
+  `tenjin publish <file>` is the only command that takes one.
+
+  - The document is validated before anything is written. A missing title, or an
+    answer card missing a rubric key, is refused with exit 2 naming the exact
+    frontmatter keys to add, above the scan, the dedup answer, the confirm, the
+    wallet and the network. `--draft` skips the card check and nothing else.
+  - The card check is a quality policy mirroring the server's completeness rubric.
+    What it buys is judgement, not rank: the card is the pre-purchase decision
+    payload, since the rank-1 card inlines the questions, the scope and the
+    exclusions, so a searcher judges fit without paying. An incomplete card is
+    labelled `no answer card` or `incomplete answer card` in every searcher's
+    `matchReasons`. Explicit filters remain independent: `freshWithin` requires
+    an in-window `asOf` for snapshots, and `appliesTo` requires every requested
+    value. A cardless piece fails both filters. Completeness changes neither
+    relevance nor rank.
+  - The title is frontmatter `title`, else the body's first level-1 `# ` heading.
+    No other heading level counts.
+  - Removed: `--dry-run` (validate-before-write is the preview), `--finding` and
+    `--discard` with the local finding queue behind them, and every card-authoring
+    flag on `publish` (`--question`, `--task`, `--scope`, `--exclusions`,
+    `--applies-to`, `--as-of`, `--valid-until`, `--artifact-type`,
+    `--temporal-mode`, `--provenance`, `--methodology`). The card is frontmatter or
+    it is nothing. The same fields are gone from the `tenjin_publish` MCP tool,
+    which is no longer annotated destructive; `tenjin edit` keeps its flags.
+  - The CLI fills nothing content-bearing. A named `--search-id` no longer copies
+    its question into `questionsAnswered`; every card entry is the author's.
+
+  On the daemon side, the turn-end ask names the command and nothing else: the
+  fenced fallback, the harvest that read it, and the queued-findings lines are all
+  gone, and a stop after the ask writes its row and says nothing. A subagent's Read
+  on its own no longer earns it an ask.
+
+- 9a6f2aa: Let the child publish its own finding, and stop a queued one from going unseen (tenjin-agent#228). This adds a seventh `SubagentStop` settings entry (seven entries across six events), so run `tenjin install` once after upgrading or the arm never fires; `finding`, `dryRun` and `discard` join the MCP `publish` schema, and the arm is gated by `hooks.publish`:
+
+  - **The `SubagentStop` ask now asks the child to publish.** It used to ask for words the parent then had to relay: a summary of a summary, stripped of the probe trail, the failed attempts and the exact versions and error text that only the child ever held. Capability was never the blocker — a capable child could always have run the command, and the dogfood found zero child publishes — so what was missing was the ask, at the one moment the evidence is still in context. It is the SAME publish anyone runs: same command, same `publish.mode` resolution, same scan tiers, same refusals, reaching whatever shelf your configuration names, the public marketplace included. No child-specific branch, no shelf restriction and no capability detection, because consent lives in your configuration and not in which agent runs the command.
+  - **The fenced block is the fallback, and a REFUSAL is what triggers it.** If the publish refuses, or the child cannot run the command at all, it is asked to state the finding in a marked block instead, which the next fire harvests onto a local queue as before. Which of the two happens falls out of your own mode rather than a policy in the hook: under `review` the confirm needs a TTY that a child running the CLI through a tool call does not have, so its publish fails closed with `needs_confirmation` and publishing stays with the parent, the context where the human you asked for actually is; under `auto` the child publishes.
+  - **`tenjin publish --agent <id>`, and the parent reports what its children published.** A child publishing from a sidechain nobody reads is answered by visibility, not by taking the publish away from it. The flag records the publish under the harness agent id the ask handed that child, keyed on the same `agent_id` the hooks already stamp into their rows, and it gates nothing at all: same scan, same consent, same price, same shelf. The capture ask then names those publishes as urls, above the queue, matched to the children this session actually asked. It is not exposed on the MCP `publish` tool, which has no id of its own to pass.
+  - **The capture ask surfaces unpublished findings from earlier sessions.** `SubagentStop` fires per child while a parent `Stop` may never fire at all — a crash, an interrupt, a session ended from the UI — so a finding routinely outlives the run that produced it, and a session-scoped list made it invisible rather than merely late. The queue is machine-wide now, inside the same 8-hour window the open loops use, and a finding from another session is named and marked as such. Publishing one takes it off that queue, so "held locally and unpublished" is true of everything the ask lists.
+  - **A late finding is no longer orphaned in the session that produced it, and no cursor decides which findings exist.** A subagent launched after the capture ask fired, or one whose launch had already fallen out of the transcript tail, queued its finding behind an absolute once-per-session gate that exited before it ever read the queue. A watermark fixed that and introduced a worse one: `SubagentStop` runs one process per child and `publish` runs in another again, so the order rows are minted in is not the order they become visible in, and a row that commits after the ask that read past it sits below the cursor forever. Three cursor shapes lost a row that way (the newest `at` plus a millisecond, the greatest uid, and the (at, key) pair). The ask now stamps each row it names, and both the gate and the two lists read the rows that carry no stamp: a late commit is picked up by the next ask, a named row is not restated, and nothing assumes an ordering. The stamp is machine-wide, so a finding is named to one context rather than re-listed to every session for eight hours; one nobody acts on is not re-offered and stays reachable by id.
+  - **`tenjin publish --finding <id>`, with `--dry-run`.** The id the ask prints is an argument to the command the ask already names. It is a source and nothing else: the body comes from the store instead of a file and takes the same consent cascade, the same review confirm, the same never-bypassable block tier and the same pricing. The review confirm is the read gate, so it carries the whole stored body with the child's agent id and the search id; `--dry-run` prints the same thing and exits having touched no wallet, made no request and written nothing. The child, its agent id and the loop it closed come back on the receipt, and that search is claimed on the piece unless you named one yourself.
+  - **The capture ask lists every queued finding.** It named the five newest, which dropped exactly the sessions with the most to publish. One line is what naming a finding costs the parent, so all of them are named, bounded only by the runaway guard and the reason's character budget.
+  - **The child's own publish closes the loop it was asked about.** The ask splices the search id its signal came from into the command, so the preferred path answers the dispatch MISS and prefills the piece's answer card; only the fallback used to close it. The ask also names the `tenjin_publish` MCP tool for a child with no shell, on the same principle the child pointer ladders on, and spells the refusal codes as the CLI emits them.
+  - **A queued finding survives a session that never ended cleanly.** The research gate counted findings under the CURRENT session while the list it heads is machine-wide, so a stranded row (its parent `Stop` never fired) was invisible to every later session that had done no research of its own: a dead parent erased the finding instead of delaying it. That gate now reads the same machine-wide unpublished queue the list reads, so any session that can still publish is offered it.
+  - **A child publish re-arms the report, and a re-ask names what a clock watermark used to swallow.** A successful child publish writes no queue row, so after a session's first ask every later child publish went unreported, and visibility is the only thing standing behind letting a child publish at all. The re-ask gate now fires on either half. The watermark is also taken from what the ask actually NAMED rather than from the clock at the moment it marked, so a finding committed while the ask was reading is named at the next turn end instead of being skipped permanently.
+  - **`agent_published:` is one row per publish.** Keyed on the agent id alone it upserted, so a child that published something objectionable and then anything innocuous left the parent's report showing only the second. The ask lists every publish now.
+  - **The harvest is bounded before it is scrubbed, and `scrub`'s secret-name classes are bounded.** `scrub` ran on up to 20,000 characters an untrusted child chose, and its unbounded name classes backtrack super-linearly on a keyword-dotted run (227 ms at 2k, 1.8 s at 4k, 14.7 s at 8k). A synchronous regex cannot be pre-empted by the hook watchdog, so the harness timeout killed the process mid-scrub and the harvest was lost with no row at all. Cut first, then scrub, with the name classes capped at 64 characters, which changes no match.
+  - **The fences are anchored.** The parse closed at the first ``` after the opener, so a finding carrying a code snippet was truncated silently and the truncation was what got published; and it opened at the first marker, so a child that MENTIONED the marker while declining harvested its own decline. Both fences are now a line of their own, nested code fences are counted, and the last opener wins.
+  - **`PUBLISH_BLOCKED` no longer reprints the body.** A hard block on a stored finding is the signal that the hook's scrub missed a live credential (a BIP-39 mnemonic passes every scrub rule whole), and the refusal attached the whole body to the terminal, the JSON envelope and the MCP result. It now names the finding and withholds the body; the review confirm keeps it, where it is the read gate.
+  - **A finding carries the project it was captured in.** The queue is machine-wide and `publish.mode` resolves from the current directory, so a finding harvested in a private repo under `review` was publishable from an unrelated `full-auto` repo with no confirm. The row now stores its project, the ask marks a row from another checkout, and publishing one from elsewhere needs an explicit `--yes` in every mode.
+  - **`tenjin publish --finding <id> --discard`, so no is final.** Only a publish ever removed a queued finding, so a declined one came back at the first turn end of every session for eight hours. `discard` is on the MCP `publish` tool too.
+  - **The composed ask is bounded by characters, and the bound costs a turn rather than a finding.** 200 queue rows and 200 published rows composed a six-figure string inside a blocking reason. Cutting the composed text was not enough: the cut ran after the ask had already moved past every row it read, so past ~70 rows a finding was dropped from the text and never named again. Each list now fills a character budget item by item and stamps only what it kept, so what does not fit is named at the next turn end.
+  - **The ask carries no part of a finding's body.** Capture runs the query scrub and no scan tier, and the secret classes the block tier exists for pass every scrub rule whole, so a clipped 160-character preview put the same live credential `PUBLISH_BLOCKED` refuses to echo into the parent's blocking reason one turn earlier. A finding is named by its id, its author, the search it answers and its length; `--dry-run` is the read path and runs the scan.
+  - **`publish --finding <id> --dry-run` now works on a blocked finding.** The block threw above the dry-run return, so the one command four different texts named as the way to read a blocked finding re-threw and printed nothing. `--dry-run` runs above the block, prints the body, reports the blocking findings and still publishes nothing; a real publish refuses in every mode as before.
+  - **A block the hook cannot record degrades to a nudge.** The mark that bounds a re-ask was written and its result discarded, and the test for it only asked whether the session's row existed, which on a re-ask it already did. A lost write therefore left a block firing with the same reason at every turn end for the rest of the window: a session the operator could not end. Both the session row and every per-row stamp now report whether they landed, and a block degrades on either.
+  - **`--discard` takes the gates `--finding` takes.** It resolved and dequeued with no project check and no `--yes` while the ask hands a parent every cross-project id it holds, so an agent in one project could permanently drop another's finding. It now takes the same cross-project confirm, the not-found error enumerates only this project's ids, and the MCP `publish` tool is marked destructive and says so.
+  - **The three `SubagentStop` claims fail closed.** `claimState` reports a win on a write the store swallowed, which is what a SQLITE_BUSY during a fan-out looks like, so a swallowed session-budget insert left the budget unheld while the per-child claim landed and every later child in the hour was blocked for a turn. All three are `claimStateFresh` now, windowed to the same hour the arming signal is read over.
+  - **The install receipt and both permission references describe what the arm actually does**, which is ask the child to PUBLISH, rather than the earlier fence-to-the-parent design.
+  - **The child-publish report claims only publishes made after this session asked.** `agent_id` is an undocumented probed field and the publish rows are machine-wide, so matching on the id alone would report another session's child's work as this parent's on any harness whose ids repeat. A publish that predates this session's own ask of that id is not its answer. Two live sessions sharing one id still cannot be told apart; that needs a session on the row and a flag on `publish` to carry one.
+  - **The lifecycle row sits directly under the claims that spend the session's one child ask**, so a process killed in that gap leaves a row saying why rather than a budget spent in silence. A lease is the dispatch arm's answer to the same shape and is deliberately not taken here: a session budget that expires after the fire's own ceiling is a budget of one ask every eight seconds.
+  - **A stored finding is itself a research signal.** `didResearch` gated the capture ask on a session-owned search row or a qualifying injection, and a capture triggered by a FAILURE leaves neither: the lookup missed, or was weak, local, skipped, or never injected. The ask therefore never fired for exactly the case the child-boundary ask was built to catch. An unpublished finding inside the ask's own window now clears the gate on its own. It counts the QUEUE a publish deletes rather than the append-only log, so after a child publishes under `auto` the session no longer fires a bare ask with an empty list.
+
+- 4fe280c: Close the loop's own loop: record whether the agent used what the hooks showed
+  it, locally and on the shelf that served it.
+
+  **`tenjin grade [--since 7d] [--session <id>] [--explain] [--label <uid>
+<status>]`.** The arms record what they delivered and the shelf records what it
+  served; neither can see what happened next, so nothing has ever measured the
+  loop's precision. This reads the session transcript, finds where the
+  injection landed, and judges what the agent did after it. Only tool inputs
+  count: prose agreeing with an injection is what an injection makes likely
+  whether or not it helped, while a tool call is a decision the agent spent
+  something on. An explicit `tenjin read|inspect <id>` or the injected URL is
+  `used` whenever it appears; a two-word backtick span copied out of the injected
+  text within the next ten tool calls is the weaker `partially_used`; nothing at
+  all, once the session has ended, is `rejected`; and a finding that was never in
+  front of the agent — every subagent injection, which reaches no transcript — is
+  `unobserved`. A session still running is left open rather than called rejected,
+  because the shelf keeps the first verdict per lookup and post and the next tool
+  call could contradict it, and so is a session whose transcript this machine
+  could not go looking for: `unobserved` is permanent, and an unreadable home
+  directory is a fact about the run rather than about the row. Verdicts go to the
+  shelf that actually served the row — the origin of the URL it was shown with,
+  since a search id means nothing on another shelf and that endpoint answers 202
+  either way — with the team bypass header only when that origin is the configured
+  team shelf's. A landed verdict is never re-posted and a failed one is retried on
+  the next run. `--explain` shows the anchor line and the evidence; `--label` sets
+  one verdict by hand, on an injected row only.
+
+  **One store, not two.** `lib/search-store.ts` was a second module over the same
+  `searches` table, left over from when that ledger was a file. Its helpers move
+  into the store, and two queries stop scanning on the way: `buy <resourceId>` and read attribution now ask one
+  statement over `json_each` instead of walking 500 rows' candidate arrays, and a
+  search is looked up by id case-insensitively rather than filtered out of the
+  same 500. Behaviour is unchanged, with one break: the `candidate` value is gone
+  from the resolution vocabulary, where it was retained only so a value written by
+  an older build would parse.
+
+- 2eca443: The hook sidecar: a team shelf, two-shelf search, and a capture loop.
+
+  **A team shelf is a second Tenjin deployment, not a new thing to learn.** Point `baseUrl` at
+  it and set `shelfBypassSecret` to its Vercel protection-bypass secret; that one key is what
+  turns team mode on. `publish`, `search`, `read`, `inspect` and `buy` all work as they always
+  did, against a different origin. There are no new commands. Every request to `baseUrl` carries
+  the bypass header and nothing else ever does — the header is attached from the request URL, in
+  one place, so it cannot follow a call site's mistaken belief about which shelf it is talking
+  to. `config get shelfBypassSecret` prints `set` or `unset`, in `--json` too.
+
+  **Search asks two shelves, team first.** `publicShelfUrl` (the public marketplace,
+  consume-only) is the fallback: `tenjin search` and every hook arm query `baseUrl` first, and
+  only on a miss do they ask the public shelf. Human output labels each block by shelf; `--json`
+  carries the answering shelf's response plus a `shelves` array naming both legs. `read`,
+  `inspect` and `buy` accept candidates from either origin, and a `buy` signs its SIWX header for
+  the shelf the URL is actually on. In public mode there is one shelf and none of this is
+  visible.
+
+  **Publishing to a team shelf is free, and loses the warn tier only.** It goes to `baseUrl`
+  only, never to the public shelf, with the price defaulting to `0`. The scan's WARN tier is
+  skipped, except for the two credential checks `secret-assignment` and `hex32-value` and the
+  injection check `embedded-instruction`: the rest of those warnings ask "is this safe to make
+  public", and a team shelf is not public, so every one of them fires on exactly the findings the
+  shelf exists to hold. The three exceptions ask something a private audience does not answer —
+  is this a live credential, and would this text steer the agent that reads it — and `review` and
+  `auto` still confirm on them. **The hard secret
+  block still applies on every shelf**, in every mode, clearable by nothing — a team shelf is a
+  hosted database with logs and a shared door key. The consent cascade is unchanged as well;
+  `review` still asks once per note. Clearing `shelfBypassSecret` puts the warn tier back.
+
+  **A closed loop reaches the shelf that answered.** Every search entry records the base URL of
+  the leg that minted its searchId, so `tenjin outcome` posts there rather than to whatever
+  `baseUrl` currently is, and a `--search-id` the other shelf answered is dropped from the publish
+  body and left open rather than misfiled on a post row.
+
+  **The arms put a finding in front of you without being asked.** Hooks watch for the moments
+  where an answer is worth more than a search — a failing Bash command, a submitted prompt, a
+  subagent dispatch, a stuck read/edit loop — and surface a match from whichever shelf answered.
+  Every decision, delivered or not, is recorded with the shelf it came from. No arm ever cancels
+  or changes a tool call: each one only adds context beside a call the harness makes anyway.
+
+  **Capture closes the loop.** A session that actually did research is asked once, at Stop, to
+  publish anything durable it settled, with the resolved `publish.mode` named in the ask. The bar
+  follows the mode: public, durable and rights-clean on the marketplace; "anything a teammate on
+  this project would want to know" on a team shelf. The ask fires once per session whatever the
+  agent does with it. Sessions that only read and edited code are never asked, and the arms' own
+  lookups do not count as research.
+
+  `shelfBypassSecret` is unset by default, so an existing install picks up no team shelf until it
+  opts in.
+
+- 861a48f: The failure arm's mechanical error-to-fix record is deleted. It only asks now.
+
+  **The local pairing lane is gone.** The daemon no longer opens, closes, verifies or replays a record of its own: it inferred the fix from whichever files an agent edited plus a later passing command, and measured against ten real fixes it matched none of them, while an unrelated `pnpm test` could close a failed `pnpm db:migrate` through a file that only shared a basename. `pairings` and `pairing_closes` are DROPPED from `loop.db` on the next open, deliberately and permanently — there is no migration ladder, and a table nothing lists is a table nothing would ever clean up.
+
+  **The failure arm now only asks.** Round one sends the failure's `sig_v1` and `sig_v1_test` fingerprints to `/api/keys/resolve`; round two, only if the first answered nothing, sends the error line in words to the team shelf. A machine with no team origin asks nothing at all behind a failing command, where it used to read a test report and consult itself.
+
+  **The `local` shelf and its opener are gone**, so nothing is ever injected as a record from this machine. A parked handoff still reaches a starting child, under the shelf its own answer came off.
+
+  **The turn-end ask no longer names fixed-but-unwritten errors**, and `doctor` no longer counts them: a fix this machine inferred was never a fix to begin with. `tenjin publish --key fingerprint=sig_v1:<hash>` survives as the hand flag for the server-side key registry that round one resolves against, and the ask now fills it in from the failure's own ledger row rather than from a record of its own.
+
+  **`~/.tenjin/loop.db` is still kept by uninstall**, for the search record and the outcome history.
+
+- 7da12bf: Answer the marketplace's server-side publish scan instead of failing on it. The
+  `tenjin` backend now runs the same rule corpus in its shared write path, so a
+  publisher not running this CLI is gated too. Until now its refusals reached
+  `publish` and `edit` as opaque post-consent write failures (exit 4), which is
+  the wrong shape for a decision the operator can actually act on.
+
+  Both writing commands now map the gate's two codes into the consent flow they
+  already have. A `scan_blocked` is a hard failure, exit 3, with the redacted
+  findings rendered: the block tier has no acknowledgement path server-side, so
+  there is none here either. A `scan_needs_ack` merges the server's findings with
+  this run's local scan, deduped by detector and offset so the same secret renders
+  once, and refuses as `NEEDS_CONFIRMATION`; an explicit yes re-runs the identical
+  content carrying the server's ack token, and exactly once, since the token is
+  bound to that content and that finding set.
+
+  A confirmation covers the findings it post-dates, so a `--yes` clears the
+  server's hold only when the merge added nothing the local pass had not already
+  rendered. The `--yes` was an answer to a payload built before any server call,
+  and the marketplace's set is strictly larger than the local one (its semantic
+  checks have no local counterpart at all), so reading that yes as an answer to
+  findings it could not have contained is reading it as an answer to a question
+  nobody asked. `review` and `auto` therefore stop on a server-only warn even with
+  `--yes`, render it marked `[server]` with its tier, and say in the fix that the
+  yes did not cover it. `full-auto` still acknowledges unasked: clearing soft
+  findings unasked is that mode's contract.
+
+  New config key `publish.ackServerWarnings` sets a standing answer without
+  changing the mode. `off` never acknowledges, which is the off switch an
+  unattended `full-auto` machine needs; `on` lets a `--yes` cover the server's
+  findings too, which is what a non-interactive machine sets once instead of
+  re-running forever; `mode` (the default) derives the answer as above. It reads
+  from the global config only, never from a project `.tenjin.json`, because it can
+  only ever loosen what a yes covers; a project file that names it is ignored with
+  a stderr line rather than silently. The held payload's `fix` is derived from the
+  same decision the acknowledgement is, so it never advises a `--yes` that the
+  mode, the setting or the caller has already ruled out, and the Stop hook's
+  `publish.mode=full-auto` line says when `off` still stops a publish. In-process callers whose answer is not the
+  operator's to configure still pass `ackServerWarnings: false` and never
+  acknowledge at all.
+
+  Findings travel as data — detector id, tier, redacted excerpt, offset — so a
+  detector this release has never heard of renders faithfully rather than being
+  dropped, and the server stays authoritative under version skew. Findings the
+  gate contributed are marked as such in the rendered lines, because "fix your
+  file" and "the marketplace refused this" are different instructions.
+
+  While the backend's warn tier is still advisory it rejects nothing and reports
+  its findings on the success response instead. Those now reach the receipt as a
+  `scan` field and the human summary as informational lines. They never block, and
+  the `checks.semantic` marker rides along with them.
+
+- 0a9d8ef: One SQLite store for the hook sidecar (tenjin-agent#209).
+
+  **Breaking: Node 24 is now the floor** (`engines: >=24`), because the store is Node's built-in `node:sqlite` and the hooks import nothing else. **Local hook state resets**: there is no import path from the file-per-concern era, and the sidecar starts clean.
+
+  - **One store replaces nine files**, opened with `busy_timeout` set before `journal_mode=wal` (probed: eight concurrent hooks on a fresh database kill one of them at that pragma in the other order). Every failure — an old Node, an unwritable dir, a corrupt file, a busy database — returns null, and the arm then behaves exactly like a missed lookup: no shelf is asked, nothing is injected, exit 0, one stderr line. Failing open means going quiet, not losing the caps: with no store the per-arm lookup cap, the per-session injection cap, the outage brake and the dedup would otherwise all read zero at once.
+  - **One already-shown set across every hook.** The WebSearch and dispatch hint paths never touched the push ledger, so the same note re-showed for every new question — six times in one session. Every arm consults and writes the same table now, so a piece is offered once per session whichever arm found it.
+  - **The append-only push ledger, the per-session JSON, the capture markers and the publish-dedup markers are gone**, and with them the 24h pruner that had to be told not to sweep a live session's marker (a pinned mtime past the retention window asked a still-running session to capture a second time). The mkdir mutex goes too: the generated hooks had to reimplement the CLI's lock protocol byte for byte, and the 50-entry cap needed a hand-rolled demand budget — mirrored in both writers — so a subagent fan-out could not drain the slots the CLI depends on. Rows are rows now; nothing evicts anything.
+  - **The ledger tallies count the whole window.** The `tail` field and the "retained tail only; these are floors" line are gone: the tally used to read the last 256 KB of an append-only file and report a floor as a total.
+  - **Local error→fix replay ships with it.** The failure arm keys a failure with `sig_v1` (first message line + errno + top-frame basename, normalized; a signature with neither errno nor frame is below the specificity floor and is not stored), opens a `pairing`, and closes it when the same allowlisted command head later passes AND a tracked file changed that the error named. One close reads as "someone once fixed this by touching X"; two independent closes make it `verified` and it injects as a fix. A local match is injected **before any shelf is asked**, and demoted to "was true at pkg@X" when the recorded package versions no longer match what is installed. Mechanical throughout — no model, no `git` invocation.
+  - **`tenjin doctor` probes `node:sqlite`**, because the hooks fail open without it and a sidecar that has quietly stopped remembering anything looks exactly like one with nothing to say.
+
+- 2eca443: Shape the installed skills by team mode, replacing the guidance that differs
+  rather than annotating it.
+
+  A public-mode install is unchanged: `tenjin-search` and `tenjin-publish` render
+  byte-for-byte what they rendered before markers existed, and a digest pin in
+  `src/skills-text.test.ts` says so. On a machine in team mode — a shelf of the
+  team's own plus its door key — the sections whose guidance actually differs are
+  REPLACED. Nobody reads guidance for the mode they are not in, and no skill states
+  a rule and then an exception to it.
+
+  In team mode `tenjin-search` says a project-specific question is worth asking,
+  because the shelf holds quirks of this codebase, probe results and the reasoning
+  behind past decisions, where the marketplace would be a guaranteed miss.
+  `tenjin-publish` says teammate-useful instead of public-and-durable, free instead
+  of priced, and a scan that asks about credentials only — the whole block tier plus
+  `secret-assignment` and `hex32-value`, with the rest of the warn tier dropped.
+
+  One thing the team arm says that the previous appended paragraph did not: search
+  has no way to suppress the public leg. A team miss sends the SAME question string
+  to `publicShelfUrl`. So a team shelf relaxes the TOPIC, never the wording, and a
+  question must still be one you would accept being logged on a shelf that is not
+  yours. Secrets, credentials, customer and account names stay out in both modes.
+
+  The seam #147 left inert is now live, and gains an `else` arm so a region can be
+  replaced rather than added to: the two arms are exclusive by construction, so no
+  flag value can render both or neither. `skillContentFlags` is the one mapping from
+  machine facts to marker flags, and all five comparers go through it — `install`,
+  the post-command self-heal, the optional-skill placer and `doctor`'s staleness
+  compare materialize directly, and `scripts/pack-smoke.sh`, which cannot run the
+  resolver against a packed tarball, asserts the rendered properties instead.
+
+  Two behaviors worth knowing. Changing `baseUrl` or `shelfBypassSecret` makes the
+  wired copies stale, which `doctor` reports and the next ordinary command fixes with
+  no re-install. And a config that cannot be read or parsed heals NOTHING rather than
+  defaulting to public: guessing public on a team machine would rewrite every wired
+  skill to the other mode's guidance, under a notice claiming it now matches this
+  CLI. An absent config still reads as public, because no shelf is configured.
+
+  The mode is read from the stored config, never from a `--base-url` on the run: the
+  file being written outlives the command that wrote it.
+
+  `skills/tenjin/SKILL.md` is untouched. It is the byte-for-byte mirror of
+  `tenjin.blog/skills.md` that skill-drift CI diffs after re-running the sync, and
+  its reader has no CLI and so no mode.
+
+- 9d4cdbe: The failure arm gains a second, additive key lane for test failures — `sig_v1_test` (tenjin-agent#267) — because `sig_v1` keys on the error's first line plus its errno, and a vitest assertion has no errno and no two byte-identical runs.
+
+  **`sig_v1_test` keys on the test runner's own identity instead: file + suite + test.** Never a replacement for `sig_v1` — it still runs first, locally and on the wire — this lane only adds a second local pairing and, on a vitest-shaped failure, a second wire key beside it.
+
+  **Identity comes from a structured artifact first, a console breadcrumb second.** A repo that adds a second vitest reporter (`reporters: ['default', ['json', { outputFile: '.vitest-report.json' }]]`) gets the file/suite/test read straight off the JSON report, mtime-checked against the failing run; a repo with none falls back to a conservative parse of vitest's own `FAIL  <file> > <suite> > <test>` recap header, requiring the `>` breadcrumb so a bare "N failed" summary (already below `sig_v1`'s own specificity floor) cannot fire it. A repo with neither loses only precision, never gains a false match.
+
+  **A match on it gets the same full treatment a `sig_v1` match does**, and it costs no extra request: the team leg's one `/api/keys/resolve` call carries `sig_v1`'s key and the test lane's beside it, so an ordinary (non-test) failure's request shape is unchanged.
+
+  This repo's own `vitest.config.ts` opts into the reporter as its own dogfood.
+
+- 483797b: `tenjin update` re-materializes what `install` wrote, instead of swapping only
+  the binary.
+
+  The skills and the generated hook scripts are copies of a particular version, so
+  an upgrade left them at the previous one until someone re-ran `tenjin install` by
+  hand. The highest-volume request path kept reporting the old version, and agents
+  kept reading the previous release's guidance. `update` now spawns
+  `tenjin install --refresh` on the freshly installed entry once the swap
+  succeeds, and the stale "New builds pick it up immediately" line is replaced by a
+  report of what the refresh actually did.
+
+  `install --refresh` is a new non-interactive mode: it re-renders the wired
+  skills, rewrites the hook scripts already on disk, and updates the settings.json
+  hook entries this CLI already owns. It adds nothing. A skill that is not wired
+  stays unwired, a script that is absent stays absent, an event with no entry of
+  ours gets none, and no permission rule is written at all: rules a newer version
+  would grant are reported and left for an explicit `tenjin install`, because
+  widening an agent's allowlist during an unattended upgrade is not a refresh. It
+  never prompts, never creates a wallet, and never writes config. It refuses
+  `--dry-run`, which the mode dispatches above and so could not honour. On a
+  machine where nothing was ever installed there is nothing to converge, and it
+  says so and exits non-zero rather than reporting a refresh that did not happen.
+
+  The refresh runs once per profile whose hooks this machine has registered, with
+  `TENJIN_DATA_DIR` set to each. `install` bakes its data dir into the scripts it
+  generates, so a machine set up under a redirected data dir has hooks belonging to
+  that profile while a bare `tenjin update` resolves the default one; refreshing
+  only the invoking profile would leave the scripts the harness actually fires
+  stale forever. A new `detectHookOwners` reads those profiles back out of the
+  harness settings, tolerating anything it finds there. Each pass converges only
+  the entries already pointed at its own data dir, so two profiles on one machine
+  never repoint each other's hooks, and a shelf profile with the push experiment on
+  cannot widen the default profile's matcher.
+
+  A failed, refused or timed-out refresh, or one that found nothing to converge, is
+  a warning naming `tenjin install` and never fails the update: the swap already
+  happened, and it is what was asked for.
+
+  Those profile paths come out of a settings file this CLI does not own, so a
+  detected data dir that is not already a directory is reported rather than
+  created, the list is capped, and the children run with the update check off so a
+  refresh materializes no tree and makes no registry request of its own.
+
+  Two things the refresh will not do. It does not re-execute an entry path that
+  names a version: under pnpm `process.argv[1]` points into the virtual store,
+  whose directory names pin one, so running it after the swap would execute the
+  build that was just replaced and report success over the previous version's
+  bytes. The version-free link beside the store is derived and used when it is
+  there, and otherwise the profile is reported unrefreshed. And it rewrites a hook
+  script only when the bytes on disk carry the generated header marker, never
+  through a symlink standing where a script should be, and not at all when the
+  `hooks` directory has itself been replaced by a link: an unattended writer takes
+  its paths from settings.json, which anything on the machine can write, so a path
+  of the right shape is not proof that the file at it is ours. Symlinks above the
+  data dir are left alone, since those are ordinary machine layout.
+
+- 5e86f49: BREAKING: `tenjin fund` is now `tenjin wallet fund`.
+
+  Funding operates on the wallet and nothing else, so the verb moves under the
+  wallet group beside `wallet show` and `wallet balance`: one uniform group in
+  `--help`, in the skill, and in the permission allowlist, where the free-tier
+  rule is now `Bash(tenjin wallet fund:*)`. Update any allowlist carrying the old
+  `Bash(tenjin fund:*)` line; there is no compat alias, the same clean-break
+  posture as the candidate-pen removal. The behavior, flags, and output are
+  unchanged, and the MCP tool keeps its flat `tenjin_fund` name: MCP names do not
+  nest, and renaming the tool would break MCP consumers for no grouping gain.
+
+- 7a17fb5: `tenjin` becomes an x402 router for Claude Code. `tenjin install` writes two
+  hook entries and one permission rule, registers the `x402` MCP server, and sets
+  the spend limits a lookup runs under; `tenjin mcp` carries one `request` tool
+  that pays for a routing decision and then pays the provider, through the same
+  spend gate `tenjin pay` uses. `tenjin status` reports the local window.
+
+  This release registers core (`install`, `uninstall`, `update`, `wallet`, `pay`,
+  `config`, `doctor`) plus router (`hook`, `mcp`, `status`). The shelf product's
+  commands are NOT registered and do not ship: `search`, `inspect`, `read`,
+  `discover`, `buy`, `publish`, `edit`, `delete`, `profile`, `stats`, `hooks`,
+  `grade`, `daemon`, `outcome`, and the shelf MCP server. Their source stays until
+  a follow-up removes it. Needs `X402_ROUTER_API=on` on the backend.
+
+### Patch Changes
+
+- 5b0c31e: Treat answer-card completeness as public buyer context rather than a retrieval or
+  answer-eligibility signal. Card prose and completeness do not change relevance,
+  rank or placement, candidacy, or whether `POST /api/answer` may use a piece. Explicit
+  `freshWithin` and `appliesTo` filters still require matching stored claims, and a
+  present `validUntil` remains an expiry gate. CLI receipts, installed publishing
+  guidance now state that distinction. The vendored plain-HTTP skill must be resynced
+  from canonical server output after the companion server release is deployed.
+- e200c31: Every payment this CLI brokers now carries Tenjin's ERC-8021 builder code
+  (`bc_kc0altv3`) as the client service code, so CLI-brokered volume is
+  attributed, where the facilitator encodes it.
+
+  `buildExactPayment` registers the SDK's `BuilderCodeClientExtension` before it
+  signs, which puts the code in the payload's `s` field. Both `buy` and `pay` sign
+  through that one function, so first-party and Bazaar-lane payments are covered
+  by the same line. The SDK fires the hook only for sellers whose 402 advertises
+  the standard `builder-code` extension; a seller who never declared it still gets
+  an extension-free payload, and nothing about the payment terms changes either
+  way: same amount, payee, network, and asset, with attribution riding as
+  metadata beside them.
+
+  Attribution, not proof. The suffix reaches the chain only when the settling
+  facilitator has the builder-code extension registered, and `s` is
+  unauthenticated and seller-writable, so an occurrence of the code is not
+  evidence that this CLI brokered the payment.
+
+- ffa742e: Push hooks in team mode now ask the team shelf and the public shelf at the same time instead of one after the other. A slow team leg used to spend the shared search budget and leave the public leg with no time (`no-time`), or on fixed timeouts overrun the prompt arm's own budget with a hit computed and never emitted. Joined, the lookup's wall clock is the slower leg plus a body fetch, which is the sum every watchdog was already sized for; the request count doubles on team-mode fires, and so does what a fire spends of its trigger's hourly lookup allowance: both legs' rows count, so 60 lookups is 30 team-mode fires. The cap and quiet gates now run once per fire, sized to the legs it will spend, rather than once per leg — a per-leg check read the same count twice and passed both legs at one lookup left, and bumped the cold arm's escape counter twice per fire so every other escape pass landed on a leg whose answer was then discarded. `tenjin search` and the dispatch hook keep their sequential legs.
+
+  The verdict reads the top three candidates rather than rank 1 alone: the first one the shelf corroborated and did not call `low` is the hit, and when none qualifies rank 1 is recorded on the `weak` row as before. Push arms ask the shelf for three candidates (`limit: 3`); the WebSearch hint still asks for two.
+
+  A new ledger reason, `shadowed`, marks a strong public answer on a fire the team shelf also answered strongly: the team answer is delivered, the public one is recorded, and the ledger counts it with the other reasons.
+
+  The hourly lookup allowance is now counted **per session** rather than per machine. Machine-wide, ten concurrent sessions shared one hourly allowance and burned it in the first half hour, so every session that started later was capped before it had asked anything and the sidecar went quiet exactly when the laptop was busiest. Each session now gets its own 60 lookups per rolling hour per trigger, and there is deliberately no machine ceiling over the top: a stuck loop is one session, and it is still bounded by that same 60 an hour per arm.
+
+  A team hit the session has already been shown no longer swallows the public answer. `shelfDeliver` returns nothing for a piece already injected or relayed this session, and shadowing the public hit behind it spent the fire on two strong answers and emitted neither; the public answer now stands on its own, exactly as it does under a team miss.
+
+  One leg of a team-mode fire can no longer take the other down. Both legs run under one `Promise.all`, so anything that threw while reading a shelf's response rejected the pair and the fire emitted nothing and wrote no row for either shelf; a leg that throws is now recorded as the `no-answer` it is, and the other shelf's answer is delivered.
+
+- 7a94028: The adaptive cooldown's cold floor counts graded verdicts, not all lookups.
+
+  The cold rule cut a push arm's cap to a third when it had `20` hits or more and
+  a use rate under `5%` — but the two numbers came from different populations.
+  `hits` is every lookup that returned a candidate, while `rate` is
+  `used / (used + wrong)` over only the lookups something graded. So the floor,
+  whose whole job is "wait until enough outcomes back the rate", was clearing on
+  lookups nobody had judged: an arm with 40 hits and five grades, none of them
+  `used`, cleared a floor that reads as "we have seen enough of this arm" and lost
+  its cap `8` → `2` on the strength of five outcomes.
+
+  The floor is now on graded verdicts (`used + wrong >= 20`; the two columns
+  overlap, so a lookup graded both ways counts in each), the same count the rate
+  is drawn from. The hot rule (`rate >= 0.4` doubles the cap) has no floor
+  and is unchanged, as is the guard that leaves an ungraded trigger at its base
+  cap; with the floor counting grades, that guard is now the floor's first step
+  rather than a separate rule. `hits` stays in the stored `trigger_rates` row as
+  telemetry and no longer feeds any decision.
+
+- 2540e93: `tenjin install --refresh` no longer re-reports a declined allowlist as pending.
+
+  A machine installed with `--no-allow-free-verbs` used to have its
+  `permissions.pending` recomputed from the settings file on every later
+  `--refresh`, which `update` spawns after each version swap — a settled
+  decline had no persisted trace, so the full free-verb rule set came back as
+  "NOT written; run `tenjin install`" forever (tenjin-agent#234). A decline now
+  persists the EXACT rules that were pending in `install.freeVerbsDeclined` (a
+  list, not a flag), and `--refresh` subtracts that list from what it recomputes
+  instead of nagging about all of it forever. Per-rule rather than a single
+  suppress-everything switch, so a later version's genuinely new rule still gets
+  reported even on a machine sitting on an old decline.
+
+  This is a nag-silencer, not a consent record: it clears whenever an install
+  actually wires the allowlist, whether that is an explicit grant, a headless
+  settle with nobody there to answer, or finding the allowlist already fully
+  satisfied — installing Tenjin is the operator's consent, per existing policy,
+  so any of those is enough to retire a stale decline. It stays recorded when the
+  write itself is refused (an unreadable or concurrently-changed settings file):
+  the next refresh still honors it instead of re-nagging about rules the
+  operator already declined.
+
+- ab486f2: `tenjin doctor` names the half-wired team shelf instead of blaming the base URL.
+
+  A machine with `baseUrl` on a team deployment and no `shelfBypassSecret` used to
+  emit no `team shelf` check at all, and every probe ran unauthenticated. On a
+  protected deployment the probes were answered by the hosting platform's
+  protection page, so doctor reported `CONTRACT_MISMATCH: OpenAPI document was not
+valid JSON` and told the operator to point `baseUrl` at a Tenjin API, which is
+  the one setting that was already correct.
+
+  Two changes. `checkTeamShelf` now warns on that half too, from the settings
+  alone, so it is reported before the network says anything and on a deployment
+  that is not protected yet. It fires only on a `baseUrl` that came from config: a
+  `--base-url` or `TENJIN_BASE_URL` override is this run's choice, and the existing
+  withheld-key warn already names an override. Empty secret plus the public
+  marketplace stays silent.
+
+  And `fetchJson` now reports whether the response looked like an access gate (an
+  HTML content-type, or a followed redirect that landed on another host, reported
+  separately because only the second proves a sign-in redirect), on the 2xx that
+  failed to parse and on a 401/403, because the transport is the only place
+  holding the response. All three baseUrl probes read that signal and say a page
+  answered instead of the API, claiming no more than the signal proves. They point
+  at `shelfBypassSecret` only on a machine where that key is a remedy, meaning a
+  shelf of the team's own that this run actually sends the key to, and the wording
+  follows what the probe did: with no secret configured the fix is to set it, and
+  when the key was sent and still did not get past (a gate page, a 401/403, or the
+  blocked redirect interstitial a rotated key gets) the fix is to update the stale
+  key. A blocked redirect counts only when its `Location` leaves the host asked
+  for: a same-host 3xx is what an `http://` base URL or a non-canonical host name
+  gets with a perfectly good key, so that one says the URL redirects and to point
+  `baseUrl` at the host it lands on. A same-origin JSON 401 or 403 is still not
+  classified as a protection page (an API refusing in its own envelope is an
+  honest refusal), but on a shelf of the team's own the fix names the key anyway,
+  because a missing or stale secret is the likeliest thing being refused. Against the public marketplace the key is refused anyway, and an override
+  pointing anywhere but the configured shelf carries none, so both get a line
+  about a proxy or a sign-in wall and no credential to write. An override that
+  repeats the configured shelf does send the key, so it is named there too. No check output carries the secret's
+  value, only the key's name.
+
+- 23d448e: Fixed two grader defects: a backtick span that is standing boilerplate before
+  the injection anchor (e.g. `CI=true pnpm format:check` named in a subagent's
+  own work order) no longer reads as "copied from the note" whether or not an
+  injection happened, and a command named in prose with no backticks now scores
+  against a new `used-likely` tier instead of always coming back `rejected`,
+  however precisely the agent followed it.
+
+  `used-likely` extracts command heads and file basenames from the note's full
+  body and credits a match within the grading window, ranked below `read` and
+  `span`. Verdict's `by` field gains `'likely'` alongside `'read' | 'span'`;
+  `grade`'s `wireStatus()` reports it as `partially_used`, same as `span`,
+  since both are weaker-than-a-followed-pointer evidence.
+
+  Review follow-ups on the same fix: the pre-injection exclusion window is now
+  bounded to the same `SPAN_WINDOW` on both sides instead of the whole session,
+  and both the exclusion and the forward match now compare at a token boundary
+  instead of by plain substring, so a longer token on either side
+  (`db:generate-types`) can neither erase credit for nor manufacture credit
+  against a shorter genuine one the note actually named (`db:generate`); the
+  injection template's own opener, body fence and closing line are excluded
+  from `used-likely` candidates so the grader never credits its own
+  boilerplate; `tenjin grade`'s default line now breaks `used=` down by tier
+  (`read`/`span`/`likely`, plus `hand` when a `--label` verdict is present)
+  instead of only under `--explain`, and the same breakdown is
+  `data.graded.byTier` on `--json`.
+
+- e65b5a4: Hook noise fixes (tenjin-agent#211):
+
+  - The push failure arm fires only behind build/test/migrate/install/lint command heads (never `which`, `grep`, `test`, `diff`, `ls`, or `git diff --exit-code`, which exit 1 to mean "no"), and only on a real error marker in the output tail (`FAIL`, `AssertionError`, `N failed`, `Error:`-class lines, tracebacks, `exit code N`, errno codes, toolchain prefixes) rather than prose words like "error", "failed" or "not found". Stderr chatter with no marker is success. `which codex` no longer injects an unrelated note.
+  - A session remembers when a full lookup bucket refills; later capped fires on that arm write their `lookup-cap` row with `cached: true` and skip the 256 KB ledger-tail parse. Interim until the state store in #209.
+
+  - The subagent-dispatch hook now names a piece only on a **strong** hit. A subagent prompt is a work order rather than a question, so keyword overlap with a marketplace listing means much less there: three Agent calls produced six pointer lines and none of them applied. A moderate or absent match is recorded to the ledger (the dispatch arm, delivered nowhere) and never shown, and a strong hit names rank 1 alone rather than every candidate the shelf returned. The ledger row is written whether or not the arm is enabled, since the noise it replaces was identical either way.
+  - The Stop-hook capture ask now **waits for background subagents**. Claude Code fires `Stop` when the parent's turn pauses, which is not the end of a turn that still has subagents running — the ask arrived before the session had learned what it was being asked to write down, and, because the marker is written at first ask, it never came back at the real end. Running launches are read from the tail of the session transcript; a transcript that cannot be read fails toward asking, exactly as before, and a background launch with no completion notice for 45 minutes is read as finished so a crashed subagent cannot hold the ask open for a whole session.
+  - In team mode the dispatch hook now falls through to the public marketplace when the team shelf's best candidate is short of `strong` (before, any team candidate at all — and a search has no floor — shadowed the public shelf entirely; probed: ten team-mode dispatches, public asked zero times). The public answer replaces the team one only when it is stronger.
+
+- f80216b: fix(inspect): `inspect`/`read`/`buy` now resolve a bare id that no local search knows about — the id `tenjin publish` itself just printed — through the public `GET /api/posts/<id>/public` route (tenjin#803), instead of refusing with `RESOURCE_NOT_FOUND` until a `tenjin search` happened to surface it first. The by-id response's own `id` is checked against the id that was asked for, and its `slug`/`creator.handle` are constrained to a single safe path segment, before either is trusted to build the payable read URL.
+- f6aaf81: `tenjin install` creates your wallet again when there is none, and ends with a
+  short summary: set up, your wallet address, the spend limits, and the next step
+  (`tenjin wallet fund`, then restart Claude Code). `--no-wallet` skips the wallet.
+  The package no longer ships a `prepare` script, so `npm i -g tenjin-cli` prints
+  no install-script warning.
+- e8ae560: The hook lookup cap is a runaway guard now, not a budget: 60 an hour per trigger, machine-wide.
+
+  At `8` an hour per trigger, counted across every session on the machine, four or five concurrent sessions left each one about two prompt lookups an hour — 65 `lookup-cap` skips in a week on one machine, eleven in a row inside the one confusion a teammate's note would have answered (tenjin-agent#255, #258). A lookup is one short search and one embedding call, so the cap was rationing something that costs nothing to spend, and while the team experiment is being measured every skipped lookup is a data point lost. Every bucket (`prompt`, `failure`, `research`, `subagent`, and the default for an unnamed arm) is `60` now — 360 lookups an hour machine-wide, 720 with the hot rule doubling every arm, the only client-side bound on shelf egress; the rolling window, the per-trigger buckets, the machine-wide count and the adaptive cooldown are unchanged, so a stuck loop is still stopped and a graded arm still scales on evidence.
+
+- f31484e: fix(build): keep the `node:` prefix on `import('node:sqlite')` in the bundle. tsup's default `removeNodeProtocol` shipped it as `import('sqlite')`, so `tenjin doctor` reported the store missing and the CLI-side store (the ledger reports, search recording, publish dedup) failed open on every Node; the generated hooks were unaffected. The packed-artifact smoke now pins the specifier.
+- 13c1def: Every hook arm and `tenjin search` send up to 8,000 characters, the shelf's one
+  query bound, so a long prompt reaches the shelf whole. Needs BackTrackCo/tenjin#853
+  on the shelf; an older shelf answers a long non-dispatch query with a 400.
+- c9becc4: `tenjin doctor --prune` now also removes the retired pre-daemon hook files
+  `hook-nags.json` and `hook-health.json`, which nothing has read since the loop
+  database replaced them. Installed search guidance points hook-arm state at bare
+  `tenjin hooks` instead of a `config get hooks` subtree that never existed, and the
+  search skill is tightened throughout (228 to 207 lines) with no fact dropped.
+- c2cbd4d: Accept Markdown on standard input for publishing and body edits:
+
+  - `tenjin publish -` reads stdin explicitly.
+  - Bare `tenjin publish` reads stdin only when it is non-interactive.
+  - `tenjin edit <post-id> -` replaces a post body from stdin.
+
+  Interactive bare publishes still return usage immediately, and MCP stdio is never
+  exposed to either command as content.
+
+  The installed publish skill and capture hooks now prefer the stdin form. When a
+  regular file is used instead, they require `tenjin publish <file>` to run as its own bare
+  shell/tool command so the installed `Bash(tenjin publish:*)` prefix permission
+  can recognize it.
+
+- 21ce314: Remove the MIT license grant. The LICENSE file is deleted with no replacement, the `license` field is dropped from package.json, and the README/NOTICE MIT claims are removed. Third-party attributions in NOTICE.md are unchanged.
+- 86e17da: A live status line names each lookup while it runs: `routing`, then the provider
+  endpoint actually called with its bounded, redacted parameters, then the outcome
+  and the price. `tenjin install` registers `tenjin status-line` as Claude Code's
+  status line when that key is free; a status line you already set is never
+  replaced, and `--status-line compose` appends ours to it.
+- 717e693: Publish-safety scan hardening. Twenty new detectors, and the rule corpus moves
+  out of code into `src/lib/scan-rules.json` as data (detector id, tier, pattern,
+  description, attribution) so the same corpus can be enforced server-side.
+
+  Block tier: BIP-39 seed phrases (twelve or more consecutive wordlist words) and
+  `otpauth://` TOTP URIs close the wallet-shaped gap a hex-key-only scanner had;
+  OpenSSH private keys pasted without PEM framing; and Supabase, Twilio, SendGrid,
+  Hugging Face, Vercel, Notion, Linear, Figma, GitLab, Docker Hub, Cloudflare, and
+  Databricks token shapes. Warn tier: RFC1918/loopback endpoints, collaboration
+  workspace links (Google Docs/Drive, Notion, Figma, Slack archives, Linear,
+  Jira), cloud resource ids (AWS ARNs, GCP resource names, Azure subscription
+  paths, bucket URIs), pasted `.env` blocks, and a generic Shannon-entropy
+  catch-all for unknown credential formats.
+
+  Placeholder suppression drops docs-shaped matches (`sk-xxxx`, `<YOUR_KEY>`,
+  `user@example.com`) before they reach the findings list, so a documentation
+  sample cannot teach an operator to skim findings. Warn tier only: the block tier
+  stays non-bypassable, and its own suppressions are anchored to the captured
+  secret value rather than matched as a substring, so a live password containing
+  `<`, `>`, `{`, `}` or an `x` run still blocks.
+
+  The `raw-private-key` to `hex32-value` demotion widens, so quoting a public
+  32-byte value no longer refuses a publish: the label set gains `salt`, `id`,
+  `topic`, `root`, `digest`, and `commitment`; a label may now sit up to two short
+  tokens before the value, across markdown and quote punctuation, so the inline-code
+  form prose actually uses is covered; and well-known public constants such as the
+  ERC-20 `Transfer` event topic0 are recognized from a data list. Only the
+  separators loosened, never what counts as a label. Demotion is to warn only, an
+  unlabeled bare 64-hex still blocks, a secret-named assignment still blocks however
+  it is formatted, and a real key mislabeled `hash` still surfaces for review.
+
+  A labeled fixture corpus (`src/lib/scan-corpus.json`, positives and benign
+  lookalikes for every detector, plus an adversarial transcript-shaped sample)
+  holds per-detector precision and recall at 1.0 in CI, so a detector edit shows
+  its false-positive cost. The same suite enforces the redaction invariant — a
+  finding carries a detector id, a tier, offsets, and a masked excerpt, never the
+  matched secret — and a ReDoS budget against transcript-scale input, which caught
+  and fixed four quadratic paths (`email`, `internal-hostname`,
+  `db-connection-uri`, and the hash-label lookback).
+
+- 97424b5: Let team-shelf capture ask once after bounded, content-free root repository activity, and give captured repo findings a retrievable, privacy-safe snapshot brief.
+- c771484: The SessionStart primer now has a team-mode wording, chosen at run time from the config the hook reads: the public paragraph told a team machine to skip private-repo questions and warned that a hit costs cents, which points away from exactly what a team shelf holds, while the team one asks for questions about this codebase, its services and its past decisions. Both paragraphs are shorter (555 to 375 characters public, 441 to 379 team) and both keep the sentence that carries Tenjin into a research or subagent prompt. Neither warns the agent that its question may travel to the public marketplace on a team miss: an agent warned about its own question sentence hedges it, and a hedged sentence is a worse query against both shelves. The team capture ask lists "a decision and why" among the things worth publishing again, alongside the conclusion-first finding and the durable code map, matching the team criteria the sidecar design already states.
+
 ## 0.1.0-alpha.15
 
 ### Minor Changes
