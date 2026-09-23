@@ -11,6 +11,7 @@ import {
   openLookupFooter,
   pruneProgress,
   pruneSessions,
+  RECENT_MS,
   renderProgress,
   resolveProgressSession,
   SESSION_ACTIVE_MS,
@@ -56,7 +57,9 @@ describe('what the status line renders', () => {
 
   it('shows the decision in flight before any provider is known', async () => {
     await writeProgress(sessionDir(dir, 'session-a'), 'call-1', { phase: 'routing' }, NOW);
-    expect(await renderProgress(dir, 'session-a', { now: NOW })).toBe('x402 · request: routing');
+    expect(await renderProgress(dir, 'session-a', { now: NOW })).toBe(
+      'x402 · request: selecting service',
+    );
   });
 
   it('keeps a finished call on the line with its outcome and price', async () => {
@@ -172,7 +175,9 @@ describe('what the status line renders', () => {
     await writeFile(join(session, 'notes.json'), JSON.stringify({ version: 1, at: NOW }));
     await writeFile(join(session, `${'f'.repeat(64)}.json`), 'not json');
 
-    expect(await renderProgress(dir, 'session-a', { now: NOW })).toBe('x402 · request: routing');
+    expect(await renderProgress(dir, 'session-a', { now: NOW })).toBe(
+      'x402 · request: selecting service',
+    );
   });
 });
 
@@ -218,7 +223,9 @@ describe('which session a tool call belongs to', () => {
     const footer = await openLookupFooter(dir, { id: 'turn-42', now: () => NOW });
 
     await footer.routing();
-    expect(await renderProgress(dir, 'session-a', { now: NOW })).toBe('x402 · request: routing');
+    expect(await renderProgress(dir, 'session-a', { now: NOW })).toBe(
+      'x402 · request: selecting service',
+    );
 
     await footer.calling({ provider: PROVIDER, parameters: { symbol: 'BTC' } });
     expect(await renderProgress(dir, 'session-a', { now: NOW })).toContain(
@@ -290,5 +297,50 @@ describe('when the display itself fails', () => {
 
   it('still says ready for a session that has looked nothing up', async () => {
     expect(await renderProgress(dir, 'never-used', { now: NOW })).toBe('x402 · ready');
+  });
+});
+
+describe('how long a state holds the line', () => {
+  it('keeps a hook outcome until the next state, then goes back to ready', async () => {
+    const session = sessionDir(dir, 'session-a');
+    await writeProgress(
+      session,
+      'hook-1',
+      { phase: 'done', operation: 'search', outcome: 'native tools (no x402 payment)' },
+      NOW,
+    );
+
+    expect(await renderProgress(dir, 'session-a', { now: NOW + 9_000 })).toBe(
+      'x402 · search: native tools (no x402 payment)',
+    );
+    expect(await renderProgress(dir, 'session-a', { now: NOW + RECENT_MS + 1 })).toBe(
+      'x402 · ready',
+    );
+  });
+
+  it('keeps a lookup in flight on the line well past a hook state', async () => {
+    const session = sessionDir(dir, 'session-a');
+    await writeProgress(session, 'call-1', { phase: 'calling', provider: PROVIDER }, NOW);
+
+    expect(await renderProgress(dir, 'session-a', { now: NOW + RECENT_MS + 1 })).toContain(
+      'calling pro-api.coinmarketcap.com',
+    );
+  });
+
+  it('says ready for a hook decision that never came back', async () => {
+    const session = sessionDir(dir, 'session-a');
+    await writeProgress(
+      session,
+      'hook-1',
+      { phase: 'routing', operation: 'prompt', outcome: 'selecting service' },
+      NOW,
+    );
+
+    expect(await renderProgress(dir, 'session-a', { now: NOW + 1_000 })).toBe(
+      'x402 · prompt: selecting service',
+    );
+    expect(await renderProgress(dir, 'session-a', { now: NOW + RECENT_MS + 1 })).toBe(
+      'x402 · ready',
+    );
   });
 });

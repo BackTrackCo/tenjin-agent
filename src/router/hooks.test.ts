@@ -410,24 +410,32 @@ describe('a hint that is not one honest line', () => {
 });
 
 describe('what the hook leaves for the status line', () => {
-  it('binds an execute decision to its session, and shows nothing once it answered', async () => {
+  it('shows the decision in flight, then what it decided, and binds the id', async () => {
+    const seen: string[] = [];
     const { fetchImpl } = router(EXECUTE);
 
     const out = await runPromptHook(promptEvent('read https://example.test/spec'), {
       dataDir: dir,
       baseUrl: BASE,
-      fetchImpl,
+      // Read at the one moment the decision is in flight, which is what the
+      // footer's once-a-second refresh would land on.
+      fetchImpl: (async (...args: Parameters<typeof fetch>) => {
+        seen.push(await renderProgress(dir, 'sess-1'));
+        return fetchImpl(...args);
+      }) as typeof fetch,
     });
 
     // The hint is unchanged: the footer is downstream of the decision.
     expect(out.action).toBe('execute');
     expect(out.id).toBe('k3f9-abcd');
-    // The decision is over, so the footer is quiet and the tool takes it from here.
-    expect(await renderProgress(dir, 'sess-1')).toBe('x402 · ready');
+    expect(seen).toEqual(['x402 · prompt: selecting service']);
+    expect(await renderProgress(dir, 'sess-1')).toBe(
+      'x402 · prompt: paid lookup offered (Firecrawl)',
+    );
     expect(await resolveProgressSession(dir, { id: 'k3f9-abcd' })).toBe(sessionDir(dir, 'sess-1'));
   });
 
-  it('records nothing to follow for a native decision', async () => {
+  it('says so, and keeps saying so, when the turn stays on native tools', async () => {
     const { fetchImpl } = router(NATIVE);
 
     const out = await runPromptHook(promptEvent('what is 2 + 2'), {
@@ -437,9 +445,41 @@ describe('what the hook leaves for the status line', () => {
     });
 
     expect(out).toMatchObject({ response: null, action: 'native' });
-    expect(await renderProgress(dir, 'sess-1')).toBe('x402 · ready');
+    expect(await renderProgress(dir, 'sess-1')).toBe(
+      'x402 · prompt: native tools (no x402 payment)',
+    );
     // The session is still known, so a lookup it makes later can be attributed.
     expect(await resolveProgressSession(dir, {})).toBe(sessionDir(dir, 'sess-1'));
+  });
+
+  it('names the native search stage the way the demo does', async () => {
+    const { fetchImpl } = router(NATIVE);
+
+    const out = await runNativeHook(await readableEvent('weather in Paris'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+
+    expect(out).toMatchObject({ decision: 'allow', response: null });
+    expect(await renderProgress(dir, 'sess-1')).toBe(
+      'x402 · search: native tools (no x402 payment)',
+    );
+  });
+
+  it('says the router was unavailable rather than going blank', async () => {
+    const { fetchImpl } = router({ error: 'nope' }, 500);
+
+    await runPromptHook(promptEvent('btc price today'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+      warn: () => undefined,
+    });
+
+    expect(await renderProgress(dir, 'sess-1')).toBe(
+      'x402 · prompt: native tools (router unavailable)',
+    );
   });
 
   it('routes the same when the progress directory cannot be written', async () => {

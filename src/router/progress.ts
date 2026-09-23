@@ -39,8 +39,13 @@ const CALL_FILE_RE = /^[a-f0-9]{64}\.json$/;
 
 /** An in-flight call older than this is shown as stale, never as running. */
 export const STALE_AFTER_MS = 90_000;
-/** How long a finished call stays on the footer after its outcome landed. */
-export const RECENT_MS = 20_000;
+/**
+ * How long a state stays on the footer once nothing has replaced it. The demo
+ * holds each one for about ten seconds, which is what makes a decision that
+ * takes a second readable at a one-second refresh; after that the line is
+ * `x402 · ready` again.
+ */
+export const RECENT_MS = 10_000;
 /** Older than this and a record is ignored by the renderer and pruned on write. */
 export const EXPIRY_MS = 10 * 60_000;
 /** How recently a session must have been touched to claim an id-less request. */
@@ -66,7 +71,8 @@ interface SavedProgress extends Stamp {
   phase: ProgressPhase;
   /** The tool whose activity this is, as the footer names it. */
   operation: string;
-  /** Set on `done`: `fulfilled`, `native`, `needs_approval`, `failed`, ... */
+  /** What the state SAYS: the outcome on `done`, and on an in-flight record the
+   *  stage, when it is not the tool's own `selecting service`. */
   outcome?: string;
   /** Host plus path of the provider actually called, without a scheme. */
   endpoint?: string;
@@ -291,11 +297,6 @@ export async function openLookupFooter(
   };
 }
 
-/** Drop one call's record, for a step that ended with nothing worth showing. */
-export async function clearProgress(directory: string, callId: string): Promise<void> {
-  await rm(join(directory, `${digest(callId)}.json`), { force: true }).catch(() => undefined);
-}
-
 /**
  * Remove records past {@link EXPIRY_MS}. Run from a writer, never from the
  * renderer: the footer refreshes once a second and must stay read-only.
@@ -397,9 +398,14 @@ export async function renderProgress(
     return (error as NodeJS.ErrnoException).code === 'ENOENT' ? READY : '';
   }
   const running = records
-    .filter((row) => row.phase !== 'done' && now - row.at <= STALE_AFTER_MS)
+    .filter((row) => row.phase !== 'done' && now - row.at <= holdMs(row))
     .sort((a, b) => b.at - a.at);
-  const stale = records.filter((row) => row.phase !== 'done' && now - row.at > STALE_AFTER_MS);
+  // Only a LOOKUP goes stale out loud. A hook decision has a five-second budget,
+  // so one still in flight after its hold is a dead hook, and the footer says
+  // ready rather than naming a stage nothing is working on.
+  const stale = records.filter(
+    (row) => row.phase !== 'done' && now - row.at > holdMs(row) && row.operation === 'request',
+  );
   const finished = records
     .filter((row) => row.phase === 'done' && now - row.at <= RECENT_MS)
     .sort((a, b) => b.at - a.at);
@@ -413,8 +419,19 @@ export async function renderProgress(
   return bounded(`${line(head, now)}${suffix}`, columns);
 }
 
-/** What the footer says when this session has nothing running or just finished. */
+/** What the footer says when this session has nothing running or just finished.
+ *  It is the visible proof that the router is on, so it is never blank. */
 const READY = 'x402 · ready';
+
+/**
+ * How long this state holds the line. A lookup in flight holds it until it
+ * lands, because a provider call can take a minute; everything else holds it
+ * for {@link RECENT_MS}, which is how the demo reads: one state per second or
+ * so, each one still there when the next arrives.
+ */
+function holdMs(row: SavedProgress): number {
+  return row.phase !== 'done' && row.operation === 'request' ? STALE_AFTER_MS : RECENT_MS;
+}
 
 /**
  * One call, as the footer says it: `x402 · <tool>: <state> <host/path> ·
@@ -426,9 +443,11 @@ function line(row: SavedProgress, now: number): string {
   if (row.phase !== 'done' && now - row.at > STALE_AFTER_MS) {
     return `x402 · ${operation}: stale, no outcome recorded`;
   }
+  // `selecting service` is the demo's own word for a decision in flight, and a
+  // stage the hook names for itself wins over it.
   const state =
     row.phase === 'routing'
-      ? 'routing'
+      ? sanitize(row.outcome ?? 'selecting service', 40)
       : row.phase === 'calling'
         ? 'calling'
         : sanitize(row.outcome ?? 'done', 40);
