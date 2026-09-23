@@ -39,12 +39,10 @@ import {
   persistInstallHarness,
   persistPublishMode,
 } from './config';
-import { runWalletCreate } from './wallet';
+import { resolveWallet, walletValue, type WalletOutcome } from './install-wallet';
 import { collectDoctorChecks } from './doctor';
 import type { CheckResult, DoctorDeps, DoctorChecks } from './doctor';
-import { describeWallet, resolveWalletProvider } from '../lib/wallet';
 import type { PassphraseOverrides } from '../lib/wallet/local';
-import { walletFileExists } from '../lib/wallet/store';
 import { recommendedPermissions } from '../lib/permissions';
 import {
   applyGrantDecline,
@@ -69,7 +67,7 @@ import type { Harness, HarnessAdapter } from '../adapters/types';
 import { healWiredSkills } from '../lib/skill-heal';
 import type { HealOutcome } from '../lib/skill-heal';
 import type { HooksResult } from '../lib/harness-hooks';
-import { confirmChoice, intro as clackIntro, selectMany, selectOne } from '../lib/clack';
+import { intro as clackIntro, selectMany, selectOne } from '../lib/clack';
 import { sanitizeForTerminal } from '../lib/output';
 import type { Io } from '../lib/output';
 import type { CommandContext, CommandResult } from '../context';
@@ -129,48 +127,6 @@ type PublishModeSource = 'flag' | 'existing' | 'prompt' | 'headless-default' | '
 interface PublishModeSelection {
   value: PublishMode;
   source: PublishModeSource;
-}
-
-/**
- * Why no wallet was created, when none was.
- *
- * `no-passphrase-store` is the one that matters: this machine has no OS
- * credential store that would hold a generated passphrase, and no
- * `TENJIN_WALLET_PASSPHRASE`. There is no fallback here BY DESIGN. A passphrase
- * written to a plain file beside the keystore it unlocks is not a passphrase, so
- * the run creates nothing and says so loudly with both remedies.
- */
-type WalletSkipReason = 'no-passphrase-store' | 'create-failed' | 'dry-run' | 'flag';
-
-/**
- * How the wallet step resolved, so rendering stays separate from prompting.
- *
- * `declined` (an answer) and `skipped` (no answer, with a reason) are kept apart
- * deliberately: an install that could not create a key is a different state from
- * one the operator told not to, and only the first needs a remedy.
- */
-interface WalletOutcome {
-  status: 'existing' | 'created' | 'declined' | 'skipped';
-  address?: string;
-  /** Only ever set on `skipped`. */
-  reason?: WalletSkipReason;
-  /** The exact command that changes this outcome, mirroring the CliError contract. */
-  fix?: string;
-  /** The underlying failure, for a `create-failed` skip. */
-  warning?: string;
-}
-
-/** The remedy for each skip, so no skipped state is ever a dead end. */
-function walletFix(reason: WalletSkipReason): string {
-  switch (reason) {
-    case 'no-passphrase-store':
-      return 'No OS credential store is available to hold the wallet passphrase. Set TENJIN_WALLET_PASSPHRASE and re-run `tenjin install`, or run `tenjin wallet create` in a terminal to enter one.';
-    case 'create-failed':
-      return 'Fix the reported problem, then run `tenjin wallet create`.';
-    case 'dry-run':
-    case 'flag':
-      return 'Create one with `tenjin wallet create`.';
-  }
 }
 
 /**
@@ -1098,13 +1054,6 @@ function hooksValue(h: HooksResult, enabled: number): string {
   return `${h.path} was left untouched; fix it, then re-run: tenjin install`;
 }
 
-function walletValue(w: WalletOutcome): string {
-  if (w.status === 'existing') return `${w.address} (existing)`;
-  if (w.status === 'created') return `${w.address}, $0 - fund with: tenjin wallet fund`;
-  if (w.status === 'skipped') return `none (${w.reason}) - ${w.fix}`;
-  return 'none - create with: tenjin wallet create';
-}
-
 /**
  * Below the rows, and only when something needs a person: a skill copy that
  * warned, the Codex sandbox rule the operator has to add by hand, and any writer
@@ -1151,106 +1100,6 @@ function modeBlurb(v: PublishMode): string {
     : v === 'review'
       ? 'your agent asks you in chat first'
       : 'your agent publishes unattended, and only a hard block stops it';
-}
-
-/**
- * The wallet decision. A wallet is now created BY DEFAULT on both paths, because
- * the loop this command exists to set up does not close without one: `buy` needs
- * a funded key and publish-on-MISS needs a key to sign the write, so a walletless
- * install is a setup that stops at the first useful thing the agent tries.
- *
- * The headless path is the change. It creates without asking, using the
- * passphrase policy `resolvePassphraseForCreate` already enforces: an explicit
- * `TENJIN_WALLET_PASSPHRASE`, else a strong generated passphrase written to the
- * platform's OS credential store and verified by reading it back. When neither is
- * available it creates NOTHING and reports `skipped: no-passphrase-store` with
- * both remedies. There is deliberately no plain-file fallback: a passphrase
- * sitting next to the keystore it unlocks protects nothing, and an install is
- * never the right place to invent one.
- *
- * A creation failure never fails the install. The skills, hooks and permissions
- * this run just wired are all useful without a wallet, so the failure is reported
- * loudly and the command still succeeds.
- */
-async function resolveWallet(
-  ctx: CommandContext,
-  deps: InstallDeps,
-  skipReason: 'dry-run' | 'flag' | undefined,
-  canPrompt: boolean,
-): Promise<WalletOutcome> {
-  const exists = await (deps.walletExists ?? walletFileExists)(ctx.dataDir);
-  if (exists) {
-    return {
-      status: 'existing',
-      address: await (deps.walletAddress ?? existingWalletAddress)(ctx),
-    };
-  }
-  if (skipReason !== undefined) {
-    return { status: 'skipped', reason: skipReason, fix: walletFix(skipReason) };
-  }
-
-  // Interactive keeps the question (default yes); headless has nobody to ask and
-  // takes the default rather than treating silence as a no.
-  if (canPrompt) {
-    const confirm = deps.confirmWallet ?? defaultConfirm;
-    if (!(await confirm(WALLET_QUESTION))) return { status: 'declined' };
-  }
-
-  try {
-    const create =
-      deps.createWallet ??
-      ((c: CommandContext) => defaultCreateWallet(c, deps.walletPassphrase, deps.env));
-    return { status: 'created', address: await create(ctx) };
-  } catch (err) {
-    // The one failure with a real remedy: no env passphrase and no OS store, so
-    // resolvePassphraseForCreate refused rather than encrypt with a passphrase
-    // that has no durable copy. Anything else is reported as itself.
-    const reason: WalletSkipReason = isNoPassphraseError(err)
-      ? 'no-passphrase-store'
-      : 'create-failed';
-    return {
-      status: 'skipped',
-      reason,
-      fix: walletFix(reason),
-      ...(reason === 'create-failed'
-        ? { warning: `The wallet could not be created: ${errorText(err)}` }
-        : {}),
-    };
-  }
-}
-
-/** Is this the passphrase layer refusing because no durable store could serve? */
-function isNoPassphraseError(err: unknown): boolean {
-  return (
-    err instanceof CliError &&
-    err.code === 'USAGE' &&
-    err.message.includes('No wallet passphrase is available')
-  );
-}
-
-function errorText(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
-}
-
-async function existingWalletAddress(ctx: CommandContext): Promise<string> {
-  return (await describeWallet(resolveWalletProvider(ctx))).address;
-}
-
-async function defaultCreateWallet(
-  ctx: CommandContext,
-  passphrase?: PassphraseOverrides,
-  env?: NodeJS.ProcessEnv,
-): Promise<string> {
-  const result = await runWalletCreate(ctx, {
-    ...(passphrase !== undefined ? { passphrase } : {}),
-    ...(env !== undefined ? { env } : {}),
-  });
-  return (result.data as { address: string }).address;
-}
-
-/** The shared confirm, defaulting to YES (setup ergonomics); cancel reads as no. */
-function defaultConfirm(label: string): Promise<boolean> {
-  return confirmChoice(label, true);
 }
 
 interface BazaarPayOutcome {
@@ -1392,8 +1241,7 @@ function parseModeFlag(value: string): PublishMode {
 
 // --- Harness permissions ----------------------------------------------------------
 
-/** The wallet question's literal copy. */
-export const WALLET_QUESTION = 'Create a wallet now?';
+export { WALLET_QUESTION } from './install-wallet';
 
 /**
  * Settle the harness allowlist. The write itself is free-verb only and cannot
