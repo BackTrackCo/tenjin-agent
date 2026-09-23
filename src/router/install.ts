@@ -24,7 +24,7 @@ import type { CommandContext, CommandResult } from '../context';
 import { ensureStatusLine, type StatusLineMode, type StatusLineResult } from './status-line-wiring';
 
 /**
- * `tenjin install` for the router product: three hook entries, one MCP server,
+ * `tenjin install` for the router product: four hook entries, one MCP server,
  * one permission rule, the spend defaults, and a wallet when there is none.
  *
  * WHAT IT WRITES IS WHAT IT SAYS. There is no skill to materialize, no daemon
@@ -89,20 +89,35 @@ export function routerSettingsPath(
 /** The subagent tool, under its current name and its older one. */
 export const DELEGATION_MATCHER = 'Agent|Task';
 
-/** The three entries, spelled once so `uninstall` and the tests read the same list. */
+/** The native tools the after-call offer watches. */
+export const NATIVE_MATCHER = 'WebSearch|WebFetch';
+
+/**
+ * The four entries, spelled once so `uninstall`, `doctor` and the tests read
+ * the same list. There is no PreToolUse entry for the native tools any more:
+ * the offer comes after the call, on a result that came back short, and a
+ * failed call fires PostToolUseFailure rather than PostToolUse, so it takes
+ * both. Every entry of ours is pruned before this is appended, which is how
+ * an install's old `tenjin hook native` entry leaves on `--refresh`.
+ */
 export function routerHookPlan(): unknown[] {
   const handler = (command: string) => [
     { type: 'command', command, timeout: HOOK_TIMEOUT_SECONDS },
   ];
   return [
     { event: 'UserPromptSubmit', hooks: handler('tenjin hook prompt') },
-    { event: 'PreToolUse', matcher: 'WebSearch|WebFetch', hooks: handler('tenjin hook native') },
     { event: 'PreToolUse', matcher: DELEGATION_MATCHER, hooks: handler('tenjin hook agent') },
+    { event: 'PostToolUse', matcher: NATIVE_MATCHER, hooks: handler('tenjin hook shortfall') },
+    {
+      event: 'PostToolUseFailure',
+      matcher: NATIVE_MATCHER,
+      hooks: handler('tenjin hook shortfall'),
+    },
   ];
 }
 
 export const DISCLOSURE: readonly string[] = [
-  'What leaves this machine: the bounded text of each prompt, each native search query or URL, and each task handed to a subagent, sent to Tenjin for the free routing gate.',
+  'What leaves this machine: the bounded text of each prompt, each task handed to a subagent, and each native search query or URL that came back short (with its status, size or error), sent to Tenjin for the free routing gate.',
   'What is kept when a lookup is paid: the capability chosen, a hash of the contract, a hash of the arguments, and your wallet address. No prompt text, no arguments, no hint text.',
   'What never leaves: your private key. It is decrypted in this CLI to sign, and never sent anywhere.',
 ];

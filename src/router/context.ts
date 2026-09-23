@@ -44,6 +44,18 @@ export interface Packet {
   literalUrls: string[];
   historyStatus: HistoryStatus;
   pendingCall?: PendingCall;
+  /** How the free tool already fared on `pendingCall`, sent only when it fell
+   *  short. Never without `pendingCall`: the server refuses it alone. */
+  nativeOutcome?: NativeOutcome;
+}
+
+/** What the harness reported about a native call that came back short: its
+ *  status and size (WebFetch), or the error a failed call carried. At least one
+ *  field, always; the server's schema is the same strict object. */
+export interface NativeOutcome {
+  code?: number;
+  bytes?: number;
+  error?: string;
 }
 
 /** The pending native call, INSIDE the packet: the gate request is a strict
@@ -134,7 +146,7 @@ export async function buildPromptPacket(
 }
 
 /**
- * Build the packet for a native call the host is about to make. SAME BOUNDS as
+ * Build the packet for a native call that came back short. SAME BOUNDS as
  * a prompt packet, and the same reader: the six most recent messages, 16 KiB,
  * masked, with tool results excluded.
  *
@@ -145,15 +157,17 @@ export async function buildPromptPacket(
  * paid provider on a bare URL. Reading the transcript at the hook event is not
  * session guessing; the harness hands this hook the path to its own session.
  *
- * The pending call rides INSIDE the packet as the proposed operation, which is
- * the shape the route takes and the one `wire-gate-request.json` pins.
+ * The call rides INSIDE the packet as `pendingCall`, with how it fared beside
+ * it as `nativeOutcome`: the shape the route takes, pinned by
+ * `wire-hook-request-native-shortfall.json`.
  */
 export async function buildNativePacket(
   transcriptPath: string | undefined,
   sessionId: string,
   pending: PendingCall,
-  agentId?: string,
+  opts: { agentId?: string; nativeOutcome?: NativeOutcome } = {},
 ): Promise<Packet> {
+  const { agentId, nativeOutcome } = opts;
   const subject = 'query' in pending ? pending.query : pending.url;
   const read = await readHistory(transcriptPath, { sessionId });
   // A SUBAGENT'S CALL BELONGS TO ITS OWN TASK. The harness hands every
@@ -186,6 +200,7 @@ export async function buildNativePacket(
     literalUrls: literalUrlsIn(`${current?.message.text ?? ''}\n${bounded}`),
     historyStatus: read === null && own === null ? 'unavailable' : 'ok',
     pendingCall: pending,
+    ...(nativeOutcome !== undefined ? { nativeOutcome } : {}),
   });
 }
 

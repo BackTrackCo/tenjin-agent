@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { homedir } from 'node:os';
 import { promisify } from 'node:util';
 import { CliError } from '../lib/errors';
-import { inspectHooksFile, ownsHookEntry } from '../lib/harness-hooks';
+import { inspectHooksFile, ownsHookEntry, pruneOurHandlers } from '../lib/harness-hooks';
 import { httpRequest } from '../lib/http';
 import { toMoney } from '../lib/money';
 import { PRODUCTION_ORIGIN } from '../lib/production-origin';
@@ -14,11 +14,11 @@ import type { CommandContext, CommandResult } from '../context';
 import { ROUTER_PATH } from './decision';
 import {
   ALLOW_RULE,
-  DELEGATION_MATCHER,
   MCP_SERVER_NAME,
   mcpAddCommand,
   mcpScope,
   readMcpEntry,
+  routerHookPlan,
   routerSettingsPath,
   type McpEntryState,
 } from './install';
@@ -210,19 +210,20 @@ async function hooksCheck(path: string, dataDir: string): Promise<RouterCheck> {
       fix: 'Run `tenjin install` to write the permission rule.',
     };
   }
-  // An install from before the delegation arm still routes the main agent, so
-  // this is a warning with its one-command remedy, not a failure.
-  const delegation = (found.hooks.PreToolUse ?? []).some(
-    (entry) =>
-      ownsHookEntry(entry, dataDir) &&
-      (entry as { matcher?: unknown }).matcher === DELEGATION_MATCHER,
-  );
-  if (!delegation) {
+  // AN INSTALL FROM AN OLDER BUILD STILL WORKS, so this is a warning with its
+  // one-command remedy, not a failure: its `tenjin hook native` entry is a
+  // no-op now, and the entries it lacks are offers it does not make.
+  const drift = planDrift(found.hooks, dataDir);
+  if (drift.missing.length > 0 || drift.stale.length > 0) {
+    const parts = [
+      ...(drift.missing.length > 0 ? [`missing ${drift.missing.join(', ')}`] : []),
+      ...(drift.stale.length > 0 ? [`stale ${drift.stale.join(', ')}`] : []),
+    ];
     return {
       name: 'hooks',
       status: 'warn',
       required: false,
-      detail: `${events.join(' and ')} registered, but not the ${DELEGATION_MATCHER} entry, so a subagent's task is never offered a paid lookup`,
+      detail: `${events.join(' and ')} registered, but not as this build writes them: ${parts.join('; ')}`,
       fix: 'Run `tenjin install --refresh`.',
     };
   }
@@ -232,6 +233,51 @@ async function hooksCheck(path: string, dataDir: string): Promise<RouterCheck> {
     required: true,
     detail: `${events.join(' and ')} registered, ${ALLOW_RULE} allowed`,
   };
+}
+
+/** One entry as `event matcher → command`, the way doctor names it. */
+function entryLabel(event: string, matcher: unknown, command: string): string {
+  return `${event}${typeof matcher === 'string' ? ` ${matcher}` : ''} → ${command}`;
+}
+
+/**
+ * Which of `routerHookPlan()`'s entries this file lacks, and which handlers of
+ * ours it carries that the plan no longer writes (an older install's
+ * `tenjin hook native`, or a shelf-era entry). Compared by event, matcher and
+ * command, so a timeout the writer would raise is not called drift here.
+ */
+function planDrift(
+  hooks: Record<string, unknown[]>,
+  dataDir: string,
+): { missing: string[]; stale: string[] } {
+  const planned = (routerHookPlan() as PlannedEntry[]).map((entry) =>
+    entryLabel(entry.event, entry.matcher, entry.hooks[0]!.command),
+  );
+  const present: string[] = [];
+  for (const [event, list] of Object.entries(hooks)) {
+    for (const entry of list) {
+      if (!ownsHookEntry(entry, dataDir)) continue;
+      const { matcher, hooks: handlers } = entry as { matcher?: unknown; hooks: unknown[] };
+      // Ours only: a handler someone hand-merged beside ours is not drift.
+      const kept = pruneOurHandlers(entry, dataDir) as { hooks: unknown[] } | null;
+      for (const handler of handlers.filter((h) => kept === null || !kept.hooks.includes(h))) {
+        const command = (handler as { command?: unknown }).command;
+        const url = (handler as { url?: unknown }).url;
+        const label = typeof command === 'string' ? command : typeof url === 'string' ? url : '?';
+        present.push(entryLabel(event, matcher, label));
+      }
+    }
+  }
+  return {
+    missing: planned.filter((label) => !present.includes(label)),
+    stale: present.filter((label) => !planned.includes(label)),
+  };
+}
+
+interface PlannedEntry {
+  event: string;
+  matcher?: string;
+  hooks: { command: string }[];
 }
 
 function allowRules(settings: Record<string, unknown>): string[] {
