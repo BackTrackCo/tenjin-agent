@@ -70,10 +70,9 @@ export interface AdvertisedTerms {
   network?: string;
   asset?: string;
   /**
-   * A ceiling the caller was quoted, when there was one. OPTIONAL since the
-   * router stopped quoting a price it could not hold anyone to: the amount
-   * actually signed meets `maxAutoSpend` and `sessionBudget` in `gateSpend`,
-   * and that deterministic local policy is the only payment authority.
+   * A ceiling the caller was quoted, when there was one: a live 402 above it is
+   * refused. It only ever refuses; the amount actually signed still meets
+   * `maxAutoSpend` and `sessionBudget` in `gateSpend`, the payment authority.
    */
   maxAmountAtomic?: string;
   /** The advertised recipient, when the caller was given one. Checked exactly. */
