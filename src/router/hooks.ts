@@ -1,6 +1,10 @@
 import { z } from 'zod';
 import { loadRawConfig, resolveSettings } from '../lib/config';
 import type { PartialConfig } from '../lib/config';
+import { evaluateSpendPolicy } from '../lib/policy';
+import { resolveContextSettings } from '../lib/settings';
+import { readSpendSummary, spentOf } from '../lib/spend-ledger';
+import type { CommandContext } from '../context';
 import { buildNativePacket, buildPromptPacket, type Packet, type PendingCall } from './context';
 import { requestDecision, ROUTER_PATH, type HookDecision } from './decision';
 import { GATE_TIMEOUT_MS } from './gate';
@@ -124,23 +128,41 @@ async function resolveBaseUrl(deps: HookDeps): Promise<string> {
 
 /**
  * A SUBAGENT IS OFFERED ONLY WHAT IT CAN PAY FOR ALONE. It cannot reach the
- * user, so an offer above `maxAutoSpend` would end in a `needs_approval` nobody
- * sees; the parent can still make that lookup itself. The provider price is
- * display-grade, and the amount actually signed is still `gateSpend`'s to cap,
- * so this only decides whether the line is worth showing. A config that cannot
- * be read shows none.
+ * user, so an offer that would stop on `needs_approval` is a dead end; the
+ * parent can still make that lookup itself. This asks the question `request`
+ * will: the same settings, the same session ledger and the same policy
+ * evaluation, with the provider's host as the creator the way `pay` names it.
+ * Only `allow`, a spend that would auto-execute, is worth the line. It
+ * reserves nothing, and the amount actually signed is still `gateSpend`'s to
+ * cap. Anything that cannot be read shows no offer.
  */
-async function withinAutoSpend(
-  decision: { providerPriceAtomic: string },
+async function wouldAutoExecute(
+  decision: { providerPriceAtomic: string; endpoint: string },
   deps: HookDeps,
 ): Promise<boolean> {
   try {
-    const config: PartialConfig = await loadRawConfig(deps.dataDir);
-    const cap = resolveSettings({ config, flags: {}, env: deps.env ?? process.env }).maxAutoSpend;
-    return BigInt(decision.providerPriceAtomic) <= BigInt(cap.value);
+    const { policy } = await resolveContextSettings(hookContext(deps));
+    const ledger = await readSpendSummary(deps.dataDir, {
+      ...(deps.now !== undefined ? { now: deps.now } : {}),
+    });
+    const evaluation = evaluateSpendPolicy(policy, {
+      amountAtomic: BigInt(decision.providerPriceAtomic),
+      creator: new URL(decision.endpoint).host,
+      sessionSpentAtomic: ledger === null ? 0n : spentOf(ledger),
+    });
+    return evaluation.decision === 'allow';
   } catch {
     return false;
   }
+}
+
+/** The context the hook's own library calls run in: JSON, silent, no TTY. */
+function hookContext(deps: HookDeps): CommandContext {
+  return {
+    flags: { json: true, timeout: deps.timeoutMs ?? GATE_TIMEOUT_MS },
+    dataDir: deps.dataDir,
+    io: { stdout: nullStream(), stderr: nullStream(), isTTY: false },
+  };
 }
 
 export interface PromptHookOutcome {
@@ -187,7 +209,7 @@ export interface NativeHookOutcome {
   response: unknown | null;
   action?: HookDecision['action'];
   id?: string;
-  /** An `execute` whose offer was not shown: a subagent above `maxAutoSpend`. */
+  /** An `execute` whose offer was not shown: a subagent spend that would need approval. */
   withheld?: true;
 }
 
@@ -229,7 +251,7 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
     await footer.close(outcome);
     return { response: null, ...(outcome !== null ? { action: outcome.action } : {}) };
   }
-  if (event.agent_id !== undefined && !(await withinAutoSpend(outcome, deps))) {
+  if (event.agent_id !== undefined && !(await wouldAutoExecute(outcome, deps))) {
     await footer.close(outcome, { withheld: true });
     return { response: null, action: 'execute', withheld: true };
   }
@@ -263,7 +285,7 @@ export interface DelegationHookOutcome {
  * one optional line, which reaches the subagent as part of its instructions
  * from its parent, before it starts. Anything else is no output at all.
  *
- * The subagent will be the payer, so the same auto-spend rule applies here.
+ * The subagent will be the payer, so the same auto-execute rule applies here.
  */
 export async function runDelegationHook(
   raw: unknown,
@@ -284,7 +306,7 @@ export async function runDelegationHook(
     await footer.close(outcome);
     return { response: null, ...(outcome !== null ? { action: outcome.action } : {}) };
   }
-  if (!(await withinAutoSpend(outcome, deps))) {
+  if (!(await wouldAutoExecute(outcome, deps))) {
     await footer.close(outcome, { withheld: true });
     return { response: null, action: 'execute', withheld: true };
   }
@@ -346,7 +368,7 @@ async function openFooter(
         {
           phase: 'done',
           operation,
-          outcome: withheld ? 'native tools (offer above auto-spend)' : hookOutcome(decision),
+          outcome: withheld ? 'native tools (offer needs approval)' : hookOutcome(decision),
         },
         now(),
       );
@@ -374,11 +396,7 @@ async function decide(packet: Packet, deps: HookDeps): Promise<HookDecision | nu
     'hook',
     { packet },
     {
-      ctx: {
-        flags: { json: true, timeout: deps.timeoutMs ?? GATE_TIMEOUT_MS },
-        dataDir: deps.dataDir,
-        io: { stdout: nullStream(), stderr: nullStream(), isTTY: false },
-      },
+      ctx: hookContext(deps),
       baseUrl,
       timeoutMs: deps.timeoutMs ?? GATE_TIMEOUT_MS,
       ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),

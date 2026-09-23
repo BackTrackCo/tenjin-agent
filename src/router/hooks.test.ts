@@ -15,6 +15,8 @@ afterEach(async () => {
 });
 
 const BASE = 'https://tenjin.sh';
+/** What `tenjin install` writes (`ROUTER_DEFAULTS`): 0.25 a call, auto. */
+const ROUTER_POLICY = { maxAutoSpend: '250000', sessionBudget: '5000000', confirm: 'above:250000' };
 
 /** A recorded decision answer; `calls` is what the hook actually sent. */
 function router(body: unknown, status = 200): { fetchImpl: typeof fetch; calls: unknown[] } {
@@ -605,40 +607,58 @@ describe('a subagent', () => {
 
   /**
    * A SUBAGENT CANNOT REACH THE USER, so an offer it would need approval for
-   * is not shown at all. The fixture's provider price is 10000 atomic.
+   * is not shown at all. The same evaluation `request` runs decides it: price
+   * cap, allowlist, session budget and confirm. The fixture's provider price is
+   * 10000 atomic, paid to vaaya.ai.
    */
-  it('is not offered a lookup above maxAutoSpend', async () => {
-    await setConfig({ maxAutoSpend: '9999' });
+  async function subagentOffer(): Promise<{ response: unknown; withheld?: true }> {
     const path = await parentTranscript();
     await subagentTranscript('a1', 'Read this page for me.');
     const { fetchImpl } = router(EXECUTE);
-    const out = await runNativeHook(subagentFetch(path, 'a1'), {
-      dataDir: dir,
-      baseUrl: BASE,
-      fetchImpl,
-    });
+    return runNativeHook(subagentFetch(path, 'a1'), { dataDir: dir, baseUrl: BASE, fetchImpl });
+  }
+
+  it.each([
+    ['above maxAutoSpend', { maxAutoSpend: '9999', confirm: 'above:9999' }],
+    ['under confirm always', { confirm: 'always' }],
+    ['above the confirm threshold', { confirm: 'above:9999' }],
+    [
+      'to a host outside allowlistCreators',
+      { allowlistCreators: ['wolframalpha.x402.paysponge.com'] },
+    ],
+    ['past the session budget', { sessionBudget: '20000' }],
+  ])('is not offered a lookup %s', async (_label, over) => {
+    await setConfig({ ...ROUTER_POLICY, ...over });
+    // 15000 of the day already committed: only the session-budget case minds.
+    const fs = await import('node:fs/promises');
+    await fs.writeFile(
+      join(dir, 'spend.json'),
+      JSON.stringify({
+        schemaVersion: 2,
+        windowStartMs: Date.now(),
+        committedAtomic: '15000',
+        reservations: [],
+      }),
+    );
+    const out = await subagentOffer();
     expect(out).toMatchObject({ response: null, action: 'execute', withheld: true });
     expect(await renderProgress(dir, 'sess-1')).toBe(
-      'x402 · search: native tools (offer above auto-spend)',
+      'x402 · search: native tools (offer needs approval)',
     );
   });
 
-  it('is offered a lookup at or below maxAutoSpend', async () => {
-    await setConfig({ maxAutoSpend: '10000' });
-    const path = await parentTranscript();
-    await subagentTranscript('a1', 'Read this page for me.');
-    const { fetchImpl } = router(EXECUTE);
-    const out = await runNativeHook(subagentFetch(path, 'a1'), {
-      dataDir: dir,
-      baseUrl: BASE,
-      fetchImpl,
-    });
+  it.each([
+    ['at maxAutoSpend', { maxAutoSpend: '10000', confirm: 'above:10000' }],
+    ['to an allowlisted host', { allowlistCreators: ['vaaya.ai'] }],
+  ])('is offered a lookup that would auto-execute, %s', async (_label, over) => {
+    await setConfig({ ...ROUTER_POLICY, ...over });
+    const out = await subagentOffer();
     expect(out.withheld).toBeUndefined();
     expect(JSON.stringify(out.response)).toContain(HINT.slice(0, 40));
   });
 
-  it('leaves the main agent its offer whatever the cap', async () => {
-    await setConfig({ maxAutoSpend: '0' });
+  it('leaves the main agent its offer whatever the policy', async () => {
+    await setConfig({ maxAutoSpend: '0', confirm: 'always' });
     const { fetchImpl } = router(EXECUTE);
     const out = await runNativeHook(await readableEvent('https://example.test/spec', 'WebFetch'), {
       dataDir: dir,
@@ -674,7 +694,7 @@ describe('the delegation hook', () => {
 
   beforeEach(async () => {
     const fs = await import('node:fs/promises');
-    await fs.writeFile(join(dir, 'config.json'), JSON.stringify({ maxAutoSpend: '250000' }));
+    await fs.writeFile(join(dir, 'config.json'), JSON.stringify(ROUTER_POLICY));
   });
 
   it.each(['Agent', 'Task'])(
@@ -746,7 +766,10 @@ describe('the delegation hook', () => {
 
   it('withholds an offer the subagent could not pay for alone', async () => {
     const fs = await import('node:fs/promises');
-    await fs.writeFile(join(dir, 'config.json'), JSON.stringify({ maxAutoSpend: '9999' }));
+    await fs.writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ ...ROUTER_POLICY, maxAutoSpend: '9999' }),
+    );
     const { fetchImpl } = router(EXECUTE);
     const out = await runDelegationHook(await delegation(), {
       dataDir: dir,
@@ -771,7 +794,7 @@ describe('no hook path', () => {
     const { fetchImpl } = router(body, status);
     const deps = { dataDir: dir, baseUrl: BASE, fetchImpl, warn: () => undefined };
     const fs = await import('node:fs/promises');
-    await fs.writeFile(join(dir, 'config.json'), JSON.stringify({ maxAutoSpend: '250000' }));
+    await fs.writeFile(join(dir, 'config.json'), JSON.stringify(ROUTER_POLICY));
     const events = [
       await readableEvent('btc price today'),
       await readableEvent('https://example.test/spec', 'WebFetch'),

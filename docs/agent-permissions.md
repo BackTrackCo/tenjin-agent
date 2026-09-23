@@ -111,7 +111,7 @@ Decryption happens in this CLI, in a disposable worker thread, and the key never
 
 When your assistant delegates, the task it hands over is routed before the subagent starts, and a paid lookup that fits is appended to that task as one optional line. A native search or fetch the subagent makes later is routed on its own task, read from its own transcript, with your turn still in front of it.
 
-A subagent cannot reach you to approve a spend, so it is only offered lookups priced at or below `maxAutoSpend`. Its payments run through the same ledger and the same caps as the lead's, because the lock is on the file rather than on the process. A subagent is not a second budget.
+A subagent cannot reach you to approve a spend, so it is only offered lookups your spend policy would pay without asking: within `maxAutoSpend` and the `confirm` threshold, inside the day's `sessionBudget`, and to a host `allowlistCreators` permits. Its payments run through the same ledger and the same caps as the lead's, because the lock is on the file rather than on the process. A subagent is not a second budget.
 
 ## Not the same as `allowlistCreators`
 
