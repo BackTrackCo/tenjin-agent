@@ -207,7 +207,7 @@ describe('what the tool tells the model to send', () => {
       // The query is always required; the id never is.
       expect(schema.properties.query.description).toContain(SCOPE_RULE);
       expect(schema.required).toEqual(['query']);
-      expect(schema.properties.id?.description).toContain("turn's context");
+      expect(schema.properties.id?.description).toContain('names the service');
       // One lookup, not the whole turn, and no blanket ban on wording.
       expect(SCOPE_RULE).toContain('one concrete external lookup');
       expect(SCOPE_RULE).toContain('A mixed turn is not one lookup');

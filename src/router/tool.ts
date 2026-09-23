@@ -12,11 +12,11 @@ import { requestDecision, type DecisionContract, type DecisionDiagnostics } from
  * The `request` tool: one free decision per lookup, then ONE payment, to the
  * provider.
  *
- * THE QUERY IS ALWAYS SENT AND THE ID IS ONLY A SHORTCUT. With an id, the tool
- * runs the decision the hook already prepared and never re-decides. Without
- * one, or when the id was prepared for an obviously different target, it asks
- * for exactly one fresh decision from the query and the turn's packet, which is
- * the pair the routing corpus is calibrated on.
+ * THE QUERY IS ALWAYS SENT, AND THE ID NAMES THE SERVICE. With an id, the
+ * backend binds the query to the capability the hook's line offered and never
+ * re-decides which service (tenjin#885). Without one, it asks for exactly one
+ * fresh decision from the query and the turn's packet, which is the pair the
+ * routing corpus is calibrated on.
  *
  * WHAT IS CHECKED LOCALLY, BEFORE ANYTHING IS SIGNED: the decision's arguments
  * against the schema it carries, its success rule against the compiler, its
@@ -32,7 +32,8 @@ import { requestDecision, type DecisionContract, type DecisionDiagnostics } from
 
 export interface RequestToolArgs {
   query: string;
-  /** The prepared decision from the hook's line. A shortcut, never authority. */
+  /** The turn id from the hook's line. It names the service that line offered, and
+   *  the server runs that one; it grants nothing locally, every cap still applies. */
   id?: string;
 }
 
@@ -74,15 +75,11 @@ export async function runRequestTool(
   };
 
   // ONE CALL, ONE DECISION. The query the model wrote goes to the backend with
-  // the turn id when it has one, and the backend decides from that query plus
-  // the packet it stored under that id. Nothing is fetched by id and nothing is
-  // waited for: an id the backend does not know is its own plain note, and the
-  // decision still runs from the query.
-  //
-  // THE SHORTCUT IS GONE ON PURPOSE. Running a decision the gate prepared from
-  // the whole turn measures 53 of 56 against 55 of 56 for this pair, and on a
-  // mixed turn it paid for the wrong lookup: the only thing the client could
-  // check was whether the two named different URLs, which that case did not.
+  // the turn id when it has one; the backend binds the query to the service
+  // that id offered, or decides from the query and the stored packet when there
+  // is no id. Nothing is fetched by id and nothing is waited for: an id the
+  // backend does not know is its own plain note, and the decision still runs
+  // from the query.
   const fresh = await requestDecision(
     'tool',
     { query, ...(args.id !== undefined && args.id.length > 0 ? { id: args.id } : {}) },
