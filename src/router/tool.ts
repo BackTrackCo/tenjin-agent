@@ -119,11 +119,14 @@ export async function runRequestTool(
     return fail(refusal.status, refusal.reason);
   }
 
-  // The router handed this caller the destination, which is the provenance the
-  // Bazaar lane asks for. It carries NO price: the advertised-price check and
-  // the live-versus-advertised check are gone, and `gateSpend` caps the amount
-  // actually signed. A ceiling the server states is not a ceiling.
-  const terms: AdvertisedTerms = { source: decision.provider };
+  // The decision's advertised price caps the live 402, refused before signing.
+  // It bounds a provider or stale catalog charging over that price, and an
+  // injected `request` call; it does not bound a hostile server, which can
+  // still quote up to `maxAutoSpend`. `gateSpend` stays the money authority.
+  const terms: AdvertisedTerms = {
+    source: decision.provider,
+    maxAmountAtomic: decision.providerPriceAtomic,
+  };
 
   try {
     // The request is the server's, sent verbatim: the only thing built here is
