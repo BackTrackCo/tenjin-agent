@@ -94,7 +94,7 @@ Every other key in the settings file is preserved byte for byte, a second run wr
 - On every prompt, and on every native `WebSearch` or `WebFetch`: the bounded text of the current turn, at most six prior messages and 16 KiB, redacted for obvious secrets. Tool results never travel: a tool result is other people's content, and a packet carrying it would be a channel from a fetched page into a routing decision.
 - A native call sends that same bounded turn WITH the call it is about attached, read from this session's own transcript. That is how a restriction you stated in your own words, such as asking for native tools only, reaches the decision about a bare URL your assistant is fetching.
 - Slash commands and one-word acknowledgements are never sent at all.
-- The packet is stored on the backend against the decision id for 15 minutes, so the lookup your assistant sends next is decided with the context you gave; it goes when the id expires.
+- The packet is stored on the backend against the decision id, so the lookup your assistant sends next is decided with the context you gave. Expired packets are unreadable after 15 minutes (the route refuses an expired id) and are deleted by the next router request or the daily cleanup, whichever comes first.
 - On a paid lookup: the capability chosen, a hash of the contract, a hash of the arguments, your wallet address, the amount and the transaction hash are kept.
 
 The answer can put one line into your session: that a paid lookup is available for this turn, and the id that carries your context to it. It names no provider and no price, because at that point the lookup itself has not been decided.

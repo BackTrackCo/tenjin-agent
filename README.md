@@ -61,7 +61,7 @@ Keep this a small wallet. It is pocket money for an agent, not treasury custody.
 ## What leaves your machine
 
 - On every prompt, and on every native `WebSearch` or `WebFetch`: the bounded text of the current turn (at most six prior messages and 16 KiB, redacted for obvious secrets) goes to Tenjin, which answers whether a paid capability fits. A native call also carries the call it is about, so a restriction you gave in your own words reaches that decision. Tool results never travel. Slash commands and one-word acknowledgements are never sent at all.
-- That bounded, redacted packet is STORED on the backend against the decision id for 15 minutes, so the lookup your assistant sends next is decided with the context you gave. Nothing else of the conversation is kept, and the packet goes when the id expires.
+- That bounded, redacted packet is STORED on the backend against the decision id, so the lookup your assistant sends next is decided with the context you gave. Expired packets are unreadable after 15 minutes (the route refuses an expired id) and are deleted by the next router request or the daily cleanup, whichever comes first. Nothing else of the conversation is kept.
 - On a paid lookup: the capability chosen, a hash of the contract, a hash of the arguments, your wallet address, the amount and the transaction hash are kept.
 - Never: your private key.
 
