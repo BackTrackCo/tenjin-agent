@@ -316,9 +316,10 @@ async function walletCheck(ctx: CommandContext): Promise<RouterCheck[]> {
 }
 
 /**
- * The router endpoint's own 402, which is free and rate-limited: a 402 proves
- * the route is deployed and turned on, and anything else names what a lookup
- * would hit. Nothing is signed and no Jev request is spent.
+ * One cheap request to the free decision route with an empty body. It checks
+ * the route is reachable and enabled, not that it routes: a 400 is the route
+ * refusing that body, and a 404 is the route switched off. Nothing is signed
+ * and no Jev request is spent.
  */
 async function routerCheck(
   baseUrl: string,
@@ -333,23 +334,34 @@ async function routerCheck(
     jsonBody: {},
     ...(fetchImpl !== undefined ? { fetchImpl } : {}),
   });
-  if (!probe.ok) {
-    return {
-      name: 'router',
-      status: 'fail',
-      required: true,
-      detail: `${url} is unreachable (${probe.message})`,
-      fix: 'Check your connection, and that the configured base URL names a Tenjin deployment (`tenjin config get baseUrl`).',
-    };
-  }
-  if (probe.status === 402) {
-    return { name: 'router', status: 'ok', required: true, detail: `${url} answers 402` };
-  }
-  return {
+  const fail = (detail: string, fix: string): RouterCheck => ({
     name: 'router',
     status: 'fail',
     required: true,
-    detail: `${url} answered ${probe.status}; paid routing looks turned off there`,
-    fix: 'Nothing local fixes this: paid routing is off at that deployment. Try again later.',
-  };
+    detail,
+    fix,
+  });
+  const retry = 'Nothing local fixes this. Try again later.';
+  if (!probe.ok) {
+    return fail(`the router at ${url} is unreachable or erroring (${probe.message})`, retry);
+  }
+  if (probe.status === 200 || probe.status === 400) {
+    return { name: 'router', status: 'ok', required: true, detail: `${url} is live` };
+  }
+  if (probe.status === 404) {
+    return fail(`the router is not enabled at ${url}`, retry);
+  }
+  if (probe.status === 401 || probe.status === 403) {
+    return fail(
+      `${url} is not a Tenjin router (it asked for credentials)`,
+      'Set the router URL with `tenjin config set baseUrl https://tenjin.sh`.',
+    );
+  }
+  if (probe.status >= 500) {
+    return fail(`the router at ${url} is unreachable or erroring (${probe.status})`, retry);
+  }
+  return fail(
+    `${url} answered ${probe.status}, which a Tenjin router does not`,
+    'Check that the configured base URL names a Tenjin deployment (`tenjin config get baseUrl`).',
+  );
 }
