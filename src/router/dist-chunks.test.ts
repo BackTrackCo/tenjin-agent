@@ -70,6 +70,21 @@ describe.skipIf(!existsSync(dist))('the hook chunk graph', () => {
     }
   });
 
+  it('keeps the redaction corpus out of the status line, which runs every second', () => {
+    const entry = chunkContaining('router/status-line');
+    expect(entry, 'the status line should have its own chunk').toBeDefined();
+    const sources = closure(entry!).flatMap(sourcesOf);
+    for (const { label, re } of FORBIDDEN) {
+      expect(
+        sources.filter((s) => re.test(s)),
+        `${label} reached the status line`,
+      ).toEqual([]);
+    }
+    // The rule corpus and the BIP-39 wordlist are a real parse cost, and the
+    // renderer needs neither: what it reads was redacted when it was written.
+    expect(sources.filter((s) => /src[/\\]lib[/\\]redact/.test(s))).toEqual([]);
+  });
+
   it('keeps the request tool in a chunk of its own, where the wallet is allowed', () => {
     const tool = chunkContaining('router/tool');
     expect(tool, 'the request tool should have its own chunk').toBeDefined();

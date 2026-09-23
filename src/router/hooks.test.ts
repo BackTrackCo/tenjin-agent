@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { FALLBACK_LINE, promptSkipReason, runNativeHook, runPromptHook } from './hooks';
 import { ROUTER_PATH } from './decision';
+import { renderProgress, resolveProgressSession, sessionDir } from './progress';
 
 let dir: string;
 beforeEach(async () => {
@@ -413,5 +414,52 @@ describe('a hint that is not one honest line', () => {
     });
     // Nothing to show in place of the call, so the call runs.
     expect(out).toMatchObject({ decision: 'allow', response: null });
+  });
+});
+
+describe('what the hook leaves for the status line', () => {
+  it('binds an execute decision to its session, and shows nothing once it answered', async () => {
+    const { fetchImpl } = router(EXECUTE);
+
+    const out = await runPromptHook(promptEvent('read https://example.test/spec'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+
+    // The hint is unchanged: the footer is downstream of the decision.
+    expect(out.action).toBe('execute');
+    expect(out.id).toBe('k3f9-abcd');
+    // The decision is over, so the footer is quiet and the tool takes it from here.
+    expect(await renderProgress(dir, 'sess-1')).toBe('x402 · ready');
+    expect(await resolveProgressSession(dir, { id: 'k3f9-abcd' })).toBe(sessionDir(dir, 'sess-1'));
+  });
+
+  it('records nothing to follow for a native decision', async () => {
+    const { fetchImpl } = router(NATIVE);
+
+    const out = await runPromptHook(promptEvent('what is 2 + 2'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+
+    expect(out).toMatchObject({ response: null, action: 'native' });
+    expect(await renderProgress(dir, 'sess-1')).toBe('x402 · ready');
+    // The session is still known, so a lookup it makes later can be attributed.
+    expect(await resolveProgressSession(dir, {})).toBe(sessionDir(dir, 'sess-1'));
+  });
+
+  it('routes the same when the progress directory cannot be written', async () => {
+    const { fetchImpl } = router(EXECUTE);
+
+    const out = await runPromptHook(promptEvent('read https://example.test/spec'), {
+      dataDir: join(dir, 'missing', '\u0000bad'),
+      baseUrl: BASE,
+      fetchImpl,
+    });
+
+    expect(out.action).toBe('execute');
+    expect(out.id).toBe('k3f9-abcd');
   });
 });

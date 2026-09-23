@@ -8,6 +8,7 @@ import type { SpendAuthorization, SpendAuthorizer } from '../lib/wallet';
 import type { CommandContext } from '../context';
 import { runRequestTool } from './tool';
 import { ROUTER_PATH } from './decision';
+import { bindDecision, noteSession, renderProgress } from './progress';
 
 /**
  * The `request` tool after the fee: ONE free decision, then ONE payment, to the
@@ -348,5 +349,49 @@ describe('what the tool refuses to execute', () => {
     };
     const result = await runRequestTool({ query: 'q' }, real);
     expect(result.envelope).toMatchObject({ status: 'fulfilled' });
+  });
+});
+
+describe('what the tool leaves for the status line', () => {
+  it('shows the executed provider and its price, and returns the same envelope', async () => {
+    await noteSession(dir, 'sess-1');
+    await bindDecision(dir, 'sess-1', 'k3f9-abcd');
+    const { fetchImpl } = net([{ url: ROUTER, status: 200, body: decision() }, ...providerLegs()]);
+
+    const result = await runRequestTool(
+      { query: 'BTC and ETH price', id: 'k3f9-abcd' },
+      deps(fetchImpl),
+    );
+
+    expect(result.isError).toBe(false);
+    expect(result.envelope).toMatchObject({
+      status: 'fulfilled',
+      cost: ['provider price 0.01 USD'],
+    });
+    expect(await renderProgress(dir, 'sess-1')).toBe(
+      'x402 · request: fulfilled pro-api.example.test/x402/v3/quotes · {"symbol":"BTC,ETH","convert":"USD"} · $0.01',
+    );
+  });
+
+  it('records a native decision as native, with nothing called and nothing paid', async () => {
+    await noteSession(dir, 'sess-1');
+    const { fetchImpl } = net([{ url: ROUTER, status: 200, body: NATIVE }]);
+
+    const result = await runRequestTool({ query: 'what is 2 + 2' }, deps(fetchImpl));
+
+    expect(result.envelope).toMatchObject({ status: 'native' });
+    expect(await renderProgress(dir, 'sess-1')).toBe('x402 · request: native');
+  });
+
+  it('attributes nothing when two sessions are live and the call carries no id', async () => {
+    await noteSession(dir, 'sess-1');
+    await noteSession(dir, 'sess-2');
+    const { fetchImpl } = net([{ url: ROUTER, status: 200, body: decision() }, ...providerLegs()]);
+
+    const result = await runRequestTool({ query: 'BTC and ETH price' }, deps(fetchImpl));
+
+    expect(result.isError).toBe(false);
+    expect(await renderProgress(dir, 'sess-1')).toBe('x402 · ready');
+    expect(await renderProgress(dir, 'sess-2')).toBe('x402 · ready');
   });
 });

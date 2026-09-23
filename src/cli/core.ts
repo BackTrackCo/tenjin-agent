@@ -16,6 +16,10 @@ export function registerCore(reg: Registration): void {
     )
     .option('--project', "write into this project's .claude/settings.json instead of your home one")
     .option('--refresh', 're-register the hook entries this machine already has; add nothing')
+    .option(
+      '--status-line <mode>',
+      'the live footer: `own` registers it, `compose` appends it to the status line you already have, `skip` leaves the setting alone',
+    )
     .addHelpText(
       'after',
       `
@@ -32,10 +36,14 @@ Learn more:
       await runCommand('install', this, async (ctx) => {
         const o = this.opts();
         const { runRouterInstall } = await import('../router/install');
+        const { statusLineMode } = await import('../router/status-line-wiring');
         return runRouterInstall(
           {
             ...(o.project === true ? { project: true } : {}),
             ...(o.refresh === true ? { refresh: true } : {}),
+            ...(o.statusLine !== undefined
+              ? { statusLine: statusLineMode(String(o.statusLine)) }
+              : {}),
           },
           ctx,
         );
@@ -57,7 +65,7 @@ Learn more:
 
   leaf(SETUP, 'doctor', 'check this machine can run a lookup')
     .description(
-      'Check the six things a lookup needs: the Node floor, the hook entries and the permission rule, the MCP registration, the spend limits, the wallet, and the router endpoint answering its 402. It prints one line per check with a fix for each failure, and exits nonzero if a required one fails.',
+      'Check everything a lookup needs: the Node floor, the hook entries and the permission rule, the status line, the MCP registration, the spend limits, the wallet, and the router endpoint answering its 402. It prints one line per check with a fix for each failure, and exits nonzero if a required one fails.',
     )
     .option('--project', "check this project's .claude/settings.json, as --project installed it")
     .addHelpText(

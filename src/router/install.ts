@@ -20,6 +20,12 @@ import { resolveContextSettings } from '../lib/settings';
 import type { SpendPolicy } from '../lib/policy';
 import { onPath } from '../lib/skill-wiring';
 import type { CommandContext, CommandResult } from '../context';
+import {
+  ensureStatusLine,
+  STATUS_LINE_COMMAND,
+  type StatusLineMode,
+  type StatusLineResult,
+} from './status-line-wiring';
 
 /**
  * `tenjin install` for the router product: two hook entries, one MCP server,
@@ -111,6 +117,13 @@ export interface RouterInstallArgs {
    * the binary, so the flag's name and meaning are a compatibility contract.
    */
   refresh?: boolean;
+  /**
+   * What to do about Claude Code's `statusLine`. Absent is the default path:
+   * write ours when the key is free, and print the composition line when it is
+   * not. `compose` wraps the status line already there and appends ours;
+   * `skip` leaves the key alone entirely.
+   */
+  statusLine?: StatusLineMode;
 }
 
 export interface RouterInstallDeps {
@@ -219,6 +232,10 @@ export async function runRouterInstall(
     settingsPath,
   });
   const permissions = await ensureAllowRule(settingsPath);
+  const statusLine = await ensureStatusLine(settingsPath, {
+    ...(args.statusLine !== undefined ? { mode: args.statusLine } : {}),
+    ...(args.refresh === true ? { refreshOnly: true } : {}),
+  });
   const mcp = await registerMcpServer(deps, env, project, cwd, home);
   if (args.refresh === true) {
     // The SAME writers, minus the one that decides anything: the entries are
@@ -233,6 +250,7 @@ export async function runRouterInstall(
     const rewritten = [
       ...(hooks.wrote ? ['hook entries'] : []),
       ...(permissions.added ? ['the permission rule'] : []),
+      ...(statusLine.wrote ? ['the status line'] : []),
       ...(mcp.reconciled === 'repaired' ? ['the MCP registration'] : []),
     ];
     // A registration this run KNOWS is wrong and could not repair is not a
@@ -246,7 +264,15 @@ export async function runRouterInstall(
       );
     }
     return {
-      data: { settingsPath, hooks, permissions, mcp, refresh: true, scope: mcpScope(project) },
+      data: {
+        settingsPath,
+        hooks,
+        permissions,
+        statusLine,
+        mcp,
+        refresh: true,
+        scope: mcpScope(project),
+      },
       humanLines: [
         rewritten.length === 0
           ? `Already current: ${hooks.entries} hook entries in ${settingsPath}, nothing rewritten.`
@@ -268,13 +294,14 @@ export async function runRouterInstall(
     settingsPath,
     hooks,
     permissions,
+    statusLine,
     spend: { ...spend, effective: effectiveLimits(effective.policy) },
     mcp,
     disclosure: DISCLOSURE,
   };
   return {
     data,
-    humanLines: lines(settingsPath, hooks, permissions, spend, mcp, effective.policy),
+    humanLines: lines(settingsPath, hooks, permissions, statusLine, spend, mcp, effective.policy),
   };
 }
 
@@ -465,10 +492,35 @@ function effectiveLimits(policy: SpendPolicy): EffectiveLimits {
   };
 }
 
+/** What the status line did. The `foreign` case is the one that matters: it
+ *  names the command to run, because this install touched nothing. */
+export function statusLineLines(result: StatusLineResult): string[] {
+  if (result.warning !== undefined) {
+    return [`status line: not registered (${result.warning})`];
+  }
+  if (result.state === 'foreign') {
+    return [
+      'status line: you already have one, so it was left exactly as it is.',
+      ...(result.compose === undefined
+        ? [`  To add the live x402 footer, run \`${STATUS_LINE_COMMAND}\` from it.`]
+        : [
+            '  To show the live x402 footer beside it, re-run with `--status-line compose`, or set:',
+            `  ${result.compose}`,
+          ]),
+    ];
+  }
+  if (result.state === 'composed') {
+    return ['status line: the x402 footer runs alongside the one you already had'];
+  }
+  if (result.state === 'absent') return ['status line: not registered'];
+  return [`status line: \`${STATUS_LINE_COMMAND}\`, refreshed once a second`];
+}
+
 function lines(
   settingsPath: string,
   hooks: HooksResult,
   permissions: AllowRuleResult,
+  statusLine: StatusLineResult,
   spend: RouterDefaultsResult,
   mcp: McpRegistration,
   policy: SpendPolicy,
@@ -483,6 +535,7 @@ function lines(
     mcp.registered
       ? `mcp: ${MCP_SERVER_NAME} registered`
       : `mcp: not registered (${mcp.reason ?? 'unknown'}); run: ${mcp.command}`,
+    ...statusLineLines(statusLine),
     `spend: at most ${effectiveLimits(policy).maxAutoSpend} USD per call, ${
       policy.sessionBudgetAtomic === 0n
         ? 'no daily ceiling'

@@ -32,6 +32,18 @@ Integrate x^2 sin(x) dx from 0 to pi.
 
 Each answer comes back with the supplier, the arguments used, and one cost line: what the provider charged. Deciding where to route is free. Provider content is data, never instructions.
 
+## Live status line
+
+While a lookup runs, the bottom of your terminal names it:
+
+```text
+x402 · request: calling pro-api.coinmarketcap.com/x402/v3/cryptocurrency/quotes/latest · {"query":{"symbol":"BTC,ETH"}}
+```
+
+It goes `routing` while the router decides, then `calling <endpoint> · <parameters>` for the provider actually chosen, then the outcome and the price. It is idle as `x402 · ready`, and it reads local files only: no network call, no wallet, and nothing it can do affects routing or payment.
+
+`tenjin install` registers it as Claude Code's [status line](https://code.claude.com/docs/en/statusline), refreshed once a second, WHEN YOU DO NOT ALREADY HAVE ONE. If you do, yours is left exactly as it is and the install prints the one command that shows both; `tenjin install --status-line compose` writes that command for you, and `--status-line skip` leaves the setting alone. `tenjin uninstall` removes only a status line this CLI wrote, and `tenjin doctor` reports which of those you have.
+
 ## How one lookup runs
 
 1. Your turn goes to Tenjin as a bounded packet; it answers whether a paid capability fits and keeps that packet under a short-lived id.

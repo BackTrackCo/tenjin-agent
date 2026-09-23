@@ -4,6 +4,15 @@ import type { PartialConfig } from '../lib/config';
 import { buildNativePacket, buildPromptPacket, type Packet, type PendingCall } from './context';
 import { requestDecision, ROUTER_PATH, type HookDecision } from './decision';
 import { GATE_TIMEOUT_MS } from './gate';
+import {
+  bindDecision,
+  clearProgress,
+  newCallId,
+  noteSession,
+  pruneProgress,
+  sessionDir,
+  writeProgress,
+} from './progress';
 
 /**
  * The two hook handlers. Between them they do exactly three things: build the
@@ -127,7 +136,9 @@ export async function runPromptHook(raw: unknown, deps: HookDeps): Promise<Promp
   if (skipped !== null) return { response: null, skipped };
 
   const packet = await buildPromptPacket(event.transcript_path, event.session_id, event.prompt);
+  const footer = await openFooter(deps, event.session_id);
   const outcome = await decide(packet, deps);
+  await footer.close(outcome);
   if (outcome === null) return injection(FALLBACK_LINE);
   const decision = outcome;
   if (decision.action === 'native') return { response: null, action: 'native' };
@@ -180,7 +191,9 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
     );
     return { response: null, decision: 'allow' };
   }
+  const footer = await openFooter(deps, event.session_id);
   const outcome = await decide(packet, deps);
+  await footer.close(outcome);
   if (outcome === null || outcome.action !== 'execute') {
     return {
       response: null,
@@ -202,6 +215,32 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
     decision: 'deny',
     action: 'execute',
     id: outcome.id,
+  };
+}
+
+/**
+ * The footer's half of a hook: `routing` while the free decision is in flight,
+ * then nothing, because the call itself happens in the tool. An `execute` also
+ * leaves the id-to-session binding the tool resolves its own progress through.
+ * Every write inside swallows its own failure.
+ */
+async function openFooter(
+  deps: HookDeps,
+  sessionId: string,
+): Promise<{ close: (decision: HookDecision | null) => Promise<void> }> {
+  const now = (): number => deps.now?.() ?? Date.now();
+  const directory = sessionDir(deps.dataDir, sessionId);
+  const callId = newCallId();
+  await noteSession(deps.dataDir, sessionId, now());
+  await writeProgress(directory, callId, { phase: 'routing' }, now());
+  await pruneProgress(directory, now());
+  return {
+    close: async (decision) => {
+      await clearProgress(directory, callId);
+      if (decision !== null && decision.action === 'execute') {
+        await bindDecision(deps.dataDir, sessionId, decision.id, now());
+      }
+    },
   };
 }
 

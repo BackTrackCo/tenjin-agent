@@ -15,6 +15,7 @@ import {
   mcpScope,
   routerSettingsPath,
 } from './install';
+import { removeStatusLine } from './status-line-wiring';
 
 /**
  * `tenjin uninstall`: take out the hook entries, the allow rule and the MCP
@@ -57,6 +58,10 @@ export async function runRouterUninstall(
   });
 
   const removed = await removeFromSettings(settingsPath, ctx.dataDir);
+  // OURS ALONE, and after the hooks write so the two never touch the file at
+  // once. A COMPOSED status line is the user's own text with ours appended:
+  // deleting it would take their line with it, so it is reported and kept.
+  const statusLine = await removeStatusLine(settingsPath);
   // Forgotten, so a later `tenjin update` does not go looking for a project
   // this machine no longer wires.
   if (args.project === true) {
@@ -68,6 +73,7 @@ export async function runRouterUninstall(
   const data = {
     settingsPath,
     ...removed,
+    statusLine,
     mcp,
     kept: ['wallet.json', 'spend.json', 'config.json'],
   };
@@ -77,6 +83,11 @@ export async function runRouterUninstall(
       removed.warning === undefined
         ? `removed ${removed.events.length > 0 ? removed.events.join(', ') : 'no'} hook entries and ${removed.ruleRemoved ? 'the' : 'no'} permission rule from ${settingsPath}`
         : `${settingsPath} was left untouched (${removed.warning})`,
+      statusLine.wrote
+        ? 'removed the x402 status line'
+        : statusLine.state === 'composed'
+          ? 'status line: yours also runs the x402 footer; edit that command to drop it'
+          : 'status line: none of ours was registered',
       mcp.removed
         ? `removed the ${MCP_SERVER_NAME} MCP server (${mcp.scope} scope)`
         : `mcp: run ${mcp.command}`,

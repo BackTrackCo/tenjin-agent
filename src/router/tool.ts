@@ -7,6 +7,7 @@ import type { SpendAuthorizer, WalletProvider } from '../lib/wallet';
 import type { TenjinSigner } from '../lib/wallet/provider';
 import type { CommandContext } from '../context';
 import { requestDecision, type DecisionContract, type DecisionDiagnostics } from './decision';
+import { openLookupFooter } from './progress';
 
 /**
  * The `request` tool: one free decision per lookup, then ONE payment, to the
@@ -66,6 +67,13 @@ export async function runRequestTool(
       'A request needs a query naming the task, its inputs and any constraints.',
     );
   }
+  // THE FOOTER, OPENED FIRST AND TRUSTED WITH NOTHING: it shows this lookup in
+  // the terminal while it runs, resolved to a session through the hook's own
+  // binding for `id`, and every call on it swallows its own failure.
+  const footer = await openLookupFooter(deps.ctx.dataDir, {
+    ...(args.id !== undefined && args.id.length > 0 ? { id: args.id } : {}),
+  });
+  await footer.routing();
   const settings = await resolveContextSettings(deps.ctx);
   const decisionDeps = {
     ctx: deps.ctx,
@@ -89,6 +97,7 @@ export async function runRequestTool(
     decisionDeps,
   );
   if (fresh.status === 'failed') {
+    await footer.done('failed');
     return fail('failed', fresh.reason, {
       ...(fresh.errorCode !== undefined ? { errorCode: fresh.errorCode } : {}),
     });
@@ -96,6 +105,7 @@ export async function runRequestTool(
   const { decision, note } = fresh.decision;
 
   if (decision.action !== 'execute') {
+    await footer.done(decision.action === 'native' ? 'native' : 'needs_input');
     // Both non-execute arms carry diagnostics by construction now: an answer
     // without them does not parse, so there is nothing to fall back to here.
     return fail(
@@ -107,7 +117,10 @@ export async function runRequestTool(
 
   const contract = decision.contract;
   const refusal = checkContract(contract);
-  if (refusal !== null) return fail(refusal.status, refusal.reason);
+  if (refusal !== null) {
+    await footer.done(refusal.status);
+    return fail(refusal.status, refusal.reason);
+  }
 
   // The router handed this caller the destination, which is the provenance the
   // Bazaar lane asks for. It carries NO price: the advertised-price check and
@@ -119,6 +132,10 @@ export async function runRequestTool(
     // The request is the server's, sent verbatim: the only thing built here is
     // the decision about whether to send it.
     const built = contract.request;
+    // WHAT IS ABOUT TO BE CALLED, named while it is being called. This is the
+    // executed destination, not the hint's suggestion, which is the whole point
+    // of showing it.
+    await footer.calling({ provider: built.url, ...paramsOf(contract) });
     const paid = await runPay(
       {
         url: built.url,
@@ -161,7 +178,13 @@ export async function runRequestTool(
     // limit and have it read as a checked, paid result. The body still rides
     // along whole, because the money moved and withholding the product would be
     // a second loss on top of the first.
+    const shown = {
+      provider: built.url,
+      ...paramsOf(contract),
+      price: `$${toMoney(providerAtomic.toString()).usd}`,
+    };
     if (data.resultUnverified === true) {
+      await footer.done('unverified', shown);
       return {
         isError: true,
         summary: `Unverified result from ${base.supplier} · ${base.cost.join(' · ')}`,
@@ -172,6 +195,7 @@ export async function runRequestTool(
         },
       };
     }
+    await footer.done('fulfilled', shown);
     return {
       isError: false,
       summary: `Fulfilled by ${base.supplier} · ${base.cost.join(' · ')}`,
@@ -189,6 +213,11 @@ export async function runRequestTool(
       settlement?: string;
       diagnosis?: Record<string, unknown>;
     };
+    await footer.done(status, {
+      provider: contract.request.url,
+      ...paramsOf(contract),
+      price: `$${toMoney(detail.amountAtomic ?? '0').usd}`,
+    });
     return fail(status, reason, {
       providerAtomic: BigInt(detail.amountAtomic ?? '0'),
       ...(detail.settlement !== undefined ? { settlement: detail.settlement } : {}),
@@ -254,6 +283,11 @@ function unsafeHeader(headers: Record<string, string>): string | null {
     if (value.length > 1_024 || /[\r\n]/.test(value)) return name;
   }
   return null;
+}
+
+/** The decision's own arguments, for the footer, or nothing to show. */
+function paramsOf(contract: DecisionContract): { parameters?: unknown } {
+  return contract.arguments !== undefined ? { parameters: contract.arguments } : {};
 }
 
 function supplierOf(url: string): string {
