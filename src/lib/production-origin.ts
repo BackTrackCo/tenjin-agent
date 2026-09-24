@@ -10,7 +10,7 @@
  * `fund.test.ts` and `client-meta.test.ts` each hold their own written-out copy,
  * so flipping this line alone reds the suite instead of moving the money path.
  */
-export const PRODUCTION_ORIGIN = 'https://tenjin.blog';
+export const PRODUCTION_ORIGIN = 'https://tenjin.sh';
 
 /**
  * The bare host, for prose and messages that name the site rather than link to
@@ -32,7 +32,7 @@ export const PRODUCTION_HOST = new URL(PRODUCTION_ORIGIN).host;
  */
 const KNOWN_DEPLOYMENT_ORIGINS: ReadonlySet<string> = new Set([
   PRODUCTION_ORIGIN,
-  'https://tenjin.sh',
+  'https://tenjin.blog',
 ]);
 
 /**

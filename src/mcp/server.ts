@@ -297,7 +297,7 @@ const fundInput = {
  * passes none. The returned server is connected to a transport by the caller.
  */
 export function buildTenjinMcpServer(opts: BuildMcpOptions = {}): McpServer {
-  // `tenjin-cli`, NOT `tenjin`: the hosted server at tenjin.blog/api/mcp already
+  // `tenjin-cli`, NOT `tenjin`: the hosted server at tenjin.sh/api/mcp already
   // identifies as `tenjin`, so a client connected to both (and the server-side
   // client-naming telemetry) could not tell them apart. Matches the npm package
   // name. Pinned in server.test.ts.

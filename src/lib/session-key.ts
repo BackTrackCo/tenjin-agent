@@ -17,7 +17,7 @@ import type { TenjinSigner } from './wallet/provider';
 /**
  * Session-key delegation (RFC 9421 signed HTTP, RFC 9530-shaped Content-Digest),
  * verified byte-for-byte against the live "Auth — session keys" contract in
- * https://tenjin.blog/llms-full.txt (D35).
+ * https://tenjin.sh/llms-full.txt (D35).
  *
  * The point: a plain SIWX write burns a single-use nonce, so every write needs a
  * fresh WALLET signature. A session key trades that for ONE wallet signature per

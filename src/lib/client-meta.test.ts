@@ -36,7 +36,7 @@ describe('TENJIN_USER_AGENT', () => {
   it('is the package version behind a `tenjin-cli` product token and nothing else', () => {
     const [product, ...rest] = TENJIN_USER_AGENT.split(' ');
     expect(product).toBe(`tenjin-cli/${pkg.version}`);
-    expect(rest.join(' ')).toBe('(+https://tenjin.blog)');
+    expect(rest.join(' ')).toBe('(+https://tenjin.sh)');
   });
 
   it("parses to the `tenjin-cli` attribution label under the server's product regex", () => {
@@ -51,7 +51,7 @@ describe('TENJIN_USER_AGENT', () => {
   });
 
   it('separates the product token from the comment, which is what the regex needs', () => {
-    // The failure this pins: `tenjin-cli/1.2.3(+https://tenjin.blog)` still looks
+    // The failure this pins: `tenjin-cli/1.2.3(+https://tenjin.sh)` still looks
     // right to a human and to every other test, but `(` is outside the product
     // token and no whitespace follows, so the regex misses and attribution for
     // the entire CLI drops to `none`.
@@ -69,7 +69,7 @@ describe('WEBSEARCH_HOOK_USER_AGENT', () => {
   it('is the package version behind a `tenjin-websearch-hook` product token', () => {
     const [product, ...rest] = WEBSEARCH_HOOK_USER_AGENT.split(' ');
     expect(product).toBe(`tenjin-websearch-hook/${pkg.version}`);
-    expect(rest.join(' ')).toBe('(+https://tenjin.blog)');
+    expect(rest.join(' ')).toBe('(+https://tenjin.sh)');
   });
 
   it("parses to the hook's attribution label under the server's product regex", () => {
@@ -101,7 +101,7 @@ describe('composeUserAgent', () => {
 
   it('keeps the caller products, in order, behind the Tenjin product', () => {
     const composed = composeUserAgent({ caller: 'codex/1.2.0 node/24.4.0', env: NO_ENV });
-    expect(composed).toBe(`${TENJIN_PRODUCT} codex/1.2.0 node/24.4.0 (+https://tenjin.blog)`);
+    expect(composed).toBe(`${TENJIN_PRODUCT} codex/1.2.0 node/24.4.0 (+https://tenjin.sh)`);
     // Attribution still resolves to the CLI: the server reads the FIRST product.
     expect(FIRST_PRODUCT_RE.exec(composed)?.[1]).toBe('tenjin-cli');
   });
@@ -114,9 +114,9 @@ describe('composeUserAgent', () => {
 
   it('reads the env when no programmatic value is given, and the value wins when it is', () => {
     const env: NodeJS.ProcessEnv = { [CALLER_USER_AGENT_ENV]: 'launcher/3.0' };
-    expect(composeUserAgent({ env })).toBe(`${TENJIN_PRODUCT} launcher/3.0 (+https://tenjin.blog)`);
+    expect(composeUserAgent({ env })).toBe(`${TENJIN_PRODUCT} launcher/3.0 (+https://tenjin.sh)`);
     expect(composeUserAgent({ caller: 'embedder/1.0', env })).toBe(
-      `${TENJIN_PRODUCT} embedder/1.0 (+https://tenjin.blog)`,
+      `${TENJIN_PRODUCT} embedder/1.0 (+https://tenjin.sh)`,
     );
   });
 
@@ -133,10 +133,10 @@ describe('composeUserAgent', () => {
     // A stale copy of our own product must not survive as a second, and wrong,
     // identity for the same request.
     expect(composeUserAgent({ caller: 'tenjin-cli/0.0.1 codex/1.2.0', env: NO_ENV })).toBe(
-      `${TENJIN_PRODUCT} codex/1.2.0 (+https://tenjin.blog)`,
+      `${TENJIN_PRODUCT} codex/1.2.0 (+https://tenjin.sh)`,
     );
     expect(composeUserAgent({ caller: 'Tenjin-CLI/0.0.1 codex/1.2.0', env: NO_ENV })).toBe(
-      `${TENJIN_PRODUCT} codex/1.2.0 (+https://tenjin.blog)`,
+      `${TENJIN_PRODUCT} codex/1.2.0 (+https://tenjin.sh)`,
     );
     expect(composeUserAgent({ caller: 'tenjin-cli', env: NO_ENV })).toBe(TENJIN_USER_AGENT);
   });
@@ -151,9 +151,9 @@ describe('composeUserAgent', () => {
         env: NO_ENV,
         product,
       }),
-    ).toBe(`${product} codex/1 (+https://tenjin.blog)`);
+    ).toBe(`${product} codex/1 (+https://tenjin.sh)`);
     expect(composeUserAgent({ caller: 'tenjin-websearch-hook/0.0.1 codex/1', env: NO_ENV })).toBe(
-      `${TENJIN_PRODUCT} codex/1 (+https://tenjin.blog)`,
+      `${TENJIN_PRODUCT} codex/1 (+https://tenjin.sh)`,
     );
   });
 
@@ -192,7 +192,7 @@ describe('composeUserAgent', () => {
     const caller = `a/${'x'.repeat(length - overhead - 2)}`;
     const composed = composeUserAgent({ caller, env: NO_ENV });
     expect(composed).toBe(
-      kept ? `${TENJIN_PRODUCT} ${caller} (+https://tenjin.blog)` : TENJIN_USER_AGENT,
+      kept ? `${TENJIN_PRODUCT} ${caller} (+https://tenjin.sh)` : TENJIN_USER_AGENT,
     );
     if (kept) expect(composed.length).toBe(length);
   });

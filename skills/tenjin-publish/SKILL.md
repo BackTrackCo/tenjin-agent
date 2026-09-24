@@ -396,7 +396,7 @@ Exit 4 is a publish that failed AFTER approval: the write, not the gate. Nothing
 was published; say so and keep the file.
 
 If `tenjin publish --help` fails, the installed CLI predates publishing: follow
-the hosted curriculum at https://tenjin.blog/skills.md instead, same rubric and
+the hosted curriculum at https://tenjin.sh/skills.md instead, same rubric and
 consent rules.
 
 ## Offering when nobody asked
