@@ -1,5 +1,6 @@
 import { mkdir, readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
+import { dirname } from 'node:path';
 import { styleText } from 'node:util';
 import { CliError } from '../lib/errors';
 import { confirmChoice } from '../lib/clack';
@@ -836,8 +837,30 @@ function parseRouterContext(value: string): RouterContext {
  * Merge one router key into a project file. It holds the router block and
  * nothing else this CLI reads, so it is written 0644 like any committed file;
  * an existing file that is not a JSON object is refused rather than replaced.
+ * The read, merge and write run under the same cross-process lock the global
+ * writer takes, so two concurrent sets both land.
  */
 async function persistProjectRouter(
+  path: string,
+  field: 'enabled' | 'context',
+  value: boolean | RouterContext,
+): Promise<void> {
+  await mkdir(dirname(path), { recursive: true, mode: 0o755 });
+  const lockPath = `${path}.lock`;
+  try {
+    await withFileLock(lockPath, () => mergeProjectRouter(path, field, value));
+  } catch (err) {
+    if (err instanceof LockTimeoutError) {
+      throw new CliError('INTERNAL', err.message, {
+        fix: `If no other tenjin process is running, remove ${lockPath} and retry.`,
+        cause: err,
+      });
+    }
+    throw err;
+  }
+}
+
+async function mergeProjectRouter(
   path: string,
   field: 'enabled' | 'context',
   value: boolean | RouterContext,
