@@ -82,6 +82,20 @@ describe('the status line command', () => {
     expect(out).toEqual([]);
   });
 
+  it('shows no footer in a directory where the router is off', async () => {
+    const { mkdir, writeFile } = await import('node:fs/promises');
+    const repo = join(dir, 'repo');
+    await mkdir(join(repo, '.git'), { recursive: true });
+    await mkdir(join(repo, '.tenjin'), { recursive: true });
+    await writeFile(
+      join(repo, '.tenjin', 'config.json'),
+      JSON.stringify({ router: { enabled: false } }),
+    );
+    await writeProgress(sessionDir(dir, 'session-a'), 'call-1', { phase: 'routing' }, NOW);
+
+    expect(await render(JSON.stringify({ session_id: 'session-a', cwd: repo }))).toEqual([]);
+  });
+
   it('writes nothing at all', async () => {
     await writeProgress(sessionDir(dir, 'session-a'), 'call-1', { phase: 'routing' }, NOW);
     const before = await readdir(sessionDir(dir, 'session-a'));

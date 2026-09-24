@@ -21,6 +21,7 @@ import {
   routerSettingsPath,
   type McpEntryState,
 } from './install';
+import { routerSettings, type RouterSettings } from './settings';
 import { inspectStatusLine, STATUS_LINE_COMMAND } from './status-line-wiring';
 
 /**
@@ -73,6 +74,11 @@ export async function runRouterDoctor(
   deps: RouterDoctorDeps = {},
 ): Promise<CommandResult> {
   const env = deps.env ?? process.env;
+  // From the directory doctor runs in, which is the one a session there would use.
+  const router = await routerSettings(
+    { cwd: deps.cwd ?? process.cwd(), dataDir: ctx.dataDir },
+    deps.homeDir !== undefined ? { homeDir: deps.homeDir } : {},
+  ).catch((err: unknown) => (err instanceof Error ? err : new Error(String(err))));
   const settings = await resolveContextSettings(ctx);
   // The SAME resolution `install` and `uninstall` use. Reading the home file
   // only made a correctly wired `--project` install, which the README tells
@@ -83,7 +89,7 @@ export async function runRouterDoctor(
     ...(deps.cwd !== undefined ? { cwd: deps.cwd } : {}),
   });
   const checks: RouterCheck[] = [nodeCheck(deps.nodeVersion ?? process.version)];
-  checks.push(await hooksCheck(settingsPath, ctx.dataDir));
+  checks.push(await hooksCheck(settingsPath, ctx.dataDir, router));
   checks.push(await statusLineCheck(settingsPath));
   checks.push(
     await mcpCheck(
@@ -176,7 +182,11 @@ async function statusLineCheck(path: string): Promise<RouterCheck> {
   }
 }
 
-async function hooksCheck(path: string, dataDir: string): Promise<RouterCheck> {
+async function hooksCheck(
+  path: string,
+  dataDir: string,
+  router: RouterSettings | Error,
+): Promise<RouterCheck> {
   const found = await inspectHooksFile(path);
   if ('refusal' in found) {
     return {
@@ -198,6 +208,30 @@ async function hooksCheck(path: string, dataDir: string): Promise<RouterCheck> {
       required: true,
       detail: `no Tenjin hook entries in ${path}`,
       fix: 'Run `tenjin install`, then restart Claude Code.',
+    };
+  }
+  // WIRED BUT SWITCHED OFF is a choice, not a fault, so it warns and names the
+  // file that made it: the entries are there and every one of them is silent.
+  if (router instanceof Error) {
+    return {
+      name: 'hooks',
+      status: 'warn',
+      required: false,
+      detail: `${events.join(' and ')} registered, but the router is off here: ${router.message}`,
+      fix: 'Fix or delete that file.',
+    };
+  }
+  if (!router.enabled.value) {
+    const file = router.enabled.path ?? 'the config';
+    return {
+      name: 'hooks',
+      status: 'warn',
+      required: false,
+      detail: `${events.join(' and ')} registered, but router.enabled is false in ${file}, so nothing is routed from this directory`,
+      fix:
+        router.enabled.source === 'file'
+          ? 'Run `tenjin config set router.enabled true` to route again.'
+          : `Remove router.enabled from ${file} to route here again.`,
     };
   }
   if (!allow.includes(ALLOW_RULE)) {

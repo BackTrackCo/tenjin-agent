@@ -395,3 +395,34 @@ describe('what the tool leaves for the status line', () => {
     expect(await renderProgress(dir, 'sess-2')).toBe('x402 · ready');
   });
 });
+
+/**
+ * THE TOOL OBEYS THE SAME SWITCH AS THE HOOKS. It is pre-allowed, so without
+ * this a repository marked private would still have a path off the machine.
+ */
+describe('the request tool in a directory where the router is off', () => {
+  it('refuses with needs_input naming the key, and sends and pays nothing', async () => {
+    const { mkdir } = await import('node:fs/promises');
+    const repo = join(dir, 'repo');
+    await mkdir(join(repo, '.git'), { recursive: true });
+    await mkdir(join(repo, '.tenjin'), { recursive: true });
+    const file = join(repo, '.tenjin', 'config.json');
+    await writeFile(file, JSON.stringify({ router: { enabled: false } }));
+    const { fetchImpl, calls } = net([
+      { url: ROUTER, status: 200, body: decision() },
+      ...providerLegs(),
+    ]);
+    const auth = authorizer();
+    const result = await runRequestTool(
+      { query: 'BTC and ETH price', id: 'k3f9-abcd' },
+      { ...deps(fetchImpl, auth), cwd: repo },
+    );
+    expect(result.isError).toBe(false);
+    expect(result.envelope.status).toBe('needs_input');
+    expect(result.envelope.reason).toContain('router.enabled');
+    expect(result.envelope.reason).toContain(file);
+    expect(result.envelope.nextStep).toContain('Nothing was sent');
+    expect(calls).toHaveLength(0);
+    expect(auth.authorize).not.toHaveBeenCalled();
+  });
+});

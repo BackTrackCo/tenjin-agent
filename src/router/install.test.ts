@@ -452,6 +452,43 @@ describe('the doctor this release registers', () => {
   });
 });
 
+describe('doctor and the router switch', () => {
+  async function hooksCheck(cwd?: string): Promise<{ status: string; detail: string }> {
+    const { runRouterDoctor } = await import('./doctor');
+    await writeFile(join(data, 'wallet.json'), '{"not":"a wallet"}');
+    const result = await runRouterDoctor(ctx(), {
+      homeDir: home,
+      ...(cwd !== undefined ? { cwd } : {}),
+      env: {},
+      which: () => true,
+      readMcp: async () => true,
+      fetchImpl: probe400,
+    }).catch((e: unknown) => e);
+    const checks =
+      result instanceof CliError
+        ? (result.details as { checks: { name: string; status: string; detail: string }[] })
+        : (result as { data: { checks: { name: string; status: string; detail: string }[] } }).data;
+    return checks.checks.find((c) => c.name === 'hooks')!;
+  }
+
+  it('warns, naming the file, when the hooks are wired and the router is off here', async () => {
+    await runRouterInstall({}, ctx(), deps());
+    const repo = join(home, 'repo');
+    await mkdir(join(repo, '.git'), { recursive: true });
+    await mkdir(join(repo, '.tenjin'), { recursive: true });
+    const file = join(repo, '.tenjin', 'config.json');
+    await writeFile(file, JSON.stringify({ router: { enabled: false } }));
+
+    const off = await hooksCheck(repo);
+    expect(off.status).toBe('warn');
+    expect(off.detail).toContain(`router.enabled is false in ${file}`);
+
+    const elsewhere = join(home, 'other');
+    await mkdir(join(elsewhere, '.git'), { recursive: true });
+    expect((await hooksCheck(elsewhere)).status).toBe('ok');
+  });
+});
+
 describe('the permission rule goes through the shared writer', () => {
   it('leaves a settings file it cannot parse exactly as it is', async () => {
     await writeFile(settingsPath(), '{ not json');

@@ -1,13 +1,15 @@
 import { renderProgress } from './progress';
+import { routerSettings } from './settings';
 import type { Io } from '../lib/output';
 
 /**
  * `tenjin status-line`: the live footer Claude Code runs on its own refresh.
  *
- * CHEAP AND READ-ONLY. One JSON event on stdin for the session identity, one
- * read of that session's progress directory, one line out. No network call, no
- * wallet, no config read, no write: it runs once a second for as long as a
- * session is open, so anything it touched would be touched 3,600 times an hour.
+ * CHEAP AND READ-ONLY. One JSON event on stdin for the session identity, the
+ * router's own switch for its directory, one read of that session's progress
+ * directory, one line out. No network call, no wallet, no schema library, no
+ * write: it runs once a second for as long as a session is open, so anything it
+ * touched would be touched 3,600 times an hour.
  *
  * IT CANNOT FAIL LOUDLY either. Every error path writes nothing and returns, so
  * the command exits 0 with empty output and the harness shows no footer.
@@ -46,6 +48,12 @@ export async function runStatusLine(io: Io, deps: StatusLineDeps): Promise<void>
     const event: unknown = JSON.parse(raw);
     const sessionId = sessionIdOf(event);
     if (sessionId === null) return;
+    // Off here means no footer: the router is not running in this directory.
+    const router = await routerSettings(
+      { cwd: cwdOf(event) ?? process.cwd(), dataDir: deps.dataDir },
+      { warn: () => undefined },
+    );
+    if (!router.enabled.value) return;
     const columns = Number((deps.env ?? process.env).COLUMNS);
     rendered = await renderProgress(deps.dataDir, sessionId, {
       ...(Number.isFinite(columns) && columns > 0 ? { columns } : {}),
@@ -67,6 +75,12 @@ function sessionIdOf(event: unknown): string | null {
   const value = (event as { session_id?: unknown }).session_id;
   if (typeof value !== 'string' || value.length === 0 || value.length > 200) return null;
   return value;
+}
+
+/** The session's working directory, which `router.*` resolves from. */
+function cwdOf(event: unknown): string | null {
+  const value = (event as { cwd?: unknown }).cwd;
+  return typeof value === 'string' && value.length > 0 ? value : null;
 }
 
 async function readStdin(): Promise<string> {

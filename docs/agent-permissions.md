@@ -82,6 +82,8 @@ Prefer the narrow rules on this page to a broad `Bash(tenjin:*)`, `Bash(tenjin w
 
 Every other key in the settings file is preserved byte for byte, a second run writes the same bytes, and `tenjin uninstall` removes exactly those five things and keeps your wallet, your ledger and your config.
 
+To stop the router without removing anything, `tenjin config set router.enabled false` stops it on this machine, and `tenjin config set --project router.enabled false` stops it in this repository. Off means both hooks send nothing and the `request` tool refuses without paying. The project value lives in `<project>/.tenjin/config.json`, which you commit; `--project --local` writes `.tenjin/config.local.json` beside it instead, which is yours alone and belongs in `.gitignore`. The nearest project directory wins, walking up from where the session runs to the git root, and a project file can only turn the router off or narrow what it sends, never undo what your own config turned off.
+
 ## How one lookup runs
 
 1. You type a turn. The hook sends the bounded packet to Tenjin, which answers whether a paid capability fits and, if it does, keeps that packet under a short-lived id.
@@ -94,6 +96,7 @@ Every other key in the settings file is preserved byte for byte, a second run wr
 
 - On every prompt, and on every native `WebSearch` or `WebFetch`: the bounded text of the current turn, at most six prior messages and 16 KiB, redacted for obvious secrets. Tool results never travel: a tool result is other people's content, and a packet carrying it would be a channel from a fetched page into a routing decision.
 - A native call sends that same bounded turn WITH the call it is about attached, read from this session's own transcript. That is how a restriction you stated in your own words, such as asking for native tools only, reaches the decision about a bare URL your assistant is fetching.
+- With `router.context turn`, no prior messages are sent: the prompt on a prompt, and your latest message on a native call. `tenjin config set router.context turn` sets it for this machine, and `--project` for this repository.
 - Slash commands and one-word acknowledgements are never sent at all.
 - The packet is stored on the backend against the decision id, so the lookup your assistant sends next is decided with the context you gave. Expired packets are unreadable after 15 minutes (the route refuses an expired id) and are deleted by the next router request or the daily cleanup, whichever comes first.
 - On a paid lookup: the capability chosen, a hash of the contract, a hash of the arguments, your wallet address, the amount and the transaction hash are kept.

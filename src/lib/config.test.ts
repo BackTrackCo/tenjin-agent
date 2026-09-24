@@ -13,6 +13,7 @@ import {
   HOOK_ARMS,
   LOOP_CONFIG_KEYS,
   TEAM_CONFIG_KEYS,
+  ROUTER_CONFIG_KEYS,
   parseLoopValue,
   parsePublicFallbackFlag,
   resolveLoopConfig,
@@ -466,4 +467,27 @@ describe('loop and team blocks (loop-redesign/07-pr-b-daemon-kernel.md)', () => 
       expect((caught as CliError).fix).toBe('Use "on" or "off".');
     });
   });
+});
+
+describe('router block: the switch and the context', () => {
+  it('registers two dotted keys and no scalar', () => {
+    expect(ROUTER_CONFIG_KEYS).toEqual(['router.enabled', 'router.context']);
+    expect(CONFIG_KEYS as string[]).not.toContain('router');
+    expect(CONFIG_DEFAULTS.router).toEqual({ enabled: true, context: 'session' });
+  });
+
+  it('loads a partial block over the defaults and keeps an unknown subkey', async () => {
+    await writeFile(configFile(), JSON.stringify({ router: { context: 'turn', later: 1 } }));
+    expect((await loadConfig(dir)).router).toEqual({ enabled: true, context: 'turn' });
+    expect((await loadRawConfig(dir)).router).toEqual({ context: 'turn', later: 1 });
+  });
+
+  it.each([[{ router: { enabled: 'no' } }], [{ router: { context: 'all' } }]])(
+    'rejects %j as CONFIG_INVALID',
+    async (body) => {
+      await writeFile(configFile(), JSON.stringify(body));
+      const err = await loadRawConfig(dir).catch((e: unknown) => e);
+      expect((err as CliError).code).toBe('CONFIG_INVALID');
+    },
+  );
 });

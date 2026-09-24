@@ -13,6 +13,7 @@ import {
   sessionDir,
   writeProgress,
 } from './progress';
+import { routerSettings, type RouterSettings } from './settings';
 
 /**
  * The two hook handlers. Between them they do exactly three things: build the
@@ -31,12 +32,15 @@ import {
 
 const PromptEventSchema = z.object({
   session_id: z.string().min(1).max(200),
+  /** The directory the session works in; `router.*` resolves from it. */
+  cwd: z.string().optional(),
   transcript_path: z.string().optional(),
   prompt: z.string(),
 });
 
 const NativeEventSchema = z.object({
   session_id: z.string().min(1).max(200),
+  cwd: z.string().optional(),
   /** The harness's own path for THIS session: the native decision reads the
    *  same bounded history the prompt one does, so a restriction the user gave
    *  reaches both gates. */
@@ -116,8 +120,13 @@ export async function runPromptHook(raw: unknown, deps: HookDeps): Promise<Promp
   const event = parsed.data;
   const skipped = promptSkipReason(event.prompt);
   if (skipped !== null) return { response: null, skipped };
+  const router = await routerFor(event.cwd, deps);
+  if (router === null) return { response: null };
 
-  const packet = await buildPromptPacket(event.transcript_path, event.session_id, event.prompt);
+  const packet = scoped(
+    await buildPromptPacket(event.transcript_path, event.session_id, event.prompt),
+    router,
+  );
   const footer = await openFooter(deps, event.session_id, 'prompt');
   const outcome = await decide(packet, deps);
   await footer.close(outcome);
@@ -154,10 +163,15 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
   const event = parsed.data;
   const pending = pendingCallOf(event.tool_name, event.tool_input);
   if (pending === null) return { response: null, decision: 'allow' };
+  const router = await routerFor(event.cwd, deps);
+  if (router === null) return { response: null, decision: 'allow' };
   // THE USER'S WORDS COME WITH IT. Building this from the tool argument alone
   // made the search string the whole conversation, so "native tools only, no
   // paid services" never reached this gate.
-  const packet = await buildNativePacket(event.transcript_path, event.session_id, pending);
+  const packet = scoped(
+    await buildNativePacket(event.transcript_path, event.session_id, pending),
+    router,
+  );
   // AND WHEN THEY CANNOT BE READ, THE CALL RUNS. Routing a redirect on the tool
   // argument alone is how an instruction the user gave this turn gets
   // overruled by a decision that never saw it. A native call the user's own
@@ -289,4 +303,34 @@ function pendingCallOf(
   const bounded = value.trim().slice(0, 4_000);
   if (bounded.length === 0) return null;
   return tool === 'WebSearch' ? { tool, query: bounded } : { tool, url: bounded };
+}
+
+/**
+ * `router.*` for the event's directory, or null when the router is off there.
+ * FIRST, before any packet is built: `router.enabled false` means nothing about
+ * this turn is read for the router or leaves the machine. A layer that cannot
+ * be read is off too, since a switch the user set must not fail open.
+ */
+async function routerFor(cwd: string | undefined, deps: HookDeps): Promise<RouterSettings | null> {
+  const warn = deps.warn ?? ((line: string) => process.stderr.write(`${line}\n`));
+  try {
+    const settings = await routerSettings(
+      { cwd: cwd ?? process.cwd(), dataDir: deps.dataDir },
+      { warn: (line) => warn(`tenjin hook: ${line}`) },
+    );
+    return settings.enabled.value ? settings : null;
+  } catch (err) {
+    warn(`tenjin hook: ${err instanceof Error ? err.message : String(err)}, so the router is off`);
+    return null;
+  }
+}
+
+/**
+ * `router.context turn`: the current turn and nothing before it. `current` is
+ * kept, the prompt here or the latest user message on a native call, so an
+ * instruction given this turn still reaches the gate; `historyStatus` is left
+ * as read, so a native call whose turn could not be found still runs unrouted.
+ */
+function scoped(packet: Packet, router: RouterSettings): Packet {
+  return router.context.value === 'turn' ? { ...packet, history: [] } : packet;
 }

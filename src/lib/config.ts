@@ -6,6 +6,7 @@ import { configPath } from './paths';
 import { HARNESSES } from '../adapters/types';
 import type { Harness } from '../adapters/types';
 import { writeFileAtomic } from './atomic-json';
+import { ROUTER_CONTEXTS, ROUTER_SETTING_DEFAULTS } from '../router/settings';
 
 /** A non-negative integer string in USDC atomic units (6-decimal base). */
 const atomicString = z.string().regex(/^\d+$/, 'expected an atomic USDC integer string');
@@ -103,6 +104,19 @@ const HooksConfigSchema = z.object({
   failure: z.boolean(),
   publish: z.boolean(),
   primer: z.boolean(),
+});
+
+/**
+ * The router's own block, separate from the shelf's `hooks.*`: `enabled` is the
+ * off switch both hooks and the `request` tool honour, and `context` is how
+ * much conversation a hook packet carries (`session`, up to six prior messages,
+ * or `turn`, none). The same two keys may sit in a project's
+ * `.tenjin/config.json` and `config.local.json`; `routerSettings` in
+ * router/settings.ts is their one reader.
+ */
+const RouterConfigSchema = z.object({
+  enabled: z.boolean(),
+  context: z.enum(ROUTER_CONTEXTS),
 });
 
 /**
@@ -320,6 +334,7 @@ export const ConfigSchema = z.object({
   update: UpdateConfigSchema,
   loop: LoopConfigSchema,
   team: TeamConfigSchema,
+  router: RouterConfigSchema,
 });
 export type Config = z.infer<typeof ConfigSchema>;
 
@@ -354,6 +369,7 @@ export const RawConfigSchema = ConfigSchema.partial()
     update: UpdateConfigSchema.partial().passthrough().optional(),
     loop: LoopConfigSchema.partial().passthrough().optional(),
     team: TeamConfigSchema.partial().passthrough().optional(),
+    router: RouterConfigSchema.partial().passthrough().optional(),
   })
   .passthrough();
 export type PartialConfig = z.infer<typeof RawConfigSchema>;
@@ -433,6 +449,7 @@ export const CONFIG_DEFAULTS: Config = {
     port: null,
   },
   team: { publicFallback: 'on' },
+  router: { ...ROUTER_SETTING_DEFAULTS },
 };
 
 /**
@@ -444,7 +461,7 @@ export const CONFIG_DEFAULTS: Config = {
  */
 export type ScalarConfigKey = Exclude<
   keyof Config,
-  'publish' | 'install' | 'hooks' | 'update' | 'loop' | 'team'
+  'publish' | 'install' | 'hooks' | 'update' | 'loop' | 'team' | 'router'
 >;
 const NESTED_CONFIG_KEYS: ReadonlySet<string> = new Set([
   'publish',
@@ -453,6 +470,7 @@ const NESTED_CONFIG_KEYS: ReadonlySet<string> = new Set([
   'update',
   'loop',
   'team',
+  'router',
 ]);
 export const CONFIG_KEYS = (Object.keys(CONFIG_DEFAULTS) as Array<keyof Config>).filter(
   (key): key is ScalarConfigKey => !NESTED_CONFIG_KEYS.has(key),
@@ -488,6 +506,10 @@ export type LoopConfigKey = (typeof LOOP_CONFIG_KEYS)[number];
 /** The dotted key `config get/set` accepts for the team block. */
 export const TEAM_CONFIG_KEYS = ['team.publicFallback'] as const;
 export type TeamConfigKey = (typeof TEAM_CONFIG_KEYS)[number];
+
+/** The dotted keys `config get/set` accept for the router block. */
+export const ROUTER_CONFIG_KEYS = ['router.enabled', 'router.context'] as const;
+export type RouterConfigKey = (typeof ROUTER_CONFIG_KEYS)[number];
 
 /**
  * Read and validate config.json WITHOUT applying defaults, so provenance can
@@ -550,6 +572,10 @@ export async function loadConfig(dir: string): Promise<Config> {
     update: { mode: raw.update?.mode ?? CONFIG_DEFAULTS.update.mode },
     loop: resolveLoopConfig(raw),
     team: { publicFallback: raw.team?.publicFallback ?? CONFIG_DEFAULTS.team.publicFallback },
+    router: {
+      enabled: raw.router?.enabled ?? CONFIG_DEFAULTS.router.enabled,
+      context: raw.router?.context ?? CONFIG_DEFAULTS.router.context,
+    },
   };
 }
 
@@ -565,7 +591,8 @@ export function resolveLoopConfig(raw: PartialConfig): LoopConfig {
   };
 }
 
-export type Provenance = 'default' | 'file' | 'project' | 'env' | 'flag';
+/** `local` is a project's personal `.tenjin/config.local.json` (router keys only). */
+export type Provenance = 'default' | 'file' | 'project' | 'local' | 'env' | 'flag';
 
 export interface ResolvedSetting<T> {
   value: T;

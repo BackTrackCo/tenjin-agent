@@ -71,6 +71,8 @@ tenjin uninstall   # removes the Claude Code setup; your wallet stays
 
 Use `tenjin install --project` to set it up for one project instead of your whole machine.
 
+To keep it installed and stop it, `tenjin config set router.enabled false` stops the router on this machine, and `tenjin config set --project router.enabled false` stops it in this repository.
+
 ## More
 
 - [How a lookup runs, what it sends, and what install writes](./docs/agent-permissions.md)
