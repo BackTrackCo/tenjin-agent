@@ -883,12 +883,16 @@ describe('a subagent', () => {
     );
   }
 
-  function subagentFetch(transcriptPath: string, agentId: string): unknown {
+  function subagentFetch(
+    transcriptPath: string,
+    agentId: string,
+    agentType = 'general-purpose',
+  ): unknown {
     return {
       ...(nativeEvent('https://docs.cdp.coinbase.com/x402/welcome', 'WebFetch') as object),
       transcript_path: transcriptPath,
       agent_id: agentId,
-      agent_type: 'restricted-reader',
+      agent_type: agentType,
     };
   }
 
@@ -1044,7 +1048,7 @@ describe('a subagent', () => {
     await subagentTranscript('a1', 'Read this page for me.');
     const { fetchImpl, calls } = router(EXECUTE);
     const event = {
-      ...(subagentFetch(path, 'a1') as object),
+      ...(subagentFetch(path, 'a1', 'restricted-reader') as object),
       hook_event_name: 'PreToolUse',
       tool_response: undefined,
     };
@@ -1072,6 +1076,38 @@ describe('a subagent', () => {
     expect(out).toMatchObject({ response: null, action: 'execute', withheld: true });
   });
 
+  /**
+   * WE ONLY BLOCK A SUBAGENT WE KNOW CAN USE THE PAID TOOL. A built-in with no
+   * definition file is known only through `MCP_INHERITING_BUILTINS`; any other
+   * type without a file is left alone, with no router call at all.
+   */
+  it.each([
+    ['general-purpose', true],
+    ['Explore', true],
+    ['claude-code-guide', false],
+    ['statusline-setup', false],
+    ['some-unknown-type', false],
+  ])('is %s denied on execute: %s', async (type, denied) => {
+    await setConfig(ROUTER_POLICY);
+    const path = await parentTranscript();
+    await subagentTranscript('a1', 'Read this page for me.');
+    const { fetchImpl, calls } = router(EXECUTE);
+    const out = await runNativeHook(
+      {
+        ...(subagentFetch(path, 'a1', type) as object),
+        hook_event_name: 'PreToolUse',
+        tool_response: undefined,
+      },
+      { dataDir: dir, baseUrl: BASE, fetchImpl, homeDir: dir },
+    );
+    if (denied) {
+      expect(out.response).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } });
+    } else {
+      expect(out).toMatchObject({ response: null, noRequestTool: true });
+      expect(calls).toHaveLength(0);
+    }
+  });
+
   it('is denied, as the main agent is, when it can use and pay for the lookup', async () => {
     await setConfig(ROUTER_POLICY);
     await defineReader('WebFetch, mcp__x402__request');
@@ -1091,7 +1127,7 @@ describe('a subagent', () => {
     const path = await parentTranscript();
     await subagentTranscript('a1', 'Read this page for me.');
     const { fetchImpl, calls } = router(EXECUTE);
-    const out = await runShortfallHook(subagentFetch(path, 'a1'), {
+    const out = await runShortfallHook(subagentFetch(path, 'a1', 'restricted-reader'), {
       dataDir: dir,
       baseUrl: BASE,
       fetchImpl,
@@ -1107,7 +1143,7 @@ describe('a subagent', () => {
     const path = await parentTranscript();
     await subagentTranscript('a1', 'Read this page for me.');
     const { fetchImpl } = router(EXECUTE);
-    const out = await runShortfallHook(subagentFetch(path, 'a1'), {
+    const out = await runShortfallHook(subagentFetch(path, 'a1', 'restricted-reader'), {
       dataDir: dir,
       baseUrl: BASE,
       fetchImpl,
@@ -1229,7 +1265,9 @@ describe('the delegation hook', () => {
   it.each([
     ['a custom type whose tools exclude request', 'restricted-reader', 0],
     ['a built-in type', 'general-purpose', 1],
-    ['a type with no definition', 'nowhere-defined', 1],
+    ['a built-in without MCP tools', 'claude-code-guide', 0],
+    ['a type with no definition', 'nowhere-defined', 0],
+    ['Explore, a built-in that inherits MCP tools', 'Explore', 1],
   ])('asks about a task for %s only when it can act', async (_label, type, asked) => {
     const fs = await import('node:fs/promises');
     const folder = join(dir, '.claude', 'agents');

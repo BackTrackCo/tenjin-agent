@@ -91,13 +91,25 @@ describe('finding the definition an agent type names', () => {
     expect(await requestToolAccess('toolkit:fetcher', { homeDir: home })).toBe('excluded');
   });
 
-  /** Built-ins, missing files and odd types all offer as before. */
-  it.each([['general-purpose'], ['Explore'], ['../../etc/passwd'], [undefined]])(
-    'knows nothing about %s',
-    async (type) => {
-      expect(await requestToolAccess(type, { cwd: project, homeDir: home })).toBe('unknown');
-    },
-  );
+  /** Only the built-ins known to inherit MCP tools are known to have it. */
+  it.each([['general-purpose'], ['Explore'], ['Plan']])('knows %s has it', async (type) => {
+    expect(await requestToolAccess(type, { cwd: project, homeDir: home })).toBe('allowed');
+  });
+
+  it.each([
+    ['claude-code-guide'],
+    ['statusline-setup'],
+    ['nowhere-defined'],
+    ['../../etc/passwd'],
+    [undefined],
+  ])('knows nothing about %s', async (type) => {
+    expect(await requestToolAccess(type, { cwd: project, homeDir: home })).toBe('unknown');
+  });
+
+  it('lets a definition file override a built-in of the same name', async () => {
+    await define(join(home, '.claude', 'agents'), 'Explore.md', agent('Explore', 'tools: Read\n'));
+    expect(await requestToolAccess('Explore', { homeDir: home })).toBe('excluded');
+  });
 });
 
 describe('the agents doctor names', () => {

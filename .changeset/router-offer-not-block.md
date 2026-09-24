@@ -4,8 +4,9 @@
 
 Router hooks are now safe inside subagents. WebSearch and WebFetch are routed
 before each call as before, and a fitting paid lookup still redirects the call
-to `mcp__x402__request`; but a subagent is redirected only when its own tools
-include `mcp__x402__request` and your spend policy would pay without asking, and
+to `mcp__x402__request`; but a subagent is redirected only when it is known to
+have `mcp__x402__request` (its own `tools:`, or the built-in `general-purpose`,
+`Explore` and `Plan` agents) and your spend policy would pay without asking, and
 it is routed on its own task rather than the parent's last message. When a free
 call clearly fails (blocked, a server error, an empty page, a search with no
 links, a network error; never a 404 or 410), the router is asked once and may

@@ -9,10 +9,14 @@ import { MCP_SERVER_NAME, REQUEST_TOOL } from './names';
  * frontmatter may carry `tools:` (an allowlist) and `disallowedTools:`; this
  * reads that, and nothing else, and never writes to it.
  *
- * `excluded` is the ONLY answer that withholds anything. A built-in type, a
- * definition with no `tools:`, and a definition this cannot find or read all
- * inherit every tool as far as anyone here can tell, so they are `allowed` or
- * `unknown`, and both offer as before.
+ * ONLY `allowed` IS ACTED ON. A subagent is redirected or offered a lookup
+ * only when this KNOWS it can make the call: a definition whose tools cover
+ * the request tool (or that has no `tools:` and so inherits everything), or a
+ * built-in in {@link MCP_INHERITING_BUILTINS}. Every other built-in, and any
+ * type with no definition this can find or read, is `unknown`, and `unknown`
+ * gets no router call: `claude-code-guide` ships with Bash, Read, WebFetch and
+ * WebSearch and no MCP tools, and denying its WebFetch would strand it exactly
+ * as #377 reported.
  *
  * WHERE A DEFINITION LIVES, in the harness's own precedence: the project's
  * `.claude/agents` (from `cwd` up to the filesystem root, nearest first), then
@@ -23,6 +27,20 @@ import { MCP_SERVER_NAME, REQUEST_TOOL } from './names';
  */
 
 export type RequestToolAccess = 'allowed' | 'excluded' | 'unknown';
+
+/**
+ * The built-in agent types that have no definition file and still inherit MCP
+ * tools, so can call `mcp__x402__request`. From Claude Code's own Agent tool
+ * listing (2.1.28x): `general-purpose` has every tool, and `Explore` and `Plan`
+ * exclude only editing and agent tools, never MCP. Built-ins with a fixed tool
+ * list, such as `claude-code-guide` (Bash, Read, WebFetch, WebSearch) and
+ * `statusline-setup` (Read, Edit), are deliberately absent.
+ */
+export const MCP_INHERITING_BUILTINS: ReadonlySet<string> = new Set([
+  'general-purpose',
+  'Explore',
+  'Plan',
+]);
 
 export interface AgentLookup {
   cwd?: string;
@@ -39,7 +57,8 @@ export async function requestToolAccess(
   if (agentType === undefined || !TYPE_RE.test(agentType)) return 'unknown';
   try {
     const text = await findDefinition(agentType, lookup);
-    return text === null ? 'unknown' : accessOf(text);
+    if (text !== null) return accessOf(text);
+    return MCP_INHERITING_BUILTINS.has(agentType) ? 'allowed' : 'unknown';
   } catch {
     return 'unknown';
   }

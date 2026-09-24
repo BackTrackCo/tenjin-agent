@@ -49,9 +49,9 @@ import {
  * call the router routes, as every release has, because a note beside the call
  * was followed 0 times in 11 where the redirect is followed. But a denied
  * WebFetch stranded every subagent that could not reach `request`
- * (tenjin-agent#377), so a subagent is denied only when its own definition
- * grants the tool and the spend would auto-execute; anyone else's call runs
- * free. No arm ever returns `allow`: that would skip the user's own permission
+ * (tenjin-agent#377), so a subagent is denied only when it is known to have
+ * the tool (`requestToolAccess`) and the spend would auto-execute; anyone
+ * else's call runs free. No arm ever returns `allow`: that would skip the user's own permission
  * rules for the call.
  */
 
@@ -355,7 +355,7 @@ export interface NativeHookOutcome {
   id?: string;
   /** An `execute` whose offer was not shown: a subagent spend that would need approval. */
   withheld?: true;
-  /** No router call at all: the subagent's definition leaves the request tool out. */
+  /** No router call at all: the subagent is not known to have the request tool. */
   noRequestTool?: true;
 }
 
@@ -381,11 +381,12 @@ async function routeNativeCall(
   deps: HookDeps,
   nativeOutcome?: NativeOutcome,
 ): Promise<{ offer: ExecuteDecision } | { offer: null; outcome: NativeHookOutcome }> {
-  // A SUBAGENT THAT CANNOT CALL THE TOOL IS OFFERED NOTHING, and costs nothing:
-  // this is decided before the router is asked.
+  // A SUBAGENT IS ROUTED ONLY WHEN IT IS KNOWN TO HAVE THE TOOL: redirecting
+  // or offering to one that cannot make the call strands it (#377). Decided
+  // before the router is asked, so an unknown one costs nothing.
   if (
     event.agent_id !== undefined &&
-    (await requestToolAccess(event.agent_type, agentLookup(event.cwd, deps))) === 'excluded'
+    (await requestToolAccess(event.agent_type, agentLookup(event.cwd, deps))) !== 'allowed'
   ) {
     return { offer: null, outcome: { response: null, noRequestTool: true } };
   }
@@ -430,9 +431,9 @@ async function routeNativeCall(
  * call runs the decision just made. Anything else, including silence, a slow
  * backend and a `needs_input`, lets the call run with no output at all.
  *
- * WHAT IS NEW is who can be denied. A subagent whose definition leaves the
- * request tool out, or whose spend would need an approval it cannot ask for,
- * is never redirected: `routeNativeCall` answers without an offer, and its
+ * WHAT IS NEW is who can be denied. A subagent not known to have the request
+ * tool, or whose spend would need an approval it cannot ask for, is never
+ * redirected: `routeNativeCall` answers without an offer, and its
  * call runs free.
  *
  * A redirect leaves a mark under the call's `tool_use_id`, so the after-call
@@ -539,13 +540,13 @@ export async function runDelegationHook(
   const task = event.tool_input.prompt;
   if (typeof task !== 'string' || task.trim().length === 0) return { response: null };
   // The subagent this task goes to is the one that would have to make the
-  // call. With no type the harness runs its general-purpose agent, which
-  // inherits every tool.
-  const subagentType = event.tool_input.subagent_type;
-  if (
-    typeof subagentType === 'string' &&
-    (await requestToolAccess(subagentType, agentLookup(event.cwd, deps))) === 'excluded'
-  ) {
+  // call, so the same rule: only a type known to have the tool is offered. With
+  // no type the harness runs its general-purpose agent, which inherits it.
+  const subagentType =
+    typeof event.tool_input.subagent_type === 'string'
+      ? event.tool_input.subagent_type
+      : 'general-purpose';
+  if ((await requestToolAccess(subagentType, agentLookup(event.cwd, deps))) !== 'allowed') {
     return { response: null, noRequestTool: true };
   }
   const packet = await buildPromptPacket(event.transcript_path, event.session_id, task);
