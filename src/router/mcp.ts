@@ -53,8 +53,8 @@ export const SCOPE_RULE =
 const INSTRUCTIONS =
   "Paid lookups through Tenjin's router (math, live prices, research, page reads, " +
   'company/person/email lookups). When one fits, a hook line names the service and how ' +
-  'to call it: at the start of a turn, in a delegated task, or after WebSearch or ' +
-  'WebFetch comes back short. It is an option beside your own tools, which keep working. ' +
+  'to call it: at the start of a turn, beside a WebSearch or WebFetch call, after one ' +
+  'comes back short, or in a delegated task. Your own tools keep working beside it. ' +
   `${SCOPE_RULE} Call it alone and wait for its result. Deciding what to ` +
   'route is free; a wallet on THIS machine pays the provider under the local spend ' +
   'policy, and an amount over the cap or an exhausted budget returns `needs_approval` ' +

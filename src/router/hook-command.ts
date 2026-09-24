@@ -1,10 +1,16 @@
-import { runDelegationHook, runPromptHook, runShortfallHook, type HookDeps } from './hooks';
+import {
+  runDelegationHook,
+  runNativeHook,
+  runPromptHook,
+  runShortfallHook,
+  type HookDeps,
+} from './hooks';
 import type { Io } from '../lib/output';
 
 /**
- * `tenjin hook prompt`, `tenjin hook shortfall` and `tenjin hook agent`. The
- * harness writes its event on stdin and reads a JSON object (or nothing) from
- * stdout, so these commands
+ * `tenjin hook prompt`, `native`, `shortfall` and `agent`. The harness writes
+ * its event on stdin and reads a JSON object (or nothing) from stdout, so these
+ * commands
  * bypass the CLI's envelope entirely. They never fail the turn: a stdin that
  * never arrives, an unreadable event or a handler that throws all exit 0 with
  * an empty stdout, which the harness reads as "no opinion".
@@ -17,12 +23,6 @@ const MAX_EVENT_BYTES = 1_000_000;
  *  spend: every second it holds is a second the gate does not get. */
 export const STDIN_TIMEOUT_MS = 1_000;
 
-/**
- * `native` is the PreToolUse entry every install before tenjin-agent#387
- * wrote. It is kept as a no-op so those settings keep working after a CLI
- * update and before `tenjin install --refresh` replaces the entry: it reads
- * the event, says nothing and exits 0, like a hook with no opinion.
- */
 export type HookKind = 'prompt' | 'native' | 'shortfall' | 'agent';
 
 export interface HookCommandDeps extends HookDeps {
@@ -34,14 +34,15 @@ export async function runHookCommand(kind: HookKind, io: Io, deps: HookCommandDe
   let response: unknown;
   try {
     const raw = await (deps.readEvent ?? readStdin)();
-    if (kind === 'native') return;
     const event: unknown = JSON.parse(raw);
     const outcome =
       kind === 'prompt'
         ? await runPromptHook(event, deps)
-        : kind === 'shortfall'
-          ? await runShortfallHook(event, deps)
-          : await runDelegationHook(event, deps);
+        : kind === 'native'
+          ? await runNativeHook(event, deps)
+          : kind === 'shortfall'
+            ? await runShortfallHook(event, deps)
+            : await runDelegationHook(event, deps);
     response = outcome.response;
   } catch {
     response = null;

@@ -21,11 +21,14 @@ export function registerRouter(reg: Registration): void {
   for (const [name, summary] of [
     ['prompt', 'UserPromptSubmit: build the session packet and ask the free gate'],
     [
+      'native',
+      'PreToolUse on WebSearch|WebFetch: route the lookup, and point to a paid one if it fits',
+    ],
+    [
       'shortfall',
       'PostToolUse(Failure) on WebSearch|WebFetch: offer a paid lookup when the result came back short',
     ],
     ['agent', "PreToolUse on Agent|Task: append any paid offer to the subagent's task"],
-    ['native', 'no-op, kept so older installs keep working; `tenjin install --refresh` removes it'],
   ] as const) {
     addGlobalFlags(hook.command(name))
       .summary(summary)

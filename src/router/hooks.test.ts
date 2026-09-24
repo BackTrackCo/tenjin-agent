@@ -7,6 +7,7 @@ import {
   NEAR_EMPTY_BYTES,
   promptSkipReason,
   runDelegationHook,
+  runNativeHook,
   runPromptHook,
   runShortfallHook,
   shortfallOf,
@@ -487,29 +488,127 @@ describe('shortfallOf', () => {
  * `WebSearch|WebFetch` running `tenjin hook native`; after a CLI update and
  * before a refresh, that command must be a hook with no opinion.
  */
-describe('tenjin hook native', () => {
-  it('reads the event, asks nothing, and prints nothing', async () => {
+/** The same call as the harness reports it BEFORE it runs: no response yet. */
+async function preCall(
+  subject: string,
+  tool: 'WebSearch' | 'WebFetch' = 'WebFetch',
+  over: Record<string, unknown> = {},
+): Promise<Record<string, unknown>> {
+  const event = (await readableEvent(subject, tool)) as Record<string, unknown>;
+  return { ...event, hook_event_name: 'PreToolUse', tool_response: undefined, ...over };
+}
+
+/**
+ * PER-LOOKUP ROUTING BEFORE THE CALL, as main has it, with a line where main
+ * had a deny. The free call runs; the harness gets `additionalContext` and
+ * nothing else.
+ */
+describe('the pre-call hook', () => {
+  it('points to the paid lookup beside the running call, deciding nothing', async () => {
     const { fetchImpl, calls } = router(EXECUTE);
+    const out = await runNativeHook(await preCall('https://example.test/spec'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+    expect(out).toMatchObject({ action: 'execute', id: 'k3f9-abcd' });
+    expect(out.response).toEqual({
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        additionalContext:
+          `${HINT_SOURCE}: for this lookup, use mcp__x402__request; it returns what this ` +
+          `WebFetch call won't, and the WebFetch call is still running. ` +
+          SEEN.slice(HINT_SOURCE.length + 2),
+      },
+    });
+    // Main's body exactly: the pending call rides in the packet, and nothing
+    // about how it fared, because it has not run.
+    const packet = (calls[0] as { body: { packet: Record<string, unknown> } }).body.packet;
+    expect(packet.pendingCall).toEqual({ tool: 'WebFetch', url: 'https://example.test/spec' });
+    expect(packet.nativeOutcome).toBeUndefined();
+  });
+
+  it.each([
+    ['native', NATIVE, 200],
+    ['needs_input', NEEDS_INPUT, 200],
+    ['a refusal', { error: { code: 'nope', message: 'no' } }, 503],
+  ])('says nothing on %s', async (_label, body, status) => {
+    const { fetchImpl } = router(body, status);
+    const out = await runNativeHook(await preCall('btc price today', 'WebSearch'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+      warn: () => undefined,
+    });
+    expect(out.response).toBeNull();
+  });
+
+  /**
+   * ONE OFFER PER LOOKUP. A call the pre-call hook already pointed elsewhere
+   * is not offered again when it then fails; a call it said nothing about is.
+   */
+  it('does not offer again after the call it already offered on fails', async () => {
+    const { fetchImpl, calls } = router(EXECUTE);
+    const deps = { dataDir: dir, baseUrl: BASE, fetchImpl };
+    const first = await runNativeHook(
+      await preCall('https://x.com/a', 'WebFetch', { tool_use_id: 'toolu_1' }),
+      deps,
+    );
+    expect(first.response).not.toBeNull();
+    const failed = {
+      ...(await preCall('https://x.com/a', 'WebFetch', { tool_use_id: 'toolu_1' })),
+      hook_event_name: 'PostToolUseFailure',
+      error: 'getaddrinfo ENOTFOUND x.com',
+    };
+    const after = await runShortfallHook(failed, deps);
+    expect(after).toMatchObject({ response: null, alreadyOffered: true });
+    expect(calls).toHaveLength(1);
+
+    // Another call is its own lookup.
+    const other = await runShortfallHook({ ...failed, tool_use_id: 'toolu_2' }, deps);
+    expect(other.response).not.toBeNull();
+    expect(calls).toHaveLength(2);
+  });
+
+  it('offers after the call when nothing was offered before it', async () => {
+    const quiet = router(NATIVE);
+    await runNativeHook(await preCall('https://x.com/a', 'WebFetch', { tool_use_id: 'toolu_3' }), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl: quiet.fetchImpl,
+    });
+    const { fetchImpl } = router(EXECUTE);
+    const after = await runShortfallHook(
+      {
+        ...((await readableEvent('https://x.com/a', 'WebFetch')) as object),
+        tool_use_id: 'toolu_3',
+      },
+      { dataDir: dir, baseUrl: BASE, fetchImpl },
+    );
+    expect(after.response).not.toBeNull();
+  });
+
+  it('is what `tenjin hook native` prints', async () => {
+    const { fetchImpl } = router(EXECUTE);
     const written: string[] = [];
     const io = {
       stdout: { write: (chunk: string) => written.push(chunk) },
       stderr: { write: () => true },
       isTTY: false,
     } as never;
+    const event = await preCall('https://example.test/spec');
     await runHookCommand('native', io, {
       dataDir: dir,
       baseUrl: BASE,
       fetchImpl,
-      readEvent: async () =>
-        JSON.stringify({
-          hook_event_name: 'PreToolUse',
-          session_id: 'sess-1',
-          tool_name: 'WebFetch',
-          tool_input: { url: 'https://x.com/a' },
-        }),
+      readEvent: async () => JSON.stringify(event),
     });
-    expect(written).toEqual([]);
-    expect(calls).toHaveLength(0);
+    expect(written).toHaveLength(1);
+    const printed = JSON.parse(written[0]!) as { hookSpecificOutput: Record<string, unknown> };
+    expect(Object.keys(printed.hookSpecificOutput).sort()).toEqual([
+      'additionalContext',
+      'hookEventName',
+    ]);
   });
 });
 
@@ -790,6 +889,32 @@ describe('a subagent', () => {
       agent_type: 'restricted-reader',
     };
   }
+
+  it('routes its pre-call lookup on its own task too', async () => {
+    const path = await parentTranscript();
+    await subagentTranscript('a1', 'Read the page with native tools only. No paid services.');
+    await subagentTranscript('b2', 'Extract the page as clean markdown with a specialist.');
+    const { fetchImpl, calls } = router(NATIVE);
+    const deps = { dataDir: dir, baseUrl: BASE, fetchImpl };
+    for (const id of ['a1', 'b2']) {
+      await runNativeHook(
+        {
+          ...(subagentFetch(path, id) as object),
+          hook_event_name: 'PreToolUse',
+          tool_response: undefined,
+        },
+        deps,
+      );
+    }
+    const [a, b] = calls as { body: { packet: { current: { text: string }; history: unknown } } }[];
+    expect(a!.body.packet.current.text).toBe(
+      'Read the page with native tools only. No paid services.',
+    );
+    expect(b!.body.packet.current.text).toBe(
+      'Extract the page as clean markdown with a specialist.',
+    );
+    expect(JSON.stringify(a!.body.packet.history)).toContain('CDP x402 docs');
+  });
 
   /** The #377 regression: two assignments, one URL, two different packets. */
   it('routes its native call on its own task, not the parent turn', async () => {
@@ -1113,6 +1238,12 @@ describe('no hook path', () => {
     ];
     const outputs = [
       ...(await Promise.all(events.map((event) => runShortfallHook(event, deps)))),
+      await runNativeHook(await preCall('https://example.test/spec'), deps),
+      await runNativeHook(await preCall('btc price today', 'WebSearch'), deps),
+      await runNativeHook(
+        { ...(await preCall('https://example.test/spec')), agent_id: 'a1' },
+        deps,
+      ),
       await runDelegationHook(
         {
           session_id: 'sess-1',

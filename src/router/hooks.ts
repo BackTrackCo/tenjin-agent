@@ -20,16 +20,18 @@ import { REQUEST_TOOL } from './names';
 import { requestToolAccess, type AgentLookup } from './agent-tools';
 import {
   bindDecision,
+  markOffered,
   newCallId,
   noteSession,
   pruneProgress,
   pruneSessions,
   sessionDir,
+  wasOffered,
   writeProgress,
 } from './progress';
 
 /**
- * The three hook handlers. Between them they do exactly three things: build the
+ * The four hook handlers. Between them they do exactly three things: build the
  * bounded packet, ask for one free decision, and say one thing back to the
  * harness.
  *
@@ -44,7 +46,8 @@ import {
  * stderr. The user's turn is never blocked by this.
  *
  * AND NOTHING IS EVER DENIED, OR ALLOWED. A paid lookup is an OFFER, made
- * after the free tool came back short, never a replacement for it: a denied WebFetch stranded every
+ * before a native call the router routes or after one that came back short,
+ * never a replacement for it: a denied WebFetch stranded every
  * subagent that could not reach `request` (tenjin-agent#377) and painted the
  * main agent's transcript red. No arm returns a `permissionDecision` either:
  * an `allow` would skip the user's own permission rules for the call, so the
@@ -57,8 +60,8 @@ const PromptEventSchema = z.object({
   prompt: z.string(),
 });
 
-const ShortfallEventSchema = z.object({
-  hook_event_name: z.enum(['PostToolUse', 'PostToolUseFailure']),
+/** What both native arms read: the call, whose it is, and where it runs. */
+const NativeCallFields = {
   session_id: z.string().min(1).max(200),
   /** The harness's own path for THIS session: the decision reads the same
    *  bounded history the prompt one does, so a restriction the user gave
@@ -66,6 +69,24 @@ const ShortfallEventSchema = z.object({
   transcript_path: z.string().optional(),
   tool_name: z.enum(['WebSearch', 'WebFetch']),
   tool_input: z.record(z.string(), z.unknown()),
+  /** The harness's id for this one call, shared by its Pre and Post events. */
+  tool_use_id: z.string().min(1).max(200).optional(),
+  /** Present only inside a subagent, which is the one caller that cannot reach
+   *  the user to approve a spend. */
+  agent_id: z.string().min(1).max(200).optional(),
+  /** The subagent's type, which names its definition file. */
+  agent_type: z.string().min(1).max(200).optional(),
+  cwd: z.string().optional(),
+};
+
+const NativeEventSchema = z.object({
+  hook_event_name: z.literal('PreToolUse').optional(),
+  ...NativeCallFields,
+});
+
+const ShortfallEventSchema = z.object({
+  hook_event_name: z.enum(['PostToolUse', 'PostToolUseFailure']),
+  ...NativeCallFields,
   /** PostToolUse only: WebFetch's `{bytes, code, codeText, result, durationMs}`,
    *  or WebSearch's `{query, results, durationSeconds, searchCount}`. */
   tool_response: z.unknown().optional(),
@@ -73,12 +94,6 @@ const ShortfallEventSchema = z.object({
    *  `getaddrinfo ENOTFOUND x.test`. */
   error: z.unknown().optional(),
   is_interrupt: z.boolean().optional(),
-  /** Present only inside a subagent, which is the one caller that cannot reach
-   *  the user to approve a spend. */
-  agent_id: z.string().min(1).max(200).optional(),
-  /** The subagent's type, which names its definition file. */
-  agent_type: z.string().min(1).max(200).optional(),
-  cwd: z.string().optional(),
 });
 
 const DelegationEventSchema = z.object({
@@ -127,6 +142,16 @@ export function toolNamed(hint: string): string {
 
 function promptLine(hint: string): string {
   return `${HINT_SOURCE}: ${toolNamed(hint)}`;
+}
+
+/**
+ * BEFORE THE CALL, A DIRECTION, NOT A SHRUG. The router has just judged that
+ * this lookup needs what the free tool cannot return, and a soft "optional"
+ * here was taken 0 times in 2 where main's redirect was taken 2 in 2. It still
+ * denies nothing: the free call runs, and the line says so.
+ */
+function precallOffer(tool: 'WebSearch' | 'WebFetch', hint: string): string {
+  return `${HINT_SOURCE}: for this lookup, use ${REQUEST_TOOL}; it returns what this ${tool} call won't, and the ${tool} call is still running. ${toolNamed(hint)}`;
 }
 
 /** Where the offer sits after the free tool came back short. */
@@ -331,11 +356,9 @@ function injection(line: string): { response: unknown } {
   };
 }
 
-export interface ShortfallHookOutcome {
+/** What either native arm reports about itself; `response` is all the harness sees. */
+export interface NativeHookOutcome {
   response: unknown | null;
-  /** What the harness reported, when it was a shortfall; absent means the
-   *  router was never asked. */
-  nativeOutcome?: NativeOutcome;
   action?: HookDecision['action'];
   id?: string;
   /** An `execute` whose offer was not shown: a subagent spend that would need approval. */
@@ -344,14 +367,114 @@ export interface ShortfallHookOutcome {
   noRequestTool?: true;
 }
 
+export interface ShortfallHookOutcome extends NativeHookOutcome {
+  /** What the harness reported, when it was a shortfall; absent means the
+   *  router was never asked. */
+  nativeOutcome?: NativeOutcome;
+  /** The pre-call arm already offered on this very call, so nothing more is said. */
+  alreadyOffered?: true;
+}
+
+type ExecuteDecision = Extract<HookDecision, { action: 'execute' }>;
+
+/**
+ * THE ONE ROUTE BOTH NATIVE ARMS TAKE, before the call and after it: the
+ * agent's tool list, the packet from the right transcript, one free decision,
+ * and the subagent spend rule. An `execute` that survives all of it comes back
+ * as `offer`; everything else is the reason there is none.
+ */
+async function routeNativeCall(
+  event: z.infer<typeof NativeEventSchema>,
+  pending: PendingCall,
+  deps: HookDeps,
+  nativeOutcome?: NativeOutcome,
+): Promise<{ offer: ExecuteDecision } | { offer: null; outcome: NativeHookOutcome }> {
+  // A SUBAGENT THAT CANNOT CALL THE TOOL IS OFFERED NOTHING, and costs nothing:
+  // this is decided before the router is asked.
+  if (
+    event.agent_id !== undefined &&
+    (await requestToolAccess(event.agent_type, agentLookup(event.cwd, deps))) === 'excluded'
+  ) {
+    return { offer: null, outcome: { response: null, noRequestTool: true } };
+  }
+  // THE USER'S WORDS COME WITH IT. Building this from the tool argument alone
+  // made the search string the whole conversation, so "native tools only, no
+  // paid services" never reached this gate. Inside a subagent, its own task
+  // comes first: see `buildNativePacket`.
+  const packet = await buildNativePacket(event.transcript_path, event.session_id, pending, {
+    ...(event.agent_id !== undefined ? { agentId: event.agent_id } : {}),
+    ...(nativeOutcome !== undefined ? { nativeOutcome } : {}),
+  });
+  // AND WHEN THEY CANNOT BE READ, NOTHING IS OFFERED. An offer routed on the
+  // tool argument alone is how an instruction the user gave this turn gets
+  // overruled by a decision that never saw it.
+  if (packet.historyStatus !== 'ok') {
+    (deps.warn ?? ((line: string) => process.stderr.write(`${line}\n`)))(
+      "tenjin hook: this session's transcript could not be read, so no paid lookup is offered",
+    );
+    return { offer: null, outcome: { response: null } };
+  }
+  const footer = await openFooter(deps, event.session_id, 'search');
+  const outcome = await decide(packet, deps);
+  if (outcome === null || outcome.action !== 'execute') {
+    await footer.close(outcome);
+    return {
+      offer: null,
+      outcome: { response: null, ...(outcome !== null ? { action: outcome.action } : {}) },
+    };
+  }
+  if (event.agent_id !== undefined && !(await wouldAutoExecute(outcome, deps))) {
+    await footer.close(outcome, { withheld: true });
+    return { offer: null, outcome: { response: null, action: 'execute', withheld: true } };
+  }
+  await footer.close(outcome);
+  return { offer: outcome };
+}
+
+/**
+ * `tenjin hook native` (PreToolUse on `WebSearch|WebFetch`). PER-LOOKUP
+ * ROUTING BEFORE THE CALL, as it has always been, with one difference: an
+ * `execute` is a direction beside the call, never a deny. The free call runs
+ * under the user's own permission rules, and the harness is told only the
+ * line. Anything else, including silence, a slow backend and a `needs_input`,
+ * is no output at all.
+ *
+ * An offer leaves a mark under the call's `tool_use_id`, so the after-call arm
+ * does not offer the same lookup a second time.
+ */
+export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<NativeHookOutcome> {
+  const parsed = NativeEventSchema.safeParse(raw);
+  if (!parsed.success) return { response: null };
+  const event = parsed.data;
+  const pending = pendingCallOf(event.tool_name, event.tool_input);
+  if (pending === null) return { response: null };
+  const routed = await routeNativeCall(event, pending, deps);
+  if (routed.offer === null) return routed.outcome;
+  if (event.tool_use_id !== undefined) {
+    await markOffered(deps.dataDir, event.session_id, event.tool_use_id, deps.now?.());
+  }
+  return {
+    response: {
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        // THE SERVER'S LINE, attributed and made directive. It already carries
+        // the id and the exact search or URL this call is making.
+        additionalContext: precallOffer(event.tool_name, routed.offer.hint),
+      },
+    },
+    action: 'execute',
+    id: routed.offer.id,
+  };
+}
+
 /**
  * `tenjin hook shortfall` (PostToolUse and PostToolUseFailure on
  * `WebSearch|WebFetch`). THE FREE TOOL HAS ALREADY RUN, and a result that is
  * fine ends here: no router call, no footer, no added latency. Only a clear
  * shortfall ({@link shortfallOf}) asks for one free decision, with what the
  * harness reported riding in the packet as `nativeOutcome`, and only an
- * `execute` says anything: the server's offer, carrying the id so a lookup
- * the agent then chooses runs the decision just made.
+ * `execute` says anything. A call the pre-call arm already offered on is not
+ * offered again.
  *
  * A server that does not know `nativeOutcome` yet refuses the packet; that is
  * a failed decision like any other, so the hook stays silent.
@@ -367,58 +490,27 @@ export async function runShortfallHook(
   if (nativeOutcome === null) return { response: null };
   const pending = pendingCallOf(event.tool_name, event.tool_input);
   if (pending === null) return { response: null };
-  // A SUBAGENT THAT CANNOT CALL THE TOOL IS OFFERED NOTHING, and costs nothing:
-  // this is decided before the router is asked.
   if (
-    event.agent_id !== undefined &&
-    (await requestToolAccess(event.agent_type, agentLookup(event.cwd, deps))) === 'excluded'
+    event.tool_use_id !== undefined &&
+    (await wasOffered(deps.dataDir, event.session_id, event.tool_use_id, deps.now?.()))
   ) {
-    return { response: null, nativeOutcome, noRequestTool: true };
+    return { response: null, nativeOutcome, alreadyOffered: true };
   }
-  // THE USER'S WORDS COME WITH IT. Building this from the tool argument alone
-  // made the search string the whole conversation, so "native tools only, no
-  // paid services" never reached this gate. Inside a subagent, its own task
-  // comes first: see `buildNativePacket`.
-  const packet = await buildNativePacket(event.transcript_path, event.session_id, pending, {
-    ...(event.agent_id !== undefined ? { agentId: event.agent_id } : {}),
-    nativeOutcome,
-  });
-  // AND WHEN THEY CANNOT BE READ, NOTHING IS OFFERED. An offer routed on the
-  // tool argument alone is how an instruction the user gave this turn gets
-  // overruled by a decision that never saw it.
-  if (packet.historyStatus !== 'ok') {
-    (deps.warn ?? ((line: string) => process.stderr.write(`${line}\n`)))(
-      "tenjin hook: this session's transcript could not be read, so no paid lookup is offered",
-    );
-    return { response: null, nativeOutcome };
-  }
-  const footer = await openFooter(deps, event.session_id, 'search');
-  const outcome = await decide(packet, deps);
-  if (outcome === null || outcome.action !== 'execute') {
-    await footer.close(outcome);
-    return {
-      response: null,
-      nativeOutcome,
-      ...(outcome !== null ? { action: outcome.action } : {}),
-    };
-  }
-  if (event.agent_id !== undefined && !(await wouldAutoExecute(outcome, deps))) {
-    await footer.close(outcome, { withheld: true });
-    return { response: null, nativeOutcome, action: 'execute', withheld: true };
-  }
-  await footer.close(outcome);
+  const { hook_event_name: eventName, ...call } = event;
+  const routed = await routeNativeCall(call, pending, deps, nativeOutcome);
+  if (routed.offer === null) return { ...routed.outcome, nativeOutcome };
   return {
     response: {
       hookSpecificOutput: {
-        hookEventName: event.hook_event_name,
+        hookEventName: eventName,
         // THE SERVER'S LINE, attributed and framed as the option it is. It
         // already carries the id and the exact search or URL that came back short.
-        additionalContext: shortfallOffer(event.tool_name, outcome.hint),
+        additionalContext: shortfallOffer(event.tool_name, routed.offer.hint),
       },
     },
     nativeOutcome,
     action: 'execute',
-    id: outcome.id,
+    id: routed.offer.id,
   };
 }
 
