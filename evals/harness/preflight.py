@@ -7,7 +7,7 @@ copy of a skill. Three ways that happens, one check each, and every one of them
 stops the run rather than warning into a log nobody reads.
 
   1. The vendored `skills/tenjin/SKILL.md` drifts from the live
-     https://tenjin.blog/skills.md it is a copy of. `sync:skill` splices a banner
+     https://tenjin.sh/skills.md it is a copy of. `sync:skill` splices a banner
      in after the frontmatter and changes nothing else, so stripping that one
      comment makes the two byte-comparable. This is the same drift `skill-drift.yml`
      watches; the difference is that CI tells you tomorrow and this tells you
@@ -42,7 +42,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 
 VENDORED_SKILL = REPO / "skills" / "tenjin" / "SKILL.md"
-SOURCE_URL = "https://tenjin.blog/skills.md"
+SOURCE_URL = "https://tenjin.sh/skills.md"
 
 # The frontmatter, then the banner `scripts/sync-skill.mjs` splices in directly
 # after it. Matched as "any HTML comment in that position" rather than as the
