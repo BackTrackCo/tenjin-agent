@@ -4,15 +4,15 @@ import { loadRawConfig, resolveSettings } from '../lib/config';
 import type { PartialConfig } from '../lib/config';
 import { evaluateSpendPolicy } from '../lib/policy';
 import { resolveContextSettings } from '../lib/settings';
-import { mask } from '../lib/redact';
 import { readSpendSummary, spentOf } from '../lib/spend-ledger';
 import type { CommandContext } from '../context';
 import {
   buildNativePacket,
   buildPromptPacket,
+  seal,
   type NativeOutcome,
-  type Packet,
   type PendingCall,
+  type Sealed,
 } from './context';
 import { requestDecision, ROUTER_PATH, type HookDecision } from './decision';
 import { GATE_TIMEOUT_MS } from './gate';
@@ -31,8 +31,8 @@ import {
 } from './progress';
 
 /**
- * The four hook handlers. Between them they do exactly three things: build the
- * bounded packet, ask for one free decision, and say one thing back to the
+ * The four hook handlers. Between them they do exactly three things: build and
+ * seal the packet, ask for one free decision, and say one thing back to the
  * harness.
  *
  * NOTHING ELSE IS IN REACH FROM HERE. No wallet, no signer, no payment SDK, no
@@ -105,6 +105,106 @@ const DelegationEventSchema = z.object({
   tool_input: z.record(z.string(), z.unknown()),
   cwd: z.string().optional(),
 });
+
+/** A native call as every arm past {@link decodeEvent} reads it. */
+export interface NativeCall {
+  sessionId: string;
+  transcriptPath?: string;
+  tool: 'WebSearch' | 'WebFetch';
+  /** The search or URL, or null when the call carries none. */
+  pending: PendingCall | null;
+  toolUseId?: string;
+  /** Present only inside a subagent. */
+  agentId?: string;
+  agentType?: string;
+  cwd?: string;
+}
+
+/** One hook event, as this file uses it. */
+export type HookEvent =
+  | { kind: 'prompt'; sessionId: string; transcriptPath?: string; prompt: string }
+  | ({ kind: 'native' } & NativeCall)
+  | ({
+      kind: 'shortfall';
+      eventName: 'PostToolUse' | 'PostToolUseFailure';
+      /** What the harness reported, when it was a shortfall; null means none. */
+      nativeOutcome: NativeOutcome | null;
+    } & NativeCall)
+  | {
+      kind: 'delegation';
+      sessionId: string;
+      transcriptPath?: string;
+      /** `tool_input.prompt`: the subagent's whole task. */
+      task: string | null;
+      subagentType: string;
+      /** The whole tool input, echoed back with the task changed. */
+      toolInput: Record<string, unknown>;
+      cwd?: string;
+    };
+
+/**
+ * THE ONLY READER OF A HARNESS FIELD. `session_id`, `transcript_path`,
+ * `prompt`, `tool_name`, `tool_input` (its `query`, `url`, `prompt` and
+ * `subagent_type`), `tool_use_id`, `agent_id`, `agent_type`, `cwd`,
+ * `tool_response` and `error` are Claude Code's names; everything past this
+ * function reads {@link HookEvent}, so a second harness is a second decoder
+ * rather than a change to each arm. `null` is an event no arm handles.
+ */
+export function decodeEvent(raw: unknown): HookEvent | null {
+  const shortfall = ShortfallEventSchema.safeParse(raw);
+  if (shortfall.success) {
+    return {
+      kind: 'shortfall',
+      eventName: shortfall.data.hook_event_name,
+      nativeOutcome: shortfallOf(shortfall.data),
+      ...nativeCallOf(shortfall.data),
+    };
+  }
+  const native = NativeEventSchema.safeParse(raw);
+  if (native.success) return { kind: 'native', ...nativeCallOf(native.data) };
+  const delegation = DelegationEventSchema.safeParse(raw);
+  if (delegation.success) {
+    const input = delegation.data.tool_input;
+    return {
+      kind: 'delegation',
+      sessionId: delegation.data.session_id,
+      ...optional('transcriptPath', delegation.data.transcript_path),
+      task: typeof input.prompt === 'string' ? input.prompt : null,
+      // With no type the harness runs its general-purpose agent.
+      subagentType:
+        typeof input.subagent_type === 'string' ? input.subagent_type : 'general-purpose',
+      toolInput: input,
+      ...optional('cwd', delegation.data.cwd),
+    };
+  }
+  const prompt = PromptEventSchema.safeParse(raw);
+  if (!prompt.success) return null;
+  return {
+    kind: 'prompt',
+    sessionId: prompt.data.session_id,
+    ...optional('transcriptPath', prompt.data.transcript_path),
+    prompt: prompt.data.prompt,
+  };
+}
+
+function nativeCallOf(
+  event: Omit<z.infer<typeof NativeEventSchema>, 'hook_event_name'>,
+): NativeCall {
+  return {
+    sessionId: event.session_id,
+    ...optional('transcriptPath', event.transcript_path),
+    tool: event.tool_name,
+    pending: pendingCallOf(event.tool_name, event.tool_input),
+    ...optional('toolUseId', event.tool_use_id),
+    ...optional('agentId', event.agent_id),
+    ...optional('agentType', event.agent_type),
+    ...optional('cwd', event.cwd),
+  };
+}
+
+function optional<K extends string>(key: K, value: string | undefined): Partial<Record<K, string>> {
+  return value === undefined ? {} : ({ [key]: value } as Record<K, string>);
+}
 
 /** Acknowledgements that cannot be a lookup; `install` never gates them. */
 const ACKNOWLEDGEMENTS = new Set(['y', 'yes', 'ok', 'okay', 'continue', 'go', 'sure', 'thanks']);
@@ -184,7 +284,8 @@ export function shortfallOf(event: {
 }): NativeOutcome | null {
   if (event.hook_event_name === 'PostToolUseFailure') {
     if (event.is_interrupt === true) return null;
-    const error = typeof event.error === 'string' ? mask(event.error.trim()).slice(0, 1_000) : '';
+    // Neither masked nor cut here: seal() does both, in that order.
+    const error = typeof event.error === 'string' ? event.error.trim() : '';
     return error.length > 0 ? { error } : null;
   }
   const response = event.tool_response;
@@ -325,15 +426,14 @@ export interface PromptHookOutcome {
  * any failure cause to stderr.
  */
 export async function runPromptHook(raw: unknown, deps: HookDeps): Promise<PromptHookOutcome> {
-  const parsed = PromptEventSchema.safeParse(raw);
-  if (!parsed.success) return { response: null };
-  const event = parsed.data;
+  const event = decodeEvent(raw);
+  if (event?.kind !== 'prompt') return { response: null };
   const skipped = promptSkipReason(event.prompt);
   if (skipped !== null) return { response: null, skipped };
 
-  const packet = await buildPromptPacket(event.transcript_path, event.session_id, event.prompt);
-  const footer = await openFooter(deps, event.session_id, 'prompt');
-  const outcome = await decide(packet, deps);
+  const sealed = seal(await buildPromptPacket(event.transcriptPath, event.sessionId, event.prompt));
+  const footer = await openFooter(deps, event.sessionId, 'prompt');
+  const outcome = await decide(sealed, deps);
   await footer.close(outcome);
   if (outcome === null) return { response: null };
   if (outcome.action !== 'execute') return { response: null, action: outcome.action };
@@ -376,7 +476,7 @@ type ExecuteDecision = Extract<HookDecision, { action: 'execute' }>;
  * as `offer`; everything else is the reason there is none.
  */
 async function routeNativeCall(
-  event: z.infer<typeof NativeEventSchema>,
+  event: NativeCall,
   pending: PendingCall,
   deps: HookDeps,
   nativeOutcome?: NativeOutcome,
@@ -385,8 +485,8 @@ async function routeNativeCall(
   // or offering to one that cannot make the call strands it (#377). Decided
   // before the router is asked, so an unknown one costs nothing.
   if (
-    event.agent_id !== undefined &&
-    (await requestToolAccess(event.agent_type, agentLookup(event.cwd, deps))) !== 'allowed'
+    event.agentId !== undefined &&
+    (await requestToolAccess(event.agentType, agentLookup(event.cwd, deps))) !== 'allowed'
   ) {
     return { offer: null, outcome: { response: null, noRequestTool: true } };
   }
@@ -394,10 +494,25 @@ async function routeNativeCall(
   // made the search string the whole conversation, so "native tools only, no
   // paid services" never reached this gate. Inside a subagent, its own task
   // comes first: see `buildNativePacket`.
-  const packet = await buildNativePacket(event.transcript_path, event.session_id, pending, {
-    ...(event.agent_id !== undefined ? { agentId: event.agent_id } : {}),
-    ...(nativeOutcome !== undefined ? { nativeOutcome } : {}),
-  });
+  const sealed = seal(
+    await buildNativePacket(event.transcriptPath, event.sessionId, pending, {
+      ...(event.agentId !== undefined ? { agentId: event.agentId } : {}),
+      ...(nativeOutcome !== undefined ? { nativeOutcome } : {}),
+    }),
+  );
+  const { packet } = sealed;
+  // A LOCAL TARGET ONLY EVER HAS A NATIVE ANSWER, so asking costs a round trip
+  // and sends the conversation for nothing.
+  if (sealed.localTarget) return { offer: null, outcome: { response: null } };
+  // A CREDENTIAL IN THE SEARCH OR URL NEVER LEAVES. Sending it masked would put
+  // the mask into the hint the server writes from it, and the model would call
+  // the provider with the mask. The call stays native.
+  if (sealed.subjectChanged) {
+    (deps.warn ?? ((line: string) => process.stderr.write(`${line}\n`)))(
+      'tenjin hook: the native call carries a credential-shaped value, so it is not routed',
+    );
+    return { offer: null, outcome: { response: null } };
+  }
   // AND WHEN THEY CANNOT BE READ, NOTHING IS OFFERED. An offer routed on the
   // tool argument alone is how an instruction the user gave this turn gets
   // overruled by a decision that never saw it.
@@ -407,8 +522,8 @@ async function routeNativeCall(
     );
     return { offer: null, outcome: { response: null } };
   }
-  const footer = await openFooter(deps, event.session_id, 'search');
-  const outcome = await decide(packet, deps);
+  const footer = await openFooter(deps, event.sessionId, 'search');
+  const outcome = await decide(sealed, deps);
   if (outcome === null || outcome.action !== 'execute') {
     await footer.close(outcome);
     return {
@@ -416,7 +531,7 @@ async function routeNativeCall(
       outcome: { response: null, ...(outcome !== null ? { action: outcome.action } : {}) },
     };
   }
-  if (event.agent_id !== undefined && !(await wouldAutoExecute(outcome, deps))) {
+  if (event.agentId !== undefined && !(await wouldAutoExecute(outcome, deps))) {
     await footer.close(outcome, { withheld: true });
     return { offer: null, outcome: { response: null, action: 'execute', withheld: true } };
   }
@@ -440,15 +555,12 @@ async function routeNativeCall(
  * arm never offers on that same call.
  */
 export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<NativeHookOutcome> {
-  const parsed = NativeEventSchema.safeParse(raw);
-  if (!parsed.success) return { response: null };
-  const event = parsed.data;
-  const pending = pendingCallOf(event.tool_name, event.tool_input);
-  if (pending === null) return { response: null };
-  const routed = await routeNativeCall(event, pending, deps);
+  const event = decodeEvent(raw);
+  if (event?.kind !== 'native' || event.pending === null) return { response: null };
+  const routed = await routeNativeCall(event, event.pending, deps);
   if (routed.offer === null) return routed.outcome;
-  if (event.tool_use_id !== undefined) {
-    await markOffered(deps.dataDir, event.session_id, event.tool_use_id, deps.now?.());
+  if (event.toolUseId !== undefined) {
+    await markOffered(deps.dataDir, event.sessionId, event.toolUseId, deps.now?.());
   }
   return {
     response: {
@@ -481,21 +593,18 @@ export async function runShortfallHook(
   raw: unknown,
   deps: HookDeps,
 ): Promise<ShortfallHookOutcome> {
-  const parsed = ShortfallEventSchema.safeParse(raw);
-  if (!parsed.success) return { response: null };
-  const event = parsed.data;
-  const nativeOutcome = shortfallOf(event);
+  const event = decodeEvent(raw);
+  if (event?.kind !== 'shortfall') return { response: null };
+  const { nativeOutcome, pending, eventName } = event;
   if (nativeOutcome === null) return { response: null };
-  const pending = pendingCallOf(event.tool_name, event.tool_input);
   if (pending === null) return { response: null };
   if (
-    event.tool_use_id !== undefined &&
-    (await wasOffered(deps.dataDir, event.session_id, event.tool_use_id, deps.now?.()))
+    event.toolUseId !== undefined &&
+    (await wasOffered(deps.dataDir, event.sessionId, event.toolUseId, deps.now?.()))
   ) {
     return { response: null, nativeOutcome, alreadyOffered: true };
   }
-  const { hook_event_name: eventName, ...call } = event;
-  const routed = await routeNativeCall(call, pending, deps, nativeOutcome);
+  const routed = await routeNativeCall(event, pending, deps, nativeOutcome);
   if (routed.offer === null) return { ...routed.outcome, nativeOutcome };
   return {
     response: {
@@ -503,7 +612,7 @@ export async function runShortfallHook(
         hookEventName: eventName,
         // THE SERVER'S LINE, attributed and framed as the option it is. It
         // already carries the id and the exact search or URL that came back short.
-        additionalContext: shortfallOffer(event.tool_name, routed.offer.hint),
+        additionalContext: shortfallOffer(event.tool, routed.offer.hint),
       },
     },
     nativeOutcome,
@@ -534,27 +643,32 @@ export async function runDelegationHook(
   raw: unknown,
   deps: HookDeps,
 ): Promise<DelegationHookOutcome> {
-  const parsed = DelegationEventSchema.safeParse(raw);
-  if (!parsed.success) return { response: null };
-  const event = parsed.data;
-  const task = event.tool_input.prompt;
-  if (typeof task !== 'string' || task.trim().length === 0) return { response: null };
+  const event = decodeEvent(raw);
+  if (event?.kind !== 'delegation') return { response: null };
+  const { task } = event;
+  if (task === null || task.trim().length === 0) return { response: null };
   // The subagent this task goes to is the one that would have to make the
   // call, so the same rule: only a type known to have the tool is offered. With
   // no type the harness runs its general-purpose agent, which inherits it.
-  const subagentType =
-    typeof event.tool_input.subagent_type === 'string'
-      ? event.tool_input.subagent_type
-      : 'general-purpose';
-  if ((await requestToolAccess(subagentType, agentLookup(event.cwd, deps))) !== 'allowed') {
+  if ((await requestToolAccess(event.subagentType, agentLookup(event.cwd, deps))) !== 'allowed') {
     return { response: null, noRequestTool: true };
   }
-  const packet = await buildPromptPacket(event.transcript_path, event.session_id, task);
+  const sealed = seal(await buildPromptPacket(event.transcriptPath, event.sessionId, task));
+  // The native hook's two rules, with the task as the subject: a task the mask
+  // would change is not sent, since the offer is written back into it, and a
+  // task naming a local target only ever has a native answer.
+  if (sealed.localUrl) return { response: null };
+  if (sealed.currentChanged) {
+    (deps.warn ?? ((line: string) => process.stderr.write(`${line}\n`)))(
+      'tenjin hook: the delegated task carries a credential-shaped value, so it is not routed',
+    );
+    return { response: null };
+  }
   // The native hook's rule, for the same reason: a delegation routed without
   // the user's words could offer what they just ruled out.
-  if (packet.historyStatus !== 'ok') return { response: null };
-  const footer = await openFooter(deps, event.session_id, 'delegate');
-  const outcome = await decide(packet, deps);
+  if (sealed.packet.historyStatus !== 'ok') return { response: null };
+  const footer = await openFooter(deps, event.sessionId, 'delegate');
+  const outcome = await decide(sealed, deps);
   if (outcome === null || outcome.action !== 'execute') {
     await footer.close(outcome);
     return { response: null, ...(outcome !== null ? { action: outcome.action } : {}) };
@@ -570,7 +684,7 @@ export async function runDelegationHook(
         hookEventName: 'PreToolUse',
         // The whole input, with one line appended: `updatedInput` replaces it.
         updatedInput: {
-          ...event.tool_input,
+          ...event.toolInput,
           prompt: `${task}\n\n${delegationOffer(outcome.hint)}`,
         },
       },
@@ -641,8 +755,10 @@ function hookOutcome(decision: HookDecision | null): string {
   return 'needs input';
 }
 
-/** One free decision, with the hook's own deadline and its own silence. */
-async function decide(packet: Packet, deps: HookDeps): Promise<HookDecision | null> {
+/** One free decision, with the hook's own deadline and its own silence. It
+ *  takes what {@link seal} returns rather than a bare packet, so a call site
+ *  that skips the mask does not typecheck. */
+async function decide({ packet }: Sealed, deps: HookDeps): Promise<HookDecision | null> {
   const baseUrl = await resolveBaseUrl(deps);
   const warn = deps.warn ?? ((line: string) => process.stderr.write(`${line}\n`));
   const outcome = await requestDecision(
@@ -673,7 +789,9 @@ function pendingCallOf(
 ): PendingCall | null {
   const value = tool === 'WebSearch' ? input.query : input.url;
   if (typeof value !== 'string') return null;
-  const bounded = value.trim().slice(0, 4_000);
-  if (bounded.length === 0) return null;
-  return tool === 'WebSearch' ? { tool, query: bounded } : { tool, url: bounded };
+  // Not cut here: seal() masks the subject first and bounds it after, so a
+  // token crossing the bound is seen whole by the mask.
+  const subject = value.trim();
+  if (subject.length === 0) return null;
+  return tool === 'WebSearch' ? { tool, query: subject } : { tool, url: subject };
 }

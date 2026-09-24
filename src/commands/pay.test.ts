@@ -208,6 +208,26 @@ describe('runPay, tenjin lane', () => {
     expect(authorizer.commit).toHaveBeenCalledWith(RESERVATION, 100000n);
   });
 
+  // A routing decision can name a contract on the configured origin, so the
+  // terms it quoted bind here as on the Bazaar lane.
+  it('refuses a 402 above the terms a caller was given, before signing', async () => {
+    const fixture = buildPaymentRequired();
+    const { fetch, calls } = scriptedFetch([json(402, {}, { 'PAYMENT-REQUIRED': fixture.header })]);
+    const authorizer = fakeAuthorizer('allow');
+    await expect(
+      runPay(
+        { url: TENJIN_URL, terms: { source: 'router', maxAmountAtomic: '99999' } },
+        makeCtx(),
+        { ...PUBLIC_DNS, fetchImpl: fetch, provider: testWalletProvider(), authorizer },
+      ),
+    ).rejects.toMatchObject({
+      code: 'REGISTRY_MISMATCH',
+      details: { advertised: { maxAmountAtomic: '99999' }, live: { amount: '100000' } },
+    });
+    expect(calls).toHaveLength(1);
+    expect(authorizer.authorize).not.toHaveBeenCalled();
+  });
+
   it('never attaches SIWX or session credentials', async () => {
     const fixture = buildPaymentRequired();
     const { fetch, calls } = scriptedFetch([

@@ -6,9 +6,17 @@ import { buildPaymentRequired, testWalletProvider } from '../lib/read-test-utils
 import { resolveSpendAuthorizer } from '../lib/wallet';
 import type { SpendAuthorization, SpendAuthorizer } from '../lib/wallet';
 import type { CommandContext } from '../context';
+import { runPay } from '../commands/pay';
 import { runRequestTool } from './tool';
 import { ROUTER_PATH } from './decision';
 import { bindDecision, noteSession, renderProgress } from './progress';
+
+// Pass-through, so a refusal's typed details stay observable after the tool
+// folds the error into its envelope.
+vi.mock('../commands/pay', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../commands/pay')>();
+  return { ...actual, runPay: vi.fn(actual.runPay) };
+});
 
 /**
  * The `request` tool after the fee: ONE free decision, then ONE payment, to the
@@ -211,6 +219,21 @@ describe('the request tool, one decision and one payment per lookup', () => {
     expect(calls).toHaveLength(3);
   });
 
+  it('sends nothing, and pays nothing, for a query carrying a credential', async () => {
+    const auth = authorizer();
+    const { fetchImpl, calls } = net([{ url: ROUTER, status: 200, body: decision() }]);
+    const result = await runRequestTool(
+      { query: 'https://api.acme.io/v1/items?api-key=Zx81QpLm0aTe', id: 'k3f9-abcd' },
+      deps(fetchImpl, auth),
+    );
+    expect(result.envelope).toMatchObject({
+      status: 'native',
+      reason: 'the query carries a credential-shaped value, so nothing was sent',
+    });
+    expect(calls).toHaveLength(0);
+    expect(auth.authorize).not.toHaveBeenCalled();
+  });
+
   it('needs a query at all, before anything is decided', async () => {
     const { fetchImpl, calls } = net([]);
     const result = await runRequestTool({ query: '   ' }, deps(fetchImpl));
@@ -303,14 +326,35 @@ describe('what the tool refuses to execute', () => {
     expect(calls).toHaveLength(1);
   });
 
+  it('refuses a live 402 above the advertised price before anything is signed', async () => {
+    const auth = authorizer();
+    const { fetchImpl, calls } = net([
+      { url: ROUTER, status: 200, body: decision() },
+      {
+        url: PROVIDER,
+        status: 402,
+        body: {},
+        headers: { 'PAYMENT-REQUIRED': challenge({ amount: '10001' }) },
+      },
+    ]);
+    const result = await runRequestTool({ query: 'q' }, deps(fetchImpl, auth));
+    expect(result.envelope).toMatchObject({ status: 'failed', cost: ['provider price 0 USD'] });
+    expect(calls.filter((c) => c.paid)).toHaveLength(0);
+    expect(auth.authorize).not.toHaveBeenCalled();
+    await expect(vi.mocked(runPay).mock.results.at(-1)!.value).rejects.toMatchObject({
+      code: 'REGISTRY_MISMATCH',
+      details: { advertised: { maxAmountAtomic: '10000' }, live: { amount: '10001' } },
+    });
+  });
+
   /**
-   * THE ONLY MONEY RULE: the amount actually signed meets the local policy.
-   * There is no advertised-price check any more, so a decision naming a price
-   * changes nothing; the live 402 is what the spend gate sees.
+   * THE MONEY AUTHORITY: the amount actually signed meets the local policy. A
+   * server can quote any price, so a live 402 within that quote still has to
+   * fit the cap.
    */
   it('refuses at the spend gate when the live price is over the cap', async () => {
     const { fetchImpl } = net([
-      { url: ROUTER, status: 200, body: decision() },
+      { url: ROUTER, status: 200, body: decision({ providerPriceAtomic: '900000' }) },
       {
         url: PROVIDER,
         status: 402,

@@ -1,6 +1,7 @@
 import { runPay, type AdvertisedTerms, type PayDeps } from '../commands/pay';
 import { CliError } from '../lib/errors';
 import { toMoney } from '../lib/money';
+import { mask } from '../lib/redact';
 import { assertResultSchema, canonicalHash } from '../lib/request-schema';
 import { resolveContextSettings } from '../lib/settings';
 import type { SpendAuthorizer, WalletProvider } from '../lib/wallet';
@@ -68,6 +69,13 @@ export async function runRequestTool(
       'A request needs a query naming the task, its inputs and any constraints.',
     );
   }
+  // THE HOOKS NEVER SEE THIS CALL, so the native hook's rule applies here too: a
+  // query the mask would change is not sent, masked or otherwise. The server
+  // stores it against the id and the provider logs it, and an injected page can
+  // write it.
+  if (mask(query) !== query) {
+    return fail('native', 'the query carries a credential-shaped value, so nothing was sent');
+  }
   // THE FOOTER, OPENED FIRST AND TRUSTED WITH NOTHING: it shows this lookup in
   // the terminal while it runs, resolved to a session through the hook's own
   // binding for `id`, and every call on it swallows its own failure.
@@ -119,11 +127,14 @@ export async function runRequestTool(
     return fail(refusal.status, refusal.reason);
   }
 
-  // The router handed this caller the destination, which is the provenance the
-  // Bazaar lane asks for. It carries NO price: the advertised-price check and
-  // the live-versus-advertised check are gone, and `gateSpend` caps the amount
-  // actually signed. A ceiling the server states is not a ceiling.
-  const terms: AdvertisedTerms = { source: decision.provider };
+  // The decision's advertised price caps the live 402, refused before signing.
+  // It bounds a provider or stale catalog charging over that price, and an
+  // injected `request` call; it does not bound a hostile server, which can
+  // still quote up to `maxAutoSpend`. `gateSpend` stays the money authority.
+  const terms: AdvertisedTerms = {
+    source: decision.provider,
+    maxAmountAtomic: decision.providerPriceAtomic,
+  };
 
   try {
     // The request is the server's, sent verbatim: the only thing built here is

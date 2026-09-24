@@ -16,12 +16,14 @@
  *
  * `mask(text)` is the query-side verb: for the rows scoped `query` it replaces
  * each match with that row's excerpt (`ghp_…[redacted 36 chars]`,
- * `postgres://app:[redacted]@host`, `PGPASSWORD=[redacted 7 chars]`) and
- * touches nothing else. Precision first, the way gitleaks and GitHub push
- * protection work: a vendor prefix fires on format alone, the generic
- * assignment rule needs a secret-named word plus `=` or `:`, and entropy is
- * never a trigger. Paths, hosts, IPs, commit SHAs, env names and prose are
- * never touched (owner policy, tenjin-agent#197 and the 2026-09-04 decision in
+ * `postgres://app:[redacted]@host`, `PGPASSWORD=[redacted 7 chars]`,
+ * `0x…[redacted 64 chars]`) and touches nothing else. The regex rows run
+ * first, then the hex-key, PEM and seed-phrase algorithms. Precision first,
+ * the way gitleaks and GitHub push protection work: a vendor prefix fires on
+ * format alone, the generic assignment rule needs a secret-named word plus `=`
+ * or `:`, and entropy is never a trigger. Paths, hosts, IPs, commit SHAs, env
+ * names and prose are never touched; a long mixed token in a URL path is
+ * (owner policy, tenjin-agent#197 and the 2026-09-04 decision in
  * tenjin-notes/loop-redesign/06-pr-a-redact.md: search availability over
  * scrubbing; measured, the old scrub altered 16% of real prompts to stop two
  * vendor tokens).
@@ -45,6 +47,7 @@
  * tight dep tree by design.
  */
 
+import { createHash } from 'node:crypto';
 import corpusJson from './redact-rules.json';
 import wordlistJson from './bip39-wordlist.json';
 
@@ -113,25 +116,80 @@ export function mask(text: string): string {
   // itself a vendor token is taken whole, name kept, and no later row sees a
   // stub to re-match.
   for (const detector of MASK_DETECTORS) {
-    out = out.replace(detector.re, (...args) => {
-      const m = args as unknown as RegExpExecArray;
+    out = out.replace(detector.re, (...args: unknown[]) => {
+      // replace() hands (match, ...groups, offset, input[, named groups]).
+      // Rebuilt as an exec array so a skip can read the text around its match.
+      const tail = typeof args.at(-1) === 'object' ? 3 : 2;
+      const m = Object.assign(args.slice(0, -tail), {
+        index: args.at(-tail) as number,
+        input: args.at(-tail + 1) as string,
+      }) as unknown as RegExpExecArray;
       return detector.skip?.(m) === true ? m[0] : detector.excerpt(m);
     });
   }
-  return out;
+  // The algorithm rows after the regex pass, through the same scanners
+  // findings() runs, so a key the publish scan blocks is a key the packet
+  // never carries. A value the regex pass already masked no longer matches.
+  if (MASKED_ALGORITHMS.has('hex64') || MASKED_ALGORITHMS.has('bip39')) {
+    out = out.split('\n').map(maskLineSpans).join('\n');
+  }
+  if (MASKED_ALGORITHMS.has('bip39')) out = maskLooseMnemonics(out);
+  return MASKED_ALGORITHMS.has('pemBlock') ? maskPemBlocks(out) : out;
 }
 
-/** The `query` rows as the hook template renders them: pattern, flags and the
- *  excerpt's kept prefix. The template cannot import this file, so it gets the
- *  data and a ten-line replace loop instead of a second regex list. */
-export function maskRules(): Array<{ pattern: string; flags: string; keep: number }> {
-  return CORPUS.rules
-    .filter((r) => r.scopes.includes('query') && r.match.kind === 'regex')
-    .map((r) => ({
-      pattern: r.match.pattern ?? '',
-      flags: r.match.flags ?? 'g',
-      keep: r.excerpt.kind === 'mask' ? (r.excerpt.keep ?? 0) : 0,
-    }));
+/**
+ * One line's hex and seed-phrase spans, each replaced by its finding's
+ * excerpt. Built in one left-to-right pass rather than a splice per span: a
+ * transcript line can carry thousands of keys. A `hex32-value` is a hash, not
+ * a key, and stays as written.
+ *
+ * A wordlist run longer than the longest recovery phrase is not masked here:
+ * a run of common words that long is text a routing decision reads (a repeated
+ * word, a pasted list). {@link maskLooseMnemonics} masks any phrase inside it.
+ * The publish scan reports the whole run either way.
+ */
+function maskLineSpans(line: string): string {
+  const lines = [line];
+  const spans = [
+    ...(MASKED_ALGORITHMS.has('hex64') ? scanHex64(lines) : []),
+    ...(MASKED_ALGORITHMS.has('bip39') ? scanSeedPhrases(lines) : []),
+  ]
+    .filter((f) => f.check !== 'hex32-value')
+    .filter(
+      (f) =>
+        f.check !== 'bip39-seed-phrase' ||
+        line.slice(f.span[0], f.span[1]).split(/[\s"'`]+/).length <= SEED_PHRASE_MAX_WORDS,
+    )
+    .sort((a, b) => a.span[0] - b.span[0]);
+  if (spans.length === 0) return line;
+  const parts: string[] = [];
+  let cursor = 0;
+  for (const f of spans) {
+    if (f.span[0] < cursor) continue;
+    parts.push(line.slice(cursor, f.span[0]), f.excerpt);
+    cursor = f.span[1];
+  }
+  parts.push(line.slice(cursor));
+  return parts.join('');
+}
+
+/**
+ * A PEM private key from its BEGIN marker through its END marker, or to the
+ * end of the text when the paste has no END line. The armor header is kept as
+ * the type marker; everything after it is key material and goes.
+ */
+function maskPemBlocks(text: string): string {
+  let out = '';
+  let rest = text;
+  for (;;) {
+    const begin = PEM_BEGIN.exec(rest);
+    if (begin === null) return out + rest;
+    const body = begin.index + begin[0].length;
+    const end = PEM_END.exec(rest.slice(body));
+    const stop = end === null ? rest.length : body + end.index + end[0].length;
+    out += rest.slice(0, begin.index) + maskKeeping(rest.slice(begin.index, stop), begin[0].length);
+    rest = rest.slice(stop);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -169,6 +227,8 @@ const CORPUS = corpusJson as unknown as {
 
 /** Algorithmic detectors this file implements; a corpus entry naming any other fails to compile. */
 const ALGORITHMS = new Set(['hex64', 'pemBlock', 'bip39', 'envDump', 'entropy', 'longVerbatim']);
+/** The algorithms `mask()` can apply. A `query` row naming any other fails to compile. */
+const MASKABLE_ALGORITHMS: ReadonlySet<string> = new Set(['hex64', 'pemBlock', 'bip39']);
 
 const EXCERPT_HANDLERS: Record<string, (m: RegExpExecArray) => string> = {
   googleKey: (m) => maskKeeping(m[0], m[0].startsWith('AIza') ? 4 : 7),
@@ -184,6 +244,7 @@ const SKIP_HANDLERS: Record<string, (m: RegExpExecArray) => boolean> = {
   nonLiteralValue: skipNonLiteralValue,
   placeholderUsername: (m) => PLACEHOLDER_USERNAME.test(m[1] ?? m[2] ?? ''),
   reservedExampleEmail: (m) => RESERVED_EXAMPLE_DOMAIN.test(m[0]),
+  hashLabelled: isLabelledHash,
 };
 
 interface LineDetector {
@@ -221,9 +282,12 @@ function validateScopes(rule: Rule): void {
   if (rule.tier === 'block' && !rule.scopes.includes('team')) {
     throw new Error(`redact-rules.json: block rule ${rule.id} must be scoped to team as well`);
   }
-  if (rule.scopes.includes('query') && rule.match.kind !== 'regex') {
+  const maskable =
+    rule.match.kind === 'regex' ||
+    (rule.match.kind === 'algorithm' && MASKABLE_ALGORITHMS.has(rule.match.algorithm ?? ''));
+  if (rule.scopes.includes('query') && !maskable) {
     throw new Error(
-      `redact-rules.json: rule ${rule.id} is masked in queries but is not a regex row`,
+      `redact-rules.json: rule ${rule.id} is masked in queries but mask() cannot apply it`,
     );
   }
 }
@@ -322,6 +386,12 @@ function compileExcerpt(rule: Rule): (m: RegExpExecArray) => string {
 validateCorpus(CORPUS.rules);
 const LINE_DETECTORS: LineDetector[] = compileLineDetectors(CORPUS.rules);
 const MASK_DETECTORS: LineDetector[] = LINE_DETECTORS.filter((d) => d.scopes.has('query'));
+/** Which algorithm rows `mask()` applies is data on the row, like the regex rows. */
+const MASKED_ALGORITHMS: ReadonlySet<string> = new Set(
+  CORPUS.rules
+    .filter((r) => r.match.kind === 'algorithm' && r.scopes.includes('query'))
+    .map((r) => r.match.algorithm ?? ''),
+);
 
 function scanLineDetectors(lines: string[]): Finding[] {
   const out: Finding[] = [];
@@ -587,8 +657,29 @@ function isHashContext(line: string, matchIndex: number, match: string): boolean
   return /^https?:\/\//.test(line.slice(matchIndex - prefix.length));
 }
 
+/** The hash labels that keep a bare 64-hex or an 88-character base58 run as written. */
+const BARE_HASH_LABEL_RE =
+  /(?:^|[^a-z0-9])(?:tx|txn|txid|hash|sha\d*|hmac|digest|commit|id|checksum|sig|signature)(?:[\s:=/,._*'"`‘’“”-]*[A-Za-z0-9_]{1,12}){0,2}[\s:=/,._*'"`‘’“”-]*$/i;
+
+/**
+ * A bare key-shaped run that is a hash or a signature by context: a hash label
+ * within two tokens before it, or an http(s) URL it sits inside. The same
+ * window and URL test the 0x form's demotion uses, with the labels a bare
+ * digest or a Solana signature carries.
+ */
+function isLabelledHash(m: RegExpExecArray): boolean {
+  const input = m.input;
+  const from = Math.max(0, m.index - LABEL_LOOKBACK);
+  const before = input.slice(from, m.index);
+  const labelWindow = from === 0 ? before : before.replace(/^[A-Za-z0-9]+/, '');
+  if (BARE_HASH_LABEL_RE.test(labelWindow)) return true;
+  const prefix = /(\S*)$/.exec(before)?.[1] ?? '';
+  return /^https?:\/\//.test(input.slice(m.index - prefix.length));
+}
+
 // gitleaks private-key marker (RSA/EC/OPENSSH/PGP variants, optional BLOCK).
 const PEM_BEGIN = /-----BEGIN[ A-Z0-9]*PRIVATE KEY(?: BLOCK)?-----/;
+const PEM_END = /-----END[ A-Z0-9]*PRIVATE KEY(?: BLOCK)?-----/;
 
 /** A PEM private-key block is a single block finding on its BEGIN marker line. */
 function scanPemBlocks(lines: string[]): Finding[] {
@@ -617,17 +708,103 @@ function scanPemBlocks(lines: string[]): Finding[] {
 const BIP39_WORDS = new Set((wordlistJson as { words: string }).words.split(' '));
 /** The shortest valid BIP-39 mnemonic. Below this a run is prose, not a phrase. */
 const SEED_PHRASE_MIN_WORDS = 12;
+/** The longest BIP-39 mnemonic. */
+const SEED_PHRASE_MAX_WORDS = 24;
+const SEED_PHRASE_SIZES = [24, 21, 18, 15, 12];
+const BIP39_INDEX = new Map(
+  (wordlistJson as { words: string }).words.split(' ').map((word, index) => [word, index]),
+);
+
+/** What may sit between two words of a loosely written phrase. */
+const LOOSE_SEPARATOR = /^[\s,"'`]+$/;
 
 /**
- * A run of >=12 consecutive wordlist words separated ONLY by spaces or tabs.
- * The whitespace-only rule is what keeps prose out: BIP-39 words are common
+ * Recovery phrases the strict line scan does not see: any case, words joined
+ * by commas, quotes or line breaks (a 6+6 paste), or a phrase inside a longer
+ * wordlist run. Only a window that IS a phrase goes, 12 to 24 words whose
+ * BIP-39 checksum holds, longest first; everything else stays as written, so
+ * a capitalized or comma-separated list of common words is not a false hit.
+ * The English wordlist is the only one this build ships.
+ */
+function maskLooseMnemonics(text: string): string {
+  const tokens = [...text.matchAll(/[A-Za-z]+/g)].map((m) => ({
+    word: m[0].toLowerCase(),
+    start: m.index,
+    end: m.index + m[0].length,
+  }));
+  // A long run repeats itself (a word typed over and over), so each distinct
+  // window is hashed once: the pass stays linear on a transcript-length text.
+  const checked = new Map<string, boolean>();
+  const valid = (window: string[]): boolean => {
+    const key = window.join(' ');
+    let result = checked.get(key);
+    if (result === undefined) checked.set(key, (result = isMnemonic(window)));
+    return result;
+  };
+  const parts: string[] = [];
+  let cursor = 0;
+  let i = 0;
+  while (i < tokens.length) {
+    let j = i;
+    while (
+      j < tokens.length &&
+      BIP39_INDEX.has(tokens[j]!.word) &&
+      (j === i || LOOSE_SEPARATOR.test(text.slice(tokens[j - 1]!.end, tokens[j]!.start)))
+    ) {
+      j++;
+    }
+    if (j === i) {
+      i++;
+      continue;
+    }
+    let k = i;
+    while (k + SEED_PHRASE_MIN_WORDS <= j) {
+      const size = SEED_PHRASE_SIZES.find(
+        (n) => k + n <= j && valid(tokens.slice(k, k + n).map((t) => t.word)),
+      );
+      if (size === undefined) {
+        k++;
+        continue;
+      }
+      parts.push(
+        text.slice(cursor, tokens[k]!.start),
+        `[redacted ${size}-word BIP-39 recovery phrase]`,
+      );
+      cursor = tokens[k + size - 1]!.end;
+      k += size;
+    }
+    i = j;
+  }
+  parts.push(text.slice(cursor));
+  return parts.join('');
+}
+
+/** BIP-39: 11 bits per word, the last `n / 3` of them a SHA-256 checksum of the rest. */
+function isMnemonic(words: string[]): boolean {
+  let bits = 0n;
+  for (const word of words) bits = (bits << 11n) | BigInt(BIP39_INDEX.get(word) ?? 0);
+  const checksumBits = BigInt(words.length / 3);
+  const entropyBytes = (words.length * 11 - words.length / 3) / 8;
+  const entropy = Buffer.from(
+    (bits >> checksumBits).toString(16).padStart(entropyBytes * 2, '0'),
+    'hex',
+  );
+  const expected = BigInt(createHash('sha256').update(entropy).digest()[0]!) >> (8n - checksumBits);
+  return (bits & ((1n << checksumBits) - 1n)) === expected;
+}
+
+/**
+ * A run of >=12 consecutive wordlist words separated ONLY by whitespace or
+ * quote characters. The rule is what keeps prose out: BIP-39 words are common
  * English, but twelve of them in a row with no punctuation is a phrase, not a
- * sentence. Tokens are walked rather than matched by one regex so the span is
- * exact and the pass stays linear on a transcript-length line.
+ * sentence. A quote is a separator so the `.env` form counts:
+ * `MNEMONIC="abandon … about"` (tenjin-agent#296). Tokens are walked rather
+ * than matched by one regex so the span is exact and the pass stays linear on
+ * a transcript-length line.
  */
 function scanSeedPhrases(lines: string[]): Finding[] {
   const out: Finding[] = [];
-  const token = /\S+/g;
+  const token = /[^\s"'`]+/g;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i] ?? '';
     token.lastIndex = 0;
