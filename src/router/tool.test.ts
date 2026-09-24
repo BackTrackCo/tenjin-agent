@@ -227,7 +227,7 @@ describe('the request tool, one decision and one payment per lookup', () => {
       deps(fetchImpl, auth),
     );
     expect(result.envelope).toMatchObject({
-      status: 'needs_input',
+      status: 'native',
       reason: 'the query carries a credential-shaped value, so nothing was sent',
     });
     expect(calls).toHaveLength(0);

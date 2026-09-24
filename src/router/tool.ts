@@ -74,7 +74,7 @@ export async function runRequestTool(
   // stores it against the id and the provider logs it, and an injected page can
   // write it.
   if (mask(query) !== query) {
-    return fail('needs_input', 'the query carries a credential-shaped value, so nothing was sent');
+    return fail('native', 'the query carries a credential-shaped value, so nothing was sent');
   }
   // THE FOOTER, OPENED FIRST AND TRUSTED WITH NOTHING: it shows this lookup in
   // the terminal while it runs, resolved to a session through the hook's own
