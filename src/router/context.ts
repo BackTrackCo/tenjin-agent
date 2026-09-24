@@ -1,16 +1,20 @@
 import { open } from 'node:fs/promises';
+import { isIP } from 'node:net';
 import { dirname, join } from 'node:path';
+import { isPublicAddress } from '../lib/destination';
 import { mask } from '../lib/redact';
 
 /**
  * The bounded conversation packet the router's gate and paid decision read.
  *
  * WHAT GOES IN IT: ordinary user and assistant text from the CURRENT session
- * only (and, for a subagent's own native call, that one subagent's rows),
- * redacted, at most {@link MAX_HISTORY} prior messages and at most
- * {@link MAX_PACKET_BYTES} in total, oldest dropped first. Tool results are
- * excluded: a tool result is other people's content, and a packet that carried
- * it would be a channel from a fetched page into a routing decision.
+ * only (and, for a subagent's own native call, that one subagent's rows), at
+ * most {@link MAX_HISTORY} prior messages and at most {@link MAX_PACKET_BYTES}
+ * in total, oldest dropped first. The builders below choose the text;
+ * {@link seal} masks and bounds it, and is the only way a packet reaches the
+ * wire. Tool results are excluded: a tool result is other people's content,
+ * and a packet that carried it would be a channel from a fetched page into a
+ * routing decision.
  *
  * WHAT NEVER HAPPENS: a transcript this reader cannot vouch for (another
  * session, a subagent sidechain, a compaction boundary, malformed rows, an
@@ -28,6 +32,11 @@ export const MAX_MESSAGE_CHARS = 16_000;
 const MAX_TRANSCRIPT_BYTES = 4_000_000;
 const MAX_LITERAL_URLS = 8;
 const MAX_LITERAL_URL_CHARS = 2_000;
+const MAX_PENDING_CHARS = 4_000;
+/** The server's cap on a native outcome's error text. */
+const MAX_OUTCOME_ERROR_CHARS = 1_000;
+/** Scanned past each bound: longer than any secret shape the mask knows. */
+const MASK_MARGIN = 4_096;
 
 export type PacketRole = 'user' | 'assistant';
 export interface PacketMessage {
@@ -110,6 +119,113 @@ export function fit(packet: Packet): Packet {
   return next;
 }
 
+export interface Sealed {
+  packet: Packet;
+  /** The mask changed the pending call's search or URL. */
+  subjectChanged: boolean;
+  /** The pending WebFetch targets this machine or a private network. */
+  localTarget: boolean;
+  /** The mask changed the current message. */
+  currentChanged: boolean;
+  /** A literal URL in the packet targets this machine or a private network. */
+  localUrl: boolean;
+}
+
+/**
+ * THE ONE OUTBOUND CHOKEPOINT. Every string that leaves in a hook packet is
+ * masked here, `current`, `history`, `literalUrls` and the pending call alike,
+ * and only then bounded ({@link maskWithin}): a secret cut in half by a bound
+ * before the mask no longer matches its row, and its first half would leave. The server stores
+ * the packet against the id, so a secret here is a secret in its database.
+ *
+ * It also says what the caller must not send at all. A masked subject would
+ * become the query the server writes into its hint, and a local or private
+ * target can only ever be answered natively; both run unrouted.
+ */
+export function seal(packet: Packet): Sealed {
+  const pending = packet.pendingCall;
+  const subject = pending === undefined ? '' : 'query' in pending ? pending.query : pending.url;
+  const sealedSubject = maskWithin(subject, MAX_PENDING_CHARS);
+  const bound = (text: string): string => maskWithin(text, MAX_MESSAGE_CHARS).text;
+  const sealedCurrent = maskWithin(packet.current.text, MAX_MESSAGE_CHARS);
+  const current = sealedCurrent.text;
+  const outcome = packet.nativeOutcome;
+  const sealed = fit({
+    current: { role: packet.current.role, text: current.length > 0 ? current : '(no task text)' },
+    history: packet.history
+      .slice(-MAX_HISTORY)
+      .map((message) => ({ role: message.role, text: bound(message.text) }))
+      .filter((message) => message.text.length > 0),
+    literalUrls: packet.literalUrls
+      .filter((url) => !isLocalTarget(url))
+      .map(mask)
+      .filter((url) => url.length <= MAX_LITERAL_URL_CHARS),
+    historyStatus: packet.historyStatus,
+    ...(pending === undefined
+      ? {}
+      : {
+          pendingCall:
+            'query' in pending
+              ? { tool: pending.tool, query: sealedSubject.text }
+              : { tool: pending.tool, url: sealedSubject.text },
+        }),
+    ...(outcome === undefined
+      ? {}
+      : {
+          nativeOutcome: {
+            ...outcome,
+            ...(outcome.error !== undefined
+              ? { error: maskWithin(outcome.error, MAX_OUTCOME_ERROR_CHARS).text }
+              : {}),
+          },
+        }),
+  });
+  return {
+    packet: sealed,
+    subjectChanged: sealedSubject.changed,
+    localTarget: pending !== undefined && 'url' in pending && isLocalTarget(pending.url),
+    currentChanged: sealedCurrent.changed,
+    localUrl: packet.literalUrls.some(isLocalTarget),
+  };
+}
+
+/**
+ * MASKED, THEN BOUNDED, over a window: the mask scans what can be sent plus a
+ * margin longer than any secret shape, so its cost is bounded however large
+ * the input, and a secret crossing `max` is seen whole before the cut. A PEM
+ * block that opens inside the window is masked to the window's end. When the
+ * window itself cut the text, the last `MASK_MARGIN` characters of its masked
+ * form are never sent either: a secret cut at the window's edge can sit there
+ * after earlier masks shortened the text, and must not leave in part.
+ */
+function maskWithin(text: string, max: number): { text: string; changed: boolean } {
+  const window = text.slice(0, max + MASK_MARGIN);
+  const masked = mask(window);
+  const limit = window.length < text.length ? Math.min(max, masked.length - MASK_MARGIN) : max;
+  return { text: masked.slice(0, Math.max(0, limit)), changed: masked !== window };
+}
+
+const LOCAL_NAME = /(?:^|\.)(?:localhost|local)$/i;
+
+/**
+ * A URL no public service can fetch: another scheme, a `localhost` or `.local`
+ * name, or a literal address that is not public (loopback, private,
+ * link-local, IPv6 ULA and the other reserved ranges `isPublicAddress` knows).
+ * A string that does not parse as a URL is not a public target either.
+ */
+function isLocalTarget(raw: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return true;
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return true;
+  const host = url.hostname.replace(/^\[|\]$/g, '');
+  if (LOCAL_NAME.test(host)) return true;
+  return isIP(host) !== 0 && !isPublicAddress(host);
+}
+
 /**
  * A packet for a caller that has no conversation to send: the query itself is
  * the current message, because the server's message text is `min(1)` and an
@@ -127,28 +243,29 @@ export function packetForText(text: string): Packet {
 
 /**
  * Build the packet for one user prompt. `transcriptPath` is the harness's own
- * path for this session; an absent or unusable one yields `unavailable`.
+ * path for this session; an absent or unusable one yields `unavailable`. The
+ * result is neither masked nor bounded: {@link seal} does both.
  */
 export async function buildPromptPacket(
   transcriptPath: string | undefined,
   sessionId: string,
   prompt: string,
 ): Promise<Packet> {
-  const masked = mask(prompt.trim()).slice(0, MAX_MESSAGE_CHARS);
-  const text = masked.length > 0 ? masked : '(empty prompt)';
+  const trimmed = prompt.trim();
+  const text = trimmed.length > 0 ? trimmed : '(empty prompt)';
   const read = await readHistory(transcriptPath, { sessionId });
-  return fit({
+  return {
     current: { role: 'user', text },
     history: read ?? [],
     literalUrls: literalUrlsIn(text),
     historyStatus: read === null ? 'unavailable' : 'ok',
-  });
+  };
 }
 
 /**
- * Build the packet for a native call that came back short. SAME BOUNDS as
- * a prompt packet, and the same reader: the six most recent messages, 16 KiB,
- * masked, with tool results excluded.
+ * Build the packet for a native call, before it runs or after it came back
+ * short. The same reader as a prompt packet, with tool results excluded, and
+ * the same {@link seal} before it is sent.
  *
  * THE USER'S WORDS ARE WHAT CARRY THEIR AUTHORITY. Building this packet from
  * the tool argument alone made the search string the entire conversation, so a
@@ -193,15 +310,14 @@ export async function buildNativePacket(
     .map((message, index) => ({ message, index }))
     .filter((entry) => entry.message.role === 'user');
   const current = lastUser.at(-1);
-  const bounded = mask(subject).slice(0, MAX_MESSAGE_CHARS);
-  return fit({
-    current: current?.message ?? { role: 'user', text: bounded },
+  return {
+    current: current?.message ?? { role: 'user', text: subject },
     history: current === undefined ? messages : messages.slice(0, current.index),
-    literalUrls: literalUrlsIn(`${current?.message.text ?? ''}\n${bounded}`),
+    literalUrls: literalUrlsIn(`${current?.message.text ?? ''}\n${subject}`),
     historyStatus: read === null && own === null ? 'unavailable' : 'ok',
     pendingCall: pending,
     ...(nativeOutcome !== undefined ? { nativeOutcome } : {}),
-  });
+  };
 }
 
 /** Both ids become path segments, so anything but an opaque token is refused. */
@@ -295,6 +411,8 @@ function parseRows(raw: string, scope: RowScope): PacketMessage[] {
     // Never ours to read: another window's rows and a subagent's are skipped
     // rather than allowed to void the file.
     if (typeof row.sessionId === 'string' && row.sessionId !== sessionId) continue;
+    // Harness meta rows (a skill body, a command caveat) are not the user's words.
+    if (row.isMeta === true) continue;
     // A subagent read admits that one sidechain and nothing else; the harness's
     // own reminders in it are not the task. Every other read admits none.
     if (agentId === undefined ? row.isSidechain === true : !ownSidechainRow(row, agentId)) {
@@ -308,8 +426,7 @@ function parseRows(raw: string, scope: RowScope): PacketMessage[] {
     } catch {
       continue; // A row this build cannot read contributes nothing, and no more.
     }
-    const bounded = mask(text).slice(0, MAX_MESSAGE_CHARS);
-    if (bounded.length > 0) messages.push({ role: row.type, text: bounded });
+    if (text.length > 0) messages.push({ role: row.type, text });
   }
   return messages;
 }

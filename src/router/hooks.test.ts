@@ -135,6 +135,18 @@ async function readableEvent(
   return { ...(nativeEvent(subject, tool) as object), transcript_path: path };
 }
 
+/** A readable native event before the call (PreToolUse) or after it came back
+ *  short (PostToolUse). */
+async function callEvent(
+  subject: string,
+  tool: 'WebSearch' | 'WebFetch',
+  eventName: 'PreToolUse' | 'PostToolUse',
+): Promise<unknown> {
+  const event = (await readableEvent(subject, tool)) as Record<string, unknown>;
+  if (eventName === 'PostToolUse') return event;
+  return { ...event, hook_event_name: 'PreToolUse', tool_response: undefined };
+}
+
 /** What the harness reports after a native call that came back SHORT: x.com's
  *  blocked read for WebFetch (402, 0 bytes, as measured on 2.1.280), and a
  *  search with no result links for WebSearch. */
@@ -493,10 +505,12 @@ describe('shortfallOf', () => {
     expect(search(undefined)).toBeNull();
   });
 
-  it('bounds and redacts a failure error, and ignores an empty one', () => {
+  // Masked and bounded by seal(), in that order: see "masks and bounds a
+  // failure error before it leaves".
+  it('reports a failure error whole, and ignores an empty one', () => {
     const fail = (error: unknown) =>
       shortfallOf({ hook_event_name: 'PostToolUseFailure', tool_name: 'WebFetch', error });
-    expect(fail('x'.repeat(5_000))?.error).toHaveLength(1_000);
+    expect(fail('x'.repeat(5_000))?.error).toHaveLength(5_000);
     expect(fail('  ')).toBeNull();
     expect(fail(undefined)).toBeNull();
   });
@@ -730,6 +744,85 @@ describe('the native hook reads the turn it belongs to', () => {
     // Never asked: a decision made without the user's words is the thing being
     // avoided, not something to ask for and then ignore.
     expect(calls).toHaveLength(0);
+  });
+
+  /** A masked URL in the packet would become the query the server writes into
+   *  its hint, so a subject the mask changes is never sent at all, before the
+   *  call or after it. */
+  it.each([
+    ['before the call', 'PreToolUse'],
+    ['after it came back short', 'PostToolUse'],
+  ] as const)('never sends a WebFetch carrying an api-key %s', async (_label, eventName) => {
+    const { fetchImpl, calls } = router(EXECUTE);
+    const lines: string[] = [];
+    const event = await callEvent(
+      'https://api.acme.io/v1/items?api-key=Zx81QpLm0aTe',
+      'WebFetch',
+      eventName,
+    );
+    const deps = {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+      warn: (line: string) => lines.push(line),
+    };
+    const out =
+      eventName === 'PreToolUse'
+        ? await runNativeHook(event, deps)
+        : await runShortfallHook(event, deps);
+    expect(out.response).toBeNull();
+    expect(calls).toHaveLength(0);
+    expect(lines).toEqual([
+      'tenjin hook: the native call carries a credential-shaped value, so it is not routed',
+    ]);
+  });
+
+  it('masks the whole subject before it is cut, so a token across the bound never leaves', async () => {
+    const { fetchImpl, calls } = router(EXECUTE);
+    const token = `ghp_${'B'.repeat(36)}`;
+    const query = `${'a '.repeat(1_995)}${token}`;
+    expect(query.indexOf(token)).toBeLessThan(4_000);
+    expect(query.length).toBeGreaterThan(4_000);
+    const out = await runNativeHook(await callEvent(query, 'WebSearch', 'PreToolUse'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+      warn: () => undefined,
+    });
+    expect(out).toEqual({ response: null });
+    expect(calls).toHaveLength(0);
+  });
+
+  it.each(['PreToolUse', 'PostToolUse'] as const)(
+    'never sends a %s WebFetch to a local target',
+    async (eventName) => {
+      const { fetchImpl, calls } = router(EXECUTE);
+      const event = await callEvent('http://localhost:3000/', 'WebFetch', eventName);
+      const deps = { dataDir: dir, baseUrl: BASE, fetchImpl };
+      const out =
+        eventName === 'PreToolUse'
+          ? await runNativeHook(event, deps)
+          : await runShortfallHook(event, deps);
+      expect(out.response).toBeNull();
+      expect(calls).toHaveLength(0);
+    },
+  );
+
+  it('masks and bounds a failure error before it leaves', async () => {
+    const { fetchImpl, calls } = router(NATIVE);
+    const token = `ghp_${'D'.repeat(36)}`;
+    await runShortfallHook(
+      {
+        ...((await readableEvent('https://example.test/a', 'WebFetch')) as object),
+        hook_event_name: 'PostToolUseFailure',
+        tool_response: undefined,
+        error: `fetch failed with ${token} ${'x'.repeat(5_000)}`,
+      },
+      { dataDir: dir, baseUrl: BASE, fetchImpl },
+    );
+    const sent = calls[0] as { body: { packet: { nativeOutcome: { error: string } } } };
+    expect(sent.body.packet.nativeOutcome.error).not.toContain('DDDDDD');
+    expect(sent.body.packet.nativeOutcome.error.length).toBeLessThanOrEqual(1_000);
   });
 });
 
@@ -1413,6 +1506,21 @@ describe('the delegation hook', () => {
   beforeEach(async () => {
     const fs = await import('node:fs/promises');
     await fs.writeFile(join(dir, 'config.json'), JSON.stringify(ROUTER_POLICY));
+  });
+
+  /** The offer is written back into the task, so a task the mask would change
+   *  is not sent, and a task naming a local target has only a native answer. */
+  it.each([
+    ['a credential', `Fetch https://api.acme.io/v1/items?api-key=Zx81QpLm0aTe and summarize.`],
+    ['a local target', 'Read http://localhost:3000/health and report the status.'],
+  ])('never sends a task carrying %s', async (_label, prompt) => {
+    const { fetchImpl, calls } = router(EXECUTE);
+    const out = await runDelegationHook(
+      await delegation({ prompt, subagent_type: 'general-purpose' }),
+      { dataDir: dir, baseUrl: BASE, fetchImpl, warn: () => undefined },
+    );
+    expect(out.response).toBeNull();
+    expect(calls).toHaveLength(0);
   });
 
   it.each(['Agent', 'Task'])(

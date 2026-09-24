@@ -35,7 +35,7 @@ tenjin config set sessionBudget 2.00
 
 The routing decision comes from a server, and it is free: it proposes, it never authorizes. These checks are what keep a wrong or hostile one from being worth anything:
 
-- The amount actually signed has to fit `maxAutoSpend` and the day's `sessionBudget`. That is the whole money rule: a price the decision quotes is information, not a ceiling anyone is held to, so a provider charging more than it quoted is paid only if the real amount is inside your limits.
+- The amount actually signed has to fit `maxAutoSpend` and the day's `sessionBudget`. A live price above the one the decision quoted is refused before anything is signed, so a provider or a stale catalog cannot charge more than it advertised; a hostile server sets that quote itself, so against one the bound stays `maxAutoSpend`.
 - The backend binds the call and validates its arguments against the capability's own schema, then sends the finished request; this CLI sends it as given and never rebuilds it, so there is no second copy of that rule here to drift from the first.
 - The destination has to be a public HTTPS endpoint whose name resolves to a public address. This is a check, not a pin: the request resolves the name again on its own, so a host that answers publicly at check time and privately a moment later is not closed by it. See [safety-model.md](./safety-model.md).
 - A 2xx whose body fails the decision's own success rule is a paid failure, not a delivery.
@@ -94,7 +94,7 @@ To stop the router without removing anything, `tenjin config set router.enabled 
 
 ## What the hooks send
 
-- On every prompt and every native `WebSearch` or `WebFetch`: the bounded text of the current turn, at most six prior messages and 16 KiB, redacted for obvious secrets. Tool results never travel: a tool result is other people's content, and a packet carrying it would be a channel from a fetched page into a routing decision.
+- On every prompt and every native `WebSearch` or `WebFetch`: the text of the current turn and at most six prior messages, masked by the same key, PEM, seed-phrase, and URL credential rules the publish scan uses, then bounded to 16 KiB, with harness meta rows and tool results excluded. Tool results never travel: a tool result is other people's content, and a packet carrying it would be a channel from a fetched page into a routing decision.
 - A native call sends that same bounded turn WITH the call attached, read from this session's own transcript. That is how a restriction you stated in your own words, such as asking for native tools only, reaches the decision about a bare URL your assistant is fetching. When that call then comes back short and nothing was offered before it, it is sent once more with what the harness reported: the status code and byte count, or the error. Never the page or the results. A call that came back fine sends nothing more.
 - When your assistant hands a task to a subagent: that task, as the current message, with the same bounded turn before it.
 - With `router.context turn`, no prior messages are sent: the prompt on a prompt, your latest message on a native call, and the task on a delegation. `tenjin config set router.context turn` sets it for this machine, and `--project` for this repository.
