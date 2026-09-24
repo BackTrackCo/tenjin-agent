@@ -865,6 +865,19 @@ describe('mask() carries the key, PEM, seed-phrase and URL credential rows (#388
     );
   });
 
+  it('masks a valid phrase inside a longer wordlist run, and only the phrase', () => {
+    // The BIP-39 all-zero test vectors, 12 and 24 words, each followed by more
+    // wordlist words so the run is longer than any phrase.
+    const twelve = `${'abandon '.repeat(11)}about`;
+    const twentyFour = `${'abandon '.repeat(23)}art`;
+    expect(mask(`${twelve} ${'detail '.repeat(14)}then`)).toBe(
+      `[redacted 12-word BIP-39 recovery phrase] ${'detail '.repeat(14)}then`,
+    );
+    expect(mask(`use ${twentyFour} then please check`)).toBe(
+      'use [redacted 24-word BIP-39 recovery phrase] then please check',
+    );
+  });
+
   it('masks a credential query value and keeps the parameter name', () => {
     expect(mask('https://files.acme.io/f/report.pdf?sig=Zx81QpLm0aTe&page=2')).toBe(
       'https://files.acme.io/f/report.pdf?sig=[redacted 12 chars]&page=2',

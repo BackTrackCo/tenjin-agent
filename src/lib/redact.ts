@@ -47,6 +47,7 @@
  * tight dep tree by design.
  */
 
+import { createHash } from 'node:crypto';
 import corpusJson from './redact-rules.json';
 import wordlistJson from './bip39-wordlist.json';
 
@@ -135,10 +136,11 @@ export function mask(text: string): string {
  * transcript line can carry thousands of keys. A `hex32-value` is a hash, not
  * a key, and stays as written.
  *
- * A wordlist run longer than the longest recovery phrase is left as written.
- * The publish scan still reports it; a query keeps its words, because a run of
- * common words that long is text a routing decision reads (a repeated word, a
- * pasted list), and no phrase is that long.
+ * A wordlist run longer than the longest recovery phrase is not masked whole:
+ * a run of common words that long is text a routing decision reads (a repeated
+ * word, a pasted list). Inside it, only a window that IS a phrase goes, one
+ * whose BIP-39 checksum holds, so a phrase pasted beside more wordlist words
+ * is still masked. The publish scan reports the whole run either way.
  */
 function maskLineSpans(line: string): string {
   const lines = [line];
@@ -147,11 +149,7 @@ function maskLineSpans(line: string): string {
     ...(MASKED_ALGORITHMS.has('bip39') ? scanSeedPhrases(lines) : []),
   ]
     .filter((f) => f.check !== 'hex32-value')
-    .filter(
-      (f) =>
-        f.check !== 'bip39-seed-phrase' ||
-        line.slice(f.span[0], f.span[1]).split(/[\s"'`]+/).length <= SEED_PHRASE_MAX_WORDS,
-    )
+    .flatMap((f) => (f.check === 'bip39-seed-phrase' ? phraseSpans(line, f) : [f]))
     .sort((a, b) => a.span[0] - b.span[0]);
   if (spans.length === 0) return line;
   const parts: string[] = [];
@@ -681,6 +679,65 @@ const BIP39_WORDS = new Set((wordlistJson as { words: string }).words.split(' ')
 const SEED_PHRASE_MIN_WORDS = 12;
 /** The longest BIP-39 mnemonic. */
 const SEED_PHRASE_MAX_WORDS = 24;
+const SEED_PHRASE_SIZES = [24, 21, 18, 15, 12];
+const BIP39_INDEX = new Map(
+  (wordlistJson as { words: string }).words.split(' ').map((word, index) => [word, index]),
+);
+
+/**
+ * The spans `mask()` replaces for one seed-phrase run: the whole run when it
+ * is phrase-sized, else each non-overlapping window, longest first, whose
+ * checksum is a valid BIP-39 mnemonic's.
+ */
+function phraseSpans(line: string, run: Finding): Finding[] {
+  const words = [...line.slice(run.span[0], run.span[1]).matchAll(/[^\s"'`]+/g)].map((m) => ({
+    word: m[0],
+    start: run.span[0] + m.index,
+  }));
+  if (words.length <= SEED_PHRASE_MAX_WORDS) return [run];
+  const out: Finding[] = [];
+  // A long run repeats itself (a word typed over and over), so each distinct
+  // window is hashed once: the pass stays linear on a transcript-length line.
+  const checked = new Map<string, boolean>();
+  const valid = (window: string[]): boolean => {
+    const key = window.join(' ');
+    let result = checked.get(key);
+    if (result === undefined) checked.set(key, (result = isMnemonic(window)));
+    return result;
+  };
+  let i = 0;
+  while (i + SEED_PHRASE_MIN_WORDS <= words.length) {
+    const size = SEED_PHRASE_SIZES.find(
+      (n) => i + n <= words.length && valid(words.slice(i, i + n).map((w) => w.word)),
+    );
+    if (size === undefined) {
+      i++;
+      continue;
+    }
+    const last = words[i + size - 1]!;
+    out.push({
+      ...run,
+      span: [words[i]!.start, last.start + last.word.length],
+      excerpt: `[redacted ${size}-word BIP-39 recovery phrase]`,
+    });
+    i += size;
+  }
+  return out;
+}
+
+/** BIP-39: 11 bits per word, the last `n / 3` of them a SHA-256 checksum of the rest. */
+function isMnemonic(words: string[]): boolean {
+  let bits = 0n;
+  for (const word of words) bits = (bits << 11n) | BigInt(BIP39_INDEX.get(word) ?? 0);
+  const checksumBits = BigInt(words.length / 3);
+  const entropyBytes = (words.length * 11 - words.length / 3) / 8;
+  const entropy = Buffer.from(
+    (bits >> checksumBits).toString(16).padStart(entropyBytes * 2, '0'),
+    'hex',
+  );
+  const expected = BigInt(createHash('sha256').update(entropy).digest()[0]!) >> (8n - checksumBits);
+  return (bits & ((1n << checksumBits) - 1n)) === expected;
+}
 
 /**
  * A run of >=12 consecutive wordlist words separated ONLY by whitespace or
