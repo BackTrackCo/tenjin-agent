@@ -9,6 +9,10 @@ import { renderProgress, resolveProgressSession, sessionDir } from './progress';
 let dir: string;
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'router-hooks-'));
+  // A git root of its own, so `router.*` resolves from here and no file on the
+  // machine running the suite can switch the router off.
+  const { mkdir } = await import('node:fs/promises');
+  await mkdir(join(dir, '.git'));
 });
 afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
@@ -80,7 +84,7 @@ const NEEDS_INPUT = {
 };
 
 function promptEvent(prompt: string): unknown {
-  return { hook_event_name: 'UserPromptSubmit', session_id: 'sess-1', prompt };
+  return { hook_event_name: 'UserPromptSubmit', session_id: 'sess-1', cwd: dir, prompt };
 }
 
 /** A transcript this session owns, for the native hook to read its turn from. */
@@ -107,6 +111,7 @@ function nativeEvent(query: string, tool: 'WebSearch' | 'WebFetch' = 'WebSearch'
   return {
     hook_event_name: 'PreToolUse',
     session_id: 'sess-1',
+    cwd: dir,
     tool_name: tool,
     tool_input: tool === 'WebSearch' ? { query } : { url: query },
   };

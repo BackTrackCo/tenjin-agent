@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -11,6 +11,8 @@ import { buildRouterMcpServer } from './mcp';
 let dir: string;
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'router-mcp-'));
+  // Its own git root: `router.*` resolves from here, never from the suite's cwd.
+  await mkdir(join(dir, '.git'));
   await writeFile(
     join(dir, 'config.json'),
     JSON.stringify({ bazaarPay: true, maxAutoSpend: '100000', baseUrl: 'https://tenjin.sh' }),
@@ -66,6 +68,7 @@ describe('the router MCP server', () => {
     const server = buildRouterMcpServer({
       dataDir: dir,
       handlerDeps: {
+        cwd: dir,
         signer: await testWalletProvider().getSigner(),
         authorizer: authorizer(),
         fetchImpl,
@@ -97,6 +100,7 @@ describe('the router MCP server', () => {
     const server = buildRouterMcpServer({
       dataDir: dir,
       handlerDeps: {
+        cwd: dir,
         signer: await testWalletProvider().getSigner(),
         authorizer: authorizer(),
       },
@@ -145,6 +149,7 @@ describe('the base URL the MCP server routes against', () => {
       const server = buildRouterMcpServer({
         dataDir: dir,
         handlerDeps: {
+          cwd: dir,
           signer: await testWalletProvider().getSigner(),
           authorizer: authorizer(),
           fetchImpl,
@@ -181,6 +186,7 @@ describe('what the tool tells the model to send', () => {
     const server = buildRouterMcpServer({
       dataDir: dir,
       handlerDeps: {
+        cwd: dir,
         signer: await testWalletProvider().getSigner(),
         authorizer: authorizer(),
       },
@@ -245,7 +251,7 @@ describe('a free answer on a machine with no wallet', () => {
     // No wallet under this data dir at all: `getSigner` throws WALLET_MISSING.
     const server = buildRouterMcpServer({
       dataDir: dir,
-      handlerDeps: { authorizer: authorizer(), fetchImpl },
+      handlerDeps: { cwd: dir, authorizer: authorizer(), fetchImpl },
     });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: 'test', version: '0.0.0' });

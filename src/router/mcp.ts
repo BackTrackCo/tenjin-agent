@@ -132,6 +132,7 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
             ? { fetchImpl: opts.handlerDeps.fetchImpl }
             : {}),
           ...(opts.handlerDeps?.payDeps !== undefined ? { payDeps: opts.handlerDeps.payDeps } : {}),
+          ...(opts.handlerDeps?.cwd !== undefined ? { cwd: opts.handlerDeps.cwd } : {}),
         },
       );
       return {

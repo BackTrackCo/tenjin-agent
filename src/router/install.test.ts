@@ -11,10 +11,15 @@ import type { CommandContext } from '../context';
 
 let home: string;
 let data: string;
+/** A git root of its own for doctor to run from, so `router.*` never
+ *  resolves from the suite's cwd. */
+let work: string;
 beforeEach(async () => {
   const root = await mkdtemp(join(tmpdir(), 'router-install-'));
   home = join(root, 'home');
   data = join(root, 'data');
+  work = join(root, 'work');
+  await mkdir(join(work, '.git'), { recursive: true });
   await mkdir(join(home, '.claude'), { recursive: true });
   await mkdir(data, { recursive: true });
 });
@@ -398,6 +403,7 @@ describe('the doctor this release registers', () => {
       })) as typeof fetch;
     const result = await runRouterDoctor(ctx(), {
       homeDir: home,
+      cwd: work,
       env: {},
       which: () => true,
       readMcp: async () => true,
@@ -420,6 +426,7 @@ describe('the doctor this release registers', () => {
     const fetchImpl = (async () => new Response('{}', { status: 400 })) as typeof fetch;
     const err = await runRouterDoctor(ctx(), {
       homeDir: home,
+      cwd: work,
       env: {},
       which: () => false,
       fetchImpl,
@@ -439,6 +446,7 @@ describe('the doctor this release registers', () => {
     const fetchImpl = (async () => new Response('{}', { status })) as typeof fetch;
     const err = await runRouterDoctor(ctx(), {
       homeDir: home,
+      cwd: work,
       env: {},
       which: () => true,
       readMcp: async () => true,
@@ -453,12 +461,12 @@ describe('the doctor this release registers', () => {
 });
 
 describe('doctor and the router switch', () => {
-  async function hooksCheck(cwd?: string): Promise<{ status: string; detail: string }> {
+  async function hooksCheck(cwd: string): Promise<{ status: string; detail: string }> {
     const { runRouterDoctor } = await import('./doctor');
     await writeFile(join(data, 'wallet.json'), '{"not":"a wallet"}');
     const result = await runRouterDoctor(ctx(), {
       homeDir: home,
-      ...(cwd !== undefined ? { cwd } : {}),
+      cwd,
       env: {},
       which: () => true,
       readMcp: async () => true,
@@ -579,6 +587,7 @@ describe('doctor on a --project install', () => {
     // a correctly wired machine as unwired and exit 3.
     const blind = await runRouterDoctor(ctx(), {
       homeDir: home,
+      cwd: work,
       env: {},
       which: () => true,
       readMcp: async () => true,

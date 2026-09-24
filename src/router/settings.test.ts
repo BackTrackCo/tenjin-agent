@@ -125,6 +125,25 @@ describe('routerSettings', () => {
     expect(warned).toEqual([`Ignoring ${project(nested)}: not owned by the current user.`]);
   });
 
+  it('honours a planted personal file only when its project is the cwd', async () => {
+    await put(local(repo), { router: { enabled: false } });
+    const sibling = join(home, 'code', 'other');
+    await mkdir(join(sibling, '.git'), { recursive: true });
+
+    expect((await resolve(repo)).enabled).toEqual({
+      value: false,
+      source: 'local',
+      path: local(repo),
+    });
+    expect((await resolve(join(repo, 'src'))).enabled.value).toBe(false);
+    // Anywhere else, the file is not in the walk: not a sibling, not a parent.
+    expect((await resolve(sibling)).enabled).toEqual({ value: true, source: 'default' });
+    expect((await resolve(join(home, 'code'))).enabled).toEqual({
+      value: true,
+      source: 'default',
+    });
+  });
+
   it.each([
     ['not JSON', '{ nope'],
     ['a string enabled', JSON.stringify({ router: { enabled: 'no' } })],

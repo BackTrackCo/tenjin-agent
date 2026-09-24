@@ -29,10 +29,19 @@ import type { HarnessAdapter } from '../adapters/types';
 const SKILLS_SRC = resolveSkillsSource(fileURLToPath(new URL('.', import.meta.url)));
 
 let dir: string;
+let prevCwd: string;
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'tenjin-cfg-cmd-'));
+  // Every command here resolves `router.*` (and `.tenjin.json`) from the cwd,
+  // so each test runs from a git root of its own and no file on the machine
+  // running the suite can change what it reads.
+  const work = join(dir, 'work');
+  await mkdir(join(work, '.git'), { recursive: true });
+  prevCwd = process.cwd();
+  process.chdir(work);
 });
 afterEach(async () => {
+  process.chdir(prevCwd);
   await rm(dir, { recursive: true, force: true });
 });
 
@@ -1533,6 +1542,19 @@ describe('config set router.* at each scope', () => {
       const listed = (await runConfigList(makeCtx())).data as Record<string, unknown>;
       expect(listed['router.enabled']).toMatchObject({ value: false, source: 'project' });
       expect(listed['router.context']).toMatchObject({ value: 'turn', source: 'local' });
+    });
+  });
+
+  it('keeps both keys when two project sets run at once', async () => {
+    await inRepo(async (repo) => {
+      await Promise.all([
+        runConfigSet({ key: 'router.enabled', value: 'false', project: true }, makeCtx()),
+        runConfigSet({ key: 'router.context', value: 'turn', project: true }, makeCtx()),
+      ]);
+      expect(await readJson(join(repo, '.tenjin', 'config.json'))).toEqual({
+        router: { enabled: false, context: 'turn' },
+      });
+      expect(existsSync(join(repo, '.tenjin', 'config.json.lock'))).toBe(false);
     });
   });
 
