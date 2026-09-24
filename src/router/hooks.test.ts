@@ -366,6 +366,33 @@ describe('the native hook reads the turn it belongs to', () => {
     // avoided, not something to ask for and then ignore.
     expect(calls).toHaveLength(0);
   });
+
+  /** A masked URL in the packet would become the query the server writes into
+   *  its hint, so a subject the mask changes is never sent at all. */
+  it('runs a WebFetch carrying an api-key natively, with no router call', async () => {
+    const { fetchImpl, calls } = router(EXECUTE);
+    const lines: string[] = [];
+    const out = await runNativeHook(
+      await readableEvent('https://api.acme.io/v1/items?api-key=Zx81QpLm0aTe', 'WebFetch'),
+      { dataDir: dir, baseUrl: BASE, fetchImpl, warn: (line) => lines.push(line) },
+    );
+    expect(out).toEqual({ response: null, decision: 'allow' });
+    expect(calls).toHaveLength(0);
+    expect(lines).toEqual([
+      'tenjin hook: the native call carries a credential-shaped value, so it runs unrouted',
+    ]);
+  });
+
+  it('runs a WebFetch to a local target natively, with no router call', async () => {
+    const { fetchImpl, calls } = router(EXECUTE);
+    const out = await runNativeHook(await readableEvent('http://localhost:3000/', 'WebFetch'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+    expect(out).toEqual({ response: null, decision: 'allow' });
+    expect(calls).toHaveLength(0);
+  });
 });
 
 /**

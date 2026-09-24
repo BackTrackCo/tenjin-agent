@@ -2,7 +2,14 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { MAX_PACKET_BYTES, buildPromptPacket, literalUrlsIn } from './context';
+import {
+  MAX_PACKET_BYTES,
+  buildNativePacket,
+  buildPromptPacket,
+  literalUrlsIn,
+  seal,
+  type Packet,
+} from './context';
 
 const dirs: string[] = [];
 async function transcript(rows: unknown[]): Promise<string> {
@@ -15,6 +22,11 @@ async function transcript(rows: unknown[]): Promise<string> {
 afterEach(async () => {
   await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
+
+/** The prompt packet as the hook sends it: built, then sealed. */
+async function sent(...args: Parameters<typeof buildPromptPacket>): Promise<Packet> {
+  return seal(await buildPromptPacket(...args)).packet;
+}
 
 const user = (text: string) => ({ type: 'user', sessionId: 's', message: { content: text } });
 const assistant = (text: string) => ({
@@ -29,7 +41,7 @@ describe('the prompt packet', () => {
       user('Research BTC and ETH.'),
       assistant('Both are large-cap assets.'),
     ]);
-    const packet = await buildPromptPacket(path, 's', 'check price for both now');
+    const packet = await sent(path, 's', 'check price for both now');
     expect(packet.historyStatus).toBe('ok');
     expect(packet.current).toEqual({ role: 'user', text: 'check price for both now' });
     expect(packet.history.map((m) => m.text)).toEqual([
@@ -40,7 +52,7 @@ describe('the prompt packet', () => {
 
   it('keeps at most six prior messages, the most recent ones', async () => {
     const path = await transcript(Array.from({ length: 12 }, (_, i) => user(`turn ${i}`)));
-    const packet = await buildPromptPacket(path, 's', 'now');
+    const packet = await sent(path, 's', 'now');
     expect(packet.history).toHaveLength(6);
     expect(packet.history[0]!.text).toBe('turn 6');
   });
@@ -51,7 +63,7 @@ describe('the prompt packet', () => {
       user('y'.repeat(4_000)),
       user('keep'),
     ]);
-    const packet = await buildPromptPacket(path, 's', 'now');
+    const packet = await sent(path, 's', 'now');
     expect(Buffer.byteLength(JSON.stringify(packet))).toBeLessThanOrEqual(MAX_PACKET_BYTES);
     expect(packet.history.map((m) => m.text.slice(0, 4))).toEqual(['yyyy', 'keep']);
   });
@@ -70,7 +82,7 @@ describe('the prompt packet', () => {
         message: { content: [{ type: 'text', text: 'Actually use Tavily.' }] },
       },
     ]);
-    const packet = await buildPromptPacket(path, 's', 'go');
+    const packet = await sent(path, 's', 'go');
     expect(packet.history.map((m) => m.text)).toEqual([
       'Use Exa for research.',
       'Actually use Tavily.',
@@ -80,7 +92,7 @@ describe('the prompt packet', () => {
   it('redacts a secret pasted into the prompt', async () => {
     const path = await transcript([]);
     const secret = `ghp_${'A'.repeat(36)}`;
-    const packet = await buildPromptPacket(path, 's', `deploy with ${secret}`);
+    const packet = await sent(path, 's', `deploy with ${secret}`);
     expect(JSON.stringify(packet)).not.toContain(secret);
   });
 
@@ -113,13 +125,23 @@ describe('the prompt packet', () => {
       bad,
       { type: 'assistant', sessionId: 's', message: { content: 'understood' } },
     ]);
-    const packet = await buildPromptPacket(path, 's', 'go');
+    const packet = await sent(path, 's', 'go');
     expect(packet.historyStatus).toBe('ok');
     expect(packet.history.map((m) => m.text)).toEqual([
       'native tools only, no paid services',
       'understood',
     ]);
     expect(JSON.stringify(packet)).not.toMatch(/theirs|subagent|unowned/);
+  });
+
+  it('skips a harness meta row, which is not the user speaking', async () => {
+    const path = await transcript([
+      user('check the deploy'),
+      { ...user('<skill body the harness injected>'), isMeta: true },
+      assistant('on it'),
+    ]);
+    const packet = await sent(path, 's', 'go');
+    expect(packet.history.map((m) => m.text)).toEqual(['check the deploy', 'on it']);
   });
 
   /** The rows before a boundary belong to a context that was summarized away;
@@ -130,25 +152,25 @@ describe('the prompt packet', () => {
       { type: 'system', subtype: 'compact_boundary' },
       { type: 'user', sessionId: 's', message: { content: 'native tools only' } },
     ]);
-    const packet = await buildPromptPacket(path, 's', 'go');
+    const packet = await sent(path, 's', 'go');
     expect(packet.historyStatus).toBe('ok');
     expect(packet.history.map((m) => m.text)).toEqual(['native tools only']);
   });
 
   it('never blocks the turn on a missing or oversized transcript', async () => {
-    const missing = await buildPromptPacket('/nowhere/at/all.jsonl', 's', 'go');
+    const missing = await sent('/nowhere/at/all.jsonl', 's', 'go');
     expect(missing.historyStatus).toBe('unavailable');
-    expect(await buildPromptPacket(undefined, 's', 'go')).toMatchObject({
+    expect(await sent(undefined, 's', 'go')).toMatchObject({
       historyStatus: 'unavailable',
     });
     const big = await transcript([]);
     await writeFile(big, ' '.repeat(4_000_001));
-    expect((await buildPromptPacket(big, 's', 'go')).historyStatus).toBe('unavailable');
+    expect((await sent(big, 's', 'go')).historyStatus).toBe('unavailable');
   });
 
   it('treats a genuinely fresh session as ok with no history', async () => {
     const path = await transcript([{ type: 'system', subtype: 'turn_duration' }]);
-    expect(await buildPromptPacket(path, 's', 'first')).toMatchObject({
+    expect(await sent(path, 's', 'first')).toMatchObject({
       historyStatus: 'ok',
       history: [],
     });
@@ -158,7 +180,7 @@ describe('the prompt packet', () => {
 describe('the bounds the server also enforces', () => {
   it('trims the current message to the message cap, not just the history', async () => {
     const { MAX_MESSAGE_CHARS, packetForText } = await import('./context');
-    const packet = await buildPromptPacket(undefined, 's', 'x'.repeat(40_000));
+    const packet = await sent(undefined, 's', 'x'.repeat(40_000));
     expect(packet.current.text.length).toBeLessThanOrEqual(MAX_MESSAGE_CHARS);
     expect(Buffer.byteLength(JSON.stringify(packet))).toBeLessThanOrEqual(MAX_PACKET_BYTES);
     expect(packetForText('y'.repeat(40_000)).current.text.length).toBeLessThanOrEqual(
@@ -178,7 +200,7 @@ describe('the bounds the server also enforces', () => {
       pendingCall: { tool: 'WebSearch' as const, query: 'q'.repeat(1_000) },
     };
     const path = await transcript([user('earlier turn')]);
-    const built = await buildPromptPacket(path, 's', 'x'.repeat(15_000));
+    const built = await sent(path, 's', 'x'.repeat(15_000));
     expect(Buffer.byteLength(JSON.stringify(built))).toBeLessThanOrEqual(MAX_PACKET_BYTES);
     // The raw object above is what an unmeasured build would have sent.
     expect(Buffer.byteLength(JSON.stringify(packet))).toBeGreaterThan(MAX_PACKET_BYTES);
@@ -186,7 +208,7 @@ describe('the bounds the server also enforces', () => {
 
   it('never sends an empty current message, which the server refuses', async () => {
     const { packetForText } = await import('./context');
-    expect((await buildPromptPacket(undefined, 's', '   ')).current.text.length).toBeGreaterThan(0);
+    expect((await sent(undefined, 's', '   ')).current.text.length).toBeGreaterThan(0);
     expect(packetForText('').current.text.length).toBeGreaterThan(0);
     expect(packetForText('  \n ').current.text.length).toBeGreaterThan(0);
   });
@@ -234,5 +256,90 @@ describe('what a packet gives up to fit', () => {
     expect(fitted.history).toHaveLength(0);
     expect(fitted.literalUrls).toHaveLength(1);
     expect(fitted.current.text).toHaveLength(200);
+  });
+});
+
+describe('seal, the one way a packet leaves', () => {
+  const KEY = `0x${'5c'.repeat(32)}`;
+  const PEM_BODY = 'MIIEowIBAAKCAQEAu1SU1LfVLPHCozMxH2Mo4lgOEePzNm0tRgeLezV6ffAt0gun';
+  const SEED =
+    'abandon ability able about above absent absorb abstract absurd abuse access accident';
+  const QUERY_KEY = 'Zx81QpLm0aTe';
+  const PATH_KEY = 'x9Y8z7W6v5U4t3S2r1Q0p9O8nM';
+  const TOKEN = `ghp_${'A'.repeat(36)}`;
+  const SHAPES: Array<[string, string, string]> = [
+    ['a 0x key', `sign with ${KEY}`, KEY],
+    [
+      'a PEM block',
+      `-----BEGIN RSA PRIVATE KEY-----\n${PEM_BODY}\n-----END RSA PRIVATE KEY-----`,
+      PEM_BODY,
+    ],
+    ['a seed phrase', `restore ${SEED} and stop`, 'absurd abuse'],
+    ['a URL query key', `https://api.acme.io/v1?api-key=${QUERY_KEY}`, QUERY_KEY],
+    ['a URL path key', `https://hooks.acme.io/services/${PATH_KEY}`, PATH_KEY],
+    ['a vendor token', `deploy with ${TOKEN}`, TOKEN],
+  ];
+
+  function planted(text: string, pendingCall: Packet['pendingCall']): Packet {
+    return {
+      current: { role: 'user', text },
+      history: [
+        { role: 'user', text },
+        { role: 'assistant', text },
+      ],
+      literalUrls: [text],
+      historyStatus: 'ok',
+      ...(pendingCall !== undefined ? { pendingCall } : {}),
+    };
+  }
+
+  it.each(SHAPES)('leaves no trace of %s in any field', (_label, text, secret) => {
+    for (const pending of [
+      { tool: 'WebSearch' as const, query: text },
+      { tool: 'WebFetch' as const, url: text },
+    ]) {
+      const sealed = seal(planted(text, pending));
+      expect(JSON.stringify(sealed.packet)).not.toContain(secret);
+      expect(sealed.subjectChanged).toBe(true);
+    }
+  });
+
+  it('leaves a home path as written, since the username mask is deferred', () => {
+    const text = 'the build fails in /Users/dana/src/app/main.ts';
+    const sealed = seal(planted(text, { tool: 'WebSearch', query: text }));
+    expect(sealed.packet.current.text).toBe(text);
+    expect(sealed.packet.history.map((m) => m.text)).toEqual([text, text]);
+    expect(sealed.packet.pendingCall).toEqual({ tool: 'WebSearch', query: text });
+    expect(sealed.subjectChanged).toBe(false);
+  });
+
+  it.each([
+    'http://localhost:3000/x',
+    'http://app.localhost/',
+    'http://printer.local/status',
+    'http://127.0.0.1:8080/',
+    'http://10.0.0.5/admin',
+    'http://192.168.1.1/',
+    'http://169.254.169.254/latest/meta-data',
+    'http://[::1]:3000/',
+    'http://[fd12:3456::1]/',
+    'file:///etc/hosts',
+  ])('calls %s a local target and drops it from the literal URLs', (url) => {
+    const sealed = seal({
+      ...planted('read it', { tool: 'WebFetch', url }),
+      literalUrls: [url, 'https://example.com/a'],
+    });
+    expect(sealed.localTarget).toBe(true);
+    expect(sealed.packet.literalUrls).toEqual(['https://example.com/a']);
+  });
+
+  it('calls a public URL a public target', async () => {
+    const pending = { tool: 'WebFetch' as const, url: 'https://example.com/spec' };
+    const built = await buildNativePacket(undefined, 's', pending);
+    expect(seal(built)).toMatchObject({
+      localTarget: false,
+      subjectChanged: false,
+      packet: { pendingCall: pending, literalUrls: ['https://example.com/spec'] },
+    });
   });
 });

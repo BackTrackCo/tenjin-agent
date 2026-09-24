@@ -1,7 +1,13 @@
 import { z } from 'zod';
 import { loadRawConfig, resolveSettings } from '../lib/config';
 import type { PartialConfig } from '../lib/config';
-import { buildNativePacket, buildPromptPacket, type Packet, type PendingCall } from './context';
+import {
+  buildNativePacket,
+  buildPromptPacket,
+  seal,
+  type PendingCall,
+  type Sealed,
+} from './context';
 import { requestDecision, ROUTER_PATH, type HookDecision } from './decision';
 import { GATE_TIMEOUT_MS } from './gate';
 import {
@@ -15,8 +21,8 @@ import {
 } from './progress';
 
 /**
- * The two hook handlers. Between them they do exactly three things: build the
- * bounded packet, ask for one free decision, and say one thing back to the
+ * The two hook handlers. Between them they do exactly three things: build and
+ * seal the packet, ask for one free decision, and say one thing back to the
  * harness.
  *
  * NOTHING ELSE IS IN REACH FROM HERE. No wallet, no signer, no payment SDK, no
@@ -44,6 +50,48 @@ const NativeEventSchema = z.object({
   tool_name: z.enum(['WebSearch', 'WebFetch']),
   tool_input: z.record(z.string(), z.unknown()),
 });
+
+/** One hook event, as this file uses it. */
+export type HookEvent =
+  | { kind: 'prompt'; sessionId: string; transcriptPath?: string; prompt: string }
+  | {
+      kind: 'native';
+      sessionId: string;
+      transcriptPath?: string;
+      /** The search or URL the host is about to run, or null when there is none. */
+      pending: PendingCall | null;
+    };
+
+/**
+ * THE ONLY READER OF A HARNESS FIELD. `session_id`, `transcript_path`,
+ * `prompt`, `tool_name` and `tool_input` are Claude Code's names; everything
+ * past this function reads {@link HookEvent}, so a second harness is a second
+ * decoder rather than a change to each hook. `null` is an event neither hook
+ * handles.
+ */
+export function decodeEvent(raw: unknown): HookEvent | null {
+  const native = NativeEventSchema.safeParse(raw);
+  if (native.success) {
+    return {
+      kind: 'native',
+      sessionId: native.data.session_id,
+      ...(native.data.transcript_path !== undefined
+        ? { transcriptPath: native.data.transcript_path }
+        : {}),
+      pending: pendingCallOf(native.data.tool_name, native.data.tool_input),
+    };
+  }
+  const prompt = PromptEventSchema.safeParse(raw);
+  if (!prompt.success) return null;
+  return {
+    kind: 'prompt',
+    sessionId: prompt.data.session_id,
+    ...(prompt.data.transcript_path !== undefined
+      ? { transcriptPath: prompt.data.transcript_path }
+      : {}),
+    prompt: prompt.data.prompt,
+  };
+}
 
 /** Acknowledgements that cannot be a lookup; `install` never gates them. */
 const ACKNOWLEDGEMENTS = new Set(['y', 'yes', 'ok', 'okay', 'continue', 'go', 'sure', 'thanks']);
@@ -111,15 +159,14 @@ export interface PromptHookOutcome {
  * any failure cause to stderr.
  */
 export async function runPromptHook(raw: unknown, deps: HookDeps): Promise<PromptHookOutcome> {
-  const parsed = PromptEventSchema.safeParse(raw);
-  if (!parsed.success) return { response: null };
-  const event = parsed.data;
+  const event = decodeEvent(raw);
+  if (event?.kind !== 'prompt') return { response: null };
   const skipped = promptSkipReason(event.prompt);
   if (skipped !== null) return { response: null, skipped };
 
-  const packet = await buildPromptPacket(event.transcript_path, event.session_id, event.prompt);
-  const footer = await openFooter(deps, event.session_id, 'prompt');
-  const outcome = await decide(packet, deps);
+  const sealed = seal(await buildPromptPacket(event.transcriptPath, event.sessionId, event.prompt));
+  const footer = await openFooter(deps, event.sessionId, 'prompt');
+  const outcome = await decide(sealed, deps);
   await footer.close(outcome);
   if (outcome === null) return { response: null };
   if (outcome.action !== 'execute') return { response: null, action: outcome.action };
@@ -149,28 +196,41 @@ export interface NativeHookOutcome {
  * a slow backend and a `needs_input`, lets the native call run.
  */
 export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<NativeHookOutcome> {
-  const parsed = NativeEventSchema.safeParse(raw);
-  if (!parsed.success) return { response: null, decision: 'allow' };
-  const event = parsed.data;
-  const pending = pendingCallOf(event.tool_name, event.tool_input);
-  if (pending === null) return { response: null, decision: 'allow' };
+  const event = decodeEvent(raw);
+  if (event?.kind !== 'native' || event.pending === null) {
+    return { response: null, decision: 'allow' };
+  }
+  const warn = deps.warn ?? ((line: string) => process.stderr.write(`${line}\n`));
   // THE USER'S WORDS COME WITH IT. Building this from the tool argument alone
   // made the search string the whole conversation, so "native tools only, no
   // paid services" never reached this gate.
-  const packet = await buildNativePacket(event.transcript_path, event.session_id, pending);
+  const sealed = seal(
+    await buildNativePacket(event.transcriptPath, event.sessionId, event.pending),
+  );
+  const { packet } = sealed;
+  // A LOCAL TARGET ONLY EVER HAS A NATIVE ANSWER, so asking costs a round trip
+  // and sends the conversation for nothing.
+  if (sealed.localTarget) return { response: null, decision: 'allow' };
+  // A CREDENTIAL IN THE SEARCH OR URL NEVER LEAVES. Sending it masked would put
+  // the mask into the hint the server writes from it, and the model would call
+  // the provider with the mask. The call runs natively instead.
+  if (sealed.subjectChanged) {
+    warn('tenjin hook: the native call carries a credential-shaped value, so it runs unrouted');
+    return { response: null, decision: 'allow' };
+  }
   // AND WHEN THEY CANNOT BE READ, THE CALL RUNS. Routing a redirect on the tool
   // argument alone is how an instruction the user gave this turn gets
   // overruled by a decision that never saw it. A native call the user's own
   // assistant chose is the safe default; the only cost is a lookup this turn
   // does not route.
   if (packet.historyStatus !== 'ok') {
-    (deps.warn ?? ((line: string) => process.stderr.write(`${line}\n`)))(
+    warn(
       "tenjin hook: this session's transcript could not be read, so the native call runs unrouted",
     );
     return { response: null, decision: 'allow' };
   }
-  const footer = await openFooter(deps, event.session_id, 'search');
-  const outcome = await decide(packet, deps);
+  const footer = await openFooter(deps, event.sessionId, 'search');
+  const outcome = await decide(sealed, deps);
   await footer.close(outcome);
   if (outcome === null || outcome.action !== 'execute') {
     return {
@@ -250,8 +310,10 @@ function hookOutcome(decision: HookDecision | null): string {
   return 'needs input';
 }
 
-/** One free decision, with the hook's own deadline and its own silence. */
-async function decide(packet: Packet, deps: HookDeps): Promise<HookDecision | null> {
+/** One free decision, with the hook's own deadline and its own silence. It
+ *  takes what {@link seal} returns rather than a bare packet, so a call site
+ *  that skips the mask does not typecheck. */
+async function decide({ packet }: Sealed, deps: HookDeps): Promise<HookDecision | null> {
   const baseUrl = await resolveBaseUrl(deps);
   const warn = deps.warn ?? ((line: string) => process.stderr.write(`${line}\n`));
   const outcome = await requestDecision(
