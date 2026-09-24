@@ -856,6 +856,15 @@ describe('mask() carries the key, PEM, seed-phrase and URL credential rows (#388
     );
   });
 
+  it('keeps a wordlist run longer than any recovery phrase, but masks a 24-word one', () => {
+    const long = `find the flake ${'detail '.repeat(25)}then say why`;
+    expect(mask(long)).toBe(long);
+    const phrase = `${SEED} ${SEED}`;
+    expect(mask(`restore ${phrase} and stop`)).toBe(
+      'restore [redacted 24-word BIP-39 recovery phrase] and stop',
+    );
+  });
+
   it('masks a credential query value and keeps the parameter name', () => {
     expect(mask('https://files.acme.io/f/report.pdf?sig=Zx81QpLm0aTe&page=2')).toBe(
       'https://files.acme.io/f/report.pdf?sig=[redacted 12 chars]&page=2',

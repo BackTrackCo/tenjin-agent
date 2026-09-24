@@ -134,6 +134,11 @@ export function mask(text: string): string {
  * excerpt. Built in one left-to-right pass rather than a splice per span: a
  * transcript line can carry thousands of keys. A `hex32-value` is a hash, not
  * a key, and stays as written.
+ *
+ * A wordlist run longer than the longest recovery phrase is left as written.
+ * The publish scan still reports it; a query keeps its words, because a run of
+ * common words that long is text a routing decision reads (a repeated word, a
+ * pasted list), and no phrase is that long.
  */
 function maskLineSpans(line: string): string {
   const lines = [line];
@@ -142,6 +147,11 @@ function maskLineSpans(line: string): string {
     ...(MASKED_ALGORITHMS.has('bip39') ? scanSeedPhrases(lines) : []),
   ]
     .filter((f) => f.check !== 'hex32-value')
+    .filter(
+      (f) =>
+        f.check !== 'bip39-seed-phrase' ||
+        line.slice(f.span[0], f.span[1]).split(/[\s"'`]+/).length <= SEED_PHRASE_MAX_WORDS,
+    )
     .sort((a, b) => a.span[0] - b.span[0]);
   if (spans.length === 0) return line;
   const parts: string[] = [];
@@ -669,6 +679,8 @@ function scanPemBlocks(lines: string[]): Finding[] {
 const BIP39_WORDS = new Set((wordlistJson as { words: string }).words.split(' '));
 /** The shortest valid BIP-39 mnemonic. Below this a run is prose, not a phrase. */
 const SEED_PHRASE_MIN_WORDS = 12;
+/** The longest BIP-39 mnemonic. */
+const SEED_PHRASE_MAX_WORDS = 24;
 
 /**
  * A run of >=12 consecutive wordlist words separated ONLY by whitespace or
