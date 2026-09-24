@@ -16,12 +16,14 @@
  *
  * `mask(text)` is the query-side verb: for the rows scoped `query` it replaces
  * each match with that row's excerpt (`ghp_…[redacted 36 chars]`,
- * `postgres://app:[redacted]@host`, `PGPASSWORD=[redacted 7 chars]`) and
- * touches nothing else. Precision first, the way gitleaks and GitHub push
- * protection work: a vendor prefix fires on format alone, the generic
- * assignment rule needs a secret-named word plus `=` or `:`, and entropy is
- * never a trigger. Paths, hosts, IPs, commit SHAs, env names and prose are
- * never touched (owner policy, tenjin-agent#197 and the 2026-09-04 decision in
+ * `postgres://app:[redacted]@host`, `PGPASSWORD=[redacted 7 chars]`,
+ * `0x…[redacted 64 chars]`) and touches nothing else. The regex rows run
+ * first, then the hex-key, PEM and seed-phrase algorithms. Precision first,
+ * the way gitleaks and GitHub push protection work: a vendor prefix fires on
+ * format alone, the generic assignment rule needs a secret-named word plus `=`
+ * or `:`, and entropy is never a trigger. Paths, hosts, IPs, commit SHAs, env
+ * names and prose are never touched; a long mixed token in a URL path is
+ * (owner policy, tenjin-agent#197 and the 2026-09-04 decision in
  * tenjin-notes/loop-redesign/06-pr-a-redact.md: search availability over
  * scrubbing; measured, the old scrub altered 16% of real prompts to stop two
  * vendor tokens).
@@ -118,20 +120,58 @@ export function mask(text: string): string {
       return detector.skip?.(m) === true ? m[0] : detector.excerpt(m);
     });
   }
-  return out;
+  // The algorithm rows after the regex pass, through the same scanners
+  // findings() runs, so a key the publish scan blocks is a key the packet
+  // never carries. A value the regex pass already masked no longer matches.
+  if (MASKED_ALGORITHMS.has('hex64') || MASKED_ALGORITHMS.has('bip39')) {
+    out = out.split('\n').map(maskLineSpans).join('\n');
+  }
+  return MASKED_ALGORITHMS.has('pemBlock') ? maskPemBlocks(out) : out;
 }
 
-/** The `query` rows as the hook template renders them: pattern, flags and the
- *  excerpt's kept prefix. The template cannot import this file, so it gets the
- *  data and a ten-line replace loop instead of a second regex list. */
-export function maskRules(): Array<{ pattern: string; flags: string; keep: number }> {
-  return CORPUS.rules
-    .filter((r) => r.scopes.includes('query') && r.match.kind === 'regex')
-    .map((r) => ({
-      pattern: r.match.pattern ?? '',
-      flags: r.match.flags ?? 'g',
-      keep: r.excerpt.kind === 'mask' ? (r.excerpt.keep ?? 0) : 0,
-    }));
+/**
+ * One line's hex and seed-phrase spans, each replaced by its finding's
+ * excerpt. Built in one left-to-right pass rather than a splice per span: a
+ * transcript line can carry thousands of keys. A `hex32-value` is a hash, not
+ * a key, and stays as written.
+ */
+function maskLineSpans(line: string): string {
+  const lines = [line];
+  const spans = [
+    ...(MASKED_ALGORITHMS.has('hex64') ? scanHex64(lines) : []),
+    ...(MASKED_ALGORITHMS.has('bip39') ? scanSeedPhrases(lines) : []),
+  ]
+    .filter((f) => f.check !== 'hex32-value')
+    .sort((a, b) => a.span[0] - b.span[0]);
+  if (spans.length === 0) return line;
+  const parts: string[] = [];
+  let cursor = 0;
+  for (const f of spans) {
+    if (f.span[0] < cursor) continue;
+    parts.push(line.slice(cursor, f.span[0]), f.excerpt);
+    cursor = f.span[1];
+  }
+  parts.push(line.slice(cursor));
+  return parts.join('');
+}
+
+/**
+ * A PEM private key from its BEGIN marker through its END marker, or to the
+ * end of the text when the paste has no END line. The armor header is kept as
+ * the type marker; everything after it is key material and goes.
+ */
+function maskPemBlocks(text: string): string {
+  let out = '';
+  let rest = text;
+  for (;;) {
+    const begin = PEM_BEGIN.exec(rest);
+    if (begin === null) return out + rest;
+    const body = begin.index + begin[0].length;
+    const end = PEM_END.exec(rest.slice(body));
+    const stop = end === null ? rest.length : body + end.index + end[0].length;
+    out += rest.slice(0, begin.index) + maskKeeping(rest.slice(begin.index, stop), begin[0].length);
+    rest = rest.slice(stop);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -169,6 +209,8 @@ const CORPUS = corpusJson as unknown as {
 
 /** Algorithmic detectors this file implements; a corpus entry naming any other fails to compile. */
 const ALGORITHMS = new Set(['hex64', 'pemBlock', 'bip39', 'envDump', 'entropy', 'longVerbatim']);
+/** The algorithms `mask()` can apply. A `query` row naming any other fails to compile. */
+const MASKABLE_ALGORITHMS: ReadonlySet<string> = new Set(['hex64', 'pemBlock', 'bip39']);
 
 const EXCERPT_HANDLERS: Record<string, (m: RegExpExecArray) => string> = {
   googleKey: (m) => maskKeeping(m[0], m[0].startsWith('AIza') ? 4 : 7),
@@ -221,9 +263,12 @@ function validateScopes(rule: Rule): void {
   if (rule.tier === 'block' && !rule.scopes.includes('team')) {
     throw new Error(`redact-rules.json: block rule ${rule.id} must be scoped to team as well`);
   }
-  if (rule.scopes.includes('query') && rule.match.kind !== 'regex') {
+  const maskable =
+    rule.match.kind === 'regex' ||
+    (rule.match.kind === 'algorithm' && MASKABLE_ALGORITHMS.has(rule.match.algorithm ?? ''));
+  if (rule.scopes.includes('query') && !maskable) {
     throw new Error(
-      `redact-rules.json: rule ${rule.id} is masked in queries but is not a regex row`,
+      `redact-rules.json: rule ${rule.id} is masked in queries but mask() cannot apply it`,
     );
   }
 }
@@ -322,6 +367,12 @@ function compileExcerpt(rule: Rule): (m: RegExpExecArray) => string {
 validateCorpus(CORPUS.rules);
 const LINE_DETECTORS: LineDetector[] = compileLineDetectors(CORPUS.rules);
 const MASK_DETECTORS: LineDetector[] = LINE_DETECTORS.filter((d) => d.scopes.has('query'));
+/** Which algorithm rows `mask()` applies is data on the row, like the regex rows. */
+const MASKED_ALGORITHMS: ReadonlySet<string> = new Set(
+  CORPUS.rules
+    .filter((r) => r.match.kind === 'algorithm' && r.scopes.includes('query'))
+    .map((r) => r.match.algorithm ?? ''),
+);
 
 function scanLineDetectors(lines: string[]): Finding[] {
   const out: Finding[] = [];
@@ -589,6 +640,7 @@ function isHashContext(line: string, matchIndex: number, match: string): boolean
 
 // gitleaks private-key marker (RSA/EC/OPENSSH/PGP variants, optional BLOCK).
 const PEM_BEGIN = /-----BEGIN[ A-Z0-9]*PRIVATE KEY(?: BLOCK)?-----/;
+const PEM_END = /-----END[ A-Z0-9]*PRIVATE KEY(?: BLOCK)?-----/;
 
 /** A PEM private-key block is a single block finding on its BEGIN marker line. */
 function scanPemBlocks(lines: string[]): Finding[] {
@@ -619,15 +671,17 @@ const BIP39_WORDS = new Set((wordlistJson as { words: string }).words.split(' ')
 const SEED_PHRASE_MIN_WORDS = 12;
 
 /**
- * A run of >=12 consecutive wordlist words separated ONLY by spaces or tabs.
- * The whitespace-only rule is what keeps prose out: BIP-39 words are common
+ * A run of >=12 consecutive wordlist words separated ONLY by whitespace or
+ * quote characters. The rule is what keeps prose out: BIP-39 words are common
  * English, but twelve of them in a row with no punctuation is a phrase, not a
- * sentence. Tokens are walked rather than matched by one regex so the span is
- * exact and the pass stays linear on a transcript-length line.
+ * sentence. A quote is a separator so the `.env` form counts:
+ * `MNEMONIC="abandon … about"` (tenjin-agent#296). Tokens are walked rather
+ * than matched by one regex so the span is exact and the pass stays linear on
+ * a transcript-length line.
  */
 function scanSeedPhrases(lines: string[]): Finding[] {
   const out: Finding[] = [];
-  const token = /\S+/g;
+  const token = /[^\s"'`]+/g;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i] ?? '';
     token.lastIndex = 0;

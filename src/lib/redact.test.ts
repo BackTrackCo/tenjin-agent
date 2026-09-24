@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { findings, type Finding } from './redact';
+import { findings, mask, type Finding } from './redact';
 
 /** Every case here is the marketplace audience; the team scope is pinned in redact.fixtures.test.ts. */
 const scan = (text: string): Finding[] => findings(text, 'publish');
@@ -819,5 +819,93 @@ describe('findings(team) is the publish run filtered by the emitting rule', () =
     const text = 'Refund went to 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913 (USDC on Base).';
     expect(scan(text).map((f) => f.check)).toEqual(['wallet-address']);
     expect(findings(text, 'team')).toEqual([]);
+  });
+});
+
+describe('mask() carries the key, PEM, seed-phrase and URL credential rows (#388)', () => {
+  const KEY = `0x${'7e'.repeat(32)}`;
+  const SEED =
+    'abandon ability able about above absent absorb abstract absurd abuse access accident';
+
+  it('masks a bare 0x key to its prefix and length', () => {
+    expect(mask(`import ${KEY} into the wallet`)).toBe(
+      'import 0x…[redacted 64 chars] into the wallet',
+    );
+  });
+
+  it('leaves a labelled tx hash as written', () => {
+    const text = `settled, txHash: ${KEY}`;
+    expect(mask(text)).toBe(text);
+  });
+
+  it('masks a PEM block through its END line, or to the end when there is none', () => {
+    const block =
+      '-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAu1SU1LfVLPHCozMxH2Mo\n-----END RSA PRIVATE KEY-----';
+    const masked = mask(`before\n${block}\nafter`);
+    expect(masked).toMatch(
+      /^before\n-----BEGIN RSA PRIVATE KEY-----…\[redacted \d+ chars\]\nafter$/,
+    );
+    expect(mask('key:\n-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC')).toBe(
+      'key:\n-----BEGIN PRIVATE KEY-----…[redacted 33 chars]',
+    );
+  });
+
+  it('masks a 12-word recovery phrase', () => {
+    expect(mask(`restore with ${SEED} and stop`)).toBe(
+      'restore with [redacted 12-word BIP-39 recovery phrase] and stop',
+    );
+  });
+
+  it('masks a credential query value and keeps the parameter name', () => {
+    expect(mask('https://files.acme.io/f/report.pdf?sig=Zx81QpLm0aTe&page=2')).toBe(
+      'https://files.acme.io/f/report.pdf?sig=[redacted 12 chars]&page=2',
+    );
+  });
+
+  it('masks a long mixed path segment', () => {
+    expect(mask('https://hooks.acme.io/services/x9Y8z7W6v5U4t3S2r1Q0p9O8nM')).toBe(
+      'https://hooks.acme.io/services/…[redacted 26 chars]',
+    );
+  });
+
+  it('leaves ordinary URLs untouched', () => {
+    const text =
+      'https://docs.acme.io/list?page=2 and https://github.com/acme/app/blob/main/README.md';
+    expect(mask(text)).toBe(text);
+  });
+});
+
+describe('the #296 credential shapes', () => {
+  it('masks a quoted secret name with a quoted value, not config keys or numbers', () => {
+    expect(mask('{"user":"dana","password":"hunter2secret"}')).toBe(
+      '{"user":"dana","password=[redacted 13 chars]}',
+    );
+    const config = '{"max_tokens": "8k4096", "tokenizer": "cl100k_base", "password": "123456"}';
+    expect(mask(config)).toBe(config);
+  });
+
+  it('masks an Authorization: Basic credential and keeps the header', () => {
+    expect(mask('Authorization: Basic ZGFuYTpodW50ZXIyc2VjcmV0')).toBe(
+      'Authorization: Basic …[redacted 24 chars]',
+    );
+  });
+
+  it('masks the password of curl -u and keeps the user', () => {
+    expect(mask('curl -u dana:hunter2secret https://api.acme.io')).toBe(
+      'curl -u dana=[redacted 13 chars] https://api.acme.io',
+    );
+  });
+
+  it('masks an empty-user connection URI on a single-label host', () => {
+    const f = find('ECONNREFUSED redis://:hunter2secret@cache:6379', 'db-connection-uri');
+    expect(f?.excerpt).toBe('redis://:[redacted]@cache');
+  });
+
+  it('counts a seed phrase whose words sit inside quotes', () => {
+    const text =
+      'MNEMONIC="abandon ability able about above absent absorb abstract absurd abuse access accident"';
+    expect(find(text, 'bip39-seed-phrase')?.excerpt).toBe(
+      '[redacted 12-word BIP-39 recovery phrase]',
+    );
   });
 });

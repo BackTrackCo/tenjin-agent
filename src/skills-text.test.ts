@@ -975,10 +975,13 @@ describe('the public render did not move', () => {
   //
   // tenjin-search moved 2026-09-14: its question bullet no longer names a 512
   // cap, because the shelf takes 8,000 characters on every trigger.
+  //
+  // tenjin-publish moved 2026-09-23: the "real stop" list names the four new
+  // credential warns (tenjin-agent#388, #296), as the triage test above requires.
   it('renders the exact bytes a public install shipped before team mode existed', () => {
     expect(Object.fromEntries(SHAPED_SKILLS.map((n) => [n, digest(read(n))]))).toEqual({
       'tenjin-search': 'b68bf006e5c7dfe0d53a3bbbd2651198',
-      'tenjin-publish': '3c7bc8ca8ddde86353f7019928b81ee2',
+      'tenjin-publish': '9a5a0e693cfba6eaa142d19207b02f1e',
     });
   });
 

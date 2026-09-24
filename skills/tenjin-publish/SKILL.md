@@ -132,7 +132,8 @@ user's attention:
   to look.
 - Usually a real stop, because the draft carries context from somewhere it should
   not have travelled: `customer-identifier`, `confidential-marker`,
-  `internal-hostname`, `secret-assignment`,
+  `internal-hostname`, `secret-assignment`, `basic-auth-header`,
+  `curl-user-credential`, `url-query-credential`, `url-path-credential`,
   `paid-content-marker`, `phone`, `long-verbatim-quote`, `collaboration-url`,
   `cloud-resource-id`, `env-dump-block`.
 <!-- /tenjin:when -->

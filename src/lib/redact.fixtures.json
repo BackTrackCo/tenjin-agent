@@ -438,7 +438,7 @@
       "scope": "publish",
       "label": "positive",
       "input": "Backup factor: otpauth://totp/Tenjin:ops?secret=%%t25%%&issuer=Tenjin",
-      "expect_ids": ["secret-assignment", "totp-uri"],
+      "expect_ids": ["secret-assignment", "totp-uri", "url-query-credential"],
       "secret": "%%t25%%"
     },
     {
@@ -1253,6 +1253,80 @@
       "label": "negative",
       "input": "{\"credentials\": \"include\", \"max_tokens\": 128000, \"tokenizer\": \"cl100k_base\", \"temperature\": 0}",
       "expect_text": "{\"credentials\": \"include\", \"max_tokens\": 128000, \"tokenizer\": \"cl100k_base\", \"temperature\": 0}"
+    },
+    {
+      "id": "basic-auth-header/pos",
+      "scope": "publish",
+      "label": "positive",
+      "input": "curl -H 'Authorization: Basic ZGFuYTpodW50ZXIyc2VjcmV0' https://api.acme.io/v1/items",
+      "expect_ids": ["basic-auth-header"],
+      "secret": "ZGFuYTpodW50ZXIyc2VjcmV0"
+    },
+    {
+      "id": "basic-auth-header/neg",
+      "scope": "publish",
+      "label": "negative",
+      "input": "Authorization: Basic <base64 of user:password>",
+      "expect_ids": []
+    },
+    {
+      "id": "curl-user-credential/pos",
+      "scope": "publish",
+      "label": "positive",
+      "input": "curl -u dana:hunter2secret https://api.acme.io/v1/items",
+      "expect_ids": ["curl-user-credential"],
+      "secret": "hunter2secret"
+    },
+    {
+      "id": "curl-user-credential/neg",
+      "scope": "publish",
+      "label": "negative",
+      "input": "docker run -u 1000:1000 app && curl -u $API_USER:$API_PASS https://api.acme.io/v1/items",
+      "expect_ids": []
+    },
+    {
+      "id": "url-query-credential/pos",
+      "scope": "publish",
+      "label": "positive",
+      "input": "download https://files.acme.io/f/report.pdf?sig=hunter2secret77&exp=1767225600 failed",
+      "expect_ids": ["url-query-credential"],
+      "secret": "hunter2secret77"
+    },
+    {
+      "id": "url-query-credential/neg",
+      "scope": "publish",
+      "label": "negative",
+      "input": "see https://docs.acme.io/search?page=2&sort=key for the list",
+      "expect_ids": []
+    },
+    {
+      "id": "url-path-credential/pos",
+      "scope": "publish",
+      "label": "positive",
+      "input": "the hook posts to https://hooks.acme.io/services/T0A1B2C3D/x9Y8z7W6v5U4t3S2r1Q0p9O8nM and times out",
+      "expect_ids": ["url-path-credential"],
+      "secret": "x9Y8z7W6v5U4t3S2r1Q0p9O8nM"
+    },
+    {
+      "id": "url-path-credential/neg",
+      "scope": "publish",
+      "label": "negative",
+      "input": "read https://support.acme.io/en/articles/12345678-how-to-reset-your-password, https://github.com/acme/app/commit/3f9a1c77b2e04d5a8c6b1e2f9d0a4b7c3f9a1c77 and https://github.com/acme/app/blob/main/README.md",
+      "expect_ids": []
+    },
+    {
+      "id": "url-path-credential/neg-json-two-urls",
+      "scope": "publish",
+      "label": "negative",
+      "input": "[\"https://acme.io/docs\",\"/var/lib/acme2/build1234567890abcdefghij\"]",
+      "expect_ids": []
+    },
+    {
+      "id": "mask/url-credentials",
+      "scope": "query",
+      "label": "positive",
+      "input": "fetch https://files.acme.io/x9Y8z7W6v5U4t3S2r1Q0p9O8nM/report.pdf?page=2&api-key=hunter2secret77",
+      "expect_text": "fetch https://files.acme.io/…[redacted 26 chars]/report.pdf?page=2&api-key=[redacted 15 chars]"
     }
   ]
 }
