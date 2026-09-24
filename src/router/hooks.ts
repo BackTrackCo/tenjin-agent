@@ -1,10 +1,13 @@
+import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { z } from 'zod';
 import { loadRawConfig, resolveSettings } from '../lib/config';
 import type { PartialConfig } from '../lib/config';
+import { walletPath } from '../lib/paths';
 import { evaluateSpendPolicy } from '../lib/policy';
 import { resolveContextSettings } from '../lib/settings';
 import { readSpendSummary, spentOf } from '../lib/spend-ledger';
+import { readUsdcBalance } from '../lib/usdc-balance';
 import type { CommandContext } from '../context';
 import {
   buildNativePacket,
@@ -35,12 +38,14 @@ import { routerSettings, type RouterSettings } from './settings';
 /**
  * The four hook handlers. Between them they do exactly three things: build and
  * seal the packet, ask for one free decision, and say one thing back to the
- * harness.
+ * harness. Before an `execute` is shown where nobody can approve it, they also
+ * read the wallet's address from its file and its USDC balance from the RPC
+ * (`withheldBecause`); that is the only other thing they touch.
  *
- * NOTHING ELSE IS IN REACH FROM HERE. No wallet, no signer, no payment SDK, no
- * MCP server: a dist test asserts the chunk graph, because the hooks run on
- * every prompt and after every native search, and their cost is the product's
- * floor.
+ * NOTHING ELSE IS IN REACH FROM HERE. No wallet module, no signer, no payment
+ * SDK, no viem, no MCP server: a dist test asserts the chunk graph, because the
+ * hooks run on every prompt and after every native search, and their cost is
+ * the product's floor.
  * The decision is free, so nothing on this path can spend anything either.
  *
  * EVERY FAILURE IS SILENT. A backend that is down, slow or answering nonsense
@@ -52,8 +57,8 @@ import { routerSettings, type RouterSettings } from './settings';
  * was followed 0 times in 11 where the redirect is followed. But a denied
  * WebFetch stranded every subagent that could not reach `request`
  * (tenjin-agent#377), so a subagent is denied only when it is known to have
- * the tool (`requestToolAccess`) and the spend would auto-execute; anyone
- * else's call runs free. No arm ever returns `allow`: that would skip the user's own permission
+ * the tool (`requestToolAccess`) and the spend would auto-execute from a wallet
+ * that can cover it; anyone else's call runs free. No arm ever returns `allow`: that would skip the user's own permission
  * rules for the call.
  */
 
@@ -343,6 +348,8 @@ export interface HookDeps {
   baseUrl?: string;
   /** The environment the base URL precedence reads `TENJIN_BASE_URL` from. */
   env?: NodeJS.ProcessEnv;
+  /** Every request a hook makes: the decision, and the balance read before an
+   *  offer. Tests answer both from one stub. */
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
   now?: () => number;
@@ -370,33 +377,92 @@ function resolveBaseUrl(deps: HookDeps, config: PartialConfig): string {
   return resolveSettings({ config, flags: {}, env: deps.env ?? process.env }).baseUrl.value;
 }
 
+/** The balance read's own ceiling, inside what the decision left of the gate's
+ *  budget. Base's public RPC answered `balanceOf` in 0.16 to 0.26 s. */
+const BALANCE_TIMEOUT_MS = 1_000;
+
+/** When the gate's budget runs out. The decision and the balance read share it,
+ *  so the pair still fits the hook timeout `wire.test.ts` pins. */
+function gateDeadline(deps: HookDeps): number {
+  return (deps.now?.() ?? Date.now()) + (deps.timeoutMs ?? GATE_TIMEOUT_MS);
+}
+
 /**
- * A SUBAGENT IS OFFERED ONLY WHAT IT CAN PAY FOR ALONE. It cannot reach the
- * user, so an offer that would stop on `needs_approval` is a dead end; the
- * parent can still make that lookup itself. This asks the question `request`
- * will: the same settings, the same session ledger and the same policy
- * evaluation, with the provider's host as the creator the way `pay` names it.
- * Only `allow`, a spend that would auto-execute, is worth the line. It
- * reserves nothing, and the amount actually signed is still `gateSpend`'s to
- * cap. Anything that cannot be read shows no offer.
+ * WHY THE PAID CALL WOULD NOT RUN ON ITS OWN, in the footer's words, or null
+ * when it would. Every line that points at `request` where nobody can approve
+ * asks this first: a subagent cannot reach the user, and the main agent's
+ * pre-call deny and prompt hint send it to a call that has to run rather than
+ * to the free tools that would have answered. Two things stop that call:
+ *
+ * - THE SPEND POLICY, asked the way `request` will ask it: the same settings,
+ *   the same session ledger and the same evaluation, with the provider's host
+ *   as the creator the way `pay` names it. Only `allow` runs alone. Nothing is
+ *   reserved, and the amount actually signed is still `gateSpend`'s to cap.
+ * - THE WALLET. A fresh install's wallet holds no USDC, and the authorization
+ *   it signs is refused after the free call was already denied: the user got
+ *   neither. One `balanceOf`, read only once the policy said yes.
+ *
+ * ONLY A BALANCE READ BELOW THE PRICE WITHHOLDS. One that cannot be read (no
+ * wallet file, an RPC that fails, rate-limits or runs past the gate's budget)
+ * leaves the policy to decide alone, as before this check. Base's public RPC
+ * refused the sixth `eth_call` in a second, and parallel fetches are an
+ * ordinary turn, so withholding on a failed read would drop the redirect on
+ * funded wallets exactly when the router is used most, and a dead `rpcUrl`
+ * would switch it off for good. The cost of the other direction needs an
+ * empty wallet AND a failed read, and lasts one call. A `TENJIN_WALLET_KEY`
+ * wallet is left to the policy too: its address takes a curve this chunk
+ * does not load, and the file beside it is not the wallet that pays.
  */
-async function wouldAutoExecute(
+async function withheldBecause(
   decision: { providerPriceAtomic: string; endpoint: string },
   deps: HookDeps,
-): Promise<boolean> {
+  deadline: number,
+): Promise<string | null> {
+  let rpcUrl: string;
   try {
-    const { policy } = await resolveContextSettings(hookContext(deps));
+    const settings = await resolveContextSettings(hookContext(deps));
     const ledger = await readSpendSummary(deps.dataDir, {
       ...(deps.now !== undefined ? { now: deps.now } : {}),
     });
-    const evaluation = evaluateSpendPolicy(policy, {
+    const evaluation = evaluateSpendPolicy(settings.policy, {
       amountAtomic: BigInt(decision.providerPriceAtomic),
       creator: new URL(decision.endpoint).host,
       sessionSpentAtomic: ledger === null ? 0n : spentOf(ledger),
     });
-    return evaluation.decision === 'allow';
+    if (evaluation.decision !== 'allow') return 'offer needs approval';
+    rpcUrl = settings.rpcUrl;
   } catch {
-    return false;
+    return 'offer needs approval';
+  }
+  if ((deps.env ?? process.env).TENJIN_WALLET_KEY?.trim()) return null;
+  const address = await walletAddress(deps.dataDir);
+  if (address === null) return null;
+  const balance = await readUsdcBalance(address, rpcUrl, {
+    timeoutMs: Math.min(BALANCE_TIMEOUT_MS, deadline - (deps.now?.() ?? Date.now())),
+    ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+  });
+  if (balance === null) {
+    (deps.warn ?? ((line: string) => process.stderr.write(`${line}\n`)))(
+      `tenjin hook: the wallet's USDC balance could not be read from ${new URL(rpcUrl).host}, so the spend policy alone decides`,
+    );
+    return null;
+  }
+  return balance < BigInt(decision.providerPriceAtomic) ? 'wallet needs USDC' : null;
+}
+
+/**
+ * The wallet file's address, which `lib/wallet/store.ts` keeps top-level in
+ * cleartext so it reads without a passphrase; null when there is none to read.
+ * Read here rather than through the wallet module, which stays out of this
+ * chunk graph.
+ */
+async function walletAddress(dataDir: string): Promise<string | null> {
+  try {
+    const record: unknown = JSON.parse(await readFile(walletPath(dataDir), 'utf8'));
+    const address = (record as { address?: unknown } | null)?.address;
+    return typeof address === 'string' && /^0x[0-9a-fA-F]{40}$/.test(address) ? address : null;
+  } catch {
+    return null;
   }
 }
 
@@ -420,6 +486,9 @@ export interface PromptHookOutcome {
   action?: HookDecision['action'];
   /** The turn id, for the smoke to correlate against. */
   id?: string;
+  /** An `execute` whose hint was not shown: the paid call would not run on its
+   *  own, for want of approval or of funds. */
+  withheld?: true;
 }
 
 /**
@@ -428,6 +497,11 @@ export interface PromptHookOutcome {
  * `native`, `needs_input` and a decision that failed or timed out are silence:
  * a turn with no lookup carries nothing extra, and `decide` has already written
  * any failure cause to stderr.
+ *
+ * THE HINT ASKS FOR A CALL THAT HAS TO RUN. Over the cap or past the budget,
+ * `request` answers `needs_approval`, and a model sent there stops to ask the
+ * user where its free tools would have done: so the line is shown only when
+ * the paid call would auto-execute, the same rule the pre-call deny follows.
  */
 export async function runPromptHook(raw: unknown, deps: HookDeps): Promise<PromptHookOutcome> {
   const event = decodeEvent(raw);
@@ -444,10 +518,18 @@ export async function runPromptHook(raw: unknown, deps: HookDeps): Promise<Promp
     ),
   );
   const footer = await openFooter(deps, event.sessionId, 'prompt');
+  const deadline = gateDeadline(deps);
   const outcome = await decide(sealed, deps, router.config);
+  if (outcome === null || outcome.action !== 'execute') {
+    await footer.close(outcome);
+    return { response: null, ...(outcome !== null ? { action: outcome.action } : {}) };
+  }
+  const withheld = await withheldBecause(outcome, deps, deadline);
+  if (withheld !== null) {
+    await footer.close(outcome, { withheld });
+    return { response: null, action: 'execute', withheld: true };
+  }
   await footer.close(outcome);
-  if (outcome === null) return { response: null };
-  if (outcome.action !== 'execute') return { response: null, action: outcome.action };
   return { action: 'execute', id: outcome.id, ...injection(attributed(outcome.hint)) };
 }
 
@@ -464,7 +546,8 @@ export interface NativeHookOutcome {
   response: unknown | null;
   action?: HookDecision['action'];
   id?: string;
-  /** An `execute` whose offer was not shown: a subagent spend that would need approval. */
+  /** An `execute` whose offer was not shown: the paid call would not run on
+   *  its own, for want of approval or of funds. */
   withheld?: true;
   /** No router call at all: the subagent is not known to have the request tool. */
   noRequestTool?: true;
@@ -541,6 +624,7 @@ async function routeNativeCall(
     return { offer: null, outcome: { response: null } };
   }
   const footer = await openFooter(deps, event.sessionId, 'search');
+  const deadline = gateDeadline(deps);
   const outcome = await decide(sealed, deps, router.config);
   if (outcome === null || outcome.action !== 'execute') {
     await footer.close(outcome);
@@ -549,8 +633,18 @@ async function routeNativeCall(
       outcome: { response: null, ...(outcome !== null ? { action: outcome.action } : {}) },
     };
   }
-  if (event.agentId !== undefined && !(await wouldAutoExecute(outcome, deps))) {
-    await footer.close(outcome, { withheld: true });
+  // THE SPEND RULE, WHERE AN OFFER WOULD BE A DEAD END. A subagent cannot ask
+  // the user, so it is offered only what runs alone. The main agent's pre-call
+  // arm DENIES the free call, so it redirects only when the paid call would run
+  // without approval from a wallet that can pay: denying a fetch and then
+  // answering `needs_approval`, or failing an unfunded payment, left the page
+  // neither fetched nor bought. The main agent's after-call arm denies nothing,
+  // so its offer stands and `request` can still ask.
+  const denies = nativeOutcome === undefined;
+  const withheld =
+    event.agentId !== undefined || denies ? await withheldBecause(outcome, deps, deadline) : null;
+  if (withheld !== null) {
+    await footer.close(outcome, { withheld });
     return { offer: null, outcome: { response: null, action: 'execute', withheld: true } };
   }
   await footer.close(outcome);
@@ -567,7 +661,9 @@ async function routeNativeCall(
  * WHAT IS NEW is who can be denied. A subagent not known to have the request
  * tool, or whose spend would need an approval it cannot ask for, is never
  * redirected: `routeNativeCall` answers without an offer, and its
- * call runs free.
+ * call runs free. Neither is the main agent when the paid call would stop on
+ * `needs_approval` or its wallet cannot cover the price: its free call runs,
+ * and the after-call arm can still offer.
  *
  * A redirect leaves a mark under the call's `tool_use_id`, so the after-call
  * arm never offers on that same call.
@@ -690,13 +786,15 @@ export async function runDelegationHook(
   // the user's words could offer what they just ruled out.
   if (sealed.packet.historyStatus !== 'ok') return { response: null };
   const footer = await openFooter(deps, event.sessionId, 'delegate');
+  const deadline = gateDeadline(deps);
   const outcome = await decide(sealed, deps, router.config);
   if (outcome === null || outcome.action !== 'execute') {
     await footer.close(outcome);
     return { response: null, ...(outcome !== null ? { action: outcome.action } : {}) };
   }
-  if (!(await wouldAutoExecute(outcome, deps))) {
-    await footer.close(outcome, { withheld: true });
+  const withheld = await withheldBecause(outcome, deps, deadline);
+  if (withheld !== null) {
+    await footer.close(outcome, { withheld });
     return { response: null, action: 'execute', withheld: true };
   }
   await footer.close(outcome);
@@ -732,7 +830,8 @@ async function openFooter(
   sessionId: string,
   operation: 'prompt' | 'search' | 'delegate',
 ): Promise<{
-  close: (decision: HookDecision | null, opts?: { withheld?: boolean }) => Promise<void>;
+  /** `withheld` is why an `execute` was not shown, in the footer's words. */
+  close: (decision: HookDecision | null, opts?: { withheld?: string }) => Promise<void>;
 }> {
   const now = (): number => deps.now?.() ?? Date.now();
   const directory = sessionDir(deps.dataDir, sessionId);
@@ -750,18 +849,18 @@ async function openFooter(
   await pruneSessions(deps.dataDir, now());
   return {
     close: async (decision, opts) => {
-      const withheld = opts?.withheld === true;
+      const withheld = opts?.withheld;
       await writeProgress(
         directory,
         callId,
         {
           phase: 'done',
           operation,
-          outcome: withheld ? 'native tools (offer needs approval)' : hookOutcome(decision),
+          outcome: withheld !== undefined ? `native tools (${withheld})` : hookOutcome(decision),
         },
         now(),
       );
-      if (!withheld && decision !== null && decision.action === 'execute') {
+      if (withheld === undefined && decision !== null && decision.action === 'execute') {
         await bindDecision(deps.dataDir, sessionId, decision.id, now());
       }
     },

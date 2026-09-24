@@ -175,7 +175,7 @@ export async function runRequestTool(
     const data = paid.data as {
       bodyText?: string;
       amountPaid?: { atomic: string };
-      /** Set when the body was delivered without its success rule having run. */
+      /** Set when the body missed its success rule, or the rule never ran. */
       resultUnverified?: boolean;
       resultCaveat?: string;
     };
@@ -188,13 +188,14 @@ export async function runRequestTool(
       result: data.bodyText ?? '',
       providerContentUntrusted: true,
     };
-    // UNVERIFIED IS NOT FULFILLED. A body the success rule could not be run
-    // against may be exactly the contract failure the rule exists to catch, and
-    // a caveat inside a `fulfilled` envelope does not reach code that branches
-    // on the status: a provider could pad a broken answer past the validation
-    // limit and have it read as a checked, paid result. The body still rides
-    // along whole, because the money moved and withholding the product would be
-    // a second loss on top of the first.
+    // UNVERIFIED IS NOT FULFILLED. A body that missed its success rule, or
+    // that the rule could not be run against, may be exactly the contract
+    // failure the rule exists to catch, and a caveat inside a `fulfilled`
+    // envelope does not reach code that branches on the status: a provider
+    // could pad a broken answer past the validation limit and have it read as
+    // a checked, paid result. The body still rides along whole, because the
+    // money moved and withholding the product would be a second loss on top
+    // of the first.
     const shown = {
       provider: built.url,
       ...paramsOf(contract),

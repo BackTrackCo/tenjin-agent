@@ -38,7 +38,7 @@ The routing decision comes from a server, and it is free: it proposes, it never 
 - The amount actually signed has to fit `maxAutoSpend` and the day's `sessionBudget`. A live price above the one the decision quoted is refused before anything is signed, so a provider or a stale catalog cannot charge more than it advertised; a hostile server sets that quote itself, so against one the bound stays `maxAutoSpend`.
 - The backend binds the call and validates its arguments against the capability's own schema, then sends the finished request; this CLI sends it as given and never rebuilds it, so there is no second copy of that rule here to drift from the first.
 - The destination has to be a public HTTPS endpoint whose name resolves to a public address. This is a check, not a pin: the request resolves the name again on its own, so a host that answers publicly at check time and privately a moment later is not closed by it. See [safety-model.md](./safety-model.md).
-- A 2xx whose body fails the decision's own success rule is a paid failure, not a delivery.
+- A 2xx whose body fails the decision's own success rule is delivered as `unverified`, never `fulfilled`, with a caveat naming the rule it missed. The money has already moved, so the body is not withheld.
 
 A compromised backend can therefore name any origin it likes, and spend at most one `maxAutoSpend` per call inside `sessionBudget`. Set both to numbers you would not mind losing. This is a pocket-money wallet, not treasury custody.
 

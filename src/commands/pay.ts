@@ -107,12 +107,12 @@ export interface PayArgs {
   /** The same-turn duplicate guard's identity for this request. */
   requestKey?: string;
   /**
-   * The caller's APPLICATION success rule for the delivered body. A 2xx whose
-   * body fails it is a paid failure, not a delivery: the money already moved,
-   * so the refusal says so instead of handing back a body nobody vouched for.
-   * A body the rule could not be RUN against, because it is past this client's
-   * own validation limit, is delivered with `resultCaveat` instead: that limit
-   * is ours, not the endpoint's, and the payment has already settled.
+   * The caller's APPLICATION success rule for the delivered body. On a free or
+   * entitled 2xx, a body that fails it is refused: nothing was paid. On the
+   * PAID leg the money already moved, so the body is always delivered: one
+   * that fails the rule, or that is past this client's own validation limit so
+   * the rule never ran, comes back with `resultUnverified` and a
+   * `resultCaveat` saying which.
    */
   resultSchema?: unknown;
 }
@@ -330,6 +330,7 @@ export async function runPay(
   // (httpRequest never throws on transport failure; it returns ok:false.)
   const paid = await httpRequest(url, {
     ...fetchOpts,
+    timeoutMs: paidLegTimeoutMs(effectiveRequirement, ctx.flags.timeout),
     headers: { ...headers, ...payment.headers },
   });
   await authorizer.commit(reservationId, payment.amountAtomic);
@@ -350,24 +351,14 @@ export async function runPay(
     let caveat: string | undefined;
     if (args.resultSchema !== undefined) {
       const check = validateResultBody(args.resultSchema, paid.text);
-      // A body PAST THE VALIDATION LIMIT is not a broken contract: the limit is
-      // this client's constant, the endpoint's success rule never ran, and the
-      // payment has already settled. Refusing it charged the caller and threw
-      // the product away. It is delivered with the caveat instead, and the cap
-      // itself is unchanged: raising it silently is a different decision.
+      // A PAID BODY IS ALWAYS DELIVERED. The authorization has already left and
+      // the money moved, so the success rule is a check on the body, never a
+      // reason to withhold it: withholding charged the caller and threw the
+      // product away. A body past this client's validation limit (never
+      // checked) and one that fails the rule (checked, and missed) both come
+      // back whole, flagged unverified, with a caveat that says which.
       if (check.unvalidated === true) caveat = unvalidatedCaveat(check);
-      else if (!check.valid) {
-        throw new CliError('CONTRACT_MISMATCH', `The paid response is not a usable result.`, {
-          fix: 'The payment has already settled and is counted against the session budget. Do not retry blind: the endpoint answered 2xx with a body that fails the success rule it was paid under.',
-          details: {
-            status: paid.status,
-            reason: check.reason,
-            ...(check.diagnosis !== undefined ? { diagnosis: check.diagnosis } : {}),
-            amountAtomic: payment.amountAtomic.toString(),
-            settlement: 'reported',
-          },
-        });
-      }
+      else if (!check.valid) caveat = failedRuleCaveat(check);
     }
     return deliver(url, lane, paid, {
       paid: true,
@@ -398,6 +389,26 @@ export async function runPay(
       },
     },
   );
+}
+
+/**
+ * THE PAID LEG WAITS AS LONG AS THE SELLER SAID IT WOULD TAKE, within reason.
+ * A signed authorization is already out when this leg starts, so a client
+ * timeout here abandons money the seller can still settle: a 10 s default cut
+ * off a provider advertising 360 s of work and threw its answer away. The
+ * requirement's `maxTimeoutSeconds` is that promise; it is clamped to
+ * {@link MAX_PAID_LEG_TIMEOUT_MS} so a hostile seller cannot hang the caller,
+ * and it never shortens what the user asked for with `--timeout`. The probe
+ * leg keeps the CLI timeout: nothing is at stake there.
+ */
+export const MAX_PAID_LEG_TIMEOUT_MS = 120_000;
+
+export function paidLegTimeoutMs(requirement: PaymentRequirements, cliTimeoutMs: number): number {
+  const advertised = requirement.maxTimeoutSeconds;
+  if (typeof advertised !== 'number' || !Number.isFinite(advertised) || advertised <= 0) {
+    return cliTimeoutMs;
+  }
+  return Math.max(cliTimeoutMs, Math.min(advertised * 1000, MAX_PAID_LEG_TIMEOUT_MS));
 }
 
 /** Which lane may pay this URL, or the exact refusal. */
@@ -551,6 +562,12 @@ function unvalidatedCaveat(check: ResultCheck): string {
   return `${check.reason ?? 'The result could not be validated.'} The body is delivered unverified: its shape was never checked against the success rule.`;
 }
 
+/** What the caller is told when a PAID body was checked and missed its success
+ *  rule: the rule that failed, and that the body is handed back unverified. */
+function failedRuleCaveat(check: ResultCheck): string {
+  return `${check.reason ?? 'The result does not satisfy its success schema.'} The payment settled, so the body is delivered as received, unverified: treat it as possibly not the answer that was paid for.`;
+}
+
 /** The transport's own remedy, when it has one, appended after the leg's
  *  payment sentence so the two never contradict each other. */
 function legFix(failure: { kind: string }): string {
@@ -651,13 +668,13 @@ async function assertRegistryVerified(
         'REGISTRY_MISMATCH',
         `The live 402 does not match what ${verification.registry} advertises for this resource (${verification.detail}).`,
         {
-          fix: 'Nothing was signed. Re-run `tenjin discover` to see the advertised terms; if the seller changed them, the registry will catch up.',
+          fix: `Nothing was signed. The seller's live terms differ from its listing on ${verification.registry}; check that listing, and pay once it matches or the seller corrects the endpoint.`,
           details: { registry: verification.registry, detail: verification.detail },
         },
       );
     case 'unlisted':
       throw new CliError('USAGE', 'No configured registry is known to list this resource.', {
-        fix: 'The Bazaar lane pays publicly listed deals only, and pay-time lookup leans on the local `discover` cache: run `tenjin discover [query]` so a sweep can surface this endpoint, then re-run pay.',
+        fix: "Nothing was signed. The Bazaar lane pays only a URL a configured registry lists under the seller's payTo address. Check the registries in `tenjin config get bazaarRegistries` for this exact URL; if it is listed elsewhere, add that registry with `tenjin config set bazaarRegistries`.",
       });
     case 'unavailable':
       throw new CliError(

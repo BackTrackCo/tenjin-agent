@@ -8,10 +8,11 @@ import {
   type Hex,
 } from 'viem';
 import { base } from 'viem/chains';
+import { USDC_ADDRESS as USDC } from './usdc-balance';
 import type { TenjinSigner } from './wallet/provider';
 
-// Values mirror the app's lib/chain.ts Base mainnet entry (chain 8453).
-export const USDC_ADDRESS: Address = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
+/** Lives in `usdc-balance.ts`, which the viem-free hooks can load. */
+export const USDC_ADDRESS: Address = USDC;
 export const USDC_DECIMALS = 6;
 
 export async function getUsdcBalance(address: Address, rpcUrl: string): Promise<bigint> {

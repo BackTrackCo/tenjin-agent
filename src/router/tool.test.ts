@@ -401,6 +401,74 @@ describe('what the tool refuses to execute', () => {
   });
 });
 
+describe('the paid body handed back to the model', () => {
+  it('returns a large paid body whole: the harness, not this tool, files an oversized result', async () => {
+    // Firecrawl-sized, with a multi-byte character throughout.
+    const body = { markdown: 'é'.repeat(300_000) };
+    const { fetchImpl } = net([
+      { url: ROUTER, status: 200, body: decision() },
+      ...providerLegs(body),
+    ]);
+    const result = await runRequestTool({ query: 'read the page' }, deps(fetchImpl));
+    expect(result.envelope).toMatchObject({ status: 'fulfilled' });
+    expect(result.envelope.result).toBe(JSON.stringify(body));
+  });
+
+  /**
+   * A PAID BODY IS ALWAYS DELIVERED. The success rule flags it; it never
+   * withholds what the money already bought.
+   */
+  const RULE = {
+    type: 'object',
+    properties: { data: { type: 'object' } },
+    required: ['data'],
+  };
+  const withRule = () => ({
+    ...decision(),
+    decision: { ...(decision().decision as object), contract: contract({ resultSchema: RULE }) },
+  });
+
+  it('delivers a paid body that misses its success rule, unverified, naming the rule', async () => {
+    const body = { error: 'rate limited' };
+    const { fetchImpl } = net([
+      { url: ROUTER, status: 200, body: withRule() },
+      ...providerLegs(body),
+    ]);
+    const result = await runRequestTool({ query: 'q' }, deps(fetchImpl));
+    expect(result.isError).toBe(true);
+    expect(result.envelope).toMatchObject({
+      status: 'unverified',
+      result: JSON.stringify(body),
+      cost: ['provider price 0.01 USD'],
+    });
+    expect(result.envelope.resultCaveat).toContain('does not satisfy its success schema');
+    expect(result.envelope.resultCaveat).toContain('data');
+  });
+
+  it('delivers a paid body too large to check, unverified, as before', async () => {
+    const body = { data: { blob: 'x'.repeat(200 * 1024) } };
+    const { fetchImpl } = net([
+      { url: ROUTER, status: 200, body: withRule() },
+      ...providerLegs(body),
+    ]);
+    const result = await runRequestTool({ query: 'q' }, deps(fetchImpl));
+    expect(result.envelope).toMatchObject({ status: 'unverified' });
+    expect(result.envelope.resultCaveat).toContain('not checked');
+  });
+
+  it('fulfils a paid body that passes its success rule', async () => {
+    const body = { data: { BTC: 1 } };
+    const { fetchImpl } = net([
+      { url: ROUTER, status: 200, body: withRule() },
+      ...providerLegs(body),
+    ]);
+    const result = await runRequestTool({ query: 'q' }, deps(fetchImpl));
+    expect(result.isError).toBe(false);
+    expect(result.envelope).toMatchObject({ status: 'fulfilled', result: JSON.stringify(body) });
+    expect(result.envelope.resultCaveat).toBeUndefined();
+  });
+});
+
 describe('what the tool leaves for the status line', () => {
   it('shows the executed provider and its price, and returns the same envelope', async () => {
     await noteSession(dir, 'sess-1');

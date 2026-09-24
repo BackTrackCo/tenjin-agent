@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { runPay } from './pay';
+import { MAX_PAID_LEG_TIMEOUT_MS, paidLegTimeoutMs, runPay } from './pay';
 import { saveSweepListings } from '../lib/bazaar';
 import { CliError } from '../lib/errors';
 import { knownDeploymentOrigins } from '../lib/production-origin';
@@ -136,11 +136,11 @@ const LIVE_ACCEPT = {
 
 /** Registry hits go through GLOBAL fetch (the SDK client); endpoint hits go
  *  through the injected fetchImpl, so the two lanes cannot be confused. */
-function stubRegistry(answer: () => Response): { urls: string[] } {
+function stubRegistry(answer: (url: string) => Response): { urls: string[] } {
   const urls: string[] = [];
   vi.stubGlobal('fetch', (async (input: Parameters<typeof fetch>[0]) => {
     urls.push(String(input));
-    return answer();
+    return answer(String(input));
   }) as typeof fetch);
   return { urls };
 }
@@ -342,6 +342,65 @@ function attributionOf(header: string | undefined): { a?: string; s?: string[] }
   };
   return envelope.extensions?.['builder-code']?.info;
 }
+
+/** Answers each call after `delayMs`, or aborts with the caller's signal. */
+function slowFetch(responses: Response[], delays: number[]): typeof fetch {
+  return (async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const next = responses.shift();
+    const delayMs = delays.shift() ?? 0;
+    if (next === undefined) throw new Error('scripted fetch exhausted');
+    return await new Promise<Response>((resolve, reject) => {
+      const timer = setTimeout(() => resolve(next), delayMs);
+      init?.signal?.addEventListener('abort', () => {
+        clearTimeout(timer);
+        reject(init.signal?.reason ?? new Error('aborted'));
+      });
+    });
+  }) as typeof fetch;
+}
+
+describe('runPay, paid-leg timeout', () => {
+  it('bounds the paid leg by the seller-advertised maxTimeoutSeconds, not the CLI timeout', async () => {
+    const fixture = buildPaymentRequired({ maxTimeoutSeconds: 1 });
+    const fetch = slowFetch(
+      [
+        json(402, {}, { 'PAYMENT-REQUIRED': fixture.header }),
+        json(200, { answer: 'slow but paid' }),
+      ],
+      [0, 150],
+    );
+    const result = await runPay({ url: TENJIN_URL }, makeCtx({ timeout: 50 }), {
+      ...PUBLIC_DNS,
+      fetchImpl: fetch,
+      provider: testWalletProvider(),
+      authorizer: fakeAuthorizer('allow'),
+    });
+    expect((result.data as { paid: boolean }).paid).toBe(true);
+  });
+
+  it('keeps the unpaid probe on the CLI timeout', async () => {
+    const fixture = buildPaymentRequired({ maxTimeoutSeconds: 1 });
+    const fetch = slowFetch([json(402, {}, { 'PAYMENT-REQUIRED': fixture.header })], [150]);
+    await expect(
+      runPay({ url: TENJIN_URL }, makeCtx({ timeout: 50 }), { ...PUBLIC_DNS, fetchImpl: fetch }),
+    ).rejects.toBeInstanceOf(CliError);
+  });
+
+  it('clamps the advertised bound and never goes below the CLI timeout', () => {
+    const req = (maxTimeoutSeconds: number) =>
+      ({
+        ...buildPaymentRequired().paymentRequired.accepts[0]!,
+        maxTimeoutSeconds,
+      }) as PaymentRequirements;
+    expect(paidLegTimeoutMs(req(30), 10_000)).toBe(30_000);
+    expect(paidLegTimeoutMs(req(360), 10_000)).toBe(MAX_PAID_LEG_TIMEOUT_MS);
+    expect(paidLegTimeoutMs(req(2), 10_000)).toBe(10_000);
+    expect(paidLegTimeoutMs(req(0), 10_000)).toBe(10_000);
+    expect(paidLegTimeoutMs(req(Number.NaN), 10_000)).toBe(10_000);
+    // A user who asked for longer than the clamp keeps it.
+    expect(paidLegTimeoutMs(req(360), 300_000)).toBe(300_000);
+  });
+});
 
 describe('runPay, builder-code attribution', () => {
   it('sends the CLI service code when the 402 advertises builder-code', async () => {
@@ -679,9 +738,84 @@ describe('runPay, bazaar lane', () => {
     );
     const fixture = buildPaymentRequired();
     const { fetch } = scriptedFetch([json(402, {}, { 'PAYMENT-REQUIRED': fixture.header })]);
+    const err = await runPay({ url: FOREIGN_URL }, makeCtx(), {
+      ...PUBLIC_DNS,
+      fetchImpl: fetch,
+    }).catch((e: unknown) => e);
+    expect(err).toMatchObject({ code: 'USAGE' });
+    // The fix names what the user can check, never a verb this build does not
+    // register (`discover` is shelved).
+    expect((err as CliError).fix).toContain('bazaarRegistries');
+    expect((err as CliError).fix).not.toContain('discover');
+  });
+
+  /**
+   * AN UNSTORED RESOURCE IS LOOKED UP BY ITSELF. CDP's list endpoint ignores
+   * `payTo` and returns the same first page of ~17,000, so a URL no sweep had
+   * stored was refused as unlisted; its search takes the payTo and the
+   * resource, and answers with that one listing.
+   */
+  it('finds an unstored listing through the registry search, by resource and payTo', async () => {
+    await writeConfig();
+    const registry = stubRegistry((url) =>
+      url.includes('/discovery/search?')
+        ? json(200, { x402Version: 2, resources: registryListing(FOREIGN_URL, LIVE_ACCEPT).items })
+        : // What CDP's list answers whatever the filter: somebody else's page.
+          json(200, registryListing('https://other.example/api', LIVE_ACCEPT)),
+    );
+    const fixture = buildPaymentRequired();
+    const { fetch } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': fixture.header }),
+      json(200, { enriched: true }),
+    ]);
+    const result = await runPay({ url: `${FOREIGN_URL}?q=hello` }, makeCtx(), {
+      ...PUBLIC_DNS,
+      fetchImpl: fetch,
+      provider: testWalletProvider(),
+      authorizer: fakeAuthorizer('allow'),
+    });
+    expect(result.data).toMatchObject({ paid: true, registry: REGISTRY });
+    expect(registry.urls).toHaveLength(1);
+    const asked = new URL(registry.urls[0]!);
+    expect(asked.pathname).toBe('/discovery/search');
+    // The resource's identity, without the per-call query, under the live payTo.
+    expect(asked.searchParams.get('urlSubstring')).toBe(FOREIGN_URL);
+    expect(asked.searchParams.get('payTo')).toBe(LIVE_ACCEPT.payTo);
+  });
+
+  it('falls back to the payTo-filtered list on a registry with no such search', async () => {
+    await writeConfig();
+    const registry = stubRegistry((url) =>
+      url.includes('/discovery/search?')
+        ? json(404, { error: 'not found' })
+        : json(200, registryListing(FOREIGN_URL, LIVE_ACCEPT)),
+    );
+    const fixture = buildPaymentRequired();
+    const { fetch } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': fixture.header }),
+      json(200, { enriched: true }),
+    ]);
+    const result = await runPay({ url: FOREIGN_URL }, makeCtx(), {
+      ...PUBLIC_DNS,
+      fetchImpl: fetch,
+      provider: testWalletProvider(),
+      authorizer: fakeAuthorizer('allow'),
+    });
+    expect(result.data).toMatchObject({ paid: true, registry: REGISTRY });
+    expect(registry.urls).toHaveLength(2);
+    expect(new URL(registry.urls[1]!).searchParams.get('payTo')).toBe(LIVE_ACCEPT.payTo);
+  });
+
+  /** A search that fails is the registry not answering, never "not listed". */
+  it('fails the lane closed when the search itself fails', async () => {
+    await writeConfig();
+    const registry = stubRegistry(() => json(503, {}));
+    const fixture = buildPaymentRequired();
+    const { fetch } = scriptedFetch([json(402, {}, { 'PAYMENT-REQUIRED': fixture.header })]);
     await expect(
       runPay({ url: FOREIGN_URL }, makeCtx(), { ...PUBLIC_DNS, fetchImpl: fetch }),
-    ).rejects.toMatchObject({ code: 'USAGE' });
+    ).rejects.toMatchObject({ code: 'NETWORK_ERROR' });
+    expect(registry.urls).toHaveLength(1);
   });
 
   it('unreachable registries fail the lane closed', async () => {
@@ -707,8 +841,7 @@ describe('runPay, bazaar lane', () => {
 
   it('verifies via a stored discover listing when the live lookup finds nothing', async () => {
     await writeConfig();
-    // The live registry answers, but with an empty page: exactly the CDP shape,
-    // whose list filter is a no-op and whose search cannot match a URL.
+    // The live registry answers, but lists nothing for this resource.
     stubRegistry(() =>
       json(200, { x402Version: 2, items: [], pagination: { limit: 20, offset: 0, total: 0 } }),
     );
@@ -937,24 +1070,59 @@ describe('runPay, the shared request gate', () => {
     expect(calls).toHaveLength(1);
   });
 
-  it('treats a 2xx that fails its success schema as a paid failure', async () => {
+  it('delivers a paid 2xx that fails its success schema, unverified, naming the rule', async () => {
     const fixture = buildPaymentRequired();
     const { fetch } = scriptedFetch([
       json(402, {}, { 'PAYMENT-REQUIRED': fixture.header }),
       json(200, { status: 'error' }),
     ]);
     const authorizer = fakeAuthorizer('allow');
-    const err = await runPay(
+    const result = await runPay(
       {
         url: TENJIN_URL,
         resultSchema: { type: 'object', properties: { data: {} }, required: ['data'] },
       },
       makeCtx(),
       { ...PUBLIC_DNS, fetchImpl: fetch, provider: testWalletProvider(), authorizer },
-    ).catch((e: unknown) => e);
-    expect((err as CliError).code).toBe('CONTRACT_MISMATCH');
+    );
+    const data = result.data as {
+      paid: boolean;
+      bodyText: string;
+      resultUnverified?: boolean;
+      resultCaveat?: string;
+    };
+    expect(data.paid).toBe(true);
+    // The body the money bought, whole.
+    expect(data.bodyText).toBe(JSON.stringify({ status: 'error' }));
+    expect(data.resultUnverified).toBe(true);
+    expect(data.resultCaveat).toContain('does not satisfy its success schema');
+    expect(data.resultCaveat).toContain('data');
     // The authorization already left, so the spend stays accounted.
     expect(authorizer.commit).toHaveBeenCalled();
+  });
+
+  it('delivers a paid 2xx that satisfies its success schema with no caveat', async () => {
+    const fixture = buildPaymentRequired();
+    const { fetch } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': fixture.header }),
+      json(200, { data: 1 }),
+    ]);
+    const result = await runPay(
+      {
+        url: TENJIN_URL,
+        resultSchema: { type: 'object', properties: { data: {} }, required: ['data'] },
+      },
+      makeCtx(),
+      {
+        ...PUBLIC_DNS,
+        fetchImpl: fetch,
+        provider: testWalletProvider(),
+        authorizer: fakeAuthorizer('allow'),
+      },
+    );
+    const data = result.data as { paid: boolean; resultUnverified?: boolean };
+    expect(data.paid).toBe(true);
+    expect(data.resultUnverified).toBeUndefined();
   });
 });
 
