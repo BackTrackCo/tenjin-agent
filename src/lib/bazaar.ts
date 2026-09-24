@@ -269,7 +269,7 @@ async function listingsFor(
     urlSubstring: resourceIdentity(url) ?? url,
     limit: String(SEARCH_LIMIT),
   });
-  const res = await fetch(`${registry}/discovery/search?${params.toString()}`, {
+  const res = await fetch(`${registry.replace(/\/+$/, '')}/discovery/search?${params.toString()}`, {
     headers: { accept: 'application/json' },
     signal: AbortSignal.timeout(timeoutMs),
   });
