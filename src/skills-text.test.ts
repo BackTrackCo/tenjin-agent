@@ -978,10 +978,14 @@ describe('the public render did not move', () => {
   //
   // Both moved 2026-09-23 with the origin flip: the one skills.md link each page
   // carries now names tenjin.sh. No criteria changed.
+  //
+  // tenjin-publish also moved 2026-09-23 on main: the "real stop" list names the
+  // new credential warns (tenjin-agent#388, #296), as the triage test above
+  // requires. Both changes land in this merge, so the digest reflects both.
   it('renders the exact bytes a public install shipped before team mode existed', () => {
     expect(Object.fromEntries(SHAPED_SKILLS.map((n) => [n, digest(read(n))]))).toEqual({
       'tenjin-search': '69a7a0657ad6e66b37d06ddcd54809a1',
-      'tenjin-publish': '99540621436063f856b458332c705f0c',
+      'tenjin-publish': '2c0f33930582f69e59b99f02f49ab757',
     });
   });
 

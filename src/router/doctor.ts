@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { homedir } from 'node:os';
 import { promisify } from 'node:util';
 import { CliError } from '../lib/errors';
-import { inspectHooksFile, ownsHookEntry } from '../lib/harness-hooks';
+import { inspectHooksFile, ownsHookEntry, pruneOurHandlers } from '../lib/harness-hooks';
 import { httpRequest } from '../lib/http';
 import { toMoney } from '../lib/money';
 import { PRODUCTION_ORIGIN } from '../lib/production-origin';
@@ -11,6 +11,7 @@ import { onPath } from '../lib/skill-wiring';
 import { describeWallet, resolveWalletProvider } from '../lib/wallet';
 import { walletFileExists } from '../lib/wallet/store';
 import type { CommandContext, CommandResult } from '../context';
+import { agentsWithoutRequestTool } from './agent-tools';
 import { ROUTER_PATH } from './decision';
 import {
   ALLOW_RULE,
@@ -18,9 +19,12 @@ import {
   mcpAddCommand,
   mcpScope,
   readMcpEntry,
+  routerHookPlan,
   routerSettingsPath,
   type McpEntryState,
 } from './install';
+import { REQUEST_TOOL } from './names';
+import { inspectStatusLine, STATUS_LINE_COMMAND } from './status-line-wiring';
 
 /**
  * `tenjin doctor` for the router product: the six things that decide whether a
@@ -83,6 +87,7 @@ export async function runRouterDoctor(
   });
   const checks: RouterCheck[] = [nodeCheck(deps.nodeVersion ?? process.version)];
   checks.push(await hooksCheck(settingsPath, ctx.dataDir));
+  checks.push(await statusLineCheck(settingsPath));
   checks.push(
     await mcpCheck(
       deps,
@@ -95,6 +100,8 @@ export async function runRouterDoctor(
   checks.push(spendCheck(settings.policy.maxAutoSpendAtomic, settings.policy.sessionBudgetAtomic));
   checks.push(...(await walletCheck(ctx)));
   checks.push(await routerCheck(settings.baseUrl, ctx.flags.timeout, deps.fetchImpl));
+  const agents = await subagentsCheck(deps.cwd ?? process.cwd(), deps.homeDir ?? homedir());
+  if (agents !== null) checks.push(agents);
 
   const failure = checks.find((c) => c.status === 'fail' && c.required);
   const data = { checks, dataDir: ctx.dataDir, baseUrl: settings.baseUrl, settingsPath };
@@ -121,6 +128,23 @@ export async function runRouterDoctor(
   };
 }
 
+/**
+ * INFORMATIONAL, NEVER A FAILURE. A custom agent whose `tools:` leave the
+ * request tool out is a choice its author may have meant, so this names those
+ * agents and the one line that would change it, and counts as passing. It is
+ * absent when there is nothing to name. The files are only read.
+ */
+async function subagentsCheck(cwd: string, homeDir: string): Promise<RouterCheck | null> {
+  const excluded = await agentsWithoutRequestTool({ cwd, homeDir });
+  if (excluded.length === 0) return null;
+  return {
+    name: 'subagents',
+    status: 'ok',
+    required: false,
+    detail: `${excluded.join(', ')} ${excluded.length === 1 ? 'is' : 'are'} offered no paid lookups: add ${REQUEST_TOOL} to tools: to allow paid lookups there`,
+  };
+}
+
 function nodeCheck(version: string): RouterCheck {
   const major = Number(/^v(\d+)/.exec(version)?.[1] ?? '0');
   return major >= NODE_FLOOR
@@ -132,6 +156,46 @@ function nodeCheck(version: string): RouterCheck {
         detail: `${version} is below the Node ${NODE_FLOOR} floor.`,
         fix: `Install Node ${NODE_FLOOR} or newer, then re-run \`tenjin doctor\`.`,
       };
+}
+
+/**
+ * The live footer, which is the one check here that is never required: a lookup
+ * runs exactly the same without it. It reports what is in the file, including a
+ * status line of the user's that this CLI deliberately did not touch.
+ */
+async function statusLineCheck(path: string): Promise<RouterCheck> {
+  const found = await inspectStatusLine(path);
+  const name = 'status line';
+  if (found.warning !== undefined) {
+    return { name, status: 'warn', required: false, detail: found.warning };
+  }
+  switch (found.state) {
+    case 'ours':
+      return { name, status: 'ok', required: false, detail: `\`${STATUS_LINE_COMMAND}\`` };
+    case 'composed':
+      return {
+        name,
+        status: 'ok',
+        required: false,
+        detail: 'yours, with the x402 footer appended',
+      };
+    case 'foreign':
+      return {
+        name,
+        status: 'warn',
+        required: false,
+        detail: 'yours is registered and was left alone, so there is no live x402 footer',
+        fix: 'Run `tenjin install --status-line compose` to show both.',
+      };
+    default:
+      return {
+        name,
+        status: 'warn',
+        required: false,
+        detail: 'not registered, so lookups run without the live footer',
+        fix: 'Run `tenjin install` to register it.',
+      };
+  }
 }
 
 async function hooksCheck(path: string, dataDir: string): Promise<RouterCheck> {
@@ -167,12 +231,74 @@ async function hooksCheck(path: string, dataDir: string): Promise<RouterCheck> {
       fix: 'Run `tenjin install` to write the permission rule.',
     };
   }
+  // AN INSTALL FROM AN OLDER BUILD STILL WORKS, so this is a warning with its
+  // one-command remedy, not a failure: its `tenjin hook native` entry is a
+  // no-op now, and the entries it lacks are offers it does not make.
+  const drift = planDrift(found.hooks, dataDir);
+  if (drift.missing.length > 0 || drift.stale.length > 0) {
+    const parts = [
+      ...(drift.missing.length > 0 ? [`missing ${drift.missing.join(', ')}`] : []),
+      ...(drift.stale.length > 0 ? [`stale ${drift.stale.join(', ')}`] : []),
+    ];
+    return {
+      name: 'hooks',
+      status: 'warn',
+      required: false,
+      detail: `${events.join(' and ')} registered, but not as this build writes them: ${parts.join('; ')}`,
+      fix: 'Run `tenjin install --refresh`.',
+    };
+  }
   return {
     name: 'hooks',
     status: 'ok',
     required: true,
     detail: `${events.join(' and ')} registered, ${ALLOW_RULE} allowed`,
   };
+}
+
+/** One entry as `event matcher → command`, the way doctor names it. */
+function entryLabel(event: string, matcher: unknown, command: string): string {
+  return `${event}${typeof matcher === 'string' ? ` ${matcher}` : ''} → ${command}`;
+}
+
+/**
+ * Which of `routerHookPlan()`'s entries this file lacks, and which handlers of
+ * ours it carries that the plan no longer writes (an older install's
+ * `tenjin hook native`, or a shelf-era entry). Compared by event, matcher and
+ * command, so a timeout the writer would raise is not called drift here.
+ */
+function planDrift(
+  hooks: Record<string, unknown[]>,
+  dataDir: string,
+): { missing: string[]; stale: string[] } {
+  const planned = (routerHookPlan() as PlannedEntry[]).map((entry) =>
+    entryLabel(entry.event, entry.matcher, entry.hooks[0]!.command),
+  );
+  const present: string[] = [];
+  for (const [event, list] of Object.entries(hooks)) {
+    for (const entry of list) {
+      if (!ownsHookEntry(entry, dataDir)) continue;
+      const { matcher, hooks: handlers } = entry as { matcher?: unknown; hooks: unknown[] };
+      // Ours only: a handler someone hand-merged beside ours is not drift.
+      const kept = pruneOurHandlers(entry, dataDir) as { hooks: unknown[] } | null;
+      for (const handler of handlers.filter((h) => kept === null || !kept.hooks.includes(h))) {
+        const command = (handler as { command?: unknown }).command;
+        const url = (handler as { url?: unknown }).url;
+        const label = typeof command === 'string' ? command : typeof url === 'string' ? url : '?';
+        present.push(entryLabel(event, matcher, label));
+      }
+    }
+  }
+  return {
+    missing: planned.filter((label) => !present.includes(label)),
+    stale: present.filter((label) => !planned.includes(label)),
+  };
+}
+
+interface PlannedEntry {
+  event: string;
+  matcher?: string;
+  hooks: { command: string }[];
 }
 
 function allowRules(settings: Record<string, unknown>): string[] {

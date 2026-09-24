@@ -103,8 +103,8 @@ const CapabilityFields = {
   /** The service's own name, not the x402 reseller in front of it. */
   provider: z.string().min(1).max(120),
   capabilityDescription: z.string().min(1).max(500),
-  /** What the provider charges, atomic USDC. DISPLAY ONLY: the amount actually
-   *  signed is what `gateSpend` caps. */
+  /** What the provider charges, atomic USDC. The `request` tool refuses a live
+   *  402 above it; `gateSpend` still caps the amount actually signed. */
   providerPriceAtomic: z.string().regex(/^\d+$/),
 };
 

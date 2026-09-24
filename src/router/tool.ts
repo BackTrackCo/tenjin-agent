@@ -1,22 +1,24 @@
 import { runPay, type AdvertisedTerms, type PayDeps } from '../commands/pay';
 import { CliError } from '../lib/errors';
 import { toMoney } from '../lib/money';
+import { mask } from '../lib/redact';
 import { assertResultSchema, canonicalHash } from '../lib/request-schema';
 import { resolveContextSettings } from '../lib/settings';
 import type { SpendAuthorizer, WalletProvider } from '../lib/wallet';
 import type { TenjinSigner } from '../lib/wallet/provider';
 import type { CommandContext } from '../context';
 import { requestDecision, type DecisionContract, type DecisionDiagnostics } from './decision';
+import { openLookupFooter } from './progress';
 
 /**
  * The `request` tool: one free decision per lookup, then ONE payment, to the
  * provider.
  *
- * THE QUERY IS ALWAYS SENT AND THE ID IS ONLY A SHORTCUT. With an id, the tool
- * runs the decision the hook already prepared and never re-decides. Without
- * one, or when the id was prepared for an obviously different target, it asks
- * for exactly one fresh decision from the query and the turn's packet, which is
- * the pair the routing corpus is calibrated on.
+ * THE QUERY IS ALWAYS SENT, AND THE ID NAMES THE SERVICE. With an id, the
+ * backend binds the query to the capability the hook's line offered and never
+ * re-decides which service (tenjin#885). Without one, it asks for exactly one
+ * fresh decision from the query and the turn's packet, which is the pair the
+ * routing corpus is calibrated on.
  *
  * WHAT IS CHECKED LOCALLY, BEFORE ANYTHING IS SIGNED: the decision's arguments
  * against the schema it carries, its success rule against the compiler, its
@@ -32,7 +34,8 @@ import { requestDecision, type DecisionContract, type DecisionDiagnostics } from
 
 export interface RequestToolArgs {
   query: string;
-  /** The prepared decision from the hook's line. A shortcut, never authority. */
+  /** The turn id from the hook's line. It names the service that line offered, and
+   *  the server runs that one; it grants nothing locally, every cap still applies. */
   id?: string;
 }
 
@@ -66,6 +69,20 @@ export async function runRequestTool(
       'A request needs a query naming the task, its inputs and any constraints.',
     );
   }
+  // THE HOOKS NEVER SEE THIS CALL, so the native hook's rule applies here too: a
+  // query the mask would change is not sent, masked or otherwise. The server
+  // stores it against the id and the provider logs it, and an injected page can
+  // write it.
+  if (mask(query) !== query) {
+    return fail('native', 'the query carries a credential-shaped value, so nothing was sent');
+  }
+  // THE FOOTER, OPENED FIRST AND TRUSTED WITH NOTHING: it shows this lookup in
+  // the terminal while it runs, resolved to a session through the hook's own
+  // binding for `id`, and every call on it swallows its own failure.
+  const footer = await openLookupFooter(deps.ctx.dataDir, {
+    ...(args.id !== undefined && args.id.length > 0 ? { id: args.id } : {}),
+  });
+  await footer.routing();
   const settings = await resolveContextSettings(deps.ctx);
   const decisionDeps = {
     ctx: deps.ctx,
@@ -74,21 +91,18 @@ export async function runRequestTool(
   };
 
   // ONE CALL, ONE DECISION. The query the model wrote goes to the backend with
-  // the turn id when it has one, and the backend decides from that query plus
-  // the packet it stored under that id. Nothing is fetched by id and nothing is
-  // waited for: an id the backend does not know is its own plain note, and the
-  // decision still runs from the query.
-  //
-  // THE SHORTCUT IS GONE ON PURPOSE. Running a decision the gate prepared from
-  // the whole turn measures 53 of 56 against 55 of 56 for this pair, and on a
-  // mixed turn it paid for the wrong lookup: the only thing the client could
-  // check was whether the two named different URLs, which that case did not.
+  // the turn id when it has one; the backend binds the query to the service
+  // that id offered, or decides from the query and the stored packet when there
+  // is no id. Nothing is fetched by id and nothing is waited for: an id the
+  // backend does not know is its own plain note, and the decision still runs
+  // from the query.
   const fresh = await requestDecision(
     'tool',
     { query, ...(args.id !== undefined && args.id.length > 0 ? { id: args.id } : {}) },
     decisionDeps,
   );
   if (fresh.status === 'failed') {
+    await footer.done('failed');
     return fail('failed', fresh.reason, {
       ...(fresh.errorCode !== undefined ? { errorCode: fresh.errorCode } : {}),
     });
@@ -96,6 +110,7 @@ export async function runRequestTool(
   const { decision, note } = fresh.decision;
 
   if (decision.action !== 'execute') {
+    await footer.done(decision.action === 'native' ? 'native' : 'needs_input');
     // Both non-execute arms carry diagnostics by construction now: an answer
     // without them does not parse, so there is nothing to fall back to here.
     return fail(
@@ -107,18 +122,28 @@ export async function runRequestTool(
 
   const contract = decision.contract;
   const refusal = checkContract(contract);
-  if (refusal !== null) return fail(refusal.status, refusal.reason);
+  if (refusal !== null) {
+    await footer.done(refusal.status);
+    return fail(refusal.status, refusal.reason);
+  }
 
-  // The router handed this caller the destination, which is the provenance the
-  // Bazaar lane asks for. It carries NO price: the advertised-price check and
-  // the live-versus-advertised check are gone, and `gateSpend` caps the amount
-  // actually signed. A ceiling the server states is not a ceiling.
-  const terms: AdvertisedTerms = { source: decision.provider };
+  // The decision's advertised price caps the live 402, refused before signing.
+  // It bounds a provider or stale catalog charging over that price, and an
+  // injected `request` call; it does not bound a hostile server, which can
+  // still quote up to `maxAutoSpend`. `gateSpend` stays the money authority.
+  const terms: AdvertisedTerms = {
+    source: decision.provider,
+    maxAmountAtomic: decision.providerPriceAtomic,
+  };
 
   try {
     // The request is the server's, sent verbatim: the only thing built here is
     // the decision about whether to send it.
     const built = contract.request;
+    // WHAT IS ABOUT TO BE CALLED, named while it is being called. This is the
+    // executed destination, not the hint's suggestion, which is the whole point
+    // of showing it.
+    await footer.calling({ provider: built.url, ...paramsOf(contract) });
     const paid = await runPay(
       {
         url: built.url,
@@ -161,7 +186,13 @@ export async function runRequestTool(
     // limit and have it read as a checked, paid result. The body still rides
     // along whole, because the money moved and withholding the product would be
     // a second loss on top of the first.
+    const shown = {
+      provider: built.url,
+      ...paramsOf(contract),
+      price: `$${toMoney(providerAtomic.toString()).usd}`,
+    };
     if (data.resultUnverified === true) {
+      await footer.done('unverified', shown);
       return {
         isError: true,
         summary: `Unverified result from ${base.supplier} · ${base.cost.join(' · ')}`,
@@ -172,6 +203,7 @@ export async function runRequestTool(
         },
       };
     }
+    await footer.done('fulfilled', shown);
     return {
       isError: false,
       summary: `Fulfilled by ${base.supplier} · ${base.cost.join(' · ')}`,
@@ -189,6 +221,11 @@ export async function runRequestTool(
       settlement?: string;
       diagnosis?: Record<string, unknown>;
     };
+    await footer.done(status, {
+      provider: contract.request.url,
+      ...paramsOf(contract),
+      price: `$${toMoney(detail.amountAtomic ?? '0').usd}`,
+    });
     return fail(status, reason, {
       providerAtomic: BigInt(detail.amountAtomic ?? '0'),
       ...(detail.settlement !== undefined ? { settlement: detail.settlement } : {}),
@@ -254,6 +291,11 @@ function unsafeHeader(headers: Record<string, string>): string | null {
     if (value.length > 1_024 || /[\r\n]/.test(value)) return name;
   }
   return null;
+}
+
+/** The decision's own arguments, for the footer, or nothing to show. */
+function paramsOf(contract: DecisionContract): { parameters?: unknown } {
+  return contract.arguments !== undefined ? { parameters: contract.arguments } : {};
 }
 
 function supplierOf(url: string): string {

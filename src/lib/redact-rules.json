@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "note": "One rule table for every redaction surface in the CLI (src/lib/redact.ts), kept as data so the tenjin server-side ingest gate can vendor it verbatim. Every row is one detector: `id` is the stable finding `check`, `tier` is the finding severity, `match` is a JS regex or the name of an algorithmic detector a consumer must implement, `excerpt` is the masked-excerpt policy (never the secret), `skip` names a suppression predicate. `scopes` says where the row applies: `publish` (reported on the public marketplace), `team` (reported on a team shelf), `query` (its matches are replaced by the excerpt in hook queries by `mask()`; regex rows only). Precision first, as gitleaks and GitHub push protection do: a block row fires on a vendor prefix or an unambiguous shape, the generic `secret-assignment` row needs a secret-named word plus `=` or `:`, and entropy is never a trigger for a query. Table order is mask() order (the assignment row runs first, see its description). Several entries may share an `id`; they are one detector expressed as more than one pattern. Patterns adapted from gitleaks are MIT and attributed in NOTICE.md.",
+  "note": "One rule table for every redaction surface in the CLI (src/lib/redact.ts), kept as data so the tenjin server-side ingest gate can vendor it verbatim. Every row is one detector: `id` is the stable finding `check`, `tier` is the finding severity, `match` is a JS regex or the name of an algorithmic detector a consumer must implement, `excerpt` is the masked-excerpt policy (never the secret), `skip` names a suppression predicate. `scopes` says where the row applies: `publish` (reported on the public marketplace), `team` (reported on a team shelf), `query` (its matches are replaced by the excerpt in hook queries and router packets by `mask()`; regex rows, plus the `hex64`, `pemBlock` and `bip39` algorithm rows). Precision first, as gitleaks and GitHub push protection do: a block row fires on a vendor prefix or an unambiguous shape, the generic `secret-assignment` row needs a secret-named word plus `=` or `:`, and entropy is never a trigger for a query. Table order is mask() order (the assignment row runs first, see its description). Several entries may share an `id`; they are one detector expressed as more than one pattern. Patterns adapted from gitleaks are MIT and attributed in NOTICE.md.",
   "publicHexConstants": [
     {
       "value": "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
@@ -62,7 +62,7 @@
       "id": "secret-assignment",
       "tier": "warn",
       "scopes": ["query", "publish", "team"],
-      "description": "Secret-named assignment (API_KEY=, password:, token=) with a literal value. NOT the JSON-quoted form (\"password\": \"...\"): reading a quote after the name turned ordinary config keys into findings ({\"credentials\": \"include\"}, {\"max_tokens\": 128000}, {\"tokenizer\": \"cl100k_base\"}), and a JSON key is an identifier the shelf ranks on (owner decision, review round 6). The separator class is [ \\t] rather than \\s so a heading line (`## Token:`) never swallows the next line when mask() runs over whole text. FIRST IN THE TABLE ON PURPOSE: mask() applies rows in table order, and a value that is itself a vendor token (`OPENAI_API_KEY=sk-...`) must be taken whole by this row, name kept, before a vendor row could leave a stub for this row to re-match.",
+      "description": "Secret-named assignment (API_KEY=, password:, token=) with a literal value. The JSON-quoted form (\"password\": \"...\") is the third row, not a quote read here: reading a quote after this name turned ordinary config keys into findings ({\"credentials\": \"include\"}, {\"max_tokens\": 128000}, {\"tokenizer\": \"cl100k_base\"}, review round 6). The separator class is [ \\t] rather than \\s so a heading line (`## Token:`) never swallows the next line when mask() runs over whole text. FIRST IN THE TABLE ON PURPOSE: mask() applies rows in table order, and a value that is itself a vendor token (`OPENAI_API_KEY=sk-...`) must be taken whole by this row, name kept, before a vendor row could leave a stub for this row to re-match.",
       "source": "tenjin",
       "match": {
         "kind": "regex",
@@ -86,6 +86,25 @@
       "match": {
         "kind": "regex",
         "pattern": "(--(?:[a-z0-9]+-)*(?:api[_-]?key|api[_-]?token|access[_-]?key|access[_-]?token|auth[_-]?token|secret[_-]?key|private[_-]?key|subscription[_-]?key|credentials?|secret|token|password|passwd))[ \\t]+(\"[^\"]{6,}\"|'[^']{6,}'|[^\\s\"']{6,})",
+        "flags": "gi"
+      },
+      "excerpt": {
+        "kind": "custom",
+        "handler": "labeledValue"
+      },
+      "skip": {
+        "handler": "nonLiteralValue"
+      }
+    },
+    {
+      "id": "secret-assignment",
+      "tier": "warn",
+      "scopes": ["query", "publish", "team"],
+      "description": "Quoted secret name before `:` or `=` with a quoted value (\"password\": \"...\", 'api_key' = '...'), the JSON and YAML form of the first row (tenjin-agent#296). Narrower than the first row on purpose, so the review-round-6 config keys stay clean: the name must END in the secret word (no `max_tokens`, `tokenizer`, `passwordHash`), and the value must be quoted and carry a letter and a digit (no `128000`, no `\"include\"`). A letters-only quoted password is an accepted miss.",
+      "source": "tenjin (tenjin-agent#296)",
+      "match": {
+        "kind": "regex",
+        "pattern": "(?<=[\"'])([A-Za-z0-9_-]*(?:API[_-]?KEY|SECRET|ACCESS[_-]?KEY|SUBSCRIPTION[_-]?KEY|PRIVATE[_-]?KEY|PASSW(?:OR)?D|TOKEN|CREDENTIALS?|AUTH[_-]?TOKEN))[\"'][ \\t]*[:=][ \\t]*(\"(?=[^\"]*\\d)(?=[^\"]*[A-Za-z])[^\"]{6,}\"|'(?=[^']*\\d)(?=[^']*[A-Za-z])[^']{6,}')",
         "flags": "gi"
       },
       "excerpt": {
@@ -519,6 +538,146 @@
       }
     },
     {
+      "id": "basic-auth-header",
+      "tier": "warn",
+      "scopes": ["query", "publish"],
+      "description": "Authorization: Basic header: the base64 of user:password, under the entropy floor and on no vendor prefix (tenjin-agent#296). The header name is a bounded lookbehind behind a shape lookahead, so the mask keeps it, replaces the credential alone, and a whitespace run stays linear.",
+      "source": "tenjin (tenjin-agent#296)",
+      "match": {
+        "kind": "regex",
+        "pattern": "(?=[A-Za-z0-9+/]{8})(?<=\\bAuthorization:[ \\t]{0,16}Basic[ \\t]{1,16})[A-Za-z0-9+/]{8,}={0,2}(?![A-Za-z0-9+/=])",
+        "flags": "gi"
+      },
+      "excerpt": {
+        "kind": "mask",
+        "keep": 0
+      }
+    },
+    {
+      "id": "curl-user-credential",
+      "tier": "warn",
+      "scopes": ["query", "publish"],
+      "description": "curl -u / --user user:password on one command (tenjin-agent#296): the password is masked and the command and user kept. Anchored on `curl` within 200 characters of the flag on the same pipeline segment, so `docker run -u 1000:1000` never matches. A `$VAR`, a placeholder or a bare lowercase word is skipped as the assignment row skips it.",
+      "source": "tenjin (tenjin-agent#296)",
+      "match": {
+        "kind": "regex",
+        "pattern": "(\\bcurl\\b[^\\n|;&]{0,200}?[ \\t](?:-u|--user)(?:[ \\t]+|=)[\"']?[^\\s:\"']{1,64}):([^\\s\"']+)",
+        "flags": "g"
+      },
+      "excerpt": {
+        "kind": "custom",
+        "handler": "labeledValue"
+      },
+      "skip": {
+        "handler": "nonLiteralValue"
+      }
+    },
+    {
+      "id": "url-query-credential",
+      "tier": "warn",
+      "scopes": ["query", "publish"],
+      "description": "Credential-named query parameter on a URL (?key=, &api_key=, ?token=, ?sig=, ?password=): the value is masked and the name kept. The value class stops at `&`, `#`, whitespace, quotes and brackets, so a value another row already replaced with `[redacted …]` is not masked twice.",
+      "source": "tenjin (tenjin-agent#388)",
+      "match": {
+        "kind": "regex",
+        "pattern": "([?&](?:key|apikey|api_key|api-key|token|access_token|auth|secret|client_secret|sig|signature|password|pwd))=([^&#\\s\"'<>\\[\\]]+)",
+        "flags": "gi"
+      },
+      "excerpt": {
+        "kind": "custom",
+        "handler": "labeledValue"
+      }
+    },
+    {
+      "id": "url-path-credential",
+      "tier": "warn",
+      "scopes": ["query", "publish"],
+      "description": "A path segment of 24 or more [A-Za-z0-9_-] characters that mixes letters and digits, on an http(s) URL: the shape a webhook secret or a signed-link token takes. A CDN hash or a content id in a path masks too; in a query that costs one routing offer. Four exclusions, each from a measured miss: a segment with two hyphenated words (an article slug), a 40-hex git commit after a git path marker (/commit/, /commits/, /blob/, /tree/, /raw/, /compare/) or on a git host (github.com, gitlab.com, bitbucket.org, codeberg.org), since elsewhere a 40-hex segment is a node key (https://<name>.quiknode.pro/<40 hex>/), a 0x-prefixed 64-hex (the hex64 row already calls a 64-hex inside a URL a hash), a UUID, and a URL character class that stops at quotes, brackets and commas, so one match never spans two URLs in a JSON string. The segment must be whole (a `.` or `%` inside it is a filename or an encoded slug, not a token). The shape lookahead runs before the scheme lookbehind, and the lookbehind is bounded, so a line of short segments stays linear.",
+      "source": "tenjin (tenjin-agent#388)",
+      "match": {
+        "kind": "regex",
+        "pattern": "\\/(?=[\\w-]{24})(?<=\\bhttps?:\\/\\/[^\\s?#\"'`<>()\\[\\]{},]{1,2048}\\/)(?=[\\w-]*[A-Za-z])(?=[\\w-]*\\d)(?![\\w-]*?(?<![A-Za-z])[A-Za-z]{3,}-[A-Za-z]{3})(?!(?:0x[0-9a-f]{64}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?![\\w-]))(?!(?=[0-9a-f]{40}(?![\\w-]))(?<=\\/(?:commit|commits|blob|tree|raw|compare)\\/|\\bhttps?:\\/\\/(?:www\\.)?(?:github\\.com|gitlab\\.com|bitbucket\\.org|codeberg\\.org)\\/[^\\s?#\"'`<>()\\[\\]{},]{0,2048}))[\\w-]{24,}(?=[.;:!]*(?:[\\/?#\\s\"'<>(),\\[\\]{}`]|$))",
+        "flags": "gi"
+      },
+      "excerpt": {
+        "kind": "mask",
+        "keep": 1
+      }
+    },
+    {
+      "id": "bare-hex-key",
+      "tier": "warn",
+      "scopes": ["query", "publish"],
+      "description": "64 hex with no 0x, the shape a private key takes when a tool exports it bare (tenjin-agent#388). A hash label within two tokens before it (tx, txn, txid, hash, sha, sha256, hmac, digest, commit, id, checksum, sig, signature, across markdown emphasis) or an http(s) URL around it makes it a hash and it is kept, the same downgrade the 0x form has. A 128-hex run (sha512) is not a 64-hex run and never matches.",
+      "source": "tenjin (tenjin-agent#388)",
+      "match": {
+        "kind": "regex",
+        "pattern": "(?<![0-9A-Za-z])[0-9a-fA-F]{64}(?![0-9A-Za-z])",
+        "flags": "g"
+      },
+      "excerpt": {
+        "kind": "mask",
+        "keep": 0
+      },
+      "skip": {
+        "handler": "hashLabelled"
+      }
+    },
+    {
+      "id": "bare-hex-key",
+      "tier": "warn",
+      "scopes": ["query", "publish"],
+      "description": "A 64-hex key split into two 32-hex halves by one space or one newline, with an optional 0x on the first half. Bounded to exactly two adjacent halves: a third 32-hex run before or after (a list of MD5 sums) keeps the whole list as written, and a hash label keeps it as for the row above.",
+      "source": "tenjin (tenjin-agent#388)",
+      "match": {
+        "kind": "regex",
+        "pattern": "(?<![0-9A-Za-z])(?<![0-9a-fA-F]{32}[ \\n])(?:0x)?[0-9a-fA-F]{32}[ \\n][0-9a-fA-F]{32}(?![0-9A-Za-z])(?![ \\n][0-9a-fA-F]{32})",
+        "flags": "g"
+      },
+      "excerpt": {
+        "kind": "mask",
+        "keep": 0
+      },
+      "skip": {
+        "handler": "hashLabelled"
+      }
+    },
+    {
+      "id": "solana-secret-key",
+      "tier": "warn",
+      "scopes": ["query", "publish"],
+      "description": "An 87 or 88 character base58 run: a Solana keypair's 64-byte secret key as a wallet exports it (tenjin-agent#388). A transaction signature has the same shape, so a tx or sig label before it or an http(s) URL around it keeps it, as for bare-hex-key. A 32-byte public key is 43 or 44 characters and never matches.",
+      "source": "tenjin (tenjin-agent#388)",
+      "match": {
+        "kind": "regex",
+        "pattern": "(?<![1-9A-HJ-NP-Za-km-z])[1-9A-HJ-NP-Za-km-z]{87,88}(?![1-9A-HJ-NP-Za-km-z])",
+        "flags": "g"
+      },
+      "excerpt": {
+        "kind": "mask",
+        "keep": 0
+      },
+      "skip": {
+        "handler": "hashLabelled"
+      }
+    },
+    {
+      "id": "solana-secret-key",
+      "tier": "warn",
+      "scopes": ["query", "publish"],
+      "description": "A JSON array of exactly 64 integers from 0 to 255: the solana-keygen keypair file.",
+      "source": "tenjin (tenjin-agent#388)",
+      "match": {
+        "kind": "regex",
+        "pattern": "\\[\\s*(?:(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)\\s*,\\s*){63}(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)\\s*\\]",
+        "flags": "g"
+      },
+      "excerpt": {
+        "kind": "mask",
+        "keep": 1
+      }
+    },
+    {
       "id": "wallet-address",
       "tier": "warn",
       "scopes": ["publish"],
@@ -795,7 +954,7 @@
     {
       "id": "raw-private-key",
       "tier": "block",
-      "scopes": ["publish", "team"],
+      "scopes": ["query", "publish", "team"],
       "description": "0x + 64 hex with no hash context. Demoted to the warn detector hex32-value when a hash/identifier label precedes it (within two intervening tokens, across markdown and quote punctuation), when it sits inside an http(s) URL, or when it is one of the publicHexConstants below. An unlabeled bare 64-hex stays block: that is the floor.",
       "source": "blockrun-mcp (wallet-key leak scanner)",
       "match": {
@@ -810,7 +969,7 @@
     {
       "id": "pem-private-key",
       "tier": "block",
-      "scopes": ["publish", "team"],
+      "scopes": ["query", "publish", "team"],
       "description": "PEM private-key armor (-----BEGIN ... PRIVATE KEY-----), RSA/EC/OPENSSH/PGP variants.",
       "source": "gitleaks:private-key",
       "match": {
@@ -825,8 +984,8 @@
     {
       "id": "bip39-seed-phrase",
       "tier": "block",
-      "scopes": ["publish", "team"],
-      "description": "Twelve or more consecutive BIP-39 English wordlist words separated only by spaces or tabs: a wallet recovery phrase.",
+      "scopes": ["query", "publish", "team"],
+      "description": "Twelve or more consecutive BIP-39 English wordlist words separated only by whitespace or quote characters, so a quoted `.env` value (MNEMONIC=\"abandon ... about\") counts (tenjin-agent#296): a wallet recovery phrase.",
       "source": "tenjin; wordlist from BIP-0039 (see NOTICE.md)",
       "match": {
         "kind": "algorithm",

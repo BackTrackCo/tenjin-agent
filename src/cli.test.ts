@@ -72,6 +72,23 @@ describe('main', () => {
     expect(cap.stderr()).toBe('');
   });
 
+  // A hook arm this binary does not know is not a usage error: Claude Code
+  // treats a non-zero hook exit as a block of the matched tool, so a settings
+  // file written by a newer `tenjin install` would otherwise break every such
+  // call until the binary caught up (#387's `Agent|Task` arm on alpha.16).
+  it('an unknown hook arm exits 0 with nothing on stdout', async () => {
+    for (const argv of [
+      ['hook', 'no-such-arm'],
+      ['hook', 'no-such-arm', '--base-url', 'http://127.0.0.1:1'],
+      ['hook', 'no-such-arm', 'extra', '--json'],
+    ]) {
+      const cap = captureIo();
+      expect(await main(argv, cap.io), argv.join(' ')).toBe(0);
+      expect(cap.stdout(), argv.join(' ')).toBe('');
+      expect(cap.stderr(), argv.join(' ')).toBe('');
+    }
+  });
+
   it('bare invocation exits 2 with the usage contract', async () => {
     const cap = captureIo();
     const code = await main([], cap.io);
@@ -139,7 +156,7 @@ describe('main', () => {
 
     const leafHelp = captureIo();
     expect(await main(['doctor', '--help'], leafHelp.io)).toBe(0);
-    expect(leafHelp.stdout()).toContain('Check the six things a lookup needs');
+    expect(leafHelp.stdout()).toContain('Check everything a lookup needs');
     expect(leafHelp.stdout()).not.toContain('--base-url');
   });
 

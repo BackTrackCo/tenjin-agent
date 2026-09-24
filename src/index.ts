@@ -23,6 +23,16 @@ if (Number.isNaN(nodeMajor) || nodeMajor < MIN_NODE_MAJOR) {
   process.exit(1);
 }
 
+// THE STATUS LINE NEVER LOADS THE CLI. Claude Code runs it once a second for as
+// long as a session is open, and commander, zod and the command tree are parse
+// cost it has no use for. Only the bare invocation is diverted; `--help` and
+// every flag fall through to the command tree, which registers it like any verb.
+if (process.argv.length === 3 && process.argv[2] === 'status-line') {
+  const { statusLineMain } = await import('./router/status-line');
+  await statusLineMain();
+  process.exit(0);
+}
+
 const { main } = await import('./cli');
 process.exit(await main(process.argv.slice(2)));
 
