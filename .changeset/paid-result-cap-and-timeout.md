@@ -2,8 +2,10 @@
 'tenjin-cli': patch
 ---
 
-Four fixes to paid lookups. The `request` tool now hands the model at most 32 KiB
-of a provider's body, cut on a character boundary. A longer body is kept whole in
+Five fixes to paid lookups. A paid body is now always delivered: one that fails
+the decision's success rule comes back `unverified` with a caveat naming the rule
+it missed, where it used to be refused after the money had moved. The `request`
+tool now hands the model at most 32 KiB of a provider's body, cut on a character boundary. A longer body is kept whole in
 `results/` under the data directory for a day, and the result ends in
 `[truncated at N bytes of M; full body at <path>]`: a 633,016-character page read
 went past Claude Code's tool-output limit, so the model never saw what it paid

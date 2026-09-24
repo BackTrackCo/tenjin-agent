@@ -1002,24 +1002,59 @@ describe('runPay, the shared request gate', () => {
     expect(calls).toHaveLength(1);
   });
 
-  it('treats a 2xx that fails its success schema as a paid failure', async () => {
+  it('delivers a paid 2xx that fails its success schema, unverified, naming the rule', async () => {
     const fixture = buildPaymentRequired();
     const { fetch } = scriptedFetch([
       json(402, {}, { 'PAYMENT-REQUIRED': fixture.header }),
       json(200, { status: 'error' }),
     ]);
     const authorizer = fakeAuthorizer('allow');
-    const err = await runPay(
+    const result = await runPay(
       {
         url: TENJIN_URL,
         resultSchema: { type: 'object', properties: { data: {} }, required: ['data'] },
       },
       makeCtx(),
       { ...PUBLIC_DNS, fetchImpl: fetch, provider: testWalletProvider(), authorizer },
-    ).catch((e: unknown) => e);
-    expect((err as CliError).code).toBe('CONTRACT_MISMATCH');
+    );
+    const data = result.data as {
+      paid: boolean;
+      bodyText: string;
+      resultUnverified?: boolean;
+      resultCaveat?: string;
+    };
+    expect(data.paid).toBe(true);
+    // The body the money bought, whole.
+    expect(data.bodyText).toBe(JSON.stringify({ status: 'error' }));
+    expect(data.resultUnverified).toBe(true);
+    expect(data.resultCaveat).toContain('does not satisfy its success schema');
+    expect(data.resultCaveat).toContain('data');
     // The authorization already left, so the spend stays accounted.
     expect(authorizer.commit).toHaveBeenCalled();
+  });
+
+  it('delivers a paid 2xx that satisfies its success schema with no caveat', async () => {
+    const fixture = buildPaymentRequired();
+    const { fetch } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': fixture.header }),
+      json(200, { data: 1 }),
+    ]);
+    const result = await runPay(
+      {
+        url: TENJIN_URL,
+        resultSchema: { type: 'object', properties: { data: {} }, required: ['data'] },
+      },
+      makeCtx(),
+      {
+        ...PUBLIC_DNS,
+        fetchImpl: fetch,
+        provider: testWalletProvider(),
+        authorizer: fakeAuthorizer('allow'),
+      },
+    );
+    const data = result.data as { paid: boolean; resultUnverified?: boolean };
+    expect(data.paid).toBe(true);
+    expect(data.resultUnverified).toBeUndefined();
   });
 });
 

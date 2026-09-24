@@ -434,6 +434,60 @@ describe('the paid body handed back to the model', () => {
     expect(text.startsWith(kept)).toBe(true);
   });
 
+  /**
+   * A PAID BODY IS ALWAYS DELIVERED. The success rule flags it; it never
+   * withholds what the money already bought.
+   */
+  const RULE = {
+    type: 'object',
+    properties: { data: { type: 'object' } },
+    required: ['data'],
+  };
+  const withRule = () => ({
+    ...decision(),
+    decision: { ...(decision().decision as object), contract: contract({ resultSchema: RULE }) },
+  });
+
+  it('delivers a paid body that misses its success rule, unverified, naming the rule', async () => {
+    const body = { error: 'rate limited' };
+    const { fetchImpl } = net([
+      { url: ROUTER, status: 200, body: withRule() },
+      ...providerLegs(body),
+    ]);
+    const result = await runRequestTool({ query: 'q' }, deps(fetchImpl));
+    expect(result.isError).toBe(true);
+    expect(result.envelope).toMatchObject({
+      status: 'unverified',
+      result: JSON.stringify(body),
+      cost: ['provider price 0.01 USD'],
+    });
+    expect(result.envelope.resultCaveat).toContain('does not satisfy its success schema');
+    expect(result.envelope.resultCaveat).toContain('data');
+  });
+
+  it('delivers a paid body too large to check, unverified, as before', async () => {
+    const body = { data: { blob: 'x'.repeat(200 * 1024) } };
+    const { fetchImpl } = net([
+      { url: ROUTER, status: 200, body: withRule() },
+      ...providerLegs(body),
+    ]);
+    const result = await runRequestTool({ query: 'q' }, deps(fetchImpl));
+    expect(result.envelope).toMatchObject({ status: 'unverified' });
+    expect(result.envelope.resultCaveat).toContain('not checked');
+  });
+
+  it('fulfils a paid body that passes its success rule', async () => {
+    const body = { data: { BTC: 1 } };
+    const { fetchImpl } = net([
+      { url: ROUTER, status: 200, body: withRule() },
+      ...providerLegs(body),
+    ]);
+    const result = await runRequestTool({ query: 'q' }, deps(fetchImpl));
+    expect(result.isError).toBe(false);
+    expect(result.envelope).toMatchObject({ status: 'fulfilled', result: JSON.stringify(body) });
+    expect(result.envelope.resultCaveat).toBeUndefined();
+  });
+
   it('writes nothing for a body under the cap', async () => {
     const body = 'x'.repeat(RESULT_CAP_BYTES);
     expect(await keepResult(body, dir)).toBe(body);
