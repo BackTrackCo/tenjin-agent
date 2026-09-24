@@ -330,6 +330,7 @@ export async function runPay(
   // (httpRequest never throws on transport failure; it returns ok:false.)
   const paid = await httpRequest(url, {
     ...fetchOpts,
+    timeoutMs: paidLegTimeoutMs(effectiveRequirement, ctx.flags.timeout),
     headers: { ...headers, ...payment.headers },
   });
   await authorizer.commit(reservationId, payment.amountAtomic);
@@ -398,6 +399,26 @@ export async function runPay(
       },
     },
   );
+}
+
+/**
+ * THE PAID LEG WAITS AS LONG AS THE SELLER SAID IT WOULD TAKE, within reason.
+ * A signed authorization is already out when this leg starts, so a client
+ * timeout here abandons money the seller can still settle: a 10 s default cut
+ * off a provider advertising 360 s of work and threw its answer away. The
+ * requirement's `maxTimeoutSeconds` is that promise; it is clamped to
+ * {@link MAX_PAID_LEG_TIMEOUT_MS} so a hostile seller cannot hang the caller,
+ * and it never shortens what the user asked for with `--timeout`. The probe
+ * leg keeps the CLI timeout: nothing is at stake there.
+ */
+export const MAX_PAID_LEG_TIMEOUT_MS = 120_000;
+
+export function paidLegTimeoutMs(requirement: PaymentRequirements, cliTimeoutMs: number): number {
+  const advertised = requirement.maxTimeoutSeconds;
+  if (typeof advertised !== 'number' || !Number.isFinite(advertised) || advertised <= 0) {
+    return cliTimeoutMs;
+  }
+  return Math.max(cliTimeoutMs, Math.min(advertised * 1000, MAX_PAID_LEG_TIMEOUT_MS));
 }
 
 /** Which lane may pay this URL, or the exact refusal. */
@@ -651,13 +672,13 @@ async function assertRegistryVerified(
         'REGISTRY_MISMATCH',
         `The live 402 does not match what ${verification.registry} advertises for this resource (${verification.detail}).`,
         {
-          fix: 'Nothing was signed. Re-run `tenjin discover` to see the advertised terms; if the seller changed them, the registry will catch up.',
+          fix: `Nothing was signed. The seller's live terms differ from its listing on ${verification.registry}; check that listing, and pay once it matches or the seller corrects the endpoint.`,
           details: { registry: verification.registry, detail: verification.detail },
         },
       );
     case 'unlisted':
       throw new CliError('USAGE', 'No configured registry is known to list this resource.', {
-        fix: 'The Bazaar lane pays publicly listed deals only, and pay-time lookup leans on the local `discover` cache: run `tenjin discover [query]` so a sweep can surface this endpoint, then re-run pay.',
+        fix: "Nothing was signed. The Bazaar lane pays only a URL a configured registry lists under the seller's payTo address. Check the registries in `tenjin config get bazaarRegistries` for this exact URL; if it is listed elsewhere, add that registry with `tenjin config set bazaarRegistries`.",
       });
     case 'unavailable':
       throw new CliError(

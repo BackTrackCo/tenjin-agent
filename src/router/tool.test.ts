@@ -7,7 +7,7 @@ import { resolveSpendAuthorizer } from '../lib/wallet';
 import type { SpendAuthorization, SpendAuthorizer } from '../lib/wallet';
 import type { CommandContext } from '../context';
 import { runPay } from '../commands/pay';
-import { runRequestTool } from './tool';
+import { capResult, RESULT_CAP_BYTES, runRequestTool } from './tool';
 import { ROUTER_PATH } from './decision';
 import { bindDecision, noteSession, renderProgress } from './progress';
 
@@ -398,6 +398,40 @@ describe('what the tool refuses to execute', () => {
     };
     const result = await runRequestTool({ query: 'q' }, real);
     expect(result.envelope).toMatchObject({ status: 'fulfilled' });
+  });
+});
+
+describe('the paid body handed back to the model', () => {
+  it('caps an oversized provider body with a tail that says how much there was', async () => {
+    // A two-byte character throughout, so a naive byte cut would split one.
+    const body = { markdown: 'é'.repeat(200_000) };
+    const full = Buffer.byteLength(JSON.stringify(body), 'utf8');
+    const { fetchImpl } = net([
+      { url: ROUTER, status: 200, body: decision() },
+      ...providerLegs(body),
+    ]);
+    const result = await runRequestTool({ query: 'read the page' }, deps(fetchImpl));
+    expect(result.envelope).toMatchObject({ status: 'fulfilled' });
+    const shown = result.envelope.result as string;
+    expect(shown).toMatch(new RegExp(`\\[truncated at \\d+ bytes of ${full}\\]$`));
+    expect(shown).not.toContain('\uFFFD');
+    const kept = shown.slice(0, shown.lastIndexOf('\n\n[truncated'));
+    expect(Buffer.byteLength(kept, 'utf8')).toBeLessThanOrEqual(RESULT_CAP_BYTES);
+    expect(JSON.stringify(body).startsWith(kept)).toBe(true);
+  });
+
+  it('hands a body under the cap back untouched', () => {
+    const body = 'x'.repeat(RESULT_CAP_BYTES);
+    expect(capResult(body)).toBe(body);
+  });
+
+  it('cuts on a character boundary, never inside one', () => {
+    // A four-byte character straddling the cap.
+    const body = `${'a'.repeat(RESULT_CAP_BYTES - 2)}😀tail`;
+    const shown = capResult(body);
+    expect(shown).toBe(
+      `${'a'.repeat(RESULT_CAP_BYTES - 2)}\n\n[truncated at ${RESULT_CAP_BYTES - 2} bytes of ${RESULT_CAP_BYTES + 6}]`,
+    );
   });
 });
 

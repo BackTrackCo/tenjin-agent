@@ -549,7 +549,14 @@ async function routeNativeCall(
       outcome: { response: null, ...(outcome !== null ? { action: outcome.action } : {}) },
     };
   }
-  if (event.agentId !== undefined && !(await wouldAutoExecute(outcome, deps))) {
+  // THE SPEND RULE, WHERE AN OFFER WOULD BE A DEAD END. A subagent cannot ask
+  // the user, so it is offered only what runs alone. The main agent's pre-call
+  // arm DENIES the free call, so it redirects only when the paid call would run
+  // without approval: denying a fetch and then answering `needs_approval` left
+  // the page neither fetched nor bought. The main agent's after-call arm denies
+  // nothing, so its offer stands and `request` can still ask.
+  const denies = nativeOutcome === undefined;
+  if ((event.agentId !== undefined || denies) && !(await wouldAutoExecute(outcome, deps))) {
     await footer.close(outcome, { withheld: true });
     return { offer: null, outcome: { response: null, action: 'execute', withheld: true } };
   }
@@ -567,7 +574,8 @@ async function routeNativeCall(
  * WHAT IS NEW is who can be denied. A subagent not known to have the request
  * tool, or whose spend would need an approval it cannot ask for, is never
  * redirected: `routeNativeCall` answers without an offer, and its
- * call runs free.
+ * call runs free. Neither is the main agent when the paid call would stop on
+ * `needs_approval`: its free call runs, and the after-call arm can still offer.
  *
  * A redirect leaves a mark under the call's `tool_use_id`, so the after-call
  * arm never offers on that same call.

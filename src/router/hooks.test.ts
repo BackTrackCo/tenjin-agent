@@ -538,6 +538,16 @@ async function preCall(
  * subagent cases below).
  */
 describe('the pre-call hook', () => {
+  async function setConfig(values: Record<string, unknown>): Promise<void> {
+    const fs = await import('node:fs/promises');
+    await fs.writeFile(join(dir, 'config.json'), JSON.stringify(values));
+  }
+
+  // What `tenjin install` writes: the fixture's 10000-atomic lookup auto-executes.
+  beforeEach(async () => {
+    await setConfig(ROUTER_POLICY);
+  });
+
   it('denies the main agent on execute, as main does, with the attributed hint', async () => {
     const { fetchImpl, calls } = router(withHint(PRECALL_HINT));
     const out = await runNativeHook(await preCall('https://example.test/spec'), {
@@ -560,6 +570,44 @@ describe('the pre-call hook', () => {
     const packet = (calls[0] as { body: { packet: Record<string, unknown> } }).body.packet;
     expect(packet.pendingCall).toEqual({ tool: 'WebFetch', url: 'https://example.test/spec' });
     expect(packet.nativeOutcome).toBeUndefined();
+  });
+
+  /**
+   * A DENY THE PAID CALL CANNOT MAKE GOOD ON IS NOT SENT. Redirecting the main
+   * agent to a lookup that stops on `needs_approval` left the page neither
+   * fetched nor bought, so the free call runs instead; the after-call arm can
+   * still offer, since `request` can ask the user there.
+   */
+  it.each([
+    ['above maxAutoSpend', { maxAutoSpend: '9999', confirm: 'above:9999' }],
+    ['past the session budget', { sessionBudget: '20000' }],
+  ])('lets the main agent call run when the lookup is %s', async (_label, over) => {
+    await setConfig({ ...ROUTER_POLICY, ...over });
+    // 15000 of the day already committed: only the session-budget case minds.
+    const fs = await import('node:fs/promises');
+    await fs.writeFile(
+      join(dir, 'spend.json'),
+      JSON.stringify({
+        schemaVersion: 2,
+        windowStartMs: Date.now(),
+        committedAtomic: '15000',
+        reservations: [],
+      }),
+    );
+    const deps = { dataDir: dir, baseUrl: BASE, fetchImpl: router(EXECUTE).fetchImpl };
+    const event = await preCall('https://x.com/a', 'WebFetch', { tool_use_id: 'toolu_9' });
+    const out = await runNativeHook(event, deps);
+    expect(out).toMatchObject({ response: null, action: 'execute', withheld: true });
+
+    // Nothing was redirected, so the after-call arm still offers on that call.
+    const after = await runShortfallHook(
+      {
+        ...((await readableEvent('https://x.com/a', 'WebFetch')) as object),
+        tool_use_id: 'toolu_9',
+      },
+      deps,
+    );
+    expect(after.response).not.toBeNull();
   });
 
   it.each([

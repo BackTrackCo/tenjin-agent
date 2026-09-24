@@ -185,7 +185,7 @@ export async function runRequestTool(
       ...(contract.arguments !== undefined ? { parameters: contract.arguments } : {}),
       cost: costLines(providerAtomic),
       ...(note !== undefined ? { note } : {}),
-      result: data.bodyText ?? '',
+      result: capResult(data.bodyText ?? ''),
       providerContentUntrusted: true,
     };
     // UNVERIFIED IS NOT FULFILLED. A body the success rule could not be run
@@ -241,6 +241,28 @@ export async function runRequestTool(
       ...(detail.diagnosis !== undefined ? { diagnosis: detail.diagnosis } : {}),
     });
   }
+}
+
+/**
+ * THE MOST OF A PROVIDER BODY THE MODEL IS HANDED, in UTF-8 bytes. The body
+ * rides in the tool result twice (the JSON text block and `structuredContent`),
+ * and Claude Code refuses an MCP result past 25,000 tokens by default: a
+ * 633,016-character page read went over, and the model never saw what it paid
+ * for (tenjin-agent#397). 32 KiB is about 8,000 tokens of prose, so both copies
+ * plus JSON escaping stay well inside that limit while still carrying a full
+ * page's worth of text.
+ */
+export const RESULT_CAP_BYTES = 32 * 1024;
+
+/** The body, cut to {@link RESULT_CAP_BYTES} on a character boundary, with a
+ *  tail that says it was cut and how much there was. */
+export function capResult(body: string): string {
+  const bytes = Buffer.from(body, 'utf8');
+  if (bytes.length <= RESULT_CAP_BYTES) return body;
+  let cut = RESULT_CAP_BYTES;
+  // Back off to the start of a character: a UTF-8 continuation byte is 10xxxxxx.
+  while (cut > 0 && (bytes[cut]! & 0xc0) === 0x80) cut--;
+  return `${bytes.subarray(0, cut).toString('utf8')}\n\n[truncated at ${cut} bytes of ${bytes.length}]`;
 }
 
 type FailStatus = 'failed' | 'needs_approval' | 'needs_input' | 'native';

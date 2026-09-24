@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { runPay } from './pay';
+import { MAX_PAID_LEG_TIMEOUT_MS, paidLegTimeoutMs, runPay } from './pay';
 import { saveSweepListings } from '../lib/bazaar';
 import { CliError } from '../lib/errors';
 import { knownDeploymentOrigins } from '../lib/production-origin';
@@ -343,6 +343,65 @@ function attributionOf(header: string | undefined): { a?: string; s?: string[] }
   return envelope.extensions?.['builder-code']?.info;
 }
 
+/** Answers each call after `delayMs`, or aborts with the caller's signal. */
+function slowFetch(responses: Response[], delays: number[]): typeof fetch {
+  return (async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const next = responses.shift();
+    const delayMs = delays.shift() ?? 0;
+    if (next === undefined) throw new Error('scripted fetch exhausted');
+    return await new Promise<Response>((resolve, reject) => {
+      const timer = setTimeout(() => resolve(next), delayMs);
+      init?.signal?.addEventListener('abort', () => {
+        clearTimeout(timer);
+        reject(init.signal?.reason ?? new Error('aborted'));
+      });
+    });
+  }) as typeof fetch;
+}
+
+describe('runPay, paid-leg timeout', () => {
+  it('bounds the paid leg by the seller-advertised maxTimeoutSeconds, not the CLI timeout', async () => {
+    const fixture = buildPaymentRequired({ maxTimeoutSeconds: 1 });
+    const fetch = slowFetch(
+      [
+        json(402, {}, { 'PAYMENT-REQUIRED': fixture.header }),
+        json(200, { answer: 'slow but paid' }),
+      ],
+      [0, 150],
+    );
+    const result = await runPay({ url: TENJIN_URL }, makeCtx({ timeout: 50 }), {
+      ...PUBLIC_DNS,
+      fetchImpl: fetch,
+      provider: testWalletProvider(),
+      authorizer: fakeAuthorizer('allow'),
+    });
+    expect((result.data as { paid: boolean }).paid).toBe(true);
+  });
+
+  it('keeps the unpaid probe on the CLI timeout', async () => {
+    const fixture = buildPaymentRequired({ maxTimeoutSeconds: 1 });
+    const fetch = slowFetch([json(402, {}, { 'PAYMENT-REQUIRED': fixture.header })], [150]);
+    await expect(
+      runPay({ url: TENJIN_URL }, makeCtx({ timeout: 50 }), { ...PUBLIC_DNS, fetchImpl: fetch }),
+    ).rejects.toBeInstanceOf(CliError);
+  });
+
+  it('clamps the advertised bound and never goes below the CLI timeout', () => {
+    const req = (maxTimeoutSeconds: number) =>
+      ({
+        ...buildPaymentRequired().paymentRequired.accepts[0]!,
+        maxTimeoutSeconds,
+      }) as PaymentRequirements;
+    expect(paidLegTimeoutMs(req(30), 10_000)).toBe(30_000);
+    expect(paidLegTimeoutMs(req(360), 10_000)).toBe(MAX_PAID_LEG_TIMEOUT_MS);
+    expect(paidLegTimeoutMs(req(2), 10_000)).toBe(10_000);
+    expect(paidLegTimeoutMs(req(0), 10_000)).toBe(10_000);
+    expect(paidLegTimeoutMs(req(Number.NaN), 10_000)).toBe(10_000);
+    // A user who asked for longer than the clamp keeps it.
+    expect(paidLegTimeoutMs(req(360), 300_000)).toBe(300_000);
+  });
+});
+
 describe('runPay, builder-code attribution', () => {
   it('sends the CLI service code when the 402 advertises builder-code', async () => {
     const fixture = buildPaymentRequired({}, withBuilderCode());
@@ -679,9 +738,15 @@ describe('runPay, bazaar lane', () => {
     );
     const fixture = buildPaymentRequired();
     const { fetch } = scriptedFetch([json(402, {}, { 'PAYMENT-REQUIRED': fixture.header })]);
-    await expect(
-      runPay({ url: FOREIGN_URL }, makeCtx(), { ...PUBLIC_DNS, fetchImpl: fetch }),
-    ).rejects.toMatchObject({ code: 'USAGE' });
+    const err = await runPay({ url: FOREIGN_URL }, makeCtx(), {
+      ...PUBLIC_DNS,
+      fetchImpl: fetch,
+    }).catch((e: unknown) => e);
+    expect(err).toMatchObject({ code: 'USAGE' });
+    // The fix names what the user can check, never a verb this build does not
+    // register (`discover` is shelved).
+    expect((err as CliError).fix).toContain('bazaarRegistries');
+    expect((err as CliError).fix).not.toContain('discover');
   });
 
   it('unreachable registries fail the lane closed', async () => {
