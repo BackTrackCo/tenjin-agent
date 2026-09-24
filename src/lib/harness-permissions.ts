@@ -453,7 +453,6 @@ export type PermissionsSkipReason =
    * (tenjin-agent#342). The adapter registrar owns that capability now.
    */
   | 'harness-unsupported'
-  | 'not-requested'
   | 'declined'
   | 'dry-run'
   | 'unresolvable'
@@ -597,7 +596,6 @@ function fixFor(reason: PermissionsSkipReason, harness = 'claude'): string {
   switch (reason) {
     case 'harness-unsupported':
       return `No permission rules were written: ${harness} has no surface for them.`;
-    case 'not-requested':
     case 'declined':
     case 'dry-run':
       return 'Add them with `tenjin install`.';
