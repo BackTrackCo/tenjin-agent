@@ -7,9 +7,9 @@ import type { Io } from '../lib/output';
  *
  * CHEAP AND READ-ONLY. One JSON event on stdin for the session identity, the
  * router's own switch for its directory, one read of that session's progress
- * directory, one line out. No network call, no wallet, no schema library, no
- * write: it runs once a second for as long as a session is open, so anything it
- * touched would be touched 3,600 times an hour.
+ * directory, one line out. No network call, no wallet, no write: it runs once a
+ * second for as long as a session is open, so anything it touched would be
+ * touched 3,600 times an hour.
  *
  * IT CANNOT FAIL LOUDLY either. Every error path writes nothing and returns, so
  * the command exits 0 with empty output and the harness shows no footer.

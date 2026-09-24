@@ -489,9 +489,13 @@ describe('what the hook leaves for the status line', () => {
 
   it('routes the same when the progress directory cannot be written', async () => {
     const { fetchImpl } = router(EXECUTE);
+    // A plain file where the progress directory belongs: every footer write
+    // fails, while the config beside it still reads.
+    const fs = await import('node:fs/promises');
+    await fs.writeFile(join(dir, 'progress'), 'not a directory');
 
     const out = await runPromptHook(promptEvent('read https://example.test/spec'), {
-      dataDir: join(dir, 'missing', '\u0000bad'),
+      dataDir: dir,
       baseUrl: BASE,
       fetchImpl,
     });
@@ -575,6 +579,21 @@ describe('the router switch and context, per directory', () => {
     );
     expect(calls).toHaveLength(0);
     expect(warned.join('\n')).toContain(join(cwd, '.tenjin', 'config.json'));
+  });
+
+  it('stays off when the global config cannot be read', async () => {
+    const fs = await import('node:fs/promises');
+    await fs.writeFile(join(dir, 'config.json'), '{ nope');
+    const { fetchImpl, calls } = router(EXECUTE);
+    const warned: string[] = [];
+    await runPromptHook(promptEvent('btc price today'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+      warn: (line) => warned.push(line),
+    });
+    expect(calls).toHaveLength(0);
+    expect(warned.join('\n')).toContain('so the router is off');
   });
 
   it('sends the prompt and no history under router.context turn', async () => {

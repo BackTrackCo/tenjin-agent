@@ -92,9 +92,8 @@ export interface HookDeps {
  * had its prompts routed against whatever the file said instead; on a machine
  * whose file named a protected deployment that was a 401, and a 401 is silence.
  */
-async function resolveBaseUrl(deps: HookDeps): Promise<string> {
+function resolveBaseUrl(deps: HookDeps, config: PartialConfig): string {
   if (deps.baseUrl !== undefined) return deps.baseUrl;
-  const config: PartialConfig = await loadRawConfig(deps.dataDir).catch(() => ({}));
   return resolveSettings({ config, flags: {}, env: deps.env ?? process.env }).baseUrl.value;
 }
 
@@ -125,10 +124,10 @@ export async function runPromptHook(raw: unknown, deps: HookDeps): Promise<Promp
 
   const packet = scoped(
     await buildPromptPacket(event.transcript_path, event.session_id, event.prompt),
-    router,
+    router.settings,
   );
   const footer = await openFooter(deps, event.session_id, 'prompt');
-  const outcome = await decide(packet, deps);
+  const outcome = await decide(packet, deps, router.config);
   await footer.close(outcome);
   if (outcome === null) return { response: null };
   if (outcome.action !== 'execute') return { response: null, action: outcome.action };
@@ -170,7 +169,7 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
   // paid services" never reached this gate.
   const packet = scoped(
     await buildNativePacket(event.transcript_path, event.session_id, pending),
-    router,
+    router.settings,
   );
   // AND WHEN THEY CANNOT BE READ, THE CALL RUNS. Routing a redirect on the tool
   // argument alone is how an instruction the user gave this turn gets
@@ -184,7 +183,7 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
     return { response: null, decision: 'allow' };
   }
   const footer = await openFooter(deps, event.session_id, 'search');
-  const outcome = await decide(packet, deps);
+  const outcome = await decide(packet, deps, router.config);
   await footer.close(outcome);
   if (outcome === null || outcome.action !== 'execute') {
     return {
@@ -265,8 +264,12 @@ function hookOutcome(decision: HookDecision | null): string {
 }
 
 /** One free decision, with the hook's own deadline and its own silence. */
-async function decide(packet: Packet, deps: HookDeps): Promise<HookDecision | null> {
-  const baseUrl = await resolveBaseUrl(deps);
+async function decide(
+  packet: Packet,
+  deps: HookDeps,
+  config: PartialConfig,
+): Promise<HookDecision | null> {
+  const baseUrl = resolveBaseUrl(deps, config);
   const warn = deps.warn ?? ((line: string) => process.stderr.write(`${line}\n`));
   const outcome = await requestDecision(
     'hook',
@@ -306,19 +309,25 @@ function pendingCallOf(
 }
 
 /**
- * `router.*` for the event's directory, or null when the router is off there.
- * FIRST, before any packet is built: `router.enabled false` means nothing about
- * this turn is read for the router or leaves the machine. A layer that cannot
- * be read is off too, since a switch the user set must not fail open.
+ * `router.*` for the event's directory with the global config it came from,
+ * which is read ONCE per event and also names the base URL; null when the
+ * router is off there. FIRST, before any packet is built: `router.enabled
+ * false` means nothing about this turn is read for the router or leaves the
+ * machine. A config that cannot be read is off too, since a switch the user
+ * set must not fail open.
  */
-async function routerFor(cwd: string | undefined, deps: HookDeps): Promise<RouterSettings | null> {
+async function routerFor(
+  cwd: string | undefined,
+  deps: HookDeps,
+): Promise<{ settings: RouterSettings; config: PartialConfig } | null> {
   const warn = deps.warn ?? ((line: string) => process.stderr.write(`${line}\n`));
   try {
+    const config = await loadRawConfig(deps.dataDir);
     const settings = await routerSettings(
-      { cwd: cwd ?? process.cwd(), dataDir: deps.dataDir },
+      { cwd: cwd ?? process.cwd(), dataDir: deps.dataDir, config },
       { warn: (line) => warn(`tenjin hook: ${line}`) },
     );
-    return settings.enabled.value ? settings : null;
+    return settings.enabled.value ? { settings, config } : null;
   } catch (err) {
     warn(`tenjin hook: ${err instanceof Error ? err.message : String(err)}, so the router is off`);
     return null;

@@ -1,9 +1,17 @@
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
+import {
+  CONFIG_DEFAULTS,
+  loadRawConfig,
+  parseRouterLayer,
+  type PartialConfig,
+  type RouterContext,
+  type RouterLayer,
+} from '../lib/config';
 import { CliError } from '../lib/errors';
 import { configPath } from '../lib/paths';
-import { findNearestProjectFiles, projectRoot, type ProjectWalkDeps } from '../lib/project-walk';
+import { findNearestProjectFiles, projectRoot, type ProjectWalkDeps } from '../lib/settings';
 
 /**
  * THE ONE READER OF THE ROUTER'S OWN KEYS, `router.enabled` and
@@ -23,16 +31,9 @@ import { findNearestProjectFiles, projectRoot, type ProjectWalkDeps } from '../l
  * commits anyway must not undo the committed one. Both keys fail toward less
  * data sent, and no project file has a spend key to loosen.
  *
- * No zod and no config schema: the status line calls this once a second.
+ * ONE PARSER. The global block is the one `loadRawConfig` already validated,
+ * and a project file goes through `parseRouterLayer` from the same schema.
  */
-
-export const ROUTER_CONTEXTS = ['session', 'turn'] as const;
-export type RouterContext = (typeof ROUTER_CONTEXTS)[number];
-
-export const ROUTER_SETTING_DEFAULTS: { enabled: boolean; context: RouterContext } = {
-  enabled: true,
-  context: 'session',
-};
 
 /** The committed project file and the personal one beside it. */
 export const PROJECT_ROUTER_FILE = join('.tenjin', 'config.json');
@@ -57,11 +58,8 @@ export interface RouterSettingsInput {
   cwd: string;
   /** The data dir whose `config.json` is the global layer. */
   dataDir: string;
-}
-
-interface RouterLayer {
-  enabled?: boolean;
-  context?: RouterContext;
+  /** That file, when the caller has already loaded it; read here otherwise. */
+  config?: PartialConfig;
 }
 
 export async function routerSettings(
@@ -69,13 +67,13 @@ export async function routerSettings(
   deps: ProjectWalkDeps = {},
 ): Promise<RouterSettings> {
   const globalPath = configPath(input.dataDir);
-  const global = await readLayer(globalPath);
+  const global = (input.config ?? (await loadRawConfig(input.dataDir))).router;
   let enabled: RouterSetting<boolean> = {
-    value: ROUTER_SETTING_DEFAULTS.enabled,
+    value: CONFIG_DEFAULTS.router.enabled,
     source: 'default',
   };
   let context: RouterSetting<RouterContext> = {
-    value: ROUTER_SETTING_DEFAULTS.context,
+    value: CONFIG_DEFAULTS.router.context,
     source: 'default',
   };
   if (global?.enabled !== undefined) {
@@ -110,8 +108,9 @@ async function projectLayers(
   if (hit === null || resolve(hit.dir, '.tenjin') === resolve(input.dataDir)) return [];
   const layers = [];
   for (const path of hit.found) {
-    const layer = await readLayer(path);
-    if (layer === null) continue;
+    const file = await readProjectRouterFile(path);
+    if (file === null) continue;
+    const { layer } = file;
     layers.push({
       source: path === join(hit.dir, LOCAL_ROUTER_FILE) ? ('local' as const) : ('project' as const),
       path,
@@ -121,15 +120,19 @@ async function projectLayers(
   return layers;
 }
 
-const ABSENT = new Set(['ENOENT', 'ENOTDIR', 'ERR_INVALID_ARG_VALUE']);
+const ABSENT = new Set(['ENOENT', 'ENOTDIR']);
 
-/** The `router` block of one file; null when the file does not exist. */
-async function readLayer(path: string): Promise<RouterLayer | null> {
+/**
+ * One project file: its whole JSON, for a writer that keeps sibling keys, and
+ * its router layer through the one parser. Null when there is no file.
+ */
+export async function readProjectRouterFile(
+  path: string,
+): Promise<{ json: Record<string, unknown>; layer: RouterLayer } | null> {
   let raw: string;
   try {
     raw = await readFile(path, 'utf8');
   } catch (err) {
-    // No file can be at such a path, which is absence, not a file that failed.
     if (ABSENT.has(String((err as { code?: unknown }).code))) return null;
     throw invalid(path, 'could not be read', err);
   }
@@ -139,22 +142,8 @@ async function readLayer(path: string): Promise<RouterLayer | null> {
   } catch (err) {
     throw invalid(path, 'is not valid JSON', err);
   }
-  if (!isObject(json)) throw invalid(path, 'is not a JSON object');
-  const block = json.router;
-  if (block === undefined) return {};
-  if (!isObject(block)) throw invalid(path, 'has a `router` that is not an object');
-  const layer: RouterLayer = {};
-  if (block.enabled !== undefined) {
-    if (typeof block.enabled !== 'boolean') throw invalid(path, 'has a non-boolean router.enabled');
-    layer.enabled = block.enabled;
-  }
-  if (block.context !== undefined) {
-    if (!(ROUTER_CONTEXTS as readonly unknown[]).includes(block.context)) {
-      throw invalid(path, 'has a router.context that is not "session" or "turn"');
-    }
-    layer.context = block.context as RouterContext;
-  }
-  return layer;
+  const layer = parseRouterLayer(json, path);
+  return { json: json as Record<string, unknown>, layer };
 }
 
 /**
@@ -190,8 +179,4 @@ function invalid(path: string, what: string, cause?: unknown): CliError {
     fix: `Fix ${path}, or delete it.`,
     ...(cause !== undefined ? { cause } : {}),
   });
-}
-
-function isObject(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }

@@ -82,7 +82,7 @@ Prefer the narrow rules on this page to a broad `Bash(tenjin:*)`, `Bash(tenjin w
 
 Every other key in the settings file is preserved byte for byte, a second run writes the same bytes, and `tenjin uninstall` removes exactly those five things and keeps your wallet, your ledger and your config.
 
-To stop the router without removing anything, `tenjin config set router.enabled false` stops it on this machine, and `tenjin config set --project router.enabled false` stops it in this repository. Off means both hooks send nothing and the `request` tool refuses without paying. The project value lives in `<project>/.tenjin/config.json`, which you commit; `--project --local` writes `.tenjin/config.local.json` beside it instead, which is yours alone and belongs in `.gitignore`. The nearest project directory wins, walking up from where the session runs to the git root, and a project file can only turn the router off or narrow what it sends, never undo what your own config turned off.
+To stop the router without removing anything, `tenjin config set router.enabled false` stops it on this machine, and `tenjin config set --project router.enabled false` stops it in this repository. Off means both hooks send nothing and the `request` tool refuses without paying. The project value lives in `<project>/.tenjin/config.json`, which you commit; `--project --local` writes `.tenjin/config.local.json` beside it instead, which is yours alone and belongs in `.gitignore`. The nearest project directory wins, walking up from where the session runs to the git root. A project file can only turn the router off or narrow what it sends; it cannot enable anything or change a spend setting.
 
 ## How one lookup runs
 

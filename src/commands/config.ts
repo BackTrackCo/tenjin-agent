@@ -1,4 +1,4 @@
-import { mkdir, readFile } from 'node:fs/promises';
+import { mkdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname } from 'node:path';
 import { styleText } from 'node:util';
@@ -25,6 +25,7 @@ import {
   LOOP_CONFIG_KEYS,
   TEAM_CONFIG_KEYS,
   ROUTER_CONFIG_KEYS,
+  ROUTER_CONTEXTS,
   loadRawConfig,
   parseLoopValue,
   parsePublicFallbackFlag,
@@ -45,6 +46,7 @@ import type {
   LoopConfigKey,
   TeamConfigKey,
   RouterConfigKey,
+  RouterContext,
 } from '../lib/config';
 import { onPath } from '../lib/skill-wiring';
 import type { Harness, HarnessAdapter } from '../adapters/types';
@@ -58,10 +60,9 @@ import { parseUsdToAtomic, toMoney } from '../lib/money';
 import type { Money } from '../schemas';
 import type { CommandContext, CommandResult } from '../context';
 import {
-  ROUTER_CONTEXTS,
   projectRouterPath,
+  readProjectRouterFile,
   routerSettings,
-  type RouterContext,
   type RouterSettings,
 } from '../router/settings';
 
@@ -865,42 +866,13 @@ async function mergeProjectRouter(
   field: 'enabled' | 'context',
   value: boolean | RouterContext,
 ): Promise<void> {
-  let existing: Record<string, unknown> = {};
-  let raw: string | undefined;
-  try {
-    raw = await readFile(path, 'utf8');
-  } catch (err) {
-    if ((err as { code?: unknown }).code !== 'ENOENT') {
-      throw new CliError('CONFIG_INVALID', `Could not read ${path}`, {
-        fix: `Check the permissions on ${path}.`,
-        cause: err,
-      });
-    }
-  }
-  if (raw !== undefined) {
-    let json: unknown;
-    try {
-      json = JSON.parse(raw);
-    } catch (err) {
-      throw new CliError('CONFIG_INVALID', `${path} is not valid JSON`, {
-        fix: `Fix or delete ${path}.`,
-        cause: err,
-      });
-    }
-    if (json === null || typeof json !== 'object' || Array.isArray(json)) {
-      throw new CliError('CONFIG_INVALID', `${path} is not a JSON object`, {
-        fix: `Fix or delete ${path}.`,
-      });
-    }
-    existing = json as Record<string, unknown>;
-  }
-  const router =
-    existing.router !== null &&
-    typeof existing.router === 'object' &&
-    !Array.isArray(existing.router)
-      ? (existing.router as Record<string, unknown>)
-      : {};
-  const next = { ...existing, router: { ...router, [field]: value } };
+  // Through the one parser: a file that is not an object, or whose block is
+  // invalid, is refused rather than replaced.
+  const existing = await readProjectRouterFile(path);
+  const next = {
+    ...(existing?.json ?? {}),
+    router: { ...(existing?.layer ?? {}), [field]: value },
+  };
   await writeFileAtomic(path, `${JSON.stringify(next, null, 2)}\n`, {
     mode: 0o644,
     dirMode: 0o755,

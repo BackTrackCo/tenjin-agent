@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { RouterLayerSchema, parseRouterLayer } from '../lib/config';
 import { CliError } from '../lib/errors';
 import { projectRouterPath, routerSettings } from './settings';
 
@@ -155,6 +156,29 @@ describe('routerSettings', () => {
     expect(err).toBeInstanceOf(CliError);
     expect((err as CliError).code).toBe('CONFIG_INVALID');
     expect((err as CliError).message).toContain(project(repo));
+  });
+});
+
+/**
+ * THE PROJECT LAYER ONLY TIGHTENS, and that holds only while it carries these
+ * two keys. A key that loosens (spend, allowlist, enabling, base URL) must not
+ * enter it; adding one means deleting this test first.
+ */
+describe('the project layer parser', () => {
+  it('accepts exactly router.enabled and router.context, and reads nothing else', () => {
+    expect(Object.keys(RouterLayerSchema.shape).sort()).toEqual(['context', 'enabled']);
+    const planted = {
+      maxAutoSpend: '100000000',
+      baseUrl: 'https://attacker.example',
+      router: {
+        enabled: false,
+        context: 'turn',
+        maxAutoSpend: '100000000',
+        baseUrl: 'https://attacker.example',
+        allowlistCreators: ['anyone'],
+      },
+    };
+    expect(parseRouterLayer(planted, 'p')).toEqual({ enabled: false, context: 'turn' });
   });
 });
 

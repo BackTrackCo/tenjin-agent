@@ -6,7 +6,6 @@ import { configPath } from './paths';
 import { HARNESSES } from '../adapters/types';
 import type { Harness } from '../adapters/types';
 import { writeFileAtomic } from './atomic-json';
-import { ROUTER_CONTEXTS, ROUTER_SETTING_DEFAULTS } from '../router/settings';
 
 /** A non-negative integer string in USDC atomic units (6-decimal base). */
 const atomicString = z.string().regex(/^\d+$/, 'expected an atomic USDC integer string');
@@ -106,18 +105,52 @@ const HooksConfigSchema = z.object({
   primer: z.boolean(),
 });
 
+/** How much conversation a router hook packet carries. */
+export const ROUTER_CONTEXTS = ['session', 'turn'] as const;
+export type RouterContext = (typeof ROUTER_CONTEXTS)[number];
+
 /**
  * The router's own block, separate from the shelf's `hooks.*`: `enabled` is the
  * off switch both hooks and the `request` tool honour, and `context` is how
  * much conversation a hook packet carries (`session`, up to six prior messages,
- * or `turn`, none). The same two keys may sit in a project's
- * `.tenjin/config.json` and `config.local.json`; `routerSettings` in
- * router/settings.ts is their one reader.
+ * or `turn`, none). THE ONE SCHEMA for it: the global file validates it here,
+ * and a project's `.tenjin/config.json` and `config.local.json` go through
+ * {@link parseRouterLayer}. Both keys only ever tighten, which is why a
+ * project file may carry them; a key that loosens (spend, allowlist, enabling,
+ * base URL) must never join this object. `routerSettings` in
+ * router/settings.ts is the one reader of the resolved values.
  */
-const RouterConfigSchema = z.object({
-  enabled: z.boolean(),
-  context: z.enum(ROUTER_CONTEXTS),
+export const RouterLayerSchema = z.object({
+  enabled: z.boolean().optional(),
+  context: z.enum(ROUTER_CONTEXTS).optional(),
 });
+export type RouterLayer = z.infer<typeof RouterLayerSchema>;
+const RouterConfigSchema = RouterLayerSchema.required();
+
+/**
+ * The `router` block of one project file's parsed JSON, and nothing else: an
+ * unknown key, inside the block or beside it, is never read. CONFIG_INVALID,
+ * naming the file, when the file is not an object or a key has the wrong type.
+ */
+export function parseRouterLayer(json: unknown, path: string): RouterLayer {
+  if (json === null || typeof json !== 'object' || Array.isArray(json)) {
+    throw new CliError('CONFIG_INVALID', `Config at ${path} is not a JSON object`, {
+      fix: `Fix ${path}, or delete it.`,
+    });
+  }
+  const parsed = RouterLayerSchema.safeParse((json as { router?: unknown }).router ?? {});
+  if (!parsed.success) {
+    throw new CliError('CONFIG_INVALID', `Config at ${path} has an invalid router block`, {
+      fix: `Use router.enabled true|false and router.context "session"|"turn" in ${path}, or delete it.`,
+      details: parsed.error.issues,
+    });
+  }
+  const { enabled, context } = parsed.data;
+  return {
+    ...(enabled !== undefined ? { enabled } : {}),
+    ...(context !== undefined ? { context } : {}),
+  };
+}
 
 /**
  * What the daily update check is allowed to do about a newer version.
@@ -369,7 +402,7 @@ export const RawConfigSchema = ConfigSchema.partial()
     update: UpdateConfigSchema.partial().passthrough().optional(),
     loop: LoopConfigSchema.partial().passthrough().optional(),
     team: TeamConfigSchema.partial().passthrough().optional(),
-    router: RouterConfigSchema.partial().passthrough().optional(),
+    router: RouterLayerSchema.passthrough().optional(),
   })
   .passthrough();
 export type PartialConfig = z.infer<typeof RawConfigSchema>;
@@ -449,7 +482,7 @@ export const CONFIG_DEFAULTS: Config = {
     port: null,
   },
   team: { publicFallback: 'on' },
-  router: { ...ROUTER_SETTING_DEFAULTS },
+  router: { enabled: true, context: 'session' },
 };
 
 /**
