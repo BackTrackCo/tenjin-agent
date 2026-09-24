@@ -1,5 +1,58 @@
 # tenjin-cli
 
+## 0.1.0-alpha.17
+
+### Patch Changes
+
+- 2a95507: `tenjin hook <name>` for a hook arm this binary does not know now exits 0 with
+  nothing on stdout, the same "no opinion" every handler gives on a bad event.
+  It used to exit 2 as a usage error, which Claude Code reads as a blocking hook
+  failure: a settings file written by a newer `tenjin install` (a new arm, or a
+  source build ahead of the npm release) then failed every call of the matched
+  tool until the binary caught up.
+- 46fc65f: The router has an off switch and a context setting that every router hook and the
+  `request` tool honour. `tenjin config set router.enabled false` stops it on this
+  machine, and `tenjin config set --project router.enabled false` stops it in one
+  repository through a committed `.tenjin/config.json`; `--project --local` writes
+  a personal `.tenjin/config.local.json` beside it instead, which belongs in
+  `.gitignore`. Off means the hooks send nothing and the `request` tool answers
+  `needs_input` naming the key, paying nothing. `router.context turn` sends the
+  current turn with no prior messages. Every project file from the working
+  directory up to the git root applies (in a git worktree, the main checkout's
+  too), and each can only turn the router off or narrow what it sends. `tenjin config` shows
+  both keys with the file they came from, and `tenjin doctor` warns when the hooks
+  are wired but the router is off in the directory it runs from.
+- 0be992c: Router hooks are now safe inside subagents. WebSearch and WebFetch are routed
+  before each call as before, and a fitting paid lookup still redirects the call
+  to `mcp__x402__request`; but a subagent is redirected only when it is known to
+  have `mcp__x402__request` (its own `tools:`, or the built-in `general-purpose`,
+  `Explore` and `Plan` agents) and your spend policy would pay without asking, and
+  it is routed on its own task rather than the parent's last message. When a free
+  call clearly fails (blocked, a server error, an empty page, a search with no
+  links, a network error; never a 404 or 410), the router is asked once and may
+  offer a paid lookup. A new `PreToolUse` hook on `Agent|Task` appends a fitting
+  offer to the task a subagent is handed. Every line the router adds opens with
+  `Tenjin router (installed by the user):` and names the call
+  `mcp__x402__request`. `tenjin doctor` names custom agents whose `tools:` leave
+  the paid tool out. Existing installs keep working as they are;
+  `tenjin install --refresh` (which `tenjin update` runs) adds the new hooks.
+- dea376f: Every router packet is masked before it leaves: the prompt, the prior messages,
+  the literal URLs and the pending search or URL go through one `seal` step that
+  applies the publish scan's key, PEM, BIP-39 seed-phrase and URL credential rules
+  (a credential query parameter, a long token-shaped path segment). Harness meta
+  rows no longer travel. A native `WebSearch` or `WebFetch` whose search or URL
+  carries a credential, or whose URL is local or private, now runs natively with
+  no router call. The mask also covers a quoted `"password": "..."` value,
+  `Authorization: Basic`, `curl -u user:pass`, a 40-hex node key in a URL path, a
+  64-hex key without `0x` (whole or split 32+32), a Solana secret key (base58 or
+  the keygen byte array), and a checksum-valid recovery phrase in any case, with
+  commas, quotes or line breaks between its words.
+
+  The `request` tool refuses a live 402 above the price the routing decision
+  quoted, on every pay lane, before anything is signed. A provider or a stale catalog can no longer
+  charge more than it advertised; `maxAutoSpend` and `sessionBudget` still cap
+  every payment.
+
 ## 0.1.0-alpha.16
 
 ### Minor Changes
