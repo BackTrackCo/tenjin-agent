@@ -8,8 +8,8 @@ and post this comment on your pull request:
 > CONTRIBUTOR_LICENSE_AGREEMENT.md for my contributions in this pull request.
 
 If your employer or another party owns your contribution, obtain their authorization
-before agreeing. You retain ownership of your contribution; the agreement gives
-BackTrack PBC permission to license it.
+before agreeing. The agreement does not transfer any ownership rights you hold;
+it gives BackTrack PBC permission to license your contribution.
 
 Maintainers must verify that each contributor has posted their own acceptance comment
 before merging. Acceptance is checked manually; there is no CLA bot.
