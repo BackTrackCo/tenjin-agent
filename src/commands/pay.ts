@@ -199,14 +199,15 @@ export async function runPay(
   const firstSeenAmount = BigInt(requirement.amount);
   const host = new URL(url).host;
 
-  // The Bazaar lane's registry check runs BEFORE the wallet is even opened:
-  // an unverifiable deal must not reach a signer.
+  // Both checks run BEFORE the wallet is even opened: an unverifiable deal must
+  // not reach a signer. Terms a caller was given bind on EVERY lane, since a
+  // routing decision can name a contract on the configured origin too; the
+  // registry check is the Bazaar lane's own.
   let registry: string | undefined;
   let termsLabel: string | undefined;
-  if (lane === 'bazaar') {
-    if (args.terms !== undefined) termsLabel = assertWithinTerms(args.terms, requirement);
-    else
-      registry = await assertRegistryVerified(settings, url, requirement, ctx.flags.timeout, ctx);
+  if (args.terms !== undefined) termsLabel = assertWithinTerms(args.terms, requirement);
+  else if (lane === 'bazaar') {
+    registry = await assertRegistryVerified(settings, url, requirement, ctx.flags.timeout, ctx);
   }
 
   const provider = resolveWalletProvider(
@@ -274,11 +275,11 @@ export async function runPay(
       });
     }
     effectiveRequirement = fresh;
-    // The Bazaar lane verifies the challenge it will actually SIGN: the store
-    // answers this without a network round trip in the common case.
-    if (lane === 'bazaar') {
-      if (args.terms !== undefined) termsLabel = assertWithinTerms(args.terms, fresh);
-      else registry = await assertRegistryVerified(settings, url, fresh, ctx.flags.timeout, ctx);
+    // The challenge it will actually SIGN is checked again: the store answers
+    // the registry question without a network round trip in the common case.
+    if (args.terms !== undefined) termsLabel = assertWithinTerms(args.terms, fresh);
+    else if (lane === 'bazaar') {
+      registry = await assertRegistryVerified(settings, url, fresh, ctx.flags.timeout, ctx);
     }
   }
   const amountAtomic = BigInt(effectiveRequirement.amount);
