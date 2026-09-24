@@ -144,6 +144,40 @@ describe('the prompt packet', () => {
     expect(packet.history.map((m) => m.text)).toEqual(['check the deploy', 'on it']);
   });
 
+  /** tenjin-agent#401: the harness writes these as `type: "user"` rows with no
+   *  `isMeta`, and their text is tool output the user never typed. */
+  it('skips task notifications and local command output, keeping a typed command', async () => {
+    const typed = '<command-name>/review</command-name>\n<command-args>the diff</command-args>';
+    const path = await transcript([
+      user('check the deploy'),
+      {
+        ...user('<task-notification>\n<result>what a subagent found</result>\n</task-notification>'),
+        origin: { kind: 'task-notification' },
+      },
+      user('<task-notification>\n<result>an older row with no origin</result>\n</task-notification>'),
+      user('<local-command-stdout>output of a local command</local-command-stdout>'),
+      user(typed),
+      assistant('on it'),
+    ]);
+    const packet = await sent(path, 's', 'go');
+    expect(packet.history.map((m) => m.text)).toEqual(['check the deploy', typed, 'on it']);
+    expect(JSON.stringify(packet)).not.toMatch(/subagent found|no origin|local command/);
+  });
+
+  it('never takes a task notification as the current turn of a native call', async () => {
+    const path = await transcript([
+      user('find the latest release notes'),
+      assistant('searching'),
+      {
+        ...user('<task-notification>\n<result>what a subagent found</result>\n</task-notification>'),
+        origin: { kind: 'task-notification' },
+      },
+    ]);
+    const packet = await buildNativePacket(path, 's', { tool: 'WebSearch', query: 'release notes' });
+    expect(packet.current.text).toBe('find the latest release notes');
+    expect(JSON.stringify(packet)).not.toContain('subagent found');
+  });
+
   /** The rows before a boundary belong to a context that was summarized away;
    *  what follows is the turn in play, so reading starts again there. */
   it('keeps what follows a compaction boundary and drops what precedes it', async () => {
