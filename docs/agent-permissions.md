@@ -74,8 +74,8 @@ Prefer the narrow rules on this page to a broad `Bash(tenjin:*)`, `Bash(tenjin w
 
 ## What `tenjin install` writes, in full
 
-1. Two hook entries in `~/.claude/settings.json` (`--project` writes the project file instead): `UserPromptSubmit` running `tenjin hook prompt`, and `PreToolUse` on `WebSearch|WebFetch` running `tenjin hook native`. Both are plain command entries with a 5 second timeout. No daemon, no background process, no generated script.
-2. The `mcp__x402__request` rule in `permissions.allow`. Nothing goes into `permissions.deny`, so localhost, intranet and private pages stay reachable by WebFetch whenever the gate says to use your native tools.
+1. Five hook entries in `~/.claude/settings.json` (`--project` writes the project file instead): `UserPromptSubmit` running `tenjin hook prompt`, `PreToolUse` on `WebSearch|WebFetch` running `tenjin hook native`, `PreToolUse` on `Agent|Task` running `tenjin hook agent`, and `PostToolUse` and `PostToolUseFailure` on `WebSearch|WebFetch`, both running `tenjin hook shortfall`. All are plain command entries with a 5 second timeout. No daemon, no background process, no generated script. An install from an earlier release already has the first two; `tenjin install --refresh` (which `tenjin update` runs) adds the rest.
+2. The `mcp__x402__request` rule in `permissions.allow`. Nothing goes into `permissions.deny`, and no hook ever approves a call, so WebSearch and WebFetch stay under your own permission rules. Before each one, when a paid lookup fits it, the hook redirects your assistant to `mcp__x402__request` in its place, as earlier releases did; a subagent is redirected only when it is known to have `mcp__x402__request` and your spend policy would pay without asking, and otherwise its call simply runs. After a call that came back short (a failed call, a page that answers 401, 402, 403, 429 or 5xx, an empty page, a search with no results; never a 404 or 410, since a missing page is missing for a paid reader too), the router may offer a paid lookup.
 3. The `x402` MCP server, through `claude mcp add x402 -s user -- tenjin mcp` when the `claude` binary is on PATH, and printed for you to run when it is not. Under `--project` it registers at project scope instead, from the project directory, so the server lands in that project's `.mcp.json` and your `~/.claude.json` is not touched; `tenjin uninstall --project` removes it from the same place. The scope's own file is read first: a registration that already launches `tenjin mcp` is left exactly as it is and nothing is spawned, an `x402` entry launching anything else is removed and re-added, and a registration file this build cannot parse is reported rather than written over.
 4. The three spend keys above, only where your config file is silent, plus `bazaarPay` on, which is the lane the router pays providers through.
 5. `statusLine`, running `tenjin status-line` once a second, ONLY when that key is not already set. A status line of your own is never replaced: the install prints the command that runs both, and `--status-line compose` writes it only if you ask. The status line stores nothing new off your machine. It reads local files this CLI already writes under your Tenjin data dir: per session, the tool, the provider endpoint, the bounded redacted parameters of the call, its outcome and its price. No prompt text, no result body. Records expire after ten minutes, live in a 0700 directory under a hash of the session id, and are deleted by the next lookup that passes over them.
@@ -85,20 +85,21 @@ Every other key in the settings file is preserved byte for byte, a second run wr
 ## How one lookup runs
 
 1. You type a turn. The hook sends the bounded packet to Tenjin, which answers whether a paid capability fits and, if it does, keeps that packet under a short-lived id.
-2. When one fits, your assistant sees one line: a paid lookup is available for this turn, call `request` with your exact lookup and that id.
+2. When one fits, your assistant sees one line, opening with `Tenjin router (installed by the user):`, that names the service and the call to make: `mcp__x402__request` with your exact lookup and that id.
 3. Your assistant calls `request({query, id})` with the lookup it actually means. That is the accurate part: the routing is decided from your assistant's own query plus the stored context, not from a guess made before the lookup was known.
 4. Tenjin answers with the call to make and what the provider charges. Deciding costs nothing.
 5. This CLI pays that provider once, under your limits, and hands back the result.
 
 ## What the hooks send
 
-- On every prompt, and on every native `WebSearch` or `WebFetch`: the text of the current turn and at most six prior messages, masked by the same key, PEM, seed-phrase, and URL credential rules the publish scan uses, then bounded to 16 KiB, with harness meta rows and tool results excluded. Tool results never travel: a tool result is other people's content, and a packet carrying it would be a channel from a fetched page into a routing decision.
-- A native call sends that same bounded turn WITH the call it is about attached, read from this session's own transcript. That is how a restriction you stated in your own words, such as asking for native tools only, reaches the decision about a bare URL your assistant is fetching.
+- On every prompt and every native `WebSearch` or `WebFetch`: the text of the current turn and at most six prior messages, masked by the same key, PEM, seed-phrase, and URL credential rules the publish scan uses, then bounded to 16 KiB, with harness meta rows and tool results excluded. Tool results never travel: a tool result is other people's content, and a packet carrying it would be a channel from a fetched page into a routing decision.
+- A native call sends that same bounded turn WITH the call attached, read from this session's own transcript. That is how a restriction you stated in your own words, such as asking for native tools only, reaches the decision about a bare URL your assistant is fetching. When that call then comes back short and nothing was offered before it, it is sent once more with what the harness reported: the status code and byte count, or the error. Never the page or the results. A call that came back fine sends nothing more.
+- When your assistant hands a task to a subagent: that task, as the current message, with the same bounded turn before it.
 - Slash commands and one-word acknowledgements are never sent at all.
 - The packet is stored on the backend against the decision id, so the lookup your assistant sends next is decided with the context you gave. Expired packets are unreadable after 15 minutes (the route refuses an expired id) and are deleted by the next router request or the daily cleanup, whichever comes first.
 - On a paid lookup: the capability chosen, a hash of the contract, a hash of the arguments, your wallet address, the amount and the transaction hash are kept.
 
-The answer can put one line into your session: that a paid lookup is available for this turn, and the id that carries your context to it. It names no provider and no price, because at that point the lookup itself has not been decided.
+The answer can put one line into your session, or into a task your assistant delegates: the service that fits, what it does, its listed price, and the `mcp__x402__request` call carrying the id that brings your context to it. The line says it comes from the Tenjin router you installed, and it is an option: your assistant's own tools keep working. Which service actually runs, and what it costs, is decided when your assistant makes that call, under your spend policy.
 
 ## Wallet passphrase storage
 
@@ -108,7 +109,11 @@ Decryption happens in this CLI, in a disposable worker thread, and the key never
 
 ## Delegating to a subagent
 
-A subagent has no transcript of its own, so a lookup it makes routes on the query it wrote and nothing else. Its payments run through the same ledger and the same caps as the lead's, because the lock is on the file rather than on the process. A subagent is not a second budget.
+When your assistant delegates, the task it hands over is routed before the subagent starts, and a paid lookup that fits is appended to that task as one optional line. A native search or fetch the subagent makes later is routed on its own task, read from its own transcript, with your turn still in front of it.
+
+A subagent cannot reach you to approve a spend, so it is only offered lookups your spend policy would pay without asking: within `maxAutoSpend` and the `confirm` threshold, inside the day's `sessionBudget`, and to a host `allowlistCreators` permits. Its payments run through the same ledger and the same caps as the lead's, because the lock is on the file rather than on the process. A subagent is not a second budget.
+
+A subagent is only redirected or offered a lookup when it is known to have `mcp__x402__request`: a custom agent whose definition (`.claude/agents/<name>.md` in the project, `~/.claude/agents/<name>.md`, or an installed plugin's) lists it in `tools:` or has no `tools:` line at all, or one of the built-in `general-purpose`, `Explore` and `Plan` agents, which inherit MCP tools. Any other subagent, such as the built-in `claude-code-guide` (which has WebFetch and WebSearch but no MCP tools) or a type with no definition to read, is left alone: its native calls and delegated tasks are not sent to the router at all, and its calls run free. `tenjin doctor` names your own agents that leave the tool out; add `mcp__x402__request` to their `tools:` to allow paid lookups there. Nothing here edits your agent files.
 
 ## Not the same as `allowlistCreators`
 

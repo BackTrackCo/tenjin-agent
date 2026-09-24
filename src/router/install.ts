@@ -21,10 +21,11 @@ import type { SpendPolicy } from '../lib/policy';
 import { onPath } from '../lib/skill-wiring';
 import type { WalletDeps, WalletOutcome } from '../commands/install-wallet';
 import type { CommandContext, CommandResult } from '../context';
+import { MCP_SERVER_NAME, REQUEST_TOOL } from './names';
 import { ensureStatusLine, type StatusLineMode, type StatusLineResult } from './status-line-wiring';
 
 /**
- * `tenjin install` for the router product: two hook entries, one MCP server,
+ * `tenjin install` for the router product: five hook entries, one MCP server,
  * one permission rule, the spend defaults, and a wallet when there is none.
  *
  * WHAT IT WRITES IS WHAT IT SAYS. There is no skill to materialize, no daemon
@@ -46,8 +47,8 @@ const exec = promisify(execFile);
  * the refresh `tenjin update` spawns all rewrite them in place.
  */
 export const HOOK_TIMEOUT_SECONDS = 5;
-export const MCP_SERVER_NAME = 'x402';
-export const ALLOW_RULE = 'mcp__x402__request';
+export { MCP_SERVER_NAME };
+export const ALLOW_RULE = REQUEST_TOOL;
 /**
  * The MCP registration follows the SAME SCOPE the hook entries do. A
  * `--project` install that wrote its hooks into the project and then registered
@@ -86,19 +87,39 @@ export function routerSettingsPath(
   return claudeSettingsPath(opts.homeDir ?? homedir());
 }
 
-/** The two entries, spelled once so `uninstall` and the tests read the same list. */
+/** The subagent tool, under its current name and its older one. */
+export const DELEGATION_MATCHER = 'Agent|Task';
+
+/** The native tools both native arms watch. */
+export const NATIVE_MATCHER = 'WebSearch|WebFetch';
+
+/**
+ * The five entries, spelled once so `uninstall`, `doctor` and the tests read
+ * the same list. The native tools are routed twice over one lookup: BEFORE the
+ * call, as every release has, with a line pointing to a paid lookup when one
+ * fits; and AFTER it, only when it came back short and nothing was said before.
+ * A failed call fires PostToolUseFailure rather than PostToolUse, so the second
+ * takes both.
+ */
 export function routerHookPlan(): unknown[] {
   const handler = (command: string) => [
     { type: 'command', command, timeout: HOOK_TIMEOUT_SECONDS },
   ];
   return [
     { event: 'UserPromptSubmit', hooks: handler('tenjin hook prompt') },
-    { event: 'PreToolUse', matcher: 'WebSearch|WebFetch', hooks: handler('tenjin hook native') },
+    { event: 'PreToolUse', matcher: NATIVE_MATCHER, hooks: handler('tenjin hook native') },
+    { event: 'PreToolUse', matcher: DELEGATION_MATCHER, hooks: handler('tenjin hook agent') },
+    { event: 'PostToolUse', matcher: NATIVE_MATCHER, hooks: handler('tenjin hook shortfall') },
+    {
+      event: 'PostToolUseFailure',
+      matcher: NATIVE_MATCHER,
+      hooks: handler('tenjin hook shortfall'),
+    },
   ];
 }
 
 export const DISCLOSURE: readonly string[] = [
-  'What leaves this machine: the bounded text of each prompt and each native search query or URL, sent to Tenjin for the free routing gate.',
+  'What leaves this machine: the bounded text of each prompt, each native search query or URL (and, when one came back short, its status, size or error), and each task handed to a subagent, sent to Tenjin for the free routing gate.',
   'What is kept when a lookup is paid: the capability chosen, a hash of the contract, a hash of the arguments, and your wallet address. No prompt text, no arguments, no hint text.',
   'What never leaves: your private key. It is decrypted in this CLI to sign, and never sent anywhere.',
 ];

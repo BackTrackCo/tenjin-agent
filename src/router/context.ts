@@ -1,5 +1,6 @@
 import { open } from 'node:fs/promises';
 import { isIP } from 'node:net';
+import { dirname, join } from 'node:path';
 import { isPublicAddress } from '../lib/destination';
 import { mask } from '../lib/redact';
 
@@ -7,12 +8,13 @@ import { mask } from '../lib/redact';
  * The bounded conversation packet the router's gate and paid decision read.
  *
  * WHAT GOES IN IT: ordinary user and assistant text from the CURRENT session
- * only, at most {@link MAX_HISTORY} prior messages and at most
- * {@link MAX_PACKET_BYTES} in total, oldest dropped first. The builders below
- * choose the text; {@link seal} masks and bounds it, and is the only way a
- * packet reaches the wire. Tool results are excluded: a tool result is other
- * people's content, and a packet that carried it would be a channel from a
- * fetched page into a routing decision.
+ * only (and, for a subagent's own native call, that one subagent's rows), at
+ * most {@link MAX_HISTORY} prior messages and at most {@link MAX_PACKET_BYTES}
+ * in total, oldest dropped first. The builders below choose the text;
+ * {@link seal} masks and bounds it, and is the only way a packet reaches the
+ * wire. Tool results are excluded: a tool result is other people's content,
+ * and a packet that carried it would be a channel from a fetched page into a
+ * routing decision.
  *
  * WHAT NEVER HAPPENS: a transcript this reader cannot vouch for (another
  * session, a subagent sidechain, a compaction boundary, malformed rows, an
@@ -31,6 +33,8 @@ const MAX_TRANSCRIPT_BYTES = 4_000_000;
 const MAX_LITERAL_URLS = 8;
 const MAX_LITERAL_URL_CHARS = 2_000;
 const MAX_PENDING_CHARS = 4_000;
+/** The server's cap on a native outcome's error text. */
+const MAX_OUTCOME_ERROR_CHARS = 1_000;
 /** Scanned past each bound: longer than any secret shape the mask knows. */
 const MASK_MARGIN = 4_096;
 
@@ -49,6 +53,18 @@ export interface Packet {
   literalUrls: string[];
   historyStatus: HistoryStatus;
   pendingCall?: PendingCall;
+  /** How the free tool already fared on `pendingCall`, sent only when it fell
+   *  short. Never without `pendingCall`: the server refuses it alone. */
+  nativeOutcome?: NativeOutcome;
+}
+
+/** What the harness reported about a native call that came back short: its
+ *  status and size (WebFetch), or the error a failed call carried. At least one
+ *  field, always; the server's schema is the same strict object. */
+export interface NativeOutcome {
+  code?: number;
+  bytes?: number;
+  error?: string;
 }
 
 /** The pending native call, INSIDE the packet: the gate request is a strict
@@ -109,6 +125,10 @@ export interface Sealed {
   subjectChanged: boolean;
   /** The pending WebFetch targets this machine or a private network. */
   localTarget: boolean;
+  /** The mask changed the current message. */
+  currentChanged: boolean;
+  /** A literal URL in the packet targets this machine or a private network. */
+  localUrl: boolean;
 }
 
 /**
@@ -127,7 +147,9 @@ export function seal(packet: Packet): Sealed {
   const subject = pending === undefined ? '' : 'query' in pending ? pending.query : pending.url;
   const sealedSubject = maskWithin(subject, MAX_PENDING_CHARS);
   const bound = (text: string): string => maskWithin(text, MAX_MESSAGE_CHARS).text;
-  const current = bound(packet.current.text);
+  const sealedCurrent = maskWithin(packet.current.text, MAX_MESSAGE_CHARS);
+  const current = sealedCurrent.text;
+  const outcome = packet.nativeOutcome;
   const sealed = fit({
     current: { role: packet.current.role, text: current.length > 0 ? current : '(no task text)' },
     history: packet.history
@@ -147,11 +169,23 @@ export function seal(packet: Packet): Sealed {
               ? { tool: pending.tool, query: sealedSubject.text }
               : { tool: pending.tool, url: sealedSubject.text },
         }),
+    ...(outcome === undefined
+      ? {}
+      : {
+          nativeOutcome: {
+            ...outcome,
+            ...(outcome.error !== undefined
+              ? { error: maskWithin(outcome.error, MAX_OUTCOME_ERROR_CHARS).text }
+              : {}),
+          },
+        }),
   });
   return {
     packet: sealed,
     subjectChanged: sealedSubject.changed,
     localTarget: pending !== undefined && 'url' in pending && isLocalTarget(pending.url),
+    currentChanged: sealedCurrent.changed,
+    localUrl: packet.literalUrls.some(isLocalTarget),
   };
 }
 
@@ -219,7 +253,7 @@ export async function buildPromptPacket(
 ): Promise<Packet> {
   const trimmed = prompt.trim();
   const text = trimmed.length > 0 ? trimmed : '(empty prompt)';
-  const read = await readHistory(transcriptPath, sessionId);
+  const read = await readHistory(transcriptPath, { sessionId });
   return {
     current: { role: 'user', text },
     history: read ?? [],
@@ -229,9 +263,9 @@ export async function buildPromptPacket(
 }
 
 /**
- * Build the packet for a native call the host is about to make. The same
- * reader as a prompt packet, with tool results excluded, and the same
- * {@link seal} before it is sent.
+ * Build the packet for a native call, before it runs or after it came back
+ * short. The same reader as a prompt packet, with tool results excluded, and
+ * the same {@link seal} before it is sent.
  *
  * THE USER'S WORDS ARE WHAT CARRY THEIR AUTHORITY. Building this packet from
  * the tool argument alone made the search string the entire conversation, so a
@@ -240,17 +274,35 @@ export async function buildPromptPacket(
  * paid provider on a bare URL. Reading the transcript at the hook event is not
  * session guessing; the harness hands this hook the path to its own session.
  *
- * The pending call rides INSIDE the packet as the proposed operation, which is
- * the shape the route takes and the one `wire-gate-request.json` pins.
+ * The call rides INSIDE the packet as `pendingCall`, with how it fared beside
+ * it as `nativeOutcome`: the shape the route takes, pinned by
+ * `wire-hook-request-native-shortfall.json`.
  */
 export async function buildNativePacket(
   transcriptPath: string | undefined,
   sessionId: string,
   pending: PendingCall,
+  opts: { agentId?: string; nativeOutcome?: NativeOutcome } = {},
 ): Promise<Packet> {
+  const { agentId, nativeOutcome } = opts;
   const subject = 'query' in pending ? pending.query : pending.url;
-  const read = await readHistory(transcriptPath, sessionId);
-  const messages = read ?? [];
+  const read = await readHistory(transcriptPath, { sessionId });
+  // A SUBAGENT'S CALL BELONGS TO ITS OWN TASK. The harness hands every
+  // subagent hook the PARENT's transcript, whose latest user message is not
+  // what this subagent was asked to do, so two subagents with different
+  // assignments sent the same packet (tenjin-agent#377). Its own transcript
+  // opens with the delegated task; the parent's messages stay in front of it
+  // as history, which is how a restriction the user gave the parent still
+  // reaches this call. A subagent file that cannot be read is today's
+  // behaviour, not a refusal.
+  const own =
+    agentId === undefined
+      ? null
+      : await readHistory(subagentTranscriptPath(transcriptPath, sessionId, agentId), {
+          sessionId,
+          agentId,
+        });
+  const messages = own === null ? (read ?? []) : [...(read ?? []), ...own];
   // The most recent user message is the turn this call belongs to; everything
   // before it is context. With no transcript the call speaks for itself, which
   // is what this hook did before it could read one.
@@ -262,15 +314,43 @@ export async function buildNativePacket(
     current: current?.message ?? { role: 'user', text: subject },
     history: current === undefined ? messages : messages.slice(0, current.index),
     literalUrls: literalUrlsIn(`${current?.message.text ?? ''}\n${subject}`),
-    historyStatus: read === null ? 'unavailable' : 'ok',
+    historyStatus: read === null && own === null ? 'unavailable' : 'ok',
     pendingCall: pending,
+    ...(nativeOutcome !== undefined ? { nativeOutcome } : {}),
   };
+}
+
+/** Both ids become path segments, so anything but an opaque token is refused. */
+const PATH_SEGMENT_RE = /^[A-Za-z0-9_-]{1,200}$/;
+
+/**
+ * Where the harness keeps one subagent's transcript: beside the parent's
+ * `<session>.jsonl`, under `<session>/subagents/agent-<agent_id>.jsonl`
+ * (Claude Code 2.1.x). `undefined` when either id could not be a path segment.
+ */
+export function subagentTranscriptPath(
+  transcriptPath: string | undefined,
+  sessionId: string,
+  agentId: string,
+): string | undefined {
+  if (transcriptPath === undefined || transcriptPath.length === 0) return undefined;
+  if (!PATH_SEGMENT_RE.test(sessionId) || !PATH_SEGMENT_RE.test(agentId)) return undefined;
+  return join(dirname(transcriptPath), sessionId, 'subagents', `agent-${agentId}.jsonl`);
+}
+
+/**
+ * Whose rows a transcript read admits: the session's own, or with `agentId`,
+ * exactly one subagent's sidechain and no other.
+ */
+interface RowScope {
+  sessionId: string;
+  agentId?: string;
 }
 
 /** `null` means "cannot be vouched for"; an empty array is a genuinely fresh session. */
 async function readHistory(
   path: string | undefined,
-  sessionId: string,
+  scope: RowScope,
 ): Promise<PacketMessage[] | null> {
   if (path === undefined || path.length === 0) return null;
   let raw: string;
@@ -293,7 +373,7 @@ async function readHistory(
     await file.close();
   }
   try {
-    return parseRows(raw, sessionId);
+    return parseRows(raw, scope);
   } catch {
     return null;
   }
@@ -310,7 +390,8 @@ async function readHistory(
  * A compaction boundary is not a reason to read nothing: the rows after it are
  * the live context, so the collected messages start again there.
  */
-function parseRows(raw: string, sessionId: string): PacketMessage[] {
+function parseRows(raw: string, scope: RowScope): PacketMessage[] {
+  const { sessionId, agentId } = scope;
   let messages: PacketMessage[] = [];
   for (const line of raw.split('\n')) {
     if (line.trim().length === 0) continue;
@@ -330,9 +411,13 @@ function parseRows(raw: string, sessionId: string): PacketMessage[] {
     // Never ours to read: another window's rows and a subagent's are skipped
     // rather than allowed to void the file.
     if (typeof row.sessionId === 'string' && row.sessionId !== sessionId) continue;
-    if (row.isSidechain === true) continue;
     // Harness meta rows (a skill body, a command caveat) are not the user's words.
     if (row.isMeta === true) continue;
+    // A subagent read admits that one sidechain and nothing else; the harness's
+    // own reminders in it are not the task. Every other read admits none.
+    if (agentId === undefined ? row.isSidechain === true : !ownSidechainRow(row, agentId)) {
+      continue;
+    }
     if (row.type !== 'user' && row.type !== 'assistant') continue;
     if (row.sessionId !== sessionId) continue;
     let text: string;
@@ -344,6 +429,10 @@ function parseRows(raw: string, sessionId: string): PacketMessage[] {
     if (text.length > 0) messages.push({ role: row.type, text });
   }
   return messages;
+}
+
+function ownSidechainRow(row: Record<string, unknown>, agentId: string): boolean {
+  return row.isSidechain === true && row.agentId === agentId && row.isMeta !== true;
 }
 
 /** Ordinary text blocks only; a tool result contributes nothing. */

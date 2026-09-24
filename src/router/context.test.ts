@@ -289,10 +289,14 @@ describe('seal, the one way a packet leaves', () => {
       ],
       literalUrls: [text],
       historyStatus: 'ok',
-      ...(pendingCall !== undefined ? { pendingCall } : {}),
+      ...(pendingCall !== undefined
+        ? { pendingCall, nativeOutcome: { code: 402, error: text } }
+        : {}),
     };
   }
 
+  // The native arms (a pending call, and after the call its outcome) and the
+  // prompt and delegation arms (no pending call, the task as current).
   it.each(SHAPES)('leaves no trace of %s in any field', (_label, text, secret) => {
     for (const pending of [
       { tool: 'WebSearch' as const, query: text },
@@ -302,6 +306,9 @@ describe('seal, the one way a packet leaves', () => {
       expect(JSON.stringify(sealed.packet)).not.toContain(secret);
       expect(sealed.subjectChanged).toBe(true);
     }
+    const task = seal(planted(text, undefined));
+    expect(JSON.stringify(task.packet)).not.toContain(secret);
+    expect(task.currentChanged).toBe(true);
   });
 
   it('leaves a home path as written, since the username mask is deferred', () => {
