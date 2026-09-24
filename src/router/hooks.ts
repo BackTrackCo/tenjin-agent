@@ -373,7 +373,9 @@ function resolveBaseUrl(deps: HookDeps, config: PartialConfig): string {
 /**
  * A SUBAGENT IS OFFERED ONLY WHAT IT CAN PAY FOR ALONE. It cannot reach the
  * user, so an offer that would stop on `needs_approval` is a dead end; the
- * parent can still make that lookup itself. This asks the question `request`
+ * parent can still make that lookup itself. The main agent's pre-call deny and
+ * prompt hint ask the same question, since both send it to a call that has to
+ * run rather than to free tools that would have. This asks the question `request`
  * will: the same settings, the same session ledger and the same policy
  * evaluation, with the provider's host as the creator the way `pay` names it.
  * Only `allow`, a spend that would auto-execute, is worth the line. It
@@ -420,6 +422,8 @@ export interface PromptHookOutcome {
   action?: HookDecision['action'];
   /** The turn id, for the smoke to correlate against. */
   id?: string;
+  /** An `execute` whose hint was not shown: the paid call would need approval. */
+  withheld?: true;
 }
 
 /**
@@ -428,6 +432,11 @@ export interface PromptHookOutcome {
  * `native`, `needs_input` and a decision that failed or timed out are silence:
  * a turn with no lookup carries nothing extra, and `decide` has already written
  * any failure cause to stderr.
+ *
+ * THE HINT ASKS FOR A CALL THAT HAS TO RUN. Over the cap or past the budget,
+ * `request` answers `needs_approval`, and a model sent there stops to ask the
+ * user where its free tools would have done: so the line is shown only when
+ * the paid call would auto-execute, the same rule the pre-call deny follows.
  */
 export async function runPromptHook(raw: unknown, deps: HookDeps): Promise<PromptHookOutcome> {
   const event = decodeEvent(raw);
@@ -445,9 +454,15 @@ export async function runPromptHook(raw: unknown, deps: HookDeps): Promise<Promp
   );
   const footer = await openFooter(deps, event.sessionId, 'prompt');
   const outcome = await decide(sealed, deps, router.config);
+  if (outcome === null || outcome.action !== 'execute') {
+    await footer.close(outcome);
+    return { response: null, ...(outcome !== null ? { action: outcome.action } : {}) };
+  }
+  if (!(await wouldAutoExecute(outcome, deps))) {
+    await footer.close(outcome, { withheld: true });
+    return { response: null, action: 'execute', withheld: true };
+  }
   await footer.close(outcome);
-  if (outcome === null) return { response: null };
-  if (outcome.action !== 'execute') return { response: null, action: outcome.action };
   return { action: 'execute', id: outcome.id, ...injection(attributed(outcome.hint)) };
 }
 

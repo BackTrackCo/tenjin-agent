@@ -18,21 +18,25 @@ import { runHookCommand } from './hook-command';
 import { ROUTER_PATH } from './decision';
 import { renderProgress, resolveProgressSession, sessionDir } from './progress';
 
+/** What `tenjin install` writes (`ROUTER_DEFAULTS`): 0.25 a call, auto. */
+const ROUTER_POLICY = { maxAutoSpend: '250000', sessionBudget: '5000000', confirm: 'above:250000' };
+
 let dir: string;
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'router-hooks-'));
   // A git root of its own, so `router.*` resolves from here and no file on the
   // machine running the suite can switch the router off.
-  const { mkdir } = await import('node:fs/promises');
+  const { mkdir, writeFile } = await import('node:fs/promises');
   await mkdir(join(dir, '.git'));
+  // The policy `install` writes, so the fixture's lookup auto-executes; a test
+  // about another policy writes its own.
+  await writeFile(join(dir, 'config.json'), JSON.stringify(ROUTER_POLICY));
 });
 afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
 const BASE = 'https://tenjin.sh';
-/** What `tenjin install` writes (`ROUTER_DEFAULTS`): 0.25 a call, auto. */
-const ROUTER_POLICY = { maxAutoSpend: '250000', sessionBudget: '5000000', confirm: 'above:250000' };
 
 /** A recorded decision answer; `calls` is what the hook actually sent. */
 function router(body: unknown, status = 200): { fetchImpl: typeof fetch; calls: unknown[] } {
@@ -194,6 +198,40 @@ describe('the prompt hook', () => {
     // turn with no hint.
     expect(Object.keys(sent.body).sort()).toEqual(['packet', 'schemaVersion']);
     expect((sent.body.packet as { pendingCall?: unknown }).pendingCall).toBeUndefined();
+  });
+
+  /**
+   * A HINT TOWARD A CALL THAT STOPS IS NOT SENT. Over the cap or past the
+   * budget, `request` answers `needs_approval`, and a model sent there stops
+   * to ask the user instead of using its free tools.
+   */
+  it.each([
+    ['above maxAutoSpend', { maxAutoSpend: '9999', confirm: 'above:9999' }],
+    ['under confirm always', { confirm: 'always' }],
+    ['past the session budget', { sessionBudget: '20000' }],
+  ])('says nothing when the lookup is %s', async (_label, over) => {
+    const fs = await import('node:fs/promises');
+    await fs.writeFile(join(dir, 'config.json'), JSON.stringify({ ...ROUTER_POLICY, ...over }));
+    // 15000 of the day already committed: only the session-budget case minds.
+    await fs.writeFile(
+      join(dir, 'spend.json'),
+      JSON.stringify({
+        schemaVersion: 2,
+        windowStartMs: Date.now(),
+        committedAtomic: '15000',
+        reservations: [],
+      }),
+    );
+    const { fetchImpl } = router(EXECUTE);
+    const out = await runPromptHook(promptEvent('read https://example.test/spec for me'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+    expect(out).toEqual({ response: null, action: 'execute', withheld: true });
+    expect(await renderProgress(dir, 'sess-1')).toBe(
+      'x402 · prompt: native tools (offer needs approval)',
+    );
   });
 
   it('says nothing at all on native', async () => {
