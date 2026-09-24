@@ -1545,6 +1545,21 @@ describe('config set router.* at each scope', () => {
     });
   });
 
+  it('keeps a router subkey it does not know when it writes a project file', async () => {
+    await inRepo(async (repo) => {
+      await mkdir(join(repo, '.tenjin'));
+      await writeFile(
+        join(repo, '.tenjin', 'config.json'),
+        JSON.stringify({ note: 'team', router: { context: 'turn', later: 1 } }),
+      );
+      await runConfigSet({ key: 'router.enabled', value: 'false', project: true }, makeCtx());
+      expect(await readJson(join(repo, '.tenjin', 'config.json'))).toEqual({
+        note: 'team',
+        router: { context: 'turn', later: 1, enabled: false },
+      });
+    });
+  });
+
   it('keeps both keys when two project sets run at once', async () => {
     await inRepo(async (repo) => {
       await Promise.all([

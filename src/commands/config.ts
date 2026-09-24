@@ -867,11 +867,13 @@ async function mergeProjectRouter(
   value: boolean | RouterContext,
 ): Promise<void> {
   // Through the one parser: a file that is not an object, or whose block is
-  // invalid, is refused rather than replaced.
+  // invalid, is refused rather than replaced. A router subkey this build does
+  // not know rides along untouched, as in the global file; it is never read.
   const existing = await readProjectRouterFile(path);
+  const block = existing?.json.router;
   const next = {
     ...(existing?.json ?? {}),
-    router: { ...(existing?.layer ?? {}), [field]: value },
+    router: { ...(block !== undefined ? (block as object) : {}), [field]: value },
   };
   await writeFileAtomic(path, `${JSON.stringify(next, null, 2)}\n`, {
     mode: 0o644,

@@ -30,8 +30,10 @@ export interface StatusLineDeps {
 
 /**
  * The bin entry's fast path for a bare `tenjin status-line`, which runs on a
- * one-second timer: commander, zod and the command tree cost about 120 ms of
- * parse per tick over this path. `dist-chunks.test.ts` pins what it may load.
+ * one-second timer: commander and the command tree cost about 120 ms of parse
+ * per tick over this path. It does load zod, for the router's own switch
+ * through the one config parser, about 17 ms a tick. `dist-chunks.test.ts`
+ * pins what it may load.
  */
 export async function statusLineMain(): Promise<void> {
   const { dataDir } = await import('../lib/paths');
