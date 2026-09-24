@@ -13,7 +13,9 @@ import {
   MCP_SERVER_NAME,
   mcpRemoveCommand,
   mcpScope,
+  readMcpEntry,
   routerSettingsPath,
+  type McpEntryState,
 } from './install';
 import { removeStatusLine } from './status-line-wiring';
 
@@ -40,6 +42,12 @@ export interface RouterUninstallDeps {
   env?: NodeJS.ProcessEnv;
   which?: (bin: string) => boolean;
   removeMcp?: (opts: { scope: 'user' | 'project'; cwd: string }) => Promise<void>;
+  /** Reads the registration the scope's own file holds; tests inject it. */
+  readMcpEntry?: (
+    scope: 'user' | 'project',
+    cwd: string,
+    home: string,
+  ) => Promise<{ found: boolean; state: McpEntryState }>;
 }
 
 export async function runRouterUninstall(
@@ -69,7 +77,7 @@ export async function runRouterUninstall(
   }
   // The SAME scope the install used, or a `--project` uninstall would leave the
   // project's registration behind and reach into the user's file instead.
-  const mcp = await removeMcpServer(deps, env, args.project === true, cwd);
+  const mcp = await removeMcpServer(deps, env, args.project === true, cwd, home);
   const data = {
     settingsPath,
     ...removed,
@@ -90,7 +98,9 @@ export async function runRouterUninstall(
           : 'status line: none of ours was registered',
       mcp.removed
         ? `removed the ${MCP_SERVER_NAME} MCP server (${mcp.scope} scope)`
-        : `mcp: run ${mcp.command}`,
+        : mcp.kept !== undefined
+          ? `mcp: ${mcp.reason ?? 'left in place'}`
+          : `mcp: run ${mcp.command}`,
       'Your wallet, spend ledger and config are kept.',
     ],
   };
@@ -155,9 +165,39 @@ async function removeMcpServer(
   env: NodeJS.ProcessEnv,
   project: boolean,
   cwd: string,
-): Promise<{ removed: boolean; scope: 'user' | 'project'; command: string; reason?: string }> {
+  home: string,
+): Promise<{
+  removed: boolean;
+  scope: 'user' | 'project';
+  command: string;
+  reason?: string;
+  kept?: 'foreign' | 'unreadable';
+}> {
   const scope = mcpScope(project);
   const command = mcpRemoveCommand(project);
+  // THE SAME CHECK INSTALL MAKES. The name `x402` proves nothing: another tool
+  // can register its own server under it, and install refuses to touch that
+  // entry. Uninstall must not remove it either. An absent entry falls through
+  // to the remove as before, so nothing changes for a normal install.
+  const existing = await (deps.readMcpEntry ?? readMcpEntry)(scope, cwd, home);
+  if (existing.state === 'wrong-command') {
+    return {
+      removed: false,
+      scope,
+      command,
+      kept: 'foreign',
+      reason: `an MCP server named ${MCP_SERVER_NAME} at ${scope} scope launches something else; this command will not remove a registration it did not write, so it was left in place`,
+    };
+  }
+  if (existing.state === 'unreadable') {
+    return {
+      removed: false,
+      scope,
+      command,
+      kept: 'unreadable',
+      reason: `the ${scope}-scope registration file could not be read, so nothing was removed from it`,
+    };
+  }
   const which = deps.which ?? ((bin: string) => onPath(bin, env));
   if (!which('claude')) {
     return { removed: false, scope, command, reason: 'the `claude` binary is not on PATH' };
