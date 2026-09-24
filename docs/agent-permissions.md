@@ -92,7 +92,7 @@ Every other key in the settings file is preserved byte for byte, a second run wr
 
 ## What the hooks send
 
-- On every prompt, and on every native `WebSearch` or `WebFetch`: the bounded text of the current turn, at most six prior messages and 16 KiB, masked by the same key, PEM, seed-phrase, and URL credential rules the publish scan uses, with harness meta rows and tool results excluded. Tool results never travel: a tool result is other people's content, and a packet carrying it would be a channel from a fetched page into a routing decision.
+- On every prompt, and on every native `WebSearch` or `WebFetch`: the text of the current turn and at most six prior messages, masked by the same key, PEM, seed-phrase, and URL credential rules the publish scan uses, then bounded to 16 KiB, with harness meta rows and tool results excluded. Tool results never travel: a tool result is other people's content, and a packet carrying it would be a channel from a fetched page into a routing decision.
 - A native call sends that same bounded turn WITH the call it is about attached, read from this session's own transcript. That is how a restriction you stated in your own words, such as asking for native tools only, reaches the decision about a bare URL your assistant is fetching.
 - Slash commands and one-word acknowledgements are never sent at all.
 - The packet is stored on the backend against the decision id, so the lookup your assistant sends next is decided with the context you gave. Expired packets are unreadable after 15 minutes (the route refuses an expired id) and are deleted by the next router request or the daily cleanup, whichever comes first.

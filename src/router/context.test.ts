@@ -343,3 +343,55 @@ describe('seal, the one way a packet leaves', () => {
     });
   });
 });
+
+describe('seal masks, then bounds, over a bounded window', () => {
+  it('masks a secret that straddles the message bound before it cuts', async () => {
+    const { MAX_MESSAGE_CHARS } = await import('./context');
+    const body = 'B'.repeat(36);
+    const text = `${'a '.repeat((MAX_MESSAGE_CHARS - 10) / 2)}ghp_${body} tail`;
+    const sealed = seal({
+      current: { role: 'user', text },
+      history: [],
+      literalUrls: [],
+      historyStatus: 'ok',
+    });
+    // The token was seen whole and masked, not dropped and not cut open.
+    expect(sealed.packet.current.text).toContain('ghp_…');
+    expect(sealed.packet.current.text).not.toContain('BBBBBB');
+    expect(sealed.packet.current.text.length).toBe(MAX_MESSAGE_CHARS);
+  });
+
+  it('never sends a secret cut at the scan window edge, however much earlier masks shrank the text', async () => {
+    const { MAX_MESSAGE_CHARS } = await import('./context');
+    // Six long keys each mask down by about 1,000 characters, so the text that
+    // sat past the window edge would otherwise land inside the bound.
+    const keys = Array.from({ length: 6 }, () => `sk-ant-${'k'.repeat(1_000)}`).join(' ');
+    const windowEnd = MAX_MESSAGE_CHARS + 4_096;
+    const filler = 'a '.repeat(Math.floor((windowEnd - keys.length - 21) / 2));
+    const text = `${keys} ${filler}ghp_${'C'.repeat(36)} tail`;
+    expect(text.indexOf('ghp_')).toBeLessThan(windowEnd);
+    expect(text.indexOf('ghp_') + 40).toBeGreaterThan(windowEnd);
+    const sealed = seal({
+      current: { role: 'user', text },
+      history: [],
+      literalUrls: [],
+      historyStatus: 'ok',
+    });
+    expect(sealed.packet.current.text).not.toContain('ghp_C');
+  });
+
+  it('seals a megabyte of distinct wordlist words well inside the hook budget', async () => {
+    const words = (await import('../lib/bip39-wordlist.json')).default.words.split(' ');
+    const text = Array.from({ length: 160_000 }, (_, i) => words[(i * 7) % 2048]).join(' ');
+    expect(text.length).toBeGreaterThan(1_000_000);
+    const started = performance.now();
+    seal({
+      current: { role: 'user', text },
+      history: [{ role: 'user', text }],
+      literalUrls: [],
+      historyStatus: 'ok',
+      pendingCall: { tool: 'WebSearch', query: text },
+    });
+    expect(performance.now() - started).toBeLessThan(500);
+  });
+});

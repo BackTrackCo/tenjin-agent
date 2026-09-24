@@ -31,6 +31,8 @@ const MAX_TRANSCRIPT_BYTES = 4_000_000;
 const MAX_LITERAL_URLS = 8;
 const MAX_LITERAL_URL_CHARS = 2_000;
 const MAX_PENDING_CHARS = 4_000;
+/** Scanned past each bound: longer than any secret shape the mask knows. */
+const MASK_MARGIN = 4_096;
 
 export type PacketRole = 'user' | 'assistant';
 export interface PacketMessage {
@@ -112,8 +114,8 @@ export interface Sealed {
 /**
  * THE ONE OUTBOUND CHOKEPOINT. Every string that leaves in a hook packet is
  * masked here, `current`, `history`, `literalUrls` and the pending call alike,
- * and only then bounded: a secret cut in half by a bound before the mask no
- * longer matches its row, and its first half would leave. The server stores
+ * and only then bounded ({@link maskWithin}): a secret cut in half by a bound
+ * before the mask no longer matches its row, and its first half would leave. The server stores
  * the packet against the id, so a secret here is a secret in its database.
  *
  * It also says what the caller must not send at all. A masked subject would
@@ -123,8 +125,8 @@ export interface Sealed {
 export function seal(packet: Packet): Sealed {
   const pending = packet.pendingCall;
   const subject = pending === undefined ? '' : 'query' in pending ? pending.query : pending.url;
-  const maskedSubject = mask(subject);
-  const bound = (text: string): string => mask(text).slice(0, MAX_MESSAGE_CHARS);
+  const sealedSubject = maskWithin(subject, MAX_PENDING_CHARS);
+  const bound = (text: string): string => maskWithin(text, MAX_MESSAGE_CHARS).text;
   const current = bound(packet.current.text);
   const sealed = fit({
     current: { role: packet.current.role, text: current.length > 0 ? current : '(no task text)' },
@@ -142,15 +144,31 @@ export function seal(packet: Packet): Sealed {
       : {
           pendingCall:
             'query' in pending
-              ? { tool: pending.tool, query: maskedSubject.slice(0, MAX_PENDING_CHARS) }
-              : { tool: pending.tool, url: maskedSubject.slice(0, MAX_PENDING_CHARS) },
+              ? { tool: pending.tool, query: sealedSubject.text }
+              : { tool: pending.tool, url: sealedSubject.text },
         }),
   });
   return {
     packet: sealed,
-    subjectChanged: maskedSubject !== subject,
+    subjectChanged: sealedSubject.changed,
     localTarget: pending !== undefined && 'url' in pending && isLocalTarget(pending.url),
   };
+}
+
+/**
+ * MASKED, THEN BOUNDED, over a window: the mask scans what can be sent plus a
+ * margin longer than any secret shape, so its cost is bounded however large
+ * the input, and a secret crossing `max` is seen whole before the cut. A PEM
+ * block that opens inside the window is masked to the window's end. When the
+ * window itself cut the text, the last `MASK_MARGIN` characters of its masked
+ * form are never sent either: a secret cut at the window's edge can sit there
+ * after earlier masks shortened the text, and must not leave in part.
+ */
+function maskWithin(text: string, max: number): { text: string; changed: boolean } {
+  const window = text.slice(0, max + MASK_MARGIN);
+  const masked = mask(window);
+  const limit = window.length < text.length ? Math.min(max, masked.length - MASK_MARGIN) : max;
+  return { text: masked.slice(0, Math.max(0, limit)), changed: masked !== window };
 }
 
 const LOCAL_NAME = /(?:^|\.)(?:localhost|local)$/i;
