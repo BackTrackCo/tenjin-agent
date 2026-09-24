@@ -82,6 +82,9 @@ To keep it installed and stop it, `tenjin config set router.enabled false` stops
 
 ## Developing
 
+Before submitting a contribution, read [CONTRIBUTING.md](./CONTRIBUTING.md) for the
+contributor agreement and acceptance instructions.
+
 ```bash
 pnpm install
 pnpm run githooks   # once, to use the repo's git hooks
