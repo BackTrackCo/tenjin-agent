@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -7,7 +7,14 @@ import { resolveSpendAuthorizer } from '../lib/wallet';
 import type { SpendAuthorization, SpendAuthorizer } from '../lib/wallet';
 import type { CommandContext } from '../context';
 import { runPay } from '../commands/pay';
-import { capResult, RESULT_CAP_BYTES, runRequestTool } from './tool';
+import {
+  capResult,
+  keepResult,
+  RESULT_CAP_BYTES,
+  RESULT_KEEP_MS,
+  RESULTS_DIR,
+  runRequestTool,
+} from './tool';
 import { ROUTER_PATH } from './decision';
 import { bindDecision, noteSession, renderProgress } from './progress';
 
@@ -402,10 +409,11 @@ describe('what the tool refuses to execute', () => {
 });
 
 describe('the paid body handed back to the model', () => {
-  it('caps an oversized provider body with a tail that says how much there was', async () => {
+  it('caps an oversized provider body and keeps the whole of it on disk', async () => {
     // A two-byte character throughout, so a naive byte cut would split one.
     const body = { markdown: 'é'.repeat(200_000) };
-    const full = Buffer.byteLength(JSON.stringify(body), 'utf8');
+    const text = JSON.stringify(body);
+    const full = Buffer.byteLength(text, 'utf8');
     const { fetchImpl } = net([
       { url: ROUTER, status: 200, body: decision() },
       ...providerLegs(body),
@@ -413,11 +421,49 @@ describe('the paid body handed back to the model', () => {
     const result = await runRequestTool({ query: 'read the page' }, deps(fetchImpl));
     expect(result.envelope).toMatchObject({ status: 'fulfilled' });
     const shown = result.envelope.result as string;
-    expect(shown).toMatch(new RegExp(`\\[truncated at \\d+ bytes of ${full}\\]$`));
+    const tail = /\[truncated at \d+ bytes of (\d+); full body at (.+)\]$/.exec(shown);
+    expect(tail).not.toBeNull();
+    expect(Number(tail![1])).toBe(full);
+    const path = tail![2]!;
+    expect(path.startsWith(join(dir, RESULTS_DIR))).toBe(true);
+    expect(await readFile(path, 'utf8')).toBe(text);
+    if (process.platform !== 'win32') expect((await stat(path)).mode & 0o777).toBe(0o600);
     expect(shown).not.toContain('\uFFFD');
     const kept = shown.slice(0, shown.lastIndexOf('\n\n[truncated'));
     expect(Buffer.byteLength(kept, 'utf8')).toBeLessThanOrEqual(RESULT_CAP_BYTES);
-    expect(JSON.stringify(body).startsWith(kept)).toBe(true);
+    expect(text.startsWith(kept)).toBe(true);
+  });
+
+  it('writes nothing for a body under the cap', async () => {
+    const body = 'x'.repeat(RESULT_CAP_BYTES);
+    expect(await keepResult(body, dir)).toBe(body);
+    await expect(readdir(join(dir, RESULTS_DIR))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('still returns the capped body, with the plain tail, when the write fails', async () => {
+    // A file where the directory should be: the write cannot land.
+    await writeFile(join(dir, RESULTS_DIR), 'not a directory');
+    const body = 'y'.repeat(RESULT_CAP_BYTES + 10);
+    expect(await keepResult(body, dir)).toBe(
+      `${'y'.repeat(RESULT_CAP_BYTES)}\n\n[truncated at ${RESULT_CAP_BYTES} bytes of ${RESULT_CAP_BYTES + 10}]`,
+    );
+  });
+
+  it('removes kept bodies older than a day on the next write, and nothing else', async () => {
+    const now = 1_800_000_000_000;
+    const folder = join(dir, RESULTS_DIR);
+    await mkdir(folder, { recursive: true });
+    const old = `${now - RESULT_KEEP_MS - 1}-aaaaaaaaaaaa.txt`;
+    const fresh = `${now - 1_000}-bbbbbbbbbbbb.txt`;
+    await writeFile(join(folder, old), 'old');
+    await writeFile(join(folder, fresh), 'fresh');
+    await writeFile(join(folder, 'notes.txt'), 'not ours');
+    await keepResult('z'.repeat(RESULT_CAP_BYTES + 1), dir, now);
+    const left = await readdir(folder);
+    expect(left).not.toContain(old);
+    expect(left).toContain(fresh);
+    expect(left).toContain('notes.txt');
+    expect(left).toHaveLength(3);
   });
 
   it('hands a body under the cap back untouched', () => {
