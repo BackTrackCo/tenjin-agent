@@ -499,12 +499,13 @@ async function preCall(
 }
 
 /**
- * PER-LOOKUP ROUTING BEFORE THE CALL, as main has it, with a line where main
- * had a deny. The free call runs; the harness gets `additionalContext` and
- * nothing else.
+ * PER-LOOKUP ROUTING BEFORE THE CALL, exactly as main: a clear `execute`
+ * denies the native call with the server's hint as the reason, now attributed
+ * and naming the real tool. What is new is who is never denied (see the
+ * subagent cases below).
  */
 describe('the pre-call hook', () => {
-  it('points to the paid lookup beside the running call, deciding nothing', async () => {
+  it('denies the main agent on execute, as main does, with the attributed hint', async () => {
     const { fetchImpl, calls } = router(EXECUTE);
     const out = await runNativeHook(await preCall('https://example.test/spec'), {
       dataDir: dir,
@@ -515,10 +516,8 @@ describe('the pre-call hook', () => {
     expect(out.response).toEqual({
       hookSpecificOutput: {
         hookEventName: 'PreToolUse',
-        additionalContext:
-          `${HINT_SOURCE}: for this lookup, use mcp__x402__request; it returns what this ` +
-          `WebFetch call won't, and the WebFetch call is still running. ` +
-          SEEN.slice(HINT_SOURCE.length + 2),
+        permissionDecision: 'deny',
+        permissionDecisionReason: SEEN,
       },
     });
     // Main's body exactly: the pending call rides in the packet, and nothing
@@ -544,10 +543,11 @@ describe('the pre-call hook', () => {
   });
 
   /**
-   * ONE OFFER PER LOOKUP. A call the pre-call hook already pointed elsewhere
-   * is not offered again when it then fails; a call it said nothing about is.
+   * ONE ROUTING ANSWER PER LOOKUP. A denied call does not run, but should the
+   * harness still report it failing, the call the pre-call hook redirected is
+   * not offered on again; a call it said nothing about is.
    */
-  it('does not offer again after the call it already offered on fails', async () => {
+  it('does not offer after a call it already redirected', async () => {
     const { fetchImpl, calls } = router(EXECUTE);
     const deps = { dataDir: dir, baseUrl: BASE, fetchImpl };
     const first = await runNativeHook(
@@ -604,11 +604,13 @@ describe('the pre-call hook', () => {
       readEvent: async () => JSON.stringify(event),
     });
     expect(written).toHaveLength(1);
-    const printed = JSON.parse(written[0]!) as { hookSpecificOutput: Record<string, unknown> };
-    expect(Object.keys(printed.hookSpecificOutput).sort()).toEqual([
-      'additionalContext',
-      'hookEventName',
-    ]);
+    expect(JSON.parse(written[0]!)).toEqual({
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: 'deny',
+        permissionDecisionReason: SEEN,
+      },
+    });
   });
 });
 
@@ -1030,6 +1032,59 @@ describe('a subagent', () => {
     );
   }
 
+  /**
+   * THE PRE-CALL DENY, INSIDE A SUBAGENT: only when it can act on it. Denying a
+   * call the subagent cannot replace is the stranding #377 reported.
+   */
+  async function subagentPreCall(): Promise<{
+    out: Awaited<ReturnType<typeof runNativeHook>>;
+    calls: unknown[];
+  }> {
+    const path = await parentTranscript();
+    await subagentTranscript('a1', 'Read this page for me.');
+    const { fetchImpl, calls } = router(EXECUTE);
+    const event = {
+      ...(subagentFetch(path, 'a1') as object),
+      hook_event_name: 'PreToolUse',
+      tool_response: undefined,
+    };
+    const out = await runNativeHook(event, {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+      homeDir: dir,
+    });
+    return { out, calls };
+  }
+
+  it('is not denied, and not routed, when its tools exclude request', async () => {
+    await setConfig(ROUTER_POLICY);
+    await defineReader('WebFetch');
+    const { out, calls } = await subagentPreCall();
+    expect(out).toMatchObject({ response: null, noRequestTool: true });
+    expect(calls).toHaveLength(0);
+  });
+
+  it('is not denied when the lookup would need an approval it cannot ask for', async () => {
+    await setConfig({ ...ROUTER_POLICY, confirm: 'always' });
+    await defineReader('WebFetch, mcp__x402__request');
+    const { out } = await subagentPreCall();
+    expect(out).toMatchObject({ response: null, action: 'execute', withheld: true });
+  });
+
+  it('is denied, as the main agent is, when it can use and pay for the lookup', async () => {
+    await setConfig(ROUTER_POLICY);
+    await defineReader('WebFetch, mcp__x402__request');
+    const { out } = await subagentPreCall();
+    expect(out.response).toEqual({
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: 'deny',
+        permissionDecisionReason: SEEN,
+      },
+    });
+  });
+
   it('is not offered a lookup, or routed at all, when its tools exclude request', async () => {
     await setConfig(ROUTER_POLICY);
     await defineReader('WebFetch');
@@ -1211,10 +1266,11 @@ describe('the delegation hook', () => {
 });
 
 /**
- * Every arm, every answer, main agent and subagent alike: never a deny, and no
- * permission decision at all, so the user's own permission rules still apply.
+ * The prompt, after-call and delegation hooks, on every answer, main agent and
+ * subagent alike: no permission decision at all, so the user's own permission
+ * rules still apply. Only the pre-call hook denies, and only as main does.
  */
-describe('no hook path', () => {
+describe('no hook but the pre-call one', () => {
   it.each([
     ['execute', EXECUTE, 200],
     ['native', NATIVE, 200],
@@ -1238,12 +1294,7 @@ describe('no hook path', () => {
     ];
     const outputs = [
       ...(await Promise.all(events.map((event) => runShortfallHook(event, deps)))),
-      await runNativeHook(await preCall('https://example.test/spec'), deps),
-      await runNativeHook(await preCall('btc price today', 'WebSearch'), deps),
-      await runNativeHook(
-        { ...(await preCall('https://example.test/spec')), agent_id: 'a1' },
-        deps,
-      ),
+      await runPromptHook(promptEvent('what is the btc price today'), deps),
       await runDelegationHook(
         {
           session_id: 'sess-1',

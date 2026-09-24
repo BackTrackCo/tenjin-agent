@@ -32,7 +32,7 @@ import { writeFileAtomic } from '../lib/atomic-json';
 const PROGRESS_DIR = 'progress';
 /** The binding marker's prefix, so it can never be read back as a call record. */
 const BINDING_PREFIX = 'id-';
-/** A pre-call offer's marker, keyed by the harness's `tool_use_id`. */
+/** A pre-call redirect's marker, keyed by the harness's `tool_use_id`. */
 const OFFER_PREFIX = 'offer-';
 /** The session's own liveness touch, likewise outside the call-record pattern. */
 const SESSION_FILE = 'session.json';
@@ -185,9 +185,9 @@ export async function bindDecision(
 }
 
 /**
- * ONE OFFER PER LOOKUP. The pre-call hook marks the native call it offered on,
- * by the harness's own `tool_use_id`, and the after-call hook reads the mark
- * before it asks again about the same call. Expires and is pruned like every
+ * ONE ROUTING ANSWER PER LOOKUP. The pre-call hook marks the native call it
+ * redirected, by the harness's own `tool_use_id`, and the after-call hook reads
+ * the mark before it asks again about the same call. Expires and is pruned like every
  * other record here.
  */
 export async function markOffered(

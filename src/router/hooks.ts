@@ -45,13 +45,14 @@ import {
  * leaves the prompt and the native result unchanged; the cause goes to
  * stderr. The user's turn is never blocked by this.
  *
- * AND NOTHING IS EVER DENIED, OR ALLOWED. A paid lookup is an OFFER, made
- * before a native call the router routes or after one that came back short,
- * never a replacement for it: a denied WebFetch stranded every
- * subagent that could not reach `request` (tenjin-agent#377) and painted the
- * main agent's transcript red. No arm returns a `permissionDecision` either:
- * an `allow` would skip the user's own permission rules for the call, so the
- * harness's normal flow decides whether it runs, and the agent picks.
+ * A DENY ONLY WHERE IT CAN BE ACTED ON. The pre-call arm redirects a native
+ * call the router routes, as every release has, because a note beside the call
+ * was followed 0 times in 11 where the redirect is followed. But a denied
+ * WebFetch stranded every subagent that could not reach `request`
+ * (tenjin-agent#377), so a subagent is denied only when its own definition
+ * grants the tool and the spend would auto-execute; anyone else's call runs
+ * free. No arm ever returns `allow`: that would skip the user's own permission
+ * rules for the call.
  */
 
 const PromptEventSchema = z.object({
@@ -140,18 +141,9 @@ export function toolNamed(hint: string): string {
   return hint.replace(BARE_CALL_RE, `${REQUEST_TOOL}({`);
 }
 
-function promptLine(hint: string): string {
+/** The server's line as the prompt hint and the redirect both carry it. */
+function attributed(hint: string): string {
   return `${HINT_SOURCE}: ${toolNamed(hint)}`;
-}
-
-/**
- * BEFORE THE CALL, A DIRECTION, NOT A SHRUG. The router has just judged that
- * this lookup needs what the free tool cannot return, and a soft "optional"
- * here was taken 0 times in 2 where main's redirect was taken 2 in 2. It still
- * denies nothing: the free call runs, and the line says so.
- */
-function precallOffer(tool: 'WebSearch' | 'WebFetch', hint: string): string {
-  return `${HINT_SOURCE}: for this lookup, use ${REQUEST_TOOL}; it returns what this ${tool} call won't, and the ${tool} call is still running. ${toolNamed(hint)}`;
 }
 
 /** Where the offer sits after the free tool came back short. */
@@ -345,7 +337,7 @@ export async function runPromptHook(raw: unknown, deps: HookDeps): Promise<Promp
   await footer.close(outcome);
   if (outcome === null) return { response: null };
   if (outcome.action !== 'execute') return { response: null, action: outcome.action };
-  return { action: 'execute', id: outcome.id, ...injection(promptLine(outcome.hint)) };
+  return { action: 'execute', id: outcome.id, ...injection(attributed(outcome.hint)) };
 }
 
 function injection(line: string): { response: unknown } {
@@ -371,7 +363,7 @@ export interface ShortfallHookOutcome extends NativeHookOutcome {
   /** What the harness reported, when it was a shortfall; absent means the
    *  router was never asked. */
   nativeOutcome?: NativeOutcome;
-  /** The pre-call arm already offered on this very call, so nothing more is said. */
+  /** The pre-call arm already redirected this very call, so nothing more is said. */
   alreadyOffered?: true;
 }
 
@@ -433,14 +425,18 @@ async function routeNativeCall(
 
 /**
  * `tenjin hook native` (PreToolUse on `WebSearch|WebFetch`). PER-LOOKUP
- * ROUTING BEFORE THE CALL, as it has always been, with one difference: an
- * `execute` is a direction beside the call, never a deny. The free call runs
- * under the user's own permission rules, and the harness is told only the
- * line. Anything else, including silence, a slow backend and a `needs_input`,
- * is no output at all.
+ * ROUTING BEFORE THE CALL, exactly as main: a clear `execute` denies the native
+ * call with the server's hint as the reason, carrying the id so the redirected
+ * call runs the decision just made. Anything else, including silence, a slow
+ * backend and a `needs_input`, lets the call run with no output at all.
  *
- * An offer leaves a mark under the call's `tool_use_id`, so the after-call arm
- * does not offer the same lookup a second time.
+ * WHAT IS NEW is who can be denied. A subagent whose definition leaves the
+ * request tool out, or whose spend would need an approval it cannot ask for,
+ * is never redirected: `routeNativeCall` answers without an offer, and its
+ * call runs free.
+ *
+ * A redirect leaves a mark under the call's `tool_use_id`, so the after-call
+ * arm never offers on that same call.
  */
 export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<NativeHookOutcome> {
   const parsed = NativeEventSchema.safeParse(raw);
@@ -457,9 +453,10 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
     response: {
       hookSpecificOutput: {
         hookEventName: 'PreToolUse',
-        // THE SERVER'S LINE, attributed and made directive. It already carries
-        // the id and the exact search or URL this call is making.
-        additionalContext: precallOffer(event.tool_name, routed.offer.hint),
+        permissionDecision: 'deny',
+        // THE SERVER'S LINE, attributed and tool-named, and nothing else. It
+        // already carries the id and the exact search or URL that was denied.
+        permissionDecisionReason: attributed(routed.offer.hint),
       },
     },
     action: 'execute',
@@ -473,8 +470,8 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
  * fine ends here: no router call, no footer, no added latency. Only a clear
  * shortfall ({@link shortfallOf}) asks for one free decision, with what the
  * harness reported riding in the packet as `nativeOutcome`, and only an
- * `execute` says anything. A call the pre-call arm already offered on is not
- * offered again.
+ * `execute` says anything. A call the pre-call arm already redirected is not
+ * offered on again.
  *
  * A server that does not know `nativeOutcome` yet refuses the packet; that is
  * a failed decision like any other, so the hook stays silent.

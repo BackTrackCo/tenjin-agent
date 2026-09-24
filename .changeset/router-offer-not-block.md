@@ -2,19 +2,16 @@
 'tenjin-cli': patch
 ---
 
-The router never blocks a native call any more. WebSearch and WebFetch are still
-routed before each call, as before, but a fitting paid lookup is now a line
-beside the call instead of a denial, and the call runs under your own
-permission rules. When a call comes back short (a failed call, a blocked or
-failing page, an empty page, a search with no results) and nothing was offered
-before it, a paid lookup is offered after it. A new `PreToolUse` hook on
-`Agent|Task` routes each subagent's task before it starts and appends a fitting
-offer to it as one optional line, and a subagent's own native calls are routed
-on its own task. A subagent is only offered lookups your spend policy would pay
-without asking, since it cannot ask you to approve one, and a custom agent whose
-`tools:` leave out `mcp__x402__request` is offered nothing (`tenjin doctor`
-names those agents). Every line the router adds opens with
-`Tenjin router (installed by the user):` and names the call by the tool name
-Claude Code shows, `mcp__x402__request`. Existing installs keep working as they
-are; `tenjin install --refresh` (which `tenjin update` runs) adds the new
-entries, and `tenjin doctor` names any entry that is missing or stale.
+Router hooks are now safe inside subagents. WebSearch and WebFetch are routed
+before each call as before, and a fitting paid lookup still redirects the call
+to `mcp__x402__request`; but a subagent is redirected only when its own tools
+include `mcp__x402__request` and your spend policy would pay without asking, and
+it is routed on its own task rather than the parent's last message. When a free
+call clearly fails (blocked, a server error, an empty page, a search with no
+links, a network error; never a 404 or 410), the router is asked once and may
+offer a paid lookup. A new `PreToolUse` hook on `Agent|Task` appends a fitting
+offer to the task a subagent is handed. Every line the router adds opens with
+`Tenjin router (installed by the user):` and names the call
+`mcp__x402__request`. `tenjin doctor` names custom agents whose `tools:` leave
+the paid tool out. Existing installs keep working as they are;
+`tenjin install --refresh` (which `tenjin update` runs) adds the new hooks.

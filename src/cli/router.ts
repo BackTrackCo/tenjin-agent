@@ -20,10 +20,7 @@ export function registerRouter(reg: Registration): void {
     .helpCommand(false);
   for (const [name, summary] of [
     ['prompt', 'UserPromptSubmit: build the session packet and ask the free gate'],
-    [
-      'native',
-      'PreToolUse on WebSearch|WebFetch: route the lookup, and point to a paid one if it fits',
-    ],
+    ['native', 'PreToolUse on WebSearch|WebFetch: allow the call, or redirect it'],
     [
       'shortfall',
       'PostToolUse(Failure) on WebSearch|WebFetch: offer a paid lookup when the result came back short',
