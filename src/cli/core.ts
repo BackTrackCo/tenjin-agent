@@ -108,6 +108,7 @@ Examples:
   $ tenjin config
   $ tenjin config set publish.mode review
   $ tenjin config set maxAutoSpend 0.25
+  $ tenjin config set --project router.enabled false
 `,
   );
   config.action(async function (this: Command) {
@@ -132,10 +133,19 @@ Examples:
     .description(
       'Write one config value, validated against the key it is for. Spend keys take decimal USD.',
     )
+    .option(
+      '--project',
+      "write a router key into this project's .tenjin/config.json, which is committed",
+    )
+    .option('--local', 'with --project, write .tenjin/config.local.json instead, which is yours')
     .action(async function (this: Command, key: string, value: string) {
+      const o = this.opts();
       await runCommand('config.set', this, async (ctx) => {
         const { runConfigSet } = await import('../commands/config');
-        return runConfigSet({ key, value }, ctx);
+        return runConfigSet(
+          { key, value, project: o.project === true, local: o.local === true },
+          ctx,
+        );
       });
     });
 

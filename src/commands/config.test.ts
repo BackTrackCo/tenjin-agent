@@ -29,10 +29,19 @@ import type { HarnessAdapter } from '../adapters/types';
 const SKILLS_SRC = resolveSkillsSource(fileURLToPath(new URL('.', import.meta.url)));
 
 let dir: string;
+let prevCwd: string;
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'tenjin-cfg-cmd-'));
+  // Every command here resolves `router.*` (and `.tenjin.json`) from the cwd,
+  // so each test runs from a git root of its own and no file on the machine
+  // running the suite can change what it reads.
+  const work = join(dir, 'work');
+  await mkdir(join(work, '.git'), { recursive: true });
+  prevCwd = process.cwd();
+  process.chdir(work);
 });
 afterEach(async () => {
+  process.chdir(prevCwd);
   await rm(dir, { recursive: true, force: true });
 });
 
@@ -120,10 +129,12 @@ describe('runConfigList', () => {
     // shape must not depend on whether there is a secret to leak.
     expect(d.shelfBypassSecret).toEqual({ value: 'unset', source: 'default' });
     expect(d['publish.ackServerWarnings']).toEqual({ value: 'mode', source: 'default' });
+    expect(d['router.enabled']).toEqual({ value: true, source: 'default' });
+    expect(d['router.context']).toEqual({ value: 'session', source: 'default' });
     // 12 scalar keys (incl. bazaarPay/bazaarRegistries and the two shelf keys)
     // + 3 publish.* (mode, defaultPrice, ackServerWarnings) + 7 hooks.* (one
-    // per arm) + 1 update.mode + 4 loop.* + 1 team.publicFallback.
-    expect(humanLines).toHaveLength(28);
+    // per arm) + 1 update.mode + 4 loop.* + 1 team.publicFallback + 2 router.*.
+    expect(humanLines).toHaveLength(30);
   });
 
   it('sendMaxAmount round-trips: unset until set, decimal USD in, Money out, 0 and none valid', async () => {
@@ -1474,5 +1485,114 @@ describe('loop.* and team.publicFallback (loop-redesign/07-pr-b-daemon-kernel.md
     const before = await readFile(configFile(), 'utf8');
     await caught(() => runConfigSet({ key: 'loop.port', value: '70000' }, ctx));
     expect(await readFile(configFile(), 'utf8')).toBe(before);
+  });
+});
+
+describe('config set router.* at each scope', () => {
+  async function inRepo<T>(run: (repo: string) => Promise<T>): Promise<T> {
+    const repo = await mkdtemp(join(tmpdir(), 'tenjin-cfg-router-'));
+    await mkdir(join(repo, '.git'));
+    const prev = process.cwd();
+    try {
+      process.chdir(repo);
+      return await run(repo);
+    } finally {
+      process.chdir(prev);
+      await rm(repo, { recursive: true, force: true });
+    }
+  }
+  const readJson = async (path: string): Promise<unknown> =>
+    JSON.parse(await readFile(path, 'utf8')) as unknown;
+
+  it('writes the global file without --project, on or off accepted', async () => {
+    await runConfigSet({ key: 'router.enabled', value: 'off' }, makeCtx());
+    await runConfigSet({ key: 'router.context', value: 'turn' }, makeCtx());
+    expect((await readRawFile()) as Record<string, unknown>).toMatchObject({
+      router: { enabled: false, context: 'turn' },
+    });
+  });
+
+  it.each([
+    ['router.enabled', 'maybe'],
+    ['router.context', 'all'],
+  ])('rejects %s %s as USAGE', async (key, value) => {
+    const err = await caught(() => runConfigSet({ key, value }, makeCtx()));
+    expect(err.code).toBe('USAGE');
+  });
+
+  it('writes the project file with --project and the personal one with --local', async () => {
+    await inRepo(async (repo) => {
+      await runConfigSet({ key: 'router.enabled', value: 'false', project: true }, makeCtx());
+      expect(await readJson(join(repo, '.tenjin', 'config.json'))).toEqual({
+        router: { enabled: false },
+      });
+
+      const { data, humanLines } = await runConfigSet(
+        { key: 'router.context', value: 'turn', project: true, local: true },
+        makeCtx(),
+      );
+      expect(await readJson(join(repo, '.tenjin', 'config.local.json'))).toEqual({
+        router: { context: 'turn' },
+      });
+      expect(data).toMatchObject({ key: 'router.context', value: 'turn', source: 'local' });
+      expect((humanLines ?? []).join('\n')).toContain('.gitignore');
+      // The global file is untouched by either.
+      expect(existsSync(configFile())).toBe(false);
+
+      const listed = (await runConfigList(makeCtx())).data as Record<string, unknown>;
+      expect(listed['router.enabled']).toMatchObject({ value: false, source: 'project' });
+      expect(listed['router.context']).toMatchObject({ value: 'turn', source: 'local' });
+    });
+  });
+
+  it('keeps a router subkey it does not know when it writes a project file', async () => {
+    await inRepo(async (repo) => {
+      await mkdir(join(repo, '.tenjin'));
+      await writeFile(
+        join(repo, '.tenjin', 'config.json'),
+        JSON.stringify({ note: 'team', router: { context: 'turn', later: 1 } }),
+      );
+      await runConfigSet({ key: 'router.enabled', value: 'false', project: true }, makeCtx());
+      expect(await readJson(join(repo, '.tenjin', 'config.json'))).toEqual({
+        note: 'team',
+        router: { context: 'turn', later: 1, enabled: false },
+      });
+    });
+  });
+
+  it('keeps both keys when two project sets run at once', async () => {
+    await inRepo(async (repo) => {
+      await Promise.all([
+        runConfigSet({ key: 'router.enabled', value: 'false', project: true }, makeCtx()),
+        runConfigSet({ key: 'router.context', value: 'turn', project: true }, makeCtx()),
+      ]);
+      expect(await readJson(join(repo, '.tenjin', 'config.json'))).toEqual({
+        router: { enabled: false, context: 'turn' },
+      });
+      expect(existsSync(join(repo, '.tenjin', 'config.json.lock'))).toBe(false);
+    });
+  });
+
+  it('says when a project value cannot loosen the global one', async () => {
+    await runConfigSet({ key: 'router.enabled', value: 'false' }, makeCtx());
+    await inRepo(async () => {
+      const { humanLines } = await runConfigSet(
+        { key: 'router.enabled', value: 'true', project: true },
+        makeCtx(),
+      );
+      expect((humanLines ?? []).join('\n')).toContain('Still false here');
+    });
+  });
+
+  it('refuses --project on a key a project cannot set, and --local alone', async () => {
+    const project = await caught(() =>
+      runConfigSet({ key: 'maxAutoSpend', value: '5', project: true }, makeCtx()),
+    );
+    expect(project.code).toBe('USAGE');
+    const local = await caught(() =>
+      runConfigSet({ key: 'router.enabled', value: 'false', local: true }, makeCtx()),
+    );
+    expect(local.code).toBe('USAGE');
+    expect(existsSync(configFile())).toBe(false);
   });
 });

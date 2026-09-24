@@ -1,5 +1,6 @@
 import { mkdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
+import { dirname } from 'node:path';
 import { styleText } from 'node:util';
 import { CliError } from '../lib/errors';
 import { confirmChoice } from '../lib/clack';
@@ -23,6 +24,8 @@ import {
   UPDATE_CONFIG_KEYS,
   LOOP_CONFIG_KEYS,
   TEAM_CONFIG_KEYS,
+  ROUTER_CONFIG_KEYS,
+  ROUTER_CONTEXTS,
   loadRawConfig,
   parseLoopValue,
   parsePublicFallbackFlag,
@@ -42,6 +45,8 @@ import type {
   UpdateConfigKey,
   LoopConfigKey,
   TeamConfigKey,
+  RouterConfigKey,
+  RouterContext,
 } from '../lib/config';
 import { onPath } from '../lib/skill-wiring';
 import type { Harness, HarnessAdapter } from '../adapters/types';
@@ -54,6 +59,12 @@ import { withFileLock, LockTimeoutError } from '../lib/lock';
 import { parseUsdToAtomic, toMoney } from '../lib/money';
 import type { Money } from '../schemas';
 import type { CommandContext, CommandResult } from '../context';
+import {
+  projectRouterPath,
+  readProjectRouterFile,
+  routerSettings,
+  type RouterSettings,
+} from '../router/settings';
 
 /**
  * How one config key is presented in `data`. `value` is the machine form: dual
@@ -67,6 +78,8 @@ interface RenderedValue {
 }
 interface RenderedSetting extends RenderedValue {
   source: Provenance;
+  /** The file a router key came from, when one did. */
+  path?: string;
 }
 
 /**
@@ -103,6 +116,7 @@ const KEY_WIDTH = Math.max(
     ...UPDATE_CONFIG_KEYS,
     ...LOOP_CONFIG_KEYS,
     ...TEAM_CONFIG_KEYS,
+    ...ROUTER_CONFIG_KEYS,
   ].map((key) => key.length),
 );
 
@@ -149,6 +163,10 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
     "the loop daemon's loopback port; null derives one from the data dir (set only when doctor reports a foreign listener)",
   'team.publicFallback':
     'on=a team-shelf miss falls through to the public marketplace, off=team-only (public-only lookup stages are dropped)',
+  'router.enabled':
+    'false stops every router hook and the request tool; --project sets it for this repository, --project --local for you alone in it',
+  'router.context':
+    'session=a hook packet carries up to six prior messages, turn=the current turn only; --project and --local as for router.enabled',
 };
 
 function isLoopKey(key: string): key is LoopConfigKey {
@@ -157,6 +175,21 @@ function isLoopKey(key: string): key is LoopConfigKey {
 
 function isTeamKey(key: string): key is TeamConfigKey {
   return (TEAM_CONFIG_KEYS as readonly string[]).includes(key);
+}
+
+function isRouterKey(key: string): key is RouterConfigKey {
+  return (ROUTER_CONFIG_KEYS as readonly string[]).includes(key);
+}
+
+/** The list/get shape for a router key, with the file that set it. */
+function renderRouterSetting(key: RouterConfigKey, settings: RouterSettings): RenderedSetting {
+  const { value, source, path } = key === 'router.enabled' ? settings.enabled : settings.context;
+  return { value, source, ...(path !== undefined ? { path } : {}) };
+}
+
+/** Router keys resolve against the directory the command runs in, as a hook would. */
+async function resolveRouterFromContext(ctx: CommandContext): Promise<RouterSettings> {
+  return routerSettings({ cwd: process.cwd(), dataDir: ctx.dataDir });
 }
 
 function renderLoopSetting(key: LoopConfigKey, settings: EffectiveSettings): RenderedSetting {
@@ -223,6 +256,12 @@ export async function runConfigList(ctx: CommandContext): Promise<CommandResult>
     data[key] = entry;
     humanLines.push(describedLine(key, entry));
   }
+  const router = await resolveRouterFromContext(ctx);
+  for (const key of ROUTER_CONFIG_KEYS) {
+    const entry = renderRouterSetting(key, router);
+    data[key] = entry;
+    humanLines.push(describedLine(key, entry));
+  }
   return { data, humanLines };
 }
 
@@ -260,6 +299,10 @@ export async function runConfigGet(
     };
     return { data: { key, ...entry }, humanLines: [formatLine(key, entry)] };
   }
+  if (isRouterKey(key)) {
+    const entry = renderRouterSetting(key, await resolveRouterFromContext(ctx));
+    return { data: { key, ...entry }, humanLines: [formatLine(key, entry)] };
+  }
   const configKey = assertKey(key);
   const settings = await resolveFromContext(ctx);
   const entry = renderSetting(configKey, settings[configKey].value, settings[configKey].source);
@@ -277,10 +320,28 @@ export interface ConfigSetDeps {
 }
 
 export async function runConfigSet(
-  { key, value }: { key: string; value: string },
+  {
+    key,
+    value,
+    project,
+    local,
+  }: { key: string; value: string; project?: boolean; local?: boolean },
   ctx: CommandContext,
   deps: ConfigSetDeps = {},
 ): Promise<CommandResult> {
+  if (local === true && project !== true) {
+    throw new CliError('USAGE', '--local names the personal project file, so it needs --project', {
+      fix: `Run \`tenjin config set --project --local ${key} ${value}\`.`,
+    });
+  }
+  if (isRouterKey(key)) {
+    return setRouterKey(key, value, ctx, project === true ? { local: local === true } : undefined);
+  }
+  if (project === true) {
+    throw new CliError('USAGE', `${key} is not a project key`, {
+      fix: `--project applies to ${ROUTER_CONFIG_KEYS.join(' and ')} only; drop it to set ${key} for this machine.`,
+    });
+  }
   if (isPublishKey(key)) return setPublishKey(key, value, ctx, deps);
   if (isHooksKey(key)) return setHooksKey(key, value, ctx);
   if (isUpdateKey(key)) return setUpdateKey(key, value, ctx);
@@ -724,6 +785,102 @@ async function setTeamKey(
   return { data: { key, ...entry }, humanLines: [formatLine(key, entry)] };
 }
 
+/**
+ * `config set [--project [--local]] router.enabled|router.context`. Without
+ * `--project` the key goes into the global config through the same locked merge
+ * every set uses. With it, into the project file {@link projectRouterPath}
+ * names from here, merged so a sibling key survives. The line after the write
+ * is what a hook here would now resolve, which differs from the value written
+ * when an outer layer is tighter.
+ */
+async function setRouterKey(
+  key: RouterConfigKey,
+  value: string,
+  ctx: CommandContext,
+  project: { local: boolean } | undefined,
+): Promise<CommandResult> {
+  const field = key === 'router.enabled' ? 'enabled' : 'context';
+  const parsed = field === 'enabled' ? parseBoolean(value) : parseRouterContext(value);
+  let written: RenderedSetting;
+  if (project === undefined) {
+    await persist(ctx.dataDir, (existing) => ({
+      ...existing,
+      router: { ...existing.router, [field]: parsed },
+    }));
+    written = { value: parsed, source: 'file', path: configPath(ctx.dataDir) };
+  } else {
+    const path = await projectRouterPath({ cwd: process.cwd(), local: project.local });
+    await persistProjectRouter(path, field, parsed);
+    written = { value: parsed, source: project.local ? 'local' : 'project', path };
+  }
+  const effective = renderRouterSetting(key, await resolveRouterFromContext(ctx));
+  const humanLines = [formatLine(key, written)];
+  if (effective.value !== written.value) {
+    humanLines.push(
+      `Still ${String(effective.value)} here: ${effective.path ?? 'the default'} is tighter, and a nearer file can only tighten an outer one.`,
+    );
+  }
+  if (project?.local === true) {
+    humanLines.push('Keep .tenjin/config.local.json out of git: add it to .gitignore.');
+  }
+  return { data: { key, ...written, effective }, humanLines };
+}
+
+function parseRouterContext(value: string): RouterContext {
+  const found = ROUTER_CONTEXTS.find((context) => context === value);
+  if (found !== undefined) return found;
+  throw new CliError('USAGE', `Invalid router.context: ${JSON.stringify(value)}`, {
+    fix: 'Use "session" or "turn".',
+  });
+}
+
+/**
+ * Merge one router key into a project file. It holds the router block and
+ * nothing else this CLI reads, so it is written 0644 like any committed file;
+ * an existing file that is not a JSON object is refused rather than replaced.
+ * The read, merge and write run under the same cross-process lock the global
+ * writer takes, so two concurrent sets both land.
+ */
+async function persistProjectRouter(
+  path: string,
+  field: 'enabled' | 'context',
+  value: boolean | RouterContext,
+): Promise<void> {
+  await mkdir(dirname(path), { recursive: true, mode: 0o755 });
+  const lockPath = `${path}.lock`;
+  try {
+    await withFileLock(lockPath, () => mergeProjectRouter(path, field, value));
+  } catch (err) {
+    if (err instanceof LockTimeoutError) {
+      throw new CliError('INTERNAL', err.message, {
+        fix: `If no other tenjin process is running, remove ${lockPath} and retry.`,
+        cause: err,
+      });
+    }
+    throw err;
+  }
+}
+
+async function mergeProjectRouter(
+  path: string,
+  field: 'enabled' | 'context',
+  value: boolean | RouterContext,
+): Promise<void> {
+  // Through the one parser: a file that is not an object, or whose block is
+  // invalid, is refused rather than replaced. A router subkey this build does
+  // not know rides along untouched, as in the global file; it is never read.
+  const existing = await readProjectRouterFile(path);
+  const block = existing?.json.router;
+  const next = {
+    ...(existing?.json ?? {}),
+    router: { ...(block !== undefined ? (block as object) : {}), [field]: value },
+  };
+  await writeFileAtomic(path, `${JSON.stringify(next, null, 2)}\n`, {
+    mode: 0o644,
+    dirMode: 0o755,
+  });
+}
+
 function parsePublishMode(value: string): string {
   const parsed = PublishModeSchema.safeParse(value);
   if (parsed.success) return parsed.data;
@@ -883,7 +1040,7 @@ async function resolveFromContext(ctx: CommandContext): Promise<EffectiveSetting
 function assertKey(key: string): ScalarConfigKey {
   if ((CONFIG_KEYS as string[]).includes(key)) return key as ScalarConfigKey;
   throw new CliError('USAGE', `Unknown config key: ${JSON.stringify(key)}`, {
-    fix: `Valid keys: ${[...CONFIG_KEYS, ...PUBLISH_CONFIG_KEYS, ...HOOKS_CONFIG_KEYS].join(', ')}.`,
+    fix: `Valid keys: ${[...CONFIG_KEYS, ...PUBLISH_CONFIG_KEYS, ...HOOKS_CONFIG_KEYS, ...ROUTER_CONFIG_KEYS].join(', ')}.`,
   });
 }
 
@@ -1082,7 +1239,12 @@ async function persist(
 
 function formatLine(key: string, entry: RenderedSetting): string {
   const label = key.padEnd(KEY_WIDTH);
-  return `  ${label}  ${displayValue(entry)}  ${styleText('dim', `(${entry.source})`)}`;
+  // A router key from a project names its file: which of several is in force is the question.
+  const where =
+    entry.path !== undefined && (entry.source === 'project' || entry.source === 'local')
+      ? ` ${entry.path}`
+      : '';
+  return `  ${label}  ${displayValue(entry)}  ${styleText('dim', `(${entry.source}${where})`)}`;
 }
 
 /** The list variant: the value line, a dim description, and an optional dim note. */

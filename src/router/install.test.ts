@@ -11,10 +11,15 @@ import type { CommandContext } from '../context';
 
 let home: string;
 let data: string;
+/** A git root of its own for doctor to run from, so `router.*` never
+ *  resolves from the suite's cwd. */
+let work: string;
 beforeEach(async () => {
   const root = await mkdtemp(join(tmpdir(), 'router-install-'));
   home = join(root, 'home');
   data = join(root, 'data');
+  work = join(root, 'work');
+  await mkdir(join(work, '.git'), { recursive: true });
   await mkdir(join(home, '.claude'), { recursive: true });
   await mkdir(data, { recursive: true });
 });
@@ -516,6 +521,7 @@ describe('the doctor this release registers', () => {
     const fetchImpl = (async () => new Response('{}', { status: 400 })) as typeof fetch;
     const err = await runRouterDoctor(ctx(), {
       homeDir: home,
+      cwd: work,
       env: {},
       which: () => false,
       fetchImpl,
@@ -535,6 +541,7 @@ describe('the doctor this release registers', () => {
     const fetchImpl = (async () => new Response('{}', { status })) as typeof fetch;
     const err = await runRouterDoctor(ctx(), {
       homeDir: home,
+      cwd: work,
       env: {},
       which: () => true,
       readMcp: async () => true,
@@ -545,6 +552,43 @@ describe('the doctor this release registers', () => {
     const checks = (err as CliError).details as { checks: { name: string; detail: string }[] };
     const router = checks.checks.find((c) => c.name === 'router');
     expect(router?.detail).toContain(detail);
+  });
+});
+
+describe('doctor and the router switch', () => {
+  async function hooksCheck(cwd: string): Promise<{ status: string; detail: string }> {
+    const { runRouterDoctor } = await import('./doctor');
+    await writeFile(join(data, 'wallet.json'), '{"not":"a wallet"}');
+    const result = await runRouterDoctor(ctx(), {
+      homeDir: home,
+      cwd,
+      env: {},
+      which: () => true,
+      readMcp: async () => true,
+      fetchImpl: probe400,
+    }).catch((e: unknown) => e);
+    const checks =
+      result instanceof CliError
+        ? (result.details as { checks: { name: string; status: string; detail: string }[] })
+        : (result as { data: { checks: { name: string; status: string; detail: string }[] } }).data;
+    return checks.checks.find((c) => c.name === 'hooks')!;
+  }
+
+  it('warns, naming the file, when the hooks are wired and the router is off here', async () => {
+    await runRouterInstall({}, ctx(), deps());
+    const repo = join(home, 'repo');
+    await mkdir(join(repo, '.git'), { recursive: true });
+    await mkdir(join(repo, '.tenjin'), { recursive: true });
+    const file = join(repo, '.tenjin', 'config.json');
+    await writeFile(file, JSON.stringify({ router: { enabled: false } }));
+
+    const off = await hooksCheck(repo);
+    expect(off.status).toBe('warn');
+    expect(off.detail).toContain(`router.enabled is false in ${file}`);
+
+    const elsewhere = join(home, 'other');
+    await mkdir(join(elsewhere, '.git'), { recursive: true });
+    expect((await hooksCheck(elsewhere)).status).toBe('ok');
   });
 });
 
@@ -638,6 +682,7 @@ describe('doctor on a --project install', () => {
     // a correctly wired machine as unwired and exit 3.
     const blind = await runRouterDoctor(ctx(), {
       homeDir: home,
+      cwd: work,
       env: {},
       which: () => true,
       readMcp: async () => true,

@@ -11,6 +11,7 @@ import {
   buildPromptPacket,
   seal,
   type NativeOutcome,
+  type Packet,
   type PendingCall,
   type Sealed,
 } from './context';
@@ -29,6 +30,7 @@ import {
   wasOffered,
   writeProgress,
 } from './progress';
+import { routerSettings, type RouterSettings } from './settings';
 
 /**
  * The four hook handlers. Between them they do exactly three things: build and
@@ -57,6 +59,8 @@ import {
 
 const PromptEventSchema = z.object({
   session_id: z.string().min(1).max(200),
+  /** The directory the session works in; `router.*` resolves from it. */
+  cwd: z.string().optional(),
   transcript_path: z.string().optional(),
   prompt: z.string(),
 });
@@ -122,7 +126,7 @@ export interface NativeCall {
 
 /** One hook event, as this file uses it. */
 export type HookEvent =
-  | { kind: 'prompt'; sessionId: string; transcriptPath?: string; prompt: string }
+  | { kind: 'prompt'; sessionId: string; transcriptPath?: string; prompt: string; cwd?: string }
   | ({ kind: 'native' } & NativeCall)
   | ({
       kind: 'shortfall';
@@ -184,6 +188,7 @@ export function decodeEvent(raw: unknown): HookEvent | null {
     sessionId: prompt.data.session_id,
     ...optional('transcriptPath', prompt.data.transcript_path),
     prompt: prompt.data.prompt,
+    ...optional('cwd', prompt.data.cwd),
   };
 }
 
@@ -360,9 +365,8 @@ export interface HookDeps {
  * had its prompts routed against whatever the file said instead; on a machine
  * whose file named a protected deployment that was a 401, and a 401 is silence.
  */
-async function resolveBaseUrl(deps: HookDeps): Promise<string> {
+function resolveBaseUrl(deps: HookDeps, config: PartialConfig): string {
   if (deps.baseUrl !== undefined) return deps.baseUrl;
-  const config: PartialConfig = await loadRawConfig(deps.dataDir).catch(() => ({}));
   return resolveSettings({ config, flags: {}, env: deps.env ?? process.env }).baseUrl.value;
 }
 
@@ -430,10 +434,17 @@ export async function runPromptHook(raw: unknown, deps: HookDeps): Promise<Promp
   if (event?.kind !== 'prompt') return { response: null };
   const skipped = promptSkipReason(event.prompt);
   if (skipped !== null) return { response: null, skipped };
+  const router = await routerFor(event.cwd, deps);
+  if (router === null) return { response: null };
 
-  const sealed = seal(await buildPromptPacket(event.transcriptPath, event.sessionId, event.prompt));
+  const sealed = seal(
+    scoped(
+      await buildPromptPacket(event.transcriptPath, event.sessionId, event.prompt),
+      router.settings,
+    ),
+  );
   const footer = await openFooter(deps, event.sessionId, 'prompt');
-  const outcome = await decide(sealed, deps);
+  const outcome = await decide(sealed, deps, router.config);
   await footer.close(outcome);
   if (outcome === null) return { response: null };
   if (outcome.action !== 'execute') return { response: null, action: outcome.action };
@@ -481,6 +492,10 @@ async function routeNativeCall(
   deps: HookDeps,
   nativeOutcome?: NativeOutcome,
 ): Promise<{ offer: ExecuteDecision } | { offer: null; outcome: NativeHookOutcome }> {
+  // OFF MEANS NOTHING ABOUT THE TURN IS READ: the switch comes before the
+  // agent lookup and the transcript, for both native arms.
+  const router = await routerFor(event.cwd, deps);
+  if (router === null) return { offer: null, outcome: { response: null } };
   // A SUBAGENT IS ROUTED ONLY WHEN IT IS KNOWN TO HAVE THE TOOL: redirecting
   // or offering to one that cannot make the call strands it (#377). Decided
   // before the router is asked, so an unknown one costs nothing.
@@ -495,10 +510,13 @@ async function routeNativeCall(
   // paid services" never reached this gate. Inside a subagent, its own task
   // comes first: see `buildNativePacket`.
   const sealed = seal(
-    await buildNativePacket(event.transcriptPath, event.sessionId, pending, {
-      ...(event.agentId !== undefined ? { agentId: event.agentId } : {}),
-      ...(nativeOutcome !== undefined ? { nativeOutcome } : {}),
-    }),
+    scoped(
+      await buildNativePacket(event.transcriptPath, event.sessionId, pending, {
+        ...(event.agentId !== undefined ? { agentId: event.agentId } : {}),
+        ...(nativeOutcome !== undefined ? { nativeOutcome } : {}),
+      }),
+      router.settings,
+    ),
   );
   const { packet } = sealed;
   // A LOCAL TARGET ONLY EVER HAS A NATIVE ANSWER, so asking costs a round trip
@@ -523,7 +541,7 @@ async function routeNativeCall(
     return { offer: null, outcome: { response: null } };
   }
   const footer = await openFooter(deps, event.sessionId, 'search');
-  const outcome = await decide(sealed, deps);
+  const outcome = await decide(sealed, deps, router.config);
   if (outcome === null || outcome.action !== 'execute') {
     await footer.close(outcome);
     return {
@@ -647,13 +665,17 @@ export async function runDelegationHook(
   if (event?.kind !== 'delegation') return { response: null };
   const { task } = event;
   if (task === null || task.trim().length === 0) return { response: null };
+  const router = await routerFor(event.cwd, deps);
+  if (router === null) return { response: null };
   // The subagent this task goes to is the one that would have to make the
   // call, so the same rule: only a type known to have the tool is offered. With
   // no type the harness runs its general-purpose agent, which inherits it.
   if ((await requestToolAccess(event.subagentType, agentLookup(event.cwd, deps))) !== 'allowed') {
     return { response: null, noRequestTool: true };
   }
-  const sealed = seal(await buildPromptPacket(event.transcriptPath, event.sessionId, task));
+  const sealed = seal(
+    scoped(await buildPromptPacket(event.transcriptPath, event.sessionId, task), router.settings),
+  );
   // The native hook's two rules, with the task as the subject: a task the mask
   // would change is not sent, since the offer is written back into it, and a
   // task naming a local target only ever has a native answer.
@@ -668,7 +690,7 @@ export async function runDelegationHook(
   // the user's words could offer what they just ruled out.
   if (sealed.packet.historyStatus !== 'ok') return { response: null };
   const footer = await openFooter(deps, event.sessionId, 'delegate');
-  const outcome = await decide(sealed, deps);
+  const outcome = await decide(sealed, deps, router.config);
   if (outcome === null || outcome.action !== 'execute') {
     await footer.close(outcome);
     return { response: null, ...(outcome !== null ? { action: outcome.action } : {}) };
@@ -758,8 +780,12 @@ function hookOutcome(decision: HookDecision | null): string {
 /** One free decision, with the hook's own deadline and its own silence. It
  *  takes what {@link seal} returns rather than a bare packet, so a call site
  *  that skips the mask does not typecheck. */
-async function decide({ packet }: Sealed, deps: HookDeps): Promise<HookDecision | null> {
-  const baseUrl = await resolveBaseUrl(deps);
+async function decide(
+  { packet }: Sealed,
+  deps: HookDeps,
+  config: PartialConfig,
+): Promise<HookDecision | null> {
+  const baseUrl = resolveBaseUrl(deps, config);
   const warn = deps.warn ?? ((line: string) => process.stderr.write(`${line}\n`));
   const outcome = await requestDecision(
     'hook',
@@ -794,4 +820,41 @@ function pendingCallOf(
   const subject = value.trim();
   if (subject.length === 0) return null;
   return tool === 'WebSearch' ? { tool, query: subject } : { tool, url: subject };
+}
+
+/**
+ * `router.*` for the event's directory with the global config it came from,
+ * which is read ONCE per event and also names the base URL; null when the
+ * router is off there. FIRST, before any packet is built: `router.enabled
+ * false` means nothing about this turn is read for the router or leaves the
+ * machine. A config that cannot be read is off too, since a switch the user
+ * set must not fail open.
+ */
+async function routerFor(
+  cwd: string | undefined,
+  deps: HookDeps,
+): Promise<{ settings: RouterSettings; config: PartialConfig } | null> {
+  const warn = deps.warn ?? ((line: string) => process.stderr.write(`${line}\n`));
+  try {
+    const config = await loadRawConfig(deps.dataDir);
+    const settings = await routerSettings(
+      { cwd: cwd ?? process.cwd(), dataDir: deps.dataDir, config },
+      { warn: (line) => warn(`tenjin hook: ${line}`) },
+    );
+    return settings.enabled.value ? { settings, config } : null;
+  } catch (err) {
+    warn(`tenjin hook: ${err instanceof Error ? err.message : String(err)}, so the router is off`);
+    return null;
+  }
+}
+
+/**
+ * `router.context turn`: the current turn and nothing before it. `current` is
+ * kept (the prompt, the latest user message on a native call, the task on a
+ * delegation) so an instruction given this turn still reaches the gate;
+ * `historyStatus` is left as read, so a call whose turn could not be found is
+ * still offered nothing.
+ */
+function scoped(packet: Packet, router: RouterSettings): Packet {
+  return router.context.value === 'turn' ? { ...packet, history: [] } : packet;
 }

@@ -21,6 +21,10 @@ import { renderProgress, resolveProgressSession, sessionDir } from './progress';
 let dir: string;
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'router-hooks-'));
+  // A git root of its own, so `router.*` resolves from here and no file on the
+  // machine running the suite can switch the router off.
+  const { mkdir } = await import('node:fs/promises');
+  await mkdir(join(dir, '.git'));
 });
 afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
@@ -108,7 +112,7 @@ const NEEDS_INPUT = {
 };
 
 function promptEvent(prompt: string): unknown {
-  return { hook_event_name: 'UserPromptSubmit', session_id: 'sess-1', prompt };
+  return { hook_event_name: 'UserPromptSubmit', session_id: 'sess-1', cwd: dir, prompt };
 }
 
 /** A transcript this session owns, for the native hook to read its turn from. */
@@ -155,6 +159,7 @@ function nativeEvent(query: string, tool: 'WebSearch' | 'WebFetch' = 'WebSearch'
   return {
     hook_event_name: 'PostToolUse',
     session_id: 'sess-1',
+    cwd: dir,
     tool_name: tool,
     tool_input: tool === 'WebSearch' ? { query } : { url: query },
     tool_response: SHORT[tool],
@@ -937,15 +942,213 @@ describe('what the hook leaves for the status line', () => {
 
   it('routes the same when the progress directory cannot be written', async () => {
     const { fetchImpl } = router(EXECUTE);
+    // A plain file where the progress directory belongs: every footer write
+    // fails, while the config beside it still reads.
+    const fs = await import('node:fs/promises');
+    await fs.writeFile(join(dir, 'progress'), 'not a directory');
 
     const out = await runPromptHook(promptEvent('read https://example.test/spec'), {
-      dataDir: join(dir, 'missing', '\u0000bad'),
+      dataDir: dir,
       baseUrl: BASE,
       fetchImpl,
     });
 
     expect(out.action).toBe('execute');
     expect(out.id).toBe('k3f9-abcd');
+  });
+});
+
+/**
+ * `router.enabled` and `router.context`, resolved from the event's `cwd`. Off
+ * means nothing about the turn is read for the router or leaves the machine;
+ * `turn` means the packet carries the current turn and no history.
+ */
+describe('the router switch and context, per directory', () => {
+  function row(role: 'user' | 'assistant', text: string): unknown {
+    return { type: role, sessionId: 'sess-1', message: { content: [{ type: 'text', text }] } };
+  }
+
+  async function repoWith(router: unknown, file = 'config.json'): Promise<string> {
+    const fs = await import('node:fs/promises');
+    const repo = join(dir, 'repo');
+    await fs.mkdir(join(repo, '.git'), { recursive: true });
+    await fs.mkdir(join(repo, '.tenjin'), { recursive: true });
+    await fs.writeFile(join(repo, '.tenjin', file), JSON.stringify({ router }));
+    return repo;
+  }
+
+  /** The pre-call form of a native event: the same call, before it runs. */
+  function preCall(event: unknown): unknown {
+    const call: Record<string, unknown> = { ...(event as object), hook_event_name: 'PreToolUse' };
+    delete call.tool_response;
+    return call;
+  }
+
+  function delegationTo(task: string, cwd: string, transcriptPath: string): unknown {
+    return {
+      hook_event_name: 'PreToolUse',
+      session_id: 'sess-1',
+      cwd,
+      transcript_path: transcriptPath,
+      tool_name: 'Agent',
+      tool_input: { description: 'a task', prompt: task, subagent_type: 'general-purpose' },
+    };
+  }
+
+  it('sends nothing from a project that switched the router off, on every hook', async () => {
+    const cwd = await repoWith({ enabled: false });
+    const { fetchImpl, calls } = router(EXECUTE);
+    const deps = { dataDir: dir, baseUrl: BASE, fetchImpl, homeDir: dir };
+    const prompt = await runPromptHook(
+      { ...(promptEvent('read https://example.test/spec') as object), cwd },
+      deps,
+    );
+    expect(prompt).toEqual({ response: null });
+
+    const after = {
+      ...((await readableEvent('https://example.test/spec', 'WebFetch')) as object),
+      cwd,
+    };
+    expect(await runNativeHook(preCall(after), deps)).toEqual({ response: null });
+    const shortfall = await runShortfallHook(after, deps);
+    expect(shortfall.response).toBeNull();
+    expect(shortfall.action).toBeUndefined();
+
+    const transcript = await transcriptFor([row('user', 'read the spec for me')]);
+    expect(
+      await runDelegationHook(
+        delegationTo('Read https://example.test/spec', cwd, transcript),
+        deps,
+      ),
+    ).toEqual({ response: null });
+
+    expect(calls).toHaveLength(0);
+    // No footer either: every hook stopped before it opened one.
+    const fs = await import('node:fs');
+    expect(fs.existsSync(sessionDir(dir, 'sess-1'))).toBe(false);
+  });
+
+  it('obeys the global switch and a personal project file alike', async () => {
+    const fs = await import('node:fs/promises');
+    await fs.writeFile(join(dir, 'config.json'), JSON.stringify({ router: { enabled: false } }));
+    const global = router(EXECUTE);
+    await runPromptHook(promptEvent('btc price today'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl: global.fetchImpl,
+    });
+    expect(global.calls).toHaveLength(0);
+
+    await fs.rm(join(dir, 'config.json'));
+    const cwd = await repoWith({ enabled: false }, 'config.local.json');
+    const personal = router(EXECUTE);
+    await runPromptHook(
+      { ...(promptEvent('btc price today') as object), cwd },
+      { dataDir: dir, baseUrl: BASE, fetchImpl: personal.fetchImpl },
+    );
+    expect(personal.calls).toHaveLength(0);
+  });
+
+  it('stays off, and says why, when a project file cannot be read', async () => {
+    const fs = await import('node:fs/promises');
+    const cwd = await repoWith({ enabled: false });
+    await fs.writeFile(join(cwd, '.tenjin', 'config.json'), '{ nope');
+    const { fetchImpl, calls } = router(EXECUTE);
+    const warned: string[] = [];
+    await runPromptHook(
+      { ...(promptEvent('btc price today') as object), cwd },
+      { dataDir: dir, baseUrl: BASE, fetchImpl, warn: (line) => warned.push(line) },
+    );
+    expect(calls).toHaveLength(0);
+    expect(warned.join('\n')).toContain(join(cwd, '.tenjin', 'config.json'));
+  });
+
+  it('stays off when the global config cannot be read', async () => {
+    const fs = await import('node:fs/promises');
+    await fs.writeFile(join(dir, 'config.json'), '{ nope');
+    const { fetchImpl, calls } = router(EXECUTE);
+    const warned: string[] = [];
+    await runPromptHook(promptEvent('btc price today'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+      warn: (line) => warned.push(line),
+    });
+    expect(calls).toHaveLength(0);
+    expect(warned.join('\n')).toContain('so the router is off');
+  });
+
+  it('sends the prompt and no history under router.context turn', async () => {
+    const cwd = await repoWith({ context: 'turn' });
+    const path = await transcriptFor([
+      row('user', 'my staging token is in the last message'),
+      row('assistant', 'Noted.'),
+    ]);
+    const { fetchImpl, calls } = router(NATIVE);
+    await runPromptHook(
+      { ...(promptEvent('btc price today') as object), cwd, transcript_path: path },
+      { dataDir: dir, baseUrl: BASE, fetchImpl },
+    );
+    const sent = calls[0] as { body: { packet: Record<string, unknown> } };
+    expect(sent.body.packet.history).toEqual([]);
+    expect(sent.body.packet.current).toEqual({ role: 'user', text: 'btc price today' });
+    expect(sent.body.packet.historyStatus).toBe('ok');
+  });
+
+  it('keeps the latest user message on a native call under router.context turn', async () => {
+    const cwd = await repoWith({ context: 'turn' });
+    const path = await transcriptFor([
+      row('user', 'an earlier task about something private'),
+      row('assistant', 'Done.'),
+      row('user', 'Use native tools only, no paid services.'),
+    ]);
+    for (const run of [
+      (event: unknown, deps: Parameters<typeof runNativeHook>[1]) =>
+        runNativeHook(preCall(event), deps),
+      (event: unknown, deps: Parameters<typeof runShortfallHook>[1]) =>
+        runShortfallHook(event, deps),
+    ]) {
+      const { fetchImpl, calls } = router(NATIVE);
+      await run(
+        {
+          ...(nativeEvent('https://example.test/spec', 'WebFetch') as object),
+          cwd,
+          transcript_path: path,
+        },
+        { dataDir: dir, baseUrl: BASE, fetchImpl },
+      );
+      const sent = calls[0] as { body: { packet: Record<string, unknown> } };
+      expect(sent.body.packet.history).toEqual([]);
+      expect(sent.body.packet.current).toEqual({
+        role: 'user',
+        text: 'Use native tools only, no paid services.',
+      });
+      expect(sent.body.packet.historyStatus).toBe('ok');
+    }
+  });
+
+  it('sends the delegated task and no history under router.context turn', async () => {
+    const cwd = await repoWith({ context: 'turn' });
+    const fs = await import('node:fs/promises');
+    await fs.writeFile(join(dir, 'config.json'), JSON.stringify(ROUTER_POLICY));
+    const path = await transcriptFor([
+      row('user', 'an earlier task about something private'),
+      row('assistant', 'Done.'),
+    ]);
+    const { fetchImpl, calls } = router(NATIVE);
+    await runDelegationHook(delegationTo('Read https://example.test/spec', cwd, path), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+      homeDir: dir,
+    });
+    const sent = calls[0] as { body: { packet: Record<string, unknown> } };
+    expect(sent.body.packet.history).toEqual([]);
+    expect(sent.body.packet.current).toEqual({
+      role: 'user',
+      text: 'Read https://example.test/spec',
+    });
+    expect(sent.body.packet.historyStatus).toBe('ok');
   });
 });
 
@@ -1293,6 +1496,7 @@ describe('the delegation hook', () => {
     return {
       hook_event_name: 'PreToolUse',
       session_id: 'sess-1',
+      cwd: dir,
       transcript_path: path,
       tool_name: toolName,
       tool_input: toolInput,

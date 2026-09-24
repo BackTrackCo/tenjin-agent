@@ -9,6 +9,7 @@ import type { TenjinSigner } from '../lib/wallet/provider';
 import type { CommandContext } from '../context';
 import { requestDecision, type DecisionContract, type DecisionDiagnostics } from './decision';
 import { openLookupFooter } from './progress';
+import { routerSettings } from './settings';
 
 /**
  * The `request` tool: one free decision per lookup, then ONE payment, to the
@@ -50,6 +51,9 @@ export interface RequestToolDeps {
   fetchImpl?: typeof fetch;
   /** Test seam forwarded to the provider leg. */
   payDeps?: PayDeps;
+  /** The directory `router.*` resolves from; defaults to `process.cwd()`, which
+   *  Claude Code sets to the project directory for an MCP server. */
+  cwd?: string;
 }
 
 export interface RequestToolResult {
@@ -62,6 +66,11 @@ export async function runRequestTool(
   args: RequestToolArgs,
   deps: RequestToolDeps,
 ): Promise<RequestToolResult> {
+  // THE SAME SWITCH THE HOOKS OBEY, read first. The tool is pre-allowed, so
+  // without this it would be a second path off the machine in a repository the
+  // user marked private: nothing is sent and nothing is paid.
+  const off = await routerOff(deps);
+  if (off !== null) return fail('needs_input', off, { nextStep: ROUTER_OFF_NEXT_STEP });
   const query = args.query.trim().slice(0, 8_000);
   if (query.length === 0) {
     return fail(
@@ -320,6 +329,27 @@ export function costLines(providerAtomic: bigint): string[] {
  */
 const ROUTINE: ReadonlySet<FailStatus> = new Set(['native', 'needs_input', 'needs_approval']);
 
+const ROUTER_OFF_NEXT_STEP =
+  'Continue with your own tools. Nothing was sent to the router and nothing was bought.';
+
+/**
+ * Why the router is off for this directory, naming the key and the file that
+ * set it, or null when it is on. A layer that cannot be read is off: a switch
+ * the user set must not fail open.
+ */
+async function routerOff(deps: RequestToolDeps): Promise<string | null> {
+  try {
+    const { enabled } = await routerSettings({
+      cwd: deps.cwd ?? process.cwd(),
+      dataDir: deps.ctx.dataDir,
+    });
+    if (enabled.value) return null;
+    return `router.enabled is false in ${enabled.path ?? 'the config'}, so the router is off here.`;
+  } catch (err) {
+    return `router.enabled could not be read (${err instanceof Error ? err.message : String(err)}), so the router is off here.`;
+  }
+}
+
 /** One short line saying what the host does next, per routine outcome. */
 const NEXT_STEP: Record<string, string> = {
   native: 'Continue with your own tools. Nothing was bought.',
@@ -356,6 +386,8 @@ interface FailExtras {
   diagnostics?: DecisionDiagnostics;
   /** The backend's plain sentence about the call itself, such as a dead id. */
   note?: string;
+  /** Replaces the generic next step, for an outcome this build decided alone. */
+  nextStep?: string;
 }
 
 /** The headline: calm for a routine outcome, explicit for a real failure. */
@@ -390,7 +422,7 @@ function fail(status: FailStatus, reason: string, extras: FailExtras = {}): Requ
       // BACKEND'S own next action wins when it sent one: it knows which field
       // is missing.
       ...(routine || diagnostics !== undefined
-        ? { nextStep: nextStepFor(status, diagnostics) }
+        ? { nextStep: extras.nextStep ?? nextStepFor(status, diagnostics) }
         : {}),
       ...(diagnostics !== undefined
         ? {

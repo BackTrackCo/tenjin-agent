@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -27,6 +27,8 @@ vi.mock('../commands/pay', async (importOriginal) => {
 let dir: string;
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'router-tool-'));
+  // Its own git root: `router.*` resolves from here, never from the suite's cwd.
+  await mkdir(join(dir, '.git'));
   await writeFile(
     join(dir, 'config.json'),
     JSON.stringify({ bazaarPay: true, maxAutoSpend: '250000', sessionBudget: '5000000' }),
@@ -153,6 +155,7 @@ const PUBLIC = { resolveHostname: async () => [{ address: '93.184.216.34', famil
 function deps(fetchImpl: typeof fetch, auth = authorizer()) {
   return {
     ctx: ctx(),
+    cwd: dir,
     authorizer: auth,
     fetchImpl,
     payDeps: { fetchImpl, provider: testWalletProvider(), authorizer: auth, destination: PUBLIC },
@@ -364,6 +367,7 @@ describe('what the tool refuses to execute', () => {
     ]);
     const real = {
       ctx: ctx(),
+      cwd: dir,
       authorizer: resolveSpendAuthorizer(ctx(), {
         maxAutoSpendAtomic: 250_000n,
         sessionBudgetAtomic: 5_000_000n,
@@ -382,6 +386,7 @@ describe('what the tool refuses to execute', () => {
     const { fetchImpl } = net([{ url: ROUTER, status: 200, body: decision() }, ...providerLegs()]);
     const real = {
       ctx: ctx(),
+      cwd: dir,
       authorizer: resolveSpendAuthorizer(ctx(), {
         maxAutoSpendAtomic: 250_000n,
         sessionBudgetAtomic: 5_000_000n,
@@ -437,5 +442,35 @@ describe('what the tool leaves for the status line', () => {
     expect(result.isError).toBe(false);
     expect(await renderProgress(dir, 'sess-1')).toBe('x402 · ready');
     expect(await renderProgress(dir, 'sess-2')).toBe('x402 · ready');
+  });
+});
+
+/**
+ * THE TOOL OBEYS THE SAME SWITCH AS THE HOOKS. It is pre-allowed, so without
+ * this a repository marked private would still have a path off the machine.
+ */
+describe('the request tool in a directory where the router is off', () => {
+  it('refuses with needs_input naming the key, and sends and pays nothing', async () => {
+    const repo = join(dir, 'repo');
+    await mkdir(join(repo, '.git'), { recursive: true });
+    await mkdir(join(repo, '.tenjin'), { recursive: true });
+    const file = join(repo, '.tenjin', 'config.json');
+    await writeFile(file, JSON.stringify({ router: { enabled: false } }));
+    const { fetchImpl, calls } = net([
+      { url: ROUTER, status: 200, body: decision() },
+      ...providerLegs(),
+    ]);
+    const auth = authorizer();
+    const result = await runRequestTool(
+      { query: 'BTC and ETH price', id: 'k3f9-abcd' },
+      { ...deps(fetchImpl, auth), cwd: repo },
+    );
+    expect(result.isError).toBe(false);
+    expect(result.envelope.status).toBe('needs_input');
+    expect(result.envelope.reason).toContain('router.enabled');
+    expect(result.envelope.reason).toContain(file);
+    expect(result.envelope.nextStep).toContain('Nothing was sent');
+    expect(calls).toHaveLength(0);
+    expect(auth.authorize).not.toHaveBeenCalled();
   });
 });
