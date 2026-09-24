@@ -219,6 +219,21 @@ describe('the request tool, one decision and one payment per lookup', () => {
     expect(calls).toHaveLength(3);
   });
 
+  it('sends nothing, and pays nothing, for a query carrying a credential', async () => {
+    const auth = authorizer();
+    const { fetchImpl, calls } = net([{ url: ROUTER, status: 200, body: decision() }]);
+    const result = await runRequestTool(
+      { query: 'https://api.acme.io/v1/items?api-key=Zx81QpLm0aTe', id: 'k3f9-abcd' },
+      deps(fetchImpl, auth),
+    );
+    expect(result.envelope).toMatchObject({
+      status: 'needs_input',
+      reason: 'the query carries a credential-shaped value, so nothing was sent',
+    });
+    expect(calls).toHaveLength(0);
+    expect(auth.authorize).not.toHaveBeenCalled();
+  });
+
   it('needs a query at all, before anything is decided', async () => {
     const { fetchImpl, calls } = net([]);
     const result = await runRequestTool({ query: '   ' }, deps(fetchImpl));

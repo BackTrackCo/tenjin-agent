@@ -1,6 +1,7 @@
 import { runPay, type AdvertisedTerms, type PayDeps } from '../commands/pay';
 import { CliError } from '../lib/errors';
 import { toMoney } from '../lib/money';
+import { mask } from '../lib/redact';
 import { assertResultSchema, canonicalHash } from '../lib/request-schema';
 import { resolveContextSettings } from '../lib/settings';
 import type { SpendAuthorizer, WalletProvider } from '../lib/wallet';
@@ -67,6 +68,13 @@ export async function runRequestTool(
       'needs_input',
       'A request needs a query naming the task, its inputs and any constraints.',
     );
+  }
+  // THE HOOKS NEVER SEE THIS CALL, so the native hook's rule applies here too: a
+  // query the mask would change is not sent, masked or otherwise. The server
+  // stores it against the id and the provider logs it, and an injected page can
+  // write it.
+  if (mask(query) !== query) {
+    return fail('needs_input', 'the query carries a credential-shaped value, so nothing was sent');
   }
   // THE FOOTER, OPENED FIRST AND TRUSTED WITH NOTHING: it shows this lookup in
   // the terminal while it runs, resolved to a session through the hook's own
