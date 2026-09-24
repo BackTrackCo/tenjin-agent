@@ -931,3 +931,75 @@ describe('the #296 credential shapes', () => {
     );
   });
 });
+
+describe('the #388 follow-up shapes', () => {
+  const HEX = '4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318';
+  const SHA40 = '3f9a1c77b2e04d5a8c6b1e2f9d0a4b7c3f9a1c77';
+
+  it('masks a 40-hex node key in a URL path, but not a commit on a git path or host', () => {
+    expect(mask(`https://my-node.base-mainnet.quiknode.pro/${SHA40}/`)).toBe(
+      'https://my-node.base-mainnet.quiknode.pro/…[redacted 40 chars]/',
+    );
+    for (const url of [
+      `https://github.com/acme/app/commit/${SHA40}`,
+      `https://git.acme.io/acme/app/-/tree/${SHA40}/src`,
+      `https://github.com/acme/app/pull/12/files/${SHA40}`,
+    ]) {
+      expect(mask(url)).toBe(url);
+    }
+  });
+
+  it('masks a bare 64-hex key unless a hash label or a URL makes it a hash', () => {
+    expect(mask(`import ${HEX} now`)).toBe('import …[redacted 64 chars] now');
+    for (const text of [
+      `sha256: ${HEX}`,
+      `the tx is ${HEX}`,
+      `checksum ${HEX}`,
+      `**sha256**\n- before upload: \`${HEX}\``,
+      `https://explorer.acme.io/search?q=${HEX}`,
+    ]) {
+      expect(mask(text)).toBe(text);
+    }
+  });
+
+  it('keeps a 0x key after a hash label as a hash, as designed', () => {
+    const text = `txHash: 0x${HEX}`;
+    expect(mask(text)).toBe(text);
+  });
+
+  it('masks a key split 32+32 by one space or newline, but not a list of three', () => {
+    const [a, b] = [HEX.slice(0, 32), HEX.slice(32)];
+    expect(mask(`key 0x${a} ${b} end`)).toBe('key …[redacted 67 chars] end');
+    expect(mask(`key\n${a}\n${b}\nend`)).toBe('key\n…[redacted 65 chars]\nend');
+    const md5s = `${a}\n${b}\n${a}`;
+    expect(mask(md5s)).toBe(md5s);
+  });
+
+  it('masks a Solana secret key as base58 or as a keygen array, not a public key', () => {
+    const secret =
+      '5MaiiCavjCmn9Hs1o3eznqDEhRwxo7pXiAYez7keQUviUkauRiTMD8DrESdrNjN8zd9mTmVhRvBJeg5vhyvgrAhG';
+    expect(mask(`key ${secret}`)).toBe('key …[redacted 88 chars]');
+    const bytes = Array.from({ length: 64 }, (_, i) => (i * 37) % 256);
+    expect(mask(`id.json: ${JSON.stringify(bytes)}`)).toMatch(
+      /^id\.json: \[…\[redacted \d+ chars\]$/,
+    );
+    const pubkey = 'send to 9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM';
+    expect(mask(pubkey)).toBe(pubkey);
+    const short = `[${bytes.slice(0, 63).join(',')}]`;
+    expect(mask(short)).toBe(short);
+  });
+
+  it('masks a checksum-valid phrase written in any case, with commas or across lines', () => {
+    const words = 'legal winner thank year wave sausage worth useful legal winner thank yellow';
+    const phrase = '[redacted 12-word BIP-39 recovery phrase]';
+    const capitalized = words.replace(/\b\w/g, (c) => c.toUpperCase());
+    expect(mask(`seed: ${capitalized}.`)).toBe(`seed: ${phrase}.`);
+    expect(mask(`seed: ${words.split(' ').join(', ')}`)).toBe(`seed: ${phrase}`);
+    const lines = words.split(' ');
+    expect(mask(`${lines.slice(0, 6).join(' ')}\n${lines.slice(6).join(' ')}`)).toBe(phrase);
+    // Twelve wordlist words that are not a phrase stay as written.
+    const list =
+      'Abandon, Ability, Able, About, Above, Absent, Absorb, Abstract, Absurd, Abuse, Access, Accident';
+    expect(mask(list)).toBe(list);
+  });
+});

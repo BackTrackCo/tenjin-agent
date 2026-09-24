@@ -116,8 +116,14 @@ export function mask(text: string): string {
   // itself a vendor token is taken whole, name kept, and no later row sees a
   // stub to re-match.
   for (const detector of MASK_DETECTORS) {
-    out = out.replace(detector.re, (...args) => {
-      const m = args as unknown as RegExpExecArray;
+    out = out.replace(detector.re, (...args: unknown[]) => {
+      // replace() hands (match, ...groups, offset, input[, named groups]).
+      // Rebuilt as an exec array so a skip can read the text around its match.
+      const tail = typeof args.at(-1) === 'object' ? 3 : 2;
+      const m = Object.assign(args.slice(0, -tail), {
+        index: args.at(-tail) as number,
+        input: args.at(-tail + 1) as string,
+      }) as unknown as RegExpExecArray;
       return detector.skip?.(m) === true ? m[0] : detector.excerpt(m);
     });
   }
@@ -127,6 +133,7 @@ export function mask(text: string): string {
   if (MASKED_ALGORITHMS.has('hex64') || MASKED_ALGORITHMS.has('bip39')) {
     out = out.split('\n').map(maskLineSpans).join('\n');
   }
+  if (MASKED_ALGORITHMS.has('bip39')) out = maskLooseMnemonics(out);
   return MASKED_ALGORITHMS.has('pemBlock') ? maskPemBlocks(out) : out;
 }
 
@@ -136,11 +143,10 @@ export function mask(text: string): string {
  * transcript line can carry thousands of keys. A `hex32-value` is a hash, not
  * a key, and stays as written.
  *
- * A wordlist run longer than the longest recovery phrase is not masked whole:
+ * A wordlist run longer than the longest recovery phrase is not masked here:
  * a run of common words that long is text a routing decision reads (a repeated
- * word, a pasted list). Inside it, only a window that IS a phrase goes, one
- * whose BIP-39 checksum holds, so a phrase pasted beside more wordlist words
- * is still masked. The publish scan reports the whole run either way.
+ * word, a pasted list). {@link maskLooseMnemonics} masks any phrase inside it.
+ * The publish scan reports the whole run either way.
  */
 function maskLineSpans(line: string): string {
   const lines = [line];
@@ -149,7 +155,11 @@ function maskLineSpans(line: string): string {
     ...(MASKED_ALGORITHMS.has('bip39') ? scanSeedPhrases(lines) : []),
   ]
     .filter((f) => f.check !== 'hex32-value')
-    .flatMap((f) => (f.check === 'bip39-seed-phrase' ? phraseSpans(line, f) : [f]))
+    .filter(
+      (f) =>
+        f.check !== 'bip39-seed-phrase' ||
+        line.slice(f.span[0], f.span[1]).split(/[\s"'`]+/).length <= SEED_PHRASE_MAX_WORDS,
+    )
     .sort((a, b) => a.span[0] - b.span[0]);
   if (spans.length === 0) return line;
   const parts: string[] = [];
@@ -234,6 +244,7 @@ const SKIP_HANDLERS: Record<string, (m: RegExpExecArray) => boolean> = {
   nonLiteralValue: skipNonLiteralValue,
   placeholderUsername: (m) => PLACEHOLDER_USERNAME.test(m[1] ?? m[2] ?? ''),
   reservedExampleEmail: (m) => RESERVED_EXAMPLE_DOMAIN.test(m[0]),
+  hashLabelled: isLabelledHash,
 };
 
 interface LineDetector {
@@ -646,6 +657,26 @@ function isHashContext(line: string, matchIndex: number, match: string): boolean
   return /^https?:\/\//.test(line.slice(matchIndex - prefix.length));
 }
 
+/** The hash labels that keep a bare 64-hex or an 88-character base58 run as written. */
+const BARE_HASH_LABEL_RE =
+  /(?:^|[^a-z0-9])(?:tx|txn|txid|hash|sha\d*|hmac|digest|commit|id|checksum|sig|signature)(?:[\s:=/,._*'"`‘’“”-]*[A-Za-z0-9_]{1,12}){0,2}[\s:=/,._*'"`‘’“”-]*$/i;
+
+/**
+ * A bare key-shaped run that is a hash or a signature by context: a hash label
+ * within two tokens before it, or an http(s) URL it sits inside. The same
+ * window and URL test the 0x form's demotion uses, with the labels a bare
+ * digest or a Solana signature carries.
+ */
+function isLabelledHash(m: RegExpExecArray): boolean {
+  const input = m.input;
+  const from = Math.max(0, m.index - LABEL_LOOKBACK);
+  const before = input.slice(from, m.index);
+  const labelWindow = from === 0 ? before : before.replace(/^[A-Za-z0-9]+/, '');
+  if (BARE_HASH_LABEL_RE.test(labelWindow)) return true;
+  const prefix = /(\S*)$/.exec(before)?.[1] ?? '';
+  return /^https?:\/\//.test(input.slice(m.index - prefix.length));
+}
+
 // gitleaks private-key marker (RSA/EC/OPENSSH/PGP variants, optional BLOCK).
 const PEM_BEGIN = /-----BEGIN[ A-Z0-9]*PRIVATE KEY(?: BLOCK)?-----/;
 const PEM_END = /-----END[ A-Z0-9]*PRIVATE KEY(?: BLOCK)?-----/;
@@ -684,20 +715,25 @@ const BIP39_INDEX = new Map(
   (wordlistJson as { words: string }).words.split(' ').map((word, index) => [word, index]),
 );
 
+/** What may sit between two words of a loosely written phrase. */
+const LOOSE_SEPARATOR = /^[\s,"'`]+$/;
+
 /**
- * The spans `mask()` replaces for one seed-phrase run: the whole run when it
- * is phrase-sized, else each non-overlapping window, longest first, whose
- * checksum is a valid BIP-39 mnemonic's.
+ * Recovery phrases the strict line scan does not see: any case, words joined
+ * by commas, quotes or line breaks (a 6+6 paste), or a phrase inside a longer
+ * wordlist run. Only a window that IS a phrase goes, 12 to 24 words whose
+ * BIP-39 checksum holds, longest first; everything else stays as written, so
+ * a capitalized or comma-separated list of common words is not a false hit.
+ * The English wordlist is the only one this build ships.
  */
-function phraseSpans(line: string, run: Finding): Finding[] {
-  const words = [...line.slice(run.span[0], run.span[1]).matchAll(/[^\s"'`]+/g)].map((m) => ({
-    word: m[0],
-    start: run.span[0] + m.index,
+function maskLooseMnemonics(text: string): string {
+  const tokens = [...text.matchAll(/[A-Za-z]+/g)].map((m) => ({
+    word: m[0].toLowerCase(),
+    start: m.index,
+    end: m.index + m[0].length,
   }));
-  if (words.length <= SEED_PHRASE_MAX_WORDS) return [run];
-  const out: Finding[] = [];
   // A long run repeats itself (a word typed over and over), so each distinct
-  // window is hashed once: the pass stays linear on a transcript-length line.
+  // window is hashed once: the pass stays linear on a transcript-length text.
   const checked = new Map<string, boolean>();
   const valid = (window: string[]): boolean => {
     const key = window.join(' ');
@@ -705,24 +741,42 @@ function phraseSpans(line: string, run: Finding): Finding[] {
     if (result === undefined) checked.set(key, (result = isMnemonic(window)));
     return result;
   };
+  const parts: string[] = [];
+  let cursor = 0;
   let i = 0;
-  while (i + SEED_PHRASE_MIN_WORDS <= words.length) {
-    const size = SEED_PHRASE_SIZES.find(
-      (n) => i + n <= words.length && valid(words.slice(i, i + n).map((w) => w.word)),
-    );
-    if (size === undefined) {
+  while (i < tokens.length) {
+    let j = i;
+    while (
+      j < tokens.length &&
+      BIP39_INDEX.has(tokens[j]!.word) &&
+      (j === i || LOOSE_SEPARATOR.test(text.slice(tokens[j - 1]!.end, tokens[j]!.start)))
+    ) {
+      j++;
+    }
+    if (j === i) {
       i++;
       continue;
     }
-    const last = words[i + size - 1]!;
-    out.push({
-      ...run,
-      span: [words[i]!.start, last.start + last.word.length],
-      excerpt: `[redacted ${size}-word BIP-39 recovery phrase]`,
-    });
-    i += size;
+    let k = i;
+    while (k + SEED_PHRASE_MIN_WORDS <= j) {
+      const size = SEED_PHRASE_SIZES.find(
+        (n) => k + n <= j && valid(tokens.slice(k, k + n).map((t) => t.word)),
+      );
+      if (size === undefined) {
+        k++;
+        continue;
+      }
+      parts.push(
+        text.slice(cursor, tokens[k]!.start),
+        `[redacted ${size}-word BIP-39 recovery phrase]`,
+      );
+      cursor = tokens[k + size - 1]!.end;
+      k += size;
+    }
+    i = j;
   }
-  return out;
+  parts.push(text.slice(cursor));
+  return parts.join('');
 }
 
 /** BIP-39: 11 bits per word, the last `n / 3` of them a SHA-256 checksum of the rest. */

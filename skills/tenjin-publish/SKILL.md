@@ -134,6 +134,7 @@ user's attention:
   not have travelled: `customer-identifier`, `confidential-marker`,
   `internal-hostname`, `secret-assignment`, `basic-auth-header`,
   `curl-user-credential`, `url-query-credential`, `url-path-credential`,
+  `bare-hex-key`, `solana-secret-key`,
   `paid-content-marker`, `phone`, `long-verbatim-quote`, `collaboration-url`,
   `cloud-resource-id`, `env-dump-block`.
 <!-- /tenjin:when -->

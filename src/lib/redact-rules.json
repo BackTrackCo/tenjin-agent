@@ -592,12 +592,85 @@
       "id": "url-path-credential",
       "tier": "warn",
       "scopes": ["query", "publish"],
-      "description": "A path segment of 24 or more [A-Za-z0-9_-] characters that mixes letters and digits, on an http(s) URL: the shape a webhook secret or a signed-link token takes. A CDN hash or a content id in a path masks too; in a query that costs one routing offer. Four exclusions, each from a measured miss: a segment with two hyphenated words (an article slug), a 40-hex git commit or a 0x-prefixed 64-hex (the hex64 row already calls a 64-hex inside a URL a hash), a UUID, and a URL character class that stops at quotes, brackets and commas, so one match never spans two URLs in a JSON string. The segment must be whole (a `.` or `%` inside it is a filename or an encoded slug, not a token). The shape lookahead runs before the scheme lookbehind, and the lookbehind is bounded, so a line of short segments stays linear.",
+      "description": "A path segment of 24 or more [A-Za-z0-9_-] characters that mixes letters and digits, on an http(s) URL: the shape a webhook secret or a signed-link token takes. A CDN hash or a content id in a path masks too; in a query that costs one routing offer. Four exclusions, each from a measured miss: a segment with two hyphenated words (an article slug), a 40-hex git commit after a git path marker (/commit/, /commits/, /blob/, /tree/, /raw/, /compare/) or on a git host (github.com, gitlab.com, bitbucket.org, codeberg.org), since elsewhere a 40-hex segment is a node key (https://<name>.quiknode.pro/<40 hex>/), a 0x-prefixed 64-hex (the hex64 row already calls a 64-hex inside a URL a hash), a UUID, and a URL character class that stops at quotes, brackets and commas, so one match never spans two URLs in a JSON string. The segment must be whole (a `.` or `%` inside it is a filename or an encoded slug, not a token). The shape lookahead runs before the scheme lookbehind, and the lookbehind is bounded, so a line of short segments stays linear.",
       "source": "tenjin (tenjin-agent#388)",
       "match": {
         "kind": "regex",
-        "pattern": "\\/(?=[\\w-]{24})(?<=\\bhttps?:\\/\\/[^\\s?#\"'`<>()\\[\\]{},]{1,2048}\\/)(?=[\\w-]*[A-Za-z])(?=[\\w-]*\\d)(?![\\w-]*?(?<![A-Za-z])[A-Za-z]{3,}-[A-Za-z]{3})(?!(?:0x[0-9a-f]{64}|[0-9a-f]{40}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?![\\w-]))[\\w-]{24,}(?=[.;:!]*(?:[\\/?#\\s\"'<>(),\\[\\]{}`]|$))",
+        "pattern": "\\/(?=[\\w-]{24})(?<=\\bhttps?:\\/\\/[^\\s?#\"'`<>()\\[\\]{},]{1,2048}\\/)(?=[\\w-]*[A-Za-z])(?=[\\w-]*\\d)(?![\\w-]*?(?<![A-Za-z])[A-Za-z]{3,}-[A-Za-z]{3})(?!(?:0x[0-9a-f]{64}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?![\\w-]))(?!(?=[0-9a-f]{40}(?![\\w-]))(?<=\\/(?:commit|commits|blob|tree|raw|compare)\\/|\\bhttps?:\\/\\/(?:www\\.)?(?:github\\.com|gitlab\\.com|bitbucket\\.org|codeberg\\.org)\\/[^\\s?#\"'`<>()\\[\\]{},]{0,2048}))[\\w-]{24,}(?=[.;:!]*(?:[\\/?#\\s\"'<>(),\\[\\]{}`]|$))",
         "flags": "gi"
+      },
+      "excerpt": {
+        "kind": "mask",
+        "keep": 1
+      }
+    },
+    {
+      "id": "bare-hex-key",
+      "tier": "warn",
+      "scopes": ["query", "publish"],
+      "description": "64 hex with no 0x, the shape a private key takes when a tool exports it bare (tenjin-agent#388). A hash label within two tokens before it (tx, txn, txid, hash, sha, sha256, hmac, digest, commit, id, checksum, sig, signature, across markdown emphasis) or an http(s) URL around it makes it a hash and it is kept, the same downgrade the 0x form has. A 128-hex run (sha512) is not a 64-hex run and never matches.",
+      "source": "tenjin (tenjin-agent#388)",
+      "match": {
+        "kind": "regex",
+        "pattern": "(?<![0-9A-Za-z])[0-9a-fA-F]{64}(?![0-9A-Za-z])",
+        "flags": "g"
+      },
+      "excerpt": {
+        "kind": "mask",
+        "keep": 0
+      },
+      "skip": {
+        "handler": "hashLabelled"
+      }
+    },
+    {
+      "id": "bare-hex-key",
+      "tier": "warn",
+      "scopes": ["query", "publish"],
+      "description": "A 64-hex key split into two 32-hex halves by one space or one newline, with an optional 0x on the first half. Bounded to exactly two adjacent halves: a third 32-hex run before or after (a list of MD5 sums) keeps the whole list as written, and a hash label keeps it as for the row above.",
+      "source": "tenjin (tenjin-agent#388)",
+      "match": {
+        "kind": "regex",
+        "pattern": "(?<![0-9A-Za-z])(?<![0-9a-fA-F]{32}[ \\n])(?:0x)?[0-9a-fA-F]{32}[ \\n][0-9a-fA-F]{32}(?![0-9A-Za-z])(?![ \\n][0-9a-fA-F]{32})",
+        "flags": "g"
+      },
+      "excerpt": {
+        "kind": "mask",
+        "keep": 0
+      },
+      "skip": {
+        "handler": "hashLabelled"
+      }
+    },
+    {
+      "id": "solana-secret-key",
+      "tier": "warn",
+      "scopes": ["query", "publish"],
+      "description": "An 87 or 88 character base58 run: a Solana keypair's 64-byte secret key as a wallet exports it (tenjin-agent#388). A transaction signature has the same shape, so a tx or sig label before it or an http(s) URL around it keeps it, as for bare-hex-key. A 32-byte public key is 43 or 44 characters and never matches.",
+      "source": "tenjin (tenjin-agent#388)",
+      "match": {
+        "kind": "regex",
+        "pattern": "(?<![1-9A-HJ-NP-Za-km-z])[1-9A-HJ-NP-Za-km-z]{87,88}(?![1-9A-HJ-NP-Za-km-z])",
+        "flags": "g"
+      },
+      "excerpt": {
+        "kind": "mask",
+        "keep": 0
+      },
+      "skip": {
+        "handler": "hashLabelled"
+      }
+    },
+    {
+      "id": "solana-secret-key",
+      "tier": "warn",
+      "scopes": ["query", "publish"],
+      "description": "A JSON array of exactly 64 integers from 0 to 255: the solana-keygen keypair file.",
+      "source": "tenjin (tenjin-agent#388)",
+      "match": {
+        "kind": "regex",
+        "pattern": "\\[\\s*(?:(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)\\s*,\\s*){63}(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)\\s*\\]",
+        "flags": "g"
       },
       "excerpt": {
         "kind": "mask",

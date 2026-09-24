@@ -1104,7 +1104,7 @@
       "scope": "publish",
       "label": "positive",
       "input": "Failed: cast send --private-key %%t41%% 0xabc \"transfer()\"",
-      "expect_ids": ["secret-assignment"],
+      "expect_ids": ["bare-hex-key", "secret-assignment"],
       "secret": "%%t41%%"
     },
     {
@@ -1327,6 +1327,36 @@
       "label": "positive",
       "input": "fetch https://files.acme.io/x9Y8z7W6v5U4t3S2r1Q0p9O8nM/report.pdf?page=2&api-key=hunter2secret77",
       "expect_text": "fetch https://files.acme.io/…[redacted 26 chars]/report.pdf?page=2&api-key=[redacted 15 chars]"
+    },
+    {
+      "id": "bare-hex-key/pos",
+      "scope": "publish",
+      "label": "positive",
+      "input": "exported key: 4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318",
+      "expect_ids": ["bare-hex-key"],
+      "secret": "4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318"
+    },
+    {
+      "id": "bare-hex-key/neg",
+      "scope": "publish",
+      "label": "negative",
+      "input": "image digest sha256:4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318 and tx 4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318",
+      "expect_ids": []
+    },
+    {
+      "id": "solana-secret-key/pos",
+      "scope": "publish",
+      "label": "positive",
+      "input": "phantom export 5MaiiCavjCmn9Hs1o3eznqDEhRwxo7pXiAYez7keQUviUkauRiTMD8DrESdrNjN8zd9mTmVhRvBJeg5vhyvgrAhG",
+      "expect_ids": ["solana-secret-key"],
+      "secret": "5MaiiCavjCmn9Hs1o3eznqDEhRwxo7pXiAYez7keQUviUkauRiTMD8DrESdrNjN8zd9mTmVhRvBJeg5vhyvgrAhG"
+    },
+    {
+      "id": "solana-secret-key/neg",
+      "scope": "publish",
+      "label": "negative",
+      "input": "pay 9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM on mainnet, sig 5MaiiCavjCmn9Hs1o3eznqDEhRwxo7pXiAYez7keQUviUkauRiTMD8DrESdrNjN8zd9mTmVhRvBJeg5vhyvgrAhG",
+      "expect_ids": ["high-entropy-string"]
     }
   ]
 }
