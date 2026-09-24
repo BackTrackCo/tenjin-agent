@@ -136,11 +136,11 @@ const LIVE_ACCEPT = {
 
 /** Registry hits go through GLOBAL fetch (the SDK client); endpoint hits go
  *  through the injected fetchImpl, so the two lanes cannot be confused. */
-function stubRegistry(answer: () => Response): { urls: string[] } {
+function stubRegistry(answer: (url: string) => Response): { urls: string[] } {
   const urls: string[] = [];
   vi.stubGlobal('fetch', (async (input: Parameters<typeof fetch>[0]) => {
     urls.push(String(input));
-    return answer();
+    return answer(String(input));
   }) as typeof fetch);
   return { urls };
 }
@@ -749,6 +749,75 @@ describe('runPay, bazaar lane', () => {
     expect((err as CliError).fix).not.toContain('discover');
   });
 
+  /**
+   * AN UNSTORED RESOURCE IS LOOKED UP BY ITSELF. CDP's list endpoint ignores
+   * `payTo` and returns the same first page of ~17,000, so a URL no sweep had
+   * stored was refused as unlisted; its search takes the payTo and the
+   * resource, and answers with that one listing.
+   */
+  it('finds an unstored listing through the registry search, by resource and payTo', async () => {
+    await writeConfig();
+    const registry = stubRegistry((url) =>
+      url.includes('/discovery/search?')
+        ? json(200, { x402Version: 2, resources: registryListing(FOREIGN_URL, LIVE_ACCEPT).items })
+        : // What CDP's list answers whatever the filter: somebody else's page.
+          json(200, registryListing('https://other.example/api', LIVE_ACCEPT)),
+    );
+    const fixture = buildPaymentRequired();
+    const { fetch } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': fixture.header }),
+      json(200, { enriched: true }),
+    ]);
+    const result = await runPay({ url: `${FOREIGN_URL}?q=hello` }, makeCtx(), {
+      ...PUBLIC_DNS,
+      fetchImpl: fetch,
+      provider: testWalletProvider(),
+      authorizer: fakeAuthorizer('allow'),
+    });
+    expect(result.data).toMatchObject({ paid: true, registry: REGISTRY });
+    expect(registry.urls).toHaveLength(1);
+    const asked = new URL(registry.urls[0]!);
+    expect(asked.pathname).toBe('/discovery/search');
+    // The resource's identity, without the per-call query, under the live payTo.
+    expect(asked.searchParams.get('urlSubstring')).toBe(FOREIGN_URL);
+    expect(asked.searchParams.get('payTo')).toBe(LIVE_ACCEPT.payTo);
+  });
+
+  it('falls back to the payTo-filtered list on a registry with no such search', async () => {
+    await writeConfig();
+    const registry = stubRegistry((url) =>
+      url.includes('/discovery/search?')
+        ? json(404, { error: 'not found' })
+        : json(200, registryListing(FOREIGN_URL, LIVE_ACCEPT)),
+    );
+    const fixture = buildPaymentRequired();
+    const { fetch } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': fixture.header }),
+      json(200, { enriched: true }),
+    ]);
+    const result = await runPay({ url: FOREIGN_URL }, makeCtx(), {
+      ...PUBLIC_DNS,
+      fetchImpl: fetch,
+      provider: testWalletProvider(),
+      authorizer: fakeAuthorizer('allow'),
+    });
+    expect(result.data).toMatchObject({ paid: true, registry: REGISTRY });
+    expect(registry.urls).toHaveLength(2);
+    expect(new URL(registry.urls[1]!).searchParams.get('payTo')).toBe(LIVE_ACCEPT.payTo);
+  });
+
+  /** A search that fails is the registry not answering, never "not listed". */
+  it('fails the lane closed when the search itself fails', async () => {
+    await writeConfig();
+    const registry = stubRegistry(() => json(503, {}));
+    const fixture = buildPaymentRequired();
+    const { fetch } = scriptedFetch([json(402, {}, { 'PAYMENT-REQUIRED': fixture.header })]);
+    await expect(
+      runPay({ url: FOREIGN_URL }, makeCtx(), { ...PUBLIC_DNS, fetchImpl: fetch }),
+    ).rejects.toMatchObject({ code: 'NETWORK_ERROR' });
+    expect(registry.urls).toHaveLength(1);
+  });
+
   it('unreachable registries fail the lane closed', async () => {
     await writeConfig();
     stubRegistry(() => {
@@ -772,8 +841,7 @@ describe('runPay, bazaar lane', () => {
 
   it('verifies via a stored discover listing when the live lookup finds nothing', async () => {
     await writeConfig();
-    // The live registry answers, but with an empty page: exactly the CDP shape,
-    // whose list filter is a no-op and whose search cannot match a URL.
+    // The live registry answers, but lists nothing for this resource.
     stubRegistry(() =>
       json(200, { x402Version: 2, items: [], pagination: { limit: 20, offset: 0, total: 0 } }),
     );

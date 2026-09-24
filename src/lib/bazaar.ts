@@ -122,19 +122,14 @@ export async function sweepRegistries(
 }
 
 // ---------------------------------------------------------------------------
-// The local listing store: what `discover` swept, kept as pay-time evidence.
-//
-// The live lookup below is honest but weak: CDP's Bazaar ignores the `payTo`
-// list filter and its search is semantic (a URL query matches nothing), both
-// verified live 2026-08-14, so "look this URL up at pay time" cannot be relied
-// on against the largest registry. What CAN be relied on is what a sweep
-// actually returned: `discover` persists its listings here (bounded, TTL'd),
-// and the pay lane treats a fresh stored listing as the registry's word. That
-// also matches the designed flow — discover, then pay what discovery surfaced.
+// The local listing store: what a `discover` sweep returned, kept as pay-time
+// evidence (bounded, TTL'd). The pay lane checks a fresh stored listing first,
+// then asks each registry live (`listingsFor`), so the store is a shortcut and
+// never the only way a listed resource can be paid.
 // ---------------------------------------------------------------------------
 
 const LISTING_STORE_FILE = 'bazaar-listings.json';
-/** A listing older than this is not pay-time evidence; re-run `discover`. */
+/** A listing older than this is not pay-time evidence; the live lookup decides. */
 const LISTING_TTL_MS = 24 * 60 * 60 * 1000;
 /** Newest-first cap so the store cannot grow without bound. */
 const LISTING_STORE_CAP = 1000;
@@ -159,7 +154,7 @@ function listingStorePath(dataDir: string): string {
  * `accepts`, so one malformed row from a truncated write or a hand-edit throws a
  * raw TypeError out of the check that decides whether a payment may be signed.
  * A row that is not the shape this module writes is dropped, which costs at
- * worst a re-`discover`.
+ * worst a live lookup.
  */
 function isStoredListing(value: unknown): value is StoredListing {
   if (typeof value !== 'object' || value === null) return false;
@@ -238,23 +233,60 @@ export type RegistryVerification =
  * An unparseable listing matches nothing.
  */
 function sameResourceUrl(listed: string, requested: string): boolean {
-  const identity = (u: string): string | null => {
-    try {
-      const parsed = new URL(u);
-      const path = parsed.pathname.endsWith('/') ? parsed.pathname.slice(0, -1) : parsed.pathname;
-      return `${parsed.origin}${path}`;
-    } catch {
-      return null;
-    }
-  };
-  const a = identity(listed);
-  return a !== null && a === identity(requested);
+  const a = resourceIdentity(listed);
+  return a !== null && a === resourceIdentity(requested);
+}
+
+function resourceIdentity(u: string): string | null {
+  try {
+    const parsed = new URL(u);
+    const path = parsed.pathname.endsWith('/') ? parsed.pathname.slice(0, -1) : parsed.pathname;
+    return `${parsed.origin}${path}`;
+  } catch {
+    return null;
+  }
 }
 
 /**
- * Is the live 402 the deal a registry publicly advertises? Looked up by the
- * LIVE payTo (the discovery API's only useful filter), which is self-verifying:
- * a tampered payTo finds either nothing or listings whose resource is not this
+ * What one registry lists for this resource under this payTo, asked the
+ * narrowest way it answers. CDP's list endpoint ignores `payTo` and returns
+ * the same first page of its ~17,000 listings, so a resource no sweep had
+ * stored always read as unlisted there. Its `/discovery/search` takes `payTo`
+ * and `urlSubstring` (documented; verified live 2026-09-24: one request, the
+ * one listing), so that is asked first. A registry without that search (PayAI
+ * answers 400, others 404, or a body that is not a discovery answer) gets the
+ * list filtered by `payTo`, which PayAI honours. Every item is checked again
+ * by the caller, so a filter a registry ignores costs a miss, never a match.
+ */
+async function listingsFor(
+  registry: string,
+  url: string,
+  payTo: string,
+  timeoutMs: number,
+): Promise<DiscoveryResource[]> {
+  const params = new URLSearchParams({
+    payTo,
+    urlSubstring: resourceIdentity(url) ?? url,
+    limit: String(SEARCH_LIMIT),
+  });
+  const res = await fetch(`${registry}/discovery/search?${params.toString()}`, {
+    headers: { accept: 'application/json' },
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (res.ok) {
+    const found = ((await res.json()) as { resources?: unknown } | null)?.resources;
+    if (Array.isArray(found)) return found as DiscoveryResource[];
+  } else if (res.status !== 400 && res.status !== 404) {
+    throw new Error(`search on ${registry} answered ${res.status}`);
+  }
+  const bazaar = client(registry).extensions.bazaar;
+  return (await bazaar.listResources({ type: 'http', payTo, limit: PAGE_LIMIT })).items;
+}
+
+/**
+ * Is the live 402 the deal a registry publicly advertises? Looked up by this
+ * resource under the LIVE payTo (`listingsFor`), which is self-verifying: a
+ * tampered payTo finds either nothing or listings whose resource is not this
  * URL. A match requires same scheme/network/asset/payTo and a live amount AT
  * MOST the advertised one, so a seller can cut prices without delisting but a
  * raise waits for the registry. This is provenance, not endorsement: the spend
@@ -271,8 +303,7 @@ export async function verifyAgainstRegistries(
   let mismatch: { registry: string; detail: string } | undefined;
 
   // A fresh listing a `discover` sweep stored IS the registry's word for this
-  // resource; checking it first is also the only reliable path on registries
-  // whose live lookup cannot filter by URL or payTo (see the store note above).
+  // resource, and it answers without a round trip.
   if (opts.dataDir !== undefined) {
     for (const listing of await storedListingsFor(opts.dataDir, url, opts.now ?? Date.now)) {
       if (!registries.includes(listing.registry)) continue; // no longer configured
@@ -284,13 +315,12 @@ export async function verifyAgainstRegistries(
 
   for (const registry of registries) {
     try {
-      const bazaar = client(registry).extensions.bazaar;
       const listed = await withTimeout(
-        bazaar.listResources({ type: 'http', payTo: live.payTo, limit: PAGE_LIMIT }),
+        listingsFor(registry, url, live.payTo, timeoutMs),
         timeoutMs,
-        `listing ${registry}`,
+        `looking up this resource on ${registry}`,
       );
-      const matches = listed.items.filter(
+      const matches = listed.filter(
         (item) => item.type === 'http' && sameResourceUrl(item.resource, url),
       );
       if (matches.length === 0) continue;

@@ -2,7 +2,7 @@
 'tenjin-cli': patch
 ---
 
-Seven fixes to paid lookups. A paid body is now always delivered: one that fails
+Eight fixes to paid lookups. A paid body is now always delivered: one that fails
 the decision's success rule comes back `unverified` with a caveat naming the
 rule it missed, where it used to be refused after the money had moved. The
 `request` tool now sends its result once instead of twice, and declares
@@ -25,6 +25,10 @@ payment. A balance that cannot be read leaves the policy to decide, as before.
 `tenjin pay` waits on the paid request for the seller's
 advertised `maxTimeoutSeconds`, capped at 120 s and never shorter than
 `--timeout`, instead of cutting off a signed payment at the 10 s default; the
-unpaid probe keeps `--timeout`. And the Bazaar lane's unlisted and mismatch
-refusals now say how to check the listing instead of naming the shelved
-`tenjin discover`.
+unpaid probe keeps `--timeout`. The Bazaar lane now looks a resource up
+itself: it asks each registry's `/discovery/search` for this URL under the live
+`payTo`, and falls back to the `payTo`-filtered list where a registry has no
+such search. CDP's list ignores `payTo` and returns the same first page of
+about 17,000 listings, so any endpoint no `discover` sweep had stored was
+refused as unlisted. And the lane's refusals and the tenjin-pay skill no longer
+name the shelved `tenjin discover`.
