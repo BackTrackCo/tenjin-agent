@@ -61,6 +61,18 @@ const HINT =
   'Firecrawl fits this: scrapes one public URL and returns its content as clean markdown or HTML. ' +
   '$0.01 via https://vaaya.ai/api/run/firecrawl/scrape . ' +
   'Call request({query: "https://example.test/spec", id: "k3f9-abcd"}) alone and wait for its result.';
+/**
+ * The two native-call lines tenjin's `hintFor` writes (tenjin#886): before the
+ * call, main's "instead" redirect; after a free call fell short, the
+ * conditional one.
+ */
+const OFFER =
+  'Firecrawl fits this: scrapes one public URL and returns its content as clean markdown or HTML. ' +
+  '$0.01 via https://vaaya.ai/api/run/firecrawl/scrape .';
+const PRECALL_HINT = `${OFFER} Call request({query: "https://example.test/spec", id: "k3f9-abcd"}) instead; native tools stay allowed for anything else.`;
+const SHORTFALL_HINT = `${OFFER} If WebFetch couldn't get this, call request({query: "https://example.test/spec", id: "k3f9-abcd"}) and wait for its result.`;
+const withHint = (hint: string) => ({ ...EXECUTE, decision: { ...EXECUTE.decision, hint } });
+
 /** The same line as the host sees it: attributed, and naming the real tool. */
 const SEEN = HINT_SOURCE + ': ' + HINT.replace('request({', 'mcp__x402__request({');
 
@@ -256,7 +268,7 @@ describe('the shortfall hook', () => {
    * stranded every subagent that could not reach `request` (tenjin-agent#377).
    */
   it('offers the lookup after a WebFetch that came back short', async () => {
-    const { fetchImpl, calls } = router(EXECUTE);
+    const { fetchImpl, calls } = router(withHint(SHORTFALL_HINT));
     const path = await transcriptFor([
       { type: 'user', sessionId: 'sess-1', message: { content: 'read that spec for me' } },
     ]);
@@ -290,7 +302,9 @@ describe('the shortfall hook', () => {
     // The server's line, whole and untouched, framed as an option: it already
     // names the URL and the id, and the client adds no provider or price.
     expect(output.additionalContext).toBe(
-      `${HINT_SOURCE}: your WebFetch call came back short. Optional: ${SEEN.slice(HINT_SOURCE.length + 2)}`,
+      `${HINT_SOURCE}: your WebFetch call came back short. Optional: ${OFFER} If WebFetch ` +
+        `couldn't get this, call mcp__x402__request({query: "https://example.test/spec", ` +
+        `id: "k3f9-abcd"}) and wait for its result.`,
     );
   });
 
@@ -506,7 +520,7 @@ async function preCall(
  */
 describe('the pre-call hook', () => {
   it('denies the main agent on execute, as main does, with the attributed hint', async () => {
-    const { fetchImpl, calls } = router(EXECUTE);
+    const { fetchImpl, calls } = router(withHint(PRECALL_HINT));
     const out = await runNativeHook(await preCall('https://example.test/spec'), {
       dataDir: dir,
       baseUrl: BASE,
@@ -517,7 +531,9 @@ describe('the pre-call hook', () => {
       hookSpecificOutput: {
         hookEventName: 'PreToolUse',
         permissionDecision: 'deny',
-        permissionDecisionReason: SEEN,
+        permissionDecisionReason:
+          `${HINT_SOURCE}: ${OFFER} Call mcp__x402__request({query: "https://example.test/spec", ` +
+          `id: "k3f9-abcd"}) instead; native tools stay allowed for anything else.`,
       },
     });
     // Main's body exactly: the pending call rides in the packet, and nothing

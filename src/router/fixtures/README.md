@@ -29,10 +29,12 @@ The hook answer adds the `id`, `endpoint` (the x402 URL the lookup pays),
 `usage` (what to pass in `query`) and `hint`, the one line the host injects
 verbatim: a line naming the service and the task is followed where a generic
 one is not. For the prompt hook it asks for `request({query: <usage>, id})`;
-for a native call it offers `request` with that call's own search or URL as the
-query, for when that tool can't get it. The line reads true whether the client
-lets the native call run (tenjin-agent#387) or denies it (earlier releases). The
-server builds both lines, with the real id in them.
+for a native call it asks for `request` with that call's own search or URL as
+the query. Before the call runs the client denies it, so the line says to call
+`request` instead and leaves native tools allowed for anything else; with a
+`nativeOutcome` the call already ran, and the line says to call `request`
+because that tool couldn't get it. The server builds every line, with the real
+id in it.
 
 The tool answer adds `contract`: `request`, the exact HTTP call to send
 verbatim; `arguments`, the flat view of what was bound; and `resultSchema`,
