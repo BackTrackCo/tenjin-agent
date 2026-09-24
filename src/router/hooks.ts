@@ -348,7 +348,9 @@ function pendingCallOf(
 ): PendingCall | null {
   const value = tool === 'WebSearch' ? input.query : input.url;
   if (typeof value !== 'string') return null;
-  const bounded = value.trim().slice(0, 4_000);
-  if (bounded.length === 0) return null;
-  return tool === 'WebSearch' ? { tool, query: bounded } : { tool, url: bounded };
+  // Not cut here: seal() masks the whole subject first and bounds it after, so
+  // a token crossing the bound is seen whole by the mask.
+  const subject = value.trim();
+  if (subject.length === 0) return null;
+  return tool === 'WebSearch' ? { tool, query: subject } : { tool, url: subject };
 }

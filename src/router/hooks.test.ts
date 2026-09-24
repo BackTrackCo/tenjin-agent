@@ -383,6 +383,22 @@ describe('the native hook reads the turn it belongs to', () => {
     ]);
   });
 
+  it('masks the whole subject before it is cut, so a token across the bound never leaves', async () => {
+    const { fetchImpl, calls } = router(EXECUTE);
+    const token = `ghp_${'B'.repeat(36)}`;
+    const query = `${'a '.repeat(1_995)}${token}`;
+    expect(query.indexOf(token)).toBeLessThan(4_000);
+    expect(query.length).toBeGreaterThan(4_000);
+    const out = await runNativeHook(await readableEvent(query), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+      warn: () => undefined,
+    });
+    expect(out).toEqual({ response: null, decision: 'allow' });
+    expect(calls).toHaveLength(0);
+  });
+
   it('runs a WebFetch to a local target natively, with no router call', async () => {
     const { fetchImpl, calls } = router(EXECUTE);
     const out = await runNativeHook(await readableEvent('http://localhost:3000/', 'WebFetch'), {
