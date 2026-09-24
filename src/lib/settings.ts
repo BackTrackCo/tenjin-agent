@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { readFile, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join, resolve, sep } from 'node:path';
 import { z } from 'zod';
 import { CliError } from './errors';
 import {
@@ -496,26 +496,13 @@ export async function findNearestProjectFiles(
   deps: ProjectWalkDeps & { homeIsProject?: boolean } = {},
 ): Promise<ProjectWalkHit | null> {
   const homeDir = deps.homeDir ?? homedir();
-  const isForeignOwned = deps.isForeignOwned ?? defaultIsForeignOwned;
-  const warn = deps.warn ?? ((message: string) => process.stderr.write(`${message}\n`));
 
   let dir = cwd;
   // Bounded by $HOME (a shared-host trust boundary) and the filesystem root
   // (dirname('/') === '/'), whichever comes first.
   for (;;) {
     if (dir === homeDir && deps.homeIsProject === false) return null;
-    const found: string[] = [];
-    for (const name of names) {
-      const candidate = join(dir, name);
-      if (!(await pathExists(candidate))) continue;
-      if (await isForeignOwned(candidate)) {
-        // A file owned by another user (e.g. /tmp/.tenjin.json on a shared box)
-        // must never become the honored layer; skip it and keep walking.
-        warn(`Ignoring ${candidate}: not owned by the current user.`);
-      } else {
-        found.push(candidate);
-      }
-    }
+    const found = await ownedCandidates(dir, names, deps);
     if (found.length > 0) return { dir, found };
     if (await pathExists(join(dir, '.git'))) return null; // repo root, no file
     if (dir === homeDir) return null; // never cross above $HOME
@@ -523,6 +510,82 @@ export async function findNearestProjectFiles(
     if (parent === dir) return null;
     dir = parent;
   }
+}
+
+/**
+ * EVERY directory from `cwd` up to the git root (inclusive) that holds one of
+ * `names`, nearest first, under the same bounds as
+ * {@link findNearestProjectFiles}; `gitRoot` is null outside a repository.
+ * For layers that each only tighten, where reading one more can never loosen.
+ */
+export async function findAllProjectFiles(
+  cwd: string,
+  names: readonly string[],
+  deps: ProjectWalkDeps & { homeIsProject?: boolean } = {},
+): Promise<{ levels: ProjectWalkHit[]; gitRoot: string | null }> {
+  const homeDir = deps.homeDir ?? homedir();
+  const levels: ProjectWalkHit[] = [];
+  let dir = cwd;
+  for (;;) {
+    if (dir === homeDir && deps.homeIsProject === false) return { levels, gitRoot: null };
+    const found = await ownedCandidates(dir, names, deps);
+    if (found.length > 0) levels.push({ dir, found });
+    if (await pathExists(join(dir, '.git'))) return { levels, gitRoot: dir };
+    if (dir === homeDir) return { levels, gitRoot: null };
+    const parent = dirname(dir);
+    if (parent === dir) return { levels, gitRoot: null };
+    dir = parent;
+  }
+}
+
+/**
+ * The main working tree behind a git worktree whose root is `gitRoot`, or null
+ * when `gitRoot` is not a linked worktree. Filesystem only, no `git` process:
+ * the worktree's `.git` FILE names its gitdir, whose `commondir` names the
+ * main repository's `.git`. A bare common dir, one that resolves outside
+ * $HOME, and a submodule (a gitdir with no `commondir`) all give null.
+ */
+export async function mainWorktreeOf(
+  gitRoot: string,
+  homeDir: string = homedir(),
+): Promise<string | null> {
+  try {
+    const dotGit = join(gitRoot, '.git');
+    if (!(await stat(dotGit)).isFile()) return null;
+    const line = /^gitdir:\s*(.+?)\s*$/m.exec(await readFile(dotGit, 'utf8'));
+    if (line === null) return null;
+    const gitdir = resolve(gitRoot, line[1]!);
+    const commonDir = resolve(gitdir, (await readFile(join(gitdir, 'commondir'), 'utf8')).trim());
+    if (basename(commonDir) !== '.git' || !(await stat(commonDir)).isDirectory()) return null;
+    const main = dirname(commonDir);
+    if (main === gitRoot || !main.startsWith(`${homeDir}${sep}`)) return null;
+    return main;
+  } catch {
+    return null;
+  }
+}
+
+/** The candidates present in `dir` and owned by this user, in `names` order. */
+export async function ownedCandidates(
+  dir: string,
+  names: readonly string[],
+  deps: ProjectWalkDeps = {},
+): Promise<string[]> {
+  const isForeignOwned = deps.isForeignOwned ?? defaultIsForeignOwned;
+  const warn = deps.warn ?? ((message: string) => process.stderr.write(`${message}\n`));
+  const found: string[] = [];
+  for (const name of names) {
+    const candidate = join(dir, name);
+    if (!(await pathExists(candidate))) continue;
+    if (await isForeignOwned(candidate)) {
+      // A file owned by another user (e.g. /tmp/.tenjin.json on a shared box)
+      // must never become the honored layer; skip it and keep walking.
+      warn(`Ignoring ${candidate}: not owned by the current user.`);
+    } else {
+      found.push(candidate);
+    }
+  }
+  return found;
 }
 
 /**

@@ -11,7 +11,14 @@ import {
 } from '../lib/config';
 import { CliError } from '../lib/errors';
 import { configPath } from '../lib/paths';
-import { findNearestProjectFiles, projectRoot, type ProjectWalkDeps } from '../lib/settings';
+import {
+  findAllProjectFiles,
+  findNearestProjectFiles,
+  mainWorktreeOf,
+  ownedCandidates,
+  projectRoot,
+  type ProjectWalkDeps,
+} from '../lib/settings';
 
 /**
  * THE ONE READER OF THE ROUTER'S OWN KEYS, `router.enabled` and
@@ -19,17 +26,19 @@ import { findNearestProjectFiles, projectRoot, type ProjectWalkDeps } from '../l
  * `tenjin config` call {@link routerSettings} first, and nothing reads a router
  * key any other way.
  *
- * FOUR LAYERS, NEAREST WINS: the default, `~/.tenjin/config.json`, the nearest
- * `<project>/.tenjin/config.json` walking up from the working directory to the
- * git root, then `config.local.json` beside it. There is no ancestor merge and
- * no environment variable.
+ * THE LAYERS: the default, `~/.tenjin/config.json`, then EVERY
+ * `.tenjin/config.json` and `config.local.json` from the working directory up
+ * to the git root, and in a linked git worktree the main checkout's pair too.
+ * No environment variable.
  *
- * EVERY LAYER ONLY TIGHTENS. A nearer file can turn the router off or narrow
- * the packet to the turn, and a nearer value that would loosen an outer one is
- * not read: a file a cloned repository carries must not undo `tenjin config set
- * router.enabled false` on this machine, and a `config.local.json` a repository
- * commits anyway must not undo the committed one. Both keys fail toward less
- * data sent, and no project file has a spend key to loosen.
+ * EVERY LAYER IS A FLOOR. `enabled` is false when any layer says false, and
+ * `context` is `turn` when any layer says turn; a key a file leaves out
+ * inherits, and a looser value is not read. So a file a cloned repository
+ * carries cannot undo `tenjin config set router.enabled false` on this
+ * machine, a package in a monorepo cannot undo its root, and a
+ * `config.local.json` a repository commits anyway cannot undo the committed
+ * one. Both keys fail toward less data sent, and no project file has a spend
+ * key to loosen. The source reported is the nearest layer at the value.
  *
  * ONE PARSER. The global block is the one `loadRawConfig` already validated,
  * and a project file goes through `parseRouterLayer` from the same schema.
@@ -84,7 +93,7 @@ export async function routerSettings(
   }
 
   for (const { source, path, layer } of await projectLayers(input, deps)) {
-    // An outer value is a floor: a nearer one that would loosen it is not read.
+    // Every layer is a floor: a value looser than the one so far is not read.
     if (layer.enabled !== undefined && (layer.enabled === false || enabled.value)) {
       enabled = { value: layer.enabled, source, path };
     }
@@ -95,27 +104,39 @@ export async function routerSettings(
   return { enabled, context };
 }
 
-/** The project file, then the personal one, from the nearest directory holding either. */
+const ROUTER_FILES = [PROJECT_ROUTER_FILE, LOCAL_ROUTER_FILE];
+
+/**
+ * Every project layer, outermost first so the nearest one at a value is the
+ * one reported: the main checkout's pair when this is a linked worktree, then
+ * each directory from the git root down to `cwd`, its project file before its
+ * personal one.
+ */
 async function projectLayers(
   input: RouterSettingsInput,
   deps: ProjectWalkDeps,
 ): Promise<{ source: 'project' | 'local'; path: string; layer: RouterLayer }[]> {
-  const hit = await findNearestProjectFiles(input.cwd, [PROJECT_ROUTER_FILE, LOCAL_ROUTER_FILE], {
+  const { levels, gitRoot } = await findAllProjectFiles(input.cwd, ROUTER_FILES, {
     ...deps,
     // $HOME/.tenjin is the global scope, not a project.
     homeIsProject: false,
   });
-  if (hit === null || resolve(hit.dir, '.tenjin') === resolve(input.dataDir)) return [];
+  const main = gitRoot === null ? null : await mainWorktreeOf(gitRoot, deps.homeDir);
+  const outer =
+    main === null ? [] : [{ dir: main, found: await ownedCandidates(main, ROUTER_FILES, deps) }];
   const layers = [];
-  for (const path of hit.found) {
-    const file = await readProjectRouterFile(path);
-    if (file === null) continue;
-    const { layer } = file;
-    layers.push({
-      source: path === join(hit.dir, LOCAL_ROUTER_FILE) ? ('local' as const) : ('project' as const),
-      path,
-      layer,
-    });
+  for (const { dir, found } of [...outer, ...levels.reverse()]) {
+    // A data dir kept inside a project is the global file, already read.
+    if (resolve(dir, '.tenjin') === resolve(input.dataDir)) continue;
+    for (const path of found) {
+      const file = await readProjectRouterFile(path);
+      if (file === null) continue;
+      layers.push({
+        source: path === join(dir, LOCAL_ROUTER_FILE) ? ('local' as const) : ('project' as const),
+        path,
+        layer: file.layer,
+      });
+    }
   }
   return layers;
 }

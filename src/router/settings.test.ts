@@ -79,13 +79,47 @@ describe('routerSettings', () => {
     });
   });
 
-  it('takes the nearest directory only, with no merge of its ancestors', async () => {
+  it('applies every ancestor up to the git root as a floor', async () => {
     const pkg = join(repo, 'packages', 'app');
     await put(project(repo), { router: { enabled: false } });
     await put(project(pkg), { router: { context: 'turn' } });
     const s = await resolve(pkg);
-    expect(s.enabled).toEqual({ value: true, source: 'default' });
+    // The package narrows the packet; the root's off switch still holds.
+    expect(s.enabled).toEqual({ value: false, source: 'project', path: project(repo) });
     expect(s.context).toEqual({ value: 'turn', source: 'project', path: project(pkg) });
+  });
+
+  it('keeps a root off switch under an empty nested file', async () => {
+    const pkg = join(repo, 'packages', 'app');
+    await put(project(repo), { router: { enabled: false } });
+    await put(project(pkg), {});
+    await put(local(pkg), { router: {} });
+    expect((await resolve(pkg)).enabled).toEqual({
+      value: false,
+      source: 'project',
+      path: project(repo),
+    });
+  });
+
+  it('does not let a nested file enable a router its root turned off', async () => {
+    const pkg = join(repo, 'packages', 'app');
+    await put(project(repo), { router: { enabled: false, context: 'turn' } });
+    await put(project(pkg), { router: { enabled: true, context: 'session' } });
+    await put(local(pkg), { router: { enabled: true } });
+    const s = await resolve(pkg);
+    expect(s.enabled).toEqual({ value: false, source: 'project', path: project(repo) });
+    expect(s.context).toEqual({ value: 'turn', source: 'project', path: project(repo) });
+  });
+
+  it('lets a nested file tighten a root that says nothing', async () => {
+    const pkg = join(repo, 'packages', 'app');
+    await put(project(repo), { router: { context: 'turn' } });
+    await put(local(pkg), { router: { enabled: false } });
+    const s = await resolve(pkg);
+    expect(s.enabled).toEqual({ value: false, source: 'local', path: local(pkg) });
+    expect(s.context).toEqual({ value: 'turn', source: 'project', path: project(repo) });
+    // From the root itself, the package's file is not in the walk.
+    expect((await resolve(repo)).enabled.value).toBe(true);
   });
 
   it('never lets a nearer file loosen an outer one', async () => {
@@ -115,14 +149,15 @@ describe('routerSettings', () => {
 
   it('skips a file another user owns and keeps walking', async () => {
     const nested = join(repo, 'vendor');
-    await put(project(nested), { router: { enabled: true, context: 'session' } });
-    await put(project(repo), { router: { enabled: false } });
+    await put(project(nested), { router: { enabled: false } });
+    await put(project(repo), { router: { context: 'turn' } });
     const warned: string[] = [];
     const s = await resolve(nested, {
       isForeignOwned: async (path) => path === project(nested),
       warn: (line) => warned.push(line),
     });
-    expect(s.enabled).toEqual({ value: false, source: 'project', path: project(repo) });
+    expect(s.enabled).toEqual({ value: true, source: 'default' });
+    expect(s.context).toEqual({ value: 'turn', source: 'project', path: project(repo) });
     expect(warned).toEqual([`Ignoring ${project(nested)}: not owned by the current user.`]);
   });
 
@@ -164,6 +199,65 @@ describe('routerSettings', () => {
  * two keys. A key that loosens (spend, allowlist, enabling, base URL) must not
  * enter it; adding one means deleting this test first.
  */
+/**
+ * A LINKED WORKTREE carries the main checkout's layers too: its `.git` is a
+ * file naming a gitdir, whose `commondir` names the main repository's `.git`.
+ */
+describe('routerSettings in a git worktree', () => {
+  async function worktree(mainDir: string, commonGit = join(mainDir, '.git')): Promise<string> {
+    const wt = join(home, 'code', 'wt');
+    const gitdir = join(commonGit, 'worktrees', 'wt');
+    await mkdir(gitdir, { recursive: true });
+    await writeFile(join(gitdir, 'commondir'), '../..\n');
+    await mkdir(wt, { recursive: true });
+    await writeFile(join(wt, '.git'), `gitdir: ${gitdir}\n`);
+    return wt;
+  }
+
+  it("applies the main checkout's personal file as one more floor", async () => {
+    await put(local(repo), { router: { enabled: false } });
+    const wt = await worktree(repo);
+    await put(project(wt), { router: { context: 'turn' } });
+    const s = await resolve(join(wt, 'src'));
+    expect(s.enabled).toEqual({ value: false, source: 'local', path: local(repo) });
+    expect(s.context).toEqual({ value: 'turn', source: 'project', path: project(wt) });
+  });
+
+  it('skips a bare common dir, one outside $HOME, a submodule, and a foreign file', async () => {
+    // Bare: the common dir is not a `.git` inside a working tree.
+    // Its parent is no working tree, so a file there must not be read.
+    const bare = join(home, 'code', 'bare.git');
+    await put(local(join(home, 'code')), { router: { enabled: false } });
+    let wt = await worktree(bare, bare);
+    expect((await resolve(wt)).enabled.value).toBe(true);
+    await rm(join(home, 'code', 'wt'), { recursive: true, force: true });
+    await rm(join(home, 'code', '.tenjin'), { recursive: true, force: true });
+
+    // Outside $HOME.
+    const outside = join(root, 'elsewhere');
+    await mkdir(join(outside, '.git'), { recursive: true });
+    await put(local(outside), { router: { enabled: false } });
+    wt = await worktree(outside);
+    expect((await resolve(wt)).enabled.value).toBe(true);
+    await rm(join(home, 'code', 'wt'), { recursive: true, force: true });
+
+    // A submodule: its gitdir has no commondir.
+    await put(local(repo), { router: { enabled: false } });
+    const sub = join(home, 'code', 'sub');
+    await mkdir(join(repo, '.git', 'modules', 'sub'), { recursive: true });
+    await mkdir(sub, { recursive: true });
+    await writeFile(join(sub, '.git'), `gitdir: ${join(repo, '.git', 'modules', 'sub')}\n`);
+    expect((await resolve(sub)).enabled.value).toBe(true);
+
+    // The main checkout's file owned by someone else.
+    wt = await worktree(repo);
+    expect((await resolve(wt)).enabled.value).toBe(false);
+    expect(
+      (await resolve(wt, { isForeignOwned: async (path) => path === local(repo) })).enabled.value,
+    ).toBe(true);
+  });
+});
+
 describe('the project layer parser', () => {
   it('accepts exactly router.enabled and router.context, and reads nothing else', () => {
     expect(Object.keys(RouterLayerSchema.shape).sort()).toEqual(['context', 'enabled']);
