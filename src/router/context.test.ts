@@ -151,10 +151,14 @@ describe('the prompt packet', () => {
     const path = await transcript([
       user('check the deploy'),
       {
-        ...user('<task-notification>\n<result>what a subagent found</result>\n</task-notification>'),
+        ...user(
+          '<task-notification>\n<result>what a subagent found</result>\n</task-notification>',
+        ),
         origin: { kind: 'task-notification' },
       },
-      user('<task-notification>\n<result>an older row with no origin</result>\n</task-notification>'),
+      user(
+        '<task-notification>\n<result>an older row with no origin</result>\n</task-notification>',
+      ),
       user('<local-command-stdout>output of a local command</local-command-stdout>'),
       user(typed),
       assistant('on it'),
@@ -169,11 +173,16 @@ describe('the prompt packet', () => {
       user('find the latest release notes'),
       assistant('searching'),
       {
-        ...user('<task-notification>\n<result>what a subagent found</result>\n</task-notification>'),
+        ...user(
+          '<task-notification>\n<result>what a subagent found</result>\n</task-notification>',
+        ),
         origin: { kind: 'task-notification' },
       },
     ]);
-    const packet = await buildNativePacket(path, 's', { tool: 'WebSearch', query: 'release notes' });
+    const packet = await buildNativePacket(path, 's', {
+      tool: 'WebSearch',
+      query: 'release notes',
+    });
     expect(packet.current.text).toBe('find the latest release notes');
     expect(JSON.stringify(packet)).not.toContain('subagent found');
   });
