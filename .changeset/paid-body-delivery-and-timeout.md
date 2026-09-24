@@ -2,7 +2,7 @@
 'tenjin-cli': patch
 ---
 
-Six fixes to paid lookups. A paid body is now always delivered: one that fails
+Seven fixes to paid lookups. A paid body is now always delivered: one that fails
 the decision's success rule comes back `unverified` with a caveat naming the
 rule it missed, where it used to be refused after the money had moved. The
 `request` tool now sends its result once instead of twice, and declares
@@ -16,7 +16,13 @@ after-call offer still applies, where a deny used to leave the page neither
 fetched nor bought. The prompt hook follows the same rule: its hint to call
 `request` is shown only when that call would run without approval, where it
 used to send the model to a `needs_approval` stop while its free tools would
-have answered. `tenjin pay` waits on the paid request for the seller's
+have answered. Both, and a subagent's offer, also need the wallet to cover the
+price: once the policy allows the spend, the hook reads the wallet's USDC
+balance with one `balanceOf` against `rpcUrl`, inside the hook's existing time
+budget, and a balance below the price leaves the free call to run. A fresh
+install's empty wallet used to get its WebFetch denied and then a refused
+payment. A balance that cannot be read leaves the policy to decide, as before.
+`tenjin pay` waits on the paid request for the seller's
 advertised `maxTimeoutSeconds`, capped at 120 s and never shorter than
 `--timeout`, instead of cutting off a signed payment at the 10 s default; the
 unpaid probe keeps `--timeout`. And the Bazaar lane's unlisted and mismatch

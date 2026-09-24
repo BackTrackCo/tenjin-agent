@@ -20,6 +20,18 @@ import { renderProgress, resolveProgressSession, sessionDir } from './progress';
 
 /** What `tenjin install` writes (`ROUTER_DEFAULTS`): 0.25 a call, auto. */
 const ROUTER_POLICY = { maxAutoSpend: '250000', sessionBudget: '5000000', confirm: 'above:250000' };
+/** The wallet file's cleartext address, which is all a hook reads of it. */
+const WALLET = '0x1234567890AbcdEF1234567890aBcdef12345678';
+/** The configured default `rpcUrl`, where the balance read goes. */
+const RPC = 'https://mainnet.base.org';
+
+/**
+ * What the RPC answers `balanceOf` with: an atomic USDC amount, or a function
+ * standing in for a failure. Funded by default (1 USDC), so a test about
+ * routing is not a test about the wallet; reset before each test.
+ */
+let rpcAnswer: bigint | ((init?: RequestInit) => Promise<Response>);
+let rpcCalls: { url: string; body: unknown }[];
 
 let dir: string;
 beforeEach(async () => {
@@ -28,9 +40,12 @@ beforeEach(async () => {
   // machine running the suite can switch the router off.
   const { mkdir, writeFile } = await import('node:fs/promises');
   await mkdir(join(dir, '.git'));
-  // The policy `install` writes, so the fixture's lookup auto-executes; a test
-  // about another policy writes its own.
+  // The policy `install` writes, so the fixture's lookup auto-executes, and a
+  // wallet for it to pay from; a test about another policy writes its own.
   await writeFile(join(dir, 'config.json'), JSON.stringify(ROUTER_POLICY));
+  await writeFile(join(dir, 'wallet.json'), JSON.stringify({ schemaVersion: 2, address: WALLET }));
+  rpcAnswer = 1_000_000n;
+  rpcCalls = [];
 });
 afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
@@ -38,11 +53,22 @@ afterEach(async () => {
 
 const BASE = 'https://tenjin.sh';
 
-/** A recorded decision answer; `calls` is what the hook actually sent. */
+/**
+ * A recorded decision answer; `calls` is what the hook sent the router. The
+ * balance read goes to {@link RPC} through the same fetch and is answered from
+ * {@link rpcAnswer} and recorded in {@link rpcCalls} instead.
+ */
 function router(body: unknown, status = 200): { fetchImpl: typeof fetch; calls: unknown[] } {
   const calls: unknown[] = [];
   const fetchImpl = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
-    calls.push({ url: String(input), body: JSON.parse(String(init?.body ?? 'null')) });
+    const sent = { url: String(input), body: JSON.parse(String(init?.body ?? 'null')) };
+    if (sent.url === RPC) {
+      rpcCalls.push(sent);
+      if (typeof rpcAnswer === 'function') return rpcAnswer(init);
+      const word = `0x${rpcAnswer.toString(16).padStart(64, '0')}`;
+      return new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: word }));
+    }
+    calls.push(sent);
     return new Response(JSON.stringify(body), {
       status,
       headers: { 'content-type': 'application/json' },
@@ -736,6 +762,153 @@ describe('the pre-call hook', () => {
 });
 
 /**
+ * A WALLET THAT CANNOT PAY IS NOT SENT TO PAY. A fresh install's wallet holds
+ * no USDC, so a deny or a hint toward `request` ended in a refused payment
+ * after the free call had already been stopped. A redirect, a hint and a
+ * subagent offer each read one `balanceOf`, and only a balance read below the
+ * price withholds: one that cannot be read leaves the policy to decide, as
+ * before, so a flaky or rate-limited RPC never switches routing off.
+ */
+describe('a wallet that cannot cover the lookup', () => {
+  it('reads one balanceOf for the wallet, and denies when it covers the price', async () => {
+    rpcAnswer = 10_000n; // the fixture's price, exactly
+    const { fetchImpl } = router(EXECUTE);
+    const out = await runNativeHook(await preCall('https://example.test/spec'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+    expect(out.response).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } });
+    expect(rpcCalls).toEqual([
+      {
+        url: RPC,
+        body: {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'eth_call',
+          params: [
+            {
+              to: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+              data: `0x70a08231${'0'.repeat(24)}${WALLET.slice(2).toLowerCase()}`,
+            },
+            'latest',
+          ],
+        },
+      },
+    ]);
+  });
+
+  it.each([
+    ['holds no USDC', 0n],
+    ['holds less than the price', 9_999n],
+  ])('lets the free call run, and shows no hint, when it %s', async (_label, balance) => {
+    rpcAnswer = balance;
+    const { fetchImpl } = router(EXECUTE);
+    const deps = { dataDir: dir, baseUrl: BASE, fetchImpl };
+    const event = await preCall('https://x.com/a', 'WebFetch', { tool_use_id: 'toolu_5' });
+    const out = await runNativeHook(event, deps);
+    expect(out).toMatchObject({ response: null, action: 'execute', withheld: true });
+    expect(await renderProgress(dir, 'sess-1')).toBe(
+      'x402 · search: native tools (wallet needs USDC)',
+    );
+    expect(await runPromptHook(promptEvent('read https://x.com/a'), deps)).toEqual({
+      response: null,
+      action: 'execute',
+      withheld: true,
+    });
+    // Nothing was redirected, so the after-call arm still offers on that call.
+    const after = await runShortfallHook(
+      {
+        ...((await readableEvent('https://x.com/a', 'WebFetch')) as object),
+        tool_use_id: 'toolu_5',
+      },
+      deps,
+    );
+    expect(after.response).not.toBeNull();
+  });
+
+  it.each([
+    ['answers 500', async () => new Response('nope', { status: 500 })],
+    [
+      'answers an RPC error',
+      async () =>
+        new Response(
+          JSON.stringify({ jsonrpc: '2.0', id: 1, error: { code: -32000, message: 'x' } }),
+        ),
+    ],
+    [
+      'cannot be reached',
+      async (): Promise<Response> => {
+        throw new TypeError('fetch failed');
+      },
+    ],
+  ])('leaves the policy to decide, and says why, when the RPC %s', async (_label, answer) => {
+    rpcAnswer = answer;
+    const lines: string[] = [];
+    const { fetchImpl } = router(EXECUTE);
+    const out = await runNativeHook(await preCall('https://example.test/spec'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+      warn: (line) => lines.push(line),
+    });
+    expect(out.response).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } });
+    expect(lines).toEqual([
+      "tenjin hook: the wallet's USDC balance could not be read from mainnet.base.org, so the spend policy alone decides",
+    ]);
+  });
+
+  it('spends only what the decision left of the gate budget on the read', async () => {
+    // A decision that used the whole budget leaves the read nothing: it is not
+    // sent, the hook still answers inside the timeout `install` writes, and
+    // the policy decides alone.
+    let clock = 1_000_000;
+    const answer = router(EXECUTE).fetchImpl;
+    const fetchImpl = (async (...args: Parameters<typeof fetch>) => {
+      if (String(args[0]) !== RPC) clock += 3_500;
+      return answer(...args);
+    }) as typeof fetch;
+    const out = await runNativeHook(await preCall('https://example.test/spec'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+      now: () => clock,
+      warn: () => undefined,
+    });
+    expect(out.response).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } });
+    expect(rpcCalls).toHaveLength(0);
+  });
+
+  it('reads nothing, and leaves the policy to decide, with no wallet file', async () => {
+    const fs = await import('node:fs/promises');
+    await fs.rm(join(dir, 'wallet.json'));
+    const { fetchImpl } = router(EXECUTE);
+    const out = await runNativeHook(await preCall('https://example.test/spec'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+    expect(out.response).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } });
+    expect(rpcCalls).toHaveLength(0);
+  });
+
+  /** Its address takes a curve the hook graph does not load, and the file
+   *  beside it is not the wallet that pays: the policy alone decides. */
+  it('reads nothing for a TENJIN_WALLET_KEY wallet, even beside a wallet file', async () => {
+    rpcAnswer = 0n;
+    const { fetchImpl } = router(EXECUTE);
+    const out = await runNativeHook(await preCall('https://example.test/spec'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+      env: { TENJIN_WALLET_KEY: `0x${'1'.repeat(64)}` },
+    });
+    expect(out.response).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } });
+    expect(rpcCalls).toHaveLength(0);
+  });
+});
+
+/**
  * THE ID IS THE ONE PIECE OF SERVER TEXT THIS CLIENT PUTS IN THE MODEL'S
  * CONTEXT. An id carrying a quote, a newline or a sentence would be writing
  * instructions into the turn, so the schema pins it to an opaque alphabet and
@@ -964,7 +1137,7 @@ describe('what the hook leaves for the status line', () => {
       // Read at the one moment the decision is in flight, which is what the
       // footer's once-a-second refresh would land on.
       fetchImpl: (async (...args: Parameters<typeof fetch>) => {
-        seen.push(await renderProgress(dir, 'sess-1'));
+        if (String(args[0]) !== RPC) seen.push(await renderProgress(dir, 'sess-1'));
         return fetchImpl(...args);
       }) as typeof fetch,
     });
@@ -1714,6 +1887,18 @@ describe('the delegation hook', () => {
       fetchImpl,
     });
     expect(out).toMatchObject({ response: null, withheld: true });
+  });
+
+  it('withholds an offer the wallet cannot cover', async () => {
+    rpcAnswer = 0n;
+    const { fetchImpl } = router(EXECUTE);
+    const out = await runDelegationHook(await delegation(), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+    expect(out).toMatchObject({ response: null, withheld: true });
+    expect(rpcCalls).toHaveLength(1);
   });
 });
 
