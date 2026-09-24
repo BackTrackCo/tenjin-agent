@@ -1,11 +1,13 @@
 import { open } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import { mask } from '../lib/redact';
 
 /**
  * The bounded conversation packet the router's gate and paid decision read.
  *
  * WHAT GOES IN IT: ordinary user and assistant text from the CURRENT session
- * only, redacted, at most {@link MAX_HISTORY} prior messages and at most
+ * only (and, for a subagent's own native call, that one subagent's rows),
+ * redacted, at most {@link MAX_HISTORY} prior messages and at most
  * {@link MAX_PACKET_BYTES} in total, oldest dropped first. Tool results are
  * excluded: a tool result is other people's content, and a packet that carried
  * it would be a channel from a fetched page into a routing decision.
@@ -42,6 +44,18 @@ export interface Packet {
   literalUrls: string[];
   historyStatus: HistoryStatus;
   pendingCall?: PendingCall;
+  /** How the free tool already fared on `pendingCall`, sent only when it fell
+   *  short. Never without `pendingCall`: the server refuses it alone. */
+  nativeOutcome?: NativeOutcome;
+}
+
+/** What the harness reported about a native call that came back short: its
+ *  status and size (WebFetch), or the error a failed call carried. At least one
+ *  field, always; the server's schema is the same strict object. */
+export interface NativeOutcome {
+  code?: number;
+  bytes?: number;
+  error?: string;
 }
 
 /** The pending native call, INSIDE the packet: the gate request is a strict
@@ -122,7 +136,7 @@ export async function buildPromptPacket(
 ): Promise<Packet> {
   const masked = mask(prompt.trim()).slice(0, MAX_MESSAGE_CHARS);
   const text = masked.length > 0 ? masked : '(empty prompt)';
-  const read = await readHistory(transcriptPath, sessionId);
+  const read = await readHistory(transcriptPath, { sessionId });
   return fit({
     current: { role: 'user', text },
     history: read ?? [],
@@ -132,7 +146,7 @@ export async function buildPromptPacket(
 }
 
 /**
- * Build the packet for a native call the host is about to make. SAME BOUNDS as
+ * Build the packet for a native call that came back short. SAME BOUNDS as
  * a prompt packet, and the same reader: the six most recent messages, 16 KiB,
  * masked, with tool results excluded.
  *
@@ -143,17 +157,35 @@ export async function buildPromptPacket(
  * paid provider on a bare URL. Reading the transcript at the hook event is not
  * session guessing; the harness hands this hook the path to its own session.
  *
- * The pending call rides INSIDE the packet as the proposed operation, which is
- * the shape the route takes and the one `wire-gate-request.json` pins.
+ * The call rides INSIDE the packet as `pendingCall`, with how it fared beside
+ * it as `nativeOutcome`: the shape the route takes, pinned by
+ * `wire-hook-request-native-shortfall.json`.
  */
 export async function buildNativePacket(
   transcriptPath: string | undefined,
   sessionId: string,
   pending: PendingCall,
+  opts: { agentId?: string; nativeOutcome?: NativeOutcome } = {},
 ): Promise<Packet> {
+  const { agentId, nativeOutcome } = opts;
   const subject = 'query' in pending ? pending.query : pending.url;
-  const read = await readHistory(transcriptPath, sessionId);
-  const messages = read ?? [];
+  const read = await readHistory(transcriptPath, { sessionId });
+  // A SUBAGENT'S CALL BELONGS TO ITS OWN TASK. The harness hands every
+  // subagent hook the PARENT's transcript, whose latest user message is not
+  // what this subagent was asked to do, so two subagents with different
+  // assignments sent the same packet (tenjin-agent#377). Its own transcript
+  // opens with the delegated task; the parent's messages stay in front of it
+  // as history, which is how a restriction the user gave the parent still
+  // reaches this call. A subagent file that cannot be read is today's
+  // behaviour, not a refusal.
+  const own =
+    agentId === undefined
+      ? null
+      : await readHistory(subagentTranscriptPath(transcriptPath, sessionId, agentId), {
+          sessionId,
+          agentId,
+        });
+  const messages = own === null ? (read ?? []) : [...(read ?? []), ...own];
   // The most recent user message is the turn this call belongs to; everything
   // before it is context. With no transcript the call speaks for itself, which
   // is what this hook did before it could read one.
@@ -166,15 +198,43 @@ export async function buildNativePacket(
     current: current?.message ?? { role: 'user', text: bounded },
     history: current === undefined ? messages : messages.slice(0, current.index),
     literalUrls: literalUrlsIn(`${current?.message.text ?? ''}\n${bounded}`),
-    historyStatus: read === null ? 'unavailable' : 'ok',
+    historyStatus: read === null && own === null ? 'unavailable' : 'ok',
     pendingCall: pending,
+    ...(nativeOutcome !== undefined ? { nativeOutcome } : {}),
   });
+}
+
+/** Both ids become path segments, so anything but an opaque token is refused. */
+const PATH_SEGMENT_RE = /^[A-Za-z0-9_-]{1,200}$/;
+
+/**
+ * Where the harness keeps one subagent's transcript: beside the parent's
+ * `<session>.jsonl`, under `<session>/subagents/agent-<agent_id>.jsonl`
+ * (Claude Code 2.1.x). `undefined` when either id could not be a path segment.
+ */
+export function subagentTranscriptPath(
+  transcriptPath: string | undefined,
+  sessionId: string,
+  agentId: string,
+): string | undefined {
+  if (transcriptPath === undefined || transcriptPath.length === 0) return undefined;
+  if (!PATH_SEGMENT_RE.test(sessionId) || !PATH_SEGMENT_RE.test(agentId)) return undefined;
+  return join(dirname(transcriptPath), sessionId, 'subagents', `agent-${agentId}.jsonl`);
+}
+
+/**
+ * Whose rows a transcript read admits: the session's own, or with `agentId`,
+ * exactly one subagent's sidechain and no other.
+ */
+interface RowScope {
+  sessionId: string;
+  agentId?: string;
 }
 
 /** `null` means "cannot be vouched for"; an empty array is a genuinely fresh session. */
 async function readHistory(
   path: string | undefined,
-  sessionId: string,
+  scope: RowScope,
 ): Promise<PacketMessage[] | null> {
   if (path === undefined || path.length === 0) return null;
   let raw: string;
@@ -197,7 +257,7 @@ async function readHistory(
     await file.close();
   }
   try {
-    return parseRows(raw, sessionId);
+    return parseRows(raw, scope);
   } catch {
     return null;
   }
@@ -214,7 +274,8 @@ async function readHistory(
  * A compaction boundary is not a reason to read nothing: the rows after it are
  * the live context, so the collected messages start again there.
  */
-function parseRows(raw: string, sessionId: string): PacketMessage[] {
+function parseRows(raw: string, scope: RowScope): PacketMessage[] {
+  const { sessionId, agentId } = scope;
   let messages: PacketMessage[] = [];
   for (const line of raw.split('\n')) {
     if (line.trim().length === 0) continue;
@@ -234,7 +295,11 @@ function parseRows(raw: string, sessionId: string): PacketMessage[] {
     // Never ours to read: another window's rows and a subagent's are skipped
     // rather than allowed to void the file.
     if (typeof row.sessionId === 'string' && row.sessionId !== sessionId) continue;
-    if (row.isSidechain === true) continue;
+    // A subagent read admits that one sidechain and nothing else; the harness's
+    // own reminders in it are not the task. Every other read admits none.
+    if (agentId === undefined ? row.isSidechain === true : !ownSidechainRow(row, agentId)) {
+      continue;
+    }
     if (row.type !== 'user' && row.type !== 'assistant') continue;
     if (row.sessionId !== sessionId) continue;
     let text: string;
@@ -247,6 +312,10 @@ function parseRows(raw: string, sessionId: string): PacketMessage[] {
     if (bounded.length > 0) messages.push({ role: row.type, text: bounded });
   }
   return messages;
+}
+
+function ownSidechainRow(row: Record<string, unknown>, agentId: string): boolean {
+  return row.isSidechain === true && row.agentId === agentId && row.isMeta !== true;
 }
 
 /** Ordinary text blocks only; a tool result contributes nothing. */

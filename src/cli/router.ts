@@ -2,7 +2,7 @@ import type { Command } from 'commander';
 import { INTEGRATION, SETUP, type Registration } from './registration';
 
 /**
- * The router product: the two hook commands, the MCP server that carries the
+ * The router product: the hook commands, the MCP server that carries the
  * `request` tool, and the local spend readout.
  *
  * `hook` and `mcp` BYPASS the envelope. A hook writes the harness's own JSON to
@@ -21,6 +21,11 @@ export function registerRouter(reg: Registration): void {
   for (const [name, summary] of [
     ['prompt', 'UserPromptSubmit: build the session packet and ask the free gate'],
     ['native', 'PreToolUse on WebSearch|WebFetch: allow the call, or redirect it'],
+    [
+      'shortfall',
+      'PostToolUse(Failure) on WebSearch|WebFetch: offer a paid lookup when the result came back short',
+    ],
+    ['agent', "PreToolUse on Agent|Task: append any paid offer to the subagent's task"],
   ] as const) {
     addGlobalFlags(hook.command(name))
       .summary(summary)

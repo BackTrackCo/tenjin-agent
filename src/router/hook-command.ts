@@ -1,9 +1,16 @@
-import { runNativeHook, runPromptHook, type HookDeps } from './hooks';
+import {
+  runDelegationHook,
+  runNativeHook,
+  runPromptHook,
+  runShortfallHook,
+  type HookDeps,
+} from './hooks';
 import type { Io } from '../lib/output';
 
 /**
- * `tenjin hook prompt` and `tenjin hook native`. The harness writes its event on
- * stdin and reads a JSON object (or nothing) from stdout, so these two commands
+ * `tenjin hook prompt`, `native`, `shortfall` and `agent`. The harness writes
+ * its event on stdin and reads a JSON object (or nothing) from stdout, so these
+ * commands
  * bypass the CLI's envelope entirely. They never fail the turn: a stdin that
  * never arrives, an unreadable event or a handler that throws all exit 0 with
  * an empty stdout, which the harness reads as "no opinion".
@@ -16,7 +23,7 @@ const MAX_EVENT_BYTES = 1_000_000;
  *  spend: every second it holds is a second the gate does not get. */
 export const STDIN_TIMEOUT_MS = 1_000;
 
-export type HookKind = 'prompt' | 'native';
+export type HookKind = 'prompt' | 'native' | 'shortfall' | 'agent';
 
 export interface HookCommandDeps extends HookDeps {
   /** Test seam for the harness event; production reads stdin. */
@@ -29,7 +36,13 @@ export async function runHookCommand(kind: HookKind, io: Io, deps: HookCommandDe
     const raw = await (deps.readEvent ?? readStdin)();
     const event: unknown = JSON.parse(raw);
     const outcome =
-      kind === 'prompt' ? await runPromptHook(event, deps) : await runNativeHook(event, deps);
+      kind === 'prompt'
+        ? await runPromptHook(event, deps)
+        : kind === 'native'
+          ? await runNativeHook(event, deps)
+          : kind === 'shortfall'
+            ? await runShortfallHook(event, deps)
+            : await runDelegationHook(event, deps);
     response = outcome.response;
   } catch {
     response = null;

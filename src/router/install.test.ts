@@ -78,6 +78,39 @@ const settingsPath = () => join(home, '.claude', 'settings.json');
 const readSettings = async (): Promise<Record<string, unknown>> =>
   JSON.parse(await readFile(settingsPath(), 'utf8')) as Record<string, unknown>;
 
+const handler = (command: string) => [{ type: 'command', command, timeout: 5 }];
+/** Exactly what this build writes into an empty `hooks` key. */
+const CURRENT_HOOKS = {
+  UserPromptSubmit: [{ hooks: handler('tenjin hook prompt') }],
+  PreToolUse: [
+    { matcher: 'WebSearch|WebFetch', hooks: handler('tenjin hook native') },
+    { matcher: 'Agent|Task', hooks: handler('tenjin hook agent') },
+  ],
+  PostToolUse: [{ matcher: 'WebSearch|WebFetch', hooks: handler('tenjin hook shortfall') }],
+  PostToolUseFailure: [{ matcher: 'WebSearch|WebFetch', hooks: handler('tenjin hook shortfall') }],
+};
+
+/**
+ * A settings file shaped like every alpha install before tenjin-agent#387,
+ * with the user's own entries beside ours: a PreToolUse hook on Bash and a
+ * second WebFetch hook of theirs, both of which must survive a refresh.
+ */
+function alphaSettings(): Record<string, unknown> {
+  return {
+    model: 'opus',
+    hooks: {
+      UserPromptSubmit: [{ hooks: handler('tenjin hook prompt') }],
+      PreToolUse: [
+        { matcher: 'Bash', hooks: [{ type: 'command', command: 'my-bash-guard' }] },
+        { matcher: 'WebSearch|WebFetch', hooks: handler('tenjin hook native') },
+        { matcher: 'WebFetch', hooks: [{ type: 'command', command: 'my-fetch-logger' }] },
+      ],
+    },
+    permissions: { allow: ['mcp__x402__request', 'Bash(git status)'] },
+    statusLine: { type: 'command', command: 'tenjin status-line', refreshInterval: 1 },
+  };
+}
+
 const ADDRESS = '0x3c0D84055994c3062819Ce8730869D0aDeA4c3Bf';
 
 /** Wallet seams are always stubbed: the real create writes to the OS keychain. */
@@ -95,18 +128,11 @@ function deps(over: Record<string, unknown> = {}) {
 }
 
 describe('tenjin install', () => {
-  it('writes the two hook entries, the allow rule and the MCP registration', async () => {
+  it('writes the five hook entries, the allow rule and the MCP registration', async () => {
     const registerMcp = vi.fn(async () => undefined);
     const result = await runRouterInstall({}, ctx(), deps({ registerMcp }));
     const settings = await readSettings();
-    const hooks = settings.hooks as Record<string, { matcher?: string; hooks: unknown[] }[]>;
-    expect(hooks.UserPromptSubmit![0]!.hooks).toEqual([
-      { type: 'command', command: 'tenjin hook prompt', timeout: 5 },
-    ]);
-    expect(hooks.PreToolUse![0]).toMatchObject({
-      matcher: 'WebSearch|WebFetch',
-      hooks: [{ type: 'command', command: 'tenjin hook native', timeout: 5 }],
-    });
+    expect(settings.hooks).toEqual(CURRENT_HOOKS);
     expect((settings.permissions as { allow: string[] }).allow).toContain(ALLOW_RULE);
     expect(registerMcp).toHaveBeenCalledWith(MCP_ADD_COMMAND, {
       scope: 'user',
@@ -195,6 +221,8 @@ describe('tenjin install', () => {
     expect(raw).not.toContain('tenjin-shim.mjs');
     expect(raw).not.toContain('127.0.0.1');
     expect(Object.keys(settings.hooks as object).sort()).toEqual([
+      'PostToolUse',
+      'PostToolUseFailure',
       'PreToolUse',
       'UserPromptSubmit',
     ]);
@@ -305,6 +333,38 @@ describe('tenjin install --refresh', () => {
     expect(result.humanLines).toEqual(['✓ Tenjin is up to date']);
   });
 
+  /**
+   * THE MIGRATION EVERY ALPHA INSTALL TAKES. `tenjin update` runs exactly this
+   * refresh: the prompt and PreToolUse native entries stay, the delegation and
+   * post-call entries arrive, and everything that is not ours stays byte for
+   * byte, including the user's own PreToolUse and WebFetch hooks.
+   */
+  it("migrates an alpha install, keeping its native entry and the user's own", async () => {
+    const fs = await import('node:fs/promises');
+    await fs.mkdir(join(home, '.claude'), { recursive: true });
+    await fs.writeFile(settingsPath(), JSON.stringify(alphaSettings(), null, 2) + '\n');
+
+    await runRouterInstall({ refresh: true }, ctx(), deps());
+    const after = await readSettings();
+    expect(after.hooks).toEqual({
+      UserPromptSubmit: CURRENT_HOOKS.UserPromptSubmit,
+      PreToolUse: [
+        { matcher: 'Bash', hooks: [{ type: 'command', command: 'my-bash-guard' }] },
+        { matcher: 'WebFetch', hooks: [{ type: 'command', command: 'my-fetch-logger' }] },
+        ...CURRENT_HOOKS.PreToolUse,
+      ],
+      PostToolUse: CURRENT_HOOKS.PostToolUse,
+      PostToolUseFailure: CURRENT_HOOKS.PostToolUseFailure,
+    });
+    const native = JSON.stringify(after).match(/tenjin hook native/g) ?? [];
+    expect(native).toHaveLength(1);
+    expect({ ...after, hooks: null }).toEqual({ ...alphaSettings(), hooks: null });
+
+    // Converged: a second refresh writes nothing.
+    const again = await runRouterInstall({ refresh: true }, ctx(), deps());
+    expect((onlyInstall(again) as { hooks: { wrote: boolean } }).hooks.wrote).toBe(false);
+  });
+
   it('refuses on a machine that never installed', async () => {
     await expect(runRouterInstall({ refresh: true }, ctx(), deps())).rejects.toMatchObject({
       code: 'REFUSED',
@@ -387,6 +447,41 @@ describe('a settings file this writer will not touch', () => {
 });
 
 describe('the doctor this release registers', () => {
+  /**
+   * INFORMATIONAL: a custom agent that leaves the request tool out is named,
+   * with the line that would change it, and never counts against the machine.
+   * The file itself is only read.
+   */
+  it('names custom agents whose tools exclude the request tool, as a pass', async () => {
+    const fs = await import('node:fs/promises');
+    const { runRouterDoctor } = await import('./doctor');
+    await runRouterInstall({}, ctx(), deps());
+    const agents = join(home, '.claude', 'agents');
+    await fs.mkdir(agents, { recursive: true });
+    const reader = '---\nname: reader\ndescription: reads\ntools: Read, WebFetch\n---\nRead.\n';
+    await fs.writeFile(join(agents, 'reader.md'), reader);
+    await fs.writeFile(join(agents, 'free.md'), '---\nname: free\ndescription: all\n---\n');
+    const result = await runRouterDoctor(ctx(), {
+      homeDir: home,
+      cwd: home,
+      env: {},
+      which: () => true,
+      readMcp: async () => true,
+      fetchImpl: probe400,
+    }).catch((e: unknown) => e);
+    type Check = { name: string; status: string; required: boolean; detail: string };
+    const checks =
+      result instanceof CliError
+        ? (result.details as { checks: Check[] }).checks
+        : (result as { data: { checks: Check[] } }).data.checks;
+    const line = checks.find((c) => c.name === 'subagents');
+    expect(line).toMatchObject({ status: 'ok', required: false });
+    expect(line?.detail).toBe(
+      'reader is offered no paid lookups: add mcp__x402__request to tools: to allow paid lookups there',
+    );
+    expect(await fs.readFile(join(agents, 'reader.md'), 'utf8')).toBe(reader);
+  });
+
   it('checks the router wiring and prescribes no command the CLI lacks', async () => {
     const { runRouterDoctor } = await import('./doctor');
     await runRouterInstall({}, ctx(), deps());
@@ -398,6 +493,7 @@ describe('the doctor this release registers', () => {
       })) as typeof fetch;
     const result = await runRouterDoctor(ctx(), {
       homeDir: home,
+      cwd: home,
       env: {},
       which: () => true,
       readMcp: async () => true,
@@ -803,15 +899,8 @@ describe('tenjin update re-applies the install', () => {
     await fs.writeFile(settingsPath(), JSON.stringify(settings, null, 2) + '\n');
 
     await runRouterInstall(args, ctx(), deps());
-    const after = (await readSettings()).hooks as Record<string, { hooks: unknown[] }[]>;
-    expect(after.UserPromptSubmit).toHaveLength(1);
-    expect(after.UserPromptSubmit![0]!.hooks).toEqual([
-      { type: 'command', command: 'tenjin hook prompt', timeout: 5 },
-    ]);
-    expect(after.PreToolUse).toHaveLength(1);
-    expect(after.PreToolUse![0]!.hooks).toEqual([
-      { type: 'command', command: 'tenjin hook native', timeout: 5 },
-    ]);
+    // Every entry at 5 s, each once: rewritten in place, never appended beside.
+    expect((await readSettings()).hooks).toEqual(CURRENT_HOOKS);
   });
 
   it('stays in the project scope it was installed into, with no flag', async () => {
@@ -877,6 +966,57 @@ describe('tenjin update re-applies the install', () => {
         ? (out.details as { checks: { name: string; status: string }[] })
         : (out as { data: { checks: { name: string; status: string }[] } }).data;
     expect(checks.checks.find((c) => c.name === 'hooks')?.status).toBe('ok');
+  });
+
+  /**
+   * AN ALPHA INSTALL, BEFORE AND AFTER ITS REFRESH. Doctor names the entries
+   * it lacks, with the one command that adds them, and does not call its own
+   * native entry stale; after that command it is clean.
+   */
+  it("doctor names an alpha install's drift, and the refresh clears it", async () => {
+    const fs = await import('node:fs/promises');
+    const { runRouterDoctor } = await import('./doctor');
+    const cwd = join(home, 'project');
+    await fs.mkdir(join(cwd, '.claude'), { recursive: true });
+    await fs.writeFile(
+      join(cwd, '.mcp.json'),
+      JSON.stringify({ mcpServers: { x402: { command: 'tenjin', args: ['mcp'] } } }),
+    );
+    const path = join(cwd, '.claude', 'settings.json');
+    await fs.writeFile(path, JSON.stringify(alphaSettings(), null, 2) + '\n');
+    type Check = { name: string; status: string; detail: string; fix?: string };
+    const hooksCheck = async (): Promise<Check | undefined> => {
+      const out = await runRouterDoctor(ctx(), {
+        homeDir: home,
+        cwd,
+        project: true,
+        env: {},
+        which: () => true,
+        fetchImpl: probe400,
+      }).catch((e: unknown) => e);
+      const checks =
+        out instanceof CliError
+          ? (out.details as { checks: Check[] })
+          : (out as { data: { checks: Check[] } }).data;
+      return checks.checks.find((c) => c.name === 'hooks');
+    };
+
+    const before = await hooksCheck();
+    expect(before).toMatchObject({ status: 'warn', fix: 'Run `tenjin install --refresh`.' });
+    // The alpha's own native entry is current, so nothing is stale; only the
+    // entries this release adds are missing.
+    expect(before?.detail).not.toContain('stale');
+    expect(before?.detail).not.toContain('tenjin hook native');
+    expect(before?.detail).toContain('PostToolUse WebSearch|WebFetch → tenjin hook shortfall');
+    expect(before?.detail).toContain(
+      'PostToolUseFailure WebSearch|WebFetch → tenjin hook shortfall',
+    );
+    expect(before?.detail).toContain('PreToolUse Agent|Task → tenjin hook agent');
+    // The user's own entries are theirs, never drift.
+    expect(before?.detail).not.toContain('my-bash-guard');
+
+    await runRouterInstall({ refresh: true }, ctx(), deps({ cwd }));
+    expect(await hooksCheck()).toMatchObject({ status: 'ok' });
   });
 });
 
