@@ -32,6 +32,8 @@ import { writeFileAtomic } from '../lib/atomic-json';
 const PROGRESS_DIR = 'progress';
 /** The binding marker's prefix, so it can never be read back as a call record. */
 const BINDING_PREFIX = 'id-';
+/** A pre-call redirect's marker, keyed by the harness's `tool_use_id`. */
+const OFFER_PREFIX = 'offer-';
 /** The session's own liveness touch, likewise outside the call-record pattern. */
 const SESSION_FILE = 'session.json';
 /** Call records are named by a 64-hex digest and nothing else is read as one. */
@@ -180,6 +182,35 @@ export async function bindDecision(
     version: 1,
     at: now,
   });
+}
+
+/**
+ * ONE ROUTING ANSWER PER LOOKUP. The pre-call hook marks the native call it
+ * redirected, by the harness's own `tool_use_id`, and the after-call hook reads
+ * the mark before it asks again about the same call. Expires and is pruned like every
+ * other record here.
+ */
+export async function markOffered(
+  dataDir: string,
+  sessionId: string,
+  toolUseId: string,
+  now = Date.now(),
+): Promise<void> {
+  await write(join(sessionDir(dataDir, sessionId), `${OFFER_PREFIX}${digest(toolUseId)}.json`), {
+    version: 1,
+    at: now,
+  });
+}
+
+export async function wasOffered(
+  dataDir: string,
+  sessionId: string,
+  toolUseId: string,
+  now = Date.now(),
+): Promise<boolean> {
+  const path = join(sessionDir(dataDir, sessionId), `${OFFER_PREFIX}${digest(toolUseId)}.json`);
+  const stamp = await readStamp(path);
+  return stamp !== null && now - stamp.at <= EXPIRY_MS;
 }
 
 /**

@@ -21,7 +21,8 @@ vi.mock('node:fs/promises', async (importOriginal) => {
   };
 });
 
-const { runNativeHook, runPromptHook } = await import('./hooks');
+const { runDelegationHook, runNativeHook, runPromptHook, runShortfallHook } =
+  await import('./hooks');
 
 let dir: string;
 let repo: string;
@@ -46,34 +47,52 @@ async function setEnabled(enabled: boolean): Promise<void> {
   await writeFile(join(repo, '.tenjin', 'config.json'), JSON.stringify({ router: { enabled } }));
 }
 
-async function fireBoth(): Promise<number> {
+/** Every hook that reads the transcript: prompt, pre-call, shortfall and delegation. */
+async function fireAll(): Promise<number> {
   let calls = 0;
   const fetchImpl = (async () => {
     calls += 1;
     return new Response('{}', { status: 500, headers: { 'content-type': 'application/json' } });
   }) as typeof fetch;
-  const deps = { dataDir: dir, baseUrl: 'https://tenjin.sh', fetchImpl, warn: () => undefined };
+  const deps = {
+    dataDir: dir,
+    baseUrl: 'https://tenjin.sh',
+    fetchImpl,
+    homeDir: dir,
+    warn: () => undefined,
+  };
   const base = { session_id: 'sess-1', cwd: repo, transcript_path: transcript };
+  const search = { ...base, tool_name: 'WebSearch', tool_input: { query: 'btc price today' } };
   await runPromptHook({ ...base, prompt: 'btc price today' }, deps);
-  await runNativeHook(
-    { ...base, tool_name: 'WebSearch', tool_input: { query: 'btc price today' } },
+  await runNativeHook({ ...search, hook_event_name: 'PreToolUse' }, deps);
+  await runShortfallHook(
+    { ...search, hook_event_name: 'PostToolUse', tool_response: { results: [] } },
+    deps,
+  );
+  await runDelegationHook(
+    {
+      ...base,
+      hook_event_name: 'PreToolUse',
+      tool_name: 'Agent',
+      tool_input: { prompt: 'look up the btc price', subagent_type: 'general-purpose' },
+    },
     deps,
   );
   return calls;
 }
 
 describe('a hook in a directory where the router is off', () => {
-  it('never opens the transcript, on either hook', async () => {
+  it('never opens the transcript, on any hook', async () => {
     await setEnabled(false);
-    expect(await fireBoth()).toBe(0);
+    expect(await fireAll()).toBe(0);
     expect(opened.filter((path) => path === transcript)).toEqual([]);
   });
 
   // The control: the same events with the router on do open it, so the spy
   // above is watching the reader and not nothing.
-  it('opens it on both hooks when the router is on', async () => {
+  it('opens it on every hook when the router is on', async () => {
     await setEnabled(true);
-    expect(await fireBoth()).toBe(2);
-    expect(opened.filter((path) => path === transcript)).toHaveLength(2);
+    expect(await fireAll()).toBe(4);
+    expect(opened.filter((path) => path === transcript)).toHaveLength(4);
   });
 });

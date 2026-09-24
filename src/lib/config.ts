@@ -111,7 +111,7 @@ export type RouterContext = (typeof ROUTER_CONTEXTS)[number];
 
 /**
  * The router's own block, separate from the shelf's `hooks.*`: `enabled` is the
- * off switch both hooks and the `request` tool honour, and `context` is how
+ * off switch every router hook and the `request` tool honour, and `context` is how
  * much conversation a hook packet carries (`session`, up to six prior messages,
  * or `turn`, none). THE ONE SCHEMA for it: the global file validates it here,
  * and a project's `.tenjin/config.json` and `config.local.json` go through

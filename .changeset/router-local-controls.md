@@ -2,7 +2,7 @@
 'tenjin-cli': patch
 ---
 
-The router has an off switch and a context setting that both hooks and the
+The router has an off switch and a context setting that every router hook and the
 `request` tool honour. `tenjin config set router.enabled false` stops it on this
 machine, and `tenjin config set --project router.enabled false` stops it in one
 repository through a committed `.tenjin/config.json`; `--project --local` writes

@@ -32,13 +32,14 @@ describe('the request bodies', () => {
    * route reads it from `packet.pendingCall`, which the native hook sets and
    * the prompt hook does not.
    */
-  it.each([['wire-hook-request-prompt.json'], ['wire-hook-request-native.json']])(
-    'builds %s byte for byte',
-    (name) => {
-      const canonical = fixture(name);
-      expect(buildHookBody(canonical.packet as Packet)).toEqual(canonical);
-    },
-  );
+  it.each([
+    ['wire-hook-request-prompt.json'],
+    ['wire-hook-request-native.json'],
+    ['wire-hook-request-native-shortfall.json'],
+  ])('builds %s byte for byte', (name) => {
+    const canonical = fixture(name);
+    expect(buildHookBody(canonical.packet as Packet)).toEqual(canonical);
+  });
 
   it('tells the two hook bodies apart only by the pending call', () => {
     const prompt = fixture('wire-hook-request-prompt.json').packet as Packet;
@@ -50,6 +51,22 @@ describe('the request bodies', () => {
       expect(Buffer.byteLength(JSON.stringify(packet))).toBeLessThanOrEqual(MAX_PACKET_BYTES);
       expect(packet.historyStatus).toBe('ok');
     }
+  });
+
+  /**
+   * THE SHORTFALL RIDES BESIDE ITS CALL. `nativeOutcome` is valid only with a
+   * `pendingCall` and carries at least one field; the server refuses anything
+   * else, and a server that predates it refuses it outright, which the hook
+   * reads as silence.
+   */
+  it('carries a shortfall only beside the call it is about', () => {
+    const packet = fixture('wire-hook-request-native-shortfall.json').packet as Packet;
+    expect(packet.pendingCall).toEqual({
+      tool: 'WebFetch',
+      url: 'https://x.com/x402/status/1971234567890123456',
+    });
+    expect(packet.nativeOutcome).toEqual({ code: 402, bytes: 0 });
+    expect(Buffer.byteLength(JSON.stringify(packet))).toBeLessThanOrEqual(MAX_PACKET_BYTES);
   });
 
   it('builds the tool request byte for byte', () => {
@@ -67,6 +84,7 @@ describe('the request bodies', () => {
     for (const name of [
       'wire-hook-request-prompt.json',
       'wire-hook-request-native.json',
+      'wire-hook-request-native-shortfall.json',
       'wire-tool-request.json',
     ]) {
       expect(JSON.stringify(fixture(name))).not.toMatch(/billing|admission|payment/i);

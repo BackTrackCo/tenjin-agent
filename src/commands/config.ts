@@ -164,7 +164,7 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
   'team.publicFallback':
     'on=a team-shelf miss falls through to the public marketplace, off=team-only (public-only lookup stages are dropped)',
   'router.enabled':
-    'false stops both router hooks and the request tool; --project sets it for this repository, --project --local for you alone in it',
+    'false stops every router hook and the request tool; --project sets it for this repository, --project --local for you alone in it',
   'router.context':
     'session=a hook packet carries up to six prior messages, turn=the current turn only; --project and --local as for router.enabled',
 };
