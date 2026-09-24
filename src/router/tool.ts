@@ -1,8 +1,4 @@
-import { createHash } from 'node:crypto';
-import { opendir, rm } from 'node:fs/promises';
-import { join } from 'node:path';
 import { runPay, type AdvertisedTerms, type PayDeps } from '../commands/pay';
-import { writeFileAtomic } from '../lib/atomic-json';
 import { CliError } from '../lib/errors';
 import { toMoney } from '../lib/money';
 import { mask } from '../lib/redact';
@@ -189,7 +185,7 @@ export async function runRequestTool(
       ...(contract.arguments !== undefined ? { parameters: contract.arguments } : {}),
       cost: costLines(providerAtomic),
       ...(note !== undefined ? { note } : {}),
-      result: await keepResult(data.bodyText ?? '', deps.ctx.dataDir),
+      result: data.bodyText ?? '',
       providerContentUntrusted: true,
     };
     // UNVERIFIED IS NOT FULFILLED. A body that missed its success rule, or
@@ -197,9 +193,9 @@ export async function runRequestTool(
     // failure the rule exists to catch, and a caveat inside a `fulfilled`
     // envelope does not reach code that branches on the status: a provider
     // could pad a broken answer past the validation limit and have it read as
-    // a checked, paid result. The body is still delivered, capped like any
-    // other with the whole of it kept on disk, because the money moved and
-    // withholding the product would be a second loss on top of the first.
+    // a checked, paid result. The body still rides along whole, because the
+    // money moved and withholding the product would be a second loss on top
+    // of the first.
     const shown = {
       provider: built.url,
       ...paramsOf(contract),
@@ -245,78 +241,6 @@ export async function runRequestTool(
       ...(detail.settlement !== undefined ? { settlement: detail.settlement } : {}),
       ...(detail.diagnosis !== undefined ? { diagnosis: detail.diagnosis } : {}),
     });
-  }
-}
-
-/**
- * THE MOST OF A PROVIDER BODY THE MODEL IS HANDED, in UTF-8 bytes. The body
- * rides in the tool result twice (the JSON text block and `structuredContent`),
- * and Claude Code refuses an MCP result past 25,000 tokens by default: a
- * 633,016-character page read went over, and the model never saw what it paid
- * for (tenjin-agent#397). 32 KiB is about 8,000 tokens of prose, so both copies
- * plus JSON escaping stay well inside that limit while still carrying a full
- * page's worth of text.
- */
-export const RESULT_CAP_BYTES = 32 * 1024;
-
-/** Where an over-cap body is kept, under the data dir. */
-export const RESULTS_DIR = 'results';
-/** A kept body is removed on a later write once it is this old. */
-export const RESULT_KEEP_MS = 24 * 60 * 60_000;
-/** The prune scans at most this many entries, as `pruneProgress` does. */
-const MAX_KEPT_SCAN = 256;
-const KEPT_NAME = /^(\d+)-[a-f0-9]{12}\.txt$/;
-
-/** The body, cut to {@link RESULT_CAP_BYTES} on a character boundary, with a
- *  tail that says it was cut, how much there was and, when it was kept, where. */
-export function capResult(body: string, fullPath?: string): string {
-  const bytes = Buffer.from(body, 'utf8');
-  if (bytes.length <= RESULT_CAP_BYTES) return body;
-  let cut = RESULT_CAP_BYTES;
-  // Back off to the start of a character: a UTF-8 continuation byte is 10xxxxxx.
-  while (cut > 0 && (bytes[cut]! & 0xc0) === 0x80) cut--;
-  const where = fullPath !== undefined ? `; full body at ${fullPath}` : '';
-  return `${bytes.subarray(0, cut).toString('utf8')}\n\n[truncated at ${cut} bytes of ${bytes.length}${where}]`;
-}
-
-/**
- * THE CAP IS ON WHAT THE MODEL IS HANDED, NOT ON WHAT WAS BOUGHT. A body past
- * {@link RESULT_CAP_BYTES} is written whole to `<dataDir>/results/`, named by
- * the time and a hash of the body (never by anything the user or provider
- * wrote), and the tail names the file so the model can read the rest. A failed
- * write costs only the path: the capped body is still returned. Bodies under
- * the cap write nothing.
- */
-export async function keepResult(body: string, dataDir: string, now = Date.now()): Promise<string> {
-  if (Buffer.byteLength(body, 'utf8') <= RESULT_CAP_BYTES) return body;
-  const directory = join(dataDir, RESULTS_DIR);
-  const hash = createHash('sha256').update(body).digest('hex').slice(0, 12);
-  const path = join(directory, `${now}-${hash}.txt`);
-  try {
-    await writeFileAtomic(path, body, { mode: 0o600, dirMode: 0o700 });
-  } catch {
-    return capResult(body);
-  }
-  await pruneResults(directory, now);
-  return capResult(body, path);
-}
-
-/** Remove kept bodies past {@link RESULT_KEEP_MS}; the same bounded,
- *  best-effort sweep as `pruneProgress`, run from the writer. */
-async function pruneResults(directory: string, now: number): Promise<void> {
-  try {
-    const dir = await opendir(directory);
-    let count = 0;
-    for await (const entry of dir) {
-      if (++count > MAX_KEPT_SCAN) return;
-      const at = KEPT_NAME.exec(entry.name)?.[1];
-      if (!entry.isFile() || at === undefined) continue;
-      if (now - Number(at) > RESULT_KEEP_MS) {
-        await rm(join(directory, entry.name), { force: true }).catch(() => undefined);
-      }
-    }
-  } catch {
-    // Housekeeping only. Nothing downstream depends on it having run.
   }
 }
 

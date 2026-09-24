@@ -6,7 +6,14 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { testWalletProvider } from '../lib/read-test-utils';
 import type { SpendAuthorization, SpendAuthorizer } from '../lib/wallet';
-import { buildRouterMcpServer } from './mcp';
+import { buildRouterMcpServer, MAX_RESULT_SIZE_CHARS, MAX_RESULT_SIZE_KEY } from './mcp';
+
+/** The envelope a call returned: the JSON text block after the summary line. */
+function envelopeOf(called: Record<string, unknown>): unknown {
+  const blocks = called['content'] as { type: string; text: string }[];
+  expect(blocks).toHaveLength(2);
+  return JSON.parse(blocks[1]!.text);
+}
 
 let dir: string;
 beforeEach(async () => {
@@ -81,11 +88,17 @@ describe('the router MCP server', () => {
     try {
       const tools = await client.listTools();
       expect(tools.tools.map((t) => t.name)).toEqual(['request']);
+      // The harness reads its inline-result threshold from the listed tool.
+      expect(tools.tools[0]!._meta).toEqual({
+        [MAX_RESULT_SIZE_KEY]: MAX_RESULT_SIZE_CHARS,
+      });
       const called = await client.callTool({ name: 'request', arguments: { query: 'weather' } });
       // A `native` decision is a routing outcome delivered, not a tool failure:
       // the MCP error flag stays down and the status carries the fact.
       expect(called.isError).toBe(false);
-      expect(called.structuredContent).toMatchObject({
+      // The envelope rides once, as the JSON text block after the summary.
+      expect(called.structuredContent).toBeUndefined();
+      expect(envelopeOf(called)).toMatchObject({
         status: 'native',
         reason: 'Your own tools cover this.',
         nextStep: 'Continue with your own tools. Nothing was bought.',
@@ -259,7 +272,7 @@ describe('a free answer on a machine with no wallet', () => {
     try {
       const called = await client.callTool({ name: 'request', arguments: { query: 'weather' } });
       expect(called.isError).toBe(false);
-      expect(called.structuredContent).toMatchObject({ status: 'native' });
+      expect(envelopeOf(called)).toMatchObject({ status: 'native' });
     } finally {
       await client.close();
       await server.close();
