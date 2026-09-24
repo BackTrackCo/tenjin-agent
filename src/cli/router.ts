@@ -40,6 +40,19 @@ export function registerRouter(reg: Registration): void {
         });
       });
   }
+  // A hook name this binary does not know exits 0 with nothing on stdout, the
+  // same "no opinion" every handler gives on a bad event. The alternative is
+  // commander's USAGE exit 2, which Claude Code reads as a blocking hook
+  // failure: a settings file written by a newer `tenjin install` (a new hook
+  // arm, or a source build ahead of the npm release) then fails EVERY call of
+  // the tool it matches, on every session, until the binary catches up. Seen
+  // 2026-09-23 when #387's `Agent|Task` arm met an alpha.16 binary.
+  hook
+    .command('unknown', { hidden: true, isDefault: true })
+    .argument('[args...]')
+    .allowUnknownOption()
+    .allowExcessArguments()
+    .action(() => {});
 
   leaf(INTEGRATION, 'mcp', 'run the local stdio MCP server')
     .description(
