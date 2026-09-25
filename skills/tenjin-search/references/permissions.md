@@ -59,7 +59,7 @@ Offer the pay line only when a `tenjin pay` invocation is what got denied, and
 say what it opens: unattended x402 payments at ANY endpoint the origin gate
 allows, with no library dedupe, so a looping agent pays on every call. Manual
 pay always needs consent for the live quote; `--yes` records prior explicit
-user consent. Lookup failures or differences from an exact registry listing
+user consent. Registry request failures or differences from an exact registry listing
 also require `--ignore-warnings`; an unlisted endpoint needs no warning flag.
 Never use manual pay as an autonomous workaround for a router refusal.
 
