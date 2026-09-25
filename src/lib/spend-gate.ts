@@ -18,7 +18,7 @@ import type { CommandContext } from '../context';
 
 export interface SpendGateInput {
   ctx: CommandContext;
-  mode?: PaymentMode;
+  mode: PaymentMode;
   authorizer: SpendAuthorizer;
   amountAtomic: bigint;
   /** The policy's creator identity (a handle for buy, the target host for pay). */
@@ -48,7 +48,7 @@ export interface SpendGateInput {
 export async function gateSpend(input: SpendGateInput): Promise<string | undefined> {
   const { authorizer, amountAtomic } = input;
   const authorization = await authorizer.authorize({
-    mode: input.mode ?? 'automatic',
+    mode: input.mode,
     amountAtomic,
     creator: input.creator,
     ...(input.maxPriceAtomic !== undefined ? { maxPriceAtomic: input.maxPriceAtomic } : {}),

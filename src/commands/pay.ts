@@ -495,7 +495,7 @@ async function executePay(
       ? 'Payment was not accepted by the endpoint.'
       : `The endpoint answered ${paid.status} on the paid request; whether it settled is unknown.`,
     {
-      fix: 'The signed payment already left and is counted against the session budget; the endpoint may still settle it. Do not simply retry: each attempt signs a fresh authorization. Verify the endpoint (and this listing, if Bazaar) before paying again.',
+      fix: 'The signed payment already left and is recorded as transmitted exposure; the endpoint may still settle it. Do not simply retry: each attempt signs a fresh authorization. Verify the endpoint (and this listing, if Bazaar) before paying again.',
       // The amount rides on the failure so a caller can report what is at risk
       // rather than a zero. Settlement is unknown by construction here.
       details: {

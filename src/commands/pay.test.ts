@@ -652,9 +652,9 @@ describe('runPay, bazaar lane', () => {
   // The adversarial-money case the budget accounting exists for: a hostile
   // registry-listed seller answers 402 AFTER receiving each signature. The
   // authorization it holds is a bearer instrument it can still settle, so the
-  // session budget must count the spend; releasing it here let every retry
+  // ledger must record the exposure; releasing it here let every retry
   // sign a fresh authorization while the ledger counted zero of them.
-  it('a hostile seller rejecting the paid leg still burns the session budget', async () => {
+  it('a hostile seller rejecting the paid leg still records transmitted exposure', async () => {
     await writeConfig();
     stubRegistry(() => json(200, registryListing(FOREIGN_URL, LIVE_ACCEPT)));
     const fixture = buildPaymentRequired();
@@ -675,7 +675,7 @@ describe('runPay, bazaar lane', () => {
       expect(err).toBeInstanceOf(CliError);
       expect((err as CliError).code).toBe('PAYMENT_FAILED');
       // The coaching must not send an agent around the loop that compounds it.
-      expect((err as CliError).fix).toContain('counted against the session budget');
+      expect((err as CliError).fix).toContain('recorded as transmitted exposure');
       expect((err as CliError).fix).not.toMatch(/then retry/i);
     }
     expect(calls[1]!.headers['payment-signature']).toBeDefined();
@@ -1303,6 +1303,7 @@ describe('runPay, a transport failure after the payment was transmitted', () => 
     expect((err as CliError).fix).not.toMatch(/nothing was (sent|paid)/i);
     expect((err as CliError).fix).toContain('authorization was transmitted');
     expect((err as CliError).fix).toContain('settlement is unknown');
+    expect((err as CliError).fix).toContain('recorded as transmitted exposure');
     // The transport's remedy still rides along, after the leg's own sentence.
     expect((err as CliError).fix).toContain('--max-http-header-size');
     expect(authorizer.commit).toHaveBeenCalled();

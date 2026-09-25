@@ -202,17 +202,16 @@ export const OPT_IN_ALLOWLIST: readonly AllowlistEntry[] = [
     note:
       'SPENDS USDC on Base, unrefundably. This authorizes UNATTENDED purchases: ' +
       '`--yes` is an ordinary flag on the same allowlisted verb and it clears the ' +
-      'confirm gate only. The daily limit remains a hard gate: sessionBudget 0 means no positive payments; ' +
-      'sessionBudget none explicitly removes the ceiling. maxAutoSpend is an automatic approval threshold. ' +
-      'This permission never raises a spend cap. Set a daily limit with `tenjin config set sessionBudget <usd>` before granting unattended spending.',
+      'confirm gate only. Manual purchases do not obey maxAutoSpend or sessionBudget; those limits apply only to automatic router spending. ' +
+      'This permission never raises a spend cap, but those automatic caps do not bound this verb. Use --max-price for an explicit per-purchase ceiling and require consent for the quoted purchase.',
   },
   {
     rule: 'Bash(tenjin pay:*)',
     command: 'tenjin pay',
     note:
       'SPENDS USDC on Base, unrefundably. Only for explicit user-requested payments with consent for the live quote; never an autonomous router-refusal workaround. Automatic router limits do not apply. Registry lookup failures or listed-term mismatches require --ignore-warnings ' +
-      'for that invocation, and --yes confirms payment only. Both still obey sessionBudget, --max-price, ' +
-      'balance and destination checks. maxAutoSpend controls automatic approval. Every paid call can spend again.',
+      'for that invocation, and --yes confirms payment only. Both still obey an explicit --max-price, ' +
+      'balance and destination checks. maxAutoSpend and sessionBudget apply only to automatic router spending. Every paid call can spend again.',
   },
 ];
 
@@ -330,7 +329,7 @@ export const NEVER_ALLOWLISTED: readonly ExcludedVerb[] = [
   {
     command: 'tenjin config set',
     reason:
-      'Can raise maxAutoSpend / sessionBudget / confirm, i.e. widen the agent’s own spend policy — ' +
+      'Can raise maxAutoSpend / sessionBudget, i.e. widen the agent’s own spend policy — ' +
       'and, through shelfBypassSecret + baseUrl, put the machine in team mode, where a publish ' +
       'skips the scan’s warn tier (except secret-assignment, and hex32-value, the warn form a ' +
       'block-tier check demotes to) and prices at 0. It also writes ' +
