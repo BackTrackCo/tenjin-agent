@@ -10,4 +10,4 @@ pnpm changeset
 
 Pick the bump type and write a summary; commit the generated `.md`. The release
 workflow (`.github/workflows/release.yml`) consumes these to open a version PR
-and then publish to npm. See the Release section of the top-level `README.md`.
+and then publish to npm. See [RELEASING.md](../RELEASING.md).

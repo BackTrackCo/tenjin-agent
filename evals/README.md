@@ -17,11 +17,12 @@ evals/
     redaction.py        # strips file-content tool results before they are stored or graded
     scoring_selftest.py # pure tests for the two gates that keep broken runs unscored
   tenjin-search/
-    trigger-eval.json   # 20 queries, should_trigger true/false, for description tuning
+    trigger-eval.json   # 22 queries, should_trigger true/false, for description tuning
     trigger-eval-defer.json # 4 no-CLI queries: does this skill stand down for the hosted one
     evals.json          # 6 output cases with expectations
     fixtures/           # bodies seeded into a case's workspace via its `files`
   tenjin-publish/
+    trigger-eval.json   # 20 queries, 10 positive / 10 negative
     evals.json          # 5 output cases with expectations
   tenjin/
     trigger-eval.json   # 20 queries for the zero-install hosted skill
@@ -184,7 +185,7 @@ states it has no CLI. Read a number from this file only against the install set 
 under, and prefer the three-skill one.
 
 Being all-negative, it is a probe rather than a benchmark: a description that fires at nothing
-would ace it. It is only meaningful read next to `trigger-eval.json`'s ten positives, which is
+would ace it. It is only meaningful read next to `trigger-eval.json`'s eleven positives, which is
 what `src/evals-fixtures.test.ts` enforces by requiring the pair.
 
 ## Running them
@@ -478,7 +479,7 @@ measured run to argue from.
 The discrimination in the trigger set is carried mostly by the negatives. The positives lean on
 the gate vocabulary the description itself uses ("maintained benchmark", "tested migration
 report"), which is deliberate, since those are the words a real asker uses too, but it means a
-description tuned to fire broadly still scores well on them. The ten negatives, each failing
+description tuned to fire broadly still scores well on them. The eleven negatives, each failing
 exactly one gate while keeping a positive's subject matter, are where a lazily tuned
 description loses. Read the negative pass rate first.
 
@@ -492,8 +493,8 @@ Chasing it produces a description that overtriggers on the negatives.
 holdout.** skill-creator's loop defaults to `--holdout 0.4` because it tunes; this runner only
 scores, and the tuning happens in a person's head between two runs, so a split here would hold
 out queries from a fitting process it cannot see. That makes a holdout the wrong instrument
-rather than a missing one, and it makes the label mandatory: `tenjin-search`'s 20/20 is a fit to
-a fixed twenty, not evidence of generalisation. The evidence that would generalise is a pass on
+rather than a missing one, and it makes the label mandatory: a full score on `tenjin-search`'s
+set is a fit to a fixed twenty-two, not evidence of generalisation. The evidence that would generalise is a pass on
 queries written after the description, so write the next set's queries before reading this one's
 results, and report any number from a set that shaped the description as in-sample when you
 quote it. The deferral probe does not fill that gap either: it is a regression test for a
