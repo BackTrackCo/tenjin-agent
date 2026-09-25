@@ -8,7 +8,7 @@ import type { SpendAuthorizer, WalletProvider } from '../lib/wallet';
 import type { TenjinSigner } from '../lib/wallet/provider';
 import type { CommandContext } from '../context';
 import { requestDecision, type DecisionContract, type DecisionDiagnostics } from './decision';
-import { openLookupFooter } from './progress';
+import { markDelivered, openLookupFooter } from './progress';
 import { routerSettings } from './settings';
 
 /**
@@ -214,6 +214,9 @@ export async function runRequestTool(
       };
     }
     await footer.done('fulfilled', shown);
+    // ONLY A FULFILLED LOOKUP DELIVERS the redirect that named its id, so the
+    // pre-call hook routes the next native call again; anything less lets it run.
+    if (args.id !== undefined && args.id.length > 0) await markDelivered(deps.ctx.dataDir, args.id);
     return {
       isError: false,
       summary: `Fulfilled by ${base.supplier} · ${base.cost.join(' · ')}`,

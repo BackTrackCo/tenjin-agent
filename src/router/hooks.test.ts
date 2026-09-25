@@ -16,7 +16,8 @@ import {
 import { MCP_SERVER_NAME, REQUEST_TOOL } from './names';
 import { runHookCommand } from './hook-command';
 import { ROUTER_PATH } from './decision';
-import { renderProgress, resolveProgressSession, sessionDir } from './progress';
+import { markDelivered, renderProgress, resolveProgressSession, sessionDir } from './progress';
+import { runRequestTool } from './tool';
 
 /** What `tenjin install` writes (`ROUTER_DEFAULTS`): 0.25 a call, auto. */
 const ROUTER_POLICY = { maxAutoSpend: '250000', sessionBudget: '5000000', confirm: 'above:250000' };
@@ -109,6 +110,11 @@ const withHint = (hint: string) => ({ ...EXECUTE, decision: { ...EXECUTE.decisio
 
 /** The same line as the host sees it: attributed, and naming the real tool. */
 const SEEN = HINT_SOURCE + ': ' + HINT.replace('request({', 'mcp__x402__request({');
+/** The one sentence this client adds, to a pre-call redirect only. */
+const ONE_BLOCK =
+  'If this does not cover it, search again: you will not be redirected twice in a row.';
+/** A pre-call redirect's reason: the line as the host sees it, then that sentence. */
+const DENIED = `${SEEN} ${ONE_BLOCK}`;
 
 const EXECUTE = {
   schemaVersion: 1,
@@ -625,7 +631,7 @@ describe('the pre-call hook', () => {
         permissionDecision: 'deny',
         permissionDecisionReason:
           `${HINT_SOURCE}: ${OFFER} Call mcp__x402__request({query: "https://example.test/spec", ` +
-          `id: "k3f9-abcd"}) instead; native tools stay allowed for anything else.`,
+          `id: "k3f9-abcd"}) instead; native tools stay allowed for anything else. ${ONE_BLOCK}`,
       },
     });
     // Main's body exactly: the pending call rides in the packet, and nothing
@@ -754,9 +760,96 @@ describe('the pre-call hook', () => {
       hookSpecificOutput: {
         hookEventName: 'PreToolUse',
         permissionDecision: 'deny',
-        permissionDecisionReason: SEEN,
+        permissionDecisionReason: DENIED,
       },
     });
+  });
+});
+
+/**
+ * NEVER BLOCKED TWICE IN A ROW. A redirect whose lookup does not deliver sends
+ * the agent back to search, and a second deny there is a loop: so the next
+ * native call runs unasked, and the one after it is routed as usual.
+ */
+describe('never blocked twice in a row', () => {
+  const DENY = { hookSpecificOutput: { permissionDecision: 'deny' } };
+
+  /** `request` as the redirected agent calls it. Only a lookup that stops
+   *  before payment runs here; tool.test.ts has the paid legs. */
+  function lookup(fetchImpl: typeof fetch): ReturnType<typeof runRequestTool> {
+    const sink = { write: () => true } as unknown as NodeJS.WritableStream;
+    return runRequestTool(
+      { query: 'https://example.test/spec', id: 'k3f9-abcd' },
+      {
+        ctx: {
+          flags: { json: true, timeout: 5000, baseUrl: BASE },
+          dataDir: dir,
+          io: { stdout: sink, stderr: sink, isTTY: false },
+        },
+        cwd: dir,
+        authorizer: {} as never,
+        fetchImpl,
+      },
+    );
+  }
+
+  it('lets the next call run, unasked, when nothing was called in between', async () => {
+    const { fetchImpl, calls } = router(withHint(PRECALL_HINT));
+    const deps = { dataDir: dir, baseUrl: BASE, fetchImpl };
+    const first = await runNativeHook(await preCall('https://example.test/spec'), deps);
+    expect(first.response).toMatchObject(DENY);
+    const second = await runNativeHook(await preCall('https://example.test/spec'), deps);
+    expect(second).toEqual({ response: null, redirectUndelivered: true });
+    expect(calls).toHaveLength(1);
+  });
+
+  it('lets the next call run after a lookup that failed, then routes the one after', async () => {
+    const { fetchImpl, calls } = router(withHint(PRECALL_HINT));
+    const deps = { dataDir: dir, baseUrl: BASE, fetchImpl };
+    expect(
+      (await runNativeHook(await preCall('https://example.test/spec'), deps)).response,
+    ).toMatchObject(DENY);
+    const failed = await lookup(router({ error: { code: 'nope', message: 'no' } }, 503).fetchImpl);
+    expect(failed.envelope.status).toBe('failed');
+
+    const second = await runNativeHook(await preCall('https://example.test/spec'), deps);
+    expect(second).toEqual({ response: null, redirectUndelivered: true });
+    const third = await runNativeHook(await preCall('https://example.test/spec'), deps);
+    expect(third.response).toMatchObject(DENY);
+    expect(calls).toHaveLength(2);
+  });
+
+  it('routes the next call as usual once the lookup was fulfilled', async () => {
+    const { fetchImpl, calls } = router(withHint(PRECALL_HINT));
+    const deps = { dataDir: dir, baseUrl: BASE, fetchImpl };
+    expect(
+      (await runNativeHook(await preCall('https://example.test/spec'), deps)).response,
+    ).toMatchObject(DENY);
+    // What `request` does on `fulfilled`; tool.test.ts pins that it does.
+    await markDelivered(dir, 'k3f9-abcd');
+    const second = await runNativeHook(await preCall('https://example.test/spec'), deps);
+    expect(second.response).toMatchObject(DENY);
+    expect(calls).toHaveLength(2);
+  });
+
+  it('leaves another session to be routed as usual', async () => {
+    const { fetchImpl, calls } = router(withHint(PRECALL_HINT));
+    const deps = { dataDir: dir, baseUrl: BASE, fetchImpl };
+    expect(
+      (await runNativeHook(await preCall('https://example.test/spec'), deps)).response,
+    ).toMatchObject(DENY);
+    const other = await transcriptFor([
+      { type: 'user', sessionId: 'sess-2', message: { content: 'please read the spec' } },
+    ]);
+    const elsewhere = await runNativeHook(
+      await preCall('https://example.test/spec', 'WebFetch', {
+        session_id: 'sess-2',
+        transcript_path: other,
+      }),
+      deps,
+    );
+    expect(elsewhere.response).toMatchObject(DENY);
+    expect(calls).toHaveLength(2);
   });
 });
 
@@ -1685,7 +1778,7 @@ describe('a subagent', () => {
       hookSpecificOutput: {
         hookEventName: 'PreToolUse',
         permissionDecision: 'deny',
-        permissionDecisionReason: SEEN,
+        permissionDecisionReason: DENIED,
       },
     });
   });

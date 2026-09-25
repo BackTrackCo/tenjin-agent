@@ -26,10 +26,12 @@ import {
   bindDecision,
   markOffered,
   newCallId,
+  noteRedirect,
   noteSession,
   pruneProgress,
   pruneSessions,
   sessionDir,
+  takeUndelivered,
   wasOffered,
   writeProgress,
 } from './progress';
@@ -255,6 +257,10 @@ export function toolNamed(hint: string): string {
 function attributed(hint: string): string {
   return `${HINT_SOURCE}: ${toolNamed(hint)}`;
 }
+
+/** This client's one sentence on a redirect: the promise {@link runNativeHook} keeps. */
+const ONE_BLOCK =
+  'If this does not cover it, search again: you will not be redirected twice in a row.';
 
 /** Where the offer sits after the free tool came back short. */
 function shortfallOffer(tool: 'WebSearch' | 'WebFetch', hint: string): string {
@@ -551,6 +557,8 @@ export interface NativeHookOutcome {
   withheld?: true;
   /** No router call at all: the subagent is not known to have the request tool. */
   noRequestTool?: true;
+  /** No router call at all: the session's last redirect has not delivered. */
+  redirectUndelivered?: true;
 }
 
 export interface ShortfallHookOutcome extends NativeHookOutcome {
@@ -657,24 +665,34 @@ async function routeNativeCall(
  * and the after-call arm can still offer.
  *
  * A redirect leaves a mark under the call's `tool_use_id`, so the after-call
- * arm never offers on that same call.
+ * arm never offers on that same call, and becomes the session's last redirect.
+ *
+ * NEVER BLOCKED TWICE IN A ROW. While that last redirect is undelivered (its
+ * lookup failed, stopped short of `fulfilled`, or was never called), the next
+ * native call runs with no router call at all, and consumes it; the call after
+ * that is routed as usual. A delivered one changes nothing.
  */
 export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<NativeHookOutcome> {
   const event = decodeEvent(raw);
   if (event?.kind !== 'native' || event.pending === null) return { response: null };
+  if (await takeUndelivered(deps.dataDir, event.sessionId, deps.now?.())) {
+    return { response: null, redirectUndelivered: true };
+  }
   const routed = await routeNativeCall(event, event.pending, deps);
   if (routed.offer === null) return routed.outcome;
   if (event.toolUseId !== undefined) {
     await markOffered(deps.dataDir, event.sessionId, event.toolUseId, deps.now?.());
   }
+  await noteRedirect(deps.dataDir, event.sessionId, routed.offer.id, deps.now?.());
   return {
     response: {
       hookSpecificOutput: {
         hookEventName: 'PreToolUse',
         permissionDecision: 'deny',
-        // THE SERVER'S LINE, attributed and tool-named, and nothing else. It
-        // already carries the id and the exact search or URL that was denied.
-        permissionDecisionReason: attributed(routed.offer.hint),
+        // THE SERVER'S LINE, attributed and tool-named, then this client's one
+        // sentence. The line already carries the id and the exact search or URL
+        // that was denied.
+        permissionDecisionReason: `${attributed(routed.offer.hint)} ${ONE_BLOCK}`,
       },
     },
     action: 'execute',

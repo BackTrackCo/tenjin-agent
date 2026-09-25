@@ -9,7 +9,13 @@ import type { CommandContext } from '../context';
 import { runPay } from '../commands/pay';
 import { runRequestTool } from './tool';
 import { ROUTER_PATH } from './decision';
-import { bindDecision, noteSession, renderProgress } from './progress';
+import {
+  bindDecision,
+  noteRedirect,
+  noteSession,
+  renderProgress,
+  takeUndelivered,
+} from './progress';
 
 // Pass-through, so a refusal's typed details stay observable after the tool
 // folds the error into its envelope.
@@ -527,6 +533,54 @@ describe('what the tool leaves for the status line', () => {
     expect(result.isError).toBe(false);
     expect(await renderProgress(dir, 'sess-1')).toBe('x402 · ready');
     expect(await renderProgress(dir, 'sess-2')).toBe('x402 · ready');
+  });
+});
+
+/**
+ * NEVER BLOCKED TWICE IN A ROW, the tool's half: only a `fulfilled` lookup
+ * delivers the pre-call redirect that named its id. Anything less leaves it
+ * undelivered, and the hook lets the next native call run.
+ */
+describe('the redirect a lookup answers', () => {
+  const RULE = { type: 'object', properties: { data: { type: 'object' } }, required: ['data'] };
+  it.each([
+    ['fulfilled', [{ url: ROUTER, status: 200, body: decision() }, ...providerLegs()]],
+    [
+      'unverified',
+      [
+        {
+          url: ROUTER,
+          status: 200,
+          body: decision({ contract: contract({ resultSchema: RULE }) }),
+        },
+        ...providerLegs({ error: 'rate limited' }),
+      ],
+    ],
+    ['failed', [{ url: ROUTER, status: 503, body: { error: { code: 'nope', message: 'no' } } }]],
+  ] as const)('is delivered only by a fulfilled lookup: %s', async (status, legs) => {
+    await noteSession(dir, 'sess-1');
+    await bindDecision(dir, 'sess-1', 'k3f9-abcd');
+    await noteRedirect(dir, 'sess-1', 'k3f9-abcd');
+    const { fetchImpl } = net([...legs]);
+    const result = await runRequestTool(
+      { query: 'BTC and ETH price', id: 'k3f9-abcd' },
+      deps(fetchImpl),
+    );
+    expect(result.envelope.status).toBe(status);
+    expect(await takeUndelivered(dir, 'sess-1')).toBe(status !== 'fulfilled');
+  });
+
+  it('never delivers a later redirect that named another id', async () => {
+    await noteSession(dir, 'sess-1');
+    await bindDecision(dir, 'sess-1', 'k3f9-abcd');
+    await noteRedirect(dir, 'sess-1', 'a-later-one');
+    const { fetchImpl } = net([{ url: ROUTER, status: 200, body: decision() }, ...providerLegs()]);
+    const result = await runRequestTool(
+      { query: 'BTC and ETH price', id: 'k3f9-abcd' },
+      deps(fetchImpl),
+    );
+    expect(result.envelope.status).toBe('fulfilled');
+    expect(await takeUndelivered(dir, 'sess-1')).toBe(true);
   });
 });
 

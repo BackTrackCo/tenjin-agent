@@ -12,7 +12,9 @@ import { writeFileAtomic } from '../lib/atomic-json';
  * decision, the spend policy or the paying leg; every write is best effort and
  * every failure is swallowed, so a full disk or a read-only data dir loses the
  * footer and changes no routing or payment outcome. That is the whole contract
- * this module has to keep.
+ * this module has to keep. Two markers are read back by the hooks, the offer
+ * mark and the last redirect, and both only ever make a hook say less: losing
+ * either routes a call exactly as a session with no record would.
  *
  * KEYED TO THE SESSION, NEVER GUESSED FROM IT. A record lives under the SHA-256
  * of the harness's own `session_id`, so the renderer for one session cannot see
@@ -36,6 +38,8 @@ const BINDING_PREFIX = 'id-';
 const OFFER_PREFIX = 'offer-';
 /** The session's own liveness touch, likewise outside the call-record pattern. */
 const SESSION_FILE = 'session.json';
+/** The session's last pre-call redirect: one file, and the last write wins. */
+const REDIRECT_FILE = 'redirect.json';
 /** Call records are named by a 64-hex digest and nothing else is read as one. */
 const CALL_FILE_RE = /^[a-f0-9]{64}\.json$/;
 
@@ -82,6 +86,12 @@ interface SavedProgress extends Stamp {
   parameters?: string;
   /** What the provider was paid, as USD. */
   price?: string;
+}
+
+/** Which decision the last redirect named, by digest, and whether it delivered. */
+interface SavedRedirect extends Stamp {
+  id: string;
+  delivered: boolean;
 }
 
 export interface ProgressStep {
@@ -211,6 +221,60 @@ export async function wasOffered(
   const path = join(sessionDir(dataDir, sessionId), `${OFFER_PREFIX}${digest(toolUseId)}.json`);
   const stamp = await readStamp(path);
   return stamp !== null && now - stamp.at <= EXPIRY_MS;
+}
+
+/**
+ * NEVER BLOCKED TWICE IN A ROW. The pre-call hook records each redirect as the
+ * session's last one, `request` marks it delivered once the lookup it named is
+ * fulfilled, and the next native call that finds it undelivered runs unrouted
+ * ({@link takeUndelivered}). Without it, a lookup that fails sends the agent
+ * back to search, and the same deny meets it there.
+ */
+export async function noteRedirect(
+  dataDir: string,
+  sessionId: string,
+  decisionId: string,
+  now = Date.now(),
+): Promise<void> {
+  const saved: SavedRedirect = { version: 1, at: now, id: digest(decisionId), delivered: false };
+  await write(join(sessionDir(dataDir, sessionId), REDIRECT_FILE), saved);
+}
+
+/** The lookup this id named was fulfilled. Resolved the way the footer is, and
+ *  written only over a last redirect that carried this same id. */
+export async function markDelivered(
+  dataDir: string,
+  decisionId: string,
+  now = Date.now(),
+): Promise<void> {
+  const directory = await resolveProgressSession(dataDir, { id: decisionId, now }).catch(
+    () => null,
+  );
+  if (directory === null) return;
+  const path = join(directory, REDIRECT_FILE);
+  const last = await readRedirect(path);
+  if (last === null || last.id !== digest(decisionId)) return;
+  await write(path, { ...last, delivered: true });
+}
+
+/**
+ * True, once, when the session's last redirect is live and undelivered. The
+ * record is REMOVED, so routing resumes on the call after this one, and only
+ * the caller whose removal succeeds gets true: two parallel calls cannot both
+ * skip on one redirect.
+ */
+export async function takeUndelivered(
+  dataDir: string,
+  sessionId: string,
+  now = Date.now(),
+): Promise<boolean> {
+  const path = join(sessionDir(dataDir, sessionId), REDIRECT_FILE);
+  const last = await readRedirect(path);
+  if (last === null || last.delivered || now - last.at > EXPIRY_MS) return false;
+  return rm(path).then(
+    () => true,
+    () => false,
+  );
 }
 
 /**
@@ -490,7 +554,7 @@ function line(row: SavedProgress, now: number): string {
   );
 }
 
-async function write(path: string, body: Stamp | SavedProgress): Promise<void> {
+async function write(path: string, body: Stamp | SavedProgress | SavedRedirect): Promise<void> {
   try {
     await writeFileAtomic(path, JSON.stringify(body), { mode: 0o600, dirMode: 0o700 });
   } catch {
@@ -507,6 +571,15 @@ function stampOf(row: Record<string, unknown> | null): Stamp | null {
   if (row === null) return null;
   return row.version === 1 && typeof row.at === 'number' && Number.isFinite(row.at)
     ? { version: 1, at: row.at }
+    : null;
+}
+
+async function readRedirect(path: string): Promise<SavedRedirect | null> {
+  const row = await readJson(path);
+  const stamp = stampOf(row);
+  if (row === null || stamp === null) return null;
+  return typeof row.id === 'string' && typeof row.delivered === 'boolean'
+    ? { ...stamp, id: row.id, delivered: row.delivered }
     : null;
 }
 
