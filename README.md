@@ -14,7 +14,6 @@
 
 <p align="center">
   <a href="https://www.npmjs.com/package/tenjin-cli"><img src="https://img.shields.io/npm/v/tenjin-cli?color=C85A3B&label=npm" alt="npm version"></a>
-  <img src="https://img.shields.io/badge/node-%E2%89%A524-4A5878" alt="Node 24 or newer">
   <img src="https://img.shields.io/badge/works%20with-Claude%20Code-1C1A17" alt="Works with Claude Code">
   <img src="https://img.shields.io/badge/payments-x402-8C9A7E" alt="Payments via x402">
 </p>
@@ -46,7 +45,7 @@ Tenjin handles all of it. Install it once and keep working. The Tenjin router wa
 
 ## Quick start
 
-You need **Node.js 24+** and **[Claude Code](https://code.claude.com)**. Codex support is on the way.
+Requires Node.js 24 or newer and [Claude Code](https://code.claude.com). Codex support is on the way.
 
 ```bash
 npm i -g tenjin-cli
@@ -110,6 +109,8 @@ When one fits, your agent sees a one-line suggestion with the tool and its price
 x402 · request: calling pro-api.coinmarketcap.com/x402/v3/cryptocurrency/quotes/latest · {"query":{"symbol":"BTC,ETH"}}
 ```
 
+To pick a tool, the router sends your current turn and up to six recent messages, with keys, passwords and seed phrases masked. Tool results and page contents stay on your machine, and the packet expires after 15 minutes. `tenjin config set router.context turn` sends only the current message. [Full details, and everything install writes →](./docs/agent-permissions.md)
+
 ## Wallet and payments
 
 Tenjin pays for tools with [x402](https://www.x402.org), an open standard that builds payments into HTTP. A paid endpoint answers `402 Payment Required` with its price, the client signs a payment for that amount, and the endpoint returns the result. Neither side needs an account or an API key. Read more: [x402.org](https://www.x402.org) · [whitepaper](https://www.x402.org/x402-whitepaper.pdf) · [Coinbase docs](https://docs.cdp.coinbase.com/x402/welcome) · [spec and SDKs](https://github.com/coinbase/x402).
@@ -129,17 +130,13 @@ Tenjin refuses any payment over either limit before it signs anything.
 
 ### Funding
 
-`tenjin wallet fund 2` opens a Coinbase Onramp checkout for your wallet: pay by card, or Apple Pay where your region supports it (you need a Coinbase account). You can also send USDC on Base to the address `tenjin wallet show` prints.
+`tenjin wallet fund 2` opens a Coinbase Onramp checkout for your wallet: pay by card, or Apple Pay where your region supports it. Sign in to Coinbase or create an account during checkout. You can also send USDC on Base to the address `tenjin wallet show` prints.
 
 $1–2 goes a long way. $2 covers about 280 web searches, 200 page reads or 100 Wolfram Alpha answers.
 
 ### Withdrawing
 
 `tenjin wallet send <amount> USDC <address>` sends funds to any address. It's a regular onchain transfer, so it needs a little ETH on Base for gas.
-
-### What the router sees
-
-To pick a tool, the router sends your current turn and up to six recent messages, with keys, passwords and seed phrases masked. Tool results and page contents stay on your machine, and the packet expires after 15 minutes. `tenjin config set router.context turn` sends only the current message. [Full details, and everything install writes →](./docs/agent-permissions.md)
 
 ## Everyday commands
 
