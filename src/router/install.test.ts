@@ -428,6 +428,85 @@ describe('tenjin uninstall', () => {
     });
     expect(result.data).toMatchObject({ wrote: false });
   });
+
+  it('leaves an x402 server that launches something else, as install does', async () => {
+    await runRouterInstall({}, ctx(), deps());
+    const other = { command: 'npx', args: ['-y', 'some-other-x402-server'] };
+    await writeFile(
+      join(home, '.claude.json'),
+      JSON.stringify({ mcpServers: { x402: other } }, null, 2) + '\n',
+    );
+    const removeMcp = vi.fn(async () => undefined);
+    const result = await runRouterUninstall({}, ctx(), {
+      homeDir: home,
+      env: {},
+      which: () => true,
+      removeMcp,
+    });
+    expect(removeMcp).not.toHaveBeenCalled();
+    expect(result.data).toMatchObject({ mcp: { removed: false, kept: 'foreign', scope: 'user' } });
+    expect(result.humanLines?.join('\n')).toContain('left in place');
+    expect(result.humanLines?.join('\n')).not.toContain('claude mcp remove');
+    const kept = JSON.parse(await readFile(join(home, '.claude.json'), 'utf8')) as {
+      mcpServers: Record<string, unknown>;
+    };
+    expect(kept.mcpServers.x402).toEqual(other);
+  });
+
+  it('removes the x402 server when it is the router', async () => {
+    await runRouterInstall({}, ctx(), deps());
+    await writeFile(
+      join(home, '.claude.json'),
+      JSON.stringify({ mcpServers: { x402: { command: 'tenjin', args: ['mcp'] } } }, null, 2) +
+        '\n',
+    );
+    const removeMcp = vi.fn(async () => undefined);
+    const result = await runRouterUninstall({}, ctx(), {
+      homeDir: home,
+      env: {},
+      which: () => true,
+      removeMcp,
+    });
+    expect(removeMcp).toHaveBeenCalled();
+    expect(result.data).toMatchObject({ mcp: { removed: true, scope: 'user' } });
+  });
+
+  it('removes nothing from a registration file it cannot read', async () => {
+    await runRouterInstall({}, ctx(), deps());
+    await writeFile(join(home, '.claude.json'), '{ not json');
+    const removeMcp = vi.fn(async () => undefined);
+    const result = await runRouterUninstall({}, ctx(), {
+      homeDir: home,
+      env: {},
+      which: () => true,
+      removeMcp,
+    });
+    expect(removeMcp).not.toHaveBeenCalled();
+    expect(result.data).toMatchObject({ mcp: { removed: false, kept: 'unreadable' } });
+  });
+
+  it('leaves a project-scope x402 that launches something else', async () => {
+    const cwd = join(home, 'project');
+    await mkdir(cwd, { recursive: true });
+    await runRouterInstall({ project: true }, ctx(), deps({ cwd }));
+    await writeFile(
+      join(cwd, '.mcp.json'),
+      JSON.stringify({ mcpServers: { x402: { command: 'node', args: ['other.js'] } } }, null, 2) +
+        '\n',
+    );
+    const removeMcp = vi.fn(async () => undefined);
+    const result = await runRouterUninstall({ project: true }, ctx(), {
+      homeDir: home,
+      cwd,
+      env: {},
+      which: () => true,
+      removeMcp,
+    });
+    expect(removeMcp).not.toHaveBeenCalled();
+    expect(result.data).toMatchObject({
+      mcp: { removed: false, kept: 'foreign', scope: 'project' },
+    });
+  });
 });
 
 describe('a settings file this writer will not touch', () => {
