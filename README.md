@@ -5,17 +5,18 @@
   </picture>
 </p>
 
-<h3 align="center">The tool router for Claude Code.</h3>
+<h3 align="center">The tool router for coding agents.</h3>
 
 <p align="center">
-  When your agent hits something it can't do alone, Tenjin finds the right service and pays it a few cents.<br>
-  No API keys. No accounts. No subscriptions.
+  Give your agent superpowers once. Tenjin hands it the right tool when it helps, and you keep working like before.<br>
+  No API keys. No pile of MCP servers. No rules to write.
 </p>
 
 <p align="center">
   <a href="https://www.npmjs.com/package/tenjin-cli"><img src="https://img.shields.io/npm/v/tenjin-cli?color=C85A3B&label=npm" alt="npm version"></a>
   <img src="https://img.shields.io/badge/node-%E2%89%A524-4A5878" alt="Node 24 or newer">
-  <img src="https://img.shields.io/badge/works%20with-Claude%20Code-1C1A17" alt="Works with Claude Code">
+  <img src="https://img.shields.io/badge/Claude%20Code-today-1C1A17" alt="Claude Code today">
+  <img src="https://img.shields.io/badge/Codex-coming%20soon-8A8278" alt="Codex coming soon">
   <img src="https://img.shields.io/badge/payments-x402-8C9A7E" alt="Payments via x402">
 </p>
 
@@ -35,17 +36,16 @@
 
 ## Why
 
-Your coding agent is great at your code and not so great at the outside world. It guesses at library APIs, scrapes pages that block it, and can't tell you what BTC is trading at right now. The fix is usually "go sign up for five APIs and paste keys into a config file."
+Giving your agent good tools is a chore today:
 
-Tenjin replaces that with one install:
+- **A key for every tool.** Sign up, pick a plan, paste an API key into a config file. Five tools, five accounts.
+- **MCP servers crowd the context.** Every server you install loads its tool definitions into every session, needed or not.
+- **Your agent forgets anyway.** It reaches for plain web search out of habit, so you write rules to remind it, and it still slips.
+- **Some tools you need once.** Installing something permanent for a one-off lookup isn't worth the setup.
 
-| Without Tenjin                                                | With Tenjin                                                   |
-| ------------------------------------------------------------- | ------------------------------------------------------------- |
-| Your agent searches the web and hopes the snippet is enough   | It reads current docs for the exact library you're using      |
-| A signup, an API key and a monthly plan for every data source | One install, one small wallet, pay only for what's used       |
-| "I can't access live prices"                                  | Live quotes from CoinMarketCap, for about a cent              |
-| Mental math on a hard integral                                | Wolfram Alpha answers it                                      |
-| You wire tools up by hand, per project                        | The router picks the right one for each lookup, automatically |
+Tenjin takes all of that off your plate. Install it once and work as you normally do. Jev, Tenjin's router, watches the moments where a tool could help: your prompt, your agent's web searches and page fetches, and the tasks it hands to subagents. When a curated, maintained tool would do better than what your agent was about to do, Jev suggests it, and your agent uses it. Every tool is paid per call through [x402](#the-wallet-in-plain-english), so there are no keys to manage and nothing new to download.
+
+Works with **Claude Code** today. **Codex** is coming soon.
 
 ## Quick start
 
@@ -80,7 +80,7 @@ Every answer says **who supplied it and what it cost**. Your agent's own tools k
 
 ## What it can do
 
-The router picks from a growing catalog. Choosing a service is always free. You pay the provider only when a paid one runs.
+Jev picks from a curated, maintained catalog. Choosing a service is always free. You pay the provider only when a paid one runs.
 
 |     | Tool                                                             | What your agent gets                                        | Price per call |
 | --- | ---------------------------------------------------------------- | ----------------------------------------------------------- | -------------- |
@@ -93,20 +93,20 @@ The router picks from a growing catalog. Choosing a service is always free. You 
 | 👤  | **Person lookup** · Minerva                                      | A professional profile from a name or email                 | $0.05          |
 | 🏢  | **Company profile** · [CompanyEnrich](https://companyenrich.com) | Size, industry, funding and socials from a domain or name   | $0.06          |
 
-Free tools run without a funded wallet. More services are on the way. [Tell us what you want next](#request-a-tool).
+Free tools run without a funded wallet. Twitter, Reddit and more are next, added by demand: [tell us what you want](#request-a-tool).
 
 ## How it works
 
 ```mermaid
 flowchart LR
-    A["You ask Claude Code<br>something"] --> B{"Tenjin router:<br>is there a tool<br>for this? (free)"}
+    A["You work<br>as usual"] --> B{"Jev: is there<br>a better tool<br>for this? (free)"}
     B -- no --> C["Claude uses its<br>own tools"]
     B -- yes --> D["Claude calls the<br>service it names"]
     D --> E["Your wallet pays<br>the provider<br>(within your limits)"]
     E --> F["Answer, with the<br>source and the price"]
 ```
 
-1. **Route.** On each turn, the router checks whether a service fits the lookup. Deciding is free and there's no router fee.
+1. **Route.** At your prompt, before your agent's web searches and fetches, and when it delegates to a subagent, Jev checks whether a tool fits. Deciding is free and there's no router fee.
 2. **Offer.** If one fits, Claude sees a single line naming it and the price. It's an option, not an order.
 3. **Pay.** If Claude takes it, the Tenjin CLI pays the provider directly from your wallet, only within the limits you set.
 4. **Answer.** The result comes back with the provider and the cost attached.
@@ -145,7 +145,7 @@ A payment that would go over either limit is refused before anything is signed.
 - ~100 Wolfram Alpha answers, or
 - ~65 email checks
 
-**How do I add funds?** `tenjin wallet fund 2` opens a Coinbase checkout for your wallet's address, where you pay with a card (a Coinbase account is required). Already hold USDC? Send it on Base to the address from `tenjin wallet show`.
+**How do I add funds?** `tenjin wallet fund 2` opens a Coinbase checkout for your wallet's address, where you pay with a card, or Apple Pay depending on your region (a Coinbase account is required). Already hold USDC? Send it on Base to the address from `tenjin wallet show`.
 
 **Can I get it back out?** Yes. It's your money. `tenjin wallet send <amount> USDC <address>` moves it to any address you choose. Withdrawing is a normal onchain transfer, so it needs a few cents of ETH on Base for the network fee.
 
