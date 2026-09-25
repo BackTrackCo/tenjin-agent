@@ -25,10 +25,9 @@
   <a href="#request-a-tool">Request a tool</a>
 </p>
 
-<!--
-  DEMO: drop the GIF or video here, centered at ~720px wide:
-  <p align="center"><img src="./assets/demo.gif" alt="Tenjin in Claude Code" width="720"></p>
--->
+<p align="center">
+  <img src="./assets/demo.gif" alt="Tenjin in Claude Code: research, live crypto prices, company lookup, email verification, and computation" width="720">
+</p>
 
 ---
 
