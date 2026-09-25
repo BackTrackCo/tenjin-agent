@@ -137,8 +137,10 @@ tenjin read <resource-url-or-id> --json
 tenjin buy <resource-url-or-id> --json --max-price <usd> [--yes]
 ```
 
-- Automatic spend defaults to **zero**; without approval or a policy the CLI
-  refuses with exit 3. Entitlement is re-checked, so nobody pays twice.
+- Manual purchases always require consent; without interactive confirmation or
+  prior explicit approval recorded by `--yes`, the CLI refuses with exit 3.
+  Automatic router limits do not cap buys. Entitlement is re-checked, so nobody
+  pays twice.
 - `--yes` asserts a human approved THIS purchase, clearing the confirm gate
   outright; never pass it to clear a refusal you just hit. Always pass
   `--max-price` with it: that cap is a hard gate `--yes` cannot bypass.

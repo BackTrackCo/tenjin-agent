@@ -1,15 +1,21 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { existsSync } from 'node:fs';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { existsSync, lstatSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { removeOwnedSkill, removeRetiredSkills } from './skill-placement';
+
+vi.mock('node:fs', async (importOriginal) => {
+  const fs = await importOriginal<typeof import('node:fs')>();
+  return { ...fs, lstatSync: vi.fn(fs.lstatSync) };
+});
 
 let home: string;
 beforeEach(async () => {
   home = await mkdtemp(join(tmpdir(), 'tenjin-place-'));
 });
 afterEach(async () => {
+  vi.mocked(lstatSync).mockClear();
   await rm(home, { recursive: true, force: true });
 });
 const skills = () => join(home, '.claude', 'skills');
@@ -52,6 +58,24 @@ describe('retired skill cleanup', () => {
     expect(await readFile(join(foreign, 'tenjin-pay', 'SKILL.md'), 'utf8')).toContain(
       'foreign directory',
     );
+  });
+  it('skips a missing directory below a regular-file ancestor', async () => {
+    const parent = join(home, 'not-a-directory');
+    await writeFile(parent, 'preserve');
+    expect(await removeRetiredSkills(join(parent, 'child'))).toEqual([]);
+    expect(await readFile(parent, 'utf8')).toBe('preserve');
+  });
+  it('handles Linux ENOTDIR without hiding other inspection errors', async () => {
+    vi.mocked(lstatSync).mockImplementationOnce(() => {
+      throw Object.assign(new Error('not a directory'), { code: 'ENOTDIR' });
+    });
+    expect(await removeOwnedSkill('tenjin-pay', skills())).toEqual({ changed: false });
+    vi.mocked(lstatSync).mockImplementationOnce(() => {
+      throw Object.assign(new Error('denied'), { code: 'EACCES' });
+    });
+    await expect(removeOwnedSkill('tenjin-pay', skills())).rejects.toMatchObject({
+      code: 'EACCES',
+    });
   });
   it('cleans the explicitly refreshed project too', async () => {
     const project = join(home, 'project');

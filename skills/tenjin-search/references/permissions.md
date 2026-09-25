@@ -57,16 +57,21 @@ Bash(tenjin pay:*)
 
 Offer the pay line only when a `tenjin pay` invocation is what got denied, and
 say what it opens: unattended x402 payments at ANY endpoint the origin gate
-allows, under the same `--yes` and `maxAutoSpend`/`sessionBudget` caveats as buy,
-and with no library dedupe, so a looping agent pays on every call.
+allows, with no library dedupe, so a looping agent pays on every call. Manual
+pay always needs consent for the live quote; `--yes` records prior explicit
+user consent. Lookup failures or differences from an exact registry listing
+also require `--ignore-warnings`; an unlisted endpoint needs no warning flag.
+Never use manual pay as an autonomous workaround for a router refusal.
 
 Offer the buy line only when a purchase is what got denied, and describe it
 honestly: it authorizes **unattended** purchases. `--yes` is an ordinary flag on
-that same allowlisted verb and it clears the confirm gate outright, so on the
-default config nothing stops a spend up to the wallet balance. Tell them to set
-`maxAutoSpend` and `sessionBudget` first, and that `sessionBudget 0` means no
-ceiling rather than a zero one. Do not tell them a human is still on every
-purchase: that holds only while `--yes` is absent.
+that same allowlisted verb and it clears the confirm gate outright. Both buy
+and pay are manual payments: `maxAutoSpend` and `sessionBudget` apply only to
+automatic router spending, not these purchases. Without an explicit
+`--max-price`, those settings provide no price ceiling for `buy --yes` or
+`pay --yes`. Always supply `--max-price` for the quoted purchase and obtain
+explicit user consent before supplying `--yes`. Do not tell the operator a
+human is still on every purchase: the CLI cannot authenticate who passed a flag.
 
 There is no session line to offer: a `read` of a piece this wallet already owns
 mints its own read-scoped delegation, once, and reuses it for 24h.

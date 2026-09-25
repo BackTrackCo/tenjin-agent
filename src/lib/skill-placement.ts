@@ -3,17 +3,29 @@ import { readdir, rm, rmdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { readSkillFile, skillFrontmatterName, skillsDirsFor } from './skill-wiring';
 import { RETIRED_SKILL_NAMES } from './skills-source';
+import { hasCode } from './errno';
+
+function isRealDirectory(path: string): boolean {
+  try {
+    return lstatSync(path, { throwIfNoEntry: false })?.isDirectory() === true;
+  } catch (err) {
+    // Linux reports ENOTDIR when an ancestor is a regular file. Nothing can
+    // be installed below it, just as with an absent path. Do not follow symlinks.
+    if (hasCode(err, 'ENOENT') || hasCode(err, 'ENOTDIR')) return false;
+    throw err;
+  }
+}
 
 /** Remove only our named skill file; preserve foreign skills and adjacent user files. */
 export async function removeOwnedSkill(
   name: string,
   skillsDir: string,
 ): Promise<{ changed: boolean }> {
-  if (lstatSync(skillsDir, { throwIfNoEntry: false })?.isDirectory() !== true) {
+  if (!isRealDirectory(skillsDir)) {
     return { changed: false };
   }
   const skillDir = join(skillsDir, name);
-  if (lstatSync(skillDir, { throwIfNoEntry: false })?.isDirectory() !== true) {
+  if (!isRealDirectory(skillDir)) {
     return { changed: false };
   }
   const path = join(skillDir, 'SKILL.md');
