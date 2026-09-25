@@ -1152,6 +1152,74 @@ describe('tenjin update re-applies the install', () => {
  * here, and `tenjin update` is a binary swap plus exactly that.
  */
 describe('a refresh converges one scope', () => {
+  it.each([false, true])(
+    'refreshes user scope from home (existing MCP registration: %s)',
+    async (registered) => {
+      await runRouterInstall({}, ctx(), deps());
+      const userMcpPath = join(home, '.claude.json');
+      const entry = { command: 'tenjin', args: ['mcp'] };
+      const userConfig = {
+        mcpServers: {
+          unrelated: { command: 'other-server' },
+          ...(registered ? { x402: entry } : {}),
+        },
+      };
+      await writeFile(userMcpPath, JSON.stringify(userConfig));
+      const registerMcp = vi.fn(async (_command: string, opts: { scope: string }) => {
+        const path = opts.scope === 'user' ? userMcpPath : join(home, '.mcp.json');
+        await writeFile(
+          path,
+          JSON.stringify({
+            ...userConfig,
+            mcpServers: { ...userConfig.mcpServers, x402: entry },
+          }),
+        );
+      });
+
+      // This is the cwd and argument combination spawned by `tenjin update`.
+      const result = await runRouterInstall(
+        { refresh: true },
+        ctx(),
+        deps({ cwd: home, registerMcp }),
+      );
+
+      expect(onlyInstall(result)).toMatchObject({
+        refresh: true,
+        scope: 'user',
+        settingsPath: settingsPath(),
+        mcp: { scope: 'user', registered: true },
+      });
+      expect(registerMcp).toHaveBeenCalledTimes(registered ? 0 : 1);
+      if (!registered) {
+        expect(registerMcp).toHaveBeenCalledWith(MCP_ADD_COMMAND, { scope: 'user', cwd: home });
+      }
+      expect(JSON.parse(await readFile(userMcpPath, 'utf8'))).toEqual({
+        ...userConfig,
+        mcpServers: { ...userConfig.mcpServers, x402: entry },
+      });
+      await expect(readFile(join(home, '.mcp.json'), 'utf8')).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+    },
+  );
+
+  it('honors an explicit project refresh even when the project is home', async () => {
+    await runRouterInstall({ project: true }, ctx(), deps({ cwd: home }));
+    const registerMcp = vi.fn(async () => undefined);
+
+    const result = await runRouterInstall(
+      { refresh: true, project: true },
+      ctx(),
+      deps({ cwd: home, registerMcp }),
+    );
+
+    expect(onlyInstall(result)).toMatchObject({ scope: 'project', mcp: { scope: 'project' } });
+    expect(registerMcp).toHaveBeenCalledWith('claude mcp add x402 -s project -- tenjin mcp', {
+      scope: 'project',
+      cwd: home,
+    });
+  });
+
   it('takes the project install when this directory carries the entries', async () => {
     const fs = await import('node:fs/promises');
     const cwd = join(home, 'project');

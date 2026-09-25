@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { isAbsolute, join } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { claudeAdapter } from '../adapters/claude';
 import { persistRouterDefaults } from '../commands/config';
@@ -203,20 +203,14 @@ export async function runRouterInstall(
     });
   }
   const cwd = deps.cwd ?? process.cwd();
-  // A refresh converges EVERY install this machine has, in the scope each one
-  // was made in. `tenjin update` spawns it from the HOME directory, so looking
-  // ONE SCOPE, THE ONE THIS RAN IN. `--refresh` converges the install whose
-  // settings file is here: home by default, this project under `--project`.
-  // The fan-out across recorded projects is gone with the list it read, along
-  // with a failure mode where one project's broken JSON decided what every
-  // other install got. `tenjin update` is a binary swap plus this, nothing more.
-  // With no flag, a refresh converges the install that is actually HERE: the
-  // project file when this directory carries our entries, the home file
-  // otherwise. `--project` and its absence are still explicit targets, so
-  // nothing silently moves an install from one scope to the other.
+  // A refresh infers project scope only outside home. `tenjin update` runs
+  // `install --refresh` from home, where the apparent project settings path
+  // is the user settings file itself. Those hooks cannot prove project scope.
+  // An explicit --project still wins, including for a project rooted at home.
   const project =
     args.project ??
     (args.refresh === true &&
+      resolve(cwd) !== resolve(home) &&
       (await probeOurEntries(routerSettingsPath({ project: true, cwd }), ctx.dataDir)).state ===
         'present');
   const settingsPath = routerSettingsPath({
