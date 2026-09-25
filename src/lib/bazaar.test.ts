@@ -123,6 +123,37 @@ describe('Ultravioleta discovery adapter', () => {
       outcome: 'unavailable',
     });
   });
+  it('keeps valid listings beside malformed records and reports the partial sweep', async () => {
+    stub(() => page([item({ accepts: null }), item()]));
+    const sweep = await sweepRegistries([UV], { timeoutMs: 1000 });
+    expect(sweep.resources).toHaveLength(1);
+    expect(sweep.resources[0]).toMatchObject({ url: URL, accepts: [LIVE] });
+    expect(sweep.errors).toEqual([{ registry: UV, message: expect.stringContaining('malformed') }]);
+    expect(await verifyAgainstRegistries([UV], URL, LIVE, 1000)).toEqual({
+      outcome: 'verified',
+      registry: UV,
+    });
+  });
+  it('advances past malformed records and retains their warning across pages', async () => {
+    const fetch = stub((url) => {
+      const offset = Number(url.searchParams.get('offset'));
+      expect([0, 2]).toContain(offset);
+      return offset === 0
+        ? page([item({ accepts: null }), item({ url: `${URL}/nearby` })], 0, 3, 2)
+        : page([item({ url: `${URL}/other` })], 2, 3, 2);
+    });
+    expect(await verifyAgainstRegistries([UV], URL, LIVE, 1000)).toMatchObject({
+      outcome: 'unavailable',
+      errors: [{ message: expect.stringContaining('malformed') }],
+    });
+    expect(fetch).toHaveBeenCalledTimes(2);
+    const sweep = await sweepRegistries([UV], { timeoutMs: 1000 });
+    expect(sweep.resources.map((resource) => resource.url)).toEqual([
+      `${URL}/nearby`,
+      `${URL}/other`,
+    ]);
+    expect(sweep.errors).toHaveLength(1);
+  });
   it('reports bounded pagination as incomplete, never proof of no listing', async () => {
     const fetch = stub((url) =>
       page([item({ url: `${URL}/nearby` })], Number(url.searchParams.get('offset')), 1000, 1),

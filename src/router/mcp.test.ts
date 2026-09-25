@@ -22,7 +22,7 @@ beforeEach(async () => {
   await mkdir(join(dir, '.git'));
   await writeFile(
     join(dir, 'config.json'),
-    JSON.stringify({ bazaarPay: true, maxAutoSpend: '100000', baseUrl: 'https://tenjin.sh' }),
+    JSON.stringify({ maxAutoSpend: '100000', baseUrl: 'https://tenjin.sh' }),
   );
 });
 afterEach(async () => {
@@ -129,7 +129,6 @@ describe('the base URL the MCP server routes against', () => {
     await fs.writeFile(
       join(dir, 'config.json'),
       JSON.stringify({
-        bazaarPay: true,
         maxAutoSpend: '100000',
         baseUrl: 'https://file.example.test',
       }),

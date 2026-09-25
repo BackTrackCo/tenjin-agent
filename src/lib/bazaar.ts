@@ -101,6 +101,7 @@ async function ultravioletListings(
   const deadline = Date.now() + timeoutMs;
   const items: DiscoveryResource[] = [];
   let offset = 0;
+  let incomplete: string | undefined;
   for (let page = 0; page < MAX_PAGES; page++) {
     const remaining = deadline - Date.now();
     if (remaining <= 0) throw new Error('Registry lookup deadline exceeded');
@@ -116,12 +117,18 @@ async function ultravioletListings(
     });
     if (!res.ok) throw new Error(`listing ${registry} answered ${res.status}`);
     const response = z
-      .object({ items: z.array(ultravioletResource).max(PAGE_LIMIT), pagination: paginationSchema })
+      .object({ items: z.array(z.unknown()).max(PAGE_LIMIT), pagination: paginationSchema })
       .parse(await boundedJson(res));
     const pagination = response.pagination;
     if (pagination.offset !== offset || response.items.length > pagination.limit)
       throw new Error('Invalid registry pagination');
-    for (const item of response.items) {
+    for (const record of response.items) {
+      const parsed = ultravioletResource.safeParse(record);
+      if (!parsed.success) {
+        incomplete = 'Registry search skipped malformed records';
+        continue;
+      }
+      const item = parsed.data;
       items.push({
         resource: item.url,
         type: item.type,
@@ -132,7 +139,7 @@ async function ultravioletListings(
       });
     }
     const next = pagination.offset + response.items.length;
-    if (next >= pagination.total) return { items };
+    if (next >= pagination.total) return { items, ...(incomplete ? { incomplete } : {}) };
     if (response.items.length === 0) break;
     offset = next;
   }
