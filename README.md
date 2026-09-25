@@ -123,7 +123,7 @@ Paying per call is what lets you skip API keys and subscriptions. Here's what's 
 
 **What is it?** A small wallet, created on your machine by `tenjin install`, that holds a few dollars for your agent to spend. Think of it as a prepaid card with a daily limit.
 
-**What's in it?** [USDC](https://www.circle.com/usdc), a digital dollar: 1 USDC is always worth $1. It lives on [Base](https://base.org), a network built by Coinbase where a payment costs a fraction of a cent to settle. You don't need to buy or hold any other coin, and there's no gas to manage.
+**What's in it?** [USDC](https://www.circle.com/usdc), a digital dollar: 1 USDC is always worth $1. It lives on [Base](https://base.org), a network built by Coinbase where a payment costs a fraction of a cent to settle. Paying for lookups needs no other coin and no gas.
 
 **How does the agent pay?** Through [x402](https://www.x402.org), an open payments standard. The service replies "that'll be 1¢", your wallet signs for exactly that amount, and the answer comes back, all in one request. No account is created anywhere, and no card number is ever shared.
 
@@ -147,7 +147,7 @@ A payment that would go over either limit is refused before anything is signed.
 
 **How do I add funds?** `tenjin wallet fund 2` opens a Coinbase checkout for your wallet's address, where you pay with a card (a Coinbase account is required). Already hold USDC? Send it on Base to the address from `tenjin wallet show`.
 
-**Can I get it back out?** Yes. It's your money. `tenjin wallet send <amount> USDC <address>` moves it to any address you choose.
+**Can I get it back out?** Yes. It's your money. `tenjin wallet send <amount> USDC <address>` moves it to any address you choose. Withdrawing is a normal onchain transfer, so it needs a few cents of ETH on Base for the network fee.
 
 **What does Tenjin see?** To choose a service, the router sends the current turn and up to six recent messages, with keys, passwords and seed phrases masked out. Tool results and page contents never leave your machine. The packet expires after 15 minutes. Prefer less? `tenjin config set router.context turn` sends only the current message. [Exactly what's sent, and what install writes →](./docs/agent-permissions.md)
 
