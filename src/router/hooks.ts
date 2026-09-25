@@ -26,10 +26,12 @@ import {
   bindDecision,
   markOffered,
   newCallId,
+  noteRedirect,
   noteSession,
   pruneProgress,
   pruneSessions,
   sessionDir,
+  takeUndelivered,
   wasOffered,
   writeProgress,
 } from './progress';
@@ -255,6 +257,10 @@ export function toolNamed(hint: string): string {
 function attributed(hint: string): string {
   return `${HINT_SOURCE}: ${toolNamed(hint)}`;
 }
+
+/** This client's one sentence on a redirect: the promise {@link runNativeHook} keeps. */
+const ONE_BLOCK =
+  'If this does not cover it, make your own call again: you will not be redirected twice in a row.';
 
 /** Where the offer sits after the free tool came back short. */
 function shortfallOffer(tool: 'WebSearch' | 'WebFetch', hint: string): string {
@@ -551,6 +557,9 @@ export interface NativeHookOutcome {
   withheld?: true;
   /** No router call at all: the subagent is not known to have the request tool. */
   noRequestTool?: true;
+  /** An `execute` whose redirect was not sent: this agent's last one, in the
+   *  same category, has not delivered. */
+  redirectUndelivered?: true;
 }
 
 export interface ShortfallHookOutcome extends NativeHookOutcome {
@@ -567,13 +576,15 @@ type ExecuteDecision = Extract<HookDecision, { action: 'execute' }>;
  * THE ONE ROUTE BOTH NATIVE ARMS TAKE, before the call and after it: the
  * agent's tool list, the packet from the right transcript, one free decision,
  * and the subagent spend rule. An `execute` that survives all of it comes back
- * as `offer`; everything else is the reason there is none.
+ * as `offer`; everything else is the reason there is none. `repeated` is the
+ * pre-call arm's one-block rule, asked only of an offer that would be shown.
  */
 async function routeNativeCall(
   event: NativeCall,
   pending: PendingCall,
   deps: HookDeps,
   nativeOutcome?: NativeOutcome,
+  repeated?: (offer: ExecuteDecision) => Promise<boolean>,
 ): Promise<{ offer: ExecuteDecision } | { offer: null; outcome: NativeHookOutcome }> {
   // OFF MEANS NOTHING ABOUT THE TURN IS READ: the switch comes before the
   // agent lookup and the transcript, for both native arms.
@@ -638,6 +649,13 @@ async function routeNativeCall(
     await footer.close(outcome, { withheld });
     return { offer: null, outcome: { response: null, action: 'execute', withheld: true } };
   }
+  if (repeated !== undefined && (await repeated(outcome))) {
+    await footer.close(outcome, { withheld: 'already redirected once' });
+    return {
+      offer: null,
+      outcome: { response: null, action: 'execute', redirectUndelivered: true },
+    };
+  }
   await footer.close(outcome);
   return { offer: outcome };
 }
@@ -657,24 +675,34 @@ async function routeNativeCall(
  * and the after-call arm can still offer.
  *
  * A redirect leaves a mark under the call's `tool_use_id`, so the after-call
- * arm never offers on that same call.
+ * arm never offers on that same call, and becomes this agent's last redirect.
+ *
+ * NEVER BLOCKED TWICE IN A ROW FOR ONE KIND OF LOOKUP. Every call is routed as
+ * usual. While the agent's last redirect is undelivered (its lookup failed,
+ * stopped short of `fulfilled`, or was never called), an offer in that same
+ * category is withheld once and the call runs; the call after that is routed
+ * as usual. An offer in another category is a redirect like any other.
  */
 export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<NativeHookOutcome> {
   const event = decodeEvent(raw);
   if (event?.kind !== 'native' || event.pending === null) return { response: null };
-  const routed = await routeNativeCall(event, event.pending, deps);
+  const routed = await routeNativeCall(event, event.pending, deps, undefined, (offer) =>
+    takeUndelivered(deps.dataDir, event.sessionId, event.agentId, offer.category, deps.now?.()),
+  );
   if (routed.offer === null) return routed.outcome;
   if (event.toolUseId !== undefined) {
     await markOffered(deps.dataDir, event.sessionId, event.toolUseId, deps.now?.());
   }
+  await noteRedirect(deps.dataDir, event.sessionId, event.agentId, routed.offer, deps.now?.());
   return {
     response: {
       hookSpecificOutput: {
         hookEventName: 'PreToolUse',
         permissionDecision: 'deny',
-        // THE SERVER'S LINE, attributed and tool-named, and nothing else. It
-        // already carries the id and the exact search or URL that was denied.
-        permissionDecisionReason: attributed(routed.offer.hint),
+        // THE SERVER'S LINE, attributed and tool-named, then this client's one
+        // sentence. The line already carries the id and the exact search or URL
+        // that was denied.
+        permissionDecisionReason: `${attributed(routed.offer.hint)} ${ONE_BLOCK}`,
       },
     },
     action: 'execute',

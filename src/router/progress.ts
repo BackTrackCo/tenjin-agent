@@ -12,7 +12,9 @@ import { writeFileAtomic } from '../lib/atomic-json';
  * decision, the spend policy or the paying leg; every write is best effort and
  * every failure is swallowed, so a full disk or a read-only data dir loses the
  * footer and changes no routing or payment outcome. That is the whole contract
- * this module has to keep.
+ * this module has to keep. Two markers are read back by the hooks, the offer
+ * mark and the last redirect, and both only ever make a hook say less: losing
+ * either routes a call exactly as a session with no record would.
  *
  * KEYED TO THE SESSION, NEVER GUESSED FROM IT. A record lives under the SHA-256
  * of the harness's own `session_id`, so the renderer for one session cannot see
@@ -36,6 +38,8 @@ const BINDING_PREFIX = 'id-';
 const OFFER_PREFIX = 'offer-';
 /** The session's own liveness touch, likewise outside the call-record pattern. */
 const SESSION_FILE = 'session.json';
+/** An agent's last pre-call redirect, one file per agent in the session. */
+const REDIRECT_PREFIX = 'redirect-';
 /** Call records are named by a 64-hex digest and nothing else is read as one. */
 const CALL_FILE_RE = /^[a-f0-9]{64}\.json$/;
 
@@ -82,6 +86,14 @@ interface SavedProgress extends Stamp {
   parameters?: string;
   /** What the provider was paid, as USD. */
   price?: string;
+}
+
+/** Which decision the last redirect named (by digest), its category, and
+ *  whether it delivered. */
+interface SavedRedirect extends Stamp {
+  id: string;
+  category: string;
+  delivered: boolean;
 }
 
 export interface ProgressStep {
@@ -211,6 +223,95 @@ export async function wasOffered(
   const path = join(sessionDir(dataDir, sessionId), `${OFFER_PREFIX}${digest(toolUseId)}.json`);
   const stamp = await readStamp(path);
   return stamp !== null && now - stamp.at <= EXPIRY_MS;
+}
+
+/**
+ * ONE RECORD PER AGENT. Subagents share the session id, so a shared record
+ * would let one overwrite another's redirect, or spend the main agent's skip.
+ * The main agent's key is the empty string, which no `agent_id` can be: the
+ * decoder refuses an empty one.
+ */
+function redirectPath(dataDir: string, sessionId: string, agentId: string | undefined): string {
+  return join(sessionDir(dataDir, sessionId), `${REDIRECT_PREFIX}${digest(agentId ?? '')}.json`);
+}
+
+/**
+ * NEVER BLOCKED TWICE IN A ROW FOR ONE KIND OF LOOKUP. The pre-call hook
+ * records each redirect as that agent's last one, `request` marks it delivered
+ * once the lookup it named is fulfilled, and the agent's next offer in the same
+ * category, while it is still undelivered, is withheld ({@link takeUndelivered}).
+ * Without it, a lookup that fails sends the agent back to its own tools, and
+ * the same deny meets it there.
+ */
+export async function noteRedirect(
+  dataDir: string,
+  sessionId: string,
+  agentId: string | undefined,
+  redirect: { id: string; category: string },
+  now = Date.now(),
+): Promise<void> {
+  const saved: SavedRedirect = {
+    version: 1,
+    at: now,
+    id: digest(redirect.id),
+    category: redirect.category,
+    delivered: false,
+  };
+  await write(redirectPath(dataDir, sessionId, agentId), saved);
+}
+
+/** The lookup this id named was fulfilled. The session is resolved the way the
+ *  footer is, and only the one agent's record carrying this same id is marked. */
+export async function markDelivered(
+  dataDir: string,
+  decisionId: string,
+  now = Date.now(),
+): Promise<void> {
+  const directory = await resolveProgressSession(dataDir, { id: decisionId, now }).catch(
+    () => null,
+  );
+  if (directory === null) return;
+  const id = digest(decisionId);
+  try {
+    const dir = await opendir(directory);
+    let count = 0;
+    for await (const entry of dir) {
+      // Only redirect records count toward the cap: a busy session's call
+      // records and markers must not push this agent's record past it.
+      if (!entry.isFile() || !entry.name.startsWith(REDIRECT_PREFIX)) continue;
+      if (++count > MAX_RECORDS) return;
+      const path = join(directory, entry.name);
+      const last = await readRedirect(path);
+      if (last?.id !== id) continue;
+      await write(path, { ...last, delivered: true });
+      return;
+    }
+  } catch {
+    // A lost mark costs one withheld offer, never a payment.
+  }
+}
+
+/**
+ * True, once, when this agent's last redirect is live, undelivered and in this
+ * same category. The record is REMOVED, so the call after this one is routed
+ * as usual, and only the caller whose removal succeeds gets true: two parallel
+ * calls cannot both skip on one redirect. Any other answer leaves it alone.
+ */
+export async function takeUndelivered(
+  dataDir: string,
+  sessionId: string,
+  agentId: string | undefined,
+  category: string,
+  now = Date.now(),
+): Promise<boolean> {
+  const path = redirectPath(dataDir, sessionId, agentId);
+  const last = await readRedirect(path);
+  if (last === null || last.delivered || last.category !== category) return false;
+  if (now - last.at > EXPIRY_MS) return false;
+  return rm(path).then(
+    () => true,
+    () => false,
+  );
 }
 
 /**
@@ -490,7 +591,7 @@ function line(row: SavedProgress, now: number): string {
   );
 }
 
-async function write(path: string, body: Stamp | SavedProgress): Promise<void> {
+async function write(path: string, body: Stamp | SavedProgress | SavedRedirect): Promise<void> {
   try {
     await writeFileAtomic(path, JSON.stringify(body), { mode: 0o600, dirMode: 0o700 });
   } catch {
@@ -507,6 +608,17 @@ function stampOf(row: Record<string, unknown> | null): Stamp | null {
   if (row === null) return null;
   return row.version === 1 && typeof row.at === 'number' && Number.isFinite(row.at)
     ? { version: 1, at: row.at }
+    : null;
+}
+
+async function readRedirect(path: string): Promise<SavedRedirect | null> {
+  const row = await readJson(path);
+  const stamp = stampOf(row);
+  if (row === null || stamp === null) return null;
+  return typeof row.id === 'string' &&
+    typeof row.category === 'string' &&
+    typeof row.delivered === 'boolean'
+    ? { ...stamp, id: row.id, category: row.category, delivered: row.delivered }
     : null;
 }
 

@@ -16,7 +16,8 @@ import {
 import { MCP_SERVER_NAME, REQUEST_TOOL } from './names';
 import { runHookCommand } from './hook-command';
 import { ROUTER_PATH } from './decision';
-import { renderProgress, resolveProgressSession, sessionDir } from './progress';
+import { markDelivered, renderProgress, resolveProgressSession, sessionDir } from './progress';
+import { runRequestTool } from './tool';
 
 /** What `tenjin install` writes (`ROUTER_DEFAULTS`): 0.25 a call, auto. */
 const ROUTER_POLICY = { maxAutoSpend: '250000', sessionBudget: '5000000', confirm: 'above:250000' };
@@ -109,6 +110,11 @@ const withHint = (hint: string) => ({ ...EXECUTE, decision: { ...EXECUTE.decisio
 
 /** The same line as the host sees it: attributed, and naming the real tool. */
 const SEEN = HINT_SOURCE + ': ' + HINT.replace('request({', 'mcp__x402__request({');
+/** The one sentence this client adds, to a pre-call redirect only. */
+const ONE_BLOCK =
+  'If this does not cover it, make your own call again: you will not be redirected twice in a row.';
+/** A pre-call redirect's reason: the line as the host sees it, then that sentence. */
+const DENIED = `${SEEN} ${ONE_BLOCK}`;
 
 const EXECUTE = {
   schemaVersion: 1,
@@ -625,7 +631,7 @@ describe('the pre-call hook', () => {
         permissionDecision: 'deny',
         permissionDecisionReason:
           `${HINT_SOURCE}: ${OFFER} Call mcp__x402__request({query: "https://example.test/spec", ` +
-          `id: "k3f9-abcd"}) instead; native tools stay allowed for anything else.`,
+          `id: "k3f9-abcd"}) instead; native tools stay allowed for anything else. ${ONE_BLOCK}`,
       },
     });
     // Main's body exactly: the pending call rides in the packet, and nothing
@@ -754,9 +760,106 @@ describe('the pre-call hook', () => {
       hookSpecificOutput: {
         hookEventName: 'PreToolUse',
         permissionDecision: 'deny',
-        permissionDecisionReason: SEEN,
+        permissionDecisionReason: DENIED,
       },
     });
+  });
+});
+
+/**
+ * NEVER BLOCKED TWICE IN A ROW FOR ONE KIND OF LOOKUP. A redirect whose lookup
+ * does not deliver sends the agent back to its own tools, and a second deny
+ * there is a loop: so every call is still routed, the agent's next offer in the
+ * same category is withheld once, and anything else is redirected as usual.
+ */
+describe('never blocked twice in a row', () => {
+  const DENY = { hookSpecificOutput: { permissionDecision: 'deny' } };
+  const WITHHELD = { response: null, action: 'execute', redirectUndelivered: true };
+
+  /** One pre-call WebFetch in `sess-1` (or as `over` says), which the router
+   *  answers with an offer in `category`. Every one of them asks the router. */
+  async function nativeCall(
+    category = EXECUTE.decision.category,
+    over: Record<string, unknown> = {},
+  ): Promise<Awaited<ReturnType<typeof runNativeHook>>> {
+    const { fetchImpl, calls } = router({
+      ...EXECUTE,
+      decision: { ...EXECUTE.decision, hint: PRECALL_HINT, category },
+    });
+    const event = await preCall('https://example.test/spec', 'WebFetch', over);
+    const out = await runNativeHook(event, {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+      homeDir: dir,
+    });
+    expect(calls).toHaveLength(1);
+    return out;
+  }
+
+  /** `request` as the redirected agent calls it. Only a lookup that stops
+   *  before payment runs here; tool.test.ts has the paid legs. */
+  function lookup(fetchImpl: typeof fetch): ReturnType<typeof runRequestTool> {
+    const sink = { write: () => true } as unknown as NodeJS.WritableStream;
+    return runRequestTool(
+      { query: 'https://example.test/spec', id: 'k3f9-abcd' },
+      {
+        ctx: {
+          flags: { json: true, timeout: 5000, baseUrl: BASE },
+          dataDir: dir,
+          io: { stdout: sink, stderr: sink, isTTY: false },
+        },
+        cwd: dir,
+        authorizer: {} as never,
+        fetchImpl,
+      },
+    );
+  }
+
+  it('withholds the same kind of offer once when nothing was called in between', async () => {
+    expect((await nativeCall()).response).toMatchObject(DENY);
+    expect(await nativeCall()).toEqual(WITHHELD);
+    expect(await renderProgress(dir, 'sess-1')).toBe(
+      'x402 · search: native tools (already redirected once)',
+    );
+  });
+
+  it('withholds it after a lookup that failed, then redirects the call after', async () => {
+    expect((await nativeCall()).response).toMatchObject(DENY);
+    const failed = await lookup(router({ error: { code: 'nope', message: 'no' } }, 503).fetchImpl);
+    expect(failed.envelope.status).toBe('failed');
+    expect(await nativeCall()).toEqual(WITHHELD);
+    expect((await nativeCall()).response).toMatchObject(DENY);
+  });
+
+  it('redirects an offer of another kind as usual, which becomes the last one', async () => {
+    expect((await nativeCall('read an exact page')).response).toMatchObject(DENY);
+    expect((await nativeCall('web research')).response).toMatchObject(DENY);
+    expect(await nativeCall('web research')).toEqual(WITHHELD);
+  });
+
+  it('redirects the same kind again once the lookup was fulfilled', async () => {
+    expect((await nativeCall()).response).toMatchObject(DENY);
+    // What `request` does on `fulfilled`; tool.test.ts pins that it does.
+    await markDelivered(dir, 'k3f9-abcd');
+    expect((await nativeCall()).response).toMatchObject(DENY);
+  });
+
+  it('keeps the main agent and a subagent to a record each', async () => {
+    const subagent = { agent_id: 'a1', agent_type: 'general-purpose' };
+    expect((await nativeCall()).response).toMatchObject(DENY);
+    expect((await nativeCall(undefined, subagent)).response).toMatchObject(DENY);
+    expect(await nativeCall()).toEqual(WITHHELD);
+    expect(await nativeCall(undefined, subagent)).toEqual(WITHHELD);
+  });
+
+  it('leaves another session to be routed as usual', async () => {
+    expect((await nativeCall()).response).toMatchObject(DENY);
+    const other = await transcriptFor([
+      { type: 'user', sessionId: 'sess-2', message: { content: 'please read the spec' } },
+    ]);
+    const elsewhere = await nativeCall(undefined, { session_id: 'sess-2', transcript_path: other });
+    expect(elsewhere.response).toMatchObject(DENY);
   });
 });
 
@@ -1685,7 +1788,7 @@ describe('a subagent', () => {
       hookSpecificOutput: {
         hookEventName: 'PreToolUse',
         permissionDecision: 'deny',
-        permissionDecisionReason: SEEN,
+        permissionDecisionReason: DENIED,
       },
     });
   });
