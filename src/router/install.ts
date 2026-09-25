@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
+import { readFile, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { isAbsolute, join, resolve } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { promisify } from 'node:util';
 import { claudeAdapter } from '../adapters/claude';
 import { persistRouterDefaults } from '../commands/config';
@@ -190,6 +190,28 @@ export interface McpRegistration {
   reason?: string;
 }
 
+async function inferRefreshProject(
+  cwd: string,
+  home: string,
+  dataDir: string,
+  readRegistration: typeof readMcpEntry,
+): Promise<boolean> {
+  const hooks = await probeOurEntries(routerSettingsPath({ project: true, cwd }), dataDir);
+  if (hooks.state !== 'present') return false;
+  const [cwdPath, homePath] = await Promise.all([realpath(cwd), realpath(home)]);
+  if (cwdPath !== homePath) return true;
+
+  // Home shares one hooks file between scopes. Preserve a project-only install,
+  // but prefer user scope when both registrations exist (including alpha.18's
+  // accidental duplicate). With neither registration, the default is user.
+  // Unreadable/conflicting entries stay in their scope so reconciliation refuses
+  // them instead of silently creating a registration in the other scope.
+  const user = await readRegistration('user', cwd, home);
+  if (user.state !== 'absent') return false;
+  const project = await readRegistration('project', cwd, home);
+  return project.state !== 'absent';
+}
+
 export async function runRouterInstall(
   args: RouterInstallArgs,
   ctx: CommandContext,
@@ -203,16 +225,12 @@ export async function runRouterInstall(
     });
   }
   const cwd = deps.cwd ?? process.cwd();
-  // A refresh infers project scope only outside home. `tenjin update` runs
-  // `install --refresh` from home, where the apparent project settings path
-  // is the user settings file itself. Those hooks cannot prove project scope.
+  // `tenjin update` runs from home, where the hooks file cannot prove scope.
   // An explicit --project still wins, including for a project rooted at home.
   const project =
     args.project ??
     (args.refresh === true &&
-      resolve(cwd) !== resolve(home) &&
-      (await probeOurEntries(routerSettingsPath({ project: true, cwd }), ctx.dataDir)).state ===
-        'present');
+      (await inferRefreshProject(cwd, home, ctx.dataDir, deps.readMcpEntry ?? readMcpEntry)));
   const settingsPath = routerSettingsPath({
     ...(project ? { project: true } : {}),
     homeDir: home,

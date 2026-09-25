@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -1152,6 +1152,75 @@ describe('tenjin update re-applies the install', () => {
  * here, and `tenjin update` is a binary swap plus exactly that.
  */
 describe('a refresh converges one scope', () => {
+  it.each([false, true])(
+    'preserves a home project registration on unflagged refresh (user registration: %s)',
+    async (userRegistered) => {
+      await runRouterInstall({ project: true }, ctx(), deps({ cwd: home }));
+      const config = JSON.stringify({ mcpServers: { x402: { command: 'tenjin', args: ['mcp'] } } });
+      await writeFile(join(home, '.mcp.json'), config);
+      if (userRegistered) await writeFile(join(home, '.claude.json'), config);
+      const registerMcp = vi.fn(async () => undefined);
+
+      const result = await runRouterInstall(
+        { refresh: true },
+        ctx(),
+        deps({ cwd: home, registerMcp }),
+      );
+
+      expect(onlyInstall(result)).toMatchObject({
+        scope: userRegistered ? 'user' : 'project',
+        mcp: { registered: true, reconciled: 'already-registered' },
+      });
+      expect(registerMcp).not.toHaveBeenCalled();
+      expect(await readFile(join(home, '.mcp.json'), 'utf8')).toBe(config);
+      if (userRegistered) expect(await readFile(join(home, '.claude.json'), 'utf8')).toBe(config);
+      else
+        await expect(readFile(join(home, '.claude.json'))).rejects.toMatchObject({
+          code: 'ENOENT',
+        });
+    },
+  );
+
+  it.each(['home', 'cwd'])('recognizes a symlinked %s as the user install', async (aliased) => {
+    await runRouterInstall({}, ctx(), deps());
+    const alias = join(home, '..', 'home-alias');
+    await symlink(home, alias, 'dir');
+    const config = JSON.stringify({ mcpServers: { x402: { command: 'tenjin', args: ['mcp'] } } });
+    await writeFile(join(home, '.claude.json'), config);
+    const registerMcp = vi.fn(async () => undefined);
+
+    const result = await runRouterInstall(
+      { refresh: true },
+      ctx(),
+      deps({
+        homeDir: aliased === 'home' ? alias : home,
+        cwd: aliased === 'cwd' ? alias : home,
+        registerMcp,
+      }),
+    );
+
+    expect(onlyInstall(result)).toMatchObject({ scope: 'user', mcp: { registered: true } });
+    expect(registerMcp).not.toHaveBeenCalled();
+    expect(await readFile(join(home, '.claude.json'), 'utf8')).toBe(config);
+    await expect(readFile(join(home, '.mcp.json'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it.each(['.claude.json', '.mcp.json'])(
+    'does not infer a different scope from unreadable %s at home',
+    async (file) => {
+      await runRouterInstall({}, ctx(), deps());
+      await writeFile(join(home, file), '{ broken');
+      const registerMcp = vi.fn(async () => undefined);
+
+      await expect(
+        runRouterInstall({ refresh: true }, ctx(), deps({ cwd: home, registerMcp })),
+      ).rejects.toMatchObject({ code: 'REFUSED' });
+
+      expect(registerMcp).not.toHaveBeenCalled();
+      expect(await readFile(join(home, file), 'utf8')).toBe('{ broken');
+    },
+  );
+
   it.each([false, true])(
     'refreshes user scope from home (existing MCP registration: %s)',
     async (registered) => {
