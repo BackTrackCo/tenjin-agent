@@ -71,6 +71,27 @@ tenjin uninstall   # removes the Claude Code setup; your wallet stays
 
 Use `tenjin install --project` to set it up for one project instead of your whole machine.
 
+When refreshing from home, Tenjin uses the existing user MCP registration if
+present, or preserves a project-only registration. With neither registration,
+it defaults to user scope. This also applies when home is reached through a
+symlink; `tenjin install --refresh --project` explicitly selects project scope.
+
+If updating to `0.1.0-alpha.18` caused Claude Code to ask about a new project
+MCP server named `x402`, that release could accidentally register it in
+`~/.mcp.json` while refreshing your user install. After upgrading to a release
+with the fix, inspect that file. If its `x402` entry runs `tenjin mcp` and you
+did not intentionally install it at project scope in your home directory,
+remove just that registration:
+
+```bash
+(cd ~ && claude mcp remove x402 -s project)
+```
+
+This keeps other MCP entries and the user registration in `~/.claude.json`.
+Run `tenjin install` to ensure the user setup is present, then restart Claude
+Code. Do not use `tenjin uninstall --project` from home for this cleanup: its
+settings path is also the user settings path.
+
 To keep it installed and stop it, `tenjin config set router.enabled false` stops the router on this machine, and `tenjin config set --project router.enabled false` stops it in this repository.
 
 ## More

@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
+import { readFile, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { promisify } from 'node:util';
@@ -190,6 +190,36 @@ export interface McpRegistration {
   reason?: string;
 }
 
+async function inferRefreshProject(
+  cwd: string,
+  home: string,
+  dataDir: string,
+  readRegistration: typeof readMcpEntry,
+): Promise<boolean> {
+  const hooks = await probeOurEntries(routerSettingsPath({ project: true, cwd }), dataDir);
+  if (hooks.state !== 'present') return false;
+  const [cwdPath, homePath] = await Promise.all([
+    realpath(cwd),
+    realpath(home).catch((err: NodeJS.ErrnoException) => {
+      // A missing home cannot alias this existing project. Do not require it
+      // to exist (or create it) just to refresh the project's own settings.
+      if (err.code === 'ENOENT' || err.code === 'ENOTDIR') return null;
+      throw err;
+    }),
+  ]);
+  if (cwdPath !== homePath) return true;
+
+  // Home shares one hooks file between scopes. Preserve a project-only install,
+  // but prefer user scope when both registrations exist (including alpha.18's
+  // accidental duplicate). With neither registration, the default is user.
+  // Unreadable/conflicting entries stay in their scope so reconciliation refuses
+  // them instead of silently creating a registration in the other scope.
+  const user = await readRegistration('user', cwd, home);
+  if (user.state !== 'absent') return false;
+  const project = await readRegistration('project', cwd, home);
+  return project.state !== 'absent';
+}
+
 export async function runRouterInstall(
   args: RouterInstallArgs,
   ctx: CommandContext,
@@ -203,22 +233,12 @@ export async function runRouterInstall(
     });
   }
   const cwd = deps.cwd ?? process.cwd();
-  // A refresh converges EVERY install this machine has, in the scope each one
-  // was made in. `tenjin update` spawns it from the HOME directory, so looking
-  // ONE SCOPE, THE ONE THIS RAN IN. `--refresh` converges the install whose
-  // settings file is here: home by default, this project under `--project`.
-  // The fan-out across recorded projects is gone with the list it read, along
-  // with a failure mode where one project's broken JSON decided what every
-  // other install got. `tenjin update` is a binary swap plus this, nothing more.
-  // With no flag, a refresh converges the install that is actually HERE: the
-  // project file when this directory carries our entries, the home file
-  // otherwise. `--project` and its absence are still explicit targets, so
-  // nothing silently moves an install from one scope to the other.
+  // `tenjin update` runs from home, where the hooks file cannot prove scope.
+  // An explicit --project still wins, including for a project rooted at home.
   const project =
     args.project ??
     (args.refresh === true &&
-      (await probeOurEntries(routerSettingsPath({ project: true, cwd }), ctx.dataDir)).state ===
-        'present');
+      (await inferRefreshProject(cwd, home, ctx.dataDir, deps.readMcpEntry ?? readMcpEntry)));
   const settingsPath = routerSettingsPath({
     ...(project ? { project: true } : {}),
     homeDir: home,
