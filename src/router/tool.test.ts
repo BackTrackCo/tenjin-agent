@@ -571,6 +571,29 @@ describe('the redirect a lookup answers', () => {
     expect(await takeUndelivered(dir, 'sess-1', undefined, CATEGORY)).toBe(status !== 'fulfilled');
   });
 
+  it('never counts a free lookup as delivered, since its 200 proves nothing', async () => {
+    const DOCS = 'library or API documentation';
+    await noteSession(dir, 'sess-1');
+    await bindDecision(dir, 'sess-1', 'k3f9-abcd');
+    await noteRedirect(dir, 'sess-1', undefined, { id: 'k3f9-abcd', category: DOCS });
+    const { fetchImpl, calls } = net([
+      {
+        url: ROUTER,
+        status: 200,
+        body: decision({ providerPriceAtomic: '0', category: DOCS, provider: 'Context7' }),
+      },
+      // A 200 naming another library: the lookup succeeded, the match did not.
+      { url: PROVIDER, status: 200, body: 'Context7 matched: /dodopayments/billingsdk.' },
+    ]);
+    const result = await runRequestTool(
+      { query: '@acme/billing-sdk createInvoice', id: 'k3f9-abcd' },
+      deps(fetchImpl),
+    );
+    expect(result.envelope.status).toBe('fulfilled');
+    expect(calls.some((call) => call.paid)).toBe(false);
+    expect(await takeUndelivered(dir, 'sess-1', undefined, DOCS)).toBe(true);
+  });
+
   it("marks only the agent whose redirect named the id, never another's", async () => {
     await noteSession(dir, 'sess-1');
     await bindDecision(dir, 'sess-1', 'k3f9-abcd');
