@@ -63,6 +63,13 @@ function read(skill: string, file = 'SKILL.md', teamMode = false): string {
 function flat(skill: string, file = 'SKILL.md', teamMode = false): string {
   return read(skill, file, teamMode).replace(/\s+/g, ' ');
 }
+it.each([false, true])('requires explicit purchase consent in teamMode=%s', (teamMode) => {
+  const guidance = flat('tenjin-search', 'SKILL.md', teamMode);
+  expect(guidance).toContain('the user explicitly approved this quoted purchase');
+  expect(guidance).toContain('Manual purchases always require consent');
+  expect(guidance).not.toContain('a spend policy covers it');
+});
+
 /** The same file as a TEAM install renders it. */
 function readTeam(skill: string, file = 'SKILL.md'): string {
   return read(skill, file, true);
@@ -986,7 +993,7 @@ describe('the public render did not move', () => {
   // Payment cleanup deliberately updates the manual-consent guidance in search.
   it('renders the reviewed public skill bytes', () => {
     expect(Object.fromEntries(SHAPED_SKILLS.map((n) => [n, digest(read(n))]))).toEqual({
-      'tenjin-search': '50e4fc30d7cf41428647fae5aff2270e',
+      'tenjin-search': 'f4c0f87cfe28dc90040f4c11098c5588',
       'tenjin-publish': '02e20863861037f9e3af795eec7b034a',
     });
   });

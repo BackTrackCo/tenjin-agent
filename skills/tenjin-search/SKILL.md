@@ -113,7 +113,7 @@ means price and preview only, itself a signal; an unloadable card is transient,
 so retry. A maximal card is ~25kB — inspect two or three, not the page.
 
 Buy only when ALL hold: the card matches your question's exact versions; the price
-beats your cost to regenerate; the user approved it, or a spend policy covers it.
+beats your cost to regenerate; the user explicitly approved this quoted purchase.
 Purchases are on-chain, unrefundable.
 
 ## Read (free), then buy (paid)
