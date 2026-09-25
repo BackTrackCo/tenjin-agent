@@ -112,7 +112,7 @@ const withHint = (hint: string) => ({ ...EXECUTE, decision: { ...EXECUTE.decisio
 const SEEN = HINT_SOURCE + ': ' + HINT.replace('request({', 'mcp__x402__request({');
 /** The one sentence this client adds, to a pre-call redirect only. */
 const ONE_BLOCK =
-  'If this does not cover it, search again: you will not be redirected twice in a row.';
+  'If this does not cover it, make your own call again: you will not be redirected twice in a row.';
 /** A pre-call redirect's reason: the line as the host sees it, then that sentence. */
 const DENIED = `${SEEN} ${ONE_BLOCK}`;
 

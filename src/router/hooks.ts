@@ -260,7 +260,7 @@ function attributed(hint: string): string {
 
 /** This client's one sentence on a redirect: the promise {@link runNativeHook} keeps. */
 const ONE_BLOCK =
-  'If this does not cover it, search again: you will not be redirected twice in a row.';
+  'If this does not cover it, make your own call again: you will not be redirected twice in a row.';
 
 /** Where the offer sits after the free tool came back short. */
 function shortfallOffer(tool: 'WebSearch' | 'WebFetch', hint: string): string {
