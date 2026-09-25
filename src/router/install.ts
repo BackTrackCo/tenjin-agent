@@ -18,6 +18,8 @@ import { toMoney } from '../lib/money';
 import { paint } from '../lib/output';
 import { resolveContextSettings } from '../lib/settings';
 import type { SpendPolicy } from '../lib/policy';
+import { removeRetiredSkills } from '../lib/skill-placement';
+import { loadRawConfig } from '../lib/config';
 import { onPath } from '../lib/skill-wiring';
 import type { WalletDeps, WalletOutcome } from '../commands/install-wallet';
 import type { CommandContext, CommandResult } from '../context';
@@ -232,6 +234,7 @@ export async function runRouterInstall(
       fix: 'Set HOME to your home directory (`export HOME=...`), then re-run `tenjin install`.',
     });
   }
+  await loadRawConfig(ctx.dataDir); // Validate before any install writes; retired keys remain readable.
   const cwd = deps.cwd ?? process.cwd();
   // `tenjin update` runs from home, where the hooks file cannot prove scope.
   // An explicit --project still wins, including for a project rooted at home.
@@ -262,6 +265,14 @@ export async function runRouterInstall(
       );
     }
   }
+  const spend = await persistRouterDefaults(ctx.dataDir, args.refresh === true);
+  const removedKeysLines =
+    spend.removed.length > 0
+      ? [
+          `Removed retired settings: ${spend.removed.join(', ')}. Automatic router limits remain in effect; manual pay always requires consent.`,
+        ]
+      : [];
+  const removedSkills = await removeRetiredSkills(home, project ? cwd : undefined);
   const hooks = await writeHooks({
     adapter: claudeAdapter,
     homeDir: home,
@@ -280,8 +291,8 @@ export async function runRouterInstall(
     // The SAME writers, minus the one that decides anything: the entries are
     // rewritten in place by their ownership marker so an upgrade never
     // duplicates them, the rule and the registration are re-checked because a
-    // new version can change either, and `config.json`, the wallet and
-    // `spend.json` are not touched at all. Widening an agent's spend policy
+    // new version can change either. Config cleanup only removes retired keys;
+    // the wallet, current limits and `spend.json` are unchanged. Widening an agent's spend policy
     // during an unattended upgrade is not a convergence.
     // RECONCILED, not re-added: `claude mcp add` exits 1 on an existing entry,
     // so the registration is read first and only written when it is missing or
@@ -304,12 +315,16 @@ export async function runRouterInstall(
         statusLine,
         mcp,
         refresh: true,
+        spend,
+        removedSkills,
         scope: mcpScope(project),
       },
-      humanLines: refreshLines(ctx, problems(ctx, hooks, permissions, statusLine, mcp)),
+      humanLines: [
+        ...refreshLines(ctx, problems(ctx, hooks, permissions, statusLine, mcp)),
+        ...removedKeysLines,
+      ],
     };
   }
-  const spend = await persistRouterDefaults(ctx.dataDir);
   // The shelf install's wallet step, unchanged except that it never asks: a
   // lookup cannot be paid without a wallet, so install makes one. A failure is
   // reported, never fatal; everything above is useful without it.
@@ -329,18 +344,22 @@ export async function runRouterInstall(
     mcp,
     wallet,
     disclosure: DISCLOSURE,
+    removedSkills,
   };
   return {
     data,
-    humanLines: lines(ctx, {
-      project,
-      hooks,
-      permissions,
-      statusLine,
-      mcp,
-      wallet,
-      policy: effective.policy,
-    }),
+    humanLines: [
+      ...lines(ctx, {
+        project,
+        hooks,
+        permissions,
+        statusLine,
+        mcp,
+        wallet,
+        policy: effective.policy,
+      }),
+      ...removedKeysLines,
+    ],
   };
 }
 
@@ -525,7 +544,7 @@ function effectiveLimits(policy: SpendPolicy): EffectiveLimits {
   return {
     maxAutoSpend: toMoney(policy.maxAutoSpendAtomic.toString()).usd,
     sessionBudget:
-      policy.sessionBudgetAtomic === 0n
+      policy.sessionBudgetAtomic === null
         ? 'no daily ceiling'
         : toMoney(policy.sessionBudgetAtomic.toString()).usd,
   };
@@ -570,7 +589,7 @@ function lines(
   const ok = paint(ctx.io, 'green', '✓');
   const limits = effectiveLimits(s.policy);
   const daily =
-    s.policy.sessionBudgetAtomic === 0n ? 'no daily limit' : `$${limits.sessionBudget} a day`;
+    s.policy.sessionBudgetAtomic === null ? 'no daily limit' : `$${limits.sessionBudget} a day`;
   // The first line only says "set up" when it is: a settings file this run
   // would not write to means nothing was set up, and hooks without the MCP
   // server point at a `request` tool that is not there.
@@ -585,7 +604,7 @@ function lines(
         ? paint(ctx.io, 'yellow', '! Almost done: Claude Code needs one command')
         : `${ok} Tenjin is set up for Claude Code${where}`,
     ...walletLines(ctx, ok, s.wallet),
-    `  Spends at most $${limits.maxAutoSpend} a lookup, ${daily}`,
+    `  Automatic router: up to $${limits.maxAutoSpend} per call; daily limit ${daily}`,
     ...(s.statusLine.state === 'ours' || s.statusLine.state === 'composed'
       ? ['  Live status line on: each lookup names its provider while it runs']
       : []),

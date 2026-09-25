@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runBuy } from './buy';
@@ -80,15 +80,13 @@ function fakeAuthorizer(
   };
 }
 
-/** Write a config that auto-approves spends up to $1 with no prompt (for the
- *  real-authorizer wiring tests: the only remaining gate is the price cap). */
-async function writeAutoApproveConfig(): Promise<void> {
+/** High automatic limits still do not replace manual purchase consent. */
+async function writeAutomaticLimitsConfig(): Promise<void> {
   await writeFile(
     join(dir, 'config.json'),
     JSON.stringify({
       maxAutoSpend: '1000000',
-      sessionBudget: '0',
-      confirm: 'above:1000000',
+      sessionBudget: 'none',
     }),
   );
 }
@@ -230,7 +228,7 @@ describe('runBuy, paid path', () => {
     expect(authorizer.authorize).toHaveBeenCalledOnce();
     // The FRESH 402's amount reaches the policy, and settlement commits the reservation.
     expect(vi.mocked(authorizer.authorize).mock.calls[0]?.[0]?.amountAtomic).toBe(100_000n);
-    expect(authorizer.commit).toHaveBeenCalledWith(RESERVATION, 100_000n);
+    expect(authorizer.commit).toHaveBeenCalledWith(RESERVATION, 100_000n, { mode: 'manual' });
   });
 
   it('attaches the tenjin-cli User-Agent on every request, never X-Tenjin-Client, and X-Tenjin-Search-Id after a search', async () => {
@@ -396,6 +394,43 @@ describe('runBuy, library idempotence', () => {
 });
 
 describe('runBuy, spend policy', () => {
+  it.each(['prior', 'interactive', 'missing'] as const)(
+    'uses manual consent (%s) with zero automatic limits and keeps automatic headroom',
+    async (consent) => {
+      await writeFile(
+        join(dir, 'config.json'),
+        JSON.stringify({ maxAutoSpend: '0', sessionBudget: '0' }),
+      );
+      const pr = buildPaymentRequired();
+      const { fetch, calls } = makeReadServer({
+        plain: () => reply.paymentRequired(pr),
+        siwx: () => reply.paymentRequired(pr),
+        payment: () => reply.entitled(readBody()),
+      });
+      const confirm = vi.fn(async () => true);
+      const result = runBuy({ ref: URL_, yes: consent === 'prior' }, makeCtx(), {
+        fetchImpl: fetch,
+        provider: testWalletProvider(),
+        ...(consent === 'interactive' ? { confirm } : {}),
+      });
+      if (consent === 'missing') {
+        await expect(result).rejects.toMatchObject({
+          code: 'POLICY_REFUSED',
+          details: { reason: 'confirm_always' },
+        });
+        expect(calls.some((call) => call.phase === 'payment')).toBe(false);
+      } else {
+        expect((await result).data).toMatchObject({ entitlement: 'purchased' });
+        expect(JSON.parse(await readFile(join(dir, 'spend.json'), 'utf8'))).toMatchObject({
+          committedAtomic: '100000',
+          automaticCommittedAtomic: '0',
+          reservations: [],
+        });
+        expect(confirm).toHaveBeenCalledTimes(consent === 'interactive' ? 1 : 0);
+      }
+    },
+  );
+
   it('a hard deny (e.g. price cap) refuses with exit-3 POLICY_REFUSED and never pays', async () => {
     const pr = buildPaymentRequired();
     const { fetch, calls } = makeReadServer({
@@ -532,7 +567,7 @@ describe('runBuy, fresh-402 price guard', () => {
 
 describe('runBuy, real spend authorizer wiring (resolveSpendAuthorizer)', () => {
   it('the 402 amount reaches the price cap: an overcharging server is refused without signing', async () => {
-    await writeAutoApproveConfig();
+    await writeAutomaticLimitsConfig();
     const pr = buildPaymentRequired({ amount: '200000' }); // server wants $0.20
     const { fetch, calls } = makeReadServer({
       plain: () => reply.paymentRequired(pr),
@@ -541,7 +576,7 @@ describe('runBuy, real spend authorizer wiring (resolveSpendAuthorizer)', () => 
     });
     await expect(
       // --max-price 0.10 is below the advertised 0.20 → the price cap must deny.
-      runBuy({ ref: URL_, maxPrice: '0.10' }, makeCtx(), {
+      runBuy({ ref: URL_, maxPrice: '0.10', yes: true }, makeCtx(), {
         fetchImpl: fetch,
         provider: testWalletProvider(),
       }),
@@ -549,15 +584,15 @@ describe('runBuy, real spend authorizer wiring (resolveSpendAuthorizer)', () => 
     expect(calls.some((c) => c.phase === 'payment')).toBe(false);
   });
 
-  it('within the price cap and policy, the real authorizer allows the pay', async () => {
-    await writeAutoApproveConfig();
+  it('within the price cap, the real authorizer permits an explicitly consented purchase', async () => {
+    await writeAutomaticLimitsConfig();
     const pr = buildPaymentRequired({ amount: '200000' });
     const { fetch } = makeReadServer({
       plain: () => reply.paymentRequired(pr),
       siwx: () => reply.paymentRequired(pr),
       payment: () => reply.entitled(readBody({ price: '200000' })),
     });
-    const result = await runBuy({ ref: URL_, maxPrice: '0.30' }, makeCtx(), {
+    const result = await runBuy({ ref: URL_, maxPrice: '0.30', yes: true }, makeCtx(), {
       fetchImpl: fetch,
       provider: testWalletProvider(),
     });

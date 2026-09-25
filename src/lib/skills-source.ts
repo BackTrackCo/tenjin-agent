@@ -11,19 +11,10 @@ import { CliError } from './errors';
 export const SKILL_NAMES = ['tenjin-search', 'tenjin-publish', 'tenjin'] as const;
 export type SkillName = (typeof SKILL_NAMES)[number];
 
-/**
- * OPTIONAL skills ship in the package but are PRESENT only while their gate is
- * on, and are never required for a directory to count as wired: tenjin-pay
- * exists exactly while the `bazaarPay` toggle does (lib/skill-placement). The
- * heal and doctor cover them when present, exactly like everything else whose
- * presence is the operator's consent.
- */
-export const OPTIONAL_PAY_SKILL = 'tenjin-pay';
-export const OPTIONAL_SKILL_NAMES = [OPTIONAL_PAY_SKILL] as const;
-export type OptionalSkillName = (typeof OPTIONAL_SKILL_NAMES)[number];
+export const RETIRED_SKILL_NAMES = ['tenjin-pay'] as const;
 
-/** Every skill directory this package ships, gated or not, in install order. */
-export const PACKAGED_SKILL_NAMES = [...SKILL_NAMES, ...OPTIONAL_SKILL_NAMES] as const;
+/** Retired names remain known to uninstall, but are never packaged or healed. */
+export const PACKAGED_SKILL_NAMES = [...SKILL_NAMES] as const;
 
 /**
  * Every file a packaged skill ships, per skill, as a path relative to the skill
@@ -37,11 +28,11 @@ export const PACKAGED_SKILL_NAMES = [...SKILL_NAMES, ...OPTIONAL_SKILL_NAMES] as
  * file that nobody declares fails the build rather than becoming litter no
  * uninstall can reclaim.
  *
- * The OPTIONAL skills are declared here for the same reason the required ones
- * are: `uninstall` reclaims a tenjin-pay directory whatever `bazaarPay` says at
- * the time, so a gate flipped back off cannot strand the files it wrote.
  */
-export const SHIPPED_SKILL_FILES: Record<SkillName | OptionalSkillName, readonly string[]> = {
+export const SHIPPED_SKILL_FILES: Record<
+  SkillName | (typeof RETIRED_SKILL_NAMES)[number],
+  readonly string[]
+> = {
   'tenjin-search': ['SKILL.md', 'references/permissions.md'],
   'tenjin-publish': ['SKILL.md', 'references/maintain.md'],
   tenjin: ['SKILL.md'],

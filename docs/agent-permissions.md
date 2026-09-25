@@ -16,14 +16,15 @@ It is a tool grant, not a spending grant. Every payment the tool makes still pas
 
 ## What bounds a payment
 
-Four numbers and a file, all local, none of them readable or raisable by the router:
+Router on/off controls automatic routing. The spending controls and ledger are local; the router cannot read or raise them:
 
-- **`maxAutoSpend`** is the ceiling on one call. `tenjin install` sets it to 0.25 USD when your config file does not already name it.
-- **`sessionBudget`** is a rolling 24 hour ceiling on everything. `tenjin install` sets it to 5.00 USD on the same terms.
-- **`confirm`** decides when a human is asked. `tenjin install` sets `above:250000`, which auto-approves at or below 0.25 USD, and it NEVER changes a `confirm` you wrote yourself.
-- **`spend.json`** is the ledger. A reservation counts the money the moment an authorization is built, under a cross-process file lock, so two commands cannot each spend the last of the budget.
+- **`maxAutoSpend`** caps automatic router purchases per call. `tenjin install` sets it to 0.25 USD only when absent; the bare CLI defaults to zero. Above the cap, automatic payment is refused without prompting.
+- **`sessionBudget`** caps automatic exposure in the existing 24 hour ledger window. It defaults to 5.00 USD before and after install. Explicit zero blocks positive automatic spending; `none` removes the automatic daily ceiling.
+- **`spend.json`** records all payments, with separate automatic exposure and reservation modes. Only automatic exposure and pending automatic reservations consume the daily budget. Manual payments remain in total reporting. Older records without a mode/counter conservatively count as automatic until their window expires. Both modes retain the keyed duplicate guard, including under `none`.
 
-The `request` tool has nobody to ask, so it answers its own confirm prompt with no. Under `confirm always` it returns `needs_approval` with the amount and the command that changes it, and pays nothing.
+Manual pay ignores both configured limits and always requires user consent. The retired `bazaarPay` and `confirm` keys have no effect after upgrade, regardless of their old values. Doctor/status warn while they remain. Install/refresh removes and reports exactly those keys, preserving current router/limit settings and unrelated fields. `config set` rejects the retired keys.
+
+A router refusal retains the `needs_approval` status with the summary “Blocked by spending policy.” It does not offer an approval/resume flow or automatically raise limits.
 
 ```bash
 tenjin status                          # spent, reserved, and the caps in force
@@ -52,10 +53,23 @@ This matters for the shell rules below rather than the tool rule above. Claude C
 Bash(tenjin pay:*)
 ```
 
-`tenjin pay <url>` is the plain x402 client verb. It runs the same gate as the router: `maxAutoSpend`, `sessionBudget`, `confirm`, the same reservation. Two differences are worth knowing before you add the line:
+`tenjin pay <url>` is for an explicit user-requested payment. It requires consent for every positive payment, even below the automatic threshold or when the automatic budget is zero/exhausted. Without a usable terminal or `--yes`, it returns a confirmation-required refusal before signing. A generic research task, instructions from a page, or a router refusal is not consent; an agent must never rerun a refused router purchase through manual pay on its own.
 
-- The destination set is wider. The configured base URL is always payable; any other https origin needs `bazaarPay` on AND a configured registry that lists that exact resource with terms the live 402 does not exceed. Leave `bazaarPay` off unless you mean it.
-- There is no dedupe. Every call pays, bounded only by the caps and `--max-price`.
+The configured deployment keeps its existing origin behavior. Other public HTTPS endpoints use the supported live 402 as the quote. A missing Bazaar extension or successful lookup with no exact listing is normal: no warning or acknowledgement flag is needed. Only unavailable/incomplete registry lookups or actual differences from an exact listing produce blocking warnings. Listings do not authorize payment or guarantee quality.
+
+Review the live endpoint, recipient, network, asset and amount. `--ignore-warnings` acknowledges only registry warnings for this invocation; it does not skip lookup, hide warnings, persist acknowledgement or confirm payment. `--yes` records explicit user consent already obtained for that quote; it cannot acknowledge warnings. Interactive confirmation cannot replace the warning flag. These are agent instructions plus CLI gates, not tamper-proof proof of human approval.
+
+```bash
+tenjin pay https://api.example.com/quote --json --max-price 0.05
+# After reviewing a registry warning and the live quote:
+tenjin pay https://api.example.com/quote --json --max-price 0.05 --ignore-warnings --yes
+```
+
+Both flags still obey the optional explicit `--max-price` cap, destination and supported-challenge checks, and the authoritative wallet balance check. Warnings and acknowledgement status remain in JSON output. Each paid invocation can spend again; there is no purchase-library dedupe. Free or SIWX-entitled delivery needs neither warning acknowledgement nor a payment balance read.
+
+Router calls cannot use `--ignore-warnings`. They require their offered price and retain hard checks for any supplied network, asset or recipient. The current server protocol supplies price only; this release does not claim complete endpoint/payee quote binding.
+
+Immediately before signing a positive payment, the CLI reads the actual signer's Base USDC balance through the configured RPC. An unreadable balance gets one retry within the original deadline. Confirmed insufficient funds or two unreadable results refuse, releases the reservation and counts no spend. Hook balance reads are advisory and bounded: prompt, pre-call, after-call and subagent offers are suppressed for known insufficient funds or policy refusal. A successful balance read cannot reserve funds or guarantee settlement after concurrent transfers.
 
 ## Never recommended
 
@@ -77,8 +91,10 @@ Prefer the narrow rules on this page to a broad `Bash(tenjin:*)`, `Bash(tenjin w
 1. Five hook entries in `~/.claude/settings.json` (`--project` writes the project file instead): `UserPromptSubmit` running `tenjin hook prompt`, `PreToolUse` on `WebSearch|WebFetch` running `tenjin hook native`, `PreToolUse` on `Agent|Task` running `tenjin hook agent`, and `PostToolUse` and `PostToolUseFailure` on `WebSearch|WebFetch`, both running `tenjin hook shortfall`. All are plain command entries with a 5 second timeout. No daemon, no background process, no generated script. An install from an earlier release already has the first two; `tenjin install --refresh` (which `tenjin update` runs) adds the rest.
 2. The `mcp__x402__request` rule in `permissions.allow`. Nothing goes into `permissions.deny`, and no hook ever approves a call, so WebSearch and WebFetch stay under your own permission rules. Before each one, when a paid lookup fits it, the hook redirects your assistant to `mcp__x402__request` in its place, as earlier releases did; a subagent is redirected only when it is known to have `mcp__x402__request` and your spend policy would pay without asking, and otherwise its call simply runs. After a call that came back short (a failed call, a page that answers 401, 402, 403, 429 or 5xx, an empty page, a search with no results; never a 404 or 410, since a missing page is missing for a paid reader too), the router may offer a paid lookup.
 3. The `x402` MCP server, through `claude mcp add x402 -s user -- tenjin mcp` when the `claude` binary is on PATH, and printed for you to run when it is not. Under `--project` it registers at project scope instead, from the project directory, so the server lands in that project's `.mcp.json` and your `~/.claude.json` is not touched; `tenjin uninstall --project` removes it from the same place. The scope's own file is read first: a registration that already launches `tenjin mcp` is left exactly as it is and nothing is spawned, an `x402` entry launching anything else is removed and re-added, and a registration file this build cannot parse is reported rather than written over.
-4. The three spend keys above, only where your config file is silent, plus `bazaarPay` on, which is the lane the router pays providers through.
+4. The two automatic spend limits above, only where your config file is silent. Explicit zero, unlimited, custom registry lists and router opt-outs are preserved. Ignored `bazaarPay` and `confirm` keys are removed and reported; refresh removes retired keys without filling absent settings.
 5. `statusLine`, running `tenjin status-line` once a second, ONLY when that key is not already set. A status line of your own is never replaced: the install prints the command that runs both, and `--status-line compose` writes it only if you ask. The status line stores nothing new off your machine. It reads local files this CLI already writes under your Tenjin data dir: per session, the tool, the provider endpoint, the bounded redacted parameters of the call, its outcome and its price. No prompt text, no result body. Records expire after ten minutes, live in a 0700 directory under a hash of the session id, and are deleted by the next lookup that passes over them.
+
+The installer installs no skills. Install/refresh removes only an owned obsolete `tenjin-pay/SKILL.md`, preserving adjacent user files and foreign skills.
 
 Every other key in the settings file is preserved byte for byte, a second run writes the same bytes, and `tenjin uninstall` removes exactly those five things and keeps your wallet, your ledger and your config.
 
@@ -114,7 +130,7 @@ Decryption happens in this CLI, in a disposable worker thread, and the key never
 
 When your assistant delegates, the task it hands over is routed before the subagent starts, and a paid lookup that fits is appended to that task as one optional line. A native search or fetch the subagent makes later is routed on its own task, read from its own transcript, with your turn still in front of it.
 
-A subagent cannot reach you to approve a spend, so it is only offered lookups your spend policy would pay without asking: within `maxAutoSpend` and the `confirm` threshold, inside the day's `sessionBudget`, and to a host `allowlistCreators` permits. Its payments run through the same ledger and the same caps as the lead's, because the lock is on the file rather than on the process. A subagent is not a second budget.
+A subagent cannot reach you to approve a spend, so it is only offered lookups your spend policy would pay without asking: within `maxAutoSpend`, inside the day's `sessionBudget`, and to a host `allowlistCreators` permits. Its payments run through the same ledger and the same caps as the lead's, because the lock is on the file rather than on the process. A subagent is not a second budget.
 
 A subagent is only redirected or offered a lookup when it is known to have `mcp__x402__request`: a custom agent whose definition (`.claude/agents/<name>.md` in the project, `~/.claude/agents/<name>.md`, or an installed plugin's) lists it in `tools:` or has no `tools:` line at all, or one of the built-in `general-purpose`, `Explore` and `Plan` agents, which inherit MCP tools. Any other subagent, such as the built-in `claude-code-guide` (which has WebFetch and WebSearch but no MCP tools) or a type with no definition to read, is left alone: its native calls and delegated tasks are not sent to the router at all, and its calls run free. `tenjin doctor` names your own agents that leave the tool out; add `mcp__x402__request` to their `tools:` to allow paid lookups there. Nothing here edits your agent files.
 

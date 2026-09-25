@@ -423,7 +423,16 @@ async function claudeHasServer(opts: { scope: 'user' | 'project'; cwd: string })
   return stdout.includes(MCP_SERVER_NAME) && !/no mcp server/i.test(stdout);
 }
 
-function spendCheck(maxAutoSpendAtomic: bigint, sessionBudgetAtomic: bigint): RouterCheck {
+function spendCheck(maxAutoSpendAtomic: bigint, sessionBudgetAtomic: bigint | null): RouterCheck {
+  if (sessionBudgetAtomic === 0n) {
+    return {
+      name: 'spend',
+      status: 'fail',
+      required: true,
+      detail: 'The daily limit is 0, so positive payments are refused even with --yes.',
+      fix: 'Choose a daily limit with `tenjin config set sessionBudget <usd|none>`.',
+    };
+  }
   if (maxAutoSpendAtomic === 0n) {
     return {
       name: 'spend',
@@ -434,15 +443,15 @@ function spendCheck(maxAutoSpendAtomic: bigint, sessionBudgetAtomic: bigint): Ro
     };
   }
   const budget =
-    sessionBudgetAtomic === 0n
+    sessionBudgetAtomic === null
       ? 'no daily ceiling'
       : `${toMoney(sessionBudgetAtomic.toString()).usd} USD a day`;
   return {
     name: 'spend',
-    status: sessionBudgetAtomic === 0n ? 'warn' : 'ok',
+    status: sessionBudgetAtomic === null ? 'warn' : 'ok',
     required: false,
-    detail: `at most ${toMoney(maxAutoSpendAtomic.toString()).usd} USD a call, ${budget}`,
-    ...(sessionBudgetAtomic === 0n
+    detail: `automatic approval up to ${toMoney(maxAutoSpendAtomic.toString()).usd} USD a call, ${budget}`,
+    ...(sessionBudgetAtomic === null
       ? { fix: 'Set one with `tenjin config set sessionBudget 1.00`.' }
       : {}),
   };

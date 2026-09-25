@@ -225,6 +225,7 @@ export async function runBuy(
     deps.authorizer !== undefined ? { authorizer: deps.authorizer } : {},
   );
   const reservationId = await gateSpend({
+    mode: 'manual',
     ctx,
     authorizer,
     amountAtomic,
@@ -250,7 +251,7 @@ export async function runBuy(
     });
 
     if (paid.kind === 'entitled') {
-      await authorizer.commit(reservationId, payment.amountAtomic);
+      await authorizer.commit(reservationId, payment.amountAtomic, { mode: 'manual' });
       return await deliverFresh(
         ctx.dataDir,
         ref.url,

@@ -91,8 +91,18 @@ describe('buy and pay are opt-in, never always-safe', () => {
     const note = OPT_IN_ALLOWLIST[0]?.note ?? '';
     expect(note).toMatch(/UNATTENDED purchases/);
     expect(note).toMatch(/`--yes`.*clears the\s*confirm gate/is);
-    expect(note).toMatch(/sessionBudget 0 means NO ceiling/);
+    expect(note).toContain('Manual purchases do not obey maxAutoSpend or sessionBudget');
     expect(note).not.toMatch(/human (is still )?on every purchase/i);
+  });
+
+  it('states that manual pay has no automatic daily budget', () => {
+    const note = OPT_IN_ALLOWLIST.find((entry) => entry.command === 'tenjin pay')!.note;
+    expect(note).toContain('Automatic router limits do not apply');
+    expect(note).toContain(
+      'maxAutoSpend and sessionBudget apply only to automatic router spending',
+    );
+    expect(note).not.toContain('still obey sessionBudget');
+    expect(note).toContain('explicit --max-price');
   });
 
   // Every opt-in in this tier SPENDS. The tier used to hold one that did not

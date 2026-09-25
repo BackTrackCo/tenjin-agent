@@ -298,14 +298,12 @@ const RawInstallHarnessSchema = z
 
 /**
  * The persisted config shape. Spend keys are stored atomic (accepted as decimal
- * USD at the command edge, see lib/money); `confirm` is the stored form
- * "always" | "above:<atomic>". These are client-enforced guardrails, not a
+ * USD at the command edge, see lib/money). These are client-enforced guardrails, not a
  * security boundary — any process that runs the CLI can also edit this file.
  */
 export const ConfigSchema = z.object({
   maxAutoSpend: atomicString,
-  sessionBudget: atomicString,
-  confirm: z.union([z.literal('always'), z.string().regex(/^above:\d+$/)]),
+  sessionBudget: z.union([atomicString, z.literal('none')]),
   /**
    * Hard per-send cap for `tenjin wallet send`, NOT satisfiable by --yes or a prompt
    * (the spend-policy posture): an atomic amount caps each send, "0" disables
@@ -350,14 +348,6 @@ export const ConfigSchema = z.object({
    * 90 days. Off by default; no query text is retained server-side without it.
    */
   evalCohort: z.boolean(),
-  /**
-   * The Bazaar pay lane opt-in: when true, `tenjin pay` may pay a NON-Tenjin
-   * x402 endpoint, provided a configured registry lists that exact resource and
-   * the live 402 matches the listed deal. Off by default; `install` asks once.
-   * The lane's teaching is the OPTIONAL tenjin-pay skill, present on disk
-   * exactly while this is on (lib/skill-placement).
-   */
-  bazaarPay: z.boolean(),
   /** x402 discovery registries (facilitator base URLs) `discover` queries and
    *  the Bazaar pay lane verifies against. */
   bazaarRegistries: z.array(z.url()),
@@ -441,8 +431,7 @@ export const DEFAULT_BAZAAR_REGISTRIES = [
 
 export const CONFIG_DEFAULTS: Config = {
   maxAutoSpend: '0',
-  sessionBudget: '0',
-  confirm: 'always',
+  sessionBudget: '5000000',
   // A type placeholder only, never honored: Config requires every key (and
   // CONFIG_KEYS derives from these). resolveSendMaxAmount never reads it — an
   // absent key resolves to SEND_MAX_UNSET and `tenjin wallet send` refuses until the
@@ -457,7 +446,6 @@ export const CONFIG_DEFAULTS: Config = {
   shelfBypassSecret: '',
   rpcUrl: 'https://mainnet.base.org',
   evalCohort: false,
-  bazaarPay: false,
   bazaarRegistries: DEFAULT_BAZAAR_REGISTRIES,
   publish: { mode: 'review', defaultPrice: '100000', ackServerWarnings: 'mode' },
   install: { harness: [], grantDeclined: [], routerProjects: [] },
@@ -544,6 +532,14 @@ export type TeamConfigKey = (typeof TEAM_CONFIG_KEYS)[number];
 export const ROUTER_CONFIG_KEYS = ['router.enabled', 'router.context'] as const;
 export type RouterConfigKey = (typeof ROUTER_CONFIG_KEYS)[number];
 
+export const RETIRED_PAYMENT_KEYS = ['bazaarPay', 'confirm'] as const;
+export const RETIRED_PAYMENT_GUIDANCE =
+  'Retired payment settings no longer control payments. Use router.enabled, maxAutoSpend and sessionBudget for automatic routing; manual pay always requires consent. Run tenjin install to remove retired keys.';
+
+export function retiredPaymentKeys(raw: PartialConfig): string[] {
+  return RETIRED_PAYMENT_KEYS.filter((key) => Object.hasOwn(raw, key));
+}
+
 /**
  * Read and validate config.json WITHOUT applying defaults, so provenance can
  * distinguish "present in file" from "absent". Missing file is fine (returns
@@ -584,7 +580,8 @@ export async function loadRawConfig(dir: string): Promise<PartialConfig> {
  *  publish block is merged per-subkey so a file that sets only publish.mode keeps
  *  the default defaultPrice (a shallow spread would drop it). */
 export async function loadConfig(dir: string): Promise<Config> {
-  const raw = await loadRawConfig(dir);
+  const raw = { ...(await loadRawConfig(dir)) };
+  for (const key of retiredPaymentKeys(raw)) delete raw[key];
   // loadConfig's job is the effective Config object, so an absent key is its
   // default here; the provenance question lives in resolve* below.
   return {
@@ -656,7 +653,6 @@ export interface PublishModeResolution {
 export interface EffectiveSettings {
   maxAutoSpend: ResolvedSetting<string>;
   sessionBudget: ResolvedSetting<string>;
-  confirm: ResolvedSetting<string>;
   sendMaxAmount: ResolvedSetting<string>;
   allowlistCreators: ResolvedSetting<string[]>;
   baseUrl: ResolvedSetting<string>;
@@ -664,7 +660,6 @@ export interface EffectiveSettings {
   shelfBypassSecret: ResolvedSetting<string>;
   rpcUrl: ResolvedSetting<string>;
   evalCohort: ResolvedSetting<boolean>;
-  bazaarPay: ResolvedSetting<boolean>;
   bazaarRegistries: ResolvedSetting<string[]>;
   publishMode: PublishModeResolution;
   publishDefaultPrice: ResolvedSetting<string>;
@@ -700,7 +695,6 @@ export function resolveSettings(input: ResolveSettingsInput): EffectiveSettings 
   return {
     maxAutoSpend: fileOrDefault('maxAutoSpend', config),
     sessionBudget: fileOrDefault('sessionBudget', config),
-    confirm: fileOrDefault('confirm', config),
     sendMaxAmount: resolveSendMaxAmount(config),
     allowlistCreators: fileOrDefault('allowlistCreators', config),
     baseUrl: resolveBaseUrl(config, flags, env),
@@ -708,7 +702,6 @@ export function resolveSettings(input: ResolveSettingsInput): EffectiveSettings 
     shelfBypassSecret: fileOrDefault('shelfBypassSecret', config),
     rpcUrl: fileOrDefault('rpcUrl', config),
     evalCohort: fileOrDefault('evalCohort', config),
-    bazaarPay: fileOrDefault('bazaarPay', config),
     bazaarRegistries: fileOrDefault('bazaarRegistries', config),
     publishMode: resolvePublishMode({ config, project, env }),
     publishDefaultPrice: resolvePublishDefaultPrice({ config, project }),

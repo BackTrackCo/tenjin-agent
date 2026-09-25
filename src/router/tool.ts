@@ -29,8 +29,7 @@ import { routerSettings } from './settings';
  * origin and spend at most one `maxAutoSpend` inside the daily budget.
  *
  * `needs_approval` is a LOCAL outcome only. The server never sends it: it is
- * what a price over the cap, an exhausted budget or an explicit `confirm:
- * always` looks like from here, and the fix is a command the user can run.
+ * what a price over the cap or an exhausted budget looks like from here, and the fix is a command the user can run.
  */
 
 export interface RequestToolArgs {
@@ -160,6 +159,7 @@ export async function runRequestTool(
         headers: built.headers,
         ...(built.body !== undefined ? { rawBody: built.body } : {}),
         terms,
+        execution: 'router',
         requestKey: `${decision.capabilityId}:${canonicalHash(contract.arguments ?? {})}`,
         ...(contract.resultSchema !== undefined ? { resultSchema: contract.resultSchema } : {}),
         printBody: true,
@@ -395,7 +395,7 @@ interface FailExtras {
 function summaryFor(status: FailStatus, reason: string): string {
   if (status === 'native') return `No paid lookup needed: ${reason}`;
   if (status === 'needs_input') return `More input needed: ${reason}`;
-  if (status === 'needs_approval') return `Approval needed: ${reason}`;
+  if (status === 'needs_approval') return `Blocked by spending policy: ${reason}`;
   return `x402 request ${status}: ${reason}`;
 }
 

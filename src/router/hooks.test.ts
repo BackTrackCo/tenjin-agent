@@ -233,7 +233,6 @@ describe('the prompt hook', () => {
    */
   it.each([
     ['above maxAutoSpend', { maxAutoSpend: '9999', confirm: 'above:9999' }],
-    ['under confirm always', { confirm: 'always' }],
     ['past the session budget', { sessionBudget: '20000' }],
   ])('says nothing when the lookup is %s', async (_label, over) => {
     const fs = await import('node:fs/promises');
@@ -663,7 +662,7 @@ describe('the pre-call hook', () => {
     const out = await runNativeHook(event, deps);
     expect(out).toMatchObject({ response: null, action: 'execute', withheld: true });
 
-    // Nothing was redirected, so the after-call arm still offers on that call.
+    // The same payment eligibility applies to the after-call offer.
     const after = await runShortfallHook(
       {
         ...((await readableEvent('https://x.com/a', 'WebFetch')) as object),
@@ -671,7 +670,7 @@ describe('the pre-call hook', () => {
       },
       deps,
     );
-    expect(after.response).not.toBeNull();
+    expect(after.response).toBeNull();
   });
 
   it.each([
@@ -816,7 +815,7 @@ describe('a wallet that cannot cover the lookup', () => {
       action: 'execute',
       withheld: true,
     });
-    // Nothing was redirected, so the after-call arm still offers on that call.
+    // The same payment eligibility applies to the after-call offer.
     const after = await runShortfallHook(
       {
         ...((await readableEvent('https://x.com/a', 'WebFetch')) as object),
@@ -824,7 +823,7 @@ describe('a wallet that cannot cover the lookup', () => {
       },
       deps,
     );
-    expect(after.response).not.toBeNull();
+    expect(after.response).toBeNull();
   });
 
   it.each([
@@ -1555,8 +1554,6 @@ describe('a subagent', () => {
 
   it.each([
     ['above maxAutoSpend', { maxAutoSpend: '9999', confirm: 'above:9999' }],
-    ['under confirm always', { confirm: 'always' }],
-    ['above the confirm threshold', { confirm: 'above:9999' }],
     [
       'to a host outside allowlistCreators',
       { allowlistCreators: ['wolframalpha.x402.paysponge.com'] },
@@ -1583,6 +1580,7 @@ describe('a subagent', () => {
   });
 
   it.each([
+    ['retired settings do not suppress offers', { confirm: 'always', bazaarPay: false }],
     ['at maxAutoSpend', { maxAutoSpend: '10000', confirm: 'above:10000' }],
     ['to an allowlisted host', { allowlistCreators: ['vaaya.ai'] }],
   ])('is offered a lookup that would auto-execute, %s', async (_label, over) => {
@@ -1640,8 +1638,8 @@ describe('a subagent', () => {
     expect(calls).toHaveLength(0);
   });
 
-  it('is not denied when the lookup would need an approval it cannot ask for', async () => {
-    await setConfig({ ...ROUTER_POLICY, confirm: 'always' });
+  it('is not denied when automatic spending is disabled', async () => {
+    await setConfig({ ...ROUTER_POLICY, maxAutoSpend: '0' });
     await defineReader('WebFetch, mcp__x402__request');
     const { out } = await subagentPreCall();
     expect(out).toMatchObject({ response: null, action: 'execute', withheld: true });
@@ -1723,7 +1721,7 @@ describe('a subagent', () => {
     expect(out.response).not.toBeNull();
   });
 
-  it('leaves the main agent its offer whatever the policy', async () => {
+  it('suppresses the main agent offer when policy refuses payment', async () => {
     await setConfig({ maxAutoSpend: '0', confirm: 'always' });
     const { fetchImpl } = router(EXECUTE);
     const out = await runShortfallHook(
@@ -1734,7 +1732,7 @@ describe('a subagent', () => {
         fetchImpl,
       },
     );
-    expect(out.response).not.toBeNull();
+    expect(out.response).toBeNull();
   });
 });
 

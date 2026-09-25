@@ -31,7 +31,7 @@ beforeEach(async () => {
   await mkdir(join(dir, '.git'));
   await writeFile(
     join(dir, 'config.json'),
-    JSON.stringify({ bazaarPay: true, maxAutoSpend: '250000', sessionBudget: '5000000' }),
+    JSON.stringify({ maxAutoSpend: '250000', sessionBudget: '5000000' }),
   );
 });
 afterEach(async () => {
@@ -158,7 +158,13 @@ function deps(fetchImpl: typeof fetch, auth = authorizer()) {
     cwd: dir,
     authorizer: auth,
     fetchImpl,
-    payDeps: { fetchImpl, provider: testWalletProvider(), authorizer: auth, destination: PUBLIC },
+    payDeps: {
+      readBalance: async () => 100_000_000n,
+      fetchImpl,
+      provider: testWalletProvider(),
+      authorizer: auth,
+      destination: PUBLIC,
+    },
   };
 }
 
@@ -371,14 +377,20 @@ describe('what the tool refuses to execute', () => {
       authorizer: resolveSpendAuthorizer(ctx(), {
         maxAutoSpendAtomic: 250_000n,
         sessionBudgetAtomic: 5_000_000n,
-        confirm: { mode: 'above' as const, thresholdAtomic: 250_000n },
+
         allowlistCreators: [],
       }),
       fetchImpl,
-      payDeps: { fetchImpl, provider: testWalletProvider(), destination: PUBLIC },
+      payDeps: {
+        readBalance: async () => 100_000_000n,
+        fetchImpl,
+        provider: testWalletProvider(),
+        destination: PUBLIC,
+      },
     };
     const result = await runRequestTool({ query: 'q' }, real);
     expect(result.envelope).toMatchObject({ status: 'needs_approval' });
+    expect(result.summary).toContain('Blocked by spending policy');
     expect(result.isError).toBe(false);
   });
 
@@ -390,11 +402,16 @@ describe('what the tool refuses to execute', () => {
       authorizer: resolveSpendAuthorizer(ctx(), {
         maxAutoSpendAtomic: 250_000n,
         sessionBudgetAtomic: 5_000_000n,
-        confirm: { mode: 'above' as const, thresholdAtomic: 250_000n },
+
         allowlistCreators: [],
       }),
       fetchImpl,
-      payDeps: { fetchImpl, provider: testWalletProvider(), destination: PUBLIC },
+      payDeps: {
+        readBalance: async () => 100_000_000n,
+        fetchImpl,
+        provider: testWalletProvider(),
+        destination: PUBLIC,
+      },
     };
     const result = await runRequestTool({ query: 'q' }, real);
     expect(result.envelope).toMatchObject({ status: 'fulfilled' });
