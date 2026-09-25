@@ -38,8 +38,8 @@ const BINDING_PREFIX = 'id-';
 const OFFER_PREFIX = 'offer-';
 /** The session's own liveness touch, likewise outside the call-record pattern. */
 const SESSION_FILE = 'session.json';
-/** The session's last pre-call redirect: one file, and the last write wins. */
-const REDIRECT_FILE = 'redirect.json';
+/** An agent's last pre-call redirect, one file per agent in the session. */
+const REDIRECT_PREFIX = 'redirect-';
 /** Call records are named by a 64-hex digest and nothing else is read as one. */
 const CALL_FILE_RE = /^[a-f0-9]{64}\.json$/;
 
@@ -88,9 +88,11 @@ interface SavedProgress extends Stamp {
   price?: string;
 }
 
-/** Which decision the last redirect named, by digest, and whether it delivered. */
+/** Which decision the last redirect named (by digest), its category, and
+ *  whether it delivered. */
 interface SavedRedirect extends Stamp {
   id: string;
+  category: string;
   delivered: boolean;
 }
 
@@ -224,24 +226,42 @@ export async function wasOffered(
 }
 
 /**
- * NEVER BLOCKED TWICE IN A ROW. The pre-call hook records each redirect as the
- * session's last one, `request` marks it delivered once the lookup it named is
- * fulfilled, and the next native call that finds it undelivered runs unrouted
- * ({@link takeUndelivered}). Without it, a lookup that fails sends the agent
- * back to search, and the same deny meets it there.
+ * ONE RECORD PER AGENT. Subagents share the session id, so a shared record
+ * would let one overwrite another's redirect, or spend the main agent's skip.
+ * The main agent's key is the empty string, which no `agent_id` can be: the
+ * decoder refuses an empty one.
+ */
+function redirectPath(dataDir: string, sessionId: string, agentId: string | undefined): string {
+  return join(sessionDir(dataDir, sessionId), `${REDIRECT_PREFIX}${digest(agentId ?? '')}.json`);
+}
+
+/**
+ * NEVER BLOCKED TWICE IN A ROW FOR ONE KIND OF LOOKUP. The pre-call hook
+ * records each redirect as that agent's last one, `request` marks it delivered
+ * once the lookup it named is fulfilled, and the agent's next offer in the same
+ * category, while it is still undelivered, is withheld ({@link takeUndelivered}).
+ * Without it, a lookup that fails sends the agent back to its own tools, and
+ * the same deny meets it there.
  */
 export async function noteRedirect(
   dataDir: string,
   sessionId: string,
-  decisionId: string,
+  agentId: string | undefined,
+  redirect: { id: string; category: string },
   now = Date.now(),
 ): Promise<void> {
-  const saved: SavedRedirect = { version: 1, at: now, id: digest(decisionId), delivered: false };
-  await write(join(sessionDir(dataDir, sessionId), REDIRECT_FILE), saved);
+  const saved: SavedRedirect = {
+    version: 1,
+    at: now,
+    id: digest(redirect.id),
+    category: redirect.category,
+    delivered: false,
+  };
+  await write(redirectPath(dataDir, sessionId, agentId), saved);
 }
 
-/** The lookup this id named was fulfilled. Resolved the way the footer is, and
- *  written only over a last redirect that carried this same id. */
+/** The lookup this id named was fulfilled. The session is resolved the way the
+ *  footer is, and only the one agent's record carrying this same id is marked. */
 export async function markDelivered(
   dataDir: string,
   decisionId: string,
@@ -251,26 +271,41 @@ export async function markDelivered(
     () => null,
   );
   if (directory === null) return;
-  const path = join(directory, REDIRECT_FILE);
-  const last = await readRedirect(path);
-  if (last === null || last.id !== digest(decisionId)) return;
-  await write(path, { ...last, delivered: true });
+  const id = digest(decisionId);
+  try {
+    const dir = await opendir(directory);
+    let count = 0;
+    for await (const entry of dir) {
+      if (++count > MAX_RECORDS) return;
+      if (!entry.isFile() || !entry.name.startsWith(REDIRECT_PREFIX)) continue;
+      const path = join(directory, entry.name);
+      const last = await readRedirect(path);
+      if (last?.id !== id) continue;
+      await write(path, { ...last, delivered: true });
+      return;
+    }
+  } catch {
+    // A lost mark costs one withheld offer, never a payment.
+  }
 }
 
 /**
- * True, once, when the session's last redirect is live and undelivered. The
- * record is REMOVED, so routing resumes on the call after this one, and only
- * the caller whose removal succeeds gets true: two parallel calls cannot both
- * skip on one redirect.
+ * True, once, when this agent's last redirect is live, undelivered and in this
+ * same category. The record is REMOVED, so the call after this one is routed
+ * as usual, and only the caller whose removal succeeds gets true: two parallel
+ * calls cannot both skip on one redirect. Any other answer leaves it alone.
  */
 export async function takeUndelivered(
   dataDir: string,
   sessionId: string,
+  agentId: string | undefined,
+  category: string,
   now = Date.now(),
 ): Promise<boolean> {
-  const path = join(sessionDir(dataDir, sessionId), REDIRECT_FILE);
+  const path = redirectPath(dataDir, sessionId, agentId);
   const last = await readRedirect(path);
-  if (last === null || last.delivered || now - last.at > EXPIRY_MS) return false;
+  if (last === null || last.delivered || last.category !== category) return false;
+  if (now - last.at > EXPIRY_MS) return false;
   return rm(path).then(
     () => true,
     () => false,
@@ -578,8 +613,10 @@ async function readRedirect(path: string): Promise<SavedRedirect | null> {
   const row = await readJson(path);
   const stamp = stampOf(row);
   if (row === null || stamp === null) return null;
-  return typeof row.id === 'string' && typeof row.delivered === 'boolean'
-    ? { ...stamp, id: row.id, delivered: row.delivered }
+  return typeof row.id === 'string' &&
+    typeof row.category === 'string' &&
+    typeof row.delivered === 'boolean'
+    ? { ...stamp, id: row.id, category: row.category, delivered: row.delivered }
     : null;
 }
 

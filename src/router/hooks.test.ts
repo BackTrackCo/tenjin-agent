@@ -767,12 +767,35 @@ describe('the pre-call hook', () => {
 });
 
 /**
- * NEVER BLOCKED TWICE IN A ROW. A redirect whose lookup does not deliver sends
- * the agent back to search, and a second deny there is a loop: so the next
- * native call runs unasked, and the one after it is routed as usual.
+ * NEVER BLOCKED TWICE IN A ROW FOR ONE KIND OF LOOKUP. A redirect whose lookup
+ * does not deliver sends the agent back to its own tools, and a second deny
+ * there is a loop: so every call is still routed, the agent's next offer in the
+ * same category is withheld once, and anything else is redirected as usual.
  */
 describe('never blocked twice in a row', () => {
   const DENY = { hookSpecificOutput: { permissionDecision: 'deny' } };
+  const WITHHELD = { response: null, action: 'execute', redirectUndelivered: true };
+
+  /** One pre-call WebFetch in `sess-1` (or as `over` says), which the router
+   *  answers with an offer in `category`. Every one of them asks the router. */
+  async function nativeCall(
+    category = EXECUTE.decision.category,
+    over: Record<string, unknown> = {},
+  ): Promise<Awaited<ReturnType<typeof runNativeHook>>> {
+    const { fetchImpl, calls } = router({
+      ...EXECUTE,
+      decision: { ...EXECUTE.decision, hint: PRECALL_HINT, category },
+    });
+    const event = await preCall('https://example.test/spec', 'WebFetch', over);
+    const out = await runNativeHook(event, {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+      homeDir: dir,
+    });
+    expect(calls).toHaveLength(1);
+    return out;
+  }
 
   /** `request` as the redirected agent calls it. Only a lookup that stops
    *  before payment runs here; tool.test.ts has the paid legs. */
@@ -793,63 +816,50 @@ describe('never blocked twice in a row', () => {
     );
   }
 
-  it('lets the next call run, unasked, when nothing was called in between', async () => {
-    const { fetchImpl, calls } = router(withHint(PRECALL_HINT));
-    const deps = { dataDir: dir, baseUrl: BASE, fetchImpl };
-    const first = await runNativeHook(await preCall('https://example.test/spec'), deps);
-    expect(first.response).toMatchObject(DENY);
-    const second = await runNativeHook(await preCall('https://example.test/spec'), deps);
-    expect(second).toEqual({ response: null, redirectUndelivered: true });
-    expect(calls).toHaveLength(1);
+  it('withholds the same kind of offer once when nothing was called in between', async () => {
+    expect((await nativeCall()).response).toMatchObject(DENY);
+    expect(await nativeCall()).toEqual(WITHHELD);
+    expect(await renderProgress(dir, 'sess-1')).toBe(
+      'x402 · search: native tools (already redirected once)',
+    );
   });
 
-  it('lets the next call run after a lookup that failed, then routes the one after', async () => {
-    const { fetchImpl, calls } = router(withHint(PRECALL_HINT));
-    const deps = { dataDir: dir, baseUrl: BASE, fetchImpl };
-    expect(
-      (await runNativeHook(await preCall('https://example.test/spec'), deps)).response,
-    ).toMatchObject(DENY);
+  it('withholds it after a lookup that failed, then redirects the call after', async () => {
+    expect((await nativeCall()).response).toMatchObject(DENY);
     const failed = await lookup(router({ error: { code: 'nope', message: 'no' } }, 503).fetchImpl);
     expect(failed.envelope.status).toBe('failed');
-
-    const second = await runNativeHook(await preCall('https://example.test/spec'), deps);
-    expect(second).toEqual({ response: null, redirectUndelivered: true });
-    const third = await runNativeHook(await preCall('https://example.test/spec'), deps);
-    expect(third.response).toMatchObject(DENY);
-    expect(calls).toHaveLength(2);
+    expect(await nativeCall()).toEqual(WITHHELD);
+    expect((await nativeCall()).response).toMatchObject(DENY);
   });
 
-  it('routes the next call as usual once the lookup was fulfilled', async () => {
-    const { fetchImpl, calls } = router(withHint(PRECALL_HINT));
-    const deps = { dataDir: dir, baseUrl: BASE, fetchImpl };
-    expect(
-      (await runNativeHook(await preCall('https://example.test/spec'), deps)).response,
-    ).toMatchObject(DENY);
+  it('redirects an offer of another kind as usual, which becomes the last one', async () => {
+    expect((await nativeCall('read an exact page')).response).toMatchObject(DENY);
+    expect((await nativeCall('web research')).response).toMatchObject(DENY);
+    expect(await nativeCall('web research')).toEqual(WITHHELD);
+  });
+
+  it('redirects the same kind again once the lookup was fulfilled', async () => {
+    expect((await nativeCall()).response).toMatchObject(DENY);
     // What `request` does on `fulfilled`; tool.test.ts pins that it does.
     await markDelivered(dir, 'k3f9-abcd');
-    const second = await runNativeHook(await preCall('https://example.test/spec'), deps);
-    expect(second.response).toMatchObject(DENY);
-    expect(calls).toHaveLength(2);
+    expect((await nativeCall()).response).toMatchObject(DENY);
+  });
+
+  it('keeps the main agent and a subagent to a record each', async () => {
+    const subagent = { agent_id: 'a1', agent_type: 'general-purpose' };
+    expect((await nativeCall()).response).toMatchObject(DENY);
+    expect((await nativeCall(undefined, subagent)).response).toMatchObject(DENY);
+    expect(await nativeCall()).toEqual(WITHHELD);
+    expect(await nativeCall(undefined, subagent)).toEqual(WITHHELD);
   });
 
   it('leaves another session to be routed as usual', async () => {
-    const { fetchImpl, calls } = router(withHint(PRECALL_HINT));
-    const deps = { dataDir: dir, baseUrl: BASE, fetchImpl };
-    expect(
-      (await runNativeHook(await preCall('https://example.test/spec'), deps)).response,
-    ).toMatchObject(DENY);
+    expect((await nativeCall()).response).toMatchObject(DENY);
     const other = await transcriptFor([
       { type: 'user', sessionId: 'sess-2', message: { content: 'please read the spec' } },
     ]);
-    const elsewhere = await runNativeHook(
-      await preCall('https://example.test/spec', 'WebFetch', {
-        session_id: 'sess-2',
-        transcript_path: other,
-      }),
-      deps,
-    );
+    const elsewhere = await nativeCall(undefined, { session_id: 'sess-2', transcript_path: other });
     expect(elsewhere.response).toMatchObject(DENY);
-    expect(calls).toHaveLength(2);
   });
 });
 

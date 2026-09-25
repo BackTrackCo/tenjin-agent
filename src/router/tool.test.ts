@@ -539,9 +539,10 @@ describe('what the tool leaves for the status line', () => {
 /**
  * NEVER BLOCKED TWICE IN A ROW, the tool's half: only a `fulfilled` lookup
  * delivers the pre-call redirect that named its id. Anything less leaves it
- * undelivered, and the hook lets the next native call run.
+ * undelivered, and the hook withholds that agent's next offer in its category.
  */
 describe('the redirect a lookup answers', () => {
+  const CATEGORY = 'crypto price quote';
   const RULE = { type: 'object', properties: { data: { type: 'object' } }, required: ['data'] };
   it.each([
     ['fulfilled', [{ url: ROUTER, status: 200, body: decision() }, ...providerLegs()]],
@@ -560,27 +561,29 @@ describe('the redirect a lookup answers', () => {
   ] as const)('is delivered only by a fulfilled lookup: %s', async (status, legs) => {
     await noteSession(dir, 'sess-1');
     await bindDecision(dir, 'sess-1', 'k3f9-abcd');
-    await noteRedirect(dir, 'sess-1', 'k3f9-abcd');
+    await noteRedirect(dir, 'sess-1', undefined, { id: 'k3f9-abcd', category: CATEGORY });
     const { fetchImpl } = net([...legs]);
     const result = await runRequestTool(
       { query: 'BTC and ETH price', id: 'k3f9-abcd' },
       deps(fetchImpl),
     );
     expect(result.envelope.status).toBe(status);
-    expect(await takeUndelivered(dir, 'sess-1')).toBe(status !== 'fulfilled');
+    expect(await takeUndelivered(dir, 'sess-1', undefined, CATEGORY)).toBe(status !== 'fulfilled');
   });
 
-  it('never delivers a later redirect that named another id', async () => {
+  it("marks only the agent whose redirect named the id, never another's", async () => {
     await noteSession(dir, 'sess-1');
     await bindDecision(dir, 'sess-1', 'k3f9-abcd');
-    await noteRedirect(dir, 'sess-1', 'a-later-one');
+    await noteRedirect(dir, 'sess-1', undefined, { id: 'a-later-one', category: CATEGORY });
+    await noteRedirect(dir, 'sess-1', 'a1', { id: 'k3f9-abcd', category: CATEGORY });
     const { fetchImpl } = net([{ url: ROUTER, status: 200, body: decision() }, ...providerLegs()]);
     const result = await runRequestTool(
       { query: 'BTC and ETH price', id: 'k3f9-abcd' },
       deps(fetchImpl),
     );
     expect(result.envelope.status).toBe('fulfilled');
-    expect(await takeUndelivered(dir, 'sess-1')).toBe(true);
+    expect(await takeUndelivered(dir, 'sess-1', 'a1', CATEGORY)).toBe(false);
+    expect(await takeUndelivered(dir, 'sess-1', undefined, CATEGORY)).toBe(true);
   });
 });
 

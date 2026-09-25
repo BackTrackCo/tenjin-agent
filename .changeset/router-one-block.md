@@ -2,9 +2,10 @@
 'tenjin-cli': patch
 ---
 
-The pre-call router hook no longer blocks WebSearch or WebFetch twice in a row.
-When the `mcp__x402__request` lookup it redirected to does not come back
-fulfilled (it failed, stopped to ask, or was never called), the next native call
-in that session runs as it is, and routing resumes on the call after. The
-redirect's reason now tells the agent it can search again if the lookup does not
-cover it.
+The pre-call router hook no longer redirects WebSearch or WebFetch twice in a
+row to the same kind of lookup. When the `mcp__x402__request` lookup it
+redirected to does not come back fulfilled (it failed, stopped to ask, or was
+never called), that agent's next call matched to the same kind runs as it is,
+while other lookups, and the call after that, are routed as usual; the main
+agent and each subagent keep their own record. The redirect's reason tells the
+agent it can make its own call again if the lookup does not cover it.
