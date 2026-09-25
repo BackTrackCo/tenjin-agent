@@ -34,7 +34,7 @@ const PREFETCH_TIMEOUT_MS = 12_000;
  * search has already taken about 5 s of the lookup's time by then. It fits,
  * with stdin, inside the after-call hook's timeout (`wire.test.ts` pins it).
  */
-export const AUGMENT_WAIT_MS = 10_000;
+export const AUGMENT_WAIT_MS = 9_000;
 /** A bound on the docs text, far above what the endpoint sends. */
 const MAX_DOCS_CHARS = 100_000;
 /** A body file larger than this is not one the prefetch wrote. */

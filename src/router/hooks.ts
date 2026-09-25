@@ -836,7 +836,7 @@ export async function runShortfallHook(
       augmented: 'added',
     };
   }
-  const outcome = await offerOnShortfall(event, deps);
+  const outcome = await offerOnShortfall(event, deps, augment !== null);
   return augment === null ? outcome : { ...outcome, augmented: 'nothing' };
 }
 
@@ -844,6 +844,7 @@ export async function runShortfallHook(
 async function offerOnShortfall(
   event: Extract<HookEvent, { kind: 'shortfall' }>,
   deps: HookDeps,
+  docsJustMissed = false,
 ): Promise<ShortfallHookOutcome> {
   const { nativeOutcome, pending, eventName } = event;
   if (nativeOutcome === null) return { response: null };
@@ -856,6 +857,10 @@ async function offerOnShortfall(
   }
   const routed = await routeNativeCall(event, pending, deps, { nativeOutcome });
   if (routed.offer === null) return { ...routed.outcome, nativeOutcome };
+  // The free docs lookup for this very search just came back empty: offering
+  // it again would send the agent to the same miss. Only a paid offer stands.
+  if (docsJustMissed && routed.offer.providerPriceAtomic === '0')
+    return { response: null, nativeOutcome, action: 'execute' };
   return {
     response: {
       hookSpecificOutput: {

@@ -2280,6 +2280,24 @@ describe('free docs on top of a search', () => {
     expectShortfallOffer(post);
   });
 
+  it('never re-offers the free docs lookup that just missed on this search', async () => {
+    await before('next.js middleware matcher', 'toolu_1');
+    await answer(jobs[0]!, 404, '');
+    const free = withHint(SEARCH_SHORTFALL_HINT);
+    const post = await after(
+      'next.js middleware matcher',
+      'toolu_1',
+      SHORT,
+      {},
+      {
+        ...free,
+        decision: { ...free.decision, providerPriceAtomic: '0' },
+      },
+    );
+    expect(post.out.response).toBeNull();
+    expect(post.out.augmented).toBe('nothing');
+  });
+
   it('takes the shortfall route when the lookup has not answered in time', async () => {
     await before('next.js middleware matcher', 'toolu_1');
     const started = Date.now();
