@@ -183,6 +183,17 @@ describe('main', () => {
 
   // The two things an operator chooses at install time, and nothing else: which
   // settings file, and whether this is a converge run for `tenjin update`.
+  it('documents invocation-scoped payment warnings without the shelved discover command', async () => {
+    const cap = captureIo();
+    expect(await main(['pay', '--help'], cap.io)).toBe(0);
+    const help = cap.stdout();
+    expect(help).toContain('--ignore-warning');
+    expect(help).toContain('--yes confirms payment only');
+    expect(help).toContain('--json --max-price');
+    expect(help).not.toContain('bazaarPay');
+    expect(help).not.toContain('tenjin discover');
+  });
+
   it('offers only the flags the router install actually has', async () => {
     const cap = captureIo();
     expect(await main(['install', '--help'], cap.io)).toBe(0);

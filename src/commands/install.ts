@@ -13,8 +13,7 @@ import { skillMaterialize } from '../lib/skill-materialize';
 import { installSkill } from '../lib/skill-writer';
 import { isTeamModeConfig } from '../lib/settings';
 import type { SkillInstallStatus } from '../lib/skill-writer';
-import { resolveSkillsSource, OPTIONAL_PAY_SKILL, SKILL_NAMES } from '../lib/skills-source';
-import { placeOptionalSkill } from '../lib/skill-placement';
+import { resolveSkillsSource, SKILL_NAMES } from '../lib/skills-source';
 import {
   CLI_SKILL_NAMES,
   HOSTED_SKILL_NAME,
@@ -33,12 +32,7 @@ import {
   resolveGrantDeclined,
 } from '../lib/config';
 import type { PartialConfig, PublishMode } from '../lib/config';
-import {
-  persistBazaarPay,
-  persistGrantDeclined,
-  persistInstallHarness,
-  persistPublishMode,
-} from './config';
+import { persistGrantDeclined, persistInstallHarness, persistPublishMode } from './config';
 import { resolveWallet, walletValue, type WalletOutcome } from './install-wallet';
 import { collectDoctorChecks } from './doctor';
 import type { CheckResult, DoctorDeps, DoctorChecks } from './doctor';
@@ -83,12 +77,6 @@ const InstallInputSchema = z.object({
    * it (the publish-mode select says what an auto mode adds).
    */
   noGrant: z.boolean().optional(),
-  /**
-   * `--bazaar-pay`: let `tenjin pay` pay Bazaar-listed non-Tenjin endpoints under
-   * the spend policy, and place the skill that teaches the lane. Off unless asked
-   * for: this gate opens spending at sellers Tenjin does not operate.
-   */
-  bazaarPay: z.boolean().optional(),
   /**
    * `--no-hooks`: register no hooks THIS RUN, changing nothing persistent. It is
    * deliberately not the same as `tenjin config set hooks.<arm> false`, which is
@@ -557,7 +545,6 @@ async function installBody(
   const noWallet = parsed.data.noWallet === true;
   const noHooks = parsed.data.noHooks === true;
   const noGrant = parsed.data.noGrant === true;
-  const bazaarPayFlag = parsed.data.bazaarPay === true;
   // Validate the enum flags UP FRONT so a bad value fails before any wiring.
   const publishModeFlag =
     parsed.data.publishMode !== undefined ? parseModeFlag(parsed.data.publishMode) : undefined;
@@ -685,31 +672,6 @@ async function installBody(
   const wallet = await underDataDir(ctx.dataDir, () =>
     resolveWallet(ctx, deps, walletSkip(dryRun, noWallet), canPrompt),
   );
-  const bazaarPay = await underDataDir(ctx.dataDir, () =>
-    resolveBazaarPay(ctx, bazaarPayFlag, dryRun, rawConfig.bazaarPay),
-  );
-  // The Bazaar lane's teaching lives in its own OPTIONAL skill, and PRESENCE is
-  // the whole mechanism: the tenjin-pay skill is on disk exactly while the
-  // toggle is on, so an agent is never taught a lane the operator turned off.
-  // Placed after the decisions so this run's own answer is what lands; the
-  // doctor snapshot below then sees the final state. Per-plan best-effort like
-  // the writer loop above: a placement failure is doctor's to report.
-  if (!dryRun) {
-    for (const plan of plans) {
-      try {
-        await placeOptionalSkill(
-          OPTIONAL_PAY_SKILL,
-          plan.skillsDir,
-          skillsSource,
-          bazaarPay.enabled,
-          teamMode,
-        );
-      } catch {
-        // The skills check in the embedded doctor run reports what remains.
-      }
-    }
-  }
-
   // AFTER every decision, never before (#101). The snapshot used to be taken
   // straight after the skills were written, so a run that created a wallet
   // reported "No wallet" in both the walkthrough and `data.doctor` — the checks
@@ -734,7 +696,6 @@ async function installBody(
     harnesses,
     doctor: { status: doctor.failure !== undefined ? 'fail' : 'pass', checks: doctor.checks },
     publishMode,
-    bazaarPay,
     // Shipped with the install rather than left for the operator to discover after
     // their first auto-mode denial (#33). Static constants, no config key: see
     // lib/permissions.ts for why this is deliberately not operator-editable state.
@@ -1100,33 +1061,6 @@ function modeBlurb(v: PublishMode): string {
     : v === 'review'
       ? 'your agent asks you in chat first'
       : 'your agent publishes unattended, and only a hard block stops it';
-}
-
-interface BazaarPayOutcome {
-  enabled: boolean;
-  /** enabled = this run's flag; kept = the config already says; unset = neither. */
-  status: 'enabled' | 'kept' | 'unset';
-}
-
-/**
- * The Bazaar pay lane (plan: tenjin-notes cli-x402-pay), and a flag rather than a
- * question: paying non-Tenjin sellers is an opt-in nobody should be able to give
- * by pressing return at a prompt they did not come for. `--bazaar-pay` turns it
- * on and remembers it. Without the flag an install reads what the config already
- * says and writes nothing, so `tenjin config set bazaarPay <on|off>` is the one
- * way to change it and a re-install never overrides it.
- */
-async function resolveBazaarPay(
-  ctx: CommandContext,
-  flag: boolean,
-  dryRun: boolean,
-  existing: boolean | undefined,
-): Promise<BazaarPayOutcome> {
-  if (!flag) {
-    return { enabled: existing === true, status: existing === undefined ? 'unset' : 'kept' };
-  }
-  if (!dryRun) await persistBazaarPay(ctx.dataDir, true);
-  return { enabled: true, status: 'enabled' };
 }
 
 // --- Publish-mode selection (D38 setup) ------------------------------------------

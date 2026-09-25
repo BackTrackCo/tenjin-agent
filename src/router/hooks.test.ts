@@ -663,7 +663,7 @@ describe('the pre-call hook', () => {
     const out = await runNativeHook(event, deps);
     expect(out).toMatchObject({ response: null, action: 'execute', withheld: true });
 
-    // Nothing was redirected, so the after-call arm still offers on that call.
+    // The same payment eligibility applies to the after-call offer.
     const after = await runShortfallHook(
       {
         ...((await readableEvent('https://x.com/a', 'WebFetch')) as object),
@@ -671,7 +671,7 @@ describe('the pre-call hook', () => {
       },
       deps,
     );
-    expect(after.response).not.toBeNull();
+    expect(after.response).toBeNull();
   });
 
   it.each([
@@ -816,7 +816,7 @@ describe('a wallet that cannot cover the lookup', () => {
       action: 'execute',
       withheld: true,
     });
-    // Nothing was redirected, so the after-call arm still offers on that call.
+    // The same payment eligibility applies to the after-call offer.
     const after = await runShortfallHook(
       {
         ...((await readableEvent('https://x.com/a', 'WebFetch')) as object),
@@ -824,7 +824,7 @@ describe('a wallet that cannot cover the lookup', () => {
       },
       deps,
     );
-    expect(after.response).not.toBeNull();
+    expect(after.response).toBeNull();
   });
 
   it.each([
@@ -1723,7 +1723,7 @@ describe('a subagent', () => {
     expect(out.response).not.toBeNull();
   });
 
-  it('leaves the main agent its offer whatever the policy', async () => {
+  it('suppresses the main agent offer when policy refuses payment', async () => {
     await setConfig({ maxAutoSpend: '0', confirm: 'always' });
     const { fetchImpl } = router(EXECUTE);
     const out = await runShortfallHook(
@@ -1734,7 +1734,7 @@ describe('a subagent', () => {
         fetchImpl,
       },
     );
-    expect(out.response).not.toBeNull();
+    expect(out.response).toBeNull();
   });
 });
 

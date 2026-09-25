@@ -17,7 +17,7 @@ tenjin wallet fund
 ```text
 ✓ Tenjin is set up for Claude Code
 ✓ Wallet created: 0x3c0D84055994c3062819Ce8730869D0aDeA4c3Bf
-  Spends at most $0.25 a lookup, $5 a day
+  Auto-approves up to $0.25 per call; daily limit $5 a day
 
 Next: tenjin wallet fund, then restart Claude Code
 ```
@@ -51,7 +51,7 @@ x402 · request: calling pro-api.coinmarketcap.com/x402/v3/cryptocurrency/quotes
 
 ## Spending limits
 
-Out of the box, a single lookup can cost at most $0.25 and everything together at most $5 a day, with no prompts under that. Change them any time:
+A fresh install sets automatic approval up to $0.25 per call and a $5 daily limit, only for settings you have not already chosen. The daily limit uses the existing 24 hour ledger window. `sessionBudget 0` refuses positive payments even with `--yes`; `sessionBudget none` explicitly removes the cumulative ceiling. `maxAutoSpend 0` requires approval for positive payments. A bare CLI without install defaults starts with zero spending and confirmation required. Change them any time:
 
 ```bash
 tenjin status                          # what you've spent today

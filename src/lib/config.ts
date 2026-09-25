@@ -304,7 +304,7 @@ const RawInstallHarnessSchema = z
  */
 export const ConfigSchema = z.object({
   maxAutoSpend: atomicString,
-  sessionBudget: atomicString,
+  sessionBudget: z.union([atomicString, z.literal('none')]),
   confirm: z.union([z.literal('always'), z.string().regex(/^above:\d+$/)]),
   /**
    * Hard per-send cap for `tenjin wallet send`, NOT satisfiable by --yes or a prompt
@@ -350,14 +350,6 @@ export const ConfigSchema = z.object({
    * 90 days. Off by default; no query text is retained server-side without it.
    */
   evalCohort: z.boolean(),
-  /**
-   * The Bazaar pay lane opt-in: when true, `tenjin pay` may pay a NON-Tenjin
-   * x402 endpoint, provided a configured registry lists that exact resource and
-   * the live 402 matches the listed deal. Off by default; `install` asks once.
-   * The lane's teaching is the OPTIONAL tenjin-pay skill, present on disk
-   * exactly while this is on (lib/skill-placement).
-   */
-  bazaarPay: z.boolean(),
   /** x402 discovery registries (facilitator base URLs) `discover` queries and
    *  the Bazaar pay lane verifies against. */
   bazaarRegistries: z.array(z.url()),
@@ -457,7 +449,6 @@ export const CONFIG_DEFAULTS: Config = {
   shelfBypassSecret: '',
   rpcUrl: 'https://mainnet.base.org',
   evalCohort: false,
-  bazaarPay: false,
   bazaarRegistries: DEFAULT_BAZAAR_REGISTRIES,
   publish: { mode: 'review', defaultPrice: '100000', ackServerWarnings: 'mode' },
   install: { harness: [], grantDeclined: [], routerProjects: [] },
@@ -570,6 +561,11 @@ export async function loadRawConfig(dir: string): Promise<PartialConfig> {
       cause: err,
     });
   }
+  if (typeof json === 'object' && json !== null && Object.hasOwn(json, 'bazaarPay')) {
+    throw new CliError('CONFIG_INVALID', 'The bazaarPay config key has been retired.', {
+      fix: `Remove bazaarPay from ${path} yourself and choose router.enabled, maxAutoSpend, sessionBudget (0, an amount, or none), and confirm. Existing settings have not been changed.`,
+    });
+  }
   const parsed = RawConfigSchema.safeParse(json);
   if (!parsed.success) {
     throw new CliError('CONFIG_INVALID', `Config at ${path} is invalid`, {
@@ -664,7 +660,6 @@ export interface EffectiveSettings {
   shelfBypassSecret: ResolvedSetting<string>;
   rpcUrl: ResolvedSetting<string>;
   evalCohort: ResolvedSetting<boolean>;
-  bazaarPay: ResolvedSetting<boolean>;
   bazaarRegistries: ResolvedSetting<string[]>;
   publishMode: PublishModeResolution;
   publishDefaultPrice: ResolvedSetting<string>;
@@ -708,7 +703,6 @@ export function resolveSettings(input: ResolveSettingsInput): EffectiveSettings 
     shelfBypassSecret: fileOrDefault('shelfBypassSecret', config),
     rpcUrl: fileOrDefault('rpcUrl', config),
     evalCohort: fileOrDefault('evalCohort', config),
-    bazaarPay: fileOrDefault('bazaarPay', config),
     bazaarRegistries: fileOrDefault('bazaarRegistries', config),
     publishMode: resolvePublishMode({ config, project, env }),
     publishDefaultPrice: resolvePublishDefaultPrice({ config, project }),

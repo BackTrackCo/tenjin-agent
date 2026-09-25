@@ -32,14 +32,14 @@ export async function runRouterStatus(
     (sum, r) => sum + BigInt(r.amountAtomic),
     0n,
   );
-  const budgetAtomic = BigInt(settings.policy.sessionBudgetAtomic);
+  const budgetAtomic = settings.policy.sessionBudgetAtomic;
   const data = {
     baseUrl: settings.baseUrl,
     window: {
       startedAtMs: ledger?.windowStartMs ?? null,
       committed: toMoney(committedAtomic.toString()),
       reserved: toMoney(reservedAtomic.toString()),
-      budget: budgetAtomic === 0n ? null : toMoney(budgetAtomic.toString()),
+      budget: budgetAtomic === null ? null : toMoney(budgetAtomic.toString()),
     },
     caps: {
       maxAutoSpend: toMoney(settings.policy.maxAutoSpendAtomic.toString()),
@@ -52,15 +52,15 @@ export async function runRouterStatus(
     })),
   };
   const budgetLine =
-    budgetAtomic === 0n
-      ? 'no session budget set'
+    budgetAtomic === null
+      ? 'no daily limit'
       : `of ${toMoney(budgetAtomic.toString()).usd} USD in the rolling 24h window`;
   return {
     data,
     humanLines: [
       `spent ${toMoney(committedAtomic.toString()).usd} USD ${budgetLine}`,
       `reserved ${toMoney(reservedAtomic.toString()).usd} USD in ${data.inFlight.length} open request(s)`,
-      `per call at most ${toMoney(settings.policy.maxAutoSpendAtomic.toString()).usd} USD, confirm ${confirmLabel(settings.policy.confirm)}`,
+      `automatic approval up to ${toMoney(settings.policy.maxAutoSpendAtomic.toString()).usd} USD, confirm ${confirmLabel(settings.policy.confirm)}`,
     ],
   };
 }

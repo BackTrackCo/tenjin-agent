@@ -26,7 +26,7 @@ import {
   skillFrontmatterName,
   skillsDirsFor,
 } from './skill-wiring';
-import { OPTIONAL_SKILL_NAMES } from './skills-source';
+import { RETIRED_SKILL_NAMES } from './skills-source';
 
 /**
  * Every file `install` puts in the hooks dir, which is exactly what uninstall
@@ -423,7 +423,7 @@ export async function removeHookScripts(dataDir: string): Promise<{
  */
 export async function removeSkills(homeDir: string): Promise<string[]> {
   const removed: string[] = [];
-  const names = [...CLI_SKILL_NAMES, ...OPTIONAL_SKILL_NAMES, HOSTED_SKILL_NAME];
+  const names = [...CLI_SKILL_NAMES, ...RETIRED_SKILL_NAMES, HOSTED_SKILL_NAME];
   for (const dir of skillsDirsFor(homeDir)) {
     if (lstatSync(dir, { throwIfNoEntry: false })?.isDirectory() !== true) continue;
     for (const name of names) {

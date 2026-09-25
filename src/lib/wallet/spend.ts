@@ -61,10 +61,10 @@ export interface SpendAuthorization {
   message: string;
   amountAtomic: bigint;
   sessionSpentAtomic: bigint;
-  sessionBudgetAtomic: bigint;
+  sessionBudgetAtomic: bigint | null;
   policyEnforcement: PolicyEnforcement;
   /** The pending reservation to commit (on settlement) or release (on abort).
-   *  Present only when the spend may proceed and a budget is in force. */
+   *  Present when the spend may proceed, including an unlimited budget. */
   reservationId?: string;
 }
 
@@ -180,9 +180,8 @@ export function createLocalSpendAuthorizer(deps: LocalSpendAuthorizerDeps): Spen
           sessionBudgetAtomic: deps.policy.sessionBudgetAtomic,
           policyEnforcement: 'client-only',
         };
-        // Reserve budget atomically only when a spend may proceed AND a ceiling is
-        // in force; a denied spend or a disabled budget needs no reservation.
-        if (evaluation.decision === 'deny' || deps.policy.sessionBudgetAtomic === 0n) {
+        // Unlimited budgets still reserve to prevent identical in-flight requests.
+        if (evaluation.decision === 'deny') {
           return base;
         }
         const reservation: Reservation = {
@@ -200,8 +199,7 @@ export function createLocalSpendAuthorizer(deps: LocalSpendAuthorizerDeps): Spen
       amountAtomic: bigint,
       opts: { settledAtomic?: bigint } = {},
     ): Promise<void> {
-      // No reservation id means no budget ceiling was in force at authorize
-      // time; the settled spend still counts against any FUTURE budget window.
+      // Record transmitted exposure even if its reservation has expired.
       await withLedger(async (ledger) => {
         const reservation =
           reservationId !== undefined

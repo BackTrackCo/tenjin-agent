@@ -192,17 +192,8 @@ export const ALWAYS_SAFE_ALLOWLIST: readonly AllowlistEntry[] = [
  *
  * Read the buy note carefully before pasting the line: on the DEFAULT config this
  * rule authorizes unattended spending up to the wallet balance. Walking
- * evaluateSpendPolicy (lib/policy.ts) against CONFIG_DEFAULTS with an agent that
- * passes `--yes` (which this repo's own skill snippet offers):
- *   - `maxPriceAtomic` is unset unless the agent chooses to pass `--max-price`;
- *   - `allowlistCreators` is empty, so the creator gate is off;
- *   - `sessionBudget` is '0', which `if (policy.sessionBudgetAtomic > 0n)` reads
- *     as DISABLED, not as a zero ceiling;
- *   - `maxAutoSpend` '0' and `confirm` 'always' both land on `confirm`, and
- *     `confirmSpend` returns true on `--yes` before any TTY check.
- * Nothing denies. Note the asymmetry that makes the pair read safer than it is:
- * `maxAutoSpend: '0'` means "auto-approve nothing" while `sessionBudget: '0'`
- * means "no ceiling at all".
+ * `--yes` clears confirmation only. Zero daily budget refuses positive payments,
+ * finite budgets cap cumulative exposure, and `none` explicitly removes that cap.
  */
 export const OPT_IN_ALLOWLIST: readonly AllowlistEntry[] = [
   {
@@ -211,23 +202,17 @@ export const OPT_IN_ALLOWLIST: readonly AllowlistEntry[] = [
     note:
       'SPENDS USDC on Base, unrefundably. This authorizes UNATTENDED purchases: ' +
       '`--yes` is an ordinary flag on the same allowlisted verb and it clears the ' +
-      'confirm gate, so on the default config nothing stops a spend up to your ' +
-      'wallet balance. Set a real ceiling first with ' +
-      '`tenjin config set maxAutoSpend <usd>` and ' +
-      '`tenjin config set sessionBudget <usd>` (sessionBudget 0 means NO ceiling, ' +
-      'not a zero one). This line never raises a spend cap by itself, but do not ' +
-      'read that as a human being on every purchase. Fund small.',
+      'confirm gate only. The daily limit remains a hard gate: sessionBudget 0 means no positive payments; ' +
+      'sessionBudget none explicitly removes the ceiling. maxAutoSpend is an automatic approval threshold. ' +
+      'This permission never raises a spend cap. Set a daily limit with `tenjin config set sessionBudget <usd>` before granting unattended spending.',
   },
   {
     rule: 'Bash(tenjin pay:*)',
     command: 'tenjin pay',
     note:
-      'SPENDS USDC on Base, unrefundably, at ANY x402 endpoint the origin gate ' +
-      'allows: the configured base URL always, and with `bazaarPay` on, ' +
-      'registry-listed foreign sellers too. The same spend policy and `--yes` ' +
-      'caveat as the buy line apply, and unlike `buy` there is no library ' +
-      'dedupe: a looping agent pays on every call. Set maxAutoSpend and ' +
-      'sessionBudget first, and leave `bazaarPay` off unless you mean it.',
+      'SPENDS USDC on Base, unrefundably. Direct third-party registry warnings require --ignore-warning ' +
+      'for that invocation, and --yes confirms payment only. Both still obey sessionBudget, --max-price, ' +
+      'balance and destination checks. maxAutoSpend controls automatic approval. Every paid call can spend again.',
   },
 ];
 

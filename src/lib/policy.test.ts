@@ -5,7 +5,7 @@ import { evaluateSpendPolicy, parseConfirmPolicy, type SpendPolicy } from './pol
 function policy(over: Partial<SpendPolicy> = {}): SpendPolicy {
   return {
     maxAutoSpendAtomic: 1_000_000n, // $1 auto
-    sessionBudgetAtomic: 0n, // disabled
+    sessionBudgetAtomic: null, // disabled
     confirm: { mode: 'above', thresholdAtomic: 1_000_000n },
     allowlistCreators: [],
     ...over,
@@ -68,9 +68,9 @@ describe('evaluateSpendPolicy, allowlistCreators', () => {
 });
 
 describe('evaluateSpendPolicy, sessionBudget', () => {
-  it('0 disables the ceiling', () => {
+  it('none removes the ceiling', () => {
     const r = evaluateSpendPolicy(
-      policy({ sessionBudgetAtomic: 0n }),
+      policy({ sessionBudgetAtomic: null }),
       req({ amountAtomic: 999_999_999n }),
     );
     expect(r.decision).not.toBe('deny');
@@ -183,5 +183,16 @@ describe('parseConfirmPolicy', () => {
   });
   it('fails closed to always on a malformed value', () => {
     expect(parseConfirmPolicy('garbage')).toEqual({ mode: 'always' });
+  });
+});
+
+describe('explicit zero daily limit', () => {
+  it('denies positive amounts before confirmation and permits zero', () => {
+    expect(
+      evaluateSpendPolicy(policy({ sessionBudgetAtomic: 0n }), req({ amountAtomic: 1n })),
+    ).toMatchObject({ decision: 'deny', reason: 'session_budget_exceeded' });
+    expect(
+      evaluateSpendPolicy(policy({ sessionBudgetAtomic: 0n }), req({ amountAtomic: 0n })),
+    ).toMatchObject({ decision: 'allow' });
   });
 });

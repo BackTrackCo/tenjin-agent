@@ -87,7 +87,7 @@ async function writeAutoApproveConfig(): Promise<void> {
     join(dir, 'config.json'),
     JSON.stringify({
       maxAutoSpend: '1000000',
-      sessionBudget: '0',
+      sessionBudget: 'none',
       confirm: 'above:1000000',
     }),
   );

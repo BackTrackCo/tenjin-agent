@@ -334,7 +334,6 @@ type Data = {
   harnesses: Harnesses;
   hooks: unknown[];
   doctor: unknown;
-  bazaarPay: { enabled: boolean; status: string };
 };
 
 const asData = (d: unknown) => d as Data;
@@ -492,55 +491,6 @@ describe('runInstall: dry run', () => {
     expect(existsSync(join(home, '.claude', 'skills'))).toBe(false);
     expect(existsSync(join(home, '.agents', 'skills'))).toBe(false);
     expect(existsSync(join(home, '.agents', 'AGENTS.md'))).toBe(false);
-  });
-});
-
-describe('runInstall: the bazaarPay flag', () => {
-  const payPath = () => join(home, '.claude', 'skills', 'tenjin-pay', 'SKILL.md');
-
-  it('a run without the flag leaves it off and persists nothing', async () => {
-    const { data: out } = await runInstall({ harness: ['claude'] }, makeCtx(), deps());
-    expect(asData(out).bazaarPay).toEqual({ enabled: false, status: 'unset' });
-    const raw = await readFile(join(data, 'config.json'), 'utf8').catch(() => '{}');
-    expect((JSON.parse(raw) as { bazaarPay?: boolean }).bazaarPay).toBeUndefined();
-    // The lane's teaching is presence-gated: off means the skill is not there.
-    expect(existsSync(payPath())).toBe(false);
-  });
-
-  it('the tenjin-pay skill is present exactly while the toggle is on', async () => {
-    const first = await runInstall({ harness: ['claude'], bazaarPay: true }, makeCtx(), deps());
-    expect(asData(first.data).bazaarPay).toEqual({ enabled: true, status: 'enabled' });
-    expect(await readFile(payPath(), 'utf8')).toContain('name: tenjin-pay');
-
-    // The next install honors the persisted decision without the flag...
-    const second = await runInstall({ harness: ['claude'] }, makeCtx(), deps());
-    expect(asData(second.data).bazaarPay).toEqual({ enabled: true, status: 'kept' });
-    expect(existsSync(payPath())).toBe(true);
-
-    // ...and an install after the operator turned it off removes our copy.
-    await writeFile(
-      join(data, 'config.json'),
-      JSON.stringify({
-        ...JSON.parse(await readFile(join(data, 'config.json'), 'utf8')),
-        bazaarPay: false,
-      }),
-    );
-    const third = await runInstall({ harness: ['claude'] }, makeCtx(), deps());
-    expect(asData(third.data).bazaarPay).toEqual({ enabled: false, status: 'kept' });
-    expect(existsSync(payPath())).toBe(false);
-    expect(existsSync(join(home, '.claude', 'skills', 'tenjin-search', 'SKILL.md'))).toBe(true);
-  });
-
-  it('--dry-run reports the lane it would turn on and writes nothing', async () => {
-    const res = await runInstall(
-      { harness: ['claude'], bazaarPay: true, dryRun: true },
-      makeCtx(),
-      deps(),
-    );
-    expect(asData(res.data).bazaarPay).toEqual({ enabled: true, status: 'enabled' });
-    const raw = await readFile(join(data, 'config.json'), 'utf8').catch(() => '{}');
-    expect((JSON.parse(raw) as { bazaarPay?: boolean }).bazaarPay).toBeUndefined();
-    expect(existsSync(payPath())).toBe(false);
   });
 });
 

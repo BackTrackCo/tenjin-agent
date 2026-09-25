@@ -160,6 +160,7 @@ export async function runRequestTool(
         headers: built.headers,
         ...(built.body !== undefined ? { rawBody: built.body } : {}),
         terms,
+        execution: 'router',
         requestKey: `${decision.capabilityId}:${canonicalHash(contract.arguments ?? {})}`,
         ...(contract.resultSchema !== undefined ? { resultSchema: contract.resultSchema } : {}),
         printBody: true,

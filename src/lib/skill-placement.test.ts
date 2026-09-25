@@ -1,14 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { placeOptionalSkill, syncBazaarSkill } from './skill-placement';
-import { resolveSkillsSource, OPTIONAL_PAY_SKILL } from './skills-source';
-import type { Io } from './output';
-
-const SKILLS_SRC = resolveSkillsSource(fileURLToPath(new URL('.', import.meta.url)));
+import { removeOwnedSkill, removeRetiredSkills } from './skill-placement';
 
 let home: string;
 beforeEach(async () => {
@@ -17,52 +12,52 @@ beforeEach(async () => {
 afterEach(async () => {
   await rm(home, { recursive: true, force: true });
 });
-
-function io(): Io {
-  const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
-  return { stdout: sink(), stderr: sink(), isTTY: false };
+const skills = () => join(home, '.claude', 'skills');
+const payDir = () => join(skills(), 'tenjin-pay');
+async function writeSkill(name = 'tenjin-pay') {
+  await mkdir(payDir(), { recursive: true });
+  await writeFile(join(payDir(), 'SKILL.md'), `---\nname: ${name}\n---\nlegacy instructions\n`);
 }
 
-const claudeSkills = () => join(home, '.claude', 'skills');
-const payDir = () => join(claudeSkills(), OPTIONAL_PAY_SKILL);
-
-describe('placeOptionalSkill', () => {
-  it('round-trips presence, and removal leaves operator files behind', async () => {
-    await mkdir(claudeSkills(), { recursive: true });
-    await placeOptionalSkill(OPTIONAL_PAY_SKILL, claudeSkills(), SKILLS_SRC, true, false);
-    expect(await readFile(join(payDir(), 'SKILL.md'), 'utf8')).toContain('name: tenjin-pay');
-
+describe('retired skill cleanup', () => {
+  it('removes only our skill file and preserves neighboring operator files', async () => {
+    await writeSkill();
     await writeFile(join(payDir(), 'notes.md'), 'mine');
-    await placeOptionalSkill(OPTIONAL_PAY_SKILL, claudeSkills(), SKILLS_SRC, false, false);
+    await removeRetiredSkills(home);
     expect(existsSync(join(payDir(), 'SKILL.md'))).toBe(false);
-    expect(await readFile(join(payDir(), 'notes.md'), 'utf8')).toBe('mine'); // dir survives
-
-    await placeOptionalSkill(OPTIONAL_PAY_SKILL, claudeSkills(), SKILLS_SRC, true, false);
-    await rm(join(payDir(), 'notes.md'));
-    await placeOptionalSkill(OPTIONAL_PAY_SKILL, claudeSkills(), SKILLS_SRC, false, false);
-    expect(existsSync(payDir())).toBe(false); // empty dir goes with our file
+    expect(await readFile(join(payDir(), 'notes.md'), 'utf8')).toBe('mine');
   });
-
-  it('never deletes a same-named skill that is not ours', async () => {
-    await mkdir(payDir(), { recursive: true });
-    await writeFile(join(payDir(), 'SKILL.md'), '---\nname: somebody-else\n---\ntheirs\n');
-    await placeOptionalSkill(OPTIONAL_PAY_SKILL, claudeSkills(), SKILLS_SRC, false, false);
+  it('removes an empty owned directory and is idempotent without packaged source', async () => {
+    await writeSkill();
+    expect(await removeRetiredSkills(home)).toEqual([payDir()]);
+    expect(existsSync(payDir())).toBe(false);
+    expect(await removeRetiredSkills(home)).toEqual([]);
+    expect(existsSync(join(home, '.agents'))).toBe(false);
+  });
+  it('preserves a foreign skill at the obsolete path', async () => {
+    await writeSkill('somebody-else');
+    expect(await removeOwnedSkill('tenjin-pay', skills())).toEqual({ changed: false });
     expect(await readFile(join(payDir(), 'SKILL.md'), 'utf8')).toContain('somebody-else');
   });
-});
-
-describe('syncBazaarSkill', () => {
-  it('converges only directories a tenjin skill is wired into, and never creates one', async () => {
-    const wired = join(home, '.claude', 'skills');
-    await mkdir(join(wired, 'tenjin-search'), { recursive: true });
-    await writeFile(join(wired, 'tenjin-search', 'SKILL.md'), '---\nname: tenjin-search\n---\nx\n');
-    // ~/.agents/skills does not exist and must not be created.
-
-    await syncBazaarSkill(true, { io: io(), homeDir: home, skillsSourceDir: SKILLS_SRC });
-    expect(existsSync(join(wired, 'tenjin-pay', 'SKILL.md'))).toBe(true);
-    expect(existsSync(join(home, '.agents'))).toBe(false);
-
-    await syncBazaarSkill(false, { io: io(), homeDir: home, skillsSourceDir: SKILLS_SRC });
-    expect(existsSync(join(wired, 'tenjin-pay'))).toBe(false);
+  it('does not traverse a symlinked skills directory', async () => {
+    const foreign = join(home, 'foreign');
+    await mkdir(join(foreign, 'tenjin-pay'), { recursive: true });
+    await writeFile(
+      join(foreign, 'tenjin-pay', 'SKILL.md'),
+      '---\nname: tenjin-pay\n---\nforeign directory',
+    );
+    await mkdir(join(home, '.claude'), { recursive: true });
+    await symlink(foreign, skills());
+    expect(await removeRetiredSkills(home)).toEqual([]);
+    expect(await readFile(join(foreign, 'tenjin-pay', 'SKILL.md'), 'utf8')).toContain(
+      'foreign directory',
+    );
+  });
+  it('cleans the explicitly refreshed project too', async () => {
+    const project = join(home, 'project');
+    const path = join(project, '.agents', 'skills', 'tenjin-pay');
+    await mkdir(path, { recursive: true });
+    await writeFile(join(path, 'SKILL.md'), '---\nname: tenjin-pay\n---\nold');
+    expect(await removeRetiredSkills(home, project)).toEqual([path]);
   });
 });

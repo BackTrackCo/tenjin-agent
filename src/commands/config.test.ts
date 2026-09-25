@@ -13,8 +13,6 @@ import {
 } from './config';
 import { HOOK_ARMS, LOOP_CONFIG_KEYS, RawConfigSchema } from '../lib/config';
 import { CliError } from '../lib/errors';
-import { fileURLToPath } from 'node:url';
-import { resolveSkillsSource } from '../lib/skills-source';
 import {
   claudeSettingsPath,
   FREE_VERB_RULES,
@@ -25,8 +23,6 @@ import { PRODUCTION_ORIGIN } from '../lib/production-origin';
 import type { CommandContext, GlobalFlags } from '../context';
 import { ADAPTERS } from '../adapters/registry';
 import type { HarnessAdapter } from '../adapters/types';
-
-const SKILLS_SRC = resolveSkillsSource(fileURLToPath(new URL('.', import.meta.url)));
 
 let dir: string;
 let prevCwd: string;
@@ -131,10 +127,10 @@ describe('runConfigList', () => {
     expect(d['publish.ackServerWarnings']).toEqual({ value: 'mode', source: 'default' });
     expect(d['router.enabled']).toEqual({ value: true, source: 'default' });
     expect(d['router.context']).toEqual({ value: 'session', source: 'default' });
-    // 12 scalar keys (incl. bazaarPay/bazaarRegistries and the two shelf keys)
+    // 11 scalar keys (incl. bazaarRegistries and the two shelf keys)
     // + 3 publish.* (mode, defaultPrice, ackServerWarnings) + 7 hooks.* (one
     // per arm) + 1 update.mode + 4 loop.* + 1 team.publicFallback + 2 router.*.
-    expect(humanLines).toHaveLength(30);
+    expect(humanLines).toHaveLength(29);
   });
 
   it('sendMaxAmount round-trips: unset until set, decimal USD in, Money out, 0 and none valid', async () => {
@@ -1240,40 +1236,7 @@ describe('the hooks block is set through config, which stays human-gated', () =>
   });
 });
 
-describe('runConfigSet: the bazaarPay toggle places the tenjin-pay skill', () => {
-  it('places on true, removes on false, and only for bazaarPay', async () => {
-    const ctx = makeCtx();
-    const home = await mkdtemp(join(tmpdir(), 'tenjin-cfg-home-'));
-    try {
-      // A wired directory (any shipped skill present) is the consent gate.
-      const wired = join(home, '.claude', 'skills', 'tenjin-search');
-      await mkdir(wired, { recursive: true });
-      await writeFile(join(wired, 'SKILL.md'), '---\nname: tenjin-search\n---\nx\n');
-      const placeSkill = { io: ctx.io, homeDir: home, skillsSourceDir: SKILLS_SRC };
-      const payPath = join(home, '.claude', 'skills', 'tenjin-pay', 'SKILL.md');
-
-      await runConfigSet({ key: 'bazaarPay', value: 'true' }, ctx, { placeSkill });
-      expect(await readFile(payPath, 'utf8')).toContain('name: tenjin-pay');
-
-      await runConfigSet({ key: 'baseUrl', value: 'https://tenjin.blog' }, ctx, { placeSkill });
-      expect(existsSync(payPath)).toBe(true); // untouched by an unrelated key
-
-      await runConfigSet({ key: 'bazaarPay', value: 'false' }, ctx, { placeSkill });
-      expect(existsSync(payPath)).toBe(false);
-      expect(existsSync(join(home, '.claude', 'skills', 'tenjin-search', 'SKILL.md'))).toBe(true);
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
-  });
-
-  it('a placement failure never fails the set itself', async () => {
-    const ctx = makeCtx();
-    const result = await runConfigSet({ key: 'bazaarPay', value: 'false' }, ctx, {
-      placeSkill: { io: ctx.io, homeDir: 'relative-home' },
-    });
-    expect((result.data as { value: boolean }).value).toBe(false);
-  });
-
+describe('payment configuration', () => {
   it('bazaarRegistries accepts a comma list of https origins and rejects garbage', async () => {
     const ctx = makeCtx();
     const set = await runConfigSet(
@@ -1594,5 +1557,49 @@ describe('config set router.* at each scope', () => {
     );
     expect(local.code).toBe('USAGE');
     expect(existsSync(configFile())).toBe(false);
+  });
+});
+
+describe('daily limit configuration cutover', () => {
+  it.each([
+    ['0', '0', { atomic: '0', usd: '0' }],
+    ['1.25', '1250000', { atomic: '1250000', usd: '1.25' }],
+    ['none', 'none', null],
+  ])('round trips %s', async (value, stored, rendered) => {
+    const ctx = makeCtx();
+    await runConfigSet({ key: 'sessionBudget', value: value as string }, ctx);
+    expect(JSON.parse(await readFile(join(dir, 'config.json'), 'utf8')).sessionBudget).toBe(stored);
+    expect((await runConfigGet({ key: 'sessionBudget' }, ctx)).data).toMatchObject({
+      value: rendered,
+      source: 'file',
+    });
+    const { resolveContextSettings } = await import('../lib/settings');
+    expect((await resolveContextSettings(ctx)).policy.sessionBudgetAtomic).toBe(
+      stored === 'none' ? null : BigInt(stored as string),
+    );
+  });
+  it.each([false, true, null])(
+    'refuses the retired key (%s) without rewriting it',
+    async (value) => {
+      const raw = JSON.stringify({
+        bazaarPay: value,
+        sessionBudget: '0',
+        router: { enabled: false },
+      });
+      await writeFile(join(dir, 'config.json'), raw);
+      await expect(runConfigList(makeCtx())).rejects.toMatchObject({
+        code: 'CONFIG_INVALID',
+        fix: expect.stringContaining('Remove bazaarPay'),
+      });
+      await expect(
+        runConfigSet({ key: 'sessionBudget', value: 'none' }, makeCtx()),
+      ).rejects.toMatchObject({ code: 'CONFIG_INVALID' });
+      expect(await readFile(join(dir, 'config.json'), 'utf8')).toBe(raw);
+    },
+  );
+  it('does not accept none as a per-call automatic approval threshold', async () => {
+    await expect(
+      runConfigSet({ key: 'maxAutoSpend', value: 'none' }, makeCtx()),
+    ).rejects.toMatchObject({ code: 'USAGE' });
   });
 });

@@ -14,8 +14,8 @@ export interface SpendPolicy {
   /** Amounts at or below this auto-approve WITHOUT a prompt (still subject to the
    *  confirm gate below). Default 0 → nothing auto-approves. */
   maxAutoSpendAtomic: bigint;
-  /** Rolling local ceiling on cumulative session spend. 0 = disabled (no ceiling). */
-  sessionBudgetAtomic: bigint;
+  /** Rolling local ceiling on cumulative session spend. null = no ceiling; zero refuses positive payments. */
+  sessionBudgetAtomic: bigint | null;
   /** When a human confirmation is requested. */
   confirm: ConfirmPolicy;
   /** Creators (handle or 0x-address, lowercased) auto-payment is restricted to.
@@ -96,7 +96,7 @@ export function evaluateSpendPolicy(policy: SpendPolicy, req: SpendRequest): Pol
     }
   }
 
-  if (policy.sessionBudgetAtomic > 0n) {
+  if (policy.sessionBudgetAtomic !== null) {
     const projected = req.sessionSpentAtomic + req.amountAtomic;
     if (projected > policy.sessionBudgetAtomic) {
       return {

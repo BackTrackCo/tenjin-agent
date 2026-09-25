@@ -23,7 +23,7 @@ afterEach(async () => {
 function policy(over: Partial<SpendPolicy> = {}): SpendPolicy {
   return {
     maxAutoSpendAtomic: 1_000_000n,
-    sessionBudgetAtomic: 0n, // disabled
+    sessionBudgetAtomic: null, // disabled
     confirm: { mode: 'above', thresholdAtomic: 1_000_000n },
     allowlistCreators: [],
     ...over,
@@ -48,10 +48,10 @@ describe('createLocalSpendAuthorizer', () => {
     expect(authz.reservationId).toBeTypeOf('string'); // reserved while budget in force
   });
 
-  it('does not reserve when the budget is disabled (0)', async () => {
-    const auth = createLocalSpendAuthorizer({ dir, policy: policy({ sessionBudgetAtomic: 0n }) });
+  it('reserves even when the budget is unlimited', async () => {
+    const auth = createLocalSpendAuthorizer({ dir, policy: policy({ sessionBudgetAtomic: null }) });
     const authz = await auth.authorize({ amountAtomic: 100_000n, creator: 'iris' });
-    expect(authz.reservationId).toBeUndefined();
+    expect(authz.reservationId).toBeTypeOf('string');
   });
 
   it('commit finalizes a reservation, which a NEW authorizer over the same dir sees', async () => {
@@ -203,16 +203,15 @@ describe('createLocalSpendAuthorizer', () => {
   it('reports an unreadable ledger ONCE and restarts the window (fail-open)', async () => {
     await writeFile(spendLedgerPath(dir), 'not json {{{', { mode: 0o600 });
     const reasons: string[] = [];
-    // Budget off, so neither call persists: both reads see the same broken file
-    // and only the latch keeps the second one quiet.
+    // An unlimited budget still reserves; corruption is reported only once.
     const auth = createLocalSpendAuthorizer({
       dir,
-      policy: policy({ sessionBudgetAtomic: 0n }),
+      policy: policy({ sessionBudgetAtomic: null }),
       onCorrupt: (reason) => reasons.push(reason),
     });
     const authz = await auth.authorize({ amountAtomic: 100_000n, creator: 'iris' });
     expect(authz.sessionSpentAtomic).toBe(0n); // the spend still proceeds
-    await auth.commit(undefined, 100_000n);
+    await auth.commit(authz.reservationId, 100_000n);
     expect(reasons).toEqual(['not valid JSON']);
   });
 
@@ -241,11 +240,11 @@ describe('createLocalSpendAuthorizer', () => {
     expect(reasons).toEqual([]);
   });
 
-  it('commit with no reservation id (budget was off) still counts toward a future budget', async () => {
-    const off = createLocalSpendAuthorizer({ dir, policy: policy({ sessionBudgetAtomic: 0n }) });
+  it('unlimited spend still counts toward a future finite budget', async () => {
+    const off = createLocalSpendAuthorizer({ dir, policy: policy({ sessionBudgetAtomic: null }) });
     const authz = await off.authorize({ amountAtomic: 300_000n, creator: 'iris' });
-    expect(authz.reservationId).toBeUndefined();
-    await off.commit(undefined, 300_000n);
+    expect(authz.reservationId).toBeTypeOf('string');
+    await off.commit(authz.reservationId, 300_000n);
     const on = createLocalSpendAuthorizer({
       dir,
       policy: policy({ sessionBudgetAtomic: 500_000n }),
@@ -323,5 +322,26 @@ describe('the same-turn duplicate guard', () => {
       requestKey: 'shared',
     });
     expect(blocked.reason).toBe('duplicate_in_flight');
+  });
+});
+
+describe('zero and unlimited daily budgets', () => {
+  it('zero refuses without leaving a reservation', async () => {
+    const auth = createLocalSpendAuthorizer({ dir, policy: policy({ sessionBudgetAtomic: 0n }) });
+    expect(
+      await auth.authorize({ amountAtomic: 1n, creator: 'host', requestKey: 'same' }),
+    ).toMatchObject({ decision: 'deny', reason: 'session_budget_exceeded' });
+    await expect(readFile(spendLedgerPath(dir))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+  it('unlimited still atomically refuses an identical in-flight request across authorizers', async () => {
+    const first = createLocalSpendAuthorizer({ dir, policy: policy() });
+    const second = createLocalSpendAuthorizer({ dir, policy: policy() });
+    const request = { amountAtomic: 100_000n, creator: 'host', requestKey: 'same' };
+    const results = await Promise.all([first.authorize(request), second.authorize(request)]);
+    expect(results.filter((a) => a.decision === 'allow')).toHaveLength(1);
+    expect(results.filter((a) => a.reason === 'duplicate_in_flight')).toHaveLength(1);
+    const approved = results.find((a) => a.reservationId)!;
+    await first.release(approved.reservationId);
+    expect(await second.authorize(request)).toMatchObject({ decision: 'allow' });
   });
 });

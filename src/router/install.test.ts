@@ -153,7 +153,7 @@ describe('tenjin install', () => {
     expect(config.maxAutoSpend).toBe('250000');
     expect(config.sessionBudget).toBe('5000000');
     expect(config.confirm).toBe('always');
-    expect(config.bazaarPay).toBe(true);
+    expect(config.bazaarPay).toBeUndefined();
     expect((result.data as { spend: { kept: string[] } }).spend.kept).toEqual(['confirm']);
   });
 
@@ -161,7 +161,7 @@ describe('tenjin install', () => {
     await runRouterInstall({}, ctx(), deps());
     const config = await loadRawConfig(data);
     expect(config.confirm).toBe('above:250000');
-    expect(config.bazaarPay).toBe(true);
+    expect(config.bazaarPay).toBeUndefined();
   });
 
   it('preserves every unrelated settings key byte for byte', async () => {
@@ -240,7 +240,7 @@ describe('tenjin install', () => {
     expect(result.humanLines).toEqual([
       '! Almost done: Claude Code needs one command',
       `✓ Wallet created: ${ADDRESS}`,
-      '  Spends at most $0.25 a lookup, $5 a day',
+      '  Auto-approves up to $0.25 per call; daily limit $5 a day',
       '  Live status line on: each lookup names its provider while it runs',
       '! Could not add the request tool to Claude Code. Run:',
       `  ${MCP_ADD_COMMAND}`,
@@ -262,7 +262,7 @@ describe('tenjin install', () => {
     expect(result.humanLines).toEqual([
       '✓ Tenjin is set up for Claude Code',
       `✓ Wallet created: ${ADDRESS}`,
-      '  Spends at most $0.25 a lookup, $5 a day',
+      '  Auto-approves up to $0.25 per call; daily limit $5 a day',
       '  Live status line on: each lookup names its provider while it runs',
       '',
       'Next: tenjin wallet fund, then restart Claude Code',
@@ -698,7 +698,7 @@ describe('the install readout and the status window', () => {
     );
     const result = await runRouterInstall({}, ctx(), deps());
     const text = result.humanLines!.join('\n');
-    expect(text).toContain('at most $1 a lookup, $10 a day');
+    expect(text).toContain('Auto-approves up to $1 per call; daily limit $10 a day');
     expect(text).not.toContain('$0.25');
     expect(result.data).toMatchObject({
       spend: { effective: { maxAutoSpend: '1', sessionBudget: '10' } },
@@ -708,7 +708,7 @@ describe('the install readout and the status window', () => {
   it('says so when an existing config has no daily ceiling at all', async () => {
     await writeFile(
       join(data, 'config.json'),
-      JSON.stringify({ maxAutoSpend: '500000', sessionBudget: '0' }),
+      JSON.stringify({ maxAutoSpend: '500000', sessionBudget: 'none' }),
     );
     const result = await runRouterInstall({}, ctx(), deps());
     expect(result.humanLines!.join('\n')).toContain('no daily limit');
@@ -1403,4 +1403,62 @@ describe('the live status line', () => {
     expect(settings.statusLine).toBeUndefined();
     expect(settings.hooks).toEqual({});
   });
+});
+
+describe('payment configuration and obsolete skill cutover', () => {
+  it.each(['0', 'none', '1200000'])(
+    'preserves explicit daily limit %s and all related opt-outs across install and refresh',
+    async (sessionBudget) => {
+      const config = {
+        sessionBudget,
+        maxAutoSpend: '0',
+        confirm: 'always',
+        router: { enabled: false },
+        bazaarRegistries: ['https://custom.test'],
+      };
+      await writeFile(join(data, 'config.json'), JSON.stringify(config));
+      await runRouterInstall({}, ctx(), deps());
+      await runRouterInstall({ refresh: true }, ctx(), deps());
+      expect(await loadRawConfig(data)).toMatchObject(config);
+    },
+  );
+  it.each([false, true])(
+    'refuses retired bazaarPay=%s before writing settings or config',
+    async (bazaarPay) => {
+      const raw = JSON.stringify({ bazaarPay, sessionBudget: '0' });
+      await writeFile(join(data, 'config.json'), raw);
+      await expect(runRouterInstall({}, ctx(), deps())).rejects.toMatchObject({
+        code: 'CONFIG_INVALID',
+      });
+      expect(await readFile(join(data, 'config.json'), 'utf8')).toBe(raw);
+      await expect(readFile(settingsPath())).rejects.toMatchObject({ code: 'ENOENT' });
+    },
+  );
+  it('refresh removes the owned old payment skill while preserving user files', async () => {
+    await runRouterInstall({}, ctx(), deps());
+    const path = join(home, '.claude', 'skills', 'tenjin-pay');
+    await mkdir(path, { recursive: true });
+    await writeFile(join(path, 'SKILL.md'), '---\nname: tenjin-pay\n---\nold');
+    await writeFile(join(path, 'notes.md'), 'mine');
+    const result = await runRouterInstall({ refresh: true }, ctx(), deps());
+    expect(result.data).toMatchObject({ removedSkills: [path] });
+    await expect(readFile(join(path, 'SKILL.md'))).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(await readFile(join(path, 'notes.md'), 'utf8')).toBe('mine');
+  });
+});
+
+describe('daily limit readouts', () => {
+  it.each(['0', 'none', '2000000'])(
+    'status distinguishes %s and labels the automatic threshold honestly',
+    async (sessionBudget) => {
+      await writeFile(join(data, 'config.json'), JSON.stringify({ sessionBudget }));
+      const { runRouterStatus } = await import('./status');
+      const result = await runRouterStatus(ctx());
+      expect(result.data).toMatchObject({
+        window: { budget: sessionBudget === 'none' ? null : { atomic: sessionBudget } },
+      });
+      expect(result.humanLines?.join('\n')).toContain('automatic approval up to');
+      expect(result.humanLines?.join('\n')).not.toContain('per call at most');
+    },
+  );
 });

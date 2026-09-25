@@ -73,7 +73,7 @@ import {
  * so an agent reads the dollar amount without re-parsing the string.
  */
 interface RenderedValue {
-  value: Money | string | string[] | boolean;
+  value: Money | string | string[] | boolean | null;
   threshold?: Money;
 }
 interface RenderedSetting extends RenderedValue {
@@ -125,8 +125,8 @@ const KEY_WIDTH = Math.max(
  * listing only. Machine `data` is unchanged; these are humanLines decoration.
  */
 const KEY_DESCRIPTIONS: Record<string, string> = {
-  maxAutoSpend: 'auto-approve a read up to this amount',
-  sessionBudget: 'cap on total auto-spend per session',
+  maxAutoSpend: 'automatic approval threshold per call',
+  sessionBudget: 'daily payment limit: 0 refuses payments, none removes the ceiling',
   confirm: 'when to ask before paying',
   sendMaxAmount:
     'hard cap per tenjin wallet send; unset = send refuses until set, 0 disables send, none = uncapped; never bypassed by --yes',
@@ -138,8 +138,7 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
     "the team shelf's Vercel protection-bypass secret; setting it is what turns team mode on (printed as set/unset)",
   rpcUrl: 'Base RPC endpoint for balance reads',
   evalCohort: 'opt in to the search evaluation cohort',
-  bazaarPay: 'let `tenjin pay` spend at registry-listed non-Tenjin endpoints',
-  bazaarRegistries: 'x402 discovery registries for `discover` and the pay lane',
+  bazaarRegistries: 'x402 registries used to verify direct-payment listings',
   'publish.mode': 'review=always ask, auto=ask on findings, full-auto=only hard blocks stop it',
   'publish.defaultPrice': 'price used when none is given',
   'publish.ackServerWarnings':
@@ -314,11 +313,6 @@ export async function runConfigGet(
  * file — never materializing defaults for keys the user did not set, so
  * provenance stays truthful. The written key now reads `file`.
  */
-export interface ConfigSetDeps {
-  /** Seam for the tenjin-pay skill placement (tests inject homeDir/source). */
-  placeSkill?: { io: CommandContext['io']; homeDir?: string; skillsSourceDir?: string };
-}
-
 export async function runConfigSet(
   {
     key,
@@ -350,22 +344,6 @@ export async function runConfigSet(
   const configKey = assertKey(key);
   const stored = parseValue(configKey, value);
   await persist(ctx.dataDir, (existing) => ({ ...existing, [configKey]: stored }));
-  // The Bazaar lane's teaching is an OPTIONAL skill whose presence follows
-  // this toggle: flipping it places or removes the tenjin-pay skill in every
-  // wired skills directory, immediately (a config set is an operator act, the
-  // same trust class as install). Best-effort AFTER the persist: the set
-  // itself already succeeded, and skill drift is doctor's to report.
-  if (configKey === 'bazaarPay') {
-    try {
-      const { syncBazaarSkill } = await import('../lib/skill-placement');
-      await syncBazaarSkill(
-        stored === true,
-        deps.placeSkill ?? { io: ctx.io, dataDir: ctx.dataDir },
-      );
-    } catch {
-      // `tenjin doctor` reports a presence that does not match the toggle.
-    }
-  }
   const entry = renderSetting(configKey, stored, 'file');
   const warning = await halfWiredTeamShelf(configKey, ctx.dataDir);
   return {
@@ -915,12 +893,6 @@ export async function persistPublishMode(dir: string, mode: PublishMode): Promis
   }));
 }
 
-/** install's Bazaar-lane decision writer; the same locked read-modify-write every
- *  `config set` uses, so a concurrent set never loses a sibling key. */
-export async function persistBazaarPay(dir: string, enabled: boolean): Promise<void> {
-  await persist(dir, (existing) => ({ ...existing, bazaarPay: enabled }));
-}
-
 /**
  * Remember, or forget, a project directory this machine wired with
  * `install --project`. `tenjin update` spawns its refresh from the HOME
@@ -970,15 +942,11 @@ export interface RouterDefaultsResult {
  * `confirm` the operator put in `config.json` is never touched, which is why
  * an explicit `always` keeps returning `needs_approval` from the tool handler
  * instead of being quietly loosened by an install.
- *
- * `bazaarPay` is different and is turned on either way: it is the lane the
- * router pays providers through, so an install that left it off would wire a
- * product that refuses every lookup.
  */
 export async function persistRouterDefaults(dir: string): Promise<RouterDefaultsResult> {
   const result: RouterDefaultsResult = { set: [], kept: [] };
   await persist(dir, (existing) => {
-    const next: PartialConfig = { ...existing, bazaarPay: true };
+    const next: PartialConfig = { ...existing };
     for (const [key, value] of Object.entries(ROUTER_DEFAULTS) as [
       keyof typeof ROUTER_DEFAULTS,
       string,
@@ -1090,6 +1058,7 @@ function renderValue(key: ScalarConfigKey, stored: string | string[] | boolean):
     return { value: typeof stored === 'string' && stored.length > 0 ? 'set' : 'unset' };
   }
   if (Array.isArray(stored) || typeof stored === 'boolean') return { value: stored };
+  if (key === 'sessionBudget' && stored === 'none') return { value: null };
   if (key === 'maxAutoSpend' || key === 'sessionBudget') return { value: toMoney(stored) };
   if (key === 'sendMaxAmount') {
     // 'unset' is the resolved sentinel for an absent key (send refuses), never
@@ -1105,8 +1074,9 @@ function renderValue(key: ScalarConfigKey, stored: string | string[] | boolean):
 /** Per-key edge parsing. Returns the persisted form; throws USAGE on bad input. */
 function parseValue(key: ScalarConfigKey, value: string): string | string[] | boolean {
   switch (key) {
-    case 'maxAutoSpend':
     case 'sessionBudget':
+      return value === 'none' ? 'none' : parseUsdToAtomic(value);
+    case 'maxAutoSpend':
       return parseUsdToAtomic(value); // throws USAGE on a bad amount
     case 'sendMaxAmount':
       return value === 'none' ? 'none' : parseUsdToAtomic(value);
@@ -1123,7 +1093,6 @@ function parseValue(key: ScalarConfigKey, value: string): string | string[] | bo
       // is how team mode is turned back off.
       return value.trim();
     case 'evalCohort':
-    case 'bazaarPay':
       return parseBoolean(value);
     case 'bazaarRegistries':
       return parseRegistryList(value);
@@ -1139,9 +1108,7 @@ function parseRegistryList(value: string): string[] {
     .map((entry) => parseHttpUrl(entry));
 }
 
-// on/off ride along with true/false because that is how the CLI's own refusal
-// texts coach these keys (`tenjin config set bazaarPay on`); a coached command
-// that exits USAGE teaches an agent the remediation is broken.
+// Boolean settings accept both on/off and true/false.
 function parseBoolean(value: string): boolean {
   if (value === 'true' || value === 'on') return true;
   if (value === 'false' || value === 'off') return false;
@@ -1276,6 +1243,7 @@ function displayValue(entry: RenderedSetting): string {
   const { value } = entry;
   if (Array.isArray(value)) return value.length > 0 ? value.join(', ') : '(empty)';
   if (typeof value === 'boolean') return value ? 'true' : 'false'; // evalCohort
+  if (value === null) return 'none (no daily limit)';
   if (typeof value === 'object') return `${value.usd} USD`; // Money (spend keys)
   if (entry.threshold !== undefined) return `above ${entry.threshold.usd} USD`; // confirm
   return value; // 'always', baseUrl, rpcUrl

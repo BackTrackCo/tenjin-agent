@@ -633,16 +633,7 @@ async function routeNativeCall(
       outcome: { response: null, ...(outcome !== null ? { action: outcome.action } : {}) },
     };
   }
-  // THE SPEND RULE, WHERE AN OFFER WOULD BE A DEAD END. A subagent cannot ask
-  // the user, so it is offered only what runs alone. The main agent's pre-call
-  // arm DENIES the free call, so it redirects only when the paid call would run
-  // without approval from a wallet that can pay: denying a fetch and then
-  // answering `needs_approval`, or failing an unfunded payment, left the page
-  // neither fetched nor bought. The main agent's after-call arm denies nothing,
-  // so its offer stands and `request` can still ask.
-  const denies = nativeOutcome === undefined;
-  const withheld =
-    event.agentId !== undefined || denies ? await withheldBecause(outcome, deps, deadline) : null;
+  const withheld = await withheldBecause(outcome, deps, deadline);
   if (withheld !== null) {
     await footer.close(outcome, { withheld });
     return { offer: null, outcome: { response: null, action: 'execute', withheld: true } };

@@ -60,8 +60,6 @@ export interface ResolvedSettings {
   policy: SpendPolicy;
   /** Search-only privacy opt-in; sends X-Tenjin-Eval-Cohort: 1 when true. */
   evalCohort: boolean;
-  /** Bazaar pay lane opt-in (`tenjin pay` off the configured base URL). */
-  bazaarPay: boolean;
   /** x402 discovery registries `discover` queries and the pay lane verifies against. */
   bazaarRegistries: string[];
   /**
@@ -267,7 +265,6 @@ export async function resolveContextSettings(ctx: CommandContext): Promise<Resol
     teamMode: bypass !== undefined,
     rpcUrl: s.rpcUrl.value,
     evalCohort: s.evalCohort.value,
-    bazaarPay: s.bazaarPay.value,
     bazaarRegistries: s.bazaarRegistries.value,
     sendMaxAmountAtomic:
       s.sendMaxAmount.value === SEND_MAX_UNSET
@@ -277,7 +274,7 @@ export async function resolveContextSettings(ctx: CommandContext): Promise<Resol
           : BigInt(s.sendMaxAmount.value),
     policy: {
       maxAutoSpendAtomic: BigInt(s.maxAutoSpend.value),
-      sessionBudgetAtomic: BigInt(s.sessionBudget.value),
+      sessionBudgetAtomic: s.sessionBudget.value === 'none' ? null : BigInt(s.sessionBudget.value),
       confirm: parseConfirmPolicy(s.confirm.value),
       allowlistCreators: s.allowlistCreators.value,
     },

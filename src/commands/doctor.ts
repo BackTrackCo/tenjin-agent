@@ -4,11 +4,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { lstat, rm, stat } from 'node:fs/promises';
-import {
-  OPTIONAL_PAY_SKILL,
-  OPTIONAL_SKILL_NAMES,
-  resolveSkillsSource,
-} from '../lib/skills-source';
+import { resolveSkillsSource } from '../lib/skills-source';
 import { CliError } from '../lib/errors';
 import {
   CLI_SKILL_NAMES,
@@ -303,7 +299,6 @@ export async function collectDoctorChecks(
       home,
       which,
       requested,
-      settings.bazaarPay.value,
       deps.skillsSourceDir,
       // The raw config, not resolved settings: the staleness compare has to shape
       // the packaged copies the way the WRITERS shaped them, and they read the
@@ -807,7 +802,6 @@ async function checkSkills(
   home: string,
   which: (bin: string) => boolean,
   requested: readonly Harness[],
-  bazaarPay: boolean,
   skillsSourceDir: string | undefined,
   teamMode: boolean,
 ): Promise<BuiltCheck> {
@@ -860,33 +854,6 @@ async function checkSkills(
         required: false,
         detail: broken.map(describeProblem).join('; '),
         fix: fixFor(home, broken),
-        data,
-      },
-    };
-  }
-
-  // The OPTIONAL tenjin-pay skill's presence must MATCH the `bazaarPay` toggle
-  // (lib/skill-placement): install and `config set bazaarPay` both place/remove
-  // it best-effort and stay quiet on failure, so this is the one surface where
-  // that drift is reported. Toggle off with the skill still teaching the lane,
-  // or on with no teaching, both warn; the runtime gate in pay's resolveLane
-  // keeps the lane itself safe either way, which is why this is warn, not fail.
-  const payDrift: string[] = [];
-  for (const w of inPlay) {
-    if (!harnessInPlay(home, w.dir, present, requested)) continue;
-    const onDisk = await readSkillFile(join(w.dir, OPTIONAL_PAY_SKILL, 'SKILL.md'));
-    if ((onDisk.kind === 'ok') !== bazaarPay) payDrift.push(w.dir);
-  }
-  if (payDrift.length > 0) {
-    return {
-      result: {
-        name: 'skills',
-        status: 'warn',
-        required: false,
-        detail: bazaarPay
-          ? `bazaarPay is on but the ${OPTIONAL_PAY_SKILL} skill is missing under ${payDrift.join(', ')}; agents are not being taught the lane`
-          : `bazaarPay is off but the ${OPTIONAL_PAY_SKILL} skill is still present under ${payDrift.join(', ')}; agents are being taught a lane the runtime gate will refuse`,
-        fix: `Re-run \`tenjin config set bazaarPay ${bazaarPay ? 'on' : 'off'}\` to re-sync the skill's presence.`,
         data,
       },
     };
@@ -992,7 +959,7 @@ async function compareWiredSkills(
   // not a reason to call every adapter unverifiable.
   const packaged = new Map<string, Buffer>();
   const materialize = skillMaterialize({ teamMode });
-  for (const name of [...CLI_SKILL_NAMES, ...OPTIONAL_SKILL_NAMES]) {
+  for (const name of [...CLI_SKILL_NAMES]) {
     const read = await readSkillFile(join(source, name, 'SKILL.md'));
     // SHAPED before the compare, exactly as the writers shape it. Comparing raw
     // packaged bytes here would call every skill on a marker-carrying build stale
@@ -1005,7 +972,7 @@ async function compareWiredSkills(
 
   const stale: string[] = [];
   for (const dir of dirs) {
-    for (const name of [...CLI_SKILL_NAMES, ...OPTIONAL_SKILL_NAMES]) {
+    for (const name of [...CLI_SKILL_NAMES]) {
       if (!packaged.has(name)) continue;
       // Guarded: a pipe or device at this path would otherwise block the whole
       // diagnostic. Anything but a readable regular file is the wiring check's

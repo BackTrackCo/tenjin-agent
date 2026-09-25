@@ -18,6 +18,8 @@ import { toMoney } from '../lib/money';
 import { paint } from '../lib/output';
 import { resolveContextSettings } from '../lib/settings';
 import type { SpendPolicy } from '../lib/policy';
+import { removeRetiredSkills } from '../lib/skill-placement';
+import { loadRawConfig } from '../lib/config';
 import { onPath } from '../lib/skill-wiring';
 import type { WalletDeps, WalletOutcome } from '../commands/install-wallet';
 import type { CommandContext, CommandResult } from '../context';
@@ -202,6 +204,7 @@ export async function runRouterInstall(
       fix: 'Set HOME to your home directory (`export HOME=...`), then re-run `tenjin install`.',
     });
   }
+  await loadRawConfig(ctx.dataDir); // Refuse retired keys before any install writes.
   const cwd = deps.cwd ?? process.cwd();
   // A refresh converges EVERY install this machine has, in the scope each one
   // was made in. `tenjin update` spawns it from the HOME directory, so looking
@@ -242,6 +245,7 @@ export async function runRouterInstall(
       );
     }
   }
+  const removedSkills = await removeRetiredSkills(home, project ? cwd : undefined);
   const hooks = await writeHooks({
     adapter: claudeAdapter,
     homeDir: home,
@@ -284,6 +288,7 @@ export async function runRouterInstall(
         statusLine,
         mcp,
         refresh: true,
+        removedSkills,
         scope: mcpScope(project),
       },
       humanLines: refreshLines(ctx, problems(ctx, hooks, permissions, statusLine, mcp)),
@@ -309,6 +314,7 @@ export async function runRouterInstall(
     mcp,
     wallet,
     disclosure: DISCLOSURE,
+    removedSkills,
   };
   return {
     data,
@@ -505,7 +511,7 @@ function effectiveLimits(policy: SpendPolicy): EffectiveLimits {
   return {
     maxAutoSpend: toMoney(policy.maxAutoSpendAtomic.toString()).usd,
     sessionBudget:
-      policy.sessionBudgetAtomic === 0n
+      policy.sessionBudgetAtomic === null
         ? 'no daily ceiling'
         : toMoney(policy.sessionBudgetAtomic.toString()).usd,
   };
@@ -550,7 +556,7 @@ function lines(
   const ok = paint(ctx.io, 'green', '✓');
   const limits = effectiveLimits(s.policy);
   const daily =
-    s.policy.sessionBudgetAtomic === 0n ? 'no daily limit' : `$${limits.sessionBudget} a day`;
+    s.policy.sessionBudgetAtomic === null ? 'no daily limit' : `$${limits.sessionBudget} a day`;
   // The first line only says "set up" when it is: a settings file this run
   // would not write to means nothing was set up, and hooks without the MCP
   // server point at a `request` tool that is not there.
@@ -565,7 +571,7 @@ function lines(
         ? paint(ctx.io, 'yellow', '! Almost done: Claude Code needs one command')
         : `${ok} Tenjin is set up for Claude Code${where}`,
     ...walletLines(ctx, ok, s.wallet),
-    `  Spends at most $${limits.maxAutoSpend} a lookup, ${daily}`,
+    `  Auto-approves up to $${limits.maxAutoSpend} per call; daily limit ${daily}`,
     ...(s.statusLine.state === 'ours' || s.statusLine.state === 'composed'
       ? ['  Live status line on: each lookup names its provider while it runs']
       : []),

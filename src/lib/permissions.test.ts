@@ -91,7 +91,7 @@ describe('buy and pay are opt-in, never always-safe', () => {
     const note = OPT_IN_ALLOWLIST[0]?.note ?? '';
     expect(note).toMatch(/UNATTENDED purchases/);
     expect(note).toMatch(/`--yes`.*clears the\s*confirm gate/is);
-    expect(note).toMatch(/sessionBudget 0 means NO ceiling/);
+    expect(note).toMatch(/sessionBudget 0 means no positive payments/);
     expect(note).not.toMatch(/human (is still )?on every purchase/i);
   });
 
