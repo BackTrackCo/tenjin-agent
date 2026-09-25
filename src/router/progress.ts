@@ -276,8 +276,10 @@ export async function markDelivered(
     const dir = await opendir(directory);
     let count = 0;
     for await (const entry of dir) {
-      if (++count > MAX_RECORDS) return;
+      // Only redirect records count toward the cap: a busy session's call
+      // records and markers must not push this agent's record past it.
       if (!entry.isFile() || !entry.name.startsWith(REDIRECT_PREFIX)) continue;
+      if (++count > MAX_RECORDS) return;
       const path = join(directory, entry.name);
       const last = await readRedirect(path);
       if (last?.id !== id) continue;
