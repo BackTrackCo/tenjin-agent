@@ -198,7 +198,15 @@ async function inferRefreshProject(
 ): Promise<boolean> {
   const hooks = await probeOurEntries(routerSettingsPath({ project: true, cwd }), dataDir);
   if (hooks.state !== 'present') return false;
-  const [cwdPath, homePath] = await Promise.all([realpath(cwd), realpath(home)]);
+  const [cwdPath, homePath] = await Promise.all([
+    realpath(cwd),
+    realpath(home).catch((err: NodeJS.ErrnoException) => {
+      // A missing home cannot alias this existing project. Do not require it
+      // to exist (or create it) just to refresh the project's own settings.
+      if (err.code === 'ENOENT' || err.code === 'ENOTDIR') return null;
+      throw err;
+    }),
+  ]);
   if (cwdPath !== homePath) return true;
 
   // Home shares one hooks file between scopes. Preserve a project-only install,

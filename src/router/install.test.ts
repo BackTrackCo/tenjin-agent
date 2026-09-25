@@ -1152,6 +1152,49 @@ describe('tenjin update re-applies the install', () => {
  * here, and `tenjin update` is a binary swap plus exactly that.
  */
 describe('a refresh converges one scope', () => {
+  it.each(['missing', 'dangling symlink', 'non-directory parent'])(
+    'refreshes a project with an unavailable home: %s',
+    async (kind) => {
+      await runRouterInstall({ project: true }, ctx(), deps({ cwd: work }));
+      const homeEntry = join(home, '..', 'unavailable-home');
+      const unavailableHome =
+        kind === 'non-directory parent' ? join(homeEntry, 'child') : homeEntry;
+      if (kind === 'dangling symlink')
+        await symlink(join(home, '..', 'missing-target'), unavailableHome, 'dir');
+      if (kind === 'non-directory parent') await writeFile(homeEntry, 'not a directory');
+      const registerMcp = vi.fn(async () => undefined);
+      const originalHomeSettings = await readFile(settingsPath(), 'utf8').catch(() => null);
+
+      const result = await runRouterInstall(
+        { refresh: true },
+        ctx(),
+        deps({
+          homeDir: unavailableHome,
+          cwd: work,
+          registerMcp,
+        }),
+      );
+
+      expect(onlyInstall(result)).toMatchObject({
+        refresh: true,
+        scope: 'project',
+        settingsPath: join(work, '.claude', 'settings.json'),
+        mcp: { scope: 'project', registered: true },
+      });
+      expect(registerMcp).toHaveBeenCalledWith('claude mcp add x402 -s project -- tenjin mcp', {
+        scope: 'project',
+        cwd: work,
+      });
+      expect(await readFile(settingsPath(), 'utf8').catch(() => null)).toBe(originalHomeSettings);
+      if (kind === 'non-directory parent')
+        expect(await readFile(homeEntry, 'utf8')).toBe('not a directory');
+      else
+        await expect(readFile(join(unavailableHome, '.claude.json'))).rejects.toMatchObject({
+          code: 'ENOENT',
+        });
+    },
+  );
+
   it.each([false, true])(
     'preserves a home project registration on unflagged refresh (user registration: %s)',
     async (userRegistered) => {
