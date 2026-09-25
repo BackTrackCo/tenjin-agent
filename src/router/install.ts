@@ -30,10 +30,11 @@ import { ensureStatusLine, type StatusLineMode, type StatusLineResult } from './
  * `tenjin install` for the router product: five hook entries, one MCP server,
  * one permission rule, the spend defaults, and a wallet when there is none.
  *
- * WHAT IT WRITES IS WHAT IT SAYS. There is no skill to materialize, no daemon
- * to start and no background process of any kind: the hooks are plain command
- * lines, the tool lives in an MCP server the harness starts per session, and
- * every other key in the settings file is preserved byte for byte.
+ * WHAT IT WRITES IS WHAT IT SAYS. There is no skill to materialize and no
+ * daemon to start: the hooks are plain command lines, the tool lives in an MCP
+ * server the harness starts per session, and every other key in the settings
+ * file is preserved byte for byte. The one process a hook starts is the free
+ * docs fetch beside a search, which exits within `PREFETCH_TIMEOUT_MS`.
  */
 
 const exec = promisify(execFile);
@@ -49,6 +50,15 @@ const exec = promisify(execFile);
  * the refresh `tenjin update` spawns all rewrite them in place.
  */
 export const HOOK_TIMEOUT_SECONDS = 5;
+/**
+ * The after-call entries' kill budget, longer than the rest for the one wait
+ * any hook makes: a search the pre-call arm is fetching free docs for waits up
+ * to `AUGMENT_WAIT_MS` for them (`wire.test.ts` pins the fit). Every other
+ * after-call event returns as fast as before, so the number is a ceiling, not
+ * a cost. The pre-call entry stays at {@link HOOK_TIMEOUT_SECONDS}: it starts
+ * that fetch and never waits for it.
+ */
+export const AFTER_CALL_TIMEOUT_SECONDS = 15;
 export { MCP_SERVER_NAME };
 export const ALLOW_RULE = REQUEST_TOOL;
 /**
@@ -99,29 +109,27 @@ export const NATIVE_MATCHER = 'WebSearch|WebFetch';
  * The five entries, spelled once so `uninstall`, `doctor` and the tests read
  * the same list. The native tools are routed twice over one lookup: BEFORE the
  * call, as every release has, with a line pointing to a paid lookup when one
- * fits; and AFTER it, only when it came back short and nothing was said before.
- * A failed call fires PostToolUseFailure rather than PostToolUse, so the second
+ * fits; and AFTER it, only when it came back short and nothing was said before,
+ * or to add the free docs the pre-call arm fetched to a search's results. A
+ * failed call fires PostToolUseFailure rather than PostToolUse, so the second
  * takes both.
  */
 export function routerHookPlan(): unknown[] {
-  const handler = (command: string) => [
-    { type: 'command', command, timeout: HOOK_TIMEOUT_SECONDS },
+  const handler = (command: string, timeout = HOOK_TIMEOUT_SECONDS) => [
+    { type: 'command', command, timeout },
   ];
+  const afterCall = () => handler('tenjin hook shortfall', AFTER_CALL_TIMEOUT_SECONDS);
   return [
     { event: 'UserPromptSubmit', hooks: handler('tenjin hook prompt') },
     { event: 'PreToolUse', matcher: NATIVE_MATCHER, hooks: handler('tenjin hook native') },
     { event: 'PreToolUse', matcher: DELEGATION_MATCHER, hooks: handler('tenjin hook agent') },
-    { event: 'PostToolUse', matcher: NATIVE_MATCHER, hooks: handler('tenjin hook shortfall') },
-    {
-      event: 'PostToolUseFailure',
-      matcher: NATIVE_MATCHER,
-      hooks: handler('tenjin hook shortfall'),
-    },
+    { event: 'PostToolUse', matcher: NATIVE_MATCHER, hooks: afterCall() },
+    { event: 'PostToolUseFailure', matcher: NATIVE_MATCHER, hooks: afterCall() },
   ];
 }
 
 export const DISCLOSURE: readonly string[] = [
-  'What leaves this machine: the bounded text of each prompt, each native search query or URL (and, when one came back short, its status, size or error), and each task handed to a subagent, sent to Tenjin for the free routing gate.',
+  "What leaves this machine: the bounded text of each prompt, each native search query or URL (and, when one came back short, its status, size or error), and each task handed to a subagent, sent to Tenjin for the free routing gate. When the gate offers free library docs for a search, that search query also goes to Tenjin's docs lookup, which asks Context7.",
   'What is kept when a lookup is paid: the capability chosen, a hash of the contract, a hash of the arguments, and your wallet address. No prompt text, no arguments, no hint text.',
   'What never leaves: your private key. It is decrypted in this CLI to sign, and never sent anywhere.',
 ];

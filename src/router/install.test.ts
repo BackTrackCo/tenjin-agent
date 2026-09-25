@@ -83,7 +83,9 @@ const settingsPath = () => join(home, '.claude', 'settings.json');
 const readSettings = async (): Promise<Record<string, unknown>> =>
   JSON.parse(await readFile(settingsPath(), 'utf8')) as Record<string, unknown>;
 
-const handler = (command: string) => [{ type: 'command', command, timeout: 5 }];
+const handler = (command: string, timeout = 5) => [{ type: 'command', command, timeout }];
+/** The after-call entries wait for a search's free docs, so they get longer. */
+const afterCall = handler('tenjin hook shortfall', 15);
 /** Exactly what this build writes into an empty `hooks` key. */
 const CURRENT_HOOKS = {
   UserPromptSubmit: [{ hooks: handler('tenjin hook prompt') }],
@@ -91,8 +93,8 @@ const CURRENT_HOOKS = {
     { matcher: 'WebSearch|WebFetch', hooks: handler('tenjin hook native') },
     { matcher: 'Agent|Task', hooks: handler('tenjin hook agent') },
   ],
-  PostToolUse: [{ matcher: 'WebSearch|WebFetch', hooks: handler('tenjin hook shortfall') }],
-  PostToolUseFailure: [{ matcher: 'WebSearch|WebFetch', hooks: handler('tenjin hook shortfall') }],
+  PostToolUse: [{ matcher: 'WebSearch|WebFetch', hooks: afterCall }],
+  PostToolUseFailure: [{ matcher: 'WebSearch|WebFetch', hooks: afterCall }],
 };
 
 /**
@@ -1025,6 +1027,38 @@ describe('tenjin update re-applies the install', () => {
     await runRouterInstall(args, ctx(), deps());
     // Every entry at 5 s, each once: rewritten in place, never appended beside.
     expect((await readSettings()).hooks).toEqual(CURRENT_HOOKS);
+  });
+
+  /**
+   * The after-call entry waits, bounded, for the free docs the pre-call hook
+   * fetched beside a search, so it carries a longer kill budget than the rest;
+   * an install still at 5 s would cut that wait off. The writer converges it on
+   * every route, including the refresh `tenjin update` spawns, and leaves the
+   * pre-call entry, which never waits, at 5 s.
+   */
+  it.each([
+    ['install', {}],
+    ['install --refresh (what `tenjin update` spawns)', { refresh: true }],
+  ])('gives the after-call entries 15 s on %s', async (_label, args) => {
+    const fs = await import('node:fs/promises');
+    await runRouterInstall({}, ctx(), deps());
+    const settings = await readSettings();
+    const hooks = settings.hooks as Record<string, unknown[]>;
+    for (const event of ['PostToolUse', 'PostToolUseFailure']) {
+      hooks[event] = [{ matcher: 'WebSearch|WebFetch', hooks: handler('tenjin hook shortfall') }];
+    }
+    await fs.writeFile(settingsPath(), JSON.stringify(settings, null, 2) + '\n');
+
+    const result = await runRouterInstall(args, ctx(), deps());
+    expect((onlyInstall(result) as { hooks: { wrote: boolean } }).hooks.wrote).toBe(true);
+    const after = (await readSettings()).hooks as typeof CURRENT_HOOKS;
+    expect(after.PostToolUse).toEqual([{ matcher: 'WebSearch|WebFetch', hooks: afterCall }]);
+    expect(after.PostToolUseFailure).toEqual([{ matcher: 'WebSearch|WebFetch', hooks: afterCall }]);
+    expect(after.PreToolUse[0]).toEqual({
+      matcher: 'WebSearch|WebFetch',
+      hooks: handler('tenjin hook native'),
+    });
+    expect(after).toEqual(CURRENT_HOOKS);
   });
 
   it('stays in the project scope it was installed into, with no flag', async () => {

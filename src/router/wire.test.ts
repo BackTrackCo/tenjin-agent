@@ -6,7 +6,8 @@ import { buildHookBody, buildToolBody, parseForTests } from './decision';
 import { GATE_TIMEOUT_MS } from './gate';
 import { MAX_PACKET_BYTES, type Packet } from './context';
 import { STDIN_TIMEOUT_MS } from './hook-command';
-import { HOOK_TIMEOUT_SECONDS } from './install';
+import { AFTER_CALL_TIMEOUT_SECONDS, HOOK_TIMEOUT_SECONDS } from './install';
+import { AUGMENT_WAIT_MS } from './augment';
 
 /**
  * The wire, pinned to bytes. These payloads are the SHARED ones: the same
@@ -217,5 +218,14 @@ describe('the hook time budget', () => {
     // Node's boot and the transcript read happen inside the same budget, so the
     // two network-ish waits may not fill it: half a second is the floor left.
     expect(budget - (STDIN_TIMEOUT_MS + GATE_TIMEOUT_MS)).toBeGreaterThanOrEqual(500);
+  });
+
+  /** The after-call hook's one wait, for a search's free docs, fits its own
+   *  longer timeout the same way; every other after-call event is the gate's. */
+  it('fits stdin plus the docs wait inside the after-call timeout', () => {
+    const budget = AFTER_CALL_TIMEOUT_SECONDS * 1_000;
+    for (const wait of [AUGMENT_WAIT_MS, GATE_TIMEOUT_MS]) {
+      expect(budget - (STDIN_TIMEOUT_MS + wait)).toBeGreaterThanOrEqual(500);
+    }
   });
 });

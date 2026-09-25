@@ -16,8 +16,16 @@ import {
 import { MCP_SERVER_NAME, REQUEST_TOOL } from './names';
 import { runHookCommand } from './hook-command';
 import { ROUTER_PATH } from './decision';
-import { markDelivered, renderProgress, resolveProgressSession, sessionDir } from './progress';
+import {
+  markDelivered,
+  renderProgress,
+  resolveProgressSession,
+  sessionDir,
+  takeUndelivered,
+  wasOffered,
+} from './progress';
 import { runRequestTool } from './tool';
+import type { PrefetchJob } from './augment';
 
 /** What `tenjin install` writes (`ROUTER_DEFAULTS`): 0.25 a call, auto. */
 const ROUTER_POLICY = { maxAutoSpend: '250000', sessionBudget: '5000000', confirm: 'above:250000' };
@@ -2049,5 +2057,316 @@ describe('no hook but the pre-call one', () => {
     }
     // The execute case really did produce output to check.
     if (_label === 'execute') expect(outputs.some((out) => out.response !== null)).toBe(true);
+  });
+});
+
+/**
+ * FREE DOCS ON TOP OF A SEARCH, NEVER IN PLACE OF ONE. A free offer on a
+ * WebSearch is not a deny: the search runs, the docs are fetched beside it, and
+ * the after-call arm puts them first in the search's own results. The detached
+ * fetch is replaced here by a recorder, and each test writes what the fetch
+ * would have written, in the shape `PREFETCH_SCRIPT` writes it
+ * (`augment.test.ts` runs that script for real).
+ */
+describe('free docs on top of a search', () => {
+  const DOCS = 'library or API documentation';
+  const FREE = {
+    ...EXECUTE,
+    decision: {
+      ...EXECUTE.decision,
+      capabilityId: 'context7-docs',
+      category: DOCS,
+      provider: 'Context7',
+      capabilityDescription: 'current, version-specific documentation for a named library',
+      endpoint: `${BASE}/api/docs-lookup`,
+      providerPriceAtomic: '0',
+      usage: 'the library and what to look up in it',
+      hint:
+        'Context7 fits this: current, version-specific documentation. Free via ' +
+        `${BASE}/api/docs-lookup . Call request({query: "next.js middleware", id: "k3f9-abcd"}) instead.`,
+    },
+  };
+  /** A WebSearch response as Claude Code reports it after the call. */
+  const SEARCH = {
+    query: 'next.js middleware matcher',
+    results: [
+      {
+        tool_use_id: 'srvtoolu_01',
+        content: [
+          { title: 'Routing: Middleware', url: 'https://nextjs.org/docs/app/middleware' },
+          { title: 'matcher config', url: 'https://example.test/matcher' },
+        ],
+      },
+      'Middleware runs before a request completes; `matcher` filters the paths.',
+    ],
+    durationSeconds: 4.8,
+    searchCount: 1,
+  };
+  const TEXT = 'Context7 matched: /vercel/next.js.\n\n### Matcher\nexport const config = {...}';
+  const LINE =
+    "Tenjin router added Context7 docs for this search (free). If they don't cover it, use the web results below.\n\n" +
+    TEXT;
+
+  let jobs: PrefetchJob[];
+  beforeEach(() => {
+    jobs = [];
+  });
+
+  function deps(body: unknown = FREE, over: Record<string, unknown> = {}) {
+    const { fetchImpl, calls } = router(body);
+    return {
+      calls,
+      deps: {
+        dataDir: dir,
+        baseUrl: BASE,
+        fetchImpl,
+        homeDir: dir,
+        prefetch: (job: PrefetchJob) => jobs.push(job),
+        augmentWaitMs: 300,
+        ...over,
+      },
+    };
+  }
+
+  function before(
+    query: string,
+    toolUseId: string,
+    over: Record<string, unknown> = {},
+    body: unknown = FREE,
+  ) {
+    const { deps: d, calls } = deps(body);
+    return preCall(query, 'WebSearch', { tool_use_id: toolUseId, ...over }).then(async (event) => ({
+      out: await runNativeHook(event, d),
+      calls,
+    }));
+  }
+
+  /** The after-call event, against a router that WOULD offer, so a shortfall
+   *  offer on an augmented call cannot hide. */
+  async function after(
+    query: string,
+    toolUseId: string,
+    response: unknown = SEARCH,
+    over: Record<string, unknown> = {},
+  ) {
+    const { deps: d, calls } = deps(EXECUTE);
+    const event = {
+      ...((await readableEvent(query, 'WebSearch')) as object),
+      tool_use_id: toolUseId,
+      tool_response: response,
+      ...over,
+    };
+    return { out: await runShortfallHook(event, d), calls };
+  }
+
+  /** What the prefetch writes when it is done. */
+  async function answer(job: PrefetchJob, status: number, text = ''): Promise<void> {
+    const fs = await import('node:fs/promises');
+    await fs.writeFile(job.out, JSON.stringify({ status, text }));
+  }
+
+  it('never denies the search, and adds the docs as one string above its results', async () => {
+    const pre = await before('next.js middleware matcher', 'toolu_1');
+    expect(pre.out).toEqual({
+      response: null,
+      action: 'execute',
+      id: 'k3f9-abcd',
+      free: true,
+      augmenting: true,
+    });
+    // One gate call, and no balance read: nothing here is paid.
+    expect(pre.calls).toHaveLength(1);
+    expect(rpcCalls).toHaveLength(0);
+    // The agent's own query, on the endpoint the offer named, with the CLI's identity.
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]!.url).toBe(`${BASE}/api/docs-lookup?query=next.js+middleware+matcher`);
+    expect(jobs[0]!.userAgent).toMatch(/^tenjin-cli\//);
+    expect(jobs[0]!.out.startsWith(sessionDir(dir, 'sess-1'))).toBe(true);
+    // Not a redirect: nothing recorded for the one-block rule or the offer mark.
+    expect(await wasOffered(dir, 'sess-1', 'toolu_1')).toBe(false);
+    expect(await takeUndelivered(dir, 'sess-1', undefined, DOCS)).toBe(false);
+    expect(await renderProgress(dir, 'sess-1')).toBe(
+      'x402 · search: native tools (free lookup, call runs)',
+    );
+
+    await answer(jobs[0]!, 200, TEXT);
+    const post = await after('next.js middleware matcher', 'toolu_1');
+    expect(post.out).toMatchObject({ augmented: 'added' });
+    const updated = (
+      post.out.response as {
+        hookSpecificOutput: { hookEventName: string; updatedToolOutput: typeof SEARCH };
+      }
+    ).hookSpecificOutput;
+    expect(updated.hookEventName).toBe('PostToolUse');
+    // EXACTLY one string prepended; every other field and item as the harness sent it.
+    expect(updated.updatedToolOutput).toEqual({ ...SEARCH, results: [LINE, ...SEARCH.results] });
+    expect(updated.updatedToolOutput.results).toHaveLength(SEARCH.results.length + 1);
+    // The router is not asked after the call.
+    expect(post.calls).toHaveLength(0);
+  });
+
+  it('is what `tenjin hook shortfall` prints', async () => {
+    await before('zod v4 coerce', 'toolu_1');
+    await answer(jobs[0]!, 200, TEXT);
+    const written: string[] = [];
+    const io = {
+      stdout: { write: (chunk: string) => written.push(chunk) },
+      stderr: { write: () => true },
+      isTTY: false,
+    } as never;
+    const event = {
+      ...((await readableEvent('zod v4 coerce', 'WebSearch')) as object),
+      tool_use_id: 'toolu_1',
+      tool_response: SEARCH,
+    };
+    await runHookCommand('shortfall', io, {
+      ...deps(EXECUTE).deps,
+      readEvent: async () => JSON.stringify(event),
+    });
+    expect(written).toHaveLength(1);
+    expect(JSON.parse(written[0]!)).toEqual({
+      hookSpecificOutput: {
+        hookEventName: 'PostToolUse',
+        updatedToolOutput: { ...SEARCH, results: [LINE, ...SEARCH.results] },
+      },
+    });
+  });
+
+  /**
+   * NO DOCS IS NO OUTPUT, and never an offer as well: each of these runs the
+   * after-call arm on a search that came back with no links, which on any
+   * other call is a shortfall the router is asked about.
+   */
+  it.each([
+    ['no library matched (404)', 404, ''],
+    ['the lookup is unavailable (503)', 503, ''],
+    ['the caller is over its limit (429)', 429, ''],
+    ['the fetch failed', 0, ''],
+    ['an empty 200', 200, '   '],
+  ])('says nothing after the call when %s', async (_label, status, text) => {
+    await before('next.js middleware matcher', 'toolu_1');
+    await answer(jobs[0]!, status, text);
+    const post = await after('next.js middleware matcher', 'toolu_1', { ...SEARCH, results: [] });
+    expect(post.out).toEqual({ response: null, augmented: 'nothing' });
+    expect(post.calls).toHaveLength(0);
+  });
+
+  it('says nothing after the call when the lookup has not answered in time', async () => {
+    await before('next.js middleware matcher', 'toolu_1');
+    const started = Date.now();
+    const post = await after('next.js middleware matcher', 'toolu_1', { ...SEARCH, results: [] });
+    expect(post.out).toEqual({ response: null, augmented: 'nothing' });
+    expect(post.calls).toHaveLength(0);
+    // Bounded by the wait, not by the hook's timeout.
+    expect(Date.now() - started).toBeLessThan(3_000);
+  });
+
+  it('says nothing, and offers nothing, when the augmented search itself failed', async () => {
+    await before('next.js middleware matcher', 'toolu_1');
+    await answer(jobs[0]!, 200, TEXT);
+    const post = await after('next.js middleware matcher', 'toolu_1', undefined, {
+      hook_event_name: 'PostToolUseFailure',
+      error: 'Web search failed',
+    });
+    expect(post.out).toEqual({ response: null, augmented: 'nothing' });
+    expect(post.calls).toHaveLength(0);
+  });
+
+  it('still denies a paid offer on a search, and fetches nothing', async () => {
+    const pre = await before('btc price today', 'toolu_1', {}, withHint(PRECALL_HINT));
+    expect(pre.out.response).toMatchObject({
+      hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny' },
+    });
+    expect(pre.out.free).toBeUndefined();
+    expect(jobs).toHaveLength(0);
+    expect(await wasOffered(dir, 'sess-1', 'toolu_1')).toBe(true);
+  });
+
+  it('lets a WebFetch run on a free offer, with no output and nothing fetched', async () => {
+    const { deps: d, calls } = deps();
+    const out = await runNativeHook(
+      await preCall('https://nextjs.org/docs/app/middleware', 'WebFetch', {
+        tool_use_id: 'toolu_1',
+      }),
+      d,
+    );
+    expect(out).toEqual({ response: null, action: 'execute', id: 'k3f9-abcd', free: true });
+    expect(calls).toHaveLength(1);
+    expect(jobs).toHaveLength(0);
+    expect(await wasOffered(dir, 'sess-1', 'toolu_1')).toBe(false);
+  });
+
+  it('augments two parallel searches each with its own docs', async () => {
+    await Promise.all([
+      before('next.js middleware matcher', 'toolu_a'),
+      before('zod v4 coerce', 'toolu_b'),
+    ]);
+    expect(jobs).toHaveLength(2);
+    const job = (query: string) => jobs.find((j) => j.url.includes(query))!;
+    expect(job('next.js').out).not.toBe(job('zod').out);
+    await answer(job('zod'), 200, 'zod docs');
+    await answer(job('next.js'), 200, 'next docs');
+    const [a, b] = await Promise.all([
+      after('next.js middleware matcher', 'toolu_a'),
+      after('zod v4 coerce', 'toolu_b', { ...SEARCH, query: 'zod v4 coerce' }),
+    ]);
+    const first = (out: typeof a) =>
+      (out.out.response as { hookSpecificOutput: { updatedToolOutput: typeof SEARCH } })
+        .hookSpecificOutput.updatedToolOutput.results[0];
+    expect(first(a)).toContain('next docs');
+    expect(first(a)).not.toContain('zod docs');
+    expect(first(b)).toContain('zod docs');
+    expect(first(b)).not.toContain('next docs');
+  });
+
+  it("fetches one agent's identical search once in a few minutes", async () => {
+    let clock = Date.now();
+    const at = { now: () => clock };
+    const run = async (toolUseId: string, over: Record<string, unknown> = {}) =>
+      runNativeHook(
+        await preCall('next.js middleware matcher', 'WebSearch', {
+          tool_use_id: toolUseId,
+          ...over,
+        }),
+        deps(FREE, at).deps,
+      );
+    expect(await run('toolu_1')).toMatchObject({ free: true, augmenting: true });
+    // The same search again: it runs, undenied, and nothing is fetched.
+    const again = await run('toolu_2');
+    expect(again).toMatchObject({ response: null, free: true });
+    expect(again.augmenting).toBeUndefined();
+    expect(jobs).toHaveLength(1);
+    // A different agent's identical search is its own.
+    await run('toolu_3', { agent_id: 'a1', agent_type: 'general-purpose' });
+    expect(jobs).toHaveLength(2);
+    // And past the window, the same agent's is fetched again.
+    clock += 5 * 60_000 + 1;
+    expect(await run('toolu_4')).toMatchObject({ augmenting: true });
+    expect(jobs).toHaveLength(3);
+    // The call that was not augmented is an ordinary one after it runs.
+    const post = await after('next.js middleware matcher', 'toolu_2');
+    expect(post.out.augmented).toBeUndefined();
+  });
+
+  it('adds the docs inside a subagent, as for the main agent', async () => {
+    const subagent = { agent_id: 'a1', agent_type: 'general-purpose' };
+    const pre = await before('next.js middleware matcher', 'toolu_1', subagent);
+    expect(pre.out).toMatchObject({ response: null, free: true, augmenting: true });
+    await answer(jobs[0]!, 200, TEXT);
+    const post = await after('next.js middleware matcher', 'toolu_1', SEARCH, subagent);
+    expect(
+      (post.out.response as { hookSpecificOutput: { updatedToolOutput: typeof SEARCH } })
+        .hookSpecificOutput.updatedToolOutput.results[0],
+    ).toBe(LINE);
+  });
+
+  it('fetches nothing from an endpoint on another origin, and still does not deny', async () => {
+    const elsewhere = {
+      ...FREE,
+      decision: { ...FREE.decision, endpoint: 'https://docs.example.test/api/docs-lookup' },
+    };
+    const pre = await before('next.js middleware matcher', 'toolu_1', {}, elsewhere);
+    expect(pre.out).toEqual({ response: null, action: 'execute', id: 'k3f9-abcd', free: true });
+    expect(jobs).toHaveLength(0);
   });
 });
