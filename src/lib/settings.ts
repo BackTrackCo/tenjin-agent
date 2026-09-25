@@ -25,7 +25,7 @@ import type {
 import type { ShelfBypass } from './http';
 import { parseUsdToAtomic } from './money';
 import { PRODUCTION_ORIGIN, isSameDeployment } from './production-origin';
-import { parseConfirmPolicy, type SpendPolicy } from './policy';
+import type { SpendPolicy } from './policy';
 import type { CommandContext } from '../context';
 
 /**
@@ -275,7 +275,6 @@ export async function resolveContextSettings(ctx: CommandContext): Promise<Resol
     policy: {
       maxAutoSpendAtomic: BigInt(s.maxAutoSpend.value),
       sessionBudgetAtomic: s.sessionBudget.value === 'none' ? null : BigInt(s.sessionBudget.value),
-      confirm: parseConfirmPolicy(s.confirm.value),
       allowlistCreators: s.allowlistCreators.value,
     },
   };

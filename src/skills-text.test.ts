@@ -615,7 +615,7 @@ describe('the permissions doc matches the product this release ships', () => {
         Number(toMoney(ROUTER_DEFAULTS[key]).usd),
       );
     }
-    expect(PERMISSIONS_DOC).toContain(ROUTER_DEFAULTS.confirm);
+    expect(ROUTER_DEFAULTS).not.toHaveProperty('confirm');
   });
 
   it('keeps the flag caveat, which is why a prefix rule is not a host grant', () => {

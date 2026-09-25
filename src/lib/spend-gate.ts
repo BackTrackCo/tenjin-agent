@@ -1,3 +1,4 @@
+import type { PaymentMode } from './policy';
 import { CliError } from './errors';
 import { toMoney } from './money';
 import { promptYesNo } from './prompt';
@@ -17,6 +18,7 @@ import type { CommandContext } from '../context';
 
 export interface SpendGateInput {
   ctx: CommandContext;
+  mode?: PaymentMode;
   authorizer: SpendAuthorizer;
   amountAtomic: bigint;
   /** The policy's creator identity (a handle for buy, the target host for pay). */
@@ -46,6 +48,7 @@ export interface SpendGateInput {
 export async function gateSpend(input: SpendGateInput): Promise<string | undefined> {
   const { authorizer, amountAtomic } = input;
   const authorization = await authorizer.authorize({
+    mode: input.mode ?? 'automatic',
     amountAtomic,
     creator: input.creator,
     ...(input.maxPriceAtomic !== undefined ? { maxPriceAtomic: input.maxPriceAtomic } : {}),
@@ -59,11 +62,17 @@ export async function gateSpend(input: SpendGateInput): Promise<string | undefin
   }
   const reservationId = authorization.reservationId;
   if (authorization.decision === 'confirm') {
-    const approved = await confirmSpend(input);
+    let approved: boolean;
+    try {
+      approved = await confirmSpend(input);
+    } catch (err) {
+      await authorizer.release(reservationId);
+      throw err;
+    }
     if (!approved) {
       await authorizer.release(reservationId);
       throw new CliError('POLICY_REFUSED', input.notConfirmedMessage, {
-        fix: 'Re-run with --yes, or set a policy that auto-approves this spend.',
+        fix: 'Obtain explicit user consent for this quoted payment, then re-run with --yes or confirm interactively. Manual pay is never an autonomous workaround for a router refusal.',
         details: { reason: authorization.reason, amountAtomic: amountAtomic.toString() },
       });
     }

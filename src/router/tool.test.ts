@@ -377,7 +377,7 @@ describe('what the tool refuses to execute', () => {
       authorizer: resolveSpendAuthorizer(ctx(), {
         maxAutoSpendAtomic: 250_000n,
         sessionBudgetAtomic: 5_000_000n,
-        confirm: { mode: 'above' as const, thresholdAtomic: 250_000n },
+
         allowlistCreators: [],
       }),
       fetchImpl,
@@ -390,6 +390,7 @@ describe('what the tool refuses to execute', () => {
     };
     const result = await runRequestTool({ query: 'q' }, real);
     expect(result.envelope).toMatchObject({ status: 'needs_approval' });
+    expect(result.summary).toContain('Blocked by spending policy');
     expect(result.isError).toBe(false);
   });
 
@@ -401,7 +402,7 @@ describe('what the tool refuses to execute', () => {
       authorizer: resolveSpendAuthorizer(ctx(), {
         maxAutoSpendAtomic: 250_000n,
         sessionBudgetAtomic: 5_000_000n,
-        confirm: { mode: 'above' as const, thresholdAtomic: 250_000n },
+
         allowlistCreators: [],
       }),
       fetchImpl,

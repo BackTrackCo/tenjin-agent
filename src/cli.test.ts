@@ -187,11 +187,17 @@ describe('main', () => {
     const cap = captureIo();
     expect(await main(['pay', '--help'], cap.io)).toBe(0);
     const help = cap.stdout();
-    expect(help).toContain('--ignore-warning');
-    expect(help).toContain('--yes confirms payment only');
+    expect(help).toContain('--ignore-warnings');
+    expect(help.replace(/\s+/g, ' ')).toContain('--yes records prior consent for this quote');
+    expect(help).toContain('Unlisted endpoints need no warning flag');
     expect(help).toContain('--json --max-price');
     expect(help).not.toContain('bazaarPay');
     expect(help).not.toContain('tenjin discover');
+  });
+
+  it('cannot select internal router execution from the CLI', async () => {
+    const cap = captureIo();
+    expect(await main(['pay', 'https://example.com', '--execution', 'router'], cap.io)).toBe(2);
   });
 
   it('offers only the flags the router install actually has', async () => {

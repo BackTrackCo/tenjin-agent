@@ -26,7 +26,13 @@ import { skillMaterialize } from '../lib/skill-materialize';
 import type { HarnessWiring, NotInvocableReason } from '../lib/skill-wiring';
 import type { Harness, HarnessAdapter } from '../adapters/types';
 import { fetchJson, type FetchJsonFailure, type ShelfBypass } from '../lib/http';
-import { loadRawConfig, resolveGrantDeclined, resolveSettings } from '../lib/config';
+import {
+  retiredPaymentKeys,
+  RETIRED_PAYMENT_GUIDANCE,
+  loadRawConfig,
+  resolveGrantDeclined,
+  resolveSettings,
+} from '../lib/config';
 import {
   isTeamModeConfig,
   isTeamShelfOrigin,
@@ -574,7 +580,20 @@ async function loadConfigForDoctor(
     const config = await loadRawConfig(dataDir);
     const detail =
       Object.keys(config).length === 0 ? 'no config file; using defaults' : configPath(dataDir);
-    return { config, check: { result: { name: 'config', status: 'ok', required: true, detail } } };
+    const retired = retiredPaymentKeys(config);
+    return {
+      config,
+      check: {
+        result: {
+          name: 'config',
+          status: retired.length ? 'warn' : 'ok',
+          required: true,
+          detail: retired.length
+            ? `Ignored retired keys: ${retired.join(', ')}. ${RETIRED_PAYMENT_GUIDANCE}`
+            : detail,
+        },
+      },
+    };
   } catch (err) {
     if (err instanceof CliError && err.code === 'CONFIG_INVALID') {
       return {

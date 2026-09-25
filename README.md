@@ -17,7 +17,7 @@ tenjin wallet fund
 ```text
 ✓ Tenjin is set up for Claude Code
 ✓ Wallet created: 0x3c0D84055994c3062819Ce8730869D0aDeA4c3Bf
-  Auto-approves up to $0.25 per call; daily limit $5 a day
+  Automatic router: up to $0.25 per call; daily limit $5 a day
 
 Next: tenjin wallet fund, then restart Claude Code
 ```
@@ -51,7 +51,7 @@ x402 · request: calling pro-api.coinmarketcap.com/x402/v3/cryptocurrency/quotes
 
 ## Spending limits
 
-A fresh install sets automatic approval up to $0.25 per call and a $5 daily limit, only for settings you have not already chosen. The daily limit uses the existing 24 hour ledger window. `sessionBudget 0` refuses positive payments even with `--yes`; `sessionBudget none` explicitly removes the cumulative ceiling. `maxAutoSpend 0` requires approval for positive payments. A bare CLI without install defaults starts with zero spending and confirmation required. Change them any time:
+A fresh install sets automatic router limits of $0.25 per call and $5 per day, only where no setting exists. The daily budget uses the existing 24 hour ledger window and defaults to $5 even before install. Explicit zero in either limit blocks positive automatic payments; `sessionBudget none` removes only the automatic daily ceiling. Manual `tenjin pay` ignores both limits and always requires consent for the quoted payment, interactively or with `--yes` after explicit user approval. It is never an autonomous workaround for a router refusal. Change automatic limits any time:
 
 ```bash
 tenjin status                          # what you've spent today

@@ -7,24 +7,22 @@
  * non-interactive refusal).
  */
 
-/** How a `confirm` gate is configured (parsed from the stored config string). */
-export type ConfirmPolicy = { mode: 'always' } | { mode: 'above'; thresholdAtomic: bigint };
+export type PaymentMode = 'automatic' | 'manual';
 
 export interface SpendPolicy {
-  /** Amounts at or below this auto-approve WITHOUT a prompt (still subject to the
-   *  confirm gate below). Default 0 → nothing auto-approves. */
+  /** Automatic per-call ceiling; zero blocks positive automatic payments. */
   maxAutoSpendAtomic: bigint;
-  /** Rolling local ceiling on cumulative session spend. null = no ceiling; zero refuses positive payments. */
+  /** Rolling ceiling on automatic exposure. null = no ceiling; zero blocks positive automatic payments. */
   sessionBudgetAtomic: bigint | null;
-  /** When a human confirmation is requested. */
-  confirm: ConfirmPolicy;
-  /** Creators (handle or 0x-address, lowercased) auto-payment is restricted to.
+  /** Creators (handle or 0x-address, lowercased) all payments are restricted to.
    *  Empty = no restriction. A non-empty list is a hard gate: a non-member is
    *  denied even with `--yes`. */
   allowlistCreators: string[];
 }
 
 export interface SpendRequest {
+  /** Omitted by legacy consumers: conservatively automatic. */
+  mode?: PaymentMode;
   amountAtomic: bigint;
   /** Creator identity from the 402 preview / candidate, handle or 0x address. */
   creator: string;
@@ -55,8 +53,7 @@ export type PolicyReason =
   | 'not_allowlisted'
   | 'session_budget_exceeded'
   | 'above_auto_spend'
-  | 'confirm_always'
-  | 'above_confirm_threshold';
+  | 'confirm_always';
 
 export interface PolicyEvaluation {
   decision: SpendDecision;
@@ -70,12 +67,8 @@ function normCreator(value: string): string {
   return value.trim().toLowerCase();
 }
 
-/**
- * Evaluate one spend against the policy. Hard gates run first (price cap →
- * allowlist → session budget); only if all pass is the confirm gate consulted. A
- * spend at or below `maxAutoSpend` that the confirm policy would not prompt for is
- * the only `allow`; everything else within the hard gates is `confirm`.
- */
+/** Hard price/creator checks apply in both modes. Manual payments require consent;
+ * automatic payments must fit both configured ceilings without prompting. */
 export function evaluateSpendPolicy(policy: SpendPolicy, req: SpendRequest): PolicyEvaluation {
   if (req.maxPriceAtomic !== undefined && req.amountAtomic > req.maxPriceAtomic) {
     return {
@@ -96,6 +89,16 @@ export function evaluateSpendPolicy(policy: SpendPolicy, req: SpendRequest): Pol
     }
   }
 
+  if (req.mode === 'manual') {
+    return req.amountAtomic > 0n
+      ? {
+          decision: 'confirm',
+          reason: 'confirm_always',
+          message: 'Manual payment requires explicit consent.',
+        }
+      : { decision: 'allow', reason: 'within_policy', message: 'No payment required.' };
+  }
+
   if (policy.sessionBudgetAtomic !== null) {
     const projected = req.sessionSpentAtomic + req.amountAtomic;
     if (projected > policy.sessionBudgetAtomic) {
@@ -109,37 +112,11 @@ export function evaluateSpendPolicy(policy: SpendPolicy, req: SpendRequest): Pol
 
   if (req.amountAtomic > policy.maxAutoSpendAtomic) {
     return {
-      decision: 'confirm',
+      decision: 'deny',
       reason: 'above_auto_spend',
-      message: `Price ${req.amountAtomic} is above maxAutoSpend ${policy.maxAutoSpendAtomic}; confirmation required.`,
-    };
-  }
-
-  if (policy.confirm.mode === 'always') {
-    return {
-      decision: 'confirm',
-      reason: 'confirm_always',
-      message: 'confirm policy is "always"; confirmation required.',
-    };
-  }
-
-  if (req.amountAtomic > policy.confirm.thresholdAtomic) {
-    return {
-      decision: 'confirm',
-      reason: 'above_confirm_threshold',
-      message: `Price ${req.amountAtomic} is above the confirm threshold ${policy.confirm.thresholdAtomic}; confirmation required.`,
+      message: `Price ${req.amountAtomic} is above maxAutoSpend ${policy.maxAutoSpendAtomic}; automatic payment refused.`,
     };
   }
 
   return { decision: 'allow', reason: 'within_policy', message: 'within spend policy' };
-}
-
-/** Parse the stored `confirm` config value ("always" | "above:<atomic>"). */
-export function parseConfirmPolicy(stored: string): ConfirmPolicy {
-  if (stored === 'always') return { mode: 'always' };
-  const m = /^above:(\d+)$/.exec(stored);
-  if (m && m[1] !== undefined) return { mode: 'above', thresholdAtomic: BigInt(m[1]) };
-  // The config schema already constrains this; a malformed value here is a bug,
-  // so fail closed to the safest interpretation rather than throwing mid-buy.
-  return { mode: 'always' };
 }

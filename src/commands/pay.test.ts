@@ -206,7 +206,7 @@ describe('runPay, tenjin lane', () => {
     expect(calls[1]!.headers['payment-signature']).toBeDefined();
     // The identical business request is retried: same body, same method.
     expect(calls[1]!.body).toBe(calls[0]!.body);
-    expect(authorizer.commit).toHaveBeenCalledWith(RESERVATION, 100000n);
+    expect(authorizer.commit).toHaveBeenCalledWith(RESERVATION, 100000n, { mode: 'manual' });
   });
 
   // A routing decision can name a contract on the configured origin, so the
@@ -264,7 +264,7 @@ describe('runPay, tenjin lane', () => {
         authorizer,
       }),
     ).rejects.toMatchObject({ code: 'PAYMENT_FAILED' });
-    expect(authorizer.commit).toHaveBeenCalledWith(RESERVATION, 100000n);
+    expect(authorizer.commit).toHaveBeenCalledWith(RESERVATION, 100000n, { mode: 'manual' });
     expect(authorizer.release).not.toHaveBeenCalled();
   });
 
@@ -679,7 +679,7 @@ describe('runPay, bazaar lane', () => {
       expect((err as CliError).fix).not.toMatch(/then retry/i);
     }
     expect(calls[1]!.headers['payment-signature']).toBeDefined();
-    expect(authorizer.commit).toHaveBeenCalledWith(RESERVATION, 100000n);
+    expect(authorizer.commit).toHaveBeenCalledWith(RESERVATION, 100000n, { mode: 'manual' });
     expect(authorizer.release).not.toHaveBeenCalled();
   });
 
@@ -732,22 +732,28 @@ describe('runPay, bazaar lane', () => {
     expect(calls).toHaveLength(1);
   });
 
-  it('an unlisted resource is refused', async () => {
+  it('an unlisted resource requires consent but no warning acknowledgement', async () => {
     await writeConfig();
-    stubRegistry(() =>
-      json(200, { x402Version: 2, items: [], pagination: { limit: 100, offset: 0, total: 0 } }),
-    );
-    const fixture = buildPaymentRequired();
-    const { fetch } = scriptedFetch([json(402, {}, { 'PAYMENT-REQUIRED': fixture.header })]);
-    const err = await runPay({ url: FOREIGN_URL }, makeCtx(), {
+    stubRegistry(() => json(200, { resources: [] }));
+    const responses = () =>
+      scriptedFetch([
+        json(402, {}, { 'PAYMENT-REQUIRED': buildPaymentRequired().header }),
+        json(200, { paid: true }),
+      ]);
+    await expect(
+      runPay({ url: FOREIGN_URL }, makeCtx(), {
+        ...PUBLIC_DNS,
+        fetchImpl: responses().fetch,
+        provider: testWalletProvider(),
+      }),
+    ).rejects.toMatchObject({ code: 'POLICY_REFUSED', details: { reason: 'confirm_always' } });
+    const result = await runPay({ url: FOREIGN_URL, yes: true }, makeCtx(), {
       ...PUBLIC_DNS,
-      fetchImpl: fetch,
-    }).catch((e: unknown) => e);
-    expect(err).toMatchObject({ code: 'REFUSED' });
-    // The fix names what the user can check, never a verb this build does not
-    // register (`discover` is shelved).
-    expect((err as CliError).fix).toContain('--ignore-warning');
-    expect((err as CliError).fix).not.toContain('discover');
+      fetchImpl: responses().fetch,
+      provider: testWalletProvider(),
+    });
+    expect(result.data).toMatchObject({ paid: true });
+    expect(result.data).toMatchObject({ warnings: [] });
   });
 
   /**
@@ -883,8 +889,12 @@ describe('runPay, bazaar lane', () => {
     const fixture = buildPaymentRequired();
     const { fetch } = scriptedFetch([json(402, {}, { 'PAYMENT-REQUIRED': fixture.header })]);
     await expect(
-      runPay({ url: FOREIGN_URL }, makeCtx(), { ...PUBLIC_DNS, fetchImpl: fetch }),
-    ).rejects.toMatchObject({ code: 'REFUSED' });
+      runPay({ url: FOREIGN_URL }, makeCtx(), {
+        ...PUBLIC_DNS,
+        fetchImpl: fetch,
+        provider: testWalletProvider(),
+      }),
+    ).rejects.toMatchObject({ code: 'POLICY_REFUSED', details: { reason: 'confirm_always' } });
   });
 
   // The mirror of the expiry test above, and the reason the window is bounded at
@@ -904,8 +914,12 @@ describe('runPay, bazaar lane', () => {
     const fixture = buildPaymentRequired();
     const { fetch } = scriptedFetch([json(402, {}, { 'PAYMENT-REQUIRED': fixture.header })]);
     await expect(
-      runPay({ url: FOREIGN_URL }, makeCtx(), { ...PUBLIC_DNS, fetchImpl: fetch }),
-    ).rejects.toMatchObject({ code: 'REFUSED' });
+      runPay({ url: FOREIGN_URL }, makeCtx(), {
+        ...PUBLIC_DNS,
+        fetchImpl: fetch,
+        provider: testWalletProvider(),
+      }),
+    ).rejects.toMatchObject({ code: 'POLICY_REFUSED', details: { reason: 'confirm_always' } });
   });
 
   // The store is ours, so the only way in is a truncated write or a hand-edit.
@@ -934,8 +948,12 @@ describe('runPay, bazaar lane', () => {
     const fixture = buildPaymentRequired();
     const { fetch } = scriptedFetch([json(402, {}, { 'PAYMENT-REQUIRED': fixture.header })]);
     await expect(
-      runPay({ url: FOREIGN_URL }, makeCtx(), { ...PUBLIC_DNS, fetchImpl: fetch }),
-    ).rejects.toMatchObject({ code: 'REFUSED' });
+      runPay({ url: FOREIGN_URL }, makeCtx(), {
+        ...PUBLIC_DNS,
+        fetchImpl: fetch,
+        provider: testWalletProvider(),
+      }),
+    ).rejects.toMatchObject({ code: 'POLICY_REFUSED', details: { reason: 'confirm_always' } });
   });
 
   it('a stored listing with a lower advertised price is REGISTRY_MISMATCH', async () => {
@@ -953,8 +971,15 @@ describe('runPay, bazaar lane', () => {
     const fixture = buildPaymentRequired(); // live asks 100000
     const { fetch } = scriptedFetch([json(402, {}, { 'PAYMENT-REQUIRED': fixture.header })]);
     await expect(
-      runPay({ url: FOREIGN_URL }, makeCtx(), { ...PUBLIC_DNS, fetchImpl: fetch }),
-    ).rejects.toMatchObject({ code: 'REFUSED' });
+      runPay({ url: FOREIGN_URL }, makeCtx(), {
+        ...PUBLIC_DNS,
+        fetchImpl: fetch,
+        provider: testWalletProvider(),
+      }),
+    ).rejects.toMatchObject({
+      code: 'REFUSED',
+      details: { reason: 'registry_acknowledgement_required' },
+    });
   });
 });
 
@@ -1202,7 +1227,7 @@ describe('runPay, the success rule on every delivery', () => {
     expect(data.resultCaveat).toContain('unverified');
     expect(result.humanLines?.some((line) => line.includes('unverified'))).toBe(true);
     // The ledger is unchanged by this: the money moved either way.
-    expect(authorizer.commit).toHaveBeenCalledWith(RESERVATION, 100000n);
+    expect(authorizer.commit).toHaveBeenCalledWith(RESERVATION, 100000n, { mode: 'manual' });
   });
 
   it('delivers a free 2xx too large to validate with the same caveat', async () => {
@@ -1487,7 +1512,7 @@ describe('direct registry warning acknowledgement and balance enforcement', () =
       json(200, { answer: 'paid' }),
     ]);
   }
-  it.each(['unlisted', 'unavailable', 'price', 'payee'] as const)(
+  it.each(['unavailable', 'price', 'payee'] as const)(
     '%s blocks both default and --yes before payment signing/reserving',
     async (kind) => {
       await writeConfig();
@@ -1523,7 +1548,7 @@ describe('direct registry warning acknowledgement and balance enforcement', () =
       }
     },
   );
-  it.each(['unlisted', 'unavailable', 'price', 'payee'] as const)(
+  it.each(['unavailable', 'price', 'payee'] as const)(
     '%s acknowledgement keeps the confirmation gate and warnings visible',
     async (kind) => {
       await writeConfig();
@@ -1532,7 +1557,7 @@ describe('direct registry warning acknowledgement and balance enforcement', () =
       const authorizer = fakeAuthorizer('confirm');
       const first = paymentResponses();
       await expect(
-        runPay({ url: FOREIGN_URL, ignoreWarning: true }, makeCtx(), {
+        runPay({ url: FOREIGN_URL, ignoreWarnings: true }, makeCtx(), {
           ...PUBLIC_DNS,
           fetchImpl: first.fetch,
           authorizer,
@@ -1548,7 +1573,7 @@ describe('direct registry warning acknowledgement and balance enforcement', () =
       const ctx = makeCtx({ json: true });
       const stdout = vi.spyOn(ctx.io.stdout, 'write');
       const stderr = vi.spyOn(ctx.io.stderr, 'write');
-      const result = await runPay({ url: FOREIGN_URL, ignoreWarning: true, yes: true }, ctx, {
+      const result = await runPay({ url: FOREIGN_URL, ignoreWarnings: true, yes: true }, ctx, {
         ...PUBLIC_DNS,
         fetchImpl: second.fetch,
         authorizer,
@@ -1570,7 +1595,7 @@ describe('direct registry warning acknowledgement and balance enforcement', () =
   );
   it('shows acknowledged warnings before interactive confirmation, including the complete live quote', async () => {
     await writeConfig();
-    warningRegistry('unlisted');
+    warningRegistry('price');
     const { fetch } = paymentResponses();
     const ctx = makeCtx({}, true);
     const messages: string[] = [];
@@ -1585,7 +1610,7 @@ describe('direct registry warning acknowledgement and balance enforcement', () =
       expect(prompt).toContain(LIVE_ACCEPT.asset);
       return true;
     });
-    await runPay({ url: FOREIGN_URL, ignoreWarning: true }, ctx, {
+    await runPay({ url: FOREIGN_URL, ignoreWarnings: true }, ctx, {
       ...PUBLIC_DNS,
       fetchImpl: fetch,
       authorizer: fakeAuthorizer('confirm'),
@@ -1605,7 +1630,7 @@ describe('direct registry warning acknowledgement and balance enforcement', () =
       const sign = vi.spyOn(signer, 'signTypedData');
       const readBalance = vi.fn(async () => balance);
       await expect(
-        runPay({ url: FOREIGN_URL, ignoreWarning: true, yes: true }, makeCtx(), {
+        runPay({ url: FOREIGN_URL, ignoreWarnings: true, yes: true }, makeCtx(), {
           ...PUBLIC_DNS,
           fetchImpl: fetch,
           provider,
@@ -1616,42 +1641,74 @@ describe('direct registry warning acknowledgement and balance enforcement', () =
         details: { reason: balance === null ? 'balance_unavailable' : 'insufficient_funds' },
       });
       expect(readBalance).toHaveBeenCalledWith(signer.address, expect.any(String), {
-        timeoutMs: 5000,
+        timeoutMs: expect.any(Number),
       });
       expect(sign).not.toHaveBeenCalled();
+      expect(readBalance).toHaveBeenCalledTimes(balance === null ? 2 : 1);
       expect(calls).toHaveLength(1);
       const { readSpendSummary } = await import('../lib/wallet/spend');
       expect(await readSpendSummary(dir)).toMatchObject({ committedAtomic: '0', reservations: [] });
     },
   );
-  it.each([{ sessionBudget: '0' }, { sessionBudget: '99999' }])(
-    'both flags cannot bypass daily limit %j',
+  it.each([{ sessionBudget: '0' }, { sessionBudget: '99999' }, { maxAutoSpend: '0' }, {}])(
+    'manual pay ignores automatic limits %j but always requires consent',
     async (settings) => {
       await writeConfig(settings);
       warningRegistry('unlisted');
-      const { fetch, calls } = paymentResponses();
+      const first = paymentResponses();
       const readBalance = vi.fn(async () => 1_000_000n);
       await expect(
-        runPay({ url: FOREIGN_URL, ignoreWarning: true, yes: true }, makeCtx(), {
+        runPay({ url: FOREIGN_URL }, makeCtx(), {
           ...PUBLIC_DNS,
-          fetchImpl: fetch,
+          fetchImpl: first.fetch,
           provider: testWalletProvider(),
           readBalance,
         }),
-      ).rejects.toMatchObject({
-        code: 'POLICY_REFUSED',
-        details: { reason: 'session_budget_exceeded' },
-      });
+      ).rejects.toMatchObject({ code: 'POLICY_REFUSED', details: { reason: 'confirm_always' } });
       expect(readBalance).not.toHaveBeenCalled();
-      expect(calls).toHaveLength(1);
+      const second = paymentResponses();
+      const result = await runPay({ url: FOREIGN_URL, yes: true }, makeCtx(), {
+        ...PUBLIC_DNS,
+        fetchImpl: second.fetch,
+        provider: testWalletProvider(),
+        readBalance,
+      });
+      expect(result.data).toMatchObject({ paid: true });
+      expect(second.calls).toHaveLength(2);
+      const { readSpendSummary } = await import('../lib/wallet/spend');
+      expect(await readSpendSummary(dir)).toMatchObject({
+        committedAtomic: '100000',
+        automaticCommittedAtomic: '0',
+        reservations: [],
+      });
     },
   );
+  it('manual payment works before install with no config file', async () => {
+    const result = await runPay({ url: TENJIN_URL, yes: true }, makeCtx(), {
+      ...PUBLIC_DNS,
+      fetchImpl: paymentResponses().fetch,
+      provider: testWalletProvider(),
+    });
+    expect(result.data).toMatchObject({ paid: true });
+  });
+  it('retries an unreadable balance once before signing', async () => {
+    const readBalance = vi.fn().mockResolvedValueOnce(null).mockResolvedValueOnce(100_000n);
+    const result = await runPay({ url: TENJIN_URL, yes: true }, makeCtx(), {
+      ...PUBLIC_DNS,
+      fetchImpl: paymentResponses().fetch,
+      provider: testWalletProvider(),
+      readBalance,
+    });
+    expect(result.data).toMatchObject({ paid: true });
+    expect(readBalance).toHaveBeenCalledTimes(2);
+    expect(readBalance.mock.calls[1]![2].timeoutMs).toBeLessThan(5000);
+  });
   it('both flags cannot bypass an explicit price cap', async () => {
     await writeConfig({ sessionBudget: 'none' });
     warningRegistry('unlisted');
     const { fetch, calls } = paymentResponses();
     await expect(
-      runPay({ url: FOREIGN_URL, ignoreWarning: true, yes: true, maxPrice: '0.01' }, makeCtx(), {
+      runPay({ url: FOREIGN_URL, ignoreWarnings: true, yes: true, maxPrice: '0.01' }, makeCtx(), {
         ...PUBLIC_DNS,
         fetchImpl: fetch,
         provider: testWalletProvider(),
@@ -1684,7 +1741,7 @@ describe('direct registry warning acknowledgement and balance enforcement', () =
     { execution: 'router' as const },
     { execution: 'router' as const, terms: {} },
     { execution: 'router' as const, terms: { maxAmountAtomic: 'NaN' } },
-    { execution: 'router' as const, terms: { maxAmountAtomic: '100000' }, ignoreWarning: true },
+    { execution: 'router' as const, terms: { maxAmountAtomic: '100000' }, ignoreWarnings: true },
   ])('malformed router input or override cannot become direct pay: %j', async (args) => {
     const fetchImpl = vi.fn();
     await expect(
@@ -1719,7 +1776,7 @@ describe('payment hard gates with acknowledged warnings', () => {
       return 100_000n;
     });
     await expect(
-      runPay({ url: FOREIGN_URL, ignoreWarning: true }, makeCtx(), {
+      runPay({ url: FOREIGN_URL, ignoreWarnings: true }, makeCtx(), {
         ...PUBLIC_DNS,
         provider,
         fetchImpl: fetch,
@@ -1731,11 +1788,11 @@ describe('payment hard gates with acknowledged warnings', () => {
       }),
     ).rejects.toMatchObject({
       code: 'PAYMENT_FAILED',
-      details: { amountAtomic: '100000', warnings: [{ acknowledged: true }] },
+      details: { amountAtomic: '100000' },
     });
     expect(order).toEqual(['confirm', 'balance', 'sign']);
     expect(readBalance).toHaveBeenCalledWith(signer.address, 'https://rpc.example.test', {
-      timeoutMs: 5000,
+      timeoutMs: expect.any(Number),
     });
     expect(calls).toHaveLength(2);
     const { readSpendSummary } = await import('../lib/wallet/spend');
@@ -1749,7 +1806,7 @@ describe('payment hard gates with acknowledged warnings', () => {
     const fixture = buildPaymentRequired({ network: 'eip155:1' });
     const { fetch, calls } = scriptedFetch([json(402, {}, { 'PAYMENT-REQUIRED': fixture.header })]);
     await expect(
-      runPay({ url: FOREIGN_URL, ignoreWarning: true, yes: true }, makeCtx(), {
+      runPay({ url: FOREIGN_URL, ignoreWarnings: true, yes: true }, makeCtx(), {
         ...PUBLIC_DNS,
         fetchImpl: fetch,
         provider: testWalletProvider(),
@@ -1760,7 +1817,7 @@ describe('payment hard gates with acknowledged warnings', () => {
   it('both flags cannot authorize a private destination', async () => {
     const fetchImpl = vi.fn();
     await expect(
-      runPay({ url: FOREIGN_URL, ignoreWarning: true, yes: true }, makeCtx(), {
+      runPay({ url: FOREIGN_URL, ignoreWarnings: true, yes: true }, makeCtx(), {
         fetchImpl,
         destination: { resolveHostname: async () => [{ address: '127.0.0.1', family: 4 }] },
       }),

@@ -1,3 +1,4 @@
+import { setTimeout as delay } from 'node:timers/promises';
 import { decodePaymentRequiredHeader, decodePaymentResponseHeader } from '@x402/core/http';
 import { SIGN_IN_WITH_X } from '@x402/extensions/sign-in-with-x';
 import type { PaymentRequired, PaymentRequirements } from '@x402/core/types';
@@ -35,10 +36,10 @@ import type { CommandContext, CommandResult } from '../context';
 /**
  * `tenjin pay <url>`: the standard x402 client verb, for ANY paid endpoint
  * rather than marketplace pieces. One probe; a 2xx delivers free; a 402 runs
- * the same money gates as `buy` (spend policy, price cap, session budget,
- * confirm; `--yes` clears only the confirm) and retries once with the
+ * shared payment gate (automatic limits for the router, mandatory consent for
+ * manual pay, hard price/creator checks for both) and retries once with the
  * `PAYMENT-SIGNATURE`. Deliberately NOT `buy`: no library idempotence (every
- * paid call pays; the session budget and `--max-price` are the brakes) and no
+ * paid call pays; manual consent and optional `--max-price` are the brakes) and no
  * search attribution. SIWX rides ONLY when the 402 advertises the standard
  * sign-in-with-x extension, and the signature is bound to the TARGET origin
  * (never the configured deployment's), so an entitled wallet re-reads free at
@@ -89,7 +90,7 @@ export interface PayArgs {
   /** Bypass the interactive confirm only (never the price cap or a hard deny). */
   yes?: boolean;
   /** Acknowledge direct-payment registry warnings for this invocation only. */
-  ignoreWarning?: boolean;
+  ignoreWarnings?: boolean;
   /** Internal router entrypoint; missing terms must never become direct pay. */
   execution?: 'router';
   /** Print the full body to the terminal instead of the capped preview. */
@@ -130,7 +131,7 @@ export interface PayDeps {
 
 type Lane = 'tenjin' | 'bazaar';
 
-type RegistryWarning = Exclude<RegistryVerification, { outcome: 'verified' }> & {
+type RegistryWarning = Exclude<RegistryVerification, { outcome: 'verified' | 'unlisted' }> & {
   acknowledged: boolean;
   quote: PaymentRequirements & { url: string };
 };
@@ -169,7 +170,7 @@ async function executePay(
   if (router) {
     const terms = args.terms;
     if (
-      args.ignoreWarning === true ||
+      args.ignoreWarnings === true ||
       !terms ||
       typeof terms.maxAmountAtomic !== 'string' ||
       !/^\d+$/.test(terms.maxAmountAtomic) ||
@@ -263,7 +264,7 @@ async function executePay(
       url,
       requirement,
       ctx,
-      args.ignoreWarning === true,
+      args.ignoreWarnings === true,
       warnings,
     );
   }
@@ -355,7 +356,7 @@ async function executePay(
         url,
         fresh,
         ctx,
-        args.ignoreWarning === true,
+        args.ignoreWarnings === true,
         warnings,
       );
     }
@@ -371,7 +372,9 @@ async function executePay(
   // hosts); the gate itself is shared with `buy` so the two verbs cannot drift.
   const verifiedVia = registry ?? termsLabel;
   const via = verifiedVia !== undefined ? ` (${sanitizeForTerminal(verifiedVia)})` : '';
+  const mode = router ? 'automatic' : 'manual';
   const reservationId = await gateSpend({
+    mode,
     ctx,
     authorizer,
     amountAtomic,
@@ -394,9 +397,18 @@ async function executePay(
     // advertising several chains cannot have one entry priced and another
     // signed. Without this the builder re-picked `accepts[0]`.
     if (amountAtomic > 0n) {
-      const balance = await (deps.readBalance ?? readUsdcBalance)(signer.address, settings.rpcUrl, {
-        timeoutMs: ctx.flags.timeout,
+      // One retry across a rate-limit interval, within the original read deadline.
+      const deadline = Date.now() + ctx.flags.timeout;
+      const readBalance = deps.readBalance ?? readUsdcBalance;
+      let balance = await readBalance(signer.address, settings.rpcUrl, {
+        timeoutMs: Math.max(1, Math.floor(ctx.flags.timeout / 2)),
       });
+      if (balance === null && Date.now() < deadline) {
+        await delay(Math.min(1100, Math.floor((deadline - Date.now()) / 2)));
+        const remaining = deadline - Date.now();
+        if (remaining > 0)
+          balance = await readBalance(signer.address, settings.rpcUrl, { timeoutMs: remaining });
+      }
       if (balance === null) {
         throw new CliError(
           'REFUSED',
@@ -437,7 +449,7 @@ async function executePay(
     timeoutMs: paidLegTimeoutMs(effectiveRequirement, ctx.flags.timeout),
     headers: { ...headers, ...payment.headers },
   });
-  await authorizer.commit(reservationId, payment.amountAtomic);
+  await authorizer.commit(reservationId, payment.amountAtomic, { mode });
   // A TRANSPORT failure on this leg is a post-transmission outcome like any
   // other: the authorization has left, the reservation is committed above, and
   // a receipt that said nothing was paid would report a provider cost of zero
@@ -446,7 +458,7 @@ async function executePay(
   if (!paid.ok) {
     throw fetchFailureToCliError(paid, {
       fix:
-        'The authorization was transmitted and settlement is unknown; it is counted against the session budget. ' +
+        'The authorization was transmitted and settlement is unknown; it is recorded as transmitted exposure. ' +
         `Do not simply retry: each attempt signs a fresh authorization. ${legFix(paid)}`,
       details: { amountAtomic: payment.amountAtomic.toString(), settlement: 'unknown' },
     });
@@ -756,6 +768,7 @@ async function checkRegistry(
     { dataDir: ctx.dataDir },
   );
   if (verification.outcome === 'verified') return verification.registry;
+  if (verification.outcome === 'unlisted') return undefined;
   const warning: RegistryWarning = {
     ...verification,
     acknowledged,
@@ -773,7 +786,7 @@ async function checkRegistry(
   }
   if (!acknowledged) {
     throw new CliError('REFUSED', message, {
-      fix: 'Review the live quote and use --ignore-warning to acknowledge this registry warning for this invocation. --yes only confirms payment; normal payment checks still apply.',
+      fix: 'Review the live quote and use --ignore-warnings to acknowledge this registry warning for this invocation. --yes only confirms payment; normal payment checks still apply.',
       details: { reason: 'registry_acknowledgement_required', quote: { url, ...requirement } },
     });
   }
@@ -782,8 +795,6 @@ async function checkRegistry(
 
 function warningMessage(warning: RegistryWarning): string {
   switch (warning.outcome) {
-    case 'unlisted':
-      return 'Registry warning: no configured registry lists this exact resource.';
     case 'unavailable':
       return 'Registry warning: verification is unavailable or incomplete.';
     case 'mismatch':

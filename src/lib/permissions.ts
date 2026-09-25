@@ -210,7 +210,7 @@ export const OPT_IN_ALLOWLIST: readonly AllowlistEntry[] = [
     rule: 'Bash(tenjin pay:*)',
     command: 'tenjin pay',
     note:
-      'SPENDS USDC on Base, unrefundably. Direct third-party registry warnings require --ignore-warning ' +
+      'SPENDS USDC on Base, unrefundably. Only for explicit user-requested payments with consent for the live quote; never an autonomous router-refusal workaround. Automatic router limits do not apply. Registry lookup failures or listed-term mismatches require --ignore-warnings ' +
       'for that invocation, and --yes confirms payment only. Both still obey sessionBudget, --max-price, ' +
       'balance and destination checks. maxAutoSpend controls automatic approval. Every paid call can spend again.',
   },

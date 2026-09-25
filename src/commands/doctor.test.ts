@@ -2725,3 +2725,19 @@ describe('runDoctorPrune', () => {
     expect(res.humanLines?.join('\n')).toContain('Nothing retired left to remove.');
   });
 });
+
+it('doctor warns about retired payment keys without failing config validation', async () => {
+  await writeFile(
+    join(dir, 'config.json'),
+    JSON.stringify({ bazaarPay: false, confirm: { obsolete: true } }),
+  );
+  const result = await runDoctor(ctxFor(), {
+    walletPassphrase: NO_OS_STORE,
+    fetchImpl: healthyFetch,
+    homeDir: skillHome,
+  });
+  const config = find((result.data as { checks: CheckResult[] }).checks, 'config');
+  expect(config.status).toBe('warn');
+  expect(config.detail).toContain('bazaarPay, confirm');
+  expect(config.detail).toContain('manual pay always requires consent');
+});

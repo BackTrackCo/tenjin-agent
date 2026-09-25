@@ -24,7 +24,7 @@ function policy(over: Partial<SpendPolicy> = {}): SpendPolicy {
   return {
     maxAutoSpendAtomic: 1_000_000n,
     sessionBudgetAtomic: null, // disabled
-    confirm: { mode: 'above', thresholdAtomic: 1_000_000n },
+
     allowlistCreators: [],
     ...over,
   };
@@ -343,5 +343,78 @@ describe('zero and unlimited daily budgets', () => {
     const approved = results.find((a) => a.reservationId)!;
     await first.release(approved.reservationId);
     expect(await second.authorize(request)).toMatchObject({ decision: 'allow' });
+  });
+});
+
+describe('automatic exposure and manual accounting share one ledger', () => {
+  it('manual pending and committed spend leave automatic headroom intact', async () => {
+    const auth = createLocalSpendAuthorizer({ dir, policy: policy({ sessionBudgetAtomic: 100n }) });
+    const manual = await auth.authorize({
+      mode: 'manual',
+      amountAtomic: 9_000_000n,
+      creator: 'iris',
+      requestKey: 'same',
+    });
+    expect(manual.decision).toBe('confirm');
+    expect(
+      (await auth.authorize({ amountAtomic: 1n, creator: 'iris', requestKey: 'same' })).reason,
+    ).toBe('duplicate_in_flight');
+    const automatic = await auth.authorize({ amountAtomic: 100n, creator: 'iris' });
+    expect(automatic.decision).toBe('allow');
+    await auth.commit(manual.reservationId, 9_000_000n, { mode: 'manual' });
+    expect((await auth.authorize({ amountAtomic: 1n, creator: 'iris' })).reason).toBe(
+      'session_budget_exceeded',
+    );
+    await auth.release(automatic.reservationId);
+    const next = await auth.authorize({ amountAtomic: 100n, creator: 'iris' });
+    expect(next.sessionSpentAtomic).toBe(0n);
+    await auth.commit(next.reservationId, 100n);
+    expect(JSON.parse(await readFile(spendLedgerPath(dir), 'utf8'))).toMatchObject({
+      committedAtomic: '9000100',
+      automaticCommittedAtomic: '100',
+    });
+  });
+  it('keeps manual mode after reservation expiry and a new authorizer instance', async () => {
+    let now = 1_000;
+    const create = () =>
+      createLocalSpendAuthorizer({
+        dir,
+        policy: policy({ sessionBudgetAtomic: 0n }),
+        now: () => now,
+      });
+    const first = await create().authorize({ mode: 'manual', amountAtomic: 100n, creator: 'iris' });
+    now += 700_000;
+    // Freshen persists away the expired reservation before commit.
+    const second = await create().authorize({ mode: 'manual', amountAtomic: 1n, creator: 'iris' });
+    await create().release(second.reservationId);
+    await create().commit(first.reservationId, 100n, { mode: 'manual' });
+    expect(JSON.parse(await readFile(spendLedgerPath(dir), 'utf8'))).toMatchObject({
+      committedAtomic: '100',
+      automaticCommittedAtomic: '0',
+      reservations: [],
+    });
+  });
+  it('conservatively counts legacy committed exposure and reservations as automatic', async () => {
+    const now = Date.now();
+    await writeFile(
+      spendLedgerPath(dir),
+      JSON.stringify({
+        schemaVersion: 2,
+        windowStartMs: now,
+        committedAtomic: '50',
+        reservations: [{ id: 'old', amountAtomic: '50', atMs: now }],
+      }),
+    );
+    const auth = createLocalSpendAuthorizer({ dir, policy: policy({ sessionBudgetAtomic: 100n }) });
+    expect((await auth.authorize({ amountAtomic: 1n, creator: 'iris' })).reason).toBe(
+      'session_budget_exceeded',
+    );
+    const manual = await auth.authorize({ mode: 'manual', amountAtomic: 200n, creator: 'iris' });
+    await auth.commit(manual.reservationId, 200n, { mode: 'manual' });
+    await auth.commit('old', 50n);
+    expect(JSON.parse(await readFile(spendLedgerPath(dir), 'utf8'))).toMatchObject({
+      committedAtomic: '300',
+      automaticCommittedAtomic: '100',
+    });
   });
 });

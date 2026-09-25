@@ -250,9 +250,9 @@ Examples:
       });
     });
 
-  leaf(WALLET, 'pay <url>', 'pay any x402 endpoint under your spend policy')
+  leaf(WALLET, 'pay <url>', 'pay an x402 endpoint with explicit user consent')
     .description(
-      'Pay an x402 endpoint (exact scheme, USDC on Base) under your spend policy. Third-party registry warnings require --ignore-warning for this invocation. --yes confirms payment only. Every paid call pays; entitled delivery remains free.',
+      'Pay an x402 endpoint (exact scheme, USDC on Base) with explicit user consent. Manual pay ignores automatic router limits and always confirms; --yes records prior consent for this quote. Never use it as an autonomous workaround for router refusal. Unlisted endpoints need no warning flag. Registry lookup failures or listed-term mismatches require --ignore-warnings separately. Every paid call pays; entitled delivery remains free.',
     )
     .option('-X, --method <method>', 'GET (default) or POST (implied by --data)')
     .option('-d, --data <json>', 'JSON request body (sent as application/json)')
@@ -261,7 +261,7 @@ Examples:
     // NOT the same flag as `read`/`buy` carry: there it adds `body` to the
     // machine output, here it un-caps the preview the human line prints.
     .option(
-      '--ignore-warning',
+      '--ignore-warnings',
       'acknowledge direct-payment registry warnings only; all payment checks still apply',
     )
     .option('--print-body', 'print the full body instead of the capped preview')
@@ -270,7 +270,7 @@ Examples:
       `
 Examples:
   $ tenjin pay https://api.example.com/quote --max-price 0.05
-  $ tenjin pay https://api.example.com/quote --json --max-price 0.05 --ignore-warning --yes
+  $ tenjin pay https://api.example.com/quote --json --max-price 0.05 --ignore-warnings --yes
   $ tenjin pay https://api.example.com/quote -d '{"symbol":"ETH"}' --yes
 `,
     )
@@ -286,7 +286,7 @@ Examples:
             ...(typeof o.maxPrice === 'string' ? { maxPrice: o.maxPrice } : {}),
             ...(o.yes === true ? { yes: true } : {}),
             ...(o.printBody === true ? { printBody: true } : {}),
-            ...(o.ignoreWarning === true ? { ignoreWarning: true } : {}),
+            ...(o.ignoreWarnings === true ? { ignoreWarnings: true } : {}),
           },
           ctx,
         );

@@ -17,6 +17,7 @@ import {
   type PolicyReason,
   type SpendDecision,
   type SpendPolicy,
+  type PaymentMode,
 } from '../policy';
 import type { PolicyEnforcement } from './provider';
 
@@ -38,6 +39,7 @@ import type { PolicyEnforcement } from './provider';
  */
 
 export interface SpendRequest {
+  mode?: PaymentMode;
   amountAtomic: bigint;
   creator: string;
   /** The caller's `--max-price` cap, if any. */
@@ -86,7 +88,7 @@ export interface SpendAuthorizer {
     /** What the counterparty reported actually taking, when it said so at all.
      *  Omitted means "assume it took what was authorized", the conservative
      *  reading every caller had before the router began waiving fees. */
-    opts?: { settledAtomic?: bigint },
+    opts?: { settledAtomic?: bigint; mode?: PaymentMode },
   ): Promise<void>;
   /** Drop an unused reservation (a decline, a 409, or a failed payment). */
   release(reservationId: string | undefined): Promise<void>;
@@ -168,6 +170,7 @@ export function createLocalSpendAuthorizer(deps: LocalSpendAuthorizerDeps): Spen
           };
         }
         const evaluation = evaluateSpendPolicy(deps.policy, {
+          mode: req.mode ?? 'automatic',
           amountAtomic: req.amountAtomic,
           creator: req.creator,
           ...(req.maxPriceAtomic !== undefined ? { maxPriceAtomic: req.maxPriceAtomic } : {}),
@@ -186,6 +189,7 @@ export function createLocalSpendAuthorizer(deps: LocalSpendAuthorizerDeps): Spen
         }
         const reservation: Reservation = {
           id: randomUUID(),
+          mode: req.mode ?? 'automatic',
           amountAtomic: req.amountAtomic.toString(),
           atMs: now(),
           ...(req.requestKey !== undefined ? { requestKey: req.requestKey } : {}),
@@ -197,7 +201,7 @@ export function createLocalSpendAuthorizer(deps: LocalSpendAuthorizerDeps): Spen
     async commit(
       reservationId: string | undefined,
       amountAtomic: bigint,
-      opts: { settledAtomic?: bigint } = {},
+      opts: { settledAtomic?: bigint; mode?: PaymentMode } = {},
     ): Promise<void> {
       // Record transmitted exposure even if its reservation has expired.
       await withLedger(async (ledger) => {
@@ -215,6 +219,13 @@ export function createLocalSpendAuthorizer(deps: LocalSpendAuthorizerDeps): Spen
         await persist({
           ...ledger,
           committedAtomic: (BigInt(ledger.committedAtomic) + exposure).toString(),
+          automaticCommittedAtomic: (
+            BigInt(ledger.automaticCommittedAtomic ?? ledger.committedAtomic) +
+            ((reservation ? (reservation.mode ?? 'automatic') : (opts.mode ?? 'automatic')) ===
+            'manual'
+              ? 0n
+              : exposure)
+          ).toString(),
           settledAtomic: (settledSoFar + settled).toString(),
           reservations:
             reservationId !== undefined

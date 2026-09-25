@@ -16,6 +16,8 @@ import { modeGatedPointer } from '../lib/permissions';
 import { PRODUCTION_ORIGIN, isSameDeployment } from '../lib/production-origin';
 import {
   CONFIG_KEYS,
+  RETIRED_PAYMENT_GUIDANCE,
+  retiredPaymentKeys,
   HOOKS_CONFIG_KEYS,
   PUBLISH_CONFIG_KEYS,
   PublishModeSchema,
@@ -66,15 +68,9 @@ import {
   type RouterSettings,
 } from '../router/settings';
 
-/**
- * How one config key is presented in `data`. `value` is the machine form: dual
- * Money for the spend keys, the stored string for `confirm`/URLs, the string[]
- * for the allowlist. `threshold` rides along only for `confirm: above:<atomic>`
- * so an agent reads the dollar amount without re-parsing the string.
- */
+/** Machine values use Money for spending keys and scalars for other settings. */
 interface RenderedValue {
   value: Money | string | string[] | boolean | null;
-  threshold?: Money;
 }
 interface RenderedSetting extends RenderedValue {
   source: Provenance;
@@ -107,7 +103,6 @@ export interface ConfigSetDeps {
   wireAllowlist?: (home: string, mode: PublishMode) => Promise<PermissionsResult>;
 }
 
-const CONFIRM_ABOVE = 'above:';
 const KEY_WIDTH = Math.max(
   ...[
     ...CONFIG_KEYS,
@@ -125,9 +120,8 @@ const KEY_WIDTH = Math.max(
  * listing only. Machine `data` is unchanged; these are humanLines decoration.
  */
 const KEY_DESCRIPTIONS: Record<string, string> = {
-  maxAutoSpend: 'automatic approval threshold per call',
-  sessionBudget: 'daily payment limit: 0 refuses payments, none removes the ceiling',
-  confirm: 'when to ask before paying',
+  maxAutoSpend: 'automatic router limit per call',
+  sessionBudget: 'automatic router daily limit: 0 blocks automatic spend, none removes the ceiling',
   sendMaxAmount:
     'hard cap per tenjin wallet send; unset = send refuses until set, 0 disables send, none = uncapped; never bypassed by --yes',
   allowlistCreators: 'only auto-pay these creators (empty = any)',
@@ -914,20 +908,10 @@ export async function persistRouterProject(
   });
 }
 
-/**
- * The spend keys `tenjin install` settles for the router, in atomic USDC.
- *
- * SIZED FOR A REAL SESSION, not for a demo. At 0.10 and 1.00 a research turn
- * stalled after about twenty lookups on a refusal the user had done nothing to
- * deserve; 0.25 a call inside 5.00 a day is the alpha's answer, and `confirm`
- * stays above the per-call cap so nothing under it ever asks. The cap is also
- * the whole money story: a wrong or hostile decision spends at most one
- * `maxAutoSpend` inside `sessionBudget`, whatever it names as a destination.
- */
+/** Absent-only automatic router defaults, in atomic USDC. */
 export const ROUTER_DEFAULTS = {
   maxAutoSpend: '250000',
   sessionBudget: '5000000',
-  confirm: 'above:250000',
 } as const;
 
 export interface RouterDefaultsResult {
@@ -935,18 +919,22 @@ export interface RouterDefaultsResult {
   set: string[];
   /** Keys the operator had already written, left exactly as they are. */
   kept: string[];
+  removed: string[];
 }
 
-/**
- * The router's spend defaults, written ONLY where the file is silent. A
- * `confirm` the operator put in `config.json` is never touched, which is why
- * an explicit `always` keeps returning `needs_approval` from the tool handler
- * instead of being quietly loosened by an install.
- */
-export async function persistRouterDefaults(dir: string): Promise<RouterDefaultsResult> {
-  const result: RouterDefaultsResult = { set: [], kept: [] };
+/** Remove/report retired keys in the same locked write. Refresh preserves absent
+ * current settings; a fresh install fills only missing automatic limits. */
+export async function persistRouterDefaults(
+  dir: string,
+  refresh = false,
+): Promise<RouterDefaultsResult> {
+  const result: RouterDefaultsResult = { set: [], kept: [], removed: [] };
+  if (refresh && retiredPaymentKeys(await loadRawConfig(dir)).length === 0) return result;
   await persist(dir, (existing) => {
     const next: PartialConfig = { ...existing };
+    result.removed = retiredPaymentKeys(existing);
+    for (const key of result.removed) delete next[key];
+    if (refresh) return next;
     for (const [key, value] of Object.entries(ROUTER_DEFAULTS) as [
       keyof typeof ROUTER_DEFAULTS,
       string,
@@ -1006,6 +994,9 @@ async function resolveFromContext(ctx: CommandContext): Promise<EffectiveSetting
 }
 
 function assertKey(key: string): ScalarConfigKey {
+  if (key === 'bazaarPay' || key === 'confirm') {
+    throw new CliError('USAGE', `Retired config key: ${key}`, { fix: RETIRED_PAYMENT_GUIDANCE });
+  }
   if ((CONFIG_KEYS as string[]).includes(key)) return key as ScalarConfigKey;
   throw new CliError('USAGE', `Unknown config key: ${JSON.stringify(key)}`, {
     fix: `Valid keys: ${[...CONFIG_KEYS, ...PUBLISH_CONFIG_KEYS, ...HOOKS_CONFIG_KEYS, ...ROUTER_CONFIG_KEYS].join(', ')}.`,
@@ -1065,9 +1056,6 @@ function renderValue(key: ScalarConfigKey, stored: string | string[] | boolean):
     // a stored value; 'none' is the explicit uncapped opt-in.
     return { value: stored === 'none' || stored === SEND_MAX_UNSET ? stored : toMoney(stored) };
   }
-  if (key === 'confirm' && stored.startsWith(CONFIRM_ABOVE)) {
-    return { value: stored, threshold: toMoney(stored.slice(CONFIRM_ABOVE.length)) };
-  }
   return { value: stored };
 }
 
@@ -1080,8 +1068,6 @@ function parseValue(key: ScalarConfigKey, value: string): string | string[] | bo
       return parseUsdToAtomic(value); // throws USAGE on a bad amount
     case 'sendMaxAmount':
       return value === 'none' ? 'none' : parseUsdToAtomic(value);
-    case 'confirm':
-      return parseConfirm(value);
     case 'allowlistCreators':
       return parseAllowlist(value);
     case 'baseUrl':
@@ -1114,16 +1100,6 @@ function parseBoolean(value: string): boolean {
   if (value === 'false' || value === 'off') return false;
   throw new CliError('USAGE', `Invalid boolean value: ${JSON.stringify(value)}`, {
     fix: 'Use "on" or "off" (or "true"/"false").',
-  });
-}
-
-function parseConfirm(value: string): string {
-  if (value === 'always') return 'always';
-  if (value.startsWith(CONFIRM_ABOVE)) {
-    return `${CONFIRM_ABOVE}${parseUsdToAtomic(value.slice(CONFIRM_ABOVE.length))}`;
-  }
-  throw new CliError('USAGE', `Invalid confirm value: ${JSON.stringify(value)}`, {
-    fix: 'Use "always" or "above:<usd>", e.g. above:0.25.',
   });
 }
 
@@ -1245,6 +1221,5 @@ function displayValue(entry: RenderedSetting): string {
   if (typeof value === 'boolean') return value ? 'true' : 'false'; // evalCohort
   if (value === null) return 'none (no daily limit)';
   if (typeof value === 'object') return `${value.usd} USD`; // Money (spend keys)
-  if (entry.threshold !== undefined) return `above ${entry.threshold.usd} USD`; // confirm
   return value; // 'always', baseUrl, rpcUrl
 }

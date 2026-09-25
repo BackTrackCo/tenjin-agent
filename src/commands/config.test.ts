@@ -102,8 +102,8 @@ describe('runConfigList', () => {
     const { data, humanLines } = await runConfigList(makeCtx());
     const d = data as Record<string, { value: unknown; source: string }>;
     expect(d.maxAutoSpend).toEqual({ value: { atomic: '0', usd: '0' }, source: 'default' });
-    expect(d.sessionBudget).toEqual({ value: { atomic: '0', usd: '0' }, source: 'default' });
-    expect(d.confirm).toEqual({ value: 'always', source: 'default' });
+    expect(d.sessionBudget).toEqual({ value: { atomic: '5000000', usd: '5' }, source: 'default' });
+    expect(d.confirm).toBeUndefined();
     expect(d.allowlistCreators).toEqual({ value: [], source: 'default' });
     expect(d.baseUrl).toEqual({ value: PRODUCTION_ORIGIN, source: 'default' });
     expect(d.rpcUrl).toEqual({ value: 'https://mainnet.base.org', source: 'default' });
@@ -130,7 +130,7 @@ describe('runConfigList', () => {
     // 11 scalar keys (incl. bazaarRegistries and the two shelf keys)
     // + 3 publish.* (mode, defaultPrice, ackServerWarnings) + 7 hooks.* (one
     // per arm) + 1 update.mode + 4 loop.* + 1 team.publicFallback + 2 router.*.
-    expect(humanLines).toHaveLength(29);
+    expect(humanLines).toHaveLength(28);
   });
 
   it('sendMaxAmount round-trips: unset until set, decimal USD in, Money out, 0 and none valid', async () => {
@@ -159,23 +159,12 @@ describe('runConfigList', () => {
   it('appends a one-line description per key to the human listing (data unchanged)', async () => {
     const { data, humanLines } = await runConfigList(makeCtx());
     const text = (humanLines ?? []).join('\n');
-    expect(text).toContain('when to ask before paying'); // confirm
+    expect(text).toContain('automatic router daily limit');
     expect(text).toContain('review=always ask, auto=ask on findings, full-auto=only hard blocks');
     expect(text).toContain('price used when none is given'); // publish.defaultPrice
     // The machine shape carries no description field.
     const d = data as Record<string, Record<string, unknown>>;
-    expect(Object.keys(d.confirm ?? {}).sort()).toEqual(['source', 'value']);
-  });
-
-  it('exposes the confirm threshold in dual form when above:', async () => {
-    await runConfigSet({ key: 'confirm', value: 'above:0.25' }, makeCtx());
-    const { data } = await runConfigList(makeCtx());
-    const d = data as Record<string, { value: unknown; source: string; threshold?: unknown }>;
-    expect(d.confirm).toEqual({
-      value: 'above:250000',
-      source: 'file',
-      threshold: { atomic: '250000', usd: '0.25' },
-    });
+    expect(Object.keys(d.sessionBudget ?? {}).sort()).toEqual(['source', 'value']);
   });
 
   it('persistPublishMode preserves pre-existing sibling keys', async () => {
@@ -238,10 +227,10 @@ describe('runConfigList', () => {
     // An older binary must not strip a config block a newer CLI wrote (e.g. B3's
     // publish.*): set a known key and assert the unknown one still round-trips.
     await writeFile(configFile(), JSON.stringify({ publish: { visibility: 'unlisted' } }));
-    await runConfigSet({ key: 'confirm', value: 'always' }, makeCtx());
+    await runConfigSet({ key: 'maxAutoSpend', value: '1' }, makeCtx());
     const raw = (await readRawFile()) as Record<string, unknown>;
     expect(raw.publish).toEqual({ visibility: 'unlisted' });
-    expect(raw.confirm).toBe('always');
+    expect(raw.maxAutoSpend).toBe('1000000');
   });
 
   describe('baseUrl precedence', () => {
@@ -330,28 +319,11 @@ describe('runConfigSet — spend keys', () => {
   });
 });
 
-describe('runConfigSet — confirm', () => {
-  it('stores "always" verbatim', async () => {
-    const { data } = await runConfigSet({ key: 'confirm', value: 'always' }, makeCtx());
-    expect(data).toEqual({ key: 'confirm', value: 'always', source: 'file' });
-    expect(await readRawFile()).toEqual({ confirm: 'always' });
-  });
-
-  it('stores above:<usd> as above:<atomic> with a dual-form threshold', async () => {
-    const { data } = await runConfigSet({ key: 'confirm', value: 'above:0.5' }, makeCtx());
-    expect(data).toEqual({
-      key: 'confirm',
-      value: 'above:500000',
-      source: 'file',
-      threshold: { atomic: '500000', usd: '0.5' },
-    });
-    expect(await readRawFile()).toEqual({ confirm: 'above:500000' });
-  });
-
-  it.each(['sometimes', 'above:', 'above:abc', 'above'])('rejects %j as USAGE', async (bad) => {
-    const err = await caught(() => runConfigSet({ key: 'confirm', value: bad }, makeCtx()));
+describe('retired payment setters', () => {
+  it.each(['confirm', 'bazaarPay'])('rejects %s with replacement guidance', async (key) => {
+    const err = await caught(() => runConfigSet({ key, value: 'always' }, makeCtx()));
     expect(err.code).toBe('USAGE');
-    expect(err.exitCode).toBe(2);
+    expect(err.fix).toContain('manual pay always requires consent');
   });
 });
 
@@ -418,7 +390,7 @@ describe('runConfigSet — persistence', () => {
   });
 
   it('writes a file that parses cleanly through RawConfigSchema', async () => {
-    await runConfigSet({ key: 'confirm', value: 'above:0.25' }, makeCtx());
+    await runConfigSet({ key: 'maxAutoSpend', value: '0.25' }, makeCtx());
     const parsed = RawConfigSchema.safeParse(await readRawFile());
     expect(parsed.success).toBe(true);
   });
@@ -435,14 +407,12 @@ describe('runConfigSet — persistence', () => {
     await Promise.all([
       runConfigSet({ key: 'maxAutoSpend', value: '0.25' }, makeCtx()),
       runConfigSet({ key: 'sessionBudget', value: '0.5' }, makeCtx()),
-      runConfigSet({ key: 'confirm', value: 'above:0.1' }, makeCtx()),
       runConfigSet({ key: 'baseUrl', value: 'https://a.example' }, makeCtx()),
       runConfigSet({ key: 'rpcUrl', value: 'https://b.example' }, makeCtx()),
     ]);
     expect(await readRawFile()).toEqual({
       maxAutoSpend: '250000',
       sessionBudget: '500000',
-      confirm: 'above:100000',
       baseUrl: 'https://a.example',
       rpcUrl: 'https://b.example',
     });
@@ -1579,22 +1549,26 @@ describe('daily limit configuration cutover', () => {
     );
   });
   it.each([false, true, null])(
-    'refuses the retired key (%s) without rewriting it',
+    'ignores retired values (%s) without read-time writes or blocking config edits',
     async (value) => {
       const raw = JSON.stringify({
         bazaarPay: value,
+        confirm: value,
         sessionBudget: '0',
         router: { enabled: false },
       });
       await writeFile(join(dir, 'config.json'), raw);
-      await expect(runConfigList(makeCtx())).rejects.toMatchObject({
-        code: 'CONFIG_INVALID',
-        fix: expect.stringContaining('Remove bazaarPay'),
-      });
-      await expect(
-        runConfigSet({ key: 'sessionBudget', value: 'none' }, makeCtx()),
-      ).rejects.toMatchObject({ code: 'CONFIG_INVALID' });
+      const result = await runConfigList(makeCtx());
+      expect(result.data).not.toHaveProperty('confirm');
+      expect(result.data).not.toHaveProperty('bazaarPay');
       expect(await readFile(join(dir, 'config.json'), 'utf8')).toBe(raw);
+      await runConfigSet({ key: 'sessionBudget', value: 'none' }, makeCtx());
+      expect(await readRawFile()).toMatchObject({
+        bazaarPay: value,
+        confirm: value,
+        sessionBudget: 'none',
+        router: { enabled: false },
+      });
     },
   );
   it('does not accept none as a per-call automatic approval threshold', async () => {

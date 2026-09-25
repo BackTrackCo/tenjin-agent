@@ -2,10 +2,14 @@
 'tenjin-cli': minor
 ---
 
-Replace the payment toggle with explicit spending controls, check Base USDC balance before signing, repair Ultravioleta discovery, and require invocation-scoped acknowledgement of direct-payment registry warnings.
+Separate automatic router limits from mandatory manual payment consent, check Base USDC balance before signing, repair Ultravioleta discovery, and retire the obsolete payment skill.
 
-Alpha configuration cutover: remove the retired `bazaarPay` key from your config yourself, then choose `router.enabled`, `maxAutoSpend`, `sessionBudget` and `confirm`. A config containing the old key refuses before installation or payment; installation never erases it or loosens explicit settings. `sessionBudget 0` now refuses positive payments even with `--yes`. Use an explicit amount for the daily limit, or `tenjin config set sessionBudget none` to remove the cumulative ceiling. `maxAutoSpend` is the automatic approval threshold, not a hard ceiling on confirmed manual calls.
+`maxAutoSpend` and `sessionBudget` limit automatic router purchases only. Zero blocks positive automatic spending; daily `none` removes the automatic daily ceiling. A missing daily limit defaults to $5 both before and after install. Manual `tenjin pay` ignores both configured limits and always requires consent for the quoted transaction, interactively or through `--yes` after explicit user approval. It is never an autonomous workaround for a router refusal. An optional `--max-price`, creator/destination restrictions, supported payment terms and the balance check still apply.
 
-Direct payments with missing listings, unavailable/incomplete verification or differing listed terms require `--ignore-warning`; `--yes` alone does not acknowledge them. Warning acknowledgement never bypasses confirmation, price caps, daily limits, balance or destination checks. Router payments retain their existing advertised-price enforcement and wire protocol. Install/refresh removes only owned obsolete payment-skill files.
+Legacy `bazaarPay` and `confirm` keys are ignored after upgrade, including old `false`/`always` values. Doctor/status warn; install and refresh remove and report them while preserving current router/limit settings and unrelated fields. `config set` rejects the retired keys. No hand edit is required to keep routing operational.
 
-Do not roll back to a config reader that treats zero as unlimited or ignores the new unlimited value; preserve the operator's settings when reverting behavior.
+Manual and automatic payments share one ledger and duplicate guard. Manual payments remain in total reporting without consuming automatic budget headroom. Legacy exposure without mode/counter metadata conservatively counts as automatic until the existing window expires.
+
+Missing Bazaar metadata or an unlisted endpoint is an ordinary direct-payment outcome. Only unavailable/incomplete lookups or exact-listing term differences require invocation-scoped `--ignore-warnings`; `--yes` supplies payment consent only. The selected signer's balance is read before signing, with one bounded retry on an unreadable result. Confirmed insufficient funds or persistent read failure refuses and releases the reservation. Router calls retain their advertised-price checks and wire protocol; policy refusals now say “Blocked by spending policy.”
+
+Do not roll back to a config reader that treats zero as unlimited or ignores `none`; preserve the operator's explicit automatic limits when reverting behavior.
