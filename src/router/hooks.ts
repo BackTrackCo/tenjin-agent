@@ -797,12 +797,16 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
  * `execute` says anything. A call the pre-call arm already redirected is not
  * offered on again.
  *
- * A SEARCH THE PRE-CALL ARM IS FETCHING FREE DOCS FOR ends here too, whatever
- * it returned: the docs go on top of its results (`updatedToolOutput`, the
- * response the harness reported with one string prepended to `results`), or
- * nothing is said. It is never offered on as well. This is the one wait in the
- * hook, bounded by `AUGMENT_WAIT_MS`, and the reason this entry's timeout is
- * longer than the others'.
+ * A SEARCH THE PRE-CALL ARM IS FETCHING FREE DOCS FOR waits for them first,
+ * the one wait in the hook, bounded by `AUGMENT_WAIT_MS`. When docs came back
+ * they go on top of its results (`updatedToolOutput`, the response the harness
+ * reported with one string prepended to `results`), and that call is not
+ * offered on as well. When none were added (no match, a refusal, a timeout, or
+ * a call that failed outright) it is an ordinary call from there: a search that
+ * came back fine says nothing, and one that came back short takes the shortfall
+ * route like any other, so a failed docs lookup never costs it the paid offer.
+ * The wait and that decision can follow one another, which is why this entry's
+ * timeout is longer than the others' (`wire.test.ts` pins the sum).
  *
  * A server that does not know `nativeOutcome` yet refuses the packet; that is
  * a failed decision like any other, so the hook stays silent.
@@ -821,8 +825,7 @@ export async function runShortfallHook(
     },
     deps,
   );
-  if (augment !== null) {
-    if (augment.updatedToolOutput === null) return { response: null, augmented: 'nothing' };
+  if (augment !== null && augment.updatedToolOutput !== null) {
     return {
       response: {
         hookSpecificOutput: {
@@ -833,6 +836,15 @@ export async function runShortfallHook(
       augmented: 'added',
     };
   }
+  const outcome = await offerOnShortfall(event, deps);
+  return augment === null ? outcome : { ...outcome, augmented: 'nothing' };
+}
+
+/** The shortfall route itself: ask about a call that came back short, once. */
+async function offerOnShortfall(
+  event: Extract<HookEvent, { kind: 'shortfall' }>,
+  deps: HookDeps,
+): Promise<ShortfallHookOutcome> {
   const { nativeOutcome, pending, eventName } = event;
   if (nativeOutcome === null) return { response: null };
   if (pending === null) return { response: null };

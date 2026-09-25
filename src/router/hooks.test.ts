@@ -2148,8 +2148,9 @@ describe('free docs on top of a search', () => {
     toolUseId: string,
     response: unknown = SEARCH,
     over: Record<string, unknown> = {},
+    body: unknown = EXECUTE,
   ) {
-    const { deps: d, calls } = deps(EXECUTE);
+    const { deps: d, calls } = deps(body);
     const event = {
       ...((await readableEvent(query, 'WebSearch')) as object),
       tool_use_id: toolUseId,
@@ -2232,10 +2233,33 @@ describe('free docs on top of a search', () => {
     });
   });
 
+  /** The server's line after a search that came back short, and as the host sees it. */
+  const SEARCH_SHORTFALL_HINT = `${OFFER} If WebSearch couldn't get this, call request({query: "next.js middleware matcher", id: "k3f9-abcd"}) and wait for its result.`;
+  const SHORT_OFFER = `${HINT_SOURCE}: your WebSearch call came back short. Optional: ${toolNamed(SEARCH_SHORTFALL_HINT)}`;
+  const SHORT = { ...SEARCH, results: [] };
+
+  /** The shortfall route's answer, as for any other call: the router asked
+   *  once with the shortfall in its packet, and an offer, never docs. */
+  function expectShortfallOffer(
+    post: Awaited<ReturnType<typeof after>>,
+    eventName: 'PostToolUse' | 'PostToolUseFailure' = 'PostToolUse',
+    nativeOutcome: unknown = { error: 'Web search returned no results' },
+  ): void {
+    expect(post.calls).toHaveLength(1);
+    const packet = (post.calls[0] as { body: { packet: { nativeOutcome?: unknown } } }).body.packet;
+    expect(packet.nativeOutcome).toEqual(nativeOutcome);
+    expect(post.out).toMatchObject({ action: 'execute', id: 'k3f9-abcd', augmented: 'nothing' });
+    expect(post.out.response).toEqual({
+      hookSpecificOutput: { hookEventName: eventName, additionalContext: SHORT_OFFER },
+    });
+    expect(JSON.stringify(post.out.response)).not.toContain('updatedToolOutput');
+  }
+
   /**
-   * NO DOCS IS NO OUTPUT, and never an offer as well: each of these runs the
-   * after-call arm on a search that came back with no links, which on any
-   * other call is a shortfall the router is asked about.
+   * NO DOCS, SO AN ORDINARY CALL. When the lookup added nothing, a search that
+   * came back short takes the shortfall route like any other call, so a failed
+   * docs lookup never costs it the paid offer. Each of these is a search with
+   * no links, which the router is asked about once.
    */
   it.each([
     ['no library matched (404)', 404, ''],
@@ -2243,32 +2267,86 @@ describe('free docs on top of a search', () => {
     ['the caller is over its limit (429)', 429, ''],
     ['the fetch failed', 0, ''],
     ['an empty 200', 200, '   '],
-  ])('says nothing after the call when %s', async (_label, status, text) => {
+  ])('takes the shortfall route after a short search when %s', async (_label, status, text) => {
     await before('next.js middleware matcher', 'toolu_1');
     await answer(jobs[0]!, status, text);
-    const post = await after('next.js middleware matcher', 'toolu_1', { ...SEARCH, results: [] });
-    expect(post.out).toEqual({ response: null, augmented: 'nothing' });
-    expect(post.calls).toHaveLength(0);
+    const post = await after(
+      'next.js middleware matcher',
+      'toolu_1',
+      SHORT,
+      {},
+      withHint(SEARCH_SHORTFALL_HINT),
+    );
+    expectShortfallOffer(post);
   });
 
-  it('says nothing after the call when the lookup has not answered in time', async () => {
+  it('takes the shortfall route when the lookup has not answered in time', async () => {
     await before('next.js middleware matcher', 'toolu_1');
     const started = Date.now();
-    const post = await after('next.js middleware matcher', 'toolu_1', { ...SEARCH, results: [] });
-    expect(post.out).toEqual({ response: null, augmented: 'nothing' });
-    expect(post.calls).toHaveLength(0);
+    const post = await after(
+      'next.js middleware matcher',
+      'toolu_1',
+      SHORT,
+      {},
+      withHint(SEARCH_SHORTFALL_HINT),
+    );
+    expectShortfallOffer(post);
     // Bounded by the wait, not by the hook's timeout.
     expect(Date.now() - started).toBeLessThan(3_000);
   });
 
-  it('says nothing, and offers nothing, when the augmented search itself failed', async () => {
+  it('takes the shortfall route when the augmented search itself failed', async () => {
+    await before('next.js middleware matcher', 'toolu_1');
+    // Docs that came back have no response to ride on when the call failed.
+    await answer(jobs[0]!, 200, TEXT);
+    const post = await after(
+      'next.js middleware matcher',
+      'toolu_1',
+      undefined,
+      {
+        hook_event_name: 'PostToolUseFailure',
+        tool_response: undefined,
+        error: 'Web search failed',
+      },
+      withHint(SEARCH_SHORTFALL_HINT),
+    );
+    expectShortfallOffer(post, 'PostToolUseFailure', { error: 'Web search failed' });
+  });
+
+  it('says nothing, and asks nothing, when no docs came back and the search was fine', async () => {
+    await before('next.js middleware matcher', 'toolu_1');
+    await answer(jobs[0]!, 404);
+    const post = await after(
+      'next.js middleware matcher',
+      'toolu_1',
+      SEARCH,
+      {},
+      withHint(SEARCH_SHORTFALL_HINT),
+    );
+    expect(post.out).toEqual({ response: null, augmented: 'nothing' });
+    expect(post.calls).toHaveLength(0);
+  });
+
+  /** DOCS ADDED IS THE ANSWER: a short search they were added to is not offered on as well. */
+  it('adds the docs to a search with no links, and makes no offer as well', async () => {
     await before('next.js middleware matcher', 'toolu_1');
     await answer(jobs[0]!, 200, TEXT);
-    const post = await after('next.js middleware matcher', 'toolu_1', undefined, {
-      hook_event_name: 'PostToolUseFailure',
-      error: 'Web search failed',
+    const post = await after(
+      'next.js middleware matcher',
+      'toolu_1',
+      SHORT,
+      {},
+      withHint(SEARCH_SHORTFALL_HINT),
+    );
+    expect(post.out).toEqual({
+      response: {
+        hookSpecificOutput: {
+          hookEventName: 'PostToolUse',
+          updatedToolOutput: { ...SHORT, results: [LINE] },
+        },
+      },
+      augmented: 'added',
     });
-    expect(post.out).toEqual({ response: null, augmented: 'nothing' });
     expect(post.calls).toHaveLength(0);
   });
 

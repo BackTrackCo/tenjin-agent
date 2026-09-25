@@ -53,10 +53,11 @@ export const HOOK_TIMEOUT_SECONDS = 5;
 /**
  * The after-call entries' kill budget, longer than the rest for the one wait
  * any hook makes: a search the pre-call arm is fetching free docs for waits up
- * to `AUGMENT_WAIT_MS` for them (`wire.test.ts` pins the fit). Every other
- * after-call event returns as fast as before, so the number is a ceiling, not
- * a cost. The pre-call entry stays at {@link HOOK_TIMEOUT_SECONDS}: it starts
- * that fetch and never waits for it.
+ * to `AUGMENT_WAIT_MS` for them, and when none came back and the search was
+ * short, the gate is asked after that (`wire.test.ts` pins the sum). Every
+ * other after-call event returns as fast as before, so the number is a
+ * ceiling, not a cost. The pre-call entry stays at
+ * {@link HOOK_TIMEOUT_SECONDS}: it starts that fetch and never waits for it.
  */
 export const AFTER_CALL_TIMEOUT_SECONDS = 15;
 export { MCP_SERVER_NAME };

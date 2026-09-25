@@ -220,12 +220,12 @@ describe('the hook time budget', () => {
     expect(budget - (STDIN_TIMEOUT_MS + GATE_TIMEOUT_MS)).toBeGreaterThanOrEqual(500);
   });
 
-  /** The after-call hook's one wait, for a search's free docs, fits its own
-   *  longer timeout the same way; every other after-call event is the gate's. */
-  it('fits stdin plus the docs wait inside the after-call timeout', () => {
+  /** The after-call hook's one wait, for a search's free docs, can be followed
+   *  by the gate when none came back and the search was short: stdin, the wait
+   *  and the decision in a row fit its longer timeout with the same floor. */
+  it('fits stdin, the docs wait and the decision inside the after-call timeout', () => {
     const budget = AFTER_CALL_TIMEOUT_SECONDS * 1_000;
-    for (const wait of [AUGMENT_WAIT_MS, GATE_TIMEOUT_MS]) {
-      expect(budget - (STDIN_TIMEOUT_MS + wait)).toBeGreaterThanOrEqual(500);
-    }
+    const used = STDIN_TIMEOUT_MS + AUGMENT_WAIT_MS + GATE_TIMEOUT_MS;
+    expect(budget - used).toBeGreaterThanOrEqual(500);
   });
 });
