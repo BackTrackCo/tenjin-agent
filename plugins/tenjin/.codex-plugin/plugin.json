@@ -1,0 +1,18 @@
+{
+  "name": "tenjin",
+  "version": "0.1.0-alpha.19",
+  "description": "Tenjin prompt and web lookup routing through the existing local wallet.",
+  "author": {
+    "name": "BackTrackCo"
+  },
+  "interface": {
+    "displayName": "Tenjin",
+    "shortDescription": "Use Tenjin in Codex.",
+    "longDescription": "Route eligible lookups through Tenjin under your existing spending limits.",
+    "developerName": "BackTrackCo",
+    "category": "Productivity",
+    "capabilities": [],
+    "defaultPrompt": "Help me use Tenjin."
+  },
+  "mcpServers": "./.mcp.json"
+}

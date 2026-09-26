@@ -1,4 +1,4 @@
-import type { Command } from 'commander';
+import { Option, type Command } from 'commander';
 import { PERMISSIONS_DOC_URL } from '../lib/permissions';
 import { SETUP, WALLET, type Registration } from './registration';
 
@@ -10,12 +10,19 @@ import { SETUP, WALLET, type Registration } from './registration';
 export function registerCore(reg: Registration): void {
   const { runCommand, leaf, addGlobalFlags } = reg;
 
-  leaf(SETUP, 'install', 'set up Tenjin for Claude Code and create a wallet')
+  leaf(SETUP, 'install', 'set up Tenjin for your coding host and create a wallet')
+    .addOption(
+      new Option('--harness <host>', 'coding host').choices(['claude', 'codex']).default('claude'),
+    )
     .description(
-      'Set up Claude Code to use Tenjin: five hook entries, the `x402` MCP server and its permission rule, spend limits for each lookup, and a wallet if this machine has none.',
+      'Set up Claude Code (default) or the Codex plugin (--harness codex), with the existing router and wallet. Codex hook trust is reviewed in /hooks; --approve-request grants its request tool.',
     )
     .option('--project', "write into this project's .claude/settings.json instead of your home one")
     .option('--no-wallet', 'create no wallet')
+    .option(
+      '--approve-request',
+      'approve the Codex plugin request tool under existing wallet limits',
+    )
     .option('--refresh', 're-register the hook entries this machine already has; add nothing')
     .option(
       '--status-line <mode>',
@@ -36,6 +43,19 @@ Learn more:
     .action(async function (this: Command) {
       await runCommand('install', this, async (ctx) => {
         const o = this.opts();
+        if (o.harness === 'codex') {
+          const { runCodexSetup } = await import('../router/codex-install');
+          return runCodexSetup(
+            'install',
+            {
+              project: o.project === true,
+              refresh: o.refresh === true,
+              noWallet: o.wallet === false,
+              approveRequest: o.approveRequest === true,
+            },
+            ctx,
+          );
+        }
         const { runRouterInstall } = await import('../router/install');
         const { statusLineMode } = await import('../router/status-line-wiring');
         return runRouterInstall(
@@ -53,21 +73,31 @@ Learn more:
     });
 
   leaf(SETUP, 'uninstall', 'remove what install wrote; the wallet is kept')
+    .addOption(
+      new Option('--harness <host>', 'coding host').choices(['claude', 'codex']).default('claude'),
+    )
     .description(
-      'Remove the hook entries, the permission rule and the MCP registration `tenjin install` wrote. Your wallet, spend ledger and config are kept.',
+      'Remove the selected host integration. Claude removes its hook entries, permission rule and MCP registration. Codex removes its plugin and keeps user tool policy. Your wallet, spend ledger and config are kept.',
     )
     .option('--project', "remove from this project's .claude/settings.json")
     .action(async function (this: Command) {
       await runCommand('uninstall', this, async (ctx) => {
         const o = this.opts();
+        if (o.harness === 'codex') {
+          const { runCodexSetup } = await import('../router/codex-install');
+          return runCodexSetup('uninstall', { project: o.project === true }, ctx);
+        }
         const { runRouterUninstall } = await import('../router/uninstall');
         return runRouterUninstall({ ...(o.project === true ? { project: true } : {}) }, ctx);
       });
     });
 
   leaf(SETUP, 'doctor', 'check this machine can run a lookup')
+    .addOption(
+      new Option('--harness <host>', 'coding host').choices(['claude', 'codex']).default('claude'),
+    )
     .description(
-      'Check everything a lookup needs: the Node floor, the hook entries and the permission rule, the status line, the MCP registration, the spend limits, the wallet, and the router endpoint answering its 402. It prints one line per check with a fix for each failure, and exits nonzero if a required one fails.',
+      'Check Claude lookup readiness, or Codex plugin configuration, hook trust and web qualification (--harness codex). Codex MCP connectivity and payment readiness require a new session and tenjin status. Exits nonzero if a required configuration check fails.',
     )
     .option('--project', "check this project's .claude/settings.json, as --project installed it")
     .addHelpText(
@@ -81,6 +111,10 @@ Examples:
     )
     .action(async function (this: Command) {
       await runCommand('doctor', this, async (ctx) => {
+        if (this.opts().harness === 'codex') {
+          const { runCodexSetup } = await import('../router/codex-install');
+          return runCodexSetup('doctor', { project: this.opts().project === true }, ctx);
+        }
         const { runRouterDoctor } = await import('../router/doctor');
         return runRouterDoctor(ctx, this.opts().project === true ? { project: true } : {});
       });

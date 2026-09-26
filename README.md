@@ -44,7 +44,7 @@ Tenjin handles all of it. Install it once and keep working. The Tenjin router wa
 
 ## Quick start
 
-Requires Node.js 24 or newer and [Claude Code](https://code.claude.com). Codex support is on the way.
+Requires Node.js 24 or newer and Claude Code or Codex CLI. The default setup below is for [Claude Code](https://code.claude.com); see [Codex setup](#codex-setup) for its plugin.
 
 ```bash
 npm i -g tenjin-cli
@@ -72,6 +72,19 @@ Then work as usual. Try:
 ```
 
 Each answer names the provider and the price. Your agent keeps its own tools, and the router steps in only when it has something better.
+
+## Codex setup
+
+```bash
+tenjin install --harness codex --approve-request
+tenjin doctor --harness codex
+```
+
+This installs the bundled local Codex plugin and approves only its `x402.request` tool. Your wallet's existing limits still apply. Open Codex, review the three Tenjin hooks in `/hooks`, then start a new session. Omit `--approve-request` to review the tool policy yourself; doctor reports it missing, and hooks stay silent until it is granted. A conflicting experimental direct `x402` registration must be removed once before installation.
+
+Prompt offers and direct MCP calls use the existing router. Single, unfiltered native web searches are verified on **Codex CLI 0.154.0**. Other versions report web routing unverified as a diagnostic; routing still runs when the payload and transcript pass strict checks. Batches, filtered/mixed operations, child routing and unrecognized or compacted transcripts stay native. Desktop has not been qualified. Claude's installation and status line are unchanged.
+
+`tenjin install --harness codex --refresh` refreshes an existing plugin; review changed hooks in Codex. `tenjin uninstall --harness codex` removes the plugin and keeps the wallet and user tool policy. Setup currently supports Codex user scope only. Doctor reports configuration and trust separately; a connected tool and usable funded wallet still need verification in a new session.
 
 ## What it can do
 

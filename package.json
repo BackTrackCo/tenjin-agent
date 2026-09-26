@@ -32,7 +32,9 @@
   "files": [
     "dist",
     "docs",
-    "NOTICE.md"
+    "NOTICE.md",
+    "plugins/tenjin",
+    ".agents/plugins/marketplace.json"
   ],
   "packageManager": "pnpm@11.11.0",
   "scripts": {
