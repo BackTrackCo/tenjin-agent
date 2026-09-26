@@ -156,7 +156,7 @@ describe('main', () => {
 
     const leafHelp = captureIo();
     expect(await main(['doctor', '--help'], leafHelp.io)).toBe(0);
-    expect(leafHelp.stdout()).toContain('Check everything a lookup needs');
+    expect(leafHelp.stdout()).toContain('Check Claude lookup readiness');
     expect(leafHelp.stdout()).not.toContain('--base-url');
   });
 
@@ -206,7 +206,9 @@ describe('main', () => {
     const help = cap.stdout();
     expect(help).toContain('--project');
     expect(help).toContain('--refresh');
-    for (const gone of ['--harness', '--bazaar-pay', '--no-grant', '--publish-mode'])
+    expect(help).toContain('--harness');
+    expect(help).toContain('--approve-request');
+    for (const gone of ['--bazaar-pay', '--no-grant', '--publish-mode'])
       expect(help).not.toContain(gone);
   });
 
