@@ -34,6 +34,11 @@ if (process.argv.length === 3 && process.argv[2] === 'status-line') {
 }
 
 const { main } = await import('./cli');
+// Here and not in `main`, so an in-process test of the command tree sends no
+// telemetry and mints no install id; see lib/install-identity.
+const { enableCliIdentity } = await import('./lib/install-identity');
+const { dataDir } = await import('./lib/paths');
+enableCliIdentity(dataDir(process.env));
 process.exit(await main(process.argv.slice(2)));
 
 // Marks this file a module so top-level await is legal; emits nothing.

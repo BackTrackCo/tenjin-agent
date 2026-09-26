@@ -3,6 +3,7 @@ import { z } from 'zod';
 import pkg from '../package.json';
 import { CliError } from './lib/errors';
 import { dataDir } from './lib/paths';
+import { noteBaseUrlFlag } from './lib/install-identity';
 import { PERMISSIONS_DOC_URL } from './lib/permissions';
 import { defaultIo, emitFailure, emitSuccess } from './lib/output';
 import type { Io } from './lib/output';
@@ -106,6 +107,7 @@ function buildContext(cmd: Command, io: Io): CommandContext {
     timeout: parsed.data.timeout,
     baseUrl: parsed.data.baseUrl,
   };
+  noteBaseUrlFlag(flags.baseUrl);
   return { flags, dataDir: dataDir(process.env), io };
 }
 

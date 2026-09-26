@@ -96,6 +96,63 @@ function carriesBypassKey(headers: Record<string, string>): boolean {
   return Object.keys(headers).some((name) => name.toLowerCase() === SHELF_BYPASS_HEADER);
 }
 
+/** The anonymous install id: a random UUID minted once per data dir. */
+export const INSTALL_HEADER = 'x-tenjin-install';
+/** The local wallet's PUBLIC address, read from the record's cleartext field. */
+export const WALLET_HEADER = 'x-tenjin-wallet';
+
+/**
+ * Who is using the router, for Tenjin's own request telemetry: an anonymous
+ * install id and, when a wallet exists, its public address.
+ *
+ * Same shape as {@link ShelfBypass}, for the same reason: the transport decides
+ * where these go, from the REQUEST URL, so a call site cannot send them to a
+ * provider by believing it is talking to Tenjin. `pay` runs over this transport
+ * to third-party sellers, and none of them gets either header.
+ *
+ * Process-wide rather than a per-call option because it is not a per-call
+ * decision: every request to Tenjin carries it, and threading it through forty
+ * call sites is forty chances to forget one. Set only by the two process entries
+ * (the CLI's `index.ts` and the daemon), so an in-process test that never sets
+ * it sends exactly what it always did.
+ *
+ * Redirects are left to the request's usual transport: an unpinned request
+ * follows them as `fetch` does, headers and all. Tenjin's origins redirect only
+ * to Tenjin's own hosts, and neither value is a credential, so these are not
+ * worth the redirect pin the bypass key and signed headers get.
+ */
+export interface TenjinIdentity {
+  /** The origins that are Tenjin's own for this process. */
+  origins: () => Promise<readonly string[]>;
+  /** The header values; each absent when it could not be read. */
+  values: () => Promise<{ install?: string; wallet?: string }>;
+}
+
+let tenjinIdentity: TenjinIdentity | undefined;
+
+export function setTenjinIdentity(identity: TenjinIdentity | undefined): void {
+  tenjinIdentity = identity;
+}
+
+/**
+ * The telemetry headers for `url`, or nothing. NEVER THROWS: a data dir that
+ * cannot be read costs the request its telemetry and nothing else.
+ */
+export async function tenjinIdentityHeaders(url: string): Promise<Record<string, string>> {
+  const identity = tenjinIdentity;
+  if (identity === undefined) return {};
+  try {
+    if (!(await identity.origins()).includes(new URL(url).origin)) return {};
+    const { install, wallet } = await identity.values();
+    return {
+      ...(install !== undefined ? { [INSTALL_HEADER]: install } : {}),
+      ...(wallet !== undefined ? { [WALLET_HEADER]: wallet } : {}),
+    };
+  } catch {
+    return {};
+  }
+}
+
 /**
  * The one place the identity is written for anything that can import it; both
  * transports funnel their Headers through it, so a third entry point on this
@@ -285,7 +342,7 @@ export async function fetchJson(url: string, opts: FetchJsonOptions): Promise<Fe
       pinned = carriesBypassKey(headers);
       res = await doFetch(url, {
         signal: controller.signal,
-        headers,
+        headers: { ...headers, ...(await tenjinIdentityHeaders(url)) },
         ...(pinned ? { redirect: 'manual' as const } : {}),
       });
     } catch (err) {
@@ -524,7 +581,7 @@ export async function httpRequest(url: string, opts: HttpRequestOptions): Promis
     try {
       res = await doFetch(url, {
         method: opts.method ?? 'GET',
-        headers,
+        headers: { ...headers, ...(await tenjinIdentityHeaders(url)) },
         body,
         signal,
         ...(pinned ? { redirect: 'manual' as const } : {}),
