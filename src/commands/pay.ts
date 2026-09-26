@@ -232,10 +232,22 @@ async function executePay(
     });
   }
   if (probe.status !== 402) {
-    throw new CliError('API_UNREACHABLE', `${url} answered ${probe.status}.`, {
-      fix: 'Check the URL and the endpoint status, then retry.',
-      details: { status: probe.status, body: probe.json },
-    });
+    // THE PROVIDER'S OWN WORDS, when it sent `{error: {message}}`: a free docs
+    // lookup's 404 says no library matched and to use your own tools, which a
+    // bare status line turned into "retry". A 404 is the endpoint's answer, not
+    // a transient failure, so it is never told to retry either.
+    const said = providerMessage(probe.json);
+    throw new CliError(
+      'API_UNREACHABLE',
+      `${url} answered ${probe.status}${said === null ? '.' : `: ${said}`}`,
+      {
+        fix:
+          probe.status === 404
+            ? 'Nothing was paid. The same request will answer 404 again.'
+            : 'Check the URL and the endpoint status, then retry.',
+        details: { status: probe.status, body: probe.json },
+      },
+    );
   }
 
   const paymentRequired = decodeChallenge(probe, url);
@@ -680,6 +692,20 @@ function legFix(failure: { kind: string }): string {
   return failure.kind === 'oversized-header'
     ? 'Raising `--max-http-header-size` on the node process that runs this CLI would let the header be read; that is an operator decision, not a default this build changes.'
     : '';
+}
+
+/** `{error: {message}}` from the provider, as one bounded plain line, or null.
+ *  It reaches a model's context, so control characters do not survive. */
+function providerMessage(body: unknown): string | null {
+  const error = (body as { error?: unknown } | null | undefined)?.error;
+  const message = (error as { message?: unknown } | null | undefined)?.message;
+  if (typeof message !== 'string') return null;
+  const line = message
+    .replace(/[\p{Cc}\p{Cf}]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 300);
+  return line.length > 0 ? line : null;
 }
 
 /** Nothing this caller may pay: no entry at all, or none on the advertised

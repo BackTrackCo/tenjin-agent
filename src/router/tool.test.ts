@@ -316,6 +316,68 @@ describe('routing outcomes that buy nothing', () => {
   });
 });
 
+/**
+ * THE PROVIDER'S OWN WORDS REACH THE MODEL. A free docs lookup that matched no
+ * library answers 404 with `{error: {message}}` telling the agent to use its
+ * own tools; a bare "answered 404 ... then retry" sent it straight back to the
+ * same call.
+ */
+describe('a provider that refuses the lookup', () => {
+  const DOCS = decision({
+    providerPriceAtomic: '0',
+    category: 'library or API documentation',
+    provider: 'Context7',
+  });
+  const MESSAGE = 'No indexed library matched this question. Use your own tools.';
+
+  it("shows the provider's message on a 404 with a JSON error body, and no retry", async () => {
+    const { fetchImpl, calls } = net([
+      { url: ROUTER, status: 200, body: DOCS },
+      {
+        url: PROVIDER,
+        status: 404,
+        body: { error: { code: 'no_documentation_found', message: MESSAGE } },
+      },
+    ]);
+    const result = await runRequestTool(
+      { query: '@acme/billing-sdk createInvoice' },
+      deps(fetchImpl),
+    );
+    expect(result.isError).toBe(true);
+    expect(result.envelope.status).toBe('failed');
+    const reason = String(result.envelope.reason);
+    expect(reason).toContain(`answered 404: ${MESSAGE}`);
+    expect(reason).not.toMatch(/retry/i);
+    expect(result.summary).toContain(MESSAGE);
+    expect(calls.some((call) => call.paid)).toBe(false);
+  });
+
+  it('keeps the plain status line, and its retry, for a 5xx with no message', async () => {
+    const { fetchImpl } = net([
+      { url: ROUTER, status: 200, body: DOCS },
+      { url: PROVIDER, status: 502, body: { error: 'bad gateway' } },
+    ]);
+    const result = await runRequestTool({ query: 'zod v4 coerce' }, deps(fetchImpl));
+    expect(String(result.envelope.reason)).toMatch(/answered 502\. .*then retry\.$/);
+  });
+
+  it('bounds the message and keeps it to one plain line', async () => {
+    const { fetchImpl } = net([
+      { url: ROUTER, status: 200, body: DOCS },
+      {
+        url: PROVIDER,
+        status: 503,
+        body: { error: { message: `Unavailable\u001b[2J\n${'x'.repeat(1_000)}` } },
+      },
+    ]);
+    const result = await runRequestTool({ query: 'zod v4 coerce' }, deps(fetchImpl));
+    const reason = String(result.envelope.reason);
+    expect(reason).toContain('answered 503: Unavailable [2J xxx');
+    expect(reason).not.toMatch(/\p{Cc}/u);
+    expect(reason.length).toBeLessThan(600);
+  });
+});
+
 describe('what the tool refuses to execute', () => {
   it.each([
     [

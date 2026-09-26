@@ -22,6 +22,7 @@ import { requestDecision, ROUTER_PATH, type HookDecision } from './decision';
 import { GATE_TIMEOUT_MS } from './gate';
 import { REQUEST_TOOL } from './names';
 import { requestToolAccess, type AgentLookup } from './agent-tools';
+import { finishAugment, startAugment, type PrefetchJob, type SearchResponse } from './augment';
 import {
   bindDecision,
   markOffered,
@@ -42,7 +43,8 @@ import { routerSettings, type RouterSettings } from './settings';
  * seal the packet, ask for one free decision, and say one thing back to the
  * harness. Before an `execute` is shown where nobody can approve it, they also
  * read the wallet's address from its file and its USDC balance from the RPC
- * (`withheldBecause`); that is the only other thing they touch.
+ * (`withheldBecause`). A free offer on a search starts one free docs fetch in a
+ * detached `node` (`augment.ts`); that is the only other thing they touch.
  *
  * NOTHING ELSE IS IN REACH FROM HERE. No wallet module, no signer, no payment
  * SDK, no viem, no MCP server: a dist test asserts the chunk graph, because the
@@ -140,6 +142,9 @@ export type HookEvent =
       eventName: 'PostToolUse' | 'PostToolUseFailure';
       /** What the harness reported, when it was a shortfall; null means none. */
       nativeOutcome: NativeOutcome | null;
+      /** A WebSearch's whole response after it ran, kept to be echoed back with
+       *  free docs on top; null for anything else. */
+      search: SearchResponse | null;
     } & NativeCall)
   | {
       kind: 'delegation';
@@ -168,6 +173,7 @@ export function decodeEvent(raw: unknown): HookEvent | null {
       kind: 'shortfall',
       eventName: shortfall.data.hook_event_name,
       nativeOutcome: shortfallOf(shortfall.data),
+      search: searchOf(shortfall.data),
       ...nativeCallOf(shortfall.data),
     };
   }
@@ -212,6 +218,15 @@ function nativeCallOf(
     ...optional('agentType', event.agent_type),
     ...optional('cwd', event.cwd),
   };
+}
+
+/** WebSearch's `{query, results, durationSeconds, searchCount}` after it ran. */
+function searchOf(event: z.infer<typeof ShortfallEventSchema>): SearchResponse | null {
+  if (event.hook_event_name !== 'PostToolUse' || event.tool_name !== 'WebSearch') return null;
+  const response = event.tool_response;
+  if (response === null || typeof response !== 'object' || Array.isArray(response)) return null;
+  const raw = response as Record<string, unknown>;
+  return Array.isArray(raw.results) ? { raw, results: raw.results } : null;
 }
 
 function optional<K extends string>(key: K, value: string | undefined): Partial<Record<K, string>> {
@@ -369,6 +384,11 @@ export interface HookDeps {
    * protocol channel.
    */
   warn?: (line: string) => void;
+  /** Starts the free docs fetch beside a search; tests replace the detached
+   *  process it spawns. */
+  prefetch?: (job: PrefetchJob) => void;
+  /** How long the after-call hook waits for that fetch; tests shorten it. */
+  augmentWaitMs?: number;
 }
 
 /**
@@ -560,6 +580,10 @@ export interface NativeHookOutcome {
   /** An `execute` whose redirect was not sent: this agent's last one, in the
    *  same category, has not delivered. */
   redirectUndelivered?: true;
+  /** A free offer, which the pre-call arm never redirects: the call runs. */
+  free?: true;
+  /** And its docs are being fetched, to ride above the search's results. */
+  augmenting?: true;
 }
 
 export interface ShortfallHookOutcome extends NativeHookOutcome {
@@ -568,9 +592,17 @@ export interface ShortfallHookOutcome extends NativeHookOutcome {
   nativeOutcome?: NativeOutcome;
   /** The pre-call arm already redirected this very call, so nothing more is said. */
   alreadyOffered?: true;
+  /** The pre-call arm fetched free docs for this call: they were added to its
+   *  results, or there were none to add. Never an offer as well. */
+  augmented?: 'added' | 'nothing';
 }
 
 type ExecuteDecision = Extract<HookDecision, { action: 'execute' }>;
+
+/** A free offer: nothing to pay, so nothing for the spend policy or the wallet. */
+function isFree(offer: ExecuteDecision): boolean {
+  return offer.providerPriceAtomic === '0';
+}
 
 /**
  * THE ONE ROUTE BOTH NATIVE ARMS TAKE, before the call and after it: the
@@ -578,14 +610,25 @@ type ExecuteDecision = Extract<HookDecision, { action: 'execute' }>;
  * and the subagent spend rule. An `execute` that survives all of it comes back
  * as `offer`; everything else is the reason there is none. `repeated` is the
  * pre-call arm's one-block rule, asked only of an offer that would be shown.
+ * `passFree` is the pre-call arm's too: a free offer comes back marked `free`,
+ * with the base URL it was decided on, before the spend policy, the wallet or
+ * `repeated` is asked, since it is never a redirect.
  */
 async function routeNativeCall(
   event: NativeCall,
   pending: PendingCall,
   deps: HookDeps,
-  nativeOutcome?: NativeOutcome,
-  repeated?: (offer: ExecuteDecision) => Promise<boolean>,
-): Promise<{ offer: ExecuteDecision } | { offer: null; outcome: NativeHookOutcome }> {
+  opts: {
+    nativeOutcome?: NativeOutcome;
+    repeated?: (offer: ExecuteDecision) => Promise<boolean>;
+    passFree?: boolean;
+  } = {},
+): Promise<
+  | { offer: ExecuteDecision; free?: undefined }
+  | { offer: ExecuteDecision; free: true; baseUrl: string }
+  | { offer: null; outcome: NativeHookOutcome }
+> {
+  const { nativeOutcome, repeated } = opts;
   // OFF MEANS NOTHING ABOUT THE TURN IS READ: the switch comes before the
   // agent lookup and the transcript, for both native arms.
   const router = await routerFor(event.cwd, deps);
@@ -644,6 +687,10 @@ async function routeNativeCall(
       outcome: { response: null, ...(outcome !== null ? { action: outcome.action } : {}) },
     };
   }
+  if (opts.passFree === true && isFree(outcome)) {
+    await footer.close(outcome, { withheld: 'free lookup, call runs' });
+    return { offer: outcome, free: true, baseUrl: resolveBaseUrl(deps, router.config) };
+  }
   const withheld = await withheldBecause(outcome, deps, deadline);
   if (withheld !== null) {
     await footer.close(outcome, { withheld });
@@ -682,14 +729,45 @@ async function routeNativeCall(
  * stopped short of `fulfilled`, or was never called), an offer in that same
  * category is withheld once and the call runs; the call after that is routed
  * as usual. An offer in another category is a redirect like any other.
+ *
+ * A FREE OFFER IS NEVER A REDIRECT. Denying a search for the free docs lookup
+ * sent the agent on a detour, and round a loop when the docs missed. The call
+ * runs with no output and nothing is recorded against it; on a WebSearch the
+ * docs are fetched meanwhile and the after-call arm adds them above the
+ * search's results (`augment.ts`). A WebFetch just runs.
  */
 export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<NativeHookOutcome> {
   const event = decodeEvent(raw);
   if (event?.kind !== 'native' || event.pending === null) return { response: null };
-  const routed = await routeNativeCall(event, event.pending, deps, undefined, (offer) =>
-    takeUndelivered(deps.dataDir, event.sessionId, event.agentId, offer.category, deps.now?.()),
-  );
+  const routed = await routeNativeCall(event, event.pending, deps, {
+    passFree: true,
+    repeated: (offer) =>
+      takeUndelivered(deps.dataDir, event.sessionId, event.agentId, offer.category, deps.now?.()),
+  });
   if (routed.offer === null) return routed.outcome;
+  if (routed.free === true) {
+    const { pending } = event;
+    const augmenting =
+      pending.tool === 'WebSearch' &&
+      (await startAugment(
+        {
+          sessionId: event.sessionId,
+          query: pending.query,
+          ...(event.agentId !== undefined ? { agentId: event.agentId } : {}),
+          ...(event.toolUseId !== undefined ? { toolUseId: event.toolUseId } : {}),
+        },
+        routed.offer,
+        routed.baseUrl,
+        deps,
+      ));
+    return {
+      response: null,
+      action: 'execute',
+      id: routed.offer.id,
+      free: true,
+      ...(augmenting ? { augmenting: true as const } : {}),
+    };
+  }
   if (event.toolUseId !== undefined) {
     await markOffered(deps.dataDir, event.sessionId, event.toolUseId, deps.now?.());
   }
@@ -719,6 +797,17 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
  * `execute` says anything. A call the pre-call arm already redirected is not
  * offered on again.
  *
+ * A SEARCH THE PRE-CALL ARM IS FETCHING FREE DOCS FOR waits for them first,
+ * the one wait in the hook, bounded by `AUGMENT_WAIT_MS`. When docs came back
+ * they go on top of its results (`updatedToolOutput`, the response the harness
+ * reported with one string prepended to `results`), and that call is not
+ * offered on as well. When none were added (no match, a refusal, a timeout, or
+ * a call that failed outright) it is an ordinary call from there: a search that
+ * came back fine says nothing, and one that came back short takes the shortfall
+ * route like any other, so a failed docs lookup never costs it the paid offer.
+ * The wait and that decision can follow one another, which is why this entry's
+ * timeout is longer than the others' (`wire.test.ts` pins the sum).
+ *
  * A server that does not know `nativeOutcome` yet refuses the packet; that is
  * a failed decision like any other, so the hook stays silent.
  */
@@ -728,6 +817,35 @@ export async function runShortfallHook(
 ): Promise<ShortfallHookOutcome> {
   const event = decodeEvent(raw);
   if (event?.kind !== 'shortfall') return { response: null };
+  const augment = await finishAugment(
+    {
+      sessionId: event.sessionId,
+      search: event.search,
+      ...(event.toolUseId !== undefined ? { toolUseId: event.toolUseId } : {}),
+    },
+    deps,
+  );
+  if (augment !== null && augment.updatedToolOutput !== null) {
+    return {
+      response: {
+        hookSpecificOutput: {
+          hookEventName: 'PostToolUse',
+          updatedToolOutput: augment.updatedToolOutput,
+        },
+      },
+      augmented: 'added',
+    };
+  }
+  const outcome = await offerOnShortfall(event, deps, augment !== null);
+  return augment === null ? outcome : { ...outcome, augmented: 'nothing' };
+}
+
+/** The shortfall route itself: ask about a call that came back short, once. */
+async function offerOnShortfall(
+  event: Extract<HookEvent, { kind: 'shortfall' }>,
+  deps: HookDeps,
+  docsJustMissed = false,
+): Promise<ShortfallHookOutcome> {
   const { nativeOutcome, pending, eventName } = event;
   if (nativeOutcome === null) return { response: null };
   if (pending === null) return { response: null };
@@ -737,8 +855,12 @@ export async function runShortfallHook(
   ) {
     return { response: null, nativeOutcome, alreadyOffered: true };
   }
-  const routed = await routeNativeCall(event, pending, deps, nativeOutcome);
+  const routed = await routeNativeCall(event, pending, deps, { nativeOutcome });
   if (routed.offer === null) return { ...routed.outcome, nativeOutcome };
+  // The free docs lookup for this very search just came back empty: offering
+  // it again would send the agent to the same miss. Only a paid offer stands.
+  if (docsJustMissed && routed.offer.providerPriceAtomic === '0')
+    return { response: null, nativeOutcome, action: 'execute' };
   return {
     response: {
       hookSpecificOutput: {
