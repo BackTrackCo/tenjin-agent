@@ -1088,69 +1088,7 @@ describe('the install and wallet telemetry headers', () => {
     expect(seen[0]?.redirect).toBeUndefined();
   });
 
-  it('drops them on a redirect that leaves the Tenjin origin, and follows it', async () => {
-    useIdentity(async () => ({ install: INSTALL, wallet: WALLET }));
-    const { fetchImpl, seen } = router({
-      [`${TENJIN}/api/search`]: hop(302, 'https://elsewhere.example/landing'),
-      'https://elsewhere.example/landing': ok,
-    });
-    for (const send of [
-      () => httpRequest(`${TENJIN}/api/search`, { timeoutMs: 1000, fetchImpl }),
-      () => fetchJson(`${TENJIN}/api/search`, { timeoutMs: 1000, fetchImpl }),
-    ]) {
-      seen.length = 0;
-      expect(await send()).toMatchObject({ ok: true, status: 200 });
-      expect(seen.map((s) => s.url)).toEqual([
-        `${TENJIN}/api/search`,
-        'https://elsewhere.example/landing',
-      ]);
-      // `fetch` is never allowed to follow the hop that carried them.
-      expect(seen[0]?.redirect).toBe('manual');
-      expect(seen[0]?.headers[INSTALL_HEADER]).toBe(INSTALL);
-      expect(seen[1]?.headers).not.toHaveProperty(INSTALL_HEADER);
-      expect(seen[1]?.headers).not.toHaveProperty(WALLET_HEADER);
-    }
-  });
-
-  it('keeps them across a same-origin hop, and turns a redirected POST into a bodiless GET', async () => {
-    useIdentity(async () => ({ install: INSTALL }));
-    const { fetchImpl, seen } = router({
-      [`${TENJIN}/api/outcome`]: hop(303, '/api/outcome/done'),
-      [`${TENJIN}/api/outcome/done`]: ok,
-    });
-    const res = await httpRequest(`${TENJIN}/api/outcome`, {
-      method: 'POST',
-      timeoutMs: 1000,
-      jsonBody: { a: 1 },
-      fetchImpl,
-    });
-    expect(res).toMatchObject({ ok: true, status: 200 });
-    expect(seen.map((s) => [s.method, s.body, s.headers[INSTALL_HEADER]])).toEqual([
-      ['POST', '{"a":1}', INSTALL],
-      ['GET', undefined, INSTALL],
-    ]);
-    expect(seen[1]?.headers).not.toHaveProperty('content-type');
-  });
-
-  it('keeps method and body on a 307, as fetch does', async () => {
-    useIdentity(async () => ({ install: INSTALL }));
-    const { fetchImpl, seen } = router({
-      [`${TENJIN}/api/x`]: hop(307, `${TENJIN}/api/y`),
-      [`${TENJIN}/api/y`]: ok,
-    });
-    await httpRequest(`${TENJIN}/api/x`, {
-      method: 'POST',
-      timeoutMs: 1000,
-      jsonBody: { a: 1 },
-      fetchImpl,
-    });
-    expect(seen.map((s) => [s.method, s.body])).toEqual([
-      ['POST', '{"a":1}'],
-      ['POST', '{"a":1}'],
-    ]);
-  });
-
-  it('still fails a pinned request closed on any redirect, carrying nothing further', async () => {
+  it('leaves a pinned request failing closed on any redirect, as before', async () => {
     useIdentity(async () => ({ install: INSTALL }));
     const { fetchImpl, seen } = router({
       [`${TENJIN}/api/x402-router`]: hop(302, 'https://elsewhere.example/'),
@@ -1164,12 +1102,15 @@ describe('the install and wallet telemetry headers', () => {
     });
     expect(res).toMatchObject({ ok: false, kind: 'blocked-redirect' });
     expect(seen).toHaveLength(1);
+    expect(seen[0]?.redirect).toBe('manual');
+    expect(seen[0]?.headers[INSTALL_HEADER]).toBe(INSTALL);
   });
 
-  it('gives up like fetch on a redirect loop', async () => {
+  it("leaves an unpinned request on fetch's own redirect handling", async () => {
     useIdentity(async () => ({ install: INSTALL }));
-    const { fetchImpl } = router({ [`${TENJIN}/loop`]: hop(302, `${TENJIN}/loop`) });
-    const res = await httpRequest(`${TENJIN}/loop`, { timeoutMs: 1000, fetchImpl });
-    expect(res).toMatchObject({ ok: false, kind: 'network' });
+    const { fetchImpl, seen } = router({ [`${TENJIN}/api/search`]: ok });
+    await httpRequest(`${TENJIN}/api/search`, { timeoutMs: 1000, fetchImpl });
+    expect(seen[0]?.headers[INSTALL_HEADER]).toBe(INSTALL);
+    expect(seen[0]?.redirect).toBeUndefined();
   });
 });

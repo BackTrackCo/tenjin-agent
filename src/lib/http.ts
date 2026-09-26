@@ -115,6 +115,11 @@ export const WALLET_HEADER = 'x-tenjin-wallet';
  * call sites is forty chances to forget one. Set only by the two process entries
  * (the CLI's `index.ts` and the daemon), so an in-process test that never sets
  * it sends exactly what it always did.
+ *
+ * Redirects are left to the request's usual transport: an unpinned request
+ * follows them as `fetch` does, headers and all. Tenjin's origins redirect only
+ * to Tenjin's own hosts, and neither value is a credential, so these are not
+ * worth the redirect pin the bypass key and signed headers get.
  */
 export interface TenjinIdentity {
   /** The origins that are Tenjin's own for this process. */
@@ -146,85 +151,6 @@ export async function tenjinIdentityHeaders(url: string): Promise<Record<string,
   } catch {
     return {};
   }
-}
-
-/** Headers `fetch` drops when a redirect changes origin; the manual follow below matches it. */
-const CROSS_ORIGIN_DROPPED = ['authorization', 'cookie', 'proxy-authorization'];
-/** Headers that describe a body, dropped with the body when a redirect turns the request into a GET. */
-const BODY_HEADERS = ['content-type', 'content-encoding', 'content-language', 'content-location'];
-/** `fetch`'s own redirect statuses and limit. */
-const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
-const MAX_REDIRECTS = 20;
-
-interface WireRequest {
-  method: string;
-  headers: Record<string, string>;
-  body: string | undefined;
-  signal: AbortSignal;
-}
-
-/**
- * One request, with the telemetry headers attached per hop.
- *
- * A request that carries them does not let `fetch` follow a redirect, because
- * `fetch` re-sends every header verbatim to whatever `Location` names, and a 3xx
- * on Tenjin's origin pointing at another host would hand that host the install
- * id and the wallet address. So this follows the hop itself, re-deciding the
- * headers against each new URL: a same-origin hop (http -> https, a trailing
- * slash) keeps them, and one that leaves drops them, then continues as ordinary
- * `fetch` would. Method and body rewriting match `fetch`: 303, and 301/302 on a
- * POST, become a bodiless GET.
- *
- * A `pinned` request never follows anything; its 3xx comes back for the caller
- * to fail closed on, exactly as before.
- */
-async function sendWithIdentity(
-  doFetch: typeof fetch,
-  url: string,
-  request: WireRequest,
-  pinned: boolean,
-): Promise<Response> {
-  let current = url;
-  let { method, headers, body } = request;
-  for (let hop = 0; ; hop++) {
-    const identity = await tenjinIdentityHeaders(current);
-    const carries = Object.keys(identity).length > 0;
-    const res = await doFetch(current, {
-      method,
-      headers: { ...headers, ...identity },
-      body,
-      signal: request.signal,
-      ...(pinned || carries ? { redirect: 'manual' as const } : {}),
-    });
-    if (pinned || !carries || !REDIRECT_STATUSES.has(res.status)) return res;
-    const location = res.headers.get('location');
-    if (location === null) return res;
-    if (hop >= MAX_REDIRECTS) throw new TypeError('redirect count exceeded');
-    const next = new URL(location, current);
-    if (next.protocol !== 'http:' && next.protocol !== 'https:') {
-      throw new TypeError(`redirect to unsupported scheme ${next.protocol}`);
-    }
-    // Release the redirect's own body before the next hop.
-    await res.body?.cancel().catch(() => undefined);
-    if (
-      (res.status === 303 && method !== 'HEAD') ||
-      ((res.status === 301 || res.status === 302) && method === 'POST')
-    ) {
-      method = 'GET';
-      body = undefined;
-      headers = withoutHeaders(headers, BODY_HEADERS);
-    }
-    if (next.origin !== new URL(current).origin) {
-      headers = withoutHeaders(headers, CROSS_ORIGIN_DROPPED);
-    }
-    current = next.toString();
-  }
-}
-
-function withoutHeaders(headers: Record<string, string>, names: string[]): Record<string, string> {
-  return Object.fromEntries(
-    Object.entries(headers).filter(([name]) => !names.includes(name.toLowerCase())),
-  );
 }
 
 /**
@@ -414,12 +340,11 @@ export async function fetchJson(url: string, opts: FetchJsonOptions): Promise<Fe
       // checks are anonymous — so the door key is the one thing here worth
       // pinning, and it pins the same way it does in httpRequest.
       pinned = carriesBypassKey(headers);
-      res = await sendWithIdentity(
-        doFetch,
-        url,
-        { method: 'GET', headers, body: undefined, signal: controller.signal },
-        pinned,
-      );
+      res = await doFetch(url, {
+        signal: controller.signal,
+        headers: { ...headers, ...(await tenjinIdentityHeaders(url)) },
+        ...(pinned ? { redirect: 'manual' as const } : {}),
+      });
     } catch (err) {
       // A timeout is a network failure the AbortController induced; distinguish it
       // from an organic one so the caller can say "timed out" rather than a raw
@@ -654,12 +579,13 @@ export async function httpRequest(url: string, opts: HttpRequestOptions): Promis
 
     let res: Response;
     try {
-      res = await sendWithIdentity(
-        doFetch,
-        url,
-        { method: opts.method ?? 'GET', headers, body, signal },
-        pinned,
-      );
+      res = await doFetch(url, {
+        method: opts.method ?? 'GET',
+        headers: { ...headers, ...(await tenjinIdentityHeaders(url)) },
+        body,
+        signal,
+        ...(pinned ? { redirect: 'manual' as const } : {}),
+      });
     } catch (err) {
       if (timedOut) return timeoutFailure(url, opts.timeoutMs);
       if (isHeaderOverflow(err)) return oversizedHeaderFailure(url);
