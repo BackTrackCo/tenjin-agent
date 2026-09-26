@@ -1,5 +1,40 @@
 # tenjin-cli
 
+## 0.1.0-alpha.19
+
+### Minor Changes
+
+- ddf34f7: Separate automatic router limits from mandatory manual payment consent, check Base USDC balance before signing, repair Ultravioleta discovery, and retire the obsolete payment skill.
+
+  `maxAutoSpend` and `sessionBudget` limit automatic router purchases only. Zero blocks positive automatic spending; daily `none` removes the automatic daily ceiling. A missing daily limit defaults to $5 both before and after install. Manual `tenjin pay` ignores both configured limits and always requires consent for the quoted transaction, interactively or through `--yes` after explicit user approval. It is never an autonomous workaround for a router refusal. An optional `--max-price`, creator/destination restrictions, supported payment terms and the balance check still apply.
+
+  Legacy `bazaarPay` and `confirm` keys are ignored after upgrade, including old `false`/`always` values. Doctor/status warn; install and refresh remove and report them while preserving current router/limit settings and unrelated fields. `config set` rejects the retired keys. No hand edit is required to keep routing operational.
+
+  Manual and automatic payments share one ledger and duplicate guard. Manual payments remain in total reporting without consuming automatic budget headroom. Legacy exposure without mode/counter metadata conservatively counts as automatic until the existing window expires.
+
+  Missing Bazaar metadata or an unlisted endpoint is an ordinary direct-payment outcome. Only unavailable/incomplete lookups or exact-listing term differences require invocation-scoped `--ignore-warnings`; `--yes` supplies payment consent only. The selected signer's balance is read before signing, with one bounded retry on an unreadable result. Confirmed insufficient funds or persistent read failure refuses and releases the reservation. Router calls retain their advertised-price checks and wire protocol; policy refusals now say “Blocked by spending policy.”
+
+  Do not roll back to a config reader that treats zero as unlimited or ignores `none`; preserve the operator's explicit automatic limits when reverting behavior.
+
+### Patch Changes
+
+- 1f6100f: The pre-call router hook no longer blocks a WebSearch for the free library docs
+  lookup: the search runs as written, Context7 docs for the same query are fetched
+  alongside it, and when found they are added above the search's own results
+  (nothing changes when none are found). Paid lookups are redirected exactly as
+  before, and `tenjin install --refresh` gives the after-call hook the 15 second
+  timeout that wait needs. A provider's own error message, such as the docs
+  lookup's "no library matched" 404, now reaches the agent from
+  `mcp__x402__request` instead of a bare status telling it to retry.
+- de8c3c0: The pre-call router hook no longer redirects WebSearch or WebFetch twice in a
+  row to the same kind of lookup. When the `mcp__x402__request` lookup it
+  redirected to does not come back fulfilled (it failed, stopped to ask, or was
+  never called), or was a free lookup, whose success nothing verifies, that agent's next call matched to the same kind runs as it is,
+  while other lookups, and the call after that, are routed as usual; the main
+  agent and each subagent keep their own record. The redirect's reason tells the
+  agent it can make its own call again if the lookup does not cover it.
+- 2f41cb2: Keep `tenjin update` refreshes at user scope when they run from the home directory, avoiding an unintended project-scoped x402 MCP registration. Recognize symlinked home paths, preserve existing project-only registrations and explicit project installs, and document cleanup for the accidental alpha.18 entry.
+
 ## 0.1.0-alpha.18
 
 ### Patch Changes
