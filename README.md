@@ -9,7 +9,7 @@
 
 <p align="center">
   Give your agent superpowers once. Tenjin hands it the right tool when it helps, and you keep working like before.<br>
-  No API keys. No pile of MCP servers. No rules to write.
+  No provider API keys. No pile of MCP servers. No rules to write.
 </p>
 
 <p align="center">
@@ -35,12 +35,12 @@
 
 Giving your agent good tools is a chore today:
 
-- **A key for every tool.** Sign up, pick a plan, paste an API key into a config file. Five tools, five accounts.
-- **MCP servers crowd the context.** Every server you install loads its tool definitions into every session, needed or not.
+- **Separate provider setup.** Many paid tools require their own account, plan and API key.
+- **More integrations to configure.** Each MCP server has its own setup. Claude Code's [tool search](https://code.claude.com/docs/en/mcp#scale-with-mcp-tool-search) can load tool definitions on demand, so context overhead depends on the client and configuration.
 - **Your agent forgets anyway.** It reaches for plain web search out of habit, so you write rules to remind it, and it still slips.
 - **Some tools you need once.** Installing something permanent for a one-off lookup isn't worth the setup.
 
-Tenjin handles all of it. Install it once and keep working. The Tenjin router watches the moments where a tool could help: your prompt, your agent's web searches and page fetches, and the tasks it hands to subagents. When a curated tool beats what your agent was about to do, the router suggests it and your agent calls it. Your wallet pays for each call through [x402](#wallet-and-payments), so you manage no keys and install nothing new.
+Tenjin brings the curated tools below into one setup. Install it once and keep working. The Tenjin router watches the moments where a tool could help: your prompt, your agent's web searches and page fetches, and the tasks it hands to subagents. When a curated tool beats what your agent was about to do, the router suggests it and your agent calls it. Your wallet pays for each paid call through [x402](#wallet-and-payments), so you manage no provider API keys and install nothing new for those tools.
 
 ## Quick start
 
@@ -60,7 +60,7 @@ tenjin wallet fund 2    # optional: add $2 with a card, via Coinbase
 Next: tenjin wallet fund, then restart Claude Code
 ```
 
-Restart Claude Code. That's it.
+Restart Claude Code. Free tools don't need funding; paid tools need a funded wallet. [Card funding via Coinbase](#funding) requires a Coinbase account, or you can send USDC on Base from another wallet.
 
 Then work as usual. Try:
 
@@ -112,7 +112,7 @@ To pick a tool, the router sends your current turn and up to six recent messages
 
 ## Wallet and payments
 
-Tenjin pays for tools with [x402](https://www.x402.org), an open standard that builds payments into HTTP. A paid endpoint answers `402 Payment Required` with its price, the client signs a payment for that amount, and the endpoint returns the result. Neither side needs an account or an API key. Read more: [x402.org](https://www.x402.org) · [whitepaper](https://www.x402.org/x402-whitepaper.pdf) · [Coinbase docs](https://docs.cdp.coinbase.com/x402/welcome) · [spec and SDKs](https://github.com/coinbase/x402).
+Tenjin pays for tools with [x402](https://www.x402.org), an open standard that builds payments into HTTP. A paid endpoint answers `402 Payment Required` with its price, the client signs a payment for that amount, and the endpoint returns the result. You don't need a separate account or API key for each tool provider. Funding your wallet is a separate step: [card funding via Coinbase](#funding) requires a Coinbase account. Read more: [x402.org](https://www.x402.org) · [whitepaper](https://www.x402.org/x402-whitepaper.pdf) · [Coinbase docs](https://docs.cdp.coinbase.com/x402/welcome) · [spec and SDKs](https://github.com/coinbase/x402).
 
 ### Your wallet
 
