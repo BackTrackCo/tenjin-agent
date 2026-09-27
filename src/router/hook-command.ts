@@ -5,6 +5,7 @@ import {
   runShortfallHook,
   type HookDeps,
 } from './hooks';
+import { codexResponse } from './codex-event';
 import type { Io } from '../lib/output';
 
 /**
@@ -28,6 +29,7 @@ export type HookKind = 'prompt' | 'native' | 'shortfall' | 'agent';
 export interface HookCommandDeps extends HookDeps {
   /** Test seam for the harness event; production reads stdin. */
   readEvent?: () => Promise<string>;
+  codexReadiness?: (cwd: string) => Promise<{ prompt: boolean; web: boolean }>;
 }
 
 export async function runHookCommand(kind: HookKind, io: Io, deps: HookCommandDeps): Promise<void> {
@@ -35,6 +37,18 @@ export async function runHookCommand(kind: HookKind, io: Io, deps: HookCommandDe
   try {
     const raw = await (deps.readEvent ?? readStdin)();
     const event: unknown = JSON.parse(raw);
+    if (deps.harness === 'codex') {
+      const { codexHookReadiness } = await import('./codex-host');
+      const cwd =
+        event !== null &&
+        typeof event === 'object' &&
+        typeof (event as { cwd?: unknown }).cwd === 'string'
+          ? (event as { cwd: string }).cwd
+          : process.cwd();
+      const readiness = await (deps.codexReadiness ?? codexHookReadiness)(cwd);
+      if (!readiness.prompt) return;
+      deps = { ...deps, codexWebReady: readiness.web };
+    }
     const outcome =
       kind === 'prompt'
         ? await runPromptHook(event, deps)
@@ -43,7 +57,7 @@ export async function runHookCommand(kind: HookKind, io: Io, deps: HookCommandDe
           : kind === 'shortfall'
             ? await runShortfallHook(event, deps)
             : await runDelegationHook(event, deps);
-    response = outcome.response;
+    response = deps.harness === 'codex' ? codexResponse(outcome.response) : outcome.response;
   } catch {
     response = null;
   }

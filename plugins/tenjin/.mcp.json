@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "x402": {
+      "command": "tenjin",
+      "args": ["mcp"]
+    }
+  }
+}

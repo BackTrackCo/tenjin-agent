@@ -21,6 +21,7 @@ import {
 import { requestDecision, ROUTER_PATH, type HookDecision } from './decision';
 import { GATE_TIMEOUT_MS } from './gate';
 import { REQUEST_TOOL } from './names';
+import { codexRouterEvent } from './codex-event';
 import { requestToolAccess, type AgentLookup } from './agent-tools';
 import { finishAugment, startAugment, type PrefetchJob, type SearchResponse } from './augment';
 import {
@@ -365,6 +366,9 @@ function delegationOffer(hint: string): string {
 
 export interface HookDeps {
   dataDir: string;
+  harness?: 'claude' | 'codex';
+  /** Verified installed-host web and request-tool readiness for this invocation. */
+  codexWebReady?: boolean;
   /** Overrides the resolved base URL entirely; tests point it at a local stub. */
   baseUrl?: string;
   /** The environment the base URL precedence reads `TENJIN_BASE_URL` from. */
@@ -530,7 +534,10 @@ export interface PromptHookOutcome {
  * the paid call would auto-execute, the same rule the pre-call deny follows.
  */
 export async function runPromptHook(raw: unknown, deps: HookDeps): Promise<PromptHookOutcome> {
-  const event = decodeEvent(raw);
+  const event =
+    deps.harness === 'codex'
+      ? codexRouterEvent(raw, deps.codexWebReady === true)
+      : decodeEvent(raw);
   if (event?.kind !== 'prompt') return { response: null };
   const skipped = promptSkipReason(event.prompt);
   if (skipped !== null) return { response: null, skipped };
@@ -539,7 +546,7 @@ export async function runPromptHook(raw: unknown, deps: HookDeps): Promise<Promp
 
   const sealed = seal(
     scoped(
-      await buildPromptPacket(event.transcriptPath, event.sessionId, event.prompt),
+      await buildPromptPacket(event.transcriptPath, event.sessionId, event.prompt, deps.harness),
       router.settings,
     ),
   );
@@ -651,6 +658,7 @@ async function routeNativeCall(
       await buildNativePacket(event.transcriptPath, event.sessionId, pending, {
         ...(event.agentId !== undefined ? { agentId: event.agentId } : {}),
         ...(nativeOutcome !== undefined ? { nativeOutcome } : {}),
+        ...(deps.harness !== undefined ? { harness: deps.harness } : {}),
       }),
       router.settings,
     ),
@@ -737,12 +745,21 @@ async function routeNativeCall(
  * search's results (`augment.ts`). A WebFetch just runs.
  */
 export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<NativeHookOutcome> {
-  const event = decodeEvent(raw);
+  const event =
+    deps.harness === 'codex'
+      ? codexRouterEvent(raw, deps.codexWebReady === true)
+      : decodeEvent(raw);
   if (event?.kind !== 'native' || event.pending === null) return { response: null };
   const routed = await routeNativeCall(event, event.pending, deps, {
     passFree: true,
     repeated: (offer) =>
-      takeUndelivered(deps.dataDir, event.sessionId, event.agentId, offer.category, deps.now?.()),
+      takeUndelivered(
+        deps.dataDir,
+        progressSession(event.sessionId, deps),
+        event.agentId,
+        offer.category,
+        deps.now?.(),
+      ),
   });
   if (routed.offer === null) return routed.outcome;
   if (routed.free === true) {
@@ -751,7 +768,7 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
       pending.tool === 'WebSearch' &&
       (await startAugment(
         {
-          sessionId: event.sessionId,
+          sessionId: progressSession(event.sessionId, deps),
           query: pending.query,
           ...(event.agentId !== undefined ? { agentId: event.agentId } : {}),
           ...(event.toolUseId !== undefined ? { toolUseId: event.toolUseId } : {}),
@@ -769,9 +786,20 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
     };
   }
   if (event.toolUseId !== undefined) {
-    await markOffered(deps.dataDir, event.sessionId, event.toolUseId, deps.now?.());
+    await markOffered(
+      deps.dataDir,
+      progressSession(event.sessionId, deps),
+      event.toolUseId,
+      deps.now?.(),
+    );
   }
-  await noteRedirect(deps.dataDir, event.sessionId, event.agentId, routed.offer, deps.now?.());
+  await noteRedirect(
+    deps.dataDir,
+    progressSession(event.sessionId, deps),
+    event.agentId,
+    routed.offer,
+    deps.now?.(),
+  );
   return {
     response: {
       hookSpecificOutput: {
@@ -815,11 +843,14 @@ export async function runShortfallHook(
   raw: unknown,
   deps: HookDeps,
 ): Promise<ShortfallHookOutcome> {
-  const event = decodeEvent(raw);
+  const event =
+    deps.harness === 'codex'
+      ? codexRouterEvent(raw, deps.codexWebReady === true)
+      : decodeEvent(raw);
   if (event?.kind !== 'shortfall') return { response: null };
   const augment = await finishAugment(
     {
-      sessionId: event.sessionId,
+      sessionId: progressSession(event.sessionId, deps),
       search: event.search,
       ...(event.toolUseId !== undefined ? { toolUseId: event.toolUseId } : {}),
     },
@@ -851,7 +882,12 @@ async function offerOnShortfall(
   if (pending === null) return { response: null };
   if (
     event.toolUseId !== undefined &&
-    (await wasOffered(deps.dataDir, event.sessionId, event.toolUseId, deps.now?.()))
+    (await wasOffered(
+      deps.dataDir,
+      progressSession(event.sessionId, deps),
+      event.toolUseId,
+      deps.now?.(),
+    ))
   ) {
     return { response: null, nativeOutcome, alreadyOffered: true };
   }
@@ -898,7 +934,10 @@ export async function runDelegationHook(
   raw: unknown,
   deps: HookDeps,
 ): Promise<DelegationHookOutcome> {
-  const event = decodeEvent(raw);
+  const event =
+    deps.harness === 'codex'
+      ? codexRouterEvent(raw, deps.codexWebReady === true)
+      : decodeEvent(raw);
   if (event?.kind !== 'delegation') return { response: null };
   const { task } = event;
   if (task === null || task.trim().length === 0) return { response: null };
@@ -974,6 +1013,7 @@ async function openFooter(
   /** `withheld` is why an `execute` was not shown, in the footer's words. */
   close: (decision: HookDecision | null, opts?: { withheld?: string }) => Promise<void>;
 }> {
+  sessionId = progressSession(sessionId, deps);
   const now = (): number => deps.now?.() ?? Date.now();
   const directory = sessionDir(deps.dataDir, sessionId);
   const callId = newCallId();
@@ -1097,4 +1137,8 @@ async function routerFor(
  */
 function scoped(packet: Packet, router: RouterSettings): Packet {
   return router.context.value === 'turn' ? { ...packet, history: [] } : packet;
+}
+
+function progressSession(session: string, deps: HookDeps): string {
+  return deps.harness === 'codex' ? `codex:${session}` : session;
 }

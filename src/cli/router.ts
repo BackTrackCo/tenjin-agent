@@ -1,4 +1,4 @@
-import type { Command } from 'commander';
+import { Option, type Command } from 'commander';
 import { INTEGRATION, SETUP, type Registration } from './registration';
 
 /**
@@ -13,9 +13,9 @@ import { INTEGRATION, SETUP, type Registration } from './registration';
 export function registerRouter(reg: Registration): void {
   const { io, runCommand, leaf, addGlobalFlags, buildContext } = reg;
 
-  const hook = leaf(INTEGRATION, 'hook', 'run one harness hook handler (called by Claude Code)')
+  const hook = leaf(INTEGRATION, 'hook', 'run one harness hook handler')
     .description(
-      'The handlers `tenjin install` registers in Claude Code. Each reads one hook event on stdin and writes the harness response, or nothing, on stdout. You never run these by hand.',
+      'The handlers installed for Claude Code or the Codex plugin. Each reads one hook event on stdin and writes the harness response, or nothing, on stdout. You never run these by hand.',
     )
     .helpCommand(false);
   for (const [name, summary] of [
@@ -28,6 +28,9 @@ export function registerRouter(reg: Registration): void {
     ['agent', "PreToolUse on Agent|Task: append any paid offer to the subagent's task"],
   ] as const) {
     addGlobalFlags(hook.command(name))
+      .addOption(
+        new Option('--harness <host>', 'hook host').choices(['claude', 'codex']).default('claude'),
+      )
       .summary(summary)
       .action(async function (this: Command) {
         const ctx = buildContext(this);
@@ -36,6 +39,7 @@ export function registerRouter(reg: Registration): void {
         // reaches every other command; the env layer is read inside.
         await runHookCommand(name, io, {
           dataDir: ctx.dataDir,
+          harness: this.opts().harness as 'claude' | 'codex',
           ...(ctx.flags.baseUrl !== undefined ? { baseUrl: ctx.flags.baseUrl } : {}),
         });
       });

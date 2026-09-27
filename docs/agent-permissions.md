@@ -137,3 +137,11 @@ A subagent is only redirected or offered a lookup when it is known to have `mcp_
 ## Not the same as `allowlistCreators`
 
 `allowlistCreators` is a spend-policy key that restricts which hosts may be paid at all. The permission rule on this page is a harness setting about which tool may run. They are separate gates and neither substitutes for the other.
+
+## Codex plugin
+
+`tenjin install --harness codex` uses the host plugin manager for three command hooks and the existing `tenjin mcp` server. Claude settings are untouched. Codex requires normal hook review. `--approve-request` writes only the plugin-scoped `plugins."tenjin@tenjin".mcp_servers.x402.tools.request.approval_mode = "approve"`; it does not relax global approval or wallet spending limits. Explicit restrictive policies are preserved. Under `approval_policy=never`, hooks remain silent without this grant. Doctor reports configuration/trust and exact-version web qualification separately from payment readiness.
+
+The prompt and qualified single-search web hooks use the same masked, bounded packet and payment path. Only verified root-session completed conversation items enter Codex history; tool results and synthetic instruction rows do not. Unknown ownership, compaction, child sessions, or unsupported web operations leave native web unchanged. An unverified CLI version is a diagnostic, not a runtime routing switch. Free docs are added as context beside Codex's result, never by replacing its native output. There is no new daemon or standing worker.
+
+Uninstall delegates removal to Codex; it preserves the wallet, Claude setup and user-edited tool policy. There is no migration compatibility layer. Remove any conflicting experimental direct registration once before installing the plugin. Codex project-scope setup and desktop are not qualified by this release.

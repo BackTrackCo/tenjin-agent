@@ -3,6 +3,7 @@ import { isIP } from 'node:net';
 import { dirname, join } from 'node:path';
 import { isPublicAddress } from '../lib/destination';
 import { mask } from '../lib/redact';
+import { parseCodexHistory } from './codex-history';
 
 /**
  * The bounded conversation packet the router's gate and paid decision read.
@@ -250,10 +251,11 @@ export async function buildPromptPacket(
   transcriptPath: string | undefined,
   sessionId: string,
   prompt: string,
+  harness: 'claude' | 'codex' = 'claude',
 ): Promise<Packet> {
   const trimmed = prompt.trim();
   const text = trimmed.length > 0 ? trimmed : '(empty prompt)';
-  const read = await readHistory(transcriptPath, { sessionId });
+  const read = await readHistory(transcriptPath, { sessionId }, harness);
   return {
     current: { role: 'user', text },
     history: read ?? [],
@@ -282,11 +284,11 @@ export async function buildNativePacket(
   transcriptPath: string | undefined,
   sessionId: string,
   pending: PendingCall,
-  opts: { agentId?: string; nativeOutcome?: NativeOutcome } = {},
+  opts: { agentId?: string; nativeOutcome?: NativeOutcome; harness?: 'claude' | 'codex' } = {},
 ): Promise<Packet> {
   const { agentId, nativeOutcome } = opts;
   const subject = 'query' in pending ? pending.query : pending.url;
-  const read = await readHistory(transcriptPath, { sessionId });
+  const read = await readHistory(transcriptPath, { sessionId }, opts.harness);
   // A SUBAGENT'S CALL BELONGS TO ITS OWN TASK. The harness hands every
   // subagent hook the PARENT's transcript, whose latest user message is not
   // what this subagent was asked to do, so two subagents with different
@@ -296,7 +298,7 @@ export async function buildNativePacket(
   // reaches this call. A subagent file that cannot be read is today's
   // behaviour, not a refusal.
   const own =
-    agentId === undefined
+    agentId === undefined || opts.harness === 'codex'
       ? null
       : await readHistory(subagentTranscriptPath(transcriptPath, sessionId, agentId), {
           sessionId,
@@ -351,6 +353,7 @@ interface RowScope {
 async function readHistory(
   path: string | undefined,
   scope: RowScope,
+  harness: 'claude' | 'codex' = 'claude',
 ): Promise<PacketMessage[] | null> {
   if (path === undefined || path.length === 0) return null;
   let raw: string;
@@ -373,7 +376,7 @@ async function readHistory(
     await file.close();
   }
   try {
-    return parseRows(raw, scope);
+    return harness === 'codex' ? parseCodexHistory(raw, scope.sessionId) : parseRows(raw, scope);
   } catch {
     return null;
   }

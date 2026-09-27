@@ -1,0 +1,20 @@
+{
+  "name": "tenjin",
+  "interface": {
+    "displayName": "Tenjin"
+  },
+  "plugins": [
+    {
+      "name": "tenjin",
+      "source": {
+        "source": "local",
+        "path": "./plugins/tenjin"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}
