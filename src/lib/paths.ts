@@ -33,6 +33,14 @@ export function walletPath(dir: string = dataDir()): string {
 }
 
 /**
+ * The anonymous install id sent to Tenjin as `X-Tenjin-Install` (lib/install-identity).
+ * Under the data dir so it survives upgrades and reinstalls of the CLI itself.
+ */
+export function installIdPath(dir: string = dataDir()): string {
+  return join(dir, 'install-id');
+}
+
+/**
  * Where the delegated P-256 session key + its wallet-signed SIWX delegation are
  * cached (B3, D35). A short-lived (≤24h) hot key: lower stakes than wallet.json,
  * but still written 0600 and address-bound so a wallet change invalidates it.
