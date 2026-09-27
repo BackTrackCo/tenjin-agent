@@ -9,7 +9,7 @@
 
 <p align="center">
   Give your agent superpowers once. Tenjin hands it the right tool when it helps, and you keep working like before.<br>
-  No API keys. No pile of MCP servers. No rules to write.
+  No API keys to set up or manage. No pile of MCP servers. No rules to write.
 </p>
 
 <p align="center">

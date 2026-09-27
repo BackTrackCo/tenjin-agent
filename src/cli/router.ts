@@ -12,6 +12,7 @@ import { INTEGRATION, SETUP, type Registration } from './registration';
  */
 export function registerRouter(reg: Registration): void {
   const { io, runCommand, leaf, addGlobalFlags, buildContext } = reg;
+  registerReviewJobs(reg);
 
   const hook = leaf(INTEGRATION, 'hook', 'run one harness hook handler (called by Claude Code)')
     .description(
@@ -82,6 +83,42 @@ export function registerRouter(reg: Registration): void {
       await runCommand('status', this, async (ctx) => {
         const { runRouterStatus } = await import('../router/status');
         return runRouterStatus(ctx);
+      });
+    });
+}
+
+function registerReviewJobs(reg: Registration): void {
+  const jobs = reg
+    .leaf(INTEGRATION, 'jobs', 'prepare and resume human second opinions')
+    .helpCommand(false);
+  reg.addGlobalFlags(jobs.command('status <jobId>')).action(async function (
+    this: Command,
+    jobId: string,
+  ) {
+    await reg.runCommand('jobs status', this, async (ctx) => {
+      const { readReview } = await import('../router/review/jobs');
+      const result = await readReview(ctx, jobId);
+      return { data: result.envelope, humanLines: [result.summary] };
+    });
+  });
+  reg
+    .addGlobalFlags(jobs.command('connect'))
+    .option('--yes', 'record prior consent to $10 signup credit')
+    .option('--country <code>', 'your explicitly provided two-letter country')
+    .action(async function (this: Command) {
+      await reg.runCommand('jobs connect', this, async (ctx) => {
+        const { connectReviewAccount } = await import('../router/review/account');
+        return connectReviewAccount(ctx, this.opts());
+      });
+    });
+  reg
+    .addGlobalFlags(jobs.command('quote <jobId>'))
+    .requiredOption('--price <usd>', 'worker compensation in USD; does not hire')
+    .requiredOption('--share', 'approve sending this draft material to RentAHuman for a quote')
+    .action(async function (this: Command, jobId: string) {
+      await reg.runCommand('jobs quote', this, async (ctx) => {
+        const { quoteReview } = await import('../router/review/jobs');
+        return quoteReview(ctx, jobId, this.opts().price as string);
       });
     });
 }

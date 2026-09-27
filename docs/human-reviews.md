@@ -1,0 +1,13 @@
+# Human second opinions (draft)
+
+Jev can select a delayed human critique when a client advertises `rentahuman-review-v1`. The existing `request` tool prepares exact `review` material (`title`, `material`, `expertise`) locally and returns a `jobId`. `request({jobId})` or `tenjin jobs status <jobId>` reads that same draft after restart without routing or purchasing again.
+
+This draft currently supports routing, private draft storage, automatic account onboarding, and authenticated price previews. **It cannot hire a reviewer or return a human critique yet.** Live bounty creation, applicant selection, submission review/signing, release, and cancellation remain unfinished until the provider's all-in spending bound and authenticated lifecycle are verified. A preview price alone does not authorize a future debit.
+
+`tenjin jobs connect` displays the first-account funding requirement. After explicit approval, `tenjin jobs connect --yes` uses the existing x402 wallet to fund up to $10 of RentAHuman credit. This does not purchase a review. Normal manual-payment policy still applies, including the explicit maximum and creator allowlist; automatic routing limits are not changed. An unresolved signed attempt prevents another signup. `--country` accepts the user's actual two-letter country when needed; Tenjin never infers one from a timezone.
+
+Tenjin stores the returned service credential internally, bound to the wallet. Users never obtain, paste, export, or configure a provider API key. Provider files are private (0600 files/0700 new directories where supported); they are not encrypted and those modes do not establish equivalent Windows isolation. Preserve them for recovery. Lost credentials or ambiguous payments require connection recovery, not another automatic purchase. Signed funding attempts are bearer credentials and must not be shared.
+
+After inspecting a draft, `tenjin jobs quote <jobId> --price <worker-USD> --share` authorizes sending its exact material to RentAHuman for an authenticated dry-run. The resulting all-in total comes from the server; Tenjin never substitutes an estimated fee. This command does not post or fund a bounty. Material may become public if later submitted; use content approved for sharing. This draft does not upload screenshots, deploy previews, or access private design URLs.
+
+For Codex, use the existing Codex integration. Keep its installation changes separate from this feature; a local integration build can combine both branches for testing. HTTP capabilities keep their existing wire shapes. Older clients do not receive the new executor. Human offers never replace a native web call.

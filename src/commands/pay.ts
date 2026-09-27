@@ -92,7 +92,7 @@ export interface PayArgs {
   /** Acknowledge direct-payment registry warnings for this invocation only. */
   ignoreWarnings?: boolean;
   /** Internal router entrypoint; missing terms must never become direct pay. */
-  execution?: 'router';
+  execution?: 'router' | 'manual';
   /** Print the full body to the terminal instead of the capped preview. */
   printBody?: boolean;
   /** Advertised terms that replace the registry lookup on this call. */
@@ -120,6 +120,12 @@ export interface PayArgs {
 }
 
 export interface PayDeps {
+  /** Internal caller persists signed authorization before any transmission. Never exposed as a CLI option. */
+  beforePayment?: (payment: {
+    headers: Record<string, string>;
+    amountAtomic: string;
+    url: string;
+  }) => Promise<void>;
   fetchImpl?: typeof fetch;
   readBalance?: typeof readUsdcBalance;
   provider?: WalletProvider;
@@ -166,8 +172,9 @@ async function executePay(
   deps: PayDeps,
   warnings: RegistryWarning[],
 ): Promise<CommandResult> {
-  const router = args.execution === 'router' || args.terms !== undefined;
-  if (router) {
+  const router =
+    args.execution === 'router' || (args.execution !== 'manual' && args.terms !== undefined);
+  if (router || args.terms !== undefined) {
     const terms = args.terms;
     if (
       args.ignoreWarnings === true ||
@@ -456,6 +463,11 @@ async function executePay(
   // hostile registry-listed seller answer 402 after each signature while
   // sessionBudget counted zero of the authorizations it was stacking up.
   // (httpRequest never throws on transport failure; it returns ok:false.)
+  await deps.beforePayment?.({
+    headers: payment.headers,
+    amountAtomic: payment.amountAtomic.toString(),
+    url,
+  });
   const paid = await httpRequest(url, {
     ...fetchOpts,
     timeoutMs: paidLegTimeoutMs(effectiveRequirement, ctx.flags.timeout),

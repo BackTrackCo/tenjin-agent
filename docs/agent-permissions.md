@@ -137,3 +137,5 @@ A subagent is only redirected or offered a lookup when it is known to have `mcp_
 ## Not the same as `allowlistCreators`
 
 `allowlistCreators` is a spend-policy key that restricts which hosts may be paid at all. The permission rule on this page is a harness setting about which tool may run. They are separate gates and neither substitutes for the other.
+
+The existing request tool also prepares human-review drafts and reads saved job handles. These actions grant no authority to fund an account or hire. See [human-review commands](human-reviews.md) for explicit funding and sharing actions; ordinary automatic-spend refusals are unchanged.

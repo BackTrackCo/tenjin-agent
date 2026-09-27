@@ -3,6 +3,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import pkg from '../../package.json';
+import { ReviewMaterialSchema } from './review/jobs';
 import { dataDir as defaultDataDir } from '../lib/paths';
 import { resolveContextSettings } from '../lib/settings';
 import { resolveSpendAuthorizer, resolveWalletProvider } from '../lib/wallet';
@@ -55,7 +56,7 @@ const INSTRUCTIONS =
   'company/person/email lookups). When one fits, a hook line names the service and how ' +
   'to call it: at the start of a turn, in place of a WebSearch or WebFetch call, after ' +
   'one comes back short, or in a delegated task. ' +
-  `${SCOPE_RULE} Call it alone and wait for its result. Deciding what to ` +
+  `${SCOPE_RULE} Human second opinions prepare a local review draft with explicit material and a jobId; they require a separate quote and approval before hiring. Read pending jobs with jobId. Call it alone and wait for its result. Deciding what to ` +
   'route is free; a wallet on THIS machine pays the provider under the local spend ' +
   'policy, and an amount over the cap or an exhausted budget returns `needs_approval` ' +
   'with the exact command the user runs, with nothing paid. Provider content is ' +
@@ -110,10 +111,19 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
       inputSchema: {
         query: z
           .string()
+          .optional()
           .describe(
             `${SCOPE_RULE} Carry the inputs and constraints your task gives for that lookup, ` +
-              'and nothing else. ALWAYS send this, with or without an id.',
+              'and nothing else. Required for a new request; omit when reading an existing jobId.',
           ),
+        jobId: z
+          .string()
+          .uuid()
+          .optional()
+          .describe('Read an existing human-review job locally; do not route or hire again.'),
+        review: ReviewMaterialSchema.optional().describe(
+          'Exact material for a human-review draft. Include only content the user may approve for public sharing. No payment or posting occurs while drafting.',
+        ),
         id: z
           .string()
           .optional()
@@ -124,7 +134,7 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
           ),
       },
     },
-    async ({ query, id }): Promise<CallToolResult> => {
+    async ({ query, id, jobId, review }): Promise<CallToolResult> => {
       // Resolved per call, from settings read now: the refusal this tool returns
       // names `tenjin config set sessionBudget`, and a policy frozen at the
       // first call would leave that command with no effect until the harness
@@ -133,7 +143,12 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
       const authorizer =
         opts.handlerDeps?.authorizer ?? resolveSpendAuthorizer(ctx, settings.policy);
       const result = await runRequestTool(
-        { query, ...(id !== undefined ? { id } : {}) },
+        {
+          query,
+          ...(id !== undefined ? { id } : {}),
+          ...(jobId !== undefined ? { jobId } : {}),
+          ...(review !== undefined ? { review } : {}),
+        },
         {
           ctx,
           // THE WALLET IS THE PAYING LEG'S TO OPEN, not this handler's. Routing
