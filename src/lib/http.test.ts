@@ -5,9 +5,8 @@ import {
   httpRequest,
   shelfBypassHeaders,
   setTenjinIdentity,
-  INSTALL_HEADER,
+  INSTALL_ID_HEADER,
   SHELF_BYPASS_HEADER,
-  WALLET_HEADER,
 } from './http';
 import { SIWX_HEADER } from './siwx';
 import { CliError, exitCodeFor } from './errors';
@@ -984,15 +983,14 @@ describe('a 402 challenge too large for this process to read', () => {
   });
 });
 
-describe('the install and wallet telemetry headers', () => {
+describe('the install id header', () => {
   const INSTALL = '6f1c2b1e-8d4a-4c3e-9a55-0d2f3b4c5d6e';
-  const WALLET = '0x1111111111111111111111111111111111111111';
   const TENJIN = 'https://tenjin.test';
 
   afterEach(() => setTenjinIdentity(undefined));
 
-  function useIdentity(values: () => Promise<{ install?: string; wallet?: string }>): void {
-    setTenjinIdentity({ origins: async () => [TENJIN], values });
+  function useIdentity(installId: () => Promise<string | undefined>): void {
+    setTenjinIdentity({ origins: async () => [TENJIN], installId });
   }
 
   interface Seen {
@@ -1030,7 +1028,7 @@ describe('the install and wallet telemetry headers', () => {
     new Response('', { status, headers: { location } });
 
   it('rides Tenjin-origin requests on both transports, and no provider request', async () => {
-    useIdentity(async () => ({ install: INSTALL, wallet: WALLET }));
+    useIdentity(async () => INSTALL);
     const { fetchImpl, seen } = router({
       [`${TENJIN}/api/x402-router`]: ok,
       'https://api.exa.ai/search': ok,
@@ -1046,18 +1044,18 @@ describe('the install and wallet telemetry headers', () => {
     await httpRequest('https://api.exa.ai/search', { method: 'POST', timeoutMs: 1000, fetchImpl });
     await fetchJson('https://api.exa.ai/search', { timeoutMs: 1000, fetchImpl });
 
-    expect(seen.map((s) => [s.headers[INSTALL_HEADER], s.headers[WALLET_HEADER]])).toEqual([
-      [INSTALL, WALLET],
-      [INSTALL, WALLET],
-      [undefined, undefined],
-      [undefined, undefined],
+    expect(seen.map((s) => s.headers[INSTALL_ID_HEADER])).toEqual([
+      INSTALL,
+      INSTALL,
+      undefined,
+      undefined,
     ]);
     // A provider request keeps `fetch`'s own transport, untouched.
     expect(seen[2]?.redirect).toBeUndefined();
   });
 
   it('is not sent to a sibling host or another port of the Tenjin host', async () => {
-    useIdentity(async () => ({ install: INSTALL }));
+    useIdentity(async () => INSTALL);
     const urls = [
       'https://evil.tenjin.test/x',
       'https://tenjin.test:8443/x',
@@ -1066,30 +1064,29 @@ describe('the install and wallet telemetry headers', () => {
     const { fetchImpl, seen } = router(Object.fromEntries(urls.map((url) => [url, ok])));
     for (const url of urls) await httpRequest(url, { timeoutMs: 1000, fetchImpl });
     expect(seen).toHaveLength(3);
-    expect(seen.every((s) => s.headers[INSTALL_HEADER] === undefined)).toBe(true);
+    expect(seen.every((s) => s.headers[INSTALL_ID_HEADER] === undefined)).toBe(true);
   });
 
-  it('omits the wallet header when there is no wallet, and sends the install id alone', async () => {
-    useIdentity(async () => ({ install: INSTALL }));
+  it('sends no header when there is no install id', async () => {
+    useIdentity(async () => undefined);
     const { fetchImpl, seen } = router({ [`${TENJIN}/api/search`]: ok });
     await httpRequest(`${TENJIN}/api/search`, { timeoutMs: 1000, fetchImpl });
-    expect(seen[0]?.headers[INSTALL_HEADER]).toBe(INSTALL);
-    expect(seen[0]?.headers).not.toHaveProperty(WALLET_HEADER);
+    expect(seen[0]?.headers).not.toHaveProperty(INSTALL_ID_HEADER);
   });
 
-  it('sends the request without them when reading the values throws', async () => {
+  it('sends the request without it when reading the id throws', async () => {
     useIdentity(async () => {
       throw new Error('EACCES');
     });
     const { fetchImpl, seen } = router({ [`${TENJIN}/api/search`]: ok });
     const res = await httpRequest(`${TENJIN}/api/search`, { timeoutMs: 1000, fetchImpl });
     expect(res).toMatchObject({ ok: true, status: 200 });
-    expect(seen[0]?.headers).not.toHaveProperty(INSTALL_HEADER);
+    expect(seen[0]?.headers).not.toHaveProperty(INSTALL_ID_HEADER);
     expect(seen[0]?.redirect).toBeUndefined();
   });
 
   it('leaves a pinned request failing closed on any redirect, as before', async () => {
-    useIdentity(async () => ({ install: INSTALL }));
+    useIdentity(async () => INSTALL);
     const { fetchImpl, seen } = router({
       [`${TENJIN}/api/x402-router`]: hop(302, 'https://elsewhere.example/'),
     });
@@ -1103,14 +1100,14 @@ describe('the install and wallet telemetry headers', () => {
     expect(res).toMatchObject({ ok: false, kind: 'blocked-redirect' });
     expect(seen).toHaveLength(1);
     expect(seen[0]?.redirect).toBe('manual');
-    expect(seen[0]?.headers[INSTALL_HEADER]).toBe(INSTALL);
+    expect(seen[0]?.headers[INSTALL_ID_HEADER]).toBe(INSTALL);
   });
 
   it("leaves an unpinned request on fetch's own redirect handling", async () => {
-    useIdentity(async () => ({ install: INSTALL }));
+    useIdentity(async () => INSTALL);
     const { fetchImpl, seen } = router({ [`${TENJIN}/api/search`]: ok });
     await httpRequest(`${TENJIN}/api/search`, { timeoutMs: 1000, fetchImpl });
-    expect(seen[0]?.headers[INSTALL_HEADER]).toBe(INSTALL);
+    expect(seen[0]?.headers[INSTALL_ID_HEADER]).toBe(INSTALL);
     expect(seen[0]?.redirect).toBeUndefined();
   });
 });

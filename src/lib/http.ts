@@ -97,18 +97,16 @@ function carriesBypassKey(headers: Record<string, string>): boolean {
 }
 
 /** The anonymous install id: a random UUID minted once per data dir. */
-export const INSTALL_HEADER = 'x-tenjin-install';
-/** The local wallet's PUBLIC address, read from the record's cleartext field. */
-export const WALLET_HEADER = 'x-tenjin-wallet';
+export const INSTALL_ID_HEADER = 'tenjin-install-id';
 
 /**
  * Who is using the router, for Tenjin's own request telemetry: an anonymous
- * install id and, when a wallet exists, its public address.
+ * install id, random and tied to nothing but the data dir.
  *
  * Same shape as {@link ShelfBypass}, for the same reason: the transport decides
- * where these go, from the REQUEST URL, so a call site cannot send them to a
+ * where it goes, from the REQUEST URL, so a call site cannot send it to a
  * provider by believing it is talking to Tenjin. `pay` runs over this transport
- * to third-party sellers, and none of them gets either header.
+ * to third-party sellers, and none of them gets the header.
  *
  * Process-wide rather than a per-call option because it is not a per-call
  * decision: every request to Tenjin carries it, and threading it through forty
@@ -118,14 +116,14 @@ export const WALLET_HEADER = 'x-tenjin-wallet';
  *
  * Redirects are left to the request's usual transport: an unpinned request
  * follows them as `fetch` does, headers and all. Tenjin's origins redirect only
- * to Tenjin's own hosts, and neither value is a credential, so these are not
- * worth the redirect pin the bypass key and signed headers get.
+ * to Tenjin's own hosts, and the id is not a credential, so it is not worth the
+ * redirect pin the bypass key and signed headers get.
  */
 export interface TenjinIdentity {
   /** The origins that are Tenjin's own for this process. */
   origins: () => Promise<readonly string[]>;
-  /** The header values; each absent when it could not be read. */
-  values: () => Promise<{ install?: string; wallet?: string }>;
+  /** The install id; absent when it could not be read or created. */
+  installId: () => Promise<string | undefined>;
 }
 
 let tenjinIdentity: TenjinIdentity | undefined;
@@ -143,11 +141,8 @@ export async function tenjinIdentityHeaders(url: string): Promise<Record<string,
   if (identity === undefined) return {};
   try {
     if (!(await identity.origins()).includes(new URL(url).origin)) return {};
-    const { install, wallet } = await identity.values();
-    return {
-      ...(install !== undefined ? { [INSTALL_HEADER]: install } : {}),
-      ...(wallet !== undefined ? { [WALLET_HEADER]: wallet } : {}),
-    };
+    const id = await identity.installId();
+    return id !== undefined ? { [INSTALL_ID_HEADER]: id } : {};
   } catch {
     return {};
   }

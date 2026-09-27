@@ -9,12 +9,12 @@ import { knownDeploymentOrigins } from './production-origin';
 import { isTeamModeConfig } from './settings';
 
 /**
- * The two telemetry values the transport attaches to Tenjin-bound requests (see
+ * The install id the transport attaches to Tenjin-bound requests (see
  * `TenjinIdentity` in lib/http), and the rule for which origins are Tenjin's.
  *
  * Nothing here may fail a request: every read that goes wrong is an absent
- * header. There is no opt-out for alpha; the values are an anonymous random id
- * and an address that is already public on chain, and neither is a credential.
+ * header. There is no opt-out for alpha; the id is random, anonymous, and not a
+ * credential.
  */
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -51,20 +51,6 @@ export async function readOrCreateInstallId(dir: string): Promise<string | undef
   }
 }
 
-/**
- * The wallet's public address, from the record's cleartext `address` field.
- * Never decrypts, never touches a keychain, never prompts. Loaded lazily so a
- * command that never talks to Tenjin does not parse the wallet module.
- */
-export async function readWalletAddress(dir: string): Promise<string | undefined> {
-  try {
-    const { readWalletRecord } = await import('./wallet/store');
-    return (await readWalletRecord(dir))?.address;
-  } catch {
-    return undefined;
-  }
-}
-
 function tryOrigin(url: string): string | undefined {
   try {
     return new URL(url).origin;
@@ -74,33 +60,24 @@ function tryOrigin(url: string): string | undefined {
 }
 
 /**
- * The origins that get the headers: Tenjin's own deployments, the public
- * marketplace, and the base URL this run is pointed at, overrides included (a
- * local dev server is Tenjin too).
+ * The origins that get the header: Tenjin's own deployments and the base URL
+ * this run is pointed at, overrides included (a local dev server is Tenjin too).
+ * Not `publicShelfUrl`: its default is already one of Tenjin's deployments, and
+ * a custom one may be a host Tenjin does not run.
  *
  * NOT a team shelf. In team mode `baseUrl` is the team's own deployment, which
  * Tenjin does not operate, so on a team machine the base URL is left out unless
  * it is one of Tenjin's own origins anyway. `isTeamModeConfig` reads the file,
  * so a `--base-url` on one run cannot switch that exclusion off.
  */
-export function tenjinOrigins(s: {
-  baseUrl: string;
-  publicShelfUrl: string;
-  teamMode: boolean;
-}): string[] {
+export function tenjinOrigins(s: { baseUrl: string; teamMode: boolean }): string[] {
   const origins = new Set(knownDeploymentOrigins());
-  const publicOrigin = tryOrigin(s.publicShelfUrl);
-  if (publicOrigin !== undefined) origins.add(publicOrigin);
   const baseOrigin = tryOrigin(s.baseUrl);
   if (baseOrigin !== undefined && !s.teamMode) origins.add(baseOrigin);
   return [...origins];
 }
 
-/**
- * An identity for one data dir. The install id is read once per process; the
- * wallet address is re-read per request, so a wallet created mid-session (the
- * MCP server, the daemon) is picked up without a restart.
- */
+/** An identity for one data dir. The install id is read once per process. */
 export function identityFor(
   dir: string,
   origins: () => Promise<readonly string[]>,
@@ -108,14 +85,7 @@ export function identityFor(
   let install: Promise<string | undefined> | undefined;
   return {
     origins,
-    values: async () => {
-      install ??= readOrCreateInstallId(dir);
-      const [id, wallet] = await Promise.all([install, readWalletAddress(dir)]);
-      return {
-        ...(id !== undefined ? { install: id } : {}),
-        ...(wallet !== undefined ? { wallet } : {}),
-      };
-    },
+    installId: () => (install ??= readOrCreateInstallId(dir)),
   };
 }
 
@@ -130,7 +100,7 @@ export function noteBaseUrlFlag(flag: string | undefined): void {
 }
 
 /**
- * Turn the headers on for this CLI process. Called from the entry only, never
+ * Turn the header on for this CLI process. Called from the entry only, never
  * from `main`, so in-process tests of the command tree never mint an id.
  */
 export function enableCliIdentity(dir: string, env: NodeJS.ProcessEnv = process.env): void {
@@ -142,7 +112,6 @@ export function enableCliIdentity(dir: string, env: NodeJS.ProcessEnv = process.
         const s = resolveSettings({ config, flags: { baseUrl: baseUrlFlag }, env });
         return tenjinOrigins({
           baseUrl: s.baseUrl.value,
-          publicShelfUrl: s.publicShelfUrl.value,
           teamMode: isTeamModeConfig(config),
         });
       })();
@@ -152,7 +121,7 @@ export function enableCliIdentity(dir: string, env: NodeJS.ProcessEnv = process.
 }
 
 /**
- * Turn the headers on for the loop daemon. No flag or env layer, like the rest
+ * Turn the header on for the loop daemon. No flag or env layer, like the rest
  * of the daemon's config, and re-read per request because the daemon reloads
  * config.json when it changes.
  */
@@ -165,7 +134,6 @@ export function enableDaemonIdentity(
       const c = config();
       return tenjinOrigins({
         baseUrl: c.baseUrl,
-        publicShelfUrl: c.publicShelfUrl,
         teamMode: isTeamModeConfig(c),
       });
     }),
