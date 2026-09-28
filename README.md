@@ -75,7 +75,7 @@ Each answer names the provider and the price. Your agent keeps its own tools, an
 
 ## What it can do
 
-The router picks from a catalog we curate and maintain. Routing is free: you pay the provider's price and nothing else.
+The router picks from a catalog we curate and maintain first. When nothing in it fits but a pay-per-call service listed on Coinbase's x402 Bazaar could do the step, such as generating a sound effect, the router may point your agent at that service, and your agent decides whether to use it or to ask you first. Routing is free: you pay the provider's price and nothing else.
 
 | Tool                                                             | What your agent gets                                        | Price per call |
 | ---------------------------------------------------------------- | ----------------------------------------------------------- | -------------- |
@@ -100,7 +100,7 @@ flowchart LR
     B -- "nothing better" --> E["Agent carries on"]
 ```
 
-The Tenjin router hooks into Claude Code at your prompt, before each web search or page fetch, and when your agent hands work to a subagent. At each point it asks Jev, a decision model from [TypeSafe](https://typesafe.ai), whether a tool in the catalog fits. Jev can only choose from that fixed list, so it never writes a call or an instruction for your agent.
+The Tenjin router hooks into Claude Code at your prompt, before each web search or page fetch, when your agent hands work to a subagent, and around a question your agent asks you. At each point it asks Jev, a decision model from [TypeSafe](https://typesafe.ai), whether a tool in the catalog fits. When none does, Jev may pick one service from a short list of Bazaar listings matching the step, or none. Either way Jev only chooses from a list, so it never writes a call or an instruction for your agent; a Bazaar listing's description is the seller's own, and your agent judges it.
 
 When one fits, your agent sees a one-line suggestion with the tool and its price, and calls it through Tenjin's `x402` MCP server. Tenjin pays the provider from your wallet, within your limits, and hands back the result. Your status line shows the call as it happens:
 
