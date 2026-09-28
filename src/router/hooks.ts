@@ -440,10 +440,11 @@ function gateDeadline(deps: HookDeps): number {
  * does not load, and the file beside it is not the wallet that pays.
  */
 async function withheldBecause(
-  decision: { providerPriceAtomic: string; endpoint: string },
+  decision: ExecuteDecision,
   deps: HookDeps,
   deadline: number,
 ): Promise<string | null> {
+  if ('pricing' in decision) return null;
   let rpcUrl: string;
   try {
     const settings = await resolveContextSettings(hookContext(deps));
@@ -601,7 +602,7 @@ type ExecuteDecision = Extract<HookDecision, { action: 'execute' }>;
 
 /** A free offer: nothing to pay, so nothing for the spend policy or the wallet. */
 function isFree(offer: ExecuteDecision): boolean {
-  return offer.providerPriceAtomic === '0';
+  return 'providerPriceAtomic' in offer && offer.providerPriceAtomic === '0';
 }
 
 /**
@@ -686,6 +687,10 @@ async function routeNativeCall(
       offer: null,
       outcome: { response: null, ...(outcome !== null ? { action: outcome.action } : {}) },
     };
+  }
+  if ('pricing' in outcome) {
+    await footer.close(outcome, { withheld: 'human review requires a separate draft' });
+    return { offer: null, outcome: { response: null } };
   }
   if (opts.passFree === true && isFree(outcome)) {
     await footer.close(outcome, { withheld: 'free lookup, call runs' });
@@ -859,7 +864,7 @@ async function offerOnShortfall(
   if (routed.offer === null) return { ...routed.outcome, nativeOutcome };
   // The free docs lookup for this very search just came back empty: offering
   // it again would send the agent to the same miss. Only a paid offer stands.
-  if (docsJustMissed && routed.offer.providerPriceAtomic === '0')
+  if (docsJustMissed && isFree(routed.offer))
     return { response: null, nativeOutcome, action: 'execute' };
   return {
     response: {
