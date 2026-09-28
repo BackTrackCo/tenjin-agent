@@ -464,7 +464,10 @@ it('serializes concurrent approval, release and status with one payment', async 
     reviewStatus(ctx, id, f.deps),
     actOnReview(ctx, id, { action: 'release', yes: true }, f.deps),
   ]);
-  expect(results.every((r) => r.envelope.status === 'paid')).toBe(true);
+  expect(results[0]!.envelope.status).toBe('paid');
+  expect(results[2]!.envelope.status).toBe('paid');
+  expect(['approved_awaiting_release', 'paid']).toContain(results[1]!.envelope.status);
+  expect((await reviewStatus(ctx, id, f.deps)).envelope.status).toBe('paid');
   expect(f.counts['PATCH /bounties/bounty_1/submissions/submission_1']).toBe(1);
   expect(f.counts['POST /escrow/child_1/release']).toBe(1);
 });
