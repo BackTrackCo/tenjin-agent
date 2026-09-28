@@ -798,11 +798,14 @@ describe('no user-facing CLI string coaches --base-url', () => {
     expect(files).toContain('commands/doctor.ts');
   });
 
-  it('names the flag in no executable line outside the flag definition and the caveat', () => {
+  it('names the flag only in its definition, caveat, or fixed Jevgrep auth argument', () => {
     const offenders = sourceFiles().flatMap((file) =>
       codeLines(file)
         .map((line, i) => ({ file, line: line.trim(), n: i + 1 }))
-        .filter((l) => l.line.includes('--base-url')),
+        .filter((l) => l.line.includes('--base-url'))
+        // Jevgrep's own auth CLI takes this fixed argument for our loopback proxy.
+        // Permit only the argument literal, not guidance strings in the same file.
+        .filter((l) => !(file === 'router/jevgrep/runner.ts' && l.line === "'--base-url',")),
     );
     expect(offenders).toEqual([]);
   });
