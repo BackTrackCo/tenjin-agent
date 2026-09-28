@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-09-28",
+  "scope": "Explicitly approved public tenjin-agent committed-source checkout; installed CLI and actual prompt-hook to stdio-MCP request path",
+  "platform": "macOS arm64, Node 24.18.0",
+  "serverCommit": "e9975edacbf3fe5196582a6bdfc4dde0a442024d",
+  "backend": "Loopback Next.js from server branch with an isolated local Postgres database",
+  "upstreamCommit": "aae1f7ee91f6cfe408e1cca5c50bd4c9ddc81164",
+  "upstreamTarballSha256": "f3784927f4b9f2f2adb302a9108fbbe93d05cc4de86d9461ae43b293e21e0c27",
+  "query": "Where does this repository stop duplicate or retried requests from paying twice?",
+  "snapshot": {
+    "files": 414,
+    "bytesLatest": 4774305,
+    "omitted": 154
+  },
+  "limits": {
+    "searchAtomic": "50000",
+    "dailyAtomic": "1000000",
+    "concurrency": 2
+  },
+  "trials": [
+    {
+      "sourceCommit": "751a78ca2fae2372f2a51ad17b4e6db307c9d2ba",
+      "hookMs": 1200,
+      "requestMs": 24266,
+      "status": "partial",
+      "stopReason": "provider",
+      "evaluationsAttempted": 10,
+      "validatedResponses": 8,
+      "signedExposureAtomic": "8000",
+      "remainingReservedAtomic": "0"
+    },
+    {
+      "sourceCommit": "dbbf1f33efd770bfc355ff1cb929f34abd1c2613",
+      "hookMs": 1064,
+      "requestMs": 18466,
+      "status": "partial",
+      "stopReason": "provider",
+      "evaluationsAttempted": 6,
+      "validatedResponses": 5,
+      "signedExposureAtomic": "5000",
+      "remainingReservedAtomic": "0"
+    },
+    {
+      "sourceCommit": "dbbf1f33efd770bfc355ff1cb929f34abd1c2613",
+      "hookMs": 698,
+      "requestMs": 51531,
+      "status": "partial",
+      "stopReason": "budget",
+      "evaluationsAttempted": 51,
+      "validatedResponses": 50,
+      "signedExposureAtomic": "50000",
+      "remainingReservedAtomic": "0"
+    }
+  ],
+  "diagnosis": [
+    "The first trial discarded underlying failure codes; its initial cause cannot be recovered.",
+    "The second trial recorded REFUSED/payment/balance_unavailable before signing.",
+    "Terminal proxy stops previously returned HTTP 403, causing misleading upstream authentication reports. Commit dbbf1f33 changes terminal stops to 409 and retains only sanitized failure diagnostics.",
+    "After configuring the repository-documented PublicNode Base RPC, the third trial validated 50 evaluations, then stopped at the unchanged $0.05 budget."
+  ],
+  "nativeControls": {
+    "exactSymbol": "no injection",
+    "noSourceUpload": "no injection",
+    "nativeGrep": "no intervention"
+  },
+  "totalSignedExposureAtomic": "63000",
+  "confirmedSettlementAtomic": "0",
+  "remainingReservedAtomic": "0",
+  "conclusion": "Routing, custom auth, local execution and bounded payment work. The repository-wide query did not complete within $0.05. Its 31 file leads are partial and include broad or incidental matches, so this does not establish retrieval quality or superiority over native tools. Narrower search scope and completed-search quality remain release gates. Signed exposure is retained pending settlement reconciliation."
+}

@@ -85,3 +85,22 @@ Node 24.21.0 in an isolated Linux arm64 environment. Actual offline `npx` auth, 
 TypeScript/Python searches, token handling, repeated 402 errors and SIGINT cleanup passed
 against a synthetic provider. This is packaging and transport evidence, not a live paid
 retrieval benchmark or permission to execute an unmerged artifact on another host.
+
+## Live local pilot
+
+The [sanitized live record](./jevgrep-live-pilot.json) covers an explicitly approved public
+`tenjin-agent` checkout through the actual installed prompt hook and stdio MCP tool, with a local
+branch backend and isolated local database. The third trial offered retrieval in 698 ms, validated
+50 paid evaluations, and stopped after 51.531 seconds at the unchanged $0.05 search cap. The
+414-file repository query returned partial file leads, not a completed or quality-qualified answer.
+
+An earlier trial exposed an intermittent balance-read failure on the default Base RPC. The local
+pilot switched the existing `rpcUrl` setting to the repository-documented PublicNode Base endpoint;
+no balance check or spending limit was bypassed. Terminal proxy failures now return 409 instead of
+misleading authentication errors, and the private journal retains only allowlisted diagnostic codes,
+HTTP status and execution phase. All three trials retained $0.063 total signed exposure and zero
+outstanding reservations. Chain settlement remains unreconciled.
+
+Exact-symbol, no-upload and native Grep controls stayed native. Before treating this pilot as useful
+for repository-wide discovery, narrow its search scope and demonstrate completed retrieval within
+the approved budget. Do not interpret partial leads as proof that no other matches exist.
