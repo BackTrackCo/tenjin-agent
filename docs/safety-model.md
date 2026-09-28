@@ -69,8 +69,6 @@ network_access = true
 
 That setting enables the network path; it does not grant spending by itself.
 
-Human second opinions use internally managed RentAHuman credentials in private local storage. See [human review custody and recovery](human-reviews.md). Draft preparation is local; sharing, funding, hiring, evidence approval and release require explicit actions. Status never spends; durable attempts prevent silent duplicate mutations.
-
 ## Local runtime and durable runs
 
 Local executors retain reviewed npm artifacts and package caches while removing per-run credentials and working files. Runtime preparation does not grant execution, source sharing or spending authority. Durable run reservations and signed uncertainty survive budget rollover; see [local executors](./local-executors.md) for cache boundaries and wallet upgrade requirements.

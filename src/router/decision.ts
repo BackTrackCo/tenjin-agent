@@ -108,33 +108,7 @@ const CapabilityFields = {
   providerPriceAtomic: z.string().regex(/^\d+$/),
 };
 
-const ReviewFields = {
-  capabilityId: z.literal('rentahuman-review-v1'),
-  category: z.literal('human second opinion'),
-  provider: z.literal('RentAHuman'),
-  capabilityDescription: z.string().min(1).max(500),
-  pricing: z.literal('quote_required'),
-};
-const ReviewContract = z.strictObject({
-  executor: z.literal('rentahuman-review-v1'),
-  intent: z.string().min(1).max(8_000),
-});
-const HookDecisionSchema = z.union([
-  z
-    .strictObject({
-      action: z.literal('execute'),
-      ...ReviewFields,
-      id: IdSchema,
-      endpoint: z.literal('https://rentahuman.ai'),
-      usage: z.string().min(1).max(1_000),
-      hint: z.string().min(1).max(1_000),
-    })
-    .refine(
-      (value) =>
-        !/[\p{Cc}\p{Cf}]/u.test(value.hint) &&
-        value.hint.includes('request({') &&
-        value.hint.includes(value.id),
-    ),
+const HookDecisionSchema = z.discriminatedUnion('action', [
   z
     .strictObject({
       action: z.literal('execute'),
@@ -177,8 +151,7 @@ const HookDecisionSchema = z.union([
   RefusedSchema.extend({ action: z.literal('needs_input') }),
 ]);
 
-const ToolDecisionSchema = z.union([
-  z.strictObject({ action: z.literal('execute'), ...ReviewFields, contract: ReviewContract }),
+const ToolDecisionSchema = z.discriminatedUnion('action', [
   z.strictObject({
     action: z.literal('execute'),
     ...CapabilityFields,
@@ -306,7 +279,6 @@ export async function requestDecision(
   const url = new URL(ROUTER_PATH, deps.baseUrl).toString();
   const options: HttpRequestOptions = {
     method: 'POST',
-    headers: { 'Tenjin-Router-Executors': 'rentahuman-review-v1' },
     timeoutMs: deps.timeoutMs ?? deps.ctx.flags.timeout,
     blockRedirects: true,
     jsonBody:
