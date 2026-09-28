@@ -68,14 +68,14 @@ describe('bounded local evaluation proxy', () => {
       { method: 'PUT' },
     ];
     for (const options of attempts) {
-      expect((await send(p, body, options)).status).not.toBe(200);
+      expect((await send(p, body, options)).status).toBe(options.headers ? 403 : 404);
     }
     expect(evaluate).not.toHaveBeenCalled();
   });
   it('enforces per-request bytes and exact answer IDs', async () => {
     const evaluate = vi.fn(async () => ({ answers: {} }));
     const p = await proxy(evaluate);
-    expect((await send(p)).status).toBe(502);
+    expect((await send(p)).status).toBe(409);
     expect(
       (await send(await proxy(), { ...body, state: 'x'.repeat(JEV_LIMITS.requestBytes) })).status,
     ).toBe(413);
@@ -89,10 +89,14 @@ describe('bounded local evaluation proxy', () => {
       });
       const p = await proxy(evaluate);
       const first = await send(p);
-      expect(first.status).toBe(502);
+      expect(first.status).toBe(409);
       expect(first.body).not.toContain('secret');
+      expect(first.body).toContain(reason);
       expect(p.summary().stopReason).toBe(reason);
-      expect((await send(p)).status).toBe(403);
+      expect((await send(p)).status).toBe(409);
+      expect((await send(p, body, { headers: { authorization: 'Bearer wrong' } })).status).toBe(
+        403,
+      );
       expect(evaluate).toHaveBeenCalledTimes(1);
     },
   );
@@ -117,7 +121,8 @@ describe('bounded local evaluation proxy', () => {
     const evaluate = vi.fn(async () => answer);
     const p = await proxy(evaluate);
     for (let i = 0; i < JEV_LIMITS.requests; i++) expect((await send(p)).status).toBe(200);
-    expect((await send(p)).status).toBe(403);
+    expect((await send(p)).status).toBe(409);
+    expect((await send(p)).body).toContain('request-limit');
     expect(evaluate).toHaveBeenCalledTimes(JEV_LIMITS.requests);
     expect(p.summary().stopReason).toBe('request-limit');
   });
@@ -127,8 +132,20 @@ describe('bounded local evaluation proxy', () => {
     const large = { ...body, state: 'x'.repeat(120 * 1024) };
     for (let i = 0; i < 17; i++) expect((await send(p, large)).status).toBe(200);
     expect((await send(p, large)).status).toBe(413);
+    expect((await send(p)).status).toBe(409);
     expect(evaluate).toHaveBeenCalledTimes(17);
     expect(p.summary().stopReason).toBe('total-byte-limit');
+  });
+  it('keeps a per-request byte stop terminal without misreporting authentication', async () => {
+    const evaluate = vi.fn(async () => answer);
+    const p = await proxy(evaluate);
+    expect((await send(p, { ...body, state: 'x'.repeat(JEV_LIMITS.requestBytes) })).status).toBe(
+      413,
+    );
+    const stopped = await send(p);
+    expect(stopped.status).toBe(409);
+    expect(stopped.body).toContain('request-byte-limit');
+    expect(evaluate).not.toHaveBeenCalled();
   });
   it('cancels pending callbacks and closes its listener', async () => {
     let seenSignal: AbortSignal | undefined;

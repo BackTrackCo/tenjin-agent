@@ -29,6 +29,9 @@ export async function startJevgrepProxy(options: {
       response.writeHead(status, { 'content-type': 'application/json', connection: 'close' });
       response.end(JSON.stringify({ error }));
     };
+    // The pinned evaluator treats 401/403 as bad credentials and retries 5xx.
+    // A closed run is a terminal state conflict, never an authentication failure.
+    const stopped = () => respond(409, `Local search stopped: ${stopReason ?? 'cancelled'}`);
     const auth = Buffer.from(request.headers.authorization ?? '');
     if (
       request.headers.host !== host ||
@@ -49,11 +52,11 @@ export async function startJevgrepProxy(options: {
       return;
     }
     if (controller.signal.aborted) {
-      respond(503, 'Local search stopped');
+      stopped();
       return;
     }
     if (stopReason) {
-      respond(403, 'Local search stopped');
+      stopped();
       return;
     }
     if (active >= JEV_LIMITS.concurrency) {
@@ -62,7 +65,7 @@ export async function startJevgrepProxy(options: {
     }
     if (requests >= JEV_LIMITS.requests) {
       stopReason = 'request-limit';
-      respond(403, 'Local request limit');
+      stopped();
       return;
     }
     active++;
@@ -76,14 +79,15 @@ export async function startJevgrepProxy(options: {
           // Reserve bytes as they arrive across concurrent uploads, before dispatch.
           bytes += part.length;
           if (size > JEV_LIMITS.requestBytes || bytes > JEV_LIMITS.totalRequestBytes) {
-            stopReason = size > JEV_LIMITS.requestBytes ? 'request-byte-limit' : 'total-byte-limit';
+            stopReason ??=
+              size > JEV_LIMITS.requestBytes ? 'request-byte-limit' : 'total-byte-limit';
             respond(413, 'Local request byte limit');
             return;
           }
           chunks.push(part);
         }
         if (controller.signal.aborted) {
-          respond(503, 'Local search stopped');
+          stopped();
           return;
         }
         let body: NativeEvaluationRequest;
@@ -94,12 +98,12 @@ export async function startJevgrepProxy(options: {
           return;
         }
         if (requests >= JEV_LIMITS.requests) {
-          stopReason = 'request-limit';
-          respond(403, 'Local request limit');
+          stopReason ??= 'request-limit';
+          stopped();
           return;
         }
         if (stopReason) {
-          respond(403, 'Local search stopped');
+          stopped();
           return;
         }
         requests++;
@@ -121,7 +125,7 @@ export async function startJevgrepProxy(options: {
               ['budget', 'provider', 'payment_uncertain'].includes(paymentReason)
             ? paymentReason
             : 'provider-failure';
-        if (!response.headersSent && !response.destroyed) respond(502, 'Local evaluation failed');
+        if (!response.headersSent && !response.destroyed) stopped();
       } finally {
         active--;
       }

@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { runPay } from '../../commands/pay';
 import type { CommandContext } from '../../context';
+import { ErrorCodeSchema } from '../../schemas';
 import { writeFileAtomicExclusive } from '../../lib/atomic-json';
 import { CliError } from '../../lib/errors';
 import { withFileLock } from '../../lib/lock';
@@ -83,6 +84,27 @@ function boundedFetch(implementation: typeof fetch): typeof fetch {
       headers: response.headers,
     });
   }) as typeof fetch;
+}
+
+type FailurePhase = 'payment' | 'response_validation' | 'response_persistence';
+
+/** Only closed-vocabulary diagnostics cross the provider error boundary. */
+function failureDiagnostic(error: unknown, phase: FailurePhase, aborted: boolean) {
+  const code = error instanceof CliError ? ErrorCodeSchema.safeParse(error.code) : undefined;
+  const details =
+    error instanceof CliError && typeof error.details === 'object' && error.details !== null
+      ? (error.details as Record<string, unknown>)
+      : undefined;
+  const status = details?.status;
+  const reason = details?.reason;
+  return {
+    code: aborted ? 'ABORTED' : code?.success ? code.data : 'UNKNOWN',
+    phase,
+    ...(typeof status === 'number' && Number.isInteger(status) && status >= 100 && status <= 599
+      ? { status }
+      : {}),
+    ...(reason === 'balance_unavailable' || reason === 'insufficient_funds' ? { reason } : {}),
+  };
 }
 
 /** One run, one supplier, and no automatic replacement for an unresolved payment. */
@@ -185,6 +207,7 @@ export function createJevgrepPayer(options: JevgrepPayerOptions) {
     requests++;
     let reservationId: string | undefined;
     let paymentPrepared = false;
+    let phase: FailurePhase = 'payment';
     const scopedAuthorizer: SpendAuthorizer = {
       policyEnforcement: authorizer.policyEnforcement,
       async authorize(requested) {
@@ -239,6 +262,7 @@ export function createJevgrepPayer(options: JevgrepPayerOptions) {
           },
         },
       );
+      phase = 'response_validation';
       const data = paid.data as { bodyText?: string };
       let parsed: unknown;
       try {
@@ -247,27 +271,30 @@ export function createJevgrepPayer(options: JevgrepPayerOptions) {
         refuse('The provider did not return a valid evaluation.');
       }
       const response = validateNativeResponse(parsed, request);
+      phase = 'response_persistence';
       await saveRecord(responsePath, response);
       return response;
     } catch (error) {
       // Do not persist raw provider errors, source, headers, or signatures.
+      const diagnostic = failureDiagnostic(error, phase, combined.aborted);
       await saveRecord(failedPath, {
         version: 1,
         state: paymentPrepared ? 'uncertain' : 'untransmitted',
+        diagnostic,
       }).catch(() => undefined);
       if (combined.aborted) combined.throwIfAborted();
       if (!paymentPrepared && error instanceof CliError && error.code === 'POLICY_REFUSED')
         throw new CliError(
           'POLICY_REFUSED',
           'The search payment budget was refused; no payment was transmitted.',
-          { details: { reason: 'budget' } },
+          { details: { reason: 'budget', diagnostic } },
         );
       throw new CliError(
         'REFUSED',
         paymentPrepared
           ? 'The evaluation failed or its payment is uncertain; no replacement payment was authorized.'
           : 'The evaluation failed before payment transmission; no replacement payment was authorized.',
-        { details: { reason: paymentPrepared ? 'payment_uncertain' : 'provider' } },
+        { details: { reason: paymentPrepared ? 'payment_uncertain' : 'provider', diagnostic } },
       );
     }
   }

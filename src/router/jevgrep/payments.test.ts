@@ -3,6 +3,7 @@ import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runPay } from '../../commands/pay';
+import { CliError } from '../../lib/errors';
 import type { CommandContext } from '../../context';
 import { createLocalSpendAuthorizer } from '../../lib/wallet/spend';
 import { spendLedgerPath } from '../../lib/paths';
@@ -75,6 +76,63 @@ function success() {
   });
 }
 describe('durable Jevgrep payments', () => {
+  it.each([
+    {
+      error: new CliError('API_UNREACHABLE', 'private-message', {
+        details: { status: 429, body: 'private-body', headers: 'private-signature' },
+      }),
+      diagnostic: { code: 'API_UNREACHABLE', phase: 'payment', status: 429 },
+    },
+    {
+      error: new CliError('REFUSED', 'private-message', {
+        details: { reason: 'balance_unavailable', address: 'private-wallet', status: '429' },
+      }),
+      diagnostic: { code: 'REFUSED', phase: 'payment', reason: 'balance_unavailable' },
+    },
+    {
+      error: new CliError('REFUSED', 'private-message', {
+        details: { reason: 'private-source', status: 600, cause: 'private-signature' },
+      }),
+      diagnostic: { code: 'REFUSED', phase: 'payment' },
+    },
+    {
+      error: Object.assign(new Error('private-message'), {
+        code: 'API_UNREACHABLE',
+        details: { status: 429 },
+      }),
+      diagnostic: { code: 'UNKNOWN', phase: 'payment' },
+    },
+  ])(
+    'retains only allowlisted pre-payment diagnostics: $diagnostic',
+    async ({ error, diagnostic }) => {
+      vi.mocked(runPay).mockRejectedValue(error);
+      await expect(payer().evaluate(request)).rejects.toMatchObject({
+        details: { reason: 'provider', diagnostic },
+      });
+      const root = join(dir, 'jevgrep', 'payments');
+      const runDir = join(
+        root,
+        (await readdir(root)).find((name) => /^[a-f0-9]{64}$/.test(name))!,
+      );
+      const failed = (await readdir(runDir)).find((name) => name.endsWith('.failed.json'))!;
+      const raw = await readFile(join(runDir, failed), 'utf8');
+      expect(JSON.parse(raw)).toEqual({ version: 1, state: 'untransmitted', diagnostic });
+      expect(raw).not.toContain('private-');
+      await expect(payer().evaluate(request)).rejects.toThrow('no duplicate');
+      expect(runPay).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('distinguishes response validation from payment transport failures', async () => {
+    vi.mocked(runPay).mockResolvedValue({ data: { bodyText: 'private-invalid-response' } });
+    await expect(payer().evaluate(request)).rejects.toMatchObject({
+      details: {
+        reason: 'provider',
+        diagnostic: { code: 'REFUSED', phase: 'response_validation' },
+      },
+    });
+  });
+
   it('joins concurrent identical requests and replays a completed response after restart', async () => {
     success();
     const first = payer();
