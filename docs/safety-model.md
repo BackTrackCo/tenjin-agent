@@ -86,3 +86,7 @@ reconcile it. Do not delete monetary records or downgrade to an older payer afte
 older binaries do not understand the new durable entries. Disable the executor to roll back
 routing while retaining this build's accounting. A second CLI using the same wallet but another
 data directory has separate local accounting, as with the existing wallet policy.
+
+## Local runtime and durable runs
+
+Local executors retain reviewed npm artifacts and package caches while removing per-run credentials and working files. Runtime preparation does not grant execution, source sharing or spending authority. Durable run reservations and signed uncertainty survive budget rollover; see [local executors](./local-executors.md) for cache boundaries and wallet upgrade requirements.

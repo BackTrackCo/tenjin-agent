@@ -241,7 +241,7 @@ export function createLocalSpendAuthorizer(deps: LocalSpendAuthorizerDeps): Spen
           )
             throw new CliError(
               'POLICY_REFUSED',
-              'The durable search budget or journal capacity is exhausted.',
+              'The durable run budget or journal capacity is exhausted.',
             );
         }
         const evaluation = evaluateSpendPolicy(deps.policy, {
