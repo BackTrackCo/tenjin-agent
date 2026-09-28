@@ -1,3 +1,5 @@
+import { actOnReview, reviewStatus, type ReviewAction } from './review/lifecycle';
+import { prepareReview, type ReviewMaterial } from './review/jobs';
 import { runPay, type AdvertisedTerms, type PayDeps } from '../commands/pay';
 import { CliError } from '../lib/errors';
 import { toMoney } from '../lib/money';
@@ -33,7 +35,10 @@ import { routerSettings } from './settings';
  */
 
 export interface RequestToolArgs {
-  query: string;
+  query?: string;
+  jobId?: string;
+  jobAction?: ReviewAction;
+  review?: ReviewMaterial;
   /** The turn id from the hook's line. It names the service that line offered, and
    *  the server runs that one; it grants nothing locally, every cap still applies. */
   id?: string;
@@ -69,9 +74,25 @@ export async function runRequestTool(
   // THE SAME SWITCH THE HOOKS OBEY, read first. The tool is pre-allowed, so
   // without this it would be a second path off the machine in a repository the
   // user marked private: nothing is sent and nothing is paid.
+  if (args.jobAction !== undefined && args.jobId === undefined)
+    return fail('needs_input', 'A job action requires its saved jobId.');
+  if (args.jobId !== undefined) {
+    if (args.query !== undefined || args.id !== undefined || args.review !== undefined)
+      return fail('needs_input', 'Use only jobId and an optional jobAction to resume a review.');
+    const reviewDeps = {
+      ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}),
+      ...(deps.provider ? { provider: deps.provider } : {}),
+    };
+    if (args.jobAction !== undefined) {
+      const off = await routerOff(deps);
+      if (off !== null) return fail('needs_input', off, { nextStep: ROUTER_OFF_NEXT_STEP });
+      return actOnReview(deps.ctx, args.jobId, args.jobAction, reviewDeps);
+    }
+    return reviewStatus(deps.ctx, args.jobId, reviewDeps);
+  }
   const off = await routerOff(deps);
   if (off !== null) return fail('needs_input', off, { nextStep: ROUTER_OFF_NEXT_STEP });
-  const query = args.query.trim().slice(0, 8_000);
+  const query = (args.query ?? '').trim().slice(0, 8_000);
   if (query.length === 0) {
     return fail(
       'needs_input',
@@ -129,6 +150,11 @@ export async function runRequestTool(
     );
   }
 
+  if ('executor' in decision.contract) {
+    await footer.done('needs_input');
+    return prepareReview(deps.ctx, decision.contract.intent, args.review);
+  }
+  if (!('providerPriceAtomic' in decision)) return fail('failed', 'Invalid HTTP pricing.');
   const contract = decision.contract;
   const refusal = checkContract(contract);
   if (refusal !== null) {
