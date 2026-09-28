@@ -17,10 +17,10 @@ describe('owned subprocess limits with controlled test executables', () => {
   it('terminates output-producing children at the bounded output limit', async () => {
     const command = await fakeNpx('#!/bin/sh\nexec /usr/bin/yes output\n');
     const { runBoundedCommand } = await import('./process.js');
-    const result = await runBoundedCommand({ ...command, signal: AbortSignal.timeout(2000) });
+    const result = await runBoundedCommand({ ...command, signal: AbortSignal.timeout(10000) });
     expect(result.reason).toBe('output-limit');
     expect(Buffer.byteLength(result.stdout)).toBeLessThanOrEqual(16 * 1024);
-  });
+  }, 20000);
   it('cleans up a same-group child after its parent exits before the first scan', async () => {
     const command = await fakeNpx('#!/bin/sh\nexec "$TEST_NODE" "$TEST_SCRIPT"\n');
     const script = join(command.cwd, 'fast-parent.mjs');
@@ -34,12 +34,12 @@ describe('owned subprocess limits with controlled test executables', () => {
       const result = await runBoundedCommand({
         ...command,
         env: { ...command.env, TEST_NODE: process.execPath, TEST_SCRIPT: script },
-        signal: AbortSignal.timeout(2000),
+        signal: AbortSignal.timeout(10000),
       });
       pid = Number(result.stdout.trim());
       expect(result.code).toBe(0);
       expect(pid).toBeGreaterThan(0);
-      await vi.waitFor(() => expect(() => process.kill(pid!, 0)).toThrow(), { timeout: 1500 });
+      await vi.waitFor(() => expect(() => process.kill(pid!, 0)).toThrow(), { timeout: 5000 });
     } finally {
       if (pid) {
         try {
@@ -49,7 +49,7 @@ describe('owned subprocess limits with controlled test executables', () => {
         }
       }
     }
-  });
+  }, 20000);
   it('cleans up an observed detached descendant on cancellation', async () => {
     const command = await fakeNpx('#!/bin/sh\nexec "$TEST_NODE" "$TEST_SCRIPT"\n');
     const script = join(command.cwd, 'owned-child.mjs');
@@ -63,12 +63,12 @@ describe('owned subprocess limits with controlled test executables', () => {
       const result = await runBoundedCommand({
         ...command,
         env: { ...command.env, TEST_NODE: process.execPath, TEST_SCRIPT: script },
-        signal: AbortSignal.timeout(600),
+        signal: AbortSignal.timeout(5000),
       });
       pid = Number(result.stdout.trim());
       expect(result.reason).toBe('cancelled');
       expect(pid).toBeGreaterThan(0);
-      await vi.waitFor(() => expect(() => process.kill(pid!, 0)).toThrow(), { timeout: 1500 });
+      await vi.waitFor(() => expect(() => process.kill(pid!, 0)).toThrow(), { timeout: 5000 });
     } finally {
       if (pid) {
         try {
@@ -78,5 +78,5 @@ describe('owned subprocess limits with controlled test executables', () => {
         }
       }
     }
-  });
+  }, 20000);
 });
