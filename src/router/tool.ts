@@ -45,6 +45,7 @@ export interface RequestToolArgs {
 }
 
 export interface RequestToolDeps {
+  signal?: AbortSignal;
   ctx: CommandContext;
   /** The SAME provider the MCP server pre-warmed. `runPay` opens its own
    *  otherwise, and the local one re-runs scrypt per process, which is the
@@ -193,6 +194,7 @@ export async function runRequestTool(
       deps.ctx,
       {
         ...(deps.payDeps ?? {}),
+        ...(deps.signal ? { signal: deps.signal } : {}),
         ...(deps.provider !== undefined ? { provider: deps.provider } : {}),
         authorizer: deps.payDeps?.authorizer ?? deps.authorizer,
         confirm: async () => false,
