@@ -33,7 +33,7 @@ blobs to temporary private storage, never followed through live file paths. Limi
 128 KiB per file and 8 MiB total. An oversized repository fails closed rather than searching an
 undisclosed subset. Results name the snapshot commit and omitted-file count.
 
-Tenjin runs fixed `npx` commands with isolated config, home and caches. Auth writes only the
+Tenjin runs fixed `npx` commands with isolated config and home. Reviewed runtime artifacts and their npm cache persist under the active Tenjin data directory; source snapshots and credentials stay temporary. Auth writes only the
 short-lived proxy token, then search uses that config. The normal Jevgrep configuration stays
 unchanged. `npx` may download dependencies; it is not a sandbox. The reviewed child executes with
 the OS user's privileges. Only trusted artifacts belong in this pilot. No extra skill install is required.

@@ -41,6 +41,7 @@ export async function executeJevgrep(
     });
     const result = await runJevgrep({
       root: grant.root,
+      dataDir: deps.ctx.dataDir,
       query,
       runtime: grant.runtime,
       evaluate: (request, signal) => payer!.evaluate(request, signal),

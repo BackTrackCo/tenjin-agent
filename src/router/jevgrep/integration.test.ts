@@ -200,7 +200,14 @@ describe('Jevgrep hook, binding and executor integration', () => {
     expect(options.root).toBe(root);
     expect(options.query).toBe(QUERY);
     expect(options.runtime).toEqual(grant.runtime);
-    expect(Object.keys(options).sort()).toEqual(['evaluate', 'query', 'root', 'runtime']);
+    expect(options.dataDir).toBe(ctx.dataDir);
+    expect(Object.keys(options).sort()).toEqual([
+      'dataDir',
+      'evaluate',
+      'query',
+      'root',
+      'runtime',
+    ]);
     expect(JSON.stringify(options)).not.toMatch(/wallet|bearer|authorization|privateKey/);
     expect(evaluate).not.toHaveBeenCalled();
   });

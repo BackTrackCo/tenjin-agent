@@ -6,7 +6,8 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { JEV_LIMITS } from './protocol.js';
 import { isJevgrepRuntimeAvailable, runJevgrep } from './runner.js';
-import type { BoundedCommand, CommandResult, JevgrepRuntime } from './runner.js';
+import type { JevgrepRuntime } from './runner.js';
+import type { BoundedCommand, CommandResult } from '../local/process';
 const directories: string[] = [];
 async function fixture() {
   const dir = await mkdtemp(join(tmpdir(), 'jev-runner-test-'));
@@ -46,7 +47,7 @@ async function fixture() {
     path,
     sha256: createHash('sha256').update(bytes).digest('hex'),
   };
-  return { root, runtime };
+  return { root, runtime, dataDir: join(dir, 'profile') };
 }
 const ok: CommandResult = { code: 0, stdout: '', stderr: '' };
 afterEach(async () => {
@@ -57,7 +58,9 @@ describe('isolated Jevgrep lifecycle', () => {
   it('keeps published versions unavailable pending qualification', async () => {
     expect(isJevgrepRuntimeAvailable({ kind: 'release', version: '0.4.3' })).toBe(false);
     const evaluate = vi.fn();
-    expect(await runJevgrep({ root: '/unused', query: 'question', evaluate })).toMatchObject({
+    expect(
+      await runJevgrep({ root: '/unused', dataDir: '/unused', query: 'question', evaluate }),
+    ).toMatchObject({
       status: 'unavailable',
       requests: 0,
     });
@@ -188,51 +191,5 @@ describe('isolated Jevgrep lifecycle', () => {
     );
     expect(result.status).toBe('cancelled');
     await expect(fetch(baseURL)).rejects.toThrow();
-  });
-});
-
-describe('owned subprocess limits with controlled test executables', () => {
-  async function fakeNpx(script: string) {
-    const dir = await mkdtemp(join(tmpdir(), 'jev-command-test-'));
-    directories.push(dir);
-    const file = join(dir, 'npx');
-    await writeFile(file, script, { mode: 0o700 });
-    return { argv: [], cwd: dir, env: { PATH: `${dir}:/usr/bin:/bin` } };
-  }
-  it('terminates output-producing children at the bounded output limit', async () => {
-    const command = await fakeNpx('#!/bin/sh\nexec /usr/bin/yes output\n');
-    const { runBoundedCommand } = await import('./runner.js');
-    const result = await runBoundedCommand({ ...command, signal: AbortSignal.timeout(2000) });
-    expect(result.reason).toBe('output-limit');
-    expect(Buffer.byteLength(result.stdout)).toBeLessThanOrEqual(16 * 1024);
-  });
-  it('cleans up an observed detached descendant on cancellation', async () => {
-    const command = await fakeNpx('#!/bin/sh\nexec "$TEST_NODE" "$TEST_SCRIPT"\n');
-    const script = join(command.cwd, 'owned-child.mjs');
-    await writeFile(
-      script,
-      "import { spawn } from 'node:child_process'; const c = spawn('/bin/sleep', ['30'], { detached: true, stdio: 'ignore' }); process.stdout.write(String(c.pid) + '\\n'); setInterval(() => {}, 10000);\n",
-    );
-    const { runBoundedCommand } = await import('./runner.js');
-    let pid: number | undefined;
-    try {
-      const result = await runBoundedCommand({
-        ...command,
-        env: { ...command.env, TEST_NODE: process.execPath, TEST_SCRIPT: script },
-        signal: AbortSignal.timeout(600),
-      });
-      pid = Number(result.stdout.trim());
-      expect(result.reason).toBe('cancelled');
-      expect(pid).toBeGreaterThan(0);
-      await vi.waitFor(() => expect(() => process.kill(pid!, 0)).toThrow(), { timeout: 1500 });
-    } finally {
-      if (pid) {
-        try {
-          process.kill(pid, 'SIGKILL');
-        } catch {
-          /* Already stopped. */
-        }
-      }
-    }
   });
 });
