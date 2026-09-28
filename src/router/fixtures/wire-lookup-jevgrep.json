@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "routerVersion": "2026-09-28.1",
+  "jev": {
+    "calls": 1,
+    "latencyMs": 100
+  },
+  "decision": {
+    "action": "execute",
+    "capabilityId": "jevgrep-search-v1",
+    "category": "repository retrieval",
+    "provider": "Jevgrep",
+    "capabilityDescription": "Find relevant repository source by behavior or meaning, with local source-sharing and spending limits",
+    "pricing": "bounded_locally",
+    "contract": {
+      "executor": "jevgrep-search-v1",
+      "query": "Where does this repository prevent duplicate payments?"
+    }
+  }
+}

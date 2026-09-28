@@ -1,3 +1,5 @@
+import { boundJevgrepGrant } from './jevgrep/grants';
+import { executeJevgrep } from './jevgrep/executor';
 import { actOnReview, reviewStatus, type ReviewAction } from './review/lifecycle';
 import { prepareReview, type ReviewMaterial } from './review/jobs';
 import { runPay, type AdvertisedTerms, type PayDeps } from '../commands/pay';
@@ -45,6 +47,7 @@ export interface RequestToolArgs {
 }
 
 export interface RequestToolDeps {
+  signal?: AbortSignal;
   ctx: CommandContext;
   /** The SAME provider the MCP server pre-warmed. `runPay` opens its own
    *  otherwise, and the local one re-runs scrypt per process, which is the
@@ -113,7 +116,9 @@ export async function runRequestTool(
   });
   await footer.routing();
   const settings = await resolveContextSettings(deps.ctx);
+  const local = await boundJevgrepGrant(deps.ctx, deps.cwd ?? process.cwd(), args.id, query);
   const decisionDeps = {
+    jevgrep: local !== null,
     ctx: deps.ctx,
     baseUrl: settings.baseUrl,
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
@@ -150,8 +155,21 @@ export async function runRequestTool(
   }
 
   if ('executor' in decision.contract) {
-    await footer.done('needs_input');
-    return prepareReview(deps.ctx, decision.contract.intent, args.review);
+    if (decision.contract.executor === 'rentahuman-review-v1') {
+      await footer.done('needs_input');
+      return prepareReview(deps.ctx, decision.contract.intent, args.review);
+    }
+    if (!local || !args.id || decision.contract.query !== query) {
+      await footer.done('needs_input');
+      return fail(
+        'needs_input',
+        'Local retrieval requires a fresh hook offer bound to this approved repository and unchanged query.',
+      );
+    }
+    await footer.calling({ provider: 'Jevgrep' });
+    const result = await executeJevgrep(local, args.id, query, deps);
+    await footer.done(result.envelope.status === 'fulfilled' ? 'fulfilled' : 'failed');
+    return result;
   }
   if (!('providerPriceAtomic' in decision)) return fail('failed', 'Invalid HTTP pricing.');
   const contract = decision.contract;
@@ -193,6 +211,7 @@ export async function runRequestTool(
       deps.ctx,
       {
         ...(deps.payDeps ?? {}),
+        ...(deps.signal ? { signal: deps.signal } : {}),
         ...(deps.provider !== undefined ? { provider: deps.provider } : {}),
         authorizer: deps.payDeps?.authorizer ?? deps.authorizer,
         confirm: async () => false,

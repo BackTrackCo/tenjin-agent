@@ -1,0 +1,50 @@
+{
+  "date": "2026-09-28",
+  "scope": "Synthetic provider in a disposable Linux arm64 VM/container, no paid or external inference calls",
+  "sourceSHA": "aae1f7ee91f6cfe408e1cca5c50bd4c9ddc81164",
+  "node": "v24.21.0",
+  "bun": "1.3.14",
+  "artifact": {
+    "sha256": "f3784927f4b9f2f2adb302a9108fbbe93d05cc4de86d9461ae43b293e21e0c27",
+    "bytes": 214681,
+    "package": {
+      "name": "@dzhng/jevgrep",
+      "version": "0.4.2",
+      "bin": {
+        "jg": "./dist/bin/index.js"
+      },
+      "dependencies": {
+        "pyodide": "0.25.1",
+        "typescript": "5.9.3"
+      },
+      "engines": {
+        "node": ">=22"
+      }
+    }
+  },
+  "checks": {
+    "npxPackageLaunch": true,
+    "authWithoutNetwork": true,
+    "privateCustomRecord": true,
+    "realCustomDoctor": true,
+    "realCustomSearch": true,
+    "noTokenInSearchOutput": true,
+    "402ReportedWithoutPayment": true,
+    "cancelledProcessGroup": true
+  },
+  "requests": 12,
+  "requestBytes": 15661,
+  "repeated402Requests": 2,
+  "remainingOwnedGroups": 0,
+  "cleanup": {
+    "guestRemoved": true,
+    "hostMounts": 0,
+    "sshAgentForwarded": false
+  },
+  "limitations": [
+    "Synthetic answers do not establish retrieval value or live supplier reliability.",
+    "No x402 payment or settlement recovery was exercised by this upstream compatibility probe.",
+    "No macOS execution of the upstream artifact was performed.",
+    "No published release is qualified."
+  ]
+}

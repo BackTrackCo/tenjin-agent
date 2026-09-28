@@ -228,7 +228,9 @@ describe('what the tool tells the model to send', () => {
       expect(schema.required).toBeUndefined();
       expect(schema.properties.id?.description).toContain('names the service');
       // One lookup, not the whole turn, and no blanket ban on wording.
-      expect(SCOPE_RULE).toContain('one concrete external lookup');
+      expect(SCOPE_RULE).toContain(
+        'one lookup, computation, or explicitly enabled repository retrieval',
+      );
       expect(SCOPE_RULE).toContain('A mixed turn is not one lookup');
       expect(SCOPE_RULE).not.toContain("the user's request verbatim");
       // Deciding is free now, and the instructions say so.

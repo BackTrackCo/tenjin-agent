@@ -1,6 +1,8 @@
-import { mkdir } from 'node:fs/promises';
+import { mkdir, open, rename, rm, access } from 'node:fs/promises';
+import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { writeFileAtomic } from '../atomic-json';
+import { writeFileAtomicExclusive } from '../atomic-json';
+import { CliError } from '../errors';
 import { withFileLock } from '../lock';
 import { spendLedgerPath } from '../paths';
 import {
@@ -55,6 +57,8 @@ export interface SpendRequest {
    * reservation TTL is what bounds "same turn". Omit it and nothing changes.
    */
   requestKey?: string;
+  /** Internal executor scope. Ordinary CLI arguments cannot supply this. */
+  durableRun?: { id: string; maxAtomic: bigint };
 }
 
 export interface SpendAuthorization {
@@ -92,6 +96,16 @@ export interface SpendAuthorizer {
   ): Promise<void>;
   /** Drop an unused reservation (a decline, a 409, or a failed payment). */
   release(reservationId: string | undefined): Promise<void>;
+  /** Persist uncertainty before the signed authorization can leave this process. */
+  markSigned?(reservationId: string): Promise<void>;
+  durableSummary?(runId: string): Promise<DurableSpendSummary>;
+}
+
+export interface DurableSpendSummary {
+  exposureAtomic: string;
+  confirmedAtomic: string;
+  unknownAtomic: string;
+  reservedAtomic: string;
 }
 
 export interface LocalSpendAuthorizerDeps {
@@ -114,6 +128,7 @@ export function createLocalSpendAuthorizer(deps: LocalSpendAuthorizerDeps): Spen
   const now = deps.now ?? Date.now;
   const path = spendLedgerPath(deps.dir);
   const lockPath = `${path}.lock`;
+  const durableMarker = `${path}.durable`;
   // One notice per authorizer: authorize and commit each read the file, and the
   // reset is not persisted until something is written, so an unlatched warning
   // would fire twice for the same broken file within one command.
@@ -121,7 +136,9 @@ export function createLocalSpendAuthorizer(deps: LocalSpendAuthorizerDeps): Spen
 
   // Roll the window and drop expired reservations; returns the live ledger.
   const freshen = (ledger: Ledger | null, nowMs: number): Ledger => {
-    if (ledger === null || nowMs - ledger.windowStartMs >= windowMs) return emptyLedger(nowMs);
+    if (ledger === null) return emptyLedger(nowMs);
+    if (nowMs - ledger.windowStartMs >= windowMs)
+      return { ...emptyLedger(nowMs), ...(ledger.durable ? { durable: ledger.durable } : {}) };
     return {
       ...ledger,
       reservations: ledger.reservations.filter((r) => nowMs - r.atMs < RESERVATION_TTL_MS),
@@ -129,17 +146,53 @@ export function createLocalSpendAuthorizer(deps: LocalSpendAuthorizerDeps): Spen
   };
 
   const persist = async (ledger: Ledger): Promise<void> => {
-    await writeFileAtomic(path, `${JSON.stringify(ledger, null, 2)}\n`, {
-      mode: 0o600,
-      dirMode: 0o700,
-    });
+    // The budget record must reach disk before signing. Rename alone is not durable.
+    const temporary = `${path}.${randomUUID()}.tmp`;
+    try {
+      const handle = await open(temporary, 'wx', 0o600);
+      try {
+        await handle.writeFile(`${JSON.stringify(ledger, null, 2)}\n`);
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+      await rename(temporary, path);
+      if (process.platform !== 'win32') {
+        const directory = await open(dirname(path), 'r');
+        try {
+          await directory.sync();
+        } finally {
+          await directory.close();
+        }
+      }
+    } finally {
+      await rm(temporary, { force: true });
+    }
   };
 
-  async function withLedger<T>(fn: (ledger: Ledger, nowMs: number) => Promise<T> | T): Promise<T> {
+  async function withLedger<T>(
+    fn: (ledger: Ledger, nowMs: number) => Promise<T> | T,
+    strict = false,
+  ): Promise<T> {
     await mkdir(deps.dir, { recursive: true, mode: 0o700 });
     return withFileLock(lockPath, async () => {
       const nowMs = now();
       const read = await readLedger(path);
+      const durableUsed = await access(durableMarker).then(
+        () => true,
+        (error: NodeJS.ErrnoException) => {
+          if (error.code === 'ENOENT') return false;
+          throw error;
+        },
+      );
+      if (
+        (strict && read.corrupt !== undefined) ||
+        (durableUsed && (read.ledger === null || read.ledger.durable === undefined))
+      )
+        throw new CliError(
+          'REFUSED',
+          'Durable payment accounting needs recovery; no new payment was authorized.',
+        );
       if (read.corrupt !== undefined && !warnedCorrupt) {
         warnedCorrupt = true;
         deps.onCorrupt?.(read.corrupt);
@@ -154,9 +207,16 @@ export function createLocalSpendAuthorizer(deps: LocalSpendAuthorizerDeps): Spen
     async authorize(req: SpendRequest): Promise<SpendAuthorization> {
       return withLedger(async (ledger) => {
         const sessionSpentAtomic = spentOf(ledger);
+        const durable = ledger.durable ?? [];
+        if (
+          req.durableRun &&
+          (!req.requestKey || req.durableRun.maxAtomic <= 0n || req.amountAtomic < 0n)
+        )
+          throw new CliError('REFUSED', 'Invalid durable payment scope.');
         if (
           req.requestKey !== undefined &&
-          ledger.reservations.some((r) => r.requestKey === req.requestKey)
+          (ledger.reservations.some((r) => r.requestKey === req.requestKey) ||
+            durable.some((r) => r.requestKey === req.requestKey))
         ) {
           return {
             decision: 'deny',
@@ -168,6 +228,21 @@ export function createLocalSpendAuthorizer(deps: LocalSpendAuthorizerDeps): Spen
             sessionBudgetAtomic: deps.policy.sessionBudgetAtomic,
             policyEnforcement: 'client-only',
           };
+        }
+        if (req.durableRun) {
+          const sameRun = durable.filter((entry) => entry.runId === req.durableRun!.id);
+          if (sameRun.some((entry) => entry.runMaxAtomic !== req.durableRun!.maxAtomic.toString()))
+            throw new CliError('REFUSED', 'A run cannot change its payment ceiling.');
+          if (
+            durable.length >= 4096 ||
+            sameRun.reduce((sum, entry) => sum + BigInt(entry.amountAtomic), 0n) +
+              req.amountAtomic >
+              req.durableRun.maxAtomic
+          )
+            throw new CliError(
+              'POLICY_REFUSED',
+              'The durable search budget or journal capacity is exhausted.',
+            );
         }
         const evaluation = evaluateSpendPolicy(deps.policy, {
           mode: req.mode ?? 'automatic',
@@ -194,9 +269,31 @@ export function createLocalSpendAuthorizer(deps: LocalSpendAuthorizerDeps): Spen
           atMs: now(),
           ...(req.requestKey !== undefined ? { requestKey: req.requestKey } : {}),
         };
-        await persist({ ...ledger, reservations: [...ledger.reservations, reservation] });
+        if (req.durableRun) {
+          // Once used, corruption must not silently reset this wallet's exposure.
+          try {
+            await writeFileAtomicExclusive(durableMarker, '1\n', { mode: 0o600, dirMode: 0o700 });
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+          }
+          await persist({
+            ...ledger,
+            durable: [
+              ...durable,
+              {
+                id: reservation.id,
+                requestKey: req.requestKey!,
+                runId: req.durableRun.id,
+                runMaxAtomic: req.durableRun.maxAtomic.toString(),
+                amountAtomic: reservation.amountAtomic,
+                atMs: reservation.atMs,
+                state: 'reserved',
+              },
+            ],
+          });
+        } else await persist({ ...ledger, reservations: [...ledger.reservations, reservation] });
         return { ...base, reservationId: reservation.id };
-      });
+      }, req.durableRun !== undefined);
     },
     async commit(
       reservationId: string | undefined,
@@ -205,6 +302,20 @@ export function createLocalSpendAuthorizer(deps: LocalSpendAuthorizerDeps): Spen
     ): Promise<void> {
       // Record transmitted exposure even if its reservation has expired.
       await withLedger(async (ledger) => {
+        const durable = ledger.durable?.find((entry) => entry.id === reservationId);
+        if (durable) {
+          if (durable.amountAtomic !== amountAtomic.toString())
+            throw new CliError('REFUSED', 'Durable payment amount changed.');
+          // Keep unresolved exposure in its original record. Repeated commits are harmless.
+          if (durable.state !== 'signed')
+            await persist({
+              ...ledger,
+              durable: ledger.durable!.map((entry) =>
+                entry.id === reservationId ? { ...entry, state: 'signed' as const } : entry,
+              ),
+            });
+          return;
+        }
         const reservation =
           reservationId !== undefined
             ? ledger.reservations.find((r) => r.id === reservationId)
@@ -237,12 +348,52 @@ export function createLocalSpendAuthorizer(deps: LocalSpendAuthorizerDeps): Spen
     async release(reservationId: string | undefined): Promise<void> {
       if (reservationId === undefined) return;
       await withLedger(async (ledger) => {
+        const durable = ledger.durable?.find((entry) => entry.id === reservationId);
+        if (durable) {
+          if (durable.state === 'signed') return;
+          await persist({
+            ...ledger,
+            durable: ledger.durable!.filter((entry) => entry.id !== reservationId),
+          });
+          return;
+        }
         if (!ledger.reservations.some((r) => r.id === reservationId)) return;
         await persist({
           ...ledger,
           reservations: ledger.reservations.filter((r) => r.id !== reservationId),
         });
       });
+    },
+    async markSigned(reservationId) {
+      await withLedger(async (ledger) => {
+        const entry = ledger.durable?.find((item) => item.id === reservationId);
+        if (!entry) throw new CliError('REFUSED', 'Durable payment reservation is unavailable.');
+        if (entry.state === 'signed') return;
+        await persist({
+          ...ledger,
+          durable: ledger.durable!.map((item) =>
+            item.id === reservationId ? { ...item, state: 'signed' as const } : item,
+          ),
+        });
+      }, true);
+    },
+    async durableSummary(runId) {
+      return withLedger((ledger) => {
+        const entries = (ledger.durable ?? []).filter((entry) => entry.runId === runId);
+        const signed = entries
+          .filter((entry) => entry.state === 'signed')
+          .reduce((sum, entry) => sum + BigInt(entry.amountAtomic), 0n)
+          .toString();
+        return {
+          exposureAtomic: signed,
+          confirmedAtomic: '0',
+          unknownAtomic: signed,
+          reservedAtomic: entries
+            .filter((entry) => entry.state === 'reserved')
+            .reduce((sum, entry) => sum + BigInt(entry.amountAtomic), 0n)
+            .toString(),
+        };
+      }, true);
     },
   };
 }
