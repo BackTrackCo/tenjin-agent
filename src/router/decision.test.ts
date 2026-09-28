@@ -260,7 +260,7 @@ describe('negotiated local repository executor', () => {
       { ctx: ctx(), baseUrl: BASE, jevgrep: true, fetchImpl },
     );
     expect(result.status).toBe('decided');
-    expect(executors).toBe('rentahuman-review-v1,jevgrep-search-v1');
+    expect(executors).toBe('jevgrep-search-v1');
     const unsafe = {
       ...answer,
       decision: {

@@ -4,7 +4,6 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import reviewDecision from './fixtures/wire-lookup-review.json';
 import { testWalletProvider } from '../lib/read-test-utils';
 import type { SpendAuthorization, SpendAuthorizer } from '../lib/wallet';
 import { buildRouterMcpServer, MAX_RESULT_SIZE_CHARS, MAX_RESULT_SIZE_KEY } from './mcp';
@@ -223,9 +222,9 @@ describe('what the tool tells the model to send', () => {
         properties: { query: { description: string }; id?: { description: string } };
         required?: string[];
       };
-      // A new lookup needs query; a saved job can be read with jobId alone.
+      // The query is always required; the id never is.
       expect(schema.properties.query.description).toContain(SCOPE_RULE);
-      expect(schema.required).toBeUndefined();
+      expect(schema.required).toEqual(['query']);
       expect(schema.properties.id?.description).toContain('names the service');
       // One lookup, not the whole turn, and no blanket ban on wording.
       expect(SCOPE_RULE).toContain(
@@ -275,39 +274,6 @@ describe('a free answer on a machine with no wallet', () => {
       const called = await client.callTool({ name: 'request', arguments: { query: 'weather' } });
       expect(called.isError).toBe(false);
       expect(envelopeOf(called)).toMatchObject({ status: 'native' });
-    } finally {
-      await client.close();
-      await server.close();
-    }
-  });
-});
-
-describe('a human draft over the public MCP contract', () => {
-  it('creates and resumes exact material without a wallet or another network call', async () => {
-    const fetchImpl = vi.fn(router(reviewDecision));
-    const review = {
-      title: 'Checkout critique',
-      material: 'Delivery, then payment, then confirmation. Review clarity and friction.',
-      expertise: 'UX design',
-    };
-    const server = buildRouterMcpServer({ dataDir: dir, handlerDeps: { cwd: dir, fetchImpl } });
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    const client = new Client({ name: 'test', version: '0.0.0' });
-    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
-    try {
-      const called = await client.callTool({
-        name: 'request',
-        arguments: { query: 'Get a human second opinion', review },
-      });
-      expect(called.isError).toBe(false);
-      const draft = envelopeOf(called) as { jobId: string };
-      expect(draft).toMatchObject({ status: 'draft', review, pricing: 'quote_required' });
-      const resumed = await client.callTool({ name: 'request', arguments: { jobId: draft.jobId } });
-      expect(envelopeOf(resumed)).toEqual(draft);
-      expect(fetchImpl).toHaveBeenCalledTimes(1);
-      expect(
-        new Headers(fetchImpl.mock.calls[0]?.[1]?.headers).get('Tenjin-Router-Executors'),
-      ).toBe('rentahuman-review-v1');
     } finally {
       await client.close();
       await server.close();

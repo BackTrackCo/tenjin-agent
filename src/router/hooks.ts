@@ -702,7 +702,7 @@ async function routeNativeCall(
     };
   }
   if ('pricing' in outcome) {
-    await footer.close(outcome, { withheld: 'human review requires a separate draft' });
+    await footer.close(outcome, { withheld: 'local executors require a prompt offer' });
     return { offer: null, outcome: { response: null } };
   }
   if (opts.passFree === true && isFree(outcome)) {
