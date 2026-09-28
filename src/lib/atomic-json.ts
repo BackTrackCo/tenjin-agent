@@ -64,7 +64,7 @@ export async function writeFileAtomic(
  */
 export async function writeFileAtomicExclusive(
   targetPath: string,
-  data: string,
+  data: string | Uint8Array,
   opts: AtomicWriteOptions = {},
 ): Promise<void> {
   const dir = dirname(targetPath);

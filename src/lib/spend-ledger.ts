@@ -24,6 +24,17 @@ const ReservationSchema = z.object({
 });
 export type Reservation = z.infer<typeof ReservationSchema>;
 
+const DurableSpendSchema = z.object({
+  id: z.string(),
+  requestKey: z.string(),
+  runId: z.string(),
+  runMaxAtomic: z.string().regex(/^\d+$/),
+  amountAtomic: z.string().regex(/^\d+$/),
+  atMs: z.number(),
+  state: z.enum(['reserved', 'signed']),
+});
+export type DurableSpend = z.infer<typeof DurableSpendSchema>;
+
 const LedgerSchema = z.object({
   schemaVersion: z.literal(2),
   windowStartMs: z.number(),
@@ -44,6 +55,8 @@ const LedgerSchema = z.object({
    */
   settledAtomic: z.string().regex(/^\d+$/).optional(),
   reservations: z.array(ReservationSchema),
+  /** Unreconciled executor exposure never expires with the daily window. */
+  durable: z.array(DurableSpendSchema).max(4096).optional(),
 });
 export type Ledger = z.infer<typeof LedgerSchema>;
 
@@ -64,10 +77,14 @@ export function spentOf(ledger: {
   committedAtomic: string;
   automaticCommittedAtomic?: string;
   reservations: { amountAtomic: string; mode?: 'automatic' | 'manual' }[];
+  durable?: { amountAtomic: string }[];
 }): bigint {
   return ledger.reservations.reduce(
     (sum, r) => sum + (r.mode === 'manual' ? 0n : BigInt(r.amountAtomic)),
-    BigInt(ledger.automaticCommittedAtomic ?? ledger.committedAtomic),
+    (ledger.durable ?? []).reduce(
+      (sum, entry) => sum + BigInt(entry.amountAtomic),
+      BigInt(ledger.automaticCommittedAtomic ?? ledger.committedAtomic),
+    ),
   );
 }
 
@@ -116,6 +133,7 @@ export interface SpendSummary {
   windowStartMs: number;
   committedAtomic: string;
   automaticCommittedAtomic?: string;
+  durable?: DurableSpend[];
   reservations: {
     amountAtomic: string;
     atMs: number;
@@ -142,7 +160,8 @@ export async function readSpendSummary(
   if (ledger === null) return null;
   const nowMs = (opts.now ?? Date.now)();
   const windowMs = opts.windowMs ?? DEFAULT_WINDOW_MS;
-  if (nowMs - ledger.windowStartMs >= windowMs) return emptyLedger(nowMs);
+  if (nowMs - ledger.windowStartMs >= windowMs)
+    return { ...emptyLedger(nowMs), ...(ledger.durable ? { durable: ledger.durable } : {}) };
   return {
     ...ledger,
     reservations: ledger.reservations.filter((r) => nowMs - r.atMs < RESERVATION_TTL_MS),

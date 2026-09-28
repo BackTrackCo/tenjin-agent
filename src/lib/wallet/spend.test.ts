@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createLocalSpendAuthorizer } from './spend';
 import { spendLedgerPath } from '../paths';
+import { readSpendSummary, spentOf } from '../spend-ledger';
 import { readSessionFile, type SessionFile } from '../session-present';
 // The session-cache WRITER lives with the mint half by design; a test may cross
 // that line freely (the import pin is on read.ts, not here), and writing the
@@ -29,6 +30,85 @@ function policy(over: Partial<SpendPolicy> = {}): SpendPolicy {
     ...over,
   };
 }
+
+describe('durable executor accounting', () => {
+  const request = (key: string, runId = 'run-a', maxAtomic = 1500n) => ({
+    creator: 'supplier.example',
+    amountAtomic: 1000n,
+    requestKey: key,
+    durableRun: { id: runId, maxAtomic },
+  });
+
+  it('holds unresolved exposure across TTL and daily rollover for ordinary payments too', async () => {
+    let now = 1_000_000;
+    const make = () =>
+      createLocalSpendAuthorizer({
+        dir,
+        now: () => now,
+        policy: policy({ sessionBudgetAtomic: 1500n }),
+      });
+    const first = await make().authorize(request('eval-1'));
+    await make().markSigned!(first.reservationId!);
+    await make().commit(first.reservationId, 1000n);
+    await make().commit(first.reservationId, 1000n);
+    now += 2 * 86_400_000;
+    const ordinary = await make().authorize({ creator: 'another.example', amountAtomic: 1000n });
+    expect(ordinary.decision).toBe('deny');
+    expect(ordinary.sessionSpentAtomic).toBe(1000n);
+    expect(spentOf((await readSpendSummary(dir, { now: () => now }))!)).toBe(1000n);
+    expect(await make().durableSummary!('run-a')).toMatchObject({
+      exposureAtomic: '1000',
+      unknownAtomic: '1000',
+      confirmedAtomic: '0',
+    });
+    expect((await make().authorize(request('eval-1'))).reason).toBe('duplicate_in_flight');
+  });
+
+  it('enforces one run ceiling and the wallet ceiling across independent authorizers', async () => {
+    const make = () =>
+      createLocalSpendAuthorizer({ dir, policy: policy({ sessionBudgetAtomic: 1500n }) });
+    const results = await Promise.allSettled([
+      make().authorize(request('one')),
+      make().authorize(request('two')),
+    ]);
+    expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+    expect(results.filter((result) => result.status === 'rejected')).toHaveLength(1);
+    expect((await make().authorize(request('three', 'run-b'))).decision).toBe('deny');
+    await expect(make().authorize(request('four', 'run-a', 2000n))).rejects.toThrow('ceiling');
+  });
+
+  it('releases only an unsigned reservation and never releases signed uncertainty', async () => {
+    const auth = createLocalSpendAuthorizer({ dir, policy: policy() });
+    const first = await auth.authorize(request('one'));
+    await auth.release(first.reservationId);
+    const second = await auth.authorize(request('two'));
+    await auth.markSigned!(second.reservationId!);
+    await auth.release(second.reservationId);
+    expect(await auth.durableSummary!('run-a')).toMatchObject({
+      unknownAtomic: '1000',
+      reservedAtomic: '0',
+    });
+    await expect(auth.commit(second.reservationId, 999n)).rejects.toThrow('amount changed');
+  });
+
+  it('fails closed on corrupted or missing accounting after durable use', async () => {
+    const make = () => createLocalSpendAuthorizer({ dir, policy: policy() });
+    await make().authorize(request('one'));
+    await writeFile(spendLedgerPath(dir), '{}');
+    await expect(make().authorize({ creator: 'ordinary', amountAtomic: 1n })).rejects.toThrow(
+      'recovery',
+    );
+    await rm(spendLedgerPath(dir));
+    await expect(make().authorize(request('two'))).rejects.toThrow('recovery');
+  });
+
+  it('does not reset a previously corrupt legacy ledger for a durable request', async () => {
+    await writeFile(spendLedgerPath(dir), 'broken');
+    const auth = createLocalSpendAuthorizer({ dir, policy: policy() });
+    await expect(auth.authorize(request('one'))).rejects.toThrow('recovery');
+    expect(await readFile(spendLedgerPath(dir), 'utf8')).toBe('broken');
+  });
+});
 
 describe('createLocalSpendAuthorizer', () => {
   it('reports client-only enforcement (honest custody posture)', () => {

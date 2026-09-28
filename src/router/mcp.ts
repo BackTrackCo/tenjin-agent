@@ -70,6 +70,7 @@ export interface RouterMcpOptions {
   flags?: Partial<GlobalFlags>;
   /** Test seam: everything the tool handler would otherwise resolve itself. */
   handlerDeps?: Partial<RequestToolDeps>;
+  signal?: AbortSignal;
 }
 
 function buildContext(opts: RouterMcpOptions): CommandContext {
@@ -83,6 +84,8 @@ function buildContext(opts: RouterMcpOptions): CommandContext {
 
 export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
   const ctx = buildContext(opts);
+  const lifecycle = new AbortController();
+  const sessionCwd = opts.handlerDeps?.cwd ?? process.cwd();
   const provider = resolveWalletProvider(ctx);
   // THE PREWARM, and nothing else. It runs the scrypt derivation while the
   // session is idle so a paid lookup does not wait 2.3 s for it, and its
@@ -95,6 +98,7 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
     { name: MCP_SERVER_NAME, version: pkg.version },
     { capabilities: { tools: {} }, instructions: INSTRUCTIONS },
   );
+  server.server.onclose = () => lifecycle.abort();
   server.registerTool(
     'request',
     {
@@ -124,7 +128,7 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
           ),
       },
     },
-    async ({ query, id }): Promise<CallToolResult> => {
+    async ({ query, id }, extra): Promise<CallToolResult> => {
       // Resolved per call, from settings read now: the refusal this tool returns
       // names `tenjin config set sessionBudget`, and a policy frozen at the
       // first call would leave that command with no effect until the harness
@@ -136,6 +140,12 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
         { query, ...(id !== undefined ? { id } : {}) },
         {
           ctx,
+          signal: AbortSignal.any([
+            lifecycle.signal,
+            extra.signal,
+            ...(opts.signal ? [opts.signal] : []),
+          ]),
+          cwd: sessionCwd,
           // THE WALLET IS THE PAYING LEG'S TO OPEN, not this handler's. Routing
           // is free, so a missing or locked wallet must not stop a `native` or
           // a `needs_input` answer from being delivered; `runPay` requires a
@@ -174,11 +184,34 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
  * process also watches stdin itself; without it the process would linger.
  */
 export async function runRouterMcpServer(opts: RouterMcpOptions = {}): Promise<void> {
-  const server = buildRouterMcpServer(opts);
-  await server.connect(new StdioServerTransport());
-  await new Promise<void>((resolve) => {
-    server.server.onclose = () => resolve();
-    process.stdin.once('end', resolve);
-    process.stdin.once('close', resolve);
+  const lifecycle = new AbortController();
+  const server = buildRouterMcpServer({
+    ...opts,
+    signal: AbortSignal.any([lifecycle.signal, ...(opts.signal ? [opts.signal] : [])]),
   });
+  await server.connect(new StdioServerTransport());
+  const originalClose = server.server.onclose;
+  const signals = ['SIGINT', 'SIGTERM'] as const;
+  let finish: () => void = () => {};
+  try {
+    await new Promise<void>((resolve) => {
+      finish = () => {
+        lifecycle.abort();
+        resolve();
+      };
+      server.server.onclose = () => {
+        originalClose?.();
+        finish();
+      };
+      process.stdin.once('end', finish);
+      process.stdin.once('close', finish);
+      for (const signal of signals) process.once(signal, finish);
+    });
+  } finally {
+    lifecycle.abort();
+    process.stdin.removeListener('end', finish);
+    process.stdin.removeListener('close', finish);
+    for (const signal of signals) process.removeListener(signal, finish);
+    await server.close();
+  }
 }
