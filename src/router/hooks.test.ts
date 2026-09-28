@@ -2,10 +2,14 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import {
   HINT_SOURCE,
   NEAR_EMPTY_BYTES,
   promptSkipReason,
+  runAnswerHook,
+  runAskHook,
   runDelegationHook,
   runNativeHook,
   runPromptHook,
@@ -236,7 +240,12 @@ describe('the prompt hook', () => {
     expect(sent.url).toBe(`${BASE}${ROUTER_PATH}`);
     // The route reads a STRICT object: an extra field is a 400, which is a
     // turn with no hint.
-    expect(Object.keys(sent.body).sort()).toEqual(['packet', 'schemaVersion']);
+    expect(Object.keys(sent.body).sort()).toEqual([
+      'accepts',
+      'packet',
+      'schemaVersion',
+      'sessionId',
+    ]);
     expect((sent.body.packet as { pendingCall?: unknown }).pendingCall).toBeUndefined();
   });
 
@@ -378,7 +387,12 @@ describe('the shortfall hook', () => {
     // The call and how it fared ride INSIDE the packet, in the shape
     // `wire-hook-request-native-shortfall.json` pins.
     const sent = calls[0] as { body: Record<string, unknown> };
-    expect(Object.keys(sent.body).sort()).toEqual(['packet', 'schemaVersion']);
+    expect(Object.keys(sent.body).sort()).toEqual([
+      'accepts',
+      'packet',
+      'schemaVersion',
+      'sessionId',
+    ]);
     const packet = sent.body.packet as { pendingCall?: unknown; nativeOutcome?: unknown };
     expect(packet.pendingCall).toEqual({ tool: 'WebFetch', url: 'https://example.test/spec' });
     expect(packet.nativeOutcome).toEqual({ code: 402, bytes: 0 });
@@ -1920,7 +1934,12 @@ describe('the delegation hook', () => {
       // The task is the current message, the parent's turn is history, and
       // it is the ordinary hook body: no pending call, nothing new on the wire.
       const sent = calls[0] as { body: Record<string, unknown> };
-      expect(Object.keys(sent.body).sort()).toEqual(['packet', 'schemaVersion']);
+      expect(Object.keys(sent.body).sort()).toEqual([
+        'accepts',
+        'packet',
+        'schemaVersion',
+        'sessionId',
+      ]);
       const packet = sent.body.packet as {
         current: { text: string };
         history: unknown;
@@ -2464,5 +2483,308 @@ describe('free docs on top of a search', () => {
     const pre = await before('next.js middleware matcher', 'toolu_1', {}, elsewhere);
     expect(pre.out).toEqual({ response: null, action: 'execute', id: 'k3f9-abcd', free: true });
     expect(jobs).toHaveLength(0);
+  });
+});
+
+/**
+ * A PAY-PER-CALL SERVICE NOBODY CURATED, shown exactly where a curated offer
+ * is: the server's own line, attributed and tool-named, under the same spend,
+ * wallet and one-block rules. The shape is the shared fixture's.
+ */
+describe('a discovered service', () => {
+  const DISCOVERED = JSON.parse(
+    readFileSync(
+      fileURLToPath(new URL('./fixtures/wire-hook-discovered.json', import.meta.url)),
+      'utf8',
+    ),
+  ) as { decision: { id: string; hint: string; candidate: { url: string } } };
+  const { id: ID, hint: LINE } = DISCOVERED.decision;
+  const SEEN_LINE = `${HINT_SOURCE}: ${LINE.replace('request({', 'mcp__x402__request({')}`;
+
+  beforeEach(async () => {
+    const fs = await import('node:fs/promises');
+    await fs.writeFile(join(dir, 'config.json'), JSON.stringify(ROUTER_POLICY));
+  });
+
+  it('is injected on a prompt, with the session id and what this build accepts', async () => {
+    const { fetchImpl, calls } = router(DISCOVERED);
+    const out = await runPromptHook(promptEvent('make me a whoosh sound effect'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+    expect(out).toMatchObject({ action: 'discovered', id: ID });
+    expect(out.response).toEqual({
+      hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: SEEN_LINE },
+    });
+    expect((calls[0] as { body: unknown }).body).toMatchObject({
+      sessionId: 'sess-1',
+      accepts: ['discovered'],
+    });
+    // The footer names the seller, and the id binds this session for `request`.
+    expect(await renderProgress(dir, 'sess-1')).toContain('BlockRun');
+    expect(await resolveProgressSession(dir, { id: ID })).not.toBeNull();
+  });
+
+  it('denies a native call once, with the one-block sentence', async () => {
+    const { fetchImpl } = router(DISCOVERED);
+    const event = await preCall('sound effect generator api', 'WebSearch');
+    const out = await runNativeHook(event, { dataDir: dir, baseUrl: BASE, fetchImpl });
+    expect(out).toMatchObject({ action: 'discovered', id: ID });
+    expect(out.response).toEqual({
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: 'deny',
+        permissionDecisionReason: `${SEEN_LINE} ${ONE_BLOCK}`,
+      },
+    });
+    // The next discovered offer is withheld while this one is undelivered.
+    const again = await runNativeHook(await preCall('sound effect generator api', 'WebSearch'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl: router(DISCOVERED).fetchImpl,
+    });
+    expect(again).toEqual({ response: null, action: 'discovered', redirectUndelivered: true });
+  });
+
+  it('is offered after a native call that came back short', async () => {
+    const { fetchImpl } = router(DISCOVERED);
+    const out = await runShortfallHook(await readableEvent('sound effect generator api'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+    expect(out).toMatchObject({ action: 'discovered', id: ID });
+    expect(
+      (out.response as { hookSpecificOutput: { additionalContext: string } }).hookSpecificOutput
+        .additionalContext,
+    ).toBe(
+      `${HINT_SOURCE}: your WebSearch call came back short. Optional: ${SEEN_LINE.slice(HINT_SOURCE.length + 2)}`,
+    );
+  });
+
+  it('is appended to a delegated task', async () => {
+    const path = await transcriptFor([
+      { type: 'user', sessionId: 'sess-1', message: { content: 'make the promo sound better' } },
+    ]);
+    const { fetchImpl } = router(DISCOVERED);
+    const out = await runDelegationHook(
+      {
+        hook_event_name: 'PreToolUse',
+        session_id: 'sess-1',
+        cwd: dir,
+        transcript_path: path,
+        tool_name: 'Agent',
+        tool_input: { prompt: 'Add sound effects to the promo', subagent_type: 'general-purpose' },
+      },
+      { dataDir: dir, baseUrl: BASE, fetchImpl },
+    );
+    expect(out).toMatchObject({ action: 'discovered', id: ID });
+    const prompt = (out.response as { hookSpecificOutput: { updatedInput: { prompt: string } } })
+      .hookSpecificOutput.updatedInput.prompt;
+    expect(prompt).toContain(SEEN_LINE.slice(HINT_SOURCE.length + 2));
+  });
+
+  /** The seller's price and host meet the spend policy exactly as a curated
+   *  provider's do: over the cap, nothing is shown. */
+  it('is withheld when the listed price is over the automatic cap', async () => {
+    const fs = await import('node:fs/promises');
+    await fs.writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ maxAutoSpend: '50000', confirm: 'above:50000' }),
+    );
+    const { fetchImpl } = router(DISCOVERED);
+    const out = await runPromptHook(promptEvent('make me a whoosh sound effect'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+    expect(out).toEqual({ response: null, action: 'discovered', withheld: true });
+  });
+});
+
+/**
+ * THE HOST'S QUESTION TO THE USER. Before it is asked, the questions and their
+ * options ride as the pending call; after it, the user's answers are routed as
+ * their own words.
+ */
+describe('a question to the user', () => {
+  const DISCOVERED = JSON.parse(
+    readFileSync(
+      fileURLToPath(new URL('./fixtures/wire-hook-discovered.json', import.meta.url)),
+      'utf8',
+    ),
+  ) as { decision: { id: string; hint: string } };
+  const SEEN_LINE = `${HINT_SOURCE}: ${DISCOVERED.decision.hint.replace('request({', 'mcp__x402__request({')}`;
+  /** Claude Code's AskUserQuestion input, as the transcript records it. */
+  const QUESTIONS = {
+    questions: [
+      {
+        question: 'For the audio, which can you get?',
+        header: 'Audio',
+        multiSelect: false,
+        options: [
+          {
+            label: 'ElevenLabs API key (Recommended)',
+            description: 'I generate the sound effects and a music bed through their API.',
+          },
+          { label: 'You pick a track', description: 'send me a licensed track.' },
+        ],
+      },
+    ],
+  };
+
+  async function askEvent(over: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
+    const path = await transcriptFor([
+      {
+        type: 'user',
+        sessionId: 'sess-1',
+        message: { content: 'make the promo sound better, I can get API keys if you need them' },
+      },
+    ]);
+    return {
+      hook_event_name: 'PreToolUse',
+      session_id: 'sess-1',
+      cwd: dir,
+      transcript_path: path,
+      tool_name: 'AskUserQuestion',
+      tool_input: QUESTIONS,
+      tool_use_id: 'toolu_ask',
+      ...over,
+    };
+  }
+
+  async function answerEvent(answers: Record<string, string>): Promise<Record<string, unknown>> {
+    return {
+      ...(await askEvent()),
+      hook_event_name: 'PostToolUse',
+      tool_response: { questions: QUESTIONS.questions, answers, annotations: {} },
+    };
+  }
+
+  it('sends the questions and their options as the pending call', async () => {
+    const { fetchImpl, calls } = router(NATIVE);
+    const out = await runAskHook(await askEvent(), { dataDir: dir, baseUrl: BASE, fetchImpl });
+    expect(out).toEqual({ response: null, action: 'native' });
+    const body = (calls[0] as { body: { packet: Record<string, unknown> } }).body;
+    expect(body.packet.pendingCall).toEqual({
+      tool: 'AskUserQuestion',
+      question:
+        'For the audio, which can you get? ' +
+        'ElevenLabs API key (Recommended): I generate the sound effects and a music bed through their API. ' +
+        'You pick a track: send me a licensed track.',
+    });
+    expect((body.packet.current as { text: string }).text).toContain('I can get API keys');
+    expect(body).toMatchObject({ sessionId: 'sess-1', accepts: ['discovered'] });
+  });
+
+  it('denies the question once on an offer, then lets it be asked', async () => {
+    const first = await runAskHook(await askEvent(), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl: router(DISCOVERED).fetchImpl,
+    });
+    expect(first.response).toEqual({
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: 'deny',
+        permissionDecisionReason: `${SEEN_LINE} ${ONE_BLOCK}`,
+      },
+    });
+    const second = await runAskHook(await askEvent(), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl: router(DISCOVERED).fetchImpl,
+    });
+    expect(second).toEqual({ response: null, action: 'discovered', redirectUndelivered: true });
+  });
+
+  it('denies it on a curated offer too, with the same wording', async () => {
+    const { fetchImpl } = router(EXECUTE);
+    const out = await runAskHook(await askEvent(), { dataDir: dir, baseUrl: BASE, fetchImpl });
+    expect(out.response).toEqual({
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: 'deny',
+        permissionDecisionReason: DENIED,
+      },
+    });
+  });
+
+  it('never denies it for a free offer', async () => {
+    const { fetchImpl } = router({
+      ...EXECUTE,
+      decision: { ...EXECUTE.decision, providerPriceAtomic: '0' },
+    });
+    const out = await runAskHook(await askEvent(), { dataDir: dir, baseUrl: BASE, fetchImpl });
+    expect(out).toMatchObject({ response: null, free: true });
+  });
+
+  it('asks nothing about a question with no text', async () => {
+    const { fetchImpl, calls } = router(DISCOVERED);
+    const out = await runAskHook(await askEvent({ tool_input: { questions: [] } }), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+    expect(out.response).toBeNull();
+    expect(calls).toHaveLength(0);
+  });
+
+  it("routes the user's answers as their own words, and offers beside them", async () => {
+    const { fetchImpl, calls } = router(DISCOVERED);
+    const out = await runAnswerHook(
+      await answerEvent({
+        'For the audio, which can you get?':
+          'is there an elevenlabs x402, you already have a wallet, just use it',
+      }),
+      { dataDir: dir, baseUrl: BASE, fetchImpl },
+    );
+    expect(out.response).toEqual({
+      hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: SEEN_LINE },
+    });
+    const packet = (calls[0] as { body: { packet: Record<string, unknown> } }).body.packet;
+    expect(packet.current).toEqual({
+      role: 'user',
+      text: 'is there an elevenlabs x402, you already have a wallet, just use it',
+    });
+    expect(packet.pendingCall).toBeUndefined();
+  });
+
+  it('says nothing on a plain acknowledgement, and asks nothing', async () => {
+    const { fetchImpl, calls } = router(DISCOVERED);
+    const out = await runAnswerHook(
+      await answerEvent({ 'For the audio, which can you get?': 'Yes' }),
+      { dataDir: dir, baseUrl: BASE, fetchImpl },
+    );
+    expect(out).toEqual({ response: null, skipped: 'acknowledgement' });
+    expect(calls).toHaveLength(0);
+  });
+
+  it('is what `tenjin hook ask` and `tenjin hook answer` print', async () => {
+    for (const [kind, event, expected] of [
+      ['ask', await askEvent(), { hookEventName: 'PreToolUse', permissionDecision: 'deny' }],
+      [
+        'answer',
+        await answerEvent({ 'For the audio, which can you get?': 'use a paid service' }),
+        { hookEventName: 'PostToolUse', additionalContext: SEEN_LINE },
+      ],
+    ] as const) {
+      await rm(join(dir, 'progress'), { recursive: true, force: true });
+      const written: string[] = [];
+      const io = {
+        stdout: { write: (chunk: string) => written.push(chunk) },
+        stderr: { write: () => true },
+        isTTY: false,
+      } as never;
+      await runHookCommand(kind, io, {
+        dataDir: dir,
+        baseUrl: BASE,
+        fetchImpl: router(DISCOVERED).fetchImpl,
+        readEvent: async () => JSON.stringify(event),
+      });
+      expect(written).toHaveLength(1);
+      expect(JSON.parse(written[0]!)).toMatchObject({ hookSpecificOutput: expected });
+    }
   });
 });

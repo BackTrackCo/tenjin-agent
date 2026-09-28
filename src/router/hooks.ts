@@ -39,7 +39,7 @@ import {
 import { routerSettings, type RouterSettings } from './settings';
 
 /**
- * The four hook handlers. Between them they do exactly three things: build and
+ * The six hook handlers. Between them they do exactly three things: build and
  * seal the packet, ask for one free decision, and say one thing back to the
  * harness. Before an `execute` is shown where nobody can approve it, they also
  * read the wallet's address from its file and its USDC balance from the RPC
@@ -110,6 +110,25 @@ const ShortfallEventSchema = z.object({
   is_interrupt: z.boolean().optional(),
 });
 
+/** Before the host asks the user: its questions and their options. */
+const AskEventSchema = z.object({
+  hook_event_name: z.literal('PreToolUse').optional(),
+  ...NativeCallFields,
+  tool_name: z.literal('AskUserQuestion'),
+});
+
+/** After the user answered: `tool_response` is `{questions, answers,
+ *  annotations}`, `answers` keyed by each question's text. */
+const AnswerEventSchema = z.object({
+  hook_event_name: z.literal('PostToolUse'),
+  session_id: z.string().min(1).max(200),
+  transcript_path: z.string().optional(),
+  tool_name: z.literal('AskUserQuestion'),
+  tool_input: z.record(z.string(), z.unknown()),
+  tool_response: z.unknown().optional(),
+  cwd: z.string().optional(),
+});
+
 const DelegationEventSchema = z.object({
   session_id: z.string().min(1).max(200),
   transcript_path: z.string().optional(),
@@ -138,6 +157,19 @@ export type HookEvent =
   | { kind: 'prompt'; sessionId: string; transcriptPath?: string; prompt: string; cwd?: string }
   | ({ kind: 'native' } & NativeCall)
   | ({
+      kind: 'ask';
+      /** The questions and their options, joined; null when there are none. */
+      pending: PendingCall | null;
+    } & Omit<NativeCall, 'tool' | 'pending'>)
+  | {
+      kind: 'answer';
+      sessionId: string;
+      transcriptPath?: string;
+      /** The user's answers, joined; null when there are none. */
+      answers: string | null;
+      cwd?: string;
+    }
+  | ({
       kind: 'shortfall';
       eventName: 'PostToolUse' | 'PostToolUseFailure';
       /** What the harness reported, when it was a shortfall; null means none. */
@@ -160,9 +192,9 @@ export type HookEvent =
 
 /**
  * THE ONLY READER OF A HARNESS FIELD. `session_id`, `transcript_path`,
- * `prompt`, `tool_name`, `tool_input` (its `query`, `url`, `prompt` and
- * `subagent_type`), `tool_use_id`, `agent_id`, `agent_type`, `cwd`,
- * `tool_response` and `error` are Claude Code's names; everything past this
+ * `prompt`, `tool_name`, `tool_input` (its `query`, `url`, `prompt`,
+ * `subagent_type` and `questions`), `tool_use_id`, `agent_id`, `agent_type`,
+ * `cwd`, `tool_response` (and its `answers`) and `error` are Claude Code's names; everything past this
  * function reads {@link HookEvent}, so a second harness is a second decoder
  * rather than a change to each arm. `null` is an event no arm handles.
  */
@@ -179,6 +211,25 @@ export function decodeEvent(raw: unknown): HookEvent | null {
   }
   const native = NativeEventSchema.safeParse(raw);
   if (native.success) return { kind: 'native', ...nativeCallOf(native.data) };
+  const answer = AnswerEventSchema.safeParse(raw);
+  if (answer.success) {
+    return {
+      kind: 'answer',
+      sessionId: answer.data.session_id,
+      ...optional('transcriptPath', answer.data.transcript_path),
+      answers: answersOf(answer.data.tool_response, answer.data.tool_input),
+      ...optional('cwd', answer.data.cwd),
+    };
+  }
+  const ask = AskEventSchema.safeParse(raw);
+  if (ask.success) {
+    const question = questionOf(ask.data.tool_input);
+    return {
+      kind: 'ask',
+      ...callFieldsOf(ask.data),
+      pending: question === null ? null : { tool: 'AskUserQuestion', question },
+    };
+  }
   const delegation = DelegationEventSchema.safeParse(raw);
   if (delegation.success) {
     const input = delegation.data.tool_input;
@@ -209,15 +260,72 @@ function nativeCallOf(
   event: Omit<z.infer<typeof NativeEventSchema>, 'hook_event_name'>,
 ): NativeCall {
   return {
-    sessionId: event.session_id,
-    ...optional('transcriptPath', event.transcript_path),
+    ...callFieldsOf(event),
     tool: event.tool_name,
     pending: pendingCallOf(event.tool_name, event.tool_input),
+  };
+}
+
+/** Whose call it is and where it runs, the same for every tool. */
+function callFieldsOf(event: {
+  session_id: string;
+  transcript_path?: string | undefined;
+  tool_use_id?: string | undefined;
+  agent_id?: string | undefined;
+  agent_type?: string | undefined;
+  cwd?: string | undefined;
+}): Omit<NativeCall, 'tool' | 'pending'> {
+  return {
+    sessionId: event.session_id,
+    ...optional('transcriptPath', event.transcript_path),
     ...optional('toolUseId', event.tool_use_id),
     ...optional('agentId', event.agent_id),
     ...optional('agentType', event.agent_type),
     ...optional('cwd', event.cwd),
   };
+}
+
+/**
+ * THE HOST'S OWN WORDS BEFORE IT ASKS: each question, then each option's label
+ * and description, in the order the host wrote them. Not cut here: seal()
+ * masks it first and bounds it after, as it does a search.
+ */
+function questionOf(input: Record<string, unknown>): string | null {
+  const questions = Array.isArray(input.questions) ? input.questions : [];
+  const parts: string[] = [];
+  for (const entry of questions) {
+    if (entry === null || typeof entry !== 'object') continue;
+    const { question, options } = entry as { question?: unknown; options?: unknown };
+    if (typeof question === 'string' && question.trim().length > 0) parts.push(question.trim());
+    for (const option of Array.isArray(options) ? options : []) {
+      if (option === null || typeof option !== 'object') continue;
+      const { label, description } = option as { label?: unknown; description?: unknown };
+      if (typeof label !== 'string' || label.trim().length === 0) continue;
+      parts.push(
+        typeof description === 'string' && description.trim().length > 0
+          ? `${label.trim()}: ${description.trim()}`
+          : label.trim(),
+      );
+    }
+  }
+  const joined = parts.join(' ');
+  return joined.length > 0 ? joined : null;
+}
+
+/** The user's answers, one per line, from the tool's response, or from its
+ *  input where a harness puts them there instead. */
+function answersOf(response: unknown, input: Record<string, unknown>): string | null {
+  for (const holder of [response, input]) {
+    if (holder === null || typeof holder !== 'object' || Array.isArray(holder)) continue;
+    const answers = (holder as { answers?: unknown }).answers;
+    if (answers === null || typeof answers !== 'object' || Array.isArray(answers)) continue;
+    const texts = Object.values(answers as Record<string, unknown>)
+      .filter((value): value is string => typeof value === 'string')
+      .map((value) => value.trim())
+      .filter((value) => value.length > 0);
+    if (texts.length > 0) return texts.join('\n');
+  }
+  return null;
 }
 
 /** WebSearch's `{query, results, durationSeconds, searchCount}` after it ran. */
@@ -532,39 +640,63 @@ export interface PromptHookOutcome {
 export async function runPromptHook(raw: unknown, deps: HookDeps): Promise<PromptHookOutcome> {
   const event = decodeEvent(raw);
   if (event?.kind !== 'prompt') return { response: null };
-  const skipped = promptSkipReason(event.prompt);
+  return offerOnUserText(event, event.prompt, 'UserPromptSubmit', deps);
+}
+
+/**
+ * `tenjin hook answer` (PostToolUse on `AskUserQuestion`). THE USER JUST
+ * ANSWERED, which is a user turn in all but name: an answer like "I can get an
+ * API key" is exactly when a pay-per-call service would do instead. So it is
+ * routed the way a prompt is, with the answers as the current message and the
+ * session's history before them, and an offer is added beside the answers the
+ * host reads next. Anything else is no output at all.
+ */
+export async function runAnswerHook(raw: unknown, deps: HookDeps): Promise<PromptHookOutcome> {
+  const event = decodeEvent(raw);
+  if (event?.kind !== 'answer' || event.answers === null) return { response: null };
+  return offerOnUserText(event, event.answers, 'PostToolUse', deps);
+}
+
+/** The prompt route, for any text that is the user's own words this turn. */
+async function offerOnUserText(
+  event: { sessionId: string; transcriptPath?: string; cwd?: string },
+  text: string,
+  hookEventName: 'UserPromptSubmit' | 'PostToolUse',
+  deps: HookDeps,
+): Promise<PromptHookOutcome> {
+  const skipped = promptSkipReason(text);
   if (skipped !== null) return { response: null, skipped };
   const router = await routerFor(event.cwd, deps);
   if (router === null) return { response: null };
 
   const sealed = seal(
-    scoped(
-      await buildPromptPacket(event.transcriptPath, event.sessionId, event.prompt),
-      router.settings,
-    ),
+    scoped(await buildPromptPacket(event.transcriptPath, event.sessionId, text), router.settings),
   );
   const footer = await openFooter(deps, event.sessionId, 'prompt');
   const deadline = gateDeadline(deps);
-  const outcome = await decide(sealed, deps, router.config);
-  if (outcome === null || outcome.action !== 'execute') {
+  const outcome = await decide(sealed, deps, router.config, event.sessionId);
+  if (!isOffer(outcome)) {
     await footer.close(outcome);
     return { response: null, ...(outcome !== null ? { action: outcome.action } : {}) };
   }
-  const withheld = await withheldBecause(outcome, deps, deadline);
+  const withheld = await withheldBecause(termsOf(outcome), deps, deadline);
   if (withheld !== null) {
     await footer.close(outcome, { withheld });
-    return { response: null, action: 'execute', withheld: true };
+    return { response: null, action: outcome.action, withheld: true };
   }
   await footer.close(outcome);
-  return { action: 'execute', id: outcome.id, ...injection(attributed(outcome.hint)) };
+  return {
+    action: outcome.action,
+    id: outcome.id,
+    ...injection(hookEventName, attributed(outcome.hint)),
+  };
 }
 
-function injection(line: string): { response: unknown } {
-  return {
-    response: {
-      hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: line },
-    },
-  };
+function injection(
+  hookEventName: 'UserPromptSubmit' | 'PostToolUse',
+  line: string,
+): { response: unknown } {
+  return { response: { hookSpecificOutput: { hookEventName, additionalContext: line } } };
 }
 
 /** What either native arm reports about itself; `response` is all the harness sees. */
@@ -599,9 +731,40 @@ export interface ShortfallHookOutcome extends NativeHookOutcome {
 
 type ExecuteDecision = Extract<HookDecision, { action: 'execute' }>;
 
-/** A free offer: nothing to pay, so nothing for the spend policy or the wallet. */
-function isFree(offer: ExecuteDecision): boolean {
-  return offer.providerPriceAtomic === '0';
+/**
+ * AN ANSWER THAT OFFERS SOMETHING: a curated capability (`execute`), or a
+ * pay-per-call service the server found for a step nothing curated serves
+ * (`discovered`). Both carry an id and a finished line, and every hook shows
+ * them in the same place, under the same spend and one-block rules.
+ */
+type OfferDecision = Extract<HookDecision, { action: 'execute' | 'discovered' }>;
+
+function isOffer(decision: HookDecision | null): decision is OfferDecision {
+  return decision?.action === 'execute' || decision?.action === 'discovered';
+}
+
+/** What the spend check, the footer and the one-block rule read, for either
+ *  kind of offer. Every discovered service is one category. */
+function termsOf(offer: OfferDecision): {
+  category: string;
+  provider: string;
+  providerPriceAtomic: string;
+  endpoint: string;
+} {
+  if (offer.action === 'execute') return offer;
+  const { candidate } = offer;
+  return {
+    category: 'discovered',
+    provider: candidate.provider,
+    providerPriceAtomic: candidate.providerPriceAtomic,
+    endpoint: candidate.url,
+  };
+}
+
+/** A free curated offer: nothing to pay, so nothing for the spend policy or
+ *  the wallet. A discovered service is never one: it is always a sale. */
+function isFree(offer: OfferDecision): offer is ExecuteDecision {
+  return offer.action === 'execute' && offer.providerPriceAtomic === '0';
 }
 
 /**
@@ -615,16 +778,17 @@ function isFree(offer: ExecuteDecision): boolean {
  * `repeated` is asked, since it is never a redirect.
  */
 async function routeNativeCall(
-  event: NativeCall,
+  event: Omit<NativeCall, 'tool' | 'pending'>,
   pending: PendingCall,
   deps: HookDeps,
   opts: {
     nativeOutcome?: NativeOutcome;
-    repeated?: (offer: ExecuteDecision) => Promise<boolean>;
+    repeated?: (offer: OfferDecision) => Promise<boolean>;
     passFree?: boolean;
+    operation?: 'prompt' | 'search';
   } = {},
 ): Promise<
-  | { offer: ExecuteDecision; free?: undefined }
+  | { offer: OfferDecision; free?: undefined }
   | { offer: ExecuteDecision; free: true; baseUrl: string }
   | { offer: null; outcome: NativeHookOutcome }
 > {
@@ -677,10 +841,10 @@ async function routeNativeCall(
     );
     return { offer: null, outcome: { response: null } };
   }
-  const footer = await openFooter(deps, event.sessionId, 'search');
+  const footer = await openFooter(deps, event.sessionId, opts.operation ?? 'search');
   const deadline = gateDeadline(deps);
-  const outcome = await decide(sealed, deps, router.config);
-  if (outcome === null || outcome.action !== 'execute') {
+  const outcome = await decide(sealed, deps, router.config, event.sessionId);
+  if (!isOffer(outcome)) {
     await footer.close(outcome);
     return {
       offer: null,
@@ -691,16 +855,16 @@ async function routeNativeCall(
     await footer.close(outcome, { withheld: 'free lookup, call runs' });
     return { offer: outcome, free: true, baseUrl: resolveBaseUrl(deps, router.config) };
   }
-  const withheld = await withheldBecause(outcome, deps, deadline);
+  const withheld = await withheldBecause(termsOf(outcome), deps, deadline);
   if (withheld !== null) {
     await footer.close(outcome, { withheld });
-    return { offer: null, outcome: { response: null, action: 'execute', withheld: true } };
+    return { offer: null, outcome: { response: null, action: outcome.action, withheld: true } };
   }
   if (repeated !== undefined && (await repeated(outcome))) {
     await footer.close(outcome, { withheld: 'already redirected once' });
     return {
       offer: null,
-      outcome: { response: null, action: 'execute', redirectUndelivered: true },
+      outcome: { response: null, action: outcome.action, redirectUndelivered: true },
     };
   }
   await footer.close(outcome);
@@ -742,7 +906,13 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
   const routed = await routeNativeCall(event, event.pending, deps, {
     passFree: true,
     repeated: (offer) =>
-      takeUndelivered(deps.dataDir, event.sessionId, event.agentId, offer.category, deps.now?.()),
+      takeUndelivered(
+        deps.dataDir,
+        event.sessionId,
+        event.agentId,
+        termsOf(offer).category,
+        deps.now?.(),
+      ),
   });
   if (routed.offer === null) return routed.outcome;
   if (routed.free === true) {
@@ -771,21 +941,72 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
   if (event.toolUseId !== undefined) {
     await markOffered(deps.dataDir, event.sessionId, event.toolUseId, deps.now?.());
   }
-  await noteRedirect(deps.dataDir, event.sessionId, event.agentId, routed.offer, deps.now?.());
+  return redirect(event, routed.offer, deps);
+}
+
+/**
+ * Deny the call once with the server's line: the redirect both pre-call arms
+ * make. It becomes this agent's last redirect, which is what keeps the next
+ * call in the same category from being denied while this one is undelivered.
+ */
+async function redirect(
+  event: { sessionId: string; agentId?: string },
+  offer: OfferDecision,
+  deps: HookDeps,
+): Promise<NativeHookOutcome> {
+  await noteRedirect(
+    deps.dataDir,
+    event.sessionId,
+    event.agentId,
+    { id: offer.id, category: termsOf(offer).category },
+    deps.now?.(),
+  );
   return {
     response: {
       hookSpecificOutput: {
         hookEventName: 'PreToolUse',
         permissionDecision: 'deny',
         // THE SERVER'S LINE, attributed and tool-named, then this client's one
-        // sentence. The line already carries the id and the exact search or URL
-        // that was denied.
-        permissionDecisionReason: `${attributed(routed.offer.hint)} ${ONE_BLOCK}`,
+        // sentence. The line already carries the id and the exact search, URL
+        // or question that was denied.
+        permissionDecisionReason: `${attributed(offer.hint)} ${ONE_BLOCK}`,
       },
     },
-    action: 'execute',
-    id: routed.offer.id,
+    action: offer.action,
+    id: offer.id,
   };
+}
+
+/**
+ * `tenjin hook ask` (PreToolUse on `AskUserQuestion`). THE HOST IS ABOUT TO
+ * ASK THE USER FOR SOMETHING, often an API key or an account for a one-off
+ * step, which is the moment a pay-per-call service could answer instead. The
+ * questions and their options ride as the pending call, and an offer denies
+ * the question once with the server's line, under exactly the pre-call arm's
+ * rules: the spend policy and the wallet first, never twice in a row for one
+ * kind of lookup, and a free offer never denies anything. The host can ask
+ * again, and that question runs.
+ */
+export async function runAskHook(raw: unknown, deps: HookDeps): Promise<NativeHookOutcome> {
+  const event = decodeEvent(raw);
+  if (event?.kind !== 'ask' || event.pending === null) return { response: null };
+  const routed = await routeNativeCall(event, event.pending, deps, {
+    passFree: true,
+    operation: 'prompt',
+    repeated: (offer) =>
+      takeUndelivered(
+        deps.dataDir,
+        event.sessionId,
+        event.agentId,
+        termsOf(offer).category,
+        deps.now?.(),
+      ),
+  });
+  if (routed.offer === null) return routed.outcome;
+  if (routed.free === true) {
+    return { response: null, action: routed.offer.action, id: routed.offer.id, free: true };
+  }
+  return redirect(event, routed.offer, deps);
 }
 
 /**
@@ -859,7 +1080,7 @@ async function offerOnShortfall(
   if (routed.offer === null) return { ...routed.outcome, nativeOutcome };
   // The free docs lookup for this very search just came back empty: offering
   // it again would send the agent to the same miss. Only a paid offer stands.
-  if (docsJustMissed && routed.offer.providerPriceAtomic === '0')
+  if (docsJustMissed && isFree(routed.offer))
     return { response: null, nativeOutcome, action: 'execute' };
   return {
     response: {
@@ -871,7 +1092,7 @@ async function offerOnShortfall(
       },
     },
     nativeOutcome,
-    action: 'execute',
+    action: routed.offer.action,
     id: routed.offer.id,
   };
 }
@@ -928,15 +1149,15 @@ export async function runDelegationHook(
   if (sealed.packet.historyStatus !== 'ok') return { response: null };
   const footer = await openFooter(deps, event.sessionId, 'delegate');
   const deadline = gateDeadline(deps);
-  const outcome = await decide(sealed, deps, router.config);
-  if (outcome === null || outcome.action !== 'execute') {
+  const outcome = await decide(sealed, deps, router.config, event.sessionId);
+  if (!isOffer(outcome)) {
     await footer.close(outcome);
     return { response: null, ...(outcome !== null ? { action: outcome.action } : {}) };
   }
-  const withheld = await withheldBecause(outcome, deps, deadline);
+  const withheld = await withheldBecause(termsOf(outcome), deps, deadline);
   if (withheld !== null) {
     await footer.close(outcome, { withheld });
-    return { response: null, action: 'execute', withheld: true };
+    return { response: null, action: outcome.action, withheld: true };
   }
   await footer.close(outcome);
   return {
@@ -950,7 +1171,7 @@ export async function runDelegationHook(
         },
       },
     },
-    action: 'execute',
+    action: outcome.action,
     id: outcome.id,
   };
 }
@@ -1001,7 +1222,7 @@ async function openFooter(
         },
         now(),
       );
-      if (withheld === undefined && decision !== null && decision.action === 'execute') {
+      if (withheld === undefined && isOffer(decision)) {
         await bindDecision(deps.dataDir, sessionId, decision.id, now());
       }
     },
@@ -1012,7 +1233,7 @@ async function openFooter(
  *  blank line: the turn runs on native tools and the footer says which. */
 function hookOutcome(decision: HookDecision | null): string {
   if (decision === null) return 'native tools (router unavailable)';
-  if (decision.action === 'execute') return `paid lookup offered (${decision.provider})`;
+  if (isOffer(decision)) return `paid lookup offered (${termsOf(decision).provider})`;
   if (decision.action === 'native') return 'native tools (no x402 payment)';
   return 'needs input';
 }
@@ -1024,12 +1245,13 @@ async function decide(
   { packet }: Sealed,
   deps: HookDeps,
   config: PartialConfig,
+  sessionId: string,
 ): Promise<HookDecision | null> {
   const baseUrl = resolveBaseUrl(deps, config);
   const warn = deps.warn ?? ((line: string) => process.stderr.write(`${line}\n`));
   const outcome = await requestDecision(
     'hook',
-    { packet },
+    { packet, sessionId },
     {
       ctx: hookContext(deps),
       baseUrl,

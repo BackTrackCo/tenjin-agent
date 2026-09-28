@@ -26,6 +26,8 @@ export function registerRouter(reg: Registration): void {
       'PostToolUse(Failure) on WebSearch|WebFetch: offer a paid lookup when the result came back short',
     ],
     ['agent', "PreToolUse on Agent|Task: append any paid offer to the subagent's task"],
+    ['ask', 'PreToolUse on AskUserQuestion: allow the question, or redirect it once'],
+    ['answer', "PostToolUse on AskUserQuestion: offer a paid lookup beside the user's answers"],
   ] as const) {
     addGlobalFlags(hook.command(name))
       .summary(summary)

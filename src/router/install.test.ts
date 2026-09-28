@@ -92,8 +92,12 @@ const CURRENT_HOOKS = {
   PreToolUse: [
     { matcher: 'WebSearch|WebFetch', hooks: handler('tenjin hook native') },
     { matcher: 'Agent|Task', hooks: handler('tenjin hook agent') },
+    { matcher: 'AskUserQuestion', hooks: handler('tenjin hook ask') },
   ],
-  PostToolUse: [{ matcher: 'WebSearch|WebFetch', hooks: afterCall }],
+  PostToolUse: [
+    { matcher: 'WebSearch|WebFetch', hooks: afterCall },
+    { matcher: 'AskUserQuestion', hooks: handler('tenjin hook answer') },
+  ],
   PostToolUseFailure: [{ matcher: 'WebSearch|WebFetch', hooks: afterCall }],
 };
 
@@ -135,7 +139,7 @@ function deps(over: Record<string, unknown> = {}) {
 }
 
 describe('tenjin install', () => {
-  it('writes the five hook entries, the allow rule and the MCP registration', async () => {
+  it('writes the seven hook entries, the allow rule and the MCP registration', async () => {
     const registerMcp = vi.fn(async () => undefined);
     const result = await runRouterInstall({}, ctx(), deps({ registerMcp }));
     const settings = await readSettings();
@@ -1052,7 +1056,7 @@ describe('tenjin update re-applies the install', () => {
     const result = await runRouterInstall(args, ctx(), deps());
     expect((onlyInstall(result) as { hooks: { wrote: boolean } }).hooks.wrote).toBe(true);
     const after = (await readSettings()).hooks as typeof CURRENT_HOOKS;
-    expect(after.PostToolUse).toEqual([{ matcher: 'WebSearch|WebFetch', hooks: afterCall }]);
+    expect(after.PostToolUse[0]).toEqual({ matcher: 'WebSearch|WebFetch', hooks: afterCall });
     expect(after.PostToolUseFailure).toEqual([{ matcher: 'WebSearch|WebFetch', hooks: afterCall }]);
     expect(after.PreToolUse[0]).toEqual({
       matcher: 'WebSearch|WebFetch',
