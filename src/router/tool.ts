@@ -100,6 +100,14 @@ export async function runRequestTool(
   // The same rule for a discovered service's input, which goes to the seller
   // as the request body or its query string.
   if (input !== undefined) {
+    // The server builds the call from the service that id named, so an input
+    // with no id has nothing to go to.
+    if (args.id === undefined || args.id.length === 0) {
+      return fail(
+        'needs_input',
+        'An input goes with the id from the line that named the service; send both.',
+      );
+    }
     const serialized = JSON.stringify(input);
     if (Buffer.byteLength(serialized) > MAX_INPUT_BYTES) {
       return fail('needs_input', `The input is over ${MAX_INPUT_BYTES} bytes; send a smaller one.`);

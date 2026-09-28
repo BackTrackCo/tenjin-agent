@@ -801,6 +801,13 @@ describe('a discovered service', () => {
     expect(calls).toHaveLength(0);
   });
 
+  it('refuses an input with no id before anything is sent', async () => {
+    const { fetchImpl, calls } = net([]);
+    const result = await runRequestTool({ input: { text: 'whoosh' } }, deps(fetchImpl));
+    expect(result.envelope).toMatchObject({ status: 'needs_input' });
+    expect(calls).toHaveLength(0);
+  });
+
   it('refuses an input over the server cap before anything is sent', async () => {
     const { fetchImpl, calls } = net([]);
     const result = await runRequestTool(
