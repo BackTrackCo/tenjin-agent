@@ -138,4 +138,4 @@ A subagent is only redirected or offered a lookup when it is known to have `mcp_
 
 `allowlistCreators` is a spend-policy key that restricts which hosts may be paid at all. The permission rule on this page is a harness setting about which tool may run. They are separate gates and neither substitutes for the other.
 
-The existing request tool also prepares human-review drafts and reads saved job handles. These actions grant no authority to fund an account or hire. See [human-review commands](human-reviews.md) for explicit funding and sharing actions; ordinary automatic-spend refusals are unchanged.
+The existing request tool also prepares human-review drafts, resumes provider status and accepts typed job actions. Drafts and status grant no authority to spend. Quoting needs sharing consent; posting binds explicit approval to the public brief and all-in total; applicant selection, evidence acceptance and payment release each need explicit consent. See [human-review commands](human-reviews.md). Provider credit is not automatic spending permission, and ordinary automatic-spend refusals are unchanged.

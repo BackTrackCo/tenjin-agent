@@ -69,4 +69,4 @@ network_access = true
 
 That setting enables the network path; it does not grant spending by itself.
 
-Human second opinions use internally managed RentAHuman credentials in private local storage. See [human review custody and launch gates](human-reviews.md). Draft preparation is local; quote sharing and account funding require explicit actions.
+Human second opinions use internally managed RentAHuman credentials in private local storage. See [human review custody and recovery](human-reviews.md). Draft preparation is local; sharing, funding, hiring, evidence approval and release require explicit actions. Status never spends; durable attempts prevent silent duplicate mutations.

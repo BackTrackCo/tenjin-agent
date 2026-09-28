@@ -98,9 +98,43 @@ function registerReviewJobs(reg: Registration): void {
     await reg.runCommand('jobs status', this, async (ctx) => {
       const { readReview } = await import('../router/review/jobs');
       const result = await readReview(ctx, jobId);
-      return { data: result.envelope, humanLines: [result.summary] };
+      return { data: result.envelope, humanLines: [JSON.stringify(result.envelope)] };
     });
   });
+  for (const action of ['submit', 'select', 'approve', 'release'] as const) {
+    const command = reg
+      .addGlobalFlags(jobs.command(`${action} <jobId>`))
+      .requiredOption('--yes', 'record explicit prior user approval of this action');
+    if (action === 'submit')
+      command
+        .requiredOption('--quote-id <id>', 'saved quote ID')
+        .requiredOption('--approval <digest>', 'exact approved quote digest');
+    if (action === 'select') command.requiredOption('--application-id <id>', 'approved applicant');
+    if (action === 'approve')
+      command
+        .requiredOption('--submission-id <id>', 'reviewed submission')
+        .requiredOption('--evidence-revision <digest>', 'exact reviewed evidence revision');
+    command.action(async function (this: Command, jobId: string) {
+      await reg.runCommand(`jobs ${action}`, this, async (ctx) => {
+        const { actOnReview } = await import('../router/review/lifecycle');
+        const result = await actOnReview(ctx, jobId, {
+          action,
+          yes: this.opts().yes,
+          ...(action === 'submit'
+            ? { quoteId: this.opts().quoteId, approval: this.opts().approval }
+            : {}),
+          ...(action === 'select' ? { applicationId: this.opts().applicationId } : {}),
+          ...(action === 'approve'
+            ? {
+                submissionId: this.opts().submissionId,
+                evidenceRevision: this.opts().evidenceRevision,
+              }
+            : {}),
+        });
+        return { data: result.envelope, humanLines: [JSON.stringify(result.envelope)] };
+      });
+    });
+  }
   reg
     .addGlobalFlags(jobs.command('connect'))
     .option('--yes', 'record prior consent to $10 signup credit')

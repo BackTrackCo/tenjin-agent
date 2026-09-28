@@ -2,7 +2,6 @@ import { join } from 'node:path';
 import { z } from 'zod';
 import { runPay, type PayDeps } from '../../commands/pay';
 import { CliError } from '../../lib/errors';
-import { httpRequest } from '../../lib/http';
 import { withFileLock } from '../../lib/lock';
 import { resolveWalletProvider } from '../../lib/wallet';
 import type { CommandContext, CommandResult } from '../../context';
@@ -107,37 +106,4 @@ export async function connectReviewAccount(
       humanLines: ['RentAHuman connected; credential saved privately. No review was purchased.'],
     };
   });
-}
-export async function providerRead(
-  ctx: CommandContext,
-  path: string,
-  body?: unknown,
-  fetchImpl?: typeof fetch,
-): Promise<unknown> {
-  const { account } = await reviewAccount(ctx);
-  if (!account)
-    throw new CliError('REFUSED', 'RentAHuman is not connected.', {
-      fix: 'Approve $10 of initial provider credit with tenjin jobs connect. No API-key setup is needed.',
-    });
-  if (!['/bounties', '/wallet/balance', '/wallet/controls'].includes(path))
-    throw new CliError('REFUSED', 'Unsupported review read.');
-  if (
-    body !== undefined &&
-    (path !== '/bounties' || (body as { dryRun?: unknown }).dryRun !== true)
-  )
-    throw new CliError('REFUSED', 'Only a non-purchasing quote is supported by this draft.');
-  const result = await httpRequest(`https://rentahuman.ai/api${path}`, {
-    method: body === undefined ? 'GET' : 'POST',
-    ...(body !== undefined ? { jsonBody: body } : {}),
-    headers: { 'X-API-Key': account.apiKey },
-    timeoutMs: ctx.flags.timeout,
-    blockRedirects: true,
-    ...(fetchImpl ? { fetchImpl } : {}),
-  });
-  if (!result.ok || result.status < 200 || result.status >= 300)
-    throw new CliError(
-      'REFUSED',
-      'RentAHuman could not verify this read. No hiring request was sent.',
-    );
-  return result.json;
 }
