@@ -212,6 +212,9 @@ async function executePay(
     ...(jsonBody !== undefined ? { jsonBody } : {}),
     ...(jsonBody === undefined && args.rawBody !== undefined ? { rawBody: args.rawBody } : {}),
     ...(Object.keys(headers).length > 0 ? { headers } : {}),
+    // A router lookup can buy a file (a sound, an image): its bytes are kept
+    // whole for the tool to save, never decoded as text.
+    ...(router ? { binaryBody: true as const } : {}),
     method,
   };
 
@@ -875,9 +878,13 @@ function deliver(url: string, lane: Lane, res: HttpResponse, opts: DeliverOpts):
     // a caller branching on a delivery must not have to match on prose, which
     // is how an unchecked body passed for a checked one one layer up.
     ...(opts.caveat !== undefined ? { resultUnverified: true, resultCaveat: opts.caveat } : {}),
-    // The body is the product: JSON when the endpoint spoke it, raw text always.
+    // The body is the product: JSON when the endpoint spoke it, raw text always,
+    // and the bytes themselves when it was a file.
     ...(res.json !== undefined ? { body: res.json } : {}),
     bodyText: res.text,
+    ...(res.bytes !== undefined
+      ? { bodyBytes: res.bytes, contentType: res.header('content-type') ?? '' }
+      : {}),
   };
   const headline = opts.paid
     ? `paid ${toMoney(opts.amountAtomic.toString()).usd} USD to ${sanitizeForTerminal(new URL(url).host)}` +

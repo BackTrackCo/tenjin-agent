@@ -171,3 +171,11 @@ export const VITEST_REPORTER_FILE = 'tenjin-vitest-reporter.mjs';
 export function vitestReporterPath(dir: string = dataDir()): string {
   return join(hooksDir(dir), VITEST_REPORTER_FILE);
 }
+
+/**
+ * Where a router lookup that bought a file (a sound, an image) saves it. The
+ * bytes cannot ride in the tool result, so the result names this file instead.
+ */
+export function downloadsDir(dir: string = dataDir()): string {
+  return join(dir, 'downloads');
+}

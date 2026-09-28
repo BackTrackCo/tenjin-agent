@@ -3,6 +3,7 @@ import {
   fetchJson,
   fetchFailureToCliError,
   httpRequest,
+  isBinaryContentType,
   shelfBypassHeaders,
   setTenjinIdentity,
   INSTALL_ID_HEADER,
@@ -1109,5 +1110,50 @@ describe('the install id header', () => {
     await httpRequest(`${TENJIN}/api/search`, { timeoutMs: 1000, fetchImpl });
     expect(seen[0]?.headers[INSTALL_ID_HEADER]).toBe(INSTALL);
     expect(seen[0]?.redirect).toBeUndefined();
+  });
+});
+
+describe('a binary body, kept as bytes only when asked', () => {
+  const bytes = new Uint8Array([0xff, 0xfb, 0x90, 0x00, 0x80]);
+  const fetchImpl = (async () =>
+    new Response(bytes, {
+      status: 200,
+      headers: { 'content-type': 'audio/mpeg' },
+    })) as typeof fetch;
+
+  it('returns the bytes and an empty text with binaryBody', async () => {
+    const res = await httpRequest('https://seller.example.test/a', {
+      timeoutMs: 1000,
+      fetchImpl,
+      binaryBody: true,
+    });
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.bytes).toEqual(bytes);
+    expect(res.text).toBe('');
+    expect(res.json).toBeUndefined();
+  });
+
+  it('reads text as before without it', async () => {
+    const res = await httpRequest('https://seller.example.test/a', { timeoutMs: 1000, fetchImpl });
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.bytes).toBeUndefined();
+    expect(res.text.length).toBeGreaterThan(0);
+  });
+
+  it.each([
+    ['audio/mpeg', true],
+    ['image/png', true],
+    ['application/octet-stream', true],
+    ['application/pdf', true],
+    ['application/json; charset=utf-8', false],
+    ['application/problem+json', false],
+    ['text/html', false],
+    ['application/xml', false],
+    ['image/svg+xml', false],
+    ['', false],
+  ])('%s is binary: %s', (type, binary) => {
+    expect(isBinaryContentType(type)).toBe(binary);
   });
 });

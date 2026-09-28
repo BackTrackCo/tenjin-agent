@@ -1,6 +1,9 @@
+import { mkdir, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { runPay, type AdvertisedTerms, type PayDeps } from '../commands/pay';
 import { CliError } from '../lib/errors';
 import { toMoney } from '../lib/money';
+import { downloadsDir } from '../lib/paths';
 import { mask } from '../lib/redact';
 import { assertResultSchema, canonicalHash } from '../lib/request-schema';
 import { resolveContextSettings } from '../lib/settings';
@@ -33,11 +36,18 @@ import { routerSettings } from './settings';
  */
 
 export interface RequestToolArgs {
-  query: string;
+  /** Optional only beside `input`. */
+  query?: string;
   /** The turn id from the hook's line. It names the service that line offered, and
    *  the server runs that one; it grants nothing locally, every cap still applies. */
   id?: string;
+  /** The host's own input for a discovered service, per the schema its line
+   *  gave. The server builds the request from it; every cap still applies. */
+  input?: Record<string, unknown>;
 }
+
+/** The server's own cap on `input`, serialized. */
+export const MAX_INPUT_BYTES = 16 * 1024;
 
 export interface RequestToolDeps {
   ctx: CommandContext;
@@ -53,6 +63,8 @@ export interface RequestToolDeps {
   /** The directory `router.*` resolves from; defaults to `process.cwd()`, which
    *  Claude Code sets to the project directory for an MCP server. */
   cwd?: string;
+  /** Clock seam for a saved file's name. */
+  now?: () => number;
 }
 
 export interface RequestToolResult {
@@ -70,8 +82,9 @@ export async function runRequestTool(
   // user marked private: nothing is sent and nothing is paid.
   const off = await routerOff(deps);
   if (off !== null) return fail('needs_input', off, { nextStep: ROUTER_OFF_NEXT_STEP });
-  const query = args.query.trim().slice(0, 8_000);
-  if (query.length === 0) {
+  const query = (args.query ?? '').trim().slice(0, 8_000);
+  const { input } = args;
+  if (query.length === 0 && input === undefined) {
     return fail(
       'needs_input',
       'A request needs a query naming the task, its inputs and any constraints.',
@@ -83,6 +96,17 @@ export async function runRequestTool(
   // write it.
   if (mask(query) !== query) {
     return fail('native', 'the query carries a credential-shaped value, so nothing was sent');
+  }
+  // The same rule for a discovered service's input, which goes to the seller
+  // as the request body or its query string.
+  if (input !== undefined) {
+    const serialized = JSON.stringify(input);
+    if (Buffer.byteLength(serialized) > MAX_INPUT_BYTES) {
+      return fail('needs_input', `The input is over ${MAX_INPUT_BYTES} bytes; send a smaller one.`);
+    }
+    if (mask(serialized) !== serialized) {
+      return fail('native', 'the input carries a credential-shaped value, so nothing was sent');
+    }
   }
   // THE FOOTER, OPENED FIRST AND TRUSTED WITH NOTHING: it shows this lookup in
   // the terminal while it runs, resolved to a session through the hook's own
@@ -106,7 +130,11 @@ export async function runRequestTool(
   // from the query.
   const fresh = await requestDecision(
     'tool',
-    { query, ...(args.id !== undefined && args.id.length > 0 ? { id: args.id } : {}) },
+    {
+      ...(query.length > 0 ? { query } : {}),
+      ...(args.id !== undefined && args.id.length > 0 ? { id: args.id } : {}),
+      ...(input !== undefined ? { input } : {}),
+    },
     decisionDeps,
   );
   if (fresh.status === 'failed') {
@@ -116,6 +144,34 @@ export async function runRequestTool(
     });
   }
   const { decision, note } = fresh.decision;
+
+  // A SERVICE NOBODY CURATED, named for the host to judge. Nothing is paid on
+  // this answer: the server's own line says how to call it, with the id it
+  // minted and the input the host builds, and that second call pays through
+  // the execute path below like any other.
+  if (decision.action === 'discovered') {
+    await footer.done('service found');
+    const { candidate } = decision;
+    return {
+      isError: false,
+      summary: decision.hint,
+      envelope: {
+        status: 'discovered',
+        id: decision.id,
+        service: {
+          provider: candidate.provider,
+          url: candidate.url,
+          method: candidate.method,
+          description: candidate.description,
+          price: `$${toMoney(candidate.providerPriceAtomic).usd}`,
+          input: candidate.input,
+        },
+        cost: costLines(0n),
+        ...(note !== undefined ? { note } : {}),
+        providerContentUntrusted: true,
+      },
+    };
+  }
 
   if (decision.action !== 'execute') {
     await footer.done(decision.action === 'native' ? 'native' : 'needs_input');
@@ -174,6 +230,9 @@ export async function runRequestTool(
     );
     const data = paid.data as {
       bodyText?: string;
+      /** A binary body's bytes and type, kept whole by the provider leg. */
+      bodyBytes?: Uint8Array;
+      contentType?: string;
       amountPaid?: { atomic: string };
       /** Set when the body missed its success rule, or the rule never ran. */
       resultUnverified?: boolean;
@@ -185,7 +244,15 @@ export async function runRequestTool(
       ...(contract.arguments !== undefined ? { parameters: contract.arguments } : {}),
       cost: costLines(providerAtomic),
       ...(note !== undefined ? { note } : {}),
-      result: data.bodyText ?? '',
+      // A FILE IS SAVED, NOT INLINED: its bytes are no use as text in a tool
+      // result, so the result names where they are.
+      result:
+        data.bodyBytes !== undefined
+          ? await saveBinary(deps.ctx.dataDir, decision.capabilityId, data.bodyBytes, {
+              contentType: data.contentType ?? '',
+              ...(deps.now !== undefined ? { now: deps.now } : {}),
+            })
+          : (data.bodyText ?? ''),
       providerContentUntrusted: true,
     };
     // UNVERIFIED IS NOT FULFILLED. A body that missed its success rule, or
@@ -248,6 +315,69 @@ export async function runRequestTool(
       ...(detail.settlement !== undefined ? { settlement: detail.settlement } : {}),
       ...(detail.diagnosis !== undefined ? { diagnosis: detail.diagnosis } : {}),
     });
+  }
+}
+
+/** Extensions for the file types a paid lookup plausibly returns; any other
+ *  type keeps a short subtype of its own, or `bin`. */
+const EXTENSIONS: Record<string, string> = {
+  'audio/mpeg': 'mp3',
+  'audio/mp3': 'mp3',
+  'audio/wav': 'wav',
+  'audio/x-wav': 'wav',
+  'audio/wave': 'wav',
+  'audio/ogg': 'ogg',
+  'audio/aac': 'aac',
+  'audio/flac': 'flac',
+  'audio/webm': 'webm',
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/gif': 'gif',
+  'image/webp': 'webp',
+  'image/svg+xml': 'svg',
+  'video/mp4': 'mp4',
+  'video/webm': 'webm',
+  'application/pdf': 'pdf',
+  'application/zip': 'zip',
+  'application/octet-stream': 'bin',
+};
+
+export function extensionFor(contentType: string): string {
+  const type = contentType.split(';')[0]!.trim().toLowerCase();
+  const known = EXTENSIONS[type];
+  if (known !== undefined) return known;
+  const subtype = type.split('/')[1] ?? '';
+  return /^[a-z0-9]{1,10}$/.test(subtype) ? subtype : 'bin';
+}
+
+/**
+ * Write a binary body under the data dir as `<capability>-<timestamp>.<ext>`
+ * and say where: the path, the type and the size are what the host needs to
+ * use it. The name is built from characters a path segment can always hold.
+ *
+ * NEVER THROWS. The money has already moved when this runs, and a throw here
+ * would reach the failure arm, which reports nothing paid; a file that could
+ * not be written is said so beside the amount instead.
+ */
+async function saveBinary(
+  dataDir: string,
+  capabilityId: string,
+  bytes: Uint8Array,
+  opts: { contentType: string; now?: () => number },
+): Promise<{ savedTo?: string; saveError?: string; contentType: string; bytes: number }> {
+  const described = { contentType: opts.contentType, bytes: bytes.byteLength };
+  try {
+    const directory = downloadsDir(dataDir);
+    await mkdir(directory, { recursive: true });
+    const stem = capabilityId.replace(/[^A-Za-z0-9_-]+/g, '-').slice(0, 80) || 'lookup';
+    const path = join(
+      directory,
+      `${stem}-${(opts.now ?? Date.now)()}.${extensionFor(opts.contentType)}`,
+    );
+    await writeFile(path, bytes, { mode: 0o600 });
+    return { savedTo: path, ...described };
+  } catch (err) {
+    return { saveError: err instanceof Error ? err.message : String(err), ...described };
   }
 }
 

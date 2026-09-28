@@ -474,6 +474,26 @@ export interface HttpRequestOptions {
    * Off by default so search/outcome/publish/doctor keep normal transport.
    */
   blockRedirects?: boolean;
+  /**
+   * Keep a binary body as bytes. A sound, an image or any other non-text
+   * payload decoded as text is corrupted, so with this set a response whose
+   * content type is not text ({@link isBinaryContentType}) comes back with
+   * `bytes` and an empty `text`. The router's provider leg sets it; every other
+   * caller reads text as before.
+   */
+  binaryBody?: boolean;
+}
+
+/**
+ * A content type whose body is not text: anything that is not `text/*` and
+ * not a JSON, XML, JavaScript, YAML or form type. An absent header is text, as
+ * it always was here.
+ */
+export function isBinaryContentType(contentType: string | undefined): boolean {
+  const type = (contentType ?? '').split(';')[0]!.trim().toLowerCase();
+  if (type.length === 0) return false;
+  if (type.startsWith('text/')) return false;
+  return !/(?:json|xml|javascript|ecmascript|yaml|x-www-form-urlencoded)/.test(type);
 }
 
 export interface HttpResponse {
@@ -485,6 +505,9 @@ export interface HttpResponse {
   json: unknown;
   /** The raw body text; what a non-JSON endpoint actually said (`pay` delivers it). */
   text: string;
+  /** The body's bytes, only for a binary body read with `binaryBody`; `text`
+   *  is then empty. */
+  bytes?: Uint8Array;
   requestId?: string;
 }
 
@@ -616,8 +639,14 @@ export async function httpRequest(url: string, opts: HttpRequestOptions): Promis
     // HTML error page) yields `undefined` rather than a thrown parse, because a
     // 402/409 caller keys off the STATUS and only some statuses carry JSON.
     let text: string;
+    let bytes: Uint8Array | undefined;
     try {
-      text = await res.text();
+      if (opts.binaryBody === true && isBinaryContentType(res.headers.get('content-type') ?? '')) {
+        bytes = new Uint8Array(await res.arrayBuffer());
+        text = '';
+      } else {
+        text = await res.text();
+      }
     } catch (err) {
       if (timedOut) return timeoutFailure(url, opts.timeoutMs);
       return {
@@ -642,6 +671,7 @@ export async function httpRequest(url: string, opts: HttpRequestOptions): Promis
       header: (name) => res.headers.get(name) ?? undefined,
       json,
       text,
+      ...(bytes !== undefined ? { bytes } : {}),
       ...(requestId !== undefined ? { requestId } : {}),
     };
   } finally {
