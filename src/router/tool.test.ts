@@ -116,6 +116,8 @@ interface Leg {
   url: string;
   status: number;
   body: unknown;
+  /** Sent as is in place of `body`, for an answer that is not JSON. */
+  raw?: string;
   headers?: Record<string, string>;
 }
 
@@ -138,7 +140,7 @@ function net(legs: Leg[]): {
     });
     const leg = queue.shift();
     if (leg === undefined) throw new Error(`unscripted request to ${String(input)}`);
-    return new Response(JSON.stringify(leg.body), {
+    return new Response(leg.raw ?? JSON.stringify(leg.body), {
       status: leg.status,
       headers: { 'content-type': 'application/json', ...leg.headers },
     });
@@ -369,6 +371,58 @@ describe('a provider that refuses the lookup', () => {
     expect(reason).toContain('answered 503: Unavailable [2J xxx');
     expect(reason).not.toMatch(/\p{Cc}/u);
     expect(reason.length).toBeLessThan(600);
+  });
+});
+
+/**
+ * A PAID CALL THE PROVIDER REFUSED SAYS WHY. Firecrawl answered 403 on a
+ * LinkedIn URL after the authorization left, and the envelope carried neither
+ * the status nor the provider's reason, so nobody could tell a refused target
+ * from an outage. Settlement stays unknown: the authorization is still out.
+ */
+describe('a paid call the provider refused', () => {
+  const REASON = 'This website is no longer supported, please reach out to support.';
+
+  /** The paid leg answers 403 with `answer`, after a 402 and one signature. */
+  async function refused(
+    answer: Partial<Leg>,
+  ): Promise<Awaited<ReturnType<typeof runRequestTool>>> {
+    const { fetchImpl, calls } = net([
+      { url: ROUTER, status: 200, body: decision() },
+      { url: PROVIDER, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge() } },
+      { url: PROVIDER, status: 403, body: null, ...answer },
+    ]);
+    const result = await runRequestTool(
+      { query: 'https://www.linkedin.com/in/someone', id: 'k3f9-abcd' },
+      deps(fetchImpl),
+    );
+    expect(calls.filter((call) => call.paid)).toHaveLength(1);
+    return result;
+  }
+
+  it("carries the provider's status and its JSON reason", async () => {
+    const result = await refused({ body: { success: false, error: REASON } });
+    expect(result.isError).toBe(true);
+    expect(result.envelope).toMatchObject({
+      status: 'failed',
+      providerStatus: 403,
+      providerError: JSON.stringify({ success: false, error: REASON }),
+      settlement: 'unknown',
+      cost: ['provider price 0.01 USD'],
+      providerContentUntrusted: true,
+    });
+  });
+
+  it('bounds a page that is not JSON and keeps it to one plain line', async () => {
+    const result = await refused({
+      raw: `<html>\n<h1>403</h1> ${REASON}\u001b[2J\u202e ${'x'.repeat(2_000)}</html>`,
+    });
+    expect(result.envelope).toMatchObject({ providerStatus: 403, settlement: 'unknown' });
+    const snippet = String(result.envelope.providerError);
+    expect(snippet.startsWith(`<html> <h1>403</h1> ${REASON}`)).toBe(true);
+    expect(snippet).not.toMatch(/[\p{Cc}\u202e]/u);
+    expect(Array.from(snippet)).toHaveLength(501);
+    expect(snippet.endsWith('…')).toBe(true);
   });
 });
 
