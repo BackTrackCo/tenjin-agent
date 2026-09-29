@@ -884,7 +884,7 @@ export async function inspectFreeVerbRules(
   };
 }
 
-interface AllowlistInspection {
+export interface AllowlistInspection {
   path: string;
   /** The exact bytes read, so the commit can prove nothing changed underneath it. */
   raw: string | null;
@@ -904,7 +904,19 @@ async function inspectAllowlist(
   homeDir: string,
   mode: PublishMode,
 ): Promise<AllowlistInspection | { result: PermissionsResult }> {
-  const declaredPath = claudeSettingsPath(homeDir);
+  return inspectAllowlistAt(claudeSettingsPath(homeDir), rulesForPublishMode(mode));
+}
+
+/**
+ * The same read, for any settings file and any rule list. Every refusal this
+ * module can reach is decided here, so a second writer cannot accidentally
+ * skip the symlink resolution, the shape checks or the bytes a commit has to
+ * compare against. `tenjin install`'s router rule goes through it.
+ */
+export async function inspectAllowlistAt(
+  declaredPath: string,
+  rules: readonly string[],
+): Promise<AllowlistInspection | { result: PermissionsResult }> {
   const refuse = (
     p: string,
     reason: PermissionsSkipReason,
@@ -994,8 +1006,55 @@ async function inspectAllowlist(
   const allow: unknown[] = allowValue ?? [];
 
   const present = new Set(allow.filter((e): e is string => typeof e === 'string'));
-  const writable = rulesForPublishMode(mode);
-  const added = writable.filter((rule) => !present.has(rule));
-  const alreadyPresent = writable.filter((rule) => present.has(rule));
+  const added = rules.filter((rule) => !present.has(rule));
+  const alreadyPresent = rules.filter((rule) => present.has(rule));
   return { path, raw, settings, permissions, allow, added, alreadyPresent: [...alreadyPresent] };
+}
+
+export interface AppendAllowlistResult {
+  path: string;
+  added: string[];
+  alreadyPresent: string[];
+  skipped?: PermissionsSkipReason;
+  warning?: string;
+}
+
+/**
+ * Append rules to `permissions.allow` in one settings file, keeping every other
+ * key. Shares {@link inspectAllowlistAt}'s refusals and the changed-since-read
+ * compare, so a file this module will not touch is a file no writer here
+ * touches: a symlink is resolved before the rename, an unparseable file is left
+ * exactly as it is, and a write that landed underneath is refused rather than
+ * erased.
+ */
+export async function appendAllowlistRules(
+  declaredPath: string,
+  rules: readonly string[],
+): Promise<AppendAllowlistResult> {
+  const found = await inspectAllowlistAt(declaredPath, rules);
+  if ('result' in found) {
+    const result = found.result;
+    return {
+      path: result.path ?? declaredPath,
+      added: [],
+      alreadyPresent: [],
+      ...(result.skipped !== undefined ? { skipped: result.skipped } : {}),
+      ...(result.warning !== undefined ? { warning: result.warning } : {}),
+    };
+  }
+  const { path, raw, settings, permissions, allow, added, alreadyPresent } = found;
+  if (added.length === 0) return { path, added: [], alreadyPresent };
+  const next = { ...settings, permissions: { ...permissions, allow: [...allow, ...added] } };
+  const current = await readFile(path, 'utf8').catch(() => null);
+  if (current !== raw) {
+    return {
+      path,
+      added: [],
+      alreadyPresent,
+      skipped: 'changed-since-read',
+      warning: `${path} changed while it was being updated, so nothing was written. Re-run \`tenjin install\`.`,
+    };
+  }
+  await writeSettings(path, next);
+  return { path, added, alreadyPresent };
 }

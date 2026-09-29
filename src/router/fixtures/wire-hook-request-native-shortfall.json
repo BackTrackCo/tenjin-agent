@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "packet": {
+    "current": {
+      "role": "user",
+      "text": "what did the x402 team announce on x this week?"
+    },
+    "history": [],
+    "literalUrls": [],
+    "historyStatus": "ok",
+    "pendingCall": {
+      "tool": "WebFetch",
+      "url": "https://x.com/x402/status/1971234567890123456"
+    },
+    "nativeOutcome": {
+      "code": 402,
+      "bytes": 0
+    }
+  }
+}

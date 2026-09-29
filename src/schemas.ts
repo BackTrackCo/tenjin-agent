@@ -63,6 +63,11 @@ export const ErrorCodeSchema = z.enum([
   // registry publicly advertises for this resource (understood-but-refused, 3);
   // nothing was signed and nothing was spent.
   'REGISTRY_MISMATCH',
+  // The seller's 402 challenge exceeds this process's response-header limit, so
+  // its terms could never be read (understood-but-refused, 3). Nothing was
+  // signed and nothing was sent; a retry changes nothing without an operator
+  // raising `--max-http-header-size` on the process that runs the CLI.
+  'CHALLENGE_TOO_LARGE',
 ]);
 export type ErrorCode = z.infer<typeof ErrorCodeSchema>;
 

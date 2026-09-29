@@ -331,7 +331,7 @@ function writeLines(stream: NodeJS.WritableStream, lines: string[]): void {
  * a genuine Stream; a test/redirected sink is not one, so it falls back to the
  * default capability check and comes out plain.
  */
-function paint(io: Io, format: Parameters<typeof styleText>[0], text: string): string {
+export function paint(io: Io, format: Parameters<typeof styleText>[0], text: string): string {
   if (io.stdout instanceof Stream) return styleText(format, text, { stream: io.stdout });
   return styleText(format, text);
 }

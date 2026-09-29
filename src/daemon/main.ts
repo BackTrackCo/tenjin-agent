@@ -15,6 +15,7 @@ import { readToken, resolveDataDir } from '../hooks/shim';
 import type { Arm, Deps, KernelConfig } from '../hooks/types';
 import { configPath } from '../lib/paths';
 import { CONFIG_DEFAULTS, RawConfigSchema, resolveLoopConfig } from '../lib/config';
+import { enableDaemonIdentity } from '../lib/install-identity';
 import { bind, derivePort, IdleTimer, openLog, shutdown, writePid } from './lifecycle';
 import { createHookServer } from './server';
 
@@ -108,6 +109,7 @@ async function main(): Promise<void> {
   }
   let config = readKernelConfig(dataDir, log);
   let mtime = configMtime(dataDir);
+  enableDaemonIdentity(dataDir, () => config);
   const clock = () => Date.now();
   // `db` IS OPENED AFTER `bind()`, the daemon's only mutual exclusion:
   // `openLoopDb` deletes and rebuilds a file of another build's shape, and two

@@ -1,0 +1,38 @@
+{
+  "strictness": 3,
+  "commentTypes": ["logic"],
+  "autoReview": ["open", "push"],
+  "excludeAuthors": ["dependabot[bot]", "renovate[bot]"],
+  "ignorePatterns": "pnpm-lock.yaml\ndist/**\n**/*.snap\nsrc/fixtures/**\nevals/**/fixtures/**\nCHANGELOG.md",
+  "fixWithAI": true,
+  "confidenceScoreSection": { "included": true },
+  "summarySection": { "included": true, "collapsible": true, "defaultOpen": false },
+  "context": { "repos": ["BackTrackCo/tenjin"] },
+  "instructions": "tenjin-agent is the CLI, MCP server, and hooks that run inside a user's coding agent and talk to the Tenjin API, paying with x402 (USDC on Base) on the user's behalf. It runs on the user's machine with their credentials, so a defect here spends their money, leaks their prompts, or reaches their local network. Report only findings that would block a merge or break in production. Every finding must name the concrete trigger and its cost; cite file:line; never infer behavior from a name. Do not report: style, naming, comment density, PR wording, missing backward compatibility (breaking changes are fine), pre-existing issues, or anything CI enforces (lint, typecheck, prettier, build). On a re-review, report only the delta.",
+  "rules": [
+    {
+      "id": "spend-once",
+      "rule": "Every paid call must commit its budget reservation at most once per decision. A retry, a stale 402 challenge, or a resumed session must not charge or reserve twice.",
+      "scope": ["src/router/**", "src/lib/**", "src/commands/**"],
+      "severity": "high"
+    },
+    {
+      "id": "session-isolation",
+      "rule": "Data from one agent session (prompt, history, packet, key) must never be read or sent on behalf of another session. Any lookup that picks the newest file across sessions without a session id is a defect.",
+      "scope": ["src/router/**", "src/daemon/**", "src/mcp/**", "src/hooks/**"],
+      "severity": "high"
+    },
+    {
+      "id": "outbound-destination-pinning",
+      "rule": "An outbound request to a provider-controlled host must connect to the address that passed the private-network check (pin the resolved address or revalidate at connect time). A DNS check followed by an unpinned fetch is a defect.",
+      "scope": ["src/lib/**", "src/router/**"],
+      "severity": "high"
+    },
+    {
+      "id": "consent-and-permissions",
+      "rule": "Anything that sends user content off the machine, spends money, or writes outside the data directory must pass through the consent and permission model in docs/safety-model.md and docs/agent-permissions.md.",
+      "scope": ["src/**"],
+      "severity": "high"
+    }
+  ]
+}

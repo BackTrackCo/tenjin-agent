@@ -3,8 +3,10 @@
 # Security pin mirrored from the tenjin repo — dropping it reddens
 # `pnpm audit` (ws is pulled in via viem).
 #
-# fast-uri: GHSA-4c8g-83qw-93j6, GHSA-v2hh-gcrm-f6hx, GHSA-7p8r-x3mc-p8w7.
-# Drop once ajv's own fast-uri floor clears 3.1.5.
+# fast-uri: GHSA-4c8g-83qw-93j6, GHSA-v2hh-gcrm-f6hx, GHSA-7p8r-x3mc-p8w7,
+# and the four of 2026-09-23 (GHSA-5jgf-p345-68v8, GHSA-f65p-4m7j-42xc,
+# GHSA-fph4-wmhf-6fwf, GHSA-jqff-g426-hqxp) that moved the floor to 3.1.6.
+# Via @modelcontextprotocol/sdk > ajv. Drop once ajv's own floor clears 3.1.6.
 #
 # esbuild: GHSA-g7r4-m6w7-qqqr. Drop once tsup/vitest bump their esbuild
 # floor past 0.28.1.
@@ -15,9 +17,10 @@
 # ip-address: GHSA-mwp4-54f8-5fhr (via @modelcontextprotocol/sdk >
 # express-rate-limit). Drop once express-rate-limit's floor clears 10.3.1.
 #
-# js-yaml: GHSA-5p4m-2wfm-xmqj, both the 3.x and 4.x ranges (via
-# @changesets/cli, dev-only). Drop once @changesets/cli's own floors clear
-# 4.3.1 and read-yaml-file's clears 3.15.1.
+# js-yaml: GHSA-5p4m-2wfm-xmqj and GHSA-2883-xcg3-v3hh (floors widened
+# 2026-09-23 from 3.15.1/4.3.1 to 3.15.2/4.3.2), both the 3.x and 4.x ranges
+# (via @changesets/cli, dev-only). Drop once @changesets/cli's own floors
+# clear 4.3.2 and read-yaml-file's clears 3.15.2.
 #
 # nanoid: GHSA-2v37-7h3g-55p8 (floor widened 2026-08-07 from 3.3.17 to 3.3.18,
 # stranding the previous pin) and GHSA-28wg-ghj8-5hjv (floor 3.3.16), via
@@ -43,12 +46,12 @@
 # on >=2.0.10 itself.
 overrides:
   'ws@>=8.0.0 <8.21.0': '8.21.0'
-  'fast-uri@>=3.0.0 <3.1.5': '3.1.5'
+  'fast-uri@>=3.0.0 <3.1.6': '3.1.6'
   'esbuild@>=0.27.3 <0.28.1': '0.28.1'
   'brace-expansion@>=4.0.0 <5.0.9': '5.0.9'
   'ip-address@>=10.0.0 <10.3.1': '10.3.1'
-  'js-yaml@>=4.0.0 <4.3.1': '4.3.1'
-  'js-yaml@>=3.0.0 <3.15.1': '3.15.1'
+  'js-yaml@>=4.0.0 <4.3.2': '4.3.2'
+  'js-yaml@>=3.0.0 <3.15.2': '3.15.2'
   'nanoid@>=3.0.0 <3.3.18': '3.3.18'
   'hono@>=3.8.0 <4.12.34': '4.12.34'
   'postcss@<8.5.23': '8.5.23'

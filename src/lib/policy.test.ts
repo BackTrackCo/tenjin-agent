@@ -1,12 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { evaluateSpendPolicy, parseConfirmPolicy, type SpendPolicy } from './policy';
+import { evaluateSpendPolicy, type SpendPolicy } from './policy';
 
 // A permissive baseline; each test tightens ONE knob so a failure names the knob.
 function policy(over: Partial<SpendPolicy> = {}): SpendPolicy {
   return {
     maxAutoSpendAtomic: 1_000_000n, // $1 auto
-    sessionBudgetAtomic: 0n, // disabled
-    confirm: { mode: 'above', thresholdAtomic: 1_000_000n },
+    sessionBudgetAtomic: null, // disabled
     allowlistCreators: [],
     ...over,
   };
@@ -36,10 +35,7 @@ describe('evaluateSpendPolicy, price cap (--max-price)', () => {
     expect(r.decision).toBe('allow');
   });
   it('a price cap is a hard deny, not reduced to confirm even under a loose confirm policy', () => {
-    const r = evaluateSpendPolicy(
-      policy({ confirm: { mode: 'always' } }),
-      req({ amountAtomic: 5n, maxPriceAtomic: 4n }),
-    );
+    const r = evaluateSpendPolicy(policy(), req({ amountAtomic: 5n, maxPriceAtomic: 4n }));
     expect(r.decision).toBe('deny');
     expect(r.reason).toBe('price_cap_exceeded');
   });
@@ -68,9 +64,9 @@ describe('evaluateSpendPolicy, allowlistCreators', () => {
 });
 
 describe('evaluateSpendPolicy, sessionBudget', () => {
-  it('0 disables the ceiling', () => {
+  it('none removes the ceiling', () => {
     const r = evaluateSpendPolicy(
-      policy({ sessionBudgetAtomic: 0n }),
+      policy({ sessionBudgetAtomic: null, maxAutoSpendAtomic: 999_999_999n }),
       req({ amountAtomic: 999_999_999n }),
     );
     expect(r.decision).not.toBe('deny');
@@ -92,65 +88,39 @@ describe('evaluateSpendPolicy, sessionBudget', () => {
   });
 });
 
-describe('evaluateSpendPolicy, maxAutoSpend + confirm', () => {
-  it('default posture (maxAutoSpend 0, confirm always) requires confirmation for any spend', () => {
-    const r = evaluateSpendPolicy(
-      policy({ maxAutoSpendAtomic: 0n, confirm: { mode: 'always' } }),
-      req({ amountAtomic: 1n }),
-    );
-    expect(r.decision).toBe('confirm');
-    expect(r.reason).toBe('above_auto_spend');
+describe('automatic limits and mandatory manual consent', () => {
+  it.each([0n, 99_999n])('refuses automatic spending above threshold %s', (maxAutoSpendAtomic) => {
+    expect(evaluateSpendPolicy(policy({ maxAutoSpendAtomic }), req())).toMatchObject({
+      decision: 'deny',
+      reason: 'above_auto_spend',
+    });
   });
-  it('confirm always forces a prompt even within maxAutoSpend', () => {
-    const r = evaluateSpendPolicy(
-      policy({ maxAutoSpendAtomic: 1_000_000n, confirm: { mode: 'always' } }),
-      req({ amountAtomic: 100_000n }),
+  it('allows the exact automatic threshold', () => {
+    expect(evaluateSpendPolicy(policy({ maxAutoSpendAtomic: 100_000n }), req()).decision).toBe(
+      'allow',
     );
-    expect(r.decision).toBe('confirm');
-    expect(r.reason).toBe('confirm_always');
   });
-  it('allows silently when within maxAutoSpend and below the confirm threshold', () => {
-    const r = evaluateSpendPolicy(
-      policy({
-        maxAutoSpendAtomic: 1_000_000n,
-        confirm: { mode: 'above', thresholdAtomic: 500_000n },
-      }),
-      req({ amountAtomic: 100_000n }),
-    );
-    expect(r.decision).toBe('allow');
-    expect(r.reason).toBe('within_policy');
+  it.each([0n, 1n, null])(
+    'manual consent is independent of budget %s and automatic threshold',
+    (sessionBudgetAtomic) => {
+      expect(
+        evaluateSpendPolicy(
+          policy({ sessionBudgetAtomic, maxAutoSpendAtomic: 0n }),
+          req({ mode: 'manual', sessionSpentAtomic: 9_000_000n }),
+        ),
+      ).toMatchObject({ decision: 'confirm', reason: 'confirm_always' });
+    },
+  );
+  it('even a small manual payment needs consent', () => {
+    expect(evaluateSpendPolicy(policy(), req({ mode: 'manual' })).decision).toBe('confirm');
   });
-  it('confirms above the confirm threshold even within maxAutoSpend', () => {
-    const r = evaluateSpendPolicy(
-      policy({
-        maxAutoSpendAtomic: 1_000_000n,
-        confirm: { mode: 'above', thresholdAtomic: 200_000n },
-      }),
-      req({ amountAtomic: 300_000n }),
+  it('manual consent does not override price or creator checks', () => {
+    expect(evaluateSpendPolicy(policy(), req({ mode: 'manual', maxPriceAtomic: 1n })).reason).toBe(
+      'price_cap_exceeded',
     );
-    expect(r.decision).toBe('confirm');
-    expect(r.reason).toBe('above_confirm_threshold');
-  });
-  it('confirms above maxAutoSpend regardless of the confirm threshold', () => {
-    const r = evaluateSpendPolicy(
-      policy({
-        maxAutoSpendAtomic: 100_000n,
-        confirm: { mode: 'above', thresholdAtomic: 1_000_000n },
-      }),
-      req({ amountAtomic: 200_000n }),
-    );
-    expect(r.decision).toBe('confirm');
-    expect(r.reason).toBe('above_auto_spend');
-  });
-  it('allows exactly at maxAutoSpend (boundary) below threshold', () => {
-    const r = evaluateSpendPolicy(
-      policy({
-        maxAutoSpendAtomic: 100_000n,
-        confirm: { mode: 'above', thresholdAtomic: 100_000n },
-      }),
-      req({ amountAtomic: 100_000n }),
-    );
-    expect(r.decision).toBe('allow');
+    expect(
+      evaluateSpendPolicy(policy({ allowlistCreators: ['other'] }), req({ mode: 'manual' })).reason,
+    ).toBe('not_allowlisted');
   });
 });
 
@@ -171,17 +141,13 @@ describe('evaluateSpendPolicy, gate ordering', () => {
   });
 });
 
-describe('parseConfirmPolicy', () => {
-  it('parses "always"', () => {
-    expect(parseConfirmPolicy('always')).toEqual({ mode: 'always' });
-  });
-  it('parses "above:<atomic>"', () => {
-    expect(parseConfirmPolicy('above:250000')).toEqual({
-      mode: 'above',
-      thresholdAtomic: 250_000n,
-    });
-  });
-  it('fails closed to always on a malformed value', () => {
-    expect(parseConfirmPolicy('garbage')).toEqual({ mode: 'always' });
+describe('explicit zero daily limit', () => {
+  it('denies positive amounts before confirmation and permits zero', () => {
+    expect(
+      evaluateSpendPolicy(policy({ sessionBudgetAtomic: 0n }), req({ amountAtomic: 1n })),
+    ).toMatchObject({ decision: 'deny', reason: 'session_budget_exceeded' });
+    expect(
+      evaluateSpendPolicy(policy({ sessionBudgetAtomic: 0n }), req({ amountAtomic: 0n })),
+    ).toMatchObject({ decision: 'allow' });
   });
 });

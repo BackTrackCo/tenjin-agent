@@ -23,7 +23,22 @@ if (Number.isNaN(nodeMajor) || nodeMajor < MIN_NODE_MAJOR) {
   process.exit(1);
 }
 
+// THE STATUS LINE NEVER LOADS THE CLI. Claude Code runs it once a second for as
+// long as a session is open, and commander, zod and the command tree are parse
+// cost it has no use for. Only the bare invocation is diverted; `--help` and
+// every flag fall through to the command tree, which registers it like any verb.
+if (process.argv.length === 3 && process.argv[2] === 'status-line') {
+  const { statusLineMain } = await import('./router/status-line');
+  await statusLineMain();
+  process.exit(0);
+}
+
 const { main } = await import('./cli');
+// Here and not in `main`, so an in-process test of the command tree sends no
+// telemetry and mints no install id; see lib/install-identity.
+const { enableCliIdentity } = await import('./lib/install-identity');
+const { dataDir } = await import('./lib/paths');
+enableCliIdentity(dataDir(process.env));
 process.exit(await main(process.argv.slice(2)));
 
 // Marks this file a module so top-level await is legal; emits nothing.

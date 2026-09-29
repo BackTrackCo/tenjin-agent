@@ -4,10 +4,12 @@ import {
   fetchFailureToCliError,
   httpRequest,
   shelfBypassHeaders,
+  setTenjinIdentity,
+  INSTALL_ID_HEADER,
   SHELF_BYPASS_HEADER,
 } from './http';
 import { SIWX_HEADER } from './siwx';
-import { CliError } from './errors';
+import { CliError, exitCodeFor } from './errors';
 import { CALLER_USER_AGENT_ENV, TENJIN_PRODUCT, TENJIN_USER_AGENT } from './client-meta';
 import type { FetchJsonFailure, HttpRequestOptions } from './http';
 
@@ -906,5 +908,206 @@ describe('the team shelf bypass header', () => {
     });
     expect(rec.seen[0]?.[SHELF_BYPASS_HEADER]).toBe(SECRET);
     expect(rec.seen[1]?.[SHELF_BYPASS_HEADER]).toBe('planted');
+  });
+});
+
+/**
+ * An x402 challenge travels in a response header, and Node reads at most 16 KiB
+ * of headers unless `--max-http-header-size` says otherwise. A seller that
+ * embeds its whole output schema in the challenge can exceed that on its own
+ * (AnyAPI's is 52 KB, measured 2026-09-22), and undici then aborts the request:
+ * the generic path reported `fetch failed` with no status and nothing naming
+ * the cause, which reads as "the endpoint is down" for a seller that is
+ * answering perfectly.
+ */
+describe('a 402 challenge too large for this process to read', () => {
+  const overflow = (shape: 'direct' | 'cause' | 'code'): typeof fetch =>
+    (async () => {
+      if (shape === 'code') {
+        throw Object.assign(new TypeError('fetch failed'), {
+          cause: Object.assign(new Error('unexpected'), { code: 'UND_ERR_HEADERS_OVERFLOW' }),
+        });
+      }
+      if (shape === 'cause') {
+        throw Object.assign(new TypeError('fetch failed'), {
+          cause: new Error('Headers Overflow Error'),
+        });
+      }
+      throw new Error('Headers Overflow Error');
+    }) as typeof fetch;
+
+  it.each(['direct', 'cause', 'code'] as const)(
+    'names it rather than reporting a dead connection (%s)',
+    async (shape) => {
+      const result = await httpRequest('https://api.example.test/v1/run/thing', {
+        method: 'POST',
+        timeoutMs: 5_000,
+        jsonBody: {},
+        fetchImpl: overflow(shape),
+      });
+      expect(result.ok).toBe(false);
+      const failure = result as Extract<typeof result, { ok: false }>;
+      expect(failure.kind).toBe('oversized-header');
+      // The ORIGIN, not the path: the whole host answers this way.
+      expect(failure.message).toContain('https://api.example.test');
+      expect(failure.message).not.toContain('/v1/run/thing');
+      // The transport says what it could not read and NOTHING about payment:
+      // it serves the unpaid probe and the paid retry alike, so either claim
+      // would be wrong on one of them. The leg adds that sentence.
+      expect(failure.message).toContain('could not be read');
+      expect(failure.message).not.toMatch(/nothing was (sent|paid)|authorization/i);
+    },
+  );
+
+  it('maps to CHALLENGE_TOO_LARGE with the operator knob, not a retry', async () => {
+    const result = await httpRequest('https://api.example.test/pay', {
+      timeoutMs: 5_000,
+      fetchImpl: overflow('cause'),
+    });
+    const err = fetchFailureToCliError(result as Extract<typeof result, { ok: false }>);
+    expect(err.code).toBe('CHALLENGE_TOO_LARGE');
+    expect(exitCodeFor(err.code)).toBe(3);
+    expect(err.fix).toContain('--max-http-header-size');
+    expect(err.fix).not.toMatch(/try again|retry/i);
+    expect(err.fix).not.toMatch(/nothing was (sent|paid)|authorization/i);
+  });
+
+  it('is still a plain network failure when the abort is anything else', async () => {
+    const result = await httpRequest('https://api.example.test/pay', {
+      timeoutMs: 5_000,
+      fetchImpl: (async () => {
+        throw new Error('socket hang up');
+      }) as typeof fetch,
+    });
+    expect((result as Extract<typeof result, { ok: false }>).kind).toBe('network');
+  });
+});
+
+describe('the install id header', () => {
+  const INSTALL = '6f1c2b1e-8d4a-4c3e-9a55-0d2f3b4c5d6e';
+  const TENJIN = 'https://tenjin.test';
+
+  afterEach(() => setTenjinIdentity(undefined));
+
+  function useIdentity(installId: () => Promise<string | undefined>): void {
+    setTenjinIdentity({ origins: async () => [TENJIN], installId });
+  }
+
+  interface Seen {
+    url: string;
+    method: string | undefined;
+    body: unknown;
+    redirect: RequestInit['redirect'];
+    headers: Record<string, string>;
+  }
+
+  /** Answers each URL from `routes`, recording what every hop was sent. */
+  function router(routes: Record<string, () => Response>): {
+    fetchImpl: typeof fetch;
+    seen: Seen[];
+  } {
+    const seen: Seen[] = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      seen.push({
+        url,
+        method: init?.method,
+        body: init?.body,
+        redirect: init?.redirect,
+        headers: Object.fromEntries(new Headers(init?.headers).entries()),
+      });
+      const answer = routes[url];
+      if (answer === undefined) throw new Error(`unrouted ${url}`);
+      return answer();
+    };
+    return { fetchImpl, seen };
+  }
+
+  const ok = (): Response => jsonResponse({ ok: true });
+  const hop = (status: number, location: string) => (): Response =>
+    new Response('', { status, headers: { location } });
+
+  it('rides Tenjin-origin requests on both transports, and no provider request', async () => {
+    useIdentity(async () => INSTALL);
+    const { fetchImpl, seen } = router({
+      [`${TENJIN}/api/x402-router`]: ok,
+      'https://api.exa.ai/search': ok,
+    });
+    await httpRequest(`${TENJIN}/api/x402-router`, {
+      method: 'POST',
+      timeoutMs: 1000,
+      jsonBody: {},
+      blockRedirects: true,
+      fetchImpl,
+    });
+    await fetchJson(`${TENJIN}/api/x402-router`, { timeoutMs: 1000, fetchImpl });
+    await httpRequest('https://api.exa.ai/search', { method: 'POST', timeoutMs: 1000, fetchImpl });
+    await fetchJson('https://api.exa.ai/search', { timeoutMs: 1000, fetchImpl });
+
+    expect(seen.map((s) => s.headers[INSTALL_ID_HEADER])).toEqual([
+      INSTALL,
+      INSTALL,
+      undefined,
+      undefined,
+    ]);
+    // A provider request keeps `fetch`'s own transport, untouched.
+    expect(seen[2]?.redirect).toBeUndefined();
+  });
+
+  it('is not sent to a sibling host or another port of the Tenjin host', async () => {
+    useIdentity(async () => INSTALL);
+    const urls = [
+      'https://evil.tenjin.test/x',
+      'https://tenjin.test:8443/x',
+      'http://tenjin.test/x',
+    ];
+    const { fetchImpl, seen } = router(Object.fromEntries(urls.map((url) => [url, ok])));
+    for (const url of urls) await httpRequest(url, { timeoutMs: 1000, fetchImpl });
+    expect(seen).toHaveLength(3);
+    expect(seen.every((s) => s.headers[INSTALL_ID_HEADER] === undefined)).toBe(true);
+  });
+
+  it('sends no header when there is no install id', async () => {
+    useIdentity(async () => undefined);
+    const { fetchImpl, seen } = router({ [`${TENJIN}/api/search`]: ok });
+    await httpRequest(`${TENJIN}/api/search`, { timeoutMs: 1000, fetchImpl });
+    expect(seen[0]?.headers).not.toHaveProperty(INSTALL_ID_HEADER);
+  });
+
+  it('sends the request without it when reading the id throws', async () => {
+    useIdentity(async () => {
+      throw new Error('EACCES');
+    });
+    const { fetchImpl, seen } = router({ [`${TENJIN}/api/search`]: ok });
+    const res = await httpRequest(`${TENJIN}/api/search`, { timeoutMs: 1000, fetchImpl });
+    expect(res).toMatchObject({ ok: true, status: 200 });
+    expect(seen[0]?.headers).not.toHaveProperty(INSTALL_ID_HEADER);
+    expect(seen[0]?.redirect).toBeUndefined();
+  });
+
+  it('leaves a pinned request failing closed on any redirect, as before', async () => {
+    useIdentity(async () => INSTALL);
+    const { fetchImpl, seen } = router({
+      [`${TENJIN}/api/x402-router`]: hop(302, 'https://elsewhere.example/'),
+    });
+    const res = await httpRequest(`${TENJIN}/api/x402-router`, {
+      method: 'POST',
+      timeoutMs: 1000,
+      jsonBody: {},
+      blockRedirects: true,
+      fetchImpl,
+    });
+    expect(res).toMatchObject({ ok: false, kind: 'blocked-redirect' });
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.redirect).toBe('manual');
+    expect(seen[0]?.headers[INSTALL_ID_HEADER]).toBe(INSTALL);
+  });
+
+  it("leaves an unpinned request on fetch's own redirect handling", async () => {
+    useIdentity(async () => INSTALL);
+    const { fetchImpl, seen } = router({ [`${TENJIN}/api/search`]: ok });
+    await httpRequest(`${TENJIN}/api/search`, { timeoutMs: 1000, fetchImpl });
+    expect(seen[0]?.headers[INSTALL_ID_HEADER]).toBe(INSTALL);
+    expect(seen[0]?.redirect).toBeUndefined();
   });
 });

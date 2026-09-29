@@ -172,8 +172,7 @@ describe('mask() — the query scope', () => {
     // survive in a question that findings() would flag on a shelf.
     const leaks: string[] = [];
     for (const c of PUBLISH_CASES) {
-      // A case that also expects an algorithmic detector (hex64, PEM, seed
-      // phrase) may label THAT secret; those rows are report-only.
+      // A case that also expects a report-only detector may label THAT secret.
       const ids = c.expect_ids ?? [];
       if (c.secret === undefined || ids.length === 0 || !ids.every((id) => MASKED_IDS.has(id)))
         continue;
@@ -253,6 +252,16 @@ describe('ReDoS budget', () => {
     ['colon run', 'a:'.repeat(100_000)],
     ['at-sign run', 'a@'.repeat(100_000)],
     ['wordlist run', 'abandon '.repeat(25_000)],
+    ['quoted wordlist run', '"abandon" '.repeat(25_000)],
+    ['curl flag run', `curl ${'-u a '.repeat(40_000)}`],
+    ['quoted secret-name run', '"password" '.repeat(20_000)],
+    ['unclosed quoted secret value', `"api_key":"${'a1'.repeat(50_000)}`],
+    ['long url path segments', `https://a.io${'/a1b2c3d4e5f6g7h8i9j0k1l2m3'.repeat(7_000)}`],
+    ['url slug run', `https://a.io/${'abc1-'.repeat(40_000)}`],
+    ['base58 run', '9WzDXwBbmkg8'.repeat(20_000)],
+    ['byte array run', `[${'255, '.repeat(50_000)}`],
+    ['32-hex halves run', `${'c'.repeat(32)} `.repeat(6_000)],
+    ['capitalized comma wordlist run', 'Abandon, '.repeat(25_000)],
     // Every value here runs the hash-label lookback. An unbounded lookback
     // re-slices the whole line per match and goes quadratic.
     ['dense 64-hex line', `hash ${`0x${'ab'.repeat(32)} `.repeat(3_000)}`],

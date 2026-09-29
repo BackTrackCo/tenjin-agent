@@ -1,15 +1,23 @@
-import { mkdir, readFile } from 'node:fs/promises';
+import { mkdir } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
-import { z } from 'zod';
 import { writeFileAtomic } from '../atomic-json';
-import { hasCode } from '../errno';
 import { withFileLock } from '../lock';
 import { spendLedgerPath } from '../paths';
+import {
+  DEFAULT_WINDOW_MS,
+  emptyLedger,
+  readLedger,
+  RESERVATION_TTL_MS,
+  spentOf,
+  type Ledger,
+  type Reservation,
+} from '../spend-ledger';
 import {
   evaluateSpendPolicy,
   type PolicyReason,
   type SpendDecision,
   type SpendPolicy,
+  type PaymentMode,
 } from '../policy';
 import type { PolicyEnforcement } from './provider';
 
@@ -30,14 +38,23 @@ import type { PolicyEnforcement } from './provider';
  * between authorize and commit) self-expires after RESERVATION_TTL_MS.
  */
 
-const DEFAULT_WINDOW_MS = 86_400_000; // 24h rolling day
-const RESERVATION_TTL_MS = 600_000; // 10 min: a dangling reservation self-expires
-
 export interface SpendRequest {
+  mode?: PaymentMode;
   amountAtomic: bigint;
   creator: string;
   /** The caller's `--max-price` cap, if any. */
   maxPriceAtomic?: bigint;
+  /**
+   * THE SAME-TURN DUPLICATE GUARD. An opaque identity for the request being
+   * paid for (its destination and its exact arguments), recorded on the
+   * reservation. A second authorization carrying a key an unexpired reservation
+   * already holds is DENIED rather than reserved, so one in-flight payment can
+   * never become two because a caller retried, a harness re-fired, or a second
+   * process asked for the same thing. Same lock and same file as the budget, so
+   * the check is atomic across the per-command processes an agent spawns; the
+   * reservation TTL is what bounds "same turn". Omit it and nothing changes.
+   */
+  requestKey?: string;
 }
 
 export interface SpendAuthorization {
@@ -46,10 +63,10 @@ export interface SpendAuthorization {
   message: string;
   amountAtomic: bigint;
   sessionSpentAtomic: bigint;
-  sessionBudgetAtomic: bigint;
+  sessionBudgetAtomic: bigint | null;
   policyEnforcement: PolicyEnforcement;
   /** The pending reservation to commit (on settlement) or release (on abort).
-   *  Present only when the spend may proceed and a budget is in force. */
+   *  Present when the spend may proceed, including an unlimited budget. */
   reservationId?: string;
 }
 
@@ -65,28 +82,16 @@ export interface SpendAuthorizer {
    * prompt), the settled amount is still recorded rather than silently lost
    * from the rolling budget.
    */
-  commit(reservationId: string | undefined, amountAtomic: bigint): Promise<void>;
+  commit(
+    reservationId: string | undefined,
+    amountAtomic: bigint,
+    /** What the counterparty reported actually taking, when it said so at all.
+     *  Omitted means "assume it took what was authorized", the conservative
+     *  reading every caller had before the router began waiving fees. */
+    opts?: { settledAtomic?: bigint; mode?: PaymentMode },
+  ): Promise<void>;
   /** Drop an unused reservation (a decline, a 409, or a failed payment). */
   release(reservationId: string | undefined): Promise<void>;
-}
-
-const ReservationSchema = z.object({
-  id: z.string(),
-  amountAtomic: z.string().regex(/^\d+$/),
-  atMs: z.number(),
-});
-type Reservation = z.infer<typeof ReservationSchema>;
-
-const LedgerSchema = z.object({
-  schemaVersion: z.literal(2),
-  windowStartMs: z.number(),
-  committedAtomic: z.string().regex(/^\d+$/),
-  reservations: z.array(ReservationSchema),
-});
-type Ledger = z.infer<typeof LedgerSchema>;
-
-function emptyLedger(nowMs: number): Ledger {
-  return { schemaVersion: 2, windowStartMs: nowMs, committedAtomic: '0', reservations: [] };
 }
 
 export interface LocalSpendAuthorizerDeps {
@@ -123,12 +128,6 @@ export function createLocalSpendAuthorizer(deps: LocalSpendAuthorizerDeps): Spen
     };
   };
 
-  const spentOf = (ledger: Ledger): bigint =>
-    ledger.reservations.reduce(
-      (sum, r) => sum + BigInt(r.amountAtomic),
-      BigInt(ledger.committedAtomic),
-    );
-
   const persist = async (ledger: Ledger): Promise<void> => {
     await writeFileAtomic(path, `${JSON.stringify(ledger, null, 2)}\n`, {
       mode: 0o600,
@@ -155,7 +154,23 @@ export function createLocalSpendAuthorizer(deps: LocalSpendAuthorizerDeps): Spen
     async authorize(req: SpendRequest): Promise<SpendAuthorization> {
       return withLedger(async (ledger) => {
         const sessionSpentAtomic = spentOf(ledger);
+        if (
+          req.requestKey !== undefined &&
+          ledger.reservations.some((r) => r.requestKey === req.requestKey)
+        ) {
+          return {
+            decision: 'deny',
+            reason: 'duplicate_in_flight',
+            message:
+              'An identical request already holds a reservation in this turn. No second payment was made.',
+            amountAtomic: req.amountAtomic,
+            sessionSpentAtomic,
+            sessionBudgetAtomic: deps.policy.sessionBudgetAtomic,
+            policyEnforcement: 'client-only',
+          };
+        }
         const evaluation = evaluateSpendPolicy(deps.policy, {
+          mode: req.mode ?? 'automatic',
           amountAtomic: req.amountAtomic,
           creator: req.creator,
           ...(req.maxPriceAtomic !== undefined ? { maxPriceAtomic: req.maxPriceAtomic } : {}),
@@ -168,32 +183,50 @@ export function createLocalSpendAuthorizer(deps: LocalSpendAuthorizerDeps): Spen
           sessionBudgetAtomic: deps.policy.sessionBudgetAtomic,
           policyEnforcement: 'client-only',
         };
-        // Reserve budget atomically only when a spend may proceed AND a ceiling is
-        // in force; a denied spend or a disabled budget needs no reservation.
-        if (evaluation.decision === 'deny' || deps.policy.sessionBudgetAtomic === 0n) {
+        // Unlimited budgets still reserve to prevent identical in-flight requests.
+        if (evaluation.decision === 'deny') {
           return base;
         }
         const reservation: Reservation = {
           id: randomUUID(),
+          mode: req.mode ?? 'automatic',
           amountAtomic: req.amountAtomic.toString(),
           atMs: now(),
+          ...(req.requestKey !== undefined ? { requestKey: req.requestKey } : {}),
         };
         await persist({ ...ledger, reservations: [...ledger.reservations, reservation] });
         return { ...base, reservationId: reservation.id };
       });
     },
-    async commit(reservationId: string | undefined, amountAtomic: bigint): Promise<void> {
-      // No reservation id means no budget ceiling was in force at authorize
-      // time; the settled spend still counts against any FUTURE budget window.
+    async commit(
+      reservationId: string | undefined,
+      amountAtomic: bigint,
+      opts: { settledAtomic?: bigint; mode?: PaymentMode } = {},
+    ): Promise<void> {
+      // Record transmitted exposure even if its reservation has expired.
       await withLedger(async (ledger) => {
         const reservation =
           reservationId !== undefined
             ? ledger.reservations.find((r) => r.id === reservationId)
             : undefined;
-        const settled = reservation !== undefined ? BigInt(reservation.amountAtomic) : amountAtomic;
+        const exposure =
+          reservation !== undefined ? BigInt(reservation.amountAtomic) : amountAtomic;
+        // TWO NUMBERS, ON PURPOSE. The budget keeps counting what left; the
+        // settled total records what was taken, and they differ whenever a
+        // counterparty waives a fee against an authorization already sent.
+        const settled = opts.settledAtomic ?? exposure;
+        const settledSoFar = BigInt(ledger.settledAtomic ?? ledger.committedAtomic);
         await persist({
           ...ledger,
-          committedAtomic: (BigInt(ledger.committedAtomic) + settled).toString(),
+          committedAtomic: (BigInt(ledger.committedAtomic) + exposure).toString(),
+          automaticCommittedAtomic: (
+            BigInt(ledger.automaticCommittedAtomic ?? ledger.committedAtomic) +
+            ((reservation ? (reservation.mode ?? 'automatic') : (opts.mode ?? 'automatic')) ===
+            'manual'
+              ? 0n
+              : exposure)
+          ).toString(),
+          settledAtomic: (settledSoFar + settled).toString(),
           reservations:
             reservationId !== undefined
               ? ledger.reservations.filter((r) => r.id !== reservationId)
@@ -214,43 +247,4 @@ export function createLocalSpendAuthorizer(deps: LocalSpendAuthorizerDeps): Spen
   };
 }
 
-/**
- * ABSENT and CORRUPT both reset the window, but they are not the same fact: the
- * first is a first run, the second is spend that existed and is now gone. Only
- * the second is worth telling anyone about, so the two stay distinguishable here
- * rather than collapsing into one null.
- */
-interface LedgerRead {
-  ledger: Ledger | null;
-  /** Set only when the file EXISTS and could not be turned back into a ledger. */
-  corrupt?: string;
-}
-
-async function readLedger(path: string): Promise<LedgerRead> {
-  let raw: string;
-  try {
-    raw = await readFile(path, 'utf8');
-  } catch (err) {
-    // A missing file is the ordinary first run. Any other read failure means a
-    // file is there and unusable, which is the corrupt case by another name.
-    if (hasCode(err, 'ENOENT')) return { ledger: null };
-    return { ledger: null, corrupt: err instanceof Error ? err.message : String(err) };
-  }
-  let json: unknown;
-  try {
-    json = JSON.parse(raw);
-  } catch {
-    return { ledger: null, corrupt: 'not valid JSON' };
-  }
-  const parsed = LedgerSchema.safeParse(json);
-  if (parsed.success) return { ledger: parsed.data };
-  const issue = parsed.error.issues[0];
-  const field = issue?.path.join('.');
-  const message = issue?.message ?? 'schema mismatch';
-  // Field-qualified: "expected number, received undefined" names nothing on its
-  // own. zod never echoes the received VALUE, so no spend figure rides along.
-  return {
-    ledger: null,
-    corrupt: field !== undefined && field.length > 0 ? `${field}: ${message}` : message,
-  };
-}
+export { readSpendSummary, type SpendSummary } from '../spend-ledger';

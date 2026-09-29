@@ -1,5 +1,6 @@
 import { mkdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
+import { dirname } from 'node:path';
 import { styleText } from 'node:util';
 import { CliError } from '../lib/errors';
 import { confirmChoice } from '../lib/clack';
@@ -15,6 +16,8 @@ import { modeGatedPointer } from '../lib/permissions';
 import { PRODUCTION_ORIGIN, isSameDeployment } from '../lib/production-origin';
 import {
   CONFIG_KEYS,
+  RETIRED_PAYMENT_GUIDANCE,
+  retiredPaymentKeys,
   HOOKS_CONFIG_KEYS,
   PUBLISH_CONFIG_KEYS,
   PublishModeSchema,
@@ -23,6 +26,8 @@ import {
   UPDATE_CONFIG_KEYS,
   LOOP_CONFIG_KEYS,
   TEAM_CONFIG_KEYS,
+  ROUTER_CONFIG_KEYS,
+  ROUTER_CONTEXTS,
   loadRawConfig,
   parseLoopValue,
   parsePublicFallbackFlag,
@@ -42,6 +47,8 @@ import type {
   UpdateConfigKey,
   LoopConfigKey,
   TeamConfigKey,
+  RouterConfigKey,
+  RouterContext,
 } from '../lib/config';
 import { onPath } from '../lib/skill-wiring';
 import type { Harness, HarnessAdapter } from '../adapters/types';
@@ -54,19 +61,21 @@ import { withFileLock, LockTimeoutError } from '../lib/lock';
 import { parseUsdToAtomic, toMoney } from '../lib/money';
 import type { Money } from '../schemas';
 import type { CommandContext, CommandResult } from '../context';
+import {
+  projectRouterPath,
+  readProjectRouterFile,
+  routerSettings,
+  type RouterSettings,
+} from '../router/settings';
 
-/**
- * How one config key is presented in `data`. `value` is the machine form: dual
- * Money for the spend keys, the stored string for `confirm`/URLs, the string[]
- * for the allowlist. `threshold` rides along only for `confirm: above:<atomic>`
- * so an agent reads the dollar amount without re-parsing the string.
- */
+/** Machine values use Money for spending keys and scalars for other settings. */
 interface RenderedValue {
-  value: Money | string | string[] | boolean;
-  threshold?: Money;
+  value: Money | string | string[] | boolean | null;
 }
 interface RenderedSetting extends RenderedValue {
   source: Provenance;
+  /** The file a router key came from, when one did. */
+  path?: string;
 }
 
 /**
@@ -94,7 +103,6 @@ export interface ConfigSetDeps {
   wireAllowlist?: (home: string, mode: PublishMode) => Promise<PermissionsResult>;
 }
 
-const CONFIRM_ABOVE = 'above:';
 const KEY_WIDTH = Math.max(
   ...[
     ...CONFIG_KEYS,
@@ -103,6 +111,7 @@ const KEY_WIDTH = Math.max(
     ...UPDATE_CONFIG_KEYS,
     ...LOOP_CONFIG_KEYS,
     ...TEAM_CONFIG_KEYS,
+    ...ROUTER_CONFIG_KEYS,
   ].map((key) => key.length),
 );
 
@@ -111,9 +120,8 @@ const KEY_WIDTH = Math.max(
  * listing only. Machine `data` is unchanged; these are humanLines decoration.
  */
 const KEY_DESCRIPTIONS: Record<string, string> = {
-  maxAutoSpend: 'auto-approve a read up to this amount',
-  sessionBudget: 'cap on total auto-spend per session',
-  confirm: 'when to ask before paying',
+  maxAutoSpend: 'automatic router limit per call',
+  sessionBudget: 'automatic router daily limit: 0 blocks automatic spend, none removes the ceiling',
   sendMaxAmount:
     'hard cap per tenjin wallet send; unset = send refuses until set, 0 disables send, none = uncapped; never bypassed by --yes',
   allowlistCreators: 'only auto-pay these creators (empty = any)',
@@ -124,8 +132,7 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
     "the team shelf's Vercel protection-bypass secret; setting it is what turns team mode on (printed as set/unset)",
   rpcUrl: 'Base RPC endpoint for balance reads',
   evalCohort: 'opt in to the search evaluation cohort',
-  bazaarPay: 'let `tenjin pay` spend at registry-listed non-Tenjin endpoints',
-  bazaarRegistries: 'x402 discovery registries for `discover` and the pay lane',
+  bazaarRegistries: 'x402 registries used to verify direct-payment listings',
   'publish.mode': 'review=always ask, auto=ask on findings, full-auto=only hard blocks stop it',
   'publish.defaultPrice': 'price used when none is given',
   'publish.ackServerWarnings':
@@ -149,6 +156,10 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
     "the loop daemon's loopback port; null derives one from the data dir (set only when doctor reports a foreign listener)",
   'team.publicFallback':
     'on=a team-shelf miss falls through to the public marketplace, off=team-only (public-only lookup stages are dropped)',
+  'router.enabled':
+    'false stops every router hook and the request tool; --project sets it for this repository, --project --local for you alone in it',
+  'router.context':
+    'session=a hook packet carries up to six prior messages, turn=the current turn only; --project and --local as for router.enabled',
 };
 
 function isLoopKey(key: string): key is LoopConfigKey {
@@ -157,6 +168,21 @@ function isLoopKey(key: string): key is LoopConfigKey {
 
 function isTeamKey(key: string): key is TeamConfigKey {
   return (TEAM_CONFIG_KEYS as readonly string[]).includes(key);
+}
+
+function isRouterKey(key: string): key is RouterConfigKey {
+  return (ROUTER_CONFIG_KEYS as readonly string[]).includes(key);
+}
+
+/** The list/get shape for a router key, with the file that set it. */
+function renderRouterSetting(key: RouterConfigKey, settings: RouterSettings): RenderedSetting {
+  const { value, source, path } = key === 'router.enabled' ? settings.enabled : settings.context;
+  return { value, source, ...(path !== undefined ? { path } : {}) };
+}
+
+/** Router keys resolve against the directory the command runs in, as a hook would. */
+async function resolveRouterFromContext(ctx: CommandContext): Promise<RouterSettings> {
+  return routerSettings({ cwd: process.cwd(), dataDir: ctx.dataDir });
 }
 
 function renderLoopSetting(key: LoopConfigKey, settings: EffectiveSettings): RenderedSetting {
@@ -223,6 +249,12 @@ export async function runConfigList(ctx: CommandContext): Promise<CommandResult>
     data[key] = entry;
     humanLines.push(describedLine(key, entry));
   }
+  const router = await resolveRouterFromContext(ctx);
+  for (const key of ROUTER_CONFIG_KEYS) {
+    const entry = renderRouterSetting(key, router);
+    data[key] = entry;
+    humanLines.push(describedLine(key, entry));
+  }
   return { data, humanLines };
 }
 
@@ -260,6 +292,10 @@ export async function runConfigGet(
     };
     return { data: { key, ...entry }, humanLines: [formatLine(key, entry)] };
   }
+  if (isRouterKey(key)) {
+    const entry = renderRouterSetting(key, await resolveRouterFromContext(ctx));
+    return { data: { key, ...entry }, humanLines: [formatLine(key, entry)] };
+  }
   const configKey = assertKey(key);
   const settings = await resolveFromContext(ctx);
   const entry = renderSetting(configKey, settings[configKey].value, settings[configKey].source);
@@ -271,16 +307,29 @@ export async function runConfigGet(
  * file — never materializing defaults for keys the user did not set, so
  * provenance stays truthful. The written key now reads `file`.
  */
-export interface ConfigSetDeps {
-  /** Seam for the tenjin-pay skill placement (tests inject homeDir/source). */
-  placeSkill?: { io: CommandContext['io']; homeDir?: string; skillsSourceDir?: string };
-}
-
 export async function runConfigSet(
-  { key, value }: { key: string; value: string },
+  {
+    key,
+    value,
+    project,
+    local,
+  }: { key: string; value: string; project?: boolean; local?: boolean },
   ctx: CommandContext,
   deps: ConfigSetDeps = {},
 ): Promise<CommandResult> {
+  if (local === true && project !== true) {
+    throw new CliError('USAGE', '--local names the personal project file, so it needs --project', {
+      fix: `Run \`tenjin config set --project --local ${key} ${value}\`.`,
+    });
+  }
+  if (isRouterKey(key)) {
+    return setRouterKey(key, value, ctx, project === true ? { local: local === true } : undefined);
+  }
+  if (project === true) {
+    throw new CliError('USAGE', `${key} is not a project key`, {
+      fix: `--project applies to ${ROUTER_CONFIG_KEYS.join(' and ')} only; drop it to set ${key} for this machine.`,
+    });
+  }
   if (isPublishKey(key)) return setPublishKey(key, value, ctx, deps);
   if (isHooksKey(key)) return setHooksKey(key, value, ctx);
   if (isUpdateKey(key)) return setUpdateKey(key, value, ctx);
@@ -289,22 +338,6 @@ export async function runConfigSet(
   const configKey = assertKey(key);
   const stored = parseValue(configKey, value);
   await persist(ctx.dataDir, (existing) => ({ ...existing, [configKey]: stored }));
-  // The Bazaar lane's teaching is an OPTIONAL skill whose presence follows
-  // this toggle: flipping it places or removes the tenjin-pay skill in every
-  // wired skills directory, immediately (a config set is an operator act, the
-  // same trust class as install). Best-effort AFTER the persist: the set
-  // itself already succeeded, and skill drift is doctor's to report.
-  if (configKey === 'bazaarPay') {
-    try {
-      const { syncBazaarSkill } = await import('../lib/skill-placement');
-      await syncBazaarSkill(
-        stored === true,
-        deps.placeSkill ?? { io: ctx.io, dataDir: ctx.dataDir },
-      );
-    } catch {
-      // `tenjin doctor` reports a presence that does not match the toggle.
-    }
-  }
   const entry = renderSetting(configKey, stored, 'file');
   const warning = await halfWiredTeamShelf(configKey, ctx.dataDir);
   return {
@@ -724,6 +757,102 @@ async function setTeamKey(
   return { data: { key, ...entry }, humanLines: [formatLine(key, entry)] };
 }
 
+/**
+ * `config set [--project [--local]] router.enabled|router.context`. Without
+ * `--project` the key goes into the global config through the same locked merge
+ * every set uses. With it, into the project file {@link projectRouterPath}
+ * names from here, merged so a sibling key survives. The line after the write
+ * is what a hook here would now resolve, which differs from the value written
+ * when an outer layer is tighter.
+ */
+async function setRouterKey(
+  key: RouterConfigKey,
+  value: string,
+  ctx: CommandContext,
+  project: { local: boolean } | undefined,
+): Promise<CommandResult> {
+  const field = key === 'router.enabled' ? 'enabled' : 'context';
+  const parsed = field === 'enabled' ? parseBoolean(value) : parseRouterContext(value);
+  let written: RenderedSetting;
+  if (project === undefined) {
+    await persist(ctx.dataDir, (existing) => ({
+      ...existing,
+      router: { ...existing.router, [field]: parsed },
+    }));
+    written = { value: parsed, source: 'file', path: configPath(ctx.dataDir) };
+  } else {
+    const path = await projectRouterPath({ cwd: process.cwd(), local: project.local });
+    await persistProjectRouter(path, field, parsed);
+    written = { value: parsed, source: project.local ? 'local' : 'project', path };
+  }
+  const effective = renderRouterSetting(key, await resolveRouterFromContext(ctx));
+  const humanLines = [formatLine(key, written)];
+  if (effective.value !== written.value) {
+    humanLines.push(
+      `Still ${String(effective.value)} here: ${effective.path ?? 'the default'} is tighter, and a nearer file can only tighten an outer one.`,
+    );
+  }
+  if (project?.local === true) {
+    humanLines.push('Keep .tenjin/config.local.json out of git: add it to .gitignore.');
+  }
+  return { data: { key, ...written, effective }, humanLines };
+}
+
+function parseRouterContext(value: string): RouterContext {
+  const found = ROUTER_CONTEXTS.find((context) => context === value);
+  if (found !== undefined) return found;
+  throw new CliError('USAGE', `Invalid router.context: ${JSON.stringify(value)}`, {
+    fix: 'Use "session" or "turn".',
+  });
+}
+
+/**
+ * Merge one router key into a project file. It holds the router block and
+ * nothing else this CLI reads, so it is written 0644 like any committed file;
+ * an existing file that is not a JSON object is refused rather than replaced.
+ * The read, merge and write run under the same cross-process lock the global
+ * writer takes, so two concurrent sets both land.
+ */
+async function persistProjectRouter(
+  path: string,
+  field: 'enabled' | 'context',
+  value: boolean | RouterContext,
+): Promise<void> {
+  await mkdir(dirname(path), { recursive: true, mode: 0o755 });
+  const lockPath = `${path}.lock`;
+  try {
+    await withFileLock(lockPath, () => mergeProjectRouter(path, field, value));
+  } catch (err) {
+    if (err instanceof LockTimeoutError) {
+      throw new CliError('INTERNAL', err.message, {
+        fix: `If no other tenjin process is running, remove ${lockPath} and retry.`,
+        cause: err,
+      });
+    }
+    throw err;
+  }
+}
+
+async function mergeProjectRouter(
+  path: string,
+  field: 'enabled' | 'context',
+  value: boolean | RouterContext,
+): Promise<void> {
+  // Through the one parser: a file that is not an object, or whose block is
+  // invalid, is refused rather than replaced. A router subkey this build does
+  // not know rides along untouched, as in the global file; it is never read.
+  const existing = await readProjectRouterFile(path);
+  const block = existing?.json.router;
+  const next = {
+    ...(existing?.json ?? {}),
+    router: { ...(block !== undefined ? (block as object) : {}), [field]: value },
+  };
+  await writeFileAtomic(path, `${JSON.stringify(next, null, 2)}\n`, {
+    mode: 0o644,
+    dirMode: 0o755,
+  });
+}
+
 function parsePublishMode(value: string): string {
   const parsed = PublishModeSchema.safeParse(value);
   if (parsed.success) return parsed.data;
@@ -758,10 +887,66 @@ export async function persistPublishMode(dir: string, mode: PublishMode): Promis
   }));
 }
 
-/** install's Bazaar-lane decision writer; the same locked read-modify-write every
- *  `config set` uses, so a concurrent set never loses a sibling key. */
-export async function persistBazaarPay(dir: string, enabled: boolean): Promise<void> {
-  await persist(dir, (existing) => ({ ...existing, bazaarPay: enabled }));
+/**
+ * Remember, or forget, a project directory this machine wired with
+ * `install --project`. `tenjin update` spawns its refresh from the HOME
+ * directory, so a project install is unfindable by looking around; this list is
+ * how a later refresh reaches it. Absolute paths, de-duplicated, and pruned
+ * when a project is uninstalled or its settings file stops carrying our
+ * entries.
+ */
+export async function persistRouterProject(
+  dir: string,
+  projectDir: string,
+  present = true,
+): Promise<void> {
+  await persist(dir, (existing) => {
+    const known = new Set(existing.install?.routerProjects ?? []);
+    if (present) known.add(projectDir);
+    else known.delete(projectDir);
+    return { ...existing, install: { ...existing.install, routerProjects: [...known].sort() } };
+  });
+}
+
+/** Absent-only automatic router defaults, in atomic USDC. */
+export const ROUTER_DEFAULTS = {
+  maxAutoSpend: '250000',
+  sessionBudget: '5000000',
+} as const;
+
+export interface RouterDefaultsResult {
+  /** Keys this run wrote, because the file did not name them. */
+  set: string[];
+  /** Keys the operator had already written, left exactly as they are. */
+  kept: string[];
+  removed: string[];
+}
+
+/** Remove/report retired keys in the same locked write. Refresh preserves absent
+ * current settings; a fresh install fills only missing automatic limits. */
+export async function persistRouterDefaults(
+  dir: string,
+  refresh = false,
+): Promise<RouterDefaultsResult> {
+  const result: RouterDefaultsResult = { set: [], kept: [], removed: [] };
+  if (refresh && retiredPaymentKeys(await loadRawConfig(dir)).length === 0) return result;
+  await persist(dir, (existing) => {
+    const next: PartialConfig = { ...existing };
+    result.removed = retiredPaymentKeys(existing);
+    for (const key of result.removed) delete next[key];
+    if (refresh) return next;
+    for (const [key, value] of Object.entries(ROUTER_DEFAULTS) as [
+      keyof typeof ROUTER_DEFAULTS,
+      string,
+    ][]) {
+      if (existing[key] === undefined) {
+        next[key] = value;
+        result.set.push(key);
+      } else result.kept.push(key);
+    }
+    return next;
+  });
+  return result;
 }
 
 /**
@@ -809,9 +994,12 @@ async function resolveFromContext(ctx: CommandContext): Promise<EffectiveSetting
 }
 
 function assertKey(key: string): ScalarConfigKey {
+  if (key === 'bazaarPay' || key === 'confirm') {
+    throw new CliError('USAGE', `Retired config key: ${key}`, { fix: RETIRED_PAYMENT_GUIDANCE });
+  }
   if ((CONFIG_KEYS as string[]).includes(key)) return key as ScalarConfigKey;
   throw new CliError('USAGE', `Unknown config key: ${JSON.stringify(key)}`, {
-    fix: `Valid keys: ${[...CONFIG_KEYS, ...PUBLISH_CONFIG_KEYS, ...HOOKS_CONFIG_KEYS].join(', ')}.`,
+    fix: `Valid keys: ${[...CONFIG_KEYS, ...PUBLISH_CONFIG_KEYS, ...HOOKS_CONFIG_KEYS, ...ROUTER_CONFIG_KEYS].join(', ')}.`,
   });
 }
 
@@ -861,14 +1049,12 @@ function renderValue(key: ScalarConfigKey, stored: string | string[] | boolean):
     return { value: typeof stored === 'string' && stored.length > 0 ? 'set' : 'unset' };
   }
   if (Array.isArray(stored) || typeof stored === 'boolean') return { value: stored };
+  if (key === 'sessionBudget' && stored === 'none') return { value: null };
   if (key === 'maxAutoSpend' || key === 'sessionBudget') return { value: toMoney(stored) };
   if (key === 'sendMaxAmount') {
     // 'unset' is the resolved sentinel for an absent key (send refuses), never
     // a stored value; 'none' is the explicit uncapped opt-in.
     return { value: stored === 'none' || stored === SEND_MAX_UNSET ? stored : toMoney(stored) };
-  }
-  if (key === 'confirm' && stored.startsWith(CONFIRM_ABOVE)) {
-    return { value: stored, threshold: toMoney(stored.slice(CONFIRM_ABOVE.length)) };
   }
   return { value: stored };
 }
@@ -876,13 +1062,12 @@ function renderValue(key: ScalarConfigKey, stored: string | string[] | boolean):
 /** Per-key edge parsing. Returns the persisted form; throws USAGE on bad input. */
 function parseValue(key: ScalarConfigKey, value: string): string | string[] | boolean {
   switch (key) {
-    case 'maxAutoSpend':
     case 'sessionBudget':
+      return value === 'none' ? 'none' : parseUsdToAtomic(value);
+    case 'maxAutoSpend':
       return parseUsdToAtomic(value); // throws USAGE on a bad amount
     case 'sendMaxAmount':
       return value === 'none' ? 'none' : parseUsdToAtomic(value);
-    case 'confirm':
-      return parseConfirm(value);
     case 'allowlistCreators':
       return parseAllowlist(value);
     case 'baseUrl':
@@ -894,7 +1079,6 @@ function parseValue(key: ScalarConfigKey, value: string): string | string[] | bo
       // is how team mode is turned back off.
       return value.trim();
     case 'evalCohort':
-    case 'bazaarPay':
       return parseBoolean(value);
     case 'bazaarRegistries':
       return parseRegistryList(value);
@@ -910,24 +1094,12 @@ function parseRegistryList(value: string): string[] {
     .map((entry) => parseHttpUrl(entry));
 }
 
-// on/off ride along with true/false because that is how the CLI's own refusal
-// texts coach these keys (`tenjin config set bazaarPay on`); a coached command
-// that exits USAGE teaches an agent the remediation is broken.
+// Boolean settings accept both on/off and true/false.
 function parseBoolean(value: string): boolean {
   if (value === 'true' || value === 'on') return true;
   if (value === 'false' || value === 'off') return false;
   throw new CliError('USAGE', `Invalid boolean value: ${JSON.stringify(value)}`, {
     fix: 'Use "on" or "off" (or "true"/"false").',
-  });
-}
-
-function parseConfirm(value: string): string {
-  if (value === 'always') return 'always';
-  if (value.startsWith(CONFIRM_ABOVE)) {
-    return `${CONFIRM_ABOVE}${parseUsdToAtomic(value.slice(CONFIRM_ABOVE.length))}`;
-  }
-  throw new CliError('USAGE', `Invalid confirm value: ${JSON.stringify(value)}`, {
-    fix: 'Use "always" or "above:<usd>", e.g. above:0.25.',
   });
 }
 
@@ -1010,7 +1182,12 @@ async function persist(
 
 function formatLine(key: string, entry: RenderedSetting): string {
   const label = key.padEnd(KEY_WIDTH);
-  return `  ${label}  ${displayValue(entry)}  ${styleText('dim', `(${entry.source})`)}`;
+  // A router key from a project names its file: which of several is in force is the question.
+  const where =
+    entry.path !== undefined && (entry.source === 'project' || entry.source === 'local')
+      ? ` ${entry.path}`
+      : '';
+  return `  ${label}  ${displayValue(entry)}  ${styleText('dim', `(${entry.source}${where})`)}`;
 }
 
 /** The list variant: the value line, a dim description, and an optional dim note. */
@@ -1042,7 +1219,7 @@ function displayValue(entry: RenderedSetting): string {
   const { value } = entry;
   if (Array.isArray(value)) return value.length > 0 ? value.join(', ') : '(empty)';
   if (typeof value === 'boolean') return value ? 'true' : 'false'; // evalCohort
+  if (value === null) return 'none (no daily limit)';
   if (typeof value === 'object') return `${value.usd} USD`; // Money (spend keys)
-  if (entry.threshold !== undefined) return `above ${entry.threshold.usd} USD`; // confirm
   return value; // 'always', baseUrl, rpcUrl
 }

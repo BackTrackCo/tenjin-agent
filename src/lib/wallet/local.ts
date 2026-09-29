@@ -5,6 +5,7 @@ import type { PrivateKeyAccount } from 'viem/accounts';
 import type { Address, Hex } from 'viem';
 import * as Keystore from 'ox/Keystore';
 import { CliError } from '../errors';
+import { deriveKeystoreKey, type KeystoreDerivationOptions } from './keystore-kdf';
 import { hasCode } from '../errno';
 import { archivedWalletPath, walletPath } from '../paths';
 import {
@@ -39,6 +40,8 @@ export interface LocalProviderDeps {
   env: NodeJS.ProcessEnv;
   /** Test seam for keychain exec / TTY prompt / platform during decryption. */
   passphrase?: PassphraseOverrides;
+  /** Bounds only pure KDF work; credential-store migration remains unchanged. */
+  derivation?: KeystoreDerivationOptions;
 }
 
 const isWindows = process.platform === 'win32';
@@ -146,9 +149,12 @@ export async function verifyLocalWallet(deps: LocalProviderDeps): Promise<Wallet
 
   let key: Hex;
   try {
-    const derived = await Keystore.toKeyAsync(cred.keystore, { password: resolved.passphrase });
+    const derived = await deriveKeystoreKey(cred.keystore, resolved.passphrase, deps.derivation);
     key = Keystore.decrypt(cred.keystore, derived);
-  } catch {
+  } catch (error) {
+    if (error instanceof Error && ['AbortError', 'TimeoutError'].includes(error.name)) {
+      return { status: 'unverified', detail: 'keystore verification was cancelled or timed out' };
+    }
     // The #70 shape: the only durable passphrase is the pre-per-address shared
     // slot and it belongs to some later wallet, so this keystore is unopenable
     // and the address it identifies you by is unsignable. Named apart from a
@@ -532,9 +538,12 @@ async function accountForSigning(
   );
   let key: Hex;
   try {
-    const derived = await Keystore.toKeyAsync(cred.keystore, { password: resolved.passphrase });
+    const derived = await deriveKeystoreKey(cred.keystore, resolved.passphrase, deps.derivation);
     key = Keystore.decrypt(cred.keystore, derived);
   } catch (err) {
+    // Cancellation bounds pure computation; it does not indicate a bad password
+    // and must never trigger credential-store migration or payment signing.
+    if (err instanceof Error && ['AbortError', 'TimeoutError'].includes(err.name)) throw err;
     if (resolved.migrateLegacy !== undefined) {
       // The only durable passphrase came from the legacy shared slot and it does
       // NOT decrypt this wallet: it almost certainly belongs to whichever wallet

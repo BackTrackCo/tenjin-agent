@@ -91,7 +91,6 @@ describe('runDiscover', () => {
       resources: { url: string; registry: string }[];
       skippedNonHttp: number;
       errors: unknown[];
-      bazaarPay: boolean;
     };
     expect(data.resources).toHaveLength(1);
     expect(data.resources[0]).toMatchObject({
@@ -100,13 +99,12 @@ describe('runDiscover', () => {
     });
     expect(data.skippedNonHttp).toBe(1);
     expect(data.errors).toEqual([]);
-    expect(data.bazaarPay).toBe(false);
-    expect(stderr()).toContain('bazaarPay is off');
+    expect(stderr()).toBe('');
     expect(result.humanLines!.join('\n')).toContain('seller.example/a');
   });
 
   it('routes a query through the search endpoint and stays quiet when the toggle is on', async () => {
-    await writeConfig({ bazaarPay: true });
+    await writeConfig();
     const registry = stubRegistry(() =>
       json({ x402Version: 2, resources: [item('https://seller.example/b', 'http')] }),
     );

@@ -7,9 +7,8 @@ import type { CommandContext, CommandResult } from '../context';
 
 /**
  * `tenjin discover [query]`: list or search the configured x402 discovery
- * registries. Free and keyless, no wallet touched, and available with the
- * `bazaarPay` toggle off (it shows what the toggle unlocks; a stderr hint says
- * so). The foreign-endpoint counterpart of `tenjin search`: `search` finds
+ * registries. Free and keyless, with no wallet touched or payment authorized.
+ * The foreign-endpoint counterpart of `tenjin search`: `search` finds
  * marketplace answers, `discover` finds payable endpoints anywhere.
  *
  * Registry listings are settlement-derived and unvetted, and every string in
@@ -66,14 +65,7 @@ export async function runDiscover(args: DiscoverArgs, ctx: CommandContext): Prom
     // A registry that did not answer makes this sweep PARTIAL; saying so is what
     // keeps "not listed here" from reading as "not listed anywhere".
     errors: sweep.errors,
-    bazaarPay: settings.bazaarPay,
   };
-
-  if (!settings.bazaarPay) {
-    ctx.io.stderr.write(
-      'bazaarPay is off: these endpoints are visible but not payable. An operator enables the lane with `tenjin config set bazaarPay on`.\n',
-    );
-  }
 
   const humanLines = sweep.resources
     .slice(0, HUMAN_ROWS)

@@ -5,18 +5,14 @@ import { withBazaar } from '@x402/extensions/bazaar';
 import type { DiscoveryResource } from '@x402/extensions/bazaar';
 import type { PaymentRequirements } from '@x402/core/types';
 import { getAddress } from 'viem';
+import { PaymentRequirementsV2Schema } from '@x402/core/schemas';
+import { z } from 'zod';
 import { writeFileAtomic } from './atomic-json';
 
 /**
- * The x402 discovery registries: `discover` reads them, and the Bazaar pay lane
- * verifies a foreign 402 against them before any signature exists. Everything
- * here rides the SDK's own bazaar client (`withBazaar` over the facilitator
- * HTTP client); this module adds only aggregation across registries, a timeout
- * (the SDK fetch has none, and a hung registry must not hang a command), and
- * the cross-check.
- *
- * Registry text (descriptions, resource URLs) is OTHER PEOPLE'S DATA: callers
- * render it sanitized and never follow instructions found in it.
+ * Discovery is evidence, never payment authority. Standard registries use the
+ * SDK; Ultravioleta has an explicit adapter for its different discovery shape.
+ * Every payment candidate is matched locally against the live requirement.
  */
 
 export interface RegistryResource {
@@ -45,6 +41,110 @@ export interface RegistrySweep {
 const PAGE_LIMIT = 100;
 /** CDP's search endpoint rejects limits above 20 (verified live 2026-08-14). */
 const SEARCH_LIMIT = 20;
+
+const MAX_PAGES = 5;
+const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+const ULTRAVIOLETA_ORIGIN = 'https://facilitator.ultravioletadao.xyz';
+
+function isUltravioleta(registry: string): boolean {
+  return new URL(registry).origin === ULTRAVIOLETA_ORIGIN;
+}
+
+const paymentTerms = z.custom<PaymentRequirements>((value: unknown) => {
+  const parsed = PaymentRequirementsV2Schema.safeParse(value);
+  return parsed.success && /^\d+$/.test(parsed.data.amount);
+});
+const ultravioletResource = z.object({
+  url: z.string().url(),
+  type: z.string(),
+  x402Version: z.number().int(),
+  description: z.string().optional(),
+  accepts: z.array(paymentTerms).max(100),
+  lastUpdated: z.number().int().nonnegative().max(8_640_000_000_000),
+});
+const paginationSchema = z.object({
+  limit: z.number().int().positive().max(PAGE_LIMIT),
+  offset: z.number().int().nonnegative(),
+  total: z.number().int().nonnegative(),
+});
+interface Listings {
+  items: DiscoveryResource[];
+  incomplete?: string;
+}
+
+/** A registry controls its response size as well as its latency. */
+async function boundedJson(res: Response): Promise<unknown> {
+  const reader = res.body?.getReader();
+  if (!reader) throw new Error('Registry response has no body');
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+  try {
+    for (;;) {
+      const next = await reader.read();
+      if (next.done) break;
+      bytes += next.value.byteLength;
+      if (bytes > MAX_RESPONSE_BYTES) throw new Error('Registry response exceeds size limit');
+      chunks.push(next.value);
+    }
+  } finally {
+    await reader.cancel();
+  }
+  return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown;
+}
+
+/** Ultravioleta's documented resources API uses q, url and Unix seconds. */
+async function ultravioletListings(
+  registry: string,
+  timeoutMs: number,
+  query?: string,
+): Promise<Listings> {
+  const deadline = Date.now() + timeoutMs;
+  const items: DiscoveryResource[] = [];
+  let offset = 0;
+  let incomplete: string | undefined;
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw new Error('Registry lookup deadline exceeded');
+    const params = new URLSearchParams({
+      limit: String(PAGE_LIMIT),
+      offset: String(offset),
+      ...(query !== undefined ? { q: query } : {}),
+    });
+    const res = await fetch(`${new URL(registry).origin}/discovery/resources?${params}`, {
+      headers: { accept: 'application/json' },
+      signal: AbortSignal.timeout(remaining),
+      redirect: 'error',
+    });
+    if (!res.ok) throw new Error(`listing ${registry} answered ${res.status}`);
+    const response = z
+      .object({ items: z.array(z.unknown()).max(PAGE_LIMIT), pagination: paginationSchema })
+      .parse(await boundedJson(res));
+    const pagination = response.pagination;
+    if (pagination.offset !== offset || response.items.length > pagination.limit)
+      throw new Error('Invalid registry pagination');
+    for (const record of response.items) {
+      const parsed = ultravioletResource.safeParse(record);
+      if (!parsed.success) {
+        incomplete = 'Registry search skipped malformed records';
+        continue;
+      }
+      const item = parsed.data;
+      items.push({
+        resource: item.url,
+        type: item.type,
+        x402Version: item.x402Version,
+        accepts: item.accepts as PaymentRequirements[],
+        lastUpdated: new Date(item.lastUpdated * 1000).toISOString(),
+        ...(item.description !== undefined ? { description: item.description } : {}),
+      });
+    }
+    const next = pagination.offset + response.items.length;
+    if (next >= pagination.total) return { items, ...(incomplete ? { incomplete } : {}) };
+    if (response.items.length === 0) break;
+    offset = next;
+  }
+  return { items, incomplete: 'Registry search truncated at the pagination limit' };
+}
 
 function client(registry: string) {
   return withBazaar(new HTTPFacilitatorClient({ url: registry }));
@@ -86,25 +186,37 @@ export async function sweepRegistries(
   const resources: RegistryResource[] = [];
   const errors: RegistryError[] = [];
   let skippedNonHttp = 0;
+  const deadline = Date.now() + opts.timeoutMs;
   for (const registry of registries) {
     try {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw new Error('Registry lookup deadline exceeded');
       const bazaar = client(registry).extensions.bazaar;
+      const ultraviolet = isUltravioleta(registry)
+        ? await withTimeout(
+            ultravioletListings(registry, remaining, opts.query),
+            remaining,
+            registry,
+          )
+        : undefined;
+      if (ultraviolet?.incomplete) errors.push({ registry, message: ultraviolet.incomplete });
       const items =
-        opts.query !== undefined
+        ultraviolet?.items ??
+        (opts.query !== undefined
           ? (
               await withTimeout(
                 bazaar.search({ query: opts.query, limit: SEARCH_LIMIT }),
-                opts.timeoutMs,
+                remaining,
                 `search on ${registry}`,
               )
             ).resources
           : (
               await withTimeout(
                 bazaar.listResources({ type: 'http', limit: PAGE_LIMIT }),
-                opts.timeoutMs,
+                remaining,
                 `listing ${registry}`,
               )
-            ).items;
+            ).items);
       for (const item of items) {
         if (item.type !== 'http') {
           // An MCP-type listing is a seller this CLI cannot speak x402-over-HTTP
@@ -122,19 +234,14 @@ export async function sweepRegistries(
 }
 
 // ---------------------------------------------------------------------------
-// The local listing store: what `discover` swept, kept as pay-time evidence.
-//
-// The live lookup below is honest but weak: CDP's Bazaar ignores the `payTo`
-// list filter and its search is semantic (a URL query matches nothing), both
-// verified live 2026-08-14, so "look this URL up at pay time" cannot be relied
-// on against the largest registry. What CAN be relied on is what a sweep
-// actually returned: `discover` persists its listings here (bounded, TTL'd),
-// and the pay lane treats a fresh stored listing as the registry's word. That
-// also matches the designed flow — discover, then pay what discovery surfaced.
+// The local listing store: what a `discover` sweep returned, kept as pay-time
+// evidence (bounded, TTL'd). The pay lane checks a fresh stored listing first,
+// then asks each registry live (`listingsFor`), so the store is a shortcut and
+// never the only way a listed resource can be paid.
 // ---------------------------------------------------------------------------
 
 const LISTING_STORE_FILE = 'bazaar-listings.json';
-/** A listing older than this is not pay-time evidence; re-run `discover`. */
+/** A listing older than this is not pay-time evidence; the live lookup decides. */
 const LISTING_TTL_MS = 24 * 60 * 60 * 1000;
 /** Newest-first cap so the store cannot grow without bound. */
 const LISTING_STORE_CAP = 1000;
@@ -159,7 +266,7 @@ function listingStorePath(dataDir: string): string {
  * `accepts`, so one malformed row from a truncated write or a hand-edit throws a
  * raw TypeError out of the check that decides whether a payment may be signed.
  * A row that is not the shape this module writes is dropped, which costs at
- * worst a re-`discover`.
+ * worst a live lookup.
  */
 function isStoredListing(value: unknown): value is StoredListing {
   if (typeof value !== 'object' || value === null) return false;
@@ -228,7 +335,7 @@ export type RegistryVerification =
   /** Listed somewhere, but no listing matches the live 402's terms. */
   | { outcome: 'mismatch'; registry: string; detail: string }
   | { outcome: 'unlisted' }
-  /** Every registry errored: the check could not run, which is never a pass. */
+  /** Some required evidence could not be checked; absence is not established. */
   | { outcome: 'unavailable'; errors: RegistryError[] };
 
 /**
@@ -238,28 +345,87 @@ export type RegistryVerification =
  * An unparseable listing matches nothing.
  */
 function sameResourceUrl(listed: string, requested: string): boolean {
-  const identity = (u: string): string | null => {
-    try {
-      const parsed = new URL(u);
-      const path = parsed.pathname.endsWith('/') ? parsed.pathname.slice(0, -1) : parsed.pathname;
-      return `${parsed.origin}${path}`;
-    } catch {
-      return null;
-    }
-  };
-  const a = identity(listed);
-  return a !== null && a === identity(requested);
+  const a = resourceIdentity(listed);
+  return a !== null && a === resourceIdentity(requested);
 }
 
-/**
- * Is the live 402 the deal a registry publicly advertises? Looked up by the
- * LIVE payTo (the discovery API's only useful filter), which is self-verifying:
- * a tampered payTo finds either nothing or listings whose resource is not this
- * URL. A match requires same scheme/network/asset/payTo and a live amount AT
- * MOST the advertised one, so a seller can cut prices without delisting but a
- * raise waits for the registry. This is provenance, not endorsement: the spend
- * policy and the confirm gate still bound the money.
- */
+function resourceIdentity(u: string): string | null {
+  try {
+    const parsed = new URL(u);
+    const path = parsed.pathname.endsWith('/') ? parsed.pathname.slice(0, -1) : parsed.pathname;
+    return `${parsed.origin}${path}`;
+  } catch {
+    return null;
+  }
+}
+
+/** Search by endpoint identity so differing recipients remain visible. Registries
+ * without search retain the SDK's recipient-filtered listing fallback. */
+async function listingsFor(
+  registry: string,
+  url: string,
+  payTo: string,
+  timeoutMs: number,
+): Promise<Listings> {
+  if (isUltravioleta(registry))
+    return ultravioletListings(registry, timeoutMs, resourceIdentity(url) ?? url);
+  const deadline = Date.now() + timeoutMs;
+  const params = new URLSearchParams({
+    urlSubstring: resourceIdentity(url) ?? url,
+    limit: String(SEARCH_LIMIT),
+  });
+  const res = await fetch(`${registry.replace(/\/+$/, '')}/discovery/search?${params.toString()}`, {
+    headers: { accept: 'application/json' },
+    signal: AbortSignal.timeout(timeoutMs),
+    redirect: 'error',
+  });
+  if (res.ok) {
+    const answer = (await boundedJson(res)) as {
+      resources?: unknown;
+      partialResults?: boolean;
+      pagination?: { cursor?: unknown };
+    } | null;
+    if (Array.isArray(answer?.resources)) {
+      return {
+        items: answer.resources.slice(0, PAGE_LIMIT) as DiscoveryResource[],
+        ...(answer.resources.length > PAGE_LIMIT ||
+        answer.partialResults === true ||
+        answer.pagination?.cursor != null
+          ? { incomplete: 'Registry search results are truncated' }
+          : {}),
+      };
+    }
+  } else if (res.status !== 400 && res.status !== 404) {
+    throw new Error(`search on ${registry} answered ${res.status}`);
+  }
+  const bazaar = client(registry).extensions.bazaar;
+  const items: DiscoveryResource[] = [];
+  let offset = 0;
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw new Error('Registry lookup deadline exceeded');
+    const response = await withTimeout(
+      bazaar.listResources({ type: 'http', payTo, limit: PAGE_LIMIT, offset }),
+      remaining,
+      registry,
+    );
+    const pagination = paginationSchema.parse(response.pagination);
+    if (
+      !Array.isArray(response.items) ||
+      response.items.length > PAGE_LIMIT ||
+      pagination.offset !== offset
+    )
+      throw new Error('Invalid registry page');
+    items.push(...response.items);
+    offset = pagination.offset + response.items.length;
+    if (offset >= pagination.total) return { items };
+    if (response.items.length === 0) break;
+  }
+  return { items, incomplete: 'Registry listing truncated at the pagination limit' };
+}
+
+/** An exact resource match must cover the live scheme, network, asset, recipient
+ * and price. Missing or incomplete evidence is never a verified listing. */
 export async function verifyAgainstRegistries(
   registries: readonly string[],
   url: string,
@@ -271,8 +437,7 @@ export async function verifyAgainstRegistries(
   let mismatch: { registry: string; detail: string } | undefined;
 
   // A fresh listing a `discover` sweep stored IS the registry's word for this
-  // resource; checking it first is also the only reliable path on registries
-  // whose live lookup cannot filter by URL or payTo (see the store note above).
+  // resource, and it answers without a round trip.
   if (opts.dataDir !== undefined) {
     for (const listing of await storedListingsFor(opts.dataDir, url, opts.now ?? Date.now)) {
       if (!registries.includes(listing.registry)) continue; // no longer configured
@@ -282,16 +447,24 @@ export async function verifyAgainstRegistries(
     }
   }
 
+  const deadline = Date.now() + timeoutMs;
   for (const registry of registries) {
     try {
-      const bazaar = client(registry).extensions.bazaar;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw new Error('Registry lookup deadline exceeded');
       const listed = await withTimeout(
-        bazaar.listResources({ type: 'http', payTo: live.payTo, limit: PAGE_LIMIT }),
-        timeoutMs,
-        `listing ${registry}`,
+        listingsFor(registry, url, live.payTo, remaining),
+        remaining,
+        `looking up this resource on ${registry}`,
       );
+      if (listed.incomplete) errors.push({ registry, message: listed.incomplete });
       const matches = listed.items.filter(
-        (item) => item.type === 'http' && sameResourceUrl(item.resource, url),
+        (item) =>
+          item != null &&
+          item.type === 'http' &&
+          typeof item.resource === 'string' &&
+          Array.isArray(item.accepts) &&
+          sameResourceUrl(item.resource, url),
       );
       if (matches.length === 0) continue;
       for (const item of matches) {
@@ -304,7 +477,7 @@ export async function verifyAgainstRegistries(
     }
   }
   if (mismatch !== undefined) return { outcome: 'mismatch', ...mismatch };
-  if (errors.length === registries.length && registries.length > 0) {
+  if (errors.length > 0) {
     return { outcome: 'unavailable', errors };
   }
   return { outcome: 'unlisted' };
@@ -316,7 +489,13 @@ function acceptsMismatch(
   live: PaymentRequirements,
 ): string | null {
   let closest = 'the listing advertises no payment terms';
-  for (const adv of advertised) {
+  for (const raw of advertised) {
+    const parsed = paymentTerms.safeParse(raw);
+    if (!parsed.success) {
+      closest = 'malformed advertised payment terms';
+      continue;
+    }
+    const adv = parsed.data;
     if (adv.scheme !== live.scheme) {
       closest = `advertised scheme ${adv.scheme}, live ${live.scheme}`;
       continue;

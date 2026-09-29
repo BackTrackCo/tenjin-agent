@@ -105,6 +105,53 @@ const HooksConfigSchema = z.object({
   primer: z.boolean(),
 });
 
+/** How much conversation a router hook packet carries. */
+export const ROUTER_CONTEXTS = ['session', 'turn'] as const;
+export type RouterContext = (typeof ROUTER_CONTEXTS)[number];
+
+/**
+ * The router's own block, separate from the shelf's `hooks.*`: `enabled` is the
+ * off switch every router hook and the `request` tool honour, and `context` is how
+ * much conversation a hook packet carries (`session`, up to six prior messages,
+ * or `turn`, none). THE ONE SCHEMA for it: the global file validates it here,
+ * and a project's `.tenjin/config.json` and `config.local.json` go through
+ * {@link parseRouterLayer}. Both keys only ever tighten, which is why a
+ * project file may carry them; a key that loosens (spend, allowlist, enabling,
+ * base URL) must never join this object. `routerSettings` in
+ * router/settings.ts is the one reader of the resolved values.
+ */
+export const RouterLayerSchema = z.object({
+  enabled: z.boolean().optional(),
+  context: z.enum(ROUTER_CONTEXTS).optional(),
+});
+export type RouterLayer = z.infer<typeof RouterLayerSchema>;
+const RouterConfigSchema = RouterLayerSchema.required();
+
+/**
+ * The `router` block of one project file's parsed JSON, and nothing else: an
+ * unknown key, inside the block or beside it, is never read. CONFIG_INVALID,
+ * naming the file, when the file is not an object or a key has the wrong type.
+ */
+export function parseRouterLayer(json: unknown, path: string): RouterLayer {
+  if (json === null || typeof json !== 'object' || Array.isArray(json)) {
+    throw new CliError('CONFIG_INVALID', `Config at ${path} is not a JSON object`, {
+      fix: `Fix ${path}, or delete it.`,
+    });
+  }
+  const parsed = RouterLayerSchema.safeParse((json as { router?: unknown }).router ?? {});
+  if (!parsed.success) {
+    throw new CliError('CONFIG_INVALID', `Config at ${path} has an invalid router block`, {
+      fix: `Use router.enabled true|false and router.context "session"|"turn" in ${path}, or delete it.`,
+      details: parsed.error.issues,
+    });
+  }
+  const { enabled, context } = parsed.data;
+  return {
+    ...(enabled !== undefined ? { enabled } : {}),
+    ...(context !== undefined ? { context } : {}),
+  };
+}
+
 /**
  * What the daily update check is allowed to do about a newer version.
  *
@@ -214,6 +261,18 @@ const InstallConfigSchema = z.object({
    * otherwise) is never shadowed by a stale decline.
    */
   grantDeclined: z.array(z.string()),
+  /**
+   * Absolute directories a `tenjin install --project` wired, so `tenjin update`
+   * can refresh them. It spawns `install --refresh` from the HOME directory,
+   * which is the one place a project install can never be found by looking
+   * around: without this list a project-only machine refreshed nothing and
+   * reported success while its hooks stayed on the old build.
+   *
+   * A LIST, because one machine can wire several projects, and entries are
+   * dropped by `tenjin uninstall --project` and by any refresh that finds the
+   * project's settings file no longer carries our entries.
+   */
+  routerProjects: z.array(z.string()),
 });
 
 /**
@@ -239,14 +298,12 @@ const RawInstallHarnessSchema = z
 
 /**
  * The persisted config shape. Spend keys are stored atomic (accepted as decimal
- * USD at the command edge, see lib/money); `confirm` is the stored form
- * "always" | "above:<atomic>". These are client-enforced guardrails, not a
+ * USD at the command edge, see lib/money). These are client-enforced guardrails, not a
  * security boundary — any process that runs the CLI can also edit this file.
  */
 export const ConfigSchema = z.object({
   maxAutoSpend: atomicString,
-  sessionBudget: atomicString,
-  confirm: z.union([z.literal('always'), z.string().regex(/^above:\d+$/)]),
+  sessionBudget: z.union([atomicString, z.literal('none')]),
   /**
    * Hard per-send cap for `tenjin wallet send`, NOT satisfiable by --yes or a prompt
    * (the spend-policy posture): an atomic amount caps each send, "0" disables
@@ -291,14 +348,6 @@ export const ConfigSchema = z.object({
    * 90 days. Off by default; no query text is retained server-side without it.
    */
   evalCohort: z.boolean(),
-  /**
-   * The Bazaar pay lane opt-in: when true, `tenjin pay` may pay a NON-Tenjin
-   * x402 endpoint, provided a configured registry lists that exact resource and
-   * the live 402 matches the listed deal. Off by default; `install` asks once.
-   * The lane's teaching is the OPTIONAL tenjin-pay skill, present on disk
-   * exactly while this is on (lib/skill-placement).
-   */
-  bazaarPay: z.boolean(),
   /** x402 discovery registries (facilitator base URLs) `discover` queries and
    *  the Bazaar pay lane verifies against. */
   bazaarRegistries: z.array(z.url()),
@@ -308,6 +357,7 @@ export const ConfigSchema = z.object({
   update: UpdateConfigSchema,
   loop: LoopConfigSchema,
   team: TeamConfigSchema,
+  router: RouterConfigSchema,
 });
 export type Config = z.infer<typeof ConfigSchema>;
 
@@ -342,6 +392,7 @@ export const RawConfigSchema = ConfigSchema.partial()
     update: UpdateConfigSchema.partial().passthrough().optional(),
     loop: LoopConfigSchema.partial().passthrough().optional(),
     team: TeamConfigSchema.partial().passthrough().optional(),
+    router: RouterLayerSchema.passthrough().optional(),
   })
   .passthrough();
 export type PartialConfig = z.infer<typeof RawConfigSchema>;
@@ -380,8 +431,7 @@ export const DEFAULT_BAZAAR_REGISTRIES = [
 
 export const CONFIG_DEFAULTS: Config = {
   maxAutoSpend: '0',
-  sessionBudget: '0',
-  confirm: 'always',
+  sessionBudget: '5000000',
   // A type placeholder only, never honored: Config requires every key (and
   // CONFIG_KEYS derives from these). resolveSendMaxAmount never reads it — an
   // absent key resolves to SEND_MAX_UNSET and `tenjin wallet send` refuses until the
@@ -396,10 +446,9 @@ export const CONFIG_DEFAULTS: Config = {
   shelfBypassSecret: '',
   rpcUrl: 'https://mainnet.base.org',
   evalCohort: false,
-  bazaarPay: false,
   bazaarRegistries: DEFAULT_BAZAAR_REGISTRIES,
   publish: { mode: 'review', defaultPrice: '100000', ackServerWarnings: 'mode' },
-  install: { harness: [], grantDeclined: [] },
+  install: { harness: [], grantDeclined: [], routerProjects: [] },
   // Every hook is on out of the box: a vanilla install turns the whole loop on,
   // and the disclosure and the undo ride the install output. `false` leaves the
   // registered entries inert without touching settings.json, so any of these is
@@ -421,6 +470,7 @@ export const CONFIG_DEFAULTS: Config = {
     port: null,
   },
   team: { publicFallback: 'on' },
+  router: { enabled: true, context: 'session' },
 };
 
 /**
@@ -432,7 +482,7 @@ export const CONFIG_DEFAULTS: Config = {
  */
 export type ScalarConfigKey = Exclude<
   keyof Config,
-  'publish' | 'install' | 'hooks' | 'update' | 'loop' | 'team'
+  'publish' | 'install' | 'hooks' | 'update' | 'loop' | 'team' | 'router'
 >;
 const NESTED_CONFIG_KEYS: ReadonlySet<string> = new Set([
   'publish',
@@ -441,6 +491,7 @@ const NESTED_CONFIG_KEYS: ReadonlySet<string> = new Set([
   'update',
   'loop',
   'team',
+  'router',
 ]);
 export const CONFIG_KEYS = (Object.keys(CONFIG_DEFAULTS) as Array<keyof Config>).filter(
   (key): key is ScalarConfigKey => !NESTED_CONFIG_KEYS.has(key),
@@ -476,6 +527,18 @@ export type LoopConfigKey = (typeof LOOP_CONFIG_KEYS)[number];
 /** The dotted key `config get/set` accepts for the team block. */
 export const TEAM_CONFIG_KEYS = ['team.publicFallback'] as const;
 export type TeamConfigKey = (typeof TEAM_CONFIG_KEYS)[number];
+
+/** The dotted keys `config get/set` accept for the router block. */
+export const ROUTER_CONFIG_KEYS = ['router.enabled', 'router.context'] as const;
+export type RouterConfigKey = (typeof ROUTER_CONFIG_KEYS)[number];
+
+export const RETIRED_PAYMENT_KEYS = ['bazaarPay', 'confirm'] as const;
+export const RETIRED_PAYMENT_GUIDANCE =
+  'Retired payment settings no longer control payments. Use router.enabled, maxAutoSpend and sessionBudget for automatic routing; manual pay always requires consent. Run tenjin install to remove retired keys.';
+
+export function retiredPaymentKeys(raw: PartialConfig): string[] {
+  return RETIRED_PAYMENT_KEYS.filter((key) => Object.hasOwn(raw, key));
+}
 
 /**
  * Read and validate config.json WITHOUT applying defaults, so provenance can
@@ -517,7 +580,8 @@ export async function loadRawConfig(dir: string): Promise<PartialConfig> {
  *  publish block is merged per-subkey so a file that sets only publish.mode keeps
  *  the default defaultPrice (a shallow spread would drop it). */
 export async function loadConfig(dir: string): Promise<Config> {
-  const raw = await loadRawConfig(dir);
+  const raw = { ...(await loadRawConfig(dir)) };
+  for (const key of retiredPaymentKeys(raw)) delete raw[key];
   // loadConfig's job is the effective Config object, so an absent key is its
   // default here; the provenance question lives in resolve* below.
   return {
@@ -531,12 +595,17 @@ export async function loadConfig(dir: string): Promise<Config> {
     },
     install: {
       harness: raw.install?.harness ?? CONFIG_DEFAULTS.install.harness,
+      routerProjects: raw.install?.routerProjects ?? CONFIG_DEFAULTS.install.routerProjects,
       grantDeclined: resolveGrantDeclined(raw.install?.grantDeclined),
     },
     hooks: resolveHooksConfig(raw),
     update: { mode: raw.update?.mode ?? CONFIG_DEFAULTS.update.mode },
     loop: resolveLoopConfig(raw),
     team: { publicFallback: raw.team?.publicFallback ?? CONFIG_DEFAULTS.team.publicFallback },
+    router: {
+      enabled: raw.router?.enabled ?? CONFIG_DEFAULTS.router.enabled,
+      context: raw.router?.context ?? CONFIG_DEFAULTS.router.context,
+    },
   };
 }
 
@@ -552,7 +621,8 @@ export function resolveLoopConfig(raw: PartialConfig): LoopConfig {
   };
 }
 
-export type Provenance = 'default' | 'file' | 'project' | 'env' | 'flag';
+/** `local` is a project's personal `.tenjin/config.local.json` (router keys only). */
+export type Provenance = 'default' | 'file' | 'project' | 'local' | 'env' | 'flag';
 
 export interface ResolvedSetting<T> {
   value: T;
@@ -583,7 +653,6 @@ export interface PublishModeResolution {
 export interface EffectiveSettings {
   maxAutoSpend: ResolvedSetting<string>;
   sessionBudget: ResolvedSetting<string>;
-  confirm: ResolvedSetting<string>;
   sendMaxAmount: ResolvedSetting<string>;
   allowlistCreators: ResolvedSetting<string[]>;
   baseUrl: ResolvedSetting<string>;
@@ -591,7 +660,6 @@ export interface EffectiveSettings {
   shelfBypassSecret: ResolvedSetting<string>;
   rpcUrl: ResolvedSetting<string>;
   evalCohort: ResolvedSetting<boolean>;
-  bazaarPay: ResolvedSetting<boolean>;
   bazaarRegistries: ResolvedSetting<string[]>;
   publishMode: PublishModeResolution;
   publishDefaultPrice: ResolvedSetting<string>;
@@ -627,7 +695,6 @@ export function resolveSettings(input: ResolveSettingsInput): EffectiveSettings 
   return {
     maxAutoSpend: fileOrDefault('maxAutoSpend', config),
     sessionBudget: fileOrDefault('sessionBudget', config),
-    confirm: fileOrDefault('confirm', config),
     sendMaxAmount: resolveSendMaxAmount(config),
     allowlistCreators: fileOrDefault('allowlistCreators', config),
     baseUrl: resolveBaseUrl(config, flags, env),
@@ -635,7 +702,6 @@ export function resolveSettings(input: ResolveSettingsInput): EffectiveSettings 
     shelfBypassSecret: fileOrDefault('shelfBypassSecret', config),
     rpcUrl: fileOrDefault('rpcUrl', config),
     evalCohort: fileOrDefault('evalCohort', config),
-    bazaarPay: fileOrDefault('bazaarPay', config),
     bazaarRegistries: fileOrDefault('bazaarRegistries', config),
     publishMode: resolvePublishMode({ config, project, env }),
     publishDefaultPrice: resolvePublishDefaultPrice({ config, project }),
