@@ -1,3 +1,5 @@
+import { boundJevgrepGrant } from './jevgrep/grants';
+import { executeJevgrep } from './jevgrep/executor';
 import { runPay, type AdvertisedTerms, type PayDeps } from '../commands/pay';
 import { CliError } from '../lib/errors';
 import { toMoney } from '../lib/money';
@@ -93,7 +95,9 @@ export async function runRequestTool(
   });
   await footer.routing();
   const settings = await resolveContextSettings(deps.ctx);
+  const local = await boundJevgrepGrant(deps.ctx, deps.cwd ?? process.cwd(), args.id, query);
   const decisionDeps = {
+    jevgrep: local !== null,
     ctx: deps.ctx,
     baseUrl: settings.baseUrl,
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
@@ -129,6 +133,20 @@ export async function runRequestTool(
     );
   }
 
+  if ('executor' in decision.contract) {
+    if (!local || !args.id || decision.contract.query !== query) {
+      await footer.done('needs_input');
+      return fail(
+        'needs_input',
+        'Local retrieval requires a fresh hook offer bound to this approved repository and unchanged query.',
+      );
+    }
+    await footer.calling({ provider: 'Jevgrep' });
+    const result = await executeJevgrep(local, args.id, query, deps);
+    await footer.done(result.envelope.status === 'fulfilled' ? 'fulfilled' : 'failed');
+    return result;
+  }
+  if (!('providerPriceAtomic' in decision)) return fail('failed', 'Invalid HTTP pricing.');
   const contract = decision.contract;
   const refusal = checkContract(contract);
   if (refusal !== null) {

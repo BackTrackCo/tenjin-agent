@@ -1,0 +1,242 @@
+import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { createServer } from 'node:http';
+import type { Socket } from 'node:net';
+import { canonicalHash } from '../../lib/request-schema';
+import type { JevgrepAnswerCache } from './answer-cache';
+import { JEV_LIMITS, validateNativeRequest, validateNativeResponse } from './protocol.js';
+import type { NativeEvaluationRequest, NativeEvaluationResponse } from './protocol.js';
+
+export type JevgrepEvaluate = (
+  request: NativeEvaluationRequest,
+  signal: AbortSignal,
+) => Promise<NativeEvaluationResponse>;
+
+export async function startJevgrepProxy(options: {
+  evaluate: JevgrepEvaluate;
+  cache?: JevgrepAnswerCache;
+  signal?: AbortSignal;
+}) {
+  options.signal?.throwIfAborted();
+  const controller = new AbortController();
+  const token = randomBytes(32).toString('hex');
+  const expectedAuth = Buffer.from(`Bearer ${token}`);
+  let host = '';
+  let active = 0;
+  let requests = 0;
+  let bytes = 0;
+  let localRequests = 0;
+  let localBytes = 0;
+  let cacheHits = 0;
+  let joined = 0;
+  const evaluations = new Map<string, Promise<NativeEvaluationResponse>>();
+  let stopReason: string | undefined;
+  const sockets = new Set<Socket>();
+  const pending = new Set<Promise<void>>();
+  const server = createServer((request, response) => {
+    const respond = (status: number, error: string) => {
+      response.writeHead(status, { 'content-type': 'application/json', connection: 'close' });
+      response.end(JSON.stringify({ error }));
+    };
+    // The pinned evaluator treats 401/403 as bad credentials and retries 5xx.
+    // A closed run is a terminal state conflict, never an authentication failure.
+    const stopped = () => respond(409, `Local search stopped: ${stopReason ?? 'cancelled'}`);
+    const auth = Buffer.from(request.headers.authorization ?? '');
+    if (
+      request.headers.host !== host ||
+      request.headers.origin !== undefined ||
+      request.headers['transfer-encoding'] !== undefined ||
+      auth.length !== expectedAuth.length ||
+      !timingSafeEqual(auth, expectedAuth)
+    ) {
+      respond(403, 'Local proxy access denied');
+      return;
+    }
+    if (request.method !== 'POST' || request.url !== '/v1/systemone') {
+      respond(404, 'Unknown local proxy route');
+      return;
+    }
+    if (request.headers['content-type']?.split(';')[0]?.trim() !== 'application/json') {
+      respond(415, 'Expected application/json');
+      return;
+    }
+    if (controller.signal.aborted) {
+      stopped();
+      return;
+    }
+    if (stopReason) {
+      stopped();
+      return;
+    }
+    if (active >= JEV_LIMITS.concurrency) {
+      respond(429, 'Local concurrency limit');
+      return;
+    }
+    if (localRequests >= JEV_LIMITS.localRequests) {
+      stopReason = 'local-request-limit';
+      stopped();
+      return;
+    }
+    localRequests++;
+    active++;
+    const task = (async () => {
+      try {
+        let size = 0;
+        const chunks: Buffer[] = [];
+        for await (const chunk of request) {
+          const part = Buffer.from(chunk);
+          size += part.length;
+          // Bound loopback ingress independently; only cache misses reserve
+          // the unchanged supplier request/egress budget below.
+          localBytes += part.length;
+          if (size > JEV_LIMITS.requestBytes || localBytes > JEV_LIMITS.localRequestBytes) {
+            stopReason ??=
+              size > JEV_LIMITS.requestBytes ? 'request-byte-limit' : 'local-byte-limit';
+            respond(413, 'Local request byte limit');
+            return;
+          }
+          chunks.push(part);
+        }
+        if (controller.signal.aborted) {
+          stopped();
+          return;
+        }
+        let body: NativeEvaluationRequest;
+        try {
+          body = validateNativeRequest(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+        } catch {
+          respond(400, 'Invalid native evaluation request');
+          return;
+        }
+        const cached = await options.cache?.get(body);
+        if (stopReason || controller.signal.aborted) {
+          stopped();
+          return;
+        }
+        let answer: NativeEvaluationResponse;
+        if (cached) {
+          answer = validateNativeResponse(cached, body);
+          cacheHits++;
+        } else {
+          const key = canonicalHash(body);
+          const pending = options.cache ? evaluations.get(key) : undefined;
+          if (pending) {
+            answer = await pending;
+            joined++;
+          } else {
+            if (requests >= JEV_LIMITS.requests) {
+              stopReason ??= 'request-limit';
+              stopped();
+              return;
+            }
+            if (bytes + size > JEV_LIMITS.totalRequestBytes) {
+              stopReason ??= 'total-byte-limit';
+              respond(413, 'Local request byte limit');
+              return;
+            }
+            // Reserve synchronously across concurrent misses before dispatch.
+            requests++;
+            bytes += size;
+            const operation = (async () => {
+              const upstream = await options.evaluate(
+                JSON.parse(JSON.stringify(body)) as NativeEvaluationRequest,
+                controller.signal,
+              );
+              const valid = validateNativeResponse(upstream, body);
+              if (!controller.signal.aborted)
+                await options.cache?.put(body, valid).catch(() => undefined);
+              return valid;
+            })();
+            if (options.cache) evaluations.set(key, operation);
+            try {
+              answer = await operation;
+            } finally {
+              evaluations.delete(key);
+            }
+          }
+        }
+        if (controller.signal.aborted || response.destroyed) return;
+        response.writeHead(200, { 'content-type': 'application/json', connection: 'close' });
+        response.end(JSON.stringify(answer));
+      } catch (error) {
+        const details =
+          error && typeof error === 'object' && 'details' in error ? error.details : undefined;
+        const paymentReason =
+          details && typeof details === 'object' && 'reason' in details
+            ? details.reason
+            : undefined;
+        stopReason ??= controller.signal.aborted
+          ? 'cancelled'
+          : typeof paymentReason === 'string' &&
+              ['budget', 'provider', 'payment_uncertain'].includes(paymentReason)
+            ? paymentReason
+            : 'provider-failure';
+        if (!response.headersSent && !response.destroyed) stopped();
+      } finally {
+        active--;
+      }
+    })();
+    pending.add(task);
+    void task.finally(() => pending.delete(task));
+  });
+  server.requestTimeout = 15_000;
+  server.headersTimeout = 10_000;
+  server.keepAliveTimeout = 1;
+  server.maxConnections = 8;
+  server.on('connection', (socket) => {
+    sockets.add(socket);
+    socket.on('close', () => sockets.delete(socket));
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      server.removeListener('error', reject);
+      const address = server.address();
+      if (!address || typeof address === 'string') {
+        reject(new Error('Proxy did not bind'));
+        return;
+      }
+      host = `127.0.0.1:${address.port}`;
+      resolve();
+    });
+  });
+  let closePromise: Promise<void> | undefined;
+  function close(): Promise<void> {
+    closePromise ??= (async () => {
+      controller.abort();
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      // Payment operations receive cancellation but may retain uncertain exposure.
+      // Their owner persists it; shutdown must not wait forever for a bad callback.
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        Promise.allSettled([...pending]),
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, 250);
+        }),
+      ]);
+      clearTimeout(timer);
+      options.signal?.removeEventListener('abort', abort);
+    })();
+    return closePromise;
+  }
+  function abort() {
+    void close();
+  }
+  options.signal?.addEventListener('abort', abort, { once: true });
+  if (options.signal?.aborted) await close();
+  return {
+    baseURL: `http://${host}/v1`,
+    token,
+    close,
+    summary: () => ({
+      requests,
+      requestBytes: bytes,
+      cacheHits,
+      joined,
+      localRequests,
+      localRequestBytes: localBytes,
+      active,
+      stopReason,
+    }),
+  };
+}

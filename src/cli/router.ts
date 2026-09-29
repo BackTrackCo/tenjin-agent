@@ -12,6 +12,7 @@ import { INTEGRATION, SETUP, type Registration } from './registration';
  */
 export function registerRouter(reg: Registration): void {
   const { io, runCommand, leaf, addGlobalFlags, buildContext } = reg;
+  registerJevgrep(reg);
 
   const hook = leaf(INTEGRATION, 'hook', 'run one harness hook handler (called by Claude Code)')
     .description(
@@ -56,7 +57,7 @@ export function registerRouter(reg: Registration): void {
 
   leaf(INTEGRATION, 'mcp', 'run the local stdio MCP server')
     .description(
-      'Run the local stdio MCP server that carries the `request` tool: one paid routing decision per lookup, then the provider call, under your local spend policy. It speaks on stdin and stdout and runs until the client disconnects, so it prints no envelope of its own.',
+      'Run the local stdio MCP server that carries the `request` tool: free routing decisions, followed by provider calls or explicitly enabled local retrieval under your spend policy. It speaks on stdin and stdout and runs until the client disconnects, so it prints no envelope of its own.',
     )
     .action(async function (this: Command) {
       const ctx = buildContext(this);
@@ -84,4 +85,44 @@ export function registerRouter(reg: Registration): void {
         return runRouterStatus(ctx);
       });
     });
+}
+
+function registerJevgrep(reg: Registration): void {
+  const command = reg
+    .leaf(SETUP, 'jevgrep', 'configure experimental bounded repository retrieval')
+    .helpCommand(false);
+  reg
+    .addGlobalFlags(command.command('enable'))
+    .requiredOption('--root <path>', 'one canonical repository root')
+    .requiredOption('--artifact <path>', 'reviewed Jevgrep npm tarball containing custom auth')
+    .requiredOption('--sha256 <hex>', 'reviewed tarball SHA-256')
+    .requiredOption('--max-run <usd>', 'whole-search exposure ceiling, at most 0.05 USD')
+    .requiredOption('--share-source', 'authorize committed tracked source disclosure to jev-x402')
+    .requiredOption('--experimental', 'opt into the unreleased local pilot')
+    .action(async function (this: Command) {
+      await reg.runCommand('jevgrep enable', this, async (ctx) => {
+        const { configureJevgrep } = await import('../router/jevgrep/grants');
+        return configureJevgrep(ctx, this.opts());
+      });
+    });
+  reg.addGlobalFlags(command.command('disable')).action(async function (this: Command) {
+    await reg.runCommand('jevgrep disable', this, async (ctx) => {
+      const { disableJevgrep } = await import('../router/jevgrep/grants');
+      return disableJevgrep(ctx);
+    });
+  });
+  reg.addGlobalFlags(command.command('status')).action(async function (this: Command) {
+    await reg.runCommand('jevgrep status', this, async (ctx) => {
+      const { readJevgrepGrant } = await import('../router/jevgrep/grants');
+      const grant = await readJevgrepGrant(ctx.dataDir);
+      return {
+        data: grant ?? { enabled: false },
+        humanLines: [
+          grant?.enabled
+            ? `Enabled for committed tracked source in ${grant.root}; supplier jev-x402; budget ${grant.maxRunAtomic} atomic USDC.`
+            : 'Local repository retrieval is disabled.',
+        ],
+      };
+    });
+  });
 }

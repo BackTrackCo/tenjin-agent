@@ -1,3 +1,4 @@
+import { eligibleJevgrep, bindJevgrepOffer, type JevgrepGrant } from './jevgrep/grants';
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { z } from 'zod';
@@ -440,10 +441,11 @@ function gateDeadline(deps: HookDeps): number {
  * does not load, and the file beside it is not the wallet that pays.
  */
 async function withheldBecause(
-  decision: { providerPriceAtomic: string; endpoint: string },
+  decision: ExecuteDecision,
   deps: HookDeps,
   deadline: number,
 ): Promise<string | null> {
+  if ('pricing' in decision) return null;
   let rpcUrl: string;
   try {
     const settings = await resolveContextSettings(hookContext(deps));
@@ -545,7 +547,15 @@ export async function runPromptHook(raw: unknown, deps: HookDeps): Promise<Promp
   );
   const footer = await openFooter(deps, event.sessionId, 'prompt');
   const deadline = gateDeadline(deps);
-  const outcome = await decide(sealed, deps, router.config);
+  const local = await eligibleJevgrep(
+    hookContext(deps),
+    event.cwd,
+    [
+      sealed.packet.current.text,
+      ...sealed.packet.history.filter((m) => m.role === 'user').map((m) => m.text),
+    ].join('\n'),
+  );
+  const outcome = await decide(sealed, deps, router.config, local !== null);
   if (outcome === null || outcome.action !== 'execute') {
     await footer.close(outcome);
     return { response: null, ...(outcome !== null ? { action: outcome.action } : {}) };
@@ -554,6 +564,10 @@ export async function runPromptHook(raw: unknown, deps: HookDeps): Promise<Promp
   if (withheld !== null) {
     await footer.close(outcome, { withheld });
     return { response: null, action: 'execute', withheld: true };
+  }
+  if (!(await saveLocalOffer(outcome, local, event.sessionId, deps))) {
+    await footer.close(outcome, { withheld: 'local root binding unavailable' });
+    return { response: null };
   }
   await footer.close(outcome);
   return { action: 'execute', id: outcome.id, ...injection(attributed(outcome.hint)) };
@@ -601,7 +615,7 @@ type ExecuteDecision = Extract<HookDecision, { action: 'execute' }>;
 
 /** A free offer: nothing to pay, so nothing for the spend policy or the wallet. */
 function isFree(offer: ExecuteDecision): boolean {
-  return offer.providerPriceAtomic === '0';
+  return 'providerPriceAtomic' in offer && offer.providerPriceAtomic === '0';
 }
 
 /**
@@ -686,6 +700,10 @@ async function routeNativeCall(
       offer: null,
       outcome: { response: null, ...(outcome !== null ? { action: outcome.action } : {}) },
     };
+  }
+  if ('pricing' in outcome) {
+    await footer.close(outcome, { withheld: 'local executors require a prompt offer' });
+    return { offer: null, outcome: { response: null } };
   }
   if (opts.passFree === true && isFree(outcome)) {
     await footer.close(outcome, { withheld: 'free lookup, call runs' });
@@ -859,7 +877,7 @@ async function offerOnShortfall(
   if (routed.offer === null) return { ...routed.outcome, nativeOutcome };
   // The free docs lookup for this very search just came back empty: offering
   // it again would send the agent to the same miss. Only a paid offer stands.
-  if (docsJustMissed && routed.offer.providerPriceAtomic === '0')
+  if (docsJustMissed && isFree(routed.offer))
     return { response: null, nativeOutcome, action: 'execute' };
   return {
     response: {
@@ -928,7 +946,15 @@ export async function runDelegationHook(
   if (sealed.packet.historyStatus !== 'ok') return { response: null };
   const footer = await openFooter(deps, event.sessionId, 'delegate');
   const deadline = gateDeadline(deps);
-  const outcome = await decide(sealed, deps, router.config);
+  const local = await eligibleJevgrep(
+    hookContext(deps),
+    event.cwd,
+    [
+      sealed.packet.current.text,
+      ...sealed.packet.history.filter((m) => m.role === 'user').map((m) => m.text),
+    ].join('\n'),
+  );
+  const outcome = await decide(sealed, deps, router.config, local !== null);
   if (outcome === null || outcome.action !== 'execute') {
     await footer.close(outcome);
     return { response: null, ...(outcome !== null ? { action: outcome.action } : {}) };
@@ -937,6 +963,10 @@ export async function runDelegationHook(
   if (withheld !== null) {
     await footer.close(outcome, { withheld });
     return { response: null, action: 'execute', withheld: true };
+  }
+  if (!(await saveLocalOffer(outcome, local, event.sessionId, deps))) {
+    await footer.close(outcome, { withheld: 'local root binding unavailable' });
+    return { response: null };
   }
   await footer.close(outcome);
   return {
@@ -1024,6 +1054,7 @@ async function decide(
   { packet }: Sealed,
   deps: HookDeps,
   config: PartialConfig,
+  jevgrep = false,
 ): Promise<HookDecision | null> {
   const baseUrl = resolveBaseUrl(deps, config);
   const warn = deps.warn ?? ((line: string) => process.stderr.write(`${line}\n`));
@@ -1032,6 +1063,7 @@ async function decide(
     { packet },
     {
       ctx: hookContext(deps),
+      jevgrep,
       baseUrl,
       timeoutMs: deps.timeoutMs ?? GATE_TIMEOUT_MS,
       ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
@@ -1097,4 +1129,20 @@ async function routerFor(
  */
 function scoped(packet: Packet, router: RouterSettings): Packet {
   return router.context.value === 'turn' ? { ...packet, history: [] } : packet;
+}
+
+async function saveLocalOffer(
+  decision: HookDecision,
+  grant: JevgrepGrant | null,
+  sessionId: string,
+  deps: HookDeps,
+): Promise<boolean> {
+  if (decision.action !== 'execute' || decision.capabilityId !== 'jevgrep-search-v1') return true;
+  if (!grant) return false;
+  try {
+    await bindJevgrepOffer(deps.dataDir, decision.id, sessionId, grant);
+    return true;
+  } catch {
+    return false;
+  }
 }

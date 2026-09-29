@@ -223,3 +223,59 @@ describe('one free decision', () => {
     expect((outcome as { reason: string }).reason).toContain('cannot read');
   });
 });
+
+describe('negotiated local repository executor', () => {
+  const answer = {
+    schemaVersion: 1,
+    routerVersion: '2026-09-28.1',
+    decision: {
+      action: 'execute',
+      capabilityId: 'jevgrep-search-v1',
+      category: 'repository retrieval',
+      provider: 'Jevgrep',
+      capabilityDescription: 'semantic source retrieval',
+      pricing: 'bounded_locally',
+      contract: { executor: 'jevgrep-search-v1', query: 'Explain the lifecycle' },
+    },
+  };
+  it('rejects unsolicited local execution even when its wire shape is valid', async () => {
+    const result = await requestDecision(
+      'tool',
+      { query: 'Explain the lifecycle' },
+      { ctx: ctx(), baseUrl: BASE, ...net(answer) },
+    );
+    expect(result.status).toBe('failed');
+  });
+  it('advertises eligibility explicitly and accepts only the fixed query contract', async () => {
+    let executors: string | null = null;
+    const fetchImpl = (async (_input, init) => {
+      executors = new Headers(init?.headers).get('Tenjin-Router-Executors');
+      return new Response(JSON.stringify(answer), {
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as typeof fetch;
+    const result = await requestDecision(
+      'tool',
+      { query: 'Explain the lifecycle' },
+      { ctx: ctx(), baseUrl: BASE, jevgrep: true, fetchImpl },
+    );
+    expect(result.status).toBe('decided');
+    expect(executors).toBe('jevgrep-search-v1');
+    const unsafe = {
+      ...answer,
+      decision: {
+        ...answer.decision,
+        contract: { ...answer.decision.contract, root: '/unapproved' },
+      },
+    };
+    expect(
+      (
+        await requestDecision(
+          'tool',
+          { query: 'Explain the lifecycle' },
+          { ctx: ctx(), baseUrl: BASE, jevgrep: true, ...net(unsafe) },
+        )
+      ).status,
+    ).toBe('failed');
+  });
+});

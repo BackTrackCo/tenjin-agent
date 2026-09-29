@@ -33,6 +33,12 @@ export async function runRouterStatus(
     (sum, r) => sum + BigInt(r.amountAtomic),
     0n,
   );
+  const durableReserved = (ledger?.durable ?? [])
+    .filter((entry) => entry.state === 'reserved')
+    .reduce((sum, entry) => sum + BigInt(entry.amountAtomic), 0n);
+  const durableUnknown = (ledger?.durable ?? [])
+    .filter((entry) => entry.state === 'signed')
+    .reduce((sum, entry) => sum + BigInt(entry.amountAtomic), 0n);
   const retired = retiredPaymentKeys(await loadRawConfig(ctx.dataDir));
   const warnings = retired.length
     ? [`Ignored retired keys: ${retired.join(', ')}. ${RETIRED_PAYMENT_GUIDANCE}`]
@@ -48,6 +54,11 @@ export async function runRouterStatus(
       automaticExposure: toMoney(automaticAtomic.toString()),
       reserved: toMoney(reservedAtomic.toString()),
       budget: budgetAtomic === null ? null : toMoney(budgetAtomic.toString()),
+    },
+    localRetrieval: {
+      reserved: toMoney(durableReserved.toString()),
+      unknownSignedExposure: toMoney(durableUnknown.toString()),
+      reconciliationRequired: durableUnknown > 0n,
     },
     caps: {
       maxAutoSpend: toMoney(settings.policy.maxAutoSpendAtomic.toString()),
@@ -68,6 +79,11 @@ export async function runRouterStatus(
       `spent ${toMoney(committedAtomic.toString()).usd} USD total; automatic exposure ${toMoney(automaticAtomic.toString()).usd} USD ${budgetLine}`,
       `reserved ${toMoney(reservedAtomic.toString()).usd} USD in ${data.inFlight.length} open request(s)`,
       `automatic router up to ${toMoney(settings.policy.maxAutoSpendAtomic.toString()).usd} USD per call; manual pay always requires consent`,
+      ...(durableReserved > 0n || durableUnknown > 0n
+        ? [
+            `local retrieval reserved ${toMoney(durableReserved.toString()).usd} USD; unreconciled signed exposure ${toMoney(durableUnknown.toString()).usd} USD (retained across daily rollover)`,
+          ]
+        : []),
       ...warnings,
     ],
   };

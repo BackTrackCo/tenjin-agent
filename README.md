@@ -182,6 +182,13 @@ When refreshing from home, Tenjin keeps the existing user registration if there 
 
 </details>
 
+## Experimental repository retrieval
+
+This branch can route semantic repository questions through Jevgrep using upstream custom
+provider support from [PR #28](https://github.com/dzhng/jevgrep/pull/28). It is disabled by default
+and requires a reviewed, hashed local artifact, explicit source-sharing permission and a bounded
+budget. No published runtime is qualified yet. [Setup, limits and rollback](./docs/jevgrep.md).
+
 ## Request a tool
 
 Tenjin is in alpha, and the catalog grows with what people ask for. Missing a service your agent keeps needing? Hit a lookup that went to the wrong place? We want to hear it.

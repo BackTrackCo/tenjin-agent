@@ -108,7 +108,33 @@ const CapabilityFields = {
   providerPriceAtomic: z.string().regex(/^\d+$/),
 };
 
-const HookDecisionSchema = z.discriminatedUnion('action', [
+const JevgrepFields = {
+  capabilityId: z.literal('jevgrep-search-v1'),
+  category: z.literal('repository retrieval'),
+  provider: z.literal('Jevgrep'),
+  capabilityDescription: z.string().min(1).max(500),
+  pricing: z.literal('bounded_locally'),
+};
+const JevgrepContract = z.strictObject({
+  executor: z.literal('jevgrep-search-v1'),
+  query: z.string().min(1).max(8_000),
+});
+const HookDecisionSchema = z.union([
+  z
+    .strictObject({
+      action: z.literal('execute'),
+      ...JevgrepFields,
+      id: IdSchema,
+      endpoint: z.literal('https://github.com/dzhng/jevgrep'),
+      usage: z.string().min(1).max(1_000),
+      hint: z.string().min(1).max(1_000),
+    })
+    .refine(
+      (value) =>
+        !/[\p{Cc}\p{Cf}]/u.test(value.hint) &&
+        value.hint.includes('request({') &&
+        value.hint.includes(value.id),
+    ),
   z
     .strictObject({
       action: z.literal('execute'),
@@ -151,7 +177,8 @@ const HookDecisionSchema = z.discriminatedUnion('action', [
   RefusedSchema.extend({ action: z.literal('needs_input') }),
 ]);
 
-const ToolDecisionSchema = z.discriminatedUnion('action', [
+const ToolDecisionSchema = z.union([
+  z.strictObject({ action: z.literal('execute'), ...JevgrepFields, contract: JevgrepContract }),
   z.strictObject({
     action: z.literal('execute'),
     ...CapabilityFields,
@@ -232,6 +259,7 @@ export interface GateHint {
 }
 
 export interface DecisionDeps {
+  jevgrep?: boolean;
   ctx: CommandContext;
   baseUrl: string;
   fetchImpl?: typeof fetch;
@@ -279,6 +307,9 @@ export async function requestDecision(
   const url = new URL(ROUTER_PATH, deps.baseUrl).toString();
   const options: HttpRequestOptions = {
     method: 'POST',
+    headers: {
+      'Tenjin-Router-Executors': [...(deps.jevgrep ? ['jevgrep-search-v1'] : [])].join(','),
+    },
     timeoutMs: deps.timeoutMs ?? deps.ctx.flags.timeout,
     blockRedirects: true,
     jsonBody:
@@ -291,10 +322,22 @@ export async function requestDecision(
           }),
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   };
-  return readDecision(
+  const outcome = readDecision(
     await httpRequest(url, options),
     kind === 'hook' ? HookResponseSchema : ToolResponseSchema,
   );
+  if (
+    outcome.status === 'decided' &&
+    outcome.decision.decision.action === 'execute' &&
+    outcome.decision.decision.capabilityId === 'jevgrep-search-v1' &&
+    !deps.jevgrep
+  ) {
+    return {
+      status: 'failed',
+      reason: 'The router selected a local executor that this session did not advertise.',
+    };
+  }
+  return outcome;
 }
 
 function readDecision<T extends z.ZodTypeAny>(

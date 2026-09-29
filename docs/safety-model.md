@@ -21,7 +21,7 @@ Do not copy commands from purchased content into an allowlist, `AGENTS.md`, `CLA
 
 Search, inspect, free reads, outcomes, wallet display, balance checks, doctor, and checkout-link creation are separated from purchases and transfers.
 
-The x402 router's `request` tool and `tenjin pay` are the paying commands, and they run one gate between them: `maxAutoSpend` and `sessionBudget` as limits on automatic router spending only, mandatory consent for manual pay, and a reservation that counts a signed authorization as spent the moment it leaves. A router lookup is ONE payment, to the provider: deciding where to route costs nothing and nobody signs for it. The boundary is split on purpose: the backend binds the call and validates its arguments against the capability's own schema, and this client checks the three things only it can: the amount signed against the spend caps, the body that comes back against the success rule the decision carries, and the destination resolving to a public address. That destination check is a check, not a pin: the request resolves the name again on its own, so a host that answers publicly at check time and privately a moment later is not closed by it. Closing it needs a resolver-aware transport that connects to the address it validated, which this release does not ship. `--max-price` is always a hard cap on `tenjin pay`. Every automatic authorization that LEAVES the process counts against the automatic session budget until the 24 hour window rolls, even where the provider never settles it: a signed EIP-3009 authorization is a bearer instrument, so a 200 that reports no match, or a 402 that rejects the payment, is the counterparty saying it did not take the money rather than proof that it cannot. Manual exposure remains recorded in the same ledger but does not consume automatic headroom. Older records without a mode or automatic counter count conservatively as automatic. The budget is deliberately the conservative side of that, and a caller can be left with less headroom than it actually spent.
+The x402 router's `request` tool and `tenjin pay` are the paying commands, and they run one gate between them: `maxAutoSpend` and `sessionBudget` as limits on automatic router spending only, mandatory consent for manual pay, and a reservation that counts a signed authorization as spent the moment it leaves. An ordinary HTTP router lookup makes one payment to its provider: deciding where to route costs nothing and nobody signs for it. The boundary is split on purpose: the backend binds the call and validates its arguments against the capability's own schema, and this client checks the three things only it can: the amount signed against the spend caps, the body that comes back against the success rule the decision carries, and the destination resolving to a public address. That destination check is a check, not a pin: the request resolves the name again on its own, so a host that answers publicly at check time and privately a moment later is not closed by it. Closing it needs a resolver-aware transport that connects to the address it validated, which this release does not ship. `--max-price` is always a hard cap on `tenjin pay`. For ordinary HTTP requests, every automatic authorization that leaves the process counts against the automatic session budget until the 24 hour window rolls, even where the provider never settles it: a signed EIP-3009 authorization is a bearer instrument, so a 200 that reports no match, or a 402 that rejects the payment, is the counterparty saying it did not take the money rather than proof that it cannot. Manual exposure remains recorded in the same ledger but does not consume automatic headroom. Older records without a mode or automatic counter count conservatively as automatic. The budget is deliberately the conservative side of that, and a caller can be left with less headroom than it actually spent.
 
 The automatic daily limit is zero, a finite amount or `none`: zero blocks positive automatic payments and `none` removes that ceiling while retaining reservations and duplicate protection. Manual pay requires explicit user consent and is subject to neither automatic limit. Retired `bazaarPay` and `confirm` values are ignored after upgrade; doctor/status warn, and install/refresh remove and report them while preserving current controls and unrelated fields.
 
@@ -68,6 +68,22 @@ network_access = true
 ```
 
 That setting enables the network path; it does not grant spending by itself.
+
+## Experimental repository retrieval
+
+The optional Jevgrep executor has a separate [personal source-disclosure grant](./jevgrep.md).
+It reads a bounded snapshot of committed tracked text from one approved repository. A matching
+fresh hook offer and the MCP process working directory bind execution to that grant; server
+output cannot provide a root, executable, supplier, payment recipient or arbitrary arguments.
+The model can still choose a poor question. Returned source is untrusted evidence, not a verified answer.
+
+The child receives only an ephemeral loopback token. Wallet keys remain in Tenjin. The adapter
+uses the normal payment stack with pinned terms and durable aggregate exposure. Unresolved
+signed exposure survives timeouts, restart and budget rollover. This pilot cannot automatically
+reconcile it. Do not delete monetary records or downgrade to an older payer after using it;
+older binaries do not understand the new durable entries. Disable the executor to roll back
+routing while retaining this build's accounting. A second CLI using the same wallet but another
+data directory has separate local accounting, as with the existing wallet policy.
 
 ## Local runtime and durable runs
 
