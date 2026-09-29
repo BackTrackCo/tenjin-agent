@@ -27,7 +27,7 @@ import { MCP_SERVER_NAME, REQUEST_TOOL } from './names';
 import { ensureStatusLine, type StatusLineMode, type StatusLineResult } from './status-line-wiring';
 
 /**
- * `tenjin install` for the router product: five hook entries, one MCP server,
+ * `tenjin install` for the router product: six hook entries, one MCP server,
  * one permission rule, the spend defaults, and a wallet when there is none.
  *
  * WHAT IT WRITES IS WHAT IT SAYS. There is no skill to materialize and no
@@ -60,6 +60,8 @@ export const HOOK_TIMEOUT_SECONDS = 5;
  * {@link HOOK_TIMEOUT_SECONDS}: it starts that fetch and never waits for it.
  */
 export const AFTER_CALL_TIMEOUT_SECONDS = 15;
+/** Only an explicitly granted repository can enter this bounded paid hook. */
+export const REPOSITORY_TIMEOUT_SECONDS = 990;
 export { MCP_SERVER_NAME };
 export const ALLOW_RULE = REQUEST_TOOL;
 /**
@@ -107,7 +109,7 @@ export const DELEGATION_MATCHER = 'Agent|Task';
 export const NATIVE_MATCHER = 'WebSearch|WebFetch';
 
 /**
- * The five entries, spelled once so `uninstall`, `doctor` and the tests read
+ * The six entries, spelled once so `uninstall`, `doctor` and the tests read
  * the same list. The native tools are routed twice over one lookup: BEFORE the
  * call, as every release has, with a line pointing to a paid lookup when one
  * fits; and AFTER it, only when it came back short and nothing was said before,
@@ -124,6 +126,11 @@ export function routerHookPlan(): unknown[] {
     { event: 'UserPromptSubmit', hooks: handler('tenjin hook prompt') },
     { event: 'PreToolUse', matcher: NATIVE_MATCHER, hooks: handler('tenjin hook native') },
     { event: 'PreToolUse', matcher: DELEGATION_MATCHER, hooks: handler('tenjin hook agent') },
+    {
+      event: 'PreToolUse',
+      matcher: 'Grep',
+      hooks: handler('tenjin hook repository', REPOSITORY_TIMEOUT_SECONDS),
+    },
     { event: 'PostToolUse', matcher: NATIVE_MATCHER, hooks: afterCall() },
     { event: 'PostToolUseFailure', matcher: NATIVE_MATCHER, hooks: afterCall() },
   ];
@@ -131,6 +138,7 @@ export function routerHookPlan(): unknown[] {
 
 export const DISCLOSURE: readonly string[] = [
   "What leaves this machine: the bounded text of each prompt, each native search query or URL (and, when one came back short, its status, size or error), and each task handed to a subagent, sent to Tenjin for the free routing gate. When the gate offers free library docs for a search, that search query also goes to Tenjin's docs lookup, which asks Context7.",
+  'With an explicit Jevgrep source-sharing grant, structured Grep calls may be classified and replaced by bounded retrieval from committed tracked source. Other repositories and shell searches stay native.',
   'What is kept when a lookup is paid: the capability chosen, a hash of the contract, a hash of the arguments, and your wallet address. No prompt text, no arguments, no hint text.',
   'What never leaves: your private key. It is decrypted in this CLI to sign, and never sent anywhere.',
 ];

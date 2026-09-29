@@ -41,6 +41,14 @@ export function registerRouter(reg: Registration): void {
         });
       });
   }
+  // A separate lazy entry keeps paid execution out of the ordinary free hooks.
+  addGlobalFlags(hook.command('repository'))
+    .summary('PreToolUse on Grep: classify and retrieve in explicitly approved repositories')
+    .action(async function (this: Command) {
+      const ctx = buildContext(this);
+      const { runRepositoryHookCommand } = await import('../router/repository-hook-command');
+      await runRepositoryHookCommand(ctx);
+    });
   // A hook name this binary does not know exits 0 with nothing on stdout, the
   // same "no opinion" every handler gives on a bad event. The alternative is
   // commander's USAGE exit 2, which Claude Code reads as a blocking hook
@@ -96,7 +104,10 @@ function registerJevgrep(reg: Registration): void {
     .requiredOption('--root <path>', 'one canonical repository root')
     .requiredOption('--artifact <path>', 'reviewed Jevgrep npm tarball containing custom auth')
     .requiredOption('--sha256 <hex>', 'reviewed tarball SHA-256')
-    .requiredOption('--max-run <usd>', 'whole-search exposure ceiling, at most 0.05 USD')
+    .requiredOption(
+      '--max-run <usd>',
+      'whole-search exposure ceiling, at most 1 USD; above 0.05 opts into extended retrieval',
+    )
     .requiredOption('--share-source', 'authorize committed tracked source disclosure to jev-x402')
     .requiredOption('--experimental', 'opt into the unreleased local pilot')
     .action(async function (this: Command) {

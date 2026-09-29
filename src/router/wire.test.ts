@@ -37,6 +37,7 @@ describe('the request bodies', () => {
     ['wire-hook-request-prompt.json'],
     ['wire-hook-request-native.json'],
     ['wire-hook-request-native-shortfall.json'],
+    ['wire-hook-request-grep.json'],
   ])('builds %s byte for byte', (name) => {
     const canonical = fixture(name);
     expect(buildHookBody(canonical.packet as Packet)).toEqual(canonical);
@@ -86,9 +87,11 @@ describe('the request bodies', () => {
       'wire-hook-request-prompt.json',
       'wire-hook-request-native.json',
       'wire-hook-request-native-shortfall.json',
+      'wire-hook-request-grep.json',
       'wire-tool-request.json',
     ]) {
-      expect(JSON.stringify(fixture(name))).not.toMatch(/billing|admission|payment/i);
+      // User prose may discuss payments; the transport carries no money fields.
+      expect(JSON.stringify(fixture(name))).not.toMatch(/"(?:billing|admission|payment)"\s*:/i);
     }
   });
 });

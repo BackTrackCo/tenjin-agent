@@ -116,7 +116,11 @@ beforeEach(async () => {
     dir,
     policy: { maxAutoSpendAtomic: 50_000n, sessionBudgetAtomic: 500_000n, allowlistCreators: [] },
   });
-  vi.mocked(createJevgrepPayer).mockReturnValue({ evaluate, summary });
+  vi.mocked(createJevgrepPayer).mockReturnValue({
+    evaluate,
+    summary,
+    close: vi.fn().mockResolvedValue({ drainCompleted: true, pendingEvaluations: 0 }),
+  });
   vi.mocked(runJevgrep).mockResolvedValue({
     status: 'complete',
     output: 'fixture.ts:1',
@@ -124,7 +128,8 @@ beforeEach(async () => {
   });
 });
 afterEach(async () => {
-  await rm(dir, { recursive: true, force: true });
+  // A cancelled MCP client can finish before its server persists terminal progress.
+  await rm(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 20 });
 });
 async function saveGrant() {
   await writeFile(join(dir, 'jevgrep', 'grant.json'), JSON.stringify(grant), { mode: 0o600 });
@@ -223,6 +228,7 @@ describe('Jevgrep hook, binding and executor integration', () => {
     expect(Object.keys(options).sort()).toEqual([
       'dataDir',
       'evaluate',
+      'profile',
       'query',
       'root',
       'runtime',
@@ -374,4 +380,29 @@ describe('Jevgrep hook, binding and executor integration', () => {
       }
     },
   );
+});
+
+it('keeps extended profile opt-in while preserving the current wallet clamp', async () => {
+  grant.maxRunAtomic = '1000000';
+  await saveGrant();
+  await offer();
+  expect((await request()).envelope.status).toBe('fulfilled');
+  expect(createJevgrepPayer).toHaveBeenCalledWith(
+    expect.objectContaining({ profile: 'extended-v1', maxRunAtomic: 50000n }),
+  );
+  expect(runJevgrep).toHaveBeenCalledWith(expect.objectContaining({ profile: 'extended-v1' }));
+});
+it('never reports fulfilled if payment work failed to drain before summary', async () => {
+  await offer();
+  const closed = vi.fn().mockResolvedValue({ drainCompleted: false, pendingEvaluations: 1 });
+  vi.mocked(createJevgrepPayer).mockReturnValue({ evaluate, summary, close: closed });
+  const result = await request();
+  expect(result.isError).toBe(true);
+  expect(result.envelope).toMatchObject({
+    status: 'partial',
+    stopReason: 'payment-drain-timeout',
+    drainCompleted: false,
+    pendingEvaluations: 1,
+  });
+  expect(closed).toHaveBeenCalledOnce();
 });

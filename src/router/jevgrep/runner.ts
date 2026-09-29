@@ -2,7 +2,8 @@ import { realpath } from 'node:fs/promises';
 import { isAbsolute, join, relative, sep } from 'node:path';
 import { prepareNpmRuntime, type NpmRuntime } from '../local/npm-runtime';
 import { runBoundedCommand, type BoundedCommand, type CommandResult } from '../local/process';
-import { JEV_LIMITS, JEV_MODEL } from './protocol.js';
+import { JEV_MODEL } from './protocol.js';
+import { jevgrepProfile, type JevgrepProfileId } from './profile';
 import { startJevgrepProxy } from './proxy.js';
 import type { JevgrepEvaluate } from './proxy.js';
 import { createJevgrepSnapshot, SnapshotPolicyUnavailable } from './snapshot.js';
@@ -46,6 +47,7 @@ export async function runJevgrep(
     dataDir: string;
     query: string;
     runtime?: JevgrepRuntime;
+    profile?: JevgrepProfileId;
     evaluate: JevgrepEvaluate;
     signal?: AbortSignal;
   },
@@ -55,6 +57,8 @@ export async function runJevgrep(
     searchTimeoutMs?: number;
   } = {},
 ): Promise<JevgrepRunResult> {
+  const policy = jevgrepProfile(options.profile);
+  const limits = policy.limits;
   if (!isJevgrepRuntimeAvailable(options.runtime)) {
     return {
       status: 'unavailable',
@@ -109,15 +113,26 @@ export async function runJevgrep(
     }
     const { packageSpec, env } = runtime;
     const source = join(directory, 'source');
-    snapshot = await createJevgrepSnapshot({ root, destination: source, signal: setupSignal });
+    snapshot = await createJevgrepSnapshot({
+      root,
+      destination: source,
+      signal: setupSignal,
+      profile: policy.id,
+    });
     const cache = createJevgrepAnswerCache({
       dataDir: options.dataDir,
       root,
       commit: snapshot.commit,
       query: options.query,
       runtime: options.runtime!,
+      profile: policy.id,
     });
-    proxy = await startJevgrepProxy({ evaluate: options.evaluate, cache, signal: outerSignal });
+    proxy = await startJevgrepProxy({
+      evaluate: options.evaluate,
+      cache,
+      signal: outerSignal,
+      profile: policy.id,
+    });
     phaseSignal.addEventListener('abort', abortProxy, { once: true });
     if (phaseSignal.aborted) {
       abortProxy();
@@ -130,13 +145,14 @@ export async function runJevgrep(
         'auth',
         '--provider',
         'custom',
+        ...(policy.id === 'extended-v1' ? ['--transport-profile', 'tenjin-x402'] : []),
         '--base-url',
         proxy.baseURL,
         '--model',
         JEV_MODEL,
         '--stdin',
       ],
-      outputBytes: JEV_LIMITS.outputBytes,
+      outputBytes: limits.outputBytes,
       cwd: directory,
       env,
       input: `${proxy.token}\n`,
@@ -155,7 +171,7 @@ export async function runJevgrep(
     phase = 'search';
     const searchSignal = AbortSignal.any([
       outerSignal,
-      AbortSignal.timeout(dependencies.searchTimeoutMs ?? 60_000),
+      AbortSignal.timeout(dependencies.searchTimeoutMs ?? policy.searchTimeoutMs),
     ]);
     phaseSignal.removeEventListener('abort', abortProxy);
     phaseSignal = searchSignal;
@@ -168,9 +184,9 @@ export async function runJevgrep(
       argv: [
         ...prefix,
         '--concurrency',
-        String(JEV_LIMITS.concurrency),
+        String(limits.concurrency),
         '--max-source-bytes',
-        String(JEV_LIMITS.outputBytes),
+        String(policy.sourceBytes),
         // Tenjin owns persistent answer reuse before paid admission. The CLI's
         // cache is temporary and includes the short-lived proxy port in its key.
         '--no-cache',
@@ -178,7 +194,7 @@ export async function runJevgrep(
         options.query,
         source,
       ],
-      outputBytes: JEV_LIMITS.outputBytes,
+      outputBytes: limits.outputBytes,
       cwd: directory,
       env,
       signal: searchSignal,
@@ -187,7 +203,7 @@ export async function runJevgrep(
     const mapped = redactedOutput(search.stdout, proxy.token).replaceAll(source, root);
     const heading = `Committed HEAD snapshot ${snapshot.commit}; uncommitted and untracked changes omitted.\n`;
     const output = mapped
-      ? heading + boundedUtf8(mapped, JEV_LIMITS.outputBytes - Buffer.byteLength(heading))
+      ? heading + boundedUtf8(mapped, limits.outputBytes - Buffer.byteLength(heading))
       : '';
     const reason = options.signal?.aborted
       ? 'cancelled'

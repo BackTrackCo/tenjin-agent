@@ -1,3 +1,4 @@
+import { jevgrepProfile } from './profile';
 import { constants } from 'node:fs';
 import { lstat, open, realpath, stat } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
@@ -30,7 +31,7 @@ const GrantSchema = z.strictObject({
   maxRunAtomic: z
     .string()
     .regex(/^\d+$/)
-    .refine((v) => BigInt(v) > 0n && BigInt(v) <= 50_000n),
+    .refine((v) => BigInt(v) > 0n && BigInt(v) <= jevgrepProfile('extended-v1').maxRunAtomic),
   runtime: z.strictObject({
     kind: z.literal('local-artifact'),
     path: z.string().min(1).refine(isAbsolute),
@@ -235,7 +236,7 @@ export async function configureJevgrep(
     runtime: { kind: 'local-artifact', path: artifact, sha256: digest },
   });
   if (!parsed.success)
-    throw new CliError('USAGE', 'The run budget must be positive and at most $0.05.');
+    throw new CliError('USAGE', 'The run budget must be positive and at most $1.');
   await writeFileAtomic(grantPath(ctx.dataDir), JSON.stringify(parsed.data), {
     mode: 0o600,
     dirMode: 0o700,

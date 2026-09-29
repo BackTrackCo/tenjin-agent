@@ -50,7 +50,7 @@ export async function runHookCommand(kind: HookKind, io: Io, deps: HookCommandDe
   if (response !== null) io.stdout.write(`${JSON.stringify(response)}\n`);
 }
 
-async function readStdin(): Promise<string> {
+export async function readStdin(): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;

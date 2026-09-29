@@ -43,6 +43,9 @@ export interface RequestToolArgs {
 
 export interface RequestToolDeps {
   signal?: AbortSignal;
+  /** A deterministic hook may execute only the local capability it admitted,
+   * even if its offer expires and the server makes a fresh routing decision. */
+  expectedExecutor?: 'jevgrep-search-v1';
   ctx: CommandContext;
   /** The SAME provider the MCP server pre-warmed. `runPay` opens its own
    *  otherwise, and the local one re-runs scrypt per process, which is the
@@ -130,6 +133,19 @@ export async function runRequestTool(
       decision.action === 'native' ? 'native' : 'needs_input',
       decision.reason ?? 'The router did not select a paid capability.',
       { diagnostics: decision.diagnostics, ...(note !== undefined ? { note } : {}) },
+    );
+  }
+
+  if (
+    deps.expectedExecutor !== undefined &&
+    (decision.capabilityId !== deps.expectedExecutor ||
+      !('executor' in decision.contract) ||
+      decision.contract.executor !== deps.expectedExecutor)
+  ) {
+    await footer.done('native');
+    return fail(
+      'native',
+      'The router did not return the local executor this hook authorized. Use native tools.',
     );
   }
 

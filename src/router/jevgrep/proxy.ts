@@ -1,9 +1,10 @@
+import { jevgrepProfile, type JevgrepProfileId } from './profile';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';
 import type { Socket } from 'node:net';
 import { canonicalHash } from '../../lib/request-schema';
 import type { JevgrepAnswerCache } from './answer-cache';
-import { JEV_LIMITS, validateNativeRequest, validateNativeResponse } from './protocol.js';
+import { validateNativeRequest, validateNativeResponse } from './protocol.js';
 import type { NativeEvaluationRequest, NativeEvaluationResponse } from './protocol.js';
 
 export type JevgrepEvaluate = (
@@ -13,9 +14,11 @@ export type JevgrepEvaluate = (
 
 export async function startJevgrepProxy(options: {
   evaluate: JevgrepEvaluate;
+  profile?: JevgrepProfileId;
   cache?: JevgrepAnswerCache;
   signal?: AbortSignal;
 }) {
+  const limits = jevgrepProfile(options.profile).limits;
   options.signal?.throwIfAborted();
   const controller = new AbortController();
   const token = randomBytes(32).toString('hex');
@@ -67,11 +70,11 @@ export async function startJevgrepProxy(options: {
       stopped();
       return;
     }
-    if (active >= JEV_LIMITS.concurrency) {
+    if (active >= limits.concurrency) {
       respond(429, 'Local concurrency limit');
       return;
     }
-    if (localRequests >= JEV_LIMITS.localRequests) {
+    if (localRequests >= limits.localRequests) {
       stopReason = 'local-request-limit';
       stopped();
       return;
@@ -88,9 +91,8 @@ export async function startJevgrepProxy(options: {
           // Bound loopback ingress independently; only cache misses reserve
           // the unchanged supplier request/egress budget below.
           localBytes += part.length;
-          if (size > JEV_LIMITS.requestBytes || localBytes > JEV_LIMITS.localRequestBytes) {
-            stopReason ??=
-              size > JEV_LIMITS.requestBytes ? 'request-byte-limit' : 'local-byte-limit';
+          if (size > limits.requestBytes || localBytes > limits.localRequestBytes) {
+            stopReason ??= size > limits.requestBytes ? 'request-byte-limit' : 'local-byte-limit';
             respond(413, 'Local request byte limit');
             return;
           }
@@ -102,7 +104,10 @@ export async function startJevgrepProxy(options: {
         }
         let body: NativeEvaluationRequest;
         try {
-          body = validateNativeRequest(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+          body = validateNativeRequest(
+            JSON.parse(Buffer.concat(chunks).toString('utf8')),
+            options.profile,
+          );
         } catch {
           respond(400, 'Invalid native evaluation request');
           return;
@@ -123,12 +128,12 @@ export async function startJevgrepProxy(options: {
             answer = await pending;
             joined++;
           } else {
-            if (requests >= JEV_LIMITS.requests) {
+            if (requests >= limits.requests) {
               stopReason ??= 'request-limit';
               stopped();
               return;
             }
-            if (bytes + size > JEV_LIMITS.totalRequestBytes) {
+            if (bytes + size > limits.totalRequestBytes) {
               stopReason ??= 'total-byte-limit';
               respond(413, 'Local request byte limit');
               return;

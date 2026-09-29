@@ -1,12 +1,17 @@
 # Experimental Jevgrep retrieval
 
-The hook can offer semantic source discovery when the relevant files or symbols are unknown.
-A fresh offer's `id` lets the existing MCP `request` tool execute it. Native grep and reads remain
-available. Exact symbols, known files, uncommitted changes and no-upload requests should use them.
+Tenjin can discover repository search from a prompt or an eligible Claude Code `Grep` call.
+The prompt path offers the existing MCP `request` tool. The `tenjin hook repository` tool hook
+asks the same router to classify the proposed search, then invokes the local executor directly
+when Jevgrep is selected. Only completed, validated source can replace the pending grep; partial,
+empty, failed or unavailable retrieval leaves native search available. Shell commands remain native.
+Exact known lookups, uncommitted changes and no-upload requests should use native tools.
+The hook admits at most three classification attempts and one retrieval attempt per human turn.
+Durable attempt markers prevent duplicate hook delivery or concurrent calls from paying again.
 
 This pilot requires Tenjin's matching server branch and a reviewed npm tarball built from
-[Jevgrep PR #28](https://github.com/dzhng/jevgrep/pull/28). That branch still identifies itself as
-0.4.2, so the npm version alone does not select its code. The release allowlist is empty until a
+[Jevgrep PR #28](https://github.com/dzhng/jevgrep/pull/28). Reviewed local artifacts include the original 0.4.2 pilot and the qualified 0.4.4 custom-auth
+build; the npm version alone does not select their code. The release allowlist is empty until a
 published artifact with custom auth passes qualification. Do not use a floating GitHub or npm spec.
 
 ## Explicit setup
@@ -19,6 +24,9 @@ tenjin jevgrep enable --root /absolute/repository --artifact /absolute/reviewed-
 tenjin jevgrep status
 ```
 
+After enabling, run `tenjin install --refresh` and start a fresh Claude Code session at the
+approved root so it loads the `Grep` hook and current MCP build.
+
 The personal grant is outside repository configuration. Project config cannot grant source access.
 Start the host's MCP session at that exact repository root. Only that startup directory is authorized; other or unmatched roots stay native. The grant covers sessions at that root; it is
 not a per-message confirmation. A fresh hook offer expires after 15 minutes and cannot be used
@@ -29,8 +37,8 @@ Only committed, tracked source is searched. Untracked files, working-tree edits,
 symlinks, submodules, common generated paths and sensitive filenames/content are excluded.
 This conservative filter is not a guarantee that a repository contains no confidential material;
 source-sharing approval must cover the selected committed repository. Committed hierarchical `.gitignore` and `.ignore` rules apply. If relevant current rule files differ from the committed policy or cannot be safely checked, the search stays unavailable. Source is copied from Git
-blobs to temporary private storage, never followed through live file paths. Limits are 512 files,
-128 KiB per file and 8 MiB total. An oversized repository fails closed rather than searching an
+blobs to temporary private storage, never followed through live file paths. The standard profile allows 512 files,
+128 KiB per file and 8 MiB total; the explicit extended profile raises only the per-file cap to 256 KiB. An oversized repository fails closed rather than searching an
 undisclosed subset. Results name the snapshot commit and omitted-file count.
 
 Tenjin runs fixed `npx` commands with isolated config and home. Reviewed runtime artifacts and their npm cache persist under the active Tenjin data directory; source snapshots and credentials stay temporary. Auth writes only the
@@ -42,7 +50,7 @@ Tenjin also retains validated Jev answer scores across searches in
 `jevgrep/answers` under the active Tenjin data directory. Cache identity includes the exact
 native request (source, query, questions and model), the approved repository root and committed
 snapshot, the exact runtime release or artifact hash, the fixed supplier and the versioned
-snapshot/transport policy. A different proxy port or temporary child directory does not change
+snapshot/transport policy, including the selected retrieval profile. A different proxy port or temporary child directory does not change
 this identity. Different source, query, commit, root, runtime or policy cannot reuse an answer.
 Current grants and source/ignore-policy checks still run before cache access.
 
@@ -69,11 +77,19 @@ The fixed model is `jev-1.13.0`, on Base USDC, with recipient
 Changing these terms requires a reviewed client update and renewed applicable disclosure consent.
 There is no automatic supplier fallback. This is a technical pilot; it adds no Tenjin routing fees.
 
-A search admits at most two concurrent evaluations, 60 uncached evaluations, 128 KiB per request and
-2 MiB of uncached request bytes. Cached answers consume neither paid-request nor supplier-egress
+A grant up to $0.05 retains the standard profile: two concurrent evaluations, 60 uncached
+evaluations, 128 KiB per request, 2 MiB of uncached request bytes and a 60-second search deadline.
+Explicitly granting more than $0.05, up to $1, selects the extended profile: two concurrent
+evaluations, 1,000 uncached evaluations, 256 KiB per request, 64 MiB total request bytes and a
+900-second search deadline. These are ceilings, not targets; the approved money cap may stop
+a search earlier. Runtime setup retains a 60-second deadline in either profile. Cached answers consume neither paid-request nor supplier-egress
 allowance. The local child separately stops at 4,096 requests or 64 MiB of loopback input, including
-cache hits, and the per-request bound still applies before lookup. Its exposure cap is the lower of the approved search budget and `maxAutoSpend`, at most $0.05. Each evaluation also uses the existing shared daily wallet policy, so concurrent searches cannot spend the same remaining allowance. Setup and search each have a 60-second
-limit; returned source is bounded to 16 KiB. A stopped search reports partial/failed/cancelled
+cache hits, and the per-request bound still applies before lookup. Its exposure cap is the lower of the approved search budget and `maxAutoSpend`, at most $1.
+Each evaluation also uses the existing shared daily wallet policy, so concurrent searches cannot
+spend the same remaining allowance. Returned source is bounded to 16 KiB; total output is 16 KiB
+for the standard profile and 32 KiB for the extended profile. Changing the retrieval grant does
+not raise the normal wallet limits. In-flight payments are aborted and drained before the final
+summary; an undrained operation cannot be reported as fulfilled. A stopped search reports partial/failed/cancelled
 with its reason. It must never be interpreted as proof that no matches exist.
 
 Repeated identical evaluations within the same run reuse validated responses or join an active
@@ -125,6 +141,6 @@ misleading authentication errors, and the private journal retains only allowlist
 HTTP status and execution phase. All three trials retained $0.063 total signed exposure and zero
 outstanding reservations. Chain settlement remains unreconciled.
 
-Exact-symbol, no-upload and native Grep controls stayed native. Before treating this pilot as useful
-for repository-wide discovery, narrow its search scope and demonstrate completed retrieval within
-the approved budget. Do not interpret partial leads as proof that no other matches exist.
+Exact-symbol, no-upload and native Grep controls stayed native. Those earlier pilot results used the standard profile; raising an explicit grant does not
+retroactively turn partial results into complete retrieval. Local trials must still demonstrate
+useful evidence and task outcomes within their approved budget. Do not interpret partial leads as proof that no other matches exist.

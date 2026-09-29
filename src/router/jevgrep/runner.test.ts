@@ -234,3 +234,23 @@ describe('isolated Jevgrep lifecycle', () => {
     expect(evaluate).toHaveBeenCalledTimes(1);
   });
 });
+
+it('uses qualified pacing and separate source/output bounds only for extended retrieval', async () => {
+  const f = await fixture();
+  const calls: BoundedCommand[] = [];
+  await runJevgrep(
+    { ...f, profile: 'extended-v1', query: 'Find the implementation', evaluate: vi.fn() },
+    {
+      runCommand: async (command) => {
+        calls.push(command);
+        return ok;
+      },
+    },
+  );
+  expect(calls[0]!.argv).toContain('--transport-profile');
+  expect(calls[0]!.argv).toContain('tenjin-x402');
+  const search = calls[1]!;
+  expect(search.argv[search.argv.indexOf('--max-source-bytes') + 1]).toBe('16384');
+  expect(search.outputBytes).toBe(32768);
+  expect(search.argv[search.argv.indexOf('--concurrency') + 1]).toBe('2');
+});

@@ -92,6 +92,7 @@ const CURRENT_HOOKS = {
   PreToolUse: [
     { matcher: 'WebSearch|WebFetch', hooks: handler('tenjin hook native') },
     { matcher: 'Agent|Task', hooks: handler('tenjin hook agent') },
+    { matcher: 'Grep', hooks: handler('tenjin hook repository', 990) },
   ],
   PostToolUse: [{ matcher: 'WebSearch|WebFetch', hooks: afterCall }],
   PostToolUseFailure: [{ matcher: 'WebSearch|WebFetch', hooks: afterCall }],
@@ -135,7 +136,7 @@ function deps(over: Record<string, unknown> = {}) {
 }
 
 describe('tenjin install', () => {
-  it('writes the five hook entries, the allow rule and the MCP registration', async () => {
+  it('writes the six hook entries, the allow rule and the MCP registration', async () => {
     const registerMcp = vi.fn(async () => undefined);
     const result = await runRouterInstall({}, ctx(), deps({ registerMcp }));
     const settings = await readSettings();

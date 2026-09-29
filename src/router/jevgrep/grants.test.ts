@@ -140,3 +140,12 @@ it('uses the same supplier identity as runPay for wallet allowlists', async () =
   );
   expect(await eligibleJevgrep(ctx, root)).toBeNull();
 });
+
+it('accepts an explicit extended grant but never grants more than one dollar', async () => {
+  grant.maxRunAtomic = '1000000';
+  await save();
+  expect(await eligibleJevgrep(ctx, root)).toEqual(grant);
+  grant.maxRunAtomic = '1000001';
+  await save();
+  expect(await eligibleJevgrep(ctx, root)).toBeNull();
+});

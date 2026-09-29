@@ -8,6 +8,7 @@ import type { SpendAuthorization, SpendAuthorizer } from '../lib/wallet';
 import type { CommandContext } from '../context';
 import { runPay } from '../commands/pay';
 import { runRequestTool } from './tool';
+import * as jevgrepGrants from './jevgrep/grants';
 import { ROUTER_PATH } from './decision';
 import {
   bindDecision,
@@ -183,6 +184,42 @@ function providerLegs(body: unknown = { data: { BTC: 1 } }): Leg[] {
 }
 
 describe('the request tool, one decision and one payment per lookup', () => {
+  it.each(['cmc-quotes', 'jevgrep-search-v1'])(
+    'refuses HTTP rerouting of a Jevgrep-only hook before paying (%s)',
+    async (capabilityId) => {
+      vi.mocked(runPay).mockClear();
+      // The hook still has local authority while the server's offer can have
+      // expired. Its executor negotiation must not authorize an HTTP fallback.
+      const binding = vi.spyOn(jevgrepGrants, 'boundJevgrepGrant').mockResolvedValue({} as never);
+      try {
+        const auth = authorizer();
+        const { fetchImpl, calls } = net([
+          {
+            url: ROUTER,
+            status: 200,
+            body: {
+              ...decision({ capabilityId }),
+              note: 'The offer id expired; routed the query again.',
+            },
+          },
+        ]);
+        const result = await runRequestTool(
+          { query: 'Find duplicate payment protection', id: 'expired-jevgrep-id' },
+          {
+            ...deps(fetchImpl, auth),
+            expectedExecutor: 'jevgrep-search-v1',
+          },
+        );
+        expect(result.envelope.status).toBe('native');
+        expect(runPay).not.toHaveBeenCalled();
+        expect(auth.authorize).not.toHaveBeenCalled();
+        expect(calls).toHaveLength(1);
+        expect(calls[0]!.url).toBe(`${ROUTER}${ROUTER_PATH}`);
+      } finally {
+        binding.mockRestore();
+      }
+    },
+  );
   it('sends the query and the turn id, and pays the provider once', async () => {
     const { fetchImpl, calls } = net([
       { url: ROUTER, status: 200, body: decision() },

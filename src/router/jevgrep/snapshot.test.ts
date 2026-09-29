@@ -177,3 +177,23 @@ describe('immutable committed source snapshot', () => {
     expect(isSnapshotSourcePath(path)).toBe(false);
   });
 });
+
+it('copies a 160 KiB file only with extended policy without changing aggregate limits', async () => {
+  const { dir, root } = await repository();
+  await writeFile(join(root, 'small.ts'), 'export const small = true;');
+  await writeFile(join(root, 'large.ts'), 'x'.repeat(160 * 1024));
+  git(root, 'add', '.');
+  git(root, 'commit', '-qm', 'fixture');
+  const signal = new AbortController().signal;
+  expect(
+    await createJevgrepSnapshot({ root, destination: join(dir, 'standard'), signal }),
+  ).toMatchObject({ files: 1, omitted: 1 });
+  expect(
+    await createJevgrepSnapshot({
+      root,
+      destination: join(dir, 'extended'),
+      signal,
+      profile: 'extended-v1',
+    }),
+  ).toMatchObject({ files: 2, omitted: 0 });
+});

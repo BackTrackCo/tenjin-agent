@@ -277,3 +277,14 @@ describe('bounded local evaluation proxy', () => {
     expect(evaluate).not.toHaveBeenCalled();
   }, 30_000);
 });
+
+it('extended admission accepts large requests beyond the standard 60-call bound', async () => {
+  const evaluate = vi.fn(async () => answer);
+  const p = await startJevgrepProxy({ evaluate, profile: 'extended-v1' });
+  proxies.push(p);
+  expect((await send(p, { ...body, state: 'x'.repeat(160000) })).status).toBe(200);
+  for (let i = 0; i < 60; i++) expect((await send(p, { ...body, state: i })).status).toBe(200);
+  expect(p.summary()).toMatchObject({ requests: 61, stopReason: undefined });
+  expect((await send(p, { ...body, state: 'x'.repeat(262144) })).status).toBe(413);
+  expect(evaluate).toHaveBeenCalledTimes(61);
+});

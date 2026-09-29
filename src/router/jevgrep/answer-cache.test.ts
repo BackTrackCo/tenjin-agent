@@ -196,3 +196,24 @@ describe('private cross-run Jevgrep answers', () => {
     expect(await f.cache.get({ ...request, state: 'byte-bound' })).toBeDefined();
   });
 });
+
+it('keeps legacy standard answers and isolates extended policy answers', async () => {
+  const f = await fixture();
+  await f.cache.put(request, response);
+  expect(
+    await createJevgrepAnswerCache({ ...f.options, profile: 'standard-v1' }).get(request),
+  ).toBeDefined();
+  const extended = createJevgrepAnswerCache({ ...f.options, profile: 'extended-v1' });
+  expect(await extended.get(request)).toBeUndefined();
+  const changed = {
+    ...response,
+    answers: { ...response.answers, second: { type: 'noul' as const, noul: 0.9 } },
+  };
+  await extended.put(request, changed);
+  expect(
+    (await createJevgrepAnswerCache({ ...f.options, profile: 'extended-v1' }).get(request))?.answers
+      .second?.noul,
+  ).toBe(0.9);
+  expect((await f.cache.get(request))?.answers.second?.noul).toBe(0.2);
+  expect((await readdir(f.directory)).filter((name) => name.endsWith('.json'))).toHaveLength(2);
+});

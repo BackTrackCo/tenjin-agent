@@ -1,3 +1,4 @@
+import { jevgrepProfile, type JevgrepProfileId } from './profile';
 import { mkdir, readFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -27,6 +28,7 @@ export interface JevgrepPayerOptions {
   fetchImpl?: typeof fetch;
   signal?: AbortSignal;
   runId: string;
+  profile?: JevgrepProfileId;
   maxRunAtomic: bigint;
   supplier: JevgrepSupplier;
 }
@@ -109,10 +111,11 @@ function failureDiagnostic(error: unknown, phase: FailurePhase, aborted: boolean
 
 /** One run, one supplier, and no automatic replacement for an unresolved payment. */
 export function createJevgrepPayer(options: JevgrepPayerOptions) {
+  const policy = jevgrepProfile(options.profile);
   if (
     !/^[a-zA-Z0-9_-]{1,100}$/.test(options.runId) ||
     options.maxRunAtomic <= 0n ||
-    options.maxRunAtomic > 50_000n
+    options.maxRunAtomic > policy.maxRunAtomic
   )
     refuse('Invalid search payment scope or budget.');
   if (canonicalHash(options.supplier) !== canonicalHash(JEVGREP_SUPPLIER))
@@ -124,6 +127,8 @@ export function createJevgrepPayer(options: JevgrepPayerOptions) {
   const journalRoot = join(options.ctx.dataDir, 'jevgrep', 'payments');
   const directory = join(journalRoot, canonicalHash(options.runId));
   const active = new Map<string, Promise<NativeEvaluationResponse>>();
+  const lifecycle = new AbortController();
+  let closePromise: Promise<{ drainCompleted: boolean; pendingEvaluations: number }> | undefined;
   let requests = 0;
   let replays = 0;
 
@@ -138,6 +143,7 @@ export function createJevgrepPayer(options: JevgrepPayerOptions) {
       wallet: wallet.address.toLowerCase(),
       supplier: JEVGREP_SUPPLIER,
       maxRunAtomic: options.maxRunAtomic.toString(),
+      ...(policy.id === 'extended-v1' ? { profile: policy.id } : {}),
     };
     const path = join(directory, 'scope.json');
     await mkdir(journalRoot, { recursive: true, mode: 0o700 });
@@ -155,9 +161,13 @@ export function createJevgrepPayer(options: JevgrepPayerOptions) {
 
   async function execute(body: unknown, signal?: AbortSignal): Promise<NativeEvaluationResponse> {
     // Freeze the exact request before the first asynchronous operation.
-    const request = validateNativeRequest(JSON.parse(JSON.stringify(validateNativeRequest(body))));
+    const request = validateNativeRequest(
+      JSON.parse(JSON.stringify(validateNativeRequest(body, policy.id))),
+      policy.id,
+    );
     const combined = AbortSignal.any([
       AbortSignal.timeout(120_000),
+      lifecycle.signal,
       ...[options.signal, signal].filter((item): item is AbortSignal => item !== undefined),
     ]);
     combined.throwIfAborted();
@@ -183,7 +193,8 @@ export function createJevgrepPayer(options: JevgrepPayerOptions) {
           throw Object.assign(new Error('Existing evaluation'), { code: 'EEXIST' });
         // A run is finite even if every evaluation was free or failed before signing.
         if (
-          (await readdir(directory)).filter((name) => name.endsWith('.attempt.json')).length >= 60
+          (await readdir(directory)).filter((name) => name.endsWith('.attempt.json')).length >=
+          policy.limits.requests
         )
           refuse('The search evaluation limit was reached.');
         await saveRecord(attemptPath, { version: 1, identity });
@@ -301,6 +312,7 @@ export function createJevgrepPayer(options: JevgrepPayerOptions) {
 
   return {
     evaluate(body: unknown, signal?: AbortSignal): Promise<NativeEvaluationResponse> {
+      if (lifecycle.signal.aborted) return Promise.reject(new Error('The search payer is closed.'));
       const key = canonicalHash(body);
       const pending = active.get(key);
       if (pending) {
@@ -310,6 +322,24 @@ export function createJevgrepPayer(options: JevgrepPayerOptions) {
       const operation = execute(body, signal).finally(() => active.delete(key));
       active.set(key, operation);
       return operation;
+    },
+    close() {
+      closePromise ??= (async () => {
+        lifecycle.abort();
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([
+            Promise.allSettled([...active.values()]),
+            new Promise<void>((resolve) => {
+              timer = setTimeout(resolve, 10_000);
+            }),
+          ]);
+          return { drainCompleted: active.size === 0, pendingEvaluations: active.size };
+        } finally {
+          clearTimeout(timer);
+        }
+      })();
+      return closePromise;
     },
     async summary() {
       return { ...(await authorizer.durableSummary!(options.runId)), requests, replays };

@@ -69,7 +69,8 @@ export interface NativeOutcome {
 
 /** The pending native call, INSIDE the packet: the gate request is a strict
  *  object with exactly `schemaVersion`, `source` and `packet`. */
-export type PendingCall = { tool: 'WebSearch'; query: string } | { tool: 'WebFetch'; url: string };
+export type PendingCall =
+  { tool: 'WebSearch' | 'Grep'; query: string } | { tool: 'WebFetch'; url: string };
 
 const URL_RE = /\bhttps?:\/\/[^\s<>"'`)\]]+/gi;
 

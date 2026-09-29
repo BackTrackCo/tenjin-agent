@@ -1,16 +1,7 @@
+import { jevgrepProfile, type JevgrepProfileId } from './profile';
 /** The native TypeSafe evaluation transport used by Jevgrep, not chat completions. */
 export const JEV_MODEL = 'jev-1.13.0' as const;
-export const JEV_LIMITS = {
-  concurrency: 2,
-  requests: 60,
-  // Cache hits use no paid/egress budget, but the local child remains bounded.
-  localRequests: 4096,
-  localRequestBytes: 64 * 1024 * 1024,
-  requestBytes: 128 * 1024,
-  totalRequestBytes: 2 * 1024 * 1024,
-  responseBytes: 256 * 1024,
-  outputBytes: 16 * 1024,
-} as const;
+export const JEV_LIMITS = jevgrepProfile().limits;
 
 export type JsonValue =
   null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
@@ -47,7 +38,11 @@ function boundedJson(value: unknown, bytes: number) {
   }
 }
 
-export function validateNativeRequest(value: unknown): NativeEvaluationRequest {
+export function validateNativeRequest(
+  value: unknown,
+  profile?: JevgrepProfileId,
+): NativeEvaluationRequest {
+  const limits = jevgrepProfile(profile).limits;
   if (
     !record(value) ||
     !keysOnly(value, ['model', 'state', 'questions']) ||
@@ -55,7 +50,7 @@ export function validateNativeRequest(value: unknown): NativeEvaluationRequest {
     !Object.hasOwn(value, 'state') ||
     !jsonValue(value.state) ||
     !record(value.questions) ||
-    !boundedJson(value, JEV_LIMITS.requestBytes)
+    !boundedJson(value, limits.requestBytes)
   )
     throw new Error('Invalid native evaluation request');
   const questions = Object.entries(value.questions);
