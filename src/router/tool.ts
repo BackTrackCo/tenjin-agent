@@ -44,6 +44,8 @@ export interface RequestToolArgs {
 
 export interface RequestToolDeps {
   signal?: AbortSignal;
+  /** Best-effort, locally authored status; never part of paid execution. */
+  onProgress?: (message: string) => void | Promise<void>;
   /** A deterministic hook may execute only the local capability it admitted,
    * even if its offer expires and the server makes a fresh routing decision. */
   expectedExecutor?: 'jevgrep-search-v1';

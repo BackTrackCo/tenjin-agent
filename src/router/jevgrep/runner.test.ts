@@ -234,12 +234,45 @@ describe('isolated Jevgrep lifecycle', () => {
       expect(response.status).toBe(200);
       return { ...ok, stdout: 'source evidence' };
     };
-    const first = await runJevgrep({ ...f, query: 'same question', evaluate }, { runCommand });
-    const second = await runJevgrep({ ...f, query: 'same question', evaluate }, { runCommand });
+    const firstProgress: string[] = [],
+      cachedProgress: string[] = [];
+    const first = await runJevgrep(
+      {
+        ...f,
+        query: 'same question',
+        evaluate,
+        onProgress: (message) => {
+          firstProgress.push(message);
+        },
+      },
+      { runCommand },
+    );
+    const second = await runJevgrep(
+      {
+        ...f,
+        query: 'same question',
+        evaluate,
+        onProgress: (message) => {
+          cachedProgress.push(message);
+        },
+      },
+      { runCommand },
+    );
     expect(first.requests).toBe(1);
     expect(second.requests).toBe(0);
     expect(second.cacheHits).toBe(1);
     expect(evaluate).toHaveBeenCalledTimes(1);
+    expect(firstProgress).toEqual([
+      'Jevgrep: preparing isolated runtime',
+      'Jevgrep: preparing committed source snapshot',
+      'Jevgrep: configuring local provider connection',
+      'Jevgrep: searching committed source',
+      'Jevgrep: completed provider evaluations: 1',
+      'Jevgrep: retrieval complete',
+    ]);
+    expect(cachedProgress).toEqual(
+      firstProgress.filter((message) => !message.includes('evaluations')),
+    );
     const maple = await runJevgrep(
       { ...f, query: 'same question', supplier: MAPLE_JEVGREP_SUPPLIER, evaluate },
       { runCommand },
@@ -263,6 +296,56 @@ describe('isolated Jevgrep lifecycle', () => {
     expect(blocked).not.toHaveBeenCalled();
     expect(evaluate).toHaveBeenCalledTimes(2);
   });
+  it.each(['working', 'throwing', 'rejecting'] as const)(
+    'counts real evaluations without changing execution with a %s progress sink',
+    async (sink) => {
+      const f = await fixture();
+      let baseURL = '',
+        token = '';
+      const messages: string[] = [];
+      const onProgress = (message: string) => {
+        messages.push(message);
+        if (sink === 'throwing') throw new Error('UI unavailable');
+        if (sink === 'rejecting') return Promise.reject(new Error('UI unavailable'));
+      };
+      const evaluate = vi.fn(async () => ({
+        answers: { q: { type: 'noul' as const, noul: 0.9 } },
+      }));
+      const runCommand = vi.fn(async (command: BoundedCommand) => {
+        if (command.input) {
+          baseURL = command.argv[command.argv.indexOf('--base-url') + 1]!;
+          token = command.input.trim();
+          return ok;
+        }
+        for (const state of ['first source', 'second source']) {
+          const response = await fetch(`${baseURL}/systemone`, {
+            method: 'POST',
+            headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+            body: JSON.stringify({
+              model: JEV_MODEL,
+              state,
+              questions: { q: { type: 'noul', instructions: 'Relevant?' } },
+            }),
+          });
+          expect(response.status).toBe(200);
+          await response.json();
+        }
+        return { ...ok, stdout: 'source evidence' };
+      });
+      const result = await runJevgrep(
+        { ...f, query: 'Find relevant implementation', evaluate, onProgress },
+        { runCommand },
+      );
+      expect(result).toMatchObject({ status: 'complete', requests: 2, cacheHits: 0 });
+      expect(evaluate).toHaveBeenCalledTimes(2);
+      expect(runCommand).toHaveBeenCalledTimes(2);
+      expect(messages.filter((message) => message.includes('evaluations'))).toEqual([
+        'Jevgrep: completed provider evaluations: 1',
+        'Jevgrep: completed provider evaluations: 2',
+      ]);
+      expect(messages.at(-1)).toBe('Jevgrep: retrieval complete');
+    },
+  );
 });
 
 it('uses qualified pacing and separate source/output bounds only for extended retrieval', async () => {

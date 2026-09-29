@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { JEV_MODEL, validateNativeRequest, validateNativeResponse } from './protocol.js';
+import {
+  JEV_MAX_QUESTIONS,
+  JEV_MODEL,
+  validateNativeRequest,
+  validateNativeResponse,
+} from './protocol.js';
 
 const request = {
   model: JEV_MODEL,
@@ -35,6 +40,42 @@ describe('native Jev transport validation', () => {
     { ...request, questions: { q: { type: 'boolean', instructions: 'x' } } },
   ])('rejects unsupported request shape', (value) => {
     expect(() => validateNativeRequest(value)).toThrow();
+  });
+  it.each([
+    [72, ['q', 'scope']],
+    [128, ['q', 'scope']],
+    [128, ['q', 'scope', 'ref']],
+  ] as const)(
+    'accepts the qualified runtime evidence questions for %i declarations',
+    (count, kinds) => {
+      const questions = Object.fromEntries(
+        kinds.flatMap((kind) =>
+          Array.from({ length: count }, (_, index) => [
+            `${kind}${index}`,
+            { type: 'noul', instructions: `Apply state.criteria.${kind} to declaration ${index}.` },
+          ]),
+        ),
+      );
+      const input = { ...request, questions };
+      expect(validateNativeRequest(input)).toEqual(input);
+      const answers = Object.fromEntries(
+        Object.keys(questions).map((id) => [id, { type: 'noul', noul: 0.75 }]),
+      );
+      expect(validateNativeResponse({ answers }, validateNativeRequest(input)).answers).toEqual(
+        answers,
+      );
+    },
+  );
+  it('rejects more questions than the qualified runtime can emit', () => {
+    const questions = Object.fromEntries(
+      Array.from({ length: JEV_MAX_QUESTIONS + 1 }, (_, index) => [
+        `q${index}`,
+        { type: 'noul', instructions: 'Relevant?' },
+      ]),
+    );
+    expect(() => validateNativeRequest({ ...request, questions })).toThrow(
+      'Invalid question count',
+    );
   });
   it.each([
     { answers: {} },

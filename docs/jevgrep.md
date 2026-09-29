@@ -77,6 +77,20 @@ approved root so it loads the `Grep|Bash` hook and current MCP build. Ordinary `
 hook; no special tool selection or Jevgrep prompt is required. Claude Code displays
 “Calling x402” while the hook checks the proposed search, then a visible x402 request when Claude invokes retrieval. The spinner alone does not prove that a paid request occurred.
 
+Claude Code can move a main-session MCP call to the background after two minutes. A slow
+retrieval then keeps running while the agent continues, and its result can arrive after an answer.
+For foreground testing in one repository, set
+`env.CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS` to `"0"` in that repository's ignored
+`.claude/settings.local.json`, preserving its other keys, then start a fresh Claude session.
+This controls timed backgrounding for every MCP tool in that repository, not only Jevgrep;
+it does not disable Bash or agent background tasks. Tenjin does not set this globally.
+See [Claude's MCP backgrounding documentation](https://code.claude.com/docs/en/mcp#automatic-backgrounding-of-long-tool-calls).
+When the MCP client supplies a progress token, retrieval reports its actual setup stages and
+completed provider evaluation count. Cached answers do not count as new provider evaluations.
+Progress is best effort: a failed notification cannot change payment or retry behavior.
+A headless `claude -p` run normally has backgrounding disabled already; use
+`CLAUDE_AUTO_BACKGROUND_TASKS=1` when testing interactive backgrounding behavior.
+
 The personal grant is outside repository configuration. Project config cannot grant source access.
 Start the host's MCP session at that exact repository root. Only that startup directory is authorized; other or unmatched roots stay native. The grant covers sessions at that root; it is
 not a per-message confirmation. The underlying offer binding expires after 15 minutes; a selected
@@ -135,6 +149,10 @@ The adapter preserves native question IDs and serializes object or array state a
 Maple requires string state. Although the request names `jev-latest`, the adapter accepts only
 responses identifying the qualified model `jev-1.13.0`; a missing model, alias or other version
 is rejected. Responses are checked against the original questions before caching or reuse.
+The native adapter accepts up to 384 boolean questions, matching the qualified CLI’s
+128-declaration batches with relevance, scope and reference questions. Existing byte limits still
+apply; local validation errors report a bounded reason such as `question-count` and stop the run
+as `invalid-request`, rather than attributing that refusal to the supplier.
 Source-sharing consent covers Maple and the model provider processing the submitted source;
 this integration does not claim zero retention or change provider privacy terms.
 Changing these terms requires a reviewed client update and renewed applicable disclosure consent.

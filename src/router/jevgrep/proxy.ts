@@ -4,7 +4,11 @@ import { createServer } from 'node:http';
 import type { Socket } from 'node:net';
 import { canonicalHash } from '../../lib/request-schema';
 import type { JevgrepAnswerCache } from './answer-cache';
-import { validateNativeRequest, validateNativeResponse } from './protocol.js';
+import {
+  NativeRequestValidationError,
+  validateNativeRequest,
+  validateNativeResponse,
+} from './protocol.js';
 import type { NativeEvaluationRequest, NativeEvaluationResponse } from './protocol.js';
 import { encodeMapleRequest } from './maple';
 import type { JevgrepSupplier } from './supplier';
@@ -111,8 +115,13 @@ export async function startJevgrepProxy(options: {
             JSON.parse(Buffer.concat(chunks).toString('utf8')),
             options.profile,
           );
-        } catch {
-          respond(400, 'Invalid native evaluation request');
+        } catch (error) {
+          // Report only our closed vocabulary, never parse messages, question
+          // text, repository content, or a remote supplier error.
+          const reason =
+            error instanceof NativeRequestValidationError ? error.reason : 'invalid-json';
+          stopReason ??= 'invalid-request';
+          respond(400, `Invalid native evaluation request: ${reason}`);
           return;
         }
         const cached = await options.cache?.get(body);

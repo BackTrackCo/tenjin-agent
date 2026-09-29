@@ -61,6 +61,7 @@ export async function executeJevgrep(
       ...(admission.snapshotCommit ? { expectedCommit: admission.snapshotCommit } : {}),
       profile,
       evaluate: (request, signal) => payer!.evaluate(request, signal),
+      ...(deps.onProgress ? { onProgress: deps.onProgress } : {}),
       ...(deps.signal ? { signal: deps.signal } : {}),
     });
     const drained = await payer.close();

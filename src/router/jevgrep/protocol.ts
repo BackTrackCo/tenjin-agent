@@ -2,6 +2,21 @@ import { jevgrepProfile, type JevgrepProfileId } from './profile';
 /** The native TypeSafe evaluation transport used by Jevgrep, not chat completions. */
 export const JEV_MODEL = 'jev-1.13.0' as const;
 export const JEV_LIMITS = jevgrepProfile().limits;
+// Qualified Jevgrep 0.7.0 groups up to 128 declarations, then asks relevance,
+// scope, and (when selected evidence exists) reference for each declaration.
+export const JEV_MAX_QUESTIONS = 128 * 3;
+export type NativeRequestFailureReason = 'request-shape' | 'question-count' | 'question-shape';
+export class NativeRequestValidationError extends Error {
+  constructor(readonly reason: NativeRequestFailureReason) {
+    super(
+      reason === 'question-count'
+        ? 'Invalid question count'
+        : reason === 'question-shape'
+          ? 'Invalid native evaluation question'
+          : 'Invalid native evaluation request',
+    );
+  }
+}
 
 export type JsonValue =
   null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
@@ -52,9 +67,10 @@ export function validateNativeRequest(
     !record(value.questions) ||
     !boundedJson(value, limits.requestBytes)
   )
-    throw new Error('Invalid native evaluation request');
+    throw new NativeRequestValidationError('request-shape');
   const questions = Object.entries(value.questions);
-  if (questions.length < 1 || questions.length > 128) throw new Error('Invalid question count');
+  if (questions.length < 1 || questions.length > JEV_MAX_QUESTIONS)
+    throw new NativeRequestValidationError('question-count');
   for (const [id, question] of questions) {
     if (
       !id ||
@@ -66,7 +82,7 @@ export function validateNativeRequest(
       typeof question.instructions !== 'string' ||
       question.instructions.length > 32_768
     )
-      throw new Error('Invalid native evaluation question');
+      throw new NativeRequestValidationError('question-shape');
   }
   return value as NativeEvaluationRequest;
 }
