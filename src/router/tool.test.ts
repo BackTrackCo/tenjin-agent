@@ -9,13 +9,7 @@ import type { CommandContext } from '../context';
 import { runPay } from '../commands/pay';
 import { runRequestTool } from './tool';
 import { ROUTER_PATH } from './decision';
-import {
-  bindDecision,
-  noteRedirect,
-  noteSession,
-  renderProgress,
-  takeUndelivered,
-} from './progress';
+import { bindDecision, claimRedirect, noteSession, renderProgress } from './progress';
 
 // Pass-through, so a refusal's typed details stay observable after the tool
 // folds the error into its envelope.
@@ -599,76 +593,27 @@ describe('what the tool leaves for the status line', () => {
 });
 
 /**
- * NEVER BLOCKED TWICE IN A ROW, the tool's half: only a `fulfilled` lookup
- * delivers the pre-call redirect that named its id. Anything less leaves it
- * undelivered, and the hook withholds that agent's next offer in its category.
+ * NEVER REDIRECTED TWICE FOR ONE TARGET, the tool's half: a lookup releases
+ * nothing. The hook promised the agent its own retry would run, so a delivered
+ * lookup leaves the claim in place exactly as a failed one does, and the
+ * native re-run of the same call is never denied again.
  */
 describe('the redirect a lookup answers', () => {
-  const CATEGORY = 'crypto price quote';
-  const RULE = { type: 'object', properties: { data: { type: 'object' } }, required: ['data'] };
+  const TARGET = 'WebSearch BTC and ETH price';
   it.each([
     ['fulfilled', [{ url: ROUTER, status: 200, body: decision() }, ...providerLegs()]],
-    [
-      'unverified',
-      [
-        {
-          url: ROUTER,
-          status: 200,
-          body: decision({ contract: contract({ resultSchema: RULE }) }),
-        },
-        ...providerLegs({ error: 'rate limited' }),
-      ],
-    ],
     ['failed', [{ url: ROUTER, status: 503, body: { error: { code: 'nope', message: 'no' } } }]],
-  ] as const)('is delivered only by a fulfilled lookup: %s', async (status, legs) => {
+  ] as const)('leaves the claim in place after a %s lookup', async (status, legs) => {
     await noteSession(dir, 'sess-1');
     await bindDecision(dir, 'sess-1', 'k3f9-abcd');
-    await noteRedirect(dir, 'sess-1', undefined, { id: 'k3f9-abcd', category: CATEGORY });
+    expect(await claimRedirect(dir, 'sess-1', undefined, TARGET)).toBe(true);
     const { fetchImpl } = net([...legs]);
     const result = await runRequestTool(
       { query: 'BTC and ETH price', id: 'k3f9-abcd' },
       deps(fetchImpl),
     );
     expect(result.envelope.status).toBe(status);
-    expect(await takeUndelivered(dir, 'sess-1', undefined, CATEGORY)).toBe(status !== 'fulfilled');
-  });
-
-  it('never counts a free lookup as delivered, since its 200 proves nothing', async () => {
-    const DOCS = 'library or API documentation';
-    await noteSession(dir, 'sess-1');
-    await bindDecision(dir, 'sess-1', 'k3f9-abcd');
-    await noteRedirect(dir, 'sess-1', undefined, { id: 'k3f9-abcd', category: DOCS });
-    const { fetchImpl, calls } = net([
-      {
-        url: ROUTER,
-        status: 200,
-        body: decision({ providerPriceAtomic: '0', category: DOCS, provider: 'Context7' }),
-      },
-      // A 200 naming another library: the lookup succeeded, the match did not.
-      { url: PROVIDER, status: 200, body: 'Context7 matched: /dodopayments/billingsdk.' },
-    ]);
-    const result = await runRequestTool(
-      { query: '@acme/billing-sdk createInvoice', id: 'k3f9-abcd' },
-      deps(fetchImpl),
-    );
-    expect(result.envelope.status).toBe('fulfilled');
-    expect(calls.some((call) => call.paid)).toBe(false);
-    expect(await takeUndelivered(dir, 'sess-1', undefined, DOCS)).toBe(true);
-  });
-
-  it("marks only the agent whose redirect named the id, never another's", async () => {
-    await noteSession(dir, 'sess-1');
-    await bindDecision(dir, 'sess-1', 'k3f9-abcd');
-    await noteRedirect(dir, 'sess-1', undefined, { id: 'a-later-one', category: CATEGORY });
-    await noteRedirect(dir, 'sess-1', 'a1', { id: 'k3f9-abcd', category: CATEGORY });
-    const { fetchImpl } = net([{ url: ROUTER, status: 200, body: decision() }, ...providerLegs()]);
-    const result = await runRequestTool(
-      { query: 'BTC and ETH price', id: 'k3f9-abcd' },
-      deps(fetchImpl),
-    );
-    expect(result.envelope.status).toBe('fulfilled');
-    expect(await takeUndelivered(dir, 'sess-1', 'a1', CATEGORY)).toBe(false);
-    expect(await takeUndelivered(dir, 'sess-1', undefined, CATEGORY)).toBe(true);
+    expect(await claimRedirect(dir, 'sess-1', undefined, TARGET)).toBe(false);
   });
 });
 

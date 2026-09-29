@@ -25,14 +25,13 @@ import { requestToolAccess, type AgentLookup } from './agent-tools';
 import { finishAugment, startAugment, type PrefetchJob, type SearchResponse } from './augment';
 import {
   bindDecision,
+  claimRedirect,
   markOffered,
   newCallId,
-  noteRedirect,
   noteSession,
   pruneProgress,
   pruneSessions,
   sessionDir,
-  takeUndelivered,
   wasOffered,
   writeProgress,
 } from './progress';
@@ -577,9 +576,9 @@ export interface NativeHookOutcome {
   withheld?: true;
   /** No router call at all: the subagent is not known to have the request tool. */
   noRequestTool?: true;
-  /** An `execute` whose redirect was not sent: this agent's last one, in the
-   *  same category, has not delivered. */
-  redirectUndelivered?: true;
+  /** An `execute` whose redirect was not sent: this agent was already
+   *  redirected on this same search or URL. */
+  alreadyRedirected?: true;
   /** A free offer, which the pre-call arm never redirects: the call runs. */
   free?: true;
   /** And its docs are being fetched, to ride above the search's results. */
@@ -620,7 +619,7 @@ async function routeNativeCall(
   deps: HookDeps,
   opts: {
     nativeOutcome?: NativeOutcome;
-    repeated?: (offer: ExecuteDecision) => Promise<boolean>;
+    repeated?: () => Promise<boolean>;
     passFree?: boolean;
   } = {},
 ): Promise<
@@ -696,11 +695,11 @@ async function routeNativeCall(
     await footer.close(outcome, { withheld });
     return { offer: null, outcome: { response: null, action: 'execute', withheld: true } };
   }
-  if (repeated !== undefined && (await repeated(outcome))) {
+  if (repeated !== undefined && (await repeated())) {
     await footer.close(outcome, { withheld: 'already redirected once' });
     return {
       offer: null,
-      outcome: { response: null, action: 'execute', redirectUndelivered: true },
+      outcome: { response: null, action: 'execute', alreadyRedirected: true },
     };
   }
   await footer.close(outcome);
@@ -722,13 +721,14 @@ async function routeNativeCall(
  * and the after-call arm can still offer.
  *
  * A redirect leaves a mark under the call's `tool_use_id`, so the after-call
- * arm never offers on that same call, and becomes this agent's last redirect.
+ * arm never offers on that same call.
  *
- * NEVER BLOCKED TWICE IN A ROW FOR ONE KIND OF LOOKUP. Every call is routed as
- * usual. While the agent's last redirect is undelivered (its lookup failed,
- * stopped short of `fulfilled`, or was never called), an offer in that same
- * category is withheld once and the call runs; the call after that is routed
- * as usual. An offer in another category is a redirect like any other.
+ * NEVER REDIRECTED TWICE FOR ONE TARGET. Every call is routed as usual, and a
+ * redirect claims its exact search or URL for this agent first
+ * ({@link claimRedirect}). An offer on a target this agent was already
+ * redirected on is withheld and the call runs, however its lookup went and
+ * whatever other calls ran in between: parallel calls each hold their own
+ * claim, so none can spend another's. Any other target gets its own redirect.
  *
  * A FREE OFFER IS NEVER A REDIRECT. Denying a search for the free docs lookup
  * sent the agent on a detour, and round a loop when the docs missed. The call
@@ -739,10 +739,11 @@ async function routeNativeCall(
 export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<NativeHookOutcome> {
   const event = decodeEvent(raw);
   if (event?.kind !== 'native' || event.pending === null) return { response: null };
+  const target = redirectTarget(event.pending);
   const routed = await routeNativeCall(event, event.pending, deps, {
     passFree: true,
-    repeated: (offer) =>
-      takeUndelivered(deps.dataDir, event.sessionId, event.agentId, offer.category, deps.now?.()),
+    repeated: async () =>
+      !(await claimRedirect(deps.dataDir, event.sessionId, event.agentId, target, deps.now?.())),
   });
   if (routed.offer === null) return routed.outcome;
   if (routed.free === true) {
@@ -771,7 +772,6 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
   if (event.toolUseId !== undefined) {
     await markOffered(deps.dataDir, event.sessionId, event.toolUseId, deps.now?.());
   }
-  await noteRedirect(deps.dataDir, event.sessionId, event.agentId, routed.offer, deps.now?.());
   return {
     response: {
       hookSpecificOutput: {
@@ -1047,6 +1047,22 @@ async function decide(
 /** The hooks write their own protocol answer on stdout and nothing else. */
 function nullStream(): NodeJS.WritableStream {
   return { write: () => true } as unknown as NodeJS.WritableStream;
+}
+
+/**
+ * What one redirect is for: the search as the agent wrote it, or the URL as
+ * `URL` parses it, so a retry that differs only in how the URL is spelled is
+ * still the same call.
+ */
+function redirectTarget(pending: PendingCall): string {
+  if (pending.tool === 'WebSearch') return `WebSearch ${pending.query}`;
+  let url = pending.url;
+  try {
+    url = new URL(url).toString();
+  } catch {
+    // Not a URL the parser takes: the agent's own spelling is the target.
+  }
+  return `WebFetch ${url}`;
 }
 
 function pendingCallOf(
