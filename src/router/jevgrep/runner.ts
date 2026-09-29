@@ -7,6 +7,7 @@ import { startJevgrepProxy } from './proxy.js';
 import type { JevgrepEvaluate } from './proxy.js';
 import { createJevgrepSnapshot, SnapshotPolicyUnavailable } from './snapshot.js';
 import type { SnapshotSummary } from './snapshot.js';
+import { createJevgrepAnswerCache } from './answer-cache.js';
 
 /** No published release containing upstream #28 has been qualified yet. */
 export const QUALIFIED_JEVGREP_RELEASES: readonly string[] = Object.freeze([]);
@@ -16,6 +17,7 @@ export type JevgrepRunResult = {
   output: string;
   reason?: string;
   requests: number;
+  cacheHits?: number;
   snapshot?: SnapshotSummary;
 };
 export function isJevgrepRuntimeAvailable(runtime: JevgrepRuntime | undefined): boolean {
@@ -108,7 +110,14 @@ export async function runJevgrep(
     const { packageSpec, env } = runtime;
     const source = join(directory, 'source');
     snapshot = await createJevgrepSnapshot({ root, destination: source, signal: setupSignal });
-    proxy = await startJevgrepProxy({ evaluate: options.evaluate, signal: outerSignal });
+    const cache = createJevgrepAnswerCache({
+      dataDir: options.dataDir,
+      root,
+      commit: snapshot.commit,
+      query: options.query,
+      runtime: options.runtime!,
+    });
+    proxy = await startJevgrepProxy({ evaluate: options.evaluate, cache, signal: outerSignal });
     phaseSignal.addEventListener('abort', abortProxy, { once: true });
     if (phaseSignal.aborted) {
       abortProxy();
@@ -162,6 +171,8 @@ export async function runJevgrep(
         String(JEV_LIMITS.concurrency),
         '--max-source-bytes',
         String(JEV_LIMITS.outputBytes),
+        // Tenjin owns persistent answer reuse before paid admission. The CLI's
+        // cache is temporary and includes the short-lived proxy port in its key.
         '--no-cache',
         '--',
         options.query,
@@ -200,6 +211,7 @@ export async function runJevgrep(
       status,
       output,
       requests: summary.requests,
+      cacheHits: summary.cacheHits,
       snapshot,
       ...(reason
         ? { reason }
@@ -216,6 +228,7 @@ export async function runJevgrep(
           : 'failed',
       output: '',
       requests: proxy?.summary().requests ?? 0,
+      cacheHits: proxy?.summary().cacheHits ?? 0,
       ...(snapshot ? { snapshot } : {}),
       reason:
         error instanceof SnapshotPolicyUnavailable

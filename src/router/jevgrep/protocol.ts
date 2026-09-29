@@ -3,6 +3,9 @@ export const JEV_MODEL = 'jev-1.13.0' as const;
 export const JEV_LIMITS = {
   concurrency: 2,
   requests: 60,
+  // Cache hits use no paid/egress budget, but the local child remains bounded.
+  localRequests: 4096,
+  localRequestBytes: 64 * 1024 * 1024,
   requestBytes: 128 * 1024,
   totalRequestBytes: 2 * 1024 * 1024,
   responseBytes: 256 * 1024,

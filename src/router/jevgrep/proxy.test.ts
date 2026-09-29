@@ -1,18 +1,25 @@
 import { request as httpRequest } from 'node:http';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { startJevgrepProxy } from './proxy.js';
 import type { JevgrepEvaluate } from './proxy.js';
 import { JEV_LIMITS, JEV_MODEL } from './protocol.js';
+import type { NativeEvaluationRequest } from './protocol.js';
+import { createJevgrepAnswerCache } from './answer-cache.js';
+import type { JevgrepAnswerCache } from './answer-cache.js';
 
-const body = {
+const body: NativeEvaluationRequest = {
   model: JEV_MODEL,
   state: 'public source',
   questions: { q: { type: 'noul', instructions: 'Relevant?' } },
 };
 const answer = { answers: { q: { type: 'noul' as const, noul: 0.8 } } };
 const proxies: Array<Awaited<ReturnType<typeof startJevgrepProxy>>> = [];
-async function proxy(evaluate: JevgrepEvaluate = async () => answer) {
-  const p = await startJevgrepProxy({ evaluate });
+const directories: string[] = [];
+async function proxy(evaluate: JevgrepEvaluate = async () => answer, cache?: JevgrepAnswerCache) {
+  const p = await startJevgrepProxy({ evaluate, cache });
   proxies.push(p);
   return p;
 }
@@ -48,6 +55,9 @@ function send(
 }
 afterEach(async () => {
   await Promise.all(proxies.splice(0).map((p) => p.close()));
+  await Promise.all(
+    directories.splice(0).map((path) => rm(path, { recursive: true, force: true })),
+  );
 });
 describe('bounded local evaluation proxy', () => {
   it('forwards only a valid authenticated native request', async () => {
@@ -163,4 +173,107 @@ describe('bounded local evaluation proxy', () => {
     expect(seenSignal!.aborted).toBe(true);
     await expect(send(p)).rejects.toThrow();
   });
+  it('reuses persisted answers on another proxy without paying for hits or their bytes', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'jev-proxy-cache-'));
+    directories.push(dataDir);
+    const options = {
+      dataDir,
+      root: '/approved',
+      commit: 'a'.repeat(40),
+      query: 'question',
+      runtime: { kind: 'local-artifact' as const, path: '/fixture.tgz', sha256: 'b'.repeat(64) },
+    };
+    const evaluate = vi.fn(async () => answer);
+    const first = await proxy(evaluate, createJevgrepAnswerCache(options));
+    const large = { ...body, state: 'x'.repeat(120 * 1024) };
+    expect((await send(first, large)).status).toBe(200);
+    await first.close();
+    const second = await proxy(evaluate, createJevgrepAnswerCache(options));
+    expect(second.baseURL).not.toBe(first.baseURL);
+    for (let i = 0; i < JEV_LIMITS.requests + 1; i++)
+      expect((await send(second, large)).status).toBe(200);
+    expect(evaluate).toHaveBeenCalledTimes(1);
+    expect(second.summary()).toMatchObject({
+      requests: 0,
+      requestBytes: 0,
+      cacheHits: 61,
+      stopReason: undefined,
+    });
+    expect(second.summary().localRequestBytes).toBeGreaterThan(JEV_LIMITS.totalRequestBytes);
+    // A miss still uses the ordinary payer; a hit never changes its policy.
+    expect((await send(second, { ...body, state: 'changed' })).status).toBe(200);
+    expect(evaluate).toHaveBeenCalledTimes(2);
+    expect(second.summary().requests).toBe(1);
+  });
+  it('coalesces concurrent identical misses before paid admission and does not cache invalid answers', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const evaluate = vi.fn(async () => {
+      await gate;
+      return answer;
+    });
+    const cache = { get: vi.fn(async () => undefined), put: vi.fn(async () => {}) };
+    const p = await proxy(evaluate, cache);
+    const first = send(p),
+      second = send(p);
+    await vi.waitFor(() => expect(p.summary().active).toBe(2));
+    expect(evaluate).toHaveBeenCalledTimes(1);
+    release();
+    expect((await Promise.all([first, second])).map((r) => r.status)).toEqual([200, 200]);
+    expect(p.summary()).toMatchObject({ requests: 1, joined: 1 });
+    expect(cache.put).toHaveBeenCalledTimes(1);
+    const badCache = { get: vi.fn(async () => undefined), put: vi.fn(async () => {}) };
+    expect((await send(await proxy(async () => ({ answers: {} }), badCache))).status).toBe(409);
+    expect(badCache.put).not.toHaveBeenCalled();
+  });
+  it('serves an existing answer at the paid ceiling but refuses the next uncached evaluation', async () => {
+    const evaluate = vi.fn(async () => answer);
+    const saved = new Set<string>();
+    const p = await proxy(evaluate, {
+      get: async (request) => (saved.has(JSON.stringify(request)) ? answer : undefined),
+      put: async (request) => {
+        saved.add(JSON.stringify(request));
+      },
+    });
+    for (let i = 0; i < JEV_LIMITS.requests; i++)
+      expect((await send(p, { ...body, state: `source-${i}` })).status).toBe(200);
+    expect((await send(p, { ...body, state: 'source-0' })).status).toBe(200);
+    expect((await send(p, { ...body, state: 'uncached' })).status).toBe(409);
+    expect(p.summary()).toMatchObject({
+      requests: JEV_LIMITS.requests,
+      cacheHits: 1,
+      stopReason: 'request-limit',
+    });
+    expect(evaluate).toHaveBeenCalledTimes(JEV_LIMITS.requests);
+  });
+  it('bounds repeated cache hits without consuming paid requests', async () => {
+    const evaluate = vi.fn(async () => answer);
+    const p = await proxy(evaluate, { get: async () => answer, put: async () => {} });
+    for (let i = 0; i < JEV_LIMITS.localRequests; i++) expect((await send(p)).status).toBe(200);
+    expect((await send(p)).status).toBe(409);
+    expect(p.summary()).toMatchObject({
+      requests: 0,
+      requestBytes: 0,
+      stopReason: 'local-request-limit',
+    });
+    expect(evaluate).not.toHaveBeenCalled();
+  }, 30_000);
+  it('bounds aggregate cache-hit ingress independently of supplier egress', async () => {
+    const evaluate = vi.fn(async () => answer);
+    const p = await proxy(evaluate, { get: async () => answer, put: async () => {} });
+    const large = { ...body, state: 'x'.repeat(120 * 1024) };
+    const count = Math.floor(
+      JEV_LIMITS.localRequestBytes / Buffer.byteLength(JSON.stringify(large)),
+    );
+    for (let i = 0; i < count; i++) expect((await send(p, large)).status).toBe(200);
+    expect((await send(p, large)).status).toBe(413);
+    expect(p.summary()).toMatchObject({
+      requests: 0,
+      requestBytes: 0,
+      stopReason: 'local-byte-limit',
+    });
+    expect(evaluate).not.toHaveBeenCalled();
+  }, 30_000);
 });

@@ -38,6 +38,28 @@ short-lived proxy token, then search uses that config. The normal Jevgrep config
 unchanged. `npx` may download dependencies; it is not a sandbox. The reviewed child executes with
 the OS user's privileges. Only trusted artifacts belong in this pilot. No extra skill install is required.
 
+Tenjin also retains validated Jev answer scores across searches in
+`jevgrep/answers` under the active Tenjin data directory. Cache identity includes the exact
+native request (source, query, questions and model), the approved repository root and committed
+snapshot, the exact runtime release or artifact hash, the fixed supplier and the versioned
+snapshot/transport policy. A different proxy port or temporary child directory does not change
+this identity. Different source, query, commit, root, runtime or policy cannot reuse an answer.
+Current grants and source/ignore-policy checks still run before cache access.
+
+This answer cache stores only hashes, timestamps and numeric scores in private files; even question
+IDs are reconstructed from the matching request rather than saved. It retains at most 2,048 entries
+and 32 MiB, expires answers after seven days, and validates each bounded record before reuse.
+Corrupt, mismatched, expired, unsafe or unavailable records are cache misses. Atomic writes and a
+short shared write lock keep concurrent publication and retention bounded. A crashed writer lock
+disables new cache writes until recovery but does not block valid reads or authorize payment.
+Simultaneous misses in separate processes may each use their own approved search budget; this
+cache does not change payment-journal recovery or promise cross-run payment deduplication.
+
+The upstream CLI still receives `--no-cache`: its cache lives in temporary storage and keys on the
+changing proxy URL. Tenjin owns persistent answer reuse before paid admission. Result `requests`
+counts evaluations admitted to the payer; `cacheHits` counts answers served from this cache.
+Removing disposable answer files loses reuse only; never remove payment records to clear a cache.
+
 ## Provider and spending
 
 Source and native Jev questions go directly from the local adapter to jev-x402. Tenjin's router
@@ -47,8 +69,10 @@ The fixed model is `jev-1.13.0`, on Base USDC, with recipient
 Changing these terms requires a reviewed client update and renewed applicable disclosure consent.
 There is no automatic supplier fallback. This is a technical pilot; it adds no Tenjin routing fees.
 
-A search admits at most two concurrent evaluations, 60 evaluations, 128 KiB per request and
-2 MiB total request bytes. Its exposure cap is the lower of the approved search budget and `maxAutoSpend`, at most $0.05. Each evaluation also uses the existing shared daily wallet policy, so concurrent searches cannot spend the same remaining allowance. Setup and search each have a 60-second
+A search admits at most two concurrent evaluations, 60 uncached evaluations, 128 KiB per request and
+2 MiB of uncached request bytes. Cached answers consume neither paid-request nor supplier-egress
+allowance. The local child separately stops at 4,096 requests or 64 MiB of loopback input, including
+cache hits, and the per-request bound still applies before lookup. Its exposure cap is the lower of the approved search budget and `maxAutoSpend`, at most $0.05. Each evaluation also uses the existing shared daily wallet policy, so concurrent searches cannot spend the same remaining allowance. Setup and search each have a 60-second
 limit; returned source is bounded to 16 KiB. A stopped search reports partial/failed/cancelled
 with its reason. It must never be interpreted as proof that no matches exist.
 

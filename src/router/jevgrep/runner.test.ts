@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { JEV_LIMITS } from './protocol.js';
+import { JEV_LIMITS, JEV_MODEL } from './protocol.js';
 import { isJevgrepRuntimeAvailable, runJevgrep } from './runner.js';
 import type { JevgrepRuntime } from './runner.js';
 import type { BoundedCommand, CommandResult } from '../local/process';
@@ -191,5 +191,46 @@ describe('isolated Jevgrep lifecycle', () => {
     );
     expect(result.status).toBe('cancelled');
     await expect(fetch(baseURL)).rejects.toThrow();
+  });
+  it('reuses validated answers across isolated runs only after rechecking the source snapshot', async () => {
+    const f = await fixture();
+    let baseURL = '',
+      token = '';
+    const evaluate = vi.fn(async () => ({ answers: { q: { type: 'noul' as const, noul: 0.9 } } }));
+    const runCommand = async (command: BoundedCommand) => {
+      if (command.input) {
+        baseURL = command.argv[command.argv.indexOf('--base-url') + 1]!;
+        token = command.input.trim();
+        return ok;
+      }
+      expect(command.argv).toContain('--no-cache');
+      const source = await readFile(join(command.argv.at(-1)!, 'code.ts'), 'utf8');
+      const response = await fetch(`${baseURL}/systemone`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model: JEV_MODEL,
+          state: { source, query: 'same question' },
+          questions: { q: { type: 'noul', instructions: 'Relevant?' } },
+        }),
+      });
+      expect(response.status).toBe(200);
+      return { ...ok, stdout: 'source evidence' };
+    };
+    const first = await runJevgrep({ ...f, query: 'same question', evaluate }, { runCommand });
+    const second = await runJevgrep({ ...f, query: 'same question', evaluate }, { runCommand });
+    expect(first.requests).toBe(1);
+    expect(second.requests).toBe(0);
+    expect(second.cacheHits).toBe(1);
+    expect(evaluate).toHaveBeenCalledTimes(1);
+    // A newly added uncommitted ignore policy makes the source unavailable,
+    // even though the previous exact answer exists on disk.
+    await writeFile(join(f.root, '.ignore'), 'code.ts\n');
+    const blocked = vi.fn(runCommand);
+    expect(
+      await runJevgrep({ ...f, query: 'same question', evaluate }, { runCommand: blocked }),
+    ).toMatchObject({ status: 'unavailable', reason: 'snapshot-policy-unavailable' });
+    expect(blocked).not.toHaveBeenCalled();
+    expect(evaluate).toHaveBeenCalledTimes(1);
   });
 });

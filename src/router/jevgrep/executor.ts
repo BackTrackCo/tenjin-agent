@@ -63,6 +63,8 @@ export async function executeJevgrep(
         result: result.output,
         stopReason: result.reason,
         snapshot: result.snapshot,
+        requests: result.requests,
+        cacheHits: result.cacheHits ?? 0,
         cost,
         providerContentUntrusted: true,
       },

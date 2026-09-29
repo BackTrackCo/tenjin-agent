@@ -143,6 +143,25 @@ function request(query = QUERY, cwd = root, id: string | undefined = ID) {
 }
 
 describe('Jevgrep hook, binding and executor integration', () => {
+  it.each(['complete', 'partial'] as const)(
+    'reports answer reuse on a %s retrieval',
+    async (status) => {
+      await offer();
+      vi.mocked(runJevgrep).mockResolvedValue({
+        status,
+        output: 'fixture.ts:1',
+        requests: 2,
+        cacheHits: 17,
+      });
+      const result = await request();
+      expect(result.envelope).toMatchObject({
+        status: status === 'complete' ? 'fulfilled' : 'partial',
+        requests: 2,
+        cacheHits: 17,
+      });
+      expect(result.envelope.cost).toEqual(await summary());
+    },
+  );
   it('caps the whole search at the current automatic-operation ceiling', async () => {
     await offer();
     // Tightening policy after the offer must constrain the entire search at dispatch.
