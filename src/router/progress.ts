@@ -295,19 +295,22 @@ export async function claimQuery(
 }
 
 /**
- * ONE RECORD PER AGENT AND TARGET. Subagents share the session id, so the
- * agent is in the key, and the main agent's part is the empty string, which no
- * `agent_id` can be: the decoder refuses an empty one. The target is in it too,
- * one file each, so parallel calls never share a record: one call's redirect
- * can be neither overwritten nor spent by another's.
+ * ONE RECORD PER AGENT, TARGET AND WINDOW. Subagents share the session id, so
+ * the agent is in the key, and the main agent's part is the empty string, which
+ * no `agent_id` can be: the decoder refuses an empty one. The target is in it
+ * too, one file each, so parallel calls never share a record: one call's
+ * redirect can be neither overwritten nor spent by another's. And so is the
+ * {@link EXPIRY_MS} window the claim was made in, so a claim is only ever
+ * created, never replaced: see {@link claimRedirect}.
  */
 function redirectPath(
   dataDir: string,
   sessionId: string,
   agentId: string | undefined,
   target: string,
+  window: number,
 ): string {
-  const key = digest(JSON.stringify([agentId ?? '', target]));
+  const key = digest(JSON.stringify([agentId ?? '', target, window]));
   return join(sessionDir(dataDir, sessionId), `${REDIRECT_PREFIX}${key}.json`);
 }
 
@@ -317,8 +320,15 @@ function redirectPath(
  * and the claim is now its; the pre-call hook denies only on true. So the
  * agent's own retry of a redirected call runs, whether the lookup it was sent
  * to delivered, failed or was never called, and whatever other calls ran in
- * between. The create is exclusive, so two parallel copies of one call are
- * denied once, and a claim that cannot be written is false: the call runs.
+ * between.
+ *
+ * ONLY EVER AN EXCLUSIVE CREATE. Replacing an expired claim let two parallel
+ * copies of one call both read the old stamp and both write, and both deny.
+ * The claim's file is named by its window instead, so the one create per
+ * window decides, and the previous window's claim, while it is still inside
+ * {@link EXPIRY_MS}, is read and never touched: a claim made just before a
+ * boundary still lasts its full span. A claim that cannot be written is false:
+ * the call runs.
  */
 export async function claimRedirect(
   dataDir: string,
@@ -327,17 +337,21 @@ export async function claimRedirect(
   target: string,
   now = Date.now(),
 ): Promise<boolean> {
-  const path = redirectPath(dataDir, sessionId, agentId, target);
+  const window = Math.floor(now / EXPIRY_MS);
+  const previous = await readStamp(redirectPath(dataDir, sessionId, agentId, target, window - 1));
+  if (previous !== null && now - previous.at <= EXPIRY_MS) return false;
   const stamp: Stamp = { version: 1, at: now };
   try {
-    await writeFileAtomicExclusive(path, JSON.stringify(stamp), { mode: 0o600, dirMode: 0o700 });
+    await writeFileAtomicExclusive(
+      redirectPath(dataDir, sessionId, agentId, target, window),
+      JSON.stringify(stamp),
+      { mode: 0o600, dirMode: 0o700 },
+    );
     return true;
   } catch {
-    // Taken: by a live redirect, which stands, or by an expired one, which does not.
+    // Taken in this window, which is always inside EXPIRY_MS, or not writable.
+    return false;
   }
-  const last = await readStamp(path);
-  if (last === null || now - last.at <= EXPIRY_MS) return false;
-  return write(path, stamp);
 }
 
 /**
