@@ -193,19 +193,20 @@ describe('repository hook classification and agent-authored query offers', () =>
     expect(runRequestTool).not.toHaveBeenCalled();
     expect(executeJevgrep).not.toHaveBeenCalled();
   });
-  it('offers on compound searches without suppressing commands or changing permissions', async () => {
+  it('redirects compound searches once and explicitly preserves the original command for retry', async () => {
     const d = deps();
     const input = bash(
       `cd '${root}' && git ls-files | grep -v node_modules | head -300; grep -rniE "quiet|suppress|cooldown|debounce|dirty|recent.?edit" --include=* -l . --exclude-dir=node_modules --exclude-dir=.git | head -50`,
     );
     const before = JSON.stringify(input);
     const out = await runRepositoryHook(input, d);
-    expect(out.reason).toBe('offered alongside native command');
+    expect(out.reason).toBe('redirected to repository request');
     expect(out.response).toEqual({
       hookSpecificOutput: {
         hookEventName: 'PreToolUse',
-        additionalContext: expect.stringContaining(
-          'Request Jevgrep before more exploratory searches',
+        permissionDecision: 'deny',
+        permissionDecisionReason: expect.stringContaining(
+          'This entire compound Bash command has not executed. After the Jevgrep attempt succeeds or fails, reissue the exact original Bash tool input',
         ) as unknown as string,
       },
     });
@@ -215,6 +216,10 @@ describe('repository hook classification and agent-authored query offers', () =>
     expect(search.shell.argv).toContain('--exclude-dir=node_modules');
     expect(runRequestTool).not.toHaveBeenCalled();
     expect(executeJevgrep).not.toHaveBeenCalled();
+    expect(
+      (await runRepositoryHook({ ...input, tool_use_id: 'compound-retry' }, d)).response,
+    ).toBeNull();
+    expect(d.decide).toHaveBeenCalledOnce();
   });
   it('includes only a bounded, redacted agent-authored Bash description', async () => {
     const d = deps();
@@ -234,6 +239,23 @@ describe('repository hook classification and agent-authored query offers', () =>
     expect(JSON.parse(pending).description).toContain('Find payment protection');
     expect(pending).not.toContain(token);
     expect(pending).not.toContain('never transmit me');
+  });
+  it('defers a relative cd explicitly and admits its unchanged retry', async () => {
+    const d = deps();
+    const input = bash('cd src && rg payment .');
+    const out = await runRepositoryHook(input, d);
+    expect(out.response).toMatchObject({
+      hookSpecificOutput: {
+        permissionDecision: 'deny',
+        permissionDecisionReason: expect.stringContaining(
+          'reissue the exact original Bash tool input from the same working directory',
+        ) as unknown as string,
+      },
+    });
+    expect(JSON.stringify(out.response)).not.toContain('updatedInput');
+    expect(input.tool_input.command).toBe('cd src && rg payment .');
+    expect((await runRepositoryHook({ ...input, tool_use_id: 'cd-retry' }, d)).response).toBeNull();
+    expect(d.decide).toHaveBeenCalledOnce();
   });
   it('omits oversized descriptions rather than truncating secret-shaped input', async () => {
     const d = deps();

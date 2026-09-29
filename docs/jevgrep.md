@@ -10,9 +10,12 @@ tool. Claude writes a focused natural-language repository question using its cur
 the executor receives that question unchanged. The hook does not generate a query from the human
 prompt or execute a regex as a semantic question. Prompt offers use the same request tool.
 
-Supported compound Bash calls receive an instruction to use Jevgrep before further exploratory
-searches; their original commands and permissions stay intact. A `cd` also stays intact to preserve
-Claude's directory change. Literal search flags, bounded `head` filters, and a small allowlist of
+Supported compound Bash calls are redirected once too. The hook explicitly says the entire
+original command has not run and asks Claude to reissue that exact tool input, from the same
+working directory, after the Jevgrep attempt succeeds or fails. This preserves the intended
+`cd`, filters and companion operations without rewriting shell code. The retry stays native and
+subject to normal permissions. As with paid WebSearch, the agent carries out the requested
+lookup and retry; the hook does not execute either on its behalf. Literal search flags, bounded `head` filters, and a small allowlist of
 read-only companions are recognized. Variables, substitutions, loops, writes, background jobs and
 unsupported syntax stay native without routing. Filename-filter pipelines are not treated as
 repository-content searches. Unknown subagents or subagents without access to the request tool
