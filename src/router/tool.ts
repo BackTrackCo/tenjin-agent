@@ -10,7 +10,7 @@ import type { SpendAuthorizer, WalletProvider } from '../lib/wallet';
 import type { TenjinSigner } from '../lib/wallet/provider';
 import type { CommandContext } from '../context';
 import { requestDecision, type DecisionContract, type DecisionDiagnostics } from './decision';
-import { markDelivered, openLookupFooter } from './progress';
+import { openLookupFooter } from './progress';
 import { routerSettings } from './settings';
 
 /**
@@ -234,13 +234,6 @@ export async function runRequestTool(
       };
     }
     await footer.done('fulfilled', shown);
-    // ONLY A FULFILLED, PAID LOOKUP DELIVERS the redirect that named its id, so
-    // the pre-call hook routes the next native call again; anything less lets
-    // it run. A free lookup carries no success rule, so its 200 proves nothing:
-    // a docs lookup that matched the wrong library is a 200 the agent rejects,
-    // and counting it would send the agent's own retry straight back to it.
-    if (args.id !== undefined && args.id.length > 0 && decision.providerPriceAtomic !== '0')
-      await markDelivered(deps.ctx.dataDir, args.id);
     return {
       isError: false,
       summary: `Fulfilled by ${base.supplier} · ${base.cost.join(' · ')}`,
@@ -257,6 +250,8 @@ export async function runRequestTool(
       amountAtomic?: string;
       settlement?: string;
       diagnosis?: Record<string, unknown>;
+      status?: number;
+      providerError?: string;
     };
     await footer.done(status, {
       provider: contract.request.url,
@@ -267,6 +262,11 @@ export async function runRequestTool(
       providerAtomic: BigInt(detail.amountAtomic ?? '0'),
       ...(detail.settlement !== undefined ? { settlement: detail.settlement } : {}),
       ...(detail.diagnosis !== undefined ? { diagnosis: detail.diagnosis } : {}),
+      // WHY THE PROVIDER SAID NO: its HTTP status and a bounded, redacted
+      // snippet of its body, which `runPay` cut. Without them a 403 read the
+      // same as a timeout to the agent and to the logs.
+      ...(typeof detail.status === 'number' ? { providerStatus: detail.status } : {}),
+      ...(typeof detail.providerError === 'string' ? { providerError: detail.providerError } : {}),
     });
   }
 }
@@ -408,6 +408,10 @@ interface FailExtras {
   /** Which rule failed, whether the body was JSON, its size and a bounded
    *  redacted preview: what tells a parse miss from an HTML error page. */
   diagnosis?: Record<string, unknown>;
+  /** The provider's HTTP status on a non-2xx answer. */
+  providerStatus?: number;
+  /** The start of that answer's body, bounded and redacted. Provider content. */
+  providerError?: string;
   /** The backend's own stable error code, from a typed non-2xx body. */
   errorCode?: string;
   /** What stopped a non-execute decision, in the backend's own terms. */
@@ -465,6 +469,8 @@ function fail(status: FailStatus, reason: string, extras: FailExtras = {}): Requ
       ...(extras.note !== undefined ? { note: extras.note } : {}),
       ...(extras.settlement !== undefined ? { settlement: extras.settlement } : {}),
       ...(extras.diagnosis !== undefined ? { diagnosis: extras.diagnosis } : {}),
+      ...(extras.providerStatus !== undefined ? { providerStatus: extras.providerStatus } : {}),
+      ...(extras.providerError !== undefined ? { providerError: extras.providerError } : {}),
       providerContentUntrusted: true,
     },
   };

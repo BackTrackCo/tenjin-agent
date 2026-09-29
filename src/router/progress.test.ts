@@ -8,6 +8,7 @@ import {
   augmentOf,
   bindDecision,
   claimQuery,
+  claimRedirect,
   EXPIRY_MS,
   markAugment,
   newCallId,
@@ -314,6 +315,55 @@ describe('the free-docs records', () => {
       Array.from({ length: 6 }, () => claimQuery(dir, 'session-a', undefined, 'same', NOW)),
     );
     expect(claims.filter(Boolean)).toHaveLength(1);
+  });
+});
+
+/**
+ * ONE REDIRECT PER TARGET, DECIDED BY ONE EXCLUSIVE CREATE. A claim is never
+ * replaced: replacing an expired one let two parallel copies of a call both
+ * read the old stamp, both write, and both be denied.
+ */
+describe('the redirect claims', () => {
+  /** The start of an EXPIRY_MS window, so a test can stand either side of one. */
+  const WINDOW = Math.ceil(NOW / EXPIRY_MS) * EXPIRY_MS;
+  const TARGET = 'WebFetch https://example.test/spec';
+  const claim = (now: number, agentId?: string, target = TARGET) =>
+    claimRedirect(dir, 'session-a', agentId, target, now);
+
+  it('is one per agent and target, and holds for its span', async () => {
+    expect(await claim(WINDOW + 1_000)).toBe(true);
+    expect(await claim(WINDOW + 2_000)).toBe(false);
+    expect(await claim(WINDOW + 1_000, 'a1')).toBe(true);
+    expect(await claim(WINDOW + 1_000, undefined, 'WebSearch spec')).toBe(true);
+  });
+
+  it('holds its full span across a window boundary, then lapses', async () => {
+    const at = WINDOW + EXPIRY_MS - 1_000;
+    expect(await claim(at)).toBe(true);
+    expect(await claim(WINDOW + EXPIRY_MS + 1_000)).toBe(false);
+    expect(await claim(at + EXPIRY_MS)).toBe(false);
+    expect(await claim(at + EXPIRY_MS + 1)).toBe(true);
+    expect(await claim(at + EXPIRY_MS + 2)).toBe(false);
+  });
+
+  it('gives parallel copies exactly one claim, including after one expired', async () => {
+    const copies = (now: number) => Promise.all(Array.from({ length: 6 }, () => claim(now)));
+    expect((await copies(WINDOW + 1_000)).filter(Boolean)).toHaveLength(1);
+    const after = await copies(WINDOW + 1_000 + EXPIRY_MS + 1);
+    expect(after.filter(Boolean)).toHaveLength(1);
+  });
+
+  it('prunes a claim once it has expired, and keeps a live one', async () => {
+    expect(await claim(WINDOW + 1_000)).toBe(true);
+    const directory = sessionDir(dir, 'session-a');
+    await pruneProgress(directory, WINDOW + 1_000 + EXPIRY_MS);
+    expect((await readdir(directory)).filter((name) => name.startsWith('redirect-'))).toHaveLength(
+      1,
+    );
+    await pruneProgress(directory, WINDOW + 1_000 + EXPIRY_MS + 1);
+    expect((await readdir(directory)).filter((name) => name.startsWith('redirect-'))).toHaveLength(
+      0,
+    );
   });
 });
 

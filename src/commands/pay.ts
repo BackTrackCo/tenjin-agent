@@ -11,6 +11,7 @@ import { fetchFailureToCliError, httpRequest } from '../lib/http';
 import type { HttpResponse } from '../lib/http';
 import { parseUsdToAtomic, toMoney } from '../lib/money';
 import { sanitizeForTerminal } from '../lib/output';
+import { mask } from '../lib/redact';
 import { isSameDeployment } from '../lib/production-origin';
 import { resolveContextSettings } from '../lib/settings';
 import { SIWX_HEADER, buildSiwxHeader } from '../lib/siwx';
@@ -255,7 +256,7 @@ async function executePay(
           probe.status === 404
             ? 'Nothing was paid. The same request will answer 404 again.'
             : 'Check the URL and the endpoint status, then retry.',
-        details: { status: probe.status, body: probe.json },
+        details: { status: probe.status, body: probe.json, ...providerError(probe.text) },
       },
     );
   }
@@ -336,7 +337,7 @@ async function executePay(
         `${url} answered ${recheck.status} on the entitlement re-check.`,
         {
           fix: 'Retry; if it persists the endpoint looks misconfigured.',
-          details: { status: recheck.status, body: recheck.json },
+          details: { status: recheck.status, body: recheck.json, ...providerError(recheck.text) },
         },
       );
     }
@@ -531,6 +532,7 @@ async function executePay(
       details: {
         status: paid.status,
         body: paid.json,
+        ...providerError(paid.text),
         amountAtomic: payment.amountAtomic.toString(),
         settlement: 'unknown',
       },
@@ -724,6 +726,32 @@ function providerMessage(body: unknown): string | null {
     .trim()
     .slice(0, 300);
   return line.length > 0 ? line : null;
+}
+
+/** Cap on {@link providerError}: enough for a provider's reason, never its page. */
+const PROVIDER_ERROR_CHARS = 500;
+
+/**
+ * WHY THE PROVIDER REFUSED, in its own words: the first
+ * {@link PROVIDER_ERROR_CHARS} characters of a non-2xx body, redacted and on
+ * one plain line, whatever its type. `body` above is the parse, which an HTML
+ * error page has none of, and without this a 403 reached the agent as a bare
+ * status. Other people's content, never instructions.
+ */
+function providerError(text: string): { providerError?: string } {
+  // Masked in a window well past the cap, so a large page costs nothing and a
+  // secret that starts inside the snippet is seen whole.
+  const flat = sanitizeForTerminal(
+    mask(text.slice(0, PROVIDER_ERROR_CHARS * 8)).replace(/\s+/g, ' '),
+  ).trim();
+  if (flat.length === 0) return {};
+  const chars = Array.from(flat);
+  return {
+    providerError:
+      chars.length <= PROVIDER_ERROR_CHARS
+        ? flat
+        : `${chars.slice(0, PROVIDER_ERROR_CHARS).join('')}…`,
+  };
 }
 
 /** Nothing this caller may pay: no entry at all, or none on the advertised
