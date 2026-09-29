@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -6,14 +6,23 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { testWalletProvider } from '../lib/read-test-utils';
 import type { SpendAuthorization, SpendAuthorizer } from '../lib/wallet';
-import { buildRouterMcpServer } from './mcp';
+import { buildRouterMcpServer, MAX_RESULT_SIZE_CHARS, MAX_RESULT_SIZE_KEY } from './mcp';
+
+/** The envelope a call returned: the JSON text block after the summary line. */
+function envelopeOf(called: Record<string, unknown>): unknown {
+  const blocks = called['content'] as { type: string; text: string }[];
+  expect(blocks).toHaveLength(2);
+  return JSON.parse(blocks[1]!.text);
+}
 
 let dir: string;
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'router-mcp-'));
+  // Its own git root: `router.*` resolves from here, never from the suite's cwd.
+  await mkdir(join(dir, '.git'));
   await writeFile(
     join(dir, 'config.json'),
-    JSON.stringify({ bazaarPay: true, maxAutoSpend: '100000', baseUrl: 'https://tenjin.sh' }),
+    JSON.stringify({ maxAutoSpend: '100000', baseUrl: 'https://tenjin.sh' }),
   );
 });
 afterEach(async () => {
@@ -66,6 +75,7 @@ describe('the router MCP server', () => {
     const server = buildRouterMcpServer({
       dataDir: dir,
       handlerDeps: {
+        cwd: dir,
         signer: await testWalletProvider().getSigner(),
         authorizer: authorizer(),
         fetchImpl,
@@ -78,11 +88,17 @@ describe('the router MCP server', () => {
     try {
       const tools = await client.listTools();
       expect(tools.tools.map((t) => t.name)).toEqual(['request']);
+      // The harness reads its inline-result threshold from the listed tool.
+      expect(tools.tools[0]!._meta).toEqual({
+        [MAX_RESULT_SIZE_KEY]: MAX_RESULT_SIZE_CHARS,
+      });
       const called = await client.callTool({ name: 'request', arguments: { query: 'weather' } });
       // A `native` decision is a routing outcome delivered, not a tool failure:
       // the MCP error flag stays down and the status carries the fact.
       expect(called.isError).toBe(false);
-      expect(called.structuredContent).toMatchObject({
+      // The envelope rides once, as the JSON text block after the summary.
+      expect(called.structuredContent).toBeUndefined();
+      expect(envelopeOf(called)).toMatchObject({
         status: 'native',
         reason: 'Your own tools cover this.',
         nextStep: 'Continue with your own tools. Nothing was bought.',
@@ -97,6 +113,7 @@ describe('the router MCP server', () => {
     const server = buildRouterMcpServer({
       dataDir: dir,
       handlerDeps: {
+        cwd: dir,
         signer: await testWalletProvider().getSigner(),
         authorizer: authorizer(),
       },
@@ -112,7 +129,6 @@ describe('the base URL the MCP server routes against', () => {
     await fs.writeFile(
       join(dir, 'config.json'),
       JSON.stringify({
-        bazaarPay: true,
         maxAutoSpend: '100000',
         baseUrl: 'https://file.example.test',
       }),
@@ -145,6 +161,7 @@ describe('the base URL the MCP server routes against', () => {
       const server = buildRouterMcpServer({
         dataDir: dir,
         handlerDeps: {
+          cwd: dir,
           signer: await testWalletProvider().getSigner(),
           authorizer: authorizer(),
           fetchImpl,
@@ -181,6 +198,7 @@ describe('what the tool tells the model to send', () => {
     const server = buildRouterMcpServer({
       dataDir: dir,
       handlerDeps: {
+        cwd: dir,
         signer: await testWalletProvider().getSigner(),
         authorizer: authorizer(),
       },
@@ -245,7 +263,7 @@ describe('a free answer on a machine with no wallet', () => {
     // No wallet under this data dir at all: `getSigner` throws WALLET_MISSING.
     const server = buildRouterMcpServer({
       dataDir: dir,
-      handlerDeps: { authorizer: authorizer(), fetchImpl },
+      handlerDeps: { cwd: dir, authorizer: authorizer(), fetchImpl },
     });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: 'test', version: '0.0.0' });
@@ -253,7 +271,7 @@ describe('a free answer on a machine with no wallet', () => {
     try {
       const called = await client.callTool({ name: 'request', arguments: { query: 'weather' } });
       expect(called.isError).toBe(false);
-      expect(called.structuredContent).toMatchObject({ status: 'native' });
+      expect(envelopeOf(called)).toMatchObject({ status: 'native' });
     } finally {
       await client.close();
       await server.close();

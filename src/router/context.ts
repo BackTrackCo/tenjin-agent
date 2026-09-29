@@ -426,9 +426,34 @@ function parseRows(raw: string, scope: RowScope): PacketMessage[] {
     } catch {
       continue; // A row this build cannot read contributes nothing, and no more.
     }
+    // Nor is what the harness writes back into the user's turn (tenjin-agent#401).
+    if (row.type === 'user' && harnessUserRow(row, text)) continue;
     if (text.length > 0) messages.push({ role: row.type, text });
   }
   return messages;
+}
+
+/** Output of a local command, as the harness wraps it into a user row. */
+const LOCAL_COMMAND_OUTPUT = /^\s*<local-command-(?:stdout|stderr)>/;
+
+/**
+ * A `type: "user"` row the user never typed. The harness writes two kinds
+ * without `isMeta`: a background task or subagent finishing
+ * (`origin.kind: "task-notification"`, text `<task-notification>…`) and a
+ * local command's output (`<local-command-stdout>`). Both carry tool output,
+ * so neither can be the user's words, and neither can become `current`. A
+ * `<command-name>` row stays: that is the command the user did type.
+ */
+function harnessUserRow(row: Record<string, unknown>, text: string): boolean {
+  const origin = row.origin;
+  if (
+    origin !== null &&
+    typeof origin === 'object' &&
+    (origin as { kind?: unknown }).kind === 'task-notification'
+  ) {
+    return true;
+  }
+  return text.trimStart().startsWith('<task-notification>') || LOCAL_COMMAND_OUTPUT.test(text);
 }
 
 function ownSidechainRow(row: Record<string, unknown>, agentId: string): boolean {

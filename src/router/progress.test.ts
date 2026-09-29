@@ -1,11 +1,15 @@
 import { existsSync } from 'node:fs';
-import { chmod, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readdir, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
+  AUGMENT_REPEAT_MS,
+  augmentOf,
   bindDecision,
+  claimQuery,
   EXPIRY_MS,
+  markAugment,
   newCallId,
   noteSession,
   openLookupFooter,
@@ -255,6 +259,61 @@ describe('housekeeping', () => {
 
   it('gives every call its own record', () => {
     expect(newCallId()).not.toBe(newCallId());
+  });
+
+  /**
+   * A DOCS BODY IS NOT A RECORD, and neither is a temp file between its write
+   * and its rename: read as records they are damaged, and the prune a parallel
+   * hook runs deleted them from under the prefetch. Both age by their mtime.
+   */
+  it('keeps a fresh docs body and a temp file mid-rename, and ages them out by mtime', async () => {
+    const session = sessionDir(dir, 'session-a');
+    const body = await markAugment(dir, 'session-a', 'toolu_1', 'Context7', NOW);
+    expect(body).not.toBeNull();
+    // A body the size of real docs, far past what a record may be.
+    await writeFile(body!, JSON.stringify({ status: 200, text: 'x'.repeat(20_000) }));
+    const temp = join(session, '.augment-abc.docs.123.tmp');
+    await writeFile(temp, '{"stat');
+    const seconds = NOW / 1000;
+    for (const path of [body!, temp]) await utimes(path, seconds, seconds);
+
+    await pruneProgress(session, NOW + 1_000);
+    expect(existsSync(body!)).toBe(true);
+    expect(existsSync(temp)).toBe(true);
+
+    await pruneProgress(session, NOW + EXPIRY_MS + 1_000);
+    expect(existsSync(body!)).toBe(false);
+    expect(existsSync(temp)).toBe(false);
+  });
+});
+
+describe('the free-docs records', () => {
+  it('finds the marker by the call id, with its provider and body path beside it', async () => {
+    const body = await markAugment(dir, 'session-a', 'toolu_1', 'Context7\u001b[2J', NOW);
+    const marker = await augmentOf(dir, 'session-a', 'toolu_1', NOW + 1_000);
+    expect(marker).toEqual({ at: NOW, provider: 'Context7 [2J', body });
+    expect(await augmentOf(dir, 'session-a', 'toolu_2', NOW)).toBeNull();
+    expect(await augmentOf(dir, 'session-b', 'toolu_1', NOW)).toBeNull();
+    expect(await augmentOf(dir, 'session-a', 'toolu_1', NOW + EXPIRY_MS + 1)).toBeNull();
+  });
+
+  it('claims one agent query once in the window, and again after it', async () => {
+    expect(await claimQuery(dir, 'session-a', undefined, 'zod v4 coerce', NOW)).toBe(true);
+    expect(await claimQuery(dir, 'session-a', undefined, 'zod v4 coerce', NOW + 1_000)).toBe(false);
+    // Another agent, another query, another session: each its own claim.
+    expect(await claimQuery(dir, 'session-a', 'a1', 'zod v4 coerce', NOW)).toBe(true);
+    expect(await claimQuery(dir, 'session-a', undefined, 'zod v4 transform', NOW)).toBe(true);
+    expect(await claimQuery(dir, 'session-b', undefined, 'zod v4 coerce', NOW)).toBe(true);
+    const later = NOW + AUGMENT_REPEAT_MS + 1;
+    expect(await claimQuery(dir, 'session-a', undefined, 'zod v4 coerce', later)).toBe(true);
+    expect(await claimQuery(dir, 'session-a', undefined, 'zod v4 coerce', later + 1)).toBe(false);
+  });
+
+  it('gives two parallel copies of one query a single claim', async () => {
+    const claims = await Promise.all(
+      Array.from({ length: 6 }, () => claimQuery(dir, 'session-a', undefined, 'same', NOW)),
+    );
+    expect(claims.filter(Boolean)).toHaveLength(1);
   });
 });
 

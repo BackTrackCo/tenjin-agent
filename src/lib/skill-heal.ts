@@ -15,7 +15,7 @@ import {
   skillFrontmatterName,
   skillsDirsFor,
 } from './skill-wiring';
-import { OPTIONAL_SKILL_NAMES, resolveSkillsSource } from './skills-source';
+import { resolveSkillsSource } from './skills-source';
 
 export interface HealDeps {
   io: Io;
@@ -180,7 +180,7 @@ function healable(home: string): Target[] {
   const found: Target[] = [];
   for (const dir of skillsDirsFor(home)) {
     if (!isRealDirectory(dir)) continue;
-    for (const name of [...CLI_SKILL_NAMES, ...OPTIONAL_SKILL_NAMES]) {
+    for (const name of [...CLI_SKILL_NAMES]) {
       if (!isRealDirectory(join(dir, name))) continue;
       const path = join(dir, name, 'SKILL.md');
       if (lstatSync(path, { throwIfNoEntry: false })?.isFile() !== true) continue;

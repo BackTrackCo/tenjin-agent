@@ -1,7 +1,9 @@
+import { setTimeout as delay } from 'node:timers/promises';
 import { decodePaymentRequiredHeader, decodePaymentResponseHeader } from '@x402/core/http';
 import { SIGN_IN_WITH_X } from '@x402/extensions/sign-in-with-x';
 import type { PaymentRequired, PaymentRequirements } from '@x402/core/types';
-import { verifyAgainstRegistries } from '../lib/bazaar';
+import { verifyAgainstRegistries, type RegistryVerification } from '../lib/bazaar';
+import { readUsdcBalance } from '../lib/usdc-balance';
 import { assertPublicDestination, type DestinationOptions } from '../lib/destination';
 import { CliError } from '../lib/errors';
 import { validateResultBody, type ResultCheck } from '../lib/request-schema';
@@ -34,22 +36,18 @@ import type { CommandContext, CommandResult } from '../context';
 /**
  * `tenjin pay <url>`: the standard x402 client verb, for ANY paid endpoint
  * rather than marketplace pieces. One probe; a 2xx delivers free; a 402 runs
- * the same money gates as `buy` (spend policy, price cap, session budget,
- * confirm; `--yes` clears only the confirm) and retries once with the
+ * shared payment gate (automatic limits for the router, mandatory consent for
+ * manual pay, hard price/creator checks for both) and retries once with the
  * `PAYMENT-SIGNATURE`. Deliberately NOT `buy`: no library idempotence (every
- * paid call pays; the session budget and `--max-price` are the brakes) and no
+ * paid call pays; manual consent and optional `--max-price` are the brakes) and no
  * search attribution. SIWX rides ONLY when the 402 advertises the standard
  * sign-in-with-x extension, and the signature is bound to the TARGET origin
  * (never the configured deployment's), so an entitled wallet re-reads free at
  * any seller that supports it while nothing origin-bound can leak elsewhere.
  *
- * The origin gate has two lanes. The configured base URL is always payable.
- * Any other https origin is payable only when the operator turned `bazaarPay`
- * on AND a configured registry publicly lists this exact resource with terms
- * the live 402 does not exceed (lib/bazaar); a mismatch is REGISTRY_MISMATCH
- * and nothing is signed. The response body is delivered raw in the machine
- * envelope and sanitized for the terminal: paid or not, it is other people's
- * content, never instructions.
+ * Direct third-party payments require acknowledgement of registry warnings.
+ * Router calls retain their advertised-price and supplied-term hard checks.
+ * Every positive payment checks the actual signer's balance before signing.
  */
 
 const PAYMENT_REQUIRED_HEADER = 'PAYMENT-REQUIRED';
@@ -63,7 +61,7 @@ const BODY_PREVIEW_CHARS = 1200;
  * stands in for the registry lookup on a lane that has one from elsewhere (the
  * router's paid decision carries it), and it is a ceiling, never a licence: the
  * live requirement has to match the network and asset exactly and may not
- * exceed the amount. A caller with no such terms keeps `assertRegistryVerified`.
+ * exceed the amount. Direct calls without offered terms use registry warning acknowledgement.
  */
 export interface AdvertisedTerms {
   /** Pins the deal's chain and token when the caller was told them. */
@@ -91,6 +89,10 @@ export interface PayArgs {
   maxPrice?: string;
   /** Bypass the interactive confirm only (never the price cap or a hard deny). */
   yes?: boolean;
+  /** Acknowledge direct-payment registry warnings for this invocation only. */
+  ignoreWarnings?: boolean;
+  /** Internal router entrypoint; missing terms must never become direct pay. */
+  execution?: 'router';
   /** Print the full body to the terminal instead of the capped preview. */
   printBody?: boolean;
   /** Advertised terms that replace the registry lookup on this call. */
@@ -107,18 +109,19 @@ export interface PayArgs {
   /** The same-turn duplicate guard's identity for this request. */
   requestKey?: string;
   /**
-   * The caller's APPLICATION success rule for the delivered body. A 2xx whose
-   * body fails it is a paid failure, not a delivery: the money already moved,
-   * so the refusal says so instead of handing back a body nobody vouched for.
-   * A body the rule could not be RUN against, because it is past this client's
-   * own validation limit, is delivered with `resultCaveat` instead: that limit
-   * is ours, not the endpoint's, and the payment has already settled.
+   * The caller's APPLICATION success rule for the delivered body. On a free or
+   * entitled 2xx, a body that fails it is refused: nothing was paid. On the
+   * PAID leg the money already moved, so the body is always delivered: one
+   * that fails the rule, or that is past this client's own validation limit so
+   * the rule never ran, comes back with `resultUnverified` and a
+   * `resultCaveat` saying which.
    */
   resultSchema?: unknown;
 }
 
 export interface PayDeps {
   fetchImpl?: typeof fetch;
+  readBalance?: typeof readUsdcBalance;
   provider?: WalletProvider;
   authorizer?: SpendAuthorizer;
   confirm?: (prompt: string) => Promise<boolean>;
@@ -128,11 +131,60 @@ export interface PayDeps {
 
 type Lane = 'tenjin' | 'bazaar';
 
+type RegistryWarning = Exclude<RegistryVerification, { outcome: 'verified' | 'unlisted' }> & {
+  acknowledged: boolean;
+  quote: PaymentRequirements & { url: string };
+};
+
 export async function runPay(
   args: PayArgs,
   ctx: CommandContext,
   deps: PayDeps = {},
 ): Promise<CommandResult> {
+  const warnings: RegistryWarning[] = [];
+  try {
+    return await executePay(args, ctx, deps, warnings);
+  } catch (err) {
+    if (err instanceof CliError && warnings.length > 0) {
+      throw new CliError(err.code, err.message, {
+        exitCode: err.exitCode,
+        ...(err.fix !== undefined ? { fix: err.fix } : {}),
+        details: {
+          ...(typeof err.details === 'object' && err.details !== null ? err.details : {}),
+          warnings,
+        },
+        cause: err,
+      });
+    }
+    throw err;
+  }
+}
+
+async function executePay(
+  args: PayArgs,
+  ctx: CommandContext,
+  deps: PayDeps,
+  warnings: RegistryWarning[],
+): Promise<CommandResult> {
+  const router = args.execution === 'router' || args.terms !== undefined;
+  if (router) {
+    const terms = args.terms;
+    if (
+      args.ignoreWarnings === true ||
+      !terms ||
+      typeof terms.maxAmountAtomic !== 'string' ||
+      !/^\d+$/.test(terms.maxAmountAtomic) ||
+      [terms.network, terms.asset, terms.payTo, terms.source].some(
+        (v) => v !== undefined && (typeof v !== 'string' || v.trim().length === 0),
+      )
+    ) {
+      throw new CliError(
+        'REFUSED',
+        'Router payments require valid advertised terms and cannot acknowledge registry warnings.',
+        { details: { reason: 'invalid_router_terms' } },
+      );
+    }
+  }
   const settings = await resolveContextSettings(ctx);
   const maxPriceAtomic =
     args.maxPrice !== undefined ? BigInt(parseUsdToAtomic(args.maxPrice)) : undefined;
@@ -180,10 +232,22 @@ export async function runPay(
     });
   }
   if (probe.status !== 402) {
-    throw new CliError('API_UNREACHABLE', `${url} answered ${probe.status}.`, {
-      fix: 'Check the URL and the endpoint status, then retry.',
-      details: { status: probe.status, body: probe.json },
-    });
+    // THE PROVIDER'S OWN WORDS, when it sent `{error: {message}}`: a free docs
+    // lookup's 404 says no library matched and to use your own tools, which a
+    // bare status line turned into "retry". A 404 is the endpoint's answer, not
+    // a transient failure, so it is never told to retry either.
+    const said = providerMessage(probe.json);
+    throw new CliError(
+      'API_UNREACHABLE',
+      `${url} answered ${probe.status}${said === null ? '.' : `: ${said}`}`,
+      {
+        fix:
+          probe.status === 404
+            ? 'Nothing was paid. The same request will answer 404 again.'
+            : 'Check the URL and the endpoint status, then retry.',
+        details: { status: probe.status, body: probe.json },
+      },
+    );
   }
 
   const paymentRequired = decodeChallenge(probe, url);
@@ -206,8 +270,15 @@ export async function runPay(
   let registry: string | undefined;
   let termsLabel: string | undefined;
   if (args.terms !== undefined) termsLabel = assertWithinTerms(args.terms, requirement);
-  else if (lane === 'bazaar') {
-    registry = await assertRegistryVerified(settings, url, requirement, ctx.flags.timeout, ctx);
+  else if (lane === 'bazaar' && paymentRequired.extensions?.[SIGN_IN_WITH_X] === undefined) {
+    registry = await checkRegistry(
+      settings,
+      url,
+      requirement,
+      ctx,
+      args.ignoreWarnings === true,
+      warnings,
+    );
   }
 
   const provider = resolveWalletProvider(
@@ -274,12 +345,32 @@ export async function runPay(
         },
       });
     }
+    if (
+      fresh.scheme !== requirement.scheme ||
+      fresh.network !== requirement.network ||
+      fresh.asset.toLowerCase() !== requirement.asset.toLowerCase() ||
+      fresh.payTo.toLowerCase() !== requirement.payTo.toLowerCase() ||
+      JSON.stringify(fresh.extra) !== JSON.stringify(requirement.extra)
+    ) {
+      throw new CliError(
+        'PAYMENT_FAILED',
+        'The payment terms changed before signing; refusing to pay.',
+        { fix: 'Review a fresh challenge before paying again.' },
+      );
+    }
     effectiveRequirement = fresh;
     // The challenge it will actually SIGN is checked again: the store answers
     // the registry question without a network round trip in the common case.
     if (args.terms !== undefined) termsLabel = assertWithinTerms(args.terms, fresh);
     else if (lane === 'bazaar') {
-      registry = await assertRegistryVerified(settings, url, fresh, ctx.flags.timeout, ctx);
+      registry = await checkRegistry(
+        settings,
+        url,
+        fresh,
+        ctx,
+        args.ignoreWarnings === true,
+        warnings,
+      );
     }
   }
   const amountAtomic = BigInt(effectiveRequirement.amount);
@@ -293,7 +384,9 @@ export async function runPay(
   // hosts); the gate itself is shared with `buy` so the two verbs cannot drift.
   const verifiedVia = registry ?? termsLabel;
   const via = verifiedVia !== undefined ? ` (${sanitizeForTerminal(verifiedVia)})` : '';
+  const mode = router ? 'automatic' : 'manual';
   const reservationId = await gateSpend({
+    mode,
     ctx,
     authorizer,
     amountAtomic,
@@ -302,7 +395,7 @@ export async function runPay(
     ...(args.requestKey !== undefined ? { requestKey: args.requestKey } : {}),
     yes: args.yes === true,
     ...(deps.confirm !== undefined ? { confirm: deps.confirm } : {}),
-    payeeLabel: `${sanitizeForTerminal(host)}${via}`,
+    payeeLabel: `${sanitizeForTerminal(url)}${via}; recipient ${sanitizeForTerminal(effectiveRequirement.payTo)}, ${sanitizeForTerminal(effectiveRequirement.network)} / ${sanitizeForTerminal(effectiveRequirement.asset)}`,
     allowlistSubject: 'this host',
     notConfirmedMessage: 'Payment not confirmed.',
   });
@@ -315,6 +408,41 @@ export async function runPay(
     // narrowed to the one selection everything above ran against, so a seller
     // advertising several chains cannot have one entry priced and another
     // signed. Without this the builder re-picked `accepts[0]`.
+    if (amountAtomic > 0n) {
+      // One retry across a rate-limit interval, within the original read deadline.
+      const deadline = Date.now() + ctx.flags.timeout;
+      const readBalance = deps.readBalance ?? readUsdcBalance;
+      let balance = await readBalance(signer.address, settings.rpcUrl, {
+        timeoutMs: Math.max(1, Math.floor(ctx.flags.timeout / 2)),
+      });
+      if (balance === null && Date.now() < deadline) {
+        await delay(Math.min(1100, Math.floor((deadline - Date.now()) / 2)));
+        const remaining = deadline - Date.now();
+        if (remaining > 0)
+          balance = await readBalance(signer.address, settings.rpcUrl, { timeoutMs: remaining });
+      }
+      if (balance === null) {
+        throw new CliError(
+          'REFUSED',
+          'The wallet balance could not be read; no payment was signed.',
+          {
+            fix: 'Check the configured Base rpcUrl and retry when it is available.',
+            details: { reason: 'balance_unavailable', address: signer.address },
+          },
+        );
+      }
+      if (balance < amountAtomic) {
+        throw new CliError('REFUSED', 'The wallet has insufficient USDC; no payment was signed.', {
+          fix: 'Fund this wallet on Base with `tenjin wallet fund` before paying.',
+          details: {
+            reason: 'insufficient_funds',
+            address: signer.address,
+            balanceAtomic: balance.toString(),
+            requiredAtomic: amountAtomic.toString(),
+          },
+        });
+      }
+    }
     payment = await buildExactPayment(effectiveChallenge, signer, effectiveRequirement);
   } catch (err) {
     await authorizer.release(reservationId);
@@ -330,9 +458,10 @@ export async function runPay(
   // (httpRequest never throws on transport failure; it returns ok:false.)
   const paid = await httpRequest(url, {
     ...fetchOpts,
+    timeoutMs: paidLegTimeoutMs(effectiveRequirement, ctx.flags.timeout),
     headers: { ...headers, ...payment.headers },
   });
-  await authorizer.commit(reservationId, payment.amountAtomic);
+  await authorizer.commit(reservationId, payment.amountAtomic, { mode });
   // A TRANSPORT failure on this leg is a post-transmission outcome like any
   // other: the authorization has left, the reservation is committed above, and
   // a receipt that said nothing was paid would report a provider cost of zero
@@ -341,7 +470,7 @@ export async function runPay(
   if (!paid.ok) {
     throw fetchFailureToCliError(paid, {
       fix:
-        'The authorization was transmitted and settlement is unknown; it is counted against the session budget. ' +
+        'The authorization was transmitted and settlement is unknown; it is recorded as transmitted exposure. ' +
         `Do not simply retry: each attempt signs a fresh authorization. ${legFix(paid)}`,
       details: { amountAtomic: payment.amountAtomic.toString(), settlement: 'unknown' },
     });
@@ -350,27 +479,18 @@ export async function runPay(
     let caveat: string | undefined;
     if (args.resultSchema !== undefined) {
       const check = validateResultBody(args.resultSchema, paid.text);
-      // A body PAST THE VALIDATION LIMIT is not a broken contract: the limit is
-      // this client's constant, the endpoint's success rule never ran, and the
-      // payment has already settled. Refusing it charged the caller and threw
-      // the product away. It is delivered with the caveat instead, and the cap
-      // itself is unchanged: raising it silently is a different decision.
+      // A PAID BODY IS ALWAYS DELIVERED. The authorization has already left and
+      // the money moved, so the success rule is a check on the body, never a
+      // reason to withhold it: withholding charged the caller and threw the
+      // product away. A body past this client's validation limit (never
+      // checked) and one that fails the rule (checked, and missed) both come
+      // back whole, flagged unverified, with a caveat that says which.
       if (check.unvalidated === true) caveat = unvalidatedCaveat(check);
-      else if (!check.valid) {
-        throw new CliError('CONTRACT_MISMATCH', `The paid response is not a usable result.`, {
-          fix: 'The payment has already settled and is counted against the session budget. Do not retry blind: the endpoint answered 2xx with a body that fails the success rule it was paid under.',
-          details: {
-            status: paid.status,
-            reason: check.reason,
-            ...(check.diagnosis !== undefined ? { diagnosis: check.diagnosis } : {}),
-            amountAtomic: payment.amountAtomic.toString(),
-            settlement: 'reported',
-          },
-        });
-      }
+      else if (!check.valid) caveat = failedRuleCaveat(check);
     }
     return deliver(url, lane, paid, {
       paid: true,
+      warnings,
       amountAtomic: payment.amountAtomic,
       requirement: effectiveRequirement,
       ...(registry !== undefined ? { registry } : {}),
@@ -387,7 +507,7 @@ export async function runPay(
       ? 'Payment was not accepted by the endpoint.'
       : `The endpoint answered ${paid.status} on the paid request; whether it settled is unknown.`,
     {
-      fix: 'The signed payment already left and is counted against the session budget; the endpoint may still settle it. Do not simply retry: each attempt signs a fresh authorization. Verify the endpoint (and this listing, if Bazaar) before paying again.',
+      fix: 'The signed payment already left and is recorded as transmitted exposure; the endpoint may still settle it. Do not simply retry: each attempt signs a fresh authorization. Verify the endpoint (and this listing, if Bazaar) before paying again.',
       // The amount rides on the failure so a caller can report what is at risk
       // rather than a zero. Settlement is unknown by construction here.
       details: {
@@ -398,6 +518,26 @@ export async function runPay(
       },
     },
   );
+}
+
+/**
+ * THE PAID LEG WAITS AS LONG AS THE SELLER SAID IT WOULD TAKE, within reason.
+ * A signed authorization is already out when this leg starts, so a client
+ * timeout here abandons money the seller can still settle: a 10 s default cut
+ * off a provider advertising 360 s of work and threw its answer away. The
+ * requirement's `maxTimeoutSeconds` is that promise; it is clamped to
+ * {@link MAX_PAID_LEG_TIMEOUT_MS} so a hostile seller cannot hang the caller,
+ * and it never shortens what the user asked for with `--timeout`. The probe
+ * leg keeps the CLI timeout: nothing is at stake there.
+ */
+export const MAX_PAID_LEG_TIMEOUT_MS = 120_000;
+
+export function paidLegTimeoutMs(requirement: PaymentRequirements, cliTimeoutMs: number): number {
+  const advertised = requirement.maxTimeoutSeconds;
+  if (typeof advertised !== 'number' || !Number.isFinite(advertised) || advertised <= 0) {
+    return cliTimeoutMs;
+  }
+  return Math.max(cliTimeoutMs, Math.min(advertised * 1000, MAX_PAID_LEG_TIMEOUT_MS));
 }
 
 /** Which lane may pay this URL, or the exact refusal. */
@@ -420,20 +560,9 @@ function resolveLane(url: string, settings: ResolvedSettings): Lane {
   // refuses it as a third-party endpoint or pays it under registry rules meant
   // for one. The SIWX signature below binds to the TARGET origin either way.
   if (isSameDeployment(target.origin, new URL(settings.baseUrl).origin)) return 'tenjin';
-  if (settings.bazaarPay !== true) {
-    // The fix names the operator act without coaching around the gate that just
-    // fired: this URL may have arrived in a task, a page, or purchased content.
-    throw new CliError(
-      'USAGE',
-      `${target.origin} is not the configured base URL, and the Bazaar pay lane is off.`,
-      {
-        fix: 'An operator enables paying registry-listed non-Tenjin endpoints with `tenjin config set bazaarPay on`.',
-      },
-    );
-  }
   if (target.protocol !== 'https:') {
     throw new CliError('USAGE', 'The Bazaar lane pays https endpoints only.', {
-      fix: 'Use the https URL the registry lists.',
+      fix: 'Use a public HTTPS endpoint.',
     });
   }
   return 'bazaar';
@@ -551,12 +680,32 @@ function unvalidatedCaveat(check: ResultCheck): string {
   return `${check.reason ?? 'The result could not be validated.'} The body is delivered unverified: its shape was never checked against the success rule.`;
 }
 
+/** What the caller is told when a PAID body was checked and missed its success
+ *  rule: the rule that failed, and that the body is handed back unverified. */
+function failedRuleCaveat(check: ResultCheck): string {
+  return `${check.reason ?? 'The result does not satisfy its success schema.'} The payment settled, so the body is delivered as received, unverified: treat it as possibly not the answer that was paid for.`;
+}
+
 /** The transport's own remedy, when it has one, appended after the leg's
  *  payment sentence so the two never contradict each other. */
 function legFix(failure: { kind: string }): string {
   return failure.kind === 'oversized-header'
     ? 'Raising `--max-http-header-size` on the node process that runs this CLI would let the header be read; that is an operator decision, not a default this build changes.'
     : '';
+}
+
+/** `{error: {message}}` from the provider, as one bounded plain line, or null.
+ *  It reaches a model's context, so control characters do not survive. */
+function providerMessage(body: unknown): string | null {
+  const error = (body as { error?: unknown } | null | undefined)?.error;
+  const message = (error as { message?: unknown } | null | undefined)?.message;
+  if (typeof message !== 'string') return null;
+  const line = message
+    .replace(/[\p{Cc}\p{Cf}]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 300);
+  return line.length > 0 ? line : null;
 }
 
 /** Nothing this caller may pay: no entry at all, or none on the advertised
@@ -628,46 +777,54 @@ function assertWithinTerms(terms: AdvertisedTerms, requirement: PaymentRequireme
   return terms.source ?? 'the advertised terms';
 }
 
-/** The registry gate: only a `verified` outcome returns; everything else throws. */
-async function assertRegistryVerified(
+/** Registry evidence informs direct payments; only this invocation can acknowledge a warning. */
+async function checkRegistry(
   settings: ResolvedSettings,
   url: string,
   requirement: PaymentRequirements,
-  timeoutMs: number,
   ctx: CommandContext,
-): Promise<string> {
+  acknowledged: boolean,
+  warnings: RegistryWarning[],
+): Promise<string | undefined> {
   const verification = await verifyAgainstRegistries(
     settings.bazaarRegistries,
     url,
     requirement,
-    timeoutMs,
+    ctx.flags.timeout,
     { dataDir: ctx.dataDir },
   );
-  switch (verification.outcome) {
-    case 'verified':
-      return verification.registry;
-    case 'mismatch':
-      throw new CliError(
-        'REGISTRY_MISMATCH',
-        `The live 402 does not match what ${verification.registry} advertises for this resource (${verification.detail}).`,
-        {
-          fix: 'Nothing was signed. Re-run `tenjin discover` to see the advertised terms; if the seller changed them, the registry will catch up.',
-          details: { registry: verification.registry, detail: verification.detail },
-        },
-      );
-    case 'unlisted':
-      throw new CliError('USAGE', 'No configured registry is known to list this resource.', {
-        fix: 'The Bazaar lane pays publicly listed deals only, and pay-time lookup leans on the local `discover` cache: run `tenjin discover [query]` so a sweep can surface this endpoint, then re-run pay.',
-      });
+  if (verification.outcome === 'verified') return verification.registry;
+  if (verification.outcome === 'unlisted') return undefined;
+  const warning: RegistryWarning = {
+    ...verification,
+    acknowledged,
+    quote: { url, ...requirement },
+  };
+  warnings.push(warning);
+  const message = warningMessage(warning);
+  if (!ctx.flags.json) {
+    ctx.io.stderr.write(
+      `Live quote: ${sanitizeForTerminal(url)}; recipient ${sanitizeForTerminal(requirement.payTo)}; ${sanitizeForTerminal(requirement.network)} / ${sanitizeForTerminal(requirement.asset)}; ${toMoney(requirement.amount).usd} USD\n`,
+    );
+    ctx.io.stderr.write(
+      `${sanitizeForTerminal(message)}${acknowledged ? ' (acknowledged for this invocation)' : ''}\n`,
+    );
+  }
+  if (!acknowledged) {
+    throw new CliError('REFUSED', message, {
+      fix: 'Review the live quote and use --ignore-warnings to acknowledge this registry warning for this invocation. --yes only confirms payment; normal payment checks still apply.',
+      details: { reason: 'registry_acknowledgement_required', quote: { url, ...requirement } },
+    });
+  }
+  return undefined;
+}
+
+function warningMessage(warning: RegistryWarning): string {
+  switch (warning.outcome) {
     case 'unavailable':
-      throw new CliError(
-        'NETWORK_ERROR',
-        'No configured registry answered; the Bazaar lane fails closed.',
-        {
-          fix: 'Retry when the registries are reachable.',
-          details: { errors: verification.errors },
-        },
-      );
+      return 'Registry warning: verification is unavailable or incomplete.';
+    case 'mismatch':
+      return `Registry warning: the live terms differ from ${warning.registry} (${warning.detail}).`;
   }
 }
 
@@ -676,6 +833,7 @@ async function assertRegistryVerified(
 type DeliverOpts = {
   /** Set when the body is delivered UNVERIFIED: the success rule could not run. */
   caveat?: string;
+  warnings?: RegistryWarning[];
 } & (
   | {
       paid: false;
@@ -699,11 +857,13 @@ function deliver(url: string, lane: Lane, res: HttpResponse, opts: DeliverOpts):
     lane,
     status: res.status,
     paid: opts.paid,
+    ...(opts.warnings !== undefined ? { warnings: opts.warnings } : {}),
     ...(opts.paid
       ? {
           amountPaid: toMoney(opts.amountAtomic.toString()),
           payTo: opts.requirement.payTo,
           network: opts.requirement.network,
+          asset: opts.requirement.asset,
           ...(opts.registry !== undefined ? { registry: opts.registry } : {}),
         }
       : opts.entitled === true
@@ -734,6 +894,9 @@ function deliver(url: string, lane: Lane, res: HttpResponse, opts: DeliverOpts):
     data,
     humanLines: [
       headline,
+      ...(opts.warnings ?? []).map(
+        (w) => `${sanitizeForTerminal(warningMessage(w))} (acknowledged)`,
+      ),
       ...(opts.caveat !== undefined ? [sanitizeForTerminal(opts.caveat)] : []),
       ...(preview.length > 0 ? [preview] : []),
     ],

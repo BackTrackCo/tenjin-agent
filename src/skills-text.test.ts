@@ -63,6 +63,13 @@ function read(skill: string, file = 'SKILL.md', teamMode = false): string {
 function flat(skill: string, file = 'SKILL.md', teamMode = false): string {
   return read(skill, file, teamMode).replace(/\s+/g, ' ');
 }
+it.each([false, true])('requires explicit purchase consent in teamMode=%s', (teamMode) => {
+  const guidance = flat('tenjin-search', 'SKILL.md', teamMode);
+  expect(guidance).toContain('the user explicitly approved this quoted purchase');
+  expect(guidance).toContain('Manual purchases always require consent');
+  expect(guidance).not.toContain('a spend policy covers it');
+});
+
 /** The same file as a TEAM install renders it. */
 function readTeam(skill: string, file = 'SKILL.md'): string {
   return read(skill, file, true);
@@ -156,7 +163,12 @@ describe('tenjin-search references/permissions.md: the detail, one hop away', ()
   it('describes the buy line as authorizing unattended purchases, not as human-gated', () => {
     expect(text).toMatch(/authorizes \*\*unattended\*\* purchases/i);
     expect(text).toMatch(/clears the confirm gate outright/i);
-    expect(text).toMatch(/sessionBudget 0` means\s*no ceiling/i);
+    expect(text).toContain(
+      '`maxAutoSpend` and `sessionBudget` apply only to automatic router spending',
+    );
+    expect(text).toContain('`--max-price`');
+    expect(text).toContain('those settings provide no price ceiling');
+    expect(text).not.toMatch(/sessionBudget 0` means\s*no ceiling/i);
     expect(text).not.toMatch(/still (apply to every|puts a human on every) purchase/i);
   });
 
@@ -615,7 +627,7 @@ describe('the permissions doc matches the product this release ships', () => {
         Number(toMoney(ROUTER_DEFAULTS[key]).usd),
       );
     }
-    expect(PERMISSIONS_DOC).toContain(ROUTER_DEFAULTS.confirm);
+    expect(ROUTER_DEFAULTS).not.toHaveProperty('confirm');
   });
 
   it('keeps the flag caveat, which is why a prefix rule is not a host grant', () => {
@@ -976,15 +988,15 @@ describe('the public render did not move', () => {
   // tenjin-search moved 2026-09-14: its question bullet no longer names a 512
   // cap, because the shelf takes 8,000 characters on every trigger.
   //
+  // tenjin-publish moved 2026-09-23: the "real stop" list names the new
+  // credential warns (tenjin-agent#388, #296), as the triage test above requires.
+  // Payment cleanup deliberately updates the manual-consent guidance in search.
+  //
   // Both moved 2026-09-23 with the origin flip: the one skills.md link each page
   // carries now names tenjin.sh. No criteria changed.
-  //
-  // tenjin-publish also moved 2026-09-23 on main: the "real stop" list names the
-  // new credential warns (tenjin-agent#388, #296), as the triage test above
-  // requires. Both changes land in this merge, so the digest reflects both.
-  it('renders the exact bytes a public install shipped before team mode existed', () => {
+  it('renders the reviewed public skill bytes', () => {
     expect(Object.fromEntries(SHAPED_SKILLS.map((n) => [n, digest(read(n))]))).toEqual({
-      'tenjin-search': '69a7a0657ad6e66b37d06ddcd54809a1',
+      'tenjin-search': 'b01df050fd3003f77d3dcad51d0269e6',
       'tenjin-publish': '2c0f33930582f69e59b99f02f49ab757',
     });
   });

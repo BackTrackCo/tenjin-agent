@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -9,7 +9,13 @@ import type { CommandContext } from '../context';
 import { runPay } from '../commands/pay';
 import { runRequestTool } from './tool';
 import { ROUTER_PATH } from './decision';
-import { bindDecision, noteSession, renderProgress } from './progress';
+import {
+  bindDecision,
+  noteRedirect,
+  noteSession,
+  renderProgress,
+  takeUndelivered,
+} from './progress';
 
 // Pass-through, so a refusal's typed details stay observable after the tool
 // folds the error into its envelope.
@@ -27,9 +33,11 @@ vi.mock('../commands/pay', async (importOriginal) => {
 let dir: string;
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'router-tool-'));
+  // Its own git root: `router.*` resolves from here, never from the suite's cwd.
+  await mkdir(join(dir, '.git'));
   await writeFile(
     join(dir, 'config.json'),
-    JSON.stringify({ bazaarPay: true, maxAutoSpend: '250000', sessionBudget: '5000000' }),
+    JSON.stringify({ maxAutoSpend: '250000', sessionBudget: '5000000' }),
   );
 });
 afterEach(async () => {
@@ -153,9 +161,16 @@ const PUBLIC = { resolveHostname: async () => [{ address: '93.184.216.34', famil
 function deps(fetchImpl: typeof fetch, auth = authorizer()) {
   return {
     ctx: ctx(),
+    cwd: dir,
     authorizer: auth,
     fetchImpl,
-    payDeps: { fetchImpl, provider: testWalletProvider(), authorizer: auth, destination: PUBLIC },
+    payDeps: {
+      readBalance: async () => 100_000_000n,
+      fetchImpl,
+      provider: testWalletProvider(),
+      authorizer: auth,
+      destination: PUBLIC,
+    },
   };
 }
 
@@ -301,6 +316,68 @@ describe('routing outcomes that buy nothing', () => {
   });
 });
 
+/**
+ * THE PROVIDER'S OWN WORDS REACH THE MODEL. A free docs lookup that matched no
+ * library answers 404 with `{error: {message}}` telling the agent to use its
+ * own tools; a bare "answered 404 ... then retry" sent it straight back to the
+ * same call.
+ */
+describe('a provider that refuses the lookup', () => {
+  const DOCS = decision({
+    providerPriceAtomic: '0',
+    category: 'library or API documentation',
+    provider: 'Context7',
+  });
+  const MESSAGE = 'No indexed library matched this question. Use your own tools.';
+
+  it("shows the provider's message on a 404 with a JSON error body, and no retry", async () => {
+    const { fetchImpl, calls } = net([
+      { url: ROUTER, status: 200, body: DOCS },
+      {
+        url: PROVIDER,
+        status: 404,
+        body: { error: { code: 'no_documentation_found', message: MESSAGE } },
+      },
+    ]);
+    const result = await runRequestTool(
+      { query: '@acme/billing-sdk createInvoice' },
+      deps(fetchImpl),
+    );
+    expect(result.isError).toBe(true);
+    expect(result.envelope.status).toBe('failed');
+    const reason = String(result.envelope.reason);
+    expect(reason).toContain(`answered 404: ${MESSAGE}`);
+    expect(reason).not.toMatch(/retry/i);
+    expect(result.summary).toContain(MESSAGE);
+    expect(calls.some((call) => call.paid)).toBe(false);
+  });
+
+  it('keeps the plain status line, and its retry, for a 5xx with no message', async () => {
+    const { fetchImpl } = net([
+      { url: ROUTER, status: 200, body: DOCS },
+      { url: PROVIDER, status: 502, body: { error: 'bad gateway' } },
+    ]);
+    const result = await runRequestTool({ query: 'zod v4 coerce' }, deps(fetchImpl));
+    expect(String(result.envelope.reason)).toMatch(/answered 502\. .*then retry\.$/);
+  });
+
+  it('bounds the message and keeps it to one plain line', async () => {
+    const { fetchImpl } = net([
+      { url: ROUTER, status: 200, body: DOCS },
+      {
+        url: PROVIDER,
+        status: 503,
+        body: { error: { message: `Unavailable\u001b[2J\n${'x'.repeat(1_000)}` } },
+      },
+    ]);
+    const result = await runRequestTool({ query: 'zod v4 coerce' }, deps(fetchImpl));
+    const reason = String(result.envelope.reason);
+    expect(reason).toContain('answered 503: Unavailable [2J xxx');
+    expect(reason).not.toMatch(/\p{Cc}/u);
+    expect(reason.length).toBeLessThan(600);
+  });
+});
+
 describe('what the tool refuses to execute', () => {
   it.each([
     [
@@ -364,17 +441,24 @@ describe('what the tool refuses to execute', () => {
     ]);
     const real = {
       ctx: ctx(),
+      cwd: dir,
       authorizer: resolveSpendAuthorizer(ctx(), {
         maxAutoSpendAtomic: 250_000n,
         sessionBudgetAtomic: 5_000_000n,
-        confirm: { mode: 'above' as const, thresholdAtomic: 250_000n },
+
         allowlistCreators: [],
       }),
       fetchImpl,
-      payDeps: { fetchImpl, provider: testWalletProvider(), destination: PUBLIC },
+      payDeps: {
+        readBalance: async () => 100_000_000n,
+        fetchImpl,
+        provider: testWalletProvider(),
+        destination: PUBLIC,
+      },
     };
     const result = await runRequestTool({ query: 'q' }, real);
     expect(result.envelope).toMatchObject({ status: 'needs_approval' });
+    expect(result.summary).toContain('Blocked by spending policy');
     expect(result.isError).toBe(false);
   });
 
@@ -382,17 +466,91 @@ describe('what the tool refuses to execute', () => {
     const { fetchImpl } = net([{ url: ROUTER, status: 200, body: decision() }, ...providerLegs()]);
     const real = {
       ctx: ctx(),
+      cwd: dir,
       authorizer: resolveSpendAuthorizer(ctx(), {
         maxAutoSpendAtomic: 250_000n,
         sessionBudgetAtomic: 5_000_000n,
-        confirm: { mode: 'above' as const, thresholdAtomic: 250_000n },
+
         allowlistCreators: [],
       }),
       fetchImpl,
-      payDeps: { fetchImpl, provider: testWalletProvider(), destination: PUBLIC },
+      payDeps: {
+        readBalance: async () => 100_000_000n,
+        fetchImpl,
+        provider: testWalletProvider(),
+        destination: PUBLIC,
+      },
     };
     const result = await runRequestTool({ query: 'q' }, real);
     expect(result.envelope).toMatchObject({ status: 'fulfilled' });
+  });
+});
+
+describe('the paid body handed back to the model', () => {
+  it('returns a large paid body whole: the harness, not this tool, files an oversized result', async () => {
+    // Firecrawl-sized, with a multi-byte character throughout.
+    const body = { markdown: 'é'.repeat(300_000) };
+    const { fetchImpl } = net([
+      { url: ROUTER, status: 200, body: decision() },
+      ...providerLegs(body),
+    ]);
+    const result = await runRequestTool({ query: 'read the page' }, deps(fetchImpl));
+    expect(result.envelope).toMatchObject({ status: 'fulfilled' });
+    expect(result.envelope.result).toBe(JSON.stringify(body));
+  });
+
+  /**
+   * A PAID BODY IS ALWAYS DELIVERED. The success rule flags it; it never
+   * withholds what the money already bought.
+   */
+  const RULE = {
+    type: 'object',
+    properties: { data: { type: 'object' } },
+    required: ['data'],
+  };
+  const withRule = () => ({
+    ...decision(),
+    decision: { ...(decision().decision as object), contract: contract({ resultSchema: RULE }) },
+  });
+
+  it('delivers a paid body that misses its success rule, unverified, naming the rule', async () => {
+    const body = { error: 'rate limited' };
+    const { fetchImpl } = net([
+      { url: ROUTER, status: 200, body: withRule() },
+      ...providerLegs(body),
+    ]);
+    const result = await runRequestTool({ query: 'q' }, deps(fetchImpl));
+    expect(result.isError).toBe(true);
+    expect(result.envelope).toMatchObject({
+      status: 'unverified',
+      result: JSON.stringify(body),
+      cost: ['provider price 0.01 USD'],
+    });
+    expect(result.envelope.resultCaveat).toContain('does not satisfy its success schema');
+    expect(result.envelope.resultCaveat).toContain('data');
+  });
+
+  it('delivers a paid body too large to check, unverified, as before', async () => {
+    const body = { data: { blob: 'x'.repeat(200 * 1024) } };
+    const { fetchImpl } = net([
+      { url: ROUTER, status: 200, body: withRule() },
+      ...providerLegs(body),
+    ]);
+    const result = await runRequestTool({ query: 'q' }, deps(fetchImpl));
+    expect(result.envelope).toMatchObject({ status: 'unverified' });
+    expect(result.envelope.resultCaveat).toContain('not checked');
+  });
+
+  it('fulfils a paid body that passes its success rule', async () => {
+    const body = { data: { BTC: 1 } };
+    const { fetchImpl } = net([
+      { url: ROUTER, status: 200, body: withRule() },
+      ...providerLegs(body),
+    ]);
+    const result = await runRequestTool({ query: 'q' }, deps(fetchImpl));
+    expect(result.isError).toBe(false);
+    expect(result.envelope).toMatchObject({ status: 'fulfilled', result: JSON.stringify(body) });
+    expect(result.envelope.resultCaveat).toBeUndefined();
   });
 });
 
@@ -437,5 +595,109 @@ describe('what the tool leaves for the status line', () => {
     expect(result.isError).toBe(false);
     expect(await renderProgress(dir, 'sess-1')).toBe('x402 · ready');
     expect(await renderProgress(dir, 'sess-2')).toBe('x402 · ready');
+  });
+});
+
+/**
+ * NEVER BLOCKED TWICE IN A ROW, the tool's half: only a `fulfilled` lookup
+ * delivers the pre-call redirect that named its id. Anything less leaves it
+ * undelivered, and the hook withholds that agent's next offer in its category.
+ */
+describe('the redirect a lookup answers', () => {
+  const CATEGORY = 'crypto price quote';
+  const RULE = { type: 'object', properties: { data: { type: 'object' } }, required: ['data'] };
+  it.each([
+    ['fulfilled', [{ url: ROUTER, status: 200, body: decision() }, ...providerLegs()]],
+    [
+      'unverified',
+      [
+        {
+          url: ROUTER,
+          status: 200,
+          body: decision({ contract: contract({ resultSchema: RULE }) }),
+        },
+        ...providerLegs({ error: 'rate limited' }),
+      ],
+    ],
+    ['failed', [{ url: ROUTER, status: 503, body: { error: { code: 'nope', message: 'no' } } }]],
+  ] as const)('is delivered only by a fulfilled lookup: %s', async (status, legs) => {
+    await noteSession(dir, 'sess-1');
+    await bindDecision(dir, 'sess-1', 'k3f9-abcd');
+    await noteRedirect(dir, 'sess-1', undefined, { id: 'k3f9-abcd', category: CATEGORY });
+    const { fetchImpl } = net([...legs]);
+    const result = await runRequestTool(
+      { query: 'BTC and ETH price', id: 'k3f9-abcd' },
+      deps(fetchImpl),
+    );
+    expect(result.envelope.status).toBe(status);
+    expect(await takeUndelivered(dir, 'sess-1', undefined, CATEGORY)).toBe(status !== 'fulfilled');
+  });
+
+  it('never counts a free lookup as delivered, since its 200 proves nothing', async () => {
+    const DOCS = 'library or API documentation';
+    await noteSession(dir, 'sess-1');
+    await bindDecision(dir, 'sess-1', 'k3f9-abcd');
+    await noteRedirect(dir, 'sess-1', undefined, { id: 'k3f9-abcd', category: DOCS });
+    const { fetchImpl, calls } = net([
+      {
+        url: ROUTER,
+        status: 200,
+        body: decision({ providerPriceAtomic: '0', category: DOCS, provider: 'Context7' }),
+      },
+      // A 200 naming another library: the lookup succeeded, the match did not.
+      { url: PROVIDER, status: 200, body: 'Context7 matched: /dodopayments/billingsdk.' },
+    ]);
+    const result = await runRequestTool(
+      { query: '@acme/billing-sdk createInvoice', id: 'k3f9-abcd' },
+      deps(fetchImpl),
+    );
+    expect(result.envelope.status).toBe('fulfilled');
+    expect(calls.some((call) => call.paid)).toBe(false);
+    expect(await takeUndelivered(dir, 'sess-1', undefined, DOCS)).toBe(true);
+  });
+
+  it("marks only the agent whose redirect named the id, never another's", async () => {
+    await noteSession(dir, 'sess-1');
+    await bindDecision(dir, 'sess-1', 'k3f9-abcd');
+    await noteRedirect(dir, 'sess-1', undefined, { id: 'a-later-one', category: CATEGORY });
+    await noteRedirect(dir, 'sess-1', 'a1', { id: 'k3f9-abcd', category: CATEGORY });
+    const { fetchImpl } = net([{ url: ROUTER, status: 200, body: decision() }, ...providerLegs()]);
+    const result = await runRequestTool(
+      { query: 'BTC and ETH price', id: 'k3f9-abcd' },
+      deps(fetchImpl),
+    );
+    expect(result.envelope.status).toBe('fulfilled');
+    expect(await takeUndelivered(dir, 'sess-1', 'a1', CATEGORY)).toBe(false);
+    expect(await takeUndelivered(dir, 'sess-1', undefined, CATEGORY)).toBe(true);
+  });
+});
+
+/**
+ * THE TOOL OBEYS THE SAME SWITCH AS THE HOOKS. It is pre-allowed, so without
+ * this a repository marked private would still have a path off the machine.
+ */
+describe('the request tool in a directory where the router is off', () => {
+  it('refuses with needs_input naming the key, and sends and pays nothing', async () => {
+    const repo = join(dir, 'repo');
+    await mkdir(join(repo, '.git'), { recursive: true });
+    await mkdir(join(repo, '.tenjin'), { recursive: true });
+    const file = join(repo, '.tenjin', 'config.json');
+    await writeFile(file, JSON.stringify({ router: { enabled: false } }));
+    const { fetchImpl, calls } = net([
+      { url: ROUTER, status: 200, body: decision() },
+      ...providerLegs(),
+    ]);
+    const auth = authorizer();
+    const result = await runRequestTool(
+      { query: 'BTC and ETH price', id: 'k3f9-abcd' },
+      { ...deps(fetchImpl, auth), cwd: repo },
+    );
+    expect(result.isError).toBe(false);
+    expect(result.envelope.status).toBe('needs_input');
+    expect(result.envelope.reason).toContain('router.enabled');
+    expect(result.envelope.reason).toContain(file);
+    expect(result.envelope.nextStep).toContain('Nothing was sent');
+    expect(calls).toHaveLength(0);
+    expect(auth.authorize).not.toHaveBeenCalled();
   });
 });

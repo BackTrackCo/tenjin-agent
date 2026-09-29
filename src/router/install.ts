@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
+import { readFile, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { promisify } from 'node:util';
@@ -18,6 +18,8 @@ import { toMoney } from '../lib/money';
 import { paint } from '../lib/output';
 import { resolveContextSettings } from '../lib/settings';
 import type { SpendPolicy } from '../lib/policy';
+import { removeRetiredSkills } from '../lib/skill-placement';
+import { loadRawConfig } from '../lib/config';
 import { onPath } from '../lib/skill-wiring';
 import type { WalletDeps, WalletOutcome } from '../commands/install-wallet';
 import type { CommandContext, CommandResult } from '../context';
@@ -28,10 +30,11 @@ import { ensureStatusLine, type StatusLineMode, type StatusLineResult } from './
  * `tenjin install` for the router product: five hook entries, one MCP server,
  * one permission rule, the spend defaults, and a wallet when there is none.
  *
- * WHAT IT WRITES IS WHAT IT SAYS. There is no skill to materialize, no daemon
- * to start and no background process of any kind: the hooks are plain command
- * lines, the tool lives in an MCP server the harness starts per session, and
- * every other key in the settings file is preserved byte for byte.
+ * WHAT IT WRITES IS WHAT IT SAYS. There is no skill to materialize and no
+ * daemon to start: the hooks are plain command lines, the tool lives in an MCP
+ * server the harness starts per session, and every other key in the settings
+ * file is preserved byte for byte. The one process a hook starts is the free
+ * docs fetch beside a search, which exits within `PREFETCH_TIMEOUT_MS`.
  */
 
 const exec = promisify(execFile);
@@ -47,6 +50,16 @@ const exec = promisify(execFile);
  * the refresh `tenjin update` spawns all rewrite them in place.
  */
 export const HOOK_TIMEOUT_SECONDS = 5;
+/**
+ * The after-call entries' kill budget, longer than the rest for the one wait
+ * any hook makes: a search the pre-call arm is fetching free docs for waits up
+ * to `AUGMENT_WAIT_MS` for them, and when none came back and the search was
+ * short, the gate is asked after that (`wire.test.ts` pins the sum). Every
+ * other after-call event returns as fast as before, so the number is a
+ * ceiling, not a cost. The pre-call entry stays at
+ * {@link HOOK_TIMEOUT_SECONDS}: it starts that fetch and never waits for it.
+ */
+export const AFTER_CALL_TIMEOUT_SECONDS = 15;
 export { MCP_SERVER_NAME };
 export const ALLOW_RULE = REQUEST_TOOL;
 /**
@@ -97,29 +110,27 @@ export const NATIVE_MATCHER = 'WebSearch|WebFetch';
  * The five entries, spelled once so `uninstall`, `doctor` and the tests read
  * the same list. The native tools are routed twice over one lookup: BEFORE the
  * call, as every release has, with a line pointing to a paid lookup when one
- * fits; and AFTER it, only when it came back short and nothing was said before.
- * A failed call fires PostToolUseFailure rather than PostToolUse, so the second
+ * fits; and AFTER it, only when it came back short and nothing was said before,
+ * or to add the free docs the pre-call arm fetched to a search's results. A
+ * failed call fires PostToolUseFailure rather than PostToolUse, so the second
  * takes both.
  */
 export function routerHookPlan(): unknown[] {
-  const handler = (command: string) => [
-    { type: 'command', command, timeout: HOOK_TIMEOUT_SECONDS },
+  const handler = (command: string, timeout = HOOK_TIMEOUT_SECONDS) => [
+    { type: 'command', command, timeout },
   ];
+  const afterCall = () => handler('tenjin hook shortfall', AFTER_CALL_TIMEOUT_SECONDS);
   return [
     { event: 'UserPromptSubmit', hooks: handler('tenjin hook prompt') },
     { event: 'PreToolUse', matcher: NATIVE_MATCHER, hooks: handler('tenjin hook native') },
     { event: 'PreToolUse', matcher: DELEGATION_MATCHER, hooks: handler('tenjin hook agent') },
-    { event: 'PostToolUse', matcher: NATIVE_MATCHER, hooks: handler('tenjin hook shortfall') },
-    {
-      event: 'PostToolUseFailure',
-      matcher: NATIVE_MATCHER,
-      hooks: handler('tenjin hook shortfall'),
-    },
+    { event: 'PostToolUse', matcher: NATIVE_MATCHER, hooks: afterCall() },
+    { event: 'PostToolUseFailure', matcher: NATIVE_MATCHER, hooks: afterCall() },
   ];
 }
 
 export const DISCLOSURE: readonly string[] = [
-  'What leaves this machine: the bounded text of each prompt, each native search query or URL (and, when one came back short, its status, size or error), and each task handed to a subagent, sent to Tenjin for the free routing gate.',
+  "What leaves this machine: the bounded text of each prompt, each native search query or URL (and, when one came back short, its status, size or error), and each task handed to a subagent, sent to Tenjin for the free routing gate. When the gate offers free library docs for a search, that search query also goes to Tenjin's docs lookup, which asks Context7.",
   'What is kept when a lookup is paid: the capability chosen, a hash of the contract, a hash of the arguments, and your wallet address. No prompt text, no arguments, no hint text.',
   'What never leaves: your private key. It is decrypted in this CLI to sign, and never sent anywhere.',
 ];
@@ -190,6 +201,36 @@ export interface McpRegistration {
   reason?: string;
 }
 
+async function inferRefreshProject(
+  cwd: string,
+  home: string,
+  dataDir: string,
+  readRegistration: typeof readMcpEntry,
+): Promise<boolean> {
+  const hooks = await probeOurEntries(routerSettingsPath({ project: true, cwd }), dataDir);
+  if (hooks.state !== 'present') return false;
+  const [cwdPath, homePath] = await Promise.all([
+    realpath(cwd),
+    realpath(home).catch((err: NodeJS.ErrnoException) => {
+      // A missing home cannot alias this existing project. Do not require it
+      // to exist (or create it) just to refresh the project's own settings.
+      if (err.code === 'ENOENT' || err.code === 'ENOTDIR') return null;
+      throw err;
+    }),
+  ]);
+  if (cwdPath !== homePath) return true;
+
+  // Home shares one hooks file between scopes. Preserve a project-only install,
+  // but prefer user scope when both registrations exist (including alpha.18's
+  // accidental duplicate). With neither registration, the default is user.
+  // Unreadable/conflicting entries stay in their scope so reconciliation refuses
+  // them instead of silently creating a registration in the other scope.
+  const user = await readRegistration('user', cwd, home);
+  if (user.state !== 'absent') return false;
+  const project = await readRegistration('project', cwd, home);
+  return project.state !== 'absent';
+}
+
 export async function runRouterInstall(
   args: RouterInstallArgs,
   ctx: CommandContext,
@@ -202,23 +243,14 @@ export async function runRouterInstall(
       fix: 'Set HOME to your home directory (`export HOME=...`), then re-run `tenjin install`.',
     });
   }
+  await loadRawConfig(ctx.dataDir); // Validate before any install writes; retired keys remain readable.
   const cwd = deps.cwd ?? process.cwd();
-  // A refresh converges EVERY install this machine has, in the scope each one
-  // was made in. `tenjin update` spawns it from the HOME directory, so looking
-  // ONE SCOPE, THE ONE THIS RAN IN. `--refresh` converges the install whose
-  // settings file is here: home by default, this project under `--project`.
-  // The fan-out across recorded projects is gone with the list it read, along
-  // with a failure mode where one project's broken JSON decided what every
-  // other install got. `tenjin update` is a binary swap plus this, nothing more.
-  // With no flag, a refresh converges the install that is actually HERE: the
-  // project file when this directory carries our entries, the home file
-  // otherwise. `--project` and its absence are still explicit targets, so
-  // nothing silently moves an install from one scope to the other.
+  // `tenjin update` runs from home, where the hooks file cannot prove scope.
+  // An explicit --project still wins, including for a project rooted at home.
   const project =
     args.project ??
     (args.refresh === true &&
-      (await probeOurEntries(routerSettingsPath({ project: true, cwd }), ctx.dataDir)).state ===
-        'present');
+      (await inferRefreshProject(cwd, home, ctx.dataDir, deps.readMcpEntry ?? readMcpEntry)));
   const settingsPath = routerSettingsPath({
     ...(project ? { project: true } : {}),
     homeDir: home,
@@ -242,6 +274,14 @@ export async function runRouterInstall(
       );
     }
   }
+  const spend = await persistRouterDefaults(ctx.dataDir, args.refresh === true);
+  const removedKeysLines =
+    spend.removed.length > 0
+      ? [
+          `Removed retired settings: ${spend.removed.join(', ')}. Automatic router limits remain in effect; manual pay always requires consent.`,
+        ]
+      : [];
+  const removedSkills = await removeRetiredSkills(home, project ? cwd : undefined);
   const hooks = await writeHooks({
     adapter: claudeAdapter,
     homeDir: home,
@@ -260,8 +300,8 @@ export async function runRouterInstall(
     // The SAME writers, minus the one that decides anything: the entries are
     // rewritten in place by their ownership marker so an upgrade never
     // duplicates them, the rule and the registration are re-checked because a
-    // new version can change either, and `config.json`, the wallet and
-    // `spend.json` are not touched at all. Widening an agent's spend policy
+    // new version can change either. Config cleanup only removes retired keys;
+    // the wallet, current limits and `spend.json` are unchanged. Widening an agent's spend policy
     // during an unattended upgrade is not a convergence.
     // RECONCILED, not re-added: `claude mcp add` exits 1 on an existing entry,
     // so the registration is read first and only written when it is missing or
@@ -284,12 +324,16 @@ export async function runRouterInstall(
         statusLine,
         mcp,
         refresh: true,
+        spend,
+        removedSkills,
         scope: mcpScope(project),
       },
-      humanLines: refreshLines(ctx, problems(ctx, hooks, permissions, statusLine, mcp)),
+      humanLines: [
+        ...refreshLines(ctx, problems(ctx, hooks, permissions, statusLine, mcp)),
+        ...removedKeysLines,
+      ],
     };
   }
-  const spend = await persistRouterDefaults(ctx.dataDir);
   // The shelf install's wallet step, unchanged except that it never asks: a
   // lookup cannot be paid without a wallet, so install makes one. A failure is
   // reported, never fatal; everything above is useful without it.
@@ -309,18 +353,22 @@ export async function runRouterInstall(
     mcp,
     wallet,
     disclosure: DISCLOSURE,
+    removedSkills,
   };
   return {
     data,
-    humanLines: lines(ctx, {
-      project,
-      hooks,
-      permissions,
-      statusLine,
-      mcp,
-      wallet,
-      policy: effective.policy,
-    }),
+    humanLines: [
+      ...lines(ctx, {
+        project,
+        hooks,
+        permissions,
+        statusLine,
+        mcp,
+        wallet,
+        policy: effective.policy,
+      }),
+      ...removedKeysLines,
+    ],
   };
 }
 
@@ -505,7 +553,7 @@ function effectiveLimits(policy: SpendPolicy): EffectiveLimits {
   return {
     maxAutoSpend: toMoney(policy.maxAutoSpendAtomic.toString()).usd,
     sessionBudget:
-      policy.sessionBudgetAtomic === 0n
+      policy.sessionBudgetAtomic === null
         ? 'no daily ceiling'
         : toMoney(policy.sessionBudgetAtomic.toString()).usd,
   };
@@ -550,7 +598,7 @@ function lines(
   const ok = paint(ctx.io, 'green', '✓');
   const limits = effectiveLimits(s.policy);
   const daily =
-    s.policy.sessionBudgetAtomic === 0n ? 'no daily limit' : `$${limits.sessionBudget} a day`;
+    s.policy.sessionBudgetAtomic === null ? 'no daily limit' : `$${limits.sessionBudget} a day`;
   // The first line only says "set up" when it is: a settings file this run
   // would not write to means nothing was set up, and hooks without the MCP
   // server point at a `request` tool that is not there.
@@ -565,7 +613,7 @@ function lines(
         ? paint(ctx.io, 'yellow', '! Almost done: Claude Code needs one command')
         : `${ok} Tenjin is set up for Claude Code${where}`,
     ...walletLines(ctx, ok, s.wallet),
-    `  Spends at most $${limits.maxAutoSpend} a lookup, ${daily}`,
+    `  Automatic router: up to $${limits.maxAutoSpend} per call; daily limit ${daily}`,
     ...(s.statusLine.state === 'ours' || s.statusLine.state === 'composed'
       ? ['  Live status line on: each lookup names its provider while it runs']
       : []),

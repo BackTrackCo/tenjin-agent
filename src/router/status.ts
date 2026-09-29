@@ -1,5 +1,6 @@
 import { toMoney } from '../lib/money';
-import type { ConfirmPolicy } from '../lib/policy';
+import { loadRawConfig, retiredPaymentKeys, RETIRED_PAYMENT_GUIDANCE } from '../lib/config';
+import { spentOf } from '../lib/spend-ledger';
 import { resolveContextSettings } from '../lib/settings';
 import { readSpendSummary } from '../lib/wallet/spend';
 import type { CommandContext, CommandResult } from '../context';
@@ -32,18 +33,24 @@ export async function runRouterStatus(
     (sum, r) => sum + BigInt(r.amountAtomic),
     0n,
   );
-  const budgetAtomic = BigInt(settings.policy.sessionBudgetAtomic);
+  const retired = retiredPaymentKeys(await loadRawConfig(ctx.dataDir));
+  const warnings = retired.length
+    ? [`Ignored retired keys: ${retired.join(', ')}. ${RETIRED_PAYMENT_GUIDANCE}`]
+    : [];
+  const automaticAtomic = ledger === null ? 0n : spentOf(ledger);
+  const budgetAtomic = settings.policy.sessionBudgetAtomic;
   const data = {
     baseUrl: settings.baseUrl,
+    warnings,
     window: {
       startedAtMs: ledger?.windowStartMs ?? null,
       committed: toMoney(committedAtomic.toString()),
+      automaticExposure: toMoney(automaticAtomic.toString()),
       reserved: toMoney(reservedAtomic.toString()),
-      budget: budgetAtomic === 0n ? null : toMoney(budgetAtomic.toString()),
+      budget: budgetAtomic === null ? null : toMoney(budgetAtomic.toString()),
     },
     caps: {
       maxAutoSpend: toMoney(settings.policy.maxAutoSpendAtomic.toString()),
-      confirm: confirmLabel(settings.policy.confirm),
     },
     inFlight: (ledger?.reservations ?? []).map((r) => ({
       amount: toMoney(r.amountAtomic),
@@ -52,21 +59,16 @@ export async function runRouterStatus(
     })),
   };
   const budgetLine =
-    budgetAtomic === 0n
-      ? 'no session budget set'
+    budgetAtomic === null
+      ? 'no daily limit'
       : `of ${toMoney(budgetAtomic.toString()).usd} USD in the rolling 24h window`;
   return {
     data,
     humanLines: [
-      `spent ${toMoney(committedAtomic.toString()).usd} USD ${budgetLine}`,
+      `spent ${toMoney(committedAtomic.toString()).usd} USD total; automatic exposure ${toMoney(automaticAtomic.toString()).usd} USD ${budgetLine}`,
       `reserved ${toMoney(reservedAtomic.toString()).usd} USD in ${data.inFlight.length} open request(s)`,
-      `per call at most ${toMoney(settings.policy.maxAutoSpendAtomic.toString()).usd} USD, confirm ${confirmLabel(settings.policy.confirm)}`,
+      `automatic router up to ${toMoney(settings.policy.maxAutoSpendAtomic.toString()).usd} USD per call; manual pay always requires consent`,
+      ...warnings,
     ],
   };
-}
-
-function confirmLabel(confirm: ConfirmPolicy): string {
-  return confirm.mode === 'always'
-    ? 'always'
-    : `above ${toMoney(confirm.thresholdAtomic.toString()).usd} USD`;
 }

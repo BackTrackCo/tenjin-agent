@@ -23,6 +23,7 @@ import {
   routerSettingsPath,
   type McpEntryState,
 } from './install';
+import { routerSettings, type RouterSettings } from './settings';
 import { REQUEST_TOOL } from './names';
 import { inspectStatusLine, STATUS_LINE_COMMAND } from './status-line-wiring';
 
@@ -76,6 +77,11 @@ export async function runRouterDoctor(
   deps: RouterDoctorDeps = {},
 ): Promise<CommandResult> {
   const env = deps.env ?? process.env;
+  // From the directory doctor runs in, which is the one a session there would use.
+  const router = await routerSettings(
+    { cwd: deps.cwd ?? process.cwd(), dataDir: ctx.dataDir },
+    deps.homeDir !== undefined ? { homeDir: deps.homeDir } : {},
+  ).catch((err: unknown) => (err instanceof Error ? err : new Error(String(err))));
   const settings = await resolveContextSettings(ctx);
   // The SAME resolution `install` and `uninstall` use. Reading the home file
   // only made a correctly wired `--project` install, which the README tells
@@ -86,7 +92,7 @@ export async function runRouterDoctor(
     ...(deps.cwd !== undefined ? { cwd: deps.cwd } : {}),
   });
   const checks: RouterCheck[] = [nodeCheck(deps.nodeVersion ?? process.version)];
-  checks.push(await hooksCheck(settingsPath, ctx.dataDir));
+  checks.push(await hooksCheck(settingsPath, ctx.dataDir, router));
   checks.push(await statusLineCheck(settingsPath));
   checks.push(
     await mcpCheck(
@@ -198,7 +204,11 @@ async function statusLineCheck(path: string): Promise<RouterCheck> {
   }
 }
 
-async function hooksCheck(path: string, dataDir: string): Promise<RouterCheck> {
+async function hooksCheck(
+  path: string,
+  dataDir: string,
+  router: RouterSettings | Error,
+): Promise<RouterCheck> {
   const found = await inspectHooksFile(path);
   if ('refusal' in found) {
     return {
@@ -220,6 +230,30 @@ async function hooksCheck(path: string, dataDir: string): Promise<RouterCheck> {
       required: true,
       detail: `no Tenjin hook entries in ${path}`,
       fix: 'Run `tenjin install`, then restart Claude Code.',
+    };
+  }
+  // WIRED BUT SWITCHED OFF is a choice, not a fault, so it warns and names the
+  // file that made it: the entries are there and every one of them is silent.
+  if (router instanceof Error) {
+    return {
+      name: 'hooks',
+      status: 'warn',
+      required: false,
+      detail: `${events.join(' and ')} registered, but the router is off here: ${router.message}`,
+      fix: 'Fix or delete that file.',
+    };
+  }
+  if (!router.enabled.value) {
+    const file = router.enabled.path ?? 'the config';
+    return {
+      name: 'hooks',
+      status: 'warn',
+      required: false,
+      detail: `${events.join(' and ')} registered, but router.enabled is false in ${file}, so nothing is routed from this directory`,
+      fix:
+        router.enabled.source === 'file'
+          ? 'Run `tenjin config set router.enabled true` to route again.'
+          : `Remove router.enabled from ${file} to route here again.`,
     };
   }
   if (!allow.includes(ALLOW_RULE)) {
@@ -389,7 +423,16 @@ async function claudeHasServer(opts: { scope: 'user' | 'project'; cwd: string })
   return stdout.includes(MCP_SERVER_NAME) && !/no mcp server/i.test(stdout);
 }
 
-function spendCheck(maxAutoSpendAtomic: bigint, sessionBudgetAtomic: bigint): RouterCheck {
+function spendCheck(maxAutoSpendAtomic: bigint, sessionBudgetAtomic: bigint | null): RouterCheck {
+  if (sessionBudgetAtomic === 0n) {
+    return {
+      name: 'spend',
+      status: 'fail',
+      required: true,
+      detail: 'The daily limit is 0, so positive payments are refused even with --yes.',
+      fix: 'Choose a daily limit with `tenjin config set sessionBudget <usd|none>`.',
+    };
+  }
   if (maxAutoSpendAtomic === 0n) {
     return {
       name: 'spend',
@@ -400,15 +443,15 @@ function spendCheck(maxAutoSpendAtomic: bigint, sessionBudgetAtomic: bigint): Ro
     };
   }
   const budget =
-    sessionBudgetAtomic === 0n
+    sessionBudgetAtomic === null
       ? 'no daily ceiling'
       : `${toMoney(sessionBudgetAtomic.toString()).usd} USD a day`;
   return {
     name: 'spend',
-    status: sessionBudgetAtomic === 0n ? 'warn' : 'ok',
+    status: sessionBudgetAtomic === null ? 'warn' : 'ok',
     required: false,
-    detail: `at most ${toMoney(maxAutoSpendAtomic.toString()).usd} USD a call, ${budget}`,
-    ...(sessionBudgetAtomic === 0n
+    detail: `automatic approval up to ${toMoney(maxAutoSpendAtomic.toString()).usd} USD a call, ${budget}`,
+    ...(sessionBudgetAtomic === null
       ? { fix: 'Set one with `tenjin config set sessionBudget 1.00`.' }
       : {}),
   };

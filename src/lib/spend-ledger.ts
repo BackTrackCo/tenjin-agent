@@ -20,6 +20,7 @@ const ReservationSchema = z.object({
   atMs: z.number(),
   /** Optional so a ledger written by an older build still parses. */
   requestKey: z.string().optional(),
+  mode: z.enum(['automatic', 'manual']).optional(),
 });
 export type Reservation = z.infer<typeof ReservationSchema>;
 
@@ -28,10 +29,11 @@ const LedgerSchema = z.object({
   windowStartMs: z.number(),
   /**
    * EXPOSURE: every authorization this window transmitted. A signed EIP-3009
-   * authorization is a bearer instrument, so this is what the budget counts,
+   * authorization is a bearer instrument, so total exposure stays recorded,
    * whatever any counterparty later says it took.
    */
   committedAtomic: z.string().regex(/^\d+$/),
+  automaticCommittedAtomic: z.string().regex(/^\d+$/).optional(),
   /**
    * SETTLED: what counterparties reported actually taking, which the router's
    * waived outcomes made a different number from the line above (2026-09-23
@@ -50,19 +52,22 @@ export function emptyLedger(nowMs: number): Ledger {
     schemaVersion: 2,
     windowStartMs: nowMs,
     committedAtomic: '0',
+    automaticCommittedAtomic: '0',
     settledAtomic: '0',
     reservations: [],
   };
 }
 
-/** Everything this window has spent or is holding: the budget's input. */
+/** Automatic exposure plus automatic pending reservations: the budget's input.
+ * Legacy records with no mode/counter conservatively count as automatic. */
 export function spentOf(ledger: {
   committedAtomic: string;
-  reservations: { amountAtomic: string }[];
+  automaticCommittedAtomic?: string;
+  reservations: { amountAtomic: string; mode?: 'automatic' | 'manual' }[];
 }): bigint {
   return ledger.reservations.reduce(
-    (sum, r) => sum + BigInt(r.amountAtomic),
-    BigInt(ledger.committedAtomic),
+    (sum, r) => sum + (r.mode === 'manual' ? 0n : BigInt(r.amountAtomic)),
+    BigInt(ledger.automaticCommittedAtomic ?? ledger.committedAtomic),
   );
 }
 
@@ -110,7 +115,13 @@ export async function readLedger(path: string): Promise<LedgerRead> {
 export interface SpendSummary {
   windowStartMs: number;
   committedAtomic: string;
-  reservations: { amountAtomic: string; atMs: number; requestKey?: string }[];
+  automaticCommittedAtomic?: string;
+  reservations: {
+    amountAtomic: string;
+    atMs: number;
+    requestKey?: string;
+    mode?: 'automatic' | 'manual';
+  }[];
 }
 
 /**

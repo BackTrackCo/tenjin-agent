@@ -1,5 +1,5 @@
 import { describe, it, expect, afterAll, afterEach, beforeAll, beforeEach, vi } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -183,6 +183,23 @@ describe('main', () => {
 
   // The two things an operator chooses at install time, and nothing else: which
   // settings file, and whether this is a converge run for `tenjin update`.
+  it('documents invocation-scoped payment warnings without the shelved discover command', async () => {
+    const cap = captureIo();
+    expect(await main(['pay', '--help'], cap.io)).toBe(0);
+    const help = cap.stdout();
+    expect(help).toContain('--ignore-warnings');
+    expect(help.replace(/\s+/g, ' ')).toContain('--yes records prior consent for this quote');
+    expect(help).toContain('Unlisted endpoints need no warning flag');
+    expect(help).toContain('--json --max-price');
+    expect(help).not.toContain('bazaarPay');
+    expect(help).not.toContain('tenjin discover');
+  });
+
+  it('cannot select internal router execution from the CLI', async () => {
+    const cap = captureIo();
+    expect(await main(['pay', 'https://example.com', '--execution', 'router'], cap.io)).toBe(2);
+  });
+
   it('offers only the flags the router install actually has', async () => {
     const cap = captureIo();
     expect(await main(['install', '--help'], cap.io)).toBe(0);
@@ -380,7 +397,16 @@ describe('the update nudge and `install --refresh`', () => {
   // already off for some unrelated reason.
   it('still nudges for a command that is not a refresh', async () => {
     const cap = captureIo();
-    expect(await main(['config', '--json'], cap.io)).toBe(0);
+    // `config` resolves `router.*` from the cwd; run it from the sandbox.
+    const work = join(sandbox, 'work');
+    await mkdir(join(work, '.git'), { recursive: true });
+    const prev = process.cwd();
+    process.chdir(work);
+    try {
+      expect(await main(['config', '--json'], cap.io)).toBe(0);
+    } finally {
+      process.chdir(prev);
+    }
     expect(existsSync(cachePath())).toBe(true);
     expect(fetched).toBe(1);
   });

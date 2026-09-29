@@ -1,5 +1,139 @@
 # tenjin-cli
 
+## 0.1.0-alpha.19
+
+### Minor Changes
+
+- ddf34f7: Separate automatic router limits from mandatory manual payment consent, check Base USDC balance before signing, repair Ultravioleta discovery, and retire the obsolete payment skill.
+
+  `maxAutoSpend` and `sessionBudget` limit automatic router purchases only. Zero blocks positive automatic spending; daily `none` removes the automatic daily ceiling. A missing daily limit defaults to $5 both before and after install. Manual `tenjin pay` ignores both configured limits and always requires consent for the quoted transaction, interactively or through `--yes` after explicit user approval. It is never an autonomous workaround for a router refusal. An optional `--max-price`, creator/destination restrictions, supported payment terms and the balance check still apply.
+
+  Legacy `bazaarPay` and `confirm` keys are ignored after upgrade, including old `false`/`always` values. Doctor/status warn; install and refresh remove and report them while preserving current router/limit settings and unrelated fields. `config set` rejects the retired keys. No hand edit is required to keep routing operational.
+
+  Manual and automatic payments share one ledger and duplicate guard. Manual payments remain in total reporting without consuming automatic budget headroom. Legacy exposure without mode/counter metadata conservatively counts as automatic until the existing window expires.
+
+  Missing Bazaar metadata or an unlisted endpoint is an ordinary direct-payment outcome. Only unavailable/incomplete lookups or exact-listing term differences require invocation-scoped `--ignore-warnings`; `--yes` supplies payment consent only. The selected signer's balance is read before signing, with one bounded retry on an unreadable result. Confirmed insufficient funds or persistent read failure refuses and releases the reservation. Router calls retain their advertised-price checks and wire protocol; policy refusals now say “Blocked by spending policy.”
+
+  Do not roll back to a config reader that treats zero as unlimited or ignores `none`; preserve the operator's explicit automatic limits when reverting behavior.
+
+### Patch Changes
+
+- 1f6100f: The pre-call router hook no longer blocks a WebSearch for the free library docs
+  lookup: the search runs as written, Context7 docs for the same query are fetched
+  alongside it, and when found they are added above the search's own results
+  (nothing changes when none are found). Paid lookups are redirected exactly as
+  before, and `tenjin install --refresh` gives the after-call hook the 15 second
+  timeout that wait needs. A provider's own error message, such as the docs
+  lookup's "no library matched" 404, now reaches the agent from
+  `mcp__x402__request` instead of a bare status telling it to retry.
+- de8c3c0: The pre-call router hook no longer redirects WebSearch or WebFetch twice in a
+  row to the same kind of lookup. When the `mcp__x402__request` lookup it
+  redirected to does not come back fulfilled (it failed, stopped to ask, or was
+  never called), or was a free lookup, whose success nothing verifies, that agent's next call matched to the same kind runs as it is,
+  while other lookups, and the call after that, are routed as usual; the main
+  agent and each subagent keep their own record. The redirect's reason tells the
+  agent it can make its own call again if the lookup does not cover it.
+- 2f41cb2: Keep `tenjin update` refreshes at user scope when they run from the home directory, avoiding an unintended project-scoped x402 MCP registration. Recognize symlinked home paths, preserve existing project-only registrations and explicit project installs, and document cleanup for the accidental alpha.18 entry.
+
+## 0.1.0-alpha.18
+
+### Patch Changes
+
+- df153c2: Eight fixes to paid lookups. A paid body is now always delivered: one that fails
+  the decision's success rule comes back `unverified` with a caveat naming the
+  rule it missed, where it used to be refused after the money had moved. The
+  `request` tool now sends its result once instead of twice, and declares
+  `anthropic/maxResultSizeChars` of 200,000 so Claude Code keeps a full page read
+  inline; a larger result is saved by Claude Code itself and the model is handed
+  the path. A 633,016-character page read used to go past the tool-output limit,
+  so the model never saw what it paid for. The pre-call hook now denies the main
+  agent's WebFetch or WebSearch only when the paid lookup would run without
+  approval; over the cap or past the budget, the free call runs and the
+  after-call offer still applies, where a deny used to leave the page neither
+  fetched nor bought. The prompt hook follows the same rule: its hint to call
+  `request` is shown only when that call would run without approval, where it
+  used to send the model to a `needs_approval` stop while its free tools would
+  have answered. Both, and a subagent's offer, also need the wallet to cover the
+  price: once the policy allows the spend, the hook reads the wallet's USDC
+  balance with one `balanceOf` against `rpcUrl`, inside the hook's existing time
+  budget, and a balance below the price leaves the free call to run. A fresh
+  install's empty wallet used to get its WebFetch denied and then a refused
+  payment. A balance that cannot be read leaves the policy to decide, as before.
+  `tenjin pay` waits on the paid request for the seller's
+  advertised `maxTimeoutSeconds`, capped at 120 s and never shorter than
+  `--timeout`, instead of cutting off a signed payment at the 10 s default; the
+  unpaid probe keeps `--timeout`. The Bazaar lane now looks a resource up
+  itself: it asks each registry's `/discovery/search` for this URL under the live
+  `payTo`, and falls back to the `payTo`-filtered list where a registry has no
+  such search. CDP's list ignores `payTo` and returns the same first page of
+  about 17,000 listings, so any endpoint no `discover` sweep had stored was
+  refused as unlisted. And the lane's refusals and the tenjin-pay skill no longer
+  name the shelved `tenjin discover`.
+- 54e64c5: A router packet no longer carries rows the harness writes into the user's turn. A
+  background task or subagent finishing (`origin.kind: "task-notification"`) and a local
+  command's output (`<local-command-stdout>`, `<local-command-stderr>`) arrive as
+  `type: "user"` rows without `isMeta`, so they were read as the user's words: they travelled
+  in `history`, and one could become `current`, even with `router.context turn`. They are now
+  skipped like harness meta rows. A `<command-name>` row, the command the user typed, stays.
+- 0e7a557: `tenjin uninstall` leaves an `x402` MCP server it did not write. Before removing the
+  registration it reads the scope's own file the way `install` does, and when the `x402`
+  entry launches something other than `tenjin mcp`, or the file cannot be read, it removes
+  nothing and says why instead of running `claude mcp remove x402`. An entry that is the
+  router's, or no entry at all, is removed as before.
+
+## 0.1.0-alpha.17
+
+### Patch Changes
+
+- 2a95507: `tenjin hook <name>` for a hook arm this binary does not know now exits 0 with
+  nothing on stdout, the same "no opinion" every handler gives on a bad event.
+  It used to exit 2 as a usage error, which Claude Code reads as a blocking hook
+  failure: a settings file written by a newer `tenjin install` (a new arm, or a
+  source build ahead of the npm release) then failed every call of the matched
+  tool until the binary caught up.
+- 46fc65f: The router has an off switch and a context setting that every router hook and the
+  `request` tool honour. `tenjin config set router.enabled false` stops it on this
+  machine, and `tenjin config set --project router.enabled false` stops it in one
+  repository through a committed `.tenjin/config.json`; `--project --local` writes
+  a personal `.tenjin/config.local.json` beside it instead, which belongs in
+  `.gitignore`. Off means the hooks send nothing and the `request` tool answers
+  `needs_input` naming the key, paying nothing. `router.context turn` sends the
+  current turn with no prior messages. Every project file from the working
+  directory up to the git root applies (in a git worktree, the main checkout's
+  too), and each can only turn the router off or narrow what it sends. `tenjin config` shows
+  both keys with the file they came from, and `tenjin doctor` warns when the hooks
+  are wired but the router is off in the directory it runs from.
+- 0be992c: Router hooks are now safe inside subagents. WebSearch and WebFetch are routed
+  before each call as before, and a fitting paid lookup still redirects the call
+  to `mcp__x402__request`; but a subagent is redirected only when it is known to
+  have `mcp__x402__request` (its own `tools:`, or the built-in `general-purpose`,
+  `Explore` and `Plan` agents) and your spend policy would pay without asking, and
+  it is routed on its own task rather than the parent's last message. When a free
+  call clearly fails (blocked, a server error, an empty page, a search with no
+  links, a network error; never a 404 or 410), the router is asked once and may
+  offer a paid lookup. A new `PreToolUse` hook on `Agent|Task` appends a fitting
+  offer to the task a subagent is handed. Every line the router adds opens with
+  `Tenjin router (installed by the user):` and names the call
+  `mcp__x402__request`. `tenjin doctor` names custom agents whose `tools:` leave
+  the paid tool out. Existing installs keep working as they are;
+  `tenjin install --refresh` (which `tenjin update` runs) adds the new hooks.
+- dea376f: Every router packet is masked before it leaves: the prompt, the prior messages,
+  the literal URLs and the pending search or URL go through one `seal` step that
+  applies the publish scan's key, PEM, BIP-39 seed-phrase and URL credential rules
+  (a credential query parameter, a long token-shaped path segment). Harness meta
+  rows no longer travel. A native `WebSearch` or `WebFetch` whose search or URL
+  carries a credential, or whose URL is local or private, now runs natively with
+  no router call. The mask also covers a quoted `"password": "..."` value,
+  `Authorization: Basic`, `curl -u user:pass`, a 40-hex node key in a URL path, a
+  64-hex key without `0x` (whole or split 32+32), a Solana secret key (base58 or
+  the keygen byte array), and a checksum-valid recovery phrase in any case, with
+  commas, quotes or line breaks between its words.
+
+  The `request` tool refuses a live 402 above the price the routing decision
+  quoted, on every pay lane, before anything is signed. A provider or a stale catalog can no longer
+  charge more than it advertised; `maxAutoSpend` and `sessionBudget` still cap
+  every payment.
+
 ## 0.1.0-alpha.16
 
 ### Minor Changes

@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
-import { open, opendir, rm } from 'node:fs/promises';
+import { lstat, open, opendir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { writeFileAtomic } from '../lib/atomic-json';
+import { writeFileAtomic, writeFileAtomicExclusive } from '../lib/atomic-json';
 
 /**
  * The live status line's evidence: what this session is looking up right now,
@@ -12,7 +12,11 @@ import { writeFileAtomic } from '../lib/atomic-json';
  * decision, the spend policy or the paying leg; every write is best effort and
  * every failure is swallowed, so a full disk or a read-only data dir loses the
  * footer and changes no routing or payment outcome. That is the whole contract
- * this module has to keep.
+ * this module has to keep. Two markers are read back by the hooks, the offer
+ * mark and the last redirect, and both only ever make a hook say less: losing
+ * either routes a call exactly as a session with no record would. The free-docs
+ * records are the same kind: a lost augment marker is a search with no docs
+ * added, and a lost query claim is one more free fetch.
  *
  * KEYED TO THE SESSION, NEVER GUESSED FROM IT. A record lives under the SHA-256
  * of the harness's own `session_id`, so the renderer for one session cannot see
@@ -36,6 +40,15 @@ const BINDING_PREFIX = 'id-';
 const OFFER_PREFIX = 'offer-';
 /** The session's own liveness touch, likewise outside the call-record pattern. */
 const SESSION_FILE = 'session.json';
+/** An agent's last pre-call redirect, one file per agent in the session. */
+const REDIRECT_PREFIX = 'redirect-';
+/** A search the pre-call hook is adding free docs to, keyed by its `tool_use_id`. */
+const AUGMENT_PREFIX = 'augment-';
+/** What the docs prefetch got, beside its marker. The provider's text sets its
+ *  size, so it is never read as a record: it ages by its mtime. */
+const AUGMENT_BODY_SUFFIX = '.docs';
+/** One agent's search query that was augmented, so the same one is not fetched twice. */
+const QUERY_PREFIX = 'query-';
 /** Call records are named by a 64-hex digest and nothing else is read as one. */
 const CALL_FILE_RE = /^[a-f0-9]{64}\.json$/;
 
@@ -52,6 +65,8 @@ export const RECENT_MS = 10_000;
 export const EXPIRY_MS = 10 * 60_000;
 /** How recently a session must have been touched to claim an id-less request. */
 export const SESSION_ACTIVE_MS = 10 * 60_000;
+/** How long one agent's identical search is not given the same docs again. */
+export const AUGMENT_REPEAT_MS = 5 * 60_000;
 /** Above this many files a session directory is reported rather than scanned. */
 const MAX_RECORDS = 256;
 /** A ceiling on the root scan. {@link pruneSessions} keeps it far below this:
@@ -82,6 +97,19 @@ interface SavedProgress extends Stamp {
   parameters?: string;
   /** What the provider was paid, as USD. */
   price?: string;
+}
+
+/** A search being given free docs, and whose docs they are. */
+interface SavedAugment extends Stamp {
+  provider: string;
+}
+
+/** Which decision the last redirect named (by digest), its category, and
+ *  whether it delivered. */
+interface SavedRedirect extends Stamp {
+  id: string;
+  category: string;
+  delivered: boolean;
 }
 
 export interface ProgressStep {
@@ -214,6 +242,155 @@ export async function wasOffered(
 }
 
 /**
+ * FREE DOCS BESIDE A SEARCH. The pre-call hook marks the search it let run with
+ * a free offer, by the harness's own `tool_use_id` and with the provider's name
+ * for the line the after-call hook writes, and returns where the prefetch puts
+ * what it got: beside the marker, under the same key. Null when the marker could
+ * not be written, since nothing could then find the body.
+ */
+export async function markAugment(
+  dataDir: string,
+  sessionId: string,
+  toolUseId: string,
+  provider: string,
+  now = Date.now(),
+): Promise<string | null> {
+  const base = join(sessionDir(dataDir, sessionId), `${AUGMENT_PREFIX}${digest(toolUseId)}`);
+  const saved: SavedAugment = { version: 1, at: now, provider: sanitize(provider, 60) };
+  return (await write(`${base}.json`, saved)) ? `${base}${AUGMENT_BODY_SUFFIX}` : null;
+}
+
+/** The marker {@link markAugment} left for this call, or null when it left none. */
+export async function augmentOf(
+  dataDir: string,
+  sessionId: string,
+  toolUseId: string,
+  now = Date.now(),
+): Promise<{ at: number; provider: string; body: string } | null> {
+  const base = join(sessionDir(dataDir, sessionId), `${AUGMENT_PREFIX}${digest(toolUseId)}`);
+  const row = await readJson(`${base}.json`);
+  const stamp = stampOf(row);
+  if (row === null || stamp === null || now - stamp.at > EXPIRY_MS) return null;
+  const provider = typeof row.provider === 'string' ? sanitize(row.provider, 60) : '';
+  return { at: stamp.at, provider, body: `${base}${AUGMENT_BODY_SUFFIX}` };
+}
+
+/**
+ * ONE FETCH PER QUERY. True when this agent has not had this exact search
+ * augmented in the last {@link AUGMENT_REPEAT_MS}, and the claim is now its:
+ * the create is exclusive, so two parallel copies of one search fetch once.
+ */
+export async function claimQuery(
+  dataDir: string,
+  sessionId: string,
+  agentId: string | undefined,
+  query: string,
+  now = Date.now(),
+): Promise<boolean> {
+  const key = digest(JSON.stringify([agentId ?? '', query]));
+  const path = join(sessionDir(dataDir, sessionId), `${QUERY_PREFIX}${key}.json`);
+  const stamp: Stamp = { version: 1, at: now };
+  try {
+    await writeFileAtomicExclusive(path, JSON.stringify(stamp), { mode: 0o600, dirMode: 0o700 });
+    return true;
+  } catch {
+    // Taken: by a recent search, which wins, or by an old one, which does not.
+  }
+  const last = await readStamp(path);
+  if (last === null || now - last.at <= AUGMENT_REPEAT_MS) return false;
+  return write(path, stamp);
+}
+
+/**
+ * ONE RECORD PER AGENT. Subagents share the session id, so a shared record
+ * would let one overwrite another's redirect, or spend the main agent's skip.
+ * The main agent's key is the empty string, which no `agent_id` can be: the
+ * decoder refuses an empty one.
+ */
+function redirectPath(dataDir: string, sessionId: string, agentId: string | undefined): string {
+  return join(sessionDir(dataDir, sessionId), `${REDIRECT_PREFIX}${digest(agentId ?? '')}.json`);
+}
+
+/**
+ * NEVER BLOCKED TWICE IN A ROW FOR ONE KIND OF LOOKUP. The pre-call hook
+ * records each redirect as that agent's last one, `request` marks it delivered
+ * once the lookup it named is fulfilled, and the agent's next offer in the same
+ * category, while it is still undelivered, is withheld ({@link takeUndelivered}).
+ * Without it, a lookup that fails sends the agent back to its own tools, and
+ * the same deny meets it there.
+ */
+export async function noteRedirect(
+  dataDir: string,
+  sessionId: string,
+  agentId: string | undefined,
+  redirect: { id: string; category: string },
+  now = Date.now(),
+): Promise<void> {
+  const saved: SavedRedirect = {
+    version: 1,
+    at: now,
+    id: digest(redirect.id),
+    category: redirect.category,
+    delivered: false,
+  };
+  await write(redirectPath(dataDir, sessionId, agentId), saved);
+}
+
+/** The lookup this id named was fulfilled. The session is resolved the way the
+ *  footer is, and only the one agent's record carrying this same id is marked. */
+export async function markDelivered(
+  dataDir: string,
+  decisionId: string,
+  now = Date.now(),
+): Promise<void> {
+  const directory = await resolveProgressSession(dataDir, { id: decisionId, now }).catch(
+    () => null,
+  );
+  if (directory === null) return;
+  const id = digest(decisionId);
+  try {
+    const dir = await opendir(directory);
+    let count = 0;
+    for await (const entry of dir) {
+      // Only redirect records count toward the cap: a busy session's call
+      // records and markers must not push this agent's record past it.
+      if (!entry.isFile() || !entry.name.startsWith(REDIRECT_PREFIX)) continue;
+      if (++count > MAX_RECORDS) return;
+      const path = join(directory, entry.name);
+      const last = await readRedirect(path);
+      if (last?.id !== id) continue;
+      await write(path, { ...last, delivered: true });
+      return;
+    }
+  } catch {
+    // A lost mark costs one withheld offer, never a payment.
+  }
+}
+
+/**
+ * True, once, when this agent's last redirect is live, undelivered and in this
+ * same category. The record is REMOVED, so the call after this one is routed
+ * as usual, and only the caller whose removal succeeds gets true: two parallel
+ * calls cannot both skip on one redirect. Any other answer leaves it alone.
+ */
+export async function takeUndelivered(
+  dataDir: string,
+  sessionId: string,
+  agentId: string | undefined,
+  category: string,
+  now = Date.now(),
+): Promise<boolean> {
+  const path = redirectPath(dataDir, sessionId, agentId);
+  const last = await readRedirect(path);
+  if (last === null || last.delivered || last.category !== category) return false;
+  if (now - last.at > EXPIRY_MS) return false;
+  return rm(path).then(
+    () => true,
+    () => false,
+  );
+}
+
+/**
  * Which session directory a tool call belongs to, or null for "cannot tell".
  * Null is a normal answer and its only consequence is a footer that stays quiet.
  */
@@ -339,13 +516,33 @@ export async function pruneProgress(directory: string, now = Date.now()): Promis
     for await (const entry of dir) {
       if (++count > MAX_RECORDS) return;
       if (!entry.isFile() || entry.name === SESSION_FILE) continue;
-      const record = await readStamp(join(directory, entry.name));
+      const path = join(directory, entry.name);
+      const record = agesByMtime(entry.name) ? await mtimeOf(path) : await readStamp(path);
       if (record === null || now - record.at > EXPIRY_MS) {
-        await rm(join(directory, entry.name), { force: true }).catch(() => undefined);
+        await rm(path, { force: true }).catch(() => undefined);
       }
     }
   } catch {
     // Housekeeping only. Nothing downstream depends on it having run.
+  }
+}
+
+/**
+ * A FILE THAT IS NOT A WHOLE RECORD is aged by its mtime, never read as one: a
+ * temp file between its write and its rename (every writer here names them
+ * `.<name>.<suffix>`), and a docs body, whose size is the provider's. Read as
+ * records they are damaged, and the prune deleted them out from under a
+ * parallel hook's rename.
+ */
+function agesByMtime(name: string): boolean {
+  return name.startsWith('.') || (name.startsWith(AUGMENT_PREFIX) && !name.endsWith('.json'));
+}
+
+async function mtimeOf(path: string): Promise<Stamp | null> {
+  try {
+    return { version: 1, at: (await lstat(path)).mtimeMs };
+  } catch {
+    return null;
   }
 }
 
@@ -490,11 +687,17 @@ function line(row: SavedProgress, now: number): string {
   );
 }
 
-async function write(path: string, body: Stamp | SavedProgress): Promise<void> {
+/** Whether it landed. Every caller but the augment marker ignores the answer. */
+async function write(
+  path: string,
+  body: Stamp | SavedProgress | SavedRedirect | SavedAugment,
+): Promise<boolean> {
   try {
     await writeFileAtomic(path, JSON.stringify(body), { mode: 0o600, dirMode: 0o700 });
+    return true;
   } catch {
     // The footer is the only thing that can be lost here, by design.
+    return false;
   }
 }
 
@@ -507,6 +710,17 @@ function stampOf(row: Record<string, unknown> | null): Stamp | null {
   if (row === null) return null;
   return row.version === 1 && typeof row.at === 'number' && Number.isFinite(row.at)
     ? { version: 1, at: row.at }
+    : null;
+}
+
+async function readRedirect(path: string): Promise<SavedRedirect | null> {
+  const row = await readJson(path);
+  const stamp = stampOf(row);
+  if (row === null || stamp === null) return null;
+  return typeof row.id === 'string' &&
+    typeof row.category === 'string' &&
+    typeof row.delivered === 'boolean'
+    ? { ...stamp, id: row.id, category: row.category, delivered: row.delivered }
     : null;
 }
 

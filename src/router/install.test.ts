@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -11,10 +11,15 @@ import type { CommandContext } from '../context';
 
 let home: string;
 let data: string;
+/** A git root of its own for doctor to run from, so `router.*` never
+ *  resolves from the suite's cwd. */
+let work: string;
 beforeEach(async () => {
   const root = await mkdtemp(join(tmpdir(), 'router-install-'));
   home = join(root, 'home');
   data = join(root, 'data');
+  work = join(root, 'work');
+  await mkdir(join(work, '.git'), { recursive: true });
   await mkdir(join(home, '.claude'), { recursive: true });
   await mkdir(data, { recursive: true });
 });
@@ -78,7 +83,9 @@ const settingsPath = () => join(home, '.claude', 'settings.json');
 const readSettings = async (): Promise<Record<string, unknown>> =>
   JSON.parse(await readFile(settingsPath(), 'utf8')) as Record<string, unknown>;
 
-const handler = (command: string) => [{ type: 'command', command, timeout: 5 }];
+const handler = (command: string, timeout = 5) => [{ type: 'command', command, timeout }];
+/** The after-call entries wait for a search's free docs, so they get longer. */
+const afterCall = handler('tenjin hook shortfall', 15);
 /** Exactly what this build writes into an empty `hooks` key. */
 const CURRENT_HOOKS = {
   UserPromptSubmit: [{ hooks: handler('tenjin hook prompt') }],
@@ -86,8 +93,8 @@ const CURRENT_HOOKS = {
     { matcher: 'WebSearch|WebFetch', hooks: handler('tenjin hook native') },
     { matcher: 'Agent|Task', hooks: handler('tenjin hook agent') },
   ],
-  PostToolUse: [{ matcher: 'WebSearch|WebFetch', hooks: handler('tenjin hook shortfall') }],
-  PostToolUseFailure: [{ matcher: 'WebSearch|WebFetch', hooks: handler('tenjin hook shortfall') }],
+  PostToolUse: [{ matcher: 'WebSearch|WebFetch', hooks: afterCall }],
+  PostToolUseFailure: [{ matcher: 'WebSearch|WebFetch', hooks: afterCall }],
 };
 
 /**
@@ -147,16 +154,16 @@ describe('tenjin install', () => {
     const config = await loadRawConfig(data);
     expect(config.maxAutoSpend).toBe('250000');
     expect(config.sessionBudget).toBe('5000000');
-    expect(config.confirm).toBe('always');
-    expect(config.bazaarPay).toBe(true);
-    expect((result.data as { spend: { kept: string[] } }).spend.kept).toEqual(['confirm']);
+    expect(config.confirm).toBeUndefined();
+    expect(config.bazaarPay).toBeUndefined();
+    expect(result.data).toMatchObject({ spend: { removed: ['confirm'], kept: [] } });
   });
 
   it('turns the pay lane on and auto-approves at or below the per-call cap by default', async () => {
     await runRouterInstall({}, ctx(), deps());
     const config = await loadRawConfig(data);
-    expect(config.confirm).toBe('above:250000');
-    expect(config.bazaarPay).toBe(true);
+    expect(config.confirm).toBeUndefined();
+    expect(config.bazaarPay).toBeUndefined();
   });
 
   it('preserves every unrelated settings key byte for byte', async () => {
@@ -235,7 +242,7 @@ describe('tenjin install', () => {
     expect(result.humanLines).toEqual([
       '! Almost done: Claude Code needs one command',
       `✓ Wallet created: ${ADDRESS}`,
-      '  Spends at most $0.25 a lookup, $5 a day',
+      '  Automatic router: up to $0.25 per call; daily limit $5 a day',
       '  Live status line on: each lookup names its provider while it runs',
       '! Could not add the request tool to Claude Code. Run:',
       `  ${MCP_ADD_COMMAND}`,
@@ -257,7 +264,7 @@ describe('tenjin install', () => {
     expect(result.humanLines).toEqual([
       '✓ Tenjin is set up for Claude Code',
       `✓ Wallet created: ${ADDRESS}`,
-      '  Spends at most $0.25 a lookup, $5 a day',
+      '  Automatic router: up to $0.25 per call; daily limit $5 a day',
       '  Live status line on: each lookup names its provider while it runs',
       '',
       'Next: tenjin wallet fund, then restart Claude Code',
@@ -423,6 +430,85 @@ describe('tenjin uninstall', () => {
     });
     expect(result.data).toMatchObject({ wrote: false });
   });
+
+  it('leaves an x402 server that launches something else, as install does', async () => {
+    await runRouterInstall({}, ctx(), deps());
+    const other = { command: 'npx', args: ['-y', 'some-other-x402-server'] };
+    await writeFile(
+      join(home, '.claude.json'),
+      JSON.stringify({ mcpServers: { x402: other } }, null, 2) + '\n',
+    );
+    const removeMcp = vi.fn(async () => undefined);
+    const result = await runRouterUninstall({}, ctx(), {
+      homeDir: home,
+      env: {},
+      which: () => true,
+      removeMcp,
+    });
+    expect(removeMcp).not.toHaveBeenCalled();
+    expect(result.data).toMatchObject({ mcp: { removed: false, kept: 'foreign', scope: 'user' } });
+    expect(result.humanLines?.join('\n')).toContain('left in place');
+    expect(result.humanLines?.join('\n')).not.toContain('claude mcp remove');
+    const kept = JSON.parse(await readFile(join(home, '.claude.json'), 'utf8')) as {
+      mcpServers: Record<string, unknown>;
+    };
+    expect(kept.mcpServers.x402).toEqual(other);
+  });
+
+  it('removes the x402 server when it is the router', async () => {
+    await runRouterInstall({}, ctx(), deps());
+    await writeFile(
+      join(home, '.claude.json'),
+      JSON.stringify({ mcpServers: { x402: { command: 'tenjin', args: ['mcp'] } } }, null, 2) +
+        '\n',
+    );
+    const removeMcp = vi.fn(async () => undefined);
+    const result = await runRouterUninstall({}, ctx(), {
+      homeDir: home,
+      env: {},
+      which: () => true,
+      removeMcp,
+    });
+    expect(removeMcp).toHaveBeenCalled();
+    expect(result.data).toMatchObject({ mcp: { removed: true, scope: 'user' } });
+  });
+
+  it('removes nothing from a registration file it cannot read', async () => {
+    await runRouterInstall({}, ctx(), deps());
+    await writeFile(join(home, '.claude.json'), '{ not json');
+    const removeMcp = vi.fn(async () => undefined);
+    const result = await runRouterUninstall({}, ctx(), {
+      homeDir: home,
+      env: {},
+      which: () => true,
+      removeMcp,
+    });
+    expect(removeMcp).not.toHaveBeenCalled();
+    expect(result.data).toMatchObject({ mcp: { removed: false, kept: 'unreadable' } });
+  });
+
+  it('leaves a project-scope x402 that launches something else', async () => {
+    const cwd = join(home, 'project');
+    await mkdir(cwd, { recursive: true });
+    await runRouterInstall({ project: true }, ctx(), deps({ cwd }));
+    await writeFile(
+      join(cwd, '.mcp.json'),
+      JSON.stringify({ mcpServers: { x402: { command: 'node', args: ['other.js'] } } }, null, 2) +
+        '\n',
+    );
+    const removeMcp = vi.fn(async () => undefined);
+    const result = await runRouterUninstall({ project: true }, ctx(), {
+      homeDir: home,
+      cwd,
+      env: {},
+      which: () => true,
+      removeMcp,
+    });
+    expect(removeMcp).not.toHaveBeenCalled();
+    expect(result.data).toMatchObject({
+      mcp: { removed: false, kept: 'foreign', scope: 'project' },
+    });
+  });
 });
 
 describe('a settings file this writer will not touch', () => {
@@ -516,6 +602,7 @@ describe('the doctor this release registers', () => {
     const fetchImpl = (async () => new Response('{}', { status: 400 })) as typeof fetch;
     const err = await runRouterDoctor(ctx(), {
       homeDir: home,
+      cwd: work,
       env: {},
       which: () => false,
       fetchImpl,
@@ -535,6 +622,7 @@ describe('the doctor this release registers', () => {
     const fetchImpl = (async () => new Response('{}', { status })) as typeof fetch;
     const err = await runRouterDoctor(ctx(), {
       homeDir: home,
+      cwd: work,
       env: {},
       which: () => true,
       readMcp: async () => true,
@@ -545,6 +633,43 @@ describe('the doctor this release registers', () => {
     const checks = (err as CliError).details as { checks: { name: string; detail: string }[] };
     const router = checks.checks.find((c) => c.name === 'router');
     expect(router?.detail).toContain(detail);
+  });
+});
+
+describe('doctor and the router switch', () => {
+  async function hooksCheck(cwd: string): Promise<{ status: string; detail: string }> {
+    const { runRouterDoctor } = await import('./doctor');
+    await writeFile(join(data, 'wallet.json'), '{"not":"a wallet"}');
+    const result = await runRouterDoctor(ctx(), {
+      homeDir: home,
+      cwd,
+      env: {},
+      which: () => true,
+      readMcp: async () => true,
+      fetchImpl: probe400,
+    }).catch((e: unknown) => e);
+    const checks =
+      result instanceof CliError
+        ? (result.details as { checks: { name: string; status: string; detail: string }[] })
+        : (result as { data: { checks: { name: string; status: string; detail: string }[] } }).data;
+    return checks.checks.find((c) => c.name === 'hooks')!;
+  }
+
+  it('warns, naming the file, when the hooks are wired and the router is off here', async () => {
+    await runRouterInstall({}, ctx(), deps());
+    const repo = join(home, 'repo');
+    await mkdir(join(repo, '.git'), { recursive: true });
+    await mkdir(join(repo, '.tenjin'), { recursive: true });
+    const file = join(repo, '.tenjin', 'config.json');
+    await writeFile(file, JSON.stringify({ router: { enabled: false } }));
+
+    const off = await hooksCheck(repo);
+    expect(off.status).toBe('warn');
+    expect(off.detail).toContain(`router.enabled is false in ${file}`);
+
+    const elsewhere = join(home, 'other');
+    await mkdir(join(elsewhere, '.git'), { recursive: true });
+    expect((await hooksCheck(elsewhere)).status).toBe('ok');
   });
 });
 
@@ -575,7 +700,7 @@ describe('the install readout and the status window', () => {
     );
     const result = await runRouterInstall({}, ctx(), deps());
     const text = result.humanLines!.join('\n');
-    expect(text).toContain('at most $1 a lookup, $10 a day');
+    expect(text).toContain('Automatic router: up to $1 per call; daily limit $10 a day');
     expect(text).not.toContain('$0.25');
     expect(result.data).toMatchObject({
       spend: { effective: { maxAutoSpend: '1', sessionBudget: '10' } },
@@ -585,7 +710,7 @@ describe('the install readout and the status window', () => {
   it('says so when an existing config has no daily ceiling at all', async () => {
     await writeFile(
       join(data, 'config.json'),
-      JSON.stringify({ maxAutoSpend: '500000', sessionBudget: '0' }),
+      JSON.stringify({ maxAutoSpend: '500000', sessionBudget: 'none' }),
     );
     const result = await runRouterInstall({}, ctx(), deps());
     expect(result.humanLines!.join('\n')).toContain('no daily limit');
@@ -599,7 +724,7 @@ describe('the install readout and the status window', () => {
       policy: {
         maxAutoSpendAtomic: 1_000_000n,
         sessionBudgetAtomic: 1_000_000n,
-        confirm: { mode: 'above', thresholdAtomic: 1_000_000n },
+
         allowlistCreators: [],
       },
     });
@@ -638,6 +763,7 @@ describe('doctor on a --project install', () => {
     // a correctly wired machine as unwired and exit 3.
     const blind = await runRouterDoctor(ctx(), {
       homeDir: home,
+      cwd: work,
       env: {},
       which: () => true,
       readMcp: async () => true,
@@ -903,6 +1029,38 @@ describe('tenjin update re-applies the install', () => {
     expect((await readSettings()).hooks).toEqual(CURRENT_HOOKS);
   });
 
+  /**
+   * The after-call entry waits, bounded, for the free docs the pre-call hook
+   * fetched beside a search, so it carries a longer kill budget than the rest;
+   * an install still at 5 s would cut that wait off. The writer converges it on
+   * every route, including the refresh `tenjin update` spawns, and leaves the
+   * pre-call entry, which never waits, at 5 s.
+   */
+  it.each([
+    ['install', {}],
+    ['install --refresh (what `tenjin update` spawns)', { refresh: true }],
+  ])('gives the after-call entries 15 s on %s', async (_label, args) => {
+    const fs = await import('node:fs/promises');
+    await runRouterInstall({}, ctx(), deps());
+    const settings = await readSettings();
+    const hooks = settings.hooks as Record<string, unknown[]>;
+    for (const event of ['PostToolUse', 'PostToolUseFailure']) {
+      hooks[event] = [{ matcher: 'WebSearch|WebFetch', hooks: handler('tenjin hook shortfall') }];
+    }
+    await fs.writeFile(settingsPath(), JSON.stringify(settings, null, 2) + '\n');
+
+    const result = await runRouterInstall(args, ctx(), deps());
+    expect((onlyInstall(result) as { hooks: { wrote: boolean } }).hooks.wrote).toBe(true);
+    const after = (await readSettings()).hooks as typeof CURRENT_HOOKS;
+    expect(after.PostToolUse).toEqual([{ matcher: 'WebSearch|WebFetch', hooks: afterCall }]);
+    expect(after.PostToolUseFailure).toEqual([{ matcher: 'WebSearch|WebFetch', hooks: afterCall }]);
+    expect(after.PreToolUse[0]).toEqual({
+      matcher: 'WebSearch|WebFetch',
+      hooks: handler('tenjin hook native'),
+    });
+    expect(after).toEqual(CURRENT_HOOKS);
+  });
+
   it('stays in the project scope it was installed into, with no flag', async () => {
     const fs = await import('node:fs/promises');
     const cwd = join(home, 'project');
@@ -1028,6 +1186,186 @@ describe('tenjin update re-applies the install', () => {
  * here, and `tenjin update` is a binary swap plus exactly that.
  */
 describe('a refresh converges one scope', () => {
+  it.each(['missing', 'dangling symlink', 'non-directory parent'])(
+    'refreshes a project with an unavailable home: %s',
+    async (kind) => {
+      await runRouterInstall({ project: true }, ctx(), deps({ cwd: work }));
+      const homeEntry = join(home, '..', 'unavailable-home');
+      const unavailableHome =
+        kind === 'non-directory parent' ? join(homeEntry, 'child') : homeEntry;
+      if (kind === 'dangling symlink')
+        await symlink(join(home, '..', 'missing-target'), unavailableHome, 'dir');
+      if (kind === 'non-directory parent') await writeFile(homeEntry, 'not a directory');
+      const registerMcp = vi.fn(async () => undefined);
+      const originalHomeSettings = await readFile(settingsPath(), 'utf8').catch(() => null);
+
+      const result = await runRouterInstall(
+        { refresh: true },
+        ctx(),
+        deps({
+          homeDir: unavailableHome,
+          cwd: work,
+          registerMcp,
+        }),
+      );
+
+      expect(onlyInstall(result)).toMatchObject({
+        refresh: true,
+        scope: 'project',
+        settingsPath: join(work, '.claude', 'settings.json'),
+        mcp: { scope: 'project', registered: true },
+      });
+      expect(registerMcp).toHaveBeenCalledWith('claude mcp add x402 -s project -- tenjin mcp', {
+        scope: 'project',
+        cwd: work,
+      });
+      expect(await readFile(settingsPath(), 'utf8').catch(() => null)).toBe(originalHomeSettings);
+      if (kind === 'non-directory parent')
+        expect(await readFile(homeEntry, 'utf8')).toBe('not a directory');
+      else
+        await expect(readFile(join(unavailableHome, '.claude.json'))).rejects.toMatchObject({
+          code: 'ENOENT',
+        });
+    },
+  );
+
+  it.each([false, true])(
+    'preserves a home project registration on unflagged refresh (user registration: %s)',
+    async (userRegistered) => {
+      await runRouterInstall({ project: true }, ctx(), deps({ cwd: home }));
+      const config = JSON.stringify({ mcpServers: { x402: { command: 'tenjin', args: ['mcp'] } } });
+      await writeFile(join(home, '.mcp.json'), config);
+      if (userRegistered) await writeFile(join(home, '.claude.json'), config);
+      const registerMcp = vi.fn(async () => undefined);
+
+      const result = await runRouterInstall(
+        { refresh: true },
+        ctx(),
+        deps({ cwd: home, registerMcp }),
+      );
+
+      expect(onlyInstall(result)).toMatchObject({
+        scope: userRegistered ? 'user' : 'project',
+        mcp: { registered: true, reconciled: 'already-registered' },
+      });
+      expect(registerMcp).not.toHaveBeenCalled();
+      expect(await readFile(join(home, '.mcp.json'), 'utf8')).toBe(config);
+      if (userRegistered) expect(await readFile(join(home, '.claude.json'), 'utf8')).toBe(config);
+      else
+        await expect(readFile(join(home, '.claude.json'))).rejects.toMatchObject({
+          code: 'ENOENT',
+        });
+    },
+  );
+
+  it.each(['home', 'cwd'])('recognizes a symlinked %s as the user install', async (aliased) => {
+    await runRouterInstall({}, ctx(), deps());
+    const alias = join(home, '..', 'home-alias');
+    await symlink(home, alias, 'dir');
+    const config = JSON.stringify({ mcpServers: { x402: { command: 'tenjin', args: ['mcp'] } } });
+    await writeFile(join(home, '.claude.json'), config);
+    const registerMcp = vi.fn(async () => undefined);
+
+    const result = await runRouterInstall(
+      { refresh: true },
+      ctx(),
+      deps({
+        homeDir: aliased === 'home' ? alias : home,
+        cwd: aliased === 'cwd' ? alias : home,
+        registerMcp,
+      }),
+    );
+
+    expect(onlyInstall(result)).toMatchObject({ scope: 'user', mcp: { registered: true } });
+    expect(registerMcp).not.toHaveBeenCalled();
+    expect(await readFile(join(home, '.claude.json'), 'utf8')).toBe(config);
+    await expect(readFile(join(home, '.mcp.json'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it.each(['.claude.json', '.mcp.json'])(
+    'does not infer a different scope from unreadable %s at home',
+    async (file) => {
+      await runRouterInstall({}, ctx(), deps());
+      await writeFile(join(home, file), '{ broken');
+      const registerMcp = vi.fn(async () => undefined);
+
+      await expect(
+        runRouterInstall({ refresh: true }, ctx(), deps({ cwd: home, registerMcp })),
+      ).rejects.toMatchObject({ code: 'REFUSED' });
+
+      expect(registerMcp).not.toHaveBeenCalled();
+      expect(await readFile(join(home, file), 'utf8')).toBe('{ broken');
+    },
+  );
+
+  it.each([false, true])(
+    'refreshes user scope from home (existing MCP registration: %s)',
+    async (registered) => {
+      await runRouterInstall({}, ctx(), deps());
+      const userMcpPath = join(home, '.claude.json');
+      const entry = { command: 'tenjin', args: ['mcp'] };
+      const userConfig = {
+        mcpServers: {
+          unrelated: { command: 'other-server' },
+          ...(registered ? { x402: entry } : {}),
+        },
+      };
+      await writeFile(userMcpPath, JSON.stringify(userConfig));
+      const registerMcp = vi.fn(async (_command: string, opts: { scope: string }) => {
+        const path = opts.scope === 'user' ? userMcpPath : join(home, '.mcp.json');
+        await writeFile(
+          path,
+          JSON.stringify({
+            ...userConfig,
+            mcpServers: { ...userConfig.mcpServers, x402: entry },
+          }),
+        );
+      });
+
+      // This is the cwd and argument combination spawned by `tenjin update`.
+      const result = await runRouterInstall(
+        { refresh: true },
+        ctx(),
+        deps({ cwd: home, registerMcp }),
+      );
+
+      expect(onlyInstall(result)).toMatchObject({
+        refresh: true,
+        scope: 'user',
+        settingsPath: settingsPath(),
+        mcp: { scope: 'user', registered: true },
+      });
+      expect(registerMcp).toHaveBeenCalledTimes(registered ? 0 : 1);
+      if (!registered) {
+        expect(registerMcp).toHaveBeenCalledWith(MCP_ADD_COMMAND, { scope: 'user', cwd: home });
+      }
+      expect(JSON.parse(await readFile(userMcpPath, 'utf8'))).toEqual({
+        ...userConfig,
+        mcpServers: { ...userConfig.mcpServers, x402: entry },
+      });
+      await expect(readFile(join(home, '.mcp.json'), 'utf8')).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+    },
+  );
+
+  it('honors an explicit project refresh even when the project is home', async () => {
+    await runRouterInstall({ project: true }, ctx(), deps({ cwd: home }));
+    const registerMcp = vi.fn(async () => undefined);
+
+    const result = await runRouterInstall(
+      { refresh: true, project: true },
+      ctx(),
+      deps({ cwd: home, registerMcp }),
+    );
+
+    expect(onlyInstall(result)).toMatchObject({ scope: 'project', mcp: { scope: 'project' } });
+    expect(registerMcp).toHaveBeenCalledWith('claude mcp add x402 -s project -- tenjin mcp', {
+      scope: 'project',
+      cwd: home,
+    });
+  });
+
   it('takes the project install when this directory carries the entries', async () => {
     const fs = await import('node:fs/promises');
     const cwd = join(home, 'project');
@@ -1279,4 +1617,104 @@ describe('the live status line', () => {
     expect(settings.statusLine).toBeUndefined();
     expect(settings.hooks).toEqual({});
   });
+});
+
+describe('payment configuration and obsolete skill cutover', () => {
+  it.each(['0', 'none', '1200000'])(
+    'preserves explicit daily limit %s and all related opt-outs across install and refresh',
+    async (sessionBudget) => {
+      const config = {
+        sessionBudget,
+        maxAutoSpend: '0',
+        router: { enabled: false },
+        bazaarRegistries: ['https://custom.test'],
+      };
+      await writeFile(join(data, 'config.json'), JSON.stringify(config));
+      await runRouterInstall({}, ctx(), deps());
+      await runRouterInstall({ refresh: true }, ctx(), deps());
+      expect(await loadRawConfig(data)).toMatchObject(config);
+    },
+  );
+  it.each([false, true, null])(
+    'cleans retired values %s on install and refresh, with reports',
+    async (value) => {
+      const current = {
+        sessionBudget: '0',
+        maxAutoSpend: '0',
+        router: { enabled: false },
+        future: { kept: true },
+      };
+      const legacy = { ...current, bazaarPay: value, confirm: value };
+      await writeFile(join(data, 'config.json'), JSON.stringify(legacy));
+      const result = await runRouterInstall({}, ctx(), deps());
+      expect(await loadRawConfig(data)).toMatchObject(current);
+      expect(await loadRawConfig(data)).not.toHaveProperty('confirm');
+      expect(await loadRawConfig(data)).not.toHaveProperty('bazaarPay');
+      expect(result.data).toMatchObject({ spend: { removed: ['bazaarPay', 'confirm'] } });
+      expect(result.humanLines?.join('\n')).toContain(
+        'Removed retired settings: bazaarPay, confirm',
+      );
+      await writeFile(join(data, 'config.json'), JSON.stringify(legacy));
+      const refresh = await runRouterInstall({ refresh: true }, ctx(), deps());
+      expect(refresh.data).toMatchObject({ spend: { removed: ['bazaarPay', 'confirm'], set: [] } });
+      expect(await loadRawConfig(data)).toEqual(current);
+      const again = await runRouterInstall({ refresh: true }, ctx(), deps());
+      expect(again.data).toMatchObject({ spend: { removed: [] } });
+    },
+  );
+  it('refresh removes the owned old payment skill while preserving user files', async () => {
+    await runRouterInstall({}, ctx(), deps());
+    const path = join(home, '.claude', 'skills', 'tenjin-pay');
+    await mkdir(path, { recursive: true });
+    await writeFile(join(path, 'SKILL.md'), '---\nname: tenjin-pay\n---\nold');
+    await writeFile(join(path, 'notes.md'), 'mine');
+    const result = await runRouterInstall({ refresh: true }, ctx(), deps());
+    expect(result.data).toMatchObject({ removedSkills: [path] });
+    await expect(readFile(join(path, 'SKILL.md'))).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(await readFile(join(path, 'notes.md'), 'utf8')).toBe('mine');
+  });
+});
+
+describe('daily limit readouts', () => {
+  it.each(['0', 'none', '2000000'])(
+    'status distinguishes %s and labels the automatic threshold honestly',
+    async (sessionBudget) => {
+      await writeFile(join(data, 'config.json'), JSON.stringify({ sessionBudget }));
+      const { runRouterStatus } = await import('./status');
+      const result = await runRouterStatus(ctx());
+      expect(result.data).toMatchObject({
+        window: { budget: sessionBudget === 'none' ? null : { atomic: sessionBudget } },
+      });
+      expect(result.humanLines?.join('\n')).toContain('automatic router up to');
+      expect(result.humanLines?.join('\n')).not.toContain('per call at most');
+    },
+  );
+});
+
+it('status warns about ignored retired keys and reports automatic exposure separately', async () => {
+  await writeFile(
+    join(data, 'config.json'),
+    JSON.stringify({ bazaarPay: false, confirm: 'always' }),
+  );
+  await writeFile(
+    join(data, 'spend.json'),
+    JSON.stringify({
+      schemaVersion: 2,
+      windowStartMs: Date.now(),
+      committedAtomic: '9000000',
+      automaticCommittedAtomic: '100000',
+      reservations: [{ id: 'm', amountAtomic: '500000', mode: 'manual', atMs: Date.now() }],
+    }),
+  );
+  const { runRouterStatus } = await import('./status');
+  const result = await runRouterStatus(ctx());
+  expect(result.data).toMatchObject({
+    warnings: [expect.stringContaining('bazaarPay, confirm')],
+    window: {
+      committed: { atomic: '9000000' },
+      automaticExposure: { atomic: '100000' },
+      budget: { atomic: '5000000' },
+    },
+  });
+  expect(result.humanLines?.join('\n')).toContain('manual pay always requires consent');
 });

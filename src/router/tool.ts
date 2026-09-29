@@ -8,7 +8,8 @@ import type { SpendAuthorizer, WalletProvider } from '../lib/wallet';
 import type { TenjinSigner } from '../lib/wallet/provider';
 import type { CommandContext } from '../context';
 import { requestDecision, type DecisionContract, type DecisionDiagnostics } from './decision';
-import { openLookupFooter } from './progress';
+import { markDelivered, openLookupFooter } from './progress';
+import { routerSettings } from './settings';
 
 /**
  * The `request` tool: one free decision per lookup, then ONE payment, to the
@@ -28,8 +29,7 @@ import { openLookupFooter } from './progress';
  * origin and spend at most one `maxAutoSpend` inside the daily budget.
  *
  * `needs_approval` is a LOCAL outcome only. The server never sends it: it is
- * what a price over the cap, an exhausted budget or an explicit `confirm:
- * always` looks like from here, and the fix is a command the user can run.
+ * what a price over the cap or an exhausted budget looks like from here, and the fix is a command the user can run.
  */
 
 export interface RequestToolArgs {
@@ -50,6 +50,9 @@ export interface RequestToolDeps {
   fetchImpl?: typeof fetch;
   /** Test seam forwarded to the provider leg. */
   payDeps?: PayDeps;
+  /** The directory `router.*` resolves from; defaults to `process.cwd()`, which
+   *  Claude Code sets to the project directory for an MCP server. */
+  cwd?: string;
 }
 
 export interface RequestToolResult {
@@ -62,6 +65,11 @@ export async function runRequestTool(
   args: RequestToolArgs,
   deps: RequestToolDeps,
 ): Promise<RequestToolResult> {
+  // THE SAME SWITCH THE HOOKS OBEY, read first. The tool is pre-allowed, so
+  // without this it would be a second path off the machine in a repository the
+  // user marked private: nothing is sent and nothing is paid.
+  const off = await routerOff(deps);
+  if (off !== null) return fail('needs_input', off, { nextStep: ROUTER_OFF_NEXT_STEP });
   const query = args.query.trim().slice(0, 8_000);
   if (query.length === 0) {
     return fail(
@@ -151,6 +159,7 @@ export async function runRequestTool(
         headers: built.headers,
         ...(built.body !== undefined ? { rawBody: built.body } : {}),
         terms,
+        execution: 'router',
         requestKey: `${decision.capabilityId}:${canonicalHash(contract.arguments ?? {})}`,
         ...(contract.resultSchema !== undefined ? { resultSchema: contract.resultSchema } : {}),
         printBody: true,
@@ -166,7 +175,7 @@ export async function runRequestTool(
     const data = paid.data as {
       bodyText?: string;
       amountPaid?: { atomic: string };
-      /** Set when the body was delivered without its success rule having run. */
+      /** Set when the body missed its success rule, or the rule never ran. */
       resultUnverified?: boolean;
       resultCaveat?: string;
     };
@@ -179,13 +188,14 @@ export async function runRequestTool(
       result: data.bodyText ?? '',
       providerContentUntrusted: true,
     };
-    // UNVERIFIED IS NOT FULFILLED. A body the success rule could not be run
-    // against may be exactly the contract failure the rule exists to catch, and
-    // a caveat inside a `fulfilled` envelope does not reach code that branches
-    // on the status: a provider could pad a broken answer past the validation
-    // limit and have it read as a checked, paid result. The body still rides
-    // along whole, because the money moved and withholding the product would be
-    // a second loss on top of the first.
+    // UNVERIFIED IS NOT FULFILLED. A body that missed its success rule, or
+    // that the rule could not be run against, may be exactly the contract
+    // failure the rule exists to catch, and a caveat inside a `fulfilled`
+    // envelope does not reach code that branches on the status: a provider
+    // could pad a broken answer past the validation limit and have it read as
+    // a checked, paid result. The body still rides along whole, because the
+    // money moved and withholding the product would be a second loss on top
+    // of the first.
     const shown = {
       provider: built.url,
       ...paramsOf(contract),
@@ -204,6 +214,13 @@ export async function runRequestTool(
       };
     }
     await footer.done('fulfilled', shown);
+    // ONLY A FULFILLED, PAID LOOKUP DELIVERS the redirect that named its id, so
+    // the pre-call hook routes the next native call again; anything less lets
+    // it run. A free lookup carries no success rule, so its 200 proves nothing:
+    // a docs lookup that matched the wrong library is a 200 the agent rejects,
+    // and counting it would send the agent's own retry straight back to it.
+    if (args.id !== undefined && args.id.length > 0 && decision.providerPriceAtomic !== '0')
+      await markDelivered(deps.ctx.dataDir, args.id);
     return {
       isError: false,
       summary: `Fulfilled by ${base.supplier} · ${base.cost.join(' · ')}`,
@@ -320,6 +337,27 @@ export function costLines(providerAtomic: bigint): string[] {
  */
 const ROUTINE: ReadonlySet<FailStatus> = new Set(['native', 'needs_input', 'needs_approval']);
 
+const ROUTER_OFF_NEXT_STEP =
+  'Continue with your own tools. Nothing was sent to the router and nothing was bought.';
+
+/**
+ * Why the router is off for this directory, naming the key and the file that
+ * set it, or null when it is on. A layer that cannot be read is off: a switch
+ * the user set must not fail open.
+ */
+async function routerOff(deps: RequestToolDeps): Promise<string | null> {
+  try {
+    const { enabled } = await routerSettings({
+      cwd: deps.cwd ?? process.cwd(),
+      dataDir: deps.ctx.dataDir,
+    });
+    if (enabled.value) return null;
+    return `router.enabled is false in ${enabled.path ?? 'the config'}, so the router is off here.`;
+  } catch (err) {
+    return `router.enabled could not be read (${err instanceof Error ? err.message : String(err)}), so the router is off here.`;
+  }
+}
+
 /** One short line saying what the host does next, per routine outcome. */
 const NEXT_STEP: Record<string, string> = {
   native: 'Continue with your own tools. Nothing was bought.',
@@ -356,13 +394,15 @@ interface FailExtras {
   diagnostics?: DecisionDiagnostics;
   /** The backend's plain sentence about the call itself, such as a dead id. */
   note?: string;
+  /** Replaces the generic next step, for an outcome this build decided alone. */
+  nextStep?: string;
 }
 
 /** The headline: calm for a routine outcome, explicit for a real failure. */
 function summaryFor(status: FailStatus, reason: string): string {
   if (status === 'native') return `No paid lookup needed: ${reason}`;
   if (status === 'needs_input') return `More input needed: ${reason}`;
-  if (status === 'needs_approval') return `Approval needed: ${reason}`;
+  if (status === 'needs_approval') return `Blocked by spending policy: ${reason}`;
   return `x402 request ${status}: ${reason}`;
 }
 
@@ -390,7 +430,7 @@ function fail(status: FailStatus, reason: string, extras: FailExtras = {}): Requ
       // BACKEND'S own next action wins when it sent one: it knows which field
       // is missing.
       ...(routine || diagnostics !== undefined
-        ? { nextStep: nextStepFor(status, diagnostics) }
+        ? { nextStep: extras.nextStep ?? nextStepFor(status, diagnostics) }
         : {}),
       ...(diagnostics !== undefined
         ? {

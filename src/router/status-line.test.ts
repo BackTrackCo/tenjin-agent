@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -14,6 +14,9 @@ import type { Io } from '../lib/output';
 let dir: string;
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'router-status-line-'));
+  // Every event names this directory, a git root of its own, so `router.*`
+  // never resolves from the suite's cwd.
+  await mkdir(join(dir, '.git'));
 });
 afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
@@ -49,7 +52,7 @@ describe('the status line command', () => {
       NOW,
     );
 
-    expect(await render(JSON.stringify({ session_id: 'session-a' }))).toEqual([
+    expect(await render(JSON.stringify({ cwd: dir, session_id: 'session-a' }))).toEqual([
       'x402 · request: calling api.exa.ai/search\n',
     ]);
   });
@@ -62,7 +65,9 @@ describe('the status line command', () => {
       NOW,
     );
 
-    expect(await render(JSON.stringify({ session_id: 'session-b' }))).toEqual(['x402 · ready\n']);
+    expect(await render(JSON.stringify({ cwd: dir, session_id: 'session-b' }))).toEqual([
+      'x402 · ready\n',
+    ]);
   });
 
   it('prints nothing for an event with no session identity', async () => {
@@ -82,11 +87,25 @@ describe('the status line command', () => {
     expect(out).toEqual([]);
   });
 
+  it('shows no footer in a directory where the router is off', async () => {
+    const { writeFile } = await import('node:fs/promises');
+    const repo = join(dir, 'repo');
+    await mkdir(join(repo, '.git'), { recursive: true });
+    await mkdir(join(repo, '.tenjin'), { recursive: true });
+    await writeFile(
+      join(repo, '.tenjin', 'config.json'),
+      JSON.stringify({ router: { enabled: false } }),
+    );
+    await writeProgress(sessionDir(dir, 'session-a'), 'call-1', { phase: 'routing' }, NOW);
+
+    expect(await render(JSON.stringify({ session_id: 'session-a', cwd: repo }))).toEqual([]);
+  });
+
   it('writes nothing at all', async () => {
     await writeProgress(sessionDir(dir, 'session-a'), 'call-1', { phase: 'routing' }, NOW);
     const before = await readdir(sessionDir(dir, 'session-a'));
 
-    await render(JSON.stringify({ session_id: 'session-a' }));
+    await render(JSON.stringify({ cwd: dir, session_id: 'session-a' }));
 
     expect(await readdir(sessionDir(dir, 'session-a'))).toEqual(before);
   });
