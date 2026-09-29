@@ -118,8 +118,8 @@ export const NATIVE_MATCHER = 'WebSearch|WebFetch';
  * takes both.
  */
 export function routerHookPlan(): unknown[] {
-  const handler = (command: string, timeout = HOOK_TIMEOUT_SECONDS) => [
-    { type: 'command', command, timeout },
+  const handler = (command: string, timeout = HOOK_TIMEOUT_SECONDS, statusMessage?: string) => [
+    { type: 'command', command, timeout, ...(statusMessage ? { statusMessage } : {}) },
   ];
   const afterCall = () => handler('tenjin hook shortfall', AFTER_CALL_TIMEOUT_SECONDS);
   return [
@@ -129,7 +129,11 @@ export function routerHookPlan(): unknown[] {
     {
       event: 'PreToolUse',
       matcher: 'Grep',
-      hooks: handler('tenjin hook repository', REPOSITORY_TIMEOUT_SECONDS),
+      hooks: handler(
+        'tenjin hook repository',
+        REPOSITORY_TIMEOUT_SECONDS,
+        'Calling x402… repository search',
+      ),
     },
     { event: 'PostToolUse', matcher: NATIVE_MATCHER, hooks: afterCall() },
     { event: 'PostToolUseFailure', matcher: NATIVE_MATCHER, hooks: afterCall() },

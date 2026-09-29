@@ -55,7 +55,7 @@ afterEach(async () => {
   await Promise.all(directories.splice(0).map((d) => rm(d, { recursive: true, force: true })));
 });
 describe('isolated Jevgrep lifecycle', () => {
-  it('keeps published versions unavailable pending qualification', async () => {
+  it('keeps unqualified published versions unavailable', async () => {
     expect(isJevgrepRuntimeAvailable({ kind: 'release', version: '0.4.3' })).toBe(false);
     const evaluate = vi.fn();
     expect(
@@ -253,4 +253,32 @@ it('uses qualified pacing and separate source/output bounds only for extended re
   expect(search.argv[search.argv.indexOf('--max-source-bytes') + 1]).toBe('16384');
   expect(search.outputBytes).toBe(32768);
   expect(search.argv[search.argv.indexOf('--concurrency') + 1]).toBe('2');
+});
+
+it('pins published 0.7.0 and uses only its supported custom auth flags', async () => {
+  const f = await fixture();
+  const calls: BoundedCommand[] = [];
+  expect(isJevgrepRuntimeAvailable({ kind: 'release', version: '0.7.0' })).toBe(true);
+  expect(isJevgrepRuntimeAvailable({ kind: 'release', version: 'latest' })).toBe(false);
+  const result = await runJevgrep(
+    {
+      ...f,
+      runtime: { kind: 'release', version: '0.7.0' },
+      profile: 'extended-v1',
+      query: 'Find the implementation',
+      evaluate: vi.fn(),
+    },
+    {
+      runCommand: async (command) => {
+        calls.push(command);
+        return ok;
+      },
+    },
+  );
+  expect(result.status).toBe('complete');
+  expect(calls[0]!.argv).toContain('@dzhng/jevgrep@0.7.0');
+  expect(calls[0]!.argv).not.toContain('--transport-profile');
+  expect(calls[0]!.argv).toContain('custom');
+  expect(calls[1]!.outputBytes).toBe(32768);
+  expect(calls[1]!.argv[calls[1]!.argv.indexOf('--max-source-bytes') + 1]).toBe('16384');
 });

@@ -1,3 +1,4 @@
+import { QUALIFIED_JEVGREP_RELEASES, isQualifiedJevgrepRelease } from './runtime';
 import { jevgrepProfile } from './profile';
 import { constants } from 'node:fs';
 import { lstat, open, realpath, stat } from 'node:fs/promises';
@@ -32,11 +33,14 @@ const GrantSchema = z.strictObject({
     .string()
     .regex(/^\d+$/)
     .refine((v) => BigInt(v) > 0n && BigInt(v) <= jevgrepProfile('extended-v1').maxRunAtomic),
-  runtime: z.strictObject({
-    kind: z.literal('local-artifact'),
-    path: z.string().min(1).refine(isAbsolute),
-    sha256: z.string().regex(/^[a-f0-9]{64}$/),
-  }),
+  runtime: z.discriminatedUnion('kind', [
+    z.strictObject({
+      kind: z.literal('local-artifact'),
+      path: z.string().min(1).refine(isAbsolute),
+      sha256: z.string().regex(/^[a-f0-9]{64}$/),
+    }),
+    z.strictObject({ kind: z.literal('release'), version: z.enum(QUALIFIED_JEVGREP_RELEASES) }),
+  ]),
 });
 export type JevgrepGrant = z.infer<typeof GrantSchema>;
 const BindingSchema = z.strictObject({
@@ -108,14 +112,12 @@ export async function eligibleJevgrep(
       (await realpath(grant.root)) !== grant.root
     )
       return null;
-    const runtime = await lstat(grant.runtime.path);
-    if (
-      !runtime.isFile() ||
-      runtime.isSymbolicLink() ||
-      !grant.runtime.path.endsWith('.tgz') ||
-      BigInt(grant.maxRunAtomic) < BigInt(JEVGREP_SUPPLIER.maxAmountAtomic)
-    )
-      return null;
+    if (BigInt(grant.maxRunAtomic) < BigInt(JEVGREP_SUPPLIER.maxAmountAtomic)) return null;
+    if (grant.runtime.kind === 'local-artifact') {
+      const runtime = await lstat(grant.runtime.path);
+      if (!runtime.isFile() || runtime.isSymbolicLink() || !grant.runtime.path.endsWith('.tgz'))
+        return null;
+    }
     const { policy } = await resolveContextSettings(ctx);
     const { corrupt } = await readLedger(spendLedgerPath(ctx.dataDir));
     if (corrupt) return null;
@@ -191,8 +193,9 @@ export async function configureJevgrep(
   ctx: CommandContext,
   args: {
     root: string;
-    artifact: string;
-    sha256: string;
+    artifact?: string;
+    sha256?: string;
+    release?: string;
     maxRun: string;
     shareSource: boolean;
     experimental: boolean;
@@ -210,20 +213,33 @@ export async function configureJevgrep(
       'USAGE',
       '--root must name the repository root, not a parent or subdirectory.',
     );
-  const artifact = await realpath(args.artifact);
-  const info = await stat(artifact);
-  if (!artifact.endsWith('.tgz') || !info.isFile() || info.size > 32 * 1024 * 1024)
-    throw new CliError('USAGE', 'Provide the reviewed Jevgrep npm tarball (at most 32 MiB).');
-  const file = await open(artifact, 'r');
-  let digest: string;
-  try {
-    digest = createHash('sha256')
-      .update(await file.readFile())
-      .digest('hex');
-  } finally {
-    await file.close();
+  let runtime: JevgrepGrant['runtime'];
+  if (args.release !== undefined) {
+    if (args.artifact !== undefined || args.sha256 !== undefined)
+      throw new CliError('USAGE', '--release cannot be combined with --artifact or --sha256.');
+    if (!isQualifiedJevgrepRelease(args.release))
+      throw new CliError('USAGE', 'Provide a qualified exact release: 0.7.0.');
+    runtime = { kind: 'release', version: args.release };
+  } else {
+    if (!args.artifact || !args.sha256)
+      throw new CliError('USAGE', 'Provide --release 0.7.0 or both --artifact and --sha256.');
+    const artifact = await realpath(args.artifact);
+    const info = await stat(artifact);
+    if (!artifact.endsWith('.tgz') || !info.isFile() || info.size > 32 * 1024 * 1024)
+      throw new CliError('USAGE', 'Provide the reviewed Jevgrep npm tarball (at most 32 MiB).');
+    const file = await open(artifact, 'r');
+    let digest: string;
+    try {
+      digest = createHash('sha256')
+        .update(await file.readFile())
+        .digest('hex');
+    } finally {
+      await file.close();
+    }
+    if (digest !== args.sha256)
+      throw new CliError('USAGE', 'The artifact does not match --sha256.');
+    runtime = { kind: 'local-artifact', path: artifact, sha256: digest };
   }
-  if (digest !== args.sha256) throw new CliError('USAGE', 'The artifact does not match --sha256.');
   const parsed = GrantSchema.safeParse({
     version: 1,
     id: randomUUID(),
@@ -233,7 +249,7 @@ export async function configureJevgrep(
     supplier: 'jev-x402',
     shareSource: true,
     maxRunAtomic: parseUsdToAtomic(args.maxRun).toString(),
-    runtime: { kind: 'local-artifact', path: artifact, sha256: digest },
+    runtime,
   });
   if (!parsed.success)
     throw new CliError('USAGE', 'The run budget must be positive and at most $1.');

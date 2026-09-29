@@ -83,7 +83,9 @@ const settingsPath = () => join(home, '.claude', 'settings.json');
 const readSettings = async (): Promise<Record<string, unknown>> =>
   JSON.parse(await readFile(settingsPath(), 'utf8')) as Record<string, unknown>;
 
-const handler = (command: string, timeout = 5) => [{ type: 'command', command, timeout }];
+const handler = (command: string, timeout = 5, statusMessage?: string) => [
+  { type: 'command', command, timeout, ...(statusMessage ? { statusMessage } : {}) },
+];
 /** The after-call entries wait for a search's free docs, so they get longer. */
 const afterCall = handler('tenjin hook shortfall', 15);
 /** Exactly what this build writes into an empty `hooks` key. */
@@ -92,7 +94,10 @@ const CURRENT_HOOKS = {
   PreToolUse: [
     { matcher: 'WebSearch|WebFetch', hooks: handler('tenjin hook native') },
     { matcher: 'Agent|Task', hooks: handler('tenjin hook agent') },
-    { matcher: 'Grep', hooks: handler('tenjin hook repository', 990) },
+    {
+      matcher: 'Grep',
+      hooks: handler('tenjin hook repository', 990, 'Calling x402… repository search'),
+    },
   ],
   PostToolUse: [{ matcher: 'WebSearch|WebFetch', hooks: afterCall }],
   PostToolUseFailure: [{ matcher: 'WebSearch|WebFetch', hooks: afterCall }],

@@ -10,8 +10,8 @@ import { createJevgrepSnapshot, SnapshotPolicyUnavailable } from './snapshot.js'
 import type { SnapshotSummary } from './snapshot.js';
 import { createJevgrepAnswerCache } from './answer-cache.js';
 
-/** No published release containing upstream #28 has been qualified yet. */
-export const QUALIFIED_JEVGREP_RELEASES: readonly string[] = Object.freeze([]);
+import { isQualifiedJevgrepRelease } from './runtime';
+export { QUALIFIED_JEVGREP_RELEASES } from './runtime';
 export type JevgrepRuntime = NpmRuntime;
 export type JevgrepRunResult = {
   status: 'complete' | 'partial' | 'failed' | 'cancelled' | 'unavailable';
@@ -24,7 +24,7 @@ export type JevgrepRunResult = {
 export function isJevgrepRuntimeAvailable(runtime: JevgrepRuntime | undefined): boolean {
   if (!runtime || !['darwin', 'linux'].includes(process.platform)) return false;
   return runtime.kind === 'release'
-    ? QUALIFIED_JEVGREP_RELEASES.includes(runtime.version)
+    ? isQualifiedJevgrepRelease(runtime.version)
     : isAbsolute(runtime.path) &&
         runtime.path.endsWith('.tgz') &&
         /^[a-f0-9]{64}$/.test(runtime.sha256);
@@ -145,7 +145,11 @@ export async function runJevgrep(
         'auth',
         '--provider',
         'custom',
-        ...(policy.id === 'extended-v1' ? ['--transport-profile', 'tenjin-x402'] : []),
+        // Reviewed local builds support this explicit pacing profile; published
+        // 0.7.0 custom auth does not expose that fork-specific option.
+        ...(policy.id === 'extended-v1' && options.runtime!.kind === 'local-artifact'
+          ? ['--transport-profile', 'tenjin-x402']
+          : []),
         '--base-url',
         proxy.baseURL,
         '--model',

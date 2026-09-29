@@ -9,23 +9,28 @@ Exact known lookups, uncommitted changes and no-upload requests should use nativ
 The hook admits at most three classification attempts and one retrieval attempt per human turn.
 Durable attempt markers prevent duplicate hook delivery or concurrent calls from paying again.
 
-This pilot requires Tenjin's matching server branch and a reviewed npm tarball built from
-[Jevgrep PR #28](https://github.com/dzhng/jevgrep/pull/28). Reviewed local artifacts include the original 0.4.2 pilot and the qualified 0.4.4 custom-auth
-build; the npm version alone does not select their code. The release allowlist is empty until a
-published artifact with custom auth passes qualification. Do not use a floating GitHub or npm spec.
+This pilot requires Tenjin's matching server branch. [Jevgrep PR #28](https://github.com/dzhng/jevgrep/pull/28)
+is merged, and the published `@dzhng/jevgrep@0.7.0` release is qualified for the native custom-provider
+transport. Only that exact release is accepted; floating GitHub or npm specs are refused.
+Previously reviewed local tarballs remain supported, including the original 0.4.2 pilot and the
+0.4.4 custom-auth build. Existing grants retain their selected runtime until explicitly changed.
 
 ## Explicit setup
 
-After reviewing the artifact and approving disclosure to `https://jev-x402.vercel.app/jev`:
+After approving disclosure to `https://jev-x402.vercel.app/jev`:
 
 ```sh
-tenjin jevgrep enable --root /absolute/repository --artifact /absolute/reviewed-jevgrep.tgz \
-  --sha256 REVIEWED_SHA256 --max-run 0.05 --share-source --experimental
+tenjin jevgrep enable --root /absolute/repository --release 0.7.0 \
+  --max-run 0.05 --share-source --experimental
 tenjin jevgrep status
 ```
 
+A reviewed local artifact can instead use `--artifact /absolute/reviewed-jevgrep.tgz` and
+`--sha256 REVIEWED_SHA256` together, without `--release`.
+
 After enabling, run `tenjin install --refresh` and start a fresh Claude Code session at the
-approved root so it loads the `Grep` hook and current MCP build.
+approved root so it loads the `Grep` hook and current MCP build. Claude Code displays
+“Calling x402” while this hook checks the proposed search and performs any selected retrieval.
 
 The personal grant is outside repository configuration. Project config cannot grant source access.
 Start the host's MCP session at that exact repository root. Only that startup directory is authorized; other or unmatched roots stay native. The grant covers sessions at that root; it is
@@ -41,7 +46,9 @@ blobs to temporary private storage, never followed through live file paths. The 
 128 KiB per file and 8 MiB total; the explicit extended profile raises only the per-file cap to 256 KiB. An oversized repository fails closed rather than searching an
 undisclosed subset. Results name the snapshot commit and omitted-file count.
 
-Tenjin runs fixed `npx` commands with isolated config and home. Reviewed runtime artifacts and their npm cache persist under the active Tenjin data directory; source snapshots and credentials stay temporary. Auth writes only the
+Tenjin runs fixed `npx` commands with isolated config and home. The pinned release downloads through
+npm on first use and reuses its cache afterward; no separate global Jevgrep install is required.
+Reviewed runtime artifacts and the npm cache persist under the active Tenjin data directory; source snapshots and credentials stay temporary. Auth writes only the
 short-lived proxy token, then search uses that config. The normal Jevgrep configuration stays
 unchanged. `npx` may download dependencies; it is not a sandbox. The reviewed child executes with
 the OS user's privileges. Only trusted artifacts belong in this pilot. No extra skill install is required.
@@ -118,6 +125,21 @@ against it after a real payment. Older binaries cannot preserve this new durable
 If no retrieval payments occurred, restoring a saved prior CLI package is safe.
 
 ## Recorded upstream compatibility
+
+The [published-release qualification](./jevgrep-release-qualification.json) records actual pinned
+`npx` auth and search on macOS with Node 24.18.0. After warming npm's isolated cache with lifecycle
+scripts disabled, both commands ran with npm offline and child fetch restricted to loopback.
+Search completed in 1.862 seconds with seven mock evaluations; both returned TypeScript source
+blocks exactly matched the two-file committed fixture. The 25 focused grant/runner tests and
+TypeScript checking passed. This proves packaging, transport and source formatting only; no model,
+wallet or payment calls occurred, and synthetic scores do not measure retrieval quality.
+
+Published `@dzhng/jevgrep@0.7.0` uses the native `{model,state,questions}` request and matching
+`noul` response through a custom provider. Its custom-provider requests have a 15-second upstream
+timeout and do not enable the token-aware pacing reserved for upstream's `typesafe` provider.
+Tenjin keeps concurrency at two. The reviewed 0.4.4 local build retains its explicit
+`tenjin-x402` pacing profile and 60-second request timeout; that fork-specific auth option is
+omitted for the published release. Search deadlines and payment caps remain Tenjin's own bounds.
 
 The [sanitized qualification record](./jevgrep-qualification.json) covers PR #28 at commit
 `aae1f7ee91f6cfe408e1cca5c50bd4c9ddc81164`, built with Bun 1.3.14 and tested with

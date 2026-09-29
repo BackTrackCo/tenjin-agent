@@ -102,8 +102,9 @@ function registerJevgrep(reg: Registration): void {
   reg
     .addGlobalFlags(command.command('enable'))
     .requiredOption('--root <path>', 'one canonical repository root')
-    .requiredOption('--artifact <path>', 'reviewed Jevgrep npm tarball containing custom auth')
-    .requiredOption('--sha256 <hex>', 'reviewed tarball SHA-256')
+    .option('--release <version>', 'qualified exact npm release (0.7.0); cached npx runtime')
+    .option('--artifact <path>', 'reviewed Jevgrep npm tarball containing custom auth')
+    .option('--sha256 <hex>', 'reviewed tarball SHA-256; required with --artifact')
     .requiredOption(
       '--max-run <usd>',
       'whole-search exposure ceiling, at most 1 USD; above 0.05 opts into extended retrieval',

@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { mkdtemp, mkdir, realpath, rm, writeFile, chmod, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -5,6 +6,8 @@ import { randomUUID } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { CommandContext } from '../../context';
 import {
+  configureJevgrep,
+  readJevgrepGrant,
   bindJevgrepOffer,
   boundJevgrepGrant,
   disableJevgrep,
@@ -148,4 +151,37 @@ it('accepts an explicit extended grant but never grants more than one dollar', a
   grant.maxRunAtomic = '1000001';
   await save();
   expect(await eligibleJevgrep(ctx, root)).toBeNull();
+});
+
+it('configures only the qualified exact npm pin without fetching or changing wallet policy', async () => {
+  execFileSync('/usr/bin/git', ['init', '-q', root]);
+  const args = { root, release: '0.7.0', maxRun: '1', shareSource: true, experimental: true };
+  await configureJevgrep(ctx, args);
+  expect(await readJevgrepGrant(dir)).toMatchObject({
+    runtime: { kind: 'release', version: '0.7.0' },
+    maxRunAtomic: '1000000',
+  });
+  expect(await eligibleJevgrep(ctx, root)).not.toBeNull();
+  for (const release of ['latest', '^0.7.0', '0.7.1', '0.4.4'])
+    await expect(configureJevgrep(ctx, { ...args, release })).rejects.toThrow(
+      'qualified exact release',
+    );
+  await expect(configureJevgrep(ctx, { ...args, artifact: '/other.tgz' })).rejects.toThrow(
+    'cannot be combined',
+  );
+  await expect(configureJevgrep(ctx, { ...args, release: undefined })).rejects.toThrow(
+    'Provide --release',
+  );
+});
+it('does not accept an unqualified or arbitrary package in a saved release grant', async () => {
+  for (const runtime of [
+    { kind: 'release', version: 'latest' },
+    { kind: 'release', version: '0.7.1' },
+    { kind: 'release', version: '0.7.0', package: 'untrusted' },
+  ]) {
+    await writeFile(join(dir, 'jevgrep', 'grant.json'), JSON.stringify({ ...grant, runtime }), {
+      mode: 0o600,
+    });
+    expect(await eligibleJevgrep(ctx, root)).toBeNull();
+  }
 });
