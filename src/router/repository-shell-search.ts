@@ -159,6 +159,7 @@ const booleanOptions = new Set([
   '--line-number',
   '-i',
   '--ignore-case',
+  '-I',
   '-S',
   '--smart-case',
   '-s',
@@ -239,6 +240,7 @@ function search(
       '--no-filename',
       '-r',
       '--recursive',
+      '-I',
       '--include',
       '--exclude',
       '--exclude-dir',
@@ -448,8 +450,23 @@ function readOnlyCompanion(words: Word[]): boolean {
   if (subcommand === 'ls-files') return options.every((v) => !v.startsWith('-') || v === '--');
   if (subcommand === 'ls-tree')
     return options.every((v) => !v.startsWith('-') || ['-r', '--name-only'].includes(v));
-  if (subcommand === 'show')
-    return options.length === 1 && /^[A-Za-z0-9_./-]+:[^\0]+$/.test(options[0]!);
+  if (subcommand === 'show') {
+    if (options.length === 1 && /^[A-Za-z0-9_./-]+:[^\0]+$/.test(options[0]!)) return true;
+    if (options.length === 2 && options[0] === '--stat' && options[1] === 'HEAD') return true;
+    // These companion arguments remain local and the hook never runs Git.
+    // Admit no diff-driver switches or Git pathspec magic, even when quoted.
+    return (
+      options.length >= 3 &&
+      options[0] === 'HEAD' &&
+      options[1] === '--' &&
+      options
+        .slice(2)
+        .every(
+          (path) =>
+            /^[A-Za-z0-9_.][A-Za-z0-9_./ -]*$/.test(path) && !path.split('/').includes('..'),
+        )
+    );
+  }
   if (subcommand === 'log')
     return options.every(
       (v) =>

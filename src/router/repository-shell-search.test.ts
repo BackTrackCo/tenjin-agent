@@ -82,6 +82,51 @@ describe('bounded repository Bash search recognition', () => {
     });
     expect(JSON.stringify(found)).not.toContain('ls-files');
   });
+  it('recognizes the observed Git-stat and binary-skipping recursive grep discovery call', () => {
+    const found = parse(
+      'git show --stat HEAD | head -30 && grep -rIl -iE "substantive|capture" --include=*.ts --include=*.js --include=*.mjs --include=*.md --include=*.json . 2>/dev/null | grep -v node_modules | head -40',
+    );
+    expect(found?.mode).toBe('augment');
+    expect(found?.candidates).toHaveLength(1);
+    expect(found?.candidates[0]).toMatchObject({
+      input: {
+        pattern: 'substantive|capture',
+        path: '.',
+        output_mode: 'files_with_matches',
+        '-i': true,
+        head_limit: 40,
+      },
+      shell: {
+        executable: 'grep',
+        argv: [
+          '-rIl',
+          '-iE',
+          'substantive|capture',
+          '--include=*.ts',
+          '--include=*.js',
+          '--include=*.mjs',
+          '--include=*.md',
+          '--include=*.json',
+          '<repository-path>',
+        ],
+        filters: [
+          { executable: 'grep', argv: ['-v', 'node_modules'] },
+          { executable: 'head', argv: ['-40'], lines: 40 },
+        ],
+        stderr: 'discard',
+      },
+    });
+    expect(JSON.stringify(found)).not.toContain('--stat');
+  });
+  it('admits only literal HEAD path reads as Git-show companions', () => {
+    for (const command of [
+      'git show HEAD -- src/file.ts; rg payment src',
+      'git show HEAD -- src/file.ts "src/with space.ts" | head -30; rg payment src',
+    ])
+      expect(parse(command)?.mode).toBe('augment');
+    expect(parse('git show HEAD -- src/file.ts | grep payment')).toBeNull();
+    expect(parse('grep -rI payment src')?.candidates[0]?.shell.argv).toContain('-rI');
+  });
   it('allows bounded ls/search and search/sed read-only sequences as augmentation', () => {
     for (const command of [
       'ls src 2>/dev/null | head -30; rg "payment|retry" src | head -30',
@@ -144,6 +189,18 @@ describe('bounded repository Bash search recognition', () => {
     'rg payment src && touch file',
     'ls; rg payment src; git fetch',
     'git -c alias.x=evil x; rg payment src',
+    'git -c diff.x.textconv=evil show HEAD -- src/file; rg payment src',
+    'git show --ext-diff HEAD -- src/file; rg payment src',
+    'git show --textconv HEAD -- src/file; rg payment src',
+    'git show --output=result --stat HEAD; rg payment src',
+    'git show --stat main; rg payment src',
+    'git show HEAD -- --output=result; rg payment src',
+    'git show HEAD -- ../file; rg payment src',
+    'git show HEAD -- /other/file; rg payment src',
+    'git show HEAD -- src/*; rg payment src',
+    'git show HEAD -- "src/*.ts"; rg payment src',
+    'git show HEAD -- ":(glob)src/**"; rg payment src',
+    'git show HEAD -- src/file --ext-diff; rg payment src',
     'rg payment src; sed -i s/a/b/ src/a.ts',
     'rg payment src | xargs cat',
     'R=src; rg payment "$R"',
@@ -170,6 +227,7 @@ describe('bounded repository Bash search recognition', () => {
     'rg -r replacement payment src',
     'rg -E utf8 payment src',
     'rg -h payment src',
+    'rg -I payment src',
     'grep --multiline -r payment src',
     'cd - && rg payment src',
     'sed -n 1,3p *; rg payment src',
