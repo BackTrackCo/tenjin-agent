@@ -10,13 +10,7 @@ import type { CommandContext } from '../context';
 import { runPay } from '../commands/pay';
 import { extensionFor, runRequestTool } from './tool';
 import { ROUTER_PATH } from './decision';
-import {
-  bindDecision,
-  noteRedirect,
-  noteSession,
-  renderProgress,
-  takeUndelivered,
-} from './progress';
+import { bindDecision, claimRedirect, noteSession, renderProgress } from './progress';
 
 // Pass-through, so a refusal's typed details stay observable after the tool
 // folds the error into its envelope.
@@ -123,9 +117,9 @@ interface Leg {
   url: string;
   status: number;
   body: unknown;
+  /** Sent as is in place of `body`, for an answer that is not JSON (text or a file). */
+  raw?: string | Uint8Array;
   headers?: Record<string, string>;
-  /** Sent as the body verbatim instead of `body`'s JSON, for a file. */
-  raw?: Uint8Array;
 }
 
 /** A scripted network: legs are matched in order, and every request recorded. */
@@ -382,6 +376,58 @@ describe('a provider that refuses the lookup', () => {
   });
 });
 
+/**
+ * A PAID CALL THE PROVIDER REFUSED SAYS WHY. Firecrawl answered 403 on a
+ * LinkedIn URL after the authorization left, and the envelope carried neither
+ * the status nor the provider's reason, so nobody could tell a refused target
+ * from an outage. Settlement stays unknown: the authorization is still out.
+ */
+describe('a paid call the provider refused', () => {
+  const REASON = 'This website is no longer supported, please reach out to support.';
+
+  /** The paid leg answers 403 with `answer`, after a 402 and one signature. */
+  async function refused(
+    answer: Partial<Leg>,
+  ): Promise<Awaited<ReturnType<typeof runRequestTool>>> {
+    const { fetchImpl, calls } = net([
+      { url: ROUTER, status: 200, body: decision() },
+      { url: PROVIDER, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge() } },
+      { url: PROVIDER, status: 403, body: null, ...answer },
+    ]);
+    const result = await runRequestTool(
+      { query: 'https://www.linkedin.com/in/someone', id: 'k3f9-abcd' },
+      deps(fetchImpl),
+    );
+    expect(calls.filter((call) => call.paid)).toHaveLength(1);
+    return result;
+  }
+
+  it("carries the provider's status and its JSON reason", async () => {
+    const result = await refused({ body: { success: false, error: REASON } });
+    expect(result.isError).toBe(true);
+    expect(result.envelope).toMatchObject({
+      status: 'failed',
+      providerStatus: 403,
+      providerError: JSON.stringify({ success: false, error: REASON }),
+      settlement: 'unknown',
+      cost: ['provider price 0.01 USD'],
+      providerContentUntrusted: true,
+    });
+  });
+
+  it('bounds a page that is not JSON and keeps it to one plain line', async () => {
+    const result = await refused({
+      raw: `<html>\n<h1>403</h1> ${REASON}\u001b[2J\u202e ${'x'.repeat(2_000)}</html>`,
+    });
+    expect(result.envelope).toMatchObject({ providerStatus: 403, settlement: 'unknown' });
+    const snippet = String(result.envelope.providerError);
+    expect(snippet.startsWith(`<html> <h1>403</h1> ${REASON}`)).toBe(true);
+    expect(snippet).not.toMatch(/[\p{Cc}\u202e]/u);
+    expect(Array.from(snippet)).toHaveLength(501);
+    expect(snippet.endsWith('…')).toBe(true);
+  });
+});
+
 describe('what the tool refuses to execute', () => {
   it.each([
     [
@@ -603,76 +649,27 @@ describe('what the tool leaves for the status line', () => {
 });
 
 /**
- * NEVER BLOCKED TWICE IN A ROW, the tool's half: only a `fulfilled` lookup
- * delivers the pre-call redirect that named its id. Anything less leaves it
- * undelivered, and the hook withholds that agent's next offer in its category.
+ * NEVER REDIRECTED TWICE FOR ONE TARGET, the tool's half: a lookup releases
+ * nothing. The hook promised the agent its own retry would run, so a delivered
+ * lookup leaves the claim in place exactly as a failed one does, and the
+ * native re-run of the same call is never denied again.
  */
 describe('the redirect a lookup answers', () => {
-  const CATEGORY = 'crypto price quote';
-  const RULE = { type: 'object', properties: { data: { type: 'object' } }, required: ['data'] };
+  const TARGET = 'WebSearch BTC and ETH price';
   it.each([
     ['fulfilled', [{ url: ROUTER, status: 200, body: decision() }, ...providerLegs()]],
-    [
-      'unverified',
-      [
-        {
-          url: ROUTER,
-          status: 200,
-          body: decision({ contract: contract({ resultSchema: RULE }) }),
-        },
-        ...providerLegs({ error: 'rate limited' }),
-      ],
-    ],
     ['failed', [{ url: ROUTER, status: 503, body: { error: { code: 'nope', message: 'no' } } }]],
-  ] as const)('is delivered only by a fulfilled lookup: %s', async (status, legs) => {
+  ] as const)('leaves the claim in place after a %s lookup', async (status, legs) => {
     await noteSession(dir, 'sess-1');
     await bindDecision(dir, 'sess-1', 'k3f9-abcd');
-    await noteRedirect(dir, 'sess-1', undefined, { id: 'k3f9-abcd', category: CATEGORY });
+    expect(await claimRedirect(dir, 'sess-1', undefined, TARGET)).toBe(true);
     const { fetchImpl } = net([...legs]);
     const result = await runRequestTool(
       { query: 'BTC and ETH price', id: 'k3f9-abcd' },
       deps(fetchImpl),
     );
     expect(result.envelope.status).toBe(status);
-    expect(await takeUndelivered(dir, 'sess-1', undefined, CATEGORY)).toBe(status !== 'fulfilled');
-  });
-
-  it('never counts a free lookup as delivered, since its 200 proves nothing', async () => {
-    const DOCS = 'library or API documentation';
-    await noteSession(dir, 'sess-1');
-    await bindDecision(dir, 'sess-1', 'k3f9-abcd');
-    await noteRedirect(dir, 'sess-1', undefined, { id: 'k3f9-abcd', category: DOCS });
-    const { fetchImpl, calls } = net([
-      {
-        url: ROUTER,
-        status: 200,
-        body: decision({ providerPriceAtomic: '0', category: DOCS, provider: 'Context7' }),
-      },
-      // A 200 naming another library: the lookup succeeded, the match did not.
-      { url: PROVIDER, status: 200, body: 'Context7 matched: /dodopayments/billingsdk.' },
-    ]);
-    const result = await runRequestTool(
-      { query: '@acme/billing-sdk createInvoice', id: 'k3f9-abcd' },
-      deps(fetchImpl),
-    );
-    expect(result.envelope.status).toBe('fulfilled');
-    expect(calls.some((call) => call.paid)).toBe(false);
-    expect(await takeUndelivered(dir, 'sess-1', undefined, DOCS)).toBe(true);
-  });
-
-  it("marks only the agent whose redirect named the id, never another's", async () => {
-    await noteSession(dir, 'sess-1');
-    await bindDecision(dir, 'sess-1', 'k3f9-abcd');
-    await noteRedirect(dir, 'sess-1', undefined, { id: 'a-later-one', category: CATEGORY });
-    await noteRedirect(dir, 'sess-1', 'a1', { id: 'k3f9-abcd', category: CATEGORY });
-    const { fetchImpl } = net([{ url: ROUTER, status: 200, body: decision() }, ...providerLegs()]);
-    const result = await runRequestTool(
-      { query: 'BTC and ETH price', id: 'k3f9-abcd' },
-      deps(fetchImpl),
-    );
-    expect(result.envelope.status).toBe('fulfilled');
-    expect(await takeUndelivered(dir, 'sess-1', 'a1', CATEGORY)).toBe(false);
-    expect(await takeUndelivered(dir, 'sess-1', undefined, CATEGORY)).toBe(true);
+    expect(await claimRedirect(dir, 'sess-1', undefined, TARGET)).toBe(false);
   });
 });
 

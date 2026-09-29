@@ -21,11 +21,10 @@ import { MCP_SERVER_NAME, REQUEST_TOOL } from './names';
 import { runHookCommand } from './hook-command';
 import { ROUTER_PATH } from './decision';
 import {
-  markDelivered,
+  claimRedirect,
   renderProgress,
   resolveProgressSession,
   sessionDir,
-  takeUndelivered,
   wasOffered,
 } from './progress';
 import { runRequestTool } from './tool';
@@ -124,7 +123,7 @@ const withHint = (hint: string) => ({ ...EXECUTE, decision: { ...EXECUTE.decisio
 const SEEN = HINT_SOURCE + ': ' + HINT.replace('request({', 'mcp__x402__request({');
 /** The one sentence this client adds, to a pre-call redirect only. */
 const ONE_BLOCK =
-  'If this does not cover it, make your own call again: you will not be redirected twice in a row.';
+  'If this does not cover it, make your own call again: you will not be redirected twice in a row for the same search or URL.';
 /** A pre-call redirect's reason: the line as the host sees it, then that sentence. */
 const DENIED = `${SEEN} ${ONE_BLOCK}`;
 
@@ -789,26 +788,30 @@ describe('the pre-call hook', () => {
 });
 
 /**
- * NEVER BLOCKED TWICE IN A ROW FOR ONE KIND OF LOOKUP. A redirect whose lookup
- * does not deliver sends the agent back to its own tools, and a second deny
- * there is a loop: so every call is still routed, the agent's next offer in the
- * same category is withheld once, and anything else is redirected as usual.
+ * NEVER REDIRECTED TWICE FOR ONE TARGET. The deny promises the agent that its
+ * own retry will run, so a retry of the same search or URL always runs, however
+ * the redirected lookup went and whatever ran in between. A shared per-agent
+ * record broke that under parallel calls: A denied, B's offer spent A's record,
+ * and A's retry was denied again (the same LinkedIn URL three times in a row).
  */
-describe('never blocked twice in a row', () => {
+describe('never redirected twice for one target', () => {
   const DENY = { hookSpecificOutput: { permissionDecision: 'deny' } };
-  const WITHHELD = { response: null, action: 'execute', redirectUndelivered: true };
+  const WITHHELD = { response: null, action: 'execute', alreadyRedirected: true };
+  const A = 'https://example.test/spec';
+  const B = 'https://example.test/other';
 
-  /** One pre-call WebFetch in `sess-1` (or as `over` says), which the router
-   *  answers with an offer in `category`. Every one of them asks the router. */
+  /** One pre-call call for `subject` in `sess-1` (or as `over` says), which
+   *  the router answers with an offer. Every one of them asks the router. */
   async function nativeCall(
-    category = EXECUTE.decision.category,
+    subject = A,
     over: Record<string, unknown> = {},
+    tool: 'WebSearch' | 'WebFetch' = 'WebFetch',
   ): Promise<Awaited<ReturnType<typeof runNativeHook>>> {
     const { fetchImpl, calls } = router({
       ...EXECUTE,
-      decision: { ...EXECUTE.decision, hint: PRECALL_HINT, category },
+      decision: { ...EXECUTE.decision, hint: PRECALL_HINT },
     });
-    const event = await preCall('https://example.test/spec', 'WebFetch', over);
+    const event = await preCall(subject, tool, over);
     const out = await runNativeHook(event, {
       dataDir: dir,
       baseUrl: BASE,
@@ -824,7 +827,7 @@ describe('never blocked twice in a row', () => {
   function lookup(fetchImpl: typeof fetch): ReturnType<typeof runRequestTool> {
     const sink = { write: () => true } as unknown as NodeJS.WritableStream;
     return runRequestTool(
-      { query: 'https://example.test/spec', id: 'k3f9-abcd' },
+      { query: A, id: 'k3f9-abcd' },
       {
         ctx: {
           flags: { json: true, timeout: 5000, baseUrl: BASE },
@@ -838,41 +841,71 @@ describe('never blocked twice in a row', () => {
     );
   }
 
-  it('withholds the same kind of offer once when nothing was called in between', async () => {
+  it('lets the retry of a redirected call run, and every retry after it', async () => {
     expect((await nativeCall()).response).toMatchObject(DENY);
+    expect(await nativeCall()).toEqual(WITHHELD);
     expect(await nativeCall()).toEqual(WITHHELD);
     expect(await renderProgress(dir, 'sess-1')).toBe(
       'x402 · search: native tools (already redirected once)',
     );
   });
 
-  it('withholds it after a lookup that failed, then redirects the call after', async () => {
+  it('keeps the promise under parallel calls: A, then B, then A again', async () => {
+    expect((await nativeCall(A)).response).toMatchObject(DENY);
+    expect((await nativeCall(B)).response).toMatchObject(DENY);
+    expect(await nativeCall(A)).toEqual(WITHHELD);
+    expect(await nativeCall(B)).toEqual(WITHHELD);
+  });
+
+  it('denies two parallel copies of one call once', async () => {
+    const outs = await Promise.all([nativeCall(), nativeCall()]);
+    expect(outs.filter((out) => out.response !== null)).toHaveLength(1);
+    expect(outs.filter((out) => out.alreadyRedirected === true)).toHaveLength(1);
+  });
+
+  it('lets the retry run after its lookup failed', async () => {
     expect((await nativeCall()).response).toMatchObject(DENY);
     const failed = await lookup(router({ error: { code: 'nope', message: 'no' } }, 503).fetchImpl);
     expect(failed.envelope.status).toBe('failed');
     expect(await nativeCall()).toEqual(WITHHELD);
-    expect((await nativeCall()).response).toMatchObject(DENY);
   });
 
-  it('redirects an offer of another kind as usual, which becomes the last one', async () => {
-    expect((await nativeCall('read an exact page')).response).toMatchObject(DENY);
-    expect((await nativeCall('web research')).response).toMatchObject(DENY);
-    expect(await nativeCall('web research')).toEqual(WITHHELD);
+  it('keys a URL as it parses, and a search by its own words', async () => {
+    expect((await nativeCall('https://EXAMPLE.test/spec')).response).toMatchObject(DENY);
+    expect(await nativeCall(A)).toEqual(WITHHELD);
+    expect((await nativeCall(A, {}, 'WebSearch')).response).toMatchObject(DENY);
+    expect(await nativeCall(A, {}, 'WebSearch')).toEqual(WITHHELD);
+    expect((await nativeCall('site:example.test spec', {}, 'WebSearch')).response).toMatchObject(
+      DENY,
+    );
   });
 
-  it('redirects the same kind again once the lookup was fulfilled', async () => {
-    expect((await nativeCall()).response).toMatchObject(DENY);
-    // What `request` does on `fulfilled`; tool.test.ts pins that it does.
-    await markDelivered(dir, 'k3f9-abcd');
-    expect((await nativeCall()).response).toMatchObject(DENY);
+  it('redirects the same target again once its claim has expired', async () => {
+    const start = Date.now();
+    const at = async (now: number) => {
+      const { fetchImpl } = router({
+        ...EXECUTE,
+        decision: { ...EXECUTE.decision, hint: PRECALL_HINT },
+      });
+      return runNativeHook(await preCall(A), {
+        dataDir: dir,
+        baseUrl: BASE,
+        fetchImpl,
+        homeDir: dir,
+        now: () => now,
+      });
+    };
+    expect((await at(start)).response).toMatchObject(DENY);
+    expect(await at(start + 60_000)).toEqual(WITHHELD);
+    expect((await at(start + 11 * 60_000)).response).toMatchObject(DENY);
   });
 
-  it('keeps the main agent and a subagent to a record each', async () => {
+  it('keeps the main agent and a subagent to a claim each', async () => {
     const subagent = { agent_id: 'a1', agent_type: 'general-purpose' };
     expect((await nativeCall()).response).toMatchObject(DENY);
-    expect((await nativeCall(undefined, subagent)).response).toMatchObject(DENY);
+    expect((await nativeCall(A, subagent)).response).toMatchObject(DENY);
     expect(await nativeCall()).toEqual(WITHHELD);
-    expect(await nativeCall(undefined, subagent)).toEqual(WITHHELD);
+    expect(await nativeCall(A, subagent)).toEqual(WITHHELD);
   });
 
   it('leaves another session to be routed as usual', async () => {
@@ -880,7 +913,7 @@ describe('never blocked twice in a row', () => {
     const other = await transcriptFor([
       { type: 'user', sessionId: 'sess-2', message: { content: 'please read the spec' } },
     ]);
-    const elsewhere = await nativeCall(undefined, { session_id: 'sess-2', transcript_path: other });
+    const elsewhere = await nativeCall(A, { session_id: 'sess-2', transcript_path: other });
     expect(elsewhere.response).toMatchObject(DENY);
   });
 });
@@ -2204,7 +2237,9 @@ describe('free docs on top of a search', () => {
     expect(jobs[0]!.out.startsWith(sessionDir(dir, 'sess-1'))).toBe(true);
     // Not a redirect: nothing recorded for the one-block rule or the offer mark.
     expect(await wasOffered(dir, 'sess-1', 'toolu_1')).toBe(false);
-    expect(await takeUndelivered(dir, 'sess-1', undefined, DOCS)).toBe(false);
+    expect(
+      await claimRedirect(dir, 'sess-1', undefined, 'WebSearch next.js middleware matcher'),
+    ).toBe(true);
     expect(await renderProgress(dir, 'sess-1')).toBe(
       'x402 · search: native tools (free lookup, call runs)',
     );
@@ -2544,7 +2579,7 @@ describe('a discovered service', () => {
       baseUrl: BASE,
       fetchImpl: router(DISCOVERED).fetchImpl,
     });
-    expect(again).toEqual({ response: null, action: 'discovered', redirectUndelivered: true });
+    expect(again).toEqual({ response: null, action: 'discovered', alreadyRedirected: true });
   });
 
   it('is offered after a native call that came back short', async () => {
@@ -2696,7 +2731,15 @@ describe('a question to the user', () => {
       baseUrl: BASE,
       fetchImpl: router(DISCOVERED).fetchImpl,
     });
-    expect(second).toEqual({ response: null, action: 'discovered', redirectUndelivered: true });
+    expect(second).toEqual({ response: null, action: 'discovered', alreadyRedirected: true });
+    // The claim is the question's own: a different question is its own target.
+    const other = await runAskHook(
+      await askEvent({
+        tool_input: { questions: [{ question: 'Which voice should narrate it?', options: [] }] },
+      }),
+      { dataDir: dir, baseUrl: BASE, fetchImpl: router(DISCOVERED).fetchImpl },
+    );
+    expect(other.response).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } });
   });
 
   it('denies it on a curated offer too, with the same wording', async () => {
