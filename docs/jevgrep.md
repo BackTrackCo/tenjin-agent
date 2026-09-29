@@ -5,27 +5,45 @@ read-only Bash `rg`/recursive `grep` search. Like paid WebSearch routing, the ho
 using the latest human task, bounded prior user/assistant conversation, and the proposed search.
 The search pattern is evidence of the agent's next step, not the entire task.
 
-When Jevgrep is selected, a standalone search is redirected to the visible `mcp__x402__request`
-tool. Claude writes a focused natural-language repository question using its current task context;
-the executor receives that question unchanged. The hook does not generate a query from the human
-prompt or execute a regex as a semantic question. Prompt offers use the same request tool.
+When Jevgrep is selected, the hook tells Claude to make one visible `mcp__x402__request` call
+before continuing eligible repository searches. If that deferred tool is not loaded, Claude
+first discovers it with `ToolSearch` using `query: "select:mcp__x402__request"`. Claude writes a
+focused natural-language repository question using its current task context, supplies the bound
+offer id, and waits for the result. The executor receives that question unchanged. The hook does
+not generate a query from the human prompt or execute a regex as a semantic question. Prompt
+offers use the same request tool but remain a separate optional path; this handoff guard applies
+to selected repository tool calls.
 
-Supported compound Bash calls are redirected once too. The hook explicitly says the entire
+Supported compound Bash calls follow the same handoff. The hook explicitly says the entire
 original command has not run and asks Claude to reissue that exact tool input, from the same
 working directory, after the Jevgrep attempt succeeds or fails. This preserves the intended
 `cd`, filters and companion operations without rewriting shell code. The retry stays native and
-subject to normal permissions. As with paid WebSearch, the agent carries out the requested
-lookup and retry; the hook does not execute either on its behalf. Literal search flags, bounded `head` filters, and a small allowlist of
+subject to normal permissions after the request finishes or the handoff is released. The agent
+carries out the requested lookup and retry; the hook does not execute either on its behalf.
+Literal search flags, bounded `head` filters, and a small allowlist of
 read-only companions are recognized. Variables, substitutions, loops, writes, background jobs and
 unsupported syntax stay native without routing. Filename-filter pipelines are not treated as
 repository-content searches. Unknown subagents or subagents without access to the request tool
 remain native.
 
-Exact known lookups, uncommitted changes and no-upload requests should use native tools. Native
-search remains available after one redirect, or when Jevgrep fails or provides insufficient source.
-The hook admits at most three classifications and one offer per human turn. The local executor
-atomically permits one retrieval attempt for that turn, even when the agent changes the question
-or calls concurrently. Repeated identical snapshot/query requests in the session are also guarded.
+Exact known lookups, uncommitted changes and no-upload requests should use native tools. Once a
+repository-search offer is pending, retrying an eligible `Grep` or Bash search repeats the same
+handoff and offer id without reclassification. A retry alone does not release it. Native search
+resumes after the visible request returns, including an error or unavailable result, so incomplete
+retrieval can fall back to native tools. The handoff also releases if its grant or snapshot changes,
+its state cannot be read safely, or its lease expires: two minutes while awaiting the request,
+and twenty minutes once it is running. Tool discovery cannot leave native search blocked forever;
+if the tool never becomes available, the pending lease expires. Expiry never authorizes a payment
+retry or clears an unresolved payment.
+
+This guard covers recognized repository searches; it does not force every possible agent tool
+path through Jevgrep or guarantee that the agent obeys the instruction. Unsupported searches and
+known-file lookups retain their native behavior. No hook makes a hidden paid call.
+
+For each agent turn, the repository tool hook admits at most three classifications and one offer.
+The local executor atomically permits one attempt for that handoff, even when the agent changes
+the question or calls concurrently. Main-agent, subagent and prompt offers are not one shared
+attempt budget. Repeated identical snapshot/query requests in the session are also guarded.
 The offer binds the committed snapshot; a changed commit requires a new offer. Source and wallet
 permissions are checked again when the agent actually invokes the request.
 
@@ -61,7 +79,8 @@ hook; no special tool selection or Jevgrep prompt is required. Claude Code displ
 
 The personal grant is outside repository configuration. Project config cannot grant source access.
 Start the host's MCP session at that exact repository root. Only that startup directory is authorized; other or unmatched roots stay native. The grant covers sessions at that root; it is
-not a per-message confirmation. A fresh hook offer expires after 15 minutes and cannot be used
+not a per-message confirmation. The underlying offer binding expires after 15 minutes; a selected
+tool-call handoff must start within its shorter two-minute pending lease. An offer cannot be used
 with another root or replacement grant. Calling `request` without a locally bound id cannot invoke
 Jevgrep. Before enabling real payments, restart every host or payer sharing this wallet data directory so all MCP processes load the new build. An older running payer can discard the new durable ledger fields.
 

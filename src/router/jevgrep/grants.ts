@@ -62,6 +62,7 @@ const BindingSchema = z
       .optional(),
   })
   .refine((value) => (value.repositoryTurn === undefined) === (value.snapshotCommit === undefined));
+export type JevgrepBinding = z.infer<typeof BindingSchema>;
 export interface RepositoryOfferScope {
   repositoryTurn: string;
   snapshotCommit: string;
@@ -74,7 +75,7 @@ const bindingPath = (dataDir: string, id: string) =>
 async function readPrivate(path: string): Promise<unknown | null> {
   let handle;
   try {
-    handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     const info = await handle.stat();
     if (
       !info.isFile() ||
@@ -93,6 +94,20 @@ async function readPrivate(path: string): Promise<unknown | null> {
   } finally {
     await handle?.close();
   }
+}
+
+/** Local handoff state may inspect scope, but this record alone grants no spend. */
+export async function readJevgrepBinding(
+  dataDir: string,
+  id: string | undefined,
+): Promise<JevgrepBinding | null> {
+  if (!id || !ID.test(id)) return null;
+  const value = await readPrivate(bindingPath(dataDir, id));
+  if (value === null) return null;
+  const parsed = BindingSchema.safeParse(value);
+  if (!parsed.success || parsed.data.id !== id)
+    throw new CliError('REFUSED', 'The local retrieval binding is invalid.');
+  return parsed.data;
 }
 
 export async function readJevgrepGrant(dataDir: string): Promise<JevgrepGrant | null> {

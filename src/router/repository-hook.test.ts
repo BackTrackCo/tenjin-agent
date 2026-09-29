@@ -20,6 +20,7 @@ import { repositoryGrepQuery, runRepositoryHook, type RepositoryHookDeps } from 
 import { repositorySource } from './repository-hook-source';
 import { runRequestTool, type RequestToolResult } from './tool';
 import { executeJevgrep } from './jevgrep/executor';
+import { beginRepositoryHandoffRequest } from './repository-handoff';
 import hookFixture from './fixtures/wire-hook-jevgrep.json';
 
 vi.mock('./tool', () => ({ runRequestTool: vi.fn() }));
@@ -109,6 +110,12 @@ function event(id = 'call-1') {
 function bash(command: string, id = 'bash-1') {
   return { ...event(id), tool_name: 'Bash', tool_input: { command } };
 }
+async function beginVisibleRequest() {
+  const attempt = await beginRepositoryHandoffRequest(dataDir, root, hookFixture.decision.id);
+  expect(attempt.status).toBe('owned');
+  if (attempt.status !== 'owned') throw new Error('No request owner');
+  return attempt;
+}
 function result(): RequestToolResult {
   return {
     isError: false,
@@ -176,9 +183,11 @@ describe('repository hook classification and agent-authored query offers', () =>
       },
     });
     expect(JSON.stringify(out.response)).toContain(
-      'Write a focused natural-language repository question',
+      'a focused natural-language repository question',
     );
-    expect(JSON.stringify(out.response)).toContain('do not copy the grep regex or shell command');
+    expect(JSON.stringify(out.response)).toContain('Do not copy the grep regex or shell command');
+    expect(JSON.stringify(out.response)).toContain('select:mcp__x402__request');
+    expect(JSON.stringify(out.response)).not.toContain('if useful');
     expect(JSON.stringify(out.response)).not.toContain('payment|retry');
     const packet = d.decide.mock.calls[0]![0];
     expect(packet.current.text).toBe(human);
@@ -193,7 +202,7 @@ describe('repository hook classification and agent-authored query offers', () =>
     expect(runRequestTool).not.toHaveBeenCalled();
     expect(executeJevgrep).not.toHaveBeenCalled();
   });
-  it('redirects compound searches once and explicitly preserves the original command for retry', async () => {
+  it('holds compound search retries until the visible request finishes, preserving input', async () => {
     const d = deps();
     const input = bash(
       `cd '${root}' && git ls-files | grep -v node_modules | head -300; grep -rniE "quiet|suppress|cooldown|debounce|dirty|recent.?edit" --include=* -l . --exclude-dir=node_modules --exclude-dir=.git | head -50`,
@@ -216,6 +225,14 @@ describe('repository hook classification and agent-authored query offers', () =>
     expect(search.shell.argv).toContain('--exclude-dir=node_modules');
     expect(runRequestTool).not.toHaveBeenCalled();
     expect(executeJevgrep).not.toHaveBeenCalled();
+    expect(
+      (await runRepositoryHook({ ...input, tool_use_id: 'skipped-request' }, d)).response,
+    ).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } });
+    const request = await beginVisibleRequest();
+    expect((await runRepositoryHook({ ...input, tool_use_id: 'during-request' }, d)).reason).toBe(
+      'repository request running',
+    );
+    await request.finish();
     expect(
       (await runRepositoryHook({ ...input, tool_use_id: 'compound-retry' }, d)).response,
     ).toBeNull();
@@ -240,7 +257,7 @@ describe('repository hook classification and agent-authored query offers', () =>
     expect(pending).not.toContain(token);
     expect(pending).not.toContain('never transmit me');
   });
-  it('defers a relative cd explicitly and admits its unchanged retry', async () => {
+  it('defers a relative cd and admits its unchanged retry after the request', async () => {
     const d = deps();
     const input = bash('cd src && rg payment .');
     const out = await runRepositoryHook(input, d);
@@ -254,6 +271,10 @@ describe('repository hook classification and agent-authored query offers', () =>
     });
     expect(JSON.stringify(out.response)).not.toContain('updatedInput');
     expect(input.tool_input.command).toBe('cd src && rg payment .');
+    expect(
+      (await runRepositoryHook({ ...input, tool_use_id: 'cd-skipped-request' }, d)).response,
+    ).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } });
+    await (await beginVisibleRequest()).finish();
     expect((await runRepositoryHook({ ...input, tool_use_id: 'cd-retry' }, d)).response).toBeNull();
     expect(d.decide).toHaveBeenCalledOnce();
   });
@@ -328,6 +349,68 @@ describe('repository hook classification and agent-authored query offers', () =>
     expect((await runRepositoryHook(event(), d)).reason).toBe('source disclosure forbidden');
     expect(d.decide).not.toHaveBeenCalled();
   });
+  it('does not treat an earlier assistant preference as a user payment restriction', async () => {
+    const d = deps();
+    await writeFile(
+      transcript,
+      [
+        { role: 'assistant', text: 'I will use native tools only, without paid calls.' },
+        { role: 'user', text: human },
+      ]
+        .map(({ role, text }) =>
+          JSON.stringify({
+            type: role,
+            sessionId: 'session',
+            message: { role, content: text },
+          }),
+        )
+        .join('\n'),
+    );
+    expect((await runRepositoryHook(event(), d)).response).toMatchObject({
+      hookSpecificOutput: { permissionDecision: 'deny' },
+    });
+    expect(d.decide).toHaveBeenCalledOnce();
+  });
+  it('announces native fallback for expired handoffs without reclassification', async () => {
+    const d = deps();
+    await runRepositoryHook(event(), d);
+    const originalNow = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(originalNow + 121_000);
+    try {
+      const out = await runRepositoryHook(event('expired-call'), d);
+      expect(out.reason).toBe('repository handoff expired');
+      expect(out.response).toMatchObject({
+        hookSpecificOutput: {
+          additionalContext: expect.stringContaining('Continue with native tools'),
+        },
+      });
+      expect(JSON.stringify(out.response)).not.toContain('permissionDecision');
+      expect(d.decide).toHaveBeenCalledOnce();
+    } finally {
+      clock.mockRestore();
+    }
+  });
+  it('keeps the handoff stable across assistant commentary within the human turn', async () => {
+    const d = deps();
+    const first = await runRepositoryHook(event(), d);
+    const before = await readFile(transcript, 'utf8');
+    await writeFile(
+      transcript,
+      before +
+        JSON.stringify({
+          type: 'assistant',
+          sessionId: 'session',
+          message: {
+            role: 'assistant',
+            content: 'I do not need the paid lookup; I will retry grep.',
+          },
+        }) +
+        '\n',
+    );
+    const retry = await runRepositoryHook(event('ignored-handoff'), d);
+    expect(retry.response).toEqual(first.response);
+    expect(d.decide).toHaveBeenCalledOnce();
+  });
   it('retains the human task and actual pending arguments as separate gate evidence', async () => {
     const d = deps();
     await runRepositoryHook(event(), d);
@@ -388,28 +471,95 @@ describe('repository hook classification and agent-authored query offers', () =>
     expect(runRequestTool).not.toHaveBeenCalled();
     expect(executeJevgrep).not.toHaveBeenCalled();
   });
-  it('never redirects twice in a human turn, including across Bash and Grep', async () => {
+  it('makes concurrent Bash and Grep share one pending handoff rather than bypass it', async () => {
     const d = deps();
     const outcomes = await Promise.all([
       runRepositoryHook(bash('rg payment src'), d),
       runRepositoryHook(event(), d),
     ]);
-    expect(outcomes.filter((outcome) => outcome.response !== null)).toHaveLength(1);
-    expect((await runRepositoryHook(event('third-call'), d)).response).toBeNull();
+    for (const outcome of outcomes) {
+      expect(outcome.response).toMatchObject({
+        hookSpecificOutput: { permissionDecision: 'deny' },
+      });
+      expect(JSON.stringify(outcome.response)).toContain(hookFixture.decision.id);
+    }
+    expect((await runRepositoryHook(event('third-call'), d)).response).toMatchObject({
+      hookSpecificOutput: { permissionDecision: 'deny' },
+    });
     expect(runRequestTool).not.toHaveBeenCalled();
     expect(executeJevgrep).not.toHaveBeenCalled();
   });
-  it('does not repeat a hook event', async () => {
+  it('does not let a late native classification bypass a concurrently selected handoff', async () => {
+    const d = deps();
+    let release!: (value: unknown) => void;
+    d.decide.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    );
+    const slow = runRepositoryHook(event('slow-native'), d);
+    await vi.waitFor(() => expect(d.decide).toHaveBeenCalledOnce());
+    const selected = await runRepositoryHook(bash('rg payment src', 'winner'), d);
+    release({ status: 'decided', decision: { decision: { action: 'native' } } });
+    expect((await slow).response).toEqual(selected.response);
+    expect(selected.response).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } });
+  });
+  it('gives a new human turn its own handoff without clearing the previous state', async () => {
     const d = deps();
     await runRepositoryHook(event(), d);
-    expect((await runRepositoryHook(event(), d)).response).toBeNull();
+    await history('Trace the cache behavior instead.');
+    const nextId = 'next-human-offer';
+    d.decide.mockResolvedValue({
+      status: 'decided',
+      decision: {
+        ...hookFixture,
+        decision: { ...hookFixture.decision, id: nextId },
+      },
+    });
+    const next = await runRepositoryHook(event('new-human-call'), d);
+    expect(JSON.stringify(next.response)).toContain(nextId);
+    expect(next.response).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } });
+    expect(d.decide).toHaveBeenCalledTimes(2);
+    expect(
+      await stat(join(dataDir, 'jevgrep/bindings', `${hookFixture.decision.id}.json`)),
+    ).toBeDefined();
+  });
+  it('keeps sibling agent handoffs distinct even when their bounded task text matches', async () => {
+    const d = deps();
+    const first = await runRepositoryHook(
+      { ...event(), agent_id: 'one', agent_type: 'Explore' },
+      d,
+    );
+    const secondId = 'sibling-agent-offer';
+    d.decide.mockResolvedValue({
+      status: 'decided',
+      decision: {
+        ...hookFixture,
+        decision: { ...hookFixture.decision, id: secondId },
+      },
+    });
+    const second = await runRepositoryHook(
+      { ...event('sibling-call'), agent_id: 'two', agent_type: 'Explore' },
+      d,
+    );
+    expect(JSON.stringify(first.response)).toContain(hookFixture.decision.id);
+    expect(JSON.stringify(second.response)).toContain(secondId);
+    expect(d.decide).toHaveBeenCalledTimes(2);
+  });
+  it('reuses a pending handoff without reclassifying a repeated hook event', async () => {
+    const d = deps();
+    await runRepositoryHook(event(), d);
+    expect((await runRepositoryHook(event(), d)).response).toMatchObject({
+      hookSpecificOutput: { permissionDecision: 'deny' },
+    });
     expect(d.decide).toHaveBeenCalledTimes(1);
   });
   it('skips another free classification once the human turn already has an offer', async () => {
     const d = deps();
     await runRepositoryHook(event(), d);
     expect((await runRepositoryHook(bash('rg payment src', 'next-call'), d)).reason).toBe(
-      'turn already offered',
+      'redirected to repository request',
     );
     expect(d.decide).toHaveBeenCalledTimes(1);
   });
@@ -455,14 +605,20 @@ describe('repository hook classification and agent-authored query offers', () =>
     );
     expect(d.decide).toHaveBeenCalledTimes(3);
   });
-  it('retains private hash-only free-offer markers and creates no paid-attempt marker', async () => {
+  it('retains private bounded handoff metadata without source, query, or a paid claim', async () => {
     const d = deps();
     await runRepositoryHook(event(), d);
     const base = join(dataDir, 'jevgrep/repository-hooks');
     const session = join(base, (await readdir(base))[0]!);
     for (const file of await readdir(session)) {
       expect(file).not.toMatch(/^(paid|snapshot)-/);
-      expect(await readFile(join(session, file), 'utf8')).toBe('{"version":1}');
+      const raw = await readFile(join(session, file), 'utf8');
+      if (file.startsWith('offer-')) {
+        expect(JSON.parse(raw)).toMatchObject({ version: 2, id: hookFixture.decision.id });
+        expect(raw).not.toContain(human);
+        expect(raw).not.toContain(code);
+        expect(raw).not.toContain('payment|retry');
+      } else expect(raw).toBe('{"version":1}');
       expect((await stat(join(session, file))).mode & 0o777).toBe(0o600);
     }
   });

@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -9,6 +9,12 @@ import type { CommandContext } from '../context';
 import { runPay } from '../commands/pay';
 import { runRequestTool } from './tool';
 import * as jevgrepGrants from './jevgrep/grants';
+import * as jevgrepExecutor from './jevgrep/executor';
+import {
+  publishRepositoryHandoff,
+  readRepositoryHandoff,
+  type RepositoryHandoffScope,
+} from './repository-handoff';
 import { ROUTER_PATH } from './decision';
 import {
   bindDecision,
@@ -737,4 +743,160 @@ describe('the request tool in a directory where the router is off', () => {
     expect(calls).toHaveLength(0);
     expect(auth.authorize).not.toHaveBeenCalled();
   });
+});
+
+describe('a visible repository request completes its handoff', () => {
+  const ID = 'repository-offer';
+  const QUERY = 'Find duplicate payment protection';
+  let scope: RepositoryHandoffScope;
+  beforeEach(async () => {
+    scope = {
+      sessionId: 'repository-session',
+      repositoryTurn: 'a'.repeat(64),
+      snapshotCommit: 'b'.repeat(40),
+      grant: {
+        version: 1,
+        id: 'ac3cc90d-e45d-4c29-b39b-0b0579901278',
+        enabled: true,
+        root: await realpath(dir),
+        source: 'committed-tracked',
+        supplier: 'maple-jev',
+        shareSource: true,
+        maxRunAtomic: '1000000',
+        runtime: { kind: 'release', version: '0.7.0' },
+      },
+    };
+    expect(await publishRepositoryHandoff(dir, scope, ID)).toEqual({ status: 'pending', id: ID });
+    vi.mocked(runPay).mockClear();
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  it.each([
+    'empty',
+    'sensitive',
+    'disabled',
+    'revoked',
+    'decision-failed',
+    'native',
+    'wrong-executor',
+  ] as const)('releases native fallback on %s before local execution', async (cause) => {
+    const auth = authorizer();
+    const { fetchImpl, calls } = net([
+      {
+        url: ROUTER,
+        status: cause === 'decision-failed' ? 503 : 200,
+        body: cause === 'native' ? NATIVE : decision(),
+      },
+    ]);
+    vi.spyOn(jevgrepGrants, 'boundJevgrepGrant').mockResolvedValue(
+      cause === 'revoked' ? null : scope.grant,
+    );
+    if (cause === 'disabled') {
+      await mkdir(join(dir, '.tenjin'));
+      await writeFile(
+        join(dir, '.tenjin/config.json'),
+        JSON.stringify({ router: { enabled: false } }),
+      );
+    }
+    const result = await runRequestTool(
+      {
+        id: ID,
+        query:
+          cause === 'empty'
+            ? ''
+            : cause === 'sensitive'
+              ? 'https://api.acme.io/v1/items?api-key=Zx81QpLm0aTe'
+              : QUERY,
+      },
+      deps(fetchImpl, auth),
+    );
+    expect(result.envelope.status).not.toBe('fulfilled');
+    expect(await readRepositoryHandoff(dir, scope)).toEqual({ status: 'finished', id: ID });
+    expect(runPay).not.toHaveBeenCalled();
+    expect(auth.authorize).not.toHaveBeenCalled();
+    expect(calls).toHaveLength(
+      ['decision-failed', 'native', 'wrong-executor'].includes(cause) ? 1 : 0,
+    );
+    await runRequestTool({ id: ID, query: QUERY }, deps(fetchImpl, auth));
+    expect(calls).toHaveLength(
+      ['decision-failed', 'native', 'wrong-executor'].includes(cause) ? 1 : 0,
+    );
+  });
+
+  it('finishes the owner even when request setup throws', async () => {
+    vi.spyOn(jevgrepGrants, 'boundJevgrepGrant').mockRejectedValue(
+      new Error('fixture setup failure'),
+    );
+    const { fetchImpl, calls } = net([]);
+    await expect(runRequestTool({ id: ID, query: QUERY }, deps(fetchImpl))).rejects.toThrow(
+      'fixture setup failure',
+    );
+    expect(await readRepositoryHandoff(dir, scope)).toEqual({ status: 'finished', id: ID });
+    expect(calls).toHaveLength(0);
+  });
+
+  it('does not let a duplicate finish the active request', async () => {
+    vi.spyOn(jevgrepGrants, 'boundJevgrepGrant').mockResolvedValue(scope.grant);
+    let resolve!: (response: Response) => void;
+    const response = new Promise<Response>((done) => {
+      resolve = done;
+    });
+    const fetchImpl = vi.fn(async () => response) as unknown as typeof fetch;
+    const first = runRequestTool({ id: ID, query: QUERY }, deps(fetchImpl));
+    await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledOnce());
+    expect(await readRepositoryHandoff(dir, scope)).toEqual({ status: 'running', id: ID });
+    const duplicate = await runRequestTool({ id: ID, query: QUERY }, deps(fetchImpl));
+    expect(duplicate.envelope.status).toBe('needs_input');
+    expect(await readRepositoryHandoff(dir, scope)).toEqual({ status: 'running', id: ID });
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    resolve(
+      new Response(JSON.stringify(NATIVE), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+    await first;
+    expect(await readRepositoryHandoff(dir, scope)).toEqual({ status: 'finished', id: ID });
+  });
+
+  it.each(['fulfilled', 'failed', 'cancelled'] as const)(
+    'records a returned executor %s outcome',
+    async (status) => {
+      vi.spyOn(jevgrepGrants, 'boundJevgrepGrant').mockResolvedValue(scope.grant);
+      const executor = vi.spyOn(jevgrepExecutor, 'executeJevgrep').mockResolvedValue({
+        isError: status !== 'fulfilled',
+        summary: 'fixture',
+        envelope: { status },
+      });
+      const { fetchImpl } = net([
+        {
+          url: ROUTER,
+          status: 200,
+          body: {
+            schemaVersion: 1,
+            routerVersion: 'v',
+            decision: {
+              action: 'execute',
+              capabilityId: 'jevgrep-search-v1',
+              category: 'repository retrieval',
+              provider: 'Jevgrep',
+              capabilityDescription: 'Repository search',
+              pricing: 'bounded_locally',
+              contract: { executor: 'jevgrep-search-v1', query: QUERY },
+            },
+          },
+        },
+      ]);
+      const cancellation = new AbortController();
+      if (status === 'cancelled') cancellation.abort();
+      const result = await runRequestTool(
+        { id: ID, query: QUERY },
+        { ...deps(fetchImpl), signal: cancellation.signal },
+      );
+      expect(result.envelope.status).toBe(status);
+      expect(executor).toHaveBeenCalledOnce();
+      expect(executor.mock.calls[0]?.[3].signal?.aborted).toBe(status === 'cancelled');
+      expect(await readRepositoryHandoff(dir, scope)).toEqual({ status: 'finished', id: ID });
+    },
+  );
 });

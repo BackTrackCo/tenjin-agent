@@ -12,6 +12,7 @@ import type { CommandContext } from '../context';
 import { requestDecision, type DecisionContract, type DecisionDiagnostics } from './decision';
 import { markDelivered, openLookupFooter } from './progress';
 import { routerSettings } from './settings';
+import { beginRepositoryHandoffRequest } from './repository-handoff';
 
 /**
  * The `request` tool: one free decision per lookup, then ONE payment, to the
@@ -68,6 +69,31 @@ export interface RequestToolResult {
 }
 
 export async function runRequestTool(
+  args: RequestToolArgs,
+  deps: RequestToolDeps,
+): Promise<RequestToolResult> {
+  const handoff = await beginRepositoryHandoffRequest(
+    deps.ctx.dataDir,
+    deps.cwd ?? process.cwd(),
+    args.id,
+  );
+  if (handoff.status === 'blocked') return fail('needs_input', handoff.reason);
+  try {
+    return await runRequest(
+      args,
+      handoff.status === 'owned'
+        ? {
+            ...deps,
+            signal: deps.signal ? AbortSignal.any([deps.signal, handoff.signal]) : handoff.signal,
+          }
+        : deps,
+    );
+  } finally {
+    if (handoff.status === 'owned') await handoff.finish();
+  }
+}
+
+async function runRequest(
   args: RequestToolArgs,
   deps: RequestToolDeps,
 ): Promise<RequestToolResult> {

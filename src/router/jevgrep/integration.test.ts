@@ -13,6 +13,7 @@ import { runNativeHook, runPromptHook } from '../hooks';
 import { buildRouterMcpServer } from '../mcp';
 import { runRequestTool } from '../tool';
 import { runRepositoryHook } from '../repository-hook';
+import { publishRepositoryHandoff } from '../repository-handoff';
 import { bindJevgrepOffer, type JevgrepGrant } from './grants';
 import { createJevgrepPayer } from './payments';
 import { runJevgrep } from './runner';
@@ -193,24 +194,35 @@ describe('Jevgrep hook, binding and executor integration', () => {
         )
         .join('\n'),
     );
-    const out = await runRepositoryHook(
-      {
-        session_id: 'session-one',
-        tool_use_id: 'bash-search',
-        tool_name: 'Bash',
-        cwd: root,
-        transcript_path: transcript,
-        tool_input: { command: 'rg "filter|boundaries" src' },
-      },
-      { ctx, fetchImpl },
-    );
+    const searchEvent = {
+      session_id: 'session-one',
+      tool_use_id: 'bash-search',
+      tool_name: 'Bash',
+      cwd: root,
+      transcript_path: transcript,
+      tool_input: { command: 'rg "filter|boundaries" src' },
+    };
+    const out = await runRepositoryHook(searchEvent, { ctx, fetchImpl });
     expect(out.response).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } });
     expect(runJevgrep).not.toHaveBeenCalled();
+    expect(
+      (await runRepositoryHook({ ...searchEvent, tool_use_id: 'skip-request' }, { ctx, fetchImpl }))
+        .response,
+    ).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } });
+    expect(sent).toHaveLength(1);
     expect(sent[0]!.body.packet).toMatchObject({
       current: { text: 'Trace that interaction.' },
       history: [{ role: 'user', text: earlier }],
     });
     expect((await request(QUERY)).envelope.status).toBe('fulfilled');
+    expect(
+      (
+        await runRepositoryHook(
+          { ...searchEvent, tool_use_id: 'after-request' },
+          { ctx, fetchImpl },
+        )
+      ).response,
+    ).toBeNull();
     expect(vi.mocked(runJevgrep).mock.calls[0]![0].query).toBe(QUERY);
     expect(sent.at(-1)!.body.query).toBe(QUERY);
     // A second generated query cannot buy another search with this turn's offer.
@@ -223,7 +235,7 @@ describe('Jevgrep hook, binding and executor integration', () => {
   it('allows only one concurrent paid attempt across offers bound to the same human turn', async () => {
     const snapshotCommit = await committedFixture();
     const scope = { repositoryTurn: 'a'.repeat(64), snapshotCommit };
-    await bindJevgrepOffer(dir, ID, 'session-one', grant, scope);
+    await publishRepositoryHandoff(dir, { ...scope, sessionId: 'session-one', grant }, ID);
     await bindJevgrepOffer(dir, 'jev-offer-456', 'session-one', grant, scope);
     const results = await Promise.all([
       request(),
@@ -235,10 +247,16 @@ describe('Jevgrep hook, binding and executor integration', () => {
   });
   it('rejects a changed snapshot before creating the payer', async () => {
     await committedFixture();
-    await bindJevgrepOffer(dir, ID, 'session-one', grant, {
-      repositoryTurn: 'a'.repeat(64),
-      snapshotCommit: 'b'.repeat(40),
-    });
+    await publishRepositoryHandoff(
+      dir,
+      {
+        sessionId: 'session-one',
+        grant,
+        repositoryTurn: 'a'.repeat(64),
+        snapshotCommit: 'b'.repeat(40),
+      },
+      ID,
+    );
     expect((await request()).envelope.status).toBe('needs_input');
     expect(createJevgrepPayer).not.toHaveBeenCalled();
     expect(runJevgrep).not.toHaveBeenCalled();
@@ -337,6 +355,7 @@ describe('Jevgrep hook, binding and executor integration', () => {
       'query',
       'root',
       'runtime',
+      'supplier',
     ]);
     expect(JSON.stringify(options)).not.toMatch(/wallet|bearer|authorization|privateKey/);
     expect(evaluate).not.toHaveBeenCalled();

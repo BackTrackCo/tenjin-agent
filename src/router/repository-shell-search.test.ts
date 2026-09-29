@@ -127,6 +127,68 @@ describe('bounded repository Bash search recognition', () => {
     expect(parse('git show HEAD -- src/file.ts | grep payment')).toBeNull();
     expect(parse('grep -rI payment src')?.candidates[0]?.shell.argv).toContain('-rI');
   });
+  it('recognizes the recorded Opus discovery call beside a file-list count', () => {
+    const found = parse(
+      'git ls-files | head -100 && git ls-files | wc -l && grep -rliE "idempot|receipt|already.?paid|entitle|recover" --include=*.ts --include=*.js --include=*.py --include=*.md . 2>/dev/null | grep -v node_modules | head -60',
+    );
+    expect(found?.mode).toBe('augment');
+    expect(found?.candidates).toHaveLength(1);
+    expect(found?.candidates[0]).toMatchObject({
+      input: {
+        pattern: 'idempot|receipt|already.?paid|entitle|recover',
+        path: '.',
+        output_mode: 'files_with_matches',
+        '-i': true,
+        head_limit: 60,
+      },
+      shell: {
+        executable: 'grep',
+        argv: [
+          '-rliE',
+          'idempot|receipt|already.?paid|entitle|recover',
+          '--include=*.ts',
+          '--include=*.js',
+          '--include=*.py',
+          '--include=*.md',
+          '<repository-path>',
+        ],
+        filters: [
+          { executable: 'grep', argv: ['-v', 'node_modules'] },
+          { executable: 'head', argv: ['-60'], lines: 60 },
+        ],
+        stderr: 'discard',
+      },
+    });
+    expect(JSON.stringify(found)).not.toContain('wc');
+    expect(JSON.stringify(found)).not.toContain('ls-files');
+  });
+  it('keeps count-only and content-search count pipelines native', () => {
+    for (const command of [
+      'git ls-files | wc -l',
+      'rg payment src | wc -l',
+      'grep -rn payment src | wc -l',
+      'rg payment src | wc -l; rg retry src',
+      'rg payment src/a.ts src/b.ts | wc -l; rg retry src',
+    ])
+      expect(parse(command)).toBeNull();
+  });
+  it.each([
+    'wc',
+    'wc -c',
+    'wc -lm',
+    'wc --lines',
+    'wc -l src/file.ts',
+    'wc -l -',
+    'wc -l --files0-from=names',
+    'wc -l *',
+    'wc -l "$INPUT"',
+    'wc -l $(cat names)',
+    'wc -l > counts.txt',
+    'wc -l 2>&1',
+    'wc -l | tee counts.txt',
+  ])('rejects unsupported companion counter variants: %s', (counter) => {
+    expect(parse(`git ls-files | ${counter}; rg payment src`)).toBeNull();
+  });
   it('allows bounded ls/search and search/sed read-only sequences as augmentation', () => {
     for (const command of [
       'ls src 2>/dev/null | head -30; rg "payment|retry" src | head -30',

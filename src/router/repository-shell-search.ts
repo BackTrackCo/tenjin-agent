@@ -532,7 +532,22 @@ export function parseRepositoryShellSearch(
     }
     substantive++;
     const found = search(first.words, cwd, first.stderr);
-    if (!found.valid && !readOnlyCompanion(first.words)) return null;
+    const companion = !found.valid && readOnlyCompanion(first.words);
+    if (!found.valid && !companion) return null;
+    if (companion) {
+      // File-list counts remain local companion operations. A content search
+      // piped to wc asks for a count and must never become semantic retrieval.
+      for (const command of commands.slice(1)) {
+        const words = command!.words;
+        const lineCount =
+          words.length === 2 &&
+          words.every((value) => !value.glob) &&
+          words[0]!.value === 'wc' &&
+          words[1]!.value === '-l';
+        if (!lineCount && filter(words) === null) return null;
+      }
+      continue;
+    }
     const filters = commands.slice(1).map((c) => filter(c!.words));
     if (filters.some((f) => f === null)) return null;
     if (!found.candidate) continue;
