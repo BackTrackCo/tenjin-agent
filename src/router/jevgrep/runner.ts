@@ -9,6 +9,7 @@ import type { JevgrepEvaluate } from './proxy.js';
 import { createJevgrepSnapshot, SnapshotPolicyUnavailable } from './snapshot.js';
 import type { SnapshotSummary } from './snapshot.js';
 import { createJevgrepAnswerCache } from './answer-cache.js';
+import type { JevgrepSupplier } from './supplier';
 
 import { isQualifiedJevgrepRelease } from './runtime';
 export { QUALIFIED_JEVGREP_RELEASES } from './runtime';
@@ -50,6 +51,7 @@ export async function runJevgrep(
     /** A repository hook binds its offer before the agent authors the query. */
     expectedCommit?: string;
     profile?: JevgrepProfileId;
+    supplier?: JevgrepSupplier;
     evaluate: JevgrepEvaluate;
     signal?: AbortSignal;
   },
@@ -136,12 +138,14 @@ export async function runJevgrep(
       query: options.query,
       runtime: options.runtime!,
       profile: policy.id,
+      supplier: options.supplier,
     });
     proxy = await startJevgrepProxy({
       evaluate: options.evaluate,
       cache,
       signal: outerSignal,
       profile: policy.id,
+      supplier: options.supplier,
     });
     phaseSignal.addEventListener('abort', abortProxy, { once: true });
     if (phaseSignal.aborted) {

@@ -37,13 +37,19 @@ Previously reviewed local tarballs remain supported, including the original 0.4.
 
 ## Explicit setup
 
-After approving disclosure to `https://jev-x402.vercel.app/jev`:
+After approving disclosure to the chosen supplier, enable an explicit grant. For Maple:
 
 ```sh
 tenjin jevgrep enable --root /absolute/repository --release 0.7.0 \
-  --max-run 0.05 --share-source --experimental
+  --supplier maple-jev --max-run 0.05 --share-source --experimental
 tenjin jevgrep status
 ```
+
+This authorizes committed tracked source to `https://base.mapleai.shop/jev`.
+Maple uses per-request x402 payments from the existing wallet, with no API key or prepaid account.
+The legacy `--supplier jev-x402` remains the default when the option is omitted and authorizes
+`https://jev-x402.vercel.app/jev`. Existing grants retain their supplier until explicitly replaced;
+changing suppliers invalidates offers made under the previous grant.
 
 A reviewed local artifact can instead use `--artifact /absolute/reviewed-jevgrep.tgz` and
 `--sha256 REVIEWED_SHA256` together, without `--release`.
@@ -77,9 +83,10 @@ the OS user's privileges. Only trusted artifacts belong in this pilot. No extra 
 Tenjin also retains validated Jev answer scores across searches in
 `jevgrep/answers` under the active Tenjin data directory. Cache identity includes the exact
 native request (source, query, questions and model), the approved repository root and committed
-snapshot, the exact runtime release or artifact hash, the fixed supplier and the versioned
+snapshot, the exact runtime release or artifact hash, the selected supplier and the versioned
 snapshot/transport policy, including the selected retrieval profile. A different proxy port or temporary child directory does not change
-this identity. Different source, query, commit, root, runtime or policy cannot reuse an answer.
+this identity. Different source, query, commit, root, runtime, supplier or policy cannot reuse an answer.
+Legacy supplier entries are retained and remain readable; Maple uses a separate cache identity.
 Current grants and source/ignore-policy checks still run before cache access.
 
 This answer cache stores only hashes, timestamps and numeric scores in private files; even question
@@ -98,10 +105,19 @@ Removing disposable answer files loses reuse only; never remove payment records 
 
 ## Provider and spending
 
-Source and native Jev questions go directly from the local adapter to jev-x402. Tenjin's router
+Source and native Jev questions go directly from the local adapter to the selected supplier. Tenjin's router
 receives the normal bounded conversation packet, never repository source from this executor.
-The fixed model is `jev-1.13.0`, on Base USDC, with recipient
+The legacy jev-x402 model is `jev-1.13.0`, on Base USDC, with recipient
 `0xE813d34C0525E0fBb1e6478B86D40B83603C2008` and a maximum of $0.001 per evaluation.
+Maple uses `jev-latest` at `https://base.mapleai.shop/jev`, paid per request in Base USDC to
+`0x63db6eaf635a31bbc6714fe37bdc85243864f611`. Every live quote must fit the $0.01 per-evaluation
+ceiling and the remaining approved search budget; this ceiling is not a fixed charge.
+The adapter preserves native question IDs and serializes object or array state as JSON because
+Maple requires string state. Although the request names `jev-latest`, the adapter accepts only
+responses identifying the qualified model `jev-1.13.0`; a missing model, alias or other version
+is rejected. Responses are checked against the original questions before caching or reuse.
+Source-sharing consent covers Maple and the model provider processing the submitted source;
+this integration does not claim zero retention or change provider privacy terms.
 Changing these terms requires a reviewed client update and renewed applicable disclosure consent.
 There is no automatic supplier fallback. This is a technical pilot; it adds no Tenjin routing fees.
 
@@ -111,7 +127,8 @@ Explicitly granting more than $0.05, up to $1, selects the extended profile: two
 evaluations, 1,000 uncached evaluations, 256 KiB per request, 64 MiB total request bytes and a
 900-second search deadline. These are ceilings, not targets; the approved money cap may stop
 a search earlier. Runtime setup retains a 60-second deadline in either profile. Cached answers consume neither paid-request nor supplier-egress
-allowance. The local child separately stops at 4,096 requests or 64 MiB of loopback input, including
+allowance. Supplier request-byte limits count the adapted outbound JSON, including any extra escaping
+needed for Maple's string state. The local child separately stops at 4,096 requests or 64 MiB of loopback input, including
 cache hits, and the per-request bound still applies before lookup. Its exposure cap is the lower of the approved search budget and `maxAutoSpend`, at most $1.
 Each evaluation also uses the existing shared daily wallet policy, so concurrent searches cannot
 spend the same remaining allowance. Returned source is bounded to 16 KiB; total output is 16 KiB
@@ -123,7 +140,7 @@ with its reason. It must never be interpreted as proof that no matches exist.
 Repeated identical evaluations within the same run reuse validated responses or join an active
 attempt. An unresolved attempt cannot sign a replacement. The shared spend ledger retains
 reserved and signed exposure across restarts and rolling-window expiry. `confirmedAtomic`
-currently remains zero because this pilot does not independently reconcile chain settlement;
+remains zero because this pilot does not independently reconcile chain settlement;
 `unknownAtomic` reports signed exposure, including successful provider responses. The result
 reports these separately. No automatic refund or recovery is claimed. Private payment records
 hold hashes, terms and bounded answers, not source, signatures or wallet keys.

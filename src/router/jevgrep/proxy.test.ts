@@ -9,6 +9,8 @@ import { JEV_LIMITS, JEV_MODEL } from './protocol.js';
 import type { NativeEvaluationRequest } from './protocol.js';
 import { createJevgrepAnswerCache } from './answer-cache.js';
 import type { JevgrepAnswerCache } from './answer-cache.js';
+import { encodeMapleRequest } from './maple';
+import { MAPLE_JEVGREP_SUPPLIER, type JevgrepSupplier } from './supplier';
 
 const body: NativeEvaluationRequest = {
   model: JEV_MODEL,
@@ -18,8 +20,12 @@ const body: NativeEvaluationRequest = {
 const answer = { answers: { q: { type: 'noul' as const, noul: 0.8 } } };
 const proxies: Array<Awaited<ReturnType<typeof startJevgrepProxy>>> = [];
 const directories: string[] = [];
-async function proxy(evaluate: JevgrepEvaluate = async () => answer, cache?: JevgrepAnswerCache) {
-  const p = await startJevgrepProxy({ evaluate, cache });
+async function proxy(
+  evaluate: JevgrepEvaluate = async () => answer,
+  cache?: JevgrepAnswerCache,
+  supplier?: JevgrepSupplier,
+) {
+  const p = await startJevgrepProxy({ evaluate, cache, supplier });
   proxies.push(p);
   return p;
 }
@@ -155,6 +161,46 @@ describe('bounded local evaluation proxy', () => {
     const stopped = await send(p);
     expect(stopped.status).toBe(409);
     expect(stopped.body).toContain('request-byte-limit');
+    expect(evaluate).not.toHaveBeenCalled();
+  });
+  it('reserves expanded Maple body bytes before aggregate provider admission', async () => {
+    const evaluate = vi.fn(async () => answer);
+    const p = await proxy(evaluate, undefined, MAPLE_JEVGREP_SUPPLIER);
+    const escaped = { ...body, state: { source: '"\\'.repeat(15_000) } };
+    const nativeBytes = Buffer.byteLength(JSON.stringify(escaped));
+    const supplierBytes = Buffer.byteLength(encodeMapleRequest(escaped));
+    const admitted = Math.floor(JEV_LIMITS.totalRequestBytes / supplierBytes);
+    expect(supplierBytes).toBeGreaterThan(nativeBytes);
+    expect(supplierBytes).toBeLessThan(JEV_LIMITS.requestBytes);
+    // Ingress-only accounting would admit this next request and overrun egress.
+    expect((admitted + 1) * nativeBytes).toBeLessThan(JEV_LIMITS.totalRequestBytes);
+    for (let i = 0; i < admitted; i++) expect((await send(p, escaped)).status).toBe(200);
+    expect((await send(p, escaped)).status).toBe(413);
+    expect(evaluate).toHaveBeenCalledTimes(admitted);
+    expect(p.summary()).toMatchObject({
+      requests: admitted,
+      requestBytes: admitted * supplierBytes,
+      stopReason: 'total-byte-limit',
+    });
+  });
+  it('checks Maple per-request expansion only for supplier misses', async () => {
+    const evaluate = vi.fn(async () => answer);
+    const escaped = { ...body, state: { source: '"\\'.repeat(17_000) } };
+    expect(Buffer.byteLength(JSON.stringify(escaped))).toBeLessThan(JEV_LIMITS.requestBytes);
+    const hit = await proxy(
+      evaluate,
+      { get: async () => answer, put: async () => {} },
+      MAPLE_JEVGREP_SUPPLIER,
+    );
+    expect((await send(hit, escaped)).status).toBe(200);
+    expect(hit.summary()).toMatchObject({ requests: 0, requestBytes: 0, cacheHits: 1 });
+    const miss = await proxy(evaluate, undefined, MAPLE_JEVGREP_SUPPLIER);
+    expect((await send(miss, escaped)).status).toBe(413);
+    expect(miss.summary()).toMatchObject({
+      requests: 0,
+      requestBytes: 0,
+      stopReason: 'request-byte-limit',
+    });
     expect(evaluate).not.toHaveBeenCalled();
   });
   it('cancels pending callbacks and closes its listener', async () => {

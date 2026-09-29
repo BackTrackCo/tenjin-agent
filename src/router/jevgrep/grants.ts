@@ -7,7 +7,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { isAbsolute, join } from 'node:path';
 import { z } from 'zod';
-import { JEVGREP_SUPPLIER } from './supplier';
+import { jevgrepSupplier } from './supplier';
 import { routerSettings } from '../settings';
 import type { CommandContext, CommandResult } from '../../context';
 import { writeFileAtomic, writeFileAtomicExclusive } from '../../lib/atomic-json';
@@ -21,13 +21,14 @@ import { spendLedgerPath } from '../../lib/paths';
 
 const exec = promisify(execFile);
 export const JEVGREP_EXECUTOR = 'jevgrep-search-v1';
+const SupplierSchema = z.enum(['jev-x402', 'maple-jev']);
 const GrantSchema = z.strictObject({
   version: z.literal(1),
   id: z.string().uuid(),
   enabled: z.boolean(),
   root: z.string().min(1).refine(isAbsolute),
   source: z.literal('committed-tracked'),
-  supplier: z.literal('jev-x402'),
+  supplier: SupplierSchema,
   shareSource: z.literal(true),
   maxRunAtomic: z
     .string()
@@ -126,7 +127,8 @@ export async function eligibleJevgrep(
       (await realpath(grant.root)) !== grant.root
     )
       return null;
-    if (BigInt(grant.maxRunAtomic) < BigInt(JEVGREP_SUPPLIER.maxAmountAtomic)) return null;
+    const supplier = jevgrepSupplier(grant.supplier);
+    if (BigInt(grant.maxRunAtomic) < BigInt(supplier.maxAmountAtomic)) return null;
     if (grant.runtime.kind === 'local-artifact') {
       const runtime = await lstat(grant.runtime.path);
       if (!runtime.isFile() || runtime.isSymbolicLink() || !grant.runtime.path.endsWith('.tgz'))
@@ -138,8 +140,8 @@ export async function eligibleJevgrep(
     const ledger = await readSpendSummary(ctx.dataDir);
     if (
       evaluateSpendPolicy(policy, {
-        amountAtomic: BigInt(JEVGREP_SUPPLIER.maxAmountAtomic),
-        creator: new URL(JEVGREP_SUPPLIER.url).host,
+        amountAtomic: BigInt(supplier.maxAmountAtomic),
+        creator: new URL(supplier.url).host,
         sessionSpentAtomic: ledger ? spentOf(ledger) : 0n,
       }).decision !== 'allow'
     )
@@ -271,6 +273,7 @@ export async function configureJevgrep(
     artifact?: string;
     sha256?: string;
     release?: string;
+    supplier?: string;
     maxRun: string;
     shareSource: boolean;
     experimental: boolean;
@@ -278,6 +281,10 @@ export async function configureJevgrep(
 ): Promise<CommandResult> {
   if (!args.shareSource || !args.experimental)
     throw new CliError('USAGE', 'Enabling the pilot requires --share-source and --experimental.');
+  const supplierId = SupplierSchema.safeParse(args.supplier ?? 'jev-x402');
+  if (!supplierId.success)
+    throw new CliError('USAGE', 'Choose --supplier jev-x402 or --supplier maple-jev.');
+  const supplier = jevgrepSupplier(supplierId.data);
   const root = await realpath(args.root);
   const { stdout } = await exec('git', ['-C', root, 'rev-parse', '--show-toplevel'], {
     timeout: 5_000,
@@ -321,7 +328,7 @@ export async function configureJevgrep(
     enabled: true,
     root,
     source: 'committed-tracked',
-    supplier: 'jev-x402',
+    supplier: supplier.id,
     shareSource: true,
     maxRunAtomic: parseUsdToAtomic(args.maxRun).toString(),
     runtime,
@@ -335,7 +342,7 @@ export async function configureJevgrep(
   return {
     data: parsed.data,
     humanLines: [
-      `Enabled experimental repository retrieval for ${root}. Committed tracked source may be sent to https://jev-x402.vercel.app/jev, up to $${args.maxRun} per search within your wallet policy. Native tools remain available.`,
+      `Enabled experimental repository retrieval for ${root}. Committed tracked source may be sent to ${supplier.url}, up to $${args.maxRun} per search within your wallet policy. Native tools remain available.`,
     ],
   };
 }

@@ -105,11 +105,15 @@ function registerJevgrep(reg: Registration): void {
     .option('--release <version>', 'qualified exact npm release (0.7.0); cached npx runtime')
     .option('--artifact <path>', 'reviewed Jevgrep npm tarball containing custom auth')
     .option('--sha256 <hex>', 'reviewed tarball SHA-256; required with --artifact')
+    .option('--supplier <id>', 'reviewed source recipient: jev-x402 or maple-jev', 'jev-x402')
     .requiredOption(
       '--max-run <usd>',
       'whole-search exposure ceiling, at most 1 USD; above 0.05 opts into extended retrieval',
     )
-    .requiredOption('--share-source', 'authorize committed tracked source disclosure to jev-x402')
+    .requiredOption(
+      '--share-source',
+      'authorize committed tracked source disclosure to the selected supplier',
+    )
     .requiredOption('--experimental', 'opt into the unreleased local pilot')
     .action(async function (this: Command) {
       await reg.runCommand('jevgrep enable', this, async (ctx) => {
@@ -131,7 +135,7 @@ function registerJevgrep(reg: Registration): void {
         data: grant ?? { enabled: false },
         humanLines: [
           grant?.enabled
-            ? `Enabled for committed tracked source in ${grant.root}; supplier jev-x402; budget ${grant.maxRunAtomic} atomic USDC.`
+            ? `Enabled for committed tracked source in ${grant.root}; supplier ${grant.supplier}; budget ${grant.maxRunAtomic} atomic USDC.`
             : 'Local repository retrieval is disabled.',
         ],
       };

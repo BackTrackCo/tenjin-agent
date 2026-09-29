@@ -8,7 +8,7 @@ import type { NpmRuntime } from '../local/npm-runtime';
 import { JEV_MODEL, validateNativeRequest, validateNativeResponse } from './protocol';
 import type { NativeEvaluationRequest, NativeEvaluationResponse } from './protocol';
 import { jevgrepProfile, type JevgrepProfileId } from './profile';
-import { JEVGREP_SUPPLIER } from './supplier';
+import { JEVGREP_SUPPLIER, type JevgrepSupplier } from './supplier';
 
 // Bump when snapshot admission or native evaluation semantics change. Runtime
 // upgrades are independently isolated by their exact release/artifact identity.
@@ -34,6 +34,7 @@ export function createJevgrepAnswerCache(options: {
   query: string;
   runtime: NpmRuntime;
   profile?: JevgrepProfileId;
+  supplier?: JevgrepSupplier;
   now?: () => number;
 }): JevgrepAnswerCache {
   const policy = jevgrepProfile(options.profile);
@@ -58,7 +59,7 @@ export function createJevgrepAnswerCache(options: {
           searchTimeoutMs: policy.searchTimeoutMs,
         }
       : {}),
-    supplier: JEVGREP_SUPPLIER,
+    supplier: options.supplier ?? JEVGREP_SUPPLIER,
   };
   const identity = (request: NativeEvaluationRequest) =>
     canonicalHash({ namespace, request: validateNativeRequest(request, policy.id) });

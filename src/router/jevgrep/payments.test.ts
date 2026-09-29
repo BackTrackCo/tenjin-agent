@@ -11,6 +11,7 @@ import { canonicalHash } from '../../lib/request-schema';
 import type { JevgrepProfileId } from './profile';
 import type { WalletProvider } from '../../lib/wallet';
 import { createJevgrepPayer, JEVGREP_SUPPLIER } from './payments';
+import { MAPLE_JEVGREP_SUPPLIER, type JevgrepSupplier } from './supplier';
 
 vi.mock('../../commands/pay', () => ({ runPay: vi.fn() }));
 const request = {
@@ -46,6 +47,7 @@ function payer(
   maxRunAtomic = 50_000n,
   profile?: JevgrepProfileId,
   sessionBudgetAtomic = 100_000n,
+  supplier: JevgrepSupplier = JEVGREP_SUPPLIER,
 ) {
   const sink = { write: () => true } as unknown as NodeJS.WritableStream;
   const ctx: CommandContext = {
@@ -59,27 +61,27 @@ function payer(
     runId,
     maxRunAtomic,
     profile,
-    supplier: JEVGREP_SUPPLIER,
+    supplier,
     authorizer: createLocalSpendAuthorizer({
       dir,
       policy: { maxAutoSpendAtomic: 50_000n, sessionBudgetAtomic, allowlistCreators: [] },
     }),
   });
 }
-function success() {
+function success(supplier: JevgrepSupplier = JEVGREP_SUPPLIER, amountAtomic = 1000n) {
   vi.mocked(runPay).mockImplementation(async (args, _ctx, deps) => {
     const authorization = await deps!.authorizer!.authorize({
-      amountAtomic: 1000n,
-      creator: 'jev-x402.vercel.app',
+      amountAtomic,
+      creator: new URL(supplier.url).host,
       requestKey: args.requestKey,
     });
     if (authorization.decision !== 'allow') throw new Error('refused');
     await deps!.beforePayment!({
       headers: { 'payment-signature': 'must-not-persist' },
-      amountAtomic: '1000',
-      url: JEVGREP_SUPPLIER.url,
+      amountAtomic: amountAtomic.toString(),
+      url: supplier.url,
     });
-    await deps!.authorizer!.commit(authorization.reservationId, 1000n);
+    await deps!.authorizer!.commit(authorization.reservationId, amountAtomic);
     return { data: { bodyText: JSON.stringify(response) } };
   });
 }
@@ -102,6 +104,15 @@ describe('durable Jevgrep payments', () => {
         details: { reason: 'private-source', status: 600, cause: 'private-signature' },
       }),
       diagnostic: { code: 'REFUSED', phase: 'payment' },
+    },
+    {
+      error: new CliError('PAYMENT_FAILED', 'private-message', {
+        details: {
+          status: 402,
+          paymentFailure: { stage: 'settlement', reason: 'private-source' },
+        },
+      }),
+      diagnostic: { code: 'PAYMENT_FAILED', phase: 'payment', status: 402 },
     },
     {
       error: Object.assign(new Error('private-message'), {
@@ -139,6 +150,46 @@ describe('durable Jevgrep payments', () => {
         diagnostic: { code: 'REFUSED', phase: 'response_validation' },
       },
     });
+  });
+
+  it('journals a closed settlement diagnostic while preserving uncertain exposure and retry guards', async () => {
+    vi.mocked(runPay).mockImplementation(async (_args, _ctx, deps) => {
+      await deps!.authorizer!.authorize({ amountAtomic: 1000n, creator: 'jev-x402.vercel.app' });
+      await deps!.beforePayment!({ headers: {}, amountAtomic: '1000', url: JEVGREP_SUPPLIER.url });
+      throw new CliError('PAYMENT_FAILED', 'private-message', {
+        details: {
+          status: 402,
+          body: 'private-source',
+          paymentFailure: {
+            stage: 'settlement',
+            reason: 'provider_payment_method_required',
+            header: 'private-signature',
+          },
+        },
+      });
+    });
+    const diagnostic = {
+      code: 'PAYMENT_FAILED',
+      phase: 'payment',
+      status: 402,
+      paymentFailure: { stage: 'settlement', reason: 'provider_payment_method_required' },
+    };
+    const instance = payer();
+    await expect(instance.evaluate(request)).rejects.toMatchObject({
+      details: { reason: 'payment_uncertain', diagnostic },
+    });
+    const root = join(dir, 'jevgrep', 'payments');
+    const runDir = join(
+      root,
+      (await readdir(root)).find((name) => /^[a-f0-9]{64}$/.test(name))!,
+    );
+    const failed = (await readdir(runDir)).find((name) => name.endsWith('.failed.json'))!;
+    const raw = await readFile(join(runDir, failed), 'utf8');
+    expect(JSON.parse(raw)).toEqual({ version: 1, state: 'uncertain', diagnostic });
+    expect(raw).not.toContain('private-');
+    expect(await instance.summary()).toMatchObject({ unknownAtomic: '1000' });
+    await expect(payer().evaluate(request)).rejects.toThrow('no duplicate');
+    expect(runPay).toHaveBeenCalledTimes(1);
   });
 
   it('joins concurrent identical requests and replays a completed response after restart', async () => {
@@ -253,6 +304,124 @@ describe('durable Jevgrep payments', () => {
       instance.evaluate({ ...request, state: { source: 'another question' } }),
     ).rejects.toThrow('budget');
     expect(await instance.summary()).toMatchObject({ unknownAtomic: '1000' });
+  });
+});
+
+describe('Maple per-request Jevgrep payments', () => {
+  const maplePayer = (runId = 'maple-run', supplier: JevgrepSupplier = MAPLE_JEVGREP_SUPPLIER) =>
+    payer(runId, 50_000n, undefined, 100_000n, supplier);
+
+  it('pays the live quote with pinned terms, adapts state, and replays without another payment', async () => {
+    success(MAPLE_JEVGREP_SUPPLIER, 1008n);
+    const original = structuredClone(request);
+    const instance = maplePayer();
+    expect(await Promise.all([instance.evaluate(request), instance.evaluate(request)])).toEqual([
+      response,
+      response,
+    ]);
+    expect(await maplePayer().evaluate(request)).toEqual(response);
+    expect(request).toEqual(original);
+    expect(runPay).toHaveBeenCalledTimes(1);
+    const args = vi.mocked(runPay).mock.calls[0]![0];
+    expect(args).toMatchObject({
+      url: MAPLE_JEVGREP_SUPPLIER.url,
+      method: 'POST',
+      execution: 'router',
+      terms: {
+        source: 'maple-jev',
+        network: MAPLE_JEVGREP_SUPPLIER.network,
+        asset: MAPLE_JEVGREP_SUPPLIER.asset,
+        payTo: MAPLE_JEVGREP_SUPPLIER.payTo,
+        maxAmountAtomic: '10000',
+      },
+    });
+    expect(JSON.parse(args.rawBody!)).toEqual({
+      ...request,
+      model: 'jev-latest',
+      state: JSON.stringify(request.state),
+    });
+    expect(await instance.summary()).toMatchObject({ requests: 1, unknownAtomic: '1008' });
+    const journal = join(dir, 'jevgrep', 'payments', canonicalHash('maple-run'));
+    for (const name of await readdir(journal)) {
+      const raw = await readFile(join(journal, name), 'utf8');
+      expect(raw).not.toContain('private-source-body');
+      expect(raw).not.toContain('must-not-persist');
+    }
+  });
+
+  it('preserves string state without double encoding and retains verified usage', async () => {
+    vi.mocked(runPay).mockResolvedValue({
+      data: {
+        bodyText: JSON.stringify({
+          ...response,
+          usage: { input_tokens: 48, output_tokens: 2 },
+        }),
+      },
+    });
+    const input = { ...request, state: 'function retry() {\n return "cached 🍁";\n}' };
+    await expect(maplePayer().evaluate(input)).resolves.toMatchObject({
+      model: 'jev-1.13.0',
+      usage: { input_tokens: 48, output_tokens: 2 },
+    });
+    expect(JSON.parse(vi.mocked(runPay).mock.calls[0]![0].rawBody!).state).toBe(input.state);
+  });
+
+  it('refuses post-adaptation byte overflow before network or durable admission', async () => {
+    await expect(
+      maplePayer().evaluate({ ...request, state: { source: '"'.repeat(40_000) } }),
+    ).rejects.toThrow('adapted evaluation request exceeds');
+    expect(runPay).not.toHaveBeenCalled();
+    expect(await readdir(dir)).toEqual([]);
+  });
+
+  it.each(['jev-latest', undefined])(
+    'keeps paid exposure and refuses unpinned response model %s',
+    async (model) => {
+      vi.mocked(runPay).mockImplementation(async (_args, _ctx, deps) => {
+        await deps!.authorizer!.authorize({ amountAtomic: 1008n, creator: 'base.mapleai.shop' });
+        await deps!.beforePayment!({
+          headers: {},
+          amountAtomic: '1008',
+          url: MAPLE_JEVGREP_SUPPLIER.url,
+        });
+        return { data: { bodyText: JSON.stringify({ ...response, model }) } };
+      });
+      const instance = maplePayer();
+      await expect(instance.evaluate(request)).rejects.toMatchObject({
+        details: {
+          reason: 'payment_uncertain',
+          diagnostic: { code: 'REFUSED', phase: 'response_validation' },
+        },
+      });
+      expect(await instance.summary()).toMatchObject({ unknownAtomic: '1008' });
+      await expect(maplePayer().evaluate(request)).rejects.toThrow('no duplicate');
+      expect(runPay).toHaveBeenCalledTimes(1);
+      const journal = join(dir, 'jevgrep', 'payments', canonicalHash('maple-run'));
+      expect((await readdir(journal)).some((name) => name.endsWith('.response.json'))).toBe(false);
+    },
+  );
+
+  it('validates pinned provenance again on disk replay without issuing another payment', async () => {
+    success(MAPLE_JEVGREP_SUPPLIER, 1008n);
+    await maplePayer().evaluate(request);
+    const journal = join(dir, 'jevgrep', 'payments', canonicalHash('maple-run'));
+    const receipt = (await readdir(journal)).find((name) => name.endsWith('.response.json'))!;
+    await writeFile(join(journal, receipt), JSON.stringify({ answers: response.answers }));
+    await expect(maplePayer().evaluate(request)).rejects.toThrow('approved evaluation model');
+    expect(runPay).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects altered supplier terms and reuse of a legacy supplier journal', async () => {
+    expect(() =>
+      maplePayer('changed', {
+        ...MAPLE_JEVGREP_SUPPLIER,
+        maxAmountAtomic: '20000',
+      } as unknown as JevgrepSupplier),
+    ).toThrow('approved payment terms');
+    success();
+    await payer('shared').evaluate(request);
+    await expect(maplePayer('shared').evaluate(request)).rejects.toThrow('different payment terms');
+    expect(runPay).toHaveBeenCalledTimes(1);
   });
 });
 

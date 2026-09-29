@@ -6,6 +6,8 @@ import { canonicalHash } from '../../lib/request-schema';
 import type { JevgrepAnswerCache } from './answer-cache';
 import { validateNativeRequest, validateNativeResponse } from './protocol.js';
 import type { NativeEvaluationRequest, NativeEvaluationResponse } from './protocol.js';
+import { encodeMapleRequest } from './maple';
+import type { JevgrepSupplier } from './supplier';
 
 export type JevgrepEvaluate = (
   request: NativeEvaluationRequest,
@@ -15,6 +17,7 @@ export type JevgrepEvaluate = (
 export async function startJevgrepProxy(options: {
   evaluate: JevgrepEvaluate;
   profile?: JevgrepProfileId;
+  supplier?: JevgrepSupplier;
   cache?: JevgrepAnswerCache;
   signal?: AbortSignal;
 }) {
@@ -133,14 +136,24 @@ export async function startJevgrepProxy(options: {
               stopped();
               return;
             }
-            if (bytes + size > limits.totalRequestBytes) {
+            let supplierBytes = size;
+            if (options.supplier?.id === 'maple-jev') {
+              try {
+                supplierBytes = Buffer.byteLength(encodeMapleRequest(body, options.profile));
+              } catch {
+                stopReason ??= 'request-byte-limit';
+                respond(413, 'Local request byte limit');
+                return;
+              }
+            }
+            if (bytes + supplierBytes > limits.totalRequestBytes) {
               stopReason ??= 'total-byte-limit';
               respond(413, 'Local request byte limit');
               return;
             }
             // Reserve synchronously across concurrent misses before dispatch.
             requests++;
-            bytes += size;
+            bytes += supplierBytes;
             const operation = (async () => {
               const upstream = await options.evaluate(
                 JSON.parse(JSON.stringify(body)) as NativeEvaluationRequest,

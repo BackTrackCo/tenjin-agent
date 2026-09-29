@@ -4,7 +4,8 @@ import { toMoney } from '../../lib/money';
 import { resolveContextSettings } from '../../lib/settings';
 import type { RequestToolDeps, RequestToolResult } from '../tool';
 import { boundJevgrepGrant, claimRepositoryRetrieval, type JevgrepGrant } from './grants';
-import { createJevgrepPayer, JEVGREP_SUPPLIER } from './payments';
+import { createJevgrepPayer } from './payments';
+import { jevgrepSupplier } from './supplier';
 import { runJevgrep } from './runner';
 
 export async function executeJevgrep(
@@ -33,6 +34,7 @@ export async function executeJevgrep(
           'This repository retrieval was already attempted or its snapshot changed. Continue with native tools.',
         envelope: { status: 'needs_input' },
       };
+    const supplier = jevgrepSupplier(current.supplier);
     const { policy } = await resolveContextSettings(deps.ctx);
     const approved = BigInt(current.maxRunAtomic);
     const profile = jevgrepProfileForBudget(approved);
@@ -44,7 +46,7 @@ export async function executeJevgrep(
       runId,
       maxRunAtomic,
       profile,
-      supplier: JEVGREP_SUPPLIER,
+      supplier,
       ...(deps.provider ? { provider: deps.provider } : {}),
       ...(deps.signer ? { signer: deps.signer } : {}),
       ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}),
@@ -55,6 +57,7 @@ export async function executeJevgrep(
       dataDir: deps.ctx.dataDir,
       query,
       runtime: current.runtime,
+      supplier,
       ...(admission.snapshotCommit ? { expectedCommit: admission.snapshotCommit } : {}),
       profile,
       evaluate: (request, signal) => payer!.evaluate(request, signal),
@@ -71,6 +74,7 @@ export async function executeJevgrep(
       envelope: {
         status: fulfilled ? 'fulfilled' : drained.drainCompleted ? result.status : 'partial',
         executor: 'jevgrep-search-v1',
+        supplier: supplier.id,
         runId,
         source: 'committed-tracked',
         excludes: 'Uncommitted and untracked files are not included.',

@@ -8,6 +8,7 @@ import { JEV_LIMITS, JEV_MODEL } from './protocol.js';
 import { isJevgrepRuntimeAvailable, runJevgrep } from './runner.js';
 import type { JevgrepRuntime } from './runner.js';
 import type { BoundedCommand, CommandResult } from '../local/process';
+import { MAPLE_JEVGREP_SUPPLIER } from './supplier';
 const directories: string[] = [];
 async function fixture() {
   const dir = await mkdtemp(join(tmpdir(), 'jev-runner-test-'));
@@ -239,6 +240,19 @@ describe('isolated Jevgrep lifecycle', () => {
     expect(second.requests).toBe(0);
     expect(second.cacheHits).toBe(1);
     expect(evaluate).toHaveBeenCalledTimes(1);
+    const maple = await runJevgrep(
+      { ...f, query: 'same question', supplier: MAPLE_JEVGREP_SUPPLIER, evaluate },
+      { runCommand },
+    );
+    expect(maple.requests).toBe(1);
+    expect(maple.cacheHits).toBe(0);
+    const mapleAgain = await runJevgrep(
+      { ...f, query: 'same question', supplier: MAPLE_JEVGREP_SUPPLIER, evaluate },
+      { runCommand },
+    );
+    expect(mapleAgain.requests).toBe(0);
+    expect(mapleAgain.cacheHits).toBe(1);
+    expect(evaluate).toHaveBeenCalledTimes(2);
     // A newly added uncommitted ignore policy makes the source unavailable,
     // even though the previous exact answer exists on disk.
     await writeFile(join(f.root, '.ignore'), 'code.ts\n');
@@ -247,7 +261,7 @@ describe('isolated Jevgrep lifecycle', () => {
       await runJevgrep({ ...f, query: 'same question', evaluate }, { runCommand: blocked }),
     ).toMatchObject({ status: 'unavailable', reason: 'snapshot-policy-unavailable' });
     expect(blocked).not.toHaveBeenCalled();
-    expect(evaluate).toHaveBeenCalledTimes(1);
+    expect(evaluate).toHaveBeenCalledTimes(2);
   });
 });
 

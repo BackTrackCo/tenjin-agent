@@ -7,6 +7,7 @@ import type { CommandContext } from '../../context';
 import { ErrorCodeSchema } from '../../schemas';
 import { writeFileAtomicExclusive } from '../../lib/atomic-json';
 import { CliError } from '../../lib/errors';
+import { validatedX402Failure } from '../../lib/x402-diagnostic';
 import { withFileLock } from '../../lib/lock';
 import { canonicalHash } from '../../lib/request-schema';
 import { resolveWalletProvider, type WalletProvider, type SpendAuthorizer } from '../../lib/wallet';
@@ -16,7 +17,8 @@ import {
   validateNativeResponse,
   type NativeEvaluationResponse,
 } from './protocol';
-import { JEVGREP_SUPPLIER, type JevgrepSupplier } from './supplier';
+import { jevgrepSupplier, type JevgrepSupplier } from './supplier';
+import { encodeMapleRequest, validateMapleResponse } from './maple';
 
 export { JEVGREP_SUPPLIER } from './supplier';
 
@@ -99,6 +101,7 @@ function failureDiagnostic(error: unknown, phase: FailurePhase, aborted: boolean
       : undefined;
   const status = details?.status;
   const reason = details?.reason;
+  const paymentFailure = validatedX402Failure(details?.paymentFailure);
   return {
     code: aborted ? 'ABORTED' : code?.success ? code.data : 'UNKNOWN',
     phase,
@@ -106,6 +109,7 @@ function failureDiagnostic(error: unknown, phase: FailurePhase, aborted: boolean
       ? { status }
       : {}),
     ...(reason === 'balance_unavailable' || reason === 'insufficient_funds' ? { reason } : {}),
+    ...(paymentFailure !== undefined ? { paymentFailure } : {}),
   };
 }
 
@@ -118,7 +122,8 @@ export function createJevgrepPayer(options: JevgrepPayerOptions) {
     options.maxRunAtomic > policy.maxRunAtomic
   )
     refuse('Invalid search payment scope or budget.');
-  if (canonicalHash(options.supplier) !== canonicalHash(JEVGREP_SUPPLIER))
+  const supplier = jevgrepSupplier(options.supplier.id);
+  if (canonicalHash(options.supplier) !== canonicalHash(supplier))
     refuse('The search supplier does not match the approved payment terms.');
   const authorizer = options.authorizer;
   if (!authorizer.markSigned || !authorizer.durableSummary)
@@ -141,7 +146,7 @@ export function createJevgrepPayer(options: JevgrepPayerOptions) {
       version: 1,
       runId: options.runId,
       wallet: wallet.address.toLowerCase(),
-      supplier: JEVGREP_SUPPLIER,
+      supplier,
       maxRunAtomic: options.maxRunAtomic.toString(),
       ...(policy.id === 'extended-v1' ? { profile: policy.id } : {}),
     };
@@ -165,6 +170,12 @@ export function createJevgrepPayer(options: JevgrepPayerOptions) {
       JSON.parse(JSON.stringify(validateNativeRequest(body, policy.id))),
       policy.id,
     );
+    const rawBody =
+      supplier.id === 'maple-jev'
+        ? encodeMapleRequest(request, policy.id)
+        : JSON.stringify(request);
+    const validateResponse =
+      supplier.id === 'maple-jev' ? validateMapleResponse : validateNativeResponse;
     const combined = AbortSignal.any([
       AbortSignal.timeout(120_000),
       lifecycle.signal,
@@ -172,14 +183,14 @@ export function createJevgrepPayer(options: JevgrepPayerOptions) {
     ]);
     combined.throwIfAborted();
     await initialize();
-    const identity = canonicalHash({ runId: options.runId, supplier: JEVGREP_SUPPLIER, request });
+    const identity = canonicalHash({ runId: options.runId, supplier, request });
     const responsePath = join(directory, `${identity}.response.json`);
     const attemptPath = join(directory, `${identity}.attempt.json`);
     const failedPath = join(directory, `${identity}.failed.json`);
     const replay = async () => {
       const saved = await readRecord(responsePath);
       if (saved === undefined) return undefined;
-      const response = validateNativeResponse(saved, request);
+      const response = validateResponse(saved, request);
       replays++;
       return response;
     };
@@ -237,19 +248,19 @@ export function createJevgrepPayer(options: JevgrepPayerOptions) {
     try {
       const paid = await runPay(
         {
-          url: JEVGREP_SUPPLIER.url,
+          url: supplier.url,
           method: 'POST',
-          rawBody: JSON.stringify(request),
+          rawBody,
           headers: { 'content-type': 'application/json', accept: 'application/json' },
           execution: 'router',
           requestKey: identity,
           printBody: true,
           terms: {
-            source: JEVGREP_SUPPLIER.id,
-            network: JEVGREP_SUPPLIER.network,
-            asset: JEVGREP_SUPPLIER.asset,
-            payTo: JEVGREP_SUPPLIER.payTo,
-            maxAmountAtomic: JEVGREP_SUPPLIER.maxAmountAtomic,
+            source: supplier.id,
+            network: supplier.network,
+            asset: supplier.asset,
+            payTo: supplier.payTo,
+            maxAmountAtomic: supplier.maxAmountAtomic,
           },
         },
         options.ctx,
@@ -263,8 +274,8 @@ export function createJevgrepPayer(options: JevgrepPayerOptions) {
             combined.throwIfAborted();
             if (
               !reservationId ||
-              payment.url !== JEVGREP_SUPPLIER.url ||
-              BigInt(payment.amountAtomic) > BigInt(JEVGREP_SUPPLIER.maxAmountAtomic)
+              payment.url !== supplier.url ||
+              BigInt(payment.amountAtomic) > BigInt(supplier.maxAmountAtomic)
             )
               refuse('The payment does not match its durable reservation.');
             paymentPrepared = true;
@@ -281,7 +292,7 @@ export function createJevgrepPayer(options: JevgrepPayerOptions) {
       } catch {
         refuse('The provider did not return a valid evaluation.');
       }
-      const response = validateNativeResponse(parsed, request);
+      const response = validateResponse(parsed, request);
       phase = 'response_persistence';
       await saveRecord(responsePath, response);
       return response;
