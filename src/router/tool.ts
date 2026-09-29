@@ -1,4 +1,4 @@
-import { boundJevgrepGrant } from './jevgrep/grants';
+import { boundJevgrepGrant, isJevgrepOffer } from './jevgrep/grants';
 import { executeJevgrep } from './jevgrep/executor';
 import { runPay, type AdvertisedTerms, type PayDeps } from '../commands/pay';
 import { CliError } from '../lib/errors';
@@ -99,6 +99,13 @@ export async function runRequestTool(
   await footer.routing();
   const settings = await resolveContextSettings(deps.ctx);
   const local = await boundJevgrepGrant(deps.ctx, deps.cwd ?? process.cwd(), args.id, query);
+  if (!local && (await isJevgrepOffer(deps.ctx.dataDir, args.id))) {
+    await footer.done('needs_input');
+    return fail(
+      'needs_input',
+      'This local retrieval offer is no longer authorized. Use native tools.',
+    );
+  }
   const decisionDeps = {
     jevgrep: local !== null,
     ctx: deps.ctx,
@@ -137,10 +144,10 @@ export async function runRequestTool(
   }
 
   if (
-    deps.expectedExecutor !== undefined &&
-    (decision.capabilityId !== deps.expectedExecutor ||
+    (deps.expectedExecutor !== undefined || local !== null) &&
+    (decision.capabilityId !== (deps.expectedExecutor ?? 'jevgrep-search-v1') ||
       !('executor' in decision.contract) ||
-      decision.contract.executor !== deps.expectedExecutor)
+      decision.contract.executor !== (deps.expectedExecutor ?? 'jevgrep-search-v1'))
   ) {
     await footer.done('native');
     return fail(

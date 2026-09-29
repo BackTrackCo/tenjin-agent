@@ -61,7 +61,7 @@ export const HOOK_TIMEOUT_SECONDS = 5;
  */
 export const AFTER_CALL_TIMEOUT_SECONDS = 15;
 /** Only an explicitly granted repository can enter this bounded paid hook. */
-export const REPOSITORY_TIMEOUT_SECONDS = 990;
+export const REPOSITORY_TIMEOUT_SECONDS = 20;
 export { MCP_SERVER_NAME };
 export const ALLOW_RULE = REQUEST_TOOL;
 /**
@@ -128,7 +128,7 @@ export function routerHookPlan(): unknown[] {
     { event: 'PreToolUse', matcher: DELEGATION_MATCHER, hooks: handler('tenjin hook agent') },
     {
       event: 'PreToolUse',
-      matcher: 'Grep',
+      matcher: 'Grep|Bash',
       hooks: handler(
         'tenjin hook repository',
         REPOSITORY_TIMEOUT_SECONDS,
@@ -142,7 +142,7 @@ export function routerHookPlan(): unknown[] {
 
 export const DISCLOSURE: readonly string[] = [
   "What leaves this machine: the bounded text of each prompt, each native search query or URL (and, when one came back short, its status, size or error), and each task handed to a subagent, sent to Tenjin for the free routing gate. When the gate offers free library docs for a search, that search query also goes to Tenjin's docs lookup, which asks Context7.",
-  'With an explicit Jevgrep source-sharing grant, structured Grep calls may be classified and replaced by bounded retrieval from committed tracked source. Other repositories and shell searches stay native.',
+  'With an explicit Jevgrep source-sharing grant, structured Grep calls and recognized read-only Bash rg/grep searches may route to bounded retrieval from committed tracked source. Standalone searches may be redirected to x402 request, where the agent writes the question; supported compound searches retain their commands and permissions. Other repositories and unsupported shell commands stay native.',
   'What is kept when a lookup is paid: the capability chosen, a hash of the contract, a hash of the arguments, and your wallet address. No prompt text, no arguments, no hint text.',
   'What never leaves: your private key. It is decrypted in this CLI to sign, and never sent anywhere.',
 ];

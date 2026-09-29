@@ -66,6 +66,7 @@
     "ignore": "7.0.6",
     "ox": "0.14.30",
     "prettier": "^3",
+    "shell-quote": "1.10.0",
     "tsup": "^8.5.0",
     "typescript": "^6",
     "typescript-eslint": "^8",

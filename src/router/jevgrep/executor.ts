@@ -3,7 +3,7 @@ import { canonicalHash } from '../../lib/request-schema';
 import { toMoney } from '../../lib/money';
 import { resolveContextSettings } from '../../lib/settings';
 import type { RequestToolDeps, RequestToolResult } from '../tool';
-import { boundJevgrepGrant, type JevgrepGrant } from './grants';
+import { boundJevgrepGrant, claimRepositoryRetrieval, type JevgrepGrant } from './grants';
 import { createJevgrepPayer, JEVGREP_SUPPLIER } from './payments';
 import { runJevgrep } from './runner';
 
@@ -25,6 +25,14 @@ export async function executeJevgrep(
   let payer: ReturnType<typeof createJevgrepPayer> | undefined;
   try {
     deps.signal?.throwIfAborted();
+    const admission = await claimRepositoryRetrieval(deps.ctx.dataDir, id, current, query);
+    if (!admission)
+      return {
+        isError: false,
+        summary:
+          'This repository retrieval was already attempted or its snapshot changed. Continue with native tools.',
+        envelope: { status: 'needs_input' },
+      };
     const { policy } = await resolveContextSettings(deps.ctx);
     const approved = BigInt(current.maxRunAtomic);
     const profile = jevgrepProfileForBudget(approved);
@@ -47,6 +55,7 @@ export async function executeJevgrep(
       dataDir: deps.ctx.dataDir,
       query,
       runtime: current.runtime,
+      ...(admission.snapshotCommit ? { expectedCommit: admission.snapshotCommit } : {}),
       profile,
       evaluate: (request, signal) => payer!.evaluate(request, signal),
       ...(deps.signal ? { signal: deps.signal } : {}),

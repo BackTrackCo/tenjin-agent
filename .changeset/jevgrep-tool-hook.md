@@ -2,6 +2,6 @@
 'tenjin-cli': patch
 ---
 
-Run explicitly enabled repository retrieval from Claude Code Grep hooks after semantic routing, preserving native fallback and the answer cache. Add an optional bounded profile for explicitly approved searches above $0.05.
+Route explicitly enabled repository retrieval from Claude Code Grep and bounded read-only Bash rg/grep hooks. Like paid WebSearch, classify using session context, then let the agent author a focused question for the visible x402 request tool. Standalone searches are redirected once; compound commands retain their operations and permissions. Keep source grants, committed-snapshot checks, native fallback, durable attempt guards and the answer cache.
 
-Show a visible Calling x402 status while the repository hook checks and retrieves source.
+Add an optional bounded profile for explicitly approved searches above $0.05 and a Calling x402 status during hook routing.

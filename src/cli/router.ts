@@ -43,7 +43,7 @@ export function registerRouter(reg: Registration): void {
   }
   // A separate lazy entry keeps paid execution out of the ordinary free hooks.
   addGlobalFlags(hook.command('repository'))
-    .summary('PreToolUse on Grep: classify and retrieve in explicitly approved repositories')
+    .summary('PreToolUse on Grep/Bash searches: retrieve in explicitly approved repositories')
     .action(async function (this: Command) {
       const ctx = buildContext(this);
       const { runRepositoryHookCommand } = await import('../router/repository-hook-command');

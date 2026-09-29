@@ -1,13 +1,30 @@
 # Experimental Jevgrep retrieval
 
-Tenjin can discover repository search from a prompt or an eligible Claude Code `Grep` call.
-The prompt path offers the existing MCP `request` tool. The `tenjin hook repository` tool hook
-asks the same router to classify the proposed search, then invokes the local executor directly
-when Jevgrep is selected. Only completed, validated source can replace the pending grep; partial,
-empty, failed or unavailable retrieval leaves native search available. Shell commands remain native.
-Exact known lookups, uncommitted changes and no-upload requests should use native tools.
-The hook admits at most three classification attempts and one retrieval attempt per human turn.
-Durable attempt markers prevent duplicate hook delivery or concurrent calls from paying again.
+Tenjin can discover repository search from a prompt, a Claude Code `Grep` call, or a recognized
+read-only Bash `rg`/recursive `grep` search. Like paid WebSearch routing, the hook classifies
+using the latest human task, bounded prior user/assistant conversation, and the proposed search.
+The search pattern is evidence of the agent's next step, not the entire task.
+
+When Jevgrep is selected, a standalone search is redirected to the visible `mcp__x402__request`
+tool. Claude writes a focused natural-language repository question using its current task context;
+the executor receives that question unchanged. The hook does not generate a query from the human
+prompt or execute a regex as a semantic question. Prompt offers use the same request tool.
+
+Supported compound Bash calls receive an instruction to use Jevgrep before further exploratory
+searches; their original commands and permissions stay intact. A `cd` also stays intact to preserve
+Claude's directory change. Literal search flags, bounded `head` filters, and a small allowlist of
+read-only companions are recognized. Variables, substitutions, loops, writes, background jobs and
+unsupported syntax stay native without routing. Filename-filter pipelines are not treated as
+repository-content searches. Unknown subagents or subagents without access to the request tool
+remain native.
+
+Exact known lookups, uncommitted changes and no-upload requests should use native tools. Native
+search remains available after one redirect, or when Jevgrep fails or provides insufficient source.
+The hook admits at most three classifications and one offer per human turn. The local executor
+atomically permits one retrieval attempt for that turn, even when the agent changes the question
+or calls concurrently. Repeated identical snapshot/query requests in the session are also guarded.
+The offer binds the committed snapshot; a changed commit requires a new offer. Source and wallet
+permissions are checked again when the agent actually invokes the request.
 
 This pilot requires Tenjin's matching server branch. [Jevgrep PR #28](https://github.com/dzhng/jevgrep/pull/28)
 is merged, and the published `@dzhng/jevgrep@0.7.0` release is qualified for the native custom-provider
@@ -29,8 +46,9 @@ A reviewed local artifact can instead use `--artifact /absolute/reviewed-jevgrep
 `--sha256 REVIEWED_SHA256` together, without `--release`.
 
 After enabling, run `tenjin install --refresh` and start a fresh Claude Code session at the
-approved root so it loads the `Grep` hook and current MCP build. Claude Code displays
-“Calling x402” while this hook checks the proposed search and performs any selected retrieval.
+approved root so it loads the `Grep|Bash` hook and current MCP build. Ordinary `claude` uses this
+hook; no special tool selection or Jevgrep prompt is required. Claude Code displays
+“Calling x402” while the hook checks the proposed search, then a visible x402 request when Claude invokes retrieval. The spinner alone does not prove that a paid request occurred.
 
 The personal grant is outside repository configuration. Project config cannot grant source access.
 Start the host's MCP session at that exact repository root. Only that startup directory is authorized; other or unmatched roots stay native. The grant covers sessions at that root; it is

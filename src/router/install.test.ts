@@ -95,8 +95,8 @@ const CURRENT_HOOKS = {
     { matcher: 'WebSearch|WebFetch', hooks: handler('tenjin hook native') },
     { matcher: 'Agent|Task', hooks: handler('tenjin hook agent') },
     {
-      matcher: 'Grep',
-      hooks: handler('tenjin hook repository', 990, 'Calling x402… repository search'),
+      matcher: 'Grep|Bash',
+      hooks: handler('tenjin hook repository', 20, 'Calling x402… repository search'),
     },
   ],
   PostToolUse: [{ matcher: 'WebSearch|WebFetch', hooks: afterCall }],

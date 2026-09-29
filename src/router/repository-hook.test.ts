@@ -18,14 +18,19 @@ import type { HookResponse } from './decision';
 import type { JevgrepGrant } from './jevgrep/grants';
 import { repositoryGrepQuery, runRepositoryHook, type RepositoryHookDeps } from './repository-hook';
 import { repositorySource } from './repository-hook-source';
-import type { RequestToolResult } from './tool';
+import { runRequestTool, type RequestToolResult } from './tool';
+import { executeJevgrep } from './jevgrep/executor';
 import hookFixture from './fixtures/wire-hook-jevgrep.json';
+
+vi.mock('./tool', () => ({ runRequestTool: vi.fn() }));
+vi.mock('./jevgrep/executor', () => ({ executeJevgrep: vi.fn() }));
 
 let directory: string, root: string, dataDir: string, transcript: string, commit: string;
 const human =
   'I think retries can charge twice. Trace the payment flow and explain where the duplicate protection lives.';
 const code = 'export function charge() {\n  return "deduplicated";\n}';
 beforeEach(async () => {
+  vi.clearAllMocks();
   directory = await realpath(await mkdtemp(join(tmpdir(), 'repository-hook-')));
   root = join(directory, 'repo');
   dataDir = join(directory, 'profile');
@@ -101,6 +106,9 @@ function event(id = 'call-1') {
     tool_input: { pattern: 'payment|retry', path: root },
   };
 }
+function bash(command: string, id = 'bash-1') {
+  return { ...event(id), tool_name: 'Bash', tool_input: { command } };
+}
 function result(): RequestToolResult {
   return {
     isError: false,
@@ -115,28 +123,34 @@ function result(): RequestToolResult {
 }
 function deps(): RepositoryHookDeps & {
   decide: ReturnType<typeof vi.fn>;
-  execute: ReturnType<typeof vi.fn>;
 } {
   return {
     ctx: context(),
+    homeDir: join(directory, 'home'),
     eligible: vi.fn(async () => grant()),
     decide: vi.fn(async () => ({
       status: 'decided' as const,
       decision: hookFixture as HookResponse,
     })),
-    execute: vi.fn(async () => result()),
   };
 }
 
-describe('repository hook admission and execution', () => {
+describe('repository hook classification and agent-authored query offers', () => {
   it('requires an explicit grant before reading or routing anything', async () => {
     const d = deps();
     d.eligible = async () => null;
     expect((await runRepositoryHook(event(), d)).reason).toBe('repository not granted');
     expect(d.decide).not.toHaveBeenCalled();
-    expect(d.execute).not.toHaveBeenCalled();
   });
-  it('keeps Bash and count searches native', async () => {
+  it('honors router off before eligibility and transcript reads', async () => {
+    const d = deps();
+    await mkdir(dataDir, { recursive: true });
+    await writeFile(join(dataDir, 'config.json'), JSON.stringify({ router: { enabled: false } }));
+    expect((await runRepositoryHook(event(), d)).reason).toBe('router disabled');
+    expect(d.eligible).not.toHaveBeenCalled();
+    expect(d.decide).not.toHaveBeenCalled();
+  });
+  it('keeps malformed Bash and count searches native', async () => {
     const d = deps();
     expect((await runRepositoryHook({ ...event(), tool_name: 'Bash' }, d)).response).toBeNull();
     expect(
@@ -149,30 +163,138 @@ describe('repository hook admission and execution', () => {
     ).toBeNull();
     expect(d.decide).not.toHaveBeenCalled();
   });
+  it('redirects standalone Bash to an agent-authored natural-language query', async () => {
+    const d = deps();
+    const out = await runRepositoryHook(bash(`rg -n 'payment|retry' '${root}/src'`), d);
+    expect(out.reason).toBe('redirected to repository request');
+    expect(out.response).toMatchObject({
+      hookSpecificOutput: {
+        permissionDecision: 'deny',
+        permissionDecisionReason: expect.stringContaining(
+          'mcp__x402__request({query: <',
+        ) as unknown as string,
+      },
+    });
+    expect(JSON.stringify(out.response)).toContain(
+      'Write a focused natural-language repository question',
+    );
+    expect(JSON.stringify(out.response)).toContain('do not copy the grep regex or shell command');
+    expect(JSON.stringify(out.response)).not.toContain('payment|retry');
+    const packet = d.decide.mock.calls[0]![0];
+    expect(packet.current.text).toBe(human);
+    expect(packet.pendingCall.tool).toBe('Grep');
+    expect(JSON.parse(packet.pendingCall.query)).toMatchObject({
+      pattern: 'payment|retry',
+      path: 'src',
+      originTool: 'Bash',
+      shell: { executable: 'rg', argv: ['-n', 'payment|retry', '<repository-path>'] },
+    });
+    expect(packet.pendingCall.query).not.toContain(root);
+    expect(runRequestTool).not.toHaveBeenCalled();
+    expect(executeJevgrep).not.toHaveBeenCalled();
+  });
+  it('offers on compound searches without suppressing commands or changing permissions', async () => {
+    const d = deps();
+    const input = bash(
+      `cd '${root}' && git ls-files | grep -v node_modules | head -300; grep -rniE "quiet|suppress|cooldown|debounce|dirty|recent.?edit" --include=* -l . --exclude-dir=node_modules --exclude-dir=.git | head -50`,
+    );
+    const before = JSON.stringify(input);
+    const out = await runRepositoryHook(input, d);
+    expect(out.reason).toBe('offered alongside native command');
+    expect(out.response).toEqual({
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        additionalContext: expect.stringContaining(
+          'Request Jevgrep before more exploratory searches',
+        ) as unknown as string,
+      },
+    });
+    expect(JSON.stringify(input)).toBe(before);
+    const search = JSON.parse(d.decide.mock.calls[0]![0].pendingCall.query);
+    expect(search.pattern).toBe('quiet|suppress|cooldown|debounce|dirty|recent.?edit');
+    expect(search.shell.argv).toContain('--exclude-dir=node_modules');
+    expect(runRequestTool).not.toHaveBeenCalled();
+    expect(executeJevgrep).not.toHaveBeenCalled();
+  });
+  it('includes only a bounded, redacted agent-authored Bash description', async () => {
+    const d = deps();
+    const token = `ghp_${'a'.repeat(36)}`;
+    await runRepositoryHook(
+      {
+        ...bash('rg payment src'),
+        tool_input: {
+          command: 'rg payment src',
+          description: `Find payment protection using ${token}`,
+          arbitrary: 'never transmit me',
+        },
+      },
+      d,
+    );
+    const pending = d.decide.mock.calls[0]![0].pendingCall.query as string;
+    expect(JSON.parse(pending).description).toContain('Find payment protection');
+    expect(pending).not.toContain(token);
+    expect(pending).not.toContain('never transmit me');
+  });
+  it('omits oversized descriptions rather than truncating secret-shaped input', async () => {
+    const d = deps();
+    await runRepositoryHook(
+      {
+        ...bash('rg payment src'),
+        tool_input: {
+          command: 'rg payment src',
+          description: 'a'.repeat(501),
+        },
+      },
+      d,
+    );
+    expect(JSON.parse(d.decide.mock.calls[0]![0].pendingCall.query).description).toBeUndefined();
+  });
+  it.each([
+    'rg payment . && touch changed',
+    'rg payment "$REPO"',
+    'rg payment $(pwd)',
+    'for p in src; do rg payment "$p"; done',
+    'rg payment . > result.txt',
+    'git fetch && rg payment .',
+  ])('rejects unsupported Bash before eligibility or routing: %s', async (command) => {
+    const d = deps();
+    expect((await runRepositoryHook(bash(command), d)).response).toBeNull();
+    expect(d.eligible).not.toHaveBeenCalled();
+    expect(d.decide).not.toHaveBeenCalled();
+  });
+  it('keeps named files and escaped directories native', async () => {
+    await symlink(directory, join(root, 'outside'));
+    for (const command of [
+      'rg deduplicated src/a.ts',
+      `cd '${directory}' && rg payment .`,
+      'cd outside && rg payment .',
+      'rg payment outside',
+    ]) {
+      const d = deps();
+      expect((await runRepositoryHook(bash(command), d)).response).toBeNull();
+      expect(d.decide).not.toHaveBeenCalled();
+    }
+  });
   it.each([{ path: 'src/a.ts' }, { path: '.', glob: 'src/a.ts' }, { path: 'src', glob: 'a.ts' }])(
-    'keeps an already named source file native: %j',
+    'keeps an already named file native: %j',
     async (input) => {
       const d = deps();
       expect(
         (
           await runRepositoryHook(
-            {
-              ...event(),
-              tool_input: { pattern: 'deduplicated', ...input },
-            },
+            { ...event(), tool_input: { pattern: 'deduplicated', ...input } },
             d,
           )
         ).reason,
       ).toBe('unsupported search');
       expect(d.decide).not.toHaveBeenCalled();
-      expect(d.execute).not.toHaveBeenCalled();
     },
   );
   it('keeps missing human context native', async () => {
     const d = deps();
     await writeFile(transcript, '');
     expect((await runRepositoryHook(event(), d)).reason).toBe('history unavailable');
-    expect(d.execute).not.toHaveBeenCalled();
+    expect(d.decide).not.toHaveBeenCalled();
   });
   it.each([
     'Do not upload source.',
@@ -184,7 +306,7 @@ describe('repository hook admission and execution', () => {
     expect((await runRepositoryHook(event(), d)).reason).toBe('source disclosure forbidden');
     expect(d.decide).not.toHaveBeenCalled();
   });
-  it('retains the actual human and search separately, with a relative path', async () => {
+  it('retains the human task and actual pending arguments as separate gate evidence', async () => {
     const d = deps();
     await runRepositoryHook(event(), d);
     expect(d.decide.mock.calls[0]![0]).toMatchObject({
@@ -194,90 +316,114 @@ describe('repository hook admission and execution', () => {
         query: JSON.stringify({ pattern: 'payment|retry', path: '.' }),
       },
     });
-    expect(JSON.parse(d.execute.mock.calls[0]![0].query as string)).toEqual({
-      originalHumanPrompt: human,
-      plannedRepositorySearch: { pattern: 'payment|retry', path: '.' },
-    });
+    expect(runRequestTool).not.toHaveBeenCalled();
+    expect(executeJevgrep).not.toHaveBeenCalled();
   });
-  it('obeys semantic native and needs-input answers without executing', async () => {
-    for (const action of ['native', 'needs_input']) {
+  it.each(['turn', 'session'])(
+    'respects router.context=%s before sending the packet',
+    async (scope) => {
       const d = deps();
-      d.decide.mockResolvedValue({ status: 'decided', decision: { decision: { action } } });
-      expect((await runRepositoryHook(event(action), d)).response).toBeNull();
-      expect(d.execute).not.toHaveBeenCalled();
-    }
-  });
-  it('only denies after actual complete committed source has been checked', async () => {
-    const d = deps();
-    const out = await runRepositoryHook(event(), d);
-    expect(out.reason).toBe('replaced with source');
-    expect(out.response).toMatchObject({
-      hookSpecificOutput: {
-        hookEventName: 'PreToolUse',
-        permissionDecision: 'deny',
-        additionalContext: expect.stringContaining(code) as unknown as string,
-      },
-    });
-    expect(JSON.stringify(out.response)).toContain('Untrusted source evidence');
-  });
-  it.each(['partial', 'failed', 'cancelled', 'needs_input'])(
-    'keeps %s execution native',
-    async (status) => {
-      const d = deps();
-      const r = result();
-      r.envelope.status = status;
-      d.execute.mockResolvedValue(r);
-      expect((await runRepositoryHook(event(), d)).response).toBeNull();
+      await mkdir(dataDir, { recursive: true });
+      await writeFile(join(dataDir, 'config.json'), JSON.stringify({ router: { context: scope } }));
+      await writeFile(
+        transcript,
+        ['A previous topic that is unrelated.', human]
+          .map((text) =>
+            JSON.stringify({
+              type: 'user',
+              sessionId: 'session',
+              message: { role: 'user', content: text },
+            }),
+          )
+          .join('\n'),
+      );
+      await runRepositoryHook(event(), d);
+      const packet = d.decide.mock.calls[0]![0];
+      expect(packet.current.text).toBe(human);
+      expect(packet.history).toHaveLength(scope === 'turn' ? 0 : 1);
+      if (scope === 'turn') expect(JSON.stringify(packet)).not.toContain('previous topic');
     },
   );
-  it('never retries a paid attempt after failure, even with a new tool id', async () => {
+  it.each(['native', 'needs_input'])('obeys a semantic %s decision', async (action) => {
     const d = deps();
-    d.execute.mockRejectedValue(new Error('lost response'));
-    await runRepositoryHook(event(), d);
-    await runRepositoryHook(event('call-2'), d);
-    expect(d.execute).toHaveBeenCalledTimes(1);
+    d.decide.mockResolvedValue({ status: 'decided', decision: { decision: { action } } });
+    expect((await runRepositoryHook(event(), d)).response).toBeNull();
+    expect(runRequestTool).not.toHaveBeenCalled();
+    expect(executeJevgrep).not.toHaveBeenCalled();
   });
-  it('deduplicates the same snapshot and query across repeated human turns', async () => {
+  it('binds the offer to the human turn and committed snapshot without storing a query', async () => {
+    const d = deps();
+    const out = await runRepositoryHook(event(), d);
+    expect(out.reason).toBe('redirected to repository request');
+    const saved = JSON.parse(
+      await readFile(join(dataDir, 'jevgrep/bindings', `${hookFixture.decision.id}.json`), 'utf8'),
+    );
+    expect(saved.repositoryTurn).toMatch(/^[a-f0-9]{64}$/);
+    expect(saved.snapshotCommit).toBe(commit);
+    expect(saved.query).toBeUndefined();
+    expect(JSON.stringify(out.response)).toContain('Tenjin router (installed by the user)');
+    expect(JSON.stringify(out.response)).toContain('continue with native tools');
+    expect(runRequestTool).not.toHaveBeenCalled();
+    expect(executeJevgrep).not.toHaveBeenCalled();
+  });
+  it('never redirects twice in a human turn, including across Bash and Grep', async () => {
+    const d = deps();
+    const outcomes = await Promise.all([
+      runRepositoryHook(bash('rg payment src'), d),
+      runRepositoryHook(event(), d),
+    ]);
+    expect(outcomes.filter((outcome) => outcome.response !== null)).toHaveLength(1);
+    expect((await runRepositoryHook(event('third-call'), d)).response).toBeNull();
+    expect(runRequestTool).not.toHaveBeenCalled();
+    expect(executeJevgrep).not.toHaveBeenCalled();
+  });
+  it('does not repeat a hook event', async () => {
     const d = deps();
     await runRepositoryHook(event(), d);
-    const prior = JSON.parse(await readFile(transcript, 'utf8')) as unknown;
+    expect((await runRepositoryHook(event(), d)).response).toBeNull();
+    expect(d.decide).toHaveBeenCalledTimes(1);
+  });
+  it('skips another free classification once the human turn already has an offer', async () => {
+    const d = deps();
+    await runRepositoryHook(event(), d);
+    expect((await runRepositoryHook(bash('rg payment src', 'next-call'), d)).reason).toBe(
+      'turn already offered',
+    );
+    expect(d.decide).toHaveBeenCalledTimes(1);
+  });
+  it('leaves unknown or excluded MCP subagents native before routing', async () => {
+    await mkdir(join(root, '.claude/agents'), { recursive: true });
     await writeFile(
-      transcript,
-      [
-        prior,
-        {
-          type: 'user',
-          sessionId: 'session',
-          message: { role: 'user', content: human },
-        },
-      ]
-        .map((row) => JSON.stringify(row))
-        .join('\n'),
+      join(root, '.claude/agents/limited.md'),
+      '---\nname: limited\ntools: Read, Bash\n---\nRead code.',
     );
-    expect((await runRepositoryHook(event('next-turn'), d)).reason).toBe(
-      'snapshot retrieval already attempted',
-    );
-    expect(d.execute).toHaveBeenCalledTimes(1);
+    for (const agent_type of [undefined, 'missing-custom', 'limited', 'claude-code-guide']) {
+      const d = deps();
+      expect(
+        (await runRepositoryHook({ ...event(), agent_id: 'agent-one', agent_type }, d)).reason,
+      ).toBe('request tool unavailable');
+      expect(d.decide).not.toHaveBeenCalled();
+    }
   });
-  it('leaves the tool native after cancellation without signing', async () => {
+  it('allows a known MCP-capable subagent to write its own query', async () => {
+    const d = deps();
+    const out = await runRepositoryHook(
+      { ...event(), agent_id: 'agent-one', agent_type: 'Explore' },
+      d,
+    );
+    expect(out.response).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } });
+    expect(runRequestTool).not.toHaveBeenCalled();
+    expect(executeJevgrep).not.toHaveBeenCalled();
+  });
+  it('leaves cancellation and sensitive current text native', async () => {
     const d = deps();
     d.signal = AbortSignal.abort();
     expect((await runRepositoryHook(event(), d)).response).toBeNull();
     expect(d.decide).not.toHaveBeenCalled();
-    expect(d.execute).not.toHaveBeenCalled();
-  });
-  it('does not route credential-shaped current text', async () => {
-    const d = deps();
+    delete d.signal;
     await history(`Use ghp_${'a'.repeat(36)} to find the payment code`);
     expect((await runRepositoryHook(event(), d)).reason).toBe('sensitive context');
     expect(d.decide).not.toHaveBeenCalled();
-  });
-  it('admits concurrent hooks only once for paid execution', async () => {
-    const d = deps();
-    await Promise.all([runRepositoryHook(event(), d), runRepositoryHook(event('call-2'), d)]);
-    expect(d.execute).toHaveBeenCalledTimes(1);
-    await runRepositoryHook(event(), d);
-    expect(d.execute).toHaveBeenCalledTimes(1);
   });
   it('bounds free classification at three calls in one human turn', async () => {
     const d = deps();
@@ -286,15 +432,14 @@ describe('repository hook admission and execution', () => {
       Array.from({ length: 8 }, (_, i) => runRepositoryHook(event(`call-${i}`), d)),
     );
     expect(d.decide).toHaveBeenCalledTimes(3);
-    expect(d.execute).not.toHaveBeenCalled();
   });
-  it('retains private hash-only replay markers', async () => {
+  it('retains private hash-only free-offer markers and creates no paid-attempt marker', async () => {
     const d = deps();
     await runRepositoryHook(event(), d);
     const base = join(dataDir, 'jevgrep/repository-hooks');
     const session = join(base, (await readdir(base))[0]!);
     for (const file of await readdir(session)) {
-      expect(file).not.toContain('session');
+      expect(file).not.toMatch(/^(paid|snapshot)-/);
       expect(await readFile(join(session, file), 'utf8')).toBe('{"version":1}');
       expect((await stat(join(session, file))).mode & 0o777).toBe(0o600);
     }

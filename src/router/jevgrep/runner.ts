@@ -47,6 +47,8 @@ export async function runJevgrep(
     dataDir: string;
     query: string;
     runtime?: JevgrepRuntime;
+    /** A repository hook binds its offer before the agent authors the query. */
+    expectedCommit?: string;
     profile?: JevgrepProfileId;
     evaluate: JevgrepEvaluate;
     signal?: AbortSignal;
@@ -119,6 +121,14 @@ export async function runJevgrep(
       signal: setupSignal,
       profile: policy.id,
     });
+    if (options.expectedCommit !== undefined && snapshot.commit !== options.expectedCommit)
+      return {
+        status: 'failed',
+        output: '',
+        reason: 'Repository snapshot changed after the offer',
+        requests: 0,
+        snapshot,
+      };
     const cache = createJevgrepAnswerCache({
       dataDir: options.dataDir,
       root,

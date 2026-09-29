@@ -114,6 +114,22 @@ describe('isolated Jevgrep lifecycle', () => {
     expect(result.status).toBe('failed');
     expect(runCommand).not.toHaveBeenCalled();
   });
+  it('does not start auth or inference when the snapshot differs from the hook offer', async () => {
+    const f = await fixture();
+    const runCommand = vi.fn(),
+      evaluate = vi.fn();
+    const result = await runJevgrep(
+      { ...f, query: 'Trace the implementation', expectedCommit: '0'.repeat(40), evaluate },
+      { runCommand },
+    );
+    expect(result).toMatchObject({
+      status: 'failed',
+      requests: 0,
+      reason: 'Repository snapshot changed after the offer',
+    });
+    expect(runCommand).not.toHaveBeenCalled();
+    expect(evaluate).not.toHaveBeenCalled();
+  });
   it('rejects reserved CLI commands before spawning', async () => {
     const f = await fixture();
     const runCommand = vi.fn();

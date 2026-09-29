@@ -43,14 +43,28 @@ const GrantSchema = z.strictObject({
   ]),
 });
 export type JevgrepGrant = z.infer<typeof GrantSchema>;
-const BindingSchema = z.strictObject({
-  version: z.literal(1),
-  id: z.string(),
-  root: z.string(),
-  grantId: z.string().uuid(),
-  sessionId: z.string().min(1),
-  expiresAt: z.number().int(),
-});
+const BindingSchema = z
+  .strictObject({
+    version: z.literal(1),
+    id: z.string(),
+    root: z.string(),
+    grantId: z.string().uuid(),
+    sessionId: z.string().min(1),
+    expiresAt: z.number().int(),
+    repositoryTurn: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/)
+      .optional(),
+    snapshotCommit: z
+      .string()
+      .regex(/^[a-f0-9]{40}$/)
+      .optional(),
+  })
+  .refine((value) => (value.repositoryTurn === undefined) === (value.snapshotCommit === undefined));
+export interface RepositoryOfferScope {
+  repositoryTurn: string;
+  snapshotCommit: string;
+}
 const ID = /^[A-Za-z0-9_-]{8,64}$/;
 const grantPath = (dataDir: string) => join(dataDir, 'jevgrep', 'grant.json');
 const bindingPath = (dataDir: string, id: string) =>
@@ -147,6 +161,7 @@ export async function bindJevgrepOffer(
   id: string,
   sessionId: string,
   grant: JevgrepGrant,
+  scope?: RepositoryOfferScope,
 ): Promise<void> {
   if (!ID.test(id) || !sessionId)
     throw new CliError('REFUSED', 'Local retrieval needs a valid hook session.');
@@ -157,11 +172,61 @@ export async function bindJevgrepOffer(
     grantId: grant.id,
     sessionId,
     expiresAt: Date.now() + 15 * 60_000,
+    ...scope,
   };
+  BindingSchema.parse(binding);
   await writeFileAtomicExclusive(bindingPath(dataDir, id), JSON.stringify(binding), {
     mode: 0o600,
     dirMode: 0o700,
   });
+}
+
+/** A redirect does not spend. Claim its shared turn only when the agent's
+ * actual query reaches the local executor, before constructing a payer. */
+export async function claimRepositoryRetrieval(
+  dataDir: string,
+  id: string,
+  grant: JevgrepGrant,
+  query: string,
+): Promise<{ snapshotCommit?: string } | null> {
+  if (!ID.test(id)) return null;
+  try {
+    const binding = BindingSchema.parse(await readPrivate(bindingPath(dataDir, id)));
+    if (
+      binding.id !== id ||
+      binding.grantId !== grant.id ||
+      binding.root !== grant.root ||
+      binding.expiresAt <= Date.now()
+    )
+      return null;
+    // Existing prompt offers retain their normal request semantics.
+    if (!binding.repositoryTurn || !binding.snapshotCommit) return {};
+    const { stdout } = await exec('git', ['-C', grant.root, 'rev-parse', '--verify', 'HEAD'], {
+      timeout: 5_000,
+      maxBuffer: 1024,
+    });
+    if (stdout.trim() !== binding.snapshotCommit) return null;
+    const hash = (value: unknown) =>
+      createHash('sha256').update(JSON.stringify(value)).digest('hex');
+    const directory = join(dataDir, 'jevgrep', 'repository-hooks', hash(binding.sessionId));
+    const options = { mode: 0o600, dirMode: 0o700 };
+    await writeFileAtomicExclusive(
+      join(directory, `paid-${binding.repositoryTurn}.json`),
+      '{"version":1}',
+      options,
+    );
+    await writeFileAtomicExclusive(
+      join(
+        directory,
+        `snapshot-${hash({ root: grant.root, commit: binding.snapshotCommit, query })}.json`,
+      ),
+      '{"version":1}',
+      options,
+    );
+    return { snapshotCommit: binding.snapshotCommit };
+  } catch {
+    return null;
+  }
 }
 
 export async function boundJevgrepGrant(
@@ -186,6 +251,16 @@ export async function boundJevgrepGrant(
     return grant;
   } catch {
     return null;
+  }
+}
+
+/** A stale or damaged local offer must not be reinterpreted as an HTTP offer. */
+export async function isJevgrepOffer(dataDir: string, id: string | undefined): Promise<boolean> {
+  if (!id || !ID.test(id)) return false;
+  try {
+    return (await readPrivate(bindingPath(dataDir, id))) !== null;
+  } catch {
+    return true;
   }
 }
 
