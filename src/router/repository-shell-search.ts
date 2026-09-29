@@ -428,7 +428,13 @@ function readOnlyCompanion(words: Word[]): boolean {
     return false;
   const paths = (values: string[]) => values.every((v) => v && v !== '-' && !v.startsWith('-'));
   if (name === 'pwd') return args.length === 0;
-  if (name === 'echo') return args.every((v) => !v.startsWith('-'));
+  if (name === 'echo')
+    // Literal dash separators are common between independent reads. They are
+    // not echo switches; retain the exact compound call for native replay.
+    return (
+      words.every((value) => !value.glob) &&
+      args.every((v) => !v.startsWith('-') || /^-{2,}$/.test(v))
+    );
   if (name === 'ls') return args.every((v) => !v.startsWith('-') || /^-[alhdtr1A]+$/.test(v));
   if (name === 'wc') return args[0] === '-l' && paths(args.slice(1));
   if (name === 'cat') return paths(args[0] === '-n' ? args.slice(1) : args);

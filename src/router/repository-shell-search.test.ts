@@ -172,6 +172,56 @@ describe('bounded repository Bash search recognition', () => {
     ])
       expect(parse(command)).toBeNull();
   });
+  it('recognizes the recorded Opus caller search separated by literal echo dashes', () => {
+    const found = parse(
+      String.raw`grep -rnE '\\.(authorize|commit|release)\\(' src --include=*.ts | grep -v '\\.test\\.ts' ; echo ---; grep -rnlE 'SIGINT|SIGTERM|AbortSignal|abort' src --include=*.ts | grep -v test`,
+    );
+    expect(found?.mode).toBe('augment');
+    expect(found?.candidates).toHaveLength(2);
+    expect(found?.candidates.map((candidate) => candidate.input)).toEqual([
+      {
+        pattern: String.raw`\\.(authorize|commit|release)\\(`,
+        path: 'src',
+        glob: '*.ts',
+        output_mode: 'content',
+        '-n': true,
+      },
+      {
+        pattern: 'SIGINT|SIGTERM|AbortSignal|abort',
+        path: 'src',
+        glob: '*.ts',
+        output_mode: 'files_with_matches',
+        '-n': true,
+      },
+    ]);
+    expect(found?.candidates[0]?.shell.filters).toEqual([
+      { executable: 'grep', argv: ['-v', String.raw`\\.test\\.ts`] },
+    ]);
+    expect(found?.candidates[1]?.shell.filters).toEqual([
+      { executable: 'grep', argv: ['-v', 'test'] },
+    ]);
+    expect(JSON.stringify(found)).not.toContain('echo');
+  });
+  it('keeps dash separator output in the original compound call', () => {
+    expect(parse('echo ---; rg payment src')?.mode).toBe('augment');
+    expect(parse('rg payment src; echo ----')?.mode).toBe('augment');
+    expect(parse('echo ---; echo ----')).toBeNull();
+  });
+  it.each([
+    'echo -n ---',
+    'echo -e ---',
+    'echo -E ---',
+    'echo --help',
+    'echo ----LABEL',
+    'echo *',
+    'echo "$SEPARATOR"',
+    'echo $(cat separator)',
+    'echo --- > result.txt',
+    'echo --- 2>&1',
+    'echo --- | tee result.txt',
+  ])('keeps unsupported separator syntax native: %s', (separator) => {
+    expect(parse(`rg payment src; ${separator}; rg retry src`)).toBeNull();
+  });
   it.each([
     'wc',
     'wc -c',
