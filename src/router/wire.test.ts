@@ -282,6 +282,21 @@ describe('every answer payload on disk', () => {
     ).toBe(false);
   });
 
+  /** ONE BOUND FOR EVERY LINE: up to 2000 characters, on either offering arm. */
+  it.each([
+    ['wire-hook-execute.json', 'execute'],
+    ['wire-hook-discovered.json', 'discovered'],
+  ])('takes a %s hint up to 2000 characters and no longer', (name) => {
+    const payload = fixture(name);
+    const decision = payload.decision as { hint: string };
+    const padded = (length: number) => ({
+      ...payload,
+      decision: { ...decision, hint: decision.hint.padEnd(length, ' x') },
+    });
+    expect(parseForTests('hook', padded(2_000)).success).toBe(true);
+    expect(parseForTests('hook', padded(2_001)).success).toBe(false);
+  });
+
   /** A discovered service runs through the SAME execute arm as a curated one:
    *  its category is `discovered`, and its arguments are the host's input. */
   it('executes a discovered service through the ordinary execute answer', () => {

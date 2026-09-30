@@ -162,8 +162,8 @@ const DiscoveredSchema = z
     action: z.literal('discovered'),
     id: IdSchema,
     candidate: DiscoveredCandidateSchema,
-    /** THE LINE, FINISHED, as on `execute`. Longer, because it carries the
-     *  seller's description and the input it takes. */
+    /** THE LINE, FINISHED, as on `execute`: it carries the seller's
+     *  description and the input it takes. */
     hint: z.string().min(1).max(2_000),
   })
   .superRefine(checkHint);
@@ -182,9 +182,10 @@ const HookDecisionSchema = z.discriminatedUnion('action', [
        * THE LINE, FINISHED. The server writes it with the real id in it and, on a
        * native call, the exact search or URL that was denied. The client injects
        * it and composes nothing, which is why there is no hint builder here any
-       * more: two sides writing the same sentence is how they drift.
+       * more: two sides writing the same sentence is how they drift. The same
+       * bound as a discovered line's.
        */
-      hint: z.string().min(1).max(1_000),
+      hint: z.string().min(1).max(2_000),
     })
     .superRefine(checkHint),
   DiscoveredSchema,
