@@ -175,7 +175,12 @@ summary; an undrained operation cannot be reported as fulfilled. A stopped searc
 with its reason. It must never be interpreted as proof that no matches exist.
 
 Repeated identical evaluations within the same run reuse validated responses or join an active
-attempt. An unresolved attempt cannot sign a replacement. The shared spend ledger retains
+attempt. An unresolved attempt cannot sign a replacement. A failure before any signature (a dropped
+connection, a supplier 408, 429 or 5xx, or an unreadable balance) left no money in flight, so the
+loopback proxy answers Jevgrep with 429 and the child retries after its own back-off; the same
+evaluation is admitted again under its existing journal entry. After 32 such failures in one search
+the stop is reported as `provider`. A failure after signing keeps its `uncertain` record and never
+gets a replacement payment. The shared spend ledger retains
 reserved and signed exposure across restarts and rolling-window expiry. `confirmedAtomic`
 remains zero because this pilot does not independently reconcile chain settlement;
 `unknownAtomic` reports signed exposure, including successful provider responses. The result

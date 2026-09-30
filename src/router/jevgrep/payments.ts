@@ -1,5 +1,5 @@
 import { jevgrepProfile, type JevgrepProfileId } from './profile';
-import { mkdir, readFile, readdir } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { runPay } from '../../commands/pay';
@@ -37,6 +37,19 @@ export interface JevgrepPayerOptions {
 
 function refuse(message: string): never {
   throw new CliError('REFUSED', message);
+}
+
+/** A transport failure recorded before any signature left no money in flight.
+ *  A response that arrived but did not validate is not retried. */
+function untransmitted(record: unknown): boolean {
+  if (typeof record !== 'object' || record === null) return false;
+  const { state, diagnostic } = record as { state?: unknown; diagnostic?: unknown };
+  return (
+    state === 'untransmitted' &&
+    typeof diagnostic === 'object' &&
+    diagnostic !== null &&
+    (diagnostic as { phase?: unknown }).phase === 'payment'
+  );
 }
 
 async function readRecord(path: string): Promise<unknown | undefined> {
@@ -217,14 +230,29 @@ export function createJevgrepPayer(options: JevgrepPayerOptions) {
         refuse('The saved evaluation identity is invalid.');
       // Another process may still be finishing it. Only its response can satisfy this request.
       const deadline = Date.now() + 65_000;
+      let readmitted = false;
       while (Date.now() < deadline) {
         combined.throwIfAborted();
         const completed = await replay();
         if (completed) return completed;
-        if ((await readRecord(failedPath)) !== undefined) break;
+        if ((await readRecord(failedPath)) !== undefined) {
+          // Nothing was signed for an untransmitted failure, so the same
+          // evaluation may run again under its existing admission. An
+          // uncertain failure keeps its record and never gets a replacement.
+          readmitted = await withFileLock(join(directory, 'admission.lock'), async () => {
+            combined.throwIfAborted();
+            if (await replay()) return false;
+            if (!untransmitted(await readRecord(failedPath))) return false;
+            await rm(failedPath, { force: true });
+            return true;
+          });
+          if (!readmitted && (await replay())) return (await replay())!;
+          break;
+        }
         await delay(50, undefined, { signal: combined });
       }
-      refuse('An earlier evaluation needs recovery; no duplicate payment was sent.');
+      if (!readmitted)
+        refuse('An earlier evaluation needs recovery; no duplicate payment was sent.');
     }
     requests++;
     let reservationId: string | undefined;

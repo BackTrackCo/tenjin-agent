@@ -13,6 +13,23 @@ import type { NativeEvaluationRequest, NativeEvaluationResponse } from './protoc
 import { encodeMapleRequest } from './maple';
 import type { JevgrepSupplier } from './supplier';
 
+/** Dropped connections and supplier overload before payment are retried by the
+ *  child; past this many in one search the failure is reported as terminal. */
+const TRANSIENT_FAILURE_LIMIT = 32;
+
+/** A closed-vocabulary payer diagnostic for a failure that may pass on retry. */
+function transientFailure(diagnostic: unknown): boolean {
+  if (typeof diagnostic !== 'object' || diagnostic === null) return false;
+  const { code, status, reason } = diagnostic as {
+    code?: unknown;
+    status?: unknown;
+    reason?: unknown;
+  };
+  if (reason === 'insufficient_funds') return false;
+  if (code === 'NETWORK_ERROR' || reason === 'balance_unavailable') return true;
+  return typeof status === 'number' && (status === 408 || status === 429 || status >= 500);
+}
+
 export type JevgrepEvaluate = (
   request: NativeEvaluationRequest,
   signal: AbortSignal,
@@ -32,6 +49,7 @@ export async function startJevgrepProxy(options: {
   const expectedAuth = Buffer.from(`Bearer ${token}`);
   let host = '';
   let active = 0;
+  let transientFailures = 0;
   let requests = 0;
   let bytes = 0;
   let localRequests = 0;
@@ -191,6 +209,24 @@ export async function startJevgrepProxy(options: {
           details && typeof details === 'object' && 'reason' in details
             ? details.reason
             : undefined;
+        const diagnostic =
+          details && typeof details === 'object' && 'diagnostic' in details
+            ? details.diagnostic
+            : undefined;
+        if (
+          !stopReason &&
+          !controller.signal.aborted &&
+          paymentReason === 'provider' &&
+          transientFailure(diagnostic) &&
+          transientFailures < TRANSIENT_FAILURE_LIMIT
+        ) {
+          // Nothing was signed, so Jevgrep may retry after its own back-off
+          // instead of the whole search stopping on one dropped connection.
+          transientFailures++;
+          if (!response.headersSent && !response.destroyed)
+            respond(429, 'Transient supplier failure before payment; retry');
+          return;
+        }
         stopReason ??= controller.signal.aborted
           ? 'cancelled'
           : typeof paymentReason === 'string' &&
@@ -261,6 +297,7 @@ export async function startJevgrepProxy(options: {
       requestBytes: bytes,
       cacheHits,
       joined,
+      transientFailures,
       localRequests,
       localRequestBytes: localBytes,
       active,

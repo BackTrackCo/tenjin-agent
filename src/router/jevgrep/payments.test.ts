@@ -137,10 +137,37 @@ describe('durable Jevgrep payments', () => {
       const raw = await readFile(join(runDir, failed), 'utf8');
       expect(JSON.parse(raw)).toEqual({ version: 1, state: 'untransmitted', diagnostic });
       expect(raw).not.toContain('private-');
-      await expect(payer().evaluate(request)).rejects.toThrow('no duplicate');
-      expect(runPay).toHaveBeenCalledTimes(1);
+      // Nothing was signed, so the same evaluation is admitted again and fails the same way.
+      await expect(payer().evaluate(request)).rejects.toMatchObject({
+        details: { reason: 'provider', diagnostic },
+      });
+      expect(runPay).toHaveBeenCalledTimes(2);
     },
   );
+
+  it('re-admits an evaluation after an untransmitted failure and drops its failure record', async () => {
+    vi.mocked(runPay).mockRejectedValueOnce(
+      new CliError('NETWORK_ERROR', 'private-socket-reset', { details: {} }),
+    );
+    await expect(payer().evaluate(request)).rejects.toMatchObject({
+      details: { reason: 'provider', diagnostic: { code: 'NETWORK_ERROR', phase: 'payment' } },
+    });
+    success();
+    await expect(payer().evaluate(request)).resolves.toEqual(response);
+    expect(runPay).toHaveBeenCalledTimes(2);
+    const root = join(dir, 'jevgrep', 'payments');
+    const runDir = join(
+      root,
+      (await readdir(root)).find((name) => /^[a-f0-9]{64}$/.test(name))!,
+    );
+    const names = await readdir(runDir);
+    expect(names.some((name) => name.endsWith('.failed.json'))).toBe(false);
+    expect(names.filter((name) => name.endsWith('.attempt.json'))).toHaveLength(1);
+    expect(names.some((name) => name.endsWith('.response.json'))).toBe(true);
+    // The saved response now replays without a third transmission.
+    await expect(payer().evaluate(request)).resolves.toEqual(response);
+    expect(runPay).toHaveBeenCalledTimes(2);
+  });
 
   it('distinguishes response validation from payment transport failures', async () => {
     vi.mocked(runPay).mockResolvedValue({ data: { bodyText: 'private-invalid-response' } });

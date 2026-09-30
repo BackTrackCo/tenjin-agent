@@ -181,6 +181,52 @@ describe('bounded local evaluation proxy', () => {
       expect(evaluate).toHaveBeenCalledTimes(1);
     },
   );
+  it('answers 429 for a transient failure before payment, then stops past the limit', async () => {
+    const transient = () =>
+      Object.assign(new Error('never expose provider secret'), {
+        details: { reason: 'provider', diagnostic: { code: 'NETWORK_ERROR', phase: 'payment' } },
+      });
+    let failures = 0;
+    const evaluate = vi.fn(async () => {
+      if (failures++ < 2) throw transient();
+      return answer;
+    });
+    const p = await proxy(evaluate);
+    const first = await send(p);
+    expect(first.status).toBe(429);
+    expect(first.body).not.toContain('secret');
+    expect((await send(p)).status).toBe(429);
+    expect((await send(p)).status).toBe(200);
+    expect(p.summary()).toMatchObject({ transientFailures: 2, stopReason: undefined });
+
+    const overloaded = await proxy(async () => {
+      throw Object.assign(new Error('secret'), {
+        details: {
+          reason: 'provider',
+          diagnostic: { code: 'UNKNOWN', phase: 'payment', status: 503 },
+        },
+      });
+    });
+    for (let i = 0; i < 32; i++) expect((await send(overloaded)).status).toBe(429);
+    expect((await send(overloaded)).status).toBe(409);
+    expect(overloaded.summary()).toMatchObject({ transientFailures: 32, stopReason: 'provider' });
+
+    // A signed-then-failed evaluation and a deterministic refusal still stop the search.
+    for (const details of [
+      { reason: 'payment_uncertain', diagnostic: { code: 'NETWORK_ERROR', phase: 'payment' } },
+      { reason: 'provider', diagnostic: { code: 'PAYMENT_FAILED', phase: 'payment', status: 402 } },
+      {
+        reason: 'provider',
+        diagnostic: { code: 'REFUSED', phase: 'payment', reason: 'insufficient_funds' },
+      },
+    ]) {
+      const terminal = await proxy(async () => {
+        throw Object.assign(new Error('secret'), { details });
+      });
+      expect((await send(terminal)).status).toBe(409);
+      expect(terminal.summary().stopReason).toBe(details.reason);
+    }
+  });
   it('admits at most the profile concurrency of evaluations at once', async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => {
