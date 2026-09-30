@@ -327,6 +327,11 @@ export function createJevgrepPayer(options: JevgrepPayerOptions) {
       const response = validateResponse(parsed, request);
       phase = 'response_persistence';
       await saveRecord(responsePath, response);
+      // The provider answered for this signed authorization, so its money joins
+      // today's window instead of charging every later one. A failure here
+      // leaves the record unresolved, which is the conservative side.
+      if (reservationId && authorizer.settleDurable)
+        await authorizer.settleDurable(reservationId).catch(() => undefined);
       return response;
     } catch (error) {
       // Do not persist raw provider errors, source, headers, or signatures.

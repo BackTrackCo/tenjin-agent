@@ -31,7 +31,16 @@ const DurableSpendSchema = z.object({
   runMaxAtomic: z.string().regex(/^\d+$/),
   amountAtomic: z.string().regex(/^\d+$/),
   atMs: z.number(),
-  state: z.enum(['reserved', 'signed']),
+  /**
+   * `reserved`: admitted, nothing signed. `signed`: an authorization left and no
+   * validated provider response came back, so the money is unresolved and stays
+   * charged across every window. `settled`: the provider answered with a valid
+   * evaluation for it, so it was counted in that day's window like any other
+   * payment and no longer charges later windows.
+   */
+  state: z.enum(['reserved', 'signed', 'settled']),
+  /** Set on a compacted record: how many settled evaluations it stands for. */
+  count: z.number().int().positive().optional(),
 });
 export type DurableSpend = z.infer<typeof DurableSpendSchema>;
 
@@ -72,20 +81,61 @@ export function emptyLedger(nowMs: number): Ledger {
 }
 
 /** Automatic exposure plus automatic pending reservations: the budget's input.
- * Legacy records with no mode/counter conservatively count as automatic. */
+ * Legacy records with no mode/counter conservatively count as automatic. A
+ * settled durable record was added to the window counters when it settled, so
+ * it is not counted twice here; unresolved records charge every window. */
 export function spentOf(ledger: {
   committedAtomic: string;
   automaticCommittedAtomic?: string;
   reservations: { amountAtomic: string; mode?: 'automatic' | 'manual' }[];
-  durable?: { amountAtomic: string }[];
+  durable?: { amountAtomic: string; state?: 'reserved' | 'signed' | 'settled' }[];
 }): bigint {
   return ledger.reservations.reduce(
     (sum, r) => sum + (r.mode === 'manual' ? 0n : BigInt(r.amountAtomic)),
     (ledger.durable ?? []).reduce(
-      (sum, entry) => sum + BigInt(entry.amountAtomic),
+      (sum, entry) => sum + (entry.state === 'settled' ? 0n : BigInt(entry.amountAtomic)),
       BigInt(ledger.automaticCommittedAtomic ?? ledger.committedAtomic),
     ),
   );
+}
+
+/**
+ * Fold settled records older than the window into one record per run. Their
+ * money already reached the window counters when they settled, and their keys
+ * can no longer collide with an in-flight request, so only the per-run total and
+ * count are worth keeping. Unresolved records are never touched.
+ */
+export function compactDurable(
+  durable: DurableSpend[],
+  nowMs: number,
+  windowMs: number,
+): DurableSpend[] {
+  const kept: DurableSpend[] = [];
+  const folded = new Map<string, DurableSpend>();
+  for (const entry of durable) {
+    if (entry.state !== 'settled' || nowMs - entry.atMs < windowMs) {
+      kept.push(entry);
+      continue;
+    }
+    const existing = folded.get(entry.runId);
+    if (existing === undefined) {
+      folded.set(entry.runId, {
+        id: `settled:${entry.runId}`,
+        requestKey: `settled:${entry.runId}`,
+        runId: entry.runId,
+        runMaxAtomic: entry.runMaxAtomic,
+        amountAtomic: entry.amountAtomic,
+        atMs: entry.atMs,
+        state: 'settled',
+        count: entry.count ?? 1,
+      });
+      continue;
+    }
+    existing.amountAtomic = (BigInt(existing.amountAtomic) + BigInt(entry.amountAtomic)).toString();
+    existing.atMs = Math.max(existing.atMs, entry.atMs);
+    existing.count = (existing.count ?? 1) + (entry.count ?? 1);
+  }
+  return folded.size === 0 ? durable : [...kept, ...folded.values()];
 }
 
 /**

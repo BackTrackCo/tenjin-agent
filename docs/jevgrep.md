@@ -185,14 +185,21 @@ one request with 429 and `Retry-After: 2`, the child's retry of the same request
 unresolved with 503, and the child narrows or drops that batch while other evaluations continue.
 After 16 uncertain failures in one search, or at the first settlement 402 on a signed request,
 the stop is reported as `payment_uncertain`. The shared spend ledger retains
-reserved and signed exposure across restarts and rolling-window expiry. `confirmedAtomic`
-remains zero because this pilot does not independently reconcile chain settlement;
-`unknownAtomic` reports signed exposure, including successful provider responses. The result
-reports these separately. No automatic refund or recovery is claimed. Private payment records
-hold hashes, terms and bounded answers, not source, signatures or wallet keys.
+reserved and signed exposure across restarts and rolling-window expiry. A signed evaluation that
+the supplier answers with a valid response settles at that moment: its money joins the current
+daily window like any other payment and expires with it, and the result reports it as
+`settledAtomic`. A signed evaluation with no validated response stays `unknownAtomic` and charges
+every later window until it is resolved. `confirmedAtomic` remains zero because this pilot does
+not independently reconcile chain settlement; a provider's answer is the evidence, not the chain.
+No automatic refund or recovery is claimed. Private payment records hold hashes, terms and
+bounded answers, not source, signatures or wallet keys.
 
-The journal refuses more than 256 saved runs or 4,096 durable entries. It never evicts unresolved
-money to regain availability. Reconciliation and retention are release gates, as are supplier
+The journal refuses more than 256 saved runs or 4,096 durable entries. Settled records older than
+the window fold into one record per run, keeping their total and count; unresolved money is never
+evicted or folded to regain availability. A ledger written before settlement tracking holds every
+answered evaluation as unresolved, which consumes the daily budget permanently: `tenjin jevgrep
+reconcile` reports how many of those have a validated response in the journal, and
+`tenjin jevgrep reconcile --apply` settles exactly those into the current window. Reconciliation and retention are release gates, as are supplier
 source terms, completed retrieval value and a qualified upstream release. This is not a production
 activation path for private code without that review.
 

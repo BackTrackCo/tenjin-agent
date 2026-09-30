@@ -229,7 +229,8 @@ describe('durable Jevgrep payments', () => {
     expect(await first.summary()).toMatchObject({
       exposureAtomic: '1000',
       confirmedAtomic: '0',
-      unknownAtomic: '1000',
+      unknownAtomic: '0',
+      settledAtomic: '1000',
     });
     const runDir = join(
       dir,
@@ -330,7 +331,10 @@ describe('durable Jevgrep payments', () => {
     await expect(
       instance.evaluate({ ...request, state: { source: 'another question' } }),
     ).rejects.toThrow('budget');
-    expect(await instance.summary()).toMatchObject({ unknownAtomic: '1000' });
+    expect(await instance.summary()).toMatchObject({
+      exposureAtomic: '1000',
+      settledAtomic: '1000',
+    });
   });
 });
 
@@ -367,7 +371,12 @@ describe('Maple per-request Jevgrep payments', () => {
       model: 'jev-latest',
       state: JSON.stringify(request.state),
     });
-    expect(await instance.summary()).toMatchObject({ requests: 1, unknownAtomic: '1008' });
+    expect(await instance.summary()).toMatchObject({
+      requests: 1,
+      exposureAtomic: '1008',
+      unknownAtomic: '0',
+      settledAtomic: '1008',
+    });
     const journal = join(dir, 'jevgrep', 'payments', canonicalHash('maple-run'));
     for (const name of await readdir(journal)) {
       const raw = await readFile(join(journal, name), 'utf8');
@@ -490,7 +499,8 @@ it('enforces the one-dollar durable cap atomically at the final two concurrent r
   expect(result.filter((x) => x.status === 'fulfilled')).toHaveLength(1);
   expect(await instance.summary()).toMatchObject({
     exposureAtomic: '1000000',
-    unknownAtomic: '1000000',
+    unknownAtomic: '999000',
+    settledAtomic: '1000',
     reservedAtomic: '0',
   });
 });

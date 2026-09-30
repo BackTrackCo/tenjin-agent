@@ -64,6 +64,85 @@ describe('durable executor accounting', () => {
     expect((await make().authorize(request('eval-1'))).reason).toBe('duplicate_in_flight');
   });
 
+  it('settles an answered evaluation into the window, expires it with the day, and compacts it', async () => {
+    let now = 1_000_000;
+    const make = () =>
+      createLocalSpendAuthorizer({
+        dir,
+        now: () => now,
+        policy: policy({ sessionBudgetAtomic: 1500n }),
+      });
+    const first = await make().authorize(request('eval-1'));
+    await expect(make().settleDurable!(first.reservationId!)).rejects.toThrow('signed');
+    await make().markSigned!(first.reservationId!);
+    await make().commit(first.reservationId, 1000n);
+    await make().settleDurable!(first.reservationId!);
+    await make().settleDurable!(first.reservationId!);
+    // Same day: the settled money still fills the window like any payment.
+    expect((await make().authorize({ creator: 'x.example', amountAtomic: 1000n })).decision).toBe(
+      'deny',
+    );
+    expect(await make().durableSummary!('run-a')).toMatchObject({
+      exposureAtomic: '1000',
+      unknownAtomic: '0',
+      settledAtomic: '1000',
+      confirmedAtomic: '0',
+    });
+    expect((await make().authorize(request('eval-1'))).reason).toBe('duplicate_in_flight');
+    // Next day: it no longer charges the budget, and the record folds into one per run.
+    now += 2 * 86_400_000;
+    const summary = (await readSpendSummary(dir, { now: () => now }))!;
+    expect(spentOf(summary)).toBe(0n);
+    const ordinary = await make().authorize({ creator: 'x.example', amountAtomic: 1000n });
+    expect(ordinary.decision).toBe('allow');
+    expect(ordinary.sessionSpentAtomic).toBe(0n);
+    const compacted = (await readSpendSummary(dir, { now: () => now }))!.durable!;
+    expect(compacted).toEqual([
+      expect.objectContaining({
+        id: 'settled:run-a',
+        runId: 'run-a',
+        amountAtomic: '1000',
+        state: 'settled',
+        count: 1,
+      }),
+    ]);
+    expect(await make().durableSummary!('run-a')).toMatchObject({
+      exposureAtomic: '1000',
+      settledAtomic: '1000',
+      unknownAtomic: '0',
+    });
+  });
+
+  it('keeps unresolved records out of compaction and folds settled ones per run', async () => {
+    let now = 1_000_000;
+    const make = () =>
+      createLocalSpendAuthorizer({
+        dir,
+        now: () => now,
+        policy: policy({ sessionBudgetAtomic: 10_000n }),
+      });
+    const a1 = await make().authorize(request('a-1', 'run-a', 5000n));
+    const a2 = await make().authorize(request('a-2', 'run-a', 5000n));
+    const lost = await make().authorize(request('a-3', 'run-a', 5000n));
+    for (const r of [a1, a2, lost]) await make().markSigned!(r.reservationId!);
+    await make().settleDurable!(a1.reservationId!);
+    await make().settleDurable!(a2.reservationId!);
+    now += 2 * 86_400_000;
+    await make().authorize({ creator: 'x.example', amountAtomic: 1n });
+    const durable = (await readSpendSummary(dir, { now: () => now }))!.durable!;
+    expect(durable.map((entry) => [entry.state, entry.amountAtomic, entry.count ?? null])).toEqual([
+      ['signed', '1000', null],
+      ['settled', '2000', 2],
+    ]);
+    // The unresolved 1000 plus the 1 atomic reservation the probe above holds.
+    expect(spentOf((await readSpendSummary(dir, { now: () => now }))!)).toBe(1001n);
+    expect(await make().durableSummary!('run-a')).toMatchObject({
+      exposureAtomic: '3000',
+      unknownAtomic: '1000',
+      settledAtomic: '2000',
+    });
+  });
+
   it('enforces one run ceiling and the wallet ceiling across independent authorizers', async () => {
     const make = () =>
       createLocalSpendAuthorizer({ dir, policy: policy({ sessionBudgetAtomic: 1500n }) });

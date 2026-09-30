@@ -6,6 +6,7 @@ import { CliError } from '../errors';
 import { withFileLock } from '../lock';
 import { spendLedgerPath } from '../paths';
 import {
+  compactDurable,
   DEFAULT_WINDOW_MS,
   emptyLedger,
   readLedger,
@@ -98,13 +99,24 @@ export interface SpendAuthorizer {
   release(reservationId: string | undefined): Promise<void>;
   /** Persist uncertainty before the signed authorization can leave this process. */
   markSigned?(reservationId: string): Promise<void>;
+  /**
+   * A validated provider response arrived for a signed durable reservation: the
+   * money joins the current window like an ordinary payment and stops charging
+   * later windows. Not chain confirmation; the provider's answer is the evidence.
+   */
+  settleDurable?(reservationId: string): Promise<void>;
   durableSummary?(runId: string): Promise<DurableSpendSummary>;
 }
 
 export interface DurableSpendSummary {
+  /** Everything signed for the run: settled plus unresolved. */
   exposureAtomic: string;
+  /** Independently reconciled on chain. Always zero in this pilot. */
   confirmedAtomic: string;
+  /** Signed with no validated provider response: charged across every window. */
   unknownAtomic: string;
+  /** Signed and answered with a valid evaluation: counted in its day's window. */
+  settledAtomic: string;
   reservedAtomic: string;
 }
 
@@ -137,10 +149,12 @@ export function createLocalSpendAuthorizer(deps: LocalSpendAuthorizerDeps): Spen
   // Roll the window and drop expired reservations; returns the live ledger.
   const freshen = (ledger: Ledger | null, nowMs: number): Ledger => {
     if (ledger === null) return emptyLedger(nowMs);
+    const durable = ledger.durable ? compactDurable(ledger.durable, nowMs, windowMs) : undefined;
     if (nowMs - ledger.windowStartMs >= windowMs)
-      return { ...emptyLedger(nowMs), ...(ledger.durable ? { durable: ledger.durable } : {}) };
+      return { ...emptyLedger(nowMs), ...(durable ? { durable } : {}) };
     return {
       ...ledger,
+      ...(durable ? { durable } : {}),
       reservations: ledger.reservations.filter((r) => nowMs - r.atMs < RESERVATION_TTL_MS),
     };
   };
@@ -377,17 +391,43 @@ export function createLocalSpendAuthorizer(deps: LocalSpendAuthorizerDeps): Spen
         });
       }, true);
     },
+    async settleDurable(reservationId) {
+      await withLedger(async (ledger) => {
+        const entry = ledger.durable?.find((item) => item.id === reservationId);
+        if (!entry) throw new CliError('REFUSED', 'Durable payment reservation is unavailable.');
+        if (entry.state === 'settled') return;
+        if (entry.state !== 'signed')
+          throw new CliError('REFUSED', 'Only a signed durable payment can settle.');
+        const amount = BigInt(entry.amountAtomic);
+        await persist({
+          ...ledger,
+          committedAtomic: (BigInt(ledger.committedAtomic) + amount).toString(),
+          automaticCommittedAtomic: (
+            BigInt(ledger.automaticCommittedAtomic ?? ledger.committedAtomic) + amount
+          ).toString(),
+          settledAtomic: (
+            BigInt(ledger.settledAtomic ?? ledger.committedAtomic) + amount
+          ).toString(),
+          durable: ledger.durable!.map((item) =>
+            item.id === reservationId ? { ...item, state: 'settled' as const } : item,
+          ),
+        });
+      }, true);
+    },
     async durableSummary(runId) {
       return withLedger((ledger) => {
         const entries = (ledger.durable ?? []).filter((entry) => entry.runId === runId);
-        const signed = entries
-          .filter((entry) => entry.state === 'signed')
-          .reduce((sum, entry) => sum + BigInt(entry.amountAtomic), 0n)
-          .toString();
+        const total = (state: 'signed' | 'settled') =>
+          entries
+            .filter((entry) => entry.state === state)
+            .reduce((sum, entry) => sum + BigInt(entry.amountAtomic), 0n);
+        const signed = total('signed');
+        const settled = total('settled');
         return {
-          exposureAtomic: signed,
+          exposureAtomic: (signed + settled).toString(),
           confirmedAtomic: '0',
-          unknownAtomic: signed,
+          unknownAtomic: signed.toString(),
+          settledAtomic: settled.toString(),
           reservedAtomic: entries
             .filter((entry) => entry.state === 'reserved')
             .reduce((sum, entry) => sum + BigInt(entry.amountAtomic), 0n)

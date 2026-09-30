@@ -79,8 +79,9 @@ The model can still choose a poor question. Returned source is untrusted evidenc
 
 The child receives only an ephemeral loopback token. Wallet keys remain in Tenjin. The adapter
 uses the normal payment stack with pinned terms and durable aggregate exposure. Unresolved
-signed exposure survives timeouts, restart and budget rollover. This pilot cannot automatically
-reconcile it. Do not delete monetary records or downgrade to an older payer after using it;
+signed exposure survives timeouts, restart and budget rollover; an evaluation the supplier
+answered settles into that day's window on the strength of its validated response. This pilot
+cannot reconcile against the chain. Do not delete monetary records or downgrade to an older payer after using it;
 older binaries do not understand the new durable entries. Disable the executor to roll back
 routing while retaining this build's accounting. A second CLI using the same wallet but another
 data directory has separate local accounting, as with the existing wallet policy.

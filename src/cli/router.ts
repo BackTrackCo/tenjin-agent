@@ -127,6 +127,26 @@ function registerJevgrep(reg: Registration): void {
       return disableJevgrep(ctx);
     });
   });
+  reg
+    .addGlobalFlags(command.command('reconcile'))
+    .option('--apply', 'settle answered evaluations into the current window (default: report only)')
+    .action(async function (this: Command) {
+      await reg.runCommand('jevgrep reconcile', this, async (ctx) => {
+        const { reconcileJevgrepLedger } = await import('../router/jevgrep/reconcile');
+        const report = await reconcileJevgrepLedger(ctx, {
+          apply: Boolean((this.opts() as { apply?: boolean }).apply),
+        });
+        return {
+          data: report,
+          humanLines: [
+            `${report.unresolved} unresolved signed evaluations; ${report.answered} have a validated response in the journal.`,
+            report.applied
+              ? `${report.settled} settled into the current window; ${report.remainingUnknownAtomic} atomic USDC stays unresolved.`
+              : `Dry run. Pass --apply to settle them; ${report.remainingUnknownAtomic} atomic USDC would stay unresolved.`,
+          ],
+        };
+      });
+    });
   reg.addGlobalFlags(command.command('status')).action(async function (this: Command) {
     await reg.runCommand('jevgrep status', this, async (ctx) => {
       const { readJevgrepGrant } = await import('../router/jevgrep/grants');

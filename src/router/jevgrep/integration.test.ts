@@ -66,6 +66,7 @@ const summary = vi.fn(async () => ({
   exposureAtomic: '0',
   confirmedAtomic: '0',
   unknownAtomic: '0',
+  settledAtomic: '0',
   reservedAtomic: '0',
   requests: 0,
   replays: 0,
