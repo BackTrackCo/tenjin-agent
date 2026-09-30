@@ -68,3 +68,7 @@ network_access = true
 ```
 
 That setting enables the network path; it does not grant spending by itself.
+
+## Local runtime and durable runs
+
+Local executors retain reviewed npm artifacts and package caches while removing per-run credentials and working files. Runtime preparation does not grant execution, source sharing or spending authority. Durable run reservations and signed uncertainty survive budget rollover; see [local executors](./local-executors.md) for cache boundaries and wallet upgrade requirements.

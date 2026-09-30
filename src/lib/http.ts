@@ -441,7 +441,7 @@ function timeoutFailure(url: string, timeoutMs: number): FetchJsonFailure {
  * still returns the discriminated FetchJsonFailure so callers map it uniformly.
  */
 export interface HttpRequestOptions {
-  method?: 'GET' | 'POST' | 'PUT' | 'DELETE';
+  method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
   timeoutMs: number;
   headers?: Record<string, string>;
   /** The team shelf's bypass secret and its origin; see {@link ShelfBypass}. */

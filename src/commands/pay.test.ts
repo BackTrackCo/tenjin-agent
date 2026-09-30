@@ -1826,3 +1826,22 @@ describe('payment hard gates with acknowledged warnings', () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 });
+
+describe('caller cancellation', () => {
+  it('does not probe or sign when cancelled before dispatch', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const provider = testWalletProvider();
+    const getSigner = vi.spyOn(provider, 'getSigner');
+    const fetchImpl = vi.fn();
+    await expect(
+      runPay({ url: TENJIN_URL, execution: 'router' }, makeCtx(), {
+        provider,
+        fetchImpl,
+        signal: controller.signal,
+      }),
+    ).rejects.toThrow();
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(getSigner).not.toHaveBeenCalled();
+  });
+});
