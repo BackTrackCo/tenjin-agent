@@ -4,9 +4,11 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { ProgressNotificationSchema } from '@modelcontextprotocol/sdk/types.js';
 import { testWalletProvider } from '../lib/read-test-utils';
 import type { SpendAuthorization, SpendAuthorizer } from '../lib/wallet';
 import { buildRouterMcpServer, MAX_RESULT_SIZE_CHARS, MAX_RESULT_SIZE_KEY } from './mcp';
+import * as requestTool from './tool';
 
 /** The envelope a call returned: the JSON text block after the summary line. */
 function envelopeOf(called: Record<string, unknown>): unknown {
@@ -57,6 +59,90 @@ function router(body: unknown): typeof fetch {
 }
 
 describe('the router MCP server', () => {
+  it.each([0, 'lookup-progress', undefined])(
+    'sends ordered progress only for an incoming token (%s)',
+    async (progressToken) => {
+      const handler = vi
+        .spyOn(requestTool, 'runRequestTool')
+        .mockImplementationOnce(async (_args, deps) => {
+          deps.onProgress?.('Jevgrep: searching committed source');
+          deps.onProgress?.('Jevgrep: completed provider evaluations: 1');
+          return { isError: false, summary: 'complete', envelope: { status: 'fulfilled' } };
+        });
+      const server = buildRouterMcpServer({
+        dataDir: dir,
+        handlerDeps: { cwd: dir, provider: testWalletProvider(), authorizer: authorizer() },
+      });
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      const client = new Client({ name: 'test', version: '0.0.0' });
+      const notifications: unknown[] = [];
+      client.setNotificationHandler(ProgressNotificationSchema, (notification) => {
+        notifications.push(notification.params);
+      });
+      await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+      try {
+        const result = await client.callTool({
+          name: 'request',
+          arguments: { query: 'Find the implementation' },
+          ...(progressToken !== undefined ? { _meta: { progressToken } } : {}),
+        });
+        expect(result.isError).toBe(false);
+        expect(notifications).toEqual(
+          progressToken === undefined
+            ? []
+            : [
+                { progressToken, progress: 1, message: 'Jevgrep: searching committed source' },
+                {
+                  progressToken,
+                  progress: 2,
+                  message: 'Jevgrep: completed provider evaluations: 1',
+                },
+              ],
+        );
+      } finally {
+        handler.mockRestore();
+        await client.close();
+        await server.close();
+      }
+    },
+  );
+
+  it('delivers the result once even if progress notifications fail', async () => {
+    const handler = vi
+      .spyOn(requestTool, 'runRequestTool')
+      .mockImplementationOnce(async (_args, deps) => {
+        deps.onProgress?.('Jevgrep: searching committed source');
+        deps.onProgress?.('Jevgrep: completed provider evaluations: 1');
+        return { isError: false, summary: 'complete', envelope: { status: 'fulfilled' } };
+      });
+    const server = buildRouterMcpServer({
+      dataDir: dir,
+      handlerDeps: { cwd: dir, provider: testWalletProvider(), authorizer: authorizer() },
+    });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: 'test', version: '0.0.0' });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    const notification = vi
+      .spyOn(server.server, 'notification')
+      .mockRejectedValue(new Error('UI disconnected'));
+    try {
+      const result = await client.callTool({
+        name: 'request',
+        arguments: { query: 'Find the implementation' },
+        _meta: { progressToken: 'failed-ui' },
+      });
+      expect(result.isError).toBe(false);
+      expect(envelopeOf(result)).toEqual({ status: 'fulfilled' });
+      expect(handler).toHaveBeenCalledTimes(1);
+      expect(notification).toHaveBeenCalledTimes(2);
+    } finally {
+      handler.mockRestore();
+      notification.mockRestore();
+      await client.close();
+      await server.close();
+    }
+  });
+
   it('advertises one request tool and answers it, then closes cleanly', async () => {
     const fetchImpl = router({
       schemaVersion: 1,

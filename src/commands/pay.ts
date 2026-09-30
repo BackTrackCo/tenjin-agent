@@ -16,6 +16,7 @@ import { isSameDeployment } from '../lib/production-origin';
 import { resolveContextSettings } from '../lib/settings';
 import { SIWX_HEADER, buildSiwxHeader } from '../lib/siwx';
 import { gateSpend } from '../lib/spend-gate';
+import { diagnoseX402Failure } from '../lib/x402-diagnostic';
 import type { ResolvedSettings } from '../lib/settings';
 import {
   describeWallet,
@@ -520,6 +521,7 @@ async function executePay(
   // Still 402 (payment rejected) or anything else: nothing was delivered, but
   // the seller holds a live authorization, so the amount stays counted and the
   // fix must NOT coach a retry loop, since each retry signs a fresh authorization.
+  const paymentFailure = diagnoseX402Failure((name) => paid.header(name));
   throw new CliError(
     'PAYMENT_FAILED',
     paid.status === 402
@@ -535,6 +537,7 @@ async function executePay(
         ...providerError(paid.text),
         amountAtomic: payment.amountAtomic.toString(),
         settlement: 'unknown',
+        ...(paymentFailure !== undefined ? { paymentFailure } : {}),
       },
     },
   );

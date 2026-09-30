@@ -5,10 +5,12 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { startJevgrepProxy } from './proxy.js';
 import type { JevgrepEvaluate } from './proxy.js';
-import { JEV_LIMITS, JEV_MODEL } from './protocol.js';
+import { JEV_LIMITS, JEV_MAX_QUESTIONS, JEV_MODEL } from './protocol.js';
 import type { NativeEvaluationRequest } from './protocol.js';
 import { createJevgrepAnswerCache } from './answer-cache.js';
 import type { JevgrepAnswerCache } from './answer-cache.js';
+import { encodeMapleRequest } from './maple';
+import { MAPLE_JEVGREP_SUPPLIER, type JevgrepSupplier } from './supplier';
 
 const body: NativeEvaluationRequest = {
   model: JEV_MODEL,
@@ -18,17 +20,26 @@ const body: NativeEvaluationRequest = {
 const answer = { answers: { q: { type: 'noul' as const, noul: 0.8 } } };
 const proxies: Array<Awaited<ReturnType<typeof startJevgrepProxy>>> = [];
 const directories: string[] = [];
-async function proxy(evaluate: JevgrepEvaluate = async () => answer, cache?: JevgrepAnswerCache) {
-  const p = await startJevgrepProxy({ evaluate, cache });
+async function proxy(
+  evaluate: JevgrepEvaluate = async () => answer,
+  cache?: JevgrepAnswerCache,
+  supplier?: JevgrepSupplier,
+) {
+  const p = await startJevgrepProxy({ evaluate, cache, supplier });
   proxies.push(p);
   return p;
 }
 function send(
   p: Awaited<ReturnType<typeof proxy>>,
   value: unknown = body,
-  overrides: { route?: string; method?: string; headers?: Record<string, string> } = {},
+  overrides: {
+    route?: string;
+    method?: string;
+    headers?: Record<string, string>;
+    raw?: string;
+  } = {},
 ) {
-  const data = JSON.stringify(value);
+  const data = overrides.raw ?? JSON.stringify(value);
   return new Promise<{ status: number; body: string }>((resolve, reject) => {
     const req = httpRequest(
       p.baseURL + (overrides.route ?? '/systemone'),
@@ -66,6 +77,66 @@ describe('bounded local evaluation proxy', () => {
     expect((await send(p)).status).toBe(200);
     expect(evaluate.mock.calls).toHaveLength(1);
     expect(p.summary()).toMatchObject({ requests: 1, active: 0 });
+  });
+  it('admits multi-question declaration batches and refuses oversized counts before evaluation', async () => {
+    const evaluate = vi.fn(async (request: NativeEvaluationRequest) => ({
+      answers: Object.fromEntries(
+        Object.keys(request.questions).map((id) => [id, { type: 'noul' as const, noul: 0.8 }]),
+      ),
+    }));
+    const p = await proxy(evaluate);
+    const questions = Object.fromEntries(
+      ['q', 'scope', 'ref'].flatMap((kind) =>
+        Array.from({ length: 128 }, (_, index) => [
+          `${kind}${index}`,
+          { type: 'noul', instructions: `Evaluate ${kind} for declaration ${index}.` },
+        ]),
+      ),
+    );
+    expect(Object.keys(questions)).toHaveLength(JEV_MAX_QUESTIONS);
+    const accepted = await send(p, { ...body, questions });
+    expect(accepted.status).toBe(200);
+    expect(Object.keys(JSON.parse(accepted.body).answers)).toHaveLength(JEV_MAX_QUESTIONS);
+    const rejected = await send(p, {
+      ...body,
+      questions: { ...questions, extra: { type: 'noul', instructions: 'Too many' } },
+    });
+    expect(rejected.status).toBe(400);
+    expect(evaluate).toHaveBeenCalledTimes(1);
+    expect(p.summary()).toMatchObject({ requests: 1, active: 0, stopReason: 'invalid-request' });
+  });
+  it.each([
+    ['request-shape', { ...body, model: 'private source must not appear' }],
+    ['question-count', { ...body, questions: {} }],
+    [
+      'question-shape',
+      { ...body, questions: { secret: { type: 'choice', instructions: 'private source' } } },
+    ],
+  ])(
+    'reports only the safe local %s failure and stops before evaluation',
+    async (reason, input) => {
+      const evaluate = vi.fn(async () => answer);
+      const p = await proxy(evaluate);
+      const result = await send(p, input);
+      expect(result.status).toBe(400);
+      expect(JSON.parse(result.body)).toEqual({
+        error: `Invalid native evaluation request: ${reason}`,
+      });
+      expect(p.summary()).toMatchObject({ requests: 0, stopReason: 'invalid-request' });
+      expect((await send(p)).body).toContain('Local search stopped: invalid-request');
+      expect(evaluate).not.toHaveBeenCalled();
+    },
+  );
+  it('does not echo malformed JSON in local validation diagnostics', async () => {
+    const evaluate = vi.fn(async () => answer);
+    const p = await proxy(evaluate);
+    const result = await send(p, body, { raw: '{"source":"private source",' });
+    expect(result.status).toBe(400);
+    expect(JSON.parse(result.body)).toEqual({
+      error: 'Invalid native evaluation request: invalid-json',
+    });
+    expect(p.summary()).toMatchObject({ requests: 0, stopReason: 'invalid-request' });
+    expect(evaluate).not.toHaveBeenCalled();
   });
   it('rejects hostile Host/origin/token/route/method before dispatch', async () => {
     const evaluate = vi.fn(async () => answer);
@@ -155,6 +226,46 @@ describe('bounded local evaluation proxy', () => {
     const stopped = await send(p);
     expect(stopped.status).toBe(409);
     expect(stopped.body).toContain('request-byte-limit');
+    expect(evaluate).not.toHaveBeenCalled();
+  });
+  it('reserves expanded Maple body bytes before aggregate provider admission', async () => {
+    const evaluate = vi.fn(async () => answer);
+    const p = await proxy(evaluate, undefined, MAPLE_JEVGREP_SUPPLIER);
+    const escaped = { ...body, state: { source: '"\\'.repeat(15_000) } };
+    const nativeBytes = Buffer.byteLength(JSON.stringify(escaped));
+    const supplierBytes = Buffer.byteLength(encodeMapleRequest(escaped));
+    const admitted = Math.floor(JEV_LIMITS.totalRequestBytes / supplierBytes);
+    expect(supplierBytes).toBeGreaterThan(nativeBytes);
+    expect(supplierBytes).toBeLessThan(JEV_LIMITS.requestBytes);
+    // Ingress-only accounting would admit this next request and overrun egress.
+    expect((admitted + 1) * nativeBytes).toBeLessThan(JEV_LIMITS.totalRequestBytes);
+    for (let i = 0; i < admitted; i++) expect((await send(p, escaped)).status).toBe(200);
+    expect((await send(p, escaped)).status).toBe(413);
+    expect(evaluate).toHaveBeenCalledTimes(admitted);
+    expect(p.summary()).toMatchObject({
+      requests: admitted,
+      requestBytes: admitted * supplierBytes,
+      stopReason: 'total-byte-limit',
+    });
+  });
+  it('checks Maple per-request expansion only for supplier misses', async () => {
+    const evaluate = vi.fn(async () => answer);
+    const escaped = { ...body, state: { source: '"\\'.repeat(17_000) } };
+    expect(Buffer.byteLength(JSON.stringify(escaped))).toBeLessThan(JEV_LIMITS.requestBytes);
+    const hit = await proxy(
+      evaluate,
+      { get: async () => answer, put: async () => {} },
+      MAPLE_JEVGREP_SUPPLIER,
+    );
+    expect((await send(hit, escaped)).status).toBe(200);
+    expect(hit.summary()).toMatchObject({ requests: 0, requestBytes: 0, cacheHits: 1 });
+    const miss = await proxy(evaluate, undefined, MAPLE_JEVGREP_SUPPLIER);
+    expect((await send(miss, escaped)).status).toBe(413);
+    expect(miss.summary()).toMatchObject({
+      requests: 0,
+      requestBytes: 0,
+      stopReason: 'request-byte-limit',
+    });
     expect(evaluate).not.toHaveBeenCalled();
   });
   it('cancels pending callbacks and closes its listener', async () => {
@@ -276,4 +387,15 @@ describe('bounded local evaluation proxy', () => {
     });
     expect(evaluate).not.toHaveBeenCalled();
   }, 30_000);
+});
+
+it('extended admission accepts large requests beyond the standard 60-call bound', async () => {
+  const evaluate = vi.fn(async () => answer);
+  const p = await startJevgrepProxy({ evaluate, profile: 'extended-v1' });
+  proxies.push(p);
+  expect((await send(p, { ...body, state: 'x'.repeat(160000) })).status).toBe(200);
+  for (let i = 0; i < 60; i++) expect((await send(p, { ...body, state: i })).status).toBe(200);
+  expect(p.summary()).toMatchObject({ requests: 61, stopReason: undefined });
+  expect((await send(p, { ...body, state: 'x'.repeat(262144) })).status).toBe(413);
+  expect(evaluate).toHaveBeenCalledTimes(61);
 });

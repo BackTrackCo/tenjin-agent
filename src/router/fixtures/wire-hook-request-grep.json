@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "packet": {
+    "current": {
+      "role": "user",
+      "text": "Where does this repository prevent duplicate payments?"
+    },
+    "history": [],
+    "literalUrls": [],
+    "historyStatus": "ok",
+    "pendingCall": {
+      "tool": "Grep",
+      "query": "{\"pattern\":\"duplicate|payment\",\"path\":\"lib\"}"
+    }
+  }
+}

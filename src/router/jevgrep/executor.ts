@@ -1,9 +1,11 @@
+import { jevgrepProfileForBudget } from './profile';
 import { canonicalHash } from '../../lib/request-schema';
 import { toMoney } from '../../lib/money';
 import { resolveContextSettings } from '../../lib/settings';
 import type { RequestToolDeps, RequestToolResult } from '../tool';
-import { boundJevgrepGrant, type JevgrepGrant } from './grants';
-import { createJevgrepPayer, JEVGREP_SUPPLIER } from './payments';
+import { boundJevgrepGrant, claimRepositoryRetrieval, type JevgrepGrant } from './grants';
+import { createJevgrepPayer } from './payments';
+import { jevgrepSupplier } from './supplier';
 import { runJevgrep } from './runner';
 
 export async function executeJevgrep(
@@ -24,8 +26,18 @@ export async function executeJevgrep(
   let payer: ReturnType<typeof createJevgrepPayer> | undefined;
   try {
     deps.signal?.throwIfAborted();
+    const admission = await claimRepositoryRetrieval(deps.ctx.dataDir, id, current, query);
+    if (!admission)
+      return {
+        isError: false,
+        summary:
+          'This repository retrieval was already attempted or its snapshot changed. Continue with native tools.',
+        envelope: { status: 'needs_input' },
+      };
+    const supplier = jevgrepSupplier(current.supplier);
     const { policy } = await resolveContextSettings(deps.ctx);
-    const approved = BigInt(grant.maxRunAtomic);
+    const approved = BigInt(current.maxRunAtomic);
+    const profile = jevgrepProfileForBudget(approved);
     const maxRunAtomic =
       approved < policy.maxAutoSpendAtomic ? approved : policy.maxAutoSpendAtomic;
     payer = createJevgrepPayer({
@@ -33,35 +45,43 @@ export async function executeJevgrep(
       authorizer: deps.authorizer,
       runId,
       maxRunAtomic,
-      supplier: JEVGREP_SUPPLIER,
+      profile,
+      supplier,
       ...(deps.provider ? { provider: deps.provider } : {}),
       ...(deps.signer ? { signer: deps.signer } : {}),
       ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}),
       ...(deps.signal ? { signal: deps.signal } : {}),
     });
     const result = await runJevgrep({
-      root: grant.root,
+      root: current.root,
       dataDir: deps.ctx.dataDir,
       query,
-      runtime: grant.runtime,
+      runtime: current.runtime,
+      supplier,
+      ...(admission.snapshotCommit ? { expectedCommit: admission.snapshotCommit } : {}),
+      profile,
       evaluate: (request, signal) => payer!.evaluate(request, signal),
+      ...(deps.onProgress ? { onProgress: deps.onProgress } : {}),
       ...(deps.signal ? { signal: deps.signal } : {}),
     });
+    const drained = await payer.close();
     const cost = await payer.summary();
-    const fulfilled = result.status === 'complete';
+    const fulfilled = result.status === 'complete' && drained.drainCompleted;
     return {
       isError: !fulfilled,
       summary: fulfilled
         ? `Repository retrieval completed from committed tracked source; $${toMoney(cost.exposureAtomic).usd} authorized exposure, $${toMoney(cost.unknownAtomic).usd} unresolved.`
-        : `Repository retrieval ${result.status}: ${result.reason ?? 'search incomplete'}; $${toMoney(cost.exposureAtomic).usd} authorized exposure.`,
+        : `Repository retrieval ${drained.drainCompleted ? result.status : 'partial'}: ${drained.drainCompleted ? (result.reason ?? 'search incomplete') : 'payment drain timed out'}; $${toMoney(cost.exposureAtomic).usd} authorized exposure.`,
       envelope: {
-        status: fulfilled ? 'fulfilled' : result.status,
+        status: fulfilled ? 'fulfilled' : drained.drainCompleted ? result.status : 'partial',
         executor: 'jevgrep-search-v1',
+        supplier: supplier.id,
         runId,
         source: 'committed-tracked',
         excludes: 'Uncommitted and untracked files are not included.',
         result: result.output,
-        stopReason: result.reason,
+        stopReason: drained.drainCompleted ? result.reason : 'payment-drain-timeout',
+        ...drained,
         snapshot: result.snapshot,
         requests: result.requests,
         cacheHits: result.cacheHits ?? 0,
@@ -70,6 +90,7 @@ export async function executeJevgrep(
       },
     };
   } catch {
+    const drained = await payer?.close();
     const cost = await payer?.summary().catch(() => undefined);
     return {
       isError: true,
@@ -78,6 +99,7 @@ export async function executeJevgrep(
         status: deps.signal?.aborted ? 'cancelled' : 'failed',
         runId,
         ...(cost ? { cost } : {}),
+        ...(drained ? drained : {}),
         providerContentUntrusted: true,
       },
     };

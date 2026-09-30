@@ -2,15 +2,17 @@ import { realpath } from 'node:fs/promises';
 import { isAbsolute, join, relative, sep } from 'node:path';
 import { prepareNpmRuntime, type NpmRuntime } from '../local/npm-runtime';
 import { runBoundedCommand, type BoundedCommand, type CommandResult } from '../local/process';
-import { JEV_LIMITS, JEV_MODEL } from './protocol.js';
+import { JEV_MODEL } from './protocol.js';
+import { jevgrepProfile, type JevgrepProfileId } from './profile';
 import { startJevgrepProxy } from './proxy.js';
 import type { JevgrepEvaluate } from './proxy.js';
 import { createJevgrepSnapshot, SnapshotPolicyUnavailable } from './snapshot.js';
 import type { SnapshotSummary } from './snapshot.js';
 import { createJevgrepAnswerCache } from './answer-cache.js';
+import type { JevgrepSupplier } from './supplier';
 
-/** No published release containing upstream #28 has been qualified yet. */
-export const QUALIFIED_JEVGREP_RELEASES: readonly string[] = Object.freeze([]);
+import { isQualifiedJevgrepRelease } from './runtime';
+export { QUALIFIED_JEVGREP_RELEASES } from './runtime';
 export type JevgrepRuntime = NpmRuntime;
 export type JevgrepRunResult = {
   status: 'complete' | 'partial' | 'failed' | 'cancelled' | 'unavailable';
@@ -23,7 +25,7 @@ export type JevgrepRunResult = {
 export function isJevgrepRuntimeAvailable(runtime: JevgrepRuntime | undefined): boolean {
   if (!runtime || !['darwin', 'linux'].includes(process.platform)) return false;
   return runtime.kind === 'release'
-    ? QUALIFIED_JEVGREP_RELEASES.includes(runtime.version)
+    ? isQualifiedJevgrepRelease(runtime.version)
     : isAbsolute(runtime.path) &&
         runtime.path.endsWith('.tgz') &&
         /^[a-f0-9]{64}$/.test(runtime.sha256);
@@ -46,8 +48,13 @@ export async function runJevgrep(
     dataDir: string;
     query: string;
     runtime?: JevgrepRuntime;
+    /** A repository hook binds its offer before the agent authors the query. */
+    expectedCommit?: string;
+    profile?: JevgrepProfileId;
+    supplier?: JevgrepSupplier;
     evaluate: JevgrepEvaluate;
     signal?: AbortSignal;
+    onProgress?: (message: string) => void | Promise<void>;
   },
   dependencies: {
     runCommand?: (command: BoundedCommand) => Promise<CommandResult>;
@@ -55,6 +62,8 @@ export async function runJevgrep(
     searchTimeoutMs?: number;
   } = {},
 ): Promise<JevgrepRunResult> {
+  const policy = jevgrepProfile(options.profile);
+  const limits = policy.limits;
   if (!isJevgrepRuntimeAvailable(options.runtime)) {
     return {
       status: 'unavailable',
@@ -81,6 +90,15 @@ export async function runJevgrep(
     AbortSignal.timeout(dependencies.setupTimeoutMs ?? 60_000),
   ]);
   const runCommand = dependencies.runCommand ?? runBoundedCommand;
+  const report = (message: string) => {
+    try {
+      // A disconnected or slow UI must not change search/payment execution.
+      void Promise.resolve(options.onProgress?.(message)).catch(() => undefined);
+    } catch {
+      // A synchronous sink failure is equally non-authoritative.
+    }
+  };
+  let completedEvaluations = 0;
   let directory: string | undefined;
   let runtime: Awaited<ReturnType<typeof prepareNpmRuntime>> | undefined;
   let proxy: Awaited<ReturnType<typeof startJevgrepProxy>> | undefined;
@@ -93,6 +111,7 @@ export async function runJevgrep(
   try {
     setupSignal.throwIfAborted();
     const root = await realpath(options.root);
+    report('Jevgrep: preparing isolated runtime');
     runtime = await prepareNpmRuntime({
       dataDir: options.dataDir,
       packageName: '@dzhng/jevgrep',
@@ -109,34 +128,67 @@ export async function runJevgrep(
     }
     const { packageSpec, env } = runtime;
     const source = join(directory, 'source');
-    snapshot = await createJevgrepSnapshot({ root, destination: source, signal: setupSignal });
+    report('Jevgrep: preparing committed source snapshot');
+    snapshot = await createJevgrepSnapshot({
+      root,
+      destination: source,
+      signal: setupSignal,
+      profile: policy.id,
+    });
+    if (options.expectedCommit !== undefined && snapshot.commit !== options.expectedCommit)
+      return {
+        status: 'failed',
+        output: '',
+        reason: 'Repository snapshot changed after the offer',
+        requests: 0,
+        snapshot,
+      };
     const cache = createJevgrepAnswerCache({
       dataDir: options.dataDir,
       root,
       commit: snapshot.commit,
       query: options.query,
       runtime: options.runtime!,
+      profile: policy.id,
+      supplier: options.supplier,
     });
-    proxy = await startJevgrepProxy({ evaluate: options.evaluate, cache, signal: outerSignal });
+    proxy = await startJevgrepProxy({
+      evaluate: async (request, signal) => {
+        const result = await options.evaluate(request, signal);
+        // Cache hits bypass this callback; this counts real provider responses.
+        report(`Jevgrep: completed provider evaluations: ${++completedEvaluations}`);
+        return result;
+      },
+      cache,
+      signal: outerSignal,
+      profile: policy.id,
+      supplier: options.supplier,
+    });
     phaseSignal.addEventListener('abort', abortProxy, { once: true });
     if (phaseSignal.aborted) {
       abortProxy();
       phaseSignal.throwIfAborted();
     }
     const prefix = ['--yes', '--package', packageSpec, 'jg'];
+    report('Jevgrep: configuring local provider connection');
     const auth = await runCommand({
       argv: [
         ...prefix,
         'auth',
         '--provider',
         'custom',
+        // Reviewed local builds support this explicit pacing profile; published
+        // 0.7.0 custom auth does not expose that fork-specific option.
+        ...(policy.id === 'extended-v1' && options.runtime!.kind === 'local-artifact'
+          ? ['--transport-profile', 'tenjin-x402']
+          : []),
         '--base-url',
         proxy.baseURL,
         '--model',
         JEV_MODEL,
         '--stdin',
       ],
-      outputBytes: JEV_LIMITS.outputBytes,
+      outputBytes: limits.outputBytes,
       cwd: directory,
       env,
       input: `${proxy.token}\n`,
@@ -155,7 +207,7 @@ export async function runJevgrep(
     phase = 'search';
     const searchSignal = AbortSignal.any([
       outerSignal,
-      AbortSignal.timeout(dependencies.searchTimeoutMs ?? 60_000),
+      AbortSignal.timeout(dependencies.searchTimeoutMs ?? policy.searchTimeoutMs),
     ]);
     phaseSignal.removeEventListener('abort', abortProxy);
     phaseSignal = searchSignal;
@@ -164,13 +216,14 @@ export async function runJevgrep(
       abortProxy();
       phaseSignal.throwIfAborted();
     }
+    report('Jevgrep: searching committed source');
     const search = await runCommand({
       argv: [
         ...prefix,
         '--concurrency',
-        String(JEV_LIMITS.concurrency),
+        String(limits.concurrency),
         '--max-source-bytes',
-        String(JEV_LIMITS.outputBytes),
+        String(policy.sourceBytes),
         // Tenjin owns persistent answer reuse before paid admission. The CLI's
         // cache is temporary and includes the short-lived proxy port in its key.
         '--no-cache',
@@ -178,7 +231,7 @@ export async function runJevgrep(
         options.query,
         source,
       ],
-      outputBytes: JEV_LIMITS.outputBytes,
+      outputBytes: limits.outputBytes,
       cwd: directory,
       env,
       signal: searchSignal,
@@ -187,7 +240,7 @@ export async function runJevgrep(
     const mapped = redactedOutput(search.stdout, proxy.token).replaceAll(source, root);
     const heading = `Committed HEAD snapshot ${snapshot.commit}; uncommitted and untracked changes omitted.\n`;
     const output = mapped
-      ? heading + boundedUtf8(mapped, JEV_LIMITS.outputBytes - Buffer.byteLength(heading))
+      ? heading + boundedUtf8(mapped, limits.outputBytes - Buffer.byteLength(heading))
       : '';
     const reason = options.signal?.aborted
       ? 'cancelled'
@@ -207,6 +260,7 @@ export async function runJevgrep(
             : search.code === 130
               ? 'cancelled'
               : 'failed';
+    report(`Jevgrep: retrieval ${status}`);
     return {
       status,
       output,
@@ -220,6 +274,7 @@ export async function runJevgrep(
           : {}),
     };
   } catch (error) {
+    report('Jevgrep: retrieval stopped');
     return {
       status: options.signal?.aborted
         ? 'cancelled'

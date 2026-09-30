@@ -1,0 +1,100 @@
+{
+  "date": "2026-09-29",
+  "scope": "Published npm CLI against a loopback mock with two synthetic committed TypeScript files; no model, wallet or payment calls",
+  "node": "v24.18.0",
+  "platform": "darwin",
+  "package": {
+    "name": "@dzhng/jevgrep",
+    "version": "0.7.0",
+    "tarball": "https://registry.npmjs.org/@dzhng/jevgrep/-/jevgrep-0.7.0.tgz",
+    "sha256": "09719097be8765683f50b55a032a6a84db4e6e475b89e5fea9529c0af704163d",
+    "integrity": "sha512-1AZn+5EUFTcFsPkCYVLbyz8w5UnrmG2J1Z4DCuQIHkiphbneI26VmLibWcQog4eYAmaD/8fwGG7yENFKrkOlyw=="
+  },
+  "checks": {
+    "registryIntegrityVerified": true,
+    "actualPinnedNpxVersion": true,
+    "actualCustomAuth": true,
+    "actualCustomSearch": true,
+    "authAndSearchNpmOffline": true,
+    "npmLifecycleScriptsDisabled": true,
+    "childFetchLimitedToLoopback": true,
+    "returnedSourceExactlyMatchesFixture": true,
+    "nativeResponseValidated": true,
+    "completedContextMarker": true,
+    "focusedGrantAndRunnerTests": 25,
+    "typecheck": true
+  },
+  "execution": {
+    "release": "0.7.0",
+    "modelCalls": 0,
+    "payments": 0,
+    "sourceKind": "synthetic committed fixture",
+    "commands": [
+      {
+        "argv": [
+          "--yes",
+          "--package",
+          "@dzhng/jevgrep@0.7.0",
+          "jg",
+          "auth",
+          "--provider",
+          "custom",
+          "--base-url",
+          "http://127.0.0.1:<ephemeral>/v1",
+          "--model",
+          "jev-1.13.0",
+          "--stdin"
+        ],
+        "outputBytes": 32768
+      },
+      {
+        "argv": [
+          "--yes",
+          "--package",
+          "@dzhng/jevgrep@0.7.0",
+          "jg",
+          "--concurrency",
+          "2",
+          "--max-source-bytes",
+          "16384",
+          "--no-cache",
+          "--",
+          "Find the function that calculates a price discount and return its implementation.",
+          "<temporary-path>"
+        ],
+        "outputBytes": 32768
+      }
+    ],
+    "mockEvaluations": 7,
+    "warm": {
+      "code": 0,
+      "stdout": "0.7.0",
+      "stderr": ""
+    },
+    "elapsedMs": 1862,
+    "status": "complete",
+    "requests": 7,
+    "snapshotFiles": 2,
+    "verifiedBlocks": [
+      {
+        "path": "src/discount.ts",
+        "start": 1,
+        "end": 4,
+        "exact": true
+      },
+      {
+        "path": "src/format.ts",
+        "start": 1,
+        "end": 4,
+        "exact": true
+      }
+    ],
+    "passed": true
+  },
+  "limitations": [
+    "Mock answers deliberately return high scores for all questions; this checks transport and source formatting, not semantic precision or retrieval usefulness.",
+    "No live supplier, payment, wallet or settlement behavior was exercised.",
+    "Published custom-provider requests have a 15-second upstream timeout and no token-aware pacing; the older reviewed local build retains its custom transport profile.",
+    "No existing source grant or installed runtime selection was changed by qualification."
+  ]
+}

@@ -1,3 +1,4 @@
+import { jevgrepProfile, type JevgrepProfileId } from './profile';
 import { mkdir, readFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -6,6 +7,7 @@ import type { CommandContext } from '../../context';
 import { ErrorCodeSchema } from '../../schemas';
 import { writeFileAtomicExclusive } from '../../lib/atomic-json';
 import { CliError } from '../../lib/errors';
+import { validatedX402Failure } from '../../lib/x402-diagnostic';
 import { withFileLock } from '../../lib/lock';
 import { canonicalHash } from '../../lib/request-schema';
 import { resolveWalletProvider, type WalletProvider, type SpendAuthorizer } from '../../lib/wallet';
@@ -15,7 +17,8 @@ import {
   validateNativeResponse,
   type NativeEvaluationResponse,
 } from './protocol';
-import { JEVGREP_SUPPLIER, type JevgrepSupplier } from './supplier';
+import { jevgrepSupplier, type JevgrepSupplier } from './supplier';
+import { encodeMapleRequest, validateMapleResponse } from './maple';
 
 export { JEVGREP_SUPPLIER } from './supplier';
 
@@ -27,6 +30,7 @@ export interface JevgrepPayerOptions {
   fetchImpl?: typeof fetch;
   signal?: AbortSignal;
   runId: string;
+  profile?: JevgrepProfileId;
   maxRunAtomic: bigint;
   supplier: JevgrepSupplier;
 }
@@ -97,6 +101,7 @@ function failureDiagnostic(error: unknown, phase: FailurePhase, aborted: boolean
       : undefined;
   const status = details?.status;
   const reason = details?.reason;
+  const paymentFailure = validatedX402Failure(details?.paymentFailure);
   return {
     code: aborted ? 'ABORTED' : code?.success ? code.data : 'UNKNOWN',
     phase,
@@ -104,18 +109,21 @@ function failureDiagnostic(error: unknown, phase: FailurePhase, aborted: boolean
       ? { status }
       : {}),
     ...(reason === 'balance_unavailable' || reason === 'insufficient_funds' ? { reason } : {}),
+    ...(paymentFailure !== undefined ? { paymentFailure } : {}),
   };
 }
 
 /** One run, one supplier, and no automatic replacement for an unresolved payment. */
 export function createJevgrepPayer(options: JevgrepPayerOptions) {
+  const policy = jevgrepProfile(options.profile);
   if (
     !/^[a-zA-Z0-9_-]{1,100}$/.test(options.runId) ||
     options.maxRunAtomic <= 0n ||
-    options.maxRunAtomic > 50_000n
+    options.maxRunAtomic > policy.maxRunAtomic
   )
     refuse('Invalid search payment scope or budget.');
-  if (canonicalHash(options.supplier) !== canonicalHash(JEVGREP_SUPPLIER))
+  const supplier = jevgrepSupplier(options.supplier.id);
+  if (canonicalHash(options.supplier) !== canonicalHash(supplier))
     refuse('The search supplier does not match the approved payment terms.');
   const authorizer = options.authorizer;
   if (!authorizer.markSigned || !authorizer.durableSummary)
@@ -124,6 +132,8 @@ export function createJevgrepPayer(options: JevgrepPayerOptions) {
   const journalRoot = join(options.ctx.dataDir, 'jevgrep', 'payments');
   const directory = join(journalRoot, canonicalHash(options.runId));
   const active = new Map<string, Promise<NativeEvaluationResponse>>();
+  const lifecycle = new AbortController();
+  let closePromise: Promise<{ drainCompleted: boolean; pendingEvaluations: number }> | undefined;
   let requests = 0;
   let replays = 0;
 
@@ -136,8 +146,9 @@ export function createJevgrepPayer(options: JevgrepPayerOptions) {
       version: 1,
       runId: options.runId,
       wallet: wallet.address.toLowerCase(),
-      supplier: JEVGREP_SUPPLIER,
+      supplier,
       maxRunAtomic: options.maxRunAtomic.toString(),
+      ...(policy.id === 'extended-v1' ? { profile: policy.id } : {}),
     };
     const path = join(directory, 'scope.json');
     await mkdir(journalRoot, { recursive: true, mode: 0o700 });
@@ -155,21 +166,31 @@ export function createJevgrepPayer(options: JevgrepPayerOptions) {
 
   async function execute(body: unknown, signal?: AbortSignal): Promise<NativeEvaluationResponse> {
     // Freeze the exact request before the first asynchronous operation.
-    const request = validateNativeRequest(JSON.parse(JSON.stringify(validateNativeRequest(body))));
+    const request = validateNativeRequest(
+      JSON.parse(JSON.stringify(validateNativeRequest(body, policy.id))),
+      policy.id,
+    );
+    const rawBody =
+      supplier.id === 'maple-jev'
+        ? encodeMapleRequest(request, policy.id)
+        : JSON.stringify(request);
+    const validateResponse =
+      supplier.id === 'maple-jev' ? validateMapleResponse : validateNativeResponse;
     const combined = AbortSignal.any([
       AbortSignal.timeout(120_000),
+      lifecycle.signal,
       ...[options.signal, signal].filter((item): item is AbortSignal => item !== undefined),
     ]);
     combined.throwIfAborted();
     await initialize();
-    const identity = canonicalHash({ runId: options.runId, supplier: JEVGREP_SUPPLIER, request });
+    const identity = canonicalHash({ runId: options.runId, supplier, request });
     const responsePath = join(directory, `${identity}.response.json`);
     const attemptPath = join(directory, `${identity}.attempt.json`);
     const failedPath = join(directory, `${identity}.failed.json`);
     const replay = async () => {
       const saved = await readRecord(responsePath);
       if (saved === undefined) return undefined;
-      const response = validateNativeResponse(saved, request);
+      const response = validateResponse(saved, request);
       replays++;
       return response;
     };
@@ -183,7 +204,8 @@ export function createJevgrepPayer(options: JevgrepPayerOptions) {
           throw Object.assign(new Error('Existing evaluation'), { code: 'EEXIST' });
         // A run is finite even if every evaluation was free or failed before signing.
         if (
-          (await readdir(directory)).filter((name) => name.endsWith('.attempt.json')).length >= 60
+          (await readdir(directory)).filter((name) => name.endsWith('.attempt.json')).length >=
+          policy.limits.requests
         )
           refuse('The search evaluation limit was reached.');
         await saveRecord(attemptPath, { version: 1, identity });
@@ -226,19 +248,19 @@ export function createJevgrepPayer(options: JevgrepPayerOptions) {
     try {
       const paid = await runPay(
         {
-          url: JEVGREP_SUPPLIER.url,
+          url: supplier.url,
           method: 'POST',
-          rawBody: JSON.stringify(request),
+          rawBody,
           headers: { 'content-type': 'application/json', accept: 'application/json' },
           execution: 'router',
           requestKey: identity,
           printBody: true,
           terms: {
-            source: JEVGREP_SUPPLIER.id,
-            network: JEVGREP_SUPPLIER.network,
-            asset: JEVGREP_SUPPLIER.asset,
-            payTo: JEVGREP_SUPPLIER.payTo,
-            maxAmountAtomic: JEVGREP_SUPPLIER.maxAmountAtomic,
+            source: supplier.id,
+            network: supplier.network,
+            asset: supplier.asset,
+            payTo: supplier.payTo,
+            maxAmountAtomic: supplier.maxAmountAtomic,
           },
         },
         options.ctx,
@@ -252,8 +274,8 @@ export function createJevgrepPayer(options: JevgrepPayerOptions) {
             combined.throwIfAborted();
             if (
               !reservationId ||
-              payment.url !== JEVGREP_SUPPLIER.url ||
-              BigInt(payment.amountAtomic) > BigInt(JEVGREP_SUPPLIER.maxAmountAtomic)
+              payment.url !== supplier.url ||
+              BigInt(payment.amountAtomic) > BigInt(supplier.maxAmountAtomic)
             )
               refuse('The payment does not match its durable reservation.');
             paymentPrepared = true;
@@ -270,7 +292,7 @@ export function createJevgrepPayer(options: JevgrepPayerOptions) {
       } catch {
         refuse('The provider did not return a valid evaluation.');
       }
-      const response = validateNativeResponse(parsed, request);
+      const response = validateResponse(parsed, request);
       phase = 'response_persistence';
       await saveRecord(responsePath, response);
       return response;
@@ -301,6 +323,7 @@ export function createJevgrepPayer(options: JevgrepPayerOptions) {
 
   return {
     evaluate(body: unknown, signal?: AbortSignal): Promise<NativeEvaluationResponse> {
+      if (lifecycle.signal.aborted) return Promise.reject(new Error('The search payer is closed.'));
       const key = canonicalHash(body);
       const pending = active.get(key);
       if (pending) {
@@ -310,6 +333,24 @@ export function createJevgrepPayer(options: JevgrepPayerOptions) {
       const operation = execute(body, signal).finally(() => active.delete(key));
       active.set(key, operation);
       return operation;
+    },
+    close() {
+      closePromise ??= (async () => {
+        lifecycle.abort();
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([
+            Promise.allSettled([...active.values()]),
+            new Promise<void>((resolve) => {
+              timer = setTimeout(resolve, 10_000);
+            }),
+          ]);
+          return { drainCompleted: active.size === 0, pendingEvaluations: active.size };
+        } finally {
+          clearTimeout(timer);
+        }
+      })();
+      return closePromise;
     },
     async summary() {
       return { ...(await authorizer.durableSummary!(options.runId)), requests, replays };

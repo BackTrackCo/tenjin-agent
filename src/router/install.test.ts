@@ -83,7 +83,9 @@ const settingsPath = () => join(home, '.claude', 'settings.json');
 const readSettings = async (): Promise<Record<string, unknown>> =>
   JSON.parse(await readFile(settingsPath(), 'utf8')) as Record<string, unknown>;
 
-const handler = (command: string, timeout = 5) => [{ type: 'command', command, timeout }];
+const handler = (command: string, timeout = 5, statusMessage?: string) => [
+  { type: 'command', command, timeout, ...(statusMessage ? { statusMessage } : {}) },
+];
 /** The after-call entries wait for a search's free docs, so they get longer. */
 const afterCall = handler('tenjin hook shortfall', 15);
 /** Exactly what this build writes into an empty `hooks` key. */
@@ -92,6 +94,10 @@ const CURRENT_HOOKS = {
   PreToolUse: [
     { matcher: 'WebSearch|WebFetch', hooks: handler('tenjin hook native') },
     { matcher: 'Agent|Task', hooks: handler('tenjin hook agent') },
+    {
+      matcher: 'Grep|Bash',
+      hooks: handler('tenjin hook repository', 20, 'Calling x402… repository search'),
+    },
   ],
   PostToolUse: [{ matcher: 'WebSearch|WebFetch', hooks: afterCall }],
   PostToolUseFailure: [{ matcher: 'WebSearch|WebFetch', hooks: afterCall }],
@@ -135,7 +141,7 @@ function deps(over: Record<string, unknown> = {}) {
 }
 
 describe('tenjin install', () => {
-  it('writes the five hook entries, the allow rule and the MCP registration', async () => {
+  it('writes the six hook entries, the allow rule and the MCP registration', async () => {
     const registerMcp = vi.fn(async () => undefined);
     const result = await runRouterInstall({}, ctx(), deps({ registerMcp }));
     const settings = await readSettings();

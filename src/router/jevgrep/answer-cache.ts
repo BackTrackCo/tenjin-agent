@@ -7,8 +7,8 @@ import { canonicalHash } from '../../lib/request-schema';
 import type { NpmRuntime } from '../local/npm-runtime';
 import { JEV_MODEL, validateNativeRequest, validateNativeResponse } from './protocol';
 import type { NativeEvaluationRequest, NativeEvaluationResponse } from './protocol';
-import { SNAPSHOT_LIMITS } from './snapshot';
-import { JEVGREP_SUPPLIER } from './supplier';
+import { jevgrepProfile, type JevgrepProfileId } from './profile';
+import { JEVGREP_SUPPLIER, type JevgrepSupplier } from './supplier';
 
 // Bump when snapshot admission or native evaluation semantics change. Runtime
 // upgrades are independently isolated by their exact release/artifact identity.
@@ -33,8 +33,11 @@ export function createJevgrepAnswerCache(options: {
   commit: string;
   query: string;
   runtime: NpmRuntime;
+  profile?: JevgrepProfileId;
+  supplier?: JevgrepSupplier;
   now?: () => number;
 }): JevgrepAnswerCache {
+  const policy = jevgrepProfile(options.profile);
   const directory = join(options.dataDir, 'jevgrep', 'answers');
   const now = options.now ?? Date.now;
   const namespace = {
@@ -46,11 +49,20 @@ export function createJevgrepAnswerCache(options: {
       options.runtime.kind === 'release'
         ? { release: options.runtime.version }
         : { artifact: options.runtime.sha256 },
-    snapshotLimits: SNAPSHOT_LIMITS,
-    supplier: JEVGREP_SUPPLIER,
+    snapshotLimits: policy.snapshot,
+    // Keep existing standard entries readable; extended admission has its own identity.
+    ...(policy.id === 'extended-v1'
+      ? {
+          profile: policy.id,
+          limits: policy.limits,
+          sourceBytes: policy.sourceBytes,
+          searchTimeoutMs: policy.searchTimeoutMs,
+        }
+      : {}),
+    supplier: options.supplier ?? JEVGREP_SUPPLIER,
   };
   const identity = (request: NativeEvaluationRequest) =>
-    canonicalHash({ namespace, request: validateNativeRequest(request) });
+    canonicalHash({ namespace, request: validateNativeRequest(request, policy.id) });
 
   async function prepare(create: boolean) {
     // The runner already validates dataDir before granting the child any source.

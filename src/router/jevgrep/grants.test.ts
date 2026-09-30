@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { mkdtemp, mkdir, realpath, rm, writeFile, chmod, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -5,6 +6,8 @@ import { randomUUID } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { CommandContext } from '../../context';
 import {
+  configureJevgrep,
+  readJevgrepGrant,
   bindJevgrepOffer,
   boundJevgrepGrant,
   disableJevgrep,
@@ -139,4 +142,96 @@ it('uses the same supplier identity as runPay for wallet allowlists', async () =
     }),
   );
   expect(await eligibleJevgrep(ctx, root)).toBeNull();
+});
+
+it('accepts an explicit extended grant but never grants more than one dollar', async () => {
+  grant.maxRunAtomic = '1000000';
+  await save();
+  expect(await eligibleJevgrep(ctx, root)).toEqual(grant);
+  grant.maxRunAtomic = '1000001';
+  await save();
+  expect(await eligibleJevgrep(ctx, root)).toBeNull();
+});
+
+it('configures only the qualified exact npm pin without fetching or changing wallet policy', async () => {
+  execFileSync('/usr/bin/git', ['init', '-q', root]);
+  const args = { root, release: '0.7.0', maxRun: '1', shareSource: true, experimental: true };
+  await configureJevgrep(ctx, args);
+  expect(await readJevgrepGrant(dir)).toMatchObject({
+    runtime: { kind: 'release', version: '0.7.0' },
+    maxRunAtomic: '1000000',
+    supplier: 'jev-x402',
+  });
+  expect(await eligibleJevgrep(ctx, root)).not.toBeNull();
+  for (const release of ['latest', '^0.7.0', '0.7.1', '0.4.4'])
+    await expect(configureJevgrep(ctx, { ...args, release })).rejects.toThrow(
+      'qualified exact release',
+    );
+  await expect(configureJevgrep(ctx, { ...args, artifact: '/other.tgz' })).rejects.toThrow(
+    'cannot be combined',
+  );
+  await expect(configureJevgrep(ctx, { ...args, release: undefined })).rejects.toThrow(
+    'Provide --release',
+  );
+});
+
+it('grants Maple explicitly without migrating old grants or reusing their offers', async () => {
+  execFileSync('/usr/bin/git', ['init', '-q', root]);
+  await bindJevgrepOffer(dir, 'legacy-offer', 'session-one', grant);
+  expect((await readJevgrepGrant(dir))?.supplier).toBe('jev-x402');
+  const args = {
+    root,
+    release: '0.7.0',
+    maxRun: '1',
+    shareSource: true,
+    experimental: true,
+    supplier: 'maple-jev',
+  };
+  const result = await configureJevgrep(ctx, args);
+  const replacement = await readJevgrepGrant(dir);
+  expect(replacement).toMatchObject({ supplier: 'maple-jev' });
+  await writeFile(
+    join(dir, 'config.json'),
+    JSON.stringify({ maxAutoSpend: '10000', sessionBudget: '50000' }),
+  );
+  expect(await eligibleJevgrep(ctx, root)).toEqual(replacement);
+  expect(result.humanLines?.join('\n')).toContain('https://base.mapleai.shop/jev');
+  expect(await boundJevgrepGrant(ctx, root, 'legacy-offer', 'Find implementation')).toBeNull();
+  await expect(configureJevgrep(ctx, { ...args, supplier: 'arbitrary-provider' })).rejects.toThrow(
+    'Choose --supplier',
+  );
+  expect(await readJevgrepGrant(dir)).toEqual(replacement);
+});
+
+it('checks the selected supplier price and host against the grant and wallet policy', async () => {
+  grant.supplier = 'maple-jev';
+  await save();
+  // The previous $0.001 auto-spend limit does not cover Maple's $0.01 admission.
+  expect(await eligibleJevgrep(ctx, root)).toBeNull();
+  const policy = { maxAutoSpend: '10000', sessionBudget: '50000' };
+  await writeFile(
+    join(dir, 'config.json'),
+    JSON.stringify({ ...policy, allowlistCreators: ['jev-x402.vercel.app'] }),
+  );
+  expect(await eligibleJevgrep(ctx, root)).toBeNull();
+  await writeFile(
+    join(dir, 'config.json'),
+    JSON.stringify({ ...policy, allowlistCreators: ['base.mapleai.shop'] }),
+  );
+  expect(await eligibleJevgrep(ctx, root)).toEqual(grant);
+  grant.maxRunAtomic = '9999';
+  await save();
+  expect(await eligibleJevgrep(ctx, root)).toBeNull();
+});
+it('does not accept an unqualified or arbitrary package in a saved release grant', async () => {
+  for (const runtime of [
+    { kind: 'release', version: 'latest' },
+    { kind: 'release', version: '0.7.1' },
+    { kind: 'release', version: '0.7.0', package: 'untrusted' },
+  ]) {
+    await writeFile(join(dir, 'jevgrep', 'grant.json'), JSON.stringify({ ...grant, runtime }), {
+      mode: 0o600,
+    });
+    expect(await eligibleJevgrep(ctx, root)).toBeNull();
+  }
 });

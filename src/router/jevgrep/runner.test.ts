@@ -8,6 +8,7 @@ import { JEV_LIMITS, JEV_MODEL } from './protocol.js';
 import { isJevgrepRuntimeAvailable, runJevgrep } from './runner.js';
 import type { JevgrepRuntime } from './runner.js';
 import type { BoundedCommand, CommandResult } from '../local/process';
+import { MAPLE_JEVGREP_SUPPLIER } from './supplier';
 const directories: string[] = [];
 async function fixture() {
   const dir = await mkdtemp(join(tmpdir(), 'jev-runner-test-'));
@@ -55,7 +56,7 @@ afterEach(async () => {
   await Promise.all(directories.splice(0).map((d) => rm(d, { recursive: true, force: true })));
 });
 describe('isolated Jevgrep lifecycle', () => {
-  it('keeps published versions unavailable pending qualification', async () => {
+  it('keeps unqualified published versions unavailable', async () => {
     expect(isJevgrepRuntimeAvailable({ kind: 'release', version: '0.4.3' })).toBe(false);
     const evaluate = vi.fn();
     expect(
@@ -113,6 +114,22 @@ describe('isolated Jevgrep lifecycle', () => {
     );
     expect(result.status).toBe('failed');
     expect(runCommand).not.toHaveBeenCalled();
+  });
+  it('does not start auth or inference when the snapshot differs from the hook offer', async () => {
+    const f = await fixture();
+    const runCommand = vi.fn(),
+      evaluate = vi.fn();
+    const result = await runJevgrep(
+      { ...f, query: 'Trace the implementation', expectedCommit: '0'.repeat(40), evaluate },
+      { runCommand },
+    );
+    expect(result).toMatchObject({
+      status: 'failed',
+      requests: 0,
+      reason: 'Repository snapshot changed after the offer',
+    });
+    expect(runCommand).not.toHaveBeenCalled();
+    expect(evaluate).not.toHaveBeenCalled();
   });
   it('rejects reserved CLI commands before spawning', async () => {
     const f = await fixture();
@@ -217,12 +234,58 @@ describe('isolated Jevgrep lifecycle', () => {
       expect(response.status).toBe(200);
       return { ...ok, stdout: 'source evidence' };
     };
-    const first = await runJevgrep({ ...f, query: 'same question', evaluate }, { runCommand });
-    const second = await runJevgrep({ ...f, query: 'same question', evaluate }, { runCommand });
+    const firstProgress: string[] = [],
+      cachedProgress: string[] = [];
+    const first = await runJevgrep(
+      {
+        ...f,
+        query: 'same question',
+        evaluate,
+        onProgress: (message) => {
+          firstProgress.push(message);
+        },
+      },
+      { runCommand },
+    );
+    const second = await runJevgrep(
+      {
+        ...f,
+        query: 'same question',
+        evaluate,
+        onProgress: (message) => {
+          cachedProgress.push(message);
+        },
+      },
+      { runCommand },
+    );
     expect(first.requests).toBe(1);
     expect(second.requests).toBe(0);
     expect(second.cacheHits).toBe(1);
     expect(evaluate).toHaveBeenCalledTimes(1);
+    expect(firstProgress).toEqual([
+      'Jevgrep: preparing isolated runtime',
+      'Jevgrep: preparing committed source snapshot',
+      'Jevgrep: configuring local provider connection',
+      'Jevgrep: searching committed source',
+      'Jevgrep: completed provider evaluations: 1',
+      'Jevgrep: retrieval complete',
+    ]);
+    expect(cachedProgress).toEqual(
+      firstProgress.filter((message) => !message.includes('evaluations')),
+    );
+    const maple = await runJevgrep(
+      { ...f, query: 'same question', supplier: MAPLE_JEVGREP_SUPPLIER, evaluate },
+      { runCommand },
+    );
+    expect(maple.requests).toBe(1);
+    expect(maple.cacheHits).toBe(0);
+    const mapleAgain = await runJevgrep(
+      { ...f, query: 'same question', supplier: MAPLE_JEVGREP_SUPPLIER, evaluate },
+      { runCommand },
+    );
+    expect(mapleAgain.requests).toBe(0);
+    expect(mapleAgain.cacheHits).toBe(1);
+    expect(evaluate).toHaveBeenCalledTimes(2);
     // A newly added uncommitted ignore policy makes the source unavailable,
     // even though the previous exact answer exists on disk.
     await writeFile(join(f.root, '.ignore'), 'code.ts\n');
@@ -231,6 +294,104 @@ describe('isolated Jevgrep lifecycle', () => {
       await runJevgrep({ ...f, query: 'same question', evaluate }, { runCommand: blocked }),
     ).toMatchObject({ status: 'unavailable', reason: 'snapshot-policy-unavailable' });
     expect(blocked).not.toHaveBeenCalled();
-    expect(evaluate).toHaveBeenCalledTimes(1);
+    expect(evaluate).toHaveBeenCalledTimes(2);
   });
+  it.each(['working', 'throwing', 'rejecting'] as const)(
+    'counts real evaluations without changing execution with a %s progress sink',
+    async (sink) => {
+      const f = await fixture();
+      let baseURL = '',
+        token = '';
+      const messages: string[] = [];
+      const onProgress = (message: string) => {
+        messages.push(message);
+        if (sink === 'throwing') throw new Error('UI unavailable');
+        if (sink === 'rejecting') return Promise.reject(new Error('UI unavailable'));
+      };
+      const evaluate = vi.fn(async () => ({
+        answers: { q: { type: 'noul' as const, noul: 0.9 } },
+      }));
+      const runCommand = vi.fn(async (command: BoundedCommand) => {
+        if (command.input) {
+          baseURL = command.argv[command.argv.indexOf('--base-url') + 1]!;
+          token = command.input.trim();
+          return ok;
+        }
+        for (const state of ['first source', 'second source']) {
+          const response = await fetch(`${baseURL}/systemone`, {
+            method: 'POST',
+            headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+            body: JSON.stringify({
+              model: JEV_MODEL,
+              state,
+              questions: { q: { type: 'noul', instructions: 'Relevant?' } },
+            }),
+          });
+          expect(response.status).toBe(200);
+          await response.json();
+        }
+        return { ...ok, stdout: 'source evidence' };
+      });
+      const result = await runJevgrep(
+        { ...f, query: 'Find relevant implementation', evaluate, onProgress },
+        { runCommand },
+      );
+      expect(result).toMatchObject({ status: 'complete', requests: 2, cacheHits: 0 });
+      expect(evaluate).toHaveBeenCalledTimes(2);
+      expect(runCommand).toHaveBeenCalledTimes(2);
+      expect(messages.filter((message) => message.includes('evaluations'))).toEqual([
+        'Jevgrep: completed provider evaluations: 1',
+        'Jevgrep: completed provider evaluations: 2',
+      ]);
+      expect(messages.at(-1)).toBe('Jevgrep: retrieval complete');
+    },
+  );
+});
+
+it('uses qualified pacing and separate source/output bounds only for extended retrieval', async () => {
+  const f = await fixture();
+  const calls: BoundedCommand[] = [];
+  await runJevgrep(
+    { ...f, profile: 'extended-v1', query: 'Find the implementation', evaluate: vi.fn() },
+    {
+      runCommand: async (command) => {
+        calls.push(command);
+        return ok;
+      },
+    },
+  );
+  expect(calls[0]!.argv).toContain('--transport-profile');
+  expect(calls[0]!.argv).toContain('tenjin-x402');
+  const search = calls[1]!;
+  expect(search.argv[search.argv.indexOf('--max-source-bytes') + 1]).toBe('16384');
+  expect(search.outputBytes).toBe(32768);
+  expect(search.argv[search.argv.indexOf('--concurrency') + 1]).toBe('2');
+});
+
+it('pins published 0.7.0 and uses only its supported custom auth flags', async () => {
+  const f = await fixture();
+  const calls: BoundedCommand[] = [];
+  expect(isJevgrepRuntimeAvailable({ kind: 'release', version: '0.7.0' })).toBe(true);
+  expect(isJevgrepRuntimeAvailable({ kind: 'release', version: 'latest' })).toBe(false);
+  const result = await runJevgrep(
+    {
+      ...f,
+      runtime: { kind: 'release', version: '0.7.0' },
+      profile: 'extended-v1',
+      query: 'Find the implementation',
+      evaluate: vi.fn(),
+    },
+    {
+      runCommand: async (command) => {
+        calls.push(command);
+        return ok;
+      },
+    },
+  );
+  expect(result.status).toBe('complete');
+  expect(calls[0]!.argv).toContain('@dzhng/jevgrep@0.7.0');
+  expect(calls[0]!.argv).not.toContain('--transport-profile');
+  expect(calls[0]!.argv).toContain('custom');
+  expect(calls[1]!.outputBytes).toBe(32768);
+  expect(calls[1]!.argv[calls[1]!.argv.indexOf('--max-source-bytes') + 1]).toBe('16384');
 });

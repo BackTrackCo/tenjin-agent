@@ -129,6 +129,21 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
       },
     },
     async ({ query, id }, extra): Promise<CallToolResult> => {
+      const progressToken = extra._meta?.progressToken;
+      let progress = 0;
+      const onProgress = (message: string) => {
+        if (progressToken === undefined) return;
+        try {
+          void extra
+            .sendNotification({
+              method: 'notifications/progress',
+              params: { progressToken, progress: ++progress, message },
+            })
+            .catch(() => undefined);
+        } catch {
+          // Progress is only UI: a broken transport must not retry or fail payment.
+        }
+      };
       // Resolved per call, from settings read now: the refusal this tool returns
       // names `tenjin config set sessionBudget`, and a policy frozen at the
       // first call would leave that command with no effect until the harness
@@ -145,6 +160,7 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
             extra.signal,
             ...(opts.signal ? [opts.signal] : []),
           ]),
+          onProgress,
           cwd: sessionCwd,
           // THE WALLET IS THE PAYING LEG'S TO OPEN, not this handler's. Routing
           // is free, so a missing or locked wallet must not stop a `native` or

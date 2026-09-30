@@ -90,4 +90,16 @@ describe.skipIf(!existsSync(dist))('the hook chunk graph', () => {
     expect(tool, 'the request tool should have its own chunk').toBeDefined();
     expect(tool).not.toBe(chunkContaining('router/hook-command'));
   });
+
+  it('keeps wallet and payment loading lazy in the repository hook too', () => {
+    const entry = chunkContaining('router/repository-hook-command');
+    expect(entry).toBeDefined();
+    const sources = closure(entry!).flatMap(sourcesOf);
+    for (const { label, re } of FORBIDDEN) {
+      expect(
+        sources.filter((source) => re.test(source)),
+        `${label} loaded before repository admission`,
+      ).toEqual([]);
+    }
+  });
 });

@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
@@ -11,7 +12,9 @@ import { createLocalSpendAuthorizer } from '../../lib/wallet/spend';
 import { runNativeHook, runPromptHook } from '../hooks';
 import { buildRouterMcpServer } from '../mcp';
 import { runRequestTool } from '../tool';
-import type { JevgrepGrant } from './grants';
+import { runRepositoryHook } from '../repository-hook';
+import { publishRepositoryHandoff } from '../repository-handoff';
+import { bindJevgrepOffer, type JevgrepGrant } from './grants';
 import { createJevgrepPayer } from './payments';
 import { runJevgrep } from './runner';
 
@@ -116,7 +119,11 @@ beforeEach(async () => {
     dir,
     policy: { maxAutoSpendAtomic: 50_000n, sessionBudgetAtomic: 500_000n, allowlistCreators: [] },
   });
-  vi.mocked(createJevgrepPayer).mockReturnValue({ evaluate, summary });
+  vi.mocked(createJevgrepPayer).mockReturnValue({
+    evaluate,
+    summary,
+    close: vi.fn().mockResolvedValue({ drainCompleted: true, pendingEvaluations: 0 }),
+  });
   vi.mocked(runJevgrep).mockResolvedValue({
     status: 'complete',
     output: 'fixture.ts:1',
@@ -124,7 +131,8 @@ beforeEach(async () => {
   });
 });
 afterEach(async () => {
-  await rm(dir, { recursive: true, force: true });
+  // A cancelled MCP client can finish before its server persists terminal progress.
+  await rm(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 20 });
 });
 async function saveGrant() {
   await writeFile(join(dir, 'jevgrep', 'grant.json'), JSON.stringify(grant), { mode: 0o600 });
@@ -141,8 +149,128 @@ function request(query = QUERY, cwd = root, id: string | undefined = ID) {
     { ctx, cwd, provider, authorizer, fetchImpl },
   );
 }
+async function committedFixture() {
+  const git = (...args: string[]) =>
+    execFileSync(
+      'git',
+      [
+        '-c',
+        'core.hooksPath=/dev/null',
+        '-c',
+        'commit.gpgsign=false',
+        '-c',
+        'user.name=Fixture',
+        '-c',
+        'user.email=fixture@example.invalid',
+        '-C',
+        root,
+        ...args,
+      ],
+      { stdio: 'pipe' },
+    );
+  git('init', '-q');
+  await mkdir(join(root, 'src'));
+  await writeFile(join(root, 'src/source.ts'), 'export const source = true;\n');
+  git('add', '.');
+  git('commit', '-qm', 'fixture');
+  return git('rev-parse', 'HEAD').toString().trim();
+}
 
 describe('Jevgrep hook, binding and executor integration', () => {
+  it('routes from the session then executes the agent-authored question unchanged', async () => {
+    await committedFixture();
+    const transcript = join(dir, 'session.jsonl');
+    const earlier =
+      'The source filter may omit the implementation needed to explain retrieval boundaries.';
+    await writeFile(
+      transcript,
+      [earlier, 'Trace that interaction.']
+        .map((text) =>
+          JSON.stringify({
+            type: 'user',
+            sessionId: 'session-one',
+            message: { role: 'user', content: text },
+          }),
+        )
+        .join('\n'),
+    );
+    const searchEvent = {
+      session_id: 'session-one',
+      tool_use_id: 'bash-search',
+      tool_name: 'Bash',
+      cwd: root,
+      transcript_path: transcript,
+      tool_input: { command: 'rg "filter|boundaries" src' },
+    };
+    const out = await runRepositoryHook(searchEvent, { ctx, fetchImpl });
+    expect(out.response).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } });
+    expect(runJevgrep).not.toHaveBeenCalled();
+    expect(
+      (await runRepositoryHook({ ...searchEvent, tool_use_id: 'skip-request' }, { ctx, fetchImpl }))
+        .response,
+    ).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } });
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.body.packet).toMatchObject({
+      current: { text: 'Trace that interaction.' },
+      history: [{ role: 'user', text: earlier }],
+    });
+    expect((await request(QUERY)).envelope.status).toBe('fulfilled');
+    expect(
+      (
+        await runRepositoryHook(
+          { ...searchEvent, tool_use_id: 'after-request' },
+          { ctx, fetchImpl },
+        )
+      ).response,
+    ).toBeNull();
+    expect(vi.mocked(runJevgrep).mock.calls[0]![0].query).toBe(QUERY);
+    expect(sent.at(-1)!.body.query).toBe(QUERY);
+    // A second generated query cannot buy another search with this turn's offer.
+    expect((await request('A different question about source boundaries')).envelope.status).toBe(
+      'needs_input',
+    );
+    expect(createJevgrepPayer).toHaveBeenCalledOnce();
+    expect(runJevgrep).toHaveBeenCalledOnce();
+  });
+  it('allows only one concurrent paid attempt across offers bound to the same human turn', async () => {
+    const snapshotCommit = await committedFixture();
+    const scope = { repositoryTurn: 'a'.repeat(64), snapshotCommit };
+    await publishRepositoryHandoff(dir, { ...scope, sessionId: 'session-one', grant }, ID);
+    await bindJevgrepOffer(dir, 'jev-offer-456', 'session-one', grant, scope);
+    const results = await Promise.all([
+      request(),
+      request('Another task question', root, 'jev-offer-456'),
+    ]);
+    expect(results.map((r) => r.envelope.status).sort()).toEqual(['fulfilled', 'needs_input']);
+    expect(createJevgrepPayer).toHaveBeenCalledOnce();
+    expect(runJevgrep).toHaveBeenCalledOnce();
+  });
+  it('rejects a changed snapshot before creating the payer', async () => {
+    await committedFixture();
+    await publishRepositoryHandoff(
+      dir,
+      {
+        sessionId: 'session-one',
+        grant,
+        repositoryTurn: 'a'.repeat(64),
+        snapshotCommit: 'b'.repeat(40),
+      },
+      ID,
+    );
+    expect((await request()).envelope.status).toBe('needs_input');
+    expect(createJevgrepPayer).not.toHaveBeenCalled();
+    expect(runJevgrep).not.toHaveBeenCalled();
+  });
+  it('does not reroute an expired local offer to an HTTP payment', async () => {
+    await offer();
+    const file = join(dir, 'jevgrep', 'bindings', `${ID}.json`);
+    const binding = JSON.parse(await readFile(file, 'utf8'));
+    await writeFile(file, JSON.stringify({ ...binding, expiresAt: 0 }), { mode: 0o600 });
+    sent = [];
+    expect((await request()).envelope.status).toBe('needs_input');
+    expect(sent).toHaveLength(0);
+    expect(createJevgrepPayer).not.toHaveBeenCalled();
+  });
   it.each(['complete', 'partial'] as const)(
     'reports answer reuse on a %s retrieval',
     async (status) => {
@@ -223,9 +351,11 @@ describe('Jevgrep hook, binding and executor integration', () => {
     expect(Object.keys(options).sort()).toEqual([
       'dataDir',
       'evaluate',
+      'profile',
       'query',
       'root',
       'runtime',
+      'supplier',
     ]);
     expect(JSON.stringify(options)).not.toMatch(/wallet|bearer|authorization|privateKey/);
     expect(evaluate).not.toHaveBeenCalled();
@@ -374,4 +504,29 @@ describe('Jevgrep hook, binding and executor integration', () => {
       }
     },
   );
+});
+
+it('keeps extended profile opt-in while preserving the current wallet clamp', async () => {
+  grant.maxRunAtomic = '1000000';
+  await saveGrant();
+  await offer();
+  expect((await request()).envelope.status).toBe('fulfilled');
+  expect(createJevgrepPayer).toHaveBeenCalledWith(
+    expect.objectContaining({ profile: 'extended-v1', maxRunAtomic: 50000n }),
+  );
+  expect(runJevgrep).toHaveBeenCalledWith(expect.objectContaining({ profile: 'extended-v1' }));
+});
+it('never reports fulfilled if payment work failed to drain before summary', async () => {
+  await offer();
+  const closed = vi.fn().mockResolvedValue({ drainCompleted: false, pendingEvaluations: 1 });
+  vi.mocked(createJevgrepPayer).mockReturnValue({ evaluate, summary, close: closed });
+  const result = await request();
+  expect(result.isError).toBe(true);
+  expect(result.envelope).toMatchObject({
+    status: 'partial',
+    stopReason: 'payment-drain-timeout',
+    drainCompleted: false,
+    pendingEvaluations: 1,
+  });
+  expect(closed).toHaveBeenCalledOnce();
 });

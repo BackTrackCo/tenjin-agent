@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { ANSWER_CACHE_LIMITS, createJevgrepAnswerCache } from './answer-cache';
 import { JEV_MODEL, type NativeEvaluationRequest } from './protocol';
+import { JEVGREP_SUPPLIER, MAPLE_JEVGREP_SUPPLIER } from './supplier';
 
 const dirs: string[] = [];
 const request: NativeEvaluationRequest = {
@@ -195,4 +196,43 @@ describe('private cross-run Jevgrep answers', () => {
     expect(sizes.reduce((a, b) => a + b, 0)).toBeLessThanOrEqual(ANSWER_CACHE_LIMITS.bytes);
     expect(await f.cache.get({ ...request, state: 'byte-bound' })).toBeDefined();
   });
+});
+
+it('keeps legacy standard answers and isolates extended policy answers', async () => {
+  const f = await fixture();
+  await f.cache.put(request, response);
+  expect(
+    await createJevgrepAnswerCache({ ...f.options, profile: 'standard-v1' }).get(request),
+  ).toBeDefined();
+  const extended = createJevgrepAnswerCache({ ...f.options, profile: 'extended-v1' });
+  expect(await extended.get(request)).toBeUndefined();
+  const changed = {
+    ...response,
+    answers: { ...response.answers, second: { type: 'noul' as const, noul: 0.9 } },
+  };
+  await extended.put(request, changed);
+  expect(
+    (await createJevgrepAnswerCache({ ...f.options, profile: 'extended-v1' }).get(request))?.answers
+      .second?.noul,
+  ).toBe(0.9);
+  expect((await f.cache.get(request))?.answers.second?.noul).toBe(0.2);
+  expect((await readdir(f.directory)).filter((name) => name.endsWith('.json'))).toHaveLength(2);
+});
+
+it('preserves legacy answers while isolating Maple provider and model identity', async () => {
+  const f = await fixture();
+  await f.cache.put(request, response);
+  expect(
+    await createJevgrepAnswerCache({ ...f.options, supplier: JEVGREP_SUPPLIER }).get(request),
+  ).toBeDefined();
+  const maple = createJevgrepAnswerCache({ ...f.options, supplier: MAPLE_JEVGREP_SUPPLIER });
+  expect(await maple.get(request)).toBeUndefined();
+  const changed = {
+    ...response,
+    answers: { ...response.answers, second: { type: 'noul' as const, noul: 0.9 } },
+  };
+  await maple.put(request, changed);
+  expect((await maple.get(request))?.answers.second?.noul).toBe(0.9);
+  expect((await f.cache.get(request))?.answers.second?.noul).toBe(0.2);
+  expect((await readdir(f.directory)).filter((name) => name.endsWith('.json'))).toHaveLength(2);
 });

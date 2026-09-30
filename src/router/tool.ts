@@ -1,4 +1,4 @@
-import { boundJevgrepGrant } from './jevgrep/grants';
+import { boundJevgrepGrant, isJevgrepOffer } from './jevgrep/grants';
 import { executeJevgrep } from './jevgrep/executor';
 import { runPay, type AdvertisedTerms, type PayDeps } from '../commands/pay';
 import { CliError } from '../lib/errors';
@@ -12,6 +12,7 @@ import type { CommandContext } from '../context';
 import { requestDecision, type DecisionContract, type DecisionDiagnostics } from './decision';
 import { openLookupFooter } from './progress';
 import { routerSettings } from './settings';
+import { beginRepositoryHandoffRequest } from './repository-handoff';
 
 /**
  * The `request` tool: one free decision per lookup, then ONE payment, to the
@@ -43,6 +44,11 @@ export interface RequestToolArgs {
 
 export interface RequestToolDeps {
   signal?: AbortSignal;
+  /** Best-effort, locally authored status; never part of paid execution. */
+  onProgress?: (message: string) => void | Promise<void>;
+  /** A deterministic hook may execute only the local capability it admitted,
+   * even if its offer expires and the server makes a fresh routing decision. */
+  expectedExecutor?: 'jevgrep-search-v1';
   ctx: CommandContext;
   /** The SAME provider the MCP server pre-warmed. `runPay` opens its own
    *  otherwise, and the local one re-runs scrypt per process, which is the
@@ -65,6 +71,31 @@ export interface RequestToolResult {
 }
 
 export async function runRequestTool(
+  args: RequestToolArgs,
+  deps: RequestToolDeps,
+): Promise<RequestToolResult> {
+  const handoff = await beginRepositoryHandoffRequest(
+    deps.ctx.dataDir,
+    deps.cwd ?? process.cwd(),
+    args.id,
+  );
+  if (handoff.status === 'blocked') return fail('needs_input', handoff.reason);
+  try {
+    return await runRequest(
+      args,
+      handoff.status === 'owned'
+        ? {
+            ...deps,
+            signal: deps.signal ? AbortSignal.any([deps.signal, handoff.signal]) : handoff.signal,
+          }
+        : deps,
+    );
+  } finally {
+    if (handoff.status === 'owned') await handoff.finish();
+  }
+}
+
+async function runRequest(
   args: RequestToolArgs,
   deps: RequestToolDeps,
 ): Promise<RequestToolResult> {
@@ -96,6 +127,13 @@ export async function runRequestTool(
   await footer.routing();
   const settings = await resolveContextSettings(deps.ctx);
   const local = await boundJevgrepGrant(deps.ctx, deps.cwd ?? process.cwd(), args.id, query);
+  if (!local && (await isJevgrepOffer(deps.ctx.dataDir, args.id))) {
+    await footer.done('needs_input');
+    return fail(
+      'needs_input',
+      'This local retrieval offer is no longer authorized. Use native tools.',
+    );
+  }
   const decisionDeps = {
     jevgrep: local !== null,
     ctx: deps.ctx,
@@ -130,6 +168,19 @@ export async function runRequestTool(
       decision.action === 'native' ? 'native' : 'needs_input',
       decision.reason ?? 'The router did not select a paid capability.',
       { diagnostics: decision.diagnostics, ...(note !== undefined ? { note } : {}) },
+    );
+  }
+
+  if (
+    (deps.expectedExecutor !== undefined || local !== null) &&
+    (decision.capabilityId !== (deps.expectedExecutor ?? 'jevgrep-search-v1') ||
+      !('executor' in decision.contract) ||
+      decision.contract.executor !== (deps.expectedExecutor ?? 'jevgrep-search-v1'))
+  ) {
+    await footer.done('native');
+    return fail(
+      'native',
+      'The router did not return the local executor this hook authorized. Use native tools.',
     );
   }
 

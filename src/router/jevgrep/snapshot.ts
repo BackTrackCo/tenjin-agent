@@ -1,14 +1,11 @@
+import { jevgrepProfile, type JevgrepProfileId } from './profile';
 import { execFile } from 'node:child_process';
 import { constants } from 'node:fs';
 import ignore, { type Ignore } from 'ignore';
 import { lstat, mkdir, open, realpath, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative } from 'node:path';
 
-export const SNAPSHOT_LIMITS = {
-  files: 512,
-  fileBytes: 128 * 1024,
-  totalBytes: 8 * 1024 * 1024,
-} as const;
+export const SNAPSHOT_LIMITS = jevgrepProfile().snapshot;
 export type SnapshotSummary = {
   files: number;
   bytes: number;
@@ -244,9 +241,11 @@ function git(
 export async function createJevgrepSnapshot(options: {
   root: string;
   destination: string;
+  profile?: JevgrepProfileId;
   signal: AbortSignal;
 }): Promise<SnapshotSummary> {
   const { signal } = options;
+  const limits = jevgrepProfile(options.profile).snapshot;
   signal.throwIfAborted();
   const root = await realpath(options.root);
   const top = await realpath(
@@ -308,7 +307,7 @@ export async function createJevgrepSnapshot(options: {
       type !== 'blob' ||
       !isSnapshotSourcePath(path) ||
       !Number.isSafeInteger(size) ||
-      size > SNAPSHOT_LIMITS.fileBytes
+      size > limits.fileBytes
     ) {
       summary.omitted++;
       continue;
@@ -334,18 +333,13 @@ export async function createJevgrepSnapshot(options: {
     return true;
   });
   const selectedBytes = eligible.reduce((sum, file) => sum + file.size, 0);
-  if (eligible.length > SNAPSHOT_LIMITS.files || selectedBytes > SNAPSHOT_LIMITS.totalBytes)
+  if (eligible.length > limits.files || selectedBytes > limits.totalBytes)
     throw new Error('Approved repository exceeds committed snapshot pilot limits');
   signal.throwIfAborted();
   await mkdir(options.destination, { mode: 0o700 });
   for (const entry of eligible) {
     signal.throwIfAborted();
-    const content = await git(
-      top,
-      ['cat-file', 'blob', entry.oid],
-      signal,
-      SNAPSHOT_LIMITS.fileBytes + 1,
-    );
+    const content = await git(top, ['cat-file', 'blob', entry.oid], signal, limits.fileBytes + 1);
     if (content.length !== entry.size) throw new Error('Snapshot blob size changed');
     let text: string;
     try {

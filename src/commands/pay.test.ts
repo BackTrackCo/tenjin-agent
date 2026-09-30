@@ -209,6 +209,41 @@ describe('runPay, tenjin lane', () => {
     expect(authorizer.commit).toHaveBeenCalledWith(RESERVATION, 100000n, { mode: 'manual' });
   });
 
+  it('retains the provider settlement failure without releasing transmitted exposure', async () => {
+    const fixture = buildPaymentRequired();
+    const errorMessage =
+      'Facilitator settle failed (402): {"correlationId":"private-id","errorLink":"https://docs.cdp.coinbase.com/api-reference/errors#payment-method-required","errorMessage":"A valid payment method is required to complete th';
+    const { fetch, calls } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': fixture.header }),
+      json(
+        402,
+        {},
+        {
+          'PAYMENT-RESPONSE': Buffer.from(
+            JSON.stringify({ success: false, errorMessage }),
+          ).toString('base64'),
+        },
+      ),
+    ]);
+    const authorizer = fakeAuthorizer('allow');
+    const error = await runPay({ url: TENJIN_URL, data: '{"question":"q"}' }, makeCtx(), {
+      ...PUBLIC_DNS,
+      fetchImpl: fetch,
+      provider: testWalletProvider(),
+      authorizer,
+    }).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(CliError);
+    expect((error as CliError).details).toMatchObject({
+      status: 402,
+      settlement: 'unknown',
+      paymentFailure: { stage: 'settlement', reason: 'provider_payment_method_required' },
+    });
+    expect(JSON.stringify((error as CliError).details)).not.toContain('private-id');
+    expect(calls).toHaveLength(2);
+    expect(authorizer.commit).toHaveBeenCalledWith(RESERVATION, 100000n, { mode: 'manual' });
+    expect(authorizer.release).not.toHaveBeenCalled();
+  });
+
   // A routing decision can name a contract on the configured origin, so the
   // terms it quoted bind here as on the Bazaar lane.
   it('refuses a 402 above the terms a caller was given, before signing', async () => {
