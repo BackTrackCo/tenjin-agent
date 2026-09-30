@@ -10,7 +10,7 @@ describe('explicit retrieval profiles', () => {
     for (const cap of [0n, -1n, 1_000_001n]) expect(() => jevgrepProfileForBudget(cap)).toThrow();
     expect(() => jevgrepProfile('unlimited' as JevgrepProfileId)).toThrow();
     expect(JEV_LIMITS).toEqual({
-      concurrency: 32,
+      concurrency: 16,
       requests: 60,
       localRequests: 4096,
       localRequestBytes: 67108864,
@@ -28,7 +28,7 @@ describe('explicit retrieval profiles', () => {
       snapshot: { fileBytes: 262144 },
       limits: {
         requests: 1000,
-        concurrency: 32,
+        concurrency: 16,
         requestBytes: 262144,
         totalRequestBytes: 67108864,
         outputBytes: 32768,

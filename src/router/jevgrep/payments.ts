@@ -252,7 +252,11 @@ export function createJevgrepPayer(options: JevgrepPayerOptions) {
         await delay(50, undefined, { signal: combined });
       }
       if (!readmitted)
-        refuse('An earlier evaluation needs recovery; no duplicate payment was sent.');
+        throw new CliError(
+          'REFUSED',
+          'An earlier evaluation needs recovery; no duplicate payment was sent.',
+          { details: { reason: 'unresolved' } },
+        );
     }
     requests++;
     let reservationId: string | undefined;

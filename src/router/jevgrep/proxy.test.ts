@@ -162,7 +162,43 @@ describe('bounded local evaluation proxy', () => {
     ).toBe(413);
     expect(evaluate).toHaveBeenCalledTimes(1);
   });
-  it.each(['budget', 'provider', 'payment_uncertain'])(
+  it('keeps searching after an uncertain payment, refuses its replacement, and stops past the limit', async () => {
+    let uncertain = true;
+    const evaluate = vi.fn(async () => {
+      if (!uncertain) return answer;
+      uncertain = false;
+      throw Object.assign(new Error('never expose provider secret'), {
+        details: {
+          reason: 'payment_uncertain',
+          diagnostic: { code: 'PAYMENT_FAILED', phase: 'payment', status: 429 },
+        },
+      });
+    });
+    const p = await proxy(evaluate);
+    const first = await send(p);
+    expect(first.status).toBe(429);
+    expect(first.body).not.toContain('secret');
+    expect((await send(p)).status).toBe(200);
+    expect(p.summary()).toMatchObject({ uncertainFailures: 1, stopReason: undefined });
+
+    const unresolved = await proxy(async () => {
+      throw Object.assign(new Error('secret'), { details: { reason: 'unresolved' } });
+    });
+    expect((await send(unresolved)).status).toBe(503);
+    expect((await send(unresolved)).status).toBe(503);
+    expect(unresolved.summary().stopReason).toBeUndefined();
+
+    const repeated = await proxy(async () => {
+      throw Object.assign(new Error('secret'), { details: { reason: 'payment_uncertain' } });
+    });
+    for (let i = 0; i < 16; i++) expect((await send(repeated)).status).toBe(429);
+    expect((await send(repeated)).status).toBe(409);
+    expect(repeated.summary()).toMatchObject({
+      uncertainFailures: 16,
+      stopReason: 'payment_uncertain',
+    });
+  });
+  it.each(['budget', 'provider'])(
     'preserves safe payer reason %s and stops new dispatch',
     async (reason) => {
       const evaluate = vi.fn(async () => {
@@ -211,9 +247,8 @@ describe('bounded local evaluation proxy', () => {
     expect((await send(overloaded)).status).toBe(409);
     expect(overloaded.summary()).toMatchObject({ transientFailures: 32, stopReason: 'provider' });
 
-    // A signed-then-failed evaluation and a deterministic refusal still stop the search.
+    // A deterministic refusal before payment still stops the search.
     for (const details of [
-      { reason: 'payment_uncertain', diagnostic: { code: 'NETWORK_ERROR', phase: 'payment' } },
       { reason: 'provider', diagnostic: { code: 'PAYMENT_FAILED', phase: 'payment', status: 402 } },
       {
         reason: 'provider',

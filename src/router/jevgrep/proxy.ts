@@ -16,6 +16,10 @@ import type { JevgrepSupplier } from './supplier';
 /** Dropped connections and supplier overload before payment are retried by the
  *  child; past this many in one search the failure is reported as terminal. */
 const TRANSIENT_FAILURE_LIMIT = 32;
+/** A failure after signing keeps its uncertain exposure and is never replaced.
+ *  The child drops or narrows that one batch and the search goes on, until this
+ *  many such failures in one search make the stop terminal. */
+const UNCERTAIN_FAILURE_LIMIT = 16;
 
 /** A closed-vocabulary payer diagnostic for a failure that may pass on retry. */
 function transientFailure(diagnostic: unknown): boolean {
@@ -50,6 +54,7 @@ export async function startJevgrepProxy(options: {
   let host = '';
   let active = 0;
   let transientFailures = 0;
+  let uncertainFailures = 0;
   let requests = 0;
   let bytes = 0;
   let localRequests = 0;
@@ -227,6 +232,34 @@ export async function startJevgrepProxy(options: {
             respond(429, 'Transient supplier failure before payment; retry');
           return;
         }
+        if (!stopReason && !controller.signal.aborted && paymentReason === 'unresolved') {
+          // The earlier attempt for this exact request is unresolved, so no
+          // replacement is paid. The child fails this request and narrows or
+          // drops it; other evaluations continue.
+          if (!response.headersSent && !response.destroyed)
+            respond(503, 'Evaluation unresolved; no replacement payment');
+          return;
+        }
+        if (
+          !stopReason &&
+          !controller.signal.aborted &&
+          paymentReason === 'payment_uncertain' &&
+          uncertainFailures < UNCERTAIN_FAILURE_LIMIT
+        ) {
+          // The supplier refused or dropped a signed request. Its exposure is
+          // journaled as uncertain; the child backs off before its retry, which
+          // the payer then refuses as unresolved.
+          uncertainFailures++;
+          if (!response.headersSent && !response.destroyed) {
+            response.writeHead(429, {
+              'content-type': 'text/plain',
+              'retry-after': '2',
+              connection: 'close',
+            });
+            response.end('Evaluation payment uncertain; slow down');
+          }
+          return;
+        }
         stopReason ??= controller.signal.aborted
           ? 'cancelled'
           : typeof paymentReason === 'string' &&
@@ -298,6 +331,7 @@ export async function startJevgrepProxy(options: {
       cacheHits,
       joined,
       transientFailures,
+      uncertainFailures,
       localRequests,
       localRequestBytes: localBytes,
       active,

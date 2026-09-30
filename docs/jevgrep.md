@@ -158,9 +158,9 @@ this integration does not claim zero retention or change provider privacy terms.
 Changing these terms requires a reviewed client update and renewed applicable disclosure consent.
 There is no automatic supplier fallback. This is a technical pilot; it adds no Tenjin routing fees.
 
-A grant up to $0.05 retains the standard profile: 32 concurrent evaluations, 60 uncached
+A grant up to $0.05 retains the standard profile: 16 concurrent evaluations, 60 uncached
 evaluations, 128 KiB per request, 2 MiB of uncached request bytes and a 60-second search deadline.
-Explicitly granting more than $0.05, up to $1, selects the extended profile: 32 concurrent
+Explicitly granting more than $0.05, up to $1, selects the extended profile: 16 concurrent
 evaluations, 1,000 uncached evaluations, 256 KiB per request, 64 MiB total request bytes and a
 900-second search deadline. These are ceilings, not targets; the approved money cap may stop
 a search earlier. Runtime setup retains a 60-second deadline in either profile. Cached answers consume neither paid-request nor supplier-egress
@@ -179,8 +179,11 @@ attempt. An unresolved attempt cannot sign a replacement. A failure before any s
 connection, a supplier 408, 429 or 5xx, or an unreadable balance) left no money in flight, so the
 loopback proxy answers Jevgrep with 429 and the child retries after its own back-off; the same
 evaluation is admitted again under its existing journal entry. After 32 such failures in one search
-the stop is reported as `provider`. A failure after signing keeps its `uncertain` record and never
-gets a replacement payment. The shared spend ledger retains
+the stop is reported as `provider`. A failure after signing (for example a supplier 429 on the paid
+request) keeps its `uncertain` record and never gets a replacement payment. The proxy answers that
+one request with 429 and `Retry-After: 2`, the child's retry of the same request is refused as
+unresolved with 503, and the child narrows or drops that batch while other evaluations continue.
+After 16 uncertain failures in one search the stop is reported as `payment_uncertain`. The shared spend ledger retains
 reserved and signed exposure across restarts and rolling-window expiry. `confirmedAtomic`
 remains zero because this pilot does not independently reconcile chain settlement;
 `unknownAtomic` reports signed exposure, including successful provider responses. The result
@@ -217,7 +220,7 @@ wallet or payment calls occurred, and synthetic scores do not measure retrieval 
 Published `@dzhng/jevgrep@0.7.0` uses the native `{model,state,questions}` request and matching
 `noul` response through a custom provider. Its custom-provider requests have a 15-second upstream
 timeout and do not enable the token-aware pacing reserved for upstream's `typesafe` provider.
-Tenjin passes Jevgrep its own default of 32 concurrent evaluations, and the loopback proxy answers 429 above that; every evaluation is still reserved against the search cap before dispatch, so concurrency changes wall-clock time, not exposure. The reviewed 0.4.4 local build retains its explicit
+Tenjin passes Jevgrep 16 concurrent evaluations, and the loopback proxy answers 429 above that; every evaluation is still reserved against the search cap before dispatch, so concurrency changes wall-clock time, not exposure. Measured against the Maple supplier on 2026-09-30, 16 in flight gave a 2.5 s median evaluation and 3.3 evaluations per second, while Jevgrep's own default of 32 gave a 7.6 s median, dropped paid connections and lower throughput. The reviewed 0.4.4 local build retains its explicit
 `tenjin-x402` pacing profile and 60-second request timeout; that fork-specific auth option is
 omitted for the published release. Search deadlines and payment caps remain Tenjin's own bounds.
 
