@@ -34,6 +34,16 @@ function transientFailure(diagnostic: unknown): boolean {
   return typeof status === 'number' && (status === 408 || status === 429 || status >= 500);
 }
 
+/** A 402 on the signed request is the supplier's settlement refusing the
+ *  wallet or its own facilitator; the next signed request fails the same way. */
+function settlementRejected(diagnostic: unknown): boolean {
+  return (
+    typeof diagnostic === 'object' &&
+    diagnostic !== null &&
+    (diagnostic as { status?: unknown }).status === 402
+  );
+}
+
 export type JevgrepEvaluate = (
   request: NativeEvaluationRequest,
   signal: AbortSignal,
@@ -244,6 +254,7 @@ export async function startJevgrepProxy(options: {
           !stopReason &&
           !controller.signal.aborted &&
           paymentReason === 'payment_uncertain' &&
+          !settlementRejected(diagnostic) &&
           uncertainFailures < UNCERTAIN_FAILURE_LIMIT
         ) {
           // The supplier refused or dropped a signed request. Its exposure is

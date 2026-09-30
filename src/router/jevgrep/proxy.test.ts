@@ -188,6 +188,21 @@ describe('bounded local evaluation proxy', () => {
     expect((await send(unresolved)).status).toBe(503);
     expect(unresolved.summary().stopReason).toBeUndefined();
 
+    // A settlement 402 on a signed request repeats for every later request: stop at once.
+    const rejected = await proxy(async () => {
+      throw Object.assign(new Error('secret'), {
+        details: {
+          reason: 'payment_uncertain',
+          diagnostic: { code: 'PAYMENT_FAILED', phase: 'payment', status: 402 },
+        },
+      });
+    });
+    expect((await send(rejected)).status).toBe(409);
+    expect(rejected.summary()).toMatchObject({
+      uncertainFailures: 0,
+      stopReason: 'payment_uncertain',
+    });
+
     const repeated = await proxy(async () => {
       throw Object.assign(new Error('secret'), { details: { reason: 'payment_uncertain' } });
     });
