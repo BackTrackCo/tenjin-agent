@@ -208,7 +208,8 @@ export async function startJevgrepProxy(options: {
   server.requestTimeout = 15_000;
   server.headersTimeout = 10_000;
   server.keepAliveTimeout = 1;
-  server.maxConnections = 8;
+  // Jevgrep keeps up to `limits.concurrency` requests open plus its retries.
+  server.maxConnections = limits.concurrency * 2;
   server.on('connection', (socket) => {
     sockets.add(socket);
     socket.on('close', () => sockets.delete(socket));

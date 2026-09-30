@@ -365,7 +365,7 @@ it('uses qualified pacing and separate source/output bounds only for extended re
   const search = calls[1]!;
   expect(search.argv[search.argv.indexOf('--max-source-bytes') + 1]).toBe('16384');
   expect(search.outputBytes).toBe(32768);
-  expect(search.argv[search.argv.indexOf('--concurrency') + 1]).toBe('2');
+  expect(search.argv[search.argv.indexOf('--concurrency') + 1]).toBe('32');
 });
 
 it('pins published 0.7.0 and uses only its supported custom auth flags', async () => {

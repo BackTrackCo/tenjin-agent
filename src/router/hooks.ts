@@ -1087,7 +1087,7 @@ function nullStream(): NodeJS.WritableStream {
  * still the same call.
  */
 function redirectTarget(pending: PendingCall): string {
-  if (pending.tool === 'WebSearch') return `WebSearch ${pending.query}`;
+  if (pending.tool !== 'WebFetch') return `${pending.tool} ${pending.query}`;
   let url = pending.url;
   try {
     url = new URL(url).toString();

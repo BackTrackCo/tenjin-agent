@@ -181,7 +181,7 @@ describe('bounded local evaluation proxy', () => {
       expect(evaluate).toHaveBeenCalledTimes(1);
     },
   );
-  it('admits at most two concurrent evaluations', async () => {
+  it('admits at most the profile concurrency of evaluations at once', async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => {
       release = resolve;
@@ -191,12 +191,11 @@ describe('bounded local evaluation proxy', () => {
       return answer;
     });
     const p = await proxy(evaluate);
-    const first = send(p);
-    const second = send(p);
-    await vi.waitFor(() => expect(evaluate).toHaveBeenCalledTimes(2));
+    const admitted = Array.from({ length: JEV_LIMITS.concurrency }, () => send(p));
+    await vi.waitFor(() => expect(evaluate).toHaveBeenCalledTimes(JEV_LIMITS.concurrency));
     expect((await send(p)).status).toBe(429);
     release();
-    await Promise.all([first, second]);
+    await Promise.all(admitted);
   });
   it('stops at 60 evaluations without dispatching a 61st', async () => {
     const evaluate = vi.fn(async () => answer);

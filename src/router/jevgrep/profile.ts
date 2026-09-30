@@ -1,6 +1,7 @@
 /** Closed, versioned policies. A grant above the legacy cap opts into extended retrieval. */
 const standardLimits = Object.freeze({
-  concurrency: 2,
+  // Jevgrep's own default evaluator limit; the proxy answers 429 above it.
+  concurrency: 32,
   requests: 60,
   localRequests: 4096,
   localRequestBytes: 64 * 1024 * 1024,
