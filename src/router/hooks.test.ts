@@ -2972,6 +2972,42 @@ describe('a question to the user', () => {
     expect(packet.pendingCall).toBeUndefined();
   });
 
+  /**
+   * THE REAL SHAPE, from the owner's art session (Claude Code 2.1.x): the
+   * answers ride in `tool_response.answers`, keyed by question, one per line
+   * in the packet, a multi-select answer as its label. The backend logged
+   * this exact turn as the search text "OG / social card Can try all".
+   */
+  it('routes the answers from a real AskUserQuestion PostToolUse event', async () => {
+    const real = JSON.parse(
+      readFileSync(
+        fileURLToPath(
+          new URL('../adapters/fixtures/claude/PostToolUse-AskUserQuestion.json', import.meta.url),
+        ),
+        'utf8',
+      ),
+    ) as Record<string, unknown>;
+    const path = await transcriptFor([
+      {
+        type: 'user',
+        sessionId: real.session_id,
+        message: { content: 'make some art for the landing page' },
+      },
+    ]);
+    const { fetchImpl, calls } = router(NATIVE);
+    const out = await runAnswerHook(
+      { ...real, cwd: dir, transcript_path: path },
+      { dataDir: dir, baseUrl: BASE, fetchImpl },
+    );
+    expect(out).toEqual({ response: null, action: 'native' });
+    const body = (calls[0] as { body: { sessionId: string; packet: Record<string, unknown> } })
+      .body;
+    expect(body.sessionId).toBe('3080b0f2-f873-488a-bca3-9c6f7789134f');
+    expect(body.packet.current).toEqual({ role: 'user', text: 'OG / social card\nCan try all' });
+    expect(body.packet.pendingCall).toBeUndefined();
+    expect(JSON.stringify(body.packet.history)).toContain('make some art for the landing page');
+  });
+
   it('says nothing on a plain acknowledgement, and asks nothing', async () => {
     const { fetchImpl, calls } = router(DISCOVERED);
     const out = await runAnswerHook(
