@@ -350,6 +350,48 @@ describe('resolving a settlement left unknown', () => {
     expect(await releaseUnchargedExposure(dir, nonce(2), { now: () => NOW })).toBe(0n);
   });
 
+  /** RELEASE FIRST, THEN MARK: a release that cannot be written leaves the
+   *  record unknown, and the next pass gives the budget back and marks it. */
+  it('keeps a record unknown until its spend release succeeds', async () => {
+    const { chmod } = await import('node:fs/promises');
+    const auth = createLocalSpendAuthorizer({
+      dir,
+      policy: {
+        maxAutoSpendAtomic: 1_000_000n,
+        sessionBudgetAtomic: 5_000_000n,
+        allowlistCreators: [],
+      },
+      now: () => NOW - 120_000,
+    });
+    const authz = await auth.authorize({ amountAtomic: 50_000n, creator: 'seller.test' });
+    await auth.commit(authz.reservationId, 50_000n, { mode: 'automatic', nonce: nonce(2) });
+    await ledger([JSON.stringify(record(2, { amountAtomic: '50000' }))]);
+    // The spend ledger's directory refuses the lock, so the release cannot run.
+    await chmod(dir, 0o500);
+    let first;
+    try {
+      first = await reconcilePayments(dir, {
+        rpcUrl: RPC,
+        fetchImpl: rpc(new Set()),
+        now: () => NOW,
+      });
+    } finally {
+      await chmod(dir, 0o700);
+    }
+    expect(first).toMatchObject({ checked: 1, notCharged: 0, unknown: 1, releasedAtomic: '0' });
+    expect((await read())[0]!.settlement).toBe('unknown');
+    expect((await readSpendSummary(dir, { now: () => NOW }))?.committedAtomic).toBe('50000');
+
+    const second = await reconcilePayments(dir, {
+      rpcUrl: RPC,
+      fetchImpl: rpc(new Set()),
+      now: () => NOW,
+    });
+    expect(second).toMatchObject({ notCharged: 1, releasedAtomic: '50000' });
+    expect((await read())[0]!.settlement).toBe('not_charged');
+    expect((await readSpendSummary(dir, { now: () => NOW }))?.committedAtomic).toBe('0');
+  });
+
   it('releases nothing from a spend ledger an older build wrote', async () => {
     const { mkdir, writeFile } = await import('node:fs/promises');
     await mkdir(dir, { recursive: true });

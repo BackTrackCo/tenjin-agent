@@ -165,6 +165,20 @@ export async function reconcilePayments(
     });
     if (used !== null) answers.set(record.authorization!.nonce, used ? 'settled' : 'not_charged');
   }
+  // NOT CHARGED GIVES THE DAILY BUDGET BACK FIRST: exactly that payment's
+  // exposure, by its nonce, while it is still inside the window that counted
+  // it. Only then is the record marked; a release that could not be written
+  // leaves it unknown, and the next pass asks again. A second release of the
+  // same nonce finds nothing, so a retry never gives back twice.
+  let releasedAtomic = 0n;
+  for (const [nonce, answer] of [...answers]) {
+    if (answer !== 'not_charged') continue;
+    const released = await releaseUnchargedExposure(dataDir, nonce, {
+      ...(opts.now !== undefined ? { now: opts.now } : {}),
+    });
+    if (released === null) answers.delete(nonce);
+    else releasedAtomic += released;
+  }
   if (answers.size > 0) {
     await withFileLock(`${path}.lock`, async () => {
       const current = parseLedger(await readFile(path, 'utf8').catch(() => ''));
@@ -182,16 +196,6 @@ export async function reconcilePayments(
             });
       });
       await writeFileAtomic(path, lines.map((line) => `${line}\n`).join(''), { mode: 0o600 });
-    });
-  }
-  // NOT CHARGED GIVES THE DAILY BUDGET BACK: exactly that payment's exposure,
-  // by its nonce, while it is still inside the window that counted it. Once
-  // per nonce: a second release finds nothing.
-  let releasedAtomic = 0n;
-  for (const [nonce, answer] of answers) {
-    if (answer !== 'not_charged') continue;
-    releasedAtomic += await releaseUnchargedExposure(dataDir, nonce, {
-      ...(opts.now !== undefined ? { now: opts.now } : {}),
     });
   }
   const settled = [...answers.values()].filter((value) => value === 'settled').length;

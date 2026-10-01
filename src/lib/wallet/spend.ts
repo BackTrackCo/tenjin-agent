@@ -265,13 +265,14 @@ export function createLocalSpendAuthorizer(deps: LocalSpendAuthorizerDeps): Spen
  * expired unused. Exactly the exposure recorded under that nonce comes off the
  * committed totals, once; a nonce from an earlier window, from a ledger an
  * older build wrote, or one already released finds nothing and changes
- * nothing. Returns the amount released.
+ * nothing. Returns the amount released, or null when the ledger could not be
+ * updated, so the caller keeps the payment open and asks again.
  */
 export async function releaseUnchargedExposure(
   dir: string,
   nonce: string,
   opts: { now?: () => number; windowMs?: number } = {},
-): Promise<bigint> {
+): Promise<bigint | null> {
   const path = spendLedgerPath(dir);
   const nowMs = (opts.now ?? Date.now)();
   try {
@@ -313,7 +314,7 @@ export async function releaseUnchargedExposure(
       return amount;
     });
   } catch {
-    return 0n;
+    return null;
   }
 }
 
