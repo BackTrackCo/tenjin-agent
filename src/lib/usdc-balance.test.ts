@@ -2,7 +2,12 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { LAST_KNOWN_BALANCE_MS, rememberingBalanceReader } from './usdc-balance';
+import {
+  FALLBACK_RPC_URLS,
+  LAST_KNOWN_BALANCE_MS,
+  readUsdcBalanceWithFallback,
+  rememberingBalanceReader,
+} from './usdc-balance';
 
 const WALLET = '0x1234567890AbcdEF1234567890aBcdef12345678';
 const OTHER = '0x0000000000000000000000000000000000000001';
@@ -51,5 +56,106 @@ describe('the last-known balance', () => {
     const pay = reader([4_000_000n], at);
     expect(await pay.read(WALLET)).toBe(4_000_000n);
     expect(pay.reads).toHaveLength(1);
+  });
+});
+
+/**
+ * A chain behind several RPCs: each URL answers with a balance, fails the way
+ * it is told to, or hangs until the read gives up on it.
+ */
+function rpcs(answers: Record<string, bigint | 'error' | 'rate-limit' | 'down' | 'hang'>) {
+  const asked: string[] = [];
+  const fetchImpl = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const url = String(input);
+    asked.push(url);
+    const answer = answers[url] ?? 'down';
+    if (answer === 'down') throw new TypeError('fetch failed');
+    if (answer === 'error') return new Response('nope', { status: 500 });
+    if (answer === 'rate-limit') {
+      return new Response(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          error: { code: -32016, message: 'over rate limit' },
+        }),
+      );
+    }
+    if (answer === 'hang') {
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(new Error('aborted')));
+      });
+    }
+    const word = `0x${answer.toString(16).padStart(64, '0')}`;
+    return new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: word }));
+  }) as typeof fetch;
+  return { fetchImpl, asked };
+}
+
+describe('the fallback RPCs', () => {
+  const [PUBLICNODE, DRPC] = FALLBACK_RPC_URLS as [string, string];
+
+  it('are asked only when the configured RPC fails', async () => {
+    const { fetchImpl, asked } = rpcs({ [RPC]: 7n, [PUBLICNODE]: 8n });
+    expect(await readUsdcBalanceWithFallback(WALLET, RPC, { timeoutMs: 1_000, fetchImpl })).toBe(
+      7n,
+    );
+    expect(asked).toEqual([RPC]);
+  });
+
+  /** mainnet.base.org answered `-32016 over rate limit`, and a paid lookup was
+   *  refused with `balance_unavailable`; publicnode answered the same read. */
+  it.each(['rate-limit', 'error', 'down'] as const)(
+    'read the balance in order when the configured RPC is %s',
+    async (failure) => {
+      const { fetchImpl, asked } = rpcs({ [RPC]: failure, [PUBLICNODE]: 'down', [DRPC]: 9n });
+      expect(await readUsdcBalanceWithFallback(WALLET, RPC, { timeoutMs: 1_000, fetchImpl })).toBe(
+        9n,
+      );
+      expect(asked).toEqual([RPC, PUBLICNODE, DRPC]);
+    },
+  );
+
+  it('come after an RPC the user configured, and are never asked twice', async () => {
+    const mine = 'https://base.example-rpc.test/v1/key';
+    const custom = rpcs({ [mine]: 'rate-limit', [PUBLICNODE]: 5n });
+    expect(
+      await readUsdcBalanceWithFallback(WALLET, mine, {
+        timeoutMs: 1_000,
+        fetchImpl: custom.fetchImpl,
+      }),
+    ).toBe(5n);
+    expect(custom.asked).toEqual([mine, PUBLICNODE]);
+    const configured = `${PUBLICNODE}/`;
+    const same = rpcs({ [configured]: 'down', [DRPC]: 6n });
+    expect(
+      await readUsdcBalanceWithFallback(WALLET, configured, {
+        timeoutMs: 1_000,
+        fetchImpl: same.fetchImpl,
+      }),
+    ).toBe(6n);
+    expect(same.asked).toEqual([configured, DRPC]);
+  });
+
+  it('leave a hung RPC half the time, and stay inside the one timeout', async () => {
+    const { fetchImpl, asked } = rpcs({ [RPC]: 'hang', [PUBLICNODE]: 4n });
+    const started = Date.now();
+    expect(await readUsdcBalanceWithFallback(WALLET, RPC, { timeoutMs: 400, fetchImpl })).toBe(4n);
+    expect(asked).toEqual([RPC, PUBLICNODE]);
+    expect(Date.now() - started).toBeLessThan(400);
+
+    const dead = rpcs({ [RPC]: 'hang', [PUBLICNODE]: 'hang', [DRPC]: 'hang' });
+    const begun = Date.now();
+    expect(
+      await readUsdcBalanceWithFallback(WALLET, RPC, { timeoutMs: 300, fetchImpl: dead.fetchImpl }),
+    ).toBeNull();
+    expect(dead.asked).toEqual([RPC, PUBLICNODE, DRPC]);
+    expect(Date.now() - begun).toBeLessThan(600);
+  });
+
+  it('back the remembering reader the hooks and pay use', async () => {
+    const { fetchImpl, asked } = rpcs({ [RPC]: 'rate-limit', [PUBLICNODE]: 3_000_000n });
+    const read = rememberingBalanceReader(dir);
+    expect(await read(WALLET, RPC, { timeoutMs: 1_000, fetchImpl })).toBe(3_000_000n);
+    expect(asked).toEqual([RPC, PUBLICNODE]);
   });
 });

@@ -28,6 +28,7 @@ import {
   wasOffered,
 } from './progress';
 import { runRequestTool } from './tool';
+import { FALLBACK_RPC_URLS } from '../lib/usdc-balance';
 import type { PrefetchJob } from './augment';
 
 interface WebFetchSample {
@@ -51,8 +52,11 @@ const WALLET = '0x1234567890AbcdEF1234567890aBcdef12345678';
 /** The configured default `rpcUrl`, where the balance read goes. */
 const RPC = 'https://mainnet.base.org';
 
+/** The public RPCs a failed read falls back to, in order (`FALLBACK_RPC_URLS`). */
+const RPCS = [RPC, ...FALLBACK_RPC_URLS];
+
 /**
- * What the RPC answers `balanceOf` with: an atomic USDC amount, or a function
+ * What every RPC answers `balanceOf` with: an atomic USDC amount, or a function
  * standing in for a failure. Funded by default (1 USDC), so a test about
  * routing is not a test about the wallet; reset before each test.
  */
@@ -81,14 +85,14 @@ const BASE = 'https://tenjin.sh';
 
 /**
  * A recorded decision answer; `calls` is what the hook sent the router. The
- * balance read goes to {@link RPC} through the same fetch and is answered from
- * {@link rpcAnswer} and recorded in {@link rpcCalls} instead.
+ * balance read goes to {@link RPC}, or a fallback, through the same fetch and
+ * is answered from {@link rpcAnswer} and recorded in {@link rpcCalls} instead.
  */
 function router(body: unknown, status = 200): { fetchImpl: typeof fetch; calls: unknown[] } {
   const calls: unknown[] = [];
   const fetchImpl = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
     const sent = { url: String(input), body: JSON.parse(String(init?.body ?? 'null')) };
-    if (sent.url === RPC) {
+    if (RPCS.includes(sent.url)) {
       rpcCalls.push(sent);
       if (typeof rpcAnswer === 'function') return rpcAnswer(init);
       const word = `0x${rpcAnswer.toString(16).padStart(64, '0')}`;
@@ -1177,6 +1181,8 @@ describe('a wallet that cannot cover the lookup', () => {
       warn: (line) => lines.push(line),
     });
     expect(out.response).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } });
+    // Every fallback was asked, in order, before the policy decided alone.
+    expect(rpcCalls.map((call) => call.url)).toEqual(RPCS);
     expect(lines).toEqual([
       "tenjin hook: the wallet's USDC balance could not be read from mainnet.base.org, so the spend policy alone decides",
     ]);
