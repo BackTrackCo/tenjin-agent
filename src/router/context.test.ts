@@ -211,6 +211,40 @@ describe('the prompt packet', () => {
     expect((await sent(big, 's', 'go')).historyStatus).toBe('unavailable');
   });
 
+  /** A long working session passes 4 MB; reading none of it switched the
+   *  pre-call redirect off for the rest of the day. */
+  it('reads the tail of a transcript over 4 MB, where this turn is', async () => {
+    const filler = assistant('x'.repeat(1_000_000));
+    const path = await transcript([
+      user('an early turn the window no longer reaches'),
+      filler,
+      filler,
+      filler,
+      filler,
+      user('native tools only for this one'),
+      assistant('Understood.'),
+    ]);
+    const packet = seal(
+      await buildNativePacket(path, 's', { tool: 'WebSearch', query: 'btc price' }),
+    ).packet;
+    expect(packet.historyStatus).toBe('ok');
+    expect(packet.current).toEqual({ role: 'user', text: 'native tools only for this one' });
+    expect(JSON.stringify(packet)).not.toContain('an early turn');
+  });
+
+  it('reads nothing from a tail that has lost the turn it belongs to', async () => {
+    const filler = assistant('x'.repeat(1_000_000));
+    const path = await transcript([
+      user('native tools only for this one'),
+      filler,
+      filler,
+      filler,
+      filler,
+    ]);
+    const packet = await buildNativePacket(path, 's', { tool: 'WebSearch', query: 'btc price' });
+    expect(packet.historyStatus).toBe('unavailable');
+  });
+
   it('treats a genuinely fresh session as ok with no history', async () => {
     const path = await transcript([{ type: 'system', subtype: 'turn_duration' }]);
     expect(await sent(path, 's', 'first')).toMatchObject({

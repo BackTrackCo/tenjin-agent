@@ -16,10 +16,12 @@ import { mask } from '../lib/redact';
  * and a packet that carried it would be a channel from a fetched page into a
  * routing decision.
  *
- * WHAT NEVER HAPPENS: a transcript this reader cannot vouch for (another
- * session, a subagent sidechain, a compaction boundary, malformed rows, an
- * oversized file) is reported as `unavailable` rather than partially believed,
- * and the user's turn is never blocked by any of that. Adapted from the draft
+ * WHAT NEVER HAPPENS: a transcript this reader cannot vouch for is reported
+ * as `unavailable` rather than partially believed, and the user's turn is
+ * never blocked by any of that. Another session's rows, a subagent sidechain,
+ * malformed rows and everything before a compaction boundary are skipped row
+ * by row. A file over {@link MAX_TRANSCRIPT_BYTES} is read from its tail
+ * ({@link readTail}), where this turn's own words are. Adapted from the draft
  * auto-mode experiment (PR #369 `context.ts`), whose 48,000-character reader
  * this tightens.
  */
@@ -29,6 +31,8 @@ export const MAX_PACKET_BYTES = 16 * 1024;
 /** Every bound here is the server's own (tenjin `lib/x402-router/wire.ts`). A
  *  packet this side lets through and that side refuses is a paid 400. */
 export const MAX_MESSAGE_CHARS = 16_000;
+/** How much of a transcript is read: all of a smaller one, the last this many
+ *  bytes of a larger one. A long working session passes 4 MB in a day. */
 const MAX_TRANSCRIPT_BYTES = 4_000_000;
 const MAX_LITERAL_URLS = 8;
 const MAX_LITERAL_URL_CHARS = 2_000;
@@ -363,6 +367,7 @@ async function readHistory(
 ): Promise<PacketMessage[] | null> {
   if (path === undefined || path.length === 0) return null;
   let raw: string;
+  let tail: boolean;
   let file;
   try {
     file = await open(path, 'r');
@@ -371,21 +376,51 @@ async function readHistory(
   }
   try {
     const stat = await file.stat();
-    if (!stat.isFile() || stat.size > MAX_TRANSCRIPT_BYTES) return null;
-    const buffer = Buffer.alloc(MAX_TRANSCRIPT_BYTES + 1);
-    const { bytesRead } = await file.read(buffer, 0, buffer.length, 0);
-    if (bytesRead > MAX_TRANSCRIPT_BYTES) return null;
-    raw = buffer.subarray(0, bytesRead).toString('utf8');
+    if (!stat.isFile()) return null;
+    tail = stat.size > MAX_TRANSCRIPT_BYTES;
+    const read = tail ? await readTail(file, stat.size) : await readHead(file);
+    if (read === null) return null;
+    raw = read;
   } catch {
     return null;
   } finally {
     await file.close();
   }
   try {
-    return parseRows(raw, scope);
+    const messages = parseRows(raw, scope);
+    // A TAIL MUST HOLD THE TURN. The latest user message is the newest of
+    // them, so a tail with any user message holds this turn's; one with none
+    // is a single turn longer than the window, whose instruction was cut off.
+    if (tail && !messages.some((message) => message.role === 'user')) return null;
+    return messages;
   } catch {
     return null;
   }
+}
+
+type TranscriptFile = Awaited<ReturnType<typeof open>>;
+
+/** All of a transcript within the bound; null if it grew past it meanwhile. */
+async function readHead(file: TranscriptFile): Promise<string | null> {
+  const buffer = Buffer.alloc(MAX_TRANSCRIPT_BYTES + 1);
+  const { bytesRead } = await file.read(buffer, 0, buffer.length, 0);
+  if (bytesRead > MAX_TRANSCRIPT_BYTES) return null;
+  return buffer.subarray(0, bytesRead).toString('utf8');
+}
+
+/**
+ * THE LAST {@link MAX_TRANSCRIPT_BYTES} OF A LONGER TRANSCRIPT, from the first
+ * line that starts inside them: the one byte before the window is read too,
+ * so a window that opens on a line boundary keeps its first line, and one
+ * that opens mid-line drops the fragment. Cutting after a newline never
+ * splits a UTF-8 character. Null when the window holds no line start at all.
+ */
+async function readTail(file: TranscriptFile, size: number): Promise<string | null> {
+  const buffer = Buffer.alloc(MAX_TRANSCRIPT_BYTES + 1);
+  const { bytesRead } = await file.read(buffer, 0, buffer.length, size - buffer.length);
+  const window = buffer.subarray(0, bytesRead);
+  const newline = window.indexOf(0x0a);
+  return newline === -1 ? null : window.subarray(newline + 1).toString('utf8');
 }
 
 /**
