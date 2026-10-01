@@ -157,12 +157,19 @@ function challenge(over: Record<string, unknown> = {}): string {
 
 const PUBLIC = { resolveHostname: async () => [{ address: '93.184.216.34', family: 4 }] };
 
+/** NO TEST OPENS A SOCKET: a linked-media download answers from here, and a
+ *  test that wants the file passes its own transport. */
+const noMediaNetwork: MediaTransport = async (target) => {
+  throw new Error(`no network in tests: ${target.url.toString()}`);
+};
+
 function deps(fetchImpl: typeof fetch, auth = authorizer()) {
   return {
     ctx: ctx(),
     cwd: dir,
     authorizer: auth,
     fetchImpl,
+    mediaTransport: noMediaNetwork,
     payDeps: {
       readBalance: async () => 100_000_000n,
       fetchImpl,
@@ -1063,7 +1070,7 @@ describe('a discovered service', () => {
     expect(calls.some((c) => c.url.includes('10.0.0.5'))).toBe(false);
   });
 
-  it('keeps a JSON body inline, as before', async () => {
+  it('keeps a JSON body inline, and a media link that cannot be fetched fails nothing', async () => {
     const { fetchImpl } = net([
       { url: ROUTER, status: 200, body: await wire('wire-lookup-execute-discovered.json') },
       { url: SELLER, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge() } },
