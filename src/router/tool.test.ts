@@ -1013,6 +1013,12 @@ describe('a discovered service', () => {
     const { fetchImpl: scripted } = net([{ url: ROUTER, status: 200, body: NATIVE }]);
     const fetchImpl = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
       if (String(input) === 'https://mainnet.base.org') {
+        if ((JSON.parse(String(init?.body)) as { method: string }).method !== 'eth_call') {
+          const now = `0x${Math.floor(Date.now() / 1000).toString(16)}`;
+          return new Response(
+            JSON.stringify({ jsonrpc: '2.0', id: 1, result: { number: '0x1', timestamp: now } }),
+          );
+        }
         rpcCalls.push(String(init?.body));
         return new Response(
           JSON.stringify({ jsonrpc: '2.0', id: 1, result: `0x${'0'.repeat(63)}1` }),

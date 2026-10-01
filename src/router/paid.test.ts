@@ -216,11 +216,31 @@ describe('resolving a settlement left unknown', () => {
   }
 
   /** An RPC that says nonces in `used` were spent; records every call. */
-  function rpc(used: Set<string>, calls: string[] = []): typeof fetch {
+  /** An RPC that says nonces in `used` were spent, with its latest block at
+   *  `chainNow` (ms); records every eth_call and the block it was read at. */
+  function rpc(
+    used: Set<string>,
+    calls: string[] = [],
+    chain: { chainNow?: number; tags?: string[] } = {},
+  ): typeof fetch {
     return (async (_url: Parameters<typeof fetch>[0], init?: RequestInit) => {
-      const data = (JSON.parse(String(init?.body)) as { params: [{ data: string; to: string }] })
-        .params[0].data;
+      const body = JSON.parse(String(init?.body)) as {
+        method: string;
+        params: [{ data: string }, string];
+      };
+      if (body.method === 'eth_getBlockByNumber') {
+        const seconds = Math.floor((chain.chainNow ?? NOW) / 1000);
+        return new Response(
+          JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            result: { number: '0x2a', timestamp: `0x${seconds.toString(16)}` },
+          }),
+        );
+      }
+      const data = body.params[0].data;
       calls.push(data);
+      chain.tags?.push(body.params[1]);
       const spent = used.has(`0x${data.slice(-64)}`);
       return new Response(
         JSON.stringify({
@@ -231,6 +251,30 @@ describe('resolving a settlement left unknown', () => {
       );
     }) as typeof fetch;
   }
+
+  /** THE CHAIN'S CLOCK DECIDES. This machine's clock running ahead, or a
+   *  node lagging behind, leaves a record unknown until the chain's own
+   *  latest block is past validBefore; the state is then read at that block. */
+  it("asks only once the chain's latest block is past validBefore, and reads at it", async () => {
+    await ledger([JSON.stringify(record(1))]);
+    const calls: string[] = [];
+    const lagging = await reconcilePayments(dir, {
+      rpcUrl: RPC,
+      fetchImpl: rpc(new Set(), calls, { chainNow: NOW - 120_000 }),
+      now: () => NOW,
+    });
+    expect(lagging).toMatchObject({ checked: 0, unknown: 1 });
+    expect(calls).toHaveLength(0);
+    expect((await read())[0]!.lastCheckedAt).toBeUndefined();
+    const tags: string[] = [];
+    const caughtUp = await reconcilePayments(dir, {
+      rpcUrl: RPC,
+      fetchImpl: rpc(new Set(), calls, { tags }),
+      now: () => NOW,
+    });
+    expect(caughtUp).toMatchObject({ checked: 1, notCharged: 1 });
+    expect(tags).toEqual(['0x2a']);
+  });
 
   async function read(): Promise<Record<string, unknown>[]> {
     return (await readFile(join(dir, 'paid', 'ledger.jsonl'), 'utf8'))

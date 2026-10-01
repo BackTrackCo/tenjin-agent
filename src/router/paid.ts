@@ -105,30 +105,57 @@ const RECONCILE_TIMEOUT_MS = 1_500;
 export async function authorizationUsed(
   authorization: SignedAuthorization,
   rpcUrl: string,
-  opts: { fetchImpl?: typeof fetch; timeoutMs?: number } = {},
+  opts: { fetchImpl?: typeof fetch; timeoutMs?: number; blockTag?: string } = {},
 ): Promise<boolean | null> {
+  const result = await rpcCall(
+    rpcUrl,
+    'eth_call',
+    [
+      {
+        to: USDC_ADDRESS,
+        data: `${AUTHORIZATION_STATE_SELECTOR}${authorization.from.slice(2).toLowerCase().padStart(64, '0')}${authorization.nonce.slice(2).toLowerCase()}`,
+      },
+      opts.blockTag ?? 'latest',
+    ],
+    opts,
+  );
+  if (typeof result !== 'string' || !WORD_RE.test(result)) return null;
+  return BigInt(result) !== 0n;
+}
+
+/**
+ * The chain's own clock: the latest block's number and timestamp (seconds).
+ * Expiry is decided against it, not this machine's clock, and the state is
+ * read at that same block: a node that lags, or a clock running ahead, then
+ * agrees with itself. Null when the RPC could not say.
+ */
+export async function latestBlock(
+  rpcUrl: string,
+  opts: { fetchImpl?: typeof fetch; timeoutMs?: number } = {},
+): Promise<{ tag: string; timestamp: number } | null> {
+  const result = await rpcCall(rpcUrl, 'eth_getBlockByNumber', ['latest', false], opts);
+  if (result === null || typeof result !== 'object') return null;
+  const { number, timestamp } = result as { number?: unknown; timestamp?: unknown };
+  if (typeof number !== 'string' || !/^0x[0-9a-fA-F]+$/.test(number)) return null;
+  if (typeof timestamp !== 'string' || !/^0x[0-9a-fA-F]+$/.test(timestamp)) return null;
+  return { tag: number, timestamp: Number(BigInt(timestamp)) };
+}
+
+async function rpcCall(
+  rpcUrl: string,
+  method: string,
+  params: unknown[],
+  opts: { fetchImpl?: typeof fetch; timeoutMs?: number },
+): Promise<unknown> {
   try {
     const res = await (opts.fetchImpl ?? fetch)(rpcUrl, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        jsonrpc: '2.0',
-        id: 1,
-        method: 'eth_call',
-        params: [
-          {
-            to: USDC_ADDRESS,
-            data: `${AUTHORIZATION_STATE_SELECTOR}${authorization.from.slice(2).toLowerCase().padStart(64, '0')}${authorization.nonce.slice(2).toLowerCase()}`,
-          },
-          'latest',
-        ],
-      }),
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
       signal: AbortSignal.timeout(opts.timeoutMs ?? RECONCILE_TIMEOUT_MS),
     });
     if (!res.ok) return null;
-    const result = ((await res.json()) as { result?: unknown } | null)?.result;
-    if (typeof result !== 'string' || !WORD_RE.test(result)) return null;
-    return BigInt(result) !== 0n;
+    return ((await res.json()) as { result?: unknown } | null)?.result ?? null;
   } catch {
     return null;
   }
@@ -150,10 +177,12 @@ export interface ReconcileOutcome {
 
 /**
  * RESOLVE "SETTLEMENT UNKNOWN" FROM THE CHAIN. A paid call whose seller never
- * confirmed settlement leaves a record marked `unknown`. Once its
- * authorization's `validBefore` has passed, the token's own
- * `authorizationState(from, nonce)` is final: used means charged, unused means
- * it can never be charged. At most `max` records are asked about per pass, and
+ * confirmed settlement leaves a record marked `unknown`. Once the chain's
+ * latest block is past its authorization's `validBefore`, the token's own
+ * `authorizationState(from, nonce)` read AT THAT BLOCK is final: used means
+ * charged, unused means it can never be charged, since no later block can
+ * carry it. This machine's clock only decides whether the chain is worth
+ * asking. At most `max` records are asked about per pass, and
  * a record the RPC cannot answer for stays unknown, stamped `lastCheckedAt`,
  * and is not asked about again for `recheckMs`.
  *
@@ -189,12 +218,20 @@ export async function reconcilePayments(
   const answers = new Map<string, Settlement>();
   const asked = new Set<string>();
   let checked = 0;
+  const rpc = {
+    ...(opts.fetchImpl !== undefined ? { fetchImpl: opts.fetchImpl } : {}),
+    ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
+  };
+  const block = due.length > 0 ? await latestBlock(opts.rpcUrl, rpc) : null;
   for (const { record } of due.slice(0, opts.max ?? MAX_RECONCILE_CHECKS)) {
+    // Not past validBefore on the chain yet: not asked, and not stamped.
+    if (block !== null && Number(record.authorization!.validBefore) >= block.timestamp) continue;
     checked += 1;
     asked.add(record.authorization!.nonce);
+    if (block === null) continue;
     const used = await authorizationUsed(record.authorization!, opts.rpcUrl, {
-      ...(opts.fetchImpl !== undefined ? { fetchImpl: opts.fetchImpl } : {}),
-      ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
+      ...rpc,
+      blockTag: block.tag,
     });
     if (used !== null) answers.set(record.authorization!.nonce, used ? 'settled' : 'not_charged');
   }
