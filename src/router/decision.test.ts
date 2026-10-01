@@ -130,14 +130,26 @@ describe('one free decision', () => {
       { packet: packetForText('what is the weather') },
       { ctx: ctx(), baseUrl: BASE, fetchImpl },
     );
-    // Strict on the route: the packet and what this build accepts. Which hook
-    // is asking is read from `packet.pendingCall`, not from a field beside it.
-    expect(Object.keys(calls[0]!.body as object).sort()).toEqual([
-      'accepts',
-      'packet',
-      'schemaVersion',
-    ]);
-    expect((calls[0]!.body as { accepts: unknown }).accepts).toEqual(['discovered']);
+    // Strict on the route: the packet alone, with the experiment off. Which
+    // hook is asking is read from `packet.pendingCall`, not from a field beside it.
+    expect(Object.keys(calls[0]!.body as object).sort()).toEqual(['packet', 'schemaVersion']);
+  });
+
+  it('says it accepts discovered services only with the experiment on', async () => {
+    const { fetchImpl, calls } = net(NATIVE);
+    await requestDecision(
+      'hook',
+      { packet: packetForText('what is the weather') },
+      { ctx: ctx(), baseUrl: BASE, fetchImpl, acceptsDiscovered: true },
+    );
+    await requestDecision(
+      'tool',
+      { query: 'BTC and ETH price' },
+      { ctx: ctx(), baseUrl: BASE, fetchImpl, acceptsDiscovered: true },
+    );
+    for (const call of calls) {
+      expect((call.body as { accepts: unknown }).accepts).toEqual(['discovered']);
+    }
   });
 
   it('adds the harness session id to the hook body when it has one', async () => {
@@ -147,7 +159,7 @@ describe('one free decision', () => {
       { packet: packetForText('what is the weather'), sessionId: 'sess-1' },
       { ctx: ctx(), baseUrl: BASE, fetchImpl },
     );
-    expect(calls[0]!.body).toMatchObject({ sessionId: 'sess-1', accepts: ['discovered'] });
+    expect(calls[0]!.body).toMatchObject({ sessionId: 'sess-1' });
   });
 
   it('sends the query and the turn id from the tool, with no packet of its own', async () => {
@@ -158,12 +170,7 @@ describe('one free decision', () => {
       { ctx: ctx(), baseUrl: BASE, fetchImpl },
     );
     // The packet lives on the backend against the id; the client keeps none.
-    expect(Object.keys(calls[0]!.body as object).sort()).toEqual([
-      'accepts',
-      'id',
-      'query',
-      'schemaVersion',
-    ]);
+    expect(Object.keys(calls[0]!.body as object).sort()).toEqual(['id', 'query', 'schemaVersion']);
     expect(calls[0]!.method).toBe('POST');
   });
 

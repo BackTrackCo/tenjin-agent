@@ -104,6 +104,7 @@ export async function runRouterDoctor(
     ),
   );
   checks.push(spendCheck(settings.policy.maxAutoSpendAtomic, settings.policy.sessionBudgetAtomic));
+  checks.push(experimentalCheck(settings.experimentalBazaar));
   checks.push(...(await walletCheck(ctx)));
   checks.push(await routerCheck(settings.baseUrl, ctx.flags.timeout, deps.fetchImpl));
   const agents = await subagentsCheck(deps.cwd ?? process.cwd(), deps.homeDir ?? homedir());
@@ -421,6 +422,18 @@ async function claudeHasServer(opts: { scope: 'user' | 'project'; cwd: string })
     cwd: opts.cwd,
   });
   return stdout.includes(MCP_SERVER_NAME) && !/no mcp server/i.test(stdout);
+}
+
+/** INFORMATIONAL: which experiment is on, in one line. Either state passes. */
+function experimentalCheck(bazaar: boolean): RouterCheck {
+  return {
+    name: 'experimental',
+    status: 'ok',
+    required: false,
+    detail: bazaar
+      ? 'bazaar on (experimental): the router may suggest third-party pay-per-call services when nothing curated fits'
+      : 'bazaar off (experimental): curated services only; `tenjin config set experimental.bazaar on` to try third-party ones',
+  };
 }
 
 function spendCheck(maxAutoSpendAtomic: bigint, sessionBudgetAtomic: bigint | null): RouterCheck {

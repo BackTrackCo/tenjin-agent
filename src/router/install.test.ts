@@ -594,7 +594,23 @@ describe('the doctor this release registers', () => {
         ? (result.details as { checks: { name: string; fix?: string }[] })
         : (result as { data: { checks: { name: string; fix?: string }[] } }).data;
     const names = data_.checks.map((c) => c.name);
-    expect(names).toEqual(['node', 'hooks', 'status line', 'mcp', 'spend', 'wallet', 'router']);
+    expect(names).toEqual([
+      'node',
+      'hooks',
+      'status line',
+      'mcp',
+      'spend',
+      'experimental',
+      'wallet',
+      'router',
+    ]);
+    // The experiment ships off, and doctor says so in its one line.
+    const experimental = data_.checks.find((c) => c.name === 'experimental') as unknown as {
+      status: string;
+      detail: string;
+    };
+    expect(experimental.status).toBe('ok');
+    expect(experimental.detail).toMatch(/^bazaar off \(experimental\)/);
     const fixes = data_.checks.map((c) => c.fix ?? '').join(' ');
     for (const gone of ['tenjin daemon', 'tenjin search', 'tenjin publish', 'tenjin hooks']) {
       expect(fixes).not.toContain(gone);

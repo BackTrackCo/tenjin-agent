@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { z } from 'zod';
-import { loadRawConfig, resolveSettings } from '../lib/config';
+import { loadRawConfig, resolveExperimentalBazaar, resolveSettings } from '../lib/config';
 import type { PartialConfig } from '../lib/config';
 import { walletPath } from '../lib/paths';
 import { evaluateSpendPolicy } from '../lib/policy';
@@ -1231,6 +1231,7 @@ async function decide(
     {
       ctx: hookContext(deps),
       baseUrl,
+      acceptsDiscovered: resolveExperimentalBazaar(config).value === 'on',
       timeoutMs: deps.timeoutMs ?? GATE_TIMEOUT_MS,
       ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
     },

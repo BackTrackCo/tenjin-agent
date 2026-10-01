@@ -62,6 +62,8 @@ export interface ResolvedSettings {
   evalCohort: boolean;
   /** x402 discovery registries `discover` queries and the pay lane verifies against. */
   bazaarRegistries: string[];
+  /** `experimental.bazaar`: whether the router may offer third-party services. */
+  experimentalBazaar: boolean;
   /**
    * Hard per-send cap for `tenjin wallet send`: SEND_MAX_UNSET = never configured
    * (send refuses until `config set sendMaxAmount`), null = explicit "none"
@@ -266,6 +268,7 @@ export async function resolveContextSettings(ctx: CommandContext): Promise<Resol
     rpcUrl: s.rpcUrl.value,
     evalCohort: s.evalCohort.value,
     bazaarRegistries: s.bazaarRegistries.value,
+    experimentalBazaar: s.experimentalBazaar.value === 'on',
     sendMaxAmountAtomic:
       s.sendMaxAmount.value === SEND_MAX_UNSET
         ? SEND_MAX_UNSET

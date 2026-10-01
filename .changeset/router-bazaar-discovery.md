@@ -2,9 +2,9 @@
 'tenjin-cli': patch
 ---
 
-When nothing in the curated catalog fits but a pay-per-call x402 service listed
-on Coinbase's Bazaar could do the step, the router can now name that one
-service (who sells it, its URL, its price and the input it takes), and your
+Experimental, off by default (`tenjin config set experimental.bazaar on`):
+when nothing in the curated catalog fits but a third-party pay-per-call x402
+service could do the step, the router can now name that one service (who sells it, its URL, its price and the input it takes), and your
 agent decides whether to use it. It calls `mcp__x402__request` with the id and
 an `input` object, and pays the seller through the same path and under the
 same automatic limits as a curated lookup. A paid response that is a file (an

@@ -714,6 +714,17 @@ describe('a discovered service', () => {
     JSON.parse(await readFile(join(fixtures, name), 'utf8')) as Record<string, unknown>;
   const SELLER = 'https://blockrun.ai/api/v1/audio/sound-effects';
 
+  beforeEach(async () => {
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({
+        maxAutoSpend: '250000',
+        sessionBudget: '5000000',
+        experimental: { bazaar: 'on' },
+      }),
+    );
+  });
+
   it('hands the host the server line and the listing, and pays nothing', async () => {
     const auth = authorizer();
     const answer = await wire('wire-lookup-discovered.json');

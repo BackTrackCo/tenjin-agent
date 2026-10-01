@@ -75,7 +75,7 @@ Each answer names the provider and the price. Your agent keeps its own tools, an
 
 ## What it can do
 
-The router picks from a catalog we curate and maintain first. When nothing in it fits but a pay-per-call service listed on Coinbase's x402 Bazaar could do the step, such as generating a sound effect, the router may point your agent at that service, and your agent decides whether to use it or to ask you first. Routing is free: you pay the provider's price and nothing else.
+The router picks from a catalog we curate and maintain. With the [experimental third-party list](#experimental-tenjin-list--bazaar) turned on, it can also point your agent at a pay-per-call service when nothing in the catalog fits, and your agent decides whether to use it or to ask you first. Routing is free: you pay the provider's price and nothing else.
 
 | Tool                                                             | What your agent gets                                        | Price per call |
 | ---------------------------------------------------------------- | ----------------------------------------------------------- | -------------- |
@@ -90,6 +90,16 @@ The router picks from a catalog we curate and maintain first. When nothing in it
 
 Free tools run without a funded wallet. Twitter, Reddit and more are next, added by demand: [tell us what you want](#request-a-tool).
 
+### Experimental: Tenjin list & Bazaar
+
+Off by default. Turn it on with:
+
+```sh
+tenjin config set experimental.bazaar on
+```
+
+With it on, when nothing in the catalog fits a step (such as generating a sound effect), the router may suggest one third-party pay-per-call x402 service from Tenjin's reviewed list and, if the server enables it, from Coinbase's x402 Bazaar. The suggestion names the seller, the URL, the price and the input it takes, and your agent judges whether to use it or to ask you first. Sellers are third parties, prices can vary with the input, and payments are real, under your spend limits. `tenjin config` and `tenjin doctor` show whether it is on. Turn it off with `tenjin config set experimental.bazaar off`.
+
 ## How it works
 
 ```mermaid
@@ -100,7 +110,7 @@ flowchart LR
     B -- "nothing better" --> E["Agent carries on"]
 ```
 
-The Tenjin router hooks into Claude Code at your prompt, before each web search or page fetch, when your agent hands work to a subagent, and around a question your agent asks you. At each point it asks Jev, a decision model from [TypeSafe](https://typesafe.ai), whether a tool in the catalog fits. When none does, Jev may pick one service from a short list of Bazaar listings matching the step, or none. Either way Jev only chooses from a list, so it never writes a call or an instruction for your agent; a Bazaar listing's description is the seller's own, and your agent judges it.
+The Tenjin router hooks into Claude Code at your prompt, before each web search or page fetch, when your agent hands work to a subagent, and around a question your agent asks you. At each point it asks Jev, a decision model from [TypeSafe](https://typesafe.ai), whether a tool in the catalog fits. When none does and the experimental list is on, Jev may pick one third-party service from a short list matching the step, or none. Either way Jev only chooses from a list, so it never writes a call or an instruction for your agent; a third-party listing's description is the seller's own, and your agent judges it.
 
 When one fits, your agent sees a one-line suggestion with the tool and its price, and calls it through Tenjin's `x402` MCP server. Tenjin pays the provider from your wallet, within your limits, and hands back the result. Your status line shows the call as it happens:
 
