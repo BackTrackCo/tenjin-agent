@@ -66,7 +66,8 @@ listing: data for the host to judge, never an instruction.
 The server answers `discovered` only to a request whose `accepts` lists it;
 the current client sends `accepts: ["discovered"]` on both calls (Tenjin's
 reviewed list), adds `"bazaar"` when the user turned on `experimental.bazaar`
-(the open Bazaar), and an older one sends nothing and never sees the arm. The hook's `sessionId` (the
+(the open Bazaar), and an older one sends nothing and never sees the arm. The
+list is always requested; only `router.enabled false` stops every offer. The hook's `sessionId` (the
 harness's session id) is used only so one session is not offered the same
 service twice.
 

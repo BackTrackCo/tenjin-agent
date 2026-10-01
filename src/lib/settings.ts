@@ -62,7 +62,9 @@ export interface ResolvedSettings {
   evalCohort: boolean;
   /** x402 discovery registries `discover` queries and the pay lane verifies against. */
   bazaarRegistries: string[];
-  /** `experimental.bazaar`: whether the router may offer third-party services. */
+  /** `experimental.bazaar`: whether the router may also offer the open Bazaar's
+   *  unreviewed sellers. Tenjin's reviewed list is always requested; only
+   *  `router.enabled false` stops every offer. */
   experimentalBazaar: boolean;
   /**
    * Hard per-send cap for `tenjin wallet send`: SEND_MAX_UNSET = never configured

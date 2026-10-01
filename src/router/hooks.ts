@@ -691,15 +691,18 @@ export interface PromptHookOutcome {
 
 /**
  * `tenjin hook prompt` (UserPromptSubmit). One free decision from the user's
- * own words. Only an `execute` gets a line: the server's hint, attributed.
- * `native`, `needs_input` and a decision that failed or timed out are silence:
+ * own words. Only an offer (`execute`, or a `discovered` service) gets a line:
+ * the server's hint, attributed. `native`, `needs_input` and a decision that
+ * failed or timed out are silence:
  * a turn with no lookup carries nothing extra, and `decide` has already written
  * any failure cause to stderr.
  *
  * THE HINT ASKS FOR A CALL THAT HAS TO RUN. Over the cap or past the budget,
  * `request` answers `needs_approval`, and a model sent there stops to ask the
- * user where its free tools would have done: so the line is shown only when
- * the paid call would auto-execute, the same rule the pre-call deny follows.
+ * user where its free tools would have done: so a curated line is shown only
+ * when the paid call would auto-execute, the same rule the pre-call deny
+ * follows. A discovered line is shown anyway, with a sentence saying it needs
+ * approval or funds ({@link vetOffer}): it may be the only service for the step.
  */
 export async function runPromptHook(raw: unknown, deps: HookDeps): Promise<PromptHookOutcome> {
   const event = decodeEvent(raw);
@@ -942,7 +945,7 @@ async function routeNativeCall(
 
 /**
  * `tenjin hook native` (PreToolUse on `WebSearch|WebFetch`). PER-LOOKUP
- * ROUTING BEFORE THE CALL, exactly as main: a clear `execute` denies the native
+ * ROUTING BEFORE THE CALL, exactly as main: a clear offer denies the native
  * call with the server's hint as the reason, carrying the id so the redirected
  * call runs the decision just made. Anything else, including silence, a slow
  * backend and a `needs_input`, lets the call run with no output at all.
@@ -1069,8 +1072,8 @@ export async function runAskHook(raw: unknown, deps: HookDeps): Promise<NativeHo
  * `WebSearch|WebFetch`). THE FREE TOOL HAS ALREADY RUN, and a result that is
  * fine ends here: no router call, no footer, no added latency. Only a clear
  * shortfall ({@link shortfallOf}) asks for one free decision, with what the
- * harness reported riding in the packet as `nativeOutcome`, and only an
- * `execute` says anything. A call the pre-call arm already redirected is not
+ * harness reported riding in the packet as `nativeOutcome`, and only an offer
+ * (`execute` or `discovered`) says anything. A call the pre-call arm already redirected is not
  * offered on again.
  *
  * A SEARCH THE PRE-CALL ARM IS FETCHING FREE DOCS FOR waits for them first,
@@ -1164,7 +1167,7 @@ export interface DelegationHookOutcome {
  * `tenjin hook agent` (PreToolUse on `Agent|Task`). The one moment a subagent's
  * whole assignment is visible: its task prompt IS the current message, and the
  * parent's own turn is the history, so the router decides on exactly what the
- * subagent will do. On a clear `execute` the offer is appended to that task as
+ * subagent will do. On a clear offer, it is appended to that task as
  * one optional line, which reaches the subagent as part of its instructions
  * from its parent, before it starts. Anything else is no output at all.
  *

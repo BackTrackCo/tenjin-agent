@@ -2675,8 +2675,6 @@ describe('a discovered service', () => {
     expect(prompt).toContain(SEEN_LINE.slice(HINT_SOURCE.length + 2));
   });
 
-  /** The seller's price and host meet the spend policy exactly as a curated
-   *  provider's do: over the cap, nothing is shown. */
   /**
    * NEVER WITHHELD WHERE THE USER CAN BE ASKED. Over the automatic cap, the
    * line still names the service, with one sentence saying the call needs

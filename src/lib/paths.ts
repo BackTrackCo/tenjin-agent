@@ -182,8 +182,9 @@ export function downloadsDir(dir: string = dataDir()): string {
 
 /**
  * One JSON line per paid router call: what was bought, from whom, for how much,
- * the settlement it carried and the files it saved. The user's own record;
- * nothing reads it back but `tenjin payments reconcile`.
+ * the settlement it carried and the files it saved. The user's own record; only
+ * reconcile reads it back (`tenjin payments reconcile`, and the `request` tool's
+ * pass beside each lookup), to settle what was left unknown.
  */
 export function paidLedgerPath(dir: string = dataDir()): string {
   return join(dir, 'paid', 'ledger.jsonl');
