@@ -286,10 +286,14 @@ export async function runRequestTool(
             ...(deps.now !== undefined ? { now: deps.now } : {}),
           })
         : null;
-    // AND A PAID RESULT THAT LINKS TO MEDIA brings it home: the links can
-    // expire, and the user paid for what is behind them. Best effort only.
+    // AND A PAID MEDIA RESULT THAT LINKS TO ITS FILES brings them home: the
+    // links can expire, and the user paid for what is behind them. Only a
+    // discovered service (where generated images, audio and video come from)
+    // does this: a curated page read or search links whatever the page links,
+    // on hosts the page picked. The answer carries no finer media kind, so the
+    // category is the line. Best effort only.
     const linked =
-      providerAtomic > 0n && binary === null
+      providerAtomic > 0n && binary === null && decision.category === 'discovered'
         ? await saveMedia(
             deps.ctx.dataDir,
             decision.capabilityId,

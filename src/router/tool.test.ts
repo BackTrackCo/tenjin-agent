@@ -1070,6 +1070,28 @@ describe('a discovered service', () => {
     expect(calls.some((c) => c.url.includes('10.0.0.5'))).toBe(false);
   });
 
+  /** A CURATED PAGE READ OR SEARCH NEVER DOWNLOADS what its page links to. */
+  it('downloads nothing a curated result links to', async () => {
+    const connected: string[] = [];
+    const { fetchImpl } = net([
+      { url: ROUTER, status: 200, body: decision() },
+      ...providerLegs({ image: 'https://cdn.example.test/chart.png' }),
+    ]);
+    const result = await runRequestTool(
+      { query: 'BTC and ETH price' },
+      {
+        ...deps(fetchImpl),
+        mediaTransport: async (target) => {
+          connected.push(target.url.toString());
+          throw new Error('should not be called');
+        },
+      },
+    );
+    expect(result.envelope).toMatchObject({ status: 'fulfilled' });
+    expect(result.envelope.savedFiles).toBeUndefined();
+    expect(connected).toEqual([]);
+  });
+
   it('keeps a JSON body inline, and a media link that cannot be fetched fails nothing', async () => {
     const { fetchImpl } = net([
       { url: ROUTER, status: 200, body: await wire('wire-lookup-execute-discovered.json') },
