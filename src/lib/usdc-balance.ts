@@ -57,13 +57,16 @@ export async function readUsdcBalance(
   }
 }
 
+/** Base's public RPC: the shipped `rpcUrl` default (`CONFIG_DEFAULTS`). */
+export const DEFAULT_RPC_URL = 'https://mainnet.base.org';
+
 /**
- * Public Base RPCs a balance read falls back to, in order, only after the
- * configured `rpcUrl` fails. The default, mainnet.base.org, rate-limits a busy
- * IP (`-32016 over rate limit`): four paid lookups across two research runs
- * were refused with `balance_unavailable` before signing, while these two
- * answered every read. They see the wallet's address only when the configured
- * RPC did not answer, as that RPC sees it on every read.
+ * Public Base RPCs a balance read on the DEFAULT `rpcUrl` falls back to, in
+ * order, only after it fails. mainnet.base.org rate-limits a busy IP
+ * (`-32016 over rate limit`): four paid lookups across two research runs were
+ * refused with `balance_unavailable` before signing, while these two answered
+ * every read. They see the wallet's address only when the default did not
+ * answer, as the default sees it on every read.
  */
 export const FALLBACK_RPC_URLS: readonly string[] = [
   'https://base-rpc.publicnode.com',
@@ -71,17 +74,21 @@ export const FALLBACK_RPC_URLS: readonly string[] = [
 ];
 
 /**
- * {@link readUsdcBalance} from the configured `rpcUrl` first, then from each of
- * {@link FALLBACK_RPC_URLS} it is not, until one answers, all inside the one
- * `timeoutMs`. Every RPC but the last gets half of what is left, so a
- * configured one that hangs still leaves the others time to answer.
+ * {@link readUsdcBalance} from `rpcUrl` first and, when that is the default,
+ * then from each of {@link FALLBACK_RPC_URLS} until one answers, all inside the
+ * one `timeoutMs`. Every RPC but the last gets half of what is left, so one
+ * that hangs still leaves the others time to answer.
+ *
+ * AN RPC THE USER CONFIGURED IS THE ONLY ONE ASKED. Choosing one can be about
+ * privacy, and the public RPCs would see the wallet's address; a read that
+ * fails there fails, as it did before the fallbacks.
  */
 export async function readUsdcBalanceWithFallback(
   address: string,
   rpcUrl: string,
   opts: { timeoutMs: number; fetchImpl?: typeof fetch },
 ): Promise<bigint | null> {
-  const urls = [rpcUrl, ...FALLBACK_RPC_URLS.filter((url) => !sameUrl(url, rpcUrl))];
+  const urls = sameUrl(rpcUrl, DEFAULT_RPC_URL) ? [rpcUrl, ...FALLBACK_RPC_URLS] : [rpcUrl];
   const deadline = Date.now() + opts.timeoutMs;
   for (const [index, url] of urls.entries()) {
     const left = deadline - Date.now();

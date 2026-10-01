@@ -6,6 +6,7 @@ import { configPath } from './paths';
 import { HARNESSES } from '../adapters/types';
 import type { Harness } from '../adapters/types';
 import { writeFileAtomic } from './atomic-json';
+import { DEFAULT_RPC_URL } from './usdc-balance';
 
 /** A non-negative integer string in USDC atomic units (6-decimal base). */
 const atomicString = z.string().regex(/^\d+$/, 'expected an atomic USDC integer string');
@@ -454,7 +455,7 @@ export const CONFIG_DEFAULTS: Config = {
   publicShelfUrl: PRODUCTION_ORIGIN,
   // Empty = public mode. Setting it is the whole of "turn on team mode".
   shelfBypassSecret: '',
-  rpcUrl: 'https://mainnet.base.org',
+  rpcUrl: DEFAULT_RPC_URL,
   evalCohort: false,
   bazaarRegistries: DEFAULT_BAZAAR_REGISTRIES,
   publish: { mode: 'review', defaultPrice: '100000', ackServerWarnings: 'mode' },

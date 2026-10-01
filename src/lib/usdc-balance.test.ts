@@ -2,7 +2,9 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { CONFIG_DEFAULTS } from './config';
 import {
+  DEFAULT_RPC_URL,
   FALLBACK_RPC_URLS,
   LAST_KNOWN_BALANCE_MS,
   readUsdcBalanceWithFallback,
@@ -115,25 +117,37 @@ describe('the fallback RPCs', () => {
     },
   );
 
-  it('come after an RPC the user configured, and are never asked twice', async () => {
-    const mine = 'https://base.example-rpc.test/v1/key';
-    const custom = rpcs({ [mine]: 'rate-limit', [PUBLICNODE]: 5n });
+  /**
+   * A USER'S OWN RPC IS THE ONLY ONE ASKED. Choosing one can be about privacy,
+   * and the public RPCs would see the wallet's address, so a read that fails
+   * there fails, even when a fallback would have answered it.
+   */
+  it('are never asked when the user configured an RPC of their own', async () => {
+    for (const failure of ['rate-limit', 'error', 'down'] as const) {
+      const mine = 'https://base.example-rpc.test/v1/key';
+      const { fetchImpl, asked } = rpcs({ [mine]: failure, [PUBLICNODE]: 5n, [DRPC]: 6n });
+      expect(
+        await readUsdcBalanceWithFallback(WALLET, mine, { timeoutMs: 1_000, fetchImpl }),
+      ).toBeNull();
+      expect(asked).toEqual([mine]);
+    }
+    // Not even a public one: a user who picked publicnode picked publicnode.
+    const { fetchImpl, asked } = rpcs({ [PUBLICNODE]: 'down', [DRPC]: 6n });
     expect(
-      await readUsdcBalanceWithFallback(WALLET, mine, {
-        timeoutMs: 1_000,
-        fetchImpl: custom.fetchImpl,
-      }),
+      await readUsdcBalanceWithFallback(WALLET, PUBLICNODE, { timeoutMs: 1_000, fetchImpl }),
+    ).toBeNull();
+    expect(asked).toEqual([PUBLICNODE]);
+  });
+
+  it('back the default however it is spelled', async () => {
+    expect(DEFAULT_RPC_URL).toBe(RPC);
+    expect(CONFIG_DEFAULTS.rpcUrl).toBe(DEFAULT_RPC_URL);
+    const spelled = `${RPC}/`;
+    const { fetchImpl, asked } = rpcs({ [spelled]: 'rate-limit', [PUBLICNODE]: 5n });
+    expect(
+      await readUsdcBalanceWithFallback(WALLET, spelled, { timeoutMs: 1_000, fetchImpl }),
     ).toBe(5n);
-    expect(custom.asked).toEqual([mine, PUBLICNODE]);
-    const configured = `${PUBLICNODE}/`;
-    const same = rpcs({ [configured]: 'down', [DRPC]: 6n });
-    expect(
-      await readUsdcBalanceWithFallback(WALLET, configured, {
-        timeoutMs: 1_000,
-        fetchImpl: same.fetchImpl,
-      }),
-    ).toBe(6n);
-    expect(same.asked).toEqual([configured, DRPC]);
+    expect(asked).toEqual([spelled, PUBLICNODE]);
   });
 
   it('leave a hung RPC half the time, and stay inside the one timeout', async () => {
