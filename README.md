@@ -153,6 +153,7 @@ $1–2 goes a long way. $2 covers about 280 web searches, 200 page reads or 100 
 tenjin status                  # what you've spent today
 tenjin wallet balance          # what's left
 tenjin wallet fund 5           # top up
+tenjin payments reconcile      # settle paid lookups whose settlement was unknown
 tenjin update                  # newest version; wallet and settings stay
 tenjin config set router.enabled false             # pause the router on this machine
 tenjin config set --project router.enabled false   # ...or just in this repo
@@ -160,6 +161,8 @@ tenjin uninstall               # remove the Claude Code setup; your wallet stays
 ```
 
 Use `tenjin install --project` to set it up for a single project. Add `--json` to any command for machine-readable output.
+
+Every paid lookup is recorded on your machine in `~/.tenjin/paid/ledger.jsonl`: what was sent (masked), who was paid, how much, the settlement transaction, and any files saved. Files a paid lookup returns, or links to, are saved under `~/.tenjin/downloads/`. When a seller never confirmed settlement, `tenjin payments reconcile` asks USDC on Base whether the payment was used once it has expired; the `request` tool does the same for up to three before each lookup.
 
 <details>
 <summary>Status line: keeping your own</summary>

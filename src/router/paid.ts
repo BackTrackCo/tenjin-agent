@@ -1,9 +1,12 @@
 import { createWriteStream } from 'node:fs';
-import { appendFile, mkdir, rm } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import { writeFileAtomic } from '../lib/atomic-json';
 import { assertPublicDestination, type DestinationOptions } from '../lib/destination';
+import { withFileLock } from '../lib/lock';
 import { downloadsDir, paidLedgerPath } from '../lib/paths';
 import { mask } from '../lib/redact';
+import { USDC_ADDRESS } from '../lib/usdc-balance';
 
 /**
  * WHAT A PAID ROUTER CALL BOUGHT, KEPT ON THIS MACHINE. One JSON line per paid
@@ -50,10 +53,153 @@ export async function appendPaidRecord(dataDir: string, record: PaidRecord): Pro
   try {
     const path = paidLedgerPath(dataDir);
     await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-    await appendFile(path, `${JSON.stringify(record)}\n`, { mode: 0o600 });
+    // Under the lock reconcile rewrites with, so an append is never lost to it.
+    await withFileLock(`${path}.lock`, () =>
+      appendFile(path, `${JSON.stringify(record)}\n`, { mode: 0o600 }),
+    );
   } catch {
     // The record is the user's convenience; the lookup already happened.
   }
+}
+
+/** `authorizationState(address,bytes32)`: the first four bytes of its keccak-256. */
+const AUTHORIZATION_STATE_SELECTOR = '0xe94a0102';
+const WORD_RE = /^0x[0-9a-fA-F]{64}$/;
+/** How many unknown settlements one pass asks the chain about. */
+export const MAX_RECONCILE_CHECKS = 3;
+const RECONCILE_TIMEOUT_MS = 1_500;
+
+/**
+ * Whether USDC on Base has used this authorization: true once a facilitator
+ * settled it, false while it has not. Null when the RPC could not say.
+ */
+export async function authorizationUsed(
+  authorization: SignedAuthorization,
+  rpcUrl: string,
+  opts: { fetchImpl?: typeof fetch; timeoutMs?: number } = {},
+): Promise<boolean | null> {
+  try {
+    const res = await (opts.fetchImpl ?? fetch)(rpcUrl, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'eth_call',
+        params: [
+          {
+            to: USDC_ADDRESS,
+            data: `${AUTHORIZATION_STATE_SELECTOR}${authorization.from.slice(2).toLowerCase().padStart(64, '0')}${authorization.nonce.slice(2).toLowerCase()}`,
+          },
+          'latest',
+        ],
+      }),
+      signal: AbortSignal.timeout(opts.timeoutMs ?? RECONCILE_TIMEOUT_MS),
+    });
+    if (!res.ok) return null;
+    const result = ((await res.json()) as { result?: unknown } | null)?.result;
+    if (typeof result !== 'string' || !WORD_RE.test(result)) return null;
+    return BigInt(result) !== 0n;
+  } catch {
+    return null;
+  }
+}
+
+export interface ReconcileOutcome {
+  /** Records asked about in this pass. */
+  checked: number;
+  /** The authorization was used: the amount was charged. */
+  settled: number;
+  /** It expired unused: nothing was charged. */
+  notCharged: number;
+  /** Still unknown: not yet expired, no authorization on record, or the RPC
+   *  could not answer. */
+  unknown: number;
+}
+
+/**
+ * RESOLVE "SETTLEMENT UNKNOWN" FROM THE CHAIN. A paid call whose seller never
+ * confirmed settlement leaves a record marked `unknown`. Once its
+ * authorization's `validBefore` has passed, the token's own
+ * `authorizationState(from, nonce)` is final: used means charged, unused means
+ * it can never be charged. At most `max` records are asked about per pass, and
+ * a record the RPC cannot answer for stays unknown for the next one.
+ *
+ * The chain is asked outside the lock; the file is re-read and rewritten under
+ * it, so an append made meanwhile is kept.
+ */
+export async function reconcilePayments(
+  dataDir: string,
+  opts: {
+    rpcUrl: string;
+    fetchImpl?: typeof fetch;
+    now?: () => number;
+    max?: number;
+    timeoutMs?: number;
+  },
+): Promise<ReconcileOutcome> {
+  const path = paidLedgerPath(dataDir);
+  const now = (opts.now ?? Date.now)();
+  const records = parseLedger(await readFile(path, 'utf8').catch(() => ''));
+  const open = records.filter(
+    (entry): entry is { line: string; record: PaidRecord } =>
+      entry.record !== null && entry.record.settlement === 'unknown',
+  );
+  const due = open.filter(
+    ({ record }) =>
+      record.authorization !== undefined && Number(record.authorization.validBefore) * 1_000 < now,
+  );
+  const answers = new Map<string, Settlement>();
+  let checked = 0;
+  for (const { record } of due.slice(0, opts.max ?? MAX_RECONCILE_CHECKS)) {
+    checked += 1;
+    const used = await authorizationUsed(record.authorization!, opts.rpcUrl, {
+      ...(opts.fetchImpl !== undefined ? { fetchImpl: opts.fetchImpl } : {}),
+      ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
+    });
+    if (used !== null) answers.set(record.authorization!.nonce, used ? 'settled' : 'not_charged');
+  }
+  if (answers.size > 0) {
+    await withFileLock(`${path}.lock`, async () => {
+      const current = parseLedger(await readFile(path, 'utf8').catch(() => ''));
+      const lines = current.map(({ line, record }) => {
+        const answer =
+          record?.settlement === 'unknown' && record.authorization !== undefined
+            ? answers.get(record.authorization.nonce)
+            : undefined;
+        return answer === undefined
+          ? line
+          : JSON.stringify({
+              ...record,
+              settlement: answer,
+              reconciledAt: new Date(now).toISOString(),
+            });
+      });
+      await writeFileAtomic(path, lines.map((line) => `${line}\n`).join(''), { mode: 0o600 });
+    });
+  }
+  const settled = [...answers.values()].filter((value) => value === 'settled').length;
+  return {
+    checked,
+    settled,
+    notCharged: answers.size - settled,
+    unknown: open.length - answers.size,
+  };
+}
+
+/** Every line, and the record it holds when it is one; other lines ride along. */
+function parseLedger(raw: string): { line: string; record: PaidRecord | null }[] {
+  return raw
+    .split('\n')
+    .filter((line) => line.trim().length > 0)
+    .map((line) => {
+      try {
+        const value = JSON.parse(line) as PaidRecord;
+        return { line, record: value !== null && value.version === 1 ? value : null };
+      } catch {
+        return { line, record: null };
+      }
+    });
 }
 
 /** The media a paid result links to, by the extension its path ends in. */

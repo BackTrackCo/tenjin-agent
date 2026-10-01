@@ -952,6 +952,52 @@ describe('a discovered service', () => {
       savedFiles: [saved],
     });
     expect(String(record.sent)).toHaveLength(4_096);
+    // The signed authorization's identity, for reconcile to ask the token about.
+    expect(record.authorization).toMatchObject({
+      from: expect.stringMatching(/^0x[0-9a-fA-F]{40}$/) as string,
+      nonce: expect.stringMatching(/^0x[0-9a-f]{64}$/) as string,
+      validBefore: expect.stringMatching(/^\d+$/) as string,
+    });
+  });
+
+  /** A SETTLEMENT LEFT UNKNOWN is resolved at the start of the next lookup,
+   *  from the chain, before anything else is sent. */
+  it('resolves an expired unknown settlement before the next lookup', async () => {
+    const { mkdir } = await import('node:fs/promises');
+    await mkdir(join(dir, 'paid'), { recursive: true });
+    const nonce = `0x${'5'.repeat(64)}`;
+    await writeFile(
+      join(dir, 'paid', 'ledger.jsonl'),
+      `${JSON.stringify({
+        version: 1,
+        ts: '2026-01-01T00:00:00.000Z',
+        capabilityId: 'cap',
+        provider: 'Seller',
+        url: SELLER,
+        sent: 'q',
+        amountAtomic: '10000',
+        settlement: 'unknown',
+        savedFiles: [],
+        authorization: { from: `0x${'1'.repeat(40)}`, nonce, validBefore: '1700000000' },
+      })}\n`,
+    );
+    const rpcCalls: string[] = [];
+    const { fetchImpl: scripted } = net([{ url: ROUTER, status: 200, body: NATIVE }]);
+    const fetchImpl = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      if (String(input) === 'https://mainnet.base.org') {
+        rpcCalls.push(String(init?.body));
+        return new Response(
+          JSON.stringify({ jsonrpc: '2.0', id: 1, result: `0x${'0'.repeat(63)}1` }),
+        );
+      }
+      return scripted(input, init);
+    }) as typeof fetch;
+    await runRequestTool({ query: 'weather' }, deps(fetchImpl));
+    expect(rpcCalls).toHaveLength(1);
+    const record = JSON.parse(
+      (await readFile(join(dir, 'paid', 'ledger.jsonl'), 'utf8')).trim(),
+    ) as Record<string, unknown>;
+    expect(record.settlement).toBe('settled');
   });
 
   it('records a paid call with no payment-response header as settlement unknown', async () => {

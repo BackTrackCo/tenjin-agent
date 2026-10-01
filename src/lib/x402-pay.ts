@@ -24,6 +24,22 @@ export interface BuiltPayment {
   headers: Record<string, string>;
   /** The exact amount authorized, atomic USDC (from accepts[0]). */
   amountAtomic: bigint;
+  /** The signed EIP-3009 authorization's identity, when the scheme used one:
+   *  enough to ask the token later whether it was spent. */
+  authorization?: { from: string; nonce: string; validBefore: string };
+}
+
+/** `payload.authorization`'s `from`, `nonce` and `validBefore`, or nothing. */
+function authorizationOf(payload: unknown): BuiltPayment['authorization'] {
+  const inner = (payload as { payload?: { authorization?: unknown } } | null)?.payload;
+  const auth = inner?.authorization;
+  if (auth === null || typeof auth !== 'object') return undefined;
+  const { from, nonce, validBefore } = auth as Record<string, unknown>;
+  if (typeof from !== 'string' || !/^0x[0-9a-fA-F]{40}$/.test(from)) return undefined;
+  if (typeof nonce !== 'string' || !/^0x[0-9a-fA-F]{64}$/.test(nonce)) return undefined;
+  const before = typeof validBefore === 'number' ? String(validBefore) : validBefore;
+  if (typeof before !== 'string' || !/^\d+$/.test(before)) return undefined;
+  return { from, nonce, validBefore: before };
 }
 
 /**
@@ -262,9 +278,11 @@ export async function buildExactPayment(
   };
 
   let headers: Record<string, string>;
+  let authorization: BuiltPayment['authorization'];
   try {
     const payload = await http.createPaymentPayload(bound);
     headers = http.encodePaymentSignatureHeader(payload);
+    authorization = authorizationOf(payload);
   } catch (err) {
     throw new CliError('PAYMENT_FAILED', 'Could not build the x402 payment authorization.', {
       fix: 'Confirm the wallet is a supported EVM account on the advertised network.',
@@ -272,5 +290,9 @@ export async function buildExactPayment(
     });
   }
 
-  return { headers, amountAtomic: BigInt(requirement.amount) };
+  return {
+    headers,
+    amountAtomic: BigInt(requirement.amount),
+    ...(authorization !== undefined ? { authorization } : {}),
+  };
 }

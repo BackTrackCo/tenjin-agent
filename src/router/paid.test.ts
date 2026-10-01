@@ -2,7 +2,8 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { MAX_SENT_CHARS, mediaUrlsIn, recordedSent, saveMedia } from './paid';
+import { MAX_SENT_CHARS, mediaUrlsIn, reconcilePayments, recordedSent, saveMedia } from './paid';
+import { runPaymentsReconcile } from './payments';
 
 let dir: string;
 beforeEach(async () => {
@@ -86,5 +87,147 @@ describe('the media a paid result links to', () => {
       destination: PUBLIC,
     });
     expect(saved).toEqual([]);
+  });
+});
+
+describe('resolving a settlement left unknown', () => {
+  const RPC = 'https://rpc.example.test';
+  const FROM = `0x${'1'.repeat(40)}`;
+  const nonce = (n: number) => `0x${n.toString(16).padStart(64, '0')}`;
+  const NOW = 1_800_000_000_000;
+  const past = String(NOW / 1000 - 60);
+  const future = String(NOW / 1000 + 60);
+
+  function record(n: number, over: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      version: 1,
+      ts: '2027-01-15T00:00:00.000Z',
+      capabilityId: `cap-${n}`,
+      provider: 'Seller',
+      url: 'https://seller.test/x',
+      sent: 'q',
+      amountAtomic: '10000',
+      settlement: 'unknown',
+      savedFiles: [],
+      authorization: { from: FROM, nonce: nonce(n), validBefore: past },
+      ...over,
+    };
+  }
+
+  async function ledger(lines: string[]): Promise<void> {
+    const { mkdir, writeFile } = await import('node:fs/promises');
+    await mkdir(join(dir, 'paid'), { recursive: true });
+    await writeFile(join(dir, 'paid', 'ledger.jsonl'), lines.map((l) => `${l}\n`).join(''));
+  }
+
+  /** An RPC that says nonces in `used` were spent; records every call. */
+  function rpc(used: Set<string>, calls: string[] = []): typeof fetch {
+    return (async (_url: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      const data = (JSON.parse(String(init?.body)) as { params: [{ data: string; to: string }] })
+        .params[0].data;
+      calls.push(data);
+      const spent = used.has(`0x${data.slice(-64)}`);
+      return new Response(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          result: `0x${(spent ? 1 : 0).toString(16).padStart(64, '0')}`,
+        }),
+      );
+    }) as typeof fetch;
+  }
+
+  async function read(): Promise<Record<string, unknown>[]> {
+    return (await readFile(join(dir, 'paid', 'ledger.jsonl'), 'utf8'))
+      .trim()
+      .split('\n')
+      .map((line) => {
+        try {
+          return JSON.parse(line) as Record<string, unknown>;
+        } catch {
+          return { raw: line };
+        }
+      });
+  }
+
+  it('marks a used authorization charged and an unused one not, and leaves the rest', async () => {
+    await ledger([
+      JSON.stringify(record(1)),
+      JSON.stringify(record(2)),
+      JSON.stringify(
+        record(3, { authorization: { from: FROM, nonce: nonce(3), validBefore: future } }),
+      ),
+      JSON.stringify(record(4, { settlement: 'settled', txHash: `0x${'a'.repeat(64)}` })),
+      JSON.stringify(record(5, { authorization: undefined })),
+      'not json',
+    ]);
+    const calls: string[] = [];
+    const outcome = await reconcilePayments(dir, {
+      rpcUrl: RPC,
+      fetchImpl: rpc(new Set([nonce(1)]), calls),
+      now: () => NOW,
+    });
+    expect(outcome).toEqual({ checked: 2, settled: 1, notCharged: 1, unknown: 2 });
+    // authorizationState(from, nonce): the selector, the padded address, the nonce.
+    expect(calls[0]).toBe(`0xe94a0102${'1'.repeat(40).padStart(64, '0')}${nonce(1).slice(2)}`);
+    const after = await read();
+    expect(after.map((r) => r.settlement ?? r.raw)).toEqual([
+      'settled',
+      'not_charged',
+      'unknown',
+      'settled',
+      'unknown',
+      'not json',
+    ]);
+    expect(after[0]!.reconciledAt).toBe(new Date(NOW).toISOString());
+  });
+
+  it('asks about at most three per pass, and keeps an unanswered one unknown', async () => {
+    await ledger([1, 2, 3, 4, 5].map((n) => JSON.stringify(record(n))));
+    const calls: string[] = [];
+    const outcome = await reconcilePayments(dir, {
+      rpcUrl: RPC,
+      fetchImpl: rpc(new Set(), calls),
+      now: () => NOW,
+    });
+    expect(calls).toHaveLength(3);
+    expect(outcome).toMatchObject({ checked: 3, notCharged: 3, unknown: 2 });
+
+    const failing = (async () => new Response('nope', { status: 503 })) as typeof fetch;
+    const second = await reconcilePayments(dir, {
+      rpcUrl: RPC,
+      fetchImpl: failing,
+      now: () => NOW,
+    });
+    expect(second).toEqual({ checked: 2, settled: 0, notCharged: 0, unknown: 2 });
+    expect((await read()).map((r) => r.settlement)).toEqual([
+      'not_charged',
+      'not_charged',
+      'not_charged',
+      'unknown',
+      'unknown',
+    ]);
+  });
+
+  it('reads nothing from the chain with no ledger at all', async () => {
+    const calls: string[] = [];
+    const outcome = await reconcilePayments(dir, { rpcUrl: RPC, fetchImpl: rpc(new Set(), calls) });
+    expect(outcome).toEqual({ checked: 0, settled: 0, notCharged: 0, unknown: 0 });
+    expect(calls).toHaveLength(0);
+  });
+
+  it('is what `tenjin payments reconcile` runs, past the per-lookup three', async () => {
+    await ledger([1, 2, 3, 4].map((n) => JSON.stringify(record(n))));
+    const sink = { write: () => true } as unknown as NodeJS.WritableStream;
+    const result = await runPaymentsReconcile(
+      {
+        flags: { json: true, timeout: 5000 },
+        dataDir: dir,
+        io: { stdout: sink, stderr: sink, isTTY: false },
+      },
+      { fetchImpl: rpc(new Set([nonce(4)])), now: () => NOW },
+    );
+    expect(result.data).toMatchObject({ checked: 4, settled: 1, notCharged: 3, unknown: 0 });
+    expect(result.humanLines?.[0]).toBe('Checked 4: 1 charged, 3 not charged.');
   });
 });

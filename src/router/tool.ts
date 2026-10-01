@@ -16,9 +16,11 @@ import {
   appendPaidRecord,
   MAX_MEDIA_FILES,
   mediaUrlsIn,
+  reconcilePayments,
   recordedSent,
   saveMedia,
   type PaidRecord,
+  type SignedAuthorization,
 } from './paid';
 import { routerSettings } from './settings';
 
@@ -132,6 +134,13 @@ export async function runRequestTool(
   });
   await footer.routing();
   const settings = await resolveContextSettings(deps.ctx);
+  // SETTLEMENTS EARLIER CALLS LEFT UNKNOWN, resolved a few at a time from the
+  // chain. It reads a local file and, only when one is due, the RPC.
+  await reconcilePayments(deps.ctx.dataDir, {
+    rpcUrl: settings.rpcUrl,
+    ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+    ...(deps.now !== undefined ? { now: deps.now } : {}),
+  }).catch(() => undefined);
   const decisionDeps = {
     ctx: deps.ctx,
     baseUrl: settings.baseUrl,
@@ -254,6 +263,7 @@ export async function runRequestTool(
       contentType?: string;
       /** From the payment-response header, when the seller sent one. */
       settlementTxHash?: string;
+      authorization?: SignedAuthorization;
       amountPaid?: { atomic: string };
       /** Set when the body missed its success rule, or the rule never ran. */
       resultUnverified?: boolean;
@@ -292,6 +302,7 @@ export async function runRequestTool(
         deps.ctx.dataDir,
         paidRecord(decision, built.url, sent, providerAtomic, {
           ...(data.settlementTxHash !== undefined ? { txHash: data.settlementTxHash } : {}),
+          ...(data.authorization !== undefined ? { authorization: data.authorization } : {}),
           savedFiles,
           ...(deps.now !== undefined ? { now: deps.now } : {}),
         }),
@@ -351,6 +362,7 @@ export async function runRequestTool(
       diagnosis?: Record<string, unknown>;
       status?: number;
       providerError?: string;
+      authorization?: SignedAuthorization;
     };
     await footer.done(status, {
       provider: contract.request.url,
@@ -363,6 +375,7 @@ export async function runRequestTool(
       await appendPaidRecord(
         deps.ctx.dataDir,
         paidRecord(decision, contract.request.url, sent, BigInt(detail.amountAtomic ?? '0'), {
+          ...(detail.authorization !== undefined ? { authorization: detail.authorization } : {}),
           savedFiles: [],
           ...(deps.now !== undefined ? { now: deps.now } : {}),
         }),
@@ -387,7 +400,12 @@ function paidRecord(
   url: string,
   sent: string,
   amountAtomic: bigint,
-  opts: { txHash?: string; savedFiles: string[]; now?: () => number },
+  opts: {
+    txHash?: string;
+    authorization?: SignedAuthorization;
+    savedFiles: string[];
+    now?: () => number;
+  },
 ): PaidRecord {
   return {
     version: 1,
@@ -400,6 +418,7 @@ function paidRecord(
     ...(opts.txHash !== undefined ? { txHash: opts.txHash } : {}),
     settlement: opts.txHash !== undefined ? 'settled' : 'unknown',
     savedFiles: opts.savedFiles,
+    ...(opts.authorization !== undefined ? { authorization: opts.authorization } : {}),
   };
 }
 

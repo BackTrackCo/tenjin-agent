@@ -478,7 +478,11 @@ async function executePay(
       fix:
         'The authorization was transmitted and settlement is unknown; it is recorded as transmitted exposure. ' +
         `Do not simply retry: each attempt signs a fresh authorization. ${legFix(paid)}`,
-      details: { amountAtomic: payment.amountAtomic.toString(), settlement: 'unknown' },
+      details: {
+        amountAtomic: payment.amountAtomic.toString(),
+        settlement: 'unknown',
+        ...(payment.authorization !== undefined ? { authorization: payment.authorization } : {}),
+      },
     });
   }
   if (paid.status >= 200 && paid.status < 300) {
@@ -499,6 +503,7 @@ async function executePay(
       warnings,
       amountAtomic: payment.amountAtomic,
       requirement: effectiveRequirement,
+      ...(payment.authorization !== undefined ? { authorization: payment.authorization } : {}),
       ...(registry !== undefined ? { registry } : {}),
       ...(caveat !== undefined ? { caveat } : {}),
       printBody: args.printBody === true,
@@ -522,6 +527,7 @@ async function executePay(
         ...providerError(paid.text),
         amountAtomic: payment.amountAtomic.toString(),
         settlement: 'unknown',
+        ...(payment.authorization !== undefined ? { authorization: payment.authorization } : {}),
       },
     },
   );
@@ -878,6 +884,7 @@ type DeliverOpts = {
       paid: true;
       amountAtomic: bigint;
       requirement: PaymentRequirements;
+      authorization?: { from: string; nonce: string; validBefore: string };
       registry?: string;
       printBody: boolean;
     }
@@ -897,6 +904,7 @@ function deliver(url: string, lane: Lane, res: HttpResponse, opts: DeliverOpts):
           payTo: opts.requirement.payTo,
           network: opts.requirement.network,
           asset: opts.requirement.asset,
+          ...(opts.authorization !== undefined ? { authorization: opts.authorization } : {}),
           ...(opts.registry !== undefined ? { registry: opts.registry } : {}),
         }
       : opts.entitled === true
