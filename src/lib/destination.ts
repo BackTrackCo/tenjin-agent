@@ -19,7 +19,9 @@ import { CliError } from './errors';
  * following its own redirects on its own server. Closing the first needs a
  * transport that connects to the address it validated (`node:https` with a
  * `lookup` override, as the draft experiment's `safeHttpsTransport` did), which
- * the plan for this release deliberately left unported. What this does remove
+ * the plan for this release left unported for the paid leg. The router's media
+ * download does connect that way: it pins its socket to the address
+ * {@link resolvePublicDestination} validated (`router/paid.ts`). What this does remove
  * is the easy local target: `http://`, credentials, a custom port, a literal
  * private address, a `.localhost`/`.internal` name, and a public name whose
  * only answers are private. Documented in docs/safety-model.md as a bound.
