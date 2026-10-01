@@ -2675,6 +2675,43 @@ describe('a discovered service', () => {
     });
   });
 
+  /** The owner's video run: a $0.68 service against the $0.25 default cap. The
+   *  whole server line survives, the other options it lists included. */
+  it('injects a $0.68 offer over a $0.25 cap with the note, menu line intact', async () => {
+    const id = DISCOVERED.decision.id;
+    const hint =
+      'Tenjin router found a pay-per-call service for this step: VideoGen (text-to-video), ' +
+      'POST https://video.example.test/v1/generate , about $0.68 per call. ' +
+      'Other options: ClipForge ($0.90), Reelsmith ($1.10). ' +
+      `To use it, call request({id: "${id}", input: {...}}) alone and wait for its result.`;
+    const { fetchImpl } = router({
+      ...DISCOVERED,
+      decision: {
+        ...DISCOVERED.decision,
+        hint,
+        candidate: {
+          ...(DISCOVERED.decision as unknown as { candidate: Record<string, unknown> }).candidate,
+          provider: 'VideoGen',
+          url: 'https://video.example.test/v1/generate',
+          providerPriceAtomic: '680000',
+        },
+      },
+    });
+    const out = await runPromptHook(promptEvent('make a 5 second promo video clip'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+    const line = (out.response as { hookSpecificOutput: { additionalContext: string } })
+      .hookSpecificOutput.additionalContext;
+    expect(line).toBe(
+      `${HINT_SOURCE}: ${hint.replace('request({', 'mcp__x402__request({')} ` +
+        "Note: $0.68 is above this machine's automatic per-call limit ($0.25); " +
+        'request will return needs_approval with the command the user runs to approve it — ask the user first.',
+    );
+    expect(line).toContain('Other options: ClipForge ($0.90), Reelsmith ($1.10).');
+  });
+
   it('is shown when the wallet cannot cover it, with a note to fund it', async () => {
     rpcAnswer = 10_000n;
     const { fetchImpl } = router(DISCOVERED);
@@ -2686,10 +2723,7 @@ describe('a discovered service', () => {
     expect(
       (out.response as { hookSpecificOutput: { additionalContext: string } }).hookSpecificOutput
         .additionalContext,
-    ).toBe(
-      `${SEEN_LINE} Note: $0.053501 is more than this wallet holds ($0.01); ` +
-        'the user funds it with `tenjin wallet fund` — ask the user first.',
-    );
+    ).toBe(`${SEEN_LINE} Note: the wallet holds $0.01; fund it with \`tenjin wallet fund\`.`);
   });
 
   it('denies the main agent a native call over the cap, with the note in the reason', async () => {

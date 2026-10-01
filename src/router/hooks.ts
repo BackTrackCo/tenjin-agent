@@ -610,7 +610,7 @@ async function spendShortfall(
   return balance < BigInt(decision.providerPriceAtomic)
     ? {
         withheld: 'wallet needs USDC',
-        note: `Note: ${price} is more than this wallet holds ($${toMoney(balance.toString()).usd}); the user funds it with \`tenjin wallet fund\` — ask the user first.`,
+        note: `Note: the wallet holds $${toMoney(balance.toString()).usd}; fund it with \`tenjin wallet fund\`.`,
       }
     : null;
 }
