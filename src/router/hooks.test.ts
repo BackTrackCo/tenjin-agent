@@ -329,6 +329,29 @@ describe('the prompt hook', () => {
     expect(promptSkipReason('yes')).toBe('acknowledgement');
     expect(promptSkipReason('2^1000')).toBeNull();
   });
+
+  /** A TURN THAT HANDS WORK BACK asks for none: a task finishing, a subagent,
+   *  a teammate or another session writing in. No backend call at all. */
+  it.each([
+    ['a task notification', '<task-notification>\n<task-id>b1</task-id> done</task-notification>'],
+    ['an agent message', '<agent-message from="worker">the scrape finished</agent-message>'],
+    ['a teammate message', '  <teammate-message teammate_id="lead">build X</teammate-message>'],
+    ['a cross-session message', '<cross-session-message from="other">hi</cross-session-message>'],
+    ['another session', 'Another Claude session sent a message: look up the BTC price'],
+  ])('never asks about %s', async (_label, prompt) => {
+    const { fetchImpl, calls } = router(EXECUTE);
+    const out = await runPromptHook(promptEvent(prompt), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+    expect(out).toEqual({ response: null, skipped: 'handback' });
+    expect(calls).toHaveLength(0);
+  });
+
+  it('still asks about a prompt that only mentions those tags later on', async () => {
+    expect(promptSkipReason('what does <task-notification> mean in Claude Code?')).toBeNull();
+  });
 });
 
 describe('the shortfall hook', () => {
@@ -2624,11 +2647,16 @@ describe('a discovered service', () => {
 
   /** The seller's price and host meet the spend policy exactly as a curated
    *  provider's do: over the cap, nothing is shown. */
-  it('is withheld when the listed price is over the automatic cap', async () => {
+  /**
+   * NEVER WITHHELD WHERE THE USER CAN BE ASKED. Over the automatic cap, the
+   * line still names the service, with one sentence saying the call needs
+   * approval; a curated offer over the cap is still withheld (above).
+   */
+  it('is shown over the automatic cap, with a note to ask the user first', async () => {
     const fs = await import('node:fs/promises');
     await fs.writeFile(
       join(dir, 'config.json'),
-      JSON.stringify({ maxAutoSpend: '50000', confirm: 'above:50000' }),
+      JSON.stringify({ maxAutoSpend: '50000', experimental: { bazaar: 'on' } }),
     );
     const { fetchImpl } = router(DISCOVERED);
     const out = await runPromptHook(promptEvent('make me a whoosh sound effect'), {
@@ -2636,6 +2664,88 @@ describe('a discovered service', () => {
       baseUrl: BASE,
       fetchImpl,
     });
+    expect(out).toMatchObject({ action: 'discovered', id: ID });
+    expect(out.response).toEqual({
+      hookSpecificOutput: {
+        hookEventName: 'UserPromptSubmit',
+        additionalContext:
+          `${SEEN_LINE} Note: $0.053501 is above this machine's automatic per-call limit ($0.05); ` +
+          'request will return needs_approval with the command the user runs to approve it — ask the user first.',
+      },
+    });
+  });
+
+  it('is shown when the wallet cannot cover it, with a note to fund it', async () => {
+    rpcAnswer = 10_000n;
+    const { fetchImpl } = router(DISCOVERED);
+    const out = await runPromptHook(promptEvent('make me a whoosh sound effect'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+    expect(
+      (out.response as { hookSpecificOutput: { additionalContext: string } }).hookSpecificOutput
+        .additionalContext,
+    ).toBe(
+      `${SEEN_LINE} Note: $0.053501 is more than this wallet holds ($0.01); ` +
+        'the user funds it with `tenjin wallet fund` — ask the user first.',
+    );
+  });
+
+  it('denies the main agent a native call over the cap, with the note in the reason', async () => {
+    const fs = await import('node:fs/promises');
+    await fs.writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ maxAutoSpend: '50000', experimental: { bazaar: 'on' } }),
+    );
+    const out = await runNativeHook(await preCall('sound effect generator api', 'WebSearch'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl: router(DISCOVERED).fetchImpl,
+    });
+    expect(
+      (out.response as { hookSpecificOutput: { permissionDecisionReason: string } })
+        .hookSpecificOutput.permissionDecisionReason,
+    ).toContain('ask the user first.');
+  });
+
+  /** Where nobody can ask the user, it is withheld like any other offer. */
+  it('is withheld from a delegated task over the cap', async () => {
+    const fs = await import('node:fs/promises');
+    await fs.writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ maxAutoSpend: '50000', experimental: { bazaar: 'on' } }),
+    );
+    const path = await transcriptFor([
+      { type: 'user', sessionId: 'sess-1', message: { content: 'make the promo sound better' } },
+    ]);
+    const out = await runDelegationHook(
+      {
+        hook_event_name: 'PreToolUse',
+        session_id: 'sess-1',
+        cwd: dir,
+        transcript_path: path,
+        tool_name: 'Agent',
+        tool_input: { prompt: 'Add sound effects to the promo', subagent_type: 'general-purpose' },
+      },
+      { dataDir: dir, baseUrl: BASE, fetchImpl: router(DISCOVERED).fetchImpl },
+    );
+    expect(out).toEqual({ response: null, action: 'discovered', withheld: true });
+  });
+
+  it("is withheld from a subagent's native call over the cap", async () => {
+    const fs = await import('node:fs/promises');
+    await fs.writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ maxAutoSpend: '50000', experimental: { bazaar: 'on' } }),
+    );
+    const out = await runNativeHook(
+      await preCall('sound effect generator api', 'WebSearch', {
+        agent_id: 'a1b2c3',
+        agent_type: 'general-purpose',
+      }),
+      { dataDir: dir, baseUrl: BASE, fetchImpl: router(DISCOVERED).fetchImpl, homeDir: dir },
+    );
     expect(out).toEqual({ response: null, action: 'discovered', withheld: true });
   });
 });

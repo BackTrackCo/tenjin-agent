@@ -3,6 +3,7 @@ import { homedir } from 'node:os';
 import { z } from 'zod';
 import { loadRawConfig, resolveExperimentalBazaar, resolveSettings } from '../lib/config';
 import type { PartialConfig } from '../lib/config';
+import { toMoney } from '../lib/money';
 import { walletPath } from '../lib/paths';
 import { evaluateSpendPolicy } from '../lib/policy';
 import { resolveContextSettings } from '../lib/settings';
@@ -42,7 +43,7 @@ import { routerSettings, type RouterSettings } from './settings';
  * seal the packet, ask for one free decision, and say one thing back to the
  * harness. Before an `execute` is shown where nobody can approve it, they also
  * read the wallet's address from its file and its USDC balance from the RPC
- * (`withheldBecause`). A free offer on a search starts one free docs fetch in a
+ * (`spendShortfall`). A free offer on a search starts one free docs fetch in a
  * detached `node` (`augment.ts`); that is the only other thing they touch.
  *
  * NOTHING ELSE IS IN REACH FROM HERE. No wallet module, no signer, no payment
@@ -343,7 +344,21 @@ function optional<K extends string>(key: K, value: string | undefined): Partial<
 /** Acknowledgements that cannot be a lookup; `install` never gates them. */
 const ACKNOWLEDGEMENTS = new Set(['y', 'yes', 'ok', 'okay', 'continue', 'go', 'sure', 'thanks']);
 
-export type PromptSkip = 'slash' | 'acknowledgement';
+export type PromptSkip = 'slash' | 'acknowledgement' | 'handback';
+
+/**
+ * A turn the harness or another agent wrote, not the user: a background task
+ * finishing, a subagent's or teammate's message, a message from another
+ * session. It hands work back; it asks for none, and routing it offers a
+ * lookup nobody requested.
+ */
+const HANDBACK_PREFIXES = [
+  '<task-notification>',
+  '<agent-message',
+  '<teammate-message',
+  '<cross-session-message',
+  'Another Claude session sent a message',
+];
 
 /**
  * Prompts that cannot need a lookup, decided locally with no network call. Any
@@ -353,6 +368,7 @@ export type PromptSkip = 'slash' | 'acknowledgement';
  */
 export function promptSkipReason(prompt: string): PromptSkip | null {
   const trimmed = prompt.trim();
+  if (HANDBACK_PREFIXES.some((prefix) => trimmed.startsWith(prefix))) return 'handback';
   if (trimmed.startsWith('/')) return 'slash';
   const normalized = trimmed.toLowerCase().replace(/[.!,]+$/, '');
   return ACKNOWLEDGEMENTS.has(normalized) ? 'acknowledgement' : null;
@@ -546,11 +562,16 @@ function gateDeadline(deps: HookDeps): number {
  * wallet is left to the policy too: its address takes a curve this chunk
  * does not load, and the file beside it is not the wallet that pays.
  */
-async function withheldBecause(
+async function spendShortfall(
   decision: { providerPriceAtomic: string; endpoint: string },
   deps: HookDeps,
   deadline: number,
-): Promise<string | null> {
+): Promise<Shortfall | null> {
+  const price = `$${toMoney(decision.providerPriceAtomic).usd}`;
+  const approval = (detail: string): Shortfall => ({
+    withheld: 'offer needs approval',
+    note: `Note: ${price} ${detail}; request will return needs_approval with the command the user runs to approve it — ask the user first.`,
+  });
   let rpcUrl: string;
   try {
     const settings = await resolveContextSettings(hookContext(deps));
@@ -562,10 +583,16 @@ async function withheldBecause(
       creator: new URL(decision.endpoint).host,
       sessionSpentAtomic: ledger === null ? 0n : spentOf(ledger),
     });
-    if (evaluation.decision !== 'allow') return 'offer needs approval';
+    if (evaluation.decision !== 'allow') {
+      return approval(
+        evaluation.reason === 'above_auto_spend'
+          ? `is above this machine's automatic per-call limit ($${toMoney(settings.policy.maxAutoSpendAtomic.toString()).usd})`
+          : "needs approval under this machine's spend limits",
+      );
+    }
     rpcUrl = settings.rpcUrl;
   } catch {
-    return 'offer needs approval';
+    return approval("needs approval under this machine's spend limits");
   }
   if ((deps.env ?? process.env).TENJIN_WALLET_KEY?.trim()) return null;
   const address = await walletAddress(deps.dataDir);
@@ -580,7 +607,41 @@ async function withheldBecause(
     );
     return null;
   }
-  return balance < BigInt(decision.providerPriceAtomic) ? 'wallet needs USDC' : null;
+  return balance < BigInt(decision.providerPriceAtomic)
+    ? {
+        withheld: 'wallet needs USDC',
+        note: `Note: ${price} is more than this wallet holds ($${toMoney(balance.toString()).usd}); the user funds it with \`tenjin wallet fund\` — ask the user first.`,
+      }
+    : null;
+}
+
+/** Why a paid call would not run on its own: the footer's words, and the
+ *  sentence a discovered offer carries instead of being withheld. */
+interface Shortfall {
+  withheld: string;
+  note: string;
+}
+
+/**
+ * AN OFFER, OR WHY IT IS NOT SHOWN. A curated offer the paid call could not
+ * make good on alone is withheld, as it always was. A DISCOVERED one is never
+ * withheld where someone can ask the user: it is the only line naming a
+ * service that can do the step, so it is shown with one sentence saying the
+ * call needs approval or funds, and the host asks first. Where nobody can ask
+ * (a subagent's call, a delegated task) it is withheld like any other.
+ */
+async function vetOffer<T extends OfferDecision>(
+  offer: T,
+  deps: HookDeps,
+  deadline: number,
+  canAskUser: boolean,
+): Promise<{ offer: T; withheld?: undefined } | { withheld: string }> {
+  const shortfall = await spendShortfall(termsOf(offer), deps, deadline);
+  if (shortfall === null) return { offer };
+  if (offer.action === 'discovered' && canAskUser) {
+    return { offer: { ...offer, hint: `${offer.hint} ${shortfall.note}` } };
+  }
+  return { withheld: shortfall.withheld };
 }
 
 /**
@@ -678,16 +739,16 @@ async function offerOnUserText(
     await footer.close(outcome);
     return { response: null, ...(outcome !== null ? { action: outcome.action } : {}) };
   }
-  const withheld = await withheldBecause(termsOf(outcome), deps, deadline);
-  if (withheld !== null) {
-    await footer.close(outcome, { withheld });
+  const vetted = await vetOffer(outcome, deps, deadline, true);
+  if (vetted.withheld !== undefined) {
+    await footer.close(outcome, { withheld: vetted.withheld });
     return { response: null, action: outcome.action, withheld: true };
   }
   await footer.close(outcome);
   return {
     action: outcome.action,
     id: outcome.id,
-    ...injection(hookEventName, attributed(outcome.hint)),
+    ...injection(hookEventName, attributed(vetted.offer.hint)),
   };
 }
 
@@ -851,9 +912,9 @@ async function routeNativeCall(
     await footer.close(outcome, { withheld: 'free lookup, call runs' });
     return { offer: outcome, free: true, baseUrl: resolveBaseUrl(deps, router.config) };
   }
-  const withheld = await withheldBecause(termsOf(outcome), deps, deadline);
-  if (withheld !== null) {
-    await footer.close(outcome, { withheld });
+  const vetted = await vetOffer(outcome, deps, deadline, event.agentId === undefined);
+  if (vetted.withheld !== undefined) {
+    await footer.close(outcome, { withheld: vetted.withheld });
     return { offer: null, outcome: { response: null, action: outcome.action, withheld: true } };
   }
   if (repeated !== undefined && (await repeated())) {
@@ -864,7 +925,7 @@ async function routeNativeCall(
     };
   }
   await footer.close(outcome);
-  return { offer: outcome };
+  return { offer: vetted.offer };
 }
 
 /**
@@ -1130,9 +1191,11 @@ export async function runDelegationHook(
     await footer.close(outcome);
     return { response: null, ...(outcome !== null ? { action: outcome.action } : {}) };
   }
-  const withheld = await withheldBecause(termsOf(outcome), deps, deadline);
-  if (withheld !== null) {
-    await footer.close(outcome, { withheld });
+  // The subagent will make the call and cannot ask the user, so nothing it
+  // could not pay for alone is offered to it.
+  const vetted = await vetOffer(outcome, deps, deadline, false);
+  if (vetted.withheld !== undefined) {
+    await footer.close(outcome, { withheld: vetted.withheld });
     return { response: null, action: outcome.action, withheld: true };
   }
   await footer.close(outcome);
