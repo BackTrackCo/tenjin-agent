@@ -799,6 +799,28 @@ describe('a discovered service', () => {
     expect(calls).toHaveLength(0);
   });
 
+  /** A KEY BEHIND AN ESCAPED NEWLINE OR TAB: in the serialized JSON it reads
+   *  as one word with the escape's letter in front, so each leaf is masked
+   *  on its own, keys included. */
+  it.each([
+    ['an sk-ant- key after a newline', { text: `note:\nsk-ant-api03-${'a'.repeat(90)}` }],
+    ['an sk-ant- key after a tab', { text: `\tsk-ant-api03-${'b'.repeat(90)}` }],
+    ['a ghp_ token after a newline', { text: `line one\nghp_${'c'.repeat(36)}` }],
+    ['a ghp_ token after a tab, nested', { opts: [{ auth: `\tghp_${'d'.repeat(36)}` }] }],
+    ['a token as a key', { [`\nghp_${'e'.repeat(36)}`]: 'x' }],
+  ])('sends nothing for %s', async (_label, input) => {
+    const { fetchImpl, calls } = net([]);
+    const result = await runRequestTool(
+      { id: '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d02', input },
+      deps(fetchImpl),
+    );
+    expect(result.envelope).toMatchObject({
+      status: 'native',
+      reason: 'the input carries a credential-shaped value, so nothing was sent',
+    });
+    expect(calls).toHaveLength(0);
+  });
+
   it('refuses an input with no id before anything is sent', async () => {
     const { fetchImpl, calls } = net([]);
     const result = await runRequestTool({ input: { text: 'whoosh' } }, deps(fetchImpl));

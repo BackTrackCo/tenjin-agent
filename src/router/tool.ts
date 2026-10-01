@@ -18,6 +18,7 @@ import {
   recordedSent,
   saveMedia,
   createUniqueFile,
+  maskDeep,
   type MediaTransport,
   type PaidRecord,
   type SignedAuthorization,
@@ -125,7 +126,10 @@ export async function runRequestTool(
     if (Buffer.byteLength(serialized) > MAX_INPUT_BYTES) {
       return fail('needs_input', `The input is over ${MAX_INPUT_BYTES} bytes; send a smaller one.`);
     }
-    if (mask(serialized) !== serialized) {
+    // EVERY KEY AND STRING LEAF, masked on its own: in the serialized JSON a
+    // key after an escaped `\n` reads as one word (`nsk-ant-…`), so the
+    // boundaries the mask anchors on are not there.
+    if (JSON.stringify(maskDeep(input)) !== serialized) {
       return fail('native', 'the input carries a credential-shaped value, so nothing was sent');
     }
   }
@@ -225,7 +229,7 @@ export async function runRequestTool(
   // injected `request` call; it does not bound a hostile server, which can
   // still quote up to `maxAutoSpend`. `gateSpend` stays the money authority.
   // What the ledger records as sent: the host's input, or its query.
-  const sent = input !== undefined ? JSON.stringify(input) : query;
+  const sent = input !== undefined ? JSON.stringify(maskDeep(input)) : query;
   const terms: AdvertisedTerms = {
     source: decision.provider,
     maxAmountAtomic: decision.providerPriceAtomic,

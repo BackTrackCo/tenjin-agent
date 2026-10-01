@@ -48,6 +48,25 @@ export interface PaidRecord {
 
 export const MAX_SENT_CHARS = 4_096;
 
+/**
+ * A JSON value with every object key and string leaf masked on its own. The
+ * mask anchors on word boundaries, which a serialized string hides: after an
+ * escaped `\n` a key reads as `nsk-ant-…`, one word, and passes.
+ */
+export function maskDeep(value: unknown): unknown {
+  if (typeof value === 'string') return mask(value);
+  if (Array.isArray(value)) return value.map(maskDeep);
+  if (value !== null && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([key, entry]) => [
+        mask(key),
+        maskDeep(entry),
+      ]),
+    );
+  }
+  return value;
+}
+
 /** The input or query as it is recorded: secrets masked, then cut. */
 export function recordedSent(sent: string): string {
   return mask(sent).slice(0, MAX_SENT_CHARS);

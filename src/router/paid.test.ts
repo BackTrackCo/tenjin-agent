@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   createUniqueFile,
+  maskDeep,
   MAX_SENT_CHARS,
   mediaUrlsIn,
   pinnedLookup,
@@ -32,6 +33,20 @@ describe('what the ledger records as sent', () => {
     const sent = recordedSent(`use ${secret} ${'x'.repeat(10_000)}`);
     expect(sent).not.toContain(secret);
     expect(sent).toHaveLength(MAX_SENT_CHARS);
+  });
+});
+
+describe('masking a JSON input', () => {
+  it('masks each key and string leaf on its own, whatever precedes it', () => {
+    const key = `sk-ant-api03-${'a'.repeat(90)}`;
+    const masked = JSON.stringify(
+      maskDeep({ text: `\n${key}`, list: [`\tghp_${'c'.repeat(36)}`], [`\n${key}`]: 1, n: 2 }),
+    );
+    expect(masked).not.toContain(key);
+    expect(masked).not.toContain('ghp_ccc');
+    expect(masked).toContain('"n":2');
+    // The serialized form alone hides both: the escape's letter joins the key.
+    expect(recordedSent(JSON.stringify({ text: `\n${key}` }))).toContain(key);
   });
 });
 
