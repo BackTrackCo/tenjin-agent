@@ -21,6 +21,7 @@ import {
   type Sealed,
 } from './context';
 import { requestDecision, ROUTER_PATH, type HookDecision } from './decision';
+import { readsAsEmptyPage } from './fetch-result';
 import { GATE_TIMEOUT_MS } from './gate';
 import { REQUEST_TOOL } from './names';
 import { requestToolAccess, type AgentLookup } from './agent-tools';
@@ -417,6 +418,10 @@ export const NEAR_EMPTY_BYTES = 64;
  *   404 or 410 is not one: a page that is missing is missing for a paid
  *   reader too;
  * - WebFetch answering 2xx, or no code, with under {@link NEAR_EMPTY_BYTES};
+ * - WebFetch answering 2xx, or no code, whose summary says the page had no
+ *   main content (`reason: 'no_main_content'`, {@link readsAsEmptyPage}): a
+ *   JavaScript app's title, a video page's footer. Both are 200s with tens of
+ *   kilobytes, so the size never caught them;
  * - WebSearch answering with no result links at all.
  *
  * A search that returned unrelated links is NOT one: it looks exactly like a
@@ -447,7 +452,10 @@ export function shortfallOf(event: {
     };
     if (code !== undefined && isShortStatus(code)) return outcome;
     const success = code === undefined || (code >= 200 && code < 300);
-    return success && bytes !== undefined && bytes < NEAR_EMPTY_BYTES ? outcome : null;
+    if (!success) return null;
+    if (bytes !== undefined && bytes < NEAR_EMPTY_BYTES) return outcome;
+    const result = typeof fields.result === 'string' ? fields.result : '';
+    return readsAsEmptyPage(result) ? { ...outcome, reason: 'no_main_content' } : null;
   }
   const results = fields.results;
   if (!Array.isArray(results)) return null;

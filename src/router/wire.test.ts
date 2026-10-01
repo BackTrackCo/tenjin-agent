@@ -37,6 +37,7 @@ describe('the request bodies', () => {
     ['wire-hook-request-prompt.json'],
     ['wire-hook-request-native.json'],
     ['wire-hook-request-native-shortfall.json'],
+    ['wire-hook-request-native-no-content.json'],
   ])('builds %s byte for byte', (name) => {
     const canonical = fixture(name);
     expect(buildHookBody(canonical.packet as Packet)).toEqual(canonical);
@@ -68,6 +69,21 @@ describe('the request bodies', () => {
     });
     expect(packet.nativeOutcome).toEqual({ code: 402, bytes: 0 });
     expect(Buffer.byteLength(JSON.stringify(packet))).toBeLessThanOrEqual(MAX_PACKET_BYTES);
+  });
+
+  /**
+   * A 200 THAT CAME BACK EMPTY SAYS WHY. Its code and size look like a page,
+   * so the client names what it read in WebFetch's summary, and the server
+   * picks the reader from the URL. A server that predates `reason` refuses the
+   * packet, which the hook reads as silence: no offer, as before.
+   */
+  it('names why a 200 with a full body still fell short', () => {
+    const packet = fixture('wire-hook-request-native-no-content.json').packet as Packet;
+    expect(packet.pendingCall).toEqual({
+      tool: 'WebFetch',
+      url: 'https://app.uniswap.org/explore/tokens',
+    });
+    expect(packet.nativeOutcome).toEqual({ code: 200, bytes: 85_717, reason: 'no_main_content' });
   });
 
   it('builds the tool request byte for byte', () => {
@@ -122,6 +138,7 @@ describe('the request bodies', () => {
       'wire-hook-request-prompt.json',
       'wire-hook-request-native.json',
       'wire-hook-request-native-shortfall.json',
+      'wire-hook-request-native-no-content.json',
       'wire-hook-request-ask.json',
       'wire-tool-request.json',
       'wire-tool-request-discovered.json',

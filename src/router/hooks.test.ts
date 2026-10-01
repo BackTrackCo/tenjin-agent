@@ -30,6 +30,17 @@ import {
 import { runRequestTool } from './tool';
 import type { PrefetchJob } from './augment';
 
+/** Real WebFetch results (`tool_response`): shells, and pages that read fine. */
+const webFetchSamples = JSON.parse(
+  readFileSync(
+    fileURLToPath(new URL('./fixtures/harness/claude-WebFetch-results.json', import.meta.url)),
+    'utf8',
+  ),
+) as Record<
+  'shell' | 'page',
+  { url: string; tool_response: { bytes: number; code: number; result: string; url: string } }[]
+>;
+
 /** What `tenjin install` writes (`ROUTER_DEFAULTS`): 0.25 a call, auto. */
 const ROUTER_POLICY = { maxAutoSpend: '250000', sessionBudget: '5000000', confirm: 'above:250000' };
 /** The wallet file's cleartext address, which is all a hook reads of it. */
@@ -441,6 +452,28 @@ describe('the shortfall hook', () => {
     );
   });
 
+  it('offers a page reader after a WebFetch that read only the page shell', async () => {
+    const { fetchImpl, calls } = router(withHint(SHORTFALL_HINT));
+    const shell = webFetchSamples.shell.find(
+      (s) => s.url === 'https://app.uniswap.org/explore/tokens',
+    )!;
+    const out = await runShortfallHook(
+      {
+        ...((await readableEvent(shell.url, 'WebFetch')) as object),
+        tool_response: shell.tool_response,
+      },
+      { dataDir: dir, baseUrl: BASE, fetchImpl },
+    );
+    expect(out.action).toBe('execute');
+    const sent = calls[0] as { body: { packet: { nativeOutcome?: unknown } } };
+    expect(sent.body.packet.nativeOutcome).toEqual({
+      code: 200,
+      bytes: 85_717,
+      reason: 'no_main_content',
+    });
+    expect(out.response).toMatchObject({ hookSpecificOutput: { hookEventName: 'PostToolUse' } });
+  });
+
   it('offers the lookup after a failed call, carrying its error', async () => {
     const { fetchImpl, calls } = router(EXECUTE);
     const base = (await readableEvent('https://x.test/a', 'WebFetch')) as Record<string, unknown>;
@@ -604,6 +637,36 @@ describe('shortfallOf', () => {
     [null],
   ])('does not count WebFetch %j as short', (response) => {
     expect(fetchWith(response)).toBeNull();
+  });
+
+  /**
+   * A 200 WITH TENS OF KILOBYTES CAN STILL BE NOTHING. app.uniswap.org came
+   * back as its title and YouTube as its footer; the size rule passed both,
+   * and the agent was left with no offer and no page. The summary says so, and
+   * the outcome names why, since its code and size cannot.
+   */
+  it.each([
+    'https://app.uniswap.org/explore/tokens',
+    'https://www.youtube.com/watch?v=zjkBMFhNj_g',
+  ])('counts a WebFetch of %s that read only a shell as short, and says why', (url) => {
+    const sample = webFetchSamples.shell.find((s) => s.url === url)!.tool_response;
+    expect(fetchWith(sample)).toEqual({
+      code: 200,
+      bytes: sample.bytes,
+      reason: 'no_main_content',
+    });
+  });
+
+  it('does not count a WebFetch whose summary is the page answering', () => {
+    for (const { tool_response } of webFetchSamples.page) {
+      expect(fetchWith(tool_response), tool_response.url).toBeNull();
+    }
+  });
+
+  it('counts the status first: a refused shell is a refusal, with no reason', () => {
+    const shell = webFetchSamples.shell[0]!.tool_response;
+    expect(fetchWith({ ...shell, code: 403 })).toEqual({ code: 403, bytes: shell.bytes });
+    expect(fetchWith({ ...shell, code: 404 })).toBeNull();
   });
 
   it('counts only a search with no result links', () => {

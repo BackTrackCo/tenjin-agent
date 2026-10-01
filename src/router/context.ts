@@ -69,7 +69,18 @@ export interface NativeOutcome {
   code?: number;
   bytes?: number;
   error?: string;
+  /** Why a call whose status and size look fine still came back short. */
+  reason?: NativeShortfallReason;
 }
+
+/**
+ * The client's own reading of a native result, named where the code and the
+ * size say nothing. `no_main_content`: WebFetch answered 2xx with a full body,
+ * and its summary says the page was empty, only a title, navigation or a
+ * footer, or needed JavaScript it did not run (a script-rendered app, a video
+ * page) (`readsAsEmptyPage`). The server picks the reader from the URL.
+ */
+export type NativeShortfallReason = 'no_main_content';
 
 /** The pending native call, INSIDE the packet: the gate request is a strict
  *  object with exactly `schemaVersion`, `source` and `packet`. An
