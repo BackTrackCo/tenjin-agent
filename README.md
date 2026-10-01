@@ -100,7 +100,7 @@ Free tools run without a funded wallet. Twitter, Reddit and more are next, added
 tenjin config set experimental.bazaar on
 ```
 
-With it on, the router may also suggest sellers from Coinbase's open x402 Bazaar. They are unreviewed third parties, matches can be noisy, prices can vary with the input, and payments are real, under your spend limits. `tenjin config` and `tenjin doctor` show both settings. Turn it off with `tenjin config set experimental.bazaar off`.
+With it on, the router may also suggest sellers from Coinbase's open x402 Bazaar, and to find them, short snippets of your prompts are sent to Coinbase's public Bazaar search. Those sellers are unreviewed third parties, matches can be noisy, prices can vary with the input, and payments are real, under your spend limits. `tenjin config` and `tenjin doctor` show both settings. Turn it off with `tenjin config set experimental.bazaar off`.
 
 ## How it works
 

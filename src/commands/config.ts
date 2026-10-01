@@ -175,6 +175,7 @@ export const EXPERIMENTAL_BAZAAR_WARNING =
   "Experimental: the router may now also suggest sellers from Coinbase's open x402 Bazaar. " +
   'They are unreviewed third parties, Tenjin has not checked them, matches can be noisy, ' +
   'prices can vary with the input, and payments are real, under your spend limits. ' +
+  "To find them, short snippets of your prompts are sent to Coinbase's public Bazaar search. " +
   "Tenjin's reviewed list stays on either way. Turn this off with " +
   '`tenjin config set experimental.bazaar off`.';
 

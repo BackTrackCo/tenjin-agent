@@ -329,6 +329,9 @@ describe('runConfigSet — experimental.bazaar', () => {
     expect(warning).toContain('Experimental');
     expect(warning).toContain("Coinbase's open x402 Bazaar");
     expect(warning).toContain('unreviewed');
+    expect(warning).toContain(
+      "short snippets of your prompts are sent to Coinbase's public Bazaar search",
+    );
     expect(warning).toContain('payments are real');
     expect(warning).toContain('tenjin config set experimental.bazaar off');
     expect(on.humanLines).toContain(warning);
