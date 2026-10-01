@@ -188,12 +188,34 @@ describe('bounded local evaluation proxy', () => {
     expect((await send(unresolved)).status).toBe(503);
     expect(unresolved.summary().stopReason).toBeUndefined();
 
-    // A settlement 402 on a signed request repeats for every later request: stop at once.
+    // A generic settlement failure under load is one more uncertain evaluation.
+    const flaky = await proxy(async () => {
+      throw Object.assign(new Error('secret'), {
+        details: {
+          reason: 'payment_uncertain',
+          diagnostic: {
+            code: 'PAYMENT_FAILED',
+            phase: 'payment',
+            status: 402,
+            paymentFailure: { stage: 'settlement', reason: 'settlement_failed' },
+          },
+        },
+      });
+    });
+    expect((await send(flaky)).status).toBe(429);
+    expect(flaky.summary()).toMatchObject({ uncertainFailures: 1, stopReason: undefined });
+
+    // The supplier's own facilitator billing repeats for every later request: stop at once.
     const rejected = await proxy(async () => {
       throw Object.assign(new Error('secret'), {
         details: {
           reason: 'payment_uncertain',
-          diagnostic: { code: 'PAYMENT_FAILED', phase: 'payment', status: 402 },
+          diagnostic: {
+            code: 'PAYMENT_FAILED',
+            phase: 'payment',
+            status: 402,
+            paymentFailure: { stage: 'settlement', reason: 'provider_payment_method_required' },
+          },
         },
       });
     });

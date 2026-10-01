@@ -10,7 +10,7 @@ import { spendLedgerPath } from '../../lib/paths';
 import { canonicalHash } from '../../lib/request-schema';
 import type { JevgrepProfileId } from './profile';
 import type { WalletProvider } from '../../lib/wallet';
-import { createJevgrepPayer, JEVGREP_SUPPLIER } from './payments';
+import { createJevgrepPayer, JEVGREP_SUPPLIER, sharedBalanceReader } from './payments';
 import { MAPLE_JEVGREP_SUPPLIER, type JevgrepSupplier } from './supplier';
 
 vi.mock('../../commands/pay', () => ({ runPay: vi.fn() }));
@@ -579,4 +579,29 @@ it('bounds the drain when a payment callback ignores cancellation', async () => 
     finish({ data: { bodyText: JSON.stringify(response) } });
     await operation;
   }
+});
+
+describe('shared balance reader', () => {
+  it('serves concurrent evaluations from one read and refreshes after the TTL or a failure', async () => {
+    let now = 0;
+    const read = vi.fn(async (): Promise<bigint | null> => 5000n);
+    const reader = sharedBalanceReader(read, 1000, () => now);
+    const opts = { timeoutMs: 100 };
+    expect(await Promise.all([reader('0xa', 'rpc', opts), reader('0xa', 'rpc', opts)])).toEqual([
+      5000n,
+      5000n,
+    ]);
+    expect(read).toHaveBeenCalledTimes(1);
+    now = 999;
+    expect(await reader('0xa', 'rpc', opts)).toBe(5000n);
+    expect(read).toHaveBeenCalledTimes(1);
+    now = 1000;
+    read.mockResolvedValueOnce(null);
+    expect(await reader('0xa', 'rpc', opts)).toBeNull();
+    expect(await reader('0xa', 'rpc', opts)).toBe(5000n);
+    expect(read).toHaveBeenCalledTimes(3);
+    // A different wallet or RPC never reuses another's value.
+    expect(await reader('0xb', 'rpc', opts)).toBe(5000n);
+    expect(read).toHaveBeenCalledTimes(4);
+  });
 });

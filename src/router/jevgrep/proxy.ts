@@ -34,14 +34,18 @@ function transientFailure(diagnostic: unknown): boolean {
   return typeof status === 'number' && (status === 408 || status === 429 || status >= 500);
 }
 
-/** A 402 on the signed request is the supplier's settlement refusing the
- *  wallet or its own facilitator; the next signed request fails the same way. */
+/** A settlement refusal that every later signed request will repeat: the
+ *  supplier's own facilitator billing, or an empty wallet. A generic settlement
+ *  failure under load is handled as one more uncertain evaluation instead. */
 function settlementRejected(diagnostic: unknown): boolean {
-  return (
-    typeof diagnostic === 'object' &&
-    diagnostic !== null &&
-    (diagnostic as { status?: unknown }).status === 402
-  );
+  if (typeof diagnostic !== 'object' || diagnostic === null) return false;
+  const { status, reason, paymentFailure } = diagnostic as {
+    status?: unknown;
+    reason?: unknown;
+    paymentFailure?: { reason?: unknown };
+  };
+  if (reason === 'insufficient_funds') return true;
+  return status === 402 && paymentFailure?.reason === 'provider_payment_method_required';
 }
 
 export type JevgrepEvaluate = (

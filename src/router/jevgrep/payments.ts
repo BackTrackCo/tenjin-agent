@@ -3,6 +3,7 @@ import { mkdir, readFile, readdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { runPay } from '../../commands/pay';
+import { readUsdcBalance } from '../../lib/usdc-balance';
 import type { CommandContext } from '../../context';
 import { ErrorCodeSchema } from '../../schemas';
 import { writeFileAtomicExclusive } from '../../lib/atomic-json';
@@ -24,6 +25,8 @@ export { JEVGREP_SUPPLIER } from './supplier';
 
 export interface JevgrepPayerOptions {
   ctx: CommandContext;
+  /** Balance reader seam for tests; production reads USDC through the RPC. */
+  readBalance?: typeof readUsdcBalance;
   provider?: WalletProvider;
   signer?: TenjinSigner;
   authorizer: SpendAuthorizer;
@@ -65,6 +68,40 @@ async function readRecord(path: string): Promise<unknown | undefined> {
 
 async function saveRecord(path: string, value: unknown): Promise<void> {
   await writeFileAtomicExclusive(path, JSON.stringify(value), { mode: 0o600, dirMode: 0o700 });
+}
+
+/**
+ * One balance read per run, shared by every concurrent evaluation. Sixteen
+ * evaluations in flight each asked the public RPC for the balance at once and
+ * most of those reads were refused. The ledger, not this read, bounds spending;
+ * the read only refuses signing against an empty wallet, and a value up to
+ * thirty seconds old serves that purpose.
+ */
+export function sharedBalanceReader(
+  read: typeof readUsdcBalance = readUsdcBalance,
+  ttlMs = 30_000,
+  now: () => number = Date.now,
+): typeof readUsdcBalance {
+  let cached: { address: string; rpcUrl: string; value: bigint; atMs: number } | undefined;
+  let inflight: Promise<bigint | null> | undefined;
+  return async (address, rpcUrl, opts) => {
+    if (
+      cached &&
+      cached.address === address &&
+      cached.rpcUrl === rpcUrl &&
+      now() - cached.atMs < ttlMs
+    )
+      return cached.value;
+    inflight ??= read(address, rpcUrl, opts)
+      .then((value) => {
+        if (value !== null) cached = { address, rpcUrl, value, atMs: now() };
+        return value;
+      })
+      .finally(() => {
+        inflight = undefined;
+      });
+    return inflight;
+  };
 }
 
 /** Bound both unpaid challenge and paid response bodies before the shared HTTP reader. */
@@ -145,6 +182,7 @@ export function createJevgrepPayer(options: JevgrepPayerOptions) {
   const journalRoot = join(options.ctx.dataDir, 'jevgrep', 'payments');
   const directory = join(journalRoot, canonicalHash(options.runId));
   const active = new Map<string, Promise<NativeEvaluationResponse>>();
+  const readBalance = sharedBalanceReader(options.readBalance);
   const lifecycle = new AbortController();
   let closePromise: Promise<{ drainCompleted: boolean; pendingEvaluations: number }> | undefined;
   let requests = 0;
@@ -300,6 +338,7 @@ export function createJevgrepPayer(options: JevgrepPayerOptions) {
           provider,
           authorizer: scopedAuthorizer,
           signal: combined,
+          readBalance,
           fetchImpl: boundedFetch(options.fetchImpl ?? fetch),
           confirm: async () => false,
           async beforePayment(payment) {

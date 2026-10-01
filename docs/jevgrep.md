@@ -183,8 +183,10 @@ the stop is reported as `provider`. A failure after signing (for example a suppl
 request) keeps its `uncertain` record and never gets a replacement payment. The proxy answers that
 one request with 429 and `Retry-After: 2`, the child's retry of the same request is refused as
 unresolved with 503, and the child narrows or drops that batch while other evaluations continue.
-After 16 uncertain failures in one search, or at the first settlement 402 on a signed request,
-the stop is reported as `payment_uncertain`. The shared spend ledger retains
+After 16 uncertain failures in one search, or at the first settlement refusal that names the
+supplier's own facilitator billing or an empty wallet, the stop is reported as `payment_uncertain`.
+Every evaluation in a run shares one wallet balance read, refreshed after thirty seconds; the
+ledger bounds spending, the read only refuses signing against an empty wallet. The shared spend ledger retains
 reserved and signed exposure across restarts and rolling-window expiry. A signed evaluation that
 the supplier answers with a valid response settles at that moment: its money joins the current
 daily window like any other payment and expires with it, and the result reports it as
