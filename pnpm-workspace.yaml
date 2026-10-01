@@ -1,5 +1,12 @@
 # pnpm 11 config file (single-package repo, no workspace globs).
 
+# Overrides: each key is range-scoped to the vulnerable versions and each value is
+# a caret floor ('^x.y.z'), the shape `pnpm audit --fix` writes. A caret leaves a
+# later patched release reachable; an exact pin froze 3.1.6 in place on
+# 2026-09-30 when an advisory named that exact version. The daily audit
+# workflow (.github/workflows/audit.yml) opens a PR adding entries like these the
+# day an advisory lands.
+
 # Security pin mirrored from the tenjin repo — dropping it reddens
 # `pnpm audit` (ws is pulled in via viem).
 #
@@ -48,17 +55,17 @@
 # the SDK's ^1 range; the suite passes with it. Drop once the SDK depends
 # on >=2.0.10 itself.
 overrides:
-  'ws@>=8.0.0 <8.21.0': '8.21.0'
-  'fast-uri@>=3.0.0 <3.1.8': '3.1.8'
-  'esbuild@>=0.27.3 <0.28.1': '0.28.1'
-  'brace-expansion@>=4.0.0 <5.0.11': '5.0.11'
-  'ip-address@>=10.0.0 <10.3.1': '10.3.1'
-  'js-yaml@>=4.0.0 <4.3.2': '4.3.2'
-  'js-yaml@>=3.0.0 <3.15.2': '3.15.2'
-  'nanoid@>=3.0.0 <3.3.18': '3.3.18'
-  'hono@>=3.8.0 <4.12.34': '4.12.34'
-  'postcss@<8.5.23': '8.5.23'
-  '@hono/node-server@<2.0.10': '2.0.10'
+  'ws@>=8.0.0 <8.21.0': '^8.21.0'
+  'fast-uri@>=3.0.0 <3.1.8': '^3.1.8'
+  'esbuild@>=0.27.3 <0.28.1': '^0.28.1'
+  'brace-expansion@>=4.0.0 <5.0.11': '^5.0.11'
+  'ip-address@>=10.0.0 <10.3.1': '^10.3.1'
+  'js-yaml@>=4.0.0 <4.3.2': '^4.3.2'
+  'js-yaml@>=3.0.0 <3.15.2': '^3.15.2'
+  'nanoid@>=3.0.0 <3.3.18': '^3.3.18'
+  'hono@>=3.8.0 <4.12.34': '^4.12.34'
+  'postcss@<8.5.23': '^8.5.23'
+  '@hono/node-server@<2.0.10': '^2.0.10'
 
 # pnpm 11 errors (ERR_PNPM_IGNORED_BUILDS) on any build-script dep missing an
 # entry here, so keep it exhaustive. `false` = don't run the script; esbuild's
