@@ -36,10 +36,26 @@ pr_number=$(gh pr list --head "$BRANCH" --state open --json number,isCrossReposi
 
 if [ -n "$pr_number" ]; then
   # A PR is under review: build on its branch so the review thread survives,
-  # and stop if it already clears everything main is failing on.
+  # and stop if it already clears everything main is failing on. Merge main in
+  # first: the branch can predate a dependency main has added since, and an
+  # audit of the branch alone would pass while main still fails.
+  main_sha=$(git rev-parse HEAD)
   git fetch origin "$BRANCH"
   git switch -C "$BRANCH" FETCH_HEAD
-  pnpm install --frozen-lockfile --ignore-scripts
+  if ! git -c user.name='github-actions[bot]' \
+    -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+    merge --no-edit "$main_sha"; then
+    # Both sides edit the overrides block, so a conflict in the two files this
+    # script writes is the usual case, not an error. Take main's copy: the fix
+    # below re-derives every override main still needs, the branch's included.
+    # A conflict anywhere else is left unresolved, so the commit fails and stops
+    # the run (set -e) for a person to look at.
+    git checkout "$main_sha" -- pnpm-workspace.yaml pnpm-lock.yaml
+    git -c user.name='github-actions[bot]' \
+      -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+      commit --no-edit
+  fi
+  pnpm install --no-frozen-lockfile --ignore-scripts
   if pnpm audit --audit-level=high >/dev/null; then
     echo "audit-fix: PR #$pr_number already clears every high advisory; nothing to push."
     exit 0
@@ -89,7 +105,7 @@ if [ -n "$pr_number" ]; then
   # Fast-forward on top of what reviewers already saw; unforced, so a race
   # with a human push surfaces instead of overwriting it.
   git push origin "HEAD:refs/heads/$BRANCH"
-  gh pr comment "$pr_number" --body "$(printf 'New advisories since this PR opened, fixed in the latest commit:\n\n%s\n' "$advisories")"
+  gh pr comment "$pr_number" --body "$(printf 'main moved since this PR opened and still fails the audit. The latest commits merge main and fix:\n\n%s\n\nIf that merge conflicted, pnpm-workspace.yaml and pnpm-lock.yaml were taken from main and the fix re-run, so check that no hand-written comment on this branch was dropped.\n' "$advisories")"
   echo "audit-fix: updated PR #$pr_number."
   exit 0
 fi
