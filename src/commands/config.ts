@@ -26,6 +26,7 @@ import {
   UPDATE_CONFIG_KEYS,
   LOOP_CONFIG_KEYS,
   TEAM_CONFIG_KEYS,
+  EXPERIMENTAL_CONFIG_KEYS,
   ROUTER_CONFIG_KEYS,
   ROUTER_CONTEXTS,
   loadRawConfig,
@@ -47,6 +48,7 @@ import type {
   UpdateConfigKey,
   LoopConfigKey,
   TeamConfigKey,
+  ExperimentalConfigKey,
   RouterConfigKey,
   RouterContext,
 } from '../lib/config';
@@ -112,6 +114,7 @@ const KEY_WIDTH = Math.max(
     ...LOOP_CONFIG_KEYS,
     ...TEAM_CONFIG_KEYS,
     ...ROUTER_CONFIG_KEYS,
+    ...EXPERIMENTAL_CONFIG_KEYS,
   ].map((key) => key.length),
 );
 
@@ -160,7 +163,25 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
     'false stops every router hook and the request tool; --project sets it for this repository, --project --local for you alone in it',
   'router.context':
     'session=a hook packet carries up to six prior messages, turn=the current turn only; --project and --local as for router.enabled',
+  'experimental.bazaar':
+    "EXPERIMENTAL. on=the router may also suggest unreviewed sellers from Coinbase's open x402 Bazaar, off=curated services and Tenjin's reviewed list only",
 };
+
+/**
+ * What turning the experimental list on means, said when it is turned on:
+ * whose services these are, that the price is theirs, and how to turn it off.
+ */
+export const EXPERIMENTAL_BAZAAR_WARNING =
+  "Experimental: the router may now also suggest sellers from Coinbase's open x402 Bazaar. " +
+  'They are unreviewed third parties, Tenjin has not checked them, matches can be noisy, ' +
+  'prices can vary with the input, and payments are real, under your spend limits. ' +
+  "To find them, short snippets of your prompts are sent to Coinbase's public Bazaar search. " +
+  "Tenjin's reviewed list stays on either way. Turn this off with " +
+  '`tenjin config set experimental.bazaar off`.';
+
+function isExperimentalKey(key: string): key is ExperimentalConfigKey {
+  return (EXPERIMENTAL_CONFIG_KEYS as readonly string[]).includes(key);
+}
 
 function isLoopKey(key: string): key is LoopConfigKey {
   return (LOOP_CONFIG_KEYS as readonly string[]).includes(key);
@@ -255,6 +276,14 @@ export async function runConfigList(ctx: CommandContext): Promise<CommandResult>
     data[key] = entry;
     humanLines.push(describedLine(key, entry));
   }
+  for (const key of EXPERIMENTAL_CONFIG_KEYS) {
+    const entry: RenderedSetting = {
+      value: settings.experimentalBazaar.value,
+      source: settings.experimentalBazaar.source,
+    };
+    data[key] = entry;
+    humanLines.push(describedLine(key, entry));
+  }
   return { data, humanLines };
 }
 
@@ -296,6 +325,14 @@ export async function runConfigGet(
     const entry = renderRouterSetting(key, await resolveRouterFromContext(ctx));
     return { data: { key, ...entry }, humanLines: [formatLine(key, entry)] };
   }
+  if (isExperimentalKey(key)) {
+    const { experimentalBazaar } = await resolveFromContext(ctx);
+    const entry: RenderedSetting = {
+      value: experimentalBazaar.value,
+      source: experimentalBazaar.source,
+    };
+    return { data: { key, ...entry }, humanLines: [formatLine(key, entry)] };
+  }
   const configKey = assertKey(key);
   const settings = await resolveFromContext(ctx);
   const entry = renderSetting(configKey, settings[configKey].value, settings[configKey].source);
@@ -335,6 +372,7 @@ export async function runConfigSet(
   if (isUpdateKey(key)) return setUpdateKey(key, value, ctx);
   if (isLoopKey(key)) return setLoopKey(key, value, ctx);
   if (isTeamKey(key)) return setTeamKey(key, value, ctx);
+  if (isExperimentalKey(key)) return setExperimentalKey(key, value, ctx);
   const configKey = assertKey(key);
   const stored = parseValue(configKey, value);
   await persist(ctx.dataDir, (existing) => ({ ...existing, [configKey]: stored }));
@@ -757,6 +795,25 @@ async function setTeamKey(
   return { data: { key, ...entry }, humanLines: [formatLine(key, entry)] };
 }
 
+/** `config set experimental.bazaar on|off`; turning it on says what it means. */
+async function setExperimentalKey(
+  key: ExperimentalConfigKey,
+  value: string,
+  ctx: CommandContext,
+): Promise<CommandResult> {
+  const parsed = parsePublicFallbackFlag(value, key);
+  await persist(ctx.dataDir, (existing) => ({
+    ...existing,
+    experimental: { ...existing.experimental, bazaar: parsed },
+  }));
+  const entry: RenderedSetting = { value: parsed, source: 'file' };
+  const warning = parsed === 'on' ? EXPERIMENTAL_BAZAAR_WARNING : undefined;
+  return {
+    data: { key, ...entry, ...(warning !== undefined ? { warning } : {}) },
+    humanLines: [formatLine(key, entry), ...(warning !== undefined ? [warning] : [])],
+  };
+}
+
 /**
  * `config set [--project [--local]] router.enabled|router.context`. Without
  * `--project` the key goes into the global config through the same locked merge
@@ -999,7 +1056,7 @@ function assertKey(key: string): ScalarConfigKey {
   }
   if ((CONFIG_KEYS as string[]).includes(key)) return key as ScalarConfigKey;
   throw new CliError('USAGE', `Unknown config key: ${JSON.stringify(key)}`, {
-    fix: `Valid keys: ${[...CONFIG_KEYS, ...PUBLISH_CONFIG_KEYS, ...HOOKS_CONFIG_KEYS, ...ROUTER_CONFIG_KEYS].join(', ')}.`,
+    fix: `Valid keys: ${[...CONFIG_KEYS, ...PUBLISH_CONFIG_KEYS, ...HOOKS_CONFIG_KEYS, ...ROUTER_CONFIG_KEYS, ...EXPERIMENTAL_CONFIG_KEYS].join(', ')}.`,
   });
 }
 

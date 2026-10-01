@@ -1,6 +1,7 @@
 import { runPay, type AdvertisedTerms, type PayDeps } from '../commands/pay';
 import { CliError } from '../lib/errors';
 import { toMoney } from '../lib/money';
+import { downloadsDir } from '../lib/paths';
 import { mask } from '../lib/redact';
 import { assertResultSchema, canonicalHash } from '../lib/request-schema';
 import { resolveContextSettings } from '../lib/settings';
@@ -9,6 +10,20 @@ import type { TenjinSigner } from '../lib/wallet/provider';
 import type { CommandContext } from '../context';
 import { requestDecision, type DecisionContract, type DecisionDiagnostics } from './decision';
 import { openLookupFooter } from './progress';
+import {
+  appendPaidRecord,
+  MAX_MEDIA_FILES,
+  mediaUrlsIn,
+  reconcilePayments,
+  recordedSent,
+  saveMedia,
+  createUniqueFile,
+  maskDeep,
+  writeAll,
+  type MediaTransport,
+  type PaidRecord,
+  type SignedAuthorization,
+} from './paid';
 import { routerSettings } from './settings';
 
 /**
@@ -33,11 +48,18 @@ import { routerSettings } from './settings';
  */
 
 export interface RequestToolArgs {
-  query: string;
+  /** Optional only beside `input`. */
+  query?: string;
   /** The turn id from the hook's line. It names the service that line offered, and
    *  the server runs that one; it grants nothing locally, every cap still applies. */
   id?: string;
+  /** The host's own input for a discovered service, per the schema its line
+   *  gave. The server builds the request from it; every cap still applies. */
+  input?: Record<string, unknown>;
 }
+
+/** The server's own cap on `input`, serialized. */
+export const MAX_INPUT_BYTES = 16 * 1024;
 
 export interface RequestToolDeps {
   ctx: CommandContext;
@@ -53,6 +75,11 @@ export interface RequestToolDeps {
   /** The directory `router.*` resolves from; defaults to `process.cwd()`, which
    *  Claude Code sets to the project directory for an MCP server. */
   cwd?: string;
+  /** Clock seam for a saved file's name. */
+  now?: () => number;
+  /** Test seam for the media download; production pins each connection to
+   *  the address it validated. */
+  mediaTransport?: MediaTransport;
 }
 
 export interface RequestToolResult {
@@ -70,8 +97,9 @@ export async function runRequestTool(
   // user marked private: nothing is sent and nothing is paid.
   const off = await routerOff(deps);
   if (off !== null) return fail('needs_input', off, { nextStep: ROUTER_OFF_NEXT_STEP });
-  const query = args.query.trim().slice(0, 8_000);
-  if (query.length === 0) {
+  const query = (args.query ?? '').trim().slice(0, 8_000);
+  const { input } = args;
+  if (query.length === 0 && input === undefined) {
     return fail(
       'needs_input',
       'A request needs a query naming the task, its inputs and any constraints.',
@@ -84,6 +112,28 @@ export async function runRequestTool(
   if (mask(query) !== query) {
     return fail('native', 'the query carries a credential-shaped value, so nothing was sent');
   }
+  // The same rule for a discovered service's input, which goes to the seller
+  // as the request body or its query string.
+  if (input !== undefined) {
+    // The server builds the call from the service that id named, so an input
+    // with no id has nothing to go to.
+    if (args.id === undefined || args.id.length === 0) {
+      return fail(
+        'needs_input',
+        'An input goes with the id from the line that named the service; send both.',
+      );
+    }
+    const serialized = JSON.stringify(input);
+    if (Buffer.byteLength(serialized) > MAX_INPUT_BYTES) {
+      return fail('needs_input', `The input is over ${MAX_INPUT_BYTES} bytes; send a smaller one.`);
+    }
+    // EVERY KEY AND STRING LEAF, masked on its own: in the serialized JSON a
+    // key after an escaped `\n` reads as one word (`nsk-ant-…`), so the
+    // boundaries the mask anchors on are not there.
+    if (JSON.stringify(maskDeep(input)) !== serialized) {
+      return fail('native', 'the input carries a credential-shaped value, so nothing was sent');
+    }
+  }
   // THE FOOTER, OPENED FIRST AND TRUSTED WITH NOTHING: it shows this lookup in
   // the terminal while it runs, resolved to a session through the hook's own
   // binding for `id`, and every call on it swallows its own failure.
@@ -92,9 +142,19 @@ export async function runRequestTool(
   });
   await footer.routing();
   const settings = await resolveContextSettings(deps.ctx);
+  // SETTLEMENTS EARLIER CALLS LEFT UNKNOWN, resolved a few at a time from the
+  // chain, BESIDE the lookup and never in front of it: a slow or rate-limited
+  // RPC costs this call nothing, and a record it could not answer for waits
+  // `RECHECK_MS` before it is asked about again. Its own errors are its own.
+  void reconcilePayments(deps.ctx.dataDir, {
+    rpcUrl: settings.rpcUrl,
+    ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+    ...(deps.now !== undefined ? { now: deps.now } : {}),
+  }).catch(() => undefined);
   const decisionDeps = {
     ctx: deps.ctx,
     baseUrl: settings.baseUrl,
+    acceptsBazaar: settings.experimentalBazaar,
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   };
 
@@ -106,7 +166,11 @@ export async function runRequestTool(
   // from the query.
   const fresh = await requestDecision(
     'tool',
-    { query, ...(args.id !== undefined && args.id.length > 0 ? { id: args.id } : {}) },
+    {
+      ...(query.length > 0 ? { query } : {}),
+      ...(args.id !== undefined && args.id.length > 0 ? { id: args.id } : {}),
+      ...(input !== undefined ? { input } : {}),
+    },
     decisionDeps,
   );
   if (fresh.status === 'failed') {
@@ -116,6 +180,34 @@ export async function runRequestTool(
     });
   }
   const { decision, note } = fresh.decision;
+
+  // A SERVICE NOBODY CURATED, named for the host to judge. Nothing is paid on
+  // this answer: the server's own line says how to call it, with the id it
+  // minted and the input the host builds, and that second call pays through
+  // the execute path below like any other.
+  if (decision.action === 'discovered') {
+    await footer.done('service found');
+    const { candidate } = decision;
+    return {
+      isError: false,
+      summary: decision.hint,
+      envelope: {
+        status: 'discovered',
+        id: decision.id,
+        service: {
+          provider: candidate.provider,
+          url: candidate.url,
+          method: candidate.method,
+          description: candidate.description,
+          price: `$${toMoney(candidate.providerPriceAtomic).usd}`,
+          input: candidate.input,
+        },
+        cost: costLines(0n),
+        ...(note !== undefined ? { note } : {}),
+        providerContentUntrusted: true,
+      },
+    };
+  }
 
   if (decision.action !== 'execute') {
     await footer.done(decision.action === 'native' ? 'native' : 'needs_input');
@@ -139,6 +231,8 @@ export async function runRequestTool(
   // It bounds a provider or stale catalog charging over that price, and an
   // injected `request` call; it does not bound a hostile server, which can
   // still quote up to `maxAutoSpend`. `gateSpend` stays the money authority.
+  // What the ledger records as sent: the host's input, or its query.
+  const sent = input !== undefined ? JSON.stringify(maskDeep(input)) : query;
   const terms: AdvertisedTerms = {
     source: decision.provider,
     maxAmountAtomic: decision.providerPriceAtomic,
@@ -174,18 +268,68 @@ export async function runRequestTool(
     );
     const data = paid.data as {
       bodyText?: string;
+      /** A binary body's bytes and type, kept whole by the provider leg. */
+      bodyBytes?: Uint8Array;
+      contentType?: string;
+      /** From the payment-response header, when the seller sent one. */
+      settlementTxHash?: string;
+      authorization?: SignedAuthorization;
       amountPaid?: { atomic: string };
       /** Set when the body missed its success rule, or the rule never ran. */
       resultUnverified?: boolean;
       resultCaveat?: string;
     };
     const providerAtomic = BigInt(data.amountPaid?.atomic ?? '0');
+    // A FILE IS SAVED, NOT INLINED: its bytes are no use as text in a tool
+    // result, so the result names where they are.
+    const binary =
+      data.bodyBytes !== undefined
+        ? await saveBinary(deps.ctx.dataDir, decision.capabilityId, data.bodyBytes, {
+            contentType: data.contentType ?? '',
+            ...(deps.now !== undefined ? { now: deps.now } : {}),
+          })
+        : null;
+    // AND A PAID MEDIA RESULT THAT LINKS TO ITS FILES brings them home: the
+    // links can expire, and the user paid for what is behind them. Only a
+    // discovered service (where generated images, audio and video come from)
+    // does this: a curated page read or search links whatever the page links,
+    // on hosts the page picked. The answer carries no finer media kind, so the
+    // category is the line. Best effort only.
+    const linked =
+      providerAtomic > 0n && binary === null && decision.category === 'discovered'
+        ? await saveMedia(
+            deps.ctx.dataDir,
+            decision.capabilityId,
+            mediaUrlsIn(data.bodyText ?? '', MAX_MEDIA_FILES),
+            {
+              ...(deps.mediaTransport !== undefined ? { transport: deps.mediaTransport } : {}),
+              ...(deps.payDeps?.destination !== undefined
+                ? { destination: deps.payDeps.destination }
+                : {}),
+              ...(deps.now !== undefined ? { now: deps.now } : {}),
+            },
+          )
+        : [];
+    const savedFiles = [...(binary?.savedTo !== undefined ? [binary.savedTo] : []), ...linked];
+    if (providerAtomic > 0n) {
+      await appendPaidRecord(
+        deps.ctx.dataDir,
+        paidRecord(decision, built.url, sent, providerAtomic, {
+          ...(data.settlementTxHash !== undefined ? { txHash: data.settlementTxHash } : {}),
+          ...(data.authorization !== undefined ? { authorization: data.authorization } : {}),
+          savedFiles,
+          ...(deps.now !== undefined ? { now: deps.now } : {}),
+        }),
+      );
+    }
     const base = {
       supplier: supplierOf(built.url),
       ...(contract.arguments !== undefined ? { parameters: contract.arguments } : {}),
       cost: costLines(providerAtomic),
+      ...(data.settlementTxHash !== undefined ? { settlementTxHash: data.settlementTxHash } : {}),
       ...(note !== undefined ? { note } : {}),
-      result: data.bodyText ?? '',
+      result: binary ?? data.bodyText ?? '',
+      ...(savedFiles.length > 0 ? { savedFiles } : {}),
       providerContentUntrusted: true,
     };
     // UNVERIFIED IS NOT FULFILLED. A body that missed its success rule, or
@@ -232,12 +376,25 @@ export async function runRequestTool(
       diagnosis?: Record<string, unknown>;
       status?: number;
       providerError?: string;
+      authorization?: SignedAuthorization;
     };
     await footer.done(status, {
       provider: contract.request.url,
       ...paramsOf(contract),
       price: `$${toMoney(detail.amountAtomic ?? '0').usd}`,
     });
+    // An authorization that left is a paid call whatever came back: recorded
+    // with its settlement unknown, for `tenjin payments reconcile` to resolve.
+    if (BigInt(detail.amountAtomic ?? '0') > 0n) {
+      await appendPaidRecord(
+        deps.ctx.dataDir,
+        paidRecord(decision, contract.request.url, sent, BigInt(detail.amountAtomic ?? '0'), {
+          ...(detail.authorization !== undefined ? { authorization: detail.authorization } : {}),
+          savedFiles: [],
+          ...(deps.now !== undefined ? { now: deps.now } : {}),
+        }),
+      );
+    }
     return fail(status, reason, {
       providerAtomic: BigInt(detail.amountAtomic ?? '0'),
       ...(detail.settlement !== undefined ? { settlement: detail.settlement } : {}),
@@ -248,6 +405,100 @@ export async function runRequestTool(
       ...(typeof detail.status === 'number' ? { providerStatus: detail.status } : {}),
       ...(typeof detail.providerError === 'string' ? { providerError: detail.providerError } : {}),
     });
+  }
+}
+
+/** One ledger line for a paid call; the settlement is known only with a tx. */
+function paidRecord(
+  decision: { capabilityId: string; provider: string },
+  url: string,
+  sent: string,
+  amountAtomic: bigint,
+  opts: {
+    txHash?: string;
+    authorization?: SignedAuthorization;
+    savedFiles: string[];
+    now?: () => number;
+  },
+): PaidRecord {
+  return {
+    version: 1,
+    ts: new Date((opts.now ?? Date.now)()).toISOString(),
+    capabilityId: decision.capabilityId,
+    provider: decision.provider,
+    url,
+    sent: recordedSent(sent),
+    amountAtomic: amountAtomic.toString(),
+    ...(opts.txHash !== undefined ? { txHash: opts.txHash } : {}),
+    settlement: opts.txHash !== undefined ? 'settled' : 'unknown',
+    savedFiles: opts.savedFiles,
+    ...(opts.authorization !== undefined ? { authorization: opts.authorization } : {}),
+  };
+}
+
+/** Extensions for the media types a paid lookup plausibly returns; any other
+ *  type, `text/html` from a seller included, is saved as `.bin`. */
+const EXTENSIONS: Record<string, string> = {
+  'audio/mpeg': 'mp3',
+  'audio/mp3': 'mp3',
+  'audio/wav': 'wav',
+  'audio/x-wav': 'wav',
+  'audio/wave': 'wav',
+  'audio/ogg': 'ogg',
+  'audio/aac': 'aac',
+  'audio/flac': 'flac',
+  'audio/webm': 'webm',
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/gif': 'gif',
+  'image/webp': 'webp',
+  'image/svg+xml': 'svg',
+  'image/avif': 'avif',
+  'audio/mp4': 'm4a',
+  'audio/x-m4a': 'm4a',
+  'video/quicktime': 'mov',
+  'video/mp4': 'mp4',
+  'video/webm': 'webm',
+  'application/pdf': 'pdf',
+  'application/zip': 'zip',
+  'application/octet-stream': 'bin',
+};
+
+export function extensionFor(contentType: string): string {
+  const type = contentType.split(';')[0]!.trim().toLowerCase();
+  return EXTENSIONS[type] ?? 'bin';
+}
+
+/**
+ * Write a binary body under the data dir as `<capability>-<timestamp>.<ext>`
+ * and say where: the path, the type and the size are what the host needs to
+ * use it. The name is built from characters a path segment can always hold.
+ *
+ * NEVER THROWS. The money has already moved when this runs, and a throw here
+ * would reach the failure arm, which reports nothing paid; a file that could
+ * not be written is said so beside the amount instead.
+ */
+async function saveBinary(
+  dataDir: string,
+  capabilityId: string,
+  bytes: Uint8Array,
+  opts: { contentType: string; now?: () => number },
+): Promise<{ savedTo?: string; saveError?: string; contentType: string; bytes: number }> {
+  const described = { contentType: opts.contentType, bytes: bytes.byteLength };
+  try {
+    const file = await createUniqueFile(
+      downloadsDir(dataDir),
+      `${capabilityId.slice(0, 80)}-${(opts.now ?? Date.now)()}`,
+      extensionFor(opts.contentType),
+    );
+    try {
+      await writeAll(file.handle, bytes);
+    } finally {
+      await file.handle.close();
+    }
+    return { savedTo: file.path, ...described };
+  } catch (err) {
+    return { saveError: err instanceof Error ? err.message : String(err), ...described };
   }
 }
 

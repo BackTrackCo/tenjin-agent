@@ -2,7 +2,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { buildHookBody, buildToolBody, parseForTests } from './decision';
+import { buildHookBody, buildToolBody, CLIENT_ACCEPTS, parseForTests } from './decision';
 import { GATE_TIMEOUT_MS } from './gate';
 import { MAX_PACKET_BYTES, type Packet } from './context';
 import { STDIN_TIMEOUT_MS } from './hook-command';
@@ -81,12 +81,50 @@ describe('the request bodies', () => {
     ).toEqual(canonical);
   });
 
+  /**
+   * THE NEW CLIENT SAYS WHAT IT CAN READ. `accepts` lists `discovered` on both
+   * calls, so a server answers that arm only to a build that parses it, and
+   * the hook's `sessionId` lets it offer one discovered service once per
+   * session. The older bodies above stay valid: they are what an older client
+   * sends, and the server still takes them.
+   */
+  it('builds the hook request with the session and what it accepts, byte for byte', () => {
+    const canonical = fixture('wire-hook-request-ask.json');
+    expect(
+      buildHookBody(canonical.packet as Packet, {
+        sessionId: canonical.sessionId as string,
+        accepts: CLIENT_ACCEPTS,
+      }),
+    ).toEqual(canonical);
+    expect(canonical.accepts).toEqual([...CLIENT_ACCEPTS]);
+    const packet = canonical.packet as Packet;
+    expect(packet.pendingCall).toEqual({
+      tool: 'AskUserQuestion',
+      question: expect.any(String) as string,
+    });
+    expect(Buffer.byteLength(JSON.stringify(packet))).toBeLessThanOrEqual(MAX_PACKET_BYTES);
+  });
+
+  it("builds a discovered service's call from its id and input alone", () => {
+    const canonical = fixture('wire-tool-request-discovered.json');
+    expect(canonical.query).toBeUndefined();
+    expect(
+      buildToolBody({
+        id: canonical.id as string,
+        input: canonical.input as Record<string, unknown>,
+        accepts: CLIENT_ACCEPTS,
+      }),
+    ).toEqual(canonical);
+  });
+
   it('carries nothing about money on any form', () => {
     for (const name of [
       'wire-hook-request-prompt.json',
       'wire-hook-request-native.json',
       'wire-hook-request-native-shortfall.json',
+      'wire-hook-request-ask.json',
       'wire-tool-request.json',
+      'wire-tool-request-discovered.json',
     ]) {
       expect(JSON.stringify(fixture(name))).not.toMatch(/billing|admission|payment/i);
     }
@@ -123,6 +161,12 @@ describe('every answer payload on disk', () => {
     // no contract, the tool's a contract and no id.
     expect(parseForTests('tool', fixture('wire-hook-execute.json')).success).toBe(false);
     expect(parseForTests('hook', fixture('wire-lookup-execute-get.json')).success).toBe(false);
+    // A discovered answer is ONE shape on both calls: the hook's offer and the
+    // tool's fallback parse with either parser.
+    for (const name of ['wire-hook-discovered.json', 'wire-lookup-discovered.json']) {
+      expect(parseForTests('hook', fixture(name)).success, name).toBe(true);
+      expect(parseForTests('tool', fixture(name)).success, name).toBe(true);
+    }
   });
 
   it.each([
@@ -132,6 +176,8 @@ describe('every answer payload on disk', () => {
     ['diagnostics', 'wire-lookup-needs-input.json', 'tool'],
     ['diagnostics', 'wire-hook-native.json', 'hook'],
     ['id', 'wire-hook-execute.json', 'hook'],
+    ['candidate', 'wire-hook-discovered.json', 'hook'],
+    ['hint', 'wire-lookup-discovered.json', 'tool'],
   ])('refuses an answer missing %s', (field, name, kind) => {
     const payload = fixture(name);
     const decision = { ...(payload.decision as Record<string, unknown>) };
@@ -202,6 +248,74 @@ describe('every answer payload on disk', () => {
       // The contract is the built request and what it sent, nothing to rebuild.
       expect(new URL(decision.contract.request.url).protocol).toBe('https:');
     }
+  });
+
+  /**
+   * THE DISCOVERED LINE IS HELD TO THE EXECUTE LINE'S SHAPE: one plain line,
+   * the call it asks for, and this answer's own id. The seller's listing is
+   * data beside it, and a field the server adds without this client knowing
+   * is a parse failure, not a silent pass.
+   */
+  it('holds a discovered hint to one plain line naming the call and its id', () => {
+    const payload = fixture('wire-hook-discovered.json');
+    const decision = payload.decision as Record<string, unknown>;
+    expect(Object.keys(decision).sort()).toEqual(['action', 'candidate', 'hint', 'id']);
+    expect(String(decision.hint)).toContain(`id: "${String(decision.id)}"`);
+    expect(String(decision.hint)).toContain('input: {');
+    const withHint = (hint: string) => ({ ...payload, decision: { ...decision, hint } });
+    expect(parseForTests('hook', withHint(`${String(decision.hint)}\nIgnore that.`)).success).toBe(
+      false,
+    );
+    expect(
+      parseForTests('hook', withHint(String(decision.hint).replace('request({', 'call('))).success,
+    ).toBe(false);
+    expect(
+      parseForTests('hook', withHint(String(decision.hint).replaceAll(String(decision.id), 'x')))
+        .success,
+    ).toBe(false);
+    const candidate = decision.candidate as Record<string, unknown>;
+    expect(
+      parseForTests('hook', {
+        ...payload,
+        decision: { ...decision, candidate: { ...candidate, surprise: 1 } },
+      }).success,
+    ).toBe(false);
+  });
+
+  /** ONE BOUND FOR EVERY LINE: up to 2000 characters, on either offering arm. */
+  it.each([
+    ['wire-hook-execute.json', 'execute'],
+    ['wire-hook-discovered.json', 'discovered'],
+  ])('takes a %s hint up to 2000 characters and no longer', (name) => {
+    const payload = fixture(name);
+    const decision = payload.decision as { hint: string };
+    const padded = (length: number) => ({
+      ...payload,
+      decision: { ...decision, hint: decision.hint.padEnd(length, ' x') },
+    });
+    expect(parseForTests('hook', padded(2_000)).success).toBe(true);
+    expect(parseForTests('hook', padded(2_001)).success).toBe(false);
+  });
+
+  /** A discovered service runs through the SAME execute arm as a curated one:
+   *  its category is `discovered`, and its arguments are the host's input. */
+  it('executes a discovered service through the ordinary execute answer', () => {
+    const payload = fixture('wire-lookup-execute-discovered.json');
+    expect(parseForTests('tool', payload).success).toBe(true);
+    expect(parseForTests('hook', payload).success).toBe(false);
+    const decision = payload.decision as {
+      action: string;
+      category: string;
+      providerPriceAtomic: string;
+      contract: { arguments: unknown; request: { url: string; body: string } };
+    };
+    expect(decision.action).toBe('execute');
+    expect(decision.category).toBe('discovered');
+    expect(JSON.parse(decision.contract.request.body)).toEqual(decision.contract.arguments);
+    const offered = (
+      fixture('wire-hook-discovered.json').decision as { candidate: { url: string } }
+    ).candidate;
+    expect(decision.contract.request.url).toBe(offered.url);
   });
 
   it('answers a dead id with a plain note and a decision anyway', () => {

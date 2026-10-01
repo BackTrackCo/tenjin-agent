@@ -53,6 +53,8 @@ import type { CommandContext, CommandResult } from '../context';
 
 const PAYMENT_REQUIRED_HEADER = 'PAYMENT-REQUIRED';
 const PAYMENT_RESPONSE_HEADER = 'PAYMENT-RESPONSE';
+/** x402 v1's name for the same header. */
+const PAYMENT_RESPONSE_HEADER_V1 = 'X-PAYMENT-RESPONSE';
 
 /** Terminal preview cap; `--print-body` lifts it. The machine body is never cut. */
 const BODY_PREVIEW_CHARS = 1200;
@@ -213,6 +215,9 @@ async function executePay(
     ...(jsonBody !== undefined ? { jsonBody } : {}),
     ...(jsonBody === undefined && args.rawBody !== undefined ? { rawBody: args.rawBody } : {}),
     ...(Object.keys(headers).length > 0 ? { headers } : {}),
+    // A router lookup can buy a file (a sound, an image): its bytes are kept
+    // whole for the tool to save, never decoded as text.
+    ...(router ? { binaryBody: true as const } : {}),
     method,
   };
 
@@ -462,7 +467,10 @@ async function executePay(
     timeoutMs: paidLegTimeoutMs(effectiveRequirement, ctx.flags.timeout),
     headers: { ...headers, ...payment.headers },
   });
-  await authorizer.commit(reservationId, payment.amountAtomic, { mode });
+  await authorizer.commit(reservationId, payment.amountAtomic, {
+    mode,
+    ...(payment.authorization !== undefined ? { nonce: payment.authorization.nonce } : {}),
+  });
   // A TRANSPORT failure on this leg is a post-transmission outcome like any
   // other: the authorization has left, the reservation is committed above, and
   // a receipt that said nothing was paid would report a provider cost of zero
@@ -473,7 +481,11 @@ async function executePay(
       fix:
         'The authorization was transmitted and settlement is unknown; it is recorded as transmitted exposure. ' +
         `Do not simply retry: each attempt signs a fresh authorization. ${legFix(paid)}`,
-      details: { amountAtomic: payment.amountAtomic.toString(), settlement: 'unknown' },
+      details: {
+        amountAtomic: payment.amountAtomic.toString(),
+        settlement: 'unknown',
+        ...(payment.authorization !== undefined ? { authorization: payment.authorization } : {}),
+      },
     });
   }
   if (paid.status >= 200 && paid.status < 300) {
@@ -494,6 +506,7 @@ async function executePay(
       warnings,
       amountAtomic: payment.amountAtomic,
       requirement: effectiveRequirement,
+      ...(payment.authorization !== undefined ? { authorization: payment.authorization } : {}),
       ...(registry !== undefined ? { registry } : {}),
       ...(caveat !== undefined ? { caveat } : {}),
       printBody: args.printBody === true,
@@ -517,6 +530,7 @@ async function executePay(
         ...providerError(paid.text),
         amountAtomic: payment.amountAtomic.toString(),
         settlement: 'unknown',
+        ...(payment.authorization !== undefined ? { authorization: payment.authorization } : {}),
       },
     },
   );
@@ -873,6 +887,7 @@ type DeliverOpts = {
       paid: true;
       amountAtomic: bigint;
       requirement: PaymentRequirements;
+      authorization?: { from: string; nonce: string; validBefore: string };
       registry?: string;
       printBody: boolean;
     }
@@ -892,6 +907,7 @@ function deliver(url: string, lane: Lane, res: HttpResponse, opts: DeliverOpts):
           payTo: opts.requirement.payTo,
           network: opts.requirement.network,
           asset: opts.requirement.asset,
+          ...(opts.authorization !== undefined ? { authorization: opts.authorization } : {}),
           ...(opts.registry !== undefined ? { registry: opts.registry } : {}),
         }
       : opts.entitled === true
@@ -903,9 +919,13 @@ function deliver(url: string, lane: Lane, res: HttpResponse, opts: DeliverOpts):
     // a caller branching on a delivery must not have to match on prose, which
     // is how an unchecked body passed for a checked one one layer up.
     ...(opts.caveat !== undefined ? { resultUnverified: true, resultCaveat: opts.caveat } : {}),
-    // The body is the product: JSON when the endpoint spoke it, raw text always.
+    // The body is the product: JSON when the endpoint spoke it, raw text always,
+    // and the bytes themselves when it was a file.
     ...(res.json !== undefined ? { body: res.json } : {}),
     bodyText: res.text,
+    ...(res.bytes !== undefined
+      ? { bodyBytes: res.bytes, contentType: res.header('content-type') ?? '' }
+      : {}),
   };
   const headline = opts.paid
     ? `paid ${toMoney(opts.amountAtomic.toString()).usd} USD to ${sanitizeForTerminal(new URL(url).host)}` +
@@ -931,13 +951,18 @@ function deliver(url: string, lane: Lane, res: HttpResponse, opts: DeliverOpts):
   };
 }
 
-function settlementTx(res: HttpResponse): string | undefined {
-  const header = res.header(PAYMENT_RESPONSE_HEADER);
+/**
+ * The settlement transaction the payment-response header names (v2's
+ * `PAYMENT-RESPONSE`, or v1's `X-PAYMENT-RESPONSE`): base64 JSON carrying
+ * `transaction`. Read from the protocol header only, never the seller's body.
+ */
+export function settlementTx(res: Pick<HttpResponse, 'header'>): string | undefined {
+  const header = res.header(PAYMENT_RESPONSE_HEADER) ?? res.header(PAYMENT_RESPONSE_HEADER_V1);
   if (header === undefined) return undefined;
   try {
     const settle = decodePaymentResponseHeader(header);
     const tx = (settle as { transaction?: unknown }).transaction;
-    return typeof tx === 'string' ? tx : undefined;
+    return typeof tx === 'string' && /^0x[0-9a-fA-F]{64}$/.test(tx) ? tx : undefined;
   } catch {
     return undefined;
   }

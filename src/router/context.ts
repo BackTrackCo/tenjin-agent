@@ -68,8 +68,24 @@ export interface NativeOutcome {
 }
 
 /** The pending native call, INSIDE the packet: the gate request is a strict
- *  object with exactly `schemaVersion`, `source` and `packet`. */
-export type PendingCall = { tool: 'WebSearch'; query: string } | { tool: 'WebFetch'; url: string };
+ *  object with exactly `schemaVersion`, `source` and `packet`. An
+ *  `AskUserQuestion` carries the host's own question and its options, joined. */
+export type PendingCall =
+  | { tool: 'WebSearch'; query: string }
+  | { tool: 'WebFetch'; url: string }
+  | { tool: 'AskUserQuestion'; question: string };
+
+/** The one string a pending call is about: its search, its URL or its question. */
+export function subjectOf(pending: PendingCall): string {
+  return 'query' in pending ? pending.query : 'url' in pending ? pending.url : pending.question;
+}
+
+/** The same call about a different subject, of the same kind. */
+function withSubject(pending: PendingCall, subject: string): PendingCall {
+  if ('query' in pending) return { tool: pending.tool, query: subject };
+  if ('url' in pending) return { tool: pending.tool, url: subject };
+  return { tool: pending.tool, question: subject };
+}
 
 const URL_RE = /\bhttps?:\/\/[^\s<>"'`)\]]+/gi;
 
@@ -144,7 +160,7 @@ export interface Sealed {
  */
 export function seal(packet: Packet): Sealed {
   const pending = packet.pendingCall;
-  const subject = pending === undefined ? '' : 'query' in pending ? pending.query : pending.url;
+  const subject = pending === undefined ? '' : subjectOf(pending);
   const sealedSubject = maskWithin(subject, MAX_PENDING_CHARS);
   const bound = (text: string): string => maskWithin(text, MAX_MESSAGE_CHARS).text;
   const sealedCurrent = maskWithin(packet.current.text, MAX_MESSAGE_CHARS);
@@ -161,14 +177,7 @@ export function seal(packet: Packet): Sealed {
       .map(mask)
       .filter((url) => url.length <= MAX_LITERAL_URL_CHARS),
     historyStatus: packet.historyStatus,
-    ...(pending === undefined
-      ? {}
-      : {
-          pendingCall:
-            'query' in pending
-              ? { tool: pending.tool, query: sealedSubject.text }
-              : { tool: pending.tool, url: sealedSubject.text },
-        }),
+    ...(pending === undefined ? {} : { pendingCall: withSubject(pending, sealedSubject.text) }),
     ...(outcome === undefined
       ? {}
       : {
@@ -285,7 +294,7 @@ export async function buildNativePacket(
   opts: { agentId?: string; nativeOutcome?: NativeOutcome } = {},
 ): Promise<Packet> {
   const { agentId, nativeOutcome } = opts;
-  const subject = 'query' in pending ? pending.query : pending.url;
+  const subject = subjectOf(pending);
   const read = await readHistory(transcriptPath, { sessionId });
   // A SUBAGENT'S CALL BELONGS TO ITS OWN TASK. The harness hands every
   // subagent hook the PARENT's transcript, whose latest user message is not

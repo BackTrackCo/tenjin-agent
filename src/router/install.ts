@@ -27,7 +27,7 @@ import { MCP_SERVER_NAME, REQUEST_TOOL } from './names';
 import { ensureStatusLine, type StatusLineMode, type StatusLineResult } from './status-line-wiring';
 
 /**
- * `tenjin install` for the router product: five hook entries, one MCP server,
+ * `tenjin install` for the router product: seven hook entries, one MCP server,
  * one permission rule, the spend defaults, and a wallet when there is none.
  *
  * WHAT IT WRITES IS WHAT IT SAYS. There is no skill to materialize and no
@@ -106,14 +106,19 @@ export const DELEGATION_MATCHER = 'Agent|Task';
 /** The native tools both native arms watch. */
 export const NATIVE_MATCHER = 'WebSearch|WebFetch';
 
+/** The host's question to the user, watched before it is asked and after. */
+export const ASK_MATCHER = 'AskUserQuestion';
+
 /**
- * The five entries, spelled once so `uninstall`, `doctor` and the tests read
+ * The seven entries, spelled once so `uninstall`, `doctor` and the tests read
  * the same list. The native tools are routed twice over one lookup: BEFORE the
  * call, as every release has, with a line pointing to a paid lookup when one
  * fits; and AFTER it, only when it came back short and nothing was said before,
  * or to add the free docs the pre-call arm fetched to a search's results. A
  * failed call fires PostToolUseFailure rather than PostToolUse, so the second
- * takes both.
+ * takes both. The host's question to the user is routed the same two ways:
+ * before it is asked, when a service could stand in for what it asks for, and
+ * after, with the user's answers read as their own words.
  */
 export function routerHookPlan(): unknown[] {
   const handler = (command: string, timeout = HOOK_TIMEOUT_SECONDS) => [
@@ -126,11 +131,13 @@ export function routerHookPlan(): unknown[] {
     { event: 'PreToolUse', matcher: DELEGATION_MATCHER, hooks: handler('tenjin hook agent') },
     { event: 'PostToolUse', matcher: NATIVE_MATCHER, hooks: afterCall() },
     { event: 'PostToolUseFailure', matcher: NATIVE_MATCHER, hooks: afterCall() },
+    { event: 'PreToolUse', matcher: ASK_MATCHER, hooks: handler('tenjin hook ask') },
+    { event: 'PostToolUse', matcher: ASK_MATCHER, hooks: handler('tenjin hook answer') },
   ];
 }
 
 export const DISCLOSURE: readonly string[] = [
-  "What leaves this machine: the bounded text of each prompt, each native search query or URL (and, when one came back short, its status, size or error), and each task handed to a subagent, sent to Tenjin for the free routing gate. When the gate offers free library docs for a search, that search query also goes to Tenjin's docs lookup, which asks Context7.",
+  "What leaves this machine: the bounded text of each prompt, each native search query or URL (and, when one came back short, its status, size or error), each task handed to a subagent, and each question your assistant asks you with your answers, sent to Tenjin for the free routing gate, beside this session's id. When the gate offers free library docs for a search, that search query also goes to Tenjin's docs lookup, which asks Context7.",
   'What is kept when a lookup is paid: the capability chosen, a hash of the contract, a hash of the arguments, and your wallet address. No prompt text, no arguments, no hint text.',
   'What never leaves: your private key. It is decrypted in this CLI to sign, and never sent anywhere.',
 ];

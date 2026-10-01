@@ -1,13 +1,15 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildPaymentRequired, testWalletProvider } from '../lib/read-test-utils';
 import { resolveSpendAuthorizer } from '../lib/wallet';
 import type { SpendAuthorization, SpendAuthorizer } from '../lib/wallet';
 import type { CommandContext } from '../context';
 import { runPay } from '../commands/pay';
-import { runRequestTool } from './tool';
+import { extensionFor, runRequestTool } from './tool';
+import type { MediaTransport } from './paid';
 import { ROUTER_PATH } from './decision';
 import { bindDecision, claimRedirect, noteSession, renderProgress } from './progress';
 
@@ -116,17 +118,17 @@ interface Leg {
   url: string;
   status: number;
   body: unknown;
-  /** Sent as is in place of `body`, for an answer that is not JSON. */
-  raw?: string;
+  /** Sent as is in place of `body`, for an answer that is not JSON (text or a file). */
+  raw?: string | Uint8Array;
   headers?: Record<string, string>;
 }
 
 /** A scripted network: legs are matched in order, and every request recorded. */
 function net(legs: Leg[]): {
   fetchImpl: typeof fetch;
-  calls: { url: string; method: string; paid: boolean }[];
+  calls: { url: string; method: string; paid: boolean; body?: string }[];
 } {
-  const calls: { url: string; method: string; paid: boolean }[] = [];
+  const calls: { url: string; method: string; paid: boolean; body?: string }[] = [];
   const queue = [...legs];
   const fetchImpl = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
     const headers: Record<string, string> = {};
@@ -137,6 +139,7 @@ function net(legs: Leg[]): {
       url: String(input),
       method: init?.method ?? 'GET',
       paid: headers['payment-signature'] !== undefined,
+      ...(typeof init?.body === 'string' ? { body: init.body } : {}),
     });
     const leg = queue.shift();
     if (leg === undefined) throw new Error(`unscripted request to ${String(input)}`);
@@ -154,12 +157,19 @@ function challenge(over: Record<string, unknown> = {}): string {
 
 const PUBLIC = { resolveHostname: async () => [{ address: '93.184.216.34', family: 4 }] };
 
+/** NO TEST OPENS A SOCKET: a linked-media download answers from here, and a
+ *  test that wants the file passes its own transport. */
+const noMediaNetwork: MediaTransport = async (target) => {
+  throw new Error(`no network in tests: ${target.url.toString()}`);
+};
+
 function deps(fetchImpl: typeof fetch, auth = authorizer()) {
   return {
     ctx: ctx(),
     cwd: dir,
     authorizer: auth,
     fetchImpl,
+    mediaTransport: noMediaNetwork,
     payDeps: {
       readBalance: async () => 100_000_000n,
       fetchImpl,
@@ -698,5 +708,430 @@ describe('the request tool in a directory where the router is off', () => {
     expect(result.envelope.nextStep).toContain('Nothing was sent');
     expect(calls).toHaveLength(0);
     expect(auth.authorize).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * A SERVICE NOBODY CURATED. The tool's fallback answer names it and pays
+ * nothing; the host's second call, with the id and its own input, comes back
+ * as an ordinary execute and pays through the same path and caps as any other.
+ */
+describe('a discovered service', () => {
+  const fixtures = fileURLToPath(new URL('./fixtures/', import.meta.url));
+  const wire = async (name: string): Promise<Record<string, unknown>> =>
+    JSON.parse(await readFile(join(fixtures, name), 'utf8')) as Record<string, unknown>;
+  const SELLER = 'https://blockrun.ai/api/v1/audio/sound-effects';
+
+  it('hands the host the server line and the listing, and pays nothing', async () => {
+    const auth = authorizer();
+    const answer = await wire('wire-lookup-discovered.json');
+    const { fetchImpl, calls } = net([{ url: ROUTER, status: 200, body: answer }]);
+    const result = await runRequestTool(
+      { query: 'generate a short whoosh sound effect' },
+      deps(fetchImpl, auth),
+    );
+    const hint = (answer.decision as { hint: string }).hint;
+    expect(result.isError).toBe(false);
+    expect(result.summary).toBe(hint);
+    expect(result.envelope).toMatchObject({
+      status: 'discovered',
+      id: '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d03',
+      service: { provider: 'BlockRun', url: SELLER, method: 'POST', price: '$0.053501' },
+      cost: ['provider price 0 USD'],
+      providerContentUntrusted: true,
+    });
+    expect(calls).toHaveLength(1);
+    expect(JSON.parse(calls[0]!.body!)).toMatchObject({ accepts: ['discovered'] });
+    expect(auth.authorize).not.toHaveBeenCalled();
+  });
+
+  it('sends the id and the input with no query, then pays the seller under its price', async () => {
+    const auth = authorizer();
+    const { fetchImpl, calls } = net([
+      { url: ROUTER, status: 200, body: await wire('wire-lookup-execute-discovered.json') },
+      { url: SELLER, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge() } },
+      { url: SELLER, status: 200, body: { ok: true } },
+    ]);
+    const request = await wire('wire-tool-request-discovered.json');
+    const result = await runRequestTool(
+      { id: request.id as string, input: request.input as Record<string, unknown> },
+      deps(fetchImpl, auth),
+    );
+    expect(result.envelope).toMatchObject({
+      status: 'fulfilled',
+      supplier: 'blockrun.ai',
+      cost: ['provider price 0.01 USD'],
+    });
+    expect(result.summary).toContain('blockrun.ai');
+    // The body the tool sent is the shared fixture, byte for byte in meaning.
+    expect(JSON.parse(calls[0]!.body!)).toEqual(request);
+    expect(calls.filter((c) => c.paid)).toHaveLength(1);
+    expect(calls[2]!.body).toBe(JSON.stringify(request.input));
+    expect(auth.authorize).toHaveBeenCalledOnce();
+  });
+
+  it('refuses a live 402 above the listed price before anything is signed', async () => {
+    const auth = authorizer();
+    const { fetchImpl, calls } = net([
+      { url: ROUTER, status: 200, body: await wire('wire-lookup-execute-discovered.json') },
+      {
+        url: SELLER,
+        status: 402,
+        body: {},
+        headers: { 'PAYMENT-REQUIRED': challenge({ amount: '60000' }) },
+      },
+    ]);
+    const result = await runRequestTool(
+      { id: '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d02', input: { text: 'whoosh' } },
+      deps(fetchImpl, auth),
+    );
+    expect(result.isError).toBe(true);
+    expect(calls.filter((c) => c.paid)).toHaveLength(0);
+    expect(auth.authorize).not.toHaveBeenCalled();
+  });
+
+  it('sends nothing for an input carrying a credential', async () => {
+    const { fetchImpl, calls } = net([]);
+    const result = await runRequestTool(
+      {
+        id: '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d02',
+        input: { key: 'sk-ant-api03-' + 'a'.repeat(90) },
+      },
+      deps(fetchImpl),
+    );
+    expect(result.envelope).toMatchObject({
+      status: 'native',
+      reason: 'the input carries a credential-shaped value, so nothing was sent',
+    });
+    expect(calls).toHaveLength(0);
+  });
+
+  /** A KEY BEHIND AN ESCAPED NEWLINE OR TAB: in the serialized JSON it reads
+   *  as one word with the escape's letter in front, so each leaf is masked
+   *  on its own, keys included. */
+  it.each([
+    ['an sk-ant- key after a newline', { text: `note:\nsk-ant-api03-${'a'.repeat(90)}` }],
+    ['an sk-ant- key after a tab', { text: `\tsk-ant-api03-${'b'.repeat(90)}` }],
+    ['a ghp_ token after a newline', { text: `line one\nghp_${'c'.repeat(36)}` }],
+    ['a ghp_ token after a tab, nested', { opts: [{ auth: `\tghp_${'d'.repeat(36)}` }] }],
+    ['a token as a key', { [`\nghp_${'e'.repeat(36)}`]: 'x' }],
+  ])('sends nothing for %s', async (_label, input) => {
+    const { fetchImpl, calls } = net([]);
+    const result = await runRequestTool(
+      { id: '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d02', input },
+      deps(fetchImpl),
+    );
+    expect(result.envelope).toMatchObject({
+      status: 'native',
+      reason: 'the input carries a credential-shaped value, so nothing was sent',
+    });
+    expect(calls).toHaveLength(0);
+  });
+
+  it('refuses an input with no id before anything is sent', async () => {
+    const { fetchImpl, calls } = net([]);
+    const result = await runRequestTool({ input: { text: 'whoosh' } }, deps(fetchImpl));
+    expect(result.envelope).toMatchObject({ status: 'needs_input' });
+    expect(calls).toHaveLength(0);
+  });
+
+  it('refuses an input over the server cap before anything is sent', async () => {
+    const { fetchImpl, calls } = net([]);
+    const result = await runRequestTool(
+      { id: '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d02', input: { text: 'x'.repeat(17_000) } },
+      deps(fetchImpl),
+    );
+    expect(result.envelope).toMatchObject({ status: 'needs_input' });
+    expect(calls).toHaveLength(0);
+  });
+
+  /** A FILE IS SAVED, NOT INLINED: the result names the file, its type and size. */
+  it('saves a binary body to a file and returns where it is', async () => {
+    const audio = new Uint8Array([0x49, 0x44, 0x33, 0x04, 0x00, 0xff, 0xfb, 0x90]);
+    const { fetchImpl } = net([
+      { url: ROUTER, status: 200, body: await wire('wire-lookup-execute-discovered.json') },
+      { url: SELLER, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge() } },
+      {
+        url: SELLER,
+        status: 200,
+        body: null,
+        raw: audio,
+        headers: { 'content-type': 'audio/mpeg' },
+      },
+    ]);
+    const result = await runRequestTool(
+      { id: '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d02', input: { text: 'whoosh' } },
+      { ...deps(fetchImpl), now: () => 1_700_000_000_000 },
+    );
+    expect(result.envelope).toMatchObject({
+      status: 'fulfilled',
+      cost: ['provider price 0.01 USD'],
+      result: { contentType: 'audio/mpeg', bytes: audio.byteLength },
+    });
+    // The capability, the time, and a random suffix: never another call's file.
+    const savedTo = (result.envelope.result as { savedTo: string }).savedTo;
+    expect(
+      savedTo.startsWith(join(dir, 'downloads', 'discovered-bazaar-3f9c2a71-1700000000000-')),
+    ).toBe(true);
+    expect(savedTo).toMatch(/-[0-9a-f]{8}\.mp3$/);
+    expect(new Uint8Array(await readFile(savedTo))).toEqual(audio);
+  });
+
+  /** THE TX HASH IS THE PROTOCOL'S, read from the payment-response header
+   *  (v2 or v1), never from what the seller wrote in its body. */
+  it.each(['PAYMENT-RESPONSE', 'X-PAYMENT-RESPONSE'])(
+    'reports the settlement tx from the %s header',
+    async (header) => {
+      const tx = `0x${'ab'.repeat(32)}`;
+      const settle = Buffer.from(
+        JSON.stringify({ success: true, transaction: tx, network: 'eip155:8453', payer: '0x1' }),
+      ).toString('base64');
+      const { fetchImpl } = net([
+        { url: ROUTER, status: 200, body: await wire('wire-lookup-execute-discovered.json') },
+        { url: SELLER, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge() } },
+        {
+          url: SELLER,
+          status: 200,
+          body: { transaction: `0x${'cd'.repeat(32)}` },
+          headers: { [header]: settle },
+        },
+      ]);
+      const result = await runRequestTool(
+        { id: '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d02', input: { text: 'whoosh' } },
+        deps(fetchImpl),
+      );
+      expect(result.envelope).toMatchObject({ status: 'fulfilled', settlementTxHash: tx });
+    },
+  );
+
+  it('reports no tx when the seller sent no payment-response header', async () => {
+    const { fetchImpl } = net([
+      { url: ROUTER, status: 200, body: await wire('wire-lookup-execute-discovered.json') },
+      { url: SELLER, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge() } },
+      { url: SELLER, status: 200, body: { transaction: `0x${'cd'.repeat(32)}` } },
+    ]);
+    const result = await runRequestTool(
+      { id: '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d02', input: { text: 'whoosh' } },
+      deps(fetchImpl),
+    );
+    expect(result.envelope.settlementTxHash).toBeUndefined();
+  });
+
+  /** THE USER'S OWN RECORD: one line per paid call, with what was sent
+   *  masked and cut, the amount, the tx and the files it saved. */
+  it('appends one ledger line per paid call, and saves the media it links to', async () => {
+    const audio = new Uint8Array([0x49, 0x44, 0x33, 0x04]);
+    const tx = `0x${'ab'.repeat(32)}`;
+    const settle = Buffer.from(JSON.stringify({ success: true, transaction: tx })).toString(
+      'base64',
+    );
+    const { fetchImpl } = net([
+      { url: ROUTER, status: 200, body: await wire('wire-lookup-execute-discovered.json') },
+      { url: SELLER, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge() } },
+      {
+        url: SELLER,
+        status: 200,
+        body: {
+          audio_url: 'https://cdn.example.test/out/whoosh.mp3?sig=1',
+          page: 'https://x.test/',
+        },
+        headers: { 'PAYMENT-RESPONSE': settle },
+      },
+    ]);
+    // The media leg goes through the pinned transport, connected to the
+    // address the destination check validated.
+    const connected: { url: string; address: string }[] = [];
+    const mediaTransport: MediaTransport = async (target) => {
+      connected.push({ url: target.url.toString(), address: target.address });
+      return {
+        status: 200,
+        body: (async function* () {
+          yield audio;
+        })(),
+        discard: () => undefined,
+      };
+    };
+    const result = await runRequestTool(
+      {
+        id: '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d02',
+        input: { text: `whoosh ${'y'.repeat(5_000)}` },
+      },
+      { ...deps(fetchImpl), now: () => 1_700_000_000_000, mediaTransport },
+    );
+    expect(connected).toEqual([
+      { url: 'https://cdn.example.test/out/whoosh.mp3?sig=1', address: '93.184.216.34' },
+    ]);
+    const saved = (result.envelope.savedFiles as string[])[0]!;
+    expect(result.envelope).toMatchObject({ status: 'fulfilled', savedFiles: [saved] });
+    expect(saved).toMatch(/discovered-bazaar-3f9c2a71-1-1700000000000-[0-9a-f]{8}\.mp3$/);
+    expect(new Uint8Array(await readFile(saved))).toEqual(audio);
+    const lines = (await readFile(join(dir, 'paid', 'ledger.jsonl'), 'utf8')).trim().split('\n');
+    expect(lines).toHaveLength(1);
+    const record = JSON.parse(lines[0]!) as Record<string, unknown>;
+    expect(record).toMatchObject({
+      version: 1,
+      ts: new Date(1_700_000_000_000).toISOString(),
+      capabilityId: 'discovered:bazaar:3f9c2a71',
+      provider: 'BlockRun',
+      url: SELLER,
+      amountAtomic: '10000',
+      txHash: tx,
+      settlement: 'settled',
+      savedFiles: [saved],
+    });
+    expect(String(record.sent)).toHaveLength(4_096);
+    // The signed authorization's identity, for reconcile to ask the token about.
+    expect(record.authorization).toMatchObject({
+      from: expect.stringMatching(/^0x[0-9a-fA-F]{40}$/) as string,
+      nonce: expect.stringMatching(/^0x[0-9a-f]{64}$/) as string,
+      validBefore: expect.stringMatching(/^\d+$/) as string,
+    });
+  });
+
+  /** A SETTLEMENT LEFT UNKNOWN is resolved from the chain beside the next
+   *  lookup, which never waits for it. */
+  it('resolves an expired unknown settlement beside the next lookup', async () => {
+    const { mkdir } = await import('node:fs/promises');
+    await mkdir(join(dir, 'paid'), { recursive: true });
+    const nonce = `0x${'5'.repeat(64)}`;
+    await writeFile(
+      join(dir, 'paid', 'ledger.jsonl'),
+      `${JSON.stringify({
+        version: 1,
+        ts: '2026-01-01T00:00:00.000Z',
+        capabilityId: 'cap',
+        provider: 'Seller',
+        url: SELLER,
+        sent: 'q',
+        amountAtomic: '10000',
+        settlement: 'unknown',
+        savedFiles: [],
+        authorization: { from: `0x${'1'.repeat(40)}`, nonce, validBefore: '1700000000' },
+      })}\n`,
+    );
+    const rpcCalls: string[] = [];
+    const { fetchImpl: scripted } = net([{ url: ROUTER, status: 200, body: NATIVE }]);
+    const fetchImpl = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      if (String(input) === 'https://mainnet.base.org') {
+        if ((JSON.parse(String(init?.body)) as { method: string }).method !== 'eth_call') {
+          const now = `0x${Math.floor(Date.now() / 1000).toString(16)}`;
+          return new Response(
+            JSON.stringify({ jsonrpc: '2.0', id: 1, result: { number: '0x1', timestamp: now } }),
+          );
+        }
+        rpcCalls.push(String(init?.body));
+        return new Response(
+          JSON.stringify({ jsonrpc: '2.0', id: 1, result: `0x${'0'.repeat(63)}1` }),
+        );
+      }
+      return scripted(input, init);
+    }) as typeof fetch;
+    const result = await runRequestTool({ query: 'weather' }, deps(fetchImpl));
+    // The lookup itself does not wait for it.
+    expect(result.envelope).toMatchObject({ status: 'native' });
+    await expect
+      .poll(
+        async () =>
+          (
+            JSON.parse((await readFile(join(dir, 'paid', 'ledger.jsonl'), 'utf8')).trim()) as {
+              settlement: string;
+            }
+          ).settlement,
+      )
+      .toBe('settled');
+    expect(rpcCalls).toHaveLength(1);
+  });
+
+  it('records a paid call with no payment-response header as settlement unknown', async () => {
+    const { fetchImpl } = net([{ url: ROUTER, status: 200, body: decision() }, ...providerLegs()]);
+    await runRequestTool({ query: 'BTC and ETH price' }, deps(fetchImpl));
+    const record = JSON.parse(
+      (await readFile(join(dir, 'paid', 'ledger.jsonl'), 'utf8')).trim(),
+    ) as Record<string, unknown>;
+    expect(record).toMatchObject({ sent: 'BTC and ETH price', settlement: 'unknown' });
+    expect(record.txHash).toBeUndefined();
+  });
+
+  it('records a paid call that failed after the authorization left, settlement unknown', async () => {
+    const { fetchImpl } = net([
+      { url: ROUTER, status: 200, body: await wire('wire-lookup-execute-discovered.json') },
+      { url: SELLER, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge() } },
+      { url: SELLER, status: 500, body: { error: 'boom' } },
+    ]);
+    const result = await runRequestTool(
+      { id: '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d02', input: { text: 'whoosh' } },
+      deps(fetchImpl),
+    );
+    expect(result.envelope).toMatchObject({ status: 'failed' });
+    const record = JSON.parse(
+      (await readFile(join(dir, 'paid', 'ledger.jsonl'), 'utf8')).trim(),
+    ) as Record<string, unknown>;
+    expect(record).toMatchObject({ amountAtomic: '10000', settlement: 'unknown', savedFiles: [] });
+  });
+
+  it('skips media on a private address, and never fails the call over it', async () => {
+    const { fetchImpl, calls } = net([
+      { url: ROUTER, status: 200, body: await wire('wire-lookup-execute-discovered.json') },
+      { url: SELLER, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge() } },
+      { url: SELLER, status: 200, body: { url: 'https://10.0.0.5/a.png' } },
+    ]);
+    const result = await runRequestTool(
+      { id: '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d02', input: { text: 'whoosh' } },
+      deps(fetchImpl),
+    );
+    expect(result.envelope).toMatchObject({ status: 'fulfilled' });
+    expect(result.envelope.savedFiles).toBeUndefined();
+    expect(calls.some((c) => c.url.includes('10.0.0.5'))).toBe(false);
+  });
+
+  /** A CURATED PAGE READ OR SEARCH NEVER DOWNLOADS what its page links to. */
+  it('downloads nothing a curated result links to', async () => {
+    const connected: string[] = [];
+    const { fetchImpl } = net([
+      { url: ROUTER, status: 200, body: decision() },
+      ...providerLegs({ image: 'https://cdn.example.test/chart.png' }),
+    ]);
+    const result = await runRequestTool(
+      { query: 'BTC and ETH price' },
+      {
+        ...deps(fetchImpl),
+        mediaTransport: async (target) => {
+          connected.push(target.url.toString());
+          throw new Error('should not be called');
+        },
+      },
+    );
+    expect(result.envelope).toMatchObject({ status: 'fulfilled' });
+    expect(result.envelope.savedFiles).toBeUndefined();
+    expect(connected).toEqual([]);
+  });
+
+  it('keeps a JSON body inline, and a media link that cannot be fetched fails nothing', async () => {
+    const { fetchImpl } = net([
+      { url: ROUTER, status: 200, body: await wire('wire-lookup-execute-discovered.json') },
+      { url: SELLER, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge() } },
+      { url: SELLER, status: 200, body: { url: 'https://cdn.example.test/a.mp3' } },
+    ]);
+    const result = await runRequestTool(
+      { id: '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d02', input: { text: 'whoosh' } },
+      deps(fetchImpl),
+    );
+    expect(result.envelope.result).toBe(JSON.stringify({ url: 'https://cdn.example.test/a.mp3' }));
+  });
+
+  it.each([
+    ['audio/mpeg', 'mp3'],
+    ['audio/wav; codecs=1', 'wav'],
+    ['image/png', 'png'],
+    ['video/mp4', 'mp4'],
+    ['application/octet-stream', 'bin'],
+    ['audio/x-something+odd', 'bin'],
+    ['model/gltf-binary', 'bin'],
+    ['image/avif', 'avif'],
+    ['application/html', 'bin'],
+    ['text/html', 'bin'],
+    ['application/x-sh', 'bin'],
+  ])('names a %s file .%s', (type, ext) => {
+    expect(extensionFor(type)).toBe(ext);
   });
 });

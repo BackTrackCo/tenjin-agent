@@ -1,0 +1,106 @@
+{
+  "session_id": "3080b0f2-f873-488a-bca3-9c6f7789134f",
+  "transcript_path": "/Users/dev/.claude/projects/-Users-dev-proj/3080b0f2-f873-488a-bca3-9c6f7789134f.jsonl",
+  "cwd": "/Users/dev/proj",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "AskUserQuestion",
+  "tool_input": {
+    "questions": [
+      {
+        "question": "Where will the art go?",
+        "header": "Placement",
+        "options": [
+          {
+            "label": "OG / social card",
+            "description": "The 1200×630 preview image that appears when tenjin.sh is shared on X, Discord, or Slack"
+          },
+          {
+            "label": "Section / empty-state art",
+            "description": "Small illustrations for docs, 404, empty states, or between landing beats"
+          },
+          {
+            "label": "Replace the landing hero",
+            "description": "Swap or rethink the Hiroshige plum print"
+          },
+          {
+            "label": "Brand mark / favicon",
+            "description": "The logo mark or icon"
+          }
+        ],
+        "multiSelect": true
+      },
+      {
+        "question": "Which direction should I explore first?",
+        "header": "Style",
+        "options": [
+          {
+            "label": "Generative, code-drawn (Recommended)",
+            "description": "Abstract SVG/canvas art on light paper, e.g. an agent's request branching through a graph of tools until the router picks one. Legible, on-brand, no Japanese theme."
+          },
+          {
+            "label": "More public-domain prints",
+            "description": "Other CC0 ukiyo-e or editorial engravings that pair with the Hiroshige hero"
+          },
+          {
+            "label": "Image-model prompts",
+            "description": "I write prompts plus style references, and you generate them in Midjourney or a similar tool"
+          }
+        ],
+        "multiSelect": false
+      }
+    ]
+  },
+  "tool_response": {
+    "questions": [
+      {
+        "question": "Where will the art go?",
+        "header": "Placement",
+        "options": [
+          {
+            "label": "OG / social card",
+            "description": "The 1200×630 preview image that appears when tenjin.sh is shared on X, Discord, or Slack"
+          },
+          {
+            "label": "Section / empty-state art",
+            "description": "Small illustrations for docs, 404, empty states, or between landing beats"
+          },
+          {
+            "label": "Replace the landing hero",
+            "description": "Swap or rethink the Hiroshige plum print"
+          },
+          {
+            "label": "Brand mark / favicon",
+            "description": "The logo mark or icon"
+          }
+        ],
+        "multiSelect": true
+      },
+      {
+        "question": "Which direction should I explore first?",
+        "header": "Style",
+        "options": [
+          {
+            "label": "Generative, code-drawn (Recommended)",
+            "description": "Abstract SVG/canvas art on light paper, e.g. an agent's request branching through a graph of tools until the router picks one. Legible, on-brand, no Japanese theme."
+          },
+          {
+            "label": "More public-domain prints",
+            "description": "Other CC0 ukiyo-e or editorial engravings that pair with the Hiroshige hero"
+          },
+          {
+            "label": "Image-model prompts",
+            "description": "I write prompts plus style references, and you generate them in Midjourney or a similar tool"
+          }
+        ],
+        "multiSelect": false
+      }
+    ],
+    "answers": {
+      "Where will the art go?": "OG / social card",
+      "Which direction should I explore first?": "Can try all"
+    },
+    "annotations": {}
+  },
+  "tool_use_id": "toolu_01AskUserQuestionArtSession"
+}

@@ -129,8 +129,10 @@ describe('runConfigList', () => {
     expect(d['router.context']).toEqual({ value: 'session', source: 'default' });
     // 11 scalar keys (incl. bazaarRegistries and the two shelf keys)
     // + 3 publish.* (mode, defaultPrice, ackServerWarnings) + 7 hooks.* (one
-    // per arm) + 1 update.mode + 4 loop.* + 1 team.publicFallback + 2 router.*.
-    expect(humanLines).toHaveLength(28);
+    // per arm) + 1 update.mode + 4 loop.* + 1 team.publicFallback + 2 router.*
+    // + 1 experimental.bazaar, which ships off.
+    expect(d['experimental.bazaar']).toEqual({ value: 'off', source: 'default' });
+    expect(humanLines).toHaveLength(29);
   });
 
   it('sendMaxAmount round-trips: unset until set, decimal USD in, Money out, 0 and none valid', async () => {
@@ -316,6 +318,36 @@ describe('runConfigSet — spend keys', () => {
     const err = await caught(() => runConfigSet({ key: 'sessionBudget', value: bad }, makeCtx()));
     expect(err.code).toBe('USAGE');
     expect(err.exitCode).toBe(2);
+  });
+});
+
+describe('runConfigSet — experimental.bazaar', () => {
+  it('turns it on with the warning, and off without one', async () => {
+    const on = await runConfigSet({ key: 'experimental.bazaar', value: 'on' }, makeCtx());
+    expect(on.data).toMatchObject({ key: 'experimental.bazaar', value: 'on', source: 'file' });
+    const warning = (on.data as { warning: string }).warning;
+    expect(warning).toContain('Experimental');
+    expect(warning).toContain("Coinbase's open x402 Bazaar");
+    expect(warning).toContain('unreviewed');
+    expect(warning).toContain(
+      "short snippets of your prompts are sent to Coinbase's public Bazaar search",
+    );
+    expect(warning).toContain('payments are real');
+    expect(warning).toContain('tenjin config set experimental.bazaar off');
+    expect(on.humanLines).toContain(warning);
+    expect(await readRawFile()).toEqual({ experimental: { bazaar: 'on' } });
+    const got = await runConfigGet({ key: 'experimental.bazaar' }, makeCtx());
+    expect(got.data).toEqual({ key: 'experimental.bazaar', value: 'on', source: 'file' });
+
+    const off = await runConfigSet({ key: 'experimental.bazaar', value: 'off' }, makeCtx());
+    expect(off.data).toEqual({ key: 'experimental.bazaar', value: 'off', source: 'file' });
+  });
+
+  it('refuses anything but on or off', async () => {
+    const err = await caught(() =>
+      runConfigSet({ key: 'experimental.bazaar', value: 'yes' }, makeCtx()),
+    );
+    expect(err.code).toBe('USAGE');
   });
 });
 

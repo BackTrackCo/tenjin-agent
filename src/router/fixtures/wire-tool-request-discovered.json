@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "id": "0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d02",
+  "input": {
+    "text": "a short airy whoosh, dry, close-miked",
+    "duration_seconds": 1.2
+  },
+  "accepts": ["discovered"]
+}
