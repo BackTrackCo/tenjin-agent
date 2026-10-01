@@ -3,6 +3,7 @@ import {
   fetchJson,
   fetchFailureToCliError,
   httpRequest,
+  isBinaryContentType,
   shelfBypassHeaders,
   setTenjinIdentity,
   INSTALL_ID_HEADER,
@@ -1109,5 +1110,91 @@ describe('the install id header', () => {
     await httpRequest(`${TENJIN}/api/search`, { timeoutMs: 1000, fetchImpl });
     expect(seen[0]?.headers[INSTALL_ID_HEADER]).toBe(INSTALL);
     expect(seen[0]?.redirect).toBeUndefined();
+  });
+});
+
+describe('a binary body, kept as bytes only when asked', () => {
+  const bytes = new Uint8Array([0xff, 0xfb, 0x90, 0x00, 0x80]);
+  const fetchImpl = (async () =>
+    new Response(bytes, {
+      status: 200,
+      headers: { 'content-type': 'audio/mpeg' },
+    })) as typeof fetch;
+
+  it('returns the bytes and an empty text with binaryBody', async () => {
+    const res = await httpRequest('https://seller.example.test/a', {
+      timeoutMs: 1000,
+      fetchImpl,
+      binaryBody: true,
+    });
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.bytes).toEqual(bytes);
+    expect(res.text).toBe('');
+    expect(res.json).toBeUndefined();
+  });
+
+  it('refuses a binary body over the cap, read in chunks and never buffered whole', async () => {
+    let pulled = 0;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulled += 1;
+        if (pulled > 100) throw new Error('read past the cap');
+        controller.enqueue(new Uint8Array(4));
+      },
+    });
+    const endless = (async () =>
+      new Response(stream, {
+        status: 200,
+        headers: { 'content-type': 'audio/mpeg' },
+      })) as typeof fetch;
+    const res = await httpRequest('https://seller.example.test/a', {
+      timeoutMs: 1000,
+      fetchImpl: endless,
+      binaryBody: true,
+      maxBinaryBytes: 10,
+    });
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.message).toContain('over the');
+    expect(pulled).toBeLessThan(10);
+  });
+
+  it('refuses a declared length over the cap without reading it', async () => {
+    const declared = (async () =>
+      new Response(new Uint8Array(16), {
+        status: 200,
+        headers: { 'content-type': 'image/png', 'content-length': '16' },
+      })) as typeof fetch;
+    const res = await httpRequest('https://seller.example.test/a', {
+      timeoutMs: 1000,
+      fetchImpl: declared,
+      binaryBody: true,
+      maxBinaryBytes: 8,
+    });
+    expect(res.ok).toBe(false);
+  });
+
+  it('reads text as before without it', async () => {
+    const res = await httpRequest('https://seller.example.test/a', { timeoutMs: 1000, fetchImpl });
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.bytes).toBeUndefined();
+    expect(res.text.length).toBeGreaterThan(0);
+  });
+
+  it.each([
+    ['audio/mpeg', true],
+    ['image/png', true],
+    ['application/octet-stream', true],
+    ['application/pdf', true],
+    ['application/json; charset=utf-8', false],
+    ['application/problem+json', false],
+    ['text/html', false],
+    ['application/xml', false],
+    ['image/svg+xml', false],
+    ['', false],
+  ])('%s is binary: %s', (type, binary) => {
+    expect(isBinaryContentType(type)).toBe(binary);
   });
 });

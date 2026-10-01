@@ -1,5 +1,34 @@
 # tenjin-cli
 
+## 0.1.0-alpha.20
+
+### Patch Changes
+
+- 4b61f7a: Requests to Tenjin now carry a `tenjin-install-id` header: a random, anonymous
+  id minted once and stored at `~/.tenjin/install-id`. It is sent only to Tenjin,
+  never to a provider or a team shelf, and Tenjin uses it to count installs and
+  router usage. A file that cannot be read or written only drops the header.
+- ce30bbd: A router `request` the provider refused now says why. When the provider answers
+  a non-2xx status, before or after payment, the tool's failure envelope carries
+  `providerStatus` and `providerError`: the first 500 characters of the provider's
+  body, redacted and on one plain line, whether or not it is JSON, and marked as
+  untrusted provider content like the rest of the envelope. Before this, a paid
+  call Firecrawl answered 403 on reached the agent with neither the status as a
+  field nor the provider's reason, so a refused target read like an outage.
+  `tenjin pay` carries the same `providerError` in its error details. Settlement
+  on a paid failure is still reported as unknown.
+- ce30bbd: The pre-call router hook now keeps its promise that a redirected WebSearch or
+  WebFetch is not redirected again. It kept one "last redirect" per agent and let
+  any next offer in the same category spend it, so with parallel calls one call's
+  redirect was used up by another and the agent's own retry was denied again: the
+  same URL could be denied three times in a row. Each redirect now claims its exact
+  search, or its URL as parsed, for that agent, one file per claim so parallel hook
+  processes never share a record. A retry of the same search or URL runs as it is
+  for ten minutes, whether the redirected lookup succeeded, failed or was never
+  called, and two parallel copies of one call are denied once. Every other search
+  or URL still gets its own first redirect, and the main agent and each subagent
+  keep their own claims.
+
 ## 0.1.0-alpha.19
 
 ### Minor Changes

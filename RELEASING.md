@@ -29,7 +29,10 @@ To cut a release (two clicks):
    `package.json`, regenerates `CHANGELOG.md`) and opens the
    **"chore(release): version packages"** PR. Nothing is published yet.
 2. **Review and merge** that PR (its final state is what ships; edit the version
-   or changelog directly if needed).
+   or changelog directly if needed). Its CI fails on any high `pnpm audit`
+   advisory, the same check the publish gate runs: merge the `bot/audit-fix` PR
+   that the daily `audit` workflow opens (or dispatch that workflow to open
+   one), then update the version PR from `main`.
 3. **Dispatch (click 2)**: same path. With no pending changesets, the `publish`
    job builds, runs the check suite plus `pnpm audit` plus the packed-artifact
    smoke as a pre-publish gate, then `changeset publish` ships `tenjin-cli` with

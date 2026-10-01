@@ -44,6 +44,19 @@ const DurableSpendSchema = z.object({
 });
 export type DurableSpend = z.infer<typeof DurableSpendSchema>;
 
+/**
+ * ONE TRANSMITTED AUTHORIZATION, by its EIP-3009 nonce: what it exposed and
+ * when, so a payment the chain later proves was never charged can give back
+ * exactly its own amount inside the window it was counted in.
+ */
+const ExposureSchema = z.object({
+  nonce: z.string(),
+  amountAtomic: z.string().regex(/^\d+$/),
+  atMs: z.number(),
+  mode: z.enum(['automatic', 'manual']).optional(),
+});
+export type Exposure = z.infer<typeof ExposureSchema>;
+
 const LedgerSchema = z.object({
   schemaVersion: z.literal(2),
   windowStartMs: z.number(),
@@ -66,6 +79,9 @@ const LedgerSchema = z.object({
   reservations: z.array(ReservationSchema),
   /** Unreconciled executor exposure never expires with the daily window. */
   durable: z.array(DurableSpendSchema).max(4096).optional(),
+  /** Optional so a ledger an older build wrote still parses; such a ledger
+   *  simply has nothing a reconcile can release. */
+  exposures: z.array(ExposureSchema).optional(),
 });
 export type Ledger = z.infer<typeof LedgerSchema>;
 

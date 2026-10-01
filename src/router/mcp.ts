@@ -55,6 +55,8 @@ const INSTRUCTIONS =
   'company/person/email lookups). When one fits, a hook line names the service and how ' +
   'to call it: at the start of a turn, in place of a WebSearch or WebFetch call, after ' +
   'one comes back short, or in a delegated task. ' +
+  'Before asking the user to get an API key or account for a one-off task, call it with ' +
+  'that operation: it can find a pay-per-call service. ' +
   `${SCOPE_RULE} Call it alone and wait for its result. Deciding what to ` +
   'route is free; a wallet on THIS machine pays the provider under the local spend ' +
   'policy. Enabled repository retrieval needs a fresh hook id for this approved root; it sends committed tracked source to the configured supplier within a whole-search budget. Uncommitted and untracked files require native tools. Never enable disclosure or change budgets without explicit user consent. An amount over the cap or an exhausted budget returns `needs_approval` ' +
@@ -112,11 +114,15 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
       _meta: { [MAX_RESULT_SIZE_KEY]: MAX_RESULT_SIZE_CHARS },
       description: INSTRUCTIONS,
       inputSchema: {
+        // OPTIONAL ONLY FOR `input`: a discovered service's call carries the
+        // object the service takes instead. Every other call still needs it,
+        // and the handler answers `needs_input` when neither is there.
         query: z
           .string()
+          .optional()
           .describe(
             `${SCOPE_RULE} Carry the inputs and constraints your task gives for that lookup, ` +
-              'and nothing else. ALWAYS send this, with or without an id.',
+              'and nothing else. ALWAYS send this, with or without an id, unless you send `input`.',
           ),
         id: z
           .string()
@@ -126,9 +132,16 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
               'offered, and a call carrying it runs that service on your query. Leave it out ' +
               'for a different task, and the lookup is decided from the query alone.',
           ),
+        input: z
+          .record(z.string(), z.unknown())
+          .optional()
+          .describe(
+            'Only when a line named a pay-per-call service and its input: the JSON object that ' +
+              'service takes, built from the input schema the line gave, sent with its id.',
+          ),
       },
     },
-    async ({ query, id }, extra): Promise<CallToolResult> => {
+    async ({ query, id, input }, extra): Promise<CallToolResult> => {
       const progressToken = extra._meta?.progressToken;
       let progress = 0;
       const onProgress = (message: string) => {
@@ -152,7 +165,11 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
       const authorizer =
         opts.handlerDeps?.authorizer ?? resolveSpendAuthorizer(ctx, settings.policy);
       const result = await runRequestTool(
-        { query, ...(id !== undefined ? { id } : {}) },
+        {
+          ...(query !== undefined ? { query } : {}),
+          ...(id !== undefined ? { id } : {}),
+          ...(input !== undefined ? { input } : {}),
+        },
         {
           ctx,
           signal: AbortSignal.any([

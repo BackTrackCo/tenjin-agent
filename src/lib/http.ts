@@ -474,6 +474,59 @@ export interface HttpRequestOptions {
    * Off by default so search/outcome/publish/doctor keep normal transport.
    */
   blockRedirects?: boolean;
+  /**
+   * Keep a binary body as bytes. A sound, an image or any other non-text
+   * payload decoded as text is corrupted, so with this set a response whose
+   * content type is not text ({@link isBinaryContentType}) comes back with
+   * `bytes` and an empty `text`. The router's provider leg sets it; every other
+   * caller reads text as before.
+   */
+  binaryBody?: boolean;
+  /** The cap on such a body; over it the response is a failure, never a
+   *  buffer that grows without bound. Defaults to {@link MAX_BINARY_BODY_BYTES}. */
+  maxBinaryBytes?: number;
+}
+
+/** The same cap the router's linked-media download uses. */
+export const MAX_BINARY_BODY_BYTES = 200 * 1024 * 1024;
+
+/**
+ * The body's bytes, read chunk by chunk and abandoned the moment they pass
+ * `max`; null over the cap. A declared length over it is refused unread.
+ */
+async function readCapped(res: Response, max: number): Promise<Uint8Array | null> {
+  const declared = Number(res.headers.get('content-length') ?? '0');
+  if (Number.isFinite(declared) && declared > max) {
+    await res.body?.cancel().catch(() => undefined);
+    return null;
+  }
+  if (res.body === null) return new Uint8Array();
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > max) {
+      await reader.cancel().catch(() => undefined);
+      return null;
+    }
+    chunks.push(value);
+  }
+  return new Uint8Array(Buffer.concat(chunks));
+}
+
+/**
+ * A content type whose body is not text: anything that is not `text/*` and
+ * not a JSON, XML, JavaScript, YAML or form type. An absent header is text, as
+ * it always was here.
+ */
+export function isBinaryContentType(contentType: string | undefined): boolean {
+  const type = (contentType ?? '').split(';')[0]!.trim().toLowerCase();
+  if (type.length === 0) return false;
+  if (type.startsWith('text/')) return false;
+  return !/(?:json|xml|javascript|ecmascript|yaml|x-www-form-urlencoded)/.test(type);
 }
 
 export interface HttpResponse {
@@ -485,6 +538,9 @@ export interface HttpResponse {
   json: unknown;
   /** The raw body text; what a non-JSON endpoint actually said (`pay` delivers it). */
   text: string;
+  /** The body's bytes, only for a binary body read with `binaryBody`; `text`
+   *  is then empty. */
+  bytes?: Uint8Array;
   requestId?: string;
 }
 
@@ -616,8 +672,24 @@ export async function httpRequest(url: string, opts: HttpRequestOptions): Promis
     // HTML error page) yields `undefined` rather than a thrown parse, because a
     // 402/409 caller keys off the STATUS and only some statuses carry JSON.
     let text: string;
+    let bytes: Uint8Array | undefined;
     try {
-      text = await res.text();
+      if (opts.binaryBody === true && isBinaryContentType(res.headers.get('content-type') ?? '')) {
+        const read = await readCapped(res, opts.maxBinaryBytes ?? MAX_BINARY_BODY_BYTES);
+        if (read === null) {
+          return {
+            ok: false,
+            kind: 'network',
+            status: res.status,
+            ...(requestId !== undefined ? { requestId } : {}),
+            message: `Request to ${url} returned a file over the ${Math.round((opts.maxBinaryBytes ?? MAX_BINARY_BODY_BYTES) / 1_048_576)} MB cap; it was not kept.`,
+          };
+        }
+        bytes = read;
+        text = '';
+      } else {
+        text = await res.text();
+      }
     } catch (err) {
       if (timedOut) return timeoutFailure(url, opts.timeoutMs);
       return {
@@ -642,6 +714,7 @@ export async function httpRequest(url: string, opts: HttpRequestOptions): Promis
       header: (name) => res.headers.get(name) ?? undefined,
       json,
       text,
+      ...(bytes !== undefined ? { bytes } : {}),
       ...(requestId !== undefined ? { requestId } : {}),
     };
   } finally {
