@@ -1128,6 +1128,9 @@ describe('a discovered service', () => {
     ['audio/x-something+odd', 'bin'],
     ['model/gltf-binary', 'bin'],
     ['image/avif', 'avif'],
+    ['application/html', 'bin'],
+    ['text/html', 'bin'],
+    ['application/x-sh', 'bin'],
   ])('names a %s file .%s', (type, ext) => {
     expect(extensionFor(type)).toBe(ext);
   });

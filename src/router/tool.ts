@@ -435,8 +435,8 @@ function paidRecord(
   };
 }
 
-/** Extensions for the file types a paid lookup plausibly returns; any other
- *  type keeps a short subtype of its own, or `bin`. */
+/** Extensions for the media types a paid lookup plausibly returns; any other
+ *  type, `text/html` from a seller included, is saved as `.bin`. */
 const EXTENSIONS: Record<string, string> = {
   'audio/mpeg': 'mp3',
   'audio/mp3': 'mp3',
@@ -452,6 +452,10 @@ const EXTENSIONS: Record<string, string> = {
   'image/gif': 'gif',
   'image/webp': 'webp',
   'image/svg+xml': 'svg',
+  'image/avif': 'avif',
+  'audio/mp4': 'm4a',
+  'audio/x-m4a': 'm4a',
+  'video/quicktime': 'mov',
   'video/mp4': 'mp4',
   'video/webm': 'webm',
   'application/pdf': 'pdf',
@@ -461,10 +465,7 @@ const EXTENSIONS: Record<string, string> = {
 
 export function extensionFor(contentType: string): string {
   const type = contentType.split(';')[0]!.trim().toLowerCase();
-  const known = EXTENSIONS[type];
-  if (known !== undefined) return known;
-  const subtype = type.split('/')[1] ?? '';
-  return /^[a-z0-9]{1,10}$/.test(subtype) ? subtype : 'bin';
+  return EXTENSIONS[type] ?? 'bin';
 }
 
 /**
