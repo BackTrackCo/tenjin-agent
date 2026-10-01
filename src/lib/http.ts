@@ -482,6 +482,39 @@ export interface HttpRequestOptions {
    * caller reads text as before.
    */
   binaryBody?: boolean;
+  /** The cap on such a body; over it the response is a failure, never a
+   *  buffer that grows without bound. Defaults to {@link MAX_BINARY_BODY_BYTES}. */
+  maxBinaryBytes?: number;
+}
+
+/** The same cap the router's linked-media download uses. */
+export const MAX_BINARY_BODY_BYTES = 200 * 1024 * 1024;
+
+/**
+ * The body's bytes, read chunk by chunk and abandoned the moment they pass
+ * `max`; null over the cap. A declared length over it is refused unread.
+ */
+async function readCapped(res: Response, max: number): Promise<Uint8Array | null> {
+  const declared = Number(res.headers.get('content-length') ?? '0');
+  if (Number.isFinite(declared) && declared > max) {
+    await res.body?.cancel().catch(() => undefined);
+    return null;
+  }
+  if (res.body === null) return new Uint8Array();
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > max) {
+      await reader.cancel().catch(() => undefined);
+      return null;
+    }
+    chunks.push(value);
+  }
+  return new Uint8Array(Buffer.concat(chunks));
 }
 
 /**
@@ -642,7 +675,17 @@ export async function httpRequest(url: string, opts: HttpRequestOptions): Promis
     let bytes: Uint8Array | undefined;
     try {
       if (opts.binaryBody === true && isBinaryContentType(res.headers.get('content-type') ?? '')) {
-        bytes = new Uint8Array(await res.arrayBuffer());
+        const read = await readCapped(res, opts.maxBinaryBytes ?? MAX_BINARY_BODY_BYTES);
+        if (read === null) {
+          return {
+            ok: false,
+            kind: 'network',
+            status: res.status,
+            ...(requestId !== undefined ? { requestId } : {}),
+            message: `Request to ${url} returned a file over the ${Math.round((opts.maxBinaryBytes ?? MAX_BINARY_BODY_BYTES) / 1_048_576)} MB cap; it was not kept.`,
+          };
+        }
+        bytes = read;
         text = '';
       } else {
         text = await res.text();

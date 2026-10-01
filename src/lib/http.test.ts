@@ -1134,6 +1134,47 @@ describe('a binary body, kept as bytes only when asked', () => {
     expect(res.json).toBeUndefined();
   });
 
+  it('refuses a binary body over the cap, read in chunks and never buffered whole', async () => {
+    let pulled = 0;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulled += 1;
+        if (pulled > 100) throw new Error('read past the cap');
+        controller.enqueue(new Uint8Array(4));
+      },
+    });
+    const endless = (async () =>
+      new Response(stream, {
+        status: 200,
+        headers: { 'content-type': 'audio/mpeg' },
+      })) as typeof fetch;
+    const res = await httpRequest('https://seller.example.test/a', {
+      timeoutMs: 1000,
+      fetchImpl: endless,
+      binaryBody: true,
+      maxBinaryBytes: 10,
+    });
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.message).toContain('over the');
+    expect(pulled).toBeLessThan(10);
+  });
+
+  it('refuses a declared length over the cap without reading it', async () => {
+    const declared = (async () =>
+      new Response(new Uint8Array(16), {
+        status: 200,
+        headers: { 'content-type': 'image/png', 'content-length': '16' },
+      })) as typeof fetch;
+    const res = await httpRequest('https://seller.example.test/a', {
+      timeoutMs: 1000,
+      fetchImpl: declared,
+      binaryBody: true,
+      maxBinaryBytes: 8,
+    });
+    expect(res.ok).toBe(false);
+  });
+
   it('reads text as before without it', async () => {
     const res = await httpRequest('https://seller.example.test/a', { timeoutMs: 1000, fetchImpl });
     expect(res.ok).toBe(true);
