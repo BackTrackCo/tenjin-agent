@@ -30,16 +30,19 @@ import {
 import { runRequestTool } from './tool';
 import type { PrefetchJob } from './augment';
 
-/** Real WebFetch results (`tool_response`): shells, and pages that read fine. */
+interface WebFetchSample {
+  url: string;
+  tool_response: { bytes: number; code: number; result: string; url: string };
+}
+
+/** Real WebFetch results (`tool_response`): shells, pages that read fine, and
+ *  a PDF it saved whole. */
 const webFetchSamples = JSON.parse(
   readFileSync(
     fileURLToPath(new URL('./fixtures/harness/claude-WebFetch-results.json', import.meta.url)),
     'utf8',
   ),
-) as Record<
-  'shell' | 'page',
-  { url: string; tool_response: { bytes: number; code: number; result: string; url: string } }[]
->;
+) as Record<'shell' | 'page', WebFetchSample[]> & { pdf: WebFetchSample };
 
 /** What `tenjin install` writes (`ROUTER_DEFAULTS`): 0.25 a call, auto. */
 const ROUTER_POLICY = { maxAutoSpend: '250000', sessionBudget: '5000000', confirm: 'above:250000' };
@@ -472,6 +475,54 @@ describe('the shortfall hook', () => {
       reason: 'no_main_content',
     });
     expect(out.response).toMatchObject({ hookSpecificOutput: { hookEventName: 'PostToolUse' } });
+  });
+
+  /**
+   * A PDF IS READ FOR FREE. WebFetch's summary of arxiv.org/pdf/1706.03762
+   * said it could not parse the binary, but the harness saved the file whole
+   * and `Read` returns every page. The line says so, and nothing is asked.
+   */
+  it('points at the PDF WebFetch saved, free, and asks the router nothing', async () => {
+    const { fetchImpl, calls } = router(withHint(SHORTFALL_HINT));
+    const pdf = webFetchSamples.pdf;
+    const out = await runShortfallHook(
+      {
+        ...((await readableEvent(pdf.url, 'WebFetch')) as object),
+        tool_response: pdf.tool_response,
+      },
+      { dataDir: dir, baseUrl: BASE, fetchImpl },
+    );
+    expect(calls).toHaveLength(0);
+    expect(out).toEqual({
+      response: {
+        hookSpecificOutput: {
+          hookEventName: 'PostToolUse',
+          additionalContext:
+            `${HINT_SOURCE}: WebFetch's summary cannot read a PDF, but it saved this one whole to ` +
+            '/Users/dev/.claude/projects/-Users-dev-proj/3080b0f2-f873-488a-bca3-9c6f7789134f/' +
+            'tool-results/webfetch-1790892522380-pxva9y.pdf. Read that file for its text, free ' +
+            '(pass pages, such as "1-10", for a long one).',
+        },
+      },
+      savedPdf: true,
+    });
+    expect(
+      shortfallOf({ hook_event_name: 'PostToolUse', tool_name: 'WebFetch', ...pdf }),
+    ).toBeNull();
+  });
+
+  it('says nothing about a saved PDF where the router is off', async () => {
+    const fs = await import('node:fs/promises');
+    await fs.writeFile(join(dir, 'config.json'), JSON.stringify({ router: { enabled: false } }));
+    const pdf = webFetchSamples.pdf;
+    const out = await runShortfallHook(
+      {
+        ...((await readableEvent(pdf.url, 'WebFetch')) as object),
+        tool_response: pdf.tool_response,
+      },
+      { dataDir: dir, baseUrl: BASE, fetchImpl: router(EXECUTE).fetchImpl },
+    );
+    expect(out).toEqual({ response: null });
   });
 
   it('offers the lookup after a failed call, carrying its error', async () => {

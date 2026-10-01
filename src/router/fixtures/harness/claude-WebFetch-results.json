@@ -1,5 +1,5 @@
 {
-  "about": "Real WebFetch tool_response objects from Claude Code 2.1.x transcripts (the PostToolUse payload's tool_response). `result` is WebFetch's summary, not the page. `shell`: pages that came back with no main content; `page`: pages that came back fine, chosen because their openings carry the words a looser rule would trip on. A `page` result over 700 characters is cut there on a word boundary; the detector reads only the first 600.",
+  "about": "Real WebFetch tool_response objects from Claude Code 2.1.x transcripts (the PostToolUse payload's tool_response). `result` is WebFetch's summary, not the page. `shell`: pages that came back with no main content; `page`: pages that came back fine, chosen because their openings carry the words a looser rule would trip on. A `page` result over 700 characters is cut there on a word boundary; the detector reads only the first 600. `pdf`: a PDF WebFetch saved whole, its home directory and session renamed.",
   "shell": [
     {
       "url": "https://www.greptile.com/docs/code-review-bot/customization",
@@ -223,5 +223,16 @@
         "url": "https://docs.composio.dev/docs/how-composio-works.md"
       }
     }
-  ]
+  ],
+  "pdf": {
+    "url": "https://arxiv.org/pdf/1706.03762",
+    "tool_response": {
+      "bytes": 2215244,
+      "code": 200,
+      "codeText": "OK",
+      "result": "I appreciate your question, but I'm unable to extract the specific information you're requesting from the provided content. The text appears to be a PDF document with compressed/encoded stream data that isn't readable in its current form.\n\nTo answer your questions about:\n- BLEU scores for the big Transformer on WMT 2014 English-to-German and English-to-French (Table 2)\n- Row labels from Table 3\n\nI would need access to a readable version of the document, such as a plain text or properly formatted PDF that displays the tables clearly.\n\nIf you have access to the original paper or a readable version, please share that, and I'll be happy to provide the specific values and labels you're seeking.\n\n[Binary content (application/pdf, 2.1MB) also saved to /Users/dev/.claude/projects/-Users-dev-proj/3080b0f2-f873-488a-bca3-9c6f7789134f/tool-results/webfetch-1790892522380-pxva9y.pdf]",
+      "durationMs": 3061,
+      "url": "https://arxiv.org/pdf/1706.03762"
+    }
+  }
 }

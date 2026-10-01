@@ -67,3 +67,31 @@ export function readsAsEmptyPage(result: string): boolean {
   const opening = result.slice(0, OPENING_CHARS);
   return EMPTY_PAGE_PATTERNS.some((pattern) => pattern.test(opening));
 }
+
+/**
+ * The note Claude Code appends as the result's last line when the body was
+ * binary: `[Binary content (application/pdf, 2.1MB) also saved to <path>]`.
+ */
+const SAVED_PDF_RE =
+  /\n\[Binary content \(application\/pdf, [^)\n]{1,24}\) also saved to ([^\]\n]+)\]\s*$/;
+/** How WebFetch names the file it saved, in the session's `tool-results`. */
+const SAVED_PDF_NAME_RE = /[\\/]tool-results[\\/]webfetch-\d+-[a-z0-9]+\.pdf$/i;
+const PARENT_SEGMENT_RE = /(?:^|[\\/])\.\.(?:[\\/]|$)/;
+
+/**
+ * Where WebFetch saved the PDF it fetched, or null. Its summary cannot read a
+ * PDF (it is handed the compressed bytes: arxiv.org/pdf/1706.03762 came back
+ * as "a corrupted or binary PDF file that I cannot parse"), but the file it
+ * saved is whole, and `Read` parses its pages for free.
+ *
+ * Trusted only as the result's LAST line and only for a file named the way
+ * WebFetch names one, so a summary quoting a page that says otherwise cannot
+ * point the agent at any other file.
+ */
+export function savedPdfOf(result: string): string | null {
+  const path = SAVED_PDF_RE.exec(result)?.[1];
+  if (path === undefined || !SAVED_PDF_NAME_RE.test(path) || PARENT_SEGMENT_RE.test(path)) {
+    return null;
+  }
+  return path;
+}

@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { readsAsEmptyPage } from './fetch-result';
+import { readsAsEmptyPage, savedPdfOf } from './fetch-result';
 
 interface Sample {
   url: string;
@@ -14,7 +14,7 @@ const samples = JSON.parse(
     fileURLToPath(new URL('./fixtures/harness/claude-WebFetch-results.json', import.meta.url)),
     'utf8',
   ),
-) as { shell: Sample[]; page: Sample[] };
+) as { shell: Sample[]; page: Sample[]; pdf: Sample };
 
 describe('readsAsEmptyPage', () => {
   /**
@@ -68,5 +68,32 @@ describe('readsAsEmptyPage', () => {
     ['nothing', ''],
   ])('reads %s as a page', (_label, result) => {
     expect(readsAsEmptyPage(result)).toBe(false);
+  });
+});
+
+describe('savedPdfOf', () => {
+  const pdf = samples.pdf.tool_response.result;
+  const saved =
+    '/Users/dev/.claude/projects/-Users-dev-proj/3080b0f2-f873-488a-bca3-9c6f7789134f/tool-results/webfetch-1790892522380-pxva9y.pdf';
+
+  /** arxiv.org/pdf/1706.03762: the summary failed, and the file is whole. */
+  it('finds the PDF WebFetch saved', () => {
+    expect(samples.pdf.tool_response.code).toBe(200);
+    expect(savedPdfOf(pdf)).toBe(saved);
+    expect(readsAsEmptyPage(pdf)).toBe(false);
+  });
+
+  it('takes the note only as the last line', () => {
+    expect(savedPdfOf(`${pdf}\nMore text after it.`)).toBeNull();
+  });
+
+  /** A summary can quote a page; the path must still be a file WebFetch named. */
+  it.each([
+    ['another file', pdf.replace(saved, '/Users/dev/.ssh/id_ed25519')],
+    ['a climb out', pdf.replace('tool-results/', 'tool-results/../../tool-results/')],
+    ['another kind', pdf.replace('application/pdf', 'image/png')],
+    ['no note', samples.page[0]!.tool_response.result],
+  ])('ignores %s', (_label, result) => {
+    expect(savedPdfOf(result)).toBeNull();
   });
 });

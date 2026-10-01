@@ -21,7 +21,7 @@ import {
   type Sealed,
 } from './context';
 import { requestDecision, ROUTER_PATH, type HookDecision } from './decision';
-import { readsAsEmptyPage } from './fetch-result';
+import { readsAsEmptyPage, savedPdfOf } from './fetch-result';
 import { GATE_TIMEOUT_MS } from './gate';
 import { REQUEST_TOOL } from './names';
 import { requestToolAccess, type AgentLookup } from './agent-tools';
@@ -180,6 +180,9 @@ export type HookEvent =
       /** A WebSearch's whole response after it ran, kept to be echoed back with
        *  free docs on top; null for anything else. */
       search: SearchResponse | null;
+      /** Where a WebFetch saved the PDF it fetched ({@link savedPdfOf}); null
+       *  for anything else. */
+      savedPdf: string | null;
     } & NativeCall)
   | {
       kind: 'delegation';
@@ -209,6 +212,7 @@ export function decodeEvent(raw: unknown): HookEvent | null {
       eventName: shortfall.data.hook_event_name,
       nativeOutcome: shortfallOf(shortfall.data),
       search: searchOf(shortfall.data),
+      savedPdf: savedPdfIn(shortfall.data),
       ...nativeCallOf(shortfall.data),
     };
   }
@@ -340,6 +344,15 @@ function searchOf(event: z.infer<typeof ShortfallEventSchema>): SearchResponse |
   return Array.isArray(raw.results) ? { raw, results: raw.results } : null;
 }
 
+/** WebFetch's `result`, when it names the PDF it saved whole. */
+function savedPdfIn(event: z.infer<typeof ShortfallEventSchema>): string | null {
+  if (event.hook_event_name !== 'PostToolUse' || event.tool_name !== 'WebFetch') return null;
+  const response = event.tool_response;
+  if (response === null || typeof response !== 'object' || Array.isArray(response)) return null;
+  const result = (response as { result?: unknown }).result;
+  return typeof result === 'string' ? savedPdfOf(result) : null;
+}
+
 function optional<K extends string>(key: K, value: string | undefined): Partial<Record<K, string>> {
   return value === undefined ? {} : ({ [key]: value } as Record<K, string>);
 }
@@ -394,6 +407,11 @@ const ONE_BLOCK =
 const ONE_BLOCK_QUESTION =
   'If this does not cover it, ask your question again: you will not be redirected twice in a row for the same question.';
 
+/** The free line after WebFetch saved a PDF its summary could not read. */
+function savedPdfHint(path: string): string {
+  return `${HINT_SOURCE}: WebFetch's summary cannot read a PDF, but it saved this one whole to ${path}. Read that file for its text, free (pass pages, such as "1-10", for a long one).`;
+}
+
 /** Where the offer sits after the free tool came back short. */
 function shortfallOffer(tool: 'WebSearch' | 'WebFetch', hint: string): string {
   return `${HINT_SOURCE}: your ${tool} call came back short. Optional: ${toolNamed(hint)}`;
@@ -426,6 +444,8 @@ export const NEAR_EMPTY_BYTES = 64;
  *
  * A search that returned unrelated links is NOT one: it looks exactly like a
  * good search from here, and guessing would put the router on every call.
+ * Nor is a PDF WebFetch saved whole: its summary fails, but `Read` opens the
+ * file for free ({@link savedPdfOf}).
  */
 export function shortfallOf(event: {
   hook_event_name: 'PostToolUse' | 'PostToolUseFailure';
@@ -455,6 +475,8 @@ export function shortfallOf(event: {
     if (!success) return null;
     if (bytes !== undefined && bytes < NEAR_EMPTY_BYTES) return outcome;
     const result = typeof fields.result === 'string' ? fields.result : '';
+    // A PDF it saved is read for free (`runShortfallHook`), never paid for.
+    if (savedPdfOf(result) !== null) return null;
     return readsAsEmptyPage(result) ? { ...outcome, reason: 'no_main_content' } : null;
   }
   const results = fields.results;
@@ -853,6 +875,8 @@ export interface ShortfallHookOutcome extends NativeHookOutcome {
   /** The pre-call arm fetched free docs for this call: they were added to its
    *  results, or there were none to add. Never an offer as well. */
   augmented?: 'added' | 'nothing';
+  /** WebFetch saved a PDF whole, and the agent was pointed at it, free. */
+  savedPdf?: true;
 }
 
 type ExecuteDecision = Extract<HookDecision, { action: 'execute' }>;
@@ -1150,7 +1174,8 @@ export async function runAskHook(raw: unknown, deps: HookDeps): Promise<NativeHo
  * shortfall ({@link shortfallOf}) asks for one free decision, with what the
  * harness reported riding in the packet as `nativeOutcome`, and only an offer
  * (`execute` or `discovered`) says anything. A call the pre-call arm already redirected is not
- * offered on again.
+ * offered on again. The one free line is a PDF WebFetch saved whole: the agent
+ * is pointed at the file, and the router is not asked.
  *
  * A SEARCH THE PRE-CALL ARM IS FETCHING FREE DOCS FOR waits for them first,
  * the one wait in the hook, bounded by `AUGMENT_WAIT_MS`. When docs came back
@@ -1191,8 +1216,33 @@ export async function runShortfallHook(
       augmented: 'added',
     };
   }
+  if (event.savedPdf !== null) return await pointAtSavedPdf(event, event.savedPdf, deps);
   const outcome = await offerOnShortfall(event, deps, augment !== null);
   return augment === null ? outcome : { ...outcome, augmented: 'nothing' };
+}
+
+/**
+ * A PDF WEBFETCH SAVED IS READ FOR FREE. Its summary was handed the compressed
+ * bytes and says it cannot parse them, but the harness saved the file whole,
+ * and `Read` returns every page. So the line says that, and the router is
+ * never asked: a paid reader would only fetch the same file again. Silent when
+ * `router.enabled` is off, like every other line this hook writes.
+ */
+async function pointAtSavedPdf(
+  event: Extract<HookEvent, { kind: 'shortfall' }>,
+  path: string,
+  deps: HookDeps,
+): Promise<ShortfallHookOutcome> {
+  if ((await routerFor(event.cwd, deps)) === null) return { response: null };
+  return {
+    response: {
+      hookSpecificOutput: {
+        hookEventName: event.eventName,
+        additionalContext: savedPdfHint(path),
+      },
+    },
+    savedPdf: true,
+  };
 }
 
 /** The shortfall route itself: ask about a call that came back short, once. */
