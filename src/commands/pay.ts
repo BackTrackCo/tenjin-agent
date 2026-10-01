@@ -3,7 +3,7 @@ import { decodePaymentRequiredHeader, decodePaymentResponseHeader } from '@x402/
 import { SIGN_IN_WITH_X } from '@x402/extensions/sign-in-with-x';
 import type { PaymentRequired, PaymentRequirements } from '@x402/core/types';
 import { verifyAgainstRegistries, type RegistryVerification } from '../lib/bazaar';
-import { readUsdcBalance } from '../lib/usdc-balance';
+import { readUsdcBalance, rememberingBalanceReader } from '../lib/usdc-balance';
 import { assertPublicDestination, type DestinationOptions } from '../lib/destination';
 import { CliError } from '../lib/errors';
 import { validateResultBody, type ResultCheck } from '../lib/request-schema';
@@ -417,7 +417,9 @@ async function executePay(
     if (amountAtomic > 0n) {
       // One retry across a rate-limit interval, within the original read deadline.
       const deadline = Date.now() + ctx.flags.timeout;
-      const readBalance = deps.readBalance ?? readUsdcBalance;
+      // A failed read falls back to one made in the last minute, before the
+      // retry: a rate-limited RPC refused a funded wallet's payment.
+      const readBalance = deps.readBalance ?? rememberingBalanceReader(ctx.dataDir);
       let balance = await readBalance(signer.address, settings.rpcUrl, {
         timeoutMs: Math.max(1, Math.floor(ctx.flags.timeout / 2)),
       });

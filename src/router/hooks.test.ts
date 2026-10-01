@@ -1028,6 +1028,15 @@ describe('a wallet that cannot cover the lookup', () => {
     expect(after.response).toBeNull();
   });
 
+  /** Base's public RPC refuses the sixth `eth_call` in a second, which a
+   *  burst of parallel lookups reaches: a minute-old read stands. */
+  it('reads the balance once for a burst of lookups', async () => {
+    const deps = { dataDir: dir, baseUrl: BASE, fetchImpl: router(EXECUTE).fetchImpl };
+    expect((await runNativeHook(await preCall('https://x.test/a'), deps)).response).not.toBeNull();
+    expect((await runNativeHook(await preCall('https://x.test/b'), deps)).response).not.toBeNull();
+    expect(rpcCalls).toHaveLength(1);
+  });
+
   it.each([
     ['answers 500', async () => new Response('nope', { status: 500 })],
     [

@@ -6,6 +6,10 @@
  * the send path and re-exports the address from here.
  */
 
+import { readFile } from 'node:fs/promises';
+import { writeFileAtomic } from './atomic-json';
+import { balanceCachePath } from './paths';
+
 // Values mirror the app's lib/chain.ts Base mainnet entry (chain 8453).
 export const USDC_ADDRESS = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
 
@@ -48,6 +52,71 @@ export async function readUsdcBalance(
     if (!res.ok) return null;
     const result = ((await res.json()) as { result?: unknown } | null)?.result;
     return typeof result === 'string' && WORD_RE.test(result) ? BigInt(result) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * How long a balance read is remembered. Base's public RPC refuses the sixth
+ * `eth_call` in a second, which a burst of parallel lookups reaches, and a
+ * failed read stopped a funded wallet's payment ("no payment was signed") and
+ * left the hooks waiting on a timeout. A minute carries a burst past that;
+ * what the wallet could have spent since is a few cents.
+ */
+export const LAST_KNOWN_BALANCE_MS = 60_000;
+
+/**
+ * {@link readUsdcBalance} with the last read it made for this address beside
+ * it. A read that fails returns the remembered balance while it is under
+ * {@link LAST_KNOWN_BALANCE_MS} old, rather than nothing. With
+ * `preferRemembered`, a remembered balance is returned without asking the RPC
+ * at all: the hooks' read only decides whether to offer, and the payment reads
+ * the chain again. The RPC URL is never stored, since it can embed a key.
+ */
+export function rememberingBalanceReader(
+  dataDir: string,
+  opts: { preferRemembered?: boolean; now?: () => number; read?: typeof readUsdcBalance } = {},
+): typeof readUsdcBalance {
+  const read = opts.read ?? readUsdcBalance;
+  const now = opts.now ?? Date.now;
+  const path = balanceCachePath(dataDir);
+  return async (address, rpcUrl, readOpts) => {
+    const remembered = await recallBalance(path, address, now());
+    if (opts.preferRemembered === true && remembered !== null) return remembered;
+    const live = await read(address, rpcUrl, readOpts);
+    if (live === null) return remembered;
+    const record = {
+      version: 1,
+      address: address.toLowerCase(),
+      atomic: live.toString(),
+      at: now(),
+    };
+    try {
+      await writeFileAtomic(path, JSON.stringify(record), { mode: 0o600, dirMode: 0o700 });
+    } catch {
+      // A cache that cannot be written is a cache that is not used.
+    }
+    return live;
+  };
+}
+
+/** The remembered balance for this address while it is fresh, else null. */
+async function recallBalance(path: string, address: string, now: number): Promise<bigint | null> {
+  try {
+    const row = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown> | null;
+    if (
+      row?.version !== 1 ||
+      row.address !== address.toLowerCase() ||
+      typeof row.atomic !== 'string' ||
+      !/^\d{1,40}$/.test(row.atomic) ||
+      typeof row.at !== 'number' ||
+      now - row.at < 0 ||
+      now - row.at > LAST_KNOWN_BALANCE_MS
+    ) {
+      return null;
+    }
+    return BigInt(row.atomic);
   } catch {
     return null;
   }

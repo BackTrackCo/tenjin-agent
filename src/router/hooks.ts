@@ -8,7 +8,7 @@ import { walletPath } from '../lib/paths';
 import { evaluateSpendPolicy } from '../lib/policy';
 import { resolveContextSettings } from '../lib/settings';
 import { readSpendSummary, spentOf } from '../lib/spend-ledger';
-import { readUsdcBalance } from '../lib/usdc-balance';
+import { rememberingBalanceReader } from '../lib/usdc-balance';
 import type { CommandContext } from '../context';
 import {
   buildNativePacket,
@@ -590,7 +590,13 @@ async function spendShortfall(
   if ((deps.env ?? process.env).TENJIN_WALLET_KEY?.trim()) return null;
   const address = await walletAddress(deps.dataDir);
   if (address === null) return null;
-  const balance = await readUsdcBalance(address, rpcUrl, {
+  // A balance read in the last minute stands: a burst of parallel lookups
+  // otherwise asks the public RPC once each, past its rate limit.
+  const readBalance = rememberingBalanceReader(deps.dataDir, {
+    preferRemembered: true,
+    ...(deps.now !== undefined ? { now: deps.now } : {}),
+  });
+  const balance = await readBalance(address, rpcUrl, {
     timeoutMs: Math.min(BALANCE_TIMEOUT_MS, deadline - (deps.now?.() ?? Date.now())),
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   });
