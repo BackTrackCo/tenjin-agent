@@ -142,8 +142,10 @@ export async function runRequestTool(
   await footer.routing();
   const settings = await resolveContextSettings(deps.ctx);
   // SETTLEMENTS EARLIER CALLS LEFT UNKNOWN, resolved a few at a time from the
-  // chain. It reads a local file and, only when one is due, the RPC.
-  await reconcilePayments(deps.ctx.dataDir, {
+  // chain, BESIDE the lookup and never in front of it: a slow or rate-limited
+  // RPC costs this call nothing, and a record it could not answer for waits
+  // `RECHECK_MS` before it is asked about again. Its own errors are its own.
+  void reconcilePayments(deps.ctx.dataDir, {
     rpcUrl: settings.rpcUrl,
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
     ...(deps.now !== undefined ? { now: deps.now } : {}),

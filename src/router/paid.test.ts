@@ -8,6 +8,7 @@ import {
   MAX_SENT_CHARS,
   mediaUrlsIn,
   pinnedLookup,
+  RECHECK_MS,
   reconcilePayments,
   recordedSent,
   saveMedia,
@@ -313,6 +314,31 @@ describe('resolving a settlement left unknown', () => {
       'unknown',
       'unknown',
     ]);
+    // BACKOFF: the two the RPC could not answer for are stamped, and the
+    // lookup-time pass leaves them alone until RECHECK_MS has passed.
+    expect((await read())[3]!.lastCheckedAt).toBe(new Date(NOW).toISOString());
+    const recheckCalls: string[] = [];
+    const soon = await reconcilePayments(dir, {
+      rpcUrl: RPC,
+      fetchImpl: rpc(new Set(), recheckCalls),
+      now: () => NOW + 60_000,
+    });
+    expect(soon.checked).toBe(0);
+    expect(recheckCalls).toHaveLength(0);
+    const later = await reconcilePayments(dir, {
+      rpcUrl: RPC,
+      fetchImpl: rpc(new Set(), recheckCalls),
+      now: () => NOW + RECHECK_MS,
+    });
+    expect(later.checked).toBe(2);
+    // The command asks about every due record, however recent its last check.
+    const byHand = await reconcilePayments(dir, {
+      rpcUrl: RPC,
+      fetchImpl: rpc(new Set()),
+      now: () => NOW + RECHECK_MS,
+      recheckMs: 0,
+    });
+    expect(byHand).toMatchObject({ checked: 0, unknown: 0 });
   });
 
   it('reads nothing from the chain with no ledger at all', async () => {
@@ -400,11 +426,13 @@ describe('resolving a settlement left unknown', () => {
     const second = await reconcilePayments(dir, {
       rpcUrl: RPC,
       fetchImpl: rpc(new Set()),
-      now: () => NOW,
+      now: () => NOW + RECHECK_MS,
     });
     expect(second).toMatchObject({ notCharged: 1, releasedAtomic: '50000' });
     expect((await read())[0]!.settlement).toBe('not_charged');
-    expect((await readSpendSummary(dir, { now: () => NOW }))?.committedAtomic).toBe('0');
+    expect((await readSpendSummary(dir, { now: () => NOW + RECHECK_MS }))?.committedAtomic).toBe(
+      '0',
+    );
   });
 
   it('releases nothing from a spend ledger an older build wrote', async () => {

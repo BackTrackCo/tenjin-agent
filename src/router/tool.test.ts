@@ -988,9 +988,9 @@ describe('a discovered service', () => {
     });
   });
 
-  /** A SETTLEMENT LEFT UNKNOWN is resolved at the start of the next lookup,
-   *  from the chain, before anything else is sent. */
-  it('resolves an expired unknown settlement before the next lookup', async () => {
+  /** A SETTLEMENT LEFT UNKNOWN is resolved from the chain beside the next
+   *  lookup, which never waits for it. */
+  it('resolves an expired unknown settlement beside the next lookup', async () => {
     const { mkdir } = await import('node:fs/promises');
     await mkdir(join(dir, 'paid'), { recursive: true });
     const nonce = `0x${'5'.repeat(64)}`;
@@ -1020,12 +1020,20 @@ describe('a discovered service', () => {
       }
       return scripted(input, init);
     }) as typeof fetch;
-    await runRequestTool({ query: 'weather' }, deps(fetchImpl));
+    const result = await runRequestTool({ query: 'weather' }, deps(fetchImpl));
+    // The lookup itself does not wait for it.
+    expect(result.envelope).toMatchObject({ status: 'native' });
+    await expect
+      .poll(
+        async () =>
+          (
+            JSON.parse((await readFile(join(dir, 'paid', 'ledger.jsonl'), 'utf8')).trim()) as {
+              settlement: string;
+            }
+          ).settlement,
+      )
+      .toBe('settled');
     expect(rpcCalls).toHaveLength(1);
-    const record = JSON.parse(
-      (await readFile(join(dir, 'paid', 'ledger.jsonl'), 'utf8')).trim(),
-    ) as Record<string, unknown>;
-    expect(record.settlement).toBe('settled');
   });
 
   it('records a paid call with no payment-response header as settlement unknown', async () => {

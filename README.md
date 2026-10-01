@@ -164,7 +164,7 @@ tenjin uninstall               # remove the Claude Code setup; your wallet stays
 
 Use `tenjin install --project` to set it up for a single project. Add `--json` to any command for machine-readable output.
 
-Every paid lookup is recorded on your machine in `~/.tenjin/paid/ledger.jsonl`: what was sent (masked), who was paid, how much, the settlement transaction, and any files saved. Files a paid lookup returns, and media files a paid third-party service links to, are saved under `~/.tenjin/downloads/`. When a seller never confirmed settlement, `tenjin payments reconcile` asks USDC on Base whether the payment was used once it has expired, and one that was never charged goes back to today's limit; the `request` tool does the same for up to three before each lookup.
+Every paid lookup is recorded on your machine in `~/.tenjin/paid/ledger.jsonl`: what was sent (masked), who was paid, how much, the settlement transaction, and any files saved. Files a paid lookup returns, and media files a paid third-party service links to, are saved under `~/.tenjin/downloads/`. When a seller never confirmed settlement, `tenjin payments reconcile` asks USDC on Base whether the payment was used once it has expired, and one that was never charged goes back to today's limit; the `request` tool does the same for up to three beside each lookup, without waiting for it.
 
 <details>
 <summary>Status line: keeping your own</summary>

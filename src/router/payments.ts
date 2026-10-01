@@ -29,6 +29,8 @@ export async function runPaymentsReconcile(
   const outcome = await reconcilePayments(ctx.dataDir, {
     rpcUrl: settings.rpcUrl,
     max: MAX_COMMAND_CHECKS,
+    // Asked for by hand: every due record, however recently it was asked about.
+    recheckMs: 0,
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
     ...(deps.now !== undefined ? { now: deps.now } : {}),
   });

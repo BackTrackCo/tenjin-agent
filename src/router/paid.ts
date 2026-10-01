@@ -44,6 +44,9 @@ export interface PaidRecord {
   settlement: Settlement;
   savedFiles: string[];
   authorization?: SignedAuthorization;
+  /** When reconcile last asked the chain about it, so a slow or rate-limited
+   *  RPC is not asked about the same record on every lookup. */
+  lastCheckedAt?: string;
 }
 
 export const MAX_SENT_CHARS = 4_096;
@@ -90,6 +93,9 @@ const AUTHORIZATION_STATE_SELECTOR = '0xe94a0102';
 const WORD_RE = /^0x[0-9a-fA-F]{64}$/;
 /** How many unknown settlements one pass asks the chain about. */
 export const MAX_RECONCILE_CHECKS = 3;
+/** How long a record the chain could not answer for waits before it is asked
+ *  about again by the lookup-time pass. */
+export const RECHECK_MS = 10 * 60_000;
 const RECONCILE_TIMEOUT_MS = 1_500;
 
 /**
@@ -148,7 +154,8 @@ export interface ReconcileOutcome {
  * authorization's `validBefore` has passed, the token's own
  * `authorizationState(from, nonce)` is final: used means charged, unused means
  * it can never be charged. At most `max` records are asked about per pass, and
- * a record the RPC cannot answer for stays unknown for the next one.
+ * a record the RPC cannot answer for stays unknown, stamped `lastCheckedAt`,
+ * and is not asked about again for `recheckMs`.
  *
  * The chain is asked outside the lock; the file is re-read and rewritten under
  * it, so an append made meanwhile is kept.
@@ -161,6 +168,8 @@ export async function reconcilePayments(
     now?: () => number;
     max?: number;
     timeoutMs?: number;
+    /** Defaults to {@link RECHECK_MS}; the command passes 0. */
+    recheckMs?: number;
   },
 ): Promise<ReconcileOutcome> {
   const path = paidLedgerPath(dataDir);
@@ -170,14 +179,19 @@ export async function reconcilePayments(
     (entry): entry is { line: string; record: PaidRecord } =>
       entry.record !== null && entry.record.settlement === 'unknown',
   );
+  const recheckMs = opts.recheckMs ?? RECHECK_MS;
   const due = open.filter(
     ({ record }) =>
-      record.authorization !== undefined && Number(record.authorization.validBefore) * 1_000 < now,
+      record.authorization !== undefined &&
+      Number(record.authorization.validBefore) * 1_000 < now &&
+      (record.lastCheckedAt === undefined || now - Date.parse(record.lastCheckedAt) >= recheckMs),
   );
   const answers = new Map<string, Settlement>();
+  const asked = new Set<string>();
   let checked = 0;
   for (const { record } of due.slice(0, opts.max ?? MAX_RECONCILE_CHECKS)) {
     checked += 1;
+    asked.add(record.authorization!.nonce);
     const used = await authorizationUsed(record.authorization!, opts.rpcUrl, {
       ...(opts.fetchImpl !== undefined ? { fetchImpl: opts.fetchImpl } : {}),
       ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
@@ -198,21 +212,22 @@ export async function reconcilePayments(
     if (released === null) answers.delete(nonce);
     else releasedAtomic += released;
   }
-  if (answers.size > 0) {
+  if (asked.size > 0) {
     await withFileLock(`${path}.lock`, async () => {
       const current = parseLedger(await readFile(path, 'utf8').catch(() => ''));
       const lines = current.map(({ line, record }) => {
-        const answer =
+        const nonce =
           record?.settlement === 'unknown' && record.authorization !== undefined
-            ? answers.get(record.authorization.nonce)
+            ? record.authorization.nonce
             : undefined;
-        return answer === undefined
-          ? line
-          : JSON.stringify({
-              ...record,
-              settlement: answer,
-              reconciledAt: new Date(now).toISOString(),
-            });
+        if (nonce === undefined || !asked.has(nonce)) return line;
+        const answer = answers.get(nonce);
+        const stamp = new Date(now).toISOString();
+        return JSON.stringify(
+          answer === undefined
+            ? { ...record, lastCheckedAt: stamp }
+            : { ...record, settlement: answer, lastCheckedAt: stamp, reconciledAt: stamp },
+        );
       });
       await writeFileAtomic(path, lines.map((line) => `${line}\n`).join(''), { mode: 0o600 });
     });
