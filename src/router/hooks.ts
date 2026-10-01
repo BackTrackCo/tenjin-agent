@@ -400,6 +400,10 @@ function attributed(hint: string): string {
 const ONE_BLOCK =
   'If this does not cover it, make your own call again: you will not be redirected twice in a row for the same search or URL.';
 
+/** The same promise, for a question the ask arm redirected. */
+const ONE_BLOCK_QUESTION =
+  'If this does not cover it, ask your question again: you will not be redirected twice in a row for the same question.';
+
 /** Where the offer sits after the free tool came back short. */
 function shortfallOffer(tool: 'WebSearch' | 'WebFetch', hint: string): string {
   return `${HINT_SOURCE}: your ${tool} call came back short. Optional: ${toolNamed(hint)}`;
@@ -843,6 +847,9 @@ async function routeNativeCall(
     repeated?: () => Promise<boolean>;
     passFree?: boolean;
     operation?: 'prompt' | 'search';
+    /** False where a discovered offer must be affordable as it stands: the
+     *  call it would replace is the one way to reach the user. */
+    canAskUser?: boolean;
   } = {},
 ): Promise<
   | { offer: OfferDecision; free?: undefined }
@@ -912,7 +919,12 @@ async function routeNativeCall(
     await footer.close(outcome, { withheld: 'free lookup, call runs' });
     return { offer: outcome, free: true, baseUrl: resolveBaseUrl(deps, router.config) };
   }
-  const vetted = await vetOffer(outcome, deps, deadline, event.agentId === undefined);
+  const vetted = await vetOffer(
+    outcome,
+    deps,
+    deadline,
+    event.agentId === undefined && opts.canAskUser !== false,
+  );
   if (vetted.withheld !== undefined) {
     await footer.close(outcome, { withheld: vetted.withheld });
     return { offer: null, outcome: { response: null, action: outcome.action, withheld: true } };
@@ -1001,7 +1013,7 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
  * Deny the call once with the server's line: the redirect both pre-call arms
  * make, after `routeNativeCall` has claimed its target ({@link claimRedirect}).
  */
-function redirect(offer: OfferDecision): NativeHookOutcome {
+function redirect(offer: OfferDecision, oneBlock = ONE_BLOCK): NativeHookOutcome {
   return {
     response: {
       hookSpecificOutput: {
@@ -1010,7 +1022,7 @@ function redirect(offer: OfferDecision): NativeHookOutcome {
         // THE SERVER'S LINE, attributed and tool-named, then this client's one
         // sentence. The line already carries the id and the exact search, URL
         // or question that was denied.
-        permissionDecisionReason: `${attributed(offer.hint)} ${ONE_BLOCK}`,
+        permissionDecisionReason: `${attributed(offer.hint)} ${oneBlock}`,
       },
     },
     action: offer.action,
@@ -1023,10 +1035,15 @@ function redirect(offer: OfferDecision): NativeHookOutcome {
  * ASK THE USER FOR SOMETHING, often an API key or an account for a one-off
  * step, which is the moment a pay-per-call service could answer instead. The
  * questions and their options ride as the pending call, and an offer denies
- * the question once with the server's line, under exactly the pre-call arm's
- * rules: the spend policy and the wallet first, never twice for the same
+ * the question once with the server's line: never twice for the same
  * question, and a free offer never denies anything. The host can ask again,
  * and that question runs.
+ *
+ * AN OFFER THE CALL COULD NOT MAKE GOOD ON ALONE NEVER TAKES THE QUESTION'S
+ * PLACE. Elsewhere a discovered offer over the cap or the balance is shown
+ * with a note telling the host to ask the user first; here the question IS
+ * the asking, so denying it to say "ask the user" strands the turn. Any
+ * shortfall, curated or discovered, withholds the offer and the question runs.
  */
 export async function runAskHook(raw: unknown, deps: HookDeps): Promise<NativeHookOutcome> {
   const event = decodeEvent(raw);
@@ -1036,6 +1053,7 @@ export async function runAskHook(raw: unknown, deps: HookDeps): Promise<NativeHo
   const routed = await routeNativeCall(event, event.pending, deps, {
     passFree: true,
     operation: 'prompt',
+    canAskUser: false,
     repeated: async () =>
       !(await claimRedirect(deps.dataDir, event.sessionId, event.agentId, target, deps.now?.())),
   });
@@ -1043,7 +1061,7 @@ export async function runAskHook(raw: unknown, deps: HookDeps): Promise<NativeHo
   if (routed.free === true) {
     return { response: null, action: routed.offer.action, id: routed.offer.id, free: true };
   }
-  return redirect(routed.offer);
+  return redirect(routed.offer, ONE_BLOCK_QUESTION);
 }
 
 /**

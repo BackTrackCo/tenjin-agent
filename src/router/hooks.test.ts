@@ -124,6 +124,9 @@ const SEEN = HINT_SOURCE + ': ' + HINT.replace('request({', 'mcp__x402__request(
 /** The one sentence this client adds, to a pre-call redirect only. */
 const ONE_BLOCK =
   'If this does not cover it, make your own call again: you will not be redirected twice in a row for the same search or URL.';
+/** The ask arm's form of it, about the question. */
+const ONE_BLOCK_QUESTION =
+  'If this does not cover it, ask your question again: you will not be redirected twice in a row for the same question.';
 /** A pre-call redirect's reason: the line as the host sees it, then that sentence. */
 const DENIED = `${SEEN} ${ONE_BLOCK}`;
 
@@ -2901,7 +2904,7 @@ describe('a question to the user', () => {
       hookSpecificOutput: {
         hookEventName: 'PreToolUse',
         permissionDecision: 'deny',
-        permissionDecisionReason: `${SEEN_LINE} ${ONE_BLOCK}`,
+        permissionDecisionReason: `${SEEN_LINE} ${ONE_BLOCK_QUESTION}`,
       },
     });
     const second = await runAskHook(await askEvent(), {
@@ -2927,9 +2930,31 @@ describe('a question to the user', () => {
       hookSpecificOutput: {
         hookEventName: 'PreToolUse',
         permissionDecision: 'deny',
-        permissionDecisionReason: DENIED,
+        permissionDecisionReason: `${SEEN} ${ONE_BLOCK_QUESTION}`,
       },
     });
+  });
+
+  /**
+   * AN OFFER IT COULD NOT PAY FOR NEVER TAKES THE QUESTION'S PLACE. A fresh
+   * install's empty wallet, or a price over the cap, would turn the deny into
+   * "ask the user", which the denied question already was: the question runs.
+   */
+  it.each([
+    ['an empty wallet', { balance: 0n }],
+    ['a price over the cap', { config: { ...ROUTER_POLICY, maxAutoSpend: '50000' } }],
+  ])('lets the question run with %s', async (_label, setup) => {
+    if ('balance' in setup) rpcAnswer = setup.balance;
+    if ('config' in setup) {
+      const fs = await import('node:fs/promises');
+      await fs.writeFile(join(dir, 'config.json'), JSON.stringify(setup.config));
+    }
+    const out = await runAskHook(await askEvent(), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl: router(DISCOVERED).fetchImpl,
+    });
+    expect(out).toEqual({ response: null, action: 'discovered', withheld: true });
   });
 
   it('never denies it for a free offer', async () => {
