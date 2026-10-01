@@ -481,11 +481,36 @@ function parseRows(raw: string, scope: RowScope): PacketMessage[] {
 const LOCAL_COMMAND_OUTPUT = /^\s*<local-command-(?:stdout|stderr)>/;
 
 /**
- * A `type: "user"` row the user never typed. The harness writes two kinds
- * without `isMeta`: a background task or subagent finishing
- * (`origin.kind: "task-notification"`, text `<task-notification>…`) and a
- * local command's output (`<local-command-stdout>`). Both carry tool output,
- * so neither can be the user's words, and neither can become `current`. A
+ * A turn the harness or another agent wrote, not the user: a background task
+ * finishing, a subagent's hand-back or a teammate's message, a message from
+ * another session. It hands work back; it asks for none, and routing it offers
+ * a lookup nobody requested. The prompt hook skips these and the transcript
+ * reader drops them, from this one list.
+ */
+const HANDBACK_PREFIXES = [
+  '<task-notification>',
+  '<agent-message',
+  '<teammate-message',
+  '<cross-session-message',
+  'Another Claude session sent a message',
+];
+
+export function isHandback(text: string): boolean {
+  const trimmed = text.trimStart();
+  return HANDBACK_PREFIXES.some((prefix) => trimmed.startsWith(prefix));
+}
+
+/** The `origin.kind` of a user row another agent or the harness wrote. */
+const HARNESS_ORIGINS = new Set(['task-notification', 'peer']);
+
+/**
+ * A `type: "user"` row the user never typed. The harness writes these without
+ * `isMeta`: a background task finishing (`origin.kind: "task-notification"`),
+ * a subagent's hand-back or another session's message (`origin.kind: "peer"`,
+ * text `Another Claude session sent a message:` then `<agent-message …>`), and
+ * a local command's output (`<local-command-stdout>`). None is the user's
+ * words, and none can become `current`: a hand-back read as this turn put a
+ * subagent's report in place of the user's own instruction. A
  * `<command-name>` row stays: that is the command the user did type.
  */
 function harnessUserRow(row: Record<string, unknown>, text: string): boolean {
@@ -493,11 +518,11 @@ function harnessUserRow(row: Record<string, unknown>, text: string): boolean {
   if (
     origin !== null &&
     typeof origin === 'object' &&
-    (origin as { kind?: unknown }).kind === 'task-notification'
+    HARNESS_ORIGINS.has((origin as { kind?: unknown }).kind as string)
   ) {
     return true;
   }
-  return text.trimStart().startsWith('<task-notification>') || LOCAL_COMMAND_OUTPUT.test(text);
+  return isHandback(text) || LOCAL_COMMAND_OUTPUT.test(text);
 }
 
 function ownSidechainRow(row: Record<string, unknown>, agentId: string): boolean {

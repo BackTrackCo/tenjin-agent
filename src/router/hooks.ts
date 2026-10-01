@@ -13,6 +13,7 @@ import type { CommandContext } from '../context';
 import {
   buildNativePacket,
   buildPromptPacket,
+  isHandback,
   seal,
   type NativeOutcome,
   type Packet,
@@ -348,20 +349,6 @@ const ACKNOWLEDGEMENTS = new Set(['y', 'yes', 'ok', 'okay', 'continue', 'go', 's
 export type PromptSkip = 'slash' | 'acknowledgement' | 'handback';
 
 /**
- * A turn the harness or another agent wrote, not the user: a background task
- * finishing, a subagent's or teammate's message, a message from another
- * session. It hands work back; it asks for none, and routing it offers a
- * lookup nobody requested.
- */
-const HANDBACK_PREFIXES = [
-  '<task-notification>',
-  '<agent-message',
-  '<teammate-message',
-  '<cross-session-message',
-  'Another Claude session sent a message',
-];
-
-/**
  * Prompts that cannot need a lookup, decided locally with no network call. Any
  * OTHER short prompt still goes to the backend: `2^1000`, a bare URL and a task
  * typed without spaces can all need one, and a computation has no later
@@ -369,7 +356,8 @@ const HANDBACK_PREFIXES = [
  */
 export function promptSkipReason(prompt: string): PromptSkip | null {
   const trimmed = prompt.trim();
-  if (HANDBACK_PREFIXES.some((prefix) => trimmed.startsWith(prefix))) return 'handback';
+  // A hand-back from the harness or another agent ({@link isHandback}).
+  if (isHandback(trimmed)) return 'handback';
   if (trimmed.startsWith('/')) return 'slash';
   const normalized = trimmed.toLowerCase().replace(/[.!,]+$/, '');
   return ACKNOWLEDGEMENTS.has(normalized) ? 'acknowledgement' : null;

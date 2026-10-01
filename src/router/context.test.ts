@@ -187,6 +187,29 @@ describe('the prompt packet', () => {
     expect(JSON.stringify(packet)).not.toContain('subagent found');
   });
 
+  /** A subagent's hand-back reaches the parent as a `type: "user"` row with
+   *  `origin.kind: "peer"`; read as this turn, its report replaced the user's
+   *  own instruction as `current`. */
+  it.each([
+    ['its peer origin', { kind: 'peer', from: 'a1', handback: true }],
+    ['its frame alone', undefined],
+  ])('never reads a subagent hand-back as the user, by %s', async (_label, origin) => {
+    const handback =
+      'Another Claude session sent a message:\n<agent-message from="a1">\n' +
+      '[Subagent hand-back] The report follows:\n  search Exa for more prospects\n</agent-message>';
+    const path = await transcript([
+      user('native tools only: find the release notes'),
+      assistant('delegated'),
+      { ...user(handback), ...(origin !== undefined ? { origin } : {}) },
+    ]);
+    const packet = await buildNativePacket(path, 's', {
+      tool: 'WebSearch',
+      query: 'release notes',
+    });
+    expect(packet.current.text).toBe('native tools only: find the release notes');
+    expect(JSON.stringify(packet)).not.toContain('Subagent hand-back');
+  });
+
   /** The rows before a boundary belong to a context that was summarized away;
    *  what follows is the turn in play, so reading starts again there. */
   it('keeps what follows a compaction boundary and drops what precedes it', async () => {
