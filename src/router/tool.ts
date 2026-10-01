@@ -19,6 +19,7 @@ import {
   saveMedia,
   createUniqueFile,
   maskDeep,
+  writeAll,
   type MediaTransport,
   type PaidRecord,
   type SignedAuthorization,
@@ -491,7 +492,7 @@ async function saveBinary(
       extensionFor(opts.contentType),
     );
     try {
-      await file.handle.write(bytes);
+      await writeAll(file.handle, bytes);
     } finally {
       await file.handle.close();
     }

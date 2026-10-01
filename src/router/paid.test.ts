@@ -12,6 +12,7 @@ import {
   reconcilePayments,
   recordedSent,
   saveMedia,
+  writeAll,
   type MediaTransport,
 } from './paid';
 import { runPaymentsReconcile } from './payments';
@@ -34,6 +35,35 @@ describe('what the ledger records as sent', () => {
     const sent = recordedSent(`use ${secret} ${'x'.repeat(10_000)}`);
     expect(sent).not.toContain(secret);
     expect(sent).toHaveLength(MAX_SENT_CHARS);
+  });
+});
+
+describe('writing a saved file', () => {
+  /** A handle that writes at most three bytes a call, as a short write may. */
+  function shortHandle() {
+    const written: number[] = [];
+    return {
+      written,
+      handle: {
+        write: async (buffer: Uint8Array, offset = 0, length = buffer.byteLength) => {
+          const take = Math.min(3, length);
+          written.push(...buffer.subarray(offset, offset + take));
+          return { bytesWritten: take, buffer };
+        },
+      },
+    };
+  }
+
+  it('keeps writing after a short write until every byte is down', async () => {
+    const { handle, written } = shortHandle();
+    const bytes = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    await writeAll(handle as never, bytes);
+    expect(written).toEqual([...bytes]);
+  });
+
+  it('throws on a write that makes no progress, rather than spinning', async () => {
+    const stuck = { write: async (buffer: Uint8Array) => ({ bytesWritten: 0, buffer }) };
+    await expect(writeAll(stuck as never, new Uint8Array([1]))).rejects.toThrow('no progress');
   });
 });
 

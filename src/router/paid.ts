@@ -476,7 +476,7 @@ async function saveOne(
           res.discard();
           throw new Error('media over the size cap');
         }
-        await file.handle.write(chunk);
+        await writeAll(file.handle, chunk);
       }
     } finally {
       await file.handle.close();
@@ -485,6 +485,23 @@ async function saveOne(
   } catch {
     if (path !== null) await rm(path, { force: true }).catch(() => undefined);
     return null;
+  }
+}
+
+/**
+ * EVERY BYTE, OR A THROW. `FileHandle.write` may write fewer bytes than it was
+ * handed and says so only in `bytesWritten`; a caller that ignores it saves a
+ * file with a hole in it. A write that makes no progress is an error.
+ */
+export async function writeAll(
+  handle: Pick<FileHandle, 'write'>,
+  bytes: Uint8Array,
+): Promise<void> {
+  let offset = 0;
+  while (offset < bytes.byteLength) {
+    const { bytesWritten } = await handle.write(bytes, offset, bytes.byteLength - offset);
+    if (bytesWritten <= 0) throw new Error('the file write made no progress');
+    offset += bytesWritten;
   }
 }
 
