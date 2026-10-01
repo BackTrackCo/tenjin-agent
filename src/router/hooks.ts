@@ -32,6 +32,7 @@ import {
   noteSession,
   pruneProgress,
   pruneSessions,
+  redirectClaimed,
   sessionDir,
   wasOffered,
   writeProgress,
@@ -776,8 +777,9 @@ export interface NativeHookOutcome {
   withheld?: true;
   /** No router call at all: the subagent is not known to have the request tool. */
   noRequestTool?: true;
-  /** An `execute` whose redirect was not sent: this agent was already
-   *  redirected on this same search or URL. */
+  /** No redirect: this agent was already redirected on this same search or
+   *  URL. Found before the router was asked there is no `action`; only a
+   *  parallel copy that lost the claim after its decision carries one. */
   alreadyRedirected?: true;
   /** A free offer, which the pre-call arm never redirects: the call runs. */
   free?: true;
@@ -836,7 +838,9 @@ function isFree(offer: OfferDecision): offer is ExecuteDecision {
  * agent's tool list, the packet from the right transcript, one free decision,
  * and the subagent spend rule. An `execute` that survives all of it comes back
  * as `offer`; everything else is the reason there is none. `repeated` is the
- * pre-call arm's one-block rule, asked only of an offer that would be shown.
+ * pre-call arm's one-block rule, asked only of an offer that would be shown;
+ * `redirected` is its read half, asked before the router is, so a retry the
+ * arm would only withhold costs no decision and writes no offer row.
  * `passFree` is the pre-call arm's too: a free offer comes back marked `free`,
  * with the base URL it was decided on, before the spend policy, the wallet or
  * `repeated` is asked, since it is never a redirect.
@@ -848,6 +852,7 @@ async function routeNativeCall(
   opts: {
     nativeOutcome?: NativeOutcome;
     repeated?: () => Promise<boolean>;
+    redirected?: () => Promise<boolean>;
     passFree?: boolean;
     operation?: 'prompt' | 'search';
     /** False where a discovered offer must be affordable as it stands: the
@@ -872,6 +877,15 @@ async function routeNativeCall(
     (await requestToolAccess(event.agentType, agentLookup(event.cwd, deps))) !== 'allowed'
   ) {
     return { offer: null, outcome: { response: null, noRequestTool: true } };
+  }
+  // ALREADY REDIRECTED HERE: the retry the one-block rule lets run. Asking the
+  // router first cost a gate decision and wrote an offer row nobody saw, about
+  // 45% of an active session's rows. The claim after the decision still
+  // settles two parallel copies of one call.
+  if (opts.redirected !== undefined && (await opts.redirected())) {
+    const footer = await openFooter(deps, event.sessionId, opts.operation ?? 'search');
+    await footer.close(null, { withheld: 'already redirected once' });
+    return { offer: null, outcome: { response: null, alreadyRedirected: true } };
   }
   // THE USER'S WORDS COME WITH IT. Building this from the tool argument alone
   // made the search string the whole conversation, so "native tools only, no
@@ -960,12 +974,13 @@ async function routeNativeCall(
  * A redirect leaves a mark under the call's `tool_use_id`, so the after-call
  * arm never offers on that same call.
  *
- * NEVER REDIRECTED TWICE FOR ONE TARGET. Every call is routed as usual, and a
- * redirect claims its exact search or URL for this agent first
- * ({@link claimRedirect}). An offer on a target this agent was already
- * redirected on is withheld and the call runs, however its lookup went and
- * whatever other calls ran in between: parallel calls each hold their own
- * claim, so none can spend another's. Any other target gets its own redirect.
+ * NEVER REDIRECTED TWICE FOR ONE TARGET. A redirect claims its exact search or
+ * URL for this agent first ({@link claimRedirect}). A call on a target this
+ * agent was already redirected on runs without asking the router at all
+ * ({@link redirectClaimed}), however its lookup went and whatever other calls
+ * ran in between; a parallel copy that got past that check loses the claim
+ * after its decision and runs too. Parallel calls each hold their own claim,
+ * so none can spend another's. Any other target gets its own redirect.
  *
  * A FREE OFFER IS NEVER A REDIRECT. Denying a search for the free docs lookup
  * sent the agent on a detour, and round a loop when the docs missed. The call
@@ -981,6 +996,8 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
     passFree: true,
     repeated: async () =>
       !(await claimRedirect(deps.dataDir, event.sessionId, event.agentId, target, deps.now?.())),
+    redirected: () =>
+      redirectClaimed(deps.dataDir, event.sessionId, event.agentId, target, deps.now?.()),
   });
   if (routed.offer === null) return routed.outcome;
   if (routed.free === true) {
@@ -1059,6 +1076,8 @@ export async function runAskHook(raw: unknown, deps: HookDeps): Promise<NativeHo
     canAskUser: false,
     repeated: async () =>
       !(await claimRedirect(deps.dataDir, event.sessionId, event.agentId, target, deps.now?.())),
+    redirected: () =>
+      redirectClaimed(deps.dataDir, event.sessionId, event.agentId, target, deps.now?.()),
   });
   if (routed.offer === null) return routed.outcome;
   if (routed.free === true) {

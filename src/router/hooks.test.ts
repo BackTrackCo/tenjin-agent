@@ -822,12 +822,14 @@ describe('the pre-call hook', () => {
  */
 describe('never redirected twice for one target', () => {
   const DENY = { hookSpecificOutput: { permissionDecision: 'deny' } };
-  const WITHHELD = { response: null, action: 'execute', alreadyRedirected: true };
+  /** A retry found redirected before the router is asked: no decision, no action. */
+  const WITHHELD = { response: null, alreadyRedirected: true };
   const A = 'https://example.test/spec';
   const B = 'https://example.test/other';
 
   /** One pre-call call for `subject` in `sess-1` (or as `over` says), which
-   *  the router answers with an offer. Every one of them asks the router. */
+   *  the router answers with an offer. Every one of them asks the router,
+   *  except the retry of a target already redirected, which asks nothing. */
   async function nativeCall(
     subject = A,
     over: Record<string, unknown> = {},
@@ -844,7 +846,7 @@ describe('never redirected twice for one target', () => {
       fetchImpl,
       homeDir: dir,
     });
-    expect(calls).toHaveLength(1);
+    expect(calls).toHaveLength(out.alreadyRedirected === true && out.action === undefined ? 0 : 1);
     return out;
   }
 
@@ -874,6 +876,22 @@ describe('never redirected twice for one target', () => {
     expect(await renderProgress(dir, 'sess-1')).toBe(
       'x402 · search: native tools (already redirected once)',
     );
+  });
+
+  /** The retry would only be withheld, so asking the router for it wrote an
+   *  offer row nobody saw and spent a gate decision: ~45% of a session's rows. */
+  it('asks the router nothing for the retry of a redirected call', async () => {
+    expect((await nativeCall()).response).toMatchObject(DENY);
+    const { fetchImpl, calls } = router(withHint(PRECALL_HINT));
+    const retry = await runNativeHook(await preCall(A, 'WebFetch'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+      homeDir: dir,
+    });
+    expect(retry).toEqual(WITHHELD);
+    expect(calls).toHaveLength(0);
+    expect(rpcCalls).toHaveLength(1);
   });
 
   it('keeps the promise under parallel calls: A, then B, then A again', async () => {
@@ -2634,7 +2652,7 @@ describe('a discovered service', () => {
       baseUrl: BASE,
       fetchImpl: router(DISCOVERED).fetchImpl,
     });
-    expect(again).toEqual({ response: null, action: 'discovered', alreadyRedirected: true });
+    expect(again).toEqual({ response: null, alreadyRedirected: true });
   });
 
   it('is offered after a native call that came back short', async () => {
@@ -2910,7 +2928,7 @@ describe('a question to the user', () => {
       baseUrl: BASE,
       fetchImpl: router(DISCOVERED).fetchImpl,
     });
-    expect(second).toEqual({ response: null, action: 'discovered', alreadyRedirected: true });
+    expect(second).toEqual({ response: null, alreadyRedirected: true });
     // The claim is the question's own: a different question is its own target.
     const other = await runAskHook(
       await askEvent({
