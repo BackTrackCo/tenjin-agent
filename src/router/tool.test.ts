@@ -859,6 +859,46 @@ describe('a discovered service', () => {
     expect(new Uint8Array(saved)).toEqual(audio);
   });
 
+  /** THE TX HASH IS THE PROTOCOL'S, read from the payment-response header
+   *  (v2 or v1), never from what the seller wrote in its body. */
+  it.each(['PAYMENT-RESPONSE', 'X-PAYMENT-RESPONSE'])(
+    'reports the settlement tx from the %s header',
+    async (header) => {
+      const tx = `0x${'ab'.repeat(32)}`;
+      const settle = Buffer.from(
+        JSON.stringify({ success: true, transaction: tx, network: 'eip155:8453', payer: '0x1' }),
+      ).toString('base64');
+      const { fetchImpl } = net([
+        { url: ROUTER, status: 200, body: await wire('wire-lookup-execute-discovered.json') },
+        { url: SELLER, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge() } },
+        {
+          url: SELLER,
+          status: 200,
+          body: { transaction: `0x${'cd'.repeat(32)}` },
+          headers: { [header]: settle },
+        },
+      ]);
+      const result = await runRequestTool(
+        { id: '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d02', input: { text: 'whoosh' } },
+        deps(fetchImpl),
+      );
+      expect(result.envelope).toMatchObject({ status: 'fulfilled', settlementTxHash: tx });
+    },
+  );
+
+  it('reports no tx when the seller sent no payment-response header', async () => {
+    const { fetchImpl } = net([
+      { url: ROUTER, status: 200, body: await wire('wire-lookup-execute-discovered.json') },
+      { url: SELLER, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge() } },
+      { url: SELLER, status: 200, body: { transaction: `0x${'cd'.repeat(32)}` } },
+    ]);
+    const result = await runRequestTool(
+      { id: '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d02', input: { text: 'whoosh' } },
+      deps(fetchImpl),
+    );
+    expect(result.envelope.settlementTxHash).toBeUndefined();
+  });
+
   it('keeps a JSON body inline, as before', async () => {
     const { fetchImpl } = net([
       { url: ROUTER, status: 200, body: await wire('wire-lookup-execute-discovered.json') },

@@ -242,6 +242,8 @@ export async function runRequestTool(
       /** A binary body's bytes and type, kept whole by the provider leg. */
       bodyBytes?: Uint8Array;
       contentType?: string;
+      /** From the payment-response header, when the seller sent one. */
+      settlementTxHash?: string;
       amountPaid?: { atomic: string };
       /** Set when the body missed its success rule, or the rule never ran. */
       resultUnverified?: boolean;
@@ -252,6 +254,7 @@ export async function runRequestTool(
       supplier: supplierOf(built.url),
       ...(contract.arguments !== undefined ? { parameters: contract.arguments } : {}),
       cost: costLines(providerAtomic),
+      ...(data.settlementTxHash !== undefined ? { settlementTxHash: data.settlementTxHash } : {}),
       ...(note !== undefined ? { note } : {}),
       // A FILE IS SAVED, NOT INLINED: its bytes are no use as text in a tool
       // result, so the result names where they are.

@@ -53,6 +53,8 @@ import type { CommandContext, CommandResult } from '../context';
 
 const PAYMENT_REQUIRED_HEADER = 'PAYMENT-REQUIRED';
 const PAYMENT_RESPONSE_HEADER = 'PAYMENT-RESPONSE';
+/** x402 v1's name for the same header. */
+const PAYMENT_RESPONSE_HEADER_V1 = 'X-PAYMENT-RESPONSE';
 
 /** Terminal preview cap; `--print-body` lifts it. The machine body is never cut. */
 const BODY_PREVIEW_CHARS = 1200;
@@ -938,13 +940,18 @@ function deliver(url: string, lane: Lane, res: HttpResponse, opts: DeliverOpts):
   };
 }
 
-function settlementTx(res: HttpResponse): string | undefined {
-  const header = res.header(PAYMENT_RESPONSE_HEADER);
+/**
+ * The settlement transaction the payment-response header names (v2's
+ * `PAYMENT-RESPONSE`, or v1's `X-PAYMENT-RESPONSE`): base64 JSON carrying
+ * `transaction`. Read from the protocol header only, never the seller's body.
+ */
+export function settlementTx(res: Pick<HttpResponse, 'header'>): string | undefined {
+  const header = res.header(PAYMENT_RESPONSE_HEADER) ?? res.header(PAYMENT_RESPONSE_HEADER_V1);
   if (header === undefined) return undefined;
   try {
     const settle = decodePaymentResponseHeader(header);
     const tx = (settle as { transaction?: unknown }).transaction;
-    return typeof tx === 'string' ? tx : undefined;
+    return typeof tx === 'string' && /^0x[0-9a-fA-F]{64}$/.test(tx) ? tx : undefined;
   } catch {
     return undefined;
   }
