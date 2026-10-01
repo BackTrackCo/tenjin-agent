@@ -2605,6 +2605,45 @@ describe('a discovered service', () => {
     expect(await resolveProgressSession(dir, { id: ID })).not.toBeNull();
   });
 
+  /** A LIST CAN NAME A SERVICE OVER THE CAP beside one that fits: People Data
+   *  Labs at $0.28 beside a $0.005 email finder, under the $0.25 cap, was
+   *  picked and stopped on needs_approval with no warning. */
+  describe('a list with a service over the auto-spend cap', () => {
+    const entry = (n: number, provider: string, usd: string, id: string) =>
+      `${n}) ${provider} (finds a work email), POST https://${provider.toLowerCase()}.test/x , ` +
+      `about $${usd} per call. Input: {name: string}. To use it, call request({id: "${id}", input: {...}}).`;
+    const list = (second: string) => ({
+      ...DISCOVERED,
+      decision: {
+        ...DISCOVERED.decision,
+        candidate: { ...DISCOVERED.decision.candidate, providerPriceAtomic: '5000' },
+        hint:
+          'Tenjin router found pay-per-call services for this step, no API key needed: ' +
+          `${entry(1, 'OneShot', '0.005', ID)} ${entry(2, 'PDL', second, '04d63d65-cdbb-4a30')} ` +
+          'Tenjin reviewed these listings. Use your judgement: pick one.',
+      },
+    });
+    const shown = async (body: unknown): Promise<string> => {
+      const out = await runPromptHook(promptEvent('find the email of a person'), {
+        dataDir: dir,
+        baseUrl: BASE,
+        fetchImpl: router(body).fetchImpl,
+      });
+      return (out.response as { hookSpecificOutput: { additionalContext: string } })
+        .hookSpecificOutput.additionalContext;
+    };
+
+    it('says which price is over the limit and to prefer one within it', async () => {
+      expect(await shown(list('0.28'))).toMatch(
+        / Note: \$0\.28 is above this machine's automatic per-call limit \(\$0\.25\), so request returns needs_approval for that service; prefer one within the limit, or ask the user first\.$/,
+      );
+    });
+
+    it('adds nothing when every listed service fits', async () => {
+      expect(await shown(list('0.03'))).not.toContain('Note:');
+    });
+  });
+
   /** THE TENJIN LIST IS ON BY DEFAULT; the open Bazaar is asked for only
    *  with the experiment on. */
   it('asks for the open Bazaar only with the experiment on', async () => {

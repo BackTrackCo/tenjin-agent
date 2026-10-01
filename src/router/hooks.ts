@@ -3,7 +3,7 @@ import { homedir } from 'node:os';
 import { z } from 'zod';
 import { loadRawConfig, resolveExperimentalBazaar, resolveSettings } from '../lib/config';
 import type { PartialConfig } from '../lib/config';
-import { toMoney } from '../lib/money';
+import { parseUsdToAtomic, toMoney } from '../lib/money';
 import { walletPath } from '../lib/paths';
 import { evaluateSpendPolicy } from '../lib/policy';
 import { resolveContextSettings } from '../lib/settings';
@@ -622,6 +622,11 @@ interface Shortfall {
  * service that can do the step, so it is shown with one sentence saying the
  * call needs approval or funds, and the host asks first. Where nobody can ask
  * (a subagent's call, a delegated task) it is withheld like any other.
+ *
+ * An offer that is shown can still list OTHER services beside its own: a Tenjin
+ * list menu, or an alternative after a curated line. One priced over the cap
+ * gets a sentence saying so ({@link overCapNote}), so the host picks one that
+ * runs rather than one that stops on `needs_approval`.
  */
 async function vetOffer<T extends OfferDecision>(
   offer: T,
@@ -630,11 +635,61 @@ async function vetOffer<T extends OfferDecision>(
   canAskUser: boolean,
 ): Promise<{ offer: T; withheld?: undefined } | { withheld: string }> {
   const shortfall = await spendShortfall(termsOf(offer), deps, deadline);
-  if (shortfall === null) return { offer };
+  if (shortfall === null) {
+    const note = await overCapNote(offer.hint, deps, canAskUser);
+    return { offer: note === null ? offer : { ...offer, hint: `${offer.hint} ${note}` } };
+  }
   if (offer.action === 'discovered' && canAskUser) {
     return { offer: { ...offer, hint: `${offer.hint} ${shortfall.note}` } };
   }
   return { withheld: shortfall.withheld };
+}
+
+/** How the server prices each service it lists beside the offer's own
+ *  ("about $0.28 per call"); the offer's own price is checked as a field. */
+const LISTED_PRICE_RE = /\babout \$(\d+(?:\.\d+)?)/g;
+
+/**
+ * ONE SENTENCE FOR A LISTED SERVICE OVER THE AUTO-SPEND CAP, or null. The offer
+ * itself already fits (it passed {@link spendShortfall}), so a price over the
+ * cap here is another entry: People Data Labs at $0.28 beside a $0.005 email
+ * finder, under a $0.25 cap, was picked and refused. Quiet when the hint
+ * quotes no such price or the settings cannot be read.
+ */
+async function overCapNote(
+  hint: string,
+  deps: HookDeps,
+  canAskUser: boolean,
+): Promise<string | null> {
+  const quoted = [...hint.matchAll(LISTED_PRICE_RE)].map((match) => match[1] as string);
+  if (quoted.length === 0) return null;
+  let cap: bigint;
+  try {
+    cap = (await resolveContextSettings(hookContext(deps))).policy.maxAutoSpendAtomic;
+  } catch {
+    return null;
+  }
+  const over = [
+    ...new Set(
+      quoted.filter((usd) => {
+        try {
+          return BigInt(parseUsdToAtomic(usd)) > cap;
+        } catch {
+          return false;
+        }
+      }),
+    ),
+  ];
+  if (over.length === 0) return null;
+  const prices = over.map((usd) => `$${usd}`).join(' and ');
+  const which = over.length > 1 ? 'those services' : 'that service';
+  return (
+    `Note: ${prices} ${over.length > 1 ? 'are' : 'is'} above this machine's automatic per-call limit ` +
+    `($${toMoney(cap.toString()).usd}), so request returns needs_approval for ${which}; ` +
+    (canAskUser
+      ? 'prefer one within the limit, or ask the user first.'
+      : 'use one within the limit.')
+  );
 }
 
 /**
