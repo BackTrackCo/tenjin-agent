@@ -2,7 +2,16 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { MAX_SENT_CHARS, mediaUrlsIn, reconcilePayments, recordedSent, saveMedia } from './paid';
+import {
+  createUniqueFile,
+  MAX_SENT_CHARS,
+  mediaUrlsIn,
+  pinnedLookup,
+  reconcilePayments,
+  recordedSent,
+  saveMedia,
+  type MediaTransport,
+} from './paid';
 import { runPaymentsReconcile } from './payments';
 import { readSpendSummary } from '../lib/spend-ledger';
 import { createLocalSpendAuthorizer, releaseUnchargedExposure } from '../lib/wallet/spend';
@@ -50,45 +59,113 @@ describe('the media a paid result links to', () => {
     ]);
   });
 
-  it('follows a redirect only to a public destination, and caps the size', async () => {
-    const hops: string[] = [];
-    const fetchImpl = (async (input: Parameters<typeof fetch>[0]) => {
-      hops.push(String(input));
-      if (String(input).endsWith('/start.png')) {
-        return new Response(null, {
-          status: 302,
-          headers: { location: 'https://cdn.test/real.png' },
-        });
-      }
-      if (String(input).endsWith('/big.png')) return new Response(new Uint8Array(64));
-      return new Response(new Uint8Array([1, 2, 3]));
-    }) as typeof fetch;
+  /** A scripted transport: what each hop was asked to connect to. */
+  function transport(
+    answer: (url: string) => { status: number; location?: string; body?: Uint8Array },
+  ): { transport: MediaTransport; hops: { url: string; address: string }[] } {
+    const hops: { url: string; address: string }[] = [];
+    return {
+      hops,
+      transport: async (target) => {
+        hops.push({ url: target.url.toString(), address: target.address });
+        const { status, location, body } = answer(target.url.toString());
+        const bytes = body ?? new Uint8Array();
+        return {
+          status,
+          ...(location !== undefined ? { location } : {}),
+          body: (async function* () {
+            yield bytes;
+          })(),
+          discard: () => undefined,
+        };
+      },
+    };
+  }
+
+  it('connects each hop to the address it validated, and caps the size', async () => {
+    const answers: Record<string, string> = {
+      'cdn.test': '93.184.216.34',
+      'files.test': '93.184.216.35',
+    };
+    const destination = {
+      resolveHostname: async (name: string) => [{ address: answers[name]!, family: 4 }],
+    };
+    const { transport: t, hops } = transport((url) =>
+      url.endsWith('/start.png')
+        ? { status: 302, location: 'https://files.test/real.png' }
+        : url.endsWith('/big.png')
+          ? { status: 200, body: new Uint8Array(64) }
+          : { status: 200, body: new Uint8Array([1, 2, 3]) },
+    );
     const saved = await saveMedia(
       dir,
       'cap',
       ['https://cdn.test/start.png', 'https://cdn.test/big.png'],
-      { fetchImpl, destination: PUBLIC, now: () => 7, maxBytes: 16 },
+      { transport: t, destination, now: () => 7, maxBytes: 16 },
     );
     expect(hops).toEqual([
-      'https://cdn.test/start.png',
-      'https://cdn.test/real.png',
-      'https://cdn.test/big.png',
+      { url: 'https://cdn.test/start.png', address: '93.184.216.34' },
+      { url: 'https://files.test/real.png', address: '93.184.216.35' },
+      { url: 'https://cdn.test/big.png', address: '93.184.216.34' },
     ]);
-    expect(saved).toEqual([join(dir, 'downloads', 'cap-1-7.png')]);
+    expect(saved).toHaveLength(1);
+    expect(saved[0]).toMatch(/[/\\]downloads[/\\]cap-1-7-[0-9a-f]{8}\.png$/);
     expect(new Uint8Array(await readFile(saved[0]!))).toEqual(new Uint8Array([1, 2, 3]));
   });
 
-  it('refuses a redirect to a private address', async () => {
-    const fetchImpl = (async () =>
-      new Response(null, {
-        status: 302,
-        headers: { location: 'https://127.0.0.1/a.png' },
-      })) as typeof fetch;
+  it('refuses a redirect to a private address, and never connects to it', async () => {
+    const { transport: t, hops } = transport(() => ({
+      status: 302,
+      location: 'https://127.0.0.1/a.png',
+    }));
     const saved = await saveMedia(dir, 'cap', ['https://cdn.test/a.png'], {
-      fetchImpl,
+      transport: t,
       destination: PUBLIC,
     });
     expect(saved).toEqual([]);
+    expect(hops.map((h) => h.url)).toEqual(['https://cdn.test/a.png']);
+  });
+
+  /** DNS REBINDING: the socket's lookup answers the validated address, not a
+   *  fresh resolution of the name. */
+  it('pins the connection: the lookup answers only the validated address', () => {
+    const lookup = pinnedLookup({ address: '93.184.216.34', family: 4 });
+    const one: unknown[] = [];
+    (lookup as unknown as (h: string, o: object, cb: (...a: unknown[]) => void) => void)(
+      'rebinding.test',
+      {},
+      (...args) => one.push(args),
+    );
+    const all: unknown[] = [];
+    (lookup as unknown as (h: string, o: object, cb: (...a: unknown[]) => void) => void)(
+      'rebinding.test',
+      { all: true },
+      (...args) => all.push(args),
+    );
+    expect(one).toEqual([[null, '93.184.216.34', 4]]);
+    expect(all).toEqual([[null, [{ address: '93.184.216.34', family: 4 }]]]);
+  });
+
+  /** Two lookups saving in the same millisecond each get their own file. */
+  it('never gives two saves the same file', async () => {
+    const { transport: t } = transport(() => ({ status: 200, body: new Uint8Array([9]) }));
+    const both = await Promise.all(
+      [1, 2].map(() =>
+        saveMedia(dir, 'same', ['https://cdn.test/a.png'], {
+          transport: t,
+          destination: PUBLIC,
+          now: () => 7,
+        }),
+      ),
+    );
+    const paths = both.flat();
+    expect(paths).toHaveLength(2);
+    expect(new Set(paths).size).toBe(2);
+    const a = await createUniqueFile(join(dir, 'x'), 'stem', 'bin');
+    const b = await createUniqueFile(join(dir, 'x'), 'stem', 'bin');
+    await a.handle.close();
+    await b.handle.close();
+    expect(a.path).not.toBe(b.path);
   });
 });
 

@@ -9,6 +9,7 @@ import type { SpendAuthorization, SpendAuthorizer } from '../lib/wallet';
 import type { CommandContext } from '../context';
 import { runPay } from '../commands/pay';
 import { extensionFor, runRequestTool } from './tool';
+import type { MediaTransport } from './paid';
 import { ROUTER_PATH } from './decision';
 import { bindDecision, claimRedirect, noteSession, renderProgress } from './progress';
 
@@ -836,16 +837,15 @@ describe('a discovered service', () => {
     expect(result.envelope).toMatchObject({
       status: 'fulfilled',
       cost: ['provider price 0.01 USD'],
-      result: {
-        savedTo: join(dir, 'downloads', 'discovered-bazaar-3f9c2a71-1700000000000.mp3'),
-        contentType: 'audio/mpeg',
-        bytes: audio.byteLength,
-      },
+      result: { contentType: 'audio/mpeg', bytes: audio.byteLength },
     });
-    const saved = await readFile(
-      join(dir, 'downloads', 'discovered-bazaar-3f9c2a71-1700000000000.mp3'),
-    );
-    expect(new Uint8Array(saved)).toEqual(audio);
+    // The capability, the time, and a random suffix: never another call's file.
+    const savedTo = (result.envelope.result as { savedTo: string }).savedTo;
+    expect(
+      savedTo.startsWith(join(dir, 'downloads', 'discovered-bazaar-3f9c2a71-1700000000000-')),
+    ).toBe(true);
+    expect(savedTo).toMatch(/-[0-9a-f]{8}\.mp3$/);
+    expect(new Uint8Array(await readFile(savedTo))).toEqual(audio);
   });
 
   /** THE TX HASH IS THE PROTOCOL'S, read from the payment-response header
@@ -908,23 +908,33 @@ describe('a discovered service', () => {
         },
         headers: { 'PAYMENT-RESPONSE': settle },
       },
-      {
-        url: 'https://cdn.example.test/out/whoosh.mp3?sig=1',
-        status: 200,
-        body: null,
-        raw: audio,
-        headers: { 'content-type': 'audio/mpeg' },
-      },
     ]);
+    // The media leg goes through the pinned transport, connected to the
+    // address the destination check validated.
+    const connected: { url: string; address: string }[] = [];
+    const mediaTransport: MediaTransport = async (target) => {
+      connected.push({ url: target.url.toString(), address: target.address });
+      return {
+        status: 200,
+        body: (async function* () {
+          yield audio;
+        })(),
+        discard: () => undefined,
+      };
+    };
     const result = await runRequestTool(
       {
         id: '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d02',
         input: { text: `whoosh ${'y'.repeat(5_000)}` },
       },
-      { ...deps(fetchImpl), now: () => 1_700_000_000_000 },
+      { ...deps(fetchImpl), now: () => 1_700_000_000_000, mediaTransport },
     );
-    const saved = join(dir, 'downloads', 'discovered-bazaar-3f9c2a71-1-1700000000000.mp3');
+    expect(connected).toEqual([
+      { url: 'https://cdn.example.test/out/whoosh.mp3?sig=1', address: '93.184.216.34' },
+    ]);
+    const saved = (result.envelope.savedFiles as string[])[0]!;
     expect(result.envelope).toMatchObject({ status: 'fulfilled', savedFiles: [saved] });
+    expect(saved).toMatch(/discovered-bazaar-3f9c2a71-1-1700000000000-[0-9a-f]{8}\.mp3$/);
     expect(new Uint8Array(await readFile(saved))).toEqual(audio);
     const lines = (await readFile(join(dir, 'paid', 'ledger.jsonl'), 'utf8')).trim().split('\n');
     expect(lines).toHaveLength(1);

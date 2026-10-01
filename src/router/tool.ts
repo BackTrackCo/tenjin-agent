@@ -1,5 +1,3 @@
-import { mkdir, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
 import { runPay, type AdvertisedTerms, type PayDeps } from '../commands/pay';
 import { CliError } from '../lib/errors';
 import { toMoney } from '../lib/money';
@@ -19,6 +17,8 @@ import {
   reconcilePayments,
   recordedSent,
   saveMedia,
+  createUniqueFile,
+  type MediaTransport,
   type PaidRecord,
   type SignedAuthorization,
 } from './paid';
@@ -75,6 +75,9 @@ export interface RequestToolDeps {
   cwd?: string;
   /** Clock seam for a saved file's name. */
   now?: () => number;
+  /** Test seam for the media download; production pins each connection to
+   *  the address it validated. */
+  mediaTransport?: MediaTransport;
 }
 
 export interface RequestToolResult {
@@ -288,7 +291,7 @@ export async function runRequestTool(
             decision.capabilityId,
             mediaUrlsIn(data.bodyText ?? '', MAX_MEDIA_FILES),
             {
-              ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+              ...(deps.mediaTransport !== undefined ? { transport: deps.mediaTransport } : {}),
               ...(deps.payDeps?.destination !== undefined
                 ? { destination: deps.payDeps.destination }
                 : {}),
@@ -471,15 +474,17 @@ async function saveBinary(
 ): Promise<{ savedTo?: string; saveError?: string; contentType: string; bytes: number }> {
   const described = { contentType: opts.contentType, bytes: bytes.byteLength };
   try {
-    const directory = downloadsDir(dataDir);
-    await mkdir(directory, { recursive: true });
-    const stem = capabilityId.replace(/[^A-Za-z0-9_-]+/g, '-').slice(0, 80) || 'lookup';
-    const path = join(
-      directory,
-      `${stem}-${(opts.now ?? Date.now)()}.${extensionFor(opts.contentType)}`,
+    const file = await createUniqueFile(
+      downloadsDir(dataDir),
+      `${capabilityId.slice(0, 80)}-${(opts.now ?? Date.now)()}`,
+      extensionFor(opts.contentType),
     );
-    await writeFile(path, bytes, { mode: 0o600 });
-    return { savedTo: path, ...described };
+    try {
+      await file.handle.write(bytes);
+    } finally {
+      await file.handle.close();
+    }
+    return { savedTo: file.path, ...described };
   } catch (err) {
     return { saveError: err instanceof Error ? err.message : String(err), ...described };
   }

@@ -1,8 +1,11 @@
-import { createWriteStream } from 'node:fs';
-import { appendFile, mkdir, readFile, rm } from 'node:fs/promises';
+import { randomBytes } from 'node:crypto';
+import { appendFile, mkdir, open, readFile, rm, type FileHandle } from 'node:fs/promises';
+import { request as httpsRequest } from 'node:https';
+import type { LookupFunction } from 'node:net';
 import { dirname, join } from 'node:path';
 import { writeFileAtomic } from '../lib/atomic-json';
-import { assertPublicDestination, type DestinationOptions } from '../lib/destination';
+import { resolvePublicDestination, type DestinationOptions } from '../lib/destination';
+import { hasCode } from '../lib/errno';
 import { withFileLock } from '../lib/lock';
 import { downloadsDir, paidLedgerPath } from '../lib/paths';
 import { mask } from '../lib/redact';
@@ -257,8 +260,28 @@ export function mediaUrlsIn(result: string, limit = MAX_MEDIA_FILES): string[] {
   return found;
 }
 
+/** One GET the media download makes, connected to the address it validated. */
+export interface PinnedTarget {
+  url: URL;
+  /** The address `resolvePublicDestination` checked; the socket goes here. */
+  address: string;
+  family: 4 | 6;
+}
+
+export interface MediaResponse {
+  status: number;
+  location?: string;
+  contentLength?: number;
+  body: AsyncIterable<Uint8Array>;
+  /** Drop the connection without reading the rest. */
+  discard: () => void;
+}
+
+export type MediaTransport = (target: PinnedTarget, signal: AbortSignal) => Promise<MediaResponse>;
+
 export interface MediaDeps {
-  fetchImpl?: typeof fetch;
+  /** Test seam; production connects with {@link pinnedGet}. */
+  transport?: MediaTransport;
   destination?: DestinationOptions;
   now?: () => number;
   timeoutMs?: number;
@@ -266,10 +289,59 @@ export interface MediaDeps {
 }
 
 /**
+ * CONNECT TO THE ADDRESS THAT WAS CHECKED. `fetch` resolves the name again on
+ * its own, so a host answering publicly to the check and privately a moment
+ * later (DNS rebinding) would get the request. `node:https` with a `lookup`
+ * that hands back the one validated address closes that: the socket goes to
+ * it, and TLS still verifies the certificate against the URL's own host name.
+ */
+export const pinnedGet: MediaTransport = (target, signal) =>
+  new Promise((resolve, reject) => {
+    const req = httpsRequest(
+      target.url,
+      {
+        method: 'GET',
+        signal,
+        lookup: pinnedLookup(target),
+      },
+      (res) => {
+        const length = Number(res.headers['content-length']);
+        const location = res.headers.location;
+        resolve({
+          status: res.statusCode ?? 0,
+          ...(typeof location === 'string' ? { location } : {}),
+          ...(Number.isFinite(length) ? { contentLength: length } : {}),
+          body: res,
+          discard: () => res.destroy(),
+        });
+      },
+    );
+    req.on('error', reject);
+    req.end();
+  });
+
+/** A `lookup` that answers every name with the one validated address. */
+export function pinnedLookup(target: Pick<PinnedTarget, 'address' | 'family'>): LookupFunction {
+  return ((_host: string, options: { all?: boolean }, callback: LookupCallback) => {
+    if (options.all === true) {
+      callback(null, [{ address: target.address, family: target.family }]);
+    } else {
+      callback(null, target.address, target.family);
+    }
+  }) as unknown as LookupFunction;
+}
+
+type LookupCallback = (
+  err: Error | null,
+  address: string | { address: string; family: number }[],
+  family?: number,
+) => void;
+
+/**
  * Download each URL into the downloads dir, one at a time, each under its own
- * size cap and deadline, and every hop of a redirect checked as a public
- * destination first. Returns the paths that were written; a URL that fails is
- * skipped and never fails the call.
+ * size cap and deadline, every hop of a redirect validated and connected to
+ * the address it validated. Returns the paths that were written; a URL that
+ * fails is skipped and never fails the call.
  */
 export async function saveMedia(
   dataDir: string,
@@ -291,43 +363,74 @@ async function saveOne(
   raw: string,
   deps: MediaDeps,
 ): Promise<string | null> {
-  const doFetch = deps.fetchImpl ?? fetch;
+  const transport = deps.transport ?? pinnedGet;
   const maxBytes = deps.maxBytes ?? MAX_MEDIA_BYTES;
   const signal = AbortSignal.timeout(deps.timeoutMs ?? MEDIA_TIMEOUT_MS);
   let target = raw;
   let path: string | null = null;
   try {
-    let res: Response | null = null;
+    let res: MediaResponse | null = null;
     for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
-      await assertPublicDestination(target, deps.destination ?? {});
-      res = await doFetch(target, { redirect: 'manual', signal });
-      const location = res.headers.get('location');
-      if (res.status < 300 || res.status >= 400 || location === null) break;
-      target = new URL(location, target).toString();
+      const pinned = await resolvePublicDestination(target, deps.destination ?? {});
+      res = await transport(pinned, signal);
+      if (res.status < 300 || res.status >= 400 || res.location === undefined) break;
+      res.discard();
+      target = new URL(res.location, target).toString();
       res = null;
     }
-    if (res === null || res.status < 200 || res.status >= 300 || res.body === null) return null;
-    const declared = Number(res.headers.get('content-length') ?? '0');
-    if (declared > maxBytes) return null;
+    if (res === null || res.status < 200 || res.status >= 300) {
+      res?.discard();
+      return null;
+    }
+    if ((res.contentLength ?? 0) > maxBytes) {
+      res.discard();
+      return null;
+    }
     const ext = new URL(target).pathname.split('.').pop()?.toLowerCase() ?? 'bin';
-    const name = `${stem.replace(/[^A-Za-z0-9_-]+/g, '-').slice(0, 80)}-${(deps.now ?? Date.now)()}.${MEDIA_EXTENSIONS.has(ext) ? ext : 'bin'}`;
-    const directory = downloadsDir(dataDir);
-    await mkdir(directory, { recursive: true });
-    path = join(directory, name);
-    const out = createWriteStream(path, { mode: 0o600 });
+    const file = await createUniqueFile(
+      downloadsDir(dataDir),
+      `${stem}-${(deps.now ?? Date.now)()}`,
+      MEDIA_EXTENSIONS.has(ext) ? ext : 'bin',
+    );
+    path = file.path;
     let size = 0;
     try {
-      for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
+      for await (const chunk of res.body) {
         size += chunk.byteLength;
-        if (size > maxBytes) throw new Error('media over the size cap');
-        if (!out.write(chunk)) await new Promise((resolve) => out.once('drain', resolve));
+        if (size > maxBytes) {
+          res.discard();
+          throw new Error('media over the size cap');
+        }
+        await file.handle.write(chunk);
       }
     } finally {
-      await new Promise<void>((resolve) => out.end(resolve));
+      await file.handle.close();
     }
     return path;
   } catch {
     if (path !== null) await rm(path, { force: true }).catch(() => undefined);
     return null;
+  }
+}
+
+/**
+ * A NEW FILE, NEVER ANOTHER CALL'S. The name is the stem plus a random suffix,
+ * created with an exclusive flag, so two lookups finishing in the same
+ * millisecond each get their own file; a clash is retried with a new suffix.
+ */
+export async function createUniqueFile(
+  directory: string,
+  stem: string,
+  ext: string,
+): Promise<{ path: string; handle: FileHandle }> {
+  await mkdir(directory, { recursive: true });
+  const safe = stem.replace(/[^A-Za-z0-9_-]+/g, '-').slice(0, 100) || 'lookup';
+  for (let attempt = 0; ; attempt += 1) {
+    const path = join(directory, `${safe}-${randomBytes(4).toString('hex')}.${ext}`);
+    try {
+      return { path, handle: await open(path, 'wx', 0o600) };
+    } catch (err) {
+      if (attempt >= 4 || !hasCode(err, 'EEXIST')) throw err;
+    }
   }
 }
