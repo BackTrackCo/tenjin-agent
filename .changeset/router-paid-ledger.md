@@ -8,5 +8,6 @@ with what was sent (masked), the seller, the amount, the signed
 authorization's nonce, and any files saved. Media a paid result links to is
 downloaded into `~/.tenjin/downloads/`. `tenjin payments reconcile` resolves a
 payment whose settlement was unknown from USDC's `authorizationState` once its
-authorization has expired; the `request` tool runs the same check for up to
-three before each lookup.
+authorization has expired, and gives a payment that was never charged back to
+the daily limit; the `request` tool runs the same check for up to three before
+each lookup.

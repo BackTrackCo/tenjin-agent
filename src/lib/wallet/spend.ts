@@ -88,7 +88,7 @@ export interface SpendAuthorizer {
     /** What the counterparty reported actually taking, when it said so at all.
      *  Omitted means "assume it took what was authorized", the conservative
      *  reading every caller had before the router began waiving fees. */
-    opts?: { settledAtomic?: bigint; mode?: PaymentMode },
+    opts?: { settledAtomic?: bigint; mode?: PaymentMode; nonce?: string },
   ): Promise<void>;
   /** Drop an unused reservation (a decline, a 409, or a failed payment). */
   release(reservationId: string | undefined): Promise<void>;
@@ -201,7 +201,7 @@ export function createLocalSpendAuthorizer(deps: LocalSpendAuthorizerDeps): Spen
     async commit(
       reservationId: string | undefined,
       amountAtomic: bigint,
-      opts: { settledAtomic?: bigint; mode?: PaymentMode } = {},
+      opts: { settledAtomic?: bigint; mode?: PaymentMode; nonce?: string } = {},
     ): Promise<void> {
       // Record transmitted exposure even if its reservation has expired.
       await withLedger(async (ledger) => {
@@ -216,21 +216,34 @@ export function createLocalSpendAuthorizer(deps: LocalSpendAuthorizerDeps): Spen
         // counterparty waives a fee against an authorization already sent.
         const settled = opts.settledAtomic ?? exposure;
         const settledSoFar = BigInt(ledger.settledAtomic ?? ledger.committedAtomic);
+        const mode = reservation ? (reservation.mode ?? 'automatic') : (opts.mode ?? 'automatic');
         await persist({
           ...ledger,
           committedAtomic: (BigInt(ledger.committedAtomic) + exposure).toString(),
           automaticCommittedAtomic: (
             BigInt(ledger.automaticCommittedAtomic ?? ledger.committedAtomic) +
-            ((reservation ? (reservation.mode ?? 'automatic') : (opts.mode ?? 'automatic')) ===
-            'manual'
-              ? 0n
-              : exposure)
+            (mode === 'manual' ? 0n : exposure)
           ).toString(),
           settledAtomic: (settledSoFar + settled).toString(),
           reservations:
             reservationId !== undefined
               ? ledger.reservations.filter((r) => r.id !== reservationId)
               : ledger.reservations,
+          // Keyed by the authorization's nonce, so a reconcile that proves it
+          // was never charged can release this amount and nothing else.
+          ...(opts.nonce !== undefined
+            ? {
+                exposures: [
+                  ...(ledger.exposures ?? []),
+                  {
+                    nonce: opts.nonce.toLowerCase(),
+                    amountAtomic: exposure.toString(),
+                    atMs: now(),
+                    mode,
+                  },
+                ],
+              }
+            : {}),
         });
       });
     },
@@ -245,6 +258,63 @@ export function createLocalSpendAuthorizer(deps: LocalSpendAuthorizerDeps): Spen
       });
     },
   };
+}
+
+/**
+ * GIVE BACK A PAYMENT THE CHAIN PROVED WAS NEVER CHARGED: its authorization
+ * expired unused. Exactly the exposure recorded under that nonce comes off the
+ * committed totals, once; a nonce from an earlier window, from a ledger an
+ * older build wrote, or one already released finds nothing and changes
+ * nothing. Returns the amount released.
+ */
+export async function releaseUnchargedExposure(
+  dir: string,
+  nonce: string,
+  opts: { now?: () => number; windowMs?: number } = {},
+): Promise<bigint> {
+  const path = spendLedgerPath(dir);
+  const nowMs = (opts.now ?? Date.now)();
+  try {
+    return await withFileLock(`${path}.lock`, async () => {
+      const { ledger } = await readLedger(path);
+      if (ledger === null || nowMs - ledger.windowStartMs >= (opts.windowMs ?? DEFAULT_WINDOW_MS)) {
+        return 0n;
+      }
+      const key = nonce.toLowerCase();
+      const entry = (ledger.exposures ?? []).find((e) => e.nonce === key);
+      if (entry === undefined) return 0n;
+      const amount = BigInt(entry.amountAtomic);
+      const less = (value: string | undefined, fallback: string): string => {
+        const current = BigInt(value ?? fallback);
+        return (current > amount ? current - amount : 0n).toString();
+      };
+      await writeFileAtomic(
+        path,
+        `${JSON.stringify(
+          {
+            ...ledger,
+            committedAtomic: less(ledger.committedAtomic, '0'),
+            ...(entry.mode === 'manual'
+              ? {}
+              : {
+                  automaticCommittedAtomic: less(
+                    ledger.automaticCommittedAtomic,
+                    ledger.committedAtomic,
+                  ),
+                }),
+            settledAtomic: less(ledger.settledAtomic, ledger.committedAtomic),
+            exposures: (ledger.exposures ?? []).filter((e) => e.nonce !== key),
+          },
+          null,
+          2,
+        )}\n`,
+        { mode: 0o600, dirMode: 0o700 },
+      );
+      return amount;
+    });
+  } catch {
+    return 0n;
+  }
 }
 
 export { readSpendSummary, type SpendSummary } from '../spend-ledger';

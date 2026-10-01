@@ -1,3 +1,4 @@
+import { toMoney } from '../lib/money';
 import { paidLedgerPath } from '../lib/paths';
 import { resolveContextSettings } from '../lib/settings';
 import type { CommandContext, CommandResult } from '../context';
@@ -9,9 +10,8 @@ import { reconcilePayments } from './paid';
  * same pass, three records at a time, before each lookup; this one asks about
  * up to {@link MAX_COMMAND_CHECKS}.
  *
- * A record found not charged is marked so in the ledger only. The local spend
- * ledger keeps one committed total per window and has no per-payment entry to
- * release, so the automatic budget still counts it until the window rolls.
+ * A record found not charged also gives its amount back to the daily budget,
+ * when the spend ledger still holds that payment's exposure in this window.
  */
 
 const MAX_COMMAND_CHECKS = 50;
@@ -37,7 +37,10 @@ export async function runPaymentsReconcile(
     humanLines: [
       outcome.checked === 0
         ? 'No paid lookup is waiting on its settlement.'
-        : `Checked ${outcome.checked}: ${outcome.settled} charged, ${outcome.notCharged} not charged.`,
+        : `Checked ${outcome.checked}: ${outcome.settled} charged, ${outcome.notCharged} not charged.` +
+          (outcome.releasedAtomic !== '0'
+            ? ` ${toMoney(outcome.releasedAtomic).usd} USD went back to today's limit.`
+            : ''),
       ...(outcome.unknown > 0
         ? [`${outcome.unknown} still unknown: not expired yet, or the chain could not say.`]
         : []),

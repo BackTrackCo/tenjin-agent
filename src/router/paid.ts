@@ -7,6 +7,7 @@ import { withFileLock } from '../lib/lock';
 import { downloadsDir, paidLedgerPath } from '../lib/paths';
 import { mask } from '../lib/redact';
 import { USDC_ADDRESS } from '../lib/usdc-balance';
+import { releaseUnchargedExposure } from '../lib/wallet/spend';
 
 /**
  * WHAT A PAID ROUTER CALL BOUGHT, KEPT ON THIS MACHINE. One JSON line per paid
@@ -115,6 +116,8 @@ export interface ReconcileOutcome {
   /** Still unknown: not yet expired, no authorization on record, or the RPC
    *  could not answer. */
   unknown: number;
+  /** What the not-charged payments gave back to today's automatic budget. */
+  releasedAtomic: string;
 }
 
 /**
@@ -178,12 +181,23 @@ export async function reconcilePayments(
       await writeFileAtomic(path, lines.map((line) => `${line}\n`).join(''), { mode: 0o600 });
     });
   }
+  // NOT CHARGED GIVES THE DAILY BUDGET BACK: exactly that payment's exposure,
+  // by its nonce, while it is still inside the window that counted it. Once
+  // per nonce: a second release finds nothing.
+  let releasedAtomic = 0n;
+  for (const [nonce, answer] of answers) {
+    if (answer !== 'not_charged') continue;
+    releasedAtomic += await releaseUnchargedExposure(dataDir, nonce, {
+      ...(opts.now !== undefined ? { now: opts.now } : {}),
+    });
+  }
   const settled = [...answers.values()].filter((value) => value === 'settled').length;
   return {
     checked,
     settled,
     notCharged: answers.size - settled,
     unknown: open.length - answers.size,
+    releasedAtomic: releasedAtomic.toString(),
   };
 }
 

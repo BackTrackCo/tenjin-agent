@@ -206,7 +206,10 @@ describe('runPay, tenjin lane', () => {
     expect(calls[1]!.headers['payment-signature']).toBeDefined();
     // The identical business request is retried: same body, same method.
     expect(calls[1]!.body).toBe(calls[0]!.body);
-    expect(authorizer.commit).toHaveBeenCalledWith(RESERVATION, 100000n, { mode: 'manual' });
+    expect(authorizer.commit).toHaveBeenCalledWith(RESERVATION, 100000n, {
+      mode: 'manual',
+      nonce: expect.stringMatching(/^0x[0-9a-f]{64}$/) as string,
+    });
   });
 
   // A routing decision can name a contract on the configured origin, so the
@@ -264,7 +267,10 @@ describe('runPay, tenjin lane', () => {
         authorizer,
       }),
     ).rejects.toMatchObject({ code: 'PAYMENT_FAILED' });
-    expect(authorizer.commit).toHaveBeenCalledWith(RESERVATION, 100000n, { mode: 'manual' });
+    expect(authorizer.commit).toHaveBeenCalledWith(RESERVATION, 100000n, {
+      mode: 'manual',
+      nonce: expect.stringMatching(/^0x[0-9a-f]{64}$/) as string,
+    });
     expect(authorizer.release).not.toHaveBeenCalled();
   });
 
@@ -679,7 +685,10 @@ describe('runPay, bazaar lane', () => {
       expect((err as CliError).fix).not.toMatch(/then retry/i);
     }
     expect(calls[1]!.headers['payment-signature']).toBeDefined();
-    expect(authorizer.commit).toHaveBeenCalledWith(RESERVATION, 100000n, { mode: 'manual' });
+    expect(authorizer.commit).toHaveBeenCalledWith(RESERVATION, 100000n, {
+      mode: 'manual',
+      nonce: expect.stringMatching(/^0x[0-9a-f]{64}$/) as string,
+    });
     expect(authorizer.release).not.toHaveBeenCalled();
   });
 
@@ -1227,7 +1236,10 @@ describe('runPay, the success rule on every delivery', () => {
     expect(data.resultCaveat).toContain('unverified');
     expect(result.humanLines?.some((line) => line.includes('unverified'))).toBe(true);
     // The ledger is unchanged by this: the money moved either way.
-    expect(authorizer.commit).toHaveBeenCalledWith(RESERVATION, 100000n, { mode: 'manual' });
+    expect(authorizer.commit).toHaveBeenCalledWith(RESERVATION, 100000n, {
+      mode: 'manual',
+      nonce: expect.stringMatching(/^0x[0-9a-f]{64}$/) as string,
+    });
   });
 
   it('delivers a free 2xx too large to validate with the same caveat', async () => {

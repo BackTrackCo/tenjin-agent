@@ -467,7 +467,10 @@ async function executePay(
     timeoutMs: paidLegTimeoutMs(effectiveRequirement, ctx.flags.timeout),
     headers: { ...headers, ...payment.headers },
   });
-  await authorizer.commit(reservationId, payment.amountAtomic, { mode });
+  await authorizer.commit(reservationId, payment.amountAtomic, {
+    mode,
+    ...(payment.authorization !== undefined ? { nonce: payment.authorization.nonce } : {}),
+  });
   // A TRANSPORT failure on this leg is a post-transmission outcome like any
   // other: the authorization has left, the reservation is committed above, and
   // a receipt that said nothing was paid would report a provider cost of zero

@@ -4,6 +4,8 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { MAX_SENT_CHARS, mediaUrlsIn, reconcilePayments, recordedSent, saveMedia } from './paid';
 import { runPaymentsReconcile } from './payments';
+import { readSpendSummary } from '../lib/spend-ledger';
+import { createLocalSpendAuthorizer, releaseUnchargedExposure } from '../lib/wallet/spend';
 
 let dir: string;
 beforeEach(async () => {
@@ -167,7 +169,13 @@ describe('resolving a settlement left unknown', () => {
       fetchImpl: rpc(new Set([nonce(1)]), calls),
       now: () => NOW,
     });
-    expect(outcome).toEqual({ checked: 2, settled: 1, notCharged: 1, unknown: 2 });
+    expect(outcome).toEqual({
+      checked: 2,
+      settled: 1,
+      notCharged: 1,
+      unknown: 2,
+      releasedAtomic: '0',
+    });
     // authorizationState(from, nonce): the selector, the padded address, the nonce.
     expect(calls[0]).toBe(`0xe94a0102${'1'.repeat(40).padStart(64, '0')}${nonce(1).slice(2)}`);
     const after = await read();
@@ -199,7 +207,13 @@ describe('resolving a settlement left unknown', () => {
       fetchImpl: failing,
       now: () => NOW,
     });
-    expect(second).toEqual({ checked: 2, settled: 0, notCharged: 0, unknown: 2 });
+    expect(second).toEqual({
+      checked: 2,
+      settled: 0,
+      notCharged: 0,
+      unknown: 2,
+      releasedAtomic: '0',
+    });
     expect((await read()).map((r) => r.settlement)).toEqual([
       'not_charged',
       'not_charged',
@@ -212,8 +226,71 @@ describe('resolving a settlement left unknown', () => {
   it('reads nothing from the chain with no ledger at all', async () => {
     const calls: string[] = [];
     const outcome = await reconcilePayments(dir, { rpcUrl: RPC, fetchImpl: rpc(new Set(), calls) });
-    expect(outcome).toEqual({ checked: 0, settled: 0, notCharged: 0, unknown: 0 });
+    expect(outcome).toEqual({
+      checked: 0,
+      settled: 0,
+      notCharged: 0,
+      unknown: 0,
+      releasedAtomic: '0',
+    });
     expect(calls).toHaveLength(0);
+  });
+
+  /** NOT CHARGED GIVES THE BUDGET BACK: exactly that payment's exposure, once. */
+  it("lowers today's committed spend by a not-charged payment's amount", async () => {
+    const auth = createLocalSpendAuthorizer({
+      dir,
+      policy: {
+        maxAutoSpendAtomic: 1_000_000n,
+        sessionBudgetAtomic: 5_000_000n,
+        allowlistCreators: [],
+      },
+      now: () => NOW - 120_000,
+    });
+    for (const [n, amount] of [
+      [1, 30_000n],
+      [2, 50_000n],
+    ] as const) {
+      const authz = await auth.authorize({ amountAtomic: amount, creator: 'seller.test' });
+      await auth.commit(authz.reservationId, amount, { mode: 'automatic', nonce: nonce(n) });
+    }
+    const before = await readSpendSummary(dir, { now: () => NOW });
+    expect(before?.committedAtomic).toBe('80000');
+    await ledger([
+      JSON.stringify(record(1, { amountAtomic: '30000' })),
+      JSON.stringify(record(2, { amountAtomic: '50000' })),
+    ]);
+    const outcome = await reconcilePayments(dir, {
+      rpcUrl: RPC,
+      fetchImpl: rpc(new Set([nonce(1)])),
+      now: () => NOW,
+    });
+    expect(outcome).toMatchObject({ settled: 1, notCharged: 1, releasedAtomic: '50000' });
+    const after = await readSpendSummary(dir, { now: () => NOW });
+    expect(after?.committedAtomic).toBe('30000');
+    expect(after?.automaticCommittedAtomic).toBe('30000');
+    // Once: the nonce's exposure is gone, so a second release finds nothing.
+    expect(await releaseUnchargedExposure(dir, nonce(2), { now: () => NOW })).toBe(0n);
+  });
+
+  it('releases nothing from a spend ledger an older build wrote', async () => {
+    const { mkdir, writeFile } = await import('node:fs/promises');
+    await mkdir(dir, { recursive: true });
+    const legacy = {
+      schemaVersion: 2,
+      windowStartMs: NOW - 60_000,
+      committedAtomic: '50000',
+      reservations: [],
+    };
+    await writeFile(join(dir, 'spend.json'), JSON.stringify(legacy));
+    await ledger([JSON.stringify(record(2, { amountAtomic: '50000' }))]);
+    const outcome = await reconcilePayments(dir, {
+      rpcUrl: RPC,
+      fetchImpl: rpc(new Set()),
+      now: () => NOW,
+    });
+    expect(outcome).toMatchObject({ notCharged: 1, releasedAtomic: '0' });
+    expect((await readSpendSummary(dir, { now: () => NOW }))?.committedAtomic).toBe('50000');
   });
 
   it('is what `tenjin payments reconcile` runs, past the per-lookup three', async () => {
