@@ -179,3 +179,12 @@ export function vitestReporterPath(dir: string = dataDir()): string {
 export function downloadsDir(dir: string = dataDir()): string {
   return join(dir, 'downloads');
 }
+
+/**
+ * One JSON line per paid router call: what was bought, from whom, for how much,
+ * the settlement it carried and the files it saved. The user's own record;
+ * nothing reads it back but `tenjin payments reconcile`.
+ */
+export function paidLedgerPath(dir: string = dataDir()): string {
+  return join(dir, 'paid', 'ledger.jsonl');
+}

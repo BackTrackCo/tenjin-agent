@@ -899,6 +899,103 @@ describe('a discovered service', () => {
     expect(result.envelope.settlementTxHash).toBeUndefined();
   });
 
+  /** THE USER'S OWN RECORD: one line per paid call, with what was sent
+   *  masked and cut, the amount, the tx and the files it saved. */
+  it('appends one ledger line per paid call, and saves the media it links to', async () => {
+    const audio = new Uint8Array([0x49, 0x44, 0x33, 0x04]);
+    const tx = `0x${'ab'.repeat(32)}`;
+    const settle = Buffer.from(JSON.stringify({ success: true, transaction: tx })).toString(
+      'base64',
+    );
+    const { fetchImpl } = net([
+      { url: ROUTER, status: 200, body: await wire('wire-lookup-execute-discovered.json') },
+      { url: SELLER, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge() } },
+      {
+        url: SELLER,
+        status: 200,
+        body: {
+          audio_url: 'https://cdn.example.test/out/whoosh.mp3?sig=1',
+          page: 'https://x.test/',
+        },
+        headers: { 'PAYMENT-RESPONSE': settle },
+      },
+      {
+        url: 'https://cdn.example.test/out/whoosh.mp3?sig=1',
+        status: 200,
+        body: null,
+        raw: audio,
+        headers: { 'content-type': 'audio/mpeg' },
+      },
+    ]);
+    const result = await runRequestTool(
+      {
+        id: '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d02',
+        input: { text: `whoosh ${'y'.repeat(5_000)}` },
+      },
+      { ...deps(fetchImpl), now: () => 1_700_000_000_000 },
+    );
+    const saved = join(dir, 'downloads', 'discovered-bazaar-3f9c2a71-1-1700000000000.mp3');
+    expect(result.envelope).toMatchObject({ status: 'fulfilled', savedFiles: [saved] });
+    expect(new Uint8Array(await readFile(saved))).toEqual(audio);
+    const lines = (await readFile(join(dir, 'paid', 'ledger.jsonl'), 'utf8')).trim().split('\n');
+    expect(lines).toHaveLength(1);
+    const record = JSON.parse(lines[0]!) as Record<string, unknown>;
+    expect(record).toMatchObject({
+      version: 1,
+      ts: new Date(1_700_000_000_000).toISOString(),
+      capabilityId: 'discovered:bazaar:3f9c2a71',
+      provider: 'BlockRun',
+      url: SELLER,
+      amountAtomic: '10000',
+      txHash: tx,
+      settlement: 'settled',
+      savedFiles: [saved],
+    });
+    expect(String(record.sent)).toHaveLength(4_096);
+  });
+
+  it('records a paid call with no payment-response header as settlement unknown', async () => {
+    const { fetchImpl } = net([{ url: ROUTER, status: 200, body: decision() }, ...providerLegs()]);
+    await runRequestTool({ query: 'BTC and ETH price' }, deps(fetchImpl));
+    const record = JSON.parse(
+      (await readFile(join(dir, 'paid', 'ledger.jsonl'), 'utf8')).trim(),
+    ) as Record<string, unknown>;
+    expect(record).toMatchObject({ sent: 'BTC and ETH price', settlement: 'unknown' });
+    expect(record.txHash).toBeUndefined();
+  });
+
+  it('records a paid call that failed after the authorization left, settlement unknown', async () => {
+    const { fetchImpl } = net([
+      { url: ROUTER, status: 200, body: await wire('wire-lookup-execute-discovered.json') },
+      { url: SELLER, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge() } },
+      { url: SELLER, status: 500, body: { error: 'boom' } },
+    ]);
+    const result = await runRequestTool(
+      { id: '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d02', input: { text: 'whoosh' } },
+      deps(fetchImpl),
+    );
+    expect(result.envelope).toMatchObject({ status: 'failed' });
+    const record = JSON.parse(
+      (await readFile(join(dir, 'paid', 'ledger.jsonl'), 'utf8')).trim(),
+    ) as Record<string, unknown>;
+    expect(record).toMatchObject({ amountAtomic: '10000', settlement: 'unknown', savedFiles: [] });
+  });
+
+  it('skips media on a private address, and never fails the call over it', async () => {
+    const { fetchImpl, calls } = net([
+      { url: ROUTER, status: 200, body: await wire('wire-lookup-execute-discovered.json') },
+      { url: SELLER, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge() } },
+      { url: SELLER, status: 200, body: { url: 'https://10.0.0.5/a.png' } },
+    ]);
+    const result = await runRequestTool(
+      { id: '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d02', input: { text: 'whoosh' } },
+      deps(fetchImpl),
+    );
+    expect(result.envelope).toMatchObject({ status: 'fulfilled' });
+    expect(result.envelope.savedFiles).toBeUndefined();
+    expect(calls.some((c) => c.url.includes('10.0.0.5'))).toBe(false);
+  });
+
   it('keeps a JSON body inline, as before', async () => {
     const { fetchImpl } = net([
       { url: ROUTER, status: 200, body: await wire('wire-lookup-execute-discovered.json') },

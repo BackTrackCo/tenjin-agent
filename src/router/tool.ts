@@ -12,6 +12,14 @@ import type { TenjinSigner } from '../lib/wallet/provider';
 import type { CommandContext } from '../context';
 import { requestDecision, type DecisionContract, type DecisionDiagnostics } from './decision';
 import { openLookupFooter } from './progress';
+import {
+  appendPaidRecord,
+  MAX_MEDIA_FILES,
+  mediaUrlsIn,
+  recordedSent,
+  saveMedia,
+  type PaidRecord,
+} from './paid';
 import { routerSettings } from './settings';
 
 /**
@@ -204,6 +212,8 @@ export async function runRequestTool(
   // It bounds a provider or stale catalog charging over that price, and an
   // injected `request` call; it does not bound a hostile server, which can
   // still quote up to `maxAutoSpend`. `gateSpend` stays the money authority.
+  // What the ledger records as sent: the host's input, or its query.
+  const sent = input !== undefined ? JSON.stringify(input) : query;
   const terms: AdvertisedTerms = {
     source: decision.provider,
     maxAmountAtomic: decision.providerPriceAtomic,
@@ -250,21 +260,51 @@ export async function runRequestTool(
       resultCaveat?: string;
     };
     const providerAtomic = BigInt(data.amountPaid?.atomic ?? '0');
+    // A FILE IS SAVED, NOT INLINED: its bytes are no use as text in a tool
+    // result, so the result names where they are.
+    const binary =
+      data.bodyBytes !== undefined
+        ? await saveBinary(deps.ctx.dataDir, decision.capabilityId, data.bodyBytes, {
+            contentType: data.contentType ?? '',
+            ...(deps.now !== undefined ? { now: deps.now } : {}),
+          })
+        : null;
+    // AND A PAID RESULT THAT LINKS TO MEDIA brings it home: the links can
+    // expire, and the user paid for what is behind them. Best effort only.
+    const linked =
+      providerAtomic > 0n && binary === null
+        ? await saveMedia(
+            deps.ctx.dataDir,
+            decision.capabilityId,
+            mediaUrlsIn(data.bodyText ?? '', MAX_MEDIA_FILES),
+            {
+              ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+              ...(deps.payDeps?.destination !== undefined
+                ? { destination: deps.payDeps.destination }
+                : {}),
+              ...(deps.now !== undefined ? { now: deps.now } : {}),
+            },
+          )
+        : [];
+    const savedFiles = [...(binary?.savedTo !== undefined ? [binary.savedTo] : []), ...linked];
+    if (providerAtomic > 0n) {
+      await appendPaidRecord(
+        deps.ctx.dataDir,
+        paidRecord(decision, built.url, sent, providerAtomic, {
+          ...(data.settlementTxHash !== undefined ? { txHash: data.settlementTxHash } : {}),
+          savedFiles,
+          ...(deps.now !== undefined ? { now: deps.now } : {}),
+        }),
+      );
+    }
     const base = {
       supplier: supplierOf(built.url),
       ...(contract.arguments !== undefined ? { parameters: contract.arguments } : {}),
       cost: costLines(providerAtomic),
       ...(data.settlementTxHash !== undefined ? { settlementTxHash: data.settlementTxHash } : {}),
       ...(note !== undefined ? { note } : {}),
-      // A FILE IS SAVED, NOT INLINED: its bytes are no use as text in a tool
-      // result, so the result names where they are.
-      result:
-        data.bodyBytes !== undefined
-          ? await saveBinary(deps.ctx.dataDir, decision.capabilityId, data.bodyBytes, {
-              contentType: data.contentType ?? '',
-              ...(deps.now !== undefined ? { now: deps.now } : {}),
-            })
-          : (data.bodyText ?? ''),
+      result: binary ?? data.bodyText ?? '',
+      ...(savedFiles.length > 0 ? { savedFiles } : {}),
       providerContentUntrusted: true,
     };
     // UNVERIFIED IS NOT FULFILLED. A body that missed its success rule, or
@@ -317,6 +357,17 @@ export async function runRequestTool(
       ...paramsOf(contract),
       price: `$${toMoney(detail.amountAtomic ?? '0').usd}`,
     });
+    // An authorization that left is a paid call whatever came back: recorded
+    // with its settlement unknown, for `tenjin payments reconcile` to resolve.
+    if (BigInt(detail.amountAtomic ?? '0') > 0n) {
+      await appendPaidRecord(
+        deps.ctx.dataDir,
+        paidRecord(decision, contract.request.url, sent, BigInt(detail.amountAtomic ?? '0'), {
+          savedFiles: [],
+          ...(deps.now !== undefined ? { now: deps.now } : {}),
+        }),
+      );
+    }
     return fail(status, reason, {
       providerAtomic: BigInt(detail.amountAtomic ?? '0'),
       ...(detail.settlement !== undefined ? { settlement: detail.settlement } : {}),
@@ -328,6 +379,28 @@ export async function runRequestTool(
       ...(typeof detail.providerError === 'string' ? { providerError: detail.providerError } : {}),
     });
   }
+}
+
+/** One ledger line for a paid call; the settlement is known only with a tx. */
+function paidRecord(
+  decision: { capabilityId: string; provider: string },
+  url: string,
+  sent: string,
+  amountAtomic: bigint,
+  opts: { txHash?: string; savedFiles: string[]; now?: () => number },
+): PaidRecord {
+  return {
+    version: 1,
+    ts: new Date((opts.now ?? Date.now)()).toISOString(),
+    capabilityId: decision.capabilityId,
+    provider: decision.provider,
+    url,
+    sent: recordedSent(sent),
+    amountAtomic: amountAtomic.toString(),
+    ...(opts.txHash !== undefined ? { txHash: opts.txHash } : {}),
+    settlement: opts.txHash !== undefined ? 'settled' : 'unknown',
+    savedFiles: opts.savedFiles,
+  };
 }
 
 /** Extensions for the file types a paid lookup plausibly returns; any other
