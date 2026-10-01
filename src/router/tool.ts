@@ -144,7 +144,7 @@ export async function runRequestTool(
   const decisionDeps = {
     ctx: deps.ctx,
     baseUrl: settings.baseUrl,
-    acceptsDiscovered: settings.experimentalBazaar,
+    acceptsBazaar: settings.experimentalBazaar,
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   };
 

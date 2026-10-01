@@ -130,25 +130,31 @@ describe('one free decision', () => {
       { packet: packetForText('what is the weather') },
       { ctx: ctx(), baseUrl: BASE, fetchImpl },
     );
-    // Strict on the route: the packet alone, with the experiment off. Which
-    // hook is asking is read from `packet.pendingCall`, not from a field beside it.
-    expect(Object.keys(calls[0]!.body as object).sort()).toEqual(['packet', 'schemaVersion']);
+    // Strict on the route: the packet and what this build accepts. Which hook
+    // is asking is read from `packet.pendingCall`, not from a field beside it.
+    expect(Object.keys(calls[0]!.body as object).sort()).toEqual([
+      'accepts',
+      'packet',
+      'schemaVersion',
+    ]);
+    // The Tenjin list is on by default; the open Bazaar is not.
+    expect((calls[0]!.body as { accepts: unknown }).accepts).toEqual(['discovered']);
   });
 
-  it('says it accepts discovered services only with the experiment on', async () => {
+  it('adds the open Bazaar to what it accepts only with the experiment on', async () => {
     const { fetchImpl, calls } = net(NATIVE);
     await requestDecision(
       'hook',
       { packet: packetForText('what is the weather') },
-      { ctx: ctx(), baseUrl: BASE, fetchImpl, acceptsDiscovered: true },
+      { ctx: ctx(), baseUrl: BASE, fetchImpl, acceptsBazaar: true },
     );
     await requestDecision(
       'tool',
       { query: 'BTC and ETH price' },
-      { ctx: ctx(), baseUrl: BASE, fetchImpl, acceptsDiscovered: true },
+      { ctx: ctx(), baseUrl: BASE, fetchImpl, acceptsBazaar: true },
     );
     for (const call of calls) {
-      expect((call.body as { accepts: unknown }).accepts).toEqual(['discovered']);
+      expect((call.body as { accepts: unknown }).accepts).toEqual(['discovered', 'bazaar']);
     }
   });
 
@@ -170,7 +176,12 @@ describe('one free decision', () => {
       { ctx: ctx(), baseUrl: BASE, fetchImpl },
     );
     // The packet lives on the backend against the id; the client keeps none.
-    expect(Object.keys(calls[0]!.body as object).sort()).toEqual(['id', 'query', 'schemaVersion']);
+    expect(Object.keys(calls[0]!.body as object).sort()).toEqual([
+      'accepts',
+      'id',
+      'query',
+      'schemaVersion',
+    ]);
     expect(calls[0]!.method).toBe('POST');
   });
 

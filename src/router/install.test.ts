@@ -610,7 +610,7 @@ describe('the doctor this release registers', () => {
       detail: string;
     };
     expect(experimental.status).toBe('ok');
-    expect(experimental.detail).toMatch(/^bazaar off \(experimental\)/);
+    expect(experimental.detail).toMatch(/^list: on; bazaar: off \(experimental\)/);
     const fixes = data_.checks.map((c) => c.fix ?? '').join(' ');
     for (const gone of ['tenjin daemon', 'tenjin search', 'tenjin publish', 'tenjin hooks']) {
       expect(fixes).not.toContain(gone);

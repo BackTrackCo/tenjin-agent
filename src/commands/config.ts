@@ -164,7 +164,7 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
   'router.context':
     'session=a hook packet carries up to six prior messages, turn=the current turn only; --project and --local as for router.enabled',
   'experimental.bazaar':
-    'EXPERIMENTAL. on=the router may suggest third-party pay-per-call x402 services when nothing curated fits, off=curated only',
+    "EXPERIMENTAL. on=the router may also suggest unreviewed sellers from Coinbase's open x402 Bazaar, off=curated services and Tenjin's reviewed list only",
 };
 
 /**
@@ -172,10 +172,11 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
  * whose services these are, that the price is theirs, and how to turn it off.
  */
 export const EXPERIMENTAL_BAZAAR_WARNING =
-  'Experimental: the router may now suggest third-party pay-per-call x402 services from ' +
-  "Tenjin's reviewed list (and, if the server enables it, Coinbase's Bazaar) when nothing " +
-  'curated fits. Sellers are third parties, prices can vary with the input, and payments are ' +
-  'real, under your spend limits. Turn it off with `tenjin config set experimental.bazaar off`.';
+  "Experimental: the router may now also suggest sellers from Coinbase's open x402 Bazaar. " +
+  'They are unreviewed third parties, Tenjin has not checked them, matches can be noisy, ' +
+  'prices can vary with the input, and payments are real, under your spend limits. ' +
+  "Tenjin's reviewed list stays on either way. Turn this off with " +
+  '`tenjin config set experimental.bazaar off`.';
 
 function isExperimentalKey(key: string): key is ExperimentalConfigKey {
   return (EXPERIMENTAL_CONFIG_KEYS as readonly string[]).includes(key);

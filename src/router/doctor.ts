@@ -431,8 +431,8 @@ function experimentalCheck(bazaar: boolean): RouterCheck {
     status: 'ok',
     required: false,
     detail: bazaar
-      ? 'bazaar on (experimental): the router may suggest third-party pay-per-call services when nothing curated fits'
-      : 'bazaar off (experimental): curated services only; `tenjin config set experimental.bazaar on` to try third-party ones',
+      ? 'list: on; bazaar: on (experimental): the router may also suggest unreviewed sellers from the open x402 Bazaar'
+      : 'list: on; bazaar: off (experimental): `tenjin config set experimental.bazaar on` to add the open x402 Bazaar',
   };
 }
 

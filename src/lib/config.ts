@@ -199,10 +199,9 @@ export const TeamConfigSchema = z.object({ publicFallback: PublicFallbackSchema 
 export type TeamConfig = z.infer<typeof TeamConfigSchema>;
 
 /**
- * `experimental.*`: features that ship off. `bazaar` lets the router offer
- * third-party pay-per-call services (Tenjin's reviewed list, and Coinbase's
- * Bazaar when the server enables it) when nothing curated fits. Off, the
- * client never tells the server it can read those offers, so it gets none.
+ * `experimental.*`: features that ship off. `bazaar` widens the third-party
+ * services the router may offer from Tenjin's reviewed list (always on) to the
+ * open x402 Bazaar: unreviewed sellers. Off, the client never asks for them.
  */
 export const ExperimentalConfigSchema = z.object({ bazaar: PublicFallbackSchema });
 export type ExperimentalConfig = z.infer<typeof ExperimentalConfigSchema>;

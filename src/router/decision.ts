@@ -228,12 +228,19 @@ export type ToolDecision = ToolResponse['decision'];
 export type CallKind = 'hook' | 'tool';
 
 /**
- * What this client can act on beyond the curated answers, sent on both calls
- * while `experimental.bazaar` is on. The server answers `discovered` only to a
- * request that lists it, so a build that predates the arm, or one with the
- * experiment off, never sees one.
+ * What this client can act on beyond the curated answers, sent on both calls.
+ * `discovered` is Tenjin's reviewed list of third-party services, on for every
+ * build that parses it; the server answers that arm only to a request that
+ * lists it, so an older build never sees one. `bazaar` widens it to the open
+ * Bazaar and is sent only while `experimental.bazaar` is on.
  */
 export const CLIENT_ACCEPTS: readonly string[] = ['discovered'];
+export const BAZAAR_ACCEPT = 'bazaar';
+
+/** The `accepts` this build sends, with the open Bazaar or without it. */
+export function acceptsFor(bazaar: boolean): string[] {
+  return bazaar ? [...CLIENT_ACCEPTS, BAZAAR_ACCEPT] : [...CLIENT_ACCEPTS];
+}
 
 /**
  * The exact body the hook call sends, spelled once and pinned to the shared
@@ -300,9 +307,9 @@ export interface GateHint {
 export interface DecisionDeps {
   ctx: CommandContext;
   baseUrl: string;
-  /** `experimental.bazaar`: send {@link CLIENT_ACCEPTS}, so a discovered
-   *  service may come back. Off by default: curated answers only. */
-  acceptsDiscovered?: boolean;
+  /** `experimental.bazaar`: add {@link BAZAAR_ACCEPT}, so a service from the
+   *  open Bazaar may come back. Off by default: curated and the Tenjin list. */
+  acceptsBazaar?: boolean;
   fetchImpl?: typeof fetch;
   /** Overrides the per-call deadline; the hook passes its own, smaller one. */
   timeoutMs?: number;
@@ -357,14 +364,14 @@ export async function requestDecision(
       kind === 'hook'
         ? buildHookBody(request.packet as Packet, {
             ...(request.sessionId !== undefined ? { sessionId: request.sessionId } : {}),
-            ...(deps.acceptsDiscovered === true ? { accepts: CLIENT_ACCEPTS } : {}),
+            accepts: acceptsFor(deps.acceptsBazaar === true),
           })
         : buildToolBody({
             ...(request.query !== undefined ? { query: request.query } : {}),
             ...(request.id !== undefined ? { id: request.id } : {}),
             ...(request.input !== undefined ? { input: request.input } : {}),
             ...(request.gateHint !== undefined ? { gateHint: request.gateHint } : {}),
-            ...(deps.acceptsDiscovered === true ? { accepts: CLIENT_ACCEPTS } : {}),
+            accepts: acceptsFor(deps.acceptsBazaar === true),
           }),
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   };

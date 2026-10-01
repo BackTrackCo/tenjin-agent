@@ -327,7 +327,8 @@ describe('runConfigSet — experimental.bazaar', () => {
     expect(on.data).toMatchObject({ key: 'experimental.bazaar', value: 'on', source: 'file' });
     const warning = (on.data as { warning: string }).warning;
     expect(warning).toContain('Experimental');
-    expect(warning).toContain('third-party');
+    expect(warning).toContain("Coinbase's open x402 Bazaar");
+    expect(warning).toContain('unreviewed');
     expect(warning).toContain('payments are real');
     expect(warning).toContain('tenjin config set experimental.bazaar off');
     expect(on.humanLines).toContain(warning);

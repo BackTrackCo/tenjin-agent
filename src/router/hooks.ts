@@ -1294,7 +1294,7 @@ async function decide(
     {
       ctx: hookContext(deps),
       baseUrl,
-      acceptsDiscovered: resolveExperimentalBazaar(config).value === 'on',
+      acceptsBazaar: resolveExperimentalBazaar(config).value === 'on',
       timeoutMs: deps.timeoutMs ?? GATE_TIMEOUT_MS,
       ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
     },

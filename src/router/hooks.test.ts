@@ -239,7 +239,12 @@ describe('the prompt hook', () => {
     expect(sent.url).toBe(`${BASE}${ROUTER_PATH}`);
     // The route reads a STRICT object: an extra field is a 400, which is a
     // turn with no hint.
-    expect(Object.keys(sent.body).sort()).toEqual(['packet', 'schemaVersion', 'sessionId']);
+    expect(Object.keys(sent.body).sort()).toEqual([
+      'accepts',
+      'packet',
+      'schemaVersion',
+      'sessionId',
+    ]);
     expect((sent.body.packet as { pendingCall?: unknown }).pendingCall).toBeUndefined();
   });
 
@@ -404,7 +409,12 @@ describe('the shortfall hook', () => {
     // The call and how it fared ride INSIDE the packet, in the shape
     // `wire-hook-request-native-shortfall.json` pins.
     const sent = calls[0] as { body: Record<string, unknown> };
-    expect(Object.keys(sent.body).sort()).toEqual(['packet', 'schemaVersion', 'sessionId']);
+    expect(Object.keys(sent.body).sort()).toEqual([
+      'accepts',
+      'packet',
+      'schemaVersion',
+      'sessionId',
+    ]);
     const packet = sent.body.packet as { pendingCall?: unknown; nativeOutcome?: unknown };
     expect(packet.pendingCall).toEqual({ tool: 'WebFetch', url: 'https://example.test/spec' });
     expect(packet.nativeOutcome).toEqual({ code: 402, bytes: 0 });
@@ -1980,7 +1990,12 @@ describe('the delegation hook', () => {
       // The task is the current message, the parent's turn is history, and
       // it is the ordinary hook body: no pending call, nothing new on the wire.
       const sent = calls[0] as { body: Record<string, unknown> };
-      expect(Object.keys(sent.body).sort()).toEqual(['packet', 'schemaVersion', 'sessionId']);
+      expect(Object.keys(sent.body).sort()).toEqual([
+        'accepts',
+        'packet',
+        'schemaVersion',
+        'sessionId',
+      ]);
       const packet = sent.body.packet as {
         current: { text: string };
         history: unknown;
@@ -2546,10 +2561,7 @@ describe('a discovered service', () => {
 
   beforeEach(async () => {
     const fs = await import('node:fs/promises');
-    await fs.writeFile(
-      join(dir, 'config.json'),
-      JSON.stringify({ ...ROUTER_POLICY, experimental: { bazaar: 'on' } }),
-    );
+    await fs.writeFile(join(dir, 'config.json'), JSON.stringify(ROUTER_POLICY));
   });
 
   it('is injected on a prompt, with the session id and what this build accepts', async () => {
@@ -2572,18 +2584,33 @@ describe('a discovered service', () => {
     expect(await resolveProgressSession(dir, { id: ID })).not.toBeNull();
   });
 
-  /** OFF BY DEFAULT: the request says nothing about discovered services, so
-   *  the server sends none; the curated route is unchanged. */
-  it('does not ask for discovered services with the experiment off', async () => {
-    const fs = await import('node:fs/promises');
-    await fs.writeFile(join(dir, 'config.json'), JSON.stringify(ROUTER_POLICY));
-    const { fetchImpl, calls } = router(NATIVE);
+  /** THE TENJIN LIST IS ON BY DEFAULT; the open Bazaar is asked for only
+   *  with the experiment on. */
+  it('asks for the open Bazaar only with the experiment on', async () => {
+    const first = router(NATIVE);
     await runPromptHook(promptEvent('make me a whoosh sound effect'), {
       dataDir: dir,
       baseUrl: BASE,
-      fetchImpl,
+      fetchImpl: first.fetchImpl,
     });
-    expect((calls[0] as { body: Record<string, unknown> }).body.accepts).toBeUndefined();
+    expect((first.calls[0] as { body: Record<string, unknown> }).body.accepts).toEqual([
+      'discovered',
+    ]);
+    const fs = await import('node:fs/promises');
+    await fs.writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ ...ROUTER_POLICY, experimental: { bazaar: 'on' } }),
+    );
+    const second = router(NATIVE);
+    await runPromptHook(promptEvent('make me a whoosh sound effect'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl: second.fetchImpl,
+    });
+    expect((second.calls[0] as { body: Record<string, unknown> }).body.accepts).toEqual([
+      'discovered',
+      'bazaar',
+    ]);
   });
 
   it('denies a native call once, with the one-block sentence', async () => {
@@ -2817,10 +2844,7 @@ describe('a question to the user', () => {
 
   beforeEach(async () => {
     const fs = await import('node:fs/promises');
-    await fs.writeFile(
-      join(dir, 'config.json'),
-      JSON.stringify({ ...ROUTER_POLICY, experimental: { bazaar: 'on' } }),
-    );
+    await fs.writeFile(join(dir, 'config.json'), JSON.stringify(ROUTER_POLICY));
   });
 
   async function askEvent(over: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
