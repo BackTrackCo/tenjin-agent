@@ -2982,7 +2982,7 @@ describe('a question to the user', () => {
     const real = JSON.parse(
       readFileSync(
         fileURLToPath(
-          new URL('../adapters/fixtures/claude/PostToolUse-AskUserQuestion.json', import.meta.url),
+          new URL('./fixtures/harness/claude-PostToolUse-AskUserQuestion.json', import.meta.url),
         ),
         'utf8',
       ),

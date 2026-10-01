@@ -7,7 +7,9 @@ validates is a contract only one side keeps. Three divergences so far
 round trip; copy these files rather than hand-writing an equivalent.
 
 Change them here, in the same commit as the `wire.ts` change that makes them
-valid, then copy them across. `ROUTER_VERSION` is `2026-09-23.1`.
+valid, then copy them across. `harness/` is the exception: harness events
+(what Claude Code hands a router hook) that only this client reads, never
+copied. `ROUTER_VERSION` is `2026-09-23.1`.
 
 ## The two calls
 
