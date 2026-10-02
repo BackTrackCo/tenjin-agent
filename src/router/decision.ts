@@ -242,10 +242,11 @@ const ToolDecisionSchema = z.discriminatedUnion('action', [
   }),
   /**
    * A query with no id, answered with the spec of the service the server
-   * picked under a fresh `id`: kept like a hook's. `input` is there when the
-   * server bound the query to the spec's one required field (pins aside) and
-   * checked it, and the tool then runs it in the same call, checked again
-   * like any input. `hint` is the line, with the skeleton of the call:
+   * picked under a fresh `id`: kept like a hook's. `input` is there only when
+   * the query, as written, was a valid value for the spec's query field (a
+   * free-text field, or one whose format or pattern it satisfies), and the
+   * tool then runs it in the same call, checked again like any input.
+   * Otherwise the agent fills the skeleton. `hint` is the line, with the skeleton of the call:
    * `request({id, input: {...}})` with the required fields, or the bound one.
    */
   z

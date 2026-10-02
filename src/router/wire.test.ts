@@ -221,10 +221,11 @@ describe('every answer payload on disk', () => {
   });
 
   /**
-   * A QUERY WITH NO ID IS ONE CALL WHEN IT CAN BE. The server binds the query
-   * to a spec's one required field (pins aside) and sends it as `input`, which
-   * the tool runs and pays at once; a spec with more to fill comes back with
-   * no `input`, and its line is the skeleton of the next call.
+   * A QUERY WITH NO ID IS ONE CALL WHEN IT CAN BE. The server sends the query
+   * as `input` only when, as written, it is a valid value for the spec's query
+   * field (free text, or a format or pattern it satisfies), and the tool runs
+   * and pays it at once; otherwise the answer has no `input`, and its line is
+   * the skeleton the agent fills for the next call.
    */
   it('carries the bound input, or only the skeleton, on an id-less spec answer', () => {
     const bound = fixture('wire-lookup-spec.json').decision as Record<string, unknown>;
