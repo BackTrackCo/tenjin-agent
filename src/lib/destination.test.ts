@@ -1,10 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import {
-  assertPublicDestination,
-  assertPublicHttpsUrl,
-  isPublicAddress,
-  publicOnlyLookup,
-} from './destination';
+import { assertPublicDestination, assertPublicHttpsUrl, isPublicAddress } from './destination';
 import { CliError } from './errors';
 
 describe('lexical destination checks', () => {
@@ -96,35 +91,5 @@ describe('DNS preflight', () => {
       },
     });
     expect(looked).toBe(1);
-  });
-});
-
-describe('the connect-time lookup', () => {
-  type Answer = { address: string; family: number };
-  const ask = (answers: Answer[], all: boolean): Promise<unknown[]> =>
-    new Promise((resolve) => {
-      const lookup = publicOnlyLookup({ resolveHostname: async () => answers }) as unknown as (
-        host: string,
-        options: { all?: boolean },
-        callback: (...args: unknown[]) => void,
-      ) => void;
-      lookup('seller.example', { all }, (...args) => resolve(args));
-    });
-
-  /** DNS REBINDING: the socket resolves the name itself, so a private answer
-   *  at connect time is refused whatever the preflight saw. */
-  it('refuses a private answer, and hands the socket only public ones', async () => {
-    const [refused] = await ask(
-      [
-        { address: '93.184.216.34', family: 4 },
-        { address: '127.0.0.1', family: 4 },
-      ],
-      true,
-    );
-    expect(refused).toBeInstanceOf(CliError);
-    expect((refused as Error).message).toContain('private or unsupported network address');
-    const PUBLIC = [{ address: '93.184.216.34', family: 4 }];
-    expect(await ask(PUBLIC, true)).toEqual([null, PUBLIC]);
-    expect(await ask(PUBLIC, false)).toEqual([null, '93.184.216.34', 4]);
   });
 });

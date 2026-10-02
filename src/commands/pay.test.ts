@@ -1011,32 +1011,6 @@ describe('runPay, the shared request gate', () => {
     expect(calls).toHaveLength(0);
   });
 
-  /** DNS REBINDING: the name answers the preflight publicly and this network a
-   *  moment later. The connection resolves it again and refuses the private
-   *  answer, so the probe never leaves: the refusal is the lookup's own, not a
-   *  socket that tried 127.0.0.1, and no wallet is opened. */
-  it('refuses a name that rebinds onto this network between the check and the connection', async () => {
-    await writeConfig();
-    const answers = ['93.184.216.34', '127.0.0.1'];
-    const asked: string[] = [];
-    const provider = testWalletProvider();
-    const getSigner = vi.spyOn(provider, 'getSigner');
-    const failure = await runPay({ url: FOREIGN_URL }, makeCtx(), {
-      destination: {
-        resolveHostname: async (name) => {
-          asked.push(name);
-          return [{ address: answers.shift() ?? '127.0.0.1', family: 4 }];
-        },
-      },
-      provider,
-    }).catch((err: unknown) => err);
-    expect(failure).toBeInstanceOf(CliError);
-    expect(failure).toMatchObject({ code: 'NETWORK_ERROR' });
-    expect((failure as Error).message).toContain('private or unsupported network address');
-    expect(asked).toEqual(['seller.example', 'seller.example']);
-    expect(getSigner).not.toHaveBeenCalled();
-  });
-
   it('pays on advertised terms without consulting a registry', async () => {
     await writeConfig();
     const registry = stubRegistry(() => json(500, {}));

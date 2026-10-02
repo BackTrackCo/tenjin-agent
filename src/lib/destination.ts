@@ -1,5 +1,5 @@
 import { lookup } from 'node:dns/promises';
-import { BlockList, isIP, type LookupFunction } from 'node:net';
+import { BlockList, isIP } from 'node:net';
 import { CliError } from './errors';
 
 /**
@@ -13,17 +13,18 @@ import { CliError } from './errors';
  * local network, which is the shape a hostile registry listing or a hostile
  * routing decision would take.
  *
- * AND AGAIN AT CONNECT TIME. A check alone is not enough: `fetch` resolves the
- * name again on its own, so a host that answers publicly here and privately a
- * moment later (DNS rebinding) would get the request. Every transport that
- * sends to a destination this module checked therefore connects to an address
- * that passed the same test: the paid leg through {@link publicOnlyLookup},
- * which resolves once per connection and hands the socket only public answers
- * (`lib/public-fetch.ts`), and the router's media download by pinning its socket
- * to the address {@link resolvePublicDestination} validated (`router/paid.ts`).
- * What none of it closes is a remote scraper following its own redirects on its
- * own server, or a proxy Node was told to use, which resolves the name itself.
- * Documented in docs/safety-model.md as a bound.
+ * WHAT IT IS NOT. A resolved address is checked, NOT PINNED. `fetch` resolves
+ * the name again on its own, so a host that answers publicly here and privately
+ * a moment later is not closed by this, and neither is a remote scraper
+ * following its own redirects on its own server. Closing the first needs a
+ * transport that connects to the address it validated (`node:https` with a
+ * `lookup` override, as the draft experiment's `safeHttpsTransport` did), which
+ * the plan for this release left unported for the paid leg. The router's media
+ * download does connect that way: it pins its socket to the address
+ * {@link resolvePublicDestination} validated (`router/paid.ts`). What this does remove
+ * is the easy local target: `http://`, credentials, a custom port, a literal
+ * private address, a `.localhost`/`.internal` name, and a public name whose
+ * only answers are private. Documented in docs/safety-model.md as a bound.
  */
 
 const blockedV4 = new BlockList();
@@ -135,42 +136,6 @@ export async function resolvePublicDestination(
   const url = assertPublicHttpsUrl(raw);
   const host = url.hostname.replace(/^\[|\]$/g, '');
   if (isIP(host) !== 0) return { url, address: host, family: isIP(host) === 6 ? 6 : 4 };
-  const first = (await resolvePublicAddresses(host, options))[0]!;
-  return { url, ...first };
-}
-
-/**
- * A SOCKET `lookup` THAT CHECKS WHAT IT CONNECTS TO. It resolves the name once
- * per connection, refuses unless every answer is public, and hands the socket
- * only those answers, so the address checked is the address connected to and a
- * rebinding between a preflight and the connection reaches nothing. A literal
- * address never gets here: the socket connects to it directly, and the lexical
- * check already refused a private one.
- */
-export function publicOnlyLookup(options: DestinationOptions = {}): LookupFunction {
-  return ((hostname: string, lookupOptions: { all?: boolean }, callback: LookupCallback) => {
-    resolvePublicAddresses(hostname, options).then(
-      (addresses) => {
-        if (lookupOptions.all === true) callback(null, addresses);
-        else callback(null, addresses[0]!.address, addresses[0]!.family);
-      },
-      (err: unknown) => callback(err instanceof Error ? err : new Error(String(err))),
-    );
-  }) as unknown as LookupFunction;
-}
-
-type LookupCallback = (
-  err: Error | null,
-  address?: string | { address: string; family: number }[],
-  family?: number,
-) => void;
-
-/** Resolve a name, under one deadline, and keep its answers only if EVERY one
- *  is public. */
-async function resolvePublicAddresses(
-  host: string,
-  options: DestinationOptions,
-): Promise<{ address: string; family: 4 | 6 }[]> {
   const resolve = options.resolveHostname ?? ((name: string) => lookup(name, { all: true }));
   const signal = AbortSignal.timeout(options.timeoutMs ?? 5_000);
   let addresses: { address: string; family: number }[];
@@ -191,8 +156,6 @@ async function resolvePublicAddresses(
   if (addresses.length === 0 || addresses.some((entry) => !isPublicAddress(entry.address))) {
     refuse(`The endpoint host ${host} resolves to a private or unsupported network address.`);
   }
-  return addresses.map((entry) => ({
-    address: entry.address,
-    family: isIP(entry.address) === 6 ? 6 : 4,
-  }));
+  const first = addresses[0]!;
+  return { url, address: first.address, family: isIP(first.address) === 6 ? 6 : 4 };
 }
