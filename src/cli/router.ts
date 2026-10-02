@@ -58,7 +58,7 @@ export function registerRouter(reg: Registration): void {
 
   leaf(INTEGRATION, 'mcp', 'run the local stdio MCP server')
     .description(
-      "Run the local stdio MCP server that carries the `request` tool: one free routing decision per lookup, then the provider call, built here from the offer's card and your assistant's input where it has one, under your local spend policy. It speaks on stdin and stdout and runs until the client disconnects, so it prints no envelope of its own.",
+      "Run the local stdio MCP server that carries the `request` tool: one free routing decision per lookup, then the provider call, built here from the offer's spec and your assistant's input where it has one, under your local spend policy. It speaks on stdin and stdout and runs until the client disconnects, so it prints no envelope of its own.",
     )
     .action(async function (this: Command) {
       const ctx = buildContext(this);

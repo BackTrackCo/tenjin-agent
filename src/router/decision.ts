@@ -156,14 +156,14 @@ const DiscoveredCandidateSchema = z.strictObject({
 });
 
 /**
- * A TOOL CARD: the offered service's real contract, sent beside the line only
- * because this build asks for it (`accepts: ["card"]`). The hook stores it by
+ * A REQUEST SPEC: the offered service's real contract, sent beside the line only
+ * because this build asks for it (`accepts: ["spec"]`). The hook stores it by
  * the offer's id; `request({id})` shows it and `request({id, input})` fills its
  * request and pays the provider directly, with no second decision. Every field
  * is the server's, and so is checked like the rest of the answer: the payee and
  * price still meet the live 402 and the spend policy in `runPay`.
  */
-export const ToolCardSchema = z.strictObject({
+export const ToolSpecSchema = z.strictObject({
   capabilityId: z.string().min(1).max(200),
   provider: z.string().min(1).max(120),
   description: z.string().min(1).max(500),
@@ -186,13 +186,13 @@ export const ToolCardSchema = z.strictObject({
   returnsExample: z.unknown().optional(),
   resultSchema: z.record(z.string(), z.unknown()).optional(),
 });
-export type ToolCard = z.infer<typeof ToolCardSchema>;
+export type ToolSpec = z.infer<typeof ToolSpecSchema>;
 
-export const OfferCardSchema = ToolCardSchema.extend({ id: IdSchema });
-export type OfferCard = z.infer<typeof OfferCardSchema>;
+export const OfferSpecSchema = ToolSpecSchema.extend({ id: IdSchema });
+export type OfferSpec = z.infer<typeof OfferSpecSchema>;
 
-/** One card per service the line names: the offer and any alternative. */
-const CardsSchema = z.array(OfferCardSchema).min(1).max(4).optional();
+/** One spec per service the line names: the offer and any alternative. */
+const SpecsSchema = z.array(OfferSpecSchema).min(1).max(4).optional();
 
 /** The same answer on both calls: the hook's offer, and the tool's fallback
  *  when a query with no id found no curated capability. */
@@ -204,7 +204,7 @@ const DiscoveredSchema = z
     /** THE LINE, FINISHED, as on `execute`: it carries the seller's
      *  description and the input it takes. */
     hint: z.string().min(1).max(2_000),
-    cards: CardsSchema,
+    specs: SpecsSchema,
   })
   .superRefine(checkHint);
 
@@ -226,7 +226,7 @@ const HookDecisionSchema = z.discriminatedUnion('action', [
        * bound as a discovered line's.
        */
       hint: z.string().min(1).max(2_000),
-      cards: CardsSchema,
+      specs: SpecsSchema,
     })
     .superRefine(checkHint),
   DiscoveredSchema,
@@ -240,9 +240,9 @@ const ToolDecisionSchema = z.discriminatedUnion('action', [
     ...CapabilityFields,
     contract: ContractSchema,
   }),
-  /** A query with no id, answered with the card of the service the server
+  /** A query with no id, answered with the spec of the service the server
    *  picked under a fresh id: kept like a hook's, and shown to the agent. */
-  z.strictObject({ action: z.literal('card'), card: OfferCardSchema }),
+  z.strictObject({ action: z.literal('spec'), spec: OfferSpecSchema }),
   DiscoveredSchema,
   RefusedSchema.extend({ action: z.literal('native') }),
   RefusedSchema.extend({ action: z.literal('needs_input') }),
@@ -275,13 +275,13 @@ export type CallKind = 'hook' | 'tool';
  * What this client can act on beyond the curated answers, sent on both calls.
  * `discovered` is Tenjin's reviewed list of third-party services, on for every
  * build that parses it; the server answers that arm only to a request that
- * lists it, so an older build never sees one. `card` asks for each offered
- * service's tool card beside its line, and for the picked service's card in
+ * lists it, so an older build never sees one. `spec` asks for each offered
+ * service's request spec beside its line, and for the picked service's spec in
  * place of a decision on a query with no id, which only a build that parses
  * them can take: the decision schemas are strict. `bazaar` widens discovery
  * to the open Bazaar and is sent only while `experimental.bazaar` is on.
  */
-export const CLIENT_ACCEPTS: readonly string[] = ['discovered', 'card'];
+export const CLIENT_ACCEPTS: readonly string[] = ['discovered', 'spec'];
 export const BAZAAR_ACCEPT = 'bazaar';
 
 /** The `accepts` this build sends, with the open Bazaar or without it. */
@@ -428,9 +428,9 @@ export async function requestDecision(
   );
 }
 
-/** How a call run from a tool card ended, for the server's offer-to-call
+/** How a call run from a request spec ended, for the server's offer-to-call
  *  count. No text: the id, the outcome, the provider's status and the time. */
-export interface CardOutcome {
+export interface SpecOutcome {
   id: string;
   status: 'fulfilled' | 'unverified' | 'failed' | 'needs_approval';
   httpStatus?: number;
@@ -441,13 +441,13 @@ export interface CardOutcome {
 export const OUTCOME_TIMEOUT_MS = 3_000;
 
 /**
- * TELL THE SERVER A CARD WAS USED. The client called and paid the provider
+ * TELL THE SERVER A SPEC WAS USED. The client called and paid the provider
  * itself, so this is the only word the server gets that its offer was taken.
  * Never throws and never waits on anything the caller needs: a lost report
  * costs one count.
  */
-export async function reportCardOutcome(
-  outcome: CardOutcome,
+export async function reportSpecOutcome(
+  outcome: SpecOutcome,
   deps: Pick<DecisionDeps, 'ctx' | 'baseUrl' | 'fetchImpl'>,
 ): Promise<void> {
   try {
@@ -464,7 +464,7 @@ export async function reportCardOutcome(
 }
 
 /** The exact body of an outcome report, pinned to the shared fixtures. */
-export function buildOutcomeBody(outcome: CardOutcome): Record<string, unknown> {
+export function buildOutcomeBody(outcome: SpecOutcome): Record<string, unknown> {
   return {
     schemaVersion: 1,
     id: outcome.id,

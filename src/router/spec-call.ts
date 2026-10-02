@@ -1,13 +1,13 @@
 import { toMoney } from '../lib/money';
 import { inputProblems } from '../lib/request-schema';
-import type { ToolCard } from './decision';
+import type { ToolSpec } from './decision';
 
 /**
- * A TOOL CARD, READ AND RUN. `request({id})` shows the agent a card as text:
+ * A REQUEST SPEC, READ AND RUN. `request({id})` shows the agent a spec as text:
  * what the service does and costs, each input with its description and allowed
  * values, the fields Tenjin sets, one example and what comes back. `request({id,
  * input})` merges the pinned fields over the agent's input, checks the result
- * against the card's schema, and builds the HTTP request the card describes.
+ * against the spec's schema, and builds the HTTP request the spec describes.
  * Nothing here talks to the network: the caller pays through `runPay`.
  */
 
@@ -68,41 +68,41 @@ function fieldLine(name: string, schema: Json, required: boolean): string {
   return `- ${parts.join('; ')}`;
 }
 
-/** What one call costs, as the card says it. */
-function priceLine(card: ToolCard): string {
-  const price = `$${toMoney(card.priceAtomic).usd}`;
-  return card.priceVaries
-    ? `${price} per call at the listed input; the price varies with the input (up to $${toMoney(card.maxAmountAtomic).usd}) and the live price is checked before paying`
+/** What one call costs, as the spec says it. */
+function priceLine(spec: ToolSpec): string {
+  const price = `$${toMoney(spec.priceAtomic).usd}`;
+  return spec.priceVaries
+    ? `${price} per call at the listed input; the price varies with the input (up to $${toMoney(spec.maxAmountAtomic).usd}) and the live price is checked before paying`
     : `${price} per call`;
 }
 
-/** The card as the agent reads it, ending with the call that runs it. */
-export function cardText(id: string, card: ToolCard): string {
-  const properties = record(card.input.properties);
-  const required = new Set(Array.isArray(card.input.required) ? card.input.required : []);
-  const open = Object.keys(properties).filter((name) => !(name in card.pinned));
+/** The spec as the agent reads it, ending with the call that runs it. */
+export function specText(id: string, spec: ToolSpec): string {
+  const properties = record(spec.input.properties);
+  const required = new Set(Array.isArray(spec.input.required) ? spec.input.required : []);
+  const open = Object.keys(properties).filter((name) => !(name in spec.pinned));
   const ordered = [
     ...open.filter((name) => required.has(name)),
     ...open.filter((name) => !required.has(name)),
   ];
   const lines = [
-    `${card.provider}: ${card.description}`,
-    `Price: ${priceLine(card)}, paid by this machine's wallet straight to the provider.`,
-    `Request: ${card.request.method} ${card.request.url}`,
+    `${spec.provider}: ${spec.description}`,
+    `Price: ${priceLine(spec)}, paid by this machine's wallet straight to the provider.`,
+    `Request: ${spec.request.method} ${spec.request.url}`,
     ordered.length
       ? `Inputs:\n${ordered.map((name) => fieldLine(name, record(properties[name]), required.has(name))).join('\n')}`
       : 'Inputs: none.',
   ];
-  if (Object.keys(card.pinned).length)
+  if (Object.keys(spec.pinned).length)
     lines.push(
-      `Set by Tenjin on every call (leave these out): ${Object.entries(card.pinned)
+      `Set by Tenjin on every call (leave these out): ${Object.entries(spec.pinned)
         .map(([name, value]) => `${name} = ${JSON.stringify(value)}`)
         .join('; ')}`,
     );
-  if (card.example !== undefined) lines.push(`Example input: ${JSON.stringify(card.example)}`);
-  if (card.returns !== undefined) lines.push(`Returns: ${card.returns}`);
-  if (card.returnsExample !== undefined)
-    lines.push(`Example of what comes back (shortened): ${JSON.stringify(card.returnsExample)}`);
+  if (spec.example !== undefined) lines.push(`Example input: ${JSON.stringify(spec.example)}`);
+  if (spec.returns !== undefined) lines.push(`Returns: ${spec.returns}`);
+  if (spec.returnsExample !== undefined)
+    lines.push(`Example of what comes back (shortened): ${JSON.stringify(spec.returnsExample)}`);
   lines.push(
     `To run it, call request({id: ${JSON.stringify(id)}, input: {...}}) with the inputs above. Nothing has been paid.`,
   );
@@ -110,17 +110,17 @@ export function cardText(id: string, card: ToolCard): string {
 }
 
 /** The agent's input with the pinned fields over it: a pin always wins. */
-export function mergedInput(card: ToolCard, input: Json): Json {
-  return { ...input, ...card.pinned };
+export function mergedInput(spec: ToolSpec, input: Json): Json {
+  return { ...input, ...spec.pinned };
 }
 
-/** Every problem with the merged input, against the card's own schema; [] when
+/** Every problem with the merged input, against the spec's own schema; [] when
  *  it fits or the schema cannot be checked here (the provider then checks). */
-export function cardInputProblems(card: ToolCard, merged: Json): string[] {
-  return inputProblems(card.input, merged) ?? [];
+export function specInputProblems(spec: ToolSpec, merged: Json): string[] {
+  return inputProblems(spec.input, merged) ?? [];
 }
 
-export interface CardRequest {
+export interface SpecRequest {
   url: string;
   method: 'GET' | 'POST';
   headers: Record<string, string>;
@@ -139,14 +139,14 @@ const scalar = (value: unknown): value is string | number | boolean =>
 const segment = (value: unknown): boolean => scalar(value) && value !== '.' && value !== '..';
 
 /**
- * The HTTP request the card describes, filled from the merged input, or why it
+ * The HTTP request the spec describes, filled from the merged input, or why it
  * cannot be built. A path placeholder takes its field's value as one encoded
  * segment; a query field is sent as text; the rest is the JSON body. The
- * request never leaves the card's own origin.
+ * request never leaves the spec's own origin.
  */
-export function buildCardRequest(card: ToolCard, merged: Json): CardRequest | { problem: string } {
-  const where = (name: string) => card.request.fields[name] ?? card.request.location;
-  const inPath = [...card.request.url.matchAll(PLACEHOLDER_RE)].map((match) => match[1]!);
+export function buildSpecRequest(spec: ToolSpec, merged: Json): SpecRequest | { problem: string } {
+  const where = (name: string) => spec.request.fields[name] ?? spec.request.location;
+  const inPath = [...spec.request.url.matchAll(PLACEHOLDER_RE)].map((match) => match[1]!);
   const missing = inPath.filter((name) => !segment(merged[name]));
   if (missing.length)
     return {
@@ -155,14 +155,14 @@ export function buildCardRequest(card: ToolCard, merged: Json): CardRequest | { 
   let base: URL;
   let url: URL;
   try {
-    base = new URL(card.request.url);
+    base = new URL(spec.request.url);
     url = new URL(
-      card.request.url.replace(PLACEHOLDER_RE, (_, name: string) =>
+      spec.request.url.replace(PLACEHOLDER_RE, (_, name: string) =>
         encodeURIComponent(String(merged[name])),
       ),
     );
   } catch {
-    return { problem: 'the card names a URL this build cannot parse' };
+    return { problem: 'the spec names a URL this build cannot parse' };
   }
   if (url.origin !== base.origin || url.protocol !== 'https:')
     return { problem: 'the filled URL left the service it names' };
@@ -183,7 +183,7 @@ export function buildCardRequest(card: ToolCard, merged: Json): CardRequest | { 
     return {
       problem: `${nested.join(', ')} ${nested.length > 1 ? 'go' : 'goes'} in the query string, so each must be a string, number or boolean`,
     };
-  if (card.request.method === 'GET') {
+  if (spec.request.method === 'GET') {
     if (Object.keys(body).length)
       return {
         problem: `a GET carries no body, so ${Object.keys(body).join(', ')} cannot be sent`,

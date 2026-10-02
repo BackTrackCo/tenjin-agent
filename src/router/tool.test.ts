@@ -10,8 +10,8 @@ import type { CommandContext } from '../context';
 import { runPay } from '../commands/pay';
 import { extensionFor, runRequestTool } from './tool';
 import type { MediaTransport } from './paid';
-import { storeCards } from './cards';
-import { ROUTER_PATH, type OfferCard } from './decision';
+import { storeSpecs } from './specs';
+import { ROUTER_PATH, type OfferSpec } from './decision';
 import { bindDecision, claimRedirect, noteSession, renderProgress } from './progress';
 
 // Pass-through, so a refusal's typed details stay observable after the tool
@@ -747,7 +747,7 @@ describe('a discovered service', () => {
       providerContentUntrusted: true,
     });
     expect(calls).toHaveLength(1);
-    expect(JSON.parse(calls[0]!.body!)).toMatchObject({ accepts: ['discovered', 'card'] });
+    expect(JSON.parse(calls[0]!.body!)).toMatchObject({ accepts: ['discovered', 'spec'] });
     expect(auth.authorize).not.toHaveBeenCalled();
   });
 
@@ -1143,21 +1143,21 @@ describe('a discovered service', () => {
 });
 
 /**
- * AN OFFER WITH A TOOL CARD: the hook kept the card, so the tool shows it for
+ * AN OFFER WITH A REQUEST SPEC: the hook kept the spec, so the tool shows it for
  * the id alone and runs it for the id and an input, building and paying the
  * request itself. The server is asked nothing and told only how it ended.
  */
-describe('an offer with a tool card', () => {
-  const CARD_ID = '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d01';
+describe('an offer with a request spec', () => {
+  const SPEC_ID = '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d01';
   const routerCalls = (calls: { url: string }[]) =>
     calls.filter((call) => call.url.startsWith(`${ROUTER}${ROUTER_PATH}`));
   /** The outcome report is fire-and-forget: let one that was sent land. */
   const reportsSettled = () => new Promise((resolve) => setTimeout(resolve, 25));
   const PAYEE = '0x1111111111111111111111111111111111111111';
 
-  function quoteCard(over: Partial<OfferCard> = {}): OfferCard {
+  function quoteSpec(over: Partial<OfferSpec> = {}): OfferSpec {
     return {
-      id: CARD_ID,
+      id: SPEC_ID,
       capabilityId: 'cmc-quotes',
       provider: 'CoinMarketCap',
       description: 'latest market quotes for one or more cryptocurrencies',
@@ -1189,14 +1189,14 @@ describe('an offer with a tool card', () => {
     };
   }
 
-  it('shows the card for the id alone, and sends nothing', async () => {
-    await storeCards(dir, [quoteCard()]);
+  it('shows the spec for the id alone, and sends nothing', async () => {
+    await storeSpecs(dir, [quoteSpec()]);
     const { fetchImpl, calls } = net([]);
-    const result = await runRequestTool({ id: CARD_ID }, deps(fetchImpl));
+    const result = await runRequestTool({ id: SPEC_ID }, deps(fetchImpl));
     expect(result.isError).toBe(false);
     expect(result.envelope).toMatchObject({
-      status: 'card',
-      id: CARD_ID,
+      status: 'spec',
+      id: SPEC_ID,
       cost: ['provider price 0 USD'],
     });
     expect(result.summary).toContain('symbol (string, required); Comma-separated symbols');
@@ -1205,10 +1205,10 @@ describe('an offer with a tool card', () => {
   });
 
   it('builds the request from the input, pays the provider, and reports how it ended', async () => {
-    await storeCards(dir, [quoteCard()]);
+    await storeSpecs(dir, [quoteSpec()]);
     const { fetchImpl, calls } = net([...providerLegs(), { url: ROUTER, status: 200, body: {} }]);
     const result = await runRequestTool(
-      { id: CARD_ID, input: { symbol: 'BTC,ETH', convert: 'USD' } },
+      { id: SPEC_ID, input: { symbol: 'BTC,ETH', convert: 'USD' } },
       deps(fetchImpl),
     );
     expect(result.envelope).toMatchObject({
@@ -1236,16 +1236,16 @@ describe('an offer with a tool card', () => {
     expect(calls[2]).toMatchObject({ url: `${ROUTER}${ROUTER_PATH}`, method: 'POST' });
     expect(JSON.parse(calls[2]!.body!)).toMatchObject({
       schemaVersion: 1,
-      id: CARD_ID,
+      id: SPEC_ID,
       status: 'fulfilled',
     });
   });
 
-  it('refuses an input that misses the card, naming every problem, and sends nothing', async () => {
-    await storeCards(dir, [quoteCard()]);
+  it('refuses an input that misses the spec, naming every problem, and sends nothing', async () => {
+    await storeSpecs(dir, [quoteSpec()]);
     const { fetchImpl, calls } = net([]);
     const result = await runRequestTool(
-      { id: CARD_ID, input: { convert: 'GBP', limit: 3 } },
+      { id: SPEC_ID, input: { convert: 'GBP', limit: 3 } },
       deps(fetchImpl),
     );
     expect(result.isError).toBe(false);
@@ -1262,8 +1262,8 @@ describe('an offer with a tool card', () => {
     expect(calls).toEqual([]);
   });
 
-  it("signs nothing for a live 402 that pays someone other than the card's payee", async () => {
-    await storeCards(dir, [quoteCard()]);
+  it("signs nothing for a live 402 that pays someone other than the spec's payee", async () => {
+    await storeSpecs(dir, [quoteSpec()]);
     const { fetchImpl, calls } = net([
       {
         url: PROVIDER,
@@ -1274,7 +1274,7 @@ describe('an offer with a tool card', () => {
         },
       },
     ]);
-    const result = await runRequestTool({ id: CARD_ID, input: { symbol: 'BTC' } }, deps(fetchImpl));
+    const result = await runRequestTool({ id: SPEC_ID, input: { symbol: 'BTC' } }, deps(fetchImpl));
     expect(result.envelope).toMatchObject({
       status: 'failed',
       cost: ['provider price 0 USD'],
@@ -1286,8 +1286,8 @@ describe('an offer with a tool card', () => {
     expect(routerCalls(calls)).toEqual([]);
   });
 
-  it('asks for a smaller input when a varying price lands over the card ceiling', async () => {
-    await storeCards(dir, [quoteCard({ priceVaries: true, maxAmountAtomic: '1000000' })]);
+  it('asks for a smaller input when a varying price lands over the spec ceiling', async () => {
+    await storeSpecs(dir, [quoteSpec({ priceVaries: true, maxAmountAtomic: '1000000' })]);
     const auth = authorizer();
     const { fetchImpl, calls } = net([
       {
@@ -1298,7 +1298,7 @@ describe('an offer with a tool card', () => {
       },
     ]);
     const result = await runRequestTool(
-      { id: CARD_ID, input: { symbol: 'BTC' } },
+      { id: SPEC_ID, input: { symbol: 'BTC' } },
       deps(fetchImpl, auth),
     );
     expect(result.envelope).toMatchObject({
@@ -1307,7 +1307,7 @@ describe('an offer with a tool card', () => {
       nextStep: 'Change the input and call again with the same id.',
     });
     const reason = String(result.envelope.reason);
-    expect(reason).toContain("prices this input at $1.5, over this card's $1 ceiling");
+    expect(reason).toContain("prices this input at $1.5, over this spec's $1 ceiling");
     expect(reason).not.toContain('fresh decision');
     expect(calls.filter((call) => call.paid)).toEqual([]);
     expect(auth.authorize).not.toHaveBeenCalled();
@@ -1316,11 +1316,11 @@ describe('an offer with a tool card', () => {
   });
 
   it('says a provider refused the input before payment, and what was sent', async () => {
-    await storeCards(dir, [quoteCard()]);
+    await storeSpecs(dir, [quoteSpec()]);
     const { fetchImpl, calls } = net([
       { url: PROVIDER, status: 400, body: { error: 'bad symbol' } },
     ]);
-    const result = await runRequestTool({ id: CARD_ID, input: { symbol: '??' } }, deps(fetchImpl));
+    const result = await runRequestTool({ id: SPEC_ID, input: { symbol: '??' } }, deps(fetchImpl));
     expect(result.envelope).toMatchObject({
       status: 'failed',
       providerStatus: 400,
@@ -1336,13 +1336,13 @@ describe('an offer with a tool card', () => {
   });
 
   it('reports nothing when the spend policy refuses the call before signing', async () => {
-    await storeCards(dir, [quoteCard()]);
+    await storeSpecs(dir, [quoteSpec()]);
     const auth = authorizer('deny');
     const { fetchImpl, calls } = net([
       { url: PROVIDER, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge() } },
     ]);
     const result = await runRequestTool(
-      { id: CARD_ID, input: { symbol: 'BTC' } },
+      { id: SPEC_ID, input: { symbol: 'BTC' } },
       deps(fetchImpl, auth),
     );
     expect(result.envelope).toMatchObject({
@@ -1354,18 +1354,18 @@ describe('an offer with a tool card', () => {
     expect(routerCalls(calls)).toEqual([]);
   });
 
-  it('pays once per card id: a retry after a paid call sends and pays nothing', async () => {
-    await storeCards(dir, [quoteCard()]);
+  it('pays once per spec id: a retry after a paid call sends and pays nothing', async () => {
+    await storeSpecs(dir, [quoteSpec()]);
     const auth = authorizer();
     const { fetchImpl, calls } = net([...providerLegs(), { url: ROUTER, status: 200, body: {} }]);
     const first = await runRequestTool(
-      { id: CARD_ID, input: { symbol: 'BTC' } },
+      { id: SPEC_ID, input: { symbol: 'BTC' } },
       deps(fetchImpl, auth),
     );
     expect(first.envelope).toMatchObject({ status: 'fulfilled' });
     await vi.waitFor(() => expect(calls).toHaveLength(3));
     const retry = await runRequestTool(
-      { id: CARD_ID, input: { symbol: 'BTC' } },
+      { id: SPEC_ID, input: { symbol: 'BTC' } },
       deps(fetchImpl, auth),
     );
     expect(retry.isError).toBe(false);
@@ -1381,28 +1381,28 @@ describe('an offer with a tool card', () => {
     expect(auth.authorize).toHaveBeenCalledOnce();
   });
 
-  it('lets a card run again after a call that paid nothing', async () => {
-    await storeCards(dir, [quoteCard()]);
+  it('lets a spec run again after a call that paid nothing', async () => {
+    await storeSpecs(dir, [quoteSpec()]);
     const { fetchImpl, calls } = net([
       { url: PROVIDER, status: 400, body: { error: 'bad symbol' } },
       ...providerLegs(),
       { url: ROUTER, status: 200, body: {} },
     ]);
-    const refused = await runRequestTool({ id: CARD_ID, input: { symbol: '??' } }, deps(fetchImpl));
+    const refused = await runRequestTool({ id: SPEC_ID, input: { symbol: '??' } }, deps(fetchImpl));
     expect(refused.envelope).toMatchObject({ status: 'failed', providerStatus: 400 });
-    const fixed = await runRequestTool({ id: CARD_ID, input: { symbol: 'BTC' } }, deps(fetchImpl));
+    const fixed = await runRequestTool({ id: SPEC_ID, input: { symbol: 'BTC' } }, deps(fetchImpl));
     expect(fixed.envelope).toMatchObject({ status: 'fulfilled' });
     expect(calls.filter((call) => call.paid)).toHaveLength(1);
     await vi.waitFor(() => expect(routerCalls(calls)).toHaveLength(1));
   });
 
-  it("shows the server's pick for a query with no id as its card, then runs it from that card", async () => {
+  it("shows the server's pick for a query with no id as its spec, then runs it from that spec", async () => {
     const PICKED = '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d21';
     const query = 'BTC and ETH spot price in USD';
     const answer = {
       schemaVersion: 1,
       routerVersion: '2026-09-23.1',
-      decision: { action: 'card', card: quoteCard({ id: PICKED }) },
+      decision: { action: 'spec', spec: quoteSpec({ id: PICKED }) },
     };
     const { fetchImpl, calls } = net([
       { url: ROUTER, status: 200, body: answer },
@@ -1412,7 +1412,7 @@ describe('an offer with a tool card', () => {
     const shown = await runRequestTool({ query }, deps(fetchImpl));
     expect(shown.isError).toBe(false);
     expect(shown.envelope).toMatchObject({
-      status: 'card',
+      status: 'spec',
       id: PICKED,
       cost: ['provider price 0 USD'],
     });
@@ -1420,9 +1420,9 @@ describe('an offer with a tool card', () => {
     expect(JSON.parse(calls[0]!.body!)).toEqual({
       schemaVersion: 1,
       query,
-      accepts: ['discovered', 'card'],
+      accepts: ['discovered', 'spec'],
     });
-    // The next call runs from the kept card: no second decision.
+    // The next call runs from the kept spec: no second decision.
     const ran = await runRequestTool({ id: PICKED, input: { symbol: 'BTC' } }, deps(fetchImpl));
     expect(ran.envelope).toMatchObject({ status: 'fulfilled' });
     expect(calls[1]).toMatchObject({ url: `${PROVIDER}?symbol=BTC`, paid: false });
@@ -1431,26 +1431,26 @@ describe('an offer with a tool card', () => {
     expect(JSON.parse(calls[3]!.body!)).toMatchObject({ id: PICKED, status: 'fulfilled' });
   });
 
-  it("shows a carded list service's own card for a query, not its line", async () => {
+  it("shows a list service's own spec for a query, not its line", async () => {
     const fixtures = fileURLToPath(new URL('./fixtures/', import.meta.url));
     const answer = JSON.parse(
-      await readFile(join(fixtures, 'wire-hook-discovered-card.json'), 'utf8'),
-    ) as { decision: { id: string; cards: OfferCard[] } };
+      await readFile(join(fixtures, 'wire-hook-discovered-spec.json'), 'utf8'),
+    ) as { decision: { id: string; specs: OfferSpec[] } };
     const { fetchImpl } = net([{ url: ROUTER, status: 200, body: answer }]);
     const result = await runRequestTool({ query: 'an image of a red fox' }, deps(fetchImpl));
-    const [card] = answer.decision.cards;
-    expect(result.envelope).toMatchObject({ status: 'card', id: answer.decision.id });
-    expect(result.summary).toContain(`${card!.provider}: ${card!.description}`);
+    const [spec] = answer.decision.specs;
+    expect(result.envelope).toMatchObject({ status: 'spec', id: answer.decision.id });
+    expect(result.summary).toContain(`${spec!.provider}: ${spec!.description}`);
     expect(result.summary).not.toContain('Also offered');
   });
 
-  it('asks the server, as before, for an id it holds no card for', async () => {
+  it('asks the server, as before, for an id it holds no spec for', async () => {
     const { fetchImpl, calls } = net([{ url: ROUTER, status: 200, body: NATIVE }]);
-    const result = await runRequestTool({ id: CARD_ID }, deps(fetchImpl));
+    const result = await runRequestTool({ id: SPEC_ID }, deps(fetchImpl));
     expect(result.envelope).toMatchObject({ status: 'needs_input' });
-    expect(String(result.envelope.reason)).toContain('No card is kept for that id');
+    expect(String(result.envelope.reason)).toContain('No spec is kept for that id');
     expect(calls).toEqual([]);
-    const withQuery = await runRequestTool({ id: CARD_ID, query: 'BTC price' }, deps(fetchImpl));
+    const withQuery = await runRequestTool({ id: SPEC_ID, query: 'BTC price' }, deps(fetchImpl));
     expect(withQuery.envelope).toMatchObject({ status: 'native' });
     expect(calls).toHaveLength(1);
   });

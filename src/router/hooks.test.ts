@@ -19,7 +19,7 @@ import {
 } from './hooks';
 import { MCP_SERVER_NAME, REQUEST_TOOL } from './names';
 import { runHookCommand } from './hook-command';
-import { readCard } from './cards';
+import { readSpec } from './specs';
 import { ROUTER_PATH } from './decision';
 import {
   claimRedirect,
@@ -2763,27 +2763,27 @@ describe('a discovered service', () => {
     });
     expect((calls[0] as { body: unknown }).body).toMatchObject({
       sessionId: 'sess-1',
-      accepts: ['discovered', 'card'],
+      accepts: ['discovered', 'spec'],
     });
     // The footer names the seller, and the id binds this session for `request`.
     expect(await renderProgress(dir, 'sess-1')).toContain('BlockRun');
     expect(await resolveProgressSession(dir, { id: ID })).not.toBeNull();
   });
 
-  it('keeps the card of a shown offer, for request to read by its id', async () => {
-    const CARDED = JSON.parse(
+  it('keeps the spec of a shown offer, for request to read by its id', async () => {
+    const OFFERED = JSON.parse(
       readFileSync(
-        fileURLToPath(new URL('./fixtures/wire-hook-discovered-card.json', import.meta.url)),
+        fileURLToPath(new URL('./fixtures/wire-hook-discovered-spec.json', import.meta.url)),
         'utf8',
       ),
-    ) as { decision: { id: string; cards: unknown[] } };
-    const { fetchImpl } = router(CARDED);
+    ) as { decision: { id: string; specs: unknown[] } };
+    const { fetchImpl } = router(OFFERED);
     await runPromptHook(promptEvent('make a hero image for the blog post'), {
       dataDir: dir,
       baseUrl: BASE,
       fetchImpl,
     });
-    expect(await readCard(dir, CARDED.decision.id)).toEqual(CARDED.decision.cards[0]);
+    expect(await readSpec(dir, OFFERED.decision.id)).toEqual(OFFERED.decision.specs[0]);
   });
 
   /** A LIST CAN NAME A SERVICE OVER THE CAP beside one that fits: People Data
@@ -2875,7 +2875,7 @@ describe('a discovered service', () => {
     });
     expect((first.calls[0] as { body: Record<string, unknown> }).body.accepts).toEqual([
       'discovered',
-      'card',
+      'spec',
     ]);
     const fs = await import('node:fs/promises');
     await fs.writeFile(
@@ -2890,7 +2890,7 @@ describe('a discovered service', () => {
     });
     expect((second.calls[0] as { body: Record<string, unknown> }).body.accepts).toEqual([
       'discovered',
-      'card',
+      'spec',
       'bazaar',
     ]);
   });
@@ -3168,7 +3168,7 @@ describe('a question to the user', () => {
         'You pick a track: send me a licensed track.',
     });
     expect((body.packet.current as { text: string }).text).toContain('I can get API keys');
-    expect(body).toMatchObject({ sessionId: 'sess-1', accepts: ['discovered', 'card'] });
+    expect(body).toMatchObject({ sessionId: 'sess-1', accepts: ['discovered', 'spec'] });
   });
 
   it('denies the question once on an offer, then lets it be asked', async () => {

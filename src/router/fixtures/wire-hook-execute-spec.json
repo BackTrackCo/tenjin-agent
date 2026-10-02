@@ -12,7 +12,7 @@
     "endpoint": "https://api.exa.ai/search",
     "usage": "the research question",
     "hint": "Exa fits this: web search that returns ranked source pages, optionally with their text, highlights or summaries. $0.007 via https://api.exa.ai/search . Call request({id: \"0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d11\", input: {\"query\":\"x402 agent payments\"}}) instead; native tools stay allowed for anything else.",
-    "cards": [
+    "specs": [
       {
         "id": "0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d11",
         "capabilityId": "exa-search",

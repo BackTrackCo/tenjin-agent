@@ -30,7 +30,7 @@ import { runRequestTool, type RequestToolDeps } from './tool';
  * lead-search task to the router as a single operation. It then grew a second
  * half forbidding any rewording at all, which is neither enforceable nor
  * necessary: on the query path the backend binds the call against the turn's
- * stored packet, and on a card the model fills the service's own fields. What
+ * stored packet, and on a spec the model fills the service's own fields. What
  * the host owes is the immediate operation and the inputs that belong to it,
  * exactly as the user gave them where they are exact, which is one sentence
  * rather than two rules. It says "your task", not "the user": a subagent
@@ -54,7 +54,7 @@ const INSTRUCTIONS =
   'company/person/email lookups). When one fits, a hook line names the service and how ' +
   'to call it: at the start of a turn, in place of a WebSearch or WebFetch call, after ' +
   'one comes back short, or in a delegated task. ' +
-  "Call it with the offer's id: `{id}` alone returns the service's card (its inputs, " +
+  "Call it with the offer's id: `{id}` alone returns the service's spec (its inputs, " +
   'an example and what it returns), free; `{id, input}` runs it. ' +
   'Before asking the user to get an API key or account for a one-off task, call it with ' +
   'that operation: it can find a pay-per-call service. ' +
@@ -120,14 +120,14 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
           .describe(
             `${SCOPE_RULE} Carry the inputs and constraints your task gives for that lookup, ` +
               'and nothing else. Send this for a task no line offered, or with an id when the ' +
-              'line asks for a query; an offer that has a card takes `input` instead.',
+              'line asks for a query; an offer that has a spec takes `input` instead.',
           ),
         id: z
           .string()
           .optional()
           .describe(
             'The id from a hook line, when one is there. It names the service that line ' +
-              "offered. Alone, it returns that service's card: its inputs, an example and " +
+              "offered. Alone, it returns that service's spec: its inputs, an example and " +
               'what it returns, with nothing paid. With `input`, it runs that service. Leave ' +
               'it out for a different task, and the lookup is decided from the query alone.',
           ),
@@ -135,7 +135,7 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
           .record(z.string(), z.unknown())
           .optional()
           .describe(
-            'The JSON object the offered service takes, built from its card (call with the id ' +
+            'The JSON object the offered service takes, built from its spec (call with the id ' +
               'alone to see it) or given ready in the line, sent with its id.',
           ),
       },

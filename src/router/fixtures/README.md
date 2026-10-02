@@ -20,7 +20,7 @@ parsed by the handler that serves it.
 | call | request                                                     | answer                                                                                                                                                                                           |
 | ---- | ----------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | hook | `{schemaVersion, sessionId?, accepts?, packet, gateHint?}`  | is a paid lookup worth offering? `execute` with the id, the capability and a `hint`, `discovered` (below), or `native` / `needs_input` with diagnostics                                          |
-| tool | `{schemaVersion, query?, id?, input?, gateHint?, accepts?}` | the decision: the capability, its price and the contract together, `card` (a card client's query with no id), `discovered` for a query no curated capability serves, or `native` / `needs_input` |
+| tool | `{schemaVersion, query?, id?, input?, gateHint?, accepts?}` | the decision: the capability, its price and the contract together, `spec` (a spec client's query with no id), `discovered` for a query no curated capability serves, or `native` / `needs_input` |
 
 Both `execute` answers name the capability: `capabilityId`, `category`,
 `provider` (the service's own name, such as `Wolfram Alpha`),
@@ -87,33 +87,33 @@ Anything that is neither form is refused at validation with a plain error:
 is valid and is the fallback for an id that has expired; the answer says so in
 `note` and is still a decision.
 
-## Tool cards
+## Request specs
 
-A client that adds `"card"` to `accepts` also gets `cards` on every offer
-(`execute` and `discovered`): one card per service the hint names, under the
-id the hint gives it. A card is the service's contract: `capabilityId`,
+A client that adds `"spec"` to `accepts` also gets `specs` on every offer
+(`execute` and `discovered`): one spec per service the hint names, under the
+id the hint gives it. A spec is the service's contract: `capabilityId`,
 `provider`, `description`, `priceAtomic`, `priceVaries`, `maxAmountAtomic`,
 `payTo`, `network`, `asset`, `request` (`method`, a `url` that may hold
 `{name}` path placeholders, `fields` saying where each field goes, and
 `location` for any other), `input` (a flat JSON Schema), `pinned` (fields set
 on every call, which win over the agent's input), and optionally `example`,
 `returns`, `returnsExample` and `resultSchema`. The hint then asks for
-`request({id})`, which shows the card, or hands over the one input the hook
+`request({id})`, which shows the spec, or hands over the one input the hook
 already holds as `request({id, input})`. The client builds and pays the call
 itself and, once a call was attempted, reports `{schemaVersion, id, status,
 httpStatus?, ms?}`. The first report for a live id marks its row executed;
 a repeat or a report after expiry is a 204 that changes nothing. No text is
 stored. A client that does not send
-`card` never sees the field: the decision schemas are strict.
+`spec` never sees the field: the decision schemas are strict.
 
 Such a client's tool call with a `query` and no `id` gets no binder: the
 server runs the hook's gate over the query (a bare URL takes the page rule)
-and answers `{action: "card", card}`, the picked capability's card under a
+and answers `{action: "spec", spec}`, the picked capability's spec under a
 fresh id, stored as a hook offer is. The `request` tool keeps it like a hook's
-card and shows it, so the agent's next call is `request({id, input})`. A list
+spec and shows it, so the agent's next call is `request({id, input})`. A list
 specialist can still replace a generic pick, and a query no capability serves
-can still come back `discovered`, both with `cards`; the tool then shows the
-pick's own card. A pick with no card (the free docs lookup) is bound and
+can still come back `discovered`, both with `specs`; the tool then shows the
+pick's own spec. A pick with no spec (the free docs lookup) is bound and
 answered `execute` as its id would be.
 
 ## The set
@@ -138,11 +138,11 @@ answered `execute` as its id would be.
 | `wire-lookup-discovered.json`              | tool answer to a query with no id: the same `discovered` shape                      |
 | `wire-tool-request-discovered.json`        | the tool call for a discovered service: the id and the host's `input`, no query     |
 | `wire-lookup-execute-discovered.json`      | tool answer: the discovered service as an ordinary `execute`, category `discovered` |
-| `wire-hook-execute-card.json`              | hook answer for a client that accepts `card`: the ready call and the Exa card       |
-| `wire-hook-discovered-card.json`           | the same for a list service: the hint asks for the id alone, the card rides along   |
-| `wire-outcome-request.json`                | the outcome report a client sends after running a card                              |
-| `wire-tool-request-card.json`              | the tool call from a card client: a query, no id                                    |
-| `wire-lookup-card.json`                    | tool answer for it: the picked capability's card under a fresh id                   |
+| `wire-hook-execute-spec.json`              | hook answer for a client that accepts `spec`: the ready call and the Exa spec       |
+| `wire-hook-discovered-spec.json`           | the same for a list service: the hint asks for the id alone, the spec rides along   |
+| `wire-outcome-request.json`                | the outcome report a client sends after running a spec                              |
+| `wire-tool-request-spec.json`              | the tool call from a spec client: a query, no id                                    |
+| `wire-lookup-spec.json`                    | tool answer for it: the picked capability's spec under a fresh id                   |
 
 Two rules the fixtures exist to hold:
 

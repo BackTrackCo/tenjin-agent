@@ -4,48 +4,48 @@ import { lstat, open, opendir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { writeFileAtomic, writeFileAtomicExclusive } from '../lib/atomic-json';
-import { OfferCardSchema, type OfferCard } from './decision';
+import { OfferSpecSchema, type OfferSpec } from './decision';
 
 /**
- * THE TOOL CARDS AN OFFER CARRIED, kept on this machine by the offer's id. The
- * hook that shows a line stores the card of every service the line names; the
+ * THE REQUEST SPECS AN OFFER CARRIED, kept on this machine by the offer's id. The
+ * hook that shows a line stores the spec of every service the line names; the
  * `request` tool, which runs in the MCP server's own process and never sees
  * the hook, reads one back by the id the agent passes. One file per id, named
  * by the id's SHA-256, so a read is one open and needs no session.
  *
- * Best effort on the write, like every record the hooks keep: with no card
+ * Best effort on the write, like every record the hooks keep: with no spec
  * stored, `request({id})` says none is kept and asks for the query its line
- * named. A card is the server's own answer, re-parsed on the way back in, and
+ * named. A spec is the server's own answer, re-parsed on the way back in, and
  * it lives as long as the server keeps the offer's id.
  */
 
-const CARDS_DIR = join('progress', 'cards');
-/** A card holds a service's whole input schema; far larger than any record. */
-const MAX_CARD_BYTES = 128 * 1024;
+const SPECS_DIR = join('progress', 'specs');
+/** A spec holds a service's whole input schema; far larger than any record. */
+const MAX_SPEC_BYTES = 128 * 1024;
 /** Above this many files the directory is not scanned for pruning. */
-const MAX_CARDS = 512;
+const MAX_SPECS = 512;
 /** The server's decision expiry: past it, the id's outcome report and an
  *  `{id, query}` fallback find no row. */
-export const CARD_TTL_MS = 15 * 60_000;
+export const SPEC_TTL_MS = 15 * 60_000;
 
 const digest = (value: string): string => createHash('sha256').update(value).digest('hex');
 
-function cardPath(dataDir: string, id: string): string {
-  return join(dataDir, CARDS_DIR, `${digest(id)}.json`);
+function specPath(dataDir: string, id: string): string {
+  return join(dataDir, SPECS_DIR, `${digest(id)}.json`);
 }
 
 /**
- * Store each card under its id, and drop expired ones. Never throws. Ages are
+ * Store each spec under its id, and drop expired ones. Never throws. Ages are
  * file mtimes, so they are read against the real clock, never a caller's.
  */
-export async function storeCards(
+export async function storeSpecs(
   dataDir: string,
-  cards: readonly OfferCard[] | undefined,
+  specs: readonly OfferSpec[] | undefined,
 ): Promise<void> {
-  if (cards === undefined || cards.length === 0) return;
-  for (const card of cards) {
+  if (specs === undefined || specs.length === 0) return;
+  for (const spec of specs) {
     try {
-      await writeFileAtomic(cardPath(dataDir, card.id), JSON.stringify(card), {
+      await writeFileAtomic(specPath(dataDir, spec.id), JSON.stringify(spec), {
         mode: 0o600,
         dirMode: 0o700,
       });
@@ -53,20 +53,20 @@ export async function storeCards(
       // The tool falls back to the server for this id.
     }
   }
-  await pruneCards(dataDir, Date.now());
+  await pruneSpecs(dataDir, Date.now());
 }
 
-/** The card stored for this id, or null: none, expired, damaged or not ours. */
-export async function readCard(dataDir: string, id: string): Promise<OfferCard | null> {
-  const path = cardPath(dataDir, id);
+/** The spec stored for this id, or null: none, expired, damaged or not ours. */
+export async function readSpec(dataDir: string, id: string): Promise<OfferSpec | null> {
+  const path = specPath(dataDir, id);
   // O_NOFOLLOW: the directory is the user's, and a planted symlink must not
   // turn this read into a read of something else.
   const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW).catch(() => undefined);
   if (file === undefined) return null;
   try {
     const stat = await file.stat();
-    if (Date.now() - stat.mtimeMs > CARD_TTL_MS || stat.size > MAX_CARD_BYTES) return null;
-    const parsed = OfferCardSchema.safeParse(JSON.parse(await file.readFile('utf8')));
+    if (Date.now() - stat.mtimeMs > SPEC_TTL_MS || stat.size > MAX_SPEC_BYTES) return null;
+    const parsed = OfferSpecSchema.safeParse(JSON.parse(await file.readFile('utf8')));
     return parsed.success && parsed.data.id === id ? parsed.data : null;
   } catch {
     return null;
@@ -76,7 +76,7 @@ export async function readCard(dataDir: string, id: string): Promise<OfferCard |
 }
 
 /**
- * What an earlier call with a card's id left. `paid`: money left for it.
+ * What an earlier call with a spec's id left. `paid`: money left for it.
  * `running`: a call claimed it and has not ended, or its process died, so it
  * may have paid. `unrecorded`: this call could not record its claim.
  */
@@ -96,17 +96,17 @@ const PaymentSchema = z.discriminatedUnion('state', [
 ]);
 
 function paymentPath(dataDir: string, id: string): string {
-  return join(dataDir, CARDS_DIR, `${digest(id)}.paid.json`);
+  return join(dataDir, SPECS_DIR, `${digest(id)}.paid.json`);
 }
 
 /**
- * CLAIM THE ONE PAYMENT A CARD ALLOWS, before anything is signed: an exclusive
- * create beside the card, so a retry or a second call with the same id cannot
+ * CLAIM THE ONE PAYMENT A SPEC ALLOWS, before anything is signed: an exclusive
+ * create beside the spec, so a retry or a second call with the same id cannot
  * pay again. Null when the claim is this call's; otherwise what an earlier call
  * left, and this one pays nothing. A claim that cannot be written refuses too:
  * the record is the only proof a payment has not already left.
  */
-export async function claimCardPayment(
+export async function claimSpecPayment(
   dataDir: string,
   id: string,
   now: number = Date.now(),
@@ -139,7 +139,7 @@ export async function claimCardPayment(
  * call that left nothing drops its claim, so a fixed input can still run. A
  * record that cannot be written leaves the claim standing, which refuses.
  */
-export async function settleCardPayment(
+export async function settleSpecPayment(
   dataDir: string,
   id: string,
   left: { amountAtomic: bigint; txHash?: string },
@@ -161,16 +161,16 @@ export async function settleCardPayment(
   );
 }
 
-async function pruneCards(dataDir: string, now: number): Promise<void> {
+async function pruneSpecs(dataDir: string, now: number): Promise<void> {
   try {
-    const directory = await opendir(join(dataDir, CARDS_DIR));
+    const directory = await opendir(join(dataDir, SPECS_DIR));
     let count = 0;
     for await (const entry of directory) {
-      if (++count > MAX_CARDS) return;
+      if (++count > MAX_SPECS) return;
       if (!entry.isFile()) continue;
-      const path = join(dataDir, CARDS_DIR, entry.name);
+      const path = join(dataDir, SPECS_DIR, entry.name);
       const stat = await lstat(path).catch(() => undefined);
-      if (stat === undefined || now - stat.mtimeMs > CARD_TTL_MS) {
+      if (stat === undefined || now - stat.mtimeMs > SPEC_TTL_MS) {
         await rm(path, { force: true }).catch(() => undefined);
       }
     }

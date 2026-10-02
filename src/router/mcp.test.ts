@@ -226,14 +226,14 @@ describe('what the tool tells the model to send', () => {
         };
         required?: string[];
       };
-      // An offer is called by its id: alone it shows the card, with `input` it
+      // An offer is called by its id: alone it shows the spec, with `input` it
       // runs. A query is for a task no line offered. The handler refuses a call
       // with neither.
       expect(schema.properties.query.description).toContain(SCOPE_RULE);
       expect(schema.properties.query.description).toContain('a task no line offered');
       expect(schema.required ?? []).toEqual([]);
       expect(schema.properties.id?.description).toContain('names the service');
-      expect(schema.properties.id?.description).toContain("returns that service's card");
+      expect(schema.properties.id?.description).toContain("returns that service's spec");
       expect(request.description).toContain('`{id}` alone returns the service');
       expect(request.description).toContain('`{id, input}` runs it');
       expect(schema.properties.input?.type).toBe('object');

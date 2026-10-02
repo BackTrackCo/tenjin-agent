@@ -8,21 +8,21 @@ import { resolveContextSettings } from '../lib/settings';
 import type { SpendAuthorizer, WalletProvider } from '../lib/wallet';
 import type { TenjinSigner } from '../lib/wallet/provider';
 import type { CommandContext } from '../context';
-import { buildCardRequest, cardInputProblems, cardText, mergedInput } from './card-call';
+import { buildSpecRequest, specInputProblems, specText, mergedInput } from './spec-call';
 import {
-  claimCardPayment,
-  readCard,
-  settleCardPayment,
-  storeCards,
+  claimSpecPayment,
+  readSpec,
+  settleSpecPayment,
+  storeSpecs,
   type EarlierPayment,
-} from './cards';
+} from './specs';
 import {
-  reportCardOutcome,
+  reportSpecOutcome,
   requestDecision,
-  type CardOutcome,
+  type SpecOutcome,
   type DecisionContract,
   type DecisionDiagnostics,
-  type OfferCard,
+  type OfferSpec,
 } from './decision';
 import { openLookupFooter, type LookupFooter } from './progress';
 import {
@@ -45,12 +45,12 @@ import { routerSettings } from './settings';
  * The `request` tool: one free decision per lookup, then ONE payment, to the
  * provider.
  *
- * AN OFFER WITH A CARD RUNS HERE. The hook keeps each offered service's card
+ * AN OFFER WITH A SPEC RUNS HERE. The hook keeps each offered service's spec
  * by its id: `{id}` alone shows it, and `{id, input}` is checked against it,
- * built into the card's request and paid straight to the provider, with no
+ * built into the spec's request and paid straight to the provider, with no
  * second decision. The server is told only how the call ended.
  *
- * WITHOUT A CARD, THE ID NAMES THE SERVICE AND THE QUERY IS SENT. With an id,
+ * WITHOUT A SPEC, THE ID NAMES THE SERVICE AND THE QUERY IS SENT. With an id,
  * the backend binds the query to the capability the hook's line offered and
  * never re-decides which service (tenjin#885). Without one, it asks for
  * exactly one fresh decision from the query and the turn's packet, which is
@@ -73,7 +73,7 @@ export interface RequestToolArgs {
   /** The turn id from the hook's line. It names the service that line offered, and
    *  the server runs that one; it grants nothing locally, every cap still applies. */
   id?: string;
-  /** The host's own input for the offered service, per its card. With a card
+  /** The host's own input for the offered service, per its spec. With a spec
    *  kept for the id, this client builds the request; otherwise the server
    *  does. Every cap still applies. */
   input?: Record<string, unknown>;
@@ -120,17 +120,17 @@ export async function runRequestTool(
   if (off !== null) return fail('needs_input', off, { nextStep: ROUTER_OFF_NEXT_STEP });
   const id = args.id !== undefined && args.id.length > 0 ? args.id : undefined;
   const { input } = args;
-  // THE OFFER'S CARD, when the hook kept one for this id: its id alone shows
-  // the card, with no network call and nothing paid, so the agent sees the
+  // THE OFFER'S SPEC, when the hook kept one for this id: its id alone shows
+  // the spec, with no network call and nothing paid, so the agent sees the
   // real inputs before it builds any.
-  const card = id !== undefined ? await readCard(deps.ctx.dataDir, id) : null;
-  if (card !== null && input === undefined) return showCard(id!, card);
+  const spec = id !== undefined ? await readSpec(deps.ctx.dataDir, id) : null;
+  if (spec !== null && input === undefined) return showSpec(id!, spec);
   const query = (args.query ?? '').trim().slice(0, 8_000);
   if (query.length === 0 && input === undefined) {
     return fail(
       'needs_input',
       id !== undefined
-        ? 'No card is kept for that id (it expired, or its line asked for a query), so send the query its line named with the id, or a query alone.'
+        ? 'No spec is kept for that id (it expired, or its line asked for a query), so send the query its line named with the id, or a query alone.'
         : "A request needs an offer's id, or a query naming the task, its inputs and any constraints.",
     );
   }
@@ -187,11 +187,11 @@ export async function runRequestTool(
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   };
 
-  // A CARD AND AN INPUT: the agent filled the card's request itself, so it is
+  // A SPEC AND AN INPUT: the agent filled the spec's request itself, so it is
   // checked and sent here and paid straight to the provider, with no second
   // decision. The server hears only how it ended.
-  if (card !== null && input !== undefined) {
-    return runCard(id!, card, input, deps, footer, decisionDeps);
+  if (spec !== null && input !== undefined) {
+    return runSpec(id!, spec, input, deps, footer, decisionDeps);
   }
 
   // ONE CALL, ONE DECISION. The query the model wrote goes to the backend with
@@ -217,28 +217,28 @@ export async function runRequestTool(
   }
   const { decision, note } = fresh.decision;
 
-  // THE PICKED SERVICE'S CARD, for a query with no id: kept like a hook's and
+  // THE PICKED SERVICE'S SPEC, for a query with no id: kept like a hook's and
   // shown, so the agent's next call is `request({id, input})`.
-  if (decision.action === 'card') {
-    await storeCards(deps.ctx.dataDir, [decision.card]);
+  if (decision.action === 'spec') {
+    await storeSpecs(deps.ctx.dataDir, [decision.spec]);
     await footer.done('service found');
-    return showCard(decision.card.id, decision.card);
+    return showSpec(decision.spec.id, decision.spec);
   }
 
   // A SERVICE NOBODY CURATED, named for the host to judge. Nothing is paid on
-  // this answer. With cards they are kept like the hook's, and the pick's own
-  // card is shown, as for a curated pick. Without, the server's line says how
+  // this answer. With specs they are kept like the hook's, and the pick's own
+  // spec is shown, as for a curated pick. Without, the server's line says how
   // to call it, with the id it minted and the input the host builds, and that
   // second call pays through the execute path below like any other.
   if (decision.action === 'discovered') {
-    await storeCards(deps.ctx.dataDir, decision.cards);
+    await storeSpecs(deps.ctx.dataDir, decision.specs);
     await footer.done('service found');
-    const picked = decision.cards?.find((card) => card.id === decision.id);
+    const picked = decision.specs?.find((spec) => spec.id === decision.id);
     if (picked !== undefined) {
-      return showCard(
+      return showSpec(
         picked.id,
         picked,
-        decision.cards!.filter((card) => card !== picked),
+        decision.specs!.filter((spec) => spec !== picked),
       );
     }
     const { candidate } = decision;
@@ -308,25 +308,25 @@ export async function runRequestTool(
   ).result;
 }
 
-/** The answer to `request({id})` when the hook kept that offer's card, or to
- *  a query the server answered with one: the card as text, any other service
+/** The answer to `request({id})` when the hook kept that offer's spec, or to
+ *  a query the server answered with one: the spec as text, any other service
  *  offered beside it one `request({id})` away, and nothing sent or paid. */
-function showCard(
+function showSpec(
   id: string,
-  card: OfferCard,
-  others: readonly OfferCard[] = [],
+  spec: OfferSpec,
+  others: readonly OfferSpec[] = [],
 ): RequestToolResult {
   const also = others.map(
     (other) =>
-      `${other.provider} (${other.description}): request({id: ${JSON.stringify(other.id)}}) shows its card`,
+      `${other.provider} (${other.description}): request({id: ${JSON.stringify(other.id)}}) shows its spec`,
   );
   return {
     isError: false,
     summary: also.length
-      ? `${cardText(id, card)}\nAlso offered: ${also.join('; ')}.`
-      : cardText(id, card),
+      ? `${specText(id, spec)}\nAlso offered: ${also.join('; ')}.`
+      : specText(id, spec),
     envelope: {
-      status: 'card',
+      status: 'spec',
       id,
       nextStep: `Call request({id: ${JSON.stringify(id)}, input: {...}}) with the inputs above.`,
       cost: costLines(0n),
@@ -334,14 +334,14 @@ function showCard(
   };
 }
 
-/** A card's id that an earlier call already claimed: nothing sent or paid,
+/** A spec's id that an earlier call already claimed: nothing sent or paid,
  *  and the agent pointed at that call's result or at a new offer. */
-function alreadyPaid(id: string, card: OfferCard, earlier: EarlierPayment): RequestToolResult {
+function alreadyPaid(id: string, spec: OfferSpec, earlier: EarlierPayment): RequestToolResult {
   const reason =
     earlier.state === 'paid'
-      ? `This offer from ${card.provider} was already paid for at ${earlier.at} ($${toMoney(earlier.amountAtomic).usd}${earlier.txHash !== undefined ? `, tx ${earlier.txHash}` : ''}), so nothing was paid this time. Its result is in the earlier request result for this id, and the payment is in \`tenjin payments\`.`
+      ? `This offer from ${spec.provider} was already paid for at ${earlier.at} ($${toMoney(earlier.amountAtomic).usd}${earlier.txHash !== undefined ? `, tx ${earlier.txHash}` : ''}), so nothing was paid this time. Its result is in the earlier request result for this id, and the payment is in \`tenjin payments\`.`
       : earlier.state === 'running'
-        ? `A call for this offer from ${card.provider} already started and may have paid, so nothing was paid this time. Use that call's result.`
+        ? `A call for this offer from ${spec.provider} already started and may have paid, so nothing was paid this time. Use that call's result.`
         : `This machine could not record this offer's payment, so nothing was sent or paid.`;
   return fail('needs_input', reason, {
     nextStep: `For another call, send request({query}) for a new offer; this id (${id}) pays once.`,
@@ -349,39 +349,39 @@ function alreadyPaid(id: string, card: OfferCard, earlier: EarlierPayment): Requ
 }
 
 /**
- * `request({id, input})` FROM A CARD. The pinned fields go over the agent's
- * input, the result is checked against the card's schema (every problem at
- * once, with the allowed values and the example), and the card's request is
+ * `request({id, input})` FROM A SPEC. The pinned fields go over the agent's
+ * input, the result is checked against the spec's schema (every problem at
+ * once, with the allowed values and the example), and the spec's request is
  * filled and paid through `runPay` like any router call: the live 402's price
- * against the card's ceiling, its payee against the card's, and the amount
+ * against the spec's ceiling, its payee against the spec's, and the amount
  * signed against the spend policy. Then the server is told how it ended.
  */
-async function runCard(
+async function runSpec(
   id: string,
-  card: OfferCard,
+  spec: OfferSpec,
   input: Record<string, unknown>,
   deps: RequestToolDeps,
   footer: LookupFooter,
   decisionDeps: { ctx: CommandContext; baseUrl: string; fetchImpl?: typeof fetch },
 ): Promise<RequestToolResult> {
-  const merged = mergedInput(card, input);
+  const merged = mergedInput(spec, input);
   const sentInput = maskDeep(merged) as Record<string, unknown>;
   const refuse = async (problem: string): Promise<RequestToolResult> => {
     await footer.done('needs_input');
-    return fail('needs_input', `The input does not fit ${card.provider}: ${problem}.`, {
-      nextStep: `Fix the input and call request({id: ${JSON.stringify(id)}, input: {...}}) again; nothing was sent or paid.${card.example !== undefined ? ` Example input: ${JSON.stringify(card.example)}` : ''}`,
+    return fail('needs_input', `The input does not fit ${spec.provider}: ${problem}.`, {
+      nextStep: `Fix the input and call request({id: ${JSON.stringify(id)}, input: {...}}) again; nothing was sent or paid.${spec.example !== undefined ? ` Example input: ${JSON.stringify(spec.example)}` : ''}`,
       parameters: sentInput,
     });
   };
-  const problems = cardInputProblems(card, merged);
+  const problems = specInputProblems(spec, merged);
   if (problems.length) return refuse(problems.join('; '));
-  const built = buildCardRequest(card, merged);
+  const built = buildSpecRequest(spec, merged);
   if ('problem' in built) return refuse(built.problem);
   // The same checks a server-built call meets: GET or POST, only the headers
   // this build sends, and a success rule that compiles before anything is paid.
   const refusal = checkContract({
     request: built,
-    ...(card.resultSchema !== undefined ? { resultSchema: card.resultSchema } : {}),
+    ...(spec.resultSchema !== undefined ? { resultSchema: spec.resultSchema } : {}),
   });
   if (refusal !== null) {
     await footer.done(refusal.status);
@@ -389,43 +389,43 @@ async function runCard(
   }
   // ONE PAYMENT PER OFFER, claimed before anything is signed: a retry of this
   // id, or a second call racing it, pays nothing.
-  const earlier = await claimCardPayment(deps.ctx.dataDir, id);
+  const earlier = await claimSpecPayment(deps.ctx.dataDir, id);
   if (earlier !== null) {
     await footer.done('needs_input');
-    return alreadyPaid(id, card, earlier);
+    return alreadyPaid(id, spec, earlier);
   }
   const startedAt = Date.now();
   const { result, outcome, left } = await payAndDeliver(
     {
-      capabilityId: card.capabilityId,
-      provider: card.provider,
-      discovered: card.capabilityId.startsWith('discovered:'),
+      capabilityId: spec.capabilityId,
+      provider: spec.provider,
+      discovered: spec.capabilityId.startsWith('discovered:'),
       request: built,
       terms: {
-        source: card.provider,
-        maxAmountAtomic: card.maxAmountAtomic,
-        payTo: card.payTo,
-        network: card.network,
-        asset: card.asset,
+        source: spec.provider,
+        maxAmountAtomic: spec.maxAmountAtomic,
+        payTo: spec.payTo,
+        network: spec.network,
+        asset: spec.asset,
       },
-      requestKey: `${card.capabilityId}:${canonicalHash(merged)}`,
-      ...(card.resultSchema !== undefined ? { resultSchema: card.resultSchema } : {}),
+      requestKey: `${spec.capabilityId}:${canonicalHash(merged)}`,
+      ...(spec.resultSchema !== undefined ? { resultSchema: spec.resultSchema } : {}),
       parameters: sentInput,
       sent: JSON.stringify(sentInput),
       agentBuilt: true,
-      priceVaries: card.priceVaries,
+      priceVaries: spec.priceVaries,
     },
     deps,
     footer,
   );
-  await settleCardPayment(deps.ctx.dataDir, id, left);
+  await settleSpecPayment(deps.ctx.dataDir, id, left);
   // REPORTED ONLY WHEN THE CALL RAN OR MONEY LEFT: a refusal before payment
-  // (the spend policy, the card's terms, the provider's own 4xx) took nothing
+  // (the spend policy, the spec's terms, the provider's own 4xx) took nothing
   // from the offer, and the server would count it as the offer taken.
   const ran =
     outcome.status === 'fulfilled' || outcome.status === 'unverified' || left.amountAtomic > 0n;
   if (ran) {
-    void reportCardOutcome(
+    void reportSpecOutcome(
       { id, ...outcome, ms: Date.now() - startedAt },
       {
         ctx: decisionDeps.ctx,
@@ -437,7 +437,7 @@ async function runCard(
   return result;
 }
 
-/** One provider call to make and pay for, from a decision or a card. */
+/** One provider call to make and pay for, from a decision or a spec. */
 interface ProviderCall {
   capabilityId: string;
   provider: string;
@@ -452,10 +452,10 @@ interface ProviderCall {
   /** What the ledger records as sent. */
   sent: string;
   note?: string;
-  /** The agent built this input itself, from a card: a provider that refuses
+  /** The agent built this input itself, from a spec: a provider that refuses
    *  it before payment is said to have, so the agent fixes it. */
   agentBuilt?: boolean;
-  /** The card prices by input, up to `terms.maxAmountAtomic`. */
+  /** The spec prices by input, up to `terms.maxAmountAtomic`. */
   priceVaries?: boolean;
 }
 
@@ -471,7 +471,7 @@ async function payAndDeliver(
   footer: LookupFooter,
 ): Promise<{
   result: RequestToolResult;
-  outcome: Omit<CardOutcome, 'id' | 'ms'>;
+  outcome: Omit<SpecOutcome, 'id' | 'ms'>;
   /** What left this machine for the call, whatever came back. */
   left: { amountAtomic: bigint; txHash?: string };
 }> {
@@ -634,9 +634,9 @@ async function payAndDeliver(
       call.agentBuilt === true &&
       leftAtomic === 0n &&
       (detail.status === 400 || detail.status === 422);
-    // A PRICE THAT VARIES WITH THE INPUT, quoted over the card's ceiling for
+    // A PRICE THAT VARIES WITH THE INPUT, quoted over the spec's ceiling for
     // this one: a smaller input is the fix, and a fresh decision would only
-    // hand back the same card.
+    // hand back the same spec.
     const live = detail.live?.amount;
     const ceiling = call.terms.maxAmountAtomic;
     const overCeiling =
@@ -647,7 +647,7 @@ async function payAndDeliver(
       /^\d+$/.test(live) &&
       BigInt(live) > BigInt(ceiling);
     const reason = overCeiling
-      ? `${call.provider} prices this input at $${toMoney(live).usd}, over this card's $${toMoney(ceiling).usd} ceiling, so nothing was signed. Change the input (a smaller size, a shorter clip, fewer items) and call again with the same id.`
+      ? `${call.provider} prices this input at $${toMoney(live).usd}, over this spec's $${toMoney(ceiling).usd} ceiling, so nothing was signed. Change the input (a smaller size, a shorter clip, fewer items) and call again with the same id.`
       : rejectedInput
         ? `${call.provider} rejected this input before any payment (HTTP ${String(detail.status)}): see providerError. Fix the input and call again with the same id.`
         : cli !== undefined

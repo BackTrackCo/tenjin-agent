@@ -5,5 +5,5 @@
     "text": "a short airy whoosh, dry, close-miked",
     "duration_seconds": 1.2
   },
-  "accepts": ["discovered", "card"]
+  "accepts": ["discovered", "spec"]
 }
