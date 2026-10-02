@@ -236,6 +236,50 @@ describe('cutting a result to the fields its spec promises', () => {
     });
   });
 
+  /** The server's shapes: nullable unions everywhere, because Apollo returns
+   *  null a lot, and a map such as departmental_head_count kept whole. */
+  it('reads nullable unions, keeps a node with neither properties nor items whole, and passes null through', () => {
+    const org = {
+      type: 'object',
+      properties: {
+        organization: {
+          type: ['object', 'null'],
+          properties: {
+            name: { type: ['string', 'null'] },
+            industries: { type: ['array', 'null'], items: { type: 'string' } },
+            departmental_head_count: { type: ['object', 'null'] },
+            funding_events: {
+              type: ['array', 'null'],
+              items: { type: 'object', properties: { date: { type: ['string', 'null'] } } },
+            },
+          },
+        },
+      },
+    };
+    const body = JSON.stringify({
+      organization: {
+        name: 'Stripe',
+        industries: ['financial services'],
+        departmental_head_count: { engineering: 3000, sales: 1200 },
+        funding_events: [{ date: '2023-03-15', amount: 6.5e9, investors: 'Thrive' }],
+        technologies: [{ uid: 'aws' }],
+      },
+    });
+    expect(projectBody(org, body)).toEqual({
+      value: {
+        organization: {
+          name: 'Stripe',
+          industries: ['financial services'],
+          departmental_head_count: { engineering: 3000, sales: 1200 },
+          funding_events: [{ date: '2023-03-15' }],
+        },
+      },
+    });
+    expect(projectBody(org, JSON.stringify({ organization: null, extra: 1 }))).toEqual({
+      value: { organization: null },
+    });
+  });
+
   it('cuts past a missing required field or a wrong type: it never refuses', () => {
     const schema = {
       type: 'object',
