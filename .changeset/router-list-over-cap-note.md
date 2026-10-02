@@ -8,5 +8,7 @@ curated alternative ("$0.30"). A Tenjin list menu (or an alternative beside the
 offer) could name People Data Labs at $0.28 beside a $0.005 email finder under a
 $0.25 limit with no warning, and the agent picked the one that stopped on
 `needs_approval`. The line now ends with one sentence naming the price over the
-limit and asking for a service within it, or the user's approval first. The
-single-service case was already covered.
+limit and asking for a service within it, or the user's approval first. Only
+the places the router writes a price are read: a dollar amount in a service's
+description ("seats from $500/month") never raises the note. The single-service
+case was already covered.

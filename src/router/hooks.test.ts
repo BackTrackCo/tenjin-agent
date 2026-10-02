@@ -2667,6 +2667,29 @@ describe('a discovered service', () => {
         '"plans from $500 a month"), about $0.03: request({id: "x-1", input: {...}})';
       expect(await shown(list('0.03', seller))).not.toContain('Note:');
     });
+
+    /** A Tenjin list entry's or curated alternative's description is prose,
+     *  unquoted: a dollar amount in it is the service's words, not its price. */
+    it('never reads a dollar amount in an unquoted description as a price', async () => {
+      const described = (body: ReturnType<typeof list>) => ({
+        ...body,
+        decision: {
+          ...body.decision,
+          hint: body.decision.hint.replaceAll(
+            '(finds a work email)',
+            '(finds a work email; seats elsewhere from $500/month)',
+          ),
+        },
+      });
+      const curated =
+        " Alternative from Tenjin's catalog: Hunter (finds a work email, plans from $1000 a year, $0.03): " +
+        'request({query: <name and company>, id: "k3f9-abcd"}).';
+      expect(await shown(described(list('0.03', curated)))).not.toContain('Note:');
+      const over = await shown(described(list('0.28', curated)));
+      expect(over).toMatch(
+        / Note: \$0\.28 is above this machine's automatic per-call limit \(\$0\.25\), so request returns needs_approval for that service;/,
+      );
+    });
   });
 
   /** THE TENJIN LIST IS ON BY DEFAULT; the open Bazaar is asked for only

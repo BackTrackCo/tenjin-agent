@@ -650,11 +650,14 @@ async function vetOffer<T extends OfferDecision>(
   return { withheld: shortfall.withheld };
 }
 
-/** How the server prices each service it lists beside the offer's own: "about
- *  $0.28 per call" for a list entry, plain "$0.30" for a curated alternative.
- *  The offer's own price, also plain, already fits the cap (it is checked as a
- *  field), so matching it adds nothing. */
-const LISTED_PRICE_RE = /\$(\d+(?:\.\d+)?)/g;
+/** Where the server (`lib/x402-router/policy.ts`) writes a price, and only
+ *  there: "about $0.28 per call" in a list entry, "about $0.03: request(" or
+ *  "about $0.03 (price can vary" in an alternative, "$0.30): request(" closing
+ *  a curated alternative, and "$0.30 via https://" for a curated offer's own
+ *  (already checked as a field, so it fits). A dollar amount anywhere else is
+ *  a description's words ("seats from $500/month"), never a price. */
+const LISTED_PRICE_RE =
+  /about \$(\d+(?:\.\d+)?)(?= per call|: request\(| \(price can vary)|\$(\d+(?:\.\d+)?)(?=\): request\(| via https?:\/\/)/g;
 
 /** A JSON string in the hint: the user's query, an id, or a seller's own words.
  *  A dollar amount there is data ("a laptop under $1000"), never a price. */
@@ -673,7 +676,7 @@ async function overCapNote(
   canAskUser: boolean,
 ): Promise<string | null> {
   const listed = [...hint.replace(QUOTED_RE, '""').matchAll(LISTED_PRICE_RE)].map(
-    (match) => match[1] as string,
+    (match) => (match[1] ?? match[2]) as string,
   );
   if (listed.length === 0) return null;
   let cap: bigint;
