@@ -1,5 +1,70 @@
 # tenjin-cli
 
+## 0.1.0-alpha.21
+
+### Patch Changes
+
+- a46ec7c: When nothing in the curated catalog fits but a reviewed third-party
+  pay-per-call x402 service on the Tenjin list could do the step, the router can
+  now name that one service (who sells it, its URL, its price and the input it takes), and your
+  agent decides whether to use it. It calls `mcp__x402__request` with the id and
+  an `input` object, and pays the seller through the same path and under the
+  same automatic limits as a curated lookup. A paid response that is a file (an
+  audio clip, an image) is saved under `~/.tenjin/downloads` and the result names
+  the file. Two new hooks watch `AskUserQuestion`: before the question, a fitting
+  lookup redirects it once; after it, one is offered beside your answers. Hook
+  requests now carry the session id, used only so one session is not offered the
+  same service twice. `tenjin install --refresh` (which `tenjin update` runs)
+  adds the two hook entries. The open x402 Bazaar (unreviewed sellers) is
+  experimental and off by default: `tenjin config set experimental.bazaar on`.
+- 55ce073: A router offer that lists another service priced above this machine's automatic
+  per-call limit now says so, whether it is a list entry ("about $0.28") or a
+  curated alternative ("$0.30"). A Tenjin list menu (or an alternative beside the
+  offer) could name People Data Labs at $0.28 beside a $0.005 email finder under a
+  $0.25 limit with no warning, and the agent picked the one that stopped on
+  `needs_approval`. The line now ends with one sentence naming the price over the
+  limit and asking for a service within it, or the user's approval first. Only
+  the places the router writes a price are read: a dollar amount in a service's
+  description ("seats from $500/month") never raises the note. The single-service
+  case was already covered.
+- a46ec7c: Every paid router lookup now reports its settlement transaction (from the
+  x402 payment-response header) and is recorded in `~/.tenjin/paid/ledger.jsonl`
+  with what was sent (masked), the seller, the amount, the signed
+  authorization's nonce, and any files saved. Media a paid third-party service links to is
+  downloaded into `~/.tenjin/downloads/`. `tenjin payments reconcile` resolves a
+  payment whose settlement was unknown from USDC's `authorizationState` once its
+  authorization has expired, and gives a payment that was never charged back to
+  the daily limit; the `request` tool runs the same check for up to three before
+  each lookup.
+- 55ce073: A router lookup the spend policy refused (`needs_approval`) is no longer written
+  to `~/.tenjin/paid/ledger.jsonl` as a paid call, and its result no longer reports
+  the refused price as a cost. Nothing was signed, so there is nothing to record or
+  reconcile.
+- 55ce073: The retry of a WebSearch, WebFetch or question the pre-call router hook already
+  redirected no longer asks the router. The hook asked first and only then saw the
+  target was claimed, so every redirect-then-retry pair spent a second routing
+  decision and left an offer row nobody saw, about 45% of the rows in an active
+  session. The claim is now checked before the router is asked; two parallel
+  copies of one call are still denied once.
+- 55ce073: A subagent's hand-back, a teammate's message and a message from another session
+  are no longer read as the user's words in a router packet. They reach the
+  parent's transcript as `type: "user"` rows (`origin.kind: "peer"`), so a native
+  call or delegation right after one was routed with the subagent's report as the
+  current turn, in place of what the user asked. The transcript reader now skips
+  them by the same frames the prompt hook already skips.
+- 55ce073: A session whose transcript is over 4 MB is routed again. The router read nothing
+  from a transcript that size, so every long working session lost the pre-call
+  redirect and the delegation offer for the rest of its life ("this session's
+  transcript could not be read"). It now reads the last 4 MB, from the first whole
+  line, and uses it only when that window still holds a user message, so this
+  turn's own instructions are always what the decision reads.
+- 55ce073: The router hooks remember a wallet balance read for a minute in
+  `~/.tenjin/balance.json` (the address and amount only, never the RPC URL) and
+  reuse it instead of asking the RPC again, so a burst of parallel lookups no
+  longer runs Base's public RPC into its rate limit or waits on its timeout. A
+  payment still reads the signer's balance live immediately before signing and
+  never uses the remembered one.
+
 ## 0.1.0-alpha.20
 
 ### Patch Changes
