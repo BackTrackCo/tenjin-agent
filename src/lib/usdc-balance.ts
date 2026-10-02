@@ -109,35 +109,36 @@ function sameUrl(a: string, b: string): boolean {
 }
 
 /**
- * How long a balance read is remembered. Base's public RPC refuses the sixth
- * `eth_call` in a second, which a burst of parallel lookups reaches, and a
- * failed read stopped a funded wallet's payment ("no payment was signed") and
- * left the hooks waiting on a timeout. A minute carries a burst past that;
- * what the wallet could have spent since is a few cents.
+ * How long the hooks remember a balance read. Base's public RPC refuses the
+ * sixth `eth_call` in a second, which a burst of parallel lookups reaches, and
+ * each hook then waited on a failed read. A minute carries a burst past that;
+ * the hooks' read only decides whether to offer.
  */
 export const LAST_KNOWN_BALANCE_MS = 60_000;
 
 /**
- * {@link readUsdcBalanceWithFallback} with the last read it made for this
- * address beside it. A read that fails on every RPC returns the remembered
- * balance while it is under {@link LAST_KNOWN_BALANCE_MS} old, rather than
- * nothing. With
- * `preferRemembered`, a remembered balance is returned without asking the RPC
- * at all: the hooks' read only decides whether to offer, and the payment reads
- * the chain again. The RPC URL is never stored, since it can embed a key.
+ * {@link readUsdcBalanceWithFallback} for the router hooks, which returns the
+ * last read it made for this address while it is under
+ * {@link LAST_KNOWN_BALANCE_MS} old, without asking an RPC, and reads the chain
+ * otherwise. A read that fails on every RPC is null, never the remembered
+ * balance. The RPC URL is never stored, since it can embed a key.
+ *
+ * NEVER FOR A PAYMENT. `tenjin pay` reads the signer's balance live
+ * immediately before signing (docs/agent-permissions.md): a minute-old balance
+ * can be one the wallet has since spent.
  */
 export function rememberingBalanceReader(
   dataDir: string,
-  opts: { preferRemembered?: boolean; now?: () => number; read?: typeof readUsdcBalance } = {},
+  opts: { now?: () => number; read?: typeof readUsdcBalance } = {},
 ): typeof readUsdcBalance {
   const read = opts.read ?? readUsdcBalanceWithFallback;
   const now = opts.now ?? Date.now;
   const path = balanceCachePath(dataDir);
   return async (address, rpcUrl, readOpts) => {
     const remembered = await recallBalance(path, address, now());
-    if (opts.preferRemembered === true && remembered !== null) return remembered;
+    if (remembered !== null) return remembered;
     const live = await read(address, rpcUrl, readOpts);
-    if (live === null) return remembered;
+    if (live === null) return null;
     const record = {
       version: 1,
       address: address.toLowerCase(),

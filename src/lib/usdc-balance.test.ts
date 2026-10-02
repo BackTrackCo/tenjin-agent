@@ -24,10 +24,9 @@ afterEach(async () => {
 });
 
 /** A reader over a scripted chain: each read takes the next answer. */
-function reader(answers: (bigint | null)[], at: { now: number }, preferRemembered = false) {
+function reader(answers: (bigint | null)[], at: { now: number }) {
   const reads: string[] = [];
   const read = rememberingBalanceReader(dir, {
-    preferRemembered,
     now: () => at.now,
     read: async (address) => {
       reads.push(address);
@@ -38,26 +37,17 @@ function reader(answers: (bigint | null)[], at: { now: number }, preferRemembere
 }
 
 describe('the last-known balance', () => {
-  it('stands in for a failed read for a minute, for the same address only', async () => {
+  it('is returned without a read for a minute, for the same address only', async () => {
     const at = { now: 1_000_000 };
-    const { read } = reader([5_000_000n, null, null, null], at);
+    const { read, reads } = reader([5_000_000n, null, 4_000_000n], at);
     expect(await read(WALLET)).toBe(5_000_000n);
     at.now += LAST_KNOWN_BALANCE_MS;
     expect(await read(WALLET)).toBe(5_000_000n);
+    expect(reads).toHaveLength(1);
     expect(await read(OTHER)).toBeNull();
     at.now += 1;
-    expect(await read(WALLET)).toBeNull();
-  });
-
-  it('is returned without a read when the caller prefers it, and read live otherwise', async () => {
-    const at = { now: 1_000_000 };
-    const hook = reader([5_000_000n], at, true);
-    expect(await hook.read(WALLET)).toBe(5_000_000n);
-    expect(await hook.read(WALLET)).toBe(5_000_000n);
-    expect(hook.reads).toHaveLength(1);
-    const pay = reader([4_000_000n], at);
-    expect(await pay.read(WALLET)).toBe(4_000_000n);
-    expect(pay.reads).toHaveLength(1);
+    expect(await read(WALLET)).toBe(4_000_000n);
+    expect(reads).toEqual([WALLET, OTHER, WALLET]);
   });
 });
 

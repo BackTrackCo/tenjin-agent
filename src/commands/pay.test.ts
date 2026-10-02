@@ -11,6 +11,7 @@ import { parseSIWxHeader } from '@x402/extensions/sign-in-with-x';
 import type { PaymentRequired, PaymentRequirements } from '@x402/core/types';
 import { buildPaymentRequired, testWalletProvider, withBuilderCode } from '../lib/read-test-utils';
 import { TENJIN_CLI_BUILDER_CODE } from '../lib/x402-pay';
+import { rememberingBalanceReader } from '../lib/usdc-balance';
 import type { SpendAuthorizer, SpendAuthorization } from '../lib/wallet';
 import type { CommandContext, GlobalFlags } from '../context';
 
@@ -1715,6 +1716,33 @@ describe('direct registry warning acknowledgement and balance enforcement', () =
     expect(result.data).toMatchObject({ paid: true });
     expect(readBalance).toHaveBeenCalledTimes(2);
     expect(readBalance.mock.calls[1]![2].timeoutMs).toBeLessThan(5000);
+  });
+  /** THE SIGNER'S BALANCE IS READ LIVE before signing (docs/agent-permissions.md).
+   *  The balance the hooks remembered a minute ago can be one the wallet has
+   *  since spent, so it never stands in for a read that failed. */
+  it('refuses an unreadable balance even with one the hooks remembered', async () => {
+    const provider = testWalletProvider();
+    const signer = await provider.getSigner();
+    const remember = rememberingBalanceReader(dir, { read: async () => 100_000_000n });
+    expect(await remember(signer.address, 'https://rpc.test', { timeoutMs: 1_000 })).toBe(
+      100_000_000n,
+    );
+    const rpc = vi.fn(async () => new Response('over rate limit', { status: 429 }));
+    vi.stubGlobal('fetch', rpc);
+    const sign = vi.spyOn(signer, 'signTypedData');
+    const { fetch, calls } = paymentResponses();
+    await expect(
+      runPay({ url: TENJIN_URL, yes: true }, makeCtx(), {
+        destination: PUBLIC_DNS.destination,
+        fetchImpl: fetch,
+        provider,
+      }),
+    ).rejects.toMatchObject({ code: 'REFUSED', details: { reason: 'balance_unavailable' } });
+    expect(rpc).toHaveBeenCalled();
+    expect(sign).not.toHaveBeenCalled();
+    expect(calls).toHaveLength(1);
+    const { readSpendSummary } = await import('../lib/wallet/spend');
+    expect(await readSpendSummary(dir)).toMatchObject({ committedAtomic: '0', reservations: [] });
   });
   it('both flags cannot bypass an explicit price cap', async () => {
     await writeConfig({ sessionBudget: 'none' });
