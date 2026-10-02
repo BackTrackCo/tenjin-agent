@@ -118,9 +118,13 @@ describe("a card's request, filled from the input", () => {
       url: 'https://glim.sh/api/v1/twitter/users/jack%2F..%2Fx/tweets?limit=5',
       method: 'GET',
     });
-    expect(buildCardRequest(get, { limit: 5 })).toEqual({
-      problem: 'ref goes in the URL path, so each must be a non-empty string or number',
-    });
+    const segment =
+      'ref goes in the URL path, so each must be a non-empty string or number other than "." or ".."';
+    expect(buildCardRequest(get, { limit: 5 })).toEqual({ problem: segment });
+    // `encodeURIComponent` leaves these as they are: `..` would call
+    // /twitter/tweets on the same origin.
+    for (const ref of ['.', '..', ''])
+      expect(buildCardRequest(get, { ref, limit: 5 })).toEqual({ problem: segment });
     expect(buildCardRequest(get, { ref: 'jack', tags: ['a'] })).toEqual({
       problem: 'tags goes in the query string, so each must be a string, number or boolean',
     });
@@ -142,11 +146,16 @@ describe('the cards a hook keeps', () => {
     expect(await readCard(dir, '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d99')).toBeNull();
   });
 
-  it('forgets a card once its offer has expired, and prunes it on the next write', async () => {
+  it('forgets a card once the server has expired its offer, and prunes it on the next write', async () => {
     await storeCards(dir, [card()]);
     const [name] = await readdir(join(dir, 'progress', 'cards'));
-    const old = new Date(Date.now() - 11 * 60_000);
-    await utimes(join(dir, 'progress', 'cards', name!), old, old);
+    const path = join(dir, 'progress', 'cards', name!);
+    // The server keeps an offer's id 15 minutes, and so does its card.
+    const recent = new Date(Date.now() - 14 * 60_000);
+    await utimes(path, recent, recent);
+    expect(await readCard(dir, ID)).toEqual(card());
+    const old = new Date(Date.now() - 16 * 60_000);
+    await utimes(path, old, old);
     expect(await readCard(dir, ID)).toBeNull();
     const other = { ...card(), id: '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d02' };
     await storeCards(dir, [other]);

@@ -1281,6 +1281,34 @@ describe('an offer with a tool card', () => {
     expect(calls.filter((call) => call.paid)).toEqual([]);
   });
 
+  it('asks for a smaller input when a varying price lands over the card ceiling', async () => {
+    await storeCards(dir, [quoteCard({ priceVaries: true, maxAmountAtomic: '1000000' })]);
+    const auth = authorizer();
+    const { fetchImpl, calls } = net([
+      {
+        url: PROVIDER,
+        status: 402,
+        body: {},
+        headers: { 'PAYMENT-REQUIRED': challenge({ amount: '1500000' }) },
+      },
+      { url: ROUTER, status: 200, body: {} },
+    ]);
+    const result = await runRequestTool(
+      { id: CARD_ID, input: { symbol: 'BTC' } },
+      deps(fetchImpl, auth),
+    );
+    expect(result.envelope).toMatchObject({
+      status: 'failed',
+      cost: ['provider price 0 USD'],
+      nextStep: 'Change the input and call again with the same id.',
+    });
+    const reason = String(result.envelope.reason);
+    expect(reason).toContain("prices this input at $1.5, over this card's $1 ceiling");
+    expect(reason).not.toContain('fresh decision');
+    expect(calls.filter((call) => call.paid)).toEqual([]);
+    expect(auth.authorize).not.toHaveBeenCalled();
+  });
+
   it('says a provider refused the input before payment, and what was sent', async () => {
     await storeCards(dir, [quoteCard()]);
     const { fetchImpl } = net([

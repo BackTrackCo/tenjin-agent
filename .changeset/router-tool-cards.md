@@ -14,7 +14,10 @@ example), builds the request and pays the provider directly through the same
 the card's, and the spend policy. Then it tells the server only how the call
 ended. Each card id pays once: a retry of a paid id, or a second call racing
 it, pays nothing and points at the earlier result or a new offer, while a call
-that paid nothing (a refused input) leaves the card runnable. When the hook already holds a card's one input (the search a native call
+that paid nothing (a refused input) leaves the card runnable. A card is kept
+as long as the server keeps its offer, 15 minutes. A path input of `.` or `..`
+is refused before anything is sent, and an input whose varying price lands
+over the card's ceiling is refused before signing, asking for a smaller input. When the hook already holds a card's one input (the search a native call
 was about to run, or the page it was about to fetch), the line hands it over
 and the call is one step, as before. A query with an id goes to the server as
 before. A query with no id comes back as the card of the service the server

@@ -5,7 +5,6 @@ import { join } from 'node:path';
 import { z } from 'zod';
 import { writeFileAtomic, writeFileAtomicExclusive } from '../lib/atomic-json';
 import { OfferCardSchema, type OfferCard } from './decision';
-import { EXPIRY_MS } from './progress';
 
 /**
  * THE TOOL CARDS AN OFFER CARRIED, kept on this machine by the offer's id. The
@@ -14,10 +13,10 @@ import { EXPIRY_MS } from './progress';
  * the hook, reads one back by the id the agent passes. One file per id, named
  * by the id's SHA-256, so a read is one open and needs no session.
  *
- * Best effort on the write, like every record the hooks keep: a card that
- * could not be stored is a `request({id})` that goes to the server the old
- * way. A card is the server's own answer, re-parsed on the way back in, and it
- * lives as long as an offer's footer record does.
+ * Best effort on the write, like every record the hooks keep: with no card
+ * stored, `request({id})` says none is kept and asks for the query its line
+ * named. A card is the server's own answer, re-parsed on the way back in, and
+ * it lives as long as the server keeps the offer's id.
  */
 
 const CARDS_DIR = join('progress', 'cards');
@@ -25,6 +24,9 @@ const CARDS_DIR = join('progress', 'cards');
 const MAX_CARD_BYTES = 128 * 1024;
 /** Above this many files the directory is not scanned for pruning. */
 const MAX_CARDS = 512;
+/** The server's decision expiry: past it, the id's outcome report and an
+ *  `{id, query}` fallback find no row. */
+export const CARD_TTL_MS = 15 * 60_000;
 
 const digest = (value: string): string => createHash('sha256').update(value).digest('hex');
 
@@ -63,7 +65,7 @@ export async function readCard(dataDir: string, id: string): Promise<OfferCard |
   if (file === undefined) return null;
   try {
     const stat = await file.stat();
-    if (Date.now() - stat.mtimeMs > EXPIRY_MS || stat.size > MAX_CARD_BYTES) return null;
+    if (Date.now() - stat.mtimeMs > CARD_TTL_MS || stat.size > MAX_CARD_BYTES) return null;
     const parsed = OfferCardSchema.safeParse(JSON.parse(await file.readFile('utf8')));
     return parsed.success && parsed.data.id === id ? parsed.data : null;
   } catch {
@@ -168,7 +170,7 @@ async function pruneCards(dataDir: string, now: number): Promise<void> {
       if (!entry.isFile()) continue;
       const path = join(dataDir, CARDS_DIR, entry.name);
       const stat = await lstat(path).catch(() => undefined);
-      if (stat === undefined || now - stat.mtimeMs > EXPIRY_MS) {
+      if (stat === undefined || now - stat.mtimeMs > CARD_TTL_MS) {
         await rm(path, { force: true }).catch(() => undefined);
       }
     }

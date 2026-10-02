@@ -134,6 +134,10 @@ const scalar = (value: unknown): value is string | number | boolean =>
   (typeof value === 'number' && Number.isFinite(value)) ||
   typeof value === 'boolean';
 
+/** A value one path segment can hold: `encodeURIComponent` leaves `.` and `..`
+ *  as they are, and either would move the call to another path on the origin. */
+const segment = (value: unknown): boolean => scalar(value) && value !== '.' && value !== '..';
+
 /**
  * The HTTP request the card describes, filled from the merged input, or why it
  * cannot be built. A path placeholder takes its field's value as one encoded
@@ -143,10 +147,10 @@ const scalar = (value: unknown): value is string | number | boolean =>
 export function buildCardRequest(card: ToolCard, merged: Json): CardRequest | { problem: string } {
   const where = (name: string) => card.request.fields[name] ?? card.request.location;
   const inPath = [...card.request.url.matchAll(PLACEHOLDER_RE)].map((match) => match[1]!);
-  const missing = inPath.filter((name) => !scalar(merged[name]));
+  const missing = inPath.filter((name) => !segment(merged[name]));
   if (missing.length)
     return {
-      problem: `${missing.join(', ')} ${missing.length > 1 ? 'go' : 'goes'} in the URL path, so each must be a non-empty string or number`,
+      problem: `${missing.join(', ')} ${missing.length > 1 ? 'go' : 'goes'} in the URL path, so each must be a non-empty string or number other than "." or ".."`,
     };
   let base: URL;
   let url: URL;

@@ -413,6 +413,7 @@ async function runCard(
       parameters: sentInput,
       sent: JSON.stringify(sentInput),
       agentBuilt: true,
+      priceVaries: card.priceVaries,
     },
     deps,
     footer,
@@ -447,6 +448,8 @@ interface ProviderCall {
   /** The agent built this input itself, from a card: a provider that refuses
    *  it before payment is said to have, so the agent fixes it. */
   agentBuilt?: boolean;
+  /** The card prices by input, up to `terms.maxAmountAtomic`. */
+  priceVaries?: boolean;
 }
 
 /**
@@ -611,6 +614,8 @@ async function payAndDeliver(
       status?: number;
       providerError?: string;
       authorization?: SignedAuthorization;
+      /** The live 402's terms, on a REGISTRY_MISMATCH. */
+      live?: { amount?: string };
     };
     // A SPEND-POLICY REFUSAL SIGNED NOTHING. Its details carry the price it
     // refused, not an amount that left, so it is neither a cost nor a ledger
@@ -622,11 +627,25 @@ async function payAndDeliver(
       call.agentBuilt === true &&
       leftAtomic === 0n &&
       (detail.status === 400 || detail.status === 422);
-    const reason = rejectedInput
-      ? `${call.provider} rejected this input before any payment (HTTP ${String(detail.status)}): see providerError. Fix the input and call again with the same id.`
-      : cli !== undefined
-        ? `${cli.message} ${cli.fix ?? ''}`.trim()
-        : String(err);
+    // A PRICE THAT VARIES WITH THE INPUT, quoted over the card's ceiling for
+    // this one: a smaller input is the fix, and a fresh decision would only
+    // hand back the same card.
+    const live = detail.live?.amount;
+    const ceiling = call.terms.maxAmountAtomic;
+    const overCeiling =
+      call.priceVaries === true &&
+      cli?.code === 'REGISTRY_MISMATCH' &&
+      live !== undefined &&
+      ceiling !== undefined &&
+      /^\d+$/.test(live) &&
+      BigInt(live) > BigInt(ceiling);
+    const reason = overCeiling
+      ? `${call.provider} prices this input at $${toMoney(live).usd}, over this card's $${toMoney(ceiling).usd} ceiling, so nothing was signed. Change the input (a smaller size, a shorter clip, fewer items) and call again with the same id.`
+      : rejectedInput
+        ? `${call.provider} rejected this input before any payment (HTTP ${String(detail.status)}): see providerError. Fix the input and call again with the same id.`
+        : cli !== undefined
+          ? `${cli.message} ${cli.fix ?? ''}`.trim()
+          : String(err);
     await footer.done(status, {
       provider: built.url,
       ...parameters,
@@ -665,7 +684,11 @@ async function payAndDeliver(
         // field it cannot see.
         request: { method: built.method, url: built.url },
         ...(call.parameters !== undefined ? { parameters: call.parameters } : {}),
-        ...(rejectedInput ? { nextStep: 'Fix the input and call again with the same id.' } : {}),
+        ...(overCeiling
+          ? { nextStep: 'Change the input and call again with the same id.' }
+          : rejectedInput
+            ? { nextStep: 'Fix the input and call again with the same id.' }
+            : {}),
       }),
     };
   }
