@@ -61,7 +61,11 @@ function walk(value: unknown, schemaMode: boolean, depth = 0): void {
     if (schemaMode && key === '$ref' && typeof entry === 'string' && !entry.startsWith('#/')) {
       throw new Error('Remote or recursive schema references are unsupported.');
     }
-    if (schemaMode && (key === 'pattern' || key === 'patternProperties')) {
+    // A field NAMED `pattern` holds a schema object, not a regular expression.
+    if (
+      schemaMode &&
+      ((key === 'pattern' && typeof entry === 'string') || key === 'patternProperties')
+    ) {
       throw new Error('Regular-expression schema constraints are unsupported.');
     }
     walk(entry, schemaMode, depth + 1);
@@ -70,13 +74,25 @@ function walk(value: unknown, schemaMode: boolean, depth = 0): void {
 
 const validators = new Map<string, ValidateFunction>();
 
-/** `allErrors` collects every problem rather than stopping at the first: what
- *  an agent fixing its own input needs, in one round. */
-function compile(schema: JsonRecord, allErrors = false): ValidateFunction {
+interface CompileOptions {
+  /** Collect every problem rather than stopping at the first: what an agent
+   *  fixing its own input needs, in one round. */
+  allErrors?: boolean;
+  /** Pass over a keyword or format Ajv does not know instead of refusing the
+   *  schema. Such a keyword checks nothing (OpenAPI's `example`, a vendor's
+   *  `x-in`), and refusing the whole schema for one left the input with no
+   *  check at all. Nothing is logged: a hook's output is not the place. */
+  ignoreUnknown?: boolean;
+}
+
+function compile(
+  schema: JsonRecord,
+  { allErrors = false, ignoreUnknown = false }: CompileOptions = {},
+): ValidateFunction {
   if (Buffer.byteLength(stable(schema)) > MAX_SCHEMA_BYTES) {
     throw new Error('Schema exceeds its size limit.');
   }
-  const key = `${canonicalHash(schema)}${allErrors ? ':all' : ''}`;
+  const key = `${canonicalHash(schema)}${allErrors ? ':all' : ''}${ignoreUnknown ? ':lenient' : ''}`;
   const cached = validators.get(key);
   if (cached !== undefined) return cached;
   walk(schema, true);
@@ -85,6 +101,7 @@ function compile(schema: JsonRecord, allErrors = false): ValidateFunction {
     strictTypes: false,
     strictTuples: false,
     strictRequired: false,
+    ...(ignoreUnknown ? { strictSchema: false, logger: false as const } : {}),
     allErrors,
     validateFormats: true,
     coerceTypes: false,
@@ -189,14 +206,18 @@ function describeProblem(error: {
 /**
  * EVERY way an input misses its schema, each naming the field and, for a
  * fixed set, the values it allows; `[]` when it fits; undefined when the
- * schema cannot be compiled even without its patterns, which leaves the
- * provider's own validation as the only check.
+ * schema cannot be compiled even without its patterns and its unknown
+ * keywords, so the input cannot be checked here at all. AiSpace's Ideogram V4
+ * spec (`example`) and x402atlas's SEC spec (`x-in`) each carry such a keyword.
  */
 export function inputProblems(schema: unknown, value: unknown): string[] | undefined {
   if (schema === null || typeof schema !== 'object' || Array.isArray(schema)) return undefined;
   let validate: ValidateFunction;
   try {
-    validate = compile(withoutPatterns(schema) as JsonRecord, true);
+    validate = compile(withoutPatterns(schema) as JsonRecord, {
+      allErrors: true,
+      ignoreUnknown: true,
+    });
   } catch {
     return undefined;
   }

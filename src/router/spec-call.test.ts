@@ -136,6 +136,81 @@ describe('a request spec as the agent reads it', () => {
       'seed must be string',
     ]);
   });
+
+  it('checks a schema carrying a keyword Ajv does not know, as two shipped specs do', () => {
+    // Both schemas as the Tenjin list ships them: OpenAPI's `example` on
+    // Ideogram's model, a vendor `x-in` on the SEC ticker.
+    const ideogram = spec({
+      provider: 'AiSpace (Venice)',
+      request: {
+        method: 'POST',
+        url: 'https://x402.aispace.bot/api/v1/image/generate',
+        fields: { model: 'body', prompt: 'body', style_preset: 'body' },
+        location: 'body',
+      },
+      input: {
+        type: 'object',
+        properties: {
+          model: {
+            type: 'string',
+            example: 'venice-sd35',
+            description: 'Venice image model id.',
+            enum: ['ideogram-v4'],
+            default: 'ideogram-v4',
+          },
+          prompt: { type: 'string', description: 'Image description. Up to ~2000 chars.' },
+          style_preset: { type: 'string', description: 'Optional named style.' },
+        },
+        required: ['model', 'prompt'],
+      },
+      pinned: { model: 'ideogram-v4' },
+    });
+    expect(specInputProblems(ideogram, mergedInput(ideogram, { prompt: 7 }))).toEqual([
+      'prompt must be string',
+    ]);
+    expect(specInputProblems(ideogram, mergedInput(ideogram, { prompt: 'A poster' }))).toEqual([]);
+    const sec = spec({
+      provider: 'x402atlas',
+      request: {
+        method: 'GET',
+        url: 'https://sec.use.x402atlas.com/financials/{ticker}',
+        fields: { ticker: 'path' },
+        location: 'query',
+      },
+      input: {
+        type: 'object',
+        properties: {
+          ticker: {
+            type: 'string',
+            'x-in': 'path',
+            description: 'US ticker, substituted into the URL path',
+          },
+        },
+        required: ['ticker'],
+      },
+      pinned: {},
+    });
+    expect(specInputProblems(sec, {})).toEqual(['ticker is required']);
+    expect(specInputProblems(sec, { ticker: 7 })).toEqual(['ticker must be string']);
+    expect(specInputProblems(sec, { ticker: 'AAPL' })).toEqual([]);
+  });
+
+  it('says nothing fits when the schema cannot be compiled at all', () => {
+    const broken = spec({
+      input: { type: 'object', properties: { prompt: { type: 'text' } }, required: ['prompt'] },
+      pinned: {},
+    });
+    expect(specInputProblems(broken, { prompt: 'a fox' })).toBeUndefined();
+  });
+
+  it('checks a field named pattern, which is not a regular expression', () => {
+    const named = spec({
+      input: { type: 'object', properties: { pattern: { type: 'string' } }, required: ['pattern'] },
+      pinned: {},
+    });
+    expect(specInputProblems(named, { pattern: 7 })).toEqual(['pattern must be string']);
+    expect(specInputProblems(named, { pattern: 'stripes' })).toEqual([]);
+  });
 });
 
 describe("a spec's request, filled from the input", () => {

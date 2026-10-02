@@ -408,6 +408,19 @@ async function runSpec(
     return { ...refused, summary: `${refused.summary}\n\n${specText(id, spec)}` };
   };
   const problems = specInputProblems(spec, merged);
+  // A SCHEMA THIS BUILD CANNOT COMPILE CHECKS NOTHING, so the call is not
+  // paid: an input nobody checked is a paid guess, and no change to it helps.
+  if (problems === undefined) {
+    await footer.done('failed');
+    return fail(
+      'failed',
+      `The spec for ${spec.provider} has an input schema this build cannot check, so the call was not sent and nothing was paid.`,
+      {
+        nextStep: 'Continue with your own tools. Nothing was sent or paid.',
+        parameters: sentInput,
+      },
+    );
+  }
   if (problems.length) return refuse(problems.join('; '));
   const built = buildSpecRequest(spec, merged);
   if ('problem' in built) return refuse(built.problem);

@@ -15,7 +15,10 @@ spend policy. An input that misses the spec, or names a field the spec does
 not, comes back with every problem and the whole spec (each input with its
 description and allowed values, the fields Tenjin pins, one example and what
 comes back), locally, with nothing sent or paid; `request({id})` alone shows
-the same spec, free and offline. When the call ran or money left, the tool
+the same spec, free and offline. A schema keyword that checks nothing
+(OpenAPI's `example`, a vendor's `x-in`) is passed over rather than stopping
+the check, and a spec whose input schema cannot be compiled at all is refused
+with nothing sent or paid, never paid unchecked. When the call ran or money left, the tool
 then tells the server only how the call ended; a refusal before payment (the
 spend policy, the spec's terms, the provider's own 4xx) reports nothing. Each
 spec id pays once: a retry of a paid id, or a second call racing it, pays

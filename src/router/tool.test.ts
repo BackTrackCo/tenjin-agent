@@ -1297,6 +1297,31 @@ describe('an offer with a request spec', () => {
     expect(auth.authorize).not.toHaveBeenCalled();
   });
 
+  it('sends and pays nothing for a spec whose input schema cannot be checked', async () => {
+    // `text` is no JSON Schema type: the schema never compiles, so nothing
+    // here can say the input fits.
+    await storeSpecs(dir, [
+      quoteSpec({
+        input: { type: 'object', properties: { symbol: { type: 'text' } }, required: ['symbol'] },
+      }),
+    ]);
+    const auth = authorizer();
+    const { fetchImpl, calls } = net([...providerLegs()]);
+    const result = await runRequestTool(
+      { id: SPEC_ID, input: { symbol: 'BTC' } },
+      deps(fetchImpl, auth),
+    );
+    expect(result.envelope).toMatchObject({
+      status: 'failed',
+      reason:
+        'The spec for CoinMarketCap has an input schema this build cannot check, so the call was not sent and nothing was paid.',
+      cost: ['provider price 0 USD'],
+      parameters: { symbol: 'BTC' },
+    });
+    expect(calls).toEqual([]);
+    expect(auth.authorize).not.toHaveBeenCalled();
+  });
+
   it("signs nothing for a live 402 that pays someone other than the spec's payee", async () => {
     await storeSpecs(dir, [quoteSpec()]);
     const { fetchImpl, calls } = net([

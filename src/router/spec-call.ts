@@ -116,13 +116,14 @@ export function mergedInput(spec: ToolSpec, input: Json): Json {
 
 /**
  * Every problem with the merged input, against the spec's own schema; [] when
- * it fits or the schema cannot be checked here (the provider then checks). A
- * field the spec does not name is one too, whatever the schema says about
- * extras: the agent has no description for it, so it is a guess, and a paid
- * guess at that.
+ * it fits; undefined when this build cannot compile the schema, so nothing
+ * here can say the input fits and the call must not be paid. A field the spec
+ * does not name is a problem too, whatever the schema says about extras: the
+ * agent has no description for it, so it is a guess, and a paid guess at that.
  */
-export function specInputProblems(spec: ToolSpec, merged: Json): string[] {
-  const problems = inputProblems(spec.input, merged) ?? [];
+export function specInputProblems(spec: ToolSpec, merged: Json): string[] | undefined {
+  const problems = inputProblems(spec.input, merged);
+  if (problems === undefined) return undefined;
   const properties = spec.input.properties;
   if (properties === null || typeof properties !== 'object' || Array.isArray(properties))
     return problems;
