@@ -1424,7 +1424,7 @@ async function openFooter(
       if (withheld === undefined && isOffer(decision)) {
         await bindDecision(deps.dataDir, sessionId, decision.id, now());
         // The line is shown, so the specs of the services it names are what
-        // `request({id})` will read.
+        // `request({id, input})` runs and `request({id})` shows.
         await storeSpecs(deps.dataDir, decision.specs);
       }
     },

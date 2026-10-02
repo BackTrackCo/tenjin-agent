@@ -99,11 +99,14 @@ id the hint gives it. A spec is the service's contract: `capabilityId`,
 on every call, which win over the agent's input), and optionally `example`,
 `returns`, `returnsExample` and `resultSchema`. The hint is then the
 skeleton of the one call, `request({id, input: {...}})` with the required
-fields (pins aside) as placeholders, or with the value the hook already holds.
+fields (pins aside) as placeholders, or with a value already known: the one
+the hook holds, the field's schema `default`, or a number's or boolean's value
+from the `example`.
 `request({id})` shows the whole spec, and so does an input that misses it,
 locally and with nothing paid. The client builds and pays the call
-itself and, once a call was attempted, reports `{schemaVersion, id, status,
-httpStatus?, ms?}`. The first report for a live id marks its row executed;
+itself and, once the call ran or money left, reports `{schemaVersion, id,
+status, httpStatus?, ms?}`, with the provider's HTTP status whenever it is
+known. The first report for a live id marks its row executed;
 a repeat or a report after expiry is a 204 that changes nothing. No text is
 stored. A client that does not send
 `spec` never sees the field: the decision schemas are strict.
