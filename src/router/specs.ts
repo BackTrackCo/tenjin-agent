@@ -23,8 +23,6 @@ const SPECS_DIR = join('progress', 'specs');
 const RESULTS_DIR = 'results';
 /** A spec holds a service's whole input schema; far larger than any record. */
 const MAX_SPEC_BYTES = 128 * 1024;
-/** Above this many files a directory is not scanned for pruning. */
-const MAX_FILES = 512;
 /** The server's decision expiry: past it, the id's outcome report and an
  *  `{id, query}` fallback find no row. */
 export const SPEC_TTL_MS = 15 * 60_000;
@@ -200,10 +198,10 @@ export async function storeFullResult(
 
 async function prune(dir: string, ttlMs: number, now: number): Promise<void> {
   try {
+    // Every entry: a directory with many files is the one that most needs its
+    // expired files gone.
     const directory = await opendir(dir);
-    let count = 0;
     for await (const entry of directory) {
-      if (++count > MAX_FILES) return;
       if (!entry.isFile()) continue;
       const path = join(dir, entry.name);
       const stat = await lstat(path).catch(() => undefined);
