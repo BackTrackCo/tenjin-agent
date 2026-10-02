@@ -237,6 +237,8 @@ describe('what the tool tells the model to send', () => {
       expect(request.description).toContain('fill them and call `{id, input}` once');
       expect(request.description).toContain('returns the full spec');
       expect(request.description).toContain("`{id}` alone returns the service's spec");
+      // A projected result says where the rest of the response went.
+      expect(request.description).toContain('`fullResultPath`');
       expect(schema.properties.input?.type).toBe('object');
       // THE ONE DISCOVERY SENTENCE IS GENERIC TOO: it names no marketplace and
       // no seller, only when to ask.

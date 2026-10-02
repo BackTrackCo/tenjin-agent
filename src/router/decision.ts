@@ -185,6 +185,9 @@ export const ToolSpecSchema = z.strictObject({
   returns: z.string().min(1).max(200).optional(),
   returnsExample: z.unknown().optional(),
   resultSchema: z.record(z.string(), z.unknown()).optional(),
+  /** The fields the result promises (type, properties, items, required). The
+   *  agent is handed only these; the whole body is saved to a file. */
+  outputSchema: z.record(z.string(), z.unknown()).optional(),
 });
 export type ToolSpec = z.infer<typeof ToolSpecSchema>;
 

@@ -3,6 +3,7 @@ import {
   assertResultSchema,
   canonicalHash,
   MAX_BODY_BYTES,
+  projectBody,
   validateAgainstSchema,
   validateResultBody,
 } from './request-schema';
@@ -173,5 +174,86 @@ describe('what a failed result contract reports', () => {
 
   it('says nothing at all when the body satisfies the rule', () => {
     expect(validateResultBody(schema, JSON.stringify({ success: true }))).toEqual({ valid: true });
+  });
+});
+
+/**
+ * THE FIELDS A SPEC PROMISES. Ajv's `removeAdditional: 'all'`: every property
+ * the schema does not declare goes, through objects and array items; what the
+ * schema does not describe stays as it is; and nothing is ever refused.
+ */
+describe('cutting a result to the fields its spec promises', () => {
+  const PERSON = {
+    type: 'object',
+    properties: {
+      person: {
+        type: 'object',
+        properties: {
+          name: { type: ['string', 'null'] },
+          email: { type: ['string', 'null'] },
+          organization: { type: 'object', properties: { name: { type: 'string' } } },
+          employment_history: {
+            type: 'array',
+            items: { type: 'object', properties: { title: { type: 'string' } } },
+          },
+        },
+      },
+    },
+  };
+
+  it('keeps only the declared properties, through nested objects and array items', () => {
+    const body = JSON.stringify({
+      person: {
+        name: 'Patrick Collison',
+        email: 'patrick@stripe.com',
+        photo_url: 'https://example.test/p.jpg',
+        organization: { name: 'Stripe', technologies: ['a', 'b'], blurb: 'x'.repeat(1000) },
+        employment_history: [{ title: 'CEO', description: 'long' }, { kind: 'school' }],
+      },
+      breadcrumbs: [{ label: 'x' }],
+    });
+    expect(projectBody(PERSON, body)).toEqual({
+      value: {
+        person: {
+          name: 'Patrick Collison',
+          email: 'patrick@stripe.com',
+          organization: { name: 'Stripe' },
+          employment_history: [{ title: 'CEO' }, {}],
+        },
+      },
+    });
+  });
+
+  it('keeps a value of another type, and an object schema with no properties, whole', () => {
+    expect(projectBody(PERSON, JSON.stringify({ person: 'none', other: 1 }))).toEqual({
+      value: { person: 'none' },
+    });
+    expect(projectBody(PERSON, JSON.stringify([{ person: {} }]))).toEqual({
+      value: [{ person: {} }],
+    });
+    expect(projectBody({ type: 'object' }, JSON.stringify({ a: { b: 1 } }))).toEqual({
+      value: { a: { b: 1 } },
+    });
+  });
+
+  it('cuts past a missing required field or a wrong type: it never refuses', () => {
+    const schema = {
+      type: 'object',
+      required: ['missing'],
+      properties: { a: { type: 'string' }, b: { type: 'object', properties: { c: {} } } },
+    };
+    expect(projectBody(schema, JSON.stringify({ a: 5, b: { c: 1, d: 2 }, e: 3 }))).toEqual({
+      value: { a: 5, b: { c: 1 } },
+    });
+  });
+
+  it('cuts nothing it cannot read: not JSON, over the cap, a prototype key, or a schema it cannot compile', () => {
+    expect(projectBody(PERSON, '<html>502</html>')).toBeUndefined();
+    expect(projectBody(PERSON, OVER_CAP)).toBeUndefined();
+    expect(
+      projectBody({ type: 'object', properties: { a: { $ref: 'https://evil/x' } } }, '{}'),
+    ).toBeUndefined();
+    expect(projectBody(null, '{}')).toBeUndefined();
+    expect(projectBody(PERSON, '{"person": {"__proto__": {"polluted": true}}}')).toBeUndefined();
   });
 });

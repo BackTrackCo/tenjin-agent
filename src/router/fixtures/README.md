@@ -97,7 +97,12 @@ id the hint gives it. A spec is the service's contract: `capabilityId`,
 `{name}` path placeholders, `fields` saying where each field goes, and
 `location` for any other), `input` (a flat JSON Schema), `pinned` (fields set
 on every call, which win over the agent's input), and optionally `example`,
-`returns`, `returnsExample` and `resultSchema`. The hint is then the
+`returns`, `returnsExample`, `resultSchema` and `outputSchema`. `outputSchema`
+names the fields the result promises (`type`, `properties`, `items`,
+`required`): the client checks `resultSchema` on the whole body, then hands the
+agent only the properties `outputSchema` declares, through objects and array
+items, and saves the whole body to a file it names in `fullResultPath`
+(`wire-lookup-spec-skeleton.json` carries Apollo's). The hint is then the
 skeleton of the one call, `request({id, input: {...}})` with the required
 fields (pins aside) as placeholders, or with a value already known: the one
 the hook holds, the field's schema `default`, or a number's or boolean's value

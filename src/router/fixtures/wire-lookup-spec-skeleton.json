@@ -111,6 +111,92 @@
             }
           }
         }
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "person": {
+            "type": "object",
+            "properties": {
+              "match_confidence": {
+                "type": ["string", "null"]
+              },
+              "name": {
+                "type": ["string", "null"]
+              },
+              "first_name": {
+                "type": ["string", "null"]
+              },
+              "last_name": {
+                "type": ["string", "null"]
+              },
+              "title": {
+                "type": ["string", "null"]
+              },
+              "headline": {
+                "type": ["string", "null"]
+              },
+              "linkedin_url": {
+                "type": ["string", "null"]
+              },
+              "email": {
+                "type": ["string", "null"]
+              },
+              "email_status": {
+                "type": ["string", "null"]
+              },
+              "city": {
+                "type": ["string", "null"]
+              },
+              "state": {
+                "type": ["string", "null"]
+              },
+              "country": {
+                "type": ["string", "null"]
+              },
+              "organization": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": ["string", "null"]
+                  },
+                  "primary_domain": {
+                    "type": ["string", "null"]
+                  },
+                  "website_url": {
+                    "type": ["string", "null"]
+                  },
+                  "linkedin_url": {
+                    "type": ["string", "null"]
+                  }
+                }
+              },
+              "employment_history": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "organization_name": {
+                      "type": ["string", "null"]
+                    },
+                    "title": {
+                      "type": ["string", "null"]
+                    },
+                    "start_date": {
+                      "type": ["string", "null"]
+                    },
+                    "end_date": {
+                      "type": ["string", "null"]
+                    },
+                    "current": {
+                      "type": ["boolean", "null"]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
       }
     },
     "hint": "Apollo fits this: a person's professional record (current title, employer, work history, LinkedIn URL) and work email with its verification status, from a first and last name with the company domain or name, a LinkedIn profile URL, or an email address. $0.01 via https://x402.orthogonal.com/apollo/api/v1/people/match . Call request({id: \"0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d22\", input: {\"first_name\":\"<first name>\",\"last_name\":\"<last name>\",\"domain\":\"<company domain>\"}}) alone and wait for its result."

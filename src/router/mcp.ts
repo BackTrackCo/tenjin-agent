@@ -58,6 +58,8 @@ const INSTRUCTIONS =
   'which runs it. This CLI builds and pays the call, and returns the full spec (its ' +
   'inputs, an example and what it returns) if a field is wrong; `{id}` alone returns ' +
   "the service's spec too, free. " +
+  'Where the spec names the fields it returns, the result holds only those, and the ' +
+  "provider's whole response is saved to the file at `fullResultPath`. " +
   'Before asking the user to get an API key or account for a one-off task, call it with ' +
   'that operation: it can find a pay-per-call service. ' +
   `${SCOPE_RULE} Call it alone and wait for its result. Deciding what to ` +

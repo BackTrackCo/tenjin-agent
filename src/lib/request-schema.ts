@@ -23,9 +23,10 @@ export type JsonRecord = Record<string, unknown>;
 const MAX_SCHEMA_BYTES = 96 * 1024;
 const MAX_VALUE_BYTES = 64 * 1024;
 /**
- * The largest result body checked against its success rule. Ordinary provider
- * bodies must fit: one Apollo person hit is 60-180 KB, because it embeds the
- * employer's whole organization record, and a batch of ten is about 1.8 MB. 4 MB is that batch with room to
+ * The largest result body checked against its success rule, and cut to the
+ * fields its spec promises. Ordinary provider bodies must fit: one Apollo
+ * person hit is 60-180 KB, because it embeds the employer's whole organization
+ * record, and a batch of ten is about 1.8 MB. 4 MB is that batch with room to
  * spare. The transport has already read and parsed the whole body, so the cap
  * bounds only the second parse and the schema walk on this process, which take
  * tens of milliseconds at 4 MB. A body over it is delivered unchecked, flagged.
@@ -91,16 +92,19 @@ interface CompileOptions {
    *  `x-in`), and refusing the whole schema for one left the input with no
    *  check at all. Nothing is logged: a hook's output is not the place. */
   ignoreUnknown?: boolean;
+  /** Delete every property the schema does not declare, at every level the
+   *  schema describes, instead of checking: see {@link projectBody}. */
+  project?: boolean;
 }
 
 function compile(
   schema: JsonRecord,
-  { allErrors = false, ignoreUnknown = false }: CompileOptions = {},
+  { allErrors = false, ignoreUnknown = false, project = false }: CompileOptions = {},
 ): ValidateFunction {
   if (Buffer.byteLength(stable(schema)) > MAX_SCHEMA_BYTES) {
     throw new Error('Schema exceeds its size limit.');
   }
-  const key = `${canonicalHash(schema)}${allErrors ? ':all' : ''}${ignoreUnknown ? ':lenient' : ''}`;
+  const key = `${canonicalHash(schema)}${allErrors ? ':all' : ''}${ignoreUnknown ? ':lenient' : ''}${project ? ':project' : ''}`;
   const cached = validators.get(key);
   if (cached !== undefined) return cached;
   walk(schema, true);
@@ -114,7 +118,7 @@ function compile(
     validateFormats: true,
     coerceTypes: false,
     useDefaults: false,
-    removeAdditional: false,
+    removeAdditional: project ? ('all' as const) : false,
     allowUnionTypes: true,
   };
   const ajv = schema.$schema === DRAFT_07 ? new Ajv(options) : new Ajv2020(options);
@@ -334,4 +338,34 @@ export function validateResultBody(schema: unknown, body: string): ResultCheck {
     reason: `The result does not satisfy its success schema: ${failed}`,
     diagnosis: { ...base(), json: true, failed },
   };
+}
+
+/**
+ * THE FIELDS A SPEC PROMISES, CUT FROM A RESULT BODY. Every property the
+ * schema does not declare is dropped, through objects and array items, which
+ * is Ajv's `removeAdditional: 'all'`; what the schema does not describe (a
+ * value of another type, an object schema with no `properties`) stays whole.
+ * The schema only cuts, it never refuses: a missing required field or a wrong
+ * type is the success rule's business. Undefined when the body cannot be
+ * projected (over the cap, not JSON, a schema this build cannot compile), so
+ * the caller hands back the whole body instead.
+ */
+export function projectBody(schema: unknown, body: string): { value: unknown } | undefined {
+  if (schema === null || typeof schema !== 'object' || Array.isArray(schema)) return undefined;
+  if (Buffer.byteLength(body) > MAX_BODY_BYTES) return undefined;
+  try {
+    // Parsed afresh, so the deletions below touch nothing anyone else holds.
+    const value: unknown = JSON.parse(body);
+    walk(value, false);
+    // `allErrors`, or Ajv stops at the first miss and cuts nothing past it.
+    const project = compile(withoutPatterns(schema) as JsonRecord, {
+      allErrors: true,
+      ignoreUnknown: true,
+      project: true,
+    });
+    project(value);
+    return { value };
+  } catch {
+    return undefined;
+  }
 }

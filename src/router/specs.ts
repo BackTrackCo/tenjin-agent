@@ -20,13 +20,17 @@ import { OfferSpecSchema, type OfferSpec } from './decision';
  */
 
 const SPECS_DIR = join('progress', 'specs');
+const RESULTS_DIR = 'results';
 /** A spec holds a service's whole input schema; far larger than any record. */
 const MAX_SPEC_BYTES = 128 * 1024;
-/** Above this many files the directory is not scanned for pruning. */
-const MAX_SPECS = 512;
+/** Above this many files a directory is not scanned for pruning. */
+const MAX_FILES = 512;
 /** The server's decision expiry: past it, the id's outcome report and an
  *  `{id, query}` fallback find no row. */
 export const SPEC_TTL_MS = 15 * 60_000;
+/** A saved result outlives its offer: the agent opens it later in the session,
+ *  or in the next step of a chain. A day covers a working session. */
+export const RESULT_TTL_MS = 24 * 60 * 60_000;
 
 const digest = (value: string): string => createHash('sha256').update(value).digest('hex');
 
@@ -53,7 +57,7 @@ export async function storeSpecs(
       // The tool falls back to the server for this id.
     }
   }
-  await pruneSpecs(dataDir, Date.now());
+  await prune(join(dataDir, SPECS_DIR), SPEC_TTL_MS, Date.now());
 }
 
 /** The spec stored for this id, or null: none, expired, damaged or not ours. */
@@ -172,16 +176,38 @@ export async function settleSpecPayment(
   );
 }
 
-async function pruneSpecs(dataDir: string, now: number): Promise<void> {
+/**
+ * THE WHOLE BODY A SPEC'S CALL RETURNED, kept by the offer's id while the
+ * agent is handed only the fields the spec promises, so nothing it paid for is
+ * out of reach. The caller passes only a body it could project, which is
+ * bounded by the result cap. The path, or null when it could not be written,
+ * and the caller then hands back the whole body instead. Never throws.
+ */
+export async function storeFullResult(
+  dataDir: string,
+  id: string,
+  body: string,
+): Promise<string | null> {
+  const path = join(dataDir, RESULTS_DIR, `${digest(id)}.json`);
   try {
-    const directory = await opendir(join(dataDir, SPECS_DIR));
+    await writeFileAtomic(path, body, { mode: 0o600, dirMode: 0o700 });
+  } catch {
+    return null;
+  }
+  await prune(join(dataDir, RESULTS_DIR), RESULT_TTL_MS, Date.now());
+  return path;
+}
+
+async function prune(dir: string, ttlMs: number, now: number): Promise<void> {
+  try {
+    const directory = await opendir(dir);
     let count = 0;
     for await (const entry of directory) {
-      if (++count > MAX_SPECS) return;
+      if (++count > MAX_FILES) return;
       if (!entry.isFile()) continue;
-      const path = join(dataDir, SPECS_DIR, entry.name);
+      const path = join(dir, entry.name);
       const stat = await lstat(path).catch(() => undefined);
-      if (stat === undefined || now - stat.mtimeMs > SPEC_TTL_MS) {
+      if (stat === undefined || now - stat.mtimeMs > ttlMs) {
         await rm(path, { force: true }).catch(() => undefined);
       }
     }
