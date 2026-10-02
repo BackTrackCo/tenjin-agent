@@ -351,7 +351,7 @@ function savedPdfIn(event: z.infer<typeof ShortfallEventSchema>): string | null 
   const response = event.tool_response;
   if (response === null || typeof response !== 'object' || Array.isArray(response)) return null;
   const result = (response as { result?: unknown }).result;
-  return typeof result === 'string' ? savedPdfOf(result) : null;
+  return typeof result === 'string' ? savedPdfOf(result, event.session_id) : null;
 }
 
 function optional<K extends string>(key: K, value: string | undefined): Partial<Record<K, string>> {
@@ -450,6 +450,7 @@ export const NEAR_EMPTY_BYTES = 64;
  */
 export function shortfallOf(event: {
   hook_event_name: 'PostToolUse' | 'PostToolUseFailure';
+  session_id: string;
   tool_name: 'WebSearch' | 'WebFetch';
   tool_response?: unknown;
   error?: unknown;
@@ -477,7 +478,7 @@ export function shortfallOf(event: {
     if (bytes !== undefined && bytes < NEAR_EMPTY_BYTES) return outcome;
     const result = typeof fields.result === 'string' ? fields.result : '';
     // A PDF it saved is read for free (`runShortfallHook`), never paid for.
-    if (savedPdfOf(result) !== null) return null;
+    if (savedPdfOf(result, event.session_id) !== null) return null;
     return readsAsEmptyPage(result) ? { ...outcome, reason: 'no_main_content' } : null;
   }
   const results = fields.results;

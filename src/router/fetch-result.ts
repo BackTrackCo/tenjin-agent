@@ -74,8 +74,8 @@ export function readsAsEmptyPage(result: string): boolean {
  */
 const SAVED_PDF_RE =
   /\n\[Binary content \(application\/pdf, [^)\n]{1,24}\) also saved to ([^\]\n]+)\]\s*$/;
-/** How WebFetch names the file it saved, in the session's `tool-results`. */
-const SAVED_PDF_NAME_RE = /[\\/]tool-results[\\/]webfetch-\d+-[a-z0-9]+\.pdf$/i;
+/** How WebFetch names the file it saved, in `<session id>/tool-results`. */
+const SAVED_PDF_NAME_RE = /[\\/]([^\\/]+)[\\/]tool-results[\\/]webfetch-\d+-[a-z0-9]+\.pdf$/i;
 const PARENT_SEGMENT_RE = /(?:^|[\\/])\.\.(?:[\\/]|$)/;
 
 /**
@@ -84,14 +84,13 @@ const PARENT_SEGMENT_RE = /(?:^|[\\/])\.\.(?:[\\/]|$)/;
  * as "a corrupted or binary PDF file that I cannot parse"), but the file it
  * saved is whole, and `Read` parses its pages for free.
  *
- * Trusted only as the result's LAST line and only for a file named the way
- * WebFetch names one, so a summary quoting a page that says otherwise cannot
- * point the agent at any other file.
+ * Trusted only as the result's LAST line, only for a file named the way
+ * WebFetch names one, and only in this session's own `tool-results`, so a
+ * summary quoting a page that says otherwise cannot point the agent at any
+ * other file, another session's included.
  */
-export function savedPdfOf(result: string): string | null {
+export function savedPdfOf(result: string, sessionId: string): string | null {
   const path = SAVED_PDF_RE.exec(result)?.[1];
-  if (path === undefined || !SAVED_PDF_NAME_RE.test(path) || PARENT_SEGMENT_RE.test(path)) {
-    return null;
-  }
-  return path;
+  if (path === undefined || PARENT_SEGMENT_RE.test(path)) return null;
+  return SAVED_PDF_NAME_RE.exec(path)?.[1] === sessionId ? path : null;
 }

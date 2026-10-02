@@ -224,6 +224,9 @@ const SHORT: Record<'WebSearch' | 'WebFetch', unknown> = {
   WebSearch: { query: 'q', results: [], durationSeconds: 1.2, searchCount: 1 },
 };
 
+/** The session whose tool-results hold the recorded PDF sample. */
+const PDF_SESSION = '3080b0f2-f873-488a-bca3-9c6f7789134f';
+
 function nativeEvent(query: string, tool: 'WebSearch' | 'WebFetch' = 'WebSearch'): unknown {
   return {
     hook_event_name: 'PostToolUse',
@@ -493,6 +496,7 @@ describe('the shortfall hook', () => {
     const out = await runShortfallHook(
       {
         ...((await readableEvent(pdf.url, 'WebFetch')) as object),
+        session_id: PDF_SESSION,
         tool_response: pdf.tool_response,
       },
       { dataDir: dir, baseUrl: BASE, fetchImpl },
@@ -512,8 +516,27 @@ describe('the shortfall hook', () => {
       savedPdf: true,
     });
     expect(
-      shortfallOf({ hook_event_name: 'PostToolUse', tool_name: 'WebFetch', ...pdf }),
+      shortfallOf({
+        hook_event_name: 'PostToolUse',
+        session_id: PDF_SESSION,
+        tool_name: 'WebFetch',
+        ...pdf,
+      }),
     ).toBeNull();
+  });
+
+  /** The note names a file in another session's tool-results: not this one's to read. */
+  it('never points at a PDF another session saved', async () => {
+    const pdf = webFetchSamples.pdf;
+    const out = await runShortfallHook(
+      {
+        ...((await readableEvent(pdf.url, 'WebFetch')) as object),
+        tool_response: pdf.tool_response,
+      },
+      { dataDir: dir, baseUrl: BASE, fetchImpl: router(withHint(SHORTFALL_HINT)).fetchImpl },
+    );
+    expect(out).not.toHaveProperty('savedPdf');
+    expect(JSON.stringify(out)).not.toContain('tool-results');
   });
 
   it('says nothing about a saved PDF where the router is off', async () => {
@@ -523,6 +546,7 @@ describe('the shortfall hook', () => {
     const out = await runShortfallHook(
       {
         ...((await readableEvent(pdf.url, 'WebFetch')) as object),
+        session_id: PDF_SESSION,
         tool_response: pdf.tool_response,
       },
       { dataDir: dir, baseUrl: BASE, fetchImpl: router(EXECUTE).fetchImpl },
@@ -665,7 +689,12 @@ describe('the tool name in a hint', () => {
 /** The mechanical shortfall rule, case by case. */
 describe('shortfallOf', () => {
   const fetchWith = (tool_response: unknown) =>
-    shortfallOf({ hook_event_name: 'PostToolUse', tool_name: 'WebFetch', tool_response });
+    shortfallOf({
+      hook_event_name: 'PostToolUse',
+      session_id: 'sess-1',
+      tool_name: 'WebFetch',
+      tool_response,
+    });
 
   // What the harness reported IS the outcome sent: nothing is added or dropped.
   it.each([
@@ -729,6 +758,7 @@ describe('shortfallOf', () => {
     const search = (results: unknown) =>
       shortfallOf({
         hook_event_name: 'PostToolUse',
+        session_id: 'sess-1',
         tool_name: 'WebSearch',
         tool_response: { query: 'q', results },
       });
@@ -744,7 +774,12 @@ describe('shortfallOf', () => {
   // failure error before it leaves".
   it('reports a failure error whole, and ignores an empty one', () => {
     const fail = (error: unknown) =>
-      shortfallOf({ hook_event_name: 'PostToolUseFailure', tool_name: 'WebFetch', error });
+      shortfallOf({
+        hook_event_name: 'PostToolUseFailure',
+        session_id: 'sess-1',
+        tool_name: 'WebFetch',
+        error,
+      });
     expect(fail('x'.repeat(5_000))?.error).toHaveLength(5_000);
     expect(fail('  ')).toBeNull();
     expect(fail(undefined)).toBeNull();

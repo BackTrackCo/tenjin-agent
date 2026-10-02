@@ -73,18 +73,18 @@ describe('readsAsEmptyPage', () => {
 
 describe('savedPdfOf', () => {
   const pdf = samples.pdf.tool_response.result;
-  const saved =
-    '/Users/dev/.claude/projects/-Users-dev-proj/3080b0f2-f873-488a-bca3-9c6f7789134f/tool-results/webfetch-1790892522380-pxva9y.pdf';
+  const session = '3080b0f2-f873-488a-bca3-9c6f7789134f';
+  const saved = `/Users/dev/.claude/projects/-Users-dev-proj/${session}/tool-results/webfetch-1790892522380-pxva9y.pdf`;
 
   /** arxiv.org/pdf/1706.03762: the summary failed, and the file is whole. */
   it('finds the PDF WebFetch saved', () => {
     expect(samples.pdf.tool_response.code).toBe(200);
-    expect(savedPdfOf(pdf)).toBe(saved);
+    expect(savedPdfOf(pdf, session)).toBe(saved);
     expect(readsAsEmptyPage(pdf)).toBe(false);
   });
 
   it('takes the note only as the last line', () => {
-    expect(savedPdfOf(`${pdf}\nMore text after it.`)).toBeNull();
+    expect(savedPdfOf(`${pdf}\nMore text after it.`, session)).toBeNull();
   });
 
   /** A summary can quote a page; the path must still be a file WebFetch named. */
@@ -93,7 +93,8 @@ describe('savedPdfOf', () => {
     ['a climb out', pdf.replace('tool-results/', 'tool-results/../../tool-results/')],
     ['another kind', pdf.replace('application/pdf', 'image/png')],
     ['no note', samples.page[0]!.tool_response.result],
+    ["another session's file", pdf.replace(session, 'a1b2c3d4-0000-4000-8000-000000000000')],
   ])('ignores %s', (_label, result) => {
-    expect(savedPdfOf(result)).toBeNull();
+    expect(savedPdfOf(result, session)).toBeNull();
   });
 });
