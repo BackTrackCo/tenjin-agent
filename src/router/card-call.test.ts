@@ -82,6 +82,43 @@ describe('a tool card as the agent reads it', () => {
     );
   });
 
+  it("refuses an input that misses the card's whole-input guard before anything is sent", () => {
+    // Apollo's card: one of these field sets, or the call buys a billed miss.
+    const apollo = card({
+      request: {
+        method: 'POST',
+        url: 'https://x402.orthogonal.com/apollo/api/v1/people/match',
+        fields: {},
+        location: 'body',
+      },
+      input: {
+        type: 'object',
+        properties: {
+          email: { type: 'string' },
+          first_name: { type: 'string' },
+          last_name: { type: 'string' },
+          domain: { type: 'string' },
+        },
+        required: [],
+        additionalProperties: false,
+        anyOf: [{ required: ['email'] }, { required: ['first_name', 'last_name', 'domain'] }],
+        minProperties: 1,
+      },
+      pinned: {},
+    });
+    expect(cardInputProblems(apollo, { first_name: 'Patrick', last_name: 'Collison' })).not.toEqual(
+      [],
+    );
+    expect(cardInputProblems(apollo, {})).not.toEqual([]);
+    expect(
+      cardInputProblems(apollo, {
+        first_name: 'Patrick',
+        last_name: 'Collison',
+        domain: 'stripe.com',
+      }),
+    ).toEqual([]);
+  });
+
   it('still checks the rest of a schema that carries a regular expression', () => {
     // The pattern itself is left to the provider; the type beside it is not.
     expect(cardInputProblems(card(), mergedInput(card(), { prompt: 'x', seed: 'abc' }))).toEqual(

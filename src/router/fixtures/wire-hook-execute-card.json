@@ -102,6 +102,7 @@
           "query": "example search query",
           "type": "auto"
         },
+        "returns": "JSON {results:[{title, url, publishedDate, highlights[]}]}: up to numResults pages, each with about 500 characters of highlights, not the full text",
         "returnsExample": {
           "results": [
             {
