@@ -57,6 +57,57 @@ export async function readUsdcBalance(
   }
 }
 
+/** Base's public RPC: the shipped `rpcUrl` default (`CONFIG_DEFAULTS`). */
+export const DEFAULT_RPC_URL = 'https://mainnet.base.org';
+
+/**
+ * Public Base RPCs a balance read on the DEFAULT `rpcUrl` falls back to, in
+ * order, only after it fails. mainnet.base.org rate-limits a busy IP
+ * (`-32016 over rate limit`): four paid lookups across two research runs were
+ * refused with `balance_unavailable` before signing, while these two answered
+ * every read. They see the wallet's address only when the default did not
+ * answer, as the default sees it on every read.
+ */
+export const FALLBACK_RPC_URLS: readonly string[] = [
+  'https://base-rpc.publicnode.com',
+  'https://base.drpc.org',
+];
+
+/**
+ * {@link readUsdcBalance} from `rpcUrl` first and, when that is the default,
+ * then from each of {@link FALLBACK_RPC_URLS} until one answers, all inside the
+ * one `timeoutMs`. Every RPC but the last gets half of what is left, so one
+ * that hangs still leaves the others time to answer.
+ *
+ * AN RPC THE USER CONFIGURED IS THE ONLY ONE ASKED. Choosing one can be about
+ * privacy, and the public RPCs would see the wallet's address; a read that
+ * fails there fails, as it did before the fallbacks.
+ */
+export async function readUsdcBalanceWithFallback(
+  address: string,
+  rpcUrl: string,
+  opts: { timeoutMs: number; fetchImpl?: typeof fetch },
+): Promise<bigint | null> {
+  const urls = sameUrl(rpcUrl, DEFAULT_RPC_URL) ? [rpcUrl, ...FALLBACK_RPC_URLS] : [rpcUrl];
+  const deadline = Date.now() + opts.timeoutMs;
+  for (const [index, url] of urls.entries()) {
+    const left = deadline - Date.now();
+    if (left <= 0) return null;
+    const timeoutMs = index === urls.length - 1 ? left : Math.ceil(left / 2);
+    const balance = await readUsdcBalance(address, url, { ...opts, timeoutMs });
+    if (balance !== null) return balance;
+  }
+  return null;
+}
+
+function sameUrl(a: string, b: string): boolean {
+  try {
+    return new URL(a).href === new URL(b).href;
+  } catch {
+    return a === b;
+  }
+}
+
 /**
  * How long the hooks remember a balance read. Base's public RPC refuses the
  * sixth `eth_call` in a second, which a burst of parallel lookups reaches, and
@@ -66,11 +117,11 @@ export async function readUsdcBalance(
 export const LAST_KNOWN_BALANCE_MS = 60_000;
 
 /**
- * {@link readUsdcBalance} for the router hooks, which returns the last read it
- * made for this address while it is under {@link LAST_KNOWN_BALANCE_MS} old,
- * without asking the RPC, and reads the chain otherwise. A read that fails is
- * null, never the remembered balance. The RPC URL is never stored, since it
- * can embed a key.
+ * {@link readUsdcBalanceWithFallback} for the router hooks, which returns the
+ * last read it made for this address while it is under
+ * {@link LAST_KNOWN_BALANCE_MS} old, without asking an RPC, and reads the chain
+ * otherwise. A read that fails on every RPC is null, never the remembered
+ * balance. The RPC URL is never stored, since it can embed a key.
  *
  * NEVER FOR A PAYMENT. `tenjin pay` reads the signer's balance live
  * immediately before signing (docs/agent-permissions.md): a minute-old balance
@@ -80,7 +131,7 @@ export function rememberingBalanceReader(
   dataDir: string,
   opts: { now?: () => number; read?: typeof readUsdcBalance } = {},
 ): typeof readUsdcBalance {
-  const read = opts.read ?? readUsdcBalance;
+  const read = opts.read ?? readUsdcBalanceWithFallback;
   const now = opts.now ?? Date.now;
   const path = balanceCachePath(dataDir);
   return async (address, rpcUrl, readOpts) => {

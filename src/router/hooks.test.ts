@@ -19,6 +19,7 @@ import {
 } from './hooks';
 import { MCP_SERVER_NAME, REQUEST_TOOL } from './names';
 import { runHookCommand } from './hook-command';
+import { readSpec } from './specs';
 import { ROUTER_PATH } from './decision';
 import {
   claimRedirect,
@@ -28,7 +29,22 @@ import {
   wasOffered,
 } from './progress';
 import { runRequestTool } from './tool';
+import { FALLBACK_RPC_URLS } from '../lib/usdc-balance';
 import type { PrefetchJob } from './augment';
+
+interface WebFetchSample {
+  url: string;
+  tool_response: { bytes: number; code: number; result: string; url: string };
+}
+
+/** Real WebFetch results (`tool_response`): shells, pages that read fine, and
+ *  a PDF it saved whole. */
+const webFetchSamples = JSON.parse(
+  readFileSync(
+    fileURLToPath(new URL('./fixtures/harness/claude-WebFetch-results.json', import.meta.url)),
+    'utf8',
+  ),
+) as Record<'shell' | 'page', WebFetchSample[]> & { pdf: WebFetchSample };
 
 /** What `tenjin install` writes (`ROUTER_DEFAULTS`): 0.25 a call, auto. */
 const ROUTER_POLICY = { maxAutoSpend: '250000', sessionBudget: '5000000', confirm: 'above:250000' };
@@ -37,8 +53,11 @@ const WALLET = '0x1234567890AbcdEF1234567890aBcdef12345678';
 /** The configured default `rpcUrl`, where the balance read goes. */
 const RPC = 'https://mainnet.base.org';
 
+/** The public RPCs a failed read falls back to, in order (`FALLBACK_RPC_URLS`). */
+const RPCS = [RPC, ...FALLBACK_RPC_URLS];
+
 /**
- * What the RPC answers `balanceOf` with: an atomic USDC amount, or a function
+ * What every RPC answers `balanceOf` with: an atomic USDC amount, or a function
  * standing in for a failure. Funded by default (1 USDC), so a test about
  * routing is not a test about the wallet; reset before each test.
  */
@@ -67,14 +86,14 @@ const BASE = 'https://tenjin.sh';
 
 /**
  * A recorded decision answer; `calls` is what the hook sent the router. The
- * balance read goes to {@link RPC} through the same fetch and is answered from
- * {@link rpcAnswer} and recorded in {@link rpcCalls} instead.
+ * balance read goes to {@link RPC}, or a fallback, through the same fetch and
+ * is answered from {@link rpcAnswer} and recorded in {@link rpcCalls} instead.
  */
 function router(body: unknown, status = 200): { fetchImpl: typeof fetch; calls: unknown[] } {
   const calls: unknown[] = [];
   const fetchImpl = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
     const sent = { url: String(input), body: JSON.parse(String(init?.body ?? 'null')) };
-    if (sent.url === RPC) {
+    if (RPCS.includes(sent.url)) {
       rpcCalls.push(sent);
       if (typeof rpcAnswer === 'function') return rpcAnswer(init);
       const word = `0x${rpcAnswer.toString(16).padStart(64, '0')}`;
@@ -204,6 +223,9 @@ const SHORT: Record<'WebSearch' | 'WebFetch', unknown> = {
   WebFetch: { bytes: 0, code: 402, codeText: 'Payment Required', result: '', durationMs: 300 },
   WebSearch: { query: 'q', results: [], durationSeconds: 1.2, searchCount: 1 },
 };
+
+/** The session whose tool-results hold the recorded PDF sample. */
+const PDF_SESSION = '3080b0f2-f873-488a-bca3-9c6f7789134f';
 
 function nativeEvent(query: string, tool: 'WebSearch' | 'WebFetch' = 'WebSearch'): unknown {
   return {
@@ -441,6 +463,97 @@ describe('the shortfall hook', () => {
     );
   });
 
+  it('offers a page reader after a WebFetch that read only the page shell', async () => {
+    const { fetchImpl, calls } = router(withHint(SHORTFALL_HINT));
+    const shell = webFetchSamples.shell.find(
+      (s) => s.url === 'https://app.uniswap.org/explore/tokens',
+    )!;
+    const out = await runShortfallHook(
+      {
+        ...((await readableEvent(shell.url, 'WebFetch')) as object),
+        tool_response: shell.tool_response,
+      },
+      { dataDir: dir, baseUrl: BASE, fetchImpl },
+    );
+    expect(out.action).toBe('execute');
+    const sent = calls[0] as { body: { packet: { nativeOutcome?: unknown } } };
+    expect(sent.body.packet.nativeOutcome).toEqual({
+      code: 200,
+      bytes: 85_717,
+      reason: 'no_main_content',
+    });
+    expect(out.response).toMatchObject({ hookSpecificOutput: { hookEventName: 'PostToolUse' } });
+  });
+
+  /**
+   * A PDF IS READ FOR FREE. WebFetch's summary of arxiv.org/pdf/1706.03762
+   * said it could not parse the binary, but the harness saved the file whole
+   * and `Read` returns every page. The line says so, and nothing is asked.
+   */
+  it('points at the PDF WebFetch saved, free, and asks the router nothing', async () => {
+    const { fetchImpl, calls } = router(withHint(SHORTFALL_HINT));
+    const pdf = webFetchSamples.pdf;
+    const out = await runShortfallHook(
+      {
+        ...((await readableEvent(pdf.url, 'WebFetch')) as object),
+        session_id: PDF_SESSION,
+        tool_response: pdf.tool_response,
+      },
+      { dataDir: dir, baseUrl: BASE, fetchImpl },
+    );
+    expect(calls).toHaveLength(0);
+    expect(out).toEqual({
+      response: {
+        hookSpecificOutput: {
+          hookEventName: 'PostToolUse',
+          additionalContext:
+            `${HINT_SOURCE}: WebFetch's summary cannot read a PDF, but it saved this one whole to ` +
+            '/Users/dev/.claude/projects/-Users-dev-proj/3080b0f2-f873-488a-bca3-9c6f7789134f/' +
+            'tool-results/webfetch-1790892522380-pxva9y.pdf. Read that file for its text, free ' +
+            '(pass pages, such as "1-10", for a long one).',
+        },
+      },
+      savedPdf: true,
+    });
+    expect(
+      shortfallOf({
+        hook_event_name: 'PostToolUse',
+        session_id: PDF_SESSION,
+        tool_name: 'WebFetch',
+        ...pdf,
+      }),
+    ).toBeNull();
+  });
+
+  /** The note names a file in another session's tool-results: not this one's to read. */
+  it('never points at a PDF another session saved', async () => {
+    const pdf = webFetchSamples.pdf;
+    const out = await runShortfallHook(
+      {
+        ...((await readableEvent(pdf.url, 'WebFetch')) as object),
+        tool_response: pdf.tool_response,
+      },
+      { dataDir: dir, baseUrl: BASE, fetchImpl: router(withHint(SHORTFALL_HINT)).fetchImpl },
+    );
+    expect(out).not.toHaveProperty('savedPdf');
+    expect(JSON.stringify(out)).not.toContain('tool-results');
+  });
+
+  it('says nothing about a saved PDF where the router is off', async () => {
+    const fs = await import('node:fs/promises');
+    await fs.writeFile(join(dir, 'config.json'), JSON.stringify({ router: { enabled: false } }));
+    const pdf = webFetchSamples.pdf;
+    const out = await runShortfallHook(
+      {
+        ...((await readableEvent(pdf.url, 'WebFetch')) as object),
+        session_id: PDF_SESSION,
+        tool_response: pdf.tool_response,
+      },
+      { dataDir: dir, baseUrl: BASE, fetchImpl: router(EXECUTE).fetchImpl },
+    );
+    expect(out).toEqual({ response: null });
+  });
+
   it('offers the lookup after a failed call, carrying its error', async () => {
     const { fetchImpl, calls } = router(EXECUTE);
     const base = (await readableEvent('https://x.test/a', 'WebFetch')) as Record<string, unknown>;
@@ -576,7 +689,12 @@ describe('the tool name in a hint', () => {
 /** The mechanical shortfall rule, case by case. */
 describe('shortfallOf', () => {
   const fetchWith = (tool_response: unknown) =>
-    shortfallOf({ hook_event_name: 'PostToolUse', tool_name: 'WebFetch', tool_response });
+    shortfallOf({
+      hook_event_name: 'PostToolUse',
+      session_id: 'sess-1',
+      tool_name: 'WebFetch',
+      tool_response,
+    });
 
   // What the harness reported IS the outcome sent: nothing is added or dropped.
   it.each([
@@ -606,10 +724,41 @@ describe('shortfallOf', () => {
     expect(fetchWith(response)).toBeNull();
   });
 
+  /**
+   * A 200 WITH TENS OF KILOBYTES CAN STILL BE NOTHING. app.uniswap.org came
+   * back as its title and YouTube as its footer; the size rule passed both,
+   * and the agent was left with no offer and no page. The summary says so, and
+   * the outcome names why, since its code and size cannot.
+   */
+  it.each([
+    'https://app.uniswap.org/explore/tokens',
+    'https://www.youtube.com/watch?v=zjkBMFhNj_g',
+  ])('counts a WebFetch of %s that read only a shell as short, and says why', (url) => {
+    const sample = webFetchSamples.shell.find((s) => s.url === url)!.tool_response;
+    expect(fetchWith(sample)).toEqual({
+      code: 200,
+      bytes: sample.bytes,
+      reason: 'no_main_content',
+    });
+  });
+
+  it('does not count a WebFetch whose summary is the page answering', () => {
+    for (const { tool_response } of webFetchSamples.page) {
+      expect(fetchWith(tool_response), tool_response.url).toBeNull();
+    }
+  });
+
+  it('counts the status first: a refused shell is a refusal, with no reason', () => {
+    const shell = webFetchSamples.shell[0]!.tool_response;
+    expect(fetchWith({ ...shell, code: 403 })).toEqual({ code: 403, bytes: shell.bytes });
+    expect(fetchWith({ ...shell, code: 404 })).toBeNull();
+  });
+
   it('counts only a search with no result links', () => {
     const search = (results: unknown) =>
       shortfallOf({
         hook_event_name: 'PostToolUse',
+        session_id: 'sess-1',
         tool_name: 'WebSearch',
         tool_response: { query: 'q', results },
       });
@@ -625,7 +774,12 @@ describe('shortfallOf', () => {
   // failure error before it leaves".
   it('reports a failure error whole, and ignores an empty one', () => {
     const fail = (error: unknown) =>
-      shortfallOf({ hook_event_name: 'PostToolUseFailure', tool_name: 'WebFetch', error });
+      shortfallOf({
+        hook_event_name: 'PostToolUseFailure',
+        session_id: 'sess-1',
+        tool_name: 'WebFetch',
+        error,
+      });
     expect(fail('x'.repeat(5_000))?.error).toHaveLength(5_000);
     expect(fail('  ')).toBeNull();
     expect(fail(undefined)).toBeNull();
@@ -1063,6 +1217,8 @@ describe('a wallet that cannot cover the lookup', () => {
       warn: (line) => lines.push(line),
     });
     expect(out.response).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } });
+    // Every fallback was asked, in order, before the policy decided alone.
+    expect(rpcCalls.map((call) => call.url)).toEqual(RPCS);
     expect(lines).toEqual([
       "tenjin hook: the wallet's USDC balance could not be read from mainnet.base.org, so the spend policy alone decides",
     ]);
@@ -2607,11 +2763,27 @@ describe('a discovered service', () => {
     });
     expect((calls[0] as { body: unknown }).body).toMatchObject({
       sessionId: 'sess-1',
-      accepts: ['discovered'],
+      accepts: ['discovered', 'spec'],
     });
     // The footer names the seller, and the id binds this session for `request`.
     expect(await renderProgress(dir, 'sess-1')).toContain('BlockRun');
     expect(await resolveProgressSession(dir, { id: ID })).not.toBeNull();
+  });
+
+  it('keeps the spec of a shown offer, for request to read by its id', async () => {
+    const OFFERED = JSON.parse(
+      readFileSync(
+        fileURLToPath(new URL('./fixtures/wire-hook-discovered-spec.json', import.meta.url)),
+        'utf8',
+      ),
+    ) as { decision: { id: string; specs: unknown[] } };
+    const { fetchImpl } = router(OFFERED);
+    await runPromptHook(promptEvent('make a hero image for the blog post'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+    expect(await readSpec(dir, OFFERED.decision.id)).toEqual(OFFERED.decision.specs[0]);
   });
 
   /** A LIST CAN NAME A SERVICE OVER THE CAP beside one that fits: People Data
@@ -2703,6 +2875,7 @@ describe('a discovered service', () => {
     });
     expect((first.calls[0] as { body: Record<string, unknown> }).body.accepts).toEqual([
       'discovered',
+      'spec',
     ]);
     const fs = await import('node:fs/promises');
     await fs.writeFile(
@@ -2717,6 +2890,7 @@ describe('a discovered service', () => {
     });
     expect((second.calls[0] as { body: Record<string, unknown> }).body.accepts).toEqual([
       'discovered',
+      'spec',
       'bazaar',
     ]);
   });
@@ -2994,7 +3168,7 @@ describe('a question to the user', () => {
         'You pick a track: send me a licensed track.',
     });
     expect((body.packet.current as { text: string }).text).toContain('I can get API keys');
-    expect(body).toMatchObject({ sessionId: 'sess-1', accepts: ['discovered'] });
+    expect(body).toMatchObject({ sessionId: 'sess-1', accepts: ['discovered', 'spec'] });
   });
 
   it('denies the question once on an offer, then lets it be asked', async () => {

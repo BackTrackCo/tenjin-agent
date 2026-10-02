@@ -138,7 +138,7 @@ describe('one free decision', () => {
       'schemaVersion',
     ]);
     // The Tenjin list is on by default; the open Bazaar is not.
-    expect((calls[0]!.body as { accepts: unknown }).accepts).toEqual(['discovered']);
+    expect((calls[0]!.body as { accepts: unknown }).accepts).toEqual(['discovered', 'spec']);
   });
 
   it('adds the open Bazaar to what it accepts only with the experiment on', async () => {
@@ -154,7 +154,7 @@ describe('one free decision', () => {
       { ctx: ctx(), baseUrl: BASE, fetchImpl, acceptsBazaar: true },
     );
     for (const call of calls) {
-      expect((call.body as { accepts: unknown }).accepts).toEqual(['discovered', 'bazaar']);
+      expect((call.body as { accepts: unknown }).accepts).toEqual(['discovered', 'spec', 'bazaar']);
     }
   });
 

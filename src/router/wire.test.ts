@@ -2,7 +2,14 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { buildHookBody, buildToolBody, CLIENT_ACCEPTS, parseForTests } from './decision';
+import {
+  buildHookBody,
+  buildOutcomeBody,
+  buildToolBody,
+  CLIENT_ACCEPTS,
+  parseForTests,
+  type SpecOutcome,
+} from './decision';
 import { GATE_TIMEOUT_MS } from './gate';
 import { MAX_PACKET_BYTES, type Packet } from './context';
 import { STDIN_TIMEOUT_MS } from './hook-command';
@@ -37,6 +44,7 @@ describe('the request bodies', () => {
     ['wire-hook-request-prompt.json'],
     ['wire-hook-request-native.json'],
     ['wire-hook-request-native-shortfall.json'],
+    ['wire-hook-request-native-no-content.json'],
   ])('builds %s byte for byte', (name) => {
     const canonical = fixture(name);
     expect(buildHookBody(canonical.packet as Packet)).toEqual(canonical);
@@ -68,6 +76,21 @@ describe('the request bodies', () => {
     });
     expect(packet.nativeOutcome).toEqual({ code: 402, bytes: 0 });
     expect(Buffer.byteLength(JSON.stringify(packet))).toBeLessThanOrEqual(MAX_PACKET_BYTES);
+  });
+
+  /**
+   * A 200 THAT CAME BACK EMPTY SAYS WHY. Its code and size look like a page,
+   * so the client names what it read in WebFetch's summary, and the server
+   * picks the reader from the URL. A server that predates `reason` refuses the
+   * packet, which the hook reads as silence: no offer, as before.
+   */
+  it('names why a 200 with a full body still fell short', () => {
+    const packet = fixture('wire-hook-request-native-no-content.json').packet as Packet;
+    expect(packet.pendingCall).toEqual({
+      tool: 'WebFetch',
+      url: 'https://app.uniswap.org/explore/tokens',
+    });
+    expect(packet.nativeOutcome).toEqual({ code: 200, bytes: 85_717, reason: 'no_main_content' });
   });
 
   it('builds the tool request byte for byte', () => {
@@ -117,14 +140,36 @@ describe('the request bodies', () => {
     ).toEqual(canonical);
   });
 
+  it('builds the query with no id that a spec answers, byte for byte', () => {
+    const canonical = fixture('wire-tool-request-spec.json');
+    expect(canonical.id).toBeUndefined();
+    expect(buildToolBody({ query: canonical.query as string, accepts: CLIENT_ACCEPTS })).toEqual(
+      canonical,
+    );
+  });
+
+  it('reports a call run from a spec by its id and how it ended, byte for byte, with no text', () => {
+    const canonical = fixture('wire-outcome-request.json');
+    expect(buildOutcomeBody(canonical as unknown as SpecOutcome)).toEqual(canonical);
+    expect(Object.keys(canonical).sort()).toEqual([
+      'httpStatus',
+      'id',
+      'ms',
+      'schemaVersion',
+      'status',
+    ]);
+  });
+
   it('carries nothing about money on any form', () => {
     for (const name of [
       'wire-hook-request-prompt.json',
       'wire-hook-request-native.json',
       'wire-hook-request-native-shortfall.json',
+      'wire-hook-request-native-no-content.json',
       'wire-hook-request-ask.json',
       'wire-tool-request.json',
       'wire-tool-request-discovered.json',
+      'wire-tool-request-spec.json',
     ]) {
       expect(JSON.stringify(fixture(name))).not.toMatch(/billing|admission|payment/i);
     }
@@ -161,12 +206,37 @@ describe('every answer payload on disk', () => {
     // no contract, the tool's a contract and no id.
     expect(parseForTests('tool', fixture('wire-hook-execute.json')).success).toBe(false);
     expect(parseForTests('hook', fixture('wire-lookup-execute-get.json')).success).toBe(false);
+    // A spec answer is the tool's alone: the hook offers by line.
+    expect(parseForTests('hook', fixture('wire-lookup-spec.json')).success).toBe(false);
     // A discovered answer is ONE shape on both calls: the hook's offer and the
     // tool's fallback parse with either parser.
-    for (const name of ['wire-hook-discovered.json', 'wire-lookup-discovered.json']) {
+    for (const name of [
+      'wire-hook-discovered.json',
+      'wire-lookup-discovered.json',
+      'wire-hook-discovered-spec.json',
+    ]) {
       expect(parseForTests('hook', fixture(name)).success, name).toBe(true);
       expect(parseForTests('tool', fixture(name)).success, name).toBe(true);
     }
+  });
+
+  /**
+   * A QUERY WITH NO ID IS ONE CALL WHEN IT CAN BE. The server sends the query
+   * as `input` only when, as written, it is a valid value for the spec's query
+   * field (free text, or a format or pattern it satisfies), and the tool runs
+   * and pays it at once; otherwise the answer has no `input`, and its line is
+   * the skeleton the agent fills for the next call.
+   */
+  it('carries the bound input, or only the skeleton, on an id-less spec answer', () => {
+    const bound = fixture('wire-lookup-spec.json').decision as Record<string, unknown>;
+    expect(bound).toMatchObject({ action: 'spec', input: { input: expect.any(String) } });
+    expect(bound.spec).not.toHaveProperty('id');
+    expect(String(bound.hint)).toContain(`input: ${JSON.stringify(bound.input)}`);
+    const skeleton = fixture('wire-lookup-spec-skeleton.json').decision as Record<string, unknown>;
+    expect(skeleton).toMatchObject({ action: 'spec' });
+    expect(skeleton).not.toHaveProperty('input');
+    expect(skeleton.spec).not.toHaveProperty('id');
+    expect(String(skeleton.hint)).toMatch(/request\(\{id: "[^"]+", input: \{"[a-z_]+":"<[^>]+>"/);
   });
 
   it.each([
@@ -178,6 +248,9 @@ describe('every answer payload on disk', () => {
     ['id', 'wire-hook-execute.json', 'hook'],
     ['candidate', 'wire-hook-discovered.json', 'hook'],
     ['hint', 'wire-lookup-discovered.json', 'tool'],
+    ['spec', 'wire-lookup-spec.json', 'tool'],
+    ['id', 'wire-lookup-spec.json', 'tool'],
+    ['hint', 'wire-lookup-spec.json', 'tool'],
   ])('refuses an answer missing %s', (field, name, kind) => {
     const payload = fixture(name);
     const decision = { ...(payload.decision as Record<string, unknown>) };

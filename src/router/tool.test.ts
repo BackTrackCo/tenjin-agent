@@ -10,7 +10,8 @@ import type { CommandContext } from '../context';
 import { runPay } from '../commands/pay';
 import { extensionFor, runRequestTool } from './tool';
 import type { MediaTransport } from './paid';
-import { ROUTER_PATH } from './decision';
+import { storeSpecs } from './specs';
+import { ROUTER_PATH, type OfferSpec } from './decision';
 import { bindDecision, claimRedirect, noteSession, renderProgress } from './progress';
 
 // Pass-through, so a refusal's typed details stay observable after the tool
@@ -746,7 +747,7 @@ describe('a discovered service', () => {
       providerContentUntrusted: true,
     });
     expect(calls).toHaveLength(1);
-    expect(JSON.parse(calls[0]!.body!)).toMatchObject({ accepts: ['discovered'] });
+    expect(JSON.parse(calls[0]!.body!)).toMatchObject({ accepts: ['discovered', 'spec'] });
     expect(auth.authorize).not.toHaveBeenCalled();
   });
 
@@ -1138,5 +1139,497 @@ describe('a discovered service', () => {
     ['application/x-sh', 'bin'],
   ])('names a %s file .%s', (type, ext) => {
     expect(extensionFor(type)).toBe(ext);
+  });
+});
+
+/**
+ * AN OFFER WITH A REQUEST SPEC: the hook kept the spec, so the tool shows it for
+ * the id alone and runs it for the id and an input, building and paying the
+ * request itself. The server is asked nothing and told only how it ended.
+ */
+describe('an offer with a request spec', () => {
+  const SPEC_ID = '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d01';
+  const routerCalls = (calls: { url: string }[]) =>
+    calls.filter((call) => call.url.startsWith(`${ROUTER}${ROUTER_PATH}`));
+  /** The outcome report is fire-and-forget: let one that was sent land. */
+  const reportsSettled = () => new Promise((resolve) => setTimeout(resolve, 25));
+  const PAYEE = '0x1111111111111111111111111111111111111111';
+
+  function quoteSpec(over: Partial<OfferSpec> = {}): OfferSpec {
+    return {
+      id: SPEC_ID,
+      capabilityId: 'cmc-quotes',
+      provider: 'CoinMarketCap',
+      description: 'latest market quotes for one or more cryptocurrencies',
+      priceAtomic: '10000',
+      priceVaries: false,
+      maxAmountAtomic: '10000',
+      payTo: PAYEE,
+      network: 'eip155:8453',
+      asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+      request: {
+        method: 'GET',
+        url: PROVIDER,
+        fields: { symbol: 'query', convert: 'query' },
+        location: 'query',
+      },
+      input: {
+        type: 'object',
+        properties: {
+          symbol: { type: 'string', description: 'Comma-separated symbols' },
+          convert: { type: 'string', enum: ['USD', 'EUR'] },
+        },
+        required: ['symbol'],
+        additionalProperties: false,
+      },
+      pinned: {},
+      example: { symbol: 'BTC' },
+      returns: 'JSON quotes keyed by symbol',
+      ...over,
+    };
+  }
+
+  it('shows the spec for the id alone, and sends nothing', async () => {
+    await storeSpecs(dir, [quoteSpec()]);
+    const { fetchImpl, calls } = net([]);
+    const result = await runRequestTool({ id: SPEC_ID }, deps(fetchImpl));
+    expect(result.isError).toBe(false);
+    expect(result.envelope).toMatchObject({
+      status: 'spec',
+      id: SPEC_ID,
+      cost: ['provider price 0 USD'],
+    });
+    expect(result.summary).toContain('symbol (string, required); Comma-separated symbols');
+    expect(result.summary).toContain('Returns: JSON quotes keyed by symbol');
+    expect(calls).toEqual([]);
+  });
+
+  it('builds the request from the input, pays the provider, and reports how it ended', async () => {
+    await storeSpecs(dir, [quoteSpec()]);
+    const { fetchImpl, calls } = net([...providerLegs(), { url: ROUTER, status: 200, body: {} }]);
+    const result = await runRequestTool(
+      { id: SPEC_ID, input: { symbol: 'BTC,ETH', convert: 'USD' } },
+      deps(fetchImpl),
+    );
+    expect(result.envelope).toMatchObject({
+      status: 'fulfilled',
+      parameters: { symbol: 'BTC,ETH', convert: 'USD' },
+      cost: ['provider price 0.01 USD'],
+    });
+    expect(calls[0]).toMatchObject({
+      url: `${PROVIDER}?symbol=BTC%2CETH&convert=USD`,
+      method: 'GET',
+      paid: false,
+    });
+    expect(calls[1]).toMatchObject({ paid: true });
+    expect(vi.mocked(runPay).mock.calls.at(-1)![0]).toMatchObject({
+      terms: {
+        source: 'CoinMarketCap',
+        maxAmountAtomic: '10000',
+        payTo: PAYEE,
+        network: 'eip155:8453',
+      },
+      execution: 'router',
+    });
+    // No decision was asked for: the one router call is the report.
+    await vi.waitFor(() => expect(calls).toHaveLength(3));
+    expect(calls[2]).toMatchObject({ url: `${ROUTER}${ROUTER_PATH}`, method: 'POST' });
+    // The shape the shared fixture pins: the provider's status rides along.
+    const report = JSON.parse(calls[2]!.body!) as Record<string, unknown>;
+    expect(report).toMatchObject({
+      schemaVersion: 1,
+      id: SPEC_ID,
+      status: 'fulfilled',
+      httpStatus: 200,
+    });
+    const fixture = JSON.parse(
+      await readFile(
+        fileURLToPath(new URL('./fixtures/wire-outcome-request.json', import.meta.url)),
+        'utf8',
+      ),
+    ) as Record<string, unknown>;
+    expect(Object.keys(report).sort()).toEqual(Object.keys(fixture).sort());
+  });
+
+  it('refuses an input that misses the spec, naming every problem, and sends nothing', async () => {
+    await storeSpecs(dir, [quoteSpec()]);
+    const { fetchImpl, calls } = net([]);
+    const result = await runRequestTool(
+      { id: SPEC_ID, input: { convert: 'GBP', limit: 3 } },
+      deps(fetchImpl),
+    );
+    expect(result.isError).toBe(false);
+    expect(result.envelope).toMatchObject({
+      status: 'needs_input',
+      cost: ['provider price 0 USD'],
+    });
+    const reason = String(result.envelope.reason);
+    expect(reason).toContain('symbol is required');
+    expect(reason).toContain('convert must be one of "USD", "EUR"');
+    expect(reason).toContain('the input has no field "limit"');
+    // The whole spec comes back with the problems, so the next call can be right.
+    expect(result.summary).toContain('symbol (string, required); Comma-separated symbols');
+    expect(result.summary).toContain('convert (string); one of "USD", "EUR"');
+    expect(result.summary).toContain('Example input: {"symbol":"BTC"}');
+    expect(result.summary).toContain('Returns: JSON quotes keyed by symbol');
+    expect(result.envelope.nextStep).toContain(`request({id: ${JSON.stringify(SPEC_ID)}, input:`);
+    expect(result.envelope.parameters).toEqual({ convert: 'GBP', limit: 3 });
+    expect(calls).toEqual([]);
+  });
+
+  it('refuses a field the spec does not name, even where its schema allows extras', async () => {
+    const open = quoteSpec();
+    delete open.input.additionalProperties;
+    await storeSpecs(dir, [open]);
+    const auth = authorizer();
+    const { fetchImpl, calls } = net([]);
+    const result = await runRequestTool(
+      { id: SPEC_ID, input: { symbol: 'BTC', limit: 3 } },
+      deps(fetchImpl, auth),
+    );
+    expect(result.envelope).toMatchObject({
+      status: 'needs_input',
+      cost: ['provider price 0 USD'],
+    });
+    expect(String(result.envelope.reason)).toContain('the input has no field "limit"');
+    expect(result.summary).toContain('symbol (string, required); Comma-separated symbols');
+    expect(calls).toEqual([]);
+    expect(auth.authorize).not.toHaveBeenCalled();
+  });
+
+  it('sends and pays nothing for a spec whose input schema cannot be checked', async () => {
+    // `text` is no JSON Schema type: the schema never compiles, so nothing
+    // here can say the input fits.
+    await storeSpecs(dir, [
+      quoteSpec({
+        input: { type: 'object', properties: { symbol: { type: 'text' } }, required: ['symbol'] },
+      }),
+    ]);
+    const auth = authorizer();
+    const { fetchImpl, calls } = net([...providerLegs()]);
+    const result = await runRequestTool(
+      { id: SPEC_ID, input: { symbol: 'BTC' } },
+      deps(fetchImpl, auth),
+    );
+    expect(result.envelope).toMatchObject({
+      status: 'failed',
+      reason:
+        'The spec for CoinMarketCap has an input schema this build cannot check, so the call was not sent and nothing was paid.',
+      cost: ['provider price 0 USD'],
+      parameters: { symbol: 'BTC' },
+    });
+    expect(calls).toEqual([]);
+    expect(auth.authorize).not.toHaveBeenCalled();
+  });
+
+  it("signs nothing for a live 402 that pays someone other than the spec's payee", async () => {
+    await storeSpecs(dir, [quoteSpec()]);
+    const { fetchImpl, calls } = net([
+      {
+        url: PROVIDER,
+        status: 402,
+        body: {},
+        headers: {
+          'PAYMENT-REQUIRED': challenge({ payTo: '0x2222222222222222222222222222222222222222' }),
+        },
+      },
+    ]);
+    const result = await runRequestTool({ id: SPEC_ID, input: { symbol: 'BTC' } }, deps(fetchImpl));
+    expect(result.envelope).toMatchObject({
+      status: 'failed',
+      cost: ['provider price 0 USD'],
+      request: { method: 'GET', url: `${PROVIDER}?symbol=BTC` },
+      parameters: { symbol: 'BTC' },
+    });
+    expect(calls.filter((call) => call.paid)).toEqual([]);
+    await reportsSettled();
+    expect(routerCalls(calls)).toEqual([]);
+  });
+
+  it('asks for a smaller input when a varying price lands over the spec ceiling', async () => {
+    await storeSpecs(dir, [quoteSpec({ priceVaries: true, maxAmountAtomic: '1000000' })]);
+    const auth = authorizer();
+    const { fetchImpl, calls } = net([
+      {
+        url: PROVIDER,
+        status: 402,
+        body: {},
+        headers: { 'PAYMENT-REQUIRED': challenge({ amount: '1500000' }) },
+      },
+    ]);
+    const result = await runRequestTool(
+      { id: SPEC_ID, input: { symbol: 'BTC' } },
+      deps(fetchImpl, auth),
+    );
+    expect(result.envelope).toMatchObject({
+      status: 'failed',
+      cost: ['provider price 0 USD'],
+      nextStep: 'Change the input and call again with the same id.',
+    });
+    const reason = String(result.envelope.reason);
+    expect(reason).toContain("prices this input at $1.5, over this spec's $1 ceiling");
+    expect(reason).not.toContain('fresh decision');
+    expect(calls.filter((call) => call.paid)).toEqual([]);
+    expect(auth.authorize).not.toHaveBeenCalled();
+    await reportsSettled();
+    expect(routerCalls(calls)).toEqual([]);
+  });
+
+  it('says a provider refused the input before payment, and what was sent', async () => {
+    await storeSpecs(dir, [quoteSpec()]);
+    const { fetchImpl, calls } = net([
+      { url: PROVIDER, status: 400, body: { error: 'bad symbol' } },
+    ]);
+    const result = await runRequestTool({ id: SPEC_ID, input: { symbol: '??' } }, deps(fetchImpl));
+    expect(result.envelope).toMatchObject({
+      status: 'failed',
+      providerStatus: 400,
+      parameters: { symbol: '??' },
+      nextStep: 'Fix the input and call again with the same id.',
+    });
+    expect(String(result.envelope.reason)).toContain(
+      'CoinMarketCap rejected this input before any payment (HTTP 400)',
+    );
+    // Refused before payment: the offer was not taken, so nothing is reported.
+    await reportsSettled();
+    expect(routerCalls(calls)).toEqual([]);
+  });
+
+  it('reports nothing when the spend policy refuses the call before signing', async () => {
+    await storeSpecs(dir, [quoteSpec()]);
+    const auth = authorizer('deny');
+    const { fetchImpl, calls } = net([
+      { url: PROVIDER, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge() } },
+    ]);
+    const result = await runRequestTool(
+      { id: SPEC_ID, input: { symbol: 'BTC' } },
+      deps(fetchImpl, auth),
+    );
+    expect(result.envelope).toMatchObject({
+      status: 'needs_approval',
+      cost: ['provider price 0 USD'],
+    });
+    expect(calls.filter((call) => call.paid)).toEqual([]);
+    await reportsSettled();
+    expect(routerCalls(calls)).toEqual([]);
+  });
+
+  it('pays once per spec id: a retry after a paid call sends and pays nothing', async () => {
+    await storeSpecs(dir, [quoteSpec()]);
+    const auth = authorizer();
+    const { fetchImpl, calls } = net([...providerLegs(), { url: ROUTER, status: 200, body: {} }]);
+    const first = await runRequestTool(
+      { id: SPEC_ID, input: { symbol: 'BTC' } },
+      deps(fetchImpl, auth),
+    );
+    expect(first.envelope).toMatchObject({ status: 'fulfilled' });
+    await vi.waitFor(() => expect(calls).toHaveLength(3));
+    const retry = await runRequestTool(
+      { id: SPEC_ID, input: { symbol: 'BTC' } },
+      deps(fetchImpl, auth),
+    );
+    expect(retry.isError).toBe(false);
+    expect(retry.envelope).toMatchObject({
+      status: 'needs_input',
+      cost: ['provider price 0 USD'],
+    });
+    expect(String(retry.envelope.reason)).toContain('already paid for');
+    expect(String(retry.envelope.reason)).toContain('$0.01');
+    expect(String(retry.envelope.nextStep)).toContain('request({query})');
+    expect(calls).toHaveLength(3);
+    expect(calls.filter((call) => call.paid)).toHaveLength(1);
+    expect(auth.authorize).toHaveBeenCalledOnce();
+  });
+
+  it('keeps the claim when the spend ledger fails after the payment left: a retry signs nothing', async () => {
+    await storeSpecs(dir, [quoteSpec()]);
+    const auth = authorizer();
+    // The authorization has left, then the ledger write behind `commit` fails:
+    // the error carries no amount, so the call reads as unpaid.
+    vi.mocked(auth.commit).mockRejectedValueOnce(
+      new Error('the spend ledger could not be written'),
+    );
+    // A second paid leg is scripted, so a retry that signs again is observable.
+    const { fetchImpl, calls } = net([...providerLegs(), ...providerLegs()]);
+    const first = await runRequestTool(
+      { id: SPEC_ID, input: { symbol: 'BTC' } },
+      deps(fetchImpl, auth),
+    );
+    expect(first.envelope).toMatchObject({ status: 'failed' });
+    expect(calls.filter((call) => call.paid)).toHaveLength(1);
+    const retry = await runRequestTool(
+      { id: SPEC_ID, input: { symbol: 'BTC' } },
+      deps(fetchImpl, auth),
+    );
+    expect(retry.envelope).toMatchObject({ status: 'needs_input', cost: ['provider price 0 USD'] });
+    expect(String(retry.envelope.reason)).toContain('signed a payment');
+    expect(String(retry.envelope.reason)).toContain('may have left');
+    expect(String(retry.envelope.nextStep)).toContain('request({query})');
+    expect(calls.filter((call) => call.paid)).toHaveLength(1);
+    expect(auth.authorize).toHaveBeenCalledOnce();
+  });
+
+  it('lets a spec run again after a call that paid nothing', async () => {
+    await storeSpecs(dir, [quoteSpec()]);
+    const { fetchImpl, calls } = net([
+      { url: PROVIDER, status: 400, body: { error: 'bad symbol' } },
+      ...providerLegs(),
+      { url: ROUTER, status: 200, body: {} },
+    ]);
+    const refused = await runRequestTool({ id: SPEC_ID, input: { symbol: '??' } }, deps(fetchImpl));
+    expect(refused.envelope).toMatchObject({ status: 'failed', providerStatus: 400 });
+    const fixed = await runRequestTool({ id: SPEC_ID, input: { symbol: 'BTC' } }, deps(fetchImpl));
+    expect(fixed.envelope).toMatchObject({ status: 'fulfilled' });
+    expect(calls.filter((call) => call.paid)).toHaveLength(1);
+    await vi.waitFor(() => expect(routerCalls(calls)).toHaveLength(1));
+  });
+
+  /** The id-less answer: the pick's spec beside its fresh id, the line with
+   *  the call's skeleton, and the bound input when the server bound one. */
+  function specAnswer(id: string, input?: Record<string, unknown>): Record<string, unknown> {
+    const spec: Partial<OfferSpec> = quoteSpec();
+    delete spec.id;
+    const call = input !== undefined ? JSON.stringify(input) : '{"symbol":"<symbol>"}';
+    return {
+      schemaVersion: 1,
+      routerVersion: '2026-09-23.1',
+      decision: {
+        action: 'spec',
+        id,
+        spec,
+        hint: `CoinMarketCap fits this: latest market quotes. $0.01 via ${PROVIDER} . Call request({id: ${JSON.stringify(id)}, input: ${call}}) alone and wait for its result.`,
+        ...(input !== undefined ? { input } : {}),
+      },
+    };
+  }
+
+  it("shows the server's pick for a query with no id as its spec and the call's skeleton, then runs it from that spec", async () => {
+    const PICKED = '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d21';
+    const query = 'BTC and ETH spot price in USD';
+    const answer = specAnswer(PICKED);
+    const { fetchImpl, calls } = net([
+      { url: ROUTER, status: 200, body: answer },
+      ...providerLegs(),
+      { url: ROUTER, status: 200, body: {} },
+    ]);
+    const shown = await runRequestTool({ query }, deps(fetchImpl));
+    expect(shown.isError).toBe(false);
+    expect(shown.envelope).toMatchObject({
+      status: 'spec',
+      id: PICKED,
+      cost: ['provider price 0 USD'],
+    });
+    // The whole spec, then the skeleton the server wrote, as the next step.
+    expect(shown.summary).toContain('symbol (string, required); Comma-separated symbols');
+    const skeleton = `request({id: ${JSON.stringify(PICKED)}, input: {"symbol":"<symbol>"}})`;
+    expect(shown.summary).toContain(`Next: CoinMarketCap fits this`);
+    expect(shown.summary).toContain(skeleton);
+    expect(String(shown.envelope.nextStep)).toContain(skeleton);
+    expect(calls.filter((call) => call.url.startsWith(PROVIDER))).toEqual([]);
+    expect(JSON.parse(calls[0]!.body!)).toEqual({
+      schemaVersion: 1,
+      query,
+      accepts: ['discovered', 'spec'],
+    });
+    // The next call runs from the kept spec: no second decision.
+    const ran = await runRequestTool({ id: PICKED, input: { symbol: 'BTC' } }, deps(fetchImpl));
+    expect(ran.envelope).toMatchObject({ status: 'fulfilled' });
+    expect(calls[1]).toMatchObject({ url: `${PROVIDER}?symbol=BTC`, paid: false });
+    expect(calls[2]).toMatchObject({ paid: true });
+    await vi.waitFor(() => expect(calls).toHaveLength(4));
+    expect(JSON.parse(calls[3]!.body!)).toMatchObject({ id: PICKED, status: 'fulfilled' });
+  });
+
+  it('runs and pays a query with no id in the same call when the server bound its input', async () => {
+    const PICKED = '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d22';
+    const auth = authorizer();
+    const { fetchImpl, calls } = net([
+      { url: ROUTER, status: 200, body: specAnswer(PICKED, { symbol: 'BTC' }) },
+      ...providerLegs(),
+      { url: ROUTER, status: 200, body: {} },
+    ]);
+    const result = await runRequestTool({ query: 'BTC spot price' }, deps(fetchImpl, auth));
+    expect(result.envelope).toMatchObject({
+      status: 'fulfilled',
+      parameters: { symbol: 'BTC' },
+      cost: ['provider price 0.01 USD'],
+    });
+    // One decision, then the provider's probe and paid leg, built here from
+    // the spec, under the spec's own terms.
+    expect(calls[1]).toMatchObject({ url: `${PROVIDER}?symbol=BTC`, paid: false });
+    expect(calls[2]).toMatchObject({ paid: true });
+    expect(vi.mocked(runPay).mock.calls.at(-1)![0]).toMatchObject({
+      terms: { source: 'CoinMarketCap', maxAmountAtomic: '10000', payTo: PAYEE },
+    });
+    expect(auth.authorize).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(calls).toHaveLength(4));
+    expect(JSON.parse(calls[3]!.body!)).toMatchObject({ id: PICKED, status: 'fulfilled' });
+    // Kept like a hook's spec, and paid once: the same id pays nothing again.
+    const retry = await runRequestTool(
+      { id: PICKED, input: { symbol: 'BTC' } },
+      deps(fetchImpl, auth),
+    );
+    expect(String(retry.envelope.reason)).toContain('already paid for');
+    expect(calls.filter((call) => call.paid)).toHaveLength(1);
+  });
+
+  it("checks the server's bound input like any other, and shows the spec when it misses", async () => {
+    const PICKED = '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d23';
+    const auth = authorizer();
+    const { fetchImpl, calls } = net([
+      { url: ROUTER, status: 200, body: specAnswer(PICKED, { symbol: 'BTC', convert: 'GBP' }) },
+    ]);
+    const result = await runRequestTool({ query: 'BTC price in GBP' }, deps(fetchImpl, auth));
+    expect(result.envelope).toMatchObject({
+      status: 'needs_input',
+      cost: ['provider price 0 USD'],
+    });
+    expect(String(result.envelope.reason)).toContain('convert must be one of "USD", "EUR"');
+    expect(result.summary).toContain('symbol (string, required); Comma-separated symbols');
+    expect(calls).toHaveLength(1);
+    expect(auth.authorize).not.toHaveBeenCalled();
+  });
+
+  it("shows the paired skeleton answer's spec and the line to fill, and pays nothing", async () => {
+    const fixtures = fileURLToPath(new URL('./fixtures/', import.meta.url));
+    const answer = JSON.parse(
+      await readFile(join(fixtures, 'wire-lookup-spec-skeleton.json'), 'utf8'),
+    ) as { decision: { id: string; hint: string; spec: OfferSpec } };
+    const auth = authorizer();
+    const { fetchImpl, calls } = net([{ url: ROUTER, status: 200, body: answer }]);
+    const result = await runRequestTool(
+      { query: 'Patrick Collison at Stripe' },
+      deps(fetchImpl, auth),
+    );
+    const { id, hint, spec } = answer.decision;
+    expect(result.envelope).toMatchObject({ status: 'spec', id, nextStep: hint });
+    expect(result.summary).toContain(`${spec.provider}: ${spec.description}`);
+    expect(result.summary).toContain(`Next: ${hint}`);
+    expect(calls).toHaveLength(1);
+    expect(auth.authorize).not.toHaveBeenCalled();
+  });
+
+  it("shows a list service's own spec for a query, not its line", async () => {
+    const fixtures = fileURLToPath(new URL('./fixtures/', import.meta.url));
+    const answer = JSON.parse(
+      await readFile(join(fixtures, 'wire-hook-discovered-spec.json'), 'utf8'),
+    ) as { decision: { id: string; specs: OfferSpec[] } };
+    const { fetchImpl } = net([{ url: ROUTER, status: 200, body: answer }]);
+    const result = await runRequestTool({ query: 'an image of a red fox' }, deps(fetchImpl));
+    const [spec] = answer.decision.specs;
+    expect(result.envelope).toMatchObject({ status: 'spec', id: answer.decision.id });
+    expect(result.summary).toContain(`${spec!.provider}: ${spec!.description}`);
+    expect(result.summary).not.toContain('Also offered');
+  });
+
+  it('asks the server, as before, for an id it holds no spec for', async () => {
+    const { fetchImpl, calls } = net([{ url: ROUTER, status: 200, body: NATIVE }]);
+    const result = await runRequestTool({ id: SPEC_ID }, deps(fetchImpl));
+    expect(result.envelope).toMatchObject({ status: 'needs_input' });
+    expect(String(result.envelope.reason)).toContain('No spec is kept for that id');
+    expect(calls).toEqual([]);
+    const withQuery = await runRequestTool({ id: SPEC_ID, query: 'BTC price' }, deps(fetchImpl));
+    expect(withQuery.envelope).toMatchObject({ status: 'native' });
+    expect(calls).toHaveLength(1);
   });
 });

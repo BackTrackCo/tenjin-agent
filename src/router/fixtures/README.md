@@ -17,10 +17,10 @@ A lookup is two calls to ONE route, and they ask different questions. There is
 no separate gate endpoint: each call has one schema and one set of fixtures,
 parsed by the handler that serves it.
 
-| call | request                                                     | answer                                                                                                                                                  |
-| ---- | ----------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| hook | `{schemaVersion, sessionId?, accepts?, packet, gateHint?}`  | is a paid lookup worth offering? `execute` with the id, the capability and a `hint`, `discovered` (below), or `native` / `needs_input` with diagnostics |
-| tool | `{schemaVersion, query?, id?, input?, gateHint?, accepts?}` | the decision: the capability, its price and the contract together, `discovered` for a query no curated capability serves, or `native` / `needs_input`   |
+| call | request                                                     | answer                                                                                                                                                                                           |
+| ---- | ----------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| hook | `{schemaVersion, sessionId?, accepts?, packet, gateHint?}`  | is a paid lookup worth offering? `execute` with the id, the capability and a `hint`, `discovered` (below), or `native` / `needs_input` with diagnostics                                          |
+| tool | `{schemaVersion, query?, id?, input?, gateHint?, accepts?}` | the decision: the capability, its price and the contract together, `spec` (a spec client's query with no id), `discovered` for a query no curated capability serves, or `native` / `needs_input` |
 
 Both `execute` answers name the capability: `capabilityId`, `category`,
 `provider` (the service's own name, such as `Wolfram Alpha`),
@@ -87,27 +87,72 @@ Anything that is neither form is refused at validation with a plain error:
 is valid and is the fallback for an id that has expired; the answer says so in
 `note` and is still a decision.
 
+## Request specs
+
+A client that adds `"spec"` to `accepts` also gets `specs` on every offer
+(`execute` and `discovered`): one spec per service the hint names, under the
+id the hint gives it. A spec is the service's contract: `capabilityId`,
+`provider`, `description`, `priceAtomic`, `priceVaries`, `maxAmountAtomic`,
+`payTo`, `network`, `asset`, `request` (`method`, a `url` that may hold
+`{name}` path placeholders, `fields` saying where each field goes, and
+`location` for any other), `input` (a flat JSON Schema), `pinned` (fields set
+on every call, which win over the agent's input), and optionally `example`,
+`returns`, `returnsExample` and `resultSchema`. The hint is then the
+skeleton of the one call, `request({id, input: {...}})` with the required
+fields (pins aside) as placeholders, or with a value already known: the one
+the hook holds, the field's schema `default`, or a number's or boolean's value
+from the `example`.
+`request({id})` shows the whole spec, and so does an input that misses it,
+locally and with nothing paid. The client builds and pays the call
+itself and, once the call ran or money left, reports `{schemaVersion, id,
+status, httpStatus?, ms?}`, with the provider's HTTP status whenever it is
+known. The first report for a live id marks its row executed;
+a repeat or a report after expiry is a 204 that changes nothing. No text is
+stored. A client that does not send
+`spec` never sees the field: the decision schemas are strict.
+
+Such a client's tool call with a `query` and no `id` gets no binder: the
+server runs the hook's gate over the query (a bare URL takes the page rule)
+and answers `{action: "spec", id, spec, hint, input?}`: the picked
+capability's spec beside a fresh `id`, stored as a hook offer is, and the
+`hint` line with the call's skeleton. `input` is there when the spec has one
+required field (pins aside) and the server bound the query to it and checked
+the result; the `request` tool then runs it and pays in the same call, through
+every check a filled spec meets. Without `input`, the tool shows the spec and
+the skeleton, so the agent's next call is `request({id, input})`. A list
+specialist can still replace a generic pick, and a query no capability serves
+can still come back `discovered`, both with `specs`; the tool then shows the
+pick's own spec. A pick with no spec (the free docs lookup) is bound and
+answered `execute` as its id would be.
+
 ## The set
 
-| file                                      | what it pins                                                                        |
-| ----------------------------------------- | ----------------------------------------------------------------------------------- |
-| `wire-gate-request.json`                  | the free gate request, including a pending native call                              |
-| `wire-decision-request.json`              | the hook call: a packet, no query                                                   |
-| `wire-decision-request-narrowed.json`     | the tool call: the query and the id                                                 |
-| `wire-hook-execute.json`                  | hook answer: the id, the capability, `usage` and the `hint` line                    |
-| `wire-hook-native.json`                   | hook answer: the host's own tools are enough                                        |
-| `wire-hook-needs-input.json`              | hook answer: the turn names no task a capability serves                             |
-| `wire-lookup-execute-get.json`            | tool answer: a GET contract with its built query string                             |
-| `wire-lookup-execute-post.json`           | tool answer: a POST contract whose body is the serialized request                   |
-| `wire-lookup-native.json`                 | tool answer: native, with diagnostics                                               |
-| `wire-lookup-needs-input.json`            | tool answer: a named missing argument                                               |
-| `wire-lookup-expired-id.json`             | tool answer after a dead id, carrying the plain `note`                              |
-| `wire-hook-request-native-shortfall.json` | the native hook after WebFetch fell short: `nativeOutcome` beside its `pendingCall` |
-| `wire-hook-request-ask.json`              | the hook before AskUserQuestion, with `sessionId` and `accepts`                     |
-| `wire-hook-discovered.json`               | hook answer: a discovered service, its input schema and the `hint` line             |
-| `wire-lookup-discovered.json`             | tool answer to a query with no id: the same `discovered` shape                      |
-| `wire-tool-request-discovered.json`       | the tool call for a discovered service: the id and the host's `input`, no query     |
-| `wire-lookup-execute-discovered.json`     | tool answer: the discovered service as an ordinary `execute`, category `discovered` |
+| file                                       | what it pins                                                                              |
+| ------------------------------------------ | ----------------------------------------------------------------------------------------- |
+| `wire-gate-request.json`                   | the free gate request, including a pending native call                                    |
+| `wire-decision-request.json`               | the hook call: a packet, no query                                                         |
+| `wire-decision-request-narrowed.json`      | the tool call: the query and the id                                                       |
+| `wire-hook-execute.json`                   | hook answer: the id, the capability, `usage` and the `hint` line                          |
+| `wire-hook-native.json`                    | hook answer: the host's own tools are enough                                              |
+| `wire-hook-needs-input.json`               | hook answer: the turn names no task a capability serves                                   |
+| `wire-lookup-execute-get.json`             | tool answer: a GET contract with its built query string                                   |
+| `wire-lookup-execute-post.json`            | tool answer: a POST contract whose body is the serialized request                         |
+| `wire-lookup-native.json`                  | tool answer: native, with diagnostics                                                     |
+| `wire-lookup-needs-input.json`             | tool answer: a named missing argument                                                     |
+| `wire-lookup-expired-id.json`              | tool answer after a dead id, carrying the plain `note`                                    |
+| `wire-hook-request-native-shortfall.json`  | the native hook after WebFetch fell short: `nativeOutcome` beside its `pendingCall`       |
+| `wire-hook-request-native-no-content.json` | the native hook after WebFetch answered 200 with only the page shell: `reason`            |
+| `wire-hook-request-ask.json`               | the hook before AskUserQuestion, with `sessionId` and `accepts`                           |
+| `wire-hook-discovered.json`                | hook answer: a discovered service, its input schema and the `hint` line                   |
+| `wire-lookup-discovered.json`              | tool answer to a query with no id: the same `discovered` shape                            |
+| `wire-tool-request-discovered.json`        | the tool call for a discovered service: the id and the host's `input`, no query           |
+| `wire-lookup-execute-discovered.json`      | tool answer: the discovered service as an ordinary `execute`, category `discovered`       |
+| `wire-hook-execute-spec.json`              | hook answer for a client that accepts `spec`: the call with the held search, the Exa spec |
+| `wire-hook-discovered-spec.json`           | the same for a list service: the call with its skeleton, the spec rides along             |
+| `wire-outcome-request.json`                | the outcome report a client sends after running a spec                                    |
+| `wire-tool-request-spec.json`              | the tool call from a spec client: a query, no id                                          |
+| `wire-lookup-spec.json`                    | tool answer for it: Wolfram's spec under a fresh id, the query bound as `input`           |
+| `wire-lookup-spec-skeleton.json`           | tool answer for a spec with more to fill (Apollo): the skeleton line, no `input`          |
 
 Two rules the fixtures exist to hold:
 
@@ -124,24 +169,24 @@ a lookup is the caller's own, to the provider.
 
 Take these from here; do not re-derive them.
 
-| field                                      | bound                                                                                                                       |
-| ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------- |
-| `schemaVersion`                            | exactly `1`, on every request and response                                                                                  |
-| hook vs native hook                        | read from `packet.pendingCall`; there is no `source` field                                                                  |
-| `packet` serialized                        | 16384 bytes, refused rather than truncated                                                                                  |
-| `packet.history`                           | 6 messages                                                                                                                  |
-| message `text`                             | 16000 characters                                                                                                            |
-| `packet.literalUrls`                       | 8 entries, each 2000 characters                                                                                             |
-| `query`                                    | 1 to 8000 characters; optional when `input` is sent                                                                         |
-| `input`                                    | a JSON object, 16384 bytes serialized                                                                                       |
-| `accepts`                                  | an array of strings, 8 entries                                                                                              |
-| `sessionId`                                | 1 to 200 characters                                                                                                         |
-| `pendingCall.query` / `.url` / `.question` | 1 to 4000 characters                                                                                                        |
-| `packet.nativeOutcome`                     | optional; only with a `pendingCall`; at least one of `code` (0 to 999), `bytes` (0 or more), `error` (1 to 1000 characters) |
-| `gateHint.turnId` / `.lookupId`            | 1 to 64 characters                                                                                                          |
-| `diagnostics.missing`                      | 60 entries, each non-empty                                                                                                  |
-| `id`                                       | a uuid the server minted; a client never invents one                                                                        |
-| id lifetime                                | 15 minutes from the hook call that created it                                                                               |
+| field                                      | bound                                                                                                                                                                    |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `schemaVersion`                            | exactly `1`, on every request and response                                                                                                                               |
+| hook vs native hook                        | read from `packet.pendingCall`; there is no `source` field                                                                                                               |
+| `packet` serialized                        | 16384 bytes, refused rather than truncated                                                                                                                               |
+| `packet.history`                           | 6 messages                                                                                                                                                               |
+| message `text`                             | 16000 characters                                                                                                                                                         |
+| `packet.literalUrls`                       | 8 entries, each 2000 characters                                                                                                                                          |
+| `query`                                    | 1 to 8000 characters; optional when `input` is sent                                                                                                                      |
+| `input`                                    | a JSON object, 16384 bytes serialized                                                                                                                                    |
+| `accepts`                                  | an array of strings, 8 entries                                                                                                                                           |
+| `sessionId`                                | 1 to 200 characters                                                                                                                                                      |
+| `pendingCall.query` / `.url` / `.question` | 1 to 4000 characters                                                                                                                                                     |
+| `packet.nativeOutcome`                     | optional; only with a `pendingCall`; at least one of `code` (0 to 999), `bytes` (0 or more), `error` (1 to 1000 characters); `reason` optional, one of `no_main_content` |
+| `gateHint.turnId` / `.lookupId`            | 1 to 64 characters                                                                                                                                                       |
+| `diagnostics.missing`                      | 60 entries, each non-empty                                                                                                                                               |
+| `id`                                       | a uuid the server minted; a client never invents one                                                                                                                     |
+| id lifetime                                | 15 minutes from the hook call that created it                                                                                                                            |
 
 Expired packets are unreadable after 15 minutes (the route refuses an expired id) and are deleted by the next router request or the daily cleanup, whichever comes first.
 
