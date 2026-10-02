@@ -1299,6 +1299,49 @@ describe('an offer with a tool card', () => {
     );
   });
 
+  it('pays once per card id: a retry after a paid call sends and pays nothing', async () => {
+    await storeCards(dir, [quoteCard()]);
+    const auth = authorizer();
+    const { fetchImpl, calls } = net([...providerLegs(), { url: ROUTER, status: 200, body: {} }]);
+    const first = await runRequestTool(
+      { id: CARD_ID, input: { symbol: 'BTC' } },
+      deps(fetchImpl, auth),
+    );
+    expect(first.envelope).toMatchObject({ status: 'fulfilled' });
+    await vi.waitFor(() => expect(calls).toHaveLength(3));
+    const retry = await runRequestTool(
+      { id: CARD_ID, input: { symbol: 'BTC' } },
+      deps(fetchImpl, auth),
+    );
+    expect(retry.isError).toBe(false);
+    expect(retry.envelope).toMatchObject({
+      status: 'needs_input',
+      cost: ['provider price 0 USD'],
+    });
+    expect(String(retry.envelope.reason)).toContain('already paid for');
+    expect(String(retry.envelope.reason)).toContain('$0.01');
+    expect(String(retry.envelope.nextStep)).toContain('request({query})');
+    expect(calls).toHaveLength(3);
+    expect(calls.filter((call) => call.paid)).toHaveLength(1);
+    expect(auth.authorize).toHaveBeenCalledOnce();
+  });
+
+  it('lets a card run again after a call that paid nothing', async () => {
+    await storeCards(dir, [quoteCard()]);
+    const { fetchImpl, calls } = net([
+      { url: PROVIDER, status: 400, body: { error: 'bad symbol' } },
+      { url: ROUTER, status: 200, body: {} },
+      ...providerLegs(),
+      { url: ROUTER, status: 200, body: {} },
+    ]);
+    const refused = await runRequestTool({ id: CARD_ID, input: { symbol: '??' } }, deps(fetchImpl));
+    expect(refused.envelope).toMatchObject({ status: 'failed', providerStatus: 400 });
+    await vi.waitFor(() => expect(calls).toHaveLength(2));
+    const fixed = await runRequestTool({ id: CARD_ID, input: { symbol: 'BTC' } }, deps(fetchImpl));
+    expect(fixed.envelope).toMatchObject({ status: 'fulfilled' });
+    expect(calls.filter((call) => call.paid)).toHaveLength(1);
+  });
+
   it("shows the server's pick for a query with no id as its card, then runs it from that card", async () => {
     const PICKED = '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d21';
     const query = 'BTC and ETH spot price in USD';

@@ -9,7 +9,13 @@ import type { SpendAuthorizer, WalletProvider } from '../lib/wallet';
 import type { TenjinSigner } from '../lib/wallet/provider';
 import type { CommandContext } from '../context';
 import { buildCardRequest, cardInputProblems, cardText, mergedInput } from './card-call';
-import { readCard, storeCards } from './cards';
+import {
+  claimCardPayment,
+  readCard,
+  settleCardPayment,
+  storeCards,
+  type EarlierPayment,
+} from './cards';
 import {
   reportCardOutcome,
   requestDecision,
@@ -328,6 +334,20 @@ function showCard(
   };
 }
 
+/** A card's id that an earlier call already claimed: nothing sent or paid,
+ *  and the agent pointed at that call's result or at a new offer. */
+function alreadyPaid(id: string, card: OfferCard, earlier: EarlierPayment): RequestToolResult {
+  const reason =
+    earlier.state === 'paid'
+      ? `This offer from ${card.provider} was already paid for at ${earlier.at} ($${toMoney(earlier.amountAtomic).usd}${earlier.txHash !== undefined ? `, tx ${earlier.txHash}` : ''}), so nothing was paid this time. Its result is in the earlier request result for this id, and the payment is in \`tenjin payments\`.`
+      : earlier.state === 'running'
+        ? `A call for this offer from ${card.provider} already started and may have paid, so nothing was paid this time. Use that call's result.`
+        : `This machine could not record this offer's payment, so nothing was sent or paid.`;
+  return fail('needs_input', reason, {
+    nextStep: `For another call, send request({query}) for a new offer; this id (${id}) pays once.`,
+  });
+}
+
 /**
  * `request({id, input})` FROM A CARD. The pinned fields go over the agent's
  * input, the result is checked against the card's schema (every problem at
@@ -367,8 +387,15 @@ async function runCard(
     await footer.done(refusal.status);
     return fail(refusal.status, refusal.reason, { parameters: sentInput });
   }
+  // ONE PAYMENT PER OFFER, claimed before anything is signed: a retry of this
+  // id, or a second call racing it, pays nothing.
+  const earlier = await claimCardPayment(deps.ctx.dataDir, id);
+  if (earlier !== null) {
+    await footer.done('needs_input');
+    return alreadyPaid(id, card, earlier);
+  }
   const startedAt = Date.now();
-  const { result, outcome } = await payAndDeliver(
+  const { result, outcome, left } = await payAndDeliver(
     {
       capabilityId: card.capabilityId,
       provider: card.provider,
@@ -390,6 +417,7 @@ async function runCard(
     deps,
     footer,
   );
+  await settleCardPayment(deps.ctx.dataDir, id, left);
   void reportCardOutcome(
     { id, ...outcome, ms: Date.now() - startedAt },
     {
@@ -431,7 +459,12 @@ async function payAndDeliver(
   call: ProviderCall,
   deps: RequestToolDeps,
   footer: LookupFooter,
-): Promise<{ result: RequestToolResult; outcome: Omit<CardOutcome, 'id' | 'ms'> }> {
+): Promise<{
+  result: RequestToolResult;
+  outcome: Omit<CardOutcome, 'id' | 'ms'>;
+  /** What left this machine for the call, whatever came back. */
+  left: { amountAtomic: bigint; txHash?: string };
+}> {
   const built = call.request;
   const parameters = call.parameters !== undefined ? { parameters: call.parameters } : {};
   try {
@@ -473,6 +506,7 @@ async function payAndDeliver(
       resultCaveat?: string;
     };
     const providerAtomic = BigInt(data.amountPaid?.atomic ?? '0');
+    const tx = data.settlementTxHash !== undefined ? { txHash: data.settlementTxHash } : {};
     // A FILE IS SAVED, NOT INLINED: its bytes are no use as text in a tool
     // result, so the result names where they are.
     const binary =
@@ -542,6 +576,7 @@ async function payAndDeliver(
       await footer.done('unverified', shown);
       return {
         outcome: { status: 'unverified' },
+        left: { amountAtomic: providerAtomic, ...tx },
         result: {
           isError: true,
           summary: `Unverified result from ${base.supplier} · ${base.cost.join(' · ')}`,
@@ -556,6 +591,7 @@ async function payAndDeliver(
     await footer.done('fulfilled', shown);
     return {
       outcome: { status: 'fulfilled' },
+      left: { amountAtomic: providerAtomic, ...tx },
       result: {
         isError: false,
         summary: `Fulfilled by ${base.supplier} · ${base.cost.join(' · ')}`,
@@ -609,6 +645,7 @@ async function payAndDeliver(
       );
     }
     return {
+      left: { amountAtomic: leftAtomic },
       outcome: {
         status,
         ...(typeof detail.status === 'number' ? { httpStatus: detail.status } : {}),

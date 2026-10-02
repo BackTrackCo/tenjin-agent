@@ -2,7 +2,8 @@ import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
 import { lstat, open, opendir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { writeFileAtomic } from '../lib/atomic-json';
+import { z } from 'zod';
+import { writeFileAtomic, writeFileAtomicExclusive } from '../lib/atomic-json';
 import { OfferCardSchema, type OfferCard } from './decision';
 import { EXPIRY_MS } from './progress';
 
@@ -70,6 +71,92 @@ export async function readCard(dataDir: string, id: string): Promise<OfferCard |
   } finally {
     await file.close().catch(() => undefined);
   }
+}
+
+/**
+ * What an earlier call with a card's id left. `paid`: money left for it.
+ * `running`: a call claimed it and has not ended, or its process died, so it
+ * may have paid. `unrecorded`: this call could not record its claim.
+ */
+export type EarlierPayment =
+  | { state: 'paid'; at: string; amountAtomic: string; txHash?: string }
+  | { state: 'running'; at?: string }
+  | { state: 'unrecorded' };
+
+const PaymentSchema = z.discriminatedUnion('state', [
+  z.strictObject({
+    state: z.literal('paid'),
+    at: z.string().max(40),
+    amountAtomic: z.string().regex(/^\d+$/),
+    txHash: z.string().max(100).optional(),
+  }),
+  z.strictObject({ state: z.literal('running'), at: z.string().max(40) }),
+]);
+
+function paymentPath(dataDir: string, id: string): string {
+  return join(dataDir, CARDS_DIR, `${digest(id)}.paid.json`);
+}
+
+/**
+ * CLAIM THE ONE PAYMENT A CARD ALLOWS, before anything is signed: an exclusive
+ * create beside the card, so a retry or a second call with the same id cannot
+ * pay again. Null when the claim is this call's; otherwise what an earlier call
+ * left, and this one pays nothing. A claim that cannot be written refuses too:
+ * the record is the only proof a payment has not already left.
+ */
+export async function claimCardPayment(
+  dataDir: string,
+  id: string,
+  now: number = Date.now(),
+): Promise<EarlierPayment | null> {
+  const path = paymentPath(dataDir, id);
+  try {
+    await writeFileAtomicExclusive(
+      path,
+      JSON.stringify({ state: 'running', at: new Date(now).toISOString() }),
+      { mode: 0o600, dirMode: 0o700 },
+    );
+    return null;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') return { state: 'unrecorded' };
+  }
+  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW).catch(() => undefined);
+  if (file === undefined) return { state: 'running' };
+  try {
+    const parsed = PaymentSchema.safeParse(JSON.parse(await file.readFile('utf8')));
+    return parsed.success ? parsed.data : { state: 'running' };
+  } catch {
+    return { state: 'running' };
+  } finally {
+    await file.close().catch(() => undefined);
+  }
+}
+
+/**
+ * How the claimed call ended. Money that left is recorded against the id; a
+ * call that left nothing drops its claim, so a fixed input can still run. A
+ * record that cannot be written leaves the claim standing, which refuses.
+ */
+export async function settleCardPayment(
+  dataDir: string,
+  id: string,
+  left: { amountAtomic: bigint; txHash?: string },
+  now: number = Date.now(),
+): Promise<void> {
+  const path = paymentPath(dataDir, id);
+  if (left.amountAtomic === 0n) {
+    await rm(path, { force: true }).catch(() => undefined);
+    return;
+  }
+  const record = {
+    state: 'paid',
+    at: new Date(now).toISOString(),
+    amountAtomic: left.amountAtomic.toString(),
+    ...(left.txHash !== undefined ? { txHash: left.txHash } : {}),
+  };
+  await writeFileAtomic(path, JSON.stringify(record), { mode: 0o600, dirMode: 0o700 }).catch(
+    () => undefined,
+  );
 }
 
 async function pruneCards(dataDir: string, now: number): Promise<void> {

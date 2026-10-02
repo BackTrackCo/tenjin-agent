@@ -12,7 +12,9 @@ card's schema (every problem at once, with the allowed values and the
 example), builds the request and pays the provider directly through the same
 `runPay` checks: the live price against the card's ceiling, its payee against
 the card's, and the spend policy. Then it tells the server only how the call
-ended. When the hook already holds a card's one input (the search a native call
+ended. Each card id pays once: a retry of a paid id, or a second call racing
+it, pays nothing and points at the earlier result or a new offer, while a call
+that paid nothing (a refused input) leaves the card runnable. When the hook already holds a card's one input (the search a native call
 was about to run, or the page it was about to fetch), the line hands it over
 and the call is one step, as before. A query with an id goes to the server as
 before. A query with no id comes back as the card of the service the server
