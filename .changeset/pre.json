@@ -88,6 +88,8 @@
     "router-redirect-once-per-target",
     "router-refusal-not-paid",
     "router-request-specs",
+    "router-result-check-cap",
+    "router-result-projection",
     "router-retry-skips-decision",
     "router-seal-packets",
     "router-skip-handback-rows",
