@@ -1,5 +1,30 @@
 # tenjin-cli
 
+## 0.1.0-alpha.23
+
+### Minor Changes
+
+- 7ab9157: A request spec can now name the fields its result promises (`outputSchema`).
+  The `request` tool checks the success rule on the provider's whole body as
+  before, then hands the agent only the fields the spec declares, through
+  nested objects and array items, and saves the whole body under
+  `~/.tenjin/results/` (mode 0600, kept a day) at the path the result names in
+  `fullResultPath`. An Apollo person lookup, whose body carries the employer's
+  whole organization record, comes back as the person's name, title, email,
+  LinkedIn URL, employer and work history. A body that cannot be cut (not JSON,
+  over the 4 MB result cap) or a file that cannot be written hands back the
+  whole body, as before; the projection never fails a call. A spec with no
+  `outputSchema` returns the body unchanged.
+
+### Patch Changes
+
+- 7ab9157: A paid result is now checked against its success rule up to 4 MB, not 128 KB.
+  An Apollo person hit runs 60-180 KB because it embeds the employer's whole
+  organization record, so a good match came back `unverified` with a "possibly
+  not the answer that was paid for" caveat: a body past 64 KB failed the check on
+  a size limit meant for inputs, and one past 128 KB was never checked. A body
+  over 4 MB is still delivered whole and flagged unverified, as before.
+
 ## 0.1.0-alpha.22
 
 ### Minor Changes
