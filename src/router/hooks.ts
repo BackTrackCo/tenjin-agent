@@ -593,7 +593,6 @@ async function spendShortfall(
   // A balance read in the last minute stands: a burst of parallel lookups
   // otherwise asks the public RPC once each, past its rate limit.
   const readBalance = rememberingBalanceReader(deps.dataDir, {
-    preferRemembered: true,
     ...(deps.now !== undefined ? { now: deps.now } : {}),
   });
   const balance = await readBalance(address, rpcUrl, {
