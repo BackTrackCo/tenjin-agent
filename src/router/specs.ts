@@ -192,7 +192,9 @@ export async function storeFullResult(
   } catch {
     return null;
   }
-  await prune(join(dataDir, RESULTS_DIR), RESULT_TTL_MS, Date.now());
+  // Housekeeping never holds up a paid result: the prune runs after the path
+  // is handed back, and it swallows its own errors.
+  void prune(join(dataDir, RESULTS_DIR), RESULT_TTL_MS, Date.now());
   return path;
 }
 
