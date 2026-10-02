@@ -22,7 +22,15 @@ export type JsonRecord = Record<string, unknown>;
 
 const MAX_SCHEMA_BYTES = 96 * 1024;
 const MAX_VALUE_BYTES = 64 * 1024;
-const MAX_BODY_BYTES = 128 * 1024;
+/**
+ * The largest result body checked against its success rule. Ordinary provider
+ * bodies must fit: one Apollo person hit is 60-180 KB, because it embeds the
+ * employer's whole organization record, and a batch of ten is about 1.8 MB. 4 MB is that batch with room to
+ * spare. The transport has already read and parsed the whole body, so the cap
+ * bounds only the second parse and the schema walk on this process, which take
+ * tens of milliseconds at 4 MB. A body over it is delivered unchecked, flagged.
+ */
+export const MAX_BODY_BYTES = 4 * 1024 * 1024;
 const MAX_DEPTH = 24;
 const VALIDATOR_CACHE_LIMIT = 128;
 
@@ -135,14 +143,23 @@ export interface SchemaCheck {
  */
 export function validateAgainstSchema(schema: unknown, value: unknown): SchemaCheck {
   try {
-    if (schema === null || typeof schema !== 'object' || Array.isArray(schema)) {
-      throw new Error('A schema must be a JSON Schema object.');
-    }
     const json = JSON.stringify(value);
     if (json === undefined || Buffer.byteLength(json) > MAX_VALUE_BYTES) {
       throw new Error('The value is not JSON, or exceeds its size limit.');
     }
     walk(value, false);
+  } catch (err) {
+    return { valid: false, errors: [err instanceof Error ? err.message : String(err)] };
+  }
+  return checkValue(schema, value);
+}
+
+/** The schema check alone, on a value whose size and shape were bounded. */
+function checkValue(schema: unknown, value: unknown): SchemaCheck {
+  try {
+    if (schema === null || typeof schema !== 'object' || Array.isArray(schema)) {
+      throw new Error('A schema must be a JSON Schema object.');
+    }
     const validate = compile(schema as JsonRecord);
     if (validate(value)) return { valid: true, errors: [] };
     return {
@@ -284,14 +301,16 @@ function preview(body: string): string {
  */
 export function validateResultBody(schema: unknown, body: string): ResultCheck {
   const bytes = Buffer.byteLength(body);
-  const base = { json: false, bytes, maxBytes: MAX_BODY_BYTES, preview: preview(body) };
+  // Built only for a failure: masking a whole body is most of the cost of
+  // checking one, and a passing body never shows its preview.
+  const base = () => ({ json: false, bytes, maxBytes: MAX_BODY_BYTES, preview: preview(body) });
   if (bytes > MAX_BODY_BYTES) {
     // NOT a contract failure: nothing was checked. See {@link ResultCheck.unvalidated}.
     return {
       valid: false,
       unvalidated: true,
       reason: `The result is ${bytes} bytes, over the ${MAX_BODY_BYTES} byte validation limit, so its success schema was not checked.`,
-      diagnosis: { ...base, failed: 'too-large' },
+      diagnosis: { ...base(), failed: 'too-large' },
     };
   }
   let value: unknown;
@@ -302,15 +321,17 @@ export function validateResultBody(schema: unknown, body: string): ResultCheck {
     return {
       valid: false,
       reason: `The result is not a supported bounded JSON document (${err instanceof Error ? err.message : String(err)}).`,
-      diagnosis: { ...base, failed: 'not-json' },
+      diagnosis: { ...base(), failed: 'not-json' },
     };
   }
-  const check = validateAgainstSchema(schema, value);
+  // Bounded by the body cap above, not by the far smaller cap on an input: a
+  // 150 KB Apollo hit was refused here as "exceeds its size limit".
+  const check = checkValue(schema, value);
   if (check.valid) return { valid: true };
   const failed = check.errors[0] ?? 'the success rule';
   return {
     valid: false,
     reason: `The result does not satisfy its success schema: ${failed}`,
-    diagnosis: { ...base, json: true, failed },
+    diagnosis: { ...base(), json: true, failed },
   };
 }

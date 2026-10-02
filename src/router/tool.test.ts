@@ -8,6 +8,7 @@ import { resolveSpendAuthorizer } from '../lib/wallet';
 import type { SpendAuthorization, SpendAuthorizer } from '../lib/wallet';
 import type { CommandContext } from '../context';
 import { runPay } from '../commands/pay';
+import { MAX_BODY_BYTES } from '../lib/request-schema';
 import { extensionFor, runRequestTool } from './tool';
 import type { MediaTransport } from './paid';
 import { storeSpecs } from './specs';
@@ -595,7 +596,7 @@ describe('the paid body handed back to the model', () => {
   });
 
   it('delivers a paid body too large to check, unverified, as before', async () => {
-    const body = { data: { blob: 'x'.repeat(200 * 1024) } };
+    const body = { data: { blob: 'x'.repeat(MAX_BODY_BYTES) } };
     const { fetchImpl } = net([
       { url: ROUTER, status: 200, body: withRule() },
       ...providerLegs(body),
@@ -603,6 +604,18 @@ describe('the paid body handed back to the model', () => {
     const result = await runRequestTool({ query: 'q' }, deps(fetchImpl));
     expect(result.envelope).toMatchObject({ status: 'unverified' });
     expect(result.envelope.resultCaveat).toContain('not checked');
+  });
+
+  it('checks a 150 KB paid body against its rule, and fulfils one that passes', async () => {
+    const body = { data: { organization: { blurb: 'x'.repeat(150 * 1024) } } };
+    const { fetchImpl } = net([
+      { url: ROUTER, status: 200, body: withRule() },
+      ...providerLegs(body),
+    ]);
+    const result = await runRequestTool({ query: 'q' }, deps(fetchImpl));
+    expect(result.isError).toBe(false);
+    expect(result.envelope).toMatchObject({ status: 'fulfilled', result: JSON.stringify(body) });
+    expect(result.envelope.resultCaveat).toBeUndefined();
   });
 
   it('fulfils a paid body that passes its success rule', async () => {

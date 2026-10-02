@@ -2,9 +2,13 @@ import { describe, expect, it } from 'vitest';
 import {
   assertResultSchema,
   canonicalHash,
+  MAX_BODY_BYTES,
   validateAgainstSchema,
   validateResultBody,
 } from './request-schema';
+
+/** One byte past the result cap, as a JSON document. */
+const OVER_CAP = JSON.stringify({ blob: 'x'.repeat(MAX_BODY_BYTES) });
 
 const QUOTE_SCHEMA = {
   $schema: 'https://json-schema.org/draft/2020-12/schema',
@@ -73,7 +77,24 @@ describe('result body validation', () => {
 
   it('refuses a non-JSON body and one past the size limit', () => {
     expect(validateResultBody(schema, 'not json').valid).toBe(false);
-    expect(validateResultBody(schema, 'x'.repeat(200 * 1024)).reason).toContain('validation limit');
+    expect(validateResultBody(schema, OVER_CAP).reason).toContain('validation limit');
+  });
+
+  /**
+   * AN ORDINARY PROVIDER BODY IS CHECKED. An Apollo person hit is 60-180 KB;
+   * one past 64 KB was refused by the input cap, and one past 128 KB never
+   * checked, so a good match came back unverified either way.
+   */
+  it('checks a 150 KB body against its rule, and passes one that satisfies it', () => {
+    const body = JSON.stringify({ data: { organization: { blurb: 'x'.repeat(150 * 1024) } } });
+    expect(Buffer.byteLength(body)).toBeGreaterThan(150 * 1024);
+    expect(validateResultBody(schema, body)).toEqual({ valid: true });
+    const miss = JSON.stringify({ error: 'x'.repeat(150 * 1024) });
+    expect(validateResultBody(schema, miss)).toMatchObject({
+      valid: false,
+      reason: expect.stringContaining('/ must have required property') as unknown as string,
+    });
+    expect(validateResultBody(schema, miss).unvalidated).toBeUndefined();
   });
 });
 
@@ -107,7 +128,7 @@ describe('what a failed result contract reports', () => {
     });
     expect(check.diagnosis?.preview).toContain('success');
     expect(check.diagnosis?.bytes).toBeGreaterThan(0);
-    expect(check.diagnosis?.maxBytes).toBe(128 * 1024);
+    expect(check.diagnosis?.maxBytes).toBe(MAX_BODY_BYTES);
   });
 
   it('says the body was not JSON at all, and shows a bounded piece of it', () => {
@@ -119,9 +140,9 @@ describe('what a failed result contract reports', () => {
   });
 
   it('says it was too large, with the size and the cap', () => {
-    const check = validateResultBody(schema, JSON.stringify({ blob: 'x'.repeat(200 * 1024) }));
-    expect(check.diagnosis).toMatchObject({ failed: 'too-large', maxBytes: 128 * 1024 });
-    expect(check.diagnosis!.bytes).toBeGreaterThan(128 * 1024);
+    const check = validateResultBody(schema, OVER_CAP);
+    expect(check.diagnosis).toMatchObject({ failed: 'too-large', maxBytes: MAX_BODY_BYTES });
+    expect(check.diagnosis!.bytes).toBeGreaterThan(MAX_BODY_BYTES);
   });
 
   /**
@@ -131,7 +152,7 @@ describe('what a failed result contract reports', () => {
    * contract broken (and, on a paid leg, charging for a discarded result).
    */
   it('marks an over-limit body unvalidated, and a rejected one not', () => {
-    const tooLarge = validateResultBody(schema, JSON.stringify({ blob: 'x'.repeat(200 * 1024) }));
+    const tooLarge = validateResultBody(schema, OVER_CAP);
     expect(tooLarge.valid).toBe(false);
     expect(tooLarge.unvalidated).toBe(true);
     expect(tooLarge.reason).toContain('not checked');
