@@ -215,7 +215,7 @@ machine that also uses these skills for real, so the flag is load-bearing rather
 
 Both runners preflight before they spend, and a failed check stops the run rather than warning
 into a log (`harness/preflight.py`). It refuses when the vendored `skills/tenjin/SKILL.md`
-differs from the live https://tenjin.blog/skills.md it is a copy of, which is the drift
+differs from the live https://tenjin.sh/skills.md it is a copy of, which is the drift
 `skill-drift.yml` watches a commit later. That check is also what lets `evals/tenjin/` grade a
 local file honestly: the population it models fetches the canonical URL, so a baseline taken
 against a stale mirror would describe a document no zero-install agent is reading, and the run
@@ -543,7 +543,7 @@ provenances, and only one of them is generated:
   here. They are what these fixtures grade and what ships in the npm package, so a rule change
   is an edit to those files in a PR against this repo.
 - `skills/tenjin/SKILL.md` is the zero-install skill, vendored verbatim from
-  https://tenjin.blog/skills.md by `pnpm sync:skill`, carrying a do-not-hand-edit banner and
+  https://tenjin.sh/skills.md by `pnpm sync:skill`, carrying a do-not-hand-edit banner and
   guarded by `skill-drift.yml`. `evals/tenjin/` grades the vendored copy, but a rule it reveals
   as missing or wrong is not fixable here: the wording lives in `lib/agent-docs.ts` in the
   tenjin repo, and an edit to the vendored file would be reverted by the next sync. So a

@@ -8,7 +8,7 @@
     "type": "git",
     "url": "git+https://github.com/BackTrackCo/tenjin-agent.git"
   },
-  "homepage": "https://tenjin.blog/agents",
+  "homepage": "https://tenjin.sh/agents",
   "bugs": "https://github.com/BackTrackCo/tenjin-agent/issues",
   "keywords": [
     "x402",

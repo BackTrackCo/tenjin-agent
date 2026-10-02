@@ -991,10 +991,13 @@ describe('the public render did not move', () => {
   // tenjin-publish moved 2026-09-23: the "real stop" list names the new
   // credential warns (tenjin-agent#388, #296), as the triage test above requires.
   // Payment cleanup deliberately updates the manual-consent guidance in search.
+  //
+  // Both moved 2026-09-23 with the origin flip: the one skills.md link each page
+  // carries now names tenjin.sh. No criteria changed.
   it('renders the reviewed public skill bytes', () => {
     expect(Object.fromEntries(SHAPED_SKILLS.map((n) => [n, digest(read(n))]))).toEqual({
-      'tenjin-search': 'f4c0f87cfe28dc90040f4c11098c5588',
-      'tenjin-publish': '02e20863861037f9e3af795eec7b034a',
+      'tenjin-search': 'b01df050fd3003f77d3dcad51d0269e6',
+      'tenjin-publish': '2c0f33930582f69e59b99f02f49ab757',
     });
   });
 
