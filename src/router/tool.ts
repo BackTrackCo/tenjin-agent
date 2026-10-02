@@ -541,6 +541,8 @@ async function payAndDeliver(
       },
     );
     const data = paid.data as {
+      /** The provider's HTTP status on the call that delivered. */
+      status?: number;
       bodyText?: string;
       /** A binary body's bytes and type, kept whole by the provider leg. */
       bodyBytes?: Uint8Array;
@@ -555,6 +557,7 @@ async function payAndDeliver(
     };
     const providerAtomic = BigInt(data.amountPaid?.atomic ?? '0');
     const tx = data.settlementTxHash !== undefined ? { txHash: data.settlementTxHash } : {};
+    const httpStatus = typeof data.status === 'number' ? { httpStatus: data.status } : {};
     // A FILE IS SAVED, NOT INLINED: its bytes are no use as text in a tool
     // result, so the result names where they are.
     const binary =
@@ -623,7 +626,7 @@ async function payAndDeliver(
     if (data.resultUnverified === true) {
       await footer.done('unverified', shown);
       return {
-        outcome: { status: 'unverified' },
+        outcome: { status: 'unverified', ...httpStatus },
         left: { amountAtomic: providerAtomic, ...tx, signed: signing.mayHaveSigned() },
         result: {
           isError: true,
@@ -638,7 +641,7 @@ async function payAndDeliver(
     }
     await footer.done('fulfilled', shown);
     return {
-      outcome: { status: 'fulfilled' },
+      outcome: { status: 'fulfilled', ...httpStatus },
       left: { amountAtomic: providerAtomic, ...tx, signed: signing.mayHaveSigned() },
       result: {
         isError: false,

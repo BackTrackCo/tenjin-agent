@@ -1234,11 +1234,21 @@ describe('an offer with a request spec', () => {
     // No decision was asked for: the one router call is the report.
     await vi.waitFor(() => expect(calls).toHaveLength(3));
     expect(calls[2]).toMatchObject({ url: `${ROUTER}${ROUTER_PATH}`, method: 'POST' });
-    expect(JSON.parse(calls[2]!.body!)).toMatchObject({
+    // The shape the shared fixture pins: the provider's status rides along.
+    const report = JSON.parse(calls[2]!.body!) as Record<string, unknown>;
+    expect(report).toMatchObject({
       schemaVersion: 1,
       id: SPEC_ID,
       status: 'fulfilled',
+      httpStatus: 200,
     });
+    const fixture = JSON.parse(
+      await readFile(
+        fileURLToPath(new URL('./fixtures/wire-outcome-request.json', import.meta.url)),
+        'utf8',
+      ),
+    ) as Record<string, unknown>;
+    expect(Object.keys(report).sort()).toEqual(Object.keys(fixture).sort());
   });
 
   it('refuses an input that misses the spec, naming every problem, and sends nothing', async () => {
