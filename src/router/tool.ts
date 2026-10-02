@@ -419,14 +419,21 @@ async function runCard(
     footer,
   );
   await settleCardPayment(deps.ctx.dataDir, id, left);
-  void reportCardOutcome(
-    { id, ...outcome, ms: Date.now() - startedAt },
-    {
-      ctx: decisionDeps.ctx,
-      baseUrl: decisionDeps.baseUrl,
-      ...(decisionDeps.fetchImpl !== undefined ? { fetchImpl: decisionDeps.fetchImpl } : {}),
-    },
-  );
+  // REPORTED ONLY WHEN THE CALL RAN OR MONEY LEFT: a refusal before payment
+  // (the spend policy, the card's terms, the provider's own 4xx) took nothing
+  // from the offer, and the server would count it as the offer taken.
+  const ran =
+    outcome.status === 'fulfilled' || outcome.status === 'unverified' || left.amountAtomic > 0n;
+  if (ran) {
+    void reportCardOutcome(
+      { id, ...outcome, ms: Date.now() - startedAt },
+      {
+        ctx: decisionDeps.ctx,
+        baseUrl: decisionDeps.baseUrl,
+        ...(decisionDeps.fetchImpl !== undefined ? { fetchImpl: decisionDeps.fetchImpl } : {}),
+      },
+    );
+  }
   return result;
 }
 

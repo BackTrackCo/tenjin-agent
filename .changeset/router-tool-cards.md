@@ -11,8 +11,9 @@ and allowed values, the fields Tenjin pins, one example and what comes back.
 card's schema (every problem at once, with the allowed values and the
 example), builds the request and pays the provider directly through the same
 `runPay` checks: the live price against the card's ceiling, its payee against
-the card's, and the spend policy. Then it tells the server only how the call
-ended. Each card id pays once: a retry of a paid id, or a second call racing
+the card's, and the spend policy. When the call ran or money left, it then
+tells the server only how the call ended; a refusal before payment (the spend
+policy, the card's terms, the provider's own 4xx) reports nothing. Each card id pays once: a retry of a paid id, or a second call racing
 it, pays nothing and points at the earlier result or a new offer, while a call
 that paid nothing (a refused input) leaves the card runnable. A card is kept
 as long as the server keeps its offer, 15 minutes. A path input of `.` or `..`

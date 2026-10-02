@@ -1149,6 +1149,10 @@ describe('a discovered service', () => {
  */
 describe('an offer with a tool card', () => {
   const CARD_ID = '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d01';
+  const routerCalls = (calls: { url: string }[]) =>
+    calls.filter((call) => call.url.startsWith(`${ROUTER}${ROUTER_PATH}`));
+  /** The outcome report is fire-and-forget: let one that was sent land. */
+  const reportsSettled = () => new Promise((resolve) => setTimeout(resolve, 25));
   const PAYEE = '0x1111111111111111111111111111111111111111';
 
   function quoteCard(over: Partial<OfferCard> = {}): OfferCard {
@@ -1269,7 +1273,6 @@ describe('an offer with a tool card', () => {
           'PAYMENT-REQUIRED': challenge({ payTo: '0x2222222222222222222222222222222222222222' }),
         },
       },
-      { url: ROUTER, status: 200, body: {} },
     ]);
     const result = await runRequestTool({ id: CARD_ID, input: { symbol: 'BTC' } }, deps(fetchImpl));
     expect(result.envelope).toMatchObject({
@@ -1279,6 +1282,8 @@ describe('an offer with a tool card', () => {
       parameters: { symbol: 'BTC' },
     });
     expect(calls.filter((call) => call.paid)).toEqual([]);
+    await reportsSettled();
+    expect(routerCalls(calls)).toEqual([]);
   });
 
   it('asks for a smaller input when a varying price lands over the card ceiling', async () => {
@@ -1291,7 +1296,6 @@ describe('an offer with a tool card', () => {
         body: {},
         headers: { 'PAYMENT-REQUIRED': challenge({ amount: '1500000' }) },
       },
-      { url: ROUTER, status: 200, body: {} },
     ]);
     const result = await runRequestTool(
       { id: CARD_ID, input: { symbol: 'BTC' } },
@@ -1307,13 +1311,14 @@ describe('an offer with a tool card', () => {
     expect(reason).not.toContain('fresh decision');
     expect(calls.filter((call) => call.paid)).toEqual([]);
     expect(auth.authorize).not.toHaveBeenCalled();
+    await reportsSettled();
+    expect(routerCalls(calls)).toEqual([]);
   });
 
   it('says a provider refused the input before payment, and what was sent', async () => {
     await storeCards(dir, [quoteCard()]);
-    const { fetchImpl } = net([
+    const { fetchImpl, calls } = net([
       { url: PROVIDER, status: 400, body: { error: 'bad symbol' } },
-      { url: ROUTER, status: 200, body: {} },
     ]);
     const result = await runRequestTool({ id: CARD_ID, input: { symbol: '??' } }, deps(fetchImpl));
     expect(result.envelope).toMatchObject({
@@ -1325,6 +1330,28 @@ describe('an offer with a tool card', () => {
     expect(String(result.envelope.reason)).toContain(
       'CoinMarketCap rejected this input before any payment (HTTP 400)',
     );
+    // Refused before payment: the offer was not taken, so nothing is reported.
+    await reportsSettled();
+    expect(routerCalls(calls)).toEqual([]);
+  });
+
+  it('reports nothing when the spend policy refuses the call before signing', async () => {
+    await storeCards(dir, [quoteCard()]);
+    const auth = authorizer('deny');
+    const { fetchImpl, calls } = net([
+      { url: PROVIDER, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge() } },
+    ]);
+    const result = await runRequestTool(
+      { id: CARD_ID, input: { symbol: 'BTC' } },
+      deps(fetchImpl, auth),
+    );
+    expect(result.envelope).toMatchObject({
+      status: 'needs_approval',
+      cost: ['provider price 0 USD'],
+    });
+    expect(calls.filter((call) => call.paid)).toEqual([]);
+    await reportsSettled();
+    expect(routerCalls(calls)).toEqual([]);
   });
 
   it('pays once per card id: a retry after a paid call sends and pays nothing', async () => {
@@ -1358,16 +1385,15 @@ describe('an offer with a tool card', () => {
     await storeCards(dir, [quoteCard()]);
     const { fetchImpl, calls } = net([
       { url: PROVIDER, status: 400, body: { error: 'bad symbol' } },
-      { url: ROUTER, status: 200, body: {} },
       ...providerLegs(),
       { url: ROUTER, status: 200, body: {} },
     ]);
     const refused = await runRequestTool({ id: CARD_ID, input: { symbol: '??' } }, deps(fetchImpl));
     expect(refused.envelope).toMatchObject({ status: 'failed', providerStatus: 400 });
-    await vi.waitFor(() => expect(calls).toHaveLength(2));
     const fixed = await runRequestTool({ id: CARD_ID, input: { symbol: 'BTC' } }, deps(fetchImpl));
     expect(fixed.envelope).toMatchObject({ status: 'fulfilled' });
     expect(calls.filter((call) => call.paid)).toHaveLength(1);
+    await vi.waitFor(() => expect(routerCalls(calls)).toHaveLength(1));
   });
 
   it("shows the server's pick for a query with no id as its card, then runs it from that card", async () => {

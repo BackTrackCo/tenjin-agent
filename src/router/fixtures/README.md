@@ -100,8 +100,10 @@ on every call, which win over the agent's input), and optionally `example`,
 `returns`, `returnsExample` and `resultSchema`. The hint then asks for
 `request({id})`, which shows the card, or hands over the one input the hook
 already holds as `request({id, input})`. The client builds and pays the call
-itself and reports `{schemaVersion, id, status, httpStatus?, ms?}`, which
-marks the row executed and stores no text. A client that does not send
+itself and, once a call was attempted, reports `{schemaVersion, id, status,
+httpStatus?, ms?}`. The first report for a live id marks its row executed;
+a repeat or a report after expiry is a 204 that changes nothing. No text is
+stored. A client that does not send
 `card` never sees the field: the decision schemas are strict.
 
 Such a client's tool call with a `query` and no `id` gets no binder: the
