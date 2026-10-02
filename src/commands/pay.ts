@@ -417,6 +417,8 @@ async function executePay(
     if (amountAtomic > 0n) {
       // One retry across a rate-limit interval, within the original read deadline.
       const deadline = Date.now() + ctx.flags.timeout;
+      // Live, never the hooks' remembered balance: a minute-old read can count
+      // funds the wallet has since spent.
       const readBalance = deps.readBalance ?? readUsdcBalance;
       let balance = await readBalance(signer.address, settings.rpcUrl, {
         timeoutMs: Math.max(1, Math.floor(ctx.flags.timeout / 2)),

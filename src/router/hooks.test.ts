@@ -822,12 +822,14 @@ describe('the pre-call hook', () => {
  */
 describe('never redirected twice for one target', () => {
   const DENY = { hookSpecificOutput: { permissionDecision: 'deny' } };
-  const WITHHELD = { response: null, action: 'execute', alreadyRedirected: true };
+  /** A retry found redirected before the router is asked: no decision, no action. */
+  const WITHHELD = { response: null, alreadyRedirected: true };
   const A = 'https://example.test/spec';
   const B = 'https://example.test/other';
 
   /** One pre-call call for `subject` in `sess-1` (or as `over` says), which
-   *  the router answers with an offer. Every one of them asks the router. */
+   *  the router answers with an offer. Every one of them asks the router,
+   *  except the retry of a target already redirected, which asks nothing. */
   async function nativeCall(
     subject = A,
     over: Record<string, unknown> = {},
@@ -844,7 +846,7 @@ describe('never redirected twice for one target', () => {
       fetchImpl,
       homeDir: dir,
     });
-    expect(calls).toHaveLength(1);
+    expect(calls).toHaveLength(out.alreadyRedirected === true && out.action === undefined ? 0 : 1);
     return out;
   }
 
@@ -874,6 +876,22 @@ describe('never redirected twice for one target', () => {
     expect(await renderProgress(dir, 'sess-1')).toBe(
       'x402 · search: native tools (already redirected once)',
     );
+  });
+
+  /** The retry would only be withheld, so asking the router for it wrote an
+   *  offer row nobody saw and spent a gate decision: ~45% of a session's rows. */
+  it('asks the router nothing for the retry of a redirected call', async () => {
+    expect((await nativeCall()).response).toMatchObject(DENY);
+    const { fetchImpl, calls } = router(withHint(PRECALL_HINT));
+    const retry = await runNativeHook(await preCall(A, 'WebFetch'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+      homeDir: dir,
+    });
+    expect(retry).toEqual(WITHHELD);
+    expect(calls).toHaveLength(0);
+    expect(rpcCalls).toHaveLength(1);
   });
 
   it('keeps the promise under parallel calls: A, then B, then A again', async () => {
@@ -1008,6 +1026,15 @@ describe('a wallet that cannot cover the lookup', () => {
       deps,
     );
     expect(after.response).toBeNull();
+  });
+
+  /** Base's public RPC refuses the sixth `eth_call` in a second, which a
+   *  burst of parallel lookups reaches: a minute-old read stands. */
+  it('reads the balance once for a burst of lookups', async () => {
+    const deps = { dataDir: dir, baseUrl: BASE, fetchImpl: router(EXECUTE).fetchImpl };
+    expect((await runNativeHook(await preCall('https://x.test/a'), deps)).response).not.toBeNull();
+    expect((await runNativeHook(await preCall('https://x.test/b'), deps)).response).not.toBeNull();
+    expect(rpcCalls).toHaveLength(1);
   });
 
   it.each([
@@ -2587,6 +2614,84 @@ describe('a discovered service', () => {
     expect(await resolveProgressSession(dir, { id: ID })).not.toBeNull();
   });
 
+  /** A LIST CAN NAME A SERVICE OVER THE CAP beside one that fits: People Data
+   *  Labs at $0.28 beside a $0.005 email finder, under the $0.25 cap, was
+   *  picked and stopped on needs_approval with no warning. */
+  describe('a list with a service over the auto-spend cap', () => {
+    const entry = (n: number, provider: string, usd: string, id: string) =>
+      `${n}) ${provider} (finds a work email), POST https://${provider.toLowerCase()}.test/x , ` +
+      `about $${usd} per call. Input: {name: string}. To use it, call request({id: "${id}", input: {...}}).`;
+    const list = (second: string, alternative = '') => ({
+      ...DISCOVERED,
+      decision: {
+        ...DISCOVERED.decision,
+        candidate: { ...DISCOVERED.decision.candidate, providerPriceAtomic: '5000' },
+        hint:
+          'Tenjin router found pay-per-call services for this step, no API key needed: ' +
+          `${entry(1, 'OneShot', '0.005', ID)} ${entry(2, 'PDL', second, '04d63d65-cdbb-4a30')} ` +
+          `Tenjin reviewed these listings. Use your judgement: pick one.${alternative}`,
+      },
+    });
+    const shown = async (body: unknown): Promise<string> => {
+      const out = await runPromptHook(promptEvent('find the email of a person'), {
+        dataDir: dir,
+        baseUrl: BASE,
+        fetchImpl: router(body).fetchImpl,
+      });
+      return (out.response as { hookSpecificOutput: { additionalContext: string } })
+        .hookSpecificOutput.additionalContext;
+    };
+
+    it('says which price is over the limit and to prefer one within it', async () => {
+      expect(await shown(list('0.28'))).toMatch(
+        / Note: \$0\.28 is above this machine's automatic per-call limit \(\$0\.25\), so request returns needs_approval for that service; prefer one within the limit, or ask the user first\.$/,
+      );
+    });
+
+    it('adds nothing when every listed service fits', async () => {
+      expect(await shown(list('0.03'))).not.toContain('Note:');
+    });
+
+    /** The server writes a curated alternative's price plain ("$0.30"), not
+     *  "about $0.30"; a dollar amount inside quotes is a seller's or the
+     *  user's words, never a price. */
+    it("reads a curated alternative's plain price, and never a quoted amount", async () => {
+      const curated =
+        " Alternative from Tenjin's catalog: Hunter (finds a work email, $0.30): " +
+        'request({query: <name and company>, id: "k3f9-abcd"}).';
+      expect(await shown(list('0.03', curated))).toMatch(
+        / Note: \$0\.30 is above this machine's automatic per-call limit \(\$0\.25\), so request returns needs_approval for that service;/,
+      );
+      const seller =
+        ' Alternative from Coinbase\'s Bazaar (unreviewed): "Pricey" (its listing says ' +
+        '"plans from $500 a month"), about $0.03: request({id: "x-1", input: {...}})';
+      expect(await shown(list('0.03', seller))).not.toContain('Note:');
+    });
+
+    /** A Tenjin list entry's or curated alternative's description is prose,
+     *  unquoted: a dollar amount in it is the service's words, not its price. */
+    it('never reads a dollar amount in an unquoted description as a price', async () => {
+      const described = (body: ReturnType<typeof list>) => ({
+        ...body,
+        decision: {
+          ...body.decision,
+          hint: body.decision.hint.replaceAll(
+            '(finds a work email)',
+            '(finds a work email; seats elsewhere from $500/month)',
+          ),
+        },
+      });
+      const curated =
+        " Alternative from Tenjin's catalog: Hunter (finds a work email, plans from $1000 a year, $0.03): " +
+        'request({query: <name and company>, id: "k3f9-abcd"}).';
+      expect(await shown(described(list('0.03', curated)))).not.toContain('Note:');
+      const over = await shown(described(list('0.28', curated)));
+      expect(over).toMatch(
+        / Note: \$0\.28 is above this machine's automatic per-call limit \(\$0\.25\), so request returns needs_approval for that service;/,
+      );
+    });
+  });
+
   /** THE TENJIN LIST IS ON BY DEFAULT; the open Bazaar is asked for only
    *  with the experiment on. */
   it('asks for the open Bazaar only with the experiment on', async () => {
@@ -2634,7 +2739,7 @@ describe('a discovered service', () => {
       baseUrl: BASE,
       fetchImpl: router(DISCOVERED).fetchImpl,
     });
-    expect(again).toEqual({ response: null, action: 'discovered', alreadyRedirected: true });
+    expect(again).toEqual({ response: null, alreadyRedirected: true });
   });
 
   it('is offered after a native call that came back short', async () => {
@@ -2910,7 +3015,7 @@ describe('a question to the user', () => {
       baseUrl: BASE,
       fetchImpl: router(DISCOVERED).fetchImpl,
     });
-    expect(second).toEqual({ response: null, action: 'discovered', alreadyRedirected: true });
+    expect(second).toEqual({ response: null, alreadyRedirected: true });
     // The claim is the question's own: a different question is its own target.
     const other = await runAskHook(
       await askEvent({

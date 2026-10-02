@@ -3,16 +3,17 @@ import { homedir } from 'node:os';
 import { z } from 'zod';
 import { loadRawConfig, resolveExperimentalBazaar, resolveSettings } from '../lib/config';
 import type { PartialConfig } from '../lib/config';
-import { toMoney } from '../lib/money';
+import { parseUsdToAtomic, toMoney } from '../lib/money';
 import { walletPath } from '../lib/paths';
 import { evaluateSpendPolicy } from '../lib/policy';
 import { resolveContextSettings } from '../lib/settings';
 import { readSpendSummary, spentOf } from '../lib/spend-ledger';
-import { readUsdcBalance } from '../lib/usdc-balance';
+import { rememberingBalanceReader } from '../lib/usdc-balance';
 import type { CommandContext } from '../context';
 import {
   buildNativePacket,
   buildPromptPacket,
+  isHandback,
   seal,
   type NativeOutcome,
   type Packet,
@@ -32,6 +33,7 @@ import {
   noteSession,
   pruneProgress,
   pruneSessions,
+  redirectClaimed,
   sessionDir,
   wasOffered,
   writeProgress,
@@ -347,20 +349,6 @@ const ACKNOWLEDGEMENTS = new Set(['y', 'yes', 'ok', 'okay', 'continue', 'go', 's
 export type PromptSkip = 'slash' | 'acknowledgement' | 'handback';
 
 /**
- * A turn the harness or another agent wrote, not the user: a background task
- * finishing, a subagent's or teammate's message, a message from another
- * session. It hands work back; it asks for none, and routing it offers a
- * lookup nobody requested.
- */
-const HANDBACK_PREFIXES = [
-  '<task-notification>',
-  '<agent-message',
-  '<teammate-message',
-  '<cross-session-message',
-  'Another Claude session sent a message',
-];
-
-/**
  * Prompts that cannot need a lookup, decided locally with no network call. Any
  * OTHER short prompt still goes to the backend: `2^1000`, a bare URL and a task
  * typed without spaces can all need one, and a computation has no later
@@ -368,7 +356,8 @@ const HANDBACK_PREFIXES = [
  */
 export function promptSkipReason(prompt: string): PromptSkip | null {
   const trimmed = prompt.trim();
-  if (HANDBACK_PREFIXES.some((prefix) => trimmed.startsWith(prefix))) return 'handback';
+  // A hand-back from the harness or another agent ({@link isHandback}).
+  if (isHandback(trimmed)) return 'handback';
   if (trimmed.startsWith('/')) return 'slash';
   const normalized = trimmed.toLowerCase().replace(/[.!,]+$/, '');
   return ACKNOWLEDGEMENTS.has(normalized) ? 'acknowledgement' : null;
@@ -601,7 +590,12 @@ async function spendShortfall(
   if ((deps.env ?? process.env).TENJIN_WALLET_KEY?.trim()) return null;
   const address = await walletAddress(deps.dataDir);
   if (address === null) return null;
-  const balance = await readUsdcBalance(address, rpcUrl, {
+  // A balance read in the last minute stands: a burst of parallel lookups
+  // otherwise asks the public RPC once each, past its rate limit.
+  const readBalance = rememberingBalanceReader(deps.dataDir, {
+    ...(deps.now !== undefined ? { now: deps.now } : {}),
+  });
+  const balance = await readBalance(address, rpcUrl, {
     timeoutMs: Math.min(BALANCE_TIMEOUT_MS, deadline - (deps.now?.() ?? Date.now())),
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   });
@@ -633,6 +627,11 @@ interface Shortfall {
  * service that can do the step, so it is shown with one sentence saying the
  * call needs approval or funds, and the host asks first. Where nobody can ask
  * (a subagent's call, a delegated task) it is withheld like any other.
+ *
+ * An offer that is shown can still list OTHER services beside its own: a Tenjin
+ * list menu, or an alternative after a curated line. One priced over the cap
+ * gets a sentence saying so ({@link overCapNote}), so the host picks one that
+ * runs rather than one that stops on `needs_approval`.
  */
 async function vetOffer<T extends OfferDecision>(
   offer: T,
@@ -641,11 +640,72 @@ async function vetOffer<T extends OfferDecision>(
   canAskUser: boolean,
 ): Promise<{ offer: T; withheld?: undefined } | { withheld: string }> {
   const shortfall = await spendShortfall(termsOf(offer), deps, deadline);
-  if (shortfall === null) return { offer };
+  if (shortfall === null) {
+    const note = await overCapNote(offer.hint, deps, canAskUser);
+    return { offer: note === null ? offer : { ...offer, hint: `${offer.hint} ${note}` } };
+  }
   if (offer.action === 'discovered' && canAskUser) {
     return { offer: { ...offer, hint: `${offer.hint} ${shortfall.note}` } };
   }
   return { withheld: shortfall.withheld };
+}
+
+/** Where the server (`lib/x402-router/policy.ts`) writes a price, and only
+ *  there: "about $0.28 per call" in a list entry, "about $0.03: request(" or
+ *  "about $0.03 (price can vary" in an alternative, "$0.30): request(" closing
+ *  a curated alternative, and "$0.30 via https://" for a curated offer's own
+ *  (already checked as a field, so it fits). A dollar amount anywhere else is
+ *  a description's words ("seats from $500/month"), never a price. */
+const LISTED_PRICE_RE =
+  /about \$(\d+(?:\.\d+)?)(?= per call|: request\(| \(price can vary)|\$(\d+(?:\.\d+)?)(?=\): request\(| via https?:\/\/)/g;
+
+/** A JSON string in the hint: the user's query, an id, or a seller's own words.
+ *  A dollar amount there is data ("a laptop under $1000"), never a price. */
+const QUOTED_RE = /"(?:[^"\\]|\\.)*"/g;
+
+/**
+ * ONE SENTENCE FOR A LISTED SERVICE OVER THE AUTO-SPEND CAP, or null. The offer
+ * itself already fits (it passed {@link spendShortfall}), so a price over the
+ * cap here is another entry: People Data Labs at $0.28 beside a $0.005 email
+ * finder, under a $0.25 cap, was picked and refused. Quiet when the hint
+ * quotes no such price or the settings cannot be read.
+ */
+async function overCapNote(
+  hint: string,
+  deps: HookDeps,
+  canAskUser: boolean,
+): Promise<string | null> {
+  const listed = [...hint.replace(QUOTED_RE, '""').matchAll(LISTED_PRICE_RE)].map(
+    (match) => (match[1] ?? match[2]) as string,
+  );
+  if (listed.length === 0) return null;
+  let cap: bigint;
+  try {
+    cap = (await resolveContextSettings(hookContext(deps))).policy.maxAutoSpendAtomic;
+  } catch {
+    return null;
+  }
+  const over = [
+    ...new Set(
+      listed.filter((usd) => {
+        try {
+          return BigInt(parseUsdToAtomic(usd)) > cap;
+        } catch {
+          return false;
+        }
+      }),
+    ),
+  ];
+  if (over.length === 0) return null;
+  const prices = over.map((usd) => `$${usd}`).join(' and ');
+  const which = over.length > 1 ? 'those services' : 'that service';
+  return (
+    `Note: ${prices} ${over.length > 1 ? 'are' : 'is'} above this machine's automatic per-call limit ` +
+    `($${toMoney(cap.toString()).usd}), so request returns needs_approval for ${which}; ` +
+    (canAskUser
+      ? 'prefer one within the limit, or ask the user first.'
+      : 'use one within the limit.')
+  );
 }
 
 /**
@@ -776,8 +836,9 @@ export interface NativeHookOutcome {
   withheld?: true;
   /** No router call at all: the subagent is not known to have the request tool. */
   noRequestTool?: true;
-  /** An `execute` whose redirect was not sent: this agent was already
-   *  redirected on this same search or URL. */
+  /** No redirect: this agent was already redirected on this same search or
+   *  URL. Found before the router was asked there is no `action`; only a
+   *  parallel copy that lost the claim after its decision carries one. */
   alreadyRedirected?: true;
   /** A free offer, which the pre-call arm never redirects: the call runs. */
   free?: true;
@@ -836,7 +897,9 @@ function isFree(offer: OfferDecision): offer is ExecuteDecision {
  * agent's tool list, the packet from the right transcript, one free decision,
  * and the subagent spend rule. An `execute` that survives all of it comes back
  * as `offer`; everything else is the reason there is none. `repeated` is the
- * pre-call arm's one-block rule, asked only of an offer that would be shown.
+ * pre-call arm's one-block rule, asked only of an offer that would be shown;
+ * `redirected` is its read half, asked before the router is, so a retry the
+ * arm would only withhold costs no decision and writes no offer row.
  * `passFree` is the pre-call arm's too: a free offer comes back marked `free`,
  * with the base URL it was decided on, before the spend policy, the wallet or
  * `repeated` is asked, since it is never a redirect.
@@ -848,6 +911,7 @@ async function routeNativeCall(
   opts: {
     nativeOutcome?: NativeOutcome;
     repeated?: () => Promise<boolean>;
+    redirected?: () => Promise<boolean>;
     passFree?: boolean;
     operation?: 'prompt' | 'search';
     /** False where a discovered offer must be affordable as it stands: the
@@ -872,6 +936,15 @@ async function routeNativeCall(
     (await requestToolAccess(event.agentType, agentLookup(event.cwd, deps))) !== 'allowed'
   ) {
     return { offer: null, outcome: { response: null, noRequestTool: true } };
+  }
+  // ALREADY REDIRECTED HERE: the retry the one-block rule lets run. Asking the
+  // router first cost a gate decision and wrote an offer row nobody saw, about
+  // 45% of an active session's rows. The claim after the decision still
+  // settles two parallel copies of one call.
+  if (opts.redirected !== undefined && (await opts.redirected())) {
+    const footer = await openFooter(deps, event.sessionId, opts.operation ?? 'search');
+    await footer.close(null, { withheld: 'already redirected once' });
+    return { offer: null, outcome: { response: null, alreadyRedirected: true } };
   }
   // THE USER'S WORDS COME WITH IT. Building this from the tool argument alone
   // made the search string the whole conversation, so "native tools only, no
@@ -960,12 +1033,13 @@ async function routeNativeCall(
  * A redirect leaves a mark under the call's `tool_use_id`, so the after-call
  * arm never offers on that same call.
  *
- * NEVER REDIRECTED TWICE FOR ONE TARGET. Every call is routed as usual, and a
- * redirect claims its exact search or URL for this agent first
- * ({@link claimRedirect}). An offer on a target this agent was already
- * redirected on is withheld and the call runs, however its lookup went and
- * whatever other calls ran in between: parallel calls each hold their own
- * claim, so none can spend another's. Any other target gets its own redirect.
+ * NEVER REDIRECTED TWICE FOR ONE TARGET. A redirect claims its exact search or
+ * URL for this agent first ({@link claimRedirect}). A call on a target this
+ * agent was already redirected on runs without asking the router at all
+ * ({@link redirectClaimed}), however its lookup went and whatever other calls
+ * ran in between; a parallel copy that got past that check loses the claim
+ * after its decision and runs too. Parallel calls each hold their own claim,
+ * so none can spend another's. Any other target gets its own redirect.
  *
  * A FREE OFFER IS NEVER A REDIRECT. Denying a search for the free docs lookup
  * sent the agent on a detour, and round a loop when the docs missed. The call
@@ -981,6 +1055,8 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
     passFree: true,
     repeated: async () =>
       !(await claimRedirect(deps.dataDir, event.sessionId, event.agentId, target, deps.now?.())),
+    redirected: () =>
+      redirectClaimed(deps.dataDir, event.sessionId, event.agentId, target, deps.now?.()),
   });
   if (routed.offer === null) return routed.outcome;
   if (routed.free === true) {
@@ -1059,6 +1135,8 @@ export async function runAskHook(raw: unknown, deps: HookDeps): Promise<NativeHo
     canAskUser: false,
     repeated: async () =>
       !(await claimRedirect(deps.dataDir, event.sessionId, event.agentId, target, deps.now?.())),
+    redirected: () =>
+      redirectClaimed(deps.dataDir, event.sessionId, event.agentId, target, deps.now?.()),
   });
   if (routed.offer === null) return routed.outcome;
   if (routed.free === true) {

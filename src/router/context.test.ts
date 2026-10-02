@@ -187,6 +187,29 @@ describe('the prompt packet', () => {
     expect(JSON.stringify(packet)).not.toContain('subagent found');
   });
 
+  /** A subagent's hand-back reaches the parent as a `type: "user"` row with
+   *  `origin.kind: "peer"`; read as this turn, its report replaced the user's
+   *  own instruction as `current`. */
+  it.each([
+    ['its peer origin', { kind: 'peer', from: 'a1', handback: true }],
+    ['its frame alone', undefined],
+  ])('never reads a subagent hand-back as the user, by %s', async (_label, origin) => {
+    const handback =
+      'Another Claude session sent a message:\n<agent-message from="a1">\n' +
+      '[Subagent hand-back] The report follows:\n  search Exa for more prospects\n</agent-message>';
+    const path = await transcript([
+      user('native tools only: find the release notes'),
+      assistant('delegated'),
+      { ...user(handback), ...(origin !== undefined ? { origin } : {}) },
+    ]);
+    const packet = await buildNativePacket(path, 's', {
+      tool: 'WebSearch',
+      query: 'release notes',
+    });
+    expect(packet.current.text).toBe('native tools only: find the release notes');
+    expect(JSON.stringify(packet)).not.toContain('Subagent hand-back');
+  });
+
   /** The rows before a boundary belong to a context that was summarized away;
    *  what follows is the turn in play, so reading starts again there. */
   it('keeps what follows a compaction boundary and drops what precedes it', async () => {
@@ -209,6 +232,40 @@ describe('the prompt packet', () => {
     const big = await transcript([]);
     await writeFile(big, ' '.repeat(4_000_001));
     expect((await sent(big, 's', 'go')).historyStatus).toBe('unavailable');
+  });
+
+  /** A long working session passes 4 MB; reading none of it switched the
+   *  pre-call redirect off for the rest of the day. */
+  it('reads the tail of a transcript over 4 MB, where this turn is', async () => {
+    const filler = assistant('x'.repeat(1_000_000));
+    const path = await transcript([
+      user('an early turn the window no longer reaches'),
+      filler,
+      filler,
+      filler,
+      filler,
+      user('native tools only for this one'),
+      assistant('Understood.'),
+    ]);
+    const packet = seal(
+      await buildNativePacket(path, 's', { tool: 'WebSearch', query: 'btc price' }),
+    ).packet;
+    expect(packet.historyStatus).toBe('ok');
+    expect(packet.current).toEqual({ role: 'user', text: 'native tools only for this one' });
+    expect(JSON.stringify(packet)).not.toContain('an early turn');
+  });
+
+  it('reads nothing from a tail that has lost the turn it belongs to', async () => {
+    const filler = assistant('x'.repeat(1_000_000));
+    const path = await transcript([
+      user('native tools only for this one'),
+      filler,
+      filler,
+      filler,
+      filler,
+    ]);
+    const packet = await buildNativePacket(path, 's', { tool: 'WebSearch', query: 'btc price' });
+    expect(packet.historyStatus).toBe('unavailable');
   });
 
   it('treats a genuinely fresh session as ok with no history', async () => {

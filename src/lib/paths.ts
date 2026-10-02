@@ -62,6 +62,14 @@ export function spendLedgerPath(dir: string = dataDir()): string {
 }
 
 /**
+ * The wallet's last USDC balance read (lib/usdc-balance). A pure cache, a
+ * minute long: an unreadable file is simply read again from the chain.
+ */
+export function balanceCachePath(dir: string = dataDir()): string {
+  return join(dir, 'balance.json');
+}
+
+/**
  * Where the once-a-day "a newer tenjin-cli exists" check caches the registry
  * answer. A pure cache: nothing here is authoritative, so an unreadable file is
  * simply re-fetched.

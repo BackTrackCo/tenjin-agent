@@ -518,6 +518,11 @@ describe('what the tool refuses to execute', () => {
     expect(result.envelope).toMatchObject({ status: 'needs_approval' });
     expect(result.summary).toContain('Blocked by spending policy');
     expect(result.isError).toBe(false);
+    // Nothing was signed: no cost reported, and no row in the paid ledger.
+    expect(result.envelope).toMatchObject({ cost: ['provider price 0 USD'] });
+    await expect(readFile(join(dir, 'paid', 'ledger.jsonl'), 'utf8')).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
   });
 
   it('pays under the cap with no prompt at all', async () => {

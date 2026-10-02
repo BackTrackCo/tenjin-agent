@@ -355,6 +355,29 @@ export async function claimRedirect(
 }
 
 /**
+ * THE READ HALF OF {@link claimRedirect}: true when this agent already holds a
+ * live claim on this exact search or URL. The pre-call arms ask it BEFORE the
+ * router, so the retry of a call they already redirected, which they would
+ * only withhold, costs no decision and leaves no offer nobody sees. It never
+ * writes and never decides on its own: a false here still goes through the
+ * exclusive create, which is what keeps two parallel copies to one deny.
+ */
+export async function redirectClaimed(
+  dataDir: string,
+  sessionId: string,
+  agentId: string | undefined,
+  target: string,
+  now = Date.now(),
+): Promise<boolean> {
+  const window = Math.floor(now / EXPIRY_MS);
+  for (const at of [window, window - 1]) {
+    const stamp = await readStamp(redirectPath(dataDir, sessionId, agentId, target, at));
+    if (stamp !== null && now - stamp.at <= EXPIRY_MS) return true;
+  }
+  return false;
+}
+
+/**
  * Which session directory a tool call belongs to, or null for "cannot tell".
  * Null is a normal answer and its only consequence is a footer that stays quiet.
  */

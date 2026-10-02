@@ -378,17 +378,21 @@ export async function runRequestTool(
       providerError?: string;
       authorization?: SignedAuthorization;
     };
+    // A SPEND-POLICY REFUSAL SIGNED NOTHING. Its details carry the price it
+    // refused, not an amount that left, so it is neither a cost nor a ledger
+    // row: the PDL refusal sat in the ledger as $0.28 paid.
+    const leftAtomic = status === 'needs_approval' ? 0n : BigInt(detail.amountAtomic ?? '0');
     await footer.done(status, {
       provider: contract.request.url,
       ...paramsOf(contract),
-      price: `$${toMoney(detail.amountAtomic ?? '0').usd}`,
+      price: `$${toMoney(leftAtomic.toString()).usd}`,
     });
     // An authorization that left is a paid call whatever came back: recorded
     // with its settlement unknown, for `tenjin payments reconcile` to resolve.
-    if (BigInt(detail.amountAtomic ?? '0') > 0n) {
+    if (leftAtomic > 0n) {
       await appendPaidRecord(
         deps.ctx.dataDir,
-        paidRecord(decision, contract.request.url, sent, BigInt(detail.amountAtomic ?? '0'), {
+        paidRecord(decision, contract.request.url, sent, leftAtomic, {
           ...(detail.authorization !== undefined ? { authorization: detail.authorization } : {}),
           savedFiles: [],
           ...(deps.now !== undefined ? { now: deps.now } : {}),
@@ -396,7 +400,7 @@ export async function runRequestTool(
       );
     }
     return fail(status, reason, {
-      providerAtomic: BigInt(detail.amountAtomic ?? '0'),
+      providerAtomic: leftAtomic,
       ...(detail.settlement !== undefined ? { settlement: detail.settlement } : {}),
       ...(detail.diagnosis !== undefined ? { diagnosis: detail.diagnosis } : {}),
       // WHY THE PROVIDER SAID NO: its HTTP status and a bounded, redacted
