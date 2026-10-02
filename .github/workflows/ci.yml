@@ -31,6 +31,8 @@ jobs:
         with:
           node-version: '24'
           cache: pnpm
+      - name: Validate generated workspace guidance
+        run: node scripts/check-workspace-adapters.mjs
       - run: pnpm install --frozen-lockfile
       - run: pnpm format:check
       - run: pnpm lint
