@@ -37,7 +37,7 @@ function typeOf(schema: Json): string {
 
 /** One input as a line: its name, type, whether required, its description and
  *  the values or bounds it allows. */
-function fieldLine(name: string, schema: Json, required: boolean): string {
+function fieldLine(name: string, schema: Json, required: boolean, depth = 0): string {
   const parts = [`${name} (${typeOf(schema)}${required ? ', required' : ''})`];
   if (typeof schema.description === 'string') parts.push(clip(schema.description.trim(), 300));
   if (Array.isArray(schema.enum))
@@ -65,7 +65,54 @@ function fieldLine(name: string, schema: Json, required: boolean): string {
     ['maxItems', 'max items'],
   ] as const)
     if (typeof schema[key] === 'number') parts.push(`${label} ${String(schema[key])}`);
-  return `- ${parts.join('; ')}`;
+  return `${'  '.repeat(depth)}- ${parts.join('; ')}`;
+}
+
+/** How far below an input its required sub-fields are spelled out, and how
+ *  many sub-field lines one spec may add in all: Google Maps' location circle
+ *  is three levels down, and a schema that nests without end stays short. */
+const NESTED_DEPTH = 3;
+const NESTED_LINES = 20;
+
+/**
+ * An input's line, then each required field of the object it holds (or of
+ * each item, for an array of objects), as its own line under the path a
+ * problem names it by (`agent_context.agent_type`, `attachments[].filename`).
+ * A required object is then filled from the spec, not learned one problem at
+ * a time. Optional sub-fields stay names in the type; the example shows some.
+ */
+function fieldLines(
+  name: string,
+  schema: Json,
+  required: boolean,
+  budget: { left: number },
+  depth = 0,
+): string[] {
+  const lines = [fieldLine(name, schema, required, depth)];
+  if (depth >= NESTED_DEPTH) return lines;
+  const items = record(schema.items);
+  const nested: [string, Json] | undefined =
+    schema.properties !== undefined
+      ? [name, schema]
+      : items.properties !== undefined
+        ? [`${name}[]`, items]
+        : undefined;
+  if (nested === undefined) return lines;
+  const [at, object] = nested;
+  if (!Array.isArray(object.required)) return lines;
+  const properties = record(object.properties);
+  for (const sub of object.required) {
+    if (typeof sub !== 'string') continue;
+    if (budget.left <= 0) {
+      if (budget.left === 0)
+        lines.push(`${'  '.repeat(depth + 1)}- … more required fields, not listed here`);
+      budget.left = -1;
+      break;
+    }
+    budget.left -= 1;
+    lines.push(...fieldLines(`${at}.${sub}`, record(properties[sub]), true, budget, depth + 1));
+  }
+  return lines;
 }
 
 /** What one call costs, as the spec says it. */
@@ -85,12 +132,13 @@ export function specText(id: string, spec: ToolSpec): string {
     ...open.filter((name) => required.has(name)),
     ...open.filter((name) => !required.has(name)),
   ];
+  const budget = { left: NESTED_LINES };
   const lines = [
     `${spec.provider}: ${spec.description}`,
     `Price: ${priceLine(spec)}, paid by this machine's wallet straight to the provider.`,
     `Request: ${spec.request.method} ${spec.request.url}`,
     ordered.length
-      ? `Inputs:\n${ordered.map((name) => fieldLine(name, record(properties[name]), required.has(name))).join('\n')}`
+      ? `Inputs:\n${ordered.flatMap((name) => fieldLines(name, record(properties[name]), required.has(name), budget)).join('\n')}`
       : 'Inputs: none.',
   ];
   if (Object.keys(spec.pinned).length)

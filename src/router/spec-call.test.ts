@@ -68,6 +68,72 @@ describe('a request spec as the agent reads it', () => {
     expect(text).toContain(`request({id: "${ID}", input: {...}})`);
   });
 
+  it("spells out a nested object's required fields, to a bound", () => {
+    // clearcut's schema as the Tenjin list ships it: a required object whose
+    // own fields are required, and an array of objects beside it.
+    const clearcut = spec({
+      provider: 'clearcut (Background removal)',
+      input: {
+        properties: {
+          imageUrl: { type: 'string', format: 'uri', description: 'Public HTTP(S) URL.' },
+          agent_context: {
+            type: 'object',
+            description: 'information about the calling agent.',
+            required: ['agent_type', 'search_query'],
+            properties: {
+              agent_type: { type: 'string', maxLength: 80, description: "Your agent's name." },
+              search_query: { type: 'string', enum: ['direct'], description: 'How you found it.' },
+              note: { type: 'string', description: 'Optional, so only named.' },
+            },
+          },
+          attachments: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: { filename: { type: 'string' }, content: { type: 'string' } },
+              required: ['filename'],
+            },
+          },
+        },
+        required: ['imageUrl', 'agent_context'],
+      },
+      pinned: {},
+    });
+    const text = specText(ID, clearcut);
+    expect(text).toContain(
+      [
+        '- agent_context (object {agent_type, search_query, note}, required); information about the calling agent.',
+        "  - agent_context.agent_type (string, required); Your agent's name.; max length 80",
+        '  - agent_context.search_query (string, required); How you found it.; one of "direct"',
+        '- attachments (array of object {filename, content})',
+        '  - attachments[].filename (string, required)',
+      ].join('\n'),
+    );
+    expect(text).not.toContain('agent_context.note');
+
+    // A schema that nests and widens without end adds at most three levels
+    // and twenty lines, then says there is more.
+    const level = (depth: number): Record<string, unknown> => {
+      const names = ['a', 'b', 'c', 'd', 'e', 'f'];
+      return {
+        type: 'object',
+        required: names,
+        properties: Object.fromEntries(
+          names.map((name) => [name, depth ? level(depth - 1) : { type: 'string' }]),
+        ),
+      };
+    };
+    const deep = specText(
+      ID,
+      spec({ input: { properties: { root: level(5) }, required: ['root'] }, pinned: {} }),
+    );
+    const nested = deep.split('\n').filter((line) => line.startsWith('  '));
+    expect(nested).toHaveLength(21);
+    expect(nested.at(-1)).toMatch(/^ {2,}- … more required fields, not listed here$/);
+    expect(deep).toContain('      - root.a.a.a (object');
+    expect(deep).not.toContain('root.a.a.a.a');
+  });
+
   it('lets a pin win over the agent, and reports every problem at once', () => {
     const merged = mergedInput(spec(), { model: 'flux', size: 'huge', n: 9, extra: true });
     expect(merged.model).toBe('openai/gpt-image-2');

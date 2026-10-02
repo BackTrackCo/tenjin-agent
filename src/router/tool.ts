@@ -397,8 +397,9 @@ async function runSpec(
   const sentInput = maskDeep(merged) as Record<string, unknown>;
   // A WRONG GUESS COSTS ONE MORE CALL, NOT A PAYMENT: every problem, then the
   // whole spec (each input with its description and allowed values, the
-  // example, what comes back), so the next call can be right. Local, with no
-  // server call and nothing sent or paid.
+  // required fields inside a nested object, the example, what comes back), so
+  // the next call can be right. Local, with no server call and nothing sent
+  // or paid.
   const refuse = async (problem: string): Promise<RequestToolResult> => {
     await footer.done('needs_input');
     const refused = fail('needs_input', `The input does not fit ${spec.provider}: ${problem}.`, {
