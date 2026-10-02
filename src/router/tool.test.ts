@@ -1303,6 +1303,7 @@ describe('an offer with a tool card', () => {
     const { fetchImpl, calls } = net([{ url: ROUTER, status: 200, body: NATIVE }]);
     const result = await runRequestTool({ id: CARD_ID }, deps(fetchImpl));
     expect(result.envelope).toMatchObject({ status: 'needs_input' });
+    expect(String(result.envelope.reason)).toContain('No card is kept for that id');
     expect(calls).toEqual([]);
     const withQuery = await runRequestTool({ id: CARD_ID, query: 'BTC price' }, deps(fetchImpl));
     expect(withQuery.envelope).toMatchObject({ status: 'native' });

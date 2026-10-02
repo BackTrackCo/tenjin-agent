@@ -123,7 +123,9 @@ export async function runRequestTool(
   if (query.length === 0 && input === undefined) {
     return fail(
       'needs_input',
-      "A request needs an offer's id, or a query naming the task, its inputs and any constraints.",
+      id !== undefined
+        ? 'No card is kept for that id (it expired, or its line asked for a query), so send the query its line named with the id, or a query alone.'
+        : "A request needs an offer's id, or a query naming the task, its inputs and any constraints.",
     );
   }
   // THE HOOKS NEVER SEE THIS CALL, so the native hook's rule applies here too: a
