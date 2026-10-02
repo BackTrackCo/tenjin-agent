@@ -77,16 +77,17 @@ Each answer names the provider and the price. Your agent keeps its own tools, an
 
 The router picks from a catalog we curate and maintain. When nothing in it fits, it can point your agent at a reviewed third-party pay-per-call service from the [Tenjin list](#tenjin-list-and-experimental-bazaar), and your agent decides whether to use it or to ask you first. Routing is free: you pay the provider's price and nothing else.
 
-| Tool                                                             | What your agent gets                                        | Price per call |
-| ---------------------------------------------------------------- | ----------------------------------------------------------- | -------------- |
-| **Docs lookup** · [Context7](https://context7.com)               | Current, version-specific docs for a library or API         | **Free**       |
-| **Web research** · [Exa](https://exa.ai)                         | Search results with the page content, not just links        | $0.007         |
-| **Read a page** · [Firecrawl](https://firecrawl.dev)             | One exact page as clean text, even when a plain fetch fails | $0.01          |
-| **Crypto prices** · [CoinMarketCap](https://coinmarketcap.com)   | Live quotes for any coin                                    | $0.01          |
-| **Compute** · [Wolfram Alpha](https://www.wolframalpha.com)      | Math, unit conversions, science and data questions          | $0.02          |
-| **Email check** · [Hunter](https://hunter.io)                    | Whether an address is real and deliverable                  | $0.03          |
-| **Person lookup** · Minerva                                      | A professional profile from a name or email                 | $0.05          |
-| **Company profile** · [CompanyEnrich](https://companyenrich.com) | Size, industry, funding and socials from a domain or name   | $0.06          |
+| Tool                                                           | What your agent gets                                                                      | Price per call |
+| -------------------------------------------------------------- | ----------------------------------------------------------------------------------------- | -------------- |
+| **Docs lookup** · [Context7](https://context7.com)             | Current, version-specific docs for a library or API                                       | **Free**       |
+| **Web research** · [Exa](https://exa.ai)                       | Search results with the page content, not just links                                      | $0.007         |
+| **Read a page** · [Firecrawl](https://firecrawl.dev)           | One exact page as clean text, even when a plain fetch fails                               | $0.01          |
+| **Crypto prices** · [CoinMarketCap](https://coinmarketcap.com) | Live quotes for any coin                                                                  | $0.01          |
+| **Compute** · [Wolfram Alpha](https://www.wolframalpha.com)    | Math, unit conversions, science and data questions                                        | $0.02          |
+| **Email check** · [Hunter](https://hunter.io)                  | Whether an address is real and deliverable                                                | $0.008         |
+| **Person lookup** · [Apollo](https://www.apollo.io)            | A professional profile and work email from a name and company, a LinkedIn URL or an email | $0.01          |
+| **Company profile** · [Apollo](https://www.apollo.io)          | Industry, headcount, revenue and funding from a domain                                    | $0.01          |
+| **Company match** · [CompanyEnrich](https://companyenrich.com) | The company behind a name or a social URL                                                 | $0.01225       |
 
 Free tools run without a funded wallet. Twitter, Reddit and more are next, added by demand: [tell us what you want](#request-a-tool).
 
