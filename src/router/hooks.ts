@@ -20,6 +20,7 @@ import {
   type PendingCall,
   type Sealed,
 } from './context';
+import { storeCards } from './cards';
 import { requestDecision, ROUTER_PATH, type HookDecision } from './decision';
 import { readsAsEmptyPage, savedPdfOf } from './fetch-result';
 import { GATE_TIMEOUT_MS } from './gate';
@@ -1377,8 +1378,9 @@ export async function runDelegationHook(
  * decision turned out to be, and that outcome holds the line until the next
  * state arrives or its hold runs out.
  *
- * Display only. Every write inside swallows its own failure, and an `execute`
- * also leaves the id-to-session binding the tool resolves its progress through.
+ * Display only. Every write inside swallows its own failure, and a shown offer
+ * also leaves the id-to-session binding the tool resolves its progress through,
+ * and the tool cards the line names, which the tool reads by id.
  */
 async function openFooter(
   deps: HookDeps,
@@ -1417,6 +1419,9 @@ async function openFooter(
       );
       if (withheld === undefined && isOffer(decision)) {
         await bindDecision(deps.dataDir, sessionId, decision.id, now());
+        // The line is shown, so the cards of the services it names are what
+        // `request({id})` will read.
+        await storeCards(deps.dataDir, decision.cards);
       }
     },
   };

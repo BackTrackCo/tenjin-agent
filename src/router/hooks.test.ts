@@ -19,6 +19,7 @@ import {
 } from './hooks';
 import { MCP_SERVER_NAME, REQUEST_TOOL } from './names';
 import { runHookCommand } from './hook-command';
+import { readCard } from './cards';
 import { ROUTER_PATH } from './decision';
 import {
   claimRedirect,
@@ -2727,11 +2728,27 @@ describe('a discovered service', () => {
     });
     expect((calls[0] as { body: unknown }).body).toMatchObject({
       sessionId: 'sess-1',
-      accepts: ['discovered'],
+      accepts: ['discovered', 'card'],
     });
     // The footer names the seller, and the id binds this session for `request`.
     expect(await renderProgress(dir, 'sess-1')).toContain('BlockRun');
     expect(await resolveProgressSession(dir, { id: ID })).not.toBeNull();
+  });
+
+  it('keeps the card of a shown offer, for request to read by its id', async () => {
+    const CARDED = JSON.parse(
+      readFileSync(
+        fileURLToPath(new URL('./fixtures/wire-hook-discovered-card.json', import.meta.url)),
+        'utf8',
+      ),
+    ) as { decision: { id: string; cards: unknown[] } };
+    const { fetchImpl } = router(CARDED);
+    await runPromptHook(promptEvent('make a hero image for the blog post'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+    expect(await readCard(dir, CARDED.decision.id)).toEqual(CARDED.decision.cards[0]);
   });
 
   /** A LIST CAN NAME A SERVICE OVER THE CAP beside one that fits: People Data
@@ -2800,6 +2817,7 @@ describe('a discovered service', () => {
     });
     expect((first.calls[0] as { body: Record<string, unknown> }).body.accepts).toEqual([
       'discovered',
+      'card',
     ]);
     const fs = await import('node:fs/promises');
     await fs.writeFile(
@@ -2814,6 +2832,7 @@ describe('a discovered service', () => {
     });
     expect((second.calls[0] as { body: Record<string, unknown> }).body.accepts).toEqual([
       'discovered',
+      'card',
       'bazaar',
     ]);
   });
@@ -3091,7 +3110,7 @@ describe('a question to the user', () => {
         'You pick a track: send me a licensed track.',
     });
     expect((body.packet.current as { text: string }).text).toContain('I can get API keys');
-    expect(body).toMatchObject({ sessionId: 'sess-1', accepts: ['discovered'] });
+    expect(body).toMatchObject({ sessionId: 'sess-1', accepts: ['discovered', 'card'] });
   });
 
   it('denies the question once on an offer, then lets it be asked', async () => {

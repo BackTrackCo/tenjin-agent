@@ -37,7 +37,7 @@ tenjin config set sessionBudget 2.00
 The routing decision comes from a server, and it is free: it proposes, it never authorizes. These checks are what keep a wrong or hostile one from being worth anything:
 
 - The amount actually signed has to fit `maxAutoSpend` and the day's `sessionBudget`. A live price above the one the decision quoted is refused before anything is signed, so a provider or a stale catalog cannot charge more than it advertised; a hostile server sets that quote itself, so against one the bound stays `maxAutoSpend`.
-- The backend binds the call and validates its arguments against the capability's own schema, then sends the finished request; this CLI sends it as given and never rebuilds it, so there is no second copy of that rule here to drift from the first.
+- An offer carries the service's card: its input schema, the fields Tenjin pins, and the HTTP request those fields become. Your assistant fills the fields; this CLI puts the pins over them, validates the result against the schema, builds the request and pays the card's own payee, never above the card's price ceiling. A lookup that comes without a card (a free one, or an older offer) is bound by the backend, which sends the finished request for this CLI to send as given.
 - The destination has to be a public HTTPS endpoint whose name resolves to a public address. This is a check, not a pin: the request resolves the name again on its own, so a host that answers publicly at check time and privately a moment later is not closed by it. See [safety-model.md](./safety-model.md).
 - A 2xx whose body fails the decision's own success rule is delivered as `unverified`, never `fulfilled`, with a caveat naming the rule it missed. The money has already moved, so the body is not withheld.
 
@@ -103,10 +103,9 @@ To stop the router without removing anything, `tenjin config set router.enabled 
 ## How one lookup runs
 
 1. You type a turn. The hook sends the bounded packet to Tenjin, which answers whether a paid capability fits and, if it does, keeps that packet under a short-lived id.
-2. When one fits, your assistant sees one line, opening with `Tenjin router (installed by the user):`, that names the service and the call to make: `mcp__x402__request` with your exact lookup and that id.
-3. Your assistant calls `request({query, id})` with the lookup it actually means. That is the accurate part: the routing is decided from your assistant's own query plus the stored context, not from a guess made before the lookup was known.
-4. Tenjin answers with the call to make and what the provider charges. Deciding costs nothing.
-5. This CLI pays that provider once, under your limits, and hands back the result.
+2. When one fits, your assistant sees one line, opening with `Tenjin router (installed by the user):`, that names the service, its price and the call to make: `mcp__x402__request` with that id. The hook keeps the service's card on this machine under the id.
+3. Your assistant calls `request({id})`, which shows the card (the inputs, an example and what comes back) without sending or paying anything. When the hook already holds the one input (the search a native call was about to run, or the page it was about to fetch), the line hands it over and this step is skipped.
+4. Your assistant calls `request({id, input})`. This CLI validates the input against the card, builds the request, pays that provider once under your limits, hands back the result, and tells Tenjin only how the call ended. Deciding costs nothing.
 
 ## What the hooks send
 

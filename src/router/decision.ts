@@ -155,6 +155,45 @@ const DiscoveredCandidateSchema = z.strictObject({
   }),
 });
 
+/**
+ * A TOOL CARD: the offered service's real contract, sent beside the line only
+ * because this build asks for it (`accepts: ["card"]`). The hook stores it by
+ * the offer's id; `request({id})` shows it and `request({id, input})` fills its
+ * request and pays the provider directly, with no second decision. Every field
+ * is the server's, and so is checked like the rest of the answer: the payee and
+ * price still meet the live 402 and the spend policy in `runPay`.
+ */
+export const ToolCardSchema = z.strictObject({
+  capabilityId: z.string().min(1).max(200),
+  provider: z.string().min(1).max(120),
+  description: z.string().min(1).max(500),
+  priceAtomic: z.string().regex(/^\d+$/),
+  priceVaries: z.boolean(),
+  maxAmountAtomic: z.string().regex(/^\d+$/),
+  payTo: z.string().min(1).max(200),
+  network: z.string().min(1).max(64),
+  asset: z.string().min(1).max(200),
+  request: z.strictObject({
+    method: z.enum(['GET', 'POST']),
+    url: z.string().min(1).max(2_048),
+    fields: z.record(z.string(), z.enum(['path', 'query', 'body'])),
+    location: z.enum(['query', 'body']),
+  }),
+  input: z.record(z.string(), z.unknown()),
+  pinned: z.record(z.string(), z.unknown()),
+  example: z.record(z.string(), z.unknown()).optional(),
+  returns: z.string().min(1).max(200).optional(),
+  returnsExample: z.unknown().optional(),
+  resultSchema: z.record(z.string(), z.unknown()).optional(),
+});
+export type ToolCard = z.infer<typeof ToolCardSchema>;
+
+export const OfferCardSchema = ToolCardSchema.extend({ id: IdSchema });
+export type OfferCard = z.infer<typeof OfferCardSchema>;
+
+/** One card per service the line names: the offer and any alternative. */
+const CardsSchema = z.array(OfferCardSchema).min(1).max(4).optional();
+
 /** The same answer on both calls: the hook's offer, and the tool's fallback
  *  when a query with no id found no curated capability. */
 const DiscoveredSchema = z
@@ -165,6 +204,7 @@ const DiscoveredSchema = z
     /** THE LINE, FINISHED, as on `execute`: it carries the seller's
      *  description and the input it takes. */
     hint: z.string().min(1).max(2_000),
+    cards: CardsSchema,
   })
   .superRefine(checkHint);
 
@@ -186,6 +226,7 @@ const HookDecisionSchema = z.discriminatedUnion('action', [
        * bound as a discovered line's.
        */
       hint: z.string().min(1).max(2_000),
+      cards: CardsSchema,
     })
     .superRefine(checkHint),
   DiscoveredSchema,
@@ -231,10 +272,12 @@ export type CallKind = 'hook' | 'tool';
  * What this client can act on beyond the curated answers, sent on both calls.
  * `discovered` is Tenjin's reviewed list of third-party services, on for every
  * build that parses it; the server answers that arm only to a request that
- * lists it, so an older build never sees one. `bazaar` widens it to the open
+ * lists it, so an older build never sees one. `card` asks for each offered
+ * service's tool card beside its line, which only a build that parses it can
+ * take: the decision schemas are strict. `bazaar` widens discovery to the open
  * Bazaar and is sent only while `experimental.bazaar` is on.
  */
-export const CLIENT_ACCEPTS: readonly string[] = ['discovered'];
+export const CLIENT_ACCEPTS: readonly string[] = ['discovered', 'card'];
 export const BAZAAR_ACCEPT = 'bazaar';
 
 /** The `accepts` this build sends, with the open Bazaar or without it. */
@@ -379,6 +422,52 @@ export async function requestDecision(
     await httpRequest(url, options),
     kind === 'hook' ? HookResponseSchema : ToolResponseSchema,
   );
+}
+
+/** How a call run from a tool card ended, for the server's offer-to-call
+ *  count. No text: the id, the outcome, the provider's status and the time. */
+export interface CardOutcome {
+  id: string;
+  status: 'fulfilled' | 'unverified' | 'failed' | 'needs_approval';
+  httpStatus?: number;
+  ms?: number;
+}
+
+/** The outcome report's own deadline: it is telemetry and never holds a result. */
+export const OUTCOME_TIMEOUT_MS = 3_000;
+
+/**
+ * TELL THE SERVER A CARD WAS USED. The client called and paid the provider
+ * itself, so this is the only word the server gets that its offer was taken.
+ * Never throws and never waits on anything the caller needs: a lost report
+ * costs one count.
+ */
+export async function reportCardOutcome(
+  outcome: CardOutcome,
+  deps: Pick<DecisionDeps, 'ctx' | 'baseUrl' | 'fetchImpl'>,
+): Promise<void> {
+  try {
+    await httpRequest(new URL(ROUTER_PATH, deps.baseUrl).toString(), {
+      method: 'POST',
+      timeoutMs: OUTCOME_TIMEOUT_MS,
+      blockRedirects: true,
+      jsonBody: buildOutcomeBody(outcome),
+      ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+    });
+  } catch {
+    // Telemetry only.
+  }
+}
+
+/** The exact body of an outcome report, pinned to the shared fixtures. */
+export function buildOutcomeBody(outcome: CardOutcome): Record<string, unknown> {
+  return {
+    schemaVersion: 1,
+    id: outcome.id,
+    status: outcome.status,
+    ...(outcome.httpStatus !== undefined ? { httpStatus: outcome.httpStatus } : {}),
+    ...(outcome.ms !== undefined ? { ms: Math.max(0, Math.round(outcome.ms)) } : {}),
+  };
 }
 
 function readDecision<T extends z.ZodTypeAny>(

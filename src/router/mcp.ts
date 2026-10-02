@@ -29,13 +29,12 @@ import { runRequestTool, type RequestToolDeps } from './tool';
  * user's whole request, which sent a turn mixing strategy, opinions and one
  * lead-search task to the router as a single operation. It then grew a second
  * half forbidding any rewording at all, which is neither enforceable nor
- * necessary: the backend is what binds the call, it holds the turn's packet
- * against the decision id, and it compares the query it is given with the one
- * it stored. What the host owes is the immediate operation and the inputs
- * that belong to it, exactly as the user gave them where they are exact, which
- * is one sentence rather than two rules. It says "your task", not "the user":
- * a subagent calls this too, and its inputs came from the agent that
- * delegated to it.
+ * necessary: on the query path the backend binds the call against the turn's
+ * stored packet, and on a card the model fills the service's own fields. What
+ * the host owes is the immediate operation and the inputs that belong to it,
+ * exactly as the user gave them where they are exact, which is one sentence
+ * rather than two rules. It says "your task", not "the user": a subagent
+ * calls this too, and its inputs came from the agent that delegated to it.
  */
 export const SCOPE_RULE =
   'Submit one concrete external lookup or computation needed for the current task, with ' +
@@ -55,6 +54,8 @@ const INSTRUCTIONS =
   'company/person/email lookups). When one fits, a hook line names the service and how ' +
   'to call it: at the start of a turn, in place of a WebSearch or WebFetch call, after ' +
   'one comes back short, or in a delegated task. ' +
+  "Call it with the offer's id: `{id}` alone returns the service's card (its inputs, " +
+  'an example and what it returns), free; `{id, input}` runs it. ' +
   'Before asking the user to get an API key or account for a one-off task, call it with ' +
   'that operation: it can find a pay-per-call service. ' +
   `${SCOPE_RULE} Call it alone and wait for its result. Deciding what to ` +
@@ -118,22 +119,24 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
           .optional()
           .describe(
             `${SCOPE_RULE} Carry the inputs and constraints your task gives for that lookup, ` +
-              'and nothing else. ALWAYS send this, with or without an id, unless you send `input`.',
+              'and nothing else. Send this for a task no line offered, or with an id when the ' +
+              'line asks for a query; an offer that has a card takes `input` instead.',
           ),
         id: z
           .string()
           .optional()
           .describe(
-            'The turn id from a hook line, when one is there. It names the service that line ' +
-              'offered, and a call carrying it runs that service on your query. Leave it out ' +
-              'for a different task, and the lookup is decided from the query alone.',
+            'The id from a hook line, when one is there. It names the service that line ' +
+              "offered. Alone, it returns that service's card: its inputs, an example and " +
+              'what it returns, with nothing paid. With `input`, it runs that service. Leave ' +
+              'it out for a different task, and the lookup is decided from the query alone.',
           ),
         input: z
           .record(z.string(), z.unknown())
           .optional()
           .describe(
-            'Only when a line named a pay-per-call service and its input: the JSON object that ' +
-              'service takes, built from the input schema the line gave, sent with its id.',
+            'The JSON object the offered service takes, built from its card (call with the id ' +
+              'alone to see it) or given ready in the line, sent with its id.',
           ),
       },
     },

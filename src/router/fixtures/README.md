@@ -87,6 +87,23 @@ Anything that is neither form is refused at validation with a plain error:
 is valid and is the fallback for an id that has expired; the answer says so in
 `note` and is still a decision.
 
+## Tool cards
+
+A client that adds `"card"` to `accepts` also gets `cards` on every offer
+(`execute` and `discovered`): one card per service the hint names, under the
+id the hint gives it. A card is the service's contract: `capabilityId`,
+`provider`, `description`, `priceAtomic`, `priceVaries`, `maxAmountAtomic`,
+`payTo`, `network`, `asset`, `request` (`method`, a `url` that may hold
+`{name}` path placeholders, `fields` saying where each field goes, and
+`location` for any other), `input` (a flat JSON Schema), `pinned` (fields set
+on every call, which win over the agent's input), and optionally `example`,
+`returns`, `returnsExample` and `resultSchema`. The hint then asks for
+`request({id})`, which shows the card, or hands over the one input the hook
+already holds as `request({id, input})`. The client builds and pays the call
+itself and reports `{schemaVersion, id, status, httpStatus?, ms?}`, which
+marks the row executed and stores no text. A client that does not send
+`card` never sees the field: the decision schemas are strict.
+
 ## The set
 
 | file                                       | what it pins                                                                        |
@@ -109,6 +126,9 @@ is valid and is the fallback for an id that has expired; the answer says so in
 | `wire-lookup-discovered.json`              | tool answer to a query with no id: the same `discovered` shape                      |
 | `wire-tool-request-discovered.json`        | the tool call for a discovered service: the id and the host's `input`, no query     |
 | `wire-lookup-execute-discovered.json`      | tool answer: the discovered service as an ordinary `execute`, category `discovered` |
+| `wire-hook-execute-card.json`              | hook answer for a client that accepts `card`: the ready call and the Exa card       |
+| `wire-hook-discovered-card.json`           | the same for a list service: the hint asks for the id alone, the card rides along   |
+| `wire-outcome-request.json`                | the outcome report a client sends after running a card                              |
 
 Two rules the fixtures exist to hold:
 

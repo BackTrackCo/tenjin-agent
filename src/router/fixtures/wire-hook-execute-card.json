@@ -1,0 +1,121 @@
+{
+  "schemaVersion": 1,
+  "routerVersion": "2026-09-23.1",
+  "decision": {
+    "action": "execute",
+    "id": "0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d11",
+    "capabilityId": "exa-search",
+    "category": "web research",
+    "provider": "Exa",
+    "capabilityDescription": "web search that returns ranked source pages, optionally with their text, highlights or summaries",
+    "providerPriceAtomic": "7000",
+    "endpoint": "https://api.exa.ai/search",
+    "usage": "the research question",
+    "hint": "Exa fits this: web search that returns ranked source pages, optionally with their text, highlights or summaries. $0.007 via https://api.exa.ai/search . Call request({id: \"0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d11\", input: {\"query\":\"x402 agent payments\"}}) instead; native tools stay allowed for anything else.",
+    "cards": [
+      {
+        "id": "0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d11",
+        "capabilityId": "exa-search",
+        "provider": "Exa",
+        "description": "web search that returns ranked source pages, optionally with their text, highlights or summaries",
+        "priceAtomic": "7000",
+        "priceVaries": false,
+        "maxAmountAtomic": "7000",
+        "payTo": "0x6d6E695b09861467c7d462f5AAF31cF3540B9192",
+        "network": "eip155:8453",
+        "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "request": {
+          "method": "POST",
+          "url": "https://api.exa.ai/search",
+          "fields": {
+            "query": "body",
+            "type": "body",
+            "category": "body",
+            "includeDomains": "body",
+            "numResults": "body",
+            "contents": "body"
+          },
+          "location": "body"
+        },
+        "input": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Search query"
+            },
+            "type": {
+              "type": "string",
+              "enum": ["auto", "fast", "instant"],
+              "description": "Search mode: auto (the default) balances quality and speed, fast and instant trade depth for speed"
+            },
+            "category": {
+              "type": "string",
+              "enum": [
+                "company",
+                "people",
+                "publication",
+                "news",
+                "personal site",
+                "financial report"
+              ],
+              "description": "A data category to focus on"
+            },
+            "includeDomains": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "minItems": 1,
+              "maxItems": 20,
+              "description": "Return results only from these domains or domain paths"
+            },
+            "numResults": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 10,
+              "default": 10
+            },
+            "contents": {
+              "type": "object",
+              "const": {
+                "highlights": {
+                  "maxCharacters": 500
+                }
+              }
+            }
+          },
+          "required": ["query"],
+          "additionalProperties": false
+        },
+        "pinned": {
+          "contents": {
+            "highlights": {
+              "maxCharacters": 500
+            }
+          }
+        },
+        "example": {
+          "numResults": 10,
+          "query": "example search query",
+          "type": "auto"
+        },
+        "returnsExample": {
+          "results": [
+            {
+              "score": 0.99,
+              "title": "Example",
+              "url": "https://example.com"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "jev": {
+    "calls": 1,
+    "latencyMs": 640
+  }
+}

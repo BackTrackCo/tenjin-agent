@@ -10,7 +10,8 @@ import type { CommandContext } from '../context';
 import { runPay } from '../commands/pay';
 import { extensionFor, runRequestTool } from './tool';
 import type { MediaTransport } from './paid';
-import { ROUTER_PATH } from './decision';
+import { storeCards } from './cards';
+import { ROUTER_PATH, type OfferCard } from './decision';
 import { bindDecision, claimRedirect, noteSession, renderProgress } from './progress';
 
 // Pass-through, so a refusal's typed details stay observable after the tool
@@ -746,7 +747,7 @@ describe('a discovered service', () => {
       providerContentUntrusted: true,
     });
     expect(calls).toHaveLength(1);
-    expect(JSON.parse(calls[0]!.body!)).toMatchObject({ accepts: ['discovered'] });
+    expect(JSON.parse(calls[0]!.body!)).toMatchObject({ accepts: ['discovered', 'card'] });
     expect(auth.authorize).not.toHaveBeenCalled();
   });
 
@@ -1138,5 +1139,173 @@ describe('a discovered service', () => {
     ['application/x-sh', 'bin'],
   ])('names a %s file .%s', (type, ext) => {
     expect(extensionFor(type)).toBe(ext);
+  });
+});
+
+/**
+ * AN OFFER WITH A TOOL CARD: the hook kept the card, so the tool shows it for
+ * the id alone and runs it for the id and an input, building and paying the
+ * request itself. The server is asked nothing and told only how it ended.
+ */
+describe('an offer with a tool card', () => {
+  const CARD_ID = '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d01';
+  const PAYEE = '0x1111111111111111111111111111111111111111';
+
+  function quoteCard(over: Partial<OfferCard> = {}): OfferCard {
+    return {
+      id: CARD_ID,
+      capabilityId: 'cmc-quotes',
+      provider: 'CoinMarketCap',
+      description: 'latest market quotes for one or more cryptocurrencies',
+      priceAtomic: '10000',
+      priceVaries: false,
+      maxAmountAtomic: '10000',
+      payTo: PAYEE,
+      network: 'eip155:8453',
+      asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+      request: {
+        method: 'GET',
+        url: PROVIDER,
+        fields: { symbol: 'query', convert: 'query' },
+        location: 'query',
+      },
+      input: {
+        type: 'object',
+        properties: {
+          symbol: { type: 'string', description: 'Comma-separated symbols' },
+          convert: { type: 'string', enum: ['USD', 'EUR'] },
+        },
+        required: ['symbol'],
+        additionalProperties: false,
+      },
+      pinned: {},
+      example: { symbol: 'BTC' },
+      returns: 'JSON quotes keyed by symbol',
+      ...over,
+    };
+  }
+
+  it('shows the card for the id alone, and sends nothing', async () => {
+    await storeCards(dir, [quoteCard()]);
+    const { fetchImpl, calls } = net([]);
+    const result = await runRequestTool({ id: CARD_ID }, deps(fetchImpl));
+    expect(result.isError).toBe(false);
+    expect(result.envelope).toMatchObject({
+      status: 'card',
+      id: CARD_ID,
+      cost: ['provider price 0 USD'],
+    });
+    expect(result.summary).toContain('symbol (string, required); Comma-separated symbols');
+    expect(result.summary).toContain('Returns: JSON quotes keyed by symbol');
+    expect(calls).toEqual([]);
+  });
+
+  it('builds the request from the input, pays the provider, and reports how it ended', async () => {
+    await storeCards(dir, [quoteCard()]);
+    const { fetchImpl, calls } = net([...providerLegs(), { url: ROUTER, status: 200, body: {} }]);
+    const result = await runRequestTool(
+      { id: CARD_ID, input: { symbol: 'BTC,ETH', convert: 'USD' } },
+      deps(fetchImpl),
+    );
+    expect(result.envelope).toMatchObject({
+      status: 'fulfilled',
+      parameters: { symbol: 'BTC,ETH', convert: 'USD' },
+      cost: ['provider price 0.01 USD'],
+    });
+    expect(calls[0]).toMatchObject({
+      url: `${PROVIDER}?symbol=BTC%2CETH&convert=USD`,
+      method: 'GET',
+      paid: false,
+    });
+    expect(calls[1]).toMatchObject({ paid: true });
+    expect(vi.mocked(runPay).mock.calls.at(-1)![0]).toMatchObject({
+      terms: {
+        source: 'CoinMarketCap',
+        maxAmountAtomic: '10000',
+        payTo: PAYEE,
+        network: 'eip155:8453',
+      },
+      execution: 'router',
+    });
+    // No decision was asked for: the one router call is the report.
+    await vi.waitFor(() => expect(calls).toHaveLength(3));
+    expect(calls[2]).toMatchObject({ url: `${ROUTER}${ROUTER_PATH}`, method: 'POST' });
+    expect(JSON.parse(calls[2]!.body!)).toMatchObject({
+      schemaVersion: 1,
+      id: CARD_ID,
+      status: 'fulfilled',
+    });
+  });
+
+  it('refuses an input that misses the card, naming every problem, and sends nothing', async () => {
+    await storeCards(dir, [quoteCard()]);
+    const { fetchImpl, calls } = net([]);
+    const result = await runRequestTool(
+      { id: CARD_ID, input: { convert: 'GBP', limit: 3 } },
+      deps(fetchImpl),
+    );
+    expect(result.isError).toBe(false);
+    expect(result.envelope).toMatchObject({
+      status: 'needs_input',
+      cost: ['provider price 0 USD'],
+    });
+    const reason = String(result.envelope.reason);
+    expect(reason).toContain('symbol is required');
+    expect(reason).toContain('convert must be one of "USD", "EUR"');
+    expect(reason).toContain('the input has no field "limit"');
+    expect(result.envelope.nextStep).toContain('Example input: {"symbol":"BTC"}');
+    expect(result.envelope.parameters).toEqual({ convert: 'GBP', limit: 3 });
+    expect(calls).toEqual([]);
+  });
+
+  it("signs nothing for a live 402 that pays someone other than the card's payee", async () => {
+    await storeCards(dir, [quoteCard()]);
+    const { fetchImpl, calls } = net([
+      {
+        url: PROVIDER,
+        status: 402,
+        body: {},
+        headers: {
+          'PAYMENT-REQUIRED': challenge({ payTo: '0x2222222222222222222222222222222222222222' }),
+        },
+      },
+      { url: ROUTER, status: 200, body: {} },
+    ]);
+    const result = await runRequestTool({ id: CARD_ID, input: { symbol: 'BTC' } }, deps(fetchImpl));
+    expect(result.envelope).toMatchObject({
+      status: 'failed',
+      cost: ['provider price 0 USD'],
+      request: { method: 'GET', url: `${PROVIDER}?symbol=BTC` },
+      parameters: { symbol: 'BTC' },
+    });
+    expect(calls.filter((call) => call.paid)).toEqual([]);
+  });
+
+  it('says a provider refused the input before payment, and what was sent', async () => {
+    await storeCards(dir, [quoteCard()]);
+    const { fetchImpl } = net([
+      { url: PROVIDER, status: 400, body: { error: 'bad symbol' } },
+      { url: ROUTER, status: 200, body: {} },
+    ]);
+    const result = await runRequestTool({ id: CARD_ID, input: { symbol: '??' } }, deps(fetchImpl));
+    expect(result.envelope).toMatchObject({
+      status: 'failed',
+      providerStatus: 400,
+      parameters: { symbol: '??' },
+      nextStep: 'Fix the input and call again with the same id.',
+    });
+    expect(String(result.envelope.reason)).toContain(
+      'CoinMarketCap rejected this input before any payment (HTTP 400)',
+    );
+  });
+
+  it('asks the server, as before, for an id it holds no card for', async () => {
+    const { fetchImpl, calls } = net([{ url: ROUTER, status: 200, body: NATIVE }]);
+    const result = await runRequestTool({ id: CARD_ID }, deps(fetchImpl));
+    expect(result.envelope).toMatchObject({ status: 'needs_input' });
+    expect(calls).toEqual([]);
+    const withQuery = await runRequestTool({ id: CARD_ID, query: 'BTC price' }, deps(fetchImpl));
+    expect(withQuery.envelope).toMatchObject({ status: 'native' });
+    expect(calls).toHaveLength(1);
   });
 });

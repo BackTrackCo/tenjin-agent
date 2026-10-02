@@ -2,7 +2,14 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { buildHookBody, buildToolBody, CLIENT_ACCEPTS, parseForTests } from './decision';
+import {
+  buildHookBody,
+  buildOutcomeBody,
+  buildToolBody,
+  CLIENT_ACCEPTS,
+  parseForTests,
+  type CardOutcome,
+} from './decision';
 import { GATE_TIMEOUT_MS } from './gate';
 import { MAX_PACKET_BYTES, type Packet } from './context';
 import { STDIN_TIMEOUT_MS } from './hook-command';
@@ -133,6 +140,18 @@ describe('the request bodies', () => {
     ).toEqual(canonical);
   });
 
+  it('reports a carded call by its id and how it ended, byte for byte, with no text', () => {
+    const canonical = fixture('wire-outcome-request.json');
+    expect(buildOutcomeBody(canonical as unknown as CardOutcome)).toEqual(canonical);
+    expect(Object.keys(canonical).sort()).toEqual([
+      'httpStatus',
+      'id',
+      'ms',
+      'schemaVersion',
+      'status',
+    ]);
+  });
+
   it('carries nothing about money on any form', () => {
     for (const name of [
       'wire-hook-request-prompt.json',
@@ -180,7 +199,11 @@ describe('every answer payload on disk', () => {
     expect(parseForTests('hook', fixture('wire-lookup-execute-get.json')).success).toBe(false);
     // A discovered answer is ONE shape on both calls: the hook's offer and the
     // tool's fallback parse with either parser.
-    for (const name of ['wire-hook-discovered.json', 'wire-lookup-discovered.json']) {
+    for (const name of [
+      'wire-hook-discovered.json',
+      'wire-lookup-discovered.json',
+      'wire-hook-discovered-card.json',
+    ]) {
       expect(parseForTests('hook', fixture(name)).success, name).toBe(true);
       expect(parseForTests('tool', fixture(name)).success, name).toBe(true);
     }

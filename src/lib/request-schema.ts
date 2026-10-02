@@ -70,11 +70,13 @@ function walk(value: unknown, schemaMode: boolean, depth = 0): void {
 
 const validators = new Map<string, ValidateFunction>();
 
-function compile(schema: JsonRecord): ValidateFunction {
+/** `allErrors` collects every problem rather than stopping at the first: what
+ *  an agent fixing its own input needs, in one round. */
+function compile(schema: JsonRecord, allErrors = false): ValidateFunction {
   if (Buffer.byteLength(stable(schema)) > MAX_SCHEMA_BYTES) {
     throw new Error('Schema exceeds its size limit.');
   }
-  const key = canonicalHash(schema);
+  const key = `${canonicalHash(schema)}${allErrors ? ':all' : ''}`;
   const cached = validators.get(key);
   if (cached !== undefined) return cached;
   walk(schema, true);
@@ -83,7 +85,7 @@ function compile(schema: JsonRecord): ValidateFunction {
     strictTypes: false,
     strictTuples: false,
     strictRequired: false,
-    allErrors: false,
+    allErrors,
     validateFormats: true,
     coerceTypes: false,
     useDefaults: false,
@@ -135,6 +137,80 @@ export function validateAgainstSchema(schema: unknown, value: unknown): SchemaCh
   } catch (err) {
     return { valid: false, errors: [err instanceof Error ? err.message : String(err)] };
   }
+}
+
+/**
+ * A schema with its regular-expression keywords taken out, so the rest of it
+ * can still be checked: they stay out of the compiler (see {@link walk}), and
+ * refusing the whole schema for one `pattern` left four list services with no
+ * check at all. A field NAMED `pattern` is a schema object, not a string, and
+ * is kept.
+ */
+function withoutPatterns(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(withoutPatterns);
+  if (value === null || typeof value !== 'object') return value;
+  return Object.fromEntries(
+    Object.entries(value as JsonRecord)
+      .filter(
+        ([key, entry]) =>
+          !(key === 'pattern' && typeof entry === 'string') && key !== 'patternProperties',
+      )
+      .map(([key, entry]) => [key, withoutPatterns(entry)]),
+  );
+}
+
+/** One Ajv error as an agent reads it: the field, and what it must be. */
+function describeProblem(error: {
+  instancePath: string;
+  keyword: string;
+  params: Record<string, unknown>;
+  message?: string;
+}): string {
+  const at = error.instancePath.replace(/^\//, '').replaceAll('/', '.');
+  const field = (name: string) => (at ? `${at}.${name}` : name);
+  const subject = at || 'the input';
+  const { params } = error;
+  switch (error.keyword) {
+    case 'required':
+      return `${field(String(params.missingProperty))} is required`;
+    case 'additionalProperties':
+      return `${subject} has no field ${JSON.stringify(params.additionalProperty)}`;
+    case 'enum':
+      return `${subject} must be one of ${(params.allowedValues as unknown[]).map((v) => JSON.stringify(v)).join(', ')}`;
+    case 'const':
+      return `${subject} must be ${JSON.stringify(params.allowedValue)}`;
+    case 'type':
+      return `${subject} must be ${String(params.type)}`;
+    default:
+      return `${subject} ${error.message ?? 'is invalid'}`;
+  }
+}
+
+/**
+ * EVERY way an input misses its schema, each naming the field and, for a
+ * fixed set, the values it allows; `[]` when it fits; undefined when the
+ * schema cannot be compiled even without its patterns, which leaves the
+ * provider's own validation as the only check.
+ */
+export function inputProblems(schema: unknown, value: unknown): string[] | undefined {
+  if (schema === null || typeof schema !== 'object' || Array.isArray(schema)) return undefined;
+  let validate: ValidateFunction;
+  try {
+    validate = compile(withoutPatterns(schema) as JsonRecord, true);
+  } catch {
+    return undefined;
+  }
+  try {
+    const json = JSON.stringify(value);
+    if (json === undefined || Buffer.byteLength(json) > MAX_VALUE_BYTES) {
+      return ['the input is not JSON, or exceeds its size limit'];
+    }
+    walk(value, false);
+  } catch (err) {
+    return [err instanceof Error ? err.message : String(err)];
+  }
+  if (validate(value)) return [];
+  return [...new Set((validate.errors ?? []).map(describeProblem))];
 }
 
 /** Compile a success schema before a payment is signed, so a broken rule refuses
