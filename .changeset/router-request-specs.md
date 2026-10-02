@@ -20,7 +20,10 @@ then tells the server only how the call ended; a refusal before payment (the
 spend policy, the spec's terms, the provider's own 4xx) reports nothing. Each
 spec id pays once: a retry of a paid id, or a second call racing it, pays
 nothing and points at the earlier result or a new offer, while a call that
-paid nothing (a refused input) leaves the spec runnable. A spec is kept as
+signed nothing (a refused input) leaves the spec runnable. A call that signed
+a payment and then failed without learning the amount (a spend ledger that
+could not be written) keeps the id claimed as possibly paid, so a retry signs
+nothing and says to check `tenjin payments`. A spec is kept as
 long as the server keeps its offer, 15 minutes. A path input of `.` or `..` is
 refused before anything is sent, and an input whose varying price lands over
 the spec's ceiling is refused before signing, asking for a smaller input. A

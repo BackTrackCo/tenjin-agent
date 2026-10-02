@@ -77,11 +77,14 @@ export async function readSpec(dataDir: string, id: string): Promise<OfferSpec |
 
 /**
  * What an earlier call with a spec's id left. `paid`: money left for it.
+ * `possibly_paid`: a payment was signed and may have left, but the call ended
+ * without saying how much (a spend ledger that could not be written, say).
  * `running`: a call claimed it and has not ended, or its process died, so it
  * may have paid. `unrecorded`: this call could not record its claim.
  */
 export type EarlierPayment =
   | { state: 'paid'; at: string; amountAtomic: string; txHash?: string }
+  | { state: 'possibly_paid'; at: string }
   | { state: 'running'; at?: string }
   | { state: 'unrecorded' };
 
@@ -92,6 +95,7 @@ const PaymentSchema = z.discriminatedUnion('state', [
     amountAtomic: z.string().regex(/^\d+$/),
     txHash: z.string().max(100).optional(),
   }),
+  z.strictObject({ state: z.literal('possibly_paid'), at: z.string().max(40) }),
   z.strictObject({ state: z.literal('running'), at: z.string().max(40) }),
 ]);
 
@@ -135,27 +139,34 @@ export async function claimSpecPayment(
 }
 
 /**
- * How the claimed call ended. Money that left is recorded against the id; a
- * call that left nothing drops its claim, so a fixed input can still run. A
- * record that cannot be written leaves the claim standing, which refuses.
+ * How the claimed call ended. Money that left is recorded against the id. The
+ * claim is dropped ONLY when nothing was signed, so a fixed input can still
+ * run: a signed payment whose amount the call never learned (it failed after
+ * the authorization left) stays claimed as possibly paid, and the id never
+ * signs again. A record that cannot be written leaves the claim standing,
+ * which refuses too.
  */
 export async function settleSpecPayment(
   dataDir: string,
   id: string,
-  left: { amountAtomic: bigint; txHash?: string },
+  left: { amountAtomic: bigint; txHash?: string; signed: boolean },
   now: number = Date.now(),
 ): Promise<void> {
   const path = paymentPath(dataDir, id);
-  if (left.amountAtomic === 0n) {
+  if (!left.signed && left.amountAtomic === 0n) {
     await rm(path, { force: true }).catch(() => undefined);
     return;
   }
-  const record = {
-    state: 'paid',
-    at: new Date(now).toISOString(),
-    amountAtomic: left.amountAtomic.toString(),
-    ...(left.txHash !== undefined ? { txHash: left.txHash } : {}),
-  };
+  const at = new Date(now).toISOString();
+  const record =
+    left.amountAtomic > 0n
+      ? {
+          state: 'paid',
+          at,
+          amountAtomic: left.amountAtomic.toString(),
+          ...(left.txHash !== undefined ? { txHash: left.txHash } : {}),
+        }
+      : { state: 'possibly_paid', at };
   await writeFileAtomic(path, JSON.stringify(record), { mode: 0o600, dirMode: 0o700 }).catch(
     () => undefined,
   );

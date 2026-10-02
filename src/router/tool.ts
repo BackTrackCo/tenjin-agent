@@ -367,9 +367,11 @@ function alreadyPaid(id: string, spec: OfferSpec, earlier: EarlierPayment): Requ
   const reason =
     earlier.state === 'paid'
       ? `This offer from ${spec.provider} was already paid for at ${earlier.at} ($${toMoney(earlier.amountAtomic).usd}${earlier.txHash !== undefined ? `, tx ${earlier.txHash}` : ''}), so nothing was paid this time. Its result is in the earlier request result for this id, and the payment is in \`tenjin payments\`.`
-      : earlier.state === 'running'
-        ? `A call for this offer from ${spec.provider} already started and may have paid, so nothing was paid this time. Use that call's result.`
-        : `This machine could not record this offer's payment, so nothing was sent or paid.`;
+      : earlier.state === 'possibly_paid'
+        ? `A call for this offer from ${spec.provider} signed a payment at ${earlier.at} that may have left, and it ended without recording how much, so nothing was paid this time. Check \`tenjin payments\` before paying for this again.`
+        : earlier.state === 'running'
+          ? `A call for this offer from ${spec.provider} already started and may have paid, so nothing was paid this time. Use that call's result.`
+          : `This machine could not record this offer's payment, so nothing was sent or paid.`;
   return fail('needs_input', reason, {
     nextStep: `For another call, send request({query}) for a new offer; this id (${id}) pays once.`,
   });
@@ -450,6 +452,8 @@ async function runSpec(
     deps,
     footer,
   );
+  // The claim survives anything that may have signed: only a call that
+  // signed nothing frees the id for a fixed input.
   await settleSpecPayment(deps.ctx.dataDir, id, left);
   // REPORTED ONLY WHEN THE CALL RAN OR MONEY LEFT: a refusal before payment
   // (the spend policy, the spec's terms, the provider's own 4xx) took nothing
@@ -504,11 +508,13 @@ async function payAndDeliver(
 ): Promise<{
   result: RequestToolResult;
   outcome: Omit<SpecOutcome, 'id' | 'ms'>;
-  /** What left this machine for the call, whatever came back. */
-  left: { amountAtomic: bigint; txHash?: string };
+  /** What left this machine for the call, whatever came back. `signed`: a
+   *  payment may have been signed, even where the amount is unknown. */
+  left: { amountAtomic: bigint; txHash?: string; signed: boolean };
 }> {
   const built = call.request;
   const parameters = call.parameters !== undefined ? { parameters: call.parameters } : {};
+  const signing = watchSigning(deps.payDeps?.authorizer ?? deps.authorizer);
   try {
     // WHAT IS ABOUT TO BE CALLED, named while it is being called. This is the
     // executed destination, not the hint's suggestion, which is the whole point
@@ -530,7 +536,7 @@ async function payAndDeliver(
       {
         ...(deps.payDeps ?? {}),
         ...(deps.provider !== undefined ? { provider: deps.provider } : {}),
-        authorizer: deps.payDeps?.authorizer ?? deps.authorizer,
+        authorizer: signing.authorizer,
         confirm: async () => false,
       },
     );
@@ -618,7 +624,7 @@ async function payAndDeliver(
       await footer.done('unverified', shown);
       return {
         outcome: { status: 'unverified' },
-        left: { amountAtomic: providerAtomic, ...tx },
+        left: { amountAtomic: providerAtomic, ...tx, signed: signing.mayHaveSigned() },
         result: {
           isError: true,
           summary: `Unverified result from ${base.supplier} · ${base.cost.join(' · ')}`,
@@ -633,7 +639,7 @@ async function payAndDeliver(
     await footer.done('fulfilled', shown);
     return {
       outcome: { status: 'fulfilled' },
-      left: { amountAtomic: providerAtomic, ...tx },
+      left: { amountAtomic: providerAtomic, ...tx, signed: signing.mayHaveSigned() },
       result: {
         isError: false,
         summary: `Fulfilled by ${base.supplier} · ${base.cost.join(' · ')}`,
@@ -703,7 +709,7 @@ async function payAndDeliver(
       );
     }
     return {
-      left: { amountAtomic: leftAtomic },
+      left: { amountAtomic: leftAtomic, signed: signing.mayHaveSigned() },
       outcome: {
         status,
         ...(typeof detail.status === 'number' ? { httpStatus: detail.status } : {}),
@@ -731,6 +737,42 @@ async function payAndDeliver(
       }),
     };
   }
+}
+
+/**
+ * WHETHER A PAYMENT MAY HAVE BEEN SIGNED, read off the spend gate's own calls
+ * rather than off an error. `runPay` reserves before it signs, releases only
+ * when nothing was signed, and commits once the authorization has left, so a
+ * commit, or a reservation never released, is a payment that may have moved.
+ * An error's details cannot say that: a commit that fails to write the spend
+ * ledger throws with no amount on it, after the money left.
+ */
+function watchSigning(inner: SpendAuthorizer): {
+  authorizer: SpendAuthorizer;
+  mayHaveSigned: () => boolean;
+} {
+  let reserved = false;
+  let released = false;
+  let committed = false;
+  return {
+    authorizer: {
+      policyEnforcement: inner.policyEnforcement,
+      authorize: async (req) => {
+        const authorization = await inner.authorize(req);
+        if (authorization.decision !== 'deny') reserved = true;
+        return authorization;
+      },
+      commit: async (reservationId, amountAtomic, opts) => {
+        committed = true;
+        await inner.commit(reservationId, amountAtomic, opts);
+      },
+      release: async (reservationId) => {
+        released = true;
+        await inner.release(reservationId);
+      },
+    },
+    mayHaveSigned: () => committed || (reserved && !released),
+  };
 }
 
 /** One ledger line for a paid call; the settlement is known only with a tx. */

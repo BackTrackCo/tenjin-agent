@@ -1406,6 +1406,34 @@ describe('an offer with a request spec', () => {
     expect(auth.authorize).toHaveBeenCalledOnce();
   });
 
+  it('keeps the claim when the spend ledger fails after the payment left: a retry signs nothing', async () => {
+    await storeSpecs(dir, [quoteSpec()]);
+    const auth = authorizer();
+    // The authorization has left, then the ledger write behind `commit` fails:
+    // the error carries no amount, so the call reads as unpaid.
+    vi.mocked(auth.commit).mockRejectedValueOnce(
+      new Error('the spend ledger could not be written'),
+    );
+    // A second paid leg is scripted, so a retry that signs again is observable.
+    const { fetchImpl, calls } = net([...providerLegs(), ...providerLegs()]);
+    const first = await runRequestTool(
+      { id: SPEC_ID, input: { symbol: 'BTC' } },
+      deps(fetchImpl, auth),
+    );
+    expect(first.envelope).toMatchObject({ status: 'failed' });
+    expect(calls.filter((call) => call.paid)).toHaveLength(1);
+    const retry = await runRequestTool(
+      { id: SPEC_ID, input: { symbol: 'BTC' } },
+      deps(fetchImpl, auth),
+    );
+    expect(retry.envelope).toMatchObject({ status: 'needs_input', cost: ['provider price 0 USD'] });
+    expect(String(retry.envelope.reason)).toContain('signed a payment');
+    expect(String(retry.envelope.reason)).toContain('may have left');
+    expect(String(retry.envelope.nextStep)).toContain('request({query})');
+    expect(calls.filter((call) => call.paid)).toHaveLength(1);
+    expect(auth.authorize).toHaveBeenCalledOnce();
+  });
+
   it('lets a spec run again after a call that paid nothing', async () => {
     await storeSpecs(dir, [quoteSpec()]);
     const { fetchImpl, calls } = net([
