@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { MAX_PAID_LEG_TIMEOUT_MS, paidLegTimeoutMs, runPay } from './pay';
 import { saveSweepListings } from '../lib/bazaar';
 import { CliError } from '../lib/errors';
+import { MAX_BODY_BYTES } from '../lib/request-schema';
 import { knownDeploymentOrigins } from '../lib/production-origin';
 import { encodePaymentRequiredHeader } from '@x402/core/http';
 import { parseSIWxHeader } from '@x402/extensions/sign-in-with-x';
@@ -1200,12 +1201,12 @@ describe('runPay, the success rule on every delivery', () => {
   });
 
   /**
-   * A body past the client's 128 KiB validation limit is not evidence the
+   * A body past the client's 4 MiB validation limit is not evidence the
    * endpoint broke its contract: the limit is ours, the rule never ran, and on
    * the paid leg the authorization has already settled. Refusing it charged the
    * caller and threw the product away.
    */
-  const OVERSIZED = { success: true, blob: 'x'.repeat(200 * 1024) };
+  const OVERSIZED = { success: true, blob: 'x'.repeat(MAX_BODY_BYTES) };
 
   it('delivers a PAID 2xx too large to validate, with the caveat, and keeps the charge', async () => {
     const fixture = buildPaymentRequired();

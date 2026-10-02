@@ -3,7 +3,7 @@ import { CliError } from '../lib/errors';
 import { toMoney } from '../lib/money';
 import { downloadsDir } from '../lib/paths';
 import { mask } from '../lib/redact';
-import { assertResultSchema, canonicalHash } from '../lib/request-schema';
+import { assertResultSchema, canonicalHash, projectBody } from '../lib/request-schema';
 import { resolveContextSettings } from '../lib/settings';
 import type { SpendAuthorizer, WalletProvider } from '../lib/wallet';
 import type { TenjinSigner } from '../lib/wallet/provider';
@@ -13,6 +13,7 @@ import {
   claimSpecPayment,
   readSpec,
   settleSpecPayment,
+  storeFullResult,
   storeSpecs,
   type EarlierPayment,
 } from './specs';
@@ -458,6 +459,7 @@ async function runSpec(
       },
       requestKey: `${spec.capabilityId}:${canonicalHash(merged)}`,
       ...(spec.resultSchema !== undefined ? { resultSchema: spec.resultSchema } : {}),
+      ...(spec.outputSchema !== undefined ? { project: { id, schema: spec.outputSchema } } : {}),
       parameters: sentInput,
       sent: JSON.stringify(sentInput),
       agentBuilt: true,
@@ -507,6 +509,9 @@ interface ProviderCall {
   agentBuilt?: boolean;
   /** The spec prices by input, up to `terms.maxAmountAtomic`. */
   priceVaries?: boolean;
+  /** The spec's promised fields: the result is cut to them, and the whole
+   *  body is saved under the offer's id. */
+  project?: { id: string; schema: Record<string, unknown> };
 }
 
 /**
@@ -603,6 +608,10 @@ async function payAndDeliver(
           )
         : [];
     const savedFiles = [...(binary?.savedTo !== undefined ? [binary.savedTo] : []), ...linked];
+    const cut =
+      binary === null && call.project !== undefined && data.bodyText !== undefined
+        ? await projected(deps.ctx.dataDir, call.project, data.bodyText)
+        : null;
     if (providerAtomic > 0n) {
       await appendPaidRecord(
         deps.ctx.dataDir,
@@ -620,7 +629,8 @@ async function payAndDeliver(
       cost: costLines(providerAtomic),
       ...(data.settlementTxHash !== undefined ? { settlementTxHash: data.settlementTxHash } : {}),
       ...(call.note !== undefined ? { note: call.note } : {}),
-      result: binary ?? data.bodyText ?? '',
+      result: binary ?? cut?.result ?? data.bodyText ?? '',
+      ...(cut !== null ? { fullResultPath: cut.fullResultPath } : {}),
       ...(savedFiles.length > 0 ? { savedFiles } : {}),
       providerContentUntrusted: true,
     };
@@ -629,9 +639,9 @@ async function payAndDeliver(
     // failure the rule exists to catch, and a caveat inside a `fulfilled`
     // envelope does not reach code that branches on the status: a provider
     // could pad a broken answer past the validation limit and have it read as
-    // a checked, paid result. The body still rides along whole, because the
-    // money moved and withholding the product would be a second loss on top
-    // of the first.
+    // a checked, paid result. The body still rides along (whole, or cut to
+    // the spec's fields with the whole saved), because the money moved and
+    // withholding the product would be a second loss on top of the first.
     const shown = {
       provider: built.url,
       ...parameters,
@@ -754,6 +764,27 @@ async function payAndDeliver(
       }),
     };
   }
+}
+
+/**
+ * THE FIELDS THE SPEC PROMISES, AND THE WHOLE BODY ON DISK. A provider body
+ * can be far larger than the answer (an Apollo person hit carries the
+ * employer's whole organization record), so the model is handed the
+ * projection and the path of the full body. The success rule has already run
+ * on the full body. Null when the body cannot be cut or the file cannot be
+ * written: the whole body is then handed back as before, and the call never
+ * fails over it.
+ */
+async function projected(
+  dataDir: string,
+  project: { id: string; schema: Record<string, unknown> },
+  body: string,
+): Promise<{ result: string; fullResultPath: string } | null> {
+  const cut = projectBody(project.schema, body);
+  if (cut === undefined) return null;
+  const fullResultPath = await storeFullResult(dataDir, project.id, body);
+  if (fullResultPath === null) return null;
+  return { result: JSON.stringify(cut.value), fullResultPath };
 }
 
 /**

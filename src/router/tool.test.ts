@@ -1,4 +1,5 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -8,6 +9,7 @@ import { resolveSpendAuthorizer } from '../lib/wallet';
 import type { SpendAuthorization, SpendAuthorizer } from '../lib/wallet';
 import type { CommandContext } from '../context';
 import { runPay } from '../commands/pay';
+import { MAX_BODY_BYTES } from '../lib/request-schema';
 import { extensionFor, runRequestTool } from './tool';
 import type { MediaTransport } from './paid';
 import { storeSpecs } from './specs';
@@ -595,7 +597,7 @@ describe('the paid body handed back to the model', () => {
   });
 
   it('delivers a paid body too large to check, unverified, as before', async () => {
-    const body = { data: { blob: 'x'.repeat(200 * 1024) } };
+    const body = { data: { blob: 'x'.repeat(MAX_BODY_BYTES) } };
     const { fetchImpl } = net([
       { url: ROUTER, status: 200, body: withRule() },
       ...providerLegs(body),
@@ -603,6 +605,18 @@ describe('the paid body handed back to the model', () => {
     const result = await runRequestTool({ query: 'q' }, deps(fetchImpl));
     expect(result.envelope).toMatchObject({ status: 'unverified' });
     expect(result.envelope.resultCaveat).toContain('not checked');
+  });
+
+  it('checks a 150 KB paid body against its rule, and fulfils one that passes', async () => {
+    const body = { data: { organization: { blurb: 'x'.repeat(150 * 1024) } } };
+    const { fetchImpl } = net([
+      { url: ROUTER, status: 200, body: withRule() },
+      ...providerLegs(body),
+    ]);
+    const result = await runRequestTool({ query: 'q' }, deps(fetchImpl));
+    expect(result.isError).toBe(false);
+    expect(result.envelope).toMatchObject({ status: 'fulfilled', result: JSON.stringify(body) });
+    expect(result.envelope.resultCaveat).toBeUndefined();
   });
 
   it('fulfils a paid body that passes its success rule', async () => {
@@ -1216,6 +1230,9 @@ describe('an offer with a request spec', () => {
       parameters: { symbol: 'BTC,ETH', convert: 'USD' },
       cost: ['provider price 0.01 USD'],
     });
+    // A spec that names no fields hands the body back as it came, and saves nothing.
+    expect(result.envelope.result).toBe(JSON.stringify({ data: { BTC: 1 } }));
+    expect(result.envelope).not.toHaveProperty('fullResultPath');
     expect(calls[0]).toMatchObject({
       url: `${PROVIDER}?symbol=BTC%2CETH&convert=USD`,
       method: 'GET',
@@ -1631,5 +1648,160 @@ describe('an offer with a request spec', () => {
     const withQuery = await runRequestTool({ id: SPEC_ID, query: 'BTC price' }, deps(fetchImpl));
     expect(withQuery.envelope).toMatchObject({ status: 'native' });
     expect(calls).toHaveLength(1);
+  });
+});
+
+/**
+ * A SPEC THAT NAMES THE FIELDS IT RETURNS. The success rule runs on the whole
+ * body; the agent is then handed only the promised fields, and the whole body
+ * is saved by the offer's id. An Apollo person hit embeds the employer's whole
+ * organization record, which is what made a good match too large to check.
+ */
+describe('a spec that names the fields it returns', () => {
+  async function apolloSpec(id: string): Promise<OfferSpec> {
+    const fixtures = fileURLToPath(new URL('./fixtures/', import.meta.url));
+    const answer = JSON.parse(
+      await readFile(join(fixtures, 'wire-lookup-spec-skeleton.json'), 'utf8'),
+    ) as { decision: { spec: Omit<OfferSpec, 'id'> } };
+    return { ...answer.decision.spec, id };
+  }
+  const INPUT = { first_name: 'Patrick', last_name: 'Collison', domain: 'stripe.com' };
+  const PROMISED = {
+    match_confidence: 'high',
+    name: 'Patrick Collison',
+    title: 'CEO',
+    headline: 'Co-founder and CEO at Stripe',
+    linkedin_url: 'http://www.linkedin.com/in/patrickcollison',
+    email: 'patrick@stripe.com',
+    email_status: 'verified',
+    city: 'San Francisco',
+    state: 'California',
+    country: 'United States',
+  };
+  function hit(technologies: number) {
+    return {
+      person: {
+        ...PROMISED,
+        id: '5f2a',
+        first_name: 'Patrick',
+        last_name: 'Collison',
+        photo_url: 'https://example.test/p.jpg',
+        organization: {
+          name: 'Stripe',
+          primary_domain: 'stripe.com',
+          website_url: 'http://www.stripe.com',
+          linkedin_url: 'http://www.linkedin.com/company/stripe',
+          technologies: Array.from({ length: technologies }, (_, i) => ({
+            uid: `technology_${i}`,
+            name: `Technology ${i}`,
+            category: 'Other',
+          })),
+        },
+        employment_history: [
+          {
+            organization_name: 'Stripe',
+            title: 'CEO',
+            start_date: '2010-01-01',
+            end_date: null,
+            current: true,
+            description: 'Payments infrastructure for the internet.',
+            organization_id: '5f2b',
+          },
+        ],
+      },
+    };
+  }
+  function legsFor(spec: OfferSpec, body: unknown, raw?: string): Leg[] {
+    const quote = challenge({ payTo: spec.payTo, amount: spec.maxAmountAtomic });
+    return [
+      { url: spec.request.url, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': quote } },
+      { url: spec.request.url, status: 200, body, ...(raw !== undefined ? { raw } : {}) },
+      { url: ROUTER, status: 200, body: {} },
+    ];
+  }
+  const savedAt = (id: string) =>
+    join(dir, 'results', `${createHash('sha256').update(id).digest('hex')}.json`);
+
+  it('checks a 150 KB hit on the whole body, hands back the promised fields, and saves the whole body', async () => {
+    const id = '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d31';
+    const spec = await apolloSpec(id);
+    await storeSpecs(dir, [spec]);
+    const body = hit(2_500);
+    const text = JSON.stringify(body);
+    expect(Buffer.byteLength(text)).toBeGreaterThan(150 * 1024);
+    const { fetchImpl } = net(legsFor(spec, body));
+    const result = await runRequestTool({ id, input: INPUT }, deps(fetchImpl));
+    expect(result.isError).toBe(false);
+    expect(result.envelope).toMatchObject({ status: 'fulfilled', fullResultPath: savedAt(id) });
+    expect(result.envelope.resultCaveat).toBeUndefined();
+    expect(JSON.parse(String(result.envelope.result))).toEqual({
+      person: {
+        ...PROMISED,
+        organization: {
+          name: 'Stripe',
+          primary_domain: 'stripe.com',
+          website_url: 'http://www.stripe.com',
+          linkedin_url: 'http://www.linkedin.com/company/stripe',
+        },
+        employment_history: [
+          {
+            organization_name: 'Stripe',
+            title: 'CEO',
+            start_date: '2010-01-01',
+            end_date: null,
+            current: true,
+          },
+        ],
+      },
+    });
+    // The whole body, byte for byte, readable by this user alone.
+    expect(await readFile(savedAt(id), 'utf8')).toBe(text);
+    if (process.platform !== 'win32') {
+      expect((await stat(savedAt(id))).mode & 0o777).toBe(0o600);
+    }
+  });
+
+  it('cuts a billed miss the same way, unverified, with the whole body saved', async () => {
+    const id = '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d32';
+    const spec = await apolloSpec(id);
+    await storeSpecs(dir, [spec]);
+    const miss = { person: { match_confidence: 'none', email: null, search_id: 'abc' } };
+    const { fetchImpl } = net(legsFor(spec, miss));
+    const result = await runRequestTool({ id, input: INPUT }, deps(fetchImpl));
+    expect(result.isError).toBe(true);
+    expect(result.envelope).toMatchObject({ status: 'unverified', fullResultPath: savedAt(id) });
+    expect(String(result.envelope.resultCaveat)).toContain('match_confidence');
+    expect(JSON.parse(String(result.envelope.result))).toEqual({
+      person: { match_confidence: 'none', email: null },
+    });
+    expect(await readFile(savedAt(id), 'utf8')).toBe(JSON.stringify(miss));
+  });
+
+  it('hands back an over-cap body whole and unverified, as before, and saves nothing', async () => {
+    const id = '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d33';
+    const spec = await apolloSpec(id);
+    await storeSpecs(dir, [spec]);
+    const body = { person: { ...PROMISED, blob: 'x'.repeat(MAX_BODY_BYTES) } };
+    const { fetchImpl } = net(legsFor(spec, body));
+    const result = await runRequestTool({ id, input: INPUT }, deps(fetchImpl));
+    expect(result.envelope).toMatchObject({ status: 'unverified' });
+    expect(String(result.envelope.resultCaveat)).toContain('not checked');
+    expect(result.envelope.result).toBe(JSON.stringify(body));
+    expect(result.envelope).not.toHaveProperty('fullResultPath');
+    await expect(readdir(join(dir, 'results'))).rejects.toThrow();
+  });
+
+  it('hands back the whole body when it cannot be saved, and never fails the call over it', async () => {
+    const id = '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d34';
+    const spec = await apolloSpec(id);
+    await storeSpecs(dir, [spec]);
+    // A file where the directory should be: the save fails.
+    await writeFile(join(dir, 'results'), 'not a directory');
+    const body = hit(10);
+    const { fetchImpl } = net(legsFor(spec, body));
+    const result = await runRequestTool({ id, input: INPUT }, deps(fetchImpl));
+    expect(result.isError).toBe(false);
+    expect(result.envelope).toMatchObject({ status: 'fulfilled', result: JSON.stringify(body) });
+    expect(result.envelope).not.toHaveProperty('fullResultPath');
   });
 });
