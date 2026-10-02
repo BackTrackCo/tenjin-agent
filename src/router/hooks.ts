@@ -651,9 +651,15 @@ async function vetOffer<T extends OfferDecision>(
   return { withheld: shortfall.withheld };
 }
 
-/** How the server prices each service it lists beside the offer's own
- *  ("about $0.28 per call"); the offer's own price is checked as a field. */
-const LISTED_PRICE_RE = /\babout \$(\d+(?:\.\d+)?)/g;
+/** How the server prices each service it lists beside the offer's own: "about
+ *  $0.28 per call" for a list entry, plain "$0.30" for a curated alternative.
+ *  The offer's own price, also plain, already fits the cap (it is checked as a
+ *  field), so matching it adds nothing. */
+const LISTED_PRICE_RE = /\$(\d+(?:\.\d+)?)/g;
+
+/** A JSON string in the hint: the user's query, an id, or a seller's own words.
+ *  A dollar amount there is data ("a laptop under $1000"), never a price. */
+const QUOTED_RE = /"(?:[^"\\]|\\.)*"/g;
 
 /**
  * ONE SENTENCE FOR A LISTED SERVICE OVER THE AUTO-SPEND CAP, or null. The offer
@@ -667,8 +673,10 @@ async function overCapNote(
   deps: HookDeps,
   canAskUser: boolean,
 ): Promise<string | null> {
-  const quoted = [...hint.matchAll(LISTED_PRICE_RE)].map((match) => match[1] as string);
-  if (quoted.length === 0) return null;
+  const listed = [...hint.replace(QUOTED_RE, '""').matchAll(LISTED_PRICE_RE)].map(
+    (match) => match[1] as string,
+  );
+  if (listed.length === 0) return null;
   let cap: bigint;
   try {
     cap = (await resolveContextSettings(hookContext(deps))).policy.maxAutoSpendAtomic;
@@ -677,7 +685,7 @@ async function overCapNote(
   }
   const over = [
     ...new Set(
-      quoted.filter((usd) => {
+      listed.filter((usd) => {
         try {
           return BigInt(parseUsdToAtomic(usd)) > cap;
         } catch {
