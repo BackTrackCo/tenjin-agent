@@ -1669,8 +1669,6 @@ describe('a spec that names the fields it returns', () => {
   const PROMISED = {
     match_confidence: 'high',
     name: 'Patrick Collison',
-    first_name: 'Patrick',
-    last_name: 'Collison',
     title: 'CEO',
     headline: 'Co-founder and CEO at Stripe',
     linkedin_url: 'http://www.linkedin.com/in/patrickcollison',
@@ -1685,6 +1683,8 @@ describe('a spec that names the fields it returns', () => {
       person: {
         ...PROMISED,
         id: '5f2a',
+        first_name: 'Patrick',
+        last_name: 'Collison',
         photo_url: 'https://example.test/p.jpg',
         organization: {
           name: 'Stripe',

@@ -116,18 +116,9 @@
         "type": "object",
         "properties": {
           "person": {
-            "type": "object",
+            "type": ["object", "null"],
             "properties": {
-              "match_confidence": {
-                "type": ["string", "null"]
-              },
               "name": {
-                "type": ["string", "null"]
-              },
-              "first_name": {
-                "type": ["string", "null"]
-              },
-              "last_name": {
                 "type": ["string", "null"]
               },
               "title": {
@@ -145,6 +136,9 @@
               "email_status": {
                 "type": ["string", "null"]
               },
+              "match_confidence": {
+                "type": ["string", "null"]
+              },
               "city": {
                 "type": ["string", "null"]
               },
@@ -154,8 +148,31 @@
               "country": {
                 "type": ["string", "null"]
               },
+              "employment_history": {
+                "type": ["array", "null"],
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "title": {
+                      "type": ["string", "null"]
+                    },
+                    "organization_name": {
+                      "type": ["string", "null"]
+                    },
+                    "start_date": {
+                      "type": ["string", "null"]
+                    },
+                    "end_date": {
+                      "type": ["string", "null"]
+                    },
+                    "current": {
+                      "type": ["boolean", "null"]
+                    }
+                  }
+                }
+              },
               "organization": {
-                "type": "object",
+                "type": ["object", "null"],
                 "properties": {
                   "name": {
                     "type": ["string", "null"]
@@ -168,29 +185,6 @@
                   },
                   "linkedin_url": {
                     "type": ["string", "null"]
-                  }
-                }
-              },
-              "employment_history": {
-                "type": "array",
-                "items": {
-                  "type": "object",
-                  "properties": {
-                    "organization_name": {
-                      "type": ["string", "null"]
-                    },
-                    "title": {
-                      "type": ["string", "null"]
-                    },
-                    "start_date": {
-                      "type": ["string", "null"]
-                    },
-                    "end_date": {
-                      "type": ["string", "null"]
-                    },
-                    "current": {
-                      "type": ["boolean", "null"]
-                    }
                   }
                 }
               }
