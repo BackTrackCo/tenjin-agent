@@ -14,5 +14,6 @@ example), builds the request and pays the provider directly through the same
 the card's, and the spend policy. Then it tells the server only how the call
 ended. When the hook already holds a card's one input (the search a native call
 was about to run, or the page it was about to fetch), the line hands it over
-and the call is one step, as before. An id with no card, and a query with no
-id, go to the server as before. A failure now says what was sent.
+and the call is one step, as before. A query, with or without an id, goes to
+the server as before; an id alone with no card kept says so and asks for the
+query its line named. A failure now says what was sent.
