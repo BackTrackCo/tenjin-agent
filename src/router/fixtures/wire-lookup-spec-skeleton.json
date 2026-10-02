@@ -34,11 +34,11 @@
         "properties": {
           "email": {
             "type": "string",
-            "description": "Email address to match"
+            "description": "The person's email, if the user gave one"
           },
           "linkedin_url": {
             "type": "string",
-            "description": "LinkedIn profile URL"
+            "description": "LinkedIn profile URL, if the user gave one"
           },
           "first_name": {
             "type": "string",
@@ -50,11 +50,11 @@
           },
           "organization_name": {
             "type": "string",
-            "description": "Company name"
+            "description": "Company name, when no domain was given"
           },
           "domain": {
             "type": "string",
-            "description": "Company domain"
+            "description": "Company domain, only if the user gave it"
           },
           "reveal_personal_emails": {
             "type": "boolean",
@@ -71,16 +71,16 @@
         "additionalProperties": false,
         "anyOf": [
           {
-            "required": ["email"]
-          },
-          {
-            "required": ["linkedin_url"]
-          },
-          {
             "required": ["first_name", "last_name", "domain"]
           },
           {
             "required": ["first_name", "last_name", "organization_name"]
+          },
+          {
+            "required": ["email"]
+          },
+          {
+            "required": ["linkedin_url"]
           }
         ]
       },
@@ -193,7 +193,7 @@
         }
       }
     },
-    "hint": "Apollo fits this: a person's professional record (current title, employer, work history, LinkedIn URL) and work email with its verification status, from a first and last name with the company domain or name, a LinkedIn profile URL, or an email address. $0.01 via https://x402.orthogonal.com/apollo/api/v1/people/match . Call request({id: \"0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d22\", input: {\"first_name\":\"<first name>\",\"last_name\":\"<last name>\",\"domain\":\"<company domain>\"}}) alone and wait for its result."
+    "hint": "Apollo fits this: a person's professional record (current title, employer, work history, LinkedIn URL) and work email with its verification status, from a first and last name with the company domain or name, a LinkedIn profile URL, or an email address. $0.01 via https://x402.orthogonal.com/apollo/api/v1/people/match . Call request({id: \"0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d22\", input: {\"first_name\":\"<first name>\",\"last_name\":\"<last name>\",\"domain\":\"<company domain, only if the user gave it>\",\"organization_name\":\"<company name, when no domain was given>\",\"email\":\"<person's email, if the user gave one>\",\"linkedin_url\":\"<LinkedIn profile URL, if the user gave one>\"}}) alone and wait for its result."
   },
   "jev": {
     "calls": 1,
