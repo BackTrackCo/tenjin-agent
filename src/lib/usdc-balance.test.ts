@@ -156,7 +156,7 @@ describe('the fallback RPCs', () => {
     expect(Date.now() - begun).toBeLessThan(600);
   });
 
-  it('back the remembering reader the hooks and pay use', async () => {
+  it("back the hooks' remembering reader", async () => {
     const { fetchImpl, asked } = rpcs({ [RPC]: 'rate-limit', [PUBLICNODE]: 3_000_000n });
     const read = rememberingBalanceReader(dir);
     expect(await read(WALLET, RPC, { timeoutMs: 1_000, fetchImpl })).toBe(3_000_000n);

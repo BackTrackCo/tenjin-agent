@@ -11,7 +11,7 @@ import { parseSIWxHeader } from '@x402/extensions/sign-in-with-x';
 import type { PaymentRequired, PaymentRequirements } from '@x402/core/types';
 import { buildPaymentRequired, testWalletProvider, withBuilderCode } from '../lib/read-test-utils';
 import { TENJIN_CLI_BUILDER_CODE } from '../lib/x402-pay';
-import { rememberingBalanceReader } from '../lib/usdc-balance';
+import { DEFAULT_RPC_URL, FALLBACK_RPC_URLS, rememberingBalanceReader } from '../lib/usdc-balance';
 import type { SpendAuthorizer, SpendAuthorization } from '../lib/wallet';
 import type { CommandContext, GlobalFlags } from '../context';
 
@@ -1727,8 +1727,11 @@ describe('direct registry warning acknowledgement and balance enforcement', () =
     expect(await remember(signer.address, 'https://rpc.test', { timeoutMs: 1_000 })).toBe(
       100_000_000n,
     );
-    const rpc = vi.fn(async () => new Response('over rate limit', { status: 429 }));
-    vi.stubGlobal('fetch', rpc);
+    const asked: string[] = [];
+    vi.stubGlobal('fetch', async (input: unknown) => {
+      asked.push(String(input));
+      return new Response('over rate limit', { status: 429 });
+    });
     const sign = vi.spyOn(signer, 'signTypedData');
     const { fetch, calls } = paymentResponses();
     await expect(
@@ -1738,7 +1741,13 @@ describe('direct registry warning acknowledgement and balance enforcement', () =
         provider,
       }),
     ).rejects.toMatchObject({ code: 'REFUSED', details: { reason: 'balance_unavailable' } });
-    expect(rpc).toHaveBeenCalled();
+    // Both reads asked the default and each public fallback, live.
+    expect(asked).toEqual([
+      DEFAULT_RPC_URL,
+      ...FALLBACK_RPC_URLS,
+      DEFAULT_RPC_URL,
+      ...FALLBACK_RPC_URLS,
+    ]);
     expect(sign).not.toHaveBeenCalled();
     expect(calls).toHaveLength(1);
     const { readSpendSummary } = await import('../lib/wallet/spend');

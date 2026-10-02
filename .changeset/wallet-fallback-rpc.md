@@ -12,4 +12,4 @@ timeout: every RPC but the last gets half of what is left, so one that hangs
 still leaves the others time. An `rpcUrl` you configured yourself is the only
 RPC asked, since choosing one can be about privacy and the public RPCs would
 see the wallet's address. The router hooks and `tenjin pay` both read through
-it, beside the minute-long last-known balance.
+it; only the hooks also reuse the minute-long last-known balance.
