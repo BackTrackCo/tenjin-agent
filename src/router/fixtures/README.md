@@ -124,31 +124,32 @@ answered `execute` as its id would be.
 
 ## The set
 
-| file                                       | what it pins                                                                        |
-| ------------------------------------------ | ----------------------------------------------------------------------------------- |
-| `wire-gate-request.json`                   | the free gate request, including a pending native call                              |
-| `wire-decision-request.json`               | the hook call: a packet, no query                                                   |
-| `wire-decision-request-narrowed.json`      | the tool call: the query and the id                                                 |
-| `wire-hook-execute.json`                   | hook answer: the id, the capability, `usage` and the `hint` line                    |
-| `wire-hook-native.json`                    | hook answer: the host's own tools are enough                                        |
-| `wire-hook-needs-input.json`               | hook answer: the turn names no task a capability serves                             |
-| `wire-lookup-execute-get.json`             | tool answer: a GET contract with its built query string                             |
-| `wire-lookup-execute-post.json`            | tool answer: a POST contract whose body is the serialized request                   |
-| `wire-lookup-native.json`                  | tool answer: native, with diagnostics                                               |
-| `wire-lookup-needs-input.json`             | tool answer: a named missing argument                                               |
-| `wire-lookup-expired-id.json`              | tool answer after a dead id, carrying the plain `note`                              |
-| `wire-hook-request-native-shortfall.json`  | the native hook after WebFetch fell short: `nativeOutcome` beside its `pendingCall` |
-| `wire-hook-request-native-no-content.json` | the native hook after WebFetch answered 200 with only the page shell: `reason`      |
-| `wire-hook-request-ask.json`               | the hook before AskUserQuestion, with `sessionId` and `accepts`                     |
-| `wire-hook-discovered.json`                | hook answer: a discovered service, its input schema and the `hint` line             |
-| `wire-lookup-discovered.json`              | tool answer to a query with no id: the same `discovered` shape                      |
-| `wire-tool-request-discovered.json`        | the tool call for a discovered service: the id and the host's `input`, no query     |
-| `wire-lookup-execute-discovered.json`      | tool answer: the discovered service as an ordinary `execute`, category `discovered` |
-| `wire-hook-execute-spec.json`              | hook answer for a client that accepts `spec`: the ready call and the Exa spec       |
-| `wire-hook-discovered-spec.json`           | the same for a list service: the hint asks for the id alone, the spec rides along   |
-| `wire-outcome-request.json`                | the outcome report a client sends after running a spec                              |
-| `wire-tool-request-spec.json`              | the tool call from a spec client: a query, no id                                    |
-| `wire-lookup-spec.json`                    | tool answer for it: the picked capability's spec, its id, the line and bound input  |
+| file                                       | what it pins                                                                              |
+| ------------------------------------------ | ----------------------------------------------------------------------------------------- |
+| `wire-gate-request.json`                   | the free gate request, including a pending native call                                    |
+| `wire-decision-request.json`               | the hook call: a packet, no query                                                         |
+| `wire-decision-request-narrowed.json`      | the tool call: the query and the id                                                       |
+| `wire-hook-execute.json`                   | hook answer: the id, the capability, `usage` and the `hint` line                          |
+| `wire-hook-native.json`                    | hook answer: the host's own tools are enough                                              |
+| `wire-hook-needs-input.json`               | hook answer: the turn names no task a capability serves                                   |
+| `wire-lookup-execute-get.json`             | tool answer: a GET contract with its built query string                                   |
+| `wire-lookup-execute-post.json`            | tool answer: a POST contract whose body is the serialized request                         |
+| `wire-lookup-native.json`                  | tool answer: native, with diagnostics                                                     |
+| `wire-lookup-needs-input.json`             | tool answer: a named missing argument                                                     |
+| `wire-lookup-expired-id.json`              | tool answer after a dead id, carrying the plain `note`                                    |
+| `wire-hook-request-native-shortfall.json`  | the native hook after WebFetch fell short: `nativeOutcome` beside its `pendingCall`       |
+| `wire-hook-request-native-no-content.json` | the native hook after WebFetch answered 200 with only the page shell: `reason`            |
+| `wire-hook-request-ask.json`               | the hook before AskUserQuestion, with `sessionId` and `accepts`                           |
+| `wire-hook-discovered.json`                | hook answer: a discovered service, its input schema and the `hint` line                   |
+| `wire-lookup-discovered.json`              | tool answer to a query with no id: the same `discovered` shape                            |
+| `wire-tool-request-discovered.json`        | the tool call for a discovered service: the id and the host's `input`, no query           |
+| `wire-lookup-execute-discovered.json`      | tool answer: the discovered service as an ordinary `execute`, category `discovered`       |
+| `wire-hook-execute-spec.json`              | hook answer for a client that accepts `spec`: the call with the held search, the Exa spec |
+| `wire-hook-discovered-spec.json`           | the same for a list service: the call with its skeleton, the spec rides along             |
+| `wire-outcome-request.json`                | the outcome report a client sends after running a spec                                    |
+| `wire-tool-request-spec.json`              | the tool call from a spec client: a query, no id                                          |
+| `wire-lookup-spec.json`                    | tool answer for it: Wolfram's spec under a fresh id, the query bound as `input`           |
+| `wire-lookup-spec-skeleton.json`           | tool answer for a spec with more to fill (Apollo): the skeleton line, no `input`          |
 
 Two rules the fixtures exist to hold:
 

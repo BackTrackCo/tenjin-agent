@@ -1,0 +1,122 @@
+{
+  "schemaVersion": 1,
+  "routerVersion": "2026-09-23.1",
+  "decision": {
+    "action": "spec",
+    "id": "0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d22",
+    "spec": {
+      "capabilityId": "apollo-person",
+      "provider": "Apollo",
+      "description": "a person's professional record (current title, employer, work history, LinkedIn URL) and work email with its verification status, from a first and last name with the company domain or name, a LinkedIn profile URL, or an email address",
+      "priceAtomic": "10000",
+      "priceVaries": false,
+      "maxAmountAtomic": "10000",
+      "payTo": "0xcCD231829E24B42195B500028F8779b8F8B1131A",
+      "network": "eip155:8453",
+      "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      "request": {
+        "method": "POST",
+        "url": "https://x402.orthogonal.com/apollo/api/v1/people/match",
+        "fields": {
+          "email": "body",
+          "linkedin_url": "body",
+          "first_name": "body",
+          "last_name": "body",
+          "organization_name": "body",
+          "domain": "body",
+          "reveal_personal_emails": "body",
+          "reveal_phone_number": "body"
+        },
+        "location": "body"
+      },
+      "input": {
+        "type": "object",
+        "properties": {
+          "email": {
+            "type": "string",
+            "description": "Email address to match"
+          },
+          "linkedin_url": {
+            "type": "string",
+            "description": "LinkedIn profile URL"
+          },
+          "first_name": {
+            "type": "string",
+            "description": "First name; send with last_name and either domain or organization_name"
+          },
+          "last_name": {
+            "type": "string",
+            "description": "Last name"
+          },
+          "organization_name": {
+            "type": "string",
+            "description": "Company name"
+          },
+          "domain": {
+            "type": "string",
+            "description": "Company domain"
+          },
+          "reveal_personal_emails": {
+            "type": "boolean",
+            "description": "Include personal emails in response",
+            "const": false
+          },
+          "reveal_phone_number": {
+            "type": "boolean",
+            "description": "Include phone numbers in response",
+            "const": false
+          }
+        },
+        "required": [],
+        "additionalProperties": false,
+        "anyOf": [
+          {
+            "required": ["email"]
+          },
+          {
+            "required": ["linkedin_url"]
+          },
+          {
+            "required": ["first_name", "last_name", "domain"]
+          },
+          {
+            "required": ["first_name", "last_name", "organization_name"]
+          }
+        ]
+      },
+      "pinned": {
+        "reveal_personal_emails": false,
+        "reveal_phone_number": false
+      },
+      "example": {
+        "first_name": "Patrick",
+        "last_name": "Collison",
+        "domain": "stripe.com"
+      },
+      "returns": "JSON {person:{name, title, organization, employment_history[], linkedin_url, email, email_status}}, 60-180 KB; a miss is still billed and comes back as match_confidence \"none\"",
+      "resultSchema": {
+        "type": "object",
+        "required": ["person"],
+        "properties": {
+          "person": {
+            "type": "object",
+            "required": ["match_confidence"],
+            "properties": {
+              "match_confidence": {
+                "type": "string",
+                "not": {
+                  "const": "none"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "hint": "Apollo fits this: a person's professional record (current title, employer, work history, LinkedIn URL) and work email with its verification status, from a first and last name with the company domain or name, a LinkedIn profile URL, or an email address. $0.01 via https://x402.orthogonal.com/apollo/api/v1/people/match . Call request({id: \"0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d22\", input: {\"first_name\":\"<first name>\",\"last_name\":\"<last name>\",\"domain\":\"<company domain>\"}}) alone and wait for its result."
+  },
+  "jev": {
+    "calls": 1,
+    "latencyMs": 590
+  }
+}

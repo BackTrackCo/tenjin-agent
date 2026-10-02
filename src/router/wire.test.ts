@@ -220,6 +220,24 @@ describe('every answer payload on disk', () => {
     }
   });
 
+  /**
+   * A QUERY WITH NO ID IS ONE CALL WHEN IT CAN BE. The server binds the query
+   * to a spec's one required field (pins aside) and sends it as `input`, which
+   * the tool runs and pays at once; a spec with more to fill comes back with
+   * no `input`, and its line is the skeleton of the next call.
+   */
+  it('carries the bound input, or only the skeleton, on an id-less spec answer', () => {
+    const bound = fixture('wire-lookup-spec.json').decision as Record<string, unknown>;
+    expect(bound).toMatchObject({ action: 'spec', input: { input: expect.any(String) } });
+    expect(bound.spec).not.toHaveProperty('id');
+    expect(String(bound.hint)).toContain(`input: ${JSON.stringify(bound.input)}`);
+    const skeleton = fixture('wire-lookup-spec-skeleton.json').decision as Record<string, unknown>;
+    expect(skeleton).toMatchObject({ action: 'spec' });
+    expect(skeleton).not.toHaveProperty('input');
+    expect(skeleton.spec).not.toHaveProperty('id');
+    expect(String(skeleton.hint)).toMatch(/request\(\{id: "[^"]+", input: \{"[a-z_]+":"<[^>]+>"/);
+  });
+
   it.each([
     ['contract', 'wire-lookup-execute-get.json', 'tool'],
     ['capabilityId', 'wire-lookup-execute-post.json', 'tool'],

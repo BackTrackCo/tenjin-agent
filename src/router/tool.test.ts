@@ -1555,6 +1555,25 @@ describe('an offer with a request spec', () => {
     expect(auth.authorize).not.toHaveBeenCalled();
   });
 
+  it("shows the paired skeleton answer's spec and the line to fill, and pays nothing", async () => {
+    const fixtures = fileURLToPath(new URL('./fixtures/', import.meta.url));
+    const answer = JSON.parse(
+      await readFile(join(fixtures, 'wire-lookup-spec-skeleton.json'), 'utf8'),
+    ) as { decision: { id: string; hint: string; spec: OfferSpec } };
+    const auth = authorizer();
+    const { fetchImpl, calls } = net([{ url: ROUTER, status: 200, body: answer }]);
+    const result = await runRequestTool(
+      { query: 'Patrick Collison at Stripe' },
+      deps(fetchImpl, auth),
+    );
+    const { id, hint, spec } = answer.decision;
+    expect(result.envelope).toMatchObject({ status: 'spec', id, nextStep: hint });
+    expect(result.summary).toContain(`${spec.provider}: ${spec.description}`);
+    expect(result.summary).toContain(`Next: ${hint}`);
+    expect(calls).toHaveLength(1);
+    expect(auth.authorize).not.toHaveBeenCalled();
+  });
+
   it("shows a list service's own spec for a query, not its line", async () => {
     const fixtures = fileURLToPath(new URL('./fixtures/', import.meta.url));
     const answer = JSON.parse(

@@ -42,7 +42,7 @@
         }
       }
     },
-    "hint": "Tenjin router found a pay-per-call service for this step, no API key needed: BlockRun (OpenAI GPT Image 2) (General-purpose images with precise prompt following: hero images, illustrations, scenes (model=\"openai/gpt-image-2\").), POST https://blockrun.ai/api/v1/images/generations , about $0.064 per call (price can vary with the input; the live price is checked before paying). Tenjin reviewed this listing. Use your judgement, and ask the user first if it is not clearly what they want. To use it, call request({id: \"0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d12\"}) first: it returns the service's inputs, an example and what it returns, with nothing paid; then call request({id: \"0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d12\", input: {...}}) alone and wait for its result, then tell the user which service you used through Tenjin and what it cost.",
+    "hint": "Tenjin router found a pay-per-call service for this step, no API key needed: BlockRun (OpenAI GPT Image 2) (General-purpose images with precise prompt following: hero images, illustrations, scenes (model=\"openai/gpt-image-2\").), POST https://blockrun.ai/api/v1/images/generations , about $0.064 per call (price can vary with the input; the live price is checked before paying). Tenjin reviewed this listing. Use your judgement, and ask the user first if it is not clearly what they want. To use it, call request({id: \"0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d12\", input: {\"prompt\":\"<prompt>\"}}) alone and wait for its result, then tell the user which service you used through Tenjin and what it cost.",
     "specs": [
       {
         "id": "0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d12",
