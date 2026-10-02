@@ -88,8 +88,10 @@ The router picks from a catalog we curate and maintain. When nothing in it fits,
 | **Person lookup** · [Apollo](https://www.apollo.io)            | A professional profile and work email from a name and company, a LinkedIn URL or an email | $0.01          |
 | **Company profile** · [Apollo](https://www.apollo.io)          | Industry, headcount, revenue and funding from a domain                                    | $0.01          |
 | **Company match** · [CompanyEnrich](https://companyenrich.com) | The company behind a name or a social URL                                                 | $0.01225       |
+| **X posts** · [glim](https://glim.sh)                          | Posts matching a search, or one post with its thread                                      | $0.005         |
+| **Reddit** · [glim](https://glim.sh)                           | Posts matching a search, or one thread with its comments                                  | $0.01 / $0.005 |
 
-Free tools run without a funded wallet. Twitter, Reddit and more are next, added by demand: [tell us what you want](#request-a-tool).
+Free tools run without a funded wallet. More are added by demand: [tell us what you want](#request-a-tool).
 
 ### Tenjin list and experimental Bazaar
 
