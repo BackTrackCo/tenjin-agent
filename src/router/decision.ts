@@ -240,9 +240,23 @@ const ToolDecisionSchema = z.discriminatedUnion('action', [
     ...CapabilityFields,
     contract: ContractSchema,
   }),
-  /** A query with no id, answered with the spec of the service the server
-   *  picked under a fresh id: kept like a hook's, and shown to the agent. */
-  z.strictObject({ action: z.literal('spec'), spec: OfferSpecSchema }),
+  /**
+   * A query with no id, answered with the spec of the service the server
+   * picked under a fresh `id`: kept like a hook's. `input` is there when the
+   * server bound the query to the spec's one required field (pins aside) and
+   * checked it, and the tool then runs it in the same call, checked again
+   * like any input. `hint` is the line, with the skeleton of the call:
+   * `request({id, input: {...}})` with the required fields, or the bound one.
+   */
+  z
+    .strictObject({
+      action: z.literal('spec'),
+      id: IdSchema,
+      spec: ToolSpecSchema,
+      hint: z.string().min(1).max(2_000),
+      input: z.record(z.string(), z.unknown()).optional(),
+    })
+    .superRefine(checkHint),
   DiscoveredSchema,
   RefusedSchema.extend({ action: z.literal('native') }),
   RefusedSchema.extend({ action: z.literal('needs_input') }),

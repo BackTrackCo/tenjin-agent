@@ -230,6 +230,8 @@ describe('every answer payload on disk', () => {
     ['candidate', 'wire-hook-discovered.json', 'hook'],
     ['hint', 'wire-lookup-discovered.json', 'tool'],
     ['spec', 'wire-lookup-spec.json', 'tool'],
+    ['id', 'wire-lookup-spec.json', 'tool'],
+    ['hint', 'wire-lookup-spec.json', 'tool'],
   ])('refuses an answer missing %s', (field, name, kind) => {
     const payload = fixture(name);
     const decision = { ...(payload.decision as Record<string, unknown>) };

@@ -1257,9 +1257,34 @@ describe('an offer with a request spec', () => {
     expect(reason).toContain('symbol is required');
     expect(reason).toContain('convert must be one of "USD", "EUR"');
     expect(reason).toContain('the input has no field "limit"');
-    expect(result.envelope.nextStep).toContain('Example input: {"symbol":"BTC"}');
+    // The whole spec comes back with the problems, so the next call can be right.
+    expect(result.summary).toContain('symbol (string, required); Comma-separated symbols');
+    expect(result.summary).toContain('convert (string); one of "USD", "EUR"');
+    expect(result.summary).toContain('Example input: {"symbol":"BTC"}');
+    expect(result.summary).toContain('Returns: JSON quotes keyed by symbol');
+    expect(result.envelope.nextStep).toContain(`request({id: ${JSON.stringify(SPEC_ID)}, input:`);
     expect(result.envelope.parameters).toEqual({ convert: 'GBP', limit: 3 });
     expect(calls).toEqual([]);
+  });
+
+  it('refuses a field the spec does not name, even where its schema allows extras', async () => {
+    const open = quoteSpec();
+    delete open.input.additionalProperties;
+    await storeSpecs(dir, [open]);
+    const auth = authorizer();
+    const { fetchImpl, calls } = net([]);
+    const result = await runRequestTool(
+      { id: SPEC_ID, input: { symbol: 'BTC', limit: 3 } },
+      deps(fetchImpl, auth),
+    );
+    expect(result.envelope).toMatchObject({
+      status: 'needs_input',
+      cost: ['provider price 0 USD'],
+    });
+    expect(String(result.envelope.reason)).toContain('the input has no field "limit"');
+    expect(result.summary).toContain('symbol (string, required); Comma-separated symbols');
+    expect(calls).toEqual([]);
+    expect(auth.authorize).not.toHaveBeenCalled();
   });
 
   it("signs nothing for a live 402 that pays someone other than the spec's payee", async () => {
@@ -1396,14 +1421,29 @@ describe('an offer with a request spec', () => {
     await vi.waitFor(() => expect(routerCalls(calls)).toHaveLength(1));
   });
 
-  it("shows the server's pick for a query with no id as its spec, then runs it from that spec", async () => {
-    const PICKED = '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d21';
-    const query = 'BTC and ETH spot price in USD';
-    const answer = {
+  /** The id-less answer: the pick's spec beside its fresh id, the line with
+   *  the call's skeleton, and the bound input when the server bound one. */
+  function specAnswer(id: string, input?: Record<string, unknown>): Record<string, unknown> {
+    const spec: Partial<OfferSpec> = quoteSpec();
+    delete spec.id;
+    const call = input !== undefined ? JSON.stringify(input) : '{"symbol":"<symbol>"}';
+    return {
       schemaVersion: 1,
       routerVersion: '2026-09-23.1',
-      decision: { action: 'spec', spec: quoteSpec({ id: PICKED }) },
+      decision: {
+        action: 'spec',
+        id,
+        spec,
+        hint: `CoinMarketCap fits this: latest market quotes. $0.01 via ${PROVIDER} . Call request({id: ${JSON.stringify(id)}, input: ${call}}) alone and wait for its result.`,
+        ...(input !== undefined ? { input } : {}),
+      },
     };
+  }
+
+  it("shows the server's pick for a query with no id as its spec and the call's skeleton, then runs it from that spec", async () => {
+    const PICKED = '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d21';
+    const query = 'BTC and ETH spot price in USD';
+    const answer = specAnswer(PICKED);
     const { fetchImpl, calls } = net([
       { url: ROUTER, status: 200, body: answer },
       ...providerLegs(),
@@ -1416,7 +1456,13 @@ describe('an offer with a request spec', () => {
       id: PICKED,
       cost: ['provider price 0 USD'],
     });
-    expect(shown.summary).toContain(`request({id: ${JSON.stringify(PICKED)}, input: {...}})`);
+    // The whole spec, then the skeleton the server wrote, as the next step.
+    expect(shown.summary).toContain('symbol (string, required); Comma-separated symbols');
+    const skeleton = `request({id: ${JSON.stringify(PICKED)}, input: {"symbol":"<symbol>"}})`;
+    expect(shown.summary).toContain(`Next: CoinMarketCap fits this`);
+    expect(shown.summary).toContain(skeleton);
+    expect(String(shown.envelope.nextStep)).toContain(skeleton);
+    expect(calls.filter((call) => call.url.startsWith(PROVIDER))).toEqual([]);
     expect(JSON.parse(calls[0]!.body!)).toEqual({
       schemaVersion: 1,
       query,
@@ -1429,6 +1475,56 @@ describe('an offer with a request spec', () => {
     expect(calls[2]).toMatchObject({ paid: true });
     await vi.waitFor(() => expect(calls).toHaveLength(4));
     expect(JSON.parse(calls[3]!.body!)).toMatchObject({ id: PICKED, status: 'fulfilled' });
+  });
+
+  it('runs and pays a query with no id in the same call when the server bound its input', async () => {
+    const PICKED = '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d22';
+    const auth = authorizer();
+    const { fetchImpl, calls } = net([
+      { url: ROUTER, status: 200, body: specAnswer(PICKED, { symbol: 'BTC' }) },
+      ...providerLegs(),
+      { url: ROUTER, status: 200, body: {} },
+    ]);
+    const result = await runRequestTool({ query: 'BTC spot price' }, deps(fetchImpl, auth));
+    expect(result.envelope).toMatchObject({
+      status: 'fulfilled',
+      parameters: { symbol: 'BTC' },
+      cost: ['provider price 0.01 USD'],
+    });
+    // One decision, then the provider's probe and paid leg, built here from
+    // the spec, under the spec's own terms.
+    expect(calls[1]).toMatchObject({ url: `${PROVIDER}?symbol=BTC`, paid: false });
+    expect(calls[2]).toMatchObject({ paid: true });
+    expect(vi.mocked(runPay).mock.calls.at(-1)![0]).toMatchObject({
+      terms: { source: 'CoinMarketCap', maxAmountAtomic: '10000', payTo: PAYEE },
+    });
+    expect(auth.authorize).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(calls).toHaveLength(4));
+    expect(JSON.parse(calls[3]!.body!)).toMatchObject({ id: PICKED, status: 'fulfilled' });
+    // Kept like a hook's spec, and paid once: the same id pays nothing again.
+    const retry = await runRequestTool(
+      { id: PICKED, input: { symbol: 'BTC' } },
+      deps(fetchImpl, auth),
+    );
+    expect(String(retry.envelope.reason)).toContain('already paid for');
+    expect(calls.filter((call) => call.paid)).toHaveLength(1);
+  });
+
+  it("checks the server's bound input like any other, and shows the spec when it misses", async () => {
+    const PICKED = '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d23';
+    const auth = authorizer();
+    const { fetchImpl, calls } = net([
+      { url: ROUTER, status: 200, body: specAnswer(PICKED, { symbol: 'BTC', convert: 'GBP' }) },
+    ]);
+    const result = await runRequestTool({ query: 'BTC price in GBP' }, deps(fetchImpl, auth));
+    expect(result.envelope).toMatchObject({
+      status: 'needs_input',
+      cost: ['provider price 0 USD'],
+    });
+    expect(String(result.envelope.reason)).toContain('convert must be one of "USD", "EUR"');
+    expect(result.summary).toContain('symbol (string, required); Comma-separated symbols');
+    expect(calls).toHaveLength(1);
+    expect(auth.authorize).not.toHaveBeenCalled();
   });
 
   it("shows a list service's own spec for a query, not its line", async () => {

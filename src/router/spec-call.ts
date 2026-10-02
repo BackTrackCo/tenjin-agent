@@ -114,10 +114,24 @@ export function mergedInput(spec: ToolSpec, input: Json): Json {
   return { ...input, ...spec.pinned };
 }
 
-/** Every problem with the merged input, against the spec's own schema; [] when
- *  it fits or the schema cannot be checked here (the provider then checks). */
+/**
+ * Every problem with the merged input, against the spec's own schema; [] when
+ * it fits or the schema cannot be checked here (the provider then checks). A
+ * field the spec does not name is one too, whatever the schema says about
+ * extras: the agent has no description for it, so it is a guess, and a paid
+ * guess at that.
+ */
 export function specInputProblems(spec: ToolSpec, merged: Json): string[] {
-  return inputProblems(spec.input, merged) ?? [];
+  const problems = inputProblems(spec.input, merged) ?? [];
+  const properties = spec.input.properties;
+  if (properties === null || typeof properties !== 'object' || Array.isArray(properties))
+    return problems;
+  for (const name of Object.keys(merged)) {
+    if (Object.hasOwn(properties, name) || Object.hasOwn(spec.pinned, name)) continue;
+    const problem = `the input has no field ${JSON.stringify(name)}`;
+    if (!problems.includes(problem)) problems.push(problem);
+  }
+  return problems;
 }
 
 export interface SpecRequest {

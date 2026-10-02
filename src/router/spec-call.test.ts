@@ -82,6 +82,14 @@ describe('a request spec as the agent reads it', () => {
     );
   });
 
+  it('refuses a field the spec does not name even where the schema allows extras, but never a pin', () => {
+    const open = spec({ pinned: { model: 'openai/gpt-image-2', quality: 'high' } });
+    delete open.input.additionalProperties;
+    const merged = mergedInput(open, { prompt: 'a fox', style: 'vivid' });
+    expect(specInputProblems(open, merged)).toEqual(['the input has no field "style"']);
+    expect(specInputProblems(open, mergedInput(open, { prompt: 'a fox' }))).toEqual([]);
+  });
+
   it("refuses an input that misses the spec's whole-input guard before anything is sent", () => {
     // Apollo's spec: one of these field sets, or the call buys a billed miss.
     const apollo = spec({

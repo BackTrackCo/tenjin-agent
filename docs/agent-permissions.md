@@ -103,9 +103,9 @@ To stop the router without removing anything, `tenjin config set router.enabled 
 ## How one lookup runs
 
 1. You type a turn. The hook sends the bounded packet to Tenjin, which answers whether a paid capability fits and, if it does, keeps that packet under a short-lived id.
-2. When one fits, your assistant sees one line, opening with `Tenjin router (installed by the user):`, that names the service, its price and the call to make: `mcp__x402__request` with that id. The hook keeps the service's spec on this machine under the id.
-3. Your assistant calls `request({id})`, which shows the spec (the inputs, an example and what comes back) without sending or paying anything. When the hook already holds the one input (the search a native call was about to run, or the page it was about to fetch), the line hands it over and this step is skipped.
-4. Your assistant calls `request({id, input})`. This CLI validates the input against the spec, builds the request, pays that provider once under your limits, hands back the result, and tells Tenjin only how the call ended. Deciding costs nothing.
+2. When one fits, your assistant sees one line, opening with `Tenjin router (installed by the user):`, that names the service, its price and the call to make: `mcp__x402__request({id, input})` with the required fields as placeholders, or already filled in when the hook holds them (the search a native call was about to run, or the page it was about to fetch). The hook keeps the service's spec on this machine under the id.
+3. Your assistant fills the fields and calls `request({id, input})` once. This CLI validates the input against the spec, builds the request, pays that provider once under your limits, hands back the result, and tells Tenjin only how the call ended. Deciding costs nothing.
+4. An input that does not fit the spec is refused before anything is sent: your assistant gets every problem and the whole spec (each input with its description and allowed values, an example and what comes back), locally and with nothing paid, and calls again. `request({id})` alone shows the same spec.
 
 ## What the hooks send
 

@@ -54,8 +54,10 @@ const INSTRUCTIONS =
   'company/person/email lookups). When one fits, a hook line names the service and how ' +
   'to call it: at the start of a turn, in place of a WebSearch or WebFetch call, after ' +
   'one comes back short, or in a delegated task. ' +
-  "Call it with the offer's id: `{id}` alone returns the service's spec (its inputs, " +
-  'an example and what it returns), free; `{id, input}` runs it. ' +
+  'The line is the call to make, with its fields: fill them and call `{id, input}` once, ' +
+  'which runs it. This CLI builds and pays the call, and returns the full spec (its ' +
+  'inputs, an example and what it returns) if a field is wrong; `{id}` alone returns ' +
+  "the service's spec too, free. " +
   'Before asking the user to get an API key or account for a one-off task, call it with ' +
   'that operation: it can find a pay-per-call service. ' +
   `${SCOPE_RULE} Call it alone and wait for its result. Deciding what to ` +
@@ -135,8 +137,8 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
           .record(z.string(), z.unknown())
           .optional()
           .describe(
-            'The JSON object the offered service takes, built from its spec (call with the id ' +
-              'alone to see it) or given ready in the line, sent with its id.',
+            "The JSON object the offered service takes: the line's call with its fields filled " +
+              'in, sent with its id. Its spec lists every field (call with the id alone to see it).',
           ),
       },
     },

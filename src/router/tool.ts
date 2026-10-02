@@ -45,10 +45,14 @@ import { routerSettings } from './settings';
  * The `request` tool: one free decision per lookup, then ONE payment, to the
  * provider.
  *
- * AN OFFER WITH A SPEC RUNS HERE. The hook keeps each offered service's spec
- * by its id: `{id}` alone shows it, and `{id, input}` is checked against it,
- * built into the spec's request and paid straight to the provider, with no
- * second decision. The server is told only how the call ended.
+ * AN OFFER WITH A SPEC RUNS HERE, IN ONE CALL. The hook keeps each offered
+ * service's spec by its id, and its line is the skeleton of the call:
+ * `{id, input}` is checked against the spec, built into the spec's request and
+ * paid straight to the provider, with no second decision. An input that misses
+ * gets every problem and the whole spec back, locally, with nothing paid; `{id}`
+ * alone shows the spec too. The server is told only how the call ended. A
+ * query with no id comes back as the picked service's spec, run in the same
+ * call when the server bound the query to its input.
  *
  * WITHOUT A SPEC, THE ID NAMES THE SERVICE AND THE QUERY IS SENT. With an id,
  * the backend binds the query to the capability the hook's line offered and
@@ -217,12 +221,31 @@ export async function runRequestTool(
   }
   const { decision, note } = fresh.decision;
 
-  // THE PICKED SERVICE'S SPEC, for a query with no id: kept like a hook's and
-  // shown, so the agent's next call is `request({id, input})`.
+  // THE PICKED SERVICE'S SPEC, for a query with no id, kept like a hook's.
+  // With an `input` (the server bound the query to the spec's one required
+  // string field) it runs now, in this call, through every check a filled
+  // spec meets. Without one, the spec is shown with the skeleton of the next
+  // call, `request({id, input})`.
   if (decision.action === 'spec') {
-    await storeSpecs(deps.ctx.dataDir, [decision.spec]);
+    const picked: OfferSpec = { ...decision.spec, id: decision.id };
+    await storeSpecs(deps.ctx.dataDir, [picked]);
+    if (decision.input !== undefined) {
+      const bound = decision.input;
+      const serialized = JSON.stringify(bound);
+      // The server's input meets the agent's rules: the size cap, and no
+      // credential-shaped key or value, masked or otherwise.
+      if (Buffer.byteLength(serialized) > MAX_INPUT_BYTES) {
+        await footer.done('needs_input');
+        return showSpec(picked.id, picked, [], decision.hint);
+      }
+      if (JSON.stringify(maskDeep(bound)) !== serialized) {
+        await footer.done('native');
+        return fail('native', 'the input carries a credential-shaped value, so nothing was sent');
+      }
+      return runSpec(picked.id, picked, bound, deps, footer, decisionDeps);
+    }
     await footer.done('service found');
-    return showSpec(decision.spec.id, decision.spec);
+    return showSpec(picked.id, picked, [], decision.hint);
   }
 
   // A SERVICE NOBODY CURATED, named for the host to judge. Nothing is paid on
@@ -310,25 +333,29 @@ export async function runRequestTool(
 
 /** The answer to `request({id})` when the hook kept that offer's spec, or to
  *  a query the server answered with one: the spec as text, any other service
- *  offered beside it one `request({id})` away, and nothing sent or paid. */
+ *  offered beside it one `request({id})` away, and nothing sent or paid. The
+ *  server's `hint`, when it sent one, is the skeleton of the call to make. */
 function showSpec(
   id: string,
   spec: OfferSpec,
   others: readonly OfferSpec[] = [],
+  hint?: string,
 ): RequestToolResult {
   const also = others.map(
     (other) =>
       `${other.provider} (${other.description}): request({id: ${JSON.stringify(other.id)}}) shows its spec`,
   );
+  const lines = [specText(id, spec)];
+  if (also.length) lines.push(`Also offered: ${also.join('; ')}.`);
+  if (hint !== undefined) lines.push(`Next: ${hint}`);
   return {
     isError: false,
-    summary: also.length
-      ? `${specText(id, spec)}\nAlso offered: ${also.join('; ')}.`
-      : specText(id, spec),
+    summary: lines.join('\n'),
     envelope: {
       status: 'spec',
       id,
-      nextStep: `Call request({id: ${JSON.stringify(id)}, input: {...}}) with the inputs above.`,
+      nextStep:
+        hint ?? `Call request({id: ${JSON.stringify(id)}, input: {...}}) with the inputs above.`,
       cost: costLines(0n),
     },
   };
@@ -366,12 +393,17 @@ async function runSpec(
 ): Promise<RequestToolResult> {
   const merged = mergedInput(spec, input);
   const sentInput = maskDeep(merged) as Record<string, unknown>;
+  // A WRONG GUESS COSTS ONE MORE CALL, NOT A PAYMENT: every problem, then the
+  // whole spec (each input with its description and allowed values, the
+  // example, what comes back), so the next call can be right. Local, with no
+  // server call and nothing sent or paid.
   const refuse = async (problem: string): Promise<RequestToolResult> => {
     await footer.done('needs_input');
-    return fail('needs_input', `The input does not fit ${spec.provider}: ${problem}.`, {
-      nextStep: `Fix the input and call request({id: ${JSON.stringify(id)}, input: {...}}) again; nothing was sent or paid.${spec.example !== undefined ? ` Example input: ${JSON.stringify(spec.example)}` : ''}`,
+    const refused = fail('needs_input', `The input does not fit ${spec.provider}: ${problem}.`, {
+      nextStep: `Fix the input from the spec above and call request({id: ${JSON.stringify(id)}, input: {...}}) again; nothing was sent or paid.`,
       parameters: sentInput,
     });
+    return { ...refused, summary: `${refused.summary}\n\n${specText(id, spec)}` };
   };
   const problems = specInputProblems(spec, merged);
   if (problems.length) return refuse(problems.join('; '));

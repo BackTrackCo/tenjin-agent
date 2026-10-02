@@ -226,16 +226,17 @@ describe('what the tool tells the model to send', () => {
         };
         required?: string[];
       };
-      // An offer is called by its id: alone it shows the spec, with `input` it
-      // runs. A query is for a task no line offered. The handler refuses a call
-      // with neither.
+      // An offer is one call: the line's skeleton, filled, with `input`. The id
+      // alone shows the spec. A query is for a task no line offered. The
+      // handler refuses a call with neither.
       expect(schema.properties.query.description).toContain(SCOPE_RULE);
       expect(schema.properties.query.description).toContain('a task no line offered');
       expect(schema.required ?? []).toEqual([]);
       expect(schema.properties.id?.description).toContain('names the service');
       expect(schema.properties.id?.description).toContain("returns that service's spec");
-      expect(request.description).toContain('`{id}` alone returns the service');
-      expect(request.description).toContain('`{id, input}` runs it');
+      expect(request.description).toContain('fill them and call `{id, input}` once');
+      expect(request.description).toContain('returns the full spec');
+      expect(request.description).toContain("`{id}` alone returns the service's spec");
       expect(schema.properties.input?.type).toBe('object');
       // THE ONE DISCOVERY SENTENCE IS GENERIC TOO: it names no marketplace and
       // no seller, only when to ask.

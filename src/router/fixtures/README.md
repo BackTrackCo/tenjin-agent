@@ -97,9 +97,11 @@ id the hint gives it. A spec is the service's contract: `capabilityId`,
 `{name}` path placeholders, `fields` saying where each field goes, and
 `location` for any other), `input` (a flat JSON Schema), `pinned` (fields set
 on every call, which win over the agent's input), and optionally `example`,
-`returns`, `returnsExample` and `resultSchema`. The hint then asks for
-`request({id})`, which shows the spec, or hands over the one input the hook
-already holds as `request({id, input})`. The client builds and pays the call
+`returns`, `returnsExample` and `resultSchema`. The hint is then the
+skeleton of the one call, `request({id, input: {...}})` with the required
+fields (pins aside) as placeholders, or with the value the hook already holds.
+`request({id})` shows the whole spec, and so does an input that misses it,
+locally and with nothing paid. The client builds and pays the call
 itself and, once a call was attempted, reports `{schemaVersion, id, status,
 httpStatus?, ms?}`. The first report for a live id marks its row executed;
 a repeat or a report after expiry is a 204 that changes nothing. No text is
@@ -108,9 +110,13 @@ stored. A client that does not send
 
 Such a client's tool call with a `query` and no `id` gets no binder: the
 server runs the hook's gate over the query (a bare URL takes the page rule)
-and answers `{action: "spec", spec}`, the picked capability's spec under a
-fresh id, stored as a hook offer is. The `request` tool keeps it like a hook's
-spec and shows it, so the agent's next call is `request({id, input})`. A list
+and answers `{action: "spec", id, spec, hint, input?}`: the picked
+capability's spec beside a fresh `id`, stored as a hook offer is, and the
+`hint` line with the call's skeleton. `input` is there when the spec has one
+required field (pins aside) and the server bound the query to it and checked
+the result; the `request` tool then runs it and pays in the same call, through
+every check a filled spec meets. Without `input`, the tool shows the spec and
+the skeleton, so the agent's next call is `request({id, input})`. A list
 specialist can still replace a generic pick, and a query no capability serves
 can still come back `discovered`, both with `specs`; the tool then shows the
 pick's own spec. A pick with no spec (the free docs lookup) is bound and
@@ -142,7 +148,7 @@ answered `execute` as its id would be.
 | `wire-hook-discovered-spec.json`           | the same for a list service: the hint asks for the id alone, the spec rides along   |
 | `wire-outcome-request.json`                | the outcome report a client sends after running a spec                              |
 | `wire-tool-request-spec.json`              | the tool call from a spec client: a query, no id                                    |
-| `wire-lookup-spec.json`                    | tool answer for it: the picked capability's spec under a fresh id                   |
+| `wire-lookup-spec.json`                    | tool answer for it: the picked capability's spec, its id, the line and bound input  |
 
 Two rules the fixtures exist to hold:
 
