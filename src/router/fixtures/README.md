@@ -17,10 +17,10 @@ A lookup is two calls to ONE route, and they ask different questions. There is
 no separate gate endpoint: each call has one schema and one set of fixtures,
 parsed by the handler that serves it.
 
-| call | request                                                     | answer                                                                                                                                                  |
-| ---- | ----------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| hook | `{schemaVersion, sessionId?, accepts?, packet, gateHint?}`  | is a paid lookup worth offering? `execute` with the id, the capability and a `hint`, `discovered` (below), or `native` / `needs_input` with diagnostics |
-| tool | `{schemaVersion, query?, id?, input?, gateHint?, accepts?}` | the decision: the capability, its price and the contract together, `discovered` for a query no curated capability serves, or `native` / `needs_input`   |
+| call | request                                                     | answer                                                                                                                                                                                           |
+| ---- | ----------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| hook | `{schemaVersion, sessionId?, accepts?, packet, gateHint?}`  | is a paid lookup worth offering? `execute` with the id, the capability and a `hint`, `discovered` (below), or `native` / `needs_input` with diagnostics                                          |
+| tool | `{schemaVersion, query?, id?, input?, gateHint?, accepts?}` | the decision: the capability, its price and the contract together, `card` (a card client's query with no id), `discovered` for a query no curated capability serves, or `native` / `needs_input` |
 
 Both `execute` answers name the capability: `capabilityId`, `category`,
 `provider` (the service's own name, such as `Wolfram Alpha`),
@@ -104,6 +104,16 @@ itself and reports `{schemaVersion, id, status, httpStatus?, ms?}`, which
 marks the row executed and stores no text. A client that does not send
 `card` never sees the field: the decision schemas are strict.
 
+Such a client's tool call with a `query` and no `id` gets no binder: the
+server runs the hook's gate over the query (a bare URL takes the page rule)
+and answers `{action: "card", card}`, the picked capability's card under a
+fresh id, stored as a hook offer is. The `request` tool keeps it like a hook's
+card and shows it, so the agent's next call is `request({id, input})`. A list
+specialist can still replace a generic pick, and a query no capability serves
+can still come back `discovered`, both with `cards`; the tool then shows the
+pick's own card. A pick with no card (the free docs lookup) is bound and
+answered `execute` as its id would be.
+
 ## The set
 
 | file                                       | what it pins                                                                        |
@@ -129,6 +139,8 @@ marks the row executed and stores no text. A client that does not send
 | `wire-hook-execute-card.json`              | hook answer for a client that accepts `card`: the ready call and the Exa card       |
 | `wire-hook-discovered-card.json`           | the same for a list service: the hint asks for the id alone, the card rides along   |
 | `wire-outcome-request.json`                | the outcome report a client sends after running a card                              |
+| `wire-tool-request-card.json`              | the tool call from a card client: a query, no id                                    |
+| `wire-lookup-card.json`                    | tool answer for it: the picked capability's card under a fresh id                   |
 
 Two rules the fixtures exist to hold:
 

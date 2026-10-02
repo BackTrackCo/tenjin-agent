@@ -140,6 +140,14 @@ describe('the request bodies', () => {
     ).toEqual(canonical);
   });
 
+  it('builds the query with no id that a card answers, byte for byte', () => {
+    const canonical = fixture('wire-tool-request-card.json');
+    expect(canonical.id).toBeUndefined();
+    expect(buildToolBody({ query: canonical.query as string, accepts: CLIENT_ACCEPTS })).toEqual(
+      canonical,
+    );
+  });
+
   it('reports a carded call by its id and how it ended, byte for byte, with no text', () => {
     const canonical = fixture('wire-outcome-request.json');
     expect(buildOutcomeBody(canonical as unknown as CardOutcome)).toEqual(canonical);
@@ -161,6 +169,7 @@ describe('the request bodies', () => {
       'wire-hook-request-ask.json',
       'wire-tool-request.json',
       'wire-tool-request-discovered.json',
+      'wire-tool-request-card.json',
     ]) {
       expect(JSON.stringify(fixture(name))).not.toMatch(/billing|admission|payment/i);
     }
@@ -197,6 +206,8 @@ describe('every answer payload on disk', () => {
     // no contract, the tool's a contract and no id.
     expect(parseForTests('tool', fixture('wire-hook-execute.json')).success).toBe(false);
     expect(parseForTests('hook', fixture('wire-lookup-execute-get.json')).success).toBe(false);
+    // A card answer is the tool's alone: the hook offers by line.
+    expect(parseForTests('hook', fixture('wire-lookup-card.json')).success).toBe(false);
     // A discovered answer is ONE shape on both calls: the hook's offer and the
     // tool's fallback parse with either parser.
     for (const name of [
@@ -218,6 +229,7 @@ describe('every answer payload on disk', () => {
     ['id', 'wire-hook-execute.json', 'hook'],
     ['candidate', 'wire-hook-discovered.json', 'hook'],
     ['hint', 'wire-lookup-discovered.json', 'tool'],
+    ['card', 'wire-lookup-card.json', 'tool'],
   ])('refuses an answer missing %s', (field, name, kind) => {
     const payload = fixture(name);
     const decision = { ...(payload.decision as Record<string, unknown>) };

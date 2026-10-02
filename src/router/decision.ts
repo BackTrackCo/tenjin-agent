@@ -240,6 +240,9 @@ const ToolDecisionSchema = z.discriminatedUnion('action', [
     ...CapabilityFields,
     contract: ContractSchema,
   }),
+  /** A query with no id, answered with the card of the service the server
+   *  picked under a fresh id: kept like a hook's, and shown to the agent. */
+  z.strictObject({ action: z.literal('card'), card: OfferCardSchema }),
   DiscoveredSchema,
   RefusedSchema.extend({ action: z.literal('native') }),
   RefusedSchema.extend({ action: z.literal('needs_input') }),
@@ -273,9 +276,10 @@ export type CallKind = 'hook' | 'tool';
  * `discovered` is Tenjin's reviewed list of third-party services, on for every
  * build that parses it; the server answers that arm only to a request that
  * lists it, so an older build never sees one. `card` asks for each offered
- * service's tool card beside its line, which only a build that parses it can
- * take: the decision schemas are strict. `bazaar` widens discovery to the open
- * Bazaar and is sent only while `experimental.bazaar` is on.
+ * service's tool card beside its line, and for the picked service's card in
+ * place of a decision on a query with no id, which only a build that parses
+ * them can take: the decision schemas are strict. `bazaar` widens discovery
+ * to the open Bazaar and is sent only while `experimental.bazaar` is on.
  */
 export const CLIENT_ACCEPTS: readonly string[] = ['discovered', 'card'];
 export const BAZAAR_ACCEPT = 'bazaar';

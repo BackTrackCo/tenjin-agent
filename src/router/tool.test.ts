@@ -1299,6 +1299,54 @@ describe('an offer with a tool card', () => {
     );
   });
 
+  it("shows the server's pick for a query with no id as its card, then runs it from that card", async () => {
+    const PICKED = '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d21';
+    const query = 'BTC and ETH spot price in USD';
+    const answer = {
+      schemaVersion: 1,
+      routerVersion: '2026-09-23.1',
+      decision: { action: 'card', card: quoteCard({ id: PICKED }) },
+    };
+    const { fetchImpl, calls } = net([
+      { url: ROUTER, status: 200, body: answer },
+      ...providerLegs(),
+      { url: ROUTER, status: 200, body: {} },
+    ]);
+    const shown = await runRequestTool({ query }, deps(fetchImpl));
+    expect(shown.isError).toBe(false);
+    expect(shown.envelope).toMatchObject({
+      status: 'card',
+      id: PICKED,
+      cost: ['provider price 0 USD'],
+    });
+    expect(shown.summary).toContain(`request({id: ${JSON.stringify(PICKED)}, input: {...}})`);
+    expect(JSON.parse(calls[0]!.body!)).toEqual({
+      schemaVersion: 1,
+      query,
+      accepts: ['discovered', 'card'],
+    });
+    // The next call runs from the kept card: no second decision.
+    const ran = await runRequestTool({ id: PICKED, input: { symbol: 'BTC' } }, deps(fetchImpl));
+    expect(ran.envelope).toMatchObject({ status: 'fulfilled' });
+    expect(calls[1]).toMatchObject({ url: `${PROVIDER}?symbol=BTC`, paid: false });
+    expect(calls[2]).toMatchObject({ paid: true });
+    await vi.waitFor(() => expect(calls).toHaveLength(4));
+    expect(JSON.parse(calls[3]!.body!)).toMatchObject({ id: PICKED, status: 'fulfilled' });
+  });
+
+  it("shows a carded list service's own card for a query, not its line", async () => {
+    const fixtures = fileURLToPath(new URL('./fixtures/', import.meta.url));
+    const answer = JSON.parse(
+      await readFile(join(fixtures, 'wire-hook-discovered-card.json'), 'utf8'),
+    ) as { decision: { id: string; cards: OfferCard[] } };
+    const { fetchImpl } = net([{ url: ROUTER, status: 200, body: answer }]);
+    const result = await runRequestTool({ query: 'an image of a red fox' }, deps(fetchImpl));
+    const [card] = answer.decision.cards;
+    expect(result.envelope).toMatchObject({ status: 'card', id: answer.decision.id });
+    expect(result.summary).toContain(`${card!.provider}: ${card!.description}`);
+    expect(result.summary).not.toContain('Also offered');
+  });
+
   it('asks the server, as before, for an id it holds no card for', async () => {
     const { fetchImpl, calls } = net([{ url: ROUTER, status: 200, body: NATIVE }]);
     const result = await runRequestTool({ id: CARD_ID }, deps(fetchImpl));

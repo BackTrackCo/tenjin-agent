@@ -211,14 +211,30 @@ export async function runRequestTool(
   }
   const { decision, note } = fresh.decision;
 
+  // THE PICKED SERVICE'S CARD, for a query with no id: kept like a hook's and
+  // shown, so the agent's next call is `request({id, input})`.
+  if (decision.action === 'card') {
+    await storeCards(deps.ctx.dataDir, [decision.card]);
+    await footer.done('service found');
+    return showCard(decision.card.id, decision.card);
+  }
+
   // A SERVICE NOBODY CURATED, named for the host to judge. Nothing is paid on
-  // this answer: the server's own line says how to call it, with the id it
-  // minted and the input the host builds, and that second call pays through
-  // the execute path below like any other. Its cards are kept like the hook's,
-  // so that second call runs from them.
+  // this answer. With cards they are kept like the hook's, and the pick's own
+  // card is shown, as for a curated pick. Without, the server's line says how
+  // to call it, with the id it minted and the input the host builds, and that
+  // second call pays through the execute path below like any other.
   if (decision.action === 'discovered') {
     await storeCards(deps.ctx.dataDir, decision.cards);
     await footer.done('service found');
+    const picked = decision.cards?.find((card) => card.id === decision.id);
+    if (picked !== undefined) {
+      return showCard(
+        picked.id,
+        picked,
+        decision.cards!.filter((card) => card !== picked),
+      );
+    }
     const { candidate } = decision;
     return {
       isError: false,
@@ -286,12 +302,23 @@ export async function runRequestTool(
   ).result;
 }
 
-/** The answer to `request({id})` when the hook kept that offer's card: the
- *  card as text, and nothing sent or paid. */
-function showCard(id: string, card: OfferCard): RequestToolResult {
+/** The answer to `request({id})` when the hook kept that offer's card, or to
+ *  a query the server answered with one: the card as text, any other service
+ *  offered beside it one `request({id})` away, and nothing sent or paid. */
+function showCard(
+  id: string,
+  card: OfferCard,
+  others: readonly OfferCard[] = [],
+): RequestToolResult {
+  const also = others.map(
+    (other) =>
+      `${other.provider} (${other.description}): request({id: ${JSON.stringify(other.id)}}) shows its card`,
+  );
   return {
     isError: false,
-    summary: cardText(id, card),
+    summary: also.length
+      ? `${cardText(id, card)}\nAlso offered: ${also.join('; ')}.`
+      : cardText(id, card),
     envelope: {
       status: 'card',
       id,
