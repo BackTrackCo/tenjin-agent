@@ -5,6 +5,7 @@ import type { PaymentRequired, PaymentRequirements } from '@x402/core/types';
 import { verifyAgainstRegistries, type RegistryVerification } from '../lib/bazaar';
 import { readUsdcBalanceWithFallback, type readUsdcBalance } from '../lib/usdc-balance';
 import { assertPublicDestination, type DestinationOptions } from '../lib/destination';
+import { envProxyInUse, publicOnlyFetch } from '../lib/public-fetch';
 import { CliError } from '../lib/errors';
 import { validateResultBody, type ResultCheck } from '../lib/request-schema';
 import { fetchFailureToCliError, httpRequest } from '../lib/http';
@@ -128,7 +129,8 @@ export interface PayDeps {
   provider?: WalletProvider;
   authorizer?: SpendAuthorizer;
   confirm?: (prompt: string) => Promise<boolean>;
-  /** Resolver seam for the destination preflight; production leaves it unset. */
+  /** Resolver seam for the destination preflight and the same check at connect
+   *  time; production leaves it unset. */
   destination?: DestinationOptions;
 }
 
@@ -204,6 +206,15 @@ async function executePay(
   const method = resolveMethod(args);
   const jsonBody = parseBody(args.data);
   const headers = callerHeaders(args.headers);
+  // AND EVERY LEG CONNECTS WHERE THE CHECK SAID: the probe, the sign-in
+  // re-check and the paid retry each resolve the name at connect time and
+  // refuse a private answer there, so a name that passed the preflight and then
+  // rebinds onto this network reaches nothing (lib/public-fetch.ts). Behind a
+  // proxy Node was told to use, the proxy resolves the name, and the request
+  // keeps going through it.
+  const transport =
+    deps.fetchImpl ??
+    (lane === 'bazaar' && !envProxyInUse() ? publicOnlyFetch(deps.destination ?? {}) : undefined);
 
   const fetchOpts = {
     timeoutMs: ctx.flags.timeout,
@@ -211,7 +222,7 @@ async function executePay(
     // carries a signed header (which pins redirects on its own; this pins the
     // probe too, so the challenge always comes from the URL that was gated).
     blockRedirects: true as const,
-    ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+    ...(transport !== undefined ? { fetchImpl: transport } : {}),
     ...(jsonBody !== undefined ? { jsonBody } : {}),
     ...(jsonBody === undefined && args.rawBody !== undefined ? { rawBody: args.rawBody } : {}),
     ...(Object.keys(headers).length > 0 ? { headers } : {}),
