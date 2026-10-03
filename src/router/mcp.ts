@@ -29,8 +29,7 @@ import { runRequestTool, type RequestToolDeps } from './tool';
  * user's whole request, which sent a turn mixing strategy, opinions and one
  * lead-search task to the router as a single operation. It then grew a second
  * half forbidding any rewording at all, which is neither enforceable nor
- * necessary: on the query path the backend binds the call against the turn's
- * stored packet, and on a spec the model fills the service's own fields. What
+ * necessary: the model fills the service's own fields from its spec. What
  * the host owes is the immediate operation and the inputs that belong to it,
  * exactly as the user gave them where they are exact, which is one sentence
  * rather than two rules. It says "your task", not "the user": a subagent

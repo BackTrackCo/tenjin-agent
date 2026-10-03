@@ -10,7 +10,8 @@ import { mask } from '../lib/redact';
  * WHAT GOES IN IT: ordinary user and assistant text from the CURRENT session
  * only (and, for a subagent's own native call, that one subagent's rows), at
  * most {@link MAX_HISTORY} prior messages and at most {@link MAX_PACKET_BYTES}
- * in total, oldest dropped first. The builders below choose the text;
+ * in total, assistant text dropped before any user message ({@link shed}).
+ * The builders below choose the text;
  * {@link seal} masks and bounds it, and is the only way a packet reaches the
  * wire. Tool results are excluded: a tool result is other people's content,
  * and a packet that carried it would be a channel from a fetched page into a
@@ -120,7 +121,33 @@ export function literalUrlsIn(text: string): string[] {
 }
 
 /**
- * Bring the packet inside the server's caps: oldest history first, then the
+ * History cut until `fits` holds: assistant messages first, then user
+ * messages, each oldest first, with the order of what is kept unchanged. A
+ * user's early instruction ("no paid tools") outlives the assistant's later
+ * replies; past the cap on user messages alone, the newest of them stay.
+ */
+export function shed(
+  history: readonly PacketMessage[],
+  fits: (kept: PacketMessage[]) => boolean,
+): PacketMessage[] {
+  const order = [
+    ...history.flatMap((message, index) => (message.role === 'assistant' ? [index] : [])),
+    ...history.flatMap((message, index) => (message.role === 'user' ? [index] : [])),
+  ];
+  const dropped = new Set<number>();
+  let kept = [...history];
+  for (const index of order) {
+    if (fits(kept)) break;
+    dropped.add(index);
+    kept = history.filter((_, at) => !dropped.has(at));
+  }
+  return kept;
+}
+
+const withinCount = (kept: PacketMessage[]): boolean => kept.length <= MAX_HISTORY;
+
+/**
+ * Bring the packet inside the server's caps: history first ({@link shed}), then the
  * current message itself, measured on the WHOLE packet rather than on the two
  * message lists, because `literalUrls` and a pending call are bytes too.
  *
@@ -131,14 +158,12 @@ export function literalUrlsIn(text: string): string[] {
  */
 export function fit(packet: Packet): Packet {
   const size = (value: Packet): number => Buffer.byteLength(JSON.stringify(value));
-  const next: Packet = { ...packet, history: packet.history.slice(-MAX_HISTORY) };
+  const next: Packet = { ...packet, history: shed(packet.history, withinCount) };
   // In order of what is cheapest to lose. History first: a prior turn is
   // context. Then the literal URLs, which are a convenience the server can
   // re-derive from the text. The current message LAST, because it is the task
   // itself, and only down to one character, so a packet is never empty.
-  while (next.history.length > 0 && size(next) > MAX_PACKET_BYTES) {
-    next.history = next.history.slice(1);
-  }
+  next.history = shed(next.history, (kept) => size({ ...next, history: kept }) <= MAX_PACKET_BYTES);
   while (next.literalUrls.length > 0 && size(next) > MAX_PACKET_BYTES) {
     next.literalUrls = next.literalUrls.slice(0, -1);
   }
@@ -183,8 +208,7 @@ export function seal(packet: Packet): Sealed {
   const outcome = packet.nativeOutcome;
   const sealed = fit({
     current: { role: packet.current.role, text: current.length > 0 ? current : '(no task text)' },
-    history: packet.history
-      .slice(-MAX_HISTORY)
+    history: shed(packet.history, withinCount)
       .map((message) => ({ role: message.role, text: bound(message.text) }))
       .filter((message) => message.text.length > 0),
     literalUrls: packet.literalUrls

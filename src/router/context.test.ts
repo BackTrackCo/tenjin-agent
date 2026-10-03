@@ -359,6 +359,68 @@ describe('what a packet gives up to fit', () => {
   });
 });
 
+describe('what history gives up first', () => {
+  it("keeps an early user restriction past the six-message cap, dropping the assistant's replies", async () => {
+    const path = await transcript([
+      user('Do not use any paid tools for this.'),
+      assistant('Understood.'),
+      user('Compare BTC and ETH.'),
+      assistant('BTC is larger.'),
+      user('And their fees?'),
+      assistant('ETH fees vary.'),
+      user('Check the price now.'),
+    ]);
+    const packet = await sent(path, 's', 'now');
+    // Oldest-first would have cut the restriction; the oldest reply goes instead.
+    expect(packet.history.map((m) => m.text)).toEqual([
+      'Do not use any paid tools for this.',
+      'Compare BTC and ETH.',
+      'BTC is larger.',
+      'And their fees?',
+      'ETH fees vary.',
+      'Check the price now.',
+    ]);
+  });
+
+  it('drops assistant text before any user message to fit the byte cap', async () => {
+    const { fit } = await import('./context');
+    const fitted = fit({
+      current: { role: 'user', text: 'now' },
+      history: [
+        { role: 'user', text: 'Only use the host tools.' },
+        { role: 'assistant', text: 'a'.repeat(14_000) },
+        { role: 'user', text: 'u'.repeat(4_000) },
+        { role: 'assistant', text: 'short reply' },
+      ],
+      literalUrls: [],
+      historyStatus: 'ok',
+    });
+    expect(Buffer.byteLength(JSON.stringify(fitted))).toBeLessThanOrEqual(MAX_PACKET_BYTES);
+    expect(fitted.history.map((m) => m.text.slice(0, 11))).toEqual([
+      'Only use th',
+      'uuuuuuuuuuu',
+      'short reply',
+    ]);
+  });
+
+  it('keeps the newest user messages when user text alone is over the cap', async () => {
+    const { fit } = await import('./context');
+    const fitted = fit({
+      current: { role: 'user', text: 'now' },
+      history: [
+        { role: 'user', text: 'x'.repeat(7_000) },
+        { role: 'assistant', text: 'reply' },
+        { role: 'user', text: 'y'.repeat(7_000) },
+        { role: 'user', text: 'z'.repeat(7_000) },
+      ],
+      literalUrls: [],
+      historyStatus: 'ok',
+    });
+    expect(Buffer.byteLength(JSON.stringify(fitted))).toBeLessThanOrEqual(MAX_PACKET_BYTES);
+    expect(fitted.history.map((m) => m.text[0])).toEqual(['y', 'z']);
+  });
+});
+
 describe('seal, the one way a packet leaves', () => {
   const KEY = `0x${'5c'.repeat(32)}`;
   const PEM_BODY = 'MIIEowIBAAKCAQEAu1SU1LfVLPHCozMxH2Mo4lgOEePzNm0tRgeLezV6ffAt0gun';
