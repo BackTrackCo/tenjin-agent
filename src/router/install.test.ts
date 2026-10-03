@@ -330,6 +330,177 @@ describe('tenjin install', () => {
   });
 });
 
+/** A person at a terminal: human output, no `--json`. */
+function humanCtx(): CommandContext {
+  const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
+  return {
+    flags: { json: false, timeout: 5000 },
+    dataDir: data,
+    io: { stdout: sink(), stderr: sink(), isTTY: true },
+  };
+}
+
+/** Answers each amount question from the list, in order, and records what was asked. */
+function amounts(answers: (string | null)[]) {
+  const queue = [...answers];
+  return vi.fn(async (_message: string, _placeholder: string) => {
+    if (queue.length === 0) throw new Error('asked more often than the test answers');
+    return queue.shift()!;
+  });
+}
+
+describe('install asks a person to approve the spend limits', () => {
+  it('"Use these limits" writes the defaults it showed', async () => {
+    const promptLimits = vi.fn(async () => 'approve' as const);
+    const promptAmount = amounts([]);
+    const result = await runRouterInstall(
+      {},
+      humanCtx(),
+      deps({ isInteractive: true, promptLimits, promptAmount }),
+    );
+    expect(promptLimits).toHaveBeenCalledWith(
+      'The router pays for tool calls without asking, up to:\n  $0.25 a call, $5 a day',
+    );
+    expect(promptAmount).not.toHaveBeenCalled();
+    const config = await loadRawConfig(data);
+    expect(config).toMatchObject({ maxAutoSpend: '250000', sessionBudget: '5000000' });
+    expect(result.humanLines).toContain(
+      '  Automatic router: up to $0.25 per call; daily limit $5 a day',
+    );
+  });
+
+  it('"Choose my own" writes the amounts typed, and the readout prints them', async () => {
+    const result = await runRouterInstall(
+      {},
+      humanCtx(),
+      deps({
+        isInteractive: true,
+        promptLimits: async () => 'own' as const,
+        promptAmount: amounts(['0.10', '2']),
+      }),
+    );
+    expect(await loadRawConfig(data)).toMatchObject({
+      maxAutoSpend: '100000',
+      sessionBudget: '2000000',
+    });
+    expect(result.humanLines).toContain(
+      '  Automatic router: up to $0.1 per call; daily limit $2 a day',
+    );
+  });
+
+  it('takes none for the daily limit', async () => {
+    await runRouterInstall(
+      {},
+      humanCtx(),
+      deps({
+        isInteractive: true,
+        promptLimits: async () => 'own' as const,
+        promptAmount: amounts(['0.25', 'none']),
+      }),
+    );
+    expect(await loadRawConfig(data)).toMatchObject({
+      maxAutoSpend: '250000',
+      sessionBudget: 'none',
+    });
+  });
+
+  it('refuses zero and a negative amount and asks again', async () => {
+    const promptAmount = amounts(['0', '-1', '0.5', '0', '3']);
+    await runRouterInstall(
+      {},
+      humanCtx(),
+      deps({ isInteractive: true, promptLimits: async () => 'own' as const, promptAmount }),
+    );
+    const messages = promptAmount.mock.calls.map(([message]) => message);
+    expect(messages).toHaveLength(5);
+    expect(messages[1]).toMatch(/^The limit must be more than zero\. /);
+    expect(messages[2]).toMatch(/^Invalid USD amount: "-1"\. /);
+    expect(messages[4]).toMatch(/^The limit must be more than zero\. /);
+    expect(await loadRawConfig(data)).toMatchObject({
+      maxAutoSpend: '500000',
+      sessionBudget: '3000000',
+    });
+  });
+
+  it.each([
+    ['at the selector', async () => null, amounts([])],
+    ['at an amount', async () => 'own' as const, amounts(['0.10', null])],
+  ])('a cancel %s writes nothing and exits non-zero', async (_at, promptLimits, promptAmount) => {
+    const registerMcp = vi.fn(async () => undefined);
+    const createWallet = vi.fn(async () => ADDRESS);
+    const err = await runRouterInstall(
+      {},
+      humanCtx(),
+      deps({ isInteractive: true, promptLimits, promptAmount, registerMcp, createWallet }),
+    ).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(CliError);
+    expect((err as CliError).exitCode).not.toBe(0);
+    await expect(readFile(join(data, 'config.json'))).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(readFile(settingsPath())).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(registerMcp).not.toHaveBeenCalled();
+    expect(createWallet).not.toHaveBeenCalled();
+  });
+
+  it('does not ask when the file already names both limits', async () => {
+    await writeFile(
+      join(data, 'config.json'),
+      JSON.stringify({ maxAutoSpend: '10000', sessionBudget: 'none' }),
+    );
+    const promptLimits = vi.fn(async () => 'approve' as const);
+    await runRouterInstall({}, humanCtx(), deps({ isInteractive: true, promptLimits }));
+    expect(promptLimits).not.toHaveBeenCalled();
+    expect(await loadRawConfig(data)).toMatchObject({
+      maxAutoSpend: '10000',
+      sessionBudget: 'none',
+    });
+  });
+
+  it('shows a limit the file already names and asks only for the missing one', async () => {
+    await writeFile(join(data, 'config.json'), JSON.stringify({ sessionBudget: 'none' }));
+    const promptLimits = vi.fn(async () => 'own' as const);
+    const promptAmount = amounts(['0.05']);
+    await runRouterInstall(
+      {},
+      humanCtx(),
+      deps({ isInteractive: true, promptLimits, promptAmount }),
+    );
+    expect(promptLimits).toHaveBeenCalledWith(
+      'The router pays for tool calls without asking, up to:\n  $0.25 a call, no daily limit',
+    );
+    expect(promptAmount).toHaveBeenCalledTimes(1);
+    expect(await loadRawConfig(data)).toMatchObject({
+      maxAutoSpend: '50000',
+      sessionBudget: 'none',
+    });
+  });
+
+  it.each([
+    ['a non-interactive run', () => humanCtx(), false],
+    ['--json', () => ctx(), true],
+  ])('%s asks nothing and writes the defaults', async (_name, makeCtx, isInteractive) => {
+    const promptLimits = vi.fn(async () => 'own' as const);
+    await runRouterInstall({}, makeCtx(), deps({ isInteractive, promptLimits }));
+    expect(promptLimits).not.toHaveBeenCalled();
+    expect(await loadRawConfig(data)).toMatchObject({
+      maxAutoSpend: '250000',
+      sessionBudget: '5000000',
+    });
+  });
+
+  it('--refresh asks nothing and fills no absent limit', async () => {
+    await runRouterInstall({}, ctx(), deps());
+    await writeFile(join(data, 'config.json'), '{}');
+    const promptLimits = vi.fn(async () => 'own' as const);
+    await runRouterInstall(
+      { refresh: true },
+      humanCtx(),
+      deps({ isInteractive: true, promptLimits }),
+    );
+    expect(promptLimits).not.toHaveBeenCalled();
+    expect(await loadRawConfig(data)).toEqual({});
+  });
+});
+
 describe('tenjin install --refresh', () => {
   it('re-registers what is already there and changes no config', async () => {
     await runRouterInstall({}, ctx(), deps());
