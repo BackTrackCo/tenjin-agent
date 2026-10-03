@@ -9,3 +9,8 @@ pruned now answers `needs_input` at once, pointing the agent at a fresh
 through to a server path that no longer exists. Pairs with the Tenjin router
 dropping its server-side binder: tenjin-cli 0.1.0-alpha.21 and older receive no
 paid offers and are told to run `tenjin update`.
+
+When a hook's conversation packet is over its six-message or 16 KiB bound,
+the assistant's replies are now dropped before any of the user's messages, so
+an early instruction such as "don't use paid tools" still reaches the router's
+gate. Past the bound on user messages alone, the newest of them are kept.
