@@ -15,10 +15,9 @@ import type { Packet } from './context';
  * retry, the settlement accounting and one Base settlement of about 1.5 s from
  * every paid lookup.
  *
- * NOTHING IS STORED LOCALLY. The bounded packet travels with the request and
- * the backend keeps it against the decision id until that id expires, which is
- * how `request({query})` reaches the same calibrated input with no session
- * file, no timestamp latch and no guess about which window this process serves.
+ * The bounded packet travels with the hook request and the backend keeps it
+ * against the decision id until that id expires. What this client keeps is
+ * each offer's spec, by its id (`specs.ts`).
  */
 
 export const ROUTER_PATH = '/api/x402-router';
@@ -331,13 +330,12 @@ export function buildHookBody(
   };
 }
 
-/** The exact body the tool call sends. `id` is the turn whose packet decides
- *  with this query; `gateHint` is evidence, never authority. `input` is the
- *  host's own input for a discovered service, and stands in for `query`. */
+/** The exact body the tool call sends. `id` is the offer the query is for,
+ *  sent only for an offer with no spec kept; `gateHint` is evidence, never
+ *  authority. */
 export function buildToolBody(request: {
   query?: string;
   id?: string;
-  input?: Record<string, unknown>;
   gateHint?: GateHint;
   accepts?: readonly string[];
 }): Record<string, unknown> {
@@ -345,7 +343,6 @@ export function buildToolBody(request: {
     schemaVersion: 1,
     ...(request.query !== undefined ? { query: request.query } : {}),
     ...(request.id !== undefined ? { id: request.id } : {}),
-    ...(request.input !== undefined ? { input: request.input } : {}),
     ...(request.gateHint !== undefined ? { gateHint: request.gateHint } : {}),
     ...(request.accepts !== undefined ? { accepts: [...request.accepts] } : {}),
   };
@@ -388,15 +385,12 @@ export type DecisionOutcome<T> =
 
 /**
  * ONE FREE CALL, IN TWO FORMS. The hook sends `{ packet }`: the backend runs
- * the gate, and on `execute` stores that packet under an id. The tool sends
- * `{ query, id? }`: the backend makes THE decision from that query plus the
- * packet it stored, and answers with the contract to run. A discovered
- * service's id is sent with the host's own `{ input }` instead of a query.
- *
- * The tool never sends a packet of its own. The turn's context lives on the
- * backend against the id, and the query the model wrote is what the routing
- * corpus is calibrated against: 55 of 56 for query plus packet, 53 of 56 for
- * the raw prompt, measured on jev-1.13.0.
+ * the gate, and on `execute` stores that packet under an id and answers with
+ * each offered service's spec. The tool sends `{ query }`, which the backend
+ * answers with the spec of the service its gate picks, or `{ query, id }` for
+ * the free docs offer, which has no spec and is bound from the query. Every
+ * provider call is built here, from a spec, or for the docs lookup by the
+ * backend from the query.
  */
 export async function requestDecision(
   kind: 'hook',
@@ -405,7 +399,7 @@ export async function requestDecision(
 ): Promise<DecisionOutcome<HookResponse>>;
 export async function requestDecision(
   kind: 'tool',
-  request: { query?: string; id?: string; input?: Record<string, unknown>; gateHint?: GateHint },
+  request: { query: string; id?: string; gateHint?: GateHint },
   deps: DecisionDeps,
 ): Promise<DecisionOutcome<ToolResponse>>;
 export async function requestDecision(
@@ -415,7 +409,6 @@ export async function requestDecision(
     packet?: Packet;
     sessionId?: string;
     id?: string;
-    input?: Record<string, unknown>;
     gateHint?: GateHint;
   },
   deps: DecisionDeps,
@@ -434,7 +427,6 @@ export async function requestDecision(
         : buildToolBody({
             ...(request.query !== undefined ? { query: request.query } : {}),
             ...(request.id !== undefined ? { id: request.id } : {}),
-            ...(request.input !== undefined ? { input: request.input } : {}),
             ...(request.gateHint !== undefined ? { gateHint: request.gateHint } : {}),
             accepts: acceptsFor(deps.acceptsBazaar === true),
           }),

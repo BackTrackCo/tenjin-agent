@@ -55,14 +55,14 @@ import { routerSettings } from './settings';
  * query with no id comes back as the picked service's spec, run in the same
  * call when the server bound the query to its input.
  *
- * WITHOUT A SPEC, THE ID NAMES THE SERVICE AND THE QUERY IS SENT. With an id,
- * the backend binds the query to the capability the hook's line offered and
- * never re-decides which service (tenjin#885). Without one, it asks for
- * exactly one fresh decision from the query and the turn's packet, which is
- * the pair the routing corpus is calibrated on.
+ * AN ID WITH NO KEPT SPEC builds nothing. An input for it (the spec expired
+ * or was pruned) is answered here, with no server call and nothing paid: the
+ * agent starts over with `request({query})`. A query with it goes to the
+ * server, which binds the free docs lookup, the one offer with no spec, from
+ * the query in code, and points any other id back to a fresh query.
  *
- * WHAT IS CHECKED LOCALLY, BEFORE ANYTHING IS SIGNED: the decision's arguments
- * against the schema it carries, its success rule against the compiler, its
+ * WHAT IS CHECKED LOCALLY, BEFORE ANYTHING IS SIGNED: the input against the
+ * spec's schema, the decision's arguments against the schema it carries, its success rule against the compiler, its
  * destination against the shared preflight inside `runPay`, and the amount
  * actually signed against `maxAutoSpend` and `sessionBudget` in `gateSpend`.
  * That last one is the whole money story: a hostile backend can name any
@@ -75,12 +75,12 @@ import { routerSettings } from './settings';
 export interface RequestToolArgs {
   /** Optional only beside `input`. */
   query?: string;
-  /** The turn id from the hook's line. It names the service that line offered, and
-   *  the server runs that one; it grants nothing locally, every cap still applies. */
+  /** The turn id from the hook's line. It names the service that line offered;
+   *  it grants nothing locally, every cap still applies. */
   id?: string;
-  /** The host's own input for the offered service, per its spec. With a spec
-   *  kept for the id, this client builds the request; otherwise the server
-   *  does. Every cap still applies. */
+  /** The host's own input for the offered service, per its spec. This client
+   *  builds the request from the spec kept for the id; with none kept, nothing
+   *  is built. Every cap still applies. */
   input?: Record<string, unknown>;
 }
 
@@ -146,11 +146,11 @@ export async function runRequestTool(
   if (mask(query) !== query) {
     return fail('native', 'the query carries a credential-shaped value, so nothing was sent');
   }
-  // The same rule for a discovered service's input, which goes to the seller
-  // as the request body or its query string.
+  // The same rule for an input, which goes to the seller as the request body
+  // or its query string.
   if (input !== undefined) {
-    // The server builds the call from the service that id named, so an input
-    // with no id has nothing to go to.
+    // An input fills the spec of the service that id named, so with no id it
+    // has nothing to go to.
     if (id === undefined) {
       return fail(
         'needs_input',
@@ -166,6 +166,16 @@ export async function runRequestTool(
     // boundaries the mask anchors on are not there.
     if (JSON.stringify(maskDeep(input)) !== serialized) {
       return fail('native', 'the input carries a credential-shaped value, so nothing was sent');
+    }
+    // NO SPEC KEPT FOR THE ID: it expired or was pruned, and nobody else builds
+    // the call. Answered here, with no server call: one more call costs less
+    // than a guess.
+    if (spec === null) {
+      return fail(
+        'needs_input',
+        'The spec for that offer is no longer kept on this machine (it expired or was pruned), so nothing was sent or paid.',
+        { nextStep: 'Call request({query}) with the task for a fresh offer, then fill its line.' },
+      );
     }
   }
   // THE FOOTER, OPENED FIRST AND TRUSTED WITH NOTHING: it shows this lookup in
@@ -200,18 +210,13 @@ export async function runRequestTool(
   }
 
   // ONE CALL, ONE DECISION. The query the model wrote goes to the backend with
-  // the turn id when it has one; the backend binds the query to the service
-  // that id offered, or decides from the query and the stored packet when there
-  // is no id. Nothing is fetched by id and nothing is waited for: an id the
-  // backend does not know is its own plain note, and the decision still runs
-  // from the query.
+  // the turn id when it has one: the free docs offer's id binds the query, and
+  // with no id the gate picks a service and answers with its spec. An id the
+  // backend does not know is its own plain note, and the pick still runs from
+  // the query.
   const fresh = await requestDecision(
     'tool',
-    {
-      ...(query.length > 0 ? { query } : {}),
-      ...(id !== undefined ? { id } : {}),
-      ...(input !== undefined ? { input } : {}),
-    },
+    { query, ...(id !== undefined ? { id } : {}) },
     decisionDeps,
   );
   if (fresh.status === 'failed') {
