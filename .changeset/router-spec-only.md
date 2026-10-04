@@ -11,6 +11,9 @@ dropping its server-side binder: tenjin-cli 0.1.0-alpha.21 and older receive no
 paid offers and are told to run `tenjin update`.
 
 When a hook's conversation packet is over its six-message or 16 KiB bound,
-the assistant's replies are now dropped before any of the user's messages, so
-an early instruction such as "don't use paid tools" still reaches the router's
-gate. Past the bound on user messages alone, the newest of them are kept.
+the newest assistant reply is kept, so a follow-up such as "the domain you
+found" still carries its referent; older replies go first, then the oldest of
+the user's messages. A newest reply too large to fit beside the newest user
+message is dropped instead, so an early instruction such as "don't use paid
+tools" still reaches the router's gate. Past the bound on user messages alone,
+the newest of them are kept.

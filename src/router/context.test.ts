@@ -403,7 +403,30 @@ describe('what history gives up first', () => {
     ]);
   });
 
-  it('keeps the newest user messages when user text alone is over the cap', async () => {
+  it('keeps the newest assistant reply when six user turns fill the cap', async () => {
+    const path = await transcript([
+      user('turn 1'),
+      assistant('Looking.'),
+      user('turn 2'),
+      user('turn 3'),
+      user('turn 4'),
+      user('turn 5'),
+      user('turn 6'),
+      assistant('The company runs on example.com.'),
+    ]);
+    const packet = await sent(path, 's', 'the company profile for the domain you found');
+    // The follow-up names the domain only through that reply.
+    expect(packet.history.map((m) => m.text)).toEqual([
+      'turn 2',
+      'turn 3',
+      'turn 4',
+      'turn 5',
+      'turn 6',
+      'The company runs on example.com.',
+    ]);
+  });
+
+  it('keeps the newest user messages and the newest reply when they alone are over the cap', async () => {
     const { fit } = await import('./context');
     const fitted = fit({
       current: { role: 'user', text: 'now' },
@@ -417,7 +440,23 @@ describe('what history gives up first', () => {
       historyStatus: 'ok',
     });
     expect(Buffer.byteLength(JSON.stringify(fitted))).toBeLessThanOrEqual(MAX_PACKET_BYTES);
-    expect(fitted.history.map((m) => m.text[0])).toEqual(['y', 'z']);
+    expect(fitted.history.map((m) => m.text[0])).toEqual(['r', 'y', 'z']);
+  });
+
+  it('drops a newest reply too large to sit beside the newest user message, keeping the restriction', async () => {
+    const { fit } = await import('./context');
+    const fitted = fit({
+      current: { role: 'user', text: 'now' },
+      history: [
+        { role: 'user', text: 'Only use the host tools.' },
+        { role: 'assistant', text: 'a'.repeat(12_000) },
+        { role: 'user', text: 'u'.repeat(5_000) },
+      ],
+      literalUrls: [],
+      historyStatus: 'ok',
+    });
+    expect(Buffer.byteLength(JSON.stringify(fitted))).toBeLessThanOrEqual(MAX_PACKET_BYTES);
+    expect(fitted.history.map((m) => m.text.slice(0, 11))).toEqual(['Only use th', 'uuuuuuuuuuu']);
   });
 });
 
