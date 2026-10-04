@@ -106,13 +106,11 @@ a repeat or a report after expiry is a 204 that changes nothing. No text is
 stored.
 
 A tool call with a `query` and no `id` runs the hook's gate over the query (a bare URL takes the page rule)
-and answers `{action: "spec", id, spec, hint, input?}`: the picked
+and answers `{action: "spec", id, spec, hint}`: the picked
 capability's spec beside a fresh `id`, stored as a hook offer is, and the
-`hint` line with the call's skeleton. `input` is there when the spec has one
-required field (pins aside) and the server bound the query to it and checked
-the result; the `request` tool then runs it and pays in the same call, through
-every check a filled spec meets. Without `input`, the tool shows the spec and
-the skeleton, so the agent's next call is `request({id, input})`. A list
+`hint` line with the call's skeleton. The answer never carries an `input`, so
+nothing runs or is paid on it: the tool shows the spec and the skeleton, and
+the agent's next call is `request({id, input})` with the fields filled. A list
 specialist can still replace a generic pick, and a query no capability serves
 can still come back `discovered`, both with `specs`; the tool then shows the
 pick's own spec. A pick with no spec (the free docs lookup) is bound and
@@ -140,7 +138,7 @@ answered `execute` as its id would be.
 | `wire-hook-discovered-spec.json`           | the same for a list service: the call with its skeleton, the spec rides along             |
 | `wire-outcome-request.json`                | the outcome report a client sends after running a spec                                    |
 | `wire-tool-request-spec.json`              | the tool call from a spec client: a query, no id                                          |
-| `wire-lookup-spec.json`                    | tool answer for it: Wolfram's spec under a fresh id, the query bound as `input`           |
+| `wire-lookup-spec.json`                    | tool answer for it: Wolfram's spec under a fresh id and the skeleton line, no `input`     |
 | `wire-lookup-spec-skeleton.json`           | tool answer for a spec with more to fill (Apollo): the skeleton line, no `input`          |
 
 Two rules the fixtures exist to hold:
