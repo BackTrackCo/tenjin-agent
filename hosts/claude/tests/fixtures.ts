@@ -1,6 +1,6 @@
 import { mock } from 'claude-code/testing';
 import type { On } from 'claude-code';
-import type { Mounted } from 'claude-code/testing';
+import type { MockClock, Mounted } from 'claude-code/testing';
 
 /** Every body that draws runs on both surfaces the mod draws on. */
 export const SURFACES = ['terminal', 'desktop'] as const;
@@ -17,15 +17,15 @@ export const MODEL_TEXT = /x402|http|[{}]/;
  * and `$.fs.read` answered from `files`, a missing path rejecting as the real
  * one does.
  */
-export function machine(on: On): Map<string, string> {
+export function machine(on: On): { files: Map<string, string>; clock: MockClock } {
   const files = new Map<string, string>();
   mock.env(on, { HOME: '/home/test' });
-  mock.clock(on, { now: NOW });
+  const clock = mock.clock(on, { now: NOW });
   on('fs.read', (_$, e) => {
     const text = files.get(e.path);
     return text === undefined ? { deny: `ENOENT: ${e.path}` } : { value: text };
   });
-  return files;
+  return { files, clock };
 }
 
 export async function sha256Hex(text: string): Promise<string> {
@@ -60,7 +60,13 @@ export async function keepSpec(
 export async function recordPayment(
   files: Map<string, string>,
   id: string,
-  row: { capabilityId: string; provider: string; amountAtomic: string; txHash: string },
+  row: {
+    capabilityId: string;
+    provider: string;
+    amountAtomic: string;
+    txHash: string;
+    settlement?: 'settled' | 'unknown';
+  },
 ): Promise<void> {
   const at = new Date(NOW).toISOString();
   files.set(
