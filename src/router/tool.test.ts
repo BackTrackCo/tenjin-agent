@@ -1606,10 +1606,17 @@ describe('an offer with a request spec', () => {
     (answer.decision as Record<string, unknown>).input = { symbol: 'BTC' };
     const { fetchImpl, calls } = net([{ url: ROUTER, status: 200, body: answer }]);
     const result = await runRequestTool({ query: 'BTC spot price' }, deps(fetchImpl, auth));
-    // A spec answer is a pick, never a run: one carrying an input is not the
-    // contract, so nothing reaches the provider and nothing is signed.
-    expect(result.isError).toBe(true);
-    expect(result.envelope.status).not.toBe('fulfilled');
+    // A spec answer is a pick, never a run: an input an older router bound
+    // still parses, and the spec is kept and shown with its skeleton, but
+    // nothing reaches the provider and nothing is signed.
+    expect(result.isError).toBe(false);
+    expect(result.envelope).toMatchObject({ status: 'spec', id: PICKED });
+    expect(String(result.envelope.nextStep)).toContain(
+      `request({id: ${JSON.stringify(PICKED)}, input: {"symbol":"<symbol>"}})`,
+    );
+    // Kept: the id alone shows the spec from this machine, with no second call.
+    const shown = await runRequestTool({ id: PICKED }, deps(fetchImpl, auth));
+    expect(shown.envelope).toMatchObject({ status: 'spec', id: PICKED });
     expect(calls).toHaveLength(1);
     expect(auth.authorize).not.toHaveBeenCalled();
   });

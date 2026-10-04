@@ -198,10 +198,10 @@ describe('every answer payload on disk', () => {
 
   /**
    * A QUERY WITH NO ID ONLY PICKS. The answer is the service's spec under a
-   * fresh id and the skeleton the agent fills for the next call; it never
-   * carries an `input` to run, so an id-less call pays nothing.
+   * fresh id and the skeleton the agent fills for the next call. An `input`
+   * an older router still binds parses too, and the client never reads it.
    */
-  it('carries only the skeleton on an id-less spec answer, and refuses one with an input', () => {
+  it('carries only the skeleton on an id-less spec answer, and still parses one with an input', () => {
     const payload = fixture('wire-lookup-spec-skeleton.json');
     const skeleton = payload.decision as Record<string, unknown>;
     expect(skeleton).toMatchObject({ action: 'spec' });
@@ -209,7 +209,7 @@ describe('every answer payload on disk', () => {
     expect(skeleton.spec).not.toHaveProperty('id');
     expect(String(skeleton.hint)).toMatch(/request\(\{id: "[^"]+", input: \{"[a-z_]+":"<[^>]+>"/);
     const withInput = { ...payload, decision: { ...skeleton, input: { q: 'x' } } };
-    expect(parseForTests('tool', withInput).success).toBe(false);
+    expect(parseForTests('tool', withInput).success).toBe(true);
   });
 
   it.each([

@@ -246,7 +246,9 @@ const ToolDecisionSchema = z.discriminatedUnion('action', [
    * A query with no id, answered with the spec of the service the server
    * picked under a fresh `id`: kept like a hook's, and never run in the same
    * call. `hint` is the line, with the skeleton of the next call:
-   * `request({id, input: {...}})` with the required fields.
+   * `request({id, input: {...}})` with the required fields. `input` is what a
+   * router from before the binder's removal still sends on a bound pick: it
+   * is accepted so that answer parses, and never read, so it never runs.
    */
   z
     .strictObject({
@@ -254,6 +256,7 @@ const ToolDecisionSchema = z.discriminatedUnion('action', [
       id: IdSchema,
       spec: ToolSpecSchema,
       hint: z.string().min(1).max(2_000),
+      input: z.record(z.string(), z.unknown()).optional(),
     })
     .superRefine(checkHint),
   DiscoveredSchema,
