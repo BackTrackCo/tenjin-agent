@@ -99,7 +99,7 @@ test('a payment whose settlement is unknown reads as pending', async ($, on) => 
         output: resultText('fulfilled'),
       },
     });
-    expect((await shownLines(ui)).slice(0, 2)).toEqual(['Exa search', '$0.007 · pending']);
+    expect((await shownLines(ui)).slice(0, 2)).toEqual(['Exa search', 'pending']);
     await ui.unmount();
   }
 });

@@ -271,7 +271,9 @@ async function settleCall(
     const outcome =
       settlement === 'not_charged'
         ? 'not charged'
-        : `$${usd(amount)} · ${settlement === 'settled' ? 'settled' : 'pending'}`;
+        : settlement === 'settled'
+          ? `$${usd(amount)} · settled`
+          : 'pending';
     return {
       row: { outcome, ...label },
       ...(settlement === 'not_charged' ? {} : { paidAtomic: amount }),
