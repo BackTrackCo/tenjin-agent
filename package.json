@@ -3,7 +3,7 @@
   "version": "0.1.0-alpha.23",
   "mcpName": "blog.tenjin/tenjin",
   "type": "module",
-  "description": "The tool router for coding agents: hands Claude Code the right tool when it helps, paid per call over x402. No API keys, no MCP servers.",
+  "description": "The tool router for coding agents.",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/BackTrackCo/tenjin-agent.git"

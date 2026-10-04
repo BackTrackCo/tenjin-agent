@@ -91,7 +91,7 @@ The router picks from a catalog we curate and maintain. When nothing in it fits,
 | **X posts** · [glim](https://glim.sh)                          | Posts matching a search, or one post with its thread                                      | $0.005         |
 | **Reddit** · [glim](https://glim.sh)                           | Posts matching a search, or one thread with its comments                                  | $0.01 / $0.005 |
 
-Free tools run without a funded wallet. Every tool, including the Tenjin list, with current prices: [tenjin.sh/tools](https://tenjin.sh/tools). More are added by demand: [tell us what you want](#request-a-tool).
+Every tool, including the Tenjin list, with current prices: [tenjin.sh/tools](https://tenjin.sh/tools). More are added by demand: [tell us what you want](#request-a-tool).
 
 ### Tenjin list and experimental Bazaar
 
