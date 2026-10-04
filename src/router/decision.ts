@@ -166,6 +166,9 @@ const DiscoveredCandidateSchema = z.strictObject({
 export const ToolSpecSchema = z.strictObject({
   capabilityId: z.string().min(1).max(200),
   provider: z.string().min(1).max(120),
+  /** The service's display name (`Exa search`, `Wolfram Alpha`), sent only to
+   *  a build that accepts `label`. The person sees it; nothing decides by it. */
+  label: z.string().min(1).max(32).optional(),
   description: z.string().min(1).max(500),
   priceAtomic: z.string().regex(/^\d+$/),
   priceVaries: z.boolean(),
@@ -296,10 +299,12 @@ export type CallKind = 'hook' | 'tool';
  * lists it, so an older build never sees one. `spec` asks for each offered
  * service's request spec beside its line, and for the picked service's spec in
  * place of a decision on a query with no id, which only a build that parses
- * them can take: the decision schemas are strict. `bazaar` widens discovery
- * to the open Bazaar and is sent only while `experimental.bazaar` is on.
+ * them can take: the decision schemas are strict. `label` asks for each spec's
+ * display name, which the same strictness keeps from an older build. `bazaar`
+ * widens discovery to the open Bazaar and is sent only while
+ * `experimental.bazaar` is on.
  */
-export const CLIENT_ACCEPTS: readonly string[] = ['discovered', 'spec'];
+export const CLIENT_ACCEPTS: readonly string[] = ['discovered', 'spec', 'label'];
 export const BAZAAR_ACCEPT = 'bazaar';
 
 /** The `accepts` this build sends, with the open Bazaar or without it. */

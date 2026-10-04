@@ -1,6 +1,8 @@
+import { readFileSync } from 'node:fs';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { CommandContext } from '../context';
 import { packetForText } from './context';
@@ -138,7 +140,11 @@ describe('one free decision', () => {
       'schemaVersion',
     ]);
     // The Tenjin list is on by default; the open Bazaar is not.
-    expect((calls[0]!.body as { accepts: unknown }).accepts).toEqual(['discovered', 'spec']);
+    expect((calls[0]!.body as { accepts: unknown }).accepts).toEqual([
+      'discovered',
+      'spec',
+      'label',
+    ]);
   });
 
   it('adds the open Bazaar to what it accepts only with the experiment on', async () => {
@@ -154,7 +160,45 @@ describe('one free decision', () => {
       { ctx: ctx(), baseUrl: BASE, fetchImpl, acceptsBazaar: true },
     );
     for (const call of calls) {
-      expect((call.body as { accepts: unknown }).accepts).toEqual(['discovered', 'spec', 'bazaar']);
+      expect((call.body as { accepts: unknown }).accepts).toEqual([
+        'discovered',
+        'spec',
+        'label',
+        'bazaar',
+      ]);
+    }
+  });
+
+  /**
+   * A DISPLAY NAME THE SERVER SENDS ONLY TO A BUILD THAT ASKS. `label` rides
+   * each spec once `accepts` names it; a spec without one is what every other
+   * server answer still looks like, and parses as before.
+   */
+  it("keeps a spec's label, and parses a spec with none", async () => {
+    const offer = JSON.parse(
+      readFileSync(
+        fileURLToPath(new URL('./fixtures/wire-hook-execute-spec.json', import.meta.url)),
+        'utf8',
+      ),
+    ) as { decision: { specs: Record<string, unknown>[] } };
+    const [spec] = offer.decision.specs;
+    const labelled = {
+      ...offer,
+      decision: { ...offer.decision, specs: [{ ...spec, label: 'Exa search' }] },
+    };
+    for (const [answer, label] of [
+      [labelled, 'Exa search'],
+      [offer, undefined],
+    ] as const) {
+      const outcome = await requestDecision(
+        'hook',
+        { packet: packetForText('who builds agent payments') },
+        { ctx: ctx(), baseUrl: BASE, fetchImpl: net(answer).fetchImpl },
+      );
+      expect(outcome.status).toBe('decided');
+      const { decision } = (outcome as { decision: { decision: { specs?: { label?: string }[] } } })
+        .decision;
+      expect(decision.specs?.[0]?.label).toBe(label);
     }
   });
 

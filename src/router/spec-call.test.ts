@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, rm, utimes } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -330,6 +330,15 @@ describe('the specs a hook keeps', () => {
     await storeSpecs(dir, [spec()]);
     expect(await readSpec(dir, ID)).toEqual(spec());
     expect(await readSpec(dir, '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d99')).toBeNull();
+  });
+
+  // The mod reads the file itself, for the row's label: the field must land on disk.
+  it("keeps a spec's label in the file, and reads it back", async () => {
+    await storeSpecs(dir, [spec({ label: 'GPT Image 2' })]);
+    const [name] = await readdir(join(dir, 'progress', 'specs'));
+    const saved = JSON.parse(await readFile(join(dir, 'progress', 'specs', name!), 'utf8'));
+    expect(saved.label).toBe('GPT Image 2');
+    expect((await readSpec(dir, ID))?.label).toBe('GPT Image 2');
   });
 
   it('forgets a spec once the server has expired its offer, and prunes it on the next write', async () => {
