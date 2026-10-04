@@ -268,12 +268,7 @@ async function settleCall(
       : {};
   if (amount !== undefined && BigInt(amount) > 0n) {
     const settlement = ledger?.settlement;
-    const outcome =
-      settlement === 'not_charged'
-        ? 'not charged'
-        : settlement === 'settled'
-          ? `$${usd(amount)} · settled`
-          : 'pending';
+    const outcome = settlement === 'not_charged' ? 'not charged' : `$${usd(amount)} · paid`;
     return {
       row: { outcome, ...label },
       ...(settlement === 'not_charged' ? {} : { paidAtomic: amount }),

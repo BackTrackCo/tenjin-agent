@@ -59,7 +59,7 @@ test('a paid row names the label, the price and the fields, then how it ended', 
     const lines = await shownLines(ui);
     expect(lines).toEqual([
       'Exa search',
-      '$0.007 · settled',
+      '$0.007 · paid',
       'query: rust async runtimes',
       'numResults: 5',
     ]);
@@ -68,7 +68,7 @@ test('a paid row names the label, the price and the fields, then how it ended', 
   }
 });
 
-test('a payment whose settlement is unknown reads as pending', async ($, on) => {
+test('a payment whose settlement is unknown still reads as paid', async ($, on) => {
   const { files } = machine(on);
   await keepSpec(files, OFFER, {
     capabilityId: 'exa-search',
@@ -99,7 +99,7 @@ test('a payment whose settlement is unknown reads as pending', async ($, on) => 
         output: resultText('fulfilled'),
       },
     });
-    expect((await shownLines(ui)).slice(0, 2)).toEqual(['Exa search', 'pending']);
+    expect((await shownLines(ui)).slice(0, 2)).toEqual(['Exa search', '$0.007 · paid']);
     await ui.unmount();
   }
 });
