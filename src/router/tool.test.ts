@@ -1544,12 +1544,12 @@ describe('an offer with a request spec', () => {
     await vi.waitFor(() => expect(routerCalls(calls)).toHaveLength(1));
   });
 
-  /** The id-less answer: the pick's spec beside its fresh id, the line with
-   *  the call's skeleton, and the bound input when the server bound one. */
-  function specAnswer(id: string, input?: Record<string, unknown>): Record<string, unknown> {
+  /** The id-less answer: the pick's spec beside its fresh id, and the line
+   *  with the call's skeleton. */
+  function specAnswer(id: string): Record<string, unknown> {
     const spec: Partial<OfferSpec> = quoteSpec();
     delete spec.id;
-    const call = input !== undefined ? JSON.stringify(input) : '{"symbol":"<symbol>"}';
+    const call = '{"symbol":"<symbol>"}';
     return {
       schemaVersion: 1,
       routerVersion: '2026-09-23.1',
@@ -1558,7 +1558,6 @@ describe('an offer with a request spec', () => {
         id,
         spec,
         hint: `CoinMarketCap fits this: latest market quotes. $0.01 via ${PROVIDER} . Call request({id: ${JSON.stringify(id)}, input: ${call}}) alone and wait for its result.`,
-        ...(input !== undefined ? { input } : {}),
       },
     };
   }
@@ -1600,52 +1599,17 @@ describe('an offer with a request spec', () => {
     expect(JSON.parse(calls[3]!.body!)).toMatchObject({ id: PICKED, status: 'fulfilled' });
   });
 
-  it('runs and pays a query with no id in the same call when the server bound its input', async () => {
+  it('pays nothing from a query with no id, even when the answer carries an input', async () => {
     const PICKED = '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d22';
     const auth = authorizer();
-    const { fetchImpl, calls } = net([
-      { url: ROUTER, status: 200, body: specAnswer(PICKED, { symbol: 'BTC' }) },
-      ...providerLegs(),
-      { url: ROUTER, status: 200, body: {} },
-    ]);
+    const answer = specAnswer(PICKED);
+    (answer.decision as Record<string, unknown>).input = { symbol: 'BTC' };
+    const { fetchImpl, calls } = net([{ url: ROUTER, status: 200, body: answer }]);
     const result = await runRequestTool({ query: 'BTC spot price' }, deps(fetchImpl, auth));
-    expect(result.envelope).toMatchObject({
-      status: 'fulfilled',
-      parameters: { symbol: 'BTC' },
-      cost: ['provider price 0.01 USD'],
-    });
-    // One decision, then the provider's probe and paid leg, built here from
-    // the spec, under the spec's own terms.
-    expect(calls[1]).toMatchObject({ url: `${PROVIDER}?symbol=BTC`, paid: false });
-    expect(calls[2]).toMatchObject({ paid: true });
-    expect(vi.mocked(runPay).mock.calls.at(-1)![0]).toMatchObject({
-      terms: { source: 'CoinMarketCap', maxAmountAtomic: '10000', payTo: PAYEE },
-    });
-    expect(auth.authorize).toHaveBeenCalledOnce();
-    await vi.waitFor(() => expect(calls).toHaveLength(4));
-    expect(JSON.parse(calls[3]!.body!)).toMatchObject({ id: PICKED, status: 'fulfilled' });
-    // Kept like a hook's spec, and paid once: the same id pays nothing again.
-    const retry = await runRequestTool(
-      { id: PICKED, input: { symbol: 'BTC' } },
-      deps(fetchImpl, auth),
-    );
-    expect(String(retry.envelope.reason)).toContain('already paid for');
-    expect(calls.filter((call) => call.paid)).toHaveLength(1);
-  });
-
-  it("checks the server's bound input like any other, and shows the spec when it misses", async () => {
-    const PICKED = '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d23';
-    const auth = authorizer();
-    const { fetchImpl, calls } = net([
-      { url: ROUTER, status: 200, body: specAnswer(PICKED, { symbol: 'BTC', convert: 'GBP' }) },
-    ]);
-    const result = await runRequestTool({ query: 'BTC price in GBP' }, deps(fetchImpl, auth));
-    expect(result.envelope).toMatchObject({
-      status: 'needs_input',
-      cost: ['provider price 0 USD'],
-    });
-    expect(String(result.envelope.reason)).toContain('convert must be one of "USD", "EUR"');
-    expect(result.summary).toContain('symbol (string, required); Comma-separated symbols');
+    // A spec answer is a pick, never a run: one carrying an input is not the
+    // contract, so nothing reaches the provider and nothing is signed.
+    expect(result.isError).toBe(true);
+    expect(result.envelope.status).not.toBe('fulfilled');
     expect(calls).toHaveLength(1);
     expect(auth.authorize).not.toHaveBeenCalled();
   });

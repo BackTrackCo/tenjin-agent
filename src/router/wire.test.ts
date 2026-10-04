@@ -183,7 +183,7 @@ describe('every answer payload on disk', () => {
     expect(parseForTests('tool', fixture('wire-hook-execute.json')).success).toBe(false);
     expect(parseForTests('hook', fixture('wire-lookup-expired-id.json')).success).toBe(false);
     // A spec answer is the tool's alone: the hook offers by line.
-    expect(parseForTests('hook', fixture('wire-lookup-spec.json')).success).toBe(false);
+    expect(parseForTests('hook', fixture('wire-lookup-spec-skeleton.json')).success).toBe(false);
     // A discovered answer is ONE shape on both calls: the hook's offer and the
     // tool's fallback parse with either parser.
     for (const name of [
@@ -197,22 +197,19 @@ describe('every answer payload on disk', () => {
   });
 
   /**
-   * A QUERY WITH NO ID IS ONE CALL WHEN IT CAN BE. The server sends the query
-   * as `input` only when, as written, it is a valid value for the spec's query
-   * field (free text, or a format or pattern it satisfies), and the tool runs
-   * and pays it at once; otherwise the answer has no `input`, and its line is
-   * the skeleton the agent fills for the next call.
+   * A QUERY WITH NO ID ONLY PICKS. The answer is the service's spec under a
+   * fresh id and the skeleton the agent fills for the next call; it never
+   * carries an `input` to run, so an id-less call pays nothing.
    */
-  it('carries the bound input, or only the skeleton, on an id-less spec answer', () => {
-    const bound = fixture('wire-lookup-spec.json').decision as Record<string, unknown>;
-    expect(bound).toMatchObject({ action: 'spec', input: { input: expect.any(String) } });
-    expect(bound.spec).not.toHaveProperty('id');
-    expect(String(bound.hint)).toContain(`input: ${JSON.stringify(bound.input)}`);
-    const skeleton = fixture('wire-lookup-spec-skeleton.json').decision as Record<string, unknown>;
+  it('carries only the skeleton on an id-less spec answer, and refuses one with an input', () => {
+    const payload = fixture('wire-lookup-spec-skeleton.json');
+    const skeleton = payload.decision as Record<string, unknown>;
     expect(skeleton).toMatchObject({ action: 'spec' });
     expect(skeleton).not.toHaveProperty('input');
     expect(skeleton.spec).not.toHaveProperty('id');
     expect(String(skeleton.hint)).toMatch(/request\(\{id: "[^"]+", input: \{"[a-z_]+":"<[^>]+>"/);
+    const withInput = { ...payload, decision: { ...skeleton, input: { q: 'x' } } };
+    expect(parseForTests('tool', withInput).success).toBe(false);
   });
 
   it.each([
@@ -224,9 +221,9 @@ describe('every answer payload on disk', () => {
     ['id', 'wire-hook-execute.json', 'hook'],
     ['candidate', 'wire-hook-discovered.json', 'hook'],
     ['hint', 'wire-lookup-discovered.json', 'tool'],
-    ['spec', 'wire-lookup-spec.json', 'tool'],
-    ['id', 'wire-lookup-spec.json', 'tool'],
-    ['hint', 'wire-lookup-spec.json', 'tool'],
+    ['spec', 'wire-lookup-spec-skeleton.json', 'tool'],
+    ['id', 'wire-lookup-spec-skeleton.json', 'tool'],
+    ['hint', 'wire-lookup-spec-skeleton.json', 'tool'],
   ])('refuses an answer missing %s', (field, name, kind) => {
     const payload = fixture(name);
     const decision = { ...(payload.decision as Record<string, unknown>) };

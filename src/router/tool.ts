@@ -52,8 +52,8 @@ import { routerSettings } from './settings';
  * paid straight to the provider, with no second decision. An input that misses
  * gets every problem and the whole spec back, locally, with nothing paid; `{id}`
  * alone shows the spec too. The server is told only how the call ended. A
- * query with no id comes back as the picked service's spec, run in the same
- * call when the server bound the query to its input.
+ * query with no id comes back as the picked service's spec under a fresh id,
+ * with nothing paid; the next call fills it.
  *
  * AN ID WITH NO KEPT SPEC builds nothing. An input for it (the spec expired
  * or was pruned) is answered here, with no server call and nothing paid: the
@@ -227,29 +227,12 @@ export async function runRequestTool(
   }
   const { decision, note } = fresh.decision;
 
-  // THE PICKED SERVICE'S SPEC, for a query with no id, kept like a hook's.
-  // With an `input` (the server bound the query to the spec's one required
-  // string field) it runs now, in this call, through every check a filled
-  // spec meets. Without one, the spec is shown with the skeleton of the next
-  // call, `request({id, input})`.
+  // THE PICKED SERVICE'S SPEC, for a query with no id, kept like a hook's and
+  // shown with the skeleton of the next call, `request({id, input})`. Nothing
+  // is paid on this answer: only a filled spec pays.
   if (decision.action === 'spec') {
     const picked: OfferSpec = { ...decision.spec, id: decision.id };
     await storeSpecs(deps.ctx.dataDir, [picked]);
-    if (decision.input !== undefined) {
-      const bound = decision.input;
-      const serialized = JSON.stringify(bound);
-      // The server's input meets the agent's rules: the size cap, and no
-      // credential-shaped key or value, masked or otherwise.
-      if (Buffer.byteLength(serialized) > MAX_INPUT_BYTES) {
-        await footer.done('needs_input');
-        return showSpec(picked.id, picked, [], decision.hint);
-      }
-      if (JSON.stringify(maskDeep(bound)) !== serialized) {
-        await footer.done('native');
-        return fail('native', 'the input carries a credential-shaped value, so nothing was sent');
-      }
-      return runSpec(picked.id, picked, bound, deps, footer, decisionDeps);
-    }
     await footer.done('service found');
     return showSpec(picked.id, picked, [], decision.hint);
   }

@@ -9,6 +9,8 @@ pruned now answers `needs_input` at once, pointing the agent at a fresh
 through to a server path that no longer exists. Pairs with the Tenjin router
 dropping its server-side binder: tenjin-cli 0.1.0-alpha.21 and older receive no
 paid offers and are told to run `tenjin update`.
+A `request({query})` with no id now only picks: it answers with the service's
+spec and the call to fill under a fresh id, and never runs or pays in that call.
 
 When a hook's conversation packet is over its six-message or 16 KiB bound,
 the newest assistant reply is kept, so a follow-up such as "the domain you
