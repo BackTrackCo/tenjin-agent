@@ -5,12 +5,7 @@
   </picture>
 </p>
 
-<h3 align="center">The tool router for coding agents.</h3>
-
-<p align="center">
-  Give your agent superpowers once. Tenjin hands it the right tool when it helps, and you keep working like before.<br>
-  No API keys. No pile of MCP servers. No rules to write.
-</p>
+<h3 align="center">The tool router for coding agents: the right tool when it helps, no API keys.</h3>
 
 <p align="center">
   <a href="https://www.npmjs.com/package/tenjin-cli"><img src="https://img.shields.io/npm/v/tenjin-cli?color=C85A3B&label=npm" alt="npm version"></a>

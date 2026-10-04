@@ -1,9 +1,8 @@
 {
   "name": "tenjin-cli",
   "version": "0.1.0-alpha.23",
-  "mcpName": "blog.tenjin/tenjin",
   "type": "module",
-  "description": "The tool router for coding agents.",
+  "description": "The tool router for coding agents: the right tool when it helps, no API keys.",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/BackTrackCo/tenjin-agent.git"

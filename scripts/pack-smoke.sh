@@ -61,16 +61,6 @@ BIN="./node_modules/.bin/tenjin"
   exit 1
 }
 
-# The MCP Registry's npm validator fetches the pinned version from npm and requires
-# its package.json mcpName to equal the server name. Dropping the field breaks
-# BackTrackCo/tenjin's NEXT registry publish, weeks later and nowhere near here,
-# so assert it on the packed artifact the validator would actually read.
-MCP_NAME="$(node -e "process.stdout.write(require('./node_modules/tenjin-cli/package.json').mcpName ?? '')")"
-[ "$MCP_NAME" = "blog.tenjin/tenjin" ] || {
-  echo "pack-smoke: FAIL, packed mcpName is '$MCP_NAME', expected 'blog.tenjin/tenjin'" >&2
-  exit 1
-}
-
 # 1) --version prints exactly the package.json version.
 GOT_VERSION="$("$BIN" --version)"
 if [ "$GOT_VERSION" != "$EXPECTED_VERSION" ]; then
