@@ -402,10 +402,34 @@ async function readHistory(
     // A TAIL MUST HOLD THE TURN. The latest user message is the newest of
     // them, so a tail with any user message holds this turn's; one with none
     // is a single turn longer than the window, whose instruction was cut off.
-    if (tail && !messages.some((message) => message.role === 'user')) return null;
+    if (tail && !messages.some((message) => message.role === 'user')) {
+      // Except a subagent's: its one turn is the delegated task, the first
+      // user row at the head of its file. Dropping the file instead put the
+      // parent's latest message in that task's place.
+      if (scope.agentId === undefined) return null;
+      const task = await firstUserRow(path, scope);
+      return task === null ? null : [task, ...messages];
+    }
     return messages;
   } catch {
     return null;
+  }
+}
+
+/** The first user message in a transcript's leading {@link MAX_TRANSCRIPT_BYTES}. */
+async function firstUserRow(path: string, scope: RowScope): Promise<PacketMessage | null> {
+  const file = await open(path, 'r');
+  try {
+    const buffer = Buffer.alloc(MAX_TRANSCRIPT_BYTES);
+    const { bytesRead } = await file.read(buffer, 0, buffer.length, 0);
+    const window = buffer.subarray(0, bytesRead);
+    // Whole lines only: a row cut at the window's end is not read.
+    const end = window.lastIndexOf(0x0a);
+    if (end === -1) return null;
+    const rows = parseRows(window.subarray(0, end).toString('utf8'), scope);
+    return rows.find((message) => message.role === 'user') ?? null;
+  } finally {
+    await file.close();
   }
 }
 

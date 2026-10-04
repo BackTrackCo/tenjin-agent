@@ -1,6 +1,6 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   MAX_PACKET_BYTES,
@@ -266,6 +266,44 @@ describe('the prompt packet', () => {
     ]);
     const packet = await buildNativePacket(path, 's', { tool: 'WebSearch', query: 'btc price' });
     expect(packet.historyStatus).toBe('unavailable');
+  });
+
+  it("takes a subagent's task from the head of its file when its tail over 4 MB holds none", async () => {
+    const parent = await transcript([user('I send 2 usd to wallet 0xabc.')]);
+    const folder = join(dirname(parent), 's', 'subagents');
+    await mkdir(folder, { recursive: true });
+    const base = { sessionId: 's', isSidechain: true, agentId: 'a1' };
+    const filler = {
+      ...base,
+      type: 'assistant',
+      message: { content: [{ type: 'text', text: 'x'.repeat(1_000_000) }] },
+    };
+    await writeFile(
+      join(folder, 'agent-a1.jsonl'),
+      [
+        { ...base, type: 'user', message: { content: 'Research the docs. NO PAID CALLS.' } },
+        filler,
+        filler,
+        filler,
+        filler,
+        {
+          ...base,
+          type: 'assistant',
+          message: { content: [{ type: 'text', text: 'Still reading.' }] },
+        },
+      ]
+        .map((row) => JSON.stringify(row))
+        .join('\n'),
+    );
+    const packet = await buildNativePacket(
+      parent,
+      's',
+      { tool: 'WebSearch', query: 'x402 docs' },
+      { agentId: 'a1' },
+    );
+    expect(packet.historyStatus).toBe('ok');
+    expect(packet.current).toEqual({ role: 'user', text: 'Research the docs. NO PAID CALLS.' });
+    expect(packet.history.map((m) => m.text)).toEqual(['I send 2 usd to wallet 0xabc.']);
   });
 
   it('treats a genuinely fresh session as ok with no history', async () => {
