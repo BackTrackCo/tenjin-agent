@@ -5,7 +5,7 @@
   </picture>
 </p>
 
-<h3 align="center">The tool router for coding agents: the right tool when it helps, no API keys.</h3>
+<h3 align="center">The tool router for coding agents. Tenjin picks the right tool when your agent needs one, and one wallet pays for every call.</h3>
 
 <p align="center">
   <a href="https://www.npmjs.com/package/tenjin-cli"><img src="https://img.shields.io/npm/v/tenjin-cli?color=C85A3B&label=npm" alt="npm version"></a>
