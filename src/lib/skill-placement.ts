@@ -1,8 +1,13 @@
 import { lstatSync } from 'node:fs';
 import { readdir, rm, rmdir } from 'node:fs/promises';
-import { join } from 'node:path';
-import { readSkillFile, skillFrontmatterName, skillsDirsFor } from './skill-wiring';
-import { RETIRED_SKILL_NAMES } from './skills-source';
+import { dirname, join } from 'node:path';
+import {
+  CLI_SKILL_NAMES,
+  readSkillFile,
+  skillFrontmatterName,
+  skillsDirsFor,
+} from './skill-wiring';
+import { RETIRED_SKILL_NAMES, SHIPPED_SKILL_FILES } from './skills-source';
 import { hasCode } from './errno';
 
 function isRealDirectory(path: string): boolean {
@@ -16,7 +21,11 @@ function isRealDirectory(path: string): boolean {
   }
 }
 
-/** Remove only our named skill file; preserve foreign skills and adjacent user files. */
+/**
+ * Remove only the files our named skill shipped (SKILL.md last, as the ownership
+ * proof), then any directory they leave empty; preserve foreign skills and
+ * adjacent user files.
+ */
 export async function removeOwnedSkill(
   name: string,
   skillsDir: string,
@@ -34,18 +43,31 @@ export async function removeOwnedSkill(
   if (read.kind !== 'ok' || skillFrontmatterName(read.bytes.toString('utf8')) !== name) {
     return { changed: false }; // not ours to delete for sitting at our path
   }
+  const shipped = (SHIPPED_SKILL_FILES as Record<string, readonly string[]>)[name] ?? [];
+  const subdirs = new Set<string>();
+  for (const rel of shipped) {
+    if (rel === 'SKILL.md') continue;
+    subdirs.add(dirname(join(skillDir, rel)));
+    await rm(join(skillDir, rel), { force: true });
+  }
   await rm(path, { force: true });
-  const rest = await readdir(skillDir).catch(() => null);
-  if (rest !== null && rest.length === 0) await rmdir(skillDir).catch(() => undefined);
+  for (const dir of [...subdirs, skillDir].sort((a, b) => b.length - a.length)) {
+    const rest = await readdir(dir).catch(() => null);
+    if (rest !== null && rest.length === 0) await rmdir(dir).catch(() => undefined);
+  }
   return { changed: true };
 }
 
-/** Refresh retires obsolete skills without needing their old packaged source. */
+/**
+ * Refresh retires obsolete skills without needing their old packaged source:
+ * the retired names, and the shelf's CLI skills, whose `tenjin search` and
+ * `tenjin publish` commands the router CLI does not ship.
+ */
 export async function removeRetiredSkills(home: string, project?: string): Promise<string[]> {
   const removed: string[] = [];
   const dirs = [...skillsDirsFor(home), ...(project ? skillsDirsFor(project) : [])];
   for (const dir of new Set(dirs)) {
-    for (const name of RETIRED_SKILL_NAMES) {
+    for (const name of [...RETIRED_SKILL_NAMES, ...CLI_SKILL_NAMES]) {
       if ((await removeOwnedSkill(name, dir)).changed) removed.push(join(dir, name));
     }
   }

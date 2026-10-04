@@ -8,7 +8,7 @@ import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { build, type Options } from 'tsup';
-import tsupConfigs from '../../tsup.config';
+import tsupConfigs from '../../tsup.shelf.config';
 import pkg from '../../package.json';
 import { installDaemonFiles } from './control';
 import { codexAdapter } from '../adapters/codex';
@@ -263,14 +263,14 @@ beforeAll(async () => {
   // here (07-pr-b-daemon-kernel.md "B2 tests").
   tmpOutDir = await mkdtemp(join(tmpdir(), 'tenjin-b-smoke-bundle-'));
   const configs = tsupConfigs as unknown as Options[];
-  const daemonConfig = configs[1];
-  const reporterConfig = configs[2];
+  const daemonConfig = configs[0];
+  const reporterConfig = configs[1];
   if (
     !hasEntries(daemonConfig, ['tenjin-daemon', 'tenjin-shim']) ||
     !hasEntries(reporterConfig, ['tenjin-vitest-reporter'])
   ) {
     throw new Error(
-      'tsup.config.ts no longer has the tenjin-daemon/tenjin-shim/tenjin-vitest-reporter entries; smoke test assumption broke',
+      'tsup.shelf.config.ts no longer has the tenjin-daemon/tenjin-shim/tenjin-vitest-reporter entries; smoke test assumption broke',
     );
   }
   // Both single-file configs: `installDaemonFiles` copies all three, so a
@@ -300,13 +300,13 @@ beforeAll(async () => {
   // byte-complete and ends correctly while its middle is spliced (the shorter
   // bundle, then the longer one's 127-byte tail). Node refused to parse it, in
   // a file nothing on disk showed as truncated. `banner: {}` on each block in
-  // tsup.config.ts is the fix, because it leaves only one possible content; the
+  // tsup.shelf.config.ts is the fix, because it leaves only one possible content; the
   // two checks here are the tripwire if another option ever diverges. A spliced
   // bundle always duplicates the tail, so one `export {` is the structural test.
   const reporterBundle = await readFile(join(tmpOutDir, 'tenjin-vitest-reporter.mjs'), 'utf8');
   if (reporterBundle.includes('__tenjinCreateRequire')) {
     throw new Error(
-      "the reporter bundle carries the daemon block's createRequire banner: tsup leaked options between builds again, pin `banner: {}` on that block in tsup.config.ts",
+      "the reporter bundle carries the daemon block's createRequire banner: tsup leaked options between builds again, pin `banner: {}` on that block in tsup.shelf.config.ts",
     );
   }
   if (reporterBundle.split('export {').length !== 2) {
