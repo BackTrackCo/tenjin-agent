@@ -184,6 +184,26 @@ test('a refusal reads as its state, with no price and nothing paid', async ($, o
   expect(files.has(`${DATA}/paid/ledger.jsonl`)).toBe(false);
 });
 
+test('a spec fetch reads as no charge, whatever status its example holds', async ($, on) => {
+  machine(on);
+  // Drawn with no tool.call before it (a resumed session): from the stored
+  // result alone, MCP content blocks whose spec text carries a `status` too.
+  const output = [
+    { type: 'text', text: 'Spec for glim. Example: {"status":"open","limit":5}' },
+    { type: 'text', text: JSON.stringify({ status: 'spec', id: OFFER, cost: ['no charge'] }) },
+  ];
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({
+      plugin: 'tenjin',
+      surface,
+      component: 'ToolUse',
+      props: { ...toolRow('toolu_spec', TOOL, { id: OFFER }), isRunning: false, output },
+    });
+    expect(await shownLines(ui)).toEqual(['Tenjin', 'no charge']);
+    await ui.unmount();
+  }
+});
+
 test('the result under our row draws nothing of what the model read', async ($, on) => {
   machine(on);
   for (const surface of SURFACES) {

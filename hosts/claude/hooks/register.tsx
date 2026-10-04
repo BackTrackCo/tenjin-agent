@@ -41,6 +41,8 @@ const SPEND_WINDOW_MS = 86_400_000;
 const DEFAULT_BUDGET_ATOMIC = '5000000';
 /** How far a ledger row's timestamp may sit outside the call that wrote it. */
 const LEDGER_SLACK_MS = 2_000;
+/** How the request tool's envelope opens: `JSON.stringify` puts `status` first. */
+const ENVELOPE = '{"status":"';
 /** A field whose name says secret is shown masked, whatever its value. */
 const SECRET_NAME = /(api[_-]?key|token|secret|passw|authorization|cookie|private[_-]?key)/i;
 
@@ -405,9 +407,22 @@ function clean(value: string, limit: number): string {
   return chars.length <= limit ? text : `${chars.slice(0, limit - 1).join('')}…`;
 }
 
-/** The request tool's status, the first one its result text names. */
+/**
+ * The request tool's status, from its envelope: the last text block, JSON
+ * with `status` first. A spec's example or a provider's body ahead of it can
+ * hold a `status` of its own, but no suffix starting there parses whole.
+ */
 function statusOf(text: string | undefined): string | undefined {
-  return text === undefined ? undefined : /"status"\s*:\s*"([a-z_]+)"/.exec(text)?.[1];
+  if (text === undefined) return undefined;
+  for (let at = text.indexOf(ENVELOPE); at !== -1; at = text.indexOf(ENVELOPE, at + 1)) {
+    try {
+      const status = asRecord(JSON.parse(text.slice(at)))?.status;
+      if (typeof status === 'string') return status;
+    } catch {
+      // Not the envelope: one that starts inside the summary or the result.
+    }
+  }
+  return undefined;
 }
 
 function refusalOf(status: string | undefined, isErrored: boolean): string {
@@ -415,14 +430,15 @@ function refusalOf(status: string | undefined, isErrored: boolean): string {
   return isErrored || status !== undefined ? 'failed' : 'done';
 }
 
-/** The text of a stored result, whichever shape the row hands over. */
+/** The text of a stored result: a string, or MCP content blocks bare or in `content`. */
 function textOf(output: unknown): string | undefined {
   if (typeof output === 'string') return output;
-  try {
-    return output === undefined ? undefined : JSON.stringify(output);
-  } catch {
-    return undefined;
-  }
+  const blocks = Array.isArray(output) ? output : asRecord(output)?.content;
+  if (!Array.isArray(blocks)) return undefined;
+  return blocks
+    .map((block) => asRecord(block)?.text)
+    .filter((text) => typeof text === 'string')
+    .join('');
 }
 
 /**
