@@ -13,9 +13,9 @@ A `request({query})` with no id now only picks: it answers with the service's
 spec and the call to fill under a fresh id, and never runs or pays in that call.
 
 When a hook's conversation packet is over its six-message or 16 KiB bound,
-the newest assistant reply is kept, so a follow-up such as "the domain you
-found" still carries its referent; older replies go first, then the oldest of
-the user's messages. A newest reply too large to fit beside the newest user
-message is dropped instead, so an early instruction such as "don't use paid
-tools" still reaches the router's gate. Past the bound on user messages alone,
-the newest of them are kept.
+the assistant's replies are dropped first, oldest first, so the newest reply
+stays whenever every user message fits beside it and a follow-up such as "the
+domain you found" keeps its referent. A user message is never dropped to keep
+a reply, so an early instruction such as "don't use paid tools" still reaches
+the router's gate. Past the bound on user messages alone, the newest of them
+are kept.

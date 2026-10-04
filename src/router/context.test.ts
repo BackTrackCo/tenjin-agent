@@ -403,10 +403,10 @@ describe('what history gives up first', () => {
     ]);
   });
 
-  it('keeps the newest assistant reply when six user turns fill the cap', async () => {
+  it('keeps an early restriction over the newest reply when six user turns fill the cap', async () => {
     const path = await transcript([
-      user('turn 1'),
-      assistant('Looking.'),
+      user('Do not use any paid tools for this.'),
+      assistant('Understood.'),
       user('turn 2'),
       user('turn 3'),
       user('turn 4'),
@@ -415,18 +415,61 @@ describe('what history gives up first', () => {
       assistant('The company runs on example.com.'),
     ]);
     const packet = await sent(path, 's', 'the company profile for the domain you found');
-    // The follow-up names the domain only through that reply.
+    // A user message is never dropped to keep a reply.
     expect(packet.history.map((m) => m.text)).toEqual([
+      'Do not use any paid tools for this.',
       'turn 2',
       'turn 3',
       'turn 4',
       'turn 5',
       'turn 6',
+    ]);
+  });
+
+  it('keeps an early restriction over the newest reply at the byte cap', async () => {
+    const { fit } = await import('./context');
+    const fitted = fit({
+      current: { role: 'user', text: 'now' },
+      history: [
+        { role: 'user', text: 'Only use the host tools.' },
+        { role: 'user', text: 'u'.repeat(8_000) },
+        { role: 'assistant', text: 'a'.repeat(7_000) },
+        { role: 'user', text: 'v'.repeat(2_000) },
+      ],
+      literalUrls: [],
+      historyStatus: 'ok',
+    });
+    expect(Buffer.byteLength(JSON.stringify(fitted))).toBeLessThanOrEqual(MAX_PACKET_BYTES);
+    expect(fitted.history.map((m) => m.text.slice(0, 11))).toEqual([
+      'Only use th',
+      'uuuuuuuuuuu',
+      'vvvvvvvvvvv',
+    ]);
+  });
+
+  it('keeps the newest reply when there is room beside every user message', async () => {
+    const path = await transcript([
+      user('turn 1'),
+      assistant('Looking.'),
+      user('turn 2'),
+      user('turn 3'),
+      user('turn 4'),
+      user('turn 5'),
+      assistant('The company runs on example.com.'),
+    ]);
+    const packet = await sent(path, 's', 'the company profile for the domain you found');
+    // The follow-up names the domain only through that reply.
+    expect(packet.history.map((m) => m.text)).toEqual([
+      'turn 1',
+      'turn 2',
+      'turn 3',
+      'turn 4',
+      'turn 5',
       'The company runs on example.com.',
     ]);
   });
 
-  it('keeps the newest user messages and the newest reply when they alone are over the cap', async () => {
+  it('keeps the newest user messages when user text alone is over the cap', async () => {
     const { fit } = await import('./context');
     const fitted = fit({
       current: { role: 'user', text: 'now' },
@@ -440,7 +483,7 @@ describe('what history gives up first', () => {
       historyStatus: 'ok',
     });
     expect(Buffer.byteLength(JSON.stringify(fitted))).toBeLessThanOrEqual(MAX_PACKET_BYTES);
-    expect(fitted.history.map((m) => m.text[0])).toEqual(['r', 'y', 'z']);
+    expect(fitted.history.map((m) => m.text[0])).toEqual(['y', 'z']);
   });
 
   it('drops a newest reply too large to sit beside the newest user message, keeping the restriction', async () => {

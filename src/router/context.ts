@@ -122,12 +122,11 @@ export function literalUrlsIn(text: string): string[] {
 
 /**
  * History cut until `fits` holds, with the order of what is kept unchanged.
- * The newest assistant reply stays, since a follow-up ("the domain you found")
- * often names only it; older replies go first, then user messages, each oldest
- * first. When the newest reply cannot fit beside the newest user message, it
- * goes too, and the cut restarts with every reply ahead of every user message,
- * so a user's early instruction ("no paid tools") outranks any reply. Past the
- * cap on user messages alone, the newest of them stay.
+ * Assistant replies go first, oldest first, so the newest reply, which a
+ * follow-up ("the domain you found") may name alone, is the last of them to
+ * go. User messages go only after every reply, oldest first: a user message
+ * is never dropped to keep a reply, so an early instruction ("no paid tools")
+ * outlives any reply. Past the cap on user messages alone, the newest stay.
  */
 export function shed(
   history: readonly PacketMessage[],
@@ -135,24 +134,14 @@ export function shed(
 ): PacketMessage[] {
   const of = (role: PacketRole): number[] =>
     history.flatMap((message, index) => (message.role === role ? [index] : []));
-  const cut = (order: readonly number[]): PacketMessage[] => {
-    const dropped = new Set<number>();
-    let kept = [...history];
-    for (const index of order) {
-      if (fits(kept)) break;
-      dropped.add(index);
-      kept = history.filter((_, at) => !dropped.has(at));
-    }
-    return kept;
-  };
-  const replies = of('assistant');
-  const users = of('user');
-  const newest = replies.at(-1);
-  if (newest !== undefined) {
-    const kept = cut([...replies.slice(0, -1), ...users.slice(0, -1), newest, ...users.slice(-1)]);
-    if (kept.includes(history[newest]!)) return kept;
+  const dropped = new Set<number>();
+  let kept = [...history];
+  for (const index of [...of('assistant'), ...of('user')]) {
+    if (fits(kept)) break;
+    dropped.add(index);
+    kept = history.filter((_, at) => !dropped.has(at));
   }
-  return cut([...replies, ...users]);
+  return kept;
 }
 
 const withinCount = (kept: PacketMessage[]): boolean => kept.length <= MAX_HISTORY;
