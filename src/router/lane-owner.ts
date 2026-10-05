@@ -1,6 +1,5 @@
 import { randomBytes } from 'node:crypto';
 import { readFile, rm, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
 import { x402Client, x402HTTPClient } from '@x402/core/client';
 import { decodePaymentRequiredHeader } from '@x402/core/http';
 import type { PaymentRequired, PaymentRequirements } from '@x402/core/types';
@@ -16,9 +15,7 @@ import {
   type BatchSettlementClientDeps,
 } from '@x402/evm/batch-settlement/client';
 import type { TypedDataDefinition } from 'viem';
-import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
-import { writeFileAtomicExclusive } from '../lib/atomic-json';
-import { hasCode } from '../lib/errno';
+import { privateKeyToAccount } from 'viem/accounts';
 import { httpRequest, type HttpResult } from '../lib/http';
 import type { SpendAuthorizer } from '../lib/wallet';
 import type { TenjinSigner } from '../lib/wallet/provider';
@@ -87,6 +84,13 @@ export interface LaneOwnerDeps {
   authorizer: () => Promise<SpendAuthorizer>;
   /** The wallet's USDC balance, or null when it cannot be read. */
   walletBalance: (address: string) => Promise<bigint | null>;
+  /**
+   * THE LOCAL VOUCHER KEY: a key of its own that signs vouchers and nothing
+   * else, every lane's `payerAuthorizer`, so a voucher never needs the wallet
+   * unlocked and what it can authorize is capped by what a lane holds. Kept
+   * encrypted at rest like the wallet key (`lib/wallet/voucher-key.ts`).
+   */
+  voucherKey: () => Promise<`0x${string}`>;
   /** Chain reads for the SDK's recovery. */
   readContract?: ClientEvmSigner['readContract'];
   fetchImpl?: typeof fetch;
@@ -552,46 +556,9 @@ export class LaneOwner {
     };
   }
 
-  /**
-   * THE LOCAL VOUCHER KEY: a key of its own, made once on this machine and
-   * kept beside the lanes (0600), that signs vouchers and nothing else. It is
-   * every lane's `payerAuthorizer`, so a voucher never needs the wallet
-   * unlocked, and what it can authorize is capped by what a lane holds.
-   */
+  /** Every lane's voucher signer, from {@link LaneOwnerDeps.voucherKey}. */
   private async voucherSigner(): Promise<ClientEvmSigner> {
-    if (this.voucherKey === null) {
-      const path = join(lanesDir(this.deps.dataDir), 'voucher-key.json');
-      let key: `0x${string}` | null = null;
-      try {
-        const stored = JSON.parse(await readFile(path, 'utf8')) as { privateKey?: unknown };
-        if (typeof stored.privateKey === 'string' && /^0x[0-9a-f]{64}$/i.test(stored.privateKey)) {
-          key = stored.privateKey as `0x${string}`;
-        }
-      } catch {
-        // Not made yet.
-      }
-      if (key === null) {
-        const fresh = generatePrivateKey();
-        const record = {
-          version: 1,
-          address: privateKeyToAccount(fresh).address,
-          privateKey: fresh,
-        };
-        try {
-          await writeFileAtomicExclusive(path, `${JSON.stringify(record)}\n`, {
-            mode: 0o600,
-            dirMode: 0o700,
-          });
-          key = fresh;
-        } catch (err) {
-          if (!hasCode(err, 'EEXIST')) throw err;
-          // Another process made it first: theirs is every lane's authorizer.
-          key = (JSON.parse(await readFile(path, 'utf8')) as { privateKey: `0x${string}` })
-            .privateKey;
-        }
-      }
-      this.voucherKey = privateKeyToAccount(key);
-    }
+    this.voucherKey ??= privateKeyToAccount(await this.deps.voucherKey());
     const account = this.voucherKey;
     return {
       address: account.address,

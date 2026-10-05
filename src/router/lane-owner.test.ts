@@ -192,6 +192,7 @@ const NATIVE = {
 let dir: string;
 let clock: number;
 const wallet = privateKeyToAccount(generatePrivateKey());
+const VOUCHER_KEY = generatePrivateKey();
 
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'tenjin-lanes-'));
@@ -223,6 +224,7 @@ function ownerDeps(router: FakeRouter, opts: OwnerOpts = {}): LaneOwnerDeps {
     approved: async () => opts.approved ?? true,
     walletAddress: async () => wallet.address,
     getSigner: async () => signer(),
+    voucherKey: async () => VOUCHER_KEY,
     authorizer: async () =>
       createLocalSpendAuthorizer({
         dir,

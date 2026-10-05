@@ -111,6 +111,11 @@ export function lanesDir(dataDir: string): string {
   return join(dataDir, 'router', 'lanes');
 }
 
+/** Where the voucher key is kept, encrypted (`lib/wallet/voucher-key.ts`). */
+export function voucherKeyPath(dataDir: string): string {
+  return join(lanesDir(dataDir), 'voucher-key.json');
+}
+
 const file = {
   state: (dir: string, i: number) => join(dir, `lane-${i}.json`),
   claim: (dir: string, i: number) => join(dir, `lane-${i}.claim`),

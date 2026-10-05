@@ -14,9 +14,11 @@ import {
   resolveWalletProvider,
   type WalletProvider,
 } from '../lib/wallet';
+import { loadVoucherKey } from '../lib/wallet/voucher-key';
 import type { CommandContext, GlobalFlags } from '../context';
 import { routingFeeApproved, routingFeeFor } from './fee';
 import { LaneOwner } from './lane-owner';
+import { voucherKeyPath } from './lanes';
 import { MCP_SERVER_NAME } from './names';
 import { runRequestTool, type RequestToolDeps } from './tool';
 
@@ -252,6 +254,14 @@ async function routingLaneOwner(ctx: CommandContext): Promise<LaneOwner> {
       }
     },
     getSigner: () => provider.getSigner(),
+    voucherKey: async () => {
+      const address = (await describeWallet(provider)).address;
+      return loadVoucherKey(voucherKeyPath(ctx.dataDir), {
+        walletAddress: address,
+        // Never a prompt: the stdio transport owns stdin.
+        passphrase: { env: process.env, dir: ctx.dataDir, isTTY: false },
+      });
+    },
     authorizer: async () => resolveSpendAuthorizer(ctx, (await resolveContextSettings(ctx)).policy),
     walletBalance: (address) => readUsdcBalance(address, settings.rpcUrl, { timeoutMs: 5_000 }),
     readContract: (args) => chain.readContract(args as Parameters<typeof chain.readContract>[0]),
