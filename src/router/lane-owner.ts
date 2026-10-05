@@ -10,7 +10,6 @@ import {
   computeChannelId,
   processCorrectivePaymentRequired,
   processPaymentResponse,
-  processSettleResponse,
   recoverChannel,
   type BatchSettlementClientDeps,
 } from '@x402/evm/batch-settlement/client';
@@ -474,8 +473,13 @@ export class LaneOwner {
     const corrective = result !== null && result.outcome === 'corrective';
     if (result?.paymentResponse !== undefined) {
       const header = result.paymentResponse;
-      await processPaymentResponse(clientDeps.storage, (name) =>
-        name.toLowerCase() === 'payment-response' ? header : undefined,
+      await processPaymentResponse(
+        clientDeps.storage,
+        (name) => (name.toLowerCase() === 'payment-response' ? header : undefined),
+        {
+          channelId: state.channelId as `0x${string}`,
+          requestAmount: ROUTING_FEE_ATOMIC.toString(),
+        },
       );
     }
     let status = state.status;
@@ -551,10 +555,13 @@ export class LaneOwner {
           response.ok ? `the funding path answered ${response.status}` : response.message,
         );
       }
-      await processSettleResponse(
-        clientDeps.storage,
-        http.getPaymentSettleResponse((name) => response.header(name)),
-      );
+      const required = funding.accepts[0] as PaymentRequirements;
+      const deposit = (payload.payload as { deposit?: { amount?: string } }).deposit;
+      await processPaymentResponse(clientDeps.storage, (name) => response.header(name), {
+        channelId: computeChannelId(scheme.buildChannelConfig(required), required.network),
+        requestAmount: required.amount,
+        ...(deposit?.amount !== undefined ? { depositAmount: deposit.amount } : {}),
+      });
       return { deposited: true };
     } catch (err) {
       this.warn(err);

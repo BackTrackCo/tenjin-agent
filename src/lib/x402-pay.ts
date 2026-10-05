@@ -267,6 +267,19 @@ export async function buildExactPayment(
   const { core, http, builderCodeKey } = createPayerClient(() => signer);
   const requirement = only ?? selectPayableRequirement(core, paymentRequired);
   if (requirement === undefined) throw noPayableRequirement(paymentRequired.accepts);
+  // THE SDK'S PER-PAYMENT CAP IS THE AUTHORIZED AMOUNT. Since 2.23 the client
+  // refuses anything over $1 unless told otherwise; the spend policy has already
+  // authorized this exact requirement (with consent when it is manual), so the
+  // cap is set to it: the SDK then signs that amount and nothing larger.
+  core.setSpendControls({
+    allowedAssets: [
+      {
+        network: requirement.network,
+        asset: requirement.asset,
+        maxAmountPerPayment: requirement.amount,
+      },
+    ],
+  });
 
   // A single-accept challenge, so nothing can re-select a different or costlier
   // entry between the check and the signature. Narrow `accepts` only, so the
