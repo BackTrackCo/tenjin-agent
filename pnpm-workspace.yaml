@@ -27,11 +27,6 @@
 # ip-address: GHSA-mwp4-54f8-5fhr (via @modelcontextprotocol/sdk >
 # express-rate-limit). Drop once express-rate-limit's floor clears 10.3.1.
 #
-# js-yaml: GHSA-5p4m-2wfm-xmqj and GHSA-2883-xcg3-v3hh (floors widened
-# 2026-09-23 from 3.15.1/4.3.1 to 3.15.2/4.3.2), both the 3.x and 4.x ranges
-# (via @changesets/cli, dev-only). Drop once @changesets/cli's own floors
-# clear 4.3.2 and read-yaml-file's clears 3.15.2.
-#
 # nanoid: GHSA-2v37-7h3g-55p8 (floor widened 2026-08-07 from 3.3.17 to 3.3.18,
 # stranding the previous pin) and GHSA-28wg-ghj8-5hjv (floor 3.3.16), via
 # tsup/vitest > postcss, dev-only. 3.3.18 clears both. Lower-bounded at 3.0.0
@@ -60,8 +55,6 @@ overrides:
   'esbuild@>=0.27.3 <0.28.1': '^0.28.1'
   'brace-expansion@>=4.0.0 <5.0.11': '^5.0.11'
   'ip-address@>=10.0.0 <10.3.1': '^10.3.1'
-  'js-yaml@>=4.0.0 <4.3.2': '^4.3.2'
-  'js-yaml@>=3.0.0 <3.15.2': '^3.15.2'
   'nanoid@>=3.0.0 <3.3.18': '^3.3.18'
   'hono@>=3.8.0 <4.12.34': '^4.12.34'
   'postcss@<8.5.23': '^8.5.23'

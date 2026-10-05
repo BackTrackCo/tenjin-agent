@@ -1,6 +1,6 @@
 {
   "name": "tenjin-cli",
-  "version": "0.1.0-alpha.23",
+  "version": "0.1.0-alpha.24",
   "type": "module",
   "description": "The tool router for coding agents. Tenjin picks the right tool when your agent needs one, and one wallet pays for every call.",
   "repository": {
@@ -52,7 +52,7 @@
     "githooks": "git config core.hooksPath .githooks"
   },
   "devDependencies": {
-    "@changesets/cli": "^2.31.1",
+    "@changesets/cli": "^3.0.3",
     "@clack/prompts": "^1.7.0",
     "@eslint/js": "^10",
     "@modelcontextprotocol/sdk": "1.29.0",
