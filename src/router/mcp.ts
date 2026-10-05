@@ -222,9 +222,9 @@ export async function runRouterMcpServer(opts: RouterMcpOptions = {}): Promise<v
   const ctx = buildContext(opts);
   const laneOwner = opts.laneOwner ?? (await routingLaneOwner(ctx));
   const server = buildRouterMcpServer({ ...opts, laneOwner });
-  // THE LANES' OWNER RUNS HERE, never in a hook: it probes the paid path, and
-  // once the routing fee is approved it funds, signs and recovers the lanes
-  // the hooks spend from. Off the tool path and unref'd.
+  // THE LANES' OWNER RUNS HERE, never in a hook: once the routing fee is
+  // approved it probes the paid path, then funds, signs and recovers the lanes
+  // the hooks spend from. Before approval it sends nothing. Unref'd.
   const stop = laneOwner.start();
   await server.connect(new StdioServerTransport());
   await new Promise<void>((resolve) => {

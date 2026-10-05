@@ -20,7 +20,7 @@ import type { TenjinSigner } from '../lib/wallet/provider';
 import type { CommandContext } from '../context';
 import { requestDecision } from './decision';
 import { payForDecision, type RoutingFee } from './fee';
-import { LaneOwner } from './lane-owner';
+import { LaneOwner, type LaneOwnerDeps } from './lane-owner';
 import {
   claimLane,
   feesInWindow,
@@ -210,11 +210,14 @@ function signer(): TenjinSigner {
   };
 }
 
-function owner(
-  router: FakeRouter,
-  opts: { maxAutoSpendAtomic?: bigint; walletAtomic?: bigint | null; approved?: boolean } = {},
-): LaneOwner {
-  return new LaneOwner({
+type OwnerOpts = { maxAutoSpendAtomic?: bigint; walletAtomic?: bigint | null; approved?: boolean };
+
+function owner(router: FakeRouter, opts: OwnerOpts = {}): LaneOwner {
+  return new LaneOwner(ownerDeps(router, opts));
+}
+
+function ownerDeps(router: FakeRouter, opts: OwnerOpts = {}): LaneOwnerDeps {
+  return {
     dataDir: dir,
     baseUrl: BASE,
     approved: async () => opts.approved ?? true,
@@ -235,7 +238,7 @@ function owner(
     fetchImpl: router.fetch,
     now: () => clock,
     warn: () => undefined,
-  });
+  };
 }
 
 const ctx: () => CommandContext = () => ({
@@ -276,12 +279,20 @@ describe('LaneOwner', () => {
     expect(await laneIndices(lanesDir(dir))).toEqual([]);
   });
 
-  it('probes but never funds while the routing fee is not approved', async () => {
+  it('sends nothing at all while the routing fee is not approved: no probe, no lane, no deposit', async () => {
     const router = new FakeRouter();
-    await owner(router, { approved: false }).tick();
-    expect((await readPool(dir))?.paidPath).toBe('available');
-    expect(router.deposits).toBe(0);
-    expect(await pausedReason(dir, false)).toEqual({ reason: 'approval_missing' });
+    let calls = 0;
+    const counted = new LaneOwner({
+      ...ownerDeps(router, { approved: false }),
+      fetchImpl: (async (...args: Parameters<typeof fetch>) => {
+        calls += 1;
+        return router.fetch(...args);
+      }) as typeof fetch,
+    });
+    await counted.tick();
+    expect(calls).toBe(0);
+    expect(await readPool(dir)).toBeNull();
+    expect(await laneIndices(lanesDir(dir))).toEqual([]);
   });
 
   it('funds a lane with one $0.25 deposit and pre-signs a ladder of ten rungs', async () => {

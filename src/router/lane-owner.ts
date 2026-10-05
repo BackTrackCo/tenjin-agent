@@ -50,7 +50,8 @@ import {
 
 /**
  * THE LANE OWNER: the part of the routing fee that needs a key. It runs inside
- * `tenjin mcp`, never in a hook, and only once the routing fee is approved.
+ * `tenjin mcp`, never in a hook, and does nothing at all, not even a probe of
+ * the paid path, until the routing fee is approved.
  *
  * Every payment step is the SDK's own: the funding path is paid with the
  * standard x402 client and the `batch-settlement` scheme, whose
@@ -143,8 +144,10 @@ export class LaneOwner {
   }
 
   private async pass(): Promise<void> {
+    // NOTHING BEFORE APPROVAL: no probe, no lane, no deposit.
+    if (!(await this.deps.approved())) return;
     const paid = await this.paidRequirements();
-    if (paid === null || !(await this.deps.approved())) return;
+    if (paid === null) return;
     const address = await this.deps.walletAddress();
     if (address === null) return;
     const dir = lanesDir(this.deps.dataDir);
@@ -167,8 +170,9 @@ export class LaneOwner {
   /**
    * THE PAID PATH'S OWN 402, which every voucher's `accepted` has to match.
    * Asked with no payment and an empty body, so the paywall answers before any
-   * routing runs and nothing is charged. Recorded in the pool, so the hooks
-   * know whether the server answers the paid path at all.
+   * routing runs and nothing is charged. Asked only once the routing fee is
+   * approved, and recorded in the pool, so the hooks know whether the server
+   * answers the paid path at all.
    */
   private async paidRequirements(): Promise<PaymentRequired | null> {
     const now = this.now();
