@@ -4,6 +4,8 @@ import { spentOf } from '../lib/spend-ledger';
 import { resolveContextSettings } from '../lib/settings';
 import { readSpendSummary } from '../lib/wallet/spend';
 import type { CommandContext, CommandResult } from '../context';
+import { routingAllowanceAtomic, routingFeeApproved } from './fee';
+import { feeSummary, ROUTING_FEE_ATOMIC } from './lanes';
 
 /**
  * `tenjin status`: what this machine has spent and what it is still holding.
@@ -33,7 +35,10 @@ export async function runRouterStatus(
     (sum, r) => sum + BigInt(r.amountAtomic),
     0n,
   );
-  const retired = retiredPaymentKeys(await loadRawConfig(ctx.dataDir));
+  const config = await loadRawConfig(ctx.dataDir);
+  const retired = retiredPaymentKeys(config);
+  const fees = await feeSummary(ctx.dataDir, now());
+  const allowanceAtomic = routingAllowanceAtomic(config);
   const warnings = retired.length
     ? [`Ignored retired keys: ${retired.join(', ')}. ${RETIRED_PAYMENT_GUIDANCE}`]
     : [];
@@ -52,6 +57,15 @@ export async function runRouterStatus(
     caps: {
       maxAutoSpend: toMoney(settings.policy.maxAutoSpendAtomic.toString()),
     },
+    routingFee: {
+      approved: routingFeeApproved(config),
+      perCall: toMoney(ROUTING_FEE_ATOMIC.toString()),
+      last24h: toMoney(fees.windowAtomic),
+      allowance: toMoney(allowanceAtomic.toString()),
+      charged: toMoney(fees.chargedAtomic),
+      laneCredit: toMoney(fees.creditAtomic),
+      lanes: fees.lanes.length,
+    },
     inFlight: (ledger?.reservations ?? []).map((r) => ({
       amount: toMoney(r.amountAtomic),
       ageSeconds: Math.max(0, Math.round((now() - r.atMs) / 1000)),
@@ -68,6 +82,9 @@ export async function runRouterStatus(
       `spent ${toMoney(committedAtomic.toString()).usd} USD total; automatic exposure ${toMoney(automaticAtomic.toString()).usd} USD ${budgetLine}`,
       `reserved ${toMoney(reservedAtomic.toString()).usd} USD in ${data.inFlight.length} open request(s)`,
       `automatic router up to ${toMoney(settings.policy.maxAutoSpendAtomic.toString()).usd} USD per call; manual pay always requires consent`,
+      data.routingFee.approved
+        ? `routing fees ${data.routingFee.last24h.usd} USD of ${data.routingFee.allowance.usd} USD in the rolling 24h window; ${data.routingFee.laneCredit.usd} USD left in ${fees.lanes.length} lane(s)`
+        : `routing fee (${data.routingFee.perCall.usd} USD a call) not approved: routing uses the free path`,
       ...warnings,
     ],
   };

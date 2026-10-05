@@ -1,7 +1,10 @@
+import { loadRawConfig } from '../lib/config';
 import { toMoney } from '../lib/money';
 import { paidLedgerPath } from '../lib/paths';
 import { resolveContextSettings } from '../lib/settings';
 import type { CommandContext, CommandResult } from '../context';
+import { routingAllowanceAtomic, routingFeeApproved } from './fee';
+import { feeSummary, ROUTING_FEE_ATOMIC } from './lanes';
 import { reconcilePayments } from './paid';
 
 /**
@@ -47,5 +50,46 @@ export async function runPaymentsReconcile(
         ? [`${outcome.unknown} still unknown: not expired yet, or the chain could not say.`]
         : []),
     ],
+  };
+}
+
+/**
+ * `tenjin payments fees`: the routing fee beside the provider payments. Read
+ * from the lane files alone: what the server has charged per lane, what the
+ * lanes still hold, and what the rolling 24 h window has used of the allowance.
+ */
+export async function runPaymentsFees(
+  ctx: CommandContext,
+  deps: Pick<PaymentsDeps, 'now'> = {},
+): Promise<CommandResult> {
+  const config = await loadRawConfig(ctx.dataDir).catch(() => ({}));
+  const summary = await feeSummary(ctx.dataDir, (deps.now ?? Date.now)());
+  const allowance = routingAllowanceAtomic(config).toString();
+  return {
+    data: {
+      approved: routingFeeApproved(config),
+      perCall: toMoney(ROUTING_FEE_ATOMIC.toString()),
+      last24h: toMoney(summary.windowAtomic),
+      allowance: toMoney(allowance),
+      charged: toMoney(summary.chargedAtomic),
+      laneCredit: toMoney(summary.creditAtomic),
+      lanes: summary.lanes.map((lane) => ({
+        index: lane.index,
+        deposited: toMoney(lane.depositedAtomic),
+        charged: toMoney(lane.chargedAtomic),
+        status: lane.status,
+      })),
+    },
+    humanLines:
+      summary.lanes.length === 0
+        ? ['No routing fee paid: this machine has no routing lane.']
+        : [
+            `Routing fees: ${toMoney(summary.chargedAtomic).usd} USD charged in all, ${toMoney(summary.windowAtomic).usd} USD of ${toMoney(allowance).usd} USD in the rolling 24h window.`,
+            ...summary.lanes.map(
+              (lane) =>
+                `lane ${lane.index}: ${toMoney(lane.depositedAtomic).usd} USD deposited, ${toMoney(lane.chargedAtomic).usd} USD charged (${lane.status})`,
+            ),
+            `${toMoney(summary.creditAtomic).usd} USD left in the lanes for later fees.`,
+          ],
   };
 }
