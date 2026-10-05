@@ -22,7 +22,8 @@ const deps = (passphrase = 'correct horse'): VoucherKeyDeps => ({
   passphrase: { env: { TENJIN_WALLET_PASSPHRASE: passphrase }, dir, isTTY: false },
 });
 
-describe('loadVoucherKey', () => {
+// Each case runs the wallet's real scrypt, which takes seconds under a busy run.
+describe('loadVoucherKey', { timeout: 30_000 }, () => {
   it('makes one key, keeps it encrypted at rest, and reads the same key back', async () => {
     const key = await loadVoucherKey(path, deps());
     const raw = await readFile(path, 'utf8');
