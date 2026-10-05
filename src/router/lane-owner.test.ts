@@ -24,9 +24,12 @@ import { LaneOwner, type LaneOwnerDeps } from './lane-owner';
 import {
   claimLane,
   feesInWindow,
+  HOOK_CLAIM_TTL_MS,
+  laneFiles,
   lanesDir,
   laneIndices,
   pausedReason,
+  readFees,
   readLaneState,
   readPool,
   ROUTING_ALLOWANCE_ATOMIC,
@@ -389,8 +392,11 @@ describe('LaneOwner', () => {
       chargedAtomic: '3000',
       status: 'ready',
     });
+    // The fee only recovery found is in the ledger and the allowance.
+    expect(await feesInWindow(dir, clock)).toBe(3_000n);
     expect((await routeOnce(router)).status).toBe('decided');
     expect(router.settledFees).toBe(2);
+    expect(await feesInWindow(dir, clock)).toBe(6_000n);
     // The skipped call grew the pool, so the last call may take either lane:
     // across every channel, two answered calls cost exactly two fees.
     const charged = [...router.channels.values()].reduce((sum, c) => sum + c.charged, 0n);
@@ -413,6 +419,55 @@ describe('LaneOwner', () => {
     });
     expect((await routeOnce(router)).status).toBe('decided');
     expect(router.settledFees).toBe(2);
+    expect(await feesInWindow(dir, clock)).toBe(6_000n);
+  });
+
+  it("counts a fee found through recovery once, in the ledger and the allowance, even when the slow hook's own line lands after it", async () => {
+    const router = new FakeRouter();
+    const lanes = owner(router);
+    await lanes.tick();
+    const slow = await claimLane(dir, { now: clock, allowanceAtomic: ROUTING_ALLOWANCE_ATOMIC });
+    const answer = await router.fetch(`${BASE}/api/x402-router/route`, {
+      method: 'POST',
+      headers: { 'PAYMENT-SIGNATURE': slow.lane!.header },
+    });
+    clock += HOOK_CLAIM_TTL_MS + 1_000;
+    expect((await routeOnce(router)).status).toBe('failed');
+    expect(await feesInWindow(dir, clock)).toBe(0n);
+
+    await lanes.tick();
+    expect(await feesInWindow(dir, clock)).toBe(3_000n);
+    expect(await claimLane(dir, { now: clock, allowanceAtomic: ROUTING_FEE_ATOMIC })).toEqual({
+      lane: null,
+      why: 'allowance',
+    });
+
+    await slow.lane!.finish({
+      kind: 'answered',
+      status: 200,
+      paymentResponse: answer.headers.get('payment-response')!,
+    });
+    await lanes.tick();
+    expect(await readFees(lanesDir(dir), 0)).toHaveLength(2);
+    expect(await feesInWindow(dir, clock)).toBe(3_000n);
+    expect(router.settledFees).toBe(1);
+  });
+
+  it("adds nothing when recovery folds a total the hook's own line already holds", async () => {
+    const router = new FakeRouter();
+    const lanes = owner(router);
+    await lanes.tick();
+    expect((await routeOnce(router)).status).toBe('decided');
+    // The answer's result is lost, so the lane's next rung is corrected.
+    await rm(laneFiles.result(lanesDir(dir), 0));
+    expect((await routeOnce(router)).status).toBe('failed');
+    await lanes.tick();
+    expect(await readLaneState(lanesDir(dir), 0)).toMatchObject({
+      chargedAtomic: '3000',
+      status: 'ready',
+    });
+    expect(await readFees(lanesDir(dir), 0)).toHaveLength(1);
+    expect(await feesInWindow(dir, clock)).toBe(3_000n);
   });
 
   it('grows the pool by one lane when a payer found none free, up to the cap', async () => {

@@ -433,11 +433,9 @@ async function recordAnswer(
         paymentResponse: answer.paymentResponse as string,
       };
       if (charged > before) {
-        await appendFile(
-          file.fees(dir, index),
-          `${JSON.stringify({ atMs, feeAtomic: (charged - before).toString() })}\n`,
-          { mode: 0o600 },
-        );
+        await appendFees(dir, index, [
+          { atMs, feeAtomic: charged - before, chargedAtomic: charged },
+        ]);
       }
     }
   }
@@ -464,34 +462,115 @@ export function chargedFrom(header: string): bigint | null {
   }
 }
 
+/**
+ * ONE LINE PER FEE, NAMING THE TOTAL IT BRINGS THE LANE TO. A fee can reach the
+ * ledger twice: the owner writes one it learns through recovery (a killed hook,
+ * an abort), and that hook's own line may still land after it. Each line covers
+ * the span of the channel's charged total from `chargedAtomic - feeAtomic` to
+ * `chargedAtomic`, and the window counts the union of those spans, so the same
+ * charge is counted once whichever line lands first.
+ */
+export interface FeeEntry {
+  atMs: number;
+  feeAtomic: bigint;
+  /** The channel's charged total after this fee; a line without it is a bare fee. */
+  chargedAtomic?: bigint;
+}
+
 /** Fees charged across every lane in the rolling window. */
 export async function feesInWindow(dataDir: string, now: number): Promise<bigint> {
   const dir = lanesDir(dataDir);
   let total = 0n;
   for (const index of await laneIndices(dir)) {
-    for (const entry of await readFees(dir, index)) {
-      if (now - entry.atMs < ROUTING_WINDOW_MS) total += entry.feeAtomic;
+    const recent = (await readFees(dir, index)).filter((e) => now - e.atMs < ROUTING_WINDOW_MS);
+    total += spanTotal(recent);
+  }
+  return total;
+}
+
+/** One lane's fees, each part of the charged total counted once. */
+function spanTotal(entries: readonly FeeEntry[]): bigint {
+  let total = 0n;
+  const spans: [bigint, bigint][] = [];
+  for (const e of entries) {
+    if (e.chargedAtomic === undefined) total += e.feeAtomic;
+    else spans.push([e.chargedAtomic - e.feeAtomic, e.chargedAtomic]);
+  }
+  spans.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+  let reach: bigint | null = null;
+  for (const [lo, hi] of spans) {
+    const from: bigint = reach === null || lo > reach ? lo : reach;
+    if (hi > from) {
+      total += hi - from;
+      reach = hi;
     }
   }
   return total;
 }
 
-export async function readFees(
+/**
+ * PUT A TOTAL THE OWNER ACCEPTED IN THE LEDGER: whatever part of `chargedAtomic`
+ * lies above both the lane's last total (`floorAtomic`) and the highest total
+ * a line already names. A fee the hook recorded adds nothing here; one only
+ * recovery found is added once.
+ */
+export async function recordChargedTotal(
   dir: string,
   index: number,
-): Promise<{ atMs: number; feeAtomic: bigint }[]> {
+  opts: { floorAtomic: bigint; chargedAtomic: bigint; atMs: number },
+): Promise<void> {
+  let recorded = opts.floorAtomic;
+  for (const e of await readFees(dir, index)) {
+    if (e.chargedAtomic !== undefined && e.chargedAtomic > recorded) recorded = e.chargedAtomic;
+  }
+  if (opts.chargedAtomic <= recorded) return;
+  await appendFees(dir, index, [
+    {
+      atMs: opts.atMs,
+      feeAtomic: opts.chargedAtomic - recorded,
+      chargedAtomic: opts.chargedAtomic,
+    },
+  ]);
+}
+
+export function feeLines(entries: readonly FeeEntry[]): string {
+  return entries
+    .map(
+      (e) =>
+        `${JSON.stringify({
+          atMs: e.atMs,
+          feeAtomic: e.feeAtomic.toString(),
+          ...(e.chargedAtomic !== undefined ? { chargedAtomic: e.chargedAtomic.toString() } : {}),
+        })}\n`,
+    )
+    .join('');
+}
+
+async function appendFees(dir: string, index: number, entries: readonly FeeEntry[]): Promise<void> {
+  await appendFile(file.fees(dir, index), feeLines(entries), { mode: 0o600 });
+}
+
+export async function readFees(dir: string, index: number): Promise<FeeEntry[]> {
   let raw: string;
   try {
     raw = await readFile(file.fees(dir, index), 'utf8');
   } catch {
     return [];
   }
-  const out: { atMs: number; feeAtomic: bigint }[] = [];
+  const out: FeeEntry[] = [];
   for (const line of raw.split('\n')) {
     try {
-      const v = JSON.parse(line) as { atMs?: unknown; feeAtomic?: unknown };
+      const v = JSON.parse(line) as {
+        atMs?: unknown;
+        feeAtomic?: unknown;
+        chargedAtomic?: unknown;
+      };
       if (typeof v.atMs === 'number' && isAtomic(v.feeAtomic)) {
-        out.push({ atMs: v.atMs, feeAtomic: BigInt(v.feeAtomic) });
+        out.push({
+          atMs: v.atMs,
+          feeAtomic: BigInt(v.feeAtomic),
+          ...(isAtomic(v.chargedAtomic) ? { chargedAtomic: BigInt(v.chargedAtomic) } : {}),
+        });
       }
     } catch {
       // A torn last line is skipped.

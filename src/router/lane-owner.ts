@@ -29,7 +29,9 @@ import {
   LEASE_TTL_MS,
   MAX_LANES,
   OWNER_CLAIM_TTL_MS,
+  feeLines,
   readFees,
+  recordChargedTotal,
   readLaneResult,
   readLaneState,
   readPool,
@@ -341,8 +343,14 @@ export class LaneOwner {
       if (status === 'ready' && balance - charged < ROUTING_FEE_ATOMIC) {
         blocked = await this.fund(clientDeps, state, address);
       }
-      await this.pruneFees(dir, index, now);
       const fresh = await storage.get(state.channelId.toLowerCase());
+      // A total learned through recovery may hold a fee no hook wrote down.
+      await recordChargedTotal(dir, index, {
+        floorAtomic: BigInt(state.chargedAtomic),
+        chargedAtomic: BigInt(fresh?.chargedCumulativeAmount ?? state.chargedAtomic),
+        atMs: now,
+      });
+      await this.pruneFees(dir, index, now);
       const next: LaneState = {
         ...state,
         chargedAtomic: fresh?.chargedCumulativeAmount ?? state.chargedAtomic,
@@ -534,13 +542,7 @@ export class LaneOwner {
     const fees = await readFees(dir, index);
     const kept = fees.filter((f) => now - f.atMs < ROUTING_WINDOW_MS);
     if (kept.length === fees.length) return;
-    await writeFile(
-      laneFiles.fees(dir, index),
-      kept
-        .map((f) => `${JSON.stringify({ atMs: f.atMs, feeAtomic: f.feeAtomic.toString() })}\n`)
-        .join(''),
-      { mode: 0o600 },
-    );
+    await writeFile(laneFiles.fees(dir, index), feeLines(kept), { mode: 0o600 });
   }
 
   /**
