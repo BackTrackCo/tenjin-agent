@@ -3,14 +3,13 @@ import { fetchFailureToCliError, httpRequest } from '../lib/http';
 import type { HttpRequestOptions, HttpResult } from '../lib/http';
 import type { CommandContext } from '../context';
 import type { Packet } from './context';
-import type { PaidAnswer } from './lanes';
 
 /**
  * `POST /api/x402-router`: ONE DECISION PER LOOKUP. On the free path it costs
  * nothing. Once the routing fee is approved and the server answers its paid
- * path, the same body goes to that path with one pre-signed lane voucher in
- * the standard `PAYMENT-SIGNATURE` header (`fee.ts`, `lanes.ts`); the rest of
- * this note describes the free path, which is unchanged.
+ * path, `tenjin mcp` sends the same body to that path through its stock x402
+ * client ({@link DecisionRoute}, `routing-payer.ts`); the rest of this note
+ * describes the free path, which is unchanged.
  *
  * The routing decision costs nothing and nobody signs for it. The hook asks for
  * it from the user's own words, the backend answers with what it would do and
@@ -379,22 +378,35 @@ export interface DecisionDeps {
   fetchImpl?: typeof fetch;
   /** Overrides the per-call deadline; the hook passes its own, smaller one. */
   timeoutMs?: number;
-  /** The routing fee's lane rung: the call goes to the paid path carrying it in
-   *  the standard `PAYMENT-SIGNATURE` header (`fee.ts`). Absent is the free path. */
-  payment?: DecisionPayment;
+  /** The paid path, when `tenjin mcp` takes it: the body goes to `path` and is
+   *  sent by `send`, which pays the routing fee with the stock x402 client.
+   *  Absent is the free path. */
+  route?: DecisionRoute;
 }
 
-export interface DecisionPayment {
+/** How a routing call reaches the paid path. `send` may throw
+ *  {@link RouteSkipped}, and then nothing was sent or paid. */
+export interface DecisionRoute {
   path: string;
-  signature: string;
+  send: (url: string, options: HttpRequestOptions) => Promise<HttpResult>;
+}
+
+/** The paid path could not take this call, so it was not made: no slot free,
+ *  the allowance spent, the wallet locked or unable to deposit. */
+export class RouteSkipped extends Error {
+  constructor(readonly why: string) {
+    super(`routing fee not paid: ${why}`);
+  }
 }
 
 export type DecisionOutcome<T> =
-  | { status: 'decided'; decision: T; payment?: PaidAnswer }
+  | { status: 'decided'; decision: T }
   /** On the free path nothing was paid and nothing could be, so a failure here
-   *  costs the turn a routing answer and nothing else. On the paid path,
-   *  `payment` says what the lane's voucher came back with. */
-  | { status: 'failed'; reason: string; errorCode?: string; payment?: PaidAnswer };
+   *  costs the turn a routing answer and nothing else. */
+  | { status: 'failed'; reason: string; errorCode?: string }
+  /** The paid path did not take the call ({@link RouteSkipped}): nothing was
+   *  sent, and the native tool runs. */
+  | { status: 'skipped'; why: string };
 
 /**
  * ONE FREE CALL, IN TWO FORMS. The hook sends `{ packet }`: the backend runs
@@ -426,14 +438,11 @@ export async function requestDecision(
   },
   deps: DecisionDeps,
 ): Promise<DecisionOutcome<HookResponse | ToolResponse>> {
-  const url = new URL(deps.payment?.path ?? ROUTER_PATH, deps.baseUrl).toString();
+  const url = new URL(deps.route?.path ?? ROUTER_PATH, deps.baseUrl).toString();
   const options: HttpRequestOptions = {
     method: 'POST',
     timeoutMs: deps.timeoutMs ?? deps.ctx.flags.timeout,
     blockRedirects: true,
-    ...(deps.payment !== undefined
-      ? { headers: { 'PAYMENT-SIGNATURE': deps.payment.signature } }
-      : {}),
     jsonBody:
       kind === 'hook'
         ? buildHookBody(request.packet as Packet, {
@@ -448,28 +457,14 @@ export async function requestDecision(
           }),
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   };
-  const response = await httpRequest(url, options);
-  const outcome = readDecision(response, kind === 'hook' ? HookResponseSchema : ToolResponseSchema);
-  return deps.payment === undefined ? outcome : { ...outcome, payment: paidAnswer(response) };
-}
-
-/** What a paid call's lane needs to know about the answer: the settle header,
- *  the corrective 402, or that no answer came back at all. */
-function paidAnswer(response: HttpResult): PaidAnswer {
-  if (!response.ok) return { kind: 'no_answer' };
-  if (response.status === 402) {
-    const required = response.header('payment-required');
-    return {
-      kind: 'payment_required',
-      ...(required !== undefined ? { paymentRequired: required } : {}),
-    };
+  let response: HttpResult;
+  try {
+    response = await (deps.route?.send ?? httpRequest)(url, options);
+  } catch (err) {
+    if (err instanceof RouteSkipped) return { status: 'skipped', why: err.why };
+    throw err;
   }
-  const settle = response.header('payment-response');
-  return {
-    kind: 'answered',
-    status: response.status,
-    ...(settle !== undefined ? { paymentResponse: settle } : {}),
-  };
+  return readDecision(response, kind === 'hook' ? HookResponseSchema : ToolResponseSchema);
 }
 
 /** How a call run from a request spec ended, for the server's offer-to-call

@@ -6,7 +6,12 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { testWalletProvider } from '../lib/read-test-utils';
 import type { SpendAuthorization, SpendAuthorizer } from '../lib/wallet';
+import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
+import { writeFeeState } from './fee-state';
+import { FakeRouter, testSigner } from './fee-test-utils';
+import { hookToolInput } from './hook-tool';
 import { buildRouterMcpServer, MAX_RESULT_SIZE_CHARS, MAX_RESULT_SIZE_KEY } from './mcp';
+import { RoutingPayer } from './routing-payer';
 
 /** The envelope a call returned: the JSON text block after the summary line. */
 function envelopeOf(called: Record<string, unknown>): unknown {
@@ -87,7 +92,7 @@ describe('the router MCP server', () => {
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
     try {
       const tools = await client.listTools();
-      expect(tools.tools.map((t) => t.name)).toEqual(['request']);
+      expect(tools.tools.map((t) => t.name)).toEqual(['request', 'hook']);
       // The harness reads its inline-result threshold from the listed tool.
       expect(tools.tools[0]!._meta).toEqual({
         [MAX_RESULT_SIZE_KEY]: MAX_RESULT_SIZE_CHARS,
@@ -120,6 +125,120 @@ describe('the router MCP server', () => {
     });
     // No wallet exists under this data dir, so a background unlock would throw.
     await expect(server.close()).resolves.toBeUndefined();
+  });
+});
+
+/**
+ * THE HOOK ENTRIES' TOOL. Claude Code substitutes the event's fields into the
+ * entry's `input` as strings (objects as JSON text, absent fields empty), so
+ * these calls send exactly that shape.
+ */
+describe('the hook tool', () => {
+  /** The `input` Claude Code would send for `kind`, from one harness event. */
+  function substituted(kind: Parameters<typeof hookToolInput>[0], event: Record<string, unknown>) {
+    return Object.fromEntries(
+      Object.entries(hookToolInput(kind)).map(([key, value]) => {
+        const path = /^\$\{(.+)\}$/.exec(value)?.[1];
+        if (path === undefined) return [key, value];
+        const field = event[path];
+        return [
+          key,
+          field === undefined ? '' : typeof field === 'string' ? field : JSON.stringify(field),
+        ];
+      }),
+    );
+  }
+
+  async function connect(server: ReturnType<typeof buildRouterMcpServer>) {
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: 'test', version: '0.0.0' });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    return client;
+  }
+
+  const promptEvent = (session: string) => ({
+    hook_event_name: 'UserPromptSubmit',
+    session_id: session,
+    transcript_path: '',
+    cwd: dir,
+    prompt: 'what is the current price of ETH in USD',
+  });
+
+  it('runs the prompt leg in this process and answers in the hook format', async () => {
+    await writeFeeState(dir, { paidPath: 'available', checkedAtMs: Date.now() });
+    const fake = new FakeRouter();
+    const server = buildRouterMcpServer({
+      dataDir: dir,
+      handlerDeps: { cwd: dir, signer: await testWalletProvider().getSigner() },
+      hookDeps: { baseUrl: 'https://router.test', fetchImpl: fake.fetch, warn: () => undefined },
+    });
+    const client = await connect(server);
+    try {
+      const called = await client.callTool({
+        name: 'hook',
+        arguments: substituted('prompt', promptEvent('sess-hook')),
+      });
+      const text = (called.content as { text: string }[])[0]!.text;
+      // The fee is not approved, so the free path ran and the pause was said.
+      expect(fake.log).toEqual(['POST /api/x402-router unpaid']);
+      expect(JSON.parse(text)).toMatchObject({
+        hookSpecificOutput: { hookEventName: 'UserPromptSubmit' },
+      });
+      expect(text).toContain('routing is paused');
+      // Said once: the same session's next prompt gets no output at all.
+      const again = await client.callTool({
+        name: 'hook',
+        arguments: substituted('prompt', promptEvent('sess-hook')),
+      });
+      expect((again.content as { text: string }[])[0]!.text).toBe('');
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it("pays the routing fee through this process's payer once the fee is approved", async () => {
+    await writeFile(join(dir, 'config.json'), JSON.stringify({ routingFee: 'approved' }));
+    const fake = new FakeRouter();
+    const wallet = privateKeyToAccount(generatePrivateKey());
+    const payer = new RoutingPayer({
+      dataDir: dir,
+      getSigner: async () => testSigner(wallet),
+      policy: async () => ({
+        maxAutoSpendAtomic: 250_000n,
+        sessionBudgetAtomic: 5_000_000n,
+        allowlistCreators: [],
+      }),
+      walletBalance: async () => 10_000_000n,
+      readContract: fake.readContract as never,
+      fetchImpl: fake.fetch,
+      pid: 1,
+      isAlive: () => true,
+      warn: () => undefined,
+    });
+    const server = buildRouterMcpServer({
+      dataDir: dir,
+      payer,
+      handlerDeps: { cwd: dir, signer: await testWalletProvider().getSigner() },
+      hookDeps: { baseUrl: 'https://router.test', fetchImpl: fake.fetch, warn: () => undefined },
+    });
+    const client = await connect(server);
+    try {
+      await client.callTool({
+        name: 'hook',
+        arguments: substituted('prompt', promptEvent('sess-paid')),
+      });
+      expect(fake.log).toEqual([
+        'POST /api/x402-router/route unpaid',
+        'POST /api/x402-router/route paid',
+      ]);
+      expect(fake.deposits).toBe(1);
+      expect(fake.settledFees).toBe(1);
+    } finally {
+      await client.close();
+      await server.close();
+      await payer.close();
+    }
   });
 });
 

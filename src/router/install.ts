@@ -30,7 +30,7 @@ import { onPath } from '../lib/skill-wiring';
 import type { WalletDeps, WalletOutcome } from '../commands/install-wallet';
 import type { CommandContext, CommandResult } from '../context';
 import { routingAllowanceAtomic } from './fee';
-import { LANE_DEPOSIT_ATOMIC, ROUTING_FEE_ATOMIC, usd } from './lanes';
+import { CHANNEL_DEPOSIT_ATOMIC, ROUTING_FEE_ATOMIC, usd } from './fee-state';
 import { MCP_SERVER_NAME, REQUEST_TOOL } from './names';
 import { ensureStatusLine, type StatusLineMode, type StatusLineResult } from './status-line-wiring';
 
@@ -428,7 +428,7 @@ async function approveLimits(
       : `$${toMoney(shown.sessionBudget).usd} a day`;
   const fee =
     config.routingFee === undefined
-      ? `\nRouting costs $${usd(ROUTING_FEE_ATOMIC)} a call, at most $${usd(routingAllowanceAtomic(config))} in a rolling day, paid from $${usd(LANE_DEPOSIT_ATOMIC)} lane deposits that stay yours until spent and do not count against these limits.\nUsing these limits or choosing your own also approves the routing fee.`
+      ? `\nRouting costs $${usd(ROUTING_FEE_ATOMIC)} a call, at most $${usd(routingAllowanceAtomic(config))} in a rolling day, paid from $${usd(CHANNEL_DEPOSIT_ATOMIC)} channel deposits that stay yours until spent and do not count against these limits.\nUsing these limits or choosing your own also approves the routing fee.`
       : '';
   const choice = await (deps.promptLimits ?? promptLimits)(
     `The router pays for tool calls without asking, up to:\n  $${toMoney(shown.maxAutoSpend).usd} a call, ${daily}${fee}`,

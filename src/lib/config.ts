@@ -331,7 +331,7 @@ export const ConfigSchema = z.object({
   allowlistCreators: z.array(z.string()),
   /**
    * The routing fee: $0.003 per routing call on the paid path, paid from $0.25
-   * lane deposits. Absent is "never asked", which `tenjin update` asks once;
+   * channel deposits. Absent is "never asked", which `tenjin update` asks once;
    * until it is `approved` the router uses the free path only.
    */
   routingFee: RoutingFeeSchema,

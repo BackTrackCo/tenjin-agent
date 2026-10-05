@@ -88,12 +88,12 @@ export function registerRouter(reg: Registration): void {
     });
 
   const payments = leaf(SETUP, 'payments', 'the paid lookups this machine made').description(
-    'The local record of paid router lookups, in `~/.tenjin/paid/ledger.jsonl`, and the routing fees paid from the routing lanes.',
+    'The local record of paid router lookups, in `~/.tenjin/paid/ledger.jsonl`, and the routing fees paid from the routing channels.',
   );
   addGlobalFlags(payments.command('fees'))
     .summary('the routing fees this machine paid')
     .description(
-      'The routing fee per call, what each routing lane holds and has been charged, and the rolling 24h window against the routing allowance, read from the local lane files. Nothing is sent.',
+      'The routing fee per call, what each routing channel holds and has been charged, and the rolling 24h window against the routing allowance, read from the local channel files. Nothing is sent.',
     )
     .action(async function (this: Command) {
       await runCommand('payments.fees', this, async (ctx) => {

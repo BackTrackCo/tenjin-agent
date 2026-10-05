@@ -5,7 +5,8 @@ import { resolveContextSettings } from '../lib/settings';
 import { readSpendSummary } from '../lib/wallet/spend';
 import type { CommandContext, CommandResult } from '../context';
 import { routingAllowanceAtomic, routingFeeApproved } from './fee';
-import { feeSummary, ROUTING_FEE_ATOMIC } from './lanes';
+import { feeSummary } from './fee-readouts';
+import { ROUTING_FEE_ATOMIC } from './fee-state';
 
 /**
  * `tenjin status`: what this machine has spent and what it is still holding.
@@ -63,8 +64,8 @@ export async function runRouterStatus(
       last24h: toMoney(fees.windowAtomic),
       allowance: toMoney(allowanceAtomic.toString()),
       charged: toMoney(fees.chargedAtomic),
-      laneCredit: toMoney(fees.creditAtomic),
-      lanes: fees.lanes.length,
+      channelCredit: toMoney(fees.creditAtomic),
+      channels: fees.channels.length,
     },
     inFlight: (ledger?.reservations ?? []).map((r) => ({
       amount: toMoney(r.amountAtomic),
@@ -83,7 +84,7 @@ export async function runRouterStatus(
       `reserved ${toMoney(reservedAtomic.toString()).usd} USD in ${data.inFlight.length} open request(s)`,
       `automatic router up to ${toMoney(settings.policy.maxAutoSpendAtomic.toString()).usd} USD per call; manual pay always requires consent`,
       data.routingFee.approved
-        ? `routing fees ${data.routingFee.last24h.usd} USD of ${data.routingFee.allowance.usd} USD in the rolling 24h window; ${data.routingFee.laneCredit.usd} USD left in ${fees.lanes.length} lane(s)`
+        ? `routing fees ${data.routingFee.last24h.usd} USD of ${data.routingFee.allowance.usd} USD in the rolling 24h window; ${data.routingFee.channelCredit.usd} USD left in ${fees.channels.length} channel(s)`
         : `routing fee (${data.routingFee.perCall.usd} USD a call) not approved: routing uses the free path`,
       ...warnings,
     ],

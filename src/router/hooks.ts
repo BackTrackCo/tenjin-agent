@@ -22,8 +22,8 @@ import {
 } from './context';
 import { storeSpecs } from './specs';
 import { requestDecision, ROUTER_PATH, type HookDecision } from './decision';
-import { payForDecision, routingFeeApproved, routingFeeFor } from './fee';
-import { firstNoticeFor, pausedReason, pausedSentence, ROUTE_PAID_PATH } from './lanes';
+import { isFeeRequired, routingFeeApproved, type RouteFor } from './fee';
+import { firstNoticeFor, noteFeeRequired, pausedReason, pausedSentence } from './fee-state';
 import { readsAsEmptyPage, savedPdfOf } from './fetch-result';
 import { GATE_TIMEOUT_MS } from './gate';
 import { REQUEST_TOOL } from './names';
@@ -56,10 +56,11 @@ import { routerSettings, type RouterSettings } from './settings';
  * SDK, no viem, no MCP server: a dist test asserts the chunk graph, because the
  * hooks run on every prompt and after every native search, and their cost is
  * the product's floor.
- * On the free path the decision costs nothing. On the paid path (an approved
- * routing fee and a server that answers it) the hook sends one voucher the MCP
- * process already signed, from a lane it claims (`lanes.ts`): it signs nothing
- * and funds nothing, and with no lane free it skips the call.
+ * On the free path the decision costs nothing. The paid path exists only when
+ * these handlers run inside `tenjin mcp`, behind Claude Code's `mcp_tool` hook
+ * entries: that process passes its payer as {@link HookDeps.route}, and the
+ * payer, not this file, signs and pays (`routing-payer.ts`). Run as
+ * `tenjin hook <kind>`, every call is free.
  *
  * EVERY FAILURE IS SILENT. A backend that is down, slow or answering nonsense
  * leaves the prompt and the native result unchanged; the cause goes to
@@ -542,6 +543,9 @@ export interface HookDeps {
   prefetch?: (job: PrefetchJob) => void;
   /** How long the after-call hook waits for that fetch; tests shorten it. */
   augmentWaitMs?: number;
+  /** The paid path, passed by `tenjin mcp` once the routing fee is approved.
+   *  Absent (`tenjin hook <kind>`), every call takes the free path. */
+  route?: RouteFor;
 }
 
 /**
@@ -1455,11 +1459,11 @@ function hookOutcome(decision: HookDecision | null): string {
   return 'needs input';
 }
 
-/** One decision, with the hook's own deadline and its own silence. It takes
- *  what {@link seal} returns rather than a bare packet, so a call site that
- *  skips the mask does not typecheck. On the paid path it spends one rung of a
- *  lane the MCP process funded and signed; with no lane free the call is not
- *  made at all and the native tool runs (`fee.ts`). */
+/** The one routing call, its packet SEALED (masked and bounded): a path that
+ *  skips the mask does not typecheck. Inside `tenjin mcp` with the routing fee
+ *  approved it takes the paid path, which the payer may skip (no slot, the
+ *  allowance spent, the wallet locked): then nothing is sent and the native
+ *  tool runs. */
 async function decide(
   { packet }: Sealed,
   deps: HookDeps,
@@ -1469,37 +1473,34 @@ async function decide(
 ): Promise<HookDecision | null> {
   const baseUrl = resolveBaseUrl(deps, config);
   const warn = deps.warn ?? ((line: string) => process.stderr.write(`${line}\n`));
-  const fee = await routingFeeFor(deps.dataDir, config);
+  const route = (await deps.route?.(config, baseUrl)) ?? null;
   const now = deps.now?.() ?? Date.now();
-  // The lane claim and the request share the gate's deadline, so the claim's
-  // file work cannot push the call past the hook timeout.
-  const outcome = await payForDecision(
-    fee,
-    (payment, timeoutMs) =>
-      requestDecision(
-        'hook',
-        { packet, sessionId },
-        {
-          ctx: hookContext(deps),
-          baseUrl,
-          acceptsBazaar: resolveExperimentalBazaar(config).value === 'on',
-          timeoutMs: timeoutMs ?? deadline - now,
-          ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
-          ...(payment !== undefined ? { payment } : {}),
-        },
-      ),
-    now,
-    deadline - now,
+  const outcome = await requestDecision(
+    'hook',
+    { packet, sessionId },
+    {
+      ctx: hookContext(deps),
+      baseUrl,
+      acceptsBazaar: resolveExperimentalBazaar(config).value === 'on',
+      timeoutMs: Math.max(0, deadline - now),
+      ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+      ...(route !== null ? { route } : {}),
+    },
   );
-  if (outcome.status === 'skipped') {
-    warn(
-      `tenjin hook: no routing lane could pay the routing fee (${outcome.why}), so the native tool runs`,
+  // A `fee_required` answer is how a machine without approval learns the
+  // server takes the fee: doctor, the prompt notice and the tool then name the
+  // approval command. Any other free answer clears it.
+  if (route === null && outcome.status === 'decided') {
+    await noteFeeRequired(deps.dataDir, isFeeRequired(outcome.decision), now).catch(
+      () => undefined,
     );
+  }
+  if (outcome.status === 'skipped') {
+    warn(`tenjin hook: the routing fee was not paid (${outcome.why}), so the native tool runs`);
     return null;
   }
   if (outcome.status === 'failed') {
-    const path = fee.mode === 'paid' ? ROUTE_PAID_PATH : ROUTER_PATH;
-    warn(`tenjin hook: ${baseUrl}${path} ${outcome.reason}`);
+    warn(`tenjin hook: ${baseUrl}${route?.path ?? ROUTER_PATH} ${outcome.reason}`);
     return null;
   }
   return outcome.decision.decision;

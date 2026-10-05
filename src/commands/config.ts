@@ -140,7 +140,7 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
     'hard cap per tenjin wallet send; unset = send refuses until set, 0 disables send, none = uncapped; never bypassed by --yes',
   allowlistCreators: 'only auto-pay these creators (empty = any)',
   routingFee:
-    'approved=route on the paid path at $0.003 a call from $0.25 lane deposits, declined=free path only; unset = not asked yet',
+    'approved=route on the paid path at $0.003 a call from $0.25 channel deposits, declined=free path only; unset = not asked yet',
   routingAllowance: 'routing fees allowed per rolling 24h',
   baseUrl: 'Tenjin API base URL the router asks',
   publicShelfUrl:

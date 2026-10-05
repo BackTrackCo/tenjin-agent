@@ -5,7 +5,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { CliError } from '../lib/errors';
 import type { CommandContext } from '../context';
 import { runRouterDoctor } from './doctor';
-import { laneFiles, useLanesOf, writeJson, writePool, writeWalletPool } from './lanes';
+import { FileClientChannelStorage } from '@x402/evm/batch-settlement/client/file-storage';
+import { appendFee, payerDir, writeFeeState } from './fee-state';
 import { runPaymentsFees } from './payments';
 import { runRouterStatus } from './status';
 
@@ -15,6 +16,7 @@ import { runRouterStatus } from './status';
  */
 
 const PAYER = '0x0000000000000000000000000000000000000001';
+const CHANNEL = `0x${'ab'.repeat(32)}`;
 
 let root: string;
 beforeEach(async () => {
@@ -57,7 +59,7 @@ describe('doctor: routing fee', () => {
   });
 
   it('names a missing approval and the approval command', async () => {
-    await writePool(join(root, 'data'), { paidPath: 'available', checkedAtMs: Date.now() });
+    await writeFeeState(join(root, 'data'), { paidPath: 'available', checkedAtMs: Date.now() });
     const check = await feeCheck();
     expect(check.status).toBe('warn');
     expect(check.detail).toContain('routing is paused');
@@ -66,20 +68,17 @@ describe('doctor: routing fee', () => {
   });
 
   it('names the approval command once the free path answered fee_required', async () => {
-    await writePool(join(root, 'data'), { feeRequiredAtMs: Date.now() });
+    await writeFeeState(join(root, 'data'), { feeRequiredAtMs: Date.now() });
     const check = await feeCheck();
     expect(check.status).toBe('warn');
     expect(check.detail).toContain('not approved');
     expect(check.fix).toBe('Run `tenjin config set routingFee approved`.');
   });
 
-  it('names a wallet that cannot fund a lane, and tenjin wallet fund with the amount', async () => {
+  it('names a wallet that cannot fund a channel deposit, and tenjin wallet fund with the amount', async () => {
     await writeFile(join(root, 'data', 'config.json'), JSON.stringify({ routingFee: 'approved' }));
-    await writePool(join(root, 'data'), { paidPath: 'available', checkedAtMs: Date.now() });
-    await writeWalletPool(await useLanesOf(join(root, 'data'), PAYER), {
-      fundingBlocked: 'wallet_low',
-      walletBalanceAtomic: '0',
-    });
+    await writeFeeState(join(root, 'data'), { paidPath: 'available', checkedAtMs: Date.now() });
+    await writeFeeState(join(root, 'data'), { blocked: 'wallet_low', walletBalanceAtomic: '0' });
     const check = await feeCheck();
     expect(check.status).toBe('warn');
     expect(check.detail).toContain('cannot fund');
@@ -88,70 +87,59 @@ describe('doctor: routing fee', () => {
 
   it('names the passphrase variable when tenjin mcp cannot unlock the wallet', async () => {
     await writeFile(join(root, 'data', 'config.json'), JSON.stringify({ routingFee: 'approved' }));
-    await writePool(join(root, 'data'), { paidPath: 'available', checkedAtMs: Date.now() });
-    await writeWalletPool(await useLanesOf(join(root, 'data'), PAYER), {
-      ownerBlocked: 'wallet_locked',
-    });
+    await writeFeeState(join(root, 'data'), { paidPath: 'available', checkedAtMs: Date.now() });
+    await writeFeeState(join(root, 'data'), { blocked: 'wallet_locked' });
     const check = await feeCheck();
     expect(check.status).toBe('warn');
     expect(check.detail).toContain('cannot unlock the wallet');
     expect(check.fix).toContain('TENJIN_WALLET_PASSPHRASE');
   });
 
-  it('names allowlistCreators when it stopped a lane deposit', async () => {
+  it('names allowlistCreators when it stopped a channel deposit', async () => {
     await writeFile(join(root, 'data', 'config.json'), JSON.stringify({ routingFee: 'approved' }));
-    await writePool(join(root, 'data'), { paidPath: 'available', checkedAtMs: Date.now() });
-    await writeWalletPool(await useLanesOf(join(root, 'data'), PAYER), {
-      fundingBlocked: 'not_allowlisted',
-    });
+    await writeFeeState(join(root, 'data'), { paidPath: 'available', checkedAtMs: Date.now() });
+    await writeFeeState(join(root, 'data'), { blocked: 'not_allowlisted' });
     const check = await feeCheck();
     expect(check.status).toBe('warn');
-    expect(check.detail).toContain('allowlistCreators stopped the last $0.25 lane deposit');
+    expect(check.detail).toContain('allowlistCreators stopped the last $0.25 channel deposit');
     expect(check.fix).toMatch(/^Add \S+ to allowlistCreators, or clear the allowlist\.$/);
   });
 });
 
 describe('fees in status and payments', () => {
   beforeEach(async () => {
-    await writeFile(join(root, 'data', 'config.json'), JSON.stringify({ routingFee: 'approved' }));
-    const dir = await useLanesOf(join(root, 'data'), PAYER);
-    await writeJson(laneFiles.state(dir, 0), {
-      version: 1,
-      index: 0,
-      payer: PAYER,
-      salt: `0x${'0'.repeat(64)}`,
-      channelId: '0xchannel0',
-      balanceAtomic: '250000',
-      chargedAtomic: '9000',
-      status: 'ready',
-      ladder: [],
-      updatedAtMs: Date.now(),
+    const data = join(root, 'data');
+    await writeFile(join(data, 'config.json'), JSON.stringify({ routingFee: 'approved' }));
+    await writeFeeState(data, { payer: PAYER });
+    // The channel as the SDK's own file storage keeps it.
+    await new FileClientChannelStorage({ directory: payerDir(data, PAYER) }).set(CHANNEL, {
+      balance: '250000',
+      chargedCumulativeAmount: '9000',
     });
-    await writeFile(
-      laneFiles.fees(dir, 0),
-      [3000, 3000, 3000]
-        .map((fee) => JSON.stringify({ atMs: Date.now(), feeAtomic: String(fee) }))
-        .join('\n'),
-    );
+    for (let i = 0; i < 3; i++) {
+      await appendFee(payerDir(data, PAYER), 0, { atMs: Date.now(), feeAtomic: 3000n }, Date.now());
+    }
   });
 
-  it('tenjin status shows the 24h fees against the allowance and what the lanes hold', async () => {
+  it('tenjin status shows the 24h fees against the allowance and what the channels hold', async () => {
     const result = await runRouterStatus(ctx());
     expect((result.data as { routingFee: unknown }).routingFee).toMatchObject({
       approved: true,
       last24h: { atomic: '9000' },
       allowance: { atomic: '500000' },
-      laneCredit: { atomic: '241000' },
-      lanes: 1,
+      channelCredit: { atomic: '241000' },
+      channels: 1,
     });
     expect(result.humanLines?.join('\n')).toContain('routing fees 0.009 USD of 0.5 USD');
   });
 
-  it('tenjin payments fees lists each lane beside the totals', async () => {
+  it('tenjin payments fees lists each channel beside the totals', async () => {
     const result = await runPaymentsFees(ctx());
     expect(result.data).toMatchObject({
       charged: { atomic: '9000' },
-      lanes: [{ index: 0, deposited: { atomic: '250000' }, charged: { atomic: '9000' } }],
+      channels: [
+        { channelId: CHANNEL, deposited: { atomic: '250000' }, charged: { atomic: '9000' } },
+      ],
     });
     expect(result.humanLines?.[0]).toContain('0.009 USD charged in all');
   });

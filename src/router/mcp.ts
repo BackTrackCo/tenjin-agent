@@ -4,20 +4,17 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import pkg from '../../package.json';
 import { createPublicClient, http } from 'viem';
-import { loadRawConfig } from '../lib/config';
 import { dataDir as defaultDataDir } from '../lib/paths';
 import { resolveContextSettings } from '../lib/settings';
 import { readUsdcBalance } from '../lib/usdc-balance';
-import {
-  describeWallet,
-  resolveSpendAuthorizer,
-  resolveWalletProvider,
-  type WalletProvider,
-} from '../lib/wallet';
+import { resolveSpendAuthorizer, resolveWalletProvider, type WalletProvider } from '../lib/wallet';
 import type { CommandContext, GlobalFlags } from '../context';
-import { routingFeeApproved, routingFeeFor } from './fee';
-import { LaneOwner } from './lane-owner';
+import type { RouteFor } from './fee';
+import { runHookKind } from './hook-command';
+import { eventFromToolInput, HOOK_KINDS, HOOK_TOOL, HOOK_TOOL_FIELDS } from './hook-tool';
+import type { HookDeps } from './hooks';
 import { MCP_SERVER_NAME } from './names';
+import { RoutingPayer } from './routing-payer';
 import { runRequestTool, type RequestToolDeps } from './tool';
 
 /**
@@ -87,8 +84,10 @@ export interface RouterMcpOptions {
   flags?: Partial<GlobalFlags>;
   /** Test seam: everything the tool handler would otherwise resolve itself. */
   handlerDeps?: Partial<RequestToolDeps>;
-  /** The routing-fee lanes this process owns; the tool pays from them first. */
-  laneOwner?: LaneOwner;
+  /** Test seam for the `hook` tool's handlers (base URL, fetch, clock). */
+  hookDeps?: Partial<HookDeps>;
+  /** The routing fee's payer; both tools route through it once the fee is approved. */
+  payer?: RoutingPayer;
 }
 
 function buildContext(opts: RouterMcpOptions): CommandContext {
@@ -164,14 +163,8 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
       const settings = await resolveContextSettings(ctx);
       const authorizer =
         opts.handlerDeps?.authorizer ?? resolveSpendAuthorizer(ctx, settings.policy);
-      const fee = await routingFeeFor(
-        ctx.dataDir,
-        await loadRawConfig(ctx.dataDir).catch(() => ({})),
-      );
-      const routingFee =
-        fee.mode === 'paid' && opts.laneOwner !== undefined
-          ? { ...fee, prefer: opts.laneOwner.ownedLanes() }
-          : fee;
+      const route: RouteFor | undefined =
+        opts.handlerDeps?.route ?? opts.payer?.routeFor.bind(opts.payer);
       const result = await runRequestTool(
         {
           ...(query !== undefined ? { query } : {}),
@@ -188,7 +181,7 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
           // a paid lookup still skips the second key derivation.
           provider,
           authorizer,
-          routingFee: opts.handlerDeps?.routingFee ?? routingFee,
+          ...(route !== undefined ? { route } : {}),
           ...(opts.handlerDeps?.fetchImpl !== undefined
             ? { fetchImpl: opts.handlerDeps.fetchImpl }
             : {}),
@@ -210,6 +203,42 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
       };
     },
   );
+  // THE HOOK ENTRIES' TOOL. `tenjin install` writes each routing leg as an
+  // `mcp_tool` hook that calls this, so the leg runs in this process, which
+  // holds the wallet and the routing fee's payer, and its answer is the hook's
+  // output. The model sees the tool too; its description tells it to leave it.
+  server.registerTool(
+    HOOK_TOOL,
+    {
+      title: "Tenjin's routing hooks (called by Claude Code, not by you)",
+      description:
+        'Called by the Claude Code hook entries `tenjin install` wrote, once per routing ' +
+        'leg, with the hook event. Never call it yourself: to make a lookup, call `request`.',
+      inputSchema: {
+        kind: z.enum(HOOK_KINDS),
+        ...Object.fromEntries(HOOK_TOOL_FIELDS.map((field) => [field, z.string().optional()])),
+      },
+    },
+    async (args): Promise<CallToolResult> => {
+      let response: unknown;
+      try {
+        response = await runHookKind(args.kind, eventFromToolInput(args), {
+          dataDir: ctx.dataDir,
+          ...(ctx.flags.baseUrl !== undefined ? { baseUrl: ctx.flags.baseUrl } : {}),
+          ...(opts.payer !== undefined ? { route: opts.payer.routeFor.bind(opts.payer) } : {}),
+          ...opts.hookDeps,
+        });
+      } catch {
+        // A leg that throws says nothing, as the command form does.
+        response = null;
+      }
+      // Read like a command hook's stdout: a JSON object is the hook's answer,
+      // and empty text is "no opinion".
+      return {
+        content: [{ type: 'text', text: response === null ? '' : JSON.stringify(response) }],
+      };
+    },
+  );
   return server;
 }
 
@@ -220,41 +249,30 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
  */
 export async function runRouterMcpServer(opts: RouterMcpOptions = {}): Promise<void> {
   const ctx = buildContext(opts);
-  const laneOwner = opts.laneOwner ?? (await routingLaneOwner(ctx));
-  const server = buildRouterMcpServer({ ...opts, laneOwner });
-  // THE LANES' OWNER RUNS HERE, never in a hook: once the routing fee is
-  // approved it probes the paid path, then funds, signs and recovers the lanes
-  // the hooks spend from. Before approval it sends nothing. Unref'd.
-  const stop = laneOwner.start();
+  const payer = opts.payer ?? (await routingPayer(ctx));
+  const server = buildRouterMcpServer({ ...opts, payer });
   await server.connect(new StdioServerTransport());
   await new Promise<void>((resolve) => {
     server.server.onclose = () => resolve();
     process.stdin.once('end', resolve);
     process.stdin.once('close', resolve);
   });
-  stop();
+  // The slot goes back for the next process; a killed process frees it too,
+  // because a lease names a process that is gone.
+  await payer.close();
 }
 
-/** The production owner: this machine's wallet, spend policy, RPC and router. */
-async function routingLaneOwner(ctx: CommandContext): Promise<LaneOwner> {
+/** The production payer: this machine's wallet, spend policy and RPC. */
+async function routingPayer(ctx: CommandContext): Promise<RoutingPayer> {
   const settings = await resolveContextSettings(ctx);
   const provider: WalletProvider = resolveWalletProvider(ctx);
   const chain = createPublicClient({ transport: http(settings.rpcUrl) });
-  return new LaneOwner({
+  return new RoutingPayer({
     dataDir: ctx.dataDir,
-    baseUrl: settings.baseUrl,
-    approved: async () => routingFeeApproved(await loadRawConfig(ctx.dataDir).catch(() => ({}))),
-    walletAddress: async () => {
-      try {
-        return (await describeWallet(provider)).address;
-      } catch {
-        return null;
-      }
-    },
     // Never a prompt: the context is not a TTY, because the stdio transport owns stdin.
     getSigner: () => provider.getSigner(),
     policy: async () => (await resolveContextSettings(ctx)).policy,
-    walletBalance: (address) => readUsdcBalance(address, settings.rpcUrl, { timeoutMs: 5_000 }),
+    walletBalance: (address, timeoutMs) => readUsdcBalance(address, settings.rpcUrl, { timeoutMs }),
     readContract: (args) => chain.readContract(args as Parameters<typeof chain.readContract>[0]),
   });
 }

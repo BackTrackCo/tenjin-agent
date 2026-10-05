@@ -26,14 +26,8 @@ import {
   type DecisionDiagnostics,
   type OfferSpec,
 } from './decision';
-import {
-  isFeeRequired,
-  payForDecision,
-  routingFeeApproved,
-  routingFeeFor,
-  type RoutingFee,
-} from './fee';
-import { pausedReason, pausedSentence } from './lanes';
+import { isFeeRequired, routingFeeApproved, type RouteFor } from './fee';
+import { noteFeeRequired, pausedReason, pausedSentence } from './fee-state';
 import { openLookupFooter, type LookupFooter } from './progress';
 import {
   appendPaidRecord,
@@ -110,11 +104,11 @@ export interface RequestToolDeps {
   /** The directory `router.*` resolves from; defaults to `process.cwd()`, which
    *  Claude Code sets to the project directory for an MCP server. */
   cwd?: string;
-  /** Clock seam for a saved file's name and a lane's claim. */
+  /** Clock seam for a saved file's name. */
   now?: () => number;
-  /** Which path the routing call takes; the MCP server passes its own lanes
-   *  first. Absent resolves it from the config and the lane pool. */
-  routingFee?: RoutingFee;
+  /** The paid path, passed by `tenjin mcp` once the routing fee is approved.
+   *  Absent, the routing call takes the free path. */
+  route?: RouteFor;
   /** Test seam for the media download; production pins each connection to
    *  the address it validated. */
   mediaTransport?: MediaTransport;
@@ -226,25 +220,27 @@ export async function runRequestTool(
   // with no id the gate picks a service and answers with its spec. An id the
   // backend does not know is its own plain note, and the pick still runs from
   // the query.
-  // ON THE PAID PATH the call spends one rung of a lane this process's owner
-  // signed, and with no lane free it is not made: the host's own tools run.
+  // ON THE PAID PATH the payer pays the routing fee with the stock x402
+  // client, and a call it cannot pay is not made: the host's own tools run.
   const config = await loadRawConfig(deps.ctx.dataDir).catch(() => ({}));
-  const fee = deps.routingFee ?? (await routingFeeFor(deps.ctx.dataDir, config));
-  const fresh = await payForDecision(
-    fee,
-    (payment) =>
-      requestDecision(
-        'tool',
-        { query, ...(id !== undefined ? { id } : {}) },
-        { ...decisionDeps, ...(payment !== undefined ? { payment } : {}) },
-      ),
-    deps.now?.() ?? Date.now(),
+  const route = (await deps.route?.(config, settings.baseUrl)) ?? null;
+  const fresh = await requestDecision(
+    'tool',
+    { query, ...(id !== undefined ? { id } : {}) },
+    { ...decisionDeps, ...(route !== null ? { route } : {}) },
   );
+  if (route === null && fresh.status === 'decided') {
+    await noteFeeRequired(
+      deps.ctx.dataDir,
+      isFeeRequired(fresh.decision),
+      deps.now?.() ?? Date.now(),
+    ).catch(() => undefined);
+  }
   if (fresh.status === 'skipped') {
     await footer.done('native');
     return fail(
       'native',
-      `No routing lane could pay the $0.003 routing fee (${fresh.why}), so nothing was routed or paid.`,
+      `The $0.003 routing fee could not be paid (${fresh.why}), so nothing was routed or paid.`,
     );
   }
   if (fresh.status === 'failed') {
@@ -257,7 +253,7 @@ export async function runRequestTool(
 
   // THE FREE PATH NO LONGER ROUTES. The server's line says to update the CLI,
   // which is wrong for this one: what stops routing here is the approval, or
-  // lanes that are not funded yet.
+  // a paid path this process could not reach yet.
   if (isFeeRequired(fresh.decision)) {
     await footer.done('native');
     const paused = await pausedReason(deps.ctx.dataDir, routingFeeApproved(config));
@@ -265,7 +261,7 @@ export async function runRequestTool(
       'native',
       paused !== null
         ? pausedSentence(paused)
-        : 'Tenjin routing is starting: the routing fee is approved and this machine has no funded routing lane yet, so nothing was routed or paid.',
+        : 'Tenjin routing is starting: the routing fee is approved but the paid routing path did not answer yet, so nothing was routed or paid.',
       { nextStep: 'Tell the user this once, and use your own tools for now.' },
     );
   }

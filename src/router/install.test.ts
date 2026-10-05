@@ -350,7 +350,7 @@ function amounts(answers: (string | null)[]) {
 }
 
 const FEE_LINES =
-  '\nRouting costs $0.003 a call, at most $0.50 in a rolling day, paid from $0.25 lane deposits that stay yours until spent and do not count against these limits.\nUsing these limits or choosing your own also approves the routing fee.';
+  '\nRouting costs $0.003 a call, at most $0.50 in a rolling day, paid from $0.25 channel deposits that stay yours until spent and do not count against these limits.\nUsing these limits or choosing your own also approves the routing fee.';
 
 describe('install asks a person to approve the spend limits', () => {
   it('"Use these limits" writes the defaults it showed and approves the routing fee', async () => {

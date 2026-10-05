@@ -16,17 +16,15 @@ import { agentsWithoutRequestTool } from './agent-tools';
 import { ROUTER_PATH } from './decision';
 import { routingAllowanceAtomic, routingFeeApproved } from './fee';
 import {
-  currentLanesDir,
+  CHANNEL_DEPOSIT_ATOMIC,
   feesInWindow,
-  LANE_DEPOSIT_ATOMIC,
   pausedFix,
   pausedReason,
   pausedSentence,
-  readPool,
-  readWalletPool,
+  readFeeState,
   ROUTING_FEE_ATOMIC,
   usd,
-} from './lanes';
+} from './fee-state';
 import {
   ALLOW_RULE,
   MCP_SERVER_NAME,
@@ -459,9 +457,9 @@ async function routingFeeCheck(ctx: CommandContext): Promise<RouterCheck> {
       fix: pausedFix(paused),
     };
   }
-  const pool = await readPool(ctx.dataDir);
+  const state = await readFeeState(ctx.dataDir);
   const fee = `$${usd(ROUTING_FEE_ATOMIC)} a call`;
-  if (!approved || pool?.paidPath !== 'available') {
+  if (!approved || state?.paidPath !== 'available') {
     return {
       name: 'routing fee',
       status: 'ok',
@@ -472,9 +470,7 @@ async function routingFeeCheck(ctx: CommandContext): Promise<RouterCheck> {
   const allowance = routingAllowanceAtomic(config);
   const spent = await feesInWindow(ctx.dataDir, Date.now());
   const detail = `approved (${fee}): $${usd(spent)} of $${usd(allowance)} in the last 24h`;
-  const lanes = await currentLanesDir(ctx.dataDir);
-  const wallet = lanes === null ? null : await readWalletPool(lanes);
-  if (wallet?.fundingBlocked !== 'not_allowlisted') {
+  if (state.blocked !== 'not_allowlisted') {
     return { name: 'routing fee', status: 'ok', required: false, detail };
   }
   const host = new URL((await resolveContextSettings(ctx)).baseUrl).host;
@@ -482,7 +478,7 @@ async function routingFeeCheck(ctx: CommandContext): Promise<RouterCheck> {
     name: 'routing fee',
     status: 'warn',
     required: false,
-    detail: `${detail}; allowlistCreators stopped the last $${usd(LANE_DEPOSIT_ATOMIC)} lane deposit`,
+    detail: `${detail}; allowlistCreators stopped the last $${usd(CHANNEL_DEPOSIT_ATOMIC)} channel deposit`,
     fix: `Add ${host} to allowlistCreators, or clear the allowlist.`,
   };
 }
