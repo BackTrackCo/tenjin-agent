@@ -7,6 +7,11 @@ import {
   encodePaymentResponseHeader,
 } from '@x402/core/http';
 import type { PaymentRequirements } from '@x402/core/types';
+import {
+  BatchSettlementEvmScheme as ClientScheme,
+  computeChannelId,
+} from '@x402/evm/batch-settlement/client';
+import { BatchSettlementEvmScheme as ServerScheme } from '@x402/evm/batch-settlement/server';
 import type { TypedDataDefinition } from 'viem';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -373,8 +378,10 @@ describe('LaneOwner', () => {
     });
     expect((await routeOnce(router)).status).toBe('decided');
     expect(router.settledFees).toBe(2);
-    const id = (await readLaneState(lanesDir(dir), 0))!.channelId.toLowerCase();
-    expect(router.channels.get(id)!.charged).toBe(6_000n);
+    // The skipped call grew the pool, so the last call may take either lane:
+    // across every channel, two answered calls cost exactly two fees.
+    const charged = [...router.channels.values()].reduce((sum, c) => sum + c.charged, 0n);
+    expect(charged).toBe(6_000n);
   });
 
   it('a client abort after the server settled leads to recovery on the next voucher', async () => {
@@ -409,5 +416,40 @@ describe('LaneOwner', () => {
     expect(await laneIndices(lanesDir(dir))).toEqual([0, 1]);
     expect(lanes.ownedLanes()).toEqual([0, 1]);
     expect(router.deposits).toBe(2);
+  });
+});
+
+describe('one channel id on both sides', () => {
+  // The server scheme does not export its channel-id function, so this asks it
+  // through a public hook that computes one from a payload's channel config:
+  // refund enrichment refuses a voucher whose id does not match, before it
+  // ever looks the channel up.
+  it("is the id the 2.21.0 server scheme computes from the client's channel config", async () => {
+    const router = new FakeRouter();
+    const voucherKey = privateKeyToAccount(generatePrivateKey());
+    const client = new ClientScheme(
+      { address: wallet.address, signTypedData: () => Promise.reject(new Error('unused')) },
+      { salt: `0x${'ab'.repeat(32)}`, voucherSigner: voucherKey as never },
+    );
+    const channelConfig = client.buildChannelConfig(router.requirement);
+    const clientId = computeChannelId(channelConfig, NETWORK);
+    const server = new ServerScheme(router.requirement.payTo as `0x${string}`);
+    const refund = (channelId: string) =>
+      server.enrichSettlementPayload({
+        paymentPayload: {
+          x402Version: 2,
+          accepted: router.requirement,
+          payload: {
+            type: 'refund',
+            channelConfig,
+            voucher: { channelId, maxClaimableAmount: '0', signature: '0x' },
+          },
+        },
+        requirements: router.requirement,
+      } as never);
+    await expect(refund(clientId)).rejects.toThrow('invalid_batch_settlement_evm_missing_channel');
+    await expect(refund(`0x${'00'.repeat(32)}`)).rejects.toThrow(
+      'refund channelId does not match channelConfig',
+    );
   });
 });
