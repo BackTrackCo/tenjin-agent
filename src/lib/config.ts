@@ -443,9 +443,10 @@ export const SEND_MAX_UNSET = 'unset';
  * the sweep parses. CDP's Bazaar is settlement-derived (it indexes what its
  * facilitator settles, Tenjin's endpoints included); UltraVioleta is the
  * registry Tenjin also announces to; PayAI's facilitator is settlement-derived
- * like CDP's (26k+ listings at verification). PayAI has no /discovery/search
- * and ignores payTo filters, the same shapes UV and CDP already exhibit, which
- * the query sweep's per-registry errors and the stored-sweep evidence cover.
+ * like CDP's (26k+ listings at verification). PayAI's /discovery/search is
+ * keyword-only (measured 2026-10-02), so a natural-language query finds nothing
+ * there. It also ignores payTo filters, as UV and CDP do, which the query
+ * sweep's per-registry errors and the stored-sweep evidence cover.
  */
 export const DEFAULT_BAZAAR_REGISTRIES = [
   'https://api.cdp.coinbase.com/platform/v2/x402',

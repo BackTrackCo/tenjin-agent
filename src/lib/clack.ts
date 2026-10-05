@@ -167,6 +167,26 @@ export async function selectMany<T extends string>(opts: {
   });
 }
 
+/** A one-line answer. Returns what was typed, or `null` when cancelled or the input ended. */
+export async function askText(opts: {
+  message: string;
+  placeholder?: string;
+  streams?: PromptStreams;
+}): Promise<string | Cancelled> {
+  const { text, isCancel } = await import('@clack/prompts');
+  const streams = resolveStreams(opts.streams ?? {});
+  return withInputEnd<string | Cancelled>(streams, null, async (signal) => {
+    const answer = await text({
+      message: opts.message,
+      ...(opts.placeholder !== undefined ? { placeholder: opts.placeholder } : {}),
+      input: streams.input,
+      output: streams.output,
+      signal,
+    });
+    return isCancel(answer) ? null : answer;
+  });
+}
+
 /** A yes/no confirm. Cancelling, or an input that ends, reads as no. */
 export async function confirmChoice(
   message: string,

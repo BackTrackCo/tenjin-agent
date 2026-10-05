@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { PassThrough, Readable, Writable } from 'node:stream';
-import { confirmChoice, selectMany, selectOne } from './clack';
+import { askText, confirmChoice, selectMany, selectOne } from './clack';
 
 /**
  * The EOF contract, pinned against the real @clack/prompts.
@@ -138,6 +138,18 @@ describe('selectMany: input that ends', () => {
         initialValues: ['auto'],
         streams: { input: emptyInput(), output },
       }),
+    );
+    expect(answer).toBeNull();
+    expect(output.text()).toContain('\x1b[?25h');
+  });
+});
+
+describe('askText: input that ends', () => {
+  it('settles as cancelled on the ctrl-D byte, with the stream still open', async () => {
+    const output = sink();
+    const answer = await within(
+      2000,
+      askText({ message: 'amount', streams: { input: ctrlDInput(), output } }),
     );
     expect(answer).toBeNull();
     expect(output.text()).toContain('\x1b[?25h');
