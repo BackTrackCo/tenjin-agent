@@ -3,10 +3,20 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import pkg from '../../package.json';
+import { createPublicClient, http } from 'viem';
+import { loadRawConfig } from '../lib/config';
 import { dataDir as defaultDataDir } from '../lib/paths';
 import { resolveContextSettings } from '../lib/settings';
-import { resolveSpendAuthorizer, resolveWalletProvider } from '../lib/wallet';
+import { readUsdcBalance } from '../lib/usdc-balance';
+import {
+  describeWallet,
+  resolveSpendAuthorizer,
+  resolveWalletProvider,
+  type WalletProvider,
+} from '../lib/wallet';
 import type { CommandContext, GlobalFlags } from '../context';
+import { routingFeeApproved, routingFeeFor } from './fee';
+import { LaneOwner } from './lane-owner';
 import { MCP_SERVER_NAME } from './names';
 import { runRequestTool, type RequestToolDeps } from './tool';
 
@@ -76,6 +86,8 @@ export interface RouterMcpOptions {
   flags?: Partial<GlobalFlags>;
   /** Test seam: everything the tool handler would otherwise resolve itself. */
   handlerDeps?: Partial<RequestToolDeps>;
+  /** The routing-fee lanes this process owns; the tool pays from them first. */
+  laneOwner?: LaneOwner;
 }
 
 function buildContext(opts: RouterMcpOptions): CommandContext {
@@ -151,6 +163,14 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
       const settings = await resolveContextSettings(ctx);
       const authorizer =
         opts.handlerDeps?.authorizer ?? resolveSpendAuthorizer(ctx, settings.policy);
+      const fee = await routingFeeFor(
+        ctx.dataDir,
+        await loadRawConfig(ctx.dataDir).catch(() => ({})),
+      );
+      const routingFee =
+        fee.mode === 'paid' && opts.laneOwner !== undefined
+          ? { ...fee, prefer: opts.laneOwner.ownedLanes() }
+          : fee;
       const result = await runRequestTool(
         {
           ...(query !== undefined ? { query } : {}),
@@ -167,6 +187,7 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
           // a paid lookup still skips the second key derivation.
           provider,
           authorizer,
+          routingFee: opts.handlerDeps?.routingFee ?? routingFee,
           ...(opts.handlerDeps?.fetchImpl !== undefined
             ? { fetchImpl: opts.handlerDeps.fetchImpl }
             : {}),
@@ -197,11 +218,41 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
  * process also watches stdin itself; without it the process would linger.
  */
 export async function runRouterMcpServer(opts: RouterMcpOptions = {}): Promise<void> {
-  const server = buildRouterMcpServer(opts);
+  const ctx = buildContext(opts);
+  const laneOwner = opts.laneOwner ?? (await routingLaneOwner(ctx));
+  const server = buildRouterMcpServer({ ...opts, laneOwner });
+  // THE LANES' OWNER RUNS HERE, never in a hook: it probes the paid path, and
+  // once the routing fee is approved it funds, signs and recovers the lanes
+  // the hooks spend from. Off the tool path and unref'd.
+  const stop = laneOwner.start();
   await server.connect(new StdioServerTransport());
   await new Promise<void>((resolve) => {
     server.server.onclose = () => resolve();
     process.stdin.once('end', resolve);
     process.stdin.once('close', resolve);
+  });
+  stop();
+}
+
+/** The production owner: this machine's wallet, spend policy, RPC and router. */
+async function routingLaneOwner(ctx: CommandContext): Promise<LaneOwner> {
+  const settings = await resolveContextSettings(ctx);
+  const provider: WalletProvider = resolveWalletProvider(ctx);
+  const chain = createPublicClient({ transport: http(settings.rpcUrl) });
+  return new LaneOwner({
+    dataDir: ctx.dataDir,
+    baseUrl: settings.baseUrl,
+    approved: async () => routingFeeApproved(await loadRawConfig(ctx.dataDir).catch(() => ({}))),
+    walletAddress: async () => {
+      try {
+        return (await describeWallet(provider)).address;
+      } catch {
+        return null;
+      }
+    },
+    getSigner: () => provider.getSigner(),
+    authorizer: async () => resolveSpendAuthorizer(ctx, (await resolveContextSettings(ctx)).policy),
+    walletBalance: (address) => readUsdcBalance(address, settings.rpcUrl, { timeoutMs: 5_000 }),
+    readContract: (args) => chain.readContract(args as Parameters<typeof chain.readContract>[0]),
   });
 }
