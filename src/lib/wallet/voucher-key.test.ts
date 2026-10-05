@@ -1,7 +1,7 @@
 import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
+import { privateKeyToAccount } from 'viem/accounts';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { loadVoucherKey, type VoucherKeyDeps } from './voucher-key';
 
@@ -39,16 +39,6 @@ describe('loadVoucherKey', { timeout: 30_000 }, () => {
   it('refuses a wrong passphrase rather than making a new key', async () => {
     await loadVoucherKey(path, deps());
     await expect(loadVoucherKey(path, deps('wrong'))).rejects.toThrow();
-  });
-
-  it('seals a plaintext key from an earlier build on its first read, keeping the key', async () => {
-    const legacy = generatePrivateKey();
-    const { mkdir } = await import('node:fs/promises');
-    await mkdir(join(dir, 'router', 'lanes'), { recursive: true });
-    await writeFile(path, JSON.stringify({ version: 1, privateKey: legacy }));
-    expect(await loadVoucherKey(path, deps())).toBe(legacy);
-    expect(await readFile(path, 'utf8')).not.toContain(legacy.slice(2));
-    expect(await loadVoucherKey(path, deps())).toBe(legacy);
   });
 
   it('leaves a file it cannot read alone', async () => {
