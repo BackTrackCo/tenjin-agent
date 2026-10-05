@@ -289,9 +289,10 @@ export async function runUpdate(
 
 const ROUTING_FEE_QUESTION =
   `Tenjin's router charges a routing fee of $${usd(ROUTING_FEE_ATOMIC)} per routing call, at most ` +
-  `$${usd(ROUTING_ALLOWANCE_ATOMIC)} a day, paid from $${usd(LANE_DEPOSIT_ATOMIC)} deposits your ` +
-  'wallet makes within your spend limits. Until you approve it, the router uses only its free ' +
-  'path, and once that path closes routing pauses. Approve the routing fee? [y/N] ';
+  `$${usd(ROUTING_ALLOWANCE_ATOMIC)} a day, paid from $${usd(LANE_DEPOSIT_ATOMIC)} lane deposits that stay ` +
+  'yours until spent and do not count against your spend limits. Until you approve it, the ' +
+  'router uses only its free path, and once that path closes routing pauses. Approve the ' +
+  'routing fee? [y/N] ';
 
 /**
  * THE ROUTING-FEE QUESTION, ASKED ONCE. `install --refresh` runs without a
