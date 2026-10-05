@@ -55,6 +55,13 @@ export const HOOK_CLAIM_TTL_MS = 10_000;
 export const OWNER_CLAIM_TTL_MS = 60_000;
 /** A lease the owner stops renewing frees the lane for another process. */
 export const LEASE_TTL_MS = 60_000;
+/**
+ * Payers decide on the allowance one at a time, under a claim of its own that
+ * expires on its own (wall-clock ms), so a killed payer blocks the others only
+ * this long. A payer waits at most `ALLOWANCE_WAIT_MS` for it, then skips.
+ */
+export const ALLOWANCE_TURN_TTL_MS = 2_000;
+export const ALLOWANCE_WAIT_MS = 3_000;
 
 const ATOMIC_RE = /^\d{1,30}$/;
 
@@ -135,6 +142,7 @@ const file = {
   result: (dir: string, i: number) => join(dir, `lane-${i}.result.json`),
   fees: (dir: string, i: number) => join(dir, `lane-${i}.fees.jsonl`),
   pool: (dir: string) => join(dir, 'pool.json'),
+  allowanceTurn: (dir: string) => join(dir, 'allowance.claim'),
 };
 export const laneFiles = file;
 
@@ -247,7 +255,15 @@ export async function takeClaim(
   now: number,
   opts: { fee?: boolean } = {},
 ): Promise<string | null> {
-  const path = file.claim(dir, index);
+  return takeClaimAt(file.claim(dir, index), ttlMs, now, opts);
+}
+
+async function takeClaimAt(
+  path: string,
+  ttlMs: number,
+  now: number,
+  opts: { fee?: boolean } = {},
+): Promise<string | null> {
   const token = randomUUID();
   const claim: Claim = {
     token,
@@ -279,7 +295,10 @@ export async function takeClaim(
 }
 
 export async function dropClaim(dir: string, index: number, token: string): Promise<void> {
-  const path = file.claim(dir, index);
+  await dropClaimAt(file.claim(dir, index), token);
+}
+
+async function dropClaimAt(path: string, token: string): Promise<void> {
   const held = (await readJson(path)) as Claim | null;
   if (held?.token === token) await rm(path, { force: true });
 }
@@ -375,6 +394,13 @@ export type NoLane = 'no_lanes' | 'busy' | 'recovering' | 'below_fee' | 'allowan
  * only when its call ends, so each payer counts the other lanes' live fee
  * claims as fees too. Two payers near the limit each see the other's claim, or
  * one sees both: at least one of them backs off, never both pay.
+ *
+ * ONE PAYER DECIDES AT A TIME. Left to race, two payers can each see the
+ * other's claim and both back off, so the last fee the allowance holds goes
+ * unpaid by anyone. Claiming a lane and checking the allowance happen under the
+ * allowance turn, so a later payer sees only the claims of payers that have
+ * already decided. The turn buys that liveness only: a turn that expires under
+ * a slow payer leaves the check above, which still never lets both pay.
  */
 export async function claimLane(
   dataDir: string,
@@ -390,6 +416,22 @@ export async function claimLane(
   if (indices.length === 0) return { lane: null, why: 'no_lanes' };
   const spent = await feesInWindow(dataDir, opts.now);
   if (spent + ROUTING_FEE_ATOMIC > opts.allowanceAtomic) return { lane: null, why: 'allowance' };
+  const turnPath = file.allowanceTurn(dir);
+  const turn = await waitForClaim(turnPath, ALLOWANCE_TURN_TTL_MS, ALLOWANCE_WAIT_MS);
+  if (turn === null) return { lane: null, why: 'busy' };
+  try {
+    return await claimLaneInTurn(dataDir, dir, indices, opts);
+  } finally {
+    await dropClaimAt(turnPath, turn);
+  }
+}
+
+async function claimLaneInTurn(
+  dataDir: string,
+  dir: string,
+  indices: readonly number[],
+  opts: { now: number; ttlMs?: number; allowanceAtomic: bigint; prefer?: readonly number[] },
+): Promise<{ lane: HeldLane } | { lane: null; why: NoLane }> {
   const start = Math.floor(Math.random() * indices.length);
   const rotated = [...indices.slice(start), ...indices.slice(0, start)];
   const preferred = new Set(opts.prefer ?? []);
@@ -438,6 +480,16 @@ export async function claimLane(
   }
   await notePoolDemand(dataDir, opts.now);
   return { lane: null, why };
+}
+
+/** Take a claim at `path`, retrying on the wall clock until `waitMs` has passed. */
+async function waitForClaim(path: string, ttlMs: number, waitMs: number): Promise<string | null> {
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    const token = await takeClaimAt(path, ttlMs, Date.now());
+    if (token !== null || Date.now() >= deadline) return token;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
 }
 
 /** Live fee claims on every lane but `own`. */

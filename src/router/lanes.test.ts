@@ -176,10 +176,16 @@ describe('claimLane', () => {
   it('never lets two payers both take the last fee the allowance holds', async () => {
     await lane(0);
     await lane(1);
+    // Slow writes and a lane each hold both payers inside the race: each takes
+    // its lane before either checks. Exactly one pays; none paying would strand
+    // the last fee.
+    slow.on = true;
     const both = await Promise.all([
-      claimLane(dir, { now: NOW, allowanceAtomic: 3_000n }),
-      claimLane(dir, { now: NOW, allowanceAtomic: 3_000n }),
-    ]);
+      claimLane(dir, { now: NOW, allowanceAtomic: 3_000n, prefer: [0] }),
+      claimLane(dir, { now: NOW, allowanceAtomic: 3_000n, prefer: [1] }),
+    ]).finally(() => {
+      slow.on = false;
+    });
     expect(both.filter((c) => c.lane !== null)).toHaveLength(1);
     const held = both.find((c) => c.lane !== null)!.lane!;
     // While that call is out, its claim counts as a fee.
