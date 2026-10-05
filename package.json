@@ -52,7 +52,7 @@
     "githooks": "git config core.hooksPath .githooks"
   },
   "devDependencies": {
-    "@changesets/cli": "^2.31.1",
+    "@changesets/cli": "^3.0.3",
     "@clack/prompts": "^1.7.0",
     "@eslint/js": "^10",
     "@modelcontextprotocol/sdk": "1.29.0",

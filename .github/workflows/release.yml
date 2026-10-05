@@ -28,7 +28,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
-      hasChangesets: ${{ steps.changesets.outputs.hasChangesets }}
+      has-changesets: ${{ steps.changesets.outputs.has-changesets }}
     permissions:
       contents: write # push the version-bump commit
       pull-requests: write # open/update the version PR
@@ -53,9 +53,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
-          # changesets/action pushes the bump branch via git CLI, which reads
-          # the persisted token from local git config; the env GITHUB_TOKEN
-          # below only reaches octokit.
+          # changesets/action v2 pushes the bump commit through the GitHub API
+          # with its github-token input; this persisted token keeps local git
+          # on the same App identity.
           token: ${{ steps.app-token.outputs.token }}
           fetch-depth: 0 # full history for changelog generation
 
@@ -74,13 +74,14 @@ jobs:
 
       - name: Create or update version PR
         id: changesets
-        uses: changesets/action@63a615b9cd06ba9a3e6d13796c7fbcb080a60a0b # v1.8.0
+        uses: changesets/action@ae32849d5ba541f9ae29e40e22a623bc13562f51 # v2.1.2
         with:
-          version: pnpm exec changeset version
-          commit: 'chore(release): version packages'
-          title: 'chore(release): version packages'
-        env:
-          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          version-script: pnpm exec changeset version
+          commit-message: 'chore(release): version packages'
+          pr-title: 'chore(release): version packages'
+          # v2 reads the token only from this input and fails when a different
+          # GITHUB_TOKEN env is set.
+          github-token: ${{ steps.app-token.outputs.token }}
 
   # Job 2: publish to npm. Runs only when the version job found NO pending
   # changesets (the version PR was already merged and package.json is bumped).
@@ -89,7 +90,7 @@ jobs:
     # Same main-bind as version: environment + workflow filename alone don't
     # restrict the ref, so a stale-branch dispatch must not mint a publishable
     # OIDC token.
-    if: github.ref == 'refs/heads/main' && needs.version.outputs.hasChangesets == 'false'
+    if: github.ref == 'refs/heads/main' && needs.version.outputs.has-changesets == 'false'
     needs: version
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -123,8 +124,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
-          # changeset publish pushes the release tag via git CLI; needs the
-          # persisted token for auth.
+          # changesets/action v2 creates the release tag through the GitHub API
+          # with its github-token input; this persisted token keeps local git
+          # on the same App identity.
           token: ${{ steps.app-token.outputs.token }}
           fetch-depth: 0
 
@@ -158,9 +160,10 @@ jobs:
 
       - name: Publish to npm
         id: publish
-        uses: changesets/action@63a615b9cd06ba9a3e6d13796c7fbcb080a60a0b # v1.8.0
+        uses: changesets/action@ae32849d5ba541f9ae29e40e22a623bc13562f51 # v2.1.2
         with:
-          publish: pnpm exec changeset publish
-          createGithubReleases: true
-        env:
-          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          # The action reads published packages from the CHANGESETS_OUTPUT file
+          # it sets in this script's environment, not from stdout.
+          publish-script: pnpm exec changeset publish
+          create-github-releases: true
+          github-token: ${{ steps.app-token.outputs.token }}
