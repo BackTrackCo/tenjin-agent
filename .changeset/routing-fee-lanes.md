@@ -10,7 +10,8 @@ probe; a deposit is not a payment, so it counts against neither `maxAutoSpend` n
 `sessionBudget`, and at most 8 lanes hold $2 in all), pre-signs ten
 vouchers per lane with a local voucher key kept encrypted like the wallet key (lanes and voucher key are per
 wallet: a replaced wallet gets its own, and the old wallet's lanes come back when it is in use again), and recovers a lane after a corrective
-402 with the SDK's channel recovery. A hook only claims a lane for ten seconds, sends
+402 with the SDK's channel recovery. A lane whose deposit fails waits 30 s before the next
+attempt, doubling with each failure up to 10 minutes. A hook only claims a lane for ten seconds, sends
 its next voucher and writes back the charged total; with no lane free, the call skips
 routing and the native tool runs. `routingFee` (approved or declined: `tenjin install`
 names it in its spend-limit question and approving the limits approves it, and

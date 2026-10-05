@@ -21,7 +21,7 @@ import type { TenjinSigner } from '../lib/wallet/provider';
 import type { CommandContext } from '../context';
 import { requestDecision } from './decision';
 import { payForDecision, type RoutingFee } from './fee';
-import { LaneOwner, type LaneOwnerDeps } from './lane-owner';
+import { FUND_BACKOFF_MAX_MS, LaneOwner, type LaneOwnerDeps } from './lane-owner';
 import {
   claimLane,
   feesInWindow,
@@ -63,6 +63,10 @@ class FakeRouter {
   readonly channels = new Map<string, Channel>();
   deposits = 0;
   settledFees = 0;
+  /** Paid requests on the funding path, answered or not. */
+  fundingAttempts = 0;
+  /** Answer every paid request on the funding path with a 500, settling nothing. */
+  failFunding = false;
   /** Settle the next answer, then drop the connection before it is read. */
   abortAfterSettle = false;
   readonly requirement: PaymentRequirements = {
@@ -88,6 +92,10 @@ class FakeRouter {
     const headers = new Headers(init?.headers);
     const signature = headers.get('payment-signature');
     if (signature === null) return this.required(url.toString());
+    if (url.pathname === '/api/x402-router/channel') {
+      this.fundingAttempts += 1;
+      if (this.failFunding) return new Response('{}', { status: 500 });
+    }
     const payload = decodePaymentSignatureHeader(signature).payload as {
       type: 'deposit' | 'voucher';
       voucher: { channelId: string; maxClaimableAmount: string; signature: `0x${string}` };
@@ -366,6 +374,81 @@ describe('LaneOwner', () => {
       status: 'ready',
     });
     expect((await routeOnce(router)).status).toBe('decided');
+  });
+
+  it('backs off deposits on a lane while the funding path fails: 30 s, doubling, reset on success', async () => {
+    const router = new FakeRouter();
+    router.failFunding = true;
+    const lanes = owner(router);
+    const start = clock;
+    const attemptsAt = async (at: number) => {
+      clock = at;
+      await lanes.tick();
+      return router.fundingAttempts;
+    };
+    expect(await attemptsAt(start)).toBe(1);
+    // The lost answer goes to recovery, which finds nothing landed.
+    expect(await readLaneState(laneDir(), 0)).toMatchObject({
+      status: 'recovering',
+      fundFailures: 1,
+      fundRetryAtMs: start + 30_000,
+    });
+    expect(await attemptsAt(start + 5_000)).toBe(1);
+    expect(await readLaneState(laneDir(), 0)).toMatchObject({ status: 'ready', fundFailures: 1 });
+    expect(await attemptsAt(start + 29_999)).toBe(1);
+    expect(await attemptsAt(start + 30_000)).toBe(2);
+    expect(await attemptsAt(start + 30_000 + 59_999)).toBe(2);
+    expect(await attemptsAt(start + 90_000)).toBe(3);
+    expect(await readLaneState(laneDir(), 0)).toMatchObject({
+      fundFailures: 3,
+      fundRetryAtMs: start + 90_000 + 120_000,
+    });
+    router.failFunding = false;
+    expect(await attemptsAt(start + 210_000)).toBe(4);
+    const funded = (await readLaneState(laneDir(), 0))!;
+    expect(funded).toMatchObject({ balanceAtomic: '250000', status: 'ready' });
+    expect(funded.fundFailures).toBeUndefined();
+    expect(funded.fundRetryAtMs).toBeUndefined();
+    expect(router.deposits).toBe(1);
+  });
+
+  it('waits at most ten minutes between deposit attempts', async () => {
+    const router = new FakeRouter();
+    router.failFunding = true;
+    const lanes = owner(router);
+    await lanes.tick();
+    const state = (await readLaneState(laneDir(), 0))!;
+    const { writeJson, laneFiles } = await import('./lanes');
+    await writeJson(laneFiles.state(laneDir(), 0), {
+      ...state,
+      status: 'ready',
+      fundFailures: 6,
+      fundRetryAtMs: clock,
+    });
+    await lanes.tick();
+    expect(await readLaneState(laneDir(), 0)).toMatchObject({
+      fundFailures: 7,
+      fundRetryAtMs: clock + FUND_BACKOFF_MAX_MS,
+    });
+  });
+
+  it('keeps the wait across a restart of tenjin mcp', async () => {
+    const router = new FakeRouter();
+    router.failFunding = true;
+    await owner(router).tick();
+    expect(router.fundingAttempts).toBe(1);
+    // The process exits; a new one adopts the lane inside the wait.
+    await rm(laneFiles.lease(laneDir(), 0));
+    clock += 10_000;
+    const restarted = owner(router);
+    await restarted.tick();
+    expect(restarted.ownedLanes()).toEqual([0]);
+    clock += 19_999;
+    await restarted.tick();
+    expect(router.fundingAttempts).toBe(1);
+    clock += 1;
+    await restarted.tick();
+    expect(router.fundingAttempts).toBe(2);
   });
 
   it('funds a lane under per-call and daily limits below the deposit, and records no spend', async () => {

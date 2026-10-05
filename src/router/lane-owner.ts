@@ -76,6 +76,10 @@ const ABSENT_PROBE_TTL_MS = 60 * 60_000;
 const DEMAND_WINDOW_MS = 60_000;
 /** Rebuild the ladder when fewer rungs than this are left above the total. */
 const LADDER_LOW = LADDER_RUNGS / 2;
+/** The wait after a lane's first failed deposit, doubling with each one after. */
+export const FUND_BACKOFF_MS = 30_000;
+/** The longest wait between deposit attempts on a lane. */
+export const FUND_BACKOFF_MAX_MS = 10 * 60_000;
 
 export interface LaneOwnerDeps {
   dataDir: string;
@@ -111,8 +115,19 @@ export interface LaneOwnerDeps {
 interface Funding {
   blocked?: WalletPool['fundingBlocked'];
   walletAtomic?: bigint;
+  /** The deposit settled. */
+  deposited?: true;
   /** A deposit was sent and no settle came back: it may have landed. */
   depositUnknown?: true;
+}
+
+type Backoff = Pick<LaneState, 'fundFailures' | 'fundRetryAtMs'>;
+
+/** The wait after one more failed deposit: 30 s, doubling, at most 10 minutes. */
+function backoffAfterFailure(state: LaneState, now: number): Backoff {
+  const failures = (state.fundFailures ?? 0) + 1;
+  const wait = Math.min(FUND_BACKOFF_MS * 2 ** Math.min(failures - 1, 20), FUND_BACKOFF_MAX_MS);
+  return { fundFailures: failures, fundRetryAtMs: now + wait };
 }
 
 interface Probe {
@@ -395,23 +410,38 @@ export class LaneOwner {
       };
       let status = await this.foldResult(dir, index, state, clientDeps, accept);
       let funding: Funding | null = null;
+      const { fundFailures, fundRetryAtMs, ...rest } = state;
+      let backoff: Backoff = {
+        ...(fundFailures !== undefined ? { fundFailures } : {}),
+        ...(fundRetryAtMs !== undefined ? { fundRetryAtMs } : {}),
+      };
       const ctx = await storage.get(state.channelId.toLowerCase());
       const charged = BigInt(ctx?.chargedCumulativeAmount ?? state.chargedAtomic);
       const balance = BigInt(ctx?.balance ?? state.balanceAtomic);
-      if (status === 'ready' && balance - charged < ROUTING_FEE_ATOMIC) {
+      if (status === 'ready' && balance - charged >= ROUTING_FEE_ATOMIC) {
+        // Funded, by a deposit or by one a recovery found landed: no wait.
+        backoff = {};
+      } else if (status === 'ready' && (fundRetryAtMs ?? 0) <= now) {
         funding = await this.fund(clientDeps, address);
         // A deposit sent with no answer may have landed: the next pass reads
         // the channel from the chain before it deposits again.
         if (funding.depositUnknown === true) status = 'recovering';
+        // A FAILED DEPOSIT WAITS BEFORE THE NEXT, in the lane's state, so the
+        // wait holds across restarts and every process sees it. A funding path
+        // that does not answer counts as a failure; a wallet too low or a
+        // creator allowlist signs nothing and waits for nothing.
+        if (funding.deposited === true) backoff = {};
+        else if (funding.blocked == null) backoff = backoffAfterFailure(state, now);
       }
       const fresh = await storage.get(state.channelId.toLowerCase());
       const next: LaneState = {
-        ...state,
+        ...rest,
         chargedAtomic: fresh?.chargedCumulativeAmount ?? state.chargedAtomic,
         balanceAtomic: fresh?.balance ?? state.balanceAtomic,
         status,
         updatedAtMs: now,
         ladder: state.ladder,
+        ...backoff,
       };
       next.ladder = status === 'ready' ? await this.ladderFor(next, paid, clientDeps) : [];
       // THE FEE LINE, THEN THE RESULT GOES, THEN THE STATE. Whatever the channel
@@ -540,7 +570,7 @@ export class LaneOwner {
         clientDeps.storage,
         http.getPaymentSettleResponse((name) => response.header(name)),
       );
-      return {};
+      return { deposited: true };
     } catch (err) {
       this.warn(err);
       return sent ? { blocked: null, depositUnknown: true } : { blocked: null };

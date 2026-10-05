@@ -89,6 +89,10 @@ export interface LaneState {
   status: 'ready' | 'recovering';
   ladder: Rung[];
   updatedAtMs: number;
+  /** Failed deposits on this lane in a row, which set the next wait. */
+  fundFailures?: number;
+  /** No deposit is tried on this lane before this time. */
+  fundRetryAtMs?: number;
 }
 
 /** What a payer (hook or tool) writes after its call, under the claim. */
@@ -238,7 +242,13 @@ export function parseLaneState(value: unknown): LaneState | null {
       isAtomic((r as Rung).maxClaimableAtomic) &&
       typeof (r as Rung).header === 'string',
   );
-  return { ...(v as LaneState), ladder };
+  const { fundFailures, fundRetryAtMs, ...rest } = v as LaneState;
+  return {
+    ...rest,
+    ladder,
+    ...(typeof fundFailures === 'number' ? { fundFailures } : {}),
+    ...(typeof fundRetryAtMs === 'number' ? { fundRetryAtMs } : {}),
+  };
 }
 
 function parseResult(value: unknown): LaneResult | null {
