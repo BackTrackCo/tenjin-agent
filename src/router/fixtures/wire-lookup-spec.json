@@ -78,10 +78,7 @@
         }
       }
     },
-    "hint": "Wolfram Alpha fits this: exact and numeric math (integrals, equations, series), unit conversions, and curated facts and data. $0.02 via https://wolframalpha.x402.paysponge.com/v2/query . Call request({id: \"0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d21\", input: {\"input\":\"integrate x^2 sin(x) from 0 to pi\"}}) alone and wait for its result.",
-    "input": {
-      "input": "integrate x^2 sin(x) from 0 to pi"
-    }
+    "hint": "Wolfram Alpha fits this: exact and numeric math (integrals, equations, series), unit conversions, and curated facts and data. $0.02 via https://wolframalpha.x402.paysponge.com/v2/query . Call request({id: \"0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d21\", input: {\"input\":\"<math request copied verbatim>\"}}) alone and wait for its result."
   },
   "jev": {
     "calls": 1,

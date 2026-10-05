@@ -93,23 +93,13 @@ describe('the request bodies', () => {
     expect(packet.nativeOutcome).toEqual({ code: 200, bytes: 85_717, reason: 'no_main_content' });
   });
 
-  it('builds the tool request byte for byte', () => {
-    const canonical = fixture('wire-tool-request.json');
-    expect(
-      buildToolBody({
-        query: canonical.query as string,
-        id: canonical.id as string,
-        gateHint: canonical.gateHint as never,
-      }),
-    ).toEqual(canonical);
-  });
-
   /**
    * THE NEW CLIENT SAYS WHAT IT CAN READ. `accepts` lists `discovered` on both
    * calls, so a server answers that arm only to a build that parses it, and
    * the hook's `sessionId` lets it offer one discovered service once per
-   * session. The older bodies above stay valid: they are what an older client
-   * sends, and the server still takes them.
+   * session. The bodies above without `accepts` stay valid on the wire: they
+   * are what an older client sends, and the server answers them `native` with
+   * a diagnostic saying to update.
    */
   it('builds the hook request with the session and what it accepts, byte for byte', () => {
     const canonical = fixture('wire-hook-request-ask.json');
@@ -126,18 +116,6 @@ describe('the request bodies', () => {
       question: expect.any(String) as string,
     });
     expect(Buffer.byteLength(JSON.stringify(packet))).toBeLessThanOrEqual(MAX_PACKET_BYTES);
-  });
-
-  it("builds a discovered service's call from its id and input alone", () => {
-    const canonical = fixture('wire-tool-request-discovered.json');
-    expect(canonical.query).toBeUndefined();
-    expect(
-      buildToolBody({
-        id: canonical.id as string,
-        input: canonical.input as Record<string, unknown>,
-        accepts: CLIENT_ACCEPTS,
-      }),
-    ).toEqual(canonical);
   });
 
   it('builds the query with no id that a spec answers, byte for byte', () => {
@@ -167,8 +145,6 @@ describe('the request bodies', () => {
       'wire-hook-request-native-shortfall.json',
       'wire-hook-request-native-no-content.json',
       'wire-hook-request-ask.json',
-      'wire-tool-request.json',
-      'wire-tool-request-discovered.json',
       'wire-tool-request-spec.json',
     ]) {
       expect(JSON.stringify(fixture(name))).not.toMatch(/billing|admission|payment/i);
@@ -205,9 +181,9 @@ describe('every answer payload on disk', () => {
     // An execute answer belongs to one call only: the hook's carries an id and
     // no contract, the tool's a contract and no id.
     expect(parseForTests('tool', fixture('wire-hook-execute.json')).success).toBe(false);
-    expect(parseForTests('hook', fixture('wire-lookup-execute-get.json')).success).toBe(false);
+    expect(parseForTests('hook', fixture('wire-lookup-expired-id.json')).success).toBe(false);
     // A spec answer is the tool's alone: the hook offers by line.
-    expect(parseForTests('hook', fixture('wire-lookup-spec.json')).success).toBe(false);
+    expect(parseForTests('hook', fixture('wire-lookup-spec-skeleton.json')).success).toBe(false);
     // A discovered answer is ONE shape on both calls: the hook's offer and the
     // tool's fallback parse with either parser.
     for (const name of [
@@ -221,36 +197,33 @@ describe('every answer payload on disk', () => {
   });
 
   /**
-   * A QUERY WITH NO ID IS ONE CALL WHEN IT CAN BE. The server sends the query
-   * as `input` only when, as written, it is a valid value for the spec's query
-   * field (free text, or a format or pattern it satisfies), and the tool runs
-   * and pays it at once; otherwise the answer has no `input`, and its line is
-   * the skeleton the agent fills for the next call.
+   * A QUERY WITH NO ID ONLY PICKS. The answer is the service's spec under a
+   * fresh id and the skeleton the agent fills for the next call. An `input`
+   * an older router still binds parses too, and the client never reads it.
    */
-  it('carries the bound input, or only the skeleton, on an id-less spec answer', () => {
-    const bound = fixture('wire-lookup-spec.json').decision as Record<string, unknown>;
-    expect(bound).toMatchObject({ action: 'spec', input: { input: expect.any(String) } });
-    expect(bound.spec).not.toHaveProperty('id');
-    expect(String(bound.hint)).toContain(`input: ${JSON.stringify(bound.input)}`);
-    const skeleton = fixture('wire-lookup-spec-skeleton.json').decision as Record<string, unknown>;
+  it('carries only the skeleton on an id-less spec answer, and still parses one with an input', () => {
+    const payload = fixture('wire-lookup-spec-skeleton.json');
+    const skeleton = payload.decision as Record<string, unknown>;
     expect(skeleton).toMatchObject({ action: 'spec' });
     expect(skeleton).not.toHaveProperty('input');
     expect(skeleton.spec).not.toHaveProperty('id');
     expect(String(skeleton.hint)).toMatch(/request\(\{id: "[^"]+", input: \{"[a-z_]+":"<[^>]+>"/);
+    const withInput = { ...payload, decision: { ...skeleton, input: { q: 'x' } } };
+    expect(parseForTests('tool', withInput).success).toBe(true);
   });
 
   it.each([
-    ['contract', 'wire-lookup-execute-get.json', 'tool'],
-    ['capabilityId', 'wire-lookup-execute-post.json', 'tool'],
+    ['contract', 'wire-lookup-expired-id.json', 'tool'],
+    ['capabilityId', 'wire-lookup-expired-id.json', 'tool'],
     ['providerPriceAtomic', 'wire-lookup-expired-id.json', 'tool'],
     ['diagnostics', 'wire-lookup-needs-input.json', 'tool'],
     ['diagnostics', 'wire-hook-native.json', 'hook'],
     ['id', 'wire-hook-execute.json', 'hook'],
     ['candidate', 'wire-hook-discovered.json', 'hook'],
     ['hint', 'wire-lookup-discovered.json', 'tool'],
-    ['spec', 'wire-lookup-spec.json', 'tool'],
-    ['id', 'wire-lookup-spec.json', 'tool'],
-    ['hint', 'wire-lookup-spec.json', 'tool'],
+    ['spec', 'wire-lookup-spec-skeleton.json', 'tool'],
+    ['id', 'wire-lookup-spec-skeleton.json', 'tool'],
+    ['hint', 'wire-lookup-spec-skeleton.json', 'tool'],
   ])('refuses an answer missing %s', (field, name, kind) => {
     const payload = fixture(name);
     const decision = { ...(payload.decision as Record<string, unknown>) };
@@ -305,10 +278,11 @@ describe('every answer payload on disk', () => {
     expect(String(execute.hint)).toContain(`id: "${String(execute.id)}"`);
   });
 
-  /** The capability in the description and the one in the contract are ONE
-   *  decision: a caller cannot approve one offer and receive another. */
+  /** The free docs lookup, the one offer with no spec: the capability in the
+   *  description and the one in the contract are ONE decision, so a caller
+   *  cannot approve one offer and receive another. */
   it('gives the tool the capability, its price and its contract together', () => {
-    for (const name of ['wire-lookup-execute-get.json', 'wire-lookup-execute-post.json']) {
+    for (const name of ['wire-lookup-expired-id.json']) {
       const decision = fixture(name).decision as {
         provider: string;
         capabilityDescription: string;
@@ -368,27 +342,6 @@ describe('every answer payload on disk', () => {
     });
     expect(parseForTests('hook', padded(2_000)).success).toBe(true);
     expect(parseForTests('hook', padded(2_001)).success).toBe(false);
-  });
-
-  /** A discovered service runs through the SAME execute arm as a curated one:
-   *  its category is `discovered`, and its arguments are the host's input. */
-  it('executes a discovered service through the ordinary execute answer', () => {
-    const payload = fixture('wire-lookup-execute-discovered.json');
-    expect(parseForTests('tool', payload).success).toBe(true);
-    expect(parseForTests('hook', payload).success).toBe(false);
-    const decision = payload.decision as {
-      action: string;
-      category: string;
-      providerPriceAtomic: string;
-      contract: { arguments: unknown; request: { url: string; body: string } };
-    };
-    expect(decision.action).toBe('execute');
-    expect(decision.category).toBe('discovered');
-    expect(JSON.parse(decision.contract.request.body)).toEqual(decision.contract.arguments);
-    const offered = (
-      fixture('wire-hook-discovered.json').decision as { candidate: { url: string } }
-    ).candidate;
-    expect(decision.contract.request.url).toBe(offered.url);
   });
 
   it('answers a dead id with a plain note and a decision anyway', () => {

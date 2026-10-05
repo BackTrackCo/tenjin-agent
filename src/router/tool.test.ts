@@ -741,6 +741,37 @@ describe('a discovered service', () => {
   const wire = async (name: string): Promise<Record<string, unknown>> =>
     JSON.parse(await readFile(join(fixtures, name), 'utf8')) as Record<string, unknown>;
   const SELLER = 'https://blockrun.ai/api/v1/audio/sound-effects';
+  const SOUND_ID = '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d02';
+  /** The spec the hook kept for the sound-effect offer: the only way a list
+   *  service's call is built and paid. */
+  const kept = () =>
+    storeSpecs(dir, [
+      {
+        id: SOUND_ID,
+        capabilityId: 'discovered:bazaar:3f9c2a71',
+        provider: 'BlockRun',
+        description: 'AI sound effect generation (ElevenLabs)',
+        priceAtomic: '53501',
+        priceVaries: false,
+        maxAmountAtomic: '53501',
+        payTo: '0x1111111111111111111111111111111111111111',
+        network: 'eip155:8453',
+        asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+        request: {
+          method: 'POST',
+          url: SELLER,
+          fields: { text: 'body', duration_seconds: 'body' },
+          location: 'body',
+        },
+        input: {
+          type: 'object',
+          properties: { text: { type: 'string' }, duration_seconds: { type: 'number' } },
+          required: ['text'],
+          additionalProperties: false,
+        },
+        pinned: {},
+      },
+    ]);
 
   it('hands the host the server line and the listing, and pays nothing', async () => {
     const auth = authorizer();
@@ -765,35 +796,47 @@ describe('a discovered service', () => {
     expect(auth.authorize).not.toHaveBeenCalled();
   });
 
-  it('sends the id and the input with no query, then pays the seller under its price', async () => {
+  it("runs a kept list service's spec, paying the seller under its price", async () => {
+    await kept();
     const auth = authorizer();
     const { fetchImpl, calls } = net([
-      { url: ROUTER, status: 200, body: await wire('wire-lookup-execute-discovered.json') },
       { url: SELLER, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge() } },
       { url: SELLER, status: 200, body: { ok: true } },
     ]);
-    const request = await wire('wire-tool-request-discovered.json');
-    const result = await runRequestTool(
-      { id: request.id as string, input: request.input as Record<string, unknown> },
-      deps(fetchImpl, auth),
-    );
+    const input = { text: 'a short airy whoosh, dry, close-miked', duration_seconds: 1.2 };
+    const result = await runRequestTool({ id: SOUND_ID, input }, deps(fetchImpl, auth));
     expect(result.envelope).toMatchObject({
       status: 'fulfilled',
       supplier: 'blockrun.ai',
       cost: ['provider price 0.01 USD'],
     });
     expect(result.summary).toContain('blockrun.ai');
-    // The body the tool sent is the shared fixture, byte for byte in meaning.
-    expect(JSON.parse(calls[0]!.body!)).toEqual(request);
+    // Built here from the spec: no decision call before the seller.
+    expect(calls[0]!.url).toBe(SELLER);
     expect(calls.filter((c) => c.paid)).toHaveLength(1);
-    expect(calls[2]!.body).toBe(JSON.stringify(request.input));
+    expect(calls[1]!.body).toBe(JSON.stringify(input));
     expect(auth.authorize).toHaveBeenCalledOnce();
   });
 
+  it('answers an input whose spec is no longer kept with a fresh query, sending nothing', async () => {
+    const auth = authorizer();
+    const { fetchImpl, calls } = net([]);
+    const result = await runRequestTool(
+      { id: SOUND_ID, input: { text: 'whoosh' } },
+      deps(fetchImpl, auth),
+    );
+    expect(result.envelope).toMatchObject({
+      status: 'needs_input',
+      nextStep: expect.stringContaining('request({query})') as string,
+    });
+    expect(calls).toHaveLength(0);
+    expect(auth.authorize).not.toHaveBeenCalled();
+  });
+
   it('refuses a live 402 above the listed price before anything is signed', async () => {
+    await kept();
     const auth = authorizer();
     const { fetchImpl, calls } = net([
-      { url: ROUTER, status: 200, body: await wire('wire-lookup-execute-discovered.json') },
       {
         url: SELLER,
         status: 402,
@@ -867,9 +910,9 @@ describe('a discovered service', () => {
 
   /** A FILE IS SAVED, NOT INLINED: the result names the file, its type and size. */
   it('saves a binary body to a file and returns where it is', async () => {
+    await kept();
     const audio = new Uint8Array([0x49, 0x44, 0x33, 0x04, 0x00, 0xff, 0xfb, 0x90]);
     const { fetchImpl } = net([
-      { url: ROUTER, status: 200, body: await wire('wire-lookup-execute-discovered.json') },
       { url: SELLER, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge() } },
       {
         url: SELLER,
@@ -902,12 +945,12 @@ describe('a discovered service', () => {
   it.each(['PAYMENT-RESPONSE', 'X-PAYMENT-RESPONSE'])(
     'reports the settlement tx from the %s header',
     async (header) => {
+      await kept();
       const tx = `0x${'ab'.repeat(32)}`;
       const settle = Buffer.from(
         JSON.stringify({ success: true, transaction: tx, network: 'eip155:8453', payer: '0x1' }),
       ).toString('base64');
       const { fetchImpl } = net([
-        { url: ROUTER, status: 200, body: await wire('wire-lookup-execute-discovered.json') },
         { url: SELLER, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge() } },
         {
           url: SELLER,
@@ -925,8 +968,8 @@ describe('a discovered service', () => {
   );
 
   it('reports no tx when the seller sent no payment-response header', async () => {
+    await kept();
     const { fetchImpl } = net([
-      { url: ROUTER, status: 200, body: await wire('wire-lookup-execute-discovered.json') },
       { url: SELLER, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge() } },
       { url: SELLER, status: 200, body: { transaction: `0x${'cd'.repeat(32)}` } },
     ]);
@@ -940,13 +983,13 @@ describe('a discovered service', () => {
   /** THE USER'S OWN RECORD: one line per paid call, with what was sent
    *  masked and cut, the amount, the tx and the files it saved. */
   it('appends one ledger line per paid call, and saves the media it links to', async () => {
+    await kept();
     const audio = new Uint8Array([0x49, 0x44, 0x33, 0x04]);
     const tx = `0x${'ab'.repeat(32)}`;
     const settle = Buffer.from(JSON.stringify({ success: true, transaction: tx })).toString(
       'base64',
     );
     const { fetchImpl } = net([
-      { url: ROUTER, status: 200, body: await wire('wire-lookup-execute-discovered.json') },
       { url: SELLER, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge() } },
       {
         url: SELLER,
@@ -1073,8 +1116,8 @@ describe('a discovered service', () => {
   });
 
   it('records a paid call that failed after the authorization left, settlement unknown', async () => {
+    await kept();
     const { fetchImpl } = net([
-      { url: ROUTER, status: 200, body: await wire('wire-lookup-execute-discovered.json') },
       { url: SELLER, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge() } },
       { url: SELLER, status: 500, body: { error: 'boom' } },
     ]);
@@ -1090,8 +1133,8 @@ describe('a discovered service', () => {
   });
 
   it('skips media on a private address, and never fails the call over it', async () => {
+    await kept();
     const { fetchImpl, calls } = net([
-      { url: ROUTER, status: 200, body: await wire('wire-lookup-execute-discovered.json') },
       { url: SELLER, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge() } },
       { url: SELLER, status: 200, body: { url: 'https://10.0.0.5/a.png' } },
     ]);
@@ -1127,8 +1170,8 @@ describe('a discovered service', () => {
   });
 
   it('keeps a JSON body inline, and a media link that cannot be fetched fails nothing', async () => {
+    await kept();
     const { fetchImpl } = net([
-      { url: ROUTER, status: 200, body: await wire('wire-lookup-execute-discovered.json') },
       { url: SELLER, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge() } },
       { url: SELLER, status: 200, body: { url: 'https://cdn.example.test/a.mp3' } },
     ]);
@@ -1501,12 +1544,12 @@ describe('an offer with a request spec', () => {
     await vi.waitFor(() => expect(routerCalls(calls)).toHaveLength(1));
   });
 
-  /** The id-less answer: the pick's spec beside its fresh id, the line with
-   *  the call's skeleton, and the bound input when the server bound one. */
-  function specAnswer(id: string, input?: Record<string, unknown>): Record<string, unknown> {
+  /** The id-less answer: the pick's spec beside its fresh id, and the line
+   *  with the call's skeleton. */
+  function specAnswer(id: string): Record<string, unknown> {
     const spec: Partial<OfferSpec> = quoteSpec();
     delete spec.id;
-    const call = input !== undefined ? JSON.stringify(input) : '{"symbol":"<symbol>"}';
+    const call = '{"symbol":"<symbol>"}';
     return {
       schemaVersion: 1,
       routerVersion: '2026-09-23.1',
@@ -1515,7 +1558,6 @@ describe('an offer with a request spec', () => {
         id,
         spec,
         hint: `CoinMarketCap fits this: latest market quotes. $0.01 via ${PROVIDER} . Call request({id: ${JSON.stringify(id)}, input: ${call}}) alone and wait for its result.`,
-        ...(input !== undefined ? { input } : {}),
       },
     };
   }
@@ -1557,52 +1599,24 @@ describe('an offer with a request spec', () => {
     expect(JSON.parse(calls[3]!.body!)).toMatchObject({ id: PICKED, status: 'fulfilled' });
   });
 
-  it('runs and pays a query with no id in the same call when the server bound its input', async () => {
+  it('pays nothing from a query with no id, even when the answer carries an input', async () => {
     const PICKED = '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d22';
     const auth = authorizer();
-    const { fetchImpl, calls } = net([
-      { url: ROUTER, status: 200, body: specAnswer(PICKED, { symbol: 'BTC' }) },
-      ...providerLegs(),
-      { url: ROUTER, status: 200, body: {} },
-    ]);
+    const answer = specAnswer(PICKED);
+    (answer.decision as Record<string, unknown>).input = { symbol: 'BTC' };
+    const { fetchImpl, calls } = net([{ url: ROUTER, status: 200, body: answer }]);
     const result = await runRequestTool({ query: 'BTC spot price' }, deps(fetchImpl, auth));
-    expect(result.envelope).toMatchObject({
-      status: 'fulfilled',
-      parameters: { symbol: 'BTC' },
-      cost: ['provider price 0.01 USD'],
-    });
-    // One decision, then the provider's probe and paid leg, built here from
-    // the spec, under the spec's own terms.
-    expect(calls[1]).toMatchObject({ url: `${PROVIDER}?symbol=BTC`, paid: false });
-    expect(calls[2]).toMatchObject({ paid: true });
-    expect(vi.mocked(runPay).mock.calls.at(-1)![0]).toMatchObject({
-      terms: { source: 'CoinMarketCap', maxAmountAtomic: '10000', payTo: PAYEE },
-    });
-    expect(auth.authorize).toHaveBeenCalledOnce();
-    await vi.waitFor(() => expect(calls).toHaveLength(4));
-    expect(JSON.parse(calls[3]!.body!)).toMatchObject({ id: PICKED, status: 'fulfilled' });
-    // Kept like a hook's spec, and paid once: the same id pays nothing again.
-    const retry = await runRequestTool(
-      { id: PICKED, input: { symbol: 'BTC' } },
-      deps(fetchImpl, auth),
+    // A spec answer is a pick, never a run: an input an older router bound
+    // still parses, and the spec is kept and shown with its skeleton, but
+    // nothing reaches the provider and nothing is signed.
+    expect(result.isError).toBe(false);
+    expect(result.envelope).toMatchObject({ status: 'spec', id: PICKED });
+    expect(String(result.envelope.nextStep)).toContain(
+      `request({id: ${JSON.stringify(PICKED)}, input: {"symbol":"<symbol>"}})`,
     );
-    expect(String(retry.envelope.reason)).toContain('already paid for');
-    expect(calls.filter((call) => call.paid)).toHaveLength(1);
-  });
-
-  it("checks the server's bound input like any other, and shows the spec when it misses", async () => {
-    const PICKED = '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d23';
-    const auth = authorizer();
-    const { fetchImpl, calls } = net([
-      { url: ROUTER, status: 200, body: specAnswer(PICKED, { symbol: 'BTC', convert: 'GBP' }) },
-    ]);
-    const result = await runRequestTool({ query: 'BTC price in GBP' }, deps(fetchImpl, auth));
-    expect(result.envelope).toMatchObject({
-      status: 'needs_input',
-      cost: ['provider price 0 USD'],
-    });
-    expect(String(result.envelope.reason)).toContain('convert must be one of "USD", "EUR"');
-    expect(result.summary).toContain('symbol (string, required); Comma-separated symbols');
+    // Kept: the id alone shows the spec from this machine, with no second call.
+    const shown = await runRequestTool({ id: PICKED }, deps(fetchImpl, auth));
+    expect(shown.envelope).toMatchObject({ status: 'spec', id: PICKED });
     expect(calls).toHaveLength(1);
     expect(auth.authorize).not.toHaveBeenCalled();
   });
@@ -1639,15 +1653,29 @@ describe('an offer with a request spec', () => {
     expect(result.summary).not.toContain('Also offered');
   });
 
-  it('asks the server, as before, for an id it holds no spec for', async () => {
+  it('builds nothing for an id it holds no spec for, and sends only a query with it', async () => {
     const { fetchImpl, calls } = net([{ url: ROUTER, status: 200, body: NATIVE }]);
     const result = await runRequestTool({ id: SPEC_ID }, deps(fetchImpl));
     expect(result.envelope).toMatchObject({ status: 'needs_input' });
     expect(String(result.envelope.reason)).toContain('No spec is kept for that id');
+    // An input for it is answered here: no server call, nothing paid.
+    const withInput = await runRequestTool(
+      { id: SPEC_ID, input: { symbol: 'BTC' } },
+      deps(fetchImpl),
+    );
+    expect(withInput.envelope).toMatchObject({ status: 'needs_input' });
+    expect(String(withInput.envelope.nextStep)).toContain('request({query})');
     expect(calls).toEqual([]);
+    // A query with it goes to the server, which binds the free docs offer.
     const withQuery = await runRequestTool({ id: SPEC_ID, query: 'BTC price' }, deps(fetchImpl));
     expect(withQuery.envelope).toMatchObject({ status: 'native' });
     expect(calls).toHaveLength(1);
+    expect(JSON.parse(calls[0]!.body!)).toEqual({
+      schemaVersion: 1,
+      query: 'BTC price',
+      id: SPEC_ID,
+      accepts: ['discovered', 'spec'],
+    });
   });
 });
 
