@@ -5,8 +5,9 @@
 The client side of the routing fee, off until you approve it and Tenjin's server
 answers its paid routing path. Each routing call then costs a flat $0.003 over x402
 `batch-settlement`, paid from small prepaid lanes: `tenjin mcp` funds each lane with a
-$0.25 deposit through the funding path inside your spend limits (nothing is sent
-before approval, not even a probe), pre-signs ten
+$0.25 deposit through the funding path (nothing is sent before approval, not even a
+probe; a deposit is not a payment, so it counts against neither `maxAutoSpend` nor
+`sessionBudget`, and at most 8 lanes hold $2 in all), pre-signs ten
 vouchers per lane with a local voucher key kept encrypted like the wallet key, and recovers a lane after a corrective
 402 with the SDK's channel recovery. A hook only claims a lane for ten seconds, sends
 its next voucher and writes back the charged total; with no lane free, the call skips

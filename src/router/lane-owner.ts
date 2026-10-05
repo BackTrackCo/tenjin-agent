@@ -17,7 +17,7 @@ import {
 import type { TypedDataDefinition } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { httpRequest, type HttpResult } from '../lib/http';
-import type { SpendAuthorizer } from '../lib/wallet';
+import { creatorAllowed, type SpendPolicy } from '../lib/policy';
 import type { TenjinSigner } from '../lib/wallet/provider';
 import {
   HOOK_CLAIM_TTL_MS,
@@ -82,8 +82,9 @@ export interface LaneOwnerDeps {
   walletAddress: () => Promise<`0x${string}` | null>;
   /** The wallet signer, unlocked only when a deposit is signed. */
   getSigner: () => Promise<TenjinSigner>;
-  /** The spend policy, read fresh each pass. */
-  authorizer: () => Promise<SpendAuthorizer>;
+  /** The spend policy, read fresh each pass. A deposit is not spend, so only
+   *  its creator allowlist applies to one, never maxAutoSpend or sessionBudget. */
+  policy: () => Promise<SpendPolicy>;
   /** The wallet's USDC balance, or null when it cannot be read. */
   walletBalance: (address: string) => Promise<bigint | null>;
   /**
@@ -349,7 +350,7 @@ export class LaneOwner {
       const charged = BigInt(ctx?.chargedCumulativeAmount ?? state.chargedAtomic);
       const balance = BigInt(ctx?.balance ?? state.balanceAtomic);
       if (status === 'ready' && balance - charged < ROUTING_FEE_ATOMIC) {
-        blocked = await this.fund(clientDeps, state, address);
+        blocked = await this.fund(clientDeps, address);
         // A deposit sent with no answer may have landed: the next pass reads
         // the channel from the chain before it deposits again.
         if (blocked.depositUnknown === true) status = 'recovering';
@@ -436,33 +437,28 @@ export class LaneOwner {
   }
 
   /**
-   * ONE $0.25 DEPOSIT THROUGH THE FUNDING PATH, inside the spend policy. The
-   * standard client sees a channel that cannot cover the next fee and makes the
-   * deposit itself; `depositStrategy` only names the amount. The funding path
-   * runs no routing and settles at $0, so the deposit is the only money moved.
+   * ONE $0.25 DEPOSIT THROUGH THE FUNDING PATH. The standard client sees a
+   * channel that cannot cover the next fee and makes the deposit itself;
+   * `depositStrategy` only names the amount. The funding path runs no routing
+   * and settles at $0. A deposit is not a payment: it moves money into the
+   * lane's channel, fees are what leave it (capped by the routing allowance),
+   * and the rest can be withdrawn. So it counts against neither maxAutoSpend nor
+   * sessionBudget and commits nothing to the spend ledger; the creator allowlist
+   * still applies, and the lane cap bounds what deposits hold.
    */
   private async fund(
     clientDeps: BatchSettlementClientDeps,
-    state: LaneState,
     address: `0x${string}`,
   ): Promise<Funding> {
-    const authorizer = await this.deps.authorizer();
-    const auth = await authorizer.authorize({
-      amountAtomic: LANE_DEPOSIT_ATOMIC,
-      creator: new URL(this.deps.baseUrl).host,
-      requestKey: `routing-lane:${state.channelId}:${state.balanceAtomic}`,
-    });
-    if (auth.decision !== 'allow') return { blocked: 'spend_limit' };
+    if (!creatorAllowed(await this.deps.policy(), new URL(this.deps.baseUrl).host)) {
+      return { blocked: 'not_allowlisted' };
+    }
     const wallet = await this.deps.walletBalance(address);
     if (wallet !== null && wallet < LANE_DEPOSIT_ATOMIC) {
-      await authorizer.release(auth.reservationId);
       return { blocked: 'wallet_low', walletAtomic: wallet };
     }
     const funding = await this.requirementsAt(ROUTE_CHANNEL_PATH);
-    if (funding === null) {
-      await authorizer.release(auth.reservationId);
-      return { blocked: null };
-    }
+    if (funding === null) return { blocked: null };
     const signer = await this.deps.getSigner();
     const scheme = new BatchSettlementEvmScheme(
       {
@@ -495,12 +491,8 @@ export class LaneOwner {
         clientDeps.storage,
         http.getPaymentSettleResponse((name) => response.header(name)),
       );
-      await authorizer.commit(auth.reservationId, LANE_DEPOSIT_ATOMIC);
       return {};
     } catch (err) {
-      // A deposit that may have left is counted, as every other spend is.
-      if (sent) await authorizer.commit(auth.reservationId, LANE_DEPOSIT_ATOMIC);
-      else await authorizer.release(auth.reservationId);
       this.warn(err);
       return sent ? { blocked: null, depositUnknown: true } : { blocked: null };
     }

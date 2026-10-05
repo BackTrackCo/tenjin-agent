@@ -76,6 +76,19 @@ describe('doctor: routing fee', () => {
     expect(check.detail).toContain('cannot fund');
     expect(check.fix).toBe('Run `tenjin wallet fund 0.25`.');
   });
+
+  it('names allowlistCreators when it stopped a lane deposit', async () => {
+    await writeFile(join(root, 'data', 'config.json'), JSON.stringify({ routingFee: 'approved' }));
+    await writePool(join(root, 'data'), {
+      paidPath: 'available',
+      checkedAtMs: Date.now(),
+      fundingBlocked: 'not_allowlisted',
+    });
+    const check = await feeCheck();
+    expect(check.status).toBe('warn');
+    expect(check.detail).toContain('allowlistCreators stopped the last $0.25 lane deposit');
+    expect(check.fix).toMatch(/^Add \S+ to allowlistCreators, or clear the allowlist\.$/);
+  });
 });
 
 describe('fees in status and payments', () => {

@@ -119,7 +119,7 @@ export interface PoolState {
   paidPath: 'available' | 'absent';
   checkedAtMs: number;
   /** Why the last funding attempt did not deposit, if it did not. */
-  fundingBlocked?: 'wallet_low' | 'spend_limit' | null;
+  fundingBlocked?: 'wallet_low' | 'not_allowlisted' | null;
   walletBalanceAtomic?: string;
   /** When a payer last found no free lane, so an owner grows the pool. */
   demandAtMs?: number;

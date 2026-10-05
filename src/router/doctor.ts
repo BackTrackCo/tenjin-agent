@@ -470,15 +470,17 @@ async function routingFeeCheck(ctx: CommandContext): Promise<RouterCheck> {
   const allowance = routingAllowanceAtomic(config);
   const spent = await feesInWindow(ctx.dataDir, Date.now());
   const detail = `approved (${fee}): $${usd(spent)} of $${usd(allowance)} in the last 24h`;
-  return pool.fundingBlocked === 'spend_limit'
-    ? {
-        name: 'routing fee',
-        status: 'warn',
-        required: false,
-        detail: `${detail}; the spend limits stopped the last $${usd(LANE_DEPOSIT_ATOMIC)} lane deposit`,
-        fix: `Allow it with \`tenjin config set maxAutoSpend ${usd(LANE_DEPOSIT_ATOMIC)}\`, or wait for the daily limit to roll over.`,
-      }
-    : { name: 'routing fee', status: 'ok', required: false, detail };
+  if (pool.fundingBlocked !== 'not_allowlisted') {
+    return { name: 'routing fee', status: 'ok', required: false, detail };
+  }
+  const host = new URL((await resolveContextSettings(ctx)).baseUrl).host;
+  return {
+    name: 'routing fee',
+    status: 'warn',
+    required: false,
+    detail: `${detail}; allowlistCreators stopped the last $${usd(LANE_DEPOSIT_ATOMIC)} lane deposit`,
+    fix: `Add ${host} to allowlistCreators, or clear the allowlist.`,
+  };
 }
 
 function experimentalCheck(bazaar: boolean): RouterCheck {

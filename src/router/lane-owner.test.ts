@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { access, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -15,7 +15,8 @@ import { BatchSettlementEvmScheme as ServerScheme } from '@x402/evm/batch-settle
 import type { TypedDataDefinition } from 'viem';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { createLocalSpendAuthorizer } from '../lib/wallet/spend';
+import { spendLedgerPath } from '../lib/paths';
+import type { SpendPolicy } from '../lib/policy';
 import type { TenjinSigner } from '../lib/wallet/provider';
 import type { CommandContext } from '../context';
 import { requestDecision } from './decision';
@@ -215,7 +216,11 @@ function signer(): TenjinSigner {
   };
 }
 
-type OwnerOpts = { maxAutoSpendAtomic?: bigint; walletAtomic?: bigint | null; approved?: boolean };
+type OwnerOpts = {
+  policy?: Partial<SpendPolicy>;
+  walletAtomic?: bigint | null;
+  approved?: boolean;
+};
 
 function owner(router: FakeRouter, opts: OwnerOpts = {}): LaneOwner {
   return new LaneOwner(ownerDeps(router, opts));
@@ -229,16 +234,12 @@ function ownerDeps(router: FakeRouter, opts: OwnerOpts = {}): LaneOwnerDeps {
     walletAddress: async () => wallet.address,
     getSigner: async () => signer(),
     voucherKey: async () => VOUCHER_KEY,
-    authorizer: async () =>
-      createLocalSpendAuthorizer({
-        dir,
-        policy: {
-          maxAutoSpendAtomic: opts.maxAutoSpendAtomic ?? 250_000n,
-          sessionBudgetAtomic: 5_000_000n,
-          allowlistCreators: [],
-        },
-        now: () => clock,
-      }),
+    policy: async () => ({
+      maxAutoSpendAtomic: 250_000n,
+      sessionBudgetAtomic: 5_000_000n,
+      allowlistCreators: [],
+      ...opts.policy,
+    }),
     walletBalance: async () => (opts.walletAtomic === undefined ? 10_000_000n : opts.walletAtomic),
     readContract: router.readContract as never,
     fetchImpl: router.fetch,
@@ -362,11 +363,33 @@ describe('LaneOwner', () => {
     expect((await routeOnce(router)).status).toBe('decided');
   });
 
-  it('stops funding when the spend limits refuse the deposit', async () => {
+  it('funds a lane under per-call and daily limits below the deposit, and records no spend', async () => {
     const router = new FakeRouter();
-    await owner(router, { maxAutoSpendAtomic: 100_000n }).tick();
+    await owner(router, {
+      policy: { maxAutoSpendAtomic: 10_000n, sessionBudgetAtomic: 10_000n },
+    }).tick();
+    expect(router.deposits).toBe(1);
+    expect((await readPool(dir))?.fundingBlocked).toBeNull();
+    expect(await readLaneState(lanesDir(dir), 0)).toMatchObject({
+      balanceAtomic: '250000',
+      status: 'ready',
+    });
+    await expect(access(spendLedgerPath(dir))).rejects.toThrow();
+  });
+
+  it('records no spend when a funding answer is lost', async () => {
+    const router = new FakeRouter();
+    router.abortAfterSettle = true;
+    await owner(router, { policy: { sessionBudgetAtomic: 0n } }).tick();
+    expect(router.deposits).toBe(1);
+    await expect(access(spendLedgerPath(dir))).rejects.toThrow();
+  });
+
+  it('stops funding when allowlistCreators leaves out the router host', async () => {
+    const router = new FakeRouter();
+    await owner(router, { policy: { allowlistCreators: ['someone-else'] } }).tick();
     expect(router.deposits).toBe(0);
-    expect((await readPool(dir))?.fundingBlocked).toBe('spend_limit');
+    expect((await readPool(dir))?.fundingBlocked).toBe('not_allowlisted');
     const claimed = await claimLane(dir, { now: clock, allowanceAtomic: ROUTING_ALLOWANCE_ATOMIC });
     expect(claimed.lane).toBeNull();
   });

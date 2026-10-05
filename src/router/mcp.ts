@@ -262,7 +262,7 @@ async function routingLaneOwner(ctx: CommandContext): Promise<LaneOwner> {
         passphrase: { env: process.env, dir: ctx.dataDir, isTTY: false },
       });
     },
-    authorizer: async () => resolveSpendAuthorizer(ctx, (await resolveContextSettings(ctx)).policy),
+    policy: async () => (await resolveContextSettings(ctx)).policy,
     walletBalance: (address) => readUsdcBalance(address, settings.rpcUrl, { timeoutMs: 5_000 }),
     readContract: (args) => chain.readContract(args as Parameters<typeof chain.readContract>[0]),
   });
