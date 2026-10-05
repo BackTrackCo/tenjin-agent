@@ -466,7 +466,24 @@ describe('LaneOwner', () => {
     expect(await feesInWindow(dir, clock)).toBe(6_000n);
   });
 
-  it("counts a fee found through recovery once, in the ledger and the allowance, even when the slow hook's own line lands after it", async () => {
+  it('is the only writer of fee lines: a fee counts from its result, then from one line', async () => {
+    const router = new FakeRouter();
+    const lanes = owner(router);
+    await lanes.tick();
+    expect((await routeOnce(router)).status).toBe('decided');
+    expect(await readFees(lanesDir(dir), 0)).toEqual([]);
+    expect(await feesInWindow(dir, clock)).toBe(3_000n);
+    await lanes.tick();
+    expect(await readFees(lanesDir(dir), 0)).toEqual([{ atMs: clock, feeAtomic: 3_000n }]);
+    expect(await feesInWindow(dir, clock)).toBe(3_000n);
+    // A day on, the owner drops the line and the window is empty.
+    clock += ROUTING_WINDOW_MS;
+    await lanes.tick();
+    expect(await readFees(lanesDir(dir), 0)).toEqual([]);
+    expect(await feesInWindow(dir, clock)).toBe(0n);
+  });
+
+  it("counts a fee found through recovery once, even when the slow hook's result lands after it", async () => {
     const router = new FakeRouter();
     const lanes = owner(router);
     await lanes.tick();
@@ -491,40 +508,14 @@ describe('LaneOwner', () => {
       status: 200,
       paymentResponse: answer.headers.get('payment-response')!,
     });
+    expect(await feesInWindow(dir, clock)).toBe(3_000n);
     await lanes.tick();
-    expect(await readFees(lanesDir(dir), 0)).toHaveLength(2);
+    expect(await readFees(lanesDir(dir), 0)).toHaveLength(1);
     expect(await feesInWindow(dir, clock)).toBe(3_000n);
     expect(router.settledFees).toBe(1);
   });
 
-  it('counts a lost answer at the time of the call, not when recovery finds it a day later', async () => {
-    const router = new FakeRouter();
-    const lanes = owner(router);
-    await lanes.tick();
-    router.abortAfterSettle = true;
-    expect((await routeOnce(router)).status).toBe('failed');
-    expect(router.settledFees).toBe(1);
-    expect(await feesInWindow(dir, clock)).toBe(3_000n);
-    await lanes.tick();
-
-    // A day passes with the owner pruning old lines; then the next voucher
-    // meets a corrective 402 and the owner recovers yesterday's charge.
-    clock += ROUTING_WINDOW_MS + 60_000;
-    await lanes.tick();
-    expect(await feesInWindow(dir, clock)).toBe(0n);
-    expect((await routeOnce(router)).status).toBe('failed');
-    await lanes.tick();
-    expect(await readLaneState(lanesDir(dir), 0)).toMatchObject({
-      chargedAtomic: '3000',
-      status: 'ready',
-    });
-    expect(await feesInWindow(dir, clock)).toBe(0n);
-    // So an allowance of one fee still has that fee today.
-    const claimed = await claimLane(dir, { now: clock, allowanceAtomic: ROUTING_FEE_ATOMIC });
-    expect(claimed.lane).not.toBeNull();
-  });
-
-  it("adds nothing when recovery folds a total the hook's own line already holds", async () => {
+  it('writes a fee that only recovery found once', async () => {
     const router = new FakeRouter();
     const lanes = owner(router);
     await lanes.tick();

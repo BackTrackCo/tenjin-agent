@@ -22,11 +22,12 @@ import { formatUsdDisplay } from '../lib/money';
  * parallel call takes its own.
  *
  * TWO KINDS OF WRITER, ONE RULE. The `tenjin mcp` process that holds a lane's
- * lease owns everything that needs the wallet: the deposit, the voucher key and
- * the pre-signed ladder of `PAYMENT-SIGNATURE` strings (`lane-owner.ts`). A hook
- * only claims a lane, sends the rung the ladder already holds, and writes what
- * `PAYMENT-RESPONSE` said the channel has charged. Every write to a lane's files
- * happens under that lane's claim, so the owner and a hook never write at once.
+ * lease owns everything that needs the wallet: the deposit, the voucher key,
+ * the pre-signed ladder of `PAYMENT-SIGNATURE` strings and the lane's fee lines
+ * (`lane-owner.ts`). A hook only claims a lane, sends the rung the ladder
+ * already holds, and writes what `PAYMENT-RESPONSE` said the channel has
+ * charged. Every write to a lane's files happens under that lane's claim, so
+ * the owner and a hook never write at once.
  *
  * NOTHING HERE SIGNS OR IMPORTS A PAYMENT LIBRARY. The hooks load this module,
  * and their chunk graph stays free of the wallet and the x402 SDK
@@ -55,20 +56,6 @@ export const HOOK_CLAIM_TTL_MS = 10_000;
 export const OWNER_CLAIM_TTL_MS = 60_000;
 /** A lease the owner stops renewing frees the lane for another process. */
 export const LEASE_TTL_MS = 60_000;
-/**
- * Payers decide on the allowance one at a time, under a claim of its own that
- * expires on its own (wall-clock ms), so a killed payer blocks the others only
- * this long. A payer waits at most `ALLOWANCE_WAIT_MS` for it, then skips.
- */
-export const ALLOWANCE_TURN_TTL_MS = 2_000;
-export const ALLOWANCE_WAIT_MS = 3_000;
-/**
- * What a payer with a budget (the hook, inside the harness's timeout) keeps of
- * it for the router request the fee pays for. The turn wait ends while this
- * much is still left, so the wait and the request together never pass the
- * budget. The backend answers in about 1 s.
- */
-export const REQUEST_ROOM_MS = 2_500;
 
 const ATOMIC_RE = /^\d{1,30}$/;
 
@@ -129,8 +116,6 @@ interface Claim {
   token: string;
   pid: number;
   expiresAtMs: number;
-  /** Taken to pay one fee: the allowance counts it until it is let go. */
-  fee?: true;
 }
 
 export function lanesDir(dataDir: string): string {
@@ -149,7 +134,6 @@ const file = {
   result: (dir: string, i: number) => join(dir, `lane-${i}.result.json`),
   fees: (dir: string, i: number) => join(dir, `lane-${i}.fees.jsonl`),
   pool: (dir: string) => join(dir, 'pool.json'),
-  allowanceTurn: (dir: string) => join(dir, 'allowance.claim'),
 };
 export const laneFiles = file;
 
@@ -260,24 +244,10 @@ export async function takeClaim(
   index: number,
   ttlMs: number,
   now: number,
-  opts: { fee?: boolean } = {},
 ): Promise<string | null> {
-  return takeClaimAt(file.claim(dir, index), ttlMs, now, opts);
-}
-
-async function takeClaimAt(
-  path: string,
-  ttlMs: number,
-  now: number,
-  opts: { fee?: boolean } = {},
-): Promise<string | null> {
+  const path = file.claim(dir, index);
   const token = randomUUID();
-  const claim: Claim = {
-    token,
-    pid: process.pid,
-    expiresAtMs: now + ttlMs,
-    ...(opts.fee === true ? { fee: true as const } : {}),
-  };
+  const claim: Claim = { token, pid: process.pid, expiresAtMs: now + ttlMs };
   const body = JSON.stringify(claim);
   if (await createClaim(path, body)) return token;
   const held = (await readJson(path)) as Claim | null;
@@ -302,10 +272,7 @@ async function takeClaimAt(
 }
 
 export async function dropClaim(dir: string, index: number, token: string): Promise<void> {
-  await dropClaimAt(file.claim(dir, index), token);
-}
-
-async function dropClaimAt(path: string, token: string): Promise<void> {
+  const path = file.claim(dir, index);
   const held = (await readJson(path)) as Claim | null;
   if (held?.token === token) await rm(path, { force: true });
 }
@@ -397,55 +364,20 @@ export type NoLane = 'no_lanes' | 'busy' | 'recovering' | 'below_fee' | 'allowan
  * from a random start, so parallel payers spread over the pool instead of
  * queueing on lane 0. `prefer` puts some lanes first (the tool's own).
  *
- * THE ALLOWANCE IS CHECKED AFTER THE CLAIM IS TAKEN. A fee reaches the ledger
- * only when its call ends, so each payer counts the other lanes' live fee
- * claims as fees too. Two payers near the limit each see the other's claim, or
- * one sees both: at least one of them backs off, never both pay.
- *
- * ONE PAYER DECIDES AT A TIME. Left to race, two payers can each see the
- * other's claim and both back off, so the last fee the allowance holds goes
- * unpaid by anyone. Claiming a lane and checking the allowance happen under the
- * allowance turn, so a later payer sees only the claims of payers that have
- * already decided. The turn buys that liveness only: a turn that expires under
- * a slow payer leaves the check above, which still never lets both pay.
+ * THE ALLOWANCE IS CHECKED ONCE, BEFORE ANY LANE IS CLAIMED. A payer's fee
+ * counts from the moment its call writes its result, so payers that check at
+ * the same time can each pay one more fee: the allowance can go over by at
+ * most one fee per lane, because a lane carries one call at a time.
  */
 export async function claimLane(
   dataDir: string,
-  opts: {
-    now: number;
-    ttlMs?: number;
-    allowanceAtomic: bigint;
-    prefer?: readonly number[];
-    /** Wall-clock ms the caller has for this claim and the request it pays
-     *  for together; the turn wait leaves `REQUEST_ROOM_MS` of it. */
-    budgetMs?: number;
-  },
+  opts: { now: number; ttlMs?: number; allowanceAtomic: bigint; prefer?: readonly number[] },
 ): Promise<{ lane: HeldLane } | { lane: null; why: NoLane }> {
   const dir = lanesDir(dataDir);
   const indices = await laneIndices(dir);
   if (indices.length === 0) return { lane: null, why: 'no_lanes' };
   const spent = await feesInWindow(dataDir, opts.now);
   if (spent + ROUTING_FEE_ATOMIC > opts.allowanceAtomic) return { lane: null, why: 'allowance' };
-  const turnPath = file.allowanceTurn(dir);
-  const waitMs =
-    opts.budgetMs === undefined
-      ? ALLOWANCE_WAIT_MS
-      : Math.min(ALLOWANCE_WAIT_MS, Math.max(0, opts.budgetMs - REQUEST_ROOM_MS));
-  const turn = await waitForClaim(turnPath, ALLOWANCE_TURN_TTL_MS, waitMs);
-  if (turn === null) return { lane: null, why: 'busy' };
-  try {
-    return await claimLaneInTurn(dataDir, dir, indices, opts);
-  } finally {
-    await dropClaimAt(turnPath, turn);
-  }
-}
-
-async function claimLaneInTurn(
-  dataDir: string,
-  dir: string,
-  indices: readonly number[],
-  opts: { now: number; ttlMs?: number; allowanceAtomic: bigint; prefer?: readonly number[] },
-): Promise<{ lane: HeldLane } | { lane: null; why: NoLane }> {
   const start = Math.floor(Math.random() * indices.length);
   const rotated = [...indices.slice(start), ...indices.slice(0, start)];
   const preferred = new Set(opts.prefer ?? []);
@@ -454,11 +386,11 @@ async function claimLaneInTurn(
     ...rotated.filter((i) => !preferred.has(i)),
   ];
   let why: NoLane = 'busy';
+  let allHeld = true;
   for (const index of order) {
-    const token = await takeClaim(dir, index, opts.ttlMs ?? HOOK_CLAIM_TTL_MS, opts.now, {
-      fee: true,
-    });
+    const token = await takeClaim(dir, index, opts.ttlMs ?? HOOK_CLAIM_TTL_MS, opts.now);
     if (token === null) continue;
+    allHeld = false;
     const state = await readLaneState(dir, index);
     const readiness =
       state === null ? null : laneReadiness(state, await readLaneResult(dir, index));
@@ -467,14 +399,6 @@ async function claimLaneInTurn(
       if (readiness?.why === 'recovering') why = 'recovering';
       else if (readiness?.why === 'below_fee' && why !== 'recovering') why = 'below_fee';
       continue;
-    }
-    // Claims first, then the ledger: a call that ends between the two reads
-    // wrote its fee before it let its claim go, so it is seen at least once.
-    const inFlight = await feeClaimsHeld(dir, indices, index, opts.now);
-    const spentNow = await feesInWindow(dataDir, opts.now);
-    if (spentNow + (inFlight + 1n) * ROUTING_FEE_ATOMIC > opts.allowanceAtomic) {
-      await dropClaim(dir, index, token);
-      return { lane: null, why: 'allowance' };
     }
     const before = readiness.chargedAtomic;
     return {
@@ -492,37 +416,10 @@ async function claimLaneInTurn(
       },
     };
   }
-  await notePoolDemand(dataDir, opts.now);
+  // Only a pool whose every lane another payer holds is short of lanes; one
+  // that is recovering, unfunded or below a fee would gain only unfunded lanes.
+  if (allHeld) await notePoolDemand(dataDir, opts.now);
   return { lane: null, why };
-}
-
-/** Take a claim at `path`, retrying on the wall clock until `waitMs` has passed. */
-async function waitForClaim(path: string, ttlMs: number, waitMs: number): Promise<string | null> {
-  const deadline = Date.now() + waitMs;
-  for (;;) {
-    const token = await takeClaimAt(path, ttlMs, Date.now());
-    const left = deadline - Date.now();
-    if (token !== null || left <= 0) return token;
-    await new Promise((resolve) => setTimeout(resolve, Math.min(5, left)));
-  }
-}
-
-/** Live fee claims on every lane but `own`. */
-async function feeClaimsHeld(
-  dir: string,
-  indices: readonly number[],
-  own: number,
-  now: number,
-): Promise<bigint> {
-  let held = 0n;
-  for (const index of indices) {
-    if (index === own) continue;
-    const claim = (await readJson(file.claim(dir, index))) as Claim | null;
-    if (claim?.fee === true && typeof claim.expiresAtMs === 'number' && claim.expiresAtMs > now) {
-      held += 1n;
-    }
-  }
-  return held;
 }
 
 async function notePoolDemand(dataDir: string, now: number): Promise<void> {
@@ -551,7 +448,6 @@ async function recordAnswer(
     };
   } else if (answer.kind === 'no_answer') {
     result = { version: 1, atMs, chargedAtomic: before.toString(), outcome: 'unknown' };
-    await appendPossibleFee(dir, index, before, atMs);
   } else {
     const charged =
       answer.paymentResponse !== undefined ? chargedFrom(answer.paymentResponse) : null;
@@ -564,7 +460,6 @@ async function recordAnswer(
         // next voucher finds out where the channel stands.
         outcome: answer.status < 400 ? 'unknown' : 'refused',
       };
-      if (answer.status < 400) await appendPossibleFee(dir, index, before, atMs);
     } else {
       result = {
         version: 1,
@@ -573,31 +468,9 @@ async function recordAnswer(
         outcome: charged > before ? 'charged' : 'zero',
         paymentResponse: answer.paymentResponse as string,
       };
-      if (charged > before) {
-        await appendFees(dir, index, [
-          { atMs, feeAtomic: charged - before, chargedAtomic: charged },
-        ]);
-      }
     }
   }
   await writeJson(file.result(dir, index), result);
-}
-
-/**
- * A CALL THAT MAY HAVE BEEN CHARGED counts as charged, at the time of the call.
- * Its line names the total that charge would bring the lane to, so the fee a
- * later recovery finds there, or the next call's fee for the same total when
- * this one was not charged, adds nothing on top.
- */
-async function appendPossibleFee(
-  dir: string,
-  index: number,
-  before: bigint,
-  atMs: number,
-): Promise<void> {
-  await appendFees(dir, index, [
-    { atMs, feeAtomic: ROUTING_FEE_ATOMIC, chargedAtomic: before + ROUTING_FEE_ATOMIC },
-  ]);
 }
 
 /**
@@ -621,91 +494,49 @@ export function chargedFrom(header: string): bigint | null {
 }
 
 /**
- * ONE LINE PER FEE, NAMING THE TOTAL IT BRINGS THE LANE TO. A fee can reach the
- * ledger twice: the owner writes one it learns through recovery (a killed hook,
- * an abort), and that hook's own line may still land after it. Each line covers
- * the span of the channel's charged total from `chargedAtomic - feeAtomic` to
- * `chargedAtomic`, and the window counts the union of those spans, so the same
- * charge is counted once whichever line lands first.
+ * ONE LINE PER FEE, WRITTEN BY THE LANE OWNER ALONE: what a pass found the
+ * channel charged above the total the lane state last held. The state then
+ * moves to the new total, so each charge is written once, whether a payer's
+ * `PAYMENT-RESPONSE` or a recovery reported it.
  */
 export interface FeeEntry {
   atMs: number;
   feeAtomic: bigint;
-  /** The channel's charged total after this fee; a line without it is a bare fee. */
-  chargedAtomic?: bigint;
 }
 
-/** Fees charged across every lane in the rolling window. */
+/**
+ * Fees charged across every lane in the rolling window: the owner's lines,
+ * plus what payers reported since the owner last folded a lane's result.
+ */
 export async function feesInWindow(dataDir: string, now: number): Promise<bigint> {
   const dir = lanesDir(dataDir);
   let total = 0n;
   for (const index of await laneIndices(dir)) {
-    const recent = (await readFees(dir, index)).filter((e) => now - e.atMs < ROUTING_WINDOW_MS);
-    total += spanTotal(recent);
-  }
-  return total;
-}
-
-/** One lane's fees, each part of the charged total counted once. */
-function spanTotal(entries: readonly FeeEntry[]): bigint {
-  let total = 0n;
-  const spans: [bigint, bigint][] = [];
-  for (const e of entries) {
-    if (e.chargedAtomic === undefined) total += e.feeAtomic;
-    else spans.push([e.chargedAtomic - e.feeAtomic, e.chargedAtomic]);
-  }
-  spans.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
-  let reach: bigint | null = null;
-  for (const [lo, hi] of spans) {
-    const from: bigint = reach === null || lo > reach ? lo : reach;
-    if (hi > from) {
-      total += hi - from;
-      reach = hi;
+    for (const e of await readFees(dir, index)) {
+      if (now - e.atMs < ROUTING_WINDOW_MS) total += e.feeAtomic;
     }
+    total += await unfoldedFees(dir, index);
   }
   return total;
 }
 
-/**
- * PUT A TOTAL THE OWNER ACCEPTED IN THE LEDGER: whatever part of `chargedAtomic`
- * lies above both the lane's last total (`floorAtomic`) and the highest total
- * a line already names. A fee the hook recorded adds nothing here; one only
- * recovery found is added once.
- */
-export async function recordChargedTotal(
-  dir: string,
-  index: number,
-  opts: { floorAtomic: bigint; chargedAtomic: bigint; atMs: number },
-): Promise<void> {
-  let recorded = opts.floorAtomic;
-  for (const e of await readFees(dir, index)) {
-    if (e.chargedAtomic !== undefined && e.chargedAtomic > recorded) recorded = e.chargedAtomic;
-  }
-  if (opts.chargedAtomic <= recorded) return;
-  await appendFees(dir, index, [
-    {
-      atMs: opts.atMs,
-      feeAtomic: opts.chargedAtomic - recorded,
-      chargedAtomic: opts.chargedAtomic,
-    },
-  ]);
+/** What a payer's result says the channel charged above the lane state. */
+async function unfoldedFees(dir: string, index: number): Promise<bigint> {
+  const state = await readLaneState(dir, index);
+  const result = await readLaneResult(dir, index);
+  if (state === null || result === null || result.atMs < state.updatedAtMs) return 0n;
+  const added = BigInt(result.chargedAtomic) - BigInt(state.chargedAtomic);
+  return added > 0n ? added : 0n;
 }
 
 export function feeLines(entries: readonly FeeEntry[]): string {
   return entries
-    .map(
-      (e) =>
-        `${JSON.stringify({
-          atMs: e.atMs,
-          feeAtomic: e.feeAtomic.toString(),
-          ...(e.chargedAtomic !== undefined ? { chargedAtomic: e.chargedAtomic.toString() } : {}),
-        })}\n`,
-    )
+    .map((e) => `${JSON.stringify({ atMs: e.atMs, feeAtomic: e.feeAtomic.toString() })}\n`)
     .join('');
 }
 
-async function appendFees(dir: string, index: number, entries: readonly FeeEntry[]): Promise<void> {
-  await appendFile(file.fees(dir, index), feeLines(entries), { mode: 0o600 });
+export async function appendFee(dir: string, index: number, entry: FeeEntry): Promise<void> {
+  await appendFile(file.fees(dir, index), feeLines([entry]), { mode: 0o600 });
 }
 
 export async function readFees(dir: string, index: number): Promise<FeeEntry[]> {
@@ -718,17 +549,9 @@ export async function readFees(dir: string, index: number): Promise<FeeEntry[]> 
   const out: FeeEntry[] = [];
   for (const line of raw.split('\n')) {
     try {
-      const v = JSON.parse(line) as {
-        atMs?: unknown;
-        feeAtomic?: unknown;
-        chargedAtomic?: unknown;
-      };
+      const v = JSON.parse(line) as { atMs?: unknown; feeAtomic?: unknown };
       if (typeof v.atMs === 'number' && isAtomic(v.feeAtomic)) {
-        out.push({
-          atMs: v.atMs,
-          feeAtomic: BigInt(v.feeAtomic),
-          ...(isAtomic(v.chargedAtomic) ? { chargedAtomic: BigInt(v.chargedAtomic) } : {}),
-        });
+        out.push({ atMs: v.atMs, feeAtomic: BigInt(v.feeAtomic) });
       }
     } catch {
       // A torn last line is skipped.

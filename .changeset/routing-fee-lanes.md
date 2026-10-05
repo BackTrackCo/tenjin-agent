@@ -13,7 +13,7 @@ vouchers per lane with a local voucher key kept encrypted like the wallet key, a
 its next voucher and writes back the charged total; with no lane free, the call skips
 routing and the native tool runs. `routingFee` (approved or declined: `tenjin install`
 names it in its spend-limit question and approving the limits approves it, and
-`tenjin update` asks once when it is still unanswered) and `routingAllowance` ($0.50 a rolling day) are new config
+`tenjin update` asks once when it is still unanswered) and `routingAllowance` ($0.50 a rolling day, which calls at the same time can pass by at most one fee per lane) are new config
 keys. `tenjin doctor` and the first prompt hook of each session say when routing is paused,
 why, and the command that fixes it; `tenjin status` and the new `tenjin payments fees`
 show what the fee has cost. Until both conditions hold, routing uses the free path

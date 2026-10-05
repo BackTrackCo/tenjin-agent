@@ -29,9 +29,9 @@ import {
   LEASE_TTL_MS,
   MAX_LANES,
   OWNER_CLAIM_TTL_MS,
+  appendFee,
   feeLines,
   readFees,
-  recordChargedTotal,
   readLaneResult,
   readLaneState,
   readPool,
@@ -356,13 +356,6 @@ export class LaneOwner {
         if (blocked.depositUnknown === true) status = 'recovering';
       }
       const fresh = await storage.get(state.channelId.toLowerCase());
-      // A total learned through recovery may hold a fee no hook wrote down.
-      await recordChargedTotal(dir, index, {
-        floorAtomic: BigInt(state.chargedAtomic),
-        chargedAtomic: BigInt(fresh?.chargedCumulativeAmount ?? state.chargedAtomic),
-        atMs: now,
-      });
-      await this.pruneFees(dir, index, now);
       const next: LaneState = {
         ...state,
         chargedAtomic: fresh?.chargedCumulativeAmount ?? state.chargedAtomic,
@@ -372,6 +365,14 @@ export class LaneOwner {
         ladder: state.ladder,
       };
       next.ladder = status === 'ready' ? await this.ladderFor(next, paid, clientDeps) : [];
+      // THE FEE LINE, THEN THE RESULT GOES, THEN THE STATE. Whatever the channel
+      // charged above the last state, from a payer's answer or a recovery, is
+      // written once. A reader between the line and the result's removal counts
+      // the fee twice, never not at all.
+      const added = BigInt(next.chargedAtomic) - BigInt(state.chargedAtomic);
+      await this.pruneFees(dir, index, now);
+      if (added > 0n) await appendFee(dir, index, { atMs: now, feeAtomic: added });
+      await rm(laneFiles.result(dir, index), { force: true });
       await writeJson(laneFiles.state(dir, index), next);
       return blocked;
     } finally {
@@ -407,7 +408,6 @@ export class LaneOwner {
         ? 'ready'
         : 'recovering';
     }
-    await rm(laneFiles.result(dir, index), { force: true });
     return status;
   }
 
@@ -541,23 +541,10 @@ export class LaneOwner {
     return ladder;
   }
 
-  /**
-   * Drop lines past the window, except the one naming the lane's highest
-   * total: a fee recovery finds later at or under that total was counted when
-   * it happened, and must not count again at recovery time.
-   */
+  /** Drop the lane's fee lines that are past the window. */
   private async pruneFees(dir: string, index: number, now: number): Promise<void> {
     const fees = await readFees(dir, index);
-    let top: (typeof fees)[number] | undefined;
-    for (const f of fees) {
-      if (
-        f.chargedAtomic !== undefined &&
-        (top?.chargedAtomic === undefined || f.chargedAtomic > top.chargedAtomic)
-      ) {
-        top = f;
-      }
-    }
-    const kept = fees.filter((f) => f === top || now - f.atMs < ROUTING_WINDOW_MS);
+    const kept = fees.filter((f) => now - f.atMs < ROUTING_WINDOW_MS);
     if (kept.length === fees.length) return;
     await writeFile(laneFiles.fees(dir, index), feeLines(kept), { mode: 0o600 });
   }

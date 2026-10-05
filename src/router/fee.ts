@@ -51,9 +51,8 @@ export interface Skipped {
  * written and its claim dropped whatever the call did.
  *
  * ONE BUDGET FOR THE CLAIM AND THE CALL. With `budgetMs` (the hook's, inside
- * the harness's timeout) the claim waits only as long as it leaves the call
- * its room, and `call` gets what is left as its timeout, so the two together
- * never run past the budget.
+ * the harness's timeout) `call` gets what the claim left of it as its timeout,
+ * so the two together never run past the budget.
  */
 export async function payForDecision<T>(
   fee: RoutingFee,
@@ -70,7 +69,6 @@ export async function payForDecision<T>(
     now,
     allowanceAtomic: fee.allowanceAtomic,
     ...(fee.prefer !== undefined ? { prefer: fee.prefer } : {}),
-    ...(budgetMs !== undefined ? { budgetMs } : {}),
   });
   if (claimed.lane === null) return { status: 'skipped', why: claimed.why };
   const { lane } = claimed;

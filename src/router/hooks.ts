@@ -1470,8 +1470,8 @@ async function decide(
   const warn = deps.warn ?? ((line: string) => process.stderr.write(`${line}\n`));
   const fee = await routingFeeFor(deps.dataDir, config);
   const now = deps.now?.() ?? Date.now();
-  // The lane claim's wait and the request share the gate's deadline, so a
-  // claim held by another payer cannot push the call past the hook timeout.
+  // The lane claim and the request share the gate's deadline, so the claim's
+  // file work cannot push the call past the hook timeout.
   const outcome = await payForDecision(
     fee,
     (payment, timeoutMs) =>

@@ -13,6 +13,7 @@ import {
   pausedReason,
   pausedSentence,
   readLaneResult,
+  readPool,
   takeClaim,
   writeJson,
   writePool,
@@ -173,41 +174,60 @@ describe('claimLane', () => {
     expect((await claimLane(dir, { now: NOW, allowanceAtomic: ALLOWANCE })).lane).toBeNull();
   });
 
-  it('never lets two payers both take the last fee the allowance holds', async () => {
+  it('lets the allowance go over by at most one fee per lane', async () => {
     await lane(0);
     await lane(1);
-    // Slow writes and a lane each hold both payers inside the race: each takes
-    // its lane before either checks. Exactly one pays; none paying would strand
-    // the last fee.
+    // Slow writes hold all four payers inside the race: each checks the
+    // allowance before any call has written its fee.
     slow.on = true;
-    const both = await Promise.all([
-      claimLane(dir, { now: NOW, allowanceAtomic: 3_000n, prefer: [0] }),
-      claimLane(dir, { now: NOW, allowanceAtomic: 3_000n, prefer: [1] }),
-    ]).finally(() => {
+    const all = await Promise.all(
+      [0, 1, 0, 1].map((i) => claimLane(dir, { now: NOW, allowanceAtomic: 3_000n, prefer: [i] })),
+    ).finally(() => {
       slow.on = false;
     });
-    expect(both.filter((c) => c.lane !== null)).toHaveLength(1);
-    const held = both.find((c) => c.lane !== null)!.lane!;
-    // While that call is out, its claim counts as a fee.
+    const held = all.flatMap((c) => (c.lane === null ? [] : [c.lane]));
+    // A lane carries one call at a time, so two lanes pay at most two fees.
+    expect(held).toHaveLength(2);
+    expect(new Set(held.map((l) => l.index)).size).toBe(2);
+    for (const l of held) {
+      await l.finish({ kind: 'answered', status: 200, paymentResponse: settle(3_000n) });
+    }
+    expect(await feesInWindow(dir, NOW)).toBe(6_000n);
     expect(await claimLane(dir, { now: NOW, allowanceAtomic: 3_000n })).toEqual({
       lane: null,
       why: 'allowance',
     });
-    // Settled at $0, it took nothing, and the fee is free again.
-    await held.finish({ kind: 'answered', status: 200, paymentResponse: settle(0n) });
-    expect((await claimLane(dir, { now: NOW, allowanceAtomic: 3_000n })).lane).not.toBeNull();
   });
 
-  it('counts a call that may have been charged at its own time, and only once', async () => {
+  it('counts the fee a payer wrote back before the owner writes it down', async () => {
     await lane(0);
-    const lost = await claimLane(dir, { now: NOW, allowanceAtomic: ALLOWANCE });
-    await lost.lane!.finish({ kind: 'no_answer' });
-    expect(await feesInWindow(dir, NOW)).toBe(3_000n);
-    // It was not charged after all: the next call pays for the same total.
-    const next = await claimLane(dir, { now: NOW, allowanceAtomic: ALLOWANCE });
-    expect(next.lane?.header).toBe('rung-0-3000');
-    await next.lane!.finish({ kind: 'answered', status: 200, paymentResponse: settle(3_000n) });
-    expect(await feesInWindow(dir, NOW)).toBe(3_000n);
+    const first = await claimLane(dir, { now: NOW, allowanceAtomic: 6_000n });
+    await first.lane!.finish({ kind: 'answered', status: 200, paymentResponse: settle(3_000n) });
+    const second = await claimLane(dir, { now: NOW, allowanceAtomic: 6_000n });
+    expect(second.lane?.header).toBe('rung-0-6000');
+    await second.lane!.finish({ kind: 'answered', status: 200, paymentResponse: settle(6_000n) });
+    // One lane, one payer at a time: the allowance holds exactly.
+    expect(await claimLane(dir, { now: NOW, allowanceAtomic: 6_000n })).toEqual({
+      lane: null,
+      why: 'allowance',
+    });
+  });
+
+  it('asks for a bigger pool only when every lane is held by another payer', async () => {
+    await writePool(dir, { paidPath: 'available', checkedAtMs: NOW });
+    // A lane below one fee: more lanes would be unfunded too.
+    await lane(0, { chargedAtomic: '248000' });
+    expect((await claimLane(dir, { now: NOW, allowanceAtomic: ALLOWANCE })).lane).toBeNull();
+    expect((await readPool(dir))?.demandAtMs).toBeUndefined();
+    // A held lane: another one would carry the call.
+    await lane(0);
+    const held = await claimLane(dir, { now: NOW, allowanceAtomic: ALLOWANCE });
+    expect(held.lane).not.toBeNull();
+    expect(await claimLane(dir, { now: NOW + 1, allowanceAtomic: ALLOWANCE })).toEqual({
+      lane: null,
+      why: 'busy',
+    });
+    expect((await readPool(dir))?.demandAtMs).toBe(NOW + 1);
   });
 
   it('never lets a second payer take a claim that is still being written', async () => {
