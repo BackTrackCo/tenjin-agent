@@ -1044,6 +1044,11 @@ export async function persistInstallHarness(
   }));
 }
 
+/** The answer to the routing-fee question, kept so it is asked once. */
+export async function persistRoutingFee(dir: string, answer: RoutingFee): Promise<void> {
+  await persist(dir, (existing) => ({ ...existing, routingFee: answer }));
+}
+
 /**
  * Record the EXACT free-verb rules `install` declined, through the same locked
  * read-modify-write every `config set` uses. Set to whatever was pending at the
@@ -1052,11 +1057,6 @@ export async function persistInstallHarness(
  * report as pending, so a settled no stays settled per rule — without also
  * silencing a genuinely NEW rule a later version adds (tenjin-agent#234).
  */
-/** The answer to the routing-fee question, kept so it is asked once. */
-export async function persistRoutingFee(dir: string, answer: RoutingFee): Promise<void> {
-  await persist(dir, (existing) => ({ ...existing, routingFee: answer }));
-}
-
 export async function persistGrantDeclined(dir: string, declined: string[]): Promise<void> {
   await persist(dir, (existing) => ({
     ...existing,

@@ -49,23 +49,37 @@ export interface Skipped {
  * first; with none free (or recovering, or below one fee, or the allowance
  * spent) the call is skipped rather than sent unpaid. The lane's result is
  * written and its claim dropped whatever the call did.
+ *
+ * ONE BUDGET FOR THE CLAIM AND THE CALL. With `budgetMs` (the hook's, inside
+ * the harness's timeout) the claim waits only as long as it leaves the call
+ * its room, and `call` gets what is left as its timeout, so the two together
+ * never run past the budget.
  */
 export async function payForDecision<T>(
   fee: RoutingFee,
-  call: (payment: DecisionPayment | undefined) => Promise<DecisionOutcome<T>>,
+  call: (
+    payment: DecisionPayment | undefined,
+    timeoutMs: number | undefined,
+  ) => Promise<DecisionOutcome<T>>,
   now: number = Date.now(),
+  budgetMs?: number,
 ): Promise<DecisionOutcome<T> | Skipped> {
-  if (fee.mode === 'free') return call(undefined);
+  if (fee.mode === 'free') return call(undefined, budgetMs);
+  const until = budgetMs === undefined ? undefined : Date.now() + budgetMs;
   const claimed = await claimLane(fee.dataDir, {
     now,
     allowanceAtomic: fee.allowanceAtomic,
     ...(fee.prefer !== undefined ? { prefer: fee.prefer } : {}),
+    ...(budgetMs !== undefined ? { budgetMs } : {}),
   });
   if (claimed.lane === null) return { status: 'skipped', why: claimed.why };
   const { lane } = claimed;
   let outcome: DecisionOutcome<T> | undefined;
   try {
-    outcome = await call({ path: ROUTE_PAID_PATH, signature: lane.header });
+    outcome = await call(
+      { path: ROUTE_PAID_PATH, signature: lane.header },
+      until === undefined ? undefined : Math.max(0, until - Date.now()),
+    );
     return outcome;
   } finally {
     await lane.finish(outcome?.payment ?? { kind: 'no_answer' }).catch(() => undefined);

@@ -62,6 +62,13 @@ export const LEASE_TTL_MS = 60_000;
  */
 export const ALLOWANCE_TURN_TTL_MS = 2_000;
 export const ALLOWANCE_WAIT_MS = 3_000;
+/**
+ * What a payer with a budget (the hook, inside the harness's timeout) keeps of
+ * it for the router request the fee pays for. The turn wait ends while this
+ * much is still left, so the wait and the request together never pass the
+ * budget. The backend answers in about 1 s.
+ */
+export const REQUEST_ROOM_MS = 2_500;
 
 const ATOMIC_RE = /^\d{1,30}$/;
 
@@ -409,6 +416,9 @@ export async function claimLane(
     ttlMs?: number;
     allowanceAtomic: bigint;
     prefer?: readonly number[];
+    /** Wall-clock ms the caller has for this claim and the request it pays
+     *  for together; the turn wait leaves `REQUEST_ROOM_MS` of it. */
+    budgetMs?: number;
   },
 ): Promise<{ lane: HeldLane } | { lane: null; why: NoLane }> {
   const dir = lanesDir(dataDir);
@@ -417,7 +427,11 @@ export async function claimLane(
   const spent = await feesInWindow(dataDir, opts.now);
   if (spent + ROUTING_FEE_ATOMIC > opts.allowanceAtomic) return { lane: null, why: 'allowance' };
   const turnPath = file.allowanceTurn(dir);
-  const turn = await waitForClaim(turnPath, ALLOWANCE_TURN_TTL_MS, ALLOWANCE_WAIT_MS);
+  const waitMs =
+    opts.budgetMs === undefined
+      ? ALLOWANCE_WAIT_MS
+      : Math.min(ALLOWANCE_WAIT_MS, Math.max(0, opts.budgetMs - REQUEST_ROOM_MS));
+  const turn = await waitForClaim(turnPath, ALLOWANCE_TURN_TTL_MS, waitMs);
   if (turn === null) return { lane: null, why: 'busy' };
   try {
     return await claimLaneInTurn(dataDir, dir, indices, opts);
@@ -487,8 +501,9 @@ async function waitForClaim(path: string, ttlMs: number, waitMs: number): Promis
   const deadline = Date.now() + waitMs;
   for (;;) {
     const token = await takeClaimAt(path, ttlMs, Date.now());
-    if (token !== null || Date.now() >= deadline) return token;
-    await new Promise((resolve) => setTimeout(resolve, 5));
+    const left = deadline - Date.now();
+    if (token !== null || left <= 0) return token;
+    await new Promise((resolve) => setTimeout(resolve, Math.min(5, left)));
   }
 }
 

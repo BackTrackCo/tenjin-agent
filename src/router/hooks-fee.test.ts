@@ -2,12 +2,14 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { GATE_TIMEOUT_MS } from './gate';
 import { runAnswerHook, runPromptHook } from './hooks';
 import {
   claimLane,
   laneFiles,
   lanesDir,
   readLaneResult,
+  REQUEST_ROOM_MS,
   writeJson,
   writePool,
   type LaneState,
@@ -167,6 +169,60 @@ describe('the prompt hook and the routing fee', () => {
     const outcome = await runPromptHook(prompt(), deps(fetchImpl));
     expect(calls).toEqual([]);
     expect(outcome.response).toBeNull();
+  });
+
+  describe('inside the hook timeout', () => {
+    /** Another payer's allowance turn, live on the wall clock. */
+    async function holdTurn(): Promise<() => Promise<void>> {
+      const path = laneFiles.allowanceTurn(lanesDir(dir));
+      await writeJson(path, { token: 'other', pid: 1, expiresAtMs: Date.now() + 60_000 });
+      return () => rm(path, { force: true });
+    }
+
+    /** A router that never answers: the call ends only when its timeout aborts it. */
+    function silentRouter(): { fetchImpl: typeof fetch; calls: number } {
+      const seen = { fetchImpl: undefined as unknown as typeof fetch, calls: 0 };
+      seen.fetchImpl = ((_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+        seen.calls += 1;
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => reject(init.signal?.reason));
+        });
+      }) as typeof fetch;
+      return seen;
+    }
+
+    it('skips as busy, before the request room runs out, while another payer holds the turn', async () => {
+      await config({ routingFee: 'approved' });
+      await writePool(dir, { paidPath: 'available', checkedAtMs: NOW });
+      await readyLane();
+      await holdTurn();
+      const { fetchImpl, calls } = router();
+      const started = Date.now();
+      const outcome = await runPromptHook(prompt(), deps(fetchImpl));
+      expect(Date.now() - started).toBeLessThan(GATE_TIMEOUT_MS - REQUEST_ROOM_MS + 300);
+      expect(calls).toEqual([]);
+      expect(outcome.response).toBeNull();
+    });
+
+    it('gives the request only what the turn wait left, so the two fit the gate budget', async () => {
+      await config({ routingFee: 'approved' });
+      await writePool(dir, { paidPath: 'available', checkedAtMs: NOW });
+      await readyLane();
+      const release = await holdTurn();
+      // Freed late in the wait the budget allows: a full 3.5 s request after
+      // it would run the hook past the timeout install writes.
+      const freed = new Promise((resolve) =>
+        setTimeout(() => void release().then(resolve), GATE_TIMEOUT_MS - REQUEST_ROOM_MS - 200),
+      );
+      const silent = silentRouter();
+      const started = Date.now();
+      await runPromptHook(prompt(), deps(silent.fetchImpl));
+      const elapsed = Date.now() - started;
+      await freed;
+      expect(silent.calls).toBe(1);
+      expect(elapsed).toBeLessThan(GATE_TIMEOUT_MS + 300);
+      expect(await readLaneResult(lanesDir(dir), 0)).toMatchObject({ outcome: 'unknown' });
+    }, 10_000);
   });
 
   it('keeps the paused-routing line off the answer hook', async () => {

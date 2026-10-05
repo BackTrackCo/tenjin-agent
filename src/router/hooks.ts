@@ -846,7 +846,7 @@ async function offerOnUserText(
   );
   const footer = await openFooter(deps, event.sessionId, 'prompt');
   const deadline = gateDeadline(deps);
-  const outcome = await decide(sealed, deps, router.config, event.sessionId);
+  const outcome = await decide(sealed, deps, router.config, event.sessionId, deadline);
   if (!isOffer(outcome)) {
     await footer.close(outcome);
     return { ...quiet(), ...(outcome !== null ? { action: outcome.action } : {}) };
@@ -1031,7 +1031,7 @@ async function routeNativeCall(
   }
   const footer = await openFooter(deps, event.sessionId, opts.operation ?? 'search');
   const deadline = gateDeadline(deps);
-  const outcome = await decide(sealed, deps, router.config, event.sessionId);
+  const outcome = await decide(sealed, deps, router.config, event.sessionId, deadline);
   if (!isOffer(outcome)) {
     await footer.close(outcome);
     return {
@@ -1359,7 +1359,7 @@ export async function runDelegationHook(
   if (sealed.packet.historyStatus !== 'ok') return { response: null };
   const footer = await openFooter(deps, event.sessionId, 'delegate');
   const deadline = gateDeadline(deps);
-  const outcome = await decide(sealed, deps, router.config, event.sessionId);
+  const outcome = await decide(sealed, deps, router.config, event.sessionId, deadline);
   if (!isOffer(outcome)) {
     await footer.close(outcome);
     return { response: null, ...(outcome !== null ? { action: outcome.action } : {}) };
@@ -1464,13 +1464,17 @@ async function decide(
   deps: HookDeps,
   config: PartialConfig,
   sessionId: string,
+  deadline: number,
 ): Promise<HookDecision | null> {
   const baseUrl = resolveBaseUrl(deps, config);
   const warn = deps.warn ?? ((line: string) => process.stderr.write(`${line}\n`));
   const fee = await routingFeeFor(deps.dataDir, config);
+  const now = deps.now?.() ?? Date.now();
+  // The lane claim's wait and the request share the gate's deadline, so a
+  // claim held by another payer cannot push the call past the hook timeout.
   const outcome = await payForDecision(
     fee,
-    (payment) =>
+    (payment, timeoutMs) =>
       requestDecision(
         'hook',
         { packet, sessionId },
@@ -1478,12 +1482,13 @@ async function decide(
           ctx: hookContext(deps),
           baseUrl,
           acceptsBazaar: resolveExperimentalBazaar(config).value === 'on',
-          timeoutMs: deps.timeoutMs ?? GATE_TIMEOUT_MS,
+          timeoutMs: timeoutMs ?? deadline - now,
           ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
           ...(payment !== undefined ? { payment } : {}),
         },
       ),
-    deps.now?.() ?? Date.now(),
+    now,
+    deadline - now,
   );
   if (outcome.status === 'skipped') {
     warn(
