@@ -1,0 +1,6 @@
+{
+  "name": "tenjin",
+  "version": "0.1.0",
+  "description": "Shows Tenjin router lookups in Claude Code: who is called, what is sent, and what it cost.",
+  "types": "./types/index.d.ts"
+}

@@ -116,6 +116,11 @@ a repeat or a report after expiry is a 204 that changes nothing. No text is
 stored. A client that does not send
 `spec` never sees the field: the decision schemas are strict.
 
+A client that also adds `"label"` gets `label` on each spec: the service's
+display name, up to 32 characters (`Exa search`, `Wolfram Alpha`). The client
+shows it to the person on its own surfaces and never decides by it. A client
+that does not send `label` never sees the field, for the same reason.
+
 Such a client's tool call with a `query` and no `id` gets no binder: the
 server runs the hook's gate over the query (a bare URL takes the page rule)
 and answers `{action: "spec", id, spec, hint, input?}`: the picked

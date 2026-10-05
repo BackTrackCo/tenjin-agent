@@ -1,5 +1,5 @@
 {
   "schemaVersion": 1,
   "query": "integrate x^2 sin(x) from 0 to pi",
-  "accepts": ["discovered", "spec"]
+  "accepts": ["discovered", "spec", "label"]
 }

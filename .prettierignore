@@ -6,3 +6,8 @@ skills/
 # Rewritten by the changesets release action in its own JSON style
 # (multi-line arrays), which prettier disagrees with. Bot-owned, not ours.
 .changeset/pre.json
+# Written by Claude Code beside the mod each time it loads it from this folder
+# (`--plugin-dir`): the API's declarations and a tsconfig extending them.
+# Engine-owned and git-ignored (hosts/claude/.gitignore).
+hosts/claude/.claude-plugin/types/
+hosts/claude/tsconfig.json
