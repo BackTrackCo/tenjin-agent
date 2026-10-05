@@ -209,9 +209,10 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
   // THE HOOK ENTRIES' TOOL. `tenjin install` writes each routing leg as an
   // `mcp_tool` hook that calls this, so the leg runs in this process, which
   // holds the wallet and the routing fee's payer, and its answer is the hook's
-  // output. The model sees the tool too, and the event is plain arguments, so
-  // each call must name this process's session and a transcript of its own
-  // (`HookSession`); any other call answers "no opinion" with nothing sent.
+  // output. `install` denies the tool to the model (`DENY_RULE`), and the event
+  // is plain arguments, so each call must still name this process's session
+  // and a transcript of its own (`HookSession`); any other call answers "no
+  // opinion" with nothing sent.
   const session = new HookSession(opts.homeDir);
   server.registerTool(
     HOOK_TOOL,

@@ -609,10 +609,11 @@ describe('the permissions doc matches the product this release ships', () => {
     return out;
   }
 
-  it('names the one rule install writes, and the router MCP server', async () => {
-    const { ALLOW_RULE, MCP_ADD_COMMAND } = await import('./router/install');
+  it('names the two rules install writes, and the router MCP server', async () => {
+    const { ALLOW_RULE, DENY_RULE, MCP_ADD_COMMAND } = await import('./router/install');
     expect(fencedRules(PERMISSIONS_DOC)).toEqual(['Bash(tenjin pay:*)']);
     expect(PERMISSIONS_DOC).toContain(ALLOW_RULE);
+    expect(PERMISSIONS_DOC).toContain(DENY_RULE);
     expect(PERMISSIONS_DOC).toContain(MCP_ADD_COMMAND);
   });
 

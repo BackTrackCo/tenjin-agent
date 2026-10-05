@@ -15,8 +15,10 @@ channels of its own.
 The router's hook entries are now Claude Code `mcp_tool` hooks that call the new
 `hook` tool of the session's `x402` server, so every routing step runs in the one
 process that holds the wallet; `tenjin install --refresh` (which `tenjin update` runs)
-rewrites the older `tenjin hook` command entries into them. `tenjin hook <kind>` stays
-for hosts with no MCP server, on the free path.
+rewrites the older `tenjin hook` command entries into them. Install and refresh also
+write `mcp__x402__hook` into `permissions.deny`, which hides that tool from the model
+while the hook calls still run, and the tool acts only for its own session's
+transcript. `tenjin hook <kind>` stays for hosts with no MCP server, on the free path.
 
 `routingFee` (approved or declined: `tenjin install` names it in its spend-limit
 question and approving the limits approves it, and `tenjin update` asks once when it

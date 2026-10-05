@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { loadRawConfig } from '../lib/config';
 import { CliError } from '../lib/errors';
 import { hookToolInput, type HookKind } from './hook-tool';
-import { ALLOW_RULE, MCP_ADD_COMMAND, runRouterInstall } from './install';
+import { ALLOW_RULE, DENY_RULE, MCP_ADD_COMMAND, runRouterInstall } from './install';
 import { runRouterUninstall } from './uninstall';
 import { STATUS_LINE_COMMAND } from './status-line-wiring';
 import type { CommandContext } from '../context';
@@ -146,12 +146,16 @@ function deps(over: Record<string, unknown> = {}) {
 }
 
 describe('tenjin install', () => {
-  it('writes the seven hook entries, the allow rule and the MCP registration', async () => {
+  it('writes the seven hook entries, the allow and deny rules and the MCP registration', async () => {
     const registerMcp = vi.fn(async () => undefined);
     const result = await runRouterInstall({}, ctx(), deps({ registerMcp }));
     const settings = await readSettings();
     expect(settings.hooks).toEqual(CURRENT_HOOKS);
-    expect((settings.permissions as { allow: string[] }).allow).toContain(ALLOW_RULE);
+    expect(settings.permissions).toEqual({ allow: [ALLOW_RULE], deny: [DENY_RULE] });
+    expect(DENY_RULE).toBe('mcp__x402__hook');
+    expect(result.data).toMatchObject({
+      permissions: { rule: ALLOW_RULE, added: true, denyRule: DENY_RULE, denyAdded: true },
+    });
     expect(registerMcp).toHaveBeenCalledWith(MCP_ADD_COMMAND, {
       scope: 'user',
       cwd: expect.any(String) as unknown as string,
@@ -191,9 +195,22 @@ describe('tenjin install', () => {
     expect(settings.env).toEqual({ FOO: 'bar' });
     expect(settings.permissions).toEqual({
       allow: ['Bash(ls:*)', ALLOW_RULE],
-      deny: ['Bash(rm:*)'],
+      deny: ['Bash(rm:*)', DENY_RULE],
     });
     expect((settings.hooks as Record<string, unknown[]>).Stop).toEqual(original.hooks.Stop);
+  });
+
+  it('leaves a deny key that is not a list as it is, and says so', async () => {
+    await writeFile(settingsPath(), JSON.stringify({ permissions: { deny: 'Bash(rm:*)' } }) + '\n');
+    const result = await runRouterInstall({}, ctx(), deps());
+    const settings = await readSettings();
+    expect(settings.permissions).toEqual({ deny: 'Bash(rm:*)', allow: [ALLOW_RULE] });
+    expect(result.data).toMatchObject({
+      permissions: {
+        denyAdded: false,
+        warning: expect.stringContaining('"permissions.deny" key that is not an array') as unknown,
+      },
+    });
   });
 
   it('is idempotent: a second run writes the same file', async () => {
@@ -573,7 +590,16 @@ describe('tenjin install --refresh', () => {
     });
     // No command entry of ours is left: each became its `mcp_tool` leg.
     expect(JSON.stringify(after)).not.toContain('tenjin hook ');
-    expect({ ...after, hooks: null }).toEqual({ ...alphaSettings(), hooks: null });
+    // The deny rule arrives beside the allow rule; nothing else outside the hooks moves.
+    expect(after.permissions).toEqual({
+      allow: ['mcp__x402__request', 'Bash(git status)'],
+      deny: [DENY_RULE],
+    });
+    expect({ ...after, hooks: null, permissions: null }).toEqual({
+      ...alphaSettings(),
+      hooks: null,
+      permissions: null,
+    });
 
     // Converged: a second refresh writes nothing.
     const again = await runRouterInstall({ refresh: true }, ctx(), deps());
@@ -601,7 +627,8 @@ describe('tenjin uninstall', () => {
     const settings = await readSettings();
     expect(JSON.stringify(settings)).not.toContain('tenjin hook ');
     expect(JSON.stringify(settings)).not.toContain('mcp_tool');
-    expect((settings.permissions as { allow: string[] }).allow).not.toContain(ALLOW_RULE);
+    expect(settings.permissions).toEqual({ allow: [], deny: [] });
+    expect(result.humanLines?.[0]).toContain('and the permission rules from');
     expect(removeMcp).toHaveBeenCalled();
     expect(await readFile(join(data, 'wallet.json'), 'utf8')).toBe('{"keystore":"kept"}');
     expect(result.data).toMatchObject({ kept: ['wallet.json', 'spend.json', 'config.json'] });
@@ -609,15 +636,18 @@ describe('tenjin uninstall', () => {
 
   it('leaves someone else’s entries and keys exactly as they are', async () => {
     const mine = { hooks: [{ type: 'command', command: 'someone-elses-hook' }] };
+    const rules = { allow: ['Bash(ls:*)'], deny: ['Bash(rm:*)', 'mcp__x402'] };
     await writeFile(
       settingsPath(),
-      JSON.stringify({ model: 'opus', hooks: { Stop: [mine] } }, null, 2) + '\n',
+      JSON.stringify({ model: 'opus', hooks: { Stop: [mine] }, permissions: rules }, null, 2) +
+        '\n',
     );
     await runRouterInstall({}, ctx(), deps());
     await runRouterUninstall({}, ctx(), { homeDir: home, env: {}, which: () => false });
     const settings = await readSettings();
     expect(settings.model).toBe('opus');
     expect((settings.hooks as Record<string, unknown[]>).Stop).toEqual([mine]);
+    expect(settings.permissions).toEqual(rules);
   });
 
   it('says what to run by hand when the claude binary is absent', async () => {

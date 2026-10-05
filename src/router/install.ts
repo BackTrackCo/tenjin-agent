@@ -12,7 +12,11 @@ import {
 } from '../commands/config';
 import { askText, selectOne } from '../lib/clack';
 import { CliError } from '../lib/errors';
-import { appendAllowlistRules, claudeSettingsPath } from '../lib/harness-permissions';
+import {
+  appendAllowlistRules,
+  claudeSettingsPath,
+  type AppendAllowlistResult,
+} from '../lib/harness-permissions';
 import {
   inspectHooksFile,
   ownsHookEntry,
@@ -74,6 +78,15 @@ export const ROUTE_HOOK_TIMEOUT_SECONDS = 20;
 export const AFTER_CALL_TIMEOUT_SECONDS = 30;
 export { MCP_SERVER_NAME };
 export const ALLOW_RULE = REQUEST_TOOL;
+/**
+ * THE HOOK ENTRIES' TOOL IS DENIED TO THE MODEL. Its event fields are plain
+ * arguments, so the model calling it could forge a routing leg. A deny rule
+ * takes the tool out of the model's tool list in every permission mode,
+ * bypass included, while Claude Code's own `mcp_tool` hook calls to it still
+ * run (checked on Claude Code 2.1.289). The tool's session check
+ * (`HookSession`) stays for a settings file without the rule.
+ */
+export const DENY_RULE = `mcp__${MCP_SERVER_NAME}__${HOOK_TOOL}`;
 /**
  * The MCP registration follows the SAME SCOPE the hook entries do. A
  * `--project` install that wrote its hooks into the project and then registered
@@ -332,7 +345,7 @@ export async function runRouterInstall(
     plan: routerHookPlan(),
     settingsPath,
   });
-  const permissions = await ensureAllowRule(settingsPath);
+  const permissions = await ensurePermissionRules(settingsPath);
   const statusLine = await ensureStatusLine(settingsPath, {
     ...(args.statusLine !== undefined ? { mode: args.statusLine } : {}),
     ...(args.refresh === true ? { refreshOnly: true } : {}),
@@ -514,28 +527,41 @@ export interface AllowRuleResult {
   path: string;
   rule: string;
   added: boolean;
-  /** Set when the file could not be written; the rule is then not in force. */
+  /** {@link DENY_RULE}, written to `permissions.deny` beside the allow rule. */
+  denyRule: string;
+  denyAdded: boolean;
+  /** Set when the file could not be written; the rules are then not in force. */
   warning?: string;
 }
 
 /**
- * The one permission rule, through the shared allowlist writer rather than a
+ * The two permission rules, through the shared allowlist writer rather than a
  * third hand-rolled one: it resolves a symlinked settings.json before the
  * rename, refuses a file it cannot parse, and compares the bytes it read before
- * committing, none of which a local copy of the merge would have.
+ * committing, none of which a local copy of the merge would have. Each adds
+ * only its own rule and keeps every other entry in the list.
  */
-async function ensureAllowRule(path: string): Promise<AllowRuleResult> {
-  const result = await appendAllowlistRules(path, [ALLOW_RULE]);
+async function ensurePermissionRules(path: string): Promise<AllowRuleResult> {
+  const allow = await appendAllowlistRules(path, [ALLOW_RULE]);
+  const deny = await appendAllowlistRules(path, [DENY_RULE], 'deny');
+  const warning = writerWarning(allow) ?? writerWarning(deny);
   return {
-    path: result.path,
+    path: allow.path,
     rule: ALLOW_RULE,
-    added: result.added.length > 0,
-    ...(result.warning !== undefined
-      ? { warning: result.warning }
-      : result.skipped !== undefined
-        ? { warning: `${result.path} was left untouched (${result.skipped}).` }
-        : {}),
+    added: allow.added.length > 0,
+    denyRule: DENY_RULE,
+    denyAdded: deny.added.length > 0,
+    ...(warning !== undefined ? { warning } : {}),
   };
+}
+
+function writerWarning(result: AppendAllowlistResult): string | undefined {
+  return (
+    result.warning ??
+    (result.skipped !== undefined
+      ? `${result.path} was left untouched (${result.skipped}).`
+      : undefined)
+  );
 }
 
 /**
