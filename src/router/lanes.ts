@@ -8,9 +8,10 @@ import {
   readdir,
   rename,
   rm,
+  stat,
   writeFile,
 } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { writeFileAtomic } from '../lib/atomic-json';
 import { hasCode } from '../lib/errno';
 import { formatUsdDisplay } from '../lib/money';
@@ -20,6 +21,12 @@ import { formatUsdDisplay } from '../lib/money';
  * $0.003 over x402 `batch-settlement`, and the server holds one pending request
  * per channel, so a payer keeps a small pool of channels ("lanes") and each
  * parallel call takes its own.
+ *
+ * ONE FOLDER PER WALLET. Each wallet's lanes, pool file, claims, fee lines
+ * and voucher key live under `<lanes dir>/<lowercase payer address>/`, and the
+ * owner names the wallet in use in `payer.json` beside them. A replaced wallet
+ * gets lanes and a voucher key of its own; when the old wallet is in use again
+ * its folder, and what its lanes still hold, comes back as it was.
  *
  * TWO KINDS OF WRITER, ONE RULE. The `tenjin mcp` process that holds a lane's
  * lease owns everything that needs the wallet: the deposit, the voucher key,
@@ -69,7 +76,7 @@ export interface Rung {
 export interface LaneState {
   version: 1;
   index: number;
-  /** The wallet whose channel this is: a replaced wallet cannot fund or sign for it. */
+  /** The wallet whose channel this is, and whose folder the lane lives in. */
   payer: string;
   /** The SDK's client `salt`: one channel per lane for the same payer. */
   salt: string;
@@ -101,26 +108,18 @@ export interface LaneResult {
   paymentRequired?: string;
 }
 
-/**
- * `voucher_key_locked`: `tenjin mcp` cannot open the voucher key without a
- * prompt. `wallet_replaced`: the lanes belong to a wallet this machine no
- * longer uses.
- */
-export type OwnerBlocked = 'voucher_key_locked' | 'wallet_replaced';
+/** `tenjin mcp` cannot open the voucher key without a prompt. */
+export type OwnerBlocked = 'voucher_key_locked';
 
-/** What any owner writes about the pool as a whole. Advisory, last write wins. */
+/**
+ * What the server answers, for every wallet on the machine, in the lanes
+ * directory itself. Advisory, last write wins.
+ */
 export interface PoolState {
   version: 1;
   /** Whether the server answers the paid routing path with a batch-settlement 402. */
   paidPath: 'available' | 'absent';
   checkedAtMs: number;
-  /** Why the last funding attempt did not deposit, if it did not. */
-  fundingBlocked?: 'wallet_low' | 'not_allowlisted' | null;
-  /** Why the owner can service no lane at all, if it cannot. */
-  ownerBlocked?: OwnerBlocked | null;
-  walletBalanceAtomic?: string;
-  /** When a payer last found no free lane, so an owner grows the pool. */
-  demandAtMs?: number;
   /**
    * When the free path answered `fee_required`: the server routes only paid
    * calls now, so a machine without approval is paused. Cleared when the free
@@ -129,19 +128,64 @@ export interface PoolState {
   feeRequiredAtMs?: number | null;
 }
 
+/** What owners write about one wallet's lanes, in its folder. Advisory. */
+export interface WalletPool {
+  version: 1;
+  /** Why the last funding attempt did not deposit, if it did not. */
+  fundingBlocked?: 'wallet_low' | 'not_allowlisted' | null;
+  /** Why the owner can service no lane at all, if it cannot. */
+  ownerBlocked?: OwnerBlocked | null;
+  walletBalanceAtomic?: string;
+  /** When a payer last found no free lane, so an owner grows the pool. */
+  demandAtMs?: number;
+}
+
 interface Claim {
   token: string;
   pid: number;
   expiresAtMs: number;
 }
 
+/** The lanes directory: the server's answers, `payer.json`, one folder per wallet. */
 export function lanesDir(dataDir: string): string {
   return join(dataDir, 'router', 'lanes');
 }
 
-/** Where the voucher key is kept, encrypted (`lib/wallet/voucher-key.ts`). */
-export function voucherKeyPath(dataDir: string): string {
-  return join(lanesDir(dataDir), 'voucher-key.json');
+const ADDRESS_RE = /^0x[0-9a-f]{40}$/;
+const VOUCHER_KEY_FILE = 'voucher-key.json';
+
+/** One wallet's folder: its lanes, pool file, claims, fee lines and voucher key. */
+export function payerLanesDir(dataDir: string, payer: string): string {
+  const name = payer.toLowerCase();
+  if (!ADDRESS_RE.test(name)) throw new Error(`not a wallet address: ${payer}`);
+  return join(lanesDir(dataDir), name);
+}
+
+/** Where a wallet's voucher key is kept, encrypted (`lib/wallet/voucher-key.ts`). */
+export function voucherKeyPath(dataDir: string, payer: string): string {
+  return join(payerLanesDir(dataDir, payer), VOUCHER_KEY_FILE);
+}
+
+function currentFile(dataDir: string): string {
+  return join(lanesDir(dataDir), 'payer.json');
+}
+
+/**
+ * The folder of the wallet the owner last found in use, or null before any
+ * owner ran. The hooks never load the wallet, so this is how they find it.
+ */
+export async function currentLanesDir(dataDir: string): Promise<string | null> {
+  const payer = ((await readJson(currentFile(dataDir))) as { payer?: unknown } | null)?.payer;
+  return typeof payer === 'string' && ADDRESS_RE.test(payer) ? payerLanesDir(dataDir, payer) : null;
+}
+
+/** Name `payer` as the wallet in use, writing only on a change; its folder. */
+export async function useLanesOf(dataDir: string, payer: string): Promise<string> {
+  const dir = payerLanesDir(dataDir, payer);
+  if ((await currentLanesDir(dataDir)) !== dir) {
+    await writeJson(currentFile(dataDir), { version: 1, payer: payer.toLowerCase() });
+  }
+  return dir;
 }
 
 const file = {
@@ -217,9 +261,14 @@ export async function readPool(dataDir: string): Promise<PoolState | null> {
   const value = await readJson(file.pool(lanesDir(dataDir)));
   if (value === null || typeof value !== 'object') return null;
   const v = value as Partial<PoolState>;
-  return v.version === 1 && (v.paidPath === 'available' || v.paidPath === 'absent')
-    ? (v as PoolState)
-    : null;
+  if (v.version !== 1 || (v.paidPath !== 'available' && v.paidPath !== 'absent')) return null;
+  // Only the server's answers: a flat-layout pool also held one wallet's.
+  return {
+    version: 1,
+    paidPath: v.paidPath,
+    checkedAtMs: typeof v.checkedAtMs === 'number' ? v.checkedAtMs : 0,
+    ...(v.feeRequiredAtMs !== undefined ? { feeRequiredAtMs: v.feeRequiredAtMs } : {}),
+  };
 }
 
 export async function writePool(dataDir: string, patch: Partial<PoolState>): Promise<void> {
@@ -232,6 +281,19 @@ export async function writePool(dataDir: string, patch: Partial<PoolState>): Pro
     ...patch,
   };
   await writeJson(file.pool(lanesDir(dataDir)), next);
+}
+
+/** A wallet's pool file, from its folder. */
+export async function readWalletPool(dir: string): Promise<WalletPool | null> {
+  const value = await readJson(file.pool(dir));
+  return value !== null && typeof value === 'object' && (value as WalletPool).version === 1
+    ? (value as WalletPool)
+    : null;
+}
+
+export async function writeWalletPool(dir: string, patch: Partial<WalletPool>): Promise<void> {
+  const prev = await readWalletPool(dir);
+  await writeJson(file.pool(dir), { ...(prev ?? {}), ...patch, version: 1 });
 }
 
 /** Indices of the lanes that have a state file, in order. */
@@ -391,10 +453,10 @@ export async function claimLane(
   dataDir: string,
   opts: { now: number; ttlMs?: number; allowanceAtomic: bigint; prefer?: readonly number[] },
 ): Promise<{ lane: HeldLane } | { lane: null; why: NoLane }> {
-  const dir = lanesDir(dataDir);
-  const indices = await laneIndices(dir);
-  if (indices.length === 0) return { lane: null, why: 'no_lanes' };
-  const spent = await feesInWindow(dataDir, opts.now);
+  const dir = await currentLanesDir(dataDir);
+  const indices = dir === null ? [] : await laneIndices(dir);
+  if (dir === null || indices.length === 0) return { lane: null, why: 'no_lanes' };
+  const spent = await feesIn(dir, opts.now);
   if (spent + ROUTING_FEE_ATOMIC > opts.allowanceAtomic) return { lane: null, why: 'allowance' };
   const start = Math.floor(Math.random() * indices.length);
   const rotated = [...indices.slice(start), ...indices.slice(0, start)];
@@ -436,13 +498,13 @@ export async function claimLane(
   }
   // Only a pool whose every lane another payer holds is short of lanes; one
   // that is recovering, unfunded or below a fee would gain only unfunded lanes.
-  if (allHeld) await notePoolDemand(dataDir, opts.now);
+  if (allHeld) await notePoolDemand(dir, opts.now);
   return { lane: null, why };
 }
 
-async function notePoolDemand(dataDir: string, now: number): Promise<void> {
+async function notePoolDemand(dir: string, now: number): Promise<void> {
   try {
-    if ((await readPool(dataDir)) !== null) await writePool(dataDir, { demandAtMs: now });
+    await writeWalletPool(dir, { demandAtMs: now });
   } catch {
     // A hint for the owners; losing it delays one lane.
   }
@@ -523,11 +585,16 @@ export interface FeeEntry {
 }
 
 /**
- * Fees charged across every lane in the rolling window: the owner's lines,
- * plus what payers reported since the owner last folded a lane's result.
+ * Fees the wallet in use charged across its lanes in the rolling window: the
+ * owner's lines, plus what payers reported since the owner last folded a
+ * lane's result.
  */
 export async function feesInWindow(dataDir: string, now: number): Promise<bigint> {
-  const dir = lanesDir(dataDir);
+  const dir = await currentLanesDir(dataDir);
+  return dir === null ? 0n : feesIn(dir, now);
+}
+
+async function feesIn(dir: string, now: number): Promise<bigint> {
   let total = 0n;
   for (const index of await laneIndices(dir)) {
     for (const e of await readFees(dir, index)) {
@@ -591,8 +658,8 @@ export type PausedReason =
  * until then the free path routes as it always has, and there is nothing to
  * tell anyone. Missing approval pauses routing; an approved machine whose
  * lanes are all below one fee and whose wallet cannot make the next deposit is
- * paused for want of funds, and one whose owner cannot open the voucher key or
- * holds lanes of a replaced wallet is paused for that.
+ * paused for want of funds, and one whose owner cannot open the voucher key is
+ * paused for that. Lanes and funding are the wallet in use's.
  */
 export async function pausedReason(
   dataDir: string,
@@ -604,11 +671,11 @@ export async function pausedReason(
   if (!feeTaken) return null;
   if (!approved) return { reason: 'approval_missing' };
   if (pool.paidPath !== 'available') return null;
-  if (pool.ownerBlocked === 'voucher_key_locked' || pool.ownerBlocked === 'wallet_replaced') {
-    return { reason: pool.ownerBlocked };
-  }
-  if (pool.fundingBlocked !== 'wallet_low') return null;
-  const dir = lanesDir(dataDir);
+  const dir = await currentLanesDir(dataDir);
+  if (dir === null) return null;
+  const wallet = await readWalletPool(dir);
+  if (wallet?.ownerBlocked === 'voucher_key_locked') return { reason: wallet.ownerBlocked };
+  if (wallet?.fundingBlocked !== 'wallet_low') return null;
   for (const index of await laneIndices(dir)) {
     const state = await readLaneState(dir, index);
     if (state === null) continue;
@@ -619,7 +686,7 @@ export async function pausedReason(
   }
   return {
     reason: 'cannot_fund',
-    walletAtomic: isAtomic(pool.walletBalanceAtomic) ? BigInt(pool.walletBalanceAtomic) : null,
+    walletAtomic: isAtomic(wallet.walletBalanceAtomic) ? BigInt(wallet.walletBalanceAtomic) : null,
   };
 }
 
@@ -642,8 +709,8 @@ export async function noteFeeRequired(
 /** The variable the wallet already reads its passphrase from, headless. */
 export const PASSPHRASE_ENV = 'TENJIN_WALLET_PASSPHRASE';
 
-/** The fix as one sentence, or null when no command ends the pause. */
-export function pausedFix(paused: PausedReason): string | null {
+/** The fix as one sentence. */
+export function pausedFix(paused: PausedReason): string {
   switch (paused.reason) {
     case 'approval_missing':
       return `Run \`${APPROVE_COMMAND}\`.`;
@@ -651,8 +718,6 @@ export function pausedFix(paused: PausedReason): string | null {
       return `Run \`tenjin wallet fund ${usd(fundNeed(paused.walletAtomic))}\`.`;
     case 'voucher_key_locked':
       return `Set ${PASSPHRASE_ENV} to the wallet's passphrase (with a TENJIN_WALLET_KEY wallet, to a passphrase you keep) in the environment Claude Code starts from, then restart Claude Code.`;
-    case 'wallet_replaced':
-      return null;
   }
 }
 
@@ -671,8 +736,6 @@ export function pausedSentence(paused: PausedReason): string {
       return `Tenjin routing is paused: the wallet cannot fund a $${usd(LANE_DEPOSIT_ATOMIC)} routing lane. To turn it back on, fund it with \`tenjin wallet fund ${usd(fundNeed(paused.walletAtomic))}\`.`;
     case 'voucher_key_locked':
       return `Tenjin routing is paused: \`tenjin mcp\` cannot open the routing voucher key, which is sealed with the wallet passphrase, without a prompt. To turn it back on, set ${PASSPHRASE_ENV} in the environment Claude Code starts from and restart Claude Code.`;
-    case 'wallet_replaced':
-      return 'Tenjin routing is paused: the routing lanes on this machine were funded by a wallet it no longer uses (the wallet was replaced), so `tenjin mcp` cannot fund or sign for them. What those lanes still hold stays with the old wallet.';
   }
 }
 
@@ -708,7 +771,7 @@ export async function firstNoticeFor(
   return created;
 }
 
-/** The routing fee as `tenjin status` and `tenjin payments fees` show it. */
+/** The routing fee as `tenjin status` and `tenjin payments fees` show it, for the wallet in use. */
 export interface FeeSummary {
   lanes: { index: number; depositedAtomic: string; chargedAtomic: string; status: string }[];
   /** Everything the server has charged across the lanes, all time. */
@@ -720,10 +783,11 @@ export interface FeeSummary {
 }
 
 export async function feeSummary(dataDir: string, now: number): Promise<FeeSummary> {
-  const dir = lanesDir(dataDir);
+  const dir = await currentLanesDir(dataDir);
   const lanes: FeeSummary['lanes'] = [];
   let charged = 0n;
   let credit = 0n;
+  if (dir === null) return { lanes, chargedAtomic: '0', creditAtomic: '0', windowAtomic: '0' };
   for (const index of await laneIndices(dir)) {
     const state = await readLaneState(dir, index);
     if (state === null) continue;
@@ -746,6 +810,55 @@ export async function feeSummary(dataDir: string, now: number): Promise<FeeSumma
     lanes,
     chargedAtomic: charged.toString(),
     creditAtomic: credit.toString(),
-    windowAtomic: (await feesInWindow(dataDir, now)).toString(),
+    windowAtomic: (await feesIn(dir, now)).toString(),
   };
+}
+
+/**
+ * THE FLAT LAYOUT, MOVED INTO ITS PAYER'S FOLDER. Builds before the per-wallet
+ * folders kept one wallet's lanes and voucher key straight in the lanes
+ * directory. Everything moves by rename, never by copy: the voucher key first,
+ * into the folder of the payer the lanes name (with no lane to name one, the
+ * wallet in use), then each lane's files into its payer's folder with the
+ * state file last, so a crash part way leaves the state where the next run
+ * finds it and moves the rest. A file the target folder already has is left
+ * where it is, never overwritten. Running it again changes nothing.
+ */
+export async function migrateFlatLanes(dataDir: string, walletInUse: string): Promise<void> {
+  const root = lanesDir(dataDir);
+  const lanes: { index: number; dir: string }[] = [];
+  for (const index of await laneIndices(root)) {
+    const state = await readLaneState(root, index);
+    if (state === null || !ADDRESS_RE.test(state.payer.toLowerCase())) continue;
+    lanes.push({ index, dir: payerLanesDir(dataDir, state.payer) });
+  }
+  await moveIfFree(
+    join(root, VOUCHER_KEY_FILE),
+    join(lanes[0]?.dir ?? payerLanesDir(dataDir, walletInUse), VOUCHER_KEY_FILE),
+  );
+  for (const { index, dir } of lanes) {
+    if (await exists(file.state(dir, index))) continue;
+    for (const name of [file.fees, file.result, file.lease, file.claim, file.state]) {
+      await moveIfFree(name(root, index), name(dir, index));
+    }
+  }
+}
+
+async function exists(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function moveIfFree(from: string, to: string): Promise<void> {
+  if (!(await exists(from)) || (await exists(to))) return;
+  await mkdir(dirname(to), { recursive: true, mode: 0o700 });
+  try {
+    await rename(from, to);
+  } catch (err) {
+    if (!hasCode(err, 'ENOENT')) throw err;
+  }
 }

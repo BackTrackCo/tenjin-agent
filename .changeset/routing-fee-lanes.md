@@ -8,7 +8,8 @@ answers its paid routing path. Each routing call then costs a flat $0.003 over x
 $0.25 deposit through the funding path (nothing is sent before approval, not even a
 probe; a deposit is not a payment, so it counts against neither `maxAutoSpend` nor
 `sessionBudget`, and at most 8 lanes hold $2 in all), pre-signs ten
-vouchers per lane with a local voucher key kept encrypted like the wallet key, and recovers a lane after a corrective
+vouchers per lane with a local voucher key kept encrypted like the wallet key (lanes and voucher key are per
+wallet: a replaced wallet gets its own, and the old wallet's lanes come back when it is in use again), and recovers a lane after a corrective
 402 with the SDK's channel recovery. A hook only claims a lane for ten seconds, sends
 its next voucher and writes back the charged total; with no lane free, the call skips
 routing and the native tool runs. `routingFee` (approved or declined: `tenjin install`

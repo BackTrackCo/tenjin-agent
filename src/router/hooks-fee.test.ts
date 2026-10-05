@@ -7,11 +7,13 @@ import { runAnswerHook, runPromptHook } from './hooks';
 import {
   claimLane,
   laneFiles,
-  lanesDir,
   pausedReason,
+  payerLanesDir,
   readLaneResult,
+  useLanesOf,
   writeJson,
   writePool,
+  writeWalletPool,
   type LaneState,
 } from './lanes';
 
@@ -24,6 +26,7 @@ import {
 
 const BASE = 'https://tenjin.sh';
 const NOW = 1_800_000_000_000;
+const PAYER = '0x0000000000000000000000000000000000000001';
 const NATIVE = {
   schemaVersion: 1,
   routerVersion: 'v',
@@ -66,7 +69,7 @@ async function readyLane(index = 0): Promise<void> {
   const state: LaneState = {
     version: 1,
     index,
-    payer: '0x0000000000000000000000000000000000000001',
+    payer: PAYER,
     salt: `0x${'0'.repeat(64)}`,
     channelId: `0xchannel${index}`,
     balanceAtomic: '250000',
@@ -75,7 +78,7 @@ async function readyLane(index = 0): Promise<void> {
     ladder: [{ maxClaimableAtomic: '3000', header: `rung-${index}` }],
     updatedAtMs: NOW - 1_000,
   };
-  await writeJson(laneFiles.state(lanesDir(dir), index), state);
+  await writeJson(laneFiles.state(await useLanesOf(dir, PAYER), index), state);
 }
 
 function router(): {
@@ -171,9 +174,8 @@ describe('the prompt hook and the routing fee', () => {
 
   it('says once per session when the wallet cannot fund a lane, with the amount', async () => {
     await config({ routingFee: 'approved' });
-    await writePool(dir, {
-      paidPath: 'available',
-      checkedAtMs: NOW,
+    await writePool(dir, { paidPath: 'available', checkedAtMs: NOW });
+    await writeWalletPool(await useLanesOf(dir, PAYER), {
       fundingBlocked: 'wallet_low',
       walletBalanceAtomic: '50000',
     });
@@ -187,11 +189,8 @@ describe('the prompt hook and the routing fee', () => {
 
   it('says once per session when tenjin mcp cannot open the voucher key, naming the variable', async () => {
     await config({ routingFee: 'approved' });
-    await writePool(dir, {
-      paidPath: 'available',
-      checkedAtMs: NOW,
-      ownerBlocked: 'voucher_key_locked',
-    });
+    await writePool(dir, { paidPath: 'available', checkedAtMs: NOW });
+    await writeWalletPool(await useLanesOf(dir, PAYER), { ownerBlocked: 'voucher_key_locked' });
     const { fetchImpl } = router();
     const first = await runPromptHook(prompt(), deps(fetchImpl));
     expect(contextOf(first.response)).toContain('TENJIN_WALLET_PASSPHRASE');
@@ -205,7 +204,7 @@ describe('the prompt hook and the routing fee', () => {
     const { fetchImpl, calls } = router();
     await runPromptHook(prompt(), deps(fetchImpl));
     expect(calls).toEqual([{ url: `${BASE}/api/x402-router/route`, signature: 'rung-0' }]);
-    expect(await readLaneResult(lanesDir(dir), 0)).toMatchObject({
+    expect(await readLaneResult(payerLanesDir(dir, PAYER), 0)).toMatchObject({
       chargedAtomic: '3000',
       outcome: 'charged',
     });
@@ -239,7 +238,9 @@ describe('the prompt hook and the routing fee', () => {
     await runPromptHook(prompt(), deps(silent));
     expect(Date.now() - started).toBeLessThan(GATE_TIMEOUT_MS + 300);
     expect(calls).toBe(1);
-    expect(await readLaneResult(lanesDir(dir), 0)).toMatchObject({ outcome: 'unknown' });
+    expect(await readLaneResult(payerLanesDir(dir, PAYER), 0)).toMatchObject({
+      outcome: 'unknown',
+    });
   }, 10_000);
 
   it('keeps the paused-routing line off the answer hook', async () => {

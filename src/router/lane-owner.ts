@@ -25,7 +25,6 @@ import {
   LANE_DEPOSIT_ATOMIC,
   laneFiles,
   laneIndices,
-  lanesDir,
   LEASE_TTL_MS,
   MAX_LANES,
   OWNER_CLAIM_TTL_MS,
@@ -35,17 +34,21 @@ import {
   readLaneResult,
   readLaneState,
   readPool,
+  readWalletPool,
+  migrateFlatLanes,
   ROUTE_CHANNEL_PATH,
   ROUTE_PAID_PATH,
   ROUTING_FEE_ATOMIC,
   ROUTING_WINDOW_MS,
   dropClaim,
   takeClaim,
+  useLanesOf,
   writeJson,
   writePool,
+  writeWalletPool,
   type LaneState,
   type OwnerBlocked,
-  type PoolState,
+  type WalletPool,
 } from './lanes';
 
 /**
@@ -91,10 +94,11 @@ export interface LaneOwnerDeps {
   /**
    * THE LOCAL VOUCHER KEY: a key of its own that signs vouchers and nothing
    * else, every lane's `payerAuthorizer`, so a voucher never needs the wallet
-   * unlocked and what it can authorize is capped by what a lane holds. Kept
-   * encrypted at rest like the wallet key (`lib/wallet/voucher-key.ts`).
+   * unlocked and what it can authorize is capped by what a lane holds. One per
+   * wallet, kept in that wallet's folder and encrypted at rest like the wallet
+   * key (`lib/wallet/voucher-key.ts`).
    */
-  voucherKey: () => Promise<`0x${string}`>;
+  voucherKey: (payer: `0x${string}`) => Promise<`0x${string}`>;
   /** Chain reads for the SDK's recovery. */
   readContract?: ClientEvmSigner['readContract'];
   fetchImpl?: typeof fetch;
@@ -105,7 +109,7 @@ export interface LaneOwnerDeps {
 
 /** How a funding attempt ended. */
 interface Funding {
-  blocked?: PoolState['fundingBlocked'];
+  blocked?: WalletPool['fundingBlocked'];
   walletAtomic?: bigint;
   /** A deposit was sent and no settle came back: it may have landed. */
   depositUnknown?: true;
@@ -120,8 +124,10 @@ interface Probe {
 export class LaneOwner {
   private readonly id = randomBytes(8).toString('hex');
   private readonly owned = new Set<number>();
+  /** The wallet folder {@link owned} indexes into. */
+  private ownedDir: string | null = null;
   private probe: Probe | null = null;
-  private voucherKey: ReturnType<typeof privateKeyToAccount> | null = null;
+  private readonly voucherKeys = new Map<string, ReturnType<typeof privateKeyToAccount>>();
   private running: Promise<void> | null = null;
 
   constructor(private readonly deps: LaneOwnerDeps) {}
@@ -166,13 +172,20 @@ export class LaneOwner {
     if (paid === null) return;
     const address = await this.deps.walletAddress();
     if (address === null) return;
-    const dir = lanesDir(this.deps.dataDir);
-    const blocked = await this.ownerBlocked(dir, address);
-    await this.noteOwnerBlocked(blocked);
+    // EACH WALLET ITS OWN FOLDER: a replaced wallet gets lanes of its own, and
+    // the old wallet's come back as they were when it is in use again.
+    await migrateFlatLanes(this.deps.dataDir, address);
+    const dir = await useLanesOf(this.deps.dataDir, address);
+    if (this.ownedDir !== dir) {
+      this.owned.clear();
+      this.ownedDir = dir;
+    }
+    const blocked = await this.ownerBlocked(address);
+    await this.noteOwnerBlocked(dir, blocked);
     if (blocked !== null) return;
     await this.leaseLanes(dir);
     let tried = false;
-    let fundingBlocked: PoolState['fundingBlocked'] = null;
+    let fundingBlocked: WalletPool['fundingBlocked'] = null;
     let walletAtomic: bigint | null = null;
     for (const index of this.ownedLanes()) {
       const outcome = await this.serviceLane(dir, index, paid, address);
@@ -187,29 +200,20 @@ export class LaneOwner {
     // Another process's pass that owns no lane, or whose lanes needed nothing,
     // leaves the last answer standing, so the notice does not flicker.
     if (!tried) return;
-    await writePool(this.deps.dataDir, {
+    await writeWalletPool(dir, {
       fundingBlocked,
       ...(walletAtomic !== null ? { walletBalanceAtomic: walletAtomic.toString() } : {}),
     });
   }
 
   /**
-   * WHAT STOPS EVERY LANE AT ONCE, checked before any is touched. Lanes whose
-   * payer is not this wallet were left by a wallet `tenjin wallet create
-   * --replace` swapped out: this wallet can neither fund their channels nor
-   * sign for them, so they are left alone. A voucher key that cannot be opened
-   * without a prompt (no passphrase in the environment or the OS credential
-   * store) signs no ladder.
+   * WHAT STOPS EVERY LANE AT ONCE, checked before any is touched: a voucher
+   * key that cannot be opened without a prompt (no passphrase in the
+   * environment or the OS credential store) signs no ladder.
    */
-  private async ownerBlocked(dir: string, address: string): Promise<OwnerBlocked | null> {
-    for (const index of await laneIndices(dir)) {
-      const state = await readLaneState(dir, index);
-      if (state !== null && state.payer.toLowerCase() !== address.toLowerCase()) {
-        return 'wallet_replaced';
-      }
-    }
+  private async ownerBlocked(address: `0x${string}`): Promise<OwnerBlocked | null> {
     try {
-      await this.voucherSigner();
+      await this.voucherSigner(address);
     } catch (err) {
       this.warn(err);
       return 'voucher_key_locked';
@@ -218,10 +222,10 @@ export class LaneOwner {
   }
 
   /** Write the pause only when it changes, so a healthy pass writes nothing. */
-  private async noteOwnerBlocked(blocked: OwnerBlocked | null): Promise<void> {
-    const pool = await readPool(this.deps.dataDir);
+  private async noteOwnerBlocked(dir: string, blocked: OwnerBlocked | null): Promise<void> {
+    const pool = await readWalletPool(dir);
     if ((pool?.ownerBlocked ?? null) === blocked) return;
-    await writePool(this.deps.dataDir, { ownerBlocked: blocked });
+    await writeWalletPool(dir, { ownerBlocked: blocked });
   }
 
   /**
@@ -293,12 +297,12 @@ export class LaneOwner {
         this.owned.delete(index);
       }
     }
-    const pool = await readPool(this.deps.dataDir);
+    const pool = await readWalletPool(dir);
     const demand = pool?.demandAtMs !== undefined && now - pool.demandAtMs < DEMAND_WINDOW_MS;
     if (indices.length === 0 || (demand && indices.length < MAX_LANES)) {
       const next = [...Array(MAX_LANES).keys()].find((i) => !indices.includes(i));
       if (next !== undefined) await this.createLane(dir, next);
-      if (demand) await writePool(this.deps.dataDir, { demandAtMs: 0 });
+      if (demand) await writeWalletPool(dir, { demandAtMs: 0 });
     }
   }
 
@@ -306,6 +310,7 @@ export class LaneOwner {
     const now = this.now();
     if (mine) {
       await writeLease(dir, index, this.id, now);
+      this.owned.add(index);
       return;
     }
     const token = await takeClaim(dir, index, HOOK_CLAIM_TTL_MS, now);
@@ -334,7 +339,7 @@ export class LaneOwner {
       const accept = paid.accepts[0] as PaymentRequirements;
       const scheme = new BatchSettlementEvmScheme(this.walletSigner(address), {
         salt,
-        voucherSigner: await this.voucherSigner(),
+        voucherSigner: await this.voucherSigner(address),
       });
       const channelId = computeChannelId(scheme.buildChannelConfig(accept), accept.network);
       const state: LaneState = {
@@ -386,7 +391,7 @@ export class LaneOwner {
         signer: this.walletSigner(address),
         storage,
         salt: state.salt as `0x${string}`,
-        voucherSigner: await this.voucherSigner(),
+        voucherSigner: await this.voucherSigner(address),
       };
       let status = await this.foldResult(dir, index, state, clientDeps, accept);
       let funding: Funding | null = null;
@@ -606,13 +611,18 @@ export class LaneOwner {
     };
   }
 
-  /** Every lane's voucher signer, from {@link LaneOwnerDeps.voucherKey}. */
-  private async voucherSigner(): Promise<ClientEvmSigner> {
-    this.voucherKey ??= privateKeyToAccount(await this.deps.voucherKey());
-    const account = this.voucherKey;
+  /** The voucher signer of every lane `payer` funds, from {@link LaneOwnerDeps.voucherKey}. */
+  private async voucherSigner(payer: `0x${string}`): Promise<ClientEvmSigner> {
+    const key = payer.toLowerCase();
+    let account = this.voucherKeys.get(key);
+    if (account === undefined) {
+      account = privateKeyToAccount(await this.deps.voucherKey(payer));
+      this.voucherKeys.set(key, account);
+    }
+    const signer = account;
     return {
-      address: account.address,
-      signTypedData: (message) => account.signTypedData(message as unknown as TypedDataDefinition),
+      address: signer.address,
+      signTypedData: (message) => signer.signTypedData(message as unknown as TypedDataDefinition),
     };
   }
 }

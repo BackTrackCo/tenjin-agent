@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -9,14 +9,18 @@ import {
   firstNoticeFor,
   HOOK_CLAIM_TTL_MS,
   laneFiles,
+  migrateFlatLanes,
   lanesDir,
+  payerLanesDir,
   pausedReason,
   pausedSentence,
   readLaneResult,
-  readPool,
+  readWalletPool,
   takeClaim,
+  useLanesOf,
   writeJson,
   writePool,
+  writeWalletPool,
   type LaneState,
 } from './lanes';
 
@@ -58,6 +62,7 @@ vi.mock('node:fs/promises', async (importOriginal) => {
 
 let dir: string;
 const NOW = 1_800_000_000_000;
+const PAYER = '0x0000000000000000000000000000000000000001';
 const ALLOWANCE = 500_000n;
 
 beforeEach(async () => {
@@ -73,7 +78,7 @@ async function lane(index: number, over: Partial<LaneState> = {}): Promise<void>
   const state: LaneState = {
     version: 1,
     index,
-    payer: '0x0000000000000000000000000000000000000001',
+    payer: PAYER,
     salt: `0x${'0'.repeat(63)}${index}`,
     channelId: `0xchannel${index}`,
     balanceAtomic: '250000',
@@ -86,7 +91,7 @@ async function lane(index: number, over: Partial<LaneState> = {}): Promise<void>
     updatedAtMs: NOW - 1_000,
     ...over,
   };
-  await writeJson(laneFiles.state(lanesDir(dir), index), state);
+  await writeJson(laneFiles.state(await useLanesOf(dir, PAYER), index), state);
 }
 
 function settle(charged: bigint): string {
@@ -120,7 +125,7 @@ describe('claimLane', () => {
     const first = await claimLane(dir, { now: NOW, allowanceAtomic: ALLOWANCE });
     expect(first.lane?.header).toBe('rung-0-3000');
     await first.lane!.finish({ kind: 'answered', status: 200, paymentResponse: settle(0n) });
-    expect((await readLaneResult(lanesDir(dir), 0))?.outcome).toBe('zero');
+    expect((await readLaneResult(payerLanesDir(dir, PAYER), 0))?.outcome).toBe('zero');
     const second = await claimLane(dir, { now: NOW, allowanceAtomic: ALLOWANCE });
     expect(second.lane?.header).toBe('rung-0-3000');
     await second.lane!.finish({ kind: 'answered', status: 200, paymentResponse: settle(3_000n) });
@@ -145,7 +150,7 @@ describe('claimLane', () => {
     expect(late.lane?.index).toBe(0);
     // The killed payer's late release cannot drop the new holder's claim.
     await killed.lane!.finish({ kind: 'no_answer' });
-    const raw = JSON.parse(await readFile(laneFiles.claim(lanesDir(dir), 0), 'utf8'));
+    const raw = JSON.parse(await readFile(laneFiles.claim(payerLanesDir(dir, PAYER), 0), 'utf8'));
     expect(raw.expiresAtMs).toBe(NOW + HOOK_CLAIM_TTL_MS + 1 + HOOK_CLAIM_TTL_MS);
   });
 
@@ -171,7 +176,7 @@ describe('claimLane', () => {
     await lane(0);
     const held = await claimLane(dir, { now: NOW, allowanceAtomic: ALLOWANCE });
     await held.lane!.finish({ kind: 'payment_required', paymentRequired: 'eyJ9' });
-    expect((await readLaneResult(lanesDir(dir), 0))?.outcome).toBe('corrective');
+    expect((await readLaneResult(payerLanesDir(dir, PAYER), 0))?.outcome).toBe('corrective');
     expect((await claimLane(dir, { now: NOW, allowanceAtomic: ALLOWANCE })).lane).toBeNull();
   });
 
@@ -219,7 +224,7 @@ describe('claimLane', () => {
     // A lane below one fee: more lanes would be unfunded too.
     await lane(0, { chargedAtomic: '248000' });
     expect((await claimLane(dir, { now: NOW, allowanceAtomic: ALLOWANCE })).lane).toBeNull();
-    expect((await readPool(dir))?.demandAtMs).toBeUndefined();
+    expect((await readWalletPool(payerLanesDir(dir, PAYER)))?.demandAtMs).toBeUndefined();
     // A held lane: another one would carry the call.
     await lane(0);
     const held = await claimLane(dir, { now: NOW, allowanceAtomic: ALLOWANCE });
@@ -228,15 +233,15 @@ describe('claimLane', () => {
       lane: null,
       why: 'busy',
     });
-    expect((await readPool(dir))?.demandAtMs).toBe(NOW + 1);
+    expect((await readWalletPool(payerLanesDir(dir, PAYER)))?.demandAtMs).toBe(NOW + 1);
   });
 
   it('never lets a second payer take a claim that is still being written', async () => {
     slow.on = true;
     try {
-      const first = takeClaim(lanesDir(dir), 0, HOOK_CLAIM_TTL_MS, NOW);
+      const first = takeClaim(payerLanesDir(dir, PAYER), 0, HOOK_CLAIM_TTL_MS, NOW);
       await new Promise((resolve) => setTimeout(resolve, 5));
-      const second = takeClaim(lanesDir(dir), 0, HOOK_CLAIM_TTL_MS, NOW);
+      const second = takeClaim(payerLanesDir(dir, PAYER), 0, HOOK_CLAIM_TTL_MS, NOW);
       const tokens = await Promise.all([first, second]);
       expect(tokens.filter((t) => t !== null)).toHaveLength(1);
     } finally {
@@ -245,11 +250,11 @@ describe('claimLane', () => {
   });
 
   it('puts back a live claim it moved after reading none', async () => {
-    const holder = await takeClaim(lanesDir(dir), 0, HOOK_CLAIM_TTL_MS, NOW);
+    const holder = await takeClaim(payerLanesDir(dir, PAYER), 0, HOOK_CLAIM_TTL_MS, NOW);
     expect(holder).not.toBeNull();
     slow.vanish = true;
-    expect(await takeClaim(lanesDir(dir), 0, HOOK_CLAIM_TTL_MS, NOW)).toBeNull();
-    const raw = JSON.parse(await readFile(laneFiles.claim(lanesDir(dir), 0), 'utf8'));
+    expect(await takeClaim(payerLanesDir(dir, PAYER), 0, HOOK_CLAIM_TTL_MS, NOW)).toBeNull();
+    const raw = JSON.parse(await readFile(laneFiles.claim(payerLanesDir(dir, PAYER), 0), 'utf8'));
     expect(raw.token).toBe(holder);
   });
 
@@ -284,9 +289,8 @@ describe('pausedReason', () => {
   });
 
   it('names a wallet that cannot fund a lane, with the amount to fund', async () => {
-    await writePool(dir, {
-      paidPath: 'available',
-      checkedAtMs: NOW,
+    await writePool(dir, { paidPath: 'available', checkedAtMs: NOW });
+    await writeWalletPool(await useLanesOf(dir, PAYER), {
       fundingBlocked: 'wallet_low',
       walletBalanceAtomic: '100000',
     });
@@ -297,6 +301,69 @@ describe('pausedReason', () => {
     // One lane that can still pay is not a pause.
     await lane(1);
     expect(await pausedReason(dir, true)).toBeNull();
+  });
+});
+
+describe('migrateFlatLanes', () => {
+  const OTHER = '0x00000000000000000000000000000000000000aa';
+
+  /** One wallet's lane and voucher key, the way earlier builds laid them out. */
+  async function flat(): Promise<void> {
+    await lane(0);
+    await lane(1);
+    const from = payerLanesDir(dir, PAYER);
+    await writeFile(laneFiles.fees(from, 0), '{"atMs":1,"feeAtomic":"3000"}\n');
+    await writeFile(laneFiles.lease(from, 1), '{}');
+    await writeFile(join(from, 'voucher-key.json'), '{"sealed":true}');
+    for (const name of await readdir(from))
+      await rename(join(from, name), join(lanesDir(dir), name));
+    await rm(from, { recursive: true });
+  }
+
+  async function tree(root: string): Promise<string[]> {
+    return (await readdir(root, { recursive: true })).map(String).sort();
+  }
+
+  it("moves each lane and the voucher key into the lanes' payer folder, and a second run changes nothing", async () => {
+    await flat();
+    await migrateFlatLanes(dir, OTHER);
+    const to = payerLanesDir(dir, PAYER);
+    expect(await readFile(join(to, 'voucher-key.json'), 'utf8')).toBe('{"sealed":true}');
+    expect((await readdir(to)).sort()).toEqual([
+      'lane-0.fees.jsonl',
+      'lane-0.json',
+      'lane-1.json',
+      'lane-1.lease',
+      'voucher-key.json',
+    ]);
+    expect((await readdir(lanesDir(dir))).sort()).toEqual([PAYER, 'payer.json']);
+    const after = await tree(lanesDir(dir));
+    await migrateFlatLanes(dir, OTHER);
+    expect(await tree(lanesDir(dir))).toEqual(after);
+  });
+
+  it('finishes a move a crash cut short, never overwriting what the folder already has', async () => {
+    await flat();
+    const to = payerLanesDir(dir, PAYER);
+    // A crash after lane 0's fee lines moved, before its state did.
+    await mkdir(to, { recursive: true });
+    await rename(laneFiles.fees(lanesDir(dir), 0), laneFiles.fees(to, 0));
+    await migrateFlatLanes(dir, OTHER);
+    expect(await readFile(laneFiles.fees(to, 0), 'utf8')).toContain('"feeAtomic":"3000"');
+    expect((await readdir(to)).sort()).toContain('lane-0.json');
+    // A lane whose index the folder already holds is left where it was.
+    await writeFile(laneFiles.state(lanesDir(dir), 1), await readFile(laneFiles.state(to, 1)));
+    await writeFile(laneFiles.state(to, 1), 'kept');
+    await migrateFlatLanes(dir, OTHER);
+    expect(await readFile(laneFiles.state(to, 1), 'utf8')).toBe('kept');
+    expect(await readdir(lanesDir(dir))).toContain('lane-1.json');
+  });
+
+  it('gives a voucher key with no lane to name its payer to the wallet in use', async () => {
+    await mkdir(lanesDir(dir), { recursive: true });
+    await writeFile(join(lanesDir(dir), 'voucher-key.json'), 'key');
+    await migrateFlatLanes(dir, OTHER);
+    expect(await readFile(join(payerLanesDir(dir, OTHER), 'voucher-key.json'), 'utf8')).toBe('key');
   });
 });
 

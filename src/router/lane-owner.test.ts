@@ -1,4 +1,4 @@
-import { access, mkdtemp, rm } from 'node:fs/promises';
+import { access, mkdtemp, readdir, rename, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -26,13 +26,16 @@ import {
   claimLane,
   feesInWindow,
   HOOK_CLAIM_TTL_MS,
+  feeSummary,
   laneFiles,
   lanesDir,
   laneIndices,
   pausedReason,
+  payerLanesDir,
   readFees,
   readLaneState,
   readPool,
+  readWalletPool,
   ROUTING_ALLOWANCE_ATOMIC,
   ROUTING_FEE_ATOMIC,
   ROUTING_WINDOW_MS,
@@ -198,6 +201,8 @@ let dir: string;
 let clock: number;
 const wallet = privateKeyToAccount(generatePrivateKey());
 const VOUCHER_KEY = generatePrivateKey();
+/** The folder of {@link wallet}'s lanes. */
+const laneDir = () => payerLanesDir(dir, wallet.address);
 
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'tenjin-lanes-'));
@@ -207,11 +212,11 @@ afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
-function signer(): TenjinSigner {
+function signer(account = wallet): TenjinSigner {
   return {
-    address: wallet.address,
-    signMessage: (args) => wallet.signMessage(args),
-    signTypedData: (args: TypedDataDefinition) => wallet.signTypedData(args),
+    address: account.address,
+    signMessage: (args) => account.signMessage(args),
+    signTypedData: (args: TypedDataDefinition) => account.signTypedData(args),
     signTransaction: () => Promise.reject(new Error('unused')),
   };
 }
@@ -283,7 +288,7 @@ describe('LaneOwner', () => {
     const router = new FakeRouter({ paid: false });
     await owner(router).tick();
     expect((await readPool(dir))?.paidPath).toBe('absent');
-    expect(await laneIndices(lanesDir(dir))).toEqual([]);
+    expect(await laneIndices(laneDir())).toEqual([]);
   });
 
   it('sends nothing at all while the routing fee is not approved: no probe, no lane, no deposit', async () => {
@@ -299,14 +304,14 @@ describe('LaneOwner', () => {
     await counted.tick();
     expect(calls).toBe(0);
     expect(await readPool(dir)).toBeNull();
-    expect(await laneIndices(lanesDir(dir))).toEqual([]);
+    expect(await laneIndices(laneDir())).toEqual([]);
   });
 
   it('funds a lane with one $0.25 deposit and pre-signs a ladder of ten rungs', async () => {
     const router = new FakeRouter();
     await owner(router).tick();
     expect(router.deposits).toBe(1);
-    const state = await readLaneState(lanesDir(dir), 0);
+    const state = await readLaneState(laneDir(), 0);
     expect(state).toMatchObject({ balanceAtomic: '250000', chargedAtomic: '0', status: 'ready' });
     expect(state?.ladder.map((r) => r.maxClaimableAtomic)).toEqual(
       Array.from({ length: 10 }, (_, i) => String((i + 1) * 3000)),
@@ -327,16 +332,16 @@ describe('LaneOwner', () => {
     const router = new FakeRouter();
     const lanes = owner(router);
     await lanes.tick();
-    const id = (await readLaneState(lanesDir(dir), 0))!.channelId.toLowerCase();
+    const id = (await readLaneState(laneDir(), 0))!.channelId.toLowerCase();
     // The server has charged all but 2,000 of the deposit.
     router.channels.get(id)!.charged = 248_000n;
     router.channels.get(id)!.last = undefined;
-    const state = (await readLaneState(lanesDir(dir), 0))!;
+    const state = (await readLaneState(laneDir(), 0))!;
     const { writeJson, laneFiles } = await import('./lanes');
-    await writeJson(laneFiles.state(lanesDir(dir), 0), { ...state, chargedAtomic: '248000' });
+    await writeJson(laneFiles.state(laneDir(), 0), { ...state, chargedAtomic: '248000' });
     await lanes.tick();
     expect(router.deposits).toBe(2);
-    expect(await readLaneState(lanesDir(dir), 0)).toMatchObject({
+    expect(await readLaneState(laneDir(), 0)).toMatchObject({
       balanceAtomic: '500000',
       chargedAtomic: '248000',
       status: 'ready',
@@ -350,13 +355,13 @@ describe('LaneOwner', () => {
     router.abortAfterSettle = true;
     await lanes.tick();
     expect(router.deposits).toBe(1);
-    expect(await readLaneState(lanesDir(dir), 0)).toMatchObject({
+    expect(await readLaneState(laneDir(), 0)).toMatchObject({
       balanceAtomic: '0',
       status: 'recovering',
     });
     await lanes.tick();
     expect(router.deposits).toBe(1);
-    expect(await readLaneState(lanesDir(dir), 0)).toMatchObject({
+    expect(await readLaneState(laneDir(), 0)).toMatchObject({
       balanceAtomic: '250000',
       status: 'ready',
     });
@@ -369,8 +374,8 @@ describe('LaneOwner', () => {
       policy: { maxAutoSpendAtomic: 10_000n, sessionBudgetAtomic: 10_000n },
     }).tick();
     expect(router.deposits).toBe(1);
-    expect((await readPool(dir))?.fundingBlocked).toBeNull();
-    expect(await readLaneState(lanesDir(dir), 0)).toMatchObject({
+    expect((await readWalletPool(laneDir()))?.fundingBlocked).toBeNull();
+    expect(await readLaneState(laneDir(), 0)).toMatchObject({
       balanceAtomic: '250000',
       status: 'ready',
     });
@@ -389,7 +394,7 @@ describe('LaneOwner', () => {
     const router = new FakeRouter();
     await owner(router, { policy: { allowlistCreators: ['someone-else'] } }).tick();
     expect(router.deposits).toBe(0);
-    expect((await readPool(dir))?.fundingBlocked).toBe('not_allowlisted');
+    expect((await readWalletPool(laneDir()))?.fundingBlocked).toBe('not_allowlisted');
     const claimed = await claimLane(dir, { now: clock, allowanceAtomic: ROUTING_ALLOWANCE_ATOMIC });
     expect(claimed.lane).toBeNull();
   });
@@ -407,13 +412,13 @@ describe('LaneOwner', () => {
   it('leaves a funding block standing through a pass from a process that funded nothing', async () => {
     const router = new FakeRouter();
     await owner(router, { walletAtomic: 100_000n }).tick();
-    expect((await readPool(dir))?.fundingBlocked).toBe('wallet_low');
+    expect((await readWalletPool(laneDir()))?.fundingBlocked).toBe('wallet_low');
     // A second session's owner: the lane is leased to the first, so it
     // services nothing and has nothing to say about funding.
     const second = owner(router, { walletAtomic: 100_000n });
     await second.tick();
     expect(second.ownedLanes()).toEqual([]);
-    expect((await readPool(dir))?.fundingBlocked).toBe('wallet_low');
+    expect((await readWalletPool(laneDir()))?.fundingBlocked).toBe('wallet_low');
     expect(await pausedReason(dir, true)).toMatchObject({ reason: 'cannot_fund' });
   });
 
@@ -429,7 +434,7 @@ describe('LaneOwner', () => {
     });
     await lanes.tick();
     expect(router.deposits).toBe(0);
-    expect(await laneIndices(lanesDir(dir))).toEqual([]);
+    expect(await laneIndices(laneDir())).toEqual([]);
     expect(await pausedReason(dir, true)).toEqual({ reason: 'voucher_key_locked' });
     locked = false;
     await lanes.tick();
@@ -437,16 +442,93 @@ describe('LaneOwner', () => {
     expect(await pausedReason(dir, true)).toBeNull();
   });
 
-  it('leaves the lanes of a replaced wallet alone and pauses, naming the cause', async () => {
+  it('gives a replaced wallet lanes and a voucher key of its own, and funds them', async () => {
     const router = new FakeRouter();
     await owner(router).tick();
+    const before = await readLaneState(laneDir(), 0);
+    const other = privateKeyToAccount(generatePrivateKey());
+    const keysFor: string[] = [];
+    const replaced = new LaneOwner({
+      ...ownerDeps(router),
+      walletAddress: async () => other.address,
+      getSigner: async () => signer(other),
+      voucherKey: async (payer) => {
+        keysFor.push(payer);
+        return generatePrivateKey();
+      },
+    });
+    await replaced.tick();
+    expect(keysFor).toEqual([other.address]);
+    expect(router.deposits).toBe(2);
+    const fresh = await readLaneState(payerLanesDir(dir, other.address), 0);
+    expect(fresh).toMatchObject({ payer: other.address, balanceAtomic: '250000', status: 'ready' });
+    expect(fresh?.channelId).not.toBe(before?.channelId);
+    // The old wallet's lane is left exactly as it was.
+    expect(await readLaneState(laneDir(), 0)).toEqual(before);
+    expect(await pausedReason(dir, true)).toBeNull();
+    expect((await routeOnce(router)).status).toBe('decided');
+    expect(router.channels.get(fresh!.channelId.toLowerCase())?.charged).toBe(3_000n);
+  });
+
+  it("brings the old wallet's lanes back when it is in use again, and counts only its fees", async () => {
+    const router = new FakeRouter();
+    const other = privateKeyToAccount(generatePrivateKey());
+    let inUse = wallet;
+    const lanes = new LaneOwner({
+      ...ownerDeps(router),
+      walletAddress: async () => inUse.address,
+      getSigner: async () => signer(inUse),
+      voucherKey: async (payer) => (payer === wallet.address ? VOUCHER_KEY : generatePrivateKey()),
+    });
+    await lanes.tick();
+    expect((await routeOnce(router)).status).toBe('decided');
+    await lanes.tick();
+    const old = (await readLaneState(laneDir(), 0))!;
+    expect(old.chargedAtomic).toBe('3000');
+
+    inUse = other;
+    await lanes.tick();
+    expect(router.deposits).toBe(2);
+    expect(await feesInWindow(dir, clock)).toBe(0n);
+    expect((await feeSummary(dir, clock)).creditAtomic).toBe('250000');
+
+    inUse = wallet;
+    await lanes.tick();
+    // No new lane and no new deposit: the old lane, with what it still holds.
+    expect(router.deposits).toBe(2);
+    expect(lanes.ownedLanes()).toEqual([0]);
+    expect(await readLaneState(laneDir(), 0)).toMatchObject({
+      channelId: old.channelId,
+      chargedAtomic: '3000',
+      status: 'ready',
+    });
+    expect(await feesInWindow(dir, clock)).toBe(3_000n);
+    expect(await feeSummary(dir, clock)).toMatchObject({
+      chargedAtomic: '3000',
+      creditAtomic: '247000',
+    });
+    expect((await routeOnce(router)).status).toBe('decided');
+    expect(router.channels.get(old.channelId.toLowerCase())?.charged).toBe(6_000n);
+  });
+
+  it('moves lanes and a voucher key from the flat layout into their payer folder, with no new deposit', async () => {
+    const router = new FakeRouter();
+    await owner(router).tick();
+    const before = await readLaneState(laneDir(), 0);
+    // The layout of earlier builds: one wallet's files straight in the lanes directory.
+    for (const name of await readdir(laneDir())) {
+      if (name !== 'pool.json') await rename(join(laneDir(), name), join(lanesDir(dir), name));
+    }
+    await rm(join(lanesDir(dir), 'payer.json'));
+    await rm(laneDir(), { recursive: true });
+    await owner(router).tick();
     expect(router.deposits).toBe(1);
-    const before = await readLaneState(lanesDir(dir), 0);
-    const replaced = privateKeyToAccount(generatePrivateKey()).address;
-    await new LaneOwner({ ...ownerDeps(router), walletAddress: async () => replaced }).tick();
-    expect(router.deposits).toBe(1);
-    expect(await readLaneState(lanesDir(dir), 0)).toEqual(before);
-    expect(await pausedReason(dir, true)).toEqual({ reason: 'wallet_replaced' });
+    expect(await readLaneState(laneDir(), 0)).toMatchObject({
+      channelId: before?.channelId,
+      balanceAtomic: '250000',
+    });
+    expect(await laneIndices(lanesDir(dir))).toEqual([]);
+    expect((await routeOnce(router)).status).toBe('decided');
   });
 
   it('a killed hook: its claim expires, the next voucher meets a corrective 402, and the lane recovers with no double charge', async () => {
@@ -477,7 +559,7 @@ describe('LaneOwner', () => {
 
     // The owner hands the 402 to the SDK's recovery and signs from the new total.
     await lanes.tick();
-    expect(await readLaneState(lanesDir(dir), 0)).toMatchObject({
+    expect(await readLaneState(laneDir(), 0)).toMatchObject({
       chargedAtomic: '3000',
       status: 'ready',
     });
@@ -502,7 +584,7 @@ describe('LaneOwner', () => {
     // The lane does not know it was charged, so its next rung is corrected.
     expect((await routeOnce(router)).status).toBe('failed');
     await lanes.tick();
-    expect(await readLaneState(lanesDir(dir), 0)).toMatchObject({
+    expect(await readLaneState(laneDir(), 0)).toMatchObject({
       chargedAtomic: '3000',
       status: 'ready',
     });
@@ -516,15 +598,15 @@ describe('LaneOwner', () => {
     const lanes = owner(router);
     await lanes.tick();
     expect((await routeOnce(router)).status).toBe('decided');
-    expect(await readFees(lanesDir(dir), 0)).toEqual([]);
+    expect(await readFees(laneDir(), 0)).toEqual([]);
     expect(await feesInWindow(dir, clock)).toBe(3_000n);
     await lanes.tick();
-    expect(await readFees(lanesDir(dir), 0)).toEqual([{ atMs: clock, feeAtomic: 3_000n }]);
+    expect(await readFees(laneDir(), 0)).toEqual([{ atMs: clock, feeAtomic: 3_000n }]);
     expect(await feesInWindow(dir, clock)).toBe(3_000n);
     // A day on, the owner drops the line and the window is empty.
     clock += ROUTING_WINDOW_MS;
     await lanes.tick();
-    expect(await readFees(lanesDir(dir), 0)).toEqual([]);
+    expect(await readFees(laneDir(), 0)).toEqual([]);
     expect(await feesInWindow(dir, clock)).toBe(0n);
   });
 
@@ -555,7 +637,7 @@ describe('LaneOwner', () => {
     });
     expect(await feesInWindow(dir, clock)).toBe(3_000n);
     await lanes.tick();
-    expect(await readFees(lanesDir(dir), 0)).toHaveLength(1);
+    expect(await readFees(laneDir(), 0)).toHaveLength(1);
     expect(await feesInWindow(dir, clock)).toBe(3_000n);
     expect(router.settledFees).toBe(1);
   });
@@ -566,14 +648,14 @@ describe('LaneOwner', () => {
     await lanes.tick();
     expect((await routeOnce(router)).status).toBe('decided');
     // The answer's result is lost, so the lane's next rung is corrected.
-    await rm(laneFiles.result(lanesDir(dir), 0));
+    await rm(laneFiles.result(laneDir(), 0));
     expect((await routeOnce(router)).status).toBe('failed');
     await lanes.tick();
-    expect(await readLaneState(lanesDir(dir), 0)).toMatchObject({
+    expect(await readLaneState(laneDir(), 0)).toMatchObject({
       chargedAtomic: '3000',
       status: 'ready',
     });
-    expect(await readFees(lanesDir(dir), 0)).toHaveLength(1);
+    expect(await readFees(laneDir(), 0)).toHaveLength(1);
     expect(await feesInWindow(dir, clock)).toBe(3_000n);
   });
 
@@ -588,7 +670,7 @@ describe('LaneOwner', () => {
     ).toBeNull();
     await lanes.tick();
     await lanes.tick();
-    expect(await laneIndices(lanesDir(dir))).toEqual([0, 1]);
+    expect(await laneIndices(laneDir())).toEqual([0, 1]);
     expect(lanes.ownedLanes()).toEqual([0, 1]);
     expect(router.deposits).toBe(2);
   });

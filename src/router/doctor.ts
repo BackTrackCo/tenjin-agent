@@ -16,12 +16,14 @@ import { agentsWithoutRequestTool } from './agent-tools';
 import { ROUTER_PATH } from './decision';
 import { routingAllowanceAtomic, routingFeeApproved } from './fee';
 import {
+  currentLanesDir,
   feesInWindow,
   LANE_DEPOSIT_ATOMIC,
   pausedFix,
   pausedReason,
   pausedSentence,
   readPool,
+  readWalletPool,
   ROUTING_FEE_ATOMIC,
   usd,
 } from './lanes';
@@ -449,13 +451,12 @@ async function routingFeeCheck(ctx: CommandContext): Promise<RouterCheck> {
   const approved = routingFeeApproved(config);
   const paused = await pausedReason(ctx.dataDir, approved);
   if (paused !== null) {
-    const fix = pausedFix(paused);
     return {
       name: 'routing fee',
       status: 'warn',
       required: false,
       detail: pausedSentence(paused),
-      ...(fix !== null ? { fix } : {}),
+      fix: pausedFix(paused),
     };
   }
   const pool = await readPool(ctx.dataDir);
@@ -471,7 +472,9 @@ async function routingFeeCheck(ctx: CommandContext): Promise<RouterCheck> {
   const allowance = routingAllowanceAtomic(config);
   const spent = await feesInWindow(ctx.dataDir, Date.now());
   const detail = `approved (${fee}): $${usd(spent)} of $${usd(allowance)} in the last 24h`;
-  if (pool.fundingBlocked !== 'not_allowlisted') {
+  const lanes = await currentLanesDir(ctx.dataDir);
+  const wallet = lanes === null ? null : await readWalletPool(lanes);
+  if (wallet?.fundingBlocked !== 'not_allowlisted') {
     return { name: 'routing fee', status: 'ok', required: false, detail };
   }
   const host = new URL((await resolveContextSettings(ctx)).baseUrl).host;

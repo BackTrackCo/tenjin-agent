@@ -254,14 +254,12 @@ async function routingLaneOwner(ctx: CommandContext): Promise<LaneOwner> {
       }
     },
     getSigner: () => provider.getSigner(),
-    voucherKey: async () => {
-      const address = (await describeWallet(provider)).address;
-      return loadVoucherKey(voucherKeyPath(ctx.dataDir), {
-        walletAddress: address,
+    voucherKey: (payer) =>
+      loadVoucherKey(voucherKeyPath(ctx.dataDir, payer), {
+        walletAddress: payer,
         // Never a prompt: the stdio transport owns stdin.
         passphrase: { env: process.env, dir: ctx.dataDir, isTTY: false },
-      });
-    },
+      }),
     policy: async () => (await resolveContextSettings(ctx)).policy,
     walletBalance: (address) => readUsdcBalance(address, settings.rpcUrl, { timeoutMs: 5_000 }),
     readContract: (args) => chain.readContract(args as Parameters<typeof chain.readContract>[0]),

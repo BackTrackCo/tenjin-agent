@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { CliError } from '../lib/errors';
 import type { CommandContext } from '../context';
 import { runRouterDoctor } from './doctor';
-import { laneFiles, lanesDir, writeJson, writePool } from './lanes';
+import { laneFiles, useLanesOf, writeJson, writePool, writeWalletPool } from './lanes';
 import { runPaymentsFees } from './payments';
 import { runRouterStatus } from './status';
 
@@ -13,6 +13,8 @@ import { runRouterStatus } from './status';
  * Where the routing fee is read back: `tenjin doctor`'s check with each paused
  * reason and its fix, and the fees in `tenjin status` and `tenjin payments fees`.
  */
+
+const PAYER = '0x0000000000000000000000000000000000000001';
 
 let root: string;
 beforeEach(async () => {
@@ -73,9 +75,8 @@ describe('doctor: routing fee', () => {
 
   it('names a wallet that cannot fund a lane, and tenjin wallet fund with the amount', async () => {
     await writeFile(join(root, 'data', 'config.json'), JSON.stringify({ routingFee: 'approved' }));
-    await writePool(join(root, 'data'), {
-      paidPath: 'available',
-      checkedAtMs: Date.now(),
+    await writePool(join(root, 'data'), { paidPath: 'available', checkedAtMs: Date.now() });
+    await writeWalletPool(await useLanesOf(join(root, 'data'), PAYER), {
       fundingBlocked: 'wallet_low',
       walletBalanceAtomic: '0',
     });
@@ -87,9 +88,8 @@ describe('doctor: routing fee', () => {
 
   it('names the passphrase variable when tenjin mcp cannot open the voucher key', async () => {
     await writeFile(join(root, 'data', 'config.json'), JSON.stringify({ routingFee: 'approved' }));
-    await writePool(join(root, 'data'), {
-      paidPath: 'available',
-      checkedAtMs: Date.now(),
+    await writePool(join(root, 'data'), { paidPath: 'available', checkedAtMs: Date.now() });
+    await writeWalletPool(await useLanesOf(join(root, 'data'), PAYER), {
       ownerBlocked: 'voucher_key_locked',
     });
     const check = await feeCheck();
@@ -98,25 +98,10 @@ describe('doctor: routing fee', () => {
     expect(check.fix).toContain('TENJIN_WALLET_PASSPHRASE');
   });
 
-  it('says plainly that lanes of a replaced wallet stay with it, with no command to run', async () => {
-    await writeFile(join(root, 'data', 'config.json'), JSON.stringify({ routingFee: 'approved' }));
-    await writePool(join(root, 'data'), {
-      paidPath: 'available',
-      checkedAtMs: Date.now(),
-      ownerBlocked: 'wallet_replaced',
-    });
-    const check = await feeCheck();
-    expect(check.status).toBe('warn');
-    expect(check.detail).toContain('the wallet was replaced');
-    expect(check.detail).toContain('stays with the old wallet');
-    expect(check.fix).toBeUndefined();
-  });
-
   it('names allowlistCreators when it stopped a lane deposit', async () => {
     await writeFile(join(root, 'data', 'config.json'), JSON.stringify({ routingFee: 'approved' }));
-    await writePool(join(root, 'data'), {
-      paidPath: 'available',
-      checkedAtMs: Date.now(),
+    await writePool(join(root, 'data'), { paidPath: 'available', checkedAtMs: Date.now() });
+    await writeWalletPool(await useLanesOf(join(root, 'data'), PAYER), {
       fundingBlocked: 'not_allowlisted',
     });
     const check = await feeCheck();
@@ -129,11 +114,11 @@ describe('doctor: routing fee', () => {
 describe('fees in status and payments', () => {
   beforeEach(async () => {
     await writeFile(join(root, 'data', 'config.json'), JSON.stringify({ routingFee: 'approved' }));
-    const dir = lanesDir(join(root, 'data'));
+    const dir = await useLanesOf(join(root, 'data'), PAYER);
     await writeJson(laneFiles.state(dir, 0), {
       version: 1,
       index: 0,
-      payer: '0x0000000000000000000000000000000000000001',
+      payer: PAYER,
       salt: `0x${'0'.repeat(64)}`,
       channelId: '0xchannel0',
       balanceAtomic: '250000',
