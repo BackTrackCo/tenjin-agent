@@ -991,11 +991,19 @@ export interface RouterDefaultsResult {
   removed: string[];
 }
 
+/** The automatic limits a fresh install fills in, in atomic USDC; `sessionBudget` may be `none`. */
+export interface RouterLimits {
+  maxAutoSpend: string;
+  sessionBudget: string;
+}
+
 /** Remove/report retired keys in the same locked write. Refresh preserves absent
- * current settings; a fresh install fills only missing automatic limits. */
+ * current settings; a fresh install fills only missing automatic limits, with the
+ * values the person at the terminal approved or chose. */
 export async function persistRouterDefaults(
   dir: string,
   refresh = false,
+  limits: RouterLimits = ROUTER_DEFAULTS,
 ): Promise<RouterDefaultsResult> {
   const result: RouterDefaultsResult = { set: [], kept: [], removed: [] };
   if (refresh && retiredPaymentKeys(await loadRawConfig(dir)).length === 0) return result;
@@ -1004,10 +1012,7 @@ export async function persistRouterDefaults(
     result.removed = retiredPaymentKeys(existing);
     for (const key of result.removed) delete next[key];
     if (refresh) return next;
-    for (const [key, value] of Object.entries(ROUTER_DEFAULTS) as [
-      keyof typeof ROUTER_DEFAULTS,
-      string,
-    ][]) {
+    for (const [key, value] of Object.entries(limits) as [keyof RouterLimits, string][]) {
       if (existing[key] === undefined) {
         next[key] = value;
         result.set.push(key);

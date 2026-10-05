@@ -18,7 +18,7 @@ It is a tool grant, not a spending grant. Every payment the tool makes still pas
 
 Router on/off controls automatic routing. The spending controls and ledger are local; the router cannot read or raise them:
 
-- **`maxAutoSpend`** caps automatic router purchases per call. `tenjin install` sets it to 0.25 USD only when absent; the bare CLI defaults to zero. Above the cap, automatic payment is refused without prompting.
+- **`maxAutoSpend`** caps automatic router purchases per call. `tenjin install` asks you to approve or change these limits in an interactive terminal, and writes 0.25 USD only when absent otherwise; the bare CLI defaults to zero. Above the cap, automatic payment is refused without prompting.
 - **`sessionBudget`** caps automatic exposure in the existing 24 hour ledger window. It defaults to 5.00 USD before and after install. Explicit zero blocks positive automatic spending; `none` removes the automatic daily ceiling.
 - **`spend.json`** records all payments, with separate automatic exposure and reservation modes. Only automatic exposure and pending automatic reservations consume the daily budget. Manual payments remain in total reporting. Older records without a mode/counter conservatively count as automatic until their window expires. Both modes retain the keyed duplicate guard, including under `none`.
 
