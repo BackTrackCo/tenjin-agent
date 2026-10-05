@@ -1,6 +1,6 @@
 import { keccak256, stringToHex, type TypedDataDefinition } from 'viem';
 import { x402Client, x402HTTPClient, type PaymentPolicy } from '@x402/core/client';
-import type { PaymentRequired } from '@x402/core/types';
+import type { PaymentRequired, PaymentRequirements } from '@x402/core/types';
 import { toClientEvmSigner, type ClientEvmSigner } from '@x402/evm';
 import { BatchSettlementEvmScheme, computeChannelId } from '@x402/evm/batch-settlement/client';
 import { FileClientChannelStorage } from '@x402/evm/batch-settlement/client/file-storage';
@@ -8,6 +8,7 @@ import type { PartialConfig } from '../lib/config';
 import { httpRequest, type HttpRequestOptions, type HttpResult } from '../lib/http';
 import { creatorAllowed, type SpendPolicy } from '../lib/policy';
 import type { TenjinSigner } from '../lib/wallet/provider';
+import { canonicalUsdcOnly } from '../lib/x402-pay';
 import { RouteSkipped, type DecisionRoute } from './decision';
 import { routingAllowanceAtomic, routingFeeApproved } from './fee';
 import {
@@ -31,14 +32,17 @@ import {
  * `tenjin mcp`, never in a hook, and does nothing at all, not even a probe of
  * the paid path, until the routing fee is approved.
  *
- * Every payment step is the stock x402 client's: `x402HTTPClient` over a
- * `BatchSettlementEvmScheme` the wallet signs for, the SDK's
- * `FileClientChannelStorage` for the channel, `createPaymentPayload` (which
- * deposits inline when the channel cannot cover the fee), and
- * `processPaymentResult`, which updates the channel from `PAYMENT-RESPONSE` or
- * recovers it from a corrective 402, after which the call is retried once with
- * a fresh payload, exactly as `@x402/fetch` does. Nothing here builds a payload,
- * a header or a channel total by hand.
+ * The shape is the x402 guide's "MCP server with x402": a local stdio MCP
+ * server whose tool pays an HTTP API through an `x402Client` with a
+ * `BatchSettlementEvmScheme` the wallet signs for. Every payment step is the
+ * stock client's: the SDK's `FileClientChannelStorage` for the channel, its
+ * spend controls and payment policy before anything is signed, its
+ * `onBeforePaymentCreation` hook for the checks the guide puts there,
+ * `createPaymentPayload` (which deposits inline when the channel cannot cover
+ * the fee), and `processPaymentResult`, which updates the channel from
+ * `PAYMENT-RESPONSE` or recovers it from a corrective 402, after which the call
+ * is retried once with a fresh payload, as the stock fetch wrapper does.
+ * Nothing here builds a payload, a header or a channel total by hand.
  *
  * What is Tenjin's own, because the SDK has no equivalent:
  *
@@ -50,26 +54,37 @@ import {
  *   take turns on it.
  * - THE APPROVAL AND THE ALLOWANCE. Nothing is sent on the paid path before the
  *   routing fee is approved, and a call that would take the rolling 24 h fees
- *   past the routing allowance is not made. The fee lines come from the SDK's
- *   own charged total, before and after the call.
+ *   past the routing allowance is not made: the SDK's cap is per payment, not
+ *   per day. The fee lines come from the SDK's own charged total.
  * - A DEPOSIT IS NOT SPEND. It moves money into the wallet's own channel, so it
  *   counts against neither maxAutoSpend nor sessionBudget; the creator
  *   allowlist still applies to it, and a wallet that cannot cover it pauses
  *   paying with a notice rather than failing every call.
  */
 
+/**
+ * THE SDK'S PER-PAYMENT CAP for the routing fee, in place of its $1 default.
+ * The SDK bounds each deposit by this cap times `depositMultiplier`, so the
+ * two together are the deposit: $0.05 × 5 = $0.25 ({@link CHANNEL_DEPOSIT_ATOMIC}).
+ * The exact fee is the payment policy's to hold.
+ */
+export const ROUTING_SPEND_CAP = '$0.05';
+/** The SDK's default multiplier, spelled out because the deposit is cap × it. */
+export const DEPOSIT_MULTIPLIER = 5;
+
 /** How long the paid path's 402 stands before it is asked again. */
 const PROBE_TTL_MS = 10 * 60_000;
 /** A server with no paid path is asked again hourly. */
 const ABSENT_PROBE_TTL_MS = 60 * 60_000;
 /** The probe's own ceiling; it is asked at most once per {@link PROBE_TTL_MS}. */
-const PROBE_TIMEOUT_MS = 2_000;
+export const PROBE_TIMEOUT_MS = 2_000;
 /** The wallet balance read before a deposit. */
-const BALANCE_TIMEOUT_MS = 2_000;
+export const BALANCE_TIMEOUT_MS = 2_000;
 /**
- * A CALL THAT CARRIES A DEPOSIT waits for the facilitator to settle it on
- * chain before the server answers, so it gets this budget instead of the
- * gate's. It happens once per $0.25 of fees per slot.
+ * A CALL THAT CARRIES A DEPOSIT waits for the facilitator to settle it on chain
+ * before the server answers. Its timeout follows the guide's rule: the
+ * requirement's own `maxTimeoutSeconds`, capped by this. It happens once per
+ * $0.25 of fees per slot; every other call keeps the gate's budget.
  */
 export const DEPOSIT_CALL_TIMEOUT_MS = 12_000;
 
@@ -107,15 +122,29 @@ interface Slot {
   http: x402HTTPClient;
 }
 
+/** What the call in progress brings to the SDK's before-payment hook. */
+interface Call {
+  slot: Slot;
+  allowance: bigint;
+  host: string;
+  /** Set by the hook when the payload it lets through carries a deposit. */
+  deposit: boolean;
+}
+
 /** The salt of slot `index`: the same for every wallet, so the channel id
  *  (which also hashes the payer) is the slot's own for each wallet. */
 export function slotSalt(index: number): `0x${string}` {
   return keccak256(stringToHex(`tenjin-routing-slot:${index}`));
 }
 
-/** The approved fee and nothing else: a 402 asking more is not paid. */
-const approvedFeeOnly: PaymentPolicy = (_version, requirements) =>
-  requirements.filter(
+/**
+ * THE PAYMENT POLICY, the guide's check of the requirement before signing:
+ * `batch-settlement` in canonical USDC on Base, at exactly the approved fee.
+ * The server's `payTo` is not pinned: the client ships no treasury address, and
+ * what the user approved is the fee, which this holds exactly.
+ */
+const routingPolicy: PaymentPolicy = (version, requirements) =>
+  canonicalUsdcOnly(version, requirements).filter(
     (r) => r.scheme === 'batch-settlement' && r.amount === ROUTING_FEE_ATOMIC.toString(),
   );
 
@@ -125,6 +154,7 @@ const reader = new x402HTTPClient(new x402Client());
 export class RoutingPayer {
   private readonly probes = new Map<string, Probe>();
   private slot: Slot | null = null;
+  private call: Call | null = null;
   private queue: Promise<unknown> = Promise.resolve();
 
   constructor(private readonly deps: RoutingPayerDeps) {}
@@ -199,7 +229,7 @@ export class RoutingPayer {
           (name) => response.header(name),
           response.json,
         );
-        if (approvedFeeOnly(parsed.x402Version, parsed.accepts).length > 0) required = parsed;
+        if (routingPolicy(parsed.x402Version, parsed.accepts).length > 0) required = parsed;
       } catch {
         required = null;
       }
@@ -220,54 +250,53 @@ export class RoutingPayer {
     allowance: bigint,
   ): Promise<HttpResult> {
     const until = this.now() + options.timeoutMs;
-    const signer = await this.signer();
-    const slot = await this.slotFor(signer);
-    const remaining = until - this.now();
-    if (remaining <= 0) throw new RouteSkipped('busy');
-    const now = this.now();
-    if ((await feesInWindowFor(slot.dir, now)) + ROUTING_FEE_ATOMIC > allowance) {
-      throw new RouteSkipped('allowance');
-    }
-    const accept = approvedFeeOnly(required.x402Version, required.accepts)[0]!;
-    const channelId = computeChannelId(slot.scheme.buildChannelConfig(accept), accept.network);
-    const known = await slot.storage.get(channelId.toLowerCase());
-    const credit =
-      known === undefined
-        ? 0n
-        : BigInt(known.balance ?? '0') - BigInt(known.chargedCumulativeAmount ?? '0');
-    const deposit = credit < ROUTING_FEE_ATOMIC;
-    if (deposit) await this.mayDeposit(signer.address, url);
-    const timeoutMs = deposit ? Math.max(remaining, DEPOSIT_CALL_TIMEOUT_MS) : remaining;
-
-    const charged = async (): Promise<bigint> =>
-      BigInt((await slot.storage.get(channelId.toLowerCase()))?.chargedCumulativeAmount ?? '0');
-    let payload = await slot.http.createPaymentPayload(required);
-    // Read after the payload: a cold start has just recovered the channel from
-    // the chain, and what it had charged before is no fee of this call.
-    const before = await charged();
-    const send = (body: typeof payload, ms: number) =>
-      httpRequest(url, {
-        ...options,
-        timeoutMs: ms,
-        headers: { ...options.headers, ...slot.http.encodePaymentSignatureHeader(body) },
-      });
-    let response = await send(payload, timeoutMs);
-    if (response.ok) {
-      const result = await this.processResult(slot, payload, response);
-      if (result?.recovered === true) {
-        // The SDK resynced the channel from the corrective 402: one retry with
-        // a fresh payload, as the stock fetch wrapper does.
-        payload = await slot.http.createPaymentPayload(required);
-        response = await send(payload, Math.max(1, until - this.now()));
-        if (response.ok) await this.processResult(slot, payload, response);
+    const slot = await this.slotFor(await this.signer());
+    if (until - this.now() <= 0) throw new RouteSkipped('busy');
+    const call: Call = { slot, allowance, host: new URL(url).host, deposit: false };
+    this.call = call;
+    try {
+      const accept = routingPolicy(required.x402Version, required.accepts)[0]!;
+      const channelId = computeChannelId(slot.scheme.buildChannelConfig(accept), accept.network);
+      const charged = async (): Promise<bigint> =>
+        BigInt((await slot.storage.get(channelId.toLowerCase()))?.chargedCumulativeAmount ?? '0');
+      let payload = await slot.http.createPaymentPayload(required);
+      // Read after the payload: a cold start has just recovered the channel from
+      // the chain, and what it had charged before is no fee of this call.
+      const before = await charged();
+      const remaining = until - this.now();
+      const timeoutMs = call.deposit
+        ? Math.max(remaining, Math.min(accept.maxTimeoutSeconds * 1_000, DEPOSIT_CALL_TIMEOUT_MS))
+        : remaining;
+      const send = (body: typeof payload, ms: number) =>
+        httpRequest(url, {
+          ...options,
+          timeoutMs: ms,
+          headers: { ...options.headers, ...slot.http.encodePaymentSignatureHeader(body) },
+        });
+      let response = await send(payload, timeoutMs);
+      if (response.ok) {
+        const result = await this.processResult(slot, payload, response);
+        if (result?.recovered === true) {
+          // The SDK resynced the channel from the corrective 402: one retry with
+          // a fresh payload, as the stock fetch wrapper does.
+          payload = await slot.http.createPaymentPayload(required);
+          response = await send(payload, Math.max(1, until - this.now()));
+          if (response.ok) await this.processResult(slot, payload, response);
+        }
+        // A 402 the SDK did not recover from may mean new terms: ask again next time.
+        if (response.ok && response.status === 402) {
+          this.probes.delete(new URL(ROUTE_PAID_PATH, url).toString());
+        }
       }
-      // A 402 the SDK did not recover from may mean new terms: ask again next time.
-      if (response.ok && response.status === 402) this.probes.delete(new URL(url).toString());
+      const fee = (await charged()) - before;
+      if (fee > 0n) {
+        await appendFee(slot.dir, slot.index, { atMs: this.now(), feeAtomic: fee }, this.now());
+      }
+      if (response.ok && response.status < 400) await this.noteBlocked(null);
+      return response;
+    } finally {
+      this.call = null;
     }
-    const fee = (await charged()) - before;
-    if (fee > 0n) await appendFee(slot.dir, slot.index, { atMs: this.now(), feeAtomic: fee }, now);
-    if (response.ok && response.status < 400) await this.noteBlocked(null);
-    return response;
   }
 
   private async processResult(
@@ -284,6 +313,41 @@ export class RoutingPayer {
     } catch (err) {
       this.warn(err instanceof Error ? err.message : String(err));
       return null;
+    }
+  }
+
+  /**
+   * THE GUIDE'S BEFORE-PAYMENT CHECKS, in the SDK's own hook, after its spend
+   * controls and policy: the rolling allowance, and before a deposit the
+   * creator allowlist and a wallet that can cover it. Each refusal throws
+   * before anything is signed, and the call is not made.
+   */
+  private async beforePayment(requirements: PaymentRequirements): Promise<void> {
+    const call = this.call;
+    if (call === null) throw new RouteSkipped('no_call');
+    const { slot } = call;
+    if ((await feesInWindowFor(slot.dir, this.now())) + ROUTING_FEE_ATOMIC > call.allowance) {
+      throw new RouteSkipped('allowance');
+    }
+    const channelId = computeChannelId(
+      slot.scheme.buildChannelConfig(requirements),
+      requirements.network,
+    );
+    const known = await slot.storage.get(channelId.toLowerCase());
+    const credit =
+      known === undefined
+        ? 0n
+        : BigInt(known.balance ?? '0') - BigInt(known.chargedCumulativeAmount ?? '0');
+    if (credit >= BigInt(requirements.amount)) return;
+    call.deposit = true;
+    if (!creatorAllowed(await this.deps.policy(), call.host)) {
+      await this.noteBlocked('not_allowlisted');
+      throw new RouteSkipped('not_allowlisted');
+    }
+    const wallet = await this.deps.walletBalance(slot.payer, BALANCE_TIMEOUT_MS);
+    if (wallet !== null && wallet < CHANNEL_DEPOSIT_ATOMIC) {
+      await this.noteBlocked('wallet_low', wallet);
+      throw new RouteSkipped('wallet_low');
     }
   }
 
@@ -336,9 +400,19 @@ export class RoutingPayer {
       const scheme = new BatchSettlementEvmScheme(signer, {
         salt: slotSalt(index),
         storage,
-        depositStrategy: () => CHANNEL_DEPOSIT_ATOMIC.toString(),
+        depositPolicy: { depositMultiplier: DEPOSIT_MULTIPLIER },
+        // The most the spend cap allows (cap × multiplier, $0.25), not the
+        // server's minimum hint: a deposit is an on-chain settlement, so fewer
+        // and larger is faster for the user.
+        depositStrategy: ({ maxDeposit }) => maxDeposit,
       });
-      const client = new x402Client().register('eip155:*', scheme).registerPolicy(approvedFeeOnly);
+      const client = new x402Client()
+        .register('eip155:*', scheme)
+        .registerPolicy(routingPolicy)
+        .setSpendControls({ maxAmountPerPayment: ROUTING_SPEND_CAP })
+        .onBeforePaymentCreation(async ({ selectedRequirements }) => {
+          await this.beforePayment(selectedRequirements);
+        });
       this.slot = {
         payer,
         index,
@@ -352,23 +426,6 @@ export class RoutingPayer {
       return this.slot;
     }
     throw new RouteSkipped('no_slot');
-  }
-
-  /**
-   * BEFORE A DEPOSIT: the creator allowlist, and a wallet that can cover it.
-   * Either one stops the call before anything is signed, and is noted for
-   * doctor and the session notice.
-   */
-  private async mayDeposit(address: string, url: string): Promise<void> {
-    if (!creatorAllowed(await this.deps.policy(), new URL(url).host)) {
-      await this.noteBlocked('not_allowlisted');
-      throw new RouteSkipped('not_allowlisted');
-    }
-    const wallet = await this.deps.walletBalance(address, BALANCE_TIMEOUT_MS);
-    if (wallet !== null && wallet < CHANNEL_DEPOSIT_ATOMIC) {
-      await this.noteBlocked('wallet_low', wallet);
-      throw new RouteSkipped('wallet_low');
-    }
   }
 
   private async noteBlocked(blocked: PayBlocked | null, walletAtomic?: bigint): Promise<void> {

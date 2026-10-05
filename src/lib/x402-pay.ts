@@ -155,7 +155,7 @@ export function createPayerClient(getSigner: () => TenjinSigner): {
  * in a token of its choosing, and the signed EIP-3009 authorization is valid
  * against that token's contract directly, no facilitator required.
  */
-const canonicalUsdcOnly: PaymentPolicy = (_version, requirements) =>
+export const canonicalUsdcOnly: PaymentPolicy = (_version, requirements) =>
   requirements.filter((requirement) => {
     const allowed = ALLOWED_USDC_BY_NETWORK[requirement.network];
     if (allowed === undefined) return false;

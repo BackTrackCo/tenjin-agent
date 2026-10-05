@@ -18,7 +18,13 @@ import {
   ROUTING_FEE_ATOMIC,
 } from './fee-state';
 import { BASE, FakeRouter, testSigner } from './fee-test-utils';
-import { RoutingPayer, slotSalt, type RoutingPayerDeps } from './routing-payer';
+import {
+  DEPOSIT_MULTIPLIER,
+  RoutingPayer,
+  ROUTING_SPEND_CAP,
+  slotSalt,
+  type RoutingPayerDeps,
+} from './routing-payer';
 
 /**
  * The payer against a fake router that speaks the real x402 headers: the stock
@@ -270,6 +276,11 @@ describe('RoutingPayer', () => {
     expect(await routeOnce(p, router)).toEqual({ status: 'skipped', why: 'not_allowlisted' });
     expect(router.paidRequests()).toBe(0);
     expect((await readFeeState(dir))?.blocked).toBe('not_allowlisted');
+  });
+
+  it("sizes the deposit with the SDK's own knobs: the spend cap times depositMultiplier", () => {
+    expect(ROUTING_SPEND_CAP).toBe('$0.05');
+    expect(50_000n * BigInt(DEPOSIT_MULTIPLIER)).toBe(CHANNEL_DEPOSIT_ATOMIC);
   });
 
   it('keys each slot by a deterministic salt, the same for every wallet', () => {
