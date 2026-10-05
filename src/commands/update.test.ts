@@ -1204,6 +1204,39 @@ describe('runUpdate: the routing-fee approval', () => {
     expect(asked).toBe(1);
   });
 
+  it('keeps a decline written elsewhere while the prompt was open, after a yes', async () => {
+    const confirm = async (): Promise<boolean> => {
+      await writeFile(join(dir, 'config.json'), JSON.stringify({ routingFee: 'declined' }));
+      return true;
+    };
+    const result = await runUpdate(
+      { check: false },
+      makeCtx({}, true).ctx,
+      await deps({ fetchImpl: upToDate(), confirm }),
+    );
+    expect(JSON.parse(await readFile(join(dir, 'config.json'), 'utf8')).routingFee).toBe(
+      'declined',
+    );
+    expect(result.data).toMatchObject({ routingFee: 'declined' });
+    expect(result.humanLines?.join(' ')).toContain('Routing fee left as declined');
+  });
+
+  it('keeps an approval written elsewhere while the prompt was open, after a no', async () => {
+    const confirm = async (): Promise<boolean> => {
+      await writeFile(join(dir, 'config.json'), JSON.stringify({ routingFee: 'approved' }));
+      return false;
+    };
+    const result = await runUpdate(
+      { check: false },
+      makeCtx({}, true).ctx,
+      await deps({ fetchImpl: upToDate(), confirm }),
+    );
+    expect(JSON.parse(await readFile(join(dir, 'config.json'), 'utf8')).routingFee).toBe(
+      'approved',
+    );
+    expect(result.data).toMatchObject({ routingFee: 'approved' });
+  });
+
   it('never asks without a terminal, and writes nothing', async () => {
     const confirm = async (): Promise<boolean> => {
       throw new Error('asked without a terminal');

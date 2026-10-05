@@ -1044,23 +1044,22 @@ export async function persistInstallHarness(
   }));
 }
 
-/** The answer to the routing-fee question, kept so it is asked once. */
-export async function persistRoutingFee(dir: string, answer: RoutingFee): Promise<void> {
-  await persist(dir, (existing) => ({ ...existing, routingFee: answer }));
-}
-
 /**
  * The routing-fee answer, only when the file has none. The check runs inside
  * the locked write, so an answer another process wrote while this one waited
- * at a prompt is kept.
+ * at a prompt is kept. Returns the answer the file holds afterwards.
  */
 export async function persistRoutingFeeIfUnanswered(
   dir: string,
   answer: RoutingFee,
-): Promise<void> {
-  await persist(dir, (existing) =>
-    existing.routingFee === undefined ? { ...existing, routingFee: answer } : existing,
-  );
+): Promise<RoutingFee> {
+  let kept: RoutingFee = answer;
+  await persist(dir, (existing) => {
+    if (existing.routingFee === undefined) return { ...existing, routingFee: answer };
+    kept = existing.routingFee;
+    return existing;
+  });
+  return kept;
 }
 
 /**

@@ -26,7 +26,7 @@ import {
   ROUTING_FEE_ATOMIC,
   usd,
 } from '../router/lanes';
-import { persistRoutingFee } from './config';
+import { persistRoutingFeeIfUnanswered } from './config';
 
 /**
  * `tenjin update`: replace this install with the newest version npm offers it,
@@ -316,8 +316,16 @@ async function askRoutingFee(
     };
   }
   const approved = await (deps.confirm ?? ((q: string) => promptYesNo(q)))(ROUTING_FEE_QUESTION);
-  const answer = approved ? 'approved' : 'declined';
-  await persistRoutingFee(ctx.dataDir, answer);
+  const wanted = approved ? 'approved' : 'declined';
+  // AN ANSWER WRITTEN WHILE THE PROMPT WAS OPEN WINS: the write runs inside
+  // the config lock and sets the answer only when the file still has none.
+  const answer = await persistRoutingFeeIfUnanswered(ctx.dataDir, wanted);
+  if (answer !== wanted) {
+    return {
+      answer,
+      lines: [`Routing fee left as ${answer}: it was set elsewhere while this prompt was open.`],
+    };
+  }
   return {
     answer,
     lines: [
