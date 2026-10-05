@@ -70,7 +70,7 @@ Each answer names the provider and the price. Your agent keeps its own tools, an
 
 ## What it can do
 
-The router picks from a catalog we curate and maintain. When nothing in it fits, it can point your agent at a reviewed third-party pay-per-call service from the [Tenjin list](#tenjin-list-and-experimental-bazaar), and your agent decides whether to use it or to ask you first. Routing is free: you pay the provider's price and nothing else.
+The router picks from a catalog we curate and maintain. When nothing in it fits, it can point your agent at a reviewed third-party pay-per-call service from the [Tenjin list](#tenjin-list-and-experimental-bazaar), and your agent decides whether to use it or to ask you first. Routing is free today: you pay the provider's price and nothing else. A flat [routing fee](#routing-fee) of $0.003 per routing call is coming; it stays off until you approve it.
 
 | Tool                                                           | What your agent gets                                                                      | Price per call |
 | -------------------------------------------------------------- | ----------------------------------------------------------------------------------------- | -------------- |
@@ -137,6 +137,12 @@ Tenjin pays for tools with [x402](https://www.x402.org), an open standard that b
 
 Tenjin refuses any payment over either limit before it signs anything.
 
+### Routing fee
+
+Once Tenjin's server turns it on, each routing call costs a flat $0.003, whatever the answer: native advice, a free service and a paid one all cost the same. It is paid over x402 `batch-settlement` from small prepaid channels ("lanes"): `tenjin mcp` deposits $0.25 into a lane through Tenjin's funding path, within your limits above, and each routing call spends one voucher from it. The deposit is the only money that leaves your wallet, and what a lane has not spent stays there for later calls. At most $0.50 in routing fees a rolling day (`tenjin config set routingAllowance 1`).
+
+Nothing changes until you approve it: `tenjin update` asks once, and `tenjin config set routingFee approved` (or `declined`) answers it any time. Until then the router uses its free path. When routing is paused because the fee is not approved or the wallet cannot fund a lane, `tenjin doctor` says which and how to fix it, and your agent is told once per session. When no lane is free at a given moment, that one call skips routing and your agent's own tool runs. `tenjin status` and `tenjin payments fees` show what the fee has cost.
+
 ### Funding
 
 `tenjin wallet fund 2` opens a Coinbase Onramp checkout for your wallet: pay by card, or Apple Pay where your region supports it. Sign in to Coinbase or create an account during checkout. You can also send USDC on Base to the address `tenjin wallet show` prints.
@@ -154,6 +160,7 @@ tenjin status                  # what you've spent today
 tenjin wallet balance          # what's left
 tenjin wallet fund 5           # top up
 tenjin payments reconcile      # settle paid lookups whose settlement was unknown
+tenjin payments fees           # routing fees, per lane
 tenjin update                  # newest version; wallet and settings stay
 tenjin config set router.enabled false             # pause the router on this machine
 tenjin config set --project router.enabled false   # ...or just in this repo

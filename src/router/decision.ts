@@ -6,7 +6,11 @@ import type { Packet } from './context';
 import type { PaidAnswer } from './lanes';
 
 /**
- * `POST /api/x402-router`: ONE FREE DECISION PER LOOKUP.
+ * `POST /api/x402-router`: ONE DECISION PER LOOKUP. On the free path it costs
+ * nothing. Once the routing fee is approved and the server answers its paid
+ * path, the same body goes to that path with one pre-signed lane voucher in
+ * the standard `PAYMENT-SIGNATURE` header (`fee.ts`, `lanes.ts`); the rest of
+ * this note describes the free path, which is unchanged.
  *
  * The routing decision costs nothing and nobody signs for it. The hook asks for
  * it from the user's own words, the backend answers with what it would do and

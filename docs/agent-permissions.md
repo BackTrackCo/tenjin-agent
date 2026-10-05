@@ -19,6 +19,8 @@ It is a tool grant, not a spending grant. Every payment the tool makes still pas
 Router on/off controls automatic routing. The spending controls and ledger are local; the router cannot read or raise them:
 
 - **`maxAutoSpend`** caps automatic router purchases per call. `tenjin install` sets it to 0.25 USD only when absent; the bare CLI defaults to zero. Above the cap, automatic payment is refused without prompting.
+- **`routingFee`** is your answer to the routing fee ($0.003 per routing call over x402 `batch-settlement`): `approved` or `declined`, and absent until you are asked (`tenjin update` asks once). Until it is `approved`, routing uses the free path only. Each $0.25 lane deposit `tenjin mcp` makes for it is an automatic payment under `maxAutoSpend` and `sessionBudget`; the hooks never fund or sign anything, they only spend a voucher the MCP process already signed.
+- **`routingAllowance`** caps routing fees in a rolling 24 hours, $0.50 by default. Past it, routing calls are skipped and native tools run.
 - **`sessionBudget`** caps automatic exposure in the existing 24 hour ledger window. It defaults to 5.00 USD before and after install. Explicit zero blocks positive automatic spending; `none` removes the automatic daily ceiling.
 - **`spend.json`** records all payments, with separate automatic exposure and reservation modes. Only automatic exposure and pending automatic reservations consume the daily budget. Manual payments remain in total reporting. Older records without a mode/counter conservatively count as automatic until their window expires. Both modes retain the keyed duplicate guard, including under `none`.
 
@@ -34,7 +36,7 @@ tenjin config set sessionBudget 2.00
 
 ## What bounds a ROUTER payment, on top of that
 
-The routing decision comes from a server, and it is free: it proposes, it never authorizes. These checks are what keep a wrong or hostile one from being worth anything:
+The routing decision comes from a server, and it is free until the routing fee is approved, then a flat $0.003 from a prepaid lane: either way it proposes, it never authorizes. These checks are what keep a wrong or hostile one from being worth anything:
 
 - The amount actually signed has to fit `maxAutoSpend` and the day's `sessionBudget`. A live price above the one the decision quoted is refused before anything is signed, so a provider or a stale catalog cannot charge more than it advertised; a hostile server sets that quote itself, so against one the bound stays `maxAutoSpend`.
 - An offer carries the service's spec: its input schema, the fields Tenjin pins, and the HTTP request those fields become. Your assistant fills the fields; this CLI puts the pins over them, validates the result against the schema, builds the request and pays the spec's own payee, never above the spec's price ceiling. The one lookup without a spec, the free docs lookup, is bound by the backend from your assistant's query, and nothing is paid for it.
