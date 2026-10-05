@@ -417,6 +417,38 @@ describe('LaneOwner', () => {
     expect(await pausedReason(dir, true)).toMatchObject({ reason: 'cannot_fund' });
   });
 
+  it('pauses, naming the passphrase, when the voucher key cannot be opened without a prompt', async () => {
+    const router = new FakeRouter();
+    let locked = true;
+    const lanes = new LaneOwner({
+      ...ownerDeps(router),
+      voucherKey: async () => {
+        if (locked) throw new Error('No wallet passphrase available.');
+        return VOUCHER_KEY;
+      },
+    });
+    await lanes.tick();
+    expect(router.deposits).toBe(0);
+    expect(await laneIndices(lanesDir(dir))).toEqual([]);
+    expect(await pausedReason(dir, true)).toEqual({ reason: 'voucher_key_locked' });
+    locked = false;
+    await lanes.tick();
+    expect(router.deposits).toBe(1);
+    expect(await pausedReason(dir, true)).toBeNull();
+  });
+
+  it('leaves the lanes of a replaced wallet alone and pauses, naming the cause', async () => {
+    const router = new FakeRouter();
+    await owner(router).tick();
+    expect(router.deposits).toBe(1);
+    const before = await readLaneState(lanesDir(dir), 0);
+    const replaced = privateKeyToAccount(generatePrivateKey()).address;
+    await new LaneOwner({ ...ownerDeps(router), walletAddress: async () => replaced }).tick();
+    expect(router.deposits).toBe(1);
+    expect(await readLaneState(lanesDir(dir), 0)).toEqual(before);
+    expect(await pausedReason(dir, true)).toEqual({ reason: 'wallet_replaced' });
+  });
+
   it('a killed hook: its claim expires, the next voucher meets a corrective 402, and the lane recovers with no double charge', async () => {
     const router = new FakeRouter();
     const lanes = owner(router);

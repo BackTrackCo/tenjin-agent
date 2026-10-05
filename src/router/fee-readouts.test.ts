@@ -85,6 +85,33 @@ describe('doctor: routing fee', () => {
     expect(check.fix).toBe('Run `tenjin wallet fund 0.25`.');
   });
 
+  it('names the passphrase variable when tenjin mcp cannot open the voucher key', async () => {
+    await writeFile(join(root, 'data', 'config.json'), JSON.stringify({ routingFee: 'approved' }));
+    await writePool(join(root, 'data'), {
+      paidPath: 'available',
+      checkedAtMs: Date.now(),
+      ownerBlocked: 'voucher_key_locked',
+    });
+    const check = await feeCheck();
+    expect(check.status).toBe('warn');
+    expect(check.detail).toContain('cannot open the routing voucher key');
+    expect(check.fix).toContain('TENJIN_WALLET_PASSPHRASE');
+  });
+
+  it('says plainly that lanes of a replaced wallet stay with it, with no command to run', async () => {
+    await writeFile(join(root, 'data', 'config.json'), JSON.stringify({ routingFee: 'approved' }));
+    await writePool(join(root, 'data'), {
+      paidPath: 'available',
+      checkedAtMs: Date.now(),
+      ownerBlocked: 'wallet_replaced',
+    });
+    const check = await feeCheck();
+    expect(check.status).toBe('warn');
+    expect(check.detail).toContain('the wallet was replaced');
+    expect(check.detail).toContain('stays with the old wallet');
+    expect(check.fix).toBeUndefined();
+  });
+
   it('names allowlistCreators when it stopped a lane deposit', async () => {
     await writeFile(join(root, 'data', 'config.json'), JSON.stringify({ routingFee: 'approved' }));
     await writePool(join(root, 'data'), {
@@ -106,6 +133,7 @@ describe('fees in status and payments', () => {
     await writeJson(laneFiles.state(dir, 0), {
       version: 1,
       index: 0,
+      payer: '0x0000000000000000000000000000000000000001',
       salt: `0x${'0'.repeat(64)}`,
       channelId: '0xchannel0',
       balanceAtomic: '250000',

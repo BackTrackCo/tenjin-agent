@@ -66,6 +66,7 @@ async function readyLane(index = 0): Promise<void> {
   const state: LaneState = {
     version: 1,
     index,
+    payer: '0x0000000000000000000000000000000000000001',
     salt: `0x${'0'.repeat(64)}`,
     channelId: `0xchannel${index}`,
     balanceAtomic: '250000',
@@ -181,6 +182,19 @@ describe('the prompt hook and the routing fee', () => {
     expect(contextOf(first.response)).toContain('`tenjin wallet fund 0.20`');
     // No lane can pay, so the router is not asked at all.
     expect(calls).toEqual([]);
+    expect((await runPromptHook(prompt(), deps(fetchImpl))).response).toBeNull();
+  });
+
+  it('says once per session when tenjin mcp cannot open the voucher key, naming the variable', async () => {
+    await config({ routingFee: 'approved' });
+    await writePool(dir, {
+      paidPath: 'available',
+      checkedAtMs: NOW,
+      ownerBlocked: 'voucher_key_locked',
+    });
+    const { fetchImpl } = router();
+    const first = await runPromptHook(prompt(), deps(fetchImpl));
+    expect(contextOf(first.response)).toContain('TENJIN_WALLET_PASSPHRASE');
     expect((await runPromptHook(prompt(), deps(fetchImpl))).response).toBeNull();
   });
 

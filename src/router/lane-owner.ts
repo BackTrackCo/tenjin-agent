@@ -44,6 +44,7 @@ import {
   writeJson,
   writePool,
   type LaneState,
+  type OwnerBlocked,
   type PoolState,
 } from './lanes';
 
@@ -166,16 +167,19 @@ export class LaneOwner {
     const address = await this.deps.walletAddress();
     if (address === null) return;
     const dir = lanesDir(this.deps.dataDir);
+    const blocked = await this.ownerBlocked(dir, address);
+    await this.noteOwnerBlocked(blocked);
+    if (blocked !== null) return;
     await this.leaseLanes(dir);
     let tried = false;
-    let blocked: PoolState['fundingBlocked'] = null;
+    let fundingBlocked: PoolState['fundingBlocked'] = null;
     let walletAtomic: bigint | null = null;
     for (const index of this.ownedLanes()) {
       const outcome = await this.serviceLane(dir, index, paid, address);
       if (outcome === null) continue;
       tried = true;
       if (outcome.blocked != null) {
-        blocked = outcome.blocked;
+        fundingBlocked = outcome.blocked;
         walletAtomic = outcome.walletAtomic ?? walletAtomic;
       }
     }
@@ -184,9 +188,40 @@ export class LaneOwner {
     // leaves the last answer standing, so the notice does not flicker.
     if (!tried) return;
     await writePool(this.deps.dataDir, {
-      fundingBlocked: blocked,
+      fundingBlocked,
       ...(walletAtomic !== null ? { walletBalanceAtomic: walletAtomic.toString() } : {}),
     });
+  }
+
+  /**
+   * WHAT STOPS EVERY LANE AT ONCE, checked before any is touched. Lanes whose
+   * payer is not this wallet were left by a wallet `tenjin wallet create
+   * --replace` swapped out: this wallet can neither fund their channels nor
+   * sign for them, so they are left alone. A voucher key that cannot be opened
+   * without a prompt (no passphrase in the environment or the OS credential
+   * store) signs no ladder.
+   */
+  private async ownerBlocked(dir: string, address: string): Promise<OwnerBlocked | null> {
+    for (const index of await laneIndices(dir)) {
+      const state = await readLaneState(dir, index);
+      if (state !== null && state.payer.toLowerCase() !== address.toLowerCase()) {
+        return 'wallet_replaced';
+      }
+    }
+    try {
+      await this.voucherSigner();
+    } catch (err) {
+      this.warn(err);
+      return 'voucher_key_locked';
+    }
+    return null;
+  }
+
+  /** Write the pause only when it changes, so a healthy pass writes nothing. */
+  private async noteOwnerBlocked(blocked: OwnerBlocked | null): Promise<void> {
+    const pool = await readPool(this.deps.dataDir);
+    if ((pool?.ownerBlocked ?? null) === blocked) return;
+    await writePool(this.deps.dataDir, { ownerBlocked: blocked });
   }
 
   /**
@@ -305,6 +340,7 @@ export class LaneOwner {
       const state: LaneState = {
         version: 1,
         index,
+        payer: address,
         salt,
         channelId,
         balanceAtomic: '0',

@@ -449,12 +449,13 @@ async function routingFeeCheck(ctx: CommandContext): Promise<RouterCheck> {
   const approved = routingFeeApproved(config);
   const paused = await pausedReason(ctx.dataDir, approved);
   if (paused !== null) {
+    const fix = pausedFix(paused);
     return {
       name: 'routing fee',
       status: 'warn',
       required: false,
       detail: pausedSentence(paused),
-      fix: `Run ${pausedFix(paused)}.`,
+      ...(fix !== null ? { fix } : {}),
     };
   }
   const pool = await readPool(ctx.dataDir);

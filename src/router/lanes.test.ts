@@ -73,6 +73,7 @@ async function lane(index: number, over: Partial<LaneState> = {}): Promise<void>
   const state: LaneState = {
     version: 1,
     index,
+    payer: '0x0000000000000000000000000000000000000001',
     salt: `0x${'0'.repeat(63)}${index}`,
     channelId: `0xchannel${index}`,
     balanceAtomic: '250000',

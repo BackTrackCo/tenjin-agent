@@ -69,6 +69,8 @@ export interface Rung {
 export interface LaneState {
   version: 1;
   index: number;
+  /** The wallet whose channel this is: a replaced wallet cannot fund or sign for it. */
+  payer: string;
   /** The SDK's client `salt`: one channel per lane for the same payer. */
   salt: string;
   channelId: string;
@@ -99,6 +101,13 @@ export interface LaneResult {
   paymentRequired?: string;
 }
 
+/**
+ * `voucher_key_locked`: `tenjin mcp` cannot open the voucher key without a
+ * prompt. `wallet_replaced`: the lanes belong to a wallet this machine no
+ * longer uses.
+ */
+export type OwnerBlocked = 'voucher_key_locked' | 'wallet_replaced';
+
 /** What any owner writes about the pool as a whole. Advisory, last write wins. */
 export interface PoolState {
   version: 1;
@@ -107,6 +116,8 @@ export interface PoolState {
   checkedAtMs: number;
   /** Why the last funding attempt did not deposit, if it did not. */
   fundingBlocked?: 'wallet_low' | 'not_allowlisted' | null;
+  /** Why the owner can service no lane at all, if it cannot. */
+  ownerBlocked?: OwnerBlocked | null;
   walletBalanceAtomic?: string;
   /** When a payer last found no free lane, so an owner grows the pool. */
   demandAtMs?: number;
@@ -165,6 +176,7 @@ export function parseLaneState(value: unknown): LaneState | null {
   if (
     v.version !== 1 ||
     typeof v.index !== 'number' ||
+    typeof v.payer !== 'string' ||
     typeof v.salt !== 'string' ||
     typeof v.channelId !== 'string' ||
     !isAtomic(v.balanceAtomic) ||
@@ -568,7 +580,9 @@ export async function readFees(dir: string, index: number): Promise<FeeEntry[]> 
 
 /** Why routing on the paid path is paused, for doctor and the session notice. */
 export type PausedReason =
-  { reason: 'approval_missing' } | { reason: 'cannot_fund'; walletAtomic: bigint | null };
+  | { reason: 'approval_missing' }
+  | { reason: 'cannot_fund'; walletAtomic: bigint | null }
+  | { reason: OwnerBlocked };
 
 /**
  * PAUSED, AND WHY. Only once the server takes the fee, which a machine learns
@@ -577,7 +591,8 @@ export type PausedReason =
  * until then the free path routes as it always has, and there is nothing to
  * tell anyone. Missing approval pauses routing; an approved machine whose
  * lanes are all below one fee and whose wallet cannot make the next deposit is
- * paused for want of funds.
+ * paused for want of funds, and one whose owner cannot open the voucher key or
+ * holds lanes of a replaced wallet is paused for that.
  */
 export async function pausedReason(
   dataDir: string,
@@ -588,7 +603,11 @@ export async function pausedReason(
   const feeTaken = pool.paidPath === 'available' || typeof pool.feeRequiredAtMs === 'number';
   if (!feeTaken) return null;
   if (!approved) return { reason: 'approval_missing' };
-  if (pool.paidPath !== 'available' || pool.fundingBlocked !== 'wallet_low') return null;
+  if (pool.paidPath !== 'available') return null;
+  if (pool.ownerBlocked === 'voucher_key_locked' || pool.ownerBlocked === 'wallet_replaced') {
+    return { reason: pool.ownerBlocked };
+  }
+  if (pool.fundingBlocked !== 'wallet_low') return null;
   const dir = lanesDir(dataDir);
   for (const index of await laneIndices(dir)) {
     const state = await readLaneState(dir, index);
@@ -620,21 +639,41 @@ export async function noteFeeRequired(
   await writePool(dataDir, { feeRequiredAtMs: required ? now : null });
 }
 
-/** The fix, as the command the user runs. */
-export function pausedFix(paused: PausedReason): string {
-  if (paused.reason === 'approval_missing') return `\`${APPROVE_COMMAND}\``;
-  const need =
-    paused.walletAtomic === null || paused.walletAtomic >= LANE_DEPOSIT_ATOMIC
-      ? LANE_DEPOSIT_ATOMIC
-      : LANE_DEPOSIT_ATOMIC - paused.walletAtomic;
-  return `\`tenjin wallet fund ${usd(need)}\``;
+/** The variable the wallet already reads its passphrase from, headless. */
+export const PASSPHRASE_ENV = 'TENJIN_WALLET_PASSPHRASE';
+
+/** The fix as one sentence, or null when no command ends the pause. */
+export function pausedFix(paused: PausedReason): string | null {
+  switch (paused.reason) {
+    case 'approval_missing':
+      return `Run \`${APPROVE_COMMAND}\`.`;
+    case 'cannot_fund':
+      return `Run \`tenjin wallet fund ${usd(fundNeed(paused.walletAtomic))}\`.`;
+    case 'voucher_key_locked':
+      return `Set ${PASSPHRASE_ENV} to the wallet's passphrase (with a TENJIN_WALLET_KEY wallet, to a passphrase you keep) in the environment Claude Code starts from, then restart Claude Code.`;
+    case 'wallet_replaced':
+      return null;
+  }
 }
 
-/** The one sentence doctor and the session notice share. */
+function fundNeed(walletAtomic: bigint | null): bigint {
+  return walletAtomic === null || walletAtomic >= LANE_DEPOSIT_ATOMIC
+    ? LANE_DEPOSIT_ATOMIC
+    : LANE_DEPOSIT_ATOMIC - walletAtomic;
+}
+
+/** The one sentence doctor, the session notice and the tool share. */
 export function pausedSentence(paused: PausedReason): string {
-  return paused.reason === 'approval_missing'
-    ? `Tenjin routing is paused: the routing fee ($${usd(ROUTING_FEE_ATOMIC)} a call, at most $${usd(ROUTING_ALLOWANCE_ATOMIC)} a day) is not approved. To turn it back on, run ${pausedFix(paused)}.`
-    : `Tenjin routing is paused: the wallet cannot fund a $${usd(LANE_DEPOSIT_ATOMIC)} routing lane. To turn it back on, fund it with ${pausedFix(paused)}.`;
+  switch (paused.reason) {
+    case 'approval_missing':
+      return `Tenjin routing is paused: the routing fee ($${usd(ROUTING_FEE_ATOMIC)} a call, at most $${usd(ROUTING_ALLOWANCE_ATOMIC)} a day) is not approved. To turn it back on, run \`${APPROVE_COMMAND}\`.`;
+    case 'cannot_fund':
+      return `Tenjin routing is paused: the wallet cannot fund a $${usd(LANE_DEPOSIT_ATOMIC)} routing lane. To turn it back on, fund it with \`tenjin wallet fund ${usd(fundNeed(paused.walletAtomic))}\`.`;
+    case 'voucher_key_locked':
+      return `Tenjin routing is paused: \`tenjin mcp\` cannot open the routing voucher key, which is sealed with the wallet passphrase, without a prompt. To turn it back on, set ${PASSPHRASE_ENV} in the environment Claude Code starts from and restart Claude Code.`;
+    case 'wallet_replaced':
+      return 'Tenjin routing is paused: the routing lanes on this machine were funded by a wallet it no longer uses (the wallet was replaced), so `tenjin mcp` cannot fund or sign for them. What those lanes still hold stays with the old wallet.';
+  }
 }
 
 /** Atomic USDC as dollars with at least two decimals, never a float. */
