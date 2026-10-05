@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -156,19 +156,31 @@ describe('the hook tool', () => {
     return client;
   }
 
-  const promptEvent = (session: string) => ({
+  /** A home laid out as Claude Code keeps it, with `session`'s transcript in it. */
+  async function home(session: string): Promise<{ homeDir: string; transcript: string }> {
+    const homeDir = join(dir, 'home');
+    const project = join(homeDir, '.claude', 'projects', '-repo');
+    await mkdir(project, { recursive: true });
+    const transcript = join(project, `${session}.jsonl`);
+    await writeFile(transcript, '');
+    return { homeDir: await realpath(homeDir), transcript: await realpath(transcript) };
+  }
+
+  const promptEvent = (session: string, transcript: string) => ({
     hook_event_name: 'UserPromptSubmit',
     session_id: session,
-    transcript_path: '',
+    transcript_path: transcript,
     cwd: dir,
     prompt: 'what is the current price of ETH in USD',
   });
 
   it('runs the prompt leg in this process and answers in the hook format', async () => {
     await writeFeeState(dir, { paidPath: 'available', checkedAtMs: Date.now() });
+    const { homeDir, transcript } = await home('sess-hook');
     const fake = new FakeRouter();
     const server = buildRouterMcpServer({
       dataDir: dir,
+      homeDir,
       handlerDeps: { cwd: dir, signer: await testWalletProvider().getSigner() },
       hookDeps: { baseUrl: 'https://router.test', fetchImpl: fake.fetch, warn: () => undefined },
     });
@@ -176,7 +188,7 @@ describe('the hook tool', () => {
     try {
       const called = await client.callTool({
         name: 'hook',
-        arguments: substituted('prompt', promptEvent('sess-hook')),
+        arguments: substituted('prompt', promptEvent('sess-hook', transcript)),
       });
       const text = (called.content as { text: string }[])[0]!.text;
       // The fee is not approved, so the free path ran and the pause was said.
@@ -188,7 +200,7 @@ describe('the hook tool', () => {
       // Said once: the same session's next prompt gets no output at all.
       const again = await client.callTool({
         name: 'hook',
-        arguments: substituted('prompt', promptEvent('sess-hook')),
+        arguments: substituted('prompt', promptEvent('sess-hook', transcript)),
       });
       expect((again.content as { text: string }[])[0]!.text).toBe('');
     } finally {
@@ -199,6 +211,7 @@ describe('the hook tool', () => {
 
   it("pays the routing fee through this process's payer once the fee is approved", async () => {
     await writeFile(join(dir, 'config.json'), JSON.stringify({ routingFee: 'approved' }));
+    const { homeDir, transcript } = await home('sess-paid');
     const fake = new FakeRouter();
     const wallet = privateKeyToAccount(generatePrivateKey());
     const payer = new RoutingPayer({
@@ -218,6 +231,7 @@ describe('the hook tool', () => {
     });
     const server = buildRouterMcpServer({
       dataDir: dir,
+      homeDir,
       payer,
       handlerDeps: { cwd: dir, signer: await testWalletProvider().getSigner() },
       hookDeps: { baseUrl: 'https://router.test', fetchImpl: fake.fetch, warn: () => undefined },
@@ -226,13 +240,69 @@ describe('the hook tool', () => {
     try {
       await client.callTool({
         name: 'hook',
-        arguments: substituted('prompt', promptEvent('sess-paid')),
+        arguments: substituted('prompt', promptEvent('sess-paid', transcript)),
       });
       expect(fake.log).toEqual([
         'POST /api/x402-router/route unpaid',
         'POST /api/x402-router/route paid',
       ]);
       expect(fake.deposits).toBe(1);
+      expect(fake.settledFees).toBe(1);
+    } finally {
+      await client.close();
+      await server.close();
+      await payer.close();
+    }
+  });
+
+  it('reads, sends and pays nothing for a forged path or a second session', async () => {
+    await writeFile(join(dir, 'config.json'), JSON.stringify({ routingFee: 'approved' }));
+    const { homeDir, transcript } = await home('sess-real');
+    const fake = new FakeRouter();
+    const wallet = privateKeyToAccount(generatePrivateKey());
+    const payer = new RoutingPayer({
+      dataDir: dir,
+      getSigner: async () => testSigner(wallet),
+      policy: async () => ({
+        maxAutoSpendAtomic: 250_000n,
+        sessionBudgetAtomic: 5_000_000n,
+        allowlistCreators: [],
+      }),
+      walletBalance: async () => 10_000_000n,
+      readContract: fake.readContract as never,
+      fetchImpl: fake.fetch,
+      pid: 1,
+      isAlive: () => true,
+      warn: () => undefined,
+    });
+    const server = buildRouterMcpServer({
+      dataDir: dir,
+      homeDir,
+      payer,
+      handlerDeps: { cwd: dir, signer: await testWalletProvider().getSigner() },
+      hookDeps: { baseUrl: 'https://router.test', fetchImpl: fake.fetch, warn: () => undefined },
+    });
+    const client = await connect(server);
+    const forged = join(dir, 'config.json');
+    const text = async (session: string, path: string) =>
+      (
+        (
+          await client.callTool({
+            name: 'hook',
+            arguments: substituted('prompt', promptEvent(session, path)),
+          })
+        ).content as { text: string }[]
+      )[0]!.text;
+    try {
+      expect(await text('sess-real', forged)).toBe('');
+      expect(fake.log).toEqual([]);
+      await text('sess-real', transcript);
+      expect(fake.settledFees).toBe(1);
+      const sent = fake.log.length;
+      const other = join(homeDir, '.claude', 'projects', '-repo', 'sess-other.jsonl');
+      await writeFile(other, '');
+      expect(await text('sess-other', other)).toBe('');
+      expect(fake.log).toHaveLength(sent);
       expect(fake.settledFees).toBe(1);
     } finally {
       await client.close();

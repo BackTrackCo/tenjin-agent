@@ -11,6 +11,7 @@ import { resolveSpendAuthorizer, resolveWalletProvider, type WalletProvider } fr
 import type { CommandContext, GlobalFlags } from '../context';
 import type { RouteFor } from './fee';
 import { runHookKind } from './hook-command';
+import { HookSession } from './hook-session';
 import { eventFromToolInput, HOOK_KINDS, HOOK_TOOL, HOOK_TOOL_FIELDS } from './hook-tool';
 import type { HookDeps } from './hooks';
 import { MCP_SERVER_NAME } from './names';
@@ -88,6 +89,8 @@ export interface RouterMcpOptions {
   hookDeps?: Partial<HookDeps>;
   /** The routing fee's payer; both tools route through it once the fee is approved. */
   payer?: RoutingPayer;
+  /** Test seam: the home whose `.claude/projects` holds the session transcripts. */
+  homeDir?: string;
 }
 
 function buildContext(opts: RouterMcpOptions): CommandContext {
@@ -206,7 +209,10 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
   // THE HOOK ENTRIES' TOOL. `tenjin install` writes each routing leg as an
   // `mcp_tool` hook that calls this, so the leg runs in this process, which
   // holds the wallet and the routing fee's payer, and its answer is the hook's
-  // output. The model sees the tool too; its description tells it to leave it.
+  // output. The model sees the tool too, and the event is plain arguments, so
+  // each call must name this process's session and a transcript of its own
+  // (`HookSession`); any other call answers "no opinion" with nothing sent.
+  const session = new HookSession(opts.homeDir);
   server.registerTool(
     HOOK_TOOL,
     {
@@ -222,7 +228,9 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
     async (args): Promise<CallToolResult> => {
       let response: unknown;
       try {
-        response = await runHookKind(args.kind, eventFromToolInput(args), {
+        const event = await session.admit(eventFromToolInput(args));
+        if (event === null) return { content: [{ type: 'text', text: '' }] };
+        response = await runHookKind(args.kind, event, {
           dataDir: ctx.dataDir,
           ...(ctx.flags.baseUrl !== undefined ? { baseUrl: ctx.flags.baseUrl } : {}),
           ...(opts.payer !== undefined ? { route: opts.payer.routeFor.bind(opts.payer) } : {}),
