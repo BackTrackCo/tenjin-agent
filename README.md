@@ -5,12 +5,7 @@
   </picture>
 </p>
 
-<h3 align="center">The tool router for coding agents.</h3>
-
-<p align="center">
-  Give your agent superpowers once. Tenjin hands it the right tool when it helps, and you keep working like before.<br>
-  No API keys. No pile of MCP servers. No rules to write.
-</p>
+<h3 align="center">The tool router for coding agents. Tenjin picks the right tool when your agent needs one, and one wallet pays for every call.</h3>
 
 <p align="center">
   <a href="https://www.npmjs.com/package/tenjin-cli"><img src="https://img.shields.io/npm/v/tenjin-cli?color=C85A3B&label=npm" alt="npm version"></a>
@@ -91,7 +86,7 @@ The router picks from a catalog we curate and maintain. When nothing in it fits,
 | **X posts** · [glim](https://glim.sh)                          | Posts matching a search, or one post with its thread                                      | $0.005         |
 | **Reddit** · [glim](https://glim.sh)                           | Posts matching a search, or one thread with its comments                                  | $0.01 / $0.005 |
 
-Free tools run without a funded wallet. More are added by demand: [tell us what you want](#request-a-tool).
+Every tool, including the Tenjin list, with current prices: [tenjin.sh/tools](https://tenjin.sh/tools). More are added by demand: [tell us what you want](#request-a-tool).
 
 ### Tenjin list and experimental Bazaar
 

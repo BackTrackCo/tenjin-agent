@@ -106,7 +106,7 @@ Examples:
     `
 Examples:
   $ tenjin config
-  $ tenjin config set publish.mode review
+  $ tenjin config set router.context turn
   $ tenjin config set maxAutoSpend 0.25
   $ tenjin config set --project router.enabled false
 `,

@@ -1,9 +1,8 @@
 {
   "name": "tenjin-cli",
   "version": "0.1.0-alpha.23",
-  "mcpName": "blog.tenjin/tenjin",
   "type": "module",
-  "description": "x402 router for coding agents: one paid decision per lookup, a local wallet that pays each provider per call in USDC on Base.",
+  "description": "The tool router for coding agents. Tenjin picks the right tool when your agent needs one, and one wallet pays for every call.",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/BackTrackCo/tenjin-agent.git"
@@ -11,14 +10,17 @@
   "homepage": "https://tenjin.blog/agents",
   "bugs": "https://github.com/BackTrackCo/tenjin-agent/issues",
   "keywords": [
+    "claude-code",
+    "coding-agents",
+    "tool-router",
+    "ai-agents",
+    "agent-tools",
+    "mcp",
     "x402",
     "usdc",
     "base",
-    "ai-agents",
-    "agent-payments",
-    "mcp",
-    "knowledge-marketplace",
     "micropayments",
+    "agent-payments",
     "claude",
     "codex",
     "cli"

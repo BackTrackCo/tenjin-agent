@@ -105,17 +105,26 @@ export interface ConfigSetDeps {
   wireAllowlist?: (home: string, mode: PublishMode) => Promise<PermissionsResult>;
 }
 
+/**
+ * The shelf's settings. `config get/set` still accept them and `--json` still
+ * carries them, but the human listing shows only what the router CLI uses: it
+ * ships no shelf command that reads these.
+ */
+const SHELF_KEYS: ReadonlySet<string> = new Set<string>([
+  'allowlistCreators',
+  'publicShelfUrl',
+  'shelfBypassSecret',
+  'evalCohort',
+  ...PUBLISH_CONFIG_KEYS,
+  ...HOOKS_CONFIG_KEYS,
+  ...LOOP_CONFIG_KEYS,
+  ...TEAM_CONFIG_KEYS,
+]);
+
 const KEY_WIDTH = Math.max(
-  ...[
-    ...CONFIG_KEYS,
-    ...PUBLISH_CONFIG_KEYS,
-    ...HOOKS_CONFIG_KEYS,
-    ...UPDATE_CONFIG_KEYS,
-    ...LOOP_CONFIG_KEYS,
-    ...TEAM_CONFIG_KEYS,
-    ...ROUTER_CONFIG_KEYS,
-    ...EXPERIMENTAL_CONFIG_KEYS,
-  ].map((key) => key.length),
+  ...[...CONFIG_KEYS, ...UPDATE_CONFIG_KEYS, ...ROUTER_CONFIG_KEYS, ...EXPERIMENTAL_CONFIG_KEYS]
+    .filter((key) => !SHELF_KEYS.has(key))
+    .map((key) => key.length),
 );
 
 /**
@@ -128,7 +137,7 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
   sendMaxAmount:
     'hard cap per tenjin wallet send; unset = send refuses until set, 0 disables send, none = uncapped; never bypassed by --yes',
   allowlistCreators: 'only auto-pay these creators (empty = any)',
-  baseUrl: 'Tenjin API base URL: what publish/read/search go to (the team shelf, in team mode)',
+  baseUrl: 'Tenjin API base URL the router asks',
   publicShelfUrl:
     'the public marketplace, consume-only: the second shelf a team-mode search falls through to',
   shelfBypassSecret:
@@ -234,20 +243,23 @@ export async function runConfigList(ctx: CommandContext): Promise<CommandResult>
   const settings = await resolveFromContext(ctx);
   const data: Record<string, RenderedSetting> = {};
   const humanLines: string[] = [];
+  const show = (key: string, line: string) => {
+    if (!SHELF_KEYS.has(key)) humanLines.push(line);
+  };
   for (const key of CONFIG_KEYS) {
     const entry = renderSetting(key, settings[key].value, settings[key].source);
     data[key] = entry;
-    humanLines.push(describedLine(key, entry));
+    show(key, describedLine(key, entry));
   }
   for (const key of PUBLISH_CONFIG_KEYS) {
     const entry = renderPublishSetting(key, settings);
     data[key] = entry;
-    humanLines.push(describedLine(key, entry, downgradeNote(key, settings)));
+    show(key, describedLine(key, entry, downgradeNote(key, settings)));
   }
   for (const key of HOOKS_CONFIG_KEYS) {
     const entry = renderHooksSetting(key, settings);
     data[key] = entry;
-    humanLines.push(describedLine(key, entry));
+    show(key, describedLine(key, entry));
   }
   for (const key of UPDATE_CONFIG_KEYS) {
     const entry: RenderedSetting = {
@@ -255,12 +267,12 @@ export async function runConfigList(ctx: CommandContext): Promise<CommandResult>
       source: settings.updateMode.source,
     };
     data[key] = entry;
-    humanLines.push(describedLine(key, entry));
+    show(key, describedLine(key, entry));
   }
   for (const key of LOOP_CONFIG_KEYS) {
     const entry = renderLoopSetting(key, settings);
     data[key] = entry;
-    humanLines.push(describedLine(key, entry));
+    show(key, describedLine(key, entry));
   }
   for (const key of TEAM_CONFIG_KEYS) {
     const entry: RenderedSetting = {
@@ -268,13 +280,13 @@ export async function runConfigList(ctx: CommandContext): Promise<CommandResult>
       source: settings.teamPublicFallback.source,
     };
     data[key] = entry;
-    humanLines.push(describedLine(key, entry));
+    show(key, describedLine(key, entry));
   }
   const router = await resolveRouterFromContext(ctx);
   for (const key of ROUTER_CONFIG_KEYS) {
     const entry = renderRouterSetting(key, router);
     data[key] = entry;
-    humanLines.push(describedLine(key, entry));
+    show(key, describedLine(key, entry));
   }
   for (const key of EXPERIMENTAL_CONFIG_KEYS) {
     const entry: RenderedSetting = {
@@ -282,7 +294,7 @@ export async function runConfigList(ctx: CommandContext): Promise<CommandResult>
       source: settings.experimentalBazaar.source,
     };
     data[key] = entry;
-    humanLines.push(describedLine(key, entry));
+    show(key, describedLine(key, entry));
   }
   return { data, humanLines };
 }

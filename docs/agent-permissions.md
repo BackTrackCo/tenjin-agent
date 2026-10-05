@@ -45,7 +45,7 @@ A compromised backend can therefore name any origin it likes, and spend at most 
 
 ## A prefix rule pins the verb, not the flags
 
-This matters for the shell rules below rather than the tool rule above. Claude Code's `Bash(tenjin pay:*)` matches the verb and lets every flag through, including `--base-url`, which points the command at another host. So a rule you add is a rule for the verb at whatever host the caller names, and a task that arrived from a web page or a purchased document is exactly where such a flag comes from.
+This matters for the shell rules below rather than the tool rule above. Claude Code's `Bash(tenjin pay:*)` matches the verb and lets every flag through, including `--base-url`, which points the command at another host. So a rule you add is a rule for the verb at whatever host the caller names, and a task that arrived from a web page or a provider result is exactly where such a flag comes from.
 
 ## Opt in by hand: paying an endpoint you name
 
@@ -65,7 +65,7 @@ tenjin pay https://api.example.com/quote --json --max-price 0.05
 tenjin pay https://api.example.com/quote --json --max-price 0.05 --ignore-warnings --yes
 ```
 
-Both flags still obey the optional explicit `--max-price` cap, destination and supported-challenge checks, and the authoritative wallet balance check. Warnings and acknowledgement status remain in JSON output. Each paid invocation can spend again; there is no purchase-library dedupe. Free or SIWX-entitled delivery needs neither warning acknowledgement nor a payment balance read.
+Both flags still obey the optional explicit `--max-price` cap, destination and supported-challenge checks, and the authoritative wallet balance check. Warnings and acknowledgement status remain in JSON output. Each paid invocation can spend again; nothing deduplicates repeat payments. Free or SIWX-entitled delivery needs neither warning acknowledgement nor a payment balance read.
 
 Router calls cannot use `--ignore-warnings`. They require their offered price and retain hard checks for any supplied network, asset or recipient. An offer's spec supplies all four, so the live 402 has to match its recipient, network and asset and stay within its price; a lookup without a spec gets its price alone from the server, and for it this release does not claim complete endpoint/payee quote binding.
 
@@ -109,7 +109,7 @@ To stop the router without removing anything, `tenjin config set router.enabled 
 
 ## What the hooks send
 
-- On every prompt and every native `WebSearch` or `WebFetch`: the text of the current turn and at most six prior messages, masked by the same key, PEM, seed-phrase, and URL credential rules the publish scan uses, then bounded to 16 KiB, with harness meta rows and tool results excluded. Tool results never travel: a tool result is other people's content, and a packet carrying it would be a channel from a fetched page into a routing decision.
+- On every prompt and every native `WebSearch` or `WebFetch`: the text of the current turn and at most six prior messages, masked by the CLI's key, PEM, seed-phrase, and URL credential rules (`src/lib/redact-rules.json`), then bounded to 16 KiB, with harness meta rows and tool results excluded. Tool results never travel: a tool result is other people's content, and a packet carrying it would be a channel from a fetched page into a routing decision.
 - A native call sends that same bounded turn WITH the call attached, read from this session's own transcript. That is how a restriction you stated in your own words, such as asking for native tools only, reaches the decision about a bare URL your assistant is fetching. When that call then comes back short and nothing was offered before it, it is sent once more with what the harness reported: the status code and byte count, the error, or that a fetch came back with only the page's shell (`reason: no_main_content`). Never the page or the results. A call that came back fine sends nothing more.
 - When your assistant hands a task to a subagent: that task, as the current message, with the same bounded turn before it.
 - When your assistant asks you a question (`AskUserQuestion`): the questions and their options, attached to the same bounded turn, before you see them; and after you answer, your answers as the current message. Before the question, a fitting lookup redirects it once, under the same rules as a native call, and only when your spend limits and wallet would pay it without asking you; after it, a fitting lookup is offered beside your answers.
