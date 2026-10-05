@@ -553,6 +553,33 @@ describe('LaneOwner', () => {
     expect(router.channels.get(fresh!.channelId.toLowerCase())?.charged).toBe(3_000n);
   });
 
+  it('keeps a pass on the payer it started with when the wallet is replaced mid-pass', async () => {
+    const router = new FakeRouter();
+    const other = privateKeyToAccount(generatePrivateKey());
+    // The first read of a pass sees the old wallet; every later read the new one.
+    let reads = 0;
+    const lanes = new LaneOwner({
+      ...ownerDeps(router),
+      walletAddress: async () => (reads++ === 0 ? wallet.address : other.address),
+      getSigner: async () => signer(reads <= 1 ? wallet : other),
+      voucherKey: async (payer) => (payer === wallet.address ? VOUCHER_KEY : generatePrivateKey()),
+    });
+    await lanes.tick();
+    expect(await readLaneState(laneDir(), 0)).toMatchObject({
+      payer: wallet.address,
+      balanceAtomic: '250000',
+    });
+    expect(await laneIndices(payerLanesDir(dir, other.address))).toEqual([]);
+    // The next pass starts with the new wallet and uses its folder.
+    await lanes.tick();
+    expect(await readLaneState(payerLanesDir(dir, other.address), 0)).toMatchObject({
+      payer: other.address,
+      balanceAtomic: '250000',
+    });
+    expect(await laneIndices(laneDir())).toEqual([0]);
+    expect(router.deposits).toBe(2);
+  });
+
   it("brings the old wallet's lanes back when it is in use again, and counts only its fees", async () => {
     const router = new FakeRouter();
     const other = privateKeyToAccount(generatePrivateKey());

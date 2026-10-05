@@ -198,7 +198,9 @@ export class LaneOwner {
     const blocked = await this.ownerBlocked(address);
     await this.noteOwnerBlocked(dir, blocked);
     if (blocked !== null) return;
-    await this.leaseLanes(dir);
+    // ONE PAYER PER PASS: every lane write below uses this address, never a
+    // fresh read, so a wallet replaced mid-pass cannot mix two payers' lanes.
+    await this.leaseLanes(dir, address);
     let tried = false;
     let fundingBlocked: WalletPool['fundingBlocked'] = null;
     let walletAtomic: bigint | null = null;
@@ -301,7 +303,7 @@ export class LaneOwner {
    * processes cannot both take it; and a pool with recent demand and room
    * gets one more lane.
    */
-  private async leaseLanes(dir: string): Promise<void> {
+  private async leaseLanes(dir: string, address: `0x${string}`): Promise<void> {
     const now = this.now();
     const indices = await laneIndices(dir);
     for (const index of indices) {
@@ -316,7 +318,7 @@ export class LaneOwner {
     const demand = pool?.demandAtMs !== undefined && now - pool.demandAtMs < DEMAND_WINDOW_MS;
     if (indices.length === 0 || (demand && indices.length < MAX_LANES)) {
       const next = [...Array(MAX_LANES).keys()].find((i) => !indices.includes(i));
-      if (next !== undefined) await this.createLane(dir, next);
+      if (next !== undefined) await this.createLane(dir, next, address);
       if (demand) await writeWalletPool(dir, { demandAtMs: 0 });
     }
   }
@@ -341,15 +343,14 @@ export class LaneOwner {
     }
   }
 
-  private async createLane(dir: string, index: number): Promise<void> {
+  private async createLane(dir: string, index: number, address: `0x${string}`): Promise<void> {
     const now = this.now();
     const token = await takeClaim(dir, index, HOOK_CLAIM_TTL_MS, now);
     if (token === null) return;
     try {
       if ((await readLaneState(dir, index)) !== null) return;
       const paid = this.probe?.paid;
-      const address = await this.deps.walletAddress();
-      if (paid == null || address === null) return;
+      if (paid == null) return;
       const salt = `0x${randomBytes(32).toString('hex')}` as `0x${string}`;
       const accept = paid.accepts[0] as PaymentRequirements;
       const scheme = new BatchSettlementEvmScheme(this.walletSigner(address), {
@@ -539,6 +540,8 @@ export class LaneOwner {
     const funding = await this.requirementsAt(ROUTE_CHANNEL_PATH);
     if (funding === null) return { blocked: null };
     const signer = await this.deps.getSigner();
+    // A wallet replaced since the pass began signs nothing for this payer's lane.
+    if (signer.address.toLowerCase() !== address.toLowerCase()) return { blocked: null };
     const scheme = new BatchSettlementEvmScheme(
       {
         address,
