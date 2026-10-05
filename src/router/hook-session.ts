@@ -13,10 +13,10 @@ import { dirname, isAbsolute, join, relative, sep } from 'node:path';
  * session: the path resolves, symlinks followed, to a regular file under
  * `~/.claude/projects/<project>/` named `<session_id>.jsonl`, or to one of that
  * session's subagent files, `<session_id>/subagents/agent-<id>.jsonl` beside
- * it (the layout of Claude Code 2.1.x). And one `tenjin mcp` serves one
- * session: the first admitted session id binds the process, and any other id
- * is refused afterwards. A refused call reads nothing, sends nothing and pays
- * nothing.
+ * it (the layout of Claude Code 2.1.x). Each call is checked on its own: a
+ * session id that changes inside one `tenjin mcp` process, as after `/clear`
+ * or a resume, is a new session with its own transcript, not a forgery. A
+ * refused call reads nothing, sends nothing and pays nothing.
  */
 
 /** A session or agent id becomes a path segment, so only an opaque token passes. */
@@ -29,39 +29,24 @@ interface OwnTranscript {
   kind: 'session' | 'subagent';
 }
 
-export class HookSession {
-  private bound: string | undefined;
-
-  constructor(private readonly homeDir: string = homedir()) {}
-
-  /** The session this process serves, once one was admitted. */
-  get sessionId(): string | undefined {
-    return this.bound;
+/** The event with its transcript path resolved, or `null` when the call is refused. */
+export async function admitHookEvent(
+  event: Record<string, unknown>,
+  homeDir: string = homedir(),
+): Promise<Record<string, unknown> | null> {
+  const sessionId = event['session_id'];
+  if (typeof sessionId !== 'string' || !SEGMENT_RE.test(sessionId)) return null;
+  const transcript = await ownTranscript(homeDir, event['transcript_path'], sessionId);
+  if (transcript === null) return null;
+  const agentId = event['agent_id'];
+  if (
+    transcript.kind === 'session' &&
+    typeof agentId === 'string' &&
+    !(await subagentFileStaysHome(transcript.path, sessionId, agentId))
+  ) {
+    return null;
   }
-
-  /**
-   * The event with its transcript path resolved, or `null` when the call is
-   * refused. A refused call does not bind the process.
-   */
-  async admit(event: Record<string, unknown>): Promise<Record<string, unknown> | null> {
-    const sessionId = event['session_id'];
-    if (typeof sessionId !== 'string' || !SEGMENT_RE.test(sessionId)) return null;
-    if (this.bound !== undefined && this.bound !== sessionId) return null;
-    const transcript = await ownTranscript(this.homeDir, event['transcript_path'], sessionId);
-    if (transcript === null) return null;
-    const agentId = event['agent_id'];
-    if (
-      transcript.kind === 'session' &&
-      typeof agentId === 'string' &&
-      !(await subagentFileStaysHome(transcript.path, sessionId, agentId))
-    ) {
-      return null;
-    }
-    // Checked again after the reads: two first calls racing must not both bind.
-    if (this.bound !== undefined && this.bound !== sessionId) return null;
-    this.bound = sessionId;
-    return { ...event, transcript_path: transcript.path };
-  }
+  return { ...event, transcript_path: transcript.path };
 }
 
 async function ownTranscript(

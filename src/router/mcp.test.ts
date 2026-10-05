@@ -255,7 +255,7 @@ describe('the hook tool', () => {
     }
   });
 
-  it('reads, sends and pays nothing for a forged path or a second session', async () => {
+  it('reads, sends and pays nothing for a forged path, and routes a new session', async () => {
     await writeFile(join(dir, 'config.json'), JSON.stringify({ routingFee: 'approved' }));
     const { homeDir, transcript } = await home('sess-real');
     const fake = new FakeRouter();
@@ -298,12 +298,16 @@ describe('the hook tool', () => {
       expect(fake.log).toEqual([]);
       await text('sess-real', transcript);
       expect(fake.settledFees).toBe(1);
-      const sent = fake.log.length;
+      // After `/clear` the same process serves a new session id: it routes.
       const other = join(homeDir, '.claude', 'projects', '-repo', 'sess-other.jsonl');
       await writeFile(other, '');
-      expect(await text('sess-other', other)).toBe('');
+      await text('sess-other', other);
+      expect(fake.settledFees).toBe(2);
+      // A path that is not that session's own transcript still sends nothing.
+      const sent = fake.log.length;
+      expect(await text('sess-other', transcript)).toBe('');
       expect(fake.log).toHaveLength(sent);
-      expect(fake.settledFees).toBe(1);
+      expect(fake.settledFees).toBe(2);
     } finally {
       await client.close();
       await server.close();

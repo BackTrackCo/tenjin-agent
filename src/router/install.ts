@@ -83,8 +83,8 @@ export const ALLOW_RULE = REQUEST_TOOL;
  * arguments, so the model calling it could forge a routing leg. A deny rule
  * takes the tool out of the model's tool list in every permission mode,
  * bypass included, while Claude Code's own `mcp_tool` hook calls to it still
- * run (checked on Claude Code 2.1.289). The tool's session check
- * (`HookSession`) stays for a settings file without the rule.
+ * run (checked on Claude Code 2.1.289). The tool's transcript check
+ * (`admitHookEvent`) stays for a settings file without the rule.
  */
 export const DENY_RULE = `mcp__${MCP_SERVER_NAME}__${HOOK_TOOL}`;
 /**

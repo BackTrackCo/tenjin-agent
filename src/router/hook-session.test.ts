@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { HookSession } from './hook-session';
+import { admitHookEvent } from './hook-session';
 
 /**
  * The `hook` tool reads history only from a real Claude Code transcript of the
@@ -40,71 +40,52 @@ const event = (sessionId: string, path: string, extra: Record<string, unknown> =
   ...extra,
 });
 
-describe('HookSession.admit', () => {
-  it("admits the session's own transcript and binds the process to that session", async () => {
-    const session = new HookSession(home);
-    await expect(session.admit(event(SESSION, transcript))).resolves.toEqual(
-      event(SESSION, transcript),
-    );
-    expect(session.sessionId).toBe(SESSION);
+const admit = (e: Record<string, unknown>) => admitHookEvent(e, home);
+
+describe('admitHookEvent', () => {
+  it("admits the session's own transcript", async () => {
+    await expect(admit(event(SESSION, transcript))).resolves.toEqual(event(SESSION, transcript));
   });
 
   it('refuses a path outside the projects directory', async () => {
-    const session = new HookSession(home);
     const named = join(home, `${SESSION}.jsonl`);
     await writeFile(named, '{}\n');
-    await expect(session.admit(event(SESSION, named))).resolves.toBeNull();
-    await expect(session.admit(event(SESSION, outside))).resolves.toBeNull();
-    await expect(session.admit(event(SESSION, '/etc/hosts'))).resolves.toBeNull();
-    // A refused call binds nothing: the real session is still admitted.
-    expect(session.sessionId).toBeUndefined();
-    await expect(session.admit(event(SESSION, transcript))).resolves.not.toBeNull();
+    await expect(admit(event(SESSION, named))).resolves.toBeNull();
+    await expect(admit(event(SESSION, outside))).resolves.toBeNull();
+    await expect(admit(event(SESSION, '/etc/hosts'))).resolves.toBeNull();
   });
 
   it('refuses a symlink inside the projects directory that leads out of it', async () => {
     const link = join(project, `${OTHER}.jsonl`);
     await symlink(outside, link);
-    await expect(new HookSession(home).admit(event(OTHER, link))).resolves.toBeNull();
+    await expect(admit(event(OTHER, link))).resolves.toBeNull();
     // A `..` hop is resolved before the check too.
     const hop = join(project, '..', '..', '..', 'secret.jsonl');
-    await expect(new HookSession(home).admit(event(SESSION, hop))).resolves.toBeNull();
+    await expect(admit(event(SESSION, hop))).resolves.toBeNull();
   });
 
   it('refuses a transcript whose name is not the session id', async () => {
     const other = join(project, `${OTHER}.jsonl`);
     await writeFile(other, '{}\n');
-    await expect(new HookSession(home).admit(event(SESSION, other))).resolves.toBeNull();
+    await expect(admit(event(SESSION, other))).resolves.toBeNull();
     // Nor a relative path, a missing file, a directory, or a non-jsonl name.
-    await expect(new HookSession(home).admit(event(SESSION, `${SESSION}.jsonl`))).resolves.toBe(
-      null,
-    );
+    await expect(admit(event(SESSION, `${SESSION}.jsonl`))).resolves.toBe(null);
     await rm(transcript);
-    await expect(new HookSession(home).admit(event(SESSION, transcript))).resolves.toBeNull();
+    await expect(admit(event(SESSION, transcript))).resolves.toBeNull();
     await mkdir(transcript);
-    await expect(new HookSession(home).admit(event(SESSION, transcript))).resolves.toBeNull();
+    await expect(admit(event(SESSION, transcript))).resolves.toBeNull();
     const txt = join(project, `${SESSION}.txt`);
     await writeFile(txt, '{}\n');
-    await expect(new HookSession(home).admit(event(SESSION, txt))).resolves.toBeNull();
+    await expect(admit(event(SESSION, txt))).resolves.toBeNull();
   });
 
-  it('refuses a second session id once the first was served', async () => {
-    const session = new HookSession(home);
+  it('checks each call on its own: a new session id after /clear is admitted', async () => {
     const other = join(project, `${OTHER}.jsonl`);
     await writeFile(other, '{}\n');
-    await expect(session.admit(event(SESSION, transcript))).resolves.not.toBeNull();
-    await expect(session.admit(event(OTHER, other))).resolves.toBeNull();
-    await expect(session.admit(event(SESSION, transcript))).resolves.not.toBeNull();
-  });
-
-  it('binds only one of two first calls that race', async () => {
-    const session = new HookSession(home);
-    const other = join(project, `${OTHER}.jsonl`);
-    await writeFile(other, '{}\n');
-    const results = await Promise.all([
-      session.admit(event(SESSION, transcript)),
-      session.admit(event(OTHER, other)),
-    ]);
-    expect(results.filter((r) => r !== null)).toHaveLength(1);
+    await expect(admit(event(SESSION, transcript))).resolves.not.toBeNull();
+    await expect(admit(event(OTHER, other))).resolves.not.toBeNull();
+    // Each still needs its own transcript.
+    await expect(admit(event(OTHER, transcript))).resolves.toBeNull();
   });
 
   it("admits a subagent file only in that session's own folder", async () => {
@@ -112,17 +93,17 @@ describe('HookSession.admit', () => {
     await mkdir(own, { recursive: true });
     const sub = join(own, 'agent-a3148a84ba8b76284.jsonl');
     await writeFile(sub, '{}\n');
-    await expect(new HookSession(home).admit(event(SESSION, sub))).resolves.not.toBeNull();
+    await expect(admit(event(SESSION, sub))).resolves.not.toBeNull();
     // The same file named under another session's folder is that session's.
     const theirs = join(project, OTHER, 'subagents');
     await mkdir(theirs, { recursive: true });
     const foreign = join(theirs, 'agent-a3148a84ba8b76284.jsonl');
     await writeFile(foreign, '{}\n');
-    await expect(new HookSession(home).admit(event(SESSION, foreign))).resolves.toBeNull();
+    await expect(admit(event(SESSION, foreign))).resolves.toBeNull();
     // And a file in the folder that is not an agent transcript.
     const stray = join(own, 'notes.jsonl');
     await writeFile(stray, '{}\n');
-    await expect(new HookSession(home).admit(event(SESSION, stray))).resolves.toBeNull();
+    await expect(admit(event(SESSION, stray))).resolves.toBeNull();
   });
 
   it('refuses a call whose derived subagent file leads out of the session folder', async () => {
@@ -130,15 +111,15 @@ describe('HookSession.admit', () => {
     await mkdir(own, { recursive: true });
     await symlink(outside, join(own, 'agent-abc.jsonl'));
     const leg = (agentId: string) => event(SESSION, transcript, { agent_id: agentId });
-    await expect(new HookSession(home).admit(leg('abc'))).resolves.toBeNull();
+    await expect(admit(leg('abc'))).resolves.toBeNull();
     // A subagent with no file yet reads nothing, so it is admitted.
-    await expect(new HookSession(home).admit(leg('def'))).resolves.not.toBeNull();
+    await expect(admit(leg('def'))).resolves.not.toBeNull();
   });
 
   it('hands the handlers the resolved path, never the one it was given', async () => {
     const link = join(home, 'via-link.jsonl');
     await symlink(transcript, link);
-    const admitted = await new HookSession(home).admit(event(SESSION, link));
+    const admitted = await admit(event(SESSION, link));
     expect(admitted?.['transcript_path']).toBe(transcript);
   });
 });

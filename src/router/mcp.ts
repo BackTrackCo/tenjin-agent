@@ -11,7 +11,7 @@ import { resolveSpendAuthorizer, resolveWalletProvider, type WalletProvider } fr
 import type { CommandContext, GlobalFlags } from '../context';
 import type { RouteFor } from './fee';
 import { runHookKind } from './hook-command';
-import { HookSession } from './hook-session';
+import { admitHookEvent } from './hook-session';
 import { eventFromToolInput, HOOK_KINDS, HOOK_TOOL, HOOK_TOOL_FIELDS } from './hook-tool';
 import type { HookDeps } from './hooks';
 import { MCP_SERVER_NAME } from './names';
@@ -210,10 +210,9 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
   // `mcp_tool` hook that calls this, so the leg runs in this process, which
   // holds the wallet and the routing fee's payer, and its answer is the hook's
   // output. `install` denies the tool to the model (`DENY_RULE`), and the event
-  // is plain arguments, so each call must still name this process's session
-  // and a transcript of its own (`HookSession`); any other call answers "no
-  // opinion" with nothing sent.
-  const session = new HookSession(opts.homeDir);
+  // is plain arguments, so each call must still carry its session's own
+  // transcript (`admitHookEvent`); any other call answers "no opinion" with
+  // nothing sent.
   server.registerTool(
     HOOK_TOOL,
     {
@@ -229,7 +228,7 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
     async (args): Promise<CallToolResult> => {
       let response: unknown;
       try {
-        const event = await session.admit(eventFromToolInput(args));
+        const event = await admitHookEvent(eventFromToolInput(args), opts.homeDir);
         if (event === null) return { content: [{ type: 'text', text: '' }] };
         response = await runHookKind(args.kind, event, {
           dataDir: ctx.dataDir,
