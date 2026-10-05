@@ -14,11 +14,9 @@ import {
   resolveWalletProvider,
   type WalletProvider,
 } from '../lib/wallet';
-import { loadVoucherKey } from '../lib/wallet/voucher-key';
 import type { CommandContext, GlobalFlags } from '../context';
 import { routingFeeApproved, routingFeeFor } from './fee';
 import { LaneOwner } from './lane-owner';
-import { voucherKeyPath } from './lanes';
 import { MCP_SERVER_NAME } from './names';
 import { runRequestTool, type RequestToolDeps } from './tool';
 
@@ -253,13 +251,8 @@ async function routingLaneOwner(ctx: CommandContext): Promise<LaneOwner> {
         return null;
       }
     },
+    // Never a prompt: the context is not a TTY, because the stdio transport owns stdin.
     getSigner: () => provider.getSigner(),
-    voucherKey: (payer) =>
-      loadVoucherKey(voucherKeyPath(ctx.dataDir, payer), {
-        walletAddress: payer,
-        // Never a prompt: the stdio transport owns stdin.
-        passphrase: { env: process.env, dir: ctx.dataDir, isTTY: false },
-      }),
     policy: async () => (await resolveContextSettings(ctx)).policy,
     walletBalance: (address) => readUsdcBalance(address, settings.rpcUrl, { timeoutMs: 5_000 }),
     readContract: (args) => chain.readContract(args as Parameters<typeof chain.readContract>[0]),

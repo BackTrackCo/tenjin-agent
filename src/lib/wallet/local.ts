@@ -606,7 +606,7 @@ function accountFromKey(key: Hex, source: 'env' | 'file'): PrivateKeyAccount {
 }
 
 /** Encrypt a raw key into a Keystore v3 document using ox's default scrypt parameters. */
-export async function encryptToKeystore(key: Hex, passphrase: string): Promise<Keystore.Keystore> {
+async function encryptToKeystore(key: Hex, passphrase: string): Promise<Keystore.Keystore> {
   const [derivedKey, opts] = await Keystore.scryptAsync({ password: passphrase });
   return Keystore.encrypt(key, derivedKey, opts);
 }

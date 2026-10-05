@@ -8,7 +8,7 @@ answers its paid routing path. Each routing call then costs a flat $0.003 over x
 $0.25 deposit through the funding path (nothing is sent before approval, not even a
 probe; a deposit is not a payment, so it counts against neither `maxAutoSpend` nor
 `sessionBudget`, and at most 8 lanes hold $2 in all), pre-signs ten
-vouchers per lane with a local voucher key kept encrypted like the wallet key (lanes and voucher key are per
+vouchers per lane with the wallet, the SDK's default signer (lanes are per
 wallet: a replaced wallet gets its own, and the old wallet's lanes come back when it is in use again), and recovers a lane after a corrective
 402 with the SDK's channel recovery. A lane whose deposit fails waits 30 s before the next
 attempt, doubling with each failure up to 10 minutes. A hook only claims a lane for ten seconds, sends

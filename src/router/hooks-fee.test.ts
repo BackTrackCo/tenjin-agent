@@ -187,10 +187,10 @@ describe('the prompt hook and the routing fee', () => {
     expect((await runPromptHook(prompt(), deps(fetchImpl))).response).toBeNull();
   });
 
-  it('says once per session when tenjin mcp cannot open the voucher key, naming the variable', async () => {
+  it('says once per session when tenjin mcp cannot unlock the wallet, naming the variable', async () => {
     await config({ routingFee: 'approved' });
     await writePool(dir, { paidPath: 'available', checkedAtMs: NOW });
-    await writeWalletPool(await useLanesOf(dir, PAYER), { ownerBlocked: 'voucher_key_locked' });
+    await writeWalletPool(await useLanesOf(dir, PAYER), { ownerBlocked: 'wallet_locked' });
     const { fetchImpl } = router();
     const first = await runPromptHook(prompt(), deps(fetchImpl));
     expect(contextOf(first.response)).toContain('TENJIN_WALLET_PASSPHRASE');

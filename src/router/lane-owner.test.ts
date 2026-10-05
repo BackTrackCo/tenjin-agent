@@ -44,7 +44,7 @@ import {
 /**
  * The lane owner against a fake router that speaks the real x402 headers: the
  * SDK builds every deposit and voucher, and the SDK's recovery checks the
- * fake's corrective 402 against this client's own voucher key and a stubbed
+ * fake's corrective 402 against the wallet, which signs the vouchers, and a stubbed
  * chain read. No money moves and no network is touched.
  */
 
@@ -208,7 +208,6 @@ const NATIVE = {
 let dir: string;
 let clock: number;
 const wallet = privateKeyToAccount(generatePrivateKey());
-const VOUCHER_KEY = generatePrivateKey();
 /** The folder of {@link wallet}'s lanes. */
 const laneDir = () => payerLanesDir(dir, wallet.address);
 
@@ -246,7 +245,6 @@ function ownerDeps(router: FakeRouter, opts: OwnerOpts = {}): LaneOwnerDeps {
     approved: async () => opts.approved ?? true,
     walletAddress: async () => wallet.address,
     getSigner: async () => signer(),
-    voucherKey: async () => VOUCHER_KEY,
     policy: async () => ({
       maxAutoSpendAtomic: 250_000n,
       sessionBudgetAtomic: 5_000_000n,
@@ -505,43 +503,37 @@ describe('LaneOwner', () => {
     expect(await pausedReason(dir, true)).toMatchObject({ reason: 'cannot_fund' });
   });
 
-  it('pauses, naming the passphrase, when the voucher key cannot be opened without a prompt', async () => {
+  it('pauses, naming the passphrase, when the wallet cannot be unlocked without a prompt', async () => {
     const router = new FakeRouter();
     let locked = true;
     const lanes = new LaneOwner({
       ...ownerDeps(router),
-      voucherKey: async () => {
+      getSigner: async () => {
         if (locked) throw new Error('No wallet passphrase available.');
-        return VOUCHER_KEY;
+        return signer();
       },
     });
     await lanes.tick();
     expect(router.deposits).toBe(0);
     expect(await laneIndices(laneDir())).toEqual([]);
-    expect(await pausedReason(dir, true)).toEqual({ reason: 'voucher_key_locked' });
+    expect(await pausedReason(dir, true)).toEqual({ reason: 'wallet_locked' });
     locked = false;
     await lanes.tick();
     expect(router.deposits).toBe(1);
     expect(await pausedReason(dir, true)).toBeNull();
   });
 
-  it('gives a replaced wallet lanes and a voucher key of its own, and funds them', async () => {
+  it('gives a replaced wallet lanes of its own, and funds them', async () => {
     const router = new FakeRouter();
     await owner(router).tick();
     const before = await readLaneState(laneDir(), 0);
     const other = privateKeyToAccount(generatePrivateKey());
-    const keysFor: string[] = [];
     const replaced = new LaneOwner({
       ...ownerDeps(router),
       walletAddress: async () => other.address,
       getSigner: async () => signer(other),
-      voucherKey: async (payer) => {
-        keysFor.push(payer);
-        return generatePrivateKey();
-      },
     });
     await replaced.tick();
-    expect(keysFor).toEqual([other.address]);
     expect(router.deposits).toBe(2);
     const fresh = await readLaneState(payerLanesDir(dir, other.address), 0);
     expect(fresh).toMatchObject({ payer: other.address, balanceAtomic: '250000', status: 'ready' });
@@ -562,7 +554,6 @@ describe('LaneOwner', () => {
       ...ownerDeps(router),
       walletAddress: async () => (reads++ === 0 ? wallet.address : other.address),
       getSigner: async () => signer(reads <= 1 ? wallet : other),
-      voucherKey: async (payer) => (payer === wallet.address ? VOUCHER_KEY : generatePrivateKey()),
     });
     await lanes.tick();
     expect(await readLaneState(laneDir(), 0)).toMatchObject({
@@ -580,6 +571,26 @@ describe('LaneOwner', () => {
     expect(router.deposits).toBe(2);
   });
 
+  it('signs nothing for a payer whose wallet was replaced before the unlock', async () => {
+    const router = new FakeRouter();
+    const other = privateKeyToAccount(generatePrivateKey());
+    let reads = 0;
+    const lanes = new LaneOwner({
+      ...ownerDeps(router),
+      walletAddress: async () => (reads++ === 0 ? wallet.address : other.address),
+      getSigner: async () => signer(other),
+    });
+    await lanes.tick();
+    expect(router.deposits).toBe(0);
+    expect(await laneIndices(laneDir())).toEqual([]);
+    await lanes.tick();
+    expect(await readLaneState(payerLanesDir(dir, other.address), 0)).toMatchObject({
+      payer: other.address,
+      balanceAtomic: '250000',
+    });
+    expect(router.deposits).toBe(1);
+  });
+
   it("brings the old wallet's lanes back when it is in use again, and counts only its fees", async () => {
     const router = new FakeRouter();
     const other = privateKeyToAccount(generatePrivateKey());
@@ -588,7 +599,6 @@ describe('LaneOwner', () => {
       ...ownerDeps(router),
       walletAddress: async () => inUse.address,
       getSigner: async () => signer(inUse),
-      voucherKey: async (payer) => (payer === wallet.address ? VOUCHER_KEY : generatePrivateKey()),
     });
     await lanes.tick();
     expect((await routeOnce(router)).status).toBe('decided');
@@ -621,7 +631,7 @@ describe('LaneOwner', () => {
     expect(router.channels.get(old.channelId.toLowerCase())?.charged).toBe(6_000n);
   });
 
-  it('moves lanes and a voucher key from the flat layout into their payer folder, with no new deposit', async () => {
+  it('moves lanes from the flat layout into their payer folder, with no new deposit', async () => {
     const router = new FakeRouter();
     await owner(router).tick();
     const before = await readLaneState(laneDir(), 0);
@@ -793,12 +803,13 @@ describe('one channel id on both sides', () => {
   // ever looks the channel up.
   it("is the id the 2.21.0 server scheme computes from the client's channel config", async () => {
     const router = new FakeRouter();
-    const voucherKey = privateKeyToAccount(generatePrivateKey());
     const client = new ClientScheme(
       { address: wallet.address, signTypedData: () => Promise.reject(new Error('unused')) },
-      { salt: `0x${'ab'.repeat(32)}`, voucherSigner: voucherKey as never },
+      { salt: `0x${'ab'.repeat(32)}` },
     );
     const channelConfig = client.buildChannelConfig(router.requirement);
+    // The SDK's default with no voucher signer: the wallet authorizes the vouchers.
+    expect(channelConfig.payerAuthorizer).toBe(wallet.address);
     const clientId = computeChannelId(channelConfig, NETWORK);
     const server = new ServerScheme(router.requirement.payTo as `0x${string}`);
     const refund = (channelId: string) =>

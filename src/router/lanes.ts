@@ -22,15 +22,15 @@ import { formatUsdDisplay } from '../lib/money';
  * per channel, so a payer keeps a small pool of channels ("lanes") and each
  * parallel call takes its own.
  *
- * ONE FOLDER PER WALLET. Each wallet's lanes, pool file, claims, fee lines
- * and voucher key live under `<lanes dir>/<lowercase payer address>/`, and the
- * owner names the wallet in use in `payer.json` beside them. A replaced wallet
- * gets lanes and a voucher key of its own; when the old wallet is in use again
- * its folder, and what its lanes still hold, comes back as it was.
+ * ONE FOLDER PER WALLET. Each wallet's lanes, pool file, claims and fee lines
+ * live under `<lanes dir>/<lowercase payer address>/`, and the owner names the
+ * wallet in use in `payer.json` beside them. A replaced wallet gets lanes of
+ * its own; when the old wallet is in use again its folder, and what its lanes
+ * still hold, comes back as it was.
  *
  * TWO KINDS OF WRITER, ONE RULE. The `tenjin mcp` process that holds a lane's
- * lease owns everything that needs the wallet: the deposit, the voucher key,
- * the pre-signed ladder of `PAYMENT-SIGNATURE` strings and the lane's fee lines
+ * lease owns everything that needs the wallet: the deposit, the pre-signed
+ * ladder of `PAYMENT-SIGNATURE` strings the wallet signs, and the lane's fee lines
  * (`lane-owner.ts`). A hook only claims a lane, sends the rung the ladder
  * already holds, and writes what `PAYMENT-RESPONSE` said the channel has
  * charged. Every write to a lane's files happens under that lane's claim, so
@@ -112,8 +112,8 @@ export interface LaneResult {
   paymentRequired?: string;
 }
 
-/** `tenjin mcp` cannot open the voucher key without a prompt. */
-export type OwnerBlocked = 'voucher_key_locked';
+/** `tenjin mcp` cannot unlock the wallet without a prompt. */
+export type OwnerBlocked = 'wallet_locked';
 
 /**
  * What the server answers, for every wallet on the machine, in the lanes
@@ -156,18 +156,12 @@ export function lanesDir(dataDir: string): string {
 }
 
 const ADDRESS_RE = /^0x[0-9a-f]{40}$/;
-const VOUCHER_KEY_FILE = 'voucher-key.json';
 
-/** One wallet's folder: its lanes, pool file, claims, fee lines and voucher key. */
+/** One wallet's folder: its lanes, pool file, claims and fee lines. */
 export function payerLanesDir(dataDir: string, payer: string): string {
   const name = payer.toLowerCase();
   if (!ADDRESS_RE.test(name)) throw new Error(`not a wallet address: ${payer}`);
   return join(lanesDir(dataDir), name);
-}
-
-/** Where a wallet's voucher key is kept, encrypted (`lib/wallet/voucher-key.ts`). */
-export function voucherKeyPath(dataDir: string, payer: string): string {
-  return join(payerLanesDir(dataDir, payer), VOUCHER_KEY_FILE);
 }
 
 function currentFile(dataDir: string): string {
@@ -668,7 +662,7 @@ export type PausedReason =
  * until then the free path routes as it always has, and there is nothing to
  * tell anyone. Missing approval pauses routing; an approved machine whose
  * lanes are all below one fee and whose wallet cannot make the next deposit is
- * paused for want of funds, and one whose owner cannot open the voucher key is
+ * paused for want of funds, and one whose owner cannot unlock the wallet is
  * paused for that. Lanes and funding are the wallet in use's.
  */
 export async function pausedReason(
@@ -684,7 +678,7 @@ export async function pausedReason(
   const dir = await currentLanesDir(dataDir);
   if (dir === null) return null;
   const wallet = await readWalletPool(dir);
-  if (wallet?.ownerBlocked === 'voucher_key_locked') return { reason: wallet.ownerBlocked };
+  if (wallet?.ownerBlocked === 'wallet_locked') return { reason: wallet.ownerBlocked };
   if (wallet?.fundingBlocked !== 'wallet_low') return null;
   for (const index of await laneIndices(dir)) {
     const state = await readLaneState(dir, index);
@@ -726,8 +720,8 @@ export function pausedFix(paused: PausedReason): string {
       return `Run \`${APPROVE_COMMAND}\`.`;
     case 'cannot_fund':
       return `Run \`tenjin wallet fund ${usd(fundNeed(paused.walletAtomic))}\`.`;
-    case 'voucher_key_locked':
-      return `Set ${PASSPHRASE_ENV} to the wallet's passphrase (with a TENJIN_WALLET_KEY wallet, to a passphrase you keep) in the environment Claude Code starts from, then restart Claude Code.`;
+    case 'wallet_locked':
+      return `Set ${PASSPHRASE_ENV} to the wallet's passphrase in the environment Claude Code starts from, then restart Claude Code.`;
   }
 }
 
@@ -744,8 +738,8 @@ export function pausedSentence(paused: PausedReason): string {
       return `Tenjin routing is paused: the routing fee ($${usd(ROUTING_FEE_ATOMIC)} a call, at most $${usd(ROUTING_ALLOWANCE_ATOMIC)} a day) is not approved. To turn it back on, run \`${APPROVE_COMMAND}\`.`;
     case 'cannot_fund':
       return `Tenjin routing is paused: the wallet cannot fund a $${usd(LANE_DEPOSIT_ATOMIC)} routing lane. To turn it back on, fund it with \`tenjin wallet fund ${usd(fundNeed(paused.walletAtomic))}\`.`;
-    case 'voucher_key_locked':
-      return `Tenjin routing is paused: \`tenjin mcp\` cannot open the routing voucher key, which is sealed with the wallet passphrase, without a prompt. To turn it back on, set ${PASSPHRASE_ENV} in the environment Claude Code starts from and restart Claude Code.`;
+    case 'wallet_locked':
+      return `Tenjin routing is paused: \`tenjin mcp\` cannot unlock the wallet without a prompt, so it signs neither routing fees nor provider payments. To turn it back on, set ${PASSPHRASE_ENV} in the environment Claude Code starts from and restart Claude Code.`;
   }
 }
 
@@ -826,15 +820,13 @@ export async function feeSummary(dataDir: string, now: number): Promise<FeeSumma
 
 /**
  * THE FLAT LAYOUT, MOVED INTO ITS PAYER'S FOLDER. Builds before the per-wallet
- * folders kept one wallet's lanes and voucher key straight in the lanes
- * directory. Everything moves by rename, never by copy: the voucher key first,
- * into the folder of the payer the lanes name (with no lane to name one, the
- * wallet in use), then each lane's files into its payer's folder with the
- * state file last, so a crash part way leaves the state where the next run
- * finds it and moves the rest. A file the target folder already has is left
- * where it is, never overwritten. Running it again changes nothing.
+ * folders kept one wallet's lanes straight in the lanes directory. Everything
+ * moves by rename, never by copy: each lane's files go into its payer's folder
+ * with the state file last, so a crash part way leaves the state where the
+ * next run finds it and moves the rest. A file the target folder already has
+ * is left where it is, never overwritten. Running it again changes nothing.
  */
-export async function migrateFlatLanes(dataDir: string, walletInUse: string): Promise<void> {
+export async function migrateFlatLanes(dataDir: string): Promise<void> {
   const root = lanesDir(dataDir);
   const lanes: { index: number; dir: string }[] = [];
   for (const index of await laneIndices(root)) {
@@ -842,10 +834,6 @@ export async function migrateFlatLanes(dataDir: string, walletInUse: string): Pr
     if (state === null || !ADDRESS_RE.test(state.payer.toLowerCase())) continue;
     lanes.push({ index, dir: payerLanesDir(dataDir, state.payer) });
   }
-  await moveIfFree(
-    join(root, VOUCHER_KEY_FILE),
-    join(lanes[0]?.dir ?? payerLanesDir(dataDir, walletInUse), VOUCHER_KEY_FILE),
-  );
   for (const { index, dir } of lanes) {
     if (await exists(file.state(dir, index))) continue;
     for (const name of [file.fees, file.result, file.lease, file.claim, file.state]) {

@@ -86,15 +86,15 @@ describe('doctor: routing fee', () => {
     expect(check.fix).toBe('Run `tenjin wallet fund 0.25`.');
   });
 
-  it('names the passphrase variable when tenjin mcp cannot open the voucher key', async () => {
+  it('names the passphrase variable when tenjin mcp cannot unlock the wallet', async () => {
     await writeFile(join(root, 'data', 'config.json'), JSON.stringify({ routingFee: 'approved' }));
     await writePool(join(root, 'data'), { paidPath: 'available', checkedAtMs: Date.now() });
     await writeWalletPool(await useLanesOf(join(root, 'data'), PAYER), {
-      ownerBlocked: 'voucher_key_locked',
+      ownerBlocked: 'wallet_locked',
     });
     const check = await feeCheck();
     expect(check.status).toBe('warn');
-    expect(check.detail).toContain('cannot open the routing voucher key');
+    expect(check.detail).toContain('cannot unlock the wallet');
     expect(check.fix).toContain('TENJIN_WALLET_PASSPHRASE');
   });
 

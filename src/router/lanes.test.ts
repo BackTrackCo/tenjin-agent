@@ -305,16 +305,13 @@ describe('pausedReason', () => {
 });
 
 describe('migrateFlatLanes', () => {
-  const OTHER = '0x00000000000000000000000000000000000000aa';
-
-  /** One wallet's lane and voucher key, the way earlier builds laid them out. */
+  /** One wallet's lanes, the way earlier builds laid them out. */
   async function flat(): Promise<void> {
     await lane(0);
     await lane(1);
     const from = payerLanesDir(dir, PAYER);
     await writeFile(laneFiles.fees(from, 0), '{"atMs":1,"feeAtomic":"3000"}\n');
     await writeFile(laneFiles.lease(from, 1), '{}');
-    await writeFile(join(from, 'voucher-key.json'), '{"sealed":true}');
     for (const name of await readdir(from))
       await rename(join(from, name), join(lanesDir(dir), name));
     await rm(from, { recursive: true });
@@ -324,21 +321,19 @@ describe('migrateFlatLanes', () => {
     return (await readdir(root, { recursive: true })).map(String).sort();
   }
 
-  it("moves each lane and the voucher key into the lanes' payer folder, and a second run changes nothing", async () => {
+  it("moves each lane into the lanes' payer folder, and a second run changes nothing", async () => {
     await flat();
-    await migrateFlatLanes(dir, OTHER);
+    await migrateFlatLanes(dir);
     const to = payerLanesDir(dir, PAYER);
-    expect(await readFile(join(to, 'voucher-key.json'), 'utf8')).toBe('{"sealed":true}');
     expect((await readdir(to)).sort()).toEqual([
       'lane-0.fees.jsonl',
       'lane-0.json',
       'lane-1.json',
       'lane-1.lease',
-      'voucher-key.json',
     ]);
     expect((await readdir(lanesDir(dir))).sort()).toEqual([PAYER, 'payer.json']);
     const after = await tree(lanesDir(dir));
-    await migrateFlatLanes(dir, OTHER);
+    await migrateFlatLanes(dir);
     expect(await tree(lanesDir(dir))).toEqual(after);
   });
 
@@ -348,22 +343,15 @@ describe('migrateFlatLanes', () => {
     // A crash after lane 0's fee lines moved, before its state did.
     await mkdir(to, { recursive: true });
     await rename(laneFiles.fees(lanesDir(dir), 0), laneFiles.fees(to, 0));
-    await migrateFlatLanes(dir, OTHER);
+    await migrateFlatLanes(dir);
     expect(await readFile(laneFiles.fees(to, 0), 'utf8')).toContain('"feeAtomic":"3000"');
     expect((await readdir(to)).sort()).toContain('lane-0.json');
     // A lane whose index the folder already holds is left where it was.
     await writeFile(laneFiles.state(lanesDir(dir), 1), await readFile(laneFiles.state(to, 1)));
     await writeFile(laneFiles.state(to, 1), 'kept');
-    await migrateFlatLanes(dir, OTHER);
+    await migrateFlatLanes(dir);
     expect(await readFile(laneFiles.state(to, 1), 'utf8')).toBe('kept');
     expect(await readdir(lanesDir(dir))).toContain('lane-1.json');
-  });
-
-  it('gives a voucher key with no lane to name its payer to the wallet in use', async () => {
-    await mkdir(lanesDir(dir), { recursive: true });
-    await writeFile(join(lanesDir(dir), 'voucher-key.json'), 'key');
-    await migrateFlatLanes(dir, OTHER);
-    expect(await readFile(join(payerLanesDir(dir, OTHER), 'voucher-key.json'), 'utf8')).toBe('key');
   });
 });
 

@@ -15,7 +15,6 @@ import {
   type BatchSettlementClientDeps,
 } from '@x402/evm/batch-settlement/client';
 import type { TypedDataDefinition } from 'viem';
-import { privateKeyToAccount } from 'viem/accounts';
 import { httpRequest, type HttpResult } from '../lib/http';
 import { creatorAllowed, type SpendPolicy } from '../lib/policy';
 import type { TenjinSigner } from '../lib/wallet/provider';
@@ -52,8 +51,8 @@ import {
 } from './lanes';
 
 /**
- * THE LANE OWNER: the part of the routing fee that needs a key. It runs inside
- * `tenjin mcp`, never in a hook, and does nothing at all, not even a probe of
+ * THE LANE OWNER: the part of the routing fee that needs the wallet. It runs
+ * inside `tenjin mcp`, never in a hook, and does nothing at all, not even a probe of
  * the paid path, until the routing fee is approved.
  *
  * Every payment step is the SDK's own: the funding path is paid with the
@@ -61,7 +60,9 @@ import {
  * `depositStrategy` sizes each deposit at $0.25; each ladder rung is the same
  * client's voucher payload for one cumulative cap, encoded with the standard
  * header encoder; and a corrective 402 goes to the SDK's channel recovery.
- * Nothing here builds a payload or a header by hand.
+ * Nothing here builds a payload or a header by hand. The wallet signs the
+ * deposits and the vouchers, the SDK's default: with no `voucherSigner`, each
+ * lane's `payerAuthorizer` is the wallet's own address.
  *
  * Deposits are spends: each is authorized through the local spend policy
  * first, so a per-call limit under $0.25 or a spent daily budget stops funding
@@ -88,21 +89,13 @@ export interface LaneOwnerDeps {
   approved: () => Promise<boolean>;
   /** The wallet's address, without unlocking it. */
   walletAddress: () => Promise<`0x${string}` | null>;
-  /** The wallet signer, unlocked only when a deposit is signed. */
+  /** The wallet signer, unlocked without a prompt; it signs deposits and vouchers. */
   getSigner: () => Promise<TenjinSigner>;
   /** The spend policy, read fresh each pass. A deposit is not spend, so only
    *  its creator allowlist applies to one, never maxAutoSpend or sessionBudget. */
   policy: () => Promise<SpendPolicy>;
   /** The wallet's USDC balance, or null when it cannot be read. */
   walletBalance: (address: string) => Promise<bigint | null>;
-  /**
-   * THE LOCAL VOUCHER KEY: a key of its own that signs vouchers and nothing
-   * else, every lane's `payerAuthorizer`, so a voucher never needs the wallet
-   * unlocked and what it can authorize is capped by what a lane holds. One per
-   * wallet, kept in that wallet's folder and encrypted at rest like the wallet
-   * key (`lib/wallet/voucher-key.ts`).
-   */
-  voucherKey: (payer: `0x${string}`) => Promise<`0x${string}`>;
   /** Chain reads for the SDK's recovery. */
   readContract?: ClientEvmSigner['readContract'];
   fetchImpl?: typeof fetch;
@@ -142,7 +135,6 @@ export class LaneOwner {
   /** The wallet folder {@link owned} indexes into. */
   private ownedDir: string | null = null;
   private probe: Probe | null = null;
-  private readonly voucherKeys = new Map<string, ReturnType<typeof privateKeyToAccount>>();
   private running: Promise<void> | null = null;
 
   constructor(private readonly deps: LaneOwnerDeps) {}
@@ -189,23 +181,24 @@ export class LaneOwner {
     if (address === null) return;
     // EACH WALLET ITS OWN FOLDER: a replaced wallet gets lanes of its own, and
     // the old wallet's come back as they were when it is in use again.
-    await migrateFlatLanes(this.deps.dataDir, address);
+    await migrateFlatLanes(this.deps.dataDir);
     const dir = await useLanesOf(this.deps.dataDir, address);
     if (this.ownedDir !== dir) {
       this.owned.clear();
       this.ownedDir = dir;
     }
-    const blocked = await this.ownerBlocked(address);
-    await this.noteOwnerBlocked(dir, blocked);
-    if (blocked !== null) return;
-    // ONE PAYER PER PASS: every lane write below uses this address, never a
+    const signer = await this.unlock(address);
+    if (signer === null) return;
+    await this.noteOwnerBlocked(dir, signer === 'wallet_locked' ? signer : null);
+    if (signer === 'wallet_locked') return;
+    // ONE PAYER PER PASS: every lane write below uses this signer, never a
     // fresh read, so a wallet replaced mid-pass cannot mix two payers' lanes.
-    await this.leaseLanes(dir, address);
+    await this.leaseLanes(dir, signer);
     let tried = false;
     let fundingBlocked: WalletPool['fundingBlocked'] = null;
     let walletAtomic: bigint | null = null;
     for (const index of this.ownedLanes()) {
-      const outcome = await this.serviceLane(dir, index, paid, address);
+      const outcome = await this.serviceLane(dir, index, paid, signer);
       if (outcome === null) continue;
       tried = true;
       if (outcome.blocked != null) {
@@ -224,18 +217,25 @@ export class LaneOwner {
   }
 
   /**
-   * WHAT STOPS EVERY LANE AT ONCE, checked before any is touched: a voucher
-   * key that cannot be opened without a prompt (no passphrase in the
-   * environment or the OS credential store) signs no ladder.
+   * THE WALLET, UNLOCKED BEFORE ANY LANE IS TOUCHED. A wallet that cannot be
+   * unlocked without a prompt (no passphrase in the environment or the OS
+   * credential store) signs no voucher and no deposit, so every lane stops at
+   * once. A wallet replaced since its address was read signs nothing for this
+   * payer's lanes (null): the next pass starts on the new one.
    */
-  private async ownerBlocked(address: `0x${string}`): Promise<OwnerBlocked | null> {
+  private async unlock(address: `0x${string}`): Promise<ClientEvmSigner | OwnerBlocked | null> {
+    let signer: TenjinSigner;
     try {
-      await this.voucherSigner(address);
+      signer = await this.deps.getSigner();
     } catch (err) {
       this.warn(err);
-      return 'voucher_key_locked';
+      return 'wallet_locked';
     }
-    return null;
+    if (signer.address.toLowerCase() !== address.toLowerCase()) return null;
+    return {
+      address,
+      signTypedData: (message) => signer.signTypedData(message as unknown as TypedDataDefinition),
+    };
   }
 
   /** Write the pause only when it changes, so a healthy pass writes nothing. */
@@ -303,7 +303,7 @@ export class LaneOwner {
    * processes cannot both take it; and a pool with recent demand and room
    * gets one more lane.
    */
-  private async leaseLanes(dir: string, address: `0x${string}`): Promise<void> {
+  private async leaseLanes(dir: string, signer: ClientEvmSigner): Promise<void> {
     const now = this.now();
     const indices = await laneIndices(dir);
     for (const index of indices) {
@@ -318,7 +318,7 @@ export class LaneOwner {
     const demand = pool?.demandAtMs !== undefined && now - pool.demandAtMs < DEMAND_WINDOW_MS;
     if (indices.length === 0 || (demand && indices.length < MAX_LANES)) {
       const next = [...Array(MAX_LANES).keys()].find((i) => !indices.includes(i));
-      if (next !== undefined) await this.createLane(dir, next, address);
+      if (next !== undefined) await this.createLane(dir, next, signer);
       if (demand) await writeWalletPool(dir, { demandAtMs: 0 });
     }
   }
@@ -343,7 +343,7 @@ export class LaneOwner {
     }
   }
 
-  private async createLane(dir: string, index: number, address: `0x${string}`): Promise<void> {
+  private async createLane(dir: string, index: number, signer: ClientEvmSigner): Promise<void> {
     const now = this.now();
     const token = await takeClaim(dir, index, HOOK_CLAIM_TTL_MS, now);
     if (token === null) return;
@@ -353,15 +353,12 @@ export class LaneOwner {
       if (paid == null) return;
       const salt = `0x${randomBytes(32).toString('hex')}` as `0x${string}`;
       const accept = paid.accepts[0] as PaymentRequirements;
-      const scheme = new BatchSettlementEvmScheme(this.walletSigner(address), {
-        salt,
-        voucherSigner: await this.voucherSigner(address),
-      });
+      const scheme = new BatchSettlementEvmScheme(signer, { salt });
       const channelId = computeChannelId(scheme.buildChannelConfig(accept), accept.network);
       const state: LaneState = {
         version: 1,
         index,
-        payer: address,
+        payer: signer.address,
         salt,
         channelId,
         balanceAtomic: '0',
@@ -389,7 +386,7 @@ export class LaneOwner {
     dir: string,
     index: number,
     paid: PaymentRequired,
-    address: `0x${string}`,
+    signer: ClientEvmSigner,
   ): Promise<Funding | null> {
     const now = this.now();
     const token = await takeClaim(dir, index, OWNER_CLAIM_TTL_MS, now);
@@ -404,10 +401,9 @@ export class LaneOwner {
         balance: state.balanceAtomic,
       });
       const clientDeps: BatchSettlementClientDeps = {
-        signer: this.walletSigner(address),
+        signer,
         storage,
         salt: state.salt as `0x${string}`,
-        voucherSigner: await this.voucherSigner(address),
       };
       let status = await this.foldResult(dir, index, state, clientDeps, accept);
       let funding: Funding | null = null;
@@ -423,7 +419,7 @@ export class LaneOwner {
         // Funded, by a deposit or by one a recovery found landed: no wait.
         backoff = {};
       } else if (status === 'ready' && (fundRetryAtMs ?? 0) <= now) {
-        funding = await this.fund(clientDeps, address);
+        funding = await this.fund(clientDeps);
         // A deposit sent with no answer may have landed: the next pass reads
         // the channel from the chain before it deposits again.
         if (funding.depositUnknown === true) status = 'recovering';
@@ -463,8 +459,8 @@ export class LaneOwner {
   /**
    * WHAT THE LAST PAYER SAW, handed to the SDK: a `PAYMENT-RESPONSE` updates
    * the channel's totals, and a corrective 402 runs the SDK's recovery, which
-   * checks the server's state against the chain and against this client's own
-   * voucher key before it accepts it. With no 402 to go on, the channel is
+   * checks the server's state against the chain and against the wallet's own
+   * address before it accepts it. With no 402 to go on, the channel is
    * read back from the chain.
    */
   private async foldResult(
@@ -526,10 +522,8 @@ export class LaneOwner {
    * sessionBudget and commits nothing to the spend ledger; the creator allowlist
    * still applies, and the lane cap bounds what deposits hold.
    */
-  private async fund(
-    clientDeps: BatchSettlementClientDeps,
-    address: `0x${string}`,
-  ): Promise<Funding> {
+  private async fund(clientDeps: BatchSettlementClientDeps): Promise<Funding> {
+    const address = clientDeps.signer.address;
     if (!creatorAllowed(await this.deps.policy(), new URL(this.deps.baseUrl).host)) {
       return { blocked: 'not_allowlisted' };
     }
@@ -539,23 +533,11 @@ export class LaneOwner {
     }
     const funding = await this.requirementsAt(ROUTE_CHANNEL_PATH);
     if (funding === null) return { blocked: null };
-    const signer = await this.deps.getSigner();
-    // A wallet replaced since the pass began signs nothing for this payer's lane.
-    if (signer.address.toLowerCase() !== address.toLowerCase()) return { blocked: null };
-    const scheme = new BatchSettlementEvmScheme(
-      {
-        address,
-        signTypedData: (message) => signer.signTypedData(message as unknown as TypedDataDefinition),
-      },
-      {
-        storage: clientDeps.storage,
-        salt: clientDeps.salt,
-        ...(clientDeps.voucherSigner !== undefined
-          ? { voucherSigner: clientDeps.voucherSigner }
-          : {}),
-        depositStrategy: () => LANE_DEPOSIT_ATOMIC.toString(),
-      },
-    );
+    const scheme = new BatchSettlementEvmScheme(clientDeps.signer, {
+      storage: clientDeps.storage,
+      salt: clientDeps.salt,
+      depositStrategy: () => LANE_DEPOSIT_ATOMIC.toString(),
+    });
     const network = (funding.accepts[0] as PaymentRequirements).network;
     const http = new x402HTTPClient(new x402Client().register(network, scheme));
     let sent = false;
@@ -610,9 +592,6 @@ export class LaneOwner {
       const scheme = new BatchSettlementEvmScheme(clientDeps.signer, {
         storage,
         salt: clientDeps.salt,
-        ...(clientDeps.voucherSigner !== undefined
-          ? { voucherSigner: clientDeps.voucherSigner }
-          : {}),
       });
       const http = new x402HTTPClient(new x402Client().register(network, scheme));
       const payload = await http.createPaymentPayload(paid);
@@ -629,34 +608,6 @@ export class LaneOwner {
     const kept = fees.filter((f) => now - f.atMs < ROUTING_WINDOW_MS);
     if (kept.length === fees.length) return;
     await writeFile(laneFiles.fees(dir, index), feeLines(kept), { mode: 0o600 });
-  }
-
-  /**
-   * The deposit signer as the scheme sees it. Building a channel config and a
-   * voucher reads only the address; only a deposit signs with the wallet, and
-   * that goes through {@link fund}, which unlocks it.
-   */
-  private walletSigner(address: `0x${string}`): ClientEvmSigner {
-    return {
-      address,
-      signTypedData: () =>
-        Promise.reject(new Error('the wallet signs deposits only, through the funding path')),
-    };
-  }
-
-  /** The voucher signer of every lane `payer` funds, from {@link LaneOwnerDeps.voucherKey}. */
-  private async voucherSigner(payer: `0x${string}`): Promise<ClientEvmSigner> {
-    const key = payer.toLowerCase();
-    let account = this.voucherKeys.get(key);
-    if (account === undefined) {
-      account = privateKeyToAccount(await this.deps.voucherKey(payer));
-      this.voucherKeys.set(key, account);
-    }
-    const signer = account;
-    return {
-      address: signer.address,
-      signTypedData: (message) => signer.signTypedData(message as unknown as TypedDataDefinition),
-    };
   }
 }
 
