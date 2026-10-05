@@ -380,6 +380,15 @@ describe('ownership', () => {
     expect(ownsHookEntry(null, data)).toBe(false);
   });
 
+  it("claims an mcp_tool call to the router server's hook tool, and no other mcp_tool", () => {
+    const tool = (server: string, name: string): unknown => ({
+      hooks: [{ type: 'mcp_tool', server, tool: name, input: { kind: 'prompt' } }],
+    });
+    expect(ownsHookEntry(tool('x402', 'hook'), data)).toBe(true);
+    expect(ownsHookEntry(tool('x402', 'request'), data)).toBe(false);
+    expect(ownsHookEntry(tool('their-server', 'hook'), data)).toBe(false);
+  });
+
   it('pruneOurHandlers removes handlers, not entries', () => {
     const ours = { type: 'http', url: 'http://127.0.0.1:1/hook/claude' };
     const theirs = { type: 'command', command: 'node /elsewhere/theirs.mjs' };

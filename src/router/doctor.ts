@@ -280,8 +280,8 @@ async function hooksCheck(
     };
   }
   // AN INSTALL FROM AN OLDER BUILD STILL WORKS, so this is a warning with its
-  // one-command remedy, not a failure: its `tenjin hook native` entry is a
-  // no-op now, and the entries it lacks are offers it does not make.
+  // one-command remedy, not a failure: its `tenjin hook` command entries take
+  // the free path only, and the entries it lacks are offers it does not make.
   const drift = planDrift(found.hooks, dataDir);
   if (drift.missing.length > 0 || drift.stale.length > 0) {
     const parts = [
@@ -304,23 +304,33 @@ async function hooksCheck(
   };
 }
 
-/** One entry as `event matcher → command`, the way doctor names it. */
-function entryLabel(event: string, matcher: unknown, command: string): string {
-  return `${event}${typeof matcher === 'string' ? ` ${matcher}` : ''} → ${command}`;
+/** One entry as `event matcher → what it runs`, the way doctor names it. */
+function entryLabel(event: string, matcher: unknown, handler: unknown): string {
+  const h = (handler ?? {}) as Record<string, unknown>;
+  const runs =
+    h.type === 'mcp_tool'
+      ? `${String(h.server)} ${String(h.tool)} ${String((h.input as { kind?: unknown } | undefined)?.kind)}`
+      : typeof h.command === 'string'
+        ? h.command
+        : typeof h.url === 'string'
+          ? h.url
+          : '?';
+  return `${event}${typeof matcher === 'string' ? ` ${matcher}` : ''} → ${runs}`;
 }
 
 /**
  * Which of `routerHookPlan()`'s entries this file lacks, and which handlers of
  * ours it carries that the plan no longer writes (an older install's
- * `tenjin hook native`, or a shelf-era entry). Compared by event, matcher and
- * command, so a timeout the writer would raise is not called drift here.
+ * `tenjin hook prompt` command, or a shelf-era entry). Compared by event,
+ * matcher and what the handler runs, so a timeout the writer would raise is not
+ * called drift here.
  */
 function planDrift(
   hooks: Record<string, unknown[]>,
   dataDir: string,
 ): { missing: string[]; stale: string[] } {
   const planned = (routerHookPlan() as PlannedEntry[]).map((entry) =>
-    entryLabel(entry.event, entry.matcher, entry.hooks[0]!.command),
+    entryLabel(entry.event, entry.matcher, entry.hooks[0]),
   );
   const present: string[] = [];
   for (const [event, list] of Object.entries(hooks)) {
@@ -330,10 +340,7 @@ function planDrift(
       // Ours only: a handler someone hand-merged beside ours is not drift.
       const kept = pruneOurHandlers(entry, dataDir) as { hooks: unknown[] } | null;
       for (const handler of handlers.filter((h) => kept === null || !kept.hooks.includes(h))) {
-        const command = (handler as { command?: unknown }).command;
-        const url = (handler as { url?: unknown }).url;
-        const label = typeof command === 'string' ? command : typeof url === 'string' ? url : '?';
-        present.push(entryLabel(event, matcher, label));
+        present.push(entryLabel(event, matcher, handler));
       }
     }
   }
@@ -346,7 +353,7 @@ function planDrift(
 interface PlannedEntry {
   event: string;
   matcher?: string;
-  hooks: { command: string }[];
+  hooks: unknown[];
 }
 
 function allowRules(settings: Record<string, unknown>): string[] {

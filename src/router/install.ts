@@ -31,6 +31,7 @@ import type { WalletDeps, WalletOutcome } from '../commands/install-wallet';
 import type { CommandContext, CommandResult } from '../context';
 import { routingAllowanceAtomic } from './fee';
 import { CHANNEL_DEPOSIT_ATOMIC, ROUTING_FEE_ATOMIC, usd } from './fee-state';
+import { HOOK_TOOL, hookToolInput, type HookKind } from './hook-tool';
 import { MCP_SERVER_NAME, REQUEST_TOOL } from './names';
 import { ensureStatusLine, type StatusLineMode, type StatusLineResult } from './status-line-wiring';
 
@@ -39,35 +40,38 @@ import { ensureStatusLine, type StatusLineMode, type StatusLineResult } from './
  * one permission rule, the spend defaults, and a wallet when there is none.
  *
  * WHAT IT WRITES IS WHAT IT SAYS. There is no skill to materialize and no
- * daemon to start: the hooks are plain command lines, the tool lives in an MCP
- * server the harness starts per session, and every other key in the settings
- * file is preserved byte for byte. The one process a hook starts is the free
- * docs fetch beside a search, which exits within `PREFETCH_TIMEOUT_MS`.
+ * daemon to start: each hook entry is a Claude Code `mcp_tool` hook that calls
+ * the `hook` tool of the session's own router MCP server (`tenjin mcp`), which
+ * runs the leg and holds the wallet, and every other key in the settings file
+ * is preserved byte for byte. The one process a leg starts is the free docs
+ * fetch beside a search, which exits within `PREFETCH_TIMEOUT_MS`.
  */
 
 const exec = promisify(execFile);
 
 /**
- * The harness's kill budget for each hook entry, and the number every other
- * wait inside the hook is cut from: 1 s of stdin plus 3.5 s of gate, with
- * 500 ms left for node's boot and the transcript read (`wire.test.ts` pins it).
- * Raised from 3 s because a gate abort costs the turn its hint silently.
+ * The harness's kill budget for each routing leg. It is a ceiling, reached
+ * only on the call that carries a channel deposit: the probe of the paid path,
+ * the wallet read before the deposit and the deposit call itself, which waits
+ * for the facilitator's settlement (`wire.test.ts` pins the sum, with the wallet
+ * unlock to spare). Every other call answers inside the gate's 3.5 s, and the
+ * free path as fast as before. Under Claude Code's own 30 s for
+ * `UserPromptSubmit`, so a stuck server never holds the prompt that long.
  *
- * A machine carrying the old number is converged by the writer, not by the
+ * A machine carrying an older entry is converged by the writer, not by the
  * user: the entries are ours by marker, so `install`, `install --refresh` and
  * the refresh `tenjin update` spawns all rewrite them in place.
  */
-export const HOOK_TIMEOUT_SECONDS = 5;
+export const ROUTE_HOOK_TIMEOUT_SECONDS = 20;
 /**
  * The after-call entries' kill budget, longer than the rest for the one wait
- * any hook makes: a search the pre-call arm is fetching free docs for waits up
- * to `AUGMENT_WAIT_MS` for them, and when none came back and the search was
- * short, the gate is asked after that (`wire.test.ts` pins the sum). Every
- * other after-call event returns as fast as before, so the number is a
- * ceiling, not a cost. The pre-call entry stays at
- * {@link HOOK_TIMEOUT_SECONDS}: it starts that fetch and never waits for it.
+ * a leg makes: a search the pre-call leg is fetching free docs for waits up to
+ * `AUGMENT_WAIT_MS` for them, and when none came back and the search was short,
+ * the gate is asked after that (`wire.test.ts` pins the sum). Every other
+ * after-call event returns as fast as before, so the number is a ceiling, not
+ * a cost.
  */
-export const AFTER_CALL_TIMEOUT_SECONDS = 15;
+export const AFTER_CALL_TIMEOUT_SECONDS = 30;
 export { MCP_SERVER_NAME };
 export const ALLOW_RULE = REQUEST_TOOL;
 /**
@@ -129,18 +133,24 @@ export const ASK_MATCHER = 'AskUserQuestion';
  * after, with the user's answers read as their own words.
  */
 export function routerHookPlan(): unknown[] {
-  const handler = (command: string, timeout = HOOK_TIMEOUT_SECONDS) => [
-    { type: 'command', command, timeout },
+  const leg = (kind: HookKind, timeout = ROUTE_HOOK_TIMEOUT_SECONDS) => [
+    {
+      type: 'mcp_tool',
+      server: MCP_SERVER_NAME,
+      tool: HOOK_TOOL,
+      input: hookToolInput(kind),
+      timeout,
+    },
   ];
-  const afterCall = () => handler('tenjin hook shortfall', AFTER_CALL_TIMEOUT_SECONDS);
+  const afterCall = () => leg('shortfall', AFTER_CALL_TIMEOUT_SECONDS);
   return [
-    { event: 'UserPromptSubmit', hooks: handler('tenjin hook prompt') },
-    { event: 'PreToolUse', matcher: NATIVE_MATCHER, hooks: handler('tenjin hook native') },
-    { event: 'PreToolUse', matcher: DELEGATION_MATCHER, hooks: handler('tenjin hook agent') },
+    { event: 'UserPromptSubmit', hooks: leg('prompt') },
+    { event: 'PreToolUse', matcher: NATIVE_MATCHER, hooks: leg('native') },
+    { event: 'PreToolUse', matcher: DELEGATION_MATCHER, hooks: leg('agent') },
     { event: 'PostToolUse', matcher: NATIVE_MATCHER, hooks: afterCall() },
     { event: 'PostToolUseFailure', matcher: NATIVE_MATCHER, hooks: afterCall() },
-    { event: 'PreToolUse', matcher: ASK_MATCHER, hooks: handler('tenjin hook ask') },
-    { event: 'PostToolUse', matcher: ASK_MATCHER, hooks: handler('tenjin hook answer') },
+    { event: 'PreToolUse', matcher: ASK_MATCHER, hooks: leg('ask') },
+    { event: 'PostToolUse', matcher: ASK_MATCHER, hooks: leg('answer') },
   ];
 }
 

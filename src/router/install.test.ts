@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { loadRawConfig } from '../lib/config';
 import { CliError } from '../lib/errors';
+import { hookToolInput, type HookKind } from './hook-tool';
 import { ALLOW_RULE, MCP_ADD_COMMAND, runRouterInstall } from './install';
 import { runRouterUninstall } from './uninstall';
 import { STATUS_LINE_COMMAND } from './status-line-wiring';
@@ -83,20 +84,26 @@ const settingsPath = () => join(home, '.claude', 'settings.json');
 const readSettings = async (): Promise<Record<string, unknown>> =>
   JSON.parse(await readFile(settingsPath(), 'utf8')) as Record<string, unknown>;
 
+/** An entry as builds before the `mcp_tool` legs wrote it. */
 const handler = (command: string, timeout = 5) => [{ type: 'command', command, timeout }];
+/** One routing leg as this build writes it: an `mcp_tool` call to the router
+ *  server's `hook` tool, with the event's fields substituted. */
+const leg = (kind: HookKind, timeout = 20) => [
+  { type: 'mcp_tool', server: 'x402', tool: 'hook', input: hookToolInput(kind), timeout },
+];
 /** The after-call entries wait for a search's free docs, so they get longer. */
-const afterCall = handler('tenjin hook shortfall', 15);
+const afterCall = leg('shortfall', 30);
 /** Exactly what this build writes into an empty `hooks` key. */
 const CURRENT_HOOKS = {
-  UserPromptSubmit: [{ hooks: handler('tenjin hook prompt') }],
+  UserPromptSubmit: [{ hooks: leg('prompt') }],
   PreToolUse: [
-    { matcher: 'WebSearch|WebFetch', hooks: handler('tenjin hook native') },
-    { matcher: 'Agent|Task', hooks: handler('tenjin hook agent') },
-    { matcher: 'AskUserQuestion', hooks: handler('tenjin hook ask') },
+    { matcher: 'WebSearch|WebFetch', hooks: leg('native') },
+    { matcher: 'Agent|Task', hooks: leg('agent') },
+    { matcher: 'AskUserQuestion', hooks: leg('ask') },
   ],
   PostToolUse: [
     { matcher: 'WebSearch|WebFetch', hooks: afterCall },
-    { matcher: 'AskUserQuestion', hooks: handler('tenjin hook answer') },
+    { matcher: 'AskUserQuestion', hooks: leg('answer') },
   ],
   PostToolUseFailure: [{ matcher: 'WebSearch|WebFetch', hooks: afterCall }],
 };
@@ -547,7 +554,7 @@ describe('tenjin install --refresh', () => {
    * post-call entries arrive, and everything that is not ours stays byte for
    * byte, including the user's own PreToolUse and WebFetch hooks.
    */
-  it("migrates an alpha install, keeping its native entry and the user's own", async () => {
+  it("migrates an alpha install into mcp_tool legs, keeping the user's own entries", async () => {
     const fs = await import('node:fs/promises');
     await fs.mkdir(join(home, '.claude'), { recursive: true });
     await fs.writeFile(settingsPath(), JSON.stringify(alphaSettings(), null, 2) + '\n');
@@ -564,8 +571,8 @@ describe('tenjin install --refresh', () => {
       PostToolUse: CURRENT_HOOKS.PostToolUse,
       PostToolUseFailure: CURRENT_HOOKS.PostToolUseFailure,
     });
-    const native = JSON.stringify(after).match(/tenjin hook native/g) ?? [];
-    expect(native).toHaveLength(1);
+    // No command entry of ours is left: each became its `mcp_tool` leg.
+    expect(JSON.stringify(after)).not.toContain('tenjin hook ');
     expect({ ...after, hooks: null }).toEqual({ ...alphaSettings(), hooks: null });
 
     // Converged: a second refresh writes nothing.
@@ -593,6 +600,7 @@ describe('tenjin uninstall', () => {
     });
     const settings = await readSettings();
     expect(JSON.stringify(settings)).not.toContain('tenjin hook ');
+    expect(JSON.stringify(settings)).not.toContain('mcp_tool');
     expect((settings.permissions as { allow: string[] }).allow).not.toContain(ALLOW_RULE);
     expect(removeMcp).toHaveBeenCalled();
     expect(await readFile(join(data, 'wallet.json'), 'utf8')).toBe('{"keystore":"kept"}');
@@ -1209,73 +1217,80 @@ describe('tenjin update re-applies the install', () => {
       .UserPromptSubmit;
     // ONE entry, the current shape: rewritten in place, never appended beside.
     expect(prompt).toHaveLength(1);
-    expect(prompt![0]!.hooks).toEqual([
-      { type: 'command', command: 'tenjin hook prompt', timeout: 5 },
-    ]);
+    expect(prompt![0]!.hooks).toEqual(leg('prompt'));
     expect(JSON.stringify(after)).not.toContain('/old/path/tenjin');
   });
 
   /**
-   * The timeout is the harness's kill budget, so an entry left at the old 3 s
-   * would abort the gate mid-answer and cost that turn its hint silently. It is
-   * the writer's to converge, not the user's: every route that writes the plan
-   * has to raise it, including the refresh `tenjin update` spawns.
+   * AN OLDER INSTALL'S COMMAND ENTRIES BECOME `mcp_tool` LEGS on every route
+   * that writes the plan, including the refresh `tenjin update` spawns: each is
+   * ours by its `tenjin hook` marker, so it is rewritten in place, never left
+   * beside the new leg to route the same event twice, and the user's own
+   * entries are not touched.
    */
   it.each([
     ['install', {}],
     ['install --refresh (what `tenjin update` spawns)', { refresh: true }],
-  ])('raises an entry still carrying the old 3 s timeout on %s', async (_label, args) => {
+  ])('rewrites old command entries into mcp_tool legs on %s', async (_label, args) => {
     const fs = await import('node:fs/promises');
     await runRouterInstall({}, ctx(), deps());
     const settings = await readSettings();
-    for (const [event, matcher] of [
-      ['UserPromptSubmit', undefined],
-      ['PreToolUse', 'WebSearch|WebFetch'],
-    ] as const) {
-      const command = event === 'UserPromptSubmit' ? 'tenjin hook prompt' : 'tenjin hook native';
-      (settings.hooks as Record<string, unknown[]>)[event] = [
-        {
-          ...(matcher !== undefined ? { matcher } : {}),
-          hooks: [{ type: 'command', command, timeout: 3 }],
-        },
+    const hooks = settings.hooks as Record<string, unknown[]>;
+    hooks.UserPromptSubmit = [{ hooks: handler('tenjin hook prompt', 3) }];
+    hooks.PreToolUse = [
+      { matcher: 'Bash', hooks: [{ type: 'command', command: 'my-bash-guard' }] },
+      { matcher: 'WebSearch|WebFetch', hooks: handler('tenjin hook native') },
+      { matcher: 'Agent|Task', hooks: handler('tenjin hook agent') },
+      { matcher: 'AskUserQuestion', hooks: handler('tenjin hook ask') },
+    ];
+    for (const event of ['PostToolUse', 'PostToolUseFailure']) {
+      hooks[event] = [
+        { matcher: 'WebSearch|WebFetch', hooks: handler('tenjin hook shortfall', 15) },
       ];
     }
+    (hooks.PostToolUse as unknown[]).push({
+      matcher: 'AskUserQuestion',
+      hooks: handler('tenjin hook answer'),
+    });
     await fs.writeFile(settingsPath(), JSON.stringify(settings, null, 2) + '\n');
 
-    await runRouterInstall(args, ctx(), deps());
-    // Every entry at 5 s, each once: rewritten in place, never appended beside.
-    expect((await readSettings()).hooks).toEqual(CURRENT_HOOKS);
+    const result = await runRouterInstall(args, ctx(), deps());
+    expect((onlyInstall(result) as { hooks: { wrote: boolean } }).hooks.wrote).toBe(true);
+    expect((await readSettings()).hooks).toEqual({
+      ...CURRENT_HOOKS,
+      PreToolUse: [
+        { matcher: 'Bash', hooks: [{ type: 'command', command: 'my-bash-guard' }] },
+        ...CURRENT_HOOKS.PreToolUse,
+      ],
+    });
+    // Converged: the next run writes nothing.
+    const again = await runRouterInstall({ refresh: true }, ctx(), deps());
+    expect((onlyInstall(again) as { hooks: { wrote: boolean } }).hooks.wrote).toBe(false);
   });
 
   /**
-   * The after-call entry waits, bounded, for the free docs the pre-call hook
-   * fetched beside a search, so it carries a longer kill budget than the rest;
-   * an install still at 5 s would cut that wait off. The writer converges it on
-   * every route, including the refresh `tenjin update` spawns, and leaves the
-   * pre-call entry, which never waits, at 5 s.
+   * The after-call leg waits, bounded, for the free docs the pre-call leg
+   * fetched beside a search, so it carries a longer kill budget than the rest.
+   * The writer converges a shorter one on every route, including the refresh
+   * `tenjin update` spawns.
    */
   it.each([
     ['install', {}],
     ['install --refresh (what `tenjin update` spawns)', { refresh: true }],
-  ])('gives the after-call entries 15 s on %s', async (_label, args) => {
+  ])('gives the after-call legs 30 s on %s', async (_label, args) => {
     const fs = await import('node:fs/promises');
     await runRouterInstall({}, ctx(), deps());
     const settings = await readSettings();
     const hooks = settings.hooks as Record<string, unknown[]>;
     for (const event of ['PostToolUse', 'PostToolUseFailure']) {
-      hooks[event] = [{ matcher: 'WebSearch|WebFetch', hooks: handler('tenjin hook shortfall') }];
+      hooks[event] = [{ matcher: 'WebSearch|WebFetch', hooks: leg('shortfall', 20) }];
     }
     await fs.writeFile(settingsPath(), JSON.stringify(settings, null, 2) + '\n');
 
     const result = await runRouterInstall(args, ctx(), deps());
     expect((onlyInstall(result) as { hooks: { wrote: boolean } }).hooks.wrote).toBe(true);
     const after = (await readSettings()).hooks as typeof CURRENT_HOOKS;
-    expect(after.PostToolUse[0]).toEqual({ matcher: 'WebSearch|WebFetch', hooks: afterCall });
     expect(after.PostToolUseFailure).toEqual([{ matcher: 'WebSearch|WebFetch', hooks: afterCall }]);
-    expect(after.PreToolUse[0]).toEqual({
-      matcher: 'WebSearch|WebFetch',
-      hooks: handler('tenjin hook native'),
-    });
     expect(after).toEqual(CURRENT_HOOKS);
   });
 
@@ -1379,15 +1394,12 @@ describe('tenjin update re-applies the install', () => {
 
     const before = await hooksCheck();
     expect(before).toMatchObject({ status: 'warn', fix: 'Run `tenjin install --refresh`.' });
-    // The alpha's own native entry is current, so nothing is stale; only the
-    // entries this release adds are missing.
-    expect(before?.detail).not.toContain('stale');
-    expect(before?.detail).not.toContain('tenjin hook native');
-    expect(before?.detail).toContain('PostToolUse WebSearch|WebFetch → tenjin hook shortfall');
-    expect(before?.detail).toContain(
-      'PostToolUseFailure WebSearch|WebFetch → tenjin hook shortfall',
-    );
-    expect(before?.detail).toContain('PreToolUse Agent|Task → tenjin hook agent');
+    // The alpha's command entries are stale, and every `mcp_tool` leg is missing.
+    expect(before?.detail).toContain('stale UserPromptSubmit → tenjin hook prompt');
+    expect(before?.detail).toContain('PreToolUse WebSearch|WebFetch → tenjin hook native');
+    expect(before?.detail).toContain('PostToolUse WebSearch|WebFetch → x402 hook shortfall');
+    expect(before?.detail).toContain('PostToolUseFailure WebSearch|WebFetch → x402 hook shortfall');
+    expect(before?.detail).toContain('PreToolUse Agent|Task → x402 hook agent');
     // The user's own entries are theirs, never drift.
     expect(before?.detail).not.toContain('my-bash-guard');
 

@@ -12,9 +12,9 @@ import {
 } from './decision';
 import { GATE_TIMEOUT_MS } from './gate';
 import { MAX_PACKET_BYTES, type Packet } from './context';
-import { STDIN_TIMEOUT_MS } from './hook-command';
-import { AFTER_CALL_TIMEOUT_SECONDS, HOOK_TIMEOUT_SECONDS } from './install';
+import { AFTER_CALL_TIMEOUT_SECONDS, ROUTE_HOOK_TIMEOUT_SECONDS } from './install';
 import { AUGMENT_WAIT_MS } from './augment';
+import { BALANCE_TIMEOUT_MS, DEPOSIT_CALL_TIMEOUT_MS, PROBE_TIMEOUT_MS } from './routing-payer';
 
 /**
  * The wire, pinned to bytes. These payloads are the SHARED ones: the same
@@ -352,20 +352,26 @@ describe('every answer payload on disk', () => {
 });
 
 describe('the hook time budget', () => {
-  it('fits stdin plus the decision inside the timeout install writes', () => {
-    const budget = HOOK_TIMEOUT_SECONDS * 1_000;
-    expect(STDIN_TIMEOUT_MS + GATE_TIMEOUT_MS).toBeLessThan(budget);
-    // Node's boot and the transcript read happen inside the same budget, so the
-    // two network-ish waits may not fill it: half a second is the floor left.
-    expect(budget - (STDIN_TIMEOUT_MS + GATE_TIMEOUT_MS)).toBeGreaterThanOrEqual(500);
+  /** The slowest routing leg: the paid path's probe, the wallet read before a
+   *  deposit and the call that carries it, in a row. What is left covers the
+   *  wallet unlock (2.3 s of scrypt when the prewarm has not finished) and the
+   *  slot's file work. */
+  const SLOWEST_PAID_CALL = PROBE_TIMEOUT_MS + BALANCE_TIMEOUT_MS + DEPOSIT_CALL_TIMEOUT_MS;
+  const FLOOR_MS = 3_000;
+
+  it('fits the slowest paid call inside the timeout install writes, and a gate call easily', () => {
+    const budget = ROUTE_HOOK_TIMEOUT_SECONDS * 1_000;
+    expect(budget - SLOWEST_PAID_CALL).toBeGreaterThanOrEqual(FLOOR_MS);
+    expect(GATE_TIMEOUT_MS + PROBE_TIMEOUT_MS).toBeLessThan(budget);
+    // Under Claude Code's own default for UserPromptSubmit.
+    expect(ROUTE_HOOK_TIMEOUT_SECONDS).toBeLessThan(30);
   });
 
-  /** The after-call hook's one wait, for a search's free docs, can be followed
-   *  by the gate when none came back and the search was short: stdin, the wait
-   *  and the decision in a row fit its longer timeout with the same floor. */
-  it('fits stdin, the docs wait and the decision inside the after-call timeout', () => {
+  /** The after-call leg's one wait, for a search's free docs, can be followed
+   *  by the gate when none came back and the search was short: the wait and the
+   *  slowest paid call in a row fit its longer timeout with the same floor. */
+  it('fits the docs wait and the slowest paid call inside the after-call timeout', () => {
     const budget = AFTER_CALL_TIMEOUT_SECONDS * 1_000;
-    const used = STDIN_TIMEOUT_MS + AUGMENT_WAIT_MS + GATE_TIMEOUT_MS;
-    expect(budget - used).toBeGreaterThanOrEqual(500);
+    expect(budget - (AUGMENT_WAIT_MS + SLOWEST_PAID_CALL)).toBeGreaterThanOrEqual(FLOOR_MS);
   });
 });
