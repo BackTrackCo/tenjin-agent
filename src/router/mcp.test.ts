@@ -255,6 +255,55 @@ describe('the hook tool', () => {
     }
   });
 
+  it("routes and pays a session's first prompt, before Claude Code writes its transcript", async () => {
+    await writeFile(join(dir, 'config.json'), JSON.stringify({ routingFee: 'approved' }));
+    const { homeDir, transcript } = await home('sess-first');
+    await rm(transcript);
+    const fake = new FakeRouter();
+    const payer = new RoutingPayer({
+      dataDir: dir,
+      getSigner: async () => testSigner(privateKeyToAccount(generatePrivateKey())),
+      policy: async () => ({
+        maxAutoSpendAtomic: 250_000n,
+        sessionBudgetAtomic: 5_000_000n,
+        allowlistCreators: [],
+      }),
+      walletBalance: async () => 10_000_000n,
+      readContract: fake.readContract as never,
+      fetchImpl: fake.fetch,
+      pid: 1,
+      isAlive: () => true,
+      warn: () => undefined,
+    });
+    const server = buildRouterMcpServer({
+      dataDir: dir,
+      homeDir,
+      payer,
+      handlerDeps: { cwd: dir, signer: await testWalletProvider().getSigner() },
+      hookDeps: { baseUrl: 'https://router.test', fetchImpl: fake.fetch, warn: () => undefined },
+    });
+    const client = await connect(server);
+    try {
+      await client.callTool({
+        name: 'hook',
+        arguments: substituted('prompt', promptEvent('sess-first', transcript)),
+      });
+      expect(fake.settledFees).toBe(1);
+      // The same missing name outside the projects directory sends nothing.
+      const sent = fake.log.length;
+      await client.callTool({
+        name: 'hook',
+        arguments: substituted('prompt', promptEvent('sess-first', join(dir, 'sess-first.jsonl'))),
+      });
+      expect(fake.log).toHaveLength(sent);
+      expect(fake.settledFees).toBe(1);
+    } finally {
+      await client.close();
+      await server.close();
+      await payer.close();
+    }
+  });
+
   it('reads, sends and pays nothing for a forged path, and routes a new session', async () => {
     await writeFile(join(dir, 'config.json'), JSON.stringify({ routingFee: 'approved' }));
     const { homeDir, transcript } = await home('sess-real');

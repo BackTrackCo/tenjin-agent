@@ -1,6 +1,6 @@
-import { realpath, stat } from 'node:fs/promises';
+import { lstat, realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, join, relative, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path';
 
 /**
  * THE `hook` TOOL'S CALLER IS NOT PROVEN. Claude Code calls it from the hook
@@ -10,10 +10,14 @@ import { dirname, isAbsolute, join, relative, sep } from 'node:path';
  * charge a routing fee for it once the fee is approved.
  *
  * So a call is admitted only with a real Claude Code transcript of its own
- * session: the path resolves, symlinks followed, to a regular file under
- * `~/.claude/projects/<project>/` named `<session_id>.jsonl`, or to one of that
- * session's subagent files, `<session_id>/subagents/agent-<id>.jsonl` beside
- * it (the layout of Claude Code 2.1.x). Each call is checked on its own: a
+ * session: its folder resolves, symlinks followed, under
+ * `~/.claude/projects/<project>/` and the file is named `<session_id>.jsonl`,
+ * or it is one of that session's subagent files,
+ * `<session_id>/subagents/agent-<id>.jsonl` beside it (the layout of Claude
+ * Code 2.1.x). A file that is there must resolve to that same place and be a
+ * regular file. One not written yet, as at a session's first prompt (in a new
+ * project, the folder too), is no history: the leg routes on its own input and
+ * reads no file. Each call is checked on its own: a
  * session id that changes inside one `tenjin mcp` process, as after `/clear`
  * or a resume, is a new session with its own transcript, not a forgery. A
  * refused call reads nothing, sends nothing and pays nothing.
@@ -24,8 +28,8 @@ const SEGMENT_RE = /^[A-Za-z0-9_-]{1,200}$/;
 const AGENT_FILE_RE = /^agent-[A-Za-z0-9_-]{1,200}\.jsonl$/;
 
 interface OwnTranscript {
-  /** The resolved path, the one the handlers then read. */
-  path: string;
+  /** The resolved path, the one the handlers then read; `null` while the file is not written yet. */
+  path: string | null;
   kind: 'session' | 'subagent';
 }
 
@@ -38,6 +42,12 @@ export async function admitHookEvent(
   if (typeof sessionId !== 'string' || !SEGMENT_RE.test(sessionId)) return null;
   const transcript = await ownTranscript(homeDir, event['transcript_path'], sessionId);
   if (transcript === null) return null;
+  // No file yet: the leg routes on its own input, with no history to read.
+  if (transcript.path === null) {
+    const unread = { ...event };
+    delete unread['transcript_path'];
+    return unread;
+  }
   const agentId = event['agent_id'];
   if (
     transcript.kind === 'session' &&
@@ -55,37 +65,80 @@ async function ownTranscript(
   sessionId: string,
 ): Promise<OwnTranscript | null> {
   if (typeof raw !== 'string' || !isAbsolute(raw)) return null;
-  let projects: string;
-  let path: string;
+  if (raw.split(sep).some((part) => part === '.' || part === '..')) return null;
+  const name = basename(raw);
+  if (name !== `${sessionId}.jsonl` && !AGENT_FILE_RE.test(name)) return null;
+  // The folder resolves before the file: Claude Code fires a session's first
+  // prompt before it writes the file, and in a new project before the folder.
+  const projects = await resolveExisting(join(homeDir, '.claude', 'projects'));
+  const folder = await resolveExisting(dirname(raw));
+  if (projects === null || folder === null) return null;
+  const named = join(folder.path, name);
+  const kind = layoutKind(projects.path, named, sessionId);
+  if (kind === null) return null;
+  if (folder.missing) return { path: null, kind };
   try {
-    projects = await realpath(join(homeDir, '.claude', 'projects'));
-    path = await realpath(raw);
+    await lstat(named);
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'ENOENT' ? { path: null, kind } : null;
+  }
+  // A file that is there, or a symlink, must resolve to the same layout.
+  try {
+    const path = await realpath(named);
+    if (layoutKind(projects.path, path, sessionId) !== kind) return null;
+    return (await stat(path)).isFile() ? { path, kind } : null;
   } catch {
     return null;
   }
+}
+
+/**
+ * `path` with its deepest existing folder resolved, symlinks followed, and the
+ * rest kept as written, which is then known not to exist. A part that is a
+ * symlink leading nowhere refuses, so nothing missing can lead out later.
+ */
+async function resolveExisting(path: string): Promise<{ path: string; missing: boolean } | null> {
+  const rest: string[] = [];
+  let at = path;
+  for (;;) {
+    try {
+      return { path: join(await realpath(at), ...rest), missing: rest.length > 0 };
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') return null;
+    }
+    try {
+      await lstat(at);
+      return null;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') return null;
+    }
+    const up = dirname(at);
+    if (up === at) return null;
+    rest.unshift(basename(at));
+    at = up;
+  }
+}
+
+/** Where `path` sits under `projects`, or `null` when it is not a transcript of `sessionId`. */
+function layoutKind(
+  projects: string,
+  path: string,
+  sessionId: string,
+): OwnTranscript['kind'] | null {
   const rel = relative(projects, path);
   if (rel.length === 0 || isAbsolute(rel)) return null;
   const parts = rel.split(sep);
   if (parts[0] === '..' || parts[0] === '.') return null;
-  let kind: OwnTranscript['kind'];
-  if (parts.length === 2 && parts[1] === `${sessionId}.jsonl`) {
-    kind = 'session';
-  } else if (
+  if (parts.length === 2 && parts[1] === `${sessionId}.jsonl`) return 'session';
+  if (
     parts.length === 4 &&
     parts[1] === sessionId &&
     parts[2] === 'subagents' &&
     AGENT_FILE_RE.test(parts[3]!)
   ) {
-    kind = 'subagent';
-  } else {
-    return null;
+    return 'subagent';
   }
-  try {
-    if (!(await stat(path)).isFile()) return null;
-  } catch {
-    return null;
-  }
-  return { path, kind };
+  return null;
 }
 
 /**
