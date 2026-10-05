@@ -164,11 +164,14 @@ describe('buildExactPayment, builder-code attribution', () => {
     expect(info?.a).toBe('bc_seller01');
   });
 
-  it('sends no builder-code extension to a seller that never advertised one', async () => {
+  // The SDK's default since @x402/core 2.21: every registered client extension
+  // enriches every payment, so a seller that never advertised builder-code
+  // still gets Tenjin's service code, and no seller field.
+  it("sends the SDK's builder-code entry to a seller that never advertised one", async () => {
     const { paymentRequired } = buildPaymentRequired();
     const built = await buildExactPayment(paymentRequired, testSigner());
     const payload = decodePaymentSignatureHeader(built.headers['PAYMENT-SIGNATURE'] as string);
-    expect(builderCodeInfo(payload.extensions)).toBeUndefined();
+    expect(builderCodeInfo(payload.extensions)).toEqual({ s: [TENJIN_CLI_BUILDER_CODE] });
   });
 
   // Attribution is metadata, not terms: what the wallet authorizes must be

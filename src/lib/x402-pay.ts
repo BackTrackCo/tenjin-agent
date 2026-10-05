@@ -140,9 +140,9 @@ export function createPayerClient(getSigner: () => TenjinSigner): {
     core.register(network as `${string}:${string}`, new ExactEvmScheme(lazy));
   }
   core.registerPolicy(canonicalUsdcOnly);
-  // The SDK fires this hook only for sellers whose 402 advertises
-  // `builder-code`, so a seller that never declared it still gets an
-  // extension-free payload. That gating is why attribution stays spec-clean.
+  // The SDK (2.21+) runs this hook on every payment, so every seller gets
+  // Tenjin's service code; a seller that declared `builder-code` also gets its
+  // own fields echoed. Both are the SDK's own payload.
   const builderCode = new BuilderCodeClientExtension(TENJIN_CLI_BUILDER_CODE);
   core.registerExtension(builderCode);
   return { core, http: new x402HTTPClient(core), builderCodeKey: builderCode.key };
@@ -269,8 +269,8 @@ export async function buildExactPayment(
   if (requirement === undefined) throw noPayableRequirement(paymentRequired.accepts);
 
   // A single-accept challenge, so nothing can re-select a different or costlier
-  // entry between the check and the signature. Narrow `accepts` only, or the
-  // builder-code hook never fires.
+  // entry between the check and the signature. Narrow `accepts` only, so the
+  // extensions the seller declared still ride along.
   const bound: PaymentRequired = {
     ...paymentRequired,
     accepts: [requirement],

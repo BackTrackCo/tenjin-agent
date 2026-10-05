@@ -429,9 +429,10 @@ describe('runPay, builder-code attribution', () => {
     ]);
   });
 
-  // A seller who never declared the extension must not receive it: the SDK's
-  // gating is what keeps this attribution spec-clean rather than a custom header.
-  it('sends no builder-code extension to a seller that did not advertise it', async () => {
+  // The SDK's own default since @x402/core 2.21: every registered client
+  // extension enriches every payment, so a seller that never declared
+  // builder-code still gets Tenjin's service code, with no seller field.
+  it("sends the SDK's builder-code entry to a seller that did not advertise it", async () => {
     const fixture = buildPaymentRequired();
     const { fetch, calls } = scriptedFetch([
       json(402, {}, { 'PAYMENT-REQUIRED': fixture.header }),
@@ -443,7 +444,9 @@ describe('runPay, builder-code attribution', () => {
       provider: testWalletProvider(),
       authorizer: fakeAuthorizer('allow'),
     });
-    expect(attributionOf(calls[1]!.headers['payment-signature'])).toBeUndefined();
+    expect(attributionOf(calls[1]!.headers['payment-signature'])).toEqual({
+      s: [TENJIN_CLI_BUILDER_CODE],
+    });
   });
 
   // The lane the Tenjin server actually takes: it always declares
