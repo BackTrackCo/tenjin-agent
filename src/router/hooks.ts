@@ -22,6 +22,8 @@ import {
 } from './context';
 import { storeSpecs } from './specs';
 import { requestDecision, ROUTER_PATH, type HookDecision } from './decision';
+import { payForDecision, routingFeeApproved, routingFeeFor } from './fee';
+import { firstNoticeFor, pausedReason, pausedSentence, ROUTE_PAID_PATH } from './lanes';
 import { readsAsEmptyPage, savedPdfOf } from './fetch-result';
 import { GATE_TIMEOUT_MS } from './gate';
 import { REQUEST_TOOL } from './names';
@@ -54,7 +56,10 @@ import { routerSettings, type RouterSettings } from './settings';
  * SDK, no viem, no MCP server: a dist test asserts the chunk graph, because the
  * hooks run on every prompt and after every native search, and their cost is
  * the product's floor.
- * The decision is free, so nothing on this path can spend anything either.
+ * On the free path the decision costs nothing. On the paid path (an approved
+ * routing fee and a server that answers it) the hook sends one voucher the MCP
+ * process already signed, from a lane it claims (`lanes.ts`): it signs nothing
+ * and funds nothing, and with no lane free it skips the call.
  *
  * EVERY FAILURE IS SILENT. A backend that is down, slow or answering nonsense
  * leaves the prompt and the native result unchanged; the cause goes to
@@ -827,6 +832,9 @@ async function offerOnUserText(
   if (skipped !== null) return { response: null, skipped };
   const router = await routerFor(event.cwd, deps);
   if (router === null) return { response: null };
+  const notice = await pausedNotice(deps, event.sessionId, router.config);
+  const quiet = (): { response: unknown } | { response: null } =>
+    notice === null ? { response: null } : injection(hookEventName, notice);
 
   const sealed = seal(
     scoped(await buildPromptPacket(event.transcriptPath, event.sessionId, text), router.settings),
@@ -836,18 +844,19 @@ async function offerOnUserText(
   const outcome = await decide(sealed, deps, router.config, event.sessionId);
   if (!isOffer(outcome)) {
     await footer.close(outcome);
-    return { response: null, ...(outcome !== null ? { action: outcome.action } : {}) };
+    return { ...quiet(), ...(outcome !== null ? { action: outcome.action } : {}) };
   }
   const vetted = await vetOffer(outcome, deps, deadline, true);
   if (vetted.withheld !== undefined) {
     await footer.close(outcome, { withheld: vetted.withheld });
-    return { response: null, action: outcome.action, withheld: true };
+    return { ...quiet(), action: outcome.action, withheld: true };
   }
   await footer.close(outcome);
+  const line = attributed(vetted.offer.hint);
   return {
     action: outcome.action,
     id: outcome.id,
-    ...injection(hookEventName, attributed(vetted.offer.hint)),
+    ...injection(hookEventName, notice === null ? line : `${notice}\n${line}`),
   };
 }
 
@@ -1440,9 +1449,11 @@ function hookOutcome(decision: HookDecision | null): string {
   return 'needs input';
 }
 
-/** One free decision, with the hook's own deadline and its own silence. It
- *  takes what {@link seal} returns rather than a bare packet, so a call site
- *  that skips the mask does not typecheck. */
+/** One decision, with the hook's own deadline and its own silence. It takes
+ *  what {@link seal} returns rather than a bare packet, so a call site that
+ *  skips the mask does not typecheck. On the paid path it spends one rung of a
+ *  lane the MCP process funded and signed; with no lane free the call is not
+ *  made at all and the native tool runs (`fee.ts`). */
 async function decide(
   { packet }: Sealed,
   deps: HookDeps,
@@ -1451,22 +1462,56 @@ async function decide(
 ): Promise<HookDecision | null> {
   const baseUrl = resolveBaseUrl(deps, config);
   const warn = deps.warn ?? ((line: string) => process.stderr.write(`${line}\n`));
-  const outcome = await requestDecision(
-    'hook',
-    { packet, sessionId },
-    {
-      ctx: hookContext(deps),
-      baseUrl,
-      acceptsBazaar: resolveExperimentalBazaar(config).value === 'on',
-      timeoutMs: deps.timeoutMs ?? GATE_TIMEOUT_MS,
-      ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
-    },
+  const fee = await routingFeeFor(deps.dataDir, config);
+  const outcome = await payForDecision(
+    fee,
+    (payment) =>
+      requestDecision(
+        'hook',
+        { packet, sessionId },
+        {
+          ctx: hookContext(deps),
+          baseUrl,
+          acceptsBazaar: resolveExperimentalBazaar(config).value === 'on',
+          timeoutMs: deps.timeoutMs ?? GATE_TIMEOUT_MS,
+          ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+          ...(payment !== undefined ? { payment } : {}),
+        },
+      ),
+    deps.now?.() ?? Date.now(),
   );
+  if (outcome.status === 'skipped') {
+    warn(
+      `tenjin hook: no routing lane could pay the routing fee (${outcome.why}), so the native tool runs`,
+    );
+    return null;
+  }
   if (outcome.status === 'failed') {
-    warn(`tenjin hook: ${baseUrl}${ROUTER_PATH} ${outcome.reason}`);
+    const path = fee.mode === 'paid' ? ROUTE_PAID_PATH : ROUTER_PATH;
+    warn(`tenjin hook: ${baseUrl}${path} ${outcome.reason}`);
     return null;
   }
   return outcome.decision.decision;
+}
+
+/**
+ * ONE LINE, ONCE PER SESSION, when routing on the paid path is paused: the
+ * reason and the command that turns it back on, for the agent to pass to the
+ * user. Null when nothing is paused or this session was already told.
+ */
+async function pausedNotice(
+  deps: HookDeps,
+  sessionId: string,
+  config: PartialConfig,
+): Promise<string | null> {
+  try {
+    const paused = await pausedReason(deps.dataDir, routingFeeApproved(config));
+    if (paused === null) return null;
+    if (!(await firstNoticeFor(deps.dataDir, sessionId, deps.now?.() ?? Date.now()))) return null;
+    return `${HINT_SOURCE}: ${pausedSentence(paused)} Tell the user this once.`;
+  } catch {
+    return null;
+  }
 }
 
 /** The hooks write their own protocol answer on stdout and nothing else. */

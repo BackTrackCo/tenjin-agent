@@ -1,4 +1,5 @@
 import { runPay, type AdvertisedTerms, type PayDeps } from '../commands/pay';
+import { loadRawConfig } from '../lib/config';
 import { CliError } from '../lib/errors';
 import { toMoney } from '../lib/money';
 import { downloadsDir } from '../lib/paths';
@@ -25,6 +26,7 @@ import {
   type DecisionDiagnostics,
   type OfferSpec,
 } from './decision';
+import { payForDecision, routingFeeFor, type RoutingFee } from './fee';
 import { openLookupFooter, type LookupFooter } from './progress';
 import {
   appendPaidRecord,
@@ -101,8 +103,11 @@ export interface RequestToolDeps {
   /** The directory `router.*` resolves from; defaults to `process.cwd()`, which
    *  Claude Code sets to the project directory for an MCP server. */
   cwd?: string;
-  /** Clock seam for a saved file's name. */
+  /** Clock seam for a saved file's name and a lane's claim. */
   now?: () => number;
+  /** Which path the routing call takes; the MCP server passes its own lanes
+   *  first. Absent resolves it from the config and the lane pool. */
+  routingFee?: RoutingFee;
   /** Test seam for the media download; production pins each connection to
    *  the address it validated. */
   mediaTransport?: MediaTransport;
@@ -214,11 +219,31 @@ export async function runRequestTool(
   // with no id the gate picks a service and answers with its spec. An id the
   // backend does not know is its own plain note, and the pick still runs from
   // the query.
-  const fresh = await requestDecision(
-    'tool',
-    { query, ...(id !== undefined ? { id } : {}) },
-    decisionDeps,
+  // ON THE PAID PATH the call spends one rung of a lane this process's owner
+  // signed, and with no lane free it is not made: the host's own tools run.
+  const fee =
+    deps.routingFee ??
+    (await routingFeeFor(
+      deps.ctx.dataDir,
+      await loadRawConfig(deps.ctx.dataDir).catch(() => ({})),
+    ));
+  const fresh = await payForDecision(
+    fee,
+    (payment) =>
+      requestDecision(
+        'tool',
+        { query, ...(id !== undefined ? { id } : {}) },
+        { ...decisionDeps, ...(payment !== undefined ? { payment } : {}) },
+      ),
+    deps.now?.() ?? Date.now(),
   );
+  if (fresh.status === 'skipped') {
+    await footer.done('native');
+    return fail(
+      'native',
+      `No routing lane could pay the $0.003 routing fee (${fresh.why}), so nothing was routed or paid.`,
+    );
+  }
   if (fresh.status === 'failed') {
     await footer.done('failed');
     return fail('failed', fresh.reason, {
