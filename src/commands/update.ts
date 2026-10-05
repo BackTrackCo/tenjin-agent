@@ -4,6 +4,7 @@ import { homedir } from 'node:os';
 import { resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pkg from '../../package.json';
+import { loadRawConfig, ROUTING_FEE_UNSET } from '../lib/config';
 import { CliError } from '../lib/errors';
 import { MANAGERS, classifyManager, refuse, resolveManagerScript } from '../lib/install-location';
 import type { Delegable } from '../lib/install-location';
@@ -16,7 +17,16 @@ import {
   resolveTarget,
 } from '../lib/update-check';
 import { defaultDataDir } from '../lib/paths';
+import { promptYesNo } from '../lib/prompt';
 import type { CommandContext, CommandResult } from '../context';
+import {
+  APPROVE_COMMAND,
+  LANE_DEPOSIT_ATOMIC,
+  ROUTING_ALLOWANCE_ATOMIC,
+  ROUTING_FEE_ATOMIC,
+  usd,
+} from '../router/lanes';
+import { persistRoutingFee } from './config';
 
 /**
  * `tenjin update`: replace this install with the newest version npm offers it,
@@ -104,6 +114,9 @@ export interface UpdateDeps {
   managerScript?: string | null;
   /** Home whose manual-fix command the report names. Defaults to os.homedir(). */
   homeDir?: string;
+  /** Asks the routing-fee question; tests answer it. Defaults to a y/N prompt
+   *  on stderr, and is only ever called at a TTY. */
+  confirm?: (question: string) => Promise<boolean>;
   /**
    * The CLI entry the refresh child runs. Defaults to `process.argv[1]`, which
    * after the swap resolves to the NEWLY installed script — that is the whole
@@ -179,9 +192,10 @@ export async function runUpdate(
   });
 
   if (!updateAvailable) {
+    const fee = await askRoutingFee(ctx, deps);
     return {
-      data: data(false),
-      humanLines: [`tenjin-cli ${current} is up to date`],
+      data: { ...data(false), routingFee: fee.answer },
+      humanLines: [`tenjin-cli ${current} is up to date`, ...fee.lines],
     };
   }
   if (opts.check) {
@@ -262,9 +276,54 @@ export async function runUpdate(
   );
 
   const refresh = await refreshProfiles(ctx, deps);
+  const fee = await askRoutingFee(ctx, deps);
   return {
-    data: { ...data(true), refresh },
-    humanLines: [`Updated tenjin-cli ${current} -> ${latest}.`, ...refreshLines(refresh)],
+    data: { ...data(true), refresh, routingFee: fee.answer },
+    humanLines: [
+      `Updated tenjin-cli ${current} -> ${latest}.`,
+      ...refreshLines(refresh),
+      ...fee.lines,
+    ],
+  };
+}
+
+const ROUTING_FEE_QUESTION =
+  `Tenjin's router charges a routing fee of $${usd(ROUTING_FEE_ATOMIC)} per routing call, at most ` +
+  `$${usd(ROUTING_ALLOWANCE_ATOMIC)} a day, paid from $${usd(LANE_DEPOSIT_ATOMIC)} deposits your ` +
+  'wallet makes within your spend limits. Until you approve it, the router uses only its free ' +
+  'path, and once that path closes routing pauses. Approve the routing fee? [y/N] ';
+
+/**
+ * THE ROUTING-FEE QUESTION, ASKED ONCE. `install --refresh` runs without a
+ * terminal and skips the install-time selector, so an update is where a
+ * person is asked. The answer is kept either way, so it is never asked again;
+ * without a terminal nothing is kept and the line names the command instead.
+ */
+async function askRoutingFee(
+  ctx: CommandContext,
+  deps: UpdateDeps,
+): Promise<{ answer: string; lines: string[] }> {
+  const config = await loadRawConfig(ctx.dataDir).catch(() => null);
+  if (config === null) return { answer: ROUTING_FEE_UNSET, lines: [] };
+  if (config.routingFee !== undefined) return { answer: config.routingFee, lines: [] };
+  if (!ctx.io.isTTY || ctx.flags.json) {
+    return {
+      answer: ROUTING_FEE_UNSET,
+      lines: [
+        `The routing fee ($${usd(ROUTING_FEE_ATOMIC)} a call) is not approved yet. Approve it with \`${APPROVE_COMMAND}\`.`,
+      ],
+    };
+  }
+  const approved = await (deps.confirm ?? ((q: string) => promptYesNo(q)))(ROUTING_FEE_QUESTION);
+  const answer = approved ? 'approved' : 'declined';
+  await persistRoutingFee(ctx.dataDir, answer);
+  return {
+    answer,
+    lines: [
+      approved
+        ? 'Routing fee approved.'
+        : `Routing fee declined. Approve it later with \`${APPROVE_COMMAND}\`.`,
+    ],
   };
 }
 

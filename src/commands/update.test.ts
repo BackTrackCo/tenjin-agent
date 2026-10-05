@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { existsSync, realpathSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -109,6 +109,7 @@ async function deps(overrides: Partial<UpdateDeps> = {}): Promise<UpdateDeps> {
     // the home; pinned so no assertion here depends on the developer's own.
     homeDir: dir,
     refreshCommand: join(dir, 'bin', 'tenjin.js'),
+    confirm: async () => false,
     ...overrides,
   };
 }
@@ -139,6 +140,7 @@ describe('runUpdate', () => {
       updateAvailable: true,
       updated: true,
       refresh: { profiles: [dir], failed: [] },
+      routingFee: 'unset',
     });
     expect(result.humanLines?.join(' ')).toContain('0.1.0-alpha.6 -> 0.1.0-alpha.7');
   });
@@ -1149,5 +1151,69 @@ describe('versionFreeEntry', () => {
     expect(data.updated).toBe(true);
     expect(data.refresh.failed.map((f) => f.dataDir)).toEqual([dir]);
     expect(result.humanLines?.join(' ')).toContain('tenjin install');
+  });
+});
+
+describe('runUpdate: the routing-fee approval', () => {
+  const upToDate = () => registry({ latest: '0.1.0-alpha.6' }).fetchImpl;
+
+  it('asks once at a terminal and keeps the answer, so the next update does not ask', async () => {
+    const asked: string[] = [];
+    const confirm = async (question: string): Promise<boolean> => {
+      asked.push(question);
+      return true;
+    };
+    const first = await runUpdate(
+      { check: false },
+      makeCtx({}, true).ctx,
+      await deps({ fetchImpl: upToDate(), confirm }),
+    );
+    expect(asked).toHaveLength(1);
+    expect(asked[0]).toContain('$0.003 per routing call');
+    expect(first.data).toMatchObject({ routingFee: 'approved' });
+    expect(JSON.parse(await readFile(join(dir, 'config.json'), 'utf8'))).toMatchObject({
+      routingFee: 'approved',
+    });
+
+    const second = await runUpdate(
+      { check: false },
+      makeCtx({}, true).ctx,
+      await deps({ fetchImpl: upToDate(), confirm }),
+    );
+    expect(asked).toHaveLength(1);
+    expect(second.data).toMatchObject({ routingFee: 'approved' });
+  });
+
+  it('keeps a decline too, and names the command that approves it later', async () => {
+    let asked = 0;
+    const confirm = async (): Promise<boolean> => {
+      asked += 1;
+      return false;
+    };
+    const result = await runUpdate(
+      { check: false },
+      makeCtx({}, true).ctx,
+      await deps({ fetchImpl: upToDate(), confirm }),
+    );
+    expect(result.humanLines?.join(' ')).toContain('tenjin config set routingFee approved');
+    await runUpdate(
+      { check: false },
+      makeCtx({}, true).ctx,
+      await deps({ fetchImpl: upToDate(), confirm }),
+    );
+    expect(asked).toBe(1);
+  });
+
+  it('never asks without a terminal, and writes nothing', async () => {
+    const confirm = async (): Promise<boolean> => {
+      throw new Error('asked without a terminal');
+    };
+    const result = await runUpdate(
+      { check: false },
+      makeCtx({ json: true }, true).ctx,
+      await deps({ fetchImpl: upToDate(), confirm }),
+    );
+    expect(result.data).toMatchObject({ routingFee: 'unset' });
+    await expect(readFile(join(dir, 'config.json'), 'utf8')).rejects.toThrow();
   });
 });
