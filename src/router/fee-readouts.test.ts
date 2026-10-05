@@ -58,19 +58,19 @@ describe('doctor: routing fee', () => {
     expect(await feeCheck()).toMatchObject({ status: 'ok' });
   });
 
-  it('names a missing approval and the approval command', async () => {
+  it('passes without approval while the free path still routes, with the paid path known', async () => {
     await writeFeeState(join(root, 'data'), { paidPath: 'available', checkedAtMs: Date.now() });
     const check = await feeCheck();
-    expect(check.status).toBe('warn');
-    expect(check.detail).toContain('routing is paused');
+    expect(check.status).toBe('ok');
     expect(check.detail).toContain('not approved');
-    expect(check.fix).toBe('Run `tenjin config set routingFee approved`.');
+    expect(check.detail).toContain('routing uses the free path');
   });
 
   it('names the approval command once the free path answered fee_required', async () => {
     await writeFeeState(join(root, 'data'), { feeRequiredAtMs: Date.now() });
     const check = await feeCheck();
     expect(check.status).toBe('warn');
+    expect(check.detail).toContain('routing is paused');
     expect(check.detail).toContain('not approved');
     expect(check.fix).toBe('Run `tenjin config set routingFee approved`.');
   });

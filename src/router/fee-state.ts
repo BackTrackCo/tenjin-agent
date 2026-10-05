@@ -305,12 +305,11 @@ export type PausedReason =
   | { reason: 'wallet_locked' };
 
 /**
- * PAUSED, AND WHY. Only once the server takes the fee, which a machine learns
- * from the paid path's 402 (probed only after approval) or from the free path
- * answering `fee_required`: until then the free path routes as it always has.
- * Missing approval pauses routing; an approved machine whose wallet cannot
- * make the next deposit, or whose wallet `tenjin mcp` cannot unlock, is paused
- * for that.
+ * PAUSED, AND WHY. Missing approval pauses routing only once the free path
+ * answers `fee_required`: until then it routes as it always has, even on a
+ * machine that knows the paid path. An approved machine that knows the paid
+ * path, and whose wallet cannot make the next deposit or whose wallet
+ * `tenjin mcp` cannot unlock, is paused for that.
  */
 export async function pausedReason(
   dataDir: string,
@@ -318,9 +317,11 @@ export async function pausedReason(
 ): Promise<PausedReason | null> {
   const state = await readFeeState(dataDir);
   if (state === null) return null;
-  const feeTaken = state.paidPath === 'available' || typeof state.feeRequiredAtMs === 'number';
-  if (!feeTaken) return null;
-  if (!approved) return { reason: 'approval_missing' };
+  // Without approval only the free path runs, so only its `fee_required`
+  // answer pauses routing: a remembered paid path does not.
+  if (!approved) {
+    return typeof state.feeRequiredAtMs === 'number' ? { reason: 'approval_missing' } : null;
+  }
   if (state.paidPath !== 'available') return null;
   if (state.blocked === 'wallet_locked') return { reason: 'wallet_locked' };
   if (state.blocked !== 'wallet_low') return null;

@@ -59,8 +59,26 @@ async function config(value: Record<string, unknown>): Promise<void> {
   await writeFile(join(dir, 'config.json'), JSON.stringify(value));
 }
 
-/** A free router: every call answers native, and records what it was sent. */
-function router(): {
+/** A free router's offer, the answer the papercut was about. */
+const OFFER = {
+  schemaVersion: 1,
+  routerVersion: 'v',
+  decision: {
+    action: 'execute',
+    id: 'k3f9-abcd',
+    capabilityId: 'cmc-quote',
+    category: 'live price',
+    provider: 'CoinMarketCap',
+    capabilityDescription: 'live crypto quotes',
+    endpoint: 'https://example.test/quote',
+    providerPriceAtomic: '10000',
+    usage: 'the coin and currency',
+    hint: 'CoinMarketCap fits this: live crypto quotes. Call request({query: "ETH in USD", id: "k3f9-abcd"}) alone and wait for its result.',
+  },
+};
+
+/** A free router: every call answers `body` (native), and records what it was sent. */
+function router(body: unknown = NATIVE): {
   fetchImpl: typeof fetch;
   calls: { url: string; signature: string | null }[];
 } {
@@ -70,7 +88,7 @@ function router(): {
       url: String(input),
       signature: new Headers(init?.headers).get('payment-signature'),
     });
-    return new Response(JSON.stringify(NATIVE), {
+    return new Response(JSON.stringify(body), {
       status: 200,
       headers: { 'content-type': 'application/json' },
     });
@@ -161,12 +179,22 @@ describe('the hook legs and the routing fee', () => {
     expect([...fake.channels.values()][0]!.charged).toBe(2n * ROUTING_FEE_ATOMIC);
   });
 
-  it('uses the free path without approval, and says once per session that paid routing is paused', async () => {
+  it('routes on the free path without approval and says nothing of a pause, with the paid path known', async () => {
+    await config({ maxAutoSpend: '250000', sessionBudget: '5000000' });
     await writeFeeState(dir, { paidPath: 'available', checkedAtMs: NOW });
-    const { fetchImpl, calls } = router();
+    const { fetchImpl, calls } = router(OFFER);
     const first = await runPromptHook(prompt(), deps(fetchImpl));
     expect(calls[0]).toEqual({ url: `${BASE}/api/x402-router`, signature: null });
-    expect(contextOf(first.response)).toContain('the routing fee');
+    expect(contextOf(first.response)).toContain('CoinMarketCap fits this');
+    expect(contextOf(first.response)).not.toContain('paused');
+    expect(await pausedReason(dir, false)).toBeNull();
+  });
+
+  it('says once per session that routing is paused once the free path answers fee_required', async () => {
+    await writeFeeState(dir, { paidPath: 'available', checkedAtMs: NOW });
+    const { fetchImpl } = router(FEE_REQUIRED_ANSWER);
+    const first = await runPromptHook(prompt(), deps(fetchImpl));
+    expect(contextOf(first.response)).toContain('routing is paused');
     expect(contextOf(first.response)).toContain('`tenjin config set routingFee approved`');
     const second = await runPromptHook(prompt(), deps(fetchImpl));
     expect(second.response).toBeNull();
@@ -240,8 +268,7 @@ describe('the hook legs and the routing fee', () => {
   }, 15_000);
 
   it('keeps the paused-routing line off the answer hook', async () => {
-    await writeFeeState(dir, { paidPath: 'available', checkedAtMs: NOW });
-    const { fetchImpl, calls } = router();
+    const { fetchImpl, calls } = router(FEE_REQUIRED_ANSWER);
     const answered = await runAnswerHook(
       {
         hook_event_name: 'PostToolUse',

@@ -7,7 +7,6 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { testWalletProvider } from '../lib/read-test-utils';
 import type { SpendAuthorization, SpendAuthorizer } from '../lib/wallet';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
-import { writeFeeState } from './fee-state';
 import { FakeRouter, testSigner } from './fee-test-utils';
 import { hookToolInput } from './hook-tool';
 import { buildRouterMcpServer, MAX_RESULT_SIZE_CHARS, MAX_RESULT_SIZE_KEY } from './mcp';
@@ -175,14 +174,30 @@ describe('the hook tool', () => {
   });
 
   it('runs the prompt leg in this process and answers in the hook format', async () => {
-    await writeFeeState(dir, { paidPath: 'available', checkedAtMs: Date.now() });
     const { homeDir, transcript } = await home('sess-hook');
-    const fake = new FakeRouter();
+    // The server takes only paid calls: its free path answers `fee_required`.
+    const log: string[] = [];
+    const feeRequired = (async (input: Parameters<typeof fetch>[0]) => {
+      log.push(`POST ${new URL(String(input)).pathname}`);
+      return Response.json({
+        schemaVersion: 1,
+        routerVersion: 'test',
+        decision: {
+          action: 'native',
+          diagnostics: {
+            reasonCode: 'fee_required',
+            stage: 'capability',
+            missing: [],
+            nextAction: 'native',
+          },
+        },
+      });
+    }) as typeof fetch;
     const server = buildRouterMcpServer({
       dataDir: dir,
       homeDir,
       handlerDeps: { cwd: dir, signer: await testWalletProvider().getSigner() },
-      hookDeps: { baseUrl: 'https://router.test', fetchImpl: fake.fetch, warn: () => undefined },
+      hookDeps: { baseUrl: 'https://router.test', fetchImpl: feeRequired, warn: () => undefined },
     });
     const client = await connect(server);
     try {
@@ -192,7 +207,7 @@ describe('the hook tool', () => {
       });
       const text = (called.content as { text: string }[])[0]!.text;
       // The fee is not approved, so the free path ran and the pause was said.
-      expect(fake.log).toEqual(['POST /api/x402-router unpaid']);
+      expect(log).toEqual(['POST /api/x402-router']);
       expect(JSON.parse(text)).toMatchObject({
         hookSpecificOutput: { hookEventName: 'UserPromptSubmit' },
       });
