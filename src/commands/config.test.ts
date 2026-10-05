@@ -10,6 +10,7 @@ import {
   runConfigSet,
   persistPublishMode,
   persistGrantDeclined,
+  persistRoutingFeeIfUnanswered,
 } from './config';
 import { HOOK_ARMS, LOOP_CONFIG_KEYS, RawConfigSchema } from '../lib/config';
 import { CliError } from '../lib/errors';
@@ -155,6 +156,19 @@ describe('runConfigList', () => {
     expect((await runConfigGet({ key: 'routingAllowance' }, ctx)).data).toMatchObject({
       value: { atomic: '1000000' },
     });
+  });
+
+  it('persistRoutingFeeIfUnanswered writes an answer only where the file has none', async () => {
+    await persistRoutingFeeIfUnanswered(dir, 'approved');
+    expect(JSON.parse(await readFile(join(dir, 'config.json'), 'utf8')).routingFee).toBe(
+      'approved',
+    );
+    // A decline another terminal wrote first is kept.
+    await writeFile(join(dir, 'config.json'), JSON.stringify({ routingFee: 'declined' }));
+    await persistRoutingFeeIfUnanswered(dir, 'approved');
+    expect(JSON.parse(await readFile(join(dir, 'config.json'), 'utf8')).routingFee).toBe(
+      'declined',
+    );
   });
 
   it('sendMaxAmount round-trips: unset until set, decimal USD in, Money out, 0 and none valid', async () => {

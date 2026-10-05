@@ -6,7 +6,7 @@ import { promisify } from 'node:util';
 import { claudeAdapter } from '../adapters/claude';
 import {
   persistRouterDefaults,
-  persistRoutingFee,
+  persistRoutingFeeIfUnanswered,
   ROUTER_DEFAULTS,
   type RouterLimits,
 } from '../commands/config';
@@ -306,13 +306,7 @@ export async function runRouterInstall(
   const spend = await persistRouterDefaults(ctx.dataDir, args.refresh === true, limits);
   // The selector named the routing fee, so answering it approves the fee too,
   // unless an answer reached the file while the person was at the prompt.
-  if (
-    limits !== undefined &&
-    config.routingFee === undefined &&
-    (await loadRawConfig(ctx.dataDir)).routingFee === undefined
-  ) {
-    await persistRoutingFee(ctx.dataDir, 'approved');
-  }
+  if (limits !== undefined) await persistRoutingFeeIfUnanswered(ctx.dataDir, 'approved');
   const removedKeysLines =
     spend.removed.length > 0
       ? [

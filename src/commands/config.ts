@@ -1050,6 +1050,20 @@ export async function persistRoutingFee(dir: string, answer: RoutingFee): Promis
 }
 
 /**
+ * The routing-fee answer, only when the file has none. The check runs inside
+ * the locked write, so an answer another process wrote while this one waited
+ * at a prompt is kept.
+ */
+export async function persistRoutingFeeIfUnanswered(
+  dir: string,
+  answer: RoutingFee,
+): Promise<void> {
+  await persist(dir, (existing) =>
+    existing.routingFee === undefined ? { ...existing, routingFee: answer } : existing,
+  );
+}
+
+/**
  * Record the EXACT free-verb rules `install` declined, through the same locked
  * read-modify-write every `config set` uses. Set to whatever was pending at the
  * moment of `--no-grant`; cleared back to `[]` the moment an install

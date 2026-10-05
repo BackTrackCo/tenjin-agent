@@ -472,6 +472,16 @@ describe('install asks a person to approve the spend limits', () => {
     expect(await loadRawConfig(data)).toMatchObject({ routingFee: 'declined' });
   });
 
+  it('keeps a decline another terminal wrote while the selector was open', async () => {
+    const promptLimits = vi.fn(async () => {
+      await writeFile(join(data, 'config.json'), JSON.stringify({ routingFee: 'declined' }));
+      return 'approve' as const;
+    });
+    await runRouterInstall({}, humanCtx(), deps({ isInteractive: true, promptLimits }));
+    expect(promptLimits).toHaveBeenCalledTimes(1);
+    expect(await loadRawConfig(data)).toMatchObject({ routingFee: 'declined' });
+  });
+
   it('shows a limit the file already names and asks only for the missing one', async () => {
     await writeFile(join(data, 'config.json'), JSON.stringify({ sessionBudget: 'none' }));
     const promptLimits = vi.fn(async () => 'own' as const);
