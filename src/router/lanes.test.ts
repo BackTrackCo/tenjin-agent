@@ -1,7 +1,7 @@
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   chargedFrom,
   claimLane,
@@ -13,10 +13,47 @@ import {
   pausedReason,
   pausedSentence,
   readLaneResult,
+  takeClaim,
   writeJson,
   writePool,
   type LaneState,
 } from './lanes';
+
+/**
+ * `on`: every file write waits a moment first, so a race window stays open.
+ * `vanish`: the next read of a claim finds nothing, as when its holder let it
+ * go and another payer took it between that read and the move.
+ */
+const slow = vi.hoisted(() => ({ on: false, vanish: false }));
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const fs = await importOriginal<typeof import('node:fs/promises')>();
+  const pause = () => new Promise((resolve) => setTimeout(resolve, 20));
+  return {
+    ...fs,
+    readFile: async (...args: Parameters<typeof fs.readFile>) => {
+      if (slow.vanish && String(args[0]).endsWith('.claim')) {
+        slow.vanish = false;
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      }
+      return fs.readFile(...args);
+    },
+    writeFile: async (...args: Parameters<typeof fs.writeFile>) => {
+      if (slow.on) await pause();
+      return fs.writeFile(...args);
+    },
+    open: async (...args: Parameters<typeof fs.open>) => {
+      const handle = await fs.open(...args);
+      if (slow.on) {
+        const write = handle.writeFile.bind(handle);
+        handle.writeFile = async (...rest: Parameters<typeof write>) => {
+          await pause();
+          return write(...rest);
+        };
+      }
+      return handle;
+    },
+  };
+});
 
 let dir: string;
 const NOW = 1_800_000_000_000;
@@ -134,6 +171,59 @@ describe('claimLane', () => {
     await held.lane!.finish({ kind: 'payment_required', paymentRequired: 'eyJ9' });
     expect((await readLaneResult(lanesDir(dir), 0))?.outcome).toBe('corrective');
     expect((await claimLane(dir, { now: NOW, allowanceAtomic: ALLOWANCE })).lane).toBeNull();
+  });
+
+  it('never lets two payers both take the last fee the allowance holds', async () => {
+    await lane(0);
+    await lane(1);
+    const both = await Promise.all([
+      claimLane(dir, { now: NOW, allowanceAtomic: 3_000n }),
+      claimLane(dir, { now: NOW, allowanceAtomic: 3_000n }),
+    ]);
+    expect(both.filter((c) => c.lane !== null)).toHaveLength(1);
+    const held = both.find((c) => c.lane !== null)!.lane!;
+    // While that call is out, its claim counts as a fee.
+    expect(await claimLane(dir, { now: NOW, allowanceAtomic: 3_000n })).toEqual({
+      lane: null,
+      why: 'allowance',
+    });
+    // Settled at $0, it took nothing, and the fee is free again.
+    await held.finish({ kind: 'answered', status: 200, paymentResponse: settle(0n) });
+    expect((await claimLane(dir, { now: NOW, allowanceAtomic: 3_000n })).lane).not.toBeNull();
+  });
+
+  it('counts a call that may have been charged at its own time, and only once', async () => {
+    await lane(0);
+    const lost = await claimLane(dir, { now: NOW, allowanceAtomic: ALLOWANCE });
+    await lost.lane!.finish({ kind: 'no_answer' });
+    expect(await feesInWindow(dir, NOW)).toBe(3_000n);
+    // It was not charged after all: the next call pays for the same total.
+    const next = await claimLane(dir, { now: NOW, allowanceAtomic: ALLOWANCE });
+    expect(next.lane?.header).toBe('rung-0-3000');
+    await next.lane!.finish({ kind: 'answered', status: 200, paymentResponse: settle(3_000n) });
+    expect(await feesInWindow(dir, NOW)).toBe(3_000n);
+  });
+
+  it('never lets a second payer take a claim that is still being written', async () => {
+    slow.on = true;
+    try {
+      const first = takeClaim(lanesDir(dir), 0, HOOK_CLAIM_TTL_MS, NOW);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      const second = takeClaim(lanesDir(dir), 0, HOOK_CLAIM_TTL_MS, NOW);
+      const tokens = await Promise.all([first, second]);
+      expect(tokens.filter((t) => t !== null)).toHaveLength(1);
+    } finally {
+      slow.on = false;
+    }
+  });
+
+  it('puts back a live claim it moved after reading none', async () => {
+    const holder = await takeClaim(lanesDir(dir), 0, HOOK_CLAIM_TTL_MS, NOW);
+    expect(holder).not.toBeNull();
+    slow.vanish = true;
+    expect(await takeClaim(lanesDir(dir), 0, HOOK_CLAIM_TTL_MS, NOW)).toBeNull();
+    const raw = JSON.parse(await readFile(laneFiles.claim(lanesDir(dir), 0), 'utf8'));
+    expect(raw.token).toBe(holder);
   });
 
   it('says there are no lanes when none exist', async () => {

@@ -34,6 +34,7 @@ import {
   readPool,
   ROUTING_ALLOWANCE_ATOMIC,
   ROUTING_FEE_ATOMIC,
+  ROUTING_WINDOW_MS,
 } from './lanes';
 
 /**
@@ -341,6 +342,26 @@ describe('LaneOwner', () => {
     });
   });
 
+  it('reads the channel from the chain before depositing again when a funding answer is lost', async () => {
+    const router = new FakeRouter();
+    const lanes = owner(router);
+    // The deposit lands, then the connection drops before its answer is read.
+    router.abortAfterSettle = true;
+    await lanes.tick();
+    expect(router.deposits).toBe(1);
+    expect(await readLaneState(lanesDir(dir), 0)).toMatchObject({
+      balanceAtomic: '0',
+      status: 'recovering',
+    });
+    await lanes.tick();
+    expect(router.deposits).toBe(1);
+    expect(await readLaneState(lanesDir(dir), 0)).toMatchObject({
+      balanceAtomic: '250000',
+      status: 'ready',
+    });
+    expect((await routeOnce(router)).status).toBe('decided');
+  });
+
   it('stops funding when the spend limits refuse the deposit', async () => {
     const router = new FakeRouter();
     await owner(router, { maxAutoSpendAtomic: 100_000n }).tick();
@@ -451,6 +472,33 @@ describe('LaneOwner', () => {
     expect(await readFees(lanesDir(dir), 0)).toHaveLength(2);
     expect(await feesInWindow(dir, clock)).toBe(3_000n);
     expect(router.settledFees).toBe(1);
+  });
+
+  it('counts a lost answer at the time of the call, not when recovery finds it a day later', async () => {
+    const router = new FakeRouter();
+    const lanes = owner(router);
+    await lanes.tick();
+    router.abortAfterSettle = true;
+    expect((await routeOnce(router)).status).toBe('failed');
+    expect(router.settledFees).toBe(1);
+    expect(await feesInWindow(dir, clock)).toBe(3_000n);
+    await lanes.tick();
+
+    // A day passes with the owner pruning old lines; then the next voucher
+    // meets a corrective 402 and the owner recovers yesterday's charge.
+    clock += ROUTING_WINDOW_MS + 60_000;
+    await lanes.tick();
+    expect(await feesInWindow(dir, clock)).toBe(0n);
+    expect((await routeOnce(router)).status).toBe('failed');
+    await lanes.tick();
+    expect(await readLaneState(lanesDir(dir), 0)).toMatchObject({
+      chargedAtomic: '3000',
+      status: 'ready',
+    });
+    expect(await feesInWindow(dir, clock)).toBe(0n);
+    // So an allowance of one fee still has that fee today.
+    const claimed = await claimLane(dir, { now: clock, allowanceAtomic: ROUTING_FEE_ATOMIC });
+    expect(claimed.lane).not.toBeNull();
   });
 
   it("adds nothing when recovery folds a total the hook's own line already holds", async () => {

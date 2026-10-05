@@ -1,5 +1,15 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { appendFile, link, mkdir, open, readFile, readdir, rename, rm } from 'node:fs/promises';
+import {
+  appendFile,
+  link,
+  mkdir,
+  open,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  writeFile,
+} from 'node:fs/promises';
 import { join } from 'node:path';
 import { writeFileAtomic } from '../lib/atomic-json';
 import { hasCode } from '../lib/errno';
@@ -105,6 +115,8 @@ interface Claim {
   token: string;
   pid: number;
   expiresAtMs: number;
+  /** Taken to pay one fee: the allowance counts it until it is let go. */
+  fee?: true;
 }
 
 export function lanesDir(dataDir: string): string {
@@ -222,22 +234,29 @@ export async function laneIndices(dir: string): Promise<number[]> {
 }
 
 /**
- * TAKE A LANE'S CLAIM, or say it is held. The claim is a file created
- * exclusively; one past its expiry is moved aside and re-taken. Moving it aside
- * is checked against the token that was read, so two payers that both saw the
- * same stale claim cannot both end up holding the lane: the one that moved a
- * fresh claim puts it back and walks away.
+ * TAKE A LANE'S CLAIM, or say it is held. The claim is a file that appears
+ * with its whole body or not at all; one past its expiry is moved aside and
+ * re-taken. What was moved is checked against the claim that was read, so two
+ * payers cannot both end up holding the lane: the one that moved any claim
+ * other than the stale one it read puts it back and walks away.
  */
 export async function takeClaim(
   dir: string,
   index: number,
   ttlMs: number,
   now: number,
+  opts: { fee?: boolean } = {},
 ): Promise<string | null> {
   const path = file.claim(dir, index);
   const token = randomUUID();
-  const body = JSON.stringify({ token, pid: process.pid, expiresAtMs: now + ttlMs });
-  if (await createExclusive(path, body)) return token;
+  const claim: Claim = {
+    token,
+    pid: process.pid,
+    expiresAtMs: now + ttlMs,
+    ...(opts.fee === true ? { fee: true as const } : {}),
+  };
+  const body = JSON.stringify(claim);
+  if (await createClaim(path, body)) return token;
   const held = (await readJson(path)) as Claim | null;
   if (held !== null && typeof held.expiresAtMs === 'number' && held.expiresAtMs > now) {
     return null;
@@ -249,20 +268,40 @@ export async function takeClaim(
     return null;
   }
   const moved = (await readJson(aside)) as Claim | null;
-  if (held !== null && moved?.token !== held.token) {
-    // Somebody re-took it between the read and the move: hand it back.
+  if (moved !== null && moved.token !== held?.token) {
+    // Somebody took it between the read and the move: hand it back.
     await link(aside, path).catch(() => undefined);
     await rm(aside, { force: true });
     return null;
   }
   await rm(aside, { force: true });
-  return (await createExclusive(path, body)) ? token : null;
+  return (await createClaim(path, body)) ? token : null;
 }
 
 export async function dropClaim(dir: string, index: number, token: string): Promise<void> {
   const path = file.claim(dir, index);
   const held = (await readJson(path)) as Claim | null;
   if (held?.token === token) await rm(path, { force: true });
+}
+
+/**
+ * A claim is written whole under a name of its own and then linked into place,
+ * which fails when the claim exists. A reader never sees a claim without its
+ * body, so it never takes a half-written claim for a stale one.
+ */
+async function createClaim(path: string, body: string): Promise<boolean> {
+  await mkdir(join(path, '..'), { recursive: true, mode: 0o700 });
+  const draft = `${path}.${randomUUID()}.tmp`;
+  await writeFile(draft, body, { flag: 'wx', mode: 0o600 });
+  try {
+    await link(draft, path);
+    return true;
+  } catch (err) {
+    if (hasCode(err, 'EEXIST')) return false;
+    throw err;
+  } finally {
+    await rm(draft, { force: true });
+  }
 }
 
 async function createExclusive(path: string, body: string): Promise<boolean> {
@@ -331,6 +370,11 @@ export type NoLane = 'no_lanes' | 'busy' | 'recovering' | 'below_fee' | 'allowan
  * CLAIM A LANE THAT CAN PAY ONE FEE NOW, or say why none can. Lanes are tried
  * from a random start, so parallel payers spread over the pool instead of
  * queueing on lane 0. `prefer` puts some lanes first (the tool's own).
+ *
+ * THE ALLOWANCE IS CHECKED AFTER THE CLAIM IS TAKEN. A fee reaches the ledger
+ * only when its call ends, so each payer counts the other lanes' live fee
+ * claims as fees too. Two payers near the limit each see the other's claim, or
+ * one sees both: at least one of them backs off, never both pay.
  */
 export async function claimLane(
   dataDir: string,
@@ -355,7 +399,9 @@ export async function claimLane(
   ];
   let why: NoLane = 'busy';
   for (const index of order) {
-    const token = await takeClaim(dir, index, opts.ttlMs ?? HOOK_CLAIM_TTL_MS, opts.now);
+    const token = await takeClaim(dir, index, opts.ttlMs ?? HOOK_CLAIM_TTL_MS, opts.now, {
+      fee: true,
+    });
     if (token === null) continue;
     const state = await readLaneState(dir, index);
     const readiness =
@@ -365,6 +411,14 @@ export async function claimLane(
       if (readiness?.why === 'recovering') why = 'recovering';
       else if (readiness?.why === 'below_fee' && why !== 'recovering') why = 'below_fee';
       continue;
+    }
+    // Claims first, then the ledger: a call that ends between the two reads
+    // wrote its fee before it let its claim go, so it is seen at least once.
+    const inFlight = await feeClaimsHeld(dir, indices, index, opts.now);
+    const spentNow = await feesInWindow(dataDir, opts.now);
+    if (spentNow + (inFlight + 1n) * ROUTING_FEE_ATOMIC > opts.allowanceAtomic) {
+      await dropClaim(dir, index, token);
+      return { lane: null, why: 'allowance' };
     }
     const before = readiness.chargedAtomic;
     return {
@@ -384,6 +438,24 @@ export async function claimLane(
   }
   await notePoolDemand(dataDir, opts.now);
   return { lane: null, why };
+}
+
+/** Live fee claims on every lane but `own`. */
+async function feeClaimsHeld(
+  dir: string,
+  indices: readonly number[],
+  own: number,
+  now: number,
+): Promise<bigint> {
+  let held = 0n;
+  for (const index of indices) {
+    if (index === own) continue;
+    const claim = (await readJson(file.claim(dir, index))) as Claim | null;
+    if (claim?.fee === true && typeof claim.expiresAtMs === 'number' && claim.expiresAtMs > now) {
+      held += 1n;
+    }
+  }
+  return held;
 }
 
 async function notePoolDemand(dataDir: string, now: number): Promise<void> {
@@ -412,6 +484,7 @@ async function recordAnswer(
     };
   } else if (answer.kind === 'no_answer') {
     result = { version: 1, atMs, chargedAtomic: before.toString(), outcome: 'unknown' };
+    await appendPossibleFee(dir, index, before, atMs);
   } else {
     const charged =
       answer.paymentResponse !== undefined ? chargedFrom(answer.paymentResponse) : null;
@@ -424,6 +497,7 @@ async function recordAnswer(
         // next voucher finds out where the channel stands.
         outcome: answer.status < 400 ? 'unknown' : 'refused',
       };
+      if (answer.status < 400) await appendPossibleFee(dir, index, before, atMs);
     } else {
       result = {
         version: 1,
@@ -440,6 +514,23 @@ async function recordAnswer(
     }
   }
   await writeJson(file.result(dir, index), result);
+}
+
+/**
+ * A CALL THAT MAY HAVE BEEN CHARGED counts as charged, at the time of the call.
+ * Its line names the total that charge would bring the lane to, so the fee a
+ * later recovery finds there, or the next call's fee for the same total when
+ * this one was not charged, adds nothing on top.
+ */
+async function appendPossibleFee(
+  dir: string,
+  index: number,
+  before: bigint,
+  atMs: number,
+): Promise<void> {
+  await appendFees(dir, index, [
+    { atMs, feeAtomic: ROUTING_FEE_ATOMIC, chargedAtomic: before + ROUTING_FEE_ATOMIC },
+  ]);
 }
 
 /**

@@ -101,6 +101,14 @@ export interface LaneOwnerDeps {
   warn?: (line: string) => void;
 }
 
+/** How a funding attempt ended. */
+interface Funding {
+  blocked?: PoolState['fundingBlocked'];
+  walletAtomic?: bigint;
+  /** A deposit was sent and no settle came back: it may have landed. */
+  depositUnknown?: true;
+}
+
 interface Probe {
   atMs: number;
   /** The paid path's 402, narrowed to its batch-settlement entry. */
@@ -316,7 +324,7 @@ export class LaneOwner {
     index: number,
     paid: PaymentRequired,
     address: `0x${string}`,
-  ): Promise<{ blocked?: PoolState['fundingBlocked']; walletAtomic?: bigint } | null> {
+  ): Promise<Funding | null> {
     const now = this.now();
     const token = await takeClaim(dir, index, OWNER_CLAIM_TTL_MS, now);
     if (token === null) return null;
@@ -335,13 +343,16 @@ export class LaneOwner {
         salt: state.salt as `0x${string}`,
         voucherSigner: await this.voucherSigner(),
       };
-      const status = await this.foldResult(dir, index, state, clientDeps, accept);
-      let blocked: { blocked?: PoolState['fundingBlocked']; walletAtomic?: bigint } = {};
+      let status = await this.foldResult(dir, index, state, clientDeps, accept);
+      let blocked: Funding = {};
       const ctx = await storage.get(state.channelId.toLowerCase());
       const charged = BigInt(ctx?.chargedCumulativeAmount ?? state.chargedAtomic);
       const balance = BigInt(ctx?.balance ?? state.balanceAtomic);
       if (status === 'ready' && balance - charged < ROUTING_FEE_ATOMIC) {
         blocked = await this.fund(clientDeps, state, address);
+        // A deposit sent with no answer may have landed: the next pass reads
+        // the channel from the chain before it deposits again.
+        if (blocked.depositUnknown === true) status = 'recovering';
       }
       const fresh = await storage.get(state.channelId.toLowerCase());
       // A total learned through recovery may hold a fee no hook wrote down.
@@ -434,7 +445,7 @@ export class LaneOwner {
     clientDeps: BatchSettlementClientDeps,
     state: LaneState,
     address: `0x${string}`,
-  ): Promise<{ blocked?: PoolState['fundingBlocked']; walletAtomic?: bigint }> {
+  ): Promise<Funding> {
     const authorizer = await this.deps.authorizer();
     const auth = await authorizer.authorize({
       amountAtomic: LANE_DEPOSIT_ATOMIC,
@@ -491,7 +502,7 @@ export class LaneOwner {
       if (sent) await authorizer.commit(auth.reservationId, LANE_DEPOSIT_ATOMIC);
       else await authorizer.release(auth.reservationId);
       this.warn(err);
-      return { blocked: null };
+      return sent ? { blocked: null, depositUnknown: true } : { blocked: null };
     }
   }
 
@@ -538,9 +549,23 @@ export class LaneOwner {
     return ladder;
   }
 
+  /**
+   * Drop lines past the window, except the one naming the lane's highest
+   * total: a fee recovery finds later at or under that total was counted when
+   * it happened, and must not count again at recovery time.
+   */
   private async pruneFees(dir: string, index: number, now: number): Promise<void> {
     const fees = await readFees(dir, index);
-    const kept = fees.filter((f) => now - f.atMs < ROUTING_WINDOW_MS);
+    let top: (typeof fees)[number] | undefined;
+    for (const f of fees) {
+      if (
+        f.chargedAtomic !== undefined &&
+        (top?.chargedAtomic === undefined || f.chargedAtomic > top.chargedAtomic)
+      ) {
+        top = f;
+      }
+    }
+    const kept = fees.filter((f) => f === top || now - f.atMs < ROUTING_WINDOW_MS);
     if (kept.length === fees.length) return;
     await writeFile(laneFiles.fees(dir, index), feeLines(kept), { mode: 0o600 });
   }
