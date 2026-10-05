@@ -167,15 +167,22 @@ export class LaneOwner {
     if (address === null) return;
     const dir = lanesDir(this.deps.dataDir);
     await this.leaseLanes(dir);
+    let tried = false;
     let blocked: PoolState['fundingBlocked'] = null;
     let walletAtomic: bigint | null = null;
     for (const index of this.ownedLanes()) {
       const outcome = await this.serviceLane(dir, index, paid, address);
-      if (outcome?.blocked !== undefined) {
+      if (outcome === null) continue;
+      tried = true;
+      if (outcome.blocked != null) {
         blocked = outcome.blocked;
         walletAtomic = outcome.walletAtomic ?? walletAtomic;
       }
     }
+    // ONLY A PASS THAT TRIED TO FUND A LANE KNOWS WHETHER FUNDING IS BLOCKED.
+    // Another process's pass that owns no lane, or whose lanes needed nothing,
+    // leaves the last answer standing, so the notice does not flicker.
+    if (!tried) return;
     await writePool(this.deps.dataDir, {
       fundingBlocked: blocked,
       ...(walletAtomic !== null ? { walletBalanceAtomic: walletAtomic.toString() } : {}),
@@ -318,7 +325,8 @@ export class LaneOwner {
    * ONE LANE, UNDER ITS CLAIM: fold in what the last payer wrote, recover after
    * a corrective 402, top up when the lane cannot pay one more fee, and sign
    * a fresh ladder when the old one runs low. A lane a hook holds right now is
-   * left for the next pass.
+   * left for the next pass. Returns how a funding attempt ended, or null when
+   * none was made.
    */
   private async serviceLane(
     dir: string,
@@ -345,15 +353,15 @@ export class LaneOwner {
         voucherSigner: await this.voucherSigner(),
       };
       let status = await this.foldResult(dir, index, state, clientDeps, accept);
-      let blocked: Funding = {};
+      let funding: Funding | null = null;
       const ctx = await storage.get(state.channelId.toLowerCase());
       const charged = BigInt(ctx?.chargedCumulativeAmount ?? state.chargedAtomic);
       const balance = BigInt(ctx?.balance ?? state.balanceAtomic);
       if (status === 'ready' && balance - charged < ROUTING_FEE_ATOMIC) {
-        blocked = await this.fund(clientDeps, address);
+        funding = await this.fund(clientDeps, address);
         // A deposit sent with no answer may have landed: the next pass reads
         // the channel from the chain before it deposits again.
-        if (blocked.depositUnknown === true) status = 'recovering';
+        if (funding.depositUnknown === true) status = 'recovering';
       }
       const fresh = await storage.get(state.channelId.toLowerCase());
       const next: LaneState = {
@@ -374,7 +382,7 @@ export class LaneOwner {
       if (added > 0n) await appendFee(dir, index, { atMs: now, feeAtomic: added });
       await rm(laneFiles.result(dir, index), { force: true });
       await writeJson(laneFiles.state(dir, index), next);
-      return blocked;
+      return funding;
     } finally {
       await dropClaim(dir, index, token);
     }

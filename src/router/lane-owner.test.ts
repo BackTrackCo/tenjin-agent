@@ -404,6 +404,19 @@ describe('LaneOwner', () => {
     });
   });
 
+  it('leaves a funding block standing through a pass from a process that funded nothing', async () => {
+    const router = new FakeRouter();
+    await owner(router, { walletAtomic: 100_000n }).tick();
+    expect((await readPool(dir))?.fundingBlocked).toBe('wallet_low');
+    // A second session's owner: the lane is leased to the first, so it
+    // services nothing and has nothing to say about funding.
+    const second = owner(router, { walletAtomic: 100_000n });
+    await second.tick();
+    expect(second.ownedLanes()).toEqual([]);
+    expect((await readPool(dir))?.fundingBlocked).toBe('wallet_low');
+    expect(await pausedReason(dir, true)).toMatchObject({ reason: 'cannot_fund' });
+  });
+
   it('a killed hook: its claim expires, the next voucher meets a corrective 402, and the lane recovers with no double charge', async () => {
     const router = new FakeRouter();
     const lanes = owner(router);
