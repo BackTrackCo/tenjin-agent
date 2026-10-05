@@ -832,7 +832,12 @@ async function offerOnUserText(
   if (skipped !== null) return { response: null, skipped };
   const router = await routerFor(event.cwd, deps);
   if (router === null) return { response: null };
-  const notice = await pausedNotice(deps, event.sessionId, router.config);
+  // The paused-routing line rides the prompt hook only: the router installs no
+  // SessionStart arm, and the fee adds no hook arm of its own.
+  const notice =
+    hookEventName === 'UserPromptSubmit'
+      ? await pausedNotice(deps, event.sessionId, router.config)
+      : null;
   const quiet = (): { response: unknown } | { response: null } =>
     notice === null ? { response: null } : injection(hookEventName, notice);
 

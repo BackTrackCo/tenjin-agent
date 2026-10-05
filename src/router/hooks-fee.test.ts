@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { runPromptHook } from './hooks';
+import { runAnswerHook, runPromptHook } from './hooks';
 import {
   claimLane,
   laneFiles,
@@ -167,5 +167,27 @@ describe('the prompt hook and the routing fee', () => {
     const outcome = await runPromptHook(prompt(), deps(fetchImpl));
     expect(calls).toEqual([]);
     expect(outcome.response).toBeNull();
+  });
+
+  it('keeps the paused-routing line off the answer hook', async () => {
+    await writePool(dir, { paidPath: 'available', checkedAtMs: NOW });
+    const { fetchImpl, calls } = router();
+    const answered = await runAnswerHook(
+      {
+        hook_event_name: 'PostToolUse',
+        session_id: 'sess-answer',
+        cwd: dir,
+        tool_name: 'AskUserQuestion',
+        tool_input: { questions: [{ question: 'Which coin?', options: [] }] },
+        tool_response: { answers: { 'Which coin?': 'ETH, price in USD now' } },
+      },
+      deps(fetchImpl),
+    );
+    // It did route the answer, and said nothing about the pause.
+    expect(calls).toHaveLength(1);
+    expect(answered).toEqual({ response: null, action: 'native' });
+    // The session's prompt hook still carries it, once.
+    const prompted = await runPromptHook(prompt('sess-answer'), deps(fetchImpl));
+    expect(contextOf(prompted.response)).toContain('routing is paused');
   });
 });
