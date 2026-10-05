@@ -48,6 +48,17 @@ describe('retired skill cleanup', () => {
     expect(await removeRetiredSkills(home)).toEqual([searchDir]);
     expect(existsSync(searchDir)).toBe(false);
   });
+  it('never follows a symlinked references directory out of the skill', async () => {
+    const searchDir = join(skills(), 'tenjin-search');
+    const outside = join(home, 'outside');
+    await mkdir(searchDir, { recursive: true });
+    await mkdir(outside, { recursive: true });
+    await writeFile(join(outside, 'permissions.md'), 'theirs');
+    await symlink(outside, join(searchDir, 'references'));
+    await writeFile(join(searchDir, 'SKILL.md'), '---\nname: tenjin-search\n---\nsearch\n');
+    await removeRetiredSkills(home);
+    expect(await readFile(join(outside, 'permissions.md'), 'utf8')).toBe('theirs');
+  });
   it('preserves a foreign skill at the obsolete path', async () => {
     await writeSkill('somebody-else');
     expect(await removeOwnedSkill('tenjin-pay', skills())).toEqual({ changed: false });

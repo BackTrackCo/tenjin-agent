@@ -47,8 +47,11 @@ export async function removeOwnedSkill(
   const subdirs = new Set<string>();
   for (const rel of shipped) {
     if (rel === 'SKILL.md') continue;
-    subdirs.add(dirname(join(skillDir, rel)));
-    await rm(join(skillDir, rel), { force: true });
+    const file = join(skillDir, rel);
+    // A symlinked `references/` would route the delete outside the skill.
+    if (!isRealDirectory(dirname(file))) continue;
+    subdirs.add(dirname(file));
+    if (lstatSync(file, { throwIfNoEntry: false })?.isFile() === true) await rm(file);
   }
   await rm(path, { force: true });
   for (const dir of [...subdirs, skillDir].sort((a, b) => b.length - a.length)) {
