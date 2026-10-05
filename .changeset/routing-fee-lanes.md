@@ -16,3 +16,7 @@ keys. `tenjin doctor` and the first prompt hook of each session say when routing
 why, and the command that fixes it; `tenjin status` and the new `tenjin payments fees`
 show what the fee has cost. Until both conditions hold, routing uses the free path
 exactly as before.
+
+The `@x402/*` SDK moves to 2.21.0, the server's version. With it, every provider
+payment carries Tenjin's builder code in the SDK's own `builder-code` extension, also
+to sellers that never asked for one: the SDK's default.
