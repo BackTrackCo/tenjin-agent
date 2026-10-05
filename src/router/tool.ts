@@ -26,7 +26,14 @@ import {
   type DecisionDiagnostics,
   type OfferSpec,
 } from './decision';
-import { payForDecision, routingFeeFor, type RoutingFee } from './fee';
+import {
+  isFeeRequired,
+  payForDecision,
+  routingFeeApproved,
+  routingFeeFor,
+  type RoutingFee,
+} from './fee';
+import { pausedReason, pausedSentence } from './lanes';
 import { openLookupFooter, type LookupFooter } from './progress';
 import {
   appendPaidRecord,
@@ -221,12 +228,8 @@ export async function runRequestTool(
   // the query.
   // ON THE PAID PATH the call spends one rung of a lane this process's owner
   // signed, and with no lane free it is not made: the host's own tools run.
-  const fee =
-    deps.routingFee ??
-    (await routingFeeFor(
-      deps.ctx.dataDir,
-      await loadRawConfig(deps.ctx.dataDir).catch(() => ({})),
-    ));
+  const config = await loadRawConfig(deps.ctx.dataDir).catch(() => ({}));
+  const fee = deps.routingFee ?? (await routingFeeFor(deps.ctx.dataDir, config));
   const fresh = await payForDecision(
     fee,
     (payment) =>
@@ -251,6 +254,21 @@ export async function runRequestTool(
     });
   }
   const { decision, note } = fresh.decision;
+
+  // THE FREE PATH NO LONGER ROUTES. The server's line says to update the CLI,
+  // which is wrong for this one: what stops routing here is the approval, or
+  // lanes that are not funded yet.
+  if (isFeeRequired(fresh.decision)) {
+    await footer.done('native');
+    const paused = await pausedReason(deps.ctx.dataDir, routingFeeApproved(config));
+    return fail(
+      'native',
+      paused !== null
+        ? pausedSentence(paused)
+        : 'Tenjin routing is starting: the routing fee is approved and this machine has no funded routing lane yet, so nothing was routed or paid.',
+      { nextStep: 'Tell the user this once, and use your own tools for now.' },
+    );
+  }
 
   // THE PICKED SERVICE'S SPEC, for a query with no id, kept like a hook's and
   // shown with the skeleton of the next call, `request({id, input})`. Nothing

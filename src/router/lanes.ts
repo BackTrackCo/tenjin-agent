@@ -110,6 +110,12 @@ export interface PoolState {
   walletBalanceAtomic?: string;
   /** When a payer last found no free lane, so an owner grows the pool. */
   demandAtMs?: number;
+  /**
+   * When the free path answered `fee_required`: the server routes only paid
+   * calls now, so a machine without approval is paused. Cleared when the free
+   * path routes again.
+   */
+  feeRequiredAtMs?: number | null;
 }
 
 interface Claim {
@@ -565,20 +571,24 @@ export type PausedReason =
   { reason: 'approval_missing' } | { reason: 'cannot_fund'; walletAtomic: bigint | null };
 
 /**
- * PAUSED, AND WHY. Only once the server answers the paid path: before that
- * the free path routes as it always has, and there is nothing to tell anyone.
- * Missing approval pauses paid routing; an approved machine whose lanes are
- * all below one fee and whose wallet cannot make the next deposit is paused
- * for want of funds.
+ * PAUSED, AND WHY. Only once the server takes the fee, which a machine learns
+ * from the paid path's answer (an owner probes it after approval) or from the
+ * free path answering `fee_required` (before approval, when no owner probes):
+ * until then the free path routes as it always has, and there is nothing to
+ * tell anyone. Missing approval pauses routing; an approved machine whose
+ * lanes are all below one fee and whose wallet cannot make the next deposit is
+ * paused for want of funds.
  */
 export async function pausedReason(
   dataDir: string,
   approved: boolean,
 ): Promise<PausedReason | null> {
   const pool = await readPool(dataDir);
-  if (pool?.paidPath !== 'available') return null;
+  if (pool === null) return null;
+  const feeTaken = pool.paidPath === 'available' || typeof pool.feeRequiredAtMs === 'number';
+  if (!feeTaken) return null;
   if (!approved) return { reason: 'approval_missing' };
-  if (pool.fundingBlocked !== 'wallet_low') return null;
+  if (pool.paidPath !== 'available' || pool.fundingBlocked !== 'wallet_low') return null;
   const dir = lanesDir(dataDir);
   for (const index of await laneIndices(dir)) {
     const state = await readLaneState(dir, index);
@@ -595,6 +605,20 @@ export async function pausedReason(
 }
 
 export const APPROVE_COMMAND = 'tenjin config set routingFee approved';
+
+/**
+ * Note whether the free path answered `fee_required`, writing the pool only
+ * when that changes, so a hook adds no write on an ordinary call.
+ */
+export async function noteFeeRequired(
+  dataDir: string,
+  required: boolean,
+  now: number,
+): Promise<void> {
+  const pool = await readPool(dataDir);
+  if (required === (typeof pool?.feeRequiredAtMs === 'number')) return;
+  await writePool(dataDir, { feeRequiredAtMs: required ? now : null });
+}
 
 /** The fix, as the command the user runs. */
 export function pausedFix(paused: PausedReason): string {

@@ -2,6 +2,7 @@ import type { PartialConfig } from '../lib/config';
 import type { DecisionOutcome, DecisionPayment } from './decision';
 import {
   claimLane,
+  noteFeeRequired,
   readPool,
   ROUTE_PAID_PATH,
   ROUTING_ALLOWANCE_ATOMIC,
@@ -18,8 +19,12 @@ import {
  * signing and funding; this only spends a rung it already wrote.
  */
 export type RoutingFee =
-  | { mode: 'free' }
+  /** `dataDir`, when given, is where a `fee_required` answer is noted. */
+  | { mode: 'free'; dataDir?: string }
   | { mode: 'paid'; dataDir: string; allowanceAtomic: bigint; prefer?: readonly number[] };
+
+/** The free path's reason code once the server routes only paid calls. */
+export const FEE_REQUIRED = 'fee_required';
 
 export function routingFeeApproved(config: PartialConfig): boolean {
   return config.routingFee === 'approved';
@@ -32,9 +37,9 @@ export function routingAllowanceAtomic(config: PartialConfig): bigint {
 }
 
 export async function routingFeeFor(dataDir: string, config: PartialConfig): Promise<RoutingFee> {
-  if (!routingFeeApproved(config)) return { mode: 'free' };
+  if (!routingFeeApproved(config)) return { mode: 'free', dataDir };
   const pool = await readPool(dataDir).catch(() => null);
-  if (pool?.paidPath !== 'available') return { mode: 'free' };
+  if (pool?.paidPath !== 'available') return { mode: 'free', dataDir };
   return { mode: 'paid', dataDir, allowanceAtomic: routingAllowanceAtomic(config) };
 }
 
@@ -63,7 +68,18 @@ export async function payForDecision<T>(
   now: number = Date.now(),
   budgetMs?: number,
 ): Promise<DecisionOutcome<T> | Skipped> {
-  if (fee.mode === 'free') return call(undefined, budgetMs);
+  if (fee.mode === 'free') {
+    const outcome = await call(undefined, budgetMs);
+    // A `fee_required` answer is how a machine without approval learns the
+    // server takes the fee: doctor, the prompt hook and the tool then name
+    // the approval command. Any other answer clears it; no answer says nothing.
+    if (fee.dataDir !== undefined && outcome.status === 'decided') {
+      await noteFeeRequired(fee.dataDir, isFeeRequired(outcome.decision), now).catch(
+        () => undefined,
+      );
+    }
+    return outcome;
+  }
   const until = budgetMs === undefined ? undefined : Date.now() + budgetMs;
   const claimed = await claimLane(fee.dataDir, {
     now,
@@ -82,4 +98,12 @@ export async function payForDecision<T>(
   } finally {
     await lane.finish(outcome?.payment ?? { kind: 'no_answer' }).catch(() => undefined);
   }
+}
+
+/** Whether a decision is the free path's `fee_required` answer. */
+export function isFeeRequired(response: unknown): boolean {
+  const decision = (response as { decision?: { action?: unknown; diagnostics?: unknown } })
+    ?.decision;
+  const diagnostics = decision?.diagnostics as { reasonCode?: unknown } | undefined;
+  return decision?.action === 'native' && diagnostics?.reasonCode === FEE_REQUIRED;
 }

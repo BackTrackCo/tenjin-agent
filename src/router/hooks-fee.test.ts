@@ -8,6 +8,7 @@ import {
   claimLane,
   laneFiles,
   lanesDir,
+  pausedReason,
   readLaneResult,
   writeJson,
   writePool,
@@ -29,6 +30,22 @@ const NATIVE = {
   decision: {
     action: 'native',
     diagnostics: { reasonCode: 'native', stage: 'gate', missing: [], nextAction: 'native' },
+  },
+};
+/** The free path's answer once the server routes only paid calls. */
+const FEE_REQUIRED_ANSWER = {
+  schemaVersion: 1,
+  routerVersion: 'v',
+  decision: {
+    action: 'native',
+    reason:
+      'Tenjin routing needs a newer tenjin-cli. Tell the user to run `npm i -g tenjin-cli@latest`.',
+    diagnostics: {
+      reasonCode: 'fee_required',
+      stage: 'capability',
+      missing: [],
+      nextAction: 'Update tenjin-cli (run `npm i -g tenjin-cli@latest`).',
+    },
   },
 };
 
@@ -127,6 +144,28 @@ describe('the prompt hook and the routing fee', () => {
     expect(second.response).toBeNull();
     const otherSession = await runPromptHook(prompt('sess-2'), deps(fetchImpl));
     expect(contextOf(otherSession.response)).toContain('`tenjin config set routingFee approved`');
+  });
+
+  it('names the approval command from the first fee_required answer, with no paid path known', async () => {
+    // Nothing probed the paid path: before approval no owner runs.
+    const calls: string[] = [];
+    let required = true;
+    const fetchImpl = (async (input: Parameters<typeof fetch>[0]) => {
+      calls.push(String(input));
+      return new Response(JSON.stringify(required ? FEE_REQUIRED_ANSWER : NATIVE), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as typeof fetch;
+    const first = await runPromptHook(prompt(), deps(fetchImpl));
+    expect(calls).toEqual([`${BASE}/api/x402-router`]);
+    expect(contextOf(first.response)).toContain('`tenjin config set routingFee approved`');
+    expect(contextOf(first.response)).not.toContain('npm i -g');
+    expect((await runPromptHook(prompt(), deps(fetchImpl))).response).toBeNull();
+    // The free path routing again lifts the pause.
+    required = false;
+    await runPromptHook(prompt(), deps(fetchImpl));
+    expect(await pausedReason(dir, false)).toBeNull();
   });
 
   it('says once per session when the wallet cannot fund a lane, with the amount', async () => {

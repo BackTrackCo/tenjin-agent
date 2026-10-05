@@ -832,14 +832,6 @@ async function offerOnUserText(
   if (skipped !== null) return { response: null, skipped };
   const router = await routerFor(event.cwd, deps);
   if (router === null) return { response: null };
-  // The paused-routing line rides the prompt hook only: the router installs no
-  // SessionStart arm, and the fee adds no hook arm of its own.
-  const notice =
-    hookEventName === 'UserPromptSubmit'
-      ? await pausedNotice(deps, event.sessionId, router.config)
-      : null;
-  const quiet = (): { response: unknown } | { response: null } =>
-    notice === null ? { response: null } : injection(hookEventName, notice);
 
   const sealed = seal(
     scoped(await buildPromptPacket(event.transcriptPath, event.sessionId, text), router.settings),
@@ -847,6 +839,15 @@ async function offerOnUserText(
   const footer = await openFooter(deps, event.sessionId, 'prompt');
   const deadline = gateDeadline(deps);
   const outcome = await decide(sealed, deps, router.config, event.sessionId, deadline);
+  // The paused-routing line rides the prompt hook only: the router installs no
+  // SessionStart arm, and the fee adds no hook arm of its own. It is read after
+  // the call, so the first `fee_required` answer is already noted.
+  const notice =
+    hookEventName === 'UserPromptSubmit'
+      ? await pausedNotice(deps, event.sessionId, router.config)
+      : null;
+  const quiet = (): { response: unknown } | { response: null } =>
+    notice === null ? { response: null } : injection(hookEventName, notice);
   if (!isOffer(outcome)) {
     await footer.close(outcome);
     return { ...quiet(), ...(outcome !== null ? { action: outcome.action } : {}) };

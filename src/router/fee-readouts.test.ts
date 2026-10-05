@@ -63,6 +63,14 @@ describe('doctor: routing fee', () => {
     expect(check.fix).toBe('Run `tenjin config set routingFee approved`.');
   });
 
+  it('names the approval command once the free path answered fee_required', async () => {
+    await writePool(join(root, 'data'), { feeRequiredAtMs: Date.now() });
+    const check = await feeCheck();
+    expect(check.status).toBe('warn');
+    expect(check.detail).toContain('not approved');
+    expect(check.fix).toBe('Run `tenjin config set routingFee approved`.');
+  });
+
   it('names a wallet that cannot fund a lane, and tenjin wallet fund with the amount', async () => {
     await writeFile(join(root, 'data', 'config.json'), JSON.stringify({ routingFee: 'approved' }));
     await writePool(join(root, 'data'), {
