@@ -442,6 +442,8 @@ export async function removeSkills(homeDir: string): Promise<string[]> {
       for (const rel of shipped) {
         if (rel === 'SKILL.md') continue;
         const file = join(skillDir, rel);
+        // A symlinked `references/` would route the delete outside the skill.
+        if (lstatSync(dirname(file), { throwIfNoEntry: false })?.isDirectory() !== true) continue;
         // The directory is a prune CANDIDATE whether or not our file is still in
         // it: an operator who deleted the file by hand would otherwise be left
         // with an empty `references/` that nothing ever clears.

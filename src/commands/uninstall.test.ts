@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runUninstall } from './uninstall';
@@ -353,6 +353,17 @@ describe('runUninstall — a skill that ships more than SKILL.md', () => {
     expect(existsSync(join(dir, 'references', 'permissions.md'))).toBe(false);
     expect(await readFile(join(dir, 'references', 'notes.md'), 'utf8')).toBe('mine');
     expect(existsSync(dir)).toBe(true);
+  });
+
+  it('never follows a symlinked references directory out of the skill', async () => {
+    const dir = await seedSkill('.claude/skills', 'tenjin-search');
+    const outside = join(home, 'outside');
+    await mkdir(outside, { recursive: true });
+    await writeFile(join(outside, 'permissions.md'), 'theirs');
+    await symlink(outside, join(dir, 'references'));
+
+    await run();
+    expect(await readFile(join(outside, 'permissions.md'), 'utf8')).toBe('theirs');
   });
 
   // Ownership is proven by SKILL.md's frontmatter, so a directory that is not
