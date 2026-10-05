@@ -349,8 +349,11 @@ function amounts(answers: (string | null)[]) {
   });
 }
 
+const FEE_LINES =
+  '\nRouting costs $0.003 a call, at most $0.50 in a rolling day, paid from $0.25 lane deposits that stay yours until spent and do not count against these limits.\nUsing these limits or choosing your own also approves the routing fee.';
+
 describe('install asks a person to approve the spend limits', () => {
-  it('"Use these limits" writes the defaults it showed', async () => {
+  it('"Use these limits" writes the defaults it showed and approves the routing fee', async () => {
     const promptLimits = vi.fn(async () => 'approve' as const);
     const promptAmount = amounts([]);
     const result = await runRouterInstall(
@@ -359,11 +362,15 @@ describe('install asks a person to approve the spend limits', () => {
       deps({ isInteractive: true, promptLimits, promptAmount }),
     );
     expect(promptLimits).toHaveBeenCalledWith(
-      'The router pays for tool calls without asking, up to:\n  $0.25 a call, $5 a day',
+      `The router pays for tool calls without asking, up to:\n  $0.25 a call, $5 a day${FEE_LINES}`,
     );
     expect(promptAmount).not.toHaveBeenCalled();
     const config = await loadRawConfig(data);
-    expect(config).toMatchObject({ maxAutoSpend: '250000', sessionBudget: '5000000' });
+    expect(config).toMatchObject({
+      maxAutoSpend: '250000',
+      sessionBudget: '5000000',
+      routingFee: 'approved',
+    });
     expect(result.humanLines).toContain(
       '  Automatic router: up to $0.25 per call; daily limit $5 a day',
     );
@@ -382,6 +389,7 @@ describe('install asks a person to approve the spend limits', () => {
     expect(await loadRawConfig(data)).toMatchObject({
       maxAutoSpend: '100000',
       sessionBudget: '2000000',
+      routingFee: 'approved',
     });
     expect(result.humanLines).toContain(
       '  Automatic router: up to $0.1 per call; daily limit $2 a day',
@@ -449,10 +457,19 @@ describe('install asks a person to approve the spend limits', () => {
     const promptLimits = vi.fn(async () => 'approve' as const);
     await runRouterInstall({}, humanCtx(), deps({ isInteractive: true, promptLimits }));
     expect(promptLimits).not.toHaveBeenCalled();
-    expect(await loadRawConfig(data)).toMatchObject({
-      maxAutoSpend: '10000',
-      sessionBudget: 'none',
-    });
+    const config = await loadRawConfig(data);
+    expect(config).toMatchObject({ maxAutoSpend: '10000', sessionBudget: 'none' });
+    expect(config.routingFee).toBeUndefined();
+  });
+
+  it('keeps a routing-fee answer the file already has, and does not name the fee', async () => {
+    await writeFile(join(data, 'config.json'), JSON.stringify({ routingFee: 'declined' }));
+    const promptLimits = vi.fn(async () => 'approve' as const);
+    await runRouterInstall({}, humanCtx(), deps({ isInteractive: true, promptLimits }));
+    expect(promptLimits).toHaveBeenCalledWith(
+      'The router pays for tool calls without asking, up to:\n  $0.25 a call, $5 a day',
+    );
+    expect(await loadRawConfig(data)).toMatchObject({ routingFee: 'declined' });
   });
 
   it('shows a limit the file already names and asks only for the missing one', async () => {
@@ -465,7 +482,7 @@ describe('install asks a person to approve the spend limits', () => {
       deps({ isInteractive: true, promptLimits, promptAmount }),
     );
     expect(promptLimits).toHaveBeenCalledWith(
-      'The router pays for tool calls without asking, up to:\n  $0.25 a call, no daily limit',
+      `The router pays for tool calls without asking, up to:\n  $0.25 a call, no daily limit${FEE_LINES}`,
     );
     expect(promptAmount).toHaveBeenCalledTimes(1);
     expect(await loadRawConfig(data)).toMatchObject({
@@ -481,10 +498,9 @@ describe('install asks a person to approve the spend limits', () => {
     const promptLimits = vi.fn(async () => 'own' as const);
     await runRouterInstall({}, makeCtx(), deps({ isInteractive, promptLimits }));
     expect(promptLimits).not.toHaveBeenCalled();
-    expect(await loadRawConfig(data)).toMatchObject({
-      maxAutoSpend: '250000',
-      sessionBudget: '5000000',
-    });
+    const config = await loadRawConfig(data);
+    expect(config).toMatchObject({ maxAutoSpend: '250000', sessionBudget: '5000000' });
+    expect(config.routingFee).toBeUndefined();
   });
 
   it('--refresh asks nothing and fills no absent limit', async () => {
