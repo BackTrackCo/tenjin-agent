@@ -232,6 +232,24 @@ describe('RoutingPayer', () => {
     expect(router.settledFees).toBe(3);
   });
 
+  it("counts a queued call's budget from when it was sent, not from when its turn came", async () => {
+    const router = new FakeRouter();
+    const p = payer(router, { now: () => Date.now() });
+    await routeOnce(p, router);
+    router.delayMs = 300;
+    const route = (await p.routeFor(APPROVED, BASE))!;
+    const call = (timeoutMs: number) =>
+      requestDecision(
+        'tool',
+        { query: 'q' },
+        { ctx: ctx(), baseUrl: BASE, fetchImpl: router.fetch, timeoutMs, route },
+      );
+    // The second waits behind the first for longer than its own budget.
+    const [first, second] = await Promise.all([call(3_500), call(100)]);
+    expect(first.status).toBe('decided');
+    expect(second).toEqual({ status: 'skipped', why: 'busy' });
+  });
+
   it('skips a call that would pass the routing allowance, sending nothing', async () => {
     const router = new FakeRouter();
     const p = payer(router);

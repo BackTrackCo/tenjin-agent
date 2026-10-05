@@ -170,7 +170,11 @@ export class RoutingPayer {
     const allowance = routingAllowanceAtomic(config);
     return {
       path: ROUTE_PAID_PATH,
-      send: (url, options) => this.turn(() => this.pay(url, options, required, allowance)),
+      send: (url, options) => {
+        // The caller's budget starts now, not when this call's turn comes.
+        const until = this.now() + options.timeoutMs;
+        return this.turn(() => this.pay(url, options, required, allowance, until));
+      },
     };
   }
 
@@ -248,8 +252,8 @@ export class RoutingPayer {
     options: HttpRequestOptions,
     required: PaymentRequired,
     allowance: bigint,
+    until: number,
   ): Promise<HttpResult> {
-    const until = this.now() + options.timeoutMs;
     const slot = await this.slotFor(await this.signer());
     if (until - this.now() <= 0) throw new RouteSkipped('busy');
     const call: Call = { slot, allowance, host: new URL(url).host, deposit: false };
