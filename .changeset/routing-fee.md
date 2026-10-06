@@ -12,7 +12,9 @@ is an automatic payment: it is reserved in the spend ledger before it is signed,
 `maxAutoSpend`, `sessionBudget` and `allowlistCreators` apply to it, and `tenjin status`
 shows it. The fees come out of the deposit and are not counted again. `tenjin install`
 names the fee and its deposits in its spend-limit question, and approving the limits
-approves the fee.
+approves the fee. An install whose limits were approved before this release pays the
+fee inside those same limits ($0.25 a call and $5 a day by default), and `tenjin update`
+names the fee when it runs.
 
 A routing call that cannot be paid takes the free path: a wallet below the deposit, a
 wallet `tenjin mcp` cannot unlock without a prompt, a limit that refuses the deposit, a
