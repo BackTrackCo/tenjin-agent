@@ -3,16 +3,13 @@ import { homedir } from 'node:os';
 import { promisify } from 'node:util';
 import { CliError } from '../lib/errors';
 import { inspectHooksFile, ownsHookEntry, pruneOurHandlers } from '../lib/harness-hooks';
-import { httpRequest } from '../lib/http';
 import { toMoney } from '../lib/money';
-import { PRODUCTION_ORIGIN } from '../lib/production-origin';
 import { resolveContextSettings } from '../lib/settings';
 import { onPath } from '../lib/skill-wiring';
 import { describeWallet, resolveWalletProvider } from '../lib/wallet';
 import { walletFileExists } from '../lib/wallet/store';
 import type { CommandContext, CommandResult } from '../context';
 import { agentsWithoutRequestTool } from './agent-tools';
-import { ROUTER_PATH } from './decision';
 import {
   ALLOW_RULE,
   MCP_SERVER_NAME,
@@ -25,6 +22,7 @@ import {
 } from './install';
 import { routerSettings, type RouterSettings } from './settings';
 import { REQUEST_TOOL } from './names';
+import { probeRouter, type RouterCheck } from './reachability';
 import { inspectStatusLine, STATUS_LINE_COMMAND } from './status-line-wiring';
 
 /**
@@ -41,13 +39,7 @@ import { inspectStatusLine, STATUS_LINE_COMMAND } from './status-line-wiring';
 
 const exec = promisify(execFile);
 
-export interface RouterCheck {
-  name: string;
-  status: 'ok' | 'warn' | 'fail';
-  required: boolean;
-  detail: string;
-  fix?: string;
-}
+export type { RouterCheck };
 
 export interface RouterDoctorDeps {
   homeDir?: string;
@@ -106,7 +98,13 @@ export async function runRouterDoctor(
   checks.push(spendCheck(settings.policy.maxAutoSpendAtomic, settings.policy.sessionBudgetAtomic));
   checks.push(experimentalCheck(settings.experimentalBazaar));
   checks.push(...(await walletCheck(ctx)));
-  checks.push(await routerCheck(settings.baseUrl, ctx.flags.timeout, deps.fetchImpl));
+  checks.push(
+    await probeRouter(settings.baseUrl, {
+      timeoutMs: ctx.flags.timeout,
+      env,
+      ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+    }),
+  );
   const agents = await subagentsCheck(deps.cwd ?? process.cwd(), deps.homeDir ?? homedir());
   if (agents !== null) checks.push(agents);
 
@@ -452,7 +450,7 @@ function spendCheck(maxAutoSpendAtomic: bigint, sessionBudgetAtomic: bigint | nu
       status: 'fail',
       required: true,
       detail: 'maxAutoSpend is 0, so every lookup needs approval and none can pay',
-      fix: 'Run `tenjin install`, or `tenjin config set maxAutoSpend 0.10`.',
+      fix: 'Run `tenjin install` in a terminal to approve the limits, or `tenjin config set maxAutoSpend 0.10`.',
     };
   }
   const budget =
@@ -496,57 +494,4 @@ async function walletCheck(ctx: CommandContext): Promise<RouterCheck[]> {
       },
     ];
   }
-}
-
-/**
- * One cheap request to the free decision route with an empty body. It checks
- * the route is reachable and enabled, not that it routes: a 400 is the route
- * refusing that body, and a 404 is the route switched off. Nothing is signed
- * and no Jev request is spent.
- */
-async function routerCheck(
-  baseUrl: string,
-  timeoutMs: number,
-  fetchImpl: typeof fetch | undefined,
-): Promise<RouterCheck> {
-  const url = new URL(ROUTER_PATH, baseUrl).toString();
-  const probe = await httpRequest(url, {
-    method: 'POST',
-    timeoutMs,
-    blockRedirects: true,
-    jsonBody: {},
-    ...(fetchImpl !== undefined ? { fetchImpl } : {}),
-  });
-  const fail = (detail: string, fix: string): RouterCheck => ({
-    name: 'router',
-    status: 'fail',
-    required: true,
-    detail,
-    fix,
-  });
-  const checkBase =
-    'Check that the configured base URL names the Tenjin router (`tenjin config get baseUrl`), then try again later.';
-  if (!probe.ok) {
-    return fail(`the router at ${url} is unreachable or erroring (${probe.message})`, checkBase);
-  }
-  // 429 is the route's own rate limit: proof the router is there.
-  if (probe.status === 200 || probe.status === 400 || probe.status === 429) {
-    return { name: 'router', status: 'ok', required: true, detail: `${url} is live` };
-  }
-  if (probe.status === 404) {
-    return fail(`the router is not enabled at ${url}`, checkBase);
-  }
-  if (probe.status === 401 || probe.status === 403) {
-    return fail(
-      `${url} is not a Tenjin router (it asked for credentials)`,
-      `Set the router URL with \`tenjin config set baseUrl ${PRODUCTION_ORIGIN}\`.`,
-    );
-  }
-  if (probe.status >= 500) {
-    return fail(`the router at ${url} is unreachable or erroring (${probe.status})`, checkBase);
-  }
-  return fail(
-    `${url} answered ${probe.status}, which a Tenjin router does not`,
-    'Check that the configured base URL names a Tenjin deployment (`tenjin config get baseUrl`).',
-  );
 }

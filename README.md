@@ -35,7 +35,7 @@ Giving your agent good tools is a chore today:
 - **Your agent forgets anyway.** It reaches for plain web search out of habit, so you write rules to remind it, and it still slips.
 - **Some tools you need once.** Installing something permanent for a one-off lookup isn't worth the setup.
 
-Tenjin handles all of it. Install it once and keep working. The Tenjin router watches the moments where a tool could help: your prompt, your agent's web searches and page fetches, and the tasks it hands to subagents. When a curated tool beats what your agent was about to do, the router suggests it and your agent calls it. Your wallet pays for each call through [x402](#wallet-and-payments), so you manage no keys and install nothing new.
+Tenjin handles all of it. Install it once and keep working. The Tenjin router watches the moments where a tool could help: your prompt, your agent's web searches and page fetches, the tasks it hands to subagents, and the questions it asks you. When a curated tool beats what your agent was about to do, the router suggests it and your agent calls it. Your wallet pays for each call through [x402](#wallet-and-payments), so you manage no keys and install nothing new.
 
 ## Quick start
 
@@ -118,7 +118,7 @@ When one fits, your agent sees a one-line suggestion with the tool and its price
 x402 · request: calling pro-api.coinmarketcap.com/x402/v3/cryptocurrency/quotes/latest · {"query":{"symbol":"BTC,ETH"}}
 ```
 
-To pick a tool, the router sends your current turn and up to six recent messages, with keys, passwords and seed phrases masked. Tool results and page contents stay on your machine, and the packet expires after 15 minutes. `tenjin config set router.context turn` sends only the current message. [Full details, and everything install writes →](./docs/agent-permissions.md)
+To pick a tool, the router sends your current turn and up to six recent messages, with keys, passwords and seed phrases masked. It also sends each web search query or URL your agent is about to use (and, when one comes back short, its status, size or error), each task your agent hands to a subagent, and each question your agent asks you, together with your answers. When free library docs fit a search, that search query also goes to Tenjin's docs lookup, which asks Context7. Tool results and page contents stay on your machine, and the packet expires after 15 minutes. `tenjin config set router.context turn` sends only the current message. [Full details, and everything install writes →](./docs/agent-permissions.md)
 
 ## Wallet and payments
 
@@ -135,7 +135,7 @@ Tenjin pays for tools with [x402](https://www.x402.org), an open standard that b
 | Per lookup | $0.25   | `tenjin config set maxAutoSpend 0.10` |
 | Per day    | $5      | `tenjin config set sessionBudget 2`   |
 
-Tenjin refuses any payment over either limit before it signs anything.
+`tenjin install` asks you to approve these limits in a terminal. An install with no terminal (a script, CI, or an agent) sets no per-lookup limit, so every paid lookup needs your approval until you run `tenjin config set maxAutoSpend 0.25`. Tenjin refuses any payment over either limit before it signs anything.
 
 ### Funding
 

@@ -999,11 +999,13 @@ export interface RouterLimits {
 
 /** Remove/report retired keys in the same locked write. Refresh preserves absent
  * current settings; a fresh install fills only missing automatic limits, with the
- * values the person at the terminal approved or chose. */
+ * values the person at the terminal approved or chose. A key `limits` leaves out
+ * stays absent: that is how an install with nobody to approve keeps
+ * `maxAutoSpend` at the bare CLI's zero. */
 export async function persistRouterDefaults(
   dir: string,
   refresh = false,
-  limits: RouterLimits = ROUTER_DEFAULTS,
+  limits: Partial<RouterLimits> = ROUTER_DEFAULTS,
 ): Promise<RouterDefaultsResult> {
   const result: RouterDefaultsResult = { set: [], kept: [], removed: [] };
   if (refresh && retiredPaymentKeys(await loadRawConfig(dir)).length === 0) return result;
@@ -1012,11 +1014,13 @@ export async function persistRouterDefaults(
     result.removed = retiredPaymentKeys(existing);
     for (const key of result.removed) delete next[key];
     if (refresh) return next;
-    for (const [key, value] of Object.entries(limits) as [keyof RouterLimits, string][]) {
-      if (existing[key] === undefined) {
+    for (const key of Object.keys(ROUTER_DEFAULTS) as (keyof RouterLimits)[]) {
+      const value = limits[key];
+      if (existing[key] !== undefined) result.kept.push(key);
+      else if (value !== undefined) {
         next[key] = value;
         result.set.push(key);
-      } else result.kept.push(key);
+      }
     }
     return next;
   });

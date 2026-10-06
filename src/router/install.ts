@@ -25,6 +25,7 @@ import { onPath } from '../lib/skill-wiring';
 import type { WalletDeps, WalletOutcome } from '../commands/install-wallet';
 import type { CommandContext, CommandResult } from '../context';
 import { MCP_SERVER_NAME, REQUEST_TOOL } from './names';
+import { probeRouter, type RouterCheck } from './reachability';
 import { ensureStatusLine, type StatusLineMode, type StatusLineResult } from './status-line-wiring';
 
 /**
@@ -190,6 +191,8 @@ export interface RouterInstallDeps extends WalletDeps {
   promptLimits?: (message: string) => Promise<LimitsChoice | null>;
   /** One amount question; defaults to the clack text input. */
   promptAmount?: (message: string, placeholder: string) => Promise<string | null>;
+  /** The router reachability probe's transport; tests inject it. */
+  fetchImpl?: typeof fetch;
 }
 
 export type LimitsChoice = 'approve' | 'own';
@@ -292,10 +295,19 @@ export async function runRouterInstall(
     }
   }
   // The shelf install's gate: a refresh, `--json`, or a run with no terminal on
-  // either side asks nothing and writes the defaults only where the file is silent.
+  // either side asks nothing. With nobody to approve, install fills only the
+  // limit that narrows spending (the daily one) and never `maxAutoSpend`, so
+  // the bare CLI's zero holds and every paid lookup needs approval. A script, a
+  // Dockerfile, CI or an agent running install is exactly the run with nobody
+  // there to approve.
   const humanOutput = ctx.flags.json === true ? false : (deps.isInteractive ?? ctx.io.isTTY);
   const canPrompt = humanOutput && (deps.isInteractive ?? Boolean(process.stdin.isTTY));
-  const limits = args.refresh !== true && canPrompt ? await approveLimits(config, deps) : undefined;
+  const limits =
+    args.refresh === true
+      ? undefined
+      : canPrompt
+        ? await approveLimits(config, deps)
+        : { sessionBudget: ROUTER_DEFAULTS.sessionBudget };
   const spend = await persistRouterDefaults(ctx.dataDir, args.refresh === true, limits);
   const removedKeysLines =
     spend.removed.length > 0
@@ -365,15 +377,31 @@ export async function runRouterInstall(
   // keeps them, and a readout quoting the defaults would describe limits this
   // run did not set.
   const effective = await resolveContextSettings(ctx);
+  // A warning, never a failure: everything above is written and correct, and
+  // the network this machine is on now may not be the one it uses later.
+  const router = await probeRouter(effective.baseUrl, {
+    timeoutMs: ctx.flags.timeout,
+    env,
+    ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+  });
 
   const data = {
     settingsPath,
     hooks,
     permissions,
     statusLine,
-    spend: { ...spend, effective: effectiveLimits(effective.policy) },
+    spend: {
+      ...spend,
+      effective: effectiveLimits(effective.policy),
+      ...(effective.policy.maxAutoSpendAtomic === 0n ? { fix: AUTO_SPEND_FIX } : {}),
+    },
     mcp,
     wallet,
+    router: {
+      status: router.status === 'ok' ? 'ok' : 'warn',
+      detail: router.detail,
+      ...(router.fix !== undefined ? { fix: router.fix } : {}),
+    },
     disclosure: DISCLOSURE,
     removedSkills,
   };
@@ -388,11 +416,15 @@ export async function runRouterInstall(
         mcp,
         wallet,
         policy: effective.policy,
+        router,
       }),
       ...removedKeysLines,
     ],
   };
 }
+
+/** What turns automatic payment on after an install that left it at zero. */
+const AUTO_SPEND_FIX = `tenjin config set maxAutoSpend ${toMoney(ROUTER_DEFAULTS.maxAutoSpend).usd}`;
 
 /**
  * The one question install asks, before anything is written: approve the
@@ -706,12 +738,28 @@ function lines(
     mcp: McpRegistration;
     wallet: WalletOutcome;
     policy: SpendPolicy;
+    router: RouterCheck;
   },
 ): string[] {
   const ok = paint(ctx.io, 'green', '✓');
+  const warn = (text: string) => paint(ctx.io, 'yellow', `! ${text}`);
   const limits = effectiveLimits(s.policy);
   const daily =
     s.policy.sessionBudgetAtomic === null ? 'no daily limit' : `$${limits.sessionBudget} a day`;
+  const spend =
+    s.policy.maxAutoSpendAtomic === 0n
+      ? [
+          warn('Automatic payments are off: every paid lookup needs your approval'),
+          `  To let the router pay without asking, run: ${AUTO_SPEND_FIX}`,
+        ]
+      : [`  Automatic router: up to $${limits.maxAutoSpend} per call; daily limit ${daily}`];
+  const router =
+    s.router.status === 'ok'
+      ? []
+      : [
+          warn(`The router did not answer: ${s.router.detail}`),
+          ...(s.router.fix !== undefined ? [`  ${s.router.fix}`] : []),
+        ];
   // The first line only says "set up" when it is: a settings file this run
   // would not write to means nothing was set up, and hooks without the MCP
   // server point at a `request` tool that is not there.
@@ -726,11 +774,12 @@ function lines(
         ? paint(ctx.io, 'yellow', '! Almost done: Claude Code needs one command')
         : `${ok} Tenjin is set up for Claude Code${where}`,
     ...walletLines(ctx, ok, s.wallet),
-    `  Automatic router: up to $${limits.maxAutoSpend} per call; daily limit ${daily}`,
+    ...spend,
     ...(s.statusLine.state === 'ours' || s.statusLine.state === 'composed'
       ? ['  Live status line on: each lookup names its provider while it runs']
       : []),
     ...problems(ctx, s.hooks, s.permissions, s.statusLine, s.mcp),
+    ...router,
     '',
     blocked
       ? 'Next: fix the file above, then run tenjin install again'

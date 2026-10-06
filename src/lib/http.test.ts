@@ -6,6 +6,7 @@ import {
   isBinaryContentType,
   shelfBypassHeaders,
   setTenjinIdentity,
+  transportFailure,
   INSTALL_ID_HEADER,
   SHELF_BYPASS_HEADER,
 } from './http';
@@ -981,6 +982,50 @@ describe('a 402 challenge too large for this process to read', () => {
       }) as typeof fetch,
     });
     expect((result as Extract<typeof result, { ok: false }>).kind).toBe('network');
+  });
+});
+
+describe('the layer a request failed at, before any origin answered', () => {
+  const coded = (message: string, code: string) => Object.assign(new Error(message), { code });
+  /** fetch's own wrapping, as Node 24 throws it for a proxy that refuses CONNECT. */
+  const wrapped = (inner: Error) =>
+    new TypeError('fetch failed', {
+      cause: new Error('Request was cancelled.', { cause: inner }),
+    });
+
+  it.each([
+    [
+      coded('Proxy response (403) !== 200 when HTTP Tunneling', 'UND_ERR_ABORTED'),
+      { layer: 'proxy', proxyStatus: 403 },
+    ],
+    [coded('getaddrinfo EAI_AGAIN tenjin.blog', 'EAI_AGAIN'), { layer: 'dns', code: 'EAI_AGAIN' }],
+    [
+      coded('certificate has expired', 'CERT_HAS_EXPIRED'),
+      { layer: 'tls', code: 'CERT_HAS_EXPIRED' },
+    ],
+    [coded('connect ECONNREFUSED', 'ECONNREFUSED'), { layer: 'connect', code: 'ECONNREFUSED' }],
+  ])('reads it off the cause chain (%s)', (inner, expected) => {
+    expect(transportFailure(wrapped(inner))).toEqual(expected);
+  });
+
+  it('names nothing when no link names a layer', () => {
+    expect(transportFailure(wrapped(new Error('socket hang up')))).toBeUndefined();
+  });
+
+  it('rides on the network failure httpRequest returns', async () => {
+    const result = await httpRequest('https://tenjin.blog/api/x402-router', {
+      method: 'POST',
+      timeoutMs: 5_000,
+      jsonBody: {},
+      fetchImpl: (async () => {
+        throw wrapped(coded('Proxy response (407) !== 200 when HTTP Tunneling', 'UND_ERR_ABORTED'));
+      }) as typeof fetch,
+    });
+    expect(result).toMatchObject({
+      ok: false,
+      kind: 'network',
+      transport: { layer: 'proxy', proxyStatus: 407 },
+    });
   });
 });
 

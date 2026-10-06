@@ -22,8 +22,11 @@ beforeEach(async () => {
   await mkdir(join(work, '.git'), { recursive: true });
   await mkdir(join(home, '.claude'), { recursive: true });
   await mkdir(data, { recursive: true });
+  // Install ends with a reachability probe; no test here reaches the network.
+  vi.stubGlobal('fetch', probe400);
 });
 afterEach(async () => {
+  vi.unstubAllGlobals();
   await rm(join(home, '..'), { recursive: true, force: true });
 });
 
@@ -152,15 +155,30 @@ describe('tenjin install', () => {
     expect(JSON.stringify(result.data)).not.toContain('daemon');
   });
 
-  it('sets the spend defaults only where the file is silent', async () => {
+  it('with nobody to approve, fills only the daily limit and keeps automatic spend at zero', async () => {
     await writeFile(join(data, 'config.json'), JSON.stringify({ confirm: 'always' }));
     const result = await runRouterInstall({}, ctx(), deps());
     const config = await loadRawConfig(data);
-    expect(config.maxAutoSpend).toBe('250000');
+    expect(config.maxAutoSpend).toBeUndefined();
     expect(config.sessionBudget).toBe('5000000');
     expect(config.confirm).toBeUndefined();
     expect(config.bazaarPay).toBeUndefined();
-    expect(result.data).toMatchObject({ spend: { removed: ['confirm'], kept: [] } });
+    expect(result.data).toMatchObject({
+      spend: {
+        removed: ['confirm'],
+        set: ['sessionBudget'],
+        kept: [],
+        effective: { maxAutoSpend: '0', sessionBudget: '5' },
+        fix: 'tenjin config set maxAutoSpend 0.25',
+      },
+    });
+  });
+
+  it('reports no hooks directory, because the entries are plain commands', async () => {
+    const result = await runRouterInstall({}, ctx(), deps());
+    const hooks = (result.data as { hooks: Record<string, unknown> }).hooks;
+    expect(hooks).toMatchObject({ entries: 7, wrote: true });
+    expect(hooks).not.toHaveProperty('hooksDir');
   });
 
   it('turns the pay lane on and auto-approves at or below the per-call cap by default', async () => {
@@ -246,7 +264,8 @@ describe('tenjin install', () => {
     expect(result.humanLines).toEqual([
       '! Almost done: Claude Code needs one command',
       `✓ Wallet created: ${ADDRESS}`,
-      '  Automatic router: up to $0.25 per call; daily limit $5 a day',
+      '! Automatic payments are off: every paid lookup needs your approval',
+      '  To let the router pay without asking, run: tenjin config set maxAutoSpend 0.25',
       '  Live status line on: each lookup names its provider while it runs',
       '! Could not add the request tool to Claude Code. Run:',
       `  ${MCP_ADD_COMMAND}`,
@@ -268,13 +287,33 @@ describe('tenjin install', () => {
     expect(result.humanLines).toEqual([
       '✓ Tenjin is set up for Claude Code',
       `✓ Wallet created: ${ADDRESS}`,
-      '  Automatic router: up to $0.25 per call; daily limit $5 a day',
+      '! Automatic payments are off: every paid lookup needs your approval',
+      '  To let the router pay without asking, run: tenjin config set maxAutoSpend 0.25',
       '  Live status line on: each lookup names its provider while it runs',
       '',
       'Next: tenjin wallet fund, then restart Claude Code',
     ]);
     // The data-handling detail is not dropped, it moves to --json and the docs.
-    expect(result.data).toMatchObject({ disclosure: expect.any(Array) });
+    expect(result.data).toMatchObject({
+      disclosure: expect.any(Array),
+      router: { status: 'ok' },
+    });
+  });
+
+  it('still succeeds, with a warning and the fix, when the router does not answer', async () => {
+    // What an egress proxy that blocks tenjin.blog sends: a 403 with none of
+    // the headers the deployment adds.
+    const blocked = (async () => new Response('Forbidden', { status: 403 })) as typeof fetch;
+    const result = await runRouterInstall({}, ctx(), deps({ fetchImpl: blocked }));
+    const router = (result.data as { router: { status: string; detail: string; fix: string } })
+      .router;
+    expect(router.status).toBe('warn');
+    expect(router.detail).toContain('a proxy, firewall or VPN on the way most likely refused');
+    expect(router.fix).toContain('Allow tenjin.blog through your proxy, firewall or VPN');
+    expect(router.fix).not.toContain('config set baseUrl');
+    expect(result.humanLines).toContain(`! The router did not answer: ${router.detail}`);
+    expect(result.humanLines).toContain(`  ${router.fix}`);
+    expect((await readSettings()).hooks).toEqual(CURRENT_HOOKS);
   });
 
   it('creates a wallet when there is none, without asking', async () => {
@@ -477,14 +516,30 @@ describe('install asks a person to approve the spend limits', () => {
   it.each([
     ['a non-interactive run', () => humanCtx(), false],
     ['--json', () => ctx(), true],
-  ])('%s asks nothing and writes the defaults', async (_name, makeCtx, isInteractive) => {
+  ])('%s asks nothing and writes no automatic spend', async (_name, makeCtx, isInteractive) => {
     const promptLimits = vi.fn(async () => 'own' as const);
-    await runRouterInstall({}, makeCtx(), deps({ isInteractive, promptLimits }));
+    const result = await runRouterInstall({}, makeCtx(), deps({ isInteractive, promptLimits }));
     expect(promptLimits).not.toHaveBeenCalled();
-    expect(await loadRawConfig(data)).toMatchObject({
-      maxAutoSpend: '250000',
+    expect(await loadRawConfig(data)).toEqual({ sessionBudget: '5000000' });
+    expect(result.humanLines).toContain(
+      '! Automatic payments are off: every paid lookup needs your approval',
+    );
+    expect(result.humanLines).toContain(
+      '  To let the router pay without asking, run: tenjin config set maxAutoSpend 0.25',
+    );
+  });
+
+  it('a non-interactive run keeps a per-call limit the file already names', async () => {
+    await writeFile(join(data, 'config.json'), JSON.stringify({ maxAutoSpend: '100000' }));
+    const result = await runRouterInstall({}, ctx(), deps());
+    expect(await loadRawConfig(data)).toEqual({
+      maxAutoSpend: '100000',
       sessionBudget: '5000000',
     });
+    expect(result.data).toMatchObject({
+      spend: { set: ['sessionBudget'], kept: ['maxAutoSpend'] },
+    });
+    expect(result.data).not.toHaveProperty('spend.fix');
   });
 
   it('--refresh asks nothing and fills no absent limit', async () => {
@@ -804,7 +859,8 @@ describe('the doctor this release registers', () => {
 
   it.each([
     [404, 'the router is not enabled at'],
-    [401, 'is not a Tenjin router (it asked for credentials)'],
+    [401, 'answered 401 without the headers a Tenjin deployment sends'],
+    [407, 'asked for its own credentials (407)'],
     [503, 'is unreachable or erroring (503)'],
   ])('reports the router endpoint answering %i as a failure', async (status, detail) => {
     const { runRouterDoctor } = await import('./doctor');
