@@ -23,13 +23,7 @@ import {
 import { storeSpecs } from './specs';
 import { requestDecision, ROUTER_PATH, type HookDecision } from './decision';
 import { isFeeRequired, routingFeeApproved, type RouteFor } from './fee';
-import {
-  firstNoticeFor,
-  NO_SLOT_SENTENCE,
-  noteFeeRequired,
-  pausedReason,
-  pausedSentence,
-} from './fee-state';
+import { firstNoticeFor, noteFeeRequired, pausedReason, pausedSentence } from './fee-state';
 import { readsAsEmptyPage, savedPdfOf } from './fetch-result';
 import { GATE_TIMEOUT_MS } from './gate';
 import { REQUEST_TOOL } from './names';
@@ -1472,7 +1466,7 @@ function hookOutcome(decision: HookDecision | null): string {
  *  skips the mask does not typecheck. Inside `tenjin mcp` with the routing fee
  *  approved it takes the paid path, which the payer may skip (the allowance
  *  spent, the wallet locked): then nothing is sent and the native tool runs.
- *  With no slot free the call takes the free path, and the user is told. */
+ *  A channel busy with another session's call takes the free path. */
 async function decide(
   { packet }: Sealed,
   deps: HookDeps,
@@ -1510,7 +1504,6 @@ async function decide(
   }
   if (outcome.freePath !== undefined) {
     warn(`tenjin hook: the routing fee was not paid (${outcome.freePath}), so the free path ran`);
-    deps.notice?.(NO_SLOT_SENTENCE);
   }
   if (outcome.status === 'failed') {
     warn(`tenjin hook: ${baseUrl}${route?.path ?? ROUTER_PATH} ${outcome.reason}`);

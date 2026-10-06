@@ -6,15 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { GATE_TIMEOUT_MS } from './gate';
 import { runHookCommand, runHookKind } from './hook-command';
 import { runAnswerHook, runPromptHook, type HookDeps } from './hooks';
-import {
-  MAX_SLOTS,
-  NO_SLOT_SENTENCE,
-  payerDir,
-  pausedReason,
-  ROUTING_FEE_ATOMIC,
-  takeSlot,
-  writeFeeState,
-} from './fee-state';
+import { pausedReason, ROUTING_FEE_ATOMIC, writeFeeState } from './fee-state';
 import { FakeRouter, testSigner } from './fee-test-utils';
 import { DEPOSIT_GRACE_MS, RoutingPayer } from './routing-payer';
 
@@ -119,8 +111,6 @@ function payer(
     walletBalance: async () => 10_000_000n,
     readContract: fake.readContract as never,
     fetchImpl: fake.fetch,
-    pid: 1,
-    isAlive: () => true,
     warn: () => undefined,
     ...opts,
   });
@@ -187,21 +177,19 @@ describe('the hook legs and the routing fee', () => {
     expect([...fake.channels.values()][0]!.charged).toBe(2n * ROUTING_FEE_ATOMIC);
   });
 
-  it('takes the free path when every slot is carrying another call, and tells the user', async () => {
+  it("takes the free path, and says nothing, when another session's call holds the channel", async () => {
     await config({ routingFee: 'approved' });
     const fake = new FakeRouter();
-    for (let slot = 0; slot < MAX_SLOTS; slot++) {
-      expect(await takeSlot(payerDir(dir, wallet.address), slot, 99, () => true)).not.toBeNull();
-    }
-    const response = await runHookKind('prompt', prompt(), deps(fake.fetch, payer(fake)));
-    expect(fake.log).toEqual([
-      'POST /api/x402-router/route unpaid',
-      'POST /api/x402-router unpaid',
+    await runPromptHook(prompt(), deps(fake.fetch, payer(fake)));
+    fake.delayMs = 200;
+    const answers = await Promise.all([
+      runHookKind('prompt', prompt('sess-a'), deps(fake.fetch, payer(fake))),
+      runHookKind('prompt', prompt('sess-b'), deps(fake.fetch, payer(fake))),
     ]);
-    expect(fake.paidRequests()).toBe(0);
-    // A native answer says nothing to the model; the user is still told.
-    expect(response).toEqual({ systemMessage: NO_SLOT_SENTENCE });
-    expect(NO_SLOT_SENTENCE).toContain('took the free path');
+    expect(fake.log.filter((l) => l === 'POST /api/x402-router unpaid')).toHaveLength(1);
+    expect(fake.settledFees).toBe(2);
+    // Native answers and nothing for the user: a busy channel is no fault.
+    expect(answers).toEqual([null, null]);
   });
 
   it('routes on the free path without approval and says nothing of a pause, with the paid path known', async () => {

@@ -1,15 +1,5 @@
-import { createHash, randomUUID } from 'node:crypto';
-import {
-  appendFile,
-  link,
-  mkdir,
-  open,
-  readFile,
-  readdir,
-  rename,
-  rm,
-  writeFile,
-} from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { appendFile, mkdir, open, readFile, readdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { writeFileAtomic } from '../lib/atomic-json';
 import { hasCode } from '../lib/errno';
@@ -22,11 +12,7 @@ import { formatUsdDisplay } from '../lib/money';
  * each channel in the SDK's own file storage, deposits inline and recovers.
  * What is here is what the SDK does not keep:
  *
- * - the SLOT LEASES: a `tenjin mcp` process holds one channel slot while it
- *   has a paid call in flight, so the SDK's file storage has one writer per
- *   channel;
- * - the FEE LINES: the rolling 24 h routing allowance, one file per slot,
- *   written only by the process that holds the slot;
+ * - the FEE LINES: the rolling 24 h routing allowance, one file per wallet;
  * - the STATE FILE: whether the server answers the paid path, a `fee_required`
  *   answer from the free path, and why paying is paused, for `doctor`, the
  *   session notice and the readouts.
@@ -46,8 +32,6 @@ export const CHANNEL_DEPOSIT_ATOMIC = 250_000n;
 /** The default routing allowance, atomic USDC per rolling 24 h ($0.50). */
 export const ROUTING_ALLOWANCE_ATOMIC = 500_000n;
 export const ROUTING_WINDOW_MS = 86_400_000;
-/** Channel slots per wallet: at most this many paid calls in flight at once. */
-export const MAX_SLOTS = 8;
 
 const ATOMIC_RE = /^\d{1,30}$/;
 const ADDRESS_RE = /^0x[0-9a-f]{40}$/;
@@ -57,8 +41,8 @@ export function feeDir(dataDir: string): string {
   return join(dataDir, 'router', 'fee');
 }
 
-/** One wallet's folder: its slot leases, its fee lines and the SDK's channel
- *  files (`client/<channelId>.json`). */
+/** One wallet's folder: its fee lines and the SDK's channel file
+ *  (`client/<channelId>.json`). */
 export function payerDir(dataDir: string, payer: string): string {
   const name = payer.toLowerCase();
   if (!ADDRESS_RE.test(name)) throw new Error(`not a wallet address: ${payer}`);
@@ -128,99 +112,14 @@ export async function noteFeeRequired(
   await writeFeeState(dataDir, { feeRequiredAtMs: required ? now : null });
 }
 
-/**
- * ONE SLOT, ONE PROCESS. The lease is a file holding the process id and a
- * token, created whole or not at all. A lease whose process is gone is moved
- * aside and re-taken; what was moved is checked against the lease that was
- * read, so two processes cannot both end up holding the slot: the one that
- * moved a live lease puts it back and walks away. No renewal and no expiry:
- * the holder gives it back when its last call in flight ends, and a process
- * that dies holding it frees it.
- */
-export interface SlotLease {
-  pid: number;
-  token: string;
-}
-
-function leaseFile(dir: string, slot: number): string {
-  return join(dir, `slot-${slot}.lease`);
-}
-
-export async function takeSlot(
-  dir: string,
-  slot: number,
-  pid: number,
-  isAlive: (pid: number) => boolean,
-): Promise<string | null> {
-  const path = leaseFile(dir, slot);
-  const token = randomUUID();
-  const body = JSON.stringify({ pid, token } satisfies SlotLease);
-  if (await createWhole(path, body)) return token;
-  const held = (await readJson(path)) as SlotLease | null;
-  if (held !== null && typeof held.pid === 'number' && isAlive(held.pid)) return null;
-  const aside = `${path}.${randomUUID()}.stale`;
-  try {
-    await rename(path, aside);
-  } catch {
-    return null;
-  }
-  const moved = (await readJson(aside)) as SlotLease | null;
-  if (moved !== null && moved.token !== held?.token) {
-    // Somebody took it between the read and the move: hand it back.
-    await link(aside, path).catch(() => undefined);
-    await rm(aside, { force: true });
-    return null;
-  }
-  await rm(aside, { force: true });
-  return (await createWhole(path, body)) ? token : null;
-}
-
-/** Whether this token still holds the slot. */
-export async function holdsSlot(dir: string, slot: number, token: string): Promise<boolean> {
-  return ((await readJson(leaseFile(dir, slot))) as SlotLease | null)?.token === token;
-}
-
-export async function dropSlot(dir: string, slot: number, token: string): Promise<void> {
-  if (await holdsSlot(dir, slot, token)) await rm(leaseFile(dir, slot), { force: true });
-}
-
-/** Whether a process id is running. EPERM is a live process of another user. */
-export function processAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    return hasCode(err, 'EPERM');
-  }
-}
-
-/**
- * Written whole under a name of its own, then linked into place, which fails
- * when the target exists: a reader never sees a lease without its body.
- */
-async function createWhole(path: string, body: string): Promise<boolean> {
-  await mkdir(join(path, '..'), { recursive: true, mode: 0o700 });
-  const draft = `${path}.${randomUUID()}.tmp`;
-  await writeFile(draft, body, { flag: 'wx', mode: 0o600 });
-  try {
-    await link(draft, path);
-    return true;
-  } catch (err) {
-    if (hasCode(err, 'EEXIST')) return false;
-    throw err;
-  } finally {
-    await rm(draft, { force: true });
-  }
-}
-
 /** One fee the SDK's charged total moved by on a paid call. */
 export interface FeeEntry {
   atMs: number;
   feeAtomic: bigint;
 }
 
-function feeFile(dir: string, slot: number): string {
-  return join(dir, `fees-${slot}.jsonl`);
+function feeFile(dir: string): string {
+  return join(dir, 'fees.jsonl');
 }
 
 function feeLines(entries: readonly FeeEntry[]): string {
@@ -251,16 +150,11 @@ async function readFeeFile(path: string): Promise<FeeEntry[]> {
 }
 
 /**
- * ONE FEE LINE, BY THE SLOT'S HOLDER ALONE. Lines past the window are dropped
- * on the way, so the file holds about one day of fees.
+ * ONE FEE LINE. Lines past the window are dropped on the way, so the file
+ * holds about one day of fees.
  */
-export async function appendFee(
-  dir: string,
-  slot: number,
-  entry: FeeEntry,
-  now: number,
-): Promise<void> {
-  const path = feeFile(dir, slot);
+export async function appendFee(dir: string, entry: FeeEntry, now: number): Promise<void> {
+  const path = feeFile(dir);
   const fees = await readFeeFile(path);
   const kept = fees.filter((f) => now - f.atMs < ROUTING_WINDOW_MS);
   if (kept.length !== fees.length) {
@@ -271,19 +165,11 @@ export async function appendFee(
   await appendFile(path, feeLines([entry]), { mode: 0o600 });
 }
 
-/** Fees one wallet paid across its slots in the rolling window. */
+/** Fees one wallet paid in the rolling window. */
 export async function feesInWindowFor(dir: string, now: number): Promise<bigint> {
-  let names: string[];
-  try {
-    names = await readdir(dir);
-  } catch {
-    return 0n;
-  }
   let total = 0n;
-  for (const name of names.filter((n) => /^fees-\d+\.jsonl$/.test(n))) {
-    for (const e of await readFeeFile(join(dir, name))) {
-      if (now - e.atMs < ROUTING_WINDOW_MS) total += e.feeAtomic;
-    }
+  for (const e of await readFeeFile(feeFile(dir))) {
+    if (now - e.atMs < ROUTING_WINDOW_MS) total += e.feeAtomic;
   }
   return total;
 }
@@ -355,10 +241,6 @@ function fundNeed(walletAtomic: bigint | null): bigint {
     ? CHANNEL_DEPOSIT_ATOMIC
     : CHANNEL_DEPOSIT_ATOMIC - walletAtomic;
 }
-
-/** What a call that found every routing channel busy says: it took the free
- *  path. Shown to the user by the hook, and returned by the tool. */
-export const NO_SLOT_SENTENCE = `Tenjin routing: all ${MAX_SLOTS} routing channels of this wallet were carrying other sessions' calls, so this call took the free path and paid no routing fee.`;
 
 /** The one sentence doctor, the session notice and the tool share. */
 export function pausedSentence(paused: PausedReason): string {

@@ -240,8 +240,6 @@ describe('the hook tool', () => {
       walletBalance: async () => 10_000_000n,
       readContract: fake.readContract as never,
       fetchImpl: fake.fetch,
-      pid: 1,
-      isAlive: () => true,
       warn: () => undefined,
     });
     const server = buildRouterMcpServer({
@@ -266,7 +264,6 @@ describe('the hook tool', () => {
     } finally {
       await client.close();
       await server.close();
-      await payer.close();
     }
   });
 
@@ -286,8 +283,6 @@ describe('the hook tool', () => {
       walletBalance: async () => 10_000_000n,
       readContract: fake.readContract as never,
       fetchImpl: fake.fetch,
-      pid: 1,
-      isAlive: () => true,
       warn: () => undefined,
     });
     const server = buildRouterMcpServer({
@@ -315,7 +310,6 @@ describe('the hook tool', () => {
     } finally {
       await client.close();
       await server.close();
-      await payer.close();
     }
   });
 
@@ -335,8 +329,6 @@ describe('the hook tool', () => {
       walletBalance: async () => 10_000_000n,
       readContract: fake.readContract as never,
       fetchImpl: fake.fetch,
-      pid: 1,
-      isAlive: () => true,
       warn: () => undefined,
     });
     const server = buildRouterMcpServer({
@@ -375,7 +367,6 @@ describe('the hook tool', () => {
     } finally {
       await client.close();
       await server.close();
-      await payer.close();
     }
   });
 });

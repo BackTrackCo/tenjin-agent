@@ -391,24 +391,24 @@ export interface DecisionRoute {
   send: (url: string, options: HttpRequestOptions) => Promise<HttpResult>;
 }
 
-/** The paid path could not take this call, so it was not made: no slot free,
- *  the allowance spent, the wallet locked or unable to deposit. */
+/** The paid path could not take this call, so it was not paid: the channel
+ *  busy, the allowance spent, the wallet locked or unable to deposit. */
 export class RouteSkipped extends Error {
   constructor(readonly why: string) {
     super(`routing fee not paid: ${why}`);
   }
 }
 
-/** Every routing channel of the wallet is carrying another call. */
-export const NO_SLOT = 'no_slot';
+/** Another session's call was in flight on the wallet's routing channel. */
+export const CHANNEL_BUSY = 'channel_busy';
 
 export type DecisionOutcome<T> =
   /** `freePath`: the paid path skipped the call for this reason and it went
    *  to the free path instead, unpaid. */
-  | { status: 'decided'; decision: T; freePath?: typeof NO_SLOT }
+  | { status: 'decided'; decision: T; freePath?: typeof CHANNEL_BUSY }
   /** On the free path nothing was paid and nothing could be, so a failure here
    *  costs the turn a routing answer and nothing else. */
-  | { status: 'failed'; reason: string; errorCode?: string; freePath?: typeof NO_SLOT }
+  | { status: 'failed'; reason: string; errorCode?: string; freePath?: typeof CHANNEL_BUSY }
   /** The paid path did not take the call ({@link RouteSkipped}): nothing was
    *  sent, and the native tool runs. */
   | { status: 'skipped'; why: string };
@@ -470,15 +470,15 @@ export async function requestDecision(
   } catch (err) {
     if (!(err instanceof RouteSkipped)) throw err;
     const left = options.timeoutMs - (Date.now() - started);
-    if (err.why !== NO_SLOT || left <= 0) return { status: 'skipped', why: err.why };
-    // NO SLOT FREE: the call still routes, on the free path, unpaid, inside
-    // what is left of its budget, and the caller says so.
+    if (err.why !== CHANNEL_BUSY || left <= 0) return { status: 'skipped', why: err.why };
+    // THE CHANNEL WAS BUSY: the call still routes, on the free path, unpaid,
+    // inside what is left of its budget.
     response = await httpRequest(new URL(ROUTER_PATH, deps.baseUrl).toString(), {
       ...options,
       timeoutMs: left,
     });
     const free = readDecision(response, schema);
-    return free.status === 'skipped' ? free : { ...free, freePath: NO_SLOT };
+    return free.status === 'skipped' ? free : { ...free, freePath: CHANNEL_BUSY };
   }
   return readDecision(response, schema);
 }

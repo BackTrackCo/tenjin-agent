@@ -117,7 +117,7 @@ describe('fees in status and payments', () => {
       chargedCumulativeAmount: '9000',
     });
     for (let i = 0; i < 3; i++) {
-      await appendFee(payerDir(data, PAYER), 0, { atMs: Date.now(), feeAtomic: 3000n }, Date.now());
+      await appendFee(payerDir(data, PAYER), { atMs: Date.now(), feeAtomic: 3000n }, Date.now());
     }
   });
 

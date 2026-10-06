@@ -264,9 +264,6 @@ export async function runRouterMcpServer(opts: RouterMcpOptions = {}): Promise<v
     process.stdin.once('end', resolve);
     process.stdin.once('close', resolve);
   });
-  // The slot goes back for the next process; a killed process frees it too,
-  // because a lease names a process that is gone.
-  await payer.close();
 }
 
 /** The production payer: this machine's wallet, spend policy and RPC. */
