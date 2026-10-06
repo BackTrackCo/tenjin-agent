@@ -177,25 +177,60 @@ describe('RoutingPayer', () => {
     expect((await readSpendSummary(dir, { now: () => clock }))?.reservations ?? []).toEqual([]);
   });
 
-  it('releases a deposit the server refused', async () => {
-    const router = new FakeRouter();
-    const refusing: typeof fetch = async (input, init) => {
+  /** `router`, except that a request carrying a payment gets `answer` instead. */
+  function paidAnswer(router: FakeRouter, answer: () => Promise<Response>): typeof fetch {
+    return async (input, init) => {
       const request = new Request(input, init);
-      if (request.headers.has('payment-signature')) return new Response('{}', { status: 500 });
-      return router.fetch(request);
+      return request.headers.has('payment-signature') ? answer() : router.fetch(request);
     };
-    const p = payer(router, { fetchImpl: refusing });
+  }
+
+  // The server settles nothing on an answered 4xx or 5xx (tenjin#951), so
+  // those give the deposit back; an answer that never came may hide a settled
+  // deposit, so it stays counted.
+  it.each([
+    ['an answered 402 releases it', async () => new Response('{}', { status: 402 }), '0'],
+    ['an answered 500 releases it', async () => new Response('{}', { status: 500 }), '0'],
+    [
+      'a lost answer keeps it counted',
+      async (): Promise<Response> => {
+        throw new TypeError('fetch failed');
+      },
+      CHANNEL_DEPOSIT_ATOMIC.toString(),
+    ],
+  ])('settles a sent deposit in the ledger: %s', async (_label, answer, committed) => {
+    const router = new FakeRouter();
+    const fetchImpl = paidAnswer(router, answer);
+    const p = payer(router, { fetchImpl });
     const route = (await p.routeFor(BASE))!;
     const outcome = await requestDecision(
       'tool',
       { query: 'q' },
-      { ctx: ctx(), baseUrl: BASE, fetchImpl: refusing, timeoutMs: 3_500, route },
+      { ctx: ctx(), baseUrl: BASE, fetchImpl, timeoutMs: 3_500, route },
     );
     expect(tookFreePath(outcome, router)).toBe('payment_failed');
     expect(await readSpendSummary(dir, { now: () => clock })).toMatchObject({
-      committedAtomic: '0',
+      committedAtomic: committed,
       reservations: [],
     });
+  });
+
+  it('counts a deposit from the moment it is sent, before any answer', async () => {
+    const router = new FakeRouter();
+    let seen: string | undefined;
+    const fetchImpl = paidAnswer(router, async () => {
+      seen = (await readSpendSummary(dir, { now: () => clock }))?.committedAtomic;
+      throw new TypeError('fetch failed');
+    });
+    const p = payer(router, { fetchImpl });
+    const route = (await p.routeFor(BASE))!;
+    await requestDecision(
+      'tool',
+      { query: 'q' },
+      { ctx: ctx(), baseUrl: BASE, fetchImpl, timeoutMs: 3_500, route },
+    );
+    // A process killed at this point leaves the deposit counted.
+    expect(seen).toBe(CHANNEL_DEPOSIT_ATOMIC.toString());
   });
 
   it('recovers through the SDK after a lost answer: a corrective 402, one retry, no second charge', async () => {

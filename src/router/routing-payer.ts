@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { createPublicClient, http, type TypedDataDefinition } from 'viem';
 import { x402Client, x402HTTPClient, type PaymentPolicy } from '@x402/core/client';
 import { toClientEvmSigner, type ClientEvmSigner } from '@x402/evm';
@@ -9,7 +10,7 @@ import { FileClientChannelStorage } from '@x402/evm/batch-settlement/client/file
 import { wrapFetchWithPayment } from '@x402/fetch';
 import { httpRequest, type HttpRequestOptions, type HttpResult } from '../lib/http';
 import type { PolicyReason, SpendPolicy } from '../lib/policy';
-import type { SpendAuthorizer } from '../lib/wallet/spend';
+import { releaseUnchargedExposure, type SpendAuthorizer } from '../lib/wallet/spend';
 import type { TenjinSigner } from '../lib/wallet/provider';
 import { canonicalUsdcOnly } from '../lib/x402-pay';
 import {
@@ -54,8 +55,8 @@ import {
  * - A DEPOSIT IS AN AUTOMATIC PAYMENT. The SDK's `depositStrategy` sizes it
  *   and reserves it through the local spend authorizer, so it counts against
  *   the per-call limit, the rolling daily budget and the creator allowlist
- *   like any other; it is committed once it settles and released when it is
- *   refused. The fee itself comes out of the deposit and is not counted again.
+ *   like any other; it counts from the moment it is sent, and only an
+ *   answered 4xx or 5xx gives it back. The fee itself comes out of the deposit and is not counted again.
  * - THE TIMEOUT. The wrapper runs inside `httpRequest`, whose deadline is the
  *   caller's, and the SDK's chain reads and the wallet read are each cut at
  *   what is left of it, so a leg returns inside the hook's 5 s.
@@ -137,6 +138,8 @@ interface Deposit {
   authorizer: SpendAuthorizer;
   reservationId: string | undefined;
   amountAtomic: bigint;
+  /** The ledger key its exposure is committed under when it is sent. */
+  key: string;
   state: 'signed' | 'sent' | 'settled' | 'refused';
 }
 
@@ -231,12 +234,14 @@ export class RoutingPayer {
       const paying = request.headers.has('PAYMENT-SIGNATURE') && !request.signal.aborted;
       const deposit = paying ? call.deposits.find((d) => d.state === 'signed') : undefined;
       if (paying) call.paid = true;
-      if (deposit !== undefined) deposit.state = 'sent';
+      // FAIL CLOSED: the deposit counts from the moment it is sent, so a lost
+      // answer or a process killed mid-call leaves it counted.
+      if (deposit !== undefined) await this.commitDeposit(deposit);
       const response = await base(request);
-      if (deposit !== undefined) {
-        deposit.state =
-          response.status < 400 && response.headers.has('PAYMENT-RESPONSE') ? 'settled' : 'refused';
-      }
+      // Only an answered error proves it did not settle: the server settles
+      // nothing on a 4xx or 5xx.
+      if (deposit !== undefined && response.status >= 400) await this.releaseDeposit(deposit);
+      else if (deposit !== undefined) deposit.state = 'settled';
       return response;
     };
     this.call = call;
@@ -271,23 +276,34 @@ export class RoutingPayer {
   }
 
   /**
-   * EACH RESERVED DEPOSIT ENDS IN THE LEDGER: committed when it settled, and
-   * when its request went out with no answer, because it may have landed (an
-   * over-count, never an under-count); released when the server refused it or
-   * it was never sent.
+   * EACH RESERVED DEPOSIT ENDS IN THE LEDGER. It is committed as it is sent,
+   * so a lost answer leaves it counted whether or not it landed (an over-count
+   * of a few cents, never an under-count), and the SDK resyncs the channel on
+   * the next call. An answered 4xx or 5xx gives exactly that exposure back. A
+   * deposit signed but never sent releases its reservation (`settleDeposits`).
    */
+  private async commitDeposit(d: Deposit): Promise<void> {
+    // A ledger that cannot take the write stops the request: it is not sent.
+    await d.authorizer.commit(d.reservationId, d.amountAtomic, { nonce: d.key });
+    d.state = 'sent';
+  }
+
+  private async releaseDeposit(d: Deposit): Promise<void> {
+    d.state = 'refused';
+    const released = await releaseUnchargedExposure(this.deps.dataDir, d.key, {
+      now: () => this.now(),
+    });
+    if (released === null) this.ledgerWarn(new Error('the refused deposit stays counted'));
+  }
+
   private async settleDeposits(call: Call): Promise<void> {
-    for (const d of call.deposits) {
-      try {
-        if (d.state === 'settled' || d.state === 'sent') {
-          await d.authorizer.commit(d.reservationId, d.amountAtomic);
-        } else {
-          await d.authorizer.release(d.reservationId);
-        }
-      } catch (err) {
-        this.warn(`spend ledger: ${err instanceof Error ? err.message : String(err)}`);
-      }
+    for (const d of call.deposits.filter((x) => x.state === 'signed')) {
+      await d.authorizer.release(d.reservationId).catch((err: unknown) => this.ledgerWarn(err));
     }
+  }
+
+  private ledgerWarn(err: unknown): void {
+    this.warn(`spend ledger: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   /** Refuse to pay this call: nothing is signed, and the call is not made. */
@@ -332,6 +348,7 @@ export class RoutingPayer {
       authorizer,
       reservationId: auth.reservationId,
       amountAtomic: amount,
+      key: `routing-deposit:${auth.reservationId ?? randomUUID()}`,
       state: 'signed',
     });
     return amount;
