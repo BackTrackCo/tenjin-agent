@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { FileClientChannelStorage } from '@x402/evm/batch-settlement/client/file-storage';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { CliError } from '../lib/errors';
 import type { SpendPolicy } from '../lib/policy';
 import { readSpendSummary } from '../lib/wallet/spend';
 import type { CommandContext } from '../context';
@@ -363,6 +364,37 @@ describe('RoutingPayer', () => {
     },
     10_000,
   );
+
+  const noWallet = async (): Promise<never> => {
+    throw new CliError('WALLET_MISSING', 'no wallet');
+  };
+  const locked = async (): Promise<never> => {
+    throw new Error('passphrase needed');
+  };
+
+  it.each([
+    ['no wallet', noWallet],
+    ['a locked wallet', locked],
+  ])(
+    'asks the server before the wallet: with the fee off, %s is never touched',
+    async (_l, fail) => {
+      const router = new FakeRouter({ paid: false });
+      let unlocks = 0;
+      const p = payer(router, { getSigner: () => ((unlocks += 1), fail()) });
+      expect(unpaidWhy(await routeOnce(p, router))).toBe('paid_path_absent');
+      expect(unlocks).toBe(0);
+    },
+  );
+
+  it('takes the free path with no wallet once the server charges the fee', async () => {
+    const router = new FakeRouter();
+    const p = payer(router, { getSigner: noWallet });
+    expect(tookFreePath(await routeOnce(p, router), router)).toBe('no_wallet');
+    expect(router.log).toEqual([
+      'POST /api/x402-router/route unpaid',
+      'POST /api/x402-router unpaid',
+    ]);
+  });
 
   it('pays nothing when the wallet cannot be unlocked', async () => {
     const router = new FakeRouter();

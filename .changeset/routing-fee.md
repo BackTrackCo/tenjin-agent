@@ -21,7 +21,8 @@ wallet `tenjin mcp` cannot unlock without a prompt, a limit that refuses the dep
 failed payment, or another session's call on the channel at that moment. The first such
 call in a session shows you one line with the reason and the fix (`tenjin wallet fund
 0.25`, `TENJIN_WALLET_PASSPHRASE`, or `tenjin doctor`), and `tenjin doctor` names the
-same reasons. The native tools are never blocked for it.
+same reasons. The native tools are never blocked for it. While the router charges no
+fee, the wallet is not touched and nothing is said.
 
 The router's hook entries are now Claude Code `mcp_tool` hooks that call the new
 `hook` tool of the session's `x402` server, so every routing step runs in the one

@@ -7,6 +7,7 @@ import { GATE_TIMEOUT_MS } from './gate';
 import { runHookCommand, runHookKind } from './hook-command';
 import { runPromptHook, type HookDeps } from './hooks';
 import { ROUTING_FEE_ATOMIC } from './fee';
+import { CliError } from '../lib/errors';
 import { FakeRouter, payerDeps } from './fee-test-utils';
 import { RoutingPayer } from './routing-payer';
 import { readSpendSummary } from '../lib/wallet/spend';
@@ -198,6 +199,15 @@ describe('the hook legs and the routing fee', () => {
       'TENJIN_WALLET_PASSPHRASE',
     ],
     [
+      'the machine has no wallet',
+      {
+        getSigner: async () => {
+          throw new CliError('WALLET_MISSING', 'no wallet');
+        },
+      },
+      '`tenjin doctor`',
+    ],
+    [
       'the daily budget has no room for the deposit',
       {
         policy: async () => ({
@@ -230,6 +240,30 @@ describe('the hook legs and the routing fee', () => {
       expect(systemMessageOf(other)).toContain(fix);
     },
   );
+
+  it.each([
+    ['no wallet', () => new CliError('WALLET_MISSING', 'no wallet')],
+    ['a wallet it cannot unlock', () => new Error('passphrase needed')],
+  ])('says nothing about a fee that is off, on a machine with %s', async (_label, error) => {
+    const fake = new FakeRouter({ paid: false });
+    fake.body = OFFER;
+    const p = payer(fake, {
+      getSigner: async () => {
+        throw error();
+      },
+    });
+    for (let i = 0; i < 2; i += 1) {
+      const answer = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
+      expect(contextOf(answer)).toContain('CoinMarketCap fits this');
+      expect(systemMessageOf(answer)).toBeUndefined();
+    }
+    // Asked once, then the free path alone for the hour.
+    expect(fake.log).toEqual([
+      'POST /api/x402-router/route unpaid',
+      'POST /api/x402-router unpaid',
+      'POST /api/x402-router unpaid',
+    ]);
+  });
 
   it('takes the free path when the payment fails, and names doctor', async () => {
     const fake = new FakeRouter();

@@ -62,8 +62,10 @@ import {
  *   what is left of it, so a leg returns inside the hook's 5 s.
  * - THE FREE PATH. A call this cannot pay (a refusal above, a failed or
  *   refused payment, a server error) throws `RouteSkipped` with the reason,
- *   and the caller sends it to the free path. A server with no paid path is
- *   remembered for an hour, so each call is not a wasted round trip.
+ *   and the caller sends it to the free path. The server is asked before the
+ *   wallet is unlocked, so a server with no paid path (the fee off) costs no
+ *   unlock and no notice; it is remembered for an hour, so each call is not a
+ *   wasted round trip.
  *
  * Left upstream, as cent-level papercuts: the SDK exports `ErrChannelBusy`
  * only from its server entry, and its fetch wrapper rewraps a hook's error as
@@ -152,6 +154,8 @@ interface Call {
   skipped?: string;
   /** Whether a request carrying a payment went out. */
   paid: boolean;
+  /** The wallet's channel, once the server asked for a payment. */
+  channel?: Channel;
   deposits: Deposit[];
 }
 
@@ -222,27 +226,47 @@ export class RoutingPayer {
     return next;
   }
 
-  /** ONE PAID CALL on the wallet's channel, inside the caller's budget. */
+  /**
+   * ONE PAID CALL on the wallet's channel, inside the caller's budget. The
+   * server's 402 becomes the stock wrapper's first answer, so asking before
+   * the unlock adds no round trip.
+   */
   private async pay(url: string, options: HttpRequestOptions, until: number): Promise<HttpResult> {
-    const signer = await this.signer();
     if (until - this.now() <= 0) throw new RouteSkipped('busy');
-    const channel = this.channelFor(signer);
     const call: Call = { host: new URL(url).host, until, paid: false, deposits: [] };
     const base = options.fetchImpl ?? this.deps.fetchImpl ?? fetch;
-    const watched: typeof fetch = async (input, init) => {
+    const askFirst: typeof fetch = async (input, init) => {
       const request = new Request(input, init);
-      const paying = request.headers.has('PAYMENT-SIGNATURE') && !request.signal.aborted;
-      const deposit = paying ? call.deposits.find((d) => d.state === 'signed') : undefined;
-      if (paying) call.paid = true;
-      // FAIL CLOSED: the deposit counts from the moment it is sent, so a lost
-      // answer or a process killed mid-call leaves it counted.
-      if (deposit !== undefined) await this.commitDeposit(deposit);
-      const response = await base(request);
-      // Only an answered error proves it did not settle: the server settles
-      // nothing on a 4xx or 5xx.
-      if (deposit !== undefined && response.status >= 400) await this.releaseDeposit(deposit);
-      else if (deposit !== undefined) deposit.state = 'settled';
-      return response;
+      let asked: Response | undefined = await base(request.clone());
+      if (asked.status !== 402) return asked;
+      try {
+        call.channel = this.channelFor(await this.signer());
+        if (until - this.now() <= 0) throw new RouteSkipped('busy');
+      } catch (err) {
+        if (err instanceof RouteSkipped) call.skipped = err.why;
+        throw err;
+      }
+      const watched: typeof fetch = async (input, init) => {
+        const request = new Request(input, init);
+        const paying = request.headers.has('PAYMENT-SIGNATURE') && !request.signal.aborted;
+        if (!paying && asked !== undefined) {
+          const first = asked;
+          asked = undefined;
+          return first;
+        }
+        const deposit = paying ? call.deposits.find((d) => d.state === 'signed') : undefined;
+        if (paying) call.paid = true;
+        // FAIL CLOSED: the deposit counts from the moment it is sent, so a lost
+        // answer or a process killed mid-call leaves it counted.
+        if (deposit !== undefined) await this.commitDeposit(deposit);
+        const response = await base(request);
+        // Only an answered error proves it did not settle: the server settles
+        // nothing on a 4xx or 5xx.
+        if (deposit !== undefined && response.status >= 400) await this.releaseDeposit(deposit);
+        else if (deposit !== undefined) deposit.state = 'settled';
+        return response;
+      };
+      return wrapFetchWithPayment(watched, call.channel.http)(request);
     };
     this.call = call;
     let response: HttpResult;
@@ -250,7 +274,7 @@ export class RoutingPayer {
       response = await httpRequest(url, {
         ...options,
         timeoutMs: until - this.now(),
-        fetchImpl: wrapFetchWithPayment(watched, channel.http),
+        fetchImpl: askFirst,
       });
     } finally {
       this.call = null;
@@ -268,7 +292,9 @@ export class RoutingPayer {
     // charged, and this call takes the free path.
     if (response.status === 402) {
       throw new RouteSkipped(
-        paymentError(channel, response) === CHANNEL_BUSY_ERROR ? CHANNEL_BUSY : PAYMENT_FAILED,
+        call.channel !== undefined && paymentError(call.channel, response) === CHANNEL_BUSY_ERROR
+          ? CHANNEL_BUSY
+          : PAYMENT_FAILED,
       );
     }
     if (response.status >= 500) throw new RouteSkipped(PAYMENT_FAILED);
