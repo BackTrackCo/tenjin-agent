@@ -89,7 +89,8 @@ export interface RouterMcpOptions {
   hookDeps?: Partial<HookDeps>;
   /** The routing fee's payer; both tools route through it once the fee is approved. */
   payer?: RoutingPayer;
-  /** Test seam: the home whose `.claude/projects` holds the session transcripts. */
+  /** Test seam: the home whose `.claude/projects` holds the session transcripts
+   *  (`CLAUDE_CONFIG_DIR` is then not read). */
   homeDir?: string;
 }
 
@@ -228,7 +229,10 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
     async (args): Promise<CallToolResult> => {
       let response: unknown;
       try {
-        const event = await admitHookEvent(eventFromToolInput(args), opts.homeDir);
+        const event = await admitHookEvent(
+          eventFromToolInput(args),
+          opts.homeDir !== undefined ? { homeDir: opts.homeDir, env: {} } : {},
+        );
         if (event === null) return { content: [{ type: 'text', text: '' }] };
         response = await runHookKind(args.kind, event, {
           dataDir: ctx.dataDir,
