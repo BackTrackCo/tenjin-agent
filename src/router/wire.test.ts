@@ -14,7 +14,8 @@ import { GATE_TIMEOUT_MS } from './gate';
 import { MAX_PACKET_BYTES, type Packet } from './context';
 import { AFTER_CALL_TIMEOUT_SECONDS, ROUTE_HOOK_TIMEOUT_SECONDS } from './install';
 import { AUGMENT_WAIT_MS } from './augment';
-import { BALANCE_TIMEOUT_MS, DEPOSIT_CALL_TIMEOUT_MS, PROBE_TIMEOUT_MS } from './routing-payer';
+import { STDIN_TIMEOUT_MS } from './hook-command';
+import { BALANCE_TIMEOUT_MS, DEPOSIT_GRACE_MS, PROBE_TIMEOUT_MS } from './routing-payer';
 
 /**
  * The wire, pinned to bytes. These payloads are the SHARED ones: the same
@@ -352,19 +353,24 @@ describe('every answer payload on disk', () => {
 });
 
 describe('the hook time budget', () => {
-  /** The slowest routing leg: the paid path's probe, the wallet read before a
-   *  deposit and the call that carries it, in a row. What is left covers the
-   *  wallet unlock (2.3 s of scrypt when the prewarm has not finished) and the
-   *  slot's file work. */
-  const SLOWEST_PAID_CALL = PROBE_TIMEOUT_MS + BALANCE_TIMEOUT_MS + DEPOSIT_CALL_TIMEOUT_MS;
-  const FLOOR_MS = 3_000;
+  /** Startup, the transcript read and the reply share what the waits leave. */
+  const FLOOR_MS = 500;
 
-  it('fits the slowest paid call inside the timeout install writes, and a gate call easily', () => {
+  /** The slowest routing leg is a paid call that carries a deposit: the probe,
+   *  the wallet read and the call run inside the gate's budget, and the call
+   *  may run its grace past it. A stuck server holds a prompt 5 s at most. */
+  it('fits the slowest paid call inside the timeout install writes', () => {
     const budget = ROUTE_HOOK_TIMEOUT_SECONDS * 1_000;
-    expect(budget - SLOWEST_PAID_CALL).toBeGreaterThanOrEqual(FLOOR_MS);
-    expect(GATE_TIMEOUT_MS + PROBE_TIMEOUT_MS).toBeLessThan(budget);
-    // Under Claude Code's own default for UserPromptSubmit.
-    expect(ROUTE_HOOK_TIMEOUT_SECONDS).toBeLessThan(30);
+    expect(ROUTE_HOOK_TIMEOUT_SECONDS).toBeLessThanOrEqual(5);
+    expect(budget - (GATE_TIMEOUT_MS + DEPOSIT_GRACE_MS)).toBeGreaterThanOrEqual(FLOOR_MS);
+    // Both reads leave the call time of its own inside the gate's budget.
+    expect(PROBE_TIMEOUT_MS + BALANCE_TIMEOUT_MS).toBeLessThan(GATE_TIMEOUT_MS);
+  });
+
+  /** The command form, always free, waits for stdin before the gate. */
+  it('fits stdin plus the decision inside the same timeout', () => {
+    const budget = ROUTE_HOOK_TIMEOUT_SECONDS * 1_000;
+    expect(budget - (STDIN_TIMEOUT_MS + GATE_TIMEOUT_MS)).toBeGreaterThanOrEqual(FLOOR_MS);
   });
 
   /** The after-call leg's one wait, for a search's free docs, can be followed
@@ -372,6 +378,7 @@ describe('the hook time budget', () => {
    *  slowest paid call in a row fit its longer timeout with the same floor. */
   it('fits the docs wait and the slowest paid call inside the after-call timeout', () => {
     const budget = AFTER_CALL_TIMEOUT_SECONDS * 1_000;
-    expect(budget - (AUGMENT_WAIT_MS + SLOWEST_PAID_CALL)).toBeGreaterThanOrEqual(FLOOR_MS);
+    const used = AUGMENT_WAIT_MS + GATE_TIMEOUT_MS + DEPOSIT_GRACE_MS;
+    expect(budget - used).toBeGreaterThanOrEqual(FLOOR_MS);
   });
 });

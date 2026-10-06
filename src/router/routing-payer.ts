@@ -76,17 +76,24 @@ export const DEPOSIT_MULTIPLIER = 5;
 const PROBE_TTL_MS = 10 * 60_000;
 /** A server with no paid path is asked again hourly. */
 const ABSENT_PROBE_TTL_MS = 60 * 60_000;
-/** The probe's own ceiling; it is asked at most once per {@link PROBE_TTL_MS}. */
+/**
+ * The probe's own ceiling; it is asked at most once per {@link PROBE_TTL_MS},
+ * inside the caller's budget (the gate's 3.5 s in a hook leg).
+ */
 export const PROBE_TIMEOUT_MS = 2_000;
-/** The wallet balance read before a deposit. */
-export const BALANCE_TIMEOUT_MS = 2_000;
+/** The wallet balance read before a deposit, also inside the caller's budget.
+ *  Base's public RPC answered `balanceOf` in 0.16 to 0.26 s. */
+export const BALANCE_TIMEOUT_MS = 1_000;
 /**
  * A CALL THAT CARRIES A DEPOSIT waits for the facilitator to settle it on chain
- * before the server answers. Its timeout follows the guide's rule: the
- * requirement's own `maxTimeoutSeconds`, capped by this. It happens once per
- * $0.25 of fees per slot; every other call keeps the gate's budget.
+ * before the server answers, so it may run this long past the caller's budget,
+ * capped by the requirement's own `maxTimeoutSeconds`. It happens once per
+ * $0.25 of fees per slot; every other call keeps the caller's budget. The
+ * gate's 3.5 s plus this still return inside the hook's 5 s
+ * (`wire.test.ts` pins it); a deposit that takes longer costs that prompt its
+ * hint, and the SDK recovers the channel on the next call.
  */
-export const DEPOSIT_CALL_TIMEOUT_MS = 12_000;
+export const DEPOSIT_GRACE_MS = 1_000;
 
 export interface RoutingPayerDeps {
   dataDir: string;
@@ -127,6 +134,8 @@ interface Call {
   slot: Slot;
   allowance: bigint;
   host: string;
+  /** When the caller's budget ends. */
+  until: number;
   /** Set by the hook when the payload it lets through carries a deposit. */
   deposit: boolean;
 }
@@ -256,7 +265,7 @@ export class RoutingPayer {
   ): Promise<HttpResult> {
     const slot = await this.slotFor(await this.signer());
     if (until - this.now() <= 0) throw new RouteSkipped('busy');
-    const call: Call = { slot, allowance, host: new URL(url).host, deposit: false };
+    const call: Call = { slot, allowance, host: new URL(url).host, until, deposit: false };
     this.call = call;
     try {
       const accept = routingPolicy(required.x402Version, required.accepts)[0]!;
@@ -268,8 +277,13 @@ export class RoutingPayer {
       // the chain, and what it had charged before is no fee of this call.
       const before = await charged();
       const remaining = until - this.now();
+      // Signed but not sent: nothing leaves once the budget is spent.
+      if (remaining <= 0) throw new RouteSkipped('busy');
       const timeoutMs = call.deposit
-        ? Math.max(remaining, Math.min(accept.maxTimeoutSeconds * 1_000, DEPOSIT_CALL_TIMEOUT_MS))
+        ? Math.max(
+            remaining,
+            Math.min(accept.maxTimeoutSeconds * 1_000, remaining + DEPOSIT_GRACE_MS),
+          )
         : remaining;
       const send = (body: typeof payload, ms: number) =>
         httpRequest(url, {
@@ -348,7 +362,9 @@ export class RoutingPayer {
       await this.noteBlocked('not_allowlisted');
       throw new RouteSkipped('not_allowlisted');
     }
-    const wallet = await this.deps.walletBalance(slot.payer, BALANCE_TIMEOUT_MS);
+    const left = call.until - this.now();
+    if (left <= 0) throw new RouteSkipped('busy');
+    const wallet = await this.deps.walletBalance(slot.payer, Math.min(BALANCE_TIMEOUT_MS, left));
     if (wallet !== null && wallet < CHANNEL_DEPOSIT_ATOMIC) {
       await this.noteBlocked('wallet_low', wallet);
       throw new RouteSkipped('wallet_low');

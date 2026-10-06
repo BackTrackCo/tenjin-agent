@@ -88,11 +88,11 @@ const readSettings = async (): Promise<Record<string, unknown>> =>
 const handler = (command: string, timeout = 5) => [{ type: 'command', command, timeout }];
 /** One routing leg as this build writes it: an `mcp_tool` call to the router
  *  server's `hook` tool, with the event's fields substituted. */
-const leg = (kind: HookKind, timeout = 20) => [
+const leg = (kind: HookKind, timeout = 5) => [
   { type: 'mcp_tool', server: 'x402', tool: 'hook', input: hookToolInput(kind), timeout },
 ];
 /** The after-call entries wait for a search's free docs, so they get longer. */
-const afterCall = leg('shortfall', 30);
+const afterCall = leg('shortfall', 15);
 /** Exactly what this build writes into an empty `hooks` key. */
 const CURRENT_HOOKS = {
   UserPromptSubmit: [{ hooks: leg('prompt') }],
@@ -1299,27 +1299,35 @@ describe('tenjin update re-applies the install', () => {
   });
 
   /**
-   * The after-call leg waits, bounded, for the free docs the pre-call leg
-   * fetched beside a search, so it carries a longer kill budget than the rest.
-   * The writer converges a shorter one on every route, including the refresh
-   * `tenjin update` spawns.
+   * The kill budgets went back to 5 s per routing leg and 15 s after a search,
+   * so a stuck server never holds a prompt longer. An install from the build
+   * that wrote 20 s and 30 s is ours by marker, and the writer converges it on
+   * every route, including the refresh `tenjin update` spawns.
    */
   it.each([
     ['install', {}],
     ['install --refresh (what `tenjin update` spawns)', { refresh: true }],
-  ])('gives the after-call legs 30 s on %s', async (_label, args) => {
+  ])('rewrites 20 s and 30 s legs to 5 s and 15 s on %s', async (_label, args) => {
     const fs = await import('node:fs/promises');
     await runRouterInstall({}, ctx(), deps());
     const settings = await readSettings();
-    const hooks = settings.hooks as Record<string, unknown[]>;
-    for (const event of ['PostToolUse', 'PostToolUseFailure']) {
-      hooks[event] = [{ matcher: 'WebSearch|WebFetch', hooks: leg('shortfall', 20) }];
-    }
+    const longer = (entry: { hooks: { timeout: number }[] }) => ({
+      ...entry,
+      hooks: entry.hooks.map((hook) => ({ ...hook, timeout: hook.timeout === 15 ? 30 : 20 })),
+    });
+    settings.hooks = Object.fromEntries(
+      Object.entries(CURRENT_HOOKS).map(([event, entries]) => [
+        event,
+        (entries as { hooks: { timeout: number }[] }[]).map(longer),
+      ]),
+    );
     await fs.writeFile(settingsPath(), JSON.stringify(settings, null, 2) + '\n');
+    expect(await fs.readFile(settingsPath(), 'utf8')).toContain('"timeout": 30');
 
     const result = await runRouterInstall(args, ctx(), deps());
     expect((onlyInstall(result) as { hooks: { wrote: boolean } }).hooks.wrote).toBe(true);
     const after = (await readSettings()).hooks as typeof CURRENT_HOOKS;
+    expect(after.UserPromptSubmit).toEqual([{ hooks: leg('prompt') }]);
     expect(after.PostToolUseFailure).toEqual([{ matcher: 'WebSearch|WebFetch', hooks: afterCall }]);
     expect(after).toEqual(CURRENT_HOOKS);
   });

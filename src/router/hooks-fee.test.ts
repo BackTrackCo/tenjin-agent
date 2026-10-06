@@ -8,7 +8,7 @@ import { runHookCommand } from './hook-command';
 import { runAnswerHook, runPromptHook, type HookDeps } from './hooks';
 import { pausedReason, ROUTING_FEE_ATOMIC, writeFeeState } from './fee-state';
 import { FakeRouter, testSigner } from './fee-test-utils';
-import { RoutingPayer } from './routing-payer';
+import { DEPOSIT_GRACE_MS, RoutingPayer } from './routing-payer';
 
 /**
  * The hook legs on each side of the routing fee: the free path until the fee
@@ -265,6 +265,25 @@ describe('the hook legs and the routing fee', () => {
     await runPromptHook(prompt(), { ...deps(fake.fetch, p), fetchImpl: silent });
     expect(Date.now() - started).toBeLessThan(GATE_TIMEOUT_MS + 500);
     expect(silentCalls).toBeGreaterThan(0);
+  }, 15_000);
+
+  it('returns a deposit call that gets no answer before the hook timeout', async () => {
+    await config({ routingFee: 'approved' });
+    const fake = new FakeRouter();
+    const p = payer(fake);
+    let silentCalls = 0;
+    const silent = ((_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      silentCalls += 1;
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason));
+      });
+    }) as typeof fetch;
+    // The probe answers (the payer's own fetch); the first paid call, which
+    // carries the deposit, never does.
+    const started = Date.now();
+    await runPromptHook(prompt(), { ...deps(fake.fetch, p), fetchImpl: silent });
+    expect(Date.now() - started).toBeLessThan(GATE_TIMEOUT_MS + DEPOSIT_GRACE_MS + 500);
+    expect(silentCalls).toBe(1);
   }, 15_000);
 
   it('keeps the paused-routing line off the answer hook', async () => {

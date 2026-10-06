@@ -54,28 +54,29 @@ import { ensureStatusLine, type StatusLineMode, type StatusLineResult } from './
 const exec = promisify(execFile);
 
 /**
- * The harness's kill budget for each routing leg. It is a ceiling, reached
- * only on the call that carries a channel deposit: the probe of the paid path,
- * the wallet read before the deposit and the deposit call itself, which waits
- * for the facilitator's settlement (`wire.test.ts` pins the sum, with the wallet
- * unlock to spare). Every other call answers inside the gate's 3.5 s, and the
- * free path as fast as before. Under Claude Code's own 30 s for
- * `UserPromptSubmit`, so a stuck server never holds the prompt that long.
+ * The harness's kill budget for each routing leg: a stuck server never holds a
+ * prompt longer than this. Every wait inside the leg is cut from it: the gate's
+ * 3.5 s, which holds the paid path's probe, the wallet read before a deposit
+ * and the call, plus `DEPOSIT_GRACE_MS` for a call that carries a deposit, with
+ * 500 ms left for the transcript read and the reply (`wire.test.ts` pins the
+ * sum). A whole leg whose call carried a deposit took 2.8 to 3.3 s on Base
+ * Sepolia, so it fits; a slower one (a wallet unlock, a slow settlement) loses
+ * only that prompt's hint, and the SDK recovers the channel on the next call.
  *
  * A machine carrying an older entry is converged by the writer, not by the
  * user: the entries are ours by marker, so `install`, `install --refresh` and
  * the refresh `tenjin update` spawns all rewrite them in place.
  */
-export const ROUTE_HOOK_TIMEOUT_SECONDS = 20;
+export const ROUTE_HOOK_TIMEOUT_SECONDS = 5;
 /**
  * The after-call entries' kill budget, longer than the rest for the one wait
  * a leg makes: a search the pre-call leg is fetching free docs for waits up to
- * `AUGMENT_WAIT_MS` for them, and when none came back and the search was short,
- * the gate is asked after that (`wire.test.ts` pins the sum). Every other
- * after-call event returns as fast as before, so the number is a ceiling, not
- * a cost.
+ * `AUGMENT_WAIT_MS` (9 s) for them, and when none came back and the search was
+ * short, the gate's 3.5 s follow, with the routing leg's deposit grace and
+ * startup to spare (`wire.test.ts` pins the sum). Every other after-call event
+ * returns as fast as before, so the number is a ceiling, not a cost.
  */
-export const AFTER_CALL_TIMEOUT_SECONDS = 30;
+export const AFTER_CALL_TIMEOUT_SECONDS = 15;
 export { MCP_SERVER_NAME };
 export const ALLOW_RULE = REQUEST_TOOL;
 /**
