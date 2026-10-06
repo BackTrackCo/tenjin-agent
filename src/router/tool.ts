@@ -1,5 +1,4 @@
 import { runPay, type AdvertisedTerms, type PayDeps } from '../commands/pay';
-import { loadRawConfig } from '../lib/config';
 import { CliError } from '../lib/errors';
 import { toMoney } from '../lib/money';
 import { downloadsDir } from '../lib/paths';
@@ -26,8 +25,7 @@ import {
   type DecisionDiagnostics,
   type OfferSpec,
 } from './decision';
-import { isFeeRequired, routingFeeApproved, type RouteFor } from './fee';
-import { noteFeeRequired, pausedReason, pausedSentence } from './fee-state';
+import { isFeeRequired, type RouteFor } from './fee';
 import { openLookupFooter, type LookupFooter } from './progress';
 import {
   appendPaidRecord,
@@ -106,8 +104,8 @@ export interface RequestToolDeps {
   cwd?: string;
   /** Clock seam for a saved file's name. */
   now?: () => number;
-  /** The paid path, passed by `tenjin mcp` once the routing fee is approved.
-   *  Absent, the routing call takes the free path. */
+  /** The paid path, passed by `tenjin mcp`. Absent, the routing call takes
+   *  the free path. */
   route?: RouteFor;
   /** Test seam for the media download; production pins each connection to
    *  the address it validated. */
@@ -222,20 +220,12 @@ export async function runRequestTool(
   // the query.
   // ON THE PAID PATH the payer pays the routing fee with the stock x402
   // client, and a call it cannot pay is not made: the host's own tools run.
-  const config = await loadRawConfig(deps.ctx.dataDir).catch(() => ({}));
-  const route = (await deps.route?.(config, settings.baseUrl)) ?? null;
+  const route = (await deps.route?.(settings.baseUrl)) ?? null;
   const fresh = await requestDecision(
     'tool',
     { query, ...(id !== undefined ? { id } : {}) },
     { ...decisionDeps, ...(route !== null ? { route } : {}) },
   );
-  if (route === null && fresh.status === 'decided') {
-    await noteFeeRequired(
-      deps.ctx.dataDir,
-      isFeeRequired(fresh.decision),
-      deps.now?.() ?? Date.now(),
-    ).catch(() => undefined);
-  }
   if (fresh.status === 'skipped') {
     await footer.done('native');
     return fail(
@@ -252,16 +242,13 @@ export async function runRequestTool(
   const { decision, note } = fresh.decision;
 
   // THE FREE PATH NO LONGER ROUTES. The server's line says to update the CLI,
-  // which is wrong for this one: what stops routing here is the approval, or
-  // a paid path this process could not reach yet.
+  // which is wrong for this one: what stops routing here is a routing fee this
+  // call could not pay.
   if (isFeeRequired(fresh.decision)) {
     await footer.done('native');
-    const paused = await pausedReason(deps.ctx.dataDir, routingFeeApproved(config));
     return fail(
       'native',
-      paused !== null
-        ? pausedSentence(paused)
-        : 'Tenjin routing is starting: the routing fee is approved but the paid routing path did not answer yet, so nothing was routed or paid.',
+      'Tenjin routing needs the $0.003 routing fee, which this call could not pay, so nothing was routed or paid.',
       { nextStep: 'Tell the user this once, and use your own tools for now.' },
     );
   }

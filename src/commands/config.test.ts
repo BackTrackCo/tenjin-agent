@@ -10,7 +10,6 @@ import {
   runConfigSet,
   persistPublishMode,
   persistGrantDeclined,
-  persistRoutingFeeIfUnanswered,
 } from './config';
 import { HOOK_ARMS, LOOP_CONFIG_KEYS, RawConfigSchema } from '../lib/config';
 import { CliError } from '../lib/errors';
@@ -129,45 +128,11 @@ describe('runConfigList', () => {
     expect(d['router.enabled']).toEqual({ value: true, source: 'default' });
     expect(d['router.context']).toEqual({ value: 'session', source: 'default' });
     expect(d['experimental.bazaar']).toEqual({ value: 'off', source: 'default' });
-    // Nobody has been asked about the routing fee yet: the sentinel, never a default.
-    expect(d.routingFee).toEqual({ value: 'unset', source: 'default' });
-    expect(d.routingAllowance).toEqual({
-      value: { atomic: '500000', usd: '0.5' },
-      source: 'default',
-    });
-    // The human listing is the router's: 8 scalar keys + update.mode + 2
+    // The human listing is the router's: 6 scalar keys + update.mode + 2
     // router.* + experimental.bazaar. The shelf keys stay in `data` only.
-    expect(humanLines).toHaveLength(12);
+    expect(humanLines).toHaveLength(10);
     expect((humanLines ?? []).join('\n')).not.toMatch(
       /publish\.|hooks\.|loop\.|team\.|Shelf|allowlistCreators|evalCohort/,
-    );
-  });
-
-  it('routingFee takes approved or declined, and routingAllowance takes dollars', async () => {
-    const ctx = makeCtx();
-    const bad = await caught(() => runConfigSet({ key: 'routingFee', value: 'yes' }, ctx));
-    expect(bad.code).toBe('USAGE');
-    await runConfigSet({ key: 'routingFee', value: 'approved' }, ctx);
-    expect((await runConfigGet({ key: 'routingFee' }, ctx)).data).toMatchObject({
-      value: 'approved',
-      source: 'file',
-    });
-    await runConfigSet({ key: 'routingAllowance', value: '1' }, ctx);
-    expect((await runConfigGet({ key: 'routingAllowance' }, ctx)).data).toMatchObject({
-      value: { atomic: '1000000' },
-    });
-  });
-
-  it('persistRoutingFeeIfUnanswered writes an answer only where the file has none', async () => {
-    await persistRoutingFeeIfUnanswered(dir, 'approved');
-    expect(JSON.parse(await readFile(join(dir, 'config.json'), 'utf8')).routingFee).toBe(
-      'approved',
-    );
-    // A decline another terminal wrote first is kept.
-    await writeFile(join(dir, 'config.json'), JSON.stringify({ routingFee: 'declined' }));
-    await persistRoutingFeeIfUnanswered(dir, 'approved');
-    expect(JSON.parse(await readFile(join(dir, 'config.json'), 'utf8')).routingFee).toBe(
-      'declined',
     );
   });
 

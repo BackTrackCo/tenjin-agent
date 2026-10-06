@@ -9,7 +9,7 @@ import { generatePrivateKey, privateKeyToAccount, type PrivateKeyAccount } from 
 import type { SpendPolicy } from '../lib/policy';
 import type { TenjinSigner } from '../lib/wallet/provider';
 import { createLocalSpendAuthorizer } from '../lib/wallet/spend';
-import { ROUTE_PAID_PATH, ROUTING_FEE_ATOMIC } from './fee-state';
+import { ROUTE_PAID_PATH, ROUTING_FEE_ATOMIC } from './fee';
 import type { RoutingPayerDeps } from './routing-payer';
 
 /**

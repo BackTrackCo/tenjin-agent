@@ -168,11 +168,6 @@ export function parseRouterLayer(json: unknown, path: string): RouterLayer {
  */
 export const UpdateModeSchema = z.enum(['nudge', 'off']);
 
-export const RoutingFeeSchema = z.enum(['approved', 'declined']);
-export type RoutingFee = z.infer<typeof RoutingFeeSchema>;
-/** The resolved view of an absent `routingFee`: nobody has been asked. */
-export const ROUTING_FEE_UNSET = 'unset';
-
 /**
  * The loop daemon's numbers (tenjin-notes loop-redesign/02-redesign.md §7). TWO
  * budget numbers and two daemon knobs; every other bound is a formula over
@@ -329,14 +324,6 @@ export const ConfigSchema = z.object({
    */
   sendMaxAmount: z.union([z.literal('none'), atomicString]),
   allowlistCreators: z.array(z.string()),
-  /**
-   * The routing fee: $0.003 per routing call on the paid path, paid from $0.25
-   * channel deposits. Absent is "never asked", which `tenjin update` asks once;
-   * until it is `approved` the router uses the free path only.
-   */
-  routingFee: RoutingFeeSchema,
-  /** At most this much in routing fees per rolling 24 h, atomic USDC. */
-  routingAllowance: atomicString,
   baseUrl: z.url(),
   /**
    * The PUBLIC marketplace, consume-only, and the second shelf a team-mode
@@ -465,10 +452,6 @@ export const CONFIG_DEFAULTS: Config = {
   // leak fails closed instead of silently running uncapped.
   sendMaxAmount: '0',
   allowlistCreators: [],
-  // A placeholder, never honored: an absent key resolves to ROUTING_FEE_UNSET.
-  // 'declined' so a reader that ever falls through to it stays on the free path.
-  routingFee: 'declined',
-  routingAllowance: '500000',
   baseUrl: PRODUCTION_ORIGIN,
   publicShelfUrl: PRODUCTION_ORIGIN,
   // Empty = public mode. Setting it is the whole of "turn on team mode".
@@ -693,8 +676,6 @@ export interface EffectiveSettings {
   sessionBudget: ResolvedSetting<string>;
   sendMaxAmount: ResolvedSetting<string>;
   allowlistCreators: ResolvedSetting<string[]>;
-  routingFee: ResolvedSetting<string>;
-  routingAllowance: ResolvedSetting<string>;
   baseUrl: ResolvedSetting<string>;
   publicShelfUrl: ResolvedSetting<string>;
   shelfBypassSecret: ResolvedSetting<string>;
@@ -738,11 +719,6 @@ export function resolveSettings(input: ResolveSettingsInput): EffectiveSettings 
     sessionBudget: fileOrDefault('sessionBudget', config),
     sendMaxAmount: resolveSendMaxAmount(config),
     allowlistCreators: fileOrDefault('allowlistCreators', config),
-    routingFee:
-      config.routingFee !== undefined
-        ? { value: config.routingFee, source: 'file' }
-        : { value: ROUTING_FEE_UNSET, source: 'default' },
-    routingAllowance: fileOrDefault('routingAllowance', config),
     baseUrl: resolveBaseUrl(config, flags, env),
     publicShelfUrl: fileOrDefault('publicShelfUrl', config),
     shelfBypassSecret: fileOrDefault('shelfBypassSecret', config),

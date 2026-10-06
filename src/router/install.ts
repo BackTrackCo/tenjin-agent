@@ -4,12 +4,7 @@ import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { promisify } from 'node:util';
 import { claudeAdapter } from '../adapters/claude';
-import {
-  persistRouterDefaults,
-  persistRoutingFeeIfUnanswered,
-  ROUTER_DEFAULTS,
-  type RouterLimits,
-} from '../commands/config';
+import { persistRouterDefaults, ROUTER_DEFAULTS, type RouterLimits } from '../commands/config';
 import { askText, selectOne } from '../lib/clack';
 import { CliError } from '../lib/errors';
 import {
@@ -33,8 +28,7 @@ import { loadRawConfig, type PartialConfig } from '../lib/config';
 import { onPath } from '../lib/skill-wiring';
 import type { WalletDeps, WalletOutcome } from '../commands/install-wallet';
 import type { CommandContext, CommandResult } from '../context';
-import { routingAllowanceAtomic } from './fee';
-import { CHANNEL_DEPOSIT_ATOMIC, ROUTING_FEE_ATOMIC, usd } from './fee-state';
+import { CHANNEL_DEPOSIT_ATOMIC, ROUTING_FEE_ATOMIC, usd } from './fee';
 import { HOOK_TOOL, hookToolInput, type HookKind } from './hook-tool';
 import { MCP_SERVER_NAME, REQUEST_TOOL } from './names';
 import { ensureStatusLine, type StatusLineMode, type StatusLineResult } from './status-line-wiring';
@@ -328,9 +322,6 @@ export async function runRouterInstall(
   const canPrompt = humanOutput && (deps.isInteractive ?? Boolean(process.stdin.isTTY));
   const limits = args.refresh !== true && canPrompt ? await approveLimits(config, deps) : undefined;
   const spend = await persistRouterDefaults(ctx.dataDir, args.refresh === true, limits);
-  // The selector named the routing fee, so answering it approves the fee too,
-  // unless an answer reached the file while the person was at the prompt.
-  if (limits !== undefined) await persistRoutingFeeIfUnanswered(ctx.dataDir, 'approved');
   const removedKeysLines =
     spend.removed.length > 0
       ? [
@@ -432,8 +423,8 @@ export async function runRouterInstall(
  * The one question install asks, before anything is written: approve the
  * automatic spend limits or set your own. Only a key the file does not already
  * name is asked for, because the write fills absent keys and keeps the rest.
- * While nobody has answered the routing fee, the question names it too, and
- * either answer approves it. Cancelling at any step writes nothing.
+ * The question names the routing fee and its deposits too, and either answer
+ * approves it. Cancelling at any step writes nothing.
  */
 async function approveLimits(
   config: PartialConfig,
@@ -450,10 +441,7 @@ async function approveLimits(
     shown.sessionBudget === 'none'
       ? 'no daily limit'
       : `$${toMoney(shown.sessionBudget).usd} a day`;
-  const fee =
-    config.routingFee === undefined
-      ? `\nRouting costs $${usd(ROUTING_FEE_ATOMIC)} a call, at most $${usd(routingAllowanceAtomic(config))} in a rolling day, paid from $${usd(CHANNEL_DEPOSIT_ATOMIC)} channel deposits that stay yours until spent and do not count against these limits.\nUsing these limits or choosing your own also approves the routing fee.`
-      : '';
+  const fee = `\nRouting costs $${usd(ROUTING_FEE_ATOMIC)} a call, paid from channel deposits of up to $${usd(CHANNEL_DEPOSIT_ATOMIC)} that stay yours until spent; each deposit counts against these limits.\nUsing these limits or choosing your own also approves the routing fee.`;
   const choice = await (deps.promptLimits ?? promptLimits)(
     `The router pays for tool calls without asking, up to:\n  $${toMoney(shown.maxAutoSpend).usd} a call, ${daily}${fee}`,
   );

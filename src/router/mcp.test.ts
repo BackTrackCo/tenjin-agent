@@ -175,21 +175,23 @@ describe('the hook tool', () => {
 
   it('runs the prompt leg in this process and answers in the hook format', async () => {
     const { homeDir, transcript } = await home('sess-hook');
-    // The server takes only paid calls: its free path answers `fee_required`.
     const log: string[] = [];
-    const feeRequired = (async (input: Parameters<typeof fetch>[0]) => {
-      log.push(`POST ${new URL(String(input)).pathname}`);
+    const offer = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      log.push(`POST ${new URL(new Request(input, init).url).pathname}`);
       return Response.json({
         schemaVersion: 1,
         routerVersion: 'test',
         decision: {
-          action: 'native',
-          diagnostics: {
-            reasonCode: 'fee_required',
-            stage: 'capability',
-            missing: [],
-            nextAction: 'native',
-          },
+          action: 'execute',
+          id: 'k3f9-abcd',
+          capabilityId: 'cmc-quote',
+          category: 'live price',
+          provider: 'CoinMarketCap',
+          capabilityDescription: 'live crypto quotes',
+          endpoint: 'https://example.test/quote',
+          providerPriceAtomic: '10000',
+          usage: 'the coin and currency',
+          hint: 'CoinMarketCap fits this: live crypto quotes. Call request({query: "ETH in USD", id: "k3f9-abcd"}) alone and wait for its result.',
         },
       });
     }) as typeof fetch;
@@ -197,7 +199,7 @@ describe('the hook tool', () => {
       dataDir: dir,
       homeDir,
       handlerDeps: { cwd: dir, signer: await testWalletProvider().getSigner() },
-      hookDeps: { baseUrl: 'https://router.test', fetchImpl: feeRequired, warn: () => undefined },
+      hookDeps: { baseUrl: 'https://router.test', fetchImpl: offer, warn: () => undefined },
     });
     const client = await connect(server);
     try {
@@ -206,26 +208,21 @@ describe('the hook tool', () => {
         arguments: substituted('prompt', promptEvent('sess-hook', transcript)),
       });
       const text = (called.content as { text: string }[])[0]!.text;
-      // The fee is not approved, so the free path ran and the pause was said.
+      // No payer in this server, so the free path ran.
       expect(log).toEqual(['POST /api/x402-router']);
       expect(JSON.parse(text)).toMatchObject({
-        hookSpecificOutput: { hookEventName: 'UserPromptSubmit' },
+        hookSpecificOutput: {
+          hookEventName: 'UserPromptSubmit',
+          additionalContext: expect.stringContaining('CoinMarketCap fits this'),
+        },
       });
-      expect(text).toContain('routing is paused');
-      // Said once: the same session's next prompt gets no output at all.
-      const again = await client.callTool({
-        name: 'hook',
-        arguments: substituted('prompt', promptEvent('sess-hook', transcript)),
-      });
-      expect((again.content as { text: string }[])[0]!.text).toBe('');
     } finally {
       await client.close();
       await server.close();
     }
   });
 
-  it("pays the routing fee through this process's payer once the fee is approved", async () => {
-    await writeFile(join(dir, 'config.json'), JSON.stringify({ routingFee: 'approved' }));
+  it("pays the routing fee through this process's payer", async () => {
     const { homeDir, transcript } = await home('sess-paid');
     const fake = new FakeRouter();
     const wallet = privateKeyToAccount(generatePrivateKey());
@@ -256,7 +253,6 @@ describe('the hook tool', () => {
   });
 
   it("routes and pays a session's first prompt, before Claude Code writes its transcript", async () => {
-    await writeFile(join(dir, 'config.json'), JSON.stringify({ routingFee: 'approved' }));
     const { homeDir, transcript } = await home('sess-first');
     await rm(transcript);
     const fake = new FakeRouter();
@@ -290,7 +286,6 @@ describe('the hook tool', () => {
   });
 
   it('reads, sends and pays nothing for a forged path, and routes a new session', async () => {
-    await writeFile(join(dir, 'config.json'), JSON.stringify({ routingFee: 'approved' }));
     const { homeDir, transcript } = await home('sess-real');
     const fake = new FakeRouter();
     const wallet = privateKeyToAccount(generatePrivateKey());

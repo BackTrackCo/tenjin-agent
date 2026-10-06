@@ -1,11 +1,7 @@
-import { loadRawConfig } from '../lib/config';
 import { toMoney } from '../lib/money';
 import { paidLedgerPath } from '../lib/paths';
 import { resolveContextSettings } from '../lib/settings';
 import type { CommandContext, CommandResult } from '../context';
-import { routingAllowanceAtomic, routingFeeApproved } from './fee';
-import { feeSummary } from './fee-readouts';
-import { ROUTING_FEE_ATOMIC } from './fee-state';
 import { reconcilePayments } from './paid';
 
 /**
@@ -51,46 +47,5 @@ export async function runPaymentsReconcile(
         ? [`${outcome.unknown} still unknown: not expired yet, or the chain could not say.`]
         : []),
     ],
-  };
-}
-
-/**
- * `tenjin payments fees`: the routing fee beside the provider payments. Read
- * from the SDK's channel files and the fee lines alone: what the server has
- * charged per channel, what the channels still hold, and what the rolling 24 h
- * window has used of the allowance.
- */
-export async function runPaymentsFees(
-  ctx: CommandContext,
-  deps: Pick<PaymentsDeps, 'now'> = {},
-): Promise<CommandResult> {
-  const config = await loadRawConfig(ctx.dataDir).catch(() => ({}));
-  const summary = await feeSummary(ctx.dataDir, (deps.now ?? Date.now)());
-  const allowance = routingAllowanceAtomic(config).toString();
-  return {
-    data: {
-      approved: routingFeeApproved(config),
-      perCall: toMoney(ROUTING_FEE_ATOMIC.toString()),
-      last24h: toMoney(summary.windowAtomic),
-      allowance: toMoney(allowance),
-      charged: toMoney(summary.chargedAtomic),
-      channelCredit: toMoney(summary.creditAtomic),
-      channels: summary.channels.map((channel) => ({
-        channelId: channel.channelId,
-        deposited: toMoney(channel.depositedAtomic),
-        charged: toMoney(channel.chargedAtomic),
-      })),
-    },
-    humanLines:
-      summary.channels.length === 0
-        ? ['No routing fee paid: this machine has no routing channel.']
-        : [
-            `Routing fees: ${toMoney(summary.chargedAtomic).usd} USD charged in all, ${toMoney(summary.windowAtomic).usd} USD of ${toMoney(allowance).usd} USD in the rolling 24h window.`,
-            ...summary.channels.map(
-              (channel) =>
-                `channel ${channel.channelId.slice(0, 10)}: ${toMoney(channel.depositedAtomic).usd} USD deposited, ${toMoney(channel.chargedAtomic).usd} USD charged`,
-            ),
-            `${toMoney(summary.creditAtomic).usd} USD left in the channels for later fees.`,
-          ],
   };
 }

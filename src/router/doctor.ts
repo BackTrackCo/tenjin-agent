@@ -1,7 +1,6 @@
 import { execFile } from 'node:child_process';
 import { homedir } from 'node:os';
 import { promisify } from 'node:util';
-import { loadRawConfig } from '../lib/config';
 import { CliError } from '../lib/errors';
 import { inspectHooksFile, ownsHookEntry, pruneOurHandlers } from '../lib/harness-hooks';
 import { httpRequest } from '../lib/http';
@@ -14,17 +13,6 @@ import { walletFileExists } from '../lib/wallet/store';
 import type { CommandContext, CommandResult } from '../context';
 import { agentsWithoutRequestTool } from './agent-tools';
 import { ROUTER_PATH } from './decision';
-import { routingAllowanceAtomic, routingFeeApproved } from './fee';
-import {
-  CHANNEL_DEPOSIT_ATOMIC,
-  feesInWindow,
-  pausedFix,
-  pausedReason,
-  pausedSentence,
-  readFeeState,
-  ROUTING_FEE_ATOMIC,
-  usd,
-} from './fee-state';
 import {
   ALLOW_RULE,
   MCP_SERVER_NAME,
@@ -117,7 +105,6 @@ export async function runRouterDoctor(
   );
   checks.push(spendCheck(settings.policy.maxAutoSpendAtomic, settings.policy.sessionBudgetAtomic));
   checks.push(experimentalCheck(settings.experimentalBazaar));
-  checks.push(await routingFeeCheck(ctx));
   checks.push(...(await walletCheck(ctx)));
   checks.push(await routerCheck(settings.baseUrl, ctx.flags.timeout, deps.fetchImpl));
   const agents = await subagentsCheck(deps.cwd ?? process.cwd(), deps.homeDir ?? homedir());
@@ -445,51 +432,6 @@ async function claudeHasServer(opts: { scope: 'user' | 'project'; cwd: string })
 }
 
 /** INFORMATIONAL: which experiment is on, in one line. Either state passes. */
-/**
- * THE ROUTING FEE, AND WHETHER ROUTING IS PAUSED FOR IT. Never a failure: a
- * paused router leaves the native tools running. A pause names its reason
- * and the one command that ends it, the same sentence the session notice
- * gives the agent.
- */
-async function routingFeeCheck(ctx: CommandContext): Promise<RouterCheck> {
-  const config = await loadRawConfig(ctx.dataDir).catch(() => ({}));
-  const approved = routingFeeApproved(config);
-  const paused = await pausedReason(ctx.dataDir, approved);
-  if (paused !== null) {
-    return {
-      name: 'routing fee',
-      status: 'warn',
-      required: false,
-      detail: pausedSentence(paused),
-      fix: pausedFix(paused),
-    };
-  }
-  const state = await readFeeState(ctx.dataDir);
-  const fee = `$${usd(ROUTING_FEE_ATOMIC)} a call`;
-  if (!approved || state?.paidPath !== 'available') {
-    return {
-      name: 'routing fee',
-      status: 'ok',
-      required: false,
-      detail: `${approved ? 'approved' : 'not approved'} (${fee}); routing uses the free path`,
-    };
-  }
-  const allowance = routingAllowanceAtomic(config);
-  const spent = await feesInWindow(ctx.dataDir, Date.now());
-  const detail = `approved (${fee}): $${usd(spent)} of $${usd(allowance)} in the last 24h`;
-  if (state.blocked !== 'not_allowlisted') {
-    return { name: 'routing fee', status: 'ok', required: false, detail };
-  }
-  const host = new URL((await resolveContextSettings(ctx)).baseUrl).host;
-  return {
-    name: 'routing fee',
-    status: 'warn',
-    required: false,
-    detail: `${detail}; allowlistCreators stopped the last $${usd(CHANNEL_DEPOSIT_ATOMIC)} channel deposit`,
-    fix: `Add ${host} to allowlistCreators, or clear the allowlist.`,
-  };
-}
-
 function experimentalCheck(bazaar: boolean): RouterCheck {
   return {
     name: 'experimental',

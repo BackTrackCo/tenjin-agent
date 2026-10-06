@@ -22,8 +22,7 @@ import {
 } from './context';
 import { storeSpecs } from './specs';
 import { requestDecision, ROUTER_PATH, type HookDecision } from './decision';
-import { isFeeRequired, routingFeeApproved, type RouteFor } from './fee';
-import { firstNoticeFor, noteFeeRequired, pausedReason, pausedSentence } from './fee-state';
+import type { RouteFor } from './fee';
 import { readsAsEmptyPage, savedPdfOf } from './fetch-result';
 import { GATE_TIMEOUT_MS } from './gate';
 import { REQUEST_TOOL } from './names';
@@ -543,8 +542,8 @@ export interface HookDeps {
   prefetch?: (job: PrefetchJob) => void;
   /** How long the after-call hook waits for that fetch; tests shorten it. */
   augmentWaitMs?: number;
-  /** The paid path, passed by `tenjin mcp` once the routing fee is approved.
-   *  Absent (`tenjin hook <kind>`), every call takes the free path. */
+  /** The paid path, passed by `tenjin mcp`. Absent (`tenjin hook <kind>`),
+   *  every call takes the free path. */
   route?: RouteFor;
   /** A line for the user beside this leg's answer (`runHookKind` puts it in
    *  the hook's `systemMessage`). */
@@ -846,30 +845,20 @@ async function offerOnUserText(
   const footer = await openFooter(deps, event.sessionId, 'prompt');
   const deadline = gateDeadline(deps);
   const outcome = await decide(sealed, deps, router.config, event.sessionId, deadline);
-  // The paused-routing line rides the prompt hook only: the router installs no
-  // SessionStart arm, and the fee adds no hook arm of its own. It is read after
-  // the call, so the first `fee_required` answer is already noted.
-  const notice =
-    hookEventName === 'UserPromptSubmit'
-      ? await pausedNotice(deps, event.sessionId, router.config)
-      : null;
-  const quiet = (): { response: unknown } | { response: null } =>
-    notice === null ? { response: null } : injection(hookEventName, notice);
   if (!isOffer(outcome)) {
     await footer.close(outcome);
-    return { ...quiet(), ...(outcome !== null ? { action: outcome.action } : {}) };
+    return { response: null, ...(outcome !== null ? { action: outcome.action } : {}) };
   }
   const vetted = await vetOffer(outcome, deps, deadline, true);
   if (vetted.withheld !== undefined) {
     await footer.close(outcome, { withheld: vetted.withheld });
-    return { ...quiet(), action: outcome.action, withheld: true };
+    return { response: null, action: outcome.action, withheld: true };
   }
   await footer.close(outcome);
-  const line = attributed(vetted.offer.hint);
   return {
     action: outcome.action,
     id: outcome.id,
-    ...injection(hookEventName, notice === null ? line : `${notice}\n${line}`),
+    ...injection(hookEventName, attributed(vetted.offer.hint)),
   };
 }
 
@@ -1463,10 +1452,10 @@ function hookOutcome(decision: HookDecision | null): string {
 }
 
 /** The one routing call, its packet SEALED (masked and bounded): a path that
- *  skips the mask does not typecheck. Inside `tenjin mcp` with the routing fee
- *  approved it takes the paid path, which the payer may skip (the allowance
- *  spent, the wallet locked): then nothing is sent and the native tool runs.
- *  A channel busy with another session's call takes the free path. */
+ *  skips the mask does not typecheck. Inside `tenjin mcp` it takes the paid
+ *  path, which the payer may skip (the wallet locked or unable to deposit):
+ *  then nothing is sent and the native tool runs. A channel busy with another
+ *  session's call takes the free path. */
 async function decide(
   { packet }: Sealed,
   deps: HookDeps,
@@ -1476,7 +1465,7 @@ async function decide(
 ): Promise<HookDecision | null> {
   const baseUrl = resolveBaseUrl(deps, config);
   const warn = deps.warn ?? ((line: string) => process.stderr.write(`${line}\n`));
-  const route = (await deps.route?.(config, baseUrl)) ?? null;
+  const route = (await deps.route?.(baseUrl)) ?? null;
   const now = deps.now?.() ?? Date.now();
   const outcome = await requestDecision(
     'hook',
@@ -1490,14 +1479,6 @@ async function decide(
       ...(route !== null ? { route } : {}),
     },
   );
-  // A `fee_required` answer is how a machine without approval learns the
-  // server takes the fee: doctor, the prompt notice and the tool then name the
-  // approval command. Any other free answer clears it.
-  if (route === null && outcome.status === 'decided') {
-    await noteFeeRequired(deps.dataDir, isFeeRequired(outcome.decision), now).catch(
-      () => undefined,
-    );
-  }
   if (outcome.status === 'skipped') {
     warn(`tenjin hook: the routing fee was not paid (${outcome.why}), so the native tool runs`);
     return null;
@@ -1510,26 +1491,6 @@ async function decide(
     return null;
   }
   return outcome.decision.decision;
-}
-
-/**
- * ONE LINE, ONCE PER SESSION, when routing on the paid path is paused: the
- * reason and the command that turns it back on, for the agent to pass to the
- * user. Null when nothing is paused or this session was already told.
- */
-async function pausedNotice(
-  deps: HookDeps,
-  sessionId: string,
-  config: PartialConfig,
-): Promise<string | null> {
-  try {
-    const paused = await pausedReason(deps.dataDir, routingFeeApproved(config));
-    if (paused === null) return null;
-    if (!(await firstNoticeFor(deps.dataDir, sessionId, deps.now?.() ?? Date.now()))) return null;
-    return `${HINT_SOURCE}: ${pausedSentence(paused)} Tell the user this once.`;
-  } catch {
-    return null;
-  }
 }
 
 /** The hooks write their own protocol answer on stdout and nothing else. */

@@ -279,7 +279,7 @@ describe('routing outcomes that buy nothing', () => {
     expect(calls).toHaveLength(1);
   });
 
-  it('names the approval command, not an update, when the free path answers fee_required', async () => {
+  it('says the routing fee could not be paid, not to update, when the free path answers fee_required', async () => {
     const { fetchImpl, calls } = net([
       {
         url: ROUTER,
@@ -304,7 +304,7 @@ describe('routing outcomes that buy nothing', () => {
     const result = await runRequestTool({ query: 'what is the weather' }, deps(fetchImpl));
     expect(calls).toHaveLength(1);
     expect(result.envelope).toMatchObject({ status: 'native', cost: ['provider price 0 USD'] });
-    expect(String(result.envelope.reason)).toContain('`tenjin config set routingFee approved`');
+    expect(String(result.envelope.reason)).toContain('routing fee');
     expect(JSON.stringify(result.envelope)).not.toContain('npm i -g');
   });
 

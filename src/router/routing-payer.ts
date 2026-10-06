@@ -7,29 +7,18 @@ import {
 } from '@x402/evm/batch-settlement/client';
 import { FileClientChannelStorage } from '@x402/evm/batch-settlement/client/file-storage';
 import { wrapFetchWithPayment } from '@x402/fetch';
-import type { PartialConfig } from '../lib/config';
 import { httpRequest, type HttpRequestOptions, type HttpResult } from '../lib/http';
 import type { PolicyReason, SpendPolicy } from '../lib/policy';
 import type { SpendAuthorizer } from '../lib/wallet/spend';
 import type { TenjinSigner } from '../lib/wallet/provider';
 import { canonicalUsdcOnly } from '../lib/x402-pay';
 import { CHANNEL_BUSY, PAID_PATH_ABSENT, RouteSkipped, type DecisionRoute } from './decision';
-import { routingAllowanceAtomic, routingFeeApproved } from './fee';
-import {
-  appendFee,
-  CHANNEL_DEPOSIT_ATOMIC,
-  feesInWindowFor,
-  payerDir,
-  ROUTE_PAID_PATH,
-  ROUTING_FEE_ATOMIC,
-  writeFeeState,
-  type PayBlocked,
-} from './fee-state';
+import { CHANNEL_DEPOSIT_ATOMIC, payerDir, ROUTE_PAID_PATH, ROUTING_FEE_ATOMIC } from './fee';
 
 /**
  * THE ROUTING FEE, PAID THE WAY THE SDK'S OWN CLIENT PAYS. It runs inside
- * `tenjin mcp`, never in a hook, and sends nothing on the paid path until the
- * routing fee is approved.
+ * `tenjin mcp`, never in a hook. The user approved it with the automatic spend
+ * limits at install, which name it, and every deposit counts against them.
  *
  * The shape is the x402 guide's "MCP server with x402": a local stdio MCP
  * server whose tool calls an HTTP API through `wrapFetchWithPayment` over an
@@ -124,7 +113,6 @@ export interface RoutingPayerDeps {
 
 interface Channel {
   payer: `0x${string}`;
-  dir: string;
   http: x402HTTPClient;
 }
 
@@ -138,14 +126,11 @@ interface Deposit {
 
 /** What the call in progress brings to the SDK's callbacks. */
 interface Call {
-  allowance: bigint;
   host: string;
   /** When the caller's budget ends. */
   until: number;
   /** Why a check refused to pay; the wrapper rethrows the error as its own. */
   skipped?: string;
-  /** Whether the server answered the unpaid request with a 402. */
-  offered: boolean;
   /** Whether a request carrying a payment went out. */
   paid: boolean;
   deposits: Deposit[];
@@ -153,7 +138,7 @@ interface Call {
 
 /**
  * THE PAYMENT POLICY, the guide's check of the requirement before signing:
- * `batch-settlement` in canonical USDC on Base, at exactly the approved fee.
+ * `batch-settlement` in canonical USDC on Base, at exactly the $0.003 fee.
  * The server's `payTo` is not pinned: the client ships no treasury address, and
  * what the user approved is the fee, which this holds exactly.
  */
@@ -185,20 +170,18 @@ export class RoutingPayer {
   constructor(private readonly deps: RoutingPayerDeps) {}
 
   /**
-   * The paid path for one call, or null for the free path: before approval,
-   * and for an hour after the server answered no paid path.
+   * The paid path for one call, or null for the free path for an hour after
+   * the server answered no paid path.
    */
-  async routeFor(config: PartialConfig, baseUrl: string): Promise<DecisionRoute | null> {
-    if (!routingFeeApproved(config)) return null;
+  async routeFor(baseUrl: string): Promise<DecisionRoute | null> {
     const probe = new URL(ROUTE_PAID_PATH, baseUrl).toString();
     if ((this.absent.get(probe) ?? 0) > this.now()) return null;
-    const allowance = routingAllowanceAtomic(config);
     return {
       path: ROUTE_PAID_PATH,
       send: (url, options) => {
         // The caller's budget starts now, not when this call's turn comes.
         const until = this.now() + options.timeoutMs;
-        return this.turn(() => this.pay(url, options, allowance, until));
+        return this.turn(() => this.pay(url, options, until));
       },
     };
   }
@@ -221,23 +204,11 @@ export class RoutingPayer {
   }
 
   /** ONE PAID CALL on the wallet's channel, inside the caller's budget. */
-  private async pay(
-    url: string,
-    options: HttpRequestOptions,
-    allowance: bigint,
-    until: number,
-  ): Promise<HttpResult> {
+  private async pay(url: string, options: HttpRequestOptions, until: number): Promise<HttpResult> {
     const signer = await this.signer();
     if (until - this.now() <= 0) throw new RouteSkipped('busy');
-    const channel = await this.channelFor(signer);
-    const call: Call = {
-      allowance,
-      host: new URL(url).host,
-      until,
-      offered: false,
-      paid: false,
-      deposits: [],
-    };
+    const channel = this.channelFor(signer);
+    const call: Call = { host: new URL(url).host, until, paid: false, deposits: [] };
     const base = options.fetchImpl ?? this.deps.fetchImpl ?? fetch;
     const watched: typeof fetch = async (input, init) => {
       const request = new Request(input, init);
@@ -246,7 +217,6 @@ export class RoutingPayer {
       if (paying) call.paid = true;
       if (deposit !== undefined) deposit.state = 'sent';
       const response = await base(request);
-      if (!paying && response.status === 402) call.offered = true;
       if (deposit !== undefined) {
         deposit.state =
           response.status < 400 && response.headers.has('PAYMENT-RESPONSE') ? 'settled' : 'refused';
@@ -264,21 +234,12 @@ export class RoutingPayer {
     } finally {
       this.call = null;
       await this.settleDeposits(call);
-      if (call.offered) {
-        await writeFeeState(this.deps.dataDir, {
-          paidPath: 'available',
-          checkedAtMs: this.now(),
-        }).catch(() => undefined);
-      }
     }
     if (call.skipped !== undefined) throw new RouteSkipped(call.skipped);
     if (!response.ok) return response;
     if (!call.paid && response.status === 404) {
       // The server has no paid path: the free path, asked again in an hour.
       this.absent.set(new URL(ROUTE_PAID_PATH, url).toString(), this.now() + ABSENT_TTL_MS);
-      await writeFeeState(this.deps.dataDir, { paidPath: 'absent', checkedAtMs: this.now() }).catch(
-        () => undefined,
-      );
       throw new RouteSkipped(PAID_PATH_ABSENT);
     }
     // Another session's call was in flight on the channel: nothing was
@@ -286,9 +247,6 @@ export class RoutingPayer {
     if (response.status === 402 && paymentError(channel, response) === CHANNEL_BUSY_ERROR) {
       throw new RouteSkipped(CHANNEL_BUSY);
     }
-    const fee = chargedFee(channel, response);
-    if (fee > 0n) await appendFee(channel.dir, { atMs: this.now(), feeAtomic: fee }, this.now());
-    if (response.status < 400) await this.noteBlocked(null);
     return response;
   }
 
@@ -317,16 +275,6 @@ export class RoutingPayer {
     throw new RouteSkipped(why);
   }
 
-  /** THE ROLLING ALLOWANCE, checked by the SDK's before-payment hook. */
-  private async beforePayment(): Promise<void> {
-    const call = this.call;
-    if (call === null) this.refuse('no_call');
-    const dir = this.channel!.dir;
-    if ((await feesInWindowFor(dir, this.now())) + ROUTING_FEE_ATOMIC > call.allowance) {
-      this.refuse('allowance');
-    }
-  }
-
   /**
    * THE SDK'S `depositStrategy`, called right before it signs a deposit: the
    * size, and the refusals. The SDK's ceiling ($0.25) comes down to a smaller
@@ -348,10 +296,7 @@ export class RoutingPayer {
     if (left <= 0) this.refuse('busy');
     const payer = this.channel!.payer;
     const wallet = await this.deps.walletBalance(payer, Math.min(BALANCE_TIMEOUT_MS, left));
-    if (wallet !== null && wallet < amount) {
-      await this.noteBlocked('wallet_low', wallet);
-      this.refuse('wallet_low');
-    }
+    if (wallet !== null && wallet < amount) this.refuse('wallet_low');
     const authorizer = this.deps.authorizer(policy);
     const auth = await authorizer.authorize({
       mode: 'automatic',
@@ -360,7 +305,6 @@ export class RoutingPayer {
     });
     if (auth.decision !== 'allow') {
       await authorizer.release(auth.reservationId);
-      if (auth.reason === 'not_allowlisted') await this.noteBlocked('not_allowlisted');
       this.refuse(REFUSED[auth.reason] ?? auth.reason);
     }
     call.deposits.push({
@@ -374,8 +318,7 @@ export class RoutingPayer {
 
   /**
    * THE WALLET, unlocked without a prompt. One that cannot be (no passphrase
-   * in the environment or the OS credential store) pays nothing, and paying is
-   * paused with a notice that says how to unlock it.
+   * in the environment or the OS credential store) pays nothing.
    */
   private async signer(): Promise<ClientEvmSigner> {
     let signer: TenjinSigner;
@@ -383,7 +326,6 @@ export class RoutingPayer {
       signer = await this.deps.getSigner();
     } catch (err) {
       this.warn(err instanceof Error ? err.message : String(err));
-      await this.noteBlocked('wallet_locked');
       throw new RouteSkipped('wallet_locked');
     }
     return toClientEvmSigner(
@@ -417,7 +359,7 @@ export class RoutingPayer {
    * the wallet's folder, built once per wallet. A replaced wallet gets its own
    * folder, and its old channel stays in the old one.
    */
-  private async channelFor(signer: ClientEvmSigner): Promise<Channel> {
+  private channelFor(signer: ClientEvmSigner): Channel {
     const payer = signer.address.toLowerCase() as `0x${string}`;
     if (this.channel !== null && this.channel.payer === payer) return this.channel;
     const dir = payerDir(this.deps.dataDir, payer);
@@ -429,18 +371,9 @@ export class RoutingPayer {
     const client = new x402Client()
       .register('eip155:*', scheme)
       .registerPolicy(routingPolicy)
-      .setSpendControls({ maxAmountPerPayment: ROUTING_SPEND_CAP })
-      .onBeforePaymentCreation(() => this.beforePayment());
-    this.channel = { payer, dir, http: new x402HTTPClient(client) };
-    await writeFeeState(this.deps.dataDir, { payer }).catch(() => undefined);
+      .setSpendControls({ maxAmountPerPayment: ROUTING_SPEND_CAP });
+    this.channel = { payer, http: new x402HTTPClient(client) };
     return this.channel;
-  }
-
-  private async noteBlocked(blocked: PayBlocked | null, walletAtomic?: bigint): Promise<void> {
-    await writeFeeState(this.deps.dataDir, {
-      blocked,
-      ...(walletAtomic !== undefined ? { walletBalanceAtomic: walletAtomic.toString() } : {}),
-    }).catch(() => undefined);
   }
 }
 
@@ -454,16 +387,5 @@ function paymentError(
       .error;
   } catch {
     return undefined;
-  }
-}
-
-/** What the server says this call charged, from its `PAYMENT-RESPONSE`. */
-function chargedFee(channel: Channel, response: Extract<HttpResult, { ok: true }>): bigint {
-  try {
-    const settled = channel.http.getPaymentSettleResponse((name) => response.header(name));
-    const charged = (settled.extra as { chargedAmount?: unknown } | undefined)?.chargedAmount;
-    return typeof charged === 'string' && /^\d+$/.test(charged) ? BigInt(charged) : 0n;
-  } catch {
-    return 0n;
   }
 }

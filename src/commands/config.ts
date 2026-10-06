@@ -22,8 +22,6 @@ import {
   PUBLISH_CONFIG_KEYS,
   PublishModeSchema,
   RawConfigSchema,
-  RoutingFeeSchema,
-  type RoutingFee,
   SEND_MAX_UNSET,
   UPDATE_CONFIG_KEYS,
   LOOP_CONFIG_KEYS,
@@ -139,9 +137,6 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
   sendMaxAmount:
     'hard cap per tenjin wallet send; unset = send refuses until set, 0 disables send, none = uncapped; never bypassed by --yes',
   allowlistCreators: 'only auto-pay these creators (empty = any)',
-  routingFee:
-    'approved=route on the paid path at $0.003 a call from $0.25 channel deposits, declined=free path only; unset = not asked yet',
-  routingAllowance: 'routing fees allowed per rolling 24h',
   baseUrl: 'Tenjin API base URL the router asks',
   publicShelfUrl:
     'the public marketplace, consume-only: the second shelf a team-mode search falls through to',
@@ -1045,24 +1040,6 @@ export async function persistInstallHarness(
 }
 
 /**
- * The routing-fee answer, only when the file has none. The check runs inside
- * the locked write, so an answer another process wrote while this one waited
- * at a prompt is kept. Returns the answer the file holds afterwards.
- */
-export async function persistRoutingFeeIfUnanswered(
-  dir: string,
-  answer: RoutingFee,
-): Promise<RoutingFee> {
-  let kept: RoutingFee = answer;
-  await persist(dir, (existing) => {
-    if (existing.routingFee === undefined) return { ...existing, routingFee: answer };
-    kept = existing.routingFee;
-    return existing;
-  });
-  return kept;
-}
-
-/**
  * Record the EXACT free-verb rules `install` declined, through the same locked
  * read-modify-write every `config set` uses. Set to whatever was pending at the
  * moment of `--no-grant`; cleared back to `[]` the moment an install
@@ -1147,9 +1124,7 @@ function renderValue(key: ScalarConfigKey, stored: string | string[] | boolean):
   }
   if (Array.isArray(stored) || typeof stored === 'boolean') return { value: stored };
   if (key === 'sessionBudget' && stored === 'none') return { value: null };
-  if (key === 'maxAutoSpend' || key === 'sessionBudget' || key === 'routingAllowance') {
-    return { value: toMoney(stored) };
-  }
+  if (key === 'maxAutoSpend' || key === 'sessionBudget') return { value: toMoney(stored) };
   if (key === 'sendMaxAmount') {
     // 'unset' is the resolved sentinel for an absent key (send refuses), never
     // a stored value; 'none' is the explicit uncapped opt-in.
@@ -1169,10 +1144,6 @@ function parseValue(key: ScalarConfigKey, value: string): string | string[] | bo
       return value === 'none' ? 'none' : parseUsdToAtomic(value);
     case 'allowlistCreators':
       return parseAllowlist(value);
-    case 'routingFee':
-      return parseRoutingFee(value);
-    case 'routingAllowance':
-      return parseUsdToAtomic(value);
     case 'baseUrl':
     case 'publicShelfUrl':
     case 'rpcUrl':
@@ -1186,14 +1157,6 @@ function parseValue(key: ScalarConfigKey, value: string): string | string[] | bo
     case 'bazaarRegistries':
       return parseRegistryList(value);
   }
-}
-
-function parseRoutingFee(value: string): RoutingFee {
-  const parsed = RoutingFeeSchema.safeParse(value);
-  if (parsed.success) return parsed.data;
-  throw new CliError('USAGE', `Invalid routingFee: ${JSON.stringify(value)}`, {
-    fix: 'Use "approved" or "declined".',
-  });
 }
 
 /** "" clears to []; comma-split, each entry an absolute http(s) URL. */
