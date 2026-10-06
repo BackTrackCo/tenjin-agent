@@ -109,6 +109,13 @@ To stop the router without removing anything, `tenjin config set router.enabled 
 3. Your assistant fills the fields and calls `request({id, input})` once. This CLI validates the input against the spec, builds the request, pays that provider once under your limits, hands back the result, and tells Tenjin only how the call ended. Deciding costs nothing. Where the spec names the fields its result promises, the result holds only those, and the provider's whole response is saved under `~/.tenjin/results/` (readable by you alone, kept a day) at the path the result names in `fullResultPath`.
 4. An input that does not fit the spec is refused before anything is sent: your assistant gets every problem and the whole spec (each input with its description and allowed values, the required fields inside a nested object, an example and what comes back), locally and with nothing paid, and calls again. `request({id})` alone shows the same spec. A spec whose input schema this CLI cannot compile is refused outright, with nothing sent or paid.
 
+## What a paid lookup leaves on your machine
+
+- Every paid lookup is recorded in `~/.tenjin/paid/ledger.jsonl`: what was sent (masked), who was paid, how much, the settlement transaction, and any files saved.
+- Files a paid lookup returns, and media files a paid third-party service links to, are saved under `~/.tenjin/downloads/`.
+- When a tool names the fields it returns, your agent gets those fields and the provider's whole response is saved under `~/.tenjin/results/` for a day, at the path the result names.
+- When a seller never confirmed settlement, `tenjin payments reconcile` asks USDC on Base whether the payment was used once it has expired, and one that was never charged goes back to today's limit; the `request` tool does the same for up to three beside each lookup, without waiting for it.
+
 ## What the hooks send
 
 - On every prompt and every native `WebSearch` or `WebFetch`: the text of the current turn and at most six prior messages, masked by the CLI's key, PEM, seed-phrase, and URL credential rules (`src/lib/redact-rules.json`), then bounded to 16 KiB, with harness meta rows and tool results excluded. Tool results never travel: a tool result is other people's content, and a packet carrying it would be a channel from a fetched page into a routing decision.

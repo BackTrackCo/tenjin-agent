@@ -22,5 +22,7 @@ the question for the agent to ask you and the command for each answer
 The daily limit is still filled, because it can only narrow spending.
 
 The install report no longer names a `hooksDir` for the router's hook entries,
-which are plain commands and use no directory. The README now lists everything
-the router sends, including the questions your agent asks you and your answers.
+which are plain commands and use no directory. The README keeps one sentence on
+what the router sends and links to `docs/agent-permissions.md`, which lists all
+of it, including the questions your agent asks you and your answers. The paid
+lookup files and the `alpha.18` `~/.mcp.json` fix move to the docs too.

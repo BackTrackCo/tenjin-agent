@@ -118,7 +118,7 @@ When one fits, your agent sees a one-line suggestion with the tool and its price
 x402 · request: calling pro-api.coinmarketcap.com/x402/v3/cryptocurrency/quotes/latest · {"query":{"symbol":"BTC,ETH"}}
 ```
 
-To pick a tool, the router sends your current turn and up to six recent messages, with keys, passwords and seed phrases masked. It also sends each web search query or URL your agent is about to use (and, when one comes back short, its status, size or error), each task your agent hands to a subagent, and each question your agent asks you, together with your answers. When free library docs fit a search, that search query also goes to Tenjin's docs lookup, which asks Context7. Tool results and page contents stay on your machine, and the packet expires after 15 minutes. `tenjin config set router.context turn` sends only the current message. [Full details, and everything install writes →](./docs/agent-permissions.md)
+To pick a tool, the router sends your prompt and recent messages with secrets masked, plus the searches, URLs, subagent tasks and questions it routes; tool results stay on your machine. [What it sends, and everything install writes →](./docs/agent-permissions.md#what-the-hooks-send)
 
 ## Wallet and payments
 
@@ -135,7 +135,7 @@ Tenjin pays for tools with [x402](https://www.x402.org), an open standard that b
 | Per lookup | $0.25   | `tenjin config set maxAutoSpend 0.10` |
 | Per day    | $5      | `tenjin config set sessionBudget 2`   |
 
-`tenjin install` asks you to approve these limits in a terminal. When your agent runs the install, the CLI cannot ask, so it sets no per-lookup limit and tells your agent to ask you. If you say yes, your agent runs `tenjin config set maxAutoSpend 0.25`. Until then, the router pays for nothing on its own. Tenjin refuses any payment over either limit before it signs anything.
+`tenjin install` asks you to approve these limits, or tells your agent to ask you when the agent runs it. [How the limits work →](./docs/agent-permissions.md#what-bounds-a-payment)
 
 ### Funding
 
@@ -162,7 +162,7 @@ tenjin uninstall               # remove the Claude Code setup; your wallet stays
 
 Use `tenjin install --project` to set it up for a single project. Add `--json` to any command for machine-readable output.
 
-Every paid lookup is recorded on your machine in `~/.tenjin/paid/ledger.jsonl`: what was sent (masked), who was paid, how much, the settlement transaction, and any files saved. Files a paid lookup returns, and media files a paid third-party service links to, are saved under `~/.tenjin/downloads/`. When a tool names the fields it returns, your agent gets those fields and the provider's whole response is saved under `~/.tenjin/results/` for a day, at the path the result names. When a seller never confirmed settlement, `tenjin payments reconcile` asks USDC on Base whether the payment was used once it has expired, and one that was never charged goes back to today's limit; the `request` tool does the same for up to three beside each lookup, without waiting for it.
+Every paid lookup is recorded on your machine, with the files and full results it returned. [Where they live, and what `payments reconcile` does →](./docs/agent-permissions.md#what-a-paid-lookup-leaves-on-your-machine)
 
 <details>
 <summary>Status line: keeping your own</summary>
@@ -180,21 +180,6 @@ Limits are set only where no setting exists yet, so an update never overwrites y
 
 </details>
 
-<details>
-<summary>Troubleshooting: Claude Code asks about a new project MCP server named <code>x402</code></summary>
-
-Updating to `0.1.0-alpha.18` could accidentally register the server in `~/.mcp.json` while refreshing a user install. After upgrading to a release with the fix, check that file. If its `x402` entry runs `tenjin mcp` and you didn't install at project scope in your home directory on purpose, remove just that registration:
-
-```bash
-(cd ~ && claude mcp remove x402 -s project)
-```
-
-This keeps your other MCP entries and the user registration in `~/.claude.json`. Run `tenjin install`, then restart Claude Code. Don't use `tenjin uninstall --project` from home for this: its settings path is also the user settings path.
-
-When refreshing from home, Tenjin keeps the existing user registration if there is one, or preserves a project-only registration; with neither, it defaults to user scope. `tenjin install --refresh --project` selects project scope explicitly.
-
-</details>
-
 ## Request a tool
 
 Tenjin is in alpha, and the catalog grows with what people ask for. Missing a service your agent keeps needing? Hit a lookup that went to the wrong place? We want to hear it.
@@ -206,6 +191,7 @@ Tenjin is in alpha, and the catalog grows with what people ask for. Missing a se
 
 - [How a lookup runs, what it sends, and what install writes](./docs/agent-permissions.md)
 - [Safety model](./docs/safety-model.md)
+- [Troubleshooting](./docs/troubleshooting.md), including a stray `x402` server in `~/.mcp.json` after `0.1.0-alpha.18`
 
 ## Developing
 
