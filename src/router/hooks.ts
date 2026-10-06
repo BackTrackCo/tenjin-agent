@@ -22,7 +22,7 @@ import {
 } from './context';
 import { storeSpecs } from './specs';
 import { requestDecision, ROUTER_PATH, type HookDecision } from './decision';
-import type { RouteFor } from './fee';
+import { FEE_REQUIRED, firstNoticeFor, isFeeRequired, unpaidSentence, type RouteFor } from './fee';
 import { readsAsEmptyPage, savedPdfOf } from './fetch-result';
 import { GATE_TIMEOUT_MS } from './gate';
 import { REQUEST_TOOL } from './names';
@@ -1453,9 +1453,8 @@ function hookOutcome(decision: HookDecision | null): string {
 
 /** The one routing call, its packet SEALED (masked and bounded): a path that
  *  skips the mask does not typecheck. Inside `tenjin mcp` it takes the paid
- *  path, which the payer may skip (the wallet locked or unable to deposit):
- *  then nothing is sent and the native tool runs. A channel busy with another
- *  session's call takes the free path. */
+ *  path; a call that path cannot pay takes the free path, and the first such
+ *  call in a session tells the user why and what fixes it. */
 async function decide(
   { packet }: Sealed,
   deps: HookDeps,
@@ -1479,6 +1478,14 @@ async function decide(
       ...(route !== null ? { route } : {}),
     },
   );
+  const why =
+    outcome.status === 'skipped'
+      ? outcome.why
+      : (outcome.freePath ??
+        (outcome.status === 'decided' && isFeeRequired(outcome.decision)
+          ? FEE_REQUIRED
+          : undefined));
+  if (why !== undefined) await tellOnce(deps, sessionId, why, now);
   if (outcome.status === 'skipped') {
     warn(`tenjin hook: the routing fee was not paid (${outcome.why}), so the native tool runs`);
     return null;
@@ -1491,6 +1498,17 @@ async function decide(
     return null;
   }
   return outcome.decision.decision;
+}
+
+/**
+ * ONE LINE FOR THE USER, ONCE PER SESSION, when a call could not pay the
+ * routing fee for a reason the user can fix: the reason and the fix, in the
+ * hook's `systemMessage`. Never on every call, and never in place of routing.
+ */
+async function tellOnce(deps: HookDeps, sessionId: string, why: string, now: number) {
+  const sentence = unpaidSentence(why);
+  if (sentence === null || deps.notice === undefined) return;
+  if (await firstNoticeFor(deps.dataDir, sessionId, now).catch(() => false)) deps.notice(sentence);
 }
 
 /** The hooks write their own protocol answer on stdout and nothing else. */

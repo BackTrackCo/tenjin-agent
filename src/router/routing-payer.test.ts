@@ -8,12 +8,11 @@ import type { SpendPolicy } from '../lib/policy';
 import { readSpendSummary } from '../lib/wallet/spend';
 import type { CommandContext } from '../context';
 import { requestDecision } from './decision';
-import { CHANNEL_DEPOSIT_ATOMIC, payerDir, ROUTING_FEE_ATOMIC } from './fee';
+import { CHANNEL_DEPOSIT_ATOMIC, MIN_DEPOSIT_ATOMIC, payerDir, ROUTING_FEE_ATOMIC } from './fee';
 import { BASE, FakeRouter, payerDeps, TEST_POLICY } from './fee-test-utils';
 import {
   chainReader,
   DEPOSIT_MULTIPLIER,
-  MIN_DEPOSIT_ATOMIC,
   RoutingPayer,
   RPC_TIMEOUT_MS,
   ROUTING_SPEND_CAP,
@@ -81,6 +80,18 @@ async function routeOnce(p: RoutingPayer, router: FakeRouter) {
   );
 }
 
+/** Why the paid path did not answer a call: the free path's reason, or the skip's. */
+function unpaidWhy(outcome: Awaited<ReturnType<typeof routeOnce>>): string | undefined {
+  return outcome.status === 'skipped' ? outcome.why : outcome.freePath;
+}
+
+/** A call the paid path could not take, answered on the free path, unpaid. */
+function tookFreePath(outcome: Awaited<ReturnType<typeof routeOnce>>, router: FakeRouter) {
+  expect(outcome.status).toBe('decided');
+  expect(router.log.at(-1)).toBe('POST /api/x402-router unpaid');
+  return unpaidWhy(outcome);
+}
+
 async function channelFiles(): Promise<string[]> {
   return (await readdir(join(payerDir(dir, wallet.address), 'client')).catch(() => [])).sort();
 }
@@ -103,7 +114,7 @@ describe('RoutingPayer', () => {
 
   it('pays nothing to a 402 asking more than the approved fee', async () => {
     const router = new FakeRouter({ amount: '30000' });
-    expect((await routeOnce(payer(router), router)).status).toBe('failed');
+    expect(tookFreePath(await routeOnce(payer(router), router), router)).toBe('payment_failed');
     expect(router.paidRequests()).toBe(0);
   });
 
@@ -153,7 +164,7 @@ describe('RoutingPayer', () => {
   it('refuses a deposit a per-call limit cannot hold ten fees of, sending nothing paid', async () => {
     const router = new FakeRouter();
     const p = payer(router, { policy_: { maxAutoSpendAtomic: MIN_DEPOSIT_ATOMIC - 1n } });
-    expect(await routeOnce(p, router)).toEqual({ status: 'skipped', why: 'limit_below_deposit' });
+    expect(tookFreePath(await routeOnce(p, router), router)).toBe('limit_below_deposit');
     expect(router.paidRequests()).toBe(0);
     expect(await readSpendSummary(dir, { now: () => clock })).toBeNull();
   });
@@ -161,7 +172,7 @@ describe('RoutingPayer', () => {
   it('refuses a deposit the daily budget cannot take, and reserves nothing', async () => {
     const router = new FakeRouter();
     const p = payer(router, { policy_: { sessionBudgetAtomic: 200_000n } });
-    expect(await routeOnce(p, router)).toEqual({ status: 'skipped', why: 'budget_reached' });
+    expect(tookFreePath(await routeOnce(p, router), router)).toBe('budget_reached');
     expect(router.paidRequests()).toBe(0);
     expect((await readSpendSummary(dir, { now: () => clock }))?.reservations ?? []).toEqual([]);
   });
@@ -180,7 +191,7 @@ describe('RoutingPayer', () => {
       { query: 'q' },
       { ctx: ctx(), baseUrl: BASE, fetchImpl: refusing, timeoutMs: 3_500, route },
     );
-    expect(outcome.status).toBe('failed');
+    expect(tookFreePath(outcome, router)).toBe('payment_failed');
     expect(await readSpendSummary(dir, { now: () => clock })).toMatchObject({
       committedAtomic: '0',
       reservations: [],
@@ -193,7 +204,7 @@ describe('RoutingPayer', () => {
     await routeOnce(p, router);
     router.abortAfterSettle = true;
     const lost = await routeOnce(p, router);
-    expect(lost.status).toBe('failed');
+    expect(tookFreePath(lost, router)).toBe('payment_failed');
     expect(router.settledFees).toBe(2);
     const paidBefore = router.paidRequests();
     const next = await routeOnce(p, router);
@@ -308,7 +319,7 @@ describe('RoutingPayer', () => {
         { ctx: ctx(), baseUrl: BASE, fetchImpl: router.fetch, timeoutMs: budgetMs, route },
       );
       const took = Date.now() - started;
-      expect(outcome).toEqual({ status: 'skipped', why: 'chain_unreadable' });
+      expect(unpaidWhy(outcome)).toBe('chain_unreadable');
       // One request, no retry, cut at the bound.
       expect(hangingRpc.calls() - before).toBe(1);
       expect(took).toBeGreaterThanOrEqual(boundMs - 50);
@@ -325,21 +336,21 @@ describe('RoutingPayer', () => {
         throw new Error('passphrase needed');
       },
     });
-    expect(await routeOnce(p, router)).toEqual({ status: 'skipped', why: 'wallet_locked' });
+    expect(tookFreePath(await routeOnce(p, router), router)).toBe('wallet_locked');
     expect(router.paidRequests()).toBe(0);
   });
 
   it('signs no deposit from a wallet that cannot cover it', async () => {
     const router = new FakeRouter();
     const p = payer(router, { walletAtomic: 100_000n });
-    expect(await routeOnce(p, router)).toEqual({ status: 'skipped', why: 'wallet_low' });
+    expect(tookFreePath(await routeOnce(p, router), router)).toBe('wallet_low');
     expect(router.paidRequests()).toBe(0);
   });
 
   it('applies the creator allowlist to a deposit', async () => {
     const router = new FakeRouter();
     const p = payer(router, { policy_: { allowlistCreators: ['someone.else'] } });
-    expect(await routeOnce(p, router)).toEqual({ status: 'skipped', why: 'not_allowlisted' });
+    expect(tookFreePath(await routeOnce(p, router), router)).toBe('not_allowlisted');
     expect(router.paidRequests()).toBe(0);
   });
 

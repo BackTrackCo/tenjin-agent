@@ -222,6 +222,50 @@ describe('the hook tool', () => {
     }
   });
 
+  it("tells the user once, in the hook's systemMessage, when the fee cannot be paid", async () => {
+    const { homeDir, transcript } = await home('sess-told');
+    // The server takes only paid calls, and this server has no payer.
+    const feeRequired = (async () =>
+      Response.json({
+        schemaVersion: 1,
+        routerVersion: 'test',
+        decision: {
+          action: 'native',
+          diagnostics: {
+            reasonCode: 'fee_required',
+            stage: 'capability',
+            missing: [],
+            nextAction: 'native',
+          },
+        },
+      })) as typeof fetch;
+    const server = buildRouterMcpServer({
+      dataDir: dir,
+      homeDir,
+      handlerDeps: { cwd: dir, signer: await testWalletProvider().getSigner() },
+      hookDeps: { baseUrl: 'https://router.test', fetchImpl: feeRequired, warn: () => undefined },
+    });
+    const client = await connect(server);
+    const call = async () =>
+      (
+        (
+          await client.callTool({
+            name: 'hook',
+            arguments: substituted('prompt', promptEvent('sess-told', transcript)),
+          })
+        ).content as { text: string }[]
+      )[0]!.text;
+    try {
+      expect(JSON.parse(await call())).toEqual({
+        systemMessage: expect.stringContaining('`tenjin doctor`'),
+      });
+      expect(await call()).toBe('');
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
   it("pays the routing fee through this process's payer", async () => {
     const { homeDir, transcript } = await home('sess-paid');
     const fake = new FakeRouter();

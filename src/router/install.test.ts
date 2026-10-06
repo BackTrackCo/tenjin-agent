@@ -812,6 +812,7 @@ describe('the doctor this release registers', () => {
       'mcp',
       'spend',
       'experimental',
+      'routing fee',
       'wallet',
       'router',
     ]);

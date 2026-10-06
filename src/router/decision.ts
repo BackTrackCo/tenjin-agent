@@ -6,10 +6,11 @@ import type { Packet } from './context';
 
 /**
  * `POST /api/x402-router`: ONE DECISION PER LOOKUP. On the free path it costs
- * nothing. Once the routing fee is approved and the server answers its paid
- * path, `tenjin mcp` sends the same body to that path through its stock x402
- * client ({@link DecisionRoute}, `routing-payer.ts`); the rest of this note
- * describes the free path, which is unchanged.
+ * nothing. Inside `tenjin mcp`, while the server answers its paid path, the
+ * same body goes to that path through the stock x402 client
+ * ({@link DecisionRoute}, `routing-payer.ts`); a call that path cannot take
+ * falls back to the free path. The rest of this note describes the free path,
+ * which is unchanged.
  *
  * The routing decision costs nothing and nobody signs for it. The hook asks for
  * it from the user's own words, the backend answers with what it would do and
@@ -384,15 +385,16 @@ export interface DecisionDeps {
   route?: DecisionRoute;
 }
 
-/** How a routing call reaches the paid path. `send` may throw
- *  {@link RouteSkipped}, and then nothing was sent or paid. */
+/** How a routing call reaches the paid path. `send` throws
+ *  {@link RouteSkipped} when it has no paid answer for the call, which then
+ *  takes the free path. */
 export interface DecisionRoute {
   path: string;
   send: (url: string, options: HttpRequestOptions) => Promise<HttpResult>;
 }
 
-/** The paid path could not take this call, so it was not paid: the channel
- *  busy, the allowance spent, the wallet locked or unable to deposit. */
+/** The paid path gave this call no answer: the wallet locked, low or over
+ *  its spend limits, the channel busy, or the payment failed. */
 export class RouteSkipped extends Error {
   constructor(readonly why: string) {
     super(`routing fee not paid: ${why}`);
@@ -403,8 +405,8 @@ export class RouteSkipped extends Error {
 export const CHANNEL_BUSY = 'channel_busy';
 /** The server answered no paid path. */
 export const PAID_PATH_ABSENT = 'paid_path_absent';
-/** The reasons a skipped paid call still routes on the free path. */
-const FREE_PATH_REASONS = new Set<string>([CHANNEL_BUSY, PAID_PATH_ABSENT]);
+/** The paid call got no answer, a refused payment or a server error. */
+export const PAYMENT_FAILED = 'payment_failed';
 
 export type DecisionOutcome<T> =
   /** `freePath`: the paid path skipped the call for this reason and it went
@@ -413,8 +415,8 @@ export type DecisionOutcome<T> =
   /** On the free path nothing was paid and nothing could be, so a failure here
    *  costs the turn a routing answer and nothing else. */
   | { status: 'failed'; reason: string; errorCode?: string; freePath?: string }
-  /** The paid path did not take the call ({@link RouteSkipped}): nothing was
-   *  sent, and the native tool runs. */
+  /** The paid path gave no answer ({@link RouteSkipped}) and no time was left
+   *  for the free path: the native tool runs. */
   | { status: 'skipped'; why: string };
 
 /**
@@ -474,9 +476,9 @@ export async function requestDecision(
   } catch (err) {
     if (!(err instanceof RouteSkipped)) throw err;
     const left = options.timeoutMs - (Date.now() - started);
-    if (!FREE_PATH_REASONS.has(err.why) || left <= 0) return { status: 'skipped', why: err.why };
-    // THE CHANNEL WAS BUSY OR THE SERVER HAS NO PAID PATH: the call still
-    // routes, on the free path, unpaid, inside what is left of its budget.
+    if (left <= 0) return { status: 'skipped', why: err.why };
+    // A CALL THE PAID PATH COULD NOT TAKE STILL ROUTES, on the free path,
+    // unpaid, inside what is left of its budget, and says why.
     response = await httpRequest(new URL(ROUTER_PATH, deps.baseUrl).toString(), {
       ...options,
       timeoutMs: left,

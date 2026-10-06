@@ -25,7 +25,7 @@ import {
   type DecisionDiagnostics,
   type OfferSpec,
 } from './decision';
-import { isFeeRequired, type RouteFor } from './fee';
+import { FEE_REQUIRED, isFeeRequired, unpaidSentence, type RouteFor } from './fee';
 import { openLookupFooter, type LookupFooter } from './progress';
 import {
   appendPaidRecord,
@@ -219,7 +219,7 @@ export async function runRequestTool(
   // backend does not know is its own plain note, and the pick still runs from
   // the query.
   // ON THE PAID PATH the payer pays the routing fee with the stock x402
-  // client, and a call it cannot pay is not made: the host's own tools run.
+  // client, and a call it cannot pay takes the free path.
   const route = (await deps.route?.(settings.baseUrl)) ?? null;
   const fresh = await requestDecision(
     'tool',
@@ -230,7 +230,8 @@ export async function runRequestTool(
     await footer.done('native');
     return fail(
       'native',
-      `The $0.003 routing fee could not be paid (${fresh.why}), so nothing was routed or paid.`,
+      `${unpaidSentence(fresh.why) ?? ''} This call ran out of time before the free path answered, so nothing was routed or paid.`.trim(),
+      { nextStep: 'Use your own tools for this one.' },
     );
   }
   if (fresh.status === 'failed') {
@@ -243,12 +244,12 @@ export async function runRequestTool(
 
   // THE FREE PATH NO LONGER ROUTES. The server's line says to update the CLI,
   // which is wrong for this one: what stops routing here is a routing fee this
-  // call could not pay.
+  // call could not pay, for the reason the payer gave.
   if (isFeeRequired(fresh.decision)) {
     await footer.done('native');
     return fail(
       'native',
-      'Tenjin routing needs the $0.003 routing fee, which this call could not pay, so nothing was routed or paid.',
+      unpaidSentence(fresh.freePath ?? FEE_REQUIRED) ?? unpaidSentence(FEE_REQUIRED)!,
       { nextStep: 'Tell the user this once, and use your own tools for now.' },
     );
   }

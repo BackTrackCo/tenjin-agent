@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
@@ -27,12 +27,50 @@ const NATIVE = {
     diagnostics: { reasonCode: 'native', stage: 'gate', missing: [], nextAction: 'native' },
   },
 };
+/** The free path's answer once the server routes only paid calls. */
+const FEE_REQUIRED_ANSWER = {
+  schemaVersion: 1,
+  routerVersion: 'v',
+  decision: {
+    action: 'native',
+    reason:
+      'Tenjin routing needs a newer tenjin-cli. Tell the user to run `npm i -g tenjin-cli@latest`.',
+    diagnostics: {
+      reasonCode: 'fee_required',
+      stage: 'capability',
+      missing: [],
+      nextAction: 'Update tenjin-cli (run `npm i -g tenjin-cli@latest`).',
+    },
+  },
+};
+/** A free router's offer. */
+const OFFER = {
+  schemaVersion: 1,
+  routerVersion: 'v',
+  decision: {
+    action: 'execute',
+    id: 'k3f9-abcd',
+    capabilityId: 'cmc-quote',
+    category: 'live price',
+    provider: 'CoinMarketCap',
+    capabilityDescription: 'live crypto quotes',
+    endpoint: 'https://example.test/quote',
+    providerPriceAtomic: '10000',
+    usage: 'the coin and currency',
+    hint: 'CoinMarketCap fits this: live crypto quotes. Call request({query: "ETH in USD", id: "k3f9-abcd"}) alone and wait for its result.',
+  },
+};
 const wallet = privateKeyToAccount(generatePrivateKey());
 
 let dir: string;
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'router-hooks-fee-'));
   await mkdir(join(dir, '.git'));
+  // What `tenjin install` writes, so the fixture's offer clears the spend vet.
+  await writeFile(
+    join(dir, 'config.json'),
+    JSON.stringify({ maxAutoSpend: '250000', sessionBudget: '5000000' }),
+  );
 });
 afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
@@ -84,6 +122,24 @@ function deps(fetchImpl: typeof fetch, p?: RoutingPayer): HookDeps {
   };
 }
 
+function systemMessageOf(response: unknown): string | undefined {
+  return (response as { systemMessage?: string } | null)?.systemMessage;
+}
+
+function contextOf(response: unknown): string | undefined {
+  return (response as { hookSpecificOutput?: { additionalContext?: string } } | null)
+    ?.hookSpecificOutput?.additionalContext;
+}
+
+/** `fake`, except that a request carrying a payment gets a server error. */
+function paidFails(fake: FakeRouter): typeof fetch {
+  return (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const request = new Request(input, init);
+    if (request.headers.has('payment-signature')) return new Response('{}', { status: 502 });
+    return fake.fetch(request);
+  }) as typeof fetch;
+}
+
 describe('the hook legs and the routing fee', () => {
   it('takes the free path in the command form', async () => {
     const { fetchImpl, calls } = router();
@@ -124,6 +180,92 @@ describe('the hook legs and the routing fee', () => {
     expect(fake.settledFees).toBe(2);
     // Native answers and nothing for the user: a busy channel is no fault.
     expect(answers).toEqual([null, null]);
+  });
+
+  it.each([
+    [
+      'the wallet holds less than the deposit',
+      { walletBalance: async () => 50_000n },
+      '`tenjin wallet fund 0.25`',
+    ],
+    [
+      'the wallet cannot be unlocked',
+      {
+        getSigner: async () => {
+          throw new Error('passphrase needed');
+        },
+      },
+      'TENJIN_WALLET_PASSPHRASE',
+    ],
+    [
+      'the daily budget has no room for the deposit',
+      {
+        policy: async () => ({
+          maxAutoSpendAtomic: 250_000n,
+          sessionBudgetAtomic: 100_000n,
+          allowlistCreators: [],
+        }),
+      },
+      '`tenjin doctor`',
+    ],
+  ])(
+    'routes on the free path when %s, and tells the user once per session',
+    async (_label, opts, fix) => {
+      const fake = new FakeRouter();
+      fake.body = OFFER;
+      const p = payer(fake, opts);
+      const first = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
+      // The free path's offer still reaches the model.
+      expect(contextOf(first)).toContain('CoinMarketCap fits this');
+      expect(systemMessageOf(first)).toContain('could not pay its $0.003 fee');
+      expect(systemMessageOf(first)).toContain(fix);
+      expect(fake.paidRequests()).toBe(0);
+      expect(fake.log.at(-1)).toBe('POST /api/x402-router unpaid');
+      // Not again in this session, though the free path keeps routing.
+      const second = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
+      expect(contextOf(second)).toContain('CoinMarketCap fits this');
+      expect(systemMessageOf(second)).toBeUndefined();
+      // A new session is told once too.
+      const other = await runHookKind('prompt', prompt('sess-2'), deps(fake.fetch, p));
+      expect(systemMessageOf(other)).toContain(fix);
+    },
+  );
+
+  it('takes the free path when the payment fails, and names doctor', async () => {
+    const fake = new FakeRouter();
+    const p = payer(fake);
+    const fails = paidFails(fake);
+    const answer = await runHookKind('prompt', prompt('sess-fails'), deps(fails, p));
+    // The 402, the paid request that failed (answered before the fake saw it),
+    // then the free path.
+    expect(fake.log).toEqual([
+      'POST /api/x402-router/route unpaid',
+      'POST /api/x402-router unpaid',
+    ]);
+    expect(systemMessageOf(answer)).toContain('the routing payment failed');
+    expect(systemMessageOf(answer)).toContain('`tenjin doctor`');
+    // The deposit the server refused is released, not counted.
+    expect((await readSpendSummary(dir))?.committedAtomic ?? '0').toBe('0');
+  });
+
+  it('says once when the free path answers fee_required and nothing could pay, in the command form too', async () => {
+    const { fetchImpl } = router(FEE_REQUIRED_ANSWER);
+    let out = '';
+    const io = { stdout: { write: (line: string) => ((out += line), true) } } as never;
+    await runHookCommand('prompt', io, {
+      ...deps(fetchImpl),
+      readEvent: async () => JSON.stringify(prompt('sess-codex')),
+    });
+    const said = JSON.parse(out) as { systemMessage?: string };
+    expect(said.systemMessage).toContain('the router now charges it');
+    expect(said.systemMessage).toContain('`tenjin doctor`');
+    expect(JSON.stringify(said)).not.toContain('npm i -g');
+    out = '';
+    await runHookCommand('prompt', io, {
+      ...deps(fetchImpl),
+      readEvent: async () => JSON.stringify(prompt('sess-codex')),
+    });
+    expect(out).toBe('');
   });
 
   /** `fake`, except that a request carrying a payment never answers. */

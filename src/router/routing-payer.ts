@@ -12,8 +12,21 @@ import type { PolicyReason, SpendPolicy } from '../lib/policy';
 import type { SpendAuthorizer } from '../lib/wallet/spend';
 import type { TenjinSigner } from '../lib/wallet/provider';
 import { canonicalUsdcOnly } from '../lib/x402-pay';
-import { CHANNEL_BUSY, PAID_PATH_ABSENT, RouteSkipped, type DecisionRoute } from './decision';
-import { CHANNEL_DEPOSIT_ATOMIC, payerDir, ROUTE_PAID_PATH, ROUTING_FEE_ATOMIC } from './fee';
+import {
+  CHANNEL_BUSY,
+  PAID_PATH_ABSENT,
+  PAYMENT_FAILED,
+  RouteSkipped,
+  type DecisionRoute,
+} from './decision';
+import { CliError } from '../lib/errors';
+import {
+  CHANNEL_DEPOSIT_ATOMIC,
+  MIN_DEPOSIT_ATOMIC,
+  payerDir,
+  ROUTE_PAID_PATH,
+  ROUTING_FEE_ATOMIC,
+} from './fee';
 
 /**
  * THE ROUTING FEE, PAID THE WAY THE SDK'S OWN CLIENT PAYS. It runs inside
@@ -57,11 +70,6 @@ import { CHANNEL_DEPOSIT_ATOMIC, payerDir, ROUTE_PAID_PATH, ROUTING_FEE_ATOMIC }
 export const ROUTING_SPEND_CAP = '$0.05';
 /** The SDK's default multiplier, spelled out because the deposit is cap × it. */
 export const DEPOSIT_MULTIPLIER = 5;
-/**
- * The smallest deposit worth signing: ten fees. A per-call limit under $0.25
- * sizes the deposit down to the limit while it still covers this many fees.
- */
-export const MIN_DEPOSIT_ATOMIC = 10n * ROUTING_FEE_ATOMIC;
 
 /** A server that answers no paid path is asked again after an hour. */
 const ABSENT_TTL_MS = 60 * 60_000;
@@ -236,7 +244,8 @@ export class RoutingPayer {
       await this.settleDeposits(call);
     }
     if (call.skipped !== undefined) throw new RouteSkipped(call.skipped);
-    if (!response.ok) return response;
+    // No answer, a failed payment or a server error: the free path takes it.
+    if (!response.ok) throw new RouteSkipped(PAYMENT_FAILED);
     if (!call.paid && response.status === 404) {
       // The server has no paid path: the free path, asked again in an hour.
       this.absent.set(new URL(ROUTE_PAID_PATH, url).toString(), this.now() + ABSENT_TTL_MS);
@@ -244,9 +253,12 @@ export class RoutingPayer {
     }
     // Another session's call was in flight on the channel: nothing was
     // charged, and this call takes the free path.
-    if (response.status === 402 && paymentError(channel, response) === CHANNEL_BUSY_ERROR) {
-      throw new RouteSkipped(CHANNEL_BUSY);
+    if (response.status === 402) {
+      throw new RouteSkipped(
+        paymentError(channel, response) === CHANNEL_BUSY_ERROR ? CHANNEL_BUSY : PAYMENT_FAILED,
+      );
     }
+    if (response.status >= 500) throw new RouteSkipped(PAYMENT_FAILED);
     return response;
   }
 
@@ -326,7 +338,8 @@ export class RoutingPayer {
       signer = await this.deps.getSigner();
     } catch (err) {
       this.warn(err instanceof Error ? err.message : String(err));
-      throw new RouteSkipped('wallet_locked');
+      const missing = err instanceof CliError && err.code === 'WALLET_MISSING';
+      throw new RouteSkipped(missing ? 'no_wallet' : 'wallet_locked');
     }
     return toClientEvmSigner(
       {
