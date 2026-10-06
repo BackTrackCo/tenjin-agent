@@ -2,35 +2,36 @@
 'tenjin-cli': patch
 ---
 
-The client side of the routing fee, off until you approve it and Tenjin's server
-answers its paid routing path. Each routing call then costs a flat $0.003 over x402
-`batch-settlement`, paid by `tenjin mcp` with the stock x402 client: the first call of
-a channel carries a $0.25 deposit into it (nothing is sent before approval, not even
-a probe; a deposit is not a payment, so it counts against neither `maxAutoSpend` nor
-`sessionBudget`, and `allowlistCreators` still applies), the SDK keeps the channel in
-its own file storage, and recovers it after a corrective 402. A channel is
-held only while a routing call is in flight on it, so nearly every call uses the
-wallet's first channel and its one deposit; at most 8 calls at once get a channel
-each, a call that finds all 8 busy takes the free path and says so, and a replaced
-wallet gets channels of its own.
+The client side of the routing fee. Once Tenjin's server answers its paid routing
+path, each routing call costs a flat $0.003 over x402 `batch-settlement`, paid by
+`tenjin mcp` through `@x402/fetch`'s `wrapFetchWithPayment` with the stock
+`BatchSettlementEvmScheme`. The wallet has one routing channel, kept in the SDK's own
+file storage. When the channel cannot cover the next fee, the call carries a deposit of
+up to $0.25, sized down to `maxAutoSpend` while that still covers ten fees. A deposit
+is an automatic payment: it is reserved in the spend ledger before it is signed, so
+`maxAutoSpend`, `sessionBudget` and `allowlistCreators` apply to it, and `tenjin status`
+shows it. The fees come out of the deposit and are not counted again. `tenjin install`
+names the fee and its deposits in its spend-limit question, and approving the limits
+approves the fee.
+
+A routing call that cannot be paid takes the free path: a wallet below the deposit, a
+wallet `tenjin mcp` cannot unlock without a prompt, a limit that refuses the deposit, a
+failed payment, or another session's call on the channel at that moment. The first such
+call in a session shows you one line with the reason and the fix (`tenjin wallet fund
+0.25`, `TENJIN_WALLET_PASSPHRASE`, or `tenjin doctor`), and `tenjin doctor` names the
+same reasons. The native tools are never blocked for it.
 
 The router's hook entries are now Claude Code `mcp_tool` hooks that call the new
 `hook` tool of the session's `x402` server, so every routing step runs in the one
 process that holds the wallet; `tenjin install --refresh` (which `tenjin update` runs)
 rewrites the older `tenjin hook` command entries into them. Install and refresh also
 write `mcp__x402__hook` into `permissions.deny`, which hides that tool from the model
-while the hook calls still run, and the tool acts only for its own session's
-transcript. `tenjin hook <kind>` stays for hosts with no MCP server, on the free path.
+while the hook calls still run, and the tool reads only a transcript under Claude
+Code's projects directory (`$CLAUDE_CONFIG_DIR/projects` when set) named for its
+session. `tenjin hook <kind>` stays for hosts with no MCP server, on the free path.
 
-`routingFee` (approved or declined: `tenjin install` names it in its spend-limit
-question and approving the limits approves it, and `tenjin update` asks once when it
-is still unanswered) and `routingAllowance` ($0.50 a rolling day) are new config
-keys. `tenjin doctor` and the first prompt of each session say when routing is
-paused, why, and the command that fixes it; `tenjin status` and the new
-`tenjin payments fees` show what the fee has cost. Until both conditions hold,
-routing uses the free path exactly as before.
-
-The `@x402/*` SDK moves to 2.28.0. With it, every provider payment carries Tenjin's
-builder code in the SDK's own `builder-code` extension, also to sellers that never
-asked for one, and the SDK's per-payment cap is set to the amount your spend policy
-authorized, so a payment you approved above the SDK's $1 default still signs.
+The `@x402/*` SDK moves to 2.28.0, and `@x402/fetch` 2.28.0 is added. With it, every
+provider payment carries Tenjin's builder code in the SDK's own `builder-code`
+extension, also to sellers that never asked for one, and the SDK's per-payment cap is
+set to the amount your spend policy authorized, so a payment you approved above the
+SDK's $1 default still signs.

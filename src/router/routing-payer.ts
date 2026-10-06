@@ -58,7 +58,15 @@ import {
  *   refused. The fee itself comes out of the deposit and is not counted again.
  * - THE TIMEOUT. The wrapper runs inside `httpRequest`, whose deadline is the
  *   caller's, and the SDK's chain reads and the wallet read are each cut at
- *   what is left of it.
+ *   what is left of it, so a leg returns inside the hook's 5 s.
+ * - THE FREE PATH. A call this cannot pay (a refusal above, a failed or
+ *   refused payment, a server error) throws `RouteSkipped` with the reason,
+ *   and the caller sends it to the free path. A server with no paid path is
+ *   remembered for an hour, so each call is not a wasted round trip.
+ *
+ * Left upstream, as cent-level papercuts: the SDK exports `ErrChannelBusy`
+ * only from its server entry, and its fetch wrapper rewraps a hook's error as
+ * a plain `Error`, so the reason rides on the call instead.
  */
 
 /**
@@ -264,8 +272,9 @@ export class RoutingPayer {
 
   /**
    * EACH RESERVED DEPOSIT ENDS IN THE LEDGER: committed when it settled, and
-   * when its request went out with no answer, because it may have landed;
-   * released when the server refused it or it was never sent.
+   * when its request went out with no answer, because it may have landed (an
+   * over-count, never an under-count); released when the server refused it or
+   * it was never sent.
    */
   private async settleDeposits(call: Call): Promise<void> {
     for (const d of call.deposits) {

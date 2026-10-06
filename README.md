@@ -70,7 +70,7 @@ Each answer names the provider and the price. Your agent keeps its own tools, an
 
 ## What it can do
 
-The router picks from a catalog we curate and maintain. When nothing in it fits, it can point your agent at a reviewed third-party pay-per-call service from the [Tenjin list](#tenjin-list-and-experimental-bazaar), and your agent decides whether to use it or to ask you first. Routing is free today: you pay the provider's price and nothing else. A flat [routing fee](#routing-fee) of $0.003 per routing call is coming; it stays off until you approve it.
+The router picks from a catalog we curate and maintain. When nothing in it fits, it can point your agent at a reviewed third-party pay-per-call service from the [Tenjin list](#tenjin-list-and-experimental-bazaar), and your agent decides whether to use it or to ask you first. Routing is free today: you pay the provider's price and nothing else. A flat [routing fee](#routing-fee) of $0.003 per routing call is coming, under the spend limits you approve at install.
 
 | Tool                                                           | What your agent gets                                                                      | Price per call |
 | -------------------------------------------------------------- | ----------------------------------------------------------------------------------------- | -------------- |
@@ -139,11 +139,7 @@ Tenjin refuses any payment over either limit before it signs anything.
 
 ### Routing fee
 
-Once Tenjin's server turns it on, each routing call costs a flat $0.003, whatever the answer: native advice, a free service and a paid one all cost the same. It is paid over x402 `batch-settlement` by `tenjin mcp`, the router's MCP server, with the stock x402 client: the first routing call of a channel carries a $0.25 deposit into it, and each call after that spends $0.003 of it. A deposit is not a payment, so it does not count against your limits above: the fees are what you pay, and what a channel has not spent stays there for later calls. A channel is held only while a routing call is in flight on it, so nearly every call, from every session, uses the first channel and its one deposit; a second channel opens only while the first is carrying a call, at most 8 per wallet, and a call that finds all 8 busy takes the free path and says so. At most $0.50 in routing fees a rolling day (`tenjin config set routingAllowance 1`); processes paying at the same moment can take it over by at most one fee each.
-
-Nothing changes, and nothing is sent for it, until you approve it: `tenjin install` names the fee in its spend-limit question and approving the limits approves it, `tenjin update` asks once when it is still unanswered, and `tenjin config set routingFee approved` (or `declined`) answers it any time. Until then the router uses its free path. When routing is paused because the fee is not approved, the wallet cannot fund a deposit, or `tenjin mcp` cannot unlock the wallet without a prompt (set `TENJIN_WALLET_PASSPHRASE` where Claude Code starts), `tenjin doctor` says which and how to fix it, and your agent is told once per session, at your first prompt. `tenjin status` and `tenjin payments fees` show what the fee has cost the wallet that paid last.
-
-Channels belong to the wallet that funded them. After `tenjin wallet create --replace`, the new wallet's first routing call takes a fresh $0.25 deposit. The old wallet's channels stay on this machine with what they still hold, and come back when that wallet is in use again.
+Once Tenjin's server turns it on, each routing call costs a flat $0.003, paid over x402 `batch-settlement` by `tenjin mcp` from a channel deposit of up to $0.25 (less when your per-call limit is lower). A deposit is an automatic payment: it counts against the limits above, and approving them at install approves the fee. The fees come out of the deposit and are not counted again. When a call cannot be paid, it takes the free path, and Claude Code tells you once per session why and what fixes it; `tenjin doctor` says the same. Details are in [docs/agent-permissions.md](docs/agent-permissions.md#what-bounds-a-router-payment-on-top-of-that).
 
 ### Funding
 
@@ -162,7 +158,6 @@ tenjin status                  # what you've spent today
 tenjin wallet balance          # what's left
 tenjin wallet fund 5           # top up
 tenjin payments reconcile      # settle paid lookups whose settlement was unknown
-tenjin payments fees           # routing fees, per channel
 tenjin update                  # newest version; wallet and settings stay
 tenjin config set router.enabled false             # pause the router on this machine
 tenjin config set --project router.enabled false   # ...or just in this repo
