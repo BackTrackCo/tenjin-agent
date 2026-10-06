@@ -43,7 +43,7 @@ export async function probeRouter(
   } catch {
     return fail(
       `the base URL ${JSON.stringify(baseUrl)} is not a URL`,
-      `Check TENJIN_BASE_URL and --base-url, or set it with \`tenjin config set baseUrl ${PRODUCTION_ORIGIN}\`.`,
+      `Check TENJIN_BASE_URL, or set it with \`tenjin config set baseUrl ${PRODUCTION_ORIGIN}\`.`,
     );
   }
   const host = new URL(url).host;
