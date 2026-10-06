@@ -16,8 +16,12 @@ const thrown = (inner: Error) =>
 
 const withCode = (message: string, code: string) => Object.assign(new Error(message), { code });
 
-const probe = (fetchImpl: typeof fetch, baseUrl = PROD, env: NodeJS.ProcessEnv = {}) =>
-  probeRouter(baseUrl, { timeoutMs: 1000, fetchImpl, env });
+const probe = (
+  fetchImpl: typeof fetch,
+  baseUrl = PROD,
+  env: NodeJS.ProcessEnv = {},
+  proxySupported = true,
+) => probeRouter(baseUrl, { timeoutMs: 1000, fetchImpl, env, proxySupported });
 
 describe('probeRouter', () => {
   it('passes on the route refusing the empty body', async () => {
@@ -44,6 +48,29 @@ describe('probeRouter', () => {
       "Allow tenjin.blog through your proxy, firewall or VPN (this shell sets HTTPS_PROXY), or run from a network that reaches it. Tenjin's own config is correct and needs no change.",
     );
     expect(check.fix).not.toContain('secret');
+  });
+
+  it('sends a 407 from the proxy to its credentials, not to an allow-list', async () => {
+    const tunnel = withCode('Proxy response (407) !== 200 when HTTP Tunneling', 'UND_ERR_ABORTED');
+    const check = await probe(thrown(tunnel), PROD, { https_proxy: 'http://proxy:3128' });
+    expect(check.detail).toBe(
+      'a proxy between this machine and tenjin.blog asked for its own credentials (407)',
+    );
+    expect(check.fix).toBe(
+      "Put the proxy's credentials in https_proxy (`http://user:password@proxy:port`), then try again.",
+    );
+  });
+
+  it('says so when this Node cannot use the proxy the shell sets', async () => {
+    const check = await probe(
+      thrown(withCode('connect ECONNREFUSED', 'ECONNREFUSED')),
+      PROD,
+      { HTTPS_PROXY: 'http://proxy:3128' },
+      false,
+    );
+    expect(check.fix).toContain('This shell sets HTTPS_PROXY, but Node');
+    expect(check.fix).toContain('Upgrade to Node 24.14 or newer');
+    expect(check.fix).not.toContain('Allow tenjin.blog through your proxy');
   });
 
   it('blames the network for a 403 that no deployment sent', async () => {

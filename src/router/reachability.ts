@@ -1,3 +1,4 @@
+import { envProxySupported, proxyVariable } from '../lib/env-proxy';
 import { httpRequest, type HttpResponse } from '../lib/http';
 import { isSameDeployment, PRODUCTION_ORIGIN } from '../lib/production-origin';
 import { ROUTER_PATH } from './decision';
@@ -9,9 +10,6 @@ export interface RouterCheck {
   detail: string;
   fix?: string;
 }
-
-/** Named, never quoted: a proxy URL can carry its own credentials. */
-const PROXY_VARIABLES = ['HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy'];
 
 /**
  * One cheap request to the free decision route with an empty body. It checks
@@ -26,7 +24,13 @@ const PROXY_VARIABLES = ['HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy
  */
 export async function probeRouter(
   baseUrl: string,
-  opts: { timeoutMs: number; fetchImpl?: typeof fetch; env?: NodeJS.ProcessEnv },
+  opts: {
+    timeoutMs: number;
+    fetchImpl?: typeof fetch;
+    env?: NodeJS.ProcessEnv;
+    /** Test seam; production asks this Node whether it can use the proxy. */
+    proxySupported?: boolean;
+  },
 ): Promise<RouterCheck> {
   const fail = (detail: string, fix: string): RouterCheck => ({
     name: 'router',
@@ -58,9 +62,17 @@ export async function probeRouter(
   const checkBase = production
     ? 'Try again later.'
     : 'Check that the configured base URL names the Tenjin router (`tenjin config get baseUrl`), then try again later.';
-  const network = networkFix(host, opts.env ?? process.env, production);
+  const env = opts.env ?? process.env;
+  const network = networkFix(host, env, production, opts.proxySupported ?? envProxySupported());
+  const credentials = proxyCredentialsFix(env);
   if (!probe.ok) {
     const t = probe.transport;
+    if (t?.layer === 'proxy' && t.proxyStatus === 407) {
+      return fail(
+        `a proxy between this machine and ${host} asked for its own credentials (407)`,
+        credentials,
+      );
+    }
     if (t?.layer === 'proxy') {
       return fail(
         `a proxy refused the connection to ${host} (${t.proxyStatus}), so the router never answered`,
@@ -94,7 +106,7 @@ export async function probeRouter(
   if (probe.status === 407) {
     return fail(
       `a proxy between this machine and ${host} asked for its own credentials (407)`,
-      `Add the proxy's credentials to the proxy URL. ${network}`,
+      credentials,
     );
   }
   if (probe.status === 401 || probe.status === 403) {
@@ -131,9 +143,22 @@ function fromDeployment(probe: HttpResponse): boolean {
   return probe.header('x-vercel-id') !== undefined || probe.header('x-request-id') !== undefined;
 }
 
-function networkFix(host: string, env: NodeJS.ProcessEnv, production: boolean): string {
-  const proxy = PROXY_VARIABLES.find((name) => (env[name] ?? '') !== '');
-  const via = proxy !== undefined ? ` (this shell sets ${proxy})` : '';
+function networkFix(
+  host: string,
+  env: NodeJS.ProcessEnv,
+  production: boolean,
+  proxySupported: boolean,
+): string {
+  const proxy = proxyVariable(env);
   const config = production ? " Tenjin's own config is correct and needs no change." : '';
+  if (proxy !== undefined && !proxySupported) {
+    return `This shell sets ${proxy}, but Node ${process.versions.node} cannot send Tenjin's requests through it. Upgrade to Node 24.14 or newer, or run from a network that reaches ${host} directly.${config}`;
+  }
+  const via = proxy !== undefined ? ` (this shell sets ${proxy})` : '';
   return `Allow ${host} through your proxy, firewall or VPN${via}, or run from a network that reaches it.${config}`;
+}
+
+function proxyCredentialsFix(env: NodeJS.ProcessEnv): string {
+  const proxy = proxyVariable(env) ?? 'HTTPS_PROXY';
+  return `Put the proxy's credentials in ${proxy} (\`http://user:password@proxy:port\`), then try again.`;
 }
