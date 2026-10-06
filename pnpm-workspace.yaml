@@ -59,9 +59,15 @@ overrides:
   'hono@>=3.8.0 <4.12.34': '^4.12.34'
   'postcss@<8.5.23': '^8.5.23'
   '@hono/node-server@<2.0.10': '^2.0.10'
+  proxy-addr@>=1.1.0 <2.0.8: ^2.0.8
+  source-map-js@>=1.0.0 <1.2.2: ^1.2.2
 
 # pnpm 11 errors (ERR_PNPM_IGNORED_BUILDS) on any build-script dep missing an
 # entry here, so keep it exhaustive. `false` = don't run the script; esbuild's
 # native binary comes from its platform optional-deps.
 allowBuilds:
   esbuild: false
+
+minimumReleaseAgeExclude:
+  - source-map-js@1.2.2
+  - proxy-addr@2.0.8
