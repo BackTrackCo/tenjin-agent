@@ -135,7 +135,7 @@ Tenjin pays for tools with [x402](https://www.x402.org), an open standard that b
 | Per lookup | $0.25   | `tenjin config set maxAutoSpend 0.10` |
 | Per day    | $5      | `tenjin config set sessionBudget 2`   |
 
-`tenjin install` asks you to approve these limits in a terminal. An install with no terminal (a script, CI, or an agent) sets no per-lookup limit, so every paid lookup needs your approval until you run `tenjin config set maxAutoSpend 0.25`. Tenjin refuses any payment over either limit before it signs anything.
+`tenjin install` asks you to approve these limits in a terminal. When your agent runs the install, the CLI cannot ask, so it sets no per-lookup limit and tells your agent to ask you. If you say yes, your agent runs `tenjin config set maxAutoSpend 0.25`. Until then, the router pays for nothing on its own. Tenjin refuses any payment over either limit before it signs anything.
 
 ### Funding
 

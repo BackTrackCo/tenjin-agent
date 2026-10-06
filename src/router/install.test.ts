@@ -128,6 +128,15 @@ function alphaSettings(): Record<string, unknown> {
 const ADDRESS = '0x3c0D84055994c3062819Ce8730869D0aDeA4c3Bf';
 
 /** Wallet seams are always stubbed: the real create writes to the OS keychain. */
+/** What a run that could not ask prints for the agent that ran it. */
+const ASK_LINES = [
+  '! Automatic payments are off until the user approves a spend limit',
+  '  Ask the user: May Tenjin pay for tool calls without asking you each time, up to $0.25 a call and $5 a day?',
+  '  Yes: tenjin config set maxAutoSpend 0.25',
+  '  Other amounts: tenjin config set maxAutoSpend <usd> and tenjin config set sessionBudget <usd|none>',
+  '  No: run nothing, the router then pays for nothing on its own',
+];
+
 function deps(over: Record<string, unknown> = {}) {
   return {
     homeDir: home,
@@ -169,9 +178,38 @@ describe('tenjin install', () => {
         set: ['sessionBudget'],
         kept: [],
         effective: { maxAutoSpend: '0', sessionBudget: '5' },
-        fix: 'tenjin config set maxAutoSpend 0.25',
+        approval: {
+          question:
+            'May Tenjin pay for tool calls without asking you each time, up to $0.25 a call and $5 a day?',
+          approve: 'tenjin config set maxAutoSpend 0.25',
+        },
       },
     });
+    const { next } = (result.data as { spend: { approval: { next: string } } }).spend.approval;
+    expect(next).toMatch(/^Ask the user this question before you change any limit\./);
+    expect(next).toContain('If they say no, run nothing');
+  });
+
+  it('asks about the daily limit the file already names', async () => {
+    await writeFile(join(data, 'config.json'), JSON.stringify({ sessionBudget: 'none' }));
+    const result = await runRouterInstall({}, ctx(), deps());
+    expect(result.data).toMatchObject({
+      spend: {
+        approval: {
+          question:
+            'May Tenjin pay for tool calls without asking you each time, up to $0.25 a call with no daily limit?',
+        },
+      },
+    });
+  });
+
+  it('asks nothing of a user who already chose a zero per-call limit', async () => {
+    await writeFile(join(data, 'config.json'), JSON.stringify({ maxAutoSpend: '0' }));
+    const result = await runRouterInstall({}, ctx(), deps());
+    expect(result.data).not.toHaveProperty('spend.approval');
+    expect(result.humanLines).toContain(
+      '! Automatic payments are off: every paid lookup needs your approval',
+    );
   });
 
   it('reports no hooks directory, because the entries are plain commands', async () => {
@@ -264,8 +302,7 @@ describe('tenjin install', () => {
     expect(result.humanLines).toEqual([
       '! Almost done: Claude Code needs one command',
       `✓ Wallet created: ${ADDRESS}`,
-      '! Automatic payments are off: every paid lookup needs your approval',
-      '  To let the router pay without asking, run: tenjin config set maxAutoSpend 0.25',
+      ...ASK_LINES,
       '  Live status line on: each lookup names its provider while it runs',
       '! Could not add the request tool to Claude Code. Run:',
       `  ${MCP_ADD_COMMAND}`,
@@ -287,8 +324,7 @@ describe('tenjin install', () => {
     expect(result.humanLines).toEqual([
       '✓ Tenjin is set up for Claude Code',
       `✓ Wallet created: ${ADDRESS}`,
-      '! Automatic payments are off: every paid lookup needs your approval',
-      '  To let the router pay without asking, run: tenjin config set maxAutoSpend 0.25',
+      ...ASK_LINES,
       '  Live status line on: each lookup names its provider while it runs',
       '',
       'Next: tenjin wallet fund, then restart Claude Code',
@@ -521,12 +557,8 @@ describe('install asks a person to approve the spend limits', () => {
     const result = await runRouterInstall({}, makeCtx(), deps({ isInteractive, promptLimits }));
     expect(promptLimits).not.toHaveBeenCalled();
     expect(await loadRawConfig(data)).toEqual({ sessionBudget: '5000000' });
-    expect(result.humanLines).toContain(
-      '! Automatic payments are off: every paid lookup needs your approval',
-    );
-    expect(result.humanLines).toContain(
-      '  To let the router pay without asking, run: tenjin config set maxAutoSpend 0.25',
-    );
+    // An agent's shell has no terminal: the question goes to the agent instead.
+    expect(result.humanLines).toEqual(expect.arrayContaining(ASK_LINES));
   });
 
   it('a non-interactive run keeps a per-call limit the file already names', async () => {
@@ -539,7 +571,7 @@ describe('install asks a person to approve the spend limits', () => {
     expect(result.data).toMatchObject({
       spend: { set: ['sessionBudget'], kept: ['maxAutoSpend'] },
     });
-    expect(result.data).not.toHaveProperty('spend.fix');
+    expect(result.data).not.toHaveProperty('spend.approval');
   });
 
   it('--refresh asks nothing and fills no absent limit', async () => {

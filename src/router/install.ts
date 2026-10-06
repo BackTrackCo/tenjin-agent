@@ -295,11 +295,11 @@ export async function runRouterInstall(
     }
   }
   // The shelf install's gate: a refresh, `--json`, or a run with no terminal on
-  // either side asks nothing. With nobody to approve, install fills only the
-  // limit that narrows spending (the daily one) and never `maxAutoSpend`, so
-  // the bare CLI's zero holds and every paid lookup needs approval. A script, a
-  // Dockerfile, CI or an agent running install is exactly the run with nobody
-  // there to approve.
+  // either side asks nothing. An agent's install is that run: its shell has no
+  // terminal. Install then fills only the limit that narrows spending (the
+  // daily one) and never `maxAutoSpend`, and its output hands the question to
+  // whoever ran it (see {@link spendApproval}). Until the user answers, the bare
+  // CLI's zero holds.
   const humanOutput = ctx.flags.json === true ? false : (deps.isInteractive ?? ctx.io.isTTY);
   const canPrompt = humanOutput && (deps.isInteractive ?? Boolean(process.stdin.isTTY));
   const limits =
@@ -377,6 +377,10 @@ export async function runRouterInstall(
   // keeps them, and a readout quoting the defaults would describe limits this
   // run did not set.
   const effective = await resolveContextSettings(ctx);
+  const approval =
+    !canPrompt && !spend.kept.includes('maxAutoSpend')
+      ? spendApproval(effective.policy)
+      : undefined;
   // A warning, never a failure: everything above is written and correct, and
   // the network this machine is on now may not be the one it uses later.
   const router = await probeRouter(effective.baseUrl, {
@@ -393,7 +397,7 @@ export async function runRouterInstall(
     spend: {
       ...spend,
       effective: effectiveLimits(effective.policy),
-      ...(effective.policy.maxAutoSpendAtomic === 0n ? { fix: AUTO_SPEND_FIX } : {}),
+      ...(approval !== undefined ? { approval } : {}),
     },
     mcp,
     wallet,
@@ -416,6 +420,7 @@ export async function runRouterInstall(
         mcp,
         wallet,
         policy: effective.policy,
+        ...(approval !== undefined ? { approval } : {}),
         router,
       }),
       ...removedKeysLines,
@@ -425,6 +430,38 @@ export async function runRouterInstall(
 
 /** What turns automatic payment on after an install that left it at zero. */
 const AUTO_SPEND_FIX = `tenjin config set maxAutoSpend ${toMoney(ROUTER_DEFAULTS.maxAutoSpend).usd}`;
+const OWN_LIMITS_COMMANDS =
+  '`tenjin config set maxAutoSpend <usd>` and `tenjin config set sessionBudget <usd|none>`';
+const DECLINED = 'the router then pays for nothing on its own';
+
+/** The spend question an install that could not ask hands to its caller. */
+export interface SpendApproval {
+  /** For the agent to put to the user as written. */
+  question: string;
+  /** What the agent does with each answer. */
+  next: string;
+  /** The command for a yes. */
+  approve: string;
+}
+
+/**
+ * An agent runs install with `--json` or in a shell with no terminal, so the
+ * CLI cannot ask. The agent can: this is the question and what to run for each
+ * answer, the same shape as the `request` tool's `needs_input` step. A script
+ * or CI ignores it, and the zero holds.
+ */
+function spendApproval(policy: SpendPolicy): SpendApproval {
+  const call = toMoney(ROUTER_DEFAULTS.maxAutoSpend).usd;
+  const daily =
+    policy.sessionBudgetAtomic === null
+      ? 'with no daily limit'
+      : `and $${toMoney(policy.sessionBudgetAtomic.toString()).usd} a day`;
+  return {
+    question: `May Tenjin pay for tool calls without asking you each time, up to $${call} a call ${daily}?`,
+    next: `Ask the user this question before you change any limit. If they say yes, run \`${AUTO_SPEND_FIX}\`. If they give other amounts, run ${OWN_LIMITS_COMMANDS}. If they say no, run nothing: ${DECLINED}.`,
+    approve: AUTO_SPEND_FIX,
+  };
+}
 
 /**
  * The one question install asks, before anything is written: approve the
@@ -738,6 +775,7 @@ function lines(
     mcp: McpRegistration;
     wallet: WalletOutcome;
     policy: SpendPolicy;
+    approval?: SpendApproval;
     router: RouterCheck;
   },
 ): string[] {
@@ -747,12 +785,20 @@ function lines(
   const daily =
     s.policy.sessionBudgetAtomic === null ? 'no daily limit' : `$${limits.sessionBudget} a day`;
   const spend =
-    s.policy.maxAutoSpendAtomic === 0n
+    s.approval !== undefined
       ? [
-          warn('Automatic payments are off: every paid lookup needs your approval'),
-          `  To let the router pay without asking, run: ${AUTO_SPEND_FIX}`,
+          warn('Automatic payments are off until the user approves a spend limit'),
+          `  Ask the user: ${s.approval.question}`,
+          `  Yes: ${s.approval.approve}`,
+          `  Other amounts: ${OWN_LIMITS_COMMANDS.replaceAll('`', '')}`,
+          `  No: run nothing, ${DECLINED}`,
         ]
-      : [`  Automatic router: up to $${limits.maxAutoSpend} per call; daily limit ${daily}`];
+      : s.policy.maxAutoSpendAtomic === 0n
+        ? [
+            warn('Automatic payments are off: every paid lookup needs your approval'),
+            `  To let the router pay without asking, run: ${AUTO_SPEND_FIX}`,
+          ]
+        : [`  Automatic router: up to $${limits.maxAutoSpend} per call; daily limit ${daily}`];
   const router =
     s.router.status === 'ok'
       ? []
