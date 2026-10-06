@@ -8,9 +8,11 @@ answers its paid routing path. Each routing call then costs a flat $0.003 over x
 a channel carries a $0.25 deposit into it (nothing is sent before approval, not even
 a probe; a deposit is not a payment, so it counts against neither `maxAutoSpend` nor
 `sessionBudget`, and `allowlistCreators` still applies), the SDK keeps the channel in
-its own file storage, and recovers it after a corrective 402. Each `tenjin mcp`
-process uses one channel of the wallet, at most 8, and a replaced wallet gets
-channels of its own.
+its own file storage, and recovers it after a corrective 402. A channel is
+held only while a routing call is in flight on it, so nearly every call uses the
+wallet's first channel and its one deposit; at most 8 calls at once get a channel
+each, a call that finds all 8 busy takes the free path and says so, and a replaced
+wallet gets channels of its own.
 
 The router's hook entries are now Claude Code `mcp_tool` hooks that call the new
 `hook` tool of the session's `x402` server, so every routing step runs in the one

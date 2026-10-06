@@ -22,8 +22,9 @@ import { formatUsdDisplay } from '../lib/money';
  * each channel in the SDK's own file storage, deposits inline and recovers.
  * What is here is what the SDK does not keep:
  *
- * - the SLOT LEASES: one channel slot per `tenjin mcp` process, so the SDK's
- *   file storage has one writer per channel;
+ * - the SLOT LEASES: a `tenjin mcp` process holds one channel slot while it
+ *   has a paid call in flight, so the SDK's file storage has one writer per
+ *   channel;
  * - the FEE LINES: the rolling 24 h routing allowance, one file per slot,
  *   written only by the process that holds the slot;
  * - the STATE FILE: whether the server answers the paid path, a `fee_required`
@@ -45,7 +46,7 @@ export const CHANNEL_DEPOSIT_ATOMIC = 250_000n;
 /** The default routing allowance, atomic USDC per rolling 24 h ($0.50). */
 export const ROUTING_ALLOWANCE_ATOMIC = 500_000n;
 export const ROUTING_WINDOW_MS = 86_400_000;
-/** Channel slots per wallet: one per `tenjin mcp` process that pays. */
+/** Channel slots per wallet: at most this many paid calls in flight at once. */
 export const MAX_SLOTS = 8;
 
 const ATOMIC_RE = /^\d{1,30}$/;
@@ -133,7 +134,8 @@ export async function noteFeeRequired(
  * aside and re-taken; what was moved is checked against the lease that was
  * read, so two processes cannot both end up holding the slot: the one that
  * moved a live lease puts it back and walks away. No renewal and no expiry:
- * a live process keeps its slot, and an exit (or a kill) frees it.
+ * the holder gives it back when its last call in flight ends, and a process
+ * that dies holding it frees it.
  */
 export interface SlotLease {
   pid: number;
@@ -353,6 +355,10 @@ function fundNeed(walletAtomic: bigint | null): bigint {
     ? CHANNEL_DEPOSIT_ATOMIC
     : CHANNEL_DEPOSIT_ATOMIC - walletAtomic;
 }
+
+/** What a call that found every routing channel busy says: it took the free
+ *  path. Shown to the user by the hook, and returned by the tool. */
+export const NO_SLOT_SENTENCE = `Tenjin routing: all ${MAX_SLOTS} routing channels of this wallet were carrying other sessions' calls, so this call took the free path and paid no routing fee.`;
 
 /** The one sentence doctor, the session notice and the tool share. */
 export function pausedSentence(paused: PausedReason): string {

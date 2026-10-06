@@ -9,7 +9,7 @@ import { httpRequest, type HttpRequestOptions, type HttpResult } from '../lib/ht
 import { creatorAllowed, type SpendPolicy } from '../lib/policy';
 import type { TenjinSigner } from '../lib/wallet/provider';
 import { canonicalUsdcOnly } from '../lib/x402-pay';
-import { RouteSkipped, type DecisionRoute } from './decision';
+import { NO_SLOT, RouteSkipped, type DecisionRoute } from './decision';
 import { routingAllowanceAtomic, routingFeeApproved } from './fee';
 import {
   appendFee,
@@ -46,12 +46,15 @@ import {
  *
  * What is Tenjin's own, because the SDK has no equivalent:
  *
- * - ONE SLOT PER PROCESS. The server serves one pending request per channel
- *   and the SDK's file storage takes one writer per channel, so each process
- *   leases one slot of the wallet (`fee-state.ts`) and its channel is that
- *   slot's: a deterministic salt per slot index, so a restarted process, or the
- *   next one to take the slot, finds the same channel. Calls inside a process
- *   take turns on it.
+ * - ONE SLOT PER CALL IN FLIGHT. The server serves one pending request per
+ *   channel and the SDK's file storage takes one writer per channel, so a
+ *   process leases a slot of the wallet (`fee-state.ts`) while it has a paid
+ *   call in flight, and gives it back when the last one ends. Calls inside a
+ *   process take turns on it. Each slot's channel is its own: a deterministic
+ *   salt per slot index, so whichever process takes the slot next finds the
+ *   same channel in the SDK's storage. The first free slot is taken, so nearly
+ *   every call, from every session, runs on slot 0's channel and its one
+ *   deposit; another slot is used only while slot 0 is carrying a call.
  * - THE APPROVAL AND THE ALLOWANCE. Nothing is sent on the paid path before the
  *   routing fee is approved, and a call that would take the rolling 24 h fees
  *   past the routing allowance is not made: the SDK's cap is per payment, not
@@ -190,6 +193,9 @@ export class RoutingPayer {
   private slot: Slot | null = null;
   private call: Call | null = null;
   private queue: Promise<unknown> = Promise.resolve();
+  /** Paid calls sent and not yet ended; the slot is held while this is > 0. */
+  private inFlight = 0;
+  private lastPayer: string | null = null;
 
   constructor(private readonly deps: RoutingPayerDeps) {}
 
@@ -207,12 +213,22 @@ export class RoutingPayer {
       send: (url, options) => {
         // The caller's budget starts now, not when this call's turn comes.
         const until = this.now() + options.timeoutMs;
-        return this.turn(() => this.pay(url, options, required, allowance, until));
+        this.inFlight += 1;
+        return this.turn(async () => {
+          try {
+            return await this.pay(url, options, required, allowance, until);
+          } finally {
+            // Inside the turn, so the next call cannot start on a slot that is
+            // being given back.
+            this.inFlight -= 1;
+            if (this.inFlight === 0) await this.close();
+          }
+        });
       },
     };
   }
 
-  /** Give up this process's slot, for a clean exit. */
+  /** Give up the slot: when the last call in flight ends, and on exit. */
   async close(): Promise<void> {
     const slot = this.slot;
     this.slot = null;
@@ -288,8 +304,9 @@ export class RoutingPayer {
     allowance: bigint,
     until: number,
   ): Promise<HttpResult> {
-    const slot = await this.slotFor(await this.signer());
+    const signer = await this.signer();
     if (until - this.now() <= 0) throw new RouteSkipped('busy');
+    const slot = await this.slotFor(signer);
     const call: Call = { slot, allowance, host: new URL(url).host, until, deposit: false };
     this.call = call;
     try {
@@ -437,9 +454,11 @@ export class RoutingPayer {
   }
 
   /**
-   * THIS PROCESS'S SLOT for the wallet in use: the one it holds while its lease
-   * is still its own, else the first free one. A replaced wallet gets a slot of
-   * its own, and its old channels stay in its old folder.
+   * THE SLOT FOR THIS CALL, for the wallet in use: the one this process already
+   * holds for the calls in flight, while its lease is still its own, else the
+   * first free one. None free (every slot is carrying another process's call)
+   * skips the call with `no_slot`, and it takes the free path. A replaced
+   * wallet gets slots of its own, and its old channels stay in its old folder.
    */
   private async slotFor(signer: ClientEvmSigner): Promise<Slot> {
     const payer = signer.address.toLowerCase() as `0x${string}`;
@@ -484,10 +503,13 @@ export class RoutingPayer {
         scheme,
         http: new x402HTTPClient(client),
       };
-      await writeFeeState(this.deps.dataDir, { payer }).catch(() => undefined);
+      if (this.lastPayer !== payer) {
+        await writeFeeState(this.deps.dataDir, { payer }).catch(() => undefined);
+        this.lastPayer = payer;
+      }
       return this.slot;
     }
-    throw new RouteSkipped('no_slot');
+    throw new RouteSkipped(NO_SLOT);
   }
 
   private async noteBlocked(blocked: PayBlocked | null, walletAtomic?: bigint): Promise<void> {

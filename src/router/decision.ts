@@ -399,11 +399,16 @@ export class RouteSkipped extends Error {
   }
 }
 
+/** Every routing channel of the wallet is carrying another call. */
+export const NO_SLOT = 'no_slot';
+
 export type DecisionOutcome<T> =
-  | { status: 'decided'; decision: T }
+  /** `freePath`: the paid path skipped the call for this reason and it went
+   *  to the free path instead, unpaid. */
+  | { status: 'decided'; decision: T; freePath?: typeof NO_SLOT }
   /** On the free path nothing was paid and nothing could be, so a failure here
    *  costs the turn a routing answer and nothing else. */
-  | { status: 'failed'; reason: string; errorCode?: string }
+  | { status: 'failed'; reason: string; errorCode?: string; freePath?: typeof NO_SLOT }
   /** The paid path did not take the call ({@link RouteSkipped}): nothing was
    *  sent, and the native tool runs. */
   | { status: 'skipped'; why: string };
@@ -457,14 +462,25 @@ export async function requestDecision(
           }),
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   };
+  const started = Date.now();
+  const schema = kind === 'hook' ? HookResponseSchema : ToolResponseSchema;
   let response: HttpResult;
   try {
     response = await (deps.route?.send ?? httpRequest)(url, options);
   } catch (err) {
-    if (err instanceof RouteSkipped) return { status: 'skipped', why: err.why };
-    throw err;
+    if (!(err instanceof RouteSkipped)) throw err;
+    const left = options.timeoutMs - (Date.now() - started);
+    if (err.why !== NO_SLOT || left <= 0) return { status: 'skipped', why: err.why };
+    // NO SLOT FREE: the call still routes, on the free path, unpaid, inside
+    // what is left of its budget, and the caller says so.
+    response = await httpRequest(new URL(ROUTER_PATH, deps.baseUrl).toString(), {
+      ...options,
+      timeoutMs: left,
+    });
+    const free = readDecision(response, schema);
+    return free.status === 'skipped' ? free : { ...free, freePath: NO_SLOT };
   }
-  return readDecision(response, kind === 'hook' ? HookResponseSchema : ToolResponseSchema);
+  return readDecision(response, schema);
 }
 
 /** How a call run from a request spec ended, for the server's offer-to-call

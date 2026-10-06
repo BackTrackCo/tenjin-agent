@@ -27,7 +27,7 @@ import {
   type OfferSpec,
 } from './decision';
 import { isFeeRequired, routingFeeApproved, type RouteFor } from './fee';
-import { noteFeeRequired, pausedReason, pausedSentence } from './fee-state';
+import { NO_SLOT_SENTENCE, noteFeeRequired, pausedReason, pausedSentence } from './fee-state';
 import { openLookupFooter, type LookupFooter } from './progress';
 import {
   appendPaidRecord,
@@ -259,9 +259,11 @@ export async function runRequestTool(
     const paused = await pausedReason(deps.ctx.dataDir, routingFeeApproved(config));
     return fail(
       'native',
-      paused !== null
-        ? pausedSentence(paused)
-        : 'Tenjin routing is starting: the routing fee is approved but the paid routing path did not answer yet, so nothing was routed or paid.',
+      fresh.freePath !== undefined
+        ? NO_SLOT_SENTENCE
+        : paused !== null
+          ? pausedSentence(paused)
+          : 'Tenjin routing is starting: the routing fee is approved but the paid routing path did not answer yet, so nothing was routed or paid.',
       { nextStep: 'Tell the user this once, and use your own tools for now.' },
     );
   }

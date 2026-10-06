@@ -56,8 +56,10 @@ export async function runHookCommand(kind: HookKind, io: Io, deps: HookCommandDe
 export async function runHookKind(
   kind: HookKind,
   event: unknown,
-  deps: HookDeps,
+  hookDeps: HookDeps,
 ): Promise<unknown | null> {
+  const notices = new Set<string>();
+  const deps: HookDeps = { ...hookDeps, notice: (line) => notices.add(line) };
   const outcome =
     kind === 'prompt'
       ? await runPromptHook(event, deps)
@@ -70,7 +72,12 @@ export async function runHookKind(
             : kind === 'answer'
               ? await runAnswerHook(event, deps)
               : await runDelegationHook(event, deps);
-  return outcome.response;
+  if (notices.size === 0) return outcome.response;
+  // The harness shows `systemMessage` to the user, whatever the event.
+  const systemMessage = [...notices].join('\n');
+  return outcome.response === null || typeof outcome.response !== 'object'
+    ? { systemMessage }
+    : { ...outcome.response, systemMessage };
 }
 
 async function readStdin(): Promise<string> {

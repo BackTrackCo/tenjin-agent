@@ -16,6 +16,7 @@ import {
   payerDir,
   readFeeState,
   ROUTING_FEE_ATOMIC,
+  takeSlot,
 } from './fee-state';
 import { BASE, FakeRouter, testSigner } from './fee-test-utils';
 import {
@@ -98,6 +99,11 @@ async function routeOnce(p: RoutingPayer, router: FakeRouter, config = APPROVED)
       ...(route !== null ? { route } : {}),
     },
   );
+}
+
+async function leases(): Promise<string[]> {
+  const names = await readdir(payerDir(dir, wallet.address)).catch(() => [] as string[]);
+  return names.filter((n) => n.endsWith('.lease')).sort();
 }
 
 async function channelFiles(): Promise<string[]> {
@@ -186,27 +192,60 @@ describe('RoutingPayer', () => {
     expect(await feesInWindow(dir, clock)).toBe(3n * ROUTING_FEE_ATOMIC);
   });
 
-  it('gives each process its own slot and channel, and the next process takes over a dead one', async () => {
+  it('gives the slot back when no call is in flight: processes take turns on slot 0 and its one deposit', async () => {
+    const router = new FakeRouter();
+    const a = payer(router, { pid: 1 });
+    const b = payer(router, { pid: 2 });
+    for (const p of [a, b, a, b]) {
+      expect((await routeOnce(p, router)).status).toBe('decided');
+      // Between calls nothing holds a slot, though both processes stay up.
+      expect(await leases()).toEqual([]);
+    }
+    expect(router.channels.size).toBe(1);
+    expect(router.deposits).toBe(1);
+    expect(router.settledFees).toBe(4);
+    expect(await feesInWindow(dir, clock)).toBe(4n * ROUTING_FEE_ATOMIC);
+  });
+
+  it('holds one slot per call in flight: 8 calls at once use the 8 slots, and the ninth takes the free path', async () => {
+    const router = new FakeRouter();
+    router.delayMs = 200;
+    const payers = Array.from({ length: 9 }, (_, i) => payer(router, { pid: i + 1 }));
+    const outcomes = await Promise.all(payers.map((p) => routeOnce(p, router)));
+    expect(outcomes.every((o) => o.status === 'decided')).toBe(true);
+    const free = outcomes.filter((o) => o.status === 'decided' && o.freePath === 'no_slot');
+    expect(free).toHaveLength(1);
+    expect(router.log.filter((l) => l === 'POST /api/x402-router unpaid')).toHaveLength(1);
+    expect(router.channels.size).toBe(8);
+    expect(router.deposits).toBe(8);
+    expect(router.settledFees).toBe(8);
+    // All given back once the calls ended; the next call is on slot 0 again.
+    expect(await leases()).toEqual([]);
+    await routeOnce(payers[8]!, router);
+    expect(router.deposits).toBe(8);
+    expect(router.settledFees).toBe(9);
+  });
+
+  it("never shares a live process's slot, and reclaims the slot of a process that died mid-call", async () => {
     const router = new FakeRouter();
     const alive = new Set([1, 2]);
     const isAlive = (pid: number) => alive.has(pid);
-    const a = payer(router, { pid: 1, isAlive });
+    await routeOnce(payer(router, { pid: 1, isAlive }), router);
+    // Process 1 is mid-call again: its lease on slot 0 stands.
+    const slotDir = payerDir(dir, wallet.address);
+    expect(await takeSlot(slotDir, 0, 1, isAlive)).not.toBeNull();
     const b = payer(router, { pid: 2, isAlive });
-    await Promise.all([routeOnce(a, router), routeOnce(b, router)]);
+    await routeOnce(b, router);
     expect(router.channels.size).toBe(2);
     expect(router.deposits).toBe(2);
-    expect(await channelFiles()).toHaveLength(2);
-    // Process 1 is gone; process 3 takes slot 0 and its channel as it stands.
+    // Then it dies without giving the slot back. The next call takes slot 0
+    // over, on the channel as it stands: no new deposit.
     alive.delete(1);
-    alive.add(3);
-    const c = payer(router, { pid: 3, isAlive });
-    expect((await routeOnce(c, router)).status).toBe('decided');
+    await routeOnce(b, router);
     expect(router.channels.size).toBe(2);
     expect(router.deposits).toBe(2);
-    expect(await channelFiles()).toHaveLength(2);
-    // A live holder keeps its slot: process 2's next call stays on its channel.
-    expect((await routeOnce(b, router)).status).toBe('decided');
-    expect(router.channels.size).toBe(2);
+    expect(router.settledFees).toBe(3);
+    expect(await leases()).toEqual([]);
   });
 
   it('frees its slot on close, so the next process continues the same channel', async () => {
