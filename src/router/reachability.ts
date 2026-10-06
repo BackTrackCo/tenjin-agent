@@ -65,6 +65,9 @@ export async function probeRouter(
   const env = opts.env ?? process.env;
   const network = networkFix(host, env, production, opts.proxySupported ?? envProxySupported());
   const credentials = proxyCredentialsFix(env);
+  // Off production, a host that does not resolve or answer is most likely a
+  // typo or a dev server that is not running, not a blocked network.
+  const unreached = production ? network : checkBase;
   if (!probe.ok) {
     const t = probe.transport;
     if (t?.layer === 'proxy' && t.proxyStatus === 407) {
@@ -76,25 +79,22 @@ export async function probeRouter(
     if (t?.layer === 'proxy') {
       return fail(
         `a proxy refused the connection to ${host} (${t.proxyStatus}), so the router never answered`,
-        network,
+        unreached,
       );
     }
     if (t?.layer === 'dns') {
-      return fail(`${host} did not resolve (${t.code}), so the router was not reached`, network);
+      return fail(`${host} did not resolve (${t.code}), so the router was not reached`, unreached);
     }
     if (t?.layer === 'tls') {
       return fail(
         `the TLS connection to ${host} failed (${t.code}). A proxy that inspects TLS causes this`,
-        `If this network inspects TLS, set NODE_EXTRA_CA_CERTS to its CA certificate. ${network}`,
+        `If this network inspects TLS, set NODE_EXTRA_CA_CERTS to its CA certificate. ${unreached}`,
       );
     }
     if (t?.layer === 'connect') {
-      return fail(`could not connect to ${host} (${t.code})`, network);
+      return fail(`could not connect to ${host} (${t.code})`, unreached);
     }
-    return fail(
-      `the router at ${url} is unreachable or erroring (${probe.message})`,
-      production ? network : checkBase,
-    );
+    return fail(`the router at ${url} is unreachable or erroring (${probe.message})`, unreached);
   }
   // 429 is the route's own rate limit: proof the router is there.
   if (probe.status === 200 || probe.status === 400 || probe.status === 429) {

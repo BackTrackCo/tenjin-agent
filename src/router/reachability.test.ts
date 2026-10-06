@@ -125,6 +125,16 @@ describe('probeRouter', () => {
     expect(check.fix).not.toContain('config set baseUrl');
   });
 
+  it.each([
+    ['https://tenjn.blog', withCode('getaddrinfo ENOTFOUND tenjn.blog', 'ENOTFOUND')],
+    ['http://localhost:3000', withCode('connect ECONNREFUSED 127.0.0.1:3000', 'ECONNREFUSED')],
+  ])('off production, sends an unreachable %s to the base URL', async (baseUrl, inner) => {
+    const check = await probe(thrown(inner), baseUrl);
+    expect(check.fix).toBe(
+      'Check that the configured base URL names the Tenjin router (`tenjin config get baseUrl`), then try again later.',
+    );
+  });
+
   it('points a TLS failure at the CA a TLS-inspecting proxy needs', async () => {
     const check = await probe(
       thrown(withCode('self-signed certificate in chain', 'SELF_SIGNED_CERT_IN_CHAIN')),
