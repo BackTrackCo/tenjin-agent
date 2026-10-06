@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { INSTALL_ID_HEADER, setTenjinIdentity } from '../lib/http';
 import { probeRouter } from './reachability';
 
 const PROD = 'https://tenjin.blog';
@@ -27,6 +28,29 @@ describe('probeRouter', () => {
   it('passes on the route refusing the empty body', async () => {
     const check = await probe(answer(400, { 'x-vercel-id': 'iad1::x' }));
     expect(check).toMatchObject({ status: 'ok', detail: `${PROD}/api/x402-router is live` });
+  });
+
+  it('does not count the machine as an install', async () => {
+    let minted = false;
+    setTenjinIdentity({
+      origins: async () => [PROD],
+      installId: async () => {
+        minted = true;
+        return '00000000-0000-4000-8000-000000000000';
+      },
+    });
+    let sent: Headers | undefined;
+    const fetchImpl = (async (_input: unknown, init?: RequestInit) => {
+      sent = new Headers(init?.headers);
+      return new Response('{}', { status: 400, headers: { 'x-vercel-id': 'iad1::x' } });
+    }) as typeof fetch;
+    try {
+      await probe(fetchImpl);
+    } finally {
+      setTenjinIdentity(undefined);
+    }
+    expect(sent?.has(INSTALL_ID_HEADER)).toBe(false);
+    expect(minted).toBe(false);
   });
 
   it('fails, without throwing, on a base URL that is not a URL', async () => {

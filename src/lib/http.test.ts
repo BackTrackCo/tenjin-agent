@@ -1149,6 +1149,21 @@ describe('the install id header', () => {
     expect(seen[0]?.headers[INSTALL_ID_HEADER]).toBe(INSTALL);
   });
 
+  it('sends no install id, and mints none, on an anonymous request', async () => {
+    const installId = vi.fn(async () => INSTALL);
+    useIdentity(installId);
+    const { fetchImpl, seen } = router({ [`${TENJIN}/api/x402-router`]: ok });
+    await httpRequest(`${TENJIN}/api/x402-router`, {
+      method: 'POST',
+      timeoutMs: 1000,
+      jsonBody: {},
+      anonymous: true,
+      fetchImpl,
+    });
+    expect(seen[0]?.headers).not.toHaveProperty(INSTALL_ID_HEADER);
+    expect(installId).not.toHaveBeenCalled();
+  });
+
   it("leaves an unpinned request on fetch's own redirect handling", async () => {
     useIdentity(async () => INSTALL);
     const { fetchImpl, seen } = router({ [`${TENJIN}/api/search`]: ok });

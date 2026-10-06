@@ -500,6 +500,12 @@ export interface HttpRequestOptions {
   /** The cap on such a body; over it the response is a failure, never a
    *  buffer that grows without bound. Defaults to {@link MAX_BINARY_BODY_BYTES}. */
   maxBinaryBytes?: number;
+  /**
+   * Send no install id, and mint none. For a request that checks the network
+   * rather than uses Tenjin (the reachability probe), so it never counts as an
+   * install in request telemetry.
+   */
+  anonymous?: boolean;
 }
 
 /** The same cap the router's linked-media download uses. */
@@ -647,7 +653,8 @@ export async function httpRequest(url: string, opts: HttpRequestOptions): Promis
     try {
       res = await doFetch(url, {
         method: opts.method ?? 'GET',
-        headers: { ...headers, ...(await tenjinIdentityHeaders(url)) },
+        headers:
+          opts.anonymous === true ? headers : { ...headers, ...(await tenjinIdentityHeaders(url)) },
         body,
         signal,
         ...(pinned ? { redirect: 'manual' as const } : {}),

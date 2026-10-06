@@ -55,6 +55,8 @@ export async function probeRouter(
     method: 'POST',
     timeoutMs: opts.timeoutMs,
     blockRedirects: true,
+    // A reachability check, not use: it must not count this machine as an install.
+    anonymous: true,
     jsonBody: {},
     ...(opts.fetchImpl !== undefined ? { fetchImpl: opts.fetchImpl } : {}),
   });
