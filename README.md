@@ -5,12 +5,7 @@
   </picture>
 </p>
 
-<h3 align="center">The tool router for coding agents.</h3>
-
-<p align="center">
-  Give your agent superpowers once. Tenjin hands it the right tool when it helps, and you keep working like before.<br>
-  No API keys. No pile of MCP servers. No rules to write.
-</p>
+<h3 align="center">The tool router for coding agents. Tenjin picks the right tool when your agent needs one, and one wallet pays for every call.</h3>
 
 <p align="center">
   <a href="https://www.npmjs.com/package/tenjin-cli"><img src="https://img.shields.io/npm/v/tenjin-cli?color=C85A3B&label=npm" alt="npm version"></a>
@@ -75,20 +70,35 @@ Each answer names the provider and the price. Your agent keeps its own tools, an
 
 ## What it can do
 
-The router picks from a catalog we curate and maintain. Routing is free: you pay the provider's price and nothing else.
+The router picks from a catalog we curate and maintain. When nothing in it fits, it can point your agent at a reviewed third-party pay-per-call service from the [Tenjin list](#tenjin-list-and-experimental-bazaar), and your agent decides whether to use it or to ask you first. Routing is free: you pay the provider's price and nothing else.
 
-| Tool                                                             | What your agent gets                                        | Price per call |
-| ---------------------------------------------------------------- | ----------------------------------------------------------- | -------------- |
-| **Docs lookup** · [Context7](https://context7.com)               | Current, version-specific docs for a library or API         | **Free**       |
-| **Web research** · [Exa](https://exa.ai)                         | Search results with the page content, not just links        | $0.007         |
-| **Read a page** · [Firecrawl](https://firecrawl.dev)             | One exact page as clean text, even when a plain fetch fails | $0.01          |
-| **Crypto prices** · [CoinMarketCap](https://coinmarketcap.com)   | Live quotes for any coin                                    | $0.01          |
-| **Compute** · [Wolfram Alpha](https://www.wolframalpha.com)      | Math, unit conversions, science and data questions          | $0.02          |
-| **Email check** · [Hunter](https://hunter.io)                    | Whether an address is real and deliverable                  | $0.03          |
-| **Person lookup** · Minerva                                      | A professional profile from a name or email                 | $0.05          |
-| **Company profile** · [CompanyEnrich](https://companyenrich.com) | Size, industry, funding and socials from a domain or name   | $0.06          |
+| Tool                                                           | What your agent gets                                                                      | Price per call |
+| -------------------------------------------------------------- | ----------------------------------------------------------------------------------------- | -------------- |
+| **Docs lookup** · [Context7](https://context7.com)             | Current, version-specific docs for a library or API                                       | **Free**       |
+| **Web research** · [Exa](https://exa.ai)                       | Search results with the page content, not just links                                      | $0.007         |
+| **Read a page** · [Firecrawl](https://firecrawl.dev)           | One exact page as clean text, even when a plain fetch fails                               | $0.01          |
+| **Crypto prices** · [CoinMarketCap](https://coinmarketcap.com) | Live quotes for any coin                                                                  | $0.01          |
+| **Compute** · [Wolfram Alpha](https://www.wolframalpha.com)    | Math, unit conversions, science and data questions                                        | $0.02          |
+| **Email check** · [Hunter](https://hunter.io)                  | Whether an address is real and deliverable                                                | $0.008         |
+| **Person lookup** · [Apollo](https://www.apollo.io)            | A professional profile and work email from a name and company, a LinkedIn URL or an email | $0.01          |
+| **Company profile** · [Apollo](https://www.apollo.io)          | Industry, headcount, revenue and funding from a domain                                    | $0.01          |
+| **Company match** · [CompanyEnrich](https://companyenrich.com) | The company behind a name or a social URL                                                 | $0.01225       |
+| **X posts** · [glim](https://glim.sh)                          | Posts matching a search, or one post with its thread                                      | $0.005         |
+| **Reddit** · [glim](https://glim.sh)                           | Posts matching a search, or one thread with its comments                                  | $0.01 / $0.005 |
 
-Free tools run without a funded wallet. Twitter, Reddit and more are next, added by demand: [tell us what you want](#request-a-tool).
+Every tool, including the Tenjin list, with current prices: [tenjin.sh/tools](https://tenjin.sh/tools). More are added by demand: [tell us what you want](#request-a-tool).
+
+### Tenjin list and experimental Bazaar
+
+**The Tenjin list is on by default.** When nothing in the catalog fits a step (such as generating a sound effect), the router may suggest one third-party pay-per-call x402 service that Tenjin has reviewed. The suggestion names the seller, the URL, the price and the input it takes, and your agent judges whether to use it or to ask you first. It is paid like any lookup, under your spend limits.
+
+**The open Bazaar is experimental and off by default.** Turn it on with:
+
+```sh
+tenjin config set experimental.bazaar on
+```
+
+With it on, the router may also suggest sellers from Coinbase's open x402 Bazaar, and to find them, short snippets of your prompts are sent to Coinbase's public Bazaar search. Those sellers are unreviewed third parties, matches can be noisy, prices can vary with the input, and payments are real, under your spend limits. `tenjin config` and `tenjin doctor` show both settings. Turn it off with `tenjin config set experimental.bazaar off`.
 
 ## How it works
 
@@ -100,9 +110,9 @@ flowchart LR
     B -- "nothing better" --> E["Agent carries on"]
 ```
 
-The Tenjin router hooks into Claude Code at your prompt, before each web search or page fetch, and when your agent hands work to a subagent. At each point it asks Jev, a decision model from [TypeSafe](https://typesafe.ai), whether a tool in the catalog fits. Jev can only choose from that fixed list, so it never writes a call or an instruction for your agent.
+The Tenjin router hooks into Claude Code at your prompt, before each web search or page fetch, when your agent hands work to a subagent, and around a question your agent asks you. At each point it asks Jev, a decision model from [TypeSafe](https://typesafe.ai), whether a tool in the catalog fits. When none does, Jev may pick one third-party service from a short list matching the step (the Tenjin list, plus the open Bazaar if you turned it on), or none. Either way Jev only chooses from a list, so it never writes a call or an instruction for your agent; a third-party listing's description is the seller's own, and your agent judges it.
 
-When one fits, your agent sees a one-line suggestion with the tool and its price, and calls it through Tenjin's `x402` MCP server. Tenjin pays the provider from your wallet, within your limits, and hands back the result. Your status line shows the call as it happens:
+When one fits, your agent sees a one-line suggestion with the tool and its price, and calls it through Tenjin's `x402` MCP server: the offer's id alone shows the tool's inputs, an example and what it returns, and the id with the agent's input runs it. Tenjin builds the call, pays the provider from your wallet, within your limits, and hands back the result. Your status line shows the call as it happens:
 
 ```text
 x402 · request: calling pro-api.coinmarketcap.com/x402/v3/cryptocurrency/quotes/latest · {"query":{"symbol":"BTC,ETH"}}
@@ -143,6 +153,7 @@ $1–2 goes a long way. $2 covers about 280 web searches, 200 page reads or 100 
 tenjin status                  # what you've spent today
 tenjin wallet balance          # what's left
 tenjin wallet fund 5           # top up
+tenjin payments reconcile      # settle paid lookups whose settlement was unknown
 tenjin update                  # newest version; wallet and settings stay
 tenjin config set router.enabled false             # pause the router on this machine
 tenjin config set --project router.enabled false   # ...or just in this repo
@@ -150,6 +161,8 @@ tenjin uninstall               # remove the Claude Code setup; your wallet stays
 ```
 
 Use `tenjin install --project` to set it up for a single project. Add `--json` to any command for machine-readable output.
+
+Every paid lookup is recorded on your machine in `~/.tenjin/paid/ledger.jsonl`: what was sent (masked), who was paid, how much, the settlement transaction, and any files saved. Files a paid lookup returns, and media files a paid third-party service links to, are saved under `~/.tenjin/downloads/`. When a tool names the fields it returns, your agent gets those fields and the provider's whole response is saved under `~/.tenjin/results/` for a day, at the path the result names. When a seller never confirmed settlement, `tenjin payments reconcile` asks USDC on Base whether the payment was used once it has expired, and one that was never charged goes back to today's limit; the `request` tool does the same for up to three beside each lookup, without waiting for it.
 
 <details>
 <summary>Status line: keeping your own</summary>

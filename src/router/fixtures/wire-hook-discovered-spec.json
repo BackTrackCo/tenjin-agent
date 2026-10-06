@@ -1,0 +1,109 @@
+{
+  "schemaVersion": 1,
+  "routerVersion": "2026-09-23.1",
+  "decision": {
+    "action": "discovered",
+    "id": "0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d12",
+    "candidate": {
+      "source": "tenjin",
+      "provider": "BlockRun (OpenAI GPT Image 2)",
+      "url": "https://blockrun.ai/api/v1/images/generations",
+      "method": "POST",
+      "description": "General-purpose images with precise prompt following: hero images, illustrations, scenes (model=\"openai/gpt-image-2\").",
+      "providerPriceAtomic": "64000",
+      "network": "eip155:8453",
+      "payTo": "0xe9030014F5DAe217d0A152f02A043567b16c1aBf",
+      "input": {
+        "location": "body",
+        "schema": {
+          "type": "object",
+          "required": ["prompt"],
+          "properties": {
+            "model": {
+              "type": "string",
+              "description": "Image model ID (e.g., openai/gpt-image-1, openai/gpt-image-2)",
+              "enum": ["openai/gpt-image-2"],
+              "default": "openai/gpt-image-2"
+            },
+            "prompt": {
+              "type": "string",
+              "description": "Text description of the image to generate"
+            },
+            "size": {
+              "type": "string",
+              "enum": ["1024x1024", "1536x1024", "1024x1536"],
+              "description": "Output size, default 1024x1024; 1536x1024 and 1024x1536 cost $0.127 per image"
+            },
+            "n": {
+              "type": "integer",
+              "description": "Number of images to generate"
+            }
+          }
+        }
+      }
+    },
+    "hint": "Tenjin router found a pay-per-call service for this step, no API key needed: BlockRun (OpenAI GPT Image 2) (General-purpose images with precise prompt following: hero images, illustrations, scenes (model=\"openai/gpt-image-2\").), POST https://blockrun.ai/api/v1/images/generations , about $0.064 per call (price can vary with the input; the live price is checked before paying). Tenjin reviewed this listing. Use your judgement, and ask the user first if it is not clearly what they want. To use it, call request({id: \"0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d12\", input: {\"prompt\":\"<prompt>\"}}) alone and wait for its result, then tell the user which service you used through Tenjin and what it cost.",
+    "specs": [
+      {
+        "id": "0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d12",
+        "capabilityId": "discovered:tenjin:bfada11e",
+        "provider": "BlockRun (OpenAI GPT Image 2)",
+        "description": "General-purpose images with precise prompt following: hero images, illustrations, scenes (model=\"openai/gpt-image-2\").",
+        "priceAtomic": "64000",
+        "priceVaries": true,
+        "maxAmountAtomic": "1000000",
+        "payTo": "0xe9030014F5DAe217d0A152f02A043567b16c1aBf",
+        "network": "eip155:8453",
+        "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "request": {
+          "method": "POST",
+          "url": "https://blockrun.ai/api/v1/images/generations",
+          "fields": {
+            "model": "body",
+            "prompt": "body",
+            "size": "body",
+            "n": "body"
+          },
+          "location": "body"
+        },
+        "input": {
+          "type": "object",
+          "required": ["prompt"],
+          "properties": {
+            "model": {
+              "type": "string",
+              "description": "Image model ID (e.g., openai/gpt-image-1, openai/gpt-image-2)",
+              "enum": ["openai/gpt-image-2"],
+              "default": "openai/gpt-image-2"
+            },
+            "prompt": {
+              "type": "string",
+              "description": "Text description of the image to generate"
+            },
+            "size": {
+              "type": "string",
+              "enum": ["1024x1024", "1536x1024", "1024x1536"],
+              "description": "Output size, default 1024x1024; 1536x1024 and 1024x1536 cost $0.127 per image"
+            },
+            "n": {
+              "type": "integer",
+              "description": "Number of images to generate"
+            }
+          }
+        },
+        "pinned": {
+          "model": "openai/gpt-image-2"
+        },
+        "example": {
+          "prompt": "a minimalist flat illustration of a paper plane over a city skyline, soft pastel colors",
+          "size": "1024x1024"
+        },
+        "returns": "JSON {id, data:[{url}], price}: a hosted image URL per image; a slow render answers 202 {id, poll_url} with nothing charged, finished only by a GET of poll_url signed by the same wallet"
+      }
+    ]
+  },
+  "jev": {
+    "calls": 2,
+    "latencyMs": 1650
+  }
+}

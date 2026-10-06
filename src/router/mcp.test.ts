@@ -219,13 +219,36 @@ describe('what the tool tells the model to send', () => {
       }
       expect(request.description).toContain(SCOPE_RULE);
       const schema = request.inputSchema as unknown as {
-        properties: { query: { description: string }; id?: { description: string } };
+        properties: {
+          query: { description: string };
+          id?: { description: string };
+          input?: { type: string; description: string };
+        };
         required?: string[];
       };
-      // The query is always required; the id never is.
+      // An offer is one call: the line's skeleton, filled, with `input`. The id
+      // alone shows the spec. A query is for a task no line offered. The
+      // handler refuses a call with neither.
       expect(schema.properties.query.description).toContain(SCOPE_RULE);
-      expect(schema.required).toEqual(['query']);
+      expect(schema.properties.query.description).toContain('a task no line offered');
+      expect(schema.required ?? []).toEqual([]);
       expect(schema.properties.id?.description).toContain('names the service');
+      expect(schema.properties.id?.description).toContain("returns that service's spec");
+      expect(request.description).toContain('fill them and call `{id, input}` once');
+      expect(request.description).toContain('returns the full spec');
+      expect(request.description).toContain("`{id}` alone returns the service's spec");
+      // A projected result says where the rest of the response went.
+      expect(request.description).toContain('`fullResultPath`');
+      expect(schema.properties.input?.type).toBe('object');
+      // THE ONE DISCOVERY SENTENCE IS GENERIC TOO: it names no marketplace and
+      // no seller, only when to ask.
+      expect(request.description).toContain(
+        'Before asking the user to get an API key or account for a one-off task',
+      );
+      for (const name of ['Bazaar', 'Coinbase', 'BlockRun', 'ElevenLabs']) {
+        expect(request.description).not.toContain(name);
+        expect(schema.properties.input?.description).not.toContain(name);
+      }
       // One lookup, not the whole turn, and no blanket ban on wording.
       expect(SCOPE_RULE).toContain('one concrete external lookup');
       expect(SCOPE_RULE).toContain('A mixed turn is not one lookup');

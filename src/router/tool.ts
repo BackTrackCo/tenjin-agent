@@ -1,28 +1,68 @@
 import { runPay, type AdvertisedTerms, type PayDeps } from '../commands/pay';
 import { CliError } from '../lib/errors';
 import { toMoney } from '../lib/money';
+import { downloadsDir } from '../lib/paths';
 import { mask } from '../lib/redact';
-import { assertResultSchema, canonicalHash } from '../lib/request-schema';
+import { assertResultSchema, canonicalHash, projectBody } from '../lib/request-schema';
 import { resolveContextSettings } from '../lib/settings';
 import type { SpendAuthorizer, WalletProvider } from '../lib/wallet';
 import type { TenjinSigner } from '../lib/wallet/provider';
 import type { CommandContext } from '../context';
-import { requestDecision, type DecisionContract, type DecisionDiagnostics } from './decision';
-import { markDelivered, openLookupFooter } from './progress';
+import { buildSpecRequest, specInputProblems, specText, mergedInput } from './spec-call';
+import {
+  claimSpecPayment,
+  readSpec,
+  settleSpecPayment,
+  storeFullResult,
+  storeSpecs,
+  type EarlierPayment,
+} from './specs';
+import {
+  reportSpecOutcome,
+  requestDecision,
+  type SpecOutcome,
+  type DecisionContract,
+  type DecisionDiagnostics,
+  type OfferSpec,
+} from './decision';
+import { openLookupFooter, type LookupFooter } from './progress';
+import {
+  appendPaidRecord,
+  MAX_MEDIA_FILES,
+  mediaUrlsIn,
+  reconcilePayments,
+  recordedSent,
+  saveMedia,
+  createUniqueFile,
+  maskDeep,
+  writeAll,
+  type MediaTransport,
+  type PaidRecord,
+  type SignedAuthorization,
+} from './paid';
 import { routerSettings } from './settings';
 
 /**
  * The `request` tool: one free decision per lookup, then ONE payment, to the
  * provider.
  *
- * THE QUERY IS ALWAYS SENT, AND THE ID NAMES THE SERVICE. With an id, the
- * backend binds the query to the capability the hook's line offered and never
- * re-decides which service (tenjin#885). Without one, it asks for exactly one
- * fresh decision from the query and the turn's packet, which is the pair the
- * routing corpus is calibrated on.
+ * AN OFFER WITH A SPEC RUNS HERE, IN ONE CALL. The hook keeps each offered
+ * service's spec by its id, and its line is the skeleton of the call:
+ * `{id, input}` is checked against the spec, built into the spec's request and
+ * paid straight to the provider, with no second decision. An input that misses
+ * gets every problem and the whole spec back, locally, with nothing paid; `{id}`
+ * alone shows the spec too. The server is told only how the call ended. A
+ * query with no id comes back as the picked service's spec under a fresh id,
+ * with nothing paid; the next call fills it.
  *
- * WHAT IS CHECKED LOCALLY, BEFORE ANYTHING IS SIGNED: the decision's arguments
- * against the schema it carries, its success rule against the compiler, its
+ * AN ID WITH NO KEPT SPEC builds nothing. An input for it (the spec expired
+ * or was pruned) is answered here, with no server call and nothing paid: the
+ * agent starts over with `request({query})`. A query with it goes to the
+ * server, which binds the free docs lookup, the one offer with no spec, from
+ * the query in code, and points any other id back to a fresh query.
+ *
+ * WHAT IS CHECKED LOCALLY, BEFORE ANYTHING IS SIGNED: the input against the
+ * spec's schema, the decision's arguments against the schema it carries, its success rule against the compiler, its
  * destination against the shared preflight inside `runPay`, and the amount
  * actually signed against `maxAutoSpend` and `sessionBudget` in `gateSpend`.
  * That last one is the whole money story: a hostile backend can name any
@@ -33,11 +73,19 @@ import { routerSettings } from './settings';
  */
 
 export interface RequestToolArgs {
-  query: string;
-  /** The turn id from the hook's line. It names the service that line offered, and
-   *  the server runs that one; it grants nothing locally, every cap still applies. */
+  /** Optional only beside `input`. */
+  query?: string;
+  /** The turn id from the hook's line. It names the service that line offered;
+   *  it grants nothing locally, every cap still applies. */
   id?: string;
+  /** The host's own input for the offered service, per its spec. This client
+   *  builds the request from the spec kept for the id; with none kept, nothing
+   *  is built. Every cap still applies. */
+  input?: Record<string, unknown>;
 }
+
+/** The server's own cap on `input`, serialized. */
+export const MAX_INPUT_BYTES = 16 * 1024;
 
 export interface RequestToolDeps {
   ctx: CommandContext;
@@ -53,6 +101,11 @@ export interface RequestToolDeps {
   /** The directory `router.*` resolves from; defaults to `process.cwd()`, which
    *  Claude Code sets to the project directory for an MCP server. */
   cwd?: string;
+  /** Clock seam for a saved file's name. */
+  now?: () => number;
+  /** Test seam for the media download; production pins each connection to
+   *  the address it validated. */
+  mediaTransport?: MediaTransport;
 }
 
 export interface RequestToolResult {
@@ -70,11 +123,20 @@ export async function runRequestTool(
   // user marked private: nothing is sent and nothing is paid.
   const off = await routerOff(deps);
   if (off !== null) return fail('needs_input', off, { nextStep: ROUTER_OFF_NEXT_STEP });
-  const query = args.query.trim().slice(0, 8_000);
-  if (query.length === 0) {
+  const id = args.id !== undefined && args.id.length > 0 ? args.id : undefined;
+  const { input } = args;
+  // THE OFFER'S SPEC, when the hook kept one for this id: its id alone shows
+  // the spec, with no network call and nothing paid, so the agent sees the
+  // real inputs before it builds any.
+  const spec = id !== undefined ? await readSpec(deps.ctx.dataDir, id) : null;
+  if (spec !== null && input === undefined) return showSpec(id!, spec);
+  const query = (args.query ?? '').trim().slice(0, 8_000);
+  if (query.length === 0 && input === undefined) {
     return fail(
       'needs_input',
-      'A request needs a query naming the task, its inputs and any constraints.',
+      id !== undefined
+        ? 'No spec is kept for that id (it expired, or its line asked for a query), so send the query its line named with the id, or a query alone.'
+        : "A request needs an offer's id, or a query naming the task, its inputs and any constraints.",
     );
   }
   // THE HOOKS NEVER SEE THIS CALL, so the native hook's rule applies here too: a
@@ -84,29 +146,77 @@ export async function runRequestTool(
   if (mask(query) !== query) {
     return fail('native', 'the query carries a credential-shaped value, so nothing was sent');
   }
+  // The same rule for an input, which goes to the seller as the request body
+  // or its query string.
+  if (input !== undefined) {
+    // An input fills the spec of the service that id named, so with no id it
+    // has nothing to go to.
+    if (id === undefined) {
+      return fail(
+        'needs_input',
+        'An input goes with the id from the line that named the service; send both.',
+      );
+    }
+    const serialized = JSON.stringify(input);
+    if (Buffer.byteLength(serialized) > MAX_INPUT_BYTES) {
+      return fail('needs_input', `The input is over ${MAX_INPUT_BYTES} bytes; send a smaller one.`);
+    }
+    // EVERY KEY AND STRING LEAF, masked on its own: in the serialized JSON a
+    // key after an escaped `\n` reads as one word (`nsk-ant-…`), so the
+    // boundaries the mask anchors on are not there.
+    if (JSON.stringify(maskDeep(input)) !== serialized) {
+      return fail('native', 'the input carries a credential-shaped value, so nothing was sent');
+    }
+    // NO SPEC KEPT FOR THE ID: it expired or was pruned, and nobody else builds
+    // the call. Answered here, with no server call: one more call costs less
+    // than a guess.
+    if (spec === null) {
+      return fail(
+        'needs_input',
+        'The spec for that offer is no longer kept on this machine (it expired or was pruned), so nothing was sent or paid.',
+        { nextStep: 'Call request({query}) with the task for a fresh offer, then fill its line.' },
+      );
+    }
+  }
   // THE FOOTER, OPENED FIRST AND TRUSTED WITH NOTHING: it shows this lookup in
   // the terminal while it runs, resolved to a session through the hook's own
   // binding for `id`, and every call on it swallows its own failure.
   const footer = await openLookupFooter(deps.ctx.dataDir, {
-    ...(args.id !== undefined && args.id.length > 0 ? { id: args.id } : {}),
+    ...(id !== undefined ? { id } : {}),
   });
   await footer.routing();
   const settings = await resolveContextSettings(deps.ctx);
+  // SETTLEMENTS EARLIER CALLS LEFT UNKNOWN, resolved a few at a time from the
+  // chain, BESIDE the lookup and never in front of it: a slow or rate-limited
+  // RPC costs this call nothing, and a record it could not answer for waits
+  // `RECHECK_MS` before it is asked about again. Its own errors are its own.
+  void reconcilePayments(deps.ctx.dataDir, {
+    rpcUrl: settings.rpcUrl,
+    ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+    ...(deps.now !== undefined ? { now: deps.now } : {}),
+  }).catch(() => undefined);
   const decisionDeps = {
     ctx: deps.ctx,
     baseUrl: settings.baseUrl,
+    acceptsBazaar: settings.experimentalBazaar,
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   };
 
+  // A SPEC AND AN INPUT: the agent filled the spec's request itself, so it is
+  // checked and sent here and paid straight to the provider, with no second
+  // decision. The server hears only how it ended.
+  if (spec !== null && input !== undefined) {
+    return runSpec(id!, spec, input, deps, footer, decisionDeps);
+  }
+
   // ONE CALL, ONE DECISION. The query the model wrote goes to the backend with
-  // the turn id when it has one; the backend binds the query to the service
-  // that id offered, or decides from the query and the stored packet when there
-  // is no id. Nothing is fetched by id and nothing is waited for: an id the
-  // backend does not know is its own plain note, and the decision still runs
-  // from the query.
+  // the turn id when it has one: the free docs offer's id binds the query, and
+  // with no id the gate picks a service and answers with its spec. An id the
+  // backend does not know is its own plain note, and the pick still runs from
+  // the query.
   const fresh = await requestDecision(
     'tool',
-    { query, ...(args.id !== undefined && args.id.length > 0 ? { id: args.id } : {}) },
+    { query, ...(id !== undefined ? { id } : {}) },
     decisionDeps,
   );
   if (fresh.status === 'failed') {
@@ -116,6 +226,54 @@ export async function runRequestTool(
     });
   }
   const { decision, note } = fresh.decision;
+
+  // THE PICKED SERVICE'S SPEC, for a query with no id, kept like a hook's and
+  // shown with the skeleton of the next call, `request({id, input})`. Nothing
+  // is paid on this answer: only a filled spec pays.
+  if (decision.action === 'spec') {
+    const picked: OfferSpec = { ...decision.spec, id: decision.id };
+    await storeSpecs(deps.ctx.dataDir, [picked]);
+    await footer.done('service found');
+    return showSpec(picked.id, picked, [], decision.hint);
+  }
+
+  // A SERVICE NOBODY CURATED, named for the host to judge. Nothing is paid on
+  // this answer. With specs they are kept like the hook's, and the pick's own
+  // spec is shown, as for a curated pick. Without, the server's line says how
+  // to call it, with the id it minted and the input the host builds, and that
+  // second call pays through the execute path below like any other.
+  if (decision.action === 'discovered') {
+    await storeSpecs(deps.ctx.dataDir, decision.specs);
+    await footer.done('service found');
+    const picked = decision.specs?.find((spec) => spec.id === decision.id);
+    if (picked !== undefined) {
+      return showSpec(
+        picked.id,
+        picked,
+        decision.specs!.filter((spec) => spec !== picked),
+      );
+    }
+    const { candidate } = decision;
+    return {
+      isError: false,
+      summary: decision.hint,
+      envelope: {
+        status: 'discovered',
+        id: decision.id,
+        service: {
+          provider: candidate.provider,
+          url: candidate.url,
+          method: candidate.method,
+          description: candidate.description,
+          price: `$${toMoney(candidate.providerPriceAtomic).usd}`,
+          input: candidate.input,
+        },
+        cost: costLines(0n),
+        ...(note !== undefined ? { note } : {}),
+        providerContentUntrusted: true,
+      },
+    };
+  }
 
   if (decision.action !== 'execute') {
     await footer.done(decision.action === 'native' ? 'native' : 'needs_input');
@@ -139,53 +297,329 @@ export async function runRequestTool(
   // It bounds a provider or stale catalog charging over that price, and an
   // injected `request` call; it does not bound a hostile server, which can
   // still quote up to `maxAutoSpend`. `gateSpend` stays the money authority.
-  const terms: AdvertisedTerms = {
-    source: decision.provider,
-    maxAmountAtomic: decision.providerPriceAtomic,
-  };
+  // The request is the server's, sent verbatim: the only thing built here is
+  // the decision about whether to send it.
+  return (
+    await payAndDeliver(
+      {
+        capabilityId: decision.capabilityId,
+        provider: decision.provider,
+        discovered: decision.category === 'discovered',
+        request: contract.request,
+        terms: { source: decision.provider, maxAmountAtomic: decision.providerPriceAtomic },
+        requestKey: `${decision.capabilityId}:${canonicalHash(contract.arguments ?? {})}`,
+        ...(contract.resultSchema !== undefined ? { resultSchema: contract.resultSchema } : {}),
+        ...(contract.arguments !== undefined ? { parameters: contract.arguments } : {}),
+        // What the ledger records as sent: the host's input, or its query.
+        sent: input !== undefined ? JSON.stringify(maskDeep(input)) : query,
+        ...(note !== undefined ? { note } : {}),
+      },
+      deps,
+      footer,
+    )
+  ).result;
+}
 
+/** The answer to `request({id})` when the hook kept that offer's spec, or to
+ *  a query the server answered with one: the spec as text, any other service
+ *  offered beside it one `request({id})` away, and nothing sent or paid. The
+ *  server's `hint`, when it sent one, is the skeleton of the call to make. */
+function showSpec(
+  id: string,
+  spec: OfferSpec,
+  others: readonly OfferSpec[] = [],
+  hint?: string,
+): RequestToolResult {
+  const also = others.map(
+    (other) =>
+      `${other.provider} (${other.description}): request({id: ${JSON.stringify(other.id)}}) shows its spec`,
+  );
+  const lines = [specText(id, spec)];
+  if (also.length) lines.push(`Also offered: ${also.join('; ')}.`);
+  if (hint !== undefined) lines.push(`Next: ${hint}`);
+  return {
+    isError: false,
+    summary: lines.join('\n'),
+    envelope: {
+      status: 'spec',
+      id,
+      nextStep:
+        hint ?? `Call request({id: ${JSON.stringify(id)}, input: {...}}) with the inputs above.`,
+      cost: costLines(0n),
+    },
+  };
+}
+
+/** A spec's id that an earlier call already claimed: nothing sent or paid,
+ *  and the agent pointed at that call's result or at a new offer. */
+function alreadyPaid(id: string, spec: OfferSpec, earlier: EarlierPayment): RequestToolResult {
+  const reason =
+    earlier.state === 'paid'
+      ? `This offer from ${spec.provider} was already paid for at ${earlier.at} ($${toMoney(earlier.amountAtomic).usd}${earlier.txHash !== undefined ? `, tx ${earlier.txHash}` : ''}), so nothing was paid this time. Its result is in the earlier request result for this id, and the payment is in \`tenjin payments\`.`
+      : earlier.state === 'possibly_paid'
+        ? `A call for this offer from ${spec.provider} signed a payment at ${earlier.at} that may have left, and it ended without recording how much, so nothing was paid this time. Check \`tenjin payments\` before paying for this again.`
+        : earlier.state === 'running'
+          ? `A call for this offer from ${spec.provider} already started and may have paid, so nothing was paid this time. Use that call's result.`
+          : `This machine could not record this offer's payment, so nothing was sent or paid.`;
+  return fail('needs_input', reason, {
+    nextStep: `For another call, send request({query}) for a new offer; this id (${id}) pays once.`,
+  });
+}
+
+/**
+ * `request({id, input})` FROM A SPEC. The pinned fields go over the agent's
+ * input, the result is checked against the spec's schema (every problem at
+ * once, with the allowed values and the example), and the spec's request is
+ * filled and paid through `runPay` like any router call: the live 402's price
+ * against the spec's ceiling, its payee against the spec's, and the amount
+ * signed against the spend policy. Then the server is told how it ended.
+ */
+async function runSpec(
+  id: string,
+  spec: OfferSpec,
+  input: Record<string, unknown>,
+  deps: RequestToolDeps,
+  footer: LookupFooter,
+  decisionDeps: { ctx: CommandContext; baseUrl: string; fetchImpl?: typeof fetch },
+): Promise<RequestToolResult> {
+  const merged = mergedInput(spec, input);
+  const sentInput = maskDeep(merged) as Record<string, unknown>;
+  // A WRONG GUESS COSTS ONE MORE CALL, NOT A PAYMENT: every problem, then the
+  // whole spec (each input with its description and allowed values, the
+  // required fields inside a nested object, the example, what comes back), so
+  // the next call can be right. Local, with no server call and nothing sent
+  // or paid.
+  const refuse = async (problem: string): Promise<RequestToolResult> => {
+    await footer.done('needs_input');
+    const refused = fail('needs_input', `The input does not fit ${spec.provider}: ${problem}.`, {
+      nextStep: `Fix the input from the spec above and call request({id: ${JSON.stringify(id)}, input: {...}}) again; nothing was sent or paid.`,
+      parameters: sentInput,
+    });
+    return { ...refused, summary: `${refused.summary}\n\n${specText(id, spec)}` };
+  };
+  const problems = specInputProblems(spec, merged);
+  // A SCHEMA THIS BUILD CANNOT COMPILE CHECKS NOTHING, so the call is not
+  // paid: an input nobody checked is a paid guess, and no change to it helps.
+  if (problems === undefined) {
+    await footer.done('failed');
+    return fail(
+      'failed',
+      `The spec for ${spec.provider} has an input schema this build cannot check, so the call was not sent and nothing was paid.`,
+      {
+        nextStep: 'Continue with your own tools. Nothing was sent or paid.',
+        parameters: sentInput,
+      },
+    );
+  }
+  if (problems.length) return refuse(problems.join('; '));
+  const built = buildSpecRequest(spec, merged);
+  if ('problem' in built) return refuse(built.problem);
+  // The same checks a server-built call meets: GET or POST, only the headers
+  // this build sends, and a success rule that compiles before anything is paid.
+  const refusal = checkContract({
+    request: built,
+    ...(spec.resultSchema !== undefined ? { resultSchema: spec.resultSchema } : {}),
+  });
+  if (refusal !== null) {
+    await footer.done(refusal.status);
+    return fail(refusal.status, refusal.reason, { parameters: sentInput });
+  }
+  // ONE PAYMENT PER OFFER, claimed before anything is signed: a retry of this
+  // id, or a second call racing it, pays nothing.
+  const earlier = await claimSpecPayment(deps.ctx.dataDir, id);
+  if (earlier !== null) {
+    await footer.done('needs_input');
+    return alreadyPaid(id, spec, earlier);
+  }
+  const startedAt = Date.now();
+  const { result, outcome, left } = await payAndDeliver(
+    {
+      capabilityId: spec.capabilityId,
+      provider: spec.provider,
+      discovered: spec.capabilityId.startsWith('discovered:'),
+      request: built,
+      terms: {
+        source: spec.provider,
+        maxAmountAtomic: spec.maxAmountAtomic,
+        payTo: spec.payTo,
+        network: spec.network,
+        asset: spec.asset,
+      },
+      requestKey: `${spec.capabilityId}:${canonicalHash(merged)}`,
+      ...(spec.resultSchema !== undefined ? { resultSchema: spec.resultSchema } : {}),
+      ...(spec.outputSchema !== undefined ? { project: { id, schema: spec.outputSchema } } : {}),
+      parameters: sentInput,
+      sent: JSON.stringify(sentInput),
+      agentBuilt: true,
+      priceVaries: spec.priceVaries,
+    },
+    deps,
+    footer,
+  );
+  // The claim survives anything that may have signed: only a call that
+  // signed nothing frees the id for a fixed input.
+  await settleSpecPayment(deps.ctx.dataDir, id, left);
+  // REPORTED ONLY WHEN THE CALL RAN OR MONEY LEFT: a refusal before payment
+  // (the spend policy, the spec's terms, the provider's own 4xx) took nothing
+  // from the offer, and the server would count it as the offer taken.
+  const ran =
+    outcome.status === 'fulfilled' || outcome.status === 'unverified' || left.amountAtomic > 0n;
+  if (ran) {
+    void reportSpecOutcome(
+      { id, ...outcome, ms: Date.now() - startedAt },
+      {
+        ctx: decisionDeps.ctx,
+        baseUrl: decisionDeps.baseUrl,
+        ...(decisionDeps.fetchImpl !== undefined ? { fetchImpl: decisionDeps.fetchImpl } : {}),
+      },
+    );
+  }
+  return result;
+}
+
+/** One provider call to make and pay for, from a decision or a spec. */
+interface ProviderCall {
+  capabilityId: string;
+  provider: string;
+  /** A discovered service: a paid media result's links are saved locally. */
+  discovered: boolean;
+  request: { url: string; method: string; headers: Record<string, string>; body?: string };
+  terms: AdvertisedTerms;
+  requestKey: string;
+  resultSchema?: Record<string, unknown>;
+  /** What was bound or built, shown on every outcome. */
+  parameters?: unknown;
+  /** What the ledger records as sent. */
+  sent: string;
+  note?: string;
+  /** The agent built this input itself, from a spec: a provider that refuses
+   *  it before payment is said to have, so the agent fixes it. */
+  agentBuilt?: boolean;
+  /** The spec prices by input, up to `terms.maxAmountAtomic`. */
+  priceVaries?: boolean;
+  /** The spec's promised fields: the result is cut to them, and the whole
+   *  body is saved under the offer's id. */
+  project?: { id: string; schema: Record<string, unknown> };
+}
+
+/**
+ * PAY THE PROVIDER AND DELIVER WHAT CAME BACK: `runPay` under the caller's
+ * terms, the binary or media result saved, the ledger written, and the
+ * envelope the host reads, with what was sent on every outcome. `outcome` is
+ * the short form the server's report takes.
+ */
+async function payAndDeliver(
+  call: ProviderCall,
+  deps: RequestToolDeps,
+  footer: LookupFooter,
+): Promise<{
+  result: RequestToolResult;
+  outcome: Omit<SpecOutcome, 'id' | 'ms'>;
+  /** What left this machine for the call, whatever came back. `signed`: a
+   *  payment may have been signed, even where the amount is unknown. */
+  left: { amountAtomic: bigint; txHash?: string; signed: boolean };
+}> {
+  const built = call.request;
+  const parameters = call.parameters !== undefined ? { parameters: call.parameters } : {};
+  const signing = watchSigning(deps.payDeps?.authorizer ?? deps.authorizer);
   try {
-    // The request is the server's, sent verbatim: the only thing built here is
-    // the decision about whether to send it.
-    const built = contract.request;
     // WHAT IS ABOUT TO BE CALLED, named while it is being called. This is the
     // executed destination, not the hint's suggestion, which is the whole point
     // of showing it.
-    await footer.calling({ provider: built.url, ...paramsOf(contract) });
+    await footer.calling({ provider: built.url, ...parameters });
     const paid = await runPay(
       {
         url: built.url,
         method: built.method,
         headers: built.headers,
         ...(built.body !== undefined ? { rawBody: built.body } : {}),
-        terms,
+        terms: call.terms,
         execution: 'router',
-        requestKey: `${decision.capabilityId}:${canonicalHash(contract.arguments ?? {})}`,
-        ...(contract.resultSchema !== undefined ? { resultSchema: contract.resultSchema } : {}),
+        requestKey: call.requestKey,
+        ...(call.resultSchema !== undefined ? { resultSchema: call.resultSchema } : {}),
         printBody: true,
       },
       deps.ctx,
       {
         ...(deps.payDeps ?? {}),
         ...(deps.provider !== undefined ? { provider: deps.provider } : {}),
-        authorizer: deps.payDeps?.authorizer ?? deps.authorizer,
+        authorizer: signing.authorizer,
         confirm: async () => false,
       },
     );
     const data = paid.data as {
+      /** The provider's HTTP status on the call that delivered. */
+      status?: number;
       bodyText?: string;
+      /** A binary body's bytes and type, kept whole by the provider leg. */
+      bodyBytes?: Uint8Array;
+      contentType?: string;
+      /** From the payment-response header, when the seller sent one. */
+      settlementTxHash?: string;
+      authorization?: SignedAuthorization;
       amountPaid?: { atomic: string };
       /** Set when the body missed its success rule, or the rule never ran. */
       resultUnverified?: boolean;
       resultCaveat?: string;
     };
     const providerAtomic = BigInt(data.amountPaid?.atomic ?? '0');
+    const tx = data.settlementTxHash !== undefined ? { txHash: data.settlementTxHash } : {};
+    const httpStatus = typeof data.status === 'number' ? { httpStatus: data.status } : {};
+    // A FILE IS SAVED, NOT INLINED: its bytes are no use as text in a tool
+    // result, so the result names where they are.
+    const binary =
+      data.bodyBytes !== undefined
+        ? await saveBinary(deps.ctx.dataDir, call.capabilityId, data.bodyBytes, {
+            contentType: data.contentType ?? '',
+            ...(deps.now !== undefined ? { now: deps.now } : {}),
+          })
+        : null;
+    // AND A PAID MEDIA RESULT THAT LINKS TO ITS FILES brings them home: the
+    // links can expire, and the user paid for what is behind them. Only a
+    // discovered service (where generated images, audio and video come from)
+    // does this: a curated page read or search links whatever the page links,
+    // on hosts the page picked. The answer carries no finer media kind, so the
+    // category is the line. Best effort only.
+    const linked =
+      providerAtomic > 0n && binary === null && call.discovered
+        ? await saveMedia(
+            deps.ctx.dataDir,
+            call.capabilityId,
+            mediaUrlsIn(data.bodyText ?? '', MAX_MEDIA_FILES),
+            {
+              ...(deps.mediaTransport !== undefined ? { transport: deps.mediaTransport } : {}),
+              ...(deps.payDeps?.destination !== undefined
+                ? { destination: deps.payDeps.destination }
+                : {}),
+              ...(deps.now !== undefined ? { now: deps.now } : {}),
+            },
+          )
+        : [];
+    const savedFiles = [...(binary?.savedTo !== undefined ? [binary.savedTo] : []), ...linked];
+    const cut =
+      binary === null && call.project !== undefined && data.bodyText !== undefined
+        ? await projected(deps.ctx.dataDir, call.project, data.bodyText)
+        : null;
+    if (providerAtomic > 0n) {
+      await appendPaidRecord(
+        deps.ctx.dataDir,
+        paidRecord(call, built.url, call.sent, providerAtomic, {
+          ...(data.settlementTxHash !== undefined ? { txHash: data.settlementTxHash } : {}),
+          ...(data.authorization !== undefined ? { authorization: data.authorization } : {}),
+          savedFiles,
+          ...(deps.now !== undefined ? { now: deps.now } : {}),
+        }),
+      );
+    }
     const base = {
       supplier: supplierOf(built.url),
-      ...(contract.arguments !== undefined ? { parameters: contract.arguments } : {}),
+      ...parameters,
       cost: costLines(providerAtomic),
-      ...(note !== undefined ? { note } : {}),
-      result: data.bodyText ?? '',
+      ...(data.settlementTxHash !== undefined ? { settlementTxHash: data.settlementTxHash } : {}),
+      ...(call.note !== undefined ? { note: call.note } : {}),
+      result: binary ?? cut?.result ?? data.bodyText ?? '',
+      ...(cut !== null ? { fullResultPath: cut.fullResultPath } : {}),
+      ...(savedFiles.length > 0 ? { savedFiles } : {}),
       providerContentUntrusted: true,
     };
     // UNVERIFIED IS NOT FULFILLED. A body that missed its success rule, or
@@ -193,43 +627,43 @@ export async function runRequestTool(
     // failure the rule exists to catch, and a caveat inside a `fulfilled`
     // envelope does not reach code that branches on the status: a provider
     // could pad a broken answer past the validation limit and have it read as
-    // a checked, paid result. The body still rides along whole, because the
-    // money moved and withholding the product would be a second loss on top
-    // of the first.
+    // a checked, paid result. The body still rides along (whole, or cut to
+    // the spec's fields with the whole saved), because the money moved and
+    // withholding the product would be a second loss on top of the first.
     const shown = {
       provider: built.url,
-      ...paramsOf(contract),
+      ...parameters,
       price: `$${toMoney(providerAtomic.toString()).usd}`,
     };
     if (data.resultUnverified === true) {
       await footer.done('unverified', shown);
       return {
-        isError: true,
-        summary: `Unverified result from ${base.supplier} · ${base.cost.join(' · ')}`,
-        envelope: {
-          status: 'unverified',
-          ...base,
-          ...(data.resultCaveat !== undefined ? { resultCaveat: data.resultCaveat } : {}),
+        outcome: { status: 'unverified', ...httpStatus },
+        left: { amountAtomic: providerAtomic, ...tx, signed: signing.mayHaveSigned() },
+        result: {
+          isError: true,
+          summary: `Unverified result from ${base.supplier} · ${base.cost.join(' · ')}`,
+          envelope: {
+            status: 'unverified',
+            ...base,
+            ...(data.resultCaveat !== undefined ? { resultCaveat: data.resultCaveat } : {}),
+          },
         },
       };
     }
     await footer.done('fulfilled', shown);
-    // ONLY A FULFILLED, PAID LOOKUP DELIVERS the redirect that named its id, so
-    // the pre-call hook routes the next native call again; anything less lets
-    // it run. A free lookup carries no success rule, so its 200 proves nothing:
-    // a docs lookup that matched the wrong library is a 200 the agent rejects,
-    // and counting it would send the agent's own retry straight back to it.
-    if (args.id !== undefined && args.id.length > 0 && decision.providerPriceAtomic !== '0')
-      await markDelivered(deps.ctx.dataDir, args.id);
     return {
-      isError: false,
-      summary: `Fulfilled by ${base.supplier} · ${base.cost.join(' · ')}`,
-      envelope: { status: 'fulfilled', ...base },
+      outcome: { status: 'fulfilled', ...httpStatus },
+      left: { amountAtomic: providerAtomic, ...tx, signed: signing.mayHaveSigned() },
+      result: {
+        isError: false,
+        summary: `Fulfilled by ${base.supplier} · ${base.cost.join(' · ')}`,
+        envelope: { status: 'fulfilled', ...base },
+      },
     };
   } catch (err) {
     const cli = err instanceof CliError ? err : undefined;
     const status = cli?.code === 'POLICY_REFUSED' ? 'needs_approval' : 'failed';
-    const reason = cli !== undefined ? `${cli.message} ${cli.fix ?? ''}`.trim() : String(err);
     // A provider failure AFTER transmission carries the amount at risk on its
     // details. Reporting zero there told the model the call was free when the
     // ledger had already counted it.
@@ -237,17 +671,237 @@ export async function runRequestTool(
       amountAtomic?: string;
       settlement?: string;
       diagnosis?: Record<string, unknown>;
+      status?: number;
+      providerError?: string;
+      authorization?: SignedAuthorization;
+      /** The live 402's terms, on a REGISTRY_MISMATCH. */
+      live?: { amount?: string };
     };
+    // A SPEND-POLICY REFUSAL SIGNED NOTHING. Its details carry the price it
+    // refused, not an amount that left, so it is neither a cost nor a ledger
+    // row: the PDL refusal sat in the ledger as $0.28 paid.
+    const leftAtomic = status === 'needs_approval' ? 0n : BigInt(detail.amountAtomic ?? '0');
+    // AN INPUT THE AGENT BUILT, REFUSED BEFORE ANY PAYMENT: said as that, so
+    // the next step is fixing the input, not checking the URL.
+    const rejectedInput =
+      call.agentBuilt === true &&
+      leftAtomic === 0n &&
+      (detail.status === 400 || detail.status === 422);
+    // A PRICE THAT VARIES WITH THE INPUT, quoted over the spec's ceiling for
+    // this one: a smaller input is the fix, and a fresh decision would only
+    // hand back the same spec.
+    const live = detail.live?.amount;
+    const ceiling = call.terms.maxAmountAtomic;
+    const overCeiling =
+      call.priceVaries === true &&
+      cli?.code === 'REGISTRY_MISMATCH' &&
+      live !== undefined &&
+      ceiling !== undefined &&
+      /^\d+$/.test(live) &&
+      BigInt(live) > BigInt(ceiling);
+    const reason = overCeiling
+      ? `${call.provider} prices this input at $${toMoney(live).usd}, over this spec's $${toMoney(ceiling).usd} ceiling, so nothing was signed. Change the input (a smaller size, a shorter clip, fewer items) and call again with the same id.`
+      : rejectedInput
+        ? `${call.provider} rejected this input before any payment (HTTP ${String(detail.status)}): see providerError. Fix the input and call again with the same id.`
+        : cli !== undefined
+          ? `${cli.message} ${cli.fix ?? ''}`.trim()
+          : String(err);
     await footer.done(status, {
-      provider: contract.request.url,
-      ...paramsOf(contract),
-      price: `$${toMoney(detail.amountAtomic ?? '0').usd}`,
+      provider: built.url,
+      ...parameters,
+      price: `$${toMoney(leftAtomic.toString()).usd}`,
     });
-    return fail(status, reason, {
-      providerAtomic: BigInt(detail.amountAtomic ?? '0'),
-      ...(detail.settlement !== undefined ? { settlement: detail.settlement } : {}),
-      ...(detail.diagnosis !== undefined ? { diagnosis: detail.diagnosis } : {}),
-    });
+    // An authorization that left is a paid call whatever came back: recorded
+    // with its settlement unknown, for `tenjin payments reconcile` to resolve.
+    if (leftAtomic > 0n) {
+      await appendPaidRecord(
+        deps.ctx.dataDir,
+        paidRecord(call, built.url, call.sent, leftAtomic, {
+          ...(detail.authorization !== undefined ? { authorization: detail.authorization } : {}),
+          savedFiles: [],
+          ...(deps.now !== undefined ? { now: deps.now } : {}),
+        }),
+      );
+    }
+    return {
+      left: { amountAtomic: leftAtomic, signed: signing.mayHaveSigned() },
+      outcome: {
+        status,
+        ...(typeof detail.status === 'number' ? { httpStatus: detail.status } : {}),
+      },
+      result: fail(status, reason, {
+        providerAtomic: leftAtomic,
+        ...(detail.settlement !== undefined ? { settlement: detail.settlement } : {}),
+        ...(detail.diagnosis !== undefined ? { diagnosis: detail.diagnosis } : {}),
+        // WHY THE PROVIDER SAID NO: its HTTP status and a bounded, redacted
+        // snippet of its body, which `runPay` cut. Without them a 403 read the
+        // same as a timeout to the agent and to the logs.
+        ...(typeof detail.status === 'number' ? { providerStatus: detail.status } : {}),
+        ...(typeof detail.providerError === 'string'
+          ? { providerError: detail.providerError }
+          : {}),
+        // WHAT WAS SENT, on a failure too: the agent cannot match a 400 to a
+        // field it cannot see.
+        request: { method: built.method, url: built.url },
+        ...(call.parameters !== undefined ? { parameters: call.parameters } : {}),
+        ...(overCeiling
+          ? { nextStep: 'Change the input and call again with the same id.' }
+          : rejectedInput
+            ? { nextStep: 'Fix the input and call again with the same id.' }
+            : {}),
+      }),
+    };
+  }
+}
+
+/**
+ * THE FIELDS THE SPEC PROMISES, AND THE WHOLE BODY ON DISK. A provider body
+ * can be far larger than the answer (an Apollo person hit carries the
+ * employer's whole organization record), so the model is handed the
+ * projection and the path of the full body. The success rule has already run
+ * on the full body. Null when the body cannot be cut or the file cannot be
+ * written: the whole body is then handed back as before, and the call never
+ * fails over it.
+ */
+async function projected(
+  dataDir: string,
+  project: { id: string; schema: Record<string, unknown> },
+  body: string,
+): Promise<{ result: string; fullResultPath: string } | null> {
+  const cut = projectBody(project.schema, body);
+  if (cut === undefined) return null;
+  const fullResultPath = await storeFullResult(dataDir, project.id, body);
+  if (fullResultPath === null) return null;
+  return { result: JSON.stringify(cut.value), fullResultPath };
+}
+
+/**
+ * WHETHER A PAYMENT MAY HAVE BEEN SIGNED, read off the spend gate's own calls
+ * rather than off an error. `runPay` reserves before it signs, releases only
+ * when nothing was signed, and commits once the authorization has left, so a
+ * commit, or a reservation never released, is a payment that may have moved.
+ * An error's details cannot say that: a commit that fails to write the spend
+ * ledger throws with no amount on it, after the money left.
+ */
+function watchSigning(inner: SpendAuthorizer): {
+  authorizer: SpendAuthorizer;
+  mayHaveSigned: () => boolean;
+} {
+  let reserved = false;
+  let released = false;
+  let committed = false;
+  return {
+    authorizer: {
+      policyEnforcement: inner.policyEnforcement,
+      authorize: async (req) => {
+        const authorization = await inner.authorize(req);
+        if (authorization.decision !== 'deny') reserved = true;
+        return authorization;
+      },
+      commit: async (reservationId, amountAtomic, opts) => {
+        committed = true;
+        await inner.commit(reservationId, amountAtomic, opts);
+      },
+      release: async (reservationId) => {
+        released = true;
+        await inner.release(reservationId);
+      },
+    },
+    mayHaveSigned: () => committed || (reserved && !released),
+  };
+}
+
+/** One ledger line for a paid call; the settlement is known only with a tx. */
+function paidRecord(
+  decision: { capabilityId: string; provider: string },
+  url: string,
+  sent: string,
+  amountAtomic: bigint,
+  opts: {
+    txHash?: string;
+    authorization?: SignedAuthorization;
+    savedFiles: string[];
+    now?: () => number;
+  },
+): PaidRecord {
+  return {
+    version: 1,
+    ts: new Date((opts.now ?? Date.now)()).toISOString(),
+    capabilityId: decision.capabilityId,
+    provider: decision.provider,
+    url,
+    sent: recordedSent(sent),
+    amountAtomic: amountAtomic.toString(),
+    ...(opts.txHash !== undefined ? { txHash: opts.txHash } : {}),
+    settlement: opts.txHash !== undefined ? 'settled' : 'unknown',
+    savedFiles: opts.savedFiles,
+    ...(opts.authorization !== undefined ? { authorization: opts.authorization } : {}),
+  };
+}
+
+/** Extensions for the media types a paid lookup plausibly returns; any other
+ *  type, `text/html` from a seller included, is saved as `.bin`. */
+const EXTENSIONS: Record<string, string> = {
+  'audio/mpeg': 'mp3',
+  'audio/mp3': 'mp3',
+  'audio/wav': 'wav',
+  'audio/x-wav': 'wav',
+  'audio/wave': 'wav',
+  'audio/ogg': 'ogg',
+  'audio/aac': 'aac',
+  'audio/flac': 'flac',
+  'audio/webm': 'webm',
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/gif': 'gif',
+  'image/webp': 'webp',
+  'image/svg+xml': 'svg',
+  'image/avif': 'avif',
+  'audio/mp4': 'm4a',
+  'audio/x-m4a': 'm4a',
+  'video/quicktime': 'mov',
+  'video/mp4': 'mp4',
+  'video/webm': 'webm',
+  'application/pdf': 'pdf',
+  'application/zip': 'zip',
+  'application/octet-stream': 'bin',
+};
+
+export function extensionFor(contentType: string): string {
+  const type = contentType.split(';')[0]!.trim().toLowerCase();
+  return EXTENSIONS[type] ?? 'bin';
+}
+
+/**
+ * Write a binary body under the data dir as `<capability>-<timestamp>.<ext>`
+ * and say where: the path, the type and the size are what the host needs to
+ * use it. The name is built from characters a path segment can always hold.
+ *
+ * NEVER THROWS. The money has already moved when this runs, and a throw here
+ * would reach the failure arm, which reports nothing paid; a file that could
+ * not be written is said so beside the amount instead.
+ */
+async function saveBinary(
+  dataDir: string,
+  capabilityId: string,
+  bytes: Uint8Array,
+  opts: { contentType: string; now?: () => number },
+): Promise<{ savedTo?: string; saveError?: string; contentType: string; bytes: number }> {
+  const described = { contentType: opts.contentType, bytes: bytes.byteLength };
+  try {
+    const file = await createUniqueFile(
+      downloadsDir(dataDir),
+      `${capabilityId.slice(0, 80)}-${(opts.now ?? Date.now)()}`,
+      extensionFor(opts.contentType),
+    );
+    try {
+      await writeAll(file.handle, bytes);
+    } finally {
+      await file.handle.close();
+    }
+    return { savedTo: file.path, ...described };
+  } catch (err) {
+    return { saveError: err instanceof Error ? err.message : String(err), ...described };
   }
 }
 
@@ -308,11 +962,6 @@ function unsafeHeader(headers: Record<string, string>): string | null {
     if (value.length > 1_024 || /[\r\n]/.test(value)) return name;
   }
   return null;
-}
-
-/** The decision's own arguments, for the footer, or nothing to show. */
-function paramsOf(contract: DecisionContract): { parameters?: unknown } {
-  return contract.arguments !== undefined ? { parameters: contract.arguments } : {};
 }
 
 function supplierOf(url: string): string {
@@ -388,6 +1037,10 @@ interface FailExtras {
   /** Which rule failed, whether the body was JSON, its size and a bounded
    *  redacted preview: what tells a parse miss from an HTML error page. */
   diagnosis?: Record<string, unknown>;
+  /** The provider's HTTP status on a non-2xx answer. */
+  providerStatus?: number;
+  /** The start of that answer's body, bounded and redacted. Provider content. */
+  providerError?: string;
   /** The backend's own stable error code, from a typed non-2xx body. */
   errorCode?: string;
   /** What stopped a non-execute decision, in the backend's own terms. */
@@ -396,6 +1049,10 @@ interface FailExtras {
   note?: string;
   /** Replaces the generic next step, for an outcome this build decided alone. */
   nextStep?: string;
+  /** What was sent, or would have been: the bound or built input. */
+  parameters?: unknown;
+  /** The provider request it went out as. */
+  request?: { method: string; url: string };
 }
 
 /** The headline: calm for a routine outcome, explicit for a real failure. */
@@ -429,7 +1086,7 @@ function fail(status: FailStatus, reason: string, extras: FailExtras = {}): Requ
       // The status is the fact; the next step is what to do about it. The
       // BACKEND'S own next action wins when it sent one: it knows which field
       // is missing.
-      ...(routine || diagnostics !== undefined
+      ...(routine || diagnostics !== undefined || extras.nextStep !== undefined
         ? { nextStep: extras.nextStep ?? nextStepFor(status, diagnostics) }
         : {}),
       ...(diagnostics !== undefined
@@ -445,6 +1102,10 @@ function fail(status: FailStatus, reason: string, extras: FailExtras = {}): Requ
       ...(extras.note !== undefined ? { note: extras.note } : {}),
       ...(extras.settlement !== undefined ? { settlement: extras.settlement } : {}),
       ...(extras.diagnosis !== undefined ? { diagnosis: extras.diagnosis } : {}),
+      ...(extras.providerStatus !== undefined ? { providerStatus: extras.providerStatus } : {}),
+      ...(extras.providerError !== undefined ? { providerError: extras.providerError } : {}),
+      ...(extras.request !== undefined ? { request: extras.request } : {}),
+      ...(extras.parameters !== undefined ? { parameters: extras.parameters } : {}),
       providerContentUntrusted: true,
     },
   };

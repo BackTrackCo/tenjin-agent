@@ -1,21 +1,20 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildPaymentRequired, testWalletProvider } from '../lib/read-test-utils';
 import { resolveSpendAuthorizer } from '../lib/wallet';
 import type { SpendAuthorization, SpendAuthorizer } from '../lib/wallet';
 import type { CommandContext } from '../context';
 import { runPay } from '../commands/pay';
-import { runRequestTool } from './tool';
-import { ROUTER_PATH } from './decision';
-import {
-  bindDecision,
-  noteRedirect,
-  noteSession,
-  renderProgress,
-  takeUndelivered,
-} from './progress';
+import { MAX_BODY_BYTES } from '../lib/request-schema';
+import { extensionFor, runRequestTool } from './tool';
+import type { MediaTransport } from './paid';
+import { storeSpecs } from './specs';
+import { ROUTER_PATH, type OfferSpec } from './decision';
+import { bindDecision, claimRedirect, noteSession, renderProgress } from './progress';
 
 // Pass-through, so a refusal's typed details stay observable after the tool
 // folds the error into its envelope.
@@ -122,15 +121,17 @@ interface Leg {
   url: string;
   status: number;
   body: unknown;
+  /** Sent as is in place of `body`, for an answer that is not JSON (text or a file). */
+  raw?: string | Uint8Array;
   headers?: Record<string, string>;
 }
 
 /** A scripted network: legs are matched in order, and every request recorded. */
 function net(legs: Leg[]): {
   fetchImpl: typeof fetch;
-  calls: { url: string; method: string; paid: boolean }[];
+  calls: { url: string; method: string; paid: boolean; body?: string }[];
 } {
-  const calls: { url: string; method: string; paid: boolean }[] = [];
+  const calls: { url: string; method: string; paid: boolean; body?: string }[] = [];
   const queue = [...legs];
   const fetchImpl = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
     const headers: Record<string, string> = {};
@@ -141,10 +142,11 @@ function net(legs: Leg[]): {
       url: String(input),
       method: init?.method ?? 'GET',
       paid: headers['payment-signature'] !== undefined,
+      ...(typeof init?.body === 'string' ? { body: init.body } : {}),
     });
     const leg = queue.shift();
     if (leg === undefined) throw new Error(`unscripted request to ${String(input)}`);
-    return new Response(JSON.stringify(leg.body), {
+    return new Response(leg.raw ?? JSON.stringify(leg.body), {
       status: leg.status,
       headers: { 'content-type': 'application/json', ...leg.headers },
     });
@@ -158,12 +160,19 @@ function challenge(over: Record<string, unknown> = {}): string {
 
 const PUBLIC = { resolveHostname: async () => [{ address: '93.184.216.34', family: 4 }] };
 
+/** NO TEST OPENS A SOCKET: a linked-media download answers from here, and a
+ *  test that wants the file passes its own transport. */
+const noMediaNetwork: MediaTransport = async (target) => {
+  throw new Error(`no network in tests: ${target.url.toString()}`);
+};
+
 function deps(fetchImpl: typeof fetch, auth = authorizer()) {
   return {
     ctx: ctx(),
     cwd: dir,
     authorizer: auth,
     fetchImpl,
+    mediaTransport: noMediaNetwork,
     payDeps: {
       readBalance: async () => 100_000_000n,
       fetchImpl,
@@ -378,6 +387,58 @@ describe('a provider that refuses the lookup', () => {
   });
 });
 
+/**
+ * A PAID CALL THE PROVIDER REFUSED SAYS WHY. Firecrawl answered 403 on a
+ * LinkedIn URL after the authorization left, and the envelope carried neither
+ * the status nor the provider's reason, so nobody could tell a refused target
+ * from an outage. Settlement stays unknown: the authorization is still out.
+ */
+describe('a paid call the provider refused', () => {
+  const REASON = 'This website is no longer supported, please reach out to support.';
+
+  /** The paid leg answers 403 with `answer`, after a 402 and one signature. */
+  async function refused(
+    answer: Partial<Leg>,
+  ): Promise<Awaited<ReturnType<typeof runRequestTool>>> {
+    const { fetchImpl, calls } = net([
+      { url: ROUTER, status: 200, body: decision() },
+      { url: PROVIDER, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge() } },
+      { url: PROVIDER, status: 403, body: null, ...answer },
+    ]);
+    const result = await runRequestTool(
+      { query: 'https://www.linkedin.com/in/someone', id: 'k3f9-abcd' },
+      deps(fetchImpl),
+    );
+    expect(calls.filter((call) => call.paid)).toHaveLength(1);
+    return result;
+  }
+
+  it("carries the provider's status and its JSON reason", async () => {
+    const result = await refused({ body: { success: false, error: REASON } });
+    expect(result.isError).toBe(true);
+    expect(result.envelope).toMatchObject({
+      status: 'failed',
+      providerStatus: 403,
+      providerError: JSON.stringify({ success: false, error: REASON }),
+      settlement: 'unknown',
+      cost: ['provider price 0.01 USD'],
+      providerContentUntrusted: true,
+    });
+  });
+
+  it('bounds a page that is not JSON and keeps it to one plain line', async () => {
+    const result = await refused({
+      raw: `<html>\n<h1>403</h1> ${REASON}\u001b[2J\u202e ${'x'.repeat(2_000)}</html>`,
+    });
+    expect(result.envelope).toMatchObject({ providerStatus: 403, settlement: 'unknown' });
+    const snippet = String(result.envelope.providerError);
+    expect(snippet.startsWith(`<html> <h1>403</h1> ${REASON}`)).toBe(true);
+    expect(snippet).not.toMatch(/[\p{Cc}\u202e]/u);
+    expect(Array.from(snippet)).toHaveLength(501);
+    expect(snippet.endsWith('…')).toBe(true);
+  });
+});
+
 describe('what the tool refuses to execute', () => {
   it.each([
     [
@@ -460,6 +521,11 @@ describe('what the tool refuses to execute', () => {
     expect(result.envelope).toMatchObject({ status: 'needs_approval' });
     expect(result.summary).toContain('Blocked by spending policy');
     expect(result.isError).toBe(false);
+    // Nothing was signed: no cost reported, and no row in the paid ledger.
+    expect(result.envelope).toMatchObject({ cost: ['provider price 0 USD'] });
+    await expect(readFile(join(dir, 'paid', 'ledger.jsonl'), 'utf8')).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
   });
 
   it('pays under the cap with no prompt at all', async () => {
@@ -531,7 +597,7 @@ describe('the paid body handed back to the model', () => {
   });
 
   it('delivers a paid body too large to check, unverified, as before', async () => {
-    const body = { data: { blob: 'x'.repeat(200 * 1024) } };
+    const body = { data: { blob: 'x'.repeat(MAX_BODY_BYTES) } };
     const { fetchImpl } = net([
       { url: ROUTER, status: 200, body: withRule() },
       ...providerLegs(body),
@@ -539,6 +605,18 @@ describe('the paid body handed back to the model', () => {
     const result = await runRequestTool({ query: 'q' }, deps(fetchImpl));
     expect(result.envelope).toMatchObject({ status: 'unverified' });
     expect(result.envelope.resultCaveat).toContain('not checked');
+  });
+
+  it('checks a 150 KB paid body against its rule, and fulfils one that passes', async () => {
+    const body = { data: { organization: { blurb: 'x'.repeat(150 * 1024) } } };
+    const { fetchImpl } = net([
+      { url: ROUTER, status: 200, body: withRule() },
+      ...providerLegs(body),
+    ]);
+    const result = await runRequestTool({ query: 'q' }, deps(fetchImpl));
+    expect(result.isError).toBe(false);
+    expect(result.envelope).toMatchObject({ status: 'fulfilled', result: JSON.stringify(body) });
+    expect(result.envelope.resultCaveat).toBeUndefined();
   });
 
   it('fulfils a paid body that passes its success rule', async () => {
@@ -599,76 +677,27 @@ describe('what the tool leaves for the status line', () => {
 });
 
 /**
- * NEVER BLOCKED TWICE IN A ROW, the tool's half: only a `fulfilled` lookup
- * delivers the pre-call redirect that named its id. Anything less leaves it
- * undelivered, and the hook withholds that agent's next offer in its category.
+ * NEVER REDIRECTED TWICE FOR ONE TARGET, the tool's half: a lookup releases
+ * nothing. The hook promised the agent its own retry would run, so a delivered
+ * lookup leaves the claim in place exactly as a failed one does, and the
+ * native re-run of the same call is never denied again.
  */
 describe('the redirect a lookup answers', () => {
-  const CATEGORY = 'crypto price quote';
-  const RULE = { type: 'object', properties: { data: { type: 'object' } }, required: ['data'] };
+  const TARGET = 'WebSearch BTC and ETH price';
   it.each([
     ['fulfilled', [{ url: ROUTER, status: 200, body: decision() }, ...providerLegs()]],
-    [
-      'unverified',
-      [
-        {
-          url: ROUTER,
-          status: 200,
-          body: decision({ contract: contract({ resultSchema: RULE }) }),
-        },
-        ...providerLegs({ error: 'rate limited' }),
-      ],
-    ],
     ['failed', [{ url: ROUTER, status: 503, body: { error: { code: 'nope', message: 'no' } } }]],
-  ] as const)('is delivered only by a fulfilled lookup: %s', async (status, legs) => {
+  ] as const)('leaves the claim in place after a %s lookup', async (status, legs) => {
     await noteSession(dir, 'sess-1');
     await bindDecision(dir, 'sess-1', 'k3f9-abcd');
-    await noteRedirect(dir, 'sess-1', undefined, { id: 'k3f9-abcd', category: CATEGORY });
+    expect(await claimRedirect(dir, 'sess-1', undefined, TARGET)).toBe(true);
     const { fetchImpl } = net([...legs]);
     const result = await runRequestTool(
       { query: 'BTC and ETH price', id: 'k3f9-abcd' },
       deps(fetchImpl),
     );
     expect(result.envelope.status).toBe(status);
-    expect(await takeUndelivered(dir, 'sess-1', undefined, CATEGORY)).toBe(status !== 'fulfilled');
-  });
-
-  it('never counts a free lookup as delivered, since its 200 proves nothing', async () => {
-    const DOCS = 'library or API documentation';
-    await noteSession(dir, 'sess-1');
-    await bindDecision(dir, 'sess-1', 'k3f9-abcd');
-    await noteRedirect(dir, 'sess-1', undefined, { id: 'k3f9-abcd', category: DOCS });
-    const { fetchImpl, calls } = net([
-      {
-        url: ROUTER,
-        status: 200,
-        body: decision({ providerPriceAtomic: '0', category: DOCS, provider: 'Context7' }),
-      },
-      // A 200 naming another library: the lookup succeeded, the match did not.
-      { url: PROVIDER, status: 200, body: 'Context7 matched: /dodopayments/billingsdk.' },
-    ]);
-    const result = await runRequestTool(
-      { query: '@acme/billing-sdk createInvoice', id: 'k3f9-abcd' },
-      deps(fetchImpl),
-    );
-    expect(result.envelope.status).toBe('fulfilled');
-    expect(calls.some((call) => call.paid)).toBe(false);
-    expect(await takeUndelivered(dir, 'sess-1', undefined, DOCS)).toBe(true);
-  });
-
-  it("marks only the agent whose redirect named the id, never another's", async () => {
-    await noteSession(dir, 'sess-1');
-    await bindDecision(dir, 'sess-1', 'k3f9-abcd');
-    await noteRedirect(dir, 'sess-1', undefined, { id: 'a-later-one', category: CATEGORY });
-    await noteRedirect(dir, 'sess-1', 'a1', { id: 'k3f9-abcd', category: CATEGORY });
-    const { fetchImpl } = net([{ url: ROUTER, status: 200, body: decision() }, ...providerLegs()]);
-    const result = await runRequestTool(
-      { query: 'BTC and ETH price', id: 'k3f9-abcd' },
-      deps(fetchImpl),
-    );
-    expect(result.envelope.status).toBe('fulfilled');
-    expect(await takeUndelivered(dir, 'sess-1', 'a1', CATEGORY)).toBe(false);
-    expect(await takeUndelivered(dir, 'sess-1', undefined, CATEGORY)).toBe(true);
+    expect(await claimRedirect(dir, 'sess-1', undefined, TARGET)).toBe(false);
   });
 });
 
@@ -699,5 +728,1108 @@ describe('the request tool in a directory where the router is off', () => {
     expect(result.envelope.nextStep).toContain('Nothing was sent');
     expect(calls).toHaveLength(0);
     expect(auth.authorize).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * A SERVICE NOBODY CURATED. The tool's fallback answer names it and pays
+ * nothing; the host's second call, with the id and its own input, comes back
+ * as an ordinary execute and pays through the same path and caps as any other.
+ */
+describe('a discovered service', () => {
+  const fixtures = fileURLToPath(new URL('./fixtures/', import.meta.url));
+  const wire = async (name: string): Promise<Record<string, unknown>> =>
+    JSON.parse(await readFile(join(fixtures, name), 'utf8')) as Record<string, unknown>;
+  const SELLER = 'https://blockrun.ai/api/v1/audio/sound-effects';
+  const SOUND_ID = '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d02';
+  /** The spec the hook kept for the sound-effect offer: the only way a list
+   *  service's call is built and paid. */
+  const kept = () =>
+    storeSpecs(dir, [
+      {
+        id: SOUND_ID,
+        capabilityId: 'discovered:bazaar:3f9c2a71',
+        provider: 'BlockRun',
+        description: 'AI sound effect generation (ElevenLabs)',
+        priceAtomic: '53501',
+        priceVaries: false,
+        maxAmountAtomic: '53501',
+        payTo: '0x1111111111111111111111111111111111111111',
+        network: 'eip155:8453',
+        asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+        request: {
+          method: 'POST',
+          url: SELLER,
+          fields: { text: 'body', duration_seconds: 'body' },
+          location: 'body',
+        },
+        input: {
+          type: 'object',
+          properties: { text: { type: 'string' }, duration_seconds: { type: 'number' } },
+          required: ['text'],
+          additionalProperties: false,
+        },
+        pinned: {},
+      },
+    ]);
+
+  it('hands the host the server line and the listing, and pays nothing', async () => {
+    const auth = authorizer();
+    const answer = await wire('wire-lookup-discovered.json');
+    const { fetchImpl, calls } = net([{ url: ROUTER, status: 200, body: answer }]);
+    const result = await runRequestTool(
+      { query: 'generate a short whoosh sound effect' },
+      deps(fetchImpl, auth),
+    );
+    const hint = (answer.decision as { hint: string }).hint;
+    expect(result.isError).toBe(false);
+    expect(result.summary).toBe(hint);
+    expect(result.envelope).toMatchObject({
+      status: 'discovered',
+      id: '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d03',
+      service: { provider: 'BlockRun', url: SELLER, method: 'POST', price: '$0.053501' },
+      cost: ['provider price 0 USD'],
+      providerContentUntrusted: true,
+    });
+    expect(calls).toHaveLength(1);
+    expect(JSON.parse(calls[0]!.body!)).toMatchObject({ accepts: ['discovered', 'spec'] });
+    expect(auth.authorize).not.toHaveBeenCalled();
+  });
+
+  it("runs a kept list service's spec, paying the seller under its price", async () => {
+    await kept();
+    const auth = authorizer();
+    const { fetchImpl, calls } = net([
+      { url: SELLER, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge() } },
+      { url: SELLER, status: 200, body: { ok: true } },
+    ]);
+    const input = { text: 'a short airy whoosh, dry, close-miked', duration_seconds: 1.2 };
+    const result = await runRequestTool({ id: SOUND_ID, input }, deps(fetchImpl, auth));
+    expect(result.envelope).toMatchObject({
+      status: 'fulfilled',
+      supplier: 'blockrun.ai',
+      cost: ['provider price 0.01 USD'],
+    });
+    expect(result.summary).toContain('blockrun.ai');
+    // Built here from the spec: no decision call before the seller.
+    expect(calls[0]!.url).toBe(SELLER);
+    expect(calls.filter((c) => c.paid)).toHaveLength(1);
+    expect(calls[1]!.body).toBe(JSON.stringify(input));
+    expect(auth.authorize).toHaveBeenCalledOnce();
+  });
+
+  it('answers an input whose spec is no longer kept with a fresh query, sending nothing', async () => {
+    const auth = authorizer();
+    const { fetchImpl, calls } = net([]);
+    const result = await runRequestTool(
+      { id: SOUND_ID, input: { text: 'whoosh' } },
+      deps(fetchImpl, auth),
+    );
+    expect(result.envelope).toMatchObject({
+      status: 'needs_input',
+      nextStep: expect.stringContaining('request({query})') as string,
+    });
+    expect(calls).toHaveLength(0);
+    expect(auth.authorize).not.toHaveBeenCalled();
+  });
+
+  it('refuses a live 402 above the listed price before anything is signed', async () => {
+    await kept();
+    const auth = authorizer();
+    const { fetchImpl, calls } = net([
+      {
+        url: SELLER,
+        status: 402,
+        body: {},
+        headers: { 'PAYMENT-REQUIRED': challenge({ amount: '60000' }) },
+      },
+    ]);
+    const result = await runRequestTool(
+      { id: '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d02', input: { text: 'whoosh' } },
+      deps(fetchImpl, auth),
+    );
+    expect(result.isError).toBe(true);
+    expect(calls.filter((c) => c.paid)).toHaveLength(0);
+    expect(auth.authorize).not.toHaveBeenCalled();
+  });
+
+  it('sends nothing for an input carrying a credential', async () => {
+    const { fetchImpl, calls } = net([]);
+    const result = await runRequestTool(
+      {
+        id: '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d02',
+        input: { key: 'sk-ant-api03-' + 'a'.repeat(90) },
+      },
+      deps(fetchImpl),
+    );
+    expect(result.envelope).toMatchObject({
+      status: 'native',
+      reason: 'the input carries a credential-shaped value, so nothing was sent',
+    });
+    expect(calls).toHaveLength(0);
+  });
+
+  /** A KEY BEHIND AN ESCAPED NEWLINE OR TAB: in the serialized JSON it reads
+   *  as one word with the escape's letter in front, so each leaf is masked
+   *  on its own, keys included. */
+  it.each([
+    ['an sk-ant- key after a newline', { text: `note:\nsk-ant-api03-${'a'.repeat(90)}` }],
+    ['an sk-ant- key after a tab', { text: `\tsk-ant-api03-${'b'.repeat(90)}` }],
+    ['a ghp_ token after a newline', { text: `line one\nghp_${'c'.repeat(36)}` }],
+    ['a ghp_ token after a tab, nested', { opts: [{ auth: `\tghp_${'d'.repeat(36)}` }] }],
+    ['a token as a key', { [`\nghp_${'e'.repeat(36)}`]: 'x' }],
+  ])('sends nothing for %s', async (_label, input) => {
+    const { fetchImpl, calls } = net([]);
+    const result = await runRequestTool(
+      { id: '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d02', input },
+      deps(fetchImpl),
+    );
+    expect(result.envelope).toMatchObject({
+      status: 'native',
+      reason: 'the input carries a credential-shaped value, so nothing was sent',
+    });
+    expect(calls).toHaveLength(0);
+  });
+
+  it('refuses an input with no id before anything is sent', async () => {
+    const { fetchImpl, calls } = net([]);
+    const result = await runRequestTool({ input: { text: 'whoosh' } }, deps(fetchImpl));
+    expect(result.envelope).toMatchObject({ status: 'needs_input' });
+    expect(calls).toHaveLength(0);
+  });
+
+  it('refuses an input over the server cap before anything is sent', async () => {
+    const { fetchImpl, calls } = net([]);
+    const result = await runRequestTool(
+      { id: '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d02', input: { text: 'x'.repeat(17_000) } },
+      deps(fetchImpl),
+    );
+    expect(result.envelope).toMatchObject({ status: 'needs_input' });
+    expect(calls).toHaveLength(0);
+  });
+
+  /** A FILE IS SAVED, NOT INLINED: the result names the file, its type and size. */
+  it('saves a binary body to a file and returns where it is', async () => {
+    await kept();
+    const audio = new Uint8Array([0x49, 0x44, 0x33, 0x04, 0x00, 0xff, 0xfb, 0x90]);
+    const { fetchImpl } = net([
+      { url: SELLER, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge() } },
+      {
+        url: SELLER,
+        status: 200,
+        body: null,
+        raw: audio,
+        headers: { 'content-type': 'audio/mpeg' },
+      },
+    ]);
+    const result = await runRequestTool(
+      { id: '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d02', input: { text: 'whoosh' } },
+      { ...deps(fetchImpl), now: () => 1_700_000_000_000 },
+    );
+    expect(result.envelope).toMatchObject({
+      status: 'fulfilled',
+      cost: ['provider price 0.01 USD'],
+      result: { contentType: 'audio/mpeg', bytes: audio.byteLength },
+    });
+    // The capability, the time, and a random suffix: never another call's file.
+    const savedTo = (result.envelope.result as { savedTo: string }).savedTo;
+    expect(
+      savedTo.startsWith(join(dir, 'downloads', 'discovered-bazaar-3f9c2a71-1700000000000-')),
+    ).toBe(true);
+    expect(savedTo).toMatch(/-[0-9a-f]{8}\.mp3$/);
+    expect(new Uint8Array(await readFile(savedTo))).toEqual(audio);
+  });
+
+  /** THE TX HASH IS THE PROTOCOL'S, read from the payment-response header
+   *  (v2 or v1), never from what the seller wrote in its body. */
+  it.each(['PAYMENT-RESPONSE', 'X-PAYMENT-RESPONSE'])(
+    'reports the settlement tx from the %s header',
+    async (header) => {
+      await kept();
+      const tx = `0x${'ab'.repeat(32)}`;
+      const settle = Buffer.from(
+        JSON.stringify({ success: true, transaction: tx, network: 'eip155:8453', payer: '0x1' }),
+      ).toString('base64');
+      const { fetchImpl } = net([
+        { url: SELLER, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge() } },
+        {
+          url: SELLER,
+          status: 200,
+          body: { transaction: `0x${'cd'.repeat(32)}` },
+          headers: { [header]: settle },
+        },
+      ]);
+      const result = await runRequestTool(
+        { id: '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d02', input: { text: 'whoosh' } },
+        deps(fetchImpl),
+      );
+      expect(result.envelope).toMatchObject({ status: 'fulfilled', settlementTxHash: tx });
+    },
+  );
+
+  it('reports no tx when the seller sent no payment-response header', async () => {
+    await kept();
+    const { fetchImpl } = net([
+      { url: SELLER, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge() } },
+      { url: SELLER, status: 200, body: { transaction: `0x${'cd'.repeat(32)}` } },
+    ]);
+    const result = await runRequestTool(
+      { id: '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d02', input: { text: 'whoosh' } },
+      deps(fetchImpl),
+    );
+    expect(result.envelope.settlementTxHash).toBeUndefined();
+  });
+
+  /** THE USER'S OWN RECORD: one line per paid call, with what was sent
+   *  masked and cut, the amount, the tx and the files it saved. */
+  it('appends one ledger line per paid call, and saves the media it links to', async () => {
+    await kept();
+    const audio = new Uint8Array([0x49, 0x44, 0x33, 0x04]);
+    const tx = `0x${'ab'.repeat(32)}`;
+    const settle = Buffer.from(JSON.stringify({ success: true, transaction: tx })).toString(
+      'base64',
+    );
+    const { fetchImpl } = net([
+      { url: SELLER, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge() } },
+      {
+        url: SELLER,
+        status: 200,
+        body: {
+          audio_url: 'https://cdn.example.test/out/whoosh.mp3?sig=1',
+          page: 'https://x.test/',
+        },
+        headers: { 'PAYMENT-RESPONSE': settle },
+      },
+    ]);
+    // The media leg goes through the pinned transport, connected to the
+    // address the destination check validated.
+    const connected: { url: string; address: string }[] = [];
+    const mediaTransport: MediaTransport = async (target) => {
+      connected.push({ url: target.url.toString(), address: target.address });
+      return {
+        status: 200,
+        body: (async function* () {
+          yield audio;
+        })(),
+        discard: () => undefined,
+      };
+    };
+    const result = await runRequestTool(
+      {
+        id: '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d02',
+        input: { text: `whoosh ${'y'.repeat(5_000)}` },
+      },
+      { ...deps(fetchImpl), now: () => 1_700_000_000_000, mediaTransport },
+    );
+    expect(connected).toEqual([
+      { url: 'https://cdn.example.test/out/whoosh.mp3?sig=1', address: '93.184.216.34' },
+    ]);
+    const saved = (result.envelope.savedFiles as string[])[0]!;
+    expect(result.envelope).toMatchObject({ status: 'fulfilled', savedFiles: [saved] });
+    expect(saved).toMatch(/discovered-bazaar-3f9c2a71-1-1700000000000-[0-9a-f]{8}\.mp3$/);
+    expect(new Uint8Array(await readFile(saved))).toEqual(audio);
+    const lines = (await readFile(join(dir, 'paid', 'ledger.jsonl'), 'utf8')).trim().split('\n');
+    expect(lines).toHaveLength(1);
+    const record = JSON.parse(lines[0]!) as Record<string, unknown>;
+    expect(record).toMatchObject({
+      version: 1,
+      ts: new Date(1_700_000_000_000).toISOString(),
+      capabilityId: 'discovered:bazaar:3f9c2a71',
+      provider: 'BlockRun',
+      url: SELLER,
+      amountAtomic: '10000',
+      txHash: tx,
+      settlement: 'settled',
+      savedFiles: [saved],
+    });
+    expect(String(record.sent)).toHaveLength(4_096);
+    // The signed authorization's identity, for reconcile to ask the token about.
+    expect(record.authorization).toMatchObject({
+      from: expect.stringMatching(/^0x[0-9a-fA-F]{40}$/) as string,
+      nonce: expect.stringMatching(/^0x[0-9a-f]{64}$/) as string,
+      validBefore: expect.stringMatching(/^\d+$/) as string,
+    });
+  });
+
+  /** A SETTLEMENT LEFT UNKNOWN is resolved from the chain beside the next
+   *  lookup, which never waits for it. */
+  it('resolves an expired unknown settlement beside the next lookup', async () => {
+    const { mkdir } = await import('node:fs/promises');
+    await mkdir(join(dir, 'paid'), { recursive: true });
+    const nonce = `0x${'5'.repeat(64)}`;
+    await writeFile(
+      join(dir, 'paid', 'ledger.jsonl'),
+      `${JSON.stringify({
+        version: 1,
+        ts: '2026-01-01T00:00:00.000Z',
+        capabilityId: 'cap',
+        provider: 'Seller',
+        url: SELLER,
+        sent: 'q',
+        amountAtomic: '10000',
+        settlement: 'unknown',
+        savedFiles: [],
+        authorization: { from: `0x${'1'.repeat(40)}`, nonce, validBefore: '1700000000' },
+      })}\n`,
+    );
+    const rpcCalls: string[] = [];
+    const { fetchImpl: scripted } = net([{ url: ROUTER, status: 200, body: NATIVE }]);
+    const fetchImpl = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      if (String(input) === 'https://mainnet.base.org') {
+        if ((JSON.parse(String(init?.body)) as { method: string }).method !== 'eth_call') {
+          const now = `0x${Math.floor(Date.now() / 1000).toString(16)}`;
+          return new Response(
+            JSON.stringify({ jsonrpc: '2.0', id: 1, result: { number: '0x1', timestamp: now } }),
+          );
+        }
+        rpcCalls.push(String(init?.body));
+        return new Response(
+          JSON.stringify({ jsonrpc: '2.0', id: 1, result: `0x${'0'.repeat(63)}1` }),
+        );
+      }
+      return scripted(input, init);
+    }) as typeof fetch;
+    const result = await runRequestTool({ query: 'weather' }, deps(fetchImpl));
+    // The lookup itself does not wait for it.
+    expect(result.envelope).toMatchObject({ status: 'native' });
+    await expect
+      .poll(
+        async () =>
+          (
+            JSON.parse((await readFile(join(dir, 'paid', 'ledger.jsonl'), 'utf8')).trim()) as {
+              settlement: string;
+            }
+          ).settlement,
+      )
+      .toBe('settled');
+    expect(rpcCalls).toHaveLength(1);
+  });
+
+  it('records a paid call with no payment-response header as settlement unknown', async () => {
+    const { fetchImpl } = net([{ url: ROUTER, status: 200, body: decision() }, ...providerLegs()]);
+    await runRequestTool({ query: 'BTC and ETH price' }, deps(fetchImpl));
+    const record = JSON.parse(
+      (await readFile(join(dir, 'paid', 'ledger.jsonl'), 'utf8')).trim(),
+    ) as Record<string, unknown>;
+    expect(record).toMatchObject({ sent: 'BTC and ETH price', settlement: 'unknown' });
+    expect(record.txHash).toBeUndefined();
+  });
+
+  it('records a paid call that failed after the authorization left, settlement unknown', async () => {
+    await kept();
+    const { fetchImpl } = net([
+      { url: SELLER, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge() } },
+      { url: SELLER, status: 500, body: { error: 'boom' } },
+    ]);
+    const result = await runRequestTool(
+      { id: '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d02', input: { text: 'whoosh' } },
+      deps(fetchImpl),
+    );
+    expect(result.envelope).toMatchObject({ status: 'failed' });
+    const record = JSON.parse(
+      (await readFile(join(dir, 'paid', 'ledger.jsonl'), 'utf8')).trim(),
+    ) as Record<string, unknown>;
+    expect(record).toMatchObject({ amountAtomic: '10000', settlement: 'unknown', savedFiles: [] });
+  });
+
+  it('skips media on a private address, and never fails the call over it', async () => {
+    await kept();
+    const { fetchImpl, calls } = net([
+      { url: SELLER, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge() } },
+      { url: SELLER, status: 200, body: { url: 'https://10.0.0.5/a.png' } },
+    ]);
+    const result = await runRequestTool(
+      { id: '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d02', input: { text: 'whoosh' } },
+      deps(fetchImpl),
+    );
+    expect(result.envelope).toMatchObject({ status: 'fulfilled' });
+    expect(result.envelope.savedFiles).toBeUndefined();
+    expect(calls.some((c) => c.url.includes('10.0.0.5'))).toBe(false);
+  });
+
+  /** A CURATED PAGE READ OR SEARCH NEVER DOWNLOADS what its page links to. */
+  it('downloads nothing a curated result links to', async () => {
+    const connected: string[] = [];
+    const { fetchImpl } = net([
+      { url: ROUTER, status: 200, body: decision() },
+      ...providerLegs({ image: 'https://cdn.example.test/chart.png' }),
+    ]);
+    const result = await runRequestTool(
+      { query: 'BTC and ETH price' },
+      {
+        ...deps(fetchImpl),
+        mediaTransport: async (target) => {
+          connected.push(target.url.toString());
+          throw new Error('should not be called');
+        },
+      },
+    );
+    expect(result.envelope).toMatchObject({ status: 'fulfilled' });
+    expect(result.envelope.savedFiles).toBeUndefined();
+    expect(connected).toEqual([]);
+  });
+
+  it('keeps a JSON body inline, and a media link that cannot be fetched fails nothing', async () => {
+    await kept();
+    const { fetchImpl } = net([
+      { url: SELLER, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge() } },
+      { url: SELLER, status: 200, body: { url: 'https://cdn.example.test/a.mp3' } },
+    ]);
+    const result = await runRequestTool(
+      { id: '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d02', input: { text: 'whoosh' } },
+      deps(fetchImpl),
+    );
+    expect(result.envelope.result).toBe(JSON.stringify({ url: 'https://cdn.example.test/a.mp3' }));
+  });
+
+  it.each([
+    ['audio/mpeg', 'mp3'],
+    ['audio/wav; codecs=1', 'wav'],
+    ['image/png', 'png'],
+    ['video/mp4', 'mp4'],
+    ['application/octet-stream', 'bin'],
+    ['audio/x-something+odd', 'bin'],
+    ['model/gltf-binary', 'bin'],
+    ['image/avif', 'avif'],
+    ['application/html', 'bin'],
+    ['text/html', 'bin'],
+    ['application/x-sh', 'bin'],
+  ])('names a %s file .%s', (type, ext) => {
+    expect(extensionFor(type)).toBe(ext);
+  });
+});
+
+/**
+ * AN OFFER WITH A REQUEST SPEC: the hook kept the spec, so the tool shows it for
+ * the id alone and runs it for the id and an input, building and paying the
+ * request itself. The server is asked nothing and told only how it ended.
+ */
+describe('an offer with a request spec', () => {
+  const SPEC_ID = '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d01';
+  const routerCalls = (calls: { url: string }[]) =>
+    calls.filter((call) => call.url.startsWith(`${ROUTER}${ROUTER_PATH}`));
+  /** The outcome report is fire-and-forget: let one that was sent land. */
+  const reportsSettled = () => new Promise((resolve) => setTimeout(resolve, 25));
+  const PAYEE = '0x1111111111111111111111111111111111111111';
+
+  function quoteSpec(over: Partial<OfferSpec> = {}): OfferSpec {
+    return {
+      id: SPEC_ID,
+      capabilityId: 'cmc-quotes',
+      provider: 'CoinMarketCap',
+      description: 'latest market quotes for one or more cryptocurrencies',
+      priceAtomic: '10000',
+      priceVaries: false,
+      maxAmountAtomic: '10000',
+      payTo: PAYEE,
+      network: 'eip155:8453',
+      asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+      request: {
+        method: 'GET',
+        url: PROVIDER,
+        fields: { symbol: 'query', convert: 'query' },
+        location: 'query',
+      },
+      input: {
+        type: 'object',
+        properties: {
+          symbol: { type: 'string', description: 'Comma-separated symbols' },
+          convert: { type: 'string', enum: ['USD', 'EUR'] },
+        },
+        required: ['symbol'],
+        additionalProperties: false,
+      },
+      pinned: {},
+      example: { symbol: 'BTC' },
+      returns: 'JSON quotes keyed by symbol',
+      ...over,
+    };
+  }
+
+  it('shows the spec for the id alone, and sends nothing', async () => {
+    await storeSpecs(dir, [quoteSpec()]);
+    const { fetchImpl, calls } = net([]);
+    const result = await runRequestTool({ id: SPEC_ID }, deps(fetchImpl));
+    expect(result.isError).toBe(false);
+    expect(result.envelope).toMatchObject({
+      status: 'spec',
+      id: SPEC_ID,
+      cost: ['provider price 0 USD'],
+    });
+    expect(result.summary).toContain('symbol (string, required); Comma-separated symbols');
+    expect(result.summary).toContain('Returns: JSON quotes keyed by symbol');
+    expect(calls).toEqual([]);
+  });
+
+  it('builds the request from the input, pays the provider, and reports how it ended', async () => {
+    await storeSpecs(dir, [quoteSpec()]);
+    const { fetchImpl, calls } = net([...providerLegs(), { url: ROUTER, status: 200, body: {} }]);
+    const result = await runRequestTool(
+      { id: SPEC_ID, input: { symbol: 'BTC,ETH', convert: 'USD' } },
+      deps(fetchImpl),
+    );
+    expect(result.envelope).toMatchObject({
+      status: 'fulfilled',
+      parameters: { symbol: 'BTC,ETH', convert: 'USD' },
+      cost: ['provider price 0.01 USD'],
+    });
+    // A spec that names no fields hands the body back as it came, and saves nothing.
+    expect(result.envelope.result).toBe(JSON.stringify({ data: { BTC: 1 } }));
+    expect(result.envelope).not.toHaveProperty('fullResultPath');
+    expect(calls[0]).toMatchObject({
+      url: `${PROVIDER}?symbol=BTC%2CETH&convert=USD`,
+      method: 'GET',
+      paid: false,
+    });
+    expect(calls[1]).toMatchObject({ paid: true });
+    expect(vi.mocked(runPay).mock.calls.at(-1)![0]).toMatchObject({
+      terms: {
+        source: 'CoinMarketCap',
+        maxAmountAtomic: '10000',
+        payTo: PAYEE,
+        network: 'eip155:8453',
+      },
+      execution: 'router',
+    });
+    // No decision was asked for: the one router call is the report.
+    await vi.waitFor(() => expect(calls).toHaveLength(3));
+    expect(calls[2]).toMatchObject({ url: `${ROUTER}${ROUTER_PATH}`, method: 'POST' });
+    // The shape the shared fixture pins: the provider's status rides along.
+    const report = JSON.parse(calls[2]!.body!) as Record<string, unknown>;
+    expect(report).toMatchObject({
+      schemaVersion: 1,
+      id: SPEC_ID,
+      status: 'fulfilled',
+      httpStatus: 200,
+    });
+    const fixture = JSON.parse(
+      await readFile(
+        fileURLToPath(new URL('./fixtures/wire-outcome-request.json', import.meta.url)),
+        'utf8',
+      ),
+    ) as Record<string, unknown>;
+    expect(Object.keys(report).sort()).toEqual(Object.keys(fixture).sort());
+  });
+
+  it('refuses an input that misses the spec, naming every problem, and sends nothing', async () => {
+    await storeSpecs(dir, [quoteSpec()]);
+    const { fetchImpl, calls } = net([]);
+    const result = await runRequestTool(
+      { id: SPEC_ID, input: { convert: 'GBP', limit: 3 } },
+      deps(fetchImpl),
+    );
+    expect(result.isError).toBe(false);
+    expect(result.envelope).toMatchObject({
+      status: 'needs_input',
+      cost: ['provider price 0 USD'],
+    });
+    const reason = String(result.envelope.reason);
+    expect(reason).toContain('symbol is required');
+    expect(reason).toContain('convert must be one of "USD", "EUR"');
+    expect(reason).toContain('the input has no field "limit"');
+    // The whole spec comes back with the problems, so the next call can be right.
+    expect(result.summary).toContain('symbol (string, required); Comma-separated symbols');
+    expect(result.summary).toContain('convert (string); one of "USD", "EUR"');
+    expect(result.summary).toContain('Example input: {"symbol":"BTC"}');
+    expect(result.summary).toContain('Returns: JSON quotes keyed by symbol');
+    expect(result.envelope.nextStep).toContain(`request({id: ${JSON.stringify(SPEC_ID)}, input:`);
+    expect(result.envelope.parameters).toEqual({ convert: 'GBP', limit: 3 });
+    expect(calls).toEqual([]);
+  });
+
+  it('refuses a field the spec does not name, even where its schema allows extras', async () => {
+    const open = quoteSpec();
+    delete open.input.additionalProperties;
+    await storeSpecs(dir, [open]);
+    const auth = authorizer();
+    const { fetchImpl, calls } = net([]);
+    const result = await runRequestTool(
+      { id: SPEC_ID, input: { symbol: 'BTC', limit: 3 } },
+      deps(fetchImpl, auth),
+    );
+    expect(result.envelope).toMatchObject({
+      status: 'needs_input',
+      cost: ['provider price 0 USD'],
+    });
+    expect(String(result.envelope.reason)).toContain('the input has no field "limit"');
+    expect(result.summary).toContain('symbol (string, required); Comma-separated symbols');
+    expect(calls).toEqual([]);
+    expect(auth.authorize).not.toHaveBeenCalled();
+  });
+
+  it('sends and pays nothing for a spec whose input schema cannot be checked', async () => {
+    // `text` is no JSON Schema type: the schema never compiles, so nothing
+    // here can say the input fits.
+    await storeSpecs(dir, [
+      quoteSpec({
+        input: { type: 'object', properties: { symbol: { type: 'text' } }, required: ['symbol'] },
+      }),
+    ]);
+    const auth = authorizer();
+    const { fetchImpl, calls } = net([...providerLegs()]);
+    const result = await runRequestTool(
+      { id: SPEC_ID, input: { symbol: 'BTC' } },
+      deps(fetchImpl, auth),
+    );
+    expect(result.envelope).toMatchObject({
+      status: 'failed',
+      reason:
+        'The spec for CoinMarketCap has an input schema this build cannot check, so the call was not sent and nothing was paid.',
+      cost: ['provider price 0 USD'],
+      parameters: { symbol: 'BTC' },
+    });
+    expect(calls).toEqual([]);
+    expect(auth.authorize).not.toHaveBeenCalled();
+  });
+
+  it("signs nothing for a live 402 that pays someone other than the spec's payee", async () => {
+    await storeSpecs(dir, [quoteSpec()]);
+    const { fetchImpl, calls } = net([
+      {
+        url: PROVIDER,
+        status: 402,
+        body: {},
+        headers: {
+          'PAYMENT-REQUIRED': challenge({ payTo: '0x2222222222222222222222222222222222222222' }),
+        },
+      },
+    ]);
+    const result = await runRequestTool({ id: SPEC_ID, input: { symbol: 'BTC' } }, deps(fetchImpl));
+    expect(result.envelope).toMatchObject({
+      status: 'failed',
+      cost: ['provider price 0 USD'],
+      request: { method: 'GET', url: `${PROVIDER}?symbol=BTC` },
+      parameters: { symbol: 'BTC' },
+    });
+    expect(calls.filter((call) => call.paid)).toEqual([]);
+    await reportsSettled();
+    expect(routerCalls(calls)).toEqual([]);
+  });
+
+  it('asks for a smaller input when a varying price lands over the spec ceiling', async () => {
+    await storeSpecs(dir, [quoteSpec({ priceVaries: true, maxAmountAtomic: '1000000' })]);
+    const auth = authorizer();
+    const { fetchImpl, calls } = net([
+      {
+        url: PROVIDER,
+        status: 402,
+        body: {},
+        headers: { 'PAYMENT-REQUIRED': challenge({ amount: '1500000' }) },
+      },
+    ]);
+    const result = await runRequestTool(
+      { id: SPEC_ID, input: { symbol: 'BTC' } },
+      deps(fetchImpl, auth),
+    );
+    expect(result.envelope).toMatchObject({
+      status: 'failed',
+      cost: ['provider price 0 USD'],
+      nextStep: 'Change the input and call again with the same id.',
+    });
+    const reason = String(result.envelope.reason);
+    expect(reason).toContain("prices this input at $1.5, over this spec's $1 ceiling");
+    expect(reason).not.toContain('fresh decision');
+    expect(calls.filter((call) => call.paid)).toEqual([]);
+    expect(auth.authorize).not.toHaveBeenCalled();
+    await reportsSettled();
+    expect(routerCalls(calls)).toEqual([]);
+  });
+
+  it('says a provider refused the input before payment, and what was sent', async () => {
+    await storeSpecs(dir, [quoteSpec()]);
+    const { fetchImpl, calls } = net([
+      { url: PROVIDER, status: 400, body: { error: 'bad symbol' } },
+    ]);
+    const result = await runRequestTool({ id: SPEC_ID, input: { symbol: '??' } }, deps(fetchImpl));
+    expect(result.envelope).toMatchObject({
+      status: 'failed',
+      providerStatus: 400,
+      parameters: { symbol: '??' },
+      nextStep: 'Fix the input and call again with the same id.',
+    });
+    expect(String(result.envelope.reason)).toContain(
+      'CoinMarketCap rejected this input before any payment (HTTP 400)',
+    );
+    // Refused before payment: the offer was not taken, so nothing is reported.
+    await reportsSettled();
+    expect(routerCalls(calls)).toEqual([]);
+  });
+
+  it('reports nothing when the spend policy refuses the call before signing', async () => {
+    await storeSpecs(dir, [quoteSpec()]);
+    const auth = authorizer('deny');
+    const { fetchImpl, calls } = net([
+      { url: PROVIDER, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge() } },
+    ]);
+    const result = await runRequestTool(
+      { id: SPEC_ID, input: { symbol: 'BTC' } },
+      deps(fetchImpl, auth),
+    );
+    expect(result.envelope).toMatchObject({
+      status: 'needs_approval',
+      cost: ['provider price 0 USD'],
+    });
+    expect(calls.filter((call) => call.paid)).toEqual([]);
+    await reportsSettled();
+    expect(routerCalls(calls)).toEqual([]);
+  });
+
+  it('pays once per spec id: a retry after a paid call sends and pays nothing', async () => {
+    await storeSpecs(dir, [quoteSpec()]);
+    const auth = authorizer();
+    const { fetchImpl, calls } = net([...providerLegs(), { url: ROUTER, status: 200, body: {} }]);
+    const first = await runRequestTool(
+      { id: SPEC_ID, input: { symbol: 'BTC' } },
+      deps(fetchImpl, auth),
+    );
+    expect(first.envelope).toMatchObject({ status: 'fulfilled' });
+    await vi.waitFor(() => expect(calls).toHaveLength(3));
+    const retry = await runRequestTool(
+      { id: SPEC_ID, input: { symbol: 'BTC' } },
+      deps(fetchImpl, auth),
+    );
+    expect(retry.isError).toBe(false);
+    expect(retry.envelope).toMatchObject({
+      status: 'needs_input',
+      cost: ['provider price 0 USD'],
+    });
+    expect(String(retry.envelope.reason)).toContain('already paid for');
+    expect(String(retry.envelope.reason)).toContain('$0.01');
+    expect(String(retry.envelope.nextStep)).toContain('request({query})');
+    expect(calls).toHaveLength(3);
+    expect(calls.filter((call) => call.paid)).toHaveLength(1);
+    expect(auth.authorize).toHaveBeenCalledOnce();
+  });
+
+  it('keeps the claim when the spend ledger fails after the payment left: a retry signs nothing', async () => {
+    await storeSpecs(dir, [quoteSpec()]);
+    const auth = authorizer();
+    // The authorization has left, then the ledger write behind `commit` fails:
+    // the error carries no amount, so the call reads as unpaid.
+    vi.mocked(auth.commit).mockRejectedValueOnce(
+      new Error('the spend ledger could not be written'),
+    );
+    // A second paid leg is scripted, so a retry that signs again is observable.
+    const { fetchImpl, calls } = net([...providerLegs(), ...providerLegs()]);
+    const first = await runRequestTool(
+      { id: SPEC_ID, input: { symbol: 'BTC' } },
+      deps(fetchImpl, auth),
+    );
+    expect(first.envelope).toMatchObject({ status: 'failed' });
+    expect(calls.filter((call) => call.paid)).toHaveLength(1);
+    const retry = await runRequestTool(
+      { id: SPEC_ID, input: { symbol: 'BTC' } },
+      deps(fetchImpl, auth),
+    );
+    expect(retry.envelope).toMatchObject({ status: 'needs_input', cost: ['provider price 0 USD'] });
+    expect(String(retry.envelope.reason)).toContain('signed a payment');
+    expect(String(retry.envelope.reason)).toContain('may have left');
+    expect(String(retry.envelope.nextStep)).toContain('request({query})');
+    expect(calls.filter((call) => call.paid)).toHaveLength(1);
+    expect(auth.authorize).toHaveBeenCalledOnce();
+  });
+
+  it('lets a spec run again after a call that paid nothing', async () => {
+    await storeSpecs(dir, [quoteSpec()]);
+    const { fetchImpl, calls } = net([
+      { url: PROVIDER, status: 400, body: { error: 'bad symbol' } },
+      ...providerLegs(),
+      { url: ROUTER, status: 200, body: {} },
+    ]);
+    const refused = await runRequestTool({ id: SPEC_ID, input: { symbol: '??' } }, deps(fetchImpl));
+    expect(refused.envelope).toMatchObject({ status: 'failed', providerStatus: 400 });
+    const fixed = await runRequestTool({ id: SPEC_ID, input: { symbol: 'BTC' } }, deps(fetchImpl));
+    expect(fixed.envelope).toMatchObject({ status: 'fulfilled' });
+    expect(calls.filter((call) => call.paid)).toHaveLength(1);
+    await vi.waitFor(() => expect(routerCalls(calls)).toHaveLength(1));
+  });
+
+  /** The id-less answer: the pick's spec beside its fresh id, and the line
+   *  with the call's skeleton. */
+  function specAnswer(id: string): Record<string, unknown> {
+    const spec: Partial<OfferSpec> = quoteSpec();
+    delete spec.id;
+    const call = '{"symbol":"<symbol>"}';
+    return {
+      schemaVersion: 1,
+      routerVersion: '2026-09-23.1',
+      decision: {
+        action: 'spec',
+        id,
+        spec,
+        hint: `CoinMarketCap fits this: latest market quotes. $0.01 via ${PROVIDER} . Call request({id: ${JSON.stringify(id)}, input: ${call}}) alone and wait for its result.`,
+      },
+    };
+  }
+
+  it("shows the server's pick for a query with no id as its spec and the call's skeleton, then runs it from that spec", async () => {
+    const PICKED = '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d21';
+    const query = 'BTC and ETH spot price in USD';
+    const answer = specAnswer(PICKED);
+    const { fetchImpl, calls } = net([
+      { url: ROUTER, status: 200, body: answer },
+      ...providerLegs(),
+      { url: ROUTER, status: 200, body: {} },
+    ]);
+    const shown = await runRequestTool({ query }, deps(fetchImpl));
+    expect(shown.isError).toBe(false);
+    expect(shown.envelope).toMatchObject({
+      status: 'spec',
+      id: PICKED,
+      cost: ['provider price 0 USD'],
+    });
+    // The whole spec, then the skeleton the server wrote, as the next step.
+    expect(shown.summary).toContain('symbol (string, required); Comma-separated symbols');
+    const skeleton = `request({id: ${JSON.stringify(PICKED)}, input: {"symbol":"<symbol>"}})`;
+    expect(shown.summary).toContain(`Next: CoinMarketCap fits this`);
+    expect(shown.summary).toContain(skeleton);
+    expect(String(shown.envelope.nextStep)).toContain(skeleton);
+    expect(calls.filter((call) => call.url.startsWith(PROVIDER))).toEqual([]);
+    expect(JSON.parse(calls[0]!.body!)).toEqual({
+      schemaVersion: 1,
+      query,
+      accepts: ['discovered', 'spec'],
+    });
+    // The next call runs from the kept spec: no second decision.
+    const ran = await runRequestTool({ id: PICKED, input: { symbol: 'BTC' } }, deps(fetchImpl));
+    expect(ran.envelope).toMatchObject({ status: 'fulfilled' });
+    expect(calls[1]).toMatchObject({ url: `${PROVIDER}?symbol=BTC`, paid: false });
+    expect(calls[2]).toMatchObject({ paid: true });
+    await vi.waitFor(() => expect(calls).toHaveLength(4));
+    expect(JSON.parse(calls[3]!.body!)).toMatchObject({ id: PICKED, status: 'fulfilled' });
+  });
+
+  it('pays nothing from a query with no id, even when the answer carries an input', async () => {
+    const PICKED = '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d22';
+    const auth = authorizer();
+    const answer = specAnswer(PICKED);
+    (answer.decision as Record<string, unknown>).input = { symbol: 'BTC' };
+    const { fetchImpl, calls } = net([{ url: ROUTER, status: 200, body: answer }]);
+    const result = await runRequestTool({ query: 'BTC spot price' }, deps(fetchImpl, auth));
+    // A spec answer is a pick, never a run: an input an older router bound
+    // still parses, and the spec is kept and shown with its skeleton, but
+    // nothing reaches the provider and nothing is signed.
+    expect(result.isError).toBe(false);
+    expect(result.envelope).toMatchObject({ status: 'spec', id: PICKED });
+    expect(String(result.envelope.nextStep)).toContain(
+      `request({id: ${JSON.stringify(PICKED)}, input: {"symbol":"<symbol>"}})`,
+    );
+    // Kept: the id alone shows the spec from this machine, with no second call.
+    const shown = await runRequestTool({ id: PICKED }, deps(fetchImpl, auth));
+    expect(shown.envelope).toMatchObject({ status: 'spec', id: PICKED });
+    expect(calls).toHaveLength(1);
+    expect(auth.authorize).not.toHaveBeenCalled();
+  });
+
+  it("shows the paired skeleton answer's spec and the line to fill, and pays nothing", async () => {
+    const fixtures = fileURLToPath(new URL('./fixtures/', import.meta.url));
+    const answer = JSON.parse(
+      await readFile(join(fixtures, 'wire-lookup-spec-skeleton.json'), 'utf8'),
+    ) as { decision: { id: string; hint: string; spec: OfferSpec } };
+    const auth = authorizer();
+    const { fetchImpl, calls } = net([{ url: ROUTER, status: 200, body: answer }]);
+    const result = await runRequestTool(
+      { query: 'Patrick Collison at Stripe' },
+      deps(fetchImpl, auth),
+    );
+    const { id, hint, spec } = answer.decision;
+    expect(result.envelope).toMatchObject({ status: 'spec', id, nextStep: hint });
+    expect(result.summary).toContain(`${spec.provider}: ${spec.description}`);
+    expect(result.summary).toContain(`Next: ${hint}`);
+    expect(calls).toHaveLength(1);
+    expect(auth.authorize).not.toHaveBeenCalled();
+  });
+
+  it("shows a list service's own spec for a query, not its line", async () => {
+    const fixtures = fileURLToPath(new URL('./fixtures/', import.meta.url));
+    const answer = JSON.parse(
+      await readFile(join(fixtures, 'wire-hook-discovered-spec.json'), 'utf8'),
+    ) as { decision: { id: string; specs: OfferSpec[] } };
+    const { fetchImpl } = net([{ url: ROUTER, status: 200, body: answer }]);
+    const result = await runRequestTool({ query: 'an image of a red fox' }, deps(fetchImpl));
+    const [spec] = answer.decision.specs;
+    expect(result.envelope).toMatchObject({ status: 'spec', id: answer.decision.id });
+    expect(result.summary).toContain(`${spec!.provider}: ${spec!.description}`);
+    expect(result.summary).not.toContain('Also offered');
+  });
+
+  it('builds nothing for an id it holds no spec for, and sends only a query with it', async () => {
+    const { fetchImpl, calls } = net([{ url: ROUTER, status: 200, body: NATIVE }]);
+    const result = await runRequestTool({ id: SPEC_ID }, deps(fetchImpl));
+    expect(result.envelope).toMatchObject({ status: 'needs_input' });
+    expect(String(result.envelope.reason)).toContain('No spec is kept for that id');
+    // An input for it is answered here: no server call, nothing paid.
+    const withInput = await runRequestTool(
+      { id: SPEC_ID, input: { symbol: 'BTC' } },
+      deps(fetchImpl),
+    );
+    expect(withInput.envelope).toMatchObject({ status: 'needs_input' });
+    expect(String(withInput.envelope.nextStep)).toContain('request({query})');
+    expect(calls).toEqual([]);
+    // A query with it goes to the server, which binds the free docs offer.
+    const withQuery = await runRequestTool({ id: SPEC_ID, query: 'BTC price' }, deps(fetchImpl));
+    expect(withQuery.envelope).toMatchObject({ status: 'native' });
+    expect(calls).toHaveLength(1);
+    expect(JSON.parse(calls[0]!.body!)).toEqual({
+      schemaVersion: 1,
+      query: 'BTC price',
+      id: SPEC_ID,
+      accepts: ['discovered', 'spec'],
+    });
+  });
+});
+
+/**
+ * A SPEC THAT NAMES THE FIELDS IT RETURNS. The success rule runs on the whole
+ * body; the agent is then handed only the promised fields, and the whole body
+ * is saved by the offer's id. An Apollo person hit embeds the employer's whole
+ * organization record, which is what made a good match too large to check.
+ */
+describe('a spec that names the fields it returns', () => {
+  async function apolloSpec(id: string): Promise<OfferSpec> {
+    const fixtures = fileURLToPath(new URL('./fixtures/', import.meta.url));
+    const answer = JSON.parse(
+      await readFile(join(fixtures, 'wire-lookup-spec-skeleton.json'), 'utf8'),
+    ) as { decision: { spec: Omit<OfferSpec, 'id'> } };
+    return { ...answer.decision.spec, id };
+  }
+  const INPUT = { first_name: 'Patrick', last_name: 'Collison', domain: 'stripe.com' };
+  const PROMISED = {
+    match_confidence: 'high',
+    name: 'Patrick Collison',
+    title: 'CEO',
+    headline: 'Co-founder and CEO at Stripe',
+    linkedin_url: 'http://www.linkedin.com/in/patrickcollison',
+    email: 'patrick@stripe.com',
+    email_status: 'verified',
+    city: 'San Francisco',
+    state: 'California',
+    country: 'United States',
+  };
+  function hit(technologies: number) {
+    return {
+      person: {
+        ...PROMISED,
+        id: '5f2a',
+        first_name: 'Patrick',
+        last_name: 'Collison',
+        photo_url: 'https://example.test/p.jpg',
+        organization: {
+          name: 'Stripe',
+          primary_domain: 'stripe.com',
+          website_url: 'http://www.stripe.com',
+          linkedin_url: 'http://www.linkedin.com/company/stripe',
+          technologies: Array.from({ length: technologies }, (_, i) => ({
+            uid: `technology_${i}`,
+            name: `Technology ${i}`,
+            category: 'Other',
+          })),
+        },
+        employment_history: [
+          {
+            organization_name: 'Stripe',
+            title: 'CEO',
+            start_date: '2010-01-01',
+            end_date: null,
+            current: true,
+            description: 'Payments infrastructure for the internet.',
+            organization_id: '5f2b',
+          },
+        ],
+      },
+    };
+  }
+  function legsFor(spec: OfferSpec, body: unknown, raw?: string): Leg[] {
+    const quote = challenge({ payTo: spec.payTo, amount: spec.maxAmountAtomic });
+    return [
+      { url: spec.request.url, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': quote } },
+      { url: spec.request.url, status: 200, body, ...(raw !== undefined ? { raw } : {}) },
+      { url: ROUTER, status: 200, body: {} },
+    ];
+  }
+  const savedAt = (id: string) =>
+    join(dir, 'results', `${createHash('sha256').update(id).digest('hex')}.json`);
+
+  it('checks a 150 KB hit on the whole body, hands back the promised fields, and saves the whole body', async () => {
+    const id = '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d31';
+    const spec = await apolloSpec(id);
+    await storeSpecs(dir, [spec]);
+    const body = hit(2_500);
+    const text = JSON.stringify(body);
+    expect(Buffer.byteLength(text)).toBeGreaterThan(150 * 1024);
+    const { fetchImpl } = net(legsFor(spec, body));
+    const result = await runRequestTool({ id, input: INPUT }, deps(fetchImpl));
+    expect(result.isError).toBe(false);
+    expect(result.envelope).toMatchObject({ status: 'fulfilled', fullResultPath: savedAt(id) });
+    expect(result.envelope.resultCaveat).toBeUndefined();
+    expect(JSON.parse(String(result.envelope.result))).toEqual({
+      person: {
+        ...PROMISED,
+        organization: {
+          name: 'Stripe',
+          primary_domain: 'stripe.com',
+          website_url: 'http://www.stripe.com',
+          linkedin_url: 'http://www.linkedin.com/company/stripe',
+        },
+        employment_history: [
+          {
+            organization_name: 'Stripe',
+            title: 'CEO',
+            start_date: '2010-01-01',
+            end_date: null,
+            current: true,
+          },
+        ],
+      },
+    });
+    // The whole body, byte for byte, readable by this user alone.
+    expect(await readFile(savedAt(id), 'utf8')).toBe(text);
+    if (process.platform !== 'win32') {
+      expect((await stat(savedAt(id))).mode & 0o777).toBe(0o600);
+    }
+  });
+
+  it('cuts a billed miss the same way, unverified, with the whole body saved', async () => {
+    const id = '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d32';
+    const spec = await apolloSpec(id);
+    await storeSpecs(dir, [spec]);
+    const miss = { person: { match_confidence: 'none', email: null, search_id: 'abc' } };
+    const { fetchImpl } = net(legsFor(spec, miss));
+    const result = await runRequestTool({ id, input: INPUT }, deps(fetchImpl));
+    expect(result.isError).toBe(true);
+    expect(result.envelope).toMatchObject({ status: 'unverified', fullResultPath: savedAt(id) });
+    expect(String(result.envelope.resultCaveat)).toContain('match_confidence');
+    expect(JSON.parse(String(result.envelope.result))).toEqual({
+      person: { match_confidence: 'none', email: null },
+    });
+    expect(await readFile(savedAt(id), 'utf8')).toBe(JSON.stringify(miss));
+  });
+
+  it('hands back an over-cap body whole and unverified, as before, and saves nothing', async () => {
+    const id = '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d33';
+    const spec = await apolloSpec(id);
+    await storeSpecs(dir, [spec]);
+    const body = { person: { ...PROMISED, blob: 'x'.repeat(MAX_BODY_BYTES) } };
+    const { fetchImpl } = net(legsFor(spec, body));
+    const result = await runRequestTool({ id, input: INPUT }, deps(fetchImpl));
+    expect(result.envelope).toMatchObject({ status: 'unverified' });
+    expect(String(result.envelope.resultCaveat)).toContain('not checked');
+    expect(result.envelope.result).toBe(JSON.stringify(body));
+    expect(result.envelope).not.toHaveProperty('fullResultPath');
+    await expect(readdir(join(dir, 'results'))).rejects.toThrow();
+  });
+
+  it('hands back the whole body when it cannot be saved, and never fails the call over it', async () => {
+    const id = '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d34';
+    const spec = await apolloSpec(id);
+    await storeSpecs(dir, [spec]);
+    // A file where the directory should be: the save fails.
+    await writeFile(join(dir, 'results'), 'not a directory');
+    const body = hit(10);
+    const { fetchImpl } = net(legsFor(spec, body));
+    const result = await runRequestTool({ id, input: INPUT }, deps(fetchImpl));
+    expect(result.isError).toBe(false);
+    expect(result.envelope).toMatchObject({ status: 'fulfilled', result: JSON.stringify(body) });
+    expect(result.envelope).not.toHaveProperty('fullResultPath');
   });
 });

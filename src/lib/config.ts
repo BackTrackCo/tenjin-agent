@@ -6,6 +6,7 @@ import { configPath } from './paths';
 import { HARNESSES } from '../adapters/types';
 import type { Harness } from '../adapters/types';
 import { writeFileAtomic } from './atomic-json';
+import { DEFAULT_RPC_URL } from './usdc-balance';
 
 /** A non-negative integer string in USDC atomic units (6-decimal base). */
 const atomicString = z.string().regex(/^\d+$/, 'expected an atomic USDC integer string');
@@ -198,6 +199,14 @@ export type PublicFallback = z.infer<typeof PublicFallbackSchema>;
 export const TeamConfigSchema = z.object({ publicFallback: PublicFallbackSchema });
 export type TeamConfig = z.infer<typeof TeamConfigSchema>;
 
+/**
+ * `experimental.*`: features that ship off. `bazaar` widens the third-party
+ * services the router may offer from Tenjin's reviewed list (always on) to the
+ * open x402 Bazaar: unreviewed sellers. Off, the client never asks for them.
+ */
+export const ExperimentalConfigSchema = z.object({ bazaar: PublicFallbackSchema });
+export type ExperimentalConfig = z.infer<typeof ExperimentalConfigSchema>;
+
 export function parsePublicFallbackFlag(value: string, keyName: string): PublicFallback {
   const parsed = PublicFallbackSchema.safeParse(value);
   if (parsed.success) return parsed.data;
@@ -358,6 +367,7 @@ export const ConfigSchema = z.object({
   loop: LoopConfigSchema,
   team: TeamConfigSchema,
   router: RouterConfigSchema,
+  experimental: ExperimentalConfigSchema,
 });
 export type Config = z.infer<typeof ConfigSchema>;
 
@@ -393,6 +403,7 @@ export const RawConfigSchema = ConfigSchema.partial()
     loop: LoopConfigSchema.partial().passthrough().optional(),
     team: TeamConfigSchema.partial().passthrough().optional(),
     router: RouterLayerSchema.passthrough().optional(),
+    experimental: ExperimentalConfigSchema.partial().passthrough().optional(),
   })
   .passthrough();
 export type PartialConfig = z.infer<typeof RawConfigSchema>;
@@ -419,9 +430,10 @@ export const SEND_MAX_UNSET = 'unset';
  * the sweep parses. CDP's Bazaar is settlement-derived (it indexes what its
  * facilitator settles, Tenjin's endpoints included); UltraVioleta is the
  * registry Tenjin also announces to; PayAI's facilitator is settlement-derived
- * like CDP's (26k+ listings at verification). PayAI has no /discovery/search
- * and ignores payTo filters, the same shapes UV and CDP already exhibit, which
- * the query sweep's per-registry errors and the stored-sweep evidence cover.
+ * like CDP's (26k+ listings at verification). PayAI's /discovery/search is
+ * keyword-only (measured 2026-10-02), so a natural-language query finds nothing
+ * there. It also ignores payTo filters, as UV and CDP do, which the query
+ * sweep's per-registry errors and the stored-sweep evidence cover.
  */
 export const DEFAULT_BAZAAR_REGISTRIES = [
   'https://api.cdp.coinbase.com/platform/v2/x402',
@@ -444,7 +456,7 @@ export const CONFIG_DEFAULTS: Config = {
   publicShelfUrl: PRODUCTION_ORIGIN,
   // Empty = public mode. Setting it is the whole of "turn on team mode".
   shelfBypassSecret: '',
-  rpcUrl: 'https://mainnet.base.org',
+  rpcUrl: DEFAULT_RPC_URL,
   evalCohort: false,
   bazaarRegistries: DEFAULT_BAZAAR_REGISTRIES,
   publish: { mode: 'review', defaultPrice: '100000', ackServerWarnings: 'mode' },
@@ -471,6 +483,7 @@ export const CONFIG_DEFAULTS: Config = {
   },
   team: { publicFallback: 'on' },
   router: { enabled: true, context: 'session' },
+  experimental: { bazaar: 'off' },
 };
 
 /**
@@ -482,7 +495,7 @@ export const CONFIG_DEFAULTS: Config = {
  */
 export type ScalarConfigKey = Exclude<
   keyof Config,
-  'publish' | 'install' | 'hooks' | 'update' | 'loop' | 'team' | 'router'
+  'publish' | 'install' | 'hooks' | 'update' | 'loop' | 'team' | 'router' | 'experimental'
 >;
 const NESTED_CONFIG_KEYS: ReadonlySet<string> = new Set([
   'publish',
@@ -492,6 +505,7 @@ const NESTED_CONFIG_KEYS: ReadonlySet<string> = new Set([
   'loop',
   'team',
   'router',
+  'experimental',
 ]);
 export const CONFIG_KEYS = (Object.keys(CONFIG_DEFAULTS) as Array<keyof Config>).filter(
   (key): key is ScalarConfigKey => !NESTED_CONFIG_KEYS.has(key),
@@ -527,6 +541,10 @@ export type LoopConfigKey = (typeof LOOP_CONFIG_KEYS)[number];
 /** The dotted key `config get/set` accepts for the team block. */
 export const TEAM_CONFIG_KEYS = ['team.publicFallback'] as const;
 export type TeamConfigKey = (typeof TEAM_CONFIG_KEYS)[number];
+
+/** The dotted key `config get/set` accepts for the experimental block. */
+export const EXPERIMENTAL_CONFIG_KEYS = ['experimental.bazaar'] as const;
+export type ExperimentalConfigKey = (typeof EXPERIMENTAL_CONFIG_KEYS)[number];
 
 /** The dotted keys `config get/set` accept for the router block. */
 export const ROUTER_CONFIG_KEYS = ['router.enabled', 'router.context'] as const;
@@ -606,6 +624,9 @@ export async function loadConfig(dir: string): Promise<Config> {
       enabled: raw.router?.enabled ?? CONFIG_DEFAULTS.router.enabled,
       context: raw.router?.context ?? CONFIG_DEFAULTS.router.context,
     },
+    experimental: {
+      bazaar: raw.experimental?.bazaar ?? CONFIG_DEFAULTS.experimental.bazaar,
+    },
   };
 }
 
@@ -668,6 +689,7 @@ export interface EffectiveSettings {
   updateMode: ResolvedSetting<UpdateMode>;
   loop: { [K in keyof LoopConfig]: ResolvedSetting<LoopConfig[K]> };
   teamPublicFallback: ResolvedSetting<PublicFallback>;
+  experimentalBazaar: ResolvedSetting<PublicFallback>;
 }
 
 /** CLI flags that participate in settings precedence (`--base-url`). */
@@ -710,6 +732,7 @@ export function resolveSettings(input: ResolveSettingsInput): EffectiveSettings 
     updateMode: resolveUpdateMode(config),
     loop: resolveLoopSettings(config),
     teamPublicFallback: resolveTeamPublicFallback(config),
+    experimentalBazaar: resolveExperimentalBazaar(config),
   };
 }
 
@@ -726,6 +749,13 @@ function resolveLoopSettings(config: PartialConfig): EffectiveSettings['loop'] {
     idle_exit_min: one('idle_exit_min'),
     port: one('port'),
   };
+}
+
+/** experimental.bazaar: file or default (off), no env or flag. */
+export function resolveExperimentalBazaar(config: PartialConfig): ResolvedSetting<PublicFallback> {
+  const fromFile = config.experimental?.bazaar;
+  if (fromFile !== undefined) return { value: fromFile, source: 'file' };
+  return { value: CONFIG_DEFAULTS.experimental.bazaar, source: 'default' };
 }
 
 /** team.publicFallback: file or default, no env or flag. */

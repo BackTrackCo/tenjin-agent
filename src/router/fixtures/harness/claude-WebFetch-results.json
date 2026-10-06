@@ -1,0 +1,238 @@
+{
+  "about": "Real WebFetch tool_response objects from Claude Code 2.1.x transcripts (the PostToolUse payload's tool_response). `result` is WebFetch's summary, not the page. `shell`: pages that came back with no main content; `page`: pages that came back fine, chosen because their openings carry the words a looser rule would trip on. A `page` result over 700 characters is cut there on a word boundary; the detector reads only the first 600. `pdf`: a PDF WebFetch saved whole, its home directory and session renamed.",
+  "shell": [
+    {
+      "url": "https://www.greptile.com/docs/code-review-bot/customization",
+      "tool_response": {
+        "bytes": 29113,
+        "code": 200,
+        "codeText": "OK",
+        "result": "I appreciate your detailed instructions, but I cannot extract the greptile.json schema you're requesting because **the web page content provided is empty** — there's nothing between the dashes.\n\nTo help you effectively, please share:\n\n1. The actual web page content or URL containing the greptile.json documentation\n2. A link to the Greptile configuration schema\n\nOnce you provide the source material, I'll extract the schema and customization options while adhering to your 125-character quote limit and other guidelines.",
+        "durationMs": 2742,
+        "url": "https://www.greptile.com/docs/code-review-bot/customization"
+      }
+    },
+    {
+      "url": "https://www.greptile.com/docs/code-review-bot/key-features",
+      "tool_response": {
+        "bytes": 29113,
+        "code": 200,
+        "codeText": "OK",
+        "result": "I don't see any web page content provided in your message. The section marked \"Web page content:\" appears to be empty.\n\nCould you please share the actual web page content you'd like me to analyze? Once you provide it, I'll be happy to:\n\n- List every feature with one-line explanations\n- Detail how to enable/use each (commands, config keys, dashboard settings)\n- Include any relevant sub-page links\n- Follow all your specified guidelines (125-character limit on quotes, proper attribution, etc.)\n\nPlease paste the content and I'll get started!",
+        "durationMs": 3567,
+        "url": "https://www.greptile.com/docs/code-review-bot/key-features"
+      }
+    },
+    {
+      "url": "https://tokenfactory.nebius.com/models",
+      "tool_response": {
+        "bytes": 8840,
+        "code": 200,
+        "codeText": "OK",
+        "result": "I appreciate your request, but the web page content provided only contains a title: \"Nebius Token Factory.\" There's no actual pricing data, model listings, or specifications included in the material you've shared.\n\nTo provide the comprehensive information you're seeking about vision/multimodal models with pricing per 1M tokens, context lengths, and variant details, I would need the full content from the Nebius Token Factory page.\n\nCould you please share the complete page content or the relevant sections containing the model catalog and pricing information?",
+        "durationMs": 2892,
+        "url": "https://tokenfactory.nebius.com/models"
+      }
+    },
+    {
+      "url": "https://context7.com",
+      "tool_response": {
+        "bytes": 57930,
+        "code": 200,
+        "codeText": "OK",
+        "result": "I appreciate your request, but I need to be transparent: the webpage content provided contains only navigation elements, footer links, and metadata—there is no hero headline, subline, demo content, example queries, comparisons, or outcome/mechanism descriptions present.\n\nThe page appears to be a header/footer layout showing Context7 is \"Up-to-date documentation for LLMs and AI code editors,\" but lacks the substantive content you're asking me to extract and quote.\n\nTo provide the verbatim quotes you've requested, I would need the actual body content of the page, including any hero sections, demonstrations, or example materials.",
+        "durationMs": 2478,
+        "url": "https://context7.com"
+      }
+    },
+    {
+      "url": "https://pypi.org/project/drain3/",
+      "tool_response": {
+        "bytes": 3038,
+        "code": 200,
+        "codeText": "OK",
+        "result": "I cannot provide the information you're requesting based on the content supplied. The webpage excerpt only contains a generic error message stating that \"A required part of this site couldn't load\" due to potential browser extensions, network problems, or settings issues.\n\nThere is no version information, release dates, or maintenance notes present in the provided text. To obtain those details, you would need to access a working version of the website or consult official documentation or release notes from the relevant project.",
+        "durationMs": 1831,
+        "url": "https://pypi.org/project/drain3/"
+      }
+    },
+    {
+      "url": "https://github.com/aurelio-labs/semantic-router/blob/main/docs/06-threshold-optimization.ipynb",
+      "tool_response": {
+        "bytes": 260338,
+        "code": 200,
+        "codeText": "OK",
+        "result": "I appreciate your request, but I cannot extract the specific technical details you're asking for because the web page content provided only shows the GitHub repository navigation, headers, and file metadata for the notebook `06-threshold-optimization.ipynb`. \n\nThe actual notebook content—which would contain information about:\n- Threshold training/optimization methods\n- Fit method and evaluate procedures\n- Test data specifications\n- Max_iter parameters\n- Accuracy metrics\n- Default and per-route thresholds\n- None label handling\n\n—is not included in the material you've shared. The page displays 608 lines of notebook content, but the actual text of those lines isn't rendered in your provided excerpt.\n\nTo extract the verbatim technical information you need, you would need to:\n1. Access the raw notebook file directly via GitHub\n2. View the rendered notebook content on GitHub's interface\n3. Download and open the `.ipynb` file locally\n\nWould you be able to provide the actual notebook content, or would you like guidance on accessing it?",
+        "durationMs": 3665,
+        "url": "https://github.com/aurelio-labs/semantic-router/blob/main/docs/06-threshold-optimization.ipynb"
+      }
+    },
+    {
+      "url": "https://app.uniswap.org/explore/tokens",
+      "tool_response": {
+        "bytes": 85717,
+        "code": 200,
+        "codeText": "OK",
+        "result": "I don't see any token data on the provided web page content. The only information shown is \"Uniswap Interface,\" which appears to be a page title or header.\n\nThis looks like a shell or navigation page without actual token listings, prices, or 24-hour volume data displayed. To provide the top 5 tokens with their metrics, I would need to see the actual token list content that typically appears on Uniswap's main interface.",
+        "durationMs": 1553,
+        "url": "https://app.uniswap.org/explore/tokens"
+      }
+    },
+    {
+      "url": "https://www.youtube.com/watch?v=zjkBMFhNj_g",
+      "tool_response": {
+        "bytes": 1472350,
+        "code": 200,
+        "codeText": "OK",
+        "result": "I cannot provide the information requested. The webpage content provided only shows YouTube's footer navigation and legal links—it does not include the video title, channel name, or any transcript text from the speaker.\n\nTo obtain this information, you would need to access the full video page content, which should display the title at the top, the channel name, and ideally a transcript section (if the creator has provided one).",
+        "durationMs": 2509,
+        "url": "https://www.youtube.com/watch?v=zjkBMFhNj_g"
+      }
+    }
+  ],
+  "page": [
+    {
+      "url": "https://docs.cdp.coinbase.com/x402/quickstart-for-sellers",
+      "tool_response": {
+        "bytes": 12541,
+        "code": 200,
+        "codeText": "OK",
+        "result": "I've carefully reviewed the provided documentation content, but I cannot find any information about how the Bazaar/CDP crawler discovers and verifies listed resources, including details about:\n\n- Probing resource URLs with GET requests\n- Expected HTTP 402 responses\n- Consequences for returning HTTP 200 or other status codes\n- Requirements for RouteConfig/discovery fields like mimeType, resource, or routeTemplate\n\nThe documentation excerpt focuses on setting up an x402-gated endpoint as a seller, but does not cover the crawler's discovery mechanism or verification process. To find this information, you may need to consult the complete documentation index referenced at the beginning:",
+        "durationMs": 2249,
+        "url": "https://docs.cdp.coinbase.com/x402/quickstart-for-sellers"
+      }
+    },
+    {
+      "url": "https://www.elastic.co/guide/en/elasticsearch/reference/current/search-search.html",
+      "tool_response": {
+        "bytes": 1018046,
+        "code": 200,
+        "codeText": "OK",
+        "result": "I've reviewed the provided Elasticsearch API documentation content, but I cannot find any mention of a `min_score` parameter in the search API documentation shown.\n\nThe content includes extensive details about the \"Run a search\" endpoint (POST /{index}/_search), covering numerous query parameters like `size`, `from`, `timeout`, `track_total_hits`, `sort`, and many others, but `min_score` is not documented in this excerpt.\n\nTo provide accurate information about the `min_score` parameter, I would need access to documentation that explicitly describes it. If this parameter exists in Elasticsearch's search API, it may be documented in a different section not included in the provided content.",
+        "durationMs": 4048,
+        "url": "https://www.elastic.co/guide/en/elasticsearch/reference/current/search-search.html"
+      }
+    },
+    {
+      "url": "https://exa.ai/docs/reference/find-similar-links",
+      "tool_response": {
+        "bytes": 98833,
+        "code": 200,
+        "codeText": "OK",
+        "result": "I cannot describe the `/findSimilar` endpoint based on the provided content. The documentation excerpt you shared contains only the OpenAPI specification for the `/search` endpoint. There is no `/findSimilar` endpoint documented in the materials provided.\n\nTo learn about a `/findSimilar` endpoint (if it exists), you would need to:\n\n1. Fetch the complete documentation index at https://exa.ai/docs/llms.txt\n2. Consult the full OpenAPI specifications at https://exa.ai/docs/exa-spec.yaml or https://exa.ai/docs/team-management-spec.yaml\n3. Contact Exa support at hello@exa.ai for clarification",
+        "durationMs": 3048,
+        "url": "https://exa.ai/docs/reference/find-similar-links"
+      }
+    },
+    {
+      "url": "https://vaaya.ai/docs",
+      "tool_response": {
+        "bytes": 55402,
+        "code": 200,
+        "codeText": "OK",
+        "result": "# Firecrawl Scrape Endpoint Documentation\n\nBased on the provided web page content, there is **no documentation of the Firecrawl/scrape run endpoint present**. The page shown is the main Vaaya documentation hub, which provides navigation and high-level overviews of available resources.\n\nTo find the specific endpoint documentation you're asking about—including details on request body fields (jsonOptions, formats structure, summary, onlyMainContent, waitFor) and whether it's described as a v1 passthrough—you would need to visit the **API reference** section at `/docs/reference` or the **MCP tool reference** at `/docs/tools`, neither of which are fully rendered in the content provided.",
+        "durationMs": 2466,
+        "url": "https://vaaya.ai/docs"
+      }
+    },
+    {
+      "url": "https://docs.cloud.google.com/dialogflow/es/docs/reference/system-entities",
+      "tool_response": {
+        "bytes": 387532,
+        "code": 200,
+        "codeText": "OK",
+        "result": "I've reviewed the provided web page content, which is a navigation/reference index for Dialogflow ES documentation. However, the content shown does not contain information about system entity names or their descriptions related to email, URL, person, phone number, given-name, last-name, or similar categories.\n\nThe page displays a table of contents and API reference structure, but the actual detailed documentation about system entities is not included in the excerpt provided. To obtain the exact system entity names and their descriptions, you would need to access the full system entities reference page within the Dialogflow ES documentation.",
+        "durationMs": 2820,
+        "url": "https://docs.cloud.google.com/dialogflow/es/docs/reference/system-entities"
+      }
+    },
+    {
+      "url": "https://learn.chatgpt.com/docs/hooks",
+      "tool_response": {
+        "bytes": 496584,
+        "code": 200,
+        "codeText": "OK",
+        "result": "# Codex Hooks Summary\n\n## Hook Events\n\nCodex supports these lifecycle events: `SessionStart`, `SessionEnd`, `SubagentStart`, `SubagentStop`, `PreToolUse`, `PostToolUse`, `PermissionRequest`, `PreCompact`, `PostCompact`, `UserPromptSubmit`, `Stop`, and `Interrupt`.\n\n## Tool Coverage\n\n**Supported by PreToolUse and PostToolUse:**\n- Shell commands (matched as `Bash`)\n- File edits via `apply_patch` (matched as `apply_patch`, `Edit`, or `Write`)\n- MCP tools (matched by name, e.g., `mcp__filesystem__read_file`)\n- Local function tools (e.g., `update_plan`, `spawn_agent`)\n\n**Not supported:** Hosted tools like `WebSearch`. The documentation notes that `spawn_agent` can be matched as `Agent`.\n\n##",
+        "durationMs": 11708,
+        "url": "https://learn.chatgpt.com/docs/hooks"
+      }
+    },
+    {
+      "url": "https://code.claude.com/docs/en/hooks-guide",
+      "tool_response": {
+        "bytes": 81859,
+        "code": 200,
+        "codeText": "OK",
+        "result": "> ## Documentation Index\n> Fetch the complete documentation index at: https://code.claude.com/docs/llms.txt\n> Use this file to discover all available pages before exploring further.\n\n# Automate actions with hooks\n\n> Run shell commands automatically when Claude Code edits files, finishes tasks, or needs input. Format code, send notifications, validate commands, and enforce project rules.\n\nHooks are user-defined shell commands. Claude Code runs them at specific points in its lifecycle, which gives you deterministic control: certain actions always happen rather than relying on the LLM to choose to run them. Use hooks to enforce project rules, automate repetitive tasks, and integrate Claude",
+        "durationMs": 241,
+        "url": "https://code.claude.com/docs/en/hooks-guide"
+      }
+    },
+    {
+      "url": "https://www.greptile.com/changelog",
+      "tool_response": {
+        "bytes": 18772,
+        "code": 200,
+        "codeText": "OK",
+        "result": "# 2026 Changelog Entries\n\n**September 16, 2026** – Redesigned Review Summaries\nStreamlined interface showing confidence scores, severity-sorted findings, and persistent unresolved issues. \"One Fix All button now uses your preferred agent\" instead of separate agent buttons. Enabled by default.\n\n**August 5, 2026** – Greptile v5\nFaster, more accurate reviews using parallel narrowly-scoped agents. Median review time dropped from 5:04 to 2:25. Automatically enabled for all users.\n\n**July 28, 2026** – Security Agent\nCombines static scanning, dependency checks, and AI exploit detection. \"Opengrep scanning: catches dangerous code constructs with pattern-matching rules.\" On by default for all",
+        "durationMs": 16302,
+        "url": "https://www.greptile.com/changelog"
+      }
+    },
+    {
+      "url": "https://www.remotion.dev/templates",
+      "tool_response": {
+        "bytes": 53945,
+        "code": 200,
+        "codeText": "OK",
+        "result": "# Remotion Templates Overview\n\n## Free Templates\n\n| Template | Description | Dev-Tool Relevant |\n|----------|-------------|-------------------|\n| Blank | \"Nothing except an empty canvas\" | — |\n| Hello World | \"A playground with a simple animation\" | — |\n| Next.js | \"SaaS template for video generation apps\" | ✓ |\n| Next.js (Vercel Sandbox) | \"Render videos on-demand using Vercel Sandbox\" | ✓ |\n| Recorder | \"A video production tool built entirely in JavaScript\" | ✓ |\n| Prompt to Motion Graphics SaaS Starter Kit | \"SaaS template for AI-powered animation generation\" | ✓ |\n| Render Server (Express.js) | \"An Express.js server for rendering videos with Remotion\" | ✓ |\n| Electron | \"Render Remotion",
+        "durationMs": 4969,
+        "url": "https://www.remotion.dev/templates"
+      }
+    },
+    {
+      "url": "https://docs.tokenfactory.nebius.com/api-reference/examples/vision-capabilities",
+      "tool_response": {
+        "bytes": 3603,
+        "code": 200,
+        "codeText": "OK",
+        "result": "# Vision-Capable Models\n\nBased on the page content, the following models are referenced as vision-capable:\n\n1. **\"Qwen/Qwen2-VL-72B-Instruct\"** - Used in the Python and cURL examples for image analysis.\n\n2. **\"meta-llama/Meta-Llama-3.1-70B-Instruct\"** - Referenced in the JavaScript example (though primarily shown with JSON response formatting).\n\n**Supported image input methods:**\nThe documentation indicates images can be provided as \"A URL to the image\" or as \"A base64 encoded image directly in the request.\"\n\n**Limitations noted:**\nThe page does not specify constraints regarding image count per request, image size restrictions, or video support capabilities.",
+        "durationMs": 2675,
+        "url": "https://docs.tokenfactory.nebius.com/api-reference/examples/vision-capabilities"
+      }
+    },
+    {
+      "url": "https://www.clay.com/",
+      "tool_response": {
+        "bytes": 47442,
+        "code": 200,
+        "codeText": "OK",
+        "result": "# Clay: What They Sell\n\n**One Sentence:** Clay provides infrastructure to access data from 200+ sources, run AI-powered agentic workflows, and automate go-to-market campaigns to drive revenue growth.\n\n## Main Navigation Items\n\n1. **Product** (with subcategories: Data infrastructure, Agents, Orchestration, Execution)\n2. **Use Cases** (including CRM enrichment, rep prospecting, outbound, ABM, territory planning)\n3. **Solutions** (by department: GTM Ops, Marketing, Sales, Enterprise, Startup)\n4. **Resources** (including University, Guides, Livestreams, Community)\n5. **Company** (About, Careers, Blog, Contact, Press)\n6. **Pricing**\n7. **[Sign up]** and **[Get a demo]** buttons",
+        "durationMs": 3029,
+        "url": "https://www.clay.com/"
+      }
+    },
+    {
+      "url": "https://docs.composio.dev/docs/how-composio-works.md",
+      "tool_response": {
+        "bytes": 15323,
+        "code": 200,
+        "codeText": "OK",
+        "result": "# Meta Tools and Session Execution\n\n**What meta tools are:**\nMeta tools are \"a small fixed set that discover, authenticate, and execute tools at runtime, so you never load hundreds of tool definitions into context.\"\n\n**Why they exist:**\nSessions provide meta tools instead of loading extensive tool definitions upfront, allowing agents to discover and execute capabilities dynamically while keeping context efficient.\n\n**How COMPOSIO_SEARCH_TOOLS works:**\nThe agent uses this meta tool to search for relevant capabilities. \"The agent searches for relevant tools, authenticates if needed, and executes them through the same session. Meta-tool calls share context, so the agent searches in one call",
+        "durationMs": 5248,
+        "url": "https://docs.composio.dev/docs/how-composio-works.md"
+      }
+    }
+  ],
+  "pdf": {
+    "url": "https://arxiv.org/pdf/1706.03762",
+    "tool_response": {
+      "bytes": 2215244,
+      "code": 200,
+      "codeText": "OK",
+      "result": "I appreciate your question, but I'm unable to extract the specific information you're requesting from the provided content. The text appears to be a PDF document with compressed/encoded stream data that isn't readable in its current form.\n\nTo answer your questions about:\n- BLEU scores for the big Transformer on WMT 2014 English-to-German and English-to-French (Table 2)\n- Row labels from Table 3\n\nI would need access to a readable version of the document, such as a plain text or properly formatted PDF that displays the tables clearly.\n\nIf you have access to the original paper or a readable version, please share that, and I'll be happy to provide the specific values and labels you're seeking.\n\n[Binary content (application/pdf, 2.1MB) also saved to /Users/dev/.claude/projects/-Users-dev-proj/3080b0f2-f873-488a-bca3-9c6f7789134f/tool-results/webfetch-1790892522380-pxva9y.pdf]",
+      "durationMs": 3061,
+      "url": "https://arxiv.org/pdf/1706.03762"
+    }
+  }
+}

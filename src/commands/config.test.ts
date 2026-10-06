@@ -127,10 +127,13 @@ describe('runConfigList', () => {
     expect(d['publish.ackServerWarnings']).toEqual({ value: 'mode', source: 'default' });
     expect(d['router.enabled']).toEqual({ value: true, source: 'default' });
     expect(d['router.context']).toEqual({ value: 'session', source: 'default' });
-    // 11 scalar keys (incl. bazaarRegistries and the two shelf keys)
-    // + 3 publish.* (mode, defaultPrice, ackServerWarnings) + 7 hooks.* (one
-    // per arm) + 1 update.mode + 4 loop.* + 1 team.publicFallback + 2 router.*.
-    expect(humanLines).toHaveLength(28);
+    expect(d['experimental.bazaar']).toEqual({ value: 'off', source: 'default' });
+    // The human listing is the router's: 6 scalar keys + update.mode + 2
+    // router.* + experimental.bazaar. The shelf keys stay in `data` only.
+    expect(humanLines).toHaveLength(10);
+    expect((humanLines ?? []).join('\n')).not.toMatch(
+      /publish\.|hooks\.|loop\.|team\.|Shelf|allowlistCreators|evalCohort/,
+    );
   });
 
   it('sendMaxAmount round-trips: unset until set, decimal USD in, Money out, 0 and none valid', async () => {
@@ -160,8 +163,7 @@ describe('runConfigList', () => {
     const { data, humanLines } = await runConfigList(makeCtx());
     const text = (humanLines ?? []).join('\n');
     expect(text).toContain('automatic router daily limit');
-    expect(text).toContain('review=always ask, auto=ask on findings, full-auto=only hard blocks');
-    expect(text).toContain('price used when none is given'); // publish.defaultPrice
+    expect(text).toContain('Tenjin API base URL the router asks');
     // The machine shape carries no description field.
     const d = data as Record<string, Record<string, unknown>>;
     expect(Object.keys(d.sessionBudget ?? {}).sort()).toEqual(['source', 'value']);
@@ -316,6 +318,36 @@ describe('runConfigSet — spend keys', () => {
     const err = await caught(() => runConfigSet({ key: 'sessionBudget', value: bad }, makeCtx()));
     expect(err.code).toBe('USAGE');
     expect(err.exitCode).toBe(2);
+  });
+});
+
+describe('runConfigSet — experimental.bazaar', () => {
+  it('turns it on with the warning, and off without one', async () => {
+    const on = await runConfigSet({ key: 'experimental.bazaar', value: 'on' }, makeCtx());
+    expect(on.data).toMatchObject({ key: 'experimental.bazaar', value: 'on', source: 'file' });
+    const warning = (on.data as { warning: string }).warning;
+    expect(warning).toContain('Experimental');
+    expect(warning).toContain("Coinbase's open x402 Bazaar");
+    expect(warning).toContain('unreviewed');
+    expect(warning).toContain(
+      "short snippets of your prompts are sent to Coinbase's public Bazaar search",
+    );
+    expect(warning).toContain('payments are real');
+    expect(warning).toContain('tenjin config set experimental.bazaar off');
+    expect(on.humanLines).toContain(warning);
+    expect(await readRawFile()).toEqual({ experimental: { bazaar: 'on' } });
+    const got = await runConfigGet({ key: 'experimental.bazaar' }, makeCtx());
+    expect(got.data).toEqual({ key: 'experimental.bazaar', value: 'on', source: 'file' });
+
+    const off = await runConfigSet({ key: 'experimental.bazaar', value: 'off' }, makeCtx());
+    expect(off.data).toEqual({ key: 'experimental.bazaar', value: 'off', source: 'file' });
+  });
+
+  it('refuses anything but on or off', async () => {
+    const err = await caught(() =>
+      runConfigSet({ key: 'experimental.bazaar', value: 'yes' }, makeCtx()),
+    );
+    expect(err.code).toBe('USAGE');
   });
 });
 
@@ -606,11 +638,11 @@ describe('publish readout reflects the per-project .tenjin.json layer', () => {
     const prev = process.cwd();
     try {
       process.chdir(projectCwd);
-      const { data, humanLines } = await runConfigList(makeCtx());
+      const { data } = await runConfigList(makeCtx());
       const d = data as Record<string, { value: unknown; source: string }>;
       expect(d['publish.mode']).toMatchObject({ value: 'auto', source: 'project' });
-      const line = (humanLines ?? []).find((l) => l.includes('publish.mode'));
-      expect(line).toContain('downgraded from full-auto');
+      const { humanLines } = await runConfigGet({ key: 'publish.mode' }, makeCtx());
+      expect(humanLines?.[0]).toContain('downgraded from full-auto');
     } finally {
       process.chdir(prev);
       await rm(projectCwd, { recursive: true, force: true });
@@ -628,11 +660,11 @@ describe('publish readout reflects the per-project .tenjin.json layer', () => {
     const prev = process.cwd();
     try {
       process.chdir(projectCwd);
-      const { data, humanLines } = await runConfigList(makeCtx());
+      const { data } = await runConfigList(makeCtx());
       const d = data as Record<string, { value: unknown; source: string }>;
       expect(d['publish.mode']).toMatchObject({ value: 'full-auto', source: 'project' });
-      const line = (humanLines ?? []).find((l) => l.includes('publish.mode'));
-      expect(line).not.toContain('downgraded');
+      const { humanLines } = await runConfigGet({ key: 'publish.mode' }, makeCtx());
+      expect(humanLines?.[0]).not.toContain('downgraded');
     } finally {
       process.chdir(prev);
       await rm(projectCwd, { recursive: true, force: true });
@@ -1337,17 +1369,12 @@ describe('loop.* and team.publicFallback (loop-redesign/07-pr-b-daemon-kernel.md
   };
 
   it('lists every loop key and team.publicFallback with default provenance on a fresh dir', async () => {
-    const { data, humanLines } = await runConfigList(makeCtx());
+    const { data } = await runConfigList(makeCtx());
     const d = data as Record<string, { value: unknown; source: string }>;
     for (const key of LOOP_CONFIG_KEYS) {
       expect(d[key]).toEqual({ value: LOOP_DEFAULT_LINES[key], source: 'default' });
-      const line = (humanLines ?? []).find((l) => l.includes(key));
-      expect(line).toBeDefined();
-      expect(line).toContain('(default)');
     }
     expect(d['team.publicFallback']).toEqual({ value: 'on', source: 'default' });
-    const teamLine = (humanLines ?? []).find((l) => l.includes('team.publicFallback'));
-    expect(teamLine).toContain('(default)');
   });
 
   it('set loop.port 31000 then get reports "31000" from file, and only that subkey is written', async () => {

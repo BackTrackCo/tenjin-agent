@@ -13,8 +13,9 @@ import { writeFileAtomic, writeFileAtomicExclusive } from '../lib/atomic-json';
  * every failure is swallowed, so a full disk or a read-only data dir loses the
  * footer and changes no routing or payment outcome. That is the whole contract
  * this module has to keep. Two markers are read back by the hooks, the offer
- * mark and the last redirect, and both only ever make a hook say less: losing
- * either routes a call exactly as a session with no record would. The free-docs
+ * mark and the redirect claims, and both only ever make a hook say less: losing
+ * either routes a call exactly as a session with no record would, and a claim
+ * that cannot be written denies nothing. The free-docs
  * records are the same kind: a lost augment marker is a search with no docs
  * added, and a lost query claim is one more free fetch.
  *
@@ -40,7 +41,7 @@ const BINDING_PREFIX = 'id-';
 const OFFER_PREFIX = 'offer-';
 /** The session's own liveness touch, likewise outside the call-record pattern. */
 const SESSION_FILE = 'session.json';
-/** An agent's last pre-call redirect, one file per agent in the session. */
+/** A pre-call redirect, one file per agent and target in the session. */
 const REDIRECT_PREFIX = 'redirect-';
 /** A search the pre-call hook is adding free docs to, keyed by its `tool_use_id`. */
 const AUGMENT_PREFIX = 'augment-';
@@ -102,14 +103,6 @@ interface SavedProgress extends Stamp {
 /** A search being given free docs, and whose docs they are. */
 interface SavedAugment extends Stamp {
   provider: string;
-}
-
-/** Which decision the last redirect named (by digest), its category, and
- *  whether it delivered. */
-interface SavedRedirect extends Stamp {
-  id: string;
-  category: string;
-  delivered: boolean;
 }
 
 export interface ProgressStep {
@@ -302,92 +295,86 @@ export async function claimQuery(
 }
 
 /**
- * ONE RECORD PER AGENT. Subagents share the session id, so a shared record
- * would let one overwrite another's redirect, or spend the main agent's skip.
- * The main agent's key is the empty string, which no `agent_id` can be: the
- * decoder refuses an empty one.
+ * ONE RECORD PER AGENT, TARGET AND WINDOW. Subagents share the session id, so
+ * the agent is in the key, and the main agent's part is the empty string, which
+ * no `agent_id` can be: the decoder refuses an empty one. The target is in it
+ * too, one file each, so parallel calls never share a record: one call's
+ * redirect can be neither overwritten nor spent by another's. And so is the
+ * {@link EXPIRY_MS} window the claim was made in, so a claim is only ever
+ * created, never replaced: see {@link claimRedirect}.
  */
-function redirectPath(dataDir: string, sessionId: string, agentId: string | undefined): string {
-  return join(sessionDir(dataDir, sessionId), `${REDIRECT_PREFIX}${digest(agentId ?? '')}.json`);
-}
-
-/**
- * NEVER BLOCKED TWICE IN A ROW FOR ONE KIND OF LOOKUP. The pre-call hook
- * records each redirect as that agent's last one, `request` marks it delivered
- * once the lookup it named is fulfilled, and the agent's next offer in the same
- * category, while it is still undelivered, is withheld ({@link takeUndelivered}).
- * Without it, a lookup that fails sends the agent back to its own tools, and
- * the same deny meets it there.
- */
-export async function noteRedirect(
+function redirectPath(
   dataDir: string,
   sessionId: string,
   agentId: string | undefined,
-  redirect: { id: string; category: string },
-  now = Date.now(),
-): Promise<void> {
-  const saved: SavedRedirect = {
-    version: 1,
-    at: now,
-    id: digest(redirect.id),
-    category: redirect.category,
-    delivered: false,
-  };
-  await write(redirectPath(dataDir, sessionId, agentId), saved);
+  target: string,
+  window: number,
+): string {
+  const key = digest(JSON.stringify([agentId ?? '', target, window]));
+  return join(sessionDir(dataDir, sessionId), `${REDIRECT_PREFIX}${key}.json`);
 }
 
-/** The lookup this id named was fulfilled. The session is resolved the way the
- *  footer is, and only the one agent's record carrying this same id is marked. */
-export async function markDelivered(
+/**
+ * NEVER REDIRECTED TWICE FOR ONE TARGET. True, once, when this agent has not
+ * been redirected on this exact search or URL in the last {@link EXPIRY_MS},
+ * and the claim is now its; the pre-call hook denies only on true. So the
+ * agent's own retry of a redirected call runs, whether the lookup it was sent
+ * to delivered, failed or was never called, and whatever other calls ran in
+ * between.
+ *
+ * ONLY EVER AN EXCLUSIVE CREATE. Replacing an expired claim let two parallel
+ * copies of one call both read the old stamp and both write, and both deny.
+ * The claim's file is named by its window instead, so the one create per
+ * window decides, and the previous window's claim, while it is still inside
+ * {@link EXPIRY_MS}, is read and never touched: a claim made just before a
+ * boundary still lasts its full span. A claim that cannot be written is false:
+ * the call runs.
+ */
+export async function claimRedirect(
   dataDir: string,
-  decisionId: string,
+  sessionId: string,
+  agentId: string | undefined,
+  target: string,
   now = Date.now(),
-): Promise<void> {
-  const directory = await resolveProgressSession(dataDir, { id: decisionId, now }).catch(
-    () => null,
-  );
-  if (directory === null) return;
-  const id = digest(decisionId);
+): Promise<boolean> {
+  const window = Math.floor(now / EXPIRY_MS);
+  const previous = await readStamp(redirectPath(dataDir, sessionId, agentId, target, window - 1));
+  if (previous !== null && now - previous.at <= EXPIRY_MS) return false;
+  const stamp: Stamp = { version: 1, at: now };
   try {
-    const dir = await opendir(directory);
-    let count = 0;
-    for await (const entry of dir) {
-      // Only redirect records count toward the cap: a busy session's call
-      // records and markers must not push this agent's record past it.
-      if (!entry.isFile() || !entry.name.startsWith(REDIRECT_PREFIX)) continue;
-      if (++count > MAX_RECORDS) return;
-      const path = join(directory, entry.name);
-      const last = await readRedirect(path);
-      if (last?.id !== id) continue;
-      await write(path, { ...last, delivered: true });
-      return;
-    }
+    await writeFileAtomicExclusive(
+      redirectPath(dataDir, sessionId, agentId, target, window),
+      JSON.stringify(stamp),
+      { mode: 0o600, dirMode: 0o700 },
+    );
+    return true;
   } catch {
-    // A lost mark costs one withheld offer, never a payment.
+    // Taken in this window, which is always inside EXPIRY_MS, or not writable.
+    return false;
   }
 }
 
 /**
- * True, once, when this agent's last redirect is live, undelivered and in this
- * same category. The record is REMOVED, so the call after this one is routed
- * as usual, and only the caller whose removal succeeds gets true: two parallel
- * calls cannot both skip on one redirect. Any other answer leaves it alone.
+ * THE READ HALF OF {@link claimRedirect}: true when this agent already holds a
+ * live claim on this exact search or URL. The pre-call arms ask it BEFORE the
+ * router, so the retry of a call they already redirected, which they would
+ * only withhold, costs no decision and leaves no offer nobody sees. It never
+ * writes and never decides on its own: a false here still goes through the
+ * exclusive create, which is what keeps two parallel copies to one deny.
  */
-export async function takeUndelivered(
+export async function redirectClaimed(
   dataDir: string,
   sessionId: string,
   agentId: string | undefined,
-  category: string,
+  target: string,
   now = Date.now(),
 ): Promise<boolean> {
-  const path = redirectPath(dataDir, sessionId, agentId);
-  const last = await readRedirect(path);
-  if (last === null || last.delivered || last.category !== category) return false;
-  if (now - last.at > EXPIRY_MS) return false;
-  return rm(path).then(
-    () => true,
-    () => false,
-  );
+  const window = Math.floor(now / EXPIRY_MS);
+  for (const at of [window, window - 1]) {
+    const stamp = await readStamp(redirectPath(dataDir, sessionId, agentId, target, at));
+    if (stamp !== null && now - stamp.at <= EXPIRY_MS) return true;
+  }
+  return false;
 }
 
 /**
@@ -688,10 +675,7 @@ function line(row: SavedProgress, now: number): string {
 }
 
 /** Whether it landed. Every caller but the augment marker ignores the answer. */
-async function write(
-  path: string,
-  body: Stamp | SavedProgress | SavedRedirect | SavedAugment,
-): Promise<boolean> {
+async function write(path: string, body: Stamp | SavedProgress | SavedAugment): Promise<boolean> {
   try {
     await writeFileAtomic(path, JSON.stringify(body), { mode: 0o600, dirMode: 0o700 });
     return true;
@@ -710,17 +694,6 @@ function stampOf(row: Record<string, unknown> | null): Stamp | null {
   if (row === null) return null;
   return row.version === 1 && typeof row.at === 'number' && Number.isFinite(row.at)
     ? { version: 1, at: row.at }
-    : null;
-}
-
-async function readRedirect(path: string): Promise<SavedRedirect | null> {
-  const row = await readJson(path);
-  const stamp = stampOf(row);
-  if (row === null || stamp === null) return null;
-  return typeof row.id === 'string' &&
-    typeof row.category === 'string' &&
-    typeof row.delivered === 'boolean'
-    ? { ...stamp, id: row.id, category: row.category, delivered: row.delivered }
     : null;
 }
 

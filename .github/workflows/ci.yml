@@ -39,13 +39,23 @@ jobs:
       # the committed fixture) run here; the LIVE walk lives in contract-drift.yml
       # (scheduled + dispatch) so a server blip can never red an unrelated PR.
       - run: pnpm run check
-      # Supply-chain advisory scan, WARN-ONLY: advisories publish against a
-      # frozen lockfile, so a blocking gate reds every open PR for drift
-      # unrelated to its diff. A hit annotates the run; clearing it is a
-      # range-scoped override in pnpm-workspace.yaml (see the entries there).
-      - name: Audit (warn-only)
+      # Supply-chain advisory scan. WARN-ONLY on ordinary PRs: advisories
+      # publish against a frozen lockfile, so a blocking gate reds every open PR
+      # for drift unrelated to its diff. BLOCKING on the release version PR
+      # (changeset-release/main): merging it is the step right before publish,
+      # and release.yml's pre-publish gate runs this same audit, so a hit is
+      # caught here, before the publish dispatch, not during it. The daily
+      # audit.yml opens the fix PR (range-scoped overrides in pnpm-workspace.yaml).
+      - name: Audit (blocking on the version PR, warn-only elsewhere)
+        env:
+          HEAD_REF: ${{ github.head_ref }}
         run: |
-          pnpm audit --audit-level=high || echo "::warning title=pnpm audit::high/critical advisories in the lockfile; add a range-scoped override in pnpm-workspace.yaml"
+          if pnpm audit --audit-level=high; then exit 0; fi
+          if [ "$HEAD_REF" = "changeset-release/main" ]; then
+            echo "::error title=pnpm audit::high/critical advisories would fail the publish gate; merge the audit fix PR (or run the audit workflow), then update this PR"
+            exit 1
+          fi
+          echo "::warning title=pnpm audit::high/critical advisories in the lockfile; the daily audit workflow opens a fix PR"
       # Packed-artifact smoke on the engines floor (Node 24). npm-packs the
       # CLI, installs the tarball into a throwaway consumer, and exercises the
       # PUBLISHED shape (--version, config, a bogus command) — catching

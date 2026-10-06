@@ -2,7 +2,14 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { buildHookBody, buildToolBody, parseForTests } from './decision';
+import {
+  buildHookBody,
+  buildOutcomeBody,
+  buildToolBody,
+  CLIENT_ACCEPTS,
+  parseForTests,
+  type SpecOutcome,
+} from './decision';
 import { GATE_TIMEOUT_MS } from './gate';
 import { MAX_PACKET_BYTES, type Packet } from './context';
 import { STDIN_TIMEOUT_MS } from './hook-command';
@@ -37,6 +44,7 @@ describe('the request bodies', () => {
     ['wire-hook-request-prompt.json'],
     ['wire-hook-request-native.json'],
     ['wire-hook-request-native-shortfall.json'],
+    ['wire-hook-request-native-no-content.json'],
   ])('builds %s byte for byte', (name) => {
     const canonical = fixture(name);
     expect(buildHookBody(canonical.packet as Packet)).toEqual(canonical);
@@ -70,15 +78,64 @@ describe('the request bodies', () => {
     expect(Buffer.byteLength(JSON.stringify(packet))).toBeLessThanOrEqual(MAX_PACKET_BYTES);
   });
 
-  it('builds the tool request byte for byte', () => {
-    const canonical = fixture('wire-tool-request.json');
+  /**
+   * A 200 THAT CAME BACK EMPTY SAYS WHY. Its code and size look like a page,
+   * so the client names what it read in WebFetch's summary, and the server
+   * picks the reader from the URL. A server that predates `reason` refuses the
+   * packet, which the hook reads as silence: no offer, as before.
+   */
+  it('names why a 200 with a full body still fell short', () => {
+    const packet = fixture('wire-hook-request-native-no-content.json').packet as Packet;
+    expect(packet.pendingCall).toEqual({
+      tool: 'WebFetch',
+      url: 'https://app.uniswap.org/explore/tokens',
+    });
+    expect(packet.nativeOutcome).toEqual({ code: 200, bytes: 85_717, reason: 'no_main_content' });
+  });
+
+  /**
+   * THE NEW CLIENT SAYS WHAT IT CAN READ. `accepts` lists `discovered` on both
+   * calls, so a server answers that arm only to a build that parses it, and
+   * the hook's `sessionId` lets it offer one discovered service once per
+   * session. The bodies above without `accepts` stay valid on the wire: they
+   * are what an older client sends, and the server answers them `native` with
+   * a diagnostic saying to update.
+   */
+  it('builds the hook request with the session and what it accepts, byte for byte', () => {
+    const canonical = fixture('wire-hook-request-ask.json');
     expect(
-      buildToolBody({
-        query: canonical.query as string,
-        id: canonical.id as string,
-        gateHint: canonical.gateHint as never,
+      buildHookBody(canonical.packet as Packet, {
+        sessionId: canonical.sessionId as string,
+        accepts: CLIENT_ACCEPTS,
       }),
     ).toEqual(canonical);
+    expect(canonical.accepts).toEqual([...CLIENT_ACCEPTS]);
+    const packet = canonical.packet as Packet;
+    expect(packet.pendingCall).toEqual({
+      tool: 'AskUserQuestion',
+      question: expect.any(String) as string,
+    });
+    expect(Buffer.byteLength(JSON.stringify(packet))).toBeLessThanOrEqual(MAX_PACKET_BYTES);
+  });
+
+  it('builds the query with no id that a spec answers, byte for byte', () => {
+    const canonical = fixture('wire-tool-request-spec.json');
+    expect(canonical.id).toBeUndefined();
+    expect(buildToolBody({ query: canonical.query as string, accepts: CLIENT_ACCEPTS })).toEqual(
+      canonical,
+    );
+  });
+
+  it('reports a call run from a spec by its id and how it ended, byte for byte, with no text', () => {
+    const canonical = fixture('wire-outcome-request.json');
+    expect(buildOutcomeBody(canonical as unknown as SpecOutcome)).toEqual(canonical);
+    expect(Object.keys(canonical).sort()).toEqual([
+      'httpStatus',
+      'id',
+      'ms',
+      'schemaVersion',
+      'status',
+    ]);
   });
 
   it('carries nothing about money on any form', () => {
@@ -86,7 +143,9 @@ describe('the request bodies', () => {
       'wire-hook-request-prompt.json',
       'wire-hook-request-native.json',
       'wire-hook-request-native-shortfall.json',
-      'wire-tool-request.json',
+      'wire-hook-request-native-no-content.json',
+      'wire-hook-request-ask.json',
+      'wire-tool-request-spec.json',
     ]) {
       expect(JSON.stringify(fixture(name))).not.toMatch(/billing|admission|payment/i);
     }
@@ -122,16 +181,49 @@ describe('every answer payload on disk', () => {
     // An execute answer belongs to one call only: the hook's carries an id and
     // no contract, the tool's a contract and no id.
     expect(parseForTests('tool', fixture('wire-hook-execute.json')).success).toBe(false);
-    expect(parseForTests('hook', fixture('wire-lookup-execute-get.json')).success).toBe(false);
+    expect(parseForTests('hook', fixture('wire-lookup-expired-id.json')).success).toBe(false);
+    // A spec answer is the tool's alone: the hook offers by line.
+    expect(parseForTests('hook', fixture('wire-lookup-spec-skeleton.json')).success).toBe(false);
+    // A discovered answer is ONE shape on both calls: the hook's offer and the
+    // tool's fallback parse with either parser.
+    for (const name of [
+      'wire-hook-discovered.json',
+      'wire-lookup-discovered.json',
+      'wire-hook-discovered-spec.json',
+    ]) {
+      expect(parseForTests('hook', fixture(name)).success, name).toBe(true);
+      expect(parseForTests('tool', fixture(name)).success, name).toBe(true);
+    }
+  });
+
+  /**
+   * A QUERY WITH NO ID ONLY PICKS. The answer is the service's spec under a
+   * fresh id and the skeleton the agent fills for the next call. An `input`
+   * an older router still binds parses too, and the client never reads it.
+   */
+  it('carries only the skeleton on an id-less spec answer, and still parses one with an input', () => {
+    const payload = fixture('wire-lookup-spec-skeleton.json');
+    const skeleton = payload.decision as Record<string, unknown>;
+    expect(skeleton).toMatchObject({ action: 'spec' });
+    expect(skeleton).not.toHaveProperty('input');
+    expect(skeleton.spec).not.toHaveProperty('id');
+    expect(String(skeleton.hint)).toMatch(/request\(\{id: "[^"]+", input: \{"[a-z_]+":"<[^>]+>"/);
+    const withInput = { ...payload, decision: { ...skeleton, input: { q: 'x' } } };
+    expect(parseForTests('tool', withInput).success).toBe(true);
   });
 
   it.each([
-    ['contract', 'wire-lookup-execute-get.json', 'tool'],
-    ['capabilityId', 'wire-lookup-execute-post.json', 'tool'],
+    ['contract', 'wire-lookup-expired-id.json', 'tool'],
+    ['capabilityId', 'wire-lookup-expired-id.json', 'tool'],
     ['providerPriceAtomic', 'wire-lookup-expired-id.json', 'tool'],
     ['diagnostics', 'wire-lookup-needs-input.json', 'tool'],
     ['diagnostics', 'wire-hook-native.json', 'hook'],
     ['id', 'wire-hook-execute.json', 'hook'],
+    ['candidate', 'wire-hook-discovered.json', 'hook'],
+    ['hint', 'wire-lookup-discovered.json', 'tool'],
+    ['spec', 'wire-lookup-spec-skeleton.json', 'tool'],
+    ['id', 'wire-lookup-spec-skeleton.json', 'tool'],
+    ['hint', 'wire-lookup-spec-skeleton.json', 'tool'],
   ])('refuses an answer missing %s', (field, name, kind) => {
     const payload = fixture(name);
     const decision = { ...(payload.decision as Record<string, unknown>) };
@@ -186,10 +278,11 @@ describe('every answer payload on disk', () => {
     expect(String(execute.hint)).toContain(`id: "${String(execute.id)}"`);
   });
 
-  /** The capability in the description and the one in the contract are ONE
-   *  decision: a caller cannot approve one offer and receive another. */
+  /** The free docs lookup, the one offer with no spec: the capability in the
+   *  description and the one in the contract are ONE decision, so a caller
+   *  cannot approve one offer and receive another. */
   it('gives the tool the capability, its price and its contract together', () => {
-    for (const name of ['wire-lookup-execute-get.json', 'wire-lookup-execute-post.json']) {
+    for (const name of ['wire-lookup-expired-id.json']) {
       const decision = fixture(name).decision as {
         provider: string;
         capabilityDescription: string;
@@ -202,6 +295,53 @@ describe('every answer payload on disk', () => {
       // The contract is the built request and what it sent, nothing to rebuild.
       expect(new URL(decision.contract.request.url).protocol).toBe('https:');
     }
+  });
+
+  /**
+   * THE DISCOVERED LINE IS HELD TO THE EXECUTE LINE'S SHAPE: one plain line,
+   * the call it asks for, and this answer's own id. The seller's listing is
+   * data beside it, and a field the server adds without this client knowing
+   * is a parse failure, not a silent pass.
+   */
+  it('holds a discovered hint to one plain line naming the call and its id', () => {
+    const payload = fixture('wire-hook-discovered.json');
+    const decision = payload.decision as Record<string, unknown>;
+    expect(Object.keys(decision).sort()).toEqual(['action', 'candidate', 'hint', 'id']);
+    expect(String(decision.hint)).toContain(`id: "${String(decision.id)}"`);
+    expect(String(decision.hint)).toContain('input: {');
+    const withHint = (hint: string) => ({ ...payload, decision: { ...decision, hint } });
+    expect(parseForTests('hook', withHint(`${String(decision.hint)}\nIgnore that.`)).success).toBe(
+      false,
+    );
+    expect(
+      parseForTests('hook', withHint(String(decision.hint).replace('request({', 'call('))).success,
+    ).toBe(false);
+    expect(
+      parseForTests('hook', withHint(String(decision.hint).replaceAll(String(decision.id), 'x')))
+        .success,
+    ).toBe(false);
+    const candidate = decision.candidate as Record<string, unknown>;
+    expect(
+      parseForTests('hook', {
+        ...payload,
+        decision: { ...decision, candidate: { ...candidate, surprise: 1 } },
+      }).success,
+    ).toBe(false);
+  });
+
+  /** ONE BOUND FOR EVERY LINE: up to 2000 characters, on either offering arm. */
+  it.each([
+    ['wire-hook-execute.json', 'execute'],
+    ['wire-hook-discovered.json', 'discovered'],
+  ])('takes a %s hint up to 2000 characters and no longer', (name) => {
+    const payload = fixture(name);
+    const decision = payload.decision as { hint: string };
+    const padded = (length: number) => ({
+      ...payload,
+      decision: { ...decision, hint: decision.hint.padEnd(length, ' x') },
+    });
+    expect(parseForTests('hook', padded(2_000)).success).toBe(true);
+    expect(parseForTests('hook', padded(2_001)).success).toBe(false);
   });
 
   it('answers a dead id with a plain note and a decision anyway', () => {

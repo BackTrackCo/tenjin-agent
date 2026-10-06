@@ -2,9 +2,14 @@ import { describe, expect, it } from 'vitest';
 import {
   assertResultSchema,
   canonicalHash,
+  MAX_BODY_BYTES,
+  projectBody,
   validateAgainstSchema,
   validateResultBody,
 } from './request-schema';
+
+/** One byte past the result cap, as a JSON document. */
+const OVER_CAP = JSON.stringify({ blob: 'x'.repeat(MAX_BODY_BYTES) });
 
 const QUOTE_SCHEMA = {
   $schema: 'https://json-schema.org/draft/2020-12/schema',
@@ -73,7 +78,24 @@ describe('result body validation', () => {
 
   it('refuses a non-JSON body and one past the size limit', () => {
     expect(validateResultBody(schema, 'not json').valid).toBe(false);
-    expect(validateResultBody(schema, 'x'.repeat(200 * 1024)).reason).toContain('validation limit');
+    expect(validateResultBody(schema, OVER_CAP).reason).toContain('validation limit');
+  });
+
+  /**
+   * AN ORDINARY PROVIDER BODY IS CHECKED. An Apollo person hit is 60-180 KB;
+   * one past 64 KB was refused by the input cap, and one past 128 KB never
+   * checked, so a good match came back unverified either way.
+   */
+  it('checks a 150 KB body against its rule, and passes one that satisfies it', () => {
+    const body = JSON.stringify({ data: { organization: { blurb: 'x'.repeat(150 * 1024) } } });
+    expect(Buffer.byteLength(body)).toBeGreaterThan(150 * 1024);
+    expect(validateResultBody(schema, body)).toEqual({ valid: true });
+    const miss = JSON.stringify({ error: 'x'.repeat(150 * 1024) });
+    expect(validateResultBody(schema, miss)).toMatchObject({
+      valid: false,
+      reason: expect.stringContaining('/ must have required property') as unknown as string,
+    });
+    expect(validateResultBody(schema, miss).unvalidated).toBeUndefined();
   });
 });
 
@@ -107,7 +129,7 @@ describe('what a failed result contract reports', () => {
     });
     expect(check.diagnosis?.preview).toContain('success');
     expect(check.diagnosis?.bytes).toBeGreaterThan(0);
-    expect(check.diagnosis?.maxBytes).toBe(128 * 1024);
+    expect(check.diagnosis?.maxBytes).toBe(MAX_BODY_BYTES);
   });
 
   it('says the body was not JSON at all, and shows a bounded piece of it', () => {
@@ -119,9 +141,9 @@ describe('what a failed result contract reports', () => {
   });
 
   it('says it was too large, with the size and the cap', () => {
-    const check = validateResultBody(schema, JSON.stringify({ blob: 'x'.repeat(200 * 1024) }));
-    expect(check.diagnosis).toMatchObject({ failed: 'too-large', maxBytes: 128 * 1024 });
-    expect(check.diagnosis!.bytes).toBeGreaterThan(128 * 1024);
+    const check = validateResultBody(schema, OVER_CAP);
+    expect(check.diagnosis).toMatchObject({ failed: 'too-large', maxBytes: MAX_BODY_BYTES });
+    expect(check.diagnosis!.bytes).toBeGreaterThan(MAX_BODY_BYTES);
   });
 
   /**
@@ -131,7 +153,7 @@ describe('what a failed result contract reports', () => {
    * contract broken (and, on a paid leg, charging for a discarded result).
    */
   it('marks an over-limit body unvalidated, and a rejected one not', () => {
-    const tooLarge = validateResultBody(schema, JSON.stringify({ blob: 'x'.repeat(200 * 1024) }));
+    const tooLarge = validateResultBody(schema, OVER_CAP);
     expect(tooLarge.valid).toBe(false);
     expect(tooLarge.unvalidated).toBe(true);
     expect(tooLarge.reason).toContain('not checked');
@@ -152,5 +174,130 @@ describe('what a failed result contract reports', () => {
 
   it('says nothing at all when the body satisfies the rule', () => {
     expect(validateResultBody(schema, JSON.stringify({ success: true }))).toEqual({ valid: true });
+  });
+});
+
+/**
+ * THE FIELDS A SPEC PROMISES. Ajv's `removeAdditional: 'all'`: every property
+ * the schema does not declare goes, through objects and array items; what the
+ * schema does not describe stays as it is; and nothing is ever refused.
+ */
+describe('cutting a result to the fields its spec promises', () => {
+  const PERSON = {
+    type: 'object',
+    properties: {
+      person: {
+        type: 'object',
+        properties: {
+          name: { type: ['string', 'null'] },
+          email: { type: ['string', 'null'] },
+          organization: { type: 'object', properties: { name: { type: 'string' } } },
+          employment_history: {
+            type: 'array',
+            items: { type: 'object', properties: { title: { type: 'string' } } },
+          },
+        },
+      },
+    },
+  };
+
+  it('keeps only the declared properties, through nested objects and array items', () => {
+    const body = JSON.stringify({
+      person: {
+        name: 'Patrick Collison',
+        email: 'patrick@stripe.com',
+        photo_url: 'https://example.test/p.jpg',
+        organization: { name: 'Stripe', technologies: ['a', 'b'], blurb: 'x'.repeat(1000) },
+        employment_history: [{ title: 'CEO', description: 'long' }, { kind: 'school' }],
+      },
+      breadcrumbs: [{ label: 'x' }],
+    });
+    expect(projectBody(PERSON, body)).toEqual({
+      value: {
+        person: {
+          name: 'Patrick Collison',
+          email: 'patrick@stripe.com',
+          organization: { name: 'Stripe' },
+          employment_history: [{ title: 'CEO' }, {}],
+        },
+      },
+    });
+  });
+
+  it('keeps a value of another type, and an object schema with no properties, whole', () => {
+    expect(projectBody(PERSON, JSON.stringify({ person: 'none', other: 1 }))).toEqual({
+      value: { person: 'none' },
+    });
+    expect(projectBody(PERSON, JSON.stringify([{ person: {} }]))).toEqual({
+      value: [{ person: {} }],
+    });
+    expect(projectBody({ type: 'object' }, JSON.stringify({ a: { b: 1 } }))).toEqual({
+      value: { a: { b: 1 } },
+    });
+  });
+
+  /** The server's shapes: nullable unions everywhere, because Apollo returns
+   *  null a lot, and a map such as departmental_head_count kept whole. */
+  it('reads nullable unions, keeps a node with neither properties nor items whole, and passes null through', () => {
+    const org = {
+      type: 'object',
+      properties: {
+        organization: {
+          type: ['object', 'null'],
+          properties: {
+            name: { type: ['string', 'null'] },
+            industries: { type: ['array', 'null'], items: { type: 'string' } },
+            departmental_head_count: { type: ['object', 'null'] },
+            funding_events: {
+              type: ['array', 'null'],
+              items: { type: 'object', properties: { date: { type: ['string', 'null'] } } },
+            },
+          },
+        },
+      },
+    };
+    const body = JSON.stringify({
+      organization: {
+        name: 'Stripe',
+        industries: ['financial services'],
+        departmental_head_count: { engineering: 3000, sales: 1200 },
+        funding_events: [{ date: '2023-03-15', amount: 6.5e9, investors: 'Thrive' }],
+        technologies: [{ uid: 'aws' }],
+      },
+    });
+    expect(projectBody(org, body)).toEqual({
+      value: {
+        organization: {
+          name: 'Stripe',
+          industries: ['financial services'],
+          departmental_head_count: { engineering: 3000, sales: 1200 },
+          funding_events: [{ date: '2023-03-15' }],
+        },
+      },
+    });
+    expect(projectBody(org, JSON.stringify({ organization: null, extra: 1 }))).toEqual({
+      value: { organization: null },
+    });
+  });
+
+  it('cuts past a missing required field or a wrong type: it never refuses', () => {
+    const schema = {
+      type: 'object',
+      required: ['missing'],
+      properties: { a: { type: 'string' }, b: { type: 'object', properties: { c: {} } } },
+    };
+    expect(projectBody(schema, JSON.stringify({ a: 5, b: { c: 1, d: 2 }, e: 3 }))).toEqual({
+      value: { a: 5, b: { c: 1 } },
+    });
+  });
+
+  it('cuts nothing it cannot read: not JSON, over the cap, a prototype key, or a schema it cannot compile', () => {
+    expect(projectBody(PERSON, '<html>502</html>')).toBeUndefined();
+    expect(projectBody(PERSON, OVER_CAP)).toBeUndefined();
+    expect(
+      projectBody({ type: 'object', properties: { a: { $ref: 'https://evil/x' } } }, '{}'),
+    ).toBeUndefined();
+    expect(projectBody(null, '{}')).toBeUndefined();
+    expect(projectBody(PERSON, '{"person": {"__proto__": {"polluted": true}}}')).toBeUndefined();
   });
 });

@@ -26,6 +26,8 @@ export function registerRouter(reg: Registration): void {
       'PostToolUse(Failure) on WebSearch|WebFetch: offer a paid lookup when the result came back short',
     ],
     ['agent', "PreToolUse on Agent|Task: append any paid offer to the subagent's task"],
+    ['ask', 'PreToolUse on AskUserQuestion: allow the question, or redirect it once'],
+    ['answer', "PostToolUse on AskUserQuestion: offer a paid lookup beside the user's answers"],
   ] as const) {
     addGlobalFlags(hook.command(name))
       .summary(summary)
@@ -56,7 +58,7 @@ export function registerRouter(reg: Registration): void {
 
   leaf(INTEGRATION, 'mcp', 'run the local stdio MCP server')
     .description(
-      'Run the local stdio MCP server that carries the `request` tool: one paid routing decision per lookup, then the provider call, under your local spend policy. It speaks on stdin and stdout and runs until the client disconnects, so it prints no envelope of its own.',
+      "Run the local stdio MCP server that carries the `request` tool: one free routing decision per lookup, then the provider call, built here from the offer's spec and your assistant's input where it has one, under your local spend policy. It speaks on stdin and stdout and runs until the client disconnects, so it prints no envelope of its own.",
     )
     .action(async function (this: Command) {
       const ctx = buildContext(this);
@@ -82,6 +84,21 @@ export function registerRouter(reg: Registration): void {
       await runCommand('status', this, async (ctx) => {
         const { runRouterStatus } = await import('../router/status');
         return runRouterStatus(ctx);
+      });
+    });
+
+  const payments = leaf(SETUP, 'payments', 'the paid lookups this machine made').description(
+    'The local record of paid router lookups, in `~/.tenjin/paid/ledger.jsonl`.',
+  );
+  addGlobalFlags(payments.command('reconcile'))
+    .summary('resolve paid lookups whose settlement is unknown')
+    .description(
+      'For each paid lookup whose seller never confirmed settlement and whose authorization has expired, ask USDC on Base (through the configured rpcUrl) whether it was used: used means it was charged, unused means it never can be. Nothing is signed or sent but that one read.',
+    )
+    .action(async function (this: Command) {
+      await runCommand('payments.reconcile', this, async (ctx) => {
+        const { runPaymentsReconcile } = await import('../router/payments');
+        return runPaymentsReconcile(ctx);
       });
     });
 }

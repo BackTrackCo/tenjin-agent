@@ -1,0 +1,87 @@
+{
+  "schemaVersion": 1,
+  "routerVersion": "2026-09-23.1",
+  "decision": {
+    "action": "spec",
+    "id": "0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d21",
+    "spec": {
+      "capabilityId": "wolfram-compute",
+      "provider": "Wolfram Alpha",
+      "description": "exact and numeric math (integrals, equations, series), unit conversions, and curated facts and data",
+      "priceAtomic": "20000",
+      "priceVaries": false,
+      "maxAmountAtomic": "20000",
+      "payTo": "0x6302D9e6DBB22fEC3c350551568Bb39B4b35Ad57",
+      "network": "eip155:8453",
+      "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      "request": {
+        "method": "GET",
+        "url": "https://wolframalpha.x402.paysponge.com/v2/query",
+        "fields": {
+          "input": "query",
+          "output": "query",
+          "format": "query"
+        },
+        "location": "query"
+      },
+      "input": {
+        "type": "object",
+        "properties": {
+          "input": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The mathematical expression or computational question to answer."
+          },
+          "output": {
+            "type": "string",
+            "const": "json",
+            "description": "Return the full result as JSON."
+          },
+          "format": {
+            "type": "string",
+            "enum": ["plaintext"],
+            "description": "Request readable text in the individual result pods."
+          }
+        },
+        "required": ["input", "output"],
+        "additionalProperties": false
+      },
+      "pinned": {
+        "output": "json",
+        "format": "plaintext"
+      },
+      "returns": "JSON {queryresult:{success, numpods, pods[]}}: result pods (Input, Result, ...) whose subpods hold plaintext answers and images",
+      "resultSchema": {
+        "type": "object",
+        "required": ["queryresult"],
+        "properties": {
+          "queryresult": {
+            "type": "object",
+            "required": ["success", "error", "numpods", "pods"],
+            "properties": {
+              "success": {
+                "const": true
+              },
+              "error": {
+                "const": false
+              },
+              "numpods": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "pods": {
+                "type": "array",
+                "minItems": 1
+              }
+            }
+          }
+        }
+      }
+    },
+    "hint": "Wolfram Alpha fits this: exact and numeric math (integrals, equations, series), unit conversions, and curated facts and data. $0.02 via https://wolframalpha.x402.paysponge.com/v2/query . Call request({id: \"0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d21\", input: {\"input\":\"<math request copied verbatim>\"}}) alone and wait for its result."
+  },
+  "jev": {
+    "calls": 1,
+    "latencyMs": 610
+  }
+}

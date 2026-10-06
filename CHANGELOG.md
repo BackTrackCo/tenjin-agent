@@ -1,5 +1,221 @@
 # tenjin-cli
 
+## 0.1.0-alpha.24
+
+### Patch Changes
+
+- 15e1109: `tenjin install` in an interactive terminal now asks once, before it writes
+  anything, whether to use the automatic spend limits ($0.25 a call, $5 a day) or
+  set your own. Your own limits must be above zero, and the daily limit may be
+  `none`. Cancelling writes nothing. A limit already in the config file is kept
+  and not asked for. Non-interactive runs, `--json`, and `--refresh` (which
+  `tenjin update` runs) ask nothing and write the defaults only where the file
+  names no limit, as before.
+- 27e09ef: The `request` tool builds every paid call from a spec it keeps on this machine,
+  and nothing else. An offer's id with an input whose spec has expired or been
+  pruned now answers `needs_input` at once, pointing the agent at a fresh
+  `request({query})`, with no server call and nothing paid; before, it fell
+  through to a server path that no longer exists. Pairs with the Tenjin router
+  dropping its server-side binder: tenjin-cli 0.1.0-alpha.21 and older receive no
+  paid offers and are told to run `tenjin update`.
+  A `request({query})` with no id now only picks: it answers with the service's
+  spec and the call to fill under a fresh id, and never runs or pays in that call.
+- 27e09ef: A subagent's native-call packet keeps the subagent's own task once its transcript passes 4 MB, read from the head of the file, instead of carrying the parent's latest message.
+
+## 0.1.0-alpha.23
+
+### Minor Changes
+
+- 7ab9157: A request spec can now name the fields its result promises (`outputSchema`).
+  The `request` tool checks the success rule on the provider's whole body as
+  before, then hands the agent only the fields the spec declares, through
+  nested objects and array items, and saves the whole body under
+  `~/.tenjin/results/` (mode 0600, kept a day) at the path the result names in
+  `fullResultPath`. An Apollo person lookup, whose body carries the employer's
+  whole organization record, comes back as the person's name, title, email,
+  LinkedIn URL, employer and work history. A body that cannot be cut (not JSON,
+  over the 4 MB result cap) or a file that cannot be written hands back the
+  whole body, as before; the projection never fails a call. A spec with no
+  `outputSchema` returns the body unchanged.
+
+### Patch Changes
+
+- 7ab9157: A paid result is now checked against its success rule up to 4 MB, not 128 KB.
+  An Apollo person hit runs 60-180 KB because it embeds the employer's whole
+  organization record, so a good match came back `unverified` with a "possibly
+  not the answer that was paid for" caveat: a body past 64 KB failed the check on
+  a size limit meant for inputs, and one past 128 KB was never checked. A body
+  over 4 MB is still delivered whole and flagged unverified, as before.
+
+## 0.1.0-alpha.22
+
+### Minor Changes
+
+- e1e6f7d: The router's `request` tool now runs an offer from its request spec, in one
+  call. The client asks for specs (`accepts: ["spec"]`), and the hook that shows
+  an offer keeps each offered service's spec by its id. The offer line is the
+  call to make: `request({id, input})` with the required fields as placeholders,
+  or already filled in when the hook holds them (the search a native call was
+  about to run, or the page it was about to fetch). `request({id, input})` puts
+  the pins over the input, checks it against the spec's schema, builds the
+  request and pays the provider directly through the same `runPay` checks: the
+  live price against the spec's ceiling, its payee against the spec's, and the
+  spend policy. An input that misses the spec, or names a field the spec does
+  not, comes back with every problem and the whole spec (each input with its
+  description and allowed values, the required fields inside a nested object,
+  the fields Tenjin pins, one example and what comes back), locally, with
+  nothing sent or paid; `request({id})` alone shows the same spec, free and
+  offline. A schema keyword that checks nothing (OpenAPI's `example`, a
+  vendor's `x-in`) is passed over rather than stopping the check, and a spec
+  whose input schema cannot be compiled at all is refused with nothing sent or
+  paid, never paid unchecked. When the call ran or money left, the tool then
+  tells the server only how the call ended; a refusal before payment (the
+  spend policy, the spec's terms, the provider's own 4xx) reports nothing. Each
+  spec id pays once: a retry of a paid id, or a second call racing it, pays
+  nothing and points at the earlier result or a new offer, while a call that
+  signed nothing (a refused input) leaves the spec runnable. A call that signed
+  a payment and then failed without learning the amount (a spend ledger that
+  could not be written) keeps the id claimed as possibly paid, so a retry signs
+  nothing and says to check `tenjin payments`. A spec is kept as
+  long as the server keeps its offer, 15 minutes. A path input of `.` or `..` is
+  refused before anything is sent, and an input whose varying price lands over
+  the spec's ceiling is refused before signing, asking for a smaller input. A
+  query with an id goes to the server as before. A query with no id comes back
+  as the spec of the service the server picks for it, kept like a hook's: when
+  the server bound the query to the spec's input, the tool runs and pays it in
+  the same call; otherwise it shows the spec and the call's skeleton, so the
+  next call is `request({id, input})`. An id alone with no spec kept says so and
+  asks for the query its line named. A failure now says what was sent.
+- e1e6f7d: A WebFetch that came back as an empty shell now counts as falling short. A
+  JavaScript app (app.uniswap.org came back as its title, "Uniswap Interface")
+  and a YouTube page (its footer links only) both answer 200 with tens of
+  kilobytes, so the size rule never fired and the agent was left with neither the
+  page nor an offer. The after-call hook now reads the opening of WebFetch's own
+  summary for a page that was empty, only a title, navigation or a footer, or
+  needed JavaScript, and sends `nativeOutcome.reason: "no_main_content"` beside
+  the code and size so the router can pick a page reader that renders it. Over
+  682 recorded 2xx WebFetch results the rule matched the eight shells and nothing
+  else. A router that predates `reason` refuses the packet, which the hook reads
+  as silence, as before.
+
+### Patch Changes
+
+- e1e6f7d: A PDF that WebFetch fetched is now pointed at for free. WebFetch's summary is
+  handed the PDF's compressed bytes and says it cannot parse them (arxiv.org's
+  "Attention Is All You Need" came back as "a corrupted or binary PDF file"), but
+  Claude Code saves the file whole and names it on the result's last line. The
+  after-call hook now adds one line naming that file and saying `Read` returns its
+  text, and asks the router nothing: a paid page reader would only fetch the same
+  file again. Only a file named the way WebFetch names one, on that last line, in
+  the session's own tool-results directory, is ever pointed at.
+- e1e6f7d: When Base's default RPC fails a balance read for the router hooks or for a
+  payment (`tenjin pay` and the router's `request` tool), two public RPCs are now
+  asked, `https://base-rpc.publicnode.com` and then `https://base.drpc.org`,
+  before the read gives up. The default, mainnet.base.org, rate-limits a busy IP
+  (`-32016 over rate limit`), and four paid lookups across two research runs were
+  refused with "the wallet balance could not be read" while those two answered
+  every read. The fallbacks run only after the default fails, inside the same
+  timeout: every RPC but the last gets half of what is left, so one that hangs
+  still leaves the others time. An `rpcUrl` you configured yourself is the only
+  RPC asked, since choosing one can be about privacy and the public RPCs would
+  see the wallet's address. Only the hooks also reuse the minute-long last-known
+  balance. `wallet balance`, `doctor`, `fund` and `send` still ask the configured
+  RPC alone.
+
+## 0.1.0-alpha.21
+
+### Patch Changes
+
+- a46ec7c: When nothing in the curated catalog fits but a reviewed third-party
+  pay-per-call x402 service on the Tenjin list could do the step, the router can
+  now name that one service (who sells it, its URL, its price and the input it takes), and your
+  agent decides whether to use it. It calls `mcp__x402__request` with the id and
+  an `input` object, and pays the seller through the same path and under the
+  same automatic limits as a curated lookup. A paid response that is a file (an
+  audio clip, an image) is saved under `~/.tenjin/downloads` and the result names
+  the file. Two new hooks watch `AskUserQuestion`: before the question, a fitting
+  lookup redirects it once; after it, one is offered beside your answers. Hook
+  requests now carry the session id, used only so one session is not offered the
+  same service twice. `tenjin install --refresh` (which `tenjin update` runs)
+  adds the two hook entries. The open x402 Bazaar (unreviewed sellers) is
+  experimental and off by default: `tenjin config set experimental.bazaar on`.
+- 55ce073: A router offer that lists another service priced above this machine's automatic
+  per-call limit now says so, whether it is a list entry ("about $0.28") or a
+  curated alternative ("$0.30"). A Tenjin list menu (or an alternative beside the
+  offer) could name People Data Labs at $0.28 beside a $0.005 email finder under a
+  $0.25 limit with no warning, and the agent picked the one that stopped on
+  `needs_approval`. The line now ends with one sentence naming the price over the
+  limit and asking for a service within it, or the user's approval first. Only
+  the places the router writes a price are read: a dollar amount in a service's
+  description ("seats from $500/month") never raises the note. The single-service
+  case was already covered.
+- a46ec7c: Every paid router lookup now reports its settlement transaction (from the
+  x402 payment-response header) and is recorded in `~/.tenjin/paid/ledger.jsonl`
+  with what was sent (masked), the seller, the amount, the signed
+  authorization's nonce, and any files saved. Media a paid third-party service links to is
+  downloaded into `~/.tenjin/downloads/`. `tenjin payments reconcile` resolves a
+  payment whose settlement was unknown from USDC's `authorizationState` once its
+  authorization has expired, and gives a payment that was never charged back to
+  the daily limit; the `request` tool runs the same check for up to three before
+  each lookup.
+- 55ce073: A router lookup the spend policy refused (`needs_approval`) is no longer written
+  to `~/.tenjin/paid/ledger.jsonl` as a paid call, and its result no longer reports
+  the refused price as a cost. Nothing was signed, so there is nothing to record or
+  reconcile.
+- 55ce073: The retry of a WebSearch, WebFetch or question the pre-call router hook already
+  redirected no longer asks the router. The hook asked first and only then saw the
+  target was claimed, so every redirect-then-retry pair spent a second routing
+  decision and left an offer row nobody saw, about 45% of the rows in an active
+  session. The claim is now checked before the router is asked; two parallel
+  copies of one call are still denied once.
+- 55ce073: A subagent's hand-back, a teammate's message and a message from another session
+  are no longer read as the user's words in a router packet. They reach the
+  parent's transcript as `type: "user"` rows (`origin.kind: "peer"`), so a native
+  call or delegation right after one was routed with the subagent's report as the
+  current turn, in place of what the user asked. The transcript reader now skips
+  them by the same frames the prompt hook already skips.
+- 55ce073: A session whose transcript is over 4 MB is routed again. The router read nothing
+  from a transcript that size, so every long working session lost the pre-call
+  redirect and the delegation offer for the rest of its life ("this session's
+  transcript could not be read"). It now reads the last 4 MB, from the first whole
+  line, and uses it only when that window still holds a user message, so this
+  turn's own instructions are always what the decision reads.
+- 55ce073: The router hooks remember a wallet balance read for a minute in
+  `~/.tenjin/balance.json` (the address and amount only, never the RPC URL) and
+  reuse it instead of asking the RPC again, so a burst of parallel lookups no
+  longer runs Base's public RPC into its rate limit or waits on its timeout. A
+  payment still reads the signer's balance live immediately before signing and
+  never uses the remembered one.
+
+## 0.1.0-alpha.20
+
+### Patch Changes
+
+- 4b61f7a: Requests to Tenjin now carry a `tenjin-install-id` header: a random, anonymous
+  id minted once and stored at `~/.tenjin/install-id`. It is sent only to Tenjin,
+  never to a provider or a team shelf, and Tenjin uses it to count installs and
+  router usage. A file that cannot be read or written only drops the header.
+- ce30bbd: A router `request` the provider refused now says why. When the provider answers
+  a non-2xx status, before or after payment, the tool's failure envelope carries
+  `providerStatus` and `providerError`: the first 500 characters of the provider's
+  body, redacted and on one plain line, whether or not it is JSON, and marked as
+  untrusted provider content like the rest of the envelope. Before this, a paid
+  call Firecrawl answered 403 on reached the agent with neither the status as a
+  field nor the provider's reason, so a refused target read like an outage.
+  `tenjin pay` carries the same `providerError` in its error details. Settlement
+  on a paid failure is still reported as unknown.
+- ce30bbd: The pre-call router hook now keeps its promise that a redirected WebSearch or
+  WebFetch is not redirected again. It kept one "last redirect" per agent and let
+  any next offer in the same category spend it, so with parallel calls one call's
+  redirect was used up by another and the agent's own retry was denied again: the
+  same URL could be denied three times in a row. Each redirect now claims its exact
+  search, or its URL as parsed, for that agent, one file per claim so parallel hook
+  processes never share a record. A retry of the same search or URL runs as it is
+  for ten minutes, whether the redirected lookup succeeded, failed or was never
+  called, and two parallel copies of one call are denied once. Every other search
+  or URL still gets its own first redirect, and the main agent and each subagent
+  keep their own claims.
+
 ## 0.1.0-alpha.19
 
 ### Minor Changes

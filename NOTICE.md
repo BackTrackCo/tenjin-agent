@@ -43,7 +43,7 @@ BlockRun MCP is licensed under the MIT License:
 
 ## gitleaks
 
-The provider secret-token shape patterns in the publish redaction scan are
+The provider secret-token shape patterns in the CLI's secret redaction rules are
 adapted from the [gitleaks](https://github.com/gitleaks/gitleaks) ruleset (MIT),
 by Zachary Rice: AWS access keys, GitHub classic and fine-grained tokens,
 Slack/Stripe/npm/Anthropic/OpenAI/Google/Supabase/Twilio/SendGrid/Hugging Face

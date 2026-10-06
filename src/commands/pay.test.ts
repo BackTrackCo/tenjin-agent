@@ -5,12 +5,14 @@ import { join } from 'node:path';
 import { MAX_PAID_LEG_TIMEOUT_MS, paidLegTimeoutMs, runPay } from './pay';
 import { saveSweepListings } from '../lib/bazaar';
 import { CliError } from '../lib/errors';
+import { MAX_BODY_BYTES } from '../lib/request-schema';
 import { knownDeploymentOrigins } from '../lib/production-origin';
 import { encodePaymentRequiredHeader } from '@x402/core/http';
 import { parseSIWxHeader } from '@x402/extensions/sign-in-with-x';
 import type { PaymentRequired, PaymentRequirements } from '@x402/core/types';
 import { buildPaymentRequired, testWalletProvider, withBuilderCode } from '../lib/read-test-utils';
 import { TENJIN_CLI_BUILDER_CODE } from '../lib/x402-pay';
+import { DEFAULT_RPC_URL, FALLBACK_RPC_URLS, rememberingBalanceReader } from '../lib/usdc-balance';
 import type { SpendAuthorizer, SpendAuthorization } from '../lib/wallet';
 import type { CommandContext, GlobalFlags } from '../context';
 
@@ -206,7 +208,10 @@ describe('runPay, tenjin lane', () => {
     expect(calls[1]!.headers['payment-signature']).toBeDefined();
     // The identical business request is retried: same body, same method.
     expect(calls[1]!.body).toBe(calls[0]!.body);
-    expect(authorizer.commit).toHaveBeenCalledWith(RESERVATION, 100000n, { mode: 'manual' });
+    expect(authorizer.commit).toHaveBeenCalledWith(RESERVATION, 100000n, {
+      mode: 'manual',
+      nonce: expect.stringMatching(/^0x[0-9a-f]{64}$/) as string,
+    });
   });
 
   // A routing decision can name a contract on the configured origin, so the
@@ -264,7 +269,10 @@ describe('runPay, tenjin lane', () => {
         authorizer,
       }),
     ).rejects.toMatchObject({ code: 'PAYMENT_FAILED' });
-    expect(authorizer.commit).toHaveBeenCalledWith(RESERVATION, 100000n, { mode: 'manual' });
+    expect(authorizer.commit).toHaveBeenCalledWith(RESERVATION, 100000n, {
+      mode: 'manual',
+      nonce: expect.stringMatching(/^0x[0-9a-f]{64}$/) as string,
+    });
     expect(authorizer.release).not.toHaveBeenCalled();
   });
 
@@ -679,7 +687,10 @@ describe('runPay, bazaar lane', () => {
       expect((err as CliError).fix).not.toMatch(/then retry/i);
     }
     expect(calls[1]!.headers['payment-signature']).toBeDefined();
-    expect(authorizer.commit).toHaveBeenCalledWith(RESERVATION, 100000n, { mode: 'manual' });
+    expect(authorizer.commit).toHaveBeenCalledWith(RESERVATION, 100000n, {
+      mode: 'manual',
+      nonce: expect.stringMatching(/^0x[0-9a-f]{64}$/) as string,
+    });
     expect(authorizer.release).not.toHaveBeenCalled();
   });
 
@@ -1190,12 +1201,12 @@ describe('runPay, the success rule on every delivery', () => {
   });
 
   /**
-   * A body past the client's 128 KiB validation limit is not evidence the
+   * A body past the client's 4 MiB validation limit is not evidence the
    * endpoint broke its contract: the limit is ours, the rule never ran, and on
    * the paid leg the authorization has already settled. Refusing it charged the
    * caller and threw the product away.
    */
-  const OVERSIZED = { success: true, blob: 'x'.repeat(200 * 1024) };
+  const OVERSIZED = { success: true, blob: 'x'.repeat(MAX_BODY_BYTES) };
 
   it('delivers a PAID 2xx too large to validate, with the caveat, and keeps the charge', async () => {
     const fixture = buildPaymentRequired();
@@ -1227,7 +1238,10 @@ describe('runPay, the success rule on every delivery', () => {
     expect(data.resultCaveat).toContain('unverified');
     expect(result.humanLines?.some((line) => line.includes('unverified'))).toBe(true);
     // The ledger is unchanged by this: the money moved either way.
-    expect(authorizer.commit).toHaveBeenCalledWith(RESERVATION, 100000n, { mode: 'manual' });
+    expect(authorizer.commit).toHaveBeenCalledWith(RESERVATION, 100000n, {
+      mode: 'manual',
+      nonce: expect.stringMatching(/^0x[0-9a-f]{64}$/) as string,
+    });
   });
 
   it('delivers a free 2xx too large to validate with the same caveat', async () => {
@@ -1703,6 +1717,42 @@ describe('direct registry warning acknowledgement and balance enforcement', () =
     expect(result.data).toMatchObject({ paid: true });
     expect(readBalance).toHaveBeenCalledTimes(2);
     expect(readBalance.mock.calls[1]![2].timeoutMs).toBeLessThan(5000);
+  });
+  /** THE SIGNER'S BALANCE IS READ LIVE before signing (docs/agent-permissions.md).
+   *  The balance the hooks remembered a minute ago can be one the wallet has
+   *  since spent, so it never stands in for a read that failed. */
+  it('refuses an unreadable balance even with one the hooks remembered', async () => {
+    const provider = testWalletProvider();
+    const signer = await provider.getSigner();
+    const remember = rememberingBalanceReader(dir, { read: async () => 100_000_000n });
+    expect(await remember(signer.address, 'https://rpc.test', { timeoutMs: 1_000 })).toBe(
+      100_000_000n,
+    );
+    const asked: string[] = [];
+    vi.stubGlobal('fetch', async (input: unknown) => {
+      asked.push(String(input));
+      return new Response('over rate limit', { status: 429 });
+    });
+    const sign = vi.spyOn(signer, 'signTypedData');
+    const { fetch, calls } = paymentResponses();
+    await expect(
+      runPay({ url: TENJIN_URL, yes: true }, makeCtx(), {
+        destination: PUBLIC_DNS.destination,
+        fetchImpl: fetch,
+        provider,
+      }),
+    ).rejects.toMatchObject({ code: 'REFUSED', details: { reason: 'balance_unavailable' } });
+    // Both reads asked the default and each public fallback, live.
+    expect(asked).toEqual([
+      DEFAULT_RPC_URL,
+      ...FALLBACK_RPC_URLS,
+      DEFAULT_RPC_URL,
+      ...FALLBACK_RPC_URLS,
+    ]);
+    expect(sign).not.toHaveBeenCalled();
+    expect(calls).toHaveLength(1);
+    const { readSpendSummary } = await import('../lib/wallet/spend');
+    expect(await readSpendSummary(dir)).toMatchObject({ committedAtomic: '0', reservations: [] });
   });
   it('both flags cannot bypass an explicit price cap', async () => {
     await writeConfig({ sessionBudget: 'none' });

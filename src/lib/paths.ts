@@ -62,6 +62,14 @@ export function spendLedgerPath(dir: string = dataDir()): string {
 }
 
 /**
+ * The wallet's last USDC balance read (lib/usdc-balance). A pure cache, a
+ * minute long: an unreadable file is simply read again from the chain.
+ */
+export function balanceCachePath(dir: string = dataDir()): string {
+  return join(dir, 'balance.json');
+}
+
+/**
  * Where the once-a-day "a newer tenjin-cli exists" check caches the registry
  * answer. A pure cache: nothing here is authoritative, so an unreadable file is
  * simply re-fetched.
@@ -170,4 +178,22 @@ export const VITEST_REPORTER_FILE = 'tenjin-vitest-reporter.mjs';
 
 export function vitestReporterPath(dir: string = dataDir()): string {
   return join(hooksDir(dir), VITEST_REPORTER_FILE);
+}
+
+/**
+ * Where a router lookup that bought a file (a sound, an image) saves it. The
+ * bytes cannot ride in the tool result, so the result names this file instead.
+ */
+export function downloadsDir(dir: string = dataDir()): string {
+  return join(dir, 'downloads');
+}
+
+/**
+ * One JSON line per paid router call: what was bought, from whom, for how much,
+ * the settlement it carried and the files it saved. The user's own record; only
+ * reconcile reads it back (`tenjin payments reconcile`, and the `request` tool's
+ * pass beside each lookup), to settle what was left unknown.
+ */
+export function paidLedgerPath(dir: string = dataDir()): string {
+  return join(dir, 'paid', 'ledger.jsonl');
 }

@@ -4,7 +4,8 @@ import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { promisify } from 'node:util';
 import { claudeAdapter } from '../adapters/claude';
-import { persistRouterDefaults } from '../commands/config';
+import { persistRouterDefaults, ROUTER_DEFAULTS, type RouterLimits } from '../commands/config';
+import { askText, selectOne } from '../lib/clack';
 import { CliError } from '../lib/errors';
 import { appendAllowlistRules, claudeSettingsPath } from '../lib/harness-permissions';
 import {
@@ -14,12 +15,12 @@ import {
   writeHooks,
   type HooksResult,
 } from '../lib/harness-hooks';
-import { toMoney } from '../lib/money';
+import { parseUsdToAtomic, toMoney } from '../lib/money';
 import { paint } from '../lib/output';
 import { resolveContextSettings } from '../lib/settings';
 import type { SpendPolicy } from '../lib/policy';
 import { removeRetiredSkills } from '../lib/skill-placement';
-import { loadRawConfig } from '../lib/config';
+import { loadRawConfig, type PartialConfig } from '../lib/config';
 import { onPath } from '../lib/skill-wiring';
 import type { WalletDeps, WalletOutcome } from '../commands/install-wallet';
 import type { CommandContext, CommandResult } from '../context';
@@ -27,7 +28,7 @@ import { MCP_SERVER_NAME, REQUEST_TOOL } from './names';
 import { ensureStatusLine, type StatusLineMode, type StatusLineResult } from './status-line-wiring';
 
 /**
- * `tenjin install` for the router product: five hook entries, one MCP server,
+ * `tenjin install` for the router product: seven hook entries, one MCP server,
  * one permission rule, the spend defaults, and a wallet when there is none.
  *
  * WHAT IT WRITES IS WHAT IT SAYS. There is no skill to materialize and no
@@ -106,14 +107,19 @@ export const DELEGATION_MATCHER = 'Agent|Task';
 /** The native tools both native arms watch. */
 export const NATIVE_MATCHER = 'WebSearch|WebFetch';
 
+/** The host's question to the user, watched before it is asked and after. */
+export const ASK_MATCHER = 'AskUserQuestion';
+
 /**
- * The five entries, spelled once so `uninstall`, `doctor` and the tests read
+ * The seven entries, spelled once so `uninstall`, `doctor` and the tests read
  * the same list. The native tools are routed twice over one lookup: BEFORE the
  * call, as every release has, with a line pointing to a paid lookup when one
  * fits; and AFTER it, only when it came back short and nothing was said before,
  * or to add the free docs the pre-call arm fetched to a search's results. A
  * failed call fires PostToolUseFailure rather than PostToolUse, so the second
- * takes both.
+ * takes both. The host's question to the user is routed the same two ways:
+ * before it is asked, when a service could stand in for what it asks for, and
+ * after, with the user's answers read as their own words.
  */
 export function routerHookPlan(): unknown[] {
   const handler = (command: string, timeout = HOOK_TIMEOUT_SECONDS) => [
@@ -126,11 +132,13 @@ export function routerHookPlan(): unknown[] {
     { event: 'PreToolUse', matcher: DELEGATION_MATCHER, hooks: handler('tenjin hook agent') },
     { event: 'PostToolUse', matcher: NATIVE_MATCHER, hooks: afterCall() },
     { event: 'PostToolUseFailure', matcher: NATIVE_MATCHER, hooks: afterCall() },
+    { event: 'PreToolUse', matcher: ASK_MATCHER, hooks: handler('tenjin hook ask') },
+    { event: 'PostToolUse', matcher: ASK_MATCHER, hooks: handler('tenjin hook answer') },
   ];
 }
 
 export const DISCLOSURE: readonly string[] = [
-  "What leaves this machine: the bounded text of each prompt, each native search query or URL (and, when one came back short, its status, size or error), and each task handed to a subagent, sent to Tenjin for the free routing gate. When the gate offers free library docs for a search, that search query also goes to Tenjin's docs lookup, which asks Context7.",
+  "What leaves this machine: the bounded text of each prompt, each native search query or URL (and, when one came back short, its status, size or error), each task handed to a subagent, and each question your assistant asks you with your answers, sent to Tenjin for the free routing gate, beside this session's id. When the gate offers free library docs for a search, that search query also goes to Tenjin's docs lookup, which asks Context7.",
   'What is kept when a lookup is paid: the capability chosen, a hash of the contract, a hash of the arguments, and your wallet address. No prompt text, no arguments, no hint text.',
   'What never leaves: your private key. It is decrypted in this CLI to sign, and never sent anywhere.',
 ];
@@ -175,7 +183,16 @@ export interface RouterInstallDeps extends WalletDeps {
     cwd: string,
     home: string,
   ) => Promise<{ found: boolean; state: McpEntryState }>;
+  /** Whether a person can answer the spend-limit question (a TTY on stdout and
+   *  stdin, no `--json`); injected in tests. */
+  isInteractive?: boolean;
+  /** The spend-limit selector; defaults to the clack list. */
+  promptLimits?: (message: string) => Promise<LimitsChoice | null>;
+  /** One amount question; defaults to the clack text input. */
+  promptAmount?: (message: string, placeholder: string) => Promise<string | null>;
 }
+
+export type LimitsChoice = 'approve' | 'own';
 
 export interface McpRegistration {
   name: string;
@@ -243,7 +260,7 @@ export async function runRouterInstall(
       fix: 'Set HOME to your home directory (`export HOME=...`), then re-run `tenjin install`.',
     });
   }
-  await loadRawConfig(ctx.dataDir); // Validate before any install writes; retired keys remain readable.
+  const config = await loadRawConfig(ctx.dataDir); // Validate before any install writes; retired keys remain readable.
   const cwd = deps.cwd ?? process.cwd();
   // `tenjin update` runs from home, where the hooks file cannot prove scope.
   // An explicit --project still wins, including for a project rooted at home.
@@ -274,7 +291,12 @@ export async function runRouterInstall(
       );
     }
   }
-  const spend = await persistRouterDefaults(ctx.dataDir, args.refresh === true);
+  // The shelf install's gate: a refresh, `--json`, or a run with no terminal on
+  // either side asks nothing and writes the defaults only where the file is silent.
+  const humanOutput = ctx.flags.json === true ? false : (deps.isInteractive ?? ctx.io.isTTY);
+  const canPrompt = humanOutput && (deps.isInteractive ?? Boolean(process.stdin.isTTY));
+  const limits = args.refresh !== true && canPrompt ? await approveLimits(config, deps) : undefined;
+  const spend = await persistRouterDefaults(ctx.dataDir, args.refresh === true, limits);
   const removedKeysLines =
     spend.removed.length > 0
       ? [
@@ -370,6 +392,97 @@ export async function runRouterInstall(
       ...removedKeysLines,
     ],
   };
+}
+
+/**
+ * The one question install asks, before anything is written: approve the
+ * automatic spend limits or set your own. Only a key the file does not already
+ * name is asked for, because the write fills absent keys and keeps the rest.
+ * Cancelling at any step writes nothing.
+ */
+async function approveLimits(
+  config: PartialConfig,
+  deps: RouterInstallDeps,
+): Promise<RouterLimits | undefined> {
+  const shown: RouterLimits = {
+    maxAutoSpend: config.maxAutoSpend ?? ROUTER_DEFAULTS.maxAutoSpend,
+    sessionBudget: config.sessionBudget ?? ROUTER_DEFAULTS.sessionBudget,
+  };
+  const askCall = config.maxAutoSpend === undefined;
+  const askDay = config.sessionBudget === undefined;
+  if (!askCall && !askDay) return undefined;
+  const daily =
+    shown.sessionBudget === 'none'
+      ? 'no daily limit'
+      : `$${toMoney(shown.sessionBudget).usd} a day`;
+  const choice = await (deps.promptLimits ?? promptLimits)(
+    `The router pays for tool calls without asking, up to:\n  $${toMoney(shown.maxAutoSpend).usd} a call, ${daily}`,
+  );
+  if (choice === null) throw installCancelled();
+  if (choice === 'approve') return shown;
+  const ask = deps.promptAmount ?? promptAmount;
+  return {
+    maxAutoSpend: askCall
+      ? await askLimit(ask, 'Most the router may pay for one call, in USD', '0.25', false)
+      : shown.maxAutoSpend,
+    sessionBudget: askDay
+      ? await askLimit(ask, 'Most it may pay in a day, in USD, or none', '5', true)
+      : shown.sessionBudget,
+  };
+}
+
+/** Asks until the answer is a positive amount (or `none` for the daily limit). */
+async function askLimit(
+  ask: NonNullable<RouterInstallDeps['promptAmount']>,
+  question: string,
+  placeholder: string,
+  allowNone: boolean,
+): Promise<string> {
+  let message = question;
+  for (;;) {
+    const answer = await ask(message, placeholder);
+    if (answer === null) throw installCancelled();
+    const parsed = parseLimit(answer, allowNone);
+    if (!('refusal' in parsed)) return parsed.value;
+    message = `${parsed.refusal} ${question}`;
+  }
+}
+
+/** Zero is refused: a zero per-call limit means the router can never pay, and
+ *  `router.enabled false` is how to turn it off. */
+function parseLimit(answer: string, allowNone: boolean): { value: string } | { refusal: string } {
+  const trimmed = answer.trim();
+  if (allowNone && trimmed === 'none') return { value: 'none' };
+  let atomic: string;
+  try {
+    atomic = parseUsdToAtomic(trimmed);
+  } catch (err) {
+    if (err instanceof CliError) return { refusal: `${err.message}.` };
+    throw err;
+  }
+  if (atomic === '0') return { refusal: 'The limit must be more than zero.' };
+  return { value: atomic };
+}
+
+function installCancelled(): CliError {
+  return new CliError('REFUSED', 'Install cancelled before anything was written.', {
+    fix: 'Re-run `tenjin install` and choose the spend limits.',
+  });
+}
+
+function promptLimits(message: string): Promise<LimitsChoice | null> {
+  return selectOne<LimitsChoice>({
+    message,
+    choices: [
+      { value: 'approve', label: 'Use these limits' },
+      { value: 'own', label: 'Choose my own' },
+    ],
+    initialValue: 'approve',
+  });
+}
+
+function promptAmount(message: string, placeholder: string): Promise<string | null> {
+  return askText({ message, placeholder });
 }
 
 export interface AllowRuleResult {

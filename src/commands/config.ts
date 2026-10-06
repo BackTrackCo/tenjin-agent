@@ -26,6 +26,7 @@ import {
   UPDATE_CONFIG_KEYS,
   LOOP_CONFIG_KEYS,
   TEAM_CONFIG_KEYS,
+  EXPERIMENTAL_CONFIG_KEYS,
   ROUTER_CONFIG_KEYS,
   ROUTER_CONTEXTS,
   loadRawConfig,
@@ -47,6 +48,7 @@ import type {
   UpdateConfigKey,
   LoopConfigKey,
   TeamConfigKey,
+  ExperimentalConfigKey,
   RouterConfigKey,
   RouterContext,
 } from '../lib/config';
@@ -103,16 +105,26 @@ export interface ConfigSetDeps {
   wireAllowlist?: (home: string, mode: PublishMode) => Promise<PermissionsResult>;
 }
 
+/**
+ * The shelf's settings. `config get/set` still accept them and `--json` still
+ * carries them, but the human listing shows only what the router CLI uses: it
+ * ships no shelf command that reads these.
+ */
+const SHELF_KEYS: ReadonlySet<string> = new Set<string>([
+  'allowlistCreators',
+  'publicShelfUrl',
+  'shelfBypassSecret',
+  'evalCohort',
+  ...PUBLISH_CONFIG_KEYS,
+  ...HOOKS_CONFIG_KEYS,
+  ...LOOP_CONFIG_KEYS,
+  ...TEAM_CONFIG_KEYS,
+]);
+
 const KEY_WIDTH = Math.max(
-  ...[
-    ...CONFIG_KEYS,
-    ...PUBLISH_CONFIG_KEYS,
-    ...HOOKS_CONFIG_KEYS,
-    ...UPDATE_CONFIG_KEYS,
-    ...LOOP_CONFIG_KEYS,
-    ...TEAM_CONFIG_KEYS,
-    ...ROUTER_CONFIG_KEYS,
-  ].map((key) => key.length),
+  ...[...CONFIG_KEYS, ...UPDATE_CONFIG_KEYS, ...ROUTER_CONFIG_KEYS, ...EXPERIMENTAL_CONFIG_KEYS]
+    .filter((key) => !SHELF_KEYS.has(key))
+    .map((key) => key.length),
 );
 
 /**
@@ -125,7 +137,7 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
   sendMaxAmount:
     'hard cap per tenjin wallet send; unset = send refuses until set, 0 disables send, none = uncapped; never bypassed by --yes',
   allowlistCreators: 'only auto-pay these creators (empty = any)',
-  baseUrl: 'Tenjin API base URL: what publish/read/search go to (the team shelf, in team mode)',
+  baseUrl: 'Tenjin API base URL the router asks',
   publicShelfUrl:
     'the public marketplace, consume-only: the second shelf a team-mode search falls through to',
   shelfBypassSecret:
@@ -160,7 +172,25 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
     'false stops every router hook and the request tool; --project sets it for this repository, --project --local for you alone in it',
   'router.context':
     'session=a hook packet carries up to six prior messages, turn=the current turn only; --project and --local as for router.enabled',
+  'experimental.bazaar':
+    "EXPERIMENTAL. on=the router may also suggest unreviewed sellers from Coinbase's open x402 Bazaar, off=curated services and Tenjin's reviewed list only",
 };
+
+/**
+ * What turning the experimental list on means, said when it is turned on:
+ * whose services these are, that the price is theirs, and how to turn it off.
+ */
+export const EXPERIMENTAL_BAZAAR_WARNING =
+  "Experimental: the router may now also suggest sellers from Coinbase's open x402 Bazaar. " +
+  'They are unreviewed third parties, Tenjin has not checked them, matches can be noisy, ' +
+  'prices can vary with the input, and payments are real, under your spend limits. ' +
+  "To find them, short snippets of your prompts are sent to Coinbase's public Bazaar search. " +
+  "Tenjin's reviewed list stays on either way. Turn this off with " +
+  '`tenjin config set experimental.bazaar off`.';
+
+function isExperimentalKey(key: string): key is ExperimentalConfigKey {
+  return (EXPERIMENTAL_CONFIG_KEYS as readonly string[]).includes(key);
+}
 
 function isLoopKey(key: string): key is LoopConfigKey {
   return (LOOP_CONFIG_KEYS as readonly string[]).includes(key);
@@ -213,20 +243,23 @@ export async function runConfigList(ctx: CommandContext): Promise<CommandResult>
   const settings = await resolveFromContext(ctx);
   const data: Record<string, RenderedSetting> = {};
   const humanLines: string[] = [];
+  const show = (key: string, line: string) => {
+    if (!SHELF_KEYS.has(key)) humanLines.push(line);
+  };
   for (const key of CONFIG_KEYS) {
     const entry = renderSetting(key, settings[key].value, settings[key].source);
     data[key] = entry;
-    humanLines.push(describedLine(key, entry));
+    show(key, describedLine(key, entry));
   }
   for (const key of PUBLISH_CONFIG_KEYS) {
     const entry = renderPublishSetting(key, settings);
     data[key] = entry;
-    humanLines.push(describedLine(key, entry, downgradeNote(key, settings)));
+    show(key, describedLine(key, entry, downgradeNote(key, settings)));
   }
   for (const key of HOOKS_CONFIG_KEYS) {
     const entry = renderHooksSetting(key, settings);
     data[key] = entry;
-    humanLines.push(describedLine(key, entry));
+    show(key, describedLine(key, entry));
   }
   for (const key of UPDATE_CONFIG_KEYS) {
     const entry: RenderedSetting = {
@@ -234,12 +267,12 @@ export async function runConfigList(ctx: CommandContext): Promise<CommandResult>
       source: settings.updateMode.source,
     };
     data[key] = entry;
-    humanLines.push(describedLine(key, entry));
+    show(key, describedLine(key, entry));
   }
   for (const key of LOOP_CONFIG_KEYS) {
     const entry = renderLoopSetting(key, settings);
     data[key] = entry;
-    humanLines.push(describedLine(key, entry));
+    show(key, describedLine(key, entry));
   }
   for (const key of TEAM_CONFIG_KEYS) {
     const entry: RenderedSetting = {
@@ -247,13 +280,21 @@ export async function runConfigList(ctx: CommandContext): Promise<CommandResult>
       source: settings.teamPublicFallback.source,
     };
     data[key] = entry;
-    humanLines.push(describedLine(key, entry));
+    show(key, describedLine(key, entry));
   }
   const router = await resolveRouterFromContext(ctx);
   for (const key of ROUTER_CONFIG_KEYS) {
     const entry = renderRouterSetting(key, router);
     data[key] = entry;
-    humanLines.push(describedLine(key, entry));
+    show(key, describedLine(key, entry));
+  }
+  for (const key of EXPERIMENTAL_CONFIG_KEYS) {
+    const entry: RenderedSetting = {
+      value: settings.experimentalBazaar.value,
+      source: settings.experimentalBazaar.source,
+    };
+    data[key] = entry;
+    show(key, describedLine(key, entry));
   }
   return { data, humanLines };
 }
@@ -296,6 +337,14 @@ export async function runConfigGet(
     const entry = renderRouterSetting(key, await resolveRouterFromContext(ctx));
     return { data: { key, ...entry }, humanLines: [formatLine(key, entry)] };
   }
+  if (isExperimentalKey(key)) {
+    const { experimentalBazaar } = await resolveFromContext(ctx);
+    const entry: RenderedSetting = {
+      value: experimentalBazaar.value,
+      source: experimentalBazaar.source,
+    };
+    return { data: { key, ...entry }, humanLines: [formatLine(key, entry)] };
+  }
   const configKey = assertKey(key);
   const settings = await resolveFromContext(ctx);
   const entry = renderSetting(configKey, settings[configKey].value, settings[configKey].source);
@@ -335,6 +384,7 @@ export async function runConfigSet(
   if (isUpdateKey(key)) return setUpdateKey(key, value, ctx);
   if (isLoopKey(key)) return setLoopKey(key, value, ctx);
   if (isTeamKey(key)) return setTeamKey(key, value, ctx);
+  if (isExperimentalKey(key)) return setExperimentalKey(key, value, ctx);
   const configKey = assertKey(key);
   const stored = parseValue(configKey, value);
   await persist(ctx.dataDir, (existing) => ({ ...existing, [configKey]: stored }));
@@ -757,6 +807,25 @@ async function setTeamKey(
   return { data: { key, ...entry }, humanLines: [formatLine(key, entry)] };
 }
 
+/** `config set experimental.bazaar on|off`; turning it on says what it means. */
+async function setExperimentalKey(
+  key: ExperimentalConfigKey,
+  value: string,
+  ctx: CommandContext,
+): Promise<CommandResult> {
+  const parsed = parsePublicFallbackFlag(value, key);
+  await persist(ctx.dataDir, (existing) => ({
+    ...existing,
+    experimental: { ...existing.experimental, bazaar: parsed },
+  }));
+  const entry: RenderedSetting = { value: parsed, source: 'file' };
+  const warning = parsed === 'on' ? EXPERIMENTAL_BAZAAR_WARNING : undefined;
+  return {
+    data: { key, ...entry, ...(warning !== undefined ? { warning } : {}) },
+    humanLines: [formatLine(key, entry), ...(warning !== undefined ? [warning] : [])],
+  };
+}
+
 /**
  * `config set [--project [--local]] router.enabled|router.context`. Without
  * `--project` the key goes into the global config through the same locked merge
@@ -922,11 +991,19 @@ export interface RouterDefaultsResult {
   removed: string[];
 }
 
+/** The automatic limits a fresh install fills in, in atomic USDC; `sessionBudget` may be `none`. */
+export interface RouterLimits {
+  maxAutoSpend: string;
+  sessionBudget: string;
+}
+
 /** Remove/report retired keys in the same locked write. Refresh preserves absent
- * current settings; a fresh install fills only missing automatic limits. */
+ * current settings; a fresh install fills only missing automatic limits, with the
+ * values the person at the terminal approved or chose. */
 export async function persistRouterDefaults(
   dir: string,
   refresh = false,
+  limits: RouterLimits = ROUTER_DEFAULTS,
 ): Promise<RouterDefaultsResult> {
   const result: RouterDefaultsResult = { set: [], kept: [], removed: [] };
   if (refresh && retiredPaymentKeys(await loadRawConfig(dir)).length === 0) return result;
@@ -935,10 +1012,7 @@ export async function persistRouterDefaults(
     result.removed = retiredPaymentKeys(existing);
     for (const key of result.removed) delete next[key];
     if (refresh) return next;
-    for (const [key, value] of Object.entries(ROUTER_DEFAULTS) as [
-      keyof typeof ROUTER_DEFAULTS,
-      string,
-    ][]) {
+    for (const [key, value] of Object.entries(limits) as [keyof RouterLimits, string][]) {
       if (existing[key] === undefined) {
         next[key] = value;
         result.set.push(key);
@@ -999,7 +1073,7 @@ function assertKey(key: string): ScalarConfigKey {
   }
   if ((CONFIG_KEYS as string[]).includes(key)) return key as ScalarConfigKey;
   throw new CliError('USAGE', `Unknown config key: ${JSON.stringify(key)}`, {
-    fix: `Valid keys: ${[...CONFIG_KEYS, ...PUBLISH_CONFIG_KEYS, ...HOOKS_CONFIG_KEYS, ...ROUTER_CONFIG_KEYS].join(', ')}.`,
+    fix: `Valid keys: ${[...CONFIG_KEYS, ...PUBLISH_CONFIG_KEYS, ...HOOKS_CONFIG_KEYS, ...ROUTER_CONFIG_KEYS, ...EXPERIMENTAL_CONFIG_KEYS].join(', ')}.`,
   });
 }
 

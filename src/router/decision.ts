@@ -15,10 +15,9 @@ import type { Packet } from './context';
  * retry, the settlement accounting and one Base settlement of about 1.5 s from
  * every paid lookup.
  *
- * NOTHING IS STORED LOCALLY. The bounded packet travels with the request and
- * the backend keeps it against the decision id until that id expires, which is
- * how `request({query})` reaches the same calibrated input with no session
- * file, no timestamp latch and no guess about which window this process serves.
+ * The bounded packet travels with the hook request and the backend keeps it
+ * against the decision id until that id expires. What this client keeps is
+ * each offer's spec, by its id (`specs.ts`).
  */
 
 export const ROUTER_PATH = '/api/x402-router';
@@ -108,6 +107,109 @@ const CapabilityFields = {
   providerPriceAtomic: z.string().regex(/^\d+$/),
 };
 
+/**
+ * STRUCTURE, NEVER WORDING. A hint lands in the model's context verbatim, so
+ * its shape is checked the way the id's alphabet is: one line, no control
+ * characters, and it has to be the call it claims to be, naming the id this
+ * same answer carries. A hint that fails any of these is a protocol error and
+ * the turn falls back to the generic line; nothing here rewrites a word of a
+ * hint that passes. Both offering arms, `execute` and `discovered`, hold it.
+ */
+function checkHint(decision: { id: string; hint: string }, ctx: z.RefinementCtx): void {
+  if (/[\p{Cc}\p{Cf}]/u.test(decision.hint)) {
+    ctx.addIssue({ code: 'custom', path: ['hint'], message: 'a hint is one plain line' });
+  }
+  if (!decision.hint.includes('request({')) {
+    ctx.addIssue({ code: 'custom', path: ['hint'], message: 'a hint names the call to make' });
+  }
+  if (!decision.hint.includes(decision.id)) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['hint'],
+      message: "a hint carries this answer's own id",
+    });
+  }
+}
+
+/**
+ * A PAY-PER-CALL SERVICE NOBODY CURATED. When no capability in the catalog fits
+ * but a listed x402 service could do the step, the server names that one
+ * service: who sells it, where, for how much, and the input it takes. The
+ * candidate is the seller's own listing, so every field is data for the host
+ * to judge, never an instruction; the host builds the `input` and the tool
+ * call pays through the same `runPay` path and caps as a curated lookup.
+ */
+const DiscoveredCandidateSchema = z.strictObject({
+  source: z.string().min(1).max(64),
+  provider: z.string().min(1).max(120),
+  url: z.string().min(1).max(2_048),
+  method: z.enum(['GET', 'POST']),
+  description: z.string().max(500),
+  providerPriceAtomic: z.string().regex(/^\d+$/),
+  network: z.string().min(1).max(64),
+  payTo: z.string().min(1).max(200),
+  input: z.strictObject({
+    location: z.enum(['body', 'query']),
+    schema: z.record(z.string(), z.unknown()),
+  }),
+});
+
+/**
+ * A REQUEST SPEC: the offered service's real contract, sent beside the line only
+ * because this build asks for it (`accepts: ["spec"]`). The hook stores it by
+ * the offer's id; `request({id})` shows it and `request({id, input})` fills its
+ * request and pays the provider directly, with no second decision. Every field
+ * is the server's, and so is checked like the rest of the answer: the payee and
+ * price still meet the live 402 and the spend policy in `runPay`.
+ */
+export const ToolSpecSchema = z.strictObject({
+  capabilityId: z.string().min(1).max(200),
+  provider: z.string().min(1).max(120),
+  description: z.string().min(1).max(500),
+  priceAtomic: z.string().regex(/^\d+$/),
+  priceVaries: z.boolean(),
+  maxAmountAtomic: z.string().regex(/^\d+$/),
+  payTo: z.string().min(1).max(200),
+  network: z.string().min(1).max(64),
+  asset: z.string().min(1).max(200),
+  request: z.strictObject({
+    method: z.enum(['GET', 'POST']),
+    url: z.string().min(1).max(2_048),
+    fields: z.record(z.string(), z.enum(['path', 'query', 'body'])),
+    location: z.enum(['query', 'body']),
+  }),
+  input: z.record(z.string(), z.unknown()),
+  pinned: z.record(z.string(), z.unknown()),
+  example: z.record(z.string(), z.unknown()).optional(),
+  returns: z.string().min(1).max(200).optional(),
+  returnsExample: z.unknown().optional(),
+  resultSchema: z.record(z.string(), z.unknown()).optional(),
+  /** The fields the result promises (type, properties, items, required). The
+   *  agent is handed only these; the whole body is saved to a file. */
+  outputSchema: z.record(z.string(), z.unknown()).optional(),
+});
+export type ToolSpec = z.infer<typeof ToolSpecSchema>;
+
+export const OfferSpecSchema = ToolSpecSchema.extend({ id: IdSchema });
+export type OfferSpec = z.infer<typeof OfferSpecSchema>;
+
+/** One spec per service the line names: the offer and any alternative. */
+const SpecsSchema = z.array(OfferSpecSchema).min(1).max(4).optional();
+
+/** The same answer on both calls: the hook's offer, and the tool's fallback
+ *  when a query with no id found no curated capability. */
+const DiscoveredSchema = z
+  .strictObject({
+    action: z.literal('discovered'),
+    id: IdSchema,
+    candidate: DiscoveredCandidateSchema,
+    /** THE LINE, FINISHED, as on `execute`: it carries the seller's
+     *  description and the input it takes. */
+    hint: z.string().min(1).max(2_000),
+    specs: SpecsSchema,
+  })
+  .superRefine(checkHint);
+
 const HookDecisionSchema = z.discriminatedUnion('action', [
   z
     .strictObject({
@@ -122,31 +224,14 @@ const HookDecisionSchema = z.discriminatedUnion('action', [
        * THE LINE, FINISHED. The server writes it with the real id in it and, on a
        * native call, the exact search or URL that was denied. The client injects
        * it and composes nothing, which is why there is no hint builder here any
-       * more: two sides writing the same sentence is how they drift.
+       * more: two sides writing the same sentence is how they drift. The same
+       * bound as a discovered line's.
        */
-      hint: z.string().min(1).max(1_000),
+      hint: z.string().min(1).max(2_000),
+      specs: SpecsSchema,
     })
-    .superRefine((decision, ctx) => {
-      // STRUCTURE, NEVER WORDING. This line lands in the model's context
-      // verbatim, so the shape is checked the way the id's alphabet is: one
-      // line, no control characters, and it has to be the call it claims to be,
-      // naming the id this same answer carries. A hint that fails any of these
-      // is a protocol error and the turn falls back to the generic line; nothing
-      // here rewrites a word of a hint that passes.
-      if (/[\p{Cc}\p{Cf}]/u.test(decision.hint)) {
-        ctx.addIssue({ code: 'custom', path: ['hint'], message: 'a hint is one plain line' });
-      }
-      if (!decision.hint.includes('request({')) {
-        ctx.addIssue({ code: 'custom', path: ['hint'], message: 'a hint names the call to make' });
-      }
-      if (!decision.hint.includes(decision.id)) {
-        ctx.addIssue({
-          code: 'custom',
-          path: ['hint'],
-          message: "a hint carries this answer's own id",
-        });
-      }
-    }),
+    .superRefine(checkHint),
+  DiscoveredSchema,
   RefusedSchema.extend({ action: z.literal('native') }),
   RefusedSchema.extend({ action: z.literal('needs_input') }),
 ]);
@@ -157,6 +242,24 @@ const ToolDecisionSchema = z.discriminatedUnion('action', [
     ...CapabilityFields,
     contract: ContractSchema,
   }),
+  /**
+   * A query with no id, answered with the spec of the service the server
+   * picked under a fresh `id`: kept like a hook's, and never run in the same
+   * call. `hint` is the line, with the skeleton of the next call:
+   * `request({id, input: {...}})` with the required fields. `input` is what a
+   * router from before the binder's removal still sends on a bound pick: it
+   * is accepted so that answer parses, and never read, so it never runs.
+   */
+  z
+    .strictObject({
+      action: z.literal('spec'),
+      id: IdSchema,
+      spec: ToolSpecSchema,
+      hint: z.string().min(1).max(2_000),
+      input: z.record(z.string(), z.unknown()).optional(),
+    })
+    .superRefine(checkHint),
+  DiscoveredSchema,
   RefusedSchema.extend({ action: z.literal('native') }),
   RefusedSchema.extend({ action: z.literal('needs_input') }),
 ]);
@@ -185,6 +288,24 @@ export type ToolDecision = ToolResponse['decision'];
 export type CallKind = 'hook' | 'tool';
 
 /**
+ * What this client can act on beyond the curated answers, sent on both calls.
+ * `discovered` is Tenjin's reviewed list of third-party services, on for every
+ * build that parses it; the server answers that arm only to a request that
+ * lists it, so an older build never sees one. `spec` asks for each offered
+ * service's request spec beside its line, and for the picked service's spec in
+ * place of a decision on a query with no id, which only a build that parses
+ * them can take: the decision schemas are strict. `bazaar` widens discovery
+ * to the open Bazaar and is sent only while `experimental.bazaar` is on.
+ */
+export const CLIENT_ACCEPTS: readonly string[] = ['discovered', 'spec'];
+export const BAZAAR_ACCEPT = 'bazaar';
+
+/** The `accepts` this build sends, with the open Bazaar or without it. */
+export function acceptsFor(bazaar: boolean): string[] {
+  return bazaar ? [...CLIENT_ACCEPTS, BAZAAR_ACCEPT] : [...CLIENT_ACCEPTS];
+}
+
+/**
  * The exact body the hook call sends, spelled once and pinned to the shared
  * fixtures. The route reads it with a strict object, so an extra field is a
  * 400, and a 400 is a turn with no hint.
@@ -192,24 +313,37 @@ export type CallKind = 'hook' | 'tool';
  * ONE BODY FOR BOTH HOOKS. Which hook is asking is not a field: the route reads
  * it from `packet.pendingCall`, which the native hook sets and the prompt hook
  * does not. A `source` beside the packet was the `/prepare` route's shape, and
- * that route is gone.
+ * that route is gone. `sessionId` is the harness's own session id, which the
+ * server uses only so one session is not offered the same discovered service
+ * twice.
  */
-export function buildHookBody(packet: Packet): Record<string, unknown> {
-  return { schemaVersion: 1, packet };
+export function buildHookBody(
+  packet: Packet,
+  extras: { sessionId?: string; accepts?: readonly string[] } = {},
+): Record<string, unknown> {
+  return {
+    schemaVersion: 1,
+    ...(extras.sessionId !== undefined ? { sessionId: extras.sessionId } : {}),
+    ...(extras.accepts !== undefined ? { accepts: [...extras.accepts] } : {}),
+    packet,
+  };
 }
 
-/** The exact body the tool call sends. `id` is the turn whose packet decides
- *  with this query; `gateHint` is evidence, never authority. */
+/** The exact body the tool call sends. `id` is the offer the query is for,
+ *  sent only for an offer with no spec kept; `gateHint` is evidence, never
+ *  authority. */
 export function buildToolBody(request: {
-  query: string;
+  query?: string;
   id?: string;
   gateHint?: GateHint;
+  accepts?: readonly string[];
 }): Record<string, unknown> {
   return {
     schemaVersion: 1,
-    query: request.query,
+    ...(request.query !== undefined ? { query: request.query } : {}),
     ...(request.id !== undefined ? { id: request.id } : {}),
     ...(request.gateHint !== undefined ? { gateHint: request.gateHint } : {}),
+    ...(request.accepts !== undefined ? { accepts: [...request.accepts] } : {}),
   };
 }
 
@@ -234,6 +368,9 @@ export interface GateHint {
 export interface DecisionDeps {
   ctx: CommandContext;
   baseUrl: string;
+  /** `experimental.bazaar`: add {@link BAZAAR_ACCEPT}, so a service from the
+   *  open Bazaar may come back. Off by default: curated and the Tenjin list. */
+  acceptsBazaar?: boolean;
   fetchImpl?: typeof fetch;
   /** Overrides the per-call deadline; the hook passes its own, smaller one. */
   timeoutMs?: number;
@@ -247,18 +384,16 @@ export type DecisionOutcome<T> =
 
 /**
  * ONE FREE CALL, IN TWO FORMS. The hook sends `{ packet }`: the backend runs
- * the gate, and on `execute` stores that packet under an id. The tool sends
- * `{ query, id? }`: the backend makes THE decision from that query plus the
- * packet it stored, and answers with the contract to run.
- *
- * The tool never sends a packet of its own. The turn's context lives on the
- * backend against the id, and the query the model wrote is what the routing
- * corpus is calibrated against: 55 of 56 for query plus packet, 53 of 56 for
- * the raw prompt, measured on jev-1.13.0.
+ * the gate, and on `execute` stores that packet under an id and answers with
+ * each offered service's spec. The tool sends `{ query }`, which the backend
+ * answers with the spec of the service its gate picks, or `{ query, id }` for
+ * the free docs offer, which has no spec and is bound from the query. Every
+ * provider call is built here, from a spec, or for the docs lookup by the
+ * backend from the query.
  */
 export async function requestDecision(
   kind: 'hook',
-  request: { packet: Packet },
+  request: { packet: Packet; sessionId?: string },
   deps: DecisionDeps,
 ): Promise<DecisionOutcome<HookResponse>>;
 export async function requestDecision(
@@ -271,6 +406,7 @@ export async function requestDecision(
   request: {
     query?: string;
     packet?: Packet;
+    sessionId?: string;
     id?: string;
     gateHint?: GateHint;
   },
@@ -283,11 +419,15 @@ export async function requestDecision(
     blockRedirects: true,
     jsonBody:
       kind === 'hook'
-        ? buildHookBody(request.packet as Packet)
+        ? buildHookBody(request.packet as Packet, {
+            ...(request.sessionId !== undefined ? { sessionId: request.sessionId } : {}),
+            accepts: acceptsFor(deps.acceptsBazaar === true),
+          })
         : buildToolBody({
-            query: request.query as string,
+            ...(request.query !== undefined ? { query: request.query } : {}),
             ...(request.id !== undefined ? { id: request.id } : {}),
             ...(request.gateHint !== undefined ? { gateHint: request.gateHint } : {}),
+            accepts: acceptsFor(deps.acceptsBazaar === true),
           }),
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   };
@@ -295,6 +435,52 @@ export async function requestDecision(
     await httpRequest(url, options),
     kind === 'hook' ? HookResponseSchema : ToolResponseSchema,
   );
+}
+
+/** How a call run from a request spec ended, for the server's offer-to-call
+ *  count. No text: the id, the outcome, the provider's status and the time. */
+export interface SpecOutcome {
+  id: string;
+  status: 'fulfilled' | 'unverified' | 'failed' | 'needs_approval';
+  httpStatus?: number;
+  ms?: number;
+}
+
+/** The outcome report's own deadline: it is telemetry and never holds a result. */
+export const OUTCOME_TIMEOUT_MS = 3_000;
+
+/**
+ * TELL THE SERVER A SPEC WAS USED. The client called and paid the provider
+ * itself, so this is the only word the server gets that its offer was taken.
+ * Never throws and never waits on anything the caller needs: a lost report
+ * costs one count.
+ */
+export async function reportSpecOutcome(
+  outcome: SpecOutcome,
+  deps: Pick<DecisionDeps, 'ctx' | 'baseUrl' | 'fetchImpl'>,
+): Promise<void> {
+  try {
+    await httpRequest(new URL(ROUTER_PATH, deps.baseUrl).toString(), {
+      method: 'POST',
+      timeoutMs: OUTCOME_TIMEOUT_MS,
+      blockRedirects: true,
+      jsonBody: buildOutcomeBody(outcome),
+      ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+    });
+  } catch {
+    // Telemetry only.
+  }
+}
+
+/** The exact body of an outcome report, pinned to the shared fixtures. */
+export function buildOutcomeBody(outcome: SpecOutcome): Record<string, unknown> {
+  return {
+    schemaVersion: 1,
+    id: outcome.id,
+    status: outcome.status,
+    ...(outcome.httpStatus !== undefined ? { httpStatus: outcome.httpStatus } : {}),
+    ...(outcome.ms !== undefined ? { ms: Math.max(0, Math.round(outcome.ms)) } : {}),
+  };
 }
 
 function readDecision<T extends z.ZodTypeAny>(
