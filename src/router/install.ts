@@ -56,12 +56,12 @@ const exec = promisify(execFile);
 /**
  * The harness's kill budget for each routing leg: a stuck server never holds a
  * prompt longer than this. Every wait inside the leg is cut from it: the gate's
- * 3.5 s, which holds the paid path's probe, the wallet read before a deposit
- * and the call, plus `DEPOSIT_GRACE_MS` for a call that carries a deposit, with
- * 500 ms left for the transcript read and the reply (`wire.test.ts` pins the
- * sum). A whole leg whose call carried a deposit took 2.8 to 3.3 s on Base
- * Sepolia, so it fits; a slower one (a wallet unlock, a slow settlement) loses
- * only that prompt's hint, and the SDK recovers the channel on the next call.
+ * 3.5 s, which holds the paid path's 402, the reads before a deposit and the
+ * paid request, with 500 ms left for the transcript read and the reply
+ * (`wire.test.ts` pins the sum). A whole leg whose call carried a deposit took
+ * 2.8 to 3.3 s on Base Sepolia, so it fits; a slower one (a wallet unlock, a
+ * slow settlement) loses only that prompt's hint, and the SDK recovers the
+ * channel on the next call.
  *
  * A machine carrying an older entry is converged by the writer, not by the
  * user: the entries are ours by marker, so `install`, `install --refresh` and
@@ -72,8 +72,8 @@ export const ROUTE_HOOK_TIMEOUT_SECONDS = 5;
  * The after-call entries' kill budget, longer than the rest for the one wait
  * a leg makes: a search the pre-call leg is fetching free docs for waits up to
  * `AUGMENT_WAIT_MS` (9 s) for them, and when none came back and the search was
- * short, the gate's 3.5 s follow, with the routing leg's deposit grace and
- * startup to spare (`wire.test.ts` pins the sum). Every other after-call event
+ * short, the gate's 3.5 s follow, with startup to spare (`wire.test.ts` pins
+ * the sum). Every other after-call event
  * returns as fast as before, so the number is a ceiling, not a cost.
  */
 export const AFTER_CALL_TIMEOUT_SECONDS = 15;

@@ -401,14 +401,18 @@ export class RouteSkipped extends Error {
 
 /** Another session's call was in flight on the wallet's routing channel. */
 export const CHANNEL_BUSY = 'channel_busy';
+/** The server answered no paid path. */
+export const PAID_PATH_ABSENT = 'paid_path_absent';
+/** The reasons a skipped paid call still routes on the free path. */
+const FREE_PATH_REASONS = new Set<string>([CHANNEL_BUSY, PAID_PATH_ABSENT]);
 
 export type DecisionOutcome<T> =
   /** `freePath`: the paid path skipped the call for this reason and it went
    *  to the free path instead, unpaid. */
-  | { status: 'decided'; decision: T; freePath?: typeof CHANNEL_BUSY }
+  | { status: 'decided'; decision: T; freePath?: string }
   /** On the free path nothing was paid and nothing could be, so a failure here
    *  costs the turn a routing answer and nothing else. */
-  | { status: 'failed'; reason: string; errorCode?: string; freePath?: typeof CHANNEL_BUSY }
+  | { status: 'failed'; reason: string; errorCode?: string; freePath?: string }
   /** The paid path did not take the call ({@link RouteSkipped}): nothing was
    *  sent, and the native tool runs. */
   | { status: 'skipped'; why: string };
@@ -470,15 +474,15 @@ export async function requestDecision(
   } catch (err) {
     if (!(err instanceof RouteSkipped)) throw err;
     const left = options.timeoutMs - (Date.now() - started);
-    if (err.why !== CHANNEL_BUSY || left <= 0) return { status: 'skipped', why: err.why };
-    // THE CHANNEL WAS BUSY: the call still routes, on the free path, unpaid,
-    // inside what is left of its budget.
+    if (!FREE_PATH_REASONS.has(err.why) || left <= 0) return { status: 'skipped', why: err.why };
+    // THE CHANNEL WAS BUSY OR THE SERVER HAS NO PAID PATH: the call still
+    // routes, on the free path, unpaid, inside what is left of its budget.
     response = await httpRequest(new URL(ROUTER_PATH, deps.baseUrl).toString(), {
       ...options,
       timeoutMs: left,
     });
     const free = readDecision(response, schema);
-    return free.status === 'skipped' ? free : { ...free, freePath: CHANNEL_BUSY };
+    return free.status === 'skipped' ? free : { ...free, freePath: err.why };
   }
   return readDecision(response, schema);
 }

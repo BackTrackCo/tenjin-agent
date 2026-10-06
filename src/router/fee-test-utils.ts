@@ -6,8 +6,11 @@ import {
 import type { PaymentRequirements } from '@x402/core/types';
 import type { TypedDataDefinition } from 'viem';
 import { generatePrivateKey, privateKeyToAccount, type PrivateKeyAccount } from 'viem/accounts';
+import type { SpendPolicy } from '../lib/policy';
 import type { TenjinSigner } from '../lib/wallet/provider';
+import { createLocalSpendAuthorizer } from '../lib/wallet/spend';
 import { ROUTE_PAID_PATH, ROUTING_FEE_ATOMIC } from './fee-state';
+import type { RoutingPayerDeps } from './routing-payer';
 
 /**
  * A FAKE ROUTER THAT SPEAKS THE REAL x402 `batch-settlement` HEADERS, for the
@@ -74,10 +77,10 @@ export class FakeRouter {
   }
 
   readonly fetch: typeof fetch = async (input, init) => {
-    const url = new URL(String(input));
-    const headers = new Headers(init?.headers);
-    const signature = headers.get('payment-signature');
-    this.log.push(`${init?.method ?? 'GET'} ${url.pathname} ${signature ? 'paid' : 'unpaid'}`);
+    const request = new Request(input, init);
+    const url = new URL(request.url);
+    const signature = request.headers.get('payment-signature');
+    this.log.push(`${request.method} ${url.pathname} ${signature ? 'paid' : 'unpaid'}`);
     if (url.pathname !== ROUTE_PAID_PATH) return json(this.body, 200);
     if (this.opts.paid === false) return json({}, 404);
     if (signature === null) return this.required(url.toString());
@@ -207,5 +210,40 @@ export function testSigner(
     signMessage: (args) => account.signMessage(args),
     signTypedData: (args: TypedDataDefinition) => account.signTypedData(args),
     signTransaction: () => Promise.reject(new Error('unused')),
+  };
+}
+
+/** The spend policy the payer tests run under unless they say otherwise. */
+export const TEST_POLICY: SpendPolicy = {
+  maxAutoSpendAtomic: 250_000n,
+  sessionBudgetAtomic: 5_000_000n,
+  allowlistCreators: [],
+};
+
+/**
+ * A payer's deps against `router`, with the real local spend authorizer over
+ * `dataDir`'s ledger and a wallet holding $10.
+ */
+export function payerDeps(
+  router: FakeRouter,
+  dataDir: string,
+  account: PrivateKeyAccount,
+  overrides: Partial<RoutingPayerDeps> = {},
+): RoutingPayerDeps {
+  return {
+    dataDir,
+    getSigner: async () => testSigner(account),
+    policy: async () => TEST_POLICY,
+    authorizer: (policy) =>
+      createLocalSpendAuthorizer({
+        dir: dataDir,
+        policy,
+        ...(overrides.now !== undefined ? { now: overrides.now } : {}),
+      }),
+    walletBalance: async () => 10_000_000n,
+    readContract: router.readContract as never,
+    fetchImpl: router.fetch,
+    warn: () => undefined,
+    ...overrides,
   };
 }

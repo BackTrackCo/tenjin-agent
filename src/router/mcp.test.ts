@@ -7,7 +7,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { testWalletProvider } from '../lib/read-test-utils';
 import type { SpendAuthorization, SpendAuthorizer } from '../lib/wallet';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
-import { FakeRouter, testSigner } from './fee-test-utils';
+import { FakeRouter, payerDeps } from './fee-test-utils';
 import { hookToolInput } from './hook-tool';
 import { buildRouterMcpServer, MAX_RESULT_SIZE_CHARS, MAX_RESULT_SIZE_KEY } from './mcp';
 import { RoutingPayer } from './routing-payer';
@@ -229,19 +229,7 @@ describe('the hook tool', () => {
     const { homeDir, transcript } = await home('sess-paid');
     const fake = new FakeRouter();
     const wallet = privateKeyToAccount(generatePrivateKey());
-    const payer = new RoutingPayer({
-      dataDir: dir,
-      getSigner: async () => testSigner(wallet),
-      policy: async () => ({
-        maxAutoSpendAtomic: 250_000n,
-        sessionBudgetAtomic: 5_000_000n,
-        allowlistCreators: [],
-      }),
-      walletBalance: async () => 10_000_000n,
-      readContract: fake.readContract as never,
-      fetchImpl: fake.fetch,
-      warn: () => undefined,
-    });
+    const payer = new RoutingPayer(payerDeps(fake, dir, wallet));
     const server = buildRouterMcpServer({
       dataDir: dir,
       homeDir,
@@ -272,19 +260,7 @@ describe('the hook tool', () => {
     const { homeDir, transcript } = await home('sess-first');
     await rm(transcript);
     const fake = new FakeRouter();
-    const payer = new RoutingPayer({
-      dataDir: dir,
-      getSigner: async () => testSigner(privateKeyToAccount(generatePrivateKey())),
-      policy: async () => ({
-        maxAutoSpendAtomic: 250_000n,
-        sessionBudgetAtomic: 5_000_000n,
-        allowlistCreators: [],
-      }),
-      walletBalance: async () => 10_000_000n,
-      readContract: fake.readContract as never,
-      fetchImpl: fake.fetch,
-      warn: () => undefined,
-    });
+    const payer = new RoutingPayer(payerDeps(fake, dir, privateKeyToAccount(generatePrivateKey())));
     const server = buildRouterMcpServer({
       dataDir: dir,
       homeDir,
@@ -318,19 +294,7 @@ describe('the hook tool', () => {
     const { homeDir, transcript } = await home('sess-real');
     const fake = new FakeRouter();
     const wallet = privateKeyToAccount(generatePrivateKey());
-    const payer = new RoutingPayer({
-      dataDir: dir,
-      getSigner: async () => testSigner(wallet),
-      policy: async () => ({
-        maxAutoSpendAtomic: 250_000n,
-        sessionBudgetAtomic: 5_000_000n,
-        allowlistCreators: [],
-      }),
-      walletBalance: async () => 10_000_000n,
-      readContract: fake.readContract as never,
-      fetchImpl: fake.fetch,
-      warn: () => undefined,
-    });
+    const payer = new RoutingPayer(payerDeps(fake, dir, wallet));
     const server = buildRouterMcpServer({
       dataDir: dir,
       homeDir,

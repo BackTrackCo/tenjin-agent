@@ -67,12 +67,6 @@ function normCreator(value: string): string {
   return value.trim().toLowerCase();
 }
 
-/** Whether the creator allowlist admits this creator. An empty list admits all. */
-export function creatorAllowed(policy: SpendPolicy, creator: string): boolean {
-  if (policy.allowlistCreators.length === 0) return true;
-  return policy.allowlistCreators.map(normCreator).includes(normCreator(creator));
-}
-
 /** Hard price/creator checks apply in both modes. Manual payments require consent;
  * automatic payments must fit both configured ceilings without prompting. */
 export function evaluateSpendPolicy(policy: SpendPolicy, req: SpendRequest): PolicyEvaluation {
@@ -84,12 +78,15 @@ export function evaluateSpendPolicy(policy: SpendPolicy, req: SpendRequest): Pol
     };
   }
 
-  if (!creatorAllowed(policy, req.creator)) {
-    return {
-      decision: 'deny',
-      reason: 'not_allowlisted',
-      message: `Creator "${req.creator}" is not in allowlistCreators.`,
-    };
+  if (policy.allowlistCreators.length > 0) {
+    const allowed = policy.allowlistCreators.map(normCreator);
+    if (!allowed.includes(normCreator(req.creator))) {
+      return {
+        decision: 'deny',
+        reason: 'not_allowlisted',
+        message: `Creator "${req.creator}" is not in allowlistCreators.`,
+      };
+    }
   }
 
   if (req.mode === 'manual') {

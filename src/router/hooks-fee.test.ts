@@ -7,8 +7,9 @@ import { GATE_TIMEOUT_MS } from './gate';
 import { runHookCommand, runHookKind } from './hook-command';
 import { runAnswerHook, runPromptHook, type HookDeps } from './hooks';
 import { pausedReason, ROUTING_FEE_ATOMIC, writeFeeState } from './fee-state';
-import { FakeRouter, testSigner } from './fee-test-utils';
-import { DEPOSIT_GRACE_MS, RoutingPayer } from './routing-payer';
+import { FakeRouter, payerDeps } from './fee-test-utils';
+import { RoutingPayer } from './routing-payer';
+import { readSpendSummary } from '../lib/wallet/spend';
 
 /**
  * The hook legs on each side of the routing fee: the free path until the fee
@@ -100,20 +101,7 @@ function payer(
   fake: FakeRouter,
   opts: Partial<ConstructorParameters<typeof RoutingPayer>[0]> = {},
 ) {
-  return new RoutingPayer({
-    dataDir: dir,
-    getSigner: async () => testSigner(wallet),
-    policy: async () => ({
-      maxAutoSpendAtomic: 250_000n,
-      sessionBudgetAtomic: 5_000_000n,
-      allowlistCreators: [],
-    }),
-    walletBalance: async () => 10_000_000n,
-    readContract: fake.readContract as never,
-    fetchImpl: fake.fetch,
-    warn: () => undefined,
-    ...opts,
-  });
+  return new RoutingPayer(payerDeps(fake, dir, wallet, opts));
 }
 
 function prompt(session = 'sess-1'): unknown {
@@ -171,6 +159,7 @@ describe('the hook legs and the routing fee', () => {
     expect(fake.log).toEqual([
       'POST /api/x402-router/route unpaid',
       'POST /api/x402-router/route paid',
+      'POST /api/x402-router/route unpaid',
       'POST /api/x402-router/route paid',
     ]);
     expect(fake.deposits).toBe(1);
@@ -248,6 +237,7 @@ describe('the hook legs and the routing fee', () => {
 
   it('says once per session when tenjin mcp cannot unlock the wallet, naming the variable', async () => {
     await config({ routingFee: 'approved' });
+    await writeFeeState(dir, { paidPath: 'available', checkedAtMs: NOW });
     const fake = new FakeRouter();
     const p = payer(fake, {
       getSigner: async () => {
@@ -260,43 +250,44 @@ describe('the hook legs and the routing fee', () => {
     expect((await runPromptHook(prompt(), deps(fake.fetch, p))).response).toBeNull();
   });
 
+  /** `fake`, except that a request carrying a payment never answers. */
+  function paidHangs(fake: FakeRouter): { fetchImpl: typeof fetch; paid: () => number } {
+    let paid = 0;
+    const fetchImpl = ((input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      const request = new Request(input, init);
+      if (!request.headers.has('payment-signature')) return fake.fetch(request);
+      paid += 1;
+      return new Promise<Response>((_resolve, reject) => {
+        request.signal.addEventListener('abort', () => reject(request.signal.reason));
+      });
+    }) as typeof fetch;
+    return { fetchImpl, paid: () => paid };
+  }
+
   it('keeps a paid voucher call that gets no answer inside the gate budget', async () => {
     await config({ routingFee: 'approved' });
     const fake = new FakeRouter();
     const p = payer(fake);
     // The first call deposits; the next is a plain voucher.
     await runPromptHook(prompt(), deps(fake.fetch, p));
-    let silentCalls = 0;
-    const silent = ((_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
-      silentCalls += 1;
-      return new Promise<Response>((_resolve, reject) => {
-        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason));
-      });
-    }) as typeof fetch;
-    // The paid path's 402 is already known, so the call goes straight out.
+    const hang = paidHangs(fake);
     const started = Date.now();
-    await runPromptHook(prompt(), { ...deps(fake.fetch, p), fetchImpl: silent });
+    await runPromptHook(prompt(), { ...deps(fake.fetch, p), fetchImpl: hang.fetchImpl });
     expect(Date.now() - started).toBeLessThan(GATE_TIMEOUT_MS + 500);
-    expect(silentCalls).toBeGreaterThan(0);
+    expect(hang.paid()).toBe(1);
   }, 15_000);
 
-  it('returns a deposit call that gets no answer before the hook timeout', async () => {
+  it('returns a deposit call that gets no answer inside the gate budget, and counts the deposit', async () => {
     await config({ routingFee: 'approved' });
     const fake = new FakeRouter();
     const p = payer(fake);
-    let silentCalls = 0;
-    const silent = ((_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
-      silentCalls += 1;
-      return new Promise<Response>((_resolve, reject) => {
-        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason));
-      });
-    }) as typeof fetch;
-    // The probe answers (the payer's own fetch); the first paid call, which
-    // carries the deposit, never does.
+    const hang = paidHangs(fake);
     const started = Date.now();
-    await runPromptHook(prompt(), { ...deps(fake.fetch, p), fetchImpl: silent });
-    expect(Date.now() - started).toBeLessThan(GATE_TIMEOUT_MS + DEPOSIT_GRACE_MS + 500);
-    expect(silentCalls).toBe(1);
+    await runPromptHook(prompt(), { ...deps(fake.fetch, p), fetchImpl: hang.fetchImpl });
+    expect(Date.now() - started).toBeLessThan(GATE_TIMEOUT_MS + 500);
+    expect(hang.paid()).toBe(1);
+    // It went out and no answer came, so it may have landed: it counts.
+    expect(await readSpendSummary(dir)).toMatchObject({ committedAtomic: '250000' });
   }, 15_000);
 
   it('keeps the paused-routing line off the answer hook', async () => {
