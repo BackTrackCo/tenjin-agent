@@ -28,7 +28,24 @@ export async function probeRouter(
   baseUrl: string,
   opts: { timeoutMs: number; fetchImpl?: typeof fetch; env?: NodeJS.ProcessEnv },
 ): Promise<RouterCheck> {
-  const url = new URL(ROUTER_PATH, baseUrl).toString();
+  const fail = (detail: string, fix: string): RouterCheck => ({
+    name: 'router',
+    status: 'fail',
+    required: true,
+    detail,
+    fix,
+  });
+  // `TENJIN_BASE_URL` and `--base-url` reach here unvalidated. A throw would
+  // fail an install that has already written everything else.
+  let url: string;
+  try {
+    url = new URL(ROUTER_PATH, baseUrl).toString();
+  } catch {
+    return fail(
+      `the base URL ${JSON.stringify(baseUrl)} is not a URL`,
+      `Check TENJIN_BASE_URL and --base-url, or set it with \`tenjin config set baseUrl ${PRODUCTION_ORIGIN}\`.`,
+    );
+  }
   const host = new URL(url).host;
   const probe = await httpRequest(url, {
     method: 'POST',
@@ -37,14 +54,7 @@ export async function probeRouter(
     jsonBody: {},
     ...(opts.fetchImpl !== undefined ? { fetchImpl: opts.fetchImpl } : {}),
   });
-  const fail = (detail: string, fix: string): RouterCheck => ({
-    name: 'router',
-    status: 'fail',
-    required: true,
-    detail,
-    fix,
-  });
-  const production = isSameDeployment(new URL(baseUrl).origin, PRODUCTION_ORIGIN);
+  const production = isSameDeployment(new URL(url).origin, PRODUCTION_ORIGIN);
   const checkBase = production
     ? 'Try again later.'
     : 'Check that the configured base URL names the Tenjin router (`tenjin config get baseUrl`), then try again later.';

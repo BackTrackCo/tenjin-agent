@@ -212,6 +212,19 @@ describe('tenjin install', () => {
     );
   });
 
+  it('still succeeds, with a warning, when TENJIN_BASE_URL is not a URL', async () => {
+    vi.stubEnv('TENJIN_BASE_URL', 'tenjin.blog');
+    try {
+      const result = await runRouterInstall({}, ctx(), deps());
+      expect(result.data).toMatchObject({
+        router: { status: 'warn', detail: 'the base URL "tenjin.blog" is not a URL' },
+      });
+      expect((await readSettings()).hooks).toEqual(CURRENT_HOOKS);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('reports no hooks directory, because the entries are plain commands', async () => {
     const result = await runRouterInstall({}, ctx(), deps());
     const hooks = (result.data as { hooks: Record<string, unknown> }).hooks;

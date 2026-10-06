@@ -25,6 +25,15 @@ describe('probeRouter', () => {
     expect(check).toMatchObject({ status: 'ok', detail: `${PROD}/api/x402-router is live` });
   });
 
+  it('fails, without throwing, on a base URL that is not a URL', async () => {
+    const check = await probe(answer(400), 'tenjin.blog');
+    expect(check).toMatchObject({
+      status: 'fail',
+      detail: 'the base URL "tenjin.blog" is not a URL',
+    });
+    expect(check.fix).toContain('TENJIN_BASE_URL');
+  });
+
   it('blames a proxy that refuses CONNECT, and leaves the base URL alone', async () => {
     const tunnel = withCode('Proxy response (403) !== 200 when HTTP Tunneling', 'UND_ERR_ABORTED');
     const check = await probe(thrown(tunnel), PROD, { HTTPS_PROXY: 'http://u:secret@proxy:3128' });
