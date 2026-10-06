@@ -15,7 +15,12 @@ import { MAX_PACKET_BYTES, type Packet } from './context';
 import { AFTER_CALL_TIMEOUT_SECONDS, ROUTE_HOOK_TIMEOUT_SECONDS } from './install';
 import { AUGMENT_WAIT_MS } from './augment';
 import { STDIN_TIMEOUT_MS } from './hook-command';
-import { BALANCE_TIMEOUT_MS, DEPOSIT_GRACE_MS, PROBE_TIMEOUT_MS } from './routing-payer';
+import {
+  BALANCE_TIMEOUT_MS,
+  DEPOSIT_GRACE_MS,
+  PROBE_TIMEOUT_MS,
+  RPC_TIMEOUT_MS,
+} from './routing-payer';
 
 /**
  * The wire, pinned to bytes. These payloads are the SHARED ones: the same
@@ -357,14 +362,17 @@ describe('the hook time budget', () => {
   const FLOOR_MS = 500;
 
   /** The slowest routing leg is a paid call that carries a deposit: the probe,
-   *  the wallet read and the call run inside the gate's budget, and the call
-   *  may run its grace past it. A stuck server holds a prompt 5 s at most. */
+   *  the wallet read, the SDK's chain reads and the call run inside the gate's
+   *  budget (each read is also cut at what is left of it), and the call may
+   *  run its grace past it. A stuck server holds a prompt 5 s at most. */
   it('fits the slowest paid call inside the timeout install writes', () => {
     const budget = ROUTE_HOOK_TIMEOUT_SECONDS * 1_000;
     expect(ROUTE_HOOK_TIMEOUT_SECONDS).toBeLessThanOrEqual(5);
     expect(budget - (GATE_TIMEOUT_MS + DEPOSIT_GRACE_MS)).toBeGreaterThanOrEqual(FLOOR_MS);
-    // Both reads leave the call time of its own inside the gate's budget.
+    // The probe and the wallet read leave the call time of its own, and a
+    // chain read alone fits the gate's budget.
     expect(PROBE_TIMEOUT_MS + BALANCE_TIMEOUT_MS).toBeLessThan(GATE_TIMEOUT_MS);
+    expect(RPC_TIMEOUT_MS).toBeLessThan(GATE_TIMEOUT_MS);
   });
 
   /** The command form, always free, waits for stdin before the gate. */

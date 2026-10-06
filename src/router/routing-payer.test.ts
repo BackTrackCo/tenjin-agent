@@ -19,8 +19,10 @@ import {
 } from './fee-state';
 import { BASE, FakeRouter, testSigner } from './fee-test-utils';
 import {
+  chainReader,
   DEPOSIT_MULTIPLIER,
   RoutingPayer,
+  RPC_TIMEOUT_MS,
   ROUTING_SPEND_CAP,
   slotSalt,
   type RoutingPayerDeps,
@@ -249,6 +251,48 @@ describe('RoutingPayer', () => {
     expect(first.status).toBe('decided');
     expect(second).toEqual({ status: 'skipped', why: 'busy' });
   });
+
+  /** An RPC that never answers, the way viem's own fetch sees one. */
+  const hangingRpc = (() => {
+    let calls = 0;
+    const fetchFn = ((_url: unknown, init?: RequestInit) => {
+      calls += 1;
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason));
+      });
+    }) as typeof fetch;
+    return { fetchFn, calls: () => calls };
+  })();
+
+  it.each([
+    ['its own 2 s', 3_500, RPC_TIMEOUT_MS],
+    ["the call's smaller budget", 800, 800],
+  ])(
+    "skips the call within %s when the SDK's chain read hangs, sending nothing",
+    async (_label, budgetMs, boundMs) => {
+      const router = new FakeRouter();
+      const before = hangingRpc.calls();
+      const p = payer(router, {
+        now: () => Date.now(),
+        readContract: chainReader('http://rpc.test', hangingRpc.fetchFn),
+      });
+      const route = (await p.routeFor(APPROVED, BASE))!;
+      const started = Date.now();
+      const outcome = await requestDecision(
+        'tool',
+        { query: 'q' },
+        { ctx: ctx(), baseUrl: BASE, fetchImpl: router.fetch, timeoutMs: budgetMs, route },
+      );
+      const took = Date.now() - started;
+      expect(outcome).toEqual({ status: 'skipped', why: 'chain_unreadable' });
+      // One request, no retry, cut at the bound.
+      expect(hangingRpc.calls() - before).toBe(1);
+      expect(took).toBeGreaterThanOrEqual(boundMs - 50);
+      expect(took).toBeLessThan(boundMs + 400);
+      expect(router.paidRequests()).toBe(0);
+    },
+    10_000,
+  );
 
   it('skips a call that would pass the routing allowance, sending nothing', async () => {
     const router = new FakeRouter();

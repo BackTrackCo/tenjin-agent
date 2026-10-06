@@ -3,7 +3,6 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import pkg from '../../package.json';
-import { createPublicClient, http } from 'viem';
 import { dataDir as defaultDataDir } from '../lib/paths';
 import { resolveContextSettings } from '../lib/settings';
 import { readUsdcBalance } from '../lib/usdc-balance';
@@ -15,7 +14,7 @@ import { admitHookEvent } from './hook-session';
 import { eventFromToolInput, HOOK_KINDS, HOOK_TOOL, HOOK_TOOL_FIELDS } from './hook-tool';
 import type { HookDeps } from './hooks';
 import { MCP_SERVER_NAME } from './names';
-import { RoutingPayer } from './routing-payer';
+import { chainReader, RoutingPayer } from './routing-payer';
 import { runRequestTool, type RequestToolDeps } from './tool';
 
 /**
@@ -274,13 +273,12 @@ export async function runRouterMcpServer(opts: RouterMcpOptions = {}): Promise<v
 async function routingPayer(ctx: CommandContext): Promise<RoutingPayer> {
   const settings = await resolveContextSettings(ctx);
   const provider: WalletProvider = resolveWalletProvider(ctx);
-  const chain = createPublicClient({ transport: http(settings.rpcUrl) });
   return new RoutingPayer({
     dataDir: ctx.dataDir,
     // Never a prompt: the context is not a TTY, because the stdio transport owns stdin.
     getSigner: () => provider.getSigner(),
     policy: async () => (await resolveContextSettings(ctx)).policy,
     walletBalance: (address, timeoutMs) => readUsdcBalance(address, settings.rpcUrl, { timeoutMs }),
-    readContract: (args) => chain.readContract(args as Parameters<typeof chain.readContract>[0]),
+    readContract: chainReader(settings.rpcUrl),
   });
 }

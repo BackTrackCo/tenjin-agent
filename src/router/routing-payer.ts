@@ -1,4 +1,4 @@
-import { keccak256, stringToHex, type TypedDataDefinition } from 'viem';
+import { createPublicClient, http, keccak256, stringToHex, type TypedDataDefinition } from 'viem';
 import { x402Client, x402HTTPClient, type PaymentPolicy } from '@x402/core/client';
 import type { PaymentRequired, PaymentRequirements } from '@x402/core/types';
 import { toClientEvmSigner, type ClientEvmSigner } from '@x402/evm';
@@ -94,6 +94,31 @@ export const BALANCE_TIMEOUT_MS = 1_000;
  * hint, and the SDK recovers the channel on the next call.
  */
 export const DEPOSIT_GRACE_MS = 1_000;
+/**
+ * THE SDK'S CHAIN READS: `recoverChannel` on a slot's first call and the
+ * recovery after a corrective 402. Bounded like the wallet read, with no
+ * retries and never past the call's own budget, so a slow RPC costs the call
+ * its routing rather than holding the prompt.
+ */
+export const RPC_TIMEOUT_MS = 2_000;
+
+/** A chain read with its own timeout, in milliseconds. */
+export type ChainRead = (
+  args: Parameters<NonNullable<ClientEvmSigner['readContract']>>[0],
+  timeoutMs: number,
+) => Promise<unknown>;
+
+/** The production {@link ChainRead}: one RPC request, no retry. */
+export function chainReader(rpcUrl: string, fetchFn?: typeof fetch): ChainRead {
+  return (args, timeoutMs) =>
+    createPublicClient({
+      transport: http(rpcUrl, {
+        timeout: timeoutMs,
+        retryCount: 0,
+        ...(fetchFn !== undefined ? { fetchFn } : {}),
+      }),
+    }).readContract(args as Parameters<ReturnType<typeof createPublicClient>['readContract']>[0]);
+}
 
 export interface RoutingPayerDeps {
   dataDir: string;
@@ -104,7 +129,7 @@ export interface RoutingPayerDeps {
   /** The wallet's USDC balance, or null when it cannot be read. */
   walletBalance: (address: string, timeoutMs: number) => Promise<bigint | null>;
   /** Chain reads for the SDK's channel recovery. */
-  readContract?: ClientEvmSigner['readContract'];
+  readContract?: ChainRead;
   fetchImpl?: typeof fetch;
   now?: () => number;
   /** This process's id and the liveness check for another's; tests run two
@@ -390,8 +415,25 @@ export class RoutingPayer {
         address: signer.address,
         signTypedData: (message) => signer.signTypedData(message as unknown as TypedDataDefinition),
       },
-      this.deps.readContract !== undefined ? { readContract: this.deps.readContract } : undefined,
+      this.deps.readContract !== undefined
+        ? { readContract: (args) => this.chainRead(this.deps.readContract!, args) }
+        : undefined,
     );
+  }
+
+  /**
+   * ONE SDK CHAIN READ, inside {@link RPC_TIMEOUT_MS} and the call's budget.
+   * One that fails or times out skips the call before anything is sent.
+   */
+  private async chainRead(read: ChainRead, args: Parameters<ChainRead>[0]): Promise<unknown> {
+    const left = (this.call?.until ?? Infinity) - this.now();
+    if (left <= 0) throw new RouteSkipped('busy');
+    try {
+      return await read(args, Math.min(RPC_TIMEOUT_MS, left));
+    } catch (err) {
+      this.warn(`chain read: ${err instanceof Error ? err.message.split('\n')[0] : String(err)}`);
+      throw new RouteSkipped('chain_unreadable');
+    }
   }
 
   /**
