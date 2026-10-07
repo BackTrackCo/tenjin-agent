@@ -7,7 +7,11 @@ import { claudeAdapter } from '../adapters/claude';
 import { persistRouterDefaults, ROUTER_DEFAULTS, type RouterLimits } from '../commands/config';
 import { askText, selectOne } from '../lib/clack';
 import { CliError } from '../lib/errors';
-import { appendAllowlistRules, claudeSettingsPath } from '../lib/harness-permissions';
+import {
+  appendAllowlistRules,
+  claudeSettingsPath,
+  type AppendAllowlistResult,
+} from '../lib/harness-permissions';
 import {
   inspectHooksFile,
   ownsHookEntry,
@@ -24,6 +28,8 @@ import { loadRawConfig, type PartialConfig } from '../lib/config';
 import { onPath } from '../lib/skill-wiring';
 import type { WalletDeps, WalletOutcome } from '../commands/install-wallet';
 import type { CommandContext, CommandResult } from '../context';
+import { CHANNEL_DEPOSIT_ATOMIC, ROUTING_FEE_ATOMIC, usd } from './fee';
+import { HOOK_TOOL, hookToolInput, type HookKind } from './hook-tool';
 import { MCP_SERVER_NAME, REQUEST_TOOL } from './names';
 import { probeRouter, type RouterCheck } from './reachability';
 import { ensureStatusLine, type StatusLineMode, type StatusLineResult } from './status-line-wiring';
@@ -33,37 +39,50 @@ import { ensureStatusLine, type StatusLineMode, type StatusLineResult } from './
  * one permission rule, the spend defaults, and a wallet when there is none.
  *
  * WHAT IT WRITES IS WHAT IT SAYS. There is no skill to materialize and no
- * daemon to start: the hooks are plain command lines, the tool lives in an MCP
- * server the harness starts per session, and every other key in the settings
- * file is preserved byte for byte. The one process a hook starts is the free
- * docs fetch beside a search, which exits within `PREFETCH_TIMEOUT_MS`.
+ * daemon to start: each hook entry is a Claude Code `mcp_tool` hook that calls
+ * the `hook` tool of the session's own router MCP server (`tenjin mcp`), which
+ * runs the leg and holds the wallet, and every other key in the settings file
+ * is preserved byte for byte. The one process a leg starts is the free docs
+ * fetch beside a search, which exits within `PREFETCH_TIMEOUT_MS`.
  */
 
 const exec = promisify(execFile);
 
 /**
- * The harness's kill budget for each hook entry, and the number every other
- * wait inside the hook is cut from: 1 s of stdin plus 3.5 s of gate, with
- * 500 ms left for node's boot and the transcript read (`wire.test.ts` pins it).
- * Raised from 3 s because a gate abort costs the turn its hint silently.
+ * The harness's kill budget for each routing leg: a stuck server never holds a
+ * prompt longer than this. Every wait inside the leg is cut from it: the gate's
+ * 3.5 s, which holds the paid path's 402, the reads before a deposit and the
+ * paid request, with 500 ms left for the transcript read and the reply
+ * (`wire.test.ts` pins the sum). A whole leg whose call carried a deposit took
+ * 2.8 to 3.3 s on Base Sepolia, so it fits; a slower one (a wallet unlock, a
+ * slow settlement) loses only that prompt's hint, and the SDK recovers the
+ * channel on the next call.
  *
- * A machine carrying the old number is converged by the writer, not by the
+ * A machine carrying an older entry is converged by the writer, not by the
  * user: the entries are ours by marker, so `install`, `install --refresh` and
  * the refresh `tenjin update` spawns all rewrite them in place.
  */
-export const HOOK_TIMEOUT_SECONDS = 5;
+export const ROUTE_HOOK_TIMEOUT_SECONDS = 5;
 /**
  * The after-call entries' kill budget, longer than the rest for the one wait
- * any hook makes: a search the pre-call arm is fetching free docs for waits up
- * to `AUGMENT_WAIT_MS` for them, and when none came back and the search was
- * short, the gate is asked after that (`wire.test.ts` pins the sum). Every
- * other after-call event returns as fast as before, so the number is a
- * ceiling, not a cost. The pre-call entry stays at
- * {@link HOOK_TIMEOUT_SECONDS}: it starts that fetch and never waits for it.
+ * a leg makes: a search the pre-call leg is fetching free docs for waits up to
+ * `AUGMENT_WAIT_MS` (9 s) for them, and when none came back and the search was
+ * short, the gate's 3.5 s follow, with startup to spare (`wire.test.ts` pins
+ * the sum). Every other after-call event
+ * returns as fast as before, so the number is a ceiling, not a cost.
  */
 export const AFTER_CALL_TIMEOUT_SECONDS = 15;
 export { MCP_SERVER_NAME };
 export const ALLOW_RULE = REQUEST_TOOL;
+/**
+ * THE HOOK ENTRIES' TOOL IS DENIED TO THE MODEL. Its event fields are plain
+ * arguments, so the model calling it could forge a routing leg. A deny rule
+ * takes the tool out of the model's tool list in every permission mode,
+ * bypass included, while Claude Code's own `mcp_tool` hook calls to it still
+ * run (checked on Claude Code 2.1.289). The tool's transcript check
+ * (`admitHookEvent`) stays for a settings file without the rule.
+ */
+export const DENY_RULE = `mcp__${MCP_SERVER_NAME}__${HOOK_TOOL}`;
 /**
  * The MCP registration follows the SAME SCOPE the hook entries do. A
  * `--project` install that wrote its hooks into the project and then registered
@@ -123,18 +142,24 @@ export const ASK_MATCHER = 'AskUserQuestion';
  * after, with the user's answers read as their own words.
  */
 export function routerHookPlan(): unknown[] {
-  const handler = (command: string, timeout = HOOK_TIMEOUT_SECONDS) => [
-    { type: 'command', command, timeout },
+  const leg = (kind: HookKind, timeout = ROUTE_HOOK_TIMEOUT_SECONDS) => [
+    {
+      type: 'mcp_tool',
+      server: MCP_SERVER_NAME,
+      tool: HOOK_TOOL,
+      input: hookToolInput(kind),
+      timeout,
+    },
   ];
-  const afterCall = () => handler('tenjin hook shortfall', AFTER_CALL_TIMEOUT_SECONDS);
+  const afterCall = () => leg('shortfall', AFTER_CALL_TIMEOUT_SECONDS);
   return [
-    { event: 'UserPromptSubmit', hooks: handler('tenjin hook prompt') },
-    { event: 'PreToolUse', matcher: NATIVE_MATCHER, hooks: handler('tenjin hook native') },
-    { event: 'PreToolUse', matcher: DELEGATION_MATCHER, hooks: handler('tenjin hook agent') },
+    { event: 'UserPromptSubmit', hooks: leg('prompt') },
+    { event: 'PreToolUse', matcher: NATIVE_MATCHER, hooks: leg('native') },
+    { event: 'PreToolUse', matcher: DELEGATION_MATCHER, hooks: leg('agent') },
     { event: 'PostToolUse', matcher: NATIVE_MATCHER, hooks: afterCall() },
     { event: 'PostToolUseFailure', matcher: NATIVE_MATCHER, hooks: afterCall() },
-    { event: 'PreToolUse', matcher: ASK_MATCHER, hooks: handler('tenjin hook ask') },
-    { event: 'PostToolUse', matcher: ASK_MATCHER, hooks: handler('tenjin hook answer') },
+    { event: 'PreToolUse', matcher: ASK_MATCHER, hooks: leg('ask') },
+    { event: 'PostToolUse', matcher: ASK_MATCHER, hooks: leg('answer') },
   ];
 }
 
@@ -324,7 +349,7 @@ export async function runRouterInstall(
     plan: routerHookPlan(),
     settingsPath,
   });
-  const permissions = await ensureAllowRule(settingsPath);
+  const permissions = await ensurePermissionRules(settingsPath);
   const statusLine = await ensureStatusLine(settingsPath, {
     ...(args.statusLine !== undefined ? { mode: args.statusLine } : {}),
     ...(args.refresh === true ? { refreshOnly: true } : {}),
@@ -467,7 +492,8 @@ function spendApproval(policy: SpendPolicy): SpendApproval {
  * The one question install asks, before anything is written: approve the
  * automatic spend limits or set your own. Only a key the file does not already
  * name is asked for, because the write fills absent keys and keeps the rest.
- * Cancelling at any step writes nothing.
+ * The question names the routing fee and its deposits too, and either answer
+ * approves it. Cancelling at any step writes nothing.
  */
 async function approveLimits(
   config: PartialConfig,
@@ -484,8 +510,9 @@ async function approveLimits(
     shown.sessionBudget === 'none'
       ? 'no daily limit'
       : `$${toMoney(shown.sessionBudget).usd} a day`;
+  const fee = `\nRouting costs $${usd(ROUTING_FEE_ATOMIC)} a call, paid from channel deposits of up to $${usd(CHANNEL_DEPOSIT_ATOMIC)} that stay yours until spent; each deposit counts against these limits.\nUsing these limits or choosing your own also approves the routing fee.`;
   const choice = await (deps.promptLimits ?? promptLimits)(
-    `The router pays for tool calls without asking, up to:\n  $${toMoney(shown.maxAutoSpend).usd} a call, ${daily}`,
+    `The router pays for tool calls without asking, up to:\n  $${toMoney(shown.maxAutoSpend).usd} a call, ${daily}${fee}`,
   );
   if (choice === null) throw installCancelled();
   if (choice === 'approve') return shown;
@@ -558,28 +585,41 @@ export interface AllowRuleResult {
   path: string;
   rule: string;
   added: boolean;
-  /** Set when the file could not be written; the rule is then not in force. */
+  /** {@link DENY_RULE}, written to `permissions.deny` beside the allow rule. */
+  denyRule: string;
+  denyAdded: boolean;
+  /** Set when the file could not be written; the rules are then not in force. */
   warning?: string;
 }
 
 /**
- * The one permission rule, through the shared allowlist writer rather than a
+ * The two permission rules, through the shared allowlist writer rather than a
  * third hand-rolled one: it resolves a symlinked settings.json before the
  * rename, refuses a file it cannot parse, and compares the bytes it read before
- * committing, none of which a local copy of the merge would have.
+ * committing, none of which a local copy of the merge would have. Each adds
+ * only its own rule and keeps every other entry in the list.
  */
-async function ensureAllowRule(path: string): Promise<AllowRuleResult> {
-  const result = await appendAllowlistRules(path, [ALLOW_RULE]);
+async function ensurePermissionRules(path: string): Promise<AllowRuleResult> {
+  const allow = await appendAllowlistRules(path, [ALLOW_RULE]);
+  const deny = await appendAllowlistRules(path, [DENY_RULE], 'deny');
+  const warning = writerWarning(allow) ?? writerWarning(deny);
   return {
-    path: result.path,
+    path: allow.path,
     rule: ALLOW_RULE,
-    added: result.added.length > 0,
-    ...(result.warning !== undefined
-      ? { warning: result.warning }
-      : result.skipped !== undefined
-        ? { warning: `${result.path} was left untouched (${result.skipped}).` }
-        : {}),
+    added: allow.added.length > 0,
+    denyRule: DENY_RULE,
+    denyAdded: deny.added.length > 0,
+    ...(warning !== undefined ? { warning } : {}),
   };
+}
+
+function writerWarning(result: AppendAllowlistResult): string | undefined {
+  return (
+    result.warning ??
+    (result.skipped !== undefined
+      ? `${result.path} was left untouched (${result.skipped}).`
+      : undefined)
+  );
 }
 
 /**

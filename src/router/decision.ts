@@ -5,7 +5,12 @@ import type { CommandContext } from '../context';
 import type { Packet } from './context';
 
 /**
- * `POST /api/x402-router`: ONE FREE DECISION PER LOOKUP.
+ * `POST /api/x402-router`: ONE DECISION PER LOOKUP. On the free path it costs
+ * nothing. Inside `tenjin mcp`, while the server answers its paid path, the
+ * same body goes to that path through the stock x402 client
+ * ({@link DecisionRoute}, `routing-payer.ts`); a call that path cannot take
+ * falls back to the free path. The rest of this note describes the free path,
+ * which is unchanged.
  *
  * The routing decision costs nothing and nobody signs for it. The hook asks for
  * it from the user's own words, the backend answers with what it would do and
@@ -374,13 +379,45 @@ export interface DecisionDeps {
   fetchImpl?: typeof fetch;
   /** Overrides the per-call deadline; the hook passes its own, smaller one. */
   timeoutMs?: number;
+  /** The paid path, when `tenjin mcp` takes it: the body goes to `path` and is
+   *  sent by `send`, which pays the routing fee with the stock x402 client.
+   *  Absent is the free path. */
+  route?: DecisionRoute;
 }
 
+/** How a routing call reaches the paid path. `send` throws
+ *  {@link RouteSkipped} when it has no paid answer for the call, which then
+ *  takes the free path. */
+export interface DecisionRoute {
+  path: string;
+  send: (url: string, options: HttpRequestOptions) => Promise<HttpResult>;
+}
+
+/** The paid path gave this call no answer: the wallet locked, low or over
+ *  its spend limits, the channel busy, or the payment failed. */
+export class RouteSkipped extends Error {
+  constructor(readonly why: string) {
+    super(`routing fee not paid: ${why}`);
+  }
+}
+
+/** Another session's call was in flight on the wallet's routing channel. */
+export const CHANNEL_BUSY = 'channel_busy';
+/** The server answered no paid path. */
+export const PAID_PATH_ABSENT = 'paid_path_absent';
+/** The paid call got no answer, a refused payment or a server error. */
+export const PAYMENT_FAILED = 'payment_failed';
+
 export type DecisionOutcome<T> =
-  | { status: 'decided'; decision: T }
-  /** Nothing was paid and nothing could be: the endpoint is free, so a failure
-   *  here costs the turn a routing answer and nothing else. */
-  | { status: 'failed'; reason: string; errorCode?: string };
+  /** `freePath`: the paid path skipped the call for this reason and it went
+   *  to the free path instead, unpaid. */
+  | { status: 'decided'; decision: T; freePath?: string }
+  /** On the free path nothing was paid and nothing could be, so a failure here
+   *  costs the turn a routing answer and nothing else. */
+  | { status: 'failed'; reason: string; errorCode?: string; freePath?: string }
+  /** The paid path gave no answer ({@link RouteSkipped}) and no time was left
+   *  for the free path: the native tool runs. */
+  | { status: 'skipped'; why: string };
 
 /**
  * ONE FREE CALL, IN TWO FORMS. The hook sends `{ packet }`: the backend runs
@@ -412,7 +449,7 @@ export async function requestDecision(
   },
   deps: DecisionDeps,
 ): Promise<DecisionOutcome<HookResponse | ToolResponse>> {
-  const url = new URL(ROUTER_PATH, deps.baseUrl).toString();
+  const url = new URL(deps.route?.path ?? ROUTER_PATH, deps.baseUrl).toString();
   const options: HttpRequestOptions = {
     method: 'POST',
     timeoutMs: deps.timeoutMs ?? deps.ctx.flags.timeout,
@@ -431,10 +468,25 @@ export async function requestDecision(
           }),
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   };
-  return readDecision(
-    await httpRequest(url, options),
-    kind === 'hook' ? HookResponseSchema : ToolResponseSchema,
-  );
+  const started = Date.now();
+  const schema = kind === 'hook' ? HookResponseSchema : ToolResponseSchema;
+  let response: HttpResult;
+  try {
+    response = await (deps.route?.send ?? httpRequest)(url, options);
+  } catch (err) {
+    if (!(err instanceof RouteSkipped)) throw err;
+    const left = options.timeoutMs - (Date.now() - started);
+    if (left <= 0) return { status: 'skipped', why: err.why };
+    // A CALL THE PAID PATH COULD NOT TAKE STILL ROUTES, on the free path,
+    // unpaid, inside what is left of its budget, and says why.
+    response = await httpRequest(new URL(ROUTER_PATH, deps.baseUrl).toString(), {
+      ...options,
+      timeoutMs: left,
+    });
+    const free = readDecision(response, schema);
+    return free.status === 'skipped' ? free : { ...free, freePath: err.why };
+  }
+  return readDecision(response, schema);
 }
 
 /** How a call run from a request spec ended, for the server's offer-to-call

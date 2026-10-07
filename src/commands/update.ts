@@ -17,6 +17,7 @@ import {
 } from '../lib/update-check';
 import { defaultDataDir } from '../lib/paths';
 import type { CommandContext, CommandResult } from '../context';
+import { CHANNEL_DEPOSIT_ATOMIC, ROUTING_FEE_ATOMIC, usd } from '../router/fee';
 
 /**
  * `tenjin update`: replace this install with the newest version npm offers it,
@@ -264,9 +265,20 @@ export async function runUpdate(
   const refresh = await refreshProfiles(ctx, deps);
   return {
     data: { ...data(true), refresh },
-    humanLines: [`Updated tenjin-cli ${current} -> ${latest}.`, ...refreshLines(refresh)],
+    humanLines: [
+      `Updated tenjin-cli ${current} -> ${latest}.`,
+      ...refreshLines(refresh),
+      ROUTING_FEE_LINE,
+    ],
   };
 }
+
+/**
+ * THE ROUTING FEE, NAMED AT UPDATE TIME for installs whose limits were
+ * approved before the install question named it: the fee is paid from
+ * deposits that fall inside those same limits.
+ */
+const ROUTING_FEE_LINE = `Routing costs $${usd(ROUTING_FEE_ATOMIC)} a call once Tenjin's server turns the fee on, paid from deposits of up to $${usd(CHANNEL_DEPOSIT_ATOMIC)} that count against your spend limits (\`tenjin config get maxAutoSpend\`, \`tenjin config get sessionBudget\`).`;
 
 /** How long one `install --refresh` child gets. Local file writes only, no
  *  registry: a minute is already generous, and `update` must not hang a turn. */
