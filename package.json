@@ -55,7 +55,7 @@
     "@changesets/cli": "^3.0.3",
     "@clack/prompts": "^1.7.0",
     "@eslint/js": "^10",
-    "@modelcontextprotocol/sdk": "1.29.0",
+    "@modelcontextprotocol/sdk": "1.31.0",
     "@types/node": "^25",
     "@x402/core": "2.28.0",
     "@x402/evm": "2.28.0",
