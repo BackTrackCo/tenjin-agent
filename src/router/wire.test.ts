@@ -12,9 +12,10 @@ import {
 } from './decision';
 import { GATE_TIMEOUT_MS } from './gate';
 import { MAX_PACKET_BYTES, type Packet } from './context';
-import { STDIN_TIMEOUT_MS } from './hook-command';
-import { AFTER_CALL_TIMEOUT_SECONDS, HOOK_TIMEOUT_SECONDS } from './install';
+import { AFTER_CALL_TIMEOUT_SECONDS, ROUTE_HOOK_TIMEOUT_SECONDS } from './install';
 import { AUGMENT_WAIT_MS } from './augment';
+import { STDIN_TIMEOUT_MS } from './hook-command';
+import { BALANCE_TIMEOUT_MS, RPC_TIMEOUT_MS } from './routing-payer';
 
 /**
  * The wire, pinned to bytes. These payloads are the SHARED ones: the same
@@ -352,20 +353,33 @@ describe('every answer payload on disk', () => {
 });
 
 describe('the hook time budget', () => {
-  it('fits stdin plus the decision inside the timeout install writes', () => {
-    const budget = HOOK_TIMEOUT_SECONDS * 1_000;
-    expect(STDIN_TIMEOUT_MS + GATE_TIMEOUT_MS).toBeLessThan(budget);
-    // Node's boot and the transcript read happen inside the same budget, so the
-    // two network-ish waits may not fill it: half a second is the floor left.
-    expect(budget - (STDIN_TIMEOUT_MS + GATE_TIMEOUT_MS)).toBeGreaterThanOrEqual(500);
+  /** Startup, the transcript read and the reply share what the waits leave. */
+  const FLOOR_MS = 500;
+
+  /** The slowest routing leg is a paid call that carries a deposit: the 402,
+   *  the SDK's chain read, the wallet read and the paid request all run inside
+   *  the gate's budget, and each read is also cut at what is left of it. A
+   *  stuck server holds a prompt 5 s at most. */
+  it('fits the slowest paid call inside the timeout install writes', () => {
+    const budget = ROUTE_HOOK_TIMEOUT_SECONDS * 1_000;
+    expect(ROUTE_HOOK_TIMEOUT_SECONDS).toBeLessThanOrEqual(5);
+    expect(budget - GATE_TIMEOUT_MS).toBeGreaterThanOrEqual(FLOOR_MS);
+    // The chain read and the wallet read leave the requests time of their own.
+    expect(RPC_TIMEOUT_MS + BALANCE_TIMEOUT_MS).toBeLessThan(GATE_TIMEOUT_MS);
   });
 
-  /** The after-call hook's one wait, for a search's free docs, can be followed
-   *  by the gate when none came back and the search was short: stdin, the wait
-   *  and the decision in a row fit its longer timeout with the same floor. */
-  it('fits stdin, the docs wait and the decision inside the after-call timeout', () => {
+  /** The command form, always free, waits for stdin before the gate. */
+  it('fits stdin plus the decision inside the same timeout', () => {
+    const budget = ROUTE_HOOK_TIMEOUT_SECONDS * 1_000;
+    expect(budget - (STDIN_TIMEOUT_MS + GATE_TIMEOUT_MS)).toBeGreaterThanOrEqual(FLOOR_MS);
+  });
+
+  /** The after-call leg's one wait, for a search's free docs, can be followed
+   *  by the gate when none came back and the search was short: the wait and the
+   *  slowest paid call in a row fit its longer timeout with the same floor. */
+  it('fits the docs wait and the slowest paid call inside the after-call timeout', () => {
     const budget = AFTER_CALL_TIMEOUT_SECONDS * 1_000;
-    const used = STDIN_TIMEOUT_MS + AUGMENT_WAIT_MS + GATE_TIMEOUT_MS;
-    expect(budget - used).toBeGreaterThanOrEqual(500);
+    const used = AUGMENT_WAIT_MS + GATE_TIMEOUT_MS;
+    expect(budget - used).toBeGreaterThanOrEqual(FLOOR_MS);
   });
 });

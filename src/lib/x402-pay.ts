@@ -140,9 +140,9 @@ export function createPayerClient(getSigner: () => TenjinSigner): {
     core.register(network as `${string}:${string}`, new ExactEvmScheme(lazy));
   }
   core.registerPolicy(canonicalUsdcOnly);
-  // The SDK fires this hook only for sellers whose 402 advertises
-  // `builder-code`, so a seller that never declared it still gets an
-  // extension-free payload. That gating is why attribution stays spec-clean.
+  // The SDK (2.21+) runs this hook on every payment, so every seller gets
+  // Tenjin's service code; a seller that declared `builder-code` also gets its
+  // own fields echoed. Both are the SDK's own payload.
   const builderCode = new BuilderCodeClientExtension(TENJIN_CLI_BUILDER_CODE);
   core.registerExtension(builderCode);
   return { core, http: new x402HTTPClient(core), builderCodeKey: builderCode.key };
@@ -155,7 +155,7 @@ export function createPayerClient(getSigner: () => TenjinSigner): {
  * in a token of its choosing, and the signed EIP-3009 authorization is valid
  * against that token's contract directly, no facilitator required.
  */
-const canonicalUsdcOnly: PaymentPolicy = (_version, requirements) =>
+export const canonicalUsdcOnly: PaymentPolicy = (_version, requirements) =>
   requirements.filter((requirement) => {
     const allowed = ALLOWED_USDC_BY_NETWORK[requirement.network];
     if (allowed === undefined) return false;
@@ -267,10 +267,23 @@ export async function buildExactPayment(
   const { core, http, builderCodeKey } = createPayerClient(() => signer);
   const requirement = only ?? selectPayableRequirement(core, paymentRequired);
   if (requirement === undefined) throw noPayableRequirement(paymentRequired.accepts);
+  // THE SDK'S PER-PAYMENT CAP IS THE AUTHORIZED AMOUNT. Since 2.23 the client
+  // refuses anything over $1 unless told otherwise; the spend policy has already
+  // authorized this exact requirement (with consent when it is manual), so the
+  // cap is set to it: the SDK then signs that amount and nothing larger.
+  core.setSpendControls({
+    allowedAssets: [
+      {
+        network: requirement.network,
+        asset: requirement.asset,
+        maxAmountPerPayment: requirement.amount,
+      },
+    ],
+  });
 
   // A single-accept challenge, so nothing can re-select a different or costlier
-  // entry between the check and the signature. Narrow `accepts` only, or the
-  // builder-code hook never fires.
+  // entry between the check and the signature. Narrow `accepts` only, so the
+  // extensions the seller declared still ride along.
   const bound: PaymentRequired = {
     ...paymentRequired,
     accepts: [requirement],

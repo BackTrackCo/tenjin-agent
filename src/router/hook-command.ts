@@ -8,6 +8,7 @@ import {
   type HookDeps,
 } from './hooks';
 import type { Io } from '../lib/output';
+import type { HookKind } from './hook-tool';
 
 /**
  * `tenjin hook prompt`, `native`, `shortfall`, `agent`, `ask` and `answer`. The harness writes
@@ -19,15 +20,19 @@ import type { Io } from '../lib/output';
  */
 
 const MAX_EVENT_BYTES = 1_000_000;
-/** One fifth of the hook's 5 s budget, leaving the gate its 3.5 s; `wire.test.ts`
- *  pins the sum against the timeout `install` writes. The harness writes its
- *  event immediately, so this wait is a liveness check rather than a budget to
- *  spend: every second it holds is a second the gate does not get. */
+/** The command form's wait for its event, before the gate's 3.5 s. The harness
+ *  writes the event immediately, so this is a liveness check rather than a
+ *  budget to spend: every second it holds is a second the gate does not get. */
 export const STDIN_TIMEOUT_MS = 1_000;
 
-export type HookKind = 'prompt' | 'native' | 'shortfall' | 'agent' | 'ask' | 'answer';
+export type { HookKind };
 
-export interface HookCommandDeps extends HookDeps {
+/**
+ * THE FREE PATH, whatever the config says: a command entry runs where no
+ * `tenjin mcp` answers (Codex, a hand-written entry), and only that process
+ * pays the routing fee, so there is no {@link HookDeps.route} to pass here.
+ */
+export interface HookCommandDeps extends Omit<HookDeps, 'route'> {
   /** Test seam for the harness event; production reads stdin. */
   readEvent?: () => Promise<string>;
 }
@@ -36,24 +41,43 @@ export async function runHookCommand(kind: HookKind, io: Io, deps: HookCommandDe
   let response: unknown;
   try {
     const raw = await (deps.readEvent ?? readStdin)();
-    const event: unknown = JSON.parse(raw);
-    const outcome =
-      kind === 'prompt'
-        ? await runPromptHook(event, deps)
-        : kind === 'native'
-          ? await runNativeHook(event, deps)
-          : kind === 'shortfall'
-            ? await runShortfallHook(event, deps)
-            : kind === 'ask'
-              ? await runAskHook(event, deps)
-              : kind === 'answer'
-                ? await runAnswerHook(event, deps)
-                : await runDelegationHook(event, deps);
-    response = outcome.response;
+    response = await runHookKind(kind, JSON.parse(raw), deps);
   } catch {
     response = null;
   }
   if (response !== null) io.stdout.write(`${JSON.stringify(response)}\n`);
+}
+
+/**
+ * ONE HOOK EVENT, by kind, to its handler; the harness's answer or null. The
+ * command above and the `hook` tool of `tenjin mcp` both run it, so the
+ * handlers are the same whichever transport carried the event.
+ */
+export async function runHookKind(
+  kind: HookKind,
+  event: unknown,
+  hookDeps: HookDeps,
+): Promise<unknown | null> {
+  const notices = new Set<string>();
+  const deps: HookDeps = { ...hookDeps, notice: (line) => notices.add(line) };
+  const outcome =
+    kind === 'prompt'
+      ? await runPromptHook(event, deps)
+      : kind === 'native'
+        ? await runNativeHook(event, deps)
+        : kind === 'shortfall'
+          ? await runShortfallHook(event, deps)
+          : kind === 'ask'
+            ? await runAskHook(event, deps)
+            : kind === 'answer'
+              ? await runAnswerHook(event, deps)
+              : await runDelegationHook(event, deps);
+  if (notices.size === 0) return outcome.response;
+  // The harness shows `systemMessage` to the user, whatever the event.
+  const systemMessage = [...notices].join('\n');
+  return outcome.response === null || typeof outcome.response !== 'object'
+    ? { systemMessage }
+    : { ...outcome.response, systemMessage };
 }
 
 async function readStdin(): Promise<string> {

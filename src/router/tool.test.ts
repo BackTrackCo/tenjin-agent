@@ -279,6 +279,36 @@ describe('routing outcomes that buy nothing', () => {
     expect(calls).toHaveLength(1);
   });
 
+  it('says the routing fee could not be paid, not to update, when the free path answers fee_required', async () => {
+    const { fetchImpl, calls } = net([
+      {
+        url: ROUTER,
+        status: 200,
+        body: {
+          schemaVersion: 1,
+          routerVersion: 'v',
+          decision: {
+            action: 'native',
+            reason:
+              'Tenjin routing needs a newer tenjin-cli. Tell the user to run `npm i -g tenjin-cli@latest`.',
+            diagnostics: {
+              reasonCode: 'fee_required',
+              stage: 'capability',
+              missing: [],
+              nextAction: 'Update tenjin-cli (run `npm i -g tenjin-cli@latest`).',
+            },
+          },
+        },
+      },
+    ]);
+    const result = await runRequestTool({ query: 'what is the weather' }, deps(fetchImpl));
+    expect(calls).toHaveLength(1);
+    expect(result.envelope).toMatchObject({ status: 'native', cost: ['provider price 0 USD'] });
+    expect(String(result.envelope.reason)).toContain('could not pay its $0.003 fee');
+    expect(String(result.envelope.reason)).toContain('`tenjin doctor`');
+    expect(JSON.stringify(result.envelope)).not.toContain('npm i -g');
+  });
+
   it('carries the backend diagnostics into a needs_input result', async () => {
     const { fetchImpl } = net([
       {

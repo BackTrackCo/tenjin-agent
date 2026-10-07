@@ -1,18 +1,33 @@
 import { execFile } from 'node:child_process';
+import { readdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { promisify } from 'node:util';
+import { FileClientChannelStorage } from '@x402/evm/batch-settlement/client/file-storage';
 import { CliError } from '../lib/errors';
 import { inspectHooksFile, ownsHookEntry, pruneOurHandlers } from '../lib/harness-hooks';
 import { httpRequest } from '../lib/http';
 import { toMoney } from '../lib/money';
+import { evaluateSpendPolicy, type SpendPolicy } from '../lib/policy';
 import { PRODUCTION_ORIGIN } from '../lib/production-origin';
-import { resolveContextSettings } from '../lib/settings';
+import { resolveContextSettings, type ResolvedSettings } from '../lib/settings';
+import { spentOf } from '../lib/spend-ledger';
+import { readUsdcBalance } from '../lib/usdc-balance';
 import { onPath } from '../lib/skill-wiring';
-import { describeWallet, resolveWalletProvider } from '../lib/wallet';
+import { describeWallet, resolveWalletProvider, type WalletProvider } from '../lib/wallet';
+import { readSpendSummary } from '../lib/wallet/spend';
 import { walletFileExists } from '../lib/wallet/store';
 import type { CommandContext, CommandResult } from '../context';
 import { agentsWithoutRequestTool } from './agent-tools';
 import { ROUTER_PATH } from './decision';
+import {
+  CHANNEL_DEPOSIT_ATOMIC,
+  MIN_DEPOSIT_ATOMIC,
+  payerDir,
+  ROUTING_FEE_ATOMIC,
+  unpaid,
+  usd,
+} from './fee';
 import {
   ALLOW_RULE,
   MCP_SERVER_NAME,
@@ -105,6 +120,7 @@ export async function runRouterDoctor(
   );
   checks.push(spendCheck(settings.policy.maxAutoSpendAtomic, settings.policy.sessionBudgetAtomic));
   checks.push(experimentalCheck(settings.experimentalBazaar));
+  checks.push(await routingFeeCheck(ctx, settings, deps.fetchImpl));
   checks.push(...(await walletCheck(ctx)));
   checks.push(await routerCheck(settings.baseUrl, ctx.flags.timeout, deps.fetchImpl));
   const agents = await subagentsCheck(deps.cwd ?? process.cwd(), deps.homeDir ?? homedir());
@@ -267,8 +283,8 @@ async function hooksCheck(
     };
   }
   // AN INSTALL FROM AN OLDER BUILD STILL WORKS, so this is a warning with its
-  // one-command remedy, not a failure: its `tenjin hook native` entry is a
-  // no-op now, and the entries it lacks are offers it does not make.
+  // one-command remedy, not a failure: its `tenjin hook` command entries take
+  // the free path only, and the entries it lacks are offers it does not make.
   const drift = planDrift(found.hooks, dataDir);
   if (drift.missing.length > 0 || drift.stale.length > 0) {
     const parts = [
@@ -291,23 +307,33 @@ async function hooksCheck(
   };
 }
 
-/** One entry as `event matcher → command`, the way doctor names it. */
-function entryLabel(event: string, matcher: unknown, command: string): string {
-  return `${event}${typeof matcher === 'string' ? ` ${matcher}` : ''} → ${command}`;
+/** One entry as `event matcher → what it runs`, the way doctor names it. */
+function entryLabel(event: string, matcher: unknown, handler: unknown): string {
+  const h = (handler ?? {}) as Record<string, unknown>;
+  const runs =
+    h.type === 'mcp_tool'
+      ? `${String(h.server)} ${String(h.tool)} ${String((h.input as { kind?: unknown } | undefined)?.kind)}`
+      : typeof h.command === 'string'
+        ? h.command
+        : typeof h.url === 'string'
+          ? h.url
+          : '?';
+  return `${event}${typeof matcher === 'string' ? ` ${matcher}` : ''} → ${runs}`;
 }
 
 /**
  * Which of `routerHookPlan()`'s entries this file lacks, and which handlers of
  * ours it carries that the plan no longer writes (an older install's
- * `tenjin hook native`, or a shelf-era entry). Compared by event, matcher and
- * command, so a timeout the writer would raise is not called drift here.
+ * `tenjin hook prompt` command, or a shelf-era entry). Compared by event,
+ * matcher and what the handler runs, so a timeout the writer would raise is not
+ * called drift here.
  */
 function planDrift(
   hooks: Record<string, unknown[]>,
   dataDir: string,
 ): { missing: string[]; stale: string[] } {
   const planned = (routerHookPlan() as PlannedEntry[]).map((entry) =>
-    entryLabel(entry.event, entry.matcher, entry.hooks[0]!.command),
+    entryLabel(entry.event, entry.matcher, entry.hooks[0]),
   );
   const present: string[] = [];
   for (const [event, list] of Object.entries(hooks)) {
@@ -317,10 +343,7 @@ function planDrift(
       // Ours only: a handler someone hand-merged beside ours is not drift.
       const kept = pruneOurHandlers(entry, dataDir) as { hooks: unknown[] } | null;
       for (const handler of handlers.filter((h) => kept === null || !kept.hooks.includes(h))) {
-        const command = (handler as { command?: unknown }).command;
-        const url = (handler as { url?: unknown }).url;
-        const label = typeof command === 'string' ? command : typeof url === 'string' ? url : '?';
-        present.push(entryLabel(event, matcher, label));
+        present.push(entryLabel(event, matcher, handler));
       }
     }
   }
@@ -333,7 +356,7 @@ function planDrift(
 interface PlannedEntry {
   event: string;
   matcher?: string;
-  hooks: { command: string }[];
+  hooks: unknown[];
 }
 
 function allowRules(settings: Record<string, unknown>): string[] {
@@ -422,6 +445,111 @@ async function claudeHasServer(opts: { scope: 'user' | 'project'; cwd: string })
     cwd: opts.cwd,
   });
   return stdout.includes(MCP_SERVER_NAME) && !/no mcp server/i.test(stdout);
+}
+
+/**
+ * THE ROUTING FEE, AS THE NEXT PAID CALL WOULD MEET IT: the reasons the session
+ * notice gives (`unpaid`), worked out here from the wallet, the spend limits,
+ * the ledger and the channel the SDK keeps. Never a failure: a call the fee
+ * cannot pay takes the free path. A payment that failed in a session leaves
+ * nothing to read here; these are the causes this can check.
+ */
+async function routingFeeCheck(
+  ctx: CommandContext,
+  settings: ResolvedSettings,
+  fetchImpl: typeof fetch | undefined,
+): Promise<RouterCheck> {
+  const host = new URL(settings.baseUrl).host;
+  const why = await routingFeeBlock({
+    dataDir: ctx.dataDir,
+    policy: settings.policy,
+    rpcUrl: settings.rpcUrl,
+    host,
+    timeoutMs: ctx.flags.timeout,
+    provider: (await walletFileExists(ctx.dataDir)) ? resolveWalletProvider(ctx) : null,
+    ...(fetchImpl !== undefined ? { fetchImpl } : {}),
+  }).catch(() => null);
+  const u = why === null ? null : unpaid(why);
+  if (why === null || u === null) {
+    return {
+      name: 'routing fee',
+      status: 'ok',
+      required: false,
+      detail: `$${usd(ROUTING_FEE_ATOMIC)} a call, paid from channel deposits of up to $${usd(CHANNEL_DEPOSIT_ATOMIC)} that count against the spend limits`,
+    };
+  }
+  const fixes: Record<string, string> = {
+    no_wallet: 'Run `tenjin wallet create`, then `tenjin wallet fund 0.25`.',
+    limit_below_deposit: `Raise it with \`tenjin config set maxAutoSpend ${usd(CHANNEL_DEPOSIT_ATOMIC)}\`.`,
+    budget_reached:
+      'Room comes back as the rolling day passes, or raise it with `tenjin config set sessionBudget <usd>`.',
+    not_allowlisted: `Add ${host} to allowlistCreators, or clear the allowlist.`,
+  };
+  return {
+    name: 'routing fee',
+    status: 'warn',
+    required: false,
+    detail: `${u.reason}, so routing calls take the free path`,
+    fix: fixes[why] ?? u.fix,
+  };
+}
+
+/** What {@link routingFeeBlock} reads; `provider` is null with no wallet. */
+export interface RoutingFeeInput {
+  dataDir: string;
+  policy: SpendPolicy;
+  rpcUrl: string;
+  /** The router's host, the creator a deposit pays. */
+  host: string;
+  timeoutMs: number;
+  provider: WalletProvider | null;
+  fetchImpl?: typeof fetch;
+}
+
+/** Why the next deposit would be refused, or null when the fee can be paid. */
+export async function routingFeeBlock(input: RoutingFeeInput): Promise<string | null> {
+  const { provider, policy } = input;
+  if (provider === null) return 'no_wallet';
+  const verified = await provider.verify?.().catch(() => null);
+  if (verified !== undefined && verified !== null && verified.status !== 'verified') {
+    return 'wallet_locked';
+  }
+  const { address } = await describeWallet(provider);
+  if ((await channelCredit(input.dataDir, address)) >= ROUTING_FEE_ATOMIC) return null;
+  const deposit =
+    policy.maxAutoSpendAtomic < CHANNEL_DEPOSIT_ATOMIC
+      ? policy.maxAutoSpendAtomic
+      : CHANNEL_DEPOSIT_ATOMIC;
+  if (deposit < MIN_DEPOSIT_ATOMIC) return 'limit_below_deposit';
+  const ledger = await readSpendSummary(input.dataDir);
+  const evaluation = evaluateSpendPolicy(policy, {
+    mode: 'automatic',
+    amountAtomic: deposit,
+    creator: input.host,
+    sessionSpentAtomic: ledger === null ? 0n : spentOf(ledger),
+  });
+  if (evaluation.reason === 'not_allowlisted') return 'not_allowlisted';
+  if (evaluation.reason === 'session_budget_exceeded') return 'budget_reached';
+  const balance = await readUsdcBalance(address, input.rpcUrl, {
+    timeoutMs: input.timeoutMs,
+    ...(input.fetchImpl !== undefined ? { fetchImpl: input.fetchImpl } : {}),
+  });
+  return balance !== null && balance < deposit ? 'wallet_low' : null;
+}
+
+/** What the wallet's routing channel still holds for fees, from the SDK's own files. */
+async function channelCredit(dataDir: string, address: string): Promise<bigint> {
+  const dir = payerDir(dataDir, address);
+  const storage = new FileClientChannelStorage({ directory: dir });
+  let best = 0n;
+  for (const name of await readdir(join(dir, 'client')).catch(() => [] as string[])) {
+    const id = /^(0x[0-9a-f]{64})\.json$/.exec(name)?.[1];
+    const channel = id === undefined ? undefined : await storage.get(id).catch(() => undefined);
+    if (channel === undefined) continue;
+    const credit = BigInt(channel.balance ?? '0') - BigInt(channel.chargedCumulativeAmount ?? '0');
+    if (credit > best) best = credit;
+  }
+  return best;
 }
 
 /** INFORMATIONAL: which experiment is on, in one line. Either state passes. */

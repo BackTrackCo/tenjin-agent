@@ -22,6 +22,7 @@ import {
 } from './context';
 import { storeSpecs } from './specs';
 import { requestDecision, ROUTER_PATH, type HookDecision } from './decision';
+import { FEE_REQUIRED, firstNoticeFor, isFeeRequired, unpaidSentence, type RouteFor } from './fee';
 import { readsAsEmptyPage, savedPdfOf } from './fetch-result';
 import { GATE_TIMEOUT_MS } from './gate';
 import { REQUEST_TOOL } from './names';
@@ -54,7 +55,11 @@ import { routerSettings, type RouterSettings } from './settings';
  * SDK, no viem, no MCP server: a dist test asserts the chunk graph, because the
  * hooks run on every prompt and after every native search, and their cost is
  * the product's floor.
- * The decision is free, so nothing on this path can spend anything either.
+ * On the free path the decision costs nothing. The paid path exists only when
+ * these handlers run inside `tenjin mcp`, behind Claude Code's `mcp_tool` hook
+ * entries: that process passes its payer as {@link HookDeps.route}, and the
+ * payer, not this file, signs and pays (`routing-payer.ts`). Run as
+ * `tenjin hook <kind>`, every call is free.
  *
  * EVERY FAILURE IS SILENT. A backend that is down, slow or answering nonsense
  * leaves the prompt and the native result unchanged; the cause goes to
@@ -537,6 +542,12 @@ export interface HookDeps {
   prefetch?: (job: PrefetchJob) => void;
   /** How long the after-call hook waits for that fetch; tests shorten it. */
   augmentWaitMs?: number;
+  /** The paid path, passed by `tenjin mcp`. Absent (`tenjin hook <kind>`),
+   *  every call takes the free path. */
+  route?: RouteFor;
+  /** A line for the user beside this leg's answer (`runHookKind` puts it in
+   *  the hook's `systemMessage`). */
+  notice?: (line: string) => void;
 }
 
 /**
@@ -833,7 +844,7 @@ async function offerOnUserText(
   );
   const footer = await openFooter(deps, event.sessionId, 'prompt');
   const deadline = gateDeadline(deps);
-  const outcome = await decide(sealed, deps, router.config, event.sessionId);
+  const outcome = await decide(sealed, deps, router.config, event.sessionId, deadline);
   if (!isOffer(outcome)) {
     await footer.close(outcome);
     return { response: null, ...(outcome !== null ? { action: outcome.action } : {}) };
@@ -1017,7 +1028,7 @@ async function routeNativeCall(
   }
   const footer = await openFooter(deps, event.sessionId, opts.operation ?? 'search');
   const deadline = gateDeadline(deps);
-  const outcome = await decide(sealed, deps, router.config, event.sessionId);
+  const outcome = await decide(sealed, deps, router.config, event.sessionId, deadline);
   if (!isOffer(outcome)) {
     await footer.close(outcome);
     return {
@@ -1345,7 +1356,7 @@ export async function runDelegationHook(
   if (sealed.packet.historyStatus !== 'ok') return { response: null };
   const footer = await openFooter(deps, event.sessionId, 'delegate');
   const deadline = gateDeadline(deps);
-  const outcome = await decide(sealed, deps, router.config, event.sessionId);
+  const outcome = await decide(sealed, deps, router.config, event.sessionId, deadline);
   if (!isOffer(outcome)) {
     await footer.close(outcome);
     return { response: null, ...(outcome !== null ? { action: outcome.action } : {}) };
@@ -1440,17 +1451,21 @@ function hookOutcome(decision: HookDecision | null): string {
   return 'needs input';
 }
 
-/** One free decision, with the hook's own deadline and its own silence. It
- *  takes what {@link seal} returns rather than a bare packet, so a call site
- *  that skips the mask does not typecheck. */
+/** The one routing call, its packet SEALED (masked and bounded): a path that
+ *  skips the mask does not typecheck. Inside `tenjin mcp` it takes the paid
+ *  path; a call that path cannot pay takes the free path, and the first such
+ *  call in a session tells the user why and what fixes it. */
 async function decide(
   { packet }: Sealed,
   deps: HookDeps,
   config: PartialConfig,
   sessionId: string,
+  deadline: number,
 ): Promise<HookDecision | null> {
   const baseUrl = resolveBaseUrl(deps, config);
   const warn = deps.warn ?? ((line: string) => process.stderr.write(`${line}\n`));
+  const route = (await deps.route?.(baseUrl)) ?? null;
+  const now = deps.now?.() ?? Date.now();
   const outcome = await requestDecision(
     'hook',
     { packet, sessionId },
@@ -1458,15 +1473,42 @@ async function decide(
       ctx: hookContext(deps),
       baseUrl,
       acceptsBazaar: resolveExperimentalBazaar(config).value === 'on',
-      timeoutMs: deps.timeoutMs ?? GATE_TIMEOUT_MS,
+      timeoutMs: Math.max(0, deadline - now),
       ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+      ...(route !== null ? { route } : {}),
     },
   );
+  const why =
+    outcome.status === 'skipped'
+      ? outcome.why
+      : (outcome.freePath ??
+        (outcome.status === 'decided' && isFeeRequired(outcome.decision)
+          ? FEE_REQUIRED
+          : undefined));
+  if (why !== undefined) await tellOnce(deps, sessionId, why, now);
+  if (outcome.status === 'skipped') {
+    warn(`tenjin hook: the routing fee was not paid (${outcome.why}), so the native tool runs`);
+    return null;
+  }
+  if (outcome.freePath !== undefined) {
+    warn(`tenjin hook: the routing fee was not paid (${outcome.freePath}), so the free path ran`);
+  }
   if (outcome.status === 'failed') {
-    warn(`tenjin hook: ${baseUrl}${ROUTER_PATH} ${outcome.reason}`);
+    warn(`tenjin hook: ${baseUrl}${route?.path ?? ROUTER_PATH} ${outcome.reason}`);
     return null;
   }
   return outcome.decision.decision;
+}
+
+/**
+ * ONE LINE FOR THE USER, ONCE PER SESSION, when a call could not pay the
+ * routing fee for a reason the user can fix: the reason and the fix, in the
+ * hook's `systemMessage`. Never on every call, and never in place of routing.
+ */
+async function tellOnce(deps: HookDeps, sessionId: string, why: string, now: number) {
+  const sentence = unpaidSentence(why);
+  if (sentence === null || deps.notice === undefined) return;
+  if (await firstNoticeFor(deps.dataDir, sessionId, now).catch(() => false)) deps.notice(sentence);
 }
 
 /** The hooks write their own protocol answer on stdout and nothing else. */

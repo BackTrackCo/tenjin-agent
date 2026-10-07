@@ -10,6 +10,7 @@ import { onPath } from '../lib/skill-wiring';
 import type { CommandContext, CommandResult } from '../context';
 import {
   ALLOW_RULE,
+  DENY_RULE,
   MCP_SERVER_NAME,
   mcpRemoveCommand,
   mcpScope,
@@ -20,8 +21,8 @@ import {
 import { removeStatusLine } from './status-line-wiring';
 
 /**
- * `tenjin uninstall`: take out the hook entries, the allow rule and the MCP
- * registration, and nothing else.
+ * `tenjin uninstall`: take out the hook entries, the allow and deny rules and
+ * the MCP registration, and nothing else.
  *
  * THE WALLET AND `spend.json` STAY. Removing an integration is not a reason to
  * destroy a key that holds funds or a ledger that records what was spent; both
@@ -89,7 +90,7 @@ export async function runRouterUninstall(
     data,
     humanLines: [
       removed.warning === undefined
-        ? `removed ${removed.events.length > 0 ? removed.events.join(', ') : 'no'} hook entries and ${removed.ruleRemoved ? 'the' : 'no'} permission rule from ${settingsPath}`
+        ? `removed ${removed.events.length > 0 ? removed.events.join(', ') : 'no'} hook entries and ${removed.ruleRemoved || removed.denyRuleRemoved ? 'the' : 'no'} permission rules from ${settingsPath}`
         : `${settingsPath} was left untouched (${removed.warning})`,
       statusLine.wrote
         ? 'removed the x402 status line'
@@ -110,17 +111,17 @@ interface SettingsRemoval {
   /** The events an entry of ours was taken out of. */
   events: string[];
   ruleRemoved: boolean;
+  denyRuleRemoved: boolean;
   wrote: boolean;
   warning?: string;
 }
 
 async function removeFromSettings(path: string, dataDir: string): Promise<SettingsRemoval> {
+  const nothing = { events: [], ruleRemoved: false, denyRuleRemoved: false, wrote: false };
   const found = await inspectHooksFile(path);
-  if ('refusal' in found) {
-    return { events: [], ruleRemoved: false, wrote: false, warning: found.refusal.reason };
-  }
+  if ('refusal' in found) return { ...nothing, warning: found.refusal.reason };
   const { raw, settings, hooks } = found;
-  if (raw === null) return { events: [], ruleRemoved: false, wrote: false };
+  if (raw === null) return nothing;
   const pruned = pruneHooks(hooks, dataDir);
   const permissions =
     settings.permissions !== null &&
@@ -128,36 +129,41 @@ async function removeFromSettings(path: string, dataDir: string): Promise<Settin
     !Array.isArray(settings.permissions)
       ? (settings.permissions as Record<string, unknown>)
       : undefined;
+  // Each list loses our one rule and keeps every other entry; a list that is
+  // absent or not an array is left as it is.
   const allow = Array.isArray(permissions?.allow) ? permissions.allow : undefined;
+  const deny = Array.isArray(permissions?.deny) ? permissions.deny : undefined;
   const ruleRemoved = allow?.includes(ALLOW_RULE) === true;
+  const denyRuleRemoved = deny?.includes(DENY_RULE) === true;
   const next = {
     ...settings,
     hooks: pruned.next,
-    ...(permissions !== undefined && allow !== undefined
-      ? { permissions: { ...permissions, allow: allow.filter((r) => r !== ALLOW_RULE) } }
+    ...(permissions !== undefined
+      ? {
+          permissions: {
+            ...permissions,
+            ...(allow !== undefined ? { allow: allow.filter((r) => r !== ALLOW_RULE) } : {}),
+            ...(deny !== undefined ? { deny: deny.filter((r) => r !== DENY_RULE) } : {}),
+          },
+        }
       : {}),
   };
   const body = `${JSON.stringify(next, null, 2)}\n`;
   if (body === raw) {
-    return { events: pruned.removed, ruleRemoved, wrote: false };
+    return { events: pruned.removed, ruleRemoved, denyRuleRemoved, wrote: false };
   }
   const mode = await stat(found.path)
     .then((s) => ({ mode: s.mode & 0o777 }))
     .catch(() => ({}));
   if ((await readFile(found.path, 'utf8').catch(() => null)) !== raw) {
-    return { events: [], ruleRemoved: false, wrote: false, warning: 'changed-since-read' };
+    return { ...nothing, warning: 'changed-since-read' };
   }
   try {
     await writeFileAtomic(found.path, body, mode);
   } catch (err) {
-    return {
-      events: [],
-      ruleRemoved: false,
-      wrote: false,
-      warning: err instanceof Error ? err.message : String(err),
-    };
+    return { ...nothing, warning: err instanceof Error ? err.message : String(err) };
   }
-  return { events: pruned.removed, ruleRemoved, wrote: true };
+  return { events: pruned.removed, ruleRemoved, denyRuleRemoved, wrote: true };
 }
 
 async function removeMcpServer(

@@ -70,7 +70,7 @@ Each answer names the provider and the price. Your agent keeps its own tools, an
 
 ## What it can do
 
-The router picks from a catalog we curate and maintain. When nothing in it fits, it can point your agent at a reviewed third-party pay-per-call service from the [Tenjin list](#tenjin-list-and-experimental-bazaar), and your agent decides whether to use it or to ask you first. Routing is free: you pay the provider's price and nothing else.
+The router picks from a catalog we curate and maintain. When nothing in it fits, it can point your agent at a reviewed third-party pay-per-call service from the [Tenjin list](#tenjin-list-and-experimental-bazaar), and your agent decides whether to use it or to ask you first. Routing is free today: you pay the provider's price and nothing else. A flat [routing fee](#routing-fee) of $0.003 per routing call is coming, under the spend limits you approve at install.
 
 | Tool                                                           | What your agent gets                                                                      | Price per call |
 | -------------------------------------------------------------- | ----------------------------------------------------------------------------------------- | -------------- |
@@ -136,6 +136,10 @@ Tenjin pays for tools with [x402](https://www.x402.org), an open standard that b
 | Per day    | $5      | `tenjin config set sessionBudget 2`   |
 
 Tenjin refuses any payment over either limit before it signs anything.
+
+### Routing fee
+
+Once Tenjin's server turns it on, each routing call costs a flat $0.003, paid over x402 `batch-settlement` by `tenjin mcp` from a channel deposit of up to $0.25 (less when your per-call limit is lower). A deposit is an automatic payment: it counts against the limits above, and approving them at install approves the fee. The fees come out of the deposit and are not counted again. When a call cannot be paid, it takes the free path, and Claude Code tells you once per session why and what fixes it; `tenjin doctor` says the same. Details are in [docs/agent-permissions.md](docs/agent-permissions.md#what-bounds-a-router-payment-on-top-of-that).
 
 ### Funding
 
