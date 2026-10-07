@@ -25,6 +25,12 @@ import { requestDecision, ROUTER_PATH, type HookDecision } from './decision';
 import { FEE_REQUIRED, firstNoticeFor, isFeeRequired, unpaidSentence, type RouteFor } from './fee';
 import { readsAsEmptyPage, savedPdfOf } from './fetch-result';
 import { GATE_TIMEOUT_MS } from './gate';
+import {
+  clearRouterMemo,
+  readRouterMemo,
+  UNREACHABLE_BACKOFF_MS,
+  writeRouterMemo,
+} from './router-memo';
 import { REQUEST_TOOL } from './names';
 import { requestToolAccess, type AgentLookup } from './agent-tools';
 import { finishAugment, startAugment, type PrefetchJob, type SearchResponse } from './augment';
@@ -1454,7 +1460,12 @@ function hookOutcome(decision: HookDecision | null): string {
 /** The one routing call, its packet SEALED (masked and bounded): a path that
  *  skips the mask does not typecheck. Inside `tenjin mcp` it takes the paid
  *  path; a call that path cannot pay takes the free path, and the first such
- *  call in a session tells the user why and what fixes it. */
+ *  call in a session tells the user why and what fixes it.
+ *
+ *  BACKOFF: a call that never reached the router starts the machine's
+ *  `unreachable` memo, and for its minute every leg skips the call and the
+ *  native tool runs at once, rather than each one waiting out the gate. A call
+ *  the router answered, with any status, clears it. */
 async function decide(
   { packet }: Sealed,
   deps: HookDeps,
@@ -1464,8 +1475,14 @@ async function decide(
 ): Promise<HookDecision | null> {
   const baseUrl = resolveBaseUrl(deps, config);
   const warn = deps.warn ?? ((line: string) => process.stderr.write(`${line}\n`));
-  const route = (await deps.route?.(baseUrl)) ?? null;
   const now = deps.now?.() ?? Date.now();
+  const backoff = await readRouterMemo(deps.dataDir, 'unreachable', baseUrl, now);
+  if (backoff !== null) {
+    const left = Math.ceil((backoff.until - now) / 1000);
+    warn(`tenjin hook: ${baseUrl} did not answer a moment ago, so the native tool runs (${left}s)`);
+    return null;
+  }
+  const route = (await deps.route?.(baseUrl)) ?? null;
   const outcome = await requestDecision(
     'hook',
     { packet, sessionId },
@@ -1492,6 +1509,15 @@ async function decide(
   }
   if (outcome.freePath !== undefined) {
     warn(`tenjin hook: the routing fee was not paid (${outcome.freePath}), so the free path ran`);
+  }
+  if (outcome.status === 'failed' && outcome.unreachable === true) {
+    await writeRouterMemo(deps.dataDir, 'unreachable', baseUrl, {
+      now: deps.now?.() ?? Date.now(),
+      ttlMs: UNREACHABLE_BACKOFF_MS,
+      detail: outcome.reason,
+    });
+  } else {
+    await clearRouterMemo(deps.dataDir, 'unreachable', baseUrl);
   }
   if (outcome.status === 'failed') {
     warn(`tenjin hook: ${baseUrl}${route?.path ?? ROUTER_PATH} ${outcome.reason}`);

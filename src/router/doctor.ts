@@ -39,6 +39,7 @@ import {
 import { routerSettings, type RouterSettings } from './settings';
 import { REQUEST_TOOL } from './names';
 import { probeRouter, type RouterCheck } from './reachability';
+import { readRouterMemo, type RouterMemo } from './router-memo';
 import { inspectStatusLine, STATUS_LINE_COMMAND } from './status-line-wiring';
 
 /**
@@ -76,6 +77,7 @@ export interface RouterDoctorDeps {
   ) => Promise<{ found: boolean; state: McpEntryState }>;
   /** Node's own version, for the floor check. */
   nodeVersion?: string;
+  now?: () => number;
 }
 
 const NODE_FLOOR = 24;
@@ -121,12 +123,17 @@ export async function runRouterDoctor(
   checks.push(experimentalCheck(settings.experimentalBazaar));
   checks.push(await routingFeeCheck(ctx, settings, deps.fetchImpl));
   checks.push(...(await walletCheck(ctx)));
+  const now = deps.now?.() ?? Date.now();
   checks.push(
-    await probeRouter(settings.baseUrl, {
-      timeoutMs: ctx.flags.timeout,
-      env,
-      ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
-    }),
+    withBackoff(
+      await probeRouter(settings.baseUrl, {
+        timeoutMs: ctx.flags.timeout,
+        env,
+        ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+      }),
+      await readRouterMemo(ctx.dataDir, 'unreachable', settings.baseUrl, now),
+      now,
+    ),
   );
   const agents = await subagentsCheck(deps.cwd ?? process.cwd(), deps.homeDir ?? homedir());
   if (agents !== null) checks.push(agents);
@@ -153,6 +160,21 @@ export async function runRouterDoctor(
         ? `${checks.length} checks, all pass.`
         : `${checks.length} checks, ${bad} to look at.`,
     ],
+  };
+}
+
+/**
+ * The routing legs' backoff, named on the router line while it lasts: the
+ * probe can answer now while the legs still skip the router for a few seconds
+ * after a call that did not reach it. It ends by itself.
+ */
+function withBackoff(check: RouterCheck, memo: RouterMemo | null, now: number): RouterCheck {
+  if (memo === null) return check;
+  const left = Math.max(1, Math.ceil((memo.until - now) / 1000));
+  return {
+    ...check,
+    status: check.status === 'ok' ? 'warn' : check.status,
+    detail: `${check.detail}; routing calls skip the router for ${left}s more, after one did not reach it`,
   };
 }
 

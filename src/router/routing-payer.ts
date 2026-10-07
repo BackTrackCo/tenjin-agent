@@ -15,6 +15,7 @@ import type { TenjinSigner } from '../lib/wallet/provider';
 import { canonicalUsdcOnly } from '../lib/x402-pay';
 import {
   CHANNEL_BUSY,
+  isUnreachable,
   PAID_PATH_ABSENT,
   PAYMENT_FAILED,
   RouteSkipped,
@@ -28,6 +29,7 @@ import {
   ROUTE_PAID_PATH,
   ROUTING_FEE_ATOMIC,
 } from './fee';
+import { readRouterMemo, writeRouterMemo } from './router-memo';
 
 /**
  * THE ROUTING FEE, PAID THE WAY THE SDK'S OWN CLIENT PAYS. It runs inside
@@ -64,8 +66,8 @@ import {
  *   refused payment, a server error) throws `RouteSkipped` with the reason,
  *   and the caller sends it to the free path. The server is asked before the
  *   wallet is unlocked, so a server with no paid path (the fee off) costs no
- *   unlock and no notice; it is remembered for an hour, so each call is not a
- *   wasted round trip.
+ *   unlock and no notice; it is remembered for an hour in the machine's
+ *   `router-memo`, so each call is not a wasted round trip.
  *
  * Left upstream, as cent-level papercuts: the SDK exports `ErrChannelBusy`
  * only from its server entry, and its fetch wrapper rewraps a hook's error as
@@ -154,6 +156,8 @@ interface Call {
   skipped?: string;
   /** Whether a request carrying a payment went out. */
   paid: boolean;
+  /** Whether the router answered any request of this call. */
+  answered: boolean;
   /** The wallet's channel, once the server asked for a payment. */
   channel?: Channel;
   deposits: Deposit[];
@@ -184,8 +188,6 @@ const REFUSED: Partial<Record<PolicyReason, string>> = {
 };
 
 export class RoutingPayer {
-  /** Paid-path URLs that answered no paid path, until when. */
-  private readonly absent = new Map<string, number>();
   private channel: Channel | null = null;
   private call: Call | null = null;
   private queue: Promise<unknown> = Promise.resolve();
@@ -194,11 +196,13 @@ export class RoutingPayer {
 
   /**
    * The paid path for one call, or null for the free path for an hour after
-   * the server answered no paid path.
+   * the server answered no paid path. That answer is the machine's `router-memo`,
+   * so every `tenjin mcp` process shares it.
    */
   async routeFor(baseUrl: string): Promise<DecisionRoute | null> {
-    const probe = new URL(ROUTE_PAID_PATH, baseUrl).toString();
-    if ((this.absent.get(probe) ?? 0) > this.now()) return null;
+    if (await readRouterMemo(this.deps.dataDir, 'paid-path-absent', baseUrl, this.now())) {
+      return null;
+    }
     return {
       path: ROUTE_PAID_PATH,
       send: (url, options) => {
@@ -233,11 +237,18 @@ export class RoutingPayer {
    */
   private async pay(url: string, options: HttpRequestOptions, until: number): Promise<HttpResult> {
     if (until - this.now() <= 0) throw new RouteSkipped('busy');
-    const call: Call = { host: new URL(url).host, until, paid: false, deposits: [] };
+    const call: Call = {
+      host: new URL(url).host,
+      until,
+      paid: false,
+      answered: false,
+      deposits: [],
+    };
     const base = options.fetchImpl ?? this.deps.fetchImpl ?? fetch;
     const askFirst: typeof fetch = async (input, init) => {
       const request = new Request(input, init);
       let asked: Response | undefined = await base(request.clone());
+      call.answered = true;
       if (asked.status !== 402) return asked;
       try {
         call.channel = this.channelFor(await this.signer());
@@ -281,11 +292,19 @@ export class RoutingPayer {
       await this.settleDeposits(call);
     }
     if (call.skipped !== undefined) throw new RouteSkipped(call.skipped);
+    // The router never answered: the free path is on the same host, so the
+    // call ends as that transport failure.
+    if (!response.ok && !call.answered && isUnreachable(response)) {
+      throw new RouteSkipped(PAYMENT_FAILED, response);
+    }
     // No answer, a failed payment or a server error: the free path takes it.
     if (!response.ok) throw new RouteSkipped(PAYMENT_FAILED);
     if (!call.paid && response.status === 404) {
       // The server has no paid path: the free path, asked again in an hour.
-      this.absent.set(new URL(ROUTE_PAID_PATH, url).toString(), this.now() + ABSENT_TTL_MS);
+      await writeRouterMemo(this.deps.dataDir, 'paid-path-absent', url, {
+        now: this.now(),
+        ttlMs: ABSENT_TTL_MS,
+      });
       throw new RouteSkipped(PAID_PATH_ABSENT);
     }
     // Another session's call was in flight on the channel: nothing was

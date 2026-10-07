@@ -23,6 +23,12 @@ question for the agent to ask you and the command for each answer
 on its own, and `tenjin doctor` shows the open question as a warning with the
 way to answer it instead of failing on it, so its network checks still print.
 
+When a routing call cannot reach the router (DNS, TLS, a refused or timed-out
+connection, a proxy refusing the tunnel), every hook leg skips the router for
+the next 60 seconds and the native tool runs at once, instead of each prompt,
+search and hand-off waiting out the gate. An answer from the router clears it,
+and `tenjin doctor` names the pause with the seconds left.
+
 The install report no longer names a `hooksDir` for the router's hook entries,
 which use no directory. The README keeps one sentence on
 what the router sends and links to `docs/agent-permissions.md`, which lists all

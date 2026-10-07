@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { fetchFailureToCliError, httpRequest } from '../lib/http';
-import type { HttpRequestOptions, HttpResult } from '../lib/http';
+import type { FetchJsonFailure, HttpRequestOptions, HttpResult } from '../lib/http';
 import type { CommandContext } from '../context';
 import type { Packet } from './context';
 
@@ -396,7 +396,13 @@ export interface DecisionRoute {
 /** The paid path gave this call no answer: the wallet locked, low or over
  *  its spend limits, the channel busy, or the payment failed. */
 export class RouteSkipped extends Error {
-  constructor(readonly why: string) {
+  /** `unreached`: the paid call never got an answer from the router, so the
+   *  free path, on the same host, is not tried and the call reads as that
+   *  transport failure. */
+  constructor(
+    readonly why: string,
+    readonly unreached?: FetchJsonFailure,
+  ) {
     super(`routing fee not paid: ${why}`);
   }
 }
@@ -414,7 +420,14 @@ export type DecisionOutcome<T> =
   | { status: 'decided'; decision: T; freePath?: string }
   /** On the free path nothing was paid and nothing could be, so a failure here
    *  costs the turn a routing answer and nothing else. */
-  | { status: 'failed'; reason: string; errorCode?: string; freePath?: string }
+  | {
+      status: 'failed';
+      reason: string;
+      errorCode?: string;
+      freePath?: string;
+      /** The router never answered: no connection, or no answer in time. */
+      unreachable?: true;
+    }
   /** The paid path gave no answer ({@link RouteSkipped}) and no time was left
    *  for the free path: the native tool runs. */
   | { status: 'skipped'; why: string };
@@ -475,6 +488,7 @@ export async function requestDecision(
     response = await (deps.route?.send ?? httpRequest)(url, options);
   } catch (err) {
     if (!(err instanceof RouteSkipped)) throw err;
+    if (err.unreached !== undefined) return readDecision(err.unreached, schema);
     const left = options.timeoutMs - (Date.now() - started);
     if (left <= 0) return { status: 'skipped', why: err.why };
     // A CALL THE PAID PATH COULD NOT TAKE STILL ROUTES, on the free path,
@@ -541,7 +555,13 @@ function readDecision<T extends z.ZodTypeAny>(
 ): DecisionOutcome<z.infer<T>> {
   // A transport failure says its own reason; nothing was paid either way,
   // because there is nothing to pay for on this route.
-  if (!response.ok) return { status: 'failed', reason: fetchFailureToCliError(response).message };
+  if (!response.ok) {
+    return {
+      status: 'failed',
+      reason: fetchFailureToCliError(response).message,
+      ...(isUnreachable(response) ? { unreachable: true as const } : {}),
+    };
+  }
   if (response.status < 200 || response.status >= 300) {
     const named = errorOf(response.json);
     return {
@@ -572,4 +592,13 @@ function errorOf(body: unknown): { code: string; message: string } | null {
   if (typeof code !== 'string' || code.length === 0 || code.length > 64) return null;
   const text = typeof message === 'string' ? message.slice(0, 500) : '';
   return { code, message: text };
+}
+
+/**
+ * A request that never got an answer from the router: no connection (DNS,
+ * TLS, refused, a proxy refusing the tunnel) or none in time. An HTTP status,
+ * even a 5xx, is an answer.
+ */
+export function isUnreachable(failure: FetchJsonFailure): boolean {
+  return failure.kind === 'network' || failure.kind === 'timeout';
 }

@@ -978,6 +978,41 @@ describe('the doctor this release registers', () => {
     expect(checks.find((c) => c.name === 'router')?.status).toBe('fail');
   });
 
+  it('names a routing backoff in force, with the seconds left', async () => {
+    const { runRouterDoctor } = await import('./doctor');
+    const { writeRouterMemo } = await import('./router-memo');
+    await runRouterInstall({}, ctx(), deps());
+    const now = 1_800_000_000_000;
+    type Check = { name: string; status: string; detail: string };
+    const routerLine = async () => {
+      const out = await runRouterDoctor(ctx(), {
+        homeDir: home,
+        cwd: work,
+        env: {},
+        which: () => true,
+        readMcp: async () => true,
+        fetchImpl: probe400,
+        now: () => now,
+      }).catch((e: unknown) => e);
+      const body =
+        out instanceof CliError
+          ? (out.details as { checks: Check[]; baseUrl: string })
+          : (out as { data: { checks: Check[]; baseUrl: string } }).data;
+      return { check: body.checks.find((c) => c.name === 'router'), baseUrl: body.baseUrl };
+    };
+    const before = await routerLine();
+    expect(before.check?.detail).not.toContain('skip the router');
+    await writeRouterMemo(data, 'unreachable', before.baseUrl, {
+      now: now - 15_000,
+      ttlMs: 60_000,
+    });
+    const during = await routerLine();
+    expect(during.check?.status).toBe('warn');
+    expect(during.check?.detail).toContain(
+      'routing calls skip the router for 45s more, after one did not reach it',
+    );
+  });
+
   it('fails with the command that fixes it on a machine that never installed', async () => {
     const { runRouterDoctor } = await import('./doctor');
     const fetchImpl = (async () => new Response('{}', { status: 400 })) as typeof fetch;
