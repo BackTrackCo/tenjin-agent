@@ -19,7 +19,7 @@ export function registerCore(reg: Registration): void {
     .option('--refresh', 're-register the hook entries this machine already has; add nothing')
     .option(
       '--accept-defaults',
-      'answer the spend question with the limits it shows, without asking (its "Use these limits")',
+      'answer the spend question with the limits it shows (its "Use these limits") and change nothing else',
     )
     .option(
       '--status-line <mode>',

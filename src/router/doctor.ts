@@ -41,7 +41,7 @@ import { REQUEST_TOOL } from './names';
 import { probeRouter, type RouterCheck } from './reachability';
 import { readRouterMemo, type RouterMemo } from './router-memo';
 import {
-  acceptCommand,
+  ACCEPT_COMMAND,
   OWN_LIMITS_COMMANDS,
   shownLimits,
   spendQuestion,
@@ -125,9 +125,7 @@ export async function runRouterDoctor(
     spendCheck(
       settings.policy.maxAutoSpendAtomic,
       settings.policy.sessionBudgetAtomic,
-      rawConfig.maxAutoSpend === undefined
-        ? { limits: shownLimits(rawConfig), project: deps.project === true }
-        : null,
+      rawConfig.maxAutoSpend === undefined ? { limits: shownLimits(rawConfig) } : null,
     ),
   );
   checks.push(experimentalCheck(settings.experimentalBazaar));
@@ -623,7 +621,7 @@ function experimentalCheck(bazaar: boolean): RouterCheck {
 function spendCheck(
   maxAutoSpendAtomic: bigint,
   sessionBudgetAtomic: bigint | null,
-  unanswered: { limits: RouterLimits; project: boolean } | null,
+  unanswered: { limits: RouterLimits } | null,
 ): RouterCheck {
   if (sessionBudgetAtomic === 0n) {
     return {
@@ -640,7 +638,7 @@ function spendCheck(
       status: 'warn',
       required: false,
       detail: `the spend limits are not answered yet, so automatic payments are off and every lookup needs approval. Ask the user: ${spendQuestion(unanswered.limits)}`,
-      fix: `Answer the spend question: for a yes, run \`${acceptCommand(unanswered.project)}\`; for other amounts, ${OWN_LIMITS_COMMANDS}; or run \`tenjin install\` in a terminal to choose.`,
+      fix: `Answer the spend question: for a yes, run \`${ACCEPT_COMMAND}\`; for other amounts, ${OWN_LIMITS_COMMANDS}; or run \`tenjin install\` in a terminal to choose.`,
     };
   }
   if (maxAutoSpendAtomic === 0n) {

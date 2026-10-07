@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ROUTER_DEFAULTS } from '../commands/config';
-import { acceptCommand, shownLimits, spendQuestion, unpaidNotice } from './spend-question';
+import { ACCEPT_COMMAND, shownLimits, spendQuestion, unpaidNotice } from './spend-question';
 
 describe('the spend question', () => {
   it('shows the defaults where the file names no limit, and the file where it does', () => {
@@ -17,9 +17,8 @@ describe('the spend question', () => {
     );
   });
 
-  it('accepts with one command, keeping the install scope', () => {
-    expect(acceptCommand(false)).toBe('tenjin install --accept-defaults');
-    expect(acceptCommand(true)).toBe('tenjin install --project --accept-defaults');
+  it('accepts with one command, whatever scope the hooks were installed in', () => {
+    expect(ACCEPT_COMMAND).toBe('tenjin install --accept-defaults');
   });
 
   it('turns an unpaid routing call on unanswered limits into the question', () => {

@@ -667,22 +667,37 @@ describe('install asks a person to approve the spend limits', () => {
     expect(result.data).not.toHaveProperty('spend.approval');
   });
 
-  it('refuses --accept-defaults with --refresh', async () => {
-    const err = await runRouterInstall(
-      { acceptDefaults: true, refresh: true },
-      ctx(),
-      deps(),
-    ).catch((e: unknown) => e);
+  it.each([
+    ['--refresh', { refresh: true }],
+    ['--project', { project: true }],
+    ['--no-wallet', { noWallet: true }],
+    ['--status-line', { statusLine: 'skip' as const }],
+  ])('refuses --accept-defaults with %s', async (_flag, other) => {
+    const err = await runRouterInstall({ acceptDefaults: true, ...other }, ctx(), deps()).catch(
+      (e: unknown) => e,
+    );
     expect(err).toMatchObject({ code: 'USAGE' });
   });
 
-  it('a --project install hands the agent the --project yes', async () => {
-    const cwd = join(home, 'project');
-    await mkdir(cwd, { recursive: true });
-    const result = await runRouterInstall({ project: true }, ctx(), deps({ cwd }));
-    expect(result.data).toMatchObject({
-      spend: { approval: { approve: 'tenjin install --project --accept-defaults' } },
+  it('--accept-defaults answers the spend question and undoes no install choice', async () => {
+    // The agent-run install was told to make no wallet and leave the status line alone.
+    const createWallet = vi.fn(async () => ADDRESS);
+    await runRouterInstall({ noWallet: true, statusLine: 'skip' }, ctx(), deps({ createWallet }));
+    const before = await readFile(settingsPath(), 'utf8');
+    const registerMcp = vi.fn(async () => undefined);
+    const result = await runRouterInstall(
+      { acceptDefaults: true },
+      ctx(),
+      deps({ createWallet, registerMcp }),
+    );
+    expect(createWallet).not.toHaveBeenCalled();
+    expect(registerMcp).not.toHaveBeenCalled();
+    expect(await readFile(settingsPath(), 'utf8')).toBe(before);
+    expect(await loadRawConfig(data)).toMatchObject({
+      maxAutoSpend: '250000',
+      sessionBudget: '5000000',
     });
+    expect(result.data).toMatchObject({ spend: { set: ['maxAutoSpend', 'sessionBudget'] } });
   });
 
   it('--refresh asks nothing and fills no absent limit', async () => {

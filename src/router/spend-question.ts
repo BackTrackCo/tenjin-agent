@@ -51,10 +51,12 @@ export function limitsPhrase(limits: RouterLimits): string {
 /** The routing fee's terms, as the selector names them. */
 export const ROUTING_FEE_TERMS = `Routing costs $${usd(ROUTING_FEE_ATOMIC)} a call, paid from channel deposits of up to $${usd(CHANNEL_DEPOSIT_ATOMIC)} that stay yours until spent; each deposit counts against these limits.`;
 
-/** The one command that answers yes to the limits shown, as the selector's "Use these limits" does. */
-export function acceptCommand(project: boolean): string {
-  return `tenjin install${project ? ' --project' : ''} --accept-defaults`;
-}
+/**
+ * The one command that answers yes to the limits shown, as the selector's
+ * "Use these limits" does. It writes those limits and nothing else: the
+ * limits are the machine's, whatever scope the hooks were installed in.
+ */
+export const ACCEPT_COMMAND = 'tenjin install --accept-defaults';
 
 /** The commands for limits of the user's own, each in backticks. */
 export const OWN_LIMITS_COMMANDS =
@@ -67,11 +69,10 @@ export function spendQuestion(limits: RouterLimits): string {
 
 /**
  * The routing notice for a machine whose limits nobody has answered: the
- * question and the one-step yes. The hook cannot tell a `--project` install
- * from a home one, so it names the flag rather than guess.
+ * question and the one-step yes.
  */
 export function unansweredNotice(limits: RouterLimits): string {
-  return `Tenjin pays for nothing on its own yet: the spend limits are not answered. Ask the user: ${spendQuestion(limits)} For a yes, run \`${acceptCommand(false)}\` (add --project if Tenjin was installed with it); for other amounts, run ${OWN_LIMITS_COMMANDS}.`;
+  return `Tenjin pays for nothing on its own yet: the spend limits are not answered. Ask the user: ${spendQuestion(limits)} For a yes, run \`${ACCEPT_COMMAND}\`; for other amounts, run ${OWN_LIMITS_COMMANDS}.`;
 }
 
 /**
