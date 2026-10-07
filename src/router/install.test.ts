@@ -136,10 +136,13 @@ const ADDRESS = '0x3c0D84055994c3062819Ce8730869D0aDeA4c3Bf';
 
 /** Wallet seams are always stubbed: the real create writes to the OS keychain. */
 /** What a run that could not ask prints for the agent that ran it. */
+/** The routing fee's terms, as the selector shows them. */
+const FEE_TERMS =
+  'Routing costs $0.003 a call, paid from channel deposits of up to $0.25 that stay yours until spent; each deposit counts against these limits.';
 const ASK_LINES = [
   '! Automatic payments are off until the user approves a spend limit',
-  '  Ask the user: May Tenjin pay for tool calls without asking you each time, up to $0.25 a call and $5 a day?',
-  '  Yes: tenjin config set maxAutoSpend 0.25',
+  `  Ask the user: May Tenjin pay for tool calls without asking you each time, up to $0.25 a call and $5 a day? ${FEE_TERMS} A yes also approves the routing fee.`,
+  '  Yes: tenjin install --accept-defaults',
   '  Other amounts: tenjin config set maxAutoSpend <usd> and tenjin config set sessionBudget <usd|none>',
   '  No: run nothing, the router then pays for nothing on its own, and the question stays open until tenjin install in a terminal or tenjin config set answers it',
 ];
@@ -190,14 +193,19 @@ describe('tenjin install', () => {
         kept: [],
         effective: { maxAutoSpend: '0', sessionBudget: '5' },
         approval: {
-          question:
-            'May Tenjin pay for tool calls without asking you each time, up to $0.25 a call and $5 a day?',
-          approve: 'tenjin config set maxAutoSpend 0.25',
+          question: `May Tenjin pay for tool calls without asking you each time, up to $0.25 a call and $5 a day? ${FEE_TERMS} A yes also approves the routing fee.`,
+          limits: { maxAutoSpend: '0.25', sessionBudget: '5' },
+          routingFee: FEE_TERMS,
+          approve: 'tenjin install --accept-defaults',
+          own: 'tenjin config set maxAutoSpend <usd> and tenjin config set sessionBudget <usd|none>',
         },
       },
     });
     const { next } = (result.data as { spend: { approval: { next: string } } }).spend.approval;
-    expect(next).toMatch(/^Ask the user this question before you change any limit\./);
+    expect(next).toMatch(
+      /^Show the user these limits and ask this question before you change any limit\./,
+    );
+    expect(next).toContain('If they say yes, run `tenjin install --accept-defaults`.');
     expect(next).toContain('If they say no, run nothing');
   });
 
@@ -207,8 +215,8 @@ describe('tenjin install', () => {
     expect(result.data).toMatchObject({
       spend: {
         approval: {
-          question:
-            'May Tenjin pay for tool calls without asking you each time, up to $0.25 a call with no daily limit?',
+          question: `May Tenjin pay for tool calls without asking you each time, up to $0.25 a call with no daily limit? ${FEE_TERMS} A yes also approves the routing fee.`,
+          limits: { maxAutoSpend: '0.25', sessionBudget: 'none' },
         },
       },
     });
@@ -616,6 +624,40 @@ describe('install asks a person to approve the spend limits', () => {
     expect(result.data).not.toHaveProperty('spend.approval');
   });
 
+  it('--accept-defaults writes the limits the question shows, as "Use these limits" does', async () => {
+    await writeFile(join(data, 'config.json'), JSON.stringify({ sessionBudget: 'none' }));
+    const promptLimits = vi.fn(async () => 'own' as const);
+    const result = await runRouterInstall(
+      { acceptDefaults: true },
+      ctx(),
+      deps({ isInteractive: false, promptLimits }),
+    );
+    expect(promptLimits).not.toHaveBeenCalled();
+    expect(await loadRawConfig(data)).toMatchObject({
+      maxAutoSpend: '250000',
+      sessionBudget: 'none',
+    });
+    expect(result.data).not.toHaveProperty('spend.approval');
+  });
+
+  it('refuses --accept-defaults with --refresh', async () => {
+    const err = await runRouterInstall(
+      { acceptDefaults: true, refresh: true },
+      ctx(),
+      deps(),
+    ).catch((e: unknown) => e);
+    expect(err).toMatchObject({ code: 'USAGE' });
+  });
+
+  it('a --project install hands the agent the --project yes', async () => {
+    const cwd = join(home, 'project');
+    await mkdir(cwd, { recursive: true });
+    const result = await runRouterInstall({ project: true }, ctx(), deps({ cwd }));
+    expect(result.data).toMatchObject({
+      spend: { approval: { approve: 'tenjin install --project --accept-defaults' } },
+    });
+  });
+
   it('--refresh asks nothing and fills no absent limit', async () => {
     await runRouterInstall({}, ctx(), deps());
     await writeFile(join(data, 'config.json'), '{}');
@@ -966,8 +1008,11 @@ describe('the doctor this release registers', () => {
     const spend = checks.find((c) => c.name === 'spend');
     expect(spend).toMatchObject(expected);
     if (maxAutoSpend === undefined) {
+      expect(spend?.detail).toContain(
+        `Ask the user: May Tenjin pay for tool calls without asking you each time, up to $0.25 a call and $5 a day? ${FEE_TERMS}`,
+      );
       expect(spend?.fix).toBe(
-        'Answer the spend question: run `tenjin install` in a terminal, or `tenjin config set maxAutoSpend <usd>`.',
+        'Answer the spend question: for a yes, run `tenjin install --accept-defaults`; for other amounts, `tenjin config set maxAutoSpend <usd>` and `tenjin config set sessionBudget <usd|none>`; or run `tenjin install` in a terminal to choose.',
       );
       // The open question is not the first required failure, so it never hides
       // the network diagnosis.

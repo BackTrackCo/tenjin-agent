@@ -63,6 +63,7 @@ import { withFileLock, LockTimeoutError } from '../lib/lock';
 import { parseUsdToAtomic, toMoney } from '../lib/money';
 import type { Money } from '../schemas';
 import type { CommandContext, CommandResult } from '../context';
+import { ROUTER_DEFAULTS, type RouterLimits } from '../router/spend-question';
 import {
   projectRouterPath,
   readProjectRouterFile,
@@ -977,11 +978,8 @@ export async function persistRouterProject(
   });
 }
 
-/** Absent-only automatic router defaults, in atomic USDC. */
-export const ROUTER_DEFAULTS = {
-  maxAutoSpend: '250000',
-  sessionBudget: '5000000',
-} as const;
+/** Absent-only automatic router defaults; defined beside the spend question that shows them. */
+export { ROUTER_DEFAULTS, type RouterLimits };
 
 export interface RouterDefaultsResult {
   /** Keys this run wrote, because the file did not name them. */
@@ -989,12 +987,6 @@ export interface RouterDefaultsResult {
   /** Keys the operator had already written, left exactly as they are. */
   kept: string[];
   removed: string[];
-}
-
-/** The automatic limits a fresh install fills in, in atomic USDC; `sessionBudget` may be `none`. */
-export interface RouterLimits {
-  maxAutoSpend: string;
-  sessionBudget: string;
 }
 
 /** Remove/report retired keys in the same locked write. Refresh preserves absent

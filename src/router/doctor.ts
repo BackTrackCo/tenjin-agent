@@ -40,6 +40,13 @@ import { routerSettings, type RouterSettings } from './settings';
 import { REQUEST_TOOL } from './names';
 import { probeRouter, type RouterCheck } from './reachability';
 import { readRouterMemo, type RouterMemo } from './router-memo';
+import {
+  acceptCommand,
+  OWN_LIMITS_COMMANDS,
+  shownLimits,
+  spendQuestion,
+  type RouterLimits,
+} from './spend-question';
 import { inspectStatusLine, STATUS_LINE_COMMAND } from './status-line-wiring';
 
 /**
@@ -113,11 +120,14 @@ export async function runRouterDoctor(
       deps.homeDir ?? homedir(),
     ),
   );
+  const rawConfig = await loadRawConfig(ctx.dataDir);
   checks.push(
     spendCheck(
       settings.policy.maxAutoSpendAtomic,
       settings.policy.sessionBudgetAtomic,
-      (await loadRawConfig(ctx.dataDir)).maxAutoSpend === undefined,
+      rawConfig.maxAutoSpend === undefined
+        ? { limits: shownLimits(rawConfig), project: deps.project === true }
+        : null,
     ),
   );
   checks.push(experimentalCheck(settings.experimentalBazaar));
@@ -592,16 +602,17 @@ function experimentalCheck(bazaar: boolean): RouterCheck {
 }
 
 /**
- * `unanswered` is a config file that names no `maxAutoSpend`: the state an
- * install that could not ask leaves, the same as a cancel at its selector. The
- * code default's zero holds, and that is a question still open, not a broken
- * machine, so it warns and the checks after it (the router probe above all)
- * still print. A 0 the user wrote is their answer and stays a failure.
+ * `unanswered` is set when the config file names no `maxAutoSpend`: the state
+ * an install that could not ask leaves, the same as a cancel at its selector.
+ * The code default's zero holds, and that is a question still open, not a
+ * broken machine, so it warns with the question and its one-step yes, and the
+ * checks after it (the router probe above all) still print. A 0 the user
+ * wrote is their answer and stays a failure.
  */
 function spendCheck(
   maxAutoSpendAtomic: bigint,
   sessionBudgetAtomic: bigint | null,
-  unanswered: boolean,
+  unanswered: { limits: RouterLimits; project: boolean } | null,
 ): RouterCheck {
   if (sessionBudgetAtomic === 0n) {
     return {
@@ -612,14 +623,13 @@ function spendCheck(
       fix: 'Choose a daily limit with `tenjin config set sessionBudget <usd|none>`.',
     };
   }
-  if (maxAutoSpendAtomic === 0n && unanswered) {
+  if (maxAutoSpendAtomic === 0n && unanswered !== null) {
     return {
       name: 'spend',
       status: 'warn',
       required: false,
-      detail:
-        'the spend limits are not answered yet, so automatic payments are off and every lookup needs approval',
-      fix: 'Answer the spend question: run `tenjin install` in a terminal, or `tenjin config set maxAutoSpend <usd>`.',
+      detail: `the spend limits are not answered yet, so automatic payments are off and every lookup needs approval. Ask the user: ${spendQuestion(unanswered.limits)}`,
+      fix: `Answer the spend question: for a yes, run \`${acceptCommand(unanswered.project)}\`; for other amounts, ${OWN_LIMITS_COMMANDS}; or run \`tenjin install\` in a terminal to choose.`,
     };
   }
   if (maxAutoSpendAtomic === 0n) {

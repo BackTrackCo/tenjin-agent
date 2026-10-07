@@ -26,6 +26,8 @@ import {
   type OfferSpec,
 } from './decision';
 import { FEE_REQUIRED, isFeeRequired, unpaidSentence, type RouteFor } from './fee';
+import { unpaidNotice } from './spend-question';
+import { loadRawConfig } from '../lib/config';
 import { openLookupFooter, type LookupFooter } from './progress';
 import {
   appendPaidRecord,
@@ -247,9 +249,10 @@ export async function runRequestTool(
   // call could not pay, for the reason the payer gave.
   if (isFeeRequired(fresh.decision)) {
     await footer.done('native');
+    const raw = await loadRawConfig(deps.ctx.dataDir).catch(() => ({}));
     return fail(
       'native',
-      unpaidSentence(fresh.freePath ?? FEE_REQUIRED) ?? unpaidSentence(FEE_REQUIRED)!,
+      unpaidNotice(fresh.freePath ?? FEE_REQUIRED, raw) ?? unpaidSentence(FEE_REQUIRED)!,
       { nextStep: 'Tell the user this once, and use your own tools for now.' },
     );
   }

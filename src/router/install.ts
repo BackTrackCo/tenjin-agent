@@ -28,11 +28,18 @@ import { loadRawConfig, type PartialConfig } from '../lib/config';
 import { onPath } from '../lib/skill-wiring';
 import type { WalletDeps, WalletOutcome } from '../commands/install-wallet';
 import type { CommandContext, CommandResult } from '../context';
-import { CHANNEL_DEPOSIT_ATOMIC, ROUTING_FEE_ATOMIC, usd } from './fee';
 import { HOOK_TOOL, hookToolInput, type HookKind } from './hook-tool';
 import { MCP_SERVER_NAME, REQUEST_TOOL } from './names';
 import { probeRouter, type RouterCheck } from './reachability';
 import { ensureStatusLine, type StatusLineMode, type StatusLineResult } from './status-line-wiring';
+import {
+  acceptCommand,
+  limitsUsd,
+  OWN_LIMITS_COMMANDS,
+  ROUTING_FEE_TERMS,
+  shownLimits,
+  spendQuestion,
+} from './spend-question';
 
 /**
  * `tenjin install` for the router product: seven hook entries, one MCP server,
@@ -180,6 +187,11 @@ export interface RouterInstallArgs {
    */
   refresh?: boolean;
   /**
+   * Answer the spend question with the limits it shows, without asking: the
+   * selector's "Use these limits", for an agent running the user's yes.
+   */
+  acceptDefaults?: boolean;
+  /**
    * What to do about Claude Code's `statusLine`. Absent is the default path:
    * write ours when the key is free, and print the composition line when it is
    * not. `compose` wraps the status line already there and appends ours;
@@ -281,6 +293,17 @@ export async function runRouterInstall(
   ctx: CommandContext,
   deps: RouterInstallDeps = {},
 ): Promise<CommandResult> {
+  // `--accept-defaults` is the selector's "Use these limits", answered ahead:
+  // the command an agent runs for the user's yes.
+  if (args.acceptDefaults === true && args.refresh === true) {
+    throw new CliError(
+      'USAGE',
+      '--accept-defaults answers the spend question; --refresh asks none',
+      {
+        fix: 'Drop --refresh: `tenjin install --accept-defaults`.',
+      },
+    );
+  }
   const env = deps.env ?? process.env;
   const home = deps.homeDir ?? homedir();
   if (!isAbsolute(home)) {
@@ -328,7 +351,13 @@ export async function runRouterInstall(
   const humanOutput = ctx.flags.json === true ? false : (deps.isInteractive ?? ctx.io.isTTY);
   const canPrompt = humanOutput && (deps.isInteractive ?? Boolean(process.stdin.isTTY));
   const limits =
-    args.refresh === true ? undefined : canPrompt ? await approveLimits(config, deps) : {};
+    args.refresh === true
+      ? undefined
+      : args.acceptDefaults === true
+        ? shownLimits(config)
+        : canPrompt
+          ? await approveLimits(config, deps)
+          : {};
   const spend = await persistRouterDefaults(ctx.dataDir, args.refresh === true, limits);
   const removedKeysLines =
     spend.removed.length > 0
@@ -399,8 +428,8 @@ export async function runRouterInstall(
   // run did not set.
   const effective = await resolveContextSettings(ctx);
   const approval =
-    !canPrompt && !spend.kept.includes('maxAutoSpend')
-      ? spendApproval(effective.policy)
+    !canPrompt && args.acceptDefaults !== true && !spend.kept.includes('maxAutoSpend')
+      ? spendApproval(config, project)
       : undefined;
   // A warning, never a failure: everything above is written and correct, and
   // the network this machine is on now may not be the one it uses later.
@@ -451,37 +480,42 @@ export async function runRouterInstall(
 
 /** What turns automatic payment on after an install that left it at zero. */
 const AUTO_SPEND_FIX = `tenjin config set maxAutoSpend ${toMoney(ROUTER_DEFAULTS.maxAutoSpend).usd}`;
-const OWN_LIMITS_COMMANDS =
-  '`tenjin config set maxAutoSpend <usd>` and `tenjin config set sessionBudget <usd|none>`';
 const DECLINED =
   'the router then pays for nothing on its own, and the question stays open until `tenjin install` in a terminal or `tenjin config set` answers it';
 
 /** The spend question an install that could not ask hands to its caller. */
 export interface SpendApproval {
-  /** For the agent to put to the user as written. */
+  /** For the agent to put to the user as written: the limits and the routing fee. */
   question: string;
+  /** The limits the question shows, in USD, as the selector shows them. */
+  limits: { maxAutoSpend: string; sessionBudget: string };
+  /** The routing fee's terms, which a yes also approves. */
+  routingFee: string;
   /** What the agent does with each answer. */
   next: string;
-  /** The command for a yes. */
+  /** The one command for a yes: these limits, as the selector's "Use these limits". */
   approve: string;
+  /** The commands for limits of the user's own. */
+  own: string;
 }
 
 /**
  * An agent runs install with `--json` or in a shell with no terminal, so the
- * CLI cannot ask. The agent can: this is the question and what to run for each
- * answer, the same shape as the `request` tool's `needs_input` step. A script
- * or CI ignores it, and the zero holds.
+ * CLI cannot ask. The agent can: this is what the selector would have shown
+ * (the limits and the routing fee) and what to run for each answer, the same
+ * shape as the `request` tool's `needs_input` step. A script or CI ignores
+ * it, and the zero holds.
  */
-function spendApproval(policy: SpendPolicy): SpendApproval {
-  const call = toMoney(ROUTER_DEFAULTS.maxAutoSpend).usd;
-  const daily =
-    policy.sessionBudgetAtomic === null
-      ? 'with no daily limit'
-      : `and $${toMoney(policy.sessionBudgetAtomic.toString()).usd} a day`;
+function spendApproval(config: PartialConfig, project: boolean): SpendApproval {
+  const limits = shownLimits(config);
+  const approve = acceptCommand(project);
   return {
-    question: `May Tenjin pay for tool calls without asking you each time, up to $${call} a call ${daily}?`,
-    next: `Ask the user this question before you change any limit. If they say yes, run \`${AUTO_SPEND_FIX}\`. If they give other amounts, run ${OWN_LIMITS_COMMANDS}. If they say no, run nothing: ${DECLINED}.`,
-    approve: AUTO_SPEND_FIX,
+    question: spendQuestion(limits),
+    limits: limitsUsd(limits),
+    routingFee: ROUTING_FEE_TERMS,
+    next: `Show the user these limits and ask this question before you change any limit. If they say yes, run \`${approve}\`. If they give other amounts, run ${OWN_LIMITS_COMMANDS}. If they say no, run nothing: ${DECLINED}.`,
+    approve,
+    own: OWN_LIMITS_COMMANDS.replaceAll('`', ''),
   };
 }
 
@@ -496,10 +530,7 @@ async function approveLimits(
   config: PartialConfig,
   deps: RouterInstallDeps,
 ): Promise<RouterLimits | undefined> {
-  const shown: RouterLimits = {
-    maxAutoSpend: config.maxAutoSpend ?? ROUTER_DEFAULTS.maxAutoSpend,
-    sessionBudget: config.sessionBudget ?? ROUTER_DEFAULTS.sessionBudget,
-  };
+  const shown = shownLimits(config);
   const askCall = config.maxAutoSpend === undefined;
   const askDay = config.sessionBudget === undefined;
   if (!askCall && !askDay) return undefined;
@@ -507,7 +538,7 @@ async function approveLimits(
     shown.sessionBudget === 'none'
       ? 'no daily limit'
       : `$${toMoney(shown.sessionBudget).usd} a day`;
-  const fee = `\nRouting costs $${usd(ROUTING_FEE_ATOMIC)} a call, paid from channel deposits of up to $${usd(CHANNEL_DEPOSIT_ATOMIC)} that stay yours until spent; each deposit counts against these limits.\nUsing these limits or choosing your own also approves the routing fee.`;
+  const fee = `\n${ROUTING_FEE_TERMS}\nUsing these limits or choosing your own also approves the routing fee.`;
   const choice = await (deps.promptLimits ?? promptLimits)(
     `The router pays for tool calls without asking, up to:\n  $${toMoney(shown.maxAutoSpend).usd} a call, ${daily}${fee}`,
   );
@@ -827,7 +858,7 @@ function lines(
           warn('Automatic payments are off until the user approves a spend limit'),
           `  Ask the user: ${s.approval.question}`,
           `  Yes: ${s.approval.approve}`,
-          `  Other amounts: ${OWN_LIMITS_COMMANDS.replaceAll('`', '')}`,
+          `  Other amounts: ${s.approval.own}`,
           `  No: run nothing, ${DECLINED.replaceAll('`', '')}`,
         ]
       : s.policy.maxAutoSpendAtomic === 0n

@@ -22,7 +22,8 @@ import {
 } from './context';
 import { storeSpecs } from './specs';
 import { requestDecision, ROUTER_PATH, type HookDecision } from './decision';
-import { FEE_REQUIRED, firstNoticeFor, isFeeRequired, unpaidSentence, type RouteFor } from './fee';
+import { FEE_REQUIRED, firstNoticeFor, isFeeRequired, type RouteFor } from './fee';
+import { unpaidNotice } from './spend-question';
 import { readsAsEmptyPage, savedPdfOf } from './fetch-result';
 import { GATE_TIMEOUT_MS } from './gate';
 import {
@@ -1502,7 +1503,7 @@ async function decide(
         (outcome.status === 'decided' && isFeeRequired(outcome.decision)
           ? FEE_REQUIRED
           : undefined));
-  if (why !== undefined) await tellOnce(deps, sessionId, why, now);
+  if (why !== undefined) await tellOnce(deps, sessionId, why, now, config);
   if (outcome.status === 'skipped') {
     warn(`tenjin hook: the routing fee was not paid (${outcome.why}), so the native tool runs`);
     return null;
@@ -1531,8 +1532,14 @@ async function decide(
  * routing fee for a reason the user can fix: the reason and the fix, in the
  * hook's `systemMessage`. Never on every call, and never in place of routing.
  */
-async function tellOnce(deps: HookDeps, sessionId: string, why: string, now: number) {
-  const sentence = unpaidSentence(why);
+async function tellOnce(
+  deps: HookDeps,
+  sessionId: string,
+  why: string,
+  now: number,
+  config: PartialConfig,
+) {
+  const sentence = unpaidNotice(why, config);
   if (sentence === null || deps.notice === undefined) return;
   if (await firstNoticeFor(deps.dataDir, sessionId, now).catch(() => false)) deps.notice(sentence);
 }

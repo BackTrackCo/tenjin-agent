@@ -17,11 +17,14 @@ put them.
 When `tenjin install` cannot ask (`--json`, or a shell with no terminal, which
 is how an agent runs it), it writes no spend limit, the same as cancelling at
 the question in a terminal, and sets up everything else. Its output holds the
-question for the agent to ask you and the command for each answer
-(`spend.approval` in `--json`). The agent runs `tenjin config set maxAutoSpend
-0.25` only if you say yes. Until someone answers, the router pays for nothing
-on its own, and `tenjin doctor` shows the open question as a warning with the
-way to answer it instead of failing on it, so its network checks still print.
+question the terminal selector would have asked, with the same limits and
+routing-fee terms, and the command for each answer (`spend.approval` in
+`--json`). For a yes the agent runs the new `tenjin install --accept-defaults`,
+which writes the limits shown, as the selector's "Use these limits" does.
+Until someone answers, the router pays for nothing on its own. `tenjin doctor`
+shows the open question as a warning instead of failing on it, so its network
+checks still print, and the first unpaid routing call in a session shows the
+same question.
 
 When a routing call cannot reach the router (DNS, TLS, a refused or timed-out
 connection, a proxy refusing the tunnel), every hook leg skips the router for

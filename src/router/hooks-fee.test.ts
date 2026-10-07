@@ -265,6 +265,27 @@ describe('the hook legs and the routing fee', () => {
     ]);
   });
 
+  it('puts the spend question and its one-step yes to a machine whose limits are unanswered', async () => {
+    // What an agent-run install leaves: no limit in the file, so the code default's zero holds.
+    await writeFile(join(dir, 'config.json'), '{}');
+    const fake = new FakeRouter();
+    fake.body = OFFER;
+    const p = payer(fake, {
+      policy: async () => ({
+        maxAutoSpendAtomic: 0n,
+        sessionBudgetAtomic: 5_000_000n,
+        allowlistCreators: [],
+      }),
+    });
+    const answer = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
+    const notice = systemMessageOf(answer);
+    expect(notice).toContain('the spend limits are not answered');
+    expect(notice).toContain('up to $0.25 a call and $5 a day?');
+    expect(notice).toContain('Routing costs $0.003 a call');
+    expect(notice).toContain('`tenjin install --accept-defaults`');
+    expect(fake.paidRequests()).toBe(0);
+  });
+
   it('takes the free path when the payment fails, and names doctor', async () => {
     const fake = new FakeRouter();
     const p = payer(fake);
