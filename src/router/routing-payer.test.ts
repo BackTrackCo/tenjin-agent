@@ -113,6 +113,35 @@ describe('RoutingPayer', () => {
     ]);
   });
 
+  it('pays no voucher from a funded channel once the per-call limit is below the fee', async () => {
+    const router = new FakeRouter();
+    let maxAutoSpendAtomic = 250_000n;
+    const p = payer(router, {
+      policy: async () => ({ ...TEST_POLICY, maxAutoSpendAtomic }),
+    });
+    expect((await routeOnce(p, router)).status).toBe('decided');
+    expect(router.settledFees).toBe(1);
+    // The user turns automatic payment off: the channel still holds the deposit.
+    maxAutoSpendAtomic = 0n;
+    let unlocks = 0;
+    const after = await routeOnce(
+      payer(router, {
+        policy: async () => ({ ...TEST_POLICY, maxAutoSpendAtomic }),
+        getSigner: async () => {
+          unlocks += 1;
+          throw new Error('not reached');
+        },
+      }),
+      router,
+    );
+    expect(tookFreePath(after, router)).toBe('limit_below_deposit');
+    expect(router.settledFees).toBe(1);
+    expect(unlocks).toBe(0);
+    // The same payer, too.
+    expect(tookFreePath(await routeOnce(p, router), router)).toBe('limit_below_deposit');
+    expect(router.settledFees).toBe(1);
+  });
+
   it('pays nothing to a 402 asking more than the approved fee', async () => {
     const router = new FakeRouter({ amount: '30000' });
     expect(tookFreePath(await routeOnce(payer(router), router), router)).toBe('payment_failed');

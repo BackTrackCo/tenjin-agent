@@ -251,6 +251,13 @@ export class RoutingPayer {
       call.answered = true;
       if (asked.status !== 402) return asked;
       try {
+        // EVERY FEE IS AN AUTOMATIC PAYMENT under the per-call limit, a voucher
+        // from a channel already funded included: a limit below the fee (a 0
+        // the user set, or the default 0 nobody has answered) pays nothing,
+        // before the wallet is even unlocked.
+        if ((await this.deps.policy()).maxAutoSpendAtomic < ROUTING_FEE_ATOMIC) {
+          throw new RouteSkipped('limit_below_deposit');
+        }
         call.channel = this.channelFor(await this.signer());
         if (until - this.now() <= 0) throw new RouteSkipped('busy');
       } catch (err) {
