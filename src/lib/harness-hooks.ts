@@ -7,6 +7,8 @@ import { HARNESS_MS } from '../hooks/constants';
 import { readPid, readToken } from '../hooks/shim';
 import { writeFileAtomic } from './atomic-json';
 import { hooksDir, shimBundlePath } from './paths';
+import { HOOK_TOOL } from '../router/hook-tool';
+import { MCP_SERVER_NAME } from '../router/names';
 
 /**
  * Where `tenjin install` writes a harness's hook entries, and the only place
@@ -31,7 +33,8 @@ import { hooksDir, shimBundlePath } from './paths';
  *
  * OWNERSHIP IS ONE PREDICATE, {@link ownsHookEntry}, used by the writer, by
  * `uninstall` and by `doctor`. A handler is ours when its `command` names a
- * file under our hooks dir, or when its `url` is the loopback hook route.
+ * file under our hooks dir, when its `url` is the loopback hook route, or when
+ * it is an `mcp_tool` call to the router server's `hook` tool.
  */
 
 /** Every basename this CLI puts in the hooks dir. */
@@ -151,15 +154,19 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 /**
  * Is this handler ours?
  *
- * TWO SHAPES, because there are two transports. A `command` handler is ours
- * when it names one of our filenames, or any path under this profile's hooks
- * dir: the filename half recognizes an install whose data dir has since moved,
+ * An `mcp_tool` handler is ours when it calls the router server's `hook` tool,
+ * the entries `tenjin install` writes now. Before them, two shapes for two
+ * transports: a `command` handler is ours when it names one of our filenames,
+ * or any path under this profile's hooks dir: the filename half recognizes an install whose data dir has since moved,
  * the directory half a file we no longer have a name for. An `http` handler is
  * ours when its URL is the loopback hook route on any port: the port moves with
  * every bind, so matching on it would strand yesterday's entry in the file.
  */
 function ownsHandler(handler: unknown, dataDir: string): boolean {
   if (!isPlainObject(handler)) return false;
+  if (handler.type === 'mcp_tool') {
+    return handler.server === MCP_SERVER_NAME && handler.tool === HOOK_TOOL;
+  }
   const url = handler.url;
   if (typeof url === 'string' && LOOP_URL_RE.test(url)) return true;
   const command = handler.command;

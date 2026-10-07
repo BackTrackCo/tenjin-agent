@@ -25,6 +25,7 @@ import {
   type DecisionDiagnostics,
   type OfferSpec,
 } from './decision';
+import { FEE_REQUIRED, isFeeRequired, unpaidSentence, type RouteFor } from './fee';
 import { openLookupFooter, type LookupFooter } from './progress';
 import {
   appendPaidRecord,
@@ -103,6 +104,9 @@ export interface RequestToolDeps {
   cwd?: string;
   /** Clock seam for a saved file's name. */
   now?: () => number;
+  /** The paid path, passed by `tenjin mcp`. Absent, the routing call takes
+   *  the free path. */
+  route?: RouteFor;
   /** Test seam for the media download; production pins each connection to
    *  the address it validated. */
   mediaTransport?: MediaTransport;
@@ -214,11 +218,22 @@ export async function runRequestTool(
   // with no id the gate picks a service and answers with its spec. An id the
   // backend does not know is its own plain note, and the pick still runs from
   // the query.
+  // ON THE PAID PATH the payer pays the routing fee with the stock x402
+  // client, and a call it cannot pay takes the free path.
+  const route = (await deps.route?.(settings.baseUrl)) ?? null;
   const fresh = await requestDecision(
     'tool',
     { query, ...(id !== undefined ? { id } : {}) },
-    decisionDeps,
+    { ...decisionDeps, ...(route !== null ? { route } : {}) },
   );
+  if (fresh.status === 'skipped') {
+    await footer.done('native');
+    return fail(
+      'native',
+      `${unpaidSentence(fresh.why) ?? ''} This call ran out of time before the free path answered, so nothing was routed or paid.`.trim(),
+      { nextStep: 'Use your own tools for this one.' },
+    );
+  }
   if (fresh.status === 'failed') {
     await footer.done('failed');
     return fail('failed', fresh.reason, {
@@ -226,6 +241,18 @@ export async function runRequestTool(
     });
   }
   const { decision, note } = fresh.decision;
+
+  // THE FREE PATH NO LONGER ROUTES. The server's line says to update the CLI,
+  // which is wrong for this one: what stops routing here is a routing fee this
+  // call could not pay, for the reason the payer gave.
+  if (isFeeRequired(fresh.decision)) {
+    await footer.done('native');
+    return fail(
+      'native',
+      unpaidSentence(fresh.freePath ?? FEE_REQUIRED) ?? unpaidSentence(FEE_REQUIRED)!,
+      { nextStep: 'Tell the user this once, and use your own tools for now.' },
+    );
+  }
 
   // THE PICKED SERVICE'S SPEC, for a query with no id, kept like a hook's and
   // shown with the skeleton of the next call, `request({id, input})`. Nothing

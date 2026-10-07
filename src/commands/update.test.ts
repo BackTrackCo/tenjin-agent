@@ -141,6 +141,8 @@ describe('runUpdate', () => {
       refresh: { profiles: [dir], failed: [] },
     });
     expect(result.humanLines?.join(' ')).toContain('0.1.0-alpha.6 -> 0.1.0-alpha.7');
+    // An install whose limits were approved before the fee existed hears of it here.
+    expect(result.humanLines?.join(' ')).toContain('Routing costs $0.003 a call');
   });
 
   // The live-registry regression this command has to survive: `alpha` sat on

@@ -884,12 +884,15 @@ export async function inspectFreeVerbRules(
   };
 }
 
+export type PermissionList = 'allow' | 'deny';
+
 export interface AllowlistInspection {
   path: string;
   /** The exact bytes read, so the commit can prove nothing changed underneath it. */
   raw: string | null;
   settings: Record<string, unknown>;
   permissions: Record<string, unknown>;
+  /** The entries of the list read: `permissions.allow`, or `permissions.deny` when asked. */
   allow: unknown[];
   added: string[];
   alreadyPresent: string[];
@@ -911,11 +914,13 @@ async function inspectAllowlist(
  * The same read, for any settings file and any rule list. Every refusal this
  * module can reach is decided here, so a second writer cannot accidentally
  * skip the symlink resolution, the shape checks or the bytes a commit has to
- * compare against. `tenjin install`'s router rule goes through it.
+ * compare against. `tenjin install`'s router rules go through it, its deny
+ * rule included.
  */
 export async function inspectAllowlistAt(
   declaredPath: string,
   rules: readonly string[],
+  list: PermissionList = 'allow',
 ): Promise<AllowlistInspection | { result: PermissionsResult }> {
   const refuse = (
     p: string,
@@ -995,12 +1000,12 @@ export async function inspectAllowlistAt(
     );
   }
   const permissions: Record<string, unknown> = permissionsValue ?? {};
-  const allowValue = permissions.allow;
+  const allowValue = permissions[list];
   if (allowValue !== undefined && !Array.isArray(allowValue)) {
     return refuse(
       path,
       'unexpected-shape',
-      `${path} has a "permissions.allow" key that is not an array; it was left exactly as it is.`,
+      `${path} has a "permissions.${list}" key that is not an array; it was left exactly as it is.`,
     );
   }
   const allow: unknown[] = allowValue ?? [];
@@ -1020,8 +1025,8 @@ export interface AppendAllowlistResult {
 }
 
 /**
- * Append rules to `permissions.allow` in one settings file, keeping every other
- * key. Shares {@link inspectAllowlistAt}'s refusals and the changed-since-read
+ * Append rules to `permissions.allow` (or `permissions.deny`) in one settings
+ * file, keeping every other key. Shares {@link inspectAllowlistAt}'s refusals and the changed-since-read
  * compare, so a file this module will not touch is a file no writer here
  * touches: a symlink is resolved before the rename, an unparseable file is left
  * exactly as it is, and a write that landed underneath is refused rather than
@@ -1030,8 +1035,9 @@ export interface AppendAllowlistResult {
 export async function appendAllowlistRules(
   declaredPath: string,
   rules: readonly string[],
+  list: PermissionList = 'allow',
 ): Promise<AppendAllowlistResult> {
-  const found = await inspectAllowlistAt(declaredPath, rules);
+  const found = await inspectAllowlistAt(declaredPath, rules, list);
   if ('result' in found) {
     const result = found.result;
     return {
@@ -1044,7 +1050,7 @@ export async function appendAllowlistRules(
   }
   const { path, raw, settings, permissions, allow, added, alreadyPresent } = found;
   if (added.length === 0) return { path, added: [], alreadyPresent };
-  const next = { ...settings, permissions: { ...permissions, allow: [...allow, ...added] } };
+  const next = { ...settings, permissions: { ...permissions, [list]: [...allow, ...added] } };
   const current = await readFile(path, 'utf8').catch(() => null);
   if (current !== raw) {
     return {

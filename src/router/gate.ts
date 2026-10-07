@@ -9,9 +9,12 @@
  */
 
 /**
- * The hook's whole budget is 5 s (the timeout `install` writes). Stdin waits up
- * to 1 s of it, so the decision gets 3.5 s and the two together still leave
- * 500 ms for node's boot and the transcript read; `wire.test.ts` pins the sum.
+ * The hook's whole budget is 5 s (`ROUTE_HOOK_TIMEOUT_SECONDS`, the timeout
+ * `install` writes for each routing leg), and the decision gets 3.5 s of it.
+ * Inside `tenjin mcp` those 3.5 s hold the paid path too: the 402, the SDK's
+ * chain read, the wallet read before a deposit and the paid request. The
+ * command form (`tenjin hook`, always free) waits up to 1 s for stdin first. Either way 500 ms are left for startup, the
+ * transcript read and the reply; `wire.test.ts` pins the sums.
  * The expected wait is about 1 s: the backend answers on the gate question and
  * binds afterwards.
  *

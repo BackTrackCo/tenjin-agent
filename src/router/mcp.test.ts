@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -6,7 +6,11 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { testWalletProvider } from '../lib/read-test-utils';
 import type { SpendAuthorization, SpendAuthorizer } from '../lib/wallet';
+import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
+import { FakeRouter, payerDeps } from './fee-test-utils';
+import { hookToolInput } from './hook-tool';
 import { buildRouterMcpServer, MAX_RESULT_SIZE_CHARS, MAX_RESULT_SIZE_KEY } from './mcp';
+import { RoutingPayer } from './routing-payer';
 
 /** The envelope a call returned: the JSON text block after the summary line. */
 function envelopeOf(called: Record<string, unknown>): unknown {
@@ -87,7 +91,7 @@ describe('the router MCP server', () => {
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
     try {
       const tools = await client.listTools();
-      expect(tools.tools.map((t) => t.name)).toEqual(['request']);
+      expect(tools.tools.map((t) => t.name)).toEqual(['request', 'hook']);
       // The harness reads its inline-result threshold from the listed tool.
       expect(tools.tools[0]!._meta).toEqual({
         [MAX_RESULT_SIZE_KEY]: MAX_RESULT_SIZE_CHARS,
@@ -120,6 +124,253 @@ describe('the router MCP server', () => {
     });
     // No wallet exists under this data dir, so a background unlock would throw.
     await expect(server.close()).resolves.toBeUndefined();
+  });
+});
+
+/**
+ * THE HOOK ENTRIES' TOOL. Claude Code substitutes the event's fields into the
+ * entry's `input` as strings (objects as JSON text, absent fields empty), so
+ * these calls send exactly that shape.
+ */
+describe('the hook tool', () => {
+  /** The `input` Claude Code would send for `kind`, from one harness event. */
+  function substituted(kind: Parameters<typeof hookToolInput>[0], event: Record<string, unknown>) {
+    return Object.fromEntries(
+      Object.entries(hookToolInput(kind)).map(([key, value]) => {
+        const path = /^\$\{(.+)\}$/.exec(value)?.[1];
+        if (path === undefined) return [key, value];
+        const field = event[path];
+        return [
+          key,
+          field === undefined ? '' : typeof field === 'string' ? field : JSON.stringify(field),
+        ];
+      }),
+    );
+  }
+
+  async function connect(server: ReturnType<typeof buildRouterMcpServer>) {
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: 'test', version: '0.0.0' });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    return client;
+  }
+
+  /** A home laid out as Claude Code keeps it, with `session`'s transcript in it. */
+  async function home(session: string): Promise<{ homeDir: string; transcript: string }> {
+    const homeDir = join(dir, 'home');
+    const project = join(homeDir, '.claude', 'projects', '-repo');
+    await mkdir(project, { recursive: true });
+    const transcript = join(project, `${session}.jsonl`);
+    await writeFile(transcript, '');
+    return { homeDir: await realpath(homeDir), transcript: await realpath(transcript) };
+  }
+
+  const promptEvent = (session: string, transcript: string) => ({
+    hook_event_name: 'UserPromptSubmit',
+    session_id: session,
+    transcript_path: transcript,
+    cwd: dir,
+    prompt: 'what is the current price of ETH in USD',
+  });
+
+  it('runs the prompt leg in this process and answers in the hook format', async () => {
+    const { homeDir, transcript } = await home('sess-hook');
+    const log: string[] = [];
+    const offer = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      log.push(`POST ${new URL(new Request(input, init).url).pathname}`);
+      return Response.json({
+        schemaVersion: 1,
+        routerVersion: 'test',
+        decision: {
+          action: 'execute',
+          id: 'k3f9-abcd',
+          capabilityId: 'cmc-quote',
+          category: 'live price',
+          provider: 'CoinMarketCap',
+          capabilityDescription: 'live crypto quotes',
+          endpoint: 'https://example.test/quote',
+          providerPriceAtomic: '10000',
+          usage: 'the coin and currency',
+          hint: 'CoinMarketCap fits this: live crypto quotes. Call request({query: "ETH in USD", id: "k3f9-abcd"}) alone and wait for its result.',
+        },
+      });
+    }) as typeof fetch;
+    const server = buildRouterMcpServer({
+      dataDir: dir,
+      homeDir,
+      handlerDeps: { cwd: dir, signer: await testWalletProvider().getSigner() },
+      hookDeps: { baseUrl: 'https://router.test', fetchImpl: offer, warn: () => undefined },
+    });
+    const client = await connect(server);
+    try {
+      const called = await client.callTool({
+        name: 'hook',
+        arguments: substituted('prompt', promptEvent('sess-hook', transcript)),
+      });
+      const text = (called.content as { text: string }[])[0]!.text;
+      // No payer in this server, so the free path ran.
+      expect(log).toEqual(['POST /api/x402-router']);
+      expect(JSON.parse(text)).toMatchObject({
+        hookSpecificOutput: {
+          hookEventName: 'UserPromptSubmit',
+          additionalContext: expect.stringContaining('CoinMarketCap fits this'),
+        },
+      });
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it("tells the user once, in the hook's systemMessage, when the fee cannot be paid", async () => {
+    const { homeDir, transcript } = await home('sess-told');
+    // The server takes only paid calls, and this server has no payer.
+    const feeRequired = (async () =>
+      Response.json({
+        schemaVersion: 1,
+        routerVersion: 'test',
+        decision: {
+          action: 'native',
+          diagnostics: {
+            reasonCode: 'fee_required',
+            stage: 'capability',
+            missing: [],
+            nextAction: 'native',
+          },
+        },
+      })) as typeof fetch;
+    const server = buildRouterMcpServer({
+      dataDir: dir,
+      homeDir,
+      handlerDeps: { cwd: dir, signer: await testWalletProvider().getSigner() },
+      hookDeps: { baseUrl: 'https://router.test', fetchImpl: feeRequired, warn: () => undefined },
+    });
+    const client = await connect(server);
+    const call = async () =>
+      (
+        (
+          await client.callTool({
+            name: 'hook',
+            arguments: substituted('prompt', promptEvent('sess-told', transcript)),
+          })
+        ).content as { text: string }[]
+      )[0]!.text;
+    try {
+      expect(JSON.parse(await call())).toEqual({
+        systemMessage: expect.stringContaining('`tenjin doctor`'),
+      });
+      expect(await call()).toBe('');
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it("pays the routing fee through this process's payer", async () => {
+    const { homeDir, transcript } = await home('sess-paid');
+    const fake = new FakeRouter();
+    const wallet = privateKeyToAccount(generatePrivateKey());
+    const payer = new RoutingPayer(payerDeps(fake, dir, wallet));
+    const server = buildRouterMcpServer({
+      dataDir: dir,
+      homeDir,
+      payer,
+      handlerDeps: { cwd: dir, signer: await testWalletProvider().getSigner() },
+      hookDeps: { baseUrl: 'https://router.test', fetchImpl: fake.fetch, warn: () => undefined },
+    });
+    const client = await connect(server);
+    try {
+      await client.callTool({
+        name: 'hook',
+        arguments: substituted('prompt', promptEvent('sess-paid', transcript)),
+      });
+      expect(fake.log).toEqual([
+        'POST /api/x402-router/route unpaid',
+        'POST /api/x402-router/route paid',
+      ]);
+      expect(fake.deposits).toBe(1);
+      expect(fake.settledFees).toBe(1);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it("routes and pays a session's first prompt, before Claude Code writes its transcript", async () => {
+    const { homeDir, transcript } = await home('sess-first');
+    await rm(transcript);
+    const fake = new FakeRouter();
+    const payer = new RoutingPayer(payerDeps(fake, dir, privateKeyToAccount(generatePrivateKey())));
+    const server = buildRouterMcpServer({
+      dataDir: dir,
+      homeDir,
+      payer,
+      handlerDeps: { cwd: dir, signer: await testWalletProvider().getSigner() },
+      hookDeps: { baseUrl: 'https://router.test', fetchImpl: fake.fetch, warn: () => undefined },
+    });
+    const client = await connect(server);
+    try {
+      await client.callTool({
+        name: 'hook',
+        arguments: substituted('prompt', promptEvent('sess-first', transcript)),
+      });
+      expect(fake.settledFees).toBe(1);
+      // The same missing name outside the projects directory sends nothing.
+      const sent = fake.log.length;
+      await client.callTool({
+        name: 'hook',
+        arguments: substituted('prompt', promptEvent('sess-first', join(dir, 'sess-first.jsonl'))),
+      });
+      expect(fake.log).toHaveLength(sent);
+      expect(fake.settledFees).toBe(1);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it('reads, sends and pays nothing for a forged path, and routes a new session', async () => {
+    const { homeDir, transcript } = await home('sess-real');
+    const fake = new FakeRouter();
+    const wallet = privateKeyToAccount(generatePrivateKey());
+    const payer = new RoutingPayer(payerDeps(fake, dir, wallet));
+    const server = buildRouterMcpServer({
+      dataDir: dir,
+      homeDir,
+      payer,
+      handlerDeps: { cwd: dir, signer: await testWalletProvider().getSigner() },
+      hookDeps: { baseUrl: 'https://router.test', fetchImpl: fake.fetch, warn: () => undefined },
+    });
+    const client = await connect(server);
+    const forged = join(dir, 'config.json');
+    const text = async (session: string, path: string) =>
+      (
+        (
+          await client.callTool({
+            name: 'hook',
+            arguments: substituted('prompt', promptEvent(session, path)),
+          })
+        ).content as { text: string }[]
+      )[0]!.text;
+    try {
+      expect(await text('sess-real', forged)).toBe('');
+      expect(fake.log).toEqual([]);
+      await text('sess-real', transcript);
+      expect(fake.settledFees).toBe(1);
+      // After `/clear` the same process serves a new session id: it routes.
+      const other = join(homeDir, '.claude', 'projects', '-repo', 'sess-other.jsonl');
+      await writeFile(other, '');
+      await text('sess-other', other);
+      expect(fake.settledFees).toBe(2);
+      // A path that is not that session's own transcript still sends nothing.
+      const sent = fake.log.length;
+      expect(await text('sess-other', transcript)).toBe('');
+      expect(fake.log).toHaveLength(sent);
+      expect(fake.settledFees).toBe(2);
+    } finally {
+      await client.close();
+      await server.close();
+    }
   });
 });
 
