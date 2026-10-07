@@ -321,18 +321,14 @@ export async function runRouterInstall(
   }
   // The shelf install's gate: a refresh, `--json`, or a run with no terminal on
   // either side asks nothing. An agent's install is that run: its shell has no
-  // terminal. Install then fills only the limit that narrows spending (the
-  // daily one) and never `maxAutoSpend`, and its output hands the question to
-  // whoever ran it (see {@link spendApproval}). Until the user answers, the bare
-  // CLI's zero holds.
+  // terminal. Install then writes no spend limit at all, the same state a
+  // person cancelling at the selector leaves, and its output hands the question
+  // to whoever ran it (see {@link spendApproval}). Until someone answers, the
+  // bare CLI's zero holds and doctor reports the question as pending.
   const humanOutput = ctx.flags.json === true ? false : (deps.isInteractive ?? ctx.io.isTTY);
   const canPrompt = humanOutput && (deps.isInteractive ?? Boolean(process.stdin.isTTY));
   const limits =
-    args.refresh === true
-      ? undefined
-      : canPrompt
-        ? await approveLimits(config, deps)
-        : { sessionBudget: ROUTER_DEFAULTS.sessionBudget };
+    args.refresh === true ? undefined : canPrompt ? await approveLimits(config, deps) : {};
   const spend = await persistRouterDefaults(ctx.dataDir, args.refresh === true, limits);
   const removedKeysLines =
     spend.removed.length > 0
@@ -457,7 +453,8 @@ export async function runRouterInstall(
 const AUTO_SPEND_FIX = `tenjin config set maxAutoSpend ${toMoney(ROUTER_DEFAULTS.maxAutoSpend).usd}`;
 const OWN_LIMITS_COMMANDS =
   '`tenjin config set maxAutoSpend <usd>` and `tenjin config set sessionBudget <usd|none>`';
-const DECLINED = 'the router then pays for nothing on its own';
+const DECLINED =
+  'the router then pays for nothing on its own, and the question stays open until `tenjin install` in a terminal or `tenjin config set` answers it';
 
 /** The spend question an install that could not ask hands to its caller. */
 export interface SpendApproval {
@@ -831,7 +828,7 @@ function lines(
           `  Ask the user: ${s.approval.question}`,
           `  Yes: ${s.approval.approve}`,
           `  Other amounts: ${OWN_LIMITS_COMMANDS.replaceAll('`', '')}`,
-          `  No: run nothing, ${DECLINED}`,
+          `  No: run nothing, ${DECLINED.replaceAll('`', '')}`,
         ]
       : s.policy.maxAutoSpendAtomic === 0n
         ? [

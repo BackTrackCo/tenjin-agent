@@ -15,14 +15,16 @@ was set. A proxy that asks for credentials (407) gets a fix that says where to
 put them.
 
 When `tenjin install` cannot ask (`--json`, or a shell with no terminal, which
-is how an agent runs it), it no longer writes `maxAutoSpend`. Its output holds
-the question for the agent to ask you and the command for each answer
+is how an agent runs it), it writes no spend limit, the same as cancelling at
+the question in a terminal, and sets up everything else. Its output holds the
+question for the agent to ask you and the command for each answer
 (`spend.approval` in `--json`). The agent runs `tenjin config set maxAutoSpend
-0.25` only if you say yes. Until then, the router pays for nothing on its own.
-The daily limit is still filled, because it can only narrow spending.
+0.25` only if you say yes. Until someone answers, the router pays for nothing
+on its own, and `tenjin doctor` shows the open question as a warning with the
+way to answer it instead of failing on it, so its network checks still print.
 
 The install report no longer names a `hooksDir` for the router's hook entries,
-which are plain commands and use no directory. The README keeps one sentence on
+which use no directory. The README keeps one sentence on
 what the router sends and links to `docs/agent-permissions.md`, which lists all
 of it, including the questions your agent asks you and your answers. The paid
 lookup files and the `alpha.18` `~/.mcp.json` fix move to the docs too.

@@ -4,6 +4,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { FileClientChannelStorage } from '@x402/evm/batch-settlement/client/file-storage';
+import { loadRawConfig } from '../lib/config';
 import { CliError } from '../lib/errors';
 import { inspectHooksFile, ownsHookEntry, pruneOurHandlers } from '../lib/harness-hooks';
 import { toMoney } from '../lib/money';
@@ -110,7 +111,13 @@ export async function runRouterDoctor(
       deps.homeDir ?? homedir(),
     ),
   );
-  checks.push(spendCheck(settings.policy.maxAutoSpendAtomic, settings.policy.sessionBudgetAtomic));
+  checks.push(
+    spendCheck(
+      settings.policy.maxAutoSpendAtomic,
+      settings.policy.sessionBudgetAtomic,
+      (await loadRawConfig(ctx.dataDir)).maxAutoSpend === undefined,
+    ),
+  );
   checks.push(experimentalCheck(settings.experimentalBazaar));
   checks.push(await routingFeeCheck(ctx, settings, deps.fetchImpl));
   checks.push(...(await walletCheck(ctx)));
@@ -562,7 +569,18 @@ function experimentalCheck(bazaar: boolean): RouterCheck {
   };
 }
 
-function spendCheck(maxAutoSpendAtomic: bigint, sessionBudgetAtomic: bigint | null): RouterCheck {
+/**
+ * `unanswered` is a config file that names no `maxAutoSpend`: the state an
+ * install that could not ask leaves, the same as a cancel at its selector. The
+ * code default's zero holds, and that is a question still open, not a broken
+ * machine, so it warns and the checks after it (the router probe above all)
+ * still print. A 0 the user wrote is their answer and stays a failure.
+ */
+function spendCheck(
+  maxAutoSpendAtomic: bigint,
+  sessionBudgetAtomic: bigint | null,
+  unanswered: boolean,
+): RouterCheck {
   if (sessionBudgetAtomic === 0n) {
     return {
       name: 'spend',
@@ -570,6 +588,16 @@ function spendCheck(maxAutoSpendAtomic: bigint, sessionBudgetAtomic: bigint | nu
       required: true,
       detail: 'The daily limit is 0, so positive payments are refused even with --yes.',
       fix: 'Choose a daily limit with `tenjin config set sessionBudget <usd|none>`.',
+    };
+  }
+  if (maxAutoSpendAtomic === 0n && unanswered) {
+    return {
+      name: 'spend',
+      status: 'warn',
+      required: false,
+      detail:
+        'the spend limits are not answered yet, so automatic payments are off and every lookup needs approval',
+      fix: 'Answer the spend question: run `tenjin install` in a terminal, or `tenjin config set maxAutoSpend <usd>`.',
     };
   }
   if (maxAutoSpendAtomic === 0n) {

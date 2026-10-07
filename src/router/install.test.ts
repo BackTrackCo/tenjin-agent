@@ -141,7 +141,7 @@ const ASK_LINES = [
   '  Ask the user: May Tenjin pay for tool calls without asking you each time, up to $0.25 a call and $5 a day?',
   '  Yes: tenjin config set maxAutoSpend 0.25',
   '  Other amounts: tenjin config set maxAutoSpend <usd> and tenjin config set sessionBudget <usd|none>',
-  '  No: run nothing, the router then pays for nothing on its own',
+  '  No: run nothing, the router then pays for nothing on its own, and the question stays open until tenjin install in a terminal or tenjin config set answers it',
 ];
 
 function deps(over: Record<string, unknown> = {}) {
@@ -175,18 +175,18 @@ describe('tenjin install', () => {
     expect(JSON.stringify(result.data)).not.toContain('daemon');
   });
 
-  it('with nobody to approve, fills only the daily limit and keeps automatic spend at zero', async () => {
+  it('with nobody to approve, writes no limit and keeps automatic spend at zero', async () => {
     await writeFile(join(data, 'config.json'), JSON.stringify({ confirm: 'always' }));
     const result = await runRouterInstall({}, ctx(), deps());
     const config = await loadRawConfig(data);
     expect(config.maxAutoSpend).toBeUndefined();
-    expect(config.sessionBudget).toBe('5000000');
+    expect(config.sessionBudget).toBeUndefined();
     expect(config.confirm).toBeUndefined();
     expect(config.bazaarPay).toBeUndefined();
     expect(result.data).toMatchObject({
       spend: {
         removed: ['confirm'],
-        set: ['sessionBudget'],
+        set: [],
         kept: [],
         effective: { maxAutoSpend: '0', sessionBudget: '5' },
         approval: {
@@ -593,25 +593,26 @@ describe('install asks a person to approve the spend limits', () => {
   it.each([
     ['a non-interactive run', () => humanCtx(), false],
     ['--json', () => ctx(), true],
-  ])('%s asks nothing and writes no automatic spend', async (_name, makeCtx, isInteractive) => {
+  ])('%s asks nothing and writes no spend limit', async (_name, makeCtx, isInteractive) => {
     const promptLimits = vi.fn(async () => 'own' as const);
     const result = await runRouterInstall({}, makeCtx(), deps({ isInteractive, promptLimits }));
     expect(promptLimits).not.toHaveBeenCalled();
-    expect(await loadRawConfig(data)).toEqual({ sessionBudget: '5000000' });
+    // The state a cancel at the selector leaves: both keys absent, no literal 0.
+    const config = await loadRawConfig(data);
+    expect(config).not.toHaveProperty('maxAutoSpend');
+    expect(config).not.toHaveProperty('sessionBudget');
+    expect(result.data).toMatchObject({ spend: { set: [], kept: [] } });
     // An agent's shell has no terminal: the question goes to the agent instead.
     expect(result.humanLines).toEqual(expect.arrayContaining(ASK_LINES));
+    // The rest of the install completes as it would after a yes.
+    expect(onlyInstall(result)).toMatchObject({ mcp: { registered: true } });
   });
 
   it('a non-interactive run keeps a per-call limit the file already names', async () => {
     await writeFile(join(data, 'config.json'), JSON.stringify({ maxAutoSpend: '100000' }));
     const result = await runRouterInstall({}, ctx(), deps());
-    expect(await loadRawConfig(data)).toEqual({
-      maxAutoSpend: '100000',
-      sessionBudget: '5000000',
-    });
-    expect(result.data).toMatchObject({
-      spend: { set: ['sessionBudget'], kept: ['maxAutoSpend'] },
-    });
+    expect(await loadRawConfig(data)).toEqual({ maxAutoSpend: '100000' });
+    expect(result.data).toMatchObject({ spend: { set: [], kept: ['maxAutoSpend'] } });
     expect(result.data).not.toHaveProperty('spend.approval');
   });
 
@@ -929,6 +930,52 @@ describe('the doctor this release registers', () => {
     for (const gone of ['tenjin daemon', 'tenjin search', 'tenjin publish', 'tenjin hooks']) {
       expect(fixes).not.toContain(gone);
     }
+  });
+
+  it.each([
+    [
+      'an agent-run install that left the limits unanswered',
+      undefined,
+      { status: 'warn', required: false },
+    ],
+    ['a 0 the user set', '0', { status: 'fail', required: true }],
+  ])('reports %s, and the router probe still runs', async (_name, maxAutoSpend, expected) => {
+    const { runRouterDoctor } = await import('./doctor');
+    await runRouterInstall({}, ctx(), deps());
+    if (maxAutoSpend !== undefined) {
+      await writeFile(join(data, 'config.json'), JSON.stringify({ maxAutoSpend }));
+    }
+    const fetchImpl = (async () => {
+      throw Object.assign(new TypeError('fetch failed'), {
+        cause: Object.assign(new Error('getaddrinfo ENOTFOUND'), { code: 'ENOTFOUND' }),
+      });
+    }) as typeof fetch;
+    const out = await runRouterDoctor(ctx(), {
+      homeDir: home,
+      cwd: work,
+      env: {},
+      which: () => true,
+      readMcp: async () => true,
+      fetchImpl,
+    }).catch((e: unknown) => e);
+    type Check = { name: string; status: string; required: boolean; detail: string; fix?: string };
+    const checks =
+      out instanceof CliError
+        ? (out.details as { checks: Check[] }).checks
+        : (out as { data: { checks: Check[] } }).data.checks;
+    const spend = checks.find((c) => c.name === 'spend');
+    expect(spend).toMatchObject(expected);
+    if (maxAutoSpend === undefined) {
+      expect(spend?.fix).toBe(
+        'Answer the spend question: run `tenjin install` in a terminal, or `tenjin config set maxAutoSpend <usd>`.',
+      );
+      // The open question is not the first required failure, so it never hides
+      // the network diagnosis.
+      expect(out instanceof CliError ? out.message : '').not.toContain('maxAutoSpend');
+    } else {
+      expect((out as CliError).message).toContain('maxAutoSpend is 0');
+    }
+    expect(checks.find((c) => c.name === 'router')?.status).toBe('fail');
   });
 
   it('fails with the command that fixes it on a machine that never installed', async () => {
