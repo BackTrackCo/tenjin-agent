@@ -1,6 +1,8 @@
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { setFlagsFromString } from 'node:v8';
+import { runInNewContext } from 'node:vm';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { GATE_TIMEOUT_MS } from './gate';
@@ -121,6 +123,12 @@ function deps(fetchImpl: typeof fetch, p?: RoutingPayer): HookDeps {
     warn: () => undefined,
     ...(p !== undefined ? { route: p.routeFor.bind(p) } : {}),
   };
+}
+
+/** A full garbage collection, without starting Node with `--expose-gc`. */
+function collectGarbage(): void {
+  setFlagsFromString('--expose-gc');
+  (runInNewContext('gc') as () => void)();
 }
 
 function systemMessageOf(response: unknown): string | undefined {
@@ -302,15 +310,23 @@ describe('the hook legs and the routing fee', () => {
     expect(out).toBe('');
   });
 
-  /** `fake`, except that a request carrying a payment never answers. */
+  /**
+   * `fake`, except that a request carrying a payment never answers until the
+   * signal it was sent with aborts, the way a real transport ends it. A full
+   * garbage collection runs while it waits: a budget that reached the request
+   * only through Request copies was lost there about half the time.
+   */
   function paidHangs(fake: FakeRouter): { fetchImpl: typeof fetch; paid: () => number } {
     let paid = 0;
     const fetchImpl = ((input: Parameters<typeof fetch>[0], init?: RequestInit) => {
       const request = new Request(input, init);
       if (!request.headers.has('payment-signature')) return fake.fetch(request);
       paid += 1;
+      const signal = init?.signal ?? request.signal;
+      setTimeout(collectGarbage, 50);
       return new Promise<Response>((_resolve, reject) => {
-        request.signal.addEventListener('abort', () => reject(request.signal.reason));
+        if (signal.aborted) reject(signal.reason);
+        signal.addEventListener('abort', () => reject(signal.reason));
       });
     }) as typeof fetch;
     return { fetchImpl, paid: () => paid };
