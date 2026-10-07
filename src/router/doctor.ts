@@ -496,7 +496,18 @@ async function routingFeeCheck(
   settings: ResolvedSettings,
   fetchImpl: typeof fetch | undefined,
 ): Promise<RouterCheck> {
-  const host = new URL(settings.baseUrl).host;
+  let host: string;
+  try {
+    host = new URL(settings.baseUrl).host;
+  } catch {
+    // The router check below names the bad base URL and its fix.
+    return {
+      name: 'routing fee',
+      status: 'warn',
+      required: false,
+      detail: 'not checked, because the base URL is not a URL',
+    };
+  }
   const why = await routingFeeBlock({
     dataDir: ctx.dataDir,
     policy: settings.policy,

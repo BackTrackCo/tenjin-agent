@@ -244,6 +244,33 @@ describe('tenjin install', () => {
     }
   });
 
+  it('doctor reaches the router check and its fix when TENJIN_BASE_URL is not a URL', async () => {
+    const { runRouterDoctor } = await import('./doctor');
+    await runRouterInstall({}, ctx(), deps());
+    vi.stubEnv('TENJIN_BASE_URL', 'tenjin.blog');
+    try {
+      const out = await runRouterDoctor(ctx(), {
+        homeDir: home,
+        cwd: work,
+        env: {},
+        which: () => true,
+        readMcp: async () => true,
+        fetchImpl: probe400,
+      }).catch((e: unknown) => e);
+      expect(out).toBeInstanceOf(CliError);
+      const checks = ((out as CliError).details as { checks: { name: string; detail: string }[] })
+        .checks;
+      expect(checks.find((c) => c.name === 'routing fee')?.detail).toBe(
+        'not checked, because the base URL is not a URL',
+      );
+      expect(checks.find((c) => c.name === 'router')?.detail).toBe(
+        'the base URL "tenjin.blog" is not a URL',
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('reports no hooks directory, because the entries are plain commands', async () => {
     const result = await runRouterInstall({}, ctx(), deps());
     const hooks = (result.data as { hooks: Record<string, unknown> }).hooks;
