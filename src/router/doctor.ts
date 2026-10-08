@@ -591,9 +591,9 @@ export async function routingFeeBlock(input: RoutingFeeInput): Promise<string | 
   }
   const ledger = await readSpendSummary(input.dataDir);
   const spent = ledger === null ? 0n : spentOf(ledger);
-  // The fee itself first, as the payer checks it on every call: a channel
-  // with credit pays nothing the spend policy refuses.
-  const refused = feeRefusal(policy, input.host, spent);
+  // The fee's per-payment checks first, as the payer runs them on every call:
+  // a channel with credit pays nothing they refuse.
+  const refused = feeRefusal(policy, input.host);
   if (refused !== null) return refused;
   const { address } = await describeWallet(provider);
   if ((await channelCredit(input.dataDir, address)) >= ROUTING_FEE_ATOMIC) return null;

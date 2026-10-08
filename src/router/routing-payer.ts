@@ -10,12 +10,7 @@ import { FileClientChannelStorage } from '@x402/evm/batch-settlement/client/file
 import { wrapFetchWithPayment } from '@x402/fetch';
 import { httpRequest, type HttpRequestOptions, type HttpResult } from '../lib/http';
 import type { SpendPolicy } from '../lib/policy';
-import { spentOf } from '../lib/spend-ledger';
-import {
-  readSpendSummary,
-  releaseUnchargedExposure,
-  type SpendAuthorizer,
-} from '../lib/wallet/spend';
+import { releaseUnchargedExposure, type SpendAuthorizer } from '../lib/wallet/spend';
 import type { TenjinSigner } from '../lib/wallet/provider';
 import { canonicalUsdcOnly } from '../lib/x402-pay';
 import {
@@ -65,7 +60,9 @@ import { readRouterMemo, writeRouterMemo } from './router-memo';
  *   and reserves it through the local spend authorizer, so it counts against
  *   the per-call limit, the rolling daily budget and the creator allowlist
  *   like any other; it counts from the moment it is sent, and only an
- *   answered 4xx or 5xx gives it back. The fee itself comes out of the deposit and is not counted again.
+ *   answered 4xx or 5xx gives it back. The deposit is the spend: each fee
+ *   paid from it gets only the per-payment checks (the per-call limit, the
+ *   allowlist, an explicit zero daily limit) and never counts again.
  * - THE TIMEOUT. The wrapper runs inside `httpRequest`, whose deadline is the
  *   caller's, and the SDK's chain reads and the wallet read are each cut at
  *   what is left of it, so a leg returns inside the hook's 5 s.
@@ -218,12 +215,6 @@ export class RoutingPayer {
     return this.deps.now?.() ?? Date.now();
   }
 
-  /** The automatic exposure the ledger counts in the current window. */
-  private async spent(): Promise<bigint> {
-    const ledger = await readSpendSummary(this.deps.dataDir, { now: () => this.now() });
-    return ledger === null ? 0n : spentOf(ledger);
-  }
-
   private warn(line: string): void {
     (this.deps.warn ?? ((l: string) => process.stderr.write(`${l}\n`)))(
       `tenjin mcp: routing fee: ${line}`,
@@ -258,11 +249,9 @@ export class RoutingPayer {
       call.answered = true;
       if (asked.status !== 402) return asked;
       try {
-        // EVERY FEE MEETS THE WHOLE SPEND POLICY, a voucher from a channel
-        // already funded included: a per-call limit below the fee, a day's
-        // budget with no room for it (a 0 the user set included) or a host
-        // off the allowlist pays nothing, before the wallet is even unlocked.
-        const refused = feeRefusal(await this.deps.policy(), call.host, await this.spent());
+        // Each fee gets the per-payment checks (`feeRefusal`) before the
+        // wallet is even unlocked, a voucher from a funded channel included.
+        const refused = feeRefusal(await this.deps.policy(), call.host);
         if (refused !== null) throw new RouteSkipped(refused);
         call.channel = this.channelFor(await this.signer());
         if (until - this.now() <= 0) throw new RouteSkipped('busy');

@@ -42,23 +42,18 @@ export function refusedWhy(reason: PolicyReason): string {
 }
 
 /**
- * EVERY FEE IS AN AUTOMATIC PAYMENT, a voucher from a channel already funded
- * included, so each one meets the whole spend policy: the per-call limit, the
- * day's budget against what the ledger has counted, and the creator
- * allowlist (the router's host). An explicit zero in either limit refuses it.
- * Null when the policy allows the fee.
+ * THE DEPOSIT IS THE SPEND. It meets the whole policy once, the day's budget
+ * included, when the SDK's `depositStrategy` reserves it. Each fee paid from
+ * it then gets only the per-payment checks: the per-call limit, the creator
+ * allowlist (the router's host) and an explicit zero daily limit. It is never
+ * refused for the day's running total, which the deposit already consumed.
+ * Null when those checks allow the fee.
  */
-export function feeRefusal(
-  policy: SpendPolicy,
-  host: string,
-  sessionSpentAtomic: bigint,
-): string | null {
-  const evaluation = evaluateSpendPolicy(policy, {
-    mode: 'automatic',
-    amountAtomic: ROUTING_FEE_ATOMIC,
-    creator: host,
-    sessionSpentAtomic,
-  });
+export function feeRefusal(policy: SpendPolicy, host: string): string | null {
+  const evaluation = evaluateSpendPolicy(
+    { ...policy, sessionBudgetAtomic: policy.sessionBudgetAtomic === 0n ? 0n : null },
+    { mode: 'automatic', amountAtomic: ROUTING_FEE_ATOMIC, creator: host, sessionSpentAtomic: 0n },
+  );
   return evaluation.decision === 'allow' ? null : refusedWhy(evaluation.reason);
 }
 

@@ -144,8 +144,8 @@ describe('RoutingPayer', () => {
 
   it.each<[string, Partial<SpendPolicy>, string]>([
     ['a daily limit of 0', { sessionBudgetAtomic: 0n }, 'budget_reached'],
-    ['a day with no room left', { sessionBudgetAtomic: 250_000n }, 'budget_reached'],
     ['an allowlist without the router', { allowlistCreators: ['someone-else'] }, 'not_allowlisted'],
+    ['a per-call limit below the fee', { maxAutoSpendAtomic: 2_000n }, 'limit_below_deposit'],
   ])('pays no voucher from a funded channel under %s', async (_label, change, why) => {
     const router = new FakeRouter();
     let policy: SpendPolicy = TEST_POLICY;
@@ -157,6 +157,20 @@ describe('RoutingPayer', () => {
     expect(tookFreePath(await routeOnce(p, router), router)).toBe(why);
     expect(router.settledFees).toBe(1);
     expect(router.paidRequests()).toBe(1);
+  });
+
+  it('pays the next fee from a deposit that used the whole day, counting it once', async () => {
+    const router = new FakeRouter();
+    const p = payer(router, { policy_: { sessionBudgetAtomic: CHANNEL_DEPOSIT_ATOMIC } });
+    expect((await routeOnce(p, router)).status).toBe('decided');
+    expect((await readSpendSummary(dir))?.committedAtomic).toBe(CHANNEL_DEPOSIT_ATOMIC.toString());
+    // The day's budget is spent, by the deposit itself: its fees still pay.
+    const next = await routeOnce(p, router);
+    expect(next).toMatchObject({ status: 'decided' });
+    expect(unpaidWhy(next)).toBeUndefined();
+    expect(router.settledFees).toBe(2);
+    expect(router.deposits).toBe(1);
+    expect((await readSpendSummary(dir))?.committedAtomic).toBe(CHANNEL_DEPOSIT_ATOMIC.toString());
   });
 
   it('pays nothing to a 402 asking more than the approved fee', async () => {
