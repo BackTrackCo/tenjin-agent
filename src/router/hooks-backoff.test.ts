@@ -8,11 +8,14 @@ import type { HookDeps } from './hooks';
 import { FakeRouter, payerDeps } from './fee-test-utils';
 import { RoutingPayer } from './routing-payer';
 import { readRouterMemo, UNREACHABLE_BACKOFF_MS, writeRouterMemo } from './router-memo';
+import { ROUTER_PATH } from './decision';
+import { ROUTE_PAID_PATH } from './fee';
 
 /**
- * THE ROUTING LEGS' BACKOFF. A call that never reached the router starts a
- * minute in which every leg skips the router and the native tool runs; an
- * answer of any status clears it.
+ * THE ROUTING LEGS' BACKOFF. A call that could not reach the router (a
+ * refused connection, no status) starts a minute in which every leg skips the
+ * router and the native tool runs; a timeout, a reset socket or a body that
+ * failed to read never starts it.
  */
 
 const BASE = 'https://router.test';
@@ -59,7 +62,11 @@ function router() {
   return { state, fetchImpl };
 }
 
-function deps(fetchImpl: typeof fetch, route?: RoutingPayer): HookDeps {
+function deps(
+  fetchImpl: typeof fetch,
+  route?: RoutingPayer,
+  extra: Partial<HookDeps> = {},
+): HookDeps {
   return {
     dataDir: dir,
     baseUrl: BASE,
@@ -67,8 +74,24 @@ function deps(fetchImpl: typeof fetch, route?: RoutingPayer): HookDeps {
     now: () => clock,
     warn: () => undefined,
     ...(route !== undefined ? { route: route.routeFor.bind(route) } : {}),
+    ...extra,
   };
 }
+
+/** `fetch failed` with the socket's own code in its cause, as undici throws it. */
+function socketError(code: string): TypeError {
+  return Object.assign(new TypeError('fetch failed'), {
+    cause: Object.assign(new Error(`socket ${code}`), { code }),
+  });
+}
+
+/** A fetch that answers only when its signal aborts, as a slow router does. */
+const hangs = (async (input: RequestInfo | URL, init?: RequestInit) =>
+  new Promise<Response>((_resolve, reject) => {
+    new Request(input, init).signal.addEventListener('abort', () =>
+      reject(new DOMException('The operation was aborted.', 'AbortError')),
+    );
+  })) as typeof fetch;
 
 const prompt = () => ({
   hook_event_name: 'UserPromptSubmit',
@@ -116,6 +139,82 @@ describe('the routing legs back off a router they cannot reach', () => {
     await runHookKind('prompt', prompt(), deps(r.fetchImpl));
     expect(r.state.calls).toBe(1);
     expect(await readdir(join(dir, 'router-memo'))).toEqual([]);
+  });
+
+  it('does not start it on the call running out of its own time', async () => {
+    let calls = 0;
+    const slow = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls += 1;
+      return hangs(input, init);
+    }) as typeof fetch;
+    await runHookKind('prompt', prompt(), deps(slow, undefined, { timeoutMs: 30 }));
+    expect(await memo()).toBeNull();
+    await runHookKind('prompt', prompt(), deps(slow, undefined, { timeoutMs: 30 }));
+    expect(calls).toBe(2);
+  });
+
+  it('does not start it on an answer whose body failed to read', async () => {
+    const torn = (async () =>
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.error(socketError('ECONNREFUSED'));
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      )) as typeof fetch;
+    await runHookKind('prompt', prompt(), deps(torn));
+    expect(await memo()).toBeNull();
+  });
+
+  it.each(['ECONNRESET', 'UND_ERR_SOCKET'])(
+    'does not start it on a reset socket (%s)',
+    async (code) => {
+      const reset = (async () => {
+        throw socketError(code);
+      }) as typeof fetch;
+      await runHookKind('prompt', prompt(), deps(reset));
+      expect(await memo()).toBeNull();
+    },
+  );
+
+  it('retries a reset socket on the free path, on a fresh connection, and starts nothing', async () => {
+    const fake = new FakeRouter();
+    const seen: string[] = [];
+    const resetOnPaid = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = new URL(new Request(input, init).url).pathname;
+      seen.push(path);
+      if (path === ROUTE_PAID_PATH) throw socketError('ECONNRESET');
+      return fake.fetch(input, init);
+    }) as typeof fetch;
+    const p = new RoutingPayer(payerDeps(fake, dir, wallet, { now: () => clock }));
+    await runHookKind('prompt', prompt(), deps(resetOnPaid, p));
+    expect(seen).toEqual([ROUTE_PAID_PATH, ROUTER_PATH]);
+    expect(await memo()).toBeNull();
+  });
+
+  it('does not start it from the free path a paid attempt fell back to', async () => {
+    const fake = new FakeRouter();
+    const paidErrsFreeRefuses = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = new URL(new Request(input, init).url).pathname;
+      if (path === ROUTE_PAID_PATH) return new Response('{}', { status: 503 });
+      throw socketError('ECONNREFUSED');
+    }) as typeof fetch;
+    const p = new RoutingPayer(payerDeps(fake, dir, wallet, { now: () => clock }));
+    await runHookKind('prompt', prompt(), deps(paidErrsFreeRefuses, p));
+    expect(await memo()).toBeNull();
+  });
+
+  it('does not start it from a paid call queued behind another until its budget ran out', async () => {
+    const fake = new FakeRouter();
+    // Real clocks: the queued call's budget runs while the first one holds the channel.
+    const p = new RoutingPayer(payerDeps(fake, dir, wallet));
+    const real = { now: () => Date.now(), timeoutMs: 40 };
+    await Promise.all([
+      runHookKind('prompt', prompt(), deps(hangs, p, real)),
+      runHookKind('prompt', { ...prompt(), session_id: 'sess-2' }, deps(hangs, p, real)),
+    ]);
+    expect(await readRouterMemo(dir, 'unreachable', BASE, Date.now())).toBeNull();
   });
 
   it('starts it from the paid path too, without trying the free path on the same host', async () => {

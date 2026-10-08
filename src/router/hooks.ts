@@ -1463,7 +1463,7 @@ function hookOutcome(decision: HookDecision | null): string {
  *  path; a call that path cannot pay takes the free path, and the first such
  *  call in a session tells the user why and what fixes it.
  *
- *  BACKOFF: a call that never reached the router starts the machine's
+ *  BACKOFF: a call that could not reach the router starts the machine's
  *  `unreachable` memo, and for its minute every leg skips the call and the
  *  native tool runs at once, rather than each one waiting out the gate. A call
  *  the router answered, with any status, clears it. */

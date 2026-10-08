@@ -27,10 +27,11 @@ shows the open question as a warning instead of failing on it, so its network
 checks still print, and the first unpaid routing call in a session shows the
 same question.
 
-When a routing call cannot reach the router (DNS, TLS, a refused or timed-out
-connection, a proxy refusing the tunnel), every hook leg skips the router for
-the next 60 seconds and the native tool runs at once, instead of each prompt,
-search and hand-off waiting out the gate. An answer from the router clears it,
+When a routing call cannot reach the router (DNS, TLS, a refused connection,
+a proxy refusing the tunnel), every hook leg skips the router for the next 60
+seconds and the native tool runs at once, instead of each prompt, search and
+hand-off waiting out the gate. A slow answer, a dropped socket or an answer of
+any status does not start the pause. An answer from the router clears it,
 and `tenjin doctor` names the pause with the seconds left.
 
 The install report no longer names a `hooksDir` for the router's hook entries,

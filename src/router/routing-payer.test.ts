@@ -282,6 +282,29 @@ describe('RoutingPayer', () => {
     expect([...router.channels.values()][0]!.charged).toBe(3n * ROUTING_FEE_ATOMIC);
   });
 
+  it('retries a reset socket on the free path, on a fresh connection, unpaid', async () => {
+    const router = new FakeRouter();
+    const p = payer(router);
+    const route = await p.routeFor(BASE);
+    let resets = 0;
+    const resetOnce: typeof fetch = async (input, init) => {
+      if (resets === 0) {
+        resets += 1;
+        throw Object.assign(new TypeError('fetch failed'), {
+          cause: Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' }),
+        });
+      }
+      return router.fetch(input, init);
+    };
+    const outcome = await requestDecision(
+      'tool',
+      { query: 'q' },
+      { ctx: ctx(), baseUrl: BASE, fetchImpl: resetOnce, timeoutMs: 3_500, route: route! },
+    );
+    expect(tookFreePath(outcome, router)).toBe('payment_failed');
+    expect(router.settledFees).toBe(0);
+  });
+
   it('shares one channel and its one deposit between processes that take turns', async () => {
     const router = new FakeRouter();
     const a = payer(router);

@@ -8,8 +8,8 @@ import { writeFileAtomic } from '../lib/atomic-json';
  * in the data dir, so every hook leg and every `tenjin mcp` process reads the
  * same answer. Two facts use it:
  *
- * - `unreachable`: a routing leg's call never reached the router (DNS, TLS,
- *   a refused or timed-out connection, a proxy refusing the tunnel). For
+ * - `unreachable`: a routing leg's call could not reach the router (DNS, TLS,
+ *   a refused connection, a proxy refusing the tunnel; see `isUnreachable`). For
  *   {@link UNREACHABLE_BACKOFF_MS} every leg skips the router and the native
  *   tool runs at once, instead of each prompt and search waiting out the gate.
  *   A call that gets an answer clears it.

@@ -299,8 +299,9 @@ export class RoutingPayer {
       await this.settleDeposits(call);
     }
     if (call.skipped !== undefined) throw new RouteSkipped(call.skipped);
-    // The router never answered: the free path is on the same host, so the
-    // call ends as that transport failure.
+    // The router could not be reached: the free path is on the same host, so
+    // the call ends as that transport failure. A timeout or a reset socket
+    // takes the free path below, as any other unanswered call does.
     if (!response.ok && !call.answered && isUnreachable(response)) {
       throw new RouteSkipped(PAYMENT_FAILED, response);
     }

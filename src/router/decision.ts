@@ -396,9 +396,9 @@ export interface DecisionRoute {
 /** The paid path gave this call no answer: the wallet locked, low or over
  *  its spend limits, the channel busy, or the payment failed. */
 export class RouteSkipped extends Error {
-  /** `unreached`: the paid call never got an answer from the router, so the
-   *  free path, on the same host, is not tried and the call reads as that
-   *  transport failure. */
+  /** `unreached`: the paid call could not reach the router
+   *  ({@link isUnreachable}), so the free path, on the same host, is not
+   *  tried and the call reads as that transport failure. */
   constructor(
     readonly why: string,
     readonly unreached?: FetchJsonFailure,
@@ -425,7 +425,7 @@ export type DecisionOutcome<T> =
       reason: string;
       errorCode?: string;
       freePath?: string;
-      /** The router never answered: no connection, or no answer in time. */
+      /** The router could not be reached at all ({@link isUnreachable}). */
       unreachable?: true;
     }
   /** The paid path gave no answer ({@link RouteSkipped}) and no time was left
@@ -498,6 +498,16 @@ export async function requestDecision(
       timeoutMs: left,
     });
     const free = readDecision(response, schema);
+    // A failure here ran on what a paid attempt left of the budget, so it says
+    // nothing about the router being down: it never starts the backoff.
+    if (free.status === 'failed') {
+      return {
+        status: 'failed',
+        reason: free.reason,
+        ...(free.errorCode !== undefined ? { errorCode: free.errorCode } : {}),
+        freePath: err.why,
+      };
+    }
     return free.status === 'skipped' ? free : { ...free, freePath: err.why };
   }
   return readDecision(response, schema);
@@ -594,11 +604,22 @@ function errorOf(body: unknown): { code: string; message: string } | null {
   return { code, message: text };
 }
 
+/** A dropped socket, which a fresh connection usually gets past. */
+const RESET_CODES = new Set(['ECONNRESET', 'UND_ERR_SOCKET']);
+
 /**
- * A request that never got an answer from the router: no connection (DNS,
- * TLS, refused, a proxy refusing the tunnel) or none in time. An HTTP status,
- * even a 5xx, is an answer.
+ * A ROUTER THAT CANNOT BE REACHED: the transport named the layer that refused
+ * the connection (DNS, TLS, a refused connection, a proxy refusing the tunnel)
+ * and no status came back. Never the call's own timeout: that is the gate's
+ * few seconds, and a slow decision or a cold start must not take the router
+ * away from every session. Never a status, even with a body that failed to
+ * read, and never a reset socket, which the free path retries on a fresh one.
  */
 export function isUnreachable(failure: FetchJsonFailure): boolean {
-  return failure.kind === 'network' || failure.kind === 'timeout';
+  return (
+    failure.kind === 'network' &&
+    failure.status === undefined &&
+    failure.transport !== undefined &&
+    !RESET_CODES.has(failure.transport.code ?? '')
+  );
 }
