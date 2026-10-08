@@ -41,6 +41,7 @@ import {
 import { routerSettings, type RouterSettings } from './settings';
 import { REQUEST_TOOL } from './names';
 import { probeRouter, type RouterCheck } from './reachability';
+import { readMcpServers, type InstalledAt, type ListMcpProcesses } from './mcp-processes';
 import { clearRouterMemo, readRouterMemo, type RouterMemo } from './router-memo';
 import {
   ACCEPT_COMMAND,
@@ -86,6 +87,10 @@ export interface RouterDoctorDeps {
   ) => Promise<{ found: boolean; state: McpEntryState }>;
   /** Node's own version, for the floor check. */
   nodeVersion?: string;
+  /** This user's running `tenjin mcp` processes; tests inject them. */
+  listMcpProcesses?: ListMcpProcesses;
+  /** When this build was installed; tests inject it. */
+  installedAt?: InstalledAt;
   now?: () => number;
 }
 
@@ -122,6 +127,7 @@ export async function runRouterDoctor(
       deps.homeDir ?? homedir(),
     ),
   );
+  checks.push((await readMcpServers(deps)).check);
   const rawConfig = await loadRawConfig(ctx.dataDir);
   const unanswered =
     rawConfig.maxAutoSpend === undefined ? { limits: shownLimits(rawConfig) } : null;

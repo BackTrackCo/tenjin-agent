@@ -31,6 +31,12 @@ import type { CommandContext, CommandResult } from '../context';
 import { HOOK_TOOL, hookToolInput, type HookKind } from './hook-tool';
 import { MCP_SERVER_NAME, REQUEST_TOOL } from './names';
 import { probeRouter, type RouterCheck } from './reachability';
+import {
+  readMcpServers,
+  RECONNECT_FIX,
+  type InstalledAt,
+  type ListMcpProcesses,
+} from './mcp-processes';
 import { ensureStatusLine, type StatusLineMode, type StatusLineResult } from './status-line-wiring';
 import {
   ACCEPT_COMMAND,
@@ -204,6 +210,10 @@ export interface RouterInstallArgs {
 }
 
 export interface RouterInstallDeps extends WalletDeps {
+  /** This user's running `tenjin mcp` processes; tests inject them. */
+  listMcpProcesses?: ListMcpProcesses;
+  /** When this build was installed; tests inject it. */
+  installedAt?: InstalledAt;
   homeDir?: string;
   cwd?: string;
   env?: NodeJS.ProcessEnv;
@@ -369,6 +379,14 @@ export async function runRouterInstall(
     ...(args.refresh === true ? { refreshOnly: true } : {}),
   });
   const mcp = await registerMcpServer(deps, env, project, cwd, home);
+  // After the hooks are written: a `tenjin mcp` that started before this
+  // install runs the old build, so the new hooks fail there until it restarts.
+  // Named, never killed.
+  const servers = await readMcpServers(deps);
+  const serverLines =
+    servers.stale > 0
+      ? [paint(ctx.io, 'yellow', `! ${servers.check.detail}. ${RECONNECT_FIX}`)]
+      : [];
   if (args.refresh === true) {
     // The SAME writers, minus the one that decides anything: the entries are
     // rewritten in place by their ownership marker so an upgrade never
@@ -400,10 +418,12 @@ export async function runRouterInstall(
         spend,
         removedSkills,
         scope: mcpScope(project),
+        mcpServer: servers.check,
       },
       humanLines: [
         ...refreshLines(ctx, problems(ctx, hooks, permissions, statusLine, mcp)),
         ...removedKeysLines,
+        ...serverLines,
       ],
     };
   }
@@ -445,6 +465,7 @@ export async function runRouterInstall(
     },
     disclosure: DISCLOSURE,
     removedSkills,
+    mcpServer: servers.check,
   };
   return {
     data,
@@ -461,6 +482,7 @@ export async function runRouterInstall(
         router,
       }),
       ...removedKeysLines,
+      ...serverLines,
     ],
   };
 }

@@ -41,3 +41,8 @@ which use no directory. The README keeps one sentence on
 what the router sends and links to `docs/agent-permissions.md`, which lists all
 of it, including the questions your agent asks you and your answers. The paid
 lookup files and the `alpha.18` `~/.mcp.json` fix move to the docs too.
+
+`tenjin doctor` and `tenjin install` warn when a running `tenjin mcp` started
+before this install, so it still runs the older build and the new hooks can fail
+with "Tool hook not found", and name the fix: reconnect `x402` with `/mcp`, or
+start a new Claude Code session.

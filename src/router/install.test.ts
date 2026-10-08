@@ -156,6 +156,7 @@ function deps(over: Record<string, unknown> = {}) {
     walletExists: async () => false,
     createWallet: vi.fn(async () => ADDRESS),
     walletAddress: async () => ADDRESS,
+    listMcpProcesses: async () => [],
     ...over,
   };
 }
@@ -422,6 +423,27 @@ describe('tenjin install', () => {
     expect(result.humanLines).toContain(`! The router did not answer: ${router.detail}`);
     expect(result.humanLines).toContain(`  ${router.fix}`);
     expect((await readSettings()).hooks).toEqual(CURRENT_HOOKS);
+  });
+
+  it('names running servers that predate this install, with the reconnect fix, and stops none', async () => {
+    const listMcpProcesses = vi.fn(async () => [{ pid: 9044, startedAt: 1 }]);
+    const result = await runRouterInstall(
+      {},
+      ctx(),
+      deps({ listMcpProcesses, installedAt: async () => 2 }),
+    );
+    expect(result.data).toMatchObject({ mcpServer: { name: 'mcp server', status: 'warn' } });
+    expect(result.humanLines!.join('\n')).toContain('started before this install');
+    expect(result.humanLines!.join('\n')).toContain(
+      'Reconnect x402 with /mcp, or start a new Claude Code session.',
+    );
+    // The refresh `tenjin update` runs says it too.
+    const refreshed = await runRouterInstall(
+      { refresh: true },
+      ctx(),
+      deps({ listMcpProcesses, installedAt: async () => 2 }),
+    );
+    expect(refreshed.humanLines!.join('\n')).toContain('Reconnect x402 with /mcp');
   });
 
   it('creates a wallet when there is none, without asking', async () => {
@@ -1024,6 +1046,7 @@ describe('the doctor this release registers', () => {
       'hooks',
       'status line',
       'mcp',
+      'mcp server',
       'spend',
       'experimental',
       'routing fee',
