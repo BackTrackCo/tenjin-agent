@@ -8,8 +8,9 @@ the production base URL it no longer tells you to set the base URL you already
 have. `tenjin install` runs the same probe at the end and prints a warning when
 the router does not answer. The install still succeeds.
 
-On Node 24.14 or newer, the CLI, its hooks and `tenjin mcp` send their requests
-through the proxy that `HTTPS_PROXY` or `HTTP_PROXY` names, and honour
+On Node 24.14 or newer, the CLI, its hooks (the free docs prefetch included)
+and `tenjin mcp` send their requests through the proxy that `HTTPS_PROXY` or
+`HTTP_PROXY` names, and honour
 `NO_PROXY`. Before, Node's `fetch` ignored them unless `NODE_USE_ENV_PROXY=1`
 was set. A proxy that asks for credentials (407) gets a fix that says where to
 put them.
