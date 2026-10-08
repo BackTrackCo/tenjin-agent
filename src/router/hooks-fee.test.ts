@@ -209,11 +209,11 @@ describe('the hook legs and the routing fee', () => {
       '`tenjin doctor`',
     ],
     [
-      'the daily budget has no room for the fee',
+      'the daily budget has no room for the deposit',
       {
         policy: async () => ({
           maxAutoSpendAtomic: 250_000n,
-          sessionBudgetAtomic: 2_000n,
+          sessionBudgetAtomic: 100_000n,
           allowlistCreators: [],
         }),
       },
@@ -419,7 +419,7 @@ describe('the hook legs and the routing fee', () => {
     expect(hang.paid()).toBe(1);
   }, 15_000);
 
-  it('returns a deposit call that gets no answer inside the gate budget, and counts its fee', async () => {
+  it('returns a deposit call that gets no answer inside the gate budget, and counts the deposit', async () => {
     const fake = new FakeRouter();
     const p = payer(fake);
     const hang = paidHangs(fake);
@@ -427,8 +427,7 @@ describe('the hook legs and the routing fee', () => {
     await runPromptHook(prompt(), { ...deps(fake.fetch, p), fetchImpl: hang.fetchImpl });
     expect(Date.now() - started).toBeLessThan(DEPOSIT_GATE_TIMEOUT_MS + 500);
     expect(hang.paid()).toBe(1);
-    // It went out and no answer came, so its fee may have landed: the fee
-    // counts. The deposit is channel funding and never does.
-    expect(await readSpendSummary(dir)).toMatchObject({ committedAtomic: '3000' });
+    // It went out and no answer came, so it may have landed: it counts.
+    expect(await readSpendSummary(dir)).toMatchObject({ committedAtomic: '250000' });
   }, 15_000);
 });

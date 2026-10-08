@@ -13,7 +13,7 @@ describe('the spend question', () => {
 
   it('names the limits and the routing fee, as the selector does', () => {
     expect(spendQuestion(shownLimits({}))).toBe(
-      'May Tenjin pay for tool calls without asking you each time, up to $0.25 a call and $5 a day? Routing costs $0.003 a call, paid from channel deposits of up to $0.25 that stay yours until spent; each fee counts against these limits as it is paid. Using these limits or choosing your own also approves the routing fee.',
+      'May Tenjin pay for tool calls without asking you each time, up to $0.25 a call and $5 a day? Routing costs $0.003 a call, paid from channel deposits of up to $0.25 that stay yours until spent; each deposit counts against these limits. Using these limits or choosing your own also approves the routing fee.',
     );
   });
 
@@ -34,7 +34,7 @@ describe('the spend question', () => {
 
   it('words the notice for whoever reads it: the user directly, or the agent to ask', () => {
     expect(unpaidNotice('limit_below_deposit', {}, 'user')).toBe(
-      'Tenjin pays for nothing on its own yet: the spend limits are not answered. It can pay for tool calls without asking you each time, up to $0.25 a call and $5 a day. Routing costs $0.003 a call, paid from channel deposits of up to $0.25 that stay yours until spent; each fee counts against these limits as it is paid. Using these limits or choosing your own also approves the routing fee. To use these limits, run `tenjin install --accept-defaults`; to choose your own, run `tenjin config set maxAutoSpend <usd>` and `tenjin config set sessionBudget <usd|none>`.',
+      'Tenjin pays for nothing on its own yet: the spend limits are not answered. It can pay for tool calls without asking you each time, up to $0.25 a call and $5 a day. Routing costs $0.003 a call, paid from channel deposits of up to $0.25 that stay yours until spent; each deposit counts against these limits. Using these limits or choosing your own also approves the routing fee. To use these limits, run `tenjin install --accept-defaults`; to choose your own, run `tenjin config set maxAutoSpend <usd>` and `tenjin config set sessionBudget <usd|none>`.',
     );
     expect(unpaidNotice('limit_below_deposit', {}, 'agent')).toContain('Ask the user: May Tenjin');
   });
