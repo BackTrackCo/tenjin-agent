@@ -60,9 +60,9 @@ const OPT_OUT = 'TENJIN_NO_SKILL_HEAL';
  * conservative than `install`, which a human ran on purpose. What it declines to
  * touch is listed on {@link healable}, and it heals the CLI adapters plus any
  * optional skill that is present (presence is the gate that placed it):
- * the hosted `tenjin` skill mirrors tenjin.blog/skills.md, so the copy on disk
+ * the hosted `tenjin` skill mirrors tenjin.sh/skills.md, so the copy on disk
  * may be a NEWER fetch than this package ships, and rewriting it would undo that
- * and make install's "re-fetch it from tenjin.blog/skills.md" false. Same domain
+ * and make install's "re-fetch it from tenjin.sh/skills.md" false. Same domain
  * `doctor`'s staleness check compares.
  *
  * The bytes it writes are SHAPED by the machine's configured mode, through the one

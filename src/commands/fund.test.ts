@@ -30,8 +30,8 @@ const CHECKOUT = 'https://pay.coinbase.com/buy?sessionToken=tok123';
  * from #146: that was about user-facing overrides, this is defence in depth.)
  * At the cutover, edit both, deliberately.
  */
-const EXPECTED_FUND_ORIGIN = 'https://tenjin.blog';
-const EXPECTED_FUND_HOST = 'tenjin.blog';
+const EXPECTED_FUND_ORIGIN = 'https://tenjin.sh';
+const EXPECTED_FUND_HOST = 'tenjin.sh';
 
 let tmp: string;
 let dataDir: string;
