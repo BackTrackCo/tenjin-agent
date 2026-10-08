@@ -269,11 +269,20 @@ export class RoutingPayer {
         }
         const fee = paying ? call.fee : undefined;
         if (paying) call.paid = true;
+        // A RETRY IS A NEW SPEND: the fee an answered error gave back is
+        // reserved again under the budget before the retry is sent, and a
+        // retry the budget refuses is not sent; the call goes free.
+        if (fee?.state === 'refused') {
+          try {
+            Object.assign(fee, await this.reserveFee(call.host));
+          } catch (err) {
+            if (err instanceof RouteSkipped) call.skipped = err.why;
+            throw err;
+          }
+        }
         // FAIL CLOSED: the fee counts from the moment it is sent, so a lost
         // answer or a process killed mid-call leaves it counted.
-        if (fee !== undefined && (fee.state === 'reserved' || fee.state === 'refused')) {
-          await this.commitFee(fee);
-        }
+        if (fee?.state === 'reserved') await this.commitFee(fee);
         const response = await base(request);
         // Only an answered error proves it did not settle: the server settles
         // nothing on a 4xx or 5xx, and a retry after it counts again.
@@ -361,11 +370,7 @@ export class RoutingPayer {
    */
   private async commitFee(fee: Fee): Promise<void> {
     // A ledger that cannot take the write stops the request: it is not sent.
-    await fee.authorizer.commit(
-      fee.state === 'reserved' ? fee.reservationId : undefined,
-      ROUTING_FEE_ATOMIC,
-      { nonce: fee.key },
-    );
+    await fee.authorizer.commit(fee.reservationId, ROUTING_FEE_ATOMIC, { nonce: fee.key });
     fee.state = 'sent';
   }
 

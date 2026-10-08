@@ -6,7 +6,7 @@ import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { CliError } from '../lib/errors';
 import type { SpendPolicy } from '../lib/policy';
-import { readSpendSummary } from '../lib/wallet/spend';
+import { createLocalSpendAuthorizer, readSpendSummary } from '../lib/wallet/spend';
 import type { CommandContext } from '../context';
 import { requestDecision } from './decision';
 import {
@@ -365,6 +365,45 @@ describe('RoutingPayer', () => {
     expect(router.settledFees).toBe(3);
     expect(router.deposits).toBe(1);
     expect([...router.channels.values()][0]!.charged).toBe(3n * ROUTING_FEE_ATOMIC);
+  });
+
+  it('reserves the fee again before the retry after a corrective 402, and sends no retry the budget refuses', async () => {
+    const router = new FakeRouter();
+    const policy = { ...TEST_POLICY, sessionBudgetAtomic: 3n * ROUTING_FEE_ATOMIC };
+    const p = payer(router, { policy: async () => policy });
+    await routeOnce(p, router);
+    router.abortAfterSettle = true;
+    await routeOnce(p, router);
+    // Two fees counted (one settled, one with its answer lost): room for one more.
+    expect((await readSpendSummary(dir, { now: () => clock }))?.committedAtomic).toBe('6000');
+    // Another process spends that room while this call's stale voucher is refused.
+    const other = createLocalSpendAuthorizer({ dir, policy, now: () => clock });
+    let spentElsewhere = false;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const request = new Request(input, init);
+      const response = await router.fetch(request);
+      if (request.headers.has('payment-signature') && response.status === 402 && !spentElsewhere) {
+        spentElsewhere = true;
+        await other.commit(undefined, ROUTING_FEE_ATOMIC, { nonce: 'elsewhere' });
+      }
+      return response;
+    };
+    const paidBefore = router.paidRequests();
+    const route = (await p.routeFor(BASE))!;
+    const outcome = await requestDecision(
+      'tool',
+      { query: 'q' },
+      { ctx: ctx(), baseUrl: BASE, fetchImpl, timeoutMs: 3_500, route },
+    );
+    expect(spentElsewhere).toBe(true);
+    // The stale voucher went out once; the retry was refused before it was sent.
+    expect(tookFreePath(outcome, router)).toBe('budget_reached');
+    expect(router.paidRequests() - paidBefore).toBe(1);
+    expect(router.settledFees).toBe(2);
+    expect(await readSpendSummary(dir, { now: () => clock })).toMatchObject({
+      committedAtomic: '9000',
+      reservations: [],
+    });
   });
 
   it('retries a reset socket on the free path, on a fresh connection, unpaid', async () => {
