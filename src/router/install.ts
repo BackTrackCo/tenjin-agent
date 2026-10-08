@@ -34,6 +34,7 @@ import { probeRouter, type RouterCheck } from './reachability';
 import { ensureStatusLine, type StatusLineMode, type StatusLineResult } from './status-line-wiring';
 import {
   ACCEPT_COMMAND,
+  FEE_APPROVAL,
   limitsUsd,
   OWN_LIMITS_COMMANDS,
   ROUTING_FEE_TERMS,
@@ -533,12 +534,18 @@ async function acceptDefaults(
     effective.sessionBudget === 'no daily ceiling'
       ? 'no daily limit'
       : `$${effective.sessionBudget} a day`;
-  return {
-    data: { spend: { ...spend, effective } },
-    humanLines: [
-      `${paint(ctx.io, 'green', '✓')} Spend limits set: up to $${effective.maxAutoSpend} per call; daily limit ${daily}`,
-    ],
-  };
+  const now = `up to $${effective.maxAutoSpend} per call; daily limit ${daily}`;
+  // Only keys the file did not name are written, so say which were and which
+  // were kept: a 0 the user set stays, and is not "set" here.
+  const kept =
+    spend.kept.length === 0
+      ? ''
+      : ` Kept your own ${spend.kept.join(' and ')}, as the file names it.`;
+  const line =
+    spend.set.length === 0
+      ? `${paint(ctx.io, 'yellow', '!')} Nothing changed: your config already names both limits (${now}). Change one with ${OWN_LIMITS_COMMANDS}.`
+      : `${paint(ctx.io, 'green', '✓')} Spend limits set: ${now}.${kept}`;
+  return { data: { spend: { ...spend, effective } }, humanLines: [line] };
 }
 
 /**
@@ -560,7 +567,7 @@ async function approveLimits(
     shown.sessionBudget === 'none'
       ? 'no daily limit'
       : `$${toMoney(shown.sessionBudget).usd} a day`;
-  const fee = `\n${ROUTING_FEE_TERMS}\nUsing these limits or choosing your own also approves the routing fee.`;
+  const fee = `\n${ROUTING_FEE_TERMS}\n${FEE_APPROVAL}`;
   const choice = await (deps.promptLimits ?? promptLimits)(
     `The router pays for tool calls without asking, up to:\n  $${toMoney(shown.maxAutoSpend).usd} a call, ${daily}${fee}`,
   );

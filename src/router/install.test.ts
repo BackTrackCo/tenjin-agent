@@ -141,7 +141,7 @@ const FEE_TERMS =
   'Routing costs $0.003 a call, paid from channel deposits of up to $0.25 that stay yours until spent; each deposit counts against these limits.';
 const ASK_LINES = [
   '! Automatic payments are off until the user approves a spend limit',
-  `  Ask the user: May Tenjin pay for tool calls without asking you each time, up to $0.25 a call and $5 a day? ${FEE_TERMS} A yes also approves the routing fee.`,
+  `  Ask the user: May Tenjin pay for tool calls without asking you each time, up to $0.25 a call and $5 a day? ${FEE_TERMS} Using these limits or choosing your own also approves the routing fee.`,
   '  Yes: tenjin install --accept-defaults',
   '  Other amounts: tenjin config set maxAutoSpend <usd> and tenjin config set sessionBudget <usd|none>',
   '  No: run nothing, the router then pays for nothing on its own, and the question stays open until tenjin install in a terminal or tenjin config set answers it',
@@ -193,7 +193,7 @@ describe('tenjin install', () => {
         kept: [],
         effective: { maxAutoSpend: '0', sessionBudget: '5' },
         approval: {
-          question: `May Tenjin pay for tool calls without asking you each time, up to $0.25 a call and $5 a day? ${FEE_TERMS} A yes also approves the routing fee.`,
+          question: `May Tenjin pay for tool calls without asking you each time, up to $0.25 a call and $5 a day? ${FEE_TERMS} Using these limits or choosing your own also approves the routing fee.`,
           limits: { maxAutoSpend: '0.25', sessionBudget: '5' },
           routingFee: FEE_TERMS,
           approve: 'tenjin install --accept-defaults',
@@ -215,7 +215,7 @@ describe('tenjin install', () => {
     expect(result.data).toMatchObject({
       spend: {
         approval: {
-          question: `May Tenjin pay for tool calls without asking you each time, up to $0.25 a call with no daily limit? ${FEE_TERMS} A yes also approves the routing fee.`,
+          question: `May Tenjin pay for tool calls without asking you each time, up to $0.25 a call with no daily limit? ${FEE_TERMS} Using these limits or choosing your own also approves the routing fee.`,
           limits: { maxAutoSpend: '0.25', sessionBudget: 'none' },
         },
       },
@@ -698,6 +698,33 @@ describe('install asks a person to approve the spend limits', () => {
       sessionBudget: '5000000',
     });
     expect(result.data).toMatchObject({ spend: { set: ['maxAutoSpend', 'sessionBudget'] } });
+    expect(result.humanLines).toEqual([
+      '✓ Spend limits set: up to $0.25 per call; daily limit $5 a day.',
+    ]);
+  });
+
+  it('--accept-defaults says it changed nothing when the file names both limits, a 0 included', async () => {
+    await writeFile(
+      join(data, 'config.json'),
+      JSON.stringify({ maxAutoSpend: '0', sessionBudget: '5000000' }),
+    );
+    const result = await runRouterInstall({ acceptDefaults: true }, ctx(), deps());
+    expect(await loadRawConfig(data)).toMatchObject({ maxAutoSpend: '0' });
+    expect(result.data).toMatchObject({
+      spend: { set: [], kept: ['maxAutoSpend', 'sessionBudget'] },
+    });
+    const text = result.humanLines!.join('\n');
+    expect(text).not.toContain('Spend limits set');
+    expect(text).toContain(
+      'Nothing changed: your config already names both limits (up to $0 per call',
+    );
+    expect(text).toContain('`tenjin config set maxAutoSpend <usd>`');
+  });
+
+  it('--accept-defaults names the limit it kept beside the one it set', async () => {
+    await writeFile(join(data, 'config.json'), JSON.stringify({ sessionBudget: 'none' }));
+    const result = await runRouterInstall({ acceptDefaults: true }, ctx(), deps());
+    expect(result.humanLines!.join('\n')).toContain('Kept your own sessionBudget');
   });
 
   it('--refresh asks nothing and fills no absent limit', async () => {

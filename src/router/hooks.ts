@@ -1544,7 +1544,7 @@ async function tellOnce(
   now: number,
   config: PartialConfig,
 ) {
-  const sentence = unpaidNotice(why, config);
+  const sentence = unpaidNotice(why, config, 'user');
   if (sentence === null || deps.notice === undefined) return;
   if (await firstNoticeFor(deps.dataDir, sessionId, now).catch(() => false)) deps.notice(sentence);
 }

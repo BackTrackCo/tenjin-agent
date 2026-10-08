@@ -281,7 +281,12 @@ describe('the hook legs and the routing fee', () => {
     const answer = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
     const notice = systemMessageOf(answer);
     expect(notice).toContain('the spend limits are not answered');
-    expect(notice).toContain('up to $0.25 a call and $5 a day?');
+    // The user reads it, so it is put to them, not to an agent.
+    expect(notice).not.toContain('Ask the user');
+    expect(notice).toContain('without asking you each time, up to $0.25 a call and $5 a day.');
+    expect(notice).toContain(
+      'Using these limits or choosing your own also approves the routing fee.',
+    );
     expect(notice).toContain('Routing costs $0.003 a call');
     expect(notice).toContain('`tenjin install --accept-defaults`');
     expect(fake.paidRequests()).toBe(0);

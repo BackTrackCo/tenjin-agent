@@ -255,7 +255,7 @@ export async function runRequestTool(
     const raw = await loadRawConfig(deps.ctx.dataDir).catch(() => ({}));
     return fail(
       'native',
-      unpaidNotice(fresh.freePath ?? FEE_REQUIRED, raw) ?? unpaidSentence(FEE_REQUIRED)!,
+      unpaidNotice(fresh.freePath ?? FEE_REQUIRED, raw, 'agent') ?? unpaidSentence(FEE_REQUIRED)!,
       { nextStep: 'Tell the user this once, and use your own tools for now.' },
     );
   }

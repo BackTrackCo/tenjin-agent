@@ -62,17 +62,30 @@ export const ACCEPT_COMMAND = 'tenjin install --accept-defaults';
 export const OWN_LIMITS_COMMANDS =
   '`tenjin config set maxAutoSpend <usd>` and `tenjin config set sessionBudget <usd|none>`';
 
+/** The selector's own line: either answer approves the fee. */
+export const FEE_APPROVAL =
+  'Using these limits or choosing your own also approves the routing fee.';
+
 /** The question, for the agent to put to the user as written. */
 export function spendQuestion(limits: RouterLimits): string {
-  return `May Tenjin pay for tool calls without asking you each time, ${limitsPhrase(limits)}? ${ROUTING_FEE_TERMS} A yes also approves the routing fee.`;
+  return `May Tenjin pay for tool calls without asking you each time, ${limitsPhrase(limits)}? ${ROUTING_FEE_TERMS} ${FEE_APPROVAL}`;
 }
+
+/** Who reads a notice: the user, in the hook's `systemMessage`, or the agent,
+ *  in the request tool's answer. */
+export type NoticeReader = 'user' | 'agent';
 
 /**
  * The routing notice for a machine whose limits nobody has answered: the
- * question and the one-step yes.
+ * question and the one-step yes, put to the user directly, or handed to the
+ * agent to ask.
  */
-export function unansweredNotice(limits: RouterLimits): string {
-  return `Tenjin pays for nothing on its own yet: the spend limits are not answered. Ask the user: ${spendQuestion(limits)} For a yes, run \`${ACCEPT_COMMAND}\`; for other amounts, run ${OWN_LIMITS_COMMANDS}.`;
+export function unansweredNotice(limits: RouterLimits, reader: NoticeReader): string {
+  const open = 'Tenjin pays for nothing on its own yet: the spend limits are not answered.';
+  if (reader === 'agent') {
+    return `${open} Ask the user: ${spendQuestion(limits)} For a yes, run \`${ACCEPT_COMMAND}\`; for other amounts, run ${OWN_LIMITS_COMMANDS}.`;
+  }
+  return `${open} It can pay for tool calls without asking you each time, ${limitsPhrase(limits)}. ${ROUTING_FEE_TERMS} ${FEE_APPROVAL} To use these limits, run \`${ACCEPT_COMMAND}\`; to choose your own, run ${OWN_LIMITS_COMMANDS}.`;
 }
 
 /**
@@ -83,9 +96,10 @@ export function unansweredNotice(limits: RouterLimits): string {
 export function unpaidNotice(
   why: string,
   config: { maxAutoSpend?: string | undefined; sessionBudget?: string | undefined },
+  reader: NoticeReader,
 ): string | null {
   if (why === 'limit_below_deposit' && config.maxAutoSpend === undefined) {
-    return unansweredNotice(shownLimits(config));
+    return unansweredNotice(shownLimits(config), reader);
   }
   return unpaidSentence(why);
 }
