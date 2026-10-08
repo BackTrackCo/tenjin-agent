@@ -73,8 +73,9 @@ import { readRouterMemo, writeRouterMemo } from './router-memo';
  *   refused payment, a server error) throws `RouteSkipped` with the reason,
  *   and the caller sends it to the free path. The server is asked before the
  *   wallet is unlocked, so a server with no paid path (the fee off) costs no
- *   unlock and no notice; it is remembered for an hour in the machine's
- *   `router-memo`, so each call is not a wasted round trip.
+ *   unlock and no notice; it is remembered in the machine's `router-memo`
+ *   for an hour, or until the free path answers `fee_required`, so each call
+ *   is not a wasted round trip.
  *
  * Left upstream, as cent-level papercuts: the SDK exports `ErrChannelBusy`
  * only from its server entry, and its fetch wrapper rewraps a hook's error as

@@ -14,7 +14,8 @@ import { writeFileAtomic } from '../lib/atomic-json';
  *   tool runs at once, instead of each prompt and search waiting out the gate.
  *   Doctor's probe ends it early when it reaches the router.
  * - `paid-path-absent`: the router answered no paid path (the fee is off), so
- *   calls take the free path without asking for an hour.
+ *   calls take the free path without asking for an hour, or until the free
+ *   path answers `fee_required`.
  *
  * A memo is a file written atomically and read with the clock: one older than
  * its window, or dated in the future, reads as absent, so nothing cleans up

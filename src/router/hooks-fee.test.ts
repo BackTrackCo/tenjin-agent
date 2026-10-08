@@ -11,6 +11,7 @@ import { CliError } from '../lib/errors';
 import { FakeRouter, payerDeps } from './fee-test-utils';
 import { RoutingPayer } from './routing-payer';
 import { readSpendSummary } from '../lib/wallet/spend';
+import { readRouterMemo, writeRouterMemo } from './router-memo';
 
 /**
  * The hook legs on each side of the routing fee: inside `tenjin mcp` (which
@@ -301,6 +302,18 @@ describe('the hook legs and the routing fee', () => {
     expect(systemMessageOf(answer)).toContain('`tenjin doctor`');
     // The deposit the server refused is released, not counted.
     expect((await readSpendSummary(dir))?.committedAtomic ?? '0').toBe('0');
+  });
+
+  it('asks for the paid path again as soon as the free path answers fee_required', async () => {
+    const fake = new FakeRouter();
+    const p = payer(fake, { now: () => NOW });
+    // The router answered no paid path a moment ago, before the fee turned on.
+    await writeRouterMemo(dir, 'paid-path-absent', BASE, { now: NOW, ttlMs: 3_600_000 });
+    expect(await p.routeFor(BASE)).toBeNull();
+    const { fetchImpl } = router(FEE_REQUIRED_ANSWER);
+    await runHookKind('prompt', prompt(), deps(fetchImpl, p));
+    expect(await readRouterMemo(dir, 'paid-path-absent', BASE, NOW)).toBeNull();
+    expect(await p.routeFor(BASE)).not.toBeNull();
   });
 
   it('says once when the free path answers fee_required and nothing could pay, in the command form too', async () => {

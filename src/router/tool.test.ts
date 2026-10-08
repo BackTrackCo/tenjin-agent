@@ -15,6 +15,7 @@ import type { MediaTransport } from './paid';
 import { storeSpecs } from './specs';
 import { ROUTER_PATH, type OfferSpec } from './decision';
 import { bindDecision, claimRedirect, noteSession, renderProgress } from './progress';
+import { readRouterMemo, writeRouterMemo } from './router-memo';
 
 // Pass-through, so a refusal's typed details stay observable after the tool
 // folds the error into its envelope.
@@ -301,8 +302,12 @@ describe('routing outcomes that buy nothing', () => {
         },
       },
     ]);
+    // A "no paid path" this machine remembered from before the fee turned on.
+    await writeRouterMemo(dir, 'paid-path-absent', ROUTER, { now: Date.now(), ttlMs: 3_600_000 });
     const result = await runRequestTool({ query: 'what is the weather' }, deps(fetchImpl));
     expect(calls).toHaveLength(1);
+    // The fee is on now, so the next call asks for the paid path at once.
+    expect(await readRouterMemo(dir, 'paid-path-absent', ROUTER, Date.now())).toBeNull();
     expect(result.envelope).toMatchObject({ status: 'native', cost: ['provider price 0 USD'] });
     expect(String(result.envelope.reason)).toContain('could not pay its $0.003 fee');
     expect(String(result.envelope.reason)).toContain('`tenjin doctor`');

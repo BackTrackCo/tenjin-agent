@@ -27,6 +27,7 @@ import {
 } from './decision';
 import { FEE_REQUIRED, isFeeRequired, unpaidSentence, type RouteFor } from './fee';
 import { unpaidNotice } from './spend-question';
+import { clearRouterMemo } from './router-memo';
 import { loadRawConfig } from '../lib/config';
 import { openLookupFooter, type LookupFooter } from './progress';
 import {
@@ -248,6 +249,8 @@ export async function runRequestTool(
   // which is wrong for this one: what stops routing here is a routing fee this
   // call could not pay, for the reason the payer gave.
   if (isFeeRequired(fresh.decision)) {
+    // The fee is on: the next call asks for the paid path again.
+    await clearRouterMemo(deps.ctx.dataDir, 'paid-path-absent', settings.baseUrl);
     await footer.done('native');
     const raw = await loadRawConfig(deps.ctx.dataDir).catch(() => ({}));
     return fail(

@@ -1504,6 +1504,11 @@ async function decide(
           ? FEE_REQUIRED
           : undefined));
   if (why !== undefined) await tellOnce(deps, sessionId, why, now, config);
+  // The fee is on: a "no paid path" remembered from before stops holding the
+  // machine's calls on the free path.
+  if (outcome.status === 'decided' && isFeeRequired(outcome.decision)) {
+    await clearRouterMemo(deps.dataDir, 'paid-path-absent', baseUrl);
+  }
   if (outcome.status === 'skipped') {
     warn(`tenjin hook: the routing fee was not paid (${outcome.why}), so the native tool runs`);
     return null;
