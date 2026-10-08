@@ -42,6 +42,9 @@
 # postcss: GHSA-fxqj-rqcc-2cmp (via tsup/vitest > postcss-load-config,
 # dev-only). Drop once tsup's and vite's floors clear 8.5.23.
 #
+# source-map-js: GHSA-68fv-2mgg-jv7q (via tsup/vitest > postcss, dev-only).
+# Drop once the lockfile resolves postcss at 8.5.29+, whose own floor is ^1.2.2.
+#
 # @hono/node-server: GHSA-frvp-7c67-39w9, Windows-only serve-static path
 # traversal, plus the 2.x-line WebSocket-abort memory-leak advisory (floor
 # 2.0.10) that `pnpm audit` surfaces once on 2.x. Via
@@ -59,6 +62,7 @@ overrides:
   'hono@>=3.8.0 <4.12.34': '^4.12.34'
   'postcss@<8.5.23': '^8.5.23'
   '@hono/node-server@<2.0.10': '^2.0.10'
+  'source-map-js@>=1.0.0 <1.2.2': '^1.2.2'
 
 # pnpm 11 errors (ERR_PNPM_IGNORED_BUILDS) on any build-script dep missing an
 # entry here, so keep it exhaustive. `false` = don't run the script; esbuild's
