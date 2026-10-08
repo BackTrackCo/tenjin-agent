@@ -2986,7 +2986,7 @@
           "query": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 512
+            "maxLength": 8000
           },
           "question": {
             "type": "string",
