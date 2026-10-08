@@ -9,7 +9,13 @@ import type { SpendPolicy } from '../lib/policy';
 import { readSpendSummary } from '../lib/wallet/spend';
 import type { CommandContext } from '../context';
 import { requestDecision } from './decision';
-import { CHANNEL_DEPOSIT_ATOMIC, MIN_DEPOSIT_ATOMIC, payerDir, ROUTING_FEE_ATOMIC } from './fee';
+import {
+  CHANNEL_DEPOSIT_ATOMIC,
+  depositRefusal,
+  MIN_DEPOSIT_ATOMIC,
+  payerDir,
+  ROUTING_FEE_ATOMIC,
+} from './fee';
 import { BASE, FakeRouter, payerDeps, TEST_POLICY } from './fee-test-utils';
 import {
   chainReader,
@@ -159,18 +165,51 @@ describe('RoutingPayer', () => {
     expect(router.paidRequests()).toBe(1);
   });
 
-  it('pays the next fee from a deposit that used the whole day, counting it once', async () => {
+  it('makes a deposit as large as the daily limit, and counts only the fees against it', async () => {
     const router = new FakeRouter();
     const p = payer(router, { policy_: { sessionBudgetAtomic: CHANNEL_DEPOSIT_ATOMIC } });
     expect((await routeOnce(p, router)).status).toBe('decided');
-    expect((await readSpendSummary(dir))?.committedAtomic).toBe(CHANNEL_DEPOSIT_ATOMIC.toString());
-    // The day's budget is spent, by the deposit itself: its fees still pay.
+    expect(router.deposits).toBe(1);
+    // The deposit is channel funding: the day has spent one fee, not $0.25.
+    expect((await readSpendSummary(dir))?.committedAtomic).toBe(ROUTING_FEE_ATOMIC.toString());
     const next = await routeOnce(p, router);
     expect(next).toMatchObject({ status: 'decided' });
     expect(unpaidWhy(next)).toBeUndefined();
     expect(router.settledFees).toBe(2);
     expect(router.deposits).toBe(1);
-    expect((await readSpendSummary(dir))?.committedAtomic).toBe(CHANNEL_DEPOSIT_ATOMIC.toString());
+    expect((await readSpendSummary(dir))?.committedAtomic).toBe(
+      (2n * ROUTING_FEE_ATOMIC).toString(),
+    );
+  });
+
+  it('spends the daily limit fee by fee, and leaves the channel funded when it runs out', async () => {
+    const router = new FakeRouter();
+    const p = payer(router, { policy_: { sessionBudgetAtomic: 3n * ROUTING_FEE_ATOMIC } });
+    for (let n = 0; n < 3; n += 1) {
+      const paid = await routeOnce(p, router);
+      expect(paid.status).toBe('decided');
+      expect(unpaidWhy(paid)).toBeUndefined();
+    }
+    const paidBefore = router.paidRequests();
+    // The fourth fee does not fit: the call goes free, and nothing is signed.
+    expect(tookFreePath(await routeOnce(p, router), router)).toBe('budget_reached');
+    expect(router.paidRequests()).toBe(paidBefore);
+    expect(router.settledFees).toBe(3);
+    const channel = [...router.channels.values()][0]!;
+    expect(channel.balance - channel.charged).toBe(
+      CHANNEL_DEPOSIT_ATOMIC - 3n * ROUTING_FEE_ATOMIC,
+    );
+    expect((await readSpendSummary(dir))?.committedAtomic).toBe(
+      (3n * ROUTING_FEE_ATOMIC).toString(),
+    );
+  });
+
+  it('makes no deposit for a fee a daily limit of 0 refuses', async () => {
+    const router = new FakeRouter();
+    const p = payer(router, { policy_: { sessionBudgetAtomic: 0n } });
+    expect(tookFreePath(await routeOnce(p, router), router)).toBe('budget_reached');
+    expect(router.paidRequests()).toBe(0);
+    expect(router.deposits).toBe(0);
   });
 
   it('pays nothing to a 402 asking more than the approved fee', async () => {
@@ -207,9 +246,9 @@ describe('RoutingPayer', () => {
       balance: CHANNEL_DEPOSIT_ATOMIC.toString(),
       chargedCumulativeAmount: (2n * ROUTING_FEE_ATOMIC).toString(),
     });
-    // The deposit is an automatic payment in the spend ledger; the fees are not.
+    // The fees are the spend in the ledger; the deposit is channel funding.
     expect(await readSpendSummary(dir, { now: () => clock })).toMatchObject({
-      committedAtomic: CHANNEL_DEPOSIT_ATOMIC.toString(),
+      committedAtomic: (2n * ROUTING_FEE_ATOMIC).toString(),
       reservations: [],
     });
   });
@@ -219,7 +258,9 @@ describe('RoutingPayer', () => {
     const p = payer(router, { policy_: { maxAutoSpendAtomic: 100_000n } });
     expect((await routeOnce(p, router)).status).toBe('decided');
     expect([...router.channels.values()][0]!.balance).toBe(100_000n);
-    expect((await readSpendSummary(dir, { now: () => clock }))?.committedAtomic).toBe('100000');
+    expect((await readSpendSummary(dir, { now: () => clock }))?.committedAtomic).toBe(
+      ROUTING_FEE_ATOMIC.toString(),
+    );
   });
 
   it('refuses a deposit a per-call limit cannot hold ten fees of, sending nothing paid', async () => {
@@ -227,15 +268,28 @@ describe('RoutingPayer', () => {
     const p = payer(router, { policy_: { maxAutoSpendAtomic: MIN_DEPOSIT_ATOMIC - 1n } });
     expect(tookFreePath(await routeOnce(p, router), router)).toBe('limit_below_deposit');
     expect(router.paidRequests()).toBe(0);
-    expect(await readSpendSummary(dir, { now: () => clock })).toBeNull();
+    // The fee reserved for it is given back.
+    const ledger = await readSpendSummary(dir, { now: () => clock });
+    expect(ledger?.committedAtomic ?? '0').toBe('0');
+    expect(ledger?.reservations ?? []).toEqual([]);
   });
 
-  it('refuses a deposit the daily budget cannot take, and reserves nothing', async () => {
-    const router = new FakeRouter();
-    const p = payer(router, { policy_: { sessionBudgetAtomic: 200_000n } });
-    expect(tookFreePath(await routeOnce(p, router), router)).toBe('budget_reached');
-    expect(router.paidRequests()).toBe(0);
-    expect((await readSpendSummary(dir, { now: () => clock }))?.reservations ?? []).toEqual([]);
+  it('refuses a deposit to a router off the allowlist, whatever the daily limit', () => {
+    const policy = {
+      ...TEST_POLICY,
+      sessionBudgetAtomic: null,
+      allowlistCreators: ['someone.else'],
+    };
+    expect(depositRefusal(policy, 'router.test', CHANNEL_DEPOSIT_ATOMIC)).toBe('not_allowlisted');
+    expect(depositRefusal(TEST_POLICY, 'router.test', CHANNEL_DEPOSIT_ATOMIC)).toBeNull();
+    // Channel funding, not spend: a daily limit below it does not refuse it.
+    expect(
+      depositRefusal(
+        { ...TEST_POLICY, sessionBudgetAtomic: 1n },
+        'router.test',
+        CHANNEL_DEPOSIT_ATOMIC,
+      ),
+    ).toBeNull();
   });
 
   /** `router`, except that a request carrying a payment gets `answer` instead. */
@@ -247,8 +301,8 @@ describe('RoutingPayer', () => {
   }
 
   // The server settles nothing on an answered 4xx or 5xx (tenjin#951), so
-  // those give the deposit back; an answer that never came may hide a settled
-  // deposit, so it stays counted.
+  // those give the fee back; an answer that never came may hide a settled
+  // fee, so it stays counted. The deposit it carried is never counted.
   it.each([
     ['an answered 402 releases it', async () => new Response('{}', { status: 402 }), '0'],
     ['an answered 500 releases it', async () => new Response('{}', { status: 500 }), '0'],
@@ -257,9 +311,9 @@ describe('RoutingPayer', () => {
       async (): Promise<Response> => {
         throw new TypeError('fetch failed');
       },
-      CHANNEL_DEPOSIT_ATOMIC.toString(),
+      ROUTING_FEE_ATOMIC.toString(),
     ],
-  ])('settles a sent deposit in the ledger: %s', async (_label, answer, committed) => {
+  ])('settles a sent fee in the ledger: %s', async (_label, answer, committed) => {
     const router = new FakeRouter();
     const fetchImpl = paidAnswer(router, answer);
     const p = payer(router, { fetchImpl });
@@ -276,7 +330,7 @@ describe('RoutingPayer', () => {
     });
   });
 
-  it('counts a deposit from the moment it is sent, before any answer', async () => {
+  it('counts the fee from the moment it is sent, before any answer', async () => {
     const router = new FakeRouter();
     let seen: string | undefined;
     const fetchImpl = paidAnswer(router, async () => {
@@ -290,8 +344,8 @@ describe('RoutingPayer', () => {
       { query: 'q' },
       { ctx: ctx(), baseUrl: BASE, fetchImpl, timeoutMs: 3_500, route },
     );
-    // A process killed at this point leaves the deposit counted.
-    expect(seen).toBe(CHANNEL_DEPOSIT_ATOMIC.toString());
+    // A process killed at this point leaves the fee counted, and only the fee.
+    expect(seen).toBe(ROUTING_FEE_ATOMIC.toString());
   });
 
   it('recovers through the SDK after a lost answer: a corrective 402, one retry, no second charge', async () => {
@@ -497,11 +551,12 @@ describe('RoutingPayer', () => {
     expect(router.paidRequests()).toBe(0);
   });
 
-  it('applies the creator allowlist to a deposit', async () => {
+  it('applies the creator allowlist to the fee, so no deposit is made either', async () => {
     const router = new FakeRouter();
     const p = payer(router, { policy_: { allowlistCreators: ['someone.else'] } });
     expect(tookFreePath(await routeOnce(p, router), router)).toBe('not_allowlisted');
     expect(router.paidRequests()).toBe(0);
+    expect(router.deposits).toBe(0);
   });
 
   it("sizes the deposit with the SDK's own knobs: the spend cap times depositMultiplier", () => {

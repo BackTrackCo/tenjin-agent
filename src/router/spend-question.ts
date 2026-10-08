@@ -49,7 +49,7 @@ export function limitsPhrase(limits: RouterLimits): string {
 }
 
 /** The routing fee's terms, as the selector names them. */
-export const ROUTING_FEE_TERMS = `Routing costs $${usd(ROUTING_FEE_ATOMIC)} a call, paid from channel deposits of up to $${usd(CHANNEL_DEPOSIT_ATOMIC)} that stay yours until spent; each deposit counts against these limits.`;
+export const ROUTING_FEE_TERMS = `Routing costs $${usd(ROUTING_FEE_ATOMIC)} a call, paid from channel deposits of up to $${usd(CHANNEL_DEPOSIT_ATOMIC)} that stay yours until spent; each fee counts against these limits as it is paid.`;
 
 /**
  * The one command that answers yes to the limits shown, as the selector's

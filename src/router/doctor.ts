@@ -8,7 +8,7 @@ import { loadRawConfig } from '../lib/config';
 import { CliError } from '../lib/errors';
 import { inspectHooksFile, ownsHookEntry, pruneOurHandlers } from '../lib/harness-hooks';
 import { toMoney } from '../lib/money';
-import { evaluateSpendPolicy, type SpendPolicy } from '../lib/policy';
+import type { SpendPolicy } from '../lib/policy';
 import { resolveContextSettings, type ResolvedSettings } from '../lib/settings';
 import { spentOf } from '../lib/spend-ledger';
 import { readUsdcBalance } from '../lib/usdc-balance';
@@ -20,6 +20,7 @@ import type { CommandContext, CommandResult } from '../context';
 import { agentsWithoutRequestTool } from './agent-tools';
 import {
   CHANNEL_DEPOSIT_ATOMIC,
+  depositRefusal,
   feeRefusal,
   MIN_DEPOSIT_ATOMIC,
   payerDir,
@@ -539,7 +540,7 @@ export function routingFeeRow(
       name: 'routing fee',
       status: 'ok',
       required: false,
-      detail: `$${usd(ROUTING_FEE_ATOMIC)} a call, paid from channel deposits of up to $${usd(CHANNEL_DEPOSIT_ATOMIC)} that count against the spend limits`,
+      detail: `$${usd(ROUTING_FEE_ATOMIC)} a call, counted against the spend limits as it is paid, from channel deposits of up to $${usd(CHANNEL_DEPOSIT_ATOMIC)} that stay yours until spent`,
     };
   }
   if (why === 'limit_below_deposit' && unanswered !== null) {
@@ -591,9 +592,9 @@ export async function routingFeeBlock(input: RoutingFeeInput): Promise<string | 
   }
   const ledger = await readSpendSummary(input.dataDir);
   const spent = ledger === null ? 0n : spentOf(ledger);
-  // The fee's per-payment checks first, as the payer runs them on every call:
-  // a channel with credit pays nothing they refuse.
-  const refused = feeRefusal(policy, input.host);
+  // The fee is the spend, checked first as the payer reserves it on every
+  // call: a channel with credit pays nothing the policy refuses.
+  const refused = feeRefusal(policy, input.host, spent);
   if (refused !== null) return refused;
   const { address } = await describeWallet(provider);
   if ((await channelCredit(input.dataDir, address)) >= ROUTING_FEE_ATOMIC) return null;
@@ -602,14 +603,9 @@ export async function routingFeeBlock(input: RoutingFeeInput): Promise<string | 
       ? policy.maxAutoSpendAtomic
       : CHANNEL_DEPOSIT_ATOMIC;
   if (deposit < MIN_DEPOSIT_ATOMIC) return 'limit_below_deposit';
-  const evaluation = evaluateSpendPolicy(policy, {
-    mode: 'automatic',
-    amountAtomic: deposit,
-    creator: input.host,
-    sessionSpentAtomic: spent,
-  });
-  if (evaluation.reason === 'not_allowlisted') return 'not_allowlisted';
-  if (evaluation.reason === 'session_budget_exceeded') return 'budget_reached';
+  // The deposit is channel funding, not spend: the daily budget does not count it.
+  const blocked = depositRefusal(policy, input.host, deposit);
+  if (blocked !== null) return blocked;
   const balance = await readUsdcBalance(address, input.rpcUrl, {
     timeoutMs: input.timeoutMs,
     ...(input.fetchImpl !== undefined ? { fetchImpl: input.fetchImpl } : {}),

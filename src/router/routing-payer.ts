@@ -24,7 +24,7 @@ import {
 import { CliError } from '../lib/errors';
 import {
   CHANNEL_DEPOSIT_ATOMIC,
-  feeRefusal,
+  depositRefusal,
   MIN_DEPOSIT_ATOMIC,
   payerDir,
   refusedWhy,
@@ -36,7 +36,7 @@ import { readRouterMemo, writeRouterMemo } from './router-memo';
 /**
  * THE ROUTING FEE, PAID THE WAY THE SDK'S OWN CLIENT PAYS. It runs inside
  * `tenjin mcp`, never in a hook. The user approved it with the automatic spend
- * limits at install, which name it, and every deposit counts against them.
+ * limits at install, which name it, and every fee counts against them.
  *
  * The shape is the x402 guide's "MCP server with x402": a local stdio MCP
  * server whose tool calls an HTTP API through `wrapFetchWithPayment` over an
@@ -56,13 +56,15 @@ import { readRouterMemo, writeRouterMemo } from './router-memo';
  *   second payment in flight on one channel (`channel_busy`): that call takes
  *   the free path. A stale total after such a meeting is the SDK's to resync
  *   from the corrective 402, and a cumulative voucher cannot charge twice.
- * - A DEPOSIT IS AN AUTOMATIC PAYMENT. The SDK's `depositStrategy` sizes it
- *   and reserves it through the local spend authorizer, so it counts against
- *   the per-call limit, the rolling daily budget and the creator allowlist
- *   like any other; it counts from the moment it is sent, and only an
- *   answered 4xx or 5xx gives it back. The deposit is the spend: each fee
- *   paid from it gets only the per-payment checks (the per-call limit, the
- *   allowlist, an explicit zero daily limit) and never counts again.
+ * - THE FEE IS THE SPEND, THE DEPOSIT IS CHANNEL FUNDING. Each fee is an
+ *   automatic payment reserved through the local spend authorizer, so it
+ *   counts against the per-call limit, the rolling daily budget (a 0 refuses
+ *   it) and the creator allowlist as it is paid; it counts from the moment it
+ *   is sent, and only an answered 4xx or 5xx gives it back. The deposit the
+ *   SDK's `depositStrategy` sizes stays the wallet's, reclaimable, so it is
+ *   bounded by the per-call limit, the allowlist and the wallet's balance and
+ *   never counts against the daily budget. A fee the budget refuses leaves
+ *   the channel's funds in place for the next window.
  * - THE TIMEOUT. The wrapper runs inside `httpRequest`, whose deadline is the
  *   caller's, and the SDK's chain reads and the wallet read are each cut at
  *   what is left of it, so a leg returns inside the hook's 5 s.
@@ -142,14 +144,14 @@ interface Channel {
   http: x402HTTPClient;
 }
 
-/** A deposit the strategy reserved, and how far its paid request got. */
-interface Deposit {
+/** The call's fee, reserved before the wallet unlocks, and how far its paid
+ *  request got. */
+interface Fee {
   authorizer: SpendAuthorizer;
   reservationId: string | undefined;
-  amountAtomic: bigint;
   /** The ledger key its exposure is committed under when it is sent. */
   key: string;
-  state: 'signed' | 'sent' | 'settled' | 'refused';
+  state: 'reserved' | 'sent' | 'settled' | 'refused';
 }
 
 /** What the call in progress brings to the SDK's callbacks. */
@@ -165,7 +167,7 @@ interface Call {
   answered: boolean;
   /** The wallet's channel, once the server asked for a payment. */
   channel?: Channel;
-  deposits: Deposit[];
+  fee?: Fee;
 }
 
 /**
@@ -240,7 +242,6 @@ export class RoutingPayer {
       until,
       paid: false,
       answered: false,
-      deposits: [],
     };
     const base = options.fetchImpl ?? this.deps.fetchImpl ?? fetch;
     const askFirst: typeof fetch = async (input, init) => {
@@ -249,10 +250,9 @@ export class RoutingPayer {
       call.answered = true;
       if (asked.status !== 402) return asked;
       try {
-        // Each fee gets the per-payment checks (`feeRefusal`) before the
-        // wallet is even unlocked, a voucher from a funded channel included.
-        const refused = feeRefusal(await this.deps.policy(), call.host);
-        if (refused !== null) throw new RouteSkipped(refused);
+        // The fee is reserved under the whole spend policy before the wallet
+        // is even unlocked, a voucher from a funded channel included.
+        call.fee = await this.reserveFee(call.host);
         call.channel = this.channelFor(await this.signer());
         if (until - this.now() <= 0) throw new RouteSkipped('busy');
       } catch (err) {
@@ -267,16 +267,18 @@ export class RoutingPayer {
           asked = undefined;
           return first;
         }
-        const deposit = paying ? call.deposits.find((d) => d.state === 'signed') : undefined;
+        const fee = paying ? call.fee : undefined;
         if (paying) call.paid = true;
-        // FAIL CLOSED: the deposit counts from the moment it is sent, so a lost
+        // FAIL CLOSED: the fee counts from the moment it is sent, so a lost
         // answer or a process killed mid-call leaves it counted.
-        if (deposit !== undefined) await this.commitDeposit(deposit);
+        if (fee !== undefined && (fee.state === 'reserved' || fee.state === 'refused')) {
+          await this.commitFee(fee);
+        }
         const response = await base(request);
         // Only an answered error proves it did not settle: the server settles
-        // nothing on a 4xx or 5xx.
-        if (deposit !== undefined && response.status >= 400) await this.releaseDeposit(deposit);
-        else if (deposit !== undefined) deposit.state = 'settled';
+        // nothing on a 4xx or 5xx, and a retry after it counts again.
+        if (fee?.state === 'sent' && response.status >= 400) await this.releaseFee(fee);
+        else if (fee?.state === 'sent') fee.state = 'settled';
         return response;
       };
       return wrapFetchWithPayment(watched, call.channel.http)(request);
@@ -291,7 +293,11 @@ export class RoutingPayer {
       });
     } finally {
       this.call = null;
-      await this.settleDeposits(call);
+      if (call.fee?.state === 'reserved') {
+        await call.fee.authorizer
+          .release(call.fee.reservationId)
+          .catch((err: unknown) => this.ledgerWarn(err));
+      }
     }
     if (call.skipped !== undefined) throw new RouteSkipped(call.skipped);
     // The router could not be reached: the free path is on the same host, so
@@ -324,30 +330,51 @@ export class RoutingPayer {
   }
 
   /**
-   * EACH RESERVED DEPOSIT ENDS IN THE LEDGER. It is committed as it is sent,
-   * so a lost answer leaves it counted whether or not it landed (an over-count
-   * of a few cents, never an under-count), and the SDK resyncs the channel on
-   * the next call. An answered 4xx or 5xx gives exactly that exposure back. A
-   * deposit signed but never sent releases its reservation (`settleDeposits`).
+   * THE FEE, RESERVED under the whole spend policy: the per-call limit, the
+   * day's budget against what the ledger counts, and the creator allowlist.
+   * A refusal skips the call to the free path, and the channel keeps its funds.
    */
-  private async commitDeposit(d: Deposit): Promise<void> {
-    // A ledger that cannot take the write stops the request: it is not sent.
-    await d.authorizer.commit(d.reservationId, d.amountAtomic, { nonce: d.key });
-    d.state = 'sent';
+  private async reserveFee(host: string): Promise<Fee> {
+    const authorizer = this.deps.authorizer(await this.deps.policy());
+    const auth = await authorizer.authorize({
+      mode: 'automatic',
+      amountAtomic: ROUTING_FEE_ATOMIC,
+      creator: host,
+    });
+    if (auth.decision !== 'allow') {
+      await authorizer.release(auth.reservationId);
+      throw new RouteSkipped(refusedWhy(auth.reason));
+    }
+    return {
+      authorizer,
+      reservationId: auth.reservationId,
+      key: `routing-fee:${auth.reservationId ?? randomUUID()}`,
+      state: 'reserved',
+    };
   }
 
-  private async releaseDeposit(d: Deposit): Promise<void> {
-    d.state = 'refused';
-    const released = await releaseUnchargedExposure(this.deps.dataDir, d.key, {
+  /**
+   * THE FEE ENDS IN THE LEDGER. It is committed as it is sent, so a lost
+   * answer leaves it counted whether or not it landed (an over-count of one
+   * fee, never an under-count). An answered 4xx or 5xx gives exactly that
+   * exposure back; a fee reserved but never sent releases its reservation.
+   */
+  private async commitFee(fee: Fee): Promise<void> {
+    // A ledger that cannot take the write stops the request: it is not sent.
+    await fee.authorizer.commit(
+      fee.state === 'reserved' ? fee.reservationId : undefined,
+      ROUTING_FEE_ATOMIC,
+      { nonce: fee.key },
+    );
+    fee.state = 'sent';
+  }
+
+  private async releaseFee(fee: Fee): Promise<void> {
+    fee.state = 'refused';
+    const released = await releaseUnchargedExposure(this.deps.dataDir, fee.key, {
       now: () => this.now(),
     });
-    if (released === null) this.ledgerWarn(new Error('the refused deposit stays counted'));
-  }
-
-  private async settleDeposits(call: Call): Promise<void> {
-    for (const d of call.deposits.filter((x) => x.state === 'signed')) {
-      await d.authorizer.release(d.reservationId).catch((err: unknown) => this.ledgerWarn(err));
-    }
+    if (released === null) this.ledgerWarn(new Error('the refused fee stays counted'));
   }
 
   private ledgerWarn(err: unknown): void {
@@ -364,8 +391,9 @@ export class RoutingPayer {
    * THE SDK'S `depositStrategy`, called right before it signs a deposit: the
    * size, and the refusals. The SDK's ceiling ($0.25) comes down to a smaller
    * per-call limit while that still covers {@link MIN_DEPOSIT_ATOMIC}; a wallet
-   * that cannot cover it, or a spend the authorizer denies (the daily budget,
-   * the creator allowlist), refuses the deposit and the call is not paid.
+   * that cannot cover it, or a router host off the allowlist, refuses the
+   * deposit and the call is not paid. It is channel funding, not spend, so the
+   * daily budget does not count it.
    */
   private async deposit(ctx: BatchSettlementDepositStrategyContext): Promise<bigint> {
     const call = this.call;
@@ -380,25 +408,10 @@ export class RoutingPayer {
     const left = call.until - this.now();
     if (left <= 0) this.refuse('busy');
     const payer = this.channel!.payer;
+    const refused = depositRefusal(policy, call.host, amount);
+    if (refused !== null) this.refuse(refused);
     const wallet = await this.deps.walletBalance(payer, Math.min(BALANCE_TIMEOUT_MS, left));
     if (wallet !== null && wallet < amount) this.refuse('wallet_low');
-    const authorizer = this.deps.authorizer(policy);
-    const auth = await authorizer.authorize({
-      mode: 'automatic',
-      amountAtomic: amount,
-      creator: call.host,
-    });
-    if (auth.decision !== 'allow') {
-      await authorizer.release(auth.reservationId);
-      this.refuse(refusedWhy(auth.reason));
-    }
-    call.deposits.push({
-      authorizer,
-      reservationId: auth.reservationId,
-      amountAtomic: amount,
-      key: `routing-deposit:${auth.reservationId ?? randomUUID()}`,
-      state: 'signed',
-    });
     return amount;
   }
 

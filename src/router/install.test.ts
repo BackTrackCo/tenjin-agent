@@ -138,7 +138,7 @@ const ADDRESS = '0x3c0D84055994c3062819Ce8730869D0aDeA4c3Bf';
 /** What a run that could not ask prints for the agent that ran it. */
 /** The routing fee's terms, as the selector shows them. */
 const FEE_TERMS =
-  'Routing costs $0.003 a call, paid from channel deposits of up to $0.25 that stay yours until spent; each deposit counts against these limits.';
+  'Routing costs $0.003 a call, paid from channel deposits of up to $0.25 that stay yours until spent; each fee counts against these limits as it is paid.';
 const ASK_LINES = [
   '! Automatic payments are off until the user approves a spend limit',
   `  Ask the user: May Tenjin pay for tool calls without asking you each time, up to $0.25 a call and $5 a day? ${FEE_TERMS} Using these limits or choosing your own also approves the routing fee.`,
@@ -497,7 +497,7 @@ function amounts(answers: (string | null)[]) {
 }
 
 const FEE_LINES =
-  '\nRouting costs $0.003 a call, paid from channel deposits of up to $0.25 that stay yours until spent; each deposit counts against these limits.\nUsing these limits or choosing your own also approves the routing fee.';
+  '\nRouting costs $0.003 a call, paid from channel deposits of up to $0.25 that stay yours until spent; each fee counts against these limits as it is paid.\nUsing these limits or choosing your own also approves the routing fee.';
 
 describe('install asks a person to approve the spend limits', () => {
   it('"Use these limits" names the routing fee and writes the defaults it showed', async () => {

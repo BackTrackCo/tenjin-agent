@@ -42,17 +42,39 @@ export function refusedWhy(reason: PolicyReason): string {
 }
 
 /**
- * THE DEPOSIT IS THE SPEND. It meets the whole policy once, the day's budget
- * included, when the SDK's `depositStrategy` reserves it. Each fee paid from
- * it then gets only the per-payment checks: the per-call limit, the creator
- * allowlist (the router's host) and an explicit zero daily limit. It is never
- * refused for the day's running total, which the deposit already consumed.
- * Null when those checks allow the fee.
+ * THE FEE IS THE SPEND: each one meets the whole spend policy as it is paid,
+ * the per-call limit, the day's budget against what the ledger counts (a 0
+ * refuses it) and the creator allowlist (the router's host). Null when the
+ * policy allows it. Doctor's reading of what the payer reserves per call.
  */
-export function feeRefusal(policy: SpendPolicy, host: string): string | null {
+export function feeRefusal(
+  policy: SpendPolicy,
+  host: string,
+  sessionSpentAtomic: bigint,
+): string | null {
+  const evaluation = evaluateSpendPolicy(policy, {
+    mode: 'automatic',
+    amountAtomic: ROUTING_FEE_ATOMIC,
+    creator: host,
+    sessionSpentAtomic,
+  });
+  return evaluation.decision === 'allow' ? null : refusedWhy(evaluation.reason);
+}
+
+/**
+ * THE DEPOSIT IS CHANNEL FUNDING, the wallet's own until spent, so it never
+ * counts against the daily budget: only the per-call limit and the creator
+ * allowlist bound it here (the wallet's balance is the payer's to read). Null
+ * when they allow it.
+ */
+export function depositRefusal(
+  policy: SpendPolicy,
+  host: string,
+  amountAtomic: bigint,
+): string | null {
   const evaluation = evaluateSpendPolicy(
-    { ...policy, sessionBudgetAtomic: policy.sessionBudgetAtomic === 0n ? 0n : null },
-    { mode: 'automatic', amountAtomic: ROUTING_FEE_ATOMIC, creator: host, sessionSpentAtomic: 0n },
+    { ...policy, sessionBudgetAtomic: null },
+    { mode: 'automatic', amountAtomic, creator: host, sessionSpentAtomic: 0n },
   );
   return evaluation.decision === 'allow' ? null : refusedWhy(evaluation.reason);
 }
@@ -97,7 +119,8 @@ const UNPAID: Record<string, { reason: string; fix: string }> = {
     fix: 'Run `tenjin doctor`.',
   },
   budget_reached: {
-    reason: 'the daily spend limit has no room left for the routing fee or its deposit',
+    reason:
+      'the daily spend limit has no room left for the routing fee (the channel keeps its funds for the next window)',
     fix: 'Run `tenjin doctor`.',
   },
   not_allowlisted: {

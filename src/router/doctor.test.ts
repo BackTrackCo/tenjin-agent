@@ -71,9 +71,14 @@ describe('routingFeeBlock', () => {
       'limit_below_deposit',
     ],
     [
-      'a daily limit with no room for the deposit',
-      { policy: { ...POLICY, sessionBudgetAtomic: 100_000n } },
+      'a daily limit with no room for the fee',
+      { policy: { ...POLICY, sessionBudgetAtomic: 2_000n } },
       'budget_reached',
+    ],
+    [
+      'nothing for a daily limit below the deposit, which is not spend',
+      { policy: { ...POLICY, sessionBudgetAtomic: 100_000n } },
+      null,
     ],
     [
       'an allowlist without the router',
