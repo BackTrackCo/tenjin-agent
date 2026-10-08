@@ -20,6 +20,7 @@ import type { CommandContext, CommandResult } from '../context';
 import { agentsWithoutRequestTool } from './agent-tools';
 import {
   CHANNEL_DEPOSIT_ATOMIC,
+  feeRefusal,
   MIN_DEPOSIT_ATOMIC,
   payerDir,
   ROUTING_FEE_ATOMIC,
@@ -121,15 +122,13 @@ export async function runRouterDoctor(
     ),
   );
   const rawConfig = await loadRawConfig(ctx.dataDir);
+  const unanswered =
+    rawConfig.maxAutoSpend === undefined ? { limits: shownLimits(rawConfig) } : null;
   checks.push(
-    spendCheck(
-      settings.policy.maxAutoSpendAtomic,
-      settings.policy.sessionBudgetAtomic,
-      rawConfig.maxAutoSpend === undefined ? { limits: shownLimits(rawConfig) } : null,
-    ),
+    spendCheck(settings.policy.maxAutoSpendAtomic, settings.policy.sessionBudgetAtomic, unanswered),
   );
   checks.push(experimentalCheck(settings.experimentalBazaar));
-  checks.push(await routingFeeCheck(ctx, settings, deps.fetchImpl));
+  checks.push(await routingFeeCheck(ctx, settings, deps.fetchImpl, unanswered));
   checks.push(...(await walletCheck(ctx)));
   const now = deps.now?.() ?? Date.now();
   const probe = await probeRouter(settings.baseUrl, {
@@ -163,19 +162,22 @@ export async function runRouterDoctor(
       details: data,
     });
   }
+  return { data, humanLines: doctorLines(checks) };
+}
+
+/** The human report: one line a check, and under each row to look at, its
+ *  fix, as `--json` carries it. */
+export function doctorLines(checks: RouterCheck[]): string[] {
   const bad = checks.filter((c) => c.status !== 'ok').length;
-  return {
-    data,
-    humanLines: [
-      ...checks.map(
-        (c) =>
-          `${c.status === 'ok' ? 'ok  ' : c.status === 'warn' ? 'warn' : 'fail'}  ${c.name}: ${c.detail}`,
-      ),
-      bad === 0
-        ? `${checks.length} checks, all pass.`
-        : `${checks.length} checks, ${bad} to look at.`,
-    ],
-  };
+  return [
+    ...checks.flatMap((c) => [
+      `${c.status === 'ok' ? 'ok  ' : c.status === 'warn' ? 'warn' : 'fail'}  ${c.name}: ${c.detail}`,
+      ...(c.status !== 'ok' && c.fix !== undefined ? [`      fix: ${c.fix}`] : []),
+    ]),
+    bad === 0
+      ? `${checks.length} checks, all pass.`
+      : `${checks.length} checks, ${bad} to look at.`,
+  ];
 }
 
 /**
@@ -499,6 +501,7 @@ async function routingFeeCheck(
   ctx: CommandContext,
   settings: ResolvedSettings,
   fetchImpl: typeof fetch | undefined,
+  unanswered: { limits: RouterLimits } | null,
 ): Promise<RouterCheck> {
   let host: string;
   try {
@@ -521,6 +524,15 @@ async function routingFeeCheck(
     provider: (await walletFileExists(ctx.dataDir)) ? resolveWalletProvider(ctx) : null,
     ...(fetchImpl !== undefined ? { fetchImpl } : {}),
   }).catch(() => null);
+  return routingFeeRow(why, host, unanswered);
+}
+
+/** The routing-fee row for what {@link routingFeeBlock} found. */
+export function routingFeeRow(
+  why: string | null,
+  host: string,
+  unanswered: { limits: RouterLimits } | null,
+): RouterCheck {
   const u = why === null ? null : unpaid(why);
   if (why === null || u === null) {
     return {
@@ -528,6 +540,17 @@ async function routingFeeCheck(
       status: 'ok',
       required: false,
       detail: `$${usd(ROUTING_FEE_ATOMIC)} a call, paid from channel deposits of up to $${usd(CHANNEL_DEPOSIT_ATOMIC)} that count against the spend limits`,
+    };
+  }
+  if (why === 'limit_below_deposit' && unanswered !== null) {
+    // The zero is the open spend question, not a limit anyone chose: the fix
+    // is the question itself, with the fee terms it approves.
+    return {
+      name: 'routing fee',
+      status: 'warn',
+      required: false,
+      detail: 'the spend limits are not answered yet, so routing calls take the free path',
+      fix: `Answer the spend question: ${spendQuestion(unanswered.limits)} For a yes, run \`${ACCEPT_COMMAND}\`; for other amounts, ${OWN_LIMITS_COMMANDS}.`,
     };
   }
   const fixes: Record<string, string> = {
@@ -566,6 +589,12 @@ export async function routingFeeBlock(input: RoutingFeeInput): Promise<string | 
   if (verified !== undefined && verified !== null && verified.status !== 'verified') {
     return 'wallet_locked';
   }
+  const ledger = await readSpendSummary(input.dataDir);
+  const spent = ledger === null ? 0n : spentOf(ledger);
+  // The fee itself first, as the payer checks it on every call: a channel
+  // with credit pays nothing the spend policy refuses.
+  const refused = feeRefusal(policy, input.host, spent);
+  if (refused !== null) return refused;
   const { address } = await describeWallet(provider);
   if ((await channelCredit(input.dataDir, address)) >= ROUTING_FEE_ATOMIC) return null;
   const deposit =
@@ -573,12 +602,11 @@ export async function routingFeeBlock(input: RoutingFeeInput): Promise<string | 
       ? policy.maxAutoSpendAtomic
       : CHANNEL_DEPOSIT_ATOMIC;
   if (deposit < MIN_DEPOSIT_ATOMIC) return 'limit_below_deposit';
-  const ledger = await readSpendSummary(input.dataDir);
   const evaluation = evaluateSpendPolicy(policy, {
     mode: 'automatic',
     amountAtomic: deposit,
     creator: input.host,
-    sessionSpentAtomic: ledger === null ? 0n : spentOf(ledger),
+    sessionSpentAtomic: spent,
   });
   if (evaluation.reason === 'not_allowlisted') return 'not_allowlisted';
   if (evaluation.reason === 'session_budget_exceeded') return 'budget_reached';
@@ -653,7 +681,7 @@ function spendCheck(
       status: 'fail',
       required: true,
       detail: 'maxAutoSpend is 0, so every lookup needs approval and none can pay',
-      fix: 'Run `tenjin install` in a terminal to approve the limits, or `tenjin config set maxAutoSpend 0.10`.',
+      fix: 'Set a per-call limit with `tenjin config set maxAutoSpend <usd>`.',
     };
   }
   const budget =

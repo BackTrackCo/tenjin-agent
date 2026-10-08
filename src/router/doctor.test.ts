@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { SpendPolicy } from '../lib/policy';
 import { testWalletProvider } from '../lib/read-test-utils';
 import type { WalletProvider } from '../lib/wallet';
-import { routingFeeBlock, type RoutingFeeInput } from './doctor';
+import { doctorLines, routingFeeBlock, routingFeeRow, type RoutingFeeInput } from './doctor';
 import { payerDir } from './fee';
 
 /**
@@ -84,6 +84,19 @@ describe('routingFeeBlock', () => {
     expect(await routingFeeBlock(input(over as Partial<RoutingFeeInput>))).toBe(why);
   });
 
+  it.each<[string, Partial<SpendPolicy>, string]>([
+    ['a per-call limit of 0', { maxAutoSpendAtomic: 0n }, 'limit_below_deposit'],
+    ['a daily limit of 0', { sessionBudgetAtomic: 0n }, 'budget_reached'],
+    ['an allowlist without the router', { allowlistCreators: ['someone.else'] }, 'not_allowlisted'],
+  ])('names %s even while the channel still holds a fee', async (_label, change, why) => {
+    const { address } = await testWalletProvider().describe();
+    await new FileClientChannelStorage({ directory: payerDir(dir, address) }).set(
+      `0x${'ab'.repeat(32)}`,
+      { balance: '250000', chargedCumulativeAmount: '9000' },
+    );
+    expect(await routingFeeBlock(input({ policy: { ...POLICY, ...change } }))).toBe(why);
+  });
+
   it('needs no deposit while the channel still holds a fee, whatever the wallet holds', async () => {
     const { address } = await testWalletProvider().describe();
     await new FileClientChannelStorage({ directory: payerDir(dir, address) }).set(
@@ -91,5 +104,46 @@ describe('routingFeeBlock', () => {
       { balance: '250000', chargedCumulativeAmount: '9000' },
     );
     expect(await routingFeeBlock(input({ fetchImpl: rpc(0n) }))).toBeNull();
+  });
+});
+
+describe('routingFeeRow', () => {
+  it('points an unanswered limit at the spend question, with its fee terms and one-step yes', () => {
+    const row = routingFeeRow('limit_below_deposit', 'tenjin.sh', {
+      limits: { maxAutoSpend: '250000', sessionBudget: '5000000' },
+    });
+    expect(row.status).toBe('warn');
+    expect(row.fix).toContain('May Tenjin pay for tool calls without asking you each time');
+    expect(row.fix).toContain('Routing costs $0.003 a call');
+    expect(row.fix).toContain('`tenjin install --accept-defaults`');
+    expect(row.fix).not.toContain('config set maxAutoSpend 0.25');
+  });
+
+  it('keeps the raise command for a limit the user chose', () => {
+    expect(routingFeeRow('limit_below_deposit', 'tenjin.sh', null).fix).toBe(
+      'Raise it with `tenjin config set maxAutoSpend 0.25`.',
+    );
+  });
+});
+
+describe('doctorLines', () => {
+  it('prints the fix under a row to look at, and none under a passing row', () => {
+    expect(
+      doctorLines([
+        { name: 'node', status: 'ok', required: true, detail: 'v24', fix: 'unused' },
+        {
+          name: 'spend',
+          status: 'warn',
+          required: false,
+          detail: 'the spend limits are not answered yet',
+          fix: 'Run `tenjin install --accept-defaults`.',
+        },
+      ]),
+    ).toEqual([
+      'ok    node: v24',
+      'warn  spend: the spend limits are not answered yet',
+      '      fix: Run `tenjin install --accept-defaults`.',
+      '2 checks, 1 to look at.',
+    ]);
   });
 });

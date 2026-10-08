@@ -1061,6 +1061,8 @@ describe('the doctor this release registers', () => {
       expect(out instanceof CliError ? out.message : '').not.toContain('maxAutoSpend');
     } else {
       expect((out as CliError).message).toContain('maxAutoSpend is 0');
+      // Install keeps a 0 it finds and never asks, so only `config set` changes it.
+      expect(spend?.fix).toBe('Set a per-call limit with `tenjin config set maxAutoSpend <usd>`.');
     }
     expect(checks.find((c) => c.name === 'router')?.status).toBe('fail');
   });
