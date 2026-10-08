@@ -1065,20 +1065,25 @@ describe('the doctor this release registers', () => {
     expect(checks.find((c) => c.name === 'router')?.status).toBe('fail');
   });
 
-  it('names a routing backoff in force, with the seconds left', async () => {
+  it('names a routing backoff in force while the router is still not reached, and ends it once it is', async () => {
     const { runRouterDoctor } = await import('./doctor');
-    const { writeRouterMemo } = await import('./router-memo');
+    const { readRouterMemo, writeRouterMemo } = await import('./router-memo');
     await runRouterInstall({}, ctx(), deps());
     const now = 1_800_000_000_000;
     type Check = { name: string; status: string; detail: string };
-    const routerLine = async () => {
+    const refused = (async () => {
+      throw Object.assign(new TypeError('fetch failed'), {
+        cause: Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }),
+      });
+    }) as typeof fetch;
+    const routerLine = async (fetchImpl: typeof fetch = probe400) => {
       const out = await runRouterDoctor(ctx(), {
         homeDir: home,
         cwd: work,
         env: {},
         which: () => true,
         readMcp: async () => true,
-        fetchImpl: probe400,
+        fetchImpl,
         now: () => now,
       }).catch((e: unknown) => e);
       const body =
@@ -1093,11 +1098,16 @@ describe('the doctor this release registers', () => {
       now: now - 15_000,
       ttlMs: 60_000,
     });
-    const during = await routerLine();
-    expect(during.check?.status).toBe('warn');
+    const during = await routerLine(refused);
+    expect(during.check?.status).toBe('fail');
     expect(during.check?.detail).toContain(
       'routing calls skip the router for 45s more, after one did not reach it',
     );
+    // A probe the router answers ends the backoff for every routing leg.
+    const after = await routerLine();
+    expect(after.check?.status).toBe('ok');
+    expect(after.check?.detail).not.toContain('skip the router');
+    expect(await readRouterMemo(data, 'unreachable', before.baseUrl, now)).toBeNull();
   });
 
   it('fails with the command that fixes it on a machine that never installed', async () => {

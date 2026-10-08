@@ -39,7 +39,7 @@ import {
 import { routerSettings, type RouterSettings } from './settings';
 import { REQUEST_TOOL } from './names';
 import { probeRouter, type RouterCheck } from './reachability';
-import { readRouterMemo, type RouterMemo } from './router-memo';
+import { clearRouterMemo, readRouterMemo, type RouterMemo } from './router-memo';
 import {
   ACCEPT_COMMAND,
   OWN_LIMITS_COMMANDS,
@@ -132,17 +132,24 @@ export async function runRouterDoctor(
   checks.push(await routingFeeCheck(ctx, settings, deps.fetchImpl));
   checks.push(...(await walletCheck(ctx)));
   const now = deps.now?.() ?? Date.now();
-  checks.push(
-    withBackoff(
-      await probeRouter(settings.baseUrl, {
-        timeoutMs: ctx.flags.timeout,
-        env,
-        ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
-      }),
-      await readRouterMemo(ctx.dataDir, 'unreachable', settings.baseUrl, now),
-      now,
-    ),
-  );
+  const probe = await probeRouter(settings.baseUrl, {
+    timeoutMs: ctx.flags.timeout,
+    env,
+    ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+  });
+  // A probe the router answered ends the routing legs' backoff at once.
+  if (probe.status === 'ok') {
+    await clearRouterMemo(ctx.dataDir, 'unreachable', settings.baseUrl);
+    checks.push(probe);
+  } else {
+    checks.push(
+      withBackoff(
+        probe,
+        await readRouterMemo(ctx.dataDir, 'unreachable', settings.baseUrl, now),
+        now,
+      ),
+    );
+  }
   const agents = await subagentsCheck(deps.cwd ?? process.cwd(), deps.homeDir ?? homedir());
   if (agents !== null) checks.push(agents);
 
@@ -172,9 +179,8 @@ export async function runRouterDoctor(
 }
 
 /**
- * The routing legs' backoff, named on the router line while it lasts: the
- * probe can answer now while the legs still skip the router for a few seconds
- * after a call that did not reach it. It ends by itself.
+ * The routing legs' backoff, named on a router line whose probe failed too.
+ * It ends by itself after its minute, or when a probe here reaches the router.
  */
 function withBackoff(check: RouterCheck, memo: RouterMemo | null, now: number): RouterCheck {
   if (memo === null) return check;

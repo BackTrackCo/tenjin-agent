@@ -31,8 +31,9 @@ When a routing call cannot reach the router (DNS, TLS, a refused connection,
 a proxy refusing the tunnel), every hook leg skips the router for the next 60
 seconds and the native tool runs at once, instead of each prompt, search and
 hand-off waiting out the gate. A slow answer, a dropped socket or an answer of
-any status does not start the pause. An answer from the router clears it,
-and `tenjin doctor` names the pause with the seconds left.
+any status does not start the pause. It ends after 60 seconds, or at once
+when `tenjin doctor` reaches the router; while doctor cannot, it names the
+pause with the seconds left.
 
 The install report no longer names a `hooksDir` for the router's hook entries,
 which use no directory. The README keeps one sentence on

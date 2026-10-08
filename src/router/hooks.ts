@@ -1465,8 +1465,8 @@ function hookOutcome(decision: HookDecision | null): string {
  *
  *  BACKOFF: a call that could not reach the router starts the machine's
  *  `unreachable` memo, and for its minute every leg skips the call and the
- *  native tool runs at once, rather than each one waiting out the gate. A call
- *  the router answered, with any status, clears it. */
+ *  native tool runs at once, rather than each one waiting out the gate. It
+ *  ends after its minute, or when `tenjin doctor` reaches the router. */
 async function decide(
   { packet }: Sealed,
   deps: HookDeps,

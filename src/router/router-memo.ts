@@ -12,7 +12,7 @@ import { writeFileAtomic } from '../lib/atomic-json';
  *   a refused connection, a proxy refusing the tunnel; see `isUnreachable`). For
  *   {@link UNREACHABLE_BACKOFF_MS} every leg skips the router and the native
  *   tool runs at once, instead of each prompt and search waiting out the gate.
- *   A call that gets an answer clears it.
+ *   Doctor's probe ends it early when it reaches the router.
  * - `paid-path-absent`: the router answered no paid path (the fee is off), so
  *   calls take the free path without asking for an hour.
  *
