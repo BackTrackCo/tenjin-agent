@@ -1,7 +1,7 @@
 name: skill-drift
 
 # The vendored skills/tenjin/SKILL.md is a byte-for-byte mirror of the canonical
-# tenjin.blog/skills.md. Re-run the (dep-free) sync and compare, in two modes:
+# tenjin.sh/skills.md. Re-run the (dep-free) sync and compare, in two modes:
 #
 #   pull_request  -> pure check, read-only, fails on any diff so a hand-edit
 #                    never slips through.

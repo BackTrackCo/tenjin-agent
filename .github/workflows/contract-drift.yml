@@ -3,7 +3,7 @@ name: contract-drift
 # The committed openapi fixture pins the contract per-PR (offline, inside CI's
 # `pnpm check`). THIS workflow re-runs the same pins against the LIVE deployment
 # so the server moving under a released CLI surfaces on its own, without gating
-# unrelated PRs on tenjin.blog's availability (same pattern as skill-drift.yml).
+# unrelated PRs on tenjin.sh's availability (same pattern as skill-drift.yml).
 # The dispatch input also runs the wallet-free live e2e legs (lookup/outcome
 # loop, free-hit buy, paid 402 inspect); the paid, USDC-settling e2e leg is
 # never run from CI and stays a local, deliberate act.
@@ -15,7 +15,7 @@ on:
       base_url:
         description: Deployment to walk (default prod)
         required: false
-        default: https://tenjin.blog
+        default: https://tenjin.sh
       run_e2e:
         description: Also run the wallet-free live e2e legs
         type: boolean
@@ -44,9 +44,9 @@ jobs:
       - name: Contract pins vs live deploy
         run: pnpm vitest run src/contract.test.ts
         env:
-          TENJIN_CONTRACT_BASE_URL: ${{ inputs.base_url || 'https://tenjin.blog' }}
+          TENJIN_CONTRACT_BASE_URL: ${{ inputs.base_url || 'https://tenjin.sh' }}
       - name: Live e2e (wallet-free legs)
         if: ${{ inputs.run_e2e == true }}
         run: pnpm vitest run src/live-e2e.test.ts
         env:
-          TENJIN_E2E_BASE_URL: ${{ inputs.base_url || 'https://tenjin.blog' }}
+          TENJIN_E2E_BASE_URL: ${{ inputs.base_url || 'https://tenjin.sh' }}
