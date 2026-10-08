@@ -1522,7 +1522,12 @@ async function decide(
       ttlMs: UNREACHABLE_BACKOFF_MS,
       detail: outcome.reason,
     });
-  } else {
+  } else if (
+    outcome.status === 'decided' ||
+    (outcome.status === 'failed' && outcome.noAnswer !== true)
+  ) {
+    // Only an answer ends it: a concurrent call that timed out, or got no
+    // answer for any other reason, leaves another call's backoff in place.
     await clearRouterMemo(deps.dataDir, 'unreachable', baseUrl);
   }
   if (outcome.status === 'failed') {

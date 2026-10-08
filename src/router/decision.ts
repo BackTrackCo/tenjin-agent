@@ -427,6 +427,8 @@ export type DecisionOutcome<T> =
       freePath?: string;
       /** The router could not be reached at all ({@link isUnreachable}). */
       unreachable?: true;
+      /** No answer came back at all: a transport failure or a timeout. */
+      noAnswer?: true;
     }
   /** The paid path gave no answer ({@link RouteSkipped}) and no time was left
    *  for the free path: the native tool runs. */
@@ -570,6 +572,7 @@ function readDecision<T extends z.ZodTypeAny>(
       status: 'failed',
       reason: fetchFailureToCliError(response).message,
       ...(isUnreachable(response) ? { unreachable: true as const } : {}),
+      ...(response.status === undefined ? { noAnswer: true as const } : {}),
     };
   }
   if (response.status < 200 || response.status >= 300) {
