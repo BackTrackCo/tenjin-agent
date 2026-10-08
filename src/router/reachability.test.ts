@@ -125,7 +125,7 @@ describe('probeRouter', () => {
       'https://preview.example.test/api/x402-router is not a Tenjin router (it asked for credentials)',
     );
     expect(check.fix).toBe(
-      'Set the router URL with `tenjin config set baseUrl https://tenjin.blog`.',
+      'Set the router URL with `tenjin config set baseUrl https://tenjin.sh`.',
     );
   });
 

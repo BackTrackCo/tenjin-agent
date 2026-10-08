@@ -409,7 +409,7 @@ describe('tenjin install', () => {
   });
 
   it('still succeeds, with a warning and the fix, when the router does not answer', async () => {
-    // What an egress proxy that blocks tenjin.blog sends: a 403 with none of
+    // What an egress proxy that blocks tenjin.sh sends: a 403 with none of
     // the headers the deployment adds.
     const blocked = (async () => new Response('Forbidden', { status: 403 })) as typeof fetch;
     const result = await runRouterInstall({}, ctx(), deps({ fetchImpl: blocked }));
@@ -417,7 +417,7 @@ describe('tenjin install', () => {
       .router;
     expect(router.status).toBe('warn');
     expect(router.detail).toContain('a proxy, firewall or VPN on the way most likely refused');
-    expect(router.fix).toContain('Allow tenjin.blog through your proxy, firewall or VPN');
+    expect(router.fix).toContain('Allow tenjin.sh through your proxy, firewall or VPN');
     expect(router.fix).not.toContain('config set baseUrl');
     expect(result.humanLines).toContain(`! The router did not answer: ${router.detail}`);
     expect(result.humanLines).toContain(`  ${router.fix}`);
