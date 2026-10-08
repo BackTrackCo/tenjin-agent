@@ -142,11 +142,11 @@ describe('RoutingPayer', () => {
     expect(router.settledFees).toBe(1);
   });
 
-  it.each([
+  it.each<[string, Partial<SpendPolicy>, string]>([
     ['a daily limit of 0', { sessionBudgetAtomic: 0n }, 'budget_reached'],
     ['a day with no room left', { sessionBudgetAtomic: 250_000n }, 'budget_reached'],
     ['an allowlist without the router', { allowlistCreators: ['someone-else'] }, 'not_allowlisted'],
-  ] as const)('pays no voucher from a funded channel under %s', async (_label, change, why) => {
+  ])('pays no voucher from a funded channel under %s', async (_label, change, why) => {
     const router = new FakeRouter();
     let policy: SpendPolicy = TEST_POLICY;
     const p = payer(router, { policy: async () => policy });

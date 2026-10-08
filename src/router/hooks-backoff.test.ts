@@ -86,7 +86,7 @@ function socketError(code: string): TypeError {
 }
 
 /** A fetch that answers only when its signal aborts, as a slow router does. */
-const hangs = (async (input: RequestInfo | URL, init?: RequestInit) =>
+const hangs = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) =>
   new Promise<Response>((_resolve, reject) => {
     new Request(input, init).signal.addEventListener('abort', () =>
       reject(new DOMException('The operation was aborted.', 'AbortError')),
@@ -143,7 +143,7 @@ describe('the routing legs back off a router they cannot reach', () => {
 
   it('does not start it on the call running out of its own time', async () => {
     let calls = 0;
-    const slow = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const slow = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
       calls += 1;
       return hangs(input, init);
     }) as typeof fetch;
@@ -181,7 +181,7 @@ describe('the routing legs back off a router they cannot reach', () => {
   it('retries a reset socket on the free path, on a fresh connection, and starts nothing', async () => {
     const fake = new FakeRouter();
     const seen: string[] = [];
-    const resetOnPaid = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const resetOnPaid = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
       const path = new URL(new Request(input, init).url).pathname;
       seen.push(path);
       if (path === ROUTE_PAID_PATH) throw socketError('ECONNRESET');
@@ -195,7 +195,7 @@ describe('the routing legs back off a router they cannot reach', () => {
 
   it('does not start it from the free path a paid attempt fell back to', async () => {
     const fake = new FakeRouter();
-    const paidErrsFreeRefuses = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const paidErrsFreeRefuses = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
       const path = new URL(new Request(input, init).url).pathname;
       if (path === ROUTE_PAID_PATH) return new Response('{}', { status: 503 });
       throw socketError('ECONNREFUSED');
