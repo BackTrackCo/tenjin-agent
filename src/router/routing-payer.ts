@@ -18,10 +18,12 @@ import {
   isUnreachable,
   PAID_PATH_ABSENT,
   PAYMENT_FAILED,
+  DEADLINE_AFTER_PAYMENT_SENT,
   RouteSkipped,
   type DecisionRoute,
 } from './decision';
 import { CliError } from '../lib/errors';
+import { DEPOSIT_GATE_TIMEOUT_MS, GATE_TIMEOUT_MS } from './gate';
 import {
   CHANNEL_DEPOSIT_ATOMIC,
   depositRefusal,
@@ -67,7 +69,11 @@ import { readRouterMemo, writeRouterMemo } from './router-memo';
  *   the channel's funds in place for the next window.
  * - THE TIMEOUT. The wrapper runs inside `httpRequest`, whose deadline is the
  *   caller's, and the SDK's chain reads and the wallet read are each cut at
- *   what is left of it, so a leg returns inside the hook's 5 s.
+ *   what is left of it, so a leg returns inside the hook's 5 s. A call that
+ *   carries a deposit gets {@link DEPOSIT_GATE_TIMEOUT_MS} in place of the
+ *   gate's 3.5 s. A payment already sent when the time runs out is not cut:
+ *   the call returns, and the request finishes in the background
+ *   ({@link DETACHED_CEILING_MS} at most) so the SDK and the ledger record it.
  * - THE FREE PATH. A call this cannot pay (a refusal above, a failed or
  *   refused payment, a server error) throws `RouteSkipped` with the reason,
  *   and the caller sends it to the free path. The server is asked before the
@@ -90,6 +96,11 @@ import { readRouterMemo, writeRouterMemo } from './router-memo';
 export const ROUTING_SPEND_CAP = '$0.05';
 /** The SDK's default multiplier, spelled out because the deposit is cap × it. */
 export const DEPOSIT_MULTIPLIER = 5;
+
+/** A deposit call's budget past the caller's: the hook leg's rest. */
+const DEPOSIT_EXTRA_MS = DEPOSIT_GATE_TIMEOUT_MS - GATE_TIMEOUT_MS;
+/** How long a paid request still out at its call's deadline may run on. */
+export const DETACHED_CEILING_MS = 15_000;
 
 /** A server that answers no paid path is asked again after an hour. */
 const ABSENT_TTL_MS = 60 * 60_000;
@@ -157,8 +168,16 @@ interface Fee {
 /** What the call in progress brings to the SDK's callbacks. */
 interface Call {
   host: string;
-  /** When the caller's budget ends. */
+  /** When the caller's budget ends; later once the SDK sizes a deposit. */
   until: number;
+  /** The SDK sized a deposit for this call. */
+  deposit?: boolean;
+  /** Its payment was out when its budget ended: it finishes in the background. */
+  detached?: boolean;
+  /** Its budget ended before anything was paid. */
+  expired?: boolean;
+  /** What `httpRequest` returned. */
+  result?: HttpResult;
   /** Why a check refused to pay; the wrapper rethrows the error as its own. */
   skipped?: string;
   /** Whether a request carrying a payment went out. */
@@ -190,7 +209,11 @@ const CHANNEL_BUSY_ERROR = 'invalid_batch_settlement_evm_channel_busy';
 export class RoutingPayer {
   private channel: Channel | null = null;
   private call: Call | null = null;
+  /** The call `pay` ran last, for its one diagnostic line. */
+  private last: Call | null = null;
   private queue: Promise<unknown> = Promise.resolve();
+  /** A detached request still finishing; the next call waits for it. */
+  private tail: Promise<void> = Promise.resolve();
 
   constructor(private readonly deps: RoutingPayerDeps) {}
 
@@ -207,8 +230,9 @@ export class RoutingPayer {
       path: ROUTE_PAID_PATH,
       send: (url, options) => {
         // The caller's budget starts now, not when this call's turn comes.
-        const until = this.now() + options.timeoutMs;
-        return this.turn(() => this.pay(url, options, until));
+        const sent = this.now();
+        const until = sent + options.timeoutMs;
+        return this.turn(() => this.noted(sent, () => this.pay(url, options, until)));
       },
     };
   }
@@ -223,11 +247,128 @@ export class RoutingPayer {
     );
   }
 
-  /** Calls inside one process take turns on its channel. */
+  /** Calls inside one process take turns on its channel, a detached
+   *  request's tail included, so none starts from a stale channel. */
   private turn<T>(run: () => Promise<T>): Promise<T> {
     const next = this.queue.then(run, run);
-    this.queue = next.catch(() => undefined);
+    this.queue = next.catch(() => undefined).then(() => this.tail);
     return next;
+  }
+
+  /** One stderr line for a call the paid path did not answer; a detached
+   *  one says it when its request ends. */
+  private async noted(sent: number, run: () => Promise<HttpResult>): Promise<HttpResult> {
+    this.last = null;
+    try {
+      return await run();
+    } catch (err) {
+      // Set by `run`, which the narrowing above cannot see.
+      const call = this.last as Call | null;
+      if (err instanceof RouteSkipped && call?.detached !== true) this.note(err.why, call, sent);
+      throw err;
+    }
+  }
+
+  private note(why: string, call: Call | null, sent: number, late?: string): void {
+    const result = call?.result;
+    const cause =
+      late ??
+      (call === null
+        ? 'queued'
+        : call.skipped !== undefined
+          ? 'refused'
+          : result === undefined
+            ? 'none'
+            : result.ok
+              ? `http ${result.status}`
+              : call.expired === true
+                ? 'timeout'
+                : result.kind);
+    const stage =
+      call === null
+        ? 'queue'
+        : call.paid
+          ? call.deposit === true
+            ? 'deposit'
+            : 'voucher'
+          : result?.ok === true
+            ? 'answer'
+            : 'challenge';
+    this.warn(`${why} (cause ${cause}, ${this.now() - sent}ms, stage ${stage})`);
+  }
+
+  /**
+   * THE DEADLINE CUTS NOTHING ALREADY PAID. Before a payment goes out, the
+   * call's budget aborts it as always. Once one is out, aborting would lose
+   * the answer that records it (the SDK's channel and the ledger) while the
+   * server settles it anyway, so the call returns at its deadline and the
+   * request runs on here, up to {@link DETACHED_CEILING_MS}; the next call
+   * waits for it. `httpRequest`'s own timeout is the outer bound.
+   */
+  private detachable(call: Call, sent: number, run: typeof fetch): typeof fetch {
+    return (input, init) => {
+      const caller = init?.signal ?? undefined;
+      const own = new AbortController();
+      const work = run(input, { ...init, signal: own.signal });
+      return new Promise<Response>((resolve, reject) => {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const settle = () => {
+          clearTimeout(timer);
+          caller?.removeEventListener('abort', onAbort);
+        };
+        const stop = (reason: unknown) => {
+          settle();
+          if (!call.paid) return own.abort(reason);
+          call.detached = true;
+          this.tail = this.finishDetached(call, sent, work, own);
+          reject(reason);
+        };
+        const onAbort = () => stop(caller?.reason);
+        // The call's own budget, which a deposit lengthens while it runs.
+        const check = () => {
+          const left = call.until - this.now();
+          if (left > 0) timer = setTimeout(check, left);
+          else {
+            call.expired = true;
+            stop(new DOMException('The routing call ran out of time.', 'TimeoutError'));
+          }
+        };
+        check();
+        if (caller?.aborted === true) onAbort();
+        else caller?.addEventListener('abort', onAbort);
+        work.then(
+          (response) => {
+            settle();
+            resolve(response);
+          },
+          (err: unknown) => {
+            settle();
+            reject(err);
+          },
+        );
+      });
+    };
+  }
+
+  /** The detached request's end: its answer read and dropped, its one line. */
+  private async finishDetached(
+    call: Call,
+    sent: number,
+    work: Promise<Response>,
+    own: AbortController,
+  ): Promise<void> {
+    const ceiling = setTimeout(() => own.abort(), DETACHED_CEILING_MS);
+    ceiling.unref?.();
+    try {
+      const response = await work;
+      await response.arrayBuffer().catch(() => undefined);
+      const why = response.ok ? DEADLINE_AFTER_PAYMENT_SENT : PAYMENT_FAILED;
+      this.note(why, call, sent, `late http ${response.status}`);
+    } catch {
+      this.note(PAYMENT_FAILED, call, sent, own.signal.aborted ? 'late ceiling' : 'late network');
+    } finally {
+      clearTimeout(ceiling);
+    }
   }
 
   /**
@@ -293,12 +434,14 @@ export class RoutingPayer {
       return wrapFetchWithPayment(watched, call.channel.http)(request);
     };
     this.call = call;
+    this.last = call;
     let response: HttpResult;
     try {
-      response = await httpRequest(url, {
+      response = call.result = await httpRequest(url, {
         ...options,
-        timeoutMs: until - this.now(),
-        fetchImpl: askFirst,
+        // The outer bound: a deposit's budget, which a call without one never reaches.
+        timeoutMs: until + DEPOSIT_EXTRA_MS - this.now(),
+        fetchImpl: this.detachable(call, until - options.timeoutMs, askFirst),
       });
     } finally {
       this.call = null;
@@ -316,7 +459,9 @@ export class RoutingPayer {
       throw new RouteSkipped(PAYMENT_FAILED, response);
     }
     // No answer, a failed payment or a server error: the free path takes it.
-    if (!response.ok) throw new RouteSkipped(PAYMENT_FAILED);
+    if (!response.ok) {
+      throw new RouteSkipped(call.detached === true ? DEADLINE_AFTER_PAYMENT_SENT : PAYMENT_FAILED);
+    }
     if (!call.paid && response.status === 404) {
       // The server has no paid path: the free path, asked again in an hour.
       await writeRouterMemo(this.deps.dataDir, 'paid-path-absent', url, {
@@ -436,7 +581,12 @@ export class RoutingPayer {
     return toClientEvmSigner(
       {
         address: signer.address,
-        signTypedData: (message) => signer.signTypedData(message as unknown as TypedDataDefinition),
+        // Nothing is signed outside a call: a detached request finishes and
+        // starts no retry, whose answer nobody would read.
+        signTypedData: (message) =>
+          this.call === null
+            ? Promise.reject(new RouteSkipped('busy'))
+            : signer.signTypedData(message as unknown as TypedDataDefinition),
       },
       this.deps.readContract !== undefined
         ? { readContract: (args) => this.chainRead(this.deps.readContract!, args) }
@@ -471,7 +621,14 @@ export class RoutingPayer {
     const scheme = new BatchSettlementEvmScheme(signer, {
       storage: new FileClientChannelStorage({ directory: dir }),
       depositPolicy: { depositMultiplier: DEPOSIT_MULTIPLIER },
-      depositStrategy: (ctx) => this.deposit(ctx),
+      depositStrategy: (ctx) => {
+        // A DEPOSIT GETS THE LONGER BUDGET, once per call.
+        if (this.call !== null && this.call.deposit !== true) {
+          this.call.deposit = true;
+          this.call.until += DEPOSIT_EXTRA_MS;
+        }
+        return this.deposit(ctx);
+      },
     });
     const client = new x402Client()
       .register('eip155:*', scheme)

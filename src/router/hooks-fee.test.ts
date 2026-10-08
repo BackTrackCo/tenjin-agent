@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { GATE_TIMEOUT_MS } from './gate';
+import { DEPOSIT_GATE_TIMEOUT_MS, GATE_TIMEOUT_MS } from './gate';
 import { runHookCommand, runHookKind } from './hook-command';
 import { runPromptHook, type HookDeps } from './hooks';
 import { ROUTING_FEE_ATOMIC } from './fee';
@@ -355,6 +355,58 @@ describe('the hook legs and the routing fee', () => {
     return { fetchImpl, paid: () => paid };
   }
 
+  it('gives a deposit call the longer budget: a settle at about 4 s is paid and says nothing', async () => {
+    const fake = new FakeRouter();
+    fake.body = OFFER;
+    fake.delayMs = GATE_TIMEOUT_MS + 400;
+    const started = Date.now();
+    const answer = await runHookKind('prompt', prompt(), deps(fake.fetch, payer(fake)));
+    expect(Date.now() - started).toBeGreaterThan(GATE_TIMEOUT_MS);
+    expect(contextOf(answer)).toContain('CoinMarketCap fits this');
+    expect(systemMessageOf(answer)).toBeUndefined();
+    expect(fake.deposits).toBe(1);
+    expect(fake.log.at(-1)).toBe('POST /api/x402-router/route paid');
+    const ledger = await readSpendSummary(dir);
+    expect(ledger?.reservations).toEqual([]);
+    expect(ledger?.committedAtomic).not.toBe('0');
+  }, 15_000);
+
+  it('lets a deposit that settles past the budget finish in tenjin mcp, and says nothing', async () => {
+    const fake = new FakeRouter();
+    fake.body = OFFER;
+    fake.delayMs = 6_000;
+    const p = payer(fake);
+    const started = Date.now();
+    const first = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
+    // The leg returns at the deposit budget, inside the hook's 5 s, unpaid and silent.
+    expect(Date.now() - started).toBeLessThan(DEPOSIT_GATE_TIMEOUT_MS + 400);
+    expect(systemMessageOf(first)).toBeUndefined();
+    fake.delayMs = 0;
+    // The next call waits for the first to settle, then pays a voucher from
+    // the channel the SDK recorded: no second deposit, no corrective 402.
+    const second = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
+    expect(contextOf(second)).toContain('CoinMarketCap fits this');
+    expect(systemMessageOf(second)).toBeUndefined();
+    expect(fake.deposits).toBe(1);
+    expect(fake.paidRequests()).toBe(2);
+    expect([...fake.channels.values()][0]!.charged).toBe(2n * ROUTING_FEE_ATOMIC);
+    const ledger = await readSpendSummary(dir);
+    expect(ledger?.reservations).toEqual([]);
+    expect(ledger?.committedAtomic).not.toBe('0');
+  }, 20_000);
+
+  it('still names doctor when the router refuses the payment at verify', async () => {
+    const fake = new FakeRouter();
+    const refuses = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      const request = new Request(input, init);
+      if (request.headers.has('payment-signature')) return new Response('{}', { status: 402 });
+      return fake.fetch(request);
+    }) as typeof fetch;
+    const answer = await runHookKind('prompt', prompt('sess-refused'), deps(refuses, payer(fake)));
+    expect(systemMessageOf(answer)).toContain('the routing payment failed');
+    expect(systemMessageOf(answer)).toContain('`tenjin doctor`');
+  });
+
   it('keeps a paid voucher call that gets no answer inside the gate budget', async () => {
     const fake = new FakeRouter();
     const p = payer(fake);
@@ -373,7 +425,7 @@ describe('the hook legs and the routing fee', () => {
     const hang = paidHangs(fake);
     const started = Date.now();
     await runPromptHook(prompt(), { ...deps(fake.fetch, p), fetchImpl: hang.fetchImpl });
-    expect(Date.now() - started).toBeLessThan(GATE_TIMEOUT_MS + 500);
+    expect(Date.now() - started).toBeLessThan(DEPOSIT_GATE_TIMEOUT_MS + 500);
     expect(hang.paid()).toBe(1);
     // It went out and no answer came, so its fee may have landed: the fee
     // counts. The deposit is channel funding and never does.

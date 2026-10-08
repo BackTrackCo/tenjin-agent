@@ -11,3 +11,9 @@ balance, and the daily limit does not count it. A fee the budget refuses takes t
 free path and leaves the deposit in the channel for the next window. A voucher the
 SDK retries after a corrective 402 is reserved again first, and a retry the budget
 refuses is not sent.
+
+A routing call that carries the channel's deposit now gets 4.5 s instead of 3.5 s,
+so the first paid call on a new channel usually returns its answer. A routing
+payment still out when the call's time ends no longer shows "the routing payment
+failed": that prompt runs on the native tools while `tenjin mcp` lets the request
+finish, so the channel records the deposit and the spend ledger records the fee.

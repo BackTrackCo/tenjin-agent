@@ -99,7 +99,8 @@ export function isFeeRequired(response: unknown): boolean {
  * payer's skip reason (or `fee_required`, when the free path answered it and
  * nothing else explains why). Null for a reason that is no fault and needs no
  * fix: another session's call on the channel, a server with no paid path, or
- * a call queued past its own budget.
+ * a call queued past its own budget, or a payment still out when the call's
+ * budget ran out (it finishes in the background).
  */
 const UNPAID: Record<string, { reason: string; fix: string }> = {
   wallet_low: {
@@ -136,7 +137,13 @@ const UNPAID: Record<string, { reason: string; fix: string }> = {
     fix: 'Run `tenjin doctor`.',
   },
 };
-const NO_FAULT = new Set(['channel_busy', 'paid_path_absent', 'busy', 'no_call']);
+const NO_FAULT = new Set([
+  'channel_busy',
+  'paid_path_absent',
+  'busy',
+  'no_call',
+  'deadline_after_payment_sent',
+]);
 
 /** The reason and fix for an unpaid call, or null when it needs no word. */
 export function unpaid(why: string): { reason: string; fix: string } | null {
