@@ -11,6 +11,7 @@ import type { CommandContext } from '../context';
 import { requestDecision } from './decision';
 import { CHANNEL_DEPOSIT_ATOMIC, MIN_DEPOSIT_ATOMIC, payerDir, ROUTING_FEE_ATOMIC } from './fee';
 import { BASE, FakeRouter, payerDeps, TEST_POLICY } from './fee-test-utils';
+import { DEPOSIT_GATE_TIMEOUT_MS, GATE_TIMEOUT_MS } from './gate';
 import {
   chainReader,
   DEPOSIT_MULTIPLIER,
@@ -424,5 +425,100 @@ describe('RoutingPayer', () => {
   it("sizes the deposit with the SDK's own knobs: the spend cap times depositMultiplier", () => {
     expect(ROUTING_SPEND_CAP).toBe('$0.05');
     expect(50_000n * BigInt(DEPOSIT_MULTIPLIER)).toBe(CHANNEL_DEPOSIT_ATOMIC);
+  });
+});
+
+describe('RoutingPayer and the call budget', () => {
+  /** One call with its own budget, in real time, and the lines the payer warned. */
+  function timed(router: FakeRouter) {
+    const warned: string[] = [];
+    const p = payer(router, { now: () => Date.now(), warn: (line) => warned.push(line) });
+    const call = async (timeoutMs: number) => {
+      const route = (await p.routeFor(BASE))!;
+      return requestDecision(
+        'tool',
+        { query: 'q' },
+        { ctx: ctx(), baseUrl: BASE, fetchImpl: router.fetch, timeoutMs, route },
+      );
+    };
+    return { p, call, warned };
+  }
+
+  async function storedChannel() {
+    const files = await channelFiles();
+    return new FileClientChannelStorage({ directory: payerDir(dir, wallet.address) }).get(
+      files[0]!.replace('.json', ''),
+    );
+  }
+
+  it('waits past the gate budget for a call that carries a deposit', async () => {
+    const router = new FakeRouter();
+    router.delayMs = 400;
+    const { call } = timed(router);
+    // 200 ms is the caller's budget; the deposit adds the hook leg's rest.
+    expect((await call(200)).status).toBe('decided');
+    expect(router.deposits).toBe(1);
+  });
+
+  it('returns a deposit still out at the longer budget as no fault, and records it when it lands', async () => {
+    const router = new FakeRouter();
+    router.delayMs = DEPOSIT_GATE_TIMEOUT_MS - GATE_TIMEOUT_MS + 600;
+    const { call, warned } = timed(router);
+    const started = Date.now();
+    expect(await call(200)).toEqual({ status: 'skipped', why: 'deadline_after_payment_sent' });
+    expect(Date.now() - started).toBeLessThan(DEPOSIT_GATE_TIMEOUT_MS - GATE_TIMEOUT_MS + 500);
+    router.delayMs = 0;
+    // Queued behind the late answer, then a voucher from the recorded channel.
+    expect((await call(3_500)).status).toBe('decided');
+    expect(router.deposits).toBe(1);
+    expect(router.paidRequests()).toBe(2);
+    expect(await storedChannel()).toMatchObject({
+      balance: CHANNEL_DEPOSIT_ATOMIC.toString(),
+      chargedCumulativeAmount: (2n * ROUTING_FEE_ATOMIC).toString(),
+    });
+    expect((await readSpendSummary(dir))?.reservations).toEqual([]);
+    expect(warned.join('\n')).toMatch(
+      /deadline_after_payment_sent \(cause late http 200, \d+ms, stage deposit\)/,
+    );
+  });
+
+  it('keeps the gate budget for a voucher, and lets one still out finish', async () => {
+    const router = new FakeRouter();
+    const { call, warned } = timed(router);
+    expect((await call(3_500)).status).toBe('decided');
+    router.delayMs = 600;
+    const started = Date.now();
+    expect(await call(200)).toEqual({ status: 'skipped', why: 'deadline_after_payment_sent' });
+    // Not lengthened: no deposit rode on it.
+    expect(Date.now() - started).toBeLessThan(500);
+    router.delayMs = 0;
+    expect((await call(3_500)).status).toBe('decided');
+    // The late voucher was recorded: the next one continued the total.
+    expect(router.paidRequests()).toBe(3);
+    expect(router.settledFees).toBe(3);
+    expect(warned.join('\n')).toContain('stage voucher');
+  });
+
+  it('still aborts a call whose budget ends before anything is paid', async () => {
+    const router = new FakeRouter();
+    // A probe that answers only after the budget, and honors the abort.
+    const slowProbe: typeof fetch = async (input, init) => {
+      const request = new Request(input, init);
+      await new Promise((resolve, reject) => {
+        setTimeout(resolve, 400);
+        request.signal.addEventListener('abort', () => reject(request.signal.reason));
+      });
+      return router.fetch(request);
+    };
+    const { p, warned } = timed(router);
+    const route = (await p.routeFor(BASE))!;
+    const outcome = await requestDecision(
+      'tool',
+      { query: 'q' },
+      { ctx: ctx(), baseUrl: BASE, fetchImpl: slowProbe, timeoutMs: 200, route },
+    );
+    expect(outcome).toEqual({ status: 'skipped', why: 'payment_failed' });
+    expect(router.paidRequests()).toBe(0);
+    expect(warned.join('\n')).toContain('payment_failed (cause timeout');
   });
 });
