@@ -142,6 +142,23 @@ describe('RoutingPayer', () => {
     expect(router.settledFees).toBe(1);
   });
 
+  it.each([
+    ['a daily limit of 0', { sessionBudgetAtomic: 0n }, 'budget_reached'],
+    ['a day with no room left', { sessionBudgetAtomic: 250_000n }, 'budget_reached'],
+    ['an allowlist without the router', { allowlistCreators: ['someone-else'] }, 'not_allowlisted'],
+  ] as const)('pays no voucher from a funded channel under %s', async (_label, change, why) => {
+    const router = new FakeRouter();
+    let policy: SpendPolicy = TEST_POLICY;
+    const p = payer(router, { policy: async () => policy });
+    expect((await routeOnce(p, router)).status).toBe('decided');
+    expect(router.settledFees).toBe(1);
+    // The channel still holds the deposit; the user changes the policy.
+    policy = { ...TEST_POLICY, ...change };
+    expect(tookFreePath(await routeOnce(p, router), router)).toBe(why);
+    expect(router.settledFees).toBe(1);
+    expect(router.paidRequests()).toBe(1);
+  });
+
   it('pays nothing to a 402 asking more than the approved fee', async () => {
     const router = new FakeRouter({ amount: '30000' });
     expect(tookFreePath(await routeOnce(payer(router), router), router)).toBe('payment_failed');

@@ -9,8 +9,13 @@ import {
 import { FileClientChannelStorage } from '@x402/evm/batch-settlement/client/file-storage';
 import { wrapFetchWithPayment } from '@x402/fetch';
 import { httpRequest, type HttpRequestOptions, type HttpResult } from '../lib/http';
-import type { PolicyReason, SpendPolicy } from '../lib/policy';
-import { releaseUnchargedExposure, type SpendAuthorizer } from '../lib/wallet/spend';
+import type { SpendPolicy } from '../lib/policy';
+import { spentOf } from '../lib/spend-ledger';
+import {
+  readSpendSummary,
+  releaseUnchargedExposure,
+  type SpendAuthorizer,
+} from '../lib/wallet/spend';
 import type { TenjinSigner } from '../lib/wallet/provider';
 import { canonicalUsdcOnly } from '../lib/x402-pay';
 import {
@@ -24,8 +29,10 @@ import {
 import { CliError } from '../lib/errors';
 import {
   CHANNEL_DEPOSIT_ATOMIC,
+  feeRefusal,
   MIN_DEPOSIT_ATOMIC,
   payerDir,
+  refusedWhy,
   ROUTE_PAID_PATH,
   ROUTING_FEE_ATOMIC,
 } from './fee';
@@ -180,13 +187,6 @@ const routingPolicy: PaymentPolicy = (version, requirements) =>
  */
 const CHANNEL_BUSY_ERROR = 'invalid_batch_settlement_evm_channel_busy';
 
-/** A spend refusal, as the reason the call was not paid. */
-const REFUSED: Partial<Record<PolicyReason, string>> = {
-  not_allowlisted: 'not_allowlisted',
-  session_budget_exceeded: 'budget_reached',
-  above_auto_spend: 'limit_below_deposit',
-};
-
 export class RoutingPayer {
   private channel: Channel | null = null;
   private call: Call | null = null;
@@ -215,6 +215,12 @@ export class RoutingPayer {
 
   private now(): number {
     return this.deps.now?.() ?? Date.now();
+  }
+
+  /** The automatic exposure the ledger counts in the current window. */
+  private async spent(): Promise<bigint> {
+    const ledger = await readSpendSummary(this.deps.dataDir, { now: () => this.now() });
+    return ledger === null ? 0n : spentOf(ledger);
   }
 
   private warn(line: string): void {
@@ -251,13 +257,12 @@ export class RoutingPayer {
       call.answered = true;
       if (asked.status !== 402) return asked;
       try {
-        // EVERY FEE IS AN AUTOMATIC PAYMENT under the per-call limit, a voucher
-        // from a channel already funded included: a limit below the fee (a 0
-        // the user set, or the default 0 nobody has answered) pays nothing,
-        // before the wallet is even unlocked.
-        if ((await this.deps.policy()).maxAutoSpendAtomic < ROUTING_FEE_ATOMIC) {
-          throw new RouteSkipped('limit_below_deposit');
-        }
+        // EVERY FEE MEETS THE WHOLE SPEND POLICY, a voucher from a channel
+        // already funded included: a per-call limit below the fee, a day's
+        // budget with no room for it (a 0 the user set included) or a host
+        // off the allowlist pays nothing, before the wallet is even unlocked.
+        const refused = feeRefusal(await this.deps.policy(), call.host, await this.spent());
+        if (refused !== null) throw new RouteSkipped(refused);
         call.channel = this.channelFor(await this.signer());
         if (until - this.now() <= 0) throw new RouteSkipped('busy');
       } catch (err) {
@@ -395,7 +400,7 @@ export class RoutingPayer {
     });
     if (auth.decision !== 'allow') {
       await authorizer.release(auth.reservationId);
-      this.refuse(REFUSED[auth.reason] ?? auth.reason);
+      this.refuse(refusedWhy(auth.reason));
     }
     call.deposits.push({
       authorizer,

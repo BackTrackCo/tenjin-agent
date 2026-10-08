@@ -3,6 +3,7 @@ import { mkdir, open, readFile, readdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { hasCode } from '../lib/errno';
 import { formatUsdDisplay } from '../lib/money';
+import { evaluateSpendPolicy, type PolicyReason, type SpendPolicy } from '../lib/policy';
 import type { DecisionRoute } from './decision';
 
 /**
@@ -27,6 +28,39 @@ export const CHANNEL_DEPOSIT_ATOMIC = 250_000n;
  * $0.25 sizes the deposit down to the limit while it still covers this many.
  */
 export const MIN_DEPOSIT_ATOMIC = 10n * ROUTING_FEE_ATOMIC;
+
+/** A spend refusal, as the reason the call was not paid. */
+const REFUSED: Partial<Record<PolicyReason, string>> = {
+  not_allowlisted: 'not_allowlisted',
+  session_budget_exceeded: 'budget_reached',
+  above_auto_spend: 'limit_below_deposit',
+};
+
+/** The reason a spend refusal leaves a routing call unpaid. */
+export function refusedWhy(reason: PolicyReason): string {
+  return REFUSED[reason] ?? reason;
+}
+
+/**
+ * EVERY FEE IS AN AUTOMATIC PAYMENT, a voucher from a channel already funded
+ * included, so each one meets the whole spend policy: the per-call limit, the
+ * day's budget against what the ledger has counted, and the creator
+ * allowlist (the router's host). An explicit zero in either limit refuses it.
+ * Null when the policy allows the fee.
+ */
+export function feeRefusal(
+  policy: SpendPolicy,
+  host: string,
+  sessionSpentAtomic: bigint,
+): string | null {
+  const evaluation = evaluateSpendPolicy(policy, {
+    mode: 'automatic',
+    amountAtomic: ROUTING_FEE_ATOMIC,
+    creator: host,
+    sessionSpentAtomic,
+  });
+  return evaluation.decision === 'allow' ? null : refusedWhy(evaluation.reason);
+}
 
 /** The paid path for this call, or null for the free path. `tenjin mcp` passes
  *  its payer's; absent, every call is free. */
