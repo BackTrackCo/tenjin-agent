@@ -155,15 +155,22 @@ describe('the routing legs back off a router they cannot reach', () => {
 
   it('keeps the backoff one call started when a concurrent call times out', async () => {
     let calls = 0;
+    let secondStarted!: () => void;
+    const bothInFlight = new Promise<void>((resolve) => (secondStarted = resolve));
     const outage = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
       calls += 1;
-      // The first call is refused at once; the second hangs past its budget.
-      if (calls === 1) throw socketError('ECONNREFUSED');
+      // The first call is refused once the second is in flight, so neither
+      // reads a memo the other wrote; the second hangs past its budget.
+      if (calls === 1) {
+        await bothInFlight;
+        throw socketError('ECONNREFUSED');
+      }
+      secondStarted();
       return hangs(input, init);
     }) as typeof fetch;
     await Promise.all([
-      runHookKind('prompt', prompt(), deps(outage, undefined, { timeoutMs: 50 })),
-      runHookKind('prompt', prompt(), deps(outage, undefined, { timeoutMs: 50 })),
+      runHookKind('prompt', prompt(), deps(outage, undefined, { timeoutMs: 200 })),
+      runHookKind('prompt', prompt(), deps(outage, undefined, { timeoutMs: 200 })),
     ]);
     expect(calls).toBe(2);
     expect(await memo()).toMatchObject({ until: clock + UNREACHABLE_BACKOFF_MS });
