@@ -510,6 +510,8 @@ export async function requestDecision(
         status: 'failed',
         reason: free.reason,
         ...(free.errorCode !== undefined ? { errorCode: free.errorCode } : {}),
+        // Still no answer, which must not end another call's backoff.
+        ...(free.noAnswer === true ? { noAnswer: true as const } : {}),
         freePath: err.why,
       };
     }

@@ -97,6 +97,14 @@ describe('routingFeeBlock', () => {
     expect(await routingFeeBlock(input({ policy: { ...POLICY, ...change } }))).toBe(why);
   });
 
+  it('names unanswered limits before a locked wallet, as the payer meets them', async () => {
+    expect(
+      await routingFeeBlock(
+        input({ provider: verified('unverified'), policy: { ...POLICY, maxAutoSpendAtomic: 0n } }),
+      ),
+    ).toBe('limit_below_deposit');
+  });
+
   it('needs no deposit while the channel still holds a fee, whatever the wallet holds', async () => {
     const { address } = await testWalletProvider().describe();
     await new FileClientChannelStorage({ directory: payerDir(dir, address) }).set(

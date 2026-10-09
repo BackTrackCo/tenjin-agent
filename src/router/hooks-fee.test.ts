@@ -316,7 +316,9 @@ describe('the hook legs and the routing fee', () => {
     await writeRouterMemo(dir, 'paid-path-absent', BASE, { now: NOW, ttlMs: 3_600_000 });
     expect(await p.routeFor(BASE)).toBeNull();
     const { fetchImpl } = router(FEE_REQUIRED_ANSWER);
-    await runHookKind('prompt', prompt(), deps(fetchImpl, p));
+    const answer = await runHookKind('prompt', prompt(), deps(fetchImpl, p));
+    // Stale news, not a fault: the session's one notice is not used up on it.
+    expect(systemMessageOf(answer)).toBeUndefined();
     expect(await readRouterMemo(dir, 'paid-path-absent', BASE, NOW)).toBeNull();
     expect(await p.routeFor(BASE)).not.toBeNull();
   });

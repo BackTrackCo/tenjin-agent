@@ -590,6 +590,11 @@ export interface RoutingFeeInput {
 /** Why the next deposit would be refused, or null when the fee can be paid. */
 export async function routingFeeBlock(input: RoutingFeeInput): Promise<string | null> {
   const { provider, policy } = input;
+  // The fee's per-payment checks first, before the wallet, as the payer runs
+  // them on every call: a channel with credit pays nothing they refuse, and
+  // unanswered limits are the question to name, not the passphrase.
+  const refused = feeRefusal(policy, input.host);
+  if (refused !== null) return refused;
   if (provider === null) return 'no_wallet';
   const verified = await provider.verify?.().catch(() => null);
   if (verified !== undefined && verified !== null && verified.status !== 'verified') {
@@ -597,10 +602,6 @@ export async function routingFeeBlock(input: RoutingFeeInput): Promise<string | 
   }
   const ledger = await readSpendSummary(input.dataDir);
   const spent = ledger === null ? 0n : spentOf(ledger);
-  // The fee's per-payment checks first, as the payer runs them on every call:
-  // a channel with credit pays nothing they refuse.
-  const refused = feeRefusal(policy, input.host);
-  if (refused !== null) return refused;
   const { address } = await describeWallet(provider);
   if ((await channelCredit(input.dataDir, address)) >= ROUTING_FEE_ATOMIC) return null;
   const deposit =

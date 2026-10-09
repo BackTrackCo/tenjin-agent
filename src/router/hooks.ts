@@ -1503,7 +1503,13 @@ async function decide(
         (outcome.status === 'decided' && isFeeRequired(outcome.decision)
           ? FEE_REQUIRED
           : undefined));
-  if (why !== undefined) await tellOnce(deps, sessionId, why, now, config);
+  // A `fee_required` on a call the machine's "no paid path" memo sent to the
+  // free path is stale news, not a fault: the memo is cleared below and the
+  // next call pays. It does not use up the session's one notice.
+  const memoed = deps.route !== undefined && route === null;
+  if (why !== undefined && !(memoed && why === FEE_REQUIRED)) {
+    await tellOnce(deps, sessionId, why, now, config);
+  }
   // The fee is on: a "no paid path" remembered from before stops holding the
   // machine's calls on the free path.
   if (outcome.status === 'decided' && isFeeRequired(outcome.decision)) {

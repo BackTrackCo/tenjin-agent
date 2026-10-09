@@ -8,7 +8,7 @@ import type { HookDeps } from './hooks';
 import { FakeRouter, payerDeps } from './fee-test-utils';
 import { RoutingPayer } from './routing-payer';
 import { readRouterMemo, UNREACHABLE_BACKOFF_MS, writeRouterMemo } from './router-memo';
-import { ROUTER_PATH } from './decision';
+import { requestDecision, ROUTER_PATH, RouteSkipped } from './decision';
 import { ROUTE_PAID_PATH } from './fee';
 
 /**
@@ -174,6 +174,27 @@ describe('the routing legs back off a router they cannot reach', () => {
     ]);
     expect(calls).toBe(2);
     expect(await memo()).toMatchObject({ until: clock + UNREACHABLE_BACKOFF_MS });
+  });
+
+  it('keeps "no answer" on a failed free-path fallback, so it ends no backoff', async () => {
+    const outcome = await requestDecision(
+      'tool',
+      { query: 'q' },
+      {
+        ctx: { flags: { json: true, timeout: 3_500 }, dataDir: dir } as never,
+        baseUrl: BASE,
+        fetchImpl: (async () => {
+          throw socketError('ECONNRESET');
+        }) as typeof fetch,
+        route: {
+          path: ROUTE_PAID_PATH,
+          send: async () => {
+            throw new RouteSkipped('payment_failed');
+          },
+        },
+      },
+    );
+    expect(outcome).toMatchObject({ status: 'failed', noAnswer: true, freePath: 'payment_failed' });
   });
 
   it('does not start it on an answer whose body failed to read', async () => {
