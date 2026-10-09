@@ -18,13 +18,11 @@ describe('the spend question', () => {
   });
 
   it('accepts with one command, whatever scope the hooks were installed in', () => {
-    expect(ACCEPT_COMMAND).toBe('tenjin install --accept-defaults');
+    expect(ACCEPT_COMMAND).toBe('tenjin install --yes');
   });
 
   it('turns an unpaid routing call on unanswered limits into the question', () => {
-    expect(unpaidNotice('limit_below_deposit', {}, 'agent')).toContain(
-      '`tenjin install --accept-defaults`',
-    );
+    expect(unpaidNotice('limit_below_deposit', {}, 'agent')).toContain('`tenjin install --yes`');
     // A zero the user wrote is their answer: the plain reason and fix.
     expect(unpaidNotice('limit_below_deposit', { maxAutoSpend: '0' }, 'user')).toContain(
       'the per-call spend limit is below the smallest routing deposit',
@@ -34,7 +32,7 @@ describe('the spend question', () => {
 
   it('words the notice for whoever reads it: the user directly, or the agent to ask', () => {
     expect(unpaidNotice('limit_below_deposit', {}, 'user')).toBe(
-      'Tenjin pays for nothing on its own yet: the spend limits are not answered. It can pay for tool calls without asking you each time, up to $0.25 a call and $5 a day. Routing costs $0.003 a call, paid from channel deposits of up to $0.25 that stay yours until spent; each deposit counts against these limits. Using these limits or choosing your own also approves the routing fee. To use these limits, run `tenjin install --accept-defaults`; to choose your own, run `tenjin config set maxAutoSpend <usd>` and `tenjin config set sessionBudget <usd|none>`.',
+      'Tenjin pays for nothing on its own yet: the spend limits are not answered. It can pay for tool calls without asking you each time, up to $0.25 a call and $5 a day. Routing costs $0.003 a call, paid from channel deposits of up to $0.25 that stay yours until spent; each deposit counts against these limits. Using these limits or choosing your own also approves the routing fee. To use these limits, run `tenjin install --yes`; to choose your own, run `tenjin config set maxAutoSpend <usd>` and `tenjin config set sessionBudget <usd|none>`.',
     );
     expect(unpaidNotice('limit_below_deposit', {}, 'agent')).toContain('Ask the user: May Tenjin');
   });

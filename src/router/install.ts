@@ -39,7 +39,6 @@ import {
 } from './mcp-processes';
 import { ensureStatusLine, type StatusLineMode, type StatusLineResult } from './status-line-wiring';
 import {
-  ACCEPT_COMMAND,
   FEE_APPROVAL,
   limitsUsd,
   OWN_LIMITS_COMMANDS,
@@ -194,10 +193,10 @@ export interface RouterInstallArgs {
    */
   refresh?: boolean;
   /**
-   * Answer the spend question with the limits it shows, without asking: the
-   * selector's "Use these limits", for an agent running the user's yes.
+   * Accept the limits the question shows instead of asking: the selector's
+   * "Use these limits", for an agent running the user's yes.
    */
-  acceptDefaults?: boolean;
+  yes?: boolean;
   /**
    * What to do about Claude Code's `statusLine`. Absent is the default path:
    * write ours when the key is free, and print the composition line when it is
@@ -304,11 +303,6 @@ export async function runRouterInstall(
   ctx: CommandContext,
   deps: RouterInstallDeps = {},
 ): Promise<CommandResult> {
-  // `--accept-defaults` is the selector's "Use these limits", answered ahead:
-  // the command an agent runs for the user's yes. It answers that question
-  // and changes nothing else, so a wallet or status line the install was told
-  // to leave alone stays that way.
-  if (args.acceptDefaults === true) return acceptDefaults(args, ctx);
   const env = deps.env ?? process.env;
   const home = deps.homeDir ?? homedir();
   if (!isAbsolute(home)) {
@@ -355,8 +349,16 @@ export async function runRouterInstall(
   // bare CLI's zero holds and doctor reports the question as pending.
   const humanOutput = ctx.flags.json === true ? false : (deps.isInteractive ?? ctx.io.isTTY);
   const canPrompt = humanOutput && (deps.isInteractive ?? Boolean(process.stdin.isTTY));
+  // `--yes` is the selector's "Use these limits", answered ahead: the same
+  // install, run again by an agent for the user's yes.
   const limits =
-    args.refresh === true ? undefined : canPrompt ? await approveLimits(config, deps) : {};
+    args.refresh === true
+      ? undefined
+      : args.yes === true
+        ? shownLimits(config)
+        : canPrompt
+          ? await approveLimits(config, deps)
+          : {};
   const spend = await persistRouterDefaults(ctx.dataDir, args.refresh === true, limits);
   const removedKeysLines =
     spend.removed.length > 0
@@ -437,7 +439,9 @@ export async function runRouterInstall(
   // run did not set.
   const effective = await resolveContextSettings(ctx);
   const approval =
-    !canPrompt && !spend.kept.includes('maxAutoSpend') ? spendApproval(config) : undefined;
+    !canPrompt && args.yes !== true && !spend.kept.includes('maxAutoSpend')
+      ? spendApproval(config, args)
+      : undefined;
   // A warning, never a failure: everything above is written and correct, and
   // the network this machine is on now may not be the one it uses later.
   const router = await probeRouter(effective.baseUrl, {
@@ -502,7 +506,7 @@ export interface SpendApproval {
   routingFee: string;
   /** What the agent does with each answer. */
   next: string;
-  /** The one command for a yes: these limits, as the selector's "Use these limits". */
+  /** The one command for a yes: this install again with `--yes`, as the selector's "Use these limits". */
   approve: string;
   /** The commands for limits of the user's own. */
   own: string;
@@ -515,59 +519,28 @@ export interface SpendApproval {
  * shape as the `request` tool's `needs_input` step. A script or CI ignores
  * it, and the zero holds.
  */
-function spendApproval(config: PartialConfig): SpendApproval {
+function spendApproval(config: PartialConfig, args: RouterInstallArgs): SpendApproval {
   const limits = shownLimits(config);
-  const approve = ACCEPT_COMMAND;
+  const approve = yesCommand(args);
   return {
     question: spendQuestion(limits),
     limits: limitsUsd(limits),
     routingFee: ROUTING_FEE_TERMS,
-    next: `Show the user these limits and ask this question before you change any limit. If they say yes, run \`${approve}\`. If they give other amounts, run ${OWN_LIMITS_COMMANDS}. If they say no, run nothing: ${DECLINED}.`,
+    next: `Show the user these limits and ask this question before you change any limit. If they say yes, run the same install again with --yes: \`${approve}\`. If they give other amounts, run ${OWN_LIMITS_COMMANDS}. If they say no, run nothing: ${DECLINED}.`,
     approve,
     own: OWN_LIMITS_COMMANDS.replaceAll('`', ''),
   };
 }
 
-/**
- * `tenjin install --accept-defaults`: the limits the question shows, written
- * where the file names none, and nothing else. Any other install flag is
- * refused rather than half-honoured.
- */
-async function acceptDefaults(
-  args: RouterInstallArgs,
-  ctx: CommandContext,
-): Promise<CommandResult> {
-  const others = (['refresh', 'project', 'noWallet', 'statusLine'] as const).filter(
-    (key) => args[key] !== undefined && args[key] !== false,
-  );
-  if (others.length > 0) {
-    throw new CliError(
-      'USAGE',
-      '--accept-defaults answers the spend question and does nothing else',
-      {
-        fix: `Run \`${ACCEPT_COMMAND}\` on its own.`,
-      },
-    );
-  }
-  const limits = shownLimits(await loadRawConfig(ctx.dataDir));
-  const spend = await persistRouterDefaults(ctx.dataDir, false, limits);
-  const effective = effectiveLimits((await resolveContextSettings(ctx)).policy);
-  const daily =
-    effective.sessionBudget === 'no daily ceiling'
-      ? 'no daily limit'
-      : `$${effective.sessionBudget} a day`;
-  const now = `up to $${effective.maxAutoSpend} per call; daily limit ${daily}`;
-  // Only keys the file did not name are written, so say which were and which
-  // were kept: a 0 the user set stays, and is not "set" here.
-  const kept =
-    spend.kept.length === 0
-      ? ''
-      : ` Kept your own ${spend.kept.join(' and ')}, as the file names it.`;
-  const line =
-    spend.set.length === 0
-      ? `${paint(ctx.io, 'yellow', '!')} Nothing changed: your config already names both limits (${now}). Change one with ${OWN_LIMITS_COMMANDS}.`
-      : `${paint(ctx.io, 'green', '✓')} Spend limits set: ${now}.${kept}`;
-  return { data: { spend: { ...spend, effective } }, humanLines: [line] };
+/** The install this run was, with `--yes`: what an agent runs for the user's yes. */
+function yesCommand(args: RouterInstallArgs): string {
+  return [
+    'tenjin install',
+    ...(args.project === true ? ['--project'] : []),
+    ...(args.noWallet === true ? ['--no-wallet'] : []),
+    ...(args.statusLine !== undefined ? [`--status-line ${args.statusLine}`] : []),
+    '--yes',
+  ].join(' ');
 }
 
 /**

@@ -17,10 +17,7 @@ export function registerCore(reg: Registration): void {
     .option('--project', "write into this project's .claude/settings.json instead of your home one")
     .option('--no-wallet', 'create no wallet')
     .option('--refresh', 're-register the hook entries this machine already has; add nothing')
-    .option(
-      '--accept-defaults',
-      'answer the spend question with the limits it shows (its "Use these limits") and change nothing else',
-    )
+    .option('--yes', 'accept the default spend limits instead of asking')
     .option(
       '--status-line <mode>',
       'the live footer: `own` registers it when you have no status line of your own, `compose` appends it to the one you do have, `skip` leaves the setting alone',
@@ -46,7 +43,7 @@ Learn more:
           {
             ...(o.project === true ? { project: true } : {}),
             ...(o.refresh === true ? { refresh: true } : {}),
-            ...(o.acceptDefaults === true ? { acceptDefaults: true } : {}),
+            ...(o.yes === true ? { yes: true } : {}),
             ...(o.statusLine !== undefined
               ? { statusLine: statusLineMode(String(o.statusLine)) }
               : {}),

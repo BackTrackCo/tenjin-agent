@@ -142,7 +142,7 @@ const FEE_TERMS =
 const ASK_LINES = [
   '! Automatic payments are off until the user approves a spend limit',
   `  Ask the user: May Tenjin pay for tool calls without asking you each time, up to $0.25 a call and $5 a day? ${FEE_TERMS} Using these limits or choosing your own also approves the routing fee.`,
-  '  Yes: tenjin install --accept-defaults',
+  '  Yes: tenjin install --yes',
   '  Other amounts: tenjin config set maxAutoSpend <usd> and tenjin config set sessionBudget <usd|none>',
   '  No: run nothing, the router then pays for nothing on its own, and the question stays open until tenjin install in a terminal or tenjin config set answers it',
 ];
@@ -197,7 +197,7 @@ describe('tenjin install', () => {
           question: `May Tenjin pay for tool calls without asking you each time, up to $0.25 a call and $5 a day? ${FEE_TERMS} Using these limits or choosing your own also approves the routing fee.`,
           limits: { maxAutoSpend: '0.25', sessionBudget: '5' },
           routingFee: FEE_TERMS,
-          approve: 'tenjin install --accept-defaults',
+          approve: 'tenjin install --yes',
           own: 'tenjin config set maxAutoSpend <usd> and tenjin config set sessionBudget <usd|none>',
         },
       },
@@ -206,7 +206,9 @@ describe('tenjin install', () => {
     expect(next).toMatch(
       /^Show the user these limits and ask this question before you change any limit\./,
     );
-    expect(next).toContain('If they say yes, run `tenjin install --accept-defaults`.');
+    expect(next).toContain(
+      'If they say yes, run the same install again with --yes: `tenjin install --yes`.',
+    );
     expect(next).toContain('If they say no, run nothing');
   });
 
@@ -673,11 +675,11 @@ describe('install asks a person to approve the spend limits', () => {
     expect(result.data).not.toHaveProperty('spend.approval');
   });
 
-  it('--accept-defaults writes the limits the question shows, as "Use these limits" does', async () => {
+  it('--yes writes the limits the question shows, as "Use these limits" does', async () => {
     await writeFile(join(data, 'config.json'), JSON.stringify({ sessionBudget: 'none' }));
     const promptLimits = vi.fn(async () => 'own' as const);
     const result = await runRouterInstall(
-      { acceptDefaults: true },
+      { yes: true },
       ctx(),
       deps({ isInteractive: false, promptLimits }),
     );
@@ -689,64 +691,36 @@ describe('install asks a person to approve the spend limits', () => {
     expect(result.data).not.toHaveProperty('spend.approval');
   });
 
-  it.each([
-    ['--refresh', { refresh: true }],
-    ['--project', { project: true }],
-    ['--no-wallet', { noWallet: true }],
-    ['--status-line', { statusLine: 'skip' as const }],
-  ])('refuses --accept-defaults with %s', async (_flag, other) => {
-    const err = await runRouterInstall({ acceptDefaults: true, ...other }, ctx(), deps()).catch(
-      (e: unknown) => e,
-    );
-    expect(err).toMatchObject({ code: 'USAGE' });
-  });
-
-  it('--accept-defaults answers the spend question and undoes no install choice', async () => {
+  it('hands the agent its own command with --yes, and that run keeps every install choice', async () => {
     // The agent-run install was told to make no wallet and leave the status line alone.
     const createWallet = vi.fn(async () => ADDRESS);
-    await runRouterInstall({ noWallet: true, statusLine: 'skip' }, ctx(), deps({ createWallet }));
-    const before = await readFile(settingsPath(), 'utf8');
-    const registerMcp = vi.fn(async () => undefined);
-    const result = await runRouterInstall(
-      { acceptDefaults: true },
+    const first = await runRouterInstall(
+      { noWallet: true, statusLine: 'skip' },
       ctx(),
-      deps({ createWallet, registerMcp }),
+      deps({ createWallet }),
+    );
+    const { approve } = (first.data as { spend: { approval: { approve: string } } }).spend.approval;
+    expect(approve).toBe('tenjin install --no-wallet --status-line skip --yes');
+    const before = await readFile(settingsPath(), 'utf8');
+    const result = await runRouterInstall(
+      { noWallet: true, statusLine: 'skip', yes: true },
+      ctx(),
+      deps({ createWallet }),
     );
     expect(createWallet).not.toHaveBeenCalled();
-    expect(registerMcp).not.toHaveBeenCalled();
     expect(await readFile(settingsPath(), 'utf8')).toBe(before);
     expect(await loadRawConfig(data)).toMatchObject({
       maxAutoSpend: '250000',
       sessionBudget: '5000000',
     });
     expect(result.data).toMatchObject({ spend: { set: ['maxAutoSpend', 'sessionBudget'] } });
-    expect(result.humanLines).toEqual([
-      '✓ Spend limits set: up to $0.25 per call; daily limit $5 a day.',
-    ]);
+    expect(result.data).not.toHaveProperty('spend.approval');
   });
 
-  it('--accept-defaults says it changed nothing when the file names both limits, a 0 included', async () => {
-    await writeFile(
-      join(data, 'config.json'),
-      JSON.stringify({ maxAutoSpend: '0', sessionBudget: '5000000' }),
-    );
-    const result = await runRouterInstall({ acceptDefaults: true }, ctx(), deps());
+  it('--yes keeps a 0 the file names', async () => {
+    await writeFile(join(data, 'config.json'), JSON.stringify({ maxAutoSpend: '0' }));
+    await runRouterInstall({ yes: true }, ctx(), deps());
     expect(await loadRawConfig(data)).toMatchObject({ maxAutoSpend: '0' });
-    expect(result.data).toMatchObject({
-      spend: { set: [], kept: ['maxAutoSpend', 'sessionBudget'] },
-    });
-    const text = result.humanLines!.join('\n');
-    expect(text).not.toContain('Spend limits set');
-    expect(text).toContain(
-      'Nothing changed: your config already names both limits (up to $0 per call',
-    );
-    expect(text).toContain('`tenjin config set maxAutoSpend <usd>`');
-  });
-
-  it('--accept-defaults names the limit it kept beside the one it set', async () => {
-    await writeFile(join(data, 'config.json'), JSON.stringify({ sessionBudget: 'none' }));
-    const result = await runRouterInstall({ acceptDefaults: true }, ctx(), deps());
-    expect(result.humanLines!.join('\n')).toContain('Kept your own sessionBudget');
   });
 
   it('--refresh asks nothing and fills no absent limit', async () => {
@@ -1104,7 +1078,7 @@ describe('the doctor this release registers', () => {
         `Ask the user: May Tenjin pay for tool calls without asking you each time, up to $0.25 a call and $5 a day? ${FEE_TERMS}`,
       );
       expect(spend?.fix).toBe(
-        'Answer the spend question: for a yes, run `tenjin install --accept-defaults`; for other amounts, `tenjin config set maxAutoSpend <usd>` and `tenjin config set sessionBudget <usd|none>`; or run `tenjin install` in a terminal to choose.',
+        'Answer the spend question: for a yes, run `tenjin install --yes`; for other amounts, `tenjin config set maxAutoSpend <usd>` and `tenjin config set sessionBudget <usd|none>`; or run `tenjin install` in a terminal to choose.',
       );
       // The open question is not the first required failure, so it never hides
       // the network diagnosis.

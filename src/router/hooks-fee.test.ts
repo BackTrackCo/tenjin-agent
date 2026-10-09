@@ -288,7 +288,7 @@ describe('the hook legs and the routing fee', () => {
       'Using these limits or choosing your own also approves the routing fee.',
     );
     expect(notice).toContain('Routing costs $0.003 a call');
-    expect(notice).toContain('`tenjin install --accept-defaults`');
+    expect(notice).toContain('`tenjin install --yes`');
     expect(fake.paidRequests()).toBe(0);
   });
 

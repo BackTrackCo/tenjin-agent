@@ -52,11 +52,12 @@ export function limitsPhrase(limits: RouterLimits): string {
 export const ROUTING_FEE_TERMS = `Routing costs $${usd(ROUTING_FEE_ATOMIC)} a call, paid from channel deposits of up to $${usd(CHANNEL_DEPOSIT_ATOMIC)} that stay yours until spent; each deposit counts against these limits.`;
 
 /**
- * The one command that answers yes to the limits shown, as the selector's
- * "Use these limits" does. It writes those limits and nothing else: the
- * limits are the machine's, whatever scope the hooks were installed in.
+ * The yes to the limits shown, as the selector's "Use these limits": install
+ * again with `--yes`, which writes the same result plus those limits. Where
+ * the original command is known (install's own output), it is that command
+ * with `--yes` added.
  */
-export const ACCEPT_COMMAND = 'tenjin install --accept-defaults';
+export const ACCEPT_COMMAND = 'tenjin install --yes';
 
 /** The commands for limits of the user's own, each in backticks. */
 export const OWN_LIMITS_COMMANDS =

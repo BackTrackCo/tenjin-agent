@@ -20,9 +20,9 @@ is how an agent runs it), it writes no spend limit, the same as cancelling at
 the question in a terminal, and sets up everything else. Its output holds the
 question the terminal selector would have asked, with the same limits and
 routing-fee terms, and the command for each answer (`spend.approval` in
-`--json`). For a yes the agent runs the new `tenjin install --accept-defaults`,
-which writes the limits shown, as the selector's "Use these limits" does, and
-changes nothing else.
+`--json`). For a yes the agent runs the same install again with the new `--yes`
+(for example `tenjin install --no-wallet --yes`), which writes the limits shown,
+as the selector's "Use these limits" does.
 Until someone answers, the router pays for nothing on its own. `tenjin doctor`
 shows the open question as a warning instead of failing on it, so its network
 checks still print, and the first unpaid routing call in a session shows the

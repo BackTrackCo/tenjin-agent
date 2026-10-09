@@ -115,7 +115,7 @@ describe('routingFeeRow', () => {
     expect(row.status).toBe('warn');
     expect(row.fix).toContain('May Tenjin pay for tool calls without asking you each time');
     expect(row.fix).toContain('Routing costs $0.003 a call');
-    expect(row.fix).toContain('`tenjin install --accept-defaults`');
+    expect(row.fix).toContain('`tenjin install --yes`');
     expect(row.fix).not.toContain('config set maxAutoSpend 0.25');
   });
 
@@ -136,13 +136,13 @@ describe('doctorLines', () => {
           status: 'warn',
           required: false,
           detail: 'the spend limits are not answered yet',
-          fix: 'Run `tenjin install --accept-defaults`.',
+          fix: 'Run `tenjin install --yes`.',
         },
       ]),
     ).toEqual([
       'ok    node: v24',
       'warn  spend: the spend limits are not answered yet',
-      '      fix: Run `tenjin install --accept-defaults`.',
+      '      fix: Run `tenjin install --yes`.',
       '2 checks, 1 to look at.',
     ]);
   });
