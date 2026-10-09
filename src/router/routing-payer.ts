@@ -230,7 +230,7 @@ export class RoutingPayer {
         // The caller's budget starts now, not when this call's turn comes.
         const sent = this.now();
         const until = sent + options.timeoutMs;
-        return this.turn(() => this.noted(sent, () => this.pay(url, options, until)));
+        return this.turn(() => this.noted(sent, () => this.pay(url, options, until)), until);
       },
     };
   }
@@ -246,11 +246,31 @@ export class RoutingPayer {
   }
 
   /** Calls inside one process take turns on its channel, a detached
-   *  request's tail included, so none starts from a stale channel. */
-  private turn<T>(run: () => Promise<T>): Promise<T> {
-    const next = this.queue.then(run, run);
+   *  request's tail included, so none starts from a stale channel. A queued
+   *  call gives up at its own deadline (`busy`) rather than wait out the
+   *  call ahead of it, and then never starts. The deadline covers the wait
+   *  only: once a call runs, its own budget applies. */
+  private turn<T>(run: () => Promise<T>, until: number): Promise<T> {
+    let gaveUp = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const go = () => {
+      if (gaveUp) return Promise.reject(new RouteSkipped('busy'));
+      // Its turn came: from here its own budget, which a deposit lengthens, applies.
+      clearTimeout(timer);
+      return run();
+    };
+    const next = this.queue.then(go, go);
     this.queue = next.catch(() => undefined).then(() => this.tail);
-    return next;
+    const deadline = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(
+        () => {
+          gaveUp = true;
+          reject(new RouteSkipped('busy'));
+        },
+        Math.max(0, until - this.now()),
+      );
+    });
+    return Promise.race([next, deadline]).finally(() => clearTimeout(timer));
   }
 
   /** One stderr line for a call the paid path did not answer; a detached
@@ -337,6 +357,10 @@ export class RoutingPayer {
         work.then(
           (response) => {
             settle();
+            // The body is still read on `own`: the caller's deadline keeps
+            // bounding it, so a stalled body cannot hold the queue.
+            if (caller?.aborted === true) own.abort(caller.reason);
+            else caller?.addEventListener('abort', () => own.abort(caller.reason), { once: true });
             resolve(response);
           },
           (err: unknown) => {

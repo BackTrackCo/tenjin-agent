@@ -634,4 +634,46 @@ describe('RoutingPayer and the call budget', () => {
     expect(router.paidRequests()).toBe(0);
     expect(warned.join('\n')).toContain('payment_failed (cause timeout');
   });
+
+  it('gives up on a queued call at its own deadline instead of waiting out a detached payment', async () => {
+    const router = new FakeRouter();
+    const { call } = timed(router);
+    expect((await call(3_500)).status).toBe('decided');
+    // The next voucher answers after 1.5 s, past its 200 ms budget: it detaches.
+    router.delayMs = 1_500;
+    const ahead = call(200);
+    const started = Date.now();
+    const queued = await call(300);
+    expect(queued).toEqual({ status: 'skipped', why: 'busy' });
+    expect(Date.now() - started).toBeLessThan(800);
+    await ahead;
+  });
+
+  it("bounds the body read by the call's deadline once the headers arrive", async () => {
+    const router = new FakeRouter();
+    // The router sends headers, then never finishes the body; the read stops
+    // only when its signal aborts.
+    const stalled: typeof fetch = async (input, init) => {
+      const request = new Request(input, init);
+      return new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('{'));
+            request.signal.addEventListener('abort', () => controller.error(request.signal.reason));
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    };
+    const { p } = timed(router);
+    const route = (await p.routeFor(BASE))!;
+    const started = Date.now();
+    const outcome = await requestDecision(
+      'tool',
+      { query: 'q' },
+      { ctx: ctx(), baseUrl: BASE, fetchImpl: stalled, timeoutMs: 200, route },
+    );
+    expect(outcome.status).not.toBe('decided');
+    expect(Date.now() - started).toBeLessThan(DEPOSIT_GATE_TIMEOUT_MS - GATE_TIMEOUT_MS + 1_000);
+  }, 4_000);
 });
