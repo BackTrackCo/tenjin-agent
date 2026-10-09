@@ -338,6 +338,19 @@ describe('global flags are position-independent', () => {
     expect(parsed.command).toBe('wallet.show');
   });
 
+  it('`wallet address` is `wallet show`, and both QR commands accept --no-qr', async () => {
+    for (const argv of [
+      ['wallet', 'address', '--no-qr', '--timeout', 'abc'],
+      ['wallet', 'fund', '--no-qr', '--timeout', 'abc'],
+    ]) {
+      const cap = captureIo();
+      expect(await main(argv, cap.io)).toBe(2);
+      const parsed = JSON.parse(cap.stdout());
+      expect(parsed.error.code).toBe('USAGE');
+      expect(parsed.command).toBe(argv[1] === 'address' ? 'wallet.show' : 'wallet.fund');
+    }
+  });
+
   it('trailing --json suppresses stderr on a TTY, exactly like leading --json', async () => {
     const lead = captureIo(true);
     await main(['--json', 'doctor', '--timeout', 'abc'], lead.io);
