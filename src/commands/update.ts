@@ -18,6 +18,12 @@ import {
 import { defaultDataDir } from '../lib/paths';
 import type { CommandContext, CommandResult } from '../context';
 import { CHANNEL_DEPOSIT_ATOMIC, ROUTING_FEE_ATOMIC, usd } from '../router/fee';
+import {
+  readMcpServers,
+  RECONNECT_FIX,
+  type InstalledAt,
+  type ListMcpProcesses,
+} from '../router/mcp-processes';
 
 /**
  * `tenjin update`: replace this install with the newest version npm offers it,
@@ -111,6 +117,10 @@ export interface UpdateDeps {
    * point of spawning rather than calling.
    */
   refreshCommand?: string;
+  /** This user's running `tenjin mcp` processes; tests inject them. */
+  listMcpProcesses?: ListMcpProcesses;
+  /** When the new build was installed; tests inject it. */
+  installedAt?: InstalledAt;
 }
 
 interface UpdateData {
@@ -263,11 +273,15 @@ export async function runUpdate(
   );
 
   const refresh = await refreshProfiles(ctx, deps);
+  // The refresh child's output is captured, so the warning it would print about
+  // a `tenjin mcp` still running the old build is checked again here.
+  const servers = await readMcpServers(deps);
   return {
-    data: { ...data(true), refresh },
+    data: { ...data(true), refresh, mcpServer: servers.check },
     humanLines: [
       `Updated tenjin-cli ${current} -> ${latest}.`,
       ...refreshLines(refresh),
+      ...(servers.stale > 0 ? [`! ${servers.check.detail}. ${RECONNECT_FIX}`] : []),
       ROUTING_FEE_LINE,
     ],
   };

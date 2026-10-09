@@ -109,6 +109,7 @@ async function deps(overrides: Partial<UpdateDeps> = {}): Promise<UpdateDeps> {
     // the home; pinned so no assertion here depends on the developer's own.
     homeDir: dir,
     refreshCommand: join(dir, 'bin', 'tenjin.js'),
+    listMcpProcesses: async () => [],
     ...overrides,
   };
 }
@@ -139,6 +140,12 @@ describe('runUpdate', () => {
       updateAvailable: true,
       updated: true,
       refresh: { profiles: [dir], failed: [] },
+      mcpServer: {
+        name: 'mcp server',
+        status: 'ok',
+        required: false,
+        detail: 'none running (starts with the next session)',
+      },
     });
     expect(result.humanLines?.join(' ')).toContain('0.1.0-alpha.6 -> 0.1.0-alpha.7');
     // An install whose limits were approved before the fee existed hears of it here.
@@ -1044,6 +1051,24 @@ describe('runUpdate: the post-swap refresh', () => {
     const lines = result.humanLines?.join(' ') ?? '';
     expect(lines).not.toContain('pick it up immediately');
     expect(lines).toContain('Refreshed the skills and hook scripts');
+  });
+
+  it('names a running tenjin mcp that predates the update, with the reconnect fix', async () => {
+    const { ctx } = makeCtx();
+    const result = await runUpdate(
+      { check: false },
+      ctx,
+      await deps({
+        spawnImpl: scriptedSpawn([]).impl,
+        refreshCommand: ENTRY,
+        listMcpProcesses: async () => [{ pid: 9044, startedAt: 1 }],
+        installedAt: async () => 2,
+      }),
+    );
+    const lines = result.humanLines?.join('\n') ?? '';
+    expect(lines).toContain('1 running `tenjin mcp` process started before this install');
+    expect(lines).toContain('Reconnect x402 with /mcp, or start a new Claude Code session.');
+    expect(result.data).toMatchObject({ mcpServer: { status: 'warn' } });
   });
 
   it('reports every profile as unrefreshed when there is no entry to re-exec', async () => {
