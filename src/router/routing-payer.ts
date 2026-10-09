@@ -71,7 +71,8 @@ import { readRouterMemo, writeRouterMemo } from './router-memo';
  *   carries a deposit gets {@link DEPOSIT_GATE_TIMEOUT_MS} in place of the
  *   gate's 3.5 s. A payment already sent when the time runs out is not cut:
  *   the call returns, and the request finishes in the background
- *   ({@link DETACHED_CEILING_MS} at most) so the SDK and the ledger record it.
+ *   ({@link DETACHED_CEILING_MS} at most) so the SDK's channel records it; a
+ *   deposit in it was counted in the spend ledger when it was sent.
  * - THE FREE PATH. A call this cannot pay (a refusal above, a failed or
  *   refused payment, a server error) throws `RouteSkipped` with the reason,
  *   and the caller sends it to the free path. The server is asked before the
