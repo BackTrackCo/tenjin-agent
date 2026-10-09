@@ -1,4 +1,6 @@
 import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { FileClientChannelStorage } from '@x402/evm/batch-settlement/client/file-storage';
@@ -650,30 +652,27 @@ describe('RoutingPayer and the call budget', () => {
   });
 
   it("bounds the body read by the call's deadline once the headers arrive", async () => {
-    const router = new FakeRouter();
-    // The router sends headers, then never finishes the body; the read stops
-    // only when its signal aborts.
-    const stalled: typeof fetch = async (input, init) => {
-      const request = new Request(input, init);
-      return new Response(
-        new ReadableStream({
-          start(controller) {
-            controller.enqueue(new TextEncoder().encode('{'));
-            request.signal.addEventListener('abort', () => controller.error(request.signal.reason));
-          },
-        }),
-        { status: 200, headers: { 'content-type': 'application/json' } },
+    // A real router socket that sends its headers, then never finishes the body.
+    const server = createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.write('{');
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    try {
+      const p = payer(new FakeRouter(), { now: () => Date.now(), fetchImpl: fetch });
+      const route = (await p.routeFor(base))!;
+      const started = Date.now();
+      const outcome = await requestDecision(
+        'tool',
+        { query: 'q' },
+        { ctx: ctx(), baseUrl: base, timeoutMs: 200, route },
       );
-    };
-    const { p } = timed(router);
-    const route = (await p.routeFor(BASE))!;
-    const started = Date.now();
-    const outcome = await requestDecision(
-      'tool',
-      { query: 'q' },
-      { ctx: ctx(), baseUrl: BASE, fetchImpl: stalled, timeoutMs: 200, route },
-    );
-    expect(outcome.status).not.toBe('decided');
-    expect(Date.now() - started).toBeLessThan(DEPOSIT_GATE_TIMEOUT_MS - GATE_TIMEOUT_MS + 1_000);
+      expect(outcome.status).not.toBe('decided');
+      expect(Date.now() - started).toBeLessThan(DEPOSIT_GATE_TIMEOUT_MS - GATE_TIMEOUT_MS + 1_000);
+    } finally {
+      server.closeAllConnections();
+      await new Promise((resolve) => server.close(resolve));
+    }
   }, 4_000);
 });

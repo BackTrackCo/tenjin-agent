@@ -357,11 +357,7 @@ export class RoutingPayer {
         work.then(
           (response) => {
             settle();
-            // The body is still read on `own`: the caller's deadline keeps
-            // bounding it, so a stalled body cannot hold the queue.
-            if (caller?.aborted === true) own.abort(caller.reason);
-            else caller?.addEventListener('abort', () => own.abort(caller.reason), { once: true });
-            resolve(response);
+            resolve(bounded(response, caller, own));
           },
           (err: unknown) => {
             settle();
@@ -643,6 +639,27 @@ export class RoutingPayer {
     this.channel = { payer, http: new x402HTTPClient(client) };
     return this.channel;
   }
+}
+
+/**
+ * THE BODY READ STAYS BOUNDED once the headers are in: the caller's abort
+ * still reaches it. Piped here, under `own`, rather than left to the fetch's
+ * own signal, whose link to `own` is weak and can be collected mid-read.
+ */
+function bounded(
+  response: Response,
+  caller: AbortSignal | undefined,
+  own: AbortController,
+): Response {
+  if (caller === undefined || response.body === null) return response;
+  if (caller.aborted) own.abort(caller.reason);
+  else caller.addEventListener('abort', () => own.abort(caller.reason), { once: true });
+  const body = response.body.pipeThrough(new TransformStream(), { signal: own.signal });
+  return new Response(body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  });
 }
 
 /** The `error` a 402's payment-required header carries, if any. */
