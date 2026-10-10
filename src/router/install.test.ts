@@ -141,7 +141,7 @@ const FEE_TERMS =
   'Routing costs $0.003 a call, paid from channel deposits of up to $0.25 that stay yours until spent; each deposit counts against these limits.';
 const ASK_LINES = [
   '! Automatic payments are off until the user approves a spend limit',
-  `  Ask the user: May Tenjin pay for tool calls without asking you each time, up to $0.25 a call and $5 a day? ${FEE_TERMS} Using these limits or choosing your own also approves the routing fee.`,
+  `  Ask the user in this session: May Tenjin pay for tool calls without asking you each time, up to $0.25 a call and $5 a day? ${FEE_TERMS} Using these limits or choosing your own also approves the routing fee.`,
   '  Yes: tenjin install --yes',
   '  Other amounts: tenjin config set maxAutoSpend <usd> and tenjin config set sessionBudget <usd|none>',
   '  No: run nothing, the router then pays for nothing on its own, and the question stays open until tenjin install in a terminal or tenjin config set answers it',
@@ -204,7 +204,7 @@ describe('tenjin install', () => {
     });
     const { next } = (result.data as { spend: { approval: { next: string } } }).spend.approval;
     expect(next).toMatch(
-      /^Show the user these limits and ask this question before you change any limit\./,
+      /^In this session, show the user these limits and ask this question before you change any limit\./,
     );
     expect(next).toContain(
       'If they say yes, run the same install again with --yes: `tenjin install --yes`.',
@@ -382,7 +382,7 @@ describe('tenjin install', () => {
       '! Could not add the request tool to Claude Code. Run:',
       `  ${MCP_ADD_COMMAND}`,
       '',
-      'Next: run the command above and tenjin wallet fund, then restart Claude Code',
+      'Next: run the command above and tenjin wallet fund, then start a new Claude Code session so the hooks and the server load',
     ]);
   });
 
@@ -402,7 +402,7 @@ describe('tenjin install', () => {
       ...ASK_LINES,
       '  Live status line on: each lookup names its provider while it runs',
       '',
-      'Next: tenjin wallet fund, then restart Claude Code',
+      'Next: tenjin wallet fund, then start a new Claude Code session so the hooks and the server load',
     ]);
     // The data-handling detail is not dropped, it moves to --json and the docs.
     expect(result.data).toMatchObject({
@@ -467,7 +467,9 @@ describe('tenjin install', () => {
     expect(createWallet).not.toHaveBeenCalled();
     expect(result.data).toMatchObject({ wallet: { status: 'existing', address: ADDRESS } });
     expect(result.humanLines).toContain(`✓ Wallet: ${ADDRESS}`);
-    expect(result.humanLines!.at(-1)).toBe('Next: restart Claude Code');
+    expect(result.humanLines!.at(-1)).toBe(
+      'Next: start a new Claude Code session so the hooks and the server load',
+    );
   });
 
   it('creates no wallet with --no-wallet', async () => {

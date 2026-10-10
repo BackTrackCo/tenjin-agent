@@ -526,7 +526,7 @@ function spendApproval(config: PartialConfig, args: RouterInstallArgs): SpendApp
     question: spendQuestion(limits),
     limits: limitsUsd(limits),
     routingFee: ROUTING_FEE_TERMS,
-    next: `Show the user these limits and ask this question before you change any limit. If they say yes, run the same install again with --yes: \`${approve}\`. If they give other amounts, run ${OWN_LIMITS_COMMANDS}. If they say no, run nothing: ${DECLINED}.`,
+    next: `In this session, show the user these limits and ask this question before you change any limit. If they say yes, run the same install again with --yes: \`${approve}\`. If they give other amounts, run ${OWN_LIMITS_COMMANDS}. If they say no, run nothing: ${DECLINED}.`,
     approve,
     own: OWN_LIMITS_COMMANDS.replaceAll('`', ''),
   };
@@ -880,7 +880,7 @@ function lines(
     s.approval !== undefined
       ? [
           warn('Automatic payments are off until the user approves a spend limit'),
-          `  Ask the user: ${s.approval.question}`,
+          `  Ask the user in this session: ${s.approval.question}`,
           `  Yes: ${s.approval.approve}`,
           `  Other amounts: ${s.approval.own}`,
           `  No: run nothing, ${DECLINED.replaceAll('`', '')}`,
@@ -923,11 +923,11 @@ function lines(
       ? 'Next: fix the file above, then run tenjin install again'
       : needsMcp
         ? s.wallet.status === 'created'
-          ? `Next: run the command above and ${fund}, then restart Claude Code`
-          : 'Next: run the command above, then restart Claude Code'
+          ? `Next: run the command above and ${fund}, then start a new Claude Code session so the hooks and the server load`
+          : 'Next: run the command above, then start a new Claude Code session so the hooks and the server load'
         : s.wallet.status === 'created'
-          ? `Next: ${fund}, then restart Claude Code`
-          : 'Next: restart Claude Code',
+          ? `Next: ${fund}, then start a new Claude Code session so the hooks and the server load`
+          : 'Next: start a new Claude Code session so the hooks and the server load',
   ];
 }
 

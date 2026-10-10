@@ -55,8 +55,6 @@ tenjin install          # sets up Claude Code and creates your wallet
 tenjin wallet fund 2    # optional: add $2 with a card, via Coinbase
 ```
 
-Agents follow [docs/agent-install.md](docs/agent-install.md).
-
 ## What it can do
 
 The router picks from a catalog we curate and maintain. When nothing in it fits, it can point your agent at a reviewed third-party pay-per-call service from the [Tenjin list](#tenjin-list-and-experimental-bazaar), and your agent decides whether to use it or to ask you first. Routing is free today: you pay the provider's price and nothing else. A flat [routing fee](#routing-fee) of $0.003 per routing call is coming, under the spend limits you approve at install.
