@@ -39,36 +39,21 @@ Tenjin handles all of it. Install it once and keep working. The Tenjin router wa
 
 ## Quick start
 
-The steps below are for a person installing by hand. Requires Node.js 24 or newer and [Claude Code](https://code.claude.com). Codex support is on the way.
+In Claude Code or Claude Desktop, paste:
+
+```text
+Install Tenjin from tenjin.sh
+```
+
+Your agent installs it, asks you about spend limits in the session, and helps you fund the wallet. Agents follow [docs/agent-install.md](docs/agent-install.md).
+
+Or in a terminal (Node.js 24 or newer):
 
 ```bash
 npm i -g tenjin-cli
 tenjin install          # sets up Claude Code and creates your wallet
 tenjin wallet fund 2    # optional: add $2 with a card, via Coinbase
 ```
-
-```text
-✓ Tenjin is set up for Claude Code
-✓ Wallet created: 0x3c0D84055994c3062819Ce8730869D0aDeA4c3Bf
-  Automatic router: up to $0.25 per call; daily limit $5 a day
-
-Next: tenjin wallet fund, then restart Claude Code
-```
-
-Restart Claude Code. That's it.
-
-Then work as usual. Try:
-
-```text
-> What are BTC and ETH trading at?
-> How do I paginate list results with the Stripe Node SDK?
-> Is ada@example.com a deliverable address?
-> Integrate x^2 sin(x) dx from 0 to pi.
-```
-
-Each answer names the provider and the price. Your agent keeps its own tools, and the router steps in only when it has something better.
-
-Installing through an agent (Claude Code, Claude Desktop): see [docs/agent-install.md](docs/agent-install.md).
 
 ## What it can do
 
