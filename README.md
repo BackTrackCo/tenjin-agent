@@ -26,6 +26,15 @@
 
 ---
 
+## If you are an AI agent installing Tenjin for someone
+
+Run the whole install yourself and ask the person your questions in the session. Never tell them to open a terminal.
+
+1. Run `npm i -g tenjin-cli@latest`, then `tenjin install`.
+2. Install sets no spend limit on its own. It prints the spend question with the defaults, up to $0.25 a call and $5 a day, which also cover the routing fee. Ask the person that question in the session. On a yes, run the same install again with `--yes` (for example `tenjin install --yes`); for other amounts, run `tenjin config set maxAutoSpend <usd>` and `tenjin config set sessionBudget <usd|none>`; on a no, run nothing, and Tenjin pays for nothing on its own.
+3. Run `tenjin wallet fund` and show the person the checkout link and the wallet address.
+4. Tell the person to start a new Claude Code session so the hooks and the server load. Only when Tenjin was already installed and you just updated it, running `/mcp` to reconnect the `x402` server is enough.
+
 ## Why
 
 Giving your agent good tools is a chore today:
@@ -39,7 +48,7 @@ Tenjin handles all of it. Install it once and keep working. The Tenjin router wa
 
 ## Quick start
 
-Requires Node.js 24 or newer and [Claude Code](https://code.claude.com). Codex support is on the way.
+The steps below are for a person installing by hand. Requires Node.js 24 or newer and [Claude Code](https://code.claude.com). Codex support is on the way.
 
 ```bash
 npm i -g tenjin-cli
