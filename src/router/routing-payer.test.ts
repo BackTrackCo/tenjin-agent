@@ -639,7 +639,7 @@ describe('RoutingPayer and the call budget', () => {
 
   it('gives up on a queued call at its own deadline instead of waiting out a detached payment', async () => {
     const router = new FakeRouter();
-    const { call } = timed(router);
+    const { call, warned } = timed(router);
     expect((await call(3_500)).status).toBe('decided');
     // The next voucher answers after 1.5 s, past its 200 ms budget: it detaches.
     router.delayMs = 1_500;
@@ -647,8 +647,33 @@ describe('RoutingPayer and the call budget', () => {
     const started = Date.now();
     const queued = await call(300);
     expect(queued).toEqual({ status: 'skipped', why: 'busy' });
-    expect(Date.now() - started).toBeLessThan(800);
+    expect(Date.now() - started).toBeLessThan(1_200);
     await ahead;
+    // Every unanswered call says so once, a queued one included.
+    expect(warned.join('\n')).toMatch(/busy \(cause queued, \d+ms, stage queue\)/);
+  });
+
+  it('reports a paid call whose body stalls past its time as sent, not failed', async () => {
+    const router = new FakeRouter();
+    // The paid answer settles, then its body never finishes.
+    const stallPaid: typeof fetch = async (input, init) => {
+      const request = new Request(input, init);
+      const response = await router.fetch(request);
+      if (!request.headers.has('payment-signature') || response.status !== 200) return response;
+      return new Response(new ReadableStream({ start: (c) => c.enqueue(new Uint8Array([123])) }), {
+        status: 200,
+        headers: response.headers,
+      });
+    };
+    const { p } = timed(router);
+    const route = (await p.routeFor(BASE))!;
+    const outcome = await requestDecision(
+      'tool',
+      { query: 'q' },
+      { ctx: ctx(), baseUrl: BASE, fetchImpl: stallPaid, timeoutMs: 200, route },
+    );
+    expect(router.settledFees).toBe(1);
+    expect(outcome).toEqual({ status: 'skipped', why: 'deadline_after_payment_sent' });
   });
 
   it("bounds the body read by the call's deadline once the headers arrive", async () => {

@@ -231,7 +231,7 @@ export class RoutingPayer {
         // The caller's budget starts now, not when this call's turn comes.
         const sent = this.now();
         const until = sent + options.timeoutMs;
-        return this.turn(() => this.noted(sent, () => this.pay(url, options, until)), until);
+        return this.turn(() => this.noted(sent, () => this.pay(url, options, until)), until, sent);
       },
     };
   }
@@ -251,7 +251,7 @@ export class RoutingPayer {
    *  call gives up at its own deadline (`busy`) rather than wait out the
    *  call ahead of it, and then never starts. The deadline covers the wait
    *  only: once a call runs, its own budget applies. */
-  private turn<T>(run: () => Promise<T>, until: number): Promise<T> {
+  private turn<T>(run: () => Promise<T>, until: number, sent: number): Promise<T> {
     let gaveUp = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const go = () => {
@@ -266,6 +266,8 @@ export class RoutingPayer {
       timer = setTimeout(
         () => {
           gaveUp = true;
+          // It never ran, so `noted` cannot say it: its one line is here.
+          this.note('busy', null, sent);
           reject(new RouteSkipped('busy'));
         },
         Math.max(0, until - this.now()),
@@ -358,7 +360,9 @@ export class RoutingPayer {
         work.then(
           (response) => {
             settle();
-            resolve(bounded(response, caller, own));
+            // A detached request's answer is drained by `finishDetached`, so
+            // its body is left unlocked.
+            resolve(call.detached === true ? response : bounded(response, caller, own));
           },
           (err: unknown) => {
             settle();
@@ -466,7 +470,10 @@ export class RoutingPayer {
     }
     // No answer, a failed payment or a server error: the free path takes it.
     if (!response.ok) {
-      throw new RouteSkipped(call.detached === true ? DEADLINE_AFTER_PAYMENT_SENT : PAYMENT_FAILED);
+      // A payment went out and the call's time ended before its answer did,
+      // detached or with the body still arriving: no fault, it was charged.
+      const late = call.detached === true || (call.paid && response.kind === 'timeout');
+      throw new RouteSkipped(late ? DEADLINE_AFTER_PAYMENT_SENT : PAYMENT_FAILED);
     }
     if (!call.paid && response.status === 404) {
       // The server has no paid path: the free path, asked again in an hour.
