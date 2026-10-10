@@ -52,12 +52,13 @@ export function limitsPhrase(limits: RouterLimits): string {
 export const ROUTING_FEE_TERMS = `Routing costs $${usd(ROUTING_FEE_ATOMIC)} a call, paid from channel deposits of up to $${usd(CHANNEL_DEPOSIT_ATOMIC)} that stay yours until spent; each deposit counts against these limits.`;
 
 /**
- * The yes to the limits shown, as the selector's "Use these limits": install
- * again with `--yes`, which writes the same result plus those limits. Where
- * the original command is known (install's own output), it is that command
- * with `--yes` added.
+ * The yes to the limits shown, where the command install ran is not known
+ * (doctor, the routing notice, the request tool): the per-call limit only.
+ * The daily limit already defaults to the one shown. A bare `install --yes`
+ * here would undo a `--project`, `--no-wallet` or `--status-line skip`
+ * install; install's own output names that command with its flags instead.
  */
-export const ACCEPT_COMMAND = 'tenjin install --yes';
+export const ACCEPT_COMMAND = `tenjin config set maxAutoSpend ${toMoney(ROUTER_DEFAULTS.maxAutoSpend).usd}`;
 
 /** The commands for limits of the user's own, each in backticks. */
 export const OWN_LIMITS_COMMANDS =

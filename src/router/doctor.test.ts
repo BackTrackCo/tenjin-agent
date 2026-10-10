@@ -123,8 +123,9 @@ describe('routingFeeRow', () => {
     expect(row.status).toBe('warn');
     expect(row.fix).toContain('May Tenjin pay for tool calls without asking you each time');
     expect(row.fix).toContain('Routing costs $0.003 a call');
-    expect(row.fix).toContain('`tenjin install --yes`');
-    expect(row.fix).not.toContain('config set maxAutoSpend 0.25');
+    expect(row.fix).toContain('`tenjin config set maxAutoSpend 0.25`');
+    expect(row.fix).not.toContain('tenjin install --yes');
+    expect(row.fix).not.toContain('Raise it');
   });
 
   it('keeps the raise command for a limit the user chose', () => {

@@ -288,7 +288,9 @@ describe('the hook legs and the routing fee', () => {
       'Using these limits or choosing your own also approves the routing fee.',
     );
     expect(notice).toContain('Routing costs $0.003 a call');
-    expect(notice).toContain('`tenjin install --yes`');
+    expect(notice).toContain('`tenjin config set maxAutoSpend 0.25`');
+    // Never a bare install, which would undo a --project or --no-wallet install.
+    expect(notice).not.toContain('tenjin install --yes');
     expect(fake.paidRequests()).toBe(0);
   });
 

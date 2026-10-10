@@ -1080,7 +1080,7 @@ describe('the doctor this release registers', () => {
         `Ask the user: May Tenjin pay for tool calls without asking you each time, up to $0.25 a call and $5 a day? ${FEE_TERMS}`,
       );
       expect(spend?.fix).toBe(
-        'Answer the spend question: for a yes, run `tenjin install --yes`; for other amounts, `tenjin config set maxAutoSpend <usd>` and `tenjin config set sessionBudget <usd|none>`; or run `tenjin install` in a terminal to choose.',
+        'Answer the spend question: for a yes, run `tenjin config set maxAutoSpend 0.25`; for other amounts, `tenjin config set maxAutoSpend <usd>` and `tenjin config set sessionBudget <usd|none>`; or run `tenjin install` in a terminal to choose.',
       );
       // The open question is not the first required failure, so it never hides
       // the network diagnosis.
