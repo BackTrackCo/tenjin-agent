@@ -68,14 +68,7 @@ Then work as usual. Try:
 
 Each answer names the provider and the price. Your agent keeps its own tools, and the router steps in only when it has something better.
 
-### Installing through your agent
-
-An agent installing Tenjin for someone runs every step itself and asks its questions in the session, never telling the person to open a terminal:
-
-1. Run `npm i -g tenjin-cli@latest`, then `tenjin install`.
-2. Put install's spend question ($0.25 a call, $5 a day) to the person; on a yes, rerun the same install with `--yes` ([details](docs/agent-permissions.md)).
-3. Run `tenjin wallet fund` and show the person the checkout link and the wallet address.
-4. Tell the person to start a new Claude Code session; after an update of an existing install, `/mcp` to reconnect `x402` is enough.
+Installing through an agent (Claude Code, Claude Desktop): see [docs/agent-install.md](docs/agent-install.md).
 
 ## What it can do
 
