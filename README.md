@@ -45,7 +45,7 @@ In Claude Code or Claude Desktop, paste:
 Install Tenjin from tenjin.sh
 ```
 
-Your agent installs it, asks you about spend limits in the session, and helps you fund the wallet. Agents follow [docs/agent-install.md](docs/agent-install.md).
+Your agent installs it, asks you about spend limits in the session, and helps you fund the wallet.
 
 Or in a terminal (Node.js 24 or newer):
 
@@ -54,6 +54,8 @@ npm i -g tenjin-cli
 tenjin install          # sets up Claude Code and creates your wallet
 tenjin wallet fund 2    # optional: add $2 with a card, via Coinbase
 ```
+
+Agents follow [docs/agent-install.md](docs/agent-install.md).
 
 ## What it can do
 
