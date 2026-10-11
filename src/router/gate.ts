@@ -25,3 +25,13 @@
  * harness budget was already leaving unused.
  */
 export const GATE_TIMEOUT_MS = 3_500;
+
+/**
+ * A CALL THAT CARRIES A DEPOSIT gets the rest of the hook leg instead: the
+ * first paid call on a channel waits on verify, the gate and the on-chain
+ * deposit in a row (5.0 s measured on Base), so 3.5 s cut it short. It is the
+ * leg's 5 s less the 500 ms for startup, the transcript read and the reply,
+ * so the leg still never runs past the timeout `install` writes; `wire.test.ts`
+ * pins that.
+ */
+export const DEPOSIT_GATE_TIMEOUT_MS = 4_500;

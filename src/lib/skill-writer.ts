@@ -125,7 +125,7 @@ export async function installSkill(
   return {
     status: dryRun ? 'would-update' : 'updated',
     preexisting,
-    // The hosted skill is a MIRROR of tenjin.blog/skills.md (roadmap G4), so a
+    // The hosted skill is a MIRROR of tenjin.sh/skills.md (roadmap G4), so a
     // differing local copy is a replacement, not the drift warning the CLI skills
     // get. Neither side carries a version or date, so the wording claims no
     // direction: the local file may well be a newer fetch than this package's copy.

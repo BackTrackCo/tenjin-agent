@@ -4,12 +4,11 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { FileClientChannelStorage } from '@x402/evm/batch-settlement/client/file-storage';
+import { loadRawConfig } from '../lib/config';
 import { CliError } from '../lib/errors';
 import { inspectHooksFile, ownsHookEntry, pruneOurHandlers } from '../lib/harness-hooks';
-import { httpRequest } from '../lib/http';
 import { toMoney } from '../lib/money';
 import { evaluateSpendPolicy, type SpendPolicy } from '../lib/policy';
-import { PRODUCTION_ORIGIN } from '../lib/production-origin';
 import { resolveContextSettings, type ResolvedSettings } from '../lib/settings';
 import { spentOf } from '../lib/spend-ledger';
 import { readUsdcBalance } from '../lib/usdc-balance';
@@ -19,9 +18,9 @@ import { readSpendSummary } from '../lib/wallet/spend';
 import { walletFileExists } from '../lib/wallet/store';
 import type { CommandContext, CommandResult } from '../context';
 import { agentsWithoutRequestTool } from './agent-tools';
-import { ROUTER_PATH } from './decision';
 import {
   CHANNEL_DEPOSIT_ATOMIC,
+  feeRefusal,
   MIN_DEPOSIT_ATOMIC,
   payerDir,
   ROUTING_FEE_ATOMIC,
@@ -40,6 +39,16 @@ import {
 } from './install';
 import { routerSettings, type RouterSettings } from './settings';
 import { REQUEST_TOOL } from './names';
+import { probeRouter, type RouterCheck } from './reachability';
+import { readMcpServers, type InstalledAt, type ListMcpProcesses } from './mcp-processes';
+import { clearRouterMemo, readRouterMemo, type RouterMemo } from './router-memo';
+import {
+  ACCEPT_COMMAND,
+  OWN_LIMITS_COMMANDS,
+  shownLimits,
+  spendQuestion,
+  type RouterLimits,
+} from './spend-question';
 import { inspectStatusLine, STATUS_LINE_COMMAND } from './status-line-wiring';
 
 /**
@@ -56,13 +65,7 @@ import { inspectStatusLine, STATUS_LINE_COMMAND } from './status-line-wiring';
 
 const exec = promisify(execFile);
 
-export interface RouterCheck {
-  name: string;
-  status: 'ok' | 'warn' | 'fail';
-  required: boolean;
-  detail: string;
-  fix?: string;
-}
+export type { RouterCheck };
 
 export interface RouterDoctorDeps {
   homeDir?: string;
@@ -83,6 +86,11 @@ export interface RouterDoctorDeps {
   ) => Promise<{ found: boolean; state: McpEntryState }>;
   /** Node's own version, for the floor check. */
   nodeVersion?: string;
+  /** This user's running `tenjin mcp` processes; tests inject them. */
+  listMcpProcesses?: ListMcpProcesses;
+  /** When this build was installed; tests inject it. */
+  installedAt?: InstalledAt;
+  now?: () => number;
 }
 
 const NODE_FLOOR = 24;
@@ -118,11 +126,35 @@ export async function runRouterDoctor(
       deps.homeDir ?? homedir(),
     ),
   );
-  checks.push(spendCheck(settings.policy.maxAutoSpendAtomic, settings.policy.sessionBudgetAtomic));
+  checks.push((await readMcpServers(deps)).check);
+  const rawConfig = await loadRawConfig(ctx.dataDir);
+  const unanswered =
+    rawConfig.maxAutoSpend === undefined ? { limits: shownLimits(rawConfig) } : null;
+  checks.push(
+    spendCheck(settings.policy.maxAutoSpendAtomic, settings.policy.sessionBudgetAtomic, unanswered),
+  );
   checks.push(experimentalCheck(settings.experimentalBazaar));
-  checks.push(await routingFeeCheck(ctx, settings, deps.fetchImpl));
+  checks.push(await routingFeeCheck(ctx, settings, deps.fetchImpl, unanswered));
   checks.push(...(await walletCheck(ctx)));
-  checks.push(await routerCheck(settings.baseUrl, ctx.flags.timeout, deps.fetchImpl));
+  const now = deps.now?.() ?? Date.now();
+  const probe = await probeRouter(settings.baseUrl, {
+    timeoutMs: ctx.flags.timeout,
+    env,
+    ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+  });
+  // A probe the router answered ends the routing legs' backoff at once.
+  if (probe.status === 'ok') {
+    await clearRouterMemo(ctx.dataDir, 'unreachable', settings.baseUrl);
+    checks.push(probe);
+  } else {
+    checks.push(
+      withBackoff(
+        probe,
+        await readRouterMemo(ctx.dataDir, 'unreachable', settings.baseUrl, now),
+        now,
+      ),
+    );
+  }
   const agents = await subagentsCheck(deps.cwd ?? process.cwd(), deps.homeDir ?? homedir());
   if (agents !== null) checks.push(agents);
 
@@ -136,18 +168,35 @@ export async function runRouterDoctor(
       details: data,
     });
   }
+  return { data, humanLines: doctorLines(checks) };
+}
+
+/** The human report: one line a check, and under each row to look at, its
+ *  fix, as `--json` carries it. */
+export function doctorLines(checks: RouterCheck[]): string[] {
   const bad = checks.filter((c) => c.status !== 'ok').length;
+  return [
+    ...checks.flatMap((c) => [
+      `${c.status === 'ok' ? 'ok  ' : c.status === 'warn' ? 'warn' : 'fail'}  ${c.name}: ${c.detail}`,
+      ...(c.status !== 'ok' && c.fix !== undefined ? [`      fix: ${c.fix}`] : []),
+    ]),
+    bad === 0
+      ? `${checks.length} checks, all pass.`
+      : `${checks.length} checks, ${bad} to look at.`,
+  ];
+}
+
+/**
+ * The routing legs' backoff, named on a router line whose probe failed too.
+ * It ends by itself after its minute, or when a probe here reaches the router.
+ */
+function withBackoff(check: RouterCheck, memo: RouterMemo | null, now: number): RouterCheck {
+  if (memo === null) return check;
+  const left = Math.max(1, Math.ceil((memo.until - now) / 1000));
   return {
-    data,
-    humanLines: [
-      ...checks.map(
-        (c) =>
-          `${c.status === 'ok' ? 'ok  ' : c.status === 'warn' ? 'warn' : 'fail'}  ${c.name}: ${c.detail}`,
-      ),
-      bad === 0
-        ? `${checks.length} checks, all pass.`
-        : `${checks.length} checks, ${bad} to look at.`,
-    ],
+    ...check,
+    status: check.status === 'ok' ? 'warn' : check.status,
+    detail: `${check.detail}; routing calls skip the router for ${left}s more, after one did not reach it`,
   };
 }
 
@@ -458,8 +507,20 @@ async function routingFeeCheck(
   ctx: CommandContext,
   settings: ResolvedSettings,
   fetchImpl: typeof fetch | undefined,
+  unanswered: { limits: RouterLimits } | null,
 ): Promise<RouterCheck> {
-  const host = new URL(settings.baseUrl).host;
+  let host: string;
+  try {
+    host = new URL(settings.baseUrl).host;
+  } catch {
+    // The router check below names the bad base URL and its fix.
+    return {
+      name: 'routing fee',
+      status: 'warn',
+      required: false,
+      detail: 'not checked, because the base URL is not a URL',
+    };
+  }
   const why = await routingFeeBlock({
     dataDir: ctx.dataDir,
     policy: settings.policy,
@@ -469,6 +530,15 @@ async function routingFeeCheck(
     provider: (await walletFileExists(ctx.dataDir)) ? resolveWalletProvider(ctx) : null,
     ...(fetchImpl !== undefined ? { fetchImpl } : {}),
   }).catch(() => null);
+  return routingFeeRow(why, host, unanswered);
+}
+
+/** The routing-fee row for what {@link routingFeeBlock} found. */
+export function routingFeeRow(
+  why: string | null,
+  host: string,
+  unanswered: { limits: RouterLimits } | null,
+): RouterCheck {
   const u = why === null ? null : unpaid(why);
   if (why === null || u === null) {
     return {
@@ -476,6 +546,17 @@ async function routingFeeCheck(
       status: 'ok',
       required: false,
       detail: `$${usd(ROUTING_FEE_ATOMIC)} a call, paid from channel deposits of up to $${usd(CHANNEL_DEPOSIT_ATOMIC)} that count against the spend limits`,
+    };
+  }
+  if (why === 'limit_below_deposit' && unanswered !== null) {
+    // The zero is the open spend question, not a limit anyone chose: the fix
+    // is the question itself, with the fee terms it approves.
+    return {
+      name: 'routing fee',
+      status: 'warn',
+      required: false,
+      detail: 'the spend limits are not answered yet, so routing calls take the free path',
+      fix: `Answer the spend question: ${spendQuestion(unanswered.limits)} For a yes, run \`${ACCEPT_COMMAND}\`; for other amounts, ${OWN_LIMITS_COMMANDS}.`,
     };
   }
   const fixes: Record<string, string> = {
@@ -509,11 +590,18 @@ export interface RoutingFeeInput {
 /** Why the next deposit would be refused, or null when the fee can be paid. */
 export async function routingFeeBlock(input: RoutingFeeInput): Promise<string | null> {
   const { provider, policy } = input;
+  // The fee's per-payment checks first, before the wallet, as the payer runs
+  // them on every call: a channel with credit pays nothing they refuse, and
+  // unanswered limits are the question to name, not the passphrase.
+  const refused = feeRefusal(policy, input.host);
+  if (refused !== null) return refused;
   if (provider === null) return 'no_wallet';
   const verified = await provider.verify?.().catch(() => null);
   if (verified !== undefined && verified !== null && verified.status !== 'verified') {
     return 'wallet_locked';
   }
+  const ledger = await readSpendSummary(input.dataDir);
+  const spent = ledger === null ? 0n : spentOf(ledger);
   const { address } = await describeWallet(provider);
   if ((await channelCredit(input.dataDir, address)) >= ROUTING_FEE_ATOMIC) return null;
   const deposit =
@@ -521,12 +609,11 @@ export async function routingFeeBlock(input: RoutingFeeInput): Promise<string | 
       ? policy.maxAutoSpendAtomic
       : CHANNEL_DEPOSIT_ATOMIC;
   if (deposit < MIN_DEPOSIT_ATOMIC) return 'limit_below_deposit';
-  const ledger = await readSpendSummary(input.dataDir);
   const evaluation = evaluateSpendPolicy(policy, {
     mode: 'automatic',
     amountAtomic: deposit,
     creator: input.host,
-    sessionSpentAtomic: ledger === null ? 0n : spentOf(ledger),
+    sessionSpentAtomic: spent,
   });
   if (evaluation.reason === 'not_allowlisted') return 'not_allowlisted';
   if (evaluation.reason === 'session_budget_exceeded') return 'budget_reached';
@@ -564,7 +651,19 @@ function experimentalCheck(bazaar: boolean): RouterCheck {
   };
 }
 
-function spendCheck(maxAutoSpendAtomic: bigint, sessionBudgetAtomic: bigint | null): RouterCheck {
+/**
+ * `unanswered` is set when the config file names no `maxAutoSpend`: the state
+ * an install that could not ask leaves, the same as a cancel at its selector.
+ * The code default's zero holds, and that is a question still open, not a
+ * broken machine, so it warns with the question and its one-step yes, and the
+ * checks after it (the router probe above all) still print. A 0 the user
+ * wrote is their answer and stays a failure.
+ */
+function spendCheck(
+  maxAutoSpendAtomic: bigint,
+  sessionBudgetAtomic: bigint | null,
+  unanswered: { limits: RouterLimits } | null,
+): RouterCheck {
   if (sessionBudgetAtomic === 0n) {
     return {
       name: 'spend',
@@ -574,13 +673,22 @@ function spendCheck(maxAutoSpendAtomic: bigint, sessionBudgetAtomic: bigint | nu
       fix: 'Choose a daily limit with `tenjin config set sessionBudget <usd|none>`.',
     };
   }
+  if (maxAutoSpendAtomic === 0n && unanswered !== null) {
+    return {
+      name: 'spend',
+      status: 'warn',
+      required: false,
+      detail: `the spend limits are not answered yet, so automatic payments are off and every lookup needs approval. Ask the user: ${spendQuestion(unanswered.limits)}`,
+      fix: `Answer the spend question: for a yes, run \`${ACCEPT_COMMAND}\`; for other amounts, ${OWN_LIMITS_COMMANDS}; or run \`tenjin install\` in a terminal to choose.`,
+    };
+  }
   if (maxAutoSpendAtomic === 0n) {
     return {
       name: 'spend',
       status: 'fail',
       required: true,
       detail: 'maxAutoSpend is 0, so every lookup needs approval and none can pay',
-      fix: 'Run `tenjin install`, or `tenjin config set maxAutoSpend 0.10`.',
+      fix: 'Set a per-call limit with `tenjin config set maxAutoSpend <usd>`.',
     };
   }
   const budget =
@@ -624,57 +732,4 @@ async function walletCheck(ctx: CommandContext): Promise<RouterCheck[]> {
       },
     ];
   }
-}
-
-/**
- * One cheap request to the free decision route with an empty body. It checks
- * the route is reachable and enabled, not that it routes: a 400 is the route
- * refusing that body, and a 404 is the route switched off. Nothing is signed
- * and no Jev request is spent.
- */
-async function routerCheck(
-  baseUrl: string,
-  timeoutMs: number,
-  fetchImpl: typeof fetch | undefined,
-): Promise<RouterCheck> {
-  const url = new URL(ROUTER_PATH, baseUrl).toString();
-  const probe = await httpRequest(url, {
-    method: 'POST',
-    timeoutMs,
-    blockRedirects: true,
-    jsonBody: {},
-    ...(fetchImpl !== undefined ? { fetchImpl } : {}),
-  });
-  const fail = (detail: string, fix: string): RouterCheck => ({
-    name: 'router',
-    status: 'fail',
-    required: true,
-    detail,
-    fix,
-  });
-  const checkBase =
-    'Check that the configured base URL names the Tenjin router (`tenjin config get baseUrl`), then try again later.';
-  if (!probe.ok) {
-    return fail(`the router at ${url} is unreachable or erroring (${probe.message})`, checkBase);
-  }
-  // 429 is the route's own rate limit: proof the router is there.
-  if (probe.status === 200 || probe.status === 400 || probe.status === 429) {
-    return { name: 'router', status: 'ok', required: true, detail: `${url} is live` };
-  }
-  if (probe.status === 404) {
-    return fail(`the router is not enabled at ${url}`, checkBase);
-  }
-  if (probe.status === 401 || probe.status === 403) {
-    return fail(
-      `${url} is not a Tenjin router (it asked for credentials)`,
-      `Set the router URL with \`tenjin config set baseUrl ${PRODUCTION_ORIGIN}\`.`,
-    );
-  }
-  if (probe.status >= 500) {
-    return fail(`the router at ${url} is unreachable or erroring (${probe.status})`, checkBase);
-  }
-  return fail(
-    `${url} answered ${probe.status}, which a Tenjin router does not`,
-    'Check that the configured base URL names a Tenjin deployment (`tenjin config get baseUrl`).',
-  );
 }

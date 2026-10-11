@@ -12,6 +12,7 @@ import {
 import { getUsdcBalance } from '../lib/usdc';
 import { toMoney } from '../lib/money';
 import { emitNotice, emitWriteNotice } from '../lib/output';
+import { addressQrLines } from '../lib/qr';
 import { openInBrowser } from '../lib/open-url';
 import { PRODUCTION_ORIGIN } from '../lib/production-origin';
 import type { CommandContext, CommandResult } from '../context';
@@ -55,6 +56,8 @@ export interface FundOptions extends ResolveWalletProviderOptions {
   amountUsd?: string;
   /** Skip the browser open (still prints the URL). */
   open?: boolean;
+  /** `--no-qr`: skip the QR block a TTY otherwise gets for sending USDC from a phone. */
+  qr?: boolean;
   /** Poll the balance after issuing the link. Defaults to ON at a TTY, OFF otherwise. */
   wait?: boolean;
   fetchImpl?: typeof fetch;
@@ -128,6 +131,18 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
       ctx.io,
       opened ? 'Opened in your default browser.' : 'Could not open a browser; use the link above.',
       { json: ctx.flags.json },
+    );
+  }
+
+  // Human mode only, and before the wait: the poll below also sees USDC sent
+  // straight to the address, so a phone wallet is a second way to finish.
+  const qrLines =
+    opts.qr !== false && ctx.io.isTTY && !ctx.flags.json
+      ? addressQrLines(address, ctx.io.stderr)
+      : [];
+  if (qrLines.length > 0) {
+    ctx.io.stderr.write(
+      [`Or send USDC from a phone wallet to ${address}:`, ...qrLines].join('\n') + '\n',
     );
   }
 

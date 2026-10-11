@@ -208,6 +208,21 @@ export interface FetchJsonFailure {
    * caller name access protection outright.
    */
   gateOffOrigin?: boolean;
+  /**
+   * On `network`: the layer the error chain names, when it names one. The
+   * origin never answered, so a caller that blames it (or its base URL) gives
+   * the wrong fix. See {@link transportFailure}.
+   */
+  transport?: TransportFailure;
+}
+
+/** Which layer refused a request that never reached the origin. */
+export interface TransportFailure {
+  layer: 'proxy' | 'dns' | 'tls' | 'connect';
+  /** The socket's own error code, for every layer but `proxy`. */
+  code?: string;
+  /** What the proxy answered to `CONNECT`, for `proxy` only. */
+  proxyStatus?: number;
 }
 
 /**
@@ -485,6 +500,12 @@ export interface HttpRequestOptions {
   /** The cap on such a body; over it the response is a failure, never a
    *  buffer that grows without bound. Defaults to {@link MAX_BINARY_BODY_BYTES}. */
   maxBinaryBytes?: number;
+  /**
+   * Send no install id, and mint none. For a request that checks the network
+   * rather than uses Tenjin (the reachability probe), so it never counts as an
+   * install in request telemetry.
+   */
+  anonymous?: boolean;
 }
 
 /** The same cap the router's linked-media download uses. */
@@ -632,7 +653,8 @@ export async function httpRequest(url: string, opts: HttpRequestOptions): Promis
     try {
       res = await doFetch(url, {
         method: opts.method ?? 'GET',
-        headers: { ...headers, ...(await tenjinIdentityHeaders(url)) },
+        headers:
+          opts.anonymous === true ? headers : { ...headers, ...(await tenjinIdentityHeaders(url)) },
         body,
         signal,
         ...(pinned ? { redirect: 'manual' as const } : {}),
@@ -640,10 +662,12 @@ export async function httpRequest(url: string, opts: HttpRequestOptions): Promis
     } catch (err) {
       if (timedOut) return timeoutFailure(url, opts.timeoutMs);
       if (isHeaderOverflow(err)) return oversizedHeaderFailure(url);
+      const transport = transportFailure(err);
       return {
         ok: false,
         kind: 'network',
         message: `Request to ${url} failed: ${errorMessage(err)}`,
+        ...(transport !== undefined ? { transport } : {}),
       };
     }
 
@@ -788,6 +812,43 @@ function isHeaderOverflow(err: unknown): boolean {
     const message = (candidate as { message?: unknown }).message;
     return typeof message === 'string' && /headers overflow|header overflow/i.test(message);
   });
+}
+
+const DNS_CODES = new Set(['ENOTFOUND', 'EAI_AGAIN', 'EAI_FAIL', 'EAI_NODATA', 'EAI_NONAME']);
+const CONNECT_CODES = new Set([
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  'ETIMEDOUT',
+  'UND_ERR_CONNECT_TIMEOUT',
+  'UND_ERR_SOCKET',
+]);
+const TLS_CODE = /^(?:ERR_TLS_|ERR_SSL_|CERT_|UNABLE_TO_|SELF_SIGNED_|DEPTH_ZERO_)/;
+/** undici's text when a proxy answers `CONNECT` with anything but 200. */
+const PROXY_REFUSAL = /Proxy response \((\d{3})\)/;
+
+/**
+ * The layer a `fetch failed` came from, read down the `cause` chain. fetch
+ * wraps the real error twice: a proxy refusing the tunnel is
+ * `TypeError: fetch failed`, then `Request was cancelled.`, then undici's
+ * `UND_ERR_ABORTED` with the proxy's status in its message (Node 24.18,
+ * measured 2026-10-05). Undefined when no link names a layer.
+ */
+export function transportFailure(err: unknown): TransportFailure | undefined {
+  let link: unknown = err;
+  for (let depth = 0; depth < 5 && link !== null && typeof link === 'object'; depth += 1) {
+    const { code, message, cause } = link as { code?: unknown; message?: unknown; cause?: unknown };
+    const proxy = typeof message === 'string' ? PROXY_REFUSAL.exec(message) : null;
+    if (proxy !== null) return { layer: 'proxy', proxyStatus: Number(proxy[1]) };
+    if (typeof code === 'string') {
+      if (DNS_CODES.has(code)) return { layer: 'dns', code };
+      if (TLS_CODE.test(code)) return { layer: 'tls', code };
+      if (CONNECT_CODES.has(code)) return { layer: 'connect', code };
+    }
+    link = cause;
+  }
+  return undefined;
 }
 
 /**

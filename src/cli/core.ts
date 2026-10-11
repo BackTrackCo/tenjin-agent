@@ -17,6 +17,7 @@ export function registerCore(reg: Registration): void {
     .option('--project', "write into this project's .claude/settings.json instead of your home one")
     .option('--no-wallet', 'create no wallet')
     .option('--refresh', 're-register the hook entries this machine already has; add nothing')
+    .option('--yes', 'accept the default spend limits instead of asking')
     .option(
       '--status-line <mode>',
       'the live footer: `own` registers it when you have no status line of your own, `compose` appends it to the one you do have, `skip` leaves the setting alone',
@@ -42,6 +43,7 @@ Learn more:
           {
             ...(o.project === true ? { project: true } : {}),
             ...(o.refresh === true ? { refresh: true } : {}),
+            ...(o.yes === true ? { yes: true } : {}),
             ...(o.statusLine !== undefined
               ? { statusLine: statusLineMode(String(o.statusLine)) }
               : {}),
@@ -174,14 +176,17 @@ Examples:
       });
     });
   addGlobalFlags(wallet.command('show'))
+    .alias('address')
     .summary('show the wallet address and key source')
     .description(
-      'Print the active wallet address and where its key comes from. The private key is never printed, by any flag.',
+      'Print the active wallet address and where its key comes from. The private key is never printed, by any flag. At a terminal it also draws the address as a QR code for a phone wallet to scan.',
     )
+    .option('--no-qr', 'print the address without the QR code')
     .action(async function (this: Command) {
       await runCommand('wallet.show', this, async (ctx) => {
+        const o = this.opts();
         const { runWalletShow } = await import('../commands/wallet');
-        return runWalletShow(ctx);
+        return runWalletShow(ctx, o.qr === false ? { qr: false } : {});
       });
     });
   addGlobalFlags(wallet.command('balance'))
@@ -209,6 +214,7 @@ Examples:
       'Mint a Coinbase Onramp checkout link bound to THIS wallet, open it in the browser, and wait for the USDC to land on Base. Minting moves no money: a human completes the payment on pay.coinbase.com.',
     )
     .option('--no-open', 'print the checkout link without opening a browser')
+    .option('--no-qr', 'skip the QR code of the address for sending USDC from a phone')
     .option(
       '--no-wait',
       'return once the link is issued instead of polling the balance (already the default when not at a TTY)',
@@ -220,6 +226,7 @@ Examples:
         return runFund(ctx, {
           ...(amountUsd !== undefined ? { amountUsd } : {}),
           ...(o.open === false ? { open: false } : {}),
+          ...(o.qr === false ? { qr: false } : {}),
           ...(o.wait === false ? { wait: false } : {}),
         });
       });

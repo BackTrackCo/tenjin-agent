@@ -70,8 +70,9 @@ export interface HooksResult {
   harness: string;
   /** Its hooks file, absent when the harness has none. */
   path?: string;
-  /** Where the daemon bundles live (or would). */
-  hooksDir: string;
+  /** Where the daemon bundles live (or would). Absent for plain command
+   *  entries, which run a binary on PATH and need no directory. */
+  hooksDir?: string;
   /** Hook entries of ours registered after this run, or 0 on a skip. */
   entries: number;
   /** True when this run changed the file; false when it already matched. */
@@ -95,12 +96,12 @@ export interface HooksResult {
 
 function skip(
   reason: HooksSkipReason,
-  args: { harness: string; path?: string; hooksDir: string; warning?: string; fix?: string },
+  args: { harness: string; path?: string; hooksDir?: string; warning?: string; fix?: string },
 ): HooksResult {
   return {
     harness: args.harness,
     ...(args.path !== undefined ? { path: args.path } : {}),
-    hooksDir: args.hooksDir,
+    ...(args.hooksDir !== undefined ? { hooksDir: args.hooksDir } : {}),
     entries: 0,
     wrote: false,
     skipped: reason,
@@ -483,8 +484,7 @@ export async function writeHooks(opts: WriteHooksOptions): Promise<HooksResult> 
   const steps = adapter.registrar.activation?.(declaredPath);
   const activation = steps !== undefined ? { activation: steps } : {};
 
-  if (opts.plan !== undefined)
-    return writePlainEntries(opts, opts.plan, declaredPath, dir, activation);
+  if (opts.plan !== undefined) return writePlainEntries(opts, opts.plan, declaredPath, activation);
 
   // Steps 1-3. A daemon that will not come up is reported as a skip rather than
   // thrown: install has already written skills and permissions, and the remedy
@@ -637,7 +637,6 @@ async function writePlainEntries(
   opts: WriteHooksOptions,
   plan: unknown[],
   declaredPath: string,
-  dir: string,
   activation: { activation?: string[] },
 ): Promise<HooksResult> {
   const harness = opts.adapter.id;
@@ -646,7 +645,6 @@ async function writePlainEntries(
     return skip(found.refusal.reason, {
       harness,
       path: found.refusal.path,
-      hooksDir: dir,
       warning: found.refusal.message,
       fix: fixFor(found.refusal.reason),
     });
@@ -661,7 +659,6 @@ async function writePlainEntries(
   const result: HooksResult = {
     harness,
     path,
-    hooksDir: dir,
     entries: plan.length,
     wrote: next !== raw,
     ...activation,
@@ -674,7 +671,6 @@ async function writePlainEntries(
     return skip('changed-since-read', {
       harness,
       path,
-      hooksDir: dir,
       warning: `${path} changed while it was being updated, so no hooks were registered. Re-run \`tenjin install\`.`,
       fix: fixFor('changed-since-read'),
     });
@@ -685,7 +681,6 @@ async function writePlainEntries(
     return skip('unwritable', {
       harness,
       path,
-      hooksDir: dir,
       warning: `${path} could not be written (${err instanceof Error ? err.message : String(err)}); no hook entry was registered.`,
       fix: fixFor('unwritable'),
     });

@@ -30,8 +30,8 @@ const CHECKOUT = 'https://pay.coinbase.com/buy?sessionToken=tok123';
  * from #146: that was about user-facing overrides, this is defence in depth.)
  * At the cutover, edit both, deliberately.
  */
-const EXPECTED_FUND_ORIGIN = 'https://tenjin.blog';
-const EXPECTED_FUND_HOST = 'tenjin.blog';
+const EXPECTED_FUND_ORIGIN = 'https://tenjin.sh';
+const EXPECTED_FUND_HOST = 'tenjin.sh';
 
 let tmp: string;
 let dataDir: string;
@@ -48,13 +48,19 @@ afterEach(async () => {
   await rm(tmp, { recursive: true, force: true });
 });
 
-function makeCtx(overrides: { isTTY?: boolean; json?: boolean } = {}): CommandContext {
+function makeCtx(
+  overrides: { isTTY?: boolean; json?: boolean; columns?: number } = {},
+): CommandContext {
   const sink = { write: () => true } as unknown as NodeJS.WritableStream;
   const errStream = {
     write: (chunk: string) => {
       stderr.push(chunk);
       return true;
     },
+    // `columns` makes stderr a color terminal that wide, which is what the QR needs.
+    ...(overrides.columns !== undefined
+      ? { columns: overrides.columns, hasColors: () => true }
+      : {}),
   } as unknown as NodeJS.WritableStream;
   return {
     flags: { json: overrides.json ?? true, timeout: 10000 },
@@ -230,6 +236,41 @@ describe('runFund', () => {
       pollTimeoutMs: 60000,
     });
     expect(tty.data).toMatchObject({ funded: true, pollStatus: 'arrived' });
+  });
+
+  it('draws the address QR on stderr in human mode, after the checkout link', async () => {
+    const { provider, address } = fakeProvider('lower');
+    const res = await runFund(makeCtx({ isTTY: true, json: false, columns: 80 }), {
+      provider,
+      fetchImpl: stubFetch(200, { url: CHECKOUT }).fetchImpl,
+      open: false,
+      wait: false,
+    });
+    const block = stderr.find((chunk) => chunk.startsWith('Or send USDC'));
+    expect(block?.split('\n')[0]).toBe(`Or send USDC from a phone wallet to ${address}:`);
+    expect(block?.trimEnd().split('\n')).toHaveLength(19);
+    expect(block?.trimEnd().endsWith('USDC on Base (eip155:8453)')).toBe(true);
+    expect(stderr.indexOf(block!)).toBeGreaterThan(
+      stderr.findIndex((chunk) => chunk.includes(CHECKOUT)),
+    );
+    expect(Object.keys(res.data as object)).not.toContain('qr');
+  });
+
+  it.each([
+    ['--json', { isTTY: true, json: true, columns: 80 }, {}],
+    ['a pipe', { isTTY: false, json: false, columns: 80 }, {}],
+    ['--no-qr', { isTTY: true, json: false, columns: 80 }, { qr: false }],
+    ['a 32-column terminal', { isTTY: true, json: false, columns: 32 }, {}],
+  ])('draws no QR for %s', async (_label, ctxOpts, fundOpts) => {
+    const { provider } = fakeProvider();
+    await runFund(makeCtx(ctxOpts), {
+      provider,
+      fetchImpl: stubFetch(200, { url: CHECKOUT }).fetchImpl,
+      open: false,
+      wait: false,
+      ...fundOpts,
+    });
+    expect(stderr.some((chunk) => chunk.includes('eip155:8453'))).toBe(false);
   });
 
   it('maps a rejected proof (401) to a local fix, not "retry"', async () => {

@@ -35,38 +35,25 @@ Giving your agent good tools is a chore today:
 - **Your agent forgets anyway.** It reaches for plain web search out of habit, so you write rules to remind it, and it still slips.
 - **Some tools you need once.** Installing something permanent for a one-off lookup isn't worth the setup.
 
-Tenjin handles all of it. Install it once and keep working. The Tenjin router watches the moments where a tool could help: your prompt, your agent's web searches and page fetches, and the tasks it hands to subagents. When a curated tool beats what your agent was about to do, the router suggests it and your agent calls it. Your wallet pays for each call through [x402](#wallet-and-payments), so you manage no keys and install nothing new.
+Tenjin handles all of it. Install it once and keep working. The Tenjin router watches the moments where a tool could help: your prompt, your agent's web searches and page fetches, the tasks it hands to subagents, and the questions it asks you. When a curated tool beats what your agent was about to do, the router suggests it and your agent calls it. Your wallet pays for each call through [x402](#wallet-and-payments), so you manage no keys and install nothing new.
 
 ## Quick start
 
-Requires Node.js 24 or newer and [Claude Code](https://code.claude.com). Codex support is on the way.
+In Claude Code or Claude Desktop, paste:
+
+```text
+Install Tenjin from tenjin.sh
+```
+
+Your agent installs it, asks you about spend limits in the session, and helps you fund the wallet.
+
+Or in a terminal (Node.js 24 or newer):
 
 ```bash
 npm i -g tenjin-cli
 tenjin install          # sets up Claude Code and creates your wallet
 tenjin wallet fund 2    # optional: add $2 with a card, via Coinbase
 ```
-
-```text
-✓ Tenjin is set up for Claude Code
-✓ Wallet created: 0x3c0D84055994c3062819Ce8730869D0aDeA4c3Bf
-  Automatic router: up to $0.25 per call; daily limit $5 a day
-
-Next: tenjin wallet fund, then restart Claude Code
-```
-
-Restart Claude Code. That's it.
-
-Then work as usual. Try:
-
-```text
-> What are BTC and ETH trading at?
-> How do I paginate list results with the Stripe Node SDK?
-> Is ada@example.com a deliverable address?
-> Integrate x^2 sin(x) dx from 0 to pi.
-```
-
-Each answer names the provider and the price. Your agent keeps its own tools, and the router steps in only when it has something better.
 
 ## What it can do
 
@@ -118,7 +105,7 @@ When one fits, your agent sees a one-line suggestion with the tool and its price
 x402 · request: calling pro-api.coinmarketcap.com/x402/v3/cryptocurrency/quotes/latest · {"query":{"symbol":"BTC,ETH"}}
 ```
 
-To pick a tool, the router sends your current turn and up to six recent messages, with keys, passwords and seed phrases masked. Tool results and page contents stay on your machine, and the packet expires after 15 minutes. `tenjin config set router.context turn` sends only the current message. [Full details, and everything install writes →](./docs/agent-permissions.md)
+To pick a tool, the router sends your prompt and recent messages with secrets masked, plus the searches, URLs, subagent tasks and questions it routes; tool results stay on your machine. [What it sends, and everything install writes →](./docs/agent-permissions.md#what-the-hooks-send)
 
 ## Wallet and payments
 
@@ -135,7 +122,7 @@ Tenjin pays for tools with [x402](https://www.x402.org), an open standard that b
 | Per lookup | $0.25   | `tenjin config set maxAutoSpend 0.10` |
 | Per day    | $5      | `tenjin config set sessionBudget 2`   |
 
-Tenjin refuses any payment over either limit before it signs anything.
+`tenjin install` asks you to approve these limits, or tells your agent to ask you when the agent runs it. [How the limits work →](./docs/agent-permissions.md#what-bounds-a-payment)
 
 ### Routing fee
 
@@ -143,7 +130,7 @@ Once Tenjin's server turns it on, each routing call costs a flat $0.003, paid ov
 
 ### Funding
 
-`tenjin wallet fund 2` opens a Coinbase Onramp checkout for your wallet: pay by card, or Apple Pay where your region supports it. Sign in to Coinbase or create an account during checkout. You can also send USDC on Base to the address `tenjin wallet show` prints.
+`tenjin wallet fund 2` opens a Coinbase Onramp checkout for your wallet: pay by card, or Apple Pay where your region supports it. Sign in to Coinbase or create an account during checkout. You can also send USDC on Base to the address `tenjin wallet address` prints; at a terminal it and `tenjin wallet fund` also draw that address as a QR code for a phone wallet to scan (`--no-qr` skips it).
 
 $1–2 goes a long way. $2 covers about 280 web searches, 200 page reads or 100 Wolfram Alpha answers.
 
@@ -166,7 +153,7 @@ tenjin uninstall               # remove the Claude Code setup; your wallet stays
 
 Use `tenjin install --project` to set it up for a single project. Add `--json` to any command for machine-readable output.
 
-Every paid lookup is recorded on your machine in `~/.tenjin/paid/ledger.jsonl`: what was sent (masked), who was paid, how much, the settlement transaction, and any files saved. Files a paid lookup returns, and media files a paid third-party service links to, are saved under `~/.tenjin/downloads/`. When a tool names the fields it returns, your agent gets those fields and the provider's whole response is saved under `~/.tenjin/results/` for a day, at the path the result names. When a seller never confirmed settlement, `tenjin payments reconcile` asks USDC on Base whether the payment was used once it has expired, and one that was never charged goes back to today's limit; the `request` tool does the same for up to three beside each lookup, without waiting for it.
+Every paid lookup is recorded on your machine, with the files and full results it returned. [Where they live, and what `payments reconcile` does →](./docs/agent-permissions.md#what-a-paid-lookup-leaves-on-your-machine)
 
 <details>
 <summary>Status line: keeping your own</summary>
@@ -184,21 +171,6 @@ Limits are set only where no setting exists yet, so an update never overwrites y
 
 </details>
 
-<details>
-<summary>Troubleshooting: Claude Code asks about a new project MCP server named <code>x402</code></summary>
-
-Updating to `0.1.0-alpha.18` could accidentally register the server in `~/.mcp.json` while refreshing a user install. After upgrading to a release with the fix, check that file. If its `x402` entry runs `tenjin mcp` and you didn't install at project scope in your home directory on purpose, remove just that registration:
-
-```bash
-(cd ~ && claude mcp remove x402 -s project)
-```
-
-This keeps your other MCP entries and the user registration in `~/.claude.json`. Run `tenjin install`, then restart Claude Code. Don't use `tenjin uninstall --project` from home for this: its settings path is also the user settings path.
-
-When refreshing from home, Tenjin keeps the existing user registration if there is one, or preserves a project-only registration; with neither, it defaults to user scope. `tenjin install --refresh --project` selects project scope explicitly.
-
-</details>
-
 ## Request a tool
 
 Tenjin is in alpha, and the catalog grows with what people ask for. Missing a service your agent keeps needing? Hit a lookup that went to the wrong place? We want to hear it.
@@ -210,6 +182,7 @@ Tenjin is in alpha, and the catalog grows with what people ask for. Missing a se
 
 - [How a lookup runs, what it sends, and what install writes](./docs/agent-permissions.md)
 - [Safety model](./docs/safety-model.md)
+- [Troubleshooting](./docs/troubleshooting.md), including a stray `x402` server in `~/.mcp.json` after `0.1.0-alpha.18`
 
 ## Developing
 

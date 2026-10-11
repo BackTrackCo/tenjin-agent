@@ -4,7 +4,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { DOCS_QUERY_MAX, docsUrl, PREFETCH_SCRIPT } from './augment';
+import { createServer } from 'node:http';
+import { connect, type AddressInfo } from 'node:net';
+import { envProxySupported } from '../lib/env-proxy';
+import { DOCS_QUERY_MAX, docsUrl, PREFETCH_SCRIPT, prefetchEnv } from './augment';
 
 const exec = promisify(execFile);
 
@@ -121,4 +124,71 @@ describe('the docs URL', () => {
   ])('is not fetched at all for %s', (_label, endpoint) => {
     expect(docsUrl(endpoint, 'q', 'https://tenjin.sh')).toBeNull();
   });
+});
+
+describe('the prefetch behind a proxy', () => {
+  /** A bare environment with only what the case names, so the machine's own
+   *  proxy variables play no part. */
+  const bare = (extra: NodeJS.ProcessEnv): NodeJS.ProcessEnv => ({
+    PATH: process.env.PATH,
+    ...extra,
+  });
+
+  it('turns on Node’s own proxy support only where a proxy variable is set', () => {
+    expect(prefetchEnv(bare({ HTTPS_PROXY: 'http://proxy.test:8080' }))).toMatchObject({
+      NODE_USE_ENV_PROXY: '1',
+    });
+    expect(prefetchEnv(bare({}))).not.toHaveProperty('NODE_USE_ENV_PROXY');
+  });
+
+  it.skipIf(!envProxySupported())(
+    'sends the GET through the proxy the environment names',
+    async () => {
+      // Node tunnels through a proxy with CONNECT, so this one opens each tunnel
+      // back to itself and answers the GET that arrives inside it.
+      const asked: string[] = [];
+      const proxy = createServer((req, res) => {
+        asked.push(`${req.method} ${req.headers.host}${req.url}`);
+        res.writeHead(200, { 'content-type': 'text/plain' }).end('via the proxy');
+      });
+      proxy.on('connect', (req, socket, head) => {
+        asked.push(`CONNECT ${req.url}`);
+        const inner = connect((proxy.address() as AddressInfo).port, '127.0.0.1', () => {
+          socket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+          inner.write(head);
+          inner.pipe(socket);
+          socket.pipe(inner);
+        });
+      });
+      await new Promise<void>((resolve) => proxy.listen(0, '127.0.0.1', resolve));
+      const { port } = proxy.address() as AddressInfo;
+      try {
+        const out = join(dir, 'augment-p.docs');
+        await exec(
+          process.execPath,
+          [
+            '-e',
+            PREFETCH_SCRIPT,
+            'http://docs.invalid/api/docs-lookup?query=zod',
+            out,
+            'tenjin-cli/1.0.0',
+            '3000',
+            '100',
+          ],
+          { timeout: 10_000, env: prefetchEnv(bare({ HTTP_PROXY: `http://127.0.0.1:${port}` })) },
+        );
+        expect(JSON.parse(await readFile(out, 'utf8'))).toEqual({
+          status: 200,
+          text: 'via the proxy',
+        });
+        expect(asked).toEqual([
+          'CONNECT docs.invalid:80',
+          'GET docs.invalid/api/docs-lookup?query=zod',
+        ]);
+      } finally {
+        proxy.closeAllConnections();
+        await new Promise((resolve) => proxy.close(resolve));
+      }
+    },
+  );
 });

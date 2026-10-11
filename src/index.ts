@@ -33,6 +33,11 @@ if (process.argv.length === 3 && process.argv[2] === 'status-line') {
   process.exit(0);
 }
 
+// After the status line, which sends no request: every other process from this
+// bin (the CLI, the hooks, `tenjin mcp`) honours HTTPS_PROXY and NO_PROXY.
+const { useEnvProxy } = await import('./lib/env-proxy');
+useEnvProxy(process.env);
+
 const { main } = await import('./cli');
 // Here and not in `main`, so an in-process test of the command tree sends no
 // telemetry and mints no install id; see lib/install-identity.

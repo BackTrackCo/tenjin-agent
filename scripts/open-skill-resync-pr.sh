@@ -15,8 +15,8 @@ set -euo pipefail
 BRANCH=bot/skill-resync
 CHANGESET=.changeset/bot-skill-resync.md
 MIRROR=skills/tenjin/SKILL.md
-SOURCE_URL=https://tenjin.blog/skills.md
-COMMIT_MESSAGE="chore(skills): resync vendored mirror from tenjin.blog/skills.md"
+SOURCE_URL=https://tenjin.sh/skills.md
+COMMIT_MESSAGE="chore(skills): resync vendored mirror from tenjin.sh/skills.md"
 
 cd "$(git rev-parse --show-toplevel)"
 
@@ -68,7 +68,7 @@ if [ ! -f "$CHANGESET" ]; then
 'tenjin-cli': patch
 ---
 
-Resync the vendored zero-install skill from live tenjin.blog/skills.md.
+Resync the vendored zero-install skill from live tenjin.sh/skills.md.
 CHANGESET_BODY
 fi
 

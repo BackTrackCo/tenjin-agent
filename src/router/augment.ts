@@ -3,6 +3,7 @@ import { constants } from 'node:fs';
 import { open, rm } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { composeUserAgent } from '../lib/client-meta';
+import { proxyVariable } from '../lib/env-proxy';
 import { isSameDeployment } from '../lib/production-origin';
 import { augmentOf, claimQuery, markAugment } from './progress';
 
@@ -95,6 +96,15 @@ export const PREFETCH_SCRIPT = [
 ].join('\n');
 
 /**
+ * The prefetch's environment. A bare `node -e` never runs the bin's proxy
+ * setup, so where a proxy variable is set it gets Node's own switch for it,
+ * and on a network where the proxy is the only way out the docs still arrive.
+ */
+export function prefetchEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return proxyVariable(env) === undefined ? env : { ...env, NODE_USE_ENV_PROXY: '1' };
+}
+
+/**
  * Detached and unreferenced, with no stdio of the hook's: the harness waits for
  * the hook's own exit and pipes, and neither is held. `-e` is CommonJS, so the
  * script's `require` resolves builtins only.
@@ -116,6 +126,7 @@ function spawnPrefetch(job: PrefetchJob): void {
       stdio: 'ignore',
       // Never the session's project: a live child would pin its worktree.
       cwd: dirname(job.out),
+      env: prefetchEnv(process.env),
       windowsHide: true,
     },
   );

@@ -1,4 +1,6 @@
 import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { FileClientChannelStorage } from '@x402/evm/batch-settlement/client/file-storage';
@@ -11,6 +13,7 @@ import type { CommandContext } from '../context';
 import { requestDecision } from './decision';
 import { CHANNEL_DEPOSIT_ATOMIC, MIN_DEPOSIT_ATOMIC, payerDir, ROUTING_FEE_ATOMIC } from './fee';
 import { BASE, FakeRouter, payerDeps, TEST_POLICY } from './fee-test-utils';
+import { DEPOSIT_GATE_TIMEOUT_MS, GATE_TIMEOUT_MS } from './gate';
 import {
   chainReader,
   DEPOSIT_MULTIPLIER,
@@ -111,6 +114,96 @@ describe('RoutingPayer', () => {
       'POST /api/x402-router/route unpaid',
       'POST /api/x402-router unpaid',
     ]);
+  });
+
+  it('pays no voucher from a funded channel once the per-call limit is below the fee', async () => {
+    const router = new FakeRouter();
+    let maxAutoSpendAtomic = 250_000n;
+    const p = payer(router, {
+      policy: async () => ({ ...TEST_POLICY, maxAutoSpendAtomic }),
+    });
+    expect((await routeOnce(p, router)).status).toBe('decided');
+    expect(router.settledFees).toBe(1);
+    // The user turns automatic payment off: the channel still holds the deposit.
+    maxAutoSpendAtomic = 0n;
+    let unlocks = 0;
+    const after = await routeOnce(
+      payer(router, {
+        policy: async () => ({ ...TEST_POLICY, maxAutoSpendAtomic }),
+        getSigner: async () => {
+          unlocks += 1;
+          throw new Error('not reached');
+        },
+      }),
+      router,
+    );
+    expect(tookFreePath(after, router)).toBe('limit_below_deposit');
+    expect(router.settledFees).toBe(1);
+    expect(unlocks).toBe(0);
+    // The same payer, too.
+    expect(tookFreePath(await routeOnce(p, router), router)).toBe('limit_below_deposit');
+    expect(router.settledFees).toBe(1);
+  });
+
+  it.each<[string, Partial<SpendPolicy>, string]>([
+    ['a daily limit of 0', { sessionBudgetAtomic: 0n }, 'budget_reached'],
+    ['an allowlist without the router', { allowlistCreators: ['someone-else'] }, 'not_allowlisted'],
+    ['a per-call limit below the fee', { maxAutoSpendAtomic: 2_000n }, 'limit_below_deposit'],
+  ])('pays no voucher from a funded channel under %s', async (_label, change, why) => {
+    const router = new FakeRouter();
+    let policy: SpendPolicy = TEST_POLICY;
+    const p = payer(router, { policy: async () => policy });
+    expect((await routeOnce(p, router)).status).toBe('decided');
+    expect(router.settledFees).toBe(1);
+    // The channel still holds the deposit; the user changes the policy.
+    policy = { ...TEST_POLICY, ...change };
+    expect(tookFreePath(await routeOnce(p, router), router)).toBe(why);
+    expect(router.settledFees).toBe(1);
+    expect(router.paidRequests()).toBe(1);
+  });
+
+  it('pays the next fee from a deposit that used the whole day, counting it once', async () => {
+    const router = new FakeRouter();
+    const p = payer(router, { policy_: { sessionBudgetAtomic: CHANNEL_DEPOSIT_ATOMIC } });
+    expect((await routeOnce(p, router)).status).toBe('decided');
+    expect((await readSpendSummary(dir))?.committedAtomic).toBe(CHANNEL_DEPOSIT_ATOMIC.toString());
+    // The day's budget is spent, by the deposit itself: its fees still pay.
+    const next = await routeOnce(p, router);
+    expect(next).toMatchObject({ status: 'decided' });
+    expect(unpaidWhy(next)).toBeUndefined();
+    expect(router.settledFees).toBe(2);
+    expect(router.deposits).toBe(1);
+    expect((await readSpendSummary(dir))?.committedAtomic).toBe(CHANNEL_DEPOSIT_ATOMIC.toString());
+  });
+
+  it('refuses a second deposit the day has no room for, and the call goes free', async () => {
+    const router = new FakeRouter();
+    // A $0.03 deposit holds ten fees; the day has room for one deposit, not two.
+    const p = payer(router, {
+      policy_: { maxAutoSpendAtomic: MIN_DEPOSIT_ATOMIC, sessionBudgetAtomic: 50_000n },
+    });
+    for (let n = 0; n < 10; n += 1) {
+      const paid = await routeOnce(p, router);
+      expect(paid.status).toBe('decided');
+      expect(unpaidWhy(paid)).toBeUndefined();
+    }
+    expect(router.deposits).toBe(1);
+    const paidBefore = router.paidRequests();
+    expect(tookFreePath(await routeOnce(p, router), router)).toBe('budget_reached');
+    expect(router.paidRequests()).toBe(paidBefore);
+    expect(router.deposits).toBe(1);
+    // The deposit counted once; the ten fees paid from it did not count again.
+    expect((await readSpendSummary(dir, { now: () => clock }))?.committedAtomic).toBe(
+      MIN_DEPOSIT_ATOMIC.toString(),
+    );
+  });
+
+  it('makes no deposit for a fee a daily limit of 0 refuses', async () => {
+    const router = new FakeRouter();
+    const p = payer(router, { policy_: { sessionBudgetAtomic: 0n } });
+    expect(tookFreePath(await routeOnce(p, router), router)).toBe('budget_reached');
+    expect(router.paidRequests()).toBe(0);
+    expect(router.deposits).toBe(0);
   });
 
   it('pays nothing to a 402 asking more than the approved fee', async () => {
@@ -251,6 +344,29 @@ describe('RoutingPayer', () => {
     expect(router.settledFees).toBe(3);
     expect(router.deposits).toBe(1);
     expect([...router.channels.values()][0]!.charged).toBe(3n * ROUTING_FEE_ATOMIC);
+  });
+
+  it('retries a reset socket on the free path, on a fresh connection, unpaid', async () => {
+    const router = new FakeRouter();
+    const p = payer(router);
+    const route = await p.routeFor(BASE);
+    let resets = 0;
+    const resetOnce: typeof fetch = async (input, init) => {
+      if (resets === 0) {
+        resets += 1;
+        throw Object.assign(new TypeError('fetch failed'), {
+          cause: Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' }),
+        });
+      }
+      return router.fetch(input, init);
+    };
+    const outcome = await requestDecision(
+      'tool',
+      { query: 'q' },
+      { ctx: ctx(), baseUrl: BASE, fetchImpl: resetOnce, timeoutMs: 3_500, route: route! },
+    );
+    expect(tookFreePath(outcome, router)).toBe('payment_failed');
+    expect(router.settledFees).toBe(0);
   });
 
   it('shares one channel and its one deposit between processes that take turns', async () => {
@@ -425,4 +541,163 @@ describe('RoutingPayer', () => {
     expect(ROUTING_SPEND_CAP).toBe('$0.05');
     expect(50_000n * BigInt(DEPOSIT_MULTIPLIER)).toBe(CHANNEL_DEPOSIT_ATOMIC);
   });
+});
+
+describe('RoutingPayer and the call budget', () => {
+  /** One call with its own budget, in real time, and the lines the payer warned. */
+  function timed(router: FakeRouter) {
+    const warned: string[] = [];
+    const p = payer(router, { now: () => Date.now(), warn: (line) => warned.push(line) });
+    const call = async (timeoutMs: number) => {
+      const route = (await p.routeFor(BASE))!;
+      return requestDecision(
+        'tool',
+        { query: 'q' },
+        { ctx: ctx(), baseUrl: BASE, fetchImpl: router.fetch, timeoutMs, route },
+      );
+    };
+    return { p, call, warned };
+  }
+
+  async function storedChannel() {
+    const files = await channelFiles();
+    return new FileClientChannelStorage({ directory: payerDir(dir, wallet.address) }).get(
+      files[0]!.replace('.json', ''),
+    );
+  }
+
+  it('waits past the gate budget for a call that carries a deposit', async () => {
+    const router = new FakeRouter();
+    router.delayMs = 400;
+    const { call } = timed(router);
+    // 200 ms is the caller's budget; the deposit adds the hook leg's rest.
+    expect((await call(200)).status).toBe('decided');
+    expect(router.deposits).toBe(1);
+  });
+
+  it('returns a deposit still out at the longer budget as no fault, and records it when it lands', async () => {
+    const router = new FakeRouter();
+    router.delayMs = DEPOSIT_GATE_TIMEOUT_MS - GATE_TIMEOUT_MS + 600;
+    const { call, warned } = timed(router);
+    const started = Date.now();
+    expect(await call(200)).toEqual({ status: 'skipped', why: 'deadline_after_payment_sent' });
+    expect(Date.now() - started).toBeLessThan(DEPOSIT_GATE_TIMEOUT_MS - GATE_TIMEOUT_MS + 500);
+    router.delayMs = 0;
+    // Queued behind the late answer, then a voucher from the recorded channel.
+    expect((await call(3_500)).status).toBe('decided');
+    expect(router.deposits).toBe(1);
+    expect(router.paidRequests()).toBe(2);
+    expect(await storedChannel()).toMatchObject({
+      balance: CHANNEL_DEPOSIT_ATOMIC.toString(),
+      chargedCumulativeAmount: (2n * ROUTING_FEE_ATOMIC).toString(),
+    });
+    expect((await readSpendSummary(dir))?.reservations).toEqual([]);
+    expect(warned.join('\n')).toMatch(
+      /deadline_after_payment_sent \(cause late http 200, \d+ms, stage deposit\)/,
+    );
+  });
+
+  it('keeps the gate budget for a voucher, and lets one still out finish', async () => {
+    const router = new FakeRouter();
+    const { call, warned } = timed(router);
+    expect((await call(3_500)).status).toBe('decided');
+    router.delayMs = 600;
+    const started = Date.now();
+    expect(await call(200)).toEqual({ status: 'skipped', why: 'deadline_after_payment_sent' });
+    // Not lengthened: no deposit rode on it.
+    expect(Date.now() - started).toBeLessThan(500);
+    router.delayMs = 0;
+    expect((await call(3_500)).status).toBe('decided');
+    // The late voucher was recorded: the next one continued the total.
+    expect(router.paidRequests()).toBe(3);
+    expect(router.settledFees).toBe(3);
+    expect(warned.join('\n')).toContain('stage voucher');
+  });
+
+  it('still aborts a call whose budget ends before anything is paid', async () => {
+    const router = new FakeRouter();
+    // A probe that answers only after the budget, and honors the abort.
+    const slowProbe: typeof fetch = async (input, init) => {
+      const request = new Request(input, init);
+      await new Promise((resolve, reject) => {
+        setTimeout(resolve, 400);
+        request.signal.addEventListener('abort', () => reject(request.signal.reason));
+      });
+      return router.fetch(request);
+    };
+    const { p, warned } = timed(router);
+    const route = (await p.routeFor(BASE))!;
+    const outcome = await requestDecision(
+      'tool',
+      { query: 'q' },
+      { ctx: ctx(), baseUrl: BASE, fetchImpl: slowProbe, timeoutMs: 200, route },
+    );
+    expect(outcome).toEqual({ status: 'skipped', why: 'payment_failed' });
+    expect(router.paidRequests()).toBe(0);
+    expect(warned.join('\n')).toContain('payment_failed (cause timeout');
+  });
+
+  it('gives up on a queued call at its own deadline instead of waiting out a detached payment', async () => {
+    const router = new FakeRouter();
+    const { call, warned } = timed(router);
+    expect((await call(3_500)).status).toBe('decided');
+    // The next voucher answers after 1.5 s, past its 200 ms budget: it detaches.
+    router.delayMs = 1_500;
+    const ahead = call(200);
+    const started = Date.now();
+    const queued = await call(300);
+    expect(queued).toEqual({ status: 'skipped', why: 'busy' });
+    expect(Date.now() - started).toBeLessThan(1_200);
+    await ahead;
+    // Every unanswered call says so once, a queued one included.
+    expect(warned.join('\n')).toMatch(/busy \(cause queued, \d+ms, stage queue\)/);
+  });
+
+  it('reports a paid call whose body stalls past its time as sent, not failed', async () => {
+    const router = new FakeRouter();
+    // The paid answer settles, then its body never finishes.
+    const stallPaid: typeof fetch = async (input, init) => {
+      const request = new Request(input, init);
+      const response = await router.fetch(request);
+      if (!request.headers.has('payment-signature') || response.status !== 200) return response;
+      return new Response(new ReadableStream({ start: (c) => c.enqueue(new Uint8Array([123])) }), {
+        status: 200,
+        headers: response.headers,
+      });
+    };
+    const { p } = timed(router);
+    const route = (await p.routeFor(BASE))!;
+    const outcome = await requestDecision(
+      'tool',
+      { query: 'q' },
+      { ctx: ctx(), baseUrl: BASE, fetchImpl: stallPaid, timeoutMs: 200, route },
+    );
+    expect(router.settledFees).toBe(1);
+    expect(outcome).toEqual({ status: 'skipped', why: 'deadline_after_payment_sent' });
+  });
+
+  it("bounds the body read by the call's deadline once the headers arrive", async () => {
+    // A real router socket that sends its headers, then never finishes the body.
+    const server = createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.write('{');
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    try {
+      const p = payer(new FakeRouter(), { now: () => Date.now(), fetchImpl: fetch });
+      const route = (await p.routeFor(base))!;
+      const started = Date.now();
+      const outcome = await requestDecision(
+        'tool',
+        { query: 'q' },
+        { ctx: ctx(), baseUrl: base, timeoutMs: 200, route },
+      );
+      expect(outcome.status).not.toBe('decided');
+      expect(Date.now() - started).toBeLessThan(DEPOSIT_GATE_TIMEOUT_MS - GATE_TIMEOUT_MS + 1_000);
+    } finally {
+      server.closeAllConnections();
+      await new Promise((resolve) => server.close(resolve));
+    }
+  }, 4_000);
 });

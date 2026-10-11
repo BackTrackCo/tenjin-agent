@@ -63,6 +63,7 @@ import { withFileLock, LockTimeoutError } from '../lib/lock';
 import { parseUsdToAtomic, toMoney } from '../lib/money';
 import type { Money } from '../schemas';
 import type { CommandContext, CommandResult } from '../context';
+import { ROUTER_DEFAULTS, type RouterLimits } from '../router/spend-question';
 import {
   projectRouterPath,
   readProjectRouterFile,
@@ -977,11 +978,8 @@ export async function persistRouterProject(
   });
 }
 
-/** Absent-only automatic router defaults, in atomic USDC. */
-export const ROUTER_DEFAULTS = {
-  maxAutoSpend: '250000',
-  sessionBudget: '5000000',
-} as const;
+/** Absent-only automatic router defaults; defined beside the spend question that shows them. */
+export { ROUTER_DEFAULTS, type RouterLimits };
 
 export interface RouterDefaultsResult {
   /** Keys this run wrote, because the file did not name them. */
@@ -991,19 +989,15 @@ export interface RouterDefaultsResult {
   removed: string[];
 }
 
-/** The automatic limits a fresh install fills in, in atomic USDC; `sessionBudget` may be `none`. */
-export interface RouterLimits {
-  maxAutoSpend: string;
-  sessionBudget: string;
-}
-
 /** Remove/report retired keys in the same locked write. Refresh preserves absent
  * current settings; a fresh install fills only missing automatic limits, with the
- * values the person at the terminal approved or chose. */
+ * values the person at the terminal approved or chose. A key `limits` leaves out
+ * stays absent: that is how an install with nobody to approve keeps
+ * `maxAutoSpend` at the bare CLI's zero. */
 export async function persistRouterDefaults(
   dir: string,
   refresh = false,
-  limits: RouterLimits = ROUTER_DEFAULTS,
+  limits: Partial<RouterLimits> = ROUTER_DEFAULTS,
 ): Promise<RouterDefaultsResult> {
   const result: RouterDefaultsResult = { set: [], kept: [], removed: [] };
   if (refresh && retiredPaymentKeys(await loadRawConfig(dir)).length === 0) return result;
@@ -1012,11 +1006,13 @@ export async function persistRouterDefaults(
     result.removed = retiredPaymentKeys(existing);
     for (const key of result.removed) delete next[key];
     if (refresh) return next;
-    for (const [key, value] of Object.entries(limits) as [keyof RouterLimits, string][]) {
-      if (existing[key] === undefined) {
+    for (const key of Object.keys(ROUTER_DEFAULTS) as (keyof RouterLimits)[]) {
+      const value = limits[key];
+      if (existing[key] !== undefined) result.kept.push(key);
+      else if (value !== undefined) {
         next[key] = value;
         result.set.push(key);
-      } else result.kept.push(key);
+      }
     }
     return next;
   });

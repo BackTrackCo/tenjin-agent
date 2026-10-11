@@ -62,6 +62,21 @@ async function catchCliError(p: Promise<unknown>): Promise<CliError> {
   throw new Error('expected a CliError to be thrown');
 }
 
+/** A human-mode context whose stdout reports a color terminal `columns` wide. */
+function terminalCtx(opts: { columns?: number; json?: boolean; isTTY?: boolean } = {}) {
+  const stdout = {
+    write: () => true,
+    columns: opts.columns ?? 80,
+    hasColors: () => true,
+  } as unknown as NodeJS.WritableStream;
+  const ctx = makeCtx();
+  return {
+    ...ctx,
+    flags: { ...ctx.flags, json: opts.json ?? false },
+    io: { ...ctx.io, stdout, isTTY: opts.isTTY ?? true },
+  };
+}
+
 const walletFile = () => join(dataDir, 'wallet.json');
 
 /**
@@ -607,6 +622,29 @@ describe('runWalletShow', () => {
       provider: 'fake-remote',
     });
     expect(getSigner).not.toHaveBeenCalled();
+  });
+
+  it('draws the address QR under the Address line at a terminal, and the data is unchanged', async () => {
+    const address = privateKeyToAccount(generatePrivateKey()).address;
+    const { provider } = fakeRemoteProvider(address);
+    const res = await runWalletShow(terminalCtx(), { provider });
+    const lines = res.humanLines ?? [];
+    expect(lines[0]).toBe(`Address: ${address}`);
+    expect(lines[18]).toBe('USDC on Base (eip155:8453)');
+    expect(lines[19]).toBe('Key source: remote');
+    expect(res.data).toEqual((await runWalletShow(makeCtx(), { provider })).data);
+  });
+
+  it.each([
+    ['--json', { json: true }, {}],
+    ['a pipe', { isTTY: false }, {}],
+    ['--no-qr', {}, { qr: false }],
+    ['a 32-column terminal', { columns: 32 }, {}],
+  ])('prints no QR for %s', async (_label, ctxOpts, showOpts) => {
+    const address = privateKeyToAccount(generatePrivateKey()).address;
+    const { provider } = fakeRemoteProvider(address);
+    const res = await runWalletShow(terminalCtx(ctxOpts), { provider, ...showOpts });
+    expect(res.humanLines?.slice(0, 2)).toEqual([`Address: ${address}`, 'Key source: remote']);
   });
 
   it('normalizes a provider describe() rejection to PROVIDER_ERROR', async () => {

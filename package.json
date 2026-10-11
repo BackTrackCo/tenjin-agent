@@ -1,13 +1,13 @@
 {
   "name": "tenjin-cli",
-  "version": "0.1.0-alpha.24",
+  "version": "0.1.0-alpha.25",
   "type": "module",
   "description": "The tool router for coding agents. Tenjin picks the right tool when your agent needs one, and one wallet pays for every call.",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/BackTrackCo/tenjin-agent.git"
   },
-  "homepage": "https://tenjin.blog/agents",
+  "homepage": "https://tenjin.sh/agents",
   "bugs": "https://github.com/BackTrackCo/tenjin-agent/issues",
   "keywords": [
     "claude-code",
@@ -55,7 +55,7 @@
     "@changesets/cli": "^3.0.3",
     "@clack/prompts": "^1.7.0",
     "@eslint/js": "^10",
-    "@modelcontextprotocol/sdk": "1.29.0",
+    "@modelcontextprotocol/sdk": "1.31.0",
     "@types/node": "^25",
     "@x402/core": "2.28.0",
     "@x402/evm": "2.28.0",
@@ -66,6 +66,7 @@
     "commander": "^14.0.1",
     "eslint": "^10",
     "eslint-config-prettier": "^10",
+    "lean-qr": "^2.7.4",
     "ox": "0.14.30",
     "prettier": "^3",
     "tsup": "^8.5.0",

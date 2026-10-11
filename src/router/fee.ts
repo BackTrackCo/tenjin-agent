@@ -3,6 +3,7 @@ import { mkdir, open, readFile, readdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { hasCode } from '../lib/errno';
 import { formatUsdDisplay } from '../lib/money';
+import { evaluateSpendPolicy, type PolicyReason, type SpendPolicy } from '../lib/policy';
 import type { DecisionRoute } from './decision';
 
 /**
@@ -28,6 +29,34 @@ export const CHANNEL_DEPOSIT_ATOMIC = 250_000n;
  */
 export const MIN_DEPOSIT_ATOMIC = 10n * ROUTING_FEE_ATOMIC;
 
+/** A spend refusal, as the reason the call was not paid. */
+const REFUSED: Partial<Record<PolicyReason, string>> = {
+  not_allowlisted: 'not_allowlisted',
+  session_budget_exceeded: 'budget_reached',
+  above_auto_spend: 'limit_below_deposit',
+};
+
+/** The reason a spend refusal leaves a routing call unpaid. */
+export function refusedWhy(reason: PolicyReason): string {
+  return REFUSED[reason] ?? reason;
+}
+
+/**
+ * THE DEPOSIT IS THE SPEND. It meets the whole policy once, the day's budget
+ * included, when the SDK's `depositStrategy` reserves it. Each fee paid from
+ * it then gets only the per-payment checks: the per-call limit, the creator
+ * allowlist (the router's host) and an explicit zero daily limit. It is never
+ * refused for the day's running total, which the deposit already consumed.
+ * Null when those checks allow the fee.
+ */
+export function feeRefusal(policy: SpendPolicy, host: string): string | null {
+  const evaluation = evaluateSpendPolicy(
+    { ...policy, sessionBudgetAtomic: policy.sessionBudgetAtomic === 0n ? 0n : null },
+    { mode: 'automatic', amountAtomic: ROUTING_FEE_ATOMIC, creator: host, sessionSpentAtomic: 0n },
+  );
+  return evaluation.decision === 'allow' ? null : refusedWhy(evaluation.reason);
+}
+
 /** The paid path for this call, or null for the free path. `tenjin mcp` passes
  *  its payer's; absent, every call is free. */
 export type RouteFor = (baseUrl: string) => Promise<DecisionRoute | null>;
@@ -48,7 +77,8 @@ export function isFeeRequired(response: unknown): boolean {
  * payer's skip reason (or `fee_required`, when the free path answered it and
  * nothing else explains why). Null for a reason that is no fault and needs no
  * fix: another session's call on the channel, a server with no paid path, or
- * a call queued past its own budget.
+ * a call queued past its own budget, or a payment still out when the call's
+ * budget ran out (it finishes in the background).
  */
 const UNPAID: Record<string, { reason: string; fix: string }> = {
   wallet_low: {
@@ -68,7 +98,7 @@ const UNPAID: Record<string, { reason: string; fix: string }> = {
     fix: 'Run `tenjin doctor`.',
   },
   budget_reached: {
-    reason: 'the daily spend limit has no room left for a routing deposit',
+    reason: 'the daily spend limit has no room left for the routing fee or its deposit',
     fix: 'Run `tenjin doctor`.',
   },
   not_allowlisted: {
@@ -84,7 +114,13 @@ const UNPAID: Record<string, { reason: string; fix: string }> = {
     fix: 'Run `tenjin doctor`.',
   },
 };
-const NO_FAULT = new Set(['channel_busy', 'paid_path_absent', 'busy', 'no_call']);
+const NO_FAULT = new Set([
+  'channel_busy',
+  'paid_path_absent',
+  'busy',
+  'no_call',
+  'deadline_after_payment_sent',
+]);
 
 /** The reason and fix for an unpaid call, or null when it needs no word. */
 export function unpaid(why: string): { reason: string; fix: string } | null {
