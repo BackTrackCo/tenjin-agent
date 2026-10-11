@@ -1,6 +1,7 @@
 import { mkdirSync, rmSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { hasCode } from './errno';
 
 /**
  * Locks this process currently holds. Ownership starts the instant `mkdir`
@@ -107,7 +108,7 @@ export async function withFileLock<T>(
       owned.add(lockPath); // owned from here, released only in the finally below
       break; // acquired
     } catch (err) {
-      if (!isEexist(err)) throw err;
+      if (!hasCode(err, 'EEXIST')) throw err;
       if (Date.now() >= deadline) throw new LockTimeoutError(lockPath, timeoutMs);
       await delay(retryMs);
     }
@@ -141,10 +142,6 @@ export async function withFileLock<T>(
       opts.onReleaseError?.(lockPath, err);
     }
   }
-}
-
-function isEexist(err: unknown): boolean {
-  return typeof err === 'object' && err !== null && (err as { code?: unknown }).code === 'EEXIST';
 }
 
 function delay(ms: number): Promise<void> {
