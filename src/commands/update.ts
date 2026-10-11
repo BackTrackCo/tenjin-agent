@@ -282,17 +282,27 @@ export async function runUpdate(
       `Updated tenjin-cli ${current} -> ${latest}.`,
       ...refreshLines(refresh),
       ...(servers.stale > 0 ? [`! ${servers.check.detail}. ${RECONNECT_FIX}`] : []),
-      ROUTING_FEE_LINE,
+      ...(crossesFeeBoundary(current, latest) ? [ROUTING_FEE_LINE] : []),
     ],
   };
 }
 
+/** The first release whose install question names the routing fee. */
+const FEE_NAMED_AT_INSTALL = '0.1.0-alpha.25';
+
+/** True when the update moves from before the install question named the fee
+ *  to a build that names it; an unparseable version on either side is false. */
+export function crossesFeeBoundary(current: string, latest: string): boolean {
+  const reachesBoundary = latest === FEE_NAMED_AT_INSTALL || isNewer(latest, FEE_NAMED_AT_INSTALL);
+  return reachesBoundary && isNewer(FEE_NAMED_AT_INSTALL, current);
+}
+
 /**
- * THE ROUTING FEE, NAMED AT UPDATE TIME for installs whose limits were
+ * THE ROUTING FEE, NAMED AT UPDATE TIME only for installs whose limits were
  * approved before the install question named it: the fee is paid from
  * deposits that fall inside those same limits.
  */
-const ROUTING_FEE_LINE = `Routing costs $${usd(ROUTING_FEE_ATOMIC)} a call once Tenjin's server turns the fee on, paid from deposits of up to $${usd(CHANNEL_DEPOSIT_ATOMIC)} that count against your spend limits (\`tenjin config get maxAutoSpend\`, \`tenjin config get sessionBudget\`).`;
+const ROUTING_FEE_LINE = `Routing costs $${usd(ROUTING_FEE_ATOMIC)} a call, paid from deposits of up to $${usd(CHANNEL_DEPOSIT_ATOMIC)} that count against your spend limits (\`tenjin config get maxAutoSpend\`, \`tenjin config get sessionBudget\`).`;
 
 /** How long one `install --refresh` child gets. Local file writes only, no
  *  registry: a minute is already generous, and `update` must not hang a turn. */
