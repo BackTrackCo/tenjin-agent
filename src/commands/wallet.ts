@@ -6,6 +6,7 @@ import { withFileLock, LockTimeoutError } from '../lib/lock';
 import { loadRawConfig, resolveSettings } from '../lib/config';
 import { toMoney } from '../lib/money';
 import { getUsdcBalance } from '../lib/usdc';
+import { addressQrLines } from '../lib/qr';
 import {
   commitLocalWallet,
   createLocalWallet,
@@ -234,9 +235,14 @@ function passphraseNote(source: PassphraseSource, address: string): string {
   }
 }
 
+export interface WalletShowOptions extends ResolveWalletProviderOptions {
+  /** `--no-qr`: print the address without the QR block at a TTY. */
+  qr?: boolean;
+}
+
 export async function runWalletShow(
   ctx: CommandContext,
-  opts: ResolveWalletProviderOptions = {},
+  opts: WalletShowOptions = {},
 ): Promise<CommandResult> {
   const provider = resolveWalletProvider(ctx, opts);
   const desc = await describeWallet(provider);
@@ -252,7 +258,13 @@ export async function runWalletShow(
     warnings,
   } = await provider.diagnostics();
 
-  const humanLines = [`Address: ${desc.address}`, `Key source: ${desc.credentialSource}`];
+  const humanLines = [
+    `Address: ${desc.address}`,
+    ...(opts.qr !== false && ctx.io.isTTY && !ctx.flags.json
+      ? addressQrLines(desc.address, ctx.io.stdout)
+      : []),
+    `Key source: ${desc.credentialSource}`,
+  ];
   if (keyStorage !== undefined) humanLines.push(`Key storage: ${keyStorage}`);
   if (passphraseSource !== undefined) humanLines.push(`Passphrase: ${passphraseSource}`);
   if (archivedWallets !== undefined && archivedWallets.length > 0) {
