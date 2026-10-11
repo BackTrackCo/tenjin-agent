@@ -215,11 +215,6 @@ Tenjin is in alpha, and the catalog grows with what people ask for. Missing a se
 
 Before contributing, read [CONTRIBUTING.md](./CONTRIBUTING.md) for the contributor agreement.
 
-```bash
-pnpm install
-pnpm run githooks   # once, to use the repo's git hooks
-pnpm run build
-pnpm run test
-pnpm run typecheck
-pnpm run lint
-```
+The contributor command list, and the rule to add a changeset in the same PR,
+live in [RELEASING.md](./RELEASING.md#contributing). Release and publish steps
+are in the same file.
