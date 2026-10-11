@@ -18,6 +18,7 @@ import {
   type EarlierPayment,
 } from './specs';
 import {
+  DEADLINE_AFTER_PAYMENT_SENT,
   reportSpecOutcome,
   requestDecision,
   type SpecOutcome,
@@ -26,6 +27,9 @@ import {
   type OfferSpec,
 } from './decision';
 import { FEE_REQUIRED, isFeeRequired, unpaidSentence, type RouteFor } from './fee';
+import { unpaidNotice } from './spend-question';
+import { clearRouterMemo } from './router-memo';
+import { loadRawConfig } from '../lib/config';
 import { openLookupFooter, type LookupFooter } from './progress';
 import {
   appendPaidRecord,
@@ -220,17 +224,35 @@ export async function runRequestTool(
   // the query.
   // ON THE PAID PATH the payer pays the routing fee with the stock x402
   // client, and a call it cannot pay takes the free path.
-  const route = (await deps.route?.(settings.baseUrl)) ?? null;
-  const fresh = await requestDecision(
-    'tool',
-    { query, ...(id !== undefined ? { id } : {}) },
-    { ...decisionDeps, ...(route !== null ? { route } : {}) },
-  );
+  const ask = async () => {
+    const route = (await deps.route?.(settings.baseUrl)) ?? null;
+    const outcome = await requestDecision(
+      'tool',
+      { query, ...(id !== undefined ? { id } : {}) },
+      { ...decisionDeps, ...(route !== null ? { route } : {}) },
+    );
+    return { route, outcome };
+  };
+  const first = await ask();
+  let fresh = first.outcome;
+  // The machine's "no paid path" memo sent this call to the free path, which
+  // now asks for the fee: the memo is stale, so ask once more on the paid path.
+  if (
+    deps.route !== undefined &&
+    first.route === null &&
+    fresh.status === 'decided' &&
+    isFeeRequired(fresh.decision)
+  ) {
+    await clearRouterMemo(deps.ctx.dataDir, 'paid-path-absent', settings.baseUrl);
+    fresh = (await ask()).outcome;
+  }
   if (fresh.status === 'skipped') {
     await footer.done('native');
     return fail(
       'native',
-      `${unpaidSentence(fresh.why) ?? ''} This call ran out of time before the free path answered, so nothing was routed or paid.`.trim(),
+      fresh.why === DEADLINE_AFTER_PAYMENT_SENT
+        ? 'A routing payment (possibly the channel deposit) went out, and this call ran out of time before its answer. `tenjin mcp` lets it finish so it is recorded; nothing else was paid.'
+        : `${unpaidSentence(fresh.why) ?? ''} This call ran out of time before the free path answered, so nothing was routed or paid.`.trim(),
       { nextStep: 'Use your own tools for this one.' },
     );
   }
@@ -246,10 +268,13 @@ export async function runRequestTool(
   // which is wrong for this one: what stops routing here is a routing fee this
   // call could not pay, for the reason the payer gave.
   if (isFeeRequired(fresh.decision)) {
+    // The fee is on: the next call asks for the paid path again.
+    await clearRouterMemo(deps.ctx.dataDir, 'paid-path-absent', settings.baseUrl);
     await footer.done('native');
+    const raw = await loadRawConfig(deps.ctx.dataDir).catch(() => ({}));
     return fail(
       'native',
-      unpaidSentence(fresh.freePath ?? FEE_REQUIRED) ?? unpaidSentence(FEE_REQUIRED)!,
+      unpaidNotice(fresh.freePath ?? FEE_REQUIRED, raw, 'agent') ?? unpaidSentence(FEE_REQUIRED)!,
       { nextStep: 'Tell the user this once, and use your own tools for now.' },
     );
   }

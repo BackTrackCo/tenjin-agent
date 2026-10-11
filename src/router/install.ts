@@ -28,10 +28,24 @@ import { loadRawConfig, type PartialConfig } from '../lib/config';
 import { onPath } from '../lib/skill-wiring';
 import type { WalletDeps, WalletOutcome } from '../commands/install-wallet';
 import type { CommandContext, CommandResult } from '../context';
-import { CHANNEL_DEPOSIT_ATOMIC, ROUTING_FEE_ATOMIC, usd } from './fee';
 import { HOOK_TOOL, hookToolInput, type HookKind } from './hook-tool';
 import { MCP_SERVER_NAME, REQUEST_TOOL } from './names';
+import { probeRouter, type RouterCheck } from './reachability';
+import {
+  readMcpServers,
+  RECONNECT_FIX,
+  type InstalledAt,
+  type ListMcpProcesses,
+} from './mcp-processes';
 import { ensureStatusLine, type StatusLineMode, type StatusLineResult } from './status-line-wiring';
+import {
+  FEE_APPROVAL,
+  limitsUsd,
+  OWN_LIMITS_COMMANDS,
+  ROUTING_FEE_TERMS,
+  shownLimits,
+  spendQuestion,
+} from './spend-question';
 
 /**
  * `tenjin install` for the router product: seven hook entries, one MCP server,
@@ -179,6 +193,11 @@ export interface RouterInstallArgs {
    */
   refresh?: boolean;
   /**
+   * Accept the limits the question shows instead of asking: the selector's
+   * "Use these limits", for an agent running the user's yes.
+   */
+  yes?: boolean;
+  /**
    * What to do about Claude Code's `statusLine`. Absent is the default path:
    * write ours when the key is free, and print the composition line when it is
    * not. `compose` wraps the status line already there and appends ours;
@@ -190,6 +209,10 @@ export interface RouterInstallArgs {
 }
 
 export interface RouterInstallDeps extends WalletDeps {
+  /** This user's running `tenjin mcp` processes; tests inject them. */
+  listMcpProcesses?: ListMcpProcesses;
+  /** When this build was installed; tests inject it. */
+  installedAt?: InstalledAt;
   homeDir?: string;
   cwd?: string;
   env?: NodeJS.ProcessEnv;
@@ -215,6 +238,8 @@ export interface RouterInstallDeps extends WalletDeps {
   promptLimits?: (message: string) => Promise<LimitsChoice | null>;
   /** One amount question; defaults to the clack text input. */
   promptAmount?: (message: string, placeholder: string) => Promise<string | null>;
+  /** The router reachability probe's transport; tests inject it. */
+  fetchImpl?: typeof fetch;
 }
 
 export type LimitsChoice = 'approve' | 'own';
@@ -317,10 +342,23 @@ export async function runRouterInstall(
     }
   }
   // The shelf install's gate: a refresh, `--json`, or a run with no terminal on
-  // either side asks nothing and writes the defaults only where the file is silent.
+  // either side asks nothing. An agent's install is that run: its shell has no
+  // terminal. Install then writes no spend limit at all, the same state a
+  // person cancelling at the selector leaves, and its output hands the question
+  // to whoever ran it (see {@link spendApproval}). Until someone answers, the
+  // bare CLI's zero holds and doctor reports the question as pending.
   const humanOutput = ctx.flags.json === true ? false : (deps.isInteractive ?? ctx.io.isTTY);
   const canPrompt = humanOutput && (deps.isInteractive ?? Boolean(process.stdin.isTTY));
-  const limits = args.refresh !== true && canPrompt ? await approveLimits(config, deps) : undefined;
+  // `--yes` is the selector's "Use these limits", answered ahead: the same
+  // install, run again by an agent for the user's yes.
+  const limits =
+    args.refresh === true
+      ? undefined
+      : args.yes === true
+        ? shownLimits(config)
+        : canPrompt
+          ? await approveLimits(config, deps)
+          : {};
   const spend = await persistRouterDefaults(ctx.dataDir, args.refresh === true, limits);
   const removedKeysLines =
     spend.removed.length > 0
@@ -343,6 +381,14 @@ export async function runRouterInstall(
     ...(args.refresh === true ? { refreshOnly: true } : {}),
   });
   const mcp = await registerMcpServer(deps, env, project, cwd, home);
+  // After the hooks are written: a `tenjin mcp` that started before this
+  // install runs the old build, so the new hooks fail there until it restarts.
+  // Named, never killed.
+  const servers = await readMcpServers(deps);
+  const serverLines =
+    servers.stale > 0
+      ? [paint(ctx.io, 'yellow', `! ${servers.check.detail}. ${RECONNECT_FIX}`)]
+      : [];
   if (args.refresh === true) {
     // The SAME writers, minus the one that decides anything: the entries are
     // rewritten in place by their ownership marker so an upgrade never
@@ -374,10 +420,12 @@ export async function runRouterInstall(
         spend,
         removedSkills,
         scope: mcpScope(project),
+        mcpServer: servers.check,
       },
       humanLines: [
         ...refreshLines(ctx, problems(ctx, hooks, permissions, statusLine, mcp)),
         ...removedKeysLines,
+        ...serverLines,
       ],
     };
   }
@@ -390,17 +438,38 @@ export async function runRouterInstall(
   // keeps them, and a readout quoting the defaults would describe limits this
   // run did not set.
   const effective = await resolveContextSettings(ctx);
+  const approval =
+    !canPrompt && args.yes !== true && !spend.kept.includes('maxAutoSpend')
+      ? spendApproval(config, args)
+      : undefined;
+  // A warning, never a failure: everything above is written and correct, and
+  // the network this machine is on now may not be the one it uses later.
+  const router = await probeRouter(effective.baseUrl, {
+    timeoutMs: ctx.flags.timeout,
+    env,
+    ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+  });
 
   const data = {
     settingsPath,
     hooks,
     permissions,
     statusLine,
-    spend: { ...spend, effective: effectiveLimits(effective.policy) },
+    spend: {
+      ...spend,
+      effective: effectiveLimits(effective.policy),
+      ...(approval !== undefined ? { approval } : {}),
+    },
     mcp,
     wallet,
+    router: {
+      status: router.status === 'ok' ? 'ok' : 'warn',
+      detail: router.detail,
+      ...(router.fix !== undefined ? { fix: router.fix } : {}),
+    },
     disclosure: DISCLOSURE,
     removedSkills,
+    mcpServer: servers.check,
   };
   return {
     data,
@@ -413,10 +482,65 @@ export async function runRouterInstall(
         mcp,
         wallet,
         policy: effective.policy,
+        ...(approval !== undefined ? { approval } : {}),
+        router,
       }),
       ...removedKeysLines,
+      ...serverLines,
     ],
   };
+}
+
+/** What turns automatic payment on after an install that left it at zero. */
+const AUTO_SPEND_FIX = `tenjin config set maxAutoSpend ${toMoney(ROUTER_DEFAULTS.maxAutoSpend).usd}`;
+const DECLINED =
+  'the router then pays for nothing on its own, and the question stays open until `tenjin install` in a terminal or `tenjin config set` answers it';
+
+/** The spend question an install that could not ask hands to its caller. */
+export interface SpendApproval {
+  /** For the agent to put to the user as written: the limits and the routing fee. */
+  question: string;
+  /** The limits the question shows, in USD, as the selector shows them. */
+  limits: { maxAutoSpend: string; sessionBudget: string };
+  /** The routing fee's terms, which a yes also approves. */
+  routingFee: string;
+  /** What the agent does with each answer. */
+  next: string;
+  /** The one command for a yes: this install again with `--yes`, as the selector's "Use these limits". */
+  approve: string;
+  /** The commands for limits of the user's own. */
+  own: string;
+}
+
+/**
+ * An agent runs install with `--json` or in a shell with no terminal, so the
+ * CLI cannot ask. The agent can: this is what the selector would have shown
+ * (the limits and the routing fee) and what to run for each answer, the same
+ * shape as the `request` tool's `needs_input` step. A script or CI ignores
+ * it, and the zero holds.
+ */
+function spendApproval(config: PartialConfig, args: RouterInstallArgs): SpendApproval {
+  const limits = shownLimits(config);
+  const approve = yesCommand(args);
+  return {
+    question: spendQuestion(limits),
+    limits: limitsUsd(limits),
+    routingFee: ROUTING_FEE_TERMS,
+    next: `In this session, show the user these limits and ask this question before you change any limit. If they say yes, run the same install again with --yes: \`${approve}\`. If they give other amounts, run ${OWN_LIMITS_COMMANDS}. If they say no, run nothing: ${DECLINED}.`,
+    approve,
+    own: OWN_LIMITS_COMMANDS.replaceAll('`', ''),
+  };
+}
+
+/** The install this run was, with `--yes`: what an agent runs for the user's yes. */
+function yesCommand(args: RouterInstallArgs): string {
+  return [
+    'tenjin install',
+    ...(args.project === true ? ['--project'] : []),
+    ...(args.noWallet === true ? ['--no-wallet'] : []),
+    ...(args.statusLine !== undefined ? [`--status-line ${args.statusLine}`] : []),
+    '--yes',
+  ].join(' ');
 }
 
 /**
@@ -430,10 +554,7 @@ async function approveLimits(
   config: PartialConfig,
   deps: RouterInstallDeps,
 ): Promise<RouterLimits | undefined> {
-  const shown: RouterLimits = {
-    maxAutoSpend: config.maxAutoSpend ?? ROUTER_DEFAULTS.maxAutoSpend,
-    sessionBudget: config.sessionBudget ?? ROUTER_DEFAULTS.sessionBudget,
-  };
+  const shown = shownLimits(config);
   const askCall = config.maxAutoSpend === undefined;
   const askDay = config.sessionBudget === undefined;
   if (!askCall && !askDay) return undefined;
@@ -441,7 +562,7 @@ async function approveLimits(
     shown.sessionBudget === 'none'
       ? 'no daily limit'
       : `$${toMoney(shown.sessionBudget).usd} a day`;
-  const fee = `\nRouting costs $${usd(ROUTING_FEE_ATOMIC)} a call, paid from channel deposits of up to $${usd(CHANNEL_DEPOSIT_ATOMIC)} that stay yours until spent; each deposit counts against these limits.\nUsing these limits or choosing your own also approves the routing fee.`;
+  const fee = `\n${ROUTING_FEE_TERMS}\n${FEE_APPROVAL}`;
   const choice = await (deps.promptLimits ?? promptLimits)(
     `The router pays for tool calls without asking, up to:\n  $${toMoney(shown.maxAutoSpend).usd} a call, ${daily}${fee}`,
   );
@@ -746,12 +867,37 @@ function lines(
     mcp: McpRegistration;
     wallet: WalletOutcome;
     policy: SpendPolicy;
+    approval?: SpendApproval;
+    router: RouterCheck;
   },
 ): string[] {
   const ok = paint(ctx.io, 'green', '✓');
+  const warn = (text: string) => paint(ctx.io, 'yellow', `! ${text}`);
   const limits = effectiveLimits(s.policy);
   const daily =
     s.policy.sessionBudgetAtomic === null ? 'no daily limit' : `$${limits.sessionBudget} a day`;
+  const spend =
+    s.approval !== undefined
+      ? [
+          warn('Automatic payments are off until the user approves a spend limit'),
+          `  Ask the user in this session: ${s.approval.question}`,
+          `  Yes: ${s.approval.approve}`,
+          `  Other amounts: ${s.approval.own}`,
+          `  No: run nothing, ${DECLINED.replaceAll('`', '')}`,
+        ]
+      : s.policy.maxAutoSpendAtomic === 0n
+        ? [
+            warn('Automatic payments are off: every paid lookup needs your approval'),
+            `  To let the router pay without asking, run: ${AUTO_SPEND_FIX}`,
+          ]
+        : [`  Automatic router: up to $${limits.maxAutoSpend} per call; daily limit ${daily}`];
+  const router =
+    s.router.status === 'ok'
+      ? []
+      : [
+          warn(`The router did not answer: ${s.router.detail}`),
+          ...(s.router.fix !== undefined ? [`  ${s.router.fix}`] : []),
+        ];
   // The first line only says "set up" when it is: a settings file this run
   // would not write to means nothing was set up, and hooks without the MCP
   // server point at a `request` tool that is not there.
@@ -766,21 +912,22 @@ function lines(
         ? paint(ctx.io, 'yellow', '! Almost done: Claude Code needs one command')
         : `${ok} Tenjin is set up for Claude Code${where}`,
     ...walletLines(ctx, ok, s.wallet),
-    `  Automatic router: up to $${limits.maxAutoSpend} per call; daily limit ${daily}`,
+    ...spend,
     ...(s.statusLine.state === 'ours' || s.statusLine.state === 'composed'
       ? ['  Live status line on: each lookup names its provider while it runs']
       : []),
     ...problems(ctx, s.hooks, s.permissions, s.statusLine, s.mcp),
+    ...router,
     '',
     blocked
       ? 'Next: fix the file above, then run tenjin install again'
       : needsMcp
         ? s.wallet.status === 'created'
-          ? `Next: run the command above and ${fund}, then restart Claude Code`
-          : 'Next: run the command above, then restart Claude Code'
+          ? `Next: run the command above and ${fund}, then start a new Claude Code session so the hooks and the server load`
+          : 'Next: run the command above, then start a new Claude Code session so the hooks and the server load'
         : s.wallet.status === 'created'
-          ? `Next: ${fund}, then restart Claude Code`
-          : 'Next: restart Claude Code',
+          ? `Next: ${fund}, then start a new Claude Code session so the hooks and the server load`
+          : 'Next: start a new Claude Code session so the hooks and the server load',
   ];
 }
 

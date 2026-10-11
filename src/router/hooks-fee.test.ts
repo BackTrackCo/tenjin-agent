@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { GATE_TIMEOUT_MS } from './gate';
+import { DEPOSIT_GATE_TIMEOUT_MS, GATE_TIMEOUT_MS } from './gate';
 import { runHookCommand, runHookKind } from './hook-command';
 import { runPromptHook, type HookDeps } from './hooks';
 import { ROUTING_FEE_ATOMIC } from './fee';
@@ -11,6 +11,7 @@ import { CliError } from '../lib/errors';
 import { FakeRouter, payerDeps } from './fee-test-utils';
 import { RoutingPayer } from './routing-payer';
 import { readSpendSummary } from '../lib/wallet/spend';
+import { readRouterMemo, writeRouterMemo } from './router-memo';
 
 /**
  * The hook legs on each side of the routing fee: inside `tenjin mcp` (which
@@ -265,6 +266,34 @@ describe('the hook legs and the routing fee', () => {
     ]);
   });
 
+  it('puts the spend question and its one-step yes to a machine whose limits are unanswered', async () => {
+    // What an agent-run install leaves: no limit in the file, so the code default's zero holds.
+    await writeFile(join(dir, 'config.json'), '{}');
+    const fake = new FakeRouter();
+    fake.body = OFFER;
+    const p = payer(fake, {
+      policy: async () => ({
+        maxAutoSpendAtomic: 0n,
+        sessionBudgetAtomic: 5_000_000n,
+        allowlistCreators: [],
+      }),
+    });
+    const answer = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
+    const notice = systemMessageOf(answer);
+    expect(notice).toContain('the spend limits are not answered');
+    // The user reads it, so it is put to them, not to an agent.
+    expect(notice).not.toContain('Ask the user');
+    expect(notice).toContain('without asking you each time, up to $0.25 a call and $5 a day.');
+    expect(notice).toContain(
+      'Using these limits or choosing your own also approves the routing fee.',
+    );
+    expect(notice).toContain('Routing costs $0.003 a call');
+    expect(notice).toContain('`tenjin config set maxAutoSpend 0.25`');
+    // Never a bare install, which would undo a --project or --no-wallet install.
+    expect(notice).not.toContain('tenjin install --yes');
+    expect(fake.paidRequests()).toBe(0);
+  });
+
   it('takes the free path when the payment fails, and names doctor', async () => {
     const fake = new FakeRouter();
     const p = payer(fake);
@@ -280,6 +309,20 @@ describe('the hook legs and the routing fee', () => {
     expect(systemMessageOf(answer)).toContain('`tenjin doctor`');
     // The deposit the server refused is released, not counted.
     expect((await readSpendSummary(dir))?.committedAtomic ?? '0').toBe('0');
+  });
+
+  it('asks for the paid path again as soon as the free path answers fee_required', async () => {
+    const fake = new FakeRouter();
+    const p = payer(fake, { now: () => NOW });
+    // The router answered no paid path a moment ago, before the fee turned on.
+    await writeRouterMemo(dir, 'paid-path-absent', BASE, { now: NOW, ttlMs: 3_600_000 });
+    expect(await p.routeFor(BASE)).toBeNull();
+    const { fetchImpl } = router(FEE_REQUIRED_ANSWER);
+    const answer = await runHookKind('prompt', prompt(), deps(fetchImpl, p));
+    // Stale news, not a fault: the session's one notice is not used up on it.
+    expect(systemMessageOf(answer)).toBeUndefined();
+    expect(await readRouterMemo(dir, 'paid-path-absent', BASE, NOW)).toBeNull();
+    expect(await p.routeFor(BASE)).not.toBeNull();
   });
 
   it('says once when the free path answers fee_required and nothing could pay, in the command form too', async () => {
@@ -316,6 +359,58 @@ describe('the hook legs and the routing fee', () => {
     return { fetchImpl, paid: () => paid };
   }
 
+  it('gives a deposit call the longer budget: a settle at about 4 s is paid and says nothing', async () => {
+    const fake = new FakeRouter();
+    fake.body = OFFER;
+    fake.delayMs = GATE_TIMEOUT_MS + 400;
+    const started = Date.now();
+    const answer = await runHookKind('prompt', prompt(), deps(fake.fetch, payer(fake)));
+    expect(Date.now() - started).toBeGreaterThan(GATE_TIMEOUT_MS);
+    expect(contextOf(answer)).toContain('CoinMarketCap fits this');
+    expect(systemMessageOf(answer)).toBeUndefined();
+    expect(fake.deposits).toBe(1);
+    expect(fake.log.at(-1)).toBe('POST /api/x402-router/route paid');
+    const ledger = await readSpendSummary(dir);
+    expect(ledger?.reservations).toEqual([]);
+    expect(ledger?.committedAtomic).not.toBe('0');
+  }, 15_000);
+
+  it('lets a deposit that settles past the budget finish in tenjin mcp, and says nothing', async () => {
+    const fake = new FakeRouter();
+    fake.body = OFFER;
+    fake.delayMs = 6_000;
+    const p = payer(fake);
+    const started = Date.now();
+    const first = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
+    // The leg returns at the deposit budget, inside the hook's 5 s, unpaid and silent.
+    expect(Date.now() - started).toBeLessThan(DEPOSIT_GATE_TIMEOUT_MS + 400);
+    expect(systemMessageOf(first)).toBeUndefined();
+    fake.delayMs = 0;
+    // The next call waits for the first to settle, then pays a voucher from
+    // the channel the SDK recorded: no second deposit, no corrective 402.
+    const second = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
+    expect(contextOf(second)).toContain('CoinMarketCap fits this');
+    expect(systemMessageOf(second)).toBeUndefined();
+    expect(fake.deposits).toBe(1);
+    expect(fake.paidRequests()).toBe(2);
+    expect([...fake.channels.values()][0]!.charged).toBe(2n * ROUTING_FEE_ATOMIC);
+    const ledger = await readSpendSummary(dir);
+    expect(ledger?.reservations).toEqual([]);
+    expect(ledger?.committedAtomic).not.toBe('0');
+  }, 20_000);
+
+  it('still names doctor when the router refuses the payment at verify', async () => {
+    const fake = new FakeRouter();
+    const refuses = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      const request = new Request(input, init);
+      if (request.headers.has('payment-signature')) return new Response('{}', { status: 402 });
+      return fake.fetch(request);
+    }) as typeof fetch;
+    const answer = await runHookKind('prompt', prompt('sess-refused'), deps(refuses, payer(fake)));
+    expect(systemMessageOf(answer)).toContain('the routing payment failed');
+    expect(systemMessageOf(answer)).toContain('`tenjin doctor`');
+  });
+
   it('keeps a paid voucher call that gets no answer inside the gate budget', async () => {
     const fake = new FakeRouter();
     const p = payer(fake);
@@ -334,7 +429,7 @@ describe('the hook legs and the routing fee', () => {
     const hang = paidHangs(fake);
     const started = Date.now();
     await runPromptHook(prompt(), { ...deps(fake.fetch, p), fetchImpl: hang.fetchImpl });
-    expect(Date.now() - started).toBeLessThan(GATE_TIMEOUT_MS + 500);
+    expect(Date.now() - started).toBeLessThan(DEPOSIT_GATE_TIMEOUT_MS + 500);
     expect(hang.paid()).toBe(1);
     // It went out and no answer came, so it may have landed: it counts.
     expect(await readSpendSummary(dir)).toMatchObject({ committedAtomic: '250000' });

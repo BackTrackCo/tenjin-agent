@@ -13,8 +13,10 @@ import { MAX_BODY_BYTES } from '../lib/request-schema';
 import { extensionFor, runRequestTool } from './tool';
 import type { MediaTransport } from './paid';
 import { storeSpecs } from './specs';
-import { ROUTER_PATH, type OfferSpec } from './decision';
+import { DEADLINE_AFTER_PAYMENT_SENT, ROUTER_PATH, RouteSkipped, type OfferSpec } from './decision';
+import { httpRequest, type HttpRequestOptions } from '../lib/http';
 import { bindDecision, claimRedirect, noteSession, renderProgress } from './progress';
+import { readRouterMemo, writeRouterMemo } from './router-memo';
 
 // Pass-through, so a refusal's typed details stay observable after the tool
 // folds the error into its envelope.
@@ -301,12 +303,74 @@ describe('routing outcomes that buy nothing', () => {
         },
       },
     ]);
+    // A "no paid path" this machine remembered from before the fee turned on.
+    await writeRouterMemo(dir, 'paid-path-absent', ROUTER, { now: Date.now(), ttlMs: 3_600_000 });
     const result = await runRequestTool({ query: 'what is the weather' }, deps(fetchImpl));
     expect(calls).toHaveLength(1);
+    // The fee is on now, so the next call asks for the paid path at once.
+    expect(await readRouterMemo(dir, 'paid-path-absent', ROUTER, Date.now())).toBeNull();
     expect(result.envelope).toMatchObject({ status: 'native', cost: ['provider price 0 USD'] });
     expect(String(result.envelope.reason)).toContain('could not pay its $0.003 fee');
     expect(String(result.envelope.reason)).toContain('`tenjin doctor`');
     expect(JSON.stringify(result.envelope)).not.toContain('npm i -g');
+  });
+
+  it('asks once more on the paid path when a stale "no paid path" memo sent the call free', async () => {
+    const feeOn = {
+      schemaVersion: 1,
+      routerVersion: 'v',
+      decision: {
+        action: 'native',
+        diagnostics: {
+          reasonCode: 'fee_required',
+          stage: 'capability',
+          missing: [],
+          nextAction: 'x',
+        },
+      },
+    };
+    const { fetchImpl, calls } = net([
+      { url: ROUTER, status: 200, body: feeOn },
+      { url: ROUTER, status: 200, body: NATIVE },
+    ]);
+    await writeRouterMemo(dir, 'paid-path-absent', ROUTER, { now: Date.now(), ttlMs: 3_600_000 });
+    const route = async (baseUrl: string) =>
+      (await readRouterMemo(dir, 'paid-path-absent', baseUrl, Date.now()))
+        ? null
+        : {
+            path: '/api/x402-router/route',
+            send: (url: string, options: HttpRequestOptions) => httpRequest(url, options),
+          };
+    const result = await runRequestTool(
+      { query: 'what is the weather' },
+      { ...deps(fetchImpl), route },
+    );
+    expect(calls.map((c) => new URL(c.url).pathname)).toEqual([
+      '/api/x402-router',
+      '/api/x402-router/route',
+    ]);
+    expect(result.envelope).toMatchObject({ status: 'native' });
+    expect(String(result.envelope.reason)).not.toContain('could not pay');
+  });
+
+  it('says a routing payment went out when the call ran out of time after sending it', async () => {
+    const route = async () => ({
+      path: '/api/x402-router/route',
+      send: async (): Promise<never> => {
+        await new Promise((resolve) => setTimeout(resolve, 80));
+        throw new RouteSkipped(DEADLINE_AFTER_PAYMENT_SENT);
+      },
+    });
+    const { fetchImpl } = net([]);
+    const quick = { ...ctx(), flags: { ...ctx().flags, timeout: 50 } };
+    const result = await runRequestTool(
+      { query: 'what is the weather' },
+      { ...deps(fetchImpl), ctx: quick, route },
+    );
+    expect(String(result.envelope.reason)).toContain(
+      'A routing payment (possibly the channel deposit) went out',
+    );
+    expect(String(result.envelope.reason)).not.toContain('nothing was routed or paid');
   });
 
   it('carries the backend diagnostics into a needs_input result', async () => {

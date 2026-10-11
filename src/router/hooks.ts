@@ -22,9 +22,16 @@ import {
 } from './context';
 import { storeSpecs } from './specs';
 import { requestDecision, ROUTER_PATH, type HookDecision } from './decision';
-import { FEE_REQUIRED, firstNoticeFor, isFeeRequired, unpaidSentence, type RouteFor } from './fee';
+import { FEE_REQUIRED, firstNoticeFor, isFeeRequired, type RouteFor } from './fee';
+import { unpaidNotice } from './spend-question';
 import { readsAsEmptyPage, savedPdfOf } from './fetch-result';
 import { GATE_TIMEOUT_MS } from './gate';
+import {
+  clearRouterMemo,
+  readRouterMemo,
+  UNREACHABLE_BACKOFF_MS,
+  writeRouterMemo,
+} from './router-memo';
 import { REQUEST_TOOL } from './names';
 import { requestToolAccess, type AgentLookup } from './agent-tools';
 import { finishAugment, startAugment, type PrefetchJob, type SearchResponse } from './augment';
@@ -1454,7 +1461,12 @@ function hookOutcome(decision: HookDecision | null): string {
 /** The one routing call, its packet SEALED (masked and bounded): a path that
  *  skips the mask does not typecheck. Inside `tenjin mcp` it takes the paid
  *  path; a call that path cannot pay takes the free path, and the first such
- *  call in a session tells the user why and what fixes it. */
+ *  call in a session tells the user why and what fixes it.
+ *
+ *  BACKOFF: a call that could not reach the router starts the machine's
+ *  `unreachable` memo, and for its minute every leg skips the call and the
+ *  native tool runs at once, rather than each one waiting out the gate. It
+ *  ends after its minute, or when `tenjin doctor` reaches the router. */
 async function decide(
   { packet }: Sealed,
   deps: HookDeps,
@@ -1464,8 +1476,14 @@ async function decide(
 ): Promise<HookDecision | null> {
   const baseUrl = resolveBaseUrl(deps, config);
   const warn = deps.warn ?? ((line: string) => process.stderr.write(`${line}\n`));
-  const route = (await deps.route?.(baseUrl)) ?? null;
   const now = deps.now?.() ?? Date.now();
+  const backoff = await readRouterMemo(deps.dataDir, 'unreachable', baseUrl, now);
+  if (backoff !== null) {
+    const left = Math.ceil((backoff.until - now) / 1000);
+    warn(`tenjin hook: ${baseUrl} did not answer a moment ago, so the native tool runs (${left}s)`);
+    return null;
+  }
+  const route = (await deps.route?.(baseUrl)) ?? null;
   const outcome = await requestDecision(
     'hook',
     { packet, sessionId },
@@ -1485,13 +1503,38 @@ async function decide(
         (outcome.status === 'decided' && isFeeRequired(outcome.decision)
           ? FEE_REQUIRED
           : undefined));
-  if (why !== undefined) await tellOnce(deps, sessionId, why, now);
+  // A `fee_required` on a call the machine's "no paid path" memo sent to the
+  // free path is stale news, not a fault: the memo is cleared below and the
+  // next call pays. It does not use up the session's one notice.
+  const memoed = deps.route !== undefined && route === null;
+  if (why !== undefined && !(memoed && why === FEE_REQUIRED)) {
+    await tellOnce(deps, sessionId, why, now, config);
+  }
+  // The fee is on: a "no paid path" remembered from before stops holding the
+  // machine's calls on the free path.
+  if (outcome.status === 'decided' && isFeeRequired(outcome.decision)) {
+    await clearRouterMemo(deps.dataDir, 'paid-path-absent', baseUrl);
+  }
   if (outcome.status === 'skipped') {
     warn(`tenjin hook: the routing fee was not paid (${outcome.why}), so the native tool runs`);
     return null;
   }
   if (outcome.freePath !== undefined) {
     warn(`tenjin hook: the routing fee was not paid (${outcome.freePath}), so the free path ran`);
+  }
+  if (outcome.status === 'failed' && outcome.unreachable === true) {
+    await writeRouterMemo(deps.dataDir, 'unreachable', baseUrl, {
+      now: deps.now?.() ?? Date.now(),
+      ttlMs: UNREACHABLE_BACKOFF_MS,
+      detail: outcome.reason,
+    });
+  } else if (
+    outcome.status === 'decided' ||
+    (outcome.status === 'failed' && outcome.noAnswer !== true)
+  ) {
+    // Only an answer ends it: a concurrent call that timed out, or got no
+    // answer for any other reason, leaves another call's backoff in place.
+    await clearRouterMemo(deps.dataDir, 'unreachable', baseUrl);
   }
   if (outcome.status === 'failed') {
     warn(`tenjin hook: ${baseUrl}${route?.path ?? ROUTER_PATH} ${outcome.reason}`);
@@ -1505,8 +1548,14 @@ async function decide(
  * routing fee for a reason the user can fix: the reason and the fix, in the
  * hook's `systemMessage`. Never on every call, and never in place of routing.
  */
-async function tellOnce(deps: HookDeps, sessionId: string, why: string, now: number) {
-  const sentence = unpaidSentence(why);
+async function tellOnce(
+  deps: HookDeps,
+  sessionId: string,
+  why: string,
+  now: number,
+  config: PartialConfig,
+) {
+  const sentence = unpaidNotice(why, config, 'user');
   if (sentence === null || deps.notice === undefined) return;
   if (await firstNoticeFor(deps.dataDir, sessionId, now).catch(() => false)) deps.notice(sentence);
 }

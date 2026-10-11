@@ -10,7 +10,7 @@ import {
   parseForTests,
   type SpecOutcome,
 } from './decision';
-import { GATE_TIMEOUT_MS } from './gate';
+import { DEPOSIT_GATE_TIMEOUT_MS, GATE_TIMEOUT_MS } from './gate';
 import { MAX_PACKET_BYTES, type Packet } from './context';
 import { AFTER_CALL_TIMEOUT_SECONDS, ROUTE_HOOK_TIMEOUT_SECONDS } from './install';
 import { AUGMENT_WAIT_MS } from './augment';
@@ -358,12 +358,14 @@ describe('the hook time budget', () => {
 
   /** The slowest routing leg is a paid call that carries a deposit: the 402,
    *  the SDK's chain read, the wallet read and the paid request all run inside
-   *  the gate's budget, and each read is also cut at what is left of it. A
+   *  its longer budget, and each read is also cut at what is left of it. A
    *  stuck server holds a prompt 5 s at most. */
   it('fits the slowest paid call inside the timeout install writes', () => {
     const budget = ROUTE_HOOK_TIMEOUT_SECONDS * 1_000;
     expect(ROUTE_HOOK_TIMEOUT_SECONDS).toBeLessThanOrEqual(5);
     expect(budget - GATE_TIMEOUT_MS).toBeGreaterThanOrEqual(FLOOR_MS);
+    expect(DEPOSIT_GATE_TIMEOUT_MS).toBeGreaterThan(GATE_TIMEOUT_MS);
+    expect(budget - DEPOSIT_GATE_TIMEOUT_MS).toBeGreaterThanOrEqual(FLOOR_MS);
     // The chain read and the wallet read leave the requests time of their own.
     expect(RPC_TIMEOUT_MS + BALANCE_TIMEOUT_MS).toBeLessThan(GATE_TIMEOUT_MS);
   });

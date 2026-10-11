@@ -23,8 +23,11 @@ beforeEach(async () => {
   await mkdir(join(work, '.git'), { recursive: true });
   await mkdir(join(home, '.claude'), { recursive: true });
   await mkdir(data, { recursive: true });
+  // Install ends with a reachability probe; no test here reaches the network.
+  vi.stubGlobal('fetch', probe400);
 });
 afterEach(async () => {
+  vi.unstubAllGlobals();
   await rm(join(home, '..'), { recursive: true, force: true });
 });
 
@@ -132,6 +135,18 @@ function alphaSettings(): Record<string, unknown> {
 const ADDRESS = '0x3c0D84055994c3062819Ce8730869D0aDeA4c3Bf';
 
 /** Wallet seams are always stubbed: the real create writes to the OS keychain. */
+/** What a run that could not ask prints for the agent that ran it. */
+/** The routing fee's terms, as the selector shows them. */
+const FEE_TERMS =
+  'Routing costs $0.003 a call, paid from channel deposits of up to $0.25 that stay yours until spent; each deposit counts against these limits.';
+const ASK_LINES = [
+  '! Automatic payments are off until the user approves a spend limit',
+  `  Ask the user in this session: May Tenjin pay for tool calls without asking you each time, up to $0.25 a call and $5 a day? ${FEE_TERMS} Using these limits or choosing your own also approves the routing fee.`,
+  '  Yes: tenjin install --yes',
+  '  Other amounts: tenjin config set maxAutoSpend <usd> and tenjin config set sessionBudget <usd|none>',
+  '  No: run nothing, the router then pays for nothing on its own, and the question stays open until tenjin install in a terminal or tenjin config set answers it',
+];
+
 function deps(over: Record<string, unknown> = {}) {
   return {
     homeDir: home,
@@ -141,6 +156,7 @@ function deps(over: Record<string, unknown> = {}) {
     walletExists: async () => false,
     createWallet: vi.fn(async () => ADDRESS),
     walletAddress: async () => ADDRESS,
+    listMcpProcesses: async () => [],
     ...over,
   };
 }
@@ -163,15 +179,106 @@ describe('tenjin install', () => {
     expect(JSON.stringify(result.data)).not.toContain('daemon');
   });
 
-  it('sets the spend defaults only where the file is silent', async () => {
+  it('with nobody to approve, writes no limit and keeps automatic spend at zero', async () => {
     await writeFile(join(data, 'config.json'), JSON.stringify({ confirm: 'always' }));
     const result = await runRouterInstall({}, ctx(), deps());
     const config = await loadRawConfig(data);
-    expect(config.maxAutoSpend).toBe('250000');
-    expect(config.sessionBudget).toBe('5000000');
+    expect(config.maxAutoSpend).toBeUndefined();
+    expect(config.sessionBudget).toBeUndefined();
     expect(config.confirm).toBeUndefined();
     expect(config.bazaarPay).toBeUndefined();
-    expect(result.data).toMatchObject({ spend: { removed: ['confirm'], kept: [] } });
+    expect(result.data).toMatchObject({
+      spend: {
+        removed: ['confirm'],
+        set: [],
+        kept: [],
+        effective: { maxAutoSpend: '0', sessionBudget: '5' },
+        approval: {
+          question: `May Tenjin pay for tool calls without asking you each time, up to $0.25 a call and $5 a day? ${FEE_TERMS} Using these limits or choosing your own also approves the routing fee.`,
+          limits: { maxAutoSpend: '0.25', sessionBudget: '5' },
+          routingFee: FEE_TERMS,
+          approve: 'tenjin install --yes',
+          own: 'tenjin config set maxAutoSpend <usd> and tenjin config set sessionBudget <usd|none>',
+        },
+      },
+    });
+    const { next } = (result.data as { spend: { approval: { next: string } } }).spend.approval;
+    expect(next).toMatch(
+      /^In this session, show the user these limits and ask this question before you change any limit\./,
+    );
+    expect(next).toContain(
+      'If they say yes, run the same install again with --yes: `tenjin install --yes`.',
+    );
+    expect(next).toContain('If they say no, run nothing');
+  });
+
+  it('asks about the daily limit the file already names', async () => {
+    await writeFile(join(data, 'config.json'), JSON.stringify({ sessionBudget: 'none' }));
+    const result = await runRouterInstall({}, ctx(), deps());
+    expect(result.data).toMatchObject({
+      spend: {
+        approval: {
+          question: `May Tenjin pay for tool calls without asking you each time, up to $0.25 a call with no daily limit? ${FEE_TERMS} Using these limits or choosing your own also approves the routing fee.`,
+          limits: { maxAutoSpend: '0.25', sessionBudget: 'none' },
+        },
+      },
+    });
+  });
+
+  it('asks nothing of a user who already chose a zero per-call limit', async () => {
+    await writeFile(join(data, 'config.json'), JSON.stringify({ maxAutoSpend: '0' }));
+    const result = await runRouterInstall({}, ctx(), deps());
+    expect(result.data).not.toHaveProperty('spend.approval');
+    expect(result.humanLines).toContain(
+      '! Automatic payments are off: every paid lookup needs your approval',
+    );
+  });
+
+  it('still succeeds, with a warning, when TENJIN_BASE_URL is not a URL', async () => {
+    vi.stubEnv('TENJIN_BASE_URL', 'tenjin.blog');
+    try {
+      const result = await runRouterInstall({}, ctx(), deps());
+      expect(result.data).toMatchObject({
+        router: { status: 'warn', detail: 'the base URL "tenjin.blog" is not a URL' },
+      });
+      expect((await readSettings()).hooks).toEqual(CURRENT_HOOKS);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('doctor reaches the router check and its fix when TENJIN_BASE_URL is not a URL', async () => {
+    const { runRouterDoctor } = await import('./doctor');
+    await runRouterInstall({}, ctx(), deps());
+    vi.stubEnv('TENJIN_BASE_URL', 'tenjin.blog');
+    try {
+      const out = await runRouterDoctor(ctx(), {
+        homeDir: home,
+        cwd: work,
+        env: {},
+        which: () => true,
+        readMcp: async () => true,
+        fetchImpl: probe400,
+      }).catch((e: unknown) => e);
+      expect(out).toBeInstanceOf(CliError);
+      const checks = ((out as CliError).details as { checks: { name: string; detail: string }[] })
+        .checks;
+      expect(checks.find((c) => c.name === 'routing fee')?.detail).toBe(
+        'not checked, because the base URL is not a URL',
+      );
+      expect(checks.find((c) => c.name === 'router')?.detail).toBe(
+        'the base URL "tenjin.blog" is not a URL',
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('reports no hooks directory, because the entries are plain commands', async () => {
+    const result = await runRouterInstall({}, ctx(), deps());
+    const hooks = (result.data as { hooks: Record<string, unknown> }).hooks;
+    expect(hooks).toMatchObject({ entries: 7, wrote: true });
+    expect(hooks).not.toHaveProperty('hooksDir');
   });
 
   it('turns the pay lane on and auto-approves at or below the per-call cap by default', async () => {
@@ -270,12 +377,12 @@ describe('tenjin install', () => {
     expect(result.humanLines).toEqual([
       '! Almost done: Claude Code needs one command',
       `✓ Wallet created: ${ADDRESS}`,
-      '  Automatic router: up to $0.25 per call; daily limit $5 a day',
+      ...ASK_LINES,
       '  Live status line on: each lookup names its provider while it runs',
       '! Could not add the request tool to Claude Code. Run:',
       `  ${MCP_ADD_COMMAND}`,
       '',
-      'Next: run the command above and tenjin wallet fund, then restart Claude Code',
+      'Next: run the command above and tenjin wallet fund, then start a new Claude Code session so the hooks and the server load',
     ]);
   });
 
@@ -292,13 +399,53 @@ describe('tenjin install', () => {
     expect(result.humanLines).toEqual([
       '✓ Tenjin is set up for Claude Code',
       `✓ Wallet created: ${ADDRESS}`,
-      '  Automatic router: up to $0.25 per call; daily limit $5 a day',
+      ...ASK_LINES,
       '  Live status line on: each lookup names its provider while it runs',
       '',
-      'Next: tenjin wallet fund, then restart Claude Code',
+      'Next: tenjin wallet fund, then start a new Claude Code session so the hooks and the server load',
     ]);
     // The data-handling detail is not dropped, it moves to --json and the docs.
-    expect(result.data).toMatchObject({ disclosure: expect.any(Array) });
+    expect(result.data).toMatchObject({
+      disclosure: expect.any(Array),
+      router: { status: 'ok' },
+    });
+  });
+
+  it('still succeeds, with a warning and the fix, when the router does not answer', async () => {
+    // What an egress proxy that blocks tenjin.sh sends: a 403 with none of
+    // the headers the deployment adds.
+    const blocked = (async () => new Response('Forbidden', { status: 403 })) as typeof fetch;
+    const result = await runRouterInstall({}, ctx(), deps({ fetchImpl: blocked }));
+    const router = (result.data as { router: { status: string; detail: string; fix: string } })
+      .router;
+    expect(router.status).toBe('warn');
+    expect(router.detail).toContain('a proxy, firewall or VPN on the way most likely refused');
+    expect(router.fix).toContain('Allow tenjin.sh through your proxy, firewall or VPN');
+    expect(router.fix).not.toContain('config set baseUrl');
+    expect(result.humanLines).toContain(`! The router did not answer: ${router.detail}`);
+    expect(result.humanLines).toContain(`  ${router.fix}`);
+    expect((await readSettings()).hooks).toEqual(CURRENT_HOOKS);
+  });
+
+  it('names running servers that predate this install, with the reconnect fix, and stops none', async () => {
+    const listMcpProcesses = vi.fn(async () => [{ pid: 9044, startedAt: 1 }]);
+    const result = await runRouterInstall(
+      {},
+      ctx(),
+      deps({ listMcpProcesses, installedAt: async () => 2 }),
+    );
+    expect(result.data).toMatchObject({ mcpServer: { name: 'mcp server', status: 'warn' } });
+    expect(result.humanLines!.join('\n')).toContain('started before this install');
+    expect(result.humanLines!.join('\n')).toContain(
+      'Reconnect x402 with /mcp, or start a new Claude Code session.',
+    );
+    // The refresh `tenjin update` runs says it too.
+    const refreshed = await runRouterInstall(
+      { refresh: true },
+      ctx(),
+      deps({ listMcpProcesses, installedAt: async () => 2 }),
+    );
+    expect(refreshed.humanLines!.join('\n')).toContain('Reconnect x402 with /mcp');
   });
 
   it('creates a wallet when there is none, without asking', async () => {
@@ -320,7 +467,9 @@ describe('tenjin install', () => {
     expect(createWallet).not.toHaveBeenCalled();
     expect(result.data).toMatchObject({ wallet: { status: 'existing', address: ADDRESS } });
     expect(result.humanLines).toContain(`✓ Wallet: ${ADDRESS}`);
-    expect(result.humanLines!.at(-1)).toBe('Next: restart Claude Code');
+    expect(result.humanLines!.at(-1)).toBe(
+      'Next: start a new Claude Code session so the hooks and the server load',
+    );
   });
 
   it('creates no wallet with --no-wallet', async () => {
@@ -505,12 +654,75 @@ describe('install asks a person to approve the spend limits', () => {
   it.each([
     ['a non-interactive run', () => humanCtx(), false],
     ['--json', () => ctx(), true],
-  ])('%s asks nothing and writes the defaults', async (_name, makeCtx, isInteractive) => {
+  ])('%s asks nothing and writes no spend limit', async (_name, makeCtx, isInteractive) => {
     const promptLimits = vi.fn(async () => 'own' as const);
-    await runRouterInstall({}, makeCtx(), deps({ isInteractive, promptLimits }));
+    const result = await runRouterInstall({}, makeCtx(), deps({ isInteractive, promptLimits }));
     expect(promptLimits).not.toHaveBeenCalled();
+    // The state a cancel at the selector leaves: both keys absent, no literal 0.
     const config = await loadRawConfig(data);
-    expect(config).toMatchObject({ maxAutoSpend: '250000', sessionBudget: '5000000' });
+    expect(config).not.toHaveProperty('maxAutoSpend');
+    expect(config).not.toHaveProperty('sessionBudget');
+    expect(result.data).toMatchObject({ spend: { set: [], kept: [] } });
+    // An agent's shell has no terminal: the question goes to the agent instead.
+    expect(result.humanLines).toEqual(expect.arrayContaining(ASK_LINES));
+    // The rest of the install completes as it would after a yes.
+    expect(onlyInstall(result)).toMatchObject({ mcp: { registered: true } });
+  });
+
+  it('a non-interactive run keeps a per-call limit the file already names', async () => {
+    await writeFile(join(data, 'config.json'), JSON.stringify({ maxAutoSpend: '100000' }));
+    const result = await runRouterInstall({}, ctx(), deps());
+    expect(await loadRawConfig(data)).toEqual({ maxAutoSpend: '100000' });
+    expect(result.data).toMatchObject({ spend: { set: [], kept: ['maxAutoSpend'] } });
+    expect(result.data).not.toHaveProperty('spend.approval');
+  });
+
+  it('--yes writes the limits the question shows, as "Use these limits" does', async () => {
+    await writeFile(join(data, 'config.json'), JSON.stringify({ sessionBudget: 'none' }));
+    const promptLimits = vi.fn(async () => 'own' as const);
+    const result = await runRouterInstall(
+      { yes: true },
+      ctx(),
+      deps({ isInteractive: false, promptLimits }),
+    );
+    expect(promptLimits).not.toHaveBeenCalled();
+    expect(await loadRawConfig(data)).toMatchObject({
+      maxAutoSpend: '250000',
+      sessionBudget: 'none',
+    });
+    expect(result.data).not.toHaveProperty('spend.approval');
+  });
+
+  it('hands the agent its own command with --yes, and that run keeps every install choice', async () => {
+    // The agent-run install was told to make no wallet and leave the status line alone.
+    const createWallet = vi.fn(async () => ADDRESS);
+    const first = await runRouterInstall(
+      { noWallet: true, statusLine: 'skip' },
+      ctx(),
+      deps({ createWallet }),
+    );
+    const { approve } = (first.data as { spend: { approval: { approve: string } } }).spend.approval;
+    expect(approve).toBe('tenjin install --no-wallet --status-line skip --yes');
+    const before = await readFile(settingsPath(), 'utf8');
+    const result = await runRouterInstall(
+      { noWallet: true, statusLine: 'skip', yes: true },
+      ctx(),
+      deps({ createWallet }),
+    );
+    expect(createWallet).not.toHaveBeenCalled();
+    expect(await readFile(settingsPath(), 'utf8')).toBe(before);
+    expect(await loadRawConfig(data)).toMatchObject({
+      maxAutoSpend: '250000',
+      sessionBudget: '5000000',
+    });
+    expect(result.data).toMatchObject({ spend: { set: ['maxAutoSpend', 'sessionBudget'] } });
+    expect(result.data).not.toHaveProperty('spend.approval');
+  });
+
+  it('--yes keeps a 0 the file names', async () => {
+    await writeFile(join(data, 'config.json'), JSON.stringify({ maxAutoSpend: '0' }));
+    await runRouterInstall({ yes: true }, ctx(), deps());
+    expect(await loadRawConfig(data)).toMatchObject({ maxAutoSpend: '0' });
   });
 
   it('--refresh asks nothing and fills no absent limit', async () => {
@@ -810,6 +1022,7 @@ describe('the doctor this release registers', () => {
       'hooks',
       'status line',
       'mcp',
+      'mcp server',
       'spend',
       'experimental',
       'routing fee',
@@ -829,6 +1042,102 @@ describe('the doctor this release registers', () => {
     }
   });
 
+  it.each([
+    [
+      'an agent-run install that left the limits unanswered',
+      undefined,
+      { status: 'warn', required: false },
+    ],
+    ['a 0 the user set', '0', { status: 'fail', required: true }],
+  ])('reports %s, and the router probe still runs', async (_name, maxAutoSpend, expected) => {
+    const { runRouterDoctor } = await import('./doctor');
+    await runRouterInstall({}, ctx(), deps());
+    if (maxAutoSpend !== undefined) {
+      await writeFile(join(data, 'config.json'), JSON.stringify({ maxAutoSpend }));
+    }
+    const fetchImpl = (async () => {
+      throw Object.assign(new TypeError('fetch failed'), {
+        cause: Object.assign(new Error('getaddrinfo ENOTFOUND'), { code: 'ENOTFOUND' }),
+      });
+    }) as typeof fetch;
+    const out = await runRouterDoctor(ctx(), {
+      homeDir: home,
+      cwd: work,
+      env: {},
+      which: () => true,
+      readMcp: async () => true,
+      fetchImpl,
+    }).catch((e: unknown) => e);
+    type Check = { name: string; status: string; required: boolean; detail: string; fix?: string };
+    const checks =
+      out instanceof CliError
+        ? (out.details as { checks: Check[] }).checks
+        : (out as { data: { checks: Check[] } }).data.checks;
+    const spend = checks.find((c) => c.name === 'spend');
+    expect(spend).toMatchObject(expected);
+    if (maxAutoSpend === undefined) {
+      expect(spend?.detail).toContain(
+        `Ask the user: May Tenjin pay for tool calls without asking you each time, up to $0.25 a call and $5 a day? ${FEE_TERMS}`,
+      );
+      expect(spend?.fix).toBe(
+        'Answer the spend question: for a yes, run `tenjin config set maxAutoSpend 0.25`; for other amounts, `tenjin config set maxAutoSpend <usd>` and `tenjin config set sessionBudget <usd|none>`; or run `tenjin install` in a terminal to choose.',
+      );
+      // The open question is not the first required failure, so it never hides
+      // the network diagnosis.
+      expect(out instanceof CliError ? out.message : '').not.toContain('maxAutoSpend');
+    } else {
+      expect((out as CliError).message).toContain('maxAutoSpend is 0');
+      // Install keeps a 0 it finds and never asks, so only `config set` changes it.
+      expect(spend?.fix).toBe('Set a per-call limit with `tenjin config set maxAutoSpend <usd>`.');
+    }
+    expect(checks.find((c) => c.name === 'router')?.status).toBe('fail');
+  });
+
+  it('names a routing backoff in force while the router is still not reached, and ends it once it is', async () => {
+    const { runRouterDoctor } = await import('./doctor');
+    const { readRouterMemo, writeRouterMemo } = await import('./router-memo');
+    await runRouterInstall({}, ctx(), deps());
+    const now = 1_800_000_000_000;
+    type Check = { name: string; status: string; detail: string };
+    const refused = (async () => {
+      throw Object.assign(new TypeError('fetch failed'), {
+        cause: Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }),
+      });
+    }) as typeof fetch;
+    const routerLine = async (fetchImpl: typeof fetch = probe400) => {
+      const out = await runRouterDoctor(ctx(), {
+        homeDir: home,
+        cwd: work,
+        env: {},
+        which: () => true,
+        readMcp: async () => true,
+        fetchImpl,
+        now: () => now,
+      }).catch((e: unknown) => e);
+      const body =
+        out instanceof CliError
+          ? (out.details as { checks: Check[]; baseUrl: string })
+          : (out as { data: { checks: Check[]; baseUrl: string } }).data;
+      return { check: body.checks.find((c) => c.name === 'router'), baseUrl: body.baseUrl };
+    };
+    const before = await routerLine();
+    expect(before.check?.detail).not.toContain('skip the router');
+    await writeRouterMemo(data, 'unreachable', before.baseUrl, {
+      now: now - 15_000,
+      ttlMs: 60_000,
+    });
+    const during = await routerLine(refused);
+    expect(during.check?.status).toBe('fail');
+    expect(during.check?.detail).toContain(
+      'routing calls skip the router for 45s more, after one did not reach it',
+    );
+    // A probe the router answers ends the backoff for every routing leg.
+    const after = await routerLine();
+    expect(after.check?.status).toBe('ok');
+    expect(after.check?.detail).not.toContain('skip the router');
+    expect(await readRouterMemo(data, 'unreachable', before.baseUrl, now)).toBeNull();
+  });
+
   it('fails with the command that fixes it on a machine that never installed', async () => {
     const { runRouterDoctor } = await import('./doctor');
     const fetchImpl = (async () => new Response('{}', { status: 400 })) as typeof fetch;
@@ -845,7 +1154,8 @@ describe('the doctor this release registers', () => {
 
   it.each([
     [404, 'the router is not enabled at'],
-    [401, 'is not a Tenjin router (it asked for credentials)'],
+    [401, 'answered 401 without the headers a Tenjin deployment sends'],
+    [407, 'asked for its own credentials (407)'],
     [503, 'is unreachable or erroring (503)'],
   ])('reports the router endpoint answering %i as a failure', async (status, detail) => {
     const { runRouterDoctor } = await import('./doctor');
