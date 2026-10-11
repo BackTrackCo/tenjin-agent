@@ -411,7 +411,11 @@ export class RoutingPayer {
     const base = options.fetchImpl ?? this.deps.fetchImpl ?? fetch;
     const askFirst: typeof fetch = async (input, init) => {
       const request = new Request(input, init);
-      let asked: Response | undefined = await base(request.clone());
+      // Every send below gets the caller's budget signal itself. A signal that
+      // only follows it through copied Requests stops following once a copy is
+      // garbage collected, and the call then outlives the hook's budget.
+      const signal = init?.signal ?? request.signal;
+      let asked: Response | undefined = await base(request.clone(), { signal });
       call.answered = true;
       if (asked.status !== 402) return asked;
       try {
@@ -427,7 +431,7 @@ export class RoutingPayer {
       }
       const watched: typeof fetch = async (input, init) => {
         const request = new Request(input, init);
-        const paying = request.headers.has('PAYMENT-SIGNATURE') && !request.signal.aborted;
+        const paying = request.headers.has('PAYMENT-SIGNATURE') && !signal.aborted;
         if (!paying && asked !== undefined) {
           const first = asked;
           asked = undefined;
@@ -438,7 +442,7 @@ export class RoutingPayer {
         // FAIL CLOSED: the deposit counts from the moment it is sent, so a lost
         // answer or a process killed mid-call leaves it counted.
         if (deposit !== undefined) await this.commitDeposit(deposit);
-        const response = await base(request);
+        const response = await base(request, { signal });
         // Only an answered error proves it did not settle: the server settles
         // nothing on a 4xx or 5xx.
         if (deposit !== undefined && response.status >= 400) await this.releaseDeposit(deposit);
