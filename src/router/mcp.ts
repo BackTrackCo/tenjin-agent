@@ -65,9 +65,9 @@ const INSTRUCTIONS =
   'which runs it. This CLI builds and pays the call, and returns the full spec (its ' +
   'inputs, an example and what it returns) if a field is wrong; `{id}` alone returns ' +
   "the service's spec too, free. " +
-  'When a line lists choices, ask the user which one, or whether to compare all, then call ' +
-  '`{id, choice, input}`; `all` runs every choice side by side, one payment each, and ' +
-  'returns each saved result. ' +
+  'When a line lists choices, pick or ask as the line says, then call `{id, choice, input}`; ' +
+  'choice `all` runs every option side by side, one payment each, and returns each saved ' +
+  'result. ' +
   'Where the spec names the fields it returns, the result holds only those, and the ' +
   "provider's whole response is saved to the file at `fullResultPath`. " +
   'Before asking the user to get an API key or account for a one-off task, call it with ' +
@@ -164,7 +164,7 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
           .string()
           .optional()
           .describe(
-            'When the line lists choices: the key of the one the user picked, or `all` to run ' +
+            'When the line lists choices: the key of the one picked as the line says, or `all` to run ' +
               'every choice side by side, sent with the id and the input. Without an input it ' +
               "shows that choice's spec, with nothing paid.",
           ),
