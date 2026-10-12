@@ -20,7 +20,7 @@ import {
   type PendingCall,
   type Sealed,
 } from './context';
-import { storeSpecs } from './specs';
+import { storeChoices, storeSpecs } from './specs';
 import { requestDecision, ROUTER_PATH, type HookDecision } from './decision';
 import { FEE_REQUIRED, firstNoticeFor, isFeeRequired, type RouteFor } from './fee';
 import { unpaidNotice } from './spend-question';
@@ -1442,8 +1442,15 @@ async function openFooter(
       if (withheld === undefined && isOffer(decision)) {
         await bindDecision(deps.dataDir, sessionId, decision.id, now());
         // The line is shown, so the specs of the services it names are what
-        // `request({id, input})` runs and `request({id})` shows.
+        // `request({id, input})` runs and `request({id})` shows, and its
+        // choice set is what `request({id, choice})` picks from.
         await storeSpecs(deps.dataDir, decision.specs);
+        if (decision.action === 'discovered' && decision.choices !== undefined) {
+          await storeChoices(deps.dataDir, decision.id, {
+            choices: decision.choices,
+            hint: decision.hint,
+          });
+        }
       }
     },
   };

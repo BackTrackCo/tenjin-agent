@@ -19,7 +19,7 @@ import {
 } from './hooks';
 import { MCP_SERVER_NAME, REQUEST_TOOL } from './names';
 import { runHookCommand } from './hook-command';
-import { readSpec } from './specs';
+import { readChoices, readSpec } from './specs';
 import { ROUTER_PATH } from './decision';
 import {
   claimRedirect,
@@ -2784,6 +2784,29 @@ describe('a discovered service', () => {
       fetchImpl,
     });
     expect(await readSpec(dir, OFFERED.decision.id)).toEqual(OFFERED.decision.specs[0]);
+    expect(await readChoices(dir, OFFERED.decision.id)).toBeNull();
+  });
+
+  /** A CHOICE SET is kept by the line's id, beside every option's spec, so
+   *  `request({id, choice})` finds the option the user picked. */
+  it('keeps the choice set of a shown offer, and every option spec', async () => {
+    const OFFERED = JSON.parse(
+      readFileSync(
+        fileURLToPath(new URL('./fixtures/wire-hook-discovered-choices.json', import.meta.url)),
+        'utf8',
+      ),
+    ) as { decision: { id: string; hint: string; specs: { id: string }[]; choices: unknown } };
+    const { fetchImpl } = router(OFFERED);
+    await runPromptHook(promptEvent('generate an image of a lighthouse at dusk'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+    expect(await readChoices(dir, OFFERED.decision.id)).toEqual({
+      choices: OFFERED.decision.choices,
+      hint: OFFERED.decision.hint,
+    });
+    for (const spec of OFFERED.decision.specs) expect(await readSpec(dir, spec.id)).toEqual(spec);
   });
 
   /** A LIST CAN NAME A SERVICE OVER THE CAP beside one that fits: People Data

@@ -12,8 +12,14 @@ import { runPay } from '../commands/pay';
 import { MAX_BODY_BYTES } from '../lib/request-schema';
 import { extensionFor, runRequestTool } from './tool';
 import type { MediaTransport } from './paid';
-import { storeSpecs } from './specs';
-import { DEADLINE_AFTER_PAYMENT_SENT, ROUTER_PATH, RouteSkipped, type OfferSpec } from './decision';
+import { storeChoices, storeSpecs } from './specs';
+import {
+  DEADLINE_AFTER_PAYMENT_SENT,
+  ROUTER_PATH,
+  RouteSkipped,
+  type Choices,
+  type OfferSpec,
+} from './decision';
 import { httpRequest, type HttpRequestOptions } from '../lib/http';
 import { bindDecision, claimRedirect, noteSession, renderProgress } from './progress';
 import { readRouterMemo, writeRouterMemo } from './router-memo';
@@ -1772,6 +1778,95 @@ describe('an offer with a request spec', () => {
       id: SPEC_ID,
       accepts: ['discovered', 'spec', 'choices'],
     });
+  });
+});
+
+/**
+ * ONE CHOICE FROM A LINE'S SET is that option's own offer: its spec, its id,
+ * its one payment and its outcome report, exactly as `request({id: option.id})`
+ * would run it. `all` is `choices.test.ts`.
+ */
+describe('a choice from the set a line offered', () => {
+  const read = async () =>
+    JSON.parse(
+      await readFile(
+        fileURLToPath(new URL('./fixtures/wire-hook-discovered-choices.json', import.meta.url)),
+        'utf8',
+      ),
+    ) as { decision: { id: string; hint: string; specs: OfferSpec[]; choices: Choices } };
+  const keep = async () => {
+    const { decision } = await read();
+    await storeSpecs(dir, decision.specs);
+    await storeChoices(dir, decision.id, { choices: decision.choices, hint: decision.hint });
+    return { id: decision.id, grok: decision.specs[2]! };
+  };
+
+  it("runs the chosen option's spec under the option's own id", async () => {
+    const { id, grok } = await keep();
+    const { fetchImpl, calls } = net([
+      {
+        url: grok.request.url,
+        status: 402,
+        body: {},
+        headers: { 'PAYMENT-REQUIRED': challenge({ amount: '43000', payTo: grok.payTo }) },
+      },
+      { url: grok.request.url, status: 200, body: { id: 'img_1', data: [] } },
+      { url: ROUTER, status: 200, body: {} },
+    ]);
+    const result = await runRequestTool(
+      { id, choice: 'grok-imagine-2', input: { prompt: 'a lighthouse at dusk' } },
+      deps(fetchImpl),
+    );
+    expect(result.envelope).toMatchObject({
+      status: 'fulfilled',
+      supplier: 'blockrun.ai',
+      cost: ['provider price 0.043 USD'],
+    });
+    expect(calls[0]).toMatchObject({ url: grok.request.url, paid: false });
+    expect(JSON.parse(calls[1]!.body!)).toEqual({
+      prompt: 'a lighthouse at dusk',
+      model: 'xai/grok-imagine-image-2.0',
+      size: '1024x1024',
+      n: 1,
+    });
+    await vi.waitFor(() => expect(calls).toHaveLength(3));
+    expect(JSON.parse(calls[2]!.body!)).toMatchObject({ id: grok.id, status: 'fulfilled' });
+    // The payment was claimed under the option's id, which pays once.
+    const again = await runRequestTool(
+      { id: grok.id, input: { prompt: 'a lighthouse at dusk' } },
+      deps(fetchImpl),
+    );
+    expect(String(again.envelope.reason)).toContain('already paid for');
+  });
+
+  it("shows the chosen option's spec when no input comes with it, and pays nothing", async () => {
+    const { id, grok } = await keep();
+    const { fetchImpl, calls } = net([]);
+    const result = await runRequestTool({ id, choice: 'grok-imagine-2' }, deps(fetchImpl));
+    expect(result.envelope).toMatchObject({ status: 'spec', id: grok.id });
+    expect(result.summary).toContain('BlockRun');
+    expect(calls).toEqual([]);
+  });
+
+  it('refuses a choice for an id with no set kept, and a key the set does not name', async () => {
+    const { decision } = await read();
+    const { fetchImpl, calls } = net([]);
+    const none = await runRequestTool(
+      { id: decision.id, choice: 'grok-imagine-2', input: { prompt: 'x' } },
+      deps(fetchImpl),
+    );
+    expect(none.envelope).toMatchObject({ status: 'needs_input' });
+    expect(String(none.envelope.reason)).toContain('No choices are kept');
+    await keep();
+    const unknown = await runRequestTool(
+      { id: decision.id, choice: 'flux', input: { prompt: 'x' } },
+      deps(fetchImpl),
+    );
+    expect(unknown.envelope).toMatchObject({ status: 'needs_input' });
+    expect(String(unknown.envelope.reason)).toContain(
+      '"gpt-image-2.5", "nano-banana-2.1", "grok-imagine-2", "all"',
+    );
+    expect(calls).toEqual([]);
   });
 });
 

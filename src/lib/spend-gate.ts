@@ -80,7 +80,8 @@ export async function gateSpend(input: SpendGateInput): Promise<string | undefin
   return reservationId;
 }
 
-function policyFix(reason: string, allowlistSubject: string): string {
+/** The command or setting that clears a refusal, by its policy reason. */
+export function policyFix(reason: string, allowlistSubject: string): string {
   switch (reason) {
     case 'price_cap_exceeded':
       return 'Raise --max-price if this price is acceptable.';

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { evaluateSpendPolicy, type SpendPolicy } from './policy';
+import { evaluateSpendPolicy, policyCoversSet, type SpendPolicy } from './policy';
 
 // A permissive baseline; each test tightens ONE knob so a failure names the knob.
 function policy(over: Partial<SpendPolicy> = {}): SpendPolicy {
@@ -149,5 +149,43 @@ describe('explicit zero daily limit', () => {
     expect(
       evaluateSpendPolicy(policy({ sessionBudgetAtomic: 0n }), req({ amountAtomic: 0n })),
     ).toMatchObject({ decision: 'allow' });
+  });
+});
+
+/** A SET OF PAYMENTS: each one held to the per-call cap alone, the running
+ *  total to the budget, before any is signed. */
+describe('policyCoversSet', () => {
+  const step = (amountAtomic: bigint, creator = 'x402.aispace.bot') => ({ amountAtomic, creator });
+  const cap = policy({ maxAutoSpendAtomic: 250_000n, sessionBudgetAtomic: 5_000_000n });
+
+  it('passes a set whose total is over the per-call cap when each step is under it', () => {
+    expect(policyCoversSet(cap, [step(115_000n), step(95_000n), step(43_000n)], 0n)).toMatchObject({
+      decision: 'allow',
+    });
+  });
+
+  it('refuses a step over the per-call cap on its own', () => {
+    expect(policyCoversSet(cap, [step(43_000n), step(260_000n)], 0n)).toMatchObject({
+      decision: 'deny',
+      reason: 'above_auto_spend',
+    });
+  });
+
+  it('counts the steps before each one, and what the session already spent, against the budget', () => {
+    const budget = policy({ maxAutoSpendAtomic: 250_000n, sessionBudgetAtomic: 300_000n });
+    const set = [step(115_000n), step(95_000n), step(43_000n)];
+    expect(policyCoversSet(budget, set, 47_000n)).toMatchObject({ decision: 'allow' });
+    expect(policyCoversSet(budget, set, 48_000n)).toMatchObject({
+      decision: 'deny',
+      reason: 'session_budget_exceeded',
+    });
+  });
+
+  it('holds every step to the allowlist', () => {
+    const listed = policy({ allowlistCreators: ['x402.aispace.bot'] });
+    expect(policyCoversSet(listed, [step(1n), step(1n, 'blockrun.ai')], 0n)).toMatchObject({
+      decision: 'deny',
+      reason: 'not_allowlisted',
+    });
   });
 });

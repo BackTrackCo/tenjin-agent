@@ -4,7 +4,7 @@ import { lstat, open, opendir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { writeFileAtomic, writeFileAtomicExclusive } from '../lib/atomic-json';
-import { OfferSpecSchema, type OfferSpec } from './decision';
+import { ChoicesSchema, OfferSpecSchema, type Choices, type OfferSpec } from './decision';
 
 /**
  * THE REQUEST SPECS AN OFFER CARRIED, kept on this machine by the offer's id. The
@@ -70,6 +70,60 @@ export async function readSpec(dataDir: string, id: string): Promise<OfferSpec |
     if (Date.now() - stat.mtimeMs > SPEC_TTL_MS || stat.size > MAX_SPEC_BYTES) return null;
     const parsed = OfferSpecSchema.safeParse(JSON.parse(await file.readFile('utf8')));
     return parsed.success && parsed.data.id === id ? parsed.data : null;
+  } catch {
+    return null;
+  } finally {
+    await file.close().catch(() => undefined);
+  }
+}
+
+/** What the hook kept of a choice set: the set, and the line it came with. */
+export interface KeptChoices {
+  choices: Choices;
+  hint: string;
+}
+
+const KeptChoicesSchema = z.strictObject({ choices: ChoicesSchema, hint: z.string().max(2_000) });
+
+function choicesPath(dataDir: string, id: string): string {
+  return join(dataDir, SPECS_DIR, `${digest(id)}.choices.json`);
+}
+
+/**
+ * KEEP AN OFFER'S CHOICE SET by the offer's id, beside its specs and for as
+ * long: `request({id, choice})` reads it back to find the option's own id, or
+ * every option's for `all`. Never throws; with none kept, a choice is refused
+ * and the agent asks again.
+ */
+export async function storeChoices(
+  dataDir: string,
+  id: string,
+  kept: KeptChoices | undefined,
+): Promise<void> {
+  if (kept === undefined) return;
+  try {
+    await writeFileAtomic(choicesPath(dataDir, id), JSON.stringify(kept), {
+      mode: 0o600,
+      dirMode: 0o700,
+    });
+  } catch {
+    // The choice is refused, and the agent asks again.
+  }
+  await prune(join(dataDir, SPECS_DIR), SPEC_TTL_MS, Date.now());
+}
+
+/** The choice set kept for this id, or null: none, expired, damaged or not ours. */
+export async function readChoices(dataDir: string, id: string): Promise<KeptChoices | null> {
+  const file = await open(
+    choicesPath(dataDir, id),
+    constants.O_RDONLY | constants.O_NOFOLLOW,
+  ).catch(() => undefined);
+  if (file === undefined) return null;
+  try {
+    const stat = await file.stat();
+    if (Date.now() - stat.mtimeMs > SPEC_TTL_MS || stat.size > MAX_SPEC_BYTES) return null;
+    const parsed = KeptChoicesSchema.safeParse(JSON.parse(await file.readFile('utf8')));
+    return parsed.success ? parsed.data : null;
   } catch {
     return null;
   } finally {
