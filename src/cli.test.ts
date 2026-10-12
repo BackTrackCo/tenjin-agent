@@ -206,8 +206,20 @@ describe('main', () => {
     const help = cap.stdout();
     expect(help).toContain('--project');
     expect(help).toContain('--refresh');
-    for (const gone of ['--harness', '--bazaar-pay', '--no-grant', '--publish-mode'])
+    for (const gone of [
+      '--harness',
+      '--bazaar-pay',
+      '--no-grant',
+      '--publish-mode',
+      '--status-line',
+    ])
       expect(help).not.toContain(gone);
+  });
+
+  it("accepts the plugin's own flag on the MCP server", async () => {
+    const cap = captureIo();
+    expect(await main(['mcp', '--plugin', '--help'], cap.io)).toBe(0);
+    expect(cap.stdout()).not.toContain('--plugin');
   });
 
   // Removed pre-release flags are gone rather than hidden. Rejected at parse
@@ -218,6 +230,7 @@ describe('main', () => {
       '--no-claude-md',
       '--allow-free-verbs',
       '--no-allow-free-verbs',
+      '--status-line',
     ]) {
       const cap = captureIo();
       expect(await main(['install', flag, '--json'], cap.io), flag).toBe(2);

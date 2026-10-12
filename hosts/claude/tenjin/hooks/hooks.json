@@ -1,0 +1,206 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "tenjin hook alive",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "plugin:tenjin:router",
+            "tool": "hook",
+            "input": {
+              "kind": "prompt",
+              "hook_event_name": "${hook_event_name}",
+              "session_id": "${session_id}",
+              "transcript_path": "${transcript_path}",
+              "cwd": "${cwd}",
+              "prompt": "${prompt}"
+            },
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "WebSearch|WebFetch",
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "plugin:tenjin:router",
+            "tool": "hook",
+            "input": {
+              "kind": "native",
+              "hook_event_name": "${hook_event_name}",
+              "session_id": "${session_id}",
+              "transcript_path": "${transcript_path}",
+              "cwd": "${cwd}",
+              "tool_name": "${tool_name}",
+              "tool_input": "${tool_input}",
+              "tool_use_id": "${tool_use_id}",
+              "agent_id": "${agent_id}",
+              "agent_type": "${agent_type}"
+            },
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "Agent|Task",
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "plugin:tenjin:router",
+            "tool": "hook",
+            "input": {
+              "kind": "agent",
+              "hook_event_name": "${hook_event_name}",
+              "session_id": "${session_id}",
+              "transcript_path": "${transcript_path}",
+              "cwd": "${cwd}",
+              "tool_name": "${tool_name}",
+              "tool_input": "${tool_input}",
+              "tool_use_id": "${tool_use_id}",
+              "agent_id": "${agent_id}",
+              "agent_type": "${agent_type}"
+            },
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "AskUserQuestion",
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "plugin:tenjin:router",
+            "tool": "hook",
+            "input": {
+              "kind": "ask",
+              "hook_event_name": "${hook_event_name}",
+              "session_id": "${session_id}",
+              "transcript_path": "${transcript_path}",
+              "cwd": "${cwd}",
+              "tool_name": "${tool_name}",
+              "tool_input": "${tool_input}",
+              "tool_use_id": "${tool_use_id}",
+              "agent_id": "${agent_id}",
+              "agent_type": "${agent_type}"
+            },
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__plugin_tenjin_router__hook",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"Only the Tenjin hooks call this tool. To make a lookup, call mcp__plugin_tenjin_router__request.\"}}'",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__plugin_tenjin_router__request",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"allow\",\"permissionDecisionReason\":\"Tenjin lookup\"}}'",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "WebSearch|WebFetch",
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "plugin:tenjin:router",
+            "tool": "hook",
+            "input": {
+              "kind": "shortfall",
+              "hook_event_name": "${hook_event_name}",
+              "session_id": "${session_id}",
+              "transcript_path": "${transcript_path}",
+              "cwd": "${cwd}",
+              "tool_name": "${tool_name}",
+              "tool_input": "${tool_input}",
+              "tool_use_id": "${tool_use_id}",
+              "agent_id": "${agent_id}",
+              "agent_type": "${agent_type}",
+              "tool_response": "${tool_response}",
+              "error": "${error}",
+              "is_interrupt": "${is_interrupt}"
+            },
+            "timeout": 15
+          }
+        ]
+      },
+      {
+        "matcher": "AskUserQuestion",
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "plugin:tenjin:router",
+            "tool": "hook",
+            "input": {
+              "kind": "answer",
+              "hook_event_name": "${hook_event_name}",
+              "session_id": "${session_id}",
+              "transcript_path": "${transcript_path}",
+              "cwd": "${cwd}",
+              "tool_name": "${tool_name}",
+              "tool_input": "${tool_input}",
+              "tool_use_id": "${tool_use_id}",
+              "agent_id": "${agent_id}",
+              "agent_type": "${agent_type}",
+              "tool_response": "${tool_response}"
+            },
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "WebSearch|WebFetch",
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "plugin:tenjin:router",
+            "tool": "hook",
+            "input": {
+              "kind": "shortfall",
+              "hook_event_name": "${hook_event_name}",
+              "session_id": "${session_id}",
+              "transcript_path": "${transcript_path}",
+              "cwd": "${cwd}",
+              "tool_name": "${tool_name}",
+              "tool_input": "${tool_input}",
+              "tool_use_id": "${tool_use_id}",
+              "agent_id": "${agent_id}",
+              "agent_type": "${agent_type}",
+              "tool_response": "${tool_response}",
+              "error": "${error}",
+              "is_interrupt": "${is_interrupt}"
+            },
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}

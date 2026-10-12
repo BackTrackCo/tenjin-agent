@@ -94,7 +94,9 @@ export interface McpServersState {
   check: RouterCheck;
 }
 
-export const RECONNECT_FIX = 'Reconnect x402 with /mcp, or start a new Claude Code session.';
+/** Worded for the session the person is in: a slash command there, never a terminal. */
+export const RECONNECT_FIX =
+  'Type /reload-plugins in this Claude Code session, or start a new session.';
 
 /** The `mcp server` check from a process list and the install time. Never a failure. */
 export function mcpServersState(

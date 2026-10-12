@@ -8,7 +8,9 @@ import {
   type HookDeps,
 } from './hooks';
 import type { Io } from '../lib/output';
+import { sessionServedByPlugin } from './alive';
 import type { HookKind } from './hook-tool';
+import { launchedByPlugin } from './names';
 
 /**
  * `tenjin hook prompt`, `native`, `shortfall`, `agent`, `ask` and `answer`. The harness writes
@@ -35,13 +37,19 @@ export type { HookKind };
 export interface HookCommandDeps extends Omit<HookDeps, 'route'> {
   /** Test seam for the harness event; production reads stdin. */
   readEvent?: () => Promise<string>;
+  /** Test seam for this process's environment. */
+  env?: NodeJS.ProcessEnv;
 }
 
 export async function runHookCommand(kind: HookKind, io: Io, deps: HookCommandDeps): Promise<void> {
   let response: unknown;
   try {
     const raw = await (deps.readEvent ?? readStdin)();
-    response = await runHookKind(kind, JSON.parse(raw), deps);
+    const event = JSON.parse(raw) as unknown;
+    // An entry an older settings install wrote stays silent in a session the
+    // plugin serves (see `alive.ts`). SHIM: goes on or after 2026-12-01.
+    if (!launchedByPlugin(deps.env) && (await sessionServedByPlugin(deps.dataDir, event))) return;
+    response = await runHookKind(kind, event, deps);
   } catch {
     response = null;
   }

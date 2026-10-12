@@ -1050,7 +1050,7 @@ describe('runUpdate: the post-swap refresh', () => {
     );
     const lines = result.humanLines?.join(' ') ?? '';
     expect(lines).not.toContain('pick it up immediately');
-    expect(lines).toContain('Refreshed the skills and hook scripts');
+    expect(lines).toContain('Refreshed the Claude Code plugin');
   });
 
   it('names a running tenjin mcp that predates the update, with the reconnect fix', async () => {
@@ -1067,7 +1067,9 @@ describe('runUpdate: the post-swap refresh', () => {
     );
     const lines = result.humanLines?.join('\n') ?? '';
     expect(lines).toContain('1 running `tenjin mcp` process started before this install');
-    expect(lines).toContain('Reconnect x402 with /mcp, or start a new Claude Code session.');
+    expect(lines).toContain(
+      'Type /reload-plugins in this Claude Code session, or start a new session.',
+    );
     expect(result.data).toMatchObject({ mcpServer: { status: 'warn' } });
   });
 

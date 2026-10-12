@@ -609,12 +609,15 @@ describe('the permissions doc matches the product this release ships', () => {
     return out;
   }
 
-  it('names the two rules install writes, and the router MCP server', async () => {
-    const { ALLOW_RULE, DENY_RULE, MCP_ADD_COMMAND } = await import('./router/install');
+  it('names the plugin install registers, its two permission answers and its server', async () => {
+    const { PLUGIN_HOOK_TOOL, PLUGIN_ID, REQUEST_TOOL } = await import('./router/names');
     expect(fencedRules(PERMISSIONS_DOC)).toEqual(['Bash(tenjin pay:*)']);
-    expect(PERMISSIONS_DOC).toContain(ALLOW_RULE);
-    expect(PERMISSIONS_DOC).toContain(DENY_RULE);
-    expect(PERMISSIONS_DOC).toContain(MCP_ADD_COMMAND);
+    expect(PERMISSIONS_DOC).toContain(`${REQUEST_TOOL}   allow`);
+    expect(PERMISSIONS_DOC).toContain(`${PLUGIN_HOOK_TOOL}      deny`);
+    expect(PERMISSIONS_DOC).toContain(`claude plugin install ${PLUGIN_ID}`);
+    expect(PERMISSIONS_DOC).toContain('`router` MCP server');
+    // The settings install's names appear only where its migration is described.
+    expect(PERMISSIONS_DOC).not.toContain('claude mcp add');
   });
 
   it('states the caps install sets, from the constants install writes', async () => {

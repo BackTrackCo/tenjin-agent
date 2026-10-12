@@ -661,13 +661,19 @@ describe('the shortfall hook', () => {
 });
 
 /**
- * THE TOOL NAME IS THE ONE THE HARNESS EXPOSES, derived from the name
- * `install` registers the server under, and only the call is rewritten.
+ * THE TOOL NAME IS THE ONE THE HARNESS EXPOSES: the plugin's tool in a process
+ * the plugin launched, the settings install's tool otherwise, and only the
+ * call is rewritten.
  */
 describe('the tool name in a hint', () => {
-  it('comes from the registered server name', () => {
-    expect(REQUEST_TOOL).toBe(`mcp__${MCP_SERVER_NAME}__request`);
-    expect(REQUEST_TOOL).toBe('mcp__x402__request');
+  it('comes from the plugin and server names, in a process the plugin launched', () => {
+    expect(REQUEST_TOOL).toBe(`mcp__plugin_tenjin_${MCP_SERVER_NAME}__request`);
+    expect(toolNamed('Call request({query: "q"})', { CLAUDE_PLUGIN_ROOT: '/plugin' })).toBe(
+      'Call mcp__plugin_tenjin_router__request({query: "q"})',
+    );
+    expect(toolNamed('Call request({query: "q"})', {})).toBe(
+      'Call mcp__x402__request({query: "q"})',
+    );
   });
 
   it('rewrites every bare call and nothing else', () => {

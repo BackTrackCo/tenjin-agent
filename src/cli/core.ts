@@ -12,16 +12,12 @@ export function registerCore(reg: Registration): void {
 
   leaf(SETUP, 'install', 'set up Tenjin for Claude Code and create a wallet')
     .description(
-      'Set up Claude Code to use Tenjin: seven hook entries, the `x402` MCP server and its permission rule, spend limits for each lookup, and a wallet if this machine has none.',
+      "Set up Claude Code to use Tenjin: a wallet if this machine has none, spend limits for each lookup, and the Claude Code plugin `tenjin` (its routing hooks and its `router` MCP server), registered through Claude Code's own `claude plugin` commands. A settings-based install from an earlier release is removed once the plugin has loaded.",
     )
-    .option('--project', "write into this project's .claude/settings.json instead of your home one")
+    .option('--project', 'register the plugin for this project only')
     .option('--no-wallet', 'create no wallet')
-    .option('--refresh', 're-register the hook entries this machine already has; add nothing')
+    .option('--refresh', 'bring the plugin this machine already has up to this version')
     .option('--yes', 'accept the default spend limits instead of asking')
-    .option(
-      '--status-line <mode>',
-      'the live footer: `own` registers it when you have no status line of your own, `compose` appends it to the one you do have, `skip` leaves the setting alone',
-    )
     .addHelpText(
       'after',
       `
@@ -38,15 +34,11 @@ Learn more:
       await runCommand('install', this, async (ctx) => {
         const o = this.opts();
         const { runRouterInstall } = await import('../router/install');
-        const { statusLineMode } = await import('../router/status-line-wiring');
         return runRouterInstall(
           {
             ...(o.project === true ? { project: true } : {}),
             ...(o.refresh === true ? { refresh: true } : {}),
             ...(o.yes === true ? { yes: true } : {}),
-            ...(o.statusLine !== undefined
-              ? { statusLine: statusLineMode(String(o.statusLine)) }
-              : {}),
             ...(o.wallet === false ? { noWallet: true } : {}),
           },
           ctx,
@@ -56,9 +48,9 @@ Learn more:
 
   leaf(SETUP, 'uninstall', 'remove what install wrote; the wallet is kept')
     .description(
-      'Remove the hook entries, the permission rule and the MCP registration `tenjin install` wrote. Your wallet, spend ledger and config are kept.',
+      'Remove the Tenjin plugin `tenjin install` registered, and any settings-based install an earlier release wrote. Your wallet, spend ledger and config are kept.',
     )
-    .option('--project', "remove from this project's .claude/settings.json")
+    .option('--project', 'remove the project-only install')
     .action(async function (this: Command) {
       await runCommand('uninstall', this, async (ctx) => {
         const o = this.opts();
@@ -69,9 +61,9 @@ Learn more:
 
   leaf(SETUP, 'doctor', 'check this machine can run a lookup')
     .description(
-      'Check everything a lookup needs: the Node floor, the hook entries and the permission rule, the status line, the MCP registration, the spend limits, the wallet, and the router endpoint answering its 402. It prints one line per check with a fix for each failure, and exits nonzero if a required one fails.',
+      "Check everything a lookup needs: the Node floor, Claude Code's version, the Tenjin plugin and its router server, any settings install an earlier release left, the spend limits, the wallet, and the router endpoint answering its 402. It prints one line per check with a fix for each failure, writes nothing, and exits nonzero if a required one fails.",
     )
-    .option('--project', "check this project's .claude/settings.json, as --project installed it")
+    .option('--project', 'check the project-only install, as --project registered it')
     .addHelpText(
       'after',
       `
@@ -90,7 +82,7 @@ Examples:
 
   leaf(SETUP, 'update', 'update tenjin-cli to the newest published version')
     .description(
-      'Update tenjin-cli to the newest version npm publishes on the latest tag. It then runs `install --refresh` on the new binary, so every profile on this machine gets the skills and hook scripts of the build that just landed.',
+      'Update tenjin-cli to the newest version npm publishes on the latest tag. It then runs `install --refresh` on the new binary, so the Claude Code plugin is registered at the build that just landed.',
     )
     .option('--check', 'report whether a newer version exists without installing it')
     .action(async function (this: Command) {

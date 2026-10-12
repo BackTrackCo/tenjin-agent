@@ -505,7 +505,7 @@ function manualFix(dataDir: string, home: string, invoking: string): string {
   const bare =
     resolve(dataDir) === resolve(defaultDataDir(home)) && resolve(dataDir) === resolve(invoking);
   const command = bare ? 'tenjin install' : `TENJIN_DATA_DIR=${dataDir} tenjin install`;
-  return `Run \`${command}\` to bring the skills and hook scripts up to this version.`;
+  return `Run \`${command}\` to bring the Claude Code plugin up to this version.`;
 }
 
 /**
@@ -557,18 +557,18 @@ function refreshLines(refresh: RefreshOutcome): string[] {
   if (refresh.failed.length === 0) {
     return [
       done.length > 1
-        ? `Refreshed the skills and hook scripts for ${done.length} profiles: ${done.join(', ')}.`
-        : `Refreshed the skills and hook scripts for ${done[0]}.`,
+        ? `Refreshed the Claude Code plugin for ${done.length} profiles: ${done.join(', ')}.`
+        : `Refreshed the Claude Code plugin for ${done[0]}.`,
     ];
   }
   const total = done.length + refresh.failed.length;
   const lines =
     done.length > 0
       ? [
-          `Refreshed the skills and hook scripts for ${done.length} of ${total} profiles: ${done.join(', ')}.`,
+          `Refreshed the Claude Code plugin for ${done.length} of ${total} profiles: ${done.join(', ')}.`,
         ]
       : [];
-  lines.push(`Could not refresh the skills and hook scripts for ${refresh.failed.length}:`);
+  lines.push(`Could not refresh the Claude Code plugin for ${refresh.failed.length}:`);
   lines.push(...refresh.failed.map((f) => `- ${f.dataDir}: ${f.reason} ${f.fix}`));
   return lines;
 }

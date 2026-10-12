@@ -33,6 +33,19 @@ if (process.argv.length === 3 && process.argv[2] === 'status-line') {
   process.exit(0);
 }
 
+// THE PLUGIN'S SessionStart LEG NEVER LOADS THE CLI EITHER. It runs before
+// every session starts, writes two small files and prints nothing, so it
+// takes the same shortcut. A flag falls through to the command tree.
+if (process.argv.length === 4 && process.argv[2] === 'hook' && process.argv[3] === 'alive') {
+  const [{ aliveMain }, { dataDir }, { default: pkg }] = await Promise.all([
+    import('./router/alive'),
+    import('./lib/paths'),
+    import('../package.json'),
+  ]);
+  await aliveMain({ dataDir: dataDir(process.env), version: pkg.version });
+  process.exit(0);
+}
+
 // After the status line, which sends no request: every other process from this
 // bin (the CLI, the hooks, `tenjin mcp`) honours HTTPS_PROXY and NO_PROXY.
 const { useEnvProxy } = await import('./lib/env-proxy');

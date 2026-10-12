@@ -110,6 +110,38 @@ KDF_KEYSTORE="$KDF_KEYSTORE" KDF_EXPECTED="$KDF_EXPECTED" node --input-type=modu
 }
 echo "pack-smoke: packed wallet-kdf-worker.mjs derives the expected key (ok)"
 
+# 1d) The Claude Code plugin `tenjin install` registers lives in the package, as
+# a directory marketplace Claude Code reads in place. A build that stopped
+# rendering it would leave install with nothing to register but the folder
+# fallback, with every source-tree test green. The manifest carries this
+# version, so the plugin Claude Code lists is the build that runs.
+HOSTS="./node_modules/tenjin-cli/dist/hosts/claude"
+for f in .claude-plugin/marketplace.json tenjin/.claude-plugin/plugin.json tenjin/.mcp.json tenjin/hooks/hooks.json; do
+  [ -f "$HOSTS/$f" ] || {
+    echo "pack-smoke: FAIL: dist/hosts/claude/$f missing from the installed package" >&2
+    exit 1
+  }
+done
+EXPECTED_VERSION="$EXPECTED_VERSION" HOSTS="$HOSTS" node -e '
+  const { readFileSync } = require("node:fs");
+  const manifest = JSON.parse(readFileSync(process.env.HOSTS + "/tenjin/.claude-plugin/plugin.json", "utf8"));
+  if (manifest.name !== "tenjin" || manifest.version !== process.env.EXPECTED_VERSION) {
+    console.error("plugin.json names " + manifest.name + "@" + manifest.version);
+    process.exit(1);
+  }
+' || {
+  echo "pack-smoke: FAIL: the packed plugin manifest is not tenjin@$EXPECTED_VERSION" >&2
+  exit 1
+}
+# Claude Code's own validator, where a runner has the binary.
+if command -v claude >/dev/null 2>&1; then
+  CLAUDE_CONFIG_DIR="$DATA_DIR/claude" claude plugin validate "$HOSTS" >/dev/null || {
+    echo "pack-smoke: FAIL: claude plugin validate rejected the packed marketplace" >&2
+    exit 1
+  }
+fi
+echo "pack-smoke: packed Claude Code plugin tenjin@$EXPECTED_VERSION (ok)"
+
 # 2) `tenjin config` exits 0 and prints a JSON envelope carrying schemaVersion.
 # JSON is validated by node (not jq — not guaranteed on a runner): a fixed script
 # reads the captured stdout on its own stdin and exits nonzero on a bad envelope.
