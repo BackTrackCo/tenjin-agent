@@ -32,6 +32,7 @@ import { unpaidNotice } from './spend-question';
 import { clearRouterMemo } from './router-memo';
 import { loadRawConfig } from '../lib/config';
 import { openLookupFooter, type LookupFooter } from './progress';
+import { saveInlineMedia } from './inline-media';
 import {
   appendPaidRecord,
   MAX_MEDIA_FILES,
@@ -643,25 +644,45 @@ async function payAndDeliver(
     // does this: a curated page read or search links whatever the page links,
     // on hosts the page picked. The answer carries no finer media kind, so the
     // category is the line. Best effort only.
-    const linked =
-      providerAtomic > 0n && binary === null && call.discovered
-        ? await saveMedia(
-            deps.ctx.dataDir,
-            call.capabilityId,
-            mediaUrlsIn(data.bodyText ?? '', MAX_MEDIA_FILES),
-            {
-              ...(deps.mediaTransport !== undefined ? { transport: deps.mediaTransport } : {}),
-              ...(deps.payDeps?.destination !== undefined
-                ? { destination: deps.payDeps.destination }
-                : {}),
+    const media = providerAtomic > 0n && binary === null && call.discovered;
+    // ONE CARRYING ITS FILES INLINE, as base64 in its JSON, has them saved
+    // the same way, each replaced by a note naming its file: megabytes of
+    // base64 are no use to the agent as text. The rewritten body is the one
+    // cut, saved and handed back below; on any failure it is the body as it
+    // came.
+    const inline =
+      media && data.bodyText !== undefined
+        ? await saveInlineMedia(data.bodyText, async (bytes, contentType) => {
+            const saved = await saveBinary(deps.ctx.dataDir, call.capabilityId, bytes, {
+              contentType,
               ...(deps.now !== undefined ? { now: deps.now } : {}),
-            },
-          )
-        : [];
-    const savedFiles = [...(binary?.savedTo !== undefined ? [binary.savedTo] : []), ...linked];
+            });
+            return saved.savedTo ?? null;
+          })
+        : null;
+    const bodyText = inline?.bodyText ?? data.bodyText;
+    const linked = media
+      ? await saveMedia(
+          deps.ctx.dataDir,
+          call.capabilityId,
+          mediaUrlsIn(bodyText ?? '', MAX_MEDIA_FILES - (inline?.savedFiles.length ?? 0)),
+          {
+            ...(deps.mediaTransport !== undefined ? { transport: deps.mediaTransport } : {}),
+            ...(deps.payDeps?.destination !== undefined
+              ? { destination: deps.payDeps.destination }
+              : {}),
+            ...(deps.now !== undefined ? { now: deps.now } : {}),
+          },
+        )
+      : [];
+    const savedFiles = [
+      ...(binary?.savedTo !== undefined ? [binary.savedTo] : []),
+      ...(inline?.savedFiles ?? []),
+      ...linked,
+    ];
     const cut =
-      binary === null && call.project !== undefined && data.bodyText !== undefined
-        ? await projected(deps.ctx.dataDir, call.project, data.bodyText)
+      binary === null && call.project !== undefined && bodyText !== undefined
+        ? await projected(deps.ctx.dataDir, call.project, bodyText)
         : null;
     if (providerAtomic > 0n) {
       await appendPaidRecord(
@@ -680,7 +701,7 @@ async function payAndDeliver(
       cost: costLines(providerAtomic),
       ...(data.settlementTxHash !== undefined ? { settlementTxHash: data.settlementTxHash } : {}),
       ...(call.note !== undefined ? { note: call.note } : {}),
-      result: binary ?? cut?.result ?? data.bodyText ?? '',
+      result: binary ?? cut?.result ?? bodyText ?? '',
       ...(cut !== null ? { fullResultPath: cut.fullResultPath } : {}),
       ...(savedFiles.length > 0 ? { savedFiles } : {}),
       providerContentUntrusted: true,

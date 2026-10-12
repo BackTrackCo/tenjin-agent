@@ -1306,6 +1306,48 @@ describe('a discovered service', () => {
     expect(result.envelope.result).toBe(JSON.stringify({ url: 'https://cdn.example.test/a.mp3' }));
   });
 
+  /** THE FILE INSIDE THE JSON: agent402's Veo answered with the video as
+   *  4.2 MB of base64, which reached the agent whole with nothing saved. */
+  it('saves a video returned inline as base64, and hands back a note naming the file', async () => {
+    await kept();
+    const video = new Uint8Array(64 * 1024).fill(0x2a);
+    video.set([0x00, 0x00, 0x00, 0x18, ...Buffer.from('ftypisom')]);
+    const b64 = Buffer.from(video).toString('base64');
+    const { fetchImpl } = net([
+      { url: SELLER, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge() } },
+      {
+        url: SELLER,
+        status: 200,
+        body: { data: [{ b64_json: b64, media_type: 'video/mp4', duration_seconds: 4 }] },
+      },
+    ]);
+    const result = await runRequestTool(
+      { id: '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d02', input: { text: 'a whoosh, as video' } },
+      deps(fetchImpl),
+    );
+    expect(result.envelope).toMatchObject({ status: 'fulfilled' });
+    const savedFiles = result.envelope.savedFiles as string[];
+    expect(savedFiles).toHaveLength(1);
+    expect(savedFiles[0]!.startsWith(join(dir, 'downloads'))).toBe(true);
+    expect(savedFiles[0]!.endsWith('.mp4')).toBe(true);
+    expect(Buffer.from(await readFile(savedFiles[0]!)).equals(Buffer.from(video))).toBe(true);
+    const shown = String(result.envelope.result);
+    expect(shown).not.toContain(b64.slice(0, 200));
+    expect(JSON.parse(shown)).toEqual({
+      data: [
+        {
+          b64_json: `[inline file saved to ${savedFiles[0]!} (video/mp4, ${video.byteLength} bytes)]`,
+          media_type: 'video/mp4',
+          duration_seconds: 4,
+        },
+      ],
+    });
+    const record = JSON.parse(
+      (await readFile(join(dir, 'paid', 'ledger.jsonl'), 'utf8')).trim(),
+    ) as Record<string, unknown>;
+    expect(record.savedFiles).toEqual(savedFiles);
+  });
+
   it.each([
     ['audio/mpeg', 'mp3'],
     ['audio/wav; codecs=1', 'wav'],

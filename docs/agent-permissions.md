@@ -116,7 +116,7 @@ To stop the router without removing anything, `tenjin config set router.enabled 
 ## What a paid lookup leaves on your machine
 
 - Every paid lookup is recorded in `~/.tenjin/paid/ledger.jsonl`: what was sent (masked), who was paid, how much, the settlement transaction, and any files saved.
-- Files a paid lookup returns, and media files a paid third-party service links to, are saved under `~/.tenjin/downloads/`.
+- Files a paid lookup returns, and media files a paid third-party service links to or returns inline as base64 in its JSON, are saved under `~/.tenjin/downloads/`. An inline file is replaced in the result by a note naming where it was saved.
 - When a tool names the fields it returns, your agent gets those fields and the provider's whole response is saved under `~/.tenjin/results/` for a day, at the path the result names.
 - When a seller never confirmed settlement, `tenjin payments reconcile` asks USDC on Base whether the payment was used once it has expired, and one that was never charged goes back to today's limit; the `request` tool does the same for up to three beside each lookup, without waiting for it.
 
