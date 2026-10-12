@@ -2876,6 +2876,7 @@ describe('a discovered service', () => {
     expect((first.calls[0] as { body: Record<string, unknown> }).body.accepts).toEqual([
       'discovered',
       'spec',
+      'choices',
     ]);
     const fs = await import('node:fs/promises');
     await fs.writeFile(
@@ -2891,6 +2892,7 @@ describe('a discovered service', () => {
     expect((second.calls[0] as { body: Record<string, unknown> }).body.accepts).toEqual([
       'discovered',
       'spec',
+      'choices',
       'bazaar',
     ]);
   });
