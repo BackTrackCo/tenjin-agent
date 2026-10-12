@@ -1,0 +1,9 @@
+---
+'tenjin-cli': patch
+---
+
+`tenjin install` now sets up Tenjin as a Claude Code plugin, `tenjin`, with no step left to the person: after the wallet and the spend question, it runs `claude plugin marketplace add` on the package's own `dist/hosts/claude` folder and `claude plugin install tenjin@tenjin`, finding `claude` on PATH or through `CLAUDE_CODE_EXECPATH`, and writes the plugin as a folder under the config dir's `skills/tenjin-router/` when neither works. The plugin carries the seven routing legs as `mcp_tool` hooks on its `router` MCP server, a `SessionStart` leg (`tenjin hook alive`), and two hooks that allow `mcp__plugin_tenjin_router__request` and deny the legs' own tool to the model, so install writes no hook entries, permission rules, status line or MCP registration of its own. Claude Code 2.1.287 or later is required; install and doctor say to run `claude update` on an older one. `CLAUDE_CONFIG_DIR` is honored by every read and write.
+
+A settings-based install from an earlier release keeps working until the plugin has loaded in a session on the machine, and is then removed by the next `tenjin install` or `tenjin update`, only in the exact shapes it wrote. `tenjin doctor` checks the plugin through `claude plugin list --json` and `claude mcp get plugin:tenjin:router`, and reports a pending migration. `tenjin uninstall` removes the plugin and its marketplace through Claude Code's commands. The `--status-line` flag is gone; `tenjin status-line` stays an opt-in command.
+
+Migration shims, removed on or after 2026-12-01: the `x402` request tool name for a process a settings install launched, the per-session silence of settings-install legs in a session the plugin serves, the old tool name in a custom agent's `disallowedTools:`, and the settings-install remover.
