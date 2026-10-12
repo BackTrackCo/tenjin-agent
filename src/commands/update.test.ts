@@ -10,7 +10,6 @@ import {
   type UpdateDeps,
   type UpdateSpawn,
   versionFreeEntry,
-  crossesFeeBoundary,
 } from './update';
 import { REFUSALS, resolveNpmCli } from '../lib/install-location';
 import { CliError } from '../lib/errors';
@@ -149,44 +148,8 @@ describe('runUpdate', () => {
       },
     });
     expect(result.humanLines?.join(' ')).toContain('0.1.0-alpha.6 -> 0.1.0-alpha.7');
-    // alpha.6 to alpha.7 sits wholly before the fee boundary.
+    // The install question names the routing fee; update stays silent about it.
     expect(result.humanLines?.join(' ')).not.toContain('Routing costs');
-  });
-
-  describe('routing fee line', () => {
-    async function updateLines(currentVersion: string, latest: string): Promise<string> {
-      const { ctx } = makeCtx();
-      const result = await runUpdate(
-        { check: false },
-        ctx,
-        await deps({
-          currentVersion,
-          fetchImpl: registry({ latest }).fetchImpl,
-          spawnImpl: spawnRecorder().impl,
-        }),
-      );
-      return result.humanLines?.join(' ') ?? '';
-    }
-
-    it('names the fee when the update crosses alpha.25', async () => {
-      const text = await updateLines('0.1.0-alpha.24', '0.1.0-alpha.26');
-      expect(text).toContain('Routing costs $0.003 a call, paid from deposits of up to');
-      expect(text).not.toContain('turns the fee on');
-    });
-
-    it('names the fee when the update lands exactly on alpha.25', async () => {
-      expect(await updateLines('0.1.0-alpha.24', '0.1.0-alpha.25')).toContain('Routing costs');
-    });
-
-    it('stays quiet when the install already names the fee', async () => {
-      expect(await updateLines('0.1.0-alpha.25', '0.1.0-alpha.26')).not.toContain('Routing costs');
-      expect(await updateLines('0.1.0-alpha.26', '0.1.0-alpha.27')).not.toContain('Routing costs');
-    });
-
-    it('stays quiet when current cannot be parsed', () => {
-      expect(crossesFeeBoundary('dev', '0.1.0-alpha.26')).toBe(false);
-      expect(crossesFeeBoundary('0.1.0-alpha.24', 'dev')).toBe(false);
-    });
   });
 
   // The live-registry regression this command has to survive: `alpha` sat on
