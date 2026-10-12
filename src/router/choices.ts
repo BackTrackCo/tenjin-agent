@@ -2,6 +2,8 @@ import { toMoney } from '../lib/money';
 import { policyCoversSet, type SpendPolicy } from '../lib/policy';
 import { policyFix } from '../lib/spend-gate';
 import { readSpendSummary, spentOf } from '../lib/spend-ledger';
+import { readUsdcBalanceWithFallback } from '../lib/usdc-balance';
+import { resolveWalletProvider } from '../lib/wallet';
 import { ALL_CHOICES, type Choices } from './decision';
 import { SILENT_FOOTER, type LookupFooter } from './progress';
 import {
@@ -66,7 +68,10 @@ export async function pickChoice(
       refused: fail(
         'needs_input',
         'No choices are kept on this machine for that id (they expired, or its line offered none), so nothing was sent or paid.',
-        { nextStep: 'Call request({query}) with the task for a fresh offer, then fill its line.' },
+        {
+          nextStep:
+            'Call request({query}) with the task for a fresh offer, then fill its line. If its line listed no choices, call request({id, input}) without `choice`.',
+        },
       ),
     };
   }
@@ -134,7 +139,9 @@ type StepResult = { key: string; label: string; id: string; status: unknown } & 
  *    `already_paid` and runs no second time.
  * 4. The claimed options, together, fit the spend policy: each under the
  *    per-call cap, the total inside the budget. If not, every claim is
- *    dropped and the answer is `needs_approval`, with nothing signed.
+ *    dropped and the answer is `needs_approval`, with nothing signed. The
+ *    wallet's balance covers the total too, or the set is refused the same
+ *    way, as a single payment is.
  * 5. Every claimed option pays at once, through the single-offer pay step.
  * 6. One result, one entry per option, in the set's order.
  */
@@ -145,7 +152,7 @@ export async function runChoiceSet(
   deps: RequestToolDeps,
   footer: LookupFooter,
   reportDeps: ReportDeps,
-  policy: SpendPolicy,
+  settings: { policy: SpendPolicy; rpcUrl: string },
 ): Promise<RequestToolResult> {
   const { dataDir } = deps.ctx;
   const { choices } = kept;
@@ -201,18 +208,40 @@ export async function runChoiceSet(
     else earlier.set(step.option.id, claim);
   }
   if (claimed.length === 0) {
+    // "Already ran" only when each one did; a claim this machine could not
+    // write, or a call still running, says so in its own words.
+    const allRan = [...earlier.values()].every(
+      (claim) => claim.state === 'paid' || claim.state === 'possibly_paid',
+    );
     return refuse(
       'needs_input',
-      'Every choice in this set already ran under its own id, so nothing was paid this time. Their results are in the earlier request result.',
+      allRan
+        ? 'Every choice in this set already ran under its own id, so nothing was paid this time. Their results are in the earlier request result.'
+        : steps
+            .map(
+              ({ option, prepared }) =>
+                `${option.label}: ${String(alreadyPaid(option.id, prepared.spec, earlier.get(option.id)!).envelope.reason)}`,
+            )
+            .join(' '),
       'For another run, send request({query}) for a new offer; each choice pays once.',
     );
   }
+  // Every claim is dropped by a refusal below: nothing was signed.
+  const release = async (): Promise<void> => {
+    for (const step of claimed) {
+      await settleSpecPayment(dataDir, step.option.id, { amountAtomic: 0n, signed: false });
+    }
+  };
+  const ceiling = claimed.reduce(
+    (sum, { prepared }) => sum + BigInt(prepared.spec.maxAmountAtomic),
+    0n,
+  );
 
   // ONE SPEND CHECK FOR THE WHOLE SET, against the same ledger and policy an
   // authorization reads, at each option's ceiling, before anything is signed.
   const ledger = await readSpendSummary(dataDir);
   const evaluation = policyCoversSet(
-    policy,
+    settings.policy,
     claimed.map(({ prepared }) => ({
       amountAtomic: BigInt(prepared.spec.maxAmountAtomic),
       creator: new URL(prepared.built.url).host,
@@ -220,17 +249,25 @@ export async function runChoiceSet(
     ledger === null ? 0n : spentOf(ledger),
   );
   if (evaluation.decision !== 'allow') {
-    for (const step of claimed) {
-      await settleSpecPayment(dataDir, step.option.id, { amountAtomic: 0n, signed: false });
-    }
-    const ceiling = claimed.reduce(
-      (sum, { prepared }) => sum + BigInt(prepared.spec.maxAmountAtomic),
-      0n,
-    );
+    await release();
     return refuse(
       'needs_approval',
       `Running ${claimed.length} choices costs up to $${toMoney(ceiling.toString()).usd}: ${evaluation.message} ${policyFix(evaluation.reason, 'this host')}`,
       'Report the command above to the user, or pick one choice; nothing was paid.',
+    );
+  }
+
+  // AND ONE BALANCE READ FOR IT. Each payment reads the balance against its
+  // own amount only, so side by side a wallet short of the total would sign
+  // every one and the last would fail on chain, counted as exposure and
+  // claimed as paid. A read that fails leaves each payment to its own read.
+  const balance = await walletBalance(deps, settings.rpcUrl);
+  if (balance !== null && balance < ceiling) {
+    await release();
+    return refuse(
+      'failed',
+      `Running ${claimed.length} choices costs up to $${toMoney(ceiling.toString()).usd}, and the wallet holds $${toMoney(balance.toString()).usd}. The wallet has insufficient USDC; no payment was signed. Fund this wallet on Base with \`tenjin wallet fund\` before paying.`,
+      'Tell the user, or pick one choice the wallet covers; nothing was paid.',
     );
   }
 
@@ -289,4 +326,19 @@ export async function runChoiceSet(
       providerContentUntrusted: true,
     },
   };
+}
+
+/** The paying wallet's USDC balance, read the way `runPay` reads it, or null
+ *  when there is no wallet or the read failed. */
+async function walletBalance(deps: RequestToolDeps, rpcUrl: string): Promise<bigint | null> {
+  try {
+    const provider = deps.provider ?? deps.payDeps?.provider ?? resolveWalletProvider(deps.ctx);
+    const { address } = await provider.describe();
+    const read = deps.payDeps?.readBalance ?? readUsdcBalanceWithFallback;
+    return await read(address, rpcUrl, {
+      timeoutMs: Math.max(1, Math.floor(deps.ctx.flags.timeout / 2)),
+    });
+  } catch {
+    return null;
+  }
 }

@@ -156,9 +156,10 @@ export async function runRequestTool(
   // A CHOICE NAMES AN OPTION OF THE SET KEPT FOR THE LINE'S ID, and from here
   // the call is that option's own offer, under its own id: its spec, its one
   // payment. `all` is every option, run below once the input is checked.
+  const choice = args.choice !== undefined && args.choice.length > 0 ? args.choice : undefined;
   let set: KeptChoices | undefined;
-  if (args.choice !== undefined) {
-    const picked = await pickChoice(deps.ctx.dataDir, offered, args.choice);
+  if (choice !== undefined) {
+    const picked = await pickChoice(deps.ctx.dataDir, offered, choice);
     if ('refused' in picked) return picked.refused;
     if ('all' in picked) set = picked.all;
     else id = picked.id;
@@ -245,7 +246,7 @@ export async function runRequestTool(
   // EVERY OPTION OF A SET, each its own offer, checked, claimed and paid
   // through the same steps as one, after one spend check for them all.
   if (set !== undefined && input !== undefined) {
-    return runChoiceSet(id!, set, input, deps, footer, decisionDeps, settings.policy);
+    return runChoiceSet(id!, set, input, deps, footer, decisionDeps, settings);
   }
 
   // A SPEC AND AN INPUT: the agent filled the spec's request itself, so it is

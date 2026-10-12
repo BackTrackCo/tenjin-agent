@@ -336,6 +336,25 @@ describe('running every choice', () => {
     expect(await claims()).toEqual([]);
   });
 
+  /** EACH PAYMENT READS THE BALANCE FOR ITS OWN AMOUNT, so side by side a
+   *  wallet short of the total would sign every one; the set reads it once,
+   *  for the total, before any is signed. */
+  it('signs nothing, and keeps no claim, when the wallet holds less than the set costs', async () => {
+    const auth = authorizer();
+    const { fetchImpl, calls } = sellers();
+    const short = deps(fetchImpl, auth);
+    const result = await runRequestTool(
+      { id: ID, choice: 'all', input: INPUT },
+      { ...short, payDeps: { ...short.payDeps, readBalance: async () => 150_000n } },
+    );
+    expect(result.envelope).toMatchObject({ status: 'failed', cost: ['provider price 0 USD'] });
+    expect(String(result.envelope.reason)).toContain('insufficient USDC; no payment was signed');
+    expect(String(result.envelope.reason)).toContain('$0.253');
+    expect(calls).toEqual([]);
+    expect(auth.authorize).not.toHaveBeenCalled();
+    expect(await claims()).toEqual([]);
+  });
+
   it('takes only the fields every choice shares, and sends nothing for any other', async () => {
     const { fetchImpl, calls } = sellers();
     const result = await runRequestTool(
