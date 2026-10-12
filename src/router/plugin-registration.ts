@@ -111,17 +111,22 @@ export async function registerPlugin(opts: RegisterOptions): Promise<PluginRegis
         };
       }
       fallbackReason = done.reason;
-      if (done.otherPlugin !== undefined) {
-        return {
-          method: 'none',
-          id: done.otherPlugin,
-          scope: opts.scope,
-          state: 'failed',
-          version: opts.version,
-          steps,
-          reason: `${done.reason}; ${done.otherPlugin} is already enabled, so no second copy was written`,
-        };
-      }
+    }
+    // NO SECOND COPY. A plugin Claude Code already has (an earlier install
+    // whose update just failed, or a `tenjin` from another marketplace) would
+    // load beside the folder, and every event would run both sets of legs and
+    // pay twice. It is left as it is, and the run reports the failure.
+    const existing = await existingCopy(opts.binary, opts.env, opts.home, opts.cwd);
+    if (existing !== null) {
+      return {
+        method: 'none',
+        id: existing,
+        scope: opts.scope,
+        state: 'failed',
+        version: opts.version,
+        steps,
+        reason: `${fallbackReason}; ${existing} is already in Claude Code and was left as it is, so no second copy was written`,
+      };
     }
   } else {
     fallbackReason = 'no claude binary on PATH or in CLAUDE_CODE_EXECPATH';
@@ -165,8 +170,7 @@ export async function registerPlugin(opts: RegisterOptions): Promise<PluginRegis
 }
 
 type CommandsOutcome =
-  | { ok: true; state: 'installed' | 'updated' | 'current' }
-  | { ok: false; reason: string; otherPlugin?: string };
+  { ok: true; state: 'installed' | 'updated' | 'current' } | { ok: false; reason: string };
 
 async function viaPluginCommands(
   binary: ClaudeBinary,
@@ -181,15 +185,27 @@ async function viaPluginCommands(
   const marketplaceScope = opts.scope === 'user' ? [] : scopeArgs;
 
   // A marketplace called `tenjin` that is not this package's is somebody
-  // else's, and `add` would repoint it: it is left alone.
+  // else's, and `add` would repoint it: it is left alone. So is every
+  // marketplace when the list cannot be read, because an unread list cannot
+  // prove there is no such marketplace to repoint.
   const known = await run(['plugin', 'marketplace', 'list', '--json']);
-  const existing = (jsonList(known.stdout) ?? []).find((m) => m.name === MARKETPLACE_NAME);
+  const listed = known.code === 0 ? jsonList(known.stdout) : null;
+  steps.push({
+    command: 'claude plugin marketplace list --json',
+    ok: listed !== null,
+    ...(listed === null ? { detail: commandDetail(known) } : {}),
+  });
+  if (listed === null) {
+    return {
+      ok: false,
+      reason: `claude plugin marketplace list could not be read (${commandDetail(known)}), so no marketplace was added or repointed`,
+    };
+  }
+  const existing = listed.find((m) => m.name === MARKETPLACE_NAME);
   if (existing !== undefined && !(await ownMarketplace(existing))) {
-    const other = await enabledTenjinPlugin(run);
     return {
       ok: false,
       reason: `a marketplace named ${MARKETPLACE_NAME} that this CLI did not add is already configured, so it was left as it is`,
-      ...(other !== null ? { otherPlugin: other } : {}),
     };
   }
 
@@ -221,13 +237,17 @@ async function step(
   const result = jsonResult(out.stdout);
   const ok =
     out.code === 0 && (result === null || result.outcome === undefined || result.outcome === 'ok');
-  const detail =
-    typeof result?.message === 'string'
-      ? result.message
-      : (out.stderr || out.stdout).trim().slice(0, 300) ||
-        (out.code === null ? 'the command could not be run' : `exit ${out.code}`);
+  const detail = commandDetail(out, result);
   steps.push({ command: `claude ${args.join(' ')}`, ok, ...(ok ? {} : { detail }) });
   return { ok, detail, result };
+}
+
+/** What a failed command said: its JSON message, else its output, else how it ended. */
+function commandDetail(out: ClaudeRun, result: Record<string, unknown> | null = null): string {
+  if (typeof result?.message === 'string') return result.message;
+  const text = (out.stderr || out.stdout).trim().slice(0, 300);
+  if (text.length > 0) return text;
+  return out.code === null ? 'the command could not be run' : `exit ${out.code}`;
 }
 
 /**
@@ -245,12 +265,27 @@ export async function ownMarketplace(row: Record<string, unknown>): Promise<bool
   return (await inspectPluginFolder(join(path, PLUGIN_DIR))) === 'ours';
 }
 
-async function enabledTenjinPlugin(
-  run: (args: string[]) => Promise<ClaudeRun>,
+/**
+ * A `tenjin` plugin Claude Code already holds that a folder would duplicate:
+ * any enabled `tenjin@<marketplace>`. The folder's own `tenjin@skills-dir` is
+ * not a duplicate, since writing the folder updates it in place. When the list
+ * cannot be read, Claude Code's own record of installed plugins answers.
+ */
+async function existingCopy(
+  binary: ClaudeBinary,
+  env: NodeJS.ProcessEnv,
+  home: string,
+  cwd: string,
 ): Promise<string | null> {
-  const listed = jsonList((await run(['plugin', 'list', '--json'])).stdout) ?? [];
+  const out = await runClaude(binary, ['plugin', 'list', '--json'], { env, cwd });
+  const listed = out.code === 0 ? jsonList(out.stdout) : null;
+  if (listed === null) return (await installedThroughCommands(env, home)) ? PLUGIN_ID : null;
   const row = listed.find(
-    (p) => typeof p.id === 'string' && p.id.startsWith(`${PLUGIN_NAME}@`) && p.enabled === true,
+    (p) =>
+      typeof p.id === 'string' &&
+      p.id.startsWith(`${PLUGIN_NAME}@`) &&
+      p.id !== SKILLS_DIR_PLUGIN_ID &&
+      p.enabled === true,
   );
   return typeof row?.id === 'string' ? row.id : null;
 }

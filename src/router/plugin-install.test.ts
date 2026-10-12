@@ -296,6 +296,89 @@ describe('tenjin install registers the plugin through Claude Code', () => {
     expect(await exists(join(cfg, 'skills', 'tenjin-router'))).toBe(false);
   });
 
+  it('writes no second copy when a refresh cannot update the plugin Claude Code already has', async () => {
+    await fake.respond('list', listed('tenjin@tenjin', '0.0.1'));
+    await fake.respond(
+      'install',
+      `${JSON.stringify({ command: 'install', outcome: 'ok', installedVersion: '0.0.1', availableVersion: pkg.version })}\n`,
+    );
+    await fake.respond(
+      'update',
+      '{"command":"update","outcome":"failed","message":"network down"}\n',
+      1,
+    );
+    const out = await runRouterInstall({ refresh: true }, ctx(), deps()).catch((e: unknown) => e);
+    expect(out).toBeInstanceOf(CliError);
+    expect((out as CliError).message).toContain('claude plugin update failed: network down');
+    expect((out as CliError).message).toContain('no second copy was written');
+    expect(await exists(join(cfg, 'skills', 'tenjin-router'))).toBe(false);
+  });
+
+  it('writes no second copy when the list cannot be read but Claude Code recorded the plugin', async () => {
+    await fake.respond(
+      'install',
+      '{"command":"install","outcome":"failed","message":"denied"}\n',
+      1,
+    );
+    await fake.respond('list', 'not json', 1);
+    await mkdir(join(cfg, 'plugins'), { recursive: true });
+    await writeFile(
+      join(cfg, 'plugins', 'installed_plugins.json'),
+      JSON.stringify({ version: 2, plugins: { 'tenjin@tenjin': [{ scope: 'user' }] } }),
+    );
+    const result = await runRouterInstall({}, ctx(), deps());
+    expect(pluginOf(result)).toMatchObject({
+      method: 'none',
+      id: 'tenjin@tenjin',
+      state: 'failed',
+    });
+    expect(await exists(join(cfg, 'skills', 'tenjin-router'))).toBe(false);
+  });
+
+  it('still refreshes its own folder when a command fails and only that folder is loaded', async () => {
+    await runRouterInstall({}, ctx(), deps({ env: env({ PATH: await emptyPath() }) }));
+    await fake.respond('list', listed('tenjin@skills-dir', '0.0.1'));
+    await fake.respond(
+      'mkt-add',
+      '{"command":"marketplace-add","outcome":"failed","message":"denied by policy"}\n',
+      1,
+    );
+    const result = await runRouterInstall({ refresh: true }, ctx(), deps());
+    expect(pluginOf(result)).toMatchObject({ method: 'skills-dir', state: 'written' });
+  });
+
+  it.each([
+    ['exits non-zero', 'boom', 1],
+    ['prints something that is not a list', 'Checking marketplaces...\n{"oops":true}', 0],
+  ] as const)(
+    'adds and repoints no marketplace when the marketplace list %s',
+    async (_label, out, code) => {
+      await fake.respond('mkt-list', out, code);
+      const result = await runRouterInstall({}, ctx(), deps());
+      const calls = await fake.calls();
+      expect(calls.some((c) => c.startsWith('plugin marketplace add'))).toBe(false);
+      expect(calls.some((c) => c.startsWith('plugin install'))).toBe(false);
+      expect(String(pluginOf(result).fallbackReason)).toContain(
+        'claude plugin marketplace list could not be read',
+      );
+      // Nothing of Claude Code's holds a Tenjin plugin, so the folder is the registration.
+      expect(pluginOf(result)).toMatchObject({ method: 'skills-dir', state: 'written' });
+    },
+  );
+
+  it('changes nothing when the marketplace list is unreadable and the plugin is already enabled', async () => {
+    await fake.respond('mkt-list', 'garbage', 0);
+    await fake.respond('list', listed('tenjin@tenjin', pkg.version));
+    const result = await runRouterInstall({}, ctx(), deps());
+    expect((await fake.calls()).some((c) => c.startsWith('plugin marketplace add'))).toBe(false);
+    expect(pluginOf(result)).toMatchObject({
+      method: 'none',
+      id: 'tenjin@tenjin',
+      state: 'failed',
+    });
+    expect(await exists(join(cfg, 'skills', 'tenjin-router'))).toBe(false);
+  });
+
   it('repoints its own marketplace after the package moved', async () => {
     await fake.respond(
       'mkt-list',

@@ -459,7 +459,7 @@ function claudeCodeData(claude: ClaudeCodeState): Record<string, unknown> {
  */
 function registrationFix(plugin: PluginRegistration): string {
   if (plugin.id !== null && plugin.method === 'none') {
-    return `Leave ${plugin.id} as it is; it already serves this machine.`;
+    return `${plugin.id} keeps serving this machine at the version Claude Code has; run \`tenjin install\` again to retry.`;
   }
   if (
     plugin.path !== undefined &&
