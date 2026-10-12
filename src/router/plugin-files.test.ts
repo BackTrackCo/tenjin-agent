@@ -88,8 +88,12 @@ describe("the plugin's hooks", () => {
   });
 
   it('deny the hook tool to the model and allow the request tool, as static answers', () => {
+    // No stdin: the command never reads its event, and on Linux a child that
+    // exits before Node writes the event fails the write with EPIPE.
     const answer = (cmd: string) =>
-      JSON.parse(execFileSync('sh', ['-c', cmd], { input: '{}', encoding: 'utf8' })) as {
+      JSON.parse(
+        execFileSync('sh', ['-c', cmd], { stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8' }),
+      ) as {
         hookSpecificOutput: Record<string, string>;
       };
     expect(answer(DENY_HOOK_COMMAND).hookSpecificOutput).toEqual({

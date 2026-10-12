@@ -1,3 +1,4 @@
+import { PRODUCTION_ORIGIN } from '../lib/production-origin';
 import { HOOK_TOOL, hookToolInput, type HookKind } from './hook-tool';
 import {
   MARKETPLACE_NAME,
@@ -16,8 +17,9 @@ import {
  * run. The checked-in `hosts/claude/` templates are pinned to this render by a
  * test, so the two cannot drift.
  *
- * NOTHING HERE IMPORTS MORE THAN THE NAMES: `tsup.config.ts` loads this module
- * to render the shipped files, and its import graph is the build's.
+ * NOTHING HERE IMPORTS MORE THAN THE NAMES AND THE PRODUCTION ORIGIN:
+ * `tsup.config.ts` loads this module to render the shipped files, and its
+ * import graph is the build's.
  */
 
 /**
@@ -185,8 +187,8 @@ export function renderPluginManifest(version?: string): Record<string, unknown> 
     name: PLUGIN_NAME,
     ...(version !== undefined ? { version } : {}),
     description: DESCRIPTION,
-    author: { name: 'Tenjin', url: 'https://tenjin.sh' },
-    homepage: 'https://tenjin.sh/agents',
+    author: { name: 'Tenjin', url: PRODUCTION_ORIGIN },
+    homepage: `${PRODUCTION_ORIGIN}/agents`,
     repository: 'https://github.com/BackTrackCo/tenjin-agent',
     metadata: { [OWNER_MARKER]: version ?? UNBUILT },
   };
@@ -199,7 +201,7 @@ export const PLUGIN_DIR = PLUGIN_NAME;
 export function renderMarketplace(version?: string): Record<string, unknown> {
   return {
     name: MARKETPLACE_NAME,
-    owner: { name: 'Tenjin', url: 'https://tenjin.sh' },
+    owner: { name: 'Tenjin', url: PRODUCTION_ORIGIN },
     description: "Tenjin's tool router for Claude Code, installed by `tenjin install`.",
     ...(version !== undefined ? { metadata: { version } } : {}),
     plugins: [
