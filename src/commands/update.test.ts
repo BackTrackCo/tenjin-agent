@@ -148,8 +148,8 @@ describe('runUpdate', () => {
       },
     });
     expect(result.humanLines?.join(' ')).toContain('0.1.0-alpha.6 -> 0.1.0-alpha.7');
-    // An install whose limits were approved before the fee existed hears of it here.
-    expect(result.humanLines?.join(' ')).toContain('Routing costs $0.003 a call');
+    // The install question names the routing fee; update stays silent about it.
+    expect(result.humanLines?.join(' ')).not.toContain('Routing costs');
   });
 
   // The live-registry regression this command has to survive: `alpha` sat on
