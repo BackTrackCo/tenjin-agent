@@ -736,6 +736,8 @@ async function payAndDeliver(
       diagnosis?: Record<string, unknown>;
       status?: number;
       providerError?: string;
+      /** The seller's reason for not settling, from its payment-response header. */
+      settlementError?: string;
       authorization?: SignedAuthorization;
       /** The live 402's terms, on a REGISTRY_MISMATCH. */
       live?: { amount?: string };
@@ -807,6 +809,11 @@ async function payAndDeliver(
         ...(typeof detail.status === 'number' ? { providerStatus: detail.status } : {}),
         ...(typeof detail.providerError === 'string'
           ? { providerError: detail.providerError }
+          : {}),
+        // THE SELLER SAID IT DID NOT SETTLE, and why: what an empty `{}` body
+        // beside a rejected payment leaves out.
+        ...(typeof detail.settlementError === 'string'
+          ? { settlementError: detail.settlementError }
           : {}),
         // WHAT WAS SENT, on a failure too: the agent cannot match a 400 to a
         // field it cannot see.
@@ -1166,6 +1173,9 @@ interface FailExtras {
   providerStatus?: number;
   /** The start of that answer's body, bounded and redacted. Provider content. */
   providerError?: string;
+  /** Why the seller says it did not settle a signed payment, bounded and
+   *  redacted. Provider content. */
+  settlementError?: string;
   /** The backend's own stable error code, from a typed non-2xx body. */
   errorCode?: string;
   /** What stopped a non-execute decision, in the backend's own terms. */
@@ -1229,6 +1239,7 @@ function fail(status: FailStatus, reason: string, extras: FailExtras = {}): Requ
       ...(extras.diagnosis !== undefined ? { diagnosis: extras.diagnosis } : {}),
       ...(extras.providerStatus !== undefined ? { providerStatus: extras.providerStatus } : {}),
       ...(extras.providerError !== undefined ? { providerError: extras.providerError } : {}),
+      ...(extras.settlementError !== undefined ? { settlementError: extras.settlementError } : {}),
       ...(extras.request !== undefined ? { request: extras.request } : {}),
       ...(extras.parameters !== undefined ? { parameters: extras.parameters } : {}),
       providerContentUntrusted: true,

@@ -532,6 +532,35 @@ describe('a paid call the provider refused', () => {
     expect(Array.from(snippet)).toHaveLength(501);
     expect(snippet.endsWith('…')).toBe(true);
   });
+
+  it("hands the agent the seller's reason when it says it did not settle", async () => {
+    const said = 'Facilitator settle failed (402): A valid payment method is required.';
+    const settle = Buffer.from(
+      JSON.stringify({ success: false, errorReason: said, transaction: '' }),
+    ).toString('base64');
+    const result = await refused({
+      status: 402,
+      body: {},
+      headers: { 'PAYMENT-RESPONSE': settle },
+    });
+    expect(result.envelope).toMatchObject({
+      status: 'failed',
+      providerStatus: 402,
+      providerError: '{}',
+      settlementError: said,
+      settlement: 'unknown',
+      cost: ['provider price 0.01 USD'],
+    });
+    expect(String(result.envelope.reason)).toContain(
+      'The endpoint did not settle the payment: Facilitator settle failed (402)',
+    );
+    expect(String(result.envelope.reason)).toContain('Use a different service');
+  });
+
+  it('carries no settlementError when the seller sent no payment-response header', async () => {
+    const result = await refused({ body: { success: false, error: REASON } });
+    expect(result.envelope).not.toHaveProperty('settlementError');
+  });
 });
 
 describe('what the tool refuses to execute', () => {
