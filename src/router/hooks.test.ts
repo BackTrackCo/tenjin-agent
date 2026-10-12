@@ -2763,7 +2763,7 @@ describe('a discovered service', () => {
     });
     expect((calls[0] as { body: unknown }).body).toMatchObject({
       sessionId: 'sess-1',
-      accepts: ['discovered', 'spec'],
+      accepts: ['discovered', 'spec', 'choices'],
     });
     // The footer names the seller, and the id binds this session for `request`.
     expect(await renderProgress(dir, 'sess-1')).toContain('BlockRun');
@@ -3168,7 +3168,7 @@ describe('a question to the user', () => {
         'You pick a track: send me a licensed track.',
     });
     expect((body.packet.current as { text: string }).text).toContain('I can get API keys');
-    expect(body).toMatchObject({ sessionId: 'sess-1', accepts: ['discovered', 'spec'] });
+    expect(body).toMatchObject({ sessionId: 'sess-1', accepts: ['discovered', 'spec', 'choices'] });
   });
 
   it('denies the question once on an offer, then lets it be asked', async () => {

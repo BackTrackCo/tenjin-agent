@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "sessionId": "0bb65d2b-5158-492f-8963-33428f4808f1",
+  "accepts": ["discovered", "spec", "choices"],
+  "packet": {
+    "current": {
+      "role": "user",
+      "text": "generate an image of a lighthouse at dusk"
+    },
+    "history": [],
+    "literalUrls": [],
+    "historyStatus": "ok"
+  }
+}
