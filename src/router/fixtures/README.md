@@ -99,11 +99,12 @@ the hook holds, the field's schema `default`, or a number's or boolean's value
 from the `example`.
 `request({id})` shows the whole spec, and so does an input that misses it,
 locally and with nothing paid. The client builds and pays the call
-itself and, once the call ran or money left, reports `{schemaVersion, id,
-status, httpStatus?, ms?}`, with the provider's HTTP status whenever it is
-known. The first report for a live id marks its row executed;
-a repeat or a report after expiry is a 204 that changes nothing. No text is
-stored.
+itself and reports how every call for an id ended, `{schemaVersion, id,
+status, reason?, httpStatus?, ms?}`, with the provider's HTTP status whenever
+it is known. A call stopped before anything was signed is `unpaid` with a
+`reason` (`input`, `terms`, `provider`, `unreachable` or `wallet`), which never
+marks the row. The first report of a call that ran, for a live id, marks its
+row executed; any other is a 204 that changes nothing. No text is stored.
 
 A tool call with a `query` and no `id` runs the hook's gate over the query (a bare URL takes the page rule)
 and answers `{action: "spec", id, spec, hint}`: the picked
@@ -137,6 +138,7 @@ answered `execute` as its id would be.
 | `wire-hook-execute-spec.json`              | hook answer for a client that accepts `spec`: the call with the held search, the Exa spec |
 | `wire-hook-discovered-spec.json`           | the same for a list service: the call with its skeleton, the spec rides along             |
 | `wire-outcome-request.json`                | the outcome report a client sends after running a spec                                    |
+| `wire-outcome-unpaid.json`                 | a call stopped before anything was signed, with its `reason`                              |
 | `wire-tool-request-spec.json`              | the tool call from a spec client: a query, no id                                          |
 | `wire-lookup-spec.json`                    | tool answer for it: Wolfram's spec under a fresh id and the skeleton line, no `input`     |
 | `wire-lookup-spec-skeleton.json`           | tool answer for a spec with more to fill (Apollo): the skeleton line, no `input`          |

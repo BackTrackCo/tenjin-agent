@@ -22,6 +22,7 @@ import {
   reportSpecOutcome,
   requestDecision,
   type SpecOutcome,
+  type UnpaidReason,
   type DecisionContract,
   type DecisionDiagnostics,
   type OfferSpec,
@@ -434,14 +435,30 @@ async function runSpec(
   footer: LookupFooter,
   decisionDeps: { ctx: CommandContext; baseUrl: string; fetchImpl?: typeof fetch },
 ): Promise<RequestToolResult> {
+  const startedAt = Date.now();
+  // EVERY CALL FROM A SPEC IS REPORTED, refused or run, so the server can tell
+  // an offer never called from one called and stopped. A refusal before
+  // payment is `unpaid` with its reason, which the server never counts as
+  // the offer taken. Fire and forget: it never holds or changes the result.
+  const report = (outcome: Omit<SpecOutcome, 'id' | 'ms'>): void => {
+    void reportSpecOutcome(
+      { id, ...outcome, ms: Date.now() - startedAt },
+      {
+        ctx: decisionDeps.ctx,
+        baseUrl: decisionDeps.baseUrl,
+        ...(decisionDeps.fetchImpl !== undefined ? { fetchImpl: decisionDeps.fetchImpl } : {}),
+      },
+    );
+  };
   const merged = mergedInput(spec, input);
   const sentInput = maskDeep(merged) as Record<string, unknown>;
   // A WRONG GUESS COSTS ONE MORE CALL, NOT A PAYMENT: every problem, then the
   // whole spec (each input with its description and allowed values, the
   // required fields inside a nested object, the example, what comes back), so
-  // the next call can be right. Local, with no server call and nothing sent
-  // or paid.
+  // the next call can be right. Local, with nothing sent to the provider or
+  // paid.
   const refuse = async (problem: string): Promise<RequestToolResult> => {
+    report({ status: 'unpaid', reason: 'input' });
     await footer.done('needs_input');
     const refused = fail('needs_input', `The input does not fit ${spec.provider}: ${problem}.`, {
       nextStep: `Fix the input from the spec above and call request({id: ${JSON.stringify(id)}, input: {...}}) again; nothing was sent or paid.`,
@@ -453,6 +470,7 @@ async function runSpec(
   // A SCHEMA THIS BUILD CANNOT COMPILE CHECKS NOTHING, so the call is not
   // paid: an input nobody checked is a paid guess, and no change to it helps.
   if (problems === undefined) {
+    report({ status: 'unpaid', reason: 'terms' });
     await footer.done('failed');
     return fail(
       'failed',
@@ -473,17 +491,18 @@ async function runSpec(
     ...(spec.resultSchema !== undefined ? { resultSchema: spec.resultSchema } : {}),
   });
   if (refusal !== null) {
+    report({ status: 'unpaid', reason: 'terms' });
     await footer.done(refusal.status);
     return fail(refusal.status, refusal.reason, { parameters: sentInput });
   }
   // ONE PAYMENT PER OFFER, claimed before anything is signed: a retry of this
-  // id, or a second call racing it, pays nothing.
+  // id, or a second call racing it, pays nothing. A repeat is not an outcome,
+  // so it is not reported.
   const earlier = await claimSpecPayment(deps.ctx.dataDir, id);
   if (earlier !== null) {
     await footer.done('needs_input');
     return alreadyPaid(id, spec, earlier);
   }
-  const startedAt = Date.now();
   const { result, outcome, left } = await payAndDeliver(
     {
       capabilityId: spec.capabilityId,
@@ -511,21 +530,12 @@ async function runSpec(
   // The claim survives anything that may have signed: only a call that
   // signed nothing frees the id for a fixed input.
   await settleSpecPayment(deps.ctx.dataDir, id, left);
-  // REPORTED ONLY WHEN THE CALL RAN OR MONEY LEFT: a refusal before payment
-  // (the spend policy, the spec's terms, the provider's own 4xx) took nothing
-  // from the offer, and the server would count it as the offer taken.
-  const ran =
-    outcome.status === 'fulfilled' || outcome.status === 'unverified' || left.amountAtomic > 0n;
-  if (ran) {
-    void reportSpecOutcome(
-      { id, ...outcome, ms: Date.now() - startedAt },
-      {
-        ctx: decisionDeps.ctx,
-        baseUrl: decisionDeps.baseUrl,
-        ...(decisionDeps.fetchImpl !== undefined ? { fetchImpl: decisionDeps.fetchImpl } : {}),
-      },
-    );
-  }
+  // A refusal before payment (the spend policy, the spec's terms, the
+  // provider's own 4xx) arrives as `unpaid` or `needs_approval`, neither of
+  // which the server counts as the offer taken; a call that ran, or may have
+  // moved money, keeps its own status. Null is a failure this build cannot
+  // place, which says nothing rather than guess.
+  if (outcome !== null) report(outcome);
   return result;
 }
 
@@ -558,7 +568,8 @@ interface ProviderCall {
  * PAY THE PROVIDER AND DELIVER WHAT CAME BACK: `runPay` under the caller's
  * terms, the binary or media result saved, the ledger written, and the
  * envelope the host reads, with what was sent on every outcome. `outcome` is
- * the short form the server's report takes.
+ * the short form the server's report takes, null for a failure
+ * {@link failureOutcome} cannot place.
  */
 async function payAndDeliver(
   call: ProviderCall,
@@ -566,7 +577,7 @@ async function payAndDeliver(
   footer: LookupFooter,
 ): Promise<{
   result: RequestToolResult;
-  outcome: Omit<SpecOutcome, 'id' | 'ms'>;
+  outcome: Omit<SpecOutcome, 'id' | 'ms'> | null;
   /** What left this machine for the call, whatever came back. `signed`: a
    *  payment may have been signed, even where the amount is unknown. */
   left: { amountAtomic: bigint; txHash?: string; signed: boolean };
@@ -775,12 +786,17 @@ async function payAndDeliver(
         }),
       );
     }
+    const signed = signing.mayHaveSigned();
+    const outcome = failureOutcome(err, { mayHaveMoved: leftAtomic > 0n || signed, rejectedInput });
     return {
-      left: { amountAtomic: leftAtomic, signed: signing.mayHaveSigned() },
-      outcome: {
-        status,
-        ...(typeof detail.status === 'number' ? { httpStatus: detail.status } : {}),
-      },
+      left: { amountAtomic: leftAtomic, signed },
+      outcome:
+        outcome === null
+          ? null
+          : {
+              ...outcome,
+              ...(typeof detail.status === 'number' ? { httpStatus: detail.status } : {}),
+            },
       result: fail(status, reason, {
         providerAtomic: leftAtomic,
         ...(detail.settlement !== undefined ? { settlement: detail.settlement } : {}),
@@ -861,6 +877,63 @@ function watchSigning(inner: SpendAuthorizer): {
     },
     mayHaveSigned: () => committed || (reserved && !released),
   };
+}
+
+/**
+ * WHAT THE SERVER IS TOLD ABOUT A CALL THAT THREW, from the error alone.
+ * Money that may have moved is a call that ran, whatever stopped it: `failed`,
+ * never `unpaid`. The spend policy keeps its own `needs_approval`. Anything
+ * else stopped before a signature, and the reason says which side stopped it:
+ * the agent's input, the deal (the live 402 against the spec, or a request
+ * this build will not send), the provider's answer, the network, or the
+ * wallet. Null for a failure none of those describe, such as a bug here.
+ */
+export function failureOutcome(
+  err: unknown,
+  facts: {
+    /** An amount left, or the spend gate saw a payment that may have. */
+    mayHaveMoved: boolean;
+    /** The provider refused an input the agent built, before any payment. */
+    rejectedInput: boolean;
+  },
+): { status: 'failed' | 'needs_approval' } | { status: 'unpaid'; reason: UnpaidReason } | null {
+  if (facts.mayHaveMoved) return { status: 'failed' };
+  if (!(err instanceof CliError)) return null;
+  if (err.code === 'POLICY_REFUSED') return { status: 'needs_approval' };
+  const unpaid = (reason: UnpaidReason) => ({ status: 'unpaid' as const, reason });
+  if (facts.rejectedInput) return unpaid('input');
+  const detail = (err.details ?? {}) as { reason?: unknown; walletUnavailable?: unknown };
+  if (
+    detail.walletUnavailable === true ||
+    detail.reason === 'insufficient_funds' ||
+    detail.reason === 'balance_unavailable'
+  ) {
+    return unpaid('wallet');
+  }
+  switch (err.code) {
+    // REGISTRY_MISMATCH: the live 402 is not the spec's deal, including a
+    // varying price over its ceiling. PAYMENT_FAILED before a signature: no
+    // entry this wallet can pay, or a price or deal that changed on the
+    // re-check. USAGE and REFUSED: a request this build will not send.
+    case 'REGISTRY_MISMATCH':
+    case 'PAYMENT_FAILED':
+    case 'REFUSED':
+    case 'USAGE':
+      return unpaid('terms');
+    // A transport failure or a timeout: no answer came back.
+    case 'NETWORK_ERROR':
+      return unpaid('unreachable');
+    // AN ANSWER THAT WAS NOT A USABLE 402. API_UNREACHABLE from the provider
+    // leg always carries one (another status, or a redirect this build will
+    // not follow); a transport failure is NETWORK_ERROR. The others: a
+    // challenge this build cannot read, or a free body that missed its rule.
+    case 'API_UNREACHABLE':
+    case 'CONTRACT_MISMATCH':
+    case 'CHALLENGE_TOO_LARGE':
+      return unpaid('provider');
+    default:
+      return null;
+  }
 }
 
 /** One ledger line for a paid call; the settlement is known only with a tx. */

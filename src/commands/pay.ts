@@ -291,8 +291,7 @@ async function executePay(
     ctx,
     deps.provider !== undefined ? { provider: deps.provider } : {},
   );
-  await describeWallet(provider); // WALLET_MISSING with its own fix if none exists
-  const signer = await provider.getSigner();
+  const signer = await openWallet(provider);
   openedSigner.current = signer;
 
   // The standard sign-in-with-x extension, same sequence as `buy`: when the 402
@@ -968,6 +967,32 @@ export function settlementTx(res: Pick<HttpResponse, 'header'>): string | undefi
     return typeof tx === 'string' && /^0x[0-9a-fA-F]{64}$/.test(tx) ? tx : undefined;
   } catch {
     return undefined;
+  }
+}
+
+/**
+ * THE WALLET, OPENED, and a refusal from it marked as the wallet's
+ * (`walletUnavailable`): a missing wallet, one with no passphrase in a process
+ * that cannot prompt, or a key that will not decrypt. The locked wallet's
+ * `USAGE` reads the same as a refused destination's otherwise, and a caller
+ * reporting why nothing was paid has to tell the two apart. The code, message
+ * and fix stay the wallet's own.
+ */
+async function openWallet(provider: WalletProvider): Promise<TenjinSigner> {
+  try {
+    await describeWallet(provider); // WALLET_MISSING with its own fix if none exists
+    return await provider.getSigner();
+  } catch (err) {
+    if (!(err instanceof CliError)) throw err;
+    throw new CliError(err.code, err.message, {
+      exitCode: err.exitCode,
+      ...(err.fix !== undefined ? { fix: err.fix } : {}),
+      details: {
+        ...(typeof err.details === 'object' && err.details !== null ? err.details : {}),
+        walletUnavailable: true,
+      },
+      cause: err,
+    });
   }
 }
 
