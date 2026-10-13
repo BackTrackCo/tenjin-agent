@@ -604,14 +604,16 @@ export function buildTenjinMcpServer(opts: BuildMcpOptions = {}): McpServer {
   server.registerTool(
     'tenjin_fund',
     {
-      title: 'Mint a card-funding checkout link',
+      title: 'Get a funding checkout link',
       description:
-        'Mint a Coinbase Onramp checkout link that card-funds THIS wallet (the server refuses any ' +
-        'other destination). Minting moves no money: funds move only when the HUMAN opens the link ' +
-        'and completes payment on pay.coinbase.com, so always hand the returned checkoutUrl to the ' +
-        'user and never treat minting as funding. The link is single-use, expires in ~5 minutes, ' +
-        'works only from this machine’s network, and completing it requires a Coinbase ' +
-        'account. Confirm arrival afterwards with tenjin_wallet action:balance.',
+        'Returns the checkout link for the caller’s region, to fund THIS wallet (the server refuses ' +
+        'any other destination). In the US it is a Tenjin page that takes Apple Pay or Google Pay ' +
+        'with no Coinbase account (the link’s token sits after the #, so keep the whole link). ' +
+        'Elsewhere it is a Coinbase-hosted checkout, which needs a Coinbase account and works only ' +
+        'from this machine’s network. Getting the link moves no money: funds move only when the ' +
+        'HUMAN opens it and pays, so always hand the returned checkoutUrl to the user and never ' +
+        'treat it as funding. The link is short-lived (minutes). Confirm arrival afterwards with ' +
+        'tenjin_wallet action:balance.',
       inputSchema: fundInput,
       annotations: { readOnlyHint: false, openWorldHint: true },
     },
