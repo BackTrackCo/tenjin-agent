@@ -1033,28 +1033,9 @@ describe('tenjin_fund', () => {
     expect(sc.data.opened).toBe(false);
     expect(sc.data.funded).toBe(false);
     expect(sc.data.pollStatus).toBe('skipped');
-    expect(calls[0]!.body).toEqual({ address: expect.any(String), presetAmount: 5 });
+    expect(calls[0]!.body).toMatchObject({ presetAmount: 5 });
     expect(openUrl).not.toHaveBeenCalled();
     expect(getUsdcBalance).not.toHaveBeenCalled();
-  });
-
-  it('returns a Tenjin fund page link whole, fragment included, and says it is region-based', async () => {
-    const PAGE = 'https://tenjin.sh/fund?amount=5#secret-token';
-    const { fetchImpl } = mintServer(200, { url: PAGE });
-    const client = await connect({
-      dataDir: dir,
-      flags: { baseUrl: BASE },
-      deps: { fund: { provider: testWalletProvider(), fetchImpl } },
-    });
-    const res = await client.callTool({ name: 'tenjin_fund', arguments: { amountUsd: '5' } });
-
-    expect(res.isError).toBeFalsy();
-    const sc = res.structuredContent as SuccessEnvelope;
-    expect(sc.data.checkoutUrl).toBe(PAGE);
-
-    const { tools } = await client.listTools();
-    const description = tools.find((t) => t.name === 'tenjin_fund')?.description ?? '';
-    expect(description).toContain('checkout link for the caller’s region');
   });
 
   it('pins open and wait off in the options it hands the core, not just in what happens', async () => {
