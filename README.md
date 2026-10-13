@@ -47,7 +47,7 @@ Install Tenjin from tenjin.sh
 
 Your agent installs it, asks you about spend limits in the session, and helps you fund the wallet.
 
-Or in a terminal (Node.js 24 or newer):
+Or in a terminal (Node.js 22 or newer):
 
 ```bash
 npm i -g tenjin-cli

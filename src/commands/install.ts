@@ -4,8 +4,6 @@ import { fileURLToPath } from 'node:url';
 import { dirname, isAbsolute, join } from 'node:path';
 import { homedir } from 'node:os';
 import { z } from 'zod';
-import { styleText } from 'node:util';
-import { Stream } from 'node:stream';
 import { CliError } from '../lib/errors';
 import { hasCode } from '../lib/errno';
 import { ownsAnyLock, releaseOwnedLocks } from '../lib/lock';
@@ -62,7 +60,7 @@ import { healWiredSkills } from '../lib/skill-heal';
 import type { HealOutcome } from '../lib/skill-heal';
 import type { HooksResult } from '../lib/harness-hooks';
 import { intro as clackIntro, selectMany, selectOne } from '../lib/clack';
-import { sanitizeForTerminal } from '../lib/output';
+import { paint, sanitizeForTerminal } from '../lib/output';
 import type { Io } from '../lib/output';
 import type { CommandContext, CommandResult } from '../context';
 
@@ -1666,11 +1664,6 @@ async function assertSkillsLanded(plans: HarnessPlan[], dryRun: boolean): Promis
 }
 
 // --- Human rendering -------------------------------------------------------------
-
-function paint(io: Io, format: Parameters<typeof styleText>[0], text: string): string {
-  if (io.stdout instanceof Stream) return styleText(format, text, { stream: io.stdout });
-  return styleText(format, text);
-}
 
 // --- Skills source guard ---------------------------------------------------------
 

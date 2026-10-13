@@ -1,6 +1,7 @@
+import { WriteStream } from 'node:tty';
 import { describe, it, expect } from 'vitest';
 import { emitFailure, emitNotice, emitSuccess, normalizeError } from './output';
-import { sanitizeForTerminal } from './output';
+import { colorCapable, sanitizeForTerminal } from './output';
 import { CliError } from './errors';
 import { SCHEMA_VERSION } from '../schemas';
 import type { Io } from './output';
@@ -357,5 +358,50 @@ describe('sanitizeForTerminal', () => {
     expect(sanitizeForTerminal(persian)).toBe(persian);
     const cjk = '\u65e5\u672c\u8a9e\u200b\u30c6\u30ad\u30b9\u30c8';
     expect(sanitizeForTerminal(cjk)).toBe(cjk);
+  });
+});
+
+describe('colorCapable', () => {
+  const tty = (depth: (env: NodeJS.ProcessEnv) => number) =>
+    Object.create(WriteStream.prototype, {
+      isTTY: { value: true },
+      getColorDepth: { value: depth },
+    }) as WriteStream;
+  const sink = captureIo(true).io.stdout;
+
+  it('colors a TTY with more than 16 colors and passes it the env', () => {
+    const seen: NodeJS.ProcessEnv[] = [];
+    const env = { TERM: 'xterm-256color' };
+    expect(
+      colorCapable(
+        tty((e) => (seen.push(e), 8)),
+        env,
+      ),
+    ).toBe(true);
+    expect(seen).toEqual([env]);
+  });
+
+  it('keeps a no-color TTY plain', () => {
+    expect(
+      colorCapable(
+        tty(() => 1),
+        { NO_COLOR: '1' },
+      ),
+    ).toBe(false);
+  });
+
+  it('keeps a sink that is no TTY plain, which styleText before Node 22.13 did not', () => {
+    expect(colorCapable(sink, {})).toBe(false);
+  });
+
+  it('lets FORCE_COLOR decide when it is set', () => {
+    expect(colorCapable(sink, { FORCE_COLOR: '1' })).toBe(true);
+    expect(colorCapable(sink, { FORCE_COLOR: '' })).toBe(true);
+    expect(
+      colorCapable(
+        tty(() => 8),
+        { FORCE_COLOR: '0' },
+      ),
+    ).toBe(false);
   });
 });

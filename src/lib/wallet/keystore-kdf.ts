@@ -24,7 +24,7 @@ export async function deriveKeystoreKey(
     throw new Error('Keystore derivation timeout must be between 1 and 120000 milliseconds.');
   if (options.signal?.aborted) throw derivationError('AbortError');
 
-  // Source tests run on the same Node 24 floor as the CLI (native type stripping).
+  // Source tests run the .ts worker through native type stripping (unflagged from Node 22.18).
   // Every bundled entry and code-split chunk is adjacent to the worker in dist.
   const url = new URL(
     import.meta.url.endsWith('.ts') ? './keystore-kdf-worker.ts' : './wallet-kdf-worker.mjs',

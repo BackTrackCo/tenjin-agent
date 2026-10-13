@@ -1,5 +1,5 @@
+import { WriteStream } from 'node:tty';
 import { styleText } from 'node:util';
-import { Stream } from 'node:stream';
 import { CliError } from './errors';
 import type { StdinInput } from './stdin';
 import { SCHEMA_VERSION } from '../schemas';
@@ -324,14 +324,26 @@ function writeLines(stream: NodeJS.WritableStream, lines: string[]): void {
   if (lines.length > 0) stream.write(`${lines.join('\n')}\n`);
 }
 
+export type StyleFormat = Parameters<typeof styleText>[0];
+
 /**
- * Color a human line for stdout (the human surface now). styleText emits ANSI only
- * when the target stream is color-capable (a real TTY with color depth) and honors
- * NO_COLOR/FORCE_COLOR natively. The `stream` option is passed only when stdout is
- * a genuine Stream; a test/redirected sink is not one, so it falls back to the
- * default capability check and comes out plain.
+ * Does `stream` take ANSI color? Node's own rule (`shouldColorize`): FORCE_COLOR
+ * wins when set, otherwise a TTY whose color depth is above 2 (which reads
+ * NO_COLOR, NODE_DISABLE_COLORS and TERM). Decided here because styleText only
+ * checks the stream from Node 22.13 and colors unconditionally before it.
  */
-export function paint(io: Io, format: Parameters<typeof styleText>[0], text: string): string {
-  if (io.stdout instanceof Stream) return styleText(format, text, { stream: io.stdout });
-  return styleText(format, text);
+export function colorCapable(stream: unknown, env: NodeJS.ProcessEnv = process.env): boolean {
+  const force = env.FORCE_COLOR;
+  if (force !== undefined) return ['', '1', 'true', '2', '3'].includes(force);
+  return stream instanceof WriteStream && stream.isTTY && stream.getColorDepth(env) > 2;
+}
+
+/** `text` in `format` when `stream` takes color, else plain. */
+export function style(format: StyleFormat, text: string, stream: unknown = process.stdout): string {
+  return colorCapable(stream) ? styleText(format, text, { validateStream: false }) : text;
+}
+
+/** Color a human line for stdout. A test or redirected sink is no TTY, so it comes out plain. */
+export function paint(io: Io, format: StyleFormat, text: string): string {
+  return style(format, text, io.stdout);
 }
