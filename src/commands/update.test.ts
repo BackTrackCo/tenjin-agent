@@ -13,7 +13,7 @@ import {
 } from './update';
 import { REFUSALS, resolveNpmCli } from '../lib/install-location';
 import { CliError } from '../lib/errors';
-import { buildFailureEnvelope } from '../lib/output';
+import { buildFailureEnvelope, buildSuccessEnvelope } from '../lib/output';
 import type { CommandContext, GlobalFlags } from '../context';
 
 let dir: string;
@@ -139,7 +139,7 @@ describe('runUpdate', () => {
       latest: '0.1.0-alpha.7',
       updateAvailable: true,
       updated: true,
-      refresh: { profiles: [dir], failed: [] },
+      refresh: { profiles: [dir], failed: [], notices: [], settingsInstallPending: false },
       mcpServer: {
         name: 'mcp server',
         status: 'ok',
@@ -1071,6 +1071,49 @@ describe('runUpdate: the post-swap refresh', () => {
       'Type /reload-plugins in this Claude Code session, or start a new session.',
     );
     expect(result.data).toMatchObject({ mcpServer: { status: 'warn' } });
+  });
+
+  /**
+   * A REFRESH THAT SUCCEEDED CAN STILL HAVE SOMETHING TO SAY: a plugin left for
+   * a newer Claude Code, a status line the migration took out. The child puts
+   * it in `data.notices` and update prints it, since it shows nothing else of a
+   * successful child. A settings install still here turns the stale-server fix
+   * into "start a new session", because /reload-plugins would run both.
+   */
+  it("prints the refresh's notices and asks for a new session while a settings install stays", async () => {
+    const { ctx } = makeCtx();
+    const child = `${JSON.stringify(
+      buildSuccessEnvelope('install', {
+        refresh: true,
+        migration: { state: 'pending' },
+        notices: [
+          'Removed the Tenjin status line (`tenjin status-line`) with the earlier settings setup; the plugin sets none.',
+        ],
+      }),
+      null,
+      2,
+    )}\n`;
+    const result = await runUpdate(
+      { check: false },
+      ctx,
+      await deps({
+        spawnImpl: scriptedSpawn([], [undefined, child]).impl,
+        refreshCommand: ENTRY,
+        listMcpProcesses: async () => [{ pid: 9044, startedAt: 1 }],
+        installedAt: async () => 2,
+      }),
+    );
+    const lines = result.humanLines ?? [];
+    expect(lines).toContain(
+      'Removed the Tenjin status line (`tenjin status-line`) with the earlier settings setup; the plugin sets none.',
+    );
+    const text = lines.join('\n');
+    expect(text).toContain('Start a new Claude Code session');
+    expect(text).not.toContain('/reload-plugins in this');
+    expect(result.data).toMatchObject({
+      refresh: { settingsInstallPending: true },
+      mcpServer: { fix: expect.stringContaining('Start a new Claude Code session') },
+    });
   });
 
   it('reports every profile as unrefreshed when there is no entry to re-exec', async () => {

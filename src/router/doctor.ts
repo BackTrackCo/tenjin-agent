@@ -34,7 +34,7 @@ import {
   unpaid,
   usd,
 } from './fee';
-import { pluginProof, RELOAD_STEP, settingsInstallPaths } from './install';
+import { loadStep, pluginProof, settingsInstallPaths } from './install';
 import { inspectLegacyInstall, type LegacyInstall } from './legacy-install';
 import { routerSettings, type RouterSettings } from './settings';
 import { PLUGIN_ID, PLUGIN_SERVER, REQUEST_TOOL } from './names';
@@ -120,7 +120,7 @@ export async function runRouterDoctor(
     checks.push(await migrationCheck(legacy, claude, ctx.dataDir, env, cwd));
   }
   checks.push(routingCheck(router));
-  checks.push((await readMcpServers(deps)).check);
+  checks.push((await readMcpServers(deps, { settingsInstallPending: legacy.present })).check);
   const rawConfig = await loadRawConfig(ctx.dataDir);
   const unanswered =
     rawConfig.maxAutoSpend === undefined ? { limits: shownLimits(rawConfig) } : null;
@@ -294,7 +294,9 @@ async function pluginCheck(
           status: 'warn',
           required: false,
           detail: `${detail}; the settings install of an earlier release still routes here`,
-          fix: `Run \`tenjin install${c.scope === 'local' ? ' --project' : ''}\` to move this machine to the plugin.`,
+          fix: claude.meetsFloor
+            ? `Run \`tenjin install${c.scope === 'local' ? ' --project' : ''}\` to move this machine to the plugin.`
+            : `Run \`claude update\`, then \`tenjin install${c.scope === 'local' ? ' --project' : ''}\` to move this machine to the plugin.`,
         }
       : {
           name,
@@ -327,7 +329,7 @@ async function pluginCheck(
           status: 'fail',
           required: true,
           detail: `${listing.id} is installed but disabled, so no lookup is routed`,
-          fix: `Run \`claude plugin enable ${listing.id}\`, then ${RELOAD_STEP}.`,
+          fix: `Run \`claude plugin enable ${listing.id}\`, then ${loadStep(c.legacy.present)}.`,
         },
       };
     }
@@ -372,7 +374,7 @@ async function pluginCheck(
               status: 'warn',
               required: false,
               detail: `the plugin folder is at ${folder.path} and has not loaded in a session yet`,
-              fix: `To load it, ${RELOAD_STEP}.`,
+              fix: `To load it, ${loadStep(c.legacy.present)}.`,
             }
           : {
               name,
@@ -487,7 +489,9 @@ async function migrationCheck(
         status: 'warn',
         required: false,
         detail: `${found}, kept until the plugin loads: ${proof.reason}${lookalikes}`,
-        fix: `To load the plugin, ${RELOAD_STEP}; the next \`tenjin install\` or \`tenjin update\` then removes the old entries.`,
+        fix: claude.meetsFloor
+          ? `To load the plugin, ${loadStep(true)}; the next \`tenjin install\` or \`tenjin update\` then removes the old entries.`
+          : 'Run `claude update`, then `tenjin install`: until then the old entries keep routing.',
       };
 }
 

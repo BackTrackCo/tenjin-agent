@@ -54,9 +54,10 @@ export interface PluginRegistration {
   scope: PluginScope;
   /**
    * `installed` (new), `updated` (the version moved), `current` (already this
-   * build), `written` (the folder), or `failed` (nothing registered).
+   * build), `written` (the folder), `deferred` (left for a newer Claude Code,
+   * with a settings install still routing), or `failed` (nothing registered).
    */
-  state: 'installed' | 'updated' | 'current' | 'written' | 'failed';
+  state: 'installed' | 'updated' | 'current' | 'written' | 'deferred' | 'failed';
   /** The marketplace folder or the plugin folder. */
   path?: string;
   version: string;

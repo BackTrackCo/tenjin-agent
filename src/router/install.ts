@@ -30,6 +30,7 @@ import {
   type LegacyRemoval,
 } from './legacy-install';
 import { PLUGIN_ID } from './names';
+import { CLAUDE_CODE_FLOOR } from './claude-cli';
 import {
   folderState,
   readPluginListing,
@@ -38,12 +39,7 @@ import {
   type PluginScope,
 } from './plugin-registration';
 import { probeRouter, type RouterCheck } from './reachability';
-import {
-  readMcpServers,
-  RECONNECT_FIX,
-  type InstalledAt,
-  type ListMcpProcesses,
-} from './mcp-processes';
+import { readMcpServers, type InstalledAt, type ListMcpProcesses } from './mcp-processes';
 import {
   FEE_APPROVAL,
   limitsUsd,
@@ -87,6 +83,17 @@ export const DISCLOSURE: readonly string[] = [
 /** What the person does after a successful install, in the session they are in. */
 export const RELOAD_STEP =
   'type /reload-plugins in this Claude Code session, or start a new session, so Tenjin loads';
+/**
+ * The same step while a settings install is still here: only a new session.
+ * `/reload-plugins` would load the plugin beside the pre-upgrade `x402` server
+ * that session is still running, and every event would route twice.
+ */
+export const NEW_SESSION_STEP = 'start a new Claude Code session so Tenjin loads';
+
+/** The step that loads the plugin, given whether a settings install is still here. */
+export function loadStep(settingsInstallPresent: boolean): string {
+  return settingsInstallPresent ? NEW_SESSION_STEP : RELOAD_STEP;
+}
 
 export interface RouterInstallArgs {
   /**
@@ -330,15 +337,23 @@ export async function runRouterInstall(
         ]
       : [];
   const removedSkills = await removeRetiredSkills(home, project ? cwd : undefined);
-  const plugin = await registerPlugin({
-    binary: claude.binary,
-    scope,
-    version: pkg.version,
-    env,
-    home,
-    cwd,
-    ...(deps.hostsDir !== undefined ? { hostsDir: deps.hostsDir } : {}),
-  });
+  // BELOW THE FLOOR, A WORKING SETTINGS INSTALL WINS. The plugin's routing
+  // legs need Claude Code 2.1.287, but its `alive` leg is a command that runs
+  // on any version and would silence the settings install in every session,
+  // leaving the machine unrouted. So nothing is registered until `claude
+  // update`, and the settings install keeps routing.
+  const plugin: PluginRegistration =
+    !claude.meetsFloor && legacy.present
+      ? deferredRegistration(scope, claude)
+      : await registerPlugin({
+          binary: claude.binary,
+          scope,
+          version: pkg.version,
+          env,
+          home,
+          cwd,
+          ...(deps.hostsDir !== undefined ? { hostsDir: deps.hostsDir } : {}),
+        });
   const migration =
     legacy.unreadable !== undefined && !legacy.present
       ? { state: 'blocked' as const, settingsPath: paths.settingsPath, reason: legacy.unreadable }
@@ -350,12 +365,14 @@ export async function runRouterInstall(
         });
   // A `tenjin mcp` that started before this install runs the old build until
   // its session reloads it. Named, never killed.
-  const servers = await readMcpServers(deps);
+  const pending = settingsInstallStays(migration);
+  const servers = await readMcpServers(deps, { settingsInstallPending: pending });
   const serverLines =
     servers.stale > 0
-      ? [paint(ctx.io, 'yellow', `! ${servers.check.detail}. ${RECONNECT_FIX}`)]
+      ? [paint(ctx.io, 'yellow', `! ${servers.check.detail}. ${servers.check.fix ?? ''}`.trim())]
       : [];
   const claudeCode = claudeCodeData(claude);
+  const notices = refreshNotices(plugin, claude, migration);
   if (args.refresh === true) {
     // A refresh that could not register the plugin is not a converged install,
     // unless the settings install it would replace still routes here.
@@ -371,6 +388,7 @@ export async function runRouterInstall(
         plugin,
         claudeCode,
         migration,
+        notices,
         refresh: true,
         spend,
         removedSkills,
@@ -409,7 +427,7 @@ export async function runRouterInstall(
     plugin,
     claudeCode,
     migration,
-    next: nextStep(plugin, claude, wallet),
+    next: nextStep(plugin, claude, wallet, migration),
     spend: {
       ...spend,
       effective: effectiveLimits(effective.policy),
@@ -475,13 +493,75 @@ function nextStep(
   plugin: PluginRegistration,
   claude: ClaudeCodeState,
   wallet: WalletOutcome,
+  migration: Migration,
 ): string {
   if (plugin.state === 'failed') return registrationFix(plugin);
   const steps: string[] = [];
-  if (!claude.meetsFloor) steps.push('run `claude update`');
   if (wallet.status === 'created') steps.push('fund the wallet with `tenjin wallet fund`');
-  steps.push(RELOAD_STEP);
+  if (plugin.state === 'deferred') {
+    steps.unshift('run `claude update`');
+    steps.push(
+      'run `tenjin install` again; until then the earlier Tenjin setup keeps routing as before',
+    );
+    return steps.join(', then ');
+  }
+  if (!claude.meetsFloor) steps.unshift('run `claude update`');
+  steps.push(loadStep(settingsInstallStays(migration)));
   return steps.join(', then ');
+}
+
+/** Is a settings install still on this machine after this run? */
+function settingsInstallStays(migration: Migration): boolean {
+  return migration.state === 'pending' || migration.state === 'blocked';
+}
+
+function deferredRegistration(scope: PluginScope, claude: ClaudeCodeState): PluginRegistration {
+  return {
+    method: 'none',
+    id: null,
+    scope,
+    state: 'deferred',
+    version: pkg.version,
+    steps: [],
+    reason: `Claude Code ${claude.version ?? ''} is older than ${CLAUDE_CODE_FLOOR}, which the plugin needs, so it was not registered and the earlier settings setup keeps routing`,
+  };
+}
+
+/** The status line a migration took out, in words, or nothing. */
+function statusLineNotice(migration: Migration): string | null {
+  const status = migration.removed?.statusLine;
+  if (status === 'removed') {
+    return 'Removed the Tenjin status line (`tenjin status-line`) with the earlier settings setup; the plugin sets none. To keep it, set `tenjin status-line` as your Claude Code status line command.';
+  }
+  if (status === 'restored') {
+    return 'Took the Tenjin footer out of your status line and put your own command back; the plugin sets none.';
+  }
+  return null;
+}
+
+/**
+ * WHAT `tenjin update` PRINTS FROM THIS REFRESH. Update captures this run's
+ * output and shows only its failures, so anything a person must know about a
+ * refresh that succeeded rides here, as sentences the parent prints verbatim.
+ */
+function refreshNotices(
+  plugin: PluginRegistration,
+  claude: ClaudeCodeState,
+  migration: Migration,
+): string[] {
+  const out: string[] = [];
+  if (plugin.state === 'deferred') {
+    out.push(
+      `Claude Code ${claude.version ?? ''} is older than ${CLAUDE_CODE_FLOOR}, so the Tenjin plugin was not registered and the earlier settings setup keeps routing. Run \`claude update\`, then \`tenjin install\`.`,
+    );
+  } else if (plugin.state !== 'failed' && settingsInstallStays(migration)) {
+    out.push(
+      'Start a new Claude Code session so the Tenjin plugin loads; the earlier settings setup is removed by the next `tenjin update` or `tenjin install` after that.',
+    );
+  }
+  const status = statusLineNotice(migration);
+  if (status !== null) out.push(status);
+  return out;
 }
 
 /** What turns automatic payment on after an install that left it at zero. */
@@ -653,6 +733,7 @@ function walletLines(ctx: CommandContext, ok: string, w: WalletOutcome): string[
 /** The plugin line: what Claude Code will list, or why nothing is registered. */
 function pluginLines(ctx: CommandContext, plugin: PluginRegistration): string[] {
   const warn = (text: string) => paint(ctx.io, 'yellow', `! ${text}`);
+  if (plugin.state === 'deferred') return [warn(`${plugin.reason ?? ''}`)];
   if (plugin.state === 'failed') {
     return [warn(`The Tenjin plugin was not registered: ${plugin.reason ?? 'unknown reason'}`)];
   }
@@ -677,8 +758,10 @@ function migrationLines(ctx: CommandContext, migration: Migration): string[] {
   }
   if (migration.state === 'done') {
     const removed = migration.removed;
+    const status = statusLineNotice(migration);
     return [
-      `  Removed the settings install from ${migration.settingsPath}: the plugin replaces it`,
+      `  Removed the earlier settings setup from ${migration.settingsPath}: the plugin carries its hooks, permissions and server`,
+      ...(status !== null ? [`  ${status}`] : []),
       ...(removed?.warnings ?? []).map((w) => warn(w)),
     ];
   }
@@ -741,11 +824,12 @@ function lines(
           warn(`The router did not answer: ${s.router.detail}`),
           ...(s.router.fix !== undefined ? [`  ${s.router.fix}`] : []),
         ];
-  const failed = s.plugin.state === 'failed';
   return [
-    failed
+    s.plugin.state === 'failed'
       ? warn('Tenjin could not finish setting up Claude Code')
-      : `${ok} Tenjin is set up for Claude Code (plugin ${s.plugin.id ?? PLUGIN_ID})`,
+      : s.plugin.state === 'deferred'
+        ? warn('Tenjin keeps its earlier Claude Code setup until Claude Code is updated')
+        : `${ok} Tenjin is set up for Claude Code (plugin ${s.plugin.id ?? PLUGIN_ID})`,
     ...walletLines(ctx, ok, s.wallet),
     ...spend,
     ...pluginLines(ctx, s.plugin),
@@ -753,7 +837,7 @@ function lines(
     ...migrationLines(ctx, s.migration),
     ...router,
     '',
-    `Next: ${nextStep(s.plugin, s.claude, s.wallet)}`,
+    `Next: ${nextStep(s.plugin, s.claude, s.wallet, s.migration)}`,
   ];
 }
 
@@ -772,6 +856,8 @@ function refreshLines(
   const head =
     plugin.state === 'failed'
       ? paint(ctx.io, 'yellow', '! Tenjin is updated, but its plugin was not registered')
-      : `${paint(ctx.io, 'green', '✓')} Tenjin is up to date (plugin ${plugin.id ?? PLUGIN_ID})`;
+      : plugin.state === 'deferred'
+        ? paint(ctx.io, 'yellow', '! Tenjin is updated; its plugin waits for a newer Claude Code')
+        : `${paint(ctx.io, 'green', '✓')} Tenjin is up to date (plugin ${plugin.id ?? PLUGIN_ID})`;
   return [head, ...issues];
 }

@@ -471,6 +471,89 @@ describe('the settings install of an earlier release', () => {
     expect(String(migrationOf(result).reason)).toContain('older than the plugin needs');
   });
 
+  /**
+   * BELOW THE FLOOR THE SETTINGS INSTALL KEEPS ROUTING. Registering the plugin
+   * there would load its `alive` command leg, which silences the settings
+   * install in every session, while its `mcp_tool` legs need 2.1.287: the
+   * machine would route nothing. So nothing is registered until `claude update`.
+   */
+  it('registers nothing below the floor while a settings install routes, and says so', async () => {
+    await writeLegacy();
+    await fake.respond('version', '2.1.200 (Claude Code)\n');
+    const before = await readFile(join(cfg, 'settings.json'), 'utf8');
+    const install = await runRouterInstall({}, ctx(), deps());
+    const refresh = await runRouterInstall({ refresh: true }, ctx(), deps());
+    expect(await fake.calls()).toEqual(['--version', '--version']);
+    for (const result of [install, refresh]) {
+      expect(pluginOf(result)).toMatchObject({ method: 'none', state: 'deferred' });
+      expect(migrationOf(result)).toMatchObject({ state: 'pending' });
+    }
+    expect(await readFile(join(cfg, 'settings.json'), 'utf8')).toBe(before);
+    expect(await exists(join(cfg, 'skills', 'tenjin-router'))).toBe(false);
+    expect((install.data as { next: string }).next).toBe(
+      'run `claude update`, then run `tenjin install` again; until then the earlier Tenjin setup keeps routing as before',
+    );
+    expect(install.humanLines![0]).toBe(
+      '! Tenjin keeps its earlier Claude Code setup until Claude Code is updated',
+    );
+    // `tenjin update` prints the refresh's notices, since it shows nothing else of a success.
+    expect((refresh.data as { notices: string[] }).notices).toEqual([
+      'Claude Code 2.1.200 is older than 2.1.287, so the Tenjin plugin was not registered and the earlier settings setup keeps routing. Run `claude update`, then `tenjin install`.',
+    ]);
+  });
+
+  /**
+   * /reload-plugins RECONNECTS PLUGIN SERVERS ONLY. In the session the upgrade
+   * ran in, the settings install's `x402` server still runs the old build,
+   * which knows no marker, so loading the plugin beside it would route every
+   * event twice. While a settings install stays, the step is a new session.
+   */
+  it('asks for a new session, never /reload-plugins, while a settings install stays', async () => {
+    await writeLegacy();
+    const stale = {
+      listMcpProcesses: async () => [{ pid: 9044, startedAt: 1 }],
+      installedAt: async () => 2,
+    };
+    const install = await runRouterInstall({}, ctx(), deps(stale));
+    const next = (install.data as { next: string }).next;
+    expect(next).toBe('start a new Claude Code session so Tenjin loads');
+    const text = [next, ...(install.humanLines ?? [])].join('\n');
+    expect(text).not.toContain('/reload-plugins in this');
+    expect(install.data).toMatchObject({
+      mcpServer: {
+        status: 'warn',
+        fix: 'Start a new Claude Code session: the earlier Tenjin setup is still in this one, and /reload-plugins would run both.',
+      },
+    });
+    const refresh = await runRouterInstall({ refresh: true }, ctx(), deps(stale));
+    expect((refresh.data as { notices: string[] }).notices).toEqual([
+      'Start a new Claude Code session so the Tenjin plugin loads; the earlier settings setup is removed by the next `tenjin update` or `tenjin install` after that.',
+    ]);
+    // Once it is gone, /reload-plugins is safe again.
+    await fake.respond('list', listed('tenjin@tenjin', pkg.version));
+    await runAliveHook({ session_id: 's' }, { dataDir: data, version: pkg.version });
+    await runRouterInstall({ refresh: true }, ctx(), deps());
+    const after = await runRouterInstall({}, ctx(), deps(stale));
+    expect((after.data as { next: string }).next).toContain('/reload-plugins');
+  });
+
+  it('names the Tenjin status line it removes, in install and in the notices update prints', async () => {
+    await writeLegacy();
+    await fake.respond('list', listed('tenjin@tenjin', pkg.version));
+    await runAliveHook({ session_id: 's' }, { dataDir: data, version: pkg.version });
+    const line =
+      'Removed the Tenjin status line (`tenjin status-line`) with the earlier settings setup; the plugin sets none. To keep it, set `tenjin status-line` as your Claude Code status line command.';
+    const refresh = await runRouterInstall({ refresh: true }, ctx(), deps());
+    expect(migrationOf(refresh)).toMatchObject({
+      state: 'done',
+      removed: { statusLine: 'removed' },
+    });
+    expect((refresh.data as { notices: string[] }).notices).toEqual([line]);
+    await writeLegacy();
+    const install = await runRouterInstall({}, ctx(), deps());
+    expect(install.humanLines).toContain(`  ${line}`);
+  });
+
   it('is what `tenjin update` moves to the plugin: a refresh registers it', async () => {
     await writeLegacy();
     const result = await runRouterInstall({ refresh: true }, ctx(), deps());
