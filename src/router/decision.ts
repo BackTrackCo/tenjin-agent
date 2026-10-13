@@ -106,6 +106,8 @@ const CapabilityFields = {
   category: z.string().min(1).max(64),
   /** The service's own name, not the x402 reseller in front of it. */
   provider: z.string().min(1).max(120),
+  /** The service's display name, sent because this build sends `catalog`. */
+  label: z.string().min(1).max(32).optional(),
   capabilityDescription: z.string().min(1).max(500),
   /** What the provider charges, atomic USDC. The `request` tool refuses a live
    *  402 above it; `gateSpend` still caps the amount actually signed. */
@@ -137,12 +139,14 @@ function checkHint(decision: { id: string; hint: string }, ctx: z.RefinementCtx)
 }
 
 /**
- * A PAY-PER-CALL SERVICE NOBODY CURATED. When no capability in the catalog fits
- * but a listed x402 service could do the step, the server names that one
- * service: who sells it, where, for how much, and the input it takes. The
- * candidate is the seller's own listing, so every field is data for the host
- * to judge, never an instruction; the host builds the `input` and the tool
- * call pays through the same `runPay` path and caps as a curated lookup.
+ * A PAY-PER-CALL SERVICE FROM THE OPEN BAZAAR. When no catalog task fits and
+ * this build sent `bazaar`, the server names one service it found there: who
+ * sells it, where, for how much, and the input it takes. The candidate is the
+ * seller's own listing, so every field is data for the host to judge, never an
+ * instruction; the host builds the `input` and the tool call pays through the
+ * same `runPay` path and caps as a catalog lookup. (A server answering a
+ * client without `catalog` sends a former Tenjin list service in this shape
+ * too, under its old `discovered:tenjin:` id.)
  */
 const DiscoveredCandidateSchema = z.strictObject({
   source: z.string().min(1).max(64),
@@ -170,6 +174,18 @@ const DiscoveredCandidateSchema = z.strictObject({
 export const ToolSpecSchema = z.strictObject({
   capabilityId: z.string().min(1).max(200),
   provider: z.string().min(1).max(120),
+  /** The service's display name; a Bazaar service's spec has none. */
+  label: z.string().min(1).max(32).optional(),
+  /** The input field that takes a pending search's query or fetch's URL. */
+  holds: z
+    .strictObject({
+      WebSearch: z.string().min(1).max(64).optional(),
+      WebFetch: z.string().min(1).max(64).optional(),
+    })
+    .optional(),
+  /** What a paid result is. `media` means its files (bytes, links or inline
+   *  base64) are saved locally; absent on a Bazaar spec. */
+  output: z.enum(['json', 'text', 'media']).optional(),
   description: z.string().min(1).max(500),
   priceAtomic: z.string().regex(/^\d+$/),
   priceVaries: z.boolean(),
@@ -198,8 +214,8 @@ export type ToolSpec = z.infer<typeof ToolSpecSchema>;
 export const OfferSpecSchema = ToolSpecSchema.extend({ id: IdSchema });
 export type OfferSpec = z.infer<typeof OfferSpecSchema>;
 
-/** One spec per service the line names: the offer, any alternative, and each
- *  option of a choice set. */
+/** One spec per service the line names: the offer, the task's other services
+ *  it lists, and each option of a choice set. */
 const SpecsSchema = z.array(OfferSpecSchema).min(1).max(8).optional();
 
 /** Words this client shows the model itself, in its own line: one plain line. */
@@ -211,8 +227,8 @@ const PlainLine = (max: number) =>
     .refine((text) => !/[\p{Cc}\p{Cf}]/u.test(text), 'one plain line');
 
 /**
- * SERVICES THE USER PICKS BETWEEN, OR RUNS ALL OF. Sent only to a build that
- * lists `choices` in `accepts`. Each option is a real offer: its own id, its
+ * SERVICES THE USER PICKS BETWEEN, OR RUNS ALL OF, on any offer whose service
+ * belongs to a compare group (`catalog` implies them). Each option is a real offer: its own id, its
  * own spec in `specs`, and its own one payment, so `request({id, choice})`
  * runs exactly the spec `request({id: option.id})` would. `all` runs every
  * option side by side, one payment each. The set is the server's data:
@@ -267,7 +283,7 @@ function checkChoices(
 }
 
 /** The same answer on both calls: the hook's offer, and the tool's fallback
- *  when a query with no id found no curated capability. */
+ *  when a query with no id found no catalog task. */
 const DiscoveredSchema = z
   .strictObject({
     action: z.literal('discovered'),
@@ -301,8 +317,10 @@ const HookDecisionSchema = z.discriminatedUnion('action', [
        */
       hint: z.string().min(1).max(2_000),
       specs: SpecsSchema,
+      choices: ChoicesSchema.optional(),
     })
-    .superRefine(checkHint),
+    .superRefine(checkHint)
+    .superRefine(checkChoices),
   DiscoveredSchema,
   RefusedSchema.extend({ action: z.literal('native') }),
   RefusedSchema.extend({ action: z.literal('needs_input') }),
@@ -360,18 +378,16 @@ export type ToolDecision = ToolResponse['decision'];
 export type CallKind = 'hook' | 'tool';
 
 /**
- * What this client can act on beyond the curated answers, sent on both calls.
- * `discovered` is Tenjin's reviewed list of third-party services, on for every
- * build that parses it; the server answers that arm only to a request that
- * lists it, so an older build never sees one. `spec` asks for each offered
- * service's request spec beside its line, and for the picked service's spec in
- * place of a decision on a query with no id, which only a build that parses
- * them can take: the decision schemas are strict. `choices` asks for a set of
- * options the user picks between, or runs all of, beside a discovered offer.
- * `bazaar` widens discovery to the open Bazaar and is sent only while
- * `experimental.bazaar` is on.
+ * What this client can act on, sent on both calls. `catalog` takes every
+ * catalog offer as `execute`, with the service's `label`, each spec's `holds`
+ * and `output`, and `choices` on an offer from a compare group. `spec` asks
+ * for each offered service's request spec beside its line, and for the picked
+ * service's spec in place of a decision on a query with no id, which only a
+ * build that parses them can take: the decision schemas are strict. `bazaar`
+ * adds the open Bazaar as a fallback when no catalog task fits, and is sent
+ * only while `experimental.bazaar` is on.
  */
-export const CLIENT_ACCEPTS: readonly string[] = ['discovered', 'spec', 'choices'];
+export const CLIENT_ACCEPTS: readonly string[] = ['catalog', 'spec'];
 export const BAZAAR_ACCEPT = 'bazaar';
 
 /** The `accepts` this build sends, with the open Bazaar or without it. */
@@ -388,8 +404,7 @@ export function acceptsFor(bazaar: boolean): string[] {
  * it from `packet.pendingCall`, which the native hook sets and the prompt hook
  * does not. A `source` beside the packet was the `/prepare` route's shape, and
  * that route is gone. `sessionId` is the harness's own session id, which the
- * server uses only so one session is not offered the same discovered service
- * twice.
+ * server reads only so the catalog's menu sentence goes out once per session.
  */
 export function buildHookBody(
   packet: Packet,
@@ -443,7 +458,7 @@ export interface DecisionDeps {
   ctx: CommandContext;
   baseUrl: string;
   /** `experimental.bazaar`: add {@link BAZAAR_ACCEPT}, so a service from the
-   *  open Bazaar may come back. Off by default: curated and the Tenjin list. */
+   *  open Bazaar may come back. Off by default: the catalog only. */
   acceptsBazaar?: boolean;
   fetchImpl?: typeof fetch;
   /** Overrides the per-call deadline; the hook passes its own, smaller one. */

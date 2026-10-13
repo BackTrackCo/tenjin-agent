@@ -1,0 +1,5 @@
+{
+  "schemaVersion": 1,
+  "query": "papers on retrieval augmented generation evaluation",
+  "accepts": ["catalog", "spec"]
+}

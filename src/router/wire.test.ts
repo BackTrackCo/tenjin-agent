@@ -6,6 +6,7 @@ import {
   buildHookBody,
   buildOutcomeBody,
   buildToolBody,
+  acceptsFor,
   CLIENT_ACCEPTS,
   parseForTests,
   type SpecOutcome,
@@ -119,16 +120,34 @@ describe('the request bodies', () => {
     expect(Buffer.byteLength(JSON.stringify(packet))).toBeLessThanOrEqual(MAX_PACKET_BYTES);
   });
 
-  it("sends this build's accepts, choices included, byte for byte", () => {
+  /** A released build's request, which still asks for `discovered` and
+   *  `choices`: the server keeps answering it in today's shapes. */
+  it("builds a released build's request with choices, byte for byte", () => {
     const canonical = fixture('wire-hook-request-choices.json');
     expect(
       buildHookBody(canonical.packet as Packet, {
         sessionId: canonical.sessionId as string,
-        accepts: CLIENT_ACCEPTS,
+        accepts: canonical.accepts as string[],
       }),
     ).toEqual(canonical);
-    expect(canonical.accepts).toEqual([...CLIENT_ACCEPTS]);
-    expect(CLIENT_ACCEPTS).toContain('choices');
+  });
+
+  /** THIS BUILD SENDS `catalog`: every catalog offer as `execute`, with its
+   *  label, each spec's `holds` and `output`, and `choices`. `bazaar` rides
+   *  only while `experimental.bazaar` is on. */
+  it("sends this build's accepts, catalog included, byte for byte", () => {
+    const canonical = fixture('wire-hook-request-catalog.json');
+    expect(
+      buildHookBody(canonical.packet as Packet, {
+        sessionId: canonical.sessionId as string,
+        accepts: acceptsFor(true),
+      }),
+    ).toEqual(canonical);
+    expect(CLIENT_ACCEPTS).toEqual(['catalog', 'spec']);
+    const tool = fixture('wire-tool-request-catalog.json');
+    expect(buildToolBody({ query: tool.query as string, accepts: acceptsFor(false) })).toEqual(
+      tool,
+    );
   });
 
   it('builds the query with no id that a spec answers, byte for byte', () => {
@@ -175,7 +194,9 @@ describe('the request bodies', () => {
       'wire-hook-request-native-no-content.json',
       'wire-hook-request-ask.json',
       'wire-hook-request-choices.json',
+      'wire-hook-request-catalog.json',
       'wire-tool-request-spec.json',
+      'wire-tool-request-catalog.json',
     ]) {
       expect(JSON.stringify(fixture(name))).not.toMatch(/billing|admission|payment/i);
     }
@@ -226,6 +247,40 @@ describe('every answer payload on disk', () => {
       expect(parseForTests('hook', fixture(name)).success, name).toBe(true);
       expect(parseForTests('tool', fixture(name)).success, name).toBe(true);
     }
+  });
+
+  /**
+   * A CATALOG OFFER IS AN `execute`: the label, a spec with `holds` and
+   * `output` for every id the line names, and `choices` when the lead service
+   * belongs to a compare group, its default the answer's own id.
+   */
+  it('parses the catalog execute shapes: specs with output, several services, choices', () => {
+    const single = fixture('wire-hook-execute-catalog.json').decision as Record<string, unknown>;
+    expect(single).toMatchObject({ action: 'execute', label: 'ElevenLabs Sound Effects' });
+    expect((single.specs as { output?: string }[])[0]?.output).toBe('media');
+    const multi = fixture('wire-hook-execute-catalog-multi.json').decision as {
+      hint: string;
+      specs: { id: string }[];
+    };
+    expect(multi.specs).toHaveLength(3);
+    for (const spec of multi.specs) expect(multi.hint).toContain(`id: "${spec.id}"`);
+    const payload = fixture('wire-hook-execute-catalog-choices.json');
+    const withChoices = payload.decision as { id: string; choices: { default: string } };
+    expect(withChoices.choices.default).toBe('nano-banana-2.1');
+    // The same checks as on a discovered set: the default is this answer's offer.
+    const options = (withChoices.choices as unknown as { options: { key: string; id: string }[] })
+      .options;
+    const broken = options.map((option) =>
+      option.id === withChoices.id ? { ...option, key: 'other' } : option,
+    );
+    expect(
+      parseForTests('hook', {
+        ...payload,
+        decision: { ...withChoices, choices: { ...withChoices.choices, options: broken } },
+      }).success,
+    ).toBe(false);
+    const spec = fixture('wire-lookup-spec-catalog.json').decision as { spec: object };
+    expect(spec.spec).toMatchObject({ label: 'Scholarly paper search', output: 'json' });
   });
 
   /**

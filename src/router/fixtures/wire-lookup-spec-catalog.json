@@ -1,0 +1,80 @@
+{
+  "schemaVersion": 1,
+  "routerVersion": "2026-10-13.1",
+  "decision": {
+    "action": "spec",
+    "id": "0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d48",
+    "spec": {
+      "capabilityId": "kadec0-papers",
+      "provider": "kadec0 (arXiv/PubMed/OpenAlex/Crossref/Semantic Scholar)",
+      "label": "Scholarly paper search",
+      "holds": {
+        "WebSearch": "q"
+      },
+      "output": "json",
+      "description": "Search academic papers across arXiv, PubMed, OpenAlex, Crossref and Semantic Scholar in one call.",
+      "priceAtomic": "20000",
+      "priceVaries": false,
+      "maxAmountAtomic": "20000",
+      "payTo": "0x4df66B6c140778fe0717880A7c6dDE5Ea53AcDeA",
+      "network": "eip155:8453",
+      "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      "request": {
+        "method": "GET",
+        "url": "https://api.kadec0.xyz/v1/papers",
+        "fields": {
+          "q": "query",
+          "source": "query",
+          "maxItems": "query",
+          "year_from": "query",
+          "year_to": "query",
+          "sort": "query"
+        },
+        "location": "query"
+      },
+      "input": {
+        "type": "object",
+        "properties": {
+          "q": {
+            "type": "string",
+            "description": "search query / keywords"
+          },
+          "source": {
+            "type": "string",
+            "enum": ["all", "arxiv", "pubmed", "openalex", "crossref", "semanticscholar"],
+            "default": "all"
+          },
+          "maxItems": {
+            "type": "string",
+            "default": "20",
+            "description": "1-50"
+          },
+          "year_from": {
+            "type": "string",
+            "description": "earliest publication year (inclusive)"
+          },
+          "year_to": {
+            "type": "string",
+            "description": "latest publication year (inclusive)"
+          },
+          "sort": {
+            "type": "string",
+            "enum": ["relevance", "recency", "citations"],
+            "default": "relevance"
+          }
+        },
+        "required": ["q"]
+      },
+      "pinned": {},
+      "example": {
+        "q": "retrieval augmented generation"
+      },
+      "returns": "JSON {count, items[]}: per paper title, authors, year, venue, abstract, DOI, citationCount, url and pdfUrl; up to 50 items"
+    },
+    "hint": "Scholarly paper search, about $0.02 per call: Search academic papers across arXiv, PubMed, OpenAlex, Crossref and Semantic Scholar in one call. Call request({id: \"0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d48\", input: {\"q\":\"<search query / keywords>\"}}) alone and wait for its result."
+  },
+  "jev": {
+    "calls": 1,
+    "latencyMs": 412
+  }
+}

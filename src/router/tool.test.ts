@@ -923,7 +923,7 @@ describe('a discovered service', () => {
     });
     expect(calls).toHaveLength(1);
     expect(JSON.parse(calls[0]!.body!)).toMatchObject({
-      accepts: ['discovered', 'spec', 'choices'],
+      accepts: ['catalog', 'spec'],
     });
     expect(auth.authorize).not.toHaveBeenCalled();
   });
@@ -1834,7 +1834,7 @@ describe('an offer with a request spec', () => {
     expect(JSON.parse(calls[0]!.body!)).toEqual({
       schemaVersion: 1,
       query,
-      accepts: ['discovered', 'spec', 'choices'],
+      accepts: ['catalog', 'spec'],
     });
     // The next call runs from the kept spec: no second decision.
     const ran = await runRequestTool({ id: PICKED, input: { symbol: 'BTC' } }, deps(fetchImpl));
@@ -1920,7 +1920,7 @@ describe('an offer with a request spec', () => {
       schemaVersion: 1,
       query: 'BTC price',
       id: SPEC_ID,
-      accepts: ['discovered', 'spec', 'choices'],
+      accepts: ['catalog', 'spec'],
     });
   });
 });

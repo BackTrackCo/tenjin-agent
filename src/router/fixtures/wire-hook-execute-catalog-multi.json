@@ -1,0 +1,205 @@
+{
+  "schemaVersion": 1,
+  "routerVersion": "2026-10-13.1",
+  "decision": {
+    "action": "execute",
+    "id": "0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d42",
+    "capabilityId": "glim-x-search",
+    "category": "x post search",
+    "provider": "glim",
+    "label": "X search",
+    "capabilityDescription": "searches X (Twitter) posts with advanced operators (from:, min_faves:, since:) and returns the matching posts with their engagement",
+    "providerPriceAtomic": "5000",
+    "endpoint": "https://glim.sh/api/v1/twitter/search",
+    "usage": "the X search, with from:handle only if the user named an account",
+    "hint": "1) X search, about $0.005 per call: searches X (Twitter) posts with advanced operators (from:, min_faves:, since:) and returns the matching posts with their engagement. Call request({id: \"0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d42\", input: {\"query\":\"what are people saying about x402 on X\"}}). 2) glim X replies, about $0.004 per call: Replies to a tweet. Call request({id: \"0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d43\", input: {\"id\":\"<tweet id>\"}}). 3) glim X user search, about $0.004 per call: Search X user profiles by keyword. Call request({id: \"0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d44\", input: {\"q\":\"what are people saying about x402 on X\"}}). Pick the one that fits and call it instead; native tools stay allowed for anything else.",
+    "specs": [
+      {
+        "id": "0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d42",
+        "capabilityId": "glim-x-search",
+        "provider": "glim",
+        "label": "X search",
+        "holds": {
+          "WebSearch": "query"
+        },
+        "output": "json",
+        "description": "searches X (Twitter) posts with advanced operators (from:, min_faves:, since:) and returns the matching posts with their engagement",
+        "priceAtomic": "5000",
+        "priceVaries": false,
+        "maxAmountAtomic": "5000",
+        "payTo": "0xC751344Ee09B5159160173F77D4a1169bCd386A1",
+        "network": "eip155:8453",
+        "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "request": {
+          "method": "POST",
+          "url": "https://glim.sh/api/v1/twitter/search",
+          "fields": {
+            "cursor": "body",
+            "expand_urls": "body",
+            "query": "body",
+            "sort": "body"
+          },
+          "location": "body"
+        },
+        "input": {
+          "type": "object",
+          "properties": {
+            "cursor": {
+              "description": "Pagination cursor",
+              "maxLength": 500,
+              "type": "string"
+            },
+            "expand_urls": {
+              "default": false,
+              "description": "When true, auto-crawl entity URLs and attach crawled_content to tweets. Off by default: responses can grow by up to 4KB per expanded URL. Use glim_web_crawl(url) for targeted crawls instead.",
+              "type": "boolean"
+            },
+            "query": {
+              "description": "Search query with advanced operators",
+              "maxLength": 1000,
+              "minLength": 1,
+              "type": "string"
+            },
+            "sort": {
+              "description": "Sort order: \"top\" (most engaged matching tweets) or \"latest\" (newest first). Default: \"top\".",
+              "enum": ["latest", "top"],
+              "type": "string"
+            }
+          },
+          "required": ["query"],
+          "additionalProperties": true
+        },
+        "pinned": {},
+        "example": {
+          "query": "from:elonmusk AI min_faves:100"
+        },
+        "returnsExample": {
+          "count": 1,
+          "has_more": true,
+          "next_cursor": "abc123",
+          "tweets": [
+            {
+              "author": {
+                "username": "elonmusk"
+              },
+              "id": "123",
+              "text": "Hello"
+            }
+          ]
+        }
+      },
+      {
+        "id": "0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d43",
+        "capabilityId": "glim-twitter-tweets-id-replies",
+        "provider": "glim.sh (glim X replies)",
+        "label": "glim X replies",
+        "holds": {},
+        "output": "json",
+        "description": "Replies to a tweet.",
+        "priceAtomic": "4000",
+        "priceVaries": false,
+        "maxAmountAtomic": "4000",
+        "payTo": "0xC751344Ee09B5159160173F77D4a1169bCd386A1",
+        "network": "eip155:8453",
+        "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "request": {
+          "method": "POST",
+          "url": "https://glim.sh/api/v1/twitter/tweets/{id}/replies",
+          "fields": {
+            "id": "path",
+            "sort": "body",
+            "cursor": "body",
+            "since": "body",
+            "until": "body"
+          },
+          "location": "body"
+        },
+        "input": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Tweet id"
+            },
+            "sort": {
+              "default": "Relevance",
+              "description": "Reply sort",
+              "type": "string",
+              "enum": ["Relevance", "Latest", "Likes"]
+            },
+            "cursor": {
+              "description": "Pagination cursor",
+              "type": "string"
+            },
+            "since": {
+              "description": "Only include replies after this Unix timestamp",
+              "type": "integer",
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            "until": {
+              "description": "Only include replies before this Unix timestamp",
+              "type": "integer",
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": ["id"]
+        },
+        "pinned": {},
+        "returns": "JSON {data:[tweets], meta:{result_count, has_next_page, next_cursor}, summary}: replies to the tweet, paged by cursor"
+      },
+      {
+        "id": "0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d44",
+        "capabilityId": "glim-twitter-users-search",
+        "provider": "glim.sh (glim X user search)",
+        "label": "glim X user search",
+        "holds": {
+          "WebSearch": "q"
+        },
+        "output": "json",
+        "description": "Search X user profiles by keyword.",
+        "priceAtomic": "4000",
+        "priceVaries": false,
+        "maxAmountAtomic": "4000",
+        "payTo": "0xC751344Ee09B5159160173F77D4a1169bCd386A1",
+        "network": "eip155:8453",
+        "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "request": {
+          "method": "POST",
+          "url": "https://glim.sh/api/v1/twitter/users/search",
+          "fields": {
+            "q": "body",
+            "cursor": "body"
+          },
+          "location": "body"
+        },
+        "input": {
+          "type": "object",
+          "properties": {
+            "q": {
+              "type": "string",
+              "minLength": 1,
+              "description": "User search query"
+            },
+            "cursor": {
+              "description": "Pagination cursor. Ranking is strongest on page 1 - paged results under sort=Top trend toward recency (upstream behavior).",
+              "type": "string"
+            }
+          },
+          "required": ["q"]
+        },
+        "pinned": {},
+        "example": {
+          "q": "founder ai agents"
+        },
+        "returns": "JSON {data:[users], meta:{result_count, next_cursor}}: matching X profiles with id, username, name and description"
+      }
+    ]
+  },
+  "jev": {
+    "calls": 1,
+    "latencyMs": 412
+  }
+}
