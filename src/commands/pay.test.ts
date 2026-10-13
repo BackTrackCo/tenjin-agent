@@ -735,8 +735,8 @@ describe('runPay, bazaar lane', () => {
     return err as CliError;
   }
 
-  // The Vaaya shape: a 402 with an empty `{}` body, and the reason only in the
-  // payment-response header.
+  // A seller whose facilitator refused the settle: a 402 with an empty `{}`
+  // body, and the reason only in the payment-response header.
   it.each(['PAYMENT-RESPONSE', 'X-PAYMENT-RESPONSE'])(
     'names a seller whose %s header says it did not settle, with its reason',
     async (header) => {
