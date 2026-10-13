@@ -274,14 +274,22 @@ describe('the prompt hook', () => {
   });
 
   /**
-   * A HINT TOWARD A CALL THAT STOPS IS NOT SENT. Over the cap or past the
-   * budget, `request` answers `needs_approval`, and a model sent there stops
-   * to ask the user instead of using its free tools.
+   * ONE RULE FOR EVERY OFFER. Over the cap or past the budget, `request`
+   * answers `needs_approval`, so the line is shown with a sentence saying so
+   * and the host asks the user first: it may be the only service for the step.
    */
   it.each([
-    ['above maxAutoSpend', { maxAutoSpend: '14999', confirm: 'above:14999' }],
-    ['past the session budget', { sessionBudget: '20000' }],
-  ])('says nothing when the lookup is %s', async (_label, over) => {
+    [
+      'above maxAutoSpend',
+      { maxAutoSpend: '14999', confirm: 'above:14999' },
+      "Note: $0.015 is above this machine's automatic per-call limit ($0.014999);",
+    ],
+    [
+      'past the session budget',
+      { sessionBudget: '20000' },
+      "Note: $0.015 needs approval under this machine's spend limits;",
+    ],
+  ])('shows the line with a note when the lookup is %s', async (_label, over, note) => {
     const fs = await import('node:fs/promises');
     await fs.writeFile(join(dir, 'config.json'), JSON.stringify({ ...ROUTER_POLICY, ...over }));
     // 15000 of the day already committed: only the session-budget case minds.
@@ -300,10 +308,10 @@ describe('the prompt hook', () => {
       baseUrl: BASE,
       fetchImpl,
     });
-    expect(out).toEqual({ response: null, action: 'execute', withheld: true });
-    expect(await renderProgress(dir, 'sess-1')).toBe(
-      'x402 · prompt: native tools (offer needs approval)',
-    );
+    expect(out).toMatchObject({ action: 'execute' });
+    expect(out.withheld).toBeUndefined();
+    expect(JSON.stringify(out.response)).toContain(HINT.slice(0, 40));
+    expect(JSON.stringify(out.response)).toContain(note);
   });
 
   it('says nothing at all on native', async () => {
@@ -843,15 +851,14 @@ describe('the pre-call hook', () => {
   });
 
   /**
-   * A DENY THE PAID CALL CANNOT MAKE GOOD ON IS NOT SENT. Redirecting the main
-   * agent to a lookup that stops on `needs_approval` left the page neither
-   * fetched nor bought, so the free call runs instead; the after-call arm can
-   * still offer, since `request` can ask the user there.
+   * THE MAIN AGENT CAN ASK THE USER, so a lookup that stops on
+   * `needs_approval` still redirects it, with a sentence saying so: the same
+   * rule as every other offer. The after-call arm then says nothing more.
    */
   it.each([
     ['above maxAutoSpend', { maxAutoSpend: '14999', confirm: 'above:14999' }],
     ['past the session budget', { sessionBudget: '20000' }],
-  ])('lets the main agent call run when the lookup is %s', async (_label, over) => {
+  ])('redirects the main agent with a note when the lookup is %s', async (_label, over) => {
     await setConfig({ ...ROUTER_POLICY, ...over });
     // 15000 of the day already committed: only the session-budget case minds.
     const fs = await import('node:fs/promises');
@@ -867,9 +874,11 @@ describe('the pre-call hook', () => {
     const deps = { dataDir: dir, baseUrl: BASE, fetchImpl: router(EXECUTE).fetchImpl };
     const event = await preCall('https://x.com/a', 'WebFetch', { tool_use_id: 'toolu_9' });
     const out = await runNativeHook(event, deps);
-    expect(out).toMatchObject({ response: null, action: 'execute', withheld: true });
+    expect(out).toMatchObject({ action: 'execute' });
+    expect(JSON.stringify(out.response)).toContain('"permissionDecision":"deny"');
+    expect(JSON.stringify(out.response)).toContain('Note: $0.015');
 
-    // The same payment eligibility applies to the after-call offer.
+    // The call was redirected, so the after-call arm says nothing.
     const after = await runShortfallHook(
       {
         ...((await readableEvent('https://x.com/a', 'WebFetch')) as object),
@@ -1156,22 +1165,18 @@ describe('a wallet that cannot cover the lookup', () => {
   it.each([
     ['holds no USDC', 0n],
     ['holds less than the price', 14_999n],
-  ])('lets the free call run, and shows no hint, when it %s', async (_label, balance) => {
+  ])('shows the line with a funding note when it %s', async (_label, balance) => {
     rpcAnswer = balance;
     const { fetchImpl } = router(EXECUTE);
     const deps = { dataDir: dir, baseUrl: BASE, fetchImpl };
     const event = await preCall('https://x.com/a', 'WebFetch', { tool_use_id: 'toolu_5' });
     const out = await runNativeHook(event, deps);
-    expect(out).toMatchObject({ response: null, action: 'execute', withheld: true });
-    expect(await renderProgress(dir, 'sess-1')).toBe(
-      'x402 · search: native tools (wallet needs USDC)',
-    );
-    expect(await runPromptHook(promptEvent('read https://x.com/a'), deps)).toEqual({
-      response: null,
-      action: 'execute',
-      withheld: true,
-    });
-    // The same payment eligibility applies to the after-call offer.
+    expect(out).toMatchObject({ action: 'execute' });
+    expect(JSON.stringify(out.response)).toContain('fund it with `tenjin wallet fund`');
+    const prompted = await runPromptHook(promptEvent('read https://x.com/a'), deps);
+    expect(prompted.withheld).toBeUndefined();
+    expect(JSON.stringify(prompted.response)).toContain('fund it with `tenjin wallet fund`');
+    // The call was redirected, so the after-call arm says nothing.
     const after = await runShortfallHook(
       {
         ...((await readableEvent('https://x.com/a', 'WebFetch')) as object),
@@ -2088,7 +2093,7 @@ describe('a subagent', () => {
     expect(out.response).not.toBeNull();
   });
 
-  it('suppresses the main agent offer when policy refuses payment', async () => {
+  it('shows the main agent the offer with a note when policy refuses payment', async () => {
     await setConfig({ maxAutoSpend: '0', confirm: 'always' });
     const { fetchImpl } = router(EXECUTE);
     const out = await runShortfallHook(
@@ -2099,7 +2104,9 @@ describe('a subagent', () => {
         fetchImpl,
       },
     );
-    expect(out.response).toBeNull();
+    expect(JSON.stringify(out.response)).toContain(
+      "is above this machine's automatic per-call limit",
+    );
   });
 });
 
@@ -2788,26 +2795,27 @@ describe('a discovered service', () => {
   });
 
   /** A CHOICE SET is kept by the line's id, beside every option's spec, so
-   *  `request({id, choice})` finds the option the user picked. */
-  it('keeps the choice set of a shown offer, and every option spec', async () => {
-    const OFFERED = JSON.parse(
-      readFileSync(
-        fileURLToPath(new URL('./fixtures/wire-hook-discovered-choices.json', import.meta.url)),
-        'utf8',
-      ),
-    ) as { decision: { id: string; hint: string; specs: { id: string }[]; choices: unknown } };
-    const { fetchImpl } = router(OFFERED);
-    await runPromptHook(promptEvent('generate an image of a lighthouse at dusk'), {
-      dataDir: dir,
-      baseUrl: BASE,
-      fetchImpl,
-    });
-    expect(await readChoices(dir, OFFERED.decision.id)).toEqual({
-      choices: OFFERED.decision.choices,
-      hint: OFFERED.decision.hint,
-    });
-    for (const spec of OFFERED.decision.specs) expect(await readSpec(dir, spec.id)).toEqual(spec);
-  });
+   *  `request({id, choice})` finds the option the user picked: on a
+   *  `discovered` offer, and on a catalog `execute`. */
+  it.each([['wire-hook-discovered-choices.json'], ['wire-hook-execute-catalog-choices.json']])(
+    'keeps the choice set of a shown offer, and every option spec (%s)',
+    async (name) => {
+      const OFFERED = JSON.parse(
+        readFileSync(fileURLToPath(new URL(`./fixtures/${name}`, import.meta.url)), 'utf8'),
+      ) as { decision: { id: string; hint: string; specs: { id: string }[]; choices: unknown } };
+      const { fetchImpl } = router(OFFERED);
+      await runPromptHook(promptEvent('generate an image of a lighthouse at dusk'), {
+        dataDir: dir,
+        baseUrl: BASE,
+        fetchImpl,
+      });
+      expect(await readChoices(dir, OFFERED.decision.id)).toEqual({
+        choices: OFFERED.decision.choices,
+        hint: OFFERED.decision.hint,
+      });
+      for (const spec of OFFERED.decision.specs) expect(await readSpec(dir, spec.id)).toEqual(spec);
+    },
+  );
 
   /** A LIST CAN NAME A SERVICE OVER THE CAP beside one that fits: People Data
    *  Labs at $0.28 beside a $0.005 email finder, under the $0.25 cap, was
