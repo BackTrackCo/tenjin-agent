@@ -64,6 +64,10 @@ describe('readsAsEmptyPage', () => {
 
   it.each([
     ['a title among other things', 'The page only shows the title and abstract of the paper.'],
+    [
+      'a docs hub without the page asked about',
+      'Based on the provided web page content, there is **no documentation of the scrape endpoint present**. The page shown is the main documentation hub, which provides navigation and high-level overviews of available resources.',
+    ],
     ['a library that needs JavaScript', 'recheck is a ReDoS checker for JavaScript and Scala.'],
     ['nothing', ''],
   ])('reads %s as a page', (_label, result) => {

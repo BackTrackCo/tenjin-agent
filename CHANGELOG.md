@@ -1,5 +1,53 @@
 # tenjin-cli
 
+## 0.1.0-alpha.27
+
+### Minor Changes
+
+- 8d11ddb: A line can now offer a choice of services for one step, such as several
+  image models. The CLI sends `choices` in `accepts`, and the hook keeps the
+  offer's choice set beside every option's spec. `request({id, choice, input})`
+  runs the option the user picked as its own offer, under its own id, exactly
+  as `request({id: option.id, input})` would. `choice: "all"` runs every option
+  side by side, each paid once straight to its own provider, after one check
+  that the whole set fits the spend policy (each payment within `maxAutoSpend`,
+  the total inside `sessionBudget`); a set that does not fit returns
+  `needs_approval` with nothing signed. The result lists each option with its
+  status, cost and saved file under `~/.tenjin/downloads/`, so the agent can
+  open the images and help the user pick. An option already paid is not paid
+  again. Which options a set holds is the server's data, so a new set needs no
+  CLI release.
+
+### Patch Changes
+
+- a800185: A paid third-party service that returns its file inline, as base64 inside its
+  JSON (`b64_json`, a `data:` URI, an `audio_base64` field), now has that file
+  saved under `~/.tenjin/downloads/`, the way a linked file already was. The
+  `request` tool's result replaces the base64 with a note naming the saved path,
+  its type and its size, and lists the file in `savedFiles` and the paid ledger.
+  Before, a four-second video reached the agent as 4.2 MB of base64 with nothing
+  saved. A short string that only looks like base64, such as an id or a hash, is
+  left alone.
+- 8b102a1: The CLI now runs on Node 22, the same floor Claude Code needs (was Node 24). Human output stays plain when piped on every Node 22 release. Routing through HTTPS_PROXY still needs Node 24.14 or newer, and `tenjin doctor` says so.
+- a800185: When a seller rejects a signed payment and its payment-response header says it
+  did not settle (`success: false`), `tenjin pay` and the `request` tool now say
+  so, with the seller's reason: "The endpoint did not settle the payment: …". The
+  `request` tool's result carries that reason as `settlementError`, beside
+  `providerError`. Before, the reason was dropped, and a seller that answered with
+  an empty `{}` body reached the agent as `providerError: "{}"` and "settlement
+  unknown". The amount stays counted and the settlement stays `unknown`, because
+  the signed authorization is valid until it expires.
+- a800185: A call run from an offer's spec now tells Tenjin how it ended when it stopped
+  before anything was paid, too: the input did not fit the spec, the live 402 was
+  not the spec's deal, the provider answered something other than a 402, the
+  provider could not be reached, or the wallet could not pay (no wallet, a locked
+  one, or too little USDC). It is reported as `unpaid` with that reason, which
+  never counts as the offer taken, and a spend-limit refusal as `needs_approval`.
+  Before, only a call that ran or paid was reported, so a call stopped before
+  payment looked the same as an offer nobody used. The report still carries no
+  input and no result.
+- 3f79366: `tenjin update` no longer prints the routing-fee notice. The install question names the fee.
+
 ## 0.1.0-alpha.26
 
 ### Patch Changes

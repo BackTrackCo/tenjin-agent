@@ -1,10 +1,12 @@
+import { readFileSync } from 'node:fs';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { CommandContext } from '../context';
 import { packetForText } from './context';
-import { requestDecision, ROUTER_PATH } from './decision';
+import { parseForTests, requestDecision, ROUTER_PATH } from './decision';
 
 /**
  * THE DECISION IS FREE. No 402 on this route, no challenge to decode, no
@@ -138,7 +140,11 @@ describe('one free decision', () => {
       'schemaVersion',
     ]);
     // The Tenjin list is on by default; the open Bazaar is not.
-    expect((calls[0]!.body as { accepts: unknown }).accepts).toEqual(['discovered', 'spec']);
+    expect((calls[0]!.body as { accepts: unknown }).accepts).toEqual([
+      'discovered',
+      'spec',
+      'choices',
+    ]);
   });
 
   it('adds the open Bazaar to what it accepts only with the experiment on', async () => {
@@ -154,7 +160,12 @@ describe('one free decision', () => {
       { ctx: ctx(), baseUrl: BASE, fetchImpl, acceptsBazaar: true },
     );
     for (const call of calls) {
-      expect((call.body as { accepts: unknown }).accepts).toEqual(['discovered', 'spec', 'bazaar']);
+      expect((call.body as { accepts: unknown }).accepts).toEqual([
+        'discovered',
+        'spec',
+        'choices',
+        'bazaar',
+      ]);
     }
   });
 
@@ -259,5 +270,93 @@ describe('one free decision', () => {
     );
     expect(outcome).toMatchObject({ status: 'failed' });
     expect((outcome as { reason: string }).reason).toContain('cannot read');
+  });
+});
+
+/**
+ * A CHOICE SET NAMES ONLY WHAT ITS ANSWER CARRIES. Each option is an offer the
+ * client pays on its own, so an option with no spec, a key or id named twice,
+ * or a default that is not the answer's own offer would have the client run a
+ * call nobody offered. Each is a parse failure, like any unreadable answer.
+ */
+describe('a choice set', () => {
+  const CHOICES = JSON.parse(
+    readFileSync(
+      fileURLToPath(new URL('./fixtures/wire-hook-discovered-choices.json', import.meta.url)),
+      'utf8',
+    ),
+  ) as {
+    decision: {
+      id: string;
+      specs: { id: string }[];
+      choices: { default: string; options: { key: string; id: string }[] };
+    };
+  };
+  const withDecision = (change: (decision: Record<string, unknown>) => void) => {
+    const copy = structuredClone(CHOICES) as unknown as { decision: Record<string, unknown> };
+    change(copy.decision);
+    return copy;
+  };
+  const options = (decision: Record<string, unknown>) =>
+    (decision.choices as { options: { key: string; id: string }[] }).options;
+
+  it('parses on both calls, with a spec for every option', () => {
+    expect(parseForTests('hook', CHOICES).success).toBe(true);
+    expect(parseForTests('tool', CHOICES).success).toBe(true);
+    const specIds = CHOICES.decision.specs.map((spec) => spec.id);
+    for (const option of CHOICES.decision.choices.options) expect(specIds).toContain(option.id);
+  });
+
+  it.each([
+    [
+      'a key named twice',
+      (decision: Record<string, unknown>) => {
+        options(decision)[1]!.key = options(decision)[0]!.key;
+      },
+    ],
+    [
+      'an id named twice',
+      (decision: Record<string, unknown>) => {
+        options(decision)[2]!.id = options(decision)[1]!.id;
+      },
+    ],
+    [
+      'an option with no spec',
+      (decision: Record<string, unknown>) => {
+        decision.specs = (decision.specs as { id: string }[]).slice(0, 2);
+      },
+    ],
+    [
+      "a default that is not the answer's own offer",
+      (decision: Record<string, unknown>) => {
+        (decision.choices as { default: string }).default = options(decision)[1]!.key;
+      },
+    ],
+    [
+      'a default that is no option',
+      (decision: Record<string, unknown>) => {
+        (decision.choices as { default: string }).default = 'flux';
+      },
+    ],
+    [
+      'an option keyed "all"',
+      (decision: Record<string, unknown>) => {
+        options(decision)[2]!.key = 'all';
+      },
+    ],
+    [
+      'more than eight specs',
+      (decision: Record<string, unknown>) => {
+        const specs = decision.specs as { id: string }[];
+        decision.specs = [
+          ...specs,
+          ...Array.from({ length: 6 }, (_, n) => ({ ...specs[0]!, id: `extra-spec-${n}` })),
+        ];
+      },
+    ],
+  ])('refuses %s', (_label, change) => {
+    const payload = withDecision(change);
+    expect(parseForTests('hook', payload).success).toBe(false);
+    expect(parseForTests('tool', payload).success).toBe(false);
   });
 });

@@ -153,8 +153,8 @@ async function writeWallet(mode: number): Promise<void> {
 
 describe('runDoctor — passing outcomes', () => {
   /**
-   * THE OPEN IS THE PROBE. The preflight in src/index.ts already refused
-   * anything below Node 24, so a failing open here is never "upgrade Node": the
+   * THE OPEN IS THE PROBE. The node check already refused
+   * anything below Node 22.13, so a failing open here is never "upgrade Node": the
    * runtime is supported and the file still would not open, which is a damaged
    * install or bundle (tsup once shipped `import("sqlite")`, tenjin-agent#225)
    * or another build's daemon holding the ledger. The remedy and the code must
@@ -183,7 +183,7 @@ describe('runDoctor — passing outcomes', () => {
     expect(store.detail).toContain(join(dir, 'loop.db'));
     expect(store.detail).toContain('from another build');
     expect(store.fix).toContain('tenjin daemon stop');
-    expect(store.fix).not.toMatch(/Node 24/);
+    expect(store.fix).not.toMatch(/Install Node/);
   });
 
   /** The real open, which both proves `node:sqlite` and materializes the file. */

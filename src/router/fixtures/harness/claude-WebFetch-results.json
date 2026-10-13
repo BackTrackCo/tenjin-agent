@@ -125,17 +125,6 @@
       }
     },
     {
-      "url": "https://vaaya.ai/docs",
-      "tool_response": {
-        "bytes": 55402,
-        "code": 200,
-        "codeText": "OK",
-        "result": "# Firecrawl Scrape Endpoint Documentation\n\nBased on the provided web page content, there is **no documentation of the Firecrawl/scrape run endpoint present**. The page shown is the main Vaaya documentation hub, which provides navigation and high-level overviews of available resources.\n\nTo find the specific endpoint documentation you're asking about—including details on request body fields (jsonOptions, formats structure, summary, onlyMainContent, waitFor) and whether it's described as a v1 passthrough—you would need to visit the **API reference** section at `/docs/reference` or the **MCP tool reference** at `/docs/tools`, neither of which are fully rendered in the content provided.",
-        "durationMs": 2466,
-        "url": "https://vaaya.ai/docs"
-      }
-    },
-    {
       "url": "https://docs.cloud.google.com/dialogflow/es/docs/reference/system-entities",
       "tool_response": {
         "bytes": 387532,

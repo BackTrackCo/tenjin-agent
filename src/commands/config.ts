@@ -1,7 +1,6 @@
 import { mkdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname } from 'node:path';
-import { styleText } from 'node:util';
 import { CliError } from '../lib/errors';
 import { confirmChoice } from '../lib/clack';
 import type { CodexGrantResult } from '../lib/harness-permissions';
@@ -70,6 +69,7 @@ import {
   routerSettings,
   type RouterSettings,
 } from '../router/settings';
+import { style } from '../lib/output';
 
 /** Machine values use Money for spending keys and scalars for other settings. */
 interface RenderedValue {
@@ -1257,20 +1257,20 @@ function formatLine(key: string, entry: RenderedSetting): string {
     entry.path !== undefined && (entry.source === 'project' || entry.source === 'local')
       ? ` ${entry.path}`
       : '';
-  return `  ${label}  ${displayValue(entry)}  ${styleText('dim', `(${entry.source}${where})`)}`;
+  return `  ${label}  ${displayValue(entry)}  ${style('dim', `(${entry.source}${where})`)}`;
 }
 
 /** The list variant: the value line, a dim description, and an optional dim note. */
 function describedLine(key: string, entry: RenderedSetting, note?: string): string {
   const description = KEY_DESCRIPTIONS[key];
   let line = formatLine(key, entry);
-  if (description !== undefined) line += `  ${styleText('dim', `- ${description}`)}`;
+  if (description !== undefined) line += `  ${style('dim', `- ${description}`)}`;
   return withNote(line, note);
 }
 
 /** Append a dim parenthetical note (e.g. the full-auto downgrade) when present. */
 function withNote(line: string, note?: string): string {
-  return note !== undefined ? `${line}  ${styleText('dim', `(${note})`)}` : line;
+  return note !== undefined ? `${line}  ${style('dim', `(${note})`)}` : line;
 }
 
 /**

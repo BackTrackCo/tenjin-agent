@@ -19,7 +19,7 @@ import {
 } from './hooks';
 import { MCP_SERVER_NAME, REQUEST_TOOL } from './names';
 import { runHookCommand } from './hook-command';
-import { readSpec } from './specs';
+import { readChoices, readSpec } from './specs';
 import { ROUTER_PATH } from './decision';
 import {
   claimRedirect,
@@ -124,7 +124,7 @@ const NATIVE = {
 };
 const HINT =
   'Firecrawl fits this: scrapes one public URL and returns its content as clean markdown or HTML. ' +
-  '$0.01 via https://vaaya.ai/api/run/firecrawl/scrape . ' +
+  '$0.015 via https://api.munition.io/v1/firecrawl/scrape . ' +
   'Call request({query: "https://example.test/spec", id: "k3f9-abcd"}) alone and wait for its result.';
 /**
  * The two native-call lines tenjin's `hintFor` writes (tenjin#886): before the
@@ -133,7 +133,7 @@ const HINT =
  */
 const OFFER =
   'Firecrawl fits this: scrapes one public URL and returns its content as clean markdown or HTML. ' +
-  '$0.01 via https://vaaya.ai/api/run/firecrawl/scrape .';
+  '$0.015 via https://api.munition.io/v1/firecrawl/scrape .';
 const PRECALL_HINT = `${OFFER} Call request({query: "https://example.test/spec", id: "k3f9-abcd"}) instead; native tools stay allowed for anything else.`;
 const SHORTFALL_HINT = `${OFFER} If WebFetch couldn't get this, call request({query: "https://example.test/spec", id: "k3f9-abcd"}) and wait for its result.`;
 const withHint = (hint: string) => ({ ...EXECUTE, decision: { ...EXECUTE.decision, hint } });
@@ -155,13 +155,13 @@ const EXECUTE = {
   decision: {
     action: 'execute',
     id: 'k3f9-abcd',
-    capabilityId: 'vaaya-scrape',
+    capabilityId: 'munition-scrape',
     category: 'read an exact page',
     provider: 'Firecrawl',
     capabilityDescription:
       'scrapes one public URL and returns its content as clean markdown or HTML',
-    endpoint: 'https://vaaya.ai/api/run/firecrawl/scrape',
-    providerPriceAtomic: '10000',
+    endpoint: 'https://api.munition.io/v1/firecrawl/scrape',
+    providerPriceAtomic: '15000',
     usage: 'the page URL',
     hint: HINT,
   },
@@ -279,7 +279,7 @@ describe('the prompt hook', () => {
    * to ask the user instead of using its free tools.
    */
   it.each([
-    ['above maxAutoSpend', { maxAutoSpend: '9999', confirm: 'above:9999' }],
+    ['above maxAutoSpend', { maxAutoSpend: '14999', confirm: 'above:14999' }],
     ['past the session budget', { sessionBudget: '20000' }],
   ])('says nothing when the lookup is %s', async (_label, over) => {
     const fs = await import('node:fs/promises');
@@ -813,7 +813,7 @@ describe('the pre-call hook', () => {
     await fs.writeFile(join(dir, 'config.json'), JSON.stringify(values));
   }
 
-  // What `tenjin install` writes: the fixture's 10000-atomic lookup auto-executes.
+  // What `tenjin install` writes: the fixture's 15000-atomic lookup auto-executes.
   beforeEach(async () => {
     await setConfig(ROUTER_POLICY);
   });
@@ -849,7 +849,7 @@ describe('the pre-call hook', () => {
    * still offer, since `request` can ask the user there.
    */
   it.each([
-    ['above maxAutoSpend', { maxAutoSpend: '9999', confirm: 'above:9999' }],
+    ['above maxAutoSpend', { maxAutoSpend: '14999', confirm: 'above:14999' }],
     ['past the session budget', { sessionBudget: '20000' }],
   ])('lets the main agent call run when the lookup is %s', async (_label, over) => {
     await setConfig({ ...ROUTER_POLICY, ...over });
@@ -1126,7 +1126,7 @@ describe('never redirected twice for one target', () => {
  */
 describe('a wallet that cannot cover the lookup', () => {
   it('reads one balanceOf for the wallet, and denies when it covers the price', async () => {
-    rpcAnswer = 10_000n; // the fixture's price, exactly
+    rpcAnswer = 15_000n; // the fixture's price, exactly
     const { fetchImpl } = router(EXECUTE);
     const out = await runNativeHook(await preCall('https://example.test/spec'), {
       dataDir: dir,
@@ -1155,7 +1155,7 @@ describe('a wallet that cannot cover the lookup', () => {
 
   it.each([
     ['holds no USDC', 0n],
-    ['holds less than the price', 9_999n],
+    ['holds less than the price', 14_999n],
   ])('lets the free call run, and shows no hint, when it %s', async (_label, balance) => {
     rpcAnswer = balance;
     const { fetchImpl } = router(EXECUTE);
@@ -1910,7 +1910,7 @@ describe('a subagent', () => {
    * A SUBAGENT CANNOT REACH THE USER, so an offer it would need approval for
    * is not shown at all. The same evaluation `request` runs decides it: price
    * cap, allowlist, session budget and confirm. The fixture's provider price is
-   * 10000 atomic, paid to vaaya.ai.
+   * 15000 atomic, paid to api.munition.io.
    */
   async function subagentOffer(): Promise<{ response: unknown; withheld?: true }> {
     const path = await parentTranscript();
@@ -1920,7 +1920,7 @@ describe('a subagent', () => {
   }
 
   it.each([
-    ['above maxAutoSpend', { maxAutoSpend: '9999', confirm: 'above:9999' }],
+    ['above maxAutoSpend', { maxAutoSpend: '14999', confirm: 'above:14999' }],
     [
       'to a host outside allowlistCreators',
       { allowlistCreators: ['wolframalpha.x402.paysponge.com'] },
@@ -1948,8 +1948,8 @@ describe('a subagent', () => {
 
   it.each([
     ['retired settings do not suppress offers', { confirm: 'always', bazaarPay: false }],
-    ['at maxAutoSpend', { maxAutoSpend: '10000', confirm: 'above:10000' }],
-    ['to an allowlisted host', { allowlistCreators: ['vaaya.ai'] }],
+    ['at maxAutoSpend', { maxAutoSpend: '15000', confirm: 'above:15000' }],
+    ['to an allowlisted host', { allowlistCreators: ['api.munition.io'] }],
   ])('is offered a lookup that would auto-execute, %s', async (_label, over) => {
     await setConfig({ ...ROUTER_POLICY, ...over });
     const out = await subagentOffer();
@@ -2248,7 +2248,7 @@ describe('the delegation hook', () => {
     const fs = await import('node:fs/promises');
     await fs.writeFile(
       join(dir, 'config.json'),
-      JSON.stringify({ ...ROUTER_POLICY, maxAutoSpend: '9999' }),
+      JSON.stringify({ ...ROUTER_POLICY, maxAutoSpend: '14999' }),
     );
     const { fetchImpl } = router(EXECUTE);
     const out = await runDelegationHook(await delegation(), {
@@ -2763,7 +2763,7 @@ describe('a discovered service', () => {
     });
     expect((calls[0] as { body: unknown }).body).toMatchObject({
       sessionId: 'sess-1',
-      accepts: ['discovered', 'spec'],
+      accepts: ['discovered', 'spec', 'choices'],
     });
     // The footer names the seller, and the id binds this session for `request`.
     expect(await renderProgress(dir, 'sess-1')).toContain('BlockRun');
@@ -2784,6 +2784,29 @@ describe('a discovered service', () => {
       fetchImpl,
     });
     expect(await readSpec(dir, OFFERED.decision.id)).toEqual(OFFERED.decision.specs[0]);
+    expect(await readChoices(dir, OFFERED.decision.id)).toBeNull();
+  });
+
+  /** A CHOICE SET is kept by the line's id, beside every option's spec, so
+   *  `request({id, choice})` finds the option the user picked. */
+  it('keeps the choice set of a shown offer, and every option spec', async () => {
+    const OFFERED = JSON.parse(
+      readFileSync(
+        fileURLToPath(new URL('./fixtures/wire-hook-discovered-choices.json', import.meta.url)),
+        'utf8',
+      ),
+    ) as { decision: { id: string; hint: string; specs: { id: string }[]; choices: unknown } };
+    const { fetchImpl } = router(OFFERED);
+    await runPromptHook(promptEvent('generate an image of a lighthouse at dusk'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+    expect(await readChoices(dir, OFFERED.decision.id)).toEqual({
+      choices: OFFERED.decision.choices,
+      hint: OFFERED.decision.hint,
+    });
+    for (const spec of OFFERED.decision.specs) expect(await readSpec(dir, spec.id)).toEqual(spec);
   });
 
   /** A LIST CAN NAME A SERVICE OVER THE CAP beside one that fits: People Data
@@ -2876,6 +2899,7 @@ describe('a discovered service', () => {
     expect((first.calls[0] as { body: Record<string, unknown> }).body.accepts).toEqual([
       'discovered',
       'spec',
+      'choices',
     ]);
     const fs = await import('node:fs/promises');
     await fs.writeFile(
@@ -2891,6 +2915,7 @@ describe('a discovered service', () => {
     expect((second.calls[0] as { body: Record<string, unknown> }).body.accepts).toEqual([
       'discovered',
       'spec',
+      'choices',
       'bazaar',
     ]);
   });
@@ -3168,7 +3193,7 @@ describe('a question to the user', () => {
         'You pick a track: send me a licensed track.',
     });
     expect((body.packet.current as { text: string }).text).toContain('I can get API keys');
-    expect(body).toMatchObject({ sessionId: 'sess-1', accepts: ['discovered', 'spec'] });
+    expect(body).toMatchObject({ sessionId: 'sess-1', accepts: ['discovered', 'spec', 'choices'] });
   });
 
   it('denies the question once on an offer, then lets it be asked', async () => {
