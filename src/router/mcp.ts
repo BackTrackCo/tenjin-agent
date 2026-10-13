@@ -65,6 +65,9 @@ const INSTRUCTIONS =
   'which runs it. This CLI builds and pays the call, and returns the full spec (its ' +
   'inputs, an example and what it returns) if a field is wrong; `{id}` alone returns ' +
   "the service's spec too, free. " +
+  'When a line lists choices, pick or ask as the line says, then call `{id, choice, input}`; ' +
+  'choice `all` runs every option side by side, one payment each, and returns each saved ' +
+  'result. ' +
   'Where the spec names the fields it returns, the result holds only those, and the ' +
   "provider's whole response is saved to the file at `fullResultPath`. " +
   'Before asking the user to get an API key or account for a one-off task, call it with ' +
@@ -157,9 +160,17 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
             "The JSON object the offered service takes: the line's call with its fields filled " +
               'in, sent with its id. Its spec lists every field (call with the id alone to see it).',
           ),
+        choice: z
+          .string()
+          .optional()
+          .describe(
+            'When the line lists choices: the key of the one picked as the line says, or `all` to run ' +
+              'every choice side by side, sent with the id and the input. Without an input it ' +
+              "shows that choice's spec, with nothing paid.",
+          ),
       },
     },
-    async ({ query, id, input }): Promise<CallToolResult> => {
+    async ({ query, id, input, choice }): Promise<CallToolResult> => {
       // Resolved per call, from settings read now: the refusal this tool returns
       // names `tenjin config set sessionBudget`, and a policy frozen at the
       // first call would leave that command with no effect until the harness
@@ -174,6 +185,7 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
           ...(query !== undefined ? { query } : {}),
           ...(id !== undefined ? { id } : {}),
           ...(input !== undefined ? { input } : {}),
+          ...(choice !== undefined ? { choice } : {}),
         },
         {
           ctx,

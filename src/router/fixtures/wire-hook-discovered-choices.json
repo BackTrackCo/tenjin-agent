@@ -1,0 +1,240 @@
+{
+  "schemaVersion": 1,
+  "routerVersion": "2026-10-11.1",
+  "decision": {
+    "action": "discovered",
+    "id": "0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d21",
+    "candidate": {
+      "source": "tenjin",
+      "provider": "AiSpace (Venice) (OpenAI GPT Image 2.5 Flare)",
+      "url": "https://x402.aispace.bot/api/v1/image/generate",
+      "method": "POST",
+      "description": "Frontier general-purpose images with the closest prompt following and legible text in the image; ChatGPT's current image model (model=\"gpt-image-2-5-flare\").",
+      "providerPriceAtomic": "115000",
+      "network": "eip155:8453",
+      "payTo": "0xA7f3Ad0E69F61864092FAbBa6Cee00AF6e584689",
+      "input": {
+        "location": "body",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "model": {
+              "type": "string",
+              "example": "venice-sd35",
+              "description": "Venice image model id. See GET /api/v1/models?type=image (e.g. flux-2-pro, venice-sd35, gpt-image-2).",
+              "enum": ["gpt-image-2-5-flare"],
+              "default": "gpt-image-2-5-flare"
+            },
+            "prompt": {
+              "type": "string",
+              "description": "Image description. Up to ~2000 chars."
+            },
+            "return_binary": {
+              "type": "boolean",
+              "description": "Gateway-owned. true = the image file as raw bytes instead of JSON { id, images: [base64] }. Stripped before Venice.",
+              "enum": [true]
+            }
+          },
+          "required": ["model", "prompt"]
+        }
+      }
+    },
+    "hint": "Tenjin router can run this step on any of these models, no API key needed: gpt-image-2.5 = GPT Image 2.5 Flare, closest prompt following and text in the image, $0.115; nano-banana-2.1 = Nano Banana 2.1, photoreal scenes and consistent subjects, $0.095; grok-imagine-2 = Grok Imagine Image 2.0, fast photoreal and bold stylized art, $0.043; all = every one side by side, $0.253 in total. Tenjin reviewed these listings. If the user named a model or asked to compare, use that. Otherwise, if a person is present, ask them once with your own picker (such as AskUserQuestion) which one, or all; if not, use gpt-image-2.5. Then call request({id: \"0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d21\", choice: \"<gpt-image-2.5|nano-banana-2.1|grok-imagine-2|all>\", input: {\"prompt\":\"<image description>\"}}) alone and wait for its result. When the choice is all, look at each saved file and tell the user which fits best. Tell the user which model you used through Tenjin and what it cost. The Tenjin list also has video clips, text to speech, sound effects, music, speech to text, deep research, cited answer, papers, people search, company search, linkedin, sec filings, local leads, x twitter, reddit, instagram, tiktok, ocr, pdf, screenshot, hosting, messaging; call request({query: \"<the piece you need>\"}) whenever a step needs one.",
+    "specs": [
+      {
+        "id": "0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d21",
+        "capabilityId": "discovered:tenjin:4f82993e",
+        "provider": "AiSpace (Venice) (OpenAI GPT Image 2.5 Flare)",
+        "description": "Frontier general-purpose images with the closest prompt following and legible text in the image; ChatGPT's current image model (model=\"gpt-image-2-5-flare\").",
+        "priceAtomic": "115000",
+        "priceVaries": false,
+        "maxAmountAtomic": "115000",
+        "payTo": "0xA7f3Ad0E69F61864092FAbBa6Cee00AF6e584689",
+        "network": "eip155:8453",
+        "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "request": {
+          "method": "POST",
+          "url": "https://x402.aispace.bot/api/v1/image/generate",
+          "fields": {
+            "model": "body",
+            "prompt": "body",
+            "return_binary": "body"
+          },
+          "location": "body"
+        },
+        "input": {
+          "type": "object",
+          "properties": {
+            "model": {
+              "type": "string",
+              "example": "venice-sd35",
+              "description": "Venice image model id. See GET /api/v1/models?type=image (e.g. flux-2-pro, venice-sd35, gpt-image-2).",
+              "enum": ["gpt-image-2-5-flare"],
+              "default": "gpt-image-2-5-flare"
+            },
+            "prompt": {
+              "type": "string",
+              "description": "Image description. Up to ~2000 chars."
+            },
+            "return_binary": {
+              "type": "boolean",
+              "description": "Gateway-owned. true = the image file as raw bytes instead of JSON { id, images: [base64] }. Stripped before Venice.",
+              "enum": [true]
+            }
+          },
+          "required": ["model", "prompt"]
+        },
+        "pinned": {
+          "model": "gpt-image-2-5-flare",
+          "return_binary": true
+        },
+        "example": {
+          "prompt": "A storefront sign that reads \"OPEN LATE\" in warm neon letters"
+        },
+        "returns": "the image as raw bytes (WebP), saved to disk by the client"
+      },
+      {
+        "id": "0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d22",
+        "capabilityId": "discovered:tenjin:22298aaa",
+        "provider": "AiSpace (Venice) (Google Nano Banana 2.1)",
+        "description": "Photoreal images of scenes, products and people, keeping one subject consistent across images; Google's current image model (model=\"nano-banana-2-1\").",
+        "priceAtomic": "95000",
+        "priceVaries": false,
+        "maxAmountAtomic": "95000",
+        "payTo": "0xA7f3Ad0E69F61864092FAbBa6Cee00AF6e584689",
+        "network": "eip155:8453",
+        "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "request": {
+          "method": "POST",
+          "url": "https://x402.aispace.bot/api/v1/image/generate",
+          "fields": {
+            "model": "body",
+            "prompt": "body",
+            "return_binary": "body"
+          },
+          "location": "body"
+        },
+        "input": {
+          "type": "object",
+          "properties": {
+            "model": {
+              "type": "string",
+              "example": "venice-sd35",
+              "description": "Venice image model id. See GET /api/v1/models?type=image (e.g. flux-2-pro, venice-sd35, gpt-image-2).",
+              "enum": ["nano-banana-2-1"],
+              "default": "nano-banana-2-1"
+            },
+            "prompt": {
+              "type": "string",
+              "description": "Image description. Up to ~2000 chars."
+            },
+            "return_binary": {
+              "type": "boolean",
+              "description": "Gateway-owned. true = the image file as raw bytes instead of JSON { id, images: [base64] }. Stripped before Venice.",
+              "enum": [true]
+            }
+          },
+          "required": ["model", "prompt"]
+        },
+        "pinned": {
+          "model": "nano-banana-2-1",
+          "return_binary": true
+        },
+        "example": {
+          "prompt": "A storefront sign that reads \"OPEN LATE\" in warm neon letters"
+        },
+        "returns": "the image as raw bytes (WebP), saved to disk by the client"
+      },
+      {
+        "id": "0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d23",
+        "capabilityId": "discovered:tenjin:e9f9e066",
+        "provider": "BlockRun (xAI Grok Imagine Image 2.0)",
+        "description": "Fast photoreal images and bold stylized art from xAI (model=\"xai/grok-imagine-image-2.0\").",
+        "priceAtomic": "43000",
+        "priceVaries": false,
+        "maxAmountAtomic": "43000",
+        "payTo": "0xe9030014F5DAe217d0A152f02A043567b16c1aBf",
+        "network": "eip155:8453",
+        "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "request": {
+          "method": "POST",
+          "url": "https://blockrun.ai/api/v1/images/generations",
+          "fields": {
+            "model": "body",
+            "prompt": "body",
+            "size": "body",
+            "n": "body"
+          },
+          "location": "body"
+        },
+        "input": {
+          "type": "object",
+          "required": ["prompt"],
+          "properties": {
+            "model": {
+              "type": "string",
+              "description": "Image model ID (e.g., openai/gpt-image-1, openai/gpt-image-2)",
+              "enum": ["xai/grok-imagine-image-2.0"],
+              "default": "xai/grok-imagine-image-2.0"
+            },
+            "prompt": {
+              "type": "string",
+              "description": "Text description of the image to generate"
+            },
+            "size": {
+              "type": "string",
+              "description": "Image dimensions (e.g., 1024x1024)",
+              "enum": ["1024x1024"]
+            },
+            "n": {
+              "type": "integer",
+              "description": "Number of images to generate",
+              "enum": [1]
+            }
+          }
+        },
+        "pinned": {
+          "model": "xai/grok-imagine-image-2.0",
+          "size": "1024x1024",
+          "n": 1
+        },
+        "example": {
+          "prompt": "A storefront sign that reads \"OPEN LATE\" in warm neon letters"
+        },
+        "returns": "JSON {id, created, data:[{url, backed_up}], price}: a hosted JPG URL, which the client downloads"
+      }
+    ],
+    "choices": {
+      "group": "image-frontier",
+      "default": "gpt-image-2.5",
+      "input": ["prompt"],
+      "options": [
+        {
+          "key": "gpt-image-2.5",
+          "label": "GPT Image 2.5 Flare",
+          "strength": "closest prompt following and text in the image",
+          "id": "0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d21"
+        },
+        {
+          "key": "nano-banana-2.1",
+          "label": "Nano Banana 2.1",
+          "strength": "photoreal scenes and consistent subjects",
+          "id": "0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d22"
+        },
+        {
+          "key": "grok-imagine-2",
+          "label": "Grok Imagine Image 2.0",
+          "strength": "fast photoreal and bold stylized art",
+          "id": "0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d23"
+        }
+      ],
+      "all": {
+        "totalAtomic": "253000"
+      }
+    }
+  },
+  "jev": {
+    "calls": 2,
+    "latencyMs": 1720
+  }
+}

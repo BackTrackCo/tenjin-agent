@@ -455,8 +455,9 @@ export interface LookupFooter {
   ): Promise<void>;
 }
 
-/** A footer for a session this call cannot be attributed to: it writes nothing. */
-const SILENT: LookupFooter = {
+/** A footer for a session this call cannot be attributed to, or for one step
+ *  of a call whose own footer speaks for it: it writes nothing. */
+export const SILENT_FOOTER: LookupFooter = {
   routing: async () => undefined,
   calling: async () => undefined,
   done: async () => undefined,
@@ -465,7 +466,7 @@ const SILENT: LookupFooter = {
 /**
  * The `request` tool's footer: the session is resolved ONCE, at the top of the
  * call, and each later step is one small write. An unresolvable session yields
- * {@link SILENT}, and the lookup runs exactly as it would have.
+ * {@link SILENT_FOOTER}, and the lookup runs exactly as it would have.
  */
 export async function openLookupFooter(
   dataDir: string,
@@ -476,7 +477,7 @@ export async function openLookupFooter(
     ...(opts.id !== undefined ? { id: opts.id } : {}),
     now: now(),
   }).catch(() => null);
-  if (directory === null) return SILENT;
+  if (directory === null) return SILENT_FOOTER;
   const callId = newCallId();
   const operation = opts.operation ?? 'request';
   const step = async (patch: ProgressStep): Promise<void> => {

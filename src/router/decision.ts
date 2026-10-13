@@ -198,8 +198,73 @@ export type ToolSpec = z.infer<typeof ToolSpecSchema>;
 export const OfferSpecSchema = ToolSpecSchema.extend({ id: IdSchema });
 export type OfferSpec = z.infer<typeof OfferSpecSchema>;
 
-/** One spec per service the line names: the offer and any alternative. */
-const SpecsSchema = z.array(OfferSpecSchema).min(1).max(4).optional();
+/** One spec per service the line names: the offer, any alternative, and each
+ *  option of a choice set. */
+const SpecsSchema = z.array(OfferSpecSchema).min(1).max(8).optional();
+
+/** Words this client shows the model itself, in its own line: one plain line. */
+const PlainLine = (max: number) =>
+  z
+    .string()
+    .min(1)
+    .max(max)
+    .refine((text) => !/[\p{Cc}\p{Cf}]/u.test(text), 'one plain line');
+
+/**
+ * SERVICES THE USER PICKS BETWEEN, OR RUNS ALL OF. Sent only to a build that
+ * lists `choices` in `accepts`. Each option is a real offer: its own id, its
+ * own spec in `specs`, and its own one payment, so `request({id, choice})`
+ * runs exactly the spec `request({id: option.id})` would. `all` runs every
+ * option side by side, one payment each. The set is the server's data:
+ * changing it is a deploy there, not a release here. `input` names the open
+ * fields the options share, the only ones an `all` call may carry.
+ */
+export const ChoicesSchema = z.strictObject({
+  group: PlainLine(64),
+  default: PlainLine(64),
+  input: z.array(PlainLine(64)).min(1).max(16),
+  options: z
+    .array(
+      z.strictObject({
+        key: PlainLine(64),
+        label: PlainLine(120),
+        strength: PlainLine(300),
+        id: IdSchema,
+      }),
+    )
+    .min(2)
+    .max(4),
+  all: z.strictObject({ totalAtomic: z.string().regex(/^\d+$/) }),
+});
+export type Choices = z.infer<typeof ChoicesSchema>;
+
+/** The word that runs every option, so no option may take it as its key. */
+export const ALL_CHOICES = 'all';
+
+/**
+ * A CHOICE NAMES ONLY WHAT THIS ANSWER CARRIES: each key and id once, `all`
+ * free for the whole set, a spec for every option, and the default option is
+ * the offer this answer's id already names. A set that breaks any of these is
+ * a protocol error, and the turn falls back like any unreadable answer.
+ */
+function checkChoices(
+  decision: { id: string; specs?: { id: string }[] | undefined; choices?: Choices | undefined },
+  ctx: z.RefinementCtx,
+): void {
+  const { choices } = decision;
+  if (choices === undefined) return;
+  const issue = (message: string) => ctx.addIssue({ code: 'custom', path: ['choices'], message });
+  const keys = choices.options.map((option) => option.key);
+  const ids = choices.options.map((option) => option.id);
+  if (new Set(keys).size !== keys.length) issue('each choice key is named once');
+  if (new Set(ids).size !== ids.length) issue('each choice id is named once');
+  if (keys.includes(ALL_CHOICES)) issue(`"${ALL_CHOICES}" runs every choice, so it is no key`);
+  const specIds = new Set((decision.specs ?? []).map((spec) => spec.id));
+  if (ids.some((id) => !specIds.has(id))) issue('every choice carries its spec');
+  const fallback = choices.options.find((option) => option.key === choices.default);
+  if (fallback === undefined) issue('the default is one of the choices');
+  else if (fallback.id !== decision.id) issue("the default choice is this answer's own offer");
+}
 
 /** The same answer on both calls: the hook's offer, and the tool's fallback
  *  when a query with no id found no curated capability. */
@@ -212,8 +277,10 @@ const DiscoveredSchema = z
      *  description and the input it takes. */
     hint: z.string().min(1).max(2_000),
     specs: SpecsSchema,
+    choices: ChoicesSchema.optional(),
   })
-  .superRefine(checkHint);
+  .superRefine(checkHint)
+  .superRefine(checkChoices);
 
 const HookDecisionSchema = z.discriminatedUnion('action', [
   z
@@ -299,10 +366,12 @@ export type CallKind = 'hook' | 'tool';
  * lists it, so an older build never sees one. `spec` asks for each offered
  * service's request spec beside its line, and for the picked service's spec in
  * place of a decision on a query with no id, which only a build that parses
- * them can take: the decision schemas are strict. `bazaar` widens discovery
- * to the open Bazaar and is sent only while `experimental.bazaar` is on.
+ * them can take: the decision schemas are strict. `choices` asks for a set of
+ * options the user picks between, or runs all of, beside a discovered offer.
+ * `bazaar` widens discovery to the open Bazaar and is sent only while
+ * `experimental.bazaar` is on.
  */
-export const CLIENT_ACCEPTS: readonly string[] = ['discovered', 'spec'];
+export const CLIENT_ACCEPTS: readonly string[] = ['discovered', 'spec', 'choices'];
 export const BAZAAR_ACCEPT = 'bazaar';
 
 /** The `accepts` this build sends, with the open Bazaar or without it. */

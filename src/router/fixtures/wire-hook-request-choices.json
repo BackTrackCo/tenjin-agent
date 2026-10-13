@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "sessionId": "6f1c2a9e-3b7d-4e58-9a10-2c4d6e8f0a1b",
+  "accepts": ["discovered", "spec", "choices"],
+  "packet": {
+    "current": {
+      "role": "user",
+      "text": "generate a hero image of a lighthouse at dusk for the landing page"
+    },
+    "history": [],
+    "literalUrls": [],
+    "historyStatus": "ok"
+  }
+}

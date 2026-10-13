@@ -8,14 +8,22 @@ import { resolveContextSettings } from '../lib/settings';
 import type { SpendAuthorizer, WalletProvider } from '../lib/wallet';
 import type { TenjinSigner } from '../lib/wallet/provider';
 import type { CommandContext } from '../context';
-import { buildSpecRequest, specInputProblems, specText, mergedInput } from './spec-call';
+import {
+  buildSpecRequest,
+  specInputProblems,
+  specText,
+  mergedInput,
+  type SpecRequest,
+} from './spec-call';
 import {
   claimSpecPayment,
   readSpec,
   settleSpecPayment,
+  storeChoices,
   storeFullResult,
   storeSpecs,
   type EarlierPayment,
+  type KeptChoices,
 } from './specs';
 import {
   DEADLINE_AFTER_PAYMENT_SENT,
@@ -24,9 +32,11 @@ import {
   type SpecOutcome,
   type UnpaidReason,
   type DecisionContract,
+  type DecisionDeps,
   type DecisionDiagnostics,
   type OfferSpec,
 } from './decision';
+import { pickChoice, runChoiceSet, showChoices } from './choices';
 import { FEE_REQUIRED, isFeeRequired, unpaidSentence, type RouteFor } from './fee';
 import { unpaidNotice } from './spend-question';
 import { clearRouterMemo } from './router-memo';
@@ -68,6 +78,11 @@ import { routerSettings } from './settings';
  * server, which binds the free docs lookup, the one offer with no spec, from
  * the query in code, and points any other id back to a fresh query.
  *
+ * A CHOICE SET, when a line offers one, is the user's to pick from:
+ * `request({id, choice})` runs the picked option as its own offer, under its
+ * own id, and `choice: "all"` runs every option side by side, one payment
+ * each (`choices.ts`).
+ *
  * WHAT IS CHECKED LOCALLY, BEFORE ANYTHING IS SIGNED: the input against the
  * spec's schema, the decision's arguments against the schema it carries, its success rule against the compiler, its
  * destination against the shared preflight inside `runPay`, and the amount
@@ -89,6 +104,10 @@ export interface RequestToolArgs {
    *  builds the request from the spec kept for the id; with none kept, nothing
    *  is built. Every cap still applies. */
   input?: Record<string, unknown>;
+  /** One option's key from the choice set the line offered with `id`, run as
+   *  that option's own offer under its own id, or `all` for every option side
+   *  by side, one payment each. Every cap still applies. */
+  choice?: string;
 }
 
 /** The server's own cap on `input`, serialized. */
@@ -133,12 +152,25 @@ export async function runRequestTool(
   // user marked private: nothing is sent and nothing is paid.
   const off = await routerOff(deps);
   if (off !== null) return fail('needs_input', off, { nextStep: ROUTER_OFF_NEXT_STEP });
-  const id = args.id !== undefined && args.id.length > 0 ? args.id : undefined;
+  const offered = args.id !== undefined && args.id.length > 0 ? args.id : undefined;
+  let id = offered;
   const { input } = args;
+  // A CHOICE NAMES AN OPTION OF THE SET KEPT FOR THE LINE'S ID, and from here
+  // the call is that option's own offer, under its own id: its spec, its one
+  // payment. `all` is every option, run below once the input is checked.
+  const choice = args.choice !== undefined && args.choice.length > 0 ? args.choice : undefined;
+  let set: KeptChoices | undefined;
+  if (choice !== undefined) {
+    const picked = await pickChoice(deps.ctx.dataDir, offered, choice);
+    if ('refused' in picked) return picked.refused;
+    if ('all' in picked) set = picked.all;
+    else id = picked.id;
+  }
+  if (set !== undefined && input === undefined) return showChoices(id!, set);
   // THE OFFER'S SPEC, when the hook kept one for this id: its id alone shows
   // the spec, with no network call and nothing paid, so the agent sees the
   // real inputs before it builds any.
-  const spec = id !== undefined ? await readSpec(deps.ctx.dataDir, id) : null;
+  const spec = id !== undefined && set === undefined ? await readSpec(deps.ctx.dataDir, id) : null;
   if (spec !== null && input === undefined) return showSpec(id!, spec);
   const query = (args.query ?? '').trim().slice(0, 8_000);
   if (query.length === 0 && input === undefined) {
@@ -179,8 +211,8 @@ export async function runRequestTool(
     }
     // NO SPEC KEPT FOR THE ID: it expired or was pruned, and nobody else builds
     // the call. Answered here, with no server call: one more call costs less
-    // than a guess.
-    if (spec === null) {
+    // than a guess. A set reads each option's spec itself.
+    if (spec === null && set === undefined) {
       return fail(
         'needs_input',
         'The spec for that offer is no longer kept on this machine (it expired or was pruned), so nothing was sent or paid.',
@@ -190,9 +222,10 @@ export async function runRequestTool(
   }
   // THE FOOTER, OPENED FIRST AND TRUSTED WITH NOTHING: it shows this lookup in
   // the terminal while it runs, resolved to a session through the hook's own
-  // binding for `id`, and every call on it swallows its own failure.
+  // binding for the line's id (never a chosen option's), and every call on it
+  // swallows its own failure.
   const footer = await openLookupFooter(deps.ctx.dataDir, {
-    ...(id !== undefined ? { id } : {}),
+    ...(offered !== undefined ? { id: offered } : {}),
   });
   await footer.routing();
   const settings = await resolveContextSettings(deps.ctx);
@@ -211,6 +244,12 @@ export async function runRequestTool(
     acceptsBazaar: settings.experimentalBazaar,
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   };
+
+  // EVERY OPTION OF A SET, each its own offer, checked, claimed and paid
+  // through the same steps as one, after one spend check for them all.
+  if (set !== undefined && input !== undefined) {
+    return runChoiceSet(id!, set, input, deps, footer, decisionDeps, settings);
+  }
 
   // A SPEC AND AN INPUT: the agent filled the spec's request itself, so it is
   // checked and sent here and paid straight to the provider, with no second
@@ -298,13 +337,22 @@ export async function runRequestTool(
   // second call pays through the execute path below like any other.
   if (decision.action === 'discovered') {
     await storeSpecs(deps.ctx.dataDir, decision.specs);
+    // A CHOICE SET is kept like the hook's, and its line, which names every
+    // option and the call, is the next step in place of an "also offered"
+    // line per option.
+    const { choices } = decision;
+    if (choices !== undefined) {
+      await storeChoices(deps.ctx.dataDir, decision.id, { choices, hint: decision.hint });
+    }
     await footer.done('service found');
     const picked = decision.specs?.find((spec) => spec.id === decision.id);
     if (picked !== undefined) {
+      const options = new Set(choices?.options.map((option) => option.id));
       return showSpec(
         picked.id,
         picked,
-        decision.specs!.filter((spec) => spec !== picked),
+        decision.specs!.filter((spec) => spec !== picked && !options.has(spec.id)),
+        choices !== undefined ? decision.hint : undefined,
       );
     }
     const { candidate } = decision;
@@ -406,7 +454,11 @@ function showSpec(
 
 /** A spec's id that an earlier call already claimed: nothing sent or paid,
  *  and the agent pointed at that call's result or at a new offer. */
-function alreadyPaid(id: string, spec: OfferSpec, earlier: EarlierPayment): RequestToolResult {
+export function alreadyPaid(
+  id: string,
+  spec: OfferSpec,
+  earlier: EarlierPayment,
+): RequestToolResult {
   const reason =
     earlier.state === 'paid'
       ? `This offer from ${spec.provider} was already paid for at ${earlier.at} ($${toMoney(earlier.amountAtomic).usd}${earlier.txHash !== undefined ? `, tx ${earlier.txHash}` : ''}), so nothing was paid this time. Its result is in the earlier request result for this id, and the payment is in \`tenjin payments\`.`
@@ -427,6 +479,9 @@ function alreadyPaid(id: string, spec: OfferSpec, earlier: EarlierPayment): Requ
  * filled and paid through `runPay` like any router call: the live 402's price
  * against the spec's ceiling, its payee against the spec's, and the amount
  * signed against the spend policy. Then the server is told how it ended.
+ *
+ * Three steps, which a choice set runs per option too: the checks, the claim,
+ * and the payment.
  */
 async function runSpec(
   id: string,
@@ -434,23 +489,72 @@ async function runSpec(
   input: Record<string, unknown>,
   deps: RequestToolDeps,
   footer: LookupFooter,
-  decisionDeps: { ctx: CommandContext; baseUrl: string; fetchImpl?: typeof fetch },
+  reportDeps: ReportDeps,
 ): Promise<RequestToolResult> {
+  const checked = await prepareSpec(id, spec, input, footer, reportDeps);
+  if ('refused' in checked) return checked.refused;
+  // ONE PAYMENT PER OFFER, claimed before anything is signed: a retry of this
+  // id, or a second call racing it, pays nothing. A repeat is not an outcome,
+  // so it is not reported.
+  const earlier = await claimSpecPayment(deps.ctx.dataDir, id);
+  if (earlier !== null) {
+    await footer.done('needs_input');
+    return alreadyPaid(id, spec, earlier);
+  }
+  return (await paySpec(checked.prepared, deps, footer, reportDeps)).result;
+}
+
+/** Where a spec call's outcome report goes. */
+export type ReportDeps = Pick<DecisionDeps, 'ctx' | 'baseUrl' | 'fetchImpl'>;
+
+/**
+ * EVERY CALL FROM A SPEC IS REPORTED, refused or run, so the server can tell
+ * an offer never called from one called and stopped. A refusal before payment
+ * is `unpaid` with its reason, which the server never counts as the offer
+ * taken. Fire and forget: it never holds or changes the result.
+ */
+export function reportOutcome(
+  reportDeps: ReportDeps,
+  id: string,
+  outcome: Omit<SpecOutcome, 'id' | 'ms'>,
+  startedAt: number,
+): void {
+  void reportSpecOutcome(
+    { id, ...outcome, ms: Date.now() - startedAt },
+    {
+      ctx: reportDeps.ctx,
+      baseUrl: reportDeps.baseUrl,
+      ...(reportDeps.fetchImpl !== undefined ? { fetchImpl: reportDeps.fetchImpl } : {}),
+    },
+  );
+}
+
+/** A spec's call, checked and built: what is claimed and then paid. */
+export interface PreparedSpec {
+  id: string;
+  spec: OfferSpec;
+  merged: Record<string, unknown>;
+  /** The merged input, masked: what is shown and recorded as sent. */
+  sentInput: Record<string, unknown>;
+  built: SpecRequest;
+}
+
+/**
+ * EVERY CHECK A SPEC'S CALL MEETS BEFORE ANYTHING IS CLAIMED: the input
+ * against the spec, the request it builds, and the contract a server-built
+ * call meets. Local, with nothing sent to the provider or paid; a refusal is
+ * the result to hand back, already told to the footer and reported `unpaid`.
+ */
+export async function prepareSpec(
+  id: string,
+  spec: OfferSpec,
+  input: Record<string, unknown>,
+  footer: LookupFooter,
+  reportDeps: ReportDeps,
+): Promise<{ prepared: PreparedSpec } | { refused: RequestToolResult }> {
   const startedAt = Date.now();
-  // EVERY CALL FROM A SPEC IS REPORTED, refused or run, so the server can tell
-  // an offer never called from one called and stopped. A refusal before
-  // payment is `unpaid` with its reason, which the server never counts as
-  // the offer taken. Fire and forget: it never holds or changes the result.
-  const report = (outcome: Omit<SpecOutcome, 'id' | 'ms'>): void => {
-    void reportSpecOutcome(
-      { id, ...outcome, ms: Date.now() - startedAt },
-      {
-        ctx: decisionDeps.ctx,
-        baseUrl: decisionDeps.baseUrl,
-        ...(decisionDeps.fetchImpl !== undefined ? { fetchImpl: decisionDeps.fetchImpl } : {}),
-      },
-    );
-  };
+  const unpaid = (reason: UnpaidReason): void =>
+    reportOutcome(reportDeps, id, { status: 'unpaid', reason }, startedAt);
   const merged = mergedInput(spec, input);
   const sentInput = maskDeep(merged) as Record<string, unknown>;
   // A WRONG GUESS COSTS ONE MORE CALL, NOT A PAYMENT: every problem, then the
@@ -458,29 +562,31 @@ async function runSpec(
   // required fields inside a nested object, the example, what comes back), so
   // the next call can be right. Local, with nothing sent to the provider or
   // paid.
-  const refuse = async (problem: string): Promise<RequestToolResult> => {
-    report({ status: 'unpaid', reason: 'input' });
+  const refuse = async (problem: string): Promise<{ refused: RequestToolResult }> => {
+    unpaid('input');
     await footer.done('needs_input');
     const refused = fail('needs_input', `The input does not fit ${spec.provider}: ${problem}.`, {
       nextStep: `Fix the input from the spec above and call request({id: ${JSON.stringify(id)}, input: {...}}) again; nothing was sent or paid.`,
       parameters: sentInput,
     });
-    return { ...refused, summary: `${refused.summary}\n\n${specText(id, spec)}` };
+    return { refused: { ...refused, summary: `${refused.summary}\n\n${specText(id, spec)}` } };
   };
   const problems = specInputProblems(spec, merged);
   // A SCHEMA THIS BUILD CANNOT COMPILE CHECKS NOTHING, so the call is not
   // paid: an input nobody checked is a paid guess, and no change to it helps.
   if (problems === undefined) {
-    report({ status: 'unpaid', reason: 'terms' });
+    unpaid('terms');
     await footer.done('failed');
-    return fail(
-      'failed',
-      `The spec for ${spec.provider} has an input schema this build cannot check, so the call was not sent and nothing was paid.`,
-      {
-        nextStep: 'Continue with your own tools. Nothing was sent or paid.',
-        parameters: sentInput,
-      },
-    );
+    return {
+      refused: fail(
+        'failed',
+        `The spec for ${spec.provider} has an input schema this build cannot check, so the call was not sent and nothing was paid.`,
+        {
+          nextStep: 'Continue with your own tools. Nothing was sent or paid.',
+          parameters: sentInput,
+        },
+      ),
+    };
   }
   if (problems.length) return refuse(problems.join('; '));
   const built = buildSpecRequest(spec, merged);
@@ -492,19 +598,26 @@ async function runSpec(
     ...(spec.resultSchema !== undefined ? { resultSchema: spec.resultSchema } : {}),
   });
   if (refusal !== null) {
-    report({ status: 'unpaid', reason: 'terms' });
+    unpaid('terms');
     await footer.done(refusal.status);
-    return fail(refusal.status, refusal.reason, { parameters: sentInput });
+    return { refused: fail(refusal.status, refusal.reason, { parameters: sentInput }) };
   }
-  // ONE PAYMENT PER OFFER, claimed before anything is signed: a retry of this
-  // id, or a second call racing it, pays nothing. A repeat is not an outcome,
-  // so it is not reported.
-  const earlier = await claimSpecPayment(deps.ctx.dataDir, id);
-  if (earlier !== null) {
-    await footer.done('needs_input');
-    return alreadyPaid(id, spec, earlier);
-  }
-  const { result, outcome, left } = await payAndDeliver(
+  return { prepared: { id, spec, merged, sentInput, built } };
+}
+
+/**
+ * PAY A CLAIMED SPEC'S CALL, settle its claim, and tell the server how it
+ * ended. The caller holds the claim; this is where it is kept or dropped.
+ */
+export async function paySpec(
+  prepared: PreparedSpec,
+  deps: RequestToolDeps,
+  footer: LookupFooter,
+  reportDeps: ReportDeps,
+): Promise<Awaited<ReturnType<typeof payAndDeliver>>> {
+  const { id, spec, merged, sentInput, built } = prepared;
+  const startedAt = Date.now();
+  const paid = await payAndDeliver(
     {
       capabilityId: spec.capabilityId,
       provider: spec.provider,
@@ -528,6 +641,7 @@ async function runSpec(
     deps,
     footer,
   );
+  const { outcome, left } = paid;
   // The claim survives anything that may have signed: only a call that
   // signed nothing frees the id for a fixed input.
   await settleSpecPayment(deps.ctx.dataDir, id, left);
@@ -536,8 +650,8 @@ async function runSpec(
   // which the server counts as the offer taken; a call that ran, or may have
   // moved money, keeps its own status. Null is a failure this build cannot
   // place, which says nothing rather than guess.
-  if (outcome !== null) report(outcome);
-  return result;
+  if (outcome !== null) reportOutcome(reportDeps, id, outcome, startedAt);
+  return paid;
 }
 
 /** One provider call to make and pay for, from a decision or a spec. */
@@ -1058,7 +1172,7 @@ async function saveBinary(
   }
 }
 
-type FailStatus = 'failed' | 'needs_approval' | 'needs_input' | 'native';
+export type FailStatus = 'failed' | 'needs_approval' | 'needs_input' | 'native';
 
 function checkContract(contract: DecisionContract): { status: FailStatus; reason: string } | null {
   const built = contract.request;
@@ -1229,7 +1343,11 @@ function nextStepFor(status: FailStatus, diagnostics: DecisionDiagnostics | unde
   return byReason ?? NEXT_STEP[status] ?? '';
 }
 
-function fail(status: FailStatus, reason: string, extras: FailExtras = {}): RequestToolResult {
+export function fail(
+  status: FailStatus,
+  reason: string,
+  extras: FailExtras = {},
+): RequestToolResult {
   const routine = ROUTINE.has(status);
   const { diagnostics } = extras;
   return {
