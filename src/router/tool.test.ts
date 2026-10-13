@@ -862,7 +862,7 @@ describe('the request tool in a directory where the router is off', () => {
 });
 
 /**
- * A SERVICE NOBODY CURATED. The tool's fallback answer names it and pays
+ * A SERVICE FROM THE OPEN BAZAAR. The tool's fallback answer names it and pays
  * nothing; the host's second call, with the id and its own input, comes back
  * as an ordinary execute and pays through the same path and caps as any other.
  */
@@ -872,9 +872,9 @@ describe('a discovered service', () => {
     JSON.parse(await readFile(join(fixtures, name), 'utf8')) as Record<string, unknown>;
   const SELLER = 'https://blockrun.ai/api/v1/audio/sound-effects';
   const SOUND_ID = '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d02';
-  /** The spec the hook kept for the sound-effect offer: the only way a list
+  /** The spec the hook kept for the sound-effect offer: the only way the
    *  service's call is built and paid. */
-  const kept = () =>
+  const kept = (over: Partial<OfferSpec> = {}) =>
     storeSpecs(dir, [
       {
         id: SOUND_ID,
@@ -900,6 +900,7 @@ describe('a discovered service', () => {
           additionalProperties: false,
         },
         pinned: {},
+        ...over,
       },
     ]);
 
@@ -1279,8 +1280,8 @@ describe('a discovered service', () => {
     expect(calls.some((c) => c.url.includes('10.0.0.5'))).toBe(false);
   });
 
-  /** A CURATED PAGE READ OR SEARCH NEVER DOWNLOADS what its page links to. */
-  it('downloads nothing a curated result links to', async () => {
+  /** A PAGE READ OR SEARCH NEVER DOWNLOADS what its page links to. */
+  it('downloads nothing a page read or search result links to', async () => {
     const connected: string[] = [];
     const { fetchImpl } = net([
       { url: ROUTER, status: 200, body: decision() },
@@ -1299,6 +1300,40 @@ describe('a discovered service', () => {
     expect(result.envelope).toMatchObject({ status: 'fulfilled' });
     expect(result.envelope.savedFiles).toBeUndefined();
     expect(connected).toEqual([]);
+  });
+
+  /** THE SPEC'S `output` SAYS WHETHER FILES ARE SAVED, whatever the id; a
+   *  spec without one (an open-Bazaar listing) falls back to the
+   *  `discovered:` id. */
+  it.each([
+    ['a catalog media service', { capabilityId: 'blockrun-sound-effects', output: 'media' }, 1],
+    ['a discovered id whose spec says json', { output: 'json' }, 0],
+    ['a discovered id with no output', {}, 1],
+  ] as const)('saves linked files by the spec output: %s', async (_label, over, downloads) => {
+    await kept(over);
+    const { fetchImpl } = net([
+      { url: SELLER, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge() } },
+      { url: SELLER, status: 200, body: { audio_url: 'https://cdn.example.test/out/a.mp3' } },
+    ]);
+    const connected: string[] = [];
+    const result = await runRequestTool(
+      { id: SOUND_ID, input: { text: 'whoosh' } },
+      {
+        ...deps(fetchImpl),
+        mediaTransport: async (target) => {
+          connected.push(target.url.toString());
+          return {
+            status: 200,
+            body: (async function* () {
+              yield new Uint8Array([0x49, 0x44, 0x33, 0x04]);
+            })(),
+            discard: () => undefined,
+          };
+        },
+      },
+    );
+    expect(result.envelope).toMatchObject({ status: 'fulfilled' });
+    expect(connected).toHaveLength(downloads);
   });
 
   it('keeps a JSON body inline, and a media link that cannot be fetched fails nothing', async () => {

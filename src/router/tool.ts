@@ -330,9 +330,10 @@ export async function runRequestTool(
     return showSpec(picked.id, picked, [], decision.hint);
   }
 
-  // A SERVICE NOBODY CURATED, named for the host to judge. Nothing is paid on
-  // this answer. With specs they are kept like the hook's, and the pick's own
-  // spec is shown, as for a curated pick. Without, the server's line says how
+  // A SERVICE FROM THE OPEN BAZAAR (or, from a server that predates
+  // `catalog`, a Tenjin list service), named for the host to judge. Nothing is
+  // paid on this answer. With specs they are kept like the hook's, and the
+  // pick's own spec is shown, as for a catalog pick. Without, the server's line says how
   // to call it, with the id it minted and the input the host builds, and that
   // second call pays through the execute path below like any other.
   if (decision.action === 'discovered') {
@@ -406,7 +407,7 @@ export async function runRequestTool(
       {
         capabilityId: decision.capabilityId,
         provider: decision.provider,
-        discovered: decision.category === 'discovered',
+        media: decision.category === 'discovered',
         request: contract.request,
         terms: { source: decision.provider, maxAmountAtomic: decision.providerPriceAtomic },
         requestKey: `${decision.capabilityId}:${canonicalHash(contract.arguments ?? {})}`,
@@ -621,7 +622,7 @@ export async function paySpec(
     {
       capabilityId: spec.capabilityId,
       provider: spec.provider,
-      discovered: spec.capabilityId.startsWith('discovered:'),
+      media: savesMedia(spec),
       request: built,
       terms: {
         source: spec.provider,
@@ -654,12 +655,25 @@ export async function paySpec(
   return paid;
 }
 
+/**
+ * WHETHER A PAID RESULT'S FILES ARE SAVED: the spec's `output` says, and a
+ * spec without one (an open-Bazaar listing, or a former Tenjin list service
+ * from a server that predates `catalog`) is media when its id is a
+ * `discovered:` one, as before.
+ */
+function savesMedia(spec: Pick<OfferSpec, 'capabilityId' | 'output'>): boolean {
+  return spec.output !== undefined
+    ? spec.output === 'media'
+    : spec.capabilityId.startsWith('discovered:');
+}
+
 /** One provider call to make and pay for, from a decision or a spec. */
 interface ProviderCall {
   capabilityId: string;
   provider: string;
-  /** A discovered service: a paid media result's links are saved locally. */
-  discovered: boolean;
+  /** A media service: a paid result's links and inline files are saved
+   *  locally ({@link savesMedia}). */
+  media: boolean;
   request: { url: string; method: string; headers: Record<string, string>; body?: string };
   terms: AdvertisedTerms;
   requestKey: string;
@@ -754,11 +768,10 @@ async function payAndDeliver(
         : null;
     // AND A PAID MEDIA RESULT THAT LINKS TO ITS FILES brings them home: the
     // links can expire, and the user paid for what is behind them. Only a
-    // discovered service (where generated images, audio and video come from)
-    // does this: a curated page read or search links whatever the page links,
-    // on hosts the page picked. The answer carries no finer media kind, so the
-    // category is the line. Best effort only.
-    const media = providerAtomic > 0n && binary === null && call.discovered;
+    // media service (where generated images, audio and video come from) does
+    // this: a page read or search links whatever the page links, on hosts the
+    // page picked. Best effort only.
+    const media = providerAtomic > 0n && binary === null && call.media;
     // ONE CARRYING ITS FILES INLINE, as base64 in its JSON, has them saved
     // the same way, each replaced by a note naming its file: megabytes of
     // base64 are no use to the agent as text. The rewritten body is the one
