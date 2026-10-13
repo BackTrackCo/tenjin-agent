@@ -35,7 +35,12 @@ describe('useEnvProxy', () => {
     expect(useEnvProxy({ HTTPS_PROXY: 'not a url' }, setGlobal)).toBe('invalid');
   });
 
-  it('finds the real function on this runtime', () => {
-    expect(envProxySupported()).toBe(true);
-  });
+  // Node 24.14 added it. CI also runs the 22 floor, where it is absent.
+  const [major = 0, minor = 0] = process.versions.node.split('.').map(Number);
+  it.runIf(major > 24 || (major === 24 && minor >= 14))(
+    'finds the real function on Node 24.14+',
+    () => {
+      expect(envProxySupported()).toBe(true);
+    },
+  );
 });

@@ -1,5 +1,3 @@
-import { styleText } from 'node:util';
-import { Stream } from 'node:stream';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -43,7 +41,7 @@ import { tryOriginOf, trimSlash } from '../lib/url';
 import { configPath, dataDir as resolveDataDir, loopDbPath } from '../lib/paths';
 import { toMoney } from '../lib/money';
 import { walletFileExists } from '../lib/wallet/store';
-import { sanitizeForTerminal } from '../lib/output';
+import { paint, sanitizeForTerminal } from '../lib/output';
 import { modeGatedPointer, recommendedPermissions } from '../lib/permissions';
 import {
   applyGrantDecline,
@@ -482,8 +480,9 @@ export async function runDoctorPrune(ctx: CommandContext): Promise<CommandResult
 
 function checkNode(): BuiltCheck {
   const version = process.versions.node;
-  const major = Number.parseInt(version.split('.')[0] ?? '0', 10);
-  if (major >= 24) {
+  // 22.13 is the first Node 22 with `node:sqlite` unflagged, which the loop store needs.
+  const [major = 0, minor = 0] = version.split('.').map((part) => Number.parseInt(part, 10));
+  if (major > 22 || (major === 22 && minor >= 13)) {
     return { result: { name: 'node', status: 'ok', required: true, detail: version } };
   }
   return {
@@ -491,8 +490,8 @@ function checkNode(): BuiltCheck {
       name: 'node',
       status: 'fail',
       required: true,
-      detail: `${version}, below the 24 this CLI needs`,
-      fix: 'Install Node 24 or newer.',
+      detail: `${version}, below the 22.13 this CLI needs`,
+      fix: 'Install Node 22.13 or newer.',
     },
     failCode: 'NODE_UNSUPPORTED',
   };
@@ -529,7 +528,7 @@ function checkLoopDb(dir: string, open: typeof openLoopDbForCli): BuiltCheck[] {
           name: 'store',
           status: 'fail',
           required: true,
-          // Anyone reading this already cleared the >=24 preflight in src/index.ts,
+          // Anyone reading this already cleared the 22.13 node check above,
           // so "upgrade Node" cannot be the remedy: the runtime is supported and
           // the open still failed, which points at the install — a damaged or
           // re-bundled dist (tsup once shipped `import("sqlite")`,
@@ -1818,16 +1817,6 @@ function tally(checks: CheckResult[]): string {
     ...(count('fail') > 0 ? [`${count('fail')} fail`] : []),
   ];
   return `${checks.length} checks: ${parts.join(', ')}.`;
-}
-
-/**
- * Color for stderr, honoring NO_COLOR and the target's color depth: styleText
- * takes the stderr stream when it is a genuine Stream (it throws on anything
- * else, so a test/redirected sink falls back to the default plain check).
- */
-function paint(io: Io, format: Parameters<typeof styleText>[0], text: string): string {
-  if (io.stdout instanceof Stream) return styleText(format, text, { stream: io.stdout });
-  return styleText(format, text);
 }
 
 function infoVersion(json: unknown): string | undefined {

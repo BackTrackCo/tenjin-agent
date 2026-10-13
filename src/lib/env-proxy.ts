@@ -5,7 +5,7 @@ export const PROXY_VARIABLES = ['HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'htt
 
 type SetGlobalProxy = (env: NodeJS.ProcessEnv) => () => void;
 
-/** Node 24.14 added it; `engines` still admits 24.0, where it is absent. */
+/** Node 24.14 added it. `engines` admits 22.0, where it is absent. */
 const nodeSetGlobalProxy = (http as { setGlobalProxyFromEnv?: SetGlobalProxy })
   .setGlobalProxyFromEnv;
 

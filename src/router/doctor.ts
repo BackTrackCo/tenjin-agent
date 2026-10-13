@@ -93,7 +93,7 @@ export interface RouterDoctorDeps {
   now?: () => number;
 }
 
-const NODE_FLOOR = 24;
+const NODE_FLOOR = 22;
 
 export async function runRouterDoctor(
   ctx: CommandContext,
