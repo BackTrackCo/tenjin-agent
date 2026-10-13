@@ -209,9 +209,9 @@ Examples:
   // both are off unless stdout is a TTY: the link dies in ~5 minutes, so a piped
   // run takes it off stderr immediately rather than off a poll that outlives it.
   addGlobalFlags(wallet.command('fund [amountUsd]'))
-    .summary('card-fund this wallet through Coinbase Onramp')
+    .summary('fund this wallet through a checkout link for your region')
     .description(
-      'Mint a Coinbase Onramp checkout link bound to THIS wallet, open it in the browser, and wait for the USDC to land on Base. Minting moves no money: a human completes the payment on pay.coinbase.com.',
+      'Get a checkout link for THIS wallet, open it in the browser, and wait for the USDC to land on Base. In the US: Apple Pay or Google Pay with no Coinbase account. Elsewhere: your Coinbase account. The link moves no money: a human completes the payment.',
     )
     .option('--no-open', 'print the checkout link without opening a browser')
     .option('--no-qr', 'skip the QR code of the address for sending USDC from a phone')
