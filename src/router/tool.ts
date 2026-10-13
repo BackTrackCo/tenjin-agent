@@ -30,6 +30,7 @@ import {
   reportSpecOutcome,
   requestDecision,
   type SpecOutcome,
+  type UnpaidReason,
   type DecisionContract,
   type DecisionDeps,
   type DecisionDiagnostics,
@@ -41,6 +42,7 @@ import { unpaidNotice } from './spend-question';
 import { clearRouterMemo } from './router-memo';
 import { loadRawConfig } from '../lib/config';
 import { openLookupFooter, type LookupFooter } from './progress';
+import { saveInlineMedia } from './inline-media';
 import {
   appendPaidRecord,
   MAX_MEDIA_FILES,
@@ -489,10 +491,11 @@ async function runSpec(
   footer: LookupFooter,
   reportDeps: ReportDeps,
 ): Promise<RequestToolResult> {
-  const checked = await prepareSpec(id, spec, input, footer);
+  const checked = await prepareSpec(id, spec, input, footer, reportDeps);
   if ('refused' in checked) return checked.refused;
   // ONE PAYMENT PER OFFER, claimed before anything is signed: a retry of this
-  // id, or a second call racing it, pays nothing.
+  // id, or a second call racing it, pays nothing. A repeat is not an outcome,
+  // so it is not reported.
   const earlier = await claimSpecPayment(deps.ctx.dataDir, id);
   if (earlier !== null) {
     await footer.done('needs_input');
@@ -503,6 +506,28 @@ async function runSpec(
 
 /** Where a spec call's outcome report goes. */
 export type ReportDeps = Pick<DecisionDeps, 'ctx' | 'baseUrl' | 'fetchImpl'>;
+
+/**
+ * EVERY CALL FROM A SPEC IS REPORTED, refused or run, so the server can tell
+ * an offer never called from one called and stopped. A refusal before payment
+ * is `unpaid` with its reason, which the server never counts as the offer
+ * taken. Fire and forget: it never holds or changes the result.
+ */
+export function reportOutcome(
+  reportDeps: ReportDeps,
+  id: string,
+  outcome: Omit<SpecOutcome, 'id' | 'ms'>,
+  startedAt: number,
+): void {
+  void reportSpecOutcome(
+    { id, ...outcome, ms: Date.now() - startedAt },
+    {
+      ctx: reportDeps.ctx,
+      baseUrl: reportDeps.baseUrl,
+      ...(reportDeps.fetchImpl !== undefined ? { fetchImpl: reportDeps.fetchImpl } : {}),
+    },
+  );
+}
 
 /** A spec's call, checked and built: what is claimed and then paid. */
 export interface PreparedSpec {
@@ -517,23 +542,28 @@ export interface PreparedSpec {
 /**
  * EVERY CHECK A SPEC'S CALL MEETS BEFORE ANYTHING IS CLAIMED: the input
  * against the spec, the request it builds, and the contract a server-built
- * call meets. Local, with nothing sent or paid; a refusal is the result to
- * hand back, already told to the footer.
+ * call meets. Local, with nothing sent to the provider or paid; a refusal is
+ * the result to hand back, already told to the footer and reported `unpaid`.
  */
 export async function prepareSpec(
   id: string,
   spec: OfferSpec,
   input: Record<string, unknown>,
   footer: LookupFooter,
+  reportDeps: ReportDeps,
 ): Promise<{ prepared: PreparedSpec } | { refused: RequestToolResult }> {
+  const startedAt = Date.now();
+  const unpaid = (reason: UnpaidReason): void =>
+    reportOutcome(reportDeps, id, { status: 'unpaid', reason }, startedAt);
   const merged = mergedInput(spec, input);
   const sentInput = maskDeep(merged) as Record<string, unknown>;
   // A WRONG GUESS COSTS ONE MORE CALL, NOT A PAYMENT: every problem, then the
   // whole spec (each input with its description and allowed values, the
   // required fields inside a nested object, the example, what comes back), so
-  // the next call can be right. Local, with no server call and nothing sent
-  // or paid.
+  // the next call can be right. Local, with nothing sent to the provider or
+  // paid.
   const refuse = async (problem: string): Promise<{ refused: RequestToolResult }> => {
+    unpaid('input');
     await footer.done('needs_input');
     const refused = fail('needs_input', `The input does not fit ${spec.provider}: ${problem}.`, {
       nextStep: `Fix the input from the spec above and call request({id: ${JSON.stringify(id)}, input: {...}}) again; nothing was sent or paid.`,
@@ -545,6 +575,7 @@ export async function prepareSpec(
   // A SCHEMA THIS BUILD CANNOT COMPILE CHECKS NOTHING, so the call is not
   // paid: an input nobody checked is a paid guess, and no change to it helps.
   if (problems === undefined) {
+    unpaid('terms');
     await footer.done('failed');
     return {
       refused: fail(
@@ -567,6 +598,7 @@ export async function prepareSpec(
     ...(spec.resultSchema !== undefined ? { resultSchema: spec.resultSchema } : {}),
   });
   if (refusal !== null) {
+    unpaid('terms');
     await footer.done(refusal.status);
     return { refused: fail(refusal.status, refusal.reason, { parameters: sentInput }) };
   }
@@ -613,21 +645,12 @@ export async function paySpec(
   // The claim survives anything that may have signed: only a call that
   // signed nothing frees the id for a fixed input.
   await settleSpecPayment(deps.ctx.dataDir, id, left);
-  // REPORTED ONLY WHEN THE CALL RAN OR MONEY LEFT: a refusal before payment
-  // (the spend policy, the spec's terms, the provider's own 4xx) took nothing
-  // from the offer, and the server would count it as the offer taken.
-  const ran =
-    outcome.status === 'fulfilled' || outcome.status === 'unverified' || left.amountAtomic > 0n;
-  if (ran) {
-    void reportSpecOutcome(
-      { id, ...outcome, ms: Date.now() - startedAt },
-      {
-        ctx: reportDeps.ctx,
-        baseUrl: reportDeps.baseUrl,
-        ...(reportDeps.fetchImpl !== undefined ? { fetchImpl: reportDeps.fetchImpl } : {}),
-      },
-    );
-  }
+  // A refusal before payment (the spend policy, the spec's terms, the
+  // provider's own 4xx) arrives as `unpaid` or `needs_approval`, neither of
+  // which the server counts as the offer taken; a call that ran, or may have
+  // moved money, keeps its own status. Null is a failure this build cannot
+  // place, which says nothing rather than guess.
+  if (outcome !== null) reportOutcome(reportDeps, id, outcome, startedAt);
   return paid;
 }
 
@@ -660,7 +683,8 @@ interface ProviderCall {
  * PAY THE PROVIDER AND DELIVER WHAT CAME BACK: `runPay` under the caller's
  * terms, the binary or media result saved, the ledger written, and the
  * envelope the host reads, with what was sent on every outcome. `outcome` is
- * the short form the server's report takes.
+ * the short form the server's report takes, null for a failure
+ * {@link failureOutcome} cannot place.
  */
 async function payAndDeliver(
   call: ProviderCall,
@@ -668,7 +692,7 @@ async function payAndDeliver(
   footer: LookupFooter,
 ): Promise<{
   result: RequestToolResult;
-  outcome: Omit<SpecOutcome, 'id' | 'ms'>;
+  outcome: Omit<SpecOutcome, 'id' | 'ms'> | null;
   /** What left this machine for the call, whatever came back. `signed`: a
    *  payment may have been signed, even where the amount is unknown. */
   left: { amountAtomic: bigint; txHash?: string; signed: boolean };
@@ -734,25 +758,45 @@ async function payAndDeliver(
     // does this: a curated page read or search links whatever the page links,
     // on hosts the page picked. The answer carries no finer media kind, so the
     // category is the line. Best effort only.
-    const linked =
-      providerAtomic > 0n && binary === null && call.discovered
-        ? await saveMedia(
-            deps.ctx.dataDir,
-            call.capabilityId,
-            mediaUrlsIn(data.bodyText ?? '', MAX_MEDIA_FILES),
-            {
-              ...(deps.mediaTransport !== undefined ? { transport: deps.mediaTransport } : {}),
-              ...(deps.payDeps?.destination !== undefined
-                ? { destination: deps.payDeps.destination }
-                : {}),
+    const media = providerAtomic > 0n && binary === null && call.discovered;
+    // ONE CARRYING ITS FILES INLINE, as base64 in its JSON, has them saved
+    // the same way, each replaced by a note naming its file: megabytes of
+    // base64 are no use to the agent as text. The rewritten body is the one
+    // cut, saved and handed back below; on any failure it is the body as it
+    // came.
+    const inline =
+      media && data.bodyText !== undefined
+        ? await saveInlineMedia(data.bodyText, async (bytes, contentType) => {
+            const saved = await saveBinary(deps.ctx.dataDir, call.capabilityId, bytes, {
+              contentType,
               ...(deps.now !== undefined ? { now: deps.now } : {}),
-            },
-          )
-        : [];
-    const savedFiles = [...(binary?.savedTo !== undefined ? [binary.savedTo] : []), ...linked];
+            });
+            return saved.savedTo ?? null;
+          })
+        : null;
+    const bodyText = inline?.bodyText ?? data.bodyText;
+    const linked = media
+      ? await saveMedia(
+          deps.ctx.dataDir,
+          call.capabilityId,
+          mediaUrlsIn(bodyText ?? '', MAX_MEDIA_FILES - (inline?.savedFiles.length ?? 0)),
+          {
+            ...(deps.mediaTransport !== undefined ? { transport: deps.mediaTransport } : {}),
+            ...(deps.payDeps?.destination !== undefined
+              ? { destination: deps.payDeps.destination }
+              : {}),
+            ...(deps.now !== undefined ? { now: deps.now } : {}),
+          },
+        )
+      : [];
+    const savedFiles = [
+      ...(binary?.savedTo !== undefined ? [binary.savedTo] : []),
+      ...(inline?.savedFiles ?? []),
+      ...linked,
+    ];
     const cut =
-      binary === null && call.project !== undefined && data.bodyText !== undefined
-        ? await projected(deps.ctx.dataDir, call.project, data.bodyText)
+      binary === null && call.project !== undefined && bodyText !== undefined
+        ? await projected(deps.ctx.dataDir, call.project, bodyText)
         : null;
     if (providerAtomic > 0n) {
       await appendPaidRecord(
@@ -771,7 +815,7 @@ async function payAndDeliver(
       cost: costLines(providerAtomic),
       ...(data.settlementTxHash !== undefined ? { settlementTxHash: data.settlementTxHash } : {}),
       ...(call.note !== undefined ? { note: call.note } : {}),
-      result: binary ?? cut?.result ?? data.bodyText ?? '',
+      result: binary ?? cut?.result ?? bodyText ?? '',
       ...(cut !== null ? { fullResultPath: cut.fullResultPath } : {}),
       ...(savedFiles.length > 0 ? { savedFiles } : {}),
       providerContentUntrusted: true,
@@ -827,6 +871,8 @@ async function payAndDeliver(
       diagnosis?: Record<string, unknown>;
       status?: number;
       providerError?: string;
+      /** The seller's reason for not settling, from its payment-response header. */
+      settlementError?: string;
       authorization?: SignedAuthorization;
       /** The live 402's terms, on a REGISTRY_MISMATCH. */
       live?: { amount?: string };
@@ -877,12 +923,17 @@ async function payAndDeliver(
         }),
       );
     }
+    const signed = signing.mayHaveSigned();
+    const outcome = failureOutcome(err, { mayHaveMoved: leftAtomic > 0n || signed, rejectedInput });
     return {
-      left: { amountAtomic: leftAtomic, signed: signing.mayHaveSigned() },
-      outcome: {
-        status,
-        ...(typeof detail.status === 'number' ? { httpStatus: detail.status } : {}),
-      },
+      left: { amountAtomic: leftAtomic, signed },
+      outcome:
+        outcome === null
+          ? null
+          : {
+              ...outcome,
+              ...(typeof detail.status === 'number' ? { httpStatus: detail.status } : {}),
+            },
       result: fail(status, reason, {
         providerAtomic: leftAtomic,
         ...(detail.settlement !== undefined ? { settlement: detail.settlement } : {}),
@@ -893,6 +944,11 @@ async function payAndDeliver(
         ...(typeof detail.status === 'number' ? { providerStatus: detail.status } : {}),
         ...(typeof detail.providerError === 'string'
           ? { providerError: detail.providerError }
+          : {}),
+        // THE SELLER SAID IT DID NOT SETTLE, and why: what an empty `{}` body
+        // beside a rejected payment leaves out.
+        ...(typeof detail.settlementError === 'string'
+          ? { settlementError: detail.settlementError }
           : {}),
         // WHAT WAS SENT, on a failure too: the agent cannot match a 400 to a
         // field it cannot see.
@@ -963,6 +1019,63 @@ function watchSigning(inner: SpendAuthorizer): {
     },
     mayHaveSigned: () => committed || (reserved && !released),
   };
+}
+
+/**
+ * WHAT THE SERVER IS TOLD ABOUT A CALL THAT THREW, from the error alone.
+ * Money that may have moved is a call that ran, whatever stopped it: `failed`,
+ * never `unpaid`. The spend policy keeps its own `needs_approval`. Anything
+ * else stopped before a signature, and the reason says which side stopped it:
+ * the agent's input, the deal (the live 402 against the spec, or a request
+ * this build will not send), the provider's answer, the network, or the
+ * wallet. Null for a failure none of those describe, such as a bug here.
+ */
+export function failureOutcome(
+  err: unknown,
+  facts: {
+    /** An amount left, or the spend gate saw a payment that may have. */
+    mayHaveMoved: boolean;
+    /** The provider refused an input the agent built, before any payment. */
+    rejectedInput: boolean;
+  },
+): { status: 'failed' | 'needs_approval' } | { status: 'unpaid'; reason: UnpaidReason } | null {
+  if (facts.mayHaveMoved) return { status: 'failed' };
+  if (!(err instanceof CliError)) return null;
+  if (err.code === 'POLICY_REFUSED') return { status: 'needs_approval' };
+  const unpaid = (reason: UnpaidReason) => ({ status: 'unpaid' as const, reason });
+  if (facts.rejectedInput) return unpaid('input');
+  const detail = (err.details ?? {}) as { reason?: unknown; walletUnavailable?: unknown };
+  if (
+    detail.walletUnavailable === true ||
+    detail.reason === 'insufficient_funds' ||
+    detail.reason === 'balance_unavailable'
+  ) {
+    return unpaid('wallet');
+  }
+  switch (err.code) {
+    // REGISTRY_MISMATCH: the live 402 is not the spec's deal, including a
+    // varying price over its ceiling. PAYMENT_FAILED before a signature: no
+    // entry this wallet can pay, or a price or deal that changed on the
+    // re-check. USAGE and REFUSED: a request this build will not send.
+    case 'REGISTRY_MISMATCH':
+    case 'PAYMENT_FAILED':
+    case 'REFUSED':
+    case 'USAGE':
+      return unpaid('terms');
+    // A transport failure or a timeout: no answer came back.
+    case 'NETWORK_ERROR':
+      return unpaid('unreachable');
+    // AN ANSWER THAT WAS NOT A USABLE 402. API_UNREACHABLE from the provider
+    // leg always carries one (another status, or a redirect this build will
+    // not follow); a transport failure is NETWORK_ERROR. The others: a
+    // challenge this build cannot read, or a free body that missed its rule.
+    case 'API_UNREACHABLE':
+    case 'CONTRACT_MISMATCH':
+    case 'CHALLENGE_TOO_LARGE':
+      return unpaid('provider');
+    default:
+      return null;
+  }
 }
 
 /** One ledger line for a paid call; the settlement is known only with a tx. */
@@ -1195,6 +1308,9 @@ interface FailExtras {
   providerStatus?: number;
   /** The start of that answer's body, bounded and redacted. Provider content. */
   providerError?: string;
+  /** Why the seller says it did not settle a signed payment, bounded and
+   *  redacted. Provider content. */
+  settlementError?: string;
   /** The backend's own stable error code, from a typed non-2xx body. */
   errorCode?: string;
   /** What stopped a non-execute decision, in the backend's own terms. */
@@ -1262,6 +1378,7 @@ export function fail(
       ...(extras.diagnosis !== undefined ? { diagnosis: extras.diagnosis } : {}),
       ...(extras.providerStatus !== undefined ? { providerStatus: extras.providerStatus } : {}),
       ...(extras.providerError !== undefined ? { providerError: extras.providerError } : {}),
+      ...(extras.settlementError !== undefined ? { settlementError: extras.settlementError } : {}),
       ...(extras.request !== undefined ? { request: extras.request } : {}),
       ...(extras.parameters !== undefined ? { parameters: extras.parameters } : {}),
       providerContentUntrusted: true,

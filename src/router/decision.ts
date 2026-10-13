@@ -589,11 +589,20 @@ export async function requestDecision(
   return readDecision(response, schema);
 }
 
+/** Why a call from a spec stopped before anything was signed: the input did
+ *  not fit, the live terms were not the spec's, the provider answered
+ *  something else, it could not be reached, or the wallet could not pay. */
+export type UnpaidReason = 'input' | 'terms' | 'provider' | 'unreachable' | 'wallet';
+
 /** How a call run from a request spec ended, for the server's offer-to-call
  *  count. No text: the id, the outcome, the provider's status and the time. */
 export interface SpecOutcome {
   id: string;
-  status: 'fulfilled' | 'unverified' | 'failed' | 'needs_approval';
+  /** `unpaid`: stopped before anything was signed, which the server never
+   *  counts as the offer taken. */
+  status: 'fulfilled' | 'unverified' | 'failed' | 'needs_approval' | 'unpaid';
+  /** On `unpaid` only, where the server requires it. */
+  reason?: UnpaidReason;
   httpStatus?: number;
   ms?: number;
 }
@@ -603,9 +612,9 @@ export const OUTCOME_TIMEOUT_MS = 3_000;
 
 /**
  * TELL THE SERVER A SPEC WAS USED. The client called and paid the provider
- * itself, so this is the only word the server gets that its offer was taken.
- * Never throws and never waits on anything the caller needs: a lost report
- * costs one count.
+ * itself, so this is the only word the server gets that its offer was taken,
+ * or that a call for it stopped before payment and why. Never throws and never
+ * waits on anything the caller needs: a lost report costs one count.
  */
 export async function reportSpecOutcome(
   outcome: SpecOutcome,
@@ -630,6 +639,7 @@ export function buildOutcomeBody(outcome: SpecOutcome): Record<string, unknown> 
     schemaVersion: 1,
     id: outcome.id,
     status: outcome.status,
+    ...(outcome.reason !== undefined ? { reason: outcome.reason } : {}),
     ...(outcome.httpStatus !== undefined ? { httpStatus: outcome.httpStatus } : {}),
     ...(outcome.ms !== undefined ? { ms: Math.max(0, Math.round(outcome.ms)) } : {}),
   };

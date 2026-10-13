@@ -4,7 +4,7 @@ import { policyFix } from '../lib/spend-gate';
 import { readSpendSummary, spentOf } from '../lib/spend-ledger';
 import { readUsdcBalanceWithFallback } from '../lib/usdc-balance';
 import { resolveWalletProvider } from '../lib/wallet';
-import { ALL_CHOICES, type Choices } from './decision';
+import { ALL_CHOICES, type Choices, type SpecOutcome } from './decision';
 import { SILENT_FOOTER, type LookupFooter } from './progress';
 import {
   claimSpecPayment,
@@ -20,6 +20,7 @@ import {
   fail,
   paySpec,
   prepareSpec,
+  reportOutcome,
   type FailStatus,
   type PreparedSpec,
   type ReportDeps,
@@ -156,6 +157,15 @@ export async function runChoiceSet(
 ): Promise<RequestToolResult> {
   const { dataDir } = deps.ctx;
   const { choices } = kept;
+  const startedAt = Date.now();
+  // A set stopped before payment is reported once per choice, as each
+  // choice's own offer would be.
+  const stopped = (
+    options: readonly { id: string }[],
+    outcome: Omit<SpecOutcome, 'id' | 'ms'>,
+  ): void => {
+    for (const option of options) reportOutcome(reportDeps, option.id, outcome, startedAt);
+  };
   const again = `request({id: ${JSON.stringify(id)}, choice: "${ALL_CHOICES}", input: {...}})`;
   const refuse = async (
     status: FailStatus,
@@ -168,6 +178,7 @@ export async function runChoiceSet(
 
   const extra = Object.keys(input).filter((name) => !choices.input.includes(name));
   if (extra.length) {
+    stopped(choices.options, { status: 'unpaid', reason: 'input' });
     return refuse(
       'needs_input',
       `Running all the choices takes only ${choices.input.join(', ')}, not ${extra.join(', ')}.`,
@@ -186,7 +197,7 @@ export async function runChoiceSet(
         'Call request({query}) with the task for a fresh offer, then fill its line.',
       );
     }
-    const checked = await prepareSpec(option.id, spec, input, SILENT_FOOTER);
+    const checked = await prepareSpec(option.id, spec, input, SILENT_FOOTER, reportDeps);
     if ('refused' in checked) {
       const { status, reason } = checked.refused.envelope as { status: FailStatus; reason: string };
       return refuse(
@@ -250,6 +261,10 @@ export async function runChoiceSet(
   );
   if (evaluation.decision !== 'allow') {
     await release();
+    stopped(
+      claimed.map(({ option }) => option),
+      { status: 'needs_approval' },
+    );
     return refuse(
       'needs_approval',
       `Running ${claimed.length} choices costs up to $${toMoney(ceiling.toString()).usd}: ${evaluation.message} ${policyFix(evaluation.reason, 'this host')}`,
@@ -264,6 +279,10 @@ export async function runChoiceSet(
   const balance = await walletBalance(deps, settings.rpcUrl);
   if (balance !== null && balance < ceiling) {
     await release();
+    stopped(
+      claimed.map(({ option }) => option),
+      { status: 'unpaid', reason: 'wallet' },
+    );
     return refuse(
       'failed',
       `Running ${claimed.length} choices costs up to $${toMoney(ceiling.toString()).usd}, and the wallet holds $${toMoney(balance.toString()).usd}. The wallet has insufficient USDC; no payment was signed. Fund this wallet on Base with \`tenjin wallet fund\` before paying.`,

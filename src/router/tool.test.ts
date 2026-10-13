@@ -5,12 +5,13 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildPaymentRequired, testWalletProvider } from '../lib/read-test-utils';
+import { CliError } from '../lib/errors';
 import { resolveSpendAuthorizer } from '../lib/wallet';
 import type { SpendAuthorization, SpendAuthorizer } from '../lib/wallet';
 import type { CommandContext } from '../context';
 import { runPay } from '../commands/pay';
 import { MAX_BODY_BYTES } from '../lib/request-schema';
-import { extensionFor, runRequestTool } from './tool';
+import { extensionFor, failureOutcome, runRequestTool } from './tool';
 import type { MediaTransport } from './paid';
 import { storeChoices, storeSpecs } from './specs';
 import {
@@ -536,6 +537,35 @@ describe('a paid call the provider refused', () => {
     expect(snippet).not.toMatch(/[\p{Cc}\u202e]/u);
     expect(Array.from(snippet)).toHaveLength(501);
     expect(snippet.endsWith('…')).toBe(true);
+  });
+
+  it("hands the agent the seller's reason when it says it did not settle", async () => {
+    const said = 'Facilitator settle failed (402): A valid payment method is required.';
+    const settle = Buffer.from(
+      JSON.stringify({ success: false, errorReason: said, transaction: '' }),
+    ).toString('base64');
+    const result = await refused({
+      status: 402,
+      body: {},
+      headers: { 'PAYMENT-RESPONSE': settle },
+    });
+    expect(result.envelope).toMatchObject({
+      status: 'failed',
+      providerStatus: 402,
+      providerError: '{}',
+      settlementError: said,
+      settlement: 'unknown',
+      cost: ['provider price 0.01 USD'],
+    });
+    expect(String(result.envelope.reason)).toContain(
+      'The endpoint did not settle the payment: Facilitator settle failed (402)',
+    );
+    expect(String(result.envelope.reason)).toContain('Use a different service');
+  });
+
+  it('carries no settlementError when the seller sent no payment-response header', async () => {
+    const result = await refused({ body: { success: false, error: REASON } });
+    expect(result.envelope).not.toHaveProperty('settlementError');
   });
 });
 
@@ -1284,6 +1314,48 @@ describe('a discovered service', () => {
     expect(result.envelope.result).toBe(JSON.stringify({ url: 'https://cdn.example.test/a.mp3' }));
   });
 
+  /** THE FILE INSIDE THE JSON: agent402's Veo answered with the video as
+   *  4.2 MB of base64, which reached the agent whole with nothing saved. */
+  it('saves a video returned inline as base64, and hands back a note naming the file', async () => {
+    await kept();
+    const video = new Uint8Array(64 * 1024).fill(0x2a);
+    video.set([0x00, 0x00, 0x00, 0x18, ...Buffer.from('ftypisom')]);
+    const b64 = Buffer.from(video).toString('base64');
+    const { fetchImpl } = net([
+      { url: SELLER, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge() } },
+      {
+        url: SELLER,
+        status: 200,
+        body: { data: [{ b64_json: b64, media_type: 'video/mp4', duration_seconds: 4 }] },
+      },
+    ]);
+    const result = await runRequestTool(
+      { id: '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d02', input: { text: 'a whoosh, as video' } },
+      deps(fetchImpl),
+    );
+    expect(result.envelope).toMatchObject({ status: 'fulfilled' });
+    const savedFiles = result.envelope.savedFiles as string[];
+    expect(savedFiles).toHaveLength(1);
+    expect(savedFiles[0]!.startsWith(join(dir, 'downloads'))).toBe(true);
+    expect(savedFiles[0]!.endsWith('.mp4')).toBe(true);
+    expect(Buffer.from(await readFile(savedFiles[0]!)).equals(Buffer.from(video))).toBe(true);
+    const shown = String(result.envelope.result);
+    expect(shown).not.toContain(b64.slice(0, 200));
+    expect(JSON.parse(shown)).toEqual({
+      data: [
+        {
+          b64_json: `[inline file saved to ${savedFiles[0]!} (video/mp4, ${video.byteLength} bytes)]`,
+          media_type: 'video/mp4',
+          duration_seconds: 4,
+        },
+      ],
+    });
+    const record = JSON.parse(
+      (await readFile(join(dir, 'paid', 'ledger.jsonl'), 'utf8')).trim(),
+    ) as Record<string, unknown>;
+    expect(record.savedFiles).toEqual(savedFiles);
+  });
+
   it.each([
     ['audio/mpeg', 'mp3'],
     ['audio/wav; codecs=1', 'wav'],
@@ -1308,10 +1380,16 @@ describe('a discovered service', () => {
  */
 describe('an offer with a request spec', () => {
   const SPEC_ID = '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d01';
-  const routerCalls = (calls: { url: string }[]) =>
+  const routerCalls = <T extends { url: string }>(calls: T[]) =>
     calls.filter((call) => call.url.startsWith(`${ROUTER}${ROUTER_PATH}`));
-  /** The outcome report is fire-and-forget: let one that was sent land. */
-  const reportsSettled = () => new Promise((resolve) => setTimeout(resolve, 25));
+  /** The one report a call sent, once it has landed: it is fire and forget. */
+  const reported = async (calls: { url: string; body?: string }[]) => {
+    await vi.waitFor(() => expect(routerCalls(calls)).toHaveLength(1));
+    return JSON.parse(routerCalls(calls)[0]!.body!) as Record<string, unknown>;
+  };
+  /** Nothing reached the provider: the only call, if any, is the report. */
+  const providerCalls = (calls: { url: string }[]) =>
+    calls.filter((call) => call.url.startsWith(PROVIDER));
   const PAYEE = '0x1111111111111111111111111111111111111111';
 
   function quoteSpec(over: Partial<OfferSpec> = {}): OfferSpec {
@@ -1413,7 +1491,7 @@ describe('an offer with a request spec', () => {
     expect(Object.keys(report).sort()).toEqual(Object.keys(fixture).sort());
   });
 
-  it('refuses an input that misses the spec, naming every problem, and sends nothing', async () => {
+  it('refuses an input that misses the spec, naming every problem, and reports it unpaid', async () => {
     await storeSpecs(dir, [quoteSpec()]);
     const { fetchImpl, calls } = net([]);
     const result = await runRequestTool(
@@ -1436,7 +1514,14 @@ describe('an offer with a request spec', () => {
     expect(result.summary).toContain('Returns: JSON quotes keyed by symbol');
     expect(result.envelope.nextStep).toContain(`request({id: ${JSON.stringify(SPEC_ID)}, input:`);
     expect(result.envelope.parameters).toEqual({ convert: 'GBP', limit: 3 });
-    expect(calls).toEqual([]);
+    expect(providerCalls(calls)).toEqual([]);
+    expect(await reported(calls)).toEqual({
+      schemaVersion: 1,
+      id: SPEC_ID,
+      status: 'unpaid',
+      reason: 'input',
+      ms: expect.any(Number) as number,
+    });
   });
 
   it('refuses a field the spec does not name, even where its schema allows extras', async () => {
@@ -1455,11 +1540,12 @@ describe('an offer with a request spec', () => {
     });
     expect(String(result.envelope.reason)).toContain('the input has no field "limit"');
     expect(result.summary).toContain('symbol (string, required); Comma-separated symbols');
-    expect(calls).toEqual([]);
+    expect(providerCalls(calls)).toEqual([]);
     expect(auth.authorize).not.toHaveBeenCalled();
+    expect(await reported(calls)).toMatchObject({ status: 'unpaid', reason: 'input' });
   });
 
-  it('sends and pays nothing for a spec whose input schema cannot be checked', async () => {
+  it('sends and pays nothing for a spec whose input schema cannot be checked, and says why', async () => {
     // `text` is no JSON Schema type: the schema never compiles, so nothing
     // here can say the input fits.
     await storeSpecs(dir, [
@@ -1468,7 +1554,7 @@ describe('an offer with a request spec', () => {
       }),
     ]);
     const auth = authorizer();
-    const { fetchImpl, calls } = net([...providerLegs()]);
+    const { fetchImpl, calls } = net([{ url: ROUTER, status: 200, body: {} }]);
     const result = await runRequestTool(
       { id: SPEC_ID, input: { symbol: 'BTC' } },
       deps(fetchImpl, auth),
@@ -1480,8 +1566,9 @@ describe('an offer with a request spec', () => {
       cost: ['provider price 0 USD'],
       parameters: { symbol: 'BTC' },
     });
-    expect(calls).toEqual([]);
+    expect(providerCalls(calls)).toEqual([]);
     expect(auth.authorize).not.toHaveBeenCalled();
+    expect(await reported(calls)).toMatchObject({ status: 'unpaid', reason: 'terms' });
   });
 
   it("signs nothing for a live 402 that pays someone other than the spec's payee", async () => {
@@ -1504,8 +1591,7 @@ describe('an offer with a request spec', () => {
       parameters: { symbol: 'BTC' },
     });
     expect(calls.filter((call) => call.paid)).toEqual([]);
-    await reportsSettled();
-    expect(routerCalls(calls)).toEqual([]);
+    expect(await reported(calls)).toMatchObject({ status: 'unpaid', reason: 'terms' });
   });
 
   it('asks for a smaller input when a varying price lands over the spec ceiling', async () => {
@@ -1533,8 +1619,7 @@ describe('an offer with a request spec', () => {
     expect(reason).not.toContain('fresh decision');
     expect(calls.filter((call) => call.paid)).toEqual([]);
     expect(auth.authorize).not.toHaveBeenCalled();
-    await reportsSettled();
-    expect(routerCalls(calls)).toEqual([]);
+    expect(await reported(calls)).toMatchObject({ status: 'unpaid', reason: 'terms' });
   });
 
   it('says a provider refused the input before payment, and what was sent', async () => {
@@ -1552,12 +1637,16 @@ describe('an offer with a request spec', () => {
     expect(String(result.envelope.reason)).toContain(
       'CoinMarketCap rejected this input before any payment (HTTP 400)',
     );
-    // Refused before payment: the offer was not taken, so nothing is reported.
-    await reportsSettled();
-    expect(routerCalls(calls)).toEqual([]);
+    // Refused before payment: reported, as unpaid, which the server never
+    // counts as the offer taken.
+    expect(await reported(calls)).toMatchObject({
+      status: 'unpaid',
+      reason: 'input',
+      httpStatus: 400,
+    });
   });
 
-  it('reports nothing when the spend policy refuses the call before signing', async () => {
+  it('reports needs_approval when the spend policy refuses the call before signing', async () => {
     await storeSpecs(dir, [quoteSpec()]);
     const auth = authorizer('deny');
     const { fetchImpl, calls } = net([
@@ -1572,8 +1661,9 @@ describe('an offer with a request spec', () => {
       cost: ['provider price 0 USD'],
     });
     expect(calls.filter((call) => call.paid)).toEqual([]);
-    await reportsSettled();
-    expect(routerCalls(calls)).toEqual([]);
+    const report = await reported(calls);
+    expect(report).toMatchObject({ status: 'needs_approval' });
+    expect(report).not.toHaveProperty('reason');
   });
 
   it('pays once per spec id: a retry after a paid call sends and pays nothing', async () => {
@@ -1612,13 +1702,21 @@ describe('an offer with a request spec', () => {
       new Error('the spend ledger could not be written'),
     );
     // A second paid leg is scripted, so a retry that signs again is observable.
-    const { fetchImpl, calls } = net([...providerLegs(), ...providerLegs()]);
+    const { fetchImpl, calls } = net([
+      ...providerLegs(),
+      { url: ROUTER, status: 200, body: {} },
+      ...providerLegs(),
+    ]);
     const first = await runRequestTool(
       { id: SPEC_ID, input: { symbol: 'BTC' } },
       deps(fetchImpl, auth),
     );
     expect(first.envelope).toMatchObject({ status: 'failed' });
     expect(calls.filter((call) => call.paid)).toHaveLength(1);
+    // The payment may have moved, so the call ran: `failed`, never `unpaid`.
+    const report = await reported(calls);
+    expect(report).toMatchObject({ status: 'failed' });
+    expect(report).not.toHaveProperty('reason');
     const retry = await runRequestTool(
       { id: SPEC_ID, input: { symbol: 'BTC' } },
       deps(fetchImpl, auth),
@@ -1635,15 +1733,61 @@ describe('an offer with a request spec', () => {
     await storeSpecs(dir, [quoteSpec()]);
     const { fetchImpl, calls } = net([
       { url: PROVIDER, status: 400, body: { error: 'bad symbol' } },
+      { url: ROUTER, status: 200, body: {} },
       ...providerLegs(),
       { url: ROUTER, status: 200, body: {} },
     ]);
     const refused = await runRequestTool({ id: SPEC_ID, input: { symbol: '??' } }, deps(fetchImpl));
     expect(refused.envelope).toMatchObject({ status: 'failed', providerStatus: 400 });
+    expect(await reported(calls)).toMatchObject({ status: 'unpaid', reason: 'input' });
     const fixed = await runRequestTool({ id: SPEC_ID, input: { symbol: 'BTC' } }, deps(fetchImpl));
     expect(fixed.envelope).toMatchObject({ status: 'fulfilled' });
     expect(calls.filter((call) => call.paid)).toHaveLength(1);
-    await vi.waitFor(() => expect(routerCalls(calls)).toHaveLength(1));
+    await vi.waitFor(() => expect(routerCalls(calls)).toHaveLength(2));
+    expect(JSON.parse(routerCalls(calls)[1]!.body!)).toMatchObject({ status: 'fulfilled' });
+  });
+
+  it('reports a provider that answers 503 before payment as unpaid, with its status', async () => {
+    await storeSpecs(dir, [quoteSpec()]);
+    const { fetchImpl, calls } = net([
+      { url: PROVIDER, status: 503, body: { error: { message: 'busy' } } },
+      { url: ROUTER, status: 200, body: {} },
+    ]);
+    const result = await runRequestTool({ id: SPEC_ID, input: { symbol: 'BTC' } }, deps(fetchImpl));
+    expect(result.envelope).toMatchObject({ status: 'failed', providerStatus: 503 });
+    expect(await reported(calls)).toEqual({
+      schemaVersion: 1,
+      id: SPEC_ID,
+      status: 'unpaid',
+      reason: 'provider',
+      httpStatus: 503,
+      ms: expect.any(Number) as number,
+    });
+  });
+
+  it('reports a wallet that cannot be opened as unpaid for the wallet, not the terms', async () => {
+    await storeSpecs(dir, [quoteSpec()]);
+    const auth = authorizer();
+    const { fetchImpl, calls } = net([
+      { url: PROVIDER, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge() } },
+      { url: ROUTER, status: 200, body: {} },
+    ]);
+    // What a session with no passphrase to hand gets: the same USAGE code a
+    // refused destination throws.
+    const locked = {
+      ...testWalletProvider(),
+      getSigner: async () => {
+        throw new CliError('USAGE', 'No wallet passphrase is available.');
+      },
+    };
+    const base = deps(fetchImpl, auth);
+    const result = await runRequestTool(
+      { id: SPEC_ID, input: { symbol: 'BTC' } },
+      { ...base, payDeps: { ...base.payDeps, provider: locked } },
+    );
+    expect(result.envelope).toMatchObject({ status: 'failed', cost: ['provider price 0 USD'] });
+    expect(auth.authorize).not.toHaveBeenCalled();
+    expect(await reported(calls)).toMatchObject({ status: 'unpaid', reason: 'wallet' });
   });
 
   /** The id-less answer: the pick's spec beside its fresh id, and the line
@@ -2022,5 +2166,61 @@ describe('a spec that names the fields it returns', () => {
     expect(result.isError).toBe(false);
     expect(result.envelope).toMatchObject({ status: 'fulfilled', result: JSON.stringify(body) });
     expect(result.envelope).not.toHaveProperty('fullResultPath');
+  });
+});
+
+/**
+ * WHAT A FAILED SPEC CALL REPORTS, from the error alone: money that may have
+ * moved is `failed`, the spend policy `needs_approval`, and anything stopped
+ * before a signature is `unpaid` with the side that stopped it.
+ */
+describe('the outcome a failed call reports', () => {
+  const error = (code: ConstructorParameters<typeof CliError>[0], details?: unknown) =>
+    new CliError(code, 'x', details !== undefined ? { details } : {});
+  const before = { mayHaveMoved: false, rejectedInput: false };
+  const moved = { mayHaveMoved: true, rejectedInput: false };
+
+  it.each([
+    ['another status', error('API_UNREACHABLE', { status: 503 }), 'provider'],
+    ['a 400 to an input the server built', error('API_UNREACHABLE', { status: 400 }), 'provider'],
+    ['a redirect this build will not follow', error('API_UNREACHABLE'), 'provider'],
+    ['a challenge with no header', error('CONTRACT_MISMATCH'), 'provider'],
+    ['a challenge too large to read', error('CHALLENGE_TOO_LARGE'), 'provider'],
+    ['a dead socket or a timeout', error('NETWORK_ERROR'), 'unreachable'],
+    ['a 402 off the spec terms', error('REGISTRY_MISMATCH'), 'terms'],
+    ['nothing payable, or a price that rose', error('PAYMENT_FAILED'), 'terms'],
+    ['terms this build refuses', error('REFUSED', { reason: 'invalid_router_terms' }), 'terms'],
+    ['a destination this build will not pay', error('USAGE'), 'terms'],
+    ['a locked wallet', error('USAGE', { walletUnavailable: true }), 'wallet'],
+    ['no wallet', error('WALLET_MISSING', { walletUnavailable: true }), 'wallet'],
+    ['too little USDC', error('REFUSED', { reason: 'insufficient_funds' }), 'wallet'],
+    ['an unreadable balance', error('REFUSED', { reason: 'balance_unavailable' }), 'wallet'],
+  ])('%s before payment is unpaid', (_label, err, reason) => {
+    expect(failureOutcome(err, before)).toEqual({ status: 'unpaid', reason });
+  });
+
+  it('says input for an input the agent built that the provider refused', () => {
+    expect(
+      failureOutcome(error('API_UNREACHABLE', { status: 422 }), { ...before, rejectedInput: true }),
+    ).toEqual({ status: 'unpaid', reason: 'input' });
+  });
+
+  it.each([
+    ['a paid leg that never answered', error('NETWORK_ERROR', { amountAtomic: '10000' })],
+    ['a payment the seller refused', error('PAYMENT_FAILED', { status: 402 })],
+    ['a bug after the payment left', new Error('boom')],
+  ])('keeps %s, which may have moved money, as failed', (_label, err) => {
+    expect(failureOutcome(err, moved)).toEqual({ status: 'failed' });
+  });
+
+  it('keeps the spend policy as needs_approval', () => {
+    expect(failureOutcome(error('POLICY_REFUSED'), before)).toEqual({ status: 'needs_approval' });
+  });
+
+  it.each([
+    ['a failure no reason describes', error('INTERNAL')],
+    ['a bug before anything was signed', new TypeError('boom')],
+  ])('reports nothing for %s', (_label, err) => {
+    expect(failureOutcome(err, before)).toBeNull();
   });
 });

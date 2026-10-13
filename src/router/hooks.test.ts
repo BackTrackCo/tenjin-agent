@@ -124,7 +124,7 @@ const NATIVE = {
 };
 const HINT =
   'Firecrawl fits this: scrapes one public URL and returns its content as clean markdown or HTML. ' +
-  '$0.01 via https://vaaya.ai/api/run/firecrawl/scrape . ' +
+  '$0.015 via https://api.munition.io/v1/firecrawl/scrape . ' +
   'Call request({query: "https://example.test/spec", id: "k3f9-abcd"}) alone and wait for its result.';
 /**
  * The two native-call lines tenjin's `hintFor` writes (tenjin#886): before the
@@ -133,7 +133,7 @@ const HINT =
  */
 const OFFER =
   'Firecrawl fits this: scrapes one public URL and returns its content as clean markdown or HTML. ' +
-  '$0.01 via https://vaaya.ai/api/run/firecrawl/scrape .';
+  '$0.015 via https://api.munition.io/v1/firecrawl/scrape .';
 const PRECALL_HINT = `${OFFER} Call request({query: "https://example.test/spec", id: "k3f9-abcd"}) instead; native tools stay allowed for anything else.`;
 const SHORTFALL_HINT = `${OFFER} If WebFetch couldn't get this, call request({query: "https://example.test/spec", id: "k3f9-abcd"}) and wait for its result.`;
 const withHint = (hint: string) => ({ ...EXECUTE, decision: { ...EXECUTE.decision, hint } });
@@ -155,13 +155,13 @@ const EXECUTE = {
   decision: {
     action: 'execute',
     id: 'k3f9-abcd',
-    capabilityId: 'vaaya-scrape',
+    capabilityId: 'munition-scrape',
     category: 'read an exact page',
     provider: 'Firecrawl',
     capabilityDescription:
       'scrapes one public URL and returns its content as clean markdown or HTML',
-    endpoint: 'https://vaaya.ai/api/run/firecrawl/scrape',
-    providerPriceAtomic: '10000',
+    endpoint: 'https://api.munition.io/v1/firecrawl/scrape',
+    providerPriceAtomic: '15000',
     usage: 'the page URL',
     hint: HINT,
   },
@@ -279,7 +279,7 @@ describe('the prompt hook', () => {
    * to ask the user instead of using its free tools.
    */
   it.each([
-    ['above maxAutoSpend', { maxAutoSpend: '9999', confirm: 'above:9999' }],
+    ['above maxAutoSpend', { maxAutoSpend: '14999', confirm: 'above:14999' }],
     ['past the session budget', { sessionBudget: '20000' }],
   ])('says nothing when the lookup is %s', async (_label, over) => {
     const fs = await import('node:fs/promises');
@@ -813,7 +813,7 @@ describe('the pre-call hook', () => {
     await fs.writeFile(join(dir, 'config.json'), JSON.stringify(values));
   }
 
-  // What `tenjin install` writes: the fixture's 10000-atomic lookup auto-executes.
+  // What `tenjin install` writes: the fixture's 15000-atomic lookup auto-executes.
   beforeEach(async () => {
     await setConfig(ROUTER_POLICY);
   });
@@ -849,7 +849,7 @@ describe('the pre-call hook', () => {
    * still offer, since `request` can ask the user there.
    */
   it.each([
-    ['above maxAutoSpend', { maxAutoSpend: '9999', confirm: 'above:9999' }],
+    ['above maxAutoSpend', { maxAutoSpend: '14999', confirm: 'above:14999' }],
     ['past the session budget', { sessionBudget: '20000' }],
   ])('lets the main agent call run when the lookup is %s', async (_label, over) => {
     await setConfig({ ...ROUTER_POLICY, ...over });
@@ -1126,7 +1126,7 @@ describe('never redirected twice for one target', () => {
  */
 describe('a wallet that cannot cover the lookup', () => {
   it('reads one balanceOf for the wallet, and denies when it covers the price', async () => {
-    rpcAnswer = 10_000n; // the fixture's price, exactly
+    rpcAnswer = 15_000n; // the fixture's price, exactly
     const { fetchImpl } = router(EXECUTE);
     const out = await runNativeHook(await preCall('https://example.test/spec'), {
       dataDir: dir,
@@ -1155,7 +1155,7 @@ describe('a wallet that cannot cover the lookup', () => {
 
   it.each([
     ['holds no USDC', 0n],
-    ['holds less than the price', 9_999n],
+    ['holds less than the price', 14_999n],
   ])('lets the free call run, and shows no hint, when it %s', async (_label, balance) => {
     rpcAnswer = balance;
     const { fetchImpl } = router(EXECUTE);
@@ -1910,7 +1910,7 @@ describe('a subagent', () => {
    * A SUBAGENT CANNOT REACH THE USER, so an offer it would need approval for
    * is not shown at all. The same evaluation `request` runs decides it: price
    * cap, allowlist, session budget and confirm. The fixture's provider price is
-   * 10000 atomic, paid to vaaya.ai.
+   * 15000 atomic, paid to api.munition.io.
    */
   async function subagentOffer(): Promise<{ response: unknown; withheld?: true }> {
     const path = await parentTranscript();
@@ -1920,7 +1920,7 @@ describe('a subagent', () => {
   }
 
   it.each([
-    ['above maxAutoSpend', { maxAutoSpend: '9999', confirm: 'above:9999' }],
+    ['above maxAutoSpend', { maxAutoSpend: '14999', confirm: 'above:14999' }],
     [
       'to a host outside allowlistCreators',
       { allowlistCreators: ['wolframalpha.x402.paysponge.com'] },
@@ -1948,8 +1948,8 @@ describe('a subagent', () => {
 
   it.each([
     ['retired settings do not suppress offers', { confirm: 'always', bazaarPay: false }],
-    ['at maxAutoSpend', { maxAutoSpend: '10000', confirm: 'above:10000' }],
-    ['to an allowlisted host', { allowlistCreators: ['vaaya.ai'] }],
+    ['at maxAutoSpend', { maxAutoSpend: '15000', confirm: 'above:15000' }],
+    ['to an allowlisted host', { allowlistCreators: ['api.munition.io'] }],
   ])('is offered a lookup that would auto-execute, %s', async (_label, over) => {
     await setConfig({ ...ROUTER_POLICY, ...over });
     const out = await subagentOffer();
@@ -2248,7 +2248,7 @@ describe('the delegation hook', () => {
     const fs = await import('node:fs/promises');
     await fs.writeFile(
       join(dir, 'config.json'),
-      JSON.stringify({ ...ROUTER_POLICY, maxAutoSpend: '9999' }),
+      JSON.stringify({ ...ROUTER_POLICY, maxAutoSpend: '14999' }),
     );
     const { fetchImpl } = router(EXECUTE);
     const out = await runDelegationHook(await delegation(), {

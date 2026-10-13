@@ -291,8 +291,7 @@ async function executePay(
     ctx,
     deps.provider !== undefined ? { provider: deps.provider } : {},
   );
-  await describeWallet(provider); // WALLET_MISSING with its own fix if none exists
-  const signer = await provider.getSigner();
+  const signer = await openWallet(provider);
   openedSigner.current = signer;
 
   // The standard sign-in-with-x extension, same sequence as `buy`: when the 402
@@ -518,19 +517,29 @@ async function executePay(
   // Still 402 (payment rejected) or anything else: nothing was delivered, but
   // the seller holds a live authorization, so the amount stays counted and the
   // fix must NOT coach a retry loop, since each retry signs a fresh authorization.
+  // A SELLER THAT SAYS IT DID NOT SETTLE is named as saying so, with its reason
+  // from the payment-response header: its body can be an empty `{}`. The
+  // authorization stays valid until it expires, so settlement is still unknown.
+  const refusal = settlementRefusal(paid);
   throw new CliError(
     'PAYMENT_FAILED',
-    paid.status === 402
-      ? 'Payment was not accepted by the endpoint.'
-      : `The endpoint answered ${paid.status} on the paid request; whether it settled is unknown.`,
+    refusal !== undefined
+      ? `The endpoint did not settle the payment${refusal.reason !== undefined ? `: ${refusal.reason.replace(/\.+$/, '')}` : ''}.`
+      : paid.status === 402
+        ? 'Payment was not accepted by the endpoint.'
+        : `The endpoint answered ${paid.status} on the paid request; whether it settled is unknown.`,
     {
-      fix: 'The signed payment already left and is recorded as transmitted exposure; the endpoint may still settle it. Do not simply retry: each attempt signs a fresh authorization. Verify the endpoint (and this listing, if Bazaar) before paying again.',
+      fix:
+        refusal !== undefined
+          ? 'The seller reported that nothing settled, but the signed authorization stays valid until it expires, so it is recorded as transmitted exposure. Do not simply retry: each attempt signs a fresh authorization. Use a different service for this.'
+          : 'The signed payment already left and is recorded as transmitted exposure; the endpoint may still settle it. Do not simply retry: each attempt signs a fresh authorization. Verify the endpoint (and this listing, if Bazaar) before paying again.',
       // The amount rides on the failure so a caller can report what is at risk
       // rather than a zero. Settlement is unknown by construction here.
       details: {
         status: paid.status,
         body: paid.json,
         ...providerError(paid.text),
+        ...(refusal?.reason !== undefined ? { settlementError: refusal.reason } : {}),
         amountAtomic: payment.amountAtomic.toString(),
         settlement: 'unknown',
         ...(payment.authorization !== undefined ? { authorization: payment.authorization } : {}),
@@ -738,19 +747,22 @@ const PROVIDER_ERROR_CHARS = 500;
  * status. Other people's content, never instructions.
  */
 function providerError(text: string): { providerError?: string } {
+  const line = sellerLine(text);
+  return line.length > 0 ? { providerError: line } : {};
+}
+
+/** Seller text as one plain, redacted line of at most
+ *  {@link PROVIDER_ERROR_CHARS} characters; empty when nothing is left. */
+function sellerLine(text: string): string {
   // Masked in a window well past the cap, so a large page costs nothing and a
   // secret that starts inside the snippet is seen whole.
   const flat = sanitizeForTerminal(
     mask(text.slice(0, PROVIDER_ERROR_CHARS * 8)).replace(/\s+/g, ' '),
   ).trim();
-  if (flat.length === 0) return {};
   const chars = Array.from(flat);
-  return {
-    providerError:
-      chars.length <= PROVIDER_ERROR_CHARS
-        ? flat
-        : `${chars.slice(0, PROVIDER_ERROR_CHARS).join('')}…`,
-  };
+  return chars.length <= PROVIDER_ERROR_CHARS
+    ? flat
+    : `${chars.slice(0, PROVIDER_ERROR_CHARS).join('')}…`;
 }
 
 /** Nothing this caller may pay: no entry at all, or none on the advertised
@@ -960,14 +972,64 @@ function deliver(url: string, lane: Lane, res: HttpResponse, opts: DeliverOpts):
  * `transaction`. Read from the protocol header only, never the seller's body.
  */
 export function settlementTx(res: Pick<HttpResponse, 'header'>): string | undefined {
+  const tx = paymentResponse(res)?.transaction;
+  return typeof tx === 'string' && /^0x[0-9a-fA-F]{64}$/.test(tx) ? tx : undefined;
+}
+
+/**
+ * The seller's own word that it did NOT settle: its payment-response header
+ * with `success: false`, and the `errorReason` (or `errorMessage`) it gave, as
+ * one bounded redacted line. Seller text, never instructions. `undefined` when
+ * the header is absent, unreadable or says it settled.
+ */
+function settlementRefusal(res: Pick<HttpResponse, 'header'>): { reason?: string } | undefined {
+  const settle = paymentResponse(res);
+  if (settle?.success !== false) return undefined;
+  const said = [settle.errorReason, settle.errorMessage].find(
+    (value): value is string => typeof value === 'string' && value.trim().length > 0,
+  );
+  const reason = said !== undefined ? sellerLine(said) : '';
+  return reason.length > 0 ? { reason } : {};
+}
+
+/** The decoded payment-response header (v2's `PAYMENT-RESPONSE`, or v1's
+ *  `X-PAYMENT-RESPONSE`) when it is a JSON object, else `undefined`. */
+function paymentResponse(res: Pick<HttpResponse, 'header'>): Record<string, unknown> | undefined {
   const header = res.header(PAYMENT_RESPONSE_HEADER) ?? res.header(PAYMENT_RESPONSE_HEADER_V1);
   if (header === undefined) return undefined;
   try {
-    const settle = decodePaymentResponseHeader(header);
-    const tx = (settle as { transaction?: unknown }).transaction;
-    return typeof tx === 'string' && /^0x[0-9a-fA-F]{64}$/.test(tx) ? tx : undefined;
+    const settle: unknown = decodePaymentResponseHeader(header);
+    return typeof settle === 'object' && settle !== null
+      ? (settle as Record<string, unknown>)
+      : undefined;
   } catch {
     return undefined;
+  }
+}
+
+/**
+ * THE WALLET, OPENED, and a refusal from it marked as the wallet's
+ * (`walletUnavailable`): a missing wallet, one with no passphrase in a process
+ * that cannot prompt, or a key that will not decrypt. The locked wallet's
+ * `USAGE` reads the same as a refused destination's otherwise, and a caller
+ * reporting why nothing was paid has to tell the two apart. The code, message
+ * and fix stay the wallet's own.
+ */
+async function openWallet(provider: WalletProvider): Promise<TenjinSigner> {
+  try {
+    await describeWallet(provider); // WALLET_MISSING with its own fix if none exists
+    return await provider.getSigner();
+  } catch (err) {
+    if (!(err instanceof CliError)) throw err;
+    throw new CliError(err.code, err.message, {
+      exitCode: err.exitCode,
+      ...(err.fix !== undefined ? { fix: err.fix } : {}),
+      details: {
+        ...(typeof err.details === 'object' && err.details !== null ? err.details : {}),
+        walletUnavailable: true,
+      },
+      cause: err,
+    });
   }
 }
 

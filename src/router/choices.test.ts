@@ -172,6 +172,20 @@ const reports = (calls: { url: string; body?: string }[]) =>
   calls
     .filter((call) => call.url === `${ROUTER}${ROUTER_PATH}`)
     .map((call) => JSON.parse(call.body!) as { id: string; status: string });
+/** A set stopped before payment: no seller called, and one report per choice. */
+const stoppedSet = async (
+  calls: { url: string; body?: string }[],
+  outcome: { status: string; reason?: string },
+) => {
+  expect(calls.filter((call) => call.url !== `${ROUTER}${ROUTER_PATH}`)).toEqual([]);
+  await vi.waitFor(() => expect(reports(calls)).toHaveLength(3));
+  for (const report of reports(calls)) expect(report).toMatchObject(outcome);
+  expect(
+    reports(calls)
+      .map((report) => report.id)
+      .sort(),
+  ).toEqual([FLARE.id, BANANA.id, GROK.id].sort());
+};
 const ledger = async () =>
   (await readFile(join(dir, 'paid', 'ledger.jsonl'), 'utf8'))
     .trim()
@@ -331,7 +345,7 @@ describe('running every choice', () => {
     });
     expect(String(result.envelope.reason)).toContain('$0.253');
     expect(String(result.envelope.reason)).toContain('tenjin config set sessionBudget');
-    expect(calls).toEqual([]);
+    await stoppedSet(calls, { status: 'needs_approval' });
     expect(auth.authorize).not.toHaveBeenCalled();
     expect(await claims()).toEqual([]);
   });
@@ -350,7 +364,7 @@ describe('running every choice', () => {
     expect(result.envelope).toMatchObject({ status: 'failed', cost: ['provider price 0 USD'] });
     expect(String(result.envelope.reason)).toContain('insufficient USDC; no payment was signed');
     expect(String(result.envelope.reason)).toContain('$0.253');
-    expect(calls).toEqual([]);
+    await stoppedSet(calls, { status: 'unpaid', reason: 'wallet' });
     expect(auth.authorize).not.toHaveBeenCalled();
     expect(await claims()).toEqual([]);
   });
@@ -363,7 +377,7 @@ describe('running every choice', () => {
     );
     expect(result.envelope).toMatchObject({ status: 'needs_input' });
     expect(String(result.envelope.reason)).toContain('takes only prompt, not size');
-    expect(calls).toEqual([]);
+    await stoppedSet(calls, { status: 'unpaid', reason: 'input' });
     expect(await claims()).toEqual([]);
   });
 

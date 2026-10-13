@@ -151,6 +151,22 @@ describe('the request bodies', () => {
     ]);
   });
 
+  it('reports a call stopped before payment with its reason, byte for byte, with no text', () => {
+    const canonical = fixture('wire-outcome-unpaid.json');
+    expect(buildOutcomeBody(canonical as unknown as SpecOutcome)).toEqual(canonical);
+    expect(JSON.stringify(buildOutcomeBody(canonical as unknown as SpecOutcome), null, 2)).toBe(
+      readFileSync(join(dir, 'wire-outcome-unpaid.json'), 'utf8').trimEnd(),
+    );
+    expect(Object.keys(canonical)).toEqual([
+      'schemaVersion',
+      'id',
+      'status',
+      'reason',
+      'httpStatus',
+      'ms',
+    ]);
+  });
+
   it('carries nothing about money on any form', () => {
     for (const name of [
       'wire-hook-request-prompt.json',

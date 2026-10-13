@@ -697,6 +697,97 @@ describe('runPay, bazaar lane', () => {
     expect(authorizer.release).not.toHaveBeenCalled();
   });
 
+  /** A paid leg rejected with this payment-response header, v2 or v1: an
+   *  object is encoded as the protocol does, a string is sent as it is. */
+  async function rejectedWith(
+    settle: Record<string, unknown> | string | undefined,
+    header = 'PAYMENT-RESPONSE',
+  ): Promise<CliError> {
+    await writeConfig();
+    stubRegistry(() => json(200, registryListing(FOREIGN_URL, LIVE_ACCEPT)));
+    const fixture = buildPaymentRequired();
+    const { fetch } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': fixture.header }),
+      json(
+        402,
+        {},
+        typeof settle === 'string'
+          ? { [header]: settle }
+          : settle !== undefined
+            ? { [header]: Buffer.from(JSON.stringify(settle)).toString('base64') }
+            : {},
+      ),
+    ]);
+    const authorizer = fakeAuthorizer('allow');
+    const err = await runPay({ url: FOREIGN_URL }, makeCtx(), {
+      ...PUBLIC_DNS,
+      fetchImpl: fetch,
+      provider: testWalletProvider(),
+      authorizer,
+    }).then(
+      () => expect.unreachable(),
+      (thrown: unknown) => thrown,
+    );
+    expect(err).toBeInstanceOf(CliError);
+    // Whatever the seller says, the signed authorization left: counted.
+    expect(authorizer.commit).toHaveBeenCalledOnce();
+    expect(authorizer.release).not.toHaveBeenCalled();
+    return err as CliError;
+  }
+
+  // A seller whose facilitator refused the settle: a 402 with an empty `{}`
+  // body, and the reason only in the payment-response header.
+  it.each(['PAYMENT-RESPONSE', 'X-PAYMENT-RESPONSE'])(
+    'names a seller whose %s header says it did not settle, with its reason',
+    async (header) => {
+      const reason =
+        'Facilitator settle failed (402): A valid payment method is required for this account.';
+      const err = await rejectedWith(
+        { success: false, errorReason: reason, transaction: '', network: 'eip155:8453' },
+        header,
+      );
+      expect(err.code).toBe('PAYMENT_FAILED');
+      expect(err.message).toBe(`The endpoint did not settle the payment: ${reason}`);
+      expect(err.details).toMatchObject({
+        status: 402,
+        settlementError: reason,
+        amountAtomic: '100000',
+        settlement: 'unknown',
+      });
+      expect(err.fix).toContain('reported that nothing settled');
+      expect(err.fix).toContain('Do not simply retry');
+      expect(err.fix).toContain('Use a different service');
+      expect(err.fix).not.toMatch(/refund/i);
+    },
+  );
+
+  it("bounds the seller's settle reason to one redacted plain line", async () => {
+    const key = `sk-ant-api03-${'a'.repeat(90)}`;
+    const err = await rejectedWith({
+      success: false,
+      errorReason: `denied\n\u001b[2J\u202e ${key} ${'x'.repeat(2_000)}`,
+      transaction: '',
+    });
+    const said = (err.details as { settlementError: string }).settlementError;
+    expect(said.startsWith('denied ')).toBe(true);
+    expect(said).not.toMatch(/[\p{Cc}\u202e]/u);
+    expect(said).not.toContain(key);
+    expect(Array.from(said)).toHaveLength(501);
+    expect(err.message).not.toMatch(/[\p{Cc}\u202e]/u);
+  });
+
+  it.each([
+    ['no payment-response header', undefined],
+    ['one that says it settled', { success: true, transaction: `0x${'ab'.repeat(32)}` }],
+    ['one that cannot be read', 'not base64 json'],
+    ['one that is not an object', Buffer.from('false').toString('base64')],
+  ])('keeps the unknown-settlement failure for %s', async (_label, settle) => {
+    const err = await rejectedWith(settle);
+    expect(err.message).toBe('Payment was not accepted by the endpoint.');
+    expect(err.details).not.toHaveProperty('settlementError');
+    expect(err.fix).toContain('the endpoint may still settle it');
+  });
+
   // The fresh post-SIWX challenge is what gets SIGNED, so it is re-verified
   // against the registry: a seller whose first 402 matches its listing but
   // whose fresh 402 swaps payTo at the same price passes the price-bump check
