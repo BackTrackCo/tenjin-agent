@@ -120,3 +120,30 @@ export function evaluateSpendPolicy(policy: SpendPolicy, req: SpendRequest): Pol
 
   return { decision: 'allow', reason: 'within_policy', message: 'within spend policy' };
 }
+
+/**
+ * WHETHER A SET OF AUTOMATIC PAYMENTS FITS, all of them, before any is signed.
+ * Each one meets {@link evaluateSpendPolicy} exactly as it would alone, with
+ * the ones before it already counted against the session: so every step is
+ * held to the per-call cap on its own and the set's total to the budget. The
+ * first refusal is the answer; each payment still meets the gate when it is
+ * signed.
+ */
+export function policyCoversSet(
+  policy: SpendPolicy,
+  steps: readonly { amountAtomic: bigint; creator: string }[],
+  sessionSpentAtomic: bigint,
+): PolicyEvaluation {
+  let spent = sessionSpentAtomic;
+  for (const step of steps) {
+    const evaluation = evaluateSpendPolicy(policy, {
+      mode: 'automatic',
+      amountAtomic: step.amountAtomic,
+      creator: step.creator,
+      sessionSpentAtomic: spent,
+    });
+    if (evaluation.decision !== 'allow') return evaluation;
+    spent += step.amountAtomic;
+  }
+  return { decision: 'allow', reason: 'within_policy', message: 'within spend policy' };
+}

@@ -100,17 +100,17 @@ describe('the request bodies', () => {
    * the hook's `sessionId` lets it offer one discovered service once per
    * session. The bodies above without `accepts` stay valid on the wire: they
    * are what an older client sends, and the server answers them `native` with
-   * a diagnostic saying to update.
+   * a diagnostic saying to update. So does the body below, from a build that
+   * did not yet take `choices`.
    */
   it('builds the hook request with the session and what it accepts, byte for byte', () => {
     const canonical = fixture('wire-hook-request-ask.json');
     expect(
       buildHookBody(canonical.packet as Packet, {
         sessionId: canonical.sessionId as string,
-        accepts: CLIENT_ACCEPTS,
+        accepts: canonical.accepts as string[],
       }),
     ).toEqual(canonical);
-    expect(canonical.accepts).toEqual([...CLIENT_ACCEPTS]);
     const packet = canonical.packet as Packet;
     expect(packet.pendingCall).toEqual({
       tool: 'AskUserQuestion',
@@ -119,12 +119,24 @@ describe('the request bodies', () => {
     expect(Buffer.byteLength(JSON.stringify(packet))).toBeLessThanOrEqual(MAX_PACKET_BYTES);
   });
 
+  it("sends this build's accepts, choices included, byte for byte", () => {
+    const canonical = fixture('wire-hook-request-choices.json');
+    expect(
+      buildHookBody(canonical.packet as Packet, {
+        sessionId: canonical.sessionId as string,
+        accepts: CLIENT_ACCEPTS,
+      }),
+    ).toEqual(canonical);
+    expect(canonical.accepts).toEqual([...CLIENT_ACCEPTS]);
+    expect(CLIENT_ACCEPTS).toContain('choices');
+  });
+
   it('builds the query with no id that a spec answers, byte for byte', () => {
     const canonical = fixture('wire-tool-request-spec.json');
     expect(canonical.id).toBeUndefined();
-    expect(buildToolBody({ query: canonical.query as string, accepts: CLIENT_ACCEPTS })).toEqual(
-      canonical,
-    );
+    expect(
+      buildToolBody({ query: canonical.query as string, accepts: canonical.accepts as string[] }),
+    ).toEqual(canonical);
   });
 
   it('reports a call run from a spec by its id and how it ended, byte for byte, with no text', () => {
@@ -146,6 +158,7 @@ describe('the request bodies', () => {
       'wire-hook-request-native-shortfall.json',
       'wire-hook-request-native-no-content.json',
       'wire-hook-request-ask.json',
+      'wire-hook-request-choices.json',
       'wire-tool-request-spec.json',
     ]) {
       expect(JSON.stringify(fixture(name))).not.toMatch(/billing|admission|payment/i);
@@ -191,6 +204,8 @@ describe('every answer payload on disk', () => {
       'wire-hook-discovered.json',
       'wire-lookup-discovered.json',
       'wire-hook-discovered-spec.json',
+      'wire-hook-discovered-choices.json',
+      'wire-lookup-discovered-choices.json',
     ]) {
       expect(parseForTests('hook', fixture(name)).success, name).toBe(true);
       expect(parseForTests('tool', fixture(name)).success, name).toBe(true);
