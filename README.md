@@ -57,7 +57,7 @@ tenjin wallet fund 2    # optional: add $2 with a card, via Coinbase
 
 ## What it can do
 
-The router picks from a catalog we curate and maintain. When nothing in it fits, it can point your agent at a reviewed third-party pay-per-call service from the [Tenjin list](#tenjin-list-and-experimental-bazaar), and your agent decides whether to use it or to ask you first. Each routing call costs a flat [routing fee](#routing-fee) of $0.003, on top of the provider's price, paid from channel deposits of up to $0.25 that count against the spend limits you approve at install.
+The router picks from a catalog we review and maintain: the tools below, plus third-party pay-per-call services for steps such as images, audio, video and people search. When nothing in it fits and you turned on the [experimental Bazaar](#experimental-bazaar), it can point your agent at an unreviewed seller instead, and your agent decides whether to use it or to ask you first. Each routing call costs a flat [routing fee](#routing-fee) of $0.003, on top of the provider's price, paid from channel deposits of up to $0.25 that count against the spend limits you approve at install.
 
 | Tool                                                           | What your agent gets                                                                      | Price per call |
 | -------------------------------------------------------------- | ----------------------------------------------------------------------------------------- | -------------- |
@@ -73,11 +73,9 @@ The router picks from a catalog we curate and maintain. When nothing in it fits,
 | **X posts** · [glim](https://glim.sh)                          | Posts matching a search, or one post with its thread                                      | $0.005         |
 | **Reddit** · [glim](https://glim.sh)                           | Posts matching a search, or one thread with its comments                                  | $0.01 / $0.005 |
 
-Every tool, including the Tenjin list, with current prices: [tenjin.sh/tools](https://tenjin.sh/tools). More are added by demand: [tell us what you want](#request-a-tool).
+Every tool in the catalog, with current prices: [tenjin.sh/tools](https://tenjin.sh/tools). More are added by demand: [tell us what you want](#request-a-tool).
 
-### Tenjin list and experimental Bazaar
-
-**The Tenjin list is on by default.** When nothing in the catalog fits a step (such as generating a sound effect), the router may suggest one third-party pay-per-call x402 service that Tenjin has reviewed. The suggestion names the seller, the URL, the price and the input it takes, and your agent judges whether to use it or to ask you first. It is paid like any lookup, under your spend limits.
+### Experimental Bazaar
 
 **The open Bazaar is experimental and off by default.** Turn it on with:
 
@@ -85,7 +83,7 @@ Every tool, including the Tenjin list, with current prices: [tenjin.sh/tools](ht
 tenjin config set experimental.bazaar on
 ```
 
-With it on, the router may also suggest sellers from Coinbase's open x402 Bazaar, and to find them, short snippets of your prompts are sent to Coinbase's public Bazaar search. Those sellers are unreviewed third parties, matches can be noisy, prices can vary with the input, and payments are real, under your spend limits. `tenjin config` and `tenjin doctor` show both settings. Turn it off with `tenjin config set experimental.bazaar off`.
+With it on, when nothing in the catalog fits a step, the router may suggest a seller from Coinbase's open x402 Bazaar, and to find them, short snippets of your prompts are sent to Coinbase's public Bazaar search. Those sellers are unreviewed third parties, matches can be noisy, prices can vary with the input, and payments are real, under your spend limits. `tenjin config` and `tenjin doctor` show the setting. Turn it off with `tenjin config set experimental.bazaar off`.
 
 ## How it works
 
@@ -97,7 +95,7 @@ flowchart LR
     B -- "nothing better" --> E["Agent carries on"]
 ```
 
-The Tenjin router hooks into Claude Code at your prompt, before each web search or page fetch, when your agent hands work to a subagent, and around a question your agent asks you. At each point it asks Jev, a decision model from [TypeSafe](https://typesafe.ai), whether a tool in the catalog fits. When none does, Jev may pick one third-party service from a short list matching the step (the Tenjin list, plus the open Bazaar if you turned it on), or none. Either way Jev only chooses from a list, so it never writes a call or an instruction for your agent; a third-party listing's description is the seller's own, and your agent judges it.
+The Tenjin router hooks into Claude Code at your prompt, before each web search or page fetch, when your agent hands work to a subagent, and around a question your agent asks you. At each point it asks Jev, a decision model from [TypeSafe](https://typesafe.ai), which task in the catalog fits, and the router picks the service for it. When none fits and you turned on the open Bazaar, Jev may pick one seller from a short list matching the step, or none. Either way Jev only chooses from a list, so it never writes a call or an instruction for your agent; a Bazaar listing's description is the seller's own, and your agent judges it.
 
 When one fits, your agent sees a one-line suggestion with the tool and its price, and calls it through Tenjin's `x402` MCP server: the offer's id alone shows the tool's inputs, an example and what it returns, and the id with the agent's input runs it. Tenjin builds the call, pays the provider from your wallet, within your limits, and hands back the result. Your status line shows the call as it happens:
 

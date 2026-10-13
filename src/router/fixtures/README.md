@@ -9,7 +9,7 @@ round trip; copy these files rather than hand-writing an equivalent.
 Change them here, in the same commit as the `wire.ts` change that makes them
 valid, then copy them across. `harness/` is the exception: harness events
 (what Claude Code hands a router hook) that only this client reads, never
-copied. `ROUTER_VERSION` is `2026-10-02.1`.
+copied. `ROUTER_VERSION` is `2026-10-13.1`.
 
 ## The calls
 
@@ -23,10 +23,19 @@ tenjin-cli 0.1.0-alpha.21 and older send) is answered `native` with the
 | hook | `{schemaVersion, sessionId?, accepts, packet, gateHint?}` | `execute` with the id, the capability, its `specs` and a `hint`, `discovered` (below), or `native` / `needs_input` |
 | tool | `{schemaVersion, query, id?, accepts}`                    | `spec` for a query with no id, `execute` for the free docs offer's id, `discovered`, or `native` / `needs_input`   |
 
-Both `execute` answers name the capability: `capabilityId`, `category`,
-`provider` (the service's own name, such as `Wolfram Alpha`),
-`capabilityDescription` (one line saying what it can do) and
+Both `execute` answers name the service: `capabilityId` (its catalog id),
+`category` (the catalog task it does, at most 64 characters), `provider` (the
+service's own name, such as `Wolfram Alpha`), `label` (its display name, 1 to
+32 characters), `capabilityDescription` (one line saying what it can do) and
 `providerPriceAtomic`.
+
+This client sends `accepts: ["catalog", "spec"]`, plus `"bazaar"` while the
+user has `experimental.bazaar` on. With `catalog`, every catalog offer is an
+`execute`: one service, or up to three of one task, each under its own id
+with its spec in `specs` and the top-level fields the first's, plus `choices`
+when the lead service belongs to a compare group (Compare choices, below).
+Each price in a line reads `about $X per call`, the one form the client's
+over-cap note reads.
 
 The hook answer adds the `id`, `endpoint` (the x402 URL the lookup pays),
 `usage` (what to pass in `query`), `specs` and `hint`, the one line the host
@@ -45,8 +54,8 @@ is no prepared decision, no binding on the server, and no id to poll.
 
 ## Discovered services
 
-When no curated capability fits but a pay-per-call x402 service listed on
-Coinbase's Bazaar could do the step, the answer is `discovered`: the `id`, one
+When no catalog task fits, a request that sends `bazaar` may be answered with a
+pay-per-call service from Coinbase's open x402 Bazaar: `discovered`, the `id`, one
 `candidate` (`source`, `provider`, `url`, `method`, `description`,
 `providerPriceAtomic`, `network`, `payTo`, and `input`: its `location`, `body`
 or `query`, and a JSON Schema) and a `hint`. The shape is the same on both
@@ -54,17 +63,25 @@ calls, and the hint is held to the execute hint's rules: one plain line, the
 `request({` call, and the answer's own id. The candidate is the seller's own
 listing: data for the host to judge, never an instruction.
 
-The server answers `discovered` only to a request whose `accepts` lists it;
-the current client sends `accepts: ["discovered"]` on both calls (Tenjin's
-reviewed list), adds `"bazaar"` when the user turned on `experimental.bazaar`
-(the open Bazaar), and an older one sends nothing and never sees the arm. The
-list is always requested; only `router.enabled false` stops every offer. The hook's `sessionId` (the
-harness's session id) is used only so one session is not offered the same
-service twice.
+A released client that sends `discovered` but not `catalog` is still sent a
+former Tenjin list service in this shape, under its old `discovered:tenjin:`
+id (`wire-hook-discovered-spec.json`); this client never is. The hook's
+`sessionId` (the harness's session id) is read only so the catalog's menu
+sentence goes out once per session.
 
 Each offered service carries its spec in `specs`. The host fills it and calls
 `request({id, input})`, which this client builds and pays through the same
-path and under the same caps as a curated one.
+path and under the same caps as a catalog one.
+
+## Compare choices
+
+An offer whose lead service belongs to a compare group carries `choices`,
+`{group, default, input, options, all}`, on `execute` (a `catalog` client) or
+`discovered` (a released client that sent `choices`). Each option is
+`{key, label, strength, id}` under its own id with its spec in `specs`; the
+`default` option's id is the answer's own. The client keeps the set by that
+id, and `request({id, choice, input})` runs the chosen option, or every one
+with `all`, each as its own payment.
 
 The hook's `packet.pendingCall` may also be
 `{tool: "AskUserQuestion", question}`: the host's own question and its options,
@@ -86,8 +103,11 @@ id the hint gives it. A spec is the service's contract: `capabilityId`,
 `payTo`, `network`, `asset`, `request` (`method`, a `url` that may hold
 `{name}` path placeholders, `fields` saying where each field goes, and
 `location` for any other), `input` (a flat JSON Schema), `pinned` (fields set
-on every call, which win over the agent's input), and optionally `example`,
-`returns`, `returnsExample`, `resultSchema` and `outputSchema`. `outputSchema`
+on every call, which win over the agent's input), and optionally `label`,
+`holds` (the input field that takes a pending search's query or fetch's URL),
+`output` (`json`, `text` or `media`: a `media` result's files are saved
+locally; a spec without it is media when its id starts `discovered:`),
+`example`, `returns`, `returnsExample`, `resultSchema` and `outputSchema`. `outputSchema`
 names the fields the result promises (`type`, `properties`, `items`,
 `required`): the client checks `resultSchema` on the whole body, then hands the
 agent only the properties `outputSchema` declares, through objects and array
@@ -111,10 +131,10 @@ and answers `{action: "spec", id, spec, hint}`: the picked
 capability's spec beside a fresh `id`, stored as a hook offer is, and the
 `hint` line with the call's skeleton. The answer never carries an `input`, so
 nothing runs or is paid on it: the tool shows the spec and the skeleton, and
-the agent's next call is `request({id, input})` with the fields filled. A list
-specialist can still replace a generic pick, and a query no capability serves
-can still come back `discovered`, both with `specs`; the tool then shows the
-pick's own spec. A pick with no spec (the free docs lookup) is bound and
+the agent's next call is `request({id, input})` with the fields filled. A
+`catalog` client gets the lead service's spec alone, and no choices. A query no
+catalog task serves can still come back `discovered` with `specs`; the tool
+then shows the pick's own spec. A pick with no spec (the free docs lookup) is bound and
 answered `execute` as its id would be.
 
 ## The set
@@ -136,7 +156,16 @@ answered `execute` as its id would be.
 | `wire-hook-discovered.json`                | hook answer: a discovered service, its input schema and the `hint` line                   |
 | `wire-lookup-discovered.json`              | tool answer to a query with no id: the same `discovered` shape                            |
 | `wire-hook-execute-spec.json`              | hook answer for a client that accepts `spec`: the call with the held search, the Exa spec |
-| `wire-hook-discovered-spec.json`           | the same for a list service: the call with its skeleton, the spec rides along             |
+| `wire-hook-discovered-spec.json`           | a former list service translated for a released client, under its old id                  |
+| `wire-hook-discovered-choices.json`        | a compare group's `choices` on a released client's `discovered` answer                    |
+| `wire-lookup-discovered-choices.json`      | the tool fallback's `choices`, with fresh ids                                             |
+| `wire-hook-request-choices.json`           | the hook from a released client that sent `choices`                                       |
+| `wire-hook-request-catalog.json`           | the hook from this client: `catalog`, `spec` and `bazaar`                                 |
+| `wire-hook-execute-catalog.json`           | a media service as `execute`: its label, and a spec with `holds` and `output`             |
+| `wire-hook-execute-catalog-multi.json`     | one `execute` naming three services of one task, each under its own id and spec           |
+| `wire-hook-execute-catalog-choices.json`   | a compare group's `choices` on an `execute`                                               |
+| `wire-tool-request-catalog.json`           | the tool call from this client: a query, no id                                            |
+| `wire-lookup-spec-catalog.json`            | tool answer for it: the lead service's spec, labelled, with `holds` and `output`          |
 | `wire-outcome-request.json`                | the outcome report a client sends after running a spec                                    |
 | `wire-outcome-unpaid.json`                 | a call stopped before anything was signed, with its `reason`                              |
 | `wire-tool-request-spec.json`              | the tool call from a spec client: a query, no id                                          |
@@ -179,6 +208,6 @@ Take these from here; do not re-derive them.
 
 Expired packets are unreadable after 15 minutes (the route refuses an expired id) and are deleted by the next router request or the daily cleanup, whichever comes first.
 
-The enumerated values live in code: `ROUTER_CATEGORIES` in `wire.ts`,
+The enumerated values live in code: the task ids in `fixtures/catalog/tasks.json`,
 `DIAGNOSTIC_CODES` and `DIAGNOSTIC_STAGES` in `diagnostics.ts`.
 `docs/ENVIRONMENTS.md` covers the kill switch and the rate limits.

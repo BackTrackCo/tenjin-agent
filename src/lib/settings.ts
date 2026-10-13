@@ -63,8 +63,8 @@ export interface ResolvedSettings {
   /** x402 discovery registries `discover` queries and the pay lane verifies against. */
   bazaarRegistries: string[];
   /** `experimental.bazaar`: whether the router may also offer the open Bazaar's
-   *  unreviewed sellers. Tenjin's reviewed list is always requested; only
-   *  `router.enabled false` stops every offer. */
+   *  unreviewed sellers when no catalog task fits. The catalog is always
+   *  requested; only `router.enabled false` stops every offer. */
   experimentalBazaar: boolean;
   /**
    * Hard per-send cap for `tenjin wallet send`: SEND_MAX_UNSET = never configured
