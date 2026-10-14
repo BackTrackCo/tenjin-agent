@@ -132,8 +132,10 @@ capability's spec beside a fresh `id`, stored as a hook offer is, and the
 `hint` line with the call's skeleton. The answer never carries an `input`, so
 nothing runs or is paid on it: the tool shows the spec and the skeleton, and
 the agent's next call is `request({id, input})` with the fields filled. A
-`catalog` client gets the lead service's spec alone, and no choices. A query no
-catalog task serves can still come back `discovered` with `specs`; the tool
+pick from a compare group adds `choices` and each option's spec in `specs`,
+with the choice's line as `hint`, kept by the answer's id as an offer's set
+is (Compare choices, above). A query no catalog task serves can still come
+back `discovered` with `specs`; the tool
 then shows the pick's own spec. A pick with no spec (the free docs lookup) is bound and
 answered `execute` as its id would be.
 
@@ -166,6 +168,7 @@ answered `execute` as its id would be.
 | `wire-hook-execute-catalog-choices.json`   | a compare group's `choices` on an `execute`                                               |
 | `wire-tool-request-catalog.json`           | the tool call from this client: a query, no id                                            |
 | `wire-lookup-spec-catalog.json`            | tool answer for it: the lead service's spec, labelled, with `holds` and `output`          |
+| `wire-lookup-spec-catalog-choices.json`    | tool answer for an image query: the lead's spec, and `choices` with each option's spec    |
 | `wire-outcome-request.json`                | the outcome report a client sends after running a spec                                    |
 | `wire-outcome-unpaid.json`                 | a call stopped before anything was signed, with its `reason`                              |
 | `wire-tool-request-spec.json`              | the tool call from a spec client: a query, no id                                          |

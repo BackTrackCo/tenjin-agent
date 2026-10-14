@@ -33,6 +33,7 @@ import {
   type UnpaidReason,
   type DecisionContract,
   type DecisionDeps,
+  type Choices,
   type DecisionDiagnostics,
   type OfferSpec,
 } from './decision';
@@ -321,13 +322,12 @@ export async function runRequestTool(
   }
 
   // THE PICKED SERVICE'S SPEC, for a query with no id, kept like a hook's and
-  // shown with the skeleton of the next call, `request({id, input})`. Nothing
-  // is paid on this answer: only a filled spec pays.
+  // shown with the skeleton of the next call, `request({id, input})`, or with
+  // its compare group's choice line. Nothing is paid on this answer: only a
+  // filled spec pays.
   if (decision.action === 'spec') {
     const picked: OfferSpec = { ...decision.spec, id: decision.id };
-    await storeSpecs(deps.ctx.dataDir, [picked]);
-    await footer.done('service found');
-    return showSpec(picked.id, picked, [], decision.hint);
+    return keepAndShow(picked, decision.specs ?? [picked], decision, decision.hint, deps, footer);
   }
 
   // A SERVICE FROM THE OPEN BAZAAR (or, from a server that predates
@@ -337,25 +337,12 @@ export async function runRequestTool(
   // to call it, with the id it minted and the input the host builds, and that
   // second call pays through the execute path below like any other.
   if (decision.action === 'discovered') {
-    await storeSpecs(deps.ctx.dataDir, decision.specs);
-    // A CHOICE SET is kept like the hook's, and its line, which names every
-    // option and the call, is the next step in place of an "also offered"
-    // line per option.
-    const { choices } = decision;
-    if (choices !== undefined) {
-      await storeChoices(deps.ctx.dataDir, decision.id, { choices, hint: decision.hint });
-    }
-    await footer.done('service found');
     const picked = decision.specs?.find((spec) => spec.id === decision.id);
     if (picked !== undefined) {
-      const options = new Set(choices?.options.map((option) => option.id));
-      return showSpec(
-        picked.id,
-        picked,
-        decision.specs!.filter((spec) => spec !== picked && !options.has(spec.id)),
-        choices !== undefined ? decision.hint : undefined,
-      );
+      return keepAndShow(picked, decision.specs!, decision, undefined, deps, footer);
     }
+    await storeSpecs(deps.ctx.dataDir, decision.specs);
+    await footer.done('service found');
     const { candidate } = decision;
     return {
       isError: false,
@@ -421,6 +408,36 @@ export async function runRequestTool(
       footer,
     )
   ).result;
+}
+
+/**
+ * AN ANSWER'S SPECS, KEPT LIKE THE HOOK'S, and the pick's own spec shown:
+ * what `request({id, input})` runs. A CHOICE SET is kept too, for
+ * `request({id, choice})`, and its line, which names every option and the
+ * call, is the next step in place of `next` and an "also offered" line per
+ * option.
+ */
+async function keepAndShow(
+  picked: OfferSpec,
+  specs: readonly OfferSpec[],
+  answer: { hint: string; choices?: Choices | undefined },
+  next: string | undefined,
+  deps: RequestToolDeps,
+  footer: LookupFooter,
+): Promise<RequestToolResult> {
+  await storeSpecs(deps.ctx.dataDir, specs);
+  const { choices } = answer;
+  if (choices !== undefined) {
+    await storeChoices(deps.ctx.dataDir, picked.id, { choices, hint: answer.hint });
+  }
+  await footer.done('service found');
+  const options = new Set(choices?.options.map((option) => option.id));
+  return showSpec(
+    picked.id,
+    picked,
+    specs.filter((spec) => spec.id !== picked.id && !options.has(spec.id)),
+    choices !== undefined ? answer.hint : next,
+  );
 }
 
 /** The answer to `request({id})` when the hook kept that offer's spec, or to
