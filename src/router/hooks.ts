@@ -583,11 +583,9 @@ function gateDeadline(deps: HookDeps): number {
  * WHY THE PAID CALL WOULD NOT RUN ON ITS OWN, in the footer's words, or null
  * when it would. Every line that points at `request` asks this first
  * ({@link vetOffer}). Where nobody can approve (a subagent, a delegated task,
- * a question to the user), or where the line would deny a free call that is
- * about to run (the pre-call hook), a shortfall withholds the offer and the
- * free call runs. Where the main agent can ask, the prompt hint and the
- * after-call line still go out, with one sentence saying the call needs
- * approval or funds.
+ * a question to the user), a shortfall withholds the offer and the free call
+ * runs. Where the main agent can ask, the pre-call deny and the prompt hint
+ * still go out, with one sentence saying the call needs approval or funds.
  * Two things stop that call:
  *
  * - THE SPEND POLICY, asked the way `request` will ask it: the same settings,
@@ -1080,9 +1078,9 @@ async function routeNativeCall(
  * WHAT IS NEW is who can be denied. A subagent not known to have the request
  * tool, or whose spend would need an approval it cannot ask for, is never
  * redirected: `routeNativeCall` answers without an offer, and its
- * call runs free. Neither is the main agent when the paid call would stop on
- * `needs_approval` or its wallet cannot cover the price: its free call runs,
- * and the after-call arm can still offer, with a sentence saying so.
+ * call runs free. The main agent, which can ask, is redirected when the paid
+ * call would stop on `needs_approval` or its wallet cannot cover the price,
+ * with a sentence saying so ({@link vetOffer}).
  *
  * A redirect leaves a mark under the call's `tool_use_id`, so the after-call
  * arm never offers on that same call.
@@ -1107,7 +1105,6 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
   const target = redirectTarget(event.pending);
   const routed = await routeNativeCall(event, event.pending, deps, {
     passFree: true,
-    canAskUser: false,
     repeated: async () =>
       !(await claimRedirect(deps.dataDir, event.sessionId, event.agentId, target, deps.now?.())),
     redirected: () =>
