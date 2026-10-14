@@ -851,14 +851,15 @@ describe('the pre-call hook', () => {
   });
 
   /**
-   * THE MAIN AGENT CAN ASK THE USER, so a lookup that stops on
-   * `needs_approval` still redirects it, with a sentence saying so: the same
-   * rule as every other offer. The after-call arm then says nothing more.
+   * A DENY THE PAID CALL CANNOT MAKE GOOD ON IS NOT SENT. Redirecting the main
+   * agent to a lookup that stops on `needs_approval` left the page neither
+   * fetched nor bought, so the free call runs instead; the after-call arm can
+   * still offer, since `request` can ask the user there.
    */
   it.each([
     ['above maxAutoSpend', { maxAutoSpend: '14999', confirm: 'above:14999' }],
     ['past the session budget', { sessionBudget: '20000' }],
-  ])('redirects the main agent with a note when the lookup is %s', async (_label, over) => {
+  ])('lets the main agent call run when the lookup is %s', async (_label, over) => {
     await setConfig({ ...ROUTER_POLICY, ...over });
     // 15000 of the day already committed: only the session-budget case minds.
     const fs = await import('node:fs/promises');
@@ -874,11 +875,10 @@ describe('the pre-call hook', () => {
     const deps = { dataDir: dir, baseUrl: BASE, fetchImpl: router(EXECUTE).fetchImpl };
     const event = await preCall('https://x.com/a', 'WebFetch', { tool_use_id: 'toolu_9' });
     const out = await runNativeHook(event, deps);
-    expect(out).toMatchObject({ action: 'execute' });
-    expect(JSON.stringify(out.response)).toContain('"permissionDecision":"deny"');
-    expect(JSON.stringify(out.response)).toContain('Note: $0.015');
+    expect(out).toMatchObject({ response: null, action: 'execute', withheld: true });
 
-    // The call was redirected, so the after-call arm says nothing.
+    // After the call, where `request` can ask the user, the line is shown with
+    // a sentence saying the call needs approval.
     const after = await runShortfallHook(
       {
         ...((await readableEvent('https://x.com/a', 'WebFetch')) as object),
@@ -886,7 +886,7 @@ describe('the pre-call hook', () => {
       },
       deps,
     );
-    expect(after.response).toBeNull();
+    expect(JSON.stringify(after.response)).toContain('Note: $0.015');
   });
 
   it.each([
@@ -1165,27 +1165,32 @@ describe('a wallet that cannot cover the lookup', () => {
   it.each([
     ['holds no USDC', 0n],
     ['holds less than the price', 14_999n],
-  ])('shows the line with a funding note when it %s', async (_label, balance) => {
-    rpcAnswer = balance;
-    const { fetchImpl } = router(EXECUTE);
-    const deps = { dataDir: dir, baseUrl: BASE, fetchImpl };
-    const event = await preCall('https://x.com/a', 'WebFetch', { tool_use_id: 'toolu_5' });
-    const out = await runNativeHook(event, deps);
-    expect(out).toMatchObject({ action: 'execute' });
-    expect(JSON.stringify(out.response)).toContain('fund it with `tenjin wallet fund`');
-    const prompted = await runPromptHook(promptEvent('read https://x.com/a'), deps);
-    expect(prompted.withheld).toBeUndefined();
-    expect(JSON.stringify(prompted.response)).toContain('fund it with `tenjin wallet fund`');
-    // The call was redirected, so the after-call arm says nothing.
-    const after = await runShortfallHook(
-      {
-        ...((await readableEvent('https://x.com/a', 'WebFetch')) as object),
-        tool_use_id: 'toolu_5',
-      },
-      deps,
-    );
-    expect(after.response).toBeNull();
-  });
+  ])(
+    'lets the free call run, and notes the funding on the prompt line, when it %s',
+    async (_label, balance) => {
+      rpcAnswer = balance;
+      const { fetchImpl } = router(EXECUTE);
+      const deps = { dataDir: dir, baseUrl: BASE, fetchImpl };
+      const event = await preCall('https://x.com/a', 'WebFetch', { tool_use_id: 'toolu_5' });
+      const out = await runNativeHook(event, deps);
+      expect(out).toMatchObject({ response: null, action: 'execute', withheld: true });
+      expect(await renderProgress(dir, 'sess-1')).toBe(
+        'x402 · search: native tools (wallet needs USDC)',
+      );
+      const prompted = await runPromptHook(promptEvent('read https://x.com/a'), deps);
+      expect(prompted.withheld).toBeUndefined();
+      expect(JSON.stringify(prompted.response)).toContain('fund it with `tenjin wallet fund`');
+      // After the call the line is shown too, with the same note.
+      const after = await runShortfallHook(
+        {
+          ...((await readableEvent('https://x.com/a', 'WebFetch')) as object),
+          tool_use_id: 'toolu_5',
+        },
+        deps,
+      );
+      expect(JSON.stringify(after.response)).toContain('fund it with `tenjin wallet fund`');
+    },
+  );
 
   /** Base's public RPC refuses the sixth `eth_call` in a second, which a
    *  burst of parallel lookups reaches: a minute-old read stands. */
@@ -3065,7 +3070,9 @@ describe('a discovered service', () => {
     ).toBe(`${SEEN_LINE} Note: the wallet holds $0.01; fund it with \`tenjin wallet fund\`.`);
   });
 
-  it('denies the main agent a native call over the cap, with the note in the reason', async () => {
+  /** Before a native call, an offer over the cap never denies it: the free
+   *  call runs, as for every other offer. */
+  it('lets the main agent native call run over the cap', async () => {
     const fs = await import('node:fs/promises');
     await fs.writeFile(
       join(dir, 'config.json'),
@@ -3076,10 +3083,7 @@ describe('a discovered service', () => {
       baseUrl: BASE,
       fetchImpl: router(DISCOVERED).fetchImpl,
     });
-    expect(
-      (out.response as { hookSpecificOutput: { permissionDecisionReason: string } })
-        .hookSpecificOutput.permissionDecisionReason,
-    ).toContain('ask the user first.');
+    expect(out).toMatchObject({ response: null, action: 'discovered', withheld: true });
   });
 
   /** Where nobody can ask the user, it is withheld like any other offer. */

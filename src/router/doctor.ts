@@ -646,8 +646,8 @@ function experimentalCheck(bazaar: boolean): RouterCheck {
     status: 'ok',
     required: false,
     detail: bazaar
-      ? 'list: on; bazaar: on (experimental): the router may also suggest unreviewed sellers from the open x402 Bazaar'
-      : 'list: on; bazaar: off (experimental): `tenjin config set experimental.bazaar on` to add the open x402 Bazaar',
+      ? 'bazaar: on (experimental): the router may also suggest unreviewed sellers from the open x402 Bazaar'
+      : 'bazaar: off (experimental): `tenjin config set experimental.bazaar on` to add the open x402 Bazaar',
   };
 }
 
