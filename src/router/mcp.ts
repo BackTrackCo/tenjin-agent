@@ -133,7 +133,7 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
       _meta: { [MAX_RESULT_SIZE_KEY]: MAX_RESULT_SIZE_CHARS },
       description: INSTRUCTIONS,
       inputSchema: {
-        // OPTIONAL ONLY FOR `input`: a call from a kept spec carries the
+        // OPTIONAL ONLY FOR `input`: a discovered service's call carries the
         // object the service takes instead. Every other call still needs it,
         // and the handler answers `needs_input` when neither is there.
         query: z

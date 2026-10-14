@@ -2738,8 +2738,7 @@ describe('free docs on top of a search', () => {
 });
 
 /**
- * A `discovered` SERVICE (the open Bazaar, or a former list service from a
- * server answering a released client), shown exactly where a catalog offer
+ * A PAY-PER-CALL SERVICE NOBODY CURATED, shown exactly where a curated offer
  * is: the server's own line, attributed and tool-named, under the same spend,
  * wallet and one-block rules. The shape is the shared fixture's.
  */
@@ -2989,7 +2988,7 @@ describe('a discovered service', () => {
   /**
    * NEVER WITHHELD WHERE THE USER CAN BE ASKED. Over the automatic cap, the
    * line still names the service, with one sentence saying the call needs
-   * approval, the same rule as an `execute` (above).
+   * approval; a curated offer over the cap is still withheld (above).
    */
   it('is shown over the automatic cap, with a note to ask the user first', async () => {
     const fs = await import('node:fs/promises');

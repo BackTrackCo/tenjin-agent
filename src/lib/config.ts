@@ -200,9 +200,9 @@ export const TeamConfigSchema = z.object({ publicFallback: PublicFallbackSchema 
 export type TeamConfig = z.infer<typeof TeamConfigSchema>;
 
 /**
- * `experimental.*`: features that ship off. `bazaar` adds the open x402
- * Bazaar's unreviewed sellers as a fallback when no catalog task fits (the
- * catalog is always on). Off, the client never asks for them.
+ * `experimental.*`: features that ship off. `bazaar` widens the third-party
+ * services the router may offer from Tenjin's reviewed list (always on) to the
+ * open x402 Bazaar: unreviewed sellers. Off, the client never asks for them.
  */
 export const ExperimentalConfigSchema = z.object({ bazaar: PublicFallbackSchema });
 export type ExperimentalConfig = z.infer<typeof ExperimentalConfigSchema>;
