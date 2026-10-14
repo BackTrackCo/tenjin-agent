@@ -193,7 +193,7 @@
         }
       }
     },
-    "hint": "Apollo fits this: a person's professional record (current title, employer, work history, LinkedIn URL) and work email with its verification status, from a first and last name with the company domain or name, a LinkedIn profile URL, or an email address, about $0.01 per call via https://x402.orthogonal.com/apollo/api/v1/people/match . Call request({id: \"0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d22\", input: {\"first_name\":\"<first name>\",\"last_name\":\"<last name>\",\"domain\":\"<company domain, only if the user gave it>\",\"organization_name\":\"<company name, when no domain was given>\",\"email\":\"<person's email, if the user gave one>\",\"linkedin_url\":\"<LinkedIn profile URL, if the user gave one>\"}}) alone and wait for its result."
+    "hint": "Apollo fits this: a person's professional record (current title, employer, work history, LinkedIn URL) and work email with its verification status, from a first and last name with the company domain or name, a LinkedIn profile URL, or an email address. $0.01 via https://x402.orthogonal.com/apollo/api/v1/people/match . Call request({id: \"0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d22\", input: {\"first_name\":\"<first name>\",\"last_name\":\"<last name>\",\"domain\":\"<company domain, only if the user gave it>\",\"organization_name\":\"<company name, when no domain was given>\",\"email\":\"<person's email, if the user gave one>\",\"linkedin_url\":\"<LinkedIn profile URL, if the user gave one>\"}}) alone and wait for its result."
   },
   "jev": {
     "calls": 1,

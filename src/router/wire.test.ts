@@ -132,9 +132,9 @@ describe('the request bodies', () => {
     ).toEqual(canonical);
   });
 
-  /** THIS BUILD SENDS `catalog`: every catalog offer as `execute`, with its
-   *  label, each spec's `holds` and `output`, and `choices`. `bazaar` rides
-   *  only while `experimental.bazaar` is on. */
+  /** THIS BUILD SENDS `catalog`: a Tenjin list service as `discovered` under
+   *  its catalog id, each spec's `holds` and `output`, and `choices`. `bazaar`
+   *  rides only while `experimental.bazaar` is on. */
   it("sends this build's accepts, catalog included, byte for byte", () => {
     const canonical = fixture('wire-hook-request-catalog.json');
     expect(
@@ -243,6 +243,8 @@ describe('every answer payload on disk', () => {
       'wire-hook-discovered-spec.json',
       'wire-hook-discovered-choices.json',
       'wire-lookup-discovered-choices.json',
+      'wire-hook-discovered-catalog.json',
+      'wire-lookup-discovered-catalog.json',
     ]) {
       expect(parseForTests('hook', fixture(name)).success, name).toBe(true);
       expect(parseForTests('tool', fixture(name)).success, name).toBe(true);
@@ -250,38 +252,27 @@ describe('every answer payload on disk', () => {
   });
 
   /**
-   * A CATALOG OFFER IS AN `execute`: the label, a spec with `holds` and
-   * `output` for every id the line names, and `choices` when the lead service
-   * belongs to a compare group, its default the answer's own id.
+   * A TENJIN LIST SERVICE TO A `catalog` CLIENT IS `discovered`, as it always
+   * was, under its catalog id rather than a `discovered:` one, and each spec
+   * says its result is `media`, so its files are saved as before.
    */
-  it('parses the catalog execute shapes: specs with output, several services, choices', () => {
-    const single = fixture('wire-hook-execute-catalog.json').decision as Record<string, unknown>;
-    expect(single).toMatchObject({ action: 'execute', label: 'ElevenLabs Sound Effects' });
-    expect((single.specs as { output?: string }[])[0]?.output).toBe('media');
-    const multi = fixture('wire-hook-execute-catalog-multi.json').decision as {
-      hint: string;
-      specs: { id: string }[];
-    };
-    expect(multi.specs).toHaveLength(3);
-    for (const spec of multi.specs) expect(multi.hint).toContain(`id: "${spec.id}"`);
-    const payload = fixture('wire-hook-execute-catalog-choices.json');
-    const withChoices = payload.decision as { id: string; choices: { default: string } };
-    expect(withChoices.choices.default).toBe('nano-banana-2.1');
-    // The same checks as on a discovered set: the default is this answer's offer.
-    const options = (withChoices.choices as unknown as { options: { key: string; id: string }[] })
-      .options;
-    const broken = options.map((option) =>
-      option.id === withChoices.id ? { ...option, key: 'other' } : option,
-    );
-    expect(
-      parseForTests('hook', {
-        ...payload,
-        decision: { ...withChoices, choices: { ...withChoices.choices, options: broken } },
-      }).success,
-    ).toBe(false);
-    const spec = fixture('wire-lookup-spec-catalog.json').decision as { spec: object };
-    expect(spec.spec).toMatchObject({ label: 'Scholarly paper search', output: 'json' });
-  });
+  it.each([['wire-hook-discovered-catalog.json'], ['wire-lookup-discovered-catalog.json']])(
+    'parses %s as discovered, under catalog ids, with media output',
+    (name) => {
+      const decision = fixture(name).decision as {
+        action: string;
+        hint: string;
+        specs: { id: string; capabilityId: string; output?: string }[];
+      };
+      expect(decision.action).toBe('discovered');
+      expect(decision.specs.length).toBeGreaterThan(0);
+      for (const spec of decision.specs) {
+        expect(spec.capabilityId).not.toMatch(/^discovered:/);
+        expect(spec.output).toBe('media');
+        expect(decision.hint).toContain(`id: "${spec.id}"`);
+      }
+    },
+  );
 
   /**
    * A QUERY WITH NO ID ONLY PICKS. The answer is the service's spec under a

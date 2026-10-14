@@ -11,7 +11,7 @@
     "providerPriceAtomic": "0",
     "endpoint": "https://tenjin.sh/api/docs-lookup",
     "usage": "the library and what to look up in it",
-    "hint": "Context7 fits this: current, version-specific documentation and code examples for a named library, framework, SDK or CLI, free via https://tenjin.sh/api/docs-lookup . Call request({query: <the library and what to look up in it>, id: \"0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d01\"}) alone and wait for its result."
+    "hint": "Context7 fits this: current, version-specific documentation and code examples for a named library, framework, SDK or CLI. Free via https://tenjin.sh/api/docs-lookup . Call request({query: <the library and what to look up in it>, id: \"0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d01\"}) alone and wait for its result."
   },
   "jev": {
     "calls": 1,
