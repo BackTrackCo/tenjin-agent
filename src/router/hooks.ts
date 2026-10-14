@@ -664,24 +664,24 @@ async function spendShortfall(
 }
 
 /** Why a paid call would not run on its own: the footer's words, and the
- *  sentence an offer carries instead of being withheld. */
+ *  sentence a discovered offer carries instead of being withheld. */
 interface Shortfall {
   withheld: string;
   note: string;
 }
 
 /**
- * AN OFFER, OR WHY IT IS NOT SHOWN. ONE RULE FOR EVERY OFFER: one the paid
- * call could not make good on alone is never withheld where someone can ask
- * the user, since it may be the only line naming a service that can do the
- * step, so it is shown with one sentence saying the call needs approval or
- * funds, and the host asks first. Where nobody can ask (a subagent's call, a
- * delegated task, a question to the user) it is withheld.
+ * AN OFFER, OR WHY IT IS NOT SHOWN. A curated offer the paid call could not
+ * make good on alone is withheld, as it always was. A DISCOVERED one is never
+ * withheld where someone can ask the user: it is the only line naming a
+ * service that can do the step, so it is shown with one sentence saying the
+ * call needs approval or funds, and the host asks first. Where nobody can ask
+ * (a subagent's call, a delegated task) it is withheld like any other.
  *
- * An offer that is shown can still list OTHER services beside its own: the
- * task's other services, or a compare group's options. One priced over the
- * cap gets a sentence saying so ({@link overCapNote}), so the host picks one
- * that runs rather than one that stops on `needs_approval`.
+ * An offer that is shown can still list OTHER services beside its own: a Tenjin
+ * list menu, or an alternative after a curated line. One priced over the cap
+ * gets a sentence saying so ({@link overCapNote}), so the host picks one that
+ * runs rather than one that stops on `needs_approval`.
  */
 async function vetOffer<T extends OfferDecision>(
   offer: T,
@@ -694,18 +694,18 @@ async function vetOffer<T extends OfferDecision>(
     const note = await overCapNote(offer.hint, deps, canAskUser);
     return { offer: note === null ? offer : { ...offer, hint: `${offer.hint} ${note}` } };
   }
-  if (canAskUser) {
+  if (offer.action === 'discovered' && canAskUser) {
     return { offer: { ...offer, hint: `${offer.hint} ${shortfall.note}` } };
   }
   return { withheld: shortfall.withheld };
 }
 
-/** Where the server writes a price, and only there: "about $0.28 per call",
- *  the one form a catalog line uses. The other forms are what older servers
- *  wrote: "about $0.03: request(" or "about $0.03 (price can vary" in an
- *  alternative, "$0.30): request(" closing one, and "$0.30 via https://" for
- *  an offer's own. A dollar amount anywhere else is a description's words
- *  ("seats from $500/month"), never a price. */
+/** Where the server (`lib/x402-router/policy.ts`) writes a price, and only
+ *  there: "about $0.28 per call" in a list entry, "about $0.03: request(" or
+ *  "about $0.03 (price can vary" in an alternative, "$0.30): request(" closing
+ *  a curated alternative, and "$0.30 via https://" for a curated offer's own
+ *  (already checked as a field, so it fits). A dollar amount anywhere else is
+ *  a description's words ("seats from $500/month"), never a price. */
 const LISTED_PRICE_RE =
   /about \$(\d+(?:\.\d+)?)(?= per call|: request\(| \(price can vary)|\$(\d+(?:\.\d+)?)(?=\): request\(| via https?:\/\/)/g;
 
@@ -808,9 +808,11 @@ export interface PromptHookOutcome {
  * any failure cause to stderr.
  *
  * THE HINT ASKS FOR A CALL THAT HAS TO RUN. Over the cap or past the budget,
- * `request` answers `needs_approval`, so a line that would stop there is shown
- * with a sentence saying it needs approval or funds ({@link vetOffer}), and
- * the host asks the user first: it may be the only service for the step.
+ * `request` answers `needs_approval`, and a model sent there stops to ask the
+ * user where its free tools would have done: so a curated line is shown only
+ * when the paid call would auto-execute, the same rule the pre-call deny
+ * follows. A discovered line is shown anyway, with a sentence saying it needs
+ * approval or funds ({@link vetOffer}): it may be the only service for the step.
  */
 export async function runPromptHook(raw: unknown, deps: HookDeps): Promise<PromptHookOutcome> {
   const event = decodeEvent(raw);
@@ -910,8 +912,8 @@ export interface ShortfallHookOutcome extends NativeHookOutcome {
 type ExecuteDecision = Extract<HookDecision, { action: 'execute' }>;
 
 /**
- * AN ANSWER THAT OFFERS SOMETHING: a catalog service (`execute`), or a
- * pay-per-call service from the open Bazaar for a step no catalog task serves
+ * AN ANSWER THAT OFFERS SOMETHING: a curated capability (`execute`), or a
+ * pay-per-call service the server found for a step nothing curated serves
  * (`discovered`). Both carry an id and a finished line, and every hook shows
  * them in the same place, under the same spend and one-block rules.
  */
@@ -936,7 +938,7 @@ function termsOf(offer: OfferDecision): {
   };
 }
 
-/** A free catalog offer: nothing to pay, so nothing for the spend policy or
+/** A free curated offer: nothing to pay, so nothing for the spend policy or
  *  the wallet. A discovered service is never one: it is always a sale. */
 function isFree(offer: OfferDecision): offer is ExecuteDecision {
   return offer.action === 'execute' && offer.providerPriceAtomic === '0';
@@ -964,8 +966,8 @@ async function routeNativeCall(
     redirected?: () => Promise<boolean>;
     passFree?: boolean;
     operation?: 'prompt' | 'search';
-    /** False where an offer must be affordable as it stands: the call it
-     *  would replace is the one way to reach the user. */
+    /** False where a discovered offer must be affordable as it stands: the
+     *  call it would replace is the one way to reach the user. */
     canAskUser?: boolean;
   } = {},
 ): Promise<
@@ -1076,9 +1078,9 @@ async function routeNativeCall(
  * WHAT IS NEW is who can be denied. A subagent not known to have the request
  * tool, or whose spend would need an approval it cannot ask for, is never
  * redirected: `routeNativeCall` answers without an offer, and its
- * call runs free. The main agent, which can ask, is redirected when the paid
- * call would stop on `needs_approval` or its wallet cannot cover the price,
- * with a sentence saying so ({@link vetOffer}).
+ * call runs free. Neither is the main agent when the paid call would stop on
+ * `needs_approval` or its wallet cannot cover the price: its free call runs,
+ * and the after-call arm can still offer.
  *
  * A redirect leaves a mark under the call's `tool_use_id`, so the after-call
  * arm never offers on that same call.
@@ -1169,10 +1171,10 @@ function redirect(offer: OfferDecision, oneBlock = ONE_BLOCK): NativeHookOutcome
  * and that question runs.
  *
  * AN OFFER THE CALL COULD NOT MAKE GOOD ON ALONE NEVER TAKES THE QUESTION'S
- * PLACE. Elsewhere an offer over the cap or the balance is shown with a note
- * telling the host to ask the user first; here the question IS the asking, so
- * denying it to say "ask the user" strands the turn. Any shortfall withholds
- * the offer and the question runs.
+ * PLACE. Elsewhere a discovered offer over the cap or the balance is shown
+ * with a note telling the host to ask the user first; here the question IS
+ * the asking, so denying it to say "ask the user" strands the turn. Any
+ * shortfall, curated or discovered, withholds the offer and the question runs.
  */
 export async function runAskHook(raw: unknown, deps: HookDeps): Promise<NativeHookOutcome> {
   const event = decodeEvent(raw);
@@ -1443,7 +1445,7 @@ async function openFooter(
         // `request({id, input})` runs and `request({id})` shows, and its
         // choice set is what `request({id, choice})` picks from.
         await storeSpecs(deps.dataDir, decision.specs);
-        if (decision.choices !== undefined) {
+        if (decision.action === 'discovered' && decision.choices !== undefined) {
           await storeChoices(deps.dataDir, decision.id, {
             choices: decision.choices,
             hint: decision.hint,
