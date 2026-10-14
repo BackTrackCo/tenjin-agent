@@ -330,10 +330,9 @@ export async function runRequestTool(
     return showSpec(picked.id, picked, [], decision.hint);
   }
 
-  // A SERVICE FROM THE OPEN BAZAAR (or, from a server that predates
-  // `catalog`, a Tenjin list service), named for the host to judge. Nothing is
-  // paid on this answer. With specs they are kept like the hook's, and the
-  // pick's own spec is shown, as for a catalog pick. Without, the server's line says how
+  // A SERVICE NOBODY CURATED, named for the host to judge. Nothing is paid on
+  // this answer. With specs they are kept like the hook's, and the pick's own
+  // spec is shown, as for a curated pick. Without, the server's line says how
   // to call it, with the id it minted and the input the host builds, and that
   // second call pays through the execute path below like any other.
   if (decision.action === 'discovered') {
@@ -656,10 +655,9 @@ export async function paySpec(
 }
 
 /**
- * WHETHER A PAID RESULT'S FILES ARE SAVED: the spec's `output` says, and a
- * spec without one (an open-Bazaar listing, or a former Tenjin list service
- * from a server that predates `catalog`) is media when its id is a
- * `discovered:` one, as before.
+ * WHETHER A PAID RESULT'S FILES ARE SAVED: the spec's `output` says (`media`
+ * on every Tenjin list and open-Bazaar spec, so their files are saved as
+ * before), and a spec without one is media when its id is a `discovered:` one.
  */
 function savesMedia(spec: Pick<OfferSpec, 'capabilityId' | 'output'>): boolean {
   return spec.output !== undefined
@@ -768,9 +766,9 @@ async function payAndDeliver(
         : null;
     // AND A PAID MEDIA RESULT THAT LINKS TO ITS FILES brings them home: the
     // links can expire, and the user paid for what is behind them. Only a
-    // media service (where generated images, audio and video come from) does
-    // this: a page read or search links whatever the page links, on hosts the
-    // page picked. Best effort only.
+    // media service (every discovered one, where generated images, audio and
+    // video come from) does this: a curated page read or search links whatever
+    // the page links, on hosts the page picked. Best effort only.
     const media = providerAtomic > 0n && binary === null && call.media;
     // ONE CARRYING ITS FILES INLINE, as base64 in its JSON, has them saved
     // the same way, each replaced by a note naming its file: megabytes of

@@ -862,7 +862,7 @@ describe('the request tool in a directory where the router is off', () => {
 });
 
 /**
- * A SERVICE FROM THE OPEN BAZAAR. The tool's fallback answer names it and pays
+ * A SERVICE NOBODY CURATED. The tool's fallback answer names it and pays
  * nothing; the host's second call, with the id and its own input, comes back
  * as an ordinary execute and pays through the same path and caps as any other.
  */
@@ -872,7 +872,7 @@ describe('a discovered service', () => {
     JSON.parse(await readFile(join(fixtures, name), 'utf8')) as Record<string, unknown>;
   const SELLER = 'https://blockrun.ai/api/v1/audio/sound-effects';
   const SOUND_ID = '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d02';
-  /** The spec the hook kept for the sound-effect offer: the only way the
+  /** The spec the hook kept for the sound-effect offer: the only way a list
    *  service's call is built and paid. */
   const kept = (over: Partial<OfferSpec> = {}) =>
     storeSpecs(dir, [
@@ -1280,8 +1280,8 @@ describe('a discovered service', () => {
     expect(calls.some((c) => c.url.includes('10.0.0.5'))).toBe(false);
   });
 
-  /** A PAGE READ OR SEARCH NEVER DOWNLOADS what its page links to. */
-  it('downloads nothing a page read or search result links to', async () => {
+  /** A CURATED PAGE READ OR SEARCH NEVER DOWNLOADS what its page links to. */
+  it('downloads nothing a curated result links to', async () => {
     const connected: string[] = [];
     const { fetchImpl } = net([
       { url: ROUTER, status: 200, body: decision() },
@@ -1303,8 +1303,7 @@ describe('a discovered service', () => {
   });
 
   /** THE SPEC'S `output` SAYS WHETHER FILES ARE SAVED, whatever the id; a
-   *  spec without one (an open-Bazaar listing) falls back to the
-   *  `discovered:` id. */
+   *  spec without one falls back to the `discovered:` id. */
   it.each([
     ['a catalog media service', { capabilityId: 'blockrun-sound-effects', output: 'media' }, 1],
     ['a discovered id whose spec says json', { output: 'json' }, 0],
@@ -1334,6 +1333,52 @@ describe('a discovered service', () => {
     );
     expect(result.envelope).toMatchObject({ status: 'fulfilled' });
     expect(connected).toHaveLength(downloads);
+  });
+
+  /** A LIST SERVICE UNDER ITS CATALOG ID, kept from the hook's `discovered`
+   *  offer as a `catalog` client gets it, still has its files saved: its spec
+   *  says `media` where the `discovered:` id used to. */
+  it('saves the linked files of a list service kept under its catalog id', async () => {
+    const { decision } = (await wire('wire-hook-discovered-catalog.json')) as {
+      decision: { id: string; specs: OfferSpec[] };
+    };
+    const spec = decision.specs[0]!;
+    expect(spec).toMatchObject({ capabilityId: 'blockrun-sound-effects', output: 'media' });
+    await storeSpecs(dir, decision.specs);
+    const { fetchImpl } = net([
+      {
+        url: spec.request.url,
+        status: 402,
+        body: {},
+        headers: { 'PAYMENT-REQUIRED': challenge({ payTo: spec.payTo }) },
+      },
+      {
+        url: spec.request.url,
+        status: 200,
+        body: { data: [{ url: 'https://cdn.example.test/out/whoosh.mp3', format: 'mp3' }] },
+      },
+      { url: ROUTER, status: 200, body: {} },
+    ]);
+    const connected: string[] = [];
+    const result = await runRequestTool(
+      { id: decision.id, input: { text: 'a short airy whoosh' } },
+      {
+        ...deps(fetchImpl),
+        mediaTransport: async (target) => {
+          connected.push(target.url.toString());
+          return {
+            status: 200,
+            body: (async function* () {
+              yield new Uint8Array([0x49, 0x44, 0x33, 0x04]);
+            })(),
+            discard: () => undefined,
+          };
+        },
+      },
+    );
+    expect(result.envelope).toMatchObject({ status: 'fulfilled' });
+    expect(connected).toEqual(['https://cdn.example.test/out/whoosh.mp3']);
+    expect(result.envelope.savedFiles).toHaveLength(1);
   });
 
   it('keeps a JSON body inline, and a media link that cannot be fetched fails nothing', async () => {
