@@ -581,10 +581,12 @@ function gateDeadline(deps: HookDeps): number {
 
 /**
  * WHY THE PAID CALL WOULD NOT RUN ON ITS OWN, in the footer's words, or null
- * when it would. Every line that points at `request` where nobody can approve
- * asks this first: a subagent cannot reach the user, and the main agent's
- * pre-call deny and prompt hint send it to a call that has to run rather than
- * to the free tools that would have answered. Two things stop that call:
+ * when it would. Every line that points at `request` asks this first
+ * ({@link vetOffer}). Where nobody can approve (a subagent, a delegated task,
+ * a question to the user), a shortfall withholds the offer and the free call
+ * runs. Where the main agent can ask, the pre-call deny and the prompt hint
+ * still go out, with one sentence saying the call needs approval or funds.
+ * Two things stop that call:
  *
  * - THE SPEND POLICY, asked the way `request` will ask it: the same settings,
  *   the same session ledger and the same evaluation, with the provider's host
