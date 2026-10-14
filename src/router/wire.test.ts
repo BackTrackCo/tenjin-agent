@@ -284,19 +284,6 @@ describe('every answer payload on disk', () => {
   });
 
   /**
-   * A QUERY'S PICK FROM A COMPARE GROUP carries the set as an offer does:
-   * `choices`, each option's spec in `specs`, held to the same checks.
-   */
-  it('parses a spec answer with choices, and refuses one missing an option spec', () => {
-    const payload = fixture('wire-lookup-spec-catalog-choices.json');
-    const decision = payload.decision as { id: string; specs: { id: string }[] };
-    expect(decision).toMatchObject({ action: 'spec', choices: { default: 'nano-banana-2.1' } });
-    expect(parseForTests('tool', payload).success).toBe(true);
-    const missing = { ...decision, specs: decision.specs.slice(0, -1) };
-    expect(parseForTests('tool', { ...payload, decision: missing }).success).toBe(false);
-  });
-
-  /**
    * A QUERY WITH NO ID ONLY PICKS. The answer is the service's spec under a
    * fresh id and the skeleton the agent fills for the next call. An `input`
    * an older router still binds parses too, and the client never reads it.

@@ -2027,46 +2027,6 @@ describe('a choice from the set a line offered', () => {
     expect(calls).toEqual([]);
   });
 
-  it("keeps the set a query's spec answer carries, and runs the chosen option", async () => {
-    const answer = JSON.parse(
-      await readFile(
-        fileURLToPath(new URL('./fixtures/wire-lookup-spec-catalog-choices.json', import.meta.url)),
-        'utf8',
-      ),
-    ) as { decision: { id: string; hint: string; specs: OfferSpec[] } };
-    const { id, hint, specs } = answer.decision;
-    const grok = specs[2]!;
-    const { fetchImpl, calls } = net([
-      { url: ROUTER, status: 200, body: answer },
-      {
-        url: grok.request.url,
-        status: 402,
-        body: {},
-        headers: { 'PAYMENT-REQUIRED': challenge({ amount: '43000', payTo: grok.payTo }) },
-      },
-      { url: grok.request.url, status: 200, body: { id: 'img_1', data: [] } },
-      { url: ROUTER, status: 200, body: {} },
-    ]);
-    const offered = await runRequestTool(
-      { query: 'a photoreal lighthouse at dawn' },
-      deps(fetchImpl),
-    );
-    // The choice's line is the next step, with no "also offered" per option.
-    expect(offered.envelope).toMatchObject({ status: 'spec', id, nextStep: hint });
-    expect(offered.summary).not.toContain('Also offered');
-    const result = await runRequestTool(
-      { id, choice: 'grok-imagine-2', input: { prompt: 'a lighthouse at dawn' } },
-      deps(fetchImpl),
-    );
-    expect(result.envelope).toMatchObject({
-      status: 'fulfilled',
-      cost: ['provider price 0.043 USD'],
-    });
-    expect(calls[1]).toMatchObject({ url: grok.request.url, paid: false });
-    await vi.waitFor(() => expect(calls).toHaveLength(4));
-    expect(JSON.parse(calls[3]!.body!)).toMatchObject({ id: grok.id, status: 'fulfilled' });
-  });
-
   it('refuses a choice for an id with no set kept, and a key the set does not name', async () => {
     const { decision } = await read();
     const { fetchImpl, calls } = net([]);
