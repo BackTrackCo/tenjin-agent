@@ -561,7 +561,7 @@ export async function runCount(
       ? { status: 'fulfilled' }
       : status === 'running'
         ? { status: 'running' }
-        : ranHere.some(({ paid }) => paid.outcome !== null && paid.outcome.status !== 'unpaid')
+        : ranHere.some(({ paid }) => paid.outcome?.status === 'failed')
           ? { status: 'failed' }
           : (ranHere.find(({ paid }) => paid.outcome !== null)?.paid.outcome ?? null);
   if (outcome !== null) reportOutcome(reportDeps, id, outcome, startedAt);
