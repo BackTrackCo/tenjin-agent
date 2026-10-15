@@ -146,6 +146,8 @@ export interface RoutingPayerDeps {
   readContract?: ChainRead;
   fetchImpl?: typeof fetch;
   now?: () => number;
+  /** The timer functions the payer arms; the globals unless a test injects its own. */
+  timers?: Pick<typeof globalThis, 'setTimeout' | 'clearTimeout'>;
   warn?: (line: string) => void;
 }
 
@@ -236,6 +238,10 @@ export class RoutingPayer {
     };
   }
 
+  private get timers(): Pick<typeof globalThis, 'setTimeout' | 'clearTimeout'> {
+    return this.deps.timers ?? globalThis;
+  }
+
   private now(): number {
     return this.deps.now?.() ?? Date.now();
   }
@@ -257,13 +263,13 @@ export class RoutingPayer {
     const go = () => {
       if (gaveUp) return Promise.reject(new RouteSkipped('busy'));
       // Its turn came: from here its own budget, which a deposit lengthens, applies.
-      clearTimeout(timer);
+      this.timers.clearTimeout(timer);
       return run();
     };
     const next = this.queue.then(go, go);
     this.queue = next.catch(() => undefined).then(() => this.tail);
     const deadline = new Promise<never>((_resolve, reject) => {
-      timer = setTimeout(
+      timer = this.timers.setTimeout(
         () => {
           gaveUp = true;
           // It never ran, so `noted` cannot say it: its one line is here.
@@ -273,7 +279,7 @@ export class RoutingPayer {
         Math.max(0, until - this.now()),
       );
     });
-    return Promise.race([next, deadline]).finally(() => clearTimeout(timer));
+    return Promise.race([next, deadline]).finally(() => this.timers.clearTimeout(timer));
   }
 
   /** One stderr line for a call the paid path did not answer; a detached
@@ -334,7 +340,7 @@ export class RoutingPayer {
       return new Promise<Response>((resolve, reject) => {
         let timer: ReturnType<typeof setTimeout> | undefined;
         const settle = () => {
-          clearTimeout(timer);
+          this.timers.clearTimeout(timer);
           caller?.removeEventListener('abort', onAbort);
         };
         const stop = (reason: unknown) => {
@@ -348,7 +354,7 @@ export class RoutingPayer {
         // The call's own budget, which a deposit lengthens while it runs.
         const check = () => {
           const left = call.until - this.now();
-          if (left > 0) timer = setTimeout(check, left);
+          if (left > 0) timer = this.timers.setTimeout(check, left);
           else {
             call.expired = true;
             stop(new DOMException('The routing call ran out of time.', 'TimeoutError'));
@@ -380,7 +386,7 @@ export class RoutingPayer {
     work: Promise<Response>,
     own: AbortController,
   ): Promise<void> {
-    const ceiling = setTimeout(() => own.abort(), DETACHED_CEILING_MS);
+    const ceiling = this.timers.setTimeout(() => own.abort(), DETACHED_CEILING_MS);
     ceiling.unref?.();
     try {
       const response = await work;
@@ -390,7 +396,7 @@ export class RoutingPayer {
     } catch {
       this.note(PAYMENT_FAILED, call, sent, own.signal.aborted ? 'late ceiling' : 'late network');
     } finally {
-      clearTimeout(ceiling);
+      this.timers.clearTimeout(ceiling);
     }
   }
 

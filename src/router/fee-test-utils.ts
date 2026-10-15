@@ -55,6 +55,8 @@ export class FakeRouter {
   abortAfterSettle = false;
   /** How long each paid request holds its channel. */
   delayMs = 0;
+  /** Called as a paid request starts holding its channel, just before the delay timer is armed. */
+  onDelayArmed?: () => void;
   /** The body a settled paid call answers with. */
   body: unknown = NATIVE;
   readonly requirement: PaymentRequirements;
@@ -98,7 +100,11 @@ export class FakeRouter {
     }
     channel.pending = true;
     try {
-      if (this.delayMs > 0) await new Promise((r) => setTimeout(r, this.delayMs));
+      if (this.delayMs > 0) {
+        const held = new Promise((r) => setTimeout(r, this.delayMs));
+        this.onDelayArmed?.();
+        await held;
+      }
       if (payload.type === 'deposit') {
         channel.balance += BigInt(payload.deposit!.amount);
         this.deposits += 1;
