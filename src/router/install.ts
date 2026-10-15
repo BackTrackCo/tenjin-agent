@@ -50,7 +50,6 @@ import {
   type SpendOption,
 } from './spend-question';
 import { underAgentHarness } from '../lib/session';
-import { getUsdcBalance } from '../lib/usdc';
 
 /**
  * `tenjin install` for the router product: the wallet, the spend limits, and
@@ -809,7 +808,9 @@ async function mintInstallFundLink(ctx: CommandContext, address: string): Promis
   return mintFundLink(ctx, await provider.getSigner(), address);
 }
 
-function defaultBalance(address: string, rpcUrl: string): Promise<bigint> {
+/** Loaded lazily: the status line shares this module's chunk and must not load viem. */
+async function defaultBalance(address: string, rpcUrl: string): Promise<bigint> {
+  const { getUsdcBalance } = await import('../lib/usdc');
   return getUsdcBalance(address as `0x${string}`, rpcUrl);
 }
 
