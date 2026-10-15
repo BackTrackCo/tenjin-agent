@@ -1680,6 +1680,8 @@ async function finishTake(
       state: 'done',
       savedFiles: delivered.savedFiles.slice(0, 16),
       result: keptResult(shownResult),
+      ...(unverified ? { resultUnverified: true } : {}),
+      ...(caveat !== undefined ? { resultCaveat: caveat.slice(0, 1_000) } : {}),
     });
     return {
       result: withJob(delivered.result, take.offerId),
@@ -1788,11 +1790,13 @@ function endedResult(take: JobTake): RequestToolResult {
   const cost = costLines(BigInt(take.amountAtomic));
   const supplier = supplierOf(take.call.url);
   if (take.state === 'done') {
+    // Unverified as it was delivered: see `deliverResult`.
+    const unverified = take.resultUnverified === true;
     return {
-      isError: false,
-      summary: `Fulfilled by ${supplier} · ${cost.join(' · ')} (already finished; nothing was polled or paid)`,
+      isError: unverified,
+      summary: `${unverified ? 'Unverified result from' : 'Fulfilled by'} ${supplier} · ${cost.join(' · ')} (already finished; nothing was polled or paid)`,
       envelope: {
-        status: 'fulfilled',
+        status: unverified ? 'unverified' : 'fulfilled',
         job: take.offerId,
         supplier,
         cost,
@@ -1800,6 +1804,9 @@ function endedResult(take: JobTake): RequestToolResult {
         ...(take.savedFiles.length > 0 ? { savedFiles: take.savedFiles } : {}),
         note: 'This job had already finished; nothing was polled or paid.',
         providerContentUntrusted: true,
+        ...(unverified && take.resultCaveat !== undefined
+          ? { resultCaveat: take.resultCaveat }
+          : {}),
       },
     };
   }

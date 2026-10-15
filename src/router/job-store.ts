@@ -96,6 +96,10 @@ const TakeSchema = z.strictObject({
     .string()
     .max(KEPT_RESULT_CHARS + 16)
     .optional(),
+  /** That result missed its success rule, or the rule could not be run. */
+  resultUnverified: z.boolean().optional(),
+  /** Why, as the agent was told. */
+  resultCaveat: z.string().max(1_000).optional(),
   /** Why a take failed, or why it stopped. */
   reason: z.string().max(1_000).optional(),
   /** The seller's own words for it, bounded and redacted. Untrusted text. */

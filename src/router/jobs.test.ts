@@ -408,6 +408,31 @@ describe("Treza's paid leg cut off after it named its status URL", () => {
     const take = await readTake(dir, ID, 1);
     expect(take).toMatchObject({ state: 'done', statusUrl: 'https://treza.example/jobs/42' });
   });
+
+  it('answers a finished take that missed its success rule unverified, resumed too', async () => {
+    const ruled = { ...TREZA, resultSchema: { type: 'object', required: ['audio_url'] } };
+    await storeSpecs(dir, [ruled]);
+    const { fetchImpl } = submit(ruled, () =>
+      json(202, { status: 'accepted', statusUrl: 'https://treza.example/jobs/7' }),
+    );
+    const { transport } = polls([{ status: 200, body: { status: 'done' } }]);
+    const result = await runRequestTool({ id: ID, input: INPUT }, deps(fetchImpl, transport));
+    expect(result.isError).toBe(true);
+    expect(result.envelope).toMatchObject({ status: 'unverified', job: ID });
+    const caveat = result.envelope.resultCaveat as string;
+    expect(caveat).toContain('audio_url');
+
+    const later = polls([]);
+    const resumed = await runRequestTool({ job: ID }, deps(fetchImpl, later.transport));
+    expect(resumed.isError).toBe(true);
+    expect(resumed.envelope).toMatchObject({
+      status: 'unverified',
+      job: ID,
+      result: result.envelope.result,
+      resultCaveat: caveat,
+    });
+    expect(later.seen).toEqual([]);
+  });
 });
 
 describe("BlockRun's 202, polled with the paying wallet's header", () => {
