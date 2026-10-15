@@ -334,15 +334,15 @@ function toolDeps(
 }
 
 describe('the request tool over the automatic limit', () => {
-  it('pays once at the shown price when the user accepts', async () => {
-    await storeSpecs(dir, [spec()]);
+  it('pays once at the shown price when the user accepts, naming the label', async () => {
+    await storeSpecs(dir, [spec({ label: 'Exa search' })]);
     const { fetchImpl, paid } = network();
     const approve = vi.fn(async () => true);
     const result = await runRequestTool(
       { id: SPEC_ID, input: { q: 'rust' } },
       toolDeps(fetchImpl, approve),
     );
-    expect(approve).toHaveBeenCalledWith({ label: 'Tenjin lookup', amountAtomic: 420_000n });
+    expect(approve).toHaveBeenCalledWith({ label: 'Exa search', amountAtomic: 420_000n });
     expect(result.envelope).toMatchObject({
       status: 'fulfilled',
       cost: ['provider price 0.42 USD'],
