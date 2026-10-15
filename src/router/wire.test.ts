@@ -6,6 +6,7 @@ import {
   buildHookBody,
   buildOutcomeBody,
   buildToolBody,
+  acceptsFor,
   CLIENT_ACCEPTS,
   parseForTests,
   type SpecOutcome,
@@ -119,16 +120,34 @@ describe('the request bodies', () => {
     expect(Buffer.byteLength(JSON.stringify(packet))).toBeLessThanOrEqual(MAX_PACKET_BYTES);
   });
 
-  it("sends this build's accepts, choices included, byte for byte", () => {
+  /** A released build's request, which still asks for `discovered` and
+   *  `choices`: the server keeps answering it in today's shapes. */
+  it("builds a released build's request with choices, byte for byte", () => {
     const canonical = fixture('wire-hook-request-choices.json');
     expect(
       buildHookBody(canonical.packet as Packet, {
         sessionId: canonical.sessionId as string,
-        accepts: CLIENT_ACCEPTS,
+        accepts: canonical.accepts as string[],
       }),
     ).toEqual(canonical);
-    expect(canonical.accepts).toEqual([...CLIENT_ACCEPTS]);
-    expect(CLIENT_ACCEPTS).toContain('choices');
+  });
+
+  /** THIS BUILD SENDS `catalog`: a Tenjin list service as `discovered` under
+   *  its catalog id, each spec's `holds` and `output`, and `choices`. `bazaar`
+   *  rides only while `experimental.bazaar` is on. */
+  it("sends this build's accepts, catalog included, byte for byte", () => {
+    const canonical = fixture('wire-hook-request-catalog.json');
+    expect(
+      buildHookBody(canonical.packet as Packet, {
+        sessionId: canonical.sessionId as string,
+        accepts: acceptsFor(true),
+      }),
+    ).toEqual(canonical);
+    expect(CLIENT_ACCEPTS).toEqual(['catalog', 'spec']);
+    const tool = fixture('wire-tool-request-catalog.json');
+    expect(buildToolBody({ query: tool.query as string, accepts: acceptsFor(false) })).toEqual(
+      tool,
+    );
   });
 
   it('builds the query with no id that a spec answers, byte for byte', () => {
@@ -175,7 +194,9 @@ describe('the request bodies', () => {
       'wire-hook-request-native-no-content.json',
       'wire-hook-request-ask.json',
       'wire-hook-request-choices.json',
+      'wire-hook-request-catalog.json',
       'wire-tool-request-spec.json',
+      'wire-tool-request-catalog.json',
     ]) {
       expect(JSON.stringify(fixture(name))).not.toMatch(/billing|admission|payment/i);
     }
@@ -222,11 +243,36 @@ describe('every answer payload on disk', () => {
       'wire-hook-discovered-spec.json',
       'wire-hook-discovered-choices.json',
       'wire-lookup-discovered-choices.json',
+      'wire-hook-discovered-catalog.json',
+      'wire-lookup-discovered-catalog.json',
     ]) {
       expect(parseForTests('hook', fixture(name)).success, name).toBe(true);
       expect(parseForTests('tool', fixture(name)).success, name).toBe(true);
     }
   });
+
+  /**
+   * A TENJIN LIST SERVICE TO A `catalog` CLIENT IS `discovered`, as it always
+   * was, under its catalog id rather than a `discovered:` one, and each spec
+   * says its result is `media`, so its files are saved as before.
+   */
+  it.each([['wire-hook-discovered-catalog.json'], ['wire-lookup-discovered-catalog.json']])(
+    'parses %s as discovered, under catalog ids, with media output',
+    (name) => {
+      const decision = fixture(name).decision as {
+        action: string;
+        hint: string;
+        specs: { id: string; capabilityId: string; output?: string }[];
+      };
+      expect(decision.action).toBe('discovered');
+      expect(decision.specs.length).toBeGreaterThan(0);
+      for (const spec of decision.specs) {
+        expect(spec.capabilityId).not.toMatch(/^discovered:/);
+        expect(spec.output).toBe('media');
+        expect(decision.hint).toContain(`id: "${spec.id}"`);
+      }
+    },
+  );
 
   /**
    * A QUERY WITH NO ID ONLY PICKS. The answer is the service's spec under a

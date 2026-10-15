@@ -406,7 +406,7 @@ export async function runRequestTool(
       {
         capabilityId: decision.capabilityId,
         provider: decision.provider,
-        discovered: decision.category === 'discovered',
+        media: decision.category === 'discovered',
         request: contract.request,
         terms: { source: decision.provider, maxAmountAtomic: decision.providerPriceAtomic },
         requestKey: `${decision.capabilityId}:${canonicalHash(contract.arguments ?? {})}`,
@@ -621,7 +621,7 @@ export async function paySpec(
     {
       capabilityId: spec.capabilityId,
       provider: spec.provider,
-      discovered: spec.capabilityId.startsWith('discovered:'),
+      media: savesMedia(spec),
       request: built,
       terms: {
         source: spec.provider,
@@ -654,12 +654,24 @@ export async function paySpec(
   return paid;
 }
 
+/**
+ * WHETHER A PAID RESULT'S FILES ARE SAVED: the spec's `output` says (`media`
+ * on every Tenjin list and open-Bazaar spec, so their files are saved as
+ * before), and a spec without one is media when its id is a `discovered:` one.
+ */
+function savesMedia(spec: Pick<OfferSpec, 'capabilityId' | 'output'>): boolean {
+  return spec.output !== undefined
+    ? spec.output === 'media'
+    : spec.capabilityId.startsWith('discovered:');
+}
+
 /** One provider call to make and pay for, from a decision or a spec. */
 interface ProviderCall {
   capabilityId: string;
   provider: string;
-  /** A discovered service: a paid media result's links are saved locally. */
-  discovered: boolean;
+  /** A media service: a paid result's links and inline files are saved
+   *  locally ({@link savesMedia}). */
+  media: boolean;
   request: { url: string; method: string; headers: Record<string, string>; body?: string };
   terms: AdvertisedTerms;
   requestKey: string;
@@ -754,11 +766,10 @@ async function payAndDeliver(
         : null;
     // AND A PAID MEDIA RESULT THAT LINKS TO ITS FILES brings them home: the
     // links can expire, and the user paid for what is behind them. Only a
-    // discovered service (where generated images, audio and video come from)
-    // does this: a curated page read or search links whatever the page links,
-    // on hosts the page picked. The answer carries no finer media kind, so the
-    // category is the line. Best effort only.
-    const media = providerAtomic > 0n && binary === null && call.discovered;
+    // media service (every discovered one, where generated images, audio and
+    // video come from) does this: a curated page read or search links whatever
+    // the page links, on hosts the page picked. Best effort only.
+    const media = providerAtomic > 0n && binary === null && call.media;
     // ONE CARRYING ITS FILES INLINE, as base64 in its JSON, has them saved
     // the same way, each replaced by a note naming its file: megabytes of
     // base64 are no use to the agent as text. The rewritten body is the one

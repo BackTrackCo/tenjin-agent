@@ -2763,7 +2763,7 @@ describe('a discovered service', () => {
     });
     expect((calls[0] as { body: unknown }).body).toMatchObject({
       sessionId: 'sess-1',
-      accepts: ['discovered', 'spec', 'choices'],
+      accepts: ['catalog', 'spec'],
     });
     // The footer names the seller, and the id binds this session for `request`.
     expect(await renderProgress(dir, 'sess-1')).toContain('BlockRun');
@@ -2897,9 +2897,8 @@ describe('a discovered service', () => {
       fetchImpl: first.fetchImpl,
     });
     expect((first.calls[0] as { body: Record<string, unknown> }).body.accepts).toEqual([
-      'discovered',
+      'catalog',
       'spec',
-      'choices',
     ]);
     const fs = await import('node:fs/promises');
     await fs.writeFile(
@@ -2913,9 +2912,8 @@ describe('a discovered service', () => {
       fetchImpl: second.fetchImpl,
     });
     expect((second.calls[0] as { body: Record<string, unknown> }).body.accepts).toEqual([
-      'discovered',
+      'catalog',
       'spec',
-      'choices',
       'bazaar',
     ]);
   });
@@ -3193,7 +3191,7 @@ describe('a question to the user', () => {
         'You pick a track: send me a licensed track.',
     });
     expect((body.packet.current as { text: string }).text).toContain('I can get API keys');
-    expect(body).toMatchObject({ sessionId: 'sess-1', accepts: ['discovered', 'spec', 'choices'] });
+    expect(body).toMatchObject({ sessionId: 'sess-1', accepts: ['catalog', 'spec'] });
   });
 
   it('denies the question once on an offer, then lets it be asked', async () => {

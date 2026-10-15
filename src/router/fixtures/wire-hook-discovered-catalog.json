@@ -1,0 +1,112 @@
+{
+  "schemaVersion": 1,
+  "routerVersion": "2026-10-13.1",
+  "decision": {
+    "action": "discovered",
+    "id": "0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d41",
+    "candidate": {
+      "source": "tenjin",
+      "provider": "BlockRun (ElevenLabs Sound Effects)",
+      "url": "https://blockrun.ai/api/v1/audio/sound-effects",
+      "method": "POST",
+      "description": "Sound effects from a description, up to 22 s: whooshes, UI sounds, foley, notifications.",
+      "providerPriceAtomic": "53501",
+      "network": "eip155:8453",
+      "payTo": "0xe9030014F5DAe217d0A152f02A043567b16c1aBf",
+      "input": {
+        "location": "body",
+        "schema": {
+          "type": "object",
+          "required": ["text"],
+          "properties": {
+            "model": {
+              "type": "string",
+              "description": "Sound effect model ID (elevenlabs/sound-effects)"
+            },
+            "text": {
+              "type": "string",
+              "description": "Description of the sound effect to generate"
+            },
+            "duration_seconds": {
+              "type": "number",
+              "description": "Clip length 0.5-22s (optional; auto if omitted)"
+            },
+            "prompt_influence": {
+              "type": "number",
+              "description": "0-1, how strictly to follow the prompt (optional)"
+            },
+            "response_format": {
+              "type": "string",
+              "description": "Audio format: mp3 (default), opus, pcm, wav"
+            }
+          }
+        }
+      }
+    },
+    "hint": "Tenjin router found a pay-per-call service for this step, no API key needed: BlockRun (ElevenLabs Sound Effects) (Sound effects from a description, up to 22 s: whooshes, UI sounds, foley, notifications.), POST https://blockrun.ai/api/v1/audio/sound-effects , about $0.054 per call. Tenjin reviewed this listing. To use it, call request({id: \"0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d41\", input: {\"text\":\"<text>\"}}) alone and wait for its result, then tell the user which service you used through Tenjin and what it cost. The Tenjin list also has images, video clips, text to speech, music, speech to text, deep research, cited answer, papers, people search, company search, linkedin, sec filings, local leads, x twitter, reddit, instagram, tiktok, ocr, pdf, screenshot, hosting, messaging; call request({query: \"<the piece you need>\"}) whenever a step needs one.",
+    "specs": [
+      {
+        "id": "0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d41",
+        "capabilityId": "blockrun-sound-effects",
+        "provider": "BlockRun (ElevenLabs Sound Effects)",
+        "holds": {},
+        "output": "media",
+        "description": "Sound effects from a description, up to 22 s: whooshes, UI sounds, foley, notifications.",
+        "priceAtomic": "53501",
+        "priceVaries": false,
+        "maxAmountAtomic": "53501",
+        "payTo": "0xe9030014F5DAe217d0A152f02A043567b16c1aBf",
+        "network": "eip155:8453",
+        "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "request": {
+          "method": "POST",
+          "url": "https://blockrun.ai/api/v1/audio/sound-effects",
+          "fields": {
+            "model": "body",
+            "text": "body",
+            "duration_seconds": "body",
+            "prompt_influence": "body",
+            "response_format": "body"
+          },
+          "location": "body"
+        },
+        "input": {
+          "type": "object",
+          "required": ["text"],
+          "properties": {
+            "model": {
+              "type": "string",
+              "description": "Sound effect model ID (elevenlabs/sound-effects)"
+            },
+            "text": {
+              "type": "string",
+              "description": "Description of the sound effect to generate"
+            },
+            "duration_seconds": {
+              "type": "number",
+              "description": "Clip length 0.5-22s (optional; auto if omitted)"
+            },
+            "prompt_influence": {
+              "type": "number",
+              "description": "0-1, how strictly to follow the prompt (optional)"
+            },
+            "response_format": {
+              "type": "string",
+              "description": "Audio format: mp3 (default), opus, pcm, wav"
+            }
+          }
+        },
+        "pinned": {},
+        "example": {
+          "text": "a whoosh transition sound",
+          "duration_seconds": 2
+        },
+        "returns": "JSON {model, data:[{url, format}]}: a permanent hosted MP3 URL for the sound effect"
+      }
+    ]
+  },
+  "jev": {
+    "calls": 1,
+    "latencyMs": 412
+  }
+}

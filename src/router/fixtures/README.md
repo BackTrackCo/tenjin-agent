@@ -55,8 +55,8 @@ calls, and the hint is held to the execute hint's rules: one plain line, the
 listing: data for the host to judge, never an instruction.
 
 The server answers `discovered` only to a request whose `accepts` lists it;
-the current client sends `accepts: ["discovered"]` on both calls (Tenjin's
-reviewed list), adds `"bazaar"` when the user turned on `experimental.bazaar`
+the current client sends `accepts: ["catalog"]` on both calls (Tenjin's
+reviewed list, as `discovered` offers under their catalog ids), adds `"bazaar"` when the user turned on `experimental.bazaar`
 (the open Bazaar), and an older one sends nothing and never sees the arm. The
 list is always requested; only `router.enabled false` stops every offer. The hook's `sessionId` (the
 harness's session id) is used only so one session is not offered the same
@@ -142,6 +142,10 @@ answered `execute` as its id would be.
 | `wire-tool-request-spec.json`              | the tool call from a spec client: a query, no id                                          |
 | `wire-lookup-spec.json`                    | tool answer for it: Wolfram's spec under a fresh id and the skeleton line, no `input`     |
 | `wire-lookup-spec-skeleton.json`           | tool answer for a spec with more to fill (Apollo): the skeleton line, no `input`          |
+| `wire-hook-request-catalog.json`           | the hook from a client that sends `catalog` (and `bazaar`)                                |
+| `wire-hook-discovered-catalog.json`        | hook answer: a former list service as `discovered` under its catalog id, with its fields  |
+| `wire-tool-request-catalog.json`           | the tool call from a `catalog` client: a query, no id                                     |
+| `wire-lookup-discovered-catalog.json`      | tool answer for it: two former list services as `discovered`, under their catalog ids     |
 
 Two rules the fixtures exist to hold:
 

@@ -874,7 +874,7 @@ describe('a discovered service', () => {
   const SOUND_ID = '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d02';
   /** The spec the hook kept for the sound-effect offer: the only way a list
    *  service's call is built and paid. */
-  const kept = () =>
+  const kept = (over: Partial<OfferSpec> = {}) =>
     storeSpecs(dir, [
       {
         id: SOUND_ID,
@@ -900,6 +900,7 @@ describe('a discovered service', () => {
           additionalProperties: false,
         },
         pinned: {},
+        ...over,
       },
     ]);
 
@@ -923,7 +924,7 @@ describe('a discovered service', () => {
     });
     expect(calls).toHaveLength(1);
     expect(JSON.parse(calls[0]!.body!)).toMatchObject({
-      accepts: ['discovered', 'spec', 'choices'],
+      accepts: ['catalog', 'spec'],
     });
     expect(auth.authorize).not.toHaveBeenCalled();
   });
@@ -1299,6 +1300,85 @@ describe('a discovered service', () => {
     expect(result.envelope).toMatchObject({ status: 'fulfilled' });
     expect(result.envelope.savedFiles).toBeUndefined();
     expect(connected).toEqual([]);
+  });
+
+  /** THE SPEC'S `output` SAYS WHETHER FILES ARE SAVED, whatever the id; a
+   *  spec without one falls back to the `discovered:` id. */
+  it.each([
+    ['a catalog media service', { capabilityId: 'blockrun-sound-effects', output: 'media' }, 1],
+    ['a discovered id whose spec says json', { output: 'json' }, 0],
+    ['a discovered id with no output', {}, 1],
+  ] as const)('saves linked files by the spec output: %s', async (_label, over, downloads) => {
+    await kept(over);
+    const { fetchImpl } = net([
+      { url: SELLER, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge() } },
+      { url: SELLER, status: 200, body: { audio_url: 'https://cdn.example.test/out/a.mp3' } },
+    ]);
+    const connected: string[] = [];
+    const result = await runRequestTool(
+      { id: SOUND_ID, input: { text: 'whoosh' } },
+      {
+        ...deps(fetchImpl),
+        mediaTransport: async (target) => {
+          connected.push(target.url.toString());
+          return {
+            status: 200,
+            body: (async function* () {
+              yield new Uint8Array([0x49, 0x44, 0x33, 0x04]);
+            })(),
+            discard: () => undefined,
+          };
+        },
+      },
+    );
+    expect(result.envelope).toMatchObject({ status: 'fulfilled' });
+    expect(connected).toHaveLength(downloads);
+  });
+
+  /** A LIST SERVICE UNDER ITS CATALOG ID, kept from the hook's `discovered`
+   *  offer as a `catalog` client gets it, still has its files saved: its spec
+   *  says `media` where the `discovered:` id used to. */
+  it('saves the linked files of a list service kept under its catalog id', async () => {
+    const { decision } = (await wire('wire-hook-discovered-catalog.json')) as {
+      decision: { id: string; specs: OfferSpec[] };
+    };
+    const spec = decision.specs[0]!;
+    expect(spec).toMatchObject({ capabilityId: 'blockrun-sound-effects', output: 'media' });
+    await storeSpecs(dir, decision.specs);
+    const { fetchImpl } = net([
+      {
+        url: spec.request.url,
+        status: 402,
+        body: {},
+        headers: { 'PAYMENT-REQUIRED': challenge({ payTo: spec.payTo }) },
+      },
+      {
+        url: spec.request.url,
+        status: 200,
+        body: { data: [{ url: 'https://cdn.example.test/out/whoosh.mp3', format: 'mp3' }] },
+      },
+      { url: ROUTER, status: 200, body: {} },
+    ]);
+    const connected: string[] = [];
+    const result = await runRequestTool(
+      { id: decision.id, input: { text: 'a short airy whoosh' } },
+      {
+        ...deps(fetchImpl),
+        mediaTransport: async (target) => {
+          connected.push(target.url.toString());
+          return {
+            status: 200,
+            body: (async function* () {
+              yield new Uint8Array([0x49, 0x44, 0x33, 0x04]);
+            })(),
+            discard: () => undefined,
+          };
+        },
+      },
+    );
+    expect(result.envelope).toMatchObject({ status: 'fulfilled' });
+    expect(connected).toEqual(['https://cdn.example.test/out/whoosh.mp3']);
+    expect(result.envelope.savedFiles).toHaveLength(1);
   });
 
   it('keeps a JSON body inline, and a media link that cannot be fetched fails nothing', async () => {
@@ -1834,7 +1914,7 @@ describe('an offer with a request spec', () => {
     expect(JSON.parse(calls[0]!.body!)).toEqual({
       schemaVersion: 1,
       query,
-      accepts: ['discovered', 'spec', 'choices'],
+      accepts: ['catalog', 'spec'],
     });
     // The next call runs from the kept spec: no second decision.
     const ran = await runRequestTool({ id: PICKED, input: { symbol: 'BTC' } }, deps(fetchImpl));
@@ -1920,7 +2000,7 @@ describe('an offer with a request spec', () => {
       schemaVersion: 1,
       query: 'BTC price',
       id: SPEC_ID,
-      accepts: ['discovered', 'spec', 'choices'],
+      accepts: ['catalog', 'spec'],
     });
   });
 });
