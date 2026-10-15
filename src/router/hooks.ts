@@ -655,10 +655,11 @@ async function spendShortfall(
     );
     return null;
   }
-  return balance < BigInt(decision.providerPriceAtomic)
+  const short = BigInt(decision.providerPriceAtomic) - balance;
+  return short > 0n
     ? {
         withheld: 'wallet needs USDC',
-        note: `Note: the wallet holds $${toMoney(balance.toString()).usd}; fund it with \`tenjin wallet fund\`.`,
+        note: `Note: the wallet holds $${toMoney(balance.toString()).usd}, $${toMoney(short.toString()).usd} short of its ${price}; fund it with \`tenjin wallet fund\`.`,
       }
     : null;
 }

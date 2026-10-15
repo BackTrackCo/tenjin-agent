@@ -440,15 +440,20 @@ async function executePay(
         );
       }
       if (balance < amountAtomic) {
-        throw new CliError('REFUSED', 'The wallet has insufficient USDC; no payment was signed.', {
-          fix: 'Fund this wallet on Base with `tenjin wallet fund` before paying.',
-          details: {
-            reason: 'insufficient_funds',
-            address: signer.address,
-            balanceAtomic: balance.toString(),
-            requiredAtomic: amountAtomic.toString(),
+        const short = toMoney((amountAtomic - balance).toString()).usd;
+        throw new CliError(
+          'REFUSED',
+          `The wallet has insufficient USDC; no payment was signed. It holds ${toMoney(balance.toString()).usd} USD and this costs ${toMoney(amountAtomic.toString()).usd} USD: ${short} USD short.`,
+          {
+            fix: `Fund this wallet on Base with \`tenjin wallet fund\` (at least ${short} USD more) before paying.`,
+            details: {
+              reason: 'insufficient_funds',
+              address: signer.address,
+              balanceAtomic: balance.toString(),
+              requiredAtomic: amountAtomic.toString(),
+            },
           },
-        });
+        );
       }
     }
     payment = await buildExactPayment(effectiveChallenge, signer, effectiveRequirement);

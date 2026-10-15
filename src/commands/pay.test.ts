@@ -1788,6 +1788,13 @@ describe('direct registry warning acknowledgement and balance enforcement', () =
       ).rejects.toMatchObject({
         code: 'REFUSED',
         details: { reason: balance === null ? 'balance_unavailable' : 'insufficient_funds' },
+        ...(balance === 99_999n
+          ? {
+              message: expect.stringContaining(
+                'It holds 0.099999 USD and this costs 0.1 USD: 0.000001 USD short.',
+              ),
+            }
+          : {}),
       });
       expect(readBalance).toHaveBeenCalledWith(signer.address, expect.any(String), {
         timeoutMs: expect.any(Number),

@@ -3059,7 +3059,9 @@ describe('a discovered service', () => {
     expect(
       (out.response as { hookSpecificOutput: { additionalContext: string } }).hookSpecificOutput
         .additionalContext,
-    ).toBe(`${SEEN_LINE} Note: the wallet holds $0.01; fund it with \`tenjin wallet fund\`.`);
+    ).toBe(
+      `${SEEN_LINE} Note: the wallet holds $0.01, $0.043501 short of its $0.053501; fund it with \`tenjin wallet fund\`.`,
+    );
   });
 
   it('denies the main agent a native call over the cap, with the note in the reason', async () => {
