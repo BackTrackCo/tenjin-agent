@@ -1033,7 +1033,7 @@ describe('tenjin_fund', () => {
     expect(sc.data.opened).toBe(false);
     expect(sc.data.funded).toBe(false);
     expect(sc.data.pollStatus).toBe('skipped');
-    expect(calls[0]!.body).toMatchObject({ mode: 'onramp', presetAmount: 5 });
+    expect(calls[0]!.body).toMatchObject({ presetAmount: 5 });
     expect(openUrl).not.toHaveBeenCalled();
     expect(getUsdcBalance).not.toHaveBeenCalled();
   });

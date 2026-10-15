@@ -130,7 +130,7 @@ Each routing call costs a flat $0.003, paid over x402 `batch-settlement` by `ten
 
 ### Funding
 
-`tenjin wallet fund 2` opens a Coinbase Onramp checkout for your wallet: pay by card, or Apple Pay where your region supports it. Sign in to Coinbase or create an account during checkout. You can also send USDC on Base to the address `tenjin wallet address` prints; at a terminal it and `tenjin wallet fund` also draw that address as a QR code for a phone wallet to scan (`--no-qr` skips it).
+`tenjin wallet fund 2` opens a Coinbase Onramp checkout for your wallet. In the US, Apple Pay or Google Pay with no Coinbase account. Elsewhere, your Coinbase account. You can also send USDC on Base to the address `tenjin wallet address` prints; at a terminal it and `tenjin wallet fund` also draw that address as a QR code for a phone wallet to scan (`--no-qr` skips it).
 
 $1–2 goes a long way. $2 covers about 280 web searches, 200 page reads or 100 Wolfram Alpha answers.
 

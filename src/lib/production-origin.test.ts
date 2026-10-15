@@ -25,7 +25,7 @@ describe('PRODUCTION_ORIGIN', () => {
     const url = new URL(PRODUCTION_ORIGIN);
     expect(url.protocol).toBe('https:');
     // A path, trailing slash, query, or port would survive every consumer here
-    // and then break the ones that concatenate (`${origin}/api/cdp/session`).
+    // and then break the ones that concatenate (`${origin}/api/fund/link`).
     expect(PRODUCTION_ORIGIN).toBe(url.origin);
     expect(PRODUCTION_HOST).toBe(url.host);
   });

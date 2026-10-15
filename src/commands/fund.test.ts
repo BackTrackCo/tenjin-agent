@@ -137,8 +137,8 @@ describe('runFund', () => {
     const res = await runFund(makeCtx(), { provider, fetchImpl, wait: false, open: false });
 
     expect(calls).toHaveLength(1);
-    expect(calls[0]!.url).toBe(`${EXPECTED_FUND_ORIGIN}/api/cdp/session`);
-    expect(calls[0]!.body).toEqual({ mode: 'onramp', address });
+    expect(calls[0]!.url).toBe(`${EXPECTED_FUND_ORIGIN}/api/fund/link`);
+    expect(calls[0]!.body).toEqual({ address });
     expect(res.data).toMatchObject({
       address,
       checkoutUrl: CHECKOUT,
@@ -169,7 +169,7 @@ describe('runFund', () => {
     );
     await runFund(ctx, { provider, fetchImpl, wait: false, open: false });
 
-    expect(calls[0]!.url).toBe(`${EXPECTED_FUND_ORIGIN}/api/cdp/session`);
+    expect(calls[0]!.url).toBe(`${EXPECTED_FUND_ORIGIN}/api/fund/link`);
   });
 
   it('normalizes a lowercase stored address to EIP-55 for the route and the envelope', async () => {
@@ -179,7 +179,7 @@ describe('runFund', () => {
 
     // The route parses this with strict EIP-55; the local store does not, so an
     // imported wallet file would otherwise earn an unactionable 400.
-    expect(calls[0]!.body).toEqual({ mode: 'onramp', address });
+    expect(calls[0]!.body).toEqual({ address });
     expect(res.data).toMatchObject({ address });
   });
 
@@ -284,10 +284,10 @@ describe('runFund', () => {
   });
 
   it('forwards a positive amount as presetAmount', async () => {
-    const { provider } = fakeProvider();
+    const { provider, address } = fakeProvider();
     const { fetchImpl, calls } = stubFetch(200, { url: CHECKOUT });
     await runFund(makeCtx(), { provider, fetchImpl, wait: false, open: false, amountUsd: '5' });
-    expect(calls[0]!.body).toMatchObject({ presetAmount: 5 });
+    expect(calls[0]!.body).toEqual({ address, presetAmount: 5 });
   });
 
   it.each(['abc', '0', '-3', '100001'])('refuses amount %s as USAGE', async (amountUsd) => {
@@ -298,6 +298,17 @@ describe('runFund', () => {
     );
     expect(err.code).toBe('USAGE');
     expect(err.exitCode).toBe(2);
+  });
+
+  it('accepts the hosted Coinbase checkout host', async () => {
+    const { provider } = fakeProvider();
+    const res = await runFund(makeCtx(), {
+      provider,
+      fetchImpl: stubFetch(200, { url: CHECKOUT }).fetchImpl,
+      wait: false,
+      open: false,
+    });
+    expect(res.data).toMatchObject({ checkoutUrl: CHECKOUT });
   });
 
   it.each([
@@ -313,6 +324,113 @@ describe('runFund', () => {
     );
     expect(err.code).toBe('CONTRACT_MISMATCH');
     expect(openUrl).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['https://tenjin.sh.evil.example/fund?amount=5#tok'],
+    ['http://tenjin.sh/fund?amount=5#tok'],
+    ['https://tenjin.blog/fund?amount=5#tok'],
+    ['https://evil.example/fund?amount=5#tok'],
+  ])('refuses a lookalike or off-allowlist host (%s)', async (url) => {
+    const { provider } = fakeProvider();
+    const { fetchImpl } = stubFetch(200, { url });
+    const openUrl = vi.fn(async () => true);
+    const err = await catchCliError(
+      runFund(makeCtx({ isTTY: true }), { provider, fetchImpl, wait: false, openUrl }),
+    );
+    expect(err.code).toBe('CONTRACT_MISMATCH');
+    expect(err.message).toContain(`${EXPECTED_FUND_HOST} or pay.coinbase.com`);
+    expect(openUrl).not.toHaveBeenCalled();
+    expect(stderr.join('')).not.toContain('tok');
+  });
+
+  describe('the Tenjin fund page link', () => {
+    const PAGE = `${EXPECTED_FUND_ORIGIN}/fund?amount=20#secret-token`;
+
+    it('accepts the production host and sends the preset amount in the body', async () => {
+      const { provider, address } = fakeProvider();
+      const { fetchImpl, calls } = stubFetch(200, { url: PAGE });
+      const res = await runFund(makeCtx(), {
+        provider,
+        fetchImpl,
+        wait: false,
+        open: false,
+        amountUsd: '20',
+      });
+      expect(calls[0]!.body).toEqual({ address, presetAmount: 20 });
+      expect(res.data).toMatchObject({ checkoutUrl: PAGE, presetAmount: 20 });
+    });
+
+    it('opens the full URL with its fragment and prints it whole', async () => {
+      const { provider } = fakeProvider();
+      const openUrl = vi.fn(async () => true);
+      await runFund(makeCtx({ isTTY: true }), {
+        provider,
+        fetchImpl: stubFetch(200, { url: PAGE }).fetchImpl,
+        wait: false,
+        openUrl,
+      });
+      expect(openUrl).toHaveBeenCalledWith(PAGE);
+      const out = stderr.join('');
+      expect(out).toContain(PAGE);
+      expect(out).not.toContain('#…');
+    });
+
+    it('prints the whole link when it will not open it', async () => {
+      const { provider } = fakeProvider();
+      const piped = vi.fn(async () => true);
+      await runFund(makeCtx({ isTTY: false }), {
+        provider,
+        fetchImpl: stubFetch(200, { url: PAGE }).fetchImpl,
+        wait: false,
+        openUrl: piped,
+      });
+      expect(piped).not.toHaveBeenCalled();
+      expect(stderr.join('')).toContain(PAGE);
+
+      stderr.length = 0;
+      await runFund(makeCtx({ isTTY: true }), {
+        provider,
+        fetchImpl: stubFetch(200, { url: PAGE }).fetchImpl,
+        wait: false,
+        open: false,
+      });
+      expect(stderr.join('')).toContain(PAGE);
+    });
+
+    it('prints the whole link when the browser could not be opened', async () => {
+      const { provider } = fakeProvider();
+      await runFund(makeCtx({ isTTY: true }), {
+        provider,
+        fetchImpl: stubFetch(200, { url: PAGE }).fetchImpl,
+        wait: false,
+        openUrl: async () => false,
+      });
+      expect(stderr.join('')).toContain(PAGE);
+    });
+
+    it('polls for the balance after opening the link', async () => {
+      const { provider } = fakeProvider();
+      mockedBalance
+        .mockResolvedValueOnce(0n)
+        .mockResolvedValueOnce(0n)
+        .mockResolvedValueOnce(20_000_000n);
+      const sleep = vi.fn(async () => {});
+      const res = await runFund(makeCtx({ isTTY: true }), {
+        provider,
+        fetchImpl: stubFetch(200, { url: PAGE }).fetchImpl,
+        openUrl: async () => true,
+        sleep,
+        pollIntervalMs: 1,
+        pollTimeoutMs: 60000,
+      });
+      expect(sleep).toHaveBeenCalledTimes(2);
+      expect(res.data).toMatchObject({
+        funded: true,
+        pollStatus: 'arrived',
+        balance: { atomic: '20000000', usd: '20' },
+      });
+    });
   });
 
   it('maps region_not_supported to REFUSED (exit 3)', async () => {
