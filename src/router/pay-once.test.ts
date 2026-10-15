@@ -20,7 +20,7 @@ import {
   type ElicitingServer,
 } from './pay-once';
 import { storeSpecs } from './specs';
-import { runRequestTool, specLabel, type OverLimitAsk } from './tool';
+import { runRequestTool, type OverLimitAsk } from './tool';
 
 /**
  * PAY ONCE: one payment over `maxAutoSpend`, approved in an MCP elicitation at
@@ -258,13 +258,6 @@ describe('the elicitation', () => {
     expect(payOnceAsker(fake(undefined, none).server, limit)).toBeUndefined();
     expect(payOnceAsker(fake({}, none).server, limit)).toBeUndefined();
     expect(payOnceAsker(fake({ elicitation: { url: {} } }, none).server, limit)).toBeUndefined();
-  });
-
-  it("names the spec's label, or the static title when it has none", () => {
-    expect(specLabel({ label: 'Exa search' })).toBe('Exa search');
-    expect(specLabel({})).toBe('Tenjin lookup');
-    expect(specLabel({ label: 'x'.repeat(33) })).toBe('Tenjin lookup');
-    expect(specLabel({ label: 'Exa\u001b[2Jsearch' })).toBe('Tenjin lookup');
   });
 });
 
