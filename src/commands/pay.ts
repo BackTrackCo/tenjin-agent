@@ -8,7 +8,7 @@ import { assertPublicDestination, type DestinationOptions } from '../lib/destina
 import { CliError } from '../lib/errors';
 import { validateResultBody, type ResultCheck } from '../lib/request-schema';
 import { fetchFailureToCliError, httpRequest } from '../lib/http';
-import type { HttpResponse } from '../lib/http';
+import type { FetchJsonFailure, HttpResponse } from '../lib/http';
 import { parseUsdToAtomic, toMoney } from '../lib/money';
 import { sanitizeForTerminal } from '../lib/output';
 import { mask } from '../lib/redact';
@@ -464,9 +464,10 @@ async function executePay(
   // hostile registry-listed seller answer 402 after each signature while
   // sessionBudget counted zero of the authorizations it was stacking up.
   // (httpRequest never throws on transport failure; it returns ok:false.)
+  const paidTimeoutMs = paidLegTimeoutMs(effectiveRequirement, ctx.flags.timeout);
   const paid = await httpRequest(url, {
     ...fetchOpts,
-    timeoutMs: paidLegTimeoutMs(effectiveRequirement, ctx.flags.timeout),
+    timeoutMs: paidTimeoutMs,
     headers: { ...headers, ...payment.headers },
   });
   await authorizer.commit(reservationId, payment.amountAtomic, {
@@ -479,6 +480,29 @@ async function executePay(
   // for money the ledger has already counted. The transport's own reason and
   // code survive; only the fix and the amounts are this leg's to state.
   if (!paid.ok) {
+    // A LONG JOB THAT NAMED WHERE ITS RESULT WILL BE: the seller is still
+    // working, so the agent is pointed there rather than told it failed.
+    // Settlement is just as unknown as on any other timeout.
+    const statusUrl = paid.kind === 'timeout' ? statusUrlOf(paid, url) : null;
+    if (statusUrl !== null) {
+      throw new CliError(
+        'NETWORK_ERROR',
+        `The seller is still working on this: no result within ${Math.round(paidTimeoutMs / 1000)} s, and it named a status URL to check: ${statusUrl}`,
+        {
+          fix:
+            'The authorization was transmitted and settlement is unknown until the job ends; it is recorded as transmitted exposure. ' +
+            'Do not pay again: check the status URL for the result.',
+          details: {
+            statusUrl,
+            amountAtomic: payment.amountAtomic.toString(),
+            settlement: 'unknown',
+            ...(payment.authorization !== undefined
+              ? { authorization: payment.authorization }
+              : {}),
+          },
+        },
+      );
+    }
     throw fetchFailureToCliError(paid, {
       fix:
         'The authorization was transmitted and settlement is unknown; it is recorded as transmitted exposure. ' +
@@ -716,6 +740,29 @@ function failedRuleCaveat(check: ResultCheck): string {
 
 /** The transport's own remedy, when it has one, appended after the leg's
  *  payment sentence so the two never contradict each other. */
+/**
+ * Headers a seller sends with the first byte of a long job to say where its
+ * result can be checked. Treza sends `X-Status-Url`; another seller's name for
+ * the same thing goes here.
+ */
+const STATUS_URL_HEADERS = ['x-status-url'];
+
+/** The https status URL a timed-out paid response named, resolved against the
+ *  paid URL, or null. Its bytes are the seller's: bounded, https only. */
+function statusUrlOf(failure: FetchJsonFailure, requestUrl: string): string | null {
+  for (const name of STATUS_URL_HEADERS) {
+    const value = failure.header?.(name)?.trim();
+    if (value === undefined || value.length === 0 || value.length > 2_048) continue;
+    try {
+      const status = new URL(value, requestUrl);
+      if (status.protocol === 'https:') return status.toString();
+    } catch {
+      // Not a URL: the next name, or the plain timeout.
+    }
+  }
+  return null;
+}
+
 function legFix(failure: { kind: string }): string {
   return failure.kind === 'oversized-header'
     ? 'Raising `--max-http-header-size` on the node process that runs this CLI would let the header be read; that is an operator decision, not a default this build changes.'

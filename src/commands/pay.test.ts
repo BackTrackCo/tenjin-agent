@@ -387,6 +387,40 @@ describe('runPay, paid-leg timeout', () => {
     expect((result.data as { paid: boolean }).paid).toBe(true);
   });
 
+  it('names the status URL a long job sent with its headers, and pays nothing more', async () => {
+    const fixture = buildPaymentRequired({ maxTimeoutSeconds: 1 });
+    const calls: string[] = [];
+    const fetch = (async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      calls.push(new Headers(init?.headers).has('PAYMENT-SIGNATURE') ? 'paid' : 'probe');
+      if (calls.length === 1) return json(402, {}, { 'PAYMENT-REQUIRED': fixture.header });
+      // The render's headers come at once; its body never does before the deadline.
+      const body = new ReadableStream({
+        start(controller) {
+          init?.signal?.addEventListener('abort', () =>
+            controller.error(new DOMException('The operation was aborted', 'AbortError')),
+          );
+        },
+      });
+      return new Response(body, { status: 200, headers: { 'X-Status-Url': '/jobs/42' } });
+    }) as typeof fetch;
+    const err = await runPay({ url: TENJIN_URL }, makeCtx({ timeout: 50 }), {
+      ...PUBLIC_DNS,
+      fetchImpl: fetch,
+      provider: testWalletProvider(),
+      authorizer: fakeAuthorizer('allow'),
+    }).catch((e: unknown) => e as CliError);
+    expect(err).toBeInstanceOf(CliError);
+    expect(err.message).toBe(
+      'The seller is still working on this: no result within 1 s, and it named a status URL to check: https://tenjin.blog/jobs/42',
+    );
+    expect(err.fix).toContain('Do not pay again: check the status URL for the result.');
+    expect(err.details).toMatchObject({
+      statusUrl: 'https://tenjin.blog/jobs/42',
+      settlement: 'unknown',
+    });
+    expect(calls).toEqual(['probe', 'paid']);
+  });
+
   it('keeps the unpaid probe on the CLI timeout', async () => {
     const fixture = buildPaymentRequired({ maxTimeoutSeconds: 1 });
     const fetch = slowFetch([json(402, {}, { 'PAYMENT-REQUIRED': fixture.header })], [150]);
