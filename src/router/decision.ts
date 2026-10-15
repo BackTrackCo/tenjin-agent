@@ -181,8 +181,7 @@ export const POLL_REFERENCE = /^\$(input|result)\.([A-Za-z_][A-Za-z0-9_]{0,63})$
  * how a poll is sent and signed, what says it is still running or failed, how
  * often and how long to poll, and how many hours the job can be resumed.
  * `always`: the seller never answers inline. Every field is the server's: the
- * poll and complete URLs are still checked here against the submit's host
- * (`jobs.ts`).
+ * poll URL is still checked here against the submit's host (`jobs.ts`).
  */
 export const JobSchema = z
   .strictObject({
@@ -198,8 +197,9 @@ export const JobSchema = z
         .refine((at) => at.field !== undefined || at.header !== undefined, 'a field or a header'),
       z.strictObject({ fixed: z.string().min(1).max(2_048) }),
     ]),
-    /** Sent once like a poll after the result is saved: it frees the seller's
-     *  copy (AiSpace's `/complete`). Its answer is ignored. */
+    /** The seller's step that deletes its stored copy (AiSpace's `/complete`).
+     *  Read so the spec parses, and never sent: the seller's copy is the only
+     *  other one, and deleting it buys the user nothing. */
     completeUrl: z.strictObject({ fixed: z.string().min(1).max(2_048) }).optional(),
     pollMethod: z.enum(['GET', 'POST']),
     pollBody: z

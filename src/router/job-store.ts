@@ -82,6 +82,11 @@ const TakeSchema = z.strictObject({
   authorization: Authorization.optional(),
   /** The fresh one a refused poll was signed with, which its own row is found by. */
   resignedAuthorization: Authorization.optional(),
+  /** The submit's settlement, when the seller named it: paid for certain. */
+  txHash: z
+    .string()
+    .regex(/^0x[0-9a-fA-F]{64}$/)
+    .optional(),
   /** The submit's HTTP status. */
   httpStatus: z.number().int().optional(),
   state: z.enum(['running', 'done', 'failed', 'expired']),
@@ -91,8 +96,10 @@ const TakeSchema = z.strictObject({
     .string()
     .max(KEPT_RESULT_CHARS + 16)
     .optional(),
-  /** The seller's reason a take failed, or why it stopped. Seller text. */
+  /** Why a take failed, or why it stopped. */
   reason: z.string().max(1_000).optional(),
+  /** The seller's own words for it, bounded and redacted. Untrusted text. */
+  said: z.string().max(1_000).optional(),
   /** An unsigned status URL the agent may open itself. Seller text. */
   statusUrl: z.string().max(2_048).optional(),
 });

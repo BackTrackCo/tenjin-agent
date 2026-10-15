@@ -204,7 +204,13 @@ export type PollAnswer =
       contentType: string;
     }
   | { state: 'running'; status?: number; reason?: string }
-  | { state: 'failed'; status?: number; reason: string }
+  | {
+      state: 'failed';
+      status?: number;
+      reason: string;
+      /** The seller's own words for it, one bounded plain line: untrusted. */
+      said?: string;
+    }
   | { state: 'expired'; status: number };
 
 export interface PollDeps {
@@ -239,8 +245,10 @@ export interface PolledTake {
  * later one half as long again as the last, up to {@link MAX_POLL_INTERVAL_MS}.
  * A 402 on a signed poll signs one fresh authorization and polls again at
  * once; a second is the seller's refusal. A 404 or 410 is a job the seller no
- * longer has. {@link MAX_POLL_ERRORS} failures in a row stop the call
- * `running`, and the job stays resumable.
+ * longer has. Any other 4xx ends the job failed, in the seller's words: AiSpace
+ * answers a refused prompt's retrieve with a 422, and every later one the
+ * same. {@link MAX_POLL_ERRORS} 5xx, 429 or transport failures in a row stop
+ * the call `running`, and the job stays resumable.
  */
 export async function pollUntil(
   take: PolledTake,
@@ -321,11 +329,12 @@ export async function pollUntil(
       };
     }
     if (answer.status < 200 || answer.status >= 300) {
-      const said = sellerLine(answer.text);
+      const said = sellerSaid(answer.json, answer.text);
       return {
         state: 'failed',
         status: answer.status,
-        reason: `the status URL answered ${answer.status}${said.length > 0 ? `: ${said}` : ''}`,
+        reason: `the seller ended the job with HTTP ${answer.status}`,
+        ...(said.length > 0 ? { said } : {}),
       };
     }
     if (answer.tooLarge) {
@@ -337,10 +346,12 @@ export async function pollUntil(
     }
     const state = answerState(take.job, answer.status, answer.json, { submit: false });
     if (state === 'failed') {
+      const said = sellerSaid(answer.json, answer.text);
       return {
         state: 'failed',
         status: answer.status,
-        reason: failedReason(answer.json, answer.text),
+        reason: 'the seller says the job failed',
+        ...(said.length > 0 ? { said } : {}),
       };
     }
     if (state === 'done') {
@@ -359,35 +370,11 @@ export async function pollUntil(
 }
 
 /**
- * FREE THE SELLER'S COPY once the result is saved: the job's `completeUrl`,
- * held to the submit's host over HTTPS (and its origin, for a signed job) as a
- * poll is, sent once with the poll's method, body and payment header. Its
- * answer, and any failure, is ignored: the result is already on disk.
+ * THE SELLER'S OWN WORDS for a job that failed: its `error` (a string, or one
+ * with a `message`), `message`, `reason` or `detail`, else the body, as one
+ * bounded, redacted plain line; empty when it said nothing. Untrusted text.
  */
-export async function completeJob(
-  take: PolledTake & { submitUrl: string },
-  deps: PollDeps = {},
-): Promise<void> {
-  const fixed = take.job.completeUrl?.fixed;
-  if (fixed === undefined) return;
-  let url: URL;
-  let base: URL;
-  try {
-    base = new URL(take.submitUrl);
-    url = new URL(fixed);
-  } catch {
-    return;
-  }
-  if (url.protocol !== 'https:' || url.username !== '' || url.password !== '') return;
-  if (url.hostname !== base.hostname) return;
-  if (take.job.pollAuth === 'x402' && url.origin !== base.origin) return;
-  await pollOnce({ ...take, poll: { ...take.poll, url: url.toString() } }, take.auth, deps).catch(
-    () => undefined,
-  );
-}
-
-/** The seller's reason a job failed, as one bounded plain line. */
-export function failedReason(json: unknown, text: string): string {
+export function sellerSaid(json: unknown, text: string): string {
   const body = record(json);
   const error = body.error;
   const said = [
@@ -396,10 +383,7 @@ export function failedReason(json: unknown, text: string): string {
     body.reason,
     body.detail,
   ].find((value): value is string => typeof value === 'string' && value.trim().length > 0);
-  const line = sellerLine(said ?? text);
-  return line.length > 0
-    ? `the seller says the job failed: ${line}`
-    : 'the seller says the job failed';
+  return sellerLine(said ?? text);
 }
 
 type Attempt =

@@ -501,7 +501,10 @@ describe("BlockRun's 202, polled with the paying wallet's header", () => {
       cost: ['provider price 0.064 USD'],
       settlement: 'unknown',
     });
-    expect(String(result.envelope.reason)).toContain('content policy violation');
+    expect(String(result.envelope.reason)).toContain('the seller says the job failed');
+    expect(String(result.envelope.reason)).toContain('nothing came back');
+    // The seller's words ride beside the reason, as untrusted text.
+    expect(result.envelope.providerError).toBe('content policy violation');
     const take = await readTake(dir, ID, 1);
     expect(take).toMatchObject({ state: 'failed' });
     expect(take).not.toHaveProperty('auth');
@@ -711,13 +714,28 @@ describe('several takes, each its own job', () => {
 });
 
 describe("AiSpace's queue, polled free with the queue id", () => {
+  /** The submit settles at once, as AiSpace's real queue does. */
+  const TX = `0x${'cd'.repeat(32)}`;
+  const queued = () =>
+    json(
+      200,
+      { model: 'minimax-h3-max-text-to-video', queue_id: 'q-77' },
+      {
+        'PAYMENT-RESPONSE': Buffer.from(
+          JSON.stringify({ success: true, transaction: TX }),
+        ).toString('base64'),
+      },
+    );
+
   it('posts the retrieve with the input and the queue id until the clip comes back', async () => {
     await storeSpecs(dir, [AISPACE]);
-    const { fetchImpl } = submit(AISPACE, () => json(200, { queue_id: 'q-77', status: 'QUEUED' }));
+    const { fetchImpl } = submit(AISPACE, queued);
     const { transport, seen } = polls([
-      { status: 200, body: { status: 'PROCESSING' } },
+      {
+        status: 200,
+        body: { status: 'PROCESSING', average_execution_time: 37831, execution_duration: 5254 },
+      },
       { status: 200, bytes: MP4 },
-      { status: 200, body: { ok: true } },
     ]);
     const result = await runRequestTool({ id: ID, input: INPUT }, deps(fetchImpl, transport));
     expect(result.envelope).toMatchObject({
@@ -725,14 +743,15 @@ describe("AiSpace's queue, polled free with the queue id", () => {
       cost: ['provider price 0.145 USD'],
       result: { contentType: 'video/mp4', bytes: MP4.byteLength },
     });
-    // Two polls, then, with the clip saved, one complete that frees AiSpace's copy.
+    // Two retrieves and nothing else: the spec names a /complete, which only
+    // deletes AiSpace's copy, and this build never sends it.
     expect(seen.map((poll) => poll.url)).toEqual([
       'https://x402.aispace.bot/api/v1/video/retrieve',
       'https://x402.aispace.bot/api/v1/video/retrieve',
-      'https://x402.aispace.bot/api/v1/video/complete',
     ]);
     for (const poll of seen) {
       expect(poll.request.method).toBe('POST');
+      // `$input.model` is the pinned model the submit sent.
       expect(JSON.parse(poll.request.body!)).toEqual({
         model: 'minimax-h3-max-text-to-video',
         queue_id: 'q-77',
@@ -742,22 +761,53 @@ describe("AiSpace's queue, polled free with the queue id", () => {
     const saved = (result.envelope.savedFiles as string[])[0]!;
     expect(saved).toMatch(/\.mp4$/);
     expect(new Uint8Array(await readFile(saved))).toEqual(MP4);
+    // Settled at submit: one row, settled, with the clip on it.
+    expect(await ledger()).toEqual([
+      expect.objectContaining({ txHash: TX, settlement: 'settled', savedFiles: [saved] }),
+    ]);
   });
 
-  it("never frees the seller's copy when the clip could not be saved", async () => {
+  /** A REFUSED PROMPT IS A 422 ON THE RETRIEVE, after some PROCESSING, and
+   *  every retrieve after it says the same: the take fails at once, paid, in
+   *  the seller's words, and nothing is polled again. */
+  it("fails a take the seller refused with a 422, paid, in the seller's words", async () => {
     await storeSpecs(dir, [AISPACE]);
-    // The downloads directory cannot be made: every save fails.
-    await writeFile(join(dir, 'downloads'), 'not a directory');
-    const { fetchImpl } = submit(AISPACE, () => json(200, { queue_id: 'q-77', status: 'QUEUED' }));
-    const { transport, seen } = polls([{ status: 200, bytes: MP4 }]);
-    const result = await runRequestTool({ id: ID, input: INPUT }, deps(fetchImpl, transport));
-    expect(result.envelope).toMatchObject({
-      status: 'fulfilled',
-      result: { saveError: expect.any(String) as string },
-    });
-    expect(seen.map((poll) => poll.url)).toEqual([
-      'https://x402.aispace.bot/api/v1/video/retrieve',
+    const { fetchImpl, calls } = submit(AISPACE, queued);
+    const refused = 'Your prompt violates the content policy of Venice.ai or the model provider';
+    const { transport, seen } = polls([
+      { status: 200, body: { status: 'PROCESSING' } },
+      { status: 200, body: { status: 'PROCESSING' } },
+      { status: 200, body: { status: 'PROCESSING' } },
+      { status: 422, body: { error: refused } },
     ]);
+    const result = await runRequestTool({ id: ID, input: INPUT }, deps(fetchImpl, transport));
+    expect(seen).toHaveLength(4);
+    expect(result.isError).toBe(true);
+    expect(result.envelope).toMatchObject({
+      status: 'failed',
+      job: ID,
+      providerStatus: 422,
+      providerError: refused,
+      settlement: 'settled',
+      cost: ['provider price 0.145 USD'],
+      providerContentUntrusted: true,
+    });
+    expect(String(result.envelope.reason)).toBe(
+      `AiSpace (Venice): the seller ended the job with HTTP 422. It was paid ($0.145, settled in tx ${TX}) and nothing came back.`,
+    );
+    expect(String(result.envelope.nextStep)).toContain('paid and nothing came back');
+    await vi.waitFor(() => expect(reports(calls)).toHaveLength(1));
+    expect(reports(calls)[0]).toMatchObject({ status: 'failed', httpStatus: 422 });
+
+    // Resumed, it answers from its record: no poll, nothing paid.
+    const again = polls([]);
+    const resumed = await runRequestTool({ job: ID }, deps(fetchImpl, again.transport));
+    expect(again.seen).toEqual([]);
+    expect(resumed.envelope).toMatchObject({
+      status: 'failed',
+      providerError: refused,
+      settlement: 'settled',
+    });
   });
 });
 

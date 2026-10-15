@@ -134,13 +134,15 @@ task makes media, the most takes one call's `count` may run.
   and a poll that answers 402 signs one fresh authorization per take.
 - `running` (`{httpStatus}` or `{field, values}`) and `failed` (`{field,
 values}`); a 202, or `always: true`, is running whatever they say.
-- `completeUrl`: `{fixed}` on the submit's host, sent once like a poll after the
-  result is saved; its answer is ignored.
+- `completeUrl`: `{fixed}`, the seller's step that deletes its stored copy
+  (AiSpace's `/complete`). This build reads it and never sends it.
 - `everyS`, `maxWaitS` and `keepH`: the first poll's interval, how long after the
   submit the result can arrive, and how many hours `request({job})` can resume it.
 
-A paid call still running when the call's 300 s wait ends is reported
-`running`, with its `httpStatus` and `ms` and nothing else.
+A poll's 404 or 410 is a job the seller no longer has, and any other 4xx but
+402 ends it `failed` in the seller's words (AiSpace answers a refused prompt's
+retrieve with a 422). A paid call still running when the call's 300 s wait
+ends is reported `running`, with its `httpStatus` and `ms` and nothing else.
 
 ## The set
 
