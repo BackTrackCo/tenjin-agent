@@ -174,9 +174,26 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
               'every choice side by side, sent with the id and the input. Without an input it ' +
               "shows that choice's spec, with nothing paid.",
           ),
+        count: z
+          .number()
+          .int()
+          .min(2)
+          .max(5)
+          .optional()
+          .describe(
+            'Several takes of the same media call, 2 to 5, sent with the id and the input when ' +
+              'the line offers it. Each take is its own payment.',
+          ),
+        job: z
+          .string()
+          .optional()
+          .describe(
+            'The `job` a result named when the provider was still working. Alone, it checks ' +
+              'that job again and returns its result; nothing more is paid.',
+          ),
       },
     },
-    async ({ query, id, input, choice }): Promise<CallToolResult> => {
+    async ({ query, id, input, choice, count, job }): Promise<CallToolResult> => {
       // Resolved per call, from settings read now: the refusal this tool returns
       // names `tenjin config set sessionBudget`, and a policy frozen at the
       // first call would leave that command with no effect until the harness
@@ -192,6 +209,8 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
           ...(id !== undefined ? { id } : {}),
           ...(input !== undefined ? { input } : {}),
           ...(choice !== undefined ? { choice } : {}),
+          ...(count !== undefined ? { count } : {}),
+          ...(job !== undefined ? { job } : {}),
         },
         {
           ctx,
