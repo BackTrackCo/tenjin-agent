@@ -138,8 +138,17 @@ export function routerHookPlan(): { event: string; matcher?: string; hooks: unkn
   ];
 }
 
-/** `hooks/hooks.json`: the `alive` leg, the seven routing legs and the two permission answers. */
-export function renderPluginHooks(): { hooks: Record<string, unknown[]> } {
+/** The mod's module, as `hooks/hooks.json` names it (relative to that file). */
+export const MOD_MODULE = './register.tsx';
+
+/**
+ * `hooks/hooks.json`: the `alive` leg, the seven routing legs and the two
+ * permission answers, and the mod's module when the folder carries it.
+ */
+export function renderPluginHooks(withMod = false): {
+  hooks: Record<string, unknown[]>;
+  modules?: string[];
+} {
   const plan = [
     { event: 'SessionStart', hooks: command(ALIVE_COMMAND) },
     ...routerHookPlan(),
@@ -150,7 +159,7 @@ export function renderPluginHooks(): { hooks: Record<string, unknown[]> } {
   for (const { event, hooks: handlers, ...rest } of plan) {
     (hooks[event] ??= []).push({ ...rest, hooks: handlers });
   }
-  return { hooks };
+  return { hooks, ...(withMod ? { modules: [MOD_MODULE] } : {}) };
 }
 
 /**
@@ -182,11 +191,13 @@ const DESCRIPTION =
  * template carries none. `metadata[tenjin-cli]` is the ownership marker the
  * folder fallback, `update` and `uninstall` check before they touch a folder.
  */
-export function renderPluginManifest(version?: string): Record<string, unknown> {
+export function renderPluginManifest(version?: string, withMod = false): Record<string, unknown> {
   return {
     name: PLUGIN_NAME,
     ...(version !== undefined ? { version } : {}),
     description: DESCRIPTION,
+    // The mod's `$.state` contract, which `claude plugin validate` checks.
+    ...(withMod ? { types: `./${MOD_TYPES}` } : {}),
     author: { name: 'Tenjin', url: PRODUCTION_ORIGIN },
     homepage: `${PRODUCTION_ORIGIN}/agents`,
     repository: 'https://github.com/BackTrackCo/tenjin-agent',
@@ -223,24 +234,43 @@ export function renderMarketplace(version?: string): Record<string, unknown> {
  */
 export const PLUGIN_FILES = [
   '.mcp.json',
+  'types/index.d.ts',
+  'hooks/register.tsx',
   'hooks/hooks.json',
   '.claude-plugin/plugin.json',
 ] as const;
 
+/** The mod's `$.state` contract, shipped as written. */
+export const MOD_TYPES = 'types/index.d.ts';
+/**
+ * THE MOD SHIPS AS WRITTEN, NOT RENDERED: `hosts/claude/tenjin/` holds its
+ * source, the build copies it into `dist/hosts/claude/tenjin/`, and the folder
+ * fallback copies it from there. Claude Code compiles it at load (2.1.287 or
+ * later); nothing here builds or imports it.
+ */
+export const MOD_FILES = [MOD_TYPES, 'hooks/register.tsx'] as const;
+export type ModSources = Record<(typeof MOD_FILES)[number], string>;
+
 const json = (value: unknown): string => `${JSON.stringify(value, null, 2)}\n`;
 
-/** The plugin folder's files, by {@link PLUGIN_FILES} path. */
-export function renderPluginFiles(version?: string): Record<string, string> {
+/**
+ * The plugin folder's files, by {@link PLUGIN_FILES} path. Without the mod's
+ * sources the folder carries the legs and the server alone, and its hooks file
+ * names no module.
+ */
+export function renderPluginFiles(version?: string, mod?: ModSources): Record<string, string> {
+  const withMod = mod !== undefined;
   return {
     '.mcp.json': json(renderPluginMcp()),
-    'hooks/hooks.json': json(renderPluginHooks()),
-    '.claude-plugin/plugin.json': json(renderPluginManifest(version)),
+    ...(mod ?? {}),
+    'hooks/hooks.json': json(renderPluginHooks(withMod)),
+    '.claude-plugin/plugin.json': json(renderPluginManifest(version, withMod)),
   };
 }
 
 /** The marketplace folder's files: its catalog and the plugin under {@link PLUGIN_DIR}. */
-export function renderHostFiles(version?: string): Record<string, string> {
-  const plugin = Object.entries(renderPluginFiles(version)).map(
+export function renderHostFiles(version?: string, mod?: ModSources): Record<string, string> {
+  const plugin = Object.entries(renderPluginFiles(version, mod)).map(
     ([path, body]) => [`${PLUGIN_DIR}/${path}`, body] as const,
   );
   return {

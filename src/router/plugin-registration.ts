@@ -15,6 +15,7 @@ import { PLUGIN_DIR, renderPluginFiles } from './plugin-files';
 import {
   inspectPluginFolder,
   pluginFolderPath,
+  readModSources,
   removePluginFolder,
   writePluginFolder,
   type FolderRemoval,
@@ -144,7 +145,12 @@ export async function registerPlugin(opts: RegisterOptions): Promise<PluginRegis
       };
     }
   }
-  const written = await writePluginFolder(folder, renderPluginFiles(opts.version));
+  // The mod ships as written in the package's own plugin folder; the folder
+  // fallback copies it from there.
+  const hostsForMod = opts.hostsDir === undefined ? await packageHostsDir() : opts.hostsDir;
+  const mod =
+    hostsForMod === null ? undefined : await readModSources(join(hostsForMod, PLUGIN_DIR));
+  const written = await writePluginFolder(folder, renderPluginFiles(opts.version, mod));
   if (written.state === 'written') {
     return {
       method: 'skills-dir',

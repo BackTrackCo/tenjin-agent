@@ -1,0 +1,4 @@
+# Written by Claude Code beside the mod each time it loads it from this folder
+# (`--plugin-dir`): the API's declarations and a tsconfig extending them.
+tenjin/.claude-plugin/types/
+tenjin/tsconfig.json
