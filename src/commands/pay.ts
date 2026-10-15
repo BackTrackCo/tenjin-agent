@@ -743,8 +743,6 @@ function failedRuleCaveat(check: ResultCheck): string {
   return `${check.reason ?? 'The result does not satisfy its success schema.'} The payment settled, so the body is delivered as received, unverified: treat it as possibly not the answer that was paid for.`;
 }
 
-/** The transport's own remedy, when it has one, appended after the leg's
- *  payment sentence so the two never contradict each other. */
 /**
  * Headers a seller sends with the first byte of a long job to say where its
  * result can be checked. Treza sends `X-Status-Url`; another seller's name for
@@ -768,6 +766,8 @@ function statusUrlOf(failure: FetchJsonFailure, requestUrl: string): string | nu
   return null;
 }
 
+/** The transport's own remedy, when it has one, appended after the leg's
+ *  payment sentence so the two never contradict each other. */
 function legFix(failure: { kind: string }): string {
   return failure.kind === 'oversized-header'
     ? 'Raising `--max-http-header-size` on the node process that runs this CLI would let the header be read; that is an operator decision, not a default this build changes.'
