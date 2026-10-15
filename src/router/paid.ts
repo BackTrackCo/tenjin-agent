@@ -88,6 +88,44 @@ export async function appendPaidRecord(dataDir: string, record: PaidRecord): Pro
   }
 }
 
+/**
+ * A JOB'S ROW, FINISHED IN PLACE. A paid call whose seller was still working
+ * is recorded when it is paid, so a crash mid-poll loses no row; the files the
+ * job later saved, and the settlement its last answer named, are written onto
+ * that same row, found by its authorization's nonce, under the lock reconcile
+ * rewrites with. One payment, one row. Never throws.
+ */
+export async function updatePaidRecord(
+  dataDir: string,
+  nonce: string,
+  patch: { savedFiles?: string[]; txHash?: string },
+): Promise<void> {
+  try {
+    const path = paidLedgerPath(dataDir);
+    const key = nonce.toLowerCase();
+    await withFileLock(`${path}.lock`, async () => {
+      const current = parseLedger(await readFile(path, 'utf8').catch(() => ''));
+      let found = false;
+      const lines = current.map(({ line, record }) => {
+        if (record?.authorization?.nonce.toLowerCase() !== key) return line;
+        found = true;
+        return JSON.stringify({
+          ...record,
+          ...(patch.savedFiles !== undefined ? { savedFiles: patch.savedFiles } : {}),
+          ...(patch.txHash !== undefined && record.settlement === 'unknown'
+            ? { txHash: patch.txHash, settlement: 'settled' }
+            : {}),
+        });
+      });
+      if (found) {
+        await writeFileAtomic(path, lines.map((line) => `${line}\n`).join(''), { mode: 0o600 });
+      }
+    });
+  } catch {
+    // The record is the user's convenience; the lookup already happened.
+  }
+}
+
 /** `authorizationState(address,bytes32)`: the first four bytes of its keccak-256. */
 const AUTHORIZATION_STATE_SELECTOR = '0xe94a0102';
 const WORD_RE = /^0x[0-9a-fA-F]{64}$/;
