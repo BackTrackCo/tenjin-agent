@@ -141,6 +141,9 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
   );
 
   let opened = false;
+  // The opener is resolved by absolute path and ignores BROWSER (lib/open-url.ts), so an
+  // agent host cannot route the link into its embedded view. If the user's default browser
+  // is itself an embedded view there is nothing more to do here: the link and QR are printed.
   if (willOpen) {
     opened = await (opts.openUrl ?? openInBrowser)(url);
     emitNotice(
