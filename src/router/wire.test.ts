@@ -132,22 +132,32 @@ describe('the request bodies', () => {
     ).toEqual(canonical);
   });
 
-  /** THIS BUILD SENDS `catalog`: a Tenjin list service as `discovered` under
-   *  its catalog id, each spec's `holds` and `output`, and `choices`. `bazaar`
-   *  rides only while `experimental.bazaar` is on. */
-  it("sends this build's accepts, catalog included, byte for byte", () => {
+  /** A RELEASED BUILD SENDS `catalog`: a Tenjin list service as `discovered`
+   *  under its catalog id, each spec's `holds` and `output`, and `choices`.
+   *  `bazaar` rides only while `experimental.bazaar` is on. */
+  it("builds a released build's catalog request, byte for byte", () => {
     const canonical = fixture('wire-hook-request-catalog.json');
     expect(
       buildHookBody(canonical.packet as Packet, {
         sessionId: canonical.sessionId as string,
-        accepts: acceptsFor(true),
+        accepts: canonical.accepts as string[],
       }),
     ).toEqual(canonical);
-    expect(CLIENT_ACCEPTS).toEqual(['catalog', 'spec']);
     const tool = fixture('wire-tool-request-catalog.json');
-    expect(buildToolBody({ query: tool.query as string, accepts: acceptsFor(false) })).toEqual(
-      tool,
-    );
+    expect(
+      buildToolBody({ query: tool.query as string, accepts: tool.accepts as string[] }),
+    ).toEqual(tool);
+  });
+
+  /** THIS BUILD ADDS `jobs` to a released build's accepts: each spec's `job`,
+   *  the services that never answer inline, and `count` on a media line. */
+  it("sends this build's accepts, jobs beside catalog and spec", () => {
+    expect(CLIENT_ACCEPTS).toEqual(['catalog', 'spec', 'jobs']);
+    expect(acceptsFor(false)).toEqual([
+      ...(fixture('wire-tool-request-catalog.json').accepts as string[]),
+      'jobs',
+    ]);
+    expect(acceptsFor(true)).toEqual(['catalog', 'spec', 'jobs', 'bazaar']);
   });
 
   it('builds the query with no id that a spec answers, byte for byte', () => {
@@ -420,6 +430,36 @@ describe('every answer payload on disk', () => {
     });
     expect(parseForTests('hook', padded(2_000)).success).toBe(true);
     expect(parseForTests('hook', padded(2_001)).success).toBe(false);
+  });
+
+  /** A `jobs` CLIENT'S SPEC says how a call answered before its result is
+   *  ready is finished, and how many takes one call may run. The job block is
+   *  as strict as the rest: a field this build does not know is a parse
+   *  failure, never a poll it half understands. */
+  it('parses a spec with its job and takes, and refuses a job it cannot read', () => {
+    const payload = fixture('wire-lookup-spec-job.json');
+    const decision = payload.decision as { spec: Record<string, unknown>; hint: string };
+    expect(decision.spec.job).toMatchObject({ pollAuth: 'x402', running: { httpStatus: [202] } });
+    expect(decision.spec.takes).toEqual({ max: 5 });
+    expect(decision.hint).toContain('count: 2–5');
+    const withJob = (job: Record<string, unknown>) => ({
+      ...payload,
+      decision: { ...decision, spec: { ...decision.spec, job } },
+    });
+    const job = decision.spec.job as Record<string, unknown>;
+    expect(parseForTests('tool', withJob(job)).success).toBe(true);
+    expect(parseForTests('tool', withJob({ ...job, surprise: 1 })).success).toBe(false);
+    expect(parseForTests('tool', withJob({ ...job, maxWaitS: 601 })).success).toBe(false);
+    expect(
+      parseForTests('tool', withJob({ ...job, pollMethod: 'POST', pollBody: { id: '$inputs.id' } }))
+        .success,
+    ).toBe(false);
+    expect(
+      parseForTests('tool', {
+        ...payload,
+        decision: { ...decision, spec: { ...decision.spec, takes: { max: 6 } } },
+      }).success,
+    ).toBe(false);
   });
 
   it('answers a dead id with a plain note and a decision anyway', () => {

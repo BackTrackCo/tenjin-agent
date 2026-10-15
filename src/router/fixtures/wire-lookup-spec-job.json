@@ -1,0 +1,90 @@
+{
+  "schemaVersion": 1,
+  "routerVersion": "2026-10-15.1",
+  "decision": {
+    "action": "spec",
+    "id": "0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d24",
+    "spec": {
+      "capabilityId": "blockrun-image-gpt-image-2",
+      "provider": "BlockRun (OpenAI GPT Image 2)",
+      "holds": {},
+      "output": "media",
+      "description": "General-purpose images with precise prompt following: hero images, illustrations, scenes (model=\"openai/gpt-image-2\").",
+      "priceAtomic": "64000",
+      "priceVaries": true,
+      "maxAmountAtomic": "1000000",
+      "payTo": "0xe9030014F5DAe217d0A152f02A043567b16c1aBf",
+      "network": "eip155:8453",
+      "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      "request": {
+        "method": "POST",
+        "url": "https://blockrun.ai/api/v1/images/generations",
+        "fields": {
+          "model": "body",
+          "prompt": "body",
+          "size": "body",
+          "n": "body"
+        },
+        "location": "body"
+      },
+      "input": {
+        "type": "object",
+        "required": ["prompt"],
+        "properties": {
+          "model": {
+            "type": "string",
+            "description": "Image model ID (e.g., openai/gpt-image-1, openai/gpt-image-2)",
+            "enum": ["openai/gpt-image-2"],
+            "default": "openai/gpt-image-2"
+          },
+          "prompt": {
+            "type": "string",
+            "description": "Text description of the image to generate"
+          },
+          "size": {
+            "type": "string",
+            "enum": ["1024x1024", "1536x1024", "1024x1536"],
+            "description": "Output size, default 1024x1024; 1536x1024 and 1024x1536 cost $0.127 per image"
+          },
+          "n": {
+            "type": "integer",
+            "description": "Number of images to generate"
+          }
+        }
+      },
+      "pinned": {
+        "model": "openai/gpt-image-2"
+      },
+      "example": {
+        "prompt": "a minimalist flat illustration of a paper plane over a city skyline, soft pastel colors",
+        "size": "1024x1024"
+      },
+      "returns": "JSON {id, data:[{url}], price}: a hosted image URL per image; a slow render answers 202 {id, poll_url} with nothing charged, finished only by a GET of poll_url signed by the same wallet",
+      "job": {
+        "pollUrl": {
+          "field": "poll_url"
+        },
+        "pollMethod": "GET",
+        "pollAuth": "x402",
+        "running": {
+          "httpStatus": [202]
+        },
+        "failed": {
+          "field": "status",
+          "values": ["failed"]
+        },
+        "everyS": 3,
+        "maxWaitS": 540,
+        "keepH": 1
+      },
+      "takes": {
+        "max": 5
+      }
+    },
+    "hint": "Call request({id: \"0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d24\", input: {\"prompt\":\"<prompt>\"}}) alone and wait for its result. For several takes, add count: 2–5 to the same call; each take is its own payment."
+  },
+  "jev": {
+    "calls": 0,
+    "latencyMs": 0
+  }
+}
