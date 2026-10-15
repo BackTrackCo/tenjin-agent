@@ -361,7 +361,7 @@ describe('runFund', () => {
       expect(res.data).toMatchObject({ checkoutUrl: PAGE, presetAmount: 20 });
     });
 
-    it('opens the full URL with its fragment and prints it masked', async () => {
+    it('opens the full URL with its fragment and prints it whole', async () => {
       const { provider } = fakeProvider();
       const openUrl = vi.fn(async () => true);
       await runFund(makeCtx({ isTTY: true }), {
@@ -372,11 +372,11 @@ describe('runFund', () => {
       });
       expect(openUrl).toHaveBeenCalledWith(PAGE);
       const out = stderr.join('');
-      expect(out).toContain(`${EXPECTED_FUND_ORIGIN}/fund?amount=20#…`);
-      expect(out).not.toContain('secret-token');
+      expect(out).toContain(PAGE);
+      expect(out).not.toContain('#…');
     });
 
-    it('prints the whole link when it will not open it, so the token is not lost', async () => {
+    it('prints the whole link when it will not open it', async () => {
       const { provider } = fakeProvider();
       const piped = vi.fn(async () => true);
       await runFund(makeCtx({ isTTY: false }), {

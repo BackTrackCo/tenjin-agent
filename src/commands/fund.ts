@@ -126,14 +126,13 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
   // three lines are write-notices (stderr, no TTY gate, no --json gate) rather
   // than human-mode notices. stdout stays exactly one JSON object.
   //
-  // A Tenjin /fund link carries its token in the fragment. When this process is
-  // about to open the link itself, the printed copy hides the fragment so the
-  // token stays out of scrollback and logs; when it will not open it (piped,
-  // --no-open) the printed link is the only way to finish, so it prints whole.
+  // A Tenjin /fund link carries a token in its fragment, and it prints whole on
+  // every path: a user who copies it into another browser needs the token. It is
+  // not worth hiding, since it can only fund this wallet and expires in ~10 minutes.
   const willOpen = opts.open !== false && ctx.io.isTTY;
   const hosted = new URL(url).host === COINBASE_CHECKOUT_HOST;
   emitWriteNotice(ctx.io, `Checkout for ${address}:`);
-  emitWriteNotice(ctx.io, `  ${willOpen ? maskFragment(url) : url}`);
+  emitWriteNotice(ctx.io, `  ${url}`);
   emitWriteNotice(
     ctx.io,
     hosted
@@ -149,9 +148,6 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
       opened ? 'Opened in your default browser.' : 'Could not open a browser; use the link above.',
       { json: ctx.flags.json },
     );
-    if (!opened && maskFragment(url) !== url) {
-      emitWriteNotice(ctx.io, `  ${url}`);
-    }
   }
 
   // Human mode only, and before the wait: the poll below also sees USDC sent
@@ -222,12 +218,6 @@ function checksummed(address: string): string {
     );
   }
   return getAddress(address);
-}
-
-/** The link with its fragment (the fund token) replaced by an ellipsis. */
-function maskFragment(url: string): string {
-  const i = url.indexOf('#');
-  return i === -1 ? url : `${url.slice(0, i)}#…`;
 }
 
 function parsePreset(raw: string | undefined): number | undefined {
