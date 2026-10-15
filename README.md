@@ -140,6 +140,7 @@ $1–2 goes a long way. $2 covers about 280 web searches, 200 page reads or 100 
 tenjin status                  # what you've spent today
 tenjin wallet balance          # what's left
 tenjin wallet fund 5           # top up
+tenjin payments               # the paid lookups this machine made
 tenjin payments reconcile      # settle paid lookups whose settlement was unknown
 tenjin update                  # newest version; wallet and settings stay
 tenjin config set router.enabled false             # pause the router on this machine

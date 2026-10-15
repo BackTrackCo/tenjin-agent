@@ -279,6 +279,12 @@ export async function reconcilePayments(
   };
 }
 
+/** Every paid record in the ledger, oldest first; a line that is not one is skipped. */
+export async function readPaidRecords(dataDir: string): Promise<PaidRecord[]> {
+  const raw = await readFile(paidLedgerPath(dataDir), 'utf8').catch(() => '');
+  return parseLedger(raw).flatMap(({ record }) => (record === null ? [] : [record]));
+}
+
 /** Every line, and the record it holds when it is one; other lines ride along. */
 function parseLedger(raw: string): { line: string; record: PaidRecord | null }[] {
   return raw
