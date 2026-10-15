@@ -52,8 +52,9 @@ function fieldIn(json: unknown, field: string, values: readonly string[]): boole
 
 /**
  * WHAT A 2xx SAYS ABOUT THE JOB. `always`: the seller never answers inline,
- * so any 2xx is a job. A 202 is never a result. Then the job's own rules:
- * `failed` first, then `running`; anything else is the result itself.
+ * so any 2xx to the submit is a job. A 202 is never a result, to the submit
+ * or to a poll. Then the job's own rules: `failed` first, then `running`;
+ * anything else is the result itself.
  */
 export function answerState(
   job: Job,
@@ -64,7 +65,7 @@ export function answerState(
   if (job.failed !== undefined && fieldIn(json, job.failed.field, job.failed.values)) {
     return 'failed';
   }
-  if (opts.submit && (job.always === true || status === 202)) return 'running';
+  if (status === 202 || (opts.submit && job.always === true)) return 'running';
   const rule = job.running;
   if ('httpStatus' in rule) return rule.httpStatus.includes(status) ? 'running' : 'done';
   return fieldIn(json, rule.field, rule.values) ? 'running' : 'done';

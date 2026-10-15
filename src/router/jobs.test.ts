@@ -337,6 +337,21 @@ describe('a 202 from a service with a job', () => {
     await vi.waitFor(() => expect(reports(calls)).toHaveLength(1));
     expect(reports(calls)[0]).toMatchObject({ status: 'fulfilled', httpStatus: 200 });
   });
+
+  it('keeps polling a poll that answers 202 with no status field', async () => {
+    await storeSpecs(dir, [TREZA]);
+    const { fetchImpl } = submit(TREZA, () =>
+      json(202, { status: 'accepted', statusUrl: 'https://treza.example/jobs/7' }),
+    );
+    const { transport, seen } = polls([
+      { status: 202, body: {} },
+      { status: 200, body: { status: 'done', audio_url: 'https://treza.example/out/clip.mp3' } },
+    ]);
+    const result = await runRequestTool({ id: ID, input: INPUT }, deps(fetchImpl, transport));
+    expect(seen).toHaveLength(2);
+    expect(result.envelope).toMatchObject({ status: 'fulfilled', job: ID });
+    expect(result.envelope.result).toContain('audio_url');
+  });
 });
 
 describe("Treza's paid leg cut off after it named its status URL", () => {
