@@ -982,7 +982,7 @@ export async function persistRouterProject(
 export { ROUTER_DEFAULTS, type RouterLimits };
 
 export interface RouterDefaultsResult {
-  /** Keys this run wrote, because the file did not name them. */
+  /** Keys this run wrote, because the file did not name them or the user named a new value. */
   set: string[];
   /** Keys the operator had already written, left exactly as they are. */
   kept: string[];
@@ -993,11 +993,14 @@ export interface RouterDefaultsResult {
  * current settings; a fresh install fills only missing automatic limits, with the
  * values the person at the terminal approved or chose. A key `limits` leaves out
  * stays absent: that is how an install with nobody to approve keeps
- * `maxAutoSpend` at the bare CLI's zero. */
+ * `maxAutoSpend` at the bare CLI's zero. A key in `chosen` is an amount the
+ * user named for this install (`--max-auto-spend`, `--session-budget`), so it
+ * replaces what the file holds. */
 export async function persistRouterDefaults(
   dir: string,
   refresh = false,
   limits: Partial<RouterLimits> = ROUTER_DEFAULTS,
+  chosen: readonly (keyof RouterLimits)[] = [],
 ): Promise<RouterDefaultsResult> {
   const result: RouterDefaultsResult = { set: [], kept: [], removed: [] };
   if (refresh && retiredPaymentKeys(await loadRawConfig(dir)).length === 0) return result;
@@ -1008,7 +1011,7 @@ export async function persistRouterDefaults(
     if (refresh) return next;
     for (const key of Object.keys(ROUTER_DEFAULTS) as (keyof RouterLimits)[]) {
       const value = limits[key];
-      if (existing[key] !== undefined) result.kept.push(key);
+      if (existing[key] !== undefined && !chosen.includes(key)) result.kept.push(key);
       else if (value !== undefined) {
         next[key] = value;
         result.set.push(key);

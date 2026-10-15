@@ -10,11 +10,13 @@ import {
   type ResolveWalletProviderOptions,
 } from '../lib/wallet';
 import { getUsdcBalance } from '../lib/usdc';
+import type { TenjinSigner } from '../lib/wallet/provider';
 import { toMoney } from '../lib/money';
 import { emitNotice, emitWriteNotice } from '../lib/output';
 import { addressQrLines } from '../lib/qr';
 import { openInBrowser } from '../lib/open-url';
 import { PRODUCTION_ORIGIN } from '../lib/production-origin';
+import { underAgentHarness } from '../lib/session';
 import type { CommandContext, CommandResult } from '../context';
 
 /*
@@ -65,6 +67,8 @@ export interface FundOptions extends ResolveWalletProviderOptions {
   amountUsd?: string;
   /** Skip the browser open (still prints the URL). */
   open?: boolean;
+  /** The environment the agent-harness check reads; defaults to the process's. */
+  env?: NodeJS.ProcessEnv;
   /** `--no-qr`: skip the QR block a TTY otherwise gets for sending USDC from a phone. */
   qr?: boolean;
   /** Poll the balance after issuing the link. Defaults to ON at a TTY, OFF otherwise. */
@@ -87,7 +91,6 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
 
   const config = await loadRawConfig(ctx.dataDir);
   const settings = resolveSettings({ config, flags: {}, env: process.env });
-  const baseUrl = FUND_ORIGIN;
   const rpcUrl = settings.rpcUrl.value;
 
   // Waiting is an INTERACTIVE posture: a human is standing at the terminal with
@@ -100,24 +103,10 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
   // here only disables the wait, it never blocks funding.
   const startBalance = shouldWait ? await balanceOrUndefined(desc, rpcUrl) : undefined;
 
-  const siwxHeader = await buildSiwxHeader(signer, { baseUrl, chainId: SESSION_CHAIN_ID });
-  const request: HttpRequestOptions = {
-    method: 'POST',
-    timeoutMs: ctx.flags.timeout,
-    headers: { [SIWX_HEADER]: siwxHeader },
-    jsonBody: {
-      address,
-      ...(preset !== undefined ? { presetAmount: preset } : {}),
-    },
+  const url = await mintFundLink(ctx, signer, address, {
+    ...(preset !== undefined ? { presetAmount: preset } : {}),
     ...(opts.fetchImpl !== undefined ? { fetchImpl: opts.fetchImpl } : {}),
-  };
-  const res = await httpRequest(`${baseUrl}/api/fund/link`, request);
-  if (!res.ok) {
-    throw fetchFailureToCliError(res, {
-      fix: 'Check your network, then retry.',
-    });
-  }
-  const url = checkoutUrlFrom(res.status, res.json);
+  });
 
   // The link goes out on EVERY surface and before any waiting: it is single-use
   // with a ~5 minute expiry, and the stdout envelope that also carries it is
@@ -129,8 +118,12 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
   // A Tenjin /fund link carries a token in its fragment, and it prints whole on
   // every path: a user who copies it into another browser needs the token. It is
   // not worth hiding, since it can only fund this wallet and expires in ~10 minutes.
-  const willOpen = opts.open !== false && ctx.io.isTTY;
-  const hosted = new URL(url).host === COINBASE_CHECKOUT_HOST;
+  // An agent's shell has no terminal, but an agent runs this only on the
+  // person's yes to "open the funding page" (`tenjin install` hands it that
+  // question), so under a harness the page opens too.
+  const willOpen =
+    opts.open !== false && (ctx.io.isTTY || underAgentHarness(opts.env ?? process.env));
+  const hosted = isHostedCheckout(url);
   emitWriteNotice(ctx.io, `Checkout for ${address}:`);
   emitWriteNotice(ctx.io, `  ${url}`);
   emitWriteNotice(
@@ -202,6 +195,69 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
             'Confirm arrival later with `tenjin wallet balance`.',
           ],
   };
+}
+
+/**
+ * Mint a checkout link for `address`, signed by that address's own key. A
+ * signed read: nothing moves until the person pays on the page it opens.
+ * `tenjin install` mints one too, so the person can add funds without typing
+ * a command.
+ */
+export async function mintFundLink(
+  ctx: CommandContext,
+  signer: TenjinSigner,
+  address: string,
+  opts: { presetAmount?: number; fetchImpl?: typeof fetch } = {},
+): Promise<string> {
+  const siwxHeader = await buildSiwxHeader(signer, {
+    baseUrl: FUND_ORIGIN,
+    chainId: SESSION_CHAIN_ID,
+  });
+  const request: HttpRequestOptions = {
+    method: 'POST',
+    timeoutMs: ctx.flags.timeout,
+    headers: { [SIWX_HEADER]: siwxHeader },
+    jsonBody: {
+      address: checksummed(address),
+      ...(opts.presetAmount !== undefined ? { presetAmount: opts.presetAmount } : {}),
+    },
+    ...(opts.fetchImpl !== undefined ? { fetchImpl: opts.fetchImpl } : {}),
+  };
+  const res = await httpRequest(`${FUND_ORIGIN}/api/fund/link`, request);
+  if (!res.ok) {
+    throw fetchFailureToCliError(res, {
+      fix: 'Check your network, then retry.',
+    });
+  }
+  return checkoutUrlFrom(res.status, res.json);
+}
+
+/** A hosted Coinbase link lives about 5 minutes; a Tenjin /fund token 10. */
+const HOSTED_TTL_MS = 5 * 60_000;
+const PAGE_TTL_MS = 10 * 60_000;
+
+/** Is this a hosted Coinbase checkout, single-use and bound to this network? */
+export function isHostedCheckout(url: string): boolean {
+  return new URL(url).host === COINBASE_CHECKOUT_HOST;
+}
+
+/**
+ * When a minted link stops working: the `exp` a Tenjin /fund link's token
+ * carries in its fragment (read, not verified: the server verifies), else the
+ * known lifetime from `now`.
+ */
+export function fundLinkExpiry(url: string, now = Date.now()): Date {
+  if (isHostedCheckout(url)) return new Date(now + HOSTED_TTL_MS);
+  const payload = new URL(url).hash.slice(1).split('.')[0] ?? '';
+  try {
+    const exp = (
+      JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as { exp?: unknown }
+    ).exp;
+    if (typeof exp === 'number' && Number.isFinite(exp) && exp > now) return new Date(exp);
+  } catch {
+    // No readable token: the page's known lifetime.
+  }
+  return new Date(now + PAGE_TTL_MS);
 }
 
 /**

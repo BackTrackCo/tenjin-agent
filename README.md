@@ -45,7 +45,7 @@ In Claude Code or Claude Desktop, paste:
 Install Tenjin from tenjin.sh
 ```
 
-Your agent installs it, asks you about spend limits in the session, and helps you fund the wallet. Then type `/reload-plugins`, or start a new session, and Tenjin is on (when upgrading from an earlier release, start a new session). It needs Claude Code 2.1.287 or newer.
+Your agent installs it, then asks you in the session about spend limits and whether to add funds now; you never type a command. Then type `/reload-plugins`, or start a new session, and Tenjin is on (when upgrading from an earlier release, start a new session). It needs Claude Code 2.1.287 or newer.
 
 Or in a terminal (Node.js 22 or newer):
 
