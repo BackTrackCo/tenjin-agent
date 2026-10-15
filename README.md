@@ -140,7 +140,7 @@ $1–2 goes a long way. $2 covers about 280 web searches, 200 page reads or 100 
 tenjin status                  # what you've spent today
 tenjin wallet balance          # what's left
 tenjin wallet fund 2           # top up
-tenjin payments               # the paid lookups this machine made
+tenjin payments                # the paid lookups this machine made
 tenjin payments reconcile      # settle paid lookups whose settlement was unknown
 tenjin update                  # newest version; wallet and settings stay
 tenjin config set router.enabled false             # pause the router on this machine
@@ -149,6 +149,8 @@ tenjin uninstall               # remove the Claude Code plugin; your wallet stay
 ```
 
 Use `tenjin install --project` to set it up for a single project. Add `--json` to any command for machine-readable output.
+
+The CLI asks npm at most once a day whether a newer version exists and says so; it never updates itself, so `tenjin update` is yours to run. `tenjin config set update.mode off` turns that check off, the request to npm included, and `TENJIN_NO_UPDATE_CHECK=1` in the environment does the same wherever it is set.
 
 Every paid lookup is recorded on your machine, with the files and full results it returned. [Where they live, and what `payments reconcile` does →](./docs/agent-permissions.md#what-a-paid-lookup-leaves-on-your-machine)
 
