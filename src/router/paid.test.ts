@@ -143,7 +143,7 @@ describe('the media a paid result links to', () => {
           ? { status: 200, body: new Uint8Array(64) }
           : { status: 200, body: new Uint8Array([1, 2, 3]) },
     );
-    const saved = await saveMedia(
+    const { saved } = await saveMedia(
       dir,
       'cap',
       ['https://cdn.test/start.png', 'https://cdn.test/big.png'],
@@ -164,7 +164,7 @@ describe('the media a paid result links to', () => {
       status: 302,
       location: 'https://127.0.0.1/a.png',
     }));
-    const saved = await saveMedia(dir, 'cap', ['https://cdn.test/a.png'], {
+    const { saved } = await saveMedia(dir, 'cap', ['https://cdn.test/a.png'], {
       transport: t,
       destination: PUBLIC,
     });
@@ -204,7 +204,7 @@ describe('the media a paid result links to', () => {
         }),
       ),
     );
-    const paths = both.flat();
+    const paths = both.flatMap(({ saved }) => saved);
     expect(paths).toHaveLength(2);
     expect(new Set(paths).size).toBe(2);
     const a = await createUniqueFile(join(dir, 'x'), 'stem', 'bin');

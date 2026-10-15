@@ -219,8 +219,6 @@ export interface PollDeps {
   destination?: DestinationOptions;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
-  /** The cap on a finished file; the media cap by default. */
-  maxBytes?: number;
   /**
    * Sign this take's one fresh authorization for the 402 a signed poll got,
    * under every gate a payment meets, and keep it for every later poll. The
@@ -490,7 +488,10 @@ async function pollOnce(
     return { kind: 'answer', status: res.status, header: res.header, text: '', json: undefined };
   }
   const binary = isBinaryContentType(res.header('content-type'));
-  const cap = binary ? (deps.maxBytes ?? MAX_MEDIA_BYTES) : MAX_STATUS_BYTES;
+  // A file is read whole under the media cap; what the call may write of it
+  // is the save's to check, so a file this call has no room for stays
+  // resumable rather than failing here.
+  const cap = binary ? MAX_MEDIA_BYTES : MAX_STATUS_BYTES;
   const declared = Number(res.header('content-length') ?? '0');
   if (Number.isFinite(declared) && declared > cap) {
     res.discard();

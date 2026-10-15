@@ -751,6 +751,62 @@ describe('several takes, each its own job', () => {
     ]);
     expect(auth.authorize).not.toHaveBeenCalled();
   });
+
+  it("never writes past the call's download cap across takes side by side", async () => {
+    const counted = { ...BLOCKRUN, takes: { max: 5 } };
+    await storeSpecs(dir, [counted]);
+    let submitted = 0;
+    const { fetchImpl } = submit(counted, () => {
+      submitted += 1;
+      return json(202, {
+        id: `img_${submitted}`,
+        poll_url: `https://blockrun.ai/api/v1/images/generations/img_${submitted}`,
+      });
+    });
+    const transport: PollTransport = async (target, request, signal) => {
+      const key = target.url.toString().split('/').pop()!;
+      return polls([
+        {
+          status: 200,
+          body: { status: 'completed', data: [{ url: `https://cdn.blockrun.ai/out/${key}.png` }] },
+        },
+      ]).transport(target, request, signal);
+    };
+    // Each download waits for the other to start, or a moment: side by side,
+    // each would otherwise see the whole allowance.
+    let started = 0;
+    let bothIn!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      bothIn = resolve;
+    });
+    const gated: MediaTransport = async (target, signal) => {
+      started += 1;
+      if (started === 2) bothIn();
+      await Promise.race([gate, new Promise((resolve) => setTimeout(resolve, 200))]);
+      return mediaTransport(target, signal);
+    };
+    // Room for one image of the two.
+    const result = await runRequestTool(
+      { id: ID, input: INPUT, count: 2 },
+      {
+        ...deps(fetchImpl, transport),
+        mediaTransport: gated,
+        downloads: { leftBytes: PNG.byteLength + 2 },
+      },
+    );
+    expect(await readdir(join(dir, 'downloads'))).toHaveLength(1);
+    const results = result.envelope.results as Record<string, unknown>[];
+    expect(results.map((take) => take.status).sort()).toEqual(['fulfilled', 'running']);
+    const capped = results.find((take) => take.status === 'running')!;
+    expect(String(capped.note)).toContain('its cap');
+
+    // A resume has its own allowance, and pays nothing.
+    const auth = authorizer();
+    const resumed = await runRequestTool({ job: ID }, deps(fetchImpl, transport, { auth }));
+    expect(resumed.envelope).toMatchObject({ status: 'fulfilled' });
+    expect(await readdir(join(dir, 'downloads'))).toHaveLength(2);
+    expect(auth.authorize).not.toHaveBeenCalled();
+  });
 });
 
 describe("AiSpace's queue, polled free with the queue id", () => {

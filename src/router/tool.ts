@@ -1,4 +1,3 @@
-import { stat } from 'node:fs/promises';
 import {
   runPay,
   settlementTx,
@@ -60,7 +59,6 @@ import { openLookupFooter, SILENT_FOOTER, type LookupFooter } from './progress';
 import { saveInlineMedia } from './inline-media';
 import {
   appendPaidRecord,
-  MAX_MEDIA_BYTES,
   MAX_MEDIA_FILES,
   mediaUrlsIn,
   reconcilePayments,
@@ -194,6 +192,8 @@ export interface RequestToolDeps {
 
 /** What one tool call may save to disk, across every take and file. */
 export const MAX_CALL_DOWNLOAD_BYTES = 1024 * 1024 * 1024;
+/** Why a file this call had no room left for was not saved. */
+const CAP_REACHED = `not saved: this call already saved ${Math.round(MAX_CALL_DOWNLOAD_BYTES / 1_048_576)} MB, its cap`;
 
 export interface RequestToolResult {
   isError: boolean;
@@ -1248,11 +1248,12 @@ async function deliverResult(
         call.capabilityId,
         mediaUrlsIn(bodyText ?? '', MAX_MEDIA_FILES - (inline?.savedFiles.length ?? 0)),
       )
-    : [];
+    : { saved: [], capped: false };
+  if (linked.capped) unsaved ??= CAP_REACHED;
   const savedFiles = [
     ...(binary?.savedTo !== undefined ? [binary.savedTo] : []),
     ...(inline?.savedFiles ?? []),
-    ...linked,
+    ...linked.saved,
   ];
   const cut =
     binary === null && call.project !== undefined && bodyText !== undefined
@@ -1330,24 +1331,17 @@ async function deliverResult(
 
 /** The files a paid result links to, saved within what this call may still
  *  write. Best effort, like every save after the money moved. */
-async function saveLinked(deps: RequestToolDeps, stem: string, urls: string[]): Promise<string[]> {
-  const budget = deps.downloads;
-  if (budget !== undefined && budget.leftBytes <= 0) return [];
-  const saved = await saveMedia(deps.ctx.dataDir, stem, urls, {
+async function saveLinked(
+  deps: RequestToolDeps,
+  stem: string,
+  urls: string[],
+): Promise<{ saved: string[]; capped: boolean }> {
+  return saveMedia(deps.ctx.dataDir, stem, urls, {
     ...(deps.mediaTransport !== undefined ? { transport: deps.mediaTransport } : {}),
     ...(deps.payDeps?.destination !== undefined ? { destination: deps.payDeps.destination } : {}),
     ...(deps.now !== undefined ? { now: deps.now } : {}),
-    ...(budget !== undefined ? { maxBytes: Math.min(MAX_MEDIA_BYTES, budget.leftBytes) } : {}),
+    ...(deps.downloads !== undefined ? { budget: deps.downloads } : {}),
   });
-  if (budget !== undefined) {
-    for (const path of saved) {
-      budget.leftBytes -= await stat(path).then(
-        (info) => info.size,
-        () => 0,
-      );
-    }
-  }
-  return saved;
 }
 
 /** What starting a job is handed: the submit's answer and its payment. */
@@ -1528,7 +1522,6 @@ function pollDeps(deps: RequestToolDeps, take: JobTake): PollDeps {
     ...(deps.payDeps?.destination !== undefined ? { destination: deps.payDeps.destination } : {}),
     ...(deps.now !== undefined ? { now: deps.now } : {}),
     ...(deps.sleep !== undefined ? { sleep: deps.sleep } : {}),
-    maxBytes: Math.min(MAX_MEDIA_BYTES, deps.downloads?.leftBytes ?? MAX_MEDIA_BYTES),
     resign: (challenge) => resignTake(take, challenge, deps),
   };
 }
@@ -2142,12 +2135,10 @@ async function saveBinary(
 ): Promise<{ savedTo?: string; saveError?: string; contentType: string; bytes: number }> {
   const described = { contentType: opts.contentType, bytes: bytes.byteLength };
   // ONE CALL WRITES AT MOST ITS SHARE: several takes of a video each bring a
-  // file home, and the disk is the user's.
+  // file home, and the disk is the user's. Taken before the write, given back
+  // when it fails.
   if (opts.budget !== undefined && bytes.byteLength > opts.budget.leftBytes) {
-    return {
-      saveError: `not saved: this call already saved ${Math.round(MAX_CALL_DOWNLOAD_BYTES / 1_048_576)} MB, its cap`,
-      ...described,
-    };
+    return { saveError: CAP_REACHED, ...described };
   }
   if (opts.budget !== undefined) opts.budget.leftBytes -= bytes.byteLength;
   try {
@@ -2163,6 +2154,7 @@ async function saveBinary(
     }
     return { savedTo: file.path, ...described };
   } catch (err) {
+    if (opts.budget !== undefined) opts.budget.leftBytes += bytes.byteLength;
     return { saveError: err instanceof Error ? err.message : String(err), ...described };
   }
 }

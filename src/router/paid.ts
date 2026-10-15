@@ -405,6 +405,10 @@ export interface MediaDeps {
   now?: () => number;
   timeoutMs?: number;
   maxBytes?: number;
+  /** What the call may still write, shared by every file it saves, side by
+   *  side or not: each file's room is taken from it before the download, and
+   *  what the file did not use is given back after. */
+  budget?: { leftBytes: number };
 }
 
 /**
@@ -456,24 +460,31 @@ type LookupCallback = (
   family?: number,
 ) => void;
 
+/** A file the budget left too little room for. */
+const CAPPED = Symbol('capped');
+
 /**
  * Download each URL into the downloads dir, one at a time, each under its own
  * size cap and deadline, every hop of a redirect validated and connected to
- * the address it validated. Returns the paths that were written; a URL that
- * fails is skipped and never fails the call.
+ * the address it validated. Returns the paths that were written, and whether
+ * the budget left a file too little room (`capped`), which a later call, with
+ * a budget of its own, could save; a URL that fails is skipped and never
+ * fails the call.
  */
 export async function saveMedia(
   dataDir: string,
   stem: string,
   urls: string[],
   deps: MediaDeps = {},
-): Promise<string[]> {
+): Promise<{ saved: string[]; capped: boolean }> {
   const saved: string[] = [];
+  let capped = false;
   for (const [index, url] of urls.entries()) {
     const path = await saveOne(dataDir, `${stem}-${index + 1}`, url, deps);
-    if (path !== null) saved.push(path);
+    if (path === CAPPED) capped = true;
+    else if (path !== null) saved.push(path);
   }
-  return saved;
+  return { saved, capped };
 }
 
 async function saveOne(
@@ -481,9 +492,17 @@ async function saveOne(
   stem: string,
   raw: string,
   deps: MediaDeps,
-): Promise<string | null> {
+): Promise<string | typeof CAPPED | null> {
   const transport = deps.transport ?? pinnedGet;
-  const maxBytes = deps.maxBytes ?? MAX_MEDIA_BYTES;
+  const cap = deps.maxBytes ?? MAX_MEDIA_BYTES;
+  const { budget } = deps;
+  const maxBytes = budget !== undefined ? Math.min(cap, budget.leftBytes) : cap;
+  if (maxBytes <= 0) return CAPPED;
+  if (budget !== undefined) budget.leftBytes -= maxBytes;
+  // A file over its room was cut short by the budget, not by its own cap.
+  const short = maxBytes < cap;
+  let used = 0;
+  let over = false;
   const signal = AbortSignal.timeout(deps.timeoutMs ?? MEDIA_TIMEOUT_MS);
   let target = raw;
   let path: string | null = null;
@@ -503,7 +522,7 @@ async function saveOne(
     }
     if ((res.contentLength ?? 0) > maxBytes) {
       res.discard();
-      return null;
+      return short ? CAPPED : null;
     }
     const ext = new URL(target).pathname.split('.').pop()?.toLowerCase() ?? 'bin';
     const file = await createUniqueFile(
@@ -518,6 +537,7 @@ async function saveOne(
         size += chunk.byteLength;
         if (size > maxBytes) {
           res.discard();
+          over = true;
           throw new Error('media over the size cap');
         }
         await writeAll(file.handle, chunk);
@@ -525,10 +545,13 @@ async function saveOne(
     } finally {
       await file.handle.close();
     }
+    used = size;
     return path;
   } catch {
     if (path !== null) await rm(path, { force: true }).catch(() => undefined);
-    return null;
+    return over && short ? CAPPED : null;
+  } finally {
+    if (budget !== undefined) budget.leftBytes += maxBytes - used;
   }
 }
 
