@@ -1,23 +1,30 @@
-import { execFile } from 'node:child_process';
-import { readdir } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { promisify } from 'node:util';
 import { FileClientChannelStorage } from '@x402/evm/batch-settlement/client/file-storage';
+import pkg from '../../package.json';
 import { loadRawConfig } from '../lib/config';
 import { CliError } from '../lib/errors';
-import { inspectHooksFile, ownsHookEntry, pruneOurHandlers } from '../lib/harness-hooks';
 import { toMoney } from '../lib/money';
 import { evaluateSpendPolicy, type SpendPolicy } from '../lib/policy';
 import { resolveContextSettings, type ResolvedSettings } from '../lib/settings';
 import { spentOf } from '../lib/spend-ledger';
 import { readUsdcBalance } from '../lib/usdc-balance';
-import { onPath } from '../lib/skill-wiring';
 import { describeWallet, resolveWalletProvider, type WalletProvider } from '../lib/wallet';
 import { readSpendSummary } from '../lib/wallet/spend';
 import { walletFileExists } from '../lib/wallet/store';
 import type { CommandContext, CommandResult } from '../context';
 import { agentsWithoutRequestTool } from './agent-tools';
+import { readAliveStamp } from './alive';
+import {
+  CLAUDE_CODE_FLOOR,
+  claudeConfigDir,
+  findClaudeBinary,
+  readClaudeCode,
+  runClaude,
+  type ClaudeBinary,
+  type ClaudeCodeState,
+} from './claude-cli';
 import {
   CHANNEL_DEPOSIT_ATOMIC,
   feeRefusal,
@@ -27,18 +34,11 @@ import {
   unpaid,
   usd,
 } from './fee';
-import {
-  ALLOW_RULE,
-  MCP_SERVER_NAME,
-  mcpAddCommand,
-  mcpScope,
-  readMcpEntry,
-  routerHookPlan,
-  routerSettingsPath,
-  type McpEntryState,
-} from './install';
+import { loadStep, pluginProof, settingsInstallPaths } from './install';
+import { inspectLegacyInstall, type LegacyInstall } from './legacy-install';
 import { routerSettings, type RouterSettings } from './settings';
-import { REQUEST_TOOL } from './names';
+import { PLUGIN_ID, PLUGIN_SERVER, REQUEST_TOOL } from './names';
+import { folderState, readPluginListing, type PluginScope } from './plugin-registration';
 import { probeRouter, type RouterCheck } from './reachability';
 import { readMcpServers, type InstalledAt, type ListMcpProcesses } from './mcp-processes';
 import { clearRouterMemo, readRouterMemo, type RouterMemo } from './router-memo';
@@ -49,41 +49,36 @@ import {
   spendQuestion,
   type RouterLimits,
 } from './spend-question';
-import { inspectStatusLine, STATUS_LINE_COMMAND } from './status-line-wiring';
 
 /**
- * `tenjin doctor` for the router product: the six things that decide whether a
- * lookup can happen at all.
+ * `tenjin doctor` for the router product: the things that decide whether a
+ * lookup can happen at all, read and never written.
  *
- * THE SHELF'S DOCTOR IS NOT THIS ONE. It checks a loop daemon, a skills tree
- * and a marketplace contract, and prescribes `tenjin daemon start`, a command
- * this release does not register: on a router install every one of those lines
- * was a failure about a product that is not installed. That doctor stays with
- * the product it belongs to (`src/commands/doctor.ts`, unregistered), and this
- * one reports the router's own wiring.
+ * THE PLUGIN IS ASKED ABOUT THROUGH CLAUDE CODE ITSELF: `claude --version`
+ * against the floor, `claude plugin list --json` for the plugin and its
+ * version, and `claude mcp get` for its `router` server. With no binary, the
+ * plugin folder and the `alive` stamp stand in. A settings install of an
+ * earlier release is reported with its migration state; doctor never migrates.
+ *
+ * EVERY FIX IS A STEP THE AGENT TAKES IN THE SESSION: a command it runs, or a
+ * slash command the person types there. None sends anyone out of Claude Code.
+ *
+ * THE SHELF'S DOCTOR IS NOT THIS ONE. It stays with the product it belongs to
+ * (`src/commands/doctor.ts`, unregistered), and this one reports the router's
+ * own wiring.
  */
-
-const exec = promisify(execFile);
 
 export type { RouterCheck };
 
 export interface RouterDoctorDeps {
   homeDir?: string;
   cwd?: string;
-  /** Look at this project's `.claude/settings.json`, as `--project` installed it. */
+  /** Check the project install, as `install --project` registered it. */
   project?: boolean;
   env?: NodeJS.ProcessEnv;
-  which?: (bin: string) => boolean;
+  /** Finds the `claude` binary; tests inject one. */
+  findClaude?: (env: NodeJS.ProcessEnv) => ClaudeBinary | null;
   fetchImpl?: typeof fetch;
-  /** The harness's own read-back, for a user-scope registration this build
-   *  cannot find on disk; tests inject it so nothing is spawned. */
-  readMcp?: (opts: { scope: 'user' | 'project'; cwd: string }) => Promise<boolean>;
-  /** Reads the registration entry from the file the scope writes. */
-  readMcpEntry?: (
-    scope: 'user' | 'project',
-    cwd: string,
-    home: string,
-  ) => Promise<{ found: boolean; state: McpEntryState }>;
   /** Node's own version, for the floor check. */
   nodeVersion?: string;
   /** This user's running `tenjin mcp` processes; tests inject them. */
@@ -100,33 +95,32 @@ export async function runRouterDoctor(
   deps: RouterDoctorDeps = {},
 ): Promise<CommandResult> {
   const env = deps.env ?? process.env;
+  const home = deps.homeDir ?? homedir();
+  const cwd = deps.cwd ?? process.cwd();
+  const project = deps.project === true;
   // From the directory doctor runs in, which is the one a session there would use.
   const router = await routerSettings(
-    { cwd: deps.cwd ?? process.cwd(), dataDir: ctx.dataDir },
+    { cwd, dataDir: ctx.dataDir },
     deps.homeDir !== undefined ? { homeDir: deps.homeDir } : {},
   ).catch((err: unknown) => (err instanceof Error ? err : new Error(String(err))));
   const settings = await resolveContextSettings(ctx);
-  // The SAME resolution `install` and `uninstall` use. Reading the home file
-  // only made a correctly wired `--project` install, which the README tells
-  // people to do, fail a required check and exit 3.
-  const settingsPath = routerSettingsPath({
-    ...(deps.project === true ? { project: true } : {}),
-    ...(deps.homeDir !== undefined ? { homeDir: deps.homeDir } : {}),
-    ...(deps.cwd !== undefined ? { cwd: deps.cwd } : {}),
-  });
+  const claude = await readClaudeCode(env, cwd, deps.findClaude ?? findClaudeBinary);
+  const scope: PluginScope = project ? 'local' : 'user';
+  const paths = settingsInstallPaths(project, env, home, cwd);
+  const legacy = await inspectLegacyInstall(paths.settingsPath, paths.mcpFile);
+
   const checks: RouterCheck[] = [nodeCheck(deps.nodeVersion ?? process.version)];
-  checks.push(await hooksCheck(settingsPath, ctx.dataDir, router));
-  checks.push(await statusLineCheck(settingsPath));
-  checks.push(
-    await mcpCheck(
-      deps,
-      env,
-      deps.project === true,
-      deps.cwd ?? process.cwd(),
-      deps.homeDir ?? homedir(),
-    ),
-  );
-  checks.push((await readMcpServers(deps)).check);
+  checks.push(claudeCodeCheck(claude));
+  const plugin = await pluginCheck(claude, { scope, env, home, cwd, dataDir: ctx.dataDir, legacy });
+  checks.push(plugin.check);
+  if (plugin.registered && claude.binary !== null) {
+    checks.push(await serverCheck(claude.binary, env, cwd));
+  }
+  if (legacy.present || legacy.unreadable !== undefined) {
+    checks.push(await migrationCheck(legacy, claude, ctx.dataDir, env, cwd));
+  }
+  checks.push(routingCheck(router));
+  checks.push((await readMcpServers(deps, { settingsInstallPending: legacy.present })).check);
   const rawConfig = await loadRawConfig(ctx.dataDir);
   const unanswered =
     rawConfig.maxAutoSpend === undefined ? { limits: shownLimits(rawConfig) } : null;
@@ -155,11 +149,16 @@ export async function runRouterDoctor(
       ),
     );
   }
-  const agents = await subagentsCheck(deps.cwd ?? process.cwd(), deps.homeDir ?? homedir());
+  const agents = await subagentsCheck(cwd, home);
   if (agents !== null) checks.push(agents);
 
   const failure = checks.find((c) => c.status === 'fail' && c.required);
-  const data = { checks, dataDir: ctx.dataDir, baseUrl: settings.baseUrl, settingsPath };
+  const data = {
+    checks,
+    dataDir: ctx.dataDir,
+    baseUrl: settings.baseUrl,
+    settingsPath: paths.settingsPath,
+  };
   if (failure !== undefined) {
     // REFUSED, the exit-3 class: a machine this command found unready is
     // understood and refused, not a runtime failure of the command itself.
@@ -207,7 +206,7 @@ function withBackoff(check: RouterCheck, memo: RouterMemo | null, now: number): 
  * absent when there is nothing to name. The files are only read.
  */
 async function subagentsCheck(cwd: string, homeDir: string): Promise<RouterCheck | null> {
-  const excluded = await agentsWithoutRequestTool({ cwd, homeDir });
+  const excluded = await agentsWithoutRequestTool({ cwd, homeDir }, REQUEST_TOOL);
   if (excluded.length === 0) return null;
   return {
     name: 'subagents',
@@ -230,270 +229,301 @@ function nodeCheck(version: string): RouterCheck {
       };
 }
 
-/**
- * The live footer, which is the one check here that is never required: a lookup
- * runs exactly the same without it. It reports what is in the file, including a
- * status line of the user's that this CLI deliberately did not touch.
- */
-async function statusLineCheck(path: string): Promise<RouterCheck> {
-  const found = await inspectStatusLine(path);
-  const name = 'status line';
-  if (found.warning !== undefined) {
-    return { name, status: 'warn', required: false, detail: found.warning };
+/** Claude Code's version against the plugin's floor. */
+function claudeCodeCheck(claude: ClaudeCodeState): RouterCheck {
+  const name = 'claude code';
+  if (claude.binary === null) {
+    return {
+      name,
+      status: 'warn',
+      required: false,
+      detail:
+        'no claude binary on PATH or in CLAUDE_CODE_EXECPATH, so the plugin was checked from its folder only',
+      fix: 'Run `tenjin doctor` from a Claude Code session, where CLAUDE_CODE_EXECPATH names the binary.',
+    };
   }
-  switch (found.state) {
-    case 'ours':
-      return { name, status: 'ok', required: false, detail: `\`${STATUS_LINE_COMMAND}\`` };
-    case 'composed':
+  if (claude.version === null) {
+    return {
+      name,
+      status: 'warn',
+      required: false,
+      detail: `${claude.binary.path} did not report a version`,
+    };
+  }
+  if (!claude.meetsFloor) {
+    return {
+      name,
+      status: 'fail',
+      required: true,
+      detail: `Claude Code ${claude.version} is older than ${CLAUDE_CODE_FLOOR}, which the Tenjin plugin needs`,
+      ...(claude.fix !== undefined ? { fix: claude.fix } : {}),
+    };
+  }
+  return {
+    name,
+    status: 'ok',
+    required: true,
+    detail: `${claude.version}${claude.binary.source === 'execpath' ? ' (from CLAUDE_CODE_EXECPATH)' : ''}`,
+  };
+}
+
+interface PluginContext {
+  scope: PluginScope;
+  env: NodeJS.ProcessEnv;
+  home: string;
+  cwd: string;
+  dataDir: string;
+  legacy: LegacyInstall;
+}
+
+/**
+ * The plugin: listed and enabled at this CLI's version, or, with no binary to
+ * ask, its folder and the `alive` stamp. A machine that still routes through a
+ * settings install of an earlier release warns rather than fails.
+ */
+async function pluginCheck(
+  claude: ClaudeCodeState,
+  c: PluginContext,
+): Promise<{ check: RouterCheck; registered: boolean }> {
+  const name = 'plugin';
+  const missing = (detail: string): { check: RouterCheck; registered: boolean } => ({
+    registered: false,
+    check: c.legacy.present
+      ? {
+          name,
+          status: 'warn',
+          required: false,
+          detail: `${detail}; the settings install of an earlier release still routes here`,
+          fix: claude.meetsFloor
+            ? `Run \`tenjin install${c.scope === 'local' ? ' --project' : ''}\` to move this machine to the plugin.`
+            : `Run \`claude update\`, then \`tenjin install${c.scope === 'local' ? ' --project' : ''}\` to move this machine to the plugin.`,
+        }
+      : {
+          name,
+          status: 'fail',
+          required: true,
+          detail,
+          fix: `Run \`tenjin install${c.scope === 'local' ? ' --project' : ''}\`.`,
+        },
+  });
+  if (claude.binary !== null) {
+    const listing = await readPluginListing(claude.binary, c.env, c.cwd);
+    if (!listing.read) {
       return {
-        name,
-        status: 'ok',
-        required: false,
-        detail: 'yours, with the x402 footer appended',
+        registered: false,
+        check: {
+          name,
+          status: 'warn',
+          required: false,
+          detail: "Claude Code's plugin list could not be read, so the plugin was not checked",
+          fix: 'Run `tenjin doctor` again in a moment.',
+        },
       };
-    case 'foreign':
+    }
+    if (listing.id === null) return missing(`${PLUGIN_ID} is not installed in Claude Code`);
+    if (!listing.enabled) {
       return {
+        registered: false,
+        check: {
+          name,
+          status: 'fail',
+          required: true,
+          detail: `${listing.id} is installed but disabled, so no lookup is routed`,
+          fix: `Run \`claude plugin enable ${listing.id}\`, then ${loadStep(c.legacy.present)}.`,
+        },
+      };
+    }
+    if (listing.version !== pkg.version) {
+      return {
+        registered: true,
+        check: {
+          name,
+          status: 'warn',
+          required: false,
+          detail: `${listing.id} is enabled at ${listing.version ?? 'an unknown version'}, and this CLI is ${pkg.version}`,
+          fix: 'Run `tenjin install --refresh` to register this version.',
+        },
+      };
+    }
+    return {
+      registered: true,
+      check: { name, status: 'ok', required: true, detail: `${listing.id} ${pkg.version} enabled` },
+    };
+  }
+  const folder = await folderState(c.scope, c.env, c.home, c.cwd);
+  if (folder.state === 'foreign') {
+    return {
+      registered: false,
+      check: {
+        name,
+        status: 'fail',
+        required: true,
+        detail: `${folder.path} is there and is not a folder this CLI wrote, so the plugin cannot be written`,
+        fix: `Move ${folder.path} aside, then run \`tenjin install\` again.`,
+      },
+    };
+  }
+  if (folder.state === 'ours') {
+    const stamp = await readAliveStamp(c.dataDir);
+    return {
+      registered: true,
+      check:
+        stamp === null
+          ? {
+              name,
+              status: 'warn',
+              required: false,
+              detail: `the plugin folder is at ${folder.path} and has not loaded in a session yet`,
+              fix: `To load it, ${loadStep(c.legacy.present)}.`,
+            }
+          : {
+              name,
+              status: 'ok',
+              required: true,
+              detail: `the plugin folder at ${folder.path} loaded, last at ${stamp.at}`,
+            },
+    };
+  }
+  if (await listedInClaudeFiles(c.env, c.home)) {
+    return {
+      registered: true,
+      check: {
         name,
         status: 'warn',
         required: false,
-        detail: 'yours is registered and was left alone, so there is no live x402 footer',
-        fix: 'Run `tenjin install --status-line compose` to show both.',
-      };
-    default:
-      return {
-        name,
-        status: 'warn',
-        required: false,
-        detail: 'not registered, so lookups run without the live footer',
-        fix: 'Run `tenjin install` to register it.',
-      };
+        detail: `${PLUGIN_ID} is registered, and there is no claude binary here to check it`,
+        fix: 'Run `tenjin doctor` from a Claude Code session to check it.',
+      },
+    };
+  }
+  return missing(`${PLUGIN_ID} is not registered`);
+}
+
+/** Claude Code's own record, read when no binary can be asked. */
+async function listedInClaudeFiles(env: NodeJS.ProcessEnv, home: string): Promise<boolean> {
+  try {
+    const raw = await readFile(
+      join(claudeConfigDir(env, home), 'plugins', 'installed_plugins.json'),
+      'utf8',
+    );
+    const plugins = (JSON.parse(raw) as { plugins?: unknown }).plugins;
+    return plugins !== null && typeof plugins === 'object' && PLUGIN_ID in plugins;
+  } catch {
+    return false;
   }
 }
 
-async function hooksCheck(
-  path: string,
-  dataDir: string,
-  router: RouterSettings | Error,
+/**
+ * The plugin's `router` server, through `claude mcp get`, which starts it the
+ * way a session would and reports whether it answered. It starts `tenjin mcp`
+ * from the PATH Claude Code sees, so a `tenjin` that is not on that PATH shows
+ * up here as a server that fails to connect.
+ */
+async function serverCheck(
+  binary: ClaudeBinary,
+  env: NodeJS.ProcessEnv,
+  cwd: string,
 ): Promise<RouterCheck> {
-  const found = await inspectHooksFile(path);
-  if ('refusal' in found) {
-    return {
-      name: 'hooks',
-      status: 'fail',
-      required: true,
-      detail: found.refusal.message,
-      fix: 'Fix the reported file, then run `tenjin install`.',
-    };
+  const name = 'router server';
+  const run = await runClaude(binary, ['mcp', 'get', PLUGIN_SERVER], {
+    env,
+    cwd,
+    timeoutMs: 45_000,
+  });
+  const status = /Status:\s*(.+)/.exec(run.stdout)?.[1]?.trim();
+  if (
+    run.code === 0 &&
+    status !== undefined &&
+    /connected/i.test(status) &&
+    !/fail/i.test(status)
+  ) {
+    return { name, status: 'ok', required: true, detail: `${PLUGIN_SERVER} connected` };
   }
-  const events = Object.entries(found.hooks)
-    .filter(([, list]) => list.some((entry) => ownsHookEntry(entry, dataDir)))
-    .map(([event]) => event);
-  const allow = allowRules(found.settings);
-  if (events.length === 0) {
-    return {
-      name: 'hooks',
-      status: 'fail',
-      required: true,
-      detail: `no Tenjin hook entries in ${path}`,
-      fix: 'Run `tenjin install`, then restart Claude Code.',
-    };
+  return {
+    name,
+    status: 'fail',
+    required: true,
+    detail: `${PLUGIN_SERVER} did not connect${status !== undefined ? `: ${status.slice(0, 200)}` : ''}`,
+    fix: 'Run `tenjin --version` in this session: the plugin starts `tenjin mcp` from PATH, so it must print a version.',
+  };
+}
+
+/**
+ * A settings install of an earlier release: what is left, and whether the
+ * next `tenjin install` or `tenjin update` removes it. Never a failure, and
+ * never written here.
+ */
+async function migrationCheck(
+  legacy: LegacyInstall,
+  claude: ClaudeCodeState,
+  dataDir: string,
+  env: NodeJS.ProcessEnv,
+  cwd: string,
+): Promise<RouterCheck> {
+  const name = 'settings install';
+  if (legacy.unreadable !== undefined) {
+    return { name, status: 'warn', required: false, detail: legacy.unreadable };
   }
-  // WIRED BUT SWITCHED OFF is a choice, not a fault, so it warns and names the
-  // file that made it: the entries are there and every one of them is silent.
+  const parts = [
+    ...(legacy.events.length > 0 ? [`hook entries (${legacy.events.join(', ')})`] : []),
+    ...(legacy.allowRule || legacy.denyRule ? ['permission rules'] : []),
+    ...(legacy.statusLine === 'ours' || legacy.statusLine === 'composed' ? ['a status line'] : []),
+    ...(legacy.mcp === 'ok' ? ['the x402 MCP server'] : []),
+  ];
+  const found = `${parts.join(', ')} from an earlier release in ${legacy.settingsPath}`;
+  const lookalikes =
+    legacy.lookalikes.length > 0
+      ? `; not Tenjin's and left alone: ${legacy.lookalikes.join(', ')}`
+      : '';
+  const proof = await pluginProof(claude, dataDir, env, cwd);
+  return proof.proven
+    ? {
+        name,
+        status: 'warn',
+        required: false,
+        detail: `${found}, ready to remove: the plugin has loaded here${lookalikes}`,
+        fix: 'Run `tenjin install --refresh` to remove it.',
+      }
+    : {
+        name,
+        status: 'warn',
+        required: false,
+        detail: `${found}, kept until the plugin loads: ${proof.reason}${lookalikes}`,
+        fix: claude.meetsFloor
+          ? `To load the plugin, ${loadStep(true)}; the next \`tenjin install\` or \`tenjin update\` then removes the old entries.`
+          : 'Run `claude update`, then `tenjin install`: until then the old entries keep routing.',
+      };
+}
+
+/**
+ * WIRED BUT SWITCHED OFF is a choice, not a fault, so it warns and names the
+ * file that made it.
+ */
+function routingCheck(router: RouterSettings | Error): RouterCheck {
+  const name = 'routing';
   if (router instanceof Error) {
     return {
-      name: 'hooks',
+      name,
       status: 'warn',
       required: false,
-      detail: `${events.join(' and ')} registered, but the router is off here: ${router.message}`,
+      detail: `the router is off here: ${router.message}`,
       fix: 'Fix or delete that file.',
     };
   }
   if (!router.enabled.value) {
     const file = router.enabled.path ?? 'the config';
     return {
-      name: 'hooks',
+      name,
       status: 'warn',
       required: false,
-      detail: `${events.join(' and ')} registered, but router.enabled is false in ${file}, so nothing is routed from this directory`,
+      detail: `router.enabled is false in ${file}, so nothing is routed from this directory`,
       fix:
         router.enabled.source === 'file'
           ? 'Run `tenjin config set router.enabled true` to route again.'
           : `Remove router.enabled from ${file} to route here again.`,
     };
   }
-  if (!allow.includes(ALLOW_RULE)) {
-    return {
-      name: 'hooks',
-      status: 'warn',
-      required: false,
-      detail: `${events.join(' and ')} registered, but ${ALLOW_RULE} is not allowed, so every lookup asks`,
-      fix: 'Run `tenjin install` to write the permission rule.',
-    };
-  }
-  // AN INSTALL FROM AN OLDER BUILD STILL WORKS, so this is a warning with its
-  // one-command remedy, not a failure: its `tenjin hook` command entries take
-  // the free path only, and the entries it lacks are offers it does not make.
-  const drift = planDrift(found.hooks, dataDir);
-  if (drift.missing.length > 0 || drift.stale.length > 0) {
-    const parts = [
-      ...(drift.missing.length > 0 ? [`missing ${drift.missing.join(', ')}`] : []),
-      ...(drift.stale.length > 0 ? [`stale ${drift.stale.join(', ')}`] : []),
-    ];
-    return {
-      name: 'hooks',
-      status: 'warn',
-      required: false,
-      detail: `${events.join(' and ')} registered, but not as this build writes them: ${parts.join('; ')}`,
-      fix: 'Run `tenjin install --refresh`.',
-    };
-  }
-  return {
-    name: 'hooks',
-    status: 'ok',
-    required: true,
-    detail: `${events.join(' and ')} registered, ${ALLOW_RULE} allowed`,
-  };
-}
-
-/** One entry as `event matcher → what it runs`, the way doctor names it. */
-function entryLabel(event: string, matcher: unknown, handler: unknown): string {
-  const h = (handler ?? {}) as Record<string, unknown>;
-  const runs =
-    h.type === 'mcp_tool'
-      ? `${String(h.server)} ${String(h.tool)} ${String((h.input as { kind?: unknown } | undefined)?.kind)}`
-      : typeof h.command === 'string'
-        ? h.command
-        : typeof h.url === 'string'
-          ? h.url
-          : '?';
-  return `${event}${typeof matcher === 'string' ? ` ${matcher}` : ''} → ${runs}`;
-}
-
-/**
- * Which of `routerHookPlan()`'s entries this file lacks, and which handlers of
- * ours it carries that the plan no longer writes (an older install's
- * `tenjin hook prompt` command, or a shelf-era entry). Compared by event,
- * matcher and what the handler runs, so a timeout the writer would raise is not
- * called drift here.
- */
-function planDrift(
-  hooks: Record<string, unknown[]>,
-  dataDir: string,
-): { missing: string[]; stale: string[] } {
-  const planned = (routerHookPlan() as PlannedEntry[]).map((entry) =>
-    entryLabel(entry.event, entry.matcher, entry.hooks[0]),
-  );
-  const present: string[] = [];
-  for (const [event, list] of Object.entries(hooks)) {
-    for (const entry of list) {
-      if (!ownsHookEntry(entry, dataDir)) continue;
-      const { matcher, hooks: handlers } = entry as { matcher?: unknown; hooks: unknown[] };
-      // Ours only: a handler someone hand-merged beside ours is not drift.
-      const kept = pruneOurHandlers(entry, dataDir) as { hooks: unknown[] } | null;
-      for (const handler of handlers.filter((h) => kept === null || !kept.hooks.includes(h))) {
-        present.push(entryLabel(event, matcher, handler));
-      }
-    }
-  }
-  return {
-    missing: planned.filter((label) => !present.includes(label)),
-    stale: present.filter((label) => !planned.includes(label)),
-  };
-}
-
-interface PlannedEntry {
-  event: string;
-  matcher?: string;
-  hooks: unknown[];
-}
-
-function allowRules(settings: Record<string, unknown>): string[] {
-  const permissions = settings.permissions;
-  if (permissions === null || typeof permissions !== 'object' || Array.isArray(permissions)) {
-    return [];
-  }
-  const allow = (permissions as { allow?: unknown }).allow;
-  return Array.isArray(allow) ? allow.filter((r): r is string => typeof r === 'string') : [];
-}
-
-async function mcpCheck(
-  deps: RouterDoctorDeps,
-  env: NodeJS.ProcessEnv,
-  project: boolean,
-  cwd: string,
-  home: string,
-): Promise<RouterCheck> {
-  const scope = mcpScope(project);
-  const add = mcpAddCommand(project);
-  const where = scope === 'project' ? "this project's .mcp.json" : '~/.claude.json';
-  const { found, state } = await (deps.readMcpEntry ?? readMcpEntry)(scope, cwd, home);
-
-  if (state === 'ok') {
-    return {
-      name: 'mcp',
-      status: 'ok',
-      required: true,
-      detail: `${MCP_SERVER_NAME} registered (${scope} scope), running \`tenjin mcp\``,
-    };
-  }
-  if (state === 'wrong-command') {
-    return {
-      name: 'mcp',
-      status: 'fail',
-      required: true,
-      detail: `${MCP_SERVER_NAME} registered but not \`tenjin mcp\`: the entry in ${where} launches something else, so the request tool is not there`,
-      fix: `Remove it and re-run \`tenjin install\`${project ? ' --project' : ''}, or: ${add}`,
-    };
-  }
-  // A file that is there and unreadable is not an absence: "run install" would
-  // be the wrong instruction, since `install` refuses to write over it too.
-  if (state === 'unreadable') {
-    return {
-      name: 'mcp',
-      status: 'fail',
-      required: true,
-      detail: `${where} could not be read, so whether ${MCP_SERVER_NAME} is registered is unknown`,
-      fix: `Fix the JSON in ${where}, then re-run \`tenjin install\`${project ? ' --project' : ''}.`,
-    };
-  }
-  // Absent. On USER scope the file may simply not be where this build looks,
-  // so the harness's own answer is worth asking before calling it missing.
-  if (scope === 'user') {
-    const which = deps.which ?? ((bin: string) => onPath(bin, env));
-    if (which('claude')) {
-      const seen = await (deps.readMcp ?? claudeHasServer)({ scope, cwd }).catch(() => false);
-      if (seen) {
-        return {
-          name: 'mcp',
-          status: 'warn',
-          required: false,
-          detail: `${MCP_SERVER_NAME} is registered somewhere this check cannot read, so what it launches was not verified`,
-          fix: `Re-run \`tenjin install\` to write a registration this build can check, or: ${add}`,
-        };
-      }
-    }
-  }
-  return {
-    name: 'mcp',
-    status: 'fail',
-    required: true,
-    detail: found
-      ? `${MCP_SERVER_NAME} is not in ${where}, so there is no request tool`
-      : `${where} does not exist, so ${MCP_SERVER_NAME} is not registered`,
-    fix: `Run \`tenjin install\`${project ? ' --project' : ''}, or: ${add}`,
-  };
-}
-
-/** The harness's own answer, for a user-scope registration this build cannot
- *  find on disk. It resolves across scopes, which is why it is a last resort
- *  and only ever downgrades the verdict to a warn. */
-async function claudeHasServer(opts: { scope: 'user' | 'project'; cwd: string }): Promise<boolean> {
-  const { stdout } = await exec('claude', ['mcp', 'get', MCP_SERVER_NAME], {
-    timeout: 15_000,
-    cwd: opts.cwd,
-  });
-  return stdout.includes(MCP_SERVER_NAME) && !/no mcp server/i.test(stdout);
+  return { name, status: 'ok', required: false, detail: 'on' };
 }
 
 /**
@@ -679,7 +709,7 @@ function spendCheck(
       status: 'warn',
       required: false,
       detail: `the spend limits are not answered yet, so automatic payments are off and every lookup needs approval. Ask the user: ${spendQuestion(unanswered.limits)}`,
-      fix: `Answer the spend question: for a yes, run \`${ACCEPT_COMMAND}\`; for other amounts, ${OWN_LIMITS_COMMANDS}; or run \`tenjin install\` in a terminal to choose.`,
+      fix: `Answer the spend question: for a yes, run \`${ACCEPT_COMMAND}\`; for other amounts, ${OWN_LIMITS_COMMANDS}.`,
     };
   }
   if (maxAutoSpendAtomic === 0n) {

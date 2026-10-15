@@ -11,10 +11,11 @@ import { createLocalSpendAuthorizer } from '../lib/wallet/spend';
 import type { CommandContext, GlobalFlags } from '../context';
 import type { RouteFor } from './fee';
 import { runHookKind } from './hook-command';
+import { markSessionServed, sessionServedByPlugin } from './alive';
 import { admitHookEvent } from './hook-session';
 import { eventFromToolInput, HOOK_KINDS, HOOK_TOOL, HOOK_TOOL_FIELDS } from './hook-tool';
 import type { HookDeps } from './hooks';
-import { MCP_SERVER_NAME } from './names';
+import { launchedByPlugin, MCP_SERVER_NAME } from './names';
 import { chainReader, RoutingPayer } from './routing-payer';
 import { runRequestTool, type RequestToolDeps } from './tool';
 
@@ -95,6 +96,8 @@ export interface RouterMcpOptions {
   /** Test seam: the home whose `.claude/projects` holds the session transcripts
    *  (`CLAUDE_CONFIG_DIR` is then not read). */
   homeDir?: string;
+  /** Test seam for this process's environment: whether the plugin launched it. */
+  env?: NodeJS.ProcessEnv;
 }
 
 function buildContext(opts: RouterMcpOptions): CommandContext {
@@ -124,6 +127,8 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
     'request',
     {
       title: 'Request external information or a computation, paid per call',
+      // The tool row Claude Code draws reads `<server> - <annotations.title>`.
+      annotations: { title: 'Tenjin lookup' },
       // A PAID PAGE READ IS ROUTINELY PAST CLAUDE CODE'S DEFAULT INLINE LIMIT.
       // This raises the threshold for this tool alone; a result past it is saved
       // by the harness to the session's tool-results directory and the model is
@@ -219,20 +224,22 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
       };
     },
   );
-  // THE HOOK ENTRIES' TOOL. `tenjin install` writes each routing leg as an
-  // `mcp_tool` hook that calls this, so the leg runs in this process, which
-  // holds the wallet and the routing fee's payer, and its answer is the hook's
-  // output. `install` denies the tool to the model (`DENY_RULE`), and the event
+  // THE HOOK LEGS' TOOL. The plugin's hooks call it once per routing leg as an
+  // `mcp_tool` hook, so the leg runs in this process, which holds the wallet
+  // and the routing fee's payer, and its answer is the hook's output. The
+  // plugin's own PreToolUse hook denies the tool to the model, and the event
   // is plain arguments, so each call must still carry its session's own
   // transcript (`admitHookEvent`); any other call answers "no opinion" with
   // nothing sent.
+  const env = opts.env ?? process.env;
+  const fromPlugin = launchedByPlugin(env);
   server.registerTool(
     HOOK_TOOL,
     {
       title: "Tenjin's routing hooks (called by Claude Code, not by you)",
       description:
-        'Called by the Claude Code hook entries `tenjin install` wrote, once per routing ' +
-        'leg, with the hook event. Never call it yourself: to make a lookup, call `request`.',
+        "Called by the Tenjin plugin's hooks, once per routing leg, with the hook event. " +
+        'Never call it yourself: to make a lookup, call `request`.',
       inputSchema: {
         kind: z.enum(HOOK_KINDS),
         ...Object.fromEntries(HOOK_TOOL_FIELDS.map((field) => [field, z.string().optional()])),
@@ -241,8 +248,17 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
     async (args): Promise<CallToolResult> => {
       let response: unknown;
       try {
+        const raw = eventFromToolInput(args);
+        // A SESSION THE PLUGIN SERVES gets its legs from the plugin alone. The
+        // plugin's server marks it; a server a settings install launched stays
+        // silent there, so a machine carrying both never offers twice.
+        // SHIM: the silent branch goes on or after 2026-12-01.
+        if (fromPlugin) await markSessionServed(ctx.dataDir, raw);
+        else if (await sessionServedByPlugin(ctx.dataDir, raw)) {
+          return { content: [{ type: 'text', text: '' }] };
+        }
         const event = await admitHookEvent(
-          eventFromToolInput(args),
+          raw,
           opts.homeDir !== undefined ? { homeDir: opts.homeDir, env: {} } : {},
         );
         if (event === null) return { content: [{ type: 'text', text: '' }] };

@@ -94,13 +94,24 @@ export interface McpServersState {
   check: RouterCheck;
 }
 
-export const RECONNECT_FIX = 'Reconnect x402 with /mcp, or start a new Claude Code session.';
+/** Worded for the session the person is in: a slash command there, never a terminal. */
+export const RECONNECT_FIX =
+  'Type /reload-plugins in this Claude Code session, or start a new session.';
+/**
+ * WHILE A SETTINGS INSTALL IS STILL HERE, only a new session. `/reload-plugins`
+ * reconnects plugin servers alone, so the plugin would load beside a
+ * pre-upgrade `x402` server that does not know to stay silent, and every
+ * event would route twice for the rest of that session.
+ */
+export const NEW_SESSION_FIX =
+  'Start a new Claude Code session: the earlier Tenjin setup is still in this one, and /reload-plugins would run both.';
 
 /** The `mcp server` check from a process list and the install time. Never a failure. */
 export function mcpServersState(
   procs: McpProcess[] | null,
   installed: number | null,
   version: string = pkg.version,
+  fix: string = RECONNECT_FIX,
 ): McpServersState {
   const check = (detail: string): McpServersState => ({
     stale: 0,
@@ -125,7 +136,7 @@ export function mcpServersState(
       status: 'warn',
       required: false,
       detail: `${stale} running \`tenjin mcp\` ${which} started before this install (${version}), so ${stale === 1 ? 'it runs' : 'they run'} the older build, where the hooks can fail with "Tool hook not found"`,
-      fix: RECONNECT_FIX,
+      fix,
     },
   };
 }
@@ -133,10 +144,12 @@ export function mcpServersState(
 /** The check, read from this machine (or the injected sources). */
 export async function readMcpServers(
   deps: { listMcpProcesses?: ListMcpProcesses; installedAt?: InstalledAt } = {},
+  opts: { settingsInstallPending?: boolean } = {},
 ): Promise<McpServersState> {
   const [procs, installed] = await Promise.all([
     (deps.listMcpProcesses ?? listMcpProcesses)().catch(() => null),
     (deps.installedAt ?? installedAt)().catch(() => null),
   ]);
-  return mcpServersState(procs, installed);
+  const fix = opts.settingsInstallPending === true ? NEW_SESSION_FIX : RECONNECT_FIX;
+  return mcpServersState(procs, installed, pkg.version, fix);
 }

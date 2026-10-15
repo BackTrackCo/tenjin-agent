@@ -1,37 +1,29 @@
-import { execFile } from 'node:child_process';
 import { homedir } from 'node:os';
-import { readFile, stat } from 'node:fs/promises';
 import { isAbsolute } from 'node:path';
-import { promisify } from 'node:util';
 import { persistRouterProject } from '../commands/config';
-import { writeFileAtomic } from '../lib/atomic-json';
-import { inspectHooksFile, pruneHooks } from '../lib/harness-hooks';
-import { onPath } from '../lib/skill-wiring';
 import type { CommandContext, CommandResult } from '../context';
-import {
-  ALLOW_RULE,
-  DENY_RULE,
-  MCP_SERVER_NAME,
-  mcpRemoveCommand,
-  mcpScope,
-  readMcpEntry,
-  routerSettingsPath,
-  type McpEntryState,
-} from './install';
-import { removeStatusLine } from './status-line-wiring';
+import { removeAliveState } from './alive';
+import { findClaudeBinary, jsonList, jsonResult, runClaude, type ClaudeBinary } from './claude-cli';
+import { settingsInstallPaths } from './install';
+import { inspectLegacyInstall, removeLegacyInstall, type LegacyRemoval } from './legacy-install';
+import { MARKETPLACE_NAME, PLUGIN_ID } from './names';
+import { removePluginFolder, type FolderRemoval } from './plugin-folder';
+import { folderFor, ownMarketplace, type PluginScope } from './plugin-registration';
 
 /**
- * `tenjin uninstall`: take out the hook entries, the allow and deny rules and
- * the MCP registration, and nothing else.
+ * `tenjin uninstall`: take out the plugin and anything a settings install of
+ * an earlier release left, and nothing else.
+ *
+ * THE PLUGIN goes through Claude Code's own commands (`claude plugin
+ * uninstall`, then `claude plugin marketplace remove` for the marketplace
+ * `install` added), and a plugin folder of ours loses its listed files. The
+ * settings install's hook entries, rules, status line and `x402` server go
+ * under the exact-shape rules of `legacy-install.ts`.
  *
  * THE WALLET AND `spend.json` STAY. Removing an integration is not a reason to
  * destroy a key that holds funds or a ledger that records what was spent; both
  * are the user's, and `tenjin wallet` is where they go to move either.
  */
-
-const exec = promisify(execFile);
-/** The user-scope form; `--project` removes at project scope symmetrically. */
-export const MCP_REMOVE_COMMAND = mcpRemoveCommand();
 
 export interface RouterUninstallArgs {
   project?: boolean;
@@ -41,14 +33,15 @@ export interface RouterUninstallDeps {
   homeDir?: string;
   cwd?: string;
   env?: NodeJS.ProcessEnv;
-  which?: (bin: string) => boolean;
-  removeMcp?: (opts: { scope: 'user' | 'project'; cwd: string }) => Promise<void>;
-  /** Reads the registration the scope's own file holds; tests inject it. */
-  readMcpEntry?: (
-    scope: 'user' | 'project',
-    cwd: string,
-    home: string,
-  ) => Promise<{ found: boolean; state: McpEntryState }>;
+  findClaude?: (env: NodeJS.ProcessEnv) => ClaudeBinary | null;
+}
+
+export interface PluginRemoval {
+  /** `removed`, `absent` (it was not installed), or `kept` with the reason. */
+  plugin: 'removed' | 'absent' | 'kept';
+  marketplace: 'removed' | 'absent' | 'kept';
+  folder: FolderRemoval;
+  reason?: string;
 }
 
 export async function runRouterUninstall(
@@ -60,170 +53,114 @@ export async function runRouterUninstall(
   const home = deps.homeDir ?? homedir();
   if (!isAbsolute(home)) throw new Error('The home directory is not an absolute path.');
   const cwd = deps.cwd ?? process.cwd();
-  const settingsPath = routerSettingsPath({
-    ...(args.project === true ? { project: true } : {}),
-    homeDir: home,
-    cwd,
-  });
+  const project = args.project === true;
+  const scope: PluginScope = project ? 'local' : 'user';
+  const binary = (deps.findClaude ?? findClaudeBinary)(env);
 
-  const removed = await removeFromSettings(settingsPath, ctx.dataDir);
-  // OURS ALONE, and after the hooks write so the two never touch the file at
-  // once. A COMPOSED status line is the user's own text with ours appended:
-  // deleting it would take their line with it, so it is reported and kept.
-  const statusLine = await removeStatusLine(settingsPath);
+  const plugin = await removePlugin(binary, scope, env, home, cwd);
+  const paths = settingsInstallPaths(project, env, home, cwd);
+  const legacy = await inspectLegacyInstall(paths.settingsPath, paths.mcpFile);
+  const settings: LegacyRemoval | null = legacy.present
+    ? await removeLegacyInstall(legacy, { binary, env, cwd, mcpScope: paths.mcpScope })
+    : null;
+  const alive = await removeAliveState(ctx.dataDir);
   // Forgotten, so a later `tenjin update` does not go looking for a project
   // this machine no longer wires.
-  if (args.project === true) {
-    await persistRouterProject(ctx.dataDir, cwd, false).catch(() => undefined);
-  }
-  // The SAME scope the install used, or a `--project` uninstall would leave the
-  // project's registration behind and reach into the user's file instead.
-  const mcp = await removeMcpServer(deps, env, args.project === true, cwd, home);
+  if (project) await persistRouterProject(ctx.dataDir, cwd, false).catch(() => undefined);
   const data = {
-    settingsPath,
-    ...removed,
-    statusLine,
-    mcp,
+    plugin,
+    settings: { path: paths.settingsPath, found: legacy.present, removed: settings },
+    aliveRemoved: alive,
     kept: ['wallet.json', 'spend.json', 'config.json'],
   };
+  return { data, humanLines: uninstallLines(plugin, paths.settingsPath, settings) };
+}
+
+async function removePlugin(
+  binary: ClaudeBinary | null,
+  scope: PluginScope,
+  env: NodeJS.ProcessEnv,
+  home: string,
+  cwd: string,
+): Promise<PluginRemoval> {
+  const folder = await removePluginFolder(folderFor(scope, env, home, cwd));
+  if (binary === null) {
+    return {
+      plugin: 'kept',
+      marketplace: 'kept',
+      folder,
+      reason: `no claude binary on PATH or in CLAUDE_CODE_EXECPATH, so ${PLUGIN_ID} could not be checked; if Claude Code still lists it, type /plugin uninstall ${PLUGIN_ID} in a Claude Code session`,
+    };
+  }
+  const run = (a: string[]) => runClaude(binary, a, { env, cwd });
+  const uninstall = await run(['plugin', 'uninstall', PLUGIN_ID, '--scope', scope, '--json']);
+  const result = jsonResult(uninstall.stdout);
+  const pluginState: PluginRemoval['plugin'] =
+    uninstall.code === 0 ? 'removed' : result?.failureCode === 'not_installed' ? 'absent' : 'kept';
+  // THE MARKETPLACE GOES ONLY WHEN IT IS THE ONE `install` ADDED. A marketplace
+  // of the same name from anywhere else is somebody else's.
+  const listed = jsonList((await run(['plugin', 'marketplace', 'list', '--json'])).stdout) ?? [];
+  const row = listed.find((m) => m.name === MARKETPLACE_NAME);
+  let marketplace: PluginRemoval['marketplace'] = 'absent';
+  if (row !== undefined) {
+    if (await ownMarketplace(row)) {
+      // Named only for a project install, as `install` added it.
+      const scoped = scope === 'user' ? [] : ['--scope', scope];
+      const removed = await run([
+        'plugin',
+        'marketplace',
+        'remove',
+        MARKETPLACE_NAME,
+        ...scoped,
+        '--json',
+      ]);
+      marketplace = removed.code === 0 ? 'removed' : 'kept';
+    } else marketplace = 'kept';
+  }
+  const message =
+    typeof result?.message === 'string' ? result.message : uninstall.stderr.trim().slice(0, 200);
   return {
-    data,
-    humanLines: [
-      removed.warning === undefined
-        ? `removed ${removed.events.length > 0 ? removed.events.join(', ') : 'no'} hook entries and ${removed.ruleRemoved || removed.denyRuleRemoved ? 'the' : 'no'} permission rules from ${settingsPath}`
-        : `${settingsPath} was left untouched (${removed.warning})`,
-      statusLine.wrote
-        ? 'removed the x402 status line'
-        : statusLine.state === 'composed'
-          ? 'status line: yours also runs the x402 footer; edit that command to drop it'
-          : 'status line: none of ours was registered',
-      mcp.removed
-        ? `removed the ${MCP_SERVER_NAME} MCP server (${mcp.scope} scope)`
-        : mcp.kept !== undefined
-          ? `mcp: ${mcp.reason ?? 'left in place'}`
-          : `mcp: run ${mcp.command}`,
-      'Your wallet, spend ledger and config are kept.',
-    ],
-  };
-}
-
-interface SettingsRemoval {
-  /** The events an entry of ours was taken out of. */
-  events: string[];
-  ruleRemoved: boolean;
-  denyRuleRemoved: boolean;
-  wrote: boolean;
-  warning?: string;
-}
-
-async function removeFromSettings(path: string, dataDir: string): Promise<SettingsRemoval> {
-  const nothing = { events: [], ruleRemoved: false, denyRuleRemoved: false, wrote: false };
-  const found = await inspectHooksFile(path);
-  if ('refusal' in found) return { ...nothing, warning: found.refusal.reason };
-  const { raw, settings, hooks } = found;
-  if (raw === null) return nothing;
-  const pruned = pruneHooks(hooks, dataDir);
-  const permissions =
-    settings.permissions !== null &&
-    typeof settings.permissions === 'object' &&
-    !Array.isArray(settings.permissions)
-      ? (settings.permissions as Record<string, unknown>)
-      : undefined;
-  // Each list loses our one rule and keeps every other entry; a list that is
-  // absent or not an array is left as it is.
-  const allow = Array.isArray(permissions?.allow) ? permissions.allow : undefined;
-  const deny = Array.isArray(permissions?.deny) ? permissions.deny : undefined;
-  const ruleRemoved = allow?.includes(ALLOW_RULE) === true;
-  const denyRuleRemoved = deny?.includes(DENY_RULE) === true;
-  const next = {
-    ...settings,
-    hooks: pruned.next,
-    ...(permissions !== undefined
-      ? {
-          permissions: {
-            ...permissions,
-            ...(allow !== undefined ? { allow: allow.filter((r) => r !== ALLOW_RULE) } : {}),
-            ...(deny !== undefined ? { deny: deny.filter((r) => r !== DENY_RULE) } : {}),
-          },
-        }
+    plugin: pluginState,
+    marketplace,
+    folder,
+    ...(pluginState === 'kept'
+      ? { reason: `claude plugin uninstall did not succeed: ${message}` }
       : {}),
   };
-  const body = `${JSON.stringify(next, null, 2)}\n`;
-  if (body === raw) {
-    return { events: pruned.removed, ruleRemoved, denyRuleRemoved, wrote: false };
-  }
-  const mode = await stat(found.path)
-    .then((s) => ({ mode: s.mode & 0o777 }))
-    .catch(() => ({}));
-  if ((await readFile(found.path, 'utf8').catch(() => null)) !== raw) {
-    return { ...nothing, warning: 'changed-since-read' };
-  }
-  try {
-    await writeFileAtomic(found.path, body, mode);
-  } catch (err) {
-    return { ...nothing, warning: err instanceof Error ? err.message : String(err) };
-  }
-  return { events: pruned.removed, ruleRemoved, denyRuleRemoved, wrote: true };
 }
 
-async function removeMcpServer(
-  deps: RouterUninstallDeps,
-  env: NodeJS.ProcessEnv,
-  project: boolean,
-  cwd: string,
-  home: string,
-): Promise<{
-  removed: boolean;
-  scope: 'user' | 'project';
-  command: string;
-  reason?: string;
-  kept?: 'foreign' | 'unreadable';
-}> {
-  const scope = mcpScope(project);
-  const command = mcpRemoveCommand(project);
-  // THE SAME CHECK INSTALL MAKES. The name `x402` proves nothing: another tool
-  // can register its own server under it, and install refuses to touch that
-  // entry. Uninstall must not remove it either. An absent entry falls through
-  // to the remove as before, so nothing changes for a normal install.
-  const existing = await (deps.readMcpEntry ?? readMcpEntry)(scope, cwd, home);
-  if (existing.state === 'wrong-command') {
-    return {
-      removed: false,
-      scope,
-      command,
-      kept: 'foreign',
-      reason: `an MCP server named ${MCP_SERVER_NAME} at ${scope} scope launches something else; this command will not remove a registration it did not write, so it was left in place`,
-    };
+function uninstallLines(
+  plugin: PluginRemoval,
+  settingsPath: string,
+  settings: LegacyRemoval | null,
+): string[] {
+  const lines: string[] = [
+    plugin.plugin === 'removed'
+      ? `removed the ${PLUGIN_ID} plugin`
+      : plugin.plugin === 'absent'
+        ? `plugin: ${PLUGIN_ID} was not installed`
+        : `plugin: ${plugin.reason ?? 'left in place'}`,
+  ];
+  if (plugin.marketplace === 'removed') lines.push(`removed the ${MARKETPLACE_NAME} marketplace`);
+  if (plugin.folder.removed) {
+    lines.push(
+      plugin.folder.left.length === 0
+        ? `removed the plugin folder ${plugin.folder.path}`
+        : `removed the plugin's files from ${plugin.folder.path}; kept what is not Tenjin's: ${plugin.folder.left.join(', ')}`,
+    );
+  } else if (plugin.folder.reason !== undefined) lines.push(`folder: ${plugin.folder.reason}`);
+  if (settings !== null) {
+    const parts = [
+      ...(settings.events.length > 0 ? [`hook entries (${settings.events.join(', ')})`] : []),
+      ...(settings.allowRule || settings.denyRule ? ['the permission rules'] : []),
+      ...(settings.statusLine !== 'kept' ? ['the status line'] : []),
+      ...(settings.mcp === 'removed' ? ['the x402 MCP server'] : []),
+    ];
+    if (parts.length > 0) {
+      lines.push(`removed the settings install's ${parts.join(', ')} from ${settingsPath}`);
+    }
+    lines.push(...settings.warnings.map((w) => `settings: ${w}`));
   }
-  if (existing.state === 'unreadable') {
-    return {
-      removed: false,
-      scope,
-      command,
-      kept: 'unreadable',
-      reason: `the ${scope}-scope registration file could not be read, so nothing was removed from it`,
-    };
-  }
-  const which = deps.which ?? ((bin: string) => onPath(bin, env));
-  if (!which('claude')) {
-    return { removed: false, scope, command, reason: 'the `claude` binary is not on PATH' };
-  }
-  try {
-    await (deps.removeMcp ?? runClaudeMcpRemove)({ scope, cwd });
-    return { removed: true, scope, command };
-  } catch (err) {
-    return {
-      removed: false,
-      scope,
-      command,
-      reason: err instanceof Error ? err.message : String(err),
-    };
-  }
-}
-
-async function runClaudeMcpRemove(opts: { scope: 'user' | 'project'; cwd: string }): Promise<void> {
-  await exec('claude', ['mcp', 'remove', MCP_SERVER_NAME, '-s', opts.scope], {
-    timeout: 20_000,
-    cwd: opts.cwd,
-  });
+  lines.push('Your wallet, spend ledger and config are kept.');
+  return lines;
 }

@@ -1,4 +1,23 @@
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { defineConfig } from 'tsup';
+import { renderHostFiles } from './src/router/plugin-files';
+
+/**
+ * THE CLAUDE CODE PLUGIN SHIPS IN `dist/hosts/claude`, rendered from the same
+ * module the CLI reads, with this build's version stamped into its manifest.
+ * `tenjin install` registers that folder as a `directory` marketplace, so it
+ * must sit inside the published `files`; `dist` already is. The checked-in
+ * `hosts/claude/` templates are pinned to the same render by a test.
+ */
+function writeHosts(): void {
+  const { version } = JSON.parse(readFileSync('package.json', 'utf8')) as { version: string };
+  for (const [path, body] of Object.entries(renderHostFiles(version))) {
+    const target = join('dist', 'hosts', 'claude', path);
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, body);
+  }
+}
 
 // commander is CommonJS; bundled into ESM its internal require('events') would
 // hit esbuild's throwing `__require` shim. A real createRequire satisfies that
@@ -45,6 +64,7 @@ export default defineConfig([
     dts: false,
     outDir: 'dist',
     banner,
+    onSuccess: async () => writeHosts(),
   },
   // The keystore KDF worker (src/lib/wallet/keystore-kdf.ts): a single-file
   // bundle, loaded by `new Worker(url)` from the main dist with no sibling

@@ -8,6 +8,8 @@ import { testWalletProvider } from '../lib/read-test-utils';
 import type { SpendAuthorization, SpendAuthorizer } from '../lib/wallet';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { FakeRouter, payerDeps } from './fee-test-utils';
+import { runAliveHook, sessionServedByPlugin } from './alive';
+import { runHookCommand } from './hook-command';
 import { hookToolInput } from './hook-tool';
 import { buildRouterMcpServer, MAX_RESULT_SIZE_CHARS, MAX_RESULT_SIZE_KEY } from './mcp';
 import { RoutingPayer } from './routing-payer';
@@ -220,6 +222,101 @@ describe('the hook tool', () => {
       await client.close();
       await server.close();
     }
+  });
+
+  /**
+   * A MACHINE CARRYING THE PLUGIN AND A SETTINGS INSTALL runs both servers in
+   * a session. The plugin's `alive` leg marks the session first; the settings
+   * install's server, which the plugin did not launch, then says nothing there.
+   * SHIM: goes with the settings install's migration.
+   */
+  it('stays silent in a session the plugin serves, when a settings install started it', async () => {
+    const { homeDir, transcript } = await home('sess-both');
+    await runAliveHook({ session_id: 'sess-both' }, { dataDir: dir, version: 'test' });
+    const fetchImpl = vi.fn(async () => Response.json({}, { status: 400 }));
+    const server = buildRouterMcpServer({
+      dataDir: dir,
+      homeDir,
+      env: {},
+      handlerDeps: { cwd: dir, signer: await testWalletProvider().getSigner() },
+      hookDeps: {
+        baseUrl: 'https://router.test',
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+        warn: () => undefined,
+      },
+    });
+    const client = await connect(server);
+    try {
+      const called = await client.callTool({
+        name: 'hook',
+        arguments: substituted('prompt', promptEvent('sess-both', transcript)),
+      });
+      expect((called.content as { text: string }[])[0]!.text).toBe('');
+      expect(fetchImpl).not.toHaveBeenCalled();
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it('marks its own session when the plugin started it, and still routes there', async () => {
+    const { homeDir, transcript } = await home('sess-plugin');
+    const fetchImpl = vi.fn(async () => Response.json({}, { status: 400 }));
+    const server = buildRouterMcpServer({
+      dataDir: dir,
+      homeDir,
+      env: { CLAUDE_PLUGIN_ROOT: '/plugin' },
+      handlerDeps: { cwd: dir, signer: await testWalletProvider().getSigner() },
+      hookDeps: {
+        baseUrl: 'https://router.test',
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+        warn: () => undefined,
+      },
+    });
+    const client = await connect(server);
+    try {
+      await client.callTool({
+        name: 'hook',
+        arguments: substituted('prompt', promptEvent('sess-plugin', transcript)),
+      });
+      expect(fetchImpl).toHaveBeenCalled();
+      expect(await sessionServedByPlugin(dir, { session_id: 'sess-plugin' })).toBe(true);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it('the command form of a settings install stays silent there too', async () => {
+    await runAliveHook({ session_id: 'sess-cmd' }, { dataDir: dir, version: 'test' });
+    const fetchImpl = vi.fn(async () => Response.json({}, { status: 400 }));
+    const written: string[] = [];
+    const io = {
+      stdout: { write: (s: string) => written.push(s) },
+      stderr: { write: () => true },
+      isTTY: false,
+    } as unknown as Parameters<typeof runHookCommand>[1];
+    const run = (session: string) =>
+      runHookCommand('prompt', io, {
+        dataDir: dir,
+        env: {},
+        readEvent: async () =>
+          JSON.stringify({
+            hook_event_name: 'UserPromptSubmit',
+            session_id: session,
+            cwd: dir,
+            prompt: 'what is the current price of ETH in USD',
+          }),
+        baseUrl: 'https://router.test',
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+        warn: () => undefined,
+      });
+    await run('sess-cmd');
+    expect(written).toEqual([]);
+    expect(fetchImpl).not.toHaveBeenCalled();
+    // A session the plugin does not serve still routes through the old entry.
+    await run('sess-other');
+    expect(fetchImpl).toHaveBeenCalled();
   });
 
   it("tells the user once, in the hook's systemMessage, when the fee cannot be paid", async () => {

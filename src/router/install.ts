@@ -1,43 +1,45 @@
-import { execFile } from 'node:child_process';
 import { readFile, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
-import { promisify } from 'node:util';
-import { claudeAdapter } from '../adapters/claude';
+import pkg from '../../package.json';
 import { persistRouterDefaults, ROUTER_DEFAULTS, type RouterLimits } from '../commands/config';
 import { askText, selectOne } from '../lib/clack';
 import { CliError } from '../lib/errors';
-import {
-  appendAllowlistRules,
-  claudeSettingsPath,
-  type AppendAllowlistResult,
-} from '../lib/harness-permissions';
-import {
-  inspectHooksFile,
-  ownsHookEntry,
-  pruneHooks,
-  writeHooks,
-  type HooksResult,
-} from '../lib/harness-hooks';
 import { parseUsdToAtomic, toMoney } from '../lib/money';
 import { paint } from '../lib/output';
 import { resolveContextSettings } from '../lib/settings';
 import type { SpendPolicy } from '../lib/policy';
 import { removeRetiredSkills } from '../lib/skill-placement';
 import { loadRawConfig, type PartialConfig } from '../lib/config';
-import { onPath } from '../lib/skill-wiring';
 import type { WalletDeps, WalletOutcome } from '../commands/install-wallet';
 import type { CommandContext, CommandResult } from '../context';
-import { HOOK_TOOL, hookToolInput, type HookKind } from './hook-tool';
-import { MCP_SERVER_NAME, REQUEST_TOOL } from './names';
-import { probeRouter, type RouterCheck } from './reachability';
+import { readAliveStamp } from './alive';
 import {
-  readMcpServers,
-  RECONNECT_FIX,
-  type InstalledAt,
-  type ListMcpProcesses,
-} from './mcp-processes';
-import { ensureStatusLine, type StatusLineMode, type StatusLineResult } from './status-line-wiring';
+  findClaudeBinary,
+  readClaudeCode,
+  userMcpFile,
+  userSettingsPath,
+  type ClaudeBinary,
+  type ClaudeCodeState,
+} from './claude-cli';
+import {
+  inspectLegacyInstall,
+  projectMcpFile,
+  removeLegacyInstall,
+  type LegacyInstall,
+  type LegacyRemoval,
+} from './legacy-install';
+import { PLUGIN_ID } from './names';
+import { CLAUDE_CODE_FLOOR } from './claude-cli';
+import {
+  folderState,
+  readPluginListing,
+  registerPlugin,
+  type PluginRegistration,
+  type PluginScope,
+} from './plugin-registration';
+import { probeRouter, type RouterCheck } from './reachability';
+import { readMcpServers, type InstalledAt, type ListMcpProcesses } from './mcp-processes';
 import {
   FEE_APPROVAL,
   limitsUsd,
@@ -48,133 +50,29 @@ import {
 } from './spend-question';
 
 /**
- * `tenjin install` for the router product: seven hook entries, one MCP server,
- * one permission rule, the spend defaults, and a wallet when there is none.
+ * `tenjin install` for the router product: the wallet, the spend limits, and
+ * the Claude Code plugin `tenjin`, registered with no step left to the person.
  *
- * WHAT IT WRITES IS WHAT IT SAYS. There is no skill to materialize and no
- * daemon to start: each hook entry is a Claude Code `mcp_tool` hook that calls
- * the `hook` tool of the session's own router MCP server (`tenjin mcp`), which
- * runs the leg and holds the wallet, and every other key in the settings file
- * is preserved byte for byte. The one process a leg starts is the free docs
- * fetch beside a search, which exits within `PREFETCH_TIMEOUT_MS`.
- */
-
-const exec = promisify(execFile);
-
-/**
- * The harness's kill budget for each routing leg: a stuck server never holds a
- * prompt longer than this. Every wait inside the leg is cut from it: the gate's
- * 3.5 s, which holds the paid path's 402, the reads before a deposit and the
- * paid request, with 500 ms left for the transcript read and the reply
- * (`wire.test.ts` pins the sum). A whole leg whose call carried a deposit took
- * 2.8 to 3.3 s on Base Sepolia, so it fits; a slower one (a wallet unlock, a
- * slow settlement) loses only that prompt's hint, and the SDK recovers the
- * channel on the next call.
+ * WHAT IT WRITES. The wallet and the spend defaults under the data dir, as
+ * before. The plugin is registered through Claude Code's own `claude plugin`
+ * commands from this package's `dist/hosts/claude` folder (see
+ * `plugin-registration.ts`), or written as a folder under the config dir's
+ * `skills/` where no `claude` binary can be run. The plugin carries the seven
+ * routing legs, the `router` MCP server, and the hooks that allow the request
+ * tool and deny the legs' own tool to the model, so this command writes
+ * nothing into `settings.json` or `~/.claude.json` itself.
  *
- * A machine carrying an older entry is converged by the writer, not by the
- * user: the entries are ours by marker, so `install`, `install --refresh` and
- * the refresh `tenjin update` spawns all rewrite them in place.
- */
-export const ROUTE_HOOK_TIMEOUT_SECONDS = 5;
-/**
- * The after-call entries' kill budget, longer than the rest for the one wait
- * a leg makes: a search the pre-call leg is fetching free docs for waits up to
- * `AUGMENT_WAIT_MS` (9 s) for them, and when none came back and the search was
- * short, the gate's 3.5 s follow, with startup to spare (`wire.test.ts` pins
- * the sum). Every other after-call event
- * returns as fast as before, so the number is a ceiling, not a cost.
- */
-export const AFTER_CALL_TIMEOUT_SECONDS = 15;
-export { MCP_SERVER_NAME };
-export const ALLOW_RULE = REQUEST_TOOL;
-/**
- * THE HOOK ENTRIES' TOOL IS DENIED TO THE MODEL. Its event fields are plain
- * arguments, so the model calling it could forge a routing leg. A deny rule
- * takes the tool out of the model's tool list in every permission mode,
- * bypass included, while Claude Code's own `mcp_tool` hook calls to it still
- * run (checked on Claude Code 2.1.289). The tool's transcript check
- * (`admitHookEvent`) stays for a settings file without the rule.
- */
-export const DENY_RULE = `mcp__${MCP_SERVER_NAME}__${HOOK_TOOL}`;
-/**
- * The MCP registration follows the SAME SCOPE the hook entries do. A
- * `--project` install that wrote its hooks into the project and then registered
- * the server at user scope would reach into `~/.claude.json` on a run whose
- * whole point is to touch this project and nothing else, and `tenjin uninstall
- * --project` would leave that behind.
+ * NO STEP IS LEFT TO THE PERSON. An agent runs this in the person's session:
+ * the spend question comes back for the agent to ask there, the `claude`
+ * binary is found through `CLAUDE_CODE_EXECPATH` where PATH lacks it, a failed
+ * plugin command falls back to the folder, and the one step after it is
+ * typing `/reload-plugins` in the same session, or starting the next one.
  *
- * Project scope writes `<project>/.mcp.json`, so the registration lives beside
- * the settings file that names the hooks and travels with the repository.
+ * THE SETTINGS INSTALL OF EARLIER RELEASES is left working until the plugin
+ * has proven to load on this machine (see {@link migrateSettingsInstall}).
  */
-export function mcpScope(project: boolean | undefined): 'user' | 'project' {
-  return project === true ? 'project' : 'user';
-}
 
-export function mcpAddCommand(project?: boolean): string {
-  return `claude mcp add ${MCP_SERVER_NAME} -s ${mcpScope(project)} -- tenjin mcp`;
-}
-
-export function mcpRemoveCommand(project?: boolean): string {
-  return `claude mcp remove ${MCP_SERVER_NAME} -s ${mcpScope(project)}`;
-}
-
-/** The user-scope form, kept as the name the docs and the tests already use. */
-export const MCP_ADD_COMMAND = mcpAddCommand();
-
-/**
- * Which settings file this machine's router wiring lives in, spelled once so
- * `install`, `uninstall` and `doctor` can never disagree about where to look.
- * A doctor reading the home file on a `--project` install reported a correctly
- * wired machine as unwired and exited 3.
- */
-export function routerSettingsPath(
-  opts: { project?: boolean; homeDir?: string; cwd?: string } = {},
-): string {
-  if (opts.project === true) return join(opts.cwd ?? process.cwd(), '.claude', 'settings.json');
-  return claudeSettingsPath(opts.homeDir ?? homedir());
-}
-
-/** The subagent tool, under its current name and its older one. */
-export const DELEGATION_MATCHER = 'Agent|Task';
-
-/** The native tools both native arms watch. */
-export const NATIVE_MATCHER = 'WebSearch|WebFetch';
-
-/** The host's question to the user, watched before it is asked and after. */
-export const ASK_MATCHER = 'AskUserQuestion';
-
-/**
- * The seven entries, spelled once so `uninstall`, `doctor` and the tests read
- * the same list. The native tools are routed twice over one lookup: BEFORE the
- * call, as every release has, with a line pointing to a paid lookup when one
- * fits; and AFTER it, only when it came back short and nothing was said before,
- * or to add the free docs the pre-call arm fetched to a search's results. A
- * failed call fires PostToolUseFailure rather than PostToolUse, so the second
- * takes both. The host's question to the user is routed the same two ways:
- * before it is asked, when a service could stand in for what it asks for, and
- * after, with the user's answers read as their own words.
- */
-export function routerHookPlan(): unknown[] {
-  const leg = (kind: HookKind, timeout = ROUTE_HOOK_TIMEOUT_SECONDS) => [
-    {
-      type: 'mcp_tool',
-      server: MCP_SERVER_NAME,
-      tool: HOOK_TOOL,
-      input: hookToolInput(kind),
-      timeout,
-    },
-  ];
-  const afterCall = () => leg('shortfall', AFTER_CALL_TIMEOUT_SECONDS);
-  return [
-    { event: 'UserPromptSubmit', hooks: leg('prompt') },
-    { event: 'PreToolUse', matcher: NATIVE_MATCHER, hooks: leg('native') },
-    { event: 'PreToolUse', matcher: DELEGATION_MATCHER, hooks: leg('agent') },
-    { event: 'PostToolUse', matcher: NATIVE_MATCHER, hooks: afterCall() },
-    { event: 'PostToolUseFailure', matcher: NATIVE_MATCHER, hooks: afterCall() },
-    { event: 'PreToolUse', matcher: ASK_MATCHER, hooks: leg('ask') },
-    { event: 'PostToolUse', matcher: ASK_MATCHER, hooks: leg('answer') },
-  ];
-}
+export { AFTER_CALL_TIMEOUT_SECONDS, ROUTE_HOOK_TIMEOUT_SECONDS } from './plugin-files';
 
 export const DISCLOSURE: readonly string[] = [
   "What leaves this machine: the bounded text of each prompt, each native search query or URL (and, when one came back short, its status, size or error), each task handed to a subagent, and each question your assistant asks you with your answers, sent to Tenjin for the free routing gate, beside this session's id. When the gate offers free library docs for a search, that search query also goes to Tenjin's docs lookup, which asks Context7.",
@@ -182,14 +80,34 @@ export const DISCLOSURE: readonly string[] = [
   'What never leaves: your private key. It is decrypted in this CLI to sign, and never sent anywhere.',
 ];
 
+/** What the person does after a successful install, in the session they are in. */
+export const RELOAD_STEP =
+  'type /reload-plugins in this Claude Code session, or start a new session, so Tenjin loads';
+/**
+ * The same step while a settings install is still here: only a new session.
+ * `/reload-plugins` would load the plugin beside the pre-upgrade `x402` server
+ * that session is still running, and every event would route twice.
+ */
+export const NEW_SESSION_STEP = 'start a new Claude Code session so Tenjin loads';
+
+/** The step that loads the plugin, given whether a settings install is still here. */
+export function loadStep(settingsInstallPresent: boolean): string {
+  return settingsInstallPresent ? NEW_SESSION_STEP : RELOAD_STEP;
+}
+
 export interface RouterInstallArgs {
-  /** Write into this project's `.claude/settings.json` instead of your home one. */
+  /**
+   * Register the plugin for this project only (Claude Code's `local` scope,
+   * `.claude/settings.local.json`), or write its folder under the project's
+   * `.claude/skills/`.
+   */
   project?: boolean;
   /**
-   * Bring the entries this machine ALREADY has up to the running build, and
-   * add nothing: no config write, no MCP registration, and a refusal when
-   * nothing of ours is here. `tenjin update` spawns exactly this after it swaps
-   * the binary, so the flag's name and meaning are a compatibility contract.
+   * Bring what this machine ALREADY has up to the running build: the plugin,
+   * or a settings install the plugin then replaces, with no config write. A
+   * refusal when nothing of ours is here. `tenjin update` spawns exactly this
+   * after it swaps the binary, so the flag's name and meaning are a
+   * compatibility contract.
    */
   refresh?: boolean;
   /**
@@ -197,13 +115,6 @@ export interface RouterInstallArgs {
    * "Use these limits", for an agent running the user's yes.
    */
   yes?: boolean;
-  /**
-   * What to do about Claude Code's `statusLine`. Absent is the default path:
-   * write ours when the key is free, and print the composition line when it is
-   * not. `compose` wraps the status line already there and appends ours;
-   * `skip` leaves the key alone entirely.
-   */
-  statusLine?: StatusLineMode;
   /** Create no wallet, for CI and scripted machines. */
   noWallet?: boolean;
 }
@@ -216,21 +127,10 @@ export interface RouterInstallDeps extends WalletDeps {
   homeDir?: string;
   cwd?: string;
   env?: NodeJS.ProcessEnv;
-  /** PATH probe for the `claude` binary. */
-  which?: (bin: string) => boolean;
-  /** Runs `claude mcp add`; tests inject it so no binary is spawned. The scope
-   *  and the working directory are passed, because project scope is decided by
-   *  where the command runs as much as by the flag. */
-  registerMcp?: (
-    command: string,
-    opts: { scope: 'user' | 'project'; cwd: string },
-  ) => Promise<void>;
-  /** Reads the registration the scope's own file holds; tests inject it. */
-  readMcpEntry?: (
-    scope: 'user' | 'project',
-    cwd: string,
-    home: string,
-  ) => Promise<{ found: boolean; state: McpEntryState }>;
+  /** Finds the `claude` binary; tests inject one, production reads PATH and `CLAUDE_CODE_EXECPATH`. */
+  findClaude?: (env: NodeJS.ProcessEnv) => ClaudeBinary | null;
+  /** The marketplace folder; production reads this package's `dist/hosts/claude`. */
+  hostsDir?: string | null;
   /** Whether a person can answer the spend-limit question (a TTY on stdout and
    *  stdin, no `--json`); injected in tests. */
   isInteractive?: boolean;
@@ -244,58 +144,142 @@ export interface RouterInstallDeps extends WalletDeps {
 
 export type LimitsChoice = 'approve' | 'own';
 
-export interface McpRegistration {
-  name: string;
-  registered: boolean;
-  /** Which scope it went to, following the hook entries rather than the flag
-   *  being read twice. `project` writes `<project>/.mcp.json`. */
-  scope: 'user' | 'project';
-  /** The command to run by hand, when this run could not. */
-  command: string;
-  /**
-   * WHAT THIS RUN ACTUALLY DID, which `registered` alone cannot say:
-   * `already-registered` (the scope's file already launches `tenjin mcp`, and
-   * nothing was spawned), `added`, `repaired` (a same-name entry launching
-   * something else was removed and re-added, which only `uninstall` does now),
-   * `unrepaired` (a registration this run KNOWS is wrong or unreadable and will
-   * not touch) or `unavailable` (it is simply not there and this machine could
-   * not add it, e.g. no `claude` on PATH). A refresh fails on `unrepaired`,
-   * because reporting convergence over a registration that launches something
-   * else is the thing to avoid; it still only prints the manual command for
-   * `unavailable`.
-   */
-  reconciled: 'already-registered' | 'added' | 'repaired' | 'unrepaired' | 'unavailable';
-  reason?: string;
+/** Where a settings install of this scope kept its entries and its server. */
+export interface SettingsInstallPaths {
+  settingsPath: string;
+  mcpFile: string;
+  mcpScope: 'user' | 'project';
 }
 
+export function settingsInstallPaths(
+  project: boolean,
+  env: NodeJS.ProcessEnv,
+  home: string,
+  cwd: string,
+): SettingsInstallPaths {
+  return project
+    ? {
+        settingsPath: join(cwd, '.claude', 'settings.json'),
+        mcpFile: projectMcpFile(cwd),
+        mcpScope: 'project',
+      }
+    : {
+        settingsPath: userSettingsPath(env, home),
+        mcpFile: userMcpFile(env, home),
+        mcpScope: 'user',
+      };
+}
+
+/** The settings install's state, as install, update, doctor and uninstall report it. */
+export interface Migration {
+  /**
+   * `none` (no settings install here), `pending` (left in place until the
+   * plugin proves it loads), `done` (removed by this run), or `blocked` (the
+   * settings file could not be read).
+   */
+  state: 'none' | 'pending' | 'done' | 'blocked';
+  settingsPath: string;
+  /** Why it is still pending or blocked. */
+  reason?: string;
+  removed?: LegacyRemoval;
+}
+
+/**
+ * THE GUARDED MIGRATION. A working settings install is removed only once the
+ * plugin has proven to load on this machine: Claude Code at or above the floor
+ * and listing the plugin enabled (when a binary can be asked), and the
+ * plugin's `alive` leg having stamped the machine from a real session. Until
+ * then both stay, and the `alive` marker keeps the old legs silent in any
+ * session the plugin serves. Only `install` and `update` migrate; doctor
+ * reports.
+ */
+export async function pluginProof(
+  claude: ClaudeCodeState,
+  dataDir: string,
+  env: NodeJS.ProcessEnv,
+  cwd: string,
+): Promise<{ proven: true } | { proven: false; reason: string }> {
+  if (claude.binary !== null && !claude.meetsFloor) {
+    return {
+      proven: false,
+      reason: `Claude Code ${claude.version ?? '(unknown)'} is older than the plugin needs`,
+    };
+  }
+  if (claude.binary !== null) {
+    const listing = await readPluginListing(claude.binary, env, cwd);
+    if (!listing.enabled) {
+      return { proven: false, reason: 'Claude Code does not list the plugin as enabled yet' };
+    }
+  }
+  if ((await readAliveStamp(dataDir)) === null) {
+    return {
+      proven: false,
+      reason: 'the plugin has not loaded in a Claude Code session on this machine yet',
+    };
+  }
+  return { proven: true };
+}
+
+export async function migrateSettingsInstall(
+  legacy: LegacyInstall,
+  claude: ClaudeCodeState,
+  opts: { dataDir: string; env: NodeJS.ProcessEnv; cwd: string; mcpScope: 'user' | 'project' },
+): Promise<Migration> {
+  if (!legacy.present) return { state: 'none', settingsPath: legacy.settingsPath };
+  const proof = await pluginProof(claude, opts.dataDir, opts.env, opts.cwd);
+  if (!proof.proven) {
+    return { state: 'pending', settingsPath: legacy.settingsPath, reason: proof.reason };
+  }
+  const removed = await removeLegacyInstall(legacy, {
+    binary: claude.binary,
+    env: opts.env,
+    cwd: opts.cwd,
+    mcpScope: opts.mcpScope,
+  });
+  return { state: 'done', settingsPath: legacy.settingsPath, removed };
+}
+
+/**
+ * `tenjin update` runs the refresh from home, where nothing proves scope. A
+ * project install is taken when this directory, not being home, holds one:
+ * the plugin enabled in its `settings.local.json`, its plugin folder, or a
+ * settings install's entries.
+ */
 async function inferRefreshProject(
   cwd: string,
   home: string,
-  dataDir: string,
-  readRegistration: typeof readMcpEntry,
+  env: NodeJS.ProcessEnv,
 ): Promise<boolean> {
-  const hooks = await probeOurEntries(routerSettingsPath({ project: true, cwd }), dataDir);
-  if (hooks.state !== 'present') return false;
   const [cwdPath, homePath] = await Promise.all([
-    realpath(cwd),
-    realpath(home).catch((err: NodeJS.ErrnoException) => {
-      // A missing home cannot alias this existing project. Do not require it
-      // to exist (or create it) just to refresh the project's own settings.
-      if (err.code === 'ENOENT' || err.code === 'ENOTDIR') return null;
-      throw err;
-    }),
+    realpath(cwd).catch(() => cwd),
+    realpath(home).catch(() => home),
   ]);
-  if (cwdPath !== homePath) return true;
+  if (cwdPath === homePath) return false;
+  const local = await readFile(join(cwd, '.claude', 'settings.local.json'), 'utf8')
+    .then((raw) => JSON.parse(raw) as { enabledPlugins?: Record<string, unknown> })
+    .catch(() => null);
+  if (local?.enabledPlugins?.[PLUGIN_ID] === true) return true;
+  if ((await folderState('local', env, home, cwd)).state === 'ours') return true;
+  const paths = settingsInstallPaths(true, env, home, cwd);
+  return (await inspectLegacyInstall(paths.settingsPath, paths.mcpFile)).events.length > 0;
+}
 
-  // Home shares one hooks file between scopes. Preserve a project-only install,
-  // but prefer user scope when both registrations exist (including alpha.18's
-  // accidental duplicate). With neither registration, the default is user.
-  // Unreadable/conflicting entries stay in their scope so reconciliation refuses
-  // them instead of silently creating a registration in the other scope.
-  const user = await readRegistration('user', cwd, home);
-  if (user.state !== 'absent') return false;
-  const project = await readRegistration('project', cwd, home);
-  return project.state !== 'absent';
+/** Is any install of ours here for a refresh to bring up to date? */
+async function somethingToRefresh(
+  claude: ClaudeCodeState,
+  scope: PluginScope,
+  legacy: LegacyInstall,
+  env: NodeJS.ProcessEnv,
+  home: string,
+  cwd: string,
+): Promise<boolean> {
+  if (legacy.present) return true;
+  if ((await folderState(scope, env, home, cwd)).state === 'ours') return true;
+  if (claude.binary !== null) {
+    const listing = await readPluginListing(claude.binary, env, cwd);
+    if (listing.id === PLUGIN_ID) return true;
+  }
+  return false;
 }
 
 export async function runRouterInstall(
@@ -312,34 +296,20 @@ export async function runRouterInstall(
   }
   const config = await loadRawConfig(ctx.dataDir); // Validate before any install writes; retired keys remain readable.
   const cwd = deps.cwd ?? process.cwd();
-  // `tenjin update` runs from home, where the hooks file cannot prove scope.
-  // An explicit --project still wins, including for a project rooted at home.
+  // An explicit --project wins, including for a project rooted at home.
   const project =
-    args.project ??
-    (args.refresh === true &&
-      (await inferRefreshProject(cwd, home, ctx.dataDir, deps.readMcpEntry ?? readMcpEntry)));
-  const settingsPath = routerSettingsPath({
-    ...(project ? { project: true } : {}),
-    homeDir: home,
-    cwd,
-  });
+    args.project ?? (args.refresh === true && (await inferRefreshProject(cwd, home, env)));
+  const scope: PluginScope = project ? 'local' : 'user';
+  const claude = await readClaudeCode(env, cwd, deps.findClaude ?? findClaudeBinary);
+  const paths = settingsInstallPaths(project, env, home, cwd);
+  const legacy = await inspectLegacyInstall(paths.settingsPath, paths.mcpFile);
 
-  if (args.refresh === true) {
-    const probe = await probeOurEntries(settingsPath, ctx.dataDir);
-    // An unreadable file is not an absence, and telling someone to install over
-    // it is the wrong instruction: the writer would refuse it too.
-    if (probe.state === 'unreadable') {
-      throw new CliError('CONFIG_INVALID', `Could not inspect ${settingsPath}: ${probe.reason}`, {
-        fix: `Fix ${settingsPath}, then re-run: tenjin update`,
-      });
-    }
-    if (probe.state === 'absent') {
-      throw new CliError(
-        'REFUSED',
-        `Nothing to refresh in ${settingsPath}: no Tenjin hook entries are registered here.`,
-        { fix: 'Run `tenjin install` to set this machine up.' },
-      );
-    }
+  if (args.refresh === true && !(await somethingToRefresh(claude, scope, legacy, env, home, cwd))) {
+    throw new CliError(
+      'REFUSED',
+      `Nothing to refresh: neither the ${PLUGIN_ID} plugin nor a settings install of Tenjin is registered here.`,
+      { fix: 'Run `tenjin install` to set this machine up.' },
+    );
   }
   // The shelf install's gate: a refresh, `--json`, or a run with no terminal on
   // either side asks nothing. An agent's install is that run: its shell has no
@@ -367,63 +337,66 @@ export async function runRouterInstall(
         ]
       : [];
   const removedSkills = await removeRetiredSkills(home, project ? cwd : undefined);
-  const hooks = await writeHooks({
-    adapter: claudeAdapter,
-    homeDir: home,
-    dataDir: ctx.dataDir,
-    env,
-    plan: routerHookPlan(),
-    settingsPath,
-  });
-  const permissions = await ensurePermissionRules(settingsPath);
-  const statusLine = await ensureStatusLine(settingsPath, {
-    ...(args.statusLine !== undefined ? { mode: args.statusLine } : {}),
-    ...(args.refresh === true ? { refreshOnly: true } : {}),
-  });
-  const mcp = await registerMcpServer(deps, env, project, cwd, home);
-  // After the hooks are written: a `tenjin mcp` that started before this
-  // install runs the old build, so the new hooks fail there until it restarts.
-  // Named, never killed.
-  const servers = await readMcpServers(deps);
+  // BELOW THE FLOOR, A WORKING SETTINGS INSTALL WINS. The plugin's routing
+  // legs need Claude Code 2.1.287, but its `alive` leg is a command that runs
+  // on any version and would silence the settings install in every session,
+  // leaving the machine unrouted. So nothing is registered until `claude
+  // update`, and the settings install keeps routing.
+  const plugin: PluginRegistration =
+    !claude.meetsFloor && legacy.present
+      ? deferredRegistration(scope, claude)
+      : await registerPlugin({
+          binary: claude.binary,
+          scope,
+          version: pkg.version,
+          env,
+          home,
+          cwd,
+          ...(deps.hostsDir !== undefined ? { hostsDir: deps.hostsDir } : {}),
+        });
+  const migration =
+    legacy.unreadable !== undefined && !legacy.present
+      ? { state: 'blocked' as const, settingsPath: paths.settingsPath, reason: legacy.unreadable }
+      : await migrateSettingsInstall(legacy, claude, {
+          dataDir: ctx.dataDir,
+          env,
+          cwd,
+          mcpScope: paths.mcpScope,
+        });
+  // A `tenjin mcp` that started before this install runs the old build until
+  // its session reloads it. Named, never killed.
+  const pending = settingsInstallStays(migration);
+  const servers = await readMcpServers(deps, { settingsInstallPending: pending });
   const serverLines =
     servers.stale > 0
-      ? [paint(ctx.io, 'yellow', `! ${servers.check.detail}. ${RECONNECT_FIX}`)]
+      ? [paint(ctx.io, 'yellow', `! ${servers.check.detail}. ${servers.check.fix ?? ''}`.trim())]
       : [];
+  const claudeCode = claudeCodeData(claude);
+  const notices = refreshNotices(plugin, claude, migration);
   if (args.refresh === true) {
-    // The SAME writers, minus the one that decides anything: the entries are
-    // rewritten in place by their ownership marker so an upgrade never
-    // duplicates them, the rule and the registration are re-checked because a
-    // new version can change either. Config cleanup only removes retired keys;
-    // the wallet, current limits and `spend.json` are unchanged. Widening an agent's spend policy
-    // during an unattended upgrade is not a convergence.
-    // RECONCILED, not re-added: `claude mcp add` exits 1 on an existing entry,
-    // so the registration is read first and only written when it is missing or
-    // wrong (see {@link registerMcpServer}).
-    // A registration this run KNOWS is wrong and could not repair is not a
-    // converged install, and `tenjin update` reporting success over it is how
-    // a machine keeps a stale `x402` server across upgrade after upgrade.
-    if (mcp.reconciled === 'unrepaired') {
+    // A refresh that could not register the plugin is not a converged install,
+    // unless the settings install it would replace still routes here.
+    if (plugin.state === 'failed' && migration.state !== 'pending') {
       throw new CliError(
         'REFUSED',
-        `The ${MCP_SERVER_NAME} MCP registration (${mcpScope(project)} scope) is not the router's and this run could not repair it: ${mcp.reason ?? 'unknown reason'}.`,
-        { fix: `Run: ${mcp.command}`, details: { settingsPath, hooks, permissions, mcp } },
+        `The ${PLUGIN_ID} plugin could not be registered: ${plugin.reason ?? 'unknown reason'}.`,
+        { fix: registrationFix(plugin), details: { plugin, claudeCode, migration } },
       );
     }
     return {
       data: {
-        settingsPath,
-        hooks,
-        permissions,
-        statusLine,
-        mcp,
+        plugin,
+        claudeCode,
+        migration,
+        notices,
         refresh: true,
         spend,
         removedSkills,
-        scope: mcpScope(project),
+        scope,
         mcpServer: servers.check,
       },
       humanLines: [
-        ...refreshLines(ctx, problems(ctx, hooks, permissions, statusLine, mcp)),
+        ...refreshLines(ctx, plugin, claude, migration),
         ...removedKeysLines,
         ...serverLines,
       ],
@@ -451,16 +424,15 @@ export async function runRouterInstall(
   });
 
   const data = {
-    settingsPath,
-    hooks,
-    permissions,
-    statusLine,
+    plugin,
+    claudeCode,
+    migration,
+    next: nextStep(plugin, claude, wallet, migration),
     spend: {
       ...spend,
       effective: effectiveLimits(effective.policy),
       ...(approval !== undefined ? { approval } : {}),
     },
-    mcp,
     wallet,
     router: {
       status: router.status === 'ok' ? 'ok' : 'warn',
@@ -475,11 +447,9 @@ export async function runRouterInstall(
     data,
     humanLines: [
       ...lines(ctx, {
-        project,
-        hooks,
-        permissions,
-        statusLine,
-        mcp,
+        plugin,
+        claude,
+        migration,
         wallet,
         policy: effective.policy,
         ...(approval !== undefined ? { approval } : {}),
@@ -491,10 +461,113 @@ export async function runRouterInstall(
   };
 }
 
+function claudeCodeData(claude: ClaudeCodeState): Record<string, unknown> {
+  return {
+    binary: claude.binary?.path ?? null,
+    source: claude.binary?.source ?? null,
+    version: claude.version,
+    meetsFloor: claude.meetsFloor,
+    ...(claude.fix !== undefined ? { fix: claude.fix } : {}),
+  };
+}
+
+/**
+ * The fix for a registration that did not happen, worded as a step the agent
+ * can take in the session: never a command for the person to run elsewhere.
+ */
+function registrationFix(plugin: PluginRegistration): string {
+  if (plugin.id !== null && plugin.method === 'none') {
+    return `${plugin.id} keeps serving this machine at the version Claude Code has; run \`tenjin install\` again to retry.`;
+  }
+  if (
+    plugin.path !== undefined &&
+    plugin.reason?.includes('not a folder this CLI wrote') === true
+  ) {
+    return `Move ${plugin.path} aside, then run \`tenjin install\` again.`;
+  }
+  return 'Run `tenjin doctor` to see the cause, then run `tenjin install` again.';
+}
+
+/** The one step after the install, for the agent to relay in the session. */
+function nextStep(
+  plugin: PluginRegistration,
+  claude: ClaudeCodeState,
+  wallet: WalletOutcome,
+  migration: Migration,
+): string {
+  if (plugin.state === 'failed') return registrationFix(plugin);
+  const steps: string[] = [];
+  if (wallet.status === 'created') steps.push('fund the wallet with `tenjin wallet fund`');
+  if (plugin.state === 'deferred') {
+    steps.unshift('run `claude update`');
+    steps.push(
+      'run `tenjin install` again; until then the earlier Tenjin setup keeps routing as before',
+    );
+    return steps.join(', then ');
+  }
+  if (!claude.meetsFloor) steps.unshift('run `claude update`');
+  steps.push(loadStep(settingsInstallStays(migration)));
+  return steps.join(', then ');
+}
+
+/** Is a settings install still on this machine after this run? */
+function settingsInstallStays(migration: Migration): boolean {
+  return migration.state === 'pending' || migration.state === 'blocked';
+}
+
+function deferredRegistration(scope: PluginScope, claude: ClaudeCodeState): PluginRegistration {
+  return {
+    method: 'none',
+    id: null,
+    scope,
+    state: 'deferred',
+    version: pkg.version,
+    steps: [],
+    reason: `Claude Code ${claude.version ?? ''} is older than ${CLAUDE_CODE_FLOOR}, which the plugin needs, so it was not registered and the earlier settings setup keeps routing`,
+  };
+}
+
+/** The status line a migration took out, in words, or nothing. */
+function statusLineNotice(migration: Migration): string | null {
+  const status = migration.removed?.statusLine;
+  if (status === 'removed') {
+    return 'Removed the Tenjin status line (`tenjin status-line`) with the earlier settings setup; the plugin sets none. To keep it, set `tenjin status-line` as your Claude Code status line command.';
+  }
+  if (status === 'restored') {
+    return 'Took the Tenjin footer out of your status line and put your own command back; the plugin sets none.';
+  }
+  return null;
+}
+
+/**
+ * WHAT `tenjin update` PRINTS FROM THIS REFRESH. Update captures this run's
+ * output and shows only its failures, so anything a person must know about a
+ * refresh that succeeded rides here, as sentences the parent prints verbatim.
+ */
+function refreshNotices(
+  plugin: PluginRegistration,
+  claude: ClaudeCodeState,
+  migration: Migration,
+): string[] {
+  const out: string[] = [];
+  if (plugin.state === 'deferred') {
+    out.push(
+      `Claude Code ${claude.version ?? ''} is older than ${CLAUDE_CODE_FLOOR}, so the Tenjin plugin was not registered and the earlier settings setup keeps routing. Run \`claude update\`, then \`tenjin install\`.`,
+    );
+  } else if (plugin.state !== 'failed' && settingsInstallStays(migration)) {
+    out.push(
+      'Start a new Claude Code session so the Tenjin plugin loads; the earlier settings setup is removed by the next `tenjin update` or `tenjin install` after that.',
+    );
+  }
+  const status = statusLineNotice(migration);
+  if (status !== null) out.push(status);
+  return out;
+}
+
 /** What turns automatic payment on after an install that left it at zero. */
 const AUTO_SPEND_FIX = `tenjin config set maxAutoSpend ${toMoney(ROUTER_DEFAULTS.maxAutoSpend).usd}`;
 const DECLINED =
-  'the router then pays for nothing on its own, and the question stays open until `tenjin install` in a terminal or `tenjin config set` answers it';
+  'the router then pays for nothing on its own, and the question stays open until the user answers it';
 
 /** The spend question an install that could not ask hands to its caller. */
 export interface SpendApproval {
@@ -538,7 +611,6 @@ function yesCommand(args: RouterInstallArgs): string {
     'tenjin install',
     ...(args.project === true ? ['--project'] : []),
     ...(args.noWallet === true ? ['--no-wallet'] : []),
-    ...(args.statusLine !== undefined ? [`--status-line ${args.statusLine}`] : []),
     '--yes',
   ].join(' ');
 }
@@ -633,191 +705,6 @@ function promptAmount(message: string, placeholder: string): Promise<string | nu
   return askText({ message, placeholder });
 }
 
-export interface AllowRuleResult {
-  path: string;
-  rule: string;
-  added: boolean;
-  /** {@link DENY_RULE}, written to `permissions.deny` beside the allow rule. */
-  denyRule: string;
-  denyAdded: boolean;
-  /** Set when the file could not be written; the rules are then not in force. */
-  warning?: string;
-}
-
-/**
- * The two permission rules, through the shared allowlist writer rather than a
- * third hand-rolled one: it resolves a symlinked settings.json before the
- * rename, refuses a file it cannot parse, and compares the bytes it read before
- * committing, none of which a local copy of the merge would have. Each adds
- * only its own rule and keeps every other entry in the list.
- */
-async function ensurePermissionRules(path: string): Promise<AllowRuleResult> {
-  const allow = await appendAllowlistRules(path, [ALLOW_RULE]);
-  const deny = await appendAllowlistRules(path, [DENY_RULE], 'deny');
-  const warning = writerWarning(allow) ?? writerWarning(deny);
-  return {
-    path: allow.path,
-    rule: ALLOW_RULE,
-    added: allow.added.length > 0,
-    denyRule: DENY_RULE,
-    denyAdded: deny.added.length > 0,
-    ...(warning !== undefined ? { warning } : {}),
-  };
-}
-
-function writerWarning(result: AppendAllowlistResult): string | undefined {
-  return (
-    result.warning ??
-    (result.skipped !== undefined
-      ? `${result.path} was left untouched (${result.skipped}).`
-      : undefined)
-  );
-}
-
-/**
- * RECONCILE, do not re-add blindly. `claude mcp add` is not idempotent: Claude
- * Code 2.1.280 exits 1 on a second identical add with "MCP server x402 already
- * exists in .mcp.json". Running it unconditionally therefore reported a
- * perfectly healthy machine as an unregistered one and printed a repair command
- * that would fail the same way, while a same-name entry launching something
- * else never converged, because `add` refuses to overwrite it.
- *
- * So the scope's own file is read first: an entry that already launches
- * `tenjin mcp` is the goal state and nothing is spawned, and a file that cannot
- * be read is refused out loud rather than written over.
- *
- * AN `x402` ENTRY THAT LAUNCHES SOMETHING ELSE IS SOMEBODY ELSE'S. This command
- * will not delete it. It may be another tool of the user's that happens to
- * share the name, and an installer that removes a registration nobody asked it
- * to touch has destroyed configuration to make its own output look tidy. The
- * conflict is reported with the exact two commands to run, and the user decides.
- */
-async function registerMcpServer(
-  deps: RouterInstallDeps,
-  env: NodeJS.ProcessEnv,
-  project: boolean,
-  cwd: string,
-  home: string,
-): Promise<McpRegistration> {
-  const scope = mcpScope(project);
-  const command = mcpAddCommand(project);
-  const base = { name: MCP_SERVER_NAME, scope, command };
-  const existing = await (deps.readMcpEntry ?? readMcpEntry)(scope, cwd, home);
-  if (existing.state === 'ok') {
-    return { ...base, registered: true, reconciled: 'already-registered' };
-  }
-  if (existing.state === 'unreadable') {
-    return {
-      ...base,
-      registered: false,
-      reconciled: 'unrepaired',
-      reason: `the ${scope}-scope registration file could not be read, so nothing was written over it`,
-    };
-  }
-  // REFUSED, NOT REPLACED. Nothing of the user's is removed to make room.
-  if (existing.state === 'wrong-command') {
-    return {
-      ...base,
-      registered: false,
-      reconciled: 'unrepaired',
-      command: `${mcpRemoveCommand(project)} && ${command}`,
-      reason: `an MCP server named ${MCP_SERVER_NAME} is already registered at ${scope} scope and launches something else. This command will not remove a registration it did not write; run the two commands above if that entry is stale`,
-    };
-  }
-  const which = deps.which ?? ((bin: string) => onPath(bin, env));
-  if (!which('claude')) {
-    return {
-      ...base,
-      registered: false,
-      reconciled: 'unavailable',
-      reason: 'the `claude` binary is not on PATH',
-    };
-  }
-  try {
-    await (deps.registerMcp ?? runClaudeMcpAdd)(command, { scope, cwd });
-    return { ...base, registered: true, reconciled: 'added' };
-  } catch (err) {
-    return {
-      ...base,
-      registered: false,
-      reconciled: 'unavailable',
-      reason: err instanceof Error ? err.message : String(err),
-    };
-  }
-}
-
-export type McpEntryState = 'ok' | 'absent' | 'wrong-command' | 'unreadable';
-
-/**
- * What an entry named `x402` actually launches. The name proves nothing: a
- * stale entry pointing at another binary would read as a working request tool.
- */
-export function classifyMcpEntry(entry: unknown): McpEntryState {
-  if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) return 'absent';
-  const { command, args } = entry as { command?: unknown; args?: unknown };
-  if (typeof command !== 'string' || command.length === 0) return 'wrong-command';
-  // The basename, so `/opt/homebrew/bin/tenjin` and a bare `tenjin` both pass.
-  const binary = command.split(/[\\/]/).pop();
-  const runsRouter =
-    binary === 'tenjin' && Array.isArray(args) && args.length === 1 && args[0] === 'mcp';
-  return runsRouter ? 'ok' : 'wrong-command';
-}
-
-/**
- * The file each scope writes: the project's own `.mcp.json`, or the user's
- * `~/.claude.json`. Neither can inherit from the other. Shared by `install`,
- * which reconciles against it, and `doctor`, which reports it.
- */
-export async function readMcpEntry(
-  scope: 'user' | 'project',
-  cwd: string,
-  home: string,
-): Promise<{ found: boolean; state: McpEntryState }> {
-  const path = scope === 'project' ? join(cwd, '.mcp.json') : join(home, '.claude.json');
-  // ONLY "it is not there" is an absence. A permission or filesystem error on a
-  // file that DOES exist says nothing about what is registered in it, and
-  // treating it as missing sent the refresh on to `claude mcp add` over a
-  // registration it had never read: a failed add then looked like a machine
-  // that simply lacks the tooling, and `tenjin update` exited 0 over whatever
-  // was actually in there.
-  let raw: string;
-  try {
-    raw = await readFile(path, 'utf8');
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code;
-    if (code === 'ENOENT' || code === 'ENOTDIR') return { found: false, state: 'absent' };
-    return { found: true, state: 'unreadable' };
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    // NOT an absence: the harness's own file is there and unreadable to this
-    // build, so neither "register it" nor "it is missing" is a true statement.
-    return { found: true, state: 'unreadable' };
-  }
-  const servers = (parsed as { mcpServers?: unknown } | null)?.mcpServers;
-  if (servers === undefined) return { found: true, state: 'absent' };
-  if (servers === null || typeof servers !== 'object' || Array.isArray(servers)) {
-    return { found: true, state: 'unreadable' };
-  }
-  const entry = (servers as Record<string, unknown>)[MCP_SERVER_NAME];
-  if (entry === undefined) return { found: true, state: 'absent' };
-  return { found: true, state: classifyMcpEntry(entry) };
-}
-
-/** Project scope is decided by the working directory as well as the flag:
- *  `claude` writes `.mcp.json` beside the project it was run in. */
-async function runClaudeMcpAdd(
-  _command: string,
-  opts: { scope: 'user' | 'project'; cwd: string },
-): Promise<void> {
-  await exec('claude', ['mcp', 'add', MCP_SERVER_NAME, '-s', opts.scope, '--', 'tenjin', 'mcp'], {
-    timeout: 20_000,
-    cwd: opts.cwd,
-  });
-}
-
 interface EffectiveLimits {
   maxAutoSpend: string;
   sessionBudget: string;
@@ -833,38 +720,77 @@ function effectiveLimits(policy: SpendPolicy): EffectiveLimits {
   };
 }
 
-/** Only the status-line state that needs the user: one this install would not
- *  touch, with the command that adds the footer beside it. */
-export function statusLineProblems(ctx: CommandContext, result: StatusLineResult): string[] {
-  const warn = (text: string) => paint(ctx.io, 'yellow', `! ${text}`);
-  if (result.warning !== undefined) {
-    return [warn(`The live status line was not registered (${result.warning})`)];
-  }
-  if (result.state !== 'foreign') return [];
+function walletLines(ctx: CommandContext, ok: string, w: WalletOutcome): string[] {
+  if (w.status === 'created') return [`${ok} Wallet created: ${w.address}`];
+  if (w.status === 'existing') return [`${ok} Wallet: ${w.address}`];
+  if (w.reason === 'flag') return ['  No wallet yet. Create one with: tenjin wallet create'];
   return [
-    warn('You already have a status line, so it was left exactly as it is.'),
-    '  To show the live x402 footer beside it, run:',
-    '  tenjin install --status-line compose',
-    ...(result.compose === undefined
-      ? []
-      : ['  or set this command yourself:', `  ${result.compose}`]),
+    paint(ctx.io, 'yellow', `! No wallet was created. ${w.warning ?? ''}`.trimEnd()),
+    `  ${w.fix ?? 'Create one with: tenjin wallet create'}`,
+  ];
+}
+
+/** The plugin line: what Claude Code will list, or why nothing is registered. */
+function pluginLines(ctx: CommandContext, plugin: PluginRegistration): string[] {
+  const warn = (text: string) => paint(ctx.io, 'yellow', `! ${text}`);
+  if (plugin.state === 'deferred') return [warn(`${plugin.reason ?? ''}`)];
+  if (plugin.state === 'failed') {
+    return [warn(`The Tenjin plugin was not registered: ${plugin.reason ?? 'unknown reason'}`)];
+  }
+  if (plugin.method === 'skills-dir') {
+    return [
+      `  Plugin ${plugin.id ?? ''} written to ${plugin.path ?? ''} (${plugin.fallbackReason ?? ''})`,
+    ];
+  }
+  return [];
+}
+
+/** The settings install's line, when there is one. */
+function migrationLines(ctx: CommandContext, migration: Migration): string[] {
+  const warn = (text: string) => paint(ctx.io, 'yellow', `! ${text}`);
+  if (migration.state === 'pending') {
+    return [
+      `  The settings install in ${migration.settingsPath} stays until the plugin has loaded (${migration.reason ?? ''}); \`tenjin update\` or \`tenjin install\` removes it then.`,
+    ];
+  }
+  if (migration.state === 'blocked') {
+    return [warn(`${migration.settingsPath} could not be read: ${migration.reason ?? ''}`)];
+  }
+  if (migration.state === 'done') {
+    const removed = migration.removed;
+    const status = statusLineNotice(migration);
+    return [
+      `  Removed the earlier settings setup from ${migration.settingsPath}: the plugin carries its hooks, permissions and server`,
+      ...(status !== null ? [`  ${status}`] : []),
+      ...(removed?.warnings ?? []).map((w) => warn(w)),
+    ];
+  }
+  return [];
+}
+
+function claudeLines(ctx: CommandContext, claude: ClaudeCodeState): string[] {
+  if (claude.meetsFloor) return [];
+  return [
+    paint(
+      ctx.io,
+      'yellow',
+      `! Claude Code ${claude.version ?? ''} is older than the plugin needs. ${claude.fix ?? ''}`.trim(),
+    ),
   ];
 }
 
 /**
  * A few lines a first-time user can read at a glance: it worked, here is your
- * wallet, here is the one thing to do next. The file paths, entry counts and
- * data-handling detail stay in `--json` and the docs; the terminal only grows
- * a line when something needs the user.
+ * wallet, here is the one thing to do next. Paths, steps and data-handling
+ * detail stay in `--json` and the docs; the terminal only grows a line when
+ * something needs the user.
  */
 function lines(
   ctx: CommandContext,
   s: {
-    project: boolean;
-    hooks: HooksResult;
-    permissions: AllowRuleResult;
-    statusLine: StatusLineResult;
-    mcp: McpRegistration;
+    plugin: PluginRegistration;
+    claude: ClaudeCodeState;
+    migration: Migration;
     wallet: WalletOutcome;
     policy: SpendPolicy;
     approval?: SpendApproval;
@@ -898,111 +824,40 @@ function lines(
           warn(`The router did not answer: ${s.router.detail}`),
           ...(s.router.fix !== undefined ? [`  ${s.router.fix}`] : []),
         ];
-  // The first line only says "set up" when it is: a settings file this run
-  // would not write to means nothing was set up, and hooks without the MCP
-  // server point at a `request` tool that is not there.
-  const blocked = s.hooks.skipped !== undefined;
-  const needsMcp = !blocked && !s.mcp.registered;
-  const where = s.project ? ' in this project' : '';
-  const fund = paint(ctx.io, 'bold', 'tenjin wallet fund');
   return [
-    blocked
-      ? paint(ctx.io, 'yellow', `! Tenjin could not finish setting up Claude Code${where}`)
-      : needsMcp
-        ? paint(ctx.io, 'yellow', '! Almost done: Claude Code needs one command')
-        : `${ok} Tenjin is set up for Claude Code${where}`,
+    s.plugin.state === 'failed'
+      ? warn('Tenjin could not finish setting up Claude Code')
+      : s.plugin.state === 'deferred'
+        ? warn('Tenjin keeps its earlier Claude Code setup until Claude Code is updated')
+        : `${ok} Tenjin is set up for Claude Code (plugin ${s.plugin.id ?? PLUGIN_ID})`,
     ...walletLines(ctx, ok, s.wallet),
     ...spend,
-    ...(s.statusLine.state === 'ours' || s.statusLine.state === 'composed'
-      ? ['  Live status line on: each lookup names its provider while it runs']
-      : []),
-    ...problems(ctx, s.hooks, s.permissions, s.statusLine, s.mcp),
+    ...pluginLines(ctx, s.plugin),
+    ...claudeLines(ctx, s.claude),
+    ...migrationLines(ctx, s.migration),
     ...router,
     '',
-    blocked
-      ? 'Next: fix the file above, then run tenjin install again'
-      : needsMcp
-        ? s.wallet.status === 'created'
-          ? `Next: run the command above and ${fund}, then start a new Claude Code session so the hooks and the server load`
-          : 'Next: run the command above, then start a new Claude Code session so the hooks and the server load'
-        : s.wallet.status === 'created'
-          ? `Next: ${fund}, then start a new Claude Code session so the hooks and the server load`
-          : 'Next: start a new Claude Code session so the hooks and the server load',
+    `Next: ${nextStep(s.plugin, s.claude, s.wallet, s.migration)}`,
   ];
 }
 
 /** "Up to date" only when nothing below it needs the user. */
-function refreshLines(ctx: CommandContext, issues: string[]): string[] {
-  if (issues.length === 0) return [`${paint(ctx.io, 'green', '✓')} Tenjin is up to date`];
-  return [paint(ctx.io, 'yellow', '! Tenjin is updated, but needs one fix'), ...issues];
-}
-
-function walletLines(ctx: CommandContext, ok: string, w: WalletOutcome): string[] {
-  if (w.status === 'created') return [`${ok} Wallet created: ${w.address}`];
-  if (w.status === 'existing') return [`${ok} Wallet: ${w.address}`];
-  if (w.reason === 'flag') return ['  No wallet yet. Create one with: tenjin wallet create'];
-  return [
-    paint(ctx.io, 'yellow', `! No wallet was created. ${w.warning ?? ''}`.trimEnd()),
-    `  ${w.fix ?? 'Create one with: tenjin wallet create'}`,
-  ];
-}
-
-/** Only what needs the user, each with the command that fixes it. */
-function problems(
+function refreshLines(
   ctx: CommandContext,
-  hooks: HooksResult,
-  permissions: AllowRuleResult,
-  statusLine: StatusLineResult,
-  mcp: McpRegistration,
+  plugin: PluginRegistration,
+  claude: ClaudeCodeState,
+  migration: Migration,
 ): string[] {
-  const warn = (text: string) => paint(ctx.io, 'yellow', `! ${text}`);
-  const out: string[] = [];
-  // The hooks and the permission rule share one settings file, so a file this
-  // run would not touch is reported once, not once per writer.
-  if (hooks.skipped !== undefined) {
-    out.push(
-      warn(
-        hooks.warning ??
-          `${hooks.path ?? 'Your Claude Code settings file'} was left untouched (${hooks.skipped}).`,
-      ),
-    );
-  } else {
-    if (hooks.warning !== undefined) out.push(warn(hooks.warning));
-    if (permissions.warning !== undefined) out.push(warn(permissions.warning));
-  }
-  if (!mcp.registered) {
-    // The reason stays in --json: raw exec output is noise here, the fix is not.
-    out.push(warn('Could not add the request tool to Claude Code. Run:'));
-    out.push(`  ${mcp.command}`);
-  }
-  out.push(...statusLineProblems(ctx, statusLine));
-  return out;
+  const issues = [
+    ...pluginLines(ctx, plugin),
+    ...claudeLines(ctx, claude),
+    ...migrationLines(ctx, migration),
+  ];
+  const head =
+    plugin.state === 'failed'
+      ? paint(ctx.io, 'yellow', '! Tenjin is updated, but its plugin was not registered')
+      : plugin.state === 'deferred'
+        ? paint(ctx.io, 'yellow', '! Tenjin is updated; its plugin waits for a newer Claude Code')
+        : `${paint(ctx.io, 'green', '✓')} Tenjin is up to date (plugin ${plugin.id ?? PLUGIN_ID})`;
+  return [head, ...issues];
 }
-
-/**
- * THREE ANSWERS, NOT TWO. A settings file that cannot be read or parsed is not
- * a file without our entries, and collapsing the two let `refreshEveryInstall`
- * read a momentarily broken project settings file as confirmed absence and
- * strike the project off `install.routerProjects` for good: repairing the file
- * afterwards did not bring it back, so every later `tenjin update` from HOME
- * silently skipped it.
- */
-type EntriesProbe =
-  { state: 'present' } | { state: 'absent' } | { state: 'unreadable'; reason: string };
-
-async function probeOurEntries(path: string, dataDir: string): Promise<EntriesProbe> {
-  const found = await inspectHooksFile(path);
-  if ('refusal' in found) {
-    // `unreadable` here is the inspection's own vocabulary for "the file exists
-    // and this build could not use it"; a file that is simply not there comes
-    // back as an empty, readable inspection rather than a refusal.
-    return { state: 'unreadable', reason: found.refusal.reason };
-  }
-  const present = Object.values(found.hooks).some((list) =>
-    list.some((entry) => ownsHookEntry(entry, dataDir)),
-  );
-  return present ? { state: 'present' } : { state: 'absent' };
-}
-
-/** Shared with `uninstall`: the prune this module's writer already performs. */
-export { pruneHooks };

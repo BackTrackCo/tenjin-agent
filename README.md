@@ -45,13 +45,13 @@ In Claude Code or Claude Desktop, paste:
 Install Tenjin from tenjin.sh
 ```
 
-Your agent installs it, asks you about spend limits in the session, and helps you fund the wallet.
+Your agent installs it, asks you about spend limits in the session, and helps you fund the wallet. Then type `/reload-plugins`, or start a new session, and Tenjin is on (when upgrading from an earlier release, start a new session). It needs Claude Code 2.1.287 or newer.
 
 Or in a terminal (Node.js 22 or newer):
 
 ```bash
 npm i -g tenjin-cli
-tenjin install          # sets up Claude Code and creates your wallet
+tenjin install          # adds the Tenjin plugin to Claude Code and creates your wallet
 tenjin wallet fund 2    # optional: add $2 with a card, via Coinbase
 ```
 
@@ -99,11 +99,7 @@ flowchart LR
 
 The Tenjin router hooks into Claude Code at your prompt, before each web search or page fetch, when your agent hands work to a subagent, and around a question your agent asks you. At each point it asks Jev, a decision model from [TypeSafe](https://typesafe.ai), whether a tool in the catalog fits. When none does, Jev may pick one third-party service from a short list matching the step (the Tenjin list, plus the open Bazaar if you turned it on), or none. Either way Jev only chooses from a list, so it never writes a call or an instruction for your agent; a third-party listing's description is the seller's own, and your agent judges it.
 
-When one fits, your agent sees a one-line suggestion with the tool and its price, and calls it through Tenjin's `x402` MCP server: the offer's id alone shows the tool's inputs, an example and what it returns, and the id with the agent's input runs it. Tenjin builds the call, pays the provider from your wallet, within your limits, and hands back the result. Your status line shows the call as it happens:
-
-```text
-x402 · request: calling pro-api.coinmarketcap.com/x402/v3/cryptocurrency/quotes/latest · {"query":{"symbol":"BTC,ETH"}}
-```
+When one fits, your agent sees a one-line suggestion with the tool and its price, and calls it through the Tenjin plugin's MCP server: the offer's id alone shows the tool's inputs, an example and what it returns, and the id with the agent's input runs it. Tenjin builds the call, pays the provider from your wallet, within your limits, and hands back the result.
 
 To pick a tool, the router sends your prompt and recent messages with secrets masked, plus the searches, URLs, subagent tasks and questions it routes; tool results stay on your machine. [What it sends, and everything install writes →](./docs/agent-permissions.md#what-the-hooks-send)
 
@@ -148,19 +144,12 @@ tenjin payments reconcile      # settle paid lookups whose settlement was unknow
 tenjin update                  # newest version; wallet and settings stay
 tenjin config set router.enabled false             # pause the router on this machine
 tenjin config set --project router.enabled false   # ...or just in this repo
-tenjin uninstall               # remove the Claude Code setup; your wallet stays
+tenjin uninstall               # remove the Claude Code plugin; your wallet stays
 ```
 
 Use `tenjin install --project` to set it up for a single project. Add `--json` to any command for machine-readable output.
 
 Every paid lookup is recorded on your machine, with the files and full results it returned. [Where they live, and what `payments reconcile` does →](./docs/agent-permissions.md#what-a-paid-lookup-leaves-on-your-machine)
-
-<details>
-<summary>Status line: keeping your own</summary>
-
-`tenjin install` sets Claude Code's [status line](https://code.claude.com/docs/en/statusline) only if you don't already have one. If you do, yours is left alone and the install prints a command that shows both; `tenjin install --status-line compose` writes it for you, and `--status-line skip` leaves the setting untouched. The status line reads local files only: no network, no wallet, and it can't affect a lookup or a payment.
-
-</details>
 
 <details>
 <summary>Spending limits: the fine print</summary>
@@ -182,7 +171,7 @@ Tenjin is in alpha, and the catalog grows with what people ask for. Missing a se
 
 - [How a lookup runs, what it sends, and what install writes](./docs/agent-permissions.md)
 - [Safety model](./docs/safety-model.md)
-- [Troubleshooting](./docs/troubleshooting.md), including a stray `x402` server in `~/.mcp.json` after `0.1.0-alpha.18`
+- [Troubleshooting](./docs/troubleshooting.md)
 
 ## Developing
 

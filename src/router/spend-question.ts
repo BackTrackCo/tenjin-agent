@@ -55,8 +55,8 @@ export const ROUTING_FEE_TERMS = `Routing costs $${usd(ROUTING_FEE_ATOMIC)} a ca
  * The yes to the limits shown, where the command install ran is not known
  * (doctor, the routing notice, the request tool): the per-call limit only.
  * The daily limit already defaults to the one shown. A bare `install --yes`
- * here would undo a `--project`, `--no-wallet` or `--status-line skip`
- * install; install's own output names that command with its flags instead.
+ * here would undo a `--project` or `--no-wallet` install; install's own
+ * output names that command with its flags instead.
  */
 export const ACCEPT_COMMAND = `tenjin config set maxAutoSpend ${toMoney(ROUTER_DEFAULTS.maxAutoSpend).usd}`;
 

@@ -1,0 +1,250 @@
+import { PRODUCTION_ORIGIN } from '../lib/production-origin';
+import { HOOK_TOOL, hookToolInput, type HookKind } from './hook-tool';
+import {
+  MARKETPLACE_NAME,
+  MCP_SERVER_NAME,
+  PLUGIN_HOOK_TOOL,
+  PLUGIN_NAME,
+  PLUGIN_SERVER,
+  REQUEST_TOOL,
+} from './names';
+
+/**
+ * THE CLAUDE CODE PLUGIN, AS FILES. `tenjin install` registers it with Claude
+ * Code's own `claude plugin` commands from the package's `dist/hosts/claude`
+ * folder, which the build renders from this module, and writes the same plugin
+ * folder under the config dir's `skills/` when there is no `claude` binary to
+ * run. The checked-in `hosts/claude/` templates are pinned to this render by a
+ * test, so the two cannot drift.
+ *
+ * NOTHING HERE IMPORTS MORE THAN THE NAMES AND THE PRODUCTION ORIGIN:
+ * `tsup.config.ts` loads this module to render the shipped files, and its
+ * import graph is the build's.
+ */
+
+/**
+ * The harness's kill budget for each routing leg: a stuck server never holds a
+ * prompt longer than this. Every wait inside the leg is cut from it: the gate's
+ * 3.5 s, which holds the paid path's 402, the reads before a deposit and the
+ * paid request, with 500 ms left for the transcript read and the reply
+ * (`wire.test.ts` pins the sum). A whole leg whose call carried a deposit took
+ * 2.8 to 3.3 s on Base Sepolia, so it fits; a slower one (a wallet unlock, a
+ * slow settlement) loses only that prompt's hint, and the SDK recovers the
+ * channel on the next call.
+ */
+export const ROUTE_HOOK_TIMEOUT_SECONDS = 5;
+/**
+ * The after-call entries' kill budget, longer than the rest for the one wait
+ * a leg makes: a search the pre-call leg is fetching free docs for waits up to
+ * `AUGMENT_WAIT_MS` (9 s) for them, and when none came back and the search was
+ * short, the gate's 3.5 s follow, with startup to spare (`wire.test.ts` pins
+ * the sum). Every other after-call event returns as fast as before, so the
+ * number is a ceiling, not a cost.
+ */
+export const AFTER_CALL_TIMEOUT_SECONDS = 15;
+/** The `alive` leg and the two permission answers do no network work. */
+export const LOCAL_HOOK_TIMEOUT_SECONDS = 5;
+
+/** The subagent tool, under its current name and its older one. */
+export const DELEGATION_MATCHER = 'Agent|Task';
+/** The native tools both native arms watch. */
+export const NATIVE_MATCHER = 'WebSearch|WebFetch';
+/** The host's question to the user, watched before it is asked and after. */
+export const ASK_MATCHER = 'AskUserQuestion';
+
+/**
+ * The `alive` leg: the plugin's `SessionStart` entry, so it runs before any
+ * other event of a session. It marks the session as one the plugin serves, so
+ * a settings-install leg in the same session stays silent, and stamps the
+ * machine as one the plugin has loaded on, which the migration waits for. A
+ * command, not an `mcp_tool` call: a session's MCP servers may still be
+ * connecting when `SessionStart` fires, and a command needs nothing running.
+ */
+export const ALIVE_COMMAND = 'tenjin hook alive';
+
+/** A PreToolUse answer, as a hook command's stdout carries it. */
+function permissionAnswer(decision: 'allow' | 'deny', reason: string): string {
+  return JSON.stringify({
+    hookSpecificOutput: {
+      hookEventName: 'PreToolUse',
+      permissionDecision: decision,
+      permissionDecisionReason: reason,
+    },
+  });
+}
+
+/**
+ * THE HOOK LEGS' TOOL IS DENIED TO THE MODEL. Its event fields are plain
+ * arguments, so the model calling it could forge a routing leg. This blocking
+ * hook replaces the settings install's `permissions.deny` rule: a plugin cannot
+ * carry permission rules, and a blocking hook takes precedence over allow rules
+ * in every mode, bypass included, while Claude Code's own `mcp_tool` hook calls
+ * still run (lab, Claude Code 2.1.296). The tool stays in the model's list. The
+ * tool's transcript check (`admitHookEvent`) stays for a machine with hooks off.
+ *
+ * Static text, so no process starts: a fixed answer needs no CLI.
+ */
+export const DENY_HOOK_COMMAND = `echo '${permissionAnswer(
+  'deny',
+  `Only the Tenjin hooks call this tool. To make a lookup, call ${REQUEST_TOOL}.`,
+)}'`;
+
+/**
+ * THE REQUEST TOOL IS ALLOWED BY THE PLUGIN ITSELF, replacing the settings
+ * install's `permissions.allow` rule, so an install needs no rule the user
+ * adds. A hook's allow never overrides the user's own `deny` or `ask` rule for
+ * the tool. The tool still pays only within the local spend policy, and an
+ * amount over it returns `needs_approval` with nothing paid.
+ */
+export const ALLOW_HOOK_COMMAND = `echo '${permissionAnswer('allow', 'Tenjin lookup')}'`;
+
+/** One routing leg: Claude Code calls the plugin server's `hook` tool. */
+function leg(kind: HookKind, timeout = ROUTE_HOOK_TIMEOUT_SECONDS): unknown[] {
+  return [
+    {
+      type: 'mcp_tool',
+      server: PLUGIN_SERVER,
+      tool: HOOK_TOOL,
+      input: hookToolInput(kind),
+      timeout,
+    },
+  ];
+}
+
+function command(text: string): unknown[] {
+  return [{ type: 'command', command: text, timeout: LOCAL_HOOK_TIMEOUT_SECONDS }];
+}
+
+/**
+ * The seven routing legs. The native tools are routed twice over one lookup:
+ * BEFORE the call, with a line pointing to a paid lookup when one fits; and
+ * AFTER it, only when it came back short and nothing was said before, or to
+ * add the free docs the pre-call arm fetched to a search's results. A failed
+ * call fires PostToolUseFailure rather than PostToolUse, so the second takes
+ * both. The host's question to the user is routed the same two ways: before it
+ * is asked, when a service could stand in for what it asks for, and after,
+ * with the user's answers read as their own words.
+ */
+export function routerHookPlan(): { event: string; matcher?: string; hooks: unknown[] }[] {
+  const afterCall = () => leg('shortfall', AFTER_CALL_TIMEOUT_SECONDS);
+  return [
+    { event: 'UserPromptSubmit', hooks: leg('prompt') },
+    { event: 'PreToolUse', matcher: NATIVE_MATCHER, hooks: leg('native') },
+    { event: 'PreToolUse', matcher: DELEGATION_MATCHER, hooks: leg('agent') },
+    { event: 'PostToolUse', matcher: NATIVE_MATCHER, hooks: afterCall() },
+    { event: 'PostToolUseFailure', matcher: NATIVE_MATCHER, hooks: afterCall() },
+    { event: 'PreToolUse', matcher: ASK_MATCHER, hooks: leg('ask') },
+    { event: 'PostToolUse', matcher: ASK_MATCHER, hooks: leg('answer') },
+  ];
+}
+
+/** `hooks/hooks.json`: the `alive` leg, the seven routing legs and the two permission answers. */
+export function renderPluginHooks(): { hooks: Record<string, unknown[]> } {
+  const plan = [
+    { event: 'SessionStart', hooks: command(ALIVE_COMMAND) },
+    ...routerHookPlan(),
+    { event: 'PreToolUse', matcher: PLUGIN_HOOK_TOOL, hooks: command(DENY_HOOK_COMMAND) },
+    { event: 'PreToolUse', matcher: REQUEST_TOOL, hooks: command(ALLOW_HOOK_COMMAND) },
+  ];
+  const hooks: Record<string, unknown[]> = {};
+  for (const { event, hooks: handlers, ...rest } of plan) {
+    (hooks[event] ??= []).push({ ...rest, hooks: handlers });
+  }
+  return { hooks };
+}
+
+/**
+ * `.mcp.json`: the server Claude Code starts for the plugin, the CLI on PATH.
+ *
+ * `--plugin` KEEPS IT FROM BEING SUPPRESSED. Claude Code drops a plugin's MCP
+ * server whose command and arguments match a server the user configured, and
+ * a settings install's `x402` entry runs `tenjin mcp`; with the same command
+ * the plugin's `router` server would not start while the two coexist, its legs
+ * would fail, and the old ones stay silent (checked on Claude Code 2.1.296).
+ */
+export const PLUGIN_MCP_ARGS = ['mcp', '--plugin'] as const;
+
+export function renderPluginMcp(): { mcpServers: Record<string, unknown> } {
+  return { mcpServers: { [MCP_SERVER_NAME]: { command: 'tenjin', args: [...PLUGIN_MCP_ARGS] } } };
+}
+
+/** The key whose presence marks a plugin manifest as one this CLI wrote. */
+export const OWNER_MARKER = 'tenjin-cli';
+/** The marker's value in the checked-in templates, which carry no version. */
+const UNBUILT = 'source';
+
+const DESCRIPTION =
+  'Tenjin picks the right tool when your agent needs one, and one wallet on this machine pays for every call.';
+
+/**
+ * `.claude-plugin/plugin.json`. The version is the CLI's, stamped at build time,
+ * so Claude Code's plugin list names the build that runs; the checked-in
+ * template carries none. `metadata[tenjin-cli]` is the ownership marker the
+ * folder fallback, `update` and `uninstall` check before they touch a folder.
+ */
+export function renderPluginManifest(version?: string): Record<string, unknown> {
+  return {
+    name: PLUGIN_NAME,
+    ...(version !== undefined ? { version } : {}),
+    description: DESCRIPTION,
+    author: { name: 'Tenjin', url: PRODUCTION_ORIGIN },
+    homepage: `${PRODUCTION_ORIGIN}/agents`,
+    repository: 'https://github.com/BackTrackCo/tenjin-agent',
+    metadata: { [OWNER_MARKER]: version ?? UNBUILT },
+  };
+}
+
+/** The plugin's folder inside the marketplace folder. */
+export const PLUGIN_DIR = PLUGIN_NAME;
+
+/** `.claude-plugin/marketplace.json`: one plugin, read in place from the package. */
+export function renderMarketplace(version?: string): Record<string, unknown> {
+  return {
+    name: MARKETPLACE_NAME,
+    owner: { name: 'Tenjin', url: PRODUCTION_ORIGIN },
+    description: "Tenjin's tool router for Claude Code, installed by `tenjin install`.",
+    ...(version !== undefined ? { metadata: { version } } : {}),
+    plugins: [
+      {
+        name: PLUGIN_NAME,
+        source: `./${PLUGIN_DIR}`,
+        description: DESCRIPTION,
+        ...(version !== undefined ? { version } : {}),
+      },
+    ],
+  };
+}
+
+/**
+ * EVERY FILE THE PLUGIN FOLDER HOLDS, relative to the plugin's root, and the
+ * only paths install, update and uninstall ever write or unlink in a folder.
+ * The manifest is last: a crash mid-write never leaves a manifest pointing at
+ * parts that are not there yet.
+ */
+export const PLUGIN_FILES = [
+  '.mcp.json',
+  'hooks/hooks.json',
+  '.claude-plugin/plugin.json',
+] as const;
+
+const json = (value: unknown): string => `${JSON.stringify(value, null, 2)}\n`;
+
+/** The plugin folder's files, by {@link PLUGIN_FILES} path. */
+export function renderPluginFiles(version?: string): Record<string, string> {
+  return {
+    '.mcp.json': json(renderPluginMcp()),
+    'hooks/hooks.json': json(renderPluginHooks()),
+    '.claude-plugin/plugin.json': json(renderPluginManifest(version)),
+  };
+}
+
+/** The marketplace folder's files: its catalog and the plugin under {@link PLUGIN_DIR}. */
+export function renderHostFiles(version?: string): Record<string, string> {
+  const plugin = Object.entries(renderPluginFiles(version)).map(
+    ([path, body]) => [`${PLUGIN_DIR}/${path}`, body] as const,
+  );
+  return {
+    '.claude-plugin/marketplace.json': json(renderMarketplace(version)),
+    ...Object.fromEntries(plugin),
+  };
+}

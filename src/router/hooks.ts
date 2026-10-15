@@ -32,7 +32,7 @@ import {
   UNREACHABLE_BACKOFF_MS,
   writeRouterMemo,
 } from './router-memo';
-import { REQUEST_TOOL } from './names';
+import { requestToolName } from './names';
 import { requestToolAccess, type AgentLookup } from './agent-tools';
 import { finishAugment, startAugment, type PrefetchJob, type SearchResponse } from './augment';
 import {
@@ -403,8 +403,8 @@ export const HINT_SOURCE = 'Tenjin router (installed by the user)';
 
 const BARE_CALL_RE = /(?<![\w$])request\(\{/g;
 
-export function toolNamed(hint: string): string {
-  return hint.replace(BARE_CALL_RE, `${REQUEST_TOOL}({`);
+export function toolNamed(hint: string, env: NodeJS.ProcessEnv = process.env): string {
+  return hint.replace(BARE_CALL_RE, `${requestToolName(env)}({`);
 }
 
 /** The server's line as the prompt hint and the redirect both carry it. */

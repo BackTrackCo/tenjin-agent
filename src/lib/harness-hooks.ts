@@ -8,7 +8,7 @@ import { readPid, readToken } from '../hooks/shim';
 import { writeFileAtomic } from './atomic-json';
 import { hooksDir, shimBundlePath } from './paths';
 import { HOOK_TOOL } from '../router/hook-tool';
-import { MCP_SERVER_NAME } from '../router/names';
+import { LEGACY_MCP_SERVER_NAME } from '../router/names';
 
 /**
  * Where `tenjin install` writes a harness's hook entries, and the only place
@@ -34,7 +34,7 @@ import { MCP_SERVER_NAME } from '../router/names';
  * OWNERSHIP IS ONE PREDICATE, {@link ownsHookEntry}, used by the writer, by
  * `uninstall` and by `doctor`. A handler is ours when its `command` names a
  * file under our hooks dir, when its `url` is the loopback hook route, or when
- * it is an `mcp_tool` call to the router server's `hook` tool.
+ * it is an `mcp_tool` call to the settings install's `x402` server's `hook` tool.
  */
 
 /** Every basename this CLI puts in the hooks dir. */
@@ -166,7 +166,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 function ownsHandler(handler: unknown, dataDir: string): boolean {
   if (!isPlainObject(handler)) return false;
   if (handler.type === 'mcp_tool') {
-    return handler.server === MCP_SERVER_NAME && handler.tool === HOOK_TOOL;
+    return handler.server === LEGACY_MCP_SERVER_NAME && handler.tool === HOOK_TOOL;
   }
   const url = handler.url;
   if (typeof url === 'string' && LOOP_URL_RE.test(url)) return true;

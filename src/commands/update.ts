@@ -17,12 +17,7 @@ import {
 } from '../lib/update-check';
 import { defaultDataDir } from '../lib/paths';
 import type { CommandContext, CommandResult } from '../context';
-import {
-  readMcpServers,
-  RECONNECT_FIX,
-  type InstalledAt,
-  type ListMcpProcesses,
-} from '../router/mcp-processes';
+import { readMcpServers, type InstalledAt, type ListMcpProcesses } from '../router/mcp-processes';
 
 /**
  * `tenjin update`: replace this install with the newest version npm offers it,
@@ -273,14 +268,20 @@ export async function runUpdate(
 
   const refresh = await refreshProfiles(ctx, deps);
   // The refresh child's output is captured, so the warning it would print about
-  // a `tenjin mcp` still running the old build is checked again here.
-  const servers = await readMcpServers(deps);
+  // a `tenjin mcp` still running the old build is checked again here, with the
+  // fix the child's migration state calls for.
+  const servers = await readMcpServers(deps, {
+    settingsInstallPending: refresh.settingsInstallPending,
+  });
   return {
     data: { ...data(true), refresh, mcpServer: servers.check },
     humanLines: [
       `Updated tenjin-cli ${current} -> ${latest}.`,
       ...refreshLines(refresh),
-      ...(servers.stale > 0 ? [`! ${servers.check.detail}. ${RECONNECT_FIX}`] : []),
+      ...refresh.notices,
+      ...(servers.stale > 0
+        ? [`! ${servers.check.detail}. ${servers.check.fix ?? ''}`.trim()]
+        : []),
     ],
   };
 }
@@ -316,6 +317,14 @@ export interface RefreshOutcome {
    * re-exec, a data dir that is not a directory).
    */
   failed: RefreshFailure[];
+  /**
+   * What a refresh that succeeded said the person must know (the child's
+   * `data.notices`): a plugin left for a newer Claude Code, a status line the
+   * migration took out. Printed as given, one line each.
+   */
+  notices: string[];
+  /** A refreshed profile still carries an earlier release's settings install. */
+  settingsInstallPending: boolean;
 }
 
 /**
@@ -389,10 +398,14 @@ async function refreshProfiles(ctx: CommandContext, deps: UpdateDeps): Promise<R
     return {
       profiles: [],
       failed: candidates.map((d) => ({ dataDir: d, reason, fix: fixFor(d) })),
+      notices: [],
+      settingsInstallPending: false,
     };
   }
 
   const failed = [...unrun];
+  const notices: string[] = [];
+  let settingsInstallPending = false;
   for (const dataDir of profiles) {
     // A BOUNDED COLLECTOR, not the manager's live echo. npm's chatter is minutes
     // of progress a human wants to see; this child emits one envelope on a pipe,
@@ -419,14 +432,52 @@ async function refreshProfiles(ctx: CommandContext, deps: UpdateDeps): Promise<R
     // envelope on the pipe is what turns that verdict into a reason.
     if (outcome.kind !== 'exit' || outcome.code !== 0) {
       failed.push({ dataDir, reason: refreshReason(outcome, tail), fix: fixFor(dataDir) });
+      continue;
+    }
+    const reported = envelopeData(tail);
+    for (const notice of noticesOf(reported)) if (!notices.includes(notice)) notices.push(notice);
+    const migration = reported?.migration as { state?: unknown } | undefined;
+    if (migration?.state === 'pending' || migration?.state === 'blocked') {
+      settingsInstallPending = true;
     }
   }
-  return { profiles, failed };
+  return { profiles, failed, notices, settingsInstallPending };
+}
+
+/** The `data` of the one success envelope the child printed, or null. */
+function envelopeData(output: string): Record<string, unknown> | null {
+  const lines = output.split('\n');
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    if (lines[i]?.trim() !== '{' && !lines[i]?.trim().startsWith('{"')) continue;
+    try {
+      const parsed = JSON.parse(lines.slice(i).join('\n')) as { ok?: unknown; data?: unknown };
+      if (parsed?.ok === true && parsed.data !== null && typeof parsed.data === 'object') {
+        return parsed.data as Record<string, unknown>;
+      }
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+/**
+ * The child's notices, each bounded and sanitized: the child is the build
+ * this update just installed, but its text still reaches a terminal.
+ */
+function noticesOf(data: Record<string, unknown> | null): string[] {
+  const raw = data?.notices;
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((n): n is string => typeof n === 'string')
+    .map((n) => sanitizeForTerminal(n).trim().slice(0, REASON_LIMIT))
+    .filter((n) => n.length > 0)
+    .slice(0, 5);
 }
 
 /** How much of one refresh child's output is kept. It prints a single envelope,
  *  not a build log, so this is headroom rather than a budget. */
-const REFRESH_TAIL_LIMIT = 4000;
+const REFRESH_TAIL_LIMIT = 64_000;
 
 /** How much of a child's own message reaches the parent's report. Long enough
  *  for every message `install --refresh` can produce, short enough that a child
@@ -505,7 +556,7 @@ function manualFix(dataDir: string, home: string, invoking: string): string {
   const bare =
     resolve(dataDir) === resolve(defaultDataDir(home)) && resolve(dataDir) === resolve(invoking);
   const command = bare ? 'tenjin install' : `TENJIN_DATA_DIR=${dataDir} tenjin install`;
-  return `Run \`${command}\` to bring the skills and hook scripts up to this version.`;
+  return `Run \`${command}\` to bring the Claude Code plugin up to this version.`;
 }
 
 /**
@@ -557,18 +608,18 @@ function refreshLines(refresh: RefreshOutcome): string[] {
   if (refresh.failed.length === 0) {
     return [
       done.length > 1
-        ? `Refreshed the skills and hook scripts for ${done.length} profiles: ${done.join(', ')}.`
-        : `Refreshed the skills and hook scripts for ${done[0]}.`,
+        ? `Refreshed the Claude Code plugin for ${done.length} profiles: ${done.join(', ')}.`
+        : `Refreshed the Claude Code plugin for ${done[0]}.`,
     ];
   }
   const total = done.length + refresh.failed.length;
   const lines =
     done.length > 0
       ? [
-          `Refreshed the skills and hook scripts for ${done.length} of ${total} profiles: ${done.join(', ')}.`,
+          `Refreshed the Claude Code plugin for ${done.length} of ${total} profiles: ${done.join(', ')}.`,
         ]
       : [];
-  lines.push(`Could not refresh the skills and hook scripts for ${refresh.failed.length}:`);
+  lines.push(`Could not refresh the Claude Code plugin for ${refresh.failed.length}:`);
   lines.push(...refresh.failed.map((f) => `- ${f.dataDir}: ${f.reason} ${f.fix}`));
   return lines;
 }

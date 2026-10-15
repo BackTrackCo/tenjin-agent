@@ -1,0 +1,13 @@
+{
+  "name": "tenjin",
+  "description": "Tenjin picks the right tool when your agent needs one, and one wallet on this machine pays for every call.",
+  "author": {
+    "name": "Tenjin",
+    "url": "https://tenjin.sh"
+  },
+  "homepage": "https://tenjin.sh/agents",
+  "repository": "https://github.com/BackTrackCo/tenjin-agent",
+  "metadata": {
+    "tenjin-cli": "source"
+  }
+}

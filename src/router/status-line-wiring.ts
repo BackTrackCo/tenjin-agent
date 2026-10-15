@@ -4,9 +4,13 @@ import { CliError } from '../lib/errors';
 import { inspectHooksFile } from '../lib/harness-hooks';
 
 /**
- * The `statusLine` key in Claude Code's settings file: the one setting the live
- * footer needs, and the one piece of harness configuration a person is most
- * likely to have already set for themselves.
+ * The `statusLine` key in Claude Code's settings file. `install` no longer
+ * sets it (a plugin cannot), so the router reads this module only to recognise
+ * and take back a status line an earlier release wrote (`legacy-install.ts`).
+ * The writer below stays for the shelf code that still imports it.
+ *
+ * The one setting the live footer needs, and the one piece of harness
+ * configuration a person is most likely to have already set for themselves.
  *
  * SO IT IS NEVER REPLACED. An existing status line that is not ours is left
  * exactly as it is, and `install` prints the composition line instead;
