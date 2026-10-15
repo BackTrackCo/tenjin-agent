@@ -87,8 +87,10 @@ import {
   type PollTransport,
 } from './jobs';
 import {
+  endTake,
   KEPT_RESULT_CHARS,
   MAX_TAKES,
+  readTake,
   readTakes,
   updateTake,
   writeTake,
@@ -1616,6 +1618,8 @@ function callOf(take: JobTake, parameters?: unknown): DeliverCall {
  * its files written onto the payment's ledger row. Running: the id that
  * resumes it. Failed or gone: the seller's reason, the money already counted.
  * The record keeps every ending until it expires, without its payment header.
+ * The first ending recorded stands: a call whose take another call ended
+ * first answers with that ending.
  */
 async function finishTake(
   take: JobTake,
@@ -1627,14 +1631,25 @@ async function finishTake(
   const { dataDir } = deps.ctx;
   const providerAtomic = BigInt(take.amountAtomic);
   const call = callOf(take, opts.parameters);
-  const record = (change: Partial<JobTake>): Promise<JobTake | null> =>
-    updateTake(dataDir, take.offerId, take.take, (current) => ({ ...current, ...change })).catch(
-      () => null,
-    );
+  const shown = {
+    provider: take.call.url,
+    price: `$${toMoney(providerAtomic.toString()).usd}`,
+  };
+  // Undefined when the ending could not be written: the take stays running.
+  const end = (ending: Partial<JobTake>) =>
+    endTake(dataDir, take.offerId, take.take, ending).catch(() => undefined);
+  // AN ENDING ANOTHER CALL RECORDED FIRST stands, and is this call's answer.
+  const lostTo = async (ended: JobTake): Promise<TakeEnding> => {
+    const result = endedResult(ended, { raced: true });
+    const status = result.envelope.status as 'fulfilled' | 'unverified' | 'failed';
+    await footer.done(status, shown);
+    return { result, outcome: { status } };
+  };
   if (answer.state === 'done') {
     // The row the last poll's payment is on: the fresh one, when a refused
     // poll signed one, which the record on disk knows.
-    const current = (await record({})) ?? take;
+    const current = (await readTake(dataDir, take.offerId, take.take)) ?? take;
+    if (current.state !== 'running') return lostTo(current);
     const nonce = (
       current.resigned === true ? current.resignedAuthorization : current.authorization
     )?.nonce;
@@ -1666,33 +1681,31 @@ async function finishTake(
         ledger: nonce !== undefined ? { update: nonce } : 'none',
       },
     );
-    // THE SELLER'S COPY IS FREED only once ours is on disk: never after a
-    // save that failed, when the seller's copy is the only one.
+    const ended = await end({
+      state: 'done',
+      savedFiles: delivered.savedFiles.slice(0, 16),
+      result: keptResult(delivered.result.envelope.result),
+      ...(unverified ? { resultUnverified: true } : {}),
+      ...(caveat !== undefined ? { resultCaveat: caveat.slice(0, 1_000) } : {}),
+    });
+    if (ended?.won === false) return lostTo(ended.take);
+    // THE SELLER'S COPY IS FREED once ours is on disk, by the call that ended
+    // the take: never after a save that failed, when the seller's copy is the
+    // only one, nor while the record still says running.
     const saved =
       delivered.savedFiles.length > 0 &&
       (delivered.result.envelope.result as { saveError?: unknown } | undefined)?.saveError ===
         undefined;
-    if (saved) {
+    if (saved && ended !== undefined) {
       await completeJob({ ...current, submitUrl: take.call.url }, pollDeps(deps, current));
     }
-    const shownResult = delivered.result.envelope.result;
-    await record({
-      state: 'done',
-      savedFiles: delivered.savedFiles.slice(0, 16),
-      result: keptResult(shownResult),
-      ...(unverified ? { resultUnverified: true } : {}),
-      ...(caveat !== undefined ? { resultCaveat: caveat.slice(0, 1_000) } : {}),
-    });
     return {
       result: withJob(delivered.result, take.offerId),
       outcome: delivered.outcome,
     };
   }
   if (answer.state === 'running') {
-    await footer.done('running', {
-      provider: take.call.url,
-      price: `$${toMoney(providerAtomic.toString()).usd}`,
-    });
+    await footer.done('running', shown);
     return {
       outcome: {
         status: 'running',
@@ -1707,15 +1720,13 @@ async function finishTake(
       : `${take.call.provider}: ${answer.reason}.`
   } ${paidNothing(providerAtomic, take.txHash)}`;
   const said = answer.state === 'failed' ? answer.said : undefined;
-  await record({
+  const ended = await end({
     state: answer.state,
     reason: reason.slice(0, 1_000),
     ...(said !== undefined ? { said } : {}),
   });
-  await footer.done('failed', {
-    provider: take.call.url,
-    price: `$${toMoney(providerAtomic.toString()).usd}`,
-  });
+  if (ended?.won === false) return lostTo(ended.take);
+  await footer.done('failed', shown);
   return {
     outcome: {
       status: 'failed',
@@ -1785,16 +1796,21 @@ function runningResult(
   };
 }
 
-/** A take that had already ended when its job was resumed, from its record. */
-function endedResult(take: JobTake): RequestToolResult {
+/** A take that had already ended when its job was resumed, from its record;
+ *  `raced`, one another call ended while this one was polling it. */
+function endedResult(take: JobTake, opts: { raced?: boolean } = {}): RequestToolResult {
   const cost = costLines(BigInt(take.amountAtomic));
   const supplier = supplierOf(take.call.url);
+  const how =
+    opts.raced === true
+      ? 'another call finished this job first; nothing more was paid'
+      : 'already finished; nothing was polled or paid';
   if (take.state === 'done') {
     // Unverified as it was delivered: see `deliverResult`.
     const unverified = take.resultUnverified === true;
     return {
       isError: unverified,
-      summary: `${unverified ? 'Unverified result from' : 'Fulfilled by'} ${supplier} · ${cost.join(' · ')} (already finished; nothing was polled or paid)`,
+      summary: `${unverified ? 'Unverified result from' : 'Fulfilled by'} ${supplier} · ${cost.join(' · ')} (${how})`,
       envelope: {
         status: unverified ? 'unverified' : 'fulfilled',
         job: take.offerId,
@@ -1802,7 +1818,10 @@ function endedResult(take: JobTake): RequestToolResult {
         cost,
         result: take.result ?? '',
         ...(take.savedFiles.length > 0 ? { savedFiles: take.savedFiles } : {}),
-        note: 'This job had already finished; nothing was polled or paid.',
+        note:
+          opts.raced === true
+            ? 'Another call finished this job first; this is its result, and nothing more was paid.'
+            : 'This job had already finished; nothing was polled or paid.',
         providerContentUntrusted: true,
         ...(unverified && take.resultCaveat !== undefined
           ? { resultCaveat: take.resultCaveat }

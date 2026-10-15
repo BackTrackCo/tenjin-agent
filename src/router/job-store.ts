@@ -197,6 +197,32 @@ export async function updateTake(
   );
 }
 
+/**
+ * END A RUNNING TAKE, FIRST ENDING WINS. Two calls can poll one take (a host
+ * that gave up on a call this process kept polling, then a resume), and the
+ * second ending (a 404 once the first freed the seller's copy) must never
+ * overwrite the first. Under the take's lock, a take no longer `running` is
+ * left as it is. `won`: this ending was written; else `take` is the one that
+ * was. Null when no record is kept; throws when it cannot be written.
+ */
+export async function endTake(
+  dataDir: string,
+  offerId: string,
+  take: number,
+  ending: Partial<JobTake>,
+): Promise<{ won: boolean; take: JobTake } | null> {
+  let ended = null as JobTake | null;
+  const written = await updateTake(dataDir, offerId, take, (current) => {
+    if (current.state !== 'running') {
+      ended = current;
+      return null;
+    }
+    return { ...current, ...ending };
+  });
+  if (written !== null) return { won: true, take: written };
+  return ended !== null ? { won: false, take: withoutAuth(ended) } : null;
+}
+
 function parseJson(text: string): unknown {
   try {
     return JSON.parse(text);

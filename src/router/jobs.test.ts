@@ -825,6 +825,62 @@ describe("AiSpace's queue, polled free with the queue id", () => {
     ]);
   });
 
+  /** TWO CALLS POLLING ONE TAKE: the host gave up on the call that started
+   *  it, which kept polling, and the agent resumed it. The first ending stands. */
+  it('keeps the first ending when a second call polling the take gets a 404', async () => {
+    await storeSpecs(dir, [AISPACE]);
+    const { fetchImpl } = submit(AISPACE, queued);
+    const busy = Array.from({ length: 40 }, () => ({
+      status: 200,
+      body: { status: 'PROCESSING' },
+    }));
+    const started = await runRequestTool(
+      { id: ID, input: INPUT },
+      deps(fetchImpl, polls(busy).transport),
+    );
+    expect(started.envelope).toMatchObject({ status: 'running' });
+
+    // The slower call is mid-poll when the other saves the clip and frees
+    // AiSpace's copy; its retrieve then answers 404.
+    let open!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    const slow = polls([{ status: 404, body: {} }]);
+    let waiting = false;
+    const slowTransport: PollTransport = async (target, request, signal) => {
+      waiting = true;
+      await gate;
+      return slow.transport(target, request, signal);
+    };
+    const late = runRequestTool({ job: ID }, deps(fetchImpl, slowTransport));
+    await vi.waitFor(() => expect(waiting).toBe(true));
+
+    const quick = polls([
+      { status: 200, bytes: MP4 },
+      { status: 200, body: { success: true } },
+    ]);
+    const won = await runRequestTool({ job: ID }, deps(fetchImpl, quick.transport));
+    expect(won.envelope).toMatchObject({ status: 'fulfilled' });
+    expect(quick.seen.map((poll) => poll.url)).toEqual([
+      'https://x402.aispace.bot/api/v1/video/retrieve',
+      'https://x402.aispace.bot/api/v1/video/complete',
+    ]);
+    open();
+    const lost = await late;
+    expect(lost.isError).toBe(false);
+    expect(lost.envelope).toMatchObject({
+      status: 'fulfilled',
+      job: ID,
+      savedFiles: won.envelope.savedFiles,
+    });
+    expect(slow.seen).toHaveLength(1);
+    expect(await readTake(dir, ID, 1)).toMatchObject({
+      state: 'done',
+      savedFiles: won.envelope.savedFiles,
+    });
+  });
+
   /** A REFUSED PROMPT IS A 422 ON THE RETRIEVE, after some PROCESSING, and
    *  every retrieve after it says the same: the take fails at once, paid, in
    *  the seller's words, and nothing is polled again. */
