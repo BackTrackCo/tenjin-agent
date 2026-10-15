@@ -408,7 +408,13 @@ describe('tenjin install registers the plugin through Claude Code', () => {
       `plugin marketplace add ${hosts} --json --scope local`,
       'plugin install tenjin@tenjin --scope local --json',
     ]);
-    expect(result.data).toMatchObject({ plugin: { scope: 'local' } });
+    expect(result.data).toMatchObject({
+      plugin: { scope: 'local' },
+      doctor: 'tenjin doctor --project',
+    });
+    expect(result.humanLines).toContain(
+      '  For this project only; check it with: tenjin doctor --project',
+    );
     // Recorded, so `tenjin update`, which refreshes from home, reaches it.
     const config = JSON.parse(await readFile(join(data, 'config.json'), 'utf8')) as {
       install?: { routerProjects?: string[] };
@@ -731,6 +737,19 @@ describe('tenjin doctor', () => {
   it('fails a machine with no plugin, with the install to run', async () => {
     const c = await checks();
     expect(c['plugin']).toMatchObject({ status: 'fail', fix: 'Run `tenjin install`.' });
+  });
+
+  it('checks a project install it finds here without --project', async () => {
+    await runRouterInstall(
+      { project: true },
+      ctx(),
+      deps({ env: env({ PATH: await emptyPath() }) }),
+    );
+    const c = await checks({ env: env({ PATH: await emptyPath() }) });
+    expect(c['plugin']?.detail).toContain(join(work, '.claude'));
+    // Elsewhere, user scope: no plugin there.
+    const away = await checks({ cwd: root, env: env({ PATH: await emptyPath() }) });
+    expect(away['plugin']?.status).toBe('fail');
   });
 
   it('fails a disabled plugin, with the command that enables it', async () => {

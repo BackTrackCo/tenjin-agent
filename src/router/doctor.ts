@@ -34,7 +34,7 @@ import {
   usd,
 } from './fee';
 import { channelCredit } from './channel-credit';
-import { loadStep, pluginProof, settingsInstallPaths } from './install';
+import { loadStep, pluginProof, projectInstallHere, settingsInstallPaths } from './install';
 import { inspectLegacyInstall, type LegacyInstall } from './legacy-install';
 import { routerSettings, type RouterSettings } from './settings';
 import { PLUGIN_ID, PLUGIN_SERVER, REQUEST_TOOL } from './names';
@@ -73,7 +73,8 @@ export type { RouterCheck };
 export interface RouterDoctorDeps {
   homeDir?: string;
   cwd?: string;
-  /** Check the project install, as `install --project` registered it. */
+  /** Check the project install, as `install --project` registered it. Absent,
+   *  a project install in `cwd` is found ({@link projectInstallHere}). */
   project?: boolean;
   env?: NodeJS.ProcessEnv;
   /** Finds the `claude` binary; tests inject one. */
@@ -97,7 +98,9 @@ export async function runRouterDoctor(
   const env = deps.env ?? process.env;
   const home = deps.homeDir ?? homedir();
   const cwd = deps.cwd ?? process.cwd();
-  const project = deps.project === true;
+  // WITHOUT THE FLAG, THE INSTALL THIS DIRECTORY HOLDS: a project install
+  // found here is the one a session here runs, so it is the one checked.
+  const project = deps.project ?? (await projectInstallHere(cwd, home, env));
   // From the directory doctor runs in, which is the one a session there would use.
   const router = await routerSettings(
     { cwd, dataDir: ctx.dataDir },
@@ -157,6 +160,7 @@ export async function runRouterDoctor(
     checks,
     dataDir: ctx.dataDir,
     baseUrl: settings.baseUrl,
+    scope,
     settingsPath: paths.settingsPath,
   };
   if (failure !== undefined) {

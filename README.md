@@ -148,7 +148,7 @@ tenjin config set --project router.enabled false   # ...or just in this repo
 tenjin uninstall               # remove the Claude Code plugin; your wallet stays
 ```
 
-Use `tenjin install --project` to set it up for a single project. Add `--json` to any command for machine-readable output.
+Use `tenjin install --project` to set it up for a single project; `tenjin doctor` run in that project checks it, and `tenjin update` refreshes it with the rest. Add `--json` to any command for machine-readable output.
 
 The CLI asks npm at most once a day whether a newer version exists and says so; it never updates itself, so `tenjin update` is yours to run. `tenjin config set update.mode off` turns that check off, the request to npm included, and `TENJIN_NO_UPDATE_CHECK=1` in the environment does the same wherever it is set.
 

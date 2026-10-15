@@ -245,11 +245,11 @@ export async function migrateSettingsInstall(
 }
 
 /**
- * Is there a project install here? A refresh and a bare uninstall are given
- * no scope, and `tenjin update` runs its refresh from home, where nothing
- * proves one. A project install is taken when this directory, not being home,
- * holds one: the plugin enabled in its `settings.local.json`, its plugin
- * folder, or a settings install's entries.
+ * Is there a project install here? A refresh, a bare doctor and a bare
+ * uninstall are given no scope, and `tenjin update` runs its refresh from
+ * home, where nothing proves one. A project install is taken when this
+ * directory, not being home, holds one: the plugin enabled in its
+ * `settings.local.json`, its plugin folder, or a settings install's entries.
  */
 export async function projectInstallHere(
   cwd: string,
@@ -439,6 +439,9 @@ export async function runRouterInstall(
     claudeCode,
     migration,
     next: nextStep(plugin, claude, wallet, migration),
+    // The check for this scope, said outright; a bare doctor in the project
+    // also finds it from what the project holds.
+    ...(project ? { doctor: 'tenjin doctor --project' } : {}),
     spend: {
       ...spend,
       effective: effectiveLimits(effective.policy),
@@ -487,16 +490,18 @@ function claudeCodeData(claude: ClaudeCodeState): Record<string, unknown> {
  * can take in the session: never a command for the person to run elsewhere.
  */
 function registrationFix(plugin: PluginRegistration): string {
+  // A project install is retried, and checked, as one.
+  const flag = plugin.scope === 'local' ? ' --project' : '';
   if (plugin.id !== null && plugin.method === 'none') {
-    return `${plugin.id} keeps serving this machine at the version Claude Code has; run \`tenjin install\` again to retry.`;
+    return `${plugin.id} keeps serving this machine at the version Claude Code has; run \`tenjin install${flag}\` again to retry.`;
   }
   if (
     plugin.path !== undefined &&
     plugin.reason?.includes('not a folder this CLI wrote') === true
   ) {
-    return `Move ${plugin.path} aside, then run \`tenjin install\` again.`;
+    return `Move ${plugin.path} aside, then run \`tenjin install${flag}\` again.`;
   }
-  return 'Run `tenjin doctor` to see the cause, then run `tenjin install` again.';
+  return `Run \`tenjin doctor${flag}\` to see the cause, then run \`tenjin install${flag}\` again.`;
 }
 
 /** The one step after the install, for the agent to relay in the session. */
@@ -841,6 +846,9 @@ function lines(
       : s.plugin.state === 'deferred'
         ? warn('Tenjin keeps its earlier Claude Code setup until Claude Code is updated')
         : `${ok} Tenjin is set up for Claude Code (plugin ${s.plugin.id ?? PLUGIN_ID})`,
+    ...(s.plugin.scope === 'local' && s.plugin.state !== 'failed'
+      ? ['  For this project only; check it with: tenjin doctor --project']
+      : []),
     ...walletLines(ctx, ok, s.wallet),
     ...spend,
     ...pluginLines(ctx, s.plugin),
