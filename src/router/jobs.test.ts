@@ -736,6 +736,7 @@ describe("AiSpace's queue, polled free with the queue id", () => {
         body: { status: 'PROCESSING', average_execution_time: 37831, execution_duration: 5254 },
       },
       { status: 200, bytes: MP4 },
+      { status: 200, body: { success: true } },
     ]);
     const result = await runRequestTool({ id: ID, input: INPUT }, deps(fetchImpl, transport));
     expect(result.envelope).toMatchObject({
@@ -743,11 +744,12 @@ describe("AiSpace's queue, polled free with the queue id", () => {
       cost: ['provider price 0.145 USD'],
       result: { contentType: 'video/mp4', bytes: MP4.byteLength },
     });
-    // Two retrieves and nothing else: the spec names a /complete, which only
-    // deletes AiSpace's copy, and this build never sends it.
+    // Two retrieves, then, with the clip saved, one complete that frees
+    // AiSpace's copy, sent like a poll: the same method, body and no payment.
     expect(seen.map((poll) => poll.url)).toEqual([
       'https://x402.aispace.bot/api/v1/video/retrieve',
       'https://x402.aispace.bot/api/v1/video/retrieve',
+      'https://x402.aispace.bot/api/v1/video/complete',
     ]);
     for (const poll of seen) {
       expect(poll.request.method).toBe('POST');
@@ -764,6 +766,22 @@ describe("AiSpace's queue, polled free with the queue id", () => {
     // Settled at submit: one row, settled, with the clip on it.
     expect(await ledger()).toEqual([
       expect.objectContaining({ txHash: TX, settlement: 'settled', savedFiles: [saved] }),
+    ]);
+  });
+
+  it("never frees the seller's copy when the clip could not be saved", async () => {
+    await storeSpecs(dir, [AISPACE]);
+    // The downloads directory cannot be made: every save fails.
+    await writeFile(join(dir, 'downloads'), 'not a directory');
+    const { fetchImpl } = submit(AISPACE, queued);
+    const { transport, seen } = polls([{ status: 200, bytes: MP4 }]);
+    const result = await runRequestTool({ id: ID, input: INPUT }, deps(fetchImpl, transport));
+    expect(result.envelope).toMatchObject({
+      status: 'fulfilled',
+      result: { saveError: expect.any(String) as string },
+    });
+    expect(seen.map((poll) => poll.url)).toEqual([
+      'https://x402.aispace.bot/api/v1/video/retrieve',
     ]);
   });
 

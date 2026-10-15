@@ -134,8 +134,9 @@ task makes media, the most takes one call's `count` may run.
   and a poll that answers 402 signs one fresh authorization per take.
 - `running` (`{httpStatus}` or `{field, values}`) and `failed` (`{field,
 values}`); a 202, or `always: true`, is running whatever they say.
-- `completeUrl`: `{fixed}`, the seller's step that deletes its stored copy
-  (AiSpace's `/complete`). This build reads it and never sends it.
+- `completeUrl`: `{fixed}` on the submit's host, sent once like a poll (its
+  method, body and auth) after the result is saved, never after a save that
+  failed; its answer is ignored.
 - `everyS`, `maxWaitS` and `keepH`: the first poll's interval, how long after the
   submit the result can arrive, and how many hours `request({job})` can resume it.
 

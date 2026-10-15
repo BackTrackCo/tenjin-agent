@@ -77,6 +77,7 @@ import {
 import { routerSettings } from './settings';
 import {
   answerState,
+  completeJob,
   MAX_CALL_WAIT_MS,
   pollTarget,
   pollUntil,
@@ -1665,6 +1666,15 @@ async function finishTake(
         ledger: nonce !== undefined ? { update: nonce } : 'none',
       },
     );
+    // THE SELLER'S COPY IS FREED only once ours is on disk: never after a
+    // save that failed, when the seller's copy is the only one.
+    const saved =
+      delivered.savedFiles.length > 0 &&
+      (delivered.result.envelope.result as { saveError?: unknown } | undefined)?.saveError ===
+        undefined;
+    if (saved) {
+      await completeJob({ ...current, submitUrl: take.call.url }, pollDeps(deps, current));
+    }
     const shownResult = delivered.result.envelope.result;
     await record({
       state: 'done',

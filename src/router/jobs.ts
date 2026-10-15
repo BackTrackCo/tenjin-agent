@@ -370,6 +370,35 @@ export async function pollUntil(
 }
 
 /**
+ * FREE THE SELLER'S COPY once ours is saved: the job's `completeUrl`, held to
+ * the submit's host over HTTPS (and its origin, for a signed job) as a poll
+ * is, sent once with the poll's method, body and payment header. Its answer,
+ * and any failure, is ignored: the result is already on disk. The caller
+ * sends it only after the save succeeded.
+ */
+export async function completeJob(
+  take: PolledTake & { submitUrl: string },
+  deps: PollDeps = {},
+): Promise<void> {
+  const fixed = take.job.completeUrl?.fixed;
+  if (fixed === undefined) return;
+  let url: URL;
+  let base: URL;
+  try {
+    base = new URL(take.submitUrl);
+    url = new URL(fixed);
+  } catch {
+    return;
+  }
+  if (url.protocol !== 'https:' || url.username !== '' || url.password !== '') return;
+  if (url.hostname !== base.hostname) return;
+  if (take.job.pollAuth === 'x402' && url.origin !== base.origin) return;
+  await pollOnce({ ...take, poll: { ...take.poll, url: url.toString() } }, take.auth, deps).catch(
+    () => undefined,
+  );
+}
+
+/**
  * THE SELLER'S OWN WORDS for a job that failed: its `error` (a string, or one
  * with a `message`), `message`, `reason` or `detail`, else the body, as one
  * bounded, redacted plain line; empty when it said nothing. Untrusted text.
