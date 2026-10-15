@@ -364,11 +364,14 @@ async function settleCall(
   if (dataDir === null || call.ids.length === 0) {
     return { row: { outcome: refusalOf(status, ran.isError === true) } };
   }
+  const earlier = paidBefore(ran.text);
   const records = (
     await Promise.all(
-      call.ids.map(async (id) =>
-        readJson($, `${dataDir}/progress/specs/${await sha256Hex(id)}.paid.json`),
-      ),
+      call.ids
+        .filter((id) => !earlier.has(id))
+        .map(async (id) =>
+          readJson($, `${dataDir}/progress/specs/${await sha256Hex(id)}.paid.json`),
+        ),
     )
   ).flatMap((record) => {
     // A record from before this call started is an earlier call's.
@@ -562,16 +565,38 @@ function clean(value: string, limit: number): string {
  * hold a `status` of its own, but no suffix starting there parses whole.
  */
 function statusOf(text: string | undefined): string | undefined {
+  const status = envelopeOf(text)?.status;
+  return typeof status === 'string' ? status : undefined;
+}
+
+/** The request tool's envelope, the JSON block whose `status` comes first. */
+function envelopeOf(text: string | undefined): Json | undefined {
   if (text === undefined) return undefined;
   for (let at = text.indexOf(ENVELOPE); at !== -1; at = text.indexOf(ENVELOPE, at + 1)) {
     try {
-      const status = asRecord(JSON.parse(text.slice(at)))?.status;
-      if (typeof status === 'string') return status;
+      const envelope = asRecord(JSON.parse(text.slice(at)));
+      if (typeof envelope?.status === 'string') return envelope;
     } catch {
       // Not the envelope: one that starts inside the summary or the result.
     }
   }
   return undefined;
+}
+
+/**
+ * The option ids a `choice: "all"` call did not pay because an earlier call
+ * had: the envelope lists each option's own status, and `already_paid` ran no
+ * second time, so its record is that earlier call's whatever its timestamp.
+ */
+function paidBefore(text: string | undefined): Set<string> {
+  const results = envelopeOf(text)?.results;
+  if (!Array.isArray(results)) return new Set();
+  return new Set(
+    results.flatMap((one) => {
+      const step = asRecord(one);
+      return step?.status === 'already_paid' && typeof step.id === 'string' ? [step.id] : [];
+    }),
+  );
 }
 
 function refusalOf(status: string | undefined, isErrored: boolean): string {

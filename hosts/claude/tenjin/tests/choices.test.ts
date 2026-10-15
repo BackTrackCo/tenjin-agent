@@ -106,3 +106,37 @@ test('choice "all" totals every option it paid', async ($, on) => {
     await ui.unmount();
   }
 });
+
+test('choice "all" after one option was paid counts only what it paid now', async ($, on) => {
+  const { files, toasts } = await choiceMachine(on);
+  // GPT was paid by the call just before, under its own id.
+  await recordPayment(files, GPT, {
+    capabilityId: 'gpt-image',
+    amountAtomic: '40000',
+    txHash: '0xc1',
+  });
+  const envelope = JSON.stringify({
+    status: 'fulfilled',
+    choice: 'all',
+    results: [
+      { key: 'flux', label: 'Flux', id: FLUX, status: 'fulfilled' },
+      { key: 'gpt', label: 'GPT Image 2', id: GPT, status: 'already_paid' },
+    ],
+  });
+  on('tool.call', { tool: TOOL }, async () => {
+    await recordPayment(files, FLUX, {
+      capabilityId: 'flux',
+      amountAtomic: '30000',
+      txHash: '0xc2',
+    });
+    return { result: `Ran 1 of 2 choices${envelope}`, text: `Ran 1 of 2 choices${envelope}` };
+  });
+  await $.tool.call({
+    tool: TOOL,
+    tool_use_id: 'toolu_all2',
+    id: LINE,
+    choice: 'all',
+    input: INPUT,
+  });
+  expect(toasts).toEqual(['2 services · $0.03']);
+});
