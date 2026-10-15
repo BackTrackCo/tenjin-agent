@@ -245,12 +245,13 @@ export async function migrateSettingsInstall(
 }
 
 /**
- * `tenjin update` runs the refresh from home, where nothing proves scope. A
- * project install is taken when this directory, not being home, holds one:
- * the plugin enabled in its `settings.local.json`, its plugin folder, or a
- * settings install's entries.
+ * Is there a project install here? A refresh and a bare uninstall are given
+ * no scope, and `tenjin update` runs its refresh from home, where nothing
+ * proves one. A project install is taken when this directory, not being home,
+ * holds one: the plugin enabled in its `settings.local.json`, its plugin
+ * folder, or a settings install's entries.
  */
-async function inferRefreshProject(
+export async function projectInstallHere(
   cwd: string,
   home: string,
   env: NodeJS.ProcessEnv,
@@ -303,7 +304,7 @@ export async function runRouterInstall(
   const cwd = deps.cwd ?? process.cwd();
   // An explicit --project wins, including for a project rooted at home.
   const project =
-    args.project ?? (args.refresh === true && (await inferRefreshProject(cwd, home, env)));
+    args.project ?? (args.refresh === true && (await projectInstallHere(cwd, home, env)));
   const scope: PluginScope = project ? 'local' : 'user';
   const claude = await readClaudeCode(env, cwd, deps.findClaude ?? findClaudeBinary);
   const paths = settingsInstallPaths(project, env, home, cwd);

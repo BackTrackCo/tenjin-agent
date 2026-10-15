@@ -629,6 +629,25 @@ describe('tenjin uninstall', () => {
     expect(result.data).toMatchObject({ plugin: { marketplace: 'kept' } });
   });
 
+  it('says a bare uninstall left the project install here, with the command that removes it', async () => {
+    await mkdir(join(work, '.claude'), { recursive: true });
+    await writeFile(
+      join(work, '.claude', 'settings.local.json'),
+      JSON.stringify({ enabledPlugins: { 'tenjin@tenjin': true } }),
+    );
+    await fake.respond('uninstall', '{"outcome":"error","failureCode":"not_installed"}\n', 1);
+    const result = await runRouterUninstall({}, ctx(), { homeDir: home, cwd: work, env: env() });
+    expect(result.data).toMatchObject({
+      plugin: { plugin: 'absent' },
+      projectInstallLeft: work,
+    });
+    expect(result.humanLines).toContain(
+      'This project has its own Tenjin install, which this left in place; `tenjin uninstall --project` here removes it.',
+    );
+    const clean = await runRouterUninstall({}, ctx(), { homeDir: home, cwd: root, env: env() });
+    expect(clean.data).not.toHaveProperty('projectInstallLeft');
+  });
+
   it("unlinks the plugin folder's listed files and keeps what is not Tenjin's", async () => {
     await runRouterInstall({}, ctx(), deps({ env: env({ PATH: await emptyPath() }) }));
     const folder = join(cfg, 'skills', 'tenjin-router');
