@@ -39,6 +39,7 @@ import {
   bindDecision,
   claimRedirect,
   markOffered,
+  type OfferedTerms,
   newCallId,
   noteSession,
   pruneProgress,
@@ -691,7 +692,7 @@ async function vetOffer<T extends OfferDecision>(
 ): Promise<{ offer: T; withheld?: undefined } | { withheld: string }> {
   const shortfall = await spendShortfall(termsOf(offer), deps, deadline);
   if (shortfall === null) {
-    const note = await overCapNote(offer.hint, deps, canAskUser);
+    const note = await overCapNote(offer, deps, canAskUser);
     return { offer: note === null ? offer : { ...offer, hint: `${offer.hint} ${note}` } };
   }
   if (offer.action === 'discovered' && canAskUser) {
@@ -705,7 +706,9 @@ async function vetOffer<T extends OfferDecision>(
  *  "about $0.03 (price can vary" in an alternative, "$0.30): request(" closing
  *  a curated alternative, and "$0.30 via https://" for a curated offer's own
  *  (already checked as a field, so it fits). A dollar amount anywhere else is
- *  a description's words ("seats from $500/month"), never a price. */
+ *  a description's words ("seats from $500/month"), never a price. Read only
+ *  for an offer that carries no specs: every other one names each service's
+ *  price as a field. */
 const LISTED_PRICE_RE =
   /about \$(\d+(?:\.\d+)?)(?= per call|: request\(| \(price can vary)|\$(\d+(?:\.\d+)?)(?=\): request\(| via https?:\/\/)/g;
 
@@ -714,20 +717,44 @@ const LISTED_PRICE_RE =
 const QUOTED_RE = /"(?:[^"\\]|\\.)*"/g;
 
 /**
+ * The other services an offer names, by price in atomic USDC: every spec
+ * beside the offer's own (its line and its specs name the same ids), or, for
+ * an offer with no specs, each price the line quotes.
+ */
+function listedPrices(offer: OfferDecision): bigint[] {
+  if (offer.specs !== undefined) {
+    return offer.specs
+      .filter((spec) => spec.id !== offer.id)
+      .map((spec) => BigInt(spec.priceAtomic));
+  }
+  return [...offer.hint.replace(QUOTED_RE, '""').matchAll(LISTED_PRICE_RE)].flatMap((match) => {
+    try {
+      return [BigInt(parseUsdToAtomic((match[1] ?? match[2]) as string))];
+    } catch {
+      return [];
+    }
+  });
+}
+
+/** A listed price as a line quotes one: dollars with at least two decimals. */
+function listedUsd(atomic: bigint): string {
+  const [whole, fraction = ''] = toMoney(atomic.toString()).usd.split('.');
+  return `${whole}.${fraction.padEnd(2, '0')}`;
+}
+
+/**
  * ONE SENTENCE FOR A LISTED SERVICE OVER THE AUTO-SPEND CAP, or null. The offer
  * itself already fits (it passed {@link spendShortfall}), so a price over the
  * cap here is another entry: People Data Labs at $0.28 beside a $0.005 email
- * finder, under a $0.25 cap, was picked and refused. Quiet when the hint
- * quotes no such price or the settings cannot be read.
+ * finder, under a $0.25 cap, was picked and refused. Quiet when the offer
+ * names no such price or the settings cannot be read.
  */
 async function overCapNote(
-  hint: string,
+  offer: OfferDecision,
   deps: HookDeps,
   canAskUser: boolean,
 ): Promise<string | null> {
-  const listed = [...hint.replace(QUOTED_RE, '""').matchAll(LISTED_PRICE_RE)].map(
-    (match) => (match[1] ?? match[2]) as string,
-  );
+  const listed = listedPrices(offer);
   if (listed.length === 0) return null;
   let cap: bigint;
   try {
@@ -735,17 +762,7 @@ async function overCapNote(
   } catch {
     return null;
   }
-  const over = [
-    ...new Set(
-      listed.filter((usd) => {
-        try {
-          return BigInt(parseUsdToAtomic(usd)) > cap;
-        } catch {
-          return false;
-        }
-      }),
-    ),
-  ];
+  const over = [...new Set(listed.filter((atomic) => atomic > cap).map(listedUsd))];
   if (over.length === 0) return null;
   const prices = over.map((usd) => `$${usd}`).join(' and ');
   const which = over.length > 1 ? 'those services' : 'that service';
@@ -1135,9 +1152,27 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
     };
   }
   if (event.toolUseId !== undefined) {
-    await markOffered(deps.dataDir, event.sessionId, event.toolUseId, deps.now?.());
+    await markOffered(
+      deps.dataDir,
+      event.sessionId,
+      event.toolUseId,
+      offeredTerms(routed.offer),
+      deps.now?.(),
+    );
   }
   return redirect(routed.offer);
+}
+
+/** What the offer record keeps of a redirect: the offer's label, from its
+ *  decision or else its own spec, and its price. */
+function offeredTerms(offer: OfferDecision): OfferedTerms {
+  const label =
+    (offer.action === 'execute' ? offer.label : undefined) ??
+    offer.specs?.find((spec) => spec.id === offer.id)?.label;
+  return {
+    ...(label !== undefined ? { label } : {}),
+    priceAtomic: termsOf(offer).providerPriceAtomic,
+  };
 }
 
 /**
@@ -1193,6 +1228,15 @@ export async function runAskHook(raw: unknown, deps: HookDeps): Promise<NativeHo
   if (routed.offer === null) return routed.outcome;
   if (routed.free === true) {
     return { response: null, action: routed.offer.action, id: routed.offer.id, free: true };
+  }
+  if (event.toolUseId !== undefined) {
+    await markOffered(
+      deps.dataDir,
+      event.sessionId,
+      event.toolUseId,
+      offeredTerms(routed.offer),
+      deps.now?.(),
+    );
   }
   return redirect(routed.offer, ONE_BLOCK_QUESTION);
 }

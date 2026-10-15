@@ -73,6 +73,8 @@ const INSTRUCTIONS =
   "provider's whole response is saved to the file at `fullResultPath`. " +
   'Before asking the user to get an API key or account for a one-off task, call it with ' +
   'that operation: it can find a pay-per-call service. ' +
+  'To see what is available, `{browse}` lists the tools for a need (or every tool, for ' +
+  '""), and `{tool}` with a row\'s id returns its spec; both are free. ' +
   `${SCOPE_RULE} Call it alone and wait for its result. Deciding what to ` +
   'route is free, or a flat $0.003 routing fee; a wallet on ' +
   'THIS machine pays it and the provider under the local spend ' +
@@ -173,9 +175,23 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
               'every choice side by side, sent with the id and the input. Without an input it ' +
               "shows that choice's spec, with nothing paid.",
           ),
+        browse: z
+          .string()
+          .optional()
+          .describe(
+            'Sent alone: a few words for a need, or "" for every tool by kind. Lists the tools ' +
+              'available, each with its id, name, what it does and its price. Free.',
+          ),
+        tool: z
+          .string()
+          .optional()
+          .describe(
+            "Sent alone: a row's id from `browse`. Returns that tool's spec under a fresh id, " +
+              'which `{id, input}` then runs. Free.',
+          ),
       },
     },
-    async ({ query, id, input, choice }): Promise<CallToolResult> => {
+    async ({ query, id, input, choice, browse, tool }): Promise<CallToolResult> => {
       // Resolved per call, from settings read now: the refusal this tool returns
       // names `tenjin config set sessionBudget`, and a policy frozen at the
       // first call would leave that command with no effect until the harness
@@ -191,6 +207,8 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
           ...(id !== undefined ? { id } : {}),
           ...(input !== undefined ? { input } : {}),
           ...(choice !== undefined ? { choice } : {}),
+          ...(browse !== undefined ? { browse } : {}),
+          ...(tool !== undefined ? { tool } : {}),
         },
         {
           ctx,
