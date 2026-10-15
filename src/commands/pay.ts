@@ -751,14 +751,16 @@ function failedRuleCaveat(check: ResultCheck): string {
 const STATUS_URL_HEADERS = ['x-status-url'];
 
 /** The https status URL a timed-out paid response named, resolved against the
- *  paid URL, or null. Its bytes are the seller's: bounded, https only. */
+ *  paid URL, or null. Its bytes are the seller's: bounded, https only, same host. */
 function statusUrlOf(failure: FetchJsonFailure, requestUrl: string): string | null {
   for (const name of STATUS_URL_HEADERS) {
     const value = failure.header?.(name)?.trim();
     if (value === undefined || value.length === 0 || value.length > 2_048) continue;
     try {
       const status = new URL(value, requestUrl);
-      if (status.protocol === 'https:') return status.toString();
+      if (status.protocol === 'https:' && status.host === new URL(requestUrl).host) {
+        return status.toString();
+      }
     } catch {
       // Not a URL: the next name, or the plain timeout.
     }

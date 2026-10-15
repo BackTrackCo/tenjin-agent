@@ -387,7 +387,9 @@ describe('runPay, paid-leg timeout', () => {
     expect((result.data as { paid: boolean }).paid).toBe(true);
   });
 
-  it('names the status URL a long job sent with its headers, and pays nothing more', async () => {
+  /** A paid leg whose headers name `statusUrl` and whose body never arrives
+   *  before the deadline: the refusal, and which legs were sent. */
+  async function longJob(statusUrl: string): Promise<{ err: CliError; calls: string[] }> {
     const fixture = buildPaymentRequired({ maxTimeoutSeconds: 1 });
     const calls: string[] = [];
     const fetchImpl: typeof fetch = (async (
@@ -404,7 +406,7 @@ describe('runPay, paid-leg timeout', () => {
           );
         },
       });
-      return new Response(body, { status: 200, headers: { 'X-Status-Url': '/jobs/42' } });
+      return new Response(body, { status: 200, headers: { 'X-Status-Url': statusUrl } });
     }) as typeof fetch;
     const err = (await runPay({ url: TENJIN_URL }, makeCtx({ timeout: 50 }), {
       ...PUBLIC_DNS,
@@ -415,6 +417,11 @@ describe('runPay, paid-leg timeout', () => {
       () => undefined,
       (e: unknown) => e,
     )) as CliError;
+    return { err, calls };
+  }
+
+  it('names the status URL a long job sent with its headers, and pays nothing more', async () => {
+    const { err, calls } = await longJob('/jobs/42');
     expect(err).toBeInstanceOf(CliError);
     expect(err.message).toBe(
       'The seller is still working on this: no result within 1 s, and it named a status URL to check: https://tenjin.blog/jobs/42',
@@ -425,6 +432,14 @@ describe('runPay, paid-leg timeout', () => {
       settlement: 'unknown',
     });
     expect(calls).toEqual(['probe', 'paid']);
+  });
+
+  it('never points the agent at a status URL on another host', async () => {
+    const { err } = await longJob('https://localhost/jobs/42');
+    expect(err).toBeInstanceOf(CliError);
+    expect(err.message).not.toContain('status URL');
+    expect(err.details).not.toHaveProperty('statusUrl');
+    expect(err.details).toMatchObject({ settlement: 'unknown' });
   });
 
   it('keeps the unpaid probe on the CLI timeout', async () => {
