@@ -4,10 +4,15 @@ import { getAddress, isAddress } from 'viem';
 /** The line under the code: what to send and on which chain, in CAIP-2 form. */
 export const QR_NETWORK_LINE = 'USDC on Base (eip155:8453)';
 
-/** Modules of light margin drawn around the code; scanners need some, terminals have little room. */
-const QUIET_ZONE = 2;
-/** Black on white, set explicitly so the code scans the same way on a dark or a light theme. */
-const DARK_ON_LIGHT = '\x1b[30;47m';
+/** Modules of light margin drawn around the code: the QR spec's minimum. */
+const QUIET_ZONE = 4;
+/**
+ * Black on white from the 256-color cube (16 is #000000, 231 is #ffffff), set
+ * explicitly so the code scans the same way on a dark or a light theme. The
+ * 16-color slots (`30;47`) follow the theme's palette, and light themes such as
+ * VS Code's map "white" to a mid grey, too dark against black to scan.
+ */
+const DARK_ON_LIGHT = '\x1b[38;5;16;48;5;231m';
 const RESET = '\x1b[0m';
 
 /** What the QR renderer reads off the target stream; a real `tty.WriteStream` has both. */
@@ -21,14 +26,16 @@ interface TerminalFacts {
  * half blocks, then {@link QR_NETWORK_LINE}. It encodes the plain EIP-55 address,
  * which is what a phone wallet's send scanner accepts. Returns [] when the code
  * cannot be drawn correctly on `stream`: the address is not an EVM address, the
- * stream reports no width or is narrower than the code, or it cannot show color
- * (not a TTY, NO_COLOR, TERM=dumb). Without the forced colors a dark theme would
- * draw the code inverted, which many scanners reject.
+ * stream reports no width or is narrower than the code, or it cannot show 256
+ * colors (not a TTY, NO_COLOR, TERM=dumb, a 16-color terminal). The caller still
+ * prints the address as text. Without the forced colors a dark theme would draw
+ * the code inverted, which many scanners reject.
  */
 export function addressQrLines(address: string, stream: NodeJS.WritableStream): string[] {
   if (!isAddress(address, { strict: false })) return [];
   const facts = stream as TerminalFacts;
-  if (typeof facts.hasColors !== 'function' || facts.hasColors.call(stream) !== true) return [];
+  if (typeof facts.hasColors !== 'function') return [];
+  if (facts.hasColors.call(stream, 256) !== true) return [];
   const code = generate(getAddress(address), {
     minCorrectionLevel: correction.M,
     maxCorrectionLevel: correction.M,

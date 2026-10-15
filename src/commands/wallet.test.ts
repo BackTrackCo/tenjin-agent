@@ -630,8 +630,8 @@ describe('runWalletShow', () => {
     const res = await runWalletShow(terminalCtx(), { provider });
     const lines = res.humanLines ?? [];
     expect(lines[0]).toBe(`Address: ${address}`);
-    expect(lines[18]).toBe('USDC on Base (eip155:8453)');
-    expect(lines[19]).toBe('Key source: remote');
+    expect(lines[20]).toBe('USDC on Base (eip155:8453)');
+    expect(lines[21]).toBe('Key source: remote');
     expect(res.data).toEqual((await runWalletShow(makeCtx(), { provider })).data);
   });
 
@@ -639,7 +639,7 @@ describe('runWalletShow', () => {
     ['--json', { json: true }, {}],
     ['a pipe', { isTTY: false }, {}],
     ['--no-qr', {}, { qr: false }],
-    ['a 32-column terminal', { columns: 32 }, {}],
+    ['a 36-column terminal', { columns: 36 }, {}],
   ])('prints no QR for %s', async (_label, ctxOpts, showOpts) => {
     const address = privateKeyToAccount(generatePrivateKey()).address;
     const { provider } = fakeRemoteProvider(address);
