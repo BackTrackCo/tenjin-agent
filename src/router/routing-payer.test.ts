@@ -47,17 +47,32 @@ function holdTime(): void {
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
 }
 
-/** True once a voucher waits on the router's delay timer. */
-const inFlight = (router: FakeRouter): boolean =>
-  [...router.channels.values()].some((channel) => channel.pending);
+/**
+ * Timers the payer arms, observed through its injected `timers`, so a test
+ * awaits "armed" instead of guessing when the work has started.
+ */
+function armedTimers() {
+  const waiting: { ms: number; resolve: () => void }[] = [];
+  const seen: number[] = [];
+  const timers: NonNullable<RoutingPayerDeps['timers']> = {
+    setTimeout: ((fn: () => void, ms?: number) => {
+      const id = globalThis.setTimeout(fn, ms);
+      seen.push(ms ?? 0);
+      for (const w of waiting.filter((x) => x.ms === ms)) w.resolve();
+      return id;
+    }) as typeof setTimeout,
+    clearTimeout: (id) => globalThis.clearTimeout(id),
+  };
+  const armed = (ms: number): Promise<void> =>
+    seen.includes(ms) ? Promise.resolve() : new Promise((resolve) => waiting.push({ ms, resolve }));
+  return { timers, armed };
+}
 
-/** Lets real file I/O run until `ready`, with time held. The 10 s bound only fails a stuck test. */
-async function ioUntil(ready: () => boolean): Promise<void> {
-  const give = performance.now() + 10_000;
-  while (!ready() && performance.now() < give) {
-    await new Promise((r) => setImmediate(r));
-  }
-  expect(ready()).toBe(true);
+/** Resolves when the router starts holding a paid request on its delay timer. */
+function delayArmed(router: FakeRouter): Promise<void> {
+  return new Promise((resolve) => {
+    router.onDelayArmed = resolve;
+  });
 }
 
 type PayerOpts = Partial<RoutingPayerDeps> & {
@@ -442,7 +457,8 @@ describe('RoutingPayer', () => {
 
   it("counts a queued call's budget from when it was sent, not from when its turn came", async () => {
     const router = new FakeRouter();
-    const p = payer(router, { now: () => Date.now() });
+    const { timers, armed } = armedTimers();
+    const p = payer(router, { now: () => Date.now(), timers });
     await routeOnce(p, router);
     router.delayMs = 300;
     const route = (await p.routeFor(BASE))!;
@@ -454,10 +470,15 @@ describe('RoutingPayer', () => {
         { ctx: ctx(), baseUrl: BASE, fetchImpl: router.fetch, timeoutMs, route },
       );
     // The second waits behind the first for longer than its own budget.
-    const both = Promise.all([call(3_500), call(100)]);
-    await ioUntil(() => inFlight(router) && vi.getTimerCount() >= 4);
+    // The first must hold the channel before the second is sent: each call
+    // reads the memo from disk first, so sending both at once races their order.
+    const held = delayArmed(router);
+    const firstCall = call(3_500);
+    await held;
+    const secondCall = call(100);
+    await armed(100);
     await vi.advanceTimersByTimeAsync(300);
-    const [first, second] = await both;
+    const [first, second] = await Promise.all([firstCall, secondCall]);
     expect(first.status).toBe('decided');
     expect(second).toEqual({ status: 'skipped', why: 'busy' });
   });
@@ -568,9 +589,9 @@ describe('RoutingPayer', () => {
 
 describe('RoutingPayer and the call budget', () => {
   /** One call with its own budget, in real time, and the lines the payer warned. */
-  function timed(router: FakeRouter) {
+  function timed(router: FakeRouter, timers?: RoutingPayerDeps['timers']) {
     const warned: string[] = [];
-    const p = payer(router, { now: () => Date.now(), warn: (line) => warned.push(line) });
+    const p = payer(router, { now: () => Date.now(), warn: (line) => warned.push(line), timers });
     const call = async (timeoutMs: number) => {
       const route = (await p.routeFor(BASE))!;
       return requestDecision(
@@ -662,15 +683,18 @@ describe('RoutingPayer and the call budget', () => {
 
   it('gives up on a queued call at its own deadline instead of waiting out a detached payment', async () => {
     const router = new FakeRouter();
-    const { call, warned } = timed(router);
+    const { timers, armed } = armedTimers();
+    const { call, warned } = timed(router, timers);
     expect((await call(3_500)).status).toBe('decided');
     // The next voucher answers after 1.5 s, past its 200 ms budget: it detaches.
     router.delayMs = 1_500;
     holdTime();
+    const held = delayArmed(router);
     const ahead = call(200);
     const started = Date.now();
+    await Promise.all([held, armed(200)]);
     const queuedCall = call(300);
-    await ioUntil(() => inFlight(router) && vi.getTimerCount() >= 4);
+    await armed(300);
     await vi.advanceTimersByTimeAsync(300);
     const queued = await queuedCall;
     expect(queued).toEqual({ status: 'skipped', why: 'busy' });
