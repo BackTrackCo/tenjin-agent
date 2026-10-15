@@ -561,6 +561,7 @@ describe('what the tool tells the model to send', () => {
       // source of what services exist, and the hook line names the one that
       // fits the turn.
       expect(request.description?.startsWith("Paid lookups through Tenjin's router")).toBe(true);
+      expect(request.description).toContain('generating images, voice, music, sound or video');
       expect(request.description).toContain('a hook line names the service and how to call it');
       for (const name of ['Exa', 'Firecrawl', 'CoinMarketCap', 'Wolfram', 'Hunter', 'Minerva']) {
         expect(request.description).not.toContain(name);
