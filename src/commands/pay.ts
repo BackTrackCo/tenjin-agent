@@ -120,6 +120,22 @@ export interface PayArgs {
    * `resultCaveat` saying which.
    */
   resultSchema?: unknown;
+  /**
+   * The router's job seam: called once with the answer that delivered (free,
+   * entitled or paid), or with a paid leg that timed out after its headers
+   * came, and the payment headers that leg sent. A long job's status URL can
+   * be a header, and a poll the seller binds to the paying wallet re-sends the
+   * same payment. Never part of `data`, which `tenjin pay --json` prints.
+   */
+  onPaidLeg?: (leg: PaidLeg) => void;
+}
+
+/** What {@link PayArgs.onPaidLeg} is handed. */
+export interface PaidLeg {
+  status?: number;
+  header?: (name: string) => string | undefined;
+  /** The payment headers the paid leg carried; absent on a free answer. */
+  paymentHeaders?: Record<string, string>;
 }
 
 export interface PayDeps {
@@ -231,6 +247,7 @@ async function executePay(
   }
   if (probe.status >= 200 && probe.status < 300) {
     const caveat = assertUsableResult(args.resultSchema, probe.text, probe.status, 'free');
+    args.onPaidLeg?.({ status: probe.status, header: probe.header });
     return deliver(url, lane, probe, {
       paid: false,
       ...(caveat !== undefined ? { caveat } : {}),
@@ -318,6 +335,7 @@ async function executePay(
         recheck.status,
         'entitled',
       );
+      args.onPaidLeg?.({ status: recheck.status, header: recheck.header });
       return deliver(url, lane, recheck, {
         paid: false,
         entitled: true,
@@ -413,49 +431,7 @@ async function executePay(
     // narrowed to the one selection everything above ran against, so a seller
     // advertising several chains cannot have one entry priced and another
     // signed. Without this the builder re-picked `accepts[0]`.
-    if (amountAtomic > 0n) {
-      // One retry across a rate-limit interval, within the original read deadline.
-      const deadline = Date.now() + ctx.flags.timeout;
-      // Live, never the hooks' remembered balance: a minute-old read can count
-      // funds the wallet has since spent. The default RPC's public fallbacks
-      // are live reads too.
-      const readBalance = deps.readBalance ?? readUsdcBalanceWithFallback;
-      let balance = await readBalance(signer.address, settings.rpcUrl, {
-        timeoutMs: Math.max(1, Math.floor(ctx.flags.timeout / 2)),
-      });
-      if (balance === null && Date.now() < deadline) {
-        await delay(Math.min(1100, Math.floor((deadline - Date.now()) / 2)));
-        const remaining = deadline - Date.now();
-        if (remaining > 0)
-          balance = await readBalance(signer.address, settings.rpcUrl, { timeoutMs: remaining });
-      }
-      if (balance === null) {
-        throw new CliError(
-          'REFUSED',
-          'The wallet balance could not be read; no payment was signed.',
-          {
-            fix: 'Check the configured Base rpcUrl and retry when it is available.',
-            details: { reason: 'balance_unavailable', address: signer.address },
-          },
-        );
-      }
-      if (balance < amountAtomic) {
-        const short = toMoney((amountAtomic - balance).toString()).usd;
-        throw new CliError(
-          'REFUSED',
-          `The wallet has insufficient USDC; no payment was signed. It holds ${toMoney(balance.toString()).usd} USD and this costs ${toMoney(amountAtomic.toString()).usd} USD: ${short} USD short.`,
-          {
-            fix: `Fund this wallet on Base with \`tenjin wallet fund\` (at least ${short} USD more) before paying.`,
-            details: {
-              reason: 'insufficient_funds',
-              address: signer.address,
-              balanceAtomic: balance.toString(),
-              requiredAtomic: amountAtomic.toString(),
-            },
-          },
-        );
-      }
-    }
+    await assertBalanceCovers(signer.address, amountAtomic, settings.rpcUrl, ctx, deps);
     payment = await buildExactPayment(effectiveChallenge, signer, effectiveRequirement);
   } catch (err) {
     await authorizer.release(reservationId);
@@ -479,6 +455,13 @@ async function executePay(
     mode,
     ...(payment.authorization !== undefined ? { nonce: payment.authorization.nonce } : {}),
   });
+  if (paid.ok || paid.header !== undefined) {
+    args.onPaidLeg?.({
+      ...(paid.status !== undefined ? { status: paid.status } : {}),
+      ...(paid.header !== undefined ? { header: paid.header } : {}),
+      paymentHeaders: payment.headers,
+    });
+  }
   // A TRANSPORT failure on this leg is a post-transmission outcome like any
   // other: the authorization has left, the reservation is committed above, and
   // a receipt that said nothing was paid would report a provider cost of zero
@@ -595,6 +578,124 @@ export function paidLegTimeoutMs(requirement: PaymentRequirements, cliTimeoutMs:
     return cliTimeoutMs;
   }
   return Math.max(cliTimeoutMs, Math.min(advertised * 1000, MAX_PAID_LEG_TIMEOUT_MS));
+}
+
+/**
+ * THE WALLET HOLDS THE AMOUNT, read live, or a refusal before anything is
+ * signed. Live, never the hooks' remembered balance: a minute-old read can
+ * count funds the wallet has since spent. The default RPC's public fallbacks
+ * are live reads too.
+ */
+async function assertBalanceCovers(
+  address: string,
+  amountAtomic: bigint,
+  rpcUrl: string,
+  ctx: CommandContext,
+  deps: PayDeps,
+): Promise<void> {
+  if (amountAtomic <= 0n) return;
+  // One retry across a rate-limit interval, within the original read deadline.
+  const deadline = Date.now() + ctx.flags.timeout;
+  const readBalance = deps.readBalance ?? readUsdcBalanceWithFallback;
+  let balance = await readBalance(address, rpcUrl, {
+    timeoutMs: Math.max(1, Math.floor(ctx.flags.timeout / 2)),
+  });
+  if (balance === null && Date.now() < deadline) {
+    await delay(Math.min(1100, Math.floor((deadline - Date.now()) / 2)));
+    const remaining = deadline - Date.now();
+    if (remaining > 0) balance = await readBalance(address, rpcUrl, { timeoutMs: remaining });
+  }
+  if (balance === null) {
+    throw new CliError('REFUSED', 'The wallet balance could not be read; no payment was signed.', {
+      fix: 'Check the configured Base rpcUrl and retry when it is available.',
+      details: { reason: 'balance_unavailable', address },
+    });
+  }
+  if (balance < amountAtomic) {
+    const short = toMoney((amountAtomic - balance).toString()).usd;
+    throw new CliError(
+      'REFUSED',
+      `The wallet has insufficient USDC; no payment was signed. It holds ${toMoney(balance.toString()).usd} USD and this costs ${toMoney(amountAtomic.toString()).usd} USD: ${short} USD short.`,
+      {
+        fix: `Fund this wallet on Base with \`tenjin wallet fund\` (at least ${short} USD more) before paying.`,
+        details: {
+          reason: 'insufficient_funds',
+          address,
+          balanceAtomic: balance.toString(),
+          requiredAtomic: amountAtomic.toString(),
+        },
+      },
+    );
+  }
+}
+
+/**
+ * ONE FRESH AUTHORIZATION FOR A JOB'S POLL, under every gate a paid call
+ * meets. A seller that binds its polls to the paying wallet (BlockRun) can
+ * refuse the submit's own payment header on a later poll and answer 402. This
+ * signs the challenge that 402 carries against the spec's terms
+ * ({@link assertWithinTerms}), the spend policy ({@link gateSpend}, automatic,
+ * under the job's own request key) and a live balance read, exactly as the
+ * paid leg does. The reservation is committed as soon as the authorization
+ * exists: the caller keeps it for every later poll, so from here it is money
+ * that may move, and `reconcilePayments` gives back whichever of the two
+ * authorizations expires unused.
+ */
+export async function signJobPayment(
+  input: { url: string; challenge: string; terms: AdvertisedTerms; requestKey: string },
+  ctx: CommandContext,
+  deps: PayDeps = {},
+): Promise<Awaited<ReturnType<typeof buildExactPayment>>> {
+  const settings = await resolveContextSettings(ctx);
+  let challenge: PaymentRequired;
+  try {
+    challenge = decodePaymentRequiredHeader(input.challenge);
+  } catch (err) {
+    throw new CliError('CONTRACT_MISMATCH', 'Could not decode the PAYMENT-REQUIRED header.', {
+      cause: err,
+    });
+  }
+  const openedSigner: { current?: TenjinSigner } = {};
+  const payer = createPayerClient(() => signerOrThrow(openedSigner));
+  const requirement = selectRequirement(payer.core, challenge, input.terms);
+  if (requirement === undefined) throw noMatchingEntry(challenge, input.terms);
+  const termsLabel = assertWithinTerms(input.terms, requirement);
+  const signer = await openWallet(
+    resolveWalletProvider(ctx, deps.provider !== undefined ? { provider: deps.provider } : {}),
+  );
+  openedSigner.current = signer;
+  const authorizer = resolveSpendAuthorizer(
+    ctx,
+    settings.policy,
+    deps.authorizer !== undefined ? { authorizer: deps.authorizer } : {},
+  );
+  const amountAtomic = BigInt(requirement.amount);
+  const reservationId = await gateSpend({
+    mode: 'automatic',
+    ctx,
+    authorizer,
+    amountAtomic,
+    creator: new URL(input.url).host,
+    requestKey: input.requestKey,
+    yes: false,
+    confirm: async () => false,
+    payeeLabel: `${sanitizeForTerminal(input.url)} (${sanitizeForTerminal(termsLabel)}); recipient ${sanitizeForTerminal(requirement.payTo)}, ${sanitizeForTerminal(requirement.network)} / ${sanitizeForTerminal(requirement.asset)}`,
+    allowlistSubject: 'this host',
+    notConfirmedMessage: 'Payment not confirmed.',
+  });
+  let payment: Awaited<ReturnType<typeof buildExactPayment>>;
+  try {
+    await assertBalanceCovers(signer.address, amountAtomic, settings.rpcUrl, ctx, deps);
+    payment = await buildExactPayment(challenge, signer, requirement);
+  } catch (err) {
+    await authorizer.release(reservationId);
+    throw err;
+  }
+  await authorizer.commit(reservationId, payment.amountAtomic, {
+    mode: 'automatic',
+    ...(payment.authorization !== undefined ? { nonce: payment.authorization.nonce } : {}),
+  });
+  return payment;
 }
 
 /** Which lane may pay this URL, or the exact refusal. */
@@ -805,7 +906,7 @@ function providerError(text: string): { providerError?: string } {
 
 /** Seller text as one plain, redacted line of at most
  *  {@link PROVIDER_ERROR_CHARS} characters; empty when nothing is left. */
-function sellerLine(text: string): string {
+export function sellerLine(text: string): string {
   // Masked in a window well past the cap, so a large page costs nothing and a
   // secret that starts inside the snippet is seen whole.
   const flat = sanitizeForTerminal(
