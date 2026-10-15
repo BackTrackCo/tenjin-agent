@@ -120,7 +120,7 @@ function sellers(answers: Partial<Record<string, Answer>> = {}) {
         headers: { 'content-type': 'application/json', 'PAYMENT-REQUIRED': challenge.header },
       });
     }
-    const settled =
+    const settled: Record<string, string> =
       answer === 'unsettled'
         ? {}
         : {
