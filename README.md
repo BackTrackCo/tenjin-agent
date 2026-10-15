@@ -122,7 +122,7 @@ Tenjin pays for tools with [x402](https://www.x402.org), an open standard that b
 
 ### Routing fee
 
-Each routing call costs a flat $0.003, paid over x402 `batch-settlement` by `tenjin mcp` from a channel deposit of up to $0.25 (less when your per-call limit is lower). A deposit is an automatic payment: it counts against the limits above, and approving them at install approves the fee. The fees come out of the deposit and are not counted again. When a call cannot be paid, it takes the free path, and Claude Code tells you once per session why and what fixes it; `tenjin doctor` says the same. Details are in [docs/agent-permissions.md](docs/agent-permissions.md#what-bounds-a-router-payment-on-top-of-that).
+Each routing call costs a flat $0.003, paid over x402 `batch-settlement` by `tenjin mcp` from a channel deposit of up to $0.25 (less when your per-call limit is lower). A deposit is an automatic payment: it counts against the limits above, and approving them at install approves the fee. The fees come out of the deposit and are not counted again. When a deposit is taken, Claude Code says so once; `tenjin status` shows it as prepaid routing credit, apart from what lookups cost, and `tenjin wallet balance` adds the credit still left. When a call cannot be paid, it takes the free path, and Claude Code tells you once per session why and what fixes it; `tenjin doctor` says the same. Details are in [docs/agent-permissions.md](docs/agent-permissions.md#what-bounds-a-router-payment-on-top-of-that).
 
 ### Funding
 

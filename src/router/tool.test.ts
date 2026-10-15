@@ -360,6 +360,32 @@ describe('routing outcomes that buy nothing', () => {
     expect(String(result.envelope.reason)).not.toContain('could not pay');
   });
 
+  it('names a routing deposit once, in the result of the call that took it', async () => {
+    let deposited = 250_000n;
+    const route = async () => ({
+      path: '/api/x402-router/route',
+      send: (url: string, options: HttpRequestOptions) => httpRequest(url, options),
+      deposited: () => deposited,
+    });
+    const { fetchImpl } = net([
+      { url: ROUTER, status: 200, body: NATIVE },
+      { url: ROUTER, status: 200, body: NATIVE },
+    ]);
+    const first = await runRequestTool(
+      { query: 'what is the weather' },
+      { ...deps(fetchImpl), route },
+    );
+    expect(first.summary.split('\n').at(-1)).toBe(
+      'Tenjin moved $0.25 into prepaid routing credit; each routing call uses $0.003.',
+    );
+    deposited = 0n;
+    const next = await runRequestTool(
+      { query: 'what is the weather' },
+      { ...deps(fetchImpl), route },
+    );
+    expect(next.summary).not.toContain('routing credit');
+  });
+
   it('says a routing payment went out when the call ran out of time after sending it', async () => {
     const route = async () => ({
       path: '/api/x402-router/route',

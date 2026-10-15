@@ -28,6 +28,8 @@ export const CHANNEL_DEPOSIT_ATOMIC = 250_000n;
  * $0.25 sizes the deposit down to the limit while it still covers this many.
  */
 export const MIN_DEPOSIT_ATOMIC = 10n * ROUTING_FEE_ATOMIC;
+/** The spend ledger key a deposit's exposure is recorded under, before its id. */
+export const ROUTING_DEPOSIT_KEY = 'routing-deposit:';
 
 /** A spend refusal, as the reason the call was not paid. */
 const REFUSED: Partial<Record<PolicyReason, string>> = {
@@ -126,6 +128,15 @@ const NO_FAULT = new Set([
 export function unpaid(why: string): { reason: string; fix: string } | null {
   if (NO_FAULT.has(why)) return null;
   return UNPAID[why] ?? UNPAID['payment_failed']!;
+}
+
+/**
+ * The one line said when a routing call's deposit went through: the money is
+ * prepaid credit the next calls draw from, not a lookup it bought. It still
+ * counts toward the daily limit ({@link feeRefusal}).
+ */
+export function depositSentence(amountAtomic: bigint): string {
+  return `Tenjin moved $${usd(amountAtomic)} into prepaid routing credit; each routing call uses $${usd(ROUTING_FEE_ATOMIC)}.`;
 }
 
 /** The one line the user sees, once per session, when a call was not paid. */

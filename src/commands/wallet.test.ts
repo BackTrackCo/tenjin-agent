@@ -5,10 +5,12 @@ import { join } from 'node:path';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import type { Address } from 'viem';
 import * as Keystore from 'ox/Keystore';
+import { FileClientChannelStorage } from '@x402/evm/batch-settlement/client/file-storage';
 import { CliError } from '../lib/errors';
 import type { CommandContext } from '../context';
 import type { WalletProvider } from '../lib/wallet';
 import type { ExecFn } from '../lib/wallet/passphrase';
+import { payerDir } from '../router/fee';
 
 // This suite runs real ox scrypt (N=262144) several times per test; the 5s
 // default flakes under parallel vitest load (tenjin-agent#47).
@@ -688,6 +690,19 @@ describe('runWalletBalance', () => {
     expect((res.data as { balance: unknown }).balance).toEqual({ atomic: '250000', usd: '0.25' });
   });
 
+  it("adds what the routing channel still holds, which is still the wallet owner's", async () => {
+    const address = privateKeyToAccount(generatePrivateKey()).address;
+    const { provider } = fakeRemoteProvider(address);
+    await new FileClientChannelStorage({ directory: payerDir(dataDir, address) }).set(
+      `0x${'ab'.repeat(32)}`,
+      { balance: '250000', chargedCumulativeAmount: '9000' },
+    );
+    mockedBalance.mockResolvedValue(1_700_000n);
+    const res = await runWalletBalance(makeCtx(), { provider });
+    expect(res.data).toMatchObject({ routingCredit: { atomic: '241000', usd: '0.241' } });
+    expect(res.humanLines).toEqual(['Balance: 1.7 USDC on Base (+0.241 routing credit)']);
+  });
+
   it('maps an RPC failure to RPC_ERROR with a config fix', async () => {
     await runWalletCreate(makeCtx());
     mockedBalance.mockRejectedValue(new Error('rpc down'));
@@ -703,6 +718,7 @@ describe('runWalletBalance', () => {
     mockedBalance.mockResolvedValue(1000000n);
     const res = await runWalletBalance(makeCtx(), { provider });
     expect((res.data as { balance: { usd: string } }).balance.usd).toBe('1');
+    expect(res.humanLines).toEqual(['Balance: 1 USDC on Base']);
     expect(getSigner).not.toHaveBeenCalled();
   });
 });

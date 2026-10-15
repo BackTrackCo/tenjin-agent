@@ -1,7 +1,6 @@
-import { readFile, readdir } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { FileClientChannelStorage } from '@x402/evm/batch-settlement/client/file-storage';
 import pkg from '../../package.json';
 import { loadRawConfig } from '../lib/config';
 import { CliError } from '../lib/errors';
@@ -29,11 +28,11 @@ import {
   CHANNEL_DEPOSIT_ATOMIC,
   feeRefusal,
   MIN_DEPOSIT_ATOMIC,
-  payerDir,
   ROUTING_FEE_ATOMIC,
   unpaid,
   usd,
 } from './fee';
+import { channelCredit } from './channel-credit';
 import { loadStep, pluginProof, settingsInstallPaths } from './install';
 import { inspectLegacyInstall, type LegacyInstall } from './legacy-install';
 import { routerSettings, type RouterSettings } from './settings';
@@ -652,21 +651,6 @@ export async function routingFeeBlock(input: RoutingFeeInput): Promise<string | 
     ...(input.fetchImpl !== undefined ? { fetchImpl: input.fetchImpl } : {}),
   });
   return balance !== null && balance < deposit ? 'wallet_low' : null;
-}
-
-/** What the wallet's routing channel still holds for fees, from the SDK's own files. */
-async function channelCredit(dataDir: string, address: string): Promise<bigint> {
-  const dir = payerDir(dataDir, address);
-  const storage = new FileClientChannelStorage({ directory: dir });
-  let best = 0n;
-  for (const name of await readdir(join(dir, 'client')).catch(() => [] as string[])) {
-    const id = /^(0x[0-9a-f]{64})\.json$/.exec(name)?.[1];
-    const channel = id === undefined ? undefined : await storage.get(id).catch(() => undefined);
-    if (channel === undefined) continue;
-    const credit = BigInt(channel.balance ?? '0') - BigInt(channel.chargedCumulativeAmount ?? '0');
-    if (credit > best) best = credit;
-  }
-  return best;
 }
 
 /** INFORMATIONAL: which experiment is on, in one line. Either state passes. */

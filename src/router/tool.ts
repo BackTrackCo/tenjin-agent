@@ -34,10 +34,11 @@ import {
   type DecisionContract,
   type DecisionDeps,
   type DecisionDiagnostics,
+  type DecisionRoute,
   type OfferSpec,
 } from './decision';
 import { pickChoice, runChoiceSet, showChoices } from './choices';
-import { FEE_REQUIRED, isFeeRequired, unpaidSentence, type RouteFor } from './fee';
+import { depositSentence, FEE_REQUIRED, isFeeRequired, unpaidSentence, type RouteFor } from './fee';
 import { unpaidNotice } from './spend-question';
 import { clearRouterMemo } from './router-memo';
 import { loadRawConfig } from '../lib/config';
@@ -144,6 +145,34 @@ export interface RequestToolResult {
 }
 
 export async function runRequestTool(
+  args: RequestToolArgs,
+  deps: RequestToolDeps,
+): Promise<RequestToolResult> {
+  // A ROUTING DEPOSIT IS SAID WHERE THE AGENT READS IT: once, in the result of
+  // the call that took it, beside whatever that call answered. A hook leg says
+  // it in its `systemMessage` instead.
+  const routes: DecisionRoute[] = [];
+  const { route } = deps;
+  const result = await requestTool(
+    args,
+    route === undefined
+      ? deps
+      : {
+          ...deps,
+          route: async (baseUrl) => {
+            const picked = await route(baseUrl);
+            if (picked !== null) routes.push(picked);
+            return picked;
+          },
+        },
+  );
+  const deposited = routes.reduce((sum, r) => sum + (r.deposited?.() ?? 0n), 0n);
+  return deposited > 0n
+    ? { ...result, summary: `${result.summary}\n${depositSentence(deposited)}` }
+    : result;
+}
+
+async function requestTool(
   args: RequestToolArgs,
   deps: RequestToolDeps,
 ): Promise<RequestToolResult> {

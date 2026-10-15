@@ -22,7 +22,7 @@ import {
 } from './context';
 import { storeChoices, storeSpecs } from './specs';
 import { requestDecision, ROUTER_PATH, type HookDecision } from './decision';
-import { FEE_REQUIRED, firstNoticeFor, isFeeRequired, type RouteFor } from './fee';
+import { depositSentence, FEE_REQUIRED, firstNoticeFor, isFeeRequired, type RouteFor } from './fee';
 import { unpaidNotice } from './spend-question';
 import { readsAsEmptyPage, savedPdfOf } from './fetch-result';
 import { GATE_TIMEOUT_MS } from './gate';
@@ -1503,6 +1503,10 @@ async function decide(
       ...(route !== null ? { route } : {}),
     },
   );
+  // A DEPOSIT IS NEWS ONCE, when it is taken: it moved money into routing
+  // credit, and the user would otherwise see it only as spend.
+  const deposited = route?.deposited?.() ?? 0n;
+  if (deposited > 0n) deps.notice?.(depositSentence(deposited));
   const why =
     outcome.status === 'skipped'
       ? outcome.why

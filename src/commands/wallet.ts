@@ -7,6 +7,7 @@ import { loadRawConfig, resolveSettings } from '../lib/config';
 import { toMoney } from '../lib/money';
 import { getUsdcBalance } from '../lib/usdc';
 import { addressQrLines } from '../lib/qr';
+import { channelCredit } from '../router/channel-credit';
 import {
   commitLocalWallet,
   createLocalWallet,
@@ -316,9 +317,17 @@ export async function runWalletBalance(
   }
 
   const balance = toMoney(atomic.toString());
+  // THE ROUTING CREDIT IS STILL THE USER'S: a deposit moved it off the wallet
+  // into the routing channel, where the next routing fees draw from it.
+  const credit = toMoney(
+    (await channelCredit(ctx.dataDir, desc.address).catch(() => 0n)).toString(),
+  );
   return {
-    data: { address: desc.address, balance },
-    humanLines: [`Balance: ${balance.usd} USDC on Base`],
+    data: { address: desc.address, balance, routingCredit: credit },
+    humanLines: [
+      `Balance: ${balance.usd} USDC on Base` +
+        (credit.atomic !== '0' ? ` (+${credit.usd} routing credit)` : ''),
+    ],
   };
 }
 
