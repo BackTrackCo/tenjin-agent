@@ -47,8 +47,10 @@ const MAX_FIELDS = 6;
 const SPEND_WINDOW_MS = 86_400_000;
 /** The CLI's default `sessionBudget`, $5.00. */
 const DEFAULT_BUDGET_ATOMIC = '5000000';
-/** How far a ledger row's timestamp may sit outside the call that wrote it. */
-const LEDGER_SLACK_MS = 2_000;
+/** How far before the call's start its payment record's clock may read. */
+const RECORD_SLACK_MS = 2_000;
+/** The choice that runs every option of a choice set (`ALL_CHOICES` in the CLI). */
+const ALL_CHOICES = 'all';
 /** How the request tool's envelope opens: `JSON.stringify` puts `status` first. */
 const ENVELOPE = '{"status":"';
 /** A field whose name says secret is shown masked, whatever its value. */
@@ -93,8 +95,7 @@ async function onRequest<E extends { tool_use_id: string }>(
   if (running !== null) await update($, live, (list) => [...list, running]);
   try {
     const ran = await next(e);
-    const endedAt = await $.clock.now();
-    const settled = await settleCall($, call, ran, startedAt, endedAt);
+    const settled = await settleCall($, call, ran, startedAt);
     await $.state.set(ref, { ...call.row, ...settled.row });
     if (settled.paidAtomic !== undefined) {
       const paid: TenjinPaid = { amountAtomic: settled.paidAtomic };
@@ -234,35 +235,70 @@ export const register: Register = (on) => {
 
 interface Call {
   row: TenjinRow;
-  /** The offer's id, which names its spec and payment record. */
-  id?: string;
+  /**
+   * The offer ids whose payment records are this call's: the line's id, the
+   * picked option's for a `choice`, every option's for `choice: "all"`. Money
+   * is read from these records alone, never from a ledger row near in time.
+   */
+  ids: string[];
   priceAtomic?: string;
-  capabilityId?: string;
   dataDir: string | null;
 }
 
 /**
  * WHAT THE ROW SAYS BEFORE ANYTHING COMES BACK. `{id, input}` with a kept spec
- * is a paid call to that spec's service. `{id}` alone fetches the spec, and
- * `{query}` asks the server to pick: both are the router's own calls.
+ * is a paid call to that spec's service, and with a `choice` the call runs the
+ * picked option's own spec under its own id, or every option's for `all`
+ * (the choice set kept beside the line's id says which). `{id}` alone fetches
+ * the spec, `{query}` asks the server to pick, and `{browse}` and `{tool}` read
+ * the tool list: all of them are the router's own calls, and pay nothing.
  */
 async function describeCall($: Dollar, args: Json): Promise<Call> {
   const id = typeof args.id === 'string' && args.id.length > 0 ? args.id : undefined;
   const input = asRecord(args.input);
   const dataDir = await tenjinDataDir($);
-  const spec =
-    id !== undefined && input !== undefined && dataDir !== null
-      ? await readJson($, `${dataDir}/progress/specs/${await sha256Hex(id)}.json`)
-      : null;
   const fields =
     input !== undefined
       ? fieldLines(input)
       : typeof args.query === 'string'
         ? fieldLines({ query: args.query })
         : [];
-  if (input === undefined) {
-    return { row: { label: ROUTER, isPaid: false, fields }, ...(id ? { id } : {}), dataDir };
+  if (input === undefined || id === undefined || dataDir === null) {
+    return { row: { label: ROUTER, isPaid: false, fields }, ids: [], dataDir };
   }
+  const choice =
+    typeof args.choice === 'string' && args.choice.length > 0 ? args.choice : undefined;
+  if (choice !== undefined) {
+    const options = await choiceOptions($, dataDir, id);
+    if (choice === ALL_CHOICES && options.length > 0) {
+      const specs = await Promise.all(options.map((option) => readSpec($, dataDir, option.id)));
+      const prices = specs.map((spec) => atomicOf(spec?.priceAtomic));
+      const total = prices.every((one) => one !== undefined)
+        ? prices.reduce((sum, one) => sum + BigInt(one as string), 0n).toString()
+        : undefined;
+      return {
+        row: {
+          label: `${options.length} services`,
+          isPaid: true,
+          ...(total !== undefined ? { price: `for $${usd(total)}` } : {}),
+          fields,
+        },
+        ids: options.map((option) => option.id),
+        ...(total !== undefined ? { priceAtomic: total } : {}),
+        dataDir,
+      };
+    }
+    // The picked option runs as its own offer: its spec, its label, its payment.
+    const picked = options.find((option) => option.key === choice);
+    if (picked === undefined)
+      return { row: { label: ROUTER, isPaid: false, fields }, ids: [], dataDir };
+    return paidCall(await readSpec($, dataDir, picked.id), picked.id, fields, dataDir);
+  }
+  return paidCall(await readSpec($, dataDir, id), id, fields, dataDir);
+}
+
+/** One spec's call: its label, its price, and its own payment record. */
+function paidCall(spec: Json | null, id: string, fields: string[], dataDir: string): Call {
   const priceAtomic = atomicOf(spec?.priceAtomic);
   const ceiling = atomicOf(spec?.maxAmountAtomic);
   const varies = spec?.priceVaries === true && ceiling !== undefined;
@@ -273,24 +309,49 @@ async function describeCall($: Dollar, args: Json): Promise<Call> {
       : undefined;
   return {
     row: { label: labelOf(spec), isPaid: true, ...(price ? { price } : {}), fields },
-    ...(id !== undefined ? { id } : {}),
+    ids: [id],
     ...(priceAtomic !== undefined ? { priceAtomic } : {}),
-    ...(typeof spec?.capabilityId === 'string' ? { capabilityId: spec.capabilityId } : {}),
     dataDir,
   };
 }
 
 /**
- * HOW THE CALL ENDED, from the CLI's own records first: the spec's payment
- * record says what left for this id, and the paid ledger says whether it
- * settled. A call with neither paid nothing, and its result's status says why.
+ * The options of the choice set the CLI kept beside a line's id
+ * (`progress/specs/<sha256(id)>.choices.json`): each one's key and its own
+ * offer id. Empty when none is kept.
+ */
+async function choiceOptions(
+  $: Dollar,
+  dataDir: string,
+  id: string,
+): Promise<{ id: string; key: string }[]> {
+  const kept = await readJson($, `${dataDir}/progress/specs/${await sha256Hex(id)}.choices.json`);
+  const options = asRecord(kept?.choices)?.options;
+  if (!Array.isArray(options)) return [];
+  const rows = options.flatMap((one) => {
+    const option = asRecord(one);
+    return typeof option?.id === 'string' && typeof option.key === 'string'
+      ? [{ id: option.id, key: option.key }]
+      : [];
+  });
+  return rows;
+}
+
+async function readSpec($: Dollar, dataDir: string, id: string): Promise<Json | null> {
+  return readJson($, `${dataDir}/progress/specs/${await sha256Hex(id)}.json`);
+}
+
+/**
+ * HOW THE CALL ENDED. Money comes only from the payment records of this call's
+ * own offer ids, written since it started; the paid ledger is read only for
+ * the row a record names by its transaction, to say whether it settled. A
+ * call with no such record paid nothing, and its result's status says why.
  */
 async function settleCall(
   $: Dollar,
   call: Call,
   ran: { deny?: string; text?: string; isError?: true },
   startedAt: number,
-  endedAt: number,
 ): Promise<{ row: Partial<TenjinRow>; paidAtomic?: string; isSettled?: boolean }> {
   if (ran.deny !== undefined) return { row: { outcome: 'not run' } };
   const status = statusOf(ran.text);
@@ -300,58 +361,54 @@ async function settleCall(
     return { row: { outcome: refusalOf(status, ran.isError === true) } };
   }
   const { dataDir } = call;
-  const payment =
-    call.id !== undefined && dataDir !== null
-      ? await readJson($, `${dataDir}/progress/specs/${await sha256Hex(call.id)}.paid.json`)
-      : null;
-  const paidAt = typeof payment?.at === 'string' ? Date.parse(payment.at) : NaN;
-  const isThisCall = paidAt >= startedAt - LEDGER_SLACK_MS;
-  const paidAtomic =
-    isThisCall && payment?.state === 'paid' ? atomicOf(payment.amountAtomic) : undefined;
-  const ledger =
-    dataDir !== null
-      ? await ledgerRow($, dataDir, {
-          from: startedAt - LEDGER_SLACK_MS,
-          to: endedAt + LEDGER_SLACK_MS,
-          ...(call.capabilityId !== undefined ? { capabilityId: call.capabilityId } : {}),
-          ...(typeof payment?.txHash === 'string' ? { txHash: payment.txHash } : {}),
-        })
-      : null;
-  const amount = paidAtomic ?? atomicOf(ledger?.amountAtomic);
-  if (amount !== undefined && BigInt(amount) > 0n) {
-    const settlement = ledger?.settlement;
-    if (settlement === 'not_charged') return { row: { outcome: 'not charged' } };
-    const isSettled = settlement === 'settled';
+  if (dataDir === null || call.ids.length === 0) {
+    return { row: { outcome: refusalOf(status, ran.isError === true) } };
+  }
+  const records = (
+    await Promise.all(
+      call.ids.map(async (id) =>
+        readJson($, `${dataDir}/progress/specs/${await sha256Hex(id)}.paid.json`),
+      ),
+    )
+  ).flatMap((record) => {
+    // A record from before this call started is an earlier call's.
+    const at = typeof record?.at === 'string' ? Date.parse(record.at) : NaN;
+    return record !== null && at >= startedAt - RECORD_SLACK_MS ? [record] : [];
+  });
+  const paid = records.filter(
+    (record) => record.state === 'paid' && atomicOf(record.amountAtomic) !== undefined,
+  );
+  const ledger = paid.some((record) => typeof record.txHash === 'string')
+    ? await readLedger($, dataDir)
+    : [];
+  let total = 0n;
+  let settled = 0;
+  let notCharged = 0;
+  for (const record of paid) {
+    const row =
+      typeof record.txHash === 'string'
+        ? ledger.findLast((one) => one.txHash === record.txHash)
+        : undefined;
+    if (row?.settlement === 'not_charged') {
+      notCharged += 1;
+      continue;
+    }
+    if (row?.settlement === 'settled') settled += 1;
+    total += BigInt(atomicOf(record.amountAtomic) as string);
+  }
+  if (total > 0n) {
+    const isSettled = settled === paid.length - notCharged;
     return {
-      row: { outcome: `$${usd(amount)} · ${isSettled ? 'settled' : 'paid'}` },
-      paidAtomic: amount,
+      row: { outcome: `$${usd(total.toString())} · ${isSettled ? 'settled' : 'paid'}` },
+      paidAtomic: total.toString(),
       isSettled,
     };
   }
-  if (isThisCall && payment?.state === 'possibly_paid') return { row: { outcome: 'pending' } };
+  if (notCharged > 0) return { row: { outcome: 'not charged' } };
+  if (records.some((record) => record.state === 'possibly_paid')) {
+    return { row: { outcome: 'pending' } };
+  }
   return { row: { outcome: refusalOf(status, ran.isError === true) } };
-}
-
-/** The one ledger row this call wrote: by its transaction when the payment
- *  record names one, else by its service and its time. Version 1 rows only. */
-async function ledgerRow(
-  $: Dollar,
-  dataDir: string,
-  match: { from: number; to: number; capabilityId?: string; txHash?: string },
-): Promise<Json | null> {
-  const rows = (await readLedger($, dataDir)).slice(-200);
-  const byTx =
-    match.txHash !== undefined ? rows.findLast((row) => row.txHash === match.txHash) : undefined;
-  return (
-    byTx ??
-    rows.findLast((row) => {
-      const at = typeof row.ts === 'string' ? Date.parse(row.ts) : NaN;
-      const sameService =
-        match.capabilityId === undefined || row.capabilityId === match.capabilityId;
-      return sameService && at >= match.from && at <= match.to;
-    }) ??
-    null
-  );
 }
 
 async function readLedger($: Dollar, dataDir: string): Promise<Json[]> {

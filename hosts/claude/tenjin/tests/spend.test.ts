@@ -92,3 +92,14 @@ test("a subagent's turn adds no line of its own", async ($, on) => {
   const sub = await $.turn.complete({ ...ended('turn-1'), agentId: 'agent-1' });
   expect(sub.text).toBe(ANSWER);
 });
+
+test('a free browse right after a paid lookup pays and counts nothing', async ($, on) => {
+  await paidMachine(on);
+  const free = JSON.stringify({ status: 'fulfilled', rows: [] });
+  on('tool.call', { tool: TOOL, browse: '' }, () => ({ result: free, text: free }));
+  await $.turn.start({ text: 'what tools are there?', turnId: 'turn-1' });
+  await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_1', id: EXA, input: { query: 'rust' } });
+  await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_2', browse: '' });
+  const { text } = await $.turn.complete(ended('turn-1'));
+  expect(text).toBe('Tenjin: 1 paid lookup, $0.04 · today $0.31 of $5.00');
+});

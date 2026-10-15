@@ -158,3 +158,24 @@ export function toolRow(toolUseId: string, tool: string, input: unknown) {
     isInterrupted: false,
   };
 }
+
+/** A choice set as the CLI keeps it beside the line's id: each option's key and own offer id. */
+export async function keepChoices(
+  files: Map<string, string>,
+  id: string,
+  options: { key: string; id: string; label: string }[],
+): Promise<void> {
+  files.set(
+    `${DATA}/progress/specs/${await sha256Hex(id)}.choices.json`,
+    JSON.stringify({
+      choices: {
+        group: 'image model',
+        default: options[0]!.key,
+        input: ['prompt'],
+        options: options.map((option) => ({ ...option, strength: 'fast' })),
+        all: { totalAtomic: '0' },
+      },
+      hint: 'Pick an image model: https://example.test',
+    }),
+  );
+}
