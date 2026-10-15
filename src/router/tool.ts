@@ -1197,6 +1197,9 @@ async function deliverResult(
   result: RequestToolResult;
   outcome: Omit<SpecOutcome, 'id' | 'ms'>;
   savedFiles: string[];
+  /** Why a file the result carries was not saved: a job's take stays
+   *  resumable over it, since the seller still holds the result. */
+  unsaved?: string;
 }> {
   const built = call.request;
   const parameters = call.parameters !== undefined ? { parameters: call.parameters } : {};
@@ -1214,6 +1217,7 @@ async function deliverResult(
           ...(budget !== undefined ? { budget } : {}),
         })
       : null;
+  let unsaved = binary?.saveError;
   // AND A PAID MEDIA RESULT THAT LINKS TO ITS FILES brings them home: the
   // links can expire, and the user paid for what is behind them. Only a
   // media service (every discovered one, where generated images, audio and
@@ -1233,6 +1237,7 @@ async function deliverResult(
             ...now,
             ...(budget !== undefined ? { budget } : {}),
           });
+          unsaved ??= saved.saveError;
           return saved.savedTo ?? null;
         })
       : null;
@@ -1298,6 +1303,7 @@ async function deliverResult(
     return {
       outcome: { status: 'unverified', ...httpStatus },
       savedFiles,
+      ...(unsaved !== undefined ? { unsaved } : {}),
       result: {
         isError: true,
         summary: `Unverified result from ${base.supplier} · ${base.cost.join(' · ')}`,
@@ -1313,6 +1319,7 @@ async function deliverResult(
   return {
     outcome: { status: 'fulfilled', ...httpStatus },
     savedFiles,
+    ...(unsaved !== undefined ? { unsaved } : {}),
     result: {
       isError: false,
       summary: `Fulfilled by ${base.supplier} · ${base.cost.join(' · ')}`,
@@ -1681,6 +1688,16 @@ async function finishTake(
         ledger: nonce !== undefined ? { update: nonce } : 'none',
       },
     );
+    // A RESULT NOT SAVED HERE IS NOT AN ENDING: the seller still holds it, so
+    // the take stays running, its copy is never freed, and a resume fetches
+    // it again with nothing more paid.
+    if (delivered.unsaved !== undefined) {
+      await footer.done('running', shown);
+      return {
+        outcome: { status: 'running', httpStatus: answer.status },
+        result: unsavedResult(take, call, opts.kept, delivered.unsaved),
+      };
+    }
     const ended = await end({
       state: 'done',
       savedFiles: delivered.savedFiles.slice(0, 16),
@@ -1690,13 +1707,8 @@ async function finishTake(
     });
     if (ended?.won === false) return lostTo(ended.take);
     // THE SELLER'S COPY IS FREED once ours is on disk, by the call that ended
-    // the take: never after a save that failed, when the seller's copy is the
-    // only one, nor while the record still says running.
-    const saved =
-      delivered.savedFiles.length > 0 &&
-      (delivered.result.envelope.result as { saveError?: unknown } | undefined)?.saveError ===
-        undefined;
-    if (saved && ended !== undefined) {
+    // the take: never while the record still says running.
+    if (delivered.savedFiles.length > 0 && ended !== undefined) {
       await completeJob({ ...current, submitUrl: take.call.url }, pollDeps(deps, current));
     }
     return {
@@ -1793,6 +1805,30 @@ function runningResult(
       nextStep,
       providerContentUntrusted: true,
     },
+  };
+}
+
+/** A take the seller finished whose result this machine could not save: still
+ *  running, so a resume fetches it again, with nothing more paid. */
+function unsavedResult(
+  take: JobTake,
+  call: DeliverCall,
+  kept: boolean,
+  why: string,
+): RequestToolResult {
+  const running = runningResult(
+    take,
+    call,
+    kept,
+    `The seller finished it and the payment went through, but it could not be saved here (${why}).`,
+  );
+  const nextStep = kept
+    ? `Tell the user why it was not saved, then call request({job: ${JSON.stringify(take.offerId)}}) to fetch it again; nothing more is paid.`
+    : String(running.envelope.nextStep);
+  return {
+    ...running,
+    summary: `Paid; ${supplierOf(take.call.url)} finished it, but it could not be saved here (${why}). ${nextStep}`,
+    envelope: { ...running.envelope, nextStep },
   };
 }
 

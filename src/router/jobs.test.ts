@@ -809,7 +809,7 @@ describe("AiSpace's queue, polled free with the queue id", () => {
     ]);
   });
 
-  it("never frees the seller's copy when the clip could not be saved", async () => {
+  it('keeps a clip that could not be saved resumable, and fetches it again unpaid', async () => {
     await storeSpecs(dir, [AISPACE]);
     // The downloads directory cannot be made: every save fails.
     await writeFile(join(dir, 'downloads'), 'not a directory');
@@ -817,12 +817,34 @@ describe("AiSpace's queue, polled free with the queue id", () => {
     const { transport, seen } = polls([{ status: 200, bytes: MP4 }]);
     const result = await runRequestTool({ id: ID, input: INPUT }, deps(fetchImpl, transport));
     expect(result.envelope).toMatchObject({
-      status: 'fulfilled',
-      result: { saveError: expect.any(String) as string },
+      status: 'running',
+      job: ID,
+      cost: ['provider price 0.145 USD'],
+      nextStep: expect.stringContaining(`request({job: "${ID}"})`) as string,
     });
+    expect(String(result.envelope.note)).toContain('the payment went through');
+    // AiSpace's copy is the only one: never freed.
     expect(seen.map((poll) => poll.url)).toEqual([
       'https://x402.aispace.bot/api/v1/video/retrieve',
     ]);
+    expect(await readTake(dir, ID, 1)).toMatchObject({ state: 'running' });
+
+    await rm(join(dir, 'downloads'));
+    const auth = authorizer();
+    const again = polls([
+      { status: 200, bytes: MP4 },
+      { status: 200, body: { success: true } },
+    ]);
+    const resumed = await runRequestTool({ job: ID }, deps(fetchImpl, again.transport, { auth }));
+    expect(resumed.envelope).toMatchObject({ status: 'fulfilled', job: ID });
+    const saved = (resumed.envelope.savedFiles as string[])[0]!;
+    expect(new Uint8Array(await readFile(saved))).toEqual(MP4);
+    expect(again.seen.map((poll) => poll.url)).toEqual([
+      'https://x402.aispace.bot/api/v1/video/retrieve',
+      'https://x402.aispace.bot/api/v1/video/complete',
+    ]);
+    expect(auth.authorize).not.toHaveBeenCalled();
+    expect(await readTake(dir, ID, 1)).toMatchObject({ state: 'done', savedFiles: [saved] });
   });
 
   /** TWO CALLS POLLING ONE TAKE: the host gave up on the call that started
