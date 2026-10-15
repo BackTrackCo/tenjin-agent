@@ -92,8 +92,10 @@ function authorizer(): SpendAuthorizer {
 }
 
 /** The seller: a 402, then the image, except the paid takes `failing` names
- *  (by the order they arrive), which answer 500 after the payment left. */
-function seller(failing: number[] = []) {
+ *  (by the order they arrive), which answer 500 after the payment left. A
+ *  `slowMs` paid answer keeps every take's payment in flight at once, as a
+ *  real render does. */
+function seller(failing: number[] = [], slowMs = 0) {
   const calls: { url: string; paid: boolean; body?: string }[] = [];
   let paidSeen = 0;
   const fetchImpl = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
@@ -109,7 +111,9 @@ function seller(failing: number[] = []) {
       });
     }
     paidSeen += 1;
-    if (failing.includes(paidSeen)) {
+    const seen = paidSeen;
+    if (slowMs > 0) await new Promise((resolve) => setTimeout(resolve, slowMs));
+    if (failing.includes(seen)) {
       return new Response(JSON.stringify({ error: 'render failed' }), {
         status: 500,
         headers: { 'content-type': 'application/json' },
@@ -155,7 +159,7 @@ describe('several takes of one call', () => {
   it('pays each take under its own claim and request key, and passes the real duplicate guard', async () => {
     const settings = await resolveContextSettings(ctx());
     const auth = createLocalSpendAuthorizer({ dir, policy: settings.policy });
-    const { fetchImpl, calls } = seller();
+    const { fetchImpl, calls } = seller([], 100);
     const result = await runRequestTool({ id: ID, input: INPUT, count: 3 }, deps(fetchImpl, auth));
     expect(result.envelope).toMatchObject({
       status: 'fulfilled',

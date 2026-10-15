@@ -589,6 +589,15 @@ describe('what the tool tells the model to send', () => {
       // A projected result says where the rest of the response went.
       expect(request.description).toContain('`fullResultPath`');
       expect(schema.properties.input?.type).toBe('object');
+      // Several takes of a media call, and a job resumed by its id.
+      const extra = request.inputSchema.properties as Record<
+        string,
+        { type?: string; minimum?: number; maximum?: number; description?: string }
+      >;
+      expect(extra.count).toMatchObject({ type: 'integer', minimum: 2, maximum: 5 });
+      expect(extra.count?.description).toContain('its own payment');
+      expect(extra.job).toMatchObject({ type: 'string' });
+      expect(extra.job?.description).toContain('nothing more is paid');
       // THE ONE DISCOVERY SENTENCE IS GENERIC TOO: it names no marketplace and
       // no seller, only when to ask.
       expect(request.description).toContain(
