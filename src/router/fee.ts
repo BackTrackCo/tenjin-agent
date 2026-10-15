@@ -28,6 +28,12 @@ export const CHANNEL_DEPOSIT_ATOMIC = 250_000n;
  * $0.25 sizes the deposit down to the limit while it still covers this many.
  */
 export const MIN_DEPOSIT_ATOMIC = 10n * ROUTING_FEE_ATOMIC;
+/**
+ * The top-up every "fund the wallet" hint names, in USD: the README's amount,
+ * the routing deposit and a few hundred lookups. `tenjin wallet fund` sends it
+ * to the checkout as a preset, which the checkout raises to its own floor.
+ */
+export const SUGGESTED_FUND_USD = '2';
 /** The spend ledger key a deposit's exposure is recorded under, before its id. */
 export const ROUTING_DEPOSIT_KEY = 'routing-deposit:';
 
@@ -85,7 +91,7 @@ export function isFeeRequired(response: unknown): boolean {
 const UNPAID: Record<string, { reason: string; fix: string }> = {
   wallet_low: {
     reason: `the wallet holds less than the $${usd(CHANNEL_DEPOSIT_ATOMIC)} routing deposit`,
-    fix: `Fund it with \`tenjin wallet fund ${usd(CHANNEL_DEPOSIT_ATOMIC)}\`.`,
+    fix: `Fund it with \`tenjin wallet fund ${SUGGESTED_FUND_USD}\`.`,
   },
   wallet_locked: {
     reason: '`tenjin mcp` cannot unlock the wallet without a prompt',

@@ -189,9 +189,7 @@ describe('runWalletCreate', () => {
 
   it('emits the exact funding line', async () => {
     const res = await runWalletCreate(makeCtx());
-    expect(res.humanLines).toContain(
-      'Fund it with `tenjin wallet fund` (card via Coinbase), or send USDC on Base. $5 covers ~50 typical resources.',
-    );
+    expect(res.humanLines).toContain('Fund it with `tenjin wallet fund 2`, or send USDC on Base.');
   });
 
   it('reports that the key is stored encrypted', async () => {

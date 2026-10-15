@@ -29,6 +29,7 @@ import {
   feeRefusal,
   MIN_DEPOSIT_ATOMIC,
   ROUTING_FEE_ATOMIC,
+  SUGGESTED_FUND_USD,
   unpaid,
   usd,
 } from './fee';
@@ -589,7 +590,7 @@ export function routingFeeRow(
     };
   }
   const fixes: Record<string, string> = {
-    no_wallet: 'Run `tenjin wallet create`, then `tenjin wallet fund 0.25`.',
+    no_wallet: `Run \`tenjin wallet create\`, then \`tenjin wallet fund ${SUGGESTED_FUND_USD}\`.`,
     limit_below_deposit: `Raise it with \`tenjin config set maxAutoSpend ${usd(CHANNEL_DEPOSIT_ATOMIC)}\`.`,
     budget_reached:
       'Room comes back as the rolling day passes, or raise it with `tenjin config set sessionBudget <usd>`.',
@@ -728,7 +729,7 @@ async function walletCheck(ctx: CommandContext): Promise<RouterCheck[]> {
         status: 'fail',
         required: true,
         detail: 'no wallet on this machine, so nothing can pay',
-        fix: 'Run `tenjin wallet create`, then `tenjin wallet fund`.',
+        fix: `Run \`tenjin wallet create\`, then \`tenjin wallet fund ${SUGGESTED_FUND_USD}\`.`,
       },
     ];
   }

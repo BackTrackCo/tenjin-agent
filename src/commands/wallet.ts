@@ -8,6 +8,7 @@ import { toMoney } from '../lib/money';
 import { getUsdcBalance } from '../lib/usdc';
 import { addressQrLines } from '../lib/qr';
 import { channelCredit } from '../router/channel-credit';
+import { SUGGESTED_FUND_USD } from '../router/fee';
 import {
   commitLocalWallet,
   createLocalWallet,
@@ -25,8 +26,7 @@ import { resolvePassphraseForCreate, type PassphraseSource } from '../lib/wallet
 import type { PassphraseOverrides } from '../lib/wallet/local';
 import type { CommandContext, CommandResult } from '../context';
 
-const FUNDING_LINE =
-  'Fund it with `tenjin wallet fund` (card via Coinbase), or send USDC on Base. $5 covers ~50 typical resources.';
+const FUNDING_LINE = `Fund it with \`tenjin wallet fund ${SUGGESTED_FUND_USD}\`, or send USDC on Base.`;
 const KEY_STORAGE = 'encrypted (keystore v3, scrypt)';
 const isWindows = process.platform === 'win32';
 
