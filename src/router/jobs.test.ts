@@ -681,14 +681,11 @@ describe('several takes, each its own job', () => {
       cost: ['provider price 0.128 USD'],
       nextStep: `Call request({job: "${ID}"}) in a minute or two for what is still running; nothing more is paid.`,
     });
-    const statuses = (result.envelope.results as Record<string, unknown>[]).map((take) => [
-      take.take,
-      take.status,
-    ]);
-    expect(statuses.sort()).toEqual([
-      [1, 'fulfilled'],
-      [2, 'running'],
-    ]);
+    // The takes submit side by side, so which one drew the quick render is
+    // the race's: one of each, in take order.
+    const results = result.envelope.results as Record<string, unknown>[];
+    expect(results.map((take) => take.take)).toEqual([1, 2]);
+    expect(results.map((take) => take.status).sort()).toEqual(['fulfilled', 'running']);
     expect(
       calls.filter((call) => call.payment !== undefined && !call.url.startsWith(ROUTER)),
     ).toHaveLength(2);
