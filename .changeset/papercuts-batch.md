@@ -11,3 +11,6 @@ Small fixes across the CLI:
 - Every funding hint names the same amount, `tenjin wallet fund 2`.
 - The request tool's description says it also generates images, voice, music, sound and video.
 - A wallet too low to pay says how much USDC it is short.
+- A `tenjin install --project` install is refreshed by `tenjin update`, from its own directory; `install --project` records it.
+- A bare `tenjin doctor` in a project installed with `--project` checks that install, and the install names `tenjin doctor --project`.
+- A bare `tenjin uninstall` in such a project says it left the project's install in place and names `tenjin uninstall --project`.
