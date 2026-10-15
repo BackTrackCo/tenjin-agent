@@ -1,3 +1,5 @@
+import { quoteRouterCall } from '../commands/pay';
+import { CliError } from '../lib/errors';
 import { toMoney } from '../lib/money';
 import { policyCoversSet, type SpendPolicy } from '../lib/policy';
 import { policyFix } from '../lib/spend-gate';
@@ -18,10 +20,12 @@ import {
   alreadyPaid,
   costLines,
   fail,
+  failureOutcome,
   paySpec,
   prepareSpec,
   reportOutcome,
   runningJob,
+  specTerms,
   type FailStatus,
   type PreparedSpec,
   type ReportDeps,
@@ -150,10 +154,12 @@ type StepResult = { status: unknown } & Record<string, unknown>;
  * 3. Each step's one payment is claimed. One already claimed runs no second
  *    time; when none is left, the caller says so in its own words.
  * 4. The claimed steps, together, fit the spend policy: each under the
- *    per-call cap, the total inside the budget. If not, every claim is
- *    dropped and the answer is `needs_approval` with the total, with nothing
- *    signed. The wallet's balance covers the total too, or the set is refused
- *    the same way, as a single payment is.
+ *    per-call cap, the total inside the budget, each at `price` when the
+ *    caller quoted one (a count's live price) and at its spec's ceiling
+ *    otherwise. If not, every claim is dropped and the answer is
+ *    `needs_approval` with the total, with nothing signed. The wallet's
+ *    balance covers the total too, or the set is refused the same way, as a
+ *    single payment is.
  * 5. Every claimed step pays at once, through the single-offer pay step.
  */
 async function runTakes(
@@ -167,6 +173,8 @@ async function runTakes(
     refuse: (status: FailStatus, reason: string, nextStep: string) => Promise<RequestToolResult>;
     pickOne: string;
   },
+  /** What each step is checked at, when the caller quoted it live. */
+  price?: bigint,
 ): Promise<{ refused: RequestToolResult } | { ran: StepRan[]; claimed: number }> {
   const { dataDir } = deps.ctx;
   const claimed: TakeStep[] = [];
@@ -183,19 +191,23 @@ async function runTakes(
         await settleSpecPayment(dataDir, step.claim, { amountAtomic: 0n, signed: false });
       }
     };
-    const ceiling = claimed.reduce(
-      (sum, { prepared }) => sum + BigInt(prepared.spec.maxAmountAtomic),
-      0n,
-    );
+    const amountOf = (step: TakeStep): bigint =>
+      price ?? BigInt(step.prepared.spec.maxAmountAtomic);
+    const ceiling = claimed.reduce((sum, step) => sum + amountOf(step), 0n);
+    const costs =
+      price !== undefined
+        ? `costs $${toMoney(ceiling.toString()).usd} at its live price`
+        : `costs up to $${toMoney(ceiling.toString()).usd}`;
 
     // ONE SPEND CHECK FOR THE WHOLE SET, against the same ledger and policy an
-    // authorization reads, at each step's ceiling, before anything is signed.
+    // authorization reads, before anything is signed: at the live price when
+    // the caller quoted one, else at each step's ceiling.
     const ledger = await readSpendSummary(dataDir);
     const evaluation = policyCoversSet(
       settings.policy,
-      claimed.map(({ prepared }) => ({
-        amountAtomic: BigInt(prepared.spec.maxAmountAtomic),
-        creator: new URL(prepared.built.url).host,
+      claimed.map((step) => ({
+        amountAtomic: amountOf(step),
+        creator: new URL(step.prepared.built.url).host,
       })),
       ledger === null ? 0n : spentOf(ledger),
     );
@@ -205,7 +217,7 @@ async function runTakes(
       return {
         refused: await words.refuse(
           'needs_approval',
-          `${what(claimed.length)} costs up to $${toMoney(ceiling.toString()).usd}: ${evaluation.message} ${policyFix(evaluation.reason, 'this host')}`,
+          `${what(claimed.length)} ${costs}: ${evaluation.message} ${policyFix(evaluation.reason, 'this host')}`,
           `Report the command above to the user, or ${words.pickOne}; nothing was paid.`,
         ),
       };
@@ -222,7 +234,7 @@ async function runTakes(
       return {
         refused: await words.refuse(
           'failed',
-          `${what(claimed.length)} costs up to $${toMoney(ceiling.toString()).usd}, and the wallet holds $${toMoney(balance.toString()).usd}: $${toMoney((ceiling - balance).toString()).usd} short. The wallet has insufficient USDC; no payment was signed. Fund this wallet on Base with \`tenjin wallet fund\` before paying.`,
+          `${what(claimed.length)} ${costs}, and the wallet holds $${toMoney(balance.toString()).usd}: $${toMoney((ceiling - balance).toString()).usd} short. The wallet has insufficient USDC; no payment was signed. Fund this wallet on Base with \`tenjin wallet fund\` before paying.`,
           `Tell the user, or ${words.pickOne} the wallet covers; nothing was paid.`,
         ),
       };
@@ -515,6 +527,19 @@ export async function runCount(
   };
   const checked = await prepareSpec(id, spec, input, footer, reportDeps);
   if ('refused' in checked) return checked.refused;
+  // THE LIVE PRICE, ONCE, before anything is claimed: the number a single
+  // call of this input gates on, so a price that varies by input is checked
+  // at what this input costs, not at the spec's ceiling. Each take still
+  // meets the spend gate on its own when it is signed, at its own live
+  // price: one quoted higher than this is checked again there, and refused
+  // with nothing signed if it no longer fits.
+  const quoted = await quoteTake(checked.prepared, deps);
+  if ('refused' in quoted) {
+    const { outcome, result } = quoted.refused;
+    if (outcome !== null) reportOutcome(reportDeps, id, outcome, startedAt);
+    await footer.done(String(result.envelope.status));
+    return result;
+  }
   const steps: TakeStep[] = Array.from({ length: count }, (_, index) => {
     const n = index + 1;
     const claim = n === 1 ? id : `${id}#${n}`;
@@ -536,6 +561,7 @@ export async function runCount(
       refuse,
       pickOne: 'run fewer takes',
     },
+    quoted.atomic,
   );
   if ('refused' in run) return run.refused;
   if (run.claimed === 0) {
@@ -567,6 +593,80 @@ export async function runCount(
   if (outcome !== null) reportOutcome(reportDeps, id, outcome, startedAt);
   await footer.done(status, { price: `$${toMoney(paidHere(run.ran).toString()).usd}` });
   return set;
+}
+
+/**
+ * ONE TAKE'S LIVE PRICE, from an unpaid probe held to the spec's terms, or
+ * the refusal a single call would have met there, with nothing signed: an
+ * input the seller rejects, a price over the spec's ceiling, a seller that
+ * cannot be reached.
+ */
+async function quoteTake(
+  prepared: PreparedSpec,
+  deps: RequestToolDeps,
+): Promise<
+  | { atomic: bigint }
+  | {
+      refused: {
+        result: RequestToolResult;
+        outcome: ReturnType<typeof failureOutcome>;
+      };
+    }
+> {
+  const { spec, built } = prepared;
+  try {
+    const atomic = await quoteRouterCall(
+      {
+        url: built.url,
+        method: built.method,
+        headers: built.headers,
+        ...(built.body !== undefined ? { rawBody: built.body } : {}),
+        terms: specTerms(spec),
+      },
+      deps.ctx,
+      // The same seams the paid leg is given.
+      deps.payDeps ?? {},
+    );
+    return { atomic };
+  } catch (err) {
+    const cli = err instanceof CliError ? err : undefined;
+    const detail = (cli?.details ?? {}) as {
+      status?: number;
+      providerError?: string;
+      live?: { amount?: string };
+    };
+    const rejectedInput = detail.status === 400 || detail.status === 422;
+    const live = detail.live?.amount;
+    const overCeiling =
+      spec.priceVaries &&
+      cli?.code === 'REGISTRY_MISMATCH' &&
+      live !== undefined &&
+      /^\d+$/.test(live);
+    const reason = overCeiling
+      ? `${spec.provider} prices this input at $${toMoney(live).usd}, over this spec's $${toMoney(spec.maxAmountAtomic).usd} ceiling, so nothing was signed. Change the input and call again with the same id.`
+      : rejectedInput
+        ? `${spec.provider} rejected this input before any payment (HTTP ${String(detail.status)}): see providerError. Fix the input and call again with the same id.`
+        : cli !== undefined
+          ? `${cli.message} ${cli.fix ?? ''}`.trim()
+          : String(err);
+    const status: FailStatus = cli?.code === 'POLICY_REFUSED' ? 'needs_approval' : 'failed';
+    return {
+      refused: {
+        outcome: failureOutcome(err, { mayHaveMoved: false, rejectedInput }),
+        result: fail(status, reason, {
+          ...(typeof detail.status === 'number' ? { providerStatus: detail.status } : {}),
+          ...(typeof detail.providerError === 'string'
+            ? { providerError: detail.providerError }
+            : {}),
+          request: { method: built.method, url: built.url },
+          parameters: prepared.sentInput,
+          ...(overCeiling || rejectedInput
+            ? { nextStep: 'Change the input and call again with the same id.' }
+            : {}),
+        }),
+      },
+    };
+  }
 }
 
 /** The paying wallet's USDC balance, read the way `runPay` reads it, or null

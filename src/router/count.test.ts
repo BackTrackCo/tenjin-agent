@@ -94,17 +94,21 @@ function authorizer(): SpendAuthorizer {
 /** The seller: a 402, then the image, except the paid takes `failing` names
  *  (by the order they arrive), which answer 500 after the payment left. A
  *  `slowMs` paid answer keeps every take's payment in flight at once, as a
- *  real render does. */
-function seller(failing: number[] = [], slowMs = 0) {
+ *  real render does. `quotes` prices each unpaid request in the order it
+ *  arrives, the last one repeating; the spec's price otherwise. */
+function seller(failing: number[] = [], slowMs = 0, quotes: string[] = [SPEC.priceAtomic]) {
   const calls: { url: string; paid: boolean; body?: string }[] = [];
   let paidSeen = 0;
+  let quotesSeen = 0;
   const fetchImpl = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
     const url = String(input);
     const paid = new Headers(init?.headers ?? {}).get('payment-signature') !== null;
     calls.push({ url, paid, ...(typeof init?.body === 'string' ? { body: init.body } : {}) });
     if (url.startsWith(ROUTER)) return new Response(null, { status: 204 });
     if (!paid) {
-      const challenge = buildPaymentRequired({ amount: SPEC.priceAtomic, payTo: PAY_TO });
+      const amount = quotes[Math.min(quotesSeen, quotes.length - 1)]!;
+      quotesSeen += 1;
+      const challenge = buildPaymentRequired({ amount, payTo: PAY_TO });
       return new Response('{}', {
         status: 402,
         headers: { 'content-type': 'application/json', 'PAYMENT-REQUIRED': challenge.header },
@@ -214,10 +218,15 @@ describe('several takes of one call', () => {
       status: 'needs_approval',
       cost: ['provider price 0 USD'],
     });
-    expect(String(result.envelope.reason)).toContain('3 takes of AiSpace (Muse) costs up to $0.15');
+    expect(String(result.envelope.reason)).toContain(
+      '3 takes of AiSpace (Muse) costs $0.15 at its live price',
+    );
     expect(String(result.envelope.reason)).toContain('tenjin config set sessionBudget');
     expect(auth.authorize).not.toHaveBeenCalled();
-    expect(calls.filter((call) => !call.url.startsWith(ROUTER))).toEqual([]);
+    // One unpaid probe for the price, and nothing else.
+    expect(calls.filter((call) => !call.url.startsWith(ROUTER))).toEqual([
+      expect.objectContaining({ paid: false }),
+    ]);
     expect(await claims()).toEqual([]);
   });
 
@@ -228,7 +237,80 @@ describe('several takes of one call', () => {
     const result = await runRequestTool({ id: ID, input: INPUT, count: 2 }, deps(fetchImpl, auth));
     expect(result.envelope).toMatchObject({ status: 'needs_approval' });
     expect(auth.authorize).not.toHaveBeenCalled();
-    expect(calls.filter((call) => !call.url.startsWith(ROUTER))).toEqual([]);
+    expect(calls.filter((call) => call.paid)).toEqual([]);
+  });
+
+  /** A PRICE THAT VARIES BY INPUT IS CHECKED AT WHAT THIS INPUT COSTS: GPT
+   *  Image 2 is quoted 6.4¢ against a $1 ceiling, and three takes fit a
+   *  $0.25 per-call cap, as one call does. */
+  const GPT_IMAGE_2: OfferSpec = {
+    ...SPEC,
+    capabilityId: 'blockrun-image-gpt-image-2',
+    provider: 'BlockRun (OpenAI GPT Image 2)',
+    priceAtomic: '64000',
+    priceVaries: true,
+    maxAmountAtomic: '1000000',
+  };
+
+  it('checks the takes at the live quote, not the ceiling, so GPT Image 2 runs three', async () => {
+    await storeSpecs(dir, [GPT_IMAGE_2]);
+    const auth = authorizer();
+    const { fetchImpl, calls } = seller([], 0, ['64000']);
+    const result = await runRequestTool({ id: ID, input: INPUT, count: 3 }, deps(fetchImpl, auth));
+    expect(result.envelope).toMatchObject({
+      status: 'fulfilled',
+      count: 3,
+      cost: ['provider price 0.192 USD'],
+    });
+    expect(calls.filter((call) => call.paid)).toHaveLength(3);
+    expect(auth.authorize).toHaveBeenCalledTimes(3);
+  });
+
+  it('checks the session budget at the live quote too', async () => {
+    await storeSpecs(dir, [GPT_IMAGE_2]);
+    await policy({ maxAutoSpend: '250000', sessionBudget: '150000' });
+    const auth = authorizer();
+    const { fetchImpl, calls } = seller([], 0, ['64000']);
+    const result = await runRequestTool({ id: ID, input: INPUT, count: 3 }, deps(fetchImpl, auth));
+    expect(result.envelope).toMatchObject({ status: 'needs_approval' });
+    expect(String(result.envelope.reason)).toContain('costs $0.192 at its live price');
+    expect(auth.authorize).not.toHaveBeenCalled();
+    expect(calls.filter((call) => call.paid)).toEqual([]);
+    expect(await claims()).toEqual([]);
+  });
+
+  it("refuses the count when the live quote is over the spec's ceiling, with nothing claimed", async () => {
+    await storeSpecs(dir, [GPT_IMAGE_2]);
+    const auth = authorizer();
+    const { fetchImpl, calls } = seller([], 0, ['1500000']);
+    const result = await runRequestTool({ id: ID, input: INPUT, count: 2 }, deps(fetchImpl, auth));
+    expect(result.envelope).toMatchObject({ status: 'failed', cost: ['provider price 0 USD'] });
+    expect(String(result.envelope.reason)).toContain("over this spec's $1 ceiling");
+    expect(auth.authorize).not.toHaveBeenCalled();
+    expect(calls.filter((call) => call.paid)).toEqual([]);
+    expect(await claims()).toEqual([]);
+    await vi.waitFor(() => expect(reports(calls)).toHaveLength(1));
+    expect(reports(calls)[0]).toMatchObject({ id: ID, status: 'unpaid', reason: 'terms' });
+  });
+
+  /** A TAKE QUOTED HIGHER THAN THE FIRST meets the spend gate again on its
+   *  own when it is signed, and is refused there with nothing signed. */
+  it('re-checks a take quoted higher on its own, and signs nothing for it', async () => {
+    await storeSpecs(dir, [GPT_IMAGE_2]);
+    const settings = await resolveContextSettings(ctx());
+    const auth = createLocalSpendAuthorizer({ dir, policy: settings.policy });
+    // The set's quote and two takes at 6.4¢, then one take at 30¢: over the cap.
+    const { fetchImpl, calls } = seller([], 0, ['64000', '64000', '64000', '300000']);
+    const result = await runRequestTool({ id: ID, input: INPUT, count: 3 }, deps(fetchImpl, auth));
+    expect(result.envelope).toMatchObject({
+      status: 'partial',
+      cost: ['provider price 0.128 USD'],
+    });
+    const statuses = (result.envelope.results as Record<string, unknown>[]).map(
+      (take) => take.status,
+    );
+    expect(statuses.sort()).toEqual(['fulfilled', 'fulfilled', 'needs_approval']);
+    expect(calls.filter((call) => call.paid)).toHaveLength(2);
   });
 
   it('runs takes only where the spec allows them, and never beside a choice', async () => {

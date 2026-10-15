@@ -791,13 +791,7 @@ export async function paySpec(
       provider: spec.provider,
       media: savesMedia(spec),
       request: built,
-      terms: {
-        source: spec.provider,
-        maxAmountAtomic: spec.maxAmountAtomic,
-        payTo: spec.payTo,
-        network: spec.network,
-        asset: spec.asset,
-      },
+      terms: specTerms(spec),
       requestKey: `${spec.capabilityId}:${canonicalHash(merged)}${suffix}`,
       ...(spec.resultSchema !== undefined ? { resultSchema: spec.resultSchema } : {}),
       ...(spec.outputSchema !== undefined
@@ -827,6 +821,17 @@ export async function paySpec(
     reportOutcome(reportDeps, id, outcome, startedAt);
   }
   return paid;
+}
+
+/** The deal a spec's call is held to: its price ceiling, payee, chain and token. */
+export function specTerms(spec: OfferSpec): AdvertisedTerms {
+  return {
+    source: spec.provider,
+    maxAmountAtomic: spec.maxAmountAtomic,
+    payTo: spec.payTo,
+    network: spec.network,
+    asset: spec.asset,
+  };
 }
 
 /**

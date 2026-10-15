@@ -630,6 +630,60 @@ async function assertBalanceCovers(
 }
 
 /**
+ * WHAT A ROUTER CALL WILL COST, from one unpaid probe: the live 402's amount
+ * on the entry this call would sign, held to the advertised terms, with
+ * nothing signed and nothing reserved. It is the number a single call gates
+ * on, so several takes of one call are checked at it rather than at the
+ * spec's ceiling: a price that varies by input is quoted for this input.
+ * A probe that answers 2xx is free: 0. Every refusal is the paid leg's own,
+ * with nothing sent but the probe.
+ */
+export async function quoteRouterCall(
+  args: Pick<PayArgs, 'url' | 'method' | 'headers' | 'rawBody'> & { terms: AdvertisedTerms },
+  ctx: CommandContext,
+  deps: PayDeps = {},
+): Promise<bigint> {
+  const settings = await resolveContextSettings(ctx);
+  const url = args.url.trim();
+  if (resolveLane(url, settings) === 'bazaar') {
+    await assertPublicDestination(url, deps.destination ?? {});
+  }
+  const headers = callerHeaders(args.headers);
+  const probe = await httpRequest(url, {
+    timeoutMs: ctx.flags.timeout,
+    blockRedirects: true,
+    binaryBody: true,
+    method: resolveMethod(args),
+    ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+    ...(args.rawBody !== undefined ? { rawBody: args.rawBody } : {}),
+    ...(Object.keys(headers).length > 0 ? { headers } : {}),
+  });
+  if (!probe.ok) {
+    throw fetchFailureToCliError(probe, {
+      fix: `Nothing was sent and nothing was paid. ${legFix(probe)}`,
+    });
+  }
+  if (probe.status >= 200 && probe.status < 300) return 0n;
+  if (probe.status !== 402) {
+    const said = providerMessage(probe.json);
+    throw new CliError(
+      'API_UNREACHABLE',
+      `${url} answered ${probe.status}${said === null ? '.' : `: ${said}`}`,
+      {
+        fix: 'Nothing was paid.',
+        details: { status: probe.status, body: probe.json, ...providerError(probe.text) },
+      },
+    );
+  }
+  const challenge = decodeChallenge(probe, url);
+  const payer = createPayerClient(() => signerOrThrow({}));
+  const requirement = selectRequirement(payer.core, challenge, args.terms);
+  if (requirement === undefined) throw noMatchingEntry(challenge, args.terms);
+  assertWithinTerms(args.terms, requirement);
+  return BigInt(requirement.amount);
+}
+
+/**
  * ONE FRESH AUTHORIZATION FOR A JOB'S POLL, under every gate a paid call
  * meets. A seller that binds its polls to the paying wallet (BlockRun) can
  * refuse the submit's own payment header on a later poll and answer 402. This
