@@ -50,6 +50,7 @@ import {
   type SpendOption,
 } from './spend-question';
 import { underAgentHarness } from '../lib/session';
+import type { FundLink } from '../commands/fund';
 
 /**
  * `tenjin install` for the router product: the wallet, the spend limits, and
@@ -151,7 +152,7 @@ export interface RouterInstallDeps extends WalletDeps {
   /** The router reachability probe's transport; tests inject it. */
   fetchImpl?: typeof fetch;
   /** Mints the wallet's fund link; production signs the request with the wallet key. */
-  fundLink?: (ctx: CommandContext, address: string) => Promise<string>;
+  fundLink?: (ctx: CommandContext, address: string) => Promise<FundLink>;
   /** The wallet's USDC balance in atomic units; production reads Base. */
   walletBalance?: (address: string, rpcUrl: string) => Promise<bigint>;
 }
@@ -765,19 +766,16 @@ async function fundStep(
         );
   if (funded === true) return undefined;
   const minted = await (deps.fundLink ?? mintInstallFundLink)(ctx, address).then(
-    (url) => ({ url }),
+    (link) => link,
     (err: unknown) => ({ reason: err instanceof Error ? err.message : String(err) }),
   );
   const url = 'url' in minted ? minted.url : null;
-  const { fundLinkExpiry, isHostedCheckout } = await import('../commands/fund');
-  const now = Date.now();
-  const expires = url !== null ? fundLinkExpiry(url, now) : null;
-  const minutes =
-    expires !== null ? Math.max(1, Math.round((expires.getTime() - now) / 60_000)) : 0;
+  const expires = 'url' in minted ? minted.expiresAt : null;
+  const { isHostedCheckout } = await import('../commands/fund');
   const where = url !== null && isHostedCheckout(url) ? ' in a browser on this computer' : '';
   const show =
-    url !== null
-      ? `To add funds, open this link${where} (valid ${minutes} minutes): ${url} Or send USDC on Base to ${address}.`
+    url !== null && expires !== null
+      ? `To add funds, open this link${where} (valid ${validFor(expires.getTime() - Date.now())}): ${url} Or send USDC on Base to ${address}.`
       : `To add funds, send USDC on Base to ${address}.`;
   return {
     id: 'fund',
@@ -800,12 +798,22 @@ async function fundStep(
   };
 }
 
+/** "10 minutes", "1 hour": how long a link works, as the person reads it. */
+export function validFor(ms: number): string {
+  const minutes = Math.max(1, Math.round(ms / 60_000));
+  if (minutes % 60 === 0) {
+    const hours = minutes / 60;
+    return `${hours} ${hours === 1 ? 'hour' : 'hours'}`;
+  }
+  return `${minutes} ${minutes === 1 ? 'minute' : 'minutes'}`;
+}
+
 /** Never a passphrase prompt for a link: a wallet that cannot unlock gets the address alone. */
-async function mintInstallFundLink(ctx: CommandContext, address: string): Promise<string> {
+async function mintInstallFundLink(ctx: CommandContext, address: string): Promise<FundLink> {
   const { mintFundLink } = await import('../commands/fund');
   const { resolveWalletProvider } = await import('../lib/wallet');
   const provider = resolveWalletProvider({ ...ctx, io: { ...ctx.io, isTTY: false } });
-  return mintFundLink(ctx, await provider.getSigner(), address);
+  return mintFundLink(ctx, await provider.getSigner(), address, { purpose: 'install' });
 }
 
 /** Loaded lazily: the status line shares this module's chunk and must not load viem. */

@@ -103,7 +103,7 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
   // here only disables the wait, it never blocks funding.
   const startBalance = shouldWait ? await balanceOrUndefined(desc, rpcUrl) : undefined;
 
-  const url = await mintFundLink(ctx, signer, address, {
+  const { url } = await mintFundLink(ctx, signer, address, {
     ...(preset !== undefined ? { presetAmount: preset } : {}),
     ...(opts.fetchImpl !== undefined ? { fetchImpl: opts.fetchImpl } : {}),
   });
@@ -197,18 +197,25 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
   };
 }
 
+/** A minted checkout link and when it stops working. */
+export interface FundLink {
+  url: string;
+  expiresAt: Date;
+}
+
 /**
  * Mint a checkout link for `address`, signed by that address's own key. A
  * signed read: nothing moves until the person pays on the page it opens.
- * `tenjin install` mints one too, so the person can add funds without typing
- * a command.
+ * `tenjin install` mints one too, with `purpose: 'install'`, for which the
+ * server may issue a longer-lived token, so the person can add funds later
+ * without typing a command.
  */
 export async function mintFundLink(
   ctx: CommandContext,
   signer: TenjinSigner,
   address: string,
-  opts: { presetAmount?: number; fetchImpl?: typeof fetch } = {},
-): Promise<string> {
+  opts: { presetAmount?: number; purpose?: 'install'; fetchImpl?: typeof fetch } = {},
+): Promise<FundLink> {
   const siwxHeader = await buildSiwxHeader(signer, {
     baseUrl: FUND_ORIGIN,
     chainId: SESSION_CHAIN_ID,
@@ -220,6 +227,7 @@ export async function mintFundLink(
     jsonBody: {
       address: checksummed(address),
       ...(opts.presetAmount !== undefined ? { presetAmount: opts.presetAmount } : {}),
+      ...(opts.purpose !== undefined ? { purpose: opts.purpose } : {}),
     },
     ...(opts.fetchImpl !== undefined ? { fetchImpl: opts.fetchImpl } : {}),
   };
@@ -229,7 +237,8 @@ export async function mintFundLink(
       fix: 'Check your network, then retry.',
     });
   }
-  return checkoutUrlFrom(res.status, res.json);
+  const url = checkoutUrlFrom(res.status, res.json);
+  return { url, expiresAt: fundLinkExpiry(url, Date.now(), res.json) };
 }
 
 /** A hosted Coinbase link lives about 5 minutes; a Tenjin /fund token 10. */
@@ -242,11 +251,19 @@ export function isHostedCheckout(url: string): boolean {
 }
 
 /**
- * When a minted link stops working: the `exp` a Tenjin /fund link's token
- * carries in its fragment (read, not verified: the server verifies), else the
- * known lifetime from `now`.
+ * When a minted link stops working: the response's own `expiresAt` where the
+ * server sends one, else the `exp` a Tenjin /fund link's token carries in its
+ * fragment (read, not verified: the server verifies), else the known lifetime
+ * from `now`.
  */
-export function fundLinkExpiry(url: string, now = Date.now()): Date {
+export function fundLinkExpiry(url: string, now = Date.now(), body?: unknown): Date {
+  const sent =
+    typeof body === 'object' && body !== null
+      ? (body as { expiresAt?: unknown }).expiresAt
+      : undefined;
+  const sentMs =
+    typeof sent === 'string' ? Date.parse(sent) : typeof sent === 'number' ? sent : NaN;
+  if (Number.isFinite(sentMs) && sentMs > now) return new Date(sentMs);
   if (isHostedCheckout(url)) return new Date(now + HOSTED_TTL_MS);
   const payload = new URL(url).hash.slice(1).split('.')[0] ?? '';
   try {

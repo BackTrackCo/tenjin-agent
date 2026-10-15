@@ -67,10 +67,11 @@ const ASK_LINES = [
   '  Custom limits: tenjin install --max-auto-spend <usd> --session-budget <usd|none>',
   '  No automatic spending: run nothing, the router then pays for nothing on its own, and the question stays open until the user answers it',
 ];
-/** A Tenjin /fund link as the server mints it: the token's payload carries its expiry. */
-function fundUrl(exp = Date.now() + 10 * 60_000): string {
+/** A Tenjin /fund link as install mints it, working for `ttlMs`. */
+function fundLinkOf(ttlMs = 10 * 60_000): { url: string; expiresAt: Date } {
+  const exp = Date.now() + ttlMs;
   const payload = Buffer.from(JSON.stringify({ address: ADDRESS, exp })).toString('base64url');
-  return `https://tenjin.sh/fund#${payload}.sig`;
+  return { url: `https://tenjin.sh/fund#${payload}.sig`, expiresAt: new Date(exp) };
 }
 /** What Claude Code exports to the commands its agent runs. */
 const HARNESS_ENV = { CLAUDECODE: '1', CLAUDE_CODE_SESSION_ID: 'session-1' };
@@ -88,7 +89,7 @@ function deps(over: Record<string, unknown> = {}) {
     walletAddress: async () => ADDRESS,
     listMcpProcesses: async () => [],
     // The fund link is signed and minted over the network; no test reaches it.
-    fundLink: vi.fn(async () => fundUrl()),
+    fundLink: vi.fn(async () => fundLinkOf()),
     walletBalance: async () => 0n,
     ...over,
   };
@@ -1094,8 +1095,9 @@ describe('install run by an agent hands over the questions before any action', (
   const stepsOf = (result: { data: unknown }) => (result.data as { nextSteps: Step[] }).nextSteps;
 
   it('asks the spend question, then the funding question, with the command for each answer', async () => {
-    const url = fundUrl(Date.now() + 10 * 60_000);
-    const fundLink = vi.fn(async () => url);
+    const link = fundLinkOf(10 * 60_000);
+    const { url } = link;
+    const fundLink = vi.fn(async () => link);
     const result = await runRouterInstall({}, ctx(), deps({ env: HARNESS_ENV, fundLink }));
     const steps = stepsOf(result);
     expect(steps.map((q) => q.id)).toEqual(['spend', 'fund']);
@@ -1132,13 +1134,27 @@ describe('install run by an agent hands over the questions before any action', (
     expect((result.data as { next: string }).next).not.toContain('wallet fund');
   });
 
+  it('says how long the link works from the expiry the server minted', async () => {
+    // tenjin#976 mints a 60-minute token for `purpose: "install"`.
+    const link = fundLinkOf(60 * 60_000);
+    const result = await runRouterInstall(
+      { yes: true },
+      ctx(),
+      deps({ env: HARNESS_ENV, fundLink: async () => link }),
+    );
+    expect(stepsOf(result)[0]).toMatchObject({
+      show: `To add funds, open this link (valid 1 hour): ${link.url} Or send USDC on Base to ${ADDRESS}.`,
+      expiresAt: link.expiresAt.toISOString(),
+    });
+  });
+
   it('asks only the funding question once the limits are answered', async () => {
     const result = await runRouterInstall({ yes: true }, ctx(), deps({ env: HARNESS_ENV }));
     expect(stepsOf(result).map((q) => q.id)).toEqual(['fund']);
   });
 
   it('asks nothing about funds for a wallet that already holds USDC', async () => {
-    const fundLink = vi.fn(async () => fundUrl());
+    const fundLink = vi.fn(async () => fundLinkOf());
     const result = await runRouterInstall(
       { yes: true },
       ctx(),
@@ -1188,7 +1204,7 @@ describe('install run by an agent hands over the questions before any action', (
   });
 
   it('a person at a terminal gets what it always got: no questions handed over, no link', async () => {
-    const fundLink = vi.fn(async () => fundUrl());
+    const fundLink = vi.fn(async () => fundLinkOf());
     const result = await runRouterInstall(
       {},
       humanCtx(),
@@ -1207,7 +1223,7 @@ describe('install run by an agent hands over the questions before any action', (
   });
 
   it('a script outside any harness gets the spend question and no funding question', async () => {
-    const fundLink = vi.fn(async () => fundUrl());
+    const fundLink = vi.fn(async () => fundLinkOf());
     const result = await runRouterInstall({}, ctx(), deps({ fundLink }));
     expect(stepsOf(result).map((q) => q.id)).toEqual(['spend']);
     expect(fundLink).not.toHaveBeenCalled();
