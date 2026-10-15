@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { existsSync, realpathSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -139,7 +139,14 @@ describe('runUpdate', () => {
       latest: '0.1.0-alpha.7',
       updateAvailable: true,
       updated: true,
-      refresh: { profiles: [dir], failed: [], notices: [], settingsInstallPending: false },
+      refresh: {
+        profiles: [dir],
+        failed: [],
+        notices: [],
+        settingsInstallPending: false,
+        projects: [],
+        projectsFailed: [],
+      },
       mcpServer: {
         name: 'mcp server',
         status: 'ok',
@@ -774,6 +781,7 @@ describe('runUpdate: the post-swap refresh', () => {
     const calls: {
       cmd: string;
       args: string[];
+      cwd: string;
       env?: Record<string, string>;
       timeoutMs: number;
     }[] = [];
@@ -781,6 +789,7 @@ describe('runUpdate: the post-swap refresh', () => {
       calls.push({
         cmd,
         args,
+        cwd: spawnOpts.cwd,
         timeoutMs: spawnOpts.timeoutMs,
         ...(spawnOpts.env !== undefined ? { env: spawnOpts.env } : {}),
       });
@@ -1114,6 +1123,81 @@ describe('runUpdate: the post-swap refresh', () => {
       refresh: { settingsInstallPending: true },
       mcpServer: { fix: expect.stringContaining('Start a new Claude Code session') },
     });
+  });
+
+  /**
+   * A `--project` INSTALL IS CLAUDE CODE'S LOCAL SCOPE, which the refresh from
+   * home cannot see. Each project `install --project` recorded is refreshed from
+   * its own directory; one that no longer holds an install, or is gone, is
+   * forgotten.
+   */
+  it('refreshes each recorded project install from its own directory', async () => {
+    const profile = await profileDir('.tenjin');
+    const kept = await profileDir('app');
+    const moved = await profileDir('old-app');
+    const gone = join(dir, 'deleted-app');
+    await writeFile(
+      join(profile, 'config.json'),
+      JSON.stringify({ install: { routerProjects: [kept, moved, gone] } }),
+    );
+    const said = (scope: string) =>
+      `${JSON.stringify(buildSuccessEnvelope('install', { refresh: true, scope }), null, 2)}\n`;
+    const { ctx } = makeCtx();
+    ctx.dataDir = profile;
+    const spawned = scriptedSpawn([], [undefined, said('user'), said('local'), said('user')]);
+    const result = await runUpdate(
+      { check: false },
+      ctx,
+      await deps({ spawnImpl: spawned.impl, refreshCommand: ENTRY }),
+    );
+    expect(spawned.refreshes().map((c) => c.cwd)).toEqual([homedir(), kept, moved]);
+    for (const call of spawned.refreshes()) {
+      expect(call.args).toEqual([ENTRY, 'install', '--refresh']);
+      expect(call.env?.TENJIN_DATA_DIR).toBe(profile);
+    }
+    expect(result.data).toMatchObject({ refresh: { projects: [kept], projectsFailed: [] } });
+    expect(result.humanLines).toContain(`Refreshed the project install in ${kept}.`);
+    const config = JSON.parse(await readFile(join(profile, 'config.json'), 'utf8')) as {
+      install: { routerProjects: string[] };
+    };
+    expect(config.install.routerProjects).toEqual([kept]);
+  });
+
+  it('names the project and its own fix when a project refresh fails', async () => {
+    const profile = await profileDir('.tenjin');
+    const app = await profileDir('app');
+    await writeFile(
+      join(profile, 'config.json'),
+      JSON.stringify({ install: { routerProjects: [app] } }),
+    );
+    const { ctx } = makeCtx();
+    ctx.dataDir = profile;
+    const result = await runUpdate(
+      { check: false },
+      ctx,
+      await deps({
+        spawnImpl: scriptedSpawn([
+          { kind: 'exit', code: 0 },
+          { kind: 'exit', code: 0 },
+          { kind: 'timeout' },
+        ]).impl,
+        refreshCommand: ENTRY,
+      }),
+    );
+    expect(result.data).toMatchObject({
+      refresh: {
+        failed: [],
+        projects: [],
+        projectsFailed: [
+          {
+            project: app,
+            reason: 'It did not finish in 60s.',
+            fix: `Run \`tenjin install --project\` in ${app}.`,
+          },
+        ],
+      },
+    });
+    expect(result.humanLines?.join('\n')).toContain('Could not refresh the project install in 1:');
   });
 
   it('reports every profile as unrefreshed when there is no entry to re-exec', async () => {

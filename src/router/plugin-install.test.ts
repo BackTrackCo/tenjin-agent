@@ -409,6 +409,11 @@ describe('tenjin install registers the plugin through Claude Code', () => {
       'plugin install tenjin@tenjin --scope local --json',
     ]);
     expect(result.data).toMatchObject({ plugin: { scope: 'local' } });
+    // Recorded, so `tenjin update`, which refreshes from home, reaches it.
+    const config = JSON.parse(await readFile(join(data, 'config.json'), 'utf8')) as {
+      install?: { routerProjects?: string[] };
+    };
+    expect(config.install?.routerProjects).toEqual([work]);
   });
 });
 

@@ -2,7 +2,12 @@ import { readFile, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import pkg from '../../package.json';
-import { persistRouterDefaults, ROUTER_DEFAULTS, type RouterLimits } from '../commands/config';
+import {
+  persistRouterDefaults,
+  persistRouterProject,
+  ROUTER_DEFAULTS,
+  type RouterLimits,
+} from '../commands/config';
 import { askText, selectOne } from '../lib/clack';
 import { CliError } from '../lib/errors';
 import { parseUsdToAtomic, toMoney } from '../lib/money';
@@ -354,6 +359,11 @@ export async function runRouterInstall(
           cwd,
           ...(deps.hostsDir !== undefined ? { hostsDir: deps.hostsDir } : {}),
         });
+  // A PROJECT INSTALL IS RECORDED, so `tenjin update`, which refreshes from
+  // home where this scope is not visible, refreshes it from here too.
+  if (project && plugin.state !== 'failed') {
+    await persistRouterProject(ctx.dataDir, cwd).catch(() => undefined);
+  }
   const migration =
     legacy.unreadable !== undefined && !legacy.present
       ? { state: 'blocked' as const, settingsPath: paths.settingsPath, reason: legacy.unreadable }
