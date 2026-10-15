@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { FileClientChannelStorage } from '@x402/evm/batch-settlement/client/file-storage';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CliError } from '../lib/errors';
 import type { SpendPolicy } from '../lib/policy';
 import { readSpendSummary } from '../lib/wallet/spend';
@@ -38,8 +38,27 @@ beforeEach(async () => {
   clock = 1_800_000_000_000;
 });
 afterEach(async () => {
+  vi.useRealTimers();
   await rm(dir, { recursive: true, force: true });
 });
+
+/** Holds the timers and the clock still; file I/O and microtasks keep running. */
+function holdTime(): void {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+}
+
+/** True once a voucher waits on the router's delay timer. */
+const inFlight = (router: FakeRouter): boolean =>
+  [...router.channels.values()].some((channel) => channel.pending);
+
+/** Lets real file I/O run until `ready`, with time held. The 10 s bound only fails a stuck test. */
+async function ioUntil(ready: () => boolean): Promise<void> {
+  const give = performance.now() + 10_000;
+  while (!ready() && performance.now() < give) {
+    await new Promise((r) => setImmediate(r));
+  }
+  expect(ready()).toBe(true);
+}
 
 type PayerOpts = Partial<RoutingPayerDeps> & {
   policy_?: Partial<SpendPolicy>;
@@ -427,6 +446,7 @@ describe('RoutingPayer', () => {
     await routeOnce(p, router);
     router.delayMs = 300;
     const route = (await p.routeFor(BASE))!;
+    holdTime();
     const call = (timeoutMs: number) =>
       requestDecision(
         'tool',
@@ -434,7 +454,10 @@ describe('RoutingPayer', () => {
         { ctx: ctx(), baseUrl: BASE, fetchImpl: router.fetch, timeoutMs, route },
       );
     // The second waits behind the first for longer than its own budget.
-    const [first, second] = await Promise.all([call(3_500), call(100)]);
+    const both = Promise.all([call(3_500), call(100)]);
+    await ioUntil(() => inFlight(router) && vi.getTimerCount() >= 4);
+    await vi.advanceTimersByTimeAsync(300);
+    const [first, second] = await both;
     expect(first.status).toBe('decided');
     expect(second).toEqual({ status: 'skipped', why: 'busy' });
   });
@@ -643,11 +666,16 @@ describe('RoutingPayer and the call budget', () => {
     expect((await call(3_500)).status).toBe('decided');
     // The next voucher answers after 1.5 s, past its 200 ms budget: it detaches.
     router.delayMs = 1_500;
+    holdTime();
     const ahead = call(200);
     const started = Date.now();
-    const queued = await call(300);
+    const queuedCall = call(300);
+    await ioUntil(() => inFlight(router) && vi.getTimerCount() >= 4);
+    await vi.advanceTimersByTimeAsync(300);
+    const queued = await queuedCall;
     expect(queued).toEqual({ status: 'skipped', why: 'busy' });
     expect(Date.now() - started).toBeLessThan(1_200);
+    await vi.advanceTimersByTimeAsync(1_500);
     await ahead;
     // Every unanswered call says so once, a queued one included.
     expect(warned.join('\n')).toMatch(/busy \(cause queued, \d+ms, stage queue\)/);
