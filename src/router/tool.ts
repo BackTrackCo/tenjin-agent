@@ -135,6 +135,40 @@ export interface RequestToolDeps {
   /** Test seam for the media download; production pins each connection to
    *  the address it validated. */
   mediaTransport?: MediaTransport;
+  /**
+   * PAY ONCE: asks the user to approve one payment over `maxAutoSpend`, at the
+   * exact price, and resolves whether they did. `tenjin mcp` sets it only for
+   * a client that declared form elicitation (`pay-once.ts`). Absent, a price
+   * over the cap returns `needs_approval` as before.
+   */
+  approveOverLimit?: (ask: OverLimitAsk) => Promise<boolean>;
+}
+
+/** What the user is asked to approve: who wants the money, and how much. */
+export interface OverLimitAsk {
+  /** The service's display name, or {@link UNLABELLED}. */
+  label: string;
+  amountAtomic: bigint;
+}
+
+/** The static title of a lookup whose spec carries no display name. */
+export const UNLABELLED = 'Tenjin lookup';
+/** A display name is one plain line of at most this many characters. */
+const LABEL_MAX_CHARS = 32;
+
+/**
+ * The display name the user sees for a spec: the server's `label` exactly as
+ * sent, when it is one plain line, else {@link UNLABELLED}. Never built from
+ * the provider, the host or the category.
+ */
+export function specLabel(spec: object): string {
+  const label = (spec as { label?: unknown }).label;
+  return typeof label === 'string' &&
+    label.trim().length > 0 &&
+    Array.from(label).length <= LABEL_MAX_CHARS &&
+    !/[\p{Cc}\p{Cf}]/u.test(label)
+    ? label
+    : UNLABELLED;
 }
 
 export interface RequestToolResult {
@@ -621,6 +655,7 @@ export async function paySpec(
     {
       capabilityId: spec.capabilityId,
       provider: spec.provider,
+      label: specLabel(spec),
       media: savesMedia(spec),
       request: built,
       terms: {
@@ -669,6 +704,8 @@ function savesMedia(spec: Pick<OfferSpec, 'capabilityId' | 'output'>): boolean {
 interface ProviderCall {
   capabilityId: string;
   provider: string;
+  /** The display name a Pay once question names, from the spec. */
+  label?: string;
   /** A media service: a paid result's links and inline files are saved
    *  locally ({@link savesMedia}). */
   media: boolean;
@@ -735,6 +772,12 @@ async function payAndDeliver(
         ...(deps.provider !== undefined ? { provider: deps.provider } : {}),
         authorizer: signing.authorizer,
         confirm: async () => false,
+        ...(deps.approveOverLimit !== undefined
+          ? {
+              approveOverLimit: (amountAtomic: bigint) =>
+                deps.approveOverLimit!({ label: call.label ?? UNLABELLED, amountAtomic }),
+            }
+          : {}),
       },
     );
     const data = paid.data as {
@@ -887,6 +930,8 @@ async function payAndDeliver(
       authorization?: SignedAuthorization;
       /** The live 402's terms, on a REGISTRY_MISMATCH. */
       live?: { amount?: string };
+      /** The spend policy's reason, on a POLICY_REFUSED (`gateSpend`). */
+      reason?: string;
     };
     // A SPEND-POLICY REFUSAL SIGNED NOTHING. Its details carry the price it
     // refused, not an amount that left, so it is neither a cost nor a ledger
@@ -947,6 +992,11 @@ async function payAndDeliver(
             },
       result: fail(status, reason, {
         providerAtomic: leftAtomic,
+        // WHICH LIMIT SAID NO, as the policy names it, so a surface can say
+        // the setting that would change it and the ledger can count it.
+        ...(status === 'needs_approval' && typeof detail.reason === 'string'
+          ? { policyReason: detail.reason }
+          : {}),
         ...(detail.settlement !== undefined ? { settlement: detail.settlement } : {}),
         ...(detail.diagnosis !== undefined ? { diagnosis: detail.diagnosis } : {}),
         // WHY THE PROVIDER SAID NO: its HTTP status and a bounded, redacted
@@ -1334,6 +1384,9 @@ interface FailExtras {
   parameters?: unknown;
   /** The provider request it went out as. */
   request?: { method: string; url: string };
+  /** The spend policy's reason for a `needs_approval` (`above_auto_spend`,
+   *  `session_budget_exceeded`, ...). */
+  policyReason?: string;
 }
 
 /** The headline: calm for a routine outcome, explicit for a real failure. */
@@ -1368,6 +1421,7 @@ export function fail(
       status,
       reason,
       ...(extras.errorCode !== undefined ? { errorCode: extras.errorCode } : {}),
+      ...(extras.policyReason !== undefined ? { policyReason: extras.policyReason } : {}),
       // The status is the fact; the next step is what to do about it. The
       // BACKEND'S own next action wins when it sent one: it knows which field
       // is missing.

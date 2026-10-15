@@ -31,6 +31,13 @@ export interface SpendGateInput {
   /** Interactive-confirm seam; defaults to a TTY y/n prompt. */
   confirm?: (prompt: string) => Promise<boolean>;
   /**
+   * PAY ONCE. Asked only when an automatic payment is refused as over
+   * `maxAutoSpend`, with the exact amount refused. True re-runs the gate's
+   * authorization once, in automatic mode, with that amount as the approval;
+   * false, or a throw, keeps the refusal. Never asked for any other reason.
+   */
+  approveOverLimit?: (amountAtomic: bigint) => Promise<boolean>;
+  /**
    * Who the human is told they are paying, PRE-SANITIZED by the caller (it
    * knows which parts are external input). Rendered before the price so escape
    * sequences could never repaint the amount being approved.
@@ -47,13 +54,28 @@ export interface SpendGateInput {
  *  Throws POLICY_REFUSED (deny, or confirm declined), releasing first. */
 export async function gateSpend(input: SpendGateInput): Promise<string | undefined> {
   const { authorizer, amountAtomic } = input;
-  const authorization = await authorizer.authorize({
-    mode: input.mode,
-    amountAtomic,
-    creator: input.creator,
-    ...(input.maxPriceAtomic !== undefined ? { maxPriceAtomic: input.maxPriceAtomic } : {}),
-    ...(input.requestKey !== undefined ? { requestKey: input.requestKey } : {}),
-  });
+  const authorize = (approval?: bigint) =>
+    authorizer.authorize({
+      mode: input.mode,
+      amountAtomic,
+      creator: input.creator,
+      ...(input.maxPriceAtomic !== undefined ? { maxPriceAtomic: input.maxPriceAtomic } : {}),
+      ...(input.requestKey !== undefined ? { requestKey: input.requestKey } : {}),
+      ...(approval !== undefined ? { autoSpendApprovalAtomic: approval } : {}),
+    });
+  let authorization = await authorize();
+  // The approval is bound to this call and this exact amount, and lifts only
+  // the per-call ceiling: the re-run meets the price cap, the allowlist, the
+  // daily budget and the duplicate guard again, and a refusal there stands.
+  if (
+    authorization.decision === 'deny' &&
+    authorization.reason === 'above_auto_spend' &&
+    input.mode === 'automatic' &&
+    input.approveOverLimit !== undefined &&
+    (await input.approveOverLimit(amountAtomic).catch(() => false))
+  ) {
+    authorization = await authorize(amountAtomic);
+  }
   if (authorization.decision === 'deny') {
     throw new CliError('POLICY_REFUSED', authorization.message, {
       fix: policyFix(authorization.reason, input.allowlistSubject),

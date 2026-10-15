@@ -16,6 +16,7 @@ import { admitHookEvent } from './hook-session';
 import { eventFromToolInput, HOOK_KINDS, HOOK_TOOL, HOOK_TOOL_FIELDS } from './hook-tool';
 import type { HookDeps } from './hooks';
 import { launchedByPlugin, MCP_SERVER_NAME } from './names';
+import { payOnceAsker } from './pay-once';
 import { chainReader, RoutingPayer } from './routing-payer';
 import { runRequestTool, type RequestToolDeps } from './tool';
 
@@ -111,7 +112,7 @@ function buildContext(opts: RouterMcpOptions): CommandContext {
 
 export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
   const ctx = buildContext(opts);
-  const provider = resolveWalletProvider(ctx);
+  const provider = opts.handlerDeps?.provider ?? resolveWalletProvider(ctx);
   // THE PREWARM, and nothing else. It runs the scrypt derivation while the
   // session is idle so a paid lookup does not wait 2.3 s for it, and its
   // rejection is swallowed: a machine with no wallet still routes, because
@@ -175,7 +176,7 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
           ),
       },
     },
-    async ({ query, id, input, choice }): Promise<CallToolResult> => {
+    async ({ query, id, input, choice }, extra): Promise<CallToolResult> => {
       // Resolved per call, from settings read now: the refusal this tool returns
       // names `tenjin config set sessionBudget`, and a policy frozen at the
       // first call would leave that command with no effect until the harness
@@ -185,6 +186,12 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
         opts.handlerDeps?.authorizer ?? resolveSpendAuthorizer(ctx, settings.policy);
       const route: RouteFor | undefined =
         opts.handlerDeps?.route ?? opts.payer?.routeFor.bind(opts.payer);
+      // PAY ONCE, only for a client that can show the question (`pay-once.ts`).
+      const approveOverLimit = payOnceAsker(
+        server.server,
+        async () => settings.policy.maxAutoSpendAtomic,
+        { signal: extra.signal },
+      );
       const result = await runRequestTool(
         {
           ...(query !== undefined ? { query } : {}),
@@ -208,6 +215,7 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
             : {}),
           ...(opts.handlerDeps?.payDeps !== undefined ? { payDeps: opts.handlerDeps.payDeps } : {}),
           ...(opts.handlerDeps?.cwd !== undefined ? { cwd: opts.handlerDeps.cwd } : {}),
+          ...(approveOverLimit !== undefined ? { approveOverLimit } : {}),
         },
       );
       // THE ENVELOPE, ONCE. This tool declares no `outputSchema`, and for such
