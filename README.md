@@ -99,9 +99,9 @@ flowchart LR
 
 The Tenjin router hooks into Claude Code at your prompt, before each web search or page fetch, when your agent hands work to a subagent, and around a question your agent asks you. At each point it asks Jev, a decision model from [TypeSafe](https://typesafe.ai), whether a tool in the catalog fits. When none does, Jev may pick one third-party service from a short list matching the step (the Tenjin list, plus the open Bazaar if you turned it on), or none. Either way Jev only chooses from a list, so it never writes a call or an instruction for your agent; a third-party listing's description is the seller's own, and your agent judges it.
 
-When one fits, your agent sees a one-line suggestion with the tool and its price, and calls it through the Tenjin plugin's MCP server: the offer's id alone shows the tool's inputs, an example and what it returns, and the id with the agent's input runs it. Tenjin builds the call, pays the provider from your wallet, within your limits, and hands back the result.
+When one fits, your agent sees a one-line suggestion that starts at the tool's name and price, and calls it through the Tenjin plugin's MCP server: the offer's id alone shows the tool's inputs, an example and what it returns, and the id with the agent's input runs it. Tenjin builds the call, pays the provider from your wallet, within your limits, and hands back the result. Your agent can also browse the tool list for free (`request({browse})`) and fetch any listed tool's spec by its id (`request({tool})`).
 
-To pick a tool, the router sends your prompt and recent messages with secrets masked, plus the searches, URLs, subagent tasks and questions it routes; tool results stay on your machine. [What it sends, and everything install writes →](./docs/agent-permissions.md#what-the-hooks-send)
+To pick a tool, the router sends your prompt and recent messages with secrets masked, plus the searches, URLs, subagent tasks and questions it routes, and the list of contract features this CLI can run, so the server sends only what it parses; tool results stay on your machine. [What it sends, and everything install writes →](./docs/agent-permissions.md#what-the-hooks-send)
 
 ## Wallet and payments
 

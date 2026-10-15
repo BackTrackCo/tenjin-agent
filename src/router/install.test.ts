@@ -274,6 +274,11 @@ describe('tenjin install', () => {
     expect(createWallet).toHaveBeenCalledOnce();
     expect(confirmWallet).not.toHaveBeenCalled();
     expect(result.data).toMatchObject({ wallet: { status: 'created', address: ADDRESS } });
+    // The mod's first-run toast reads this marker.
+    expect(JSON.parse(await readFile(join(data, 'wallet-created.json'), 'utf8'))).toMatchObject({
+      version: 1,
+      address: ADDRESS,
+    });
   });
 
   it('keeps the wallet this machine already has', async () => {
@@ -287,6 +292,9 @@ describe('tenjin install', () => {
     expect(result.data).toMatchObject({ wallet: { status: 'existing', address: ADDRESS } });
     expect(result.humanLines).toContain(`✓ Wallet: ${ADDRESS}`);
     expect(result.humanLines!.at(-1)).toBe(`Next: ${RELOAD}`);
+    await expect(readFile(join(data, 'wallet-created.json'), 'utf8')).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
   });
 
   it('creates no wallet with --no-wallet', async () => {

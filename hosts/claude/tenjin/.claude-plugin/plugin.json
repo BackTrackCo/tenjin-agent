@@ -1,6 +1,7 @@
 {
   "name": "tenjin",
   "description": "Tenjin picks the right tool when your agent needs one, and one wallet on this machine pays for every call.",
+  "types": "./types/index.d.ts",
   "author": {
     "name": "Tenjin",
     "url": "https://tenjin.sh"

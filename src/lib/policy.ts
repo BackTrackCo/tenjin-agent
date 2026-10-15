@@ -30,6 +30,13 @@ export interface SpendRequest {
   maxPriceAtomic?: bigint;
   /** Cumulative spend already recorded in this rolling session window. */
   sessionSpentAtomic: bigint;
+  /**
+   * PAY ONCE: the exact amount the user approved, in this call's memory, for a
+   * price over `maxAutoSpend`. It lifts that one check, and only when it equals
+   * the amount being signed: the price cap, the allowlist and the daily budget
+   * still refuse. Nothing writes it to disk, so no later call can replay it.
+   */
+  autoSpendApprovalAtomic?: bigint;
 }
 
 /**
@@ -110,7 +117,10 @@ export function evaluateSpendPolicy(policy: SpendPolicy, req: SpendRequest): Pol
     }
   }
 
-  if (req.amountAtomic > policy.maxAutoSpendAtomic) {
+  if (
+    req.amountAtomic > policy.maxAutoSpendAtomic &&
+    req.autoSpendApprovalAtomic !== req.amountAtomic
+  ) {
     return {
       decision: 'deny',
       reason: 'above_auto_spend',

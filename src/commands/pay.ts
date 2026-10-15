@@ -128,6 +128,8 @@ export interface PayDeps {
   provider?: WalletProvider;
   authorizer?: SpendAuthorizer;
   confirm?: (prompt: string) => Promise<boolean>;
+  /** Pay once, for the router's automatic payments: see `gateSpend`. */
+  approveOverLimit?: (amountAtomic: bigint) => Promise<boolean>;
   /** Resolver seam for the destination preflight; production leaves it unset. */
   destination?: DestinationOptions;
 }
@@ -400,6 +402,7 @@ async function executePay(
     ...(args.requestKey !== undefined ? { requestKey: args.requestKey } : {}),
     yes: args.yes === true,
     ...(deps.confirm !== undefined ? { confirm: deps.confirm } : {}),
+    ...(deps.approveOverLimit !== undefined ? { approveOverLimit: deps.approveOverLimit } : {}),
     payeeLabel: `${sanitizeForTerminal(url)}${via}; recipient ${sanitizeForTerminal(effectiveRequirement.payTo)}, ${sanitizeForTerminal(effectiveRequirement.network)} / ${sanitizeForTerminal(effectiveRequirement.asset)}`,
     allowlistSubject: 'this host',
     notConfirmedMessage: 'Payment not confirmed.',

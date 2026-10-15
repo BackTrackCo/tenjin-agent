@@ -101,11 +101,20 @@ const RefusedSchema = z.strictObject({
  * serves the category it chose, so it now says so; the CONTRACT is still not
  * here, because the task the host will run does not exist yet.
  */
+/** A display name the server gives a capability, sent because this build
+ *  lists `label`. Shown exactly as given; absent, a surface says
+ *  {@link UNLABELLED}. */
+const LabelSchema = z.string().min(1).max(32);
+
+/** What a surface names a lookup whose decision carries no `label`. */
+export const UNLABELLED = 'Tenjin lookup';
+
 const CapabilityFields = {
   capabilityId: z.string().min(1).max(200),
   category: z.string().min(1).max(64),
   /** The service's own name, not the x402 reseller in front of it. */
   provider: z.string().min(1).max(120),
+  label: LabelSchema.optional(),
   capabilityDescription: z.string().min(1).max(500),
   /** What the provider charges, atomic USDC. The `request` tool refuses a live
    *  402 above it; `gateSpend` still caps the amount actually signed. */
@@ -172,6 +181,8 @@ const DiscoveredCandidateSchema = z.strictObject({
 export const ToolSpecSchema = z.strictObject({
   capabilityId: z.string().min(1).max(200),
   provider: z.string().min(1).max(120),
+  /** The display name, on a catalog service's spec; a Bazaar spec has none. */
+  label: LabelSchema.optional(),
   /** The input field that takes a pending search's query or fetch's URL. */
   holds: z
     .strictObject({
@@ -314,6 +325,16 @@ const HookDecisionSchema = z.discriminatedUnion('action', [
        */
       hint: z.string().min(1).max(2_000),
       specs: SpecsSchema,
+      /**
+       * HOW THE OFFER IS DELIVERED, sent because this build lists `fields`.
+       * `augment` is the free docs lookup before a search: the client shows no
+       * line and puts what `augmentUrl` returns above the search's own
+       * results. `offer` is every line the client shows. Absent (a server
+       * from before the token), a free curated offer before a search is read
+       * as `augment`, as builds before this one did.
+       */
+      delivery: z.enum(['offer', 'augment']).optional(),
+      augmentUrl: z.string().url().max(2_048).optional(),
     })
     .superRefine(checkHint),
   DiscoveredSchema,
@@ -364,17 +385,51 @@ function envelope<T extends z.ZodTypeAny>(decision: T) {
 const HookResponseSchema = envelope(HookDecisionSchema);
 const ToolResponseSchema = envelope(ToolDecisionSchema);
 
+/**
+ * ONE ROW OF THE TOOL LIST, as the free browse answers it: the tool's id, its
+ * display name (a list entry's upstream name runs to 120 characters), what it
+ * does, its price as the server writes it, and its kind. Strict like every
+ * answer here, with the server's own bounds. The id is the one field the model
+ * sends back, so its alphabet is pinned; the text is flattened to one line
+ * where it is shown (`tool.ts`).
+ */
+const BrowseRowSchema = z.strictObject({
+  id: z
+    .string()
+    .min(1)
+    .max(200)
+    .regex(/^[A-Za-z0-9._:-]+$/),
+  label: z.string().min(1).max(120),
+  does: z.string().min(1).max(500),
+  price: z.string().min(1).max(32),
+  free: z.boolean(),
+  kind: z.string().min(1).max(120),
+});
+export type BrowseRow = z.infer<typeof BrowseRowSchema>;
+
+const BrowseResponseSchema = z.strictObject({
+  schemaVersion: z.literal(1),
+  routerVersion: z.string().min(1).max(64),
+  rows: z.array(BrowseRowSchema).max(200),
+});
+export type BrowseResponse = z.infer<typeof BrowseResponseSchema>;
+
 export type HookResponse = z.infer<typeof HookResponseSchema>;
 export type ToolResponse = z.infer<typeof ToolResponseSchema>;
 export type HookDecision = HookResponse['decision'];
 export type ToolDecision = ToolResponse['decision'];
 
 /** Which call this is, and therefore which answer is legal for it. */
-export type CallKind = 'hook' | 'tool';
+export type CallKind = 'hook' | 'tool' | 'browse';
 
 /**
- * What this client can act on beyond the curated answers, sent on both calls.
- * `catalog` takes Tenjin's reviewed list of third-party services as
+ * What this client can act on beyond the curated answers, sent on every call.
+ * Each token names one kind of feature this build parses and runs, and the
+ * server ignores a token it does not know, so the list only ever grows.
+ * `label` takes each catalog service's display name on its spec and both
+ * `execute` answers, and the offer line that starts at it. `fields` takes
+ * each spec's `holds` and `output`, and the hook `execute`'s `delivery` and
+ * `augmentUrl`. `catalog` takes Tenjin's reviewed list of third-party services as
  * `discovered` offers under their catalog ids, with each spec's `holds` and
  * `output`, and `choices`, a set of options the user picks between or runs
  * all of, beside a discovered offer from a compare group. A build that sends
@@ -385,7 +440,7 @@ export type CallKind = 'hook' | 'tool';
  * take: the decision schemas are strict. `bazaar` widens discovery to the
  * open Bazaar and is sent only while `experimental.bazaar` is on.
  */
-export const CLIENT_ACCEPTS: readonly string[] = ['catalog', 'spec'];
+export const CLIENT_ACCEPTS: readonly string[] = ['catalog', 'spec', 'label', 'fields'];
 export const BAZAAR_ACCEPT = 'bazaar';
 
 /** The `accepts` this build sends, with the open Bazaar or without it. */
@@ -435,11 +490,35 @@ export function buildToolBody(request: {
   };
 }
 
+/** The free browse of the tool list: `browse` is the need, or `""` for every
+ *  tool by kind. No gate call and no Jev on the server. */
+export function buildBrowseBody(request: {
+  browse: string;
+  accepts: readonly string[];
+}): Record<string, unknown> {
+  return { schemaVersion: 1, browse: request.browse, accepts: [...request.accepts] };
+}
+
+/** A browse row's id, answered with that tool's spec under a fresh offer id. */
+export function buildToolSpecBody(request: {
+  tool: string;
+  accepts: readonly string[];
+}): Record<string, unknown> {
+  return { schemaVersion: 1, tool: request.tool, accepts: [...request.accepts] };
+}
+
 /** The parsers, exposed so the shared wire fixtures are checked against the
  *  same schemas production parses with rather than against a copy of them. */
 export function parseForTests(kind: CallKind, value: unknown): { success: boolean } {
-  const schema = kind === 'hook' ? HookResponseSchema : ToolResponseSchema;
-  return { success: schema.safeParse(value).success };
+  return { success: schemaFor(kind).safeParse(value).success };
+}
+
+function schemaFor(kind: CallKind) {
+  return kind === 'hook'
+    ? HookResponseSchema
+    : kind === 'tool'
+      ? ToolResponseSchema
+      : BrowseResponseSchema;
 }
 
 /**
@@ -601,6 +680,47 @@ export async function requestDecision(
     return free.status === 'skipped' ? free : { ...free, freePath: err.why };
   }
   return readDecision(response, schema);
+}
+
+/**
+ * THE TWO FREE READS OF THE TOOL LIST. `{browse}` lists the tools that fit a
+ * need (or all of them, by kind, for `""`), and `{tool}` answers a browse
+ * row's id with that tool's spec under a fresh offer id, exactly as a query
+ * with no id is answered. Neither makes a gate call on the server, neither is
+ * charged the routing fee, and neither pays anything here, so both always take
+ * the free path: `deps.route` is never read.
+ */
+export async function requestBrowse(
+  browse: string,
+  deps: Omit<DecisionDeps, 'route'>,
+): Promise<DecisionOutcome<BrowseResponse>> {
+  return readDecision(
+    await httpRequest(new URL(ROUTER_PATH, deps.baseUrl).toString(), {
+      method: 'POST',
+      timeoutMs: deps.timeoutMs ?? deps.ctx.flags.timeout,
+      blockRedirects: true,
+      jsonBody: buildBrowseBody({ browse, accepts: acceptsFor(deps.acceptsBazaar === true) }),
+      ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+    }),
+    BrowseResponseSchema,
+  );
+}
+
+/** `{tool}`: a browse row's spec, kept by the caller under the answer's id. */
+export async function requestToolSpec(
+  tool: string,
+  deps: Omit<DecisionDeps, 'route'>,
+): Promise<DecisionOutcome<ToolResponse>> {
+  return readDecision(
+    await httpRequest(new URL(ROUTER_PATH, deps.baseUrl).toString(), {
+      method: 'POST',
+      timeoutMs: deps.timeoutMs ?? deps.ctx.flags.timeout,
+      blockRedirects: true,
+      jsonBody: buildToolSpecBody({ tool, accepts: acceptsFor(deps.acceptsBazaar === true) }),
+      ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+    }),
+    ToolResponseSchema,
+  );
 }
 
 /** Why a call from a spec stopped before anything was signed: the input did

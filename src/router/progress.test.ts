@@ -269,7 +269,7 @@ describe('housekeeping', () => {
    */
   it('keeps a fresh docs body and a temp file mid-rename, and ages them out by mtime', async () => {
     const session = sessionDir(dir, 'session-a');
-    const body = await markAugment(dir, 'session-a', 'toolu_1', 'Context7', NOW);
+    const body = await markAugment(dir, 'session-a', 'toolu_1', { provider: 'Context7' }, NOW);
     expect(body).not.toBeNull();
     // A body the size of real docs, far past what a record may be.
     await writeFile(body!, JSON.stringify({ status: 200, text: 'x'.repeat(20_000) }));
@@ -290,9 +290,27 @@ describe('housekeeping', () => {
 
 describe('the free-docs records', () => {
   it('finds the marker by the call id, with its provider and body path beside it', async () => {
-    const body = await markAugment(dir, 'session-a', 'toolu_1', 'Context7\u001b[2J', NOW);
+    const body = await markAugment(
+      dir,
+      'session-a',
+      'toolu_1',
+      { provider: 'Context7\u001b[2J' },
+      NOW,
+    );
     const marker = await augmentOf(dir, 'session-a', 'toolu_1', NOW + 1_000);
     expect(marker).toEqual({ at: NOW, provider: 'Context7 [2J', body });
+    // The label rides beside the provider when the decision carried one.
+    await markAugment(
+      dir,
+      'session-a',
+      'toolu_3',
+      { provider: 'Context7', label: 'Context7 docs\u001b[2J' },
+      NOW,
+    );
+    expect(await augmentOf(dir, 'session-a', 'toolu_3', NOW)).toMatchObject({
+      provider: 'Context7',
+      label: 'Context7 docs [2J',
+    });
     expect(await augmentOf(dir, 'session-a', 'toolu_2', NOW)).toBeNull();
     expect(await augmentOf(dir, 'session-b', 'toolu_1', NOW)).toBeNull();
     expect(await augmentOf(dir, 'session-a', 'toolu_1', NOW + EXPIRY_MS + 1)).toBeNull();

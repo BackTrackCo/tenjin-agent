@@ -55,6 +55,9 @@ export interface SpendRequest {
    * reservation TTL is what bounds "same turn". Omit it and nothing changes.
    */
   requestKey?: string;
+  /** Pay once: the exact amount the user approved over `maxAutoSpend` for this
+   *  one call (`SpendRequest.autoSpendApprovalAtomic` in `../policy`). */
+  autoSpendApprovalAtomic?: bigint;
 }
 
 export interface SpendAuthorization {
@@ -174,6 +177,9 @@ export function createLocalSpendAuthorizer(deps: LocalSpendAuthorizerDeps): Spen
           amountAtomic: req.amountAtomic,
           creator: req.creator,
           ...(req.maxPriceAtomic !== undefined ? { maxPriceAtomic: req.maxPriceAtomic } : {}),
+          ...(req.autoSpendApprovalAtomic !== undefined
+            ? { autoSpendApprovalAtomic: req.autoSpendApprovalAtomic }
+            : {}),
           sessionSpentAtomic,
         });
         const base: SpendAuthorization = {

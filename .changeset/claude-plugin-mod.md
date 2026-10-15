@@ -1,0 +1,7 @@
+---
+'tenjin-cli': patch
+---
+
+The `tenjin` Claude Code plugin now carries a mod (Claude Code 2.1.287 or later, terminal and desktop app). It shows the `request` call as `Calling <label>…` with its price and the fields sent, then how it ended, names a live paid call in the spinner, shows a toast and one dim transcript line when a call is paid, and adds one line under a turn that paid: `Tenjin: 2 paid lookups, $0.09 · today $0.31 of $5.00`. After an install that created the wallet, the first session shows a toast with its address, and the terminal's prompt hint says the wallet is unfunded until it is funded. The mod allows the request tool after Claude Code's own verdict, so a `deny` or `ask` rule of yours still wins, and keeps it in the prompt's tool list. It reads state under `~/.tenjin` and writes nothing there.
+
+Pay once: a lookup priced over `maxAutoSpend` now asks in Claude Code's dialog (`<label> wants $0.42 for this lookup, over your $0.25 automatic limit. Pay once?`) when the client supports MCP form elicitation. Yes pays that one call at that exact price, and the daily budget, the allowlist, a price cap and the duplicate guard still refuse. No, no answer in five minutes, or a client without the dialog returns `needs_approval` as before, which now carries `policyReason`.

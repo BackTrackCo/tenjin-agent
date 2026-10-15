@@ -1,18 +1,26 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { defineConfig } from 'tsup';
-import { renderHostFiles } from './src/router/plugin-files';
+import { MOD_FILES, PLUGIN_DIR, renderHostFiles } from './src/router/plugin-files';
 
 /**
  * THE CLAUDE CODE PLUGIN SHIPS IN `dist/hosts/claude`, rendered from the same
  * module the CLI reads, with this build's version stamped into its manifest.
  * `tenjin install` registers that folder as a `directory` marketplace, so it
  * must sit inside the published `files`; `dist` already is. The checked-in
- * `hosts/claude/` templates are pinned to the same render by a test.
+ * `hosts/claude/` templates are pinned to the same render by a test, and the
+ * mod's two files are copied from them as written.
  */
 function writeHosts(): void {
   const { version } = JSON.parse(readFileSync('package.json', 'utf8')) as { version: string };
-  for (const [path, body] of Object.entries(renderHostFiles(version))) {
+  // The mod ships as written: its source is the checked-in plugin folder.
+  const mod = Object.fromEntries(
+    MOD_FILES.map((path) => [
+      path,
+      readFileSync(join('hosts', 'claude', PLUGIN_DIR, path), 'utf8'),
+    ]),
+  ) as Record<(typeof MOD_FILES)[number], string>;
+  for (const [path, body] of Object.entries(renderHostFiles(version, mod))) {
     const target = join('dist', 'hosts', 'claude', path);
     mkdirSync(dirname(target), { recursive: true });
     writeFileSync(target, body);
