@@ -15,10 +15,11 @@ import { JobSchema } from './decision';
  * a resume needs rides in the record, because the offer's spec is kept for
  * fifteen minutes and a job for up to two days.
  *
- * THE PAYMENT HEADER IS A BEARER INSTRUMENT, so the record holding it is
- * written 0600 through an atomic rename (which replaces a planted symlink
- * rather than writing through it), read with O_NOFOLLOW, and loses `auth` the
- * moment the take stops running. A record past its `expiresAt` is pruned.
+ * NO PAYMENT RIDES IN IT: a poll is never signed. The record still names a
+ * status URL that can be the result's only key and what the user asked for,
+ * so it is written 0600 through an atomic rename (which replaces a planted
+ * symlink rather than writing through it) and read with O_NOFOLLOW. A record
+ * past its `expiresAt` is pruned.
  */
 
 /** At most this many takes per call, so at most this many files per job. */
@@ -42,8 +43,6 @@ const TakeSchema = z.strictObject({
   version: z.literal(1),
   offerId: z.string().min(1).max(200),
   take: z.number().int().min(1).max(MAX_TAKES),
-  /** The submit's origin: the only place `auth` is ever sent. */
-  origin: z.string().min(1).max(2_048),
   poll: z.strictObject({
     url: z.string().min(1).max(2_048),
     method: z.enum(['GET', 'POST']),
@@ -52,11 +51,6 @@ const TakeSchema = z.strictObject({
       .max(64 * 1024)
       .optional(),
   }),
-  /** The payment headers every poll carries, for a poll the seller binds to
-   *  the paying wallet. Only while the take runs. */
-  auth: z.record(z.string(), z.string().max(16 * 1024)).optional(),
-  /** This take already signed its one fresh authorization for a poll. */
-  resigned: z.boolean().optional(),
   job: JobSchema,
   /** What finishing the call needs once its spec is gone. */
   call: z.strictObject({
@@ -80,8 +74,6 @@ const TakeSchema = z.strictObject({
   amountAtomic: Digits,
   /** The submit's authorization, which its ledger row is found by. */
   authorization: Authorization.optional(),
-  /** The fresh one a refused poll was signed with, which its own row is found by. */
-  resignedAuthorization: Authorization.optional(),
   /** The submit's settlement, when the seller named it: paid for certain. */
   txHash: z
     .string()
@@ -116,23 +108,15 @@ export function takePath(dataDir: string, offerId: string, take: number): string
 }
 
 /**
- * Write a take, `auth` dropped unless it is still running. Throws: a job that
- * cannot be recorded before its first poll is one no later process can finish,
- * and the caller says so.
+ * Write a take. Throws: a job that cannot be recorded before its first poll is
+ * one no later process can finish, and the caller says so.
  */
 export async function writeTake(dataDir: string, take: JobTake): Promise<void> {
-  const kept: JobTake = take.state === 'running' ? take : withoutAuth(take);
-  await writeFileAtomic(takePath(dataDir, take.offerId, take.take), JSON.stringify(kept), {
+  await writeFileAtomic(takePath(dataDir, take.offerId, take.take), JSON.stringify(take), {
     mode: 0o600,
     dirMode: 0o700,
   });
   void pruneJobs(dataDir, Date.now());
-}
-
-function withoutAuth(take: JobTake): JobTake {
-  const rest = { ...take };
-  delete rest.auth;
-  return rest;
 }
 
 /** The take kept for this offer, or null: none, damaged, not ours, or a symlink. */
@@ -172,8 +156,7 @@ export async function readTakes(dataDir: string, offerId: string): Promise<JobTa
 
 /**
  * READ, CHANGE AND WRITE ONE TAKE under its own lock, so two processes
- * resuming the same job cannot each sign the fresh authorization or each lose
- * the other's ending. `change` sees the record as it is on disk now and
+ * resuming the same job cannot each lose the other's ending. `change` sees the record as it is on disk now and
  * returns the one to write, or null to leave it. The record written, or null.
  */
 export async function updateTake(
@@ -191,7 +174,7 @@ export async function updateTake(
       const next = await change(current);
       if (next === null) return null;
       await writeTake(dataDir, next);
-      return next.state === 'running' ? next : withoutAuth(next);
+      return next;
     },
     { timeoutMs: 30_000 },
   );
@@ -220,7 +203,7 @@ export async function endTake(
     return { ...current, ...ending };
   });
   if (written !== null) return { won: true, take: written };
-  return ended !== null ? { won: false, take: withoutAuth(ended) } : null;
+  return ended !== null ? { won: false, take: ended } : null;
 }
 
 function parseJson(text: string): unknown {

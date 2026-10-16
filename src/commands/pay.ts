@@ -123,9 +123,8 @@ export interface PayArgs {
   /**
    * The router's job seam: called once with the answer that delivered (free,
    * entitled or paid), or with a paid leg that timed out after its headers
-   * came, and the payment headers that leg sent. A long job's status URL can
-   * be a header, and a poll the seller binds to the paying wallet re-sends the
-   * same payment. Never part of `data`, which `tenjin pay --json` prints.
+   * came. A long job's status URL can be a header. Never part of `data`,
+   * which `tenjin pay --json` prints.
    */
   onPaidLeg?: (leg: PaidLeg) => void;
 }
@@ -134,8 +133,6 @@ export interface PayArgs {
 export interface PaidLeg {
   status?: number;
   header?: (name: string) => string | undefined;
-  /** The payment headers the paid leg carried; absent on a free answer. */
-  paymentHeaders?: Record<string, string>;
 }
 
 export interface PayDeps {
@@ -459,7 +456,6 @@ async function executePay(
     args.onPaidLeg?.({
       ...(paid.status !== undefined ? { status: paid.status } : {}),
       ...(paid.header !== undefined ? { header: paid.header } : {}),
-      paymentHeaders: payment.headers,
     });
   }
   // A TRANSPORT failure on this leg is a post-transmission outcome like any
@@ -681,75 +677,6 @@ export async function quoteRouterCall(
   if (requirement === undefined) throw noMatchingEntry(challenge, args.terms);
   assertWithinTerms(args.terms, requirement);
   return BigInt(requirement.amount);
-}
-
-/**
- * ONE FRESH AUTHORIZATION FOR A JOB'S POLL, under every gate a paid call
- * meets. A seller that binds its polls to the paying wallet (BlockRun) can
- * refuse the submit's own payment header on a later poll and answer 402. This
- * signs the challenge that 402 carries against the spec's terms
- * ({@link assertWithinTerms}), the spend policy ({@link gateSpend}, automatic,
- * under the job's own request key) and a live balance read, exactly as the
- * paid leg does. The reservation is committed as soon as the authorization
- * exists: the caller keeps it for every later poll, so from here it is money
- * that may move, and `reconcilePayments` gives back whichever of the two
- * authorizations expires unused.
- */
-export async function signJobPayment(
-  input: { url: string; challenge: string; terms: AdvertisedTerms; requestKey: string },
-  ctx: CommandContext,
-  deps: PayDeps = {},
-): Promise<Awaited<ReturnType<typeof buildExactPayment>>> {
-  const settings = await resolveContextSettings(ctx);
-  let challenge: PaymentRequired;
-  try {
-    challenge = decodePaymentRequiredHeader(input.challenge);
-  } catch (err) {
-    throw new CliError('CONTRACT_MISMATCH', 'Could not decode the PAYMENT-REQUIRED header.', {
-      cause: err,
-    });
-  }
-  const openedSigner: { current?: TenjinSigner } = {};
-  const payer = createPayerClient(() => signerOrThrow(openedSigner));
-  const requirement = selectRequirement(payer.core, challenge, input.terms);
-  if (requirement === undefined) throw noMatchingEntry(challenge, input.terms);
-  const termsLabel = assertWithinTerms(input.terms, requirement);
-  const signer = await openWallet(
-    resolveWalletProvider(ctx, deps.provider !== undefined ? { provider: deps.provider } : {}),
-  );
-  openedSigner.current = signer;
-  const authorizer = resolveSpendAuthorizer(
-    ctx,
-    settings.policy,
-    deps.authorizer !== undefined ? { authorizer: deps.authorizer } : {},
-  );
-  const amountAtomic = BigInt(requirement.amount);
-  const reservationId = await gateSpend({
-    mode: 'automatic',
-    ctx,
-    authorizer,
-    amountAtomic,
-    creator: new URL(input.url).host,
-    requestKey: input.requestKey,
-    yes: false,
-    confirm: async () => false,
-    payeeLabel: `${sanitizeForTerminal(input.url)} (${sanitizeForTerminal(termsLabel)}); recipient ${sanitizeForTerminal(requirement.payTo)}, ${sanitizeForTerminal(requirement.network)} / ${sanitizeForTerminal(requirement.asset)}`,
-    allowlistSubject: 'this host',
-    notConfirmedMessage: 'Payment not confirmed.',
-  });
-  let payment: Awaited<ReturnType<typeof buildExactPayment>>;
-  try {
-    await assertBalanceCovers(signer.address, amountAtomic, settings.rpcUrl, ctx, deps);
-    payment = await buildExactPayment(challenge, signer, requirement);
-  } catch (err) {
-    await authorizer.release(reservationId);
-    throw err;
-  }
-  await authorizer.commit(reservationId, payment.amountAtomic, {
-    mode: 'automatic',
-    ...(payment.authorization !== undefined ? { nonce: payment.authorization.nonce } : {}),
-  });
-  return payment;
 }
 
 /** Which lane may pay this URL, or the exact refusal. */

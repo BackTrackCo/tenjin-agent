@@ -5,77 +5,92 @@
     "action": "spec",
     "id": "0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d24",
     "spec": {
-      "capabilityId": "blockrun-image-gpt-image-2",
-      "provider": "BlockRun (OpenAI GPT Image 2)",
+      "capabilityId": "aispace-hailuo-3-max",
+      "provider": "AiSpace (Venice) (MiniMax Hailuo 3 Max)",
       "holds": {},
       "output": "media",
-      "description": "General-purpose images with precise prompt following: hero images, illustrations, scenes (model=\"openai/gpt-image-2\").",
-      "priceAtomic": "64000",
-      "priceVaries": true,
-      "maxAmountAtomic": "1000000",
-      "payTo": "0xe9030014F5DAe217d0A152f02A043567b16c1aBf",
+      "description": "Cinematic 5-second clips with native audio from a prompt, at 768p: launch, product and social videos (model=\"minimax-h3-max-text-to-video\"). $0.155 is AiSpace's promo price, half its $0.31 list.",
+      "priceAtomic": "155000",
+      "priceVaries": false,
+      "maxAmountAtomic": "155000",
+      "payTo": "0xA7f3Ad0E69F61864092FAbBa6Cee00AF6e584689",
       "network": "eip155:8453",
       "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
       "request": {
         "method": "POST",
-        "url": "https://blockrun.ai/api/v1/images/generations",
+        "url": "https://x402.aispace.bot/api/v1/video/queue",
         "fields": {
           "model": "body",
           "prompt": "body",
-          "size": "body",
-          "n": "body"
+          "duration": "body",
+          "resolution": "body",
+          "aspect_ratio": "body"
         },
         "location": "body"
       },
       "input": {
         "type": "object",
-        "required": ["prompt"],
         "properties": {
           "model": {
             "type": "string",
-            "description": "Image model ID (e.g., openai/gpt-image-1, openai/gpt-image-2)",
-            "enum": ["openai/gpt-image-2"],
-            "default": "openai/gpt-image-2"
+            "description": "Venice video model id.",
+            "enum": ["minimax-h3-max-text-to-video"],
+            "default": "minimax-h3-max-text-to-video"
           },
           "prompt": {
             "type": "string",
-            "description": "Text description of the image to generate"
+            "minLength": 1,
+            "maxLength": 10000,
+            "description": "What the video should show, and how the camera moves."
           },
-          "size": {
+          "duration": {
             "type": "string",
-            "enum": ["1024x1024", "1536x1024", "1024x1536"],
-            "description": "Output size, default 1024x1024; 1536x1024 and 1024x1536 cost $0.127 per image"
+            "enum": ["5s"],
+            "description": "5 s ($0.155); longer clips cost more"
           },
-          "n": {
-            "type": "integer",
-            "description": "Number of images to generate"
+          "resolution": {
+            "type": "string",
+            "enum": ["768P"]
+          },
+          "aspect_ratio": {
+            "type": "string",
+            "enum": ["16:9", "21:9", "4:3", "1:1", "3:4", "9:16"],
+            "description": "Frame shape; 9:16 for a vertical video"
           }
-        }
+        },
+        "required": ["model", "prompt", "duration", "resolution"],
+        "additionalProperties": false
       },
       "pinned": {
-        "model": "openai/gpt-image-2"
+        "model": "minimax-h3-max-text-to-video",
+        "duration": "5s",
+        "resolution": "768P"
       },
       "example": {
-        "prompt": "a minimalist flat illustration of a paper plane over a city skyline, soft pastel colors",
-        "size": "1024x1024"
+        "prompt": "a paper plane gliding over a sunny city skyline, smooth cinematic camera",
+        "aspect_ratio": "16:9"
       },
-      "returns": "JSON {id, data:[{url}], price}: a hosted image URL per image; a slow render answers 202 {id, poll_url} with nothing charged, finished only by a GET of poll_url signed by the same wallet",
+      "returns": "the clip as raw MP4 bytes from the free retrieve once the job finishes, saved to disk by the client",
       "job": {
         "pollUrl": {
-          "field": "poll_url"
+          "fixed": "https://x402.aispace.bot/api/v1/video/retrieve"
         },
-        "pollMethod": "GET",
-        "pollAuth": "x402",
+        "completeUrl": {
+          "fixed": "https://x402.aispace.bot/api/v1/video/complete"
+        },
+        "pollMethod": "POST",
+        "pollBody": {
+          "model": "$input.model",
+          "queue_id": "$result.queue_id"
+        },
         "running": {
-          "httpStatus": [202]
-        },
-        "failed": {
           "field": "status",
-          "values": ["failed"]
+          "values": ["PROCESSING", "QUEUED"]
         },
-        "everyS": 3,
-        "maxWaitS": 540,
-        "keepH": 1
+        "everyS": 10,
+        "maxWaitS": 600,
+        "keepH": 24,
+        "always": true
       },
       "takes": {
         "max": 5

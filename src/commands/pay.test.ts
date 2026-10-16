@@ -2,13 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtemp, rm, writeFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import {
-  MAX_PAID_LEG_TIMEOUT_MS,
-  paidLegTimeoutMs,
-  runPay,
-  signJobPayment,
-  type PaidLeg,
-} from './pay';
+import { MAX_PAID_LEG_TIMEOUT_MS, paidLegTimeoutMs, runPay, type PaidLeg } from './pay';
 import { saveSweepListings } from '../lib/bazaar';
 import { CliError } from '../lib/errors';
 import { MAX_BODY_BYTES } from '../lib/request-schema';
@@ -1423,12 +1417,12 @@ describe('runPay, the success rule on every delivery', () => {
 // authorization has left and the reservation is committed, so the receipt owes
 // the amount whatever the transport said.
 /**
- * THE ROUTER'S JOB SEAM. A long job's status URL can be a header, and a seller
- * that binds its polls to the paying wallet takes the same payment header
- * again, so the router is handed both, and `tenjin pay --json` prints neither.
+ * THE ROUTER'S JOB SEAM. A long job's status URL can be a header, so the
+ * router is handed the paid answer's status and headers. The payment header
+ * it carried is never handed on: a poll is never signed.
  */
 describe('runPay, the paid leg a job is started from', () => {
-  it('hands the paid answer and its payment header to the caller, never into data', async () => {
+  it('hands the paid answer to the caller, and never its payment header', async () => {
     const fixture = buildPaymentRequired();
     const { fetch, calls } = scriptedFetch([
       json(402, {}, { 'PAYMENT-REQUIRED': fixture.header }),
@@ -1454,86 +1448,8 @@ describe('runPay, the paid leg a job is started from', () => {
     expect(sent).toBeDefined();
     expect(seen?.status).toBe(202);
     expect(seen?.header?.('x-status-url')).toBe('/jobs/1');
-    expect(Object.values(seen?.paymentHeaders ?? {})).toEqual([sent]);
+    expect(Object.keys(seen ?? {}).sort()).toEqual(['header', 'status']);
     expect(JSON.stringify(result.data)).not.toContain(sent);
-  });
-});
-
-/**
- * ONE FRESH AUTHORIZATION FOR A JOB'S POLL, under the same gates as a paid
- * call: the spec's terms, the spend policy under the job's own key, and the
- * balance. A challenge over the terms signs nothing and reserves nothing.
- */
-describe('signJobPayment', () => {
-  const terms = {
-    source: 'BlockRun',
-    maxAmountAtomic: '64000',
-    payTo: '0x1111111111111111111111111111111111111111',
-    network: 'eip155:8453',
-    asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
-  };
-
-  it('signs the challenge under the job key, and commits it as exposure', async () => {
-    const authorizer = fakeAuthorizer('allow');
-    const payment = await signJobPayment(
-      {
-        url: 'https://blockrun.ai/api/v1/images/generations/img_1',
-        challenge: buildPaymentRequired({ amount: '64000' }).header,
-        terms,
-        requestKey: 'job:abc#1',
-      },
-      makeCtx(),
-      { ...PUBLIC_DNS, provider: testWalletProvider(), authorizer },
-    );
-    expect(payment.amountAtomic).toBe(64_000n);
-    expect(Object.keys(payment.headers)).toHaveLength(1);
-    expect(authorizer.authorize).toHaveBeenCalledWith(
-      expect.objectContaining({
-        requestKey: 'job:abc#1',
-        creator: 'blockrun.ai',
-        mode: 'automatic',
-      }),
-    );
-    expect(authorizer.commit).toHaveBeenCalledWith(
-      RESERVATION,
-      64_000n,
-      expect.objectContaining({ nonce: payment.authorization?.nonce }),
-    );
-  });
-
-  it('refuses a challenge over the terms before any reservation', async () => {
-    const authorizer = fakeAuthorizer('allow');
-    await expect(
-      signJobPayment(
-        {
-          url: 'https://blockrun.ai/api/v1/images/generations/img_1',
-          challenge: buildPaymentRequired({ amount: '64001' }).header,
-          terms,
-          requestKey: 'job:abc#1',
-        },
-        makeCtx(),
-        { ...PUBLIC_DNS, provider: testWalletProvider(), authorizer },
-      ),
-    ).rejects.toMatchObject({ code: 'REGISTRY_MISMATCH' });
-    expect(authorizer.authorize).not.toHaveBeenCalled();
-  });
-
-  it('releases the reservation when the wallet cannot cover it', async () => {
-    const authorizer = fakeAuthorizer('allow');
-    await expect(
-      signJobPayment(
-        {
-          url: 'https://blockrun.ai/api/v1/images/generations/img_1',
-          challenge: buildPaymentRequired({ amount: '64000' }).header,
-          terms,
-          requestKey: 'job:abc#1',
-        },
-        makeCtx(),
-        { ...PUBLIC_DNS, readBalance: async () => 1n, provider: testWalletProvider(), authorizer },
-      ),
-    ).rejects.toMatchObject({ code: 'REFUSED' });
-    expect(authorizer.release).toHaveBeenCalledWith(RESERVATION);
-    expect(authorizer.commit).not.toHaveBeenCalled();
   });
 });
 

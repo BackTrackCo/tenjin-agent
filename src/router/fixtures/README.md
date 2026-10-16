@@ -121,28 +121,28 @@ answered `execute` as its id would be.
 
 This build adds `jobs` to `accepts`. A spec then carries `job` when its seller
 can answer a paid call before the result is ready, and `takes: {max}` when its
-task makes media, the most takes one call's `count` may run.
+task makes media, the most takes one call's `count` may run. A poll is never
+signed: a take's one payment is its submit, and no payment header goes to a
+poll, status or complete URL.
 
 - `pollUrl`: a field or header of the submit's 2xx answer (`{field?, header?}`),
   or one `{fixed}` URL. The client holds it to the submit's host over HTTPS,
-  and to its exact origin when `pollAuth` is `x402`, and refuses anything else
-  unpolled.
+  and refuses anything else unpolled.
 - `pollMethod`, and on a `POST` `pollBody`, whose `$input.<field>` and
   `$result.<field>` values come from the input sent (pins included) and the
   submit's answer.
-- `pollAuth`: `none`, or `x402`: every poll re-sends the submit's payment header,
-  and a poll that answers 402 signs one fresh authorization per take.
 - `running` (`{httpStatus}` or `{field, values}`) and `failed` (`{field,
 values}`); a 202, or `always: true`, is running whatever they say.
 - `completeUrl`: `{fixed}` on the submit's host, sent once like a poll (its
-  method, body and auth) after the result is saved, never after a save that
+  method and body) after the result is saved, never after a save that
   failed; its answer is ignored.
 - `everyS`, `maxWaitS` and `keepH`: the first poll's interval, how long after the
   submit the result can arrive, and how many hours `request({job})` can resume it.
 
-A poll's 404 or 410 is a job the seller no longer has, and any other 4xx but
-402 ends it `failed` in the seller's words (AiSpace answers a refused prompt's
-retrieve with a 422). A paid call still running when the call's 300 s wait
+A poll's 404 or 410 is a job the seller no longer has; a 402 ends it `failed`
+with nothing signed (the seller asked to be paid again for a result already
+paid for), and any other 4xx ends it `failed` in the seller's words (AiSpace
+answers a refused prompt's retrieve with a 422). A paid call still running when the call's 300 s wait
 ends is reported `running`, with its `httpStatus` and `ms` and nothing else.
 
 ## The set

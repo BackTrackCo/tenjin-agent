@@ -14,18 +14,21 @@ import { MAX_MEDIA_BYTES, pinnedLookup, type PinnedTarget } from './paid';
 
 /**
  * A PAID CALL THE SELLER ANSWERED BEFORE ITS RESULT WAS READY, finished by
- * polling. The spec's `job` says where the status is, how a poll is sent and
- * signed, and what says it is still running or failed; this file checks the
- * poll URL against the submit, sends each poll and reads its answer. The
- * caller (`tool.ts`) owns the money, the record and what the agent is told.
+ * polling. The spec's `job` says where the status is, how a poll is sent, and
+ * what says it is still running or failed; this file checks the poll URL
+ * against the submit, sends each poll and reads its answer. The caller
+ * (`tool.ts`) owns the money, the record and what the agent is told.
  *
- * WHAT A POLL MAY TOUCH. The URL is the submit's own host, over HTTPS, and the
- * submit's exact origin whenever the poll carries a payment header; it is
+ * A POLL NEVER CARRIES A PAYMENT. The take's cost is its one payment, made at
+ * the submit; no header from it is kept or re-sent, and nothing is signed for
+ * a poll, a status or a complete URL. A seller that asks for a payment there
+ * ends the take failed.
+ *
+ * WHAT A POLL MAY TOUCH. The URL is the submit's own host, over HTTPS; it is
  * checked when the job starts and again before every poll, resolved to a
  * public address and connected to that address, with no redirect followed.
- * A poll carries `accept`, the CLI's user agent, `content-type` on a POST,
- * and the payment header only where the job says the seller binds polls to
- * the paying wallet. Its body is the seller's: untrusted, and capped.
+ * A poll carries `accept`, the CLI's user agent and `content-type` on a POST.
+ * Its body is the seller's: untrusted, and capped.
  */
 
 /** How long one call waits for a job before it answers `running`. */
@@ -81,10 +84,9 @@ export interface PollRequestSpec {
 /**
  * WHERE THE JOB IS POLLED, from the submit's answer, or why it cannot be. A
  * URL a field or header names is resolved against the submit's URL, then held
- * to its host over HTTPS, and to its exact origin when the poll is signed. A
- * fixed URL was checked the same way by the server, and is checked again
- * here. `named` is the URL the seller gave, for the agent to see as
- * untrusted, when one was given and refused.
+ * to its host over HTTPS. A fixed URL was checked the same way by the server,
+ * and is checked again here. `named` is the URL the seller gave, for the agent
+ * to see as untrusted, when one was given and refused.
  */
 export function pollTarget(
   job: Job,
@@ -116,12 +118,6 @@ export function pollTarget(
   }
   if (url.hostname !== base.hostname) {
     return { problem: `the status URL is on ${url.hostname}, not ${base.hostname}`, named };
-  }
-  if (job.pollAuth === 'x402' && url.origin !== base.origin) {
-    return {
-      problem: `the status URL is not on ${base.origin}, the only origin a signed poll goes to`,
-      named,
-    };
   }
   if (job.pollMethod === 'GET') return { url: url.toString(), method: 'GET' };
   if (job.pollBody === undefined) return { url: url.toString(), method: 'POST' };
@@ -219,31 +215,20 @@ export interface PollDeps {
   destination?: DestinationOptions;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
-  /**
-   * Sign this take's one fresh authorization for the 402 a signed poll got,
-   * under every gate a payment meets, and keep it for every later poll. The
-   * headers to poll with, or the reason it was refused.
-   */
-  resign?: (
-    challenge: string,
-  ) => Promise<{ headers: Record<string, string> } | { refused: string }>;
 }
 
 /** What polling needs of a take. */
 export interface PolledTake {
-  origin: string;
   poll: PollRequestSpec;
   job: Job;
-  auth?: Record<string, string>;
-  resigned?: boolean;
 }
 
 /**
  * POLL ONE TAKE UNTIL IT ENDS OR THE DEADLINE PASSES. The first poll waits
  * `firstWaitMs` (the job's interval after a submit, none on a resume), each
  * later one half as long again as the last, up to {@link MAX_POLL_INTERVAL_MS}.
- * A 402 on a signed poll signs one fresh authorization and polls again at
- * once; a second is the seller's refusal. A 404 or 410 is a job the seller no
+ * A 402 is a seller asking to be paid again for a result already paid for:
+ * nothing is signed, and the take fails. A 404 or 410 is a job the seller no
  * longer has. Any other 4xx ends the job failed, in the seller's words: AiSpace
  * answers a refused prompt's retrieve with a 422, and every later one the
  * same. {@link MAX_POLL_ERRORS} 5xx, 429 or transport failures in a row stop
@@ -259,8 +244,6 @@ export async function pollUntil(
   let interval = take.job.everyS * 1000;
   let wait = opts.firstWaitMs;
   let errors = 0;
-  let auth = take.auth;
-  let resigned = take.resigned === true;
   let last: number | undefined;
   for (;;) {
     if (wait > 0) {
@@ -268,7 +251,7 @@ export async function pollUntil(
       if (left <= 0) return { state: 'running', ...(last !== undefined ? { status: last } : {}) };
       await sleep(Math.min(wait, left));
     }
-    const answer = await pollOnce(take, auth, deps);
+    const answer = await pollOnce(take, deps);
     wait = interval;
     interval = Math.min(Math.round(interval * BACKOFF), MAX_POLL_INTERVAL_MS);
     if (answer.kind === 'refused') return { state: 'failed', reason: answer.reason };
@@ -295,27 +278,11 @@ export async function pollUntil(
     if (answer.kind !== 'answer') continue;
     errors = 0;
     if (answer.status === 402) {
-      const challenge = answer.header('payment-required');
-      if (take.job.pollAuth !== 'x402' || deps.resign === undefined || challenge === undefined) {
-        return {
-          state: 'failed',
-          status: 402,
-          reason: 'the status URL asked for a payment this job does not make',
-        };
-      }
-      if (resigned) {
-        return {
-          state: 'failed',
-          status: 402,
-          reason: 'the seller refused the fresh payment on its status URL too',
-        };
-      }
-      resigned = true;
-      const signed = await deps.resign(challenge);
-      if ('refused' in signed) return { state: 'failed', status: 402, reason: signed.refused };
-      auth = signed.headers;
-      wait = 0;
-      continue;
+      return {
+        state: 'failed',
+        status: 402,
+        reason: 'the seller asked for another payment to return the result; none was sent',
+      };
     }
     if (answer.status === 404 || answer.status === 410) {
       return { state: 'expired', status: answer.status };
@@ -370,10 +337,9 @@ export async function pollUntil(
 
 /**
  * FREE THE SELLER'S COPY once ours is saved: the job's `completeUrl`, held to
- * the submit's host over HTTPS (and its origin, for a signed job) as a poll
- * is, sent once with the poll's method, body and payment header. Its answer,
- * and any failure, is ignored: the result is already on disk. The caller
- * sends it only after the save succeeded.
+ * the submit's host over HTTPS as a poll is, sent once with the poll's method
+ * and body. Its answer, and any failure, is ignored: the result is already on
+ * disk. The caller sends it only after the save succeeded.
  */
 export async function completeJob(
   take: PolledTake & { submitUrl: string },
@@ -391,8 +357,7 @@ export async function completeJob(
   }
   if (url.protocol !== 'https:' || url.username !== '' || url.password !== '') return;
   if (url.hostname !== base.hostname) return;
-  if (take.job.pollAuth === 'x402' && url.origin !== base.origin) return;
-  await pollOnce({ ...take, poll: { ...take.poll, url: url.toString() } }, take.auth, deps).catch(
+  await pollOnce({ ...take, poll: { ...take.poll, url: url.toString() } }, deps).catch(
     () => undefined,
   );
 }
@@ -427,23 +392,7 @@ type Attempt =
   | { kind: 'error'; reason: string }
   | { kind: 'refused'; reason: string };
 
-async function pollOnce(
-  take: PolledTake,
-  auth: Record<string, string> | undefined,
-  deps: PollDeps,
-): Promise<Attempt> {
-  // THE PAYMENT HEADER GOES TO THE SUBMIT'S ORIGIN AND NOWHERE ELSE, checked
-  // here as well as when the job started: a record read back from disk is
-  // only as good as the file.
-  let url: URL;
-  try {
-    url = new URL(take.poll.url);
-  } catch {
-    return { kind: 'refused', reason: 'the kept status URL cannot be parsed' };
-  }
-  if (auth !== undefined && url.origin !== take.origin) {
-    return { kind: 'refused', reason: 'a signed poll goes only to the origin it paid' };
-  }
+async function pollOnce(take: PolledTake, deps: PollDeps): Promise<Attempt> {
   try {
     assertPublicHttpsUrl(take.poll.url);
   } catch {
@@ -466,7 +415,6 @@ async function pollOnce(
     accept: 'application/json, */*;q=0.8',
     'user-agent': composeUserAgent(),
     ...(take.poll.body !== undefined ? { 'content-type': 'application/json' } : {}),
-    ...(auth ?? {}),
   };
   const signal = AbortSignal.timeout(POLL_REQUEST_TIMEOUT_MS);
   let res: PollResponse;

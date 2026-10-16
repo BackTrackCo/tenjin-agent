@@ -15,9 +15,9 @@ import { runRequestTool } from './tool';
 /**
  * A PAID CALL THE SELLER ANSWERS BEFORE ITS RESULT IS READY, against a fake
  * seller for each pattern the catalog carries: Treza answering inline or
- * cut off after naming its status URL, BlockRun's 202 polled with the same
- * payment header (and once re-signed when it refuses that), and AiSpace's
- * free queue answering PROCESSING and then the file itself. The submit goes
+ * cut off after naming its status URL, a 202 naming the URL to poll, and
+ * AiSpace's free queue answering PROCESSING and then the file itself. No poll
+ * ever carries a payment. The submit goes
  * through the paying leg's fetch; every poll through the pinned-transport
  * seam, so no test opens a socket. The clock is the test's: a wait between
  * polls moves it, never the suite.
@@ -35,7 +35,6 @@ const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const BLOCKRUN_JOB: Job = {
   pollUrl: { field: 'poll_url' },
   pollMethod: 'GET',
-  pollAuth: 'x402',
   running: { httpStatus: [202] },
   failed: { field: 'status', values: ['failed'] },
   everyS: 3,
@@ -45,7 +44,6 @@ const BLOCKRUN_JOB: Job = {
 const TREZA_JOB: Job = {
   pollUrl: { field: 'statusUrl', header: 'X-Status-Url' },
   pollMethod: 'GET',
-  pollAuth: 'none',
   running: { field: 'status', values: ['running'] },
   everyS: 10,
   maxWaitS: 300,
@@ -56,7 +54,6 @@ const AISPACE_JOB: Job = {
   completeUrl: { fixed: 'https://x402.aispace.bot/api/v1/video/complete' },
   pollMethod: 'POST',
   pollBody: { model: '$input.model', queue_id: '$result.queue_id' },
-  pollAuth: 'none',
   running: { field: 'status', values: ['PROCESSING', 'QUEUED'] },
   everyS: 10,
   maxWaitS: 600,
@@ -435,11 +432,11 @@ describe("Treza's paid leg cut off after it named its status URL", () => {
   });
 });
 
-describe("BlockRun's 202, polled with the paying wallet's header", () => {
+describe('a 202 naming the URL to poll', () => {
   const accepted = () =>
     json(202, { id: 'img_1', poll_url: 'https://blockrun.ai/api/v1/images/generations/img_1' });
 
-  it('re-sends the submit header on every poll and reserves nothing new', async () => {
+  it('polls with no payment header and reserves nothing new', async () => {
     await storeSpecs(dir, [BLOCKRUN]);
     const auth = authorizer();
     const { fetchImpl, calls } = submit(BLOCKRUN, accepted);
@@ -456,77 +453,56 @@ describe("BlockRun's 202, polled with the paying wallet's header", () => {
       deps(fetchImpl, transport, { auth }),
     );
     expect(result.envelope).toMatchObject({ status: 'fulfilled', job: ID });
-    const submitted = calls.find((call) => call.payment !== undefined)!.payment!;
     expect(seen).toHaveLength(3);
     for (const poll of seen) {
       expect(poll.url).toBe('https://blockrun.ai/api/v1/images/generations/img_1');
-      expect(paymentOf(poll.request.headers)).toBe(submitted);
+      expect(paymentOf(poll.request.headers)).toBeUndefined();
     }
     expect(auth.authorize).toHaveBeenCalledTimes(1);
     expect(result.envelope.savedFiles).toHaveLength(1);
     // The 202 was never reported as a result.
     await vi.waitFor(() => expect(reports(calls)).toHaveLength(1));
     expect(reports(calls)[0]).toMatchObject({ id: ID, status: 'fulfilled', httpStatus: 200 });
-    // The header is gone from the record once the job ended.
-    expect(await readTake(dir, ID, 1)).not.toHaveProperty('auth');
+    // No payment header was ever kept.
+    const submitted = calls.find((call) => call.payment !== undefined)!.payment!;
     expect(await readFile(takePath(dir, ID, 1), 'utf8')).not.toContain(submitted);
   });
 
-  it('signs one fresh authorization when a poll refuses the submit header, and reuses it', async () => {
+  /** A POLL THAT ASKS TO BE PAID AGAIN for a result already paid for is
+   *  answered with nothing: the take fails, and its cost stays its one
+   *  payment. */
+  it('fails a take whose poll asks for another payment, and signs nothing for it', async () => {
     await storeSpecs(dir, [BLOCKRUN]);
     const auth = authorizer();
     const { fetchImpl, calls } = submit(BLOCKRUN, accepted);
     const challenge = buildPaymentRequired({ amount: '64000', payTo: PAY_TO }).header;
     const { transport, seen } = polls([
       { status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge } },
-      { status: 202, body: { status: 'processing' } },
-      {
-        status: 200,
-        body: { status: 'completed', data: [{ url: 'https://cdn.blockrun.ai/out/img_1.png' }] },
-      },
     ]);
     const result = await runRequestTool(
       { id: ID, input: INPUT },
       deps(fetchImpl, transport, { auth }),
     );
-    expect(result.envelope).toMatchObject({ status: 'fulfilled' });
-    const submitted = calls.find((call) => call.payment !== undefined)!.payment!;
-    const [first, second, third] = seen.map((poll) => paymentOf(poll.request.headers));
-    expect(first).toBe(submitted);
-    expect(second).toBeDefined();
-    expect(second).not.toBe(submitted);
-    expect(third).toBe(second);
-    // Two gated authorizations: the submit, and the job's own.
-    expect(auth.authorize).toHaveBeenCalledTimes(2);
-    expect(vi.mocked(auth.authorize).mock.calls[1]![0]).toMatchObject({
-      requestKey: `job:${ID}#1`,
-      amountAtomic: 64_000n,
-      creator: 'blockrun.ai',
+    expect(result.envelope).toMatchObject({
+      status: 'failed',
+      job: ID,
+      providerStatus: 402,
+      cost: ['provider price 0.064 USD'],
     });
-    // Each authorization has its own row; the files go on the one that settled.
-    const rows = await ledger();
-    expect(rows).toHaveLength(2);
-    expect(rows[0]).toMatchObject({ savedFiles: [] });
-    expect(rows[1]).toMatchObject({ savedFiles: result.envelope.savedFiles });
-  });
-
-  it('fails on a second refusal, with no third authorization', async () => {
-    await storeSpecs(dir, [BLOCKRUN]);
-    const auth = authorizer();
-    const { fetchImpl } = submit(BLOCKRUN, accepted);
-    const challenge = buildPaymentRequired({ amount: '64000', payTo: PAY_TO }).header;
-    const refused = { status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge } };
-    const { transport } = polls([refused, refused]);
-    const result = await runRequestTool(
-      { id: ID, input: INPUT },
-      deps(fetchImpl, transport, { auth }),
+    expect(String(result.envelope.reason)).toContain(
+      'the seller asked for another payment to return the result; none was sent',
     );
-    expect(result.envelope).toMatchObject({ status: 'failed', providerStatus: 402 });
-    expect(String(result.envelope.reason)).toContain('refused the fresh payment');
-    expect(auth.authorize).toHaveBeenCalledTimes(2);
+    expect(seen).toHaveLength(1);
+    expect(paymentOf(seen[0]!.request.headers)).toBeUndefined();
+    expect(auth.authorize).toHaveBeenCalledTimes(1);
+    expect(
+      calls.filter((call) => call.payment !== undefined && !call.url.startsWith(ROUTER)),
+    ).toHaveLength(1);
+    expect(await ledger()).toHaveLength(1);
+    expect(await readTake(dir, ID, 1)).toMatchObject({ state: 'failed' });
   });
 
-  it("returns the seller's reason for a failed job, and drops the header", async () => {
+  it("returns the seller's reason for a failed job", async () => {
     await storeSpecs(dir, [BLOCKRUN]);
     const { fetchImpl, calls } = submit(BLOCKRUN, accepted);
     const { transport } = polls([
@@ -545,9 +521,7 @@ describe("BlockRun's 202, polled with the paying wallet's header", () => {
     expect(String(result.envelope.reason)).toContain('nothing came back');
     // The seller's words ride beside the reason, as untrusted text.
     expect(result.envelope.providerError).toBe('content policy violation');
-    const take = await readTake(dir, ID, 1);
-    expect(take).toMatchObject({ state: 'failed' });
-    expect(take).not.toHaveProperty('auth');
+    expect(await readTake(dir, ID, 1)).toMatchObject({ state: 'failed' });
     await vi.waitFor(() => expect(reports(calls)).toHaveLength(1));
     expect(reports(calls)[0]).toMatchObject({ status: 'failed', httpStatus: 200 });
   });
@@ -567,7 +541,6 @@ describe("BlockRun's 202, polled with the paying wallet's header", () => {
       cost: ['provider price 0.064 USD'],
     });
     expect(String(result.envelope.reason)).toContain('collector.example, not blockrun.ai');
-    // No record, so no payment header kept anywhere.
     expect(await readdir(join(dir, 'jobs')).catch(() => [])).toEqual([]);
   });
 
@@ -584,9 +557,9 @@ describe("BlockRun's 202, polled with the paying wallet's header", () => {
       job: ID,
       cost: ['provider price 0.064 USD'],
       nextStep: `Call request({job: "${ID}"}) in a minute or two; nothing more is paid.`,
+      // A plain GET the agent may open itself.
+      statusUrl: 'https://blockrun.ai/api/v1/images/generations/img_1',
     });
-    // A signed poll's URL is not one the agent can open: it is not shown.
-    expect(result.envelope).not.toHaveProperty('statusUrl');
     expect(clock - startedAt).toBeGreaterThanOrEqual(300_000);
     expect(clock - startedAt).toBeLessThan(301_000);
     await vi.waitFor(() => expect(reports(calls)).toHaveLength(1));
@@ -597,10 +570,7 @@ describe("BlockRun's 202, polled with the paying wallet's header", () => {
       httpStatus: 202,
       ms: expect.any(Number) as number,
     });
-    expect(await readTake(dir, ID, 1)).toMatchObject({
-      state: 'running',
-      auth: expect.any(Object),
-    });
+    expect(await readTake(dir, ID, 1)).toMatchObject({ state: 'running' });
     const mode = (await lstat(takePath(dir, ID, 1))).mode & 0o777;
     expect(mode).toBe(0o600);
 
@@ -627,11 +597,8 @@ describe("BlockRun's 202, polled with the paying wallet's header", () => {
     expect(resumed.envelope.savedFiles).toHaveLength(1);
     expect(auth.authorize).not.toHaveBeenCalled();
     expect(second.seen).toHaveLength(1);
-    expect(paymentOf(second.seen[0]!.request.headers)).toBe(
-      calls.find((call) => call.payment !== undefined)!.payment,
-    );
+    expect(paymentOf(second.seen[0]!.request.headers)).toBeUndefined();
     expect(await readTake(dir, ID, 1)).toMatchObject({ state: 'done' });
-    expect(await readTake(dir, ID, 1)).not.toHaveProperty('auth');
 
     // Resumed again, the finished job answers from its record.
     const third = polls([]);
@@ -1004,7 +971,7 @@ describe("AiSpace's queue, polled free with the queue id", () => {
 });
 
 describe('where a poll may go', () => {
-  it('holds a signed poll to the submit origin and an unsigned one to its host', () => {
+  it("holds a poll to the submit's host over HTTPS", () => {
     const submitted = { url: 'https://blockrun.ai/api/v1/images/generations', json: {} };
     const at = (pollUrl: string, job: Job = BLOCKRUN_JOB) =>
       pollTarget(job, { ...submitted, json: { poll_url: pollUrl } }, {});
@@ -1012,10 +979,7 @@ describe('where a poll may go', () => {
       url: 'https://blockrun.ai/api/v1/images/generations/1',
       method: 'GET',
     });
-    expect(at('https://blockrun.ai:8443/poll')).toMatchObject({
-      problem: expect.stringContaining('only origin a signed poll goes to') as string,
-    });
-    expect(at('https://blockrun.ai:8443/poll', { ...BLOCKRUN_JOB, pollAuth: 'none' })).toEqual({
+    expect(at('https://blockrun.ai:8443/poll')).toEqual({
       url: 'https://blockrun.ai:8443/poll',
       method: 'GET',
     });
@@ -1031,25 +995,8 @@ describe('where a poll may go', () => {
     ).toMatchObject({ problem: expect.stringContaining('$result.queue_id') as string });
   });
 
-  it('never sends a kept payment header to another origin, even from a record', async () => {
-    const { transport, seen } = polls([{ status: 200, body: {} }]);
-    const answer = await pollUntil(
-      {
-        origin: 'https://blockrun.ai',
-        poll: { url: 'https://elsewhere.example/poll', method: 'GET' },
-        job: BLOCKRUN_JOB,
-        auth: { 'PAYMENT-SIGNATURE': 'signed' },
-      },
-      { deadline: clock + 60_000, firstWaitMs: 0 },
-      { transport, now: () => clock },
-    );
-    expect(answer).toMatchObject({ state: 'failed' });
-    expect(seen).toEqual([]);
-  });
-
   it('ends the call running after three failures in a row, and calls a 404 gone', async () => {
     const take = {
-      origin: 'https://treza.example',
       poll: { url: 'https://treza.example/jobs/1', method: 'GET' as const },
       job: TREZA_JOB,
     };
@@ -1091,7 +1038,6 @@ describe('where a poll may go', () => {
     );
     await pollUntil(
       {
-        origin: 'https://treza.example',
         poll: { url: 'https://treza.example/jobs/1', method: 'GET' },
         job: TREZA_JOB,
       },
@@ -1116,9 +1062,7 @@ describe('the job store', () => {
     version: 1,
     offerId: ID,
     take: 1,
-    origin: 'https://blockrun.ai',
     poll: { url: 'https://blockrun.ai/poll/1', method: 'GET' },
-    auth: { 'PAYMENT-SIGNATURE': 'signed' },
     job: BLOCKRUN_JOB,
     call: {
       capabilityId: 'blockrun-image-gpt-image-2',
@@ -1135,12 +1079,10 @@ describe('the job store', () => {
     savedFiles: [],
   };
 
-  it('writes 0600, reads nothing through a symlink, and keeps no header once ended', async () => {
+  it('writes 0600 and reads nothing through a symlink', async () => {
     await writeTake(dir, take);
     expect((await lstat(takePath(dir, ID, 1))).mode & 0o777).toBe(0o600);
-    expect(await readTake(dir, ID, 1)).toMatchObject({ auth: { 'PAYMENT-SIGNATURE': 'signed' } });
-    await writeTake(dir, { ...take, state: 'done' });
-    expect(await readFile(takePath(dir, ID, 1), 'utf8')).not.toContain('signed');
+    expect(await readTake(dir, ID, 1)).toMatchObject({ state: 'running' });
 
     const planted = join(dir, 'planted.json');
     await writeFile(planted, JSON.stringify(take));

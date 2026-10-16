@@ -178,11 +178,11 @@ export const POLL_REFERENCE = /^\$(input|result)\.([A-Za-z_][A-Za-z0-9_]{0,63})$
  * HOW A CALL WHOSE SELLER ANSWERS BEFORE THE RESULT IS READY IS FINISHED, sent
  * on a spec only because this build asks for it (`accepts: ["jobs"]`): where
  * the status is (a field or header of the submit's answer, or one fixed URL),
- * how a poll is sent and signed, what says it is still running or failed, how
- * often and how long to poll, and how many hours the job can be resumed.
- * `always`: the seller never answers inline. Every field is the server's: the
- * poll and complete URLs are still checked here against the submit's host
- * (`jobs.ts`).
+ * how a poll is sent, what says it is still running or failed, how often and
+ * how long to poll, and how many hours the job can be resumed. `always`: the
+ * seller never answers inline. A poll is never signed: the take's one payment
+ * is its submit. Every field is the server's: the poll and complete URLs are
+ * still checked here against the submit's host (`jobs.ts`).
  */
 export const JobSchema = z
   .strictObject({
@@ -214,7 +214,6 @@ export const JobSchema = z
         'a $ value is $input.<field> or $result.<field>',
       )
       .optional(),
-    pollAuth: z.enum(['none', 'x402']),
     running: z.union([
       z.strictObject({ httpStatus: z.array(z.number().int().min(200).max(299)).min(1).max(8) }),
       JobFieldStateSchema,

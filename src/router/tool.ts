@@ -1,7 +1,6 @@
 import {
   runPay,
   settlementTx,
-  signJobPayment,
   type AdvertisedTerms,
   type PaidLeg,
   type PayDeps,
@@ -90,7 +89,6 @@ import {
   MAX_TAKES,
   readTake,
   readTakes,
-  updateTake,
   writeTake,
   type JobTake,
 } from './job-store';
@@ -149,7 +147,7 @@ export interface RequestToolArgs {
    *  signed. */
   count?: number;
   /** A job an earlier call left running, by the id its result named: polled
-   *  again, with nothing paid but a refused poll's one fresh authorization. */
+   *  again, with nothing paid. */
   job?: string;
 }
 
@@ -244,8 +242,7 @@ async function requestTool(
   const off = await routerOff(deps);
   if (off !== null) return fail('needs_input', off, { nextStep: ROUTER_OFF_NEXT_STEP });
   // A JOB AN EARLIER CALL LEFT RUNNING, by the id its result named: polled from
-  // its record, with nothing built and nothing paid but a refused poll's one
-  // fresh authorization.
+  // its record, with nothing built and nothing paid.
   if (args.job !== undefined && args.job.length > 0) {
     if (args.input !== undefined || args.choice !== undefined || args.count !== undefined) {
       return fail('needs_input', 'A job resumes on its own: send only its id, as `job`.', {
@@ -982,7 +979,6 @@ async function payAndDeliver(
           providerAtomic,
           ...tx,
           ...(data.authorization !== undefined ? { authorization: data.authorization } : {}),
-          ...(leg?.paymentHeaders !== undefined ? { paymentHeaders: leg.paymentHeaders } : {}),
         });
         return { ...job, left: left() };
       }
@@ -1060,7 +1056,6 @@ async function payAndDeliver(
         header: cutHeader,
         providerAtomic: leftAtomic,
         ...(detail.authorization !== undefined ? { authorization: detail.authorization } : {}),
-        ...(leg?.paymentHeaders !== undefined ? { paymentHeaders: leg.paymentHeaders } : {}),
       });
       return { ...job, left: { amountAtomic: leftAtomic, signed: true } };
     }
@@ -1356,8 +1351,6 @@ interface SubmitSeen {
   /** The submit's settlement, when its payment-response header named it. */
   txHash?: string;
   authorization?: SignedAuthorization;
-  /** The payment headers the submit carried, kept only for a signed poll. */
-  paymentHeaders?: Record<string, string>;
 }
 
 /** What a job's take answers, for the caller to hand back and report. */
@@ -1370,8 +1363,8 @@ interface TakeEnding {
  * A PAID CALL THE SELLER ANSWERED BEFORE ITS RESULT WAS READY. The submit is
  * on the ledger first, so a crash mid-poll loses no row. A seller that says
  * the job failed is that failure. A status URL that is not the submit's host
- * (or its origin, for a signed poll) is never fetched: the money moved, so
- * the call fails naming the URL as untrusted. Otherwise the take is recorded,
+ * is never fetched: the money moved, so the call fails naming the URL as
+ * untrusted. Otherwise the take is recorded,
  * 0600, before its first poll, and polled until it ends or this call's wait
  * runs out, when it answers `running` with the id that resumes it.
  */
@@ -1444,13 +1437,7 @@ async function startJob(
     version: 1,
     offerId: job.offerId,
     take: job.take,
-    origin: new URL(built.url).origin,
     poll: target,
-    // THE PAYMENT HEADER IS KEPT ONLY WHERE THE SELLER BINDS ITS POLLS TO THE
-    // PAYING WALLET, and only while the take runs.
-    ...(job.spec.pollAuth === 'x402' && submit.paymentHeaders !== undefined
-      ? { auth: submit.paymentHeaders }
-      : {}),
     job: job.spec,
     call: {
       capabilityId: call.capabilityId,
@@ -1476,8 +1463,8 @@ async function startJob(
     ...httpStatus,
     state: 'running',
     savedFiles: [],
-    // A status URL the agent may open itself: unsigned, and a plain GET.
-    ...(target.method === 'GET' && job.spec.pollAuth === 'none' ? { statusUrl: target.url } : {}),
+    // A status URL the agent may open itself: a plain GET.
+    ...(target.method === 'GET' ? { statusUrl: target.url } : {}),
   };
   const kept = await writeTake(deps.ctx.dataDir, take).then(
     () => true,
@@ -1490,7 +1477,7 @@ async function startJob(
   const answer = await pollUntil(
     take,
     { deadline, firstWaitMs: job.spec.everyS * 1000 },
-    pollDeps(deps, take),
+    pollDeps(deps),
   );
   return finishTake(take, answer, deps, footer, { kept, parameters: call.parameters });
 }
@@ -1515,81 +1502,14 @@ function failedNextStep(txHash: string | undefined): string {
     : 'Tell the user. The payment is in `tenjin payments`; one the seller never settles is given back to the daily budget once its authorization expires. A new call pays again.';
 }
 
-/** The poll's seams, and the one fresh authorization a refused poll may sign. */
-function pollDeps(deps: RequestToolDeps, take: JobTake): PollDeps {
+/** The poll's seams. */
+function pollDeps(deps: RequestToolDeps): PollDeps {
   return {
     ...(deps.pollTransport !== undefined ? { transport: deps.pollTransport } : {}),
     ...(deps.payDeps?.destination !== undefined ? { destination: deps.payDeps.destination } : {}),
     ...(deps.now !== undefined ? { now: deps.now } : {}),
     ...(deps.sleep !== undefined ? { sleep: deps.sleep } : {}),
-    resign: (challenge) => resignTake(take, challenge, deps),
   };
-}
-
-/**
- * THE ONE FRESH AUTHORIZATION A TAKE MAY SIGN, when its seller refused the
- * submit's own payment on a poll. Under the take's lock, so two processes
- * resuming the same job sign once between them: one that finds it already
- * signed polls with that one. Every gate a payment meets (`signJobPayment`),
- * a ledger row of its own, and kept in the record for every later poll.
- */
-async function resignTake(
-  take: JobTake,
-  challenge: string,
-  deps: RequestToolDeps,
-): Promise<{ headers: Record<string, string> } | { refused: string }> {
-  const { dataDir } = deps.ctx;
-  try {
-    const updated = await updateTake(dataDir, take.offerId, take.take, async (current) => {
-      if (current.state !== 'running') return null;
-      if (current.resigned === true) return current.auth !== undefined ? current : null;
-      const payment = await signJobPayment(
-        {
-          url: current.poll.url,
-          challenge,
-          terms: current.call.terms,
-          requestKey: `job:${current.offerId}#${current.take}`,
-        },
-        deps.ctx,
-        {
-          ...(deps.payDeps ?? {}),
-          ...(deps.provider !== undefined ? { provider: deps.provider } : {}),
-          authorizer: deps.payDeps?.authorizer ?? deps.authorizer,
-        },
-      );
-      if (payment.amountAtomic > 0n) {
-        await appendPaidRecord(
-          dataDir,
-          paidRecord(current.call, current.poll.url, current.call.sent, payment.amountAtomic, {
-            ...(payment.authorization !== undefined
-              ? { authorization: payment.authorization }
-              : {}),
-            savedFiles: [],
-            ...(deps.now !== undefined ? { now: deps.now } : {}),
-          }),
-        );
-      }
-      return {
-        ...current,
-        auth: payment.headers,
-        resigned: true,
-        ...(payment.authorization !== undefined
-          ? { resignedAuthorization: payment.authorization }
-          : {}),
-      };
-    });
-    if (updated?.auth === undefined) {
-      return {
-        refused: 'the seller asked for a fresh payment, and this job has none left to sign',
-      };
-    }
-    return { headers: updated.auth };
-  } catch (err) {
-    const cli = err instanceof CliError ? err : undefined;
-    return {
-      refused: `the seller asked for a fresh payment on its status URL, and none was signed: ${cli !== undefined ? `${cli.message}${cli.fix !== undefined ? ` ${cli.fix}` : ''}` : String(err)}`,
-    };
-  }
 }
 
 /** A take's call, rebuilt from its record for the delivery step. */
@@ -1617,9 +1537,8 @@ function callOf(take: JobTake, parameters?: unknown): DeliverCall {
  * result, checked against the success rule and saved like any paid result,
  * its files written onto the payment's ledger row. Running: the id that
  * resumes it. Failed or gone: the seller's reason, the money already counted.
- * The record keeps every ending until it expires, without its payment header.
- * The first ending recorded stands: a call whose take another call ended
- * first answers with that ending.
+ * The record keeps every ending until it expires. The first ending recorded
+ * stands: a call whose take another call ended first answers with that ending.
  */
 async function finishTake(
   take: JobTake,
@@ -1646,13 +1565,10 @@ async function finishTake(
     return { result, outcome: { status } };
   };
   if (answer.state === 'done') {
-    // The row the last poll's payment is on: the fresh one, when a refused
-    // poll signed one, which the record on disk knows.
     const current = (await readTake(dataDir, take.offerId, take.take)) ?? take;
     if (current.state !== 'running') return lostTo(current);
-    const nonce = (
-      current.resigned === true ? current.resignedAuthorization : current.authorization
-    )?.nonce;
+    // The row the submit's payment is on.
+    const nonce = current.authorization?.nonce;
     let caveat: string | undefined;
     let unverified = false;
     if (take.call.resultSchema !== undefined && answer.bytes === undefined) {
@@ -1702,7 +1618,7 @@ async function finishTake(
     // THE SELLER'S COPY IS FREED once ours is on disk, by the call that ended
     // the take: never while the record still says running.
     if (delivered.savedFiles.length > 0 && ended !== undefined) {
-      await completeJob({ ...current, submitUrl: take.call.url }, pollDeps(deps, current));
+      await completeJob({ ...current, submitUrl: take.call.url }, pollDeps(deps));
     }
     return {
       result: withJob(delivered.result, take.offerId),
@@ -1873,9 +1789,8 @@ function endedResult(take: JobTake, opts: { raced?: boolean } = {}): RequestTool
 /**
  * `request({job})`: EVERY UNFINISHED TAKE OF A JOB, polled again from its
  * record, side by side, for up to {@link MAX_CALL_WAIT_MS} and never past the
- * take's own keep time. Nothing is built and nothing is paid, but the one
- * fresh authorization a refused poll may sign. A take that already ended
- * answers from its record. One take answers as itself; several as a set.
+ * take's own keep time. Nothing is built and nothing is paid. A take that
+ * already ended answers from its record. One take answers as itself; several as a set.
  */
 async function resumeJob(offerId: string, deps: RequestToolDeps): Promise<RequestToolResult> {
   const { dataDir } = deps.ctx;
@@ -1901,7 +1816,7 @@ async function resumeJob(offerId: string, deps: RequestToolDeps): Promise<Reques
         return { take, result: endedResult(take), outcome: null };
       }
       const deadline = Math.min(startedAt + MAX_CALL_WAIT_MS, Date.parse(take.expiresAt));
-      const answer = await pollUntil(take, { deadline, firstWaitMs: 0 }, pollDeps(deps, take));
+      const answer = await pollUntil(take, { deadline, firstWaitMs: 0 }, pollDeps(deps));
       const done = await finishTake(take, answer, deps, SILENT_FOOTER, { kept: true });
       return { take, result: done.result, outcome: done.outcome };
     }),

@@ -439,7 +439,12 @@ describe('every answer payload on disk', () => {
   it('parses a spec with its job and takes, and refuses a job it cannot read', () => {
     const payload = fixture('wire-lookup-spec-job.json');
     const decision = payload.decision as { spec: Record<string, unknown>; hint: string };
-    expect(decision.spec.job).toMatchObject({ pollAuth: 'x402', running: { httpStatus: [202] } });
+    expect(decision.spec.job).toMatchObject({
+      pollMethod: 'POST',
+      running: { field: 'status' },
+      always: true,
+    });
+    expect(decision.spec.job).not.toHaveProperty('pollAuth');
     expect(decision.spec.takes).toEqual({ max: 5 });
     expect(decision.hint).toContain('count: 2–5');
     const withJob = (job: Record<string, unknown>) => ({
@@ -449,6 +454,8 @@ describe('every answer payload on disk', () => {
     const job = decision.spec.job as Record<string, unknown>;
     expect(parseForTests('tool', withJob(job)).success).toBe(true);
     expect(parseForTests('tool', withJob({ ...job, surprise: 1 })).success).toBe(false);
+    // A poll is never signed, so a job that asks for one is not read.
+    expect(parseForTests('tool', withJob({ ...job, pollAuth: 'x402' })).success).toBe(false);
     expect(parseForTests('tool', withJob({ ...job, maxWaitS: 601 })).success).toBe(false);
     expect(
       parseForTests('tool', withJob({ ...job, pollMethod: 'POST', pollBody: { id: '$inputs.id' } }))
