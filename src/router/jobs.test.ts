@@ -610,6 +610,38 @@ describe('a 202 naming the URL to poll', () => {
     expect(third.seen).toEqual([]);
   });
 
+  /** A HOST THAT WAITS FOR JOBS (Claude Code moves a long call into the
+   *  background) is told of each poll, and the call waits out the job's own
+   *  `maxWaitS` instead of handing back `running` at five minutes. */
+  it("waits out the job's own wait where the host waits for jobs, telling it each poll", async () => {
+    await storeSpecs(dir, [BLOCKRUN]);
+    const { fetchImpl } = submit(BLOCKRUN, accepted);
+    const busy = Array.from({ length: 20 }, () => ({ status: 202, body: {} }));
+    const { transport, seen } = polls([
+      ...busy,
+      {
+        status: 200,
+        body: { status: 'completed', data: [{ url: 'https://cdn.blockrun.ai/out/img_1.png' }] },
+      },
+    ]);
+    let told = 0;
+    const startedAt = clock;
+    const result = await runRequestTool(
+      { id: ID, input: INPUT },
+      {
+        ...deps(fetchImpl, transport),
+        waitsForJobs: true,
+        onPoll: () => {
+          told += 1;
+        },
+      },
+    );
+    expect(result.envelope).toMatchObject({ status: 'fulfilled', job: ID });
+    expect(clock - startedAt).toBeGreaterThan(300_000);
+    expect(clock - startedAt).toBeLessThanOrEqual(BLOCKRUN_JOB.maxWaitS * 1000);
+    expect(told).toBe(seen.length);
+  });
+
   it('resumes after the process died mid-poll', async () => {
     await storeSpecs(dir, [BLOCKRUN]);
     const { fetchImpl } = submit(BLOCKRUN, accepted);

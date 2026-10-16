@@ -204,6 +204,15 @@ export interface RequestToolDeps {
   /** What this tool call may still write to the downloads directory, shared by
    *  every take. Set by {@link runRequestTool}. */
   downloads?: { leftBytes: number };
+  /** Told before each poll of a job this call waits on: the MCP server sends
+   *  it as a progress notification, which keeps a waiting host's timeout from
+   *  running out. */
+  onPoll?: () => Promise<void> | void;
+  /** The host lets one call wait as long as a job's own `maxWaitS` (Claude
+   *  Code moves a long call into the background and delivers it when it
+   *  ends), so the call is not handed back `running` at
+   *  {@link MAX_CALL_WAIT_MS}. */
+  waitsForJobs?: boolean;
 }
 
 /** What one tool call may save to disk, across every take and file. */
@@ -1742,7 +1751,9 @@ async function startJob(
     () => false,
   );
   const deadline = Math.min(
-    (deps.startedAt ?? submit.submittedAt) + MAX_CALL_WAIT_MS,
+    deps.waitsForJobs === true
+      ? Number.POSITIVE_INFINITY
+      : (deps.startedAt ?? submit.submittedAt) + MAX_CALL_WAIT_MS,
     submit.submittedAt + job.spec.maxWaitS * 1000,
   );
   const answer = await pollUntil(
@@ -1773,13 +1784,14 @@ function failedNextStep(txHash: string | undefined): string {
     : 'Tell the user. The payment is in `tenjin payments`; one the seller never settles is given back to the daily budget once its authorization expires. A new call pays again.';
 }
 
-/** The poll's seams. */
+/** The poll's seams, and who is told of each poll. */
 function pollDeps(deps: RequestToolDeps): PollDeps {
   return {
     ...(deps.pollTransport !== undefined ? { transport: deps.pollTransport } : {}),
     ...(deps.payDeps?.destination !== undefined ? { destination: deps.payDeps.destination } : {}),
     ...(deps.now !== undefined ? { now: deps.now } : {}),
     ...(deps.sleep !== undefined ? { sleep: deps.sleep } : {}),
+    ...(deps.onPoll !== undefined ? { onPoll: deps.onPoll } : {}),
   };
 }
 
@@ -2059,9 +2071,11 @@ function endedResult(take: JobTake, opts: { raced?: boolean } = {}): RequestTool
 
 /**
  * `request({job})`: EVERY UNFINISHED TAKE OF A JOB, polled again from its
- * record, side by side, for up to {@link MAX_CALL_WAIT_MS} and never past the
- * take's own keep time. Nothing is built and nothing is paid. A take that
- * already ended answers from its record. One take answers as itself; several as a set.
+ * record, side by side, for up to {@link MAX_CALL_WAIT_MS} (or, where the host
+ * waits for jobs, until the job's own `maxWaitS` from its submit, if that is
+ * later) and never past the take's own keep time. Nothing is built and
+ * nothing is paid. A take that already ended answers from its record. One
+ * take answers as itself; several as a set.
  */
 async function resumeJob(offerId: string, deps: RequestToolDeps): Promise<RequestToolResult> {
   const { dataDir } = deps.ctx;
@@ -2086,7 +2100,13 @@ async function resumeJob(offerId: string, deps: RequestToolDeps): Promise<Reques
       if (take.state !== 'running') {
         return { take, result: endedResult(take), outcome: null };
       }
-      const deadline = Math.min(startedAt + MAX_CALL_WAIT_MS, Date.parse(take.expiresAt));
+      const waited = startedAt + MAX_CALL_WAIT_MS;
+      const deadline = Math.min(
+        deps.waitsForJobs === true
+          ? Math.max(waited, Date.parse(take.submittedAt) + take.job.maxWaitS * 1000)
+          : waited,
+        Date.parse(take.expiresAt),
+      );
       const answer = await pollUntil(take, { deadline, firstWaitMs: 0 }, pollDeps(deps));
       const done = await finishTake(take, answer, deps, SILENT_FOOTER, { kept: true });
       return { take, result: done.result, outcome: done.outcome };

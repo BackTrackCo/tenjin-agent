@@ -215,6 +215,8 @@ export interface PollDeps {
   destination?: DestinationOptions;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
+  /** Told before each poll; a failure here never stops one. */
+  onPoll?: () => Promise<void> | void;
 }
 
 /** What polling needs of a take. */
@@ -251,6 +253,9 @@ export async function pollUntil(
       if (left <= 0) return { state: 'running', ...(last !== undefined ? { status: last } : {}) };
       await sleep(Math.min(wait, left));
     }
+    await Promise.resolve()
+      .then(() => deps.onPoll?.())
+      .catch(() => undefined);
     const answer = await pollOnce(take, deps);
     wait = interval;
     interval = Math.min(Math.round(interval * BACKOFF), MAX_POLL_INTERVAL_MS);

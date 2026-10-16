@@ -1,6 +1,11 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
+import type {
+  CallToolResult,
+  ServerNotification,
+  ServerRequest,
+} from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import pkg from '../../package.json';
 import { dataDir as defaultDataDir } from '../lib/paths';
@@ -106,18 +111,57 @@ export const REQUIRES_USER_INTERACTION_KEY = 'anthropic/requiresUserInteraction'
 /** The first Claude Code that honours {@link REQUIRES_USER_INTERACTION_KEY}. */
 const PROMPTING_CLAUDE_CODE = [2, 1, 214] as const;
 
-/** Whether this client prompts a person before every `approve` call. */
-export function promptsBeforeApprove(
-  client: { name: string; version: string } | undefined,
-): boolean {
+/**
+ * The first Claude Code that moves a main-conversation MCP call running past
+ * two minutes into a background task and delivers its result when it ends.
+ * Its idle timeout is reset by each progress notification, so a call that
+ * reports each poll can wait out a job's own `maxWaitS`.
+ */
+const BACKGROUNDING_CLAUDE_CODE = [2, 1, 212] as const;
+
+type ClientInfo = { name: string; version: string } | undefined;
+
+/** Whether the client is Claude Code at `floor` or later. */
+function claudeCodeAtLeast(client: ClientInfo, floor: readonly number[]): boolean {
   if (client?.name !== 'claude-code') return false;
   const version = client.version.split('.').map((part) => Number.parseInt(part, 10));
-  for (const [index, floor] of PROMPTING_CLAUDE_CODE.entries()) {
+  for (const [index, least] of floor.entries()) {
     const part = version[index] ?? 0;
-    if (!Number.isFinite(part) || part < floor) return false;
-    if (part > floor) return true;
+    if (!Number.isFinite(part) || part < least) return false;
+    if (part > least) return true;
   }
   return true;
+}
+
+/** Whether this client prompts a person before every `approve` call. */
+export function promptsBeforeApprove(client: ClientInfo): boolean {
+  return claudeCodeAtLeast(client, PROMPTING_CLAUDE_CODE);
+}
+
+/** Whether this client lets one call wait out a job's own `maxWaitS`. */
+export function waitsForJobs(client: ClientInfo): boolean {
+  return claudeCodeAtLeast(client, BACKGROUNDING_CLAUDE_CODE);
+}
+
+/**
+ * EACH POLL AS AN MCP PROGRESS NOTIFICATION, on the call's own progress token,
+ * when it sent one: a host counts it as the call being alive.
+ */
+export function pollProgress(
+  extra: Pick<RequestHandlerExtra<ServerRequest, ServerNotification>, '_meta' | 'sendNotification'>,
+): Pick<RequestToolDeps, 'onPoll'> {
+  const progressToken = extra._meta?.progressToken;
+  if (progressToken === undefined) return {};
+  let progress = 0;
+  return {
+    onPoll: async () => {
+      progress += 1;
+      await extra.sendNotification({
+        method: 'notifications/progress',
+        params: { progressToken, progress, message: 'The seller is still working on it.' },
+      });
+    },
+  };
 }
 
 const APPROVE_DESCRIPTION =
@@ -235,7 +279,7 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
           ),
       },
     },
-    async ({ query, id, input, choice, count, job }): Promise<CallToolResult> => {
+    async ({ query, id, input, choice, count, job }, extra): Promise<CallToolResult> => {
       // Resolved per call, from settings read now: a policy frozen at the
       // first call would leave a limit the user changed with no effect until
       // the harness restarts the server.
@@ -264,6 +308,8 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
           provider,
           authorizer,
           ...(route !== undefined ? { route } : {}),
+          ...pollProgress(extra),
+          waitsForJobs: waitsForJobs(server.server.getClientVersion()),
           ...(opts.handlerDeps?.fetchImpl !== undefined
             ? { fetchImpl: opts.handlerDeps.fetchImpl }
             : {}),
@@ -297,7 +343,7 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
         what: z.string().optional().describe('What the quote buys, exactly as it gave it.'),
       },
     },
-    async ({ quote, total, what }): Promise<CallToolResult> => {
+    async ({ quote, total, what }, extra): Promise<CallToolResult> => {
       const settings = await resolveContextSettings(ctx);
       const authorizer =
         opts.handlerDeps?.authorizer ?? resolveSpendAuthorizer(ctx, settings.policy);
@@ -312,6 +358,8 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
           provider,
           authorizer,
           host: hostApproval(server),
+          ...pollProgress(extra),
+          waitsForJobs: waitsForJobs(server.server.getClientVersion()),
           ...(opts.handlerDeps?.fetchImpl !== undefined
             ? { fetchImpl: opts.handlerDeps.fetchImpl }
             : {}),

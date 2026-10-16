@@ -18,8 +18,10 @@ import {
   buildRouterMcpServer,
   MAX_RESULT_SIZE_CHARS,
   MAX_RESULT_SIZE_KEY,
+  pollProgress,
   promptsBeforeApprove,
   REQUIRES_USER_INTERACTION_KEY,
+  waitsForJobs,
 } from './mcp';
 import { RoutingPayer } from './routing-payer';
 
@@ -251,6 +253,37 @@ describe('the approve tool', () => {
     }
     expect(promptsBeforeApprove({ name: 'other-host', version: '9.9.9' })).toBe(false);
     expect(promptsBeforeApprove(undefined)).toBe(false);
+  });
+});
+
+/** A LONG JOB IN ONE CALL: Claude Code from 2.1.212 backgrounds a call past
+ *  two minutes, and each poll is a progress notification on the call's own
+ *  token, which resets its idle timeout. */
+describe('a call that waits on a job', () => {
+  it('waits out the job only for a Claude Code that backgrounds long calls', () => {
+    expect(waitsForJobs({ name: 'claude-code', version: '2.1.212' })).toBe(true);
+    expect(waitsForJobs({ name: 'claude-code', version: '2.1.211' })).toBe(false);
+    expect(waitsForJobs({ name: 'other-host', version: '9.0.0' })).toBe(false);
+  });
+
+  it("sends each poll as progress on the call's token, and nothing without one", async () => {
+    const sent: unknown[] = [];
+    const sendNotification = async (notification: unknown) => {
+      sent.push(notification);
+    };
+    const { onPoll } = pollProgress({ _meta: { progressToken: 7 }, sendNotification });
+    await onPoll!();
+    await onPoll!();
+    expect(sent).toEqual([
+      expect.objectContaining({
+        method: 'notifications/progress',
+        params: expect.objectContaining({ progressToken: 7, progress: 1 }) as unknown,
+      }),
+      expect.objectContaining({
+        params: expect.objectContaining({ progressToken: 7, progress: 2 }) as unknown,
+      }),
+    ]);
+    expect(pollProgress({ sendNotification })).toEqual({});
   });
 });
 
