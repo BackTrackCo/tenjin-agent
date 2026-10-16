@@ -3008,7 +3008,7 @@ describe('a discovered service', () => {
         hookEventName: 'UserPromptSubmit',
         additionalContext:
           `${SEEN_LINE} Note: $0.053501 is above this machine's automatic per-call limit ($0.05); ` +
-          'request will return needs_approval with the command the user runs to approve it — ask the user first.',
+          'request will return needs_approval with a quote, and approve asks the user before anything is paid.',
       },
     });
   });
@@ -3045,7 +3045,7 @@ describe('a discovered service', () => {
     expect(line).toBe(
       `${HINT_SOURCE}: ${hint.replace('request({', 'mcp__x402__request({')} ` +
         "Note: $0.68 is above this machine's automatic per-call limit ($0.25); " +
-        'request will return needs_approval with the command the user runs to approve it — ask the user first.',
+        'request will return needs_approval with a quote, and approve asks the user before anything is paid.',
     );
     expect(line).toContain('Other options: ClipForge ($0.90), Reelsmith ($1.10).');
   });
@@ -3080,7 +3080,7 @@ describe('a discovered service', () => {
     expect(
       (out.response as { hookSpecificOutput: { permissionDecisionReason: string } })
         .hookSpecificOutput.permissionDecisionReason,
-    ).toContain('ask the user first.');
+    ).toContain('approve asks the user before anything is paid.');
   });
 
   /** Where nobody can ask the user, it is withheld like any other offer. */

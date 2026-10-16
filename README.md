@@ -113,12 +113,12 @@ Tenjin pays for tools with [x402](https://www.x402.org), an open standard that b
 
 ### Limits
 
-| Limit      | Default | Change it                             |
-| ---------- | ------- | ------------------------------------- |
-| Per lookup | $0.25   | `tenjin config set maxAutoSpend 0.10` |
-| Per day    | $5      | `tenjin config set sessionBudget 2`   |
+| Limit    | Default | Change it                             |
+| -------- | ------- | ------------------------------------- |
+| Per call | $0.25   | `tenjin config set maxAutoSpend 0.10` |
+| Per day  | $5      | `tenjin config set sessionBudget 2`   |
 
-`tenjin install` asks you to approve these limits, or tells your agent to ask you when the agent runs it. [How the limits work →](./docs/agent-permissions.md#what-bounds-a-payment)
+`tenjin install` asks you to approve these limits, or tells your agent to ask you when the agent runs it. A call that would pay more (all its payments together, such as five takes of a video) pays nothing on its own: your assistant tells you what it costs, asks, and runs it once you say yes. [How the limits work →](./docs/agent-permissions.md#what-bounds-a-payment)
 
 ### Routing fee
 

@@ -80,7 +80,7 @@ export async function gateSpend(input: SpendGateInput): Promise<string | undefin
   return reservationId;
 }
 
-/** The command or setting that clears a refusal, by its policy reason. */
+/** What follows a refusal, by its policy reason. */
 export function policyFix(reason: string, allowlistSubject: string): string {
   switch (reason) {
     case 'price_cap_exceeded':
@@ -88,11 +88,11 @@ export function policyFix(reason: string, allowlistSubject: string): string {
     case 'not_allowlisted':
       return `Add ${allowlistSubject} to allowlistCreators, or clear the allowlist.`;
     case 'session_budget_exceeded':
-      return 'Raise sessionBudget with `tenjin config set sessionBudget <usd>`, or wait for the window to roll over.';
+      return "Today's automatic budget is spent; it comes back as the rolling 24 hours pass. Nothing more is paid without the user's yes.";
     case 'duplicate_in_flight':
       return 'Let the in-flight request finish and read its result; retrying the same request does not renew authorization.';
     default:
-      return 'Adjust your spend policy with `tenjin config set`.';
+      return "This is over what this machine pays without asking, so it is not paid without the user's yes.";
   }
 }
 
