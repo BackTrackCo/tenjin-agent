@@ -102,6 +102,17 @@ export function registerRouter(reg: Registration): void {
       });
     });
 
+  leaf(SETUP, 'approve <quote>', 'say yes to a lookup your assistant quoted, at this terminal')
+    .description(
+      "Approve a quote the `request` tool kept for a call over your automatic limits, when your assistant's host cannot ask you itself. It shows what the quote buys and its total, and asks; on a yes your assistant runs it once with `approve`. Nothing is paid here, and it asks only at an interactive terminal.",
+    )
+    .action(async function (this: Command, quote: string) {
+      await runCommand('approve', this, async (ctx) => {
+        const { runApproveCommand } = await import('../router/approve');
+        return runApproveCommand({ quote }, ctx);
+      });
+    });
+
   const payments = leaf(SETUP, 'payments', 'the paid lookups this machine made').description(
     'The local record of paid router lookups, in `~/.tenjin/paid/ledger.jsonl`. A bare `tenjin payments` lists the newest: when, who was paid, how much, whether it settled, and the transaction.',
   );

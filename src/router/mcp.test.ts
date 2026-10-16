@@ -4,6 +4,8 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { ElicitRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { createQuote, readQuote } from '../lib/spend-quotes';
 import { testWalletProvider } from '../lib/read-test-utils';
 import type { SpendAuthorization, SpendAuthorizer } from '../lib/wallet';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
@@ -11,7 +13,14 @@ import { FakeRouter, payerDeps } from './fee-test-utils';
 import { runAliveHook, sessionServedByPlugin } from './alive';
 import { runHookCommand } from './hook-command';
 import { hookToolInput } from './hook-tool';
-import { buildRouterMcpServer, MAX_RESULT_SIZE_CHARS, MAX_RESULT_SIZE_KEY } from './mcp';
+import type { OfferSpec } from './decision';
+import {
+  buildRouterMcpServer,
+  MAX_RESULT_SIZE_CHARS,
+  MAX_RESULT_SIZE_KEY,
+  promptsBeforeApprove,
+  REQUIRES_USER_INTERACTION_KEY,
+} from './mcp';
 import { RoutingPayer } from './routing-payer';
 
 /** The envelope a call returned: the JSON text block after the summary line. */
@@ -93,11 +102,17 @@ describe('the router MCP server', () => {
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
     try {
       const tools = await client.listTools();
-      expect(tools.tools.map((t) => t.name)).toEqual(['request', 'hook']);
+      expect(tools.tools.map((t) => t.name)).toEqual(['request', 'approve', 'hook']);
       // The harness reads its inline-result threshold from the listed tool.
       expect(tools.tools[0]!._meta).toEqual({
         [MAX_RESULT_SIZE_KEY]: MAX_RESULT_SIZE_CHARS,
       });
+      // Only `approve` makes Claude Code put every call to a person.
+      expect(tools.tools[1]!._meta).toEqual({
+        [MAX_RESULT_SIZE_KEY]: MAX_RESULT_SIZE_CHARS,
+        [REQUIRES_USER_INTERACTION_KEY]: true,
+      });
+      expect(tools.tools[2]!._meta).toBeUndefined();
       const called = await client.callTool({ name: 'request', arguments: { query: 'weather' } });
       // A `native` decision is a routing outcome delivered, not a tool failure:
       // the MCP error flag stays down and the status carries the fact.
@@ -134,6 +149,111 @@ describe('the router MCP server', () => {
  * entry's `input` as strings (objects as JSON text, absent fields empty), so
  * these calls send exactly that shape.
  */
+/**
+ * THE APPROVE TOOL ASKS A PERSON THE WAY THE HOST CAN: Claude Code from
+ * 2.1.214 prompts before every call, so the call is the yes; a host that
+ * takes elicitation is asked mid-call; any other hands the user the terminal
+ * command. Nothing here is paid: each answer stops before the run.
+ */
+describe('the approve tool', () => {
+  const SPEC: OfferSpec = {
+    id: '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d51',
+    capabilityId: 'aispace-hailuo-3-max',
+    provider: 'AiSpace (Hailuo 3 Max)',
+    output: 'media',
+    description: 'Video from a prompt.',
+    priceAtomic: '155000',
+    priceVaries: false,
+    maxAmountAtomic: '155000',
+    payTo: '0xA7f3Ad0E69F61864092FAbBa6Cee00AF6e584689',
+    network: 'eip155:8453',
+    asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+    request: { method: 'POST', url: 'https://x402.aispace.bot/v', fields: {}, location: 'body' },
+    input: { type: 'object', properties: { prompt: { type: 'string' } } },
+    pinned: {},
+  };
+
+  async function connected(client: Client) {
+    const quote = await createQuote(dir, {
+      what: 'one call to AiSpace (Hailuo 3 Max)',
+      sentence: 'One call to AiSpace (Hailuo 3 Max) costs $0.155.',
+      payments: [{ amountAtomic: 155_000n, creator: 'x402.aispace.bot' }],
+      call: { kind: 'spec', id: SPEC.id, spec: SPEC, input: { prompt: 'a plane' } },
+    });
+    const server = buildRouterMcpServer({
+      dataDir: dir,
+      handlerDeps: { cwd: dir, authorizer: authorizer(), provider: testWalletProvider() },
+    });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    return {
+      quote,
+      call: async (args: Record<string, unknown>) =>
+        envelopeOf(
+          await client.callTool({ name: 'approve', arguments: { quote: quote.id, ...args } }),
+        ),
+      close: async () => {
+        await client.close();
+        await server.close();
+      },
+    };
+  }
+
+  it('asks through elicitation where the host takes it, and pays nothing on a no', async () => {
+    const client = new Client(
+      { name: 'some-host', version: '1.0.0' },
+      { capabilities: { elicitation: { form: {} } } },
+    );
+    const asked: string[] = [];
+    client.setRequestHandler(ElicitRequestSchema, async (request) => {
+      asked.push(request.params.message);
+      return { action: 'decline' };
+    });
+    const { quote, call, close } = await connected(client);
+    try {
+      expect(await call({})).toMatchObject({ status: 'declined', cost: ['provider price 0 USD'] });
+      expect(asked).toEqual(['One call to AiSpace (Hailuo 3 Max) costs $0.155. Go ahead?']);
+      expect((await readQuote(dir, quote.id))!.usedAt).toBeUndefined();
+    } finally {
+      await close();
+    }
+  });
+
+  it('hands the terminal command to a host that can neither prompt nor ask', async () => {
+    const { quote, call, close } = await connected(new Client({ name: 'some-host', version: '1' }));
+    try {
+      const envelope = (await call({})) as { status: string; nextStep: string };
+      expect(envelope.status).toBe('needs_approval');
+      expect(envelope.nextStep).toContain(`\`tenjin approve ${quote.id}\``);
+    } finally {
+      await close();
+    }
+  });
+
+  it("takes Claude Code's own prompt as the yes, once it showed the total", async () => {
+    const { call, close } = await connected(
+      new Client({ name: 'claude-code', version: '2.1.214' }),
+    );
+    try {
+      // The prompt showed only the id: refused, nothing paid.
+      expect(await call({})).toMatchObject({ status: 'needs_input' });
+    } finally {
+      await close();
+    }
+  });
+
+  it('trusts the prompt only from a Claude Code that shows it on every call', () => {
+    for (const version of ['2.1.214', '2.1.301', '2.2.0', '3.0.0']) {
+      expect(promptsBeforeApprove({ name: 'claude-code', version })).toBe(true);
+    }
+    for (const version of ['2.1.213', '2.0.999', '1.9.0', 'beta']) {
+      expect(promptsBeforeApprove({ name: 'claude-code', version })).toBe(false);
+    }
+    expect(promptsBeforeApprove({ name: 'other-host', version: '9.9.9' })).toBe(false);
+    expect(promptsBeforeApprove(undefined)).toBe(false);
+  });
+});
+
 describe('the hook tool', () => {
   /** The `input` Claude Code would send for `kind`, from one harness event. */
   function substituted(kind: Parameters<typeof hookToolInput>[0], event: Record<string, unknown>) {
