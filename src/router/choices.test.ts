@@ -14,9 +14,10 @@ import { runRequestTool } from './tool';
 /**
  * `request({id, choice: "all"})`: every option of a line's choice set, each
  * its own offer with its own id, claim, payment, ledger line and outcome
- * report, run side by side once the whole set fits the spend policy. The set
- * here is the shared choices fixture: two models that answer raw image bytes
- * and one that answers JSON linking its image.
+ * report, run side by side once the whole set's plan, each option at its live
+ * quote, fits the spend policy. The set here is the shared choices fixture:
+ * two models that answer raw image bytes and one that answers JSON linking
+ * its image, $0.253 together.
  */
 
 const fixture = JSON.parse(
@@ -40,7 +41,7 @@ beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'router-choices-'));
   // Its own git root: `router.*` resolves from here, never from the suite's cwd.
   await mkdir(join(dir, '.git'));
-  await policy({ maxAutoSpend: '250000', sessionBudget: '5000000' });
+  await policy({ maxAutoSpend: '500000', sessionBudget: '5000000' });
   await storeSpecs(dir, SPECS);
   await storeChoices(dir, ID, { choices: CHOICES, hint: HINT });
 });
@@ -172,12 +173,12 @@ const reports = (calls: { url: string; body?: string }[]) =>
   calls
     .filter((call) => call.url === `${ROUTER}${ROUTER_PATH}`)
     .map((call) => JSON.parse(call.body!) as { id: string; status: string });
-/** A set stopped before payment: no seller called, and one report per choice. */
+/** A set stopped before payment: no seller paid, and one report per choice. */
 const stoppedSet = async (
-  calls: { url: string; body?: string }[],
+  calls: { url: string; paid?: boolean; body?: string }[],
   outcome: { status: string; reason?: string },
 ) => {
-  expect(calls.filter((call) => call.url !== `${ROUTER}${ROUTER_PATH}`)).toEqual([]);
+  expect(calls.filter((call) => call.paid === true)).toEqual([]);
   await vi.waitFor(() => expect(reports(calls)).toHaveLength(3));
   for (const report of reports(calls)) expect(report).toMatchObject(outcome);
   expect(
@@ -330,8 +331,39 @@ describe('running every choice', () => {
     ]);
   });
 
+  /** THE SET IS ONE CALL: its total meets the per-call limit, however small
+   *  each image is. Over it, the set is quoted for the user's yes. */
+  it('quotes a set whose total is over the per-call limit, and signs nothing', async () => {
+    await policy({ maxAutoSpend: '250000', sessionBudget: '5000000' });
+    const auth = authorizer();
+    const { fetchImpl, calls } = sellers();
+    const result = await runRequestTool(
+      { id: ID, choice: 'all', input: INPUT },
+      deps(fetchImpl, auth),
+    );
+    expect(result.isError).toBe(false);
+    expect(result.envelope).toMatchObject({
+      status: 'needs_approval',
+      cost: ['provider price 0 USD'],
+      quote: {
+        what: '3 choices (GPT Image 2.5 Flare, Nano Banana 2.1, Grok Imagine Image 2.0)',
+        total: '$0.253',
+      },
+    });
+    expect(String(result.envelope.reason)).toBe(
+      '3 choices (GPT Image 2.5 Flare, Nano Banana 2.1, Grok Imagine Image 2.0) cost $0.253 in total ($0.115 + $0.095 + $0.043). That is over the $0.25 this machine pays for one call without asking, so nothing was paid.',
+    );
+    expect(String(result.envelope.nextStep)).toContain('approve({quote: "q_');
+    expect(String(result.envelope.nextStep)).toContain('Do not suggest changing a setting.');
+    // One unpaid probe per model priced the plan; nothing was signed.
+    expect(calls.filter((call) => call.model !== undefined)).toHaveLength(3);
+    await stoppedSet(calls, { status: 'needs_approval' });
+    expect(auth.authorize).not.toHaveBeenCalled();
+    expect(await claims()).toEqual([]);
+  });
+
   it('signs nothing, and keeps no claim, when the set is over the session budget', async () => {
-    await policy({ maxAutoSpend: '250000', sessionBudget: '200000' });
+    await policy({ maxAutoSpend: '500000', sessionBudget: '200000' });
     const auth = authorizer();
     const { fetchImpl, calls } = sellers();
     const result = await runRequestTool(
@@ -344,7 +376,8 @@ describe('running every choice', () => {
       cost: ['provider price 0 USD'],
     });
     expect(String(result.envelope.reason)).toContain('$0.253');
-    expect(String(result.envelope.reason)).toContain('tenjin config set sessionBudget');
+    expect(String(result.envelope.reason)).toContain("today's automatic budget has left ($0.2)");
+    expect(String(result.envelope.reason)).not.toContain('config set');
     await stoppedSet(calls, { status: 'needs_approval' });
     expect(auth.authorize).not.toHaveBeenCalled();
     expect(await claims()).toEqual([]);

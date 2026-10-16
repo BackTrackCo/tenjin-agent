@@ -686,11 +686,12 @@ describe('what the tool refuses to execute', () => {
   });
 
   /**
-   * THE MONEY AUTHORITY: the amount actually signed meets the local policy. A
-   * server can quote any price, so a live 402 within that quote still has to
-   * fit the cap.
+   * THE MONEY AUTHORITY: the call's plan, at the live price, meets the local
+   * policy. A server can quote any price, so a live 402 within that quote
+   * still has to fit the limit; over it, the call is quoted for the user's
+   * yes and nothing is signed.
    */
-  it('refuses at the spend gate when the live price is over the cap', async () => {
+  it('quotes a call whose live price is over the limit, and signs nothing', async () => {
     const { fetchImpl } = net([
       { url: ROUTER, status: 200, body: decision({ providerPriceAtomic: '900000' }) },
       {
@@ -718,8 +719,15 @@ describe('what the tool refuses to execute', () => {
       },
     };
     const result = await runRequestTool({ query: 'q' }, real);
-    expect(result.envelope).toMatchObject({ status: 'needs_approval' });
-    expect(result.summary).toContain('Blocked by spending policy');
+    expect(result.envelope).toMatchObject({
+      status: 'needs_approval',
+      quote: { total: '$0.9', id: expect.stringMatching(/^q_/) as string },
+    });
+    expect(result.summary).toContain("Needs the user's approval");
+    expect(String(result.envelope.reason)).toContain(
+      'That is over the $0.25 this machine pays for one call without asking, so nothing was paid.',
+    );
+    expect(String(result.envelope.nextStep)).toMatch(/^Call approve\(\{quote: "q_/);
     expect(result.isError).toBe(false);
     // Nothing was signed: no cost reported, and no row in the paid ledger.
     expect(result.envelope).toMatchObject({ cost: ['provider price 0 USD'] });

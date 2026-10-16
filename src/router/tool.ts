@@ -6,7 +6,7 @@ import {
   type PayDeps,
 } from '../commands/pay';
 import { CliError } from '../lib/errors';
-import { toMoney } from '../lib/money';
+import { parseUsdToAtomic, toMoney } from '../lib/money';
 import { downloadsDir } from '../lib/paths';
 import { mask } from '../lib/redact';
 import {
@@ -16,6 +16,8 @@ import {
   validateResultBody,
 } from '../lib/request-schema';
 import { resolveContextSettings } from '../lib/settings';
+import { admitPlan, admitQuote, type PlanSlot } from '../lib/spend-plan';
+import { quoteClosed, readQuote } from '../lib/spend-quotes';
 import type { SpendAuthorizer, WalletProvider } from '../lib/wallet';
 import type { TenjinSigner } from '../lib/wallet/provider';
 import type { CommandContext } from '../context';
@@ -50,6 +52,16 @@ import {
   type OfferSpec,
 } from './decision';
 import { pickChoice, runChoiceSet, runCount, showChoices, takesResult } from './choices';
+import {
+  approveCall,
+  oneCall,
+  planStop,
+  quotedCall,
+  quoteView,
+  walletBalance,
+  type PlanStop,
+  type QuotedCall,
+} from './plan';
 import { depositSentence, FEE_REQUIRED, isFeeRequired, unpaidSentence, type RouteFor } from './fee';
 import { unpaidNotice } from './spend-question';
 import { clearRouterMemo } from './router-memo';
@@ -118,14 +130,20 @@ import {
  * each (`choices.ts`).
  *
  * WHAT IS CHECKED LOCALLY, BEFORE ANYTHING IS SIGNED: the input against the
- * spec's schema, the decision's arguments against the schema it carries, its success rule against the compiler, its
- * destination against the shared preflight inside `runPay`, and the amount
- * actually signed against `maxAutoSpend` and `sessionBudget` in `gateSpend`.
- * That last one is the whole money story: a hostile backend can name any
- * origin and spend at most one `maxAutoSpend` inside the daily budget.
+ * spec's schema, the decision's arguments against the schema it carries, its
+ * success rule against the compiler, its destination against the shared
+ * preflight inside `runPay`, and the call's SPEND PLAN: every payment it will
+ * make, at its quoted amount, whose total meets `maxAutoSpend` (the limit for
+ * the whole call), the day's `sessionBudget` and the balance at once
+ * (`lib/spend-plan.ts`). `runPay` signs a router payment only against a slot
+ * of an admitted plan, and `gateSpend` still meets each one. That is the
+ * whole money story: a hostile backend can name any origin and spend at most
+ * one `maxAutoSpend` per call inside the daily budget without the user's yes.
  *
  * `needs_approval` is a LOCAL outcome only. The server never sends it: it is
- * what a price over the cap or an exhausted budget looks like from here, and the fix is a command the user can run.
+ * what a plan over the limits looks like from here. Nothing is paid; the plan
+ * is kept as a quote, and `approve({quote})` puts it to the user and runs it
+ * exactly, only on their yes ({@link runApproveTool}).
  */
 
 export interface RequestToolArgs {
@@ -230,6 +248,193 @@ export async function runRequestTool(
   return deposited > 0n
     ? { ...result, summary: `${result.summary}\n${depositSentence(deposited)}` }
     : result;
+}
+
+export interface ApproveToolArgs {
+  /** The quote a `needs_approval` result named. */
+  quote: string;
+  /** The quote's total and what it buys, echoed so a host that asks before
+   *  the call shows them; each must match the quote. */
+  total?: string;
+  what?: string;
+}
+
+/** How the host puts a quote to a person. */
+export type HostApproval =
+  /** It asks before the call reaches this server, and no rule or mode skips
+   *  that (Claude Code's `requiresUserInteraction`): the call is the yes. */
+  | { kind: 'prompted' }
+  /** It asks mid-call when this server asks it to (MCP elicitation). */
+  | { kind: 'asks'; ask: (message: string) => Promise<'accept' | 'decline' | 'cancel'> }
+  /** Neither: a terminal is the only place a person can say yes. */
+  | { kind: 'none' };
+
+/**
+ * `approve({quote})`: A QUOTE THE USER SAYS YES TO, RUN EXACTLY. The quote is
+ * the plan a call over the automatic limits kept, with nothing paid: the
+ * call, its input, each payment and the total. Nothing about it changes here;
+ * the agent sends only its id. A person's yes comes from the host's own
+ * prompt before this call, or from the host asking mid-call, or from
+ * `tenjin approve <quote>` at a terminal; with none of them, nothing is paid
+ * and the answer is that command. A yes runs the quote once, past
+ * `maxAutoSpend` and the day's budget, which a person just agreed to, never
+ * past the balance, and answers as `request` would have.
+ */
+export async function runApproveTool(
+  args: ApproveToolArgs,
+  deps: RequestToolDeps & { host: HostApproval },
+): Promise<RequestToolResult> {
+  const off = await routerOff(deps);
+  if (off !== null) return fail('needs_input', off, { nextStep: ROUTER_OFF_NEXT_STEP });
+  const { dataDir } = deps.ctx;
+  const now = deps.now ?? Date.now;
+  const fresh = 'Call request again with the same call for a fresh quote.';
+  const quote = await readQuote(dataDir, args.quote.trim());
+  const call = quote !== null ? quotedCall(quote) : null;
+  if (quote === null || call === null) {
+    return fail(
+      'needs_input',
+      'No quote is kept on this machine under that id, so nothing was paid.',
+      { nextStep: fresh },
+    );
+  }
+  const closed = quoteClosed(quote, now());
+  if (closed !== null) {
+    return fail(
+      'needs_input',
+      closed === 'used'
+        ? 'That quote already ran, and a quote pays once, so nothing more was paid.'
+        : 'That quote expired (a quote waits ten minutes for a yes), so nothing was paid.',
+      {
+        nextStep: closed === 'used' ? 'Its result is in the approve call that ran it.' : fresh,
+      },
+    );
+  }
+  // THE NUMBERS A PERSON IS SHOWN ARE THE QUOTE'S: an echo that differs is
+  // refused with the true ones, never run.
+  const total = BigInt(quote.totalAtomic);
+  const echoedTotal = args.total !== undefined ? usdAtomic(args.total) : undefined;
+  if (
+    (args.total !== undefined && echoedTotal !== total) ||
+    (args.what !== undefined && args.what.trim() !== quote.what)
+  ) {
+    return fail(
+      'needs_input',
+      `That quote is for ${quote.what}, $${toMoney(quote.totalAtomic).usd} in total, not what this call said, so nothing was paid.`,
+      { quote: quoteView(quote), nextStep: `Call ${approveCall(quote)}.` },
+    );
+  }
+  const terminal = quote.approvedAt !== undefined;
+  if (!terminal) {
+    if (deps.host.kind === 'prompted') {
+      // The prompt showed this call's arguments: without the total and what
+      // they buy, nobody saw what they said yes to.
+      if (args.total === undefined || args.what === undefined) {
+        return fail(
+          'needs_input',
+          "Send the quote's total and what it buys with it, so the user sees them when asked; nothing was paid.",
+          { quote: quoteView(quote), nextStep: `Call ${approveCall(quote)}.` },
+        );
+      }
+    } else {
+      const answer =
+        deps.host.kind === 'asks'
+          ? await deps.host.ask(`${quote.sentence} Go ahead?`).catch(() => null)
+          : null;
+      if (answer === 'decline' || answer === 'cancel') {
+        return fail('declined', `The user said no to ${quote.what}, so nothing was paid.`, {
+          nextStep: 'Continue without it, and do not ask again for this.',
+        });
+      }
+      if (answer !== 'accept') {
+        return fail(
+          'needs_approval',
+          `${quote.sentence} This host cannot ask the user here, so nothing was paid.`,
+          {
+            quote: quoteView(quote),
+            nextStep: `Ask the user to run \`tenjin approve ${quote.id}\` in a terminal, then call approve({quote: ${JSON.stringify(quote.id)}}). Do not suggest changing a setting.`,
+          },
+        );
+      }
+    }
+  }
+  const call_: RequestToolDeps = {
+    ...deps,
+    startedAt: deps.startedAt ?? now(),
+    downloads: deps.downloads ?? { leftBytes: MAX_CALL_DOWNLOAD_BYTES },
+  };
+  const settings = await resolveContextSettings(deps.ctx);
+  const admitted = await admitQuote(dataDir, quote.id, {
+    terminal,
+    balance: () => walletBalance(call_, settings.rpcUrl),
+    now,
+  });
+  if ('refused' in admitted) {
+    return fail(
+      'needs_input',
+      admitted.refused === 'used'
+        ? 'That quote already ran, and a quote pays once, so nothing more was paid.'
+        : 'That quote can no longer run, so nothing was paid.',
+      { nextStep: fresh },
+    );
+  }
+  if ('short' in admitted) {
+    const { balanceAtomic, totalAtomic } = admitted.short;
+    return fail(
+      'failed',
+      `${quote.sentence} The wallet holds $${toMoney(balanceAtomic.toString()).usd}, $${toMoney((totalAtomic - balanceAtomic).toString()).usd} short. The wallet has insufficient USDC; no payment was signed. Fund this wallet on Base with \`tenjin wallet fund\` before paying.`,
+      { nextStep: 'Tell the user. The quote waits for its ten minutes; nothing was paid.' },
+    );
+  }
+  const slots = admitted.admitted;
+  const reportDeps: ReportDeps = {
+    ctx: deps.ctx,
+    baseUrl: settings.baseUrl,
+    ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+  };
+  const footer = await openLookupFooter(dataDir, call.kind !== 'call' ? { id: call.id } : {});
+  await footer.routing();
+  switch (call.kind) {
+    case 'spec':
+      return runSpec(call.id, call.spec, call.input, call_, footer, reportDeps, slots);
+    case 'count':
+      return runCount(
+        call.id,
+        call.spec,
+        call.input,
+        call.count,
+        call_,
+        footer,
+        reportDeps,
+        settings,
+        slots,
+      );
+    case 'choices':
+      return runChoiceSet(call.id, call.kept, call.input, call_, footer, reportDeps, settings, {
+        specs: call.specs,
+        keys: call.keys,
+        slots,
+      });
+    case 'call':
+      return (await payAndDeliver(call.call, { slot: slots[0]! }, call_, footer)).result;
+  }
+}
+
+/** An echoed total in USD, `$0.775` or `0.775`, as atomic units; undefined
+ *  when it is not one. */
+function usdAtomic(text: string): bigint | undefined {
+  try {
+    return BigInt(
+      parseUsdToAtomic(
+        text
+          .trim()
+          .replace(/^\$/, '')
+          .replace(/\s*USD$/i, ''),
+      ),
+    );
+  } catch {
+    return undefined;
+  }
 }
 
 async function requestTool(
@@ -540,25 +745,20 @@ async function requestTool(
   // still quote up to `maxAutoSpend`. `gateSpend` stays the money authority.
   // The request is the server's, sent verbatim: the only thing built here is
   // the decision about whether to send it.
-  return (
-    await payAndDeliver(
-      {
-        capabilityId: decision.capabilityId,
-        provider: decision.provider,
-        media: decision.category === 'discovered',
-        request: contract.request,
-        terms: { source: decision.provider, maxAmountAtomic: decision.providerPriceAtomic },
-        requestKey: `${decision.capabilityId}:${canonicalHash(contract.arguments ?? {})}`,
-        ...(contract.resultSchema !== undefined ? { resultSchema: contract.resultSchema } : {}),
-        ...(contract.arguments !== undefined ? { parameters: contract.arguments } : {}),
-        // What the ledger records as sent: the host's input, or its query.
-        sent: input !== undefined ? JSON.stringify(maskDeep(input)) : query,
-        ...(note !== undefined ? { note } : {}),
-      },
-      deps,
-      footer,
-    )
-  ).result;
+  const call: ProviderCall = {
+    capabilityId: decision.capabilityId,
+    provider: decision.provider,
+    media: decision.category === 'discovered',
+    request: contract.request,
+    terms: { source: decision.provider, maxAmountAtomic: decision.providerPriceAtomic },
+    requestKey: `${decision.capabilityId}:${canonicalHash(contract.arguments ?? {})}`,
+    ...(contract.resultSchema !== undefined ? { resultSchema: contract.resultSchema } : {}),
+    ...(contract.arguments !== undefined ? { parameters: contract.arguments } : {}),
+    // What the ledger records as sent: the host's input, or its query.
+    sent: input !== undefined ? JSON.stringify(maskDeep(input)) : query,
+    ...(note !== undefined ? { note } : {}),
+  };
+  return (await payAndDeliver(call, { alone: { kind: 'call', call } }, deps, footer)).result;
 }
 
 /** The answer to `request({id})` when the hook kept that offer's spec, or to
@@ -631,7 +831,8 @@ export function alreadyPaid(
  * signed against the spend policy. Then the server is told how it ended.
  *
  * Three steps, which a choice set runs per option too: the checks, the claim,
- * and the payment.
+ * and the payment. The payment is a plan of one at its live price, or the
+ * one slot of a quote the user approved (`approved`).
  */
 async function runSpec(
   id: string,
@@ -640,6 +841,7 @@ async function runSpec(
   deps: RequestToolDeps,
   footer: LookupFooter,
   reportDeps: ReportDeps,
+  approved?: PlanSlot[],
 ): Promise<RequestToolResult> {
   const checked = await prepareSpec(id, spec, input, footer, reportDeps);
   if ('refused' in checked) return checked.refused;
@@ -651,7 +853,9 @@ async function runSpec(
     await footer.done('needs_input');
     return alreadyPaid(id, spec, earlier, await runningJob(deps.ctx.dataDir, id));
   }
-  return (await paySpec(checked.prepared, deps, footer, reportDeps)).result;
+  const admission: Admission =
+    approved !== undefined ? { slot: approved[0]! } : { alone: { kind: 'spec', id, spec, input } };
+  return (await paySpec(checked.prepared, admission, deps, footer, reportDeps)).result;
 }
 
 /** The job id to resume when a take of this offer is still running. */
@@ -777,6 +981,7 @@ export interface TakeOf {
  */
 export async function paySpec(
   prepared: PreparedSpec,
+  admission: Admission,
   deps: RequestToolDeps,
   footer: LookupFooter,
   reportDeps: ReportDeps,
@@ -805,6 +1010,7 @@ export async function paySpec(
         ? { job: { spec: spec.job, offerId: id, take: take?.n ?? 1, input: merged } }
         : {}),
     },
+    admission,
     deps,
     footer,
   );
@@ -846,7 +1052,7 @@ function savesMedia(spec: Pick<OfferSpec, 'capabilityId' | 'output'>): boolean {
 }
 
 /** One provider call to make and pay for, from a decision or a spec. */
-interface ProviderCall {
+export interface ProviderCall {
   capabilityId: string;
   provider: string;
   /** A media service: a paid result's links and inline files are saved
@@ -883,6 +1089,50 @@ interface CallJob {
 }
 
 /**
+ * WHERE A PAYMENT'S PLACE IN ITS CALL'S PLAN COMES FROM: a slot the plan
+ * already admitted (several payments, planned together, or a quote the user
+ * approved), or a plan of one admitted at the live price as it is signed,
+ * which over the limits is kept as the quote `alone` replays.
+ */
+export type Admission = { slot: PlanSlot } | { alone: QuotedCall };
+
+/** What a payment's plan of one is stopped with: `runPay` throws it, and the
+ *  caller answers with it. */
+const PLAN_STOP = 'planStop';
+
+/**
+ * A PLAN OF ONE, admitted at the price `runPay` is about to sign, before the
+ * wallet is opened: the same planner several payments meet, so one call is
+ * one rule. Over the limits, under the allowlist, or past the balance it is
+ * stopped, and the stop rides the throw back to {@link payAndDeliver}.
+ */
+function admitAlone(
+  call: ProviderCall,
+  quoted: QuotedCall,
+  deps: RequestToolDeps,
+): (amountAtomic: bigint) => Promise<PlanSlot> {
+  return async (amountAtomic) => {
+    const settings = await resolveContextSettings(deps.ctx);
+    const payments = [{ amountAtomic, creator: new URL(call.request.url).host }];
+    const admission = await admitPlan(payments, {
+      dataDir: deps.ctx.dataDir,
+      policy: settings.policy,
+      balance: () => walletBalance(deps, settings.rpcUrl),
+      ...(deps.now !== undefined ? { now: deps.now } : {}),
+    });
+    if ('admitted' in admission) return admission.admitted[0]!;
+    const stop = await planStop(
+      admission,
+      { ...oneCall(call.provider, amountAtomic), payments, call: quoted },
+      deps,
+    );
+    throw new CliError(stop.status === 'failed' ? 'REFUSED' : 'POLICY_REFUSED', stop.reason, {
+      details: { [PLAN_STOP]: stop },
+    });
+  };
+}
+
+/**
  * PAY THE PROVIDER AND DELIVER WHAT CAME BACK: `runPay` under the caller's
  * terms, the binary or media result saved, the ledger written, and the
  * envelope the host reads, with what was sent on every outcome. `outcome` is
@@ -891,6 +1141,7 @@ interface CallJob {
  */
 async function payAndDeliver(
   call: ProviderCall,
+  admission: Admission,
   deps: RequestToolDeps,
   footer: LookupFooter,
 ): Promise<{
@@ -920,6 +1171,10 @@ async function payAndDeliver(
         ...(built.body !== undefined ? { rawBody: built.body } : {}),
         terms: call.terms,
         execution: 'router',
+        admit:
+          'slot' in admission
+            ? async () => admission.slot
+            : admitAlone(call, admission.alone, deps),
         requestKey: call.requestKey,
         ...(call.resultSchema !== undefined ? { resultSchema: call.resultSchema } : {}),
         printBody: true,
@@ -1005,6 +1260,22 @@ async function payAndDeliver(
     return { result: delivered.result, outcome: delivered.outcome, left: left() };
   } catch (err) {
     const cli = err instanceof CliError ? err : undefined;
+    // THE PLAN WAS STOPPED before anything was signed: over the limits, its
+    // quote and the approve call; otherwise why, with nothing paid.
+    const stop = (cli?.details as Record<string, unknown> | undefined)?.[PLAN_STOP] as
+      PlanStop | undefined;
+    if (stop !== undefined) {
+      await footer.done(stop.status, { provider: built.url, ...parameters });
+      return {
+        left: { amountAtomic: 0n, signed: signing.mayHaveSigned() },
+        outcome: stop.outcome,
+        result: fail(stop.status, stop.reason, {
+          ...stop.extras,
+          request: { method: built.method, url: built.url },
+          ...(call.parameters !== undefined ? { parameters: call.parameters } : {}),
+        }),
+      };
+    }
     const status = cli?.code === 'POLICY_REFUSED' ? 'needs_approval' : 'failed';
     // A provider failure AFTER transmission carries the amount at risk on its
     // details. Reporting zero there told the model the call was free when the
@@ -2074,7 +2345,7 @@ async function saveBinary(
   }
 }
 
-export type FailStatus = 'failed' | 'needs_approval' | 'needs_input' | 'native';
+export type FailStatus = 'failed' | 'needs_approval' | 'needs_input' | 'native' | 'declined';
 
 function checkContract(contract: DecisionContract): { status: FailStatus; reason: string } | null {
   const built = contract.request;
@@ -2149,11 +2420,17 @@ export function costLines(providerAtomic: bigint): string[] {
 /**
  * ROUTINE CONTROL OUTCOMES, not failures of this tool. A routing decision was
  * delivered and it says the turn continues somewhere else: with the host's own
- * tools, with a question for the user, or with an approval the user gives. The
- * MCP error flag is for what went WRONG, and raising it on these three put a
- * red box in front of the user on the most ordinary answer the router has.
+ * tools, with a question for the user, with an approval the user gives, or
+ * with the user's no to one. The MCP error flag is for what went WRONG, and
+ * raising it on these put a red box in front of the user on the most ordinary
+ * answer the router has.
  */
-const ROUTINE: ReadonlySet<FailStatus> = new Set(['native', 'needs_input', 'needs_approval']);
+const ROUTINE: ReadonlySet<FailStatus> = new Set([
+  'native',
+  'needs_input',
+  'needs_approval',
+  'declined',
+]);
 
 const ROUTER_OFF_NEXT_STEP =
   'Continue with your own tools. Nothing was sent to the router and nothing was bought.';
@@ -2182,7 +2459,8 @@ const NEXT_STEP: Record<string, string> = {
   needs_input:
     'Ask the user for the missing detail, then call `request` again with it. Nothing was bought.',
   needs_approval:
-    'Report the command above to the user; this build will not raise a spend limit on its own.',
+    'Tell the user this needs their approval; nothing was paid. Do not suggest changing a setting.',
+  declined: 'Continue without it; nothing was bought.',
 };
 
 /**
@@ -2200,7 +2478,7 @@ const NEXT_STEP_BY_REASON: Record<string, string> = {
     'The router could not classify this one and charged nothing. Continue with your own tools, or call `request` once more.',
 };
 
-interface FailExtras {
+export interface FailExtras {
   providerAtomic?: bigint;
   settlement?: string;
   /** Which rule failed, whether the body was JSON, its size and a bounded
@@ -2227,13 +2505,17 @@ interface FailExtras {
   parameters?: unknown;
   /** The provider request it went out as. */
   request?: { method: string; url: string };
+  /** A plan over the limits, kept for the user's yes: its id, what it buys
+   *  and its total. */
+  quote?: Record<string, unknown>;
 }
 
 /** The headline: calm for a routine outcome, explicit for a real failure. */
 function summaryFor(status: FailStatus, reason: string): string {
   if (status === 'native') return `No paid lookup needed: ${reason}`;
   if (status === 'needs_input') return `More input needed: ${reason}`;
-  if (status === 'needs_approval') return `Blocked by spending policy: ${reason}`;
+  if (status === 'needs_approval') return `Needs the user's approval: ${reason}`;
+  if (status === 'declined') return `Not approved: ${reason}`;
   return `x402 request ${status}: ${reason}`;
 }
 
@@ -2261,6 +2543,7 @@ export function fail(
       status,
       reason,
       ...(extras.errorCode !== undefined ? { errorCode: extras.errorCode } : {}),
+      ...(extras.quote !== undefined ? { quote: extras.quote } : {}),
       // The status is the fact; the next step is what to do about it. The
       // BACKEND'S own next action wins when it sent one: it knows which field
       // is missing.

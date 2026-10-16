@@ -206,3 +206,11 @@ export function paidLedgerPath(dir: string = dataDir()): string {
 export function jobsDir(dir: string = dataDir()): string {
   return join(dir, 'jobs');
 }
+
+/**
+ * One file per quote: a router call over the automatic limits, kept with its
+ * exact plan until the user approves it, it runs once, or it expires.
+ */
+export function quotesDir(dir: string = dataDir()): string {
+  return join(dir, 'quotes');
+}

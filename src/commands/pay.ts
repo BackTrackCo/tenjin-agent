@@ -16,6 +16,7 @@ import { isSameDeployment } from '../lib/production-origin';
 import { resolveContextSettings } from '../lib/settings';
 import { SIWX_HEADER, buildSiwxHeader } from '../lib/siwx';
 import { gateSpend } from '../lib/spend-gate';
+import { spendSlot, type PlanSlot } from '../lib/spend-plan';
 import type { ResolvedSettings } from '../lib/settings';
 import {
   describeWallet,
@@ -47,7 +48,8 @@ import type { CommandContext, CommandResult } from '../context';
  * any seller that supports it while nothing origin-bound can leak elsewhere.
  *
  * Direct third-party payments require acknowledgement of registry warnings.
- * Router calls retain their advertised-price and supplied-term hard checks.
+ * Router calls retain their advertised-price and supplied-term hard checks,
+ * and each is signed only against its call's spend plan (`admit`).
  * Every positive payment checks the actual signer's balance before signing.
  */
 
@@ -127,6 +129,14 @@ export interface PayArgs {
    * which `tenjin pay --json` prints.
    */
   onPaidLeg?: (leg: PaidLeg) => void;
+  /**
+   * THE CALL'S SPEND PLAN, which every router payment is signed against.
+   * Handed the live price before the wallet is opened, it returns the slot an
+   * admitted plan holds for this payment (`lib/spend-plan.ts`), or throws the
+   * refusal: over the limits, the router's quote. Required in router mode: a
+   * router payment no plan admitted is refused with nothing sent.
+   */
+  admit?: (amountAtomic: bigint) => Promise<PlanSlot>;
 }
 
 /** What {@link PayArgs.onPaidLeg} is handed. */
@@ -198,6 +208,13 @@ async function executePay(
         'REFUSED',
         'Router payments require valid advertised terms and cannot acknowledge registry warnings.',
         { details: { reason: 'invalid_router_terms' } },
+      );
+    }
+    if (args.admit === undefined) {
+      throw new CliError(
+        'REFUSED',
+        "A router payment is signed only against its call's spend plan, and this one has none; nothing was sent.",
+        { details: { reason: 'unplanned' } },
       );
     }
   }
@@ -300,6 +317,9 @@ async function executePay(
       warnings,
     );
   }
+  // THE CALL'S PLAN ADMITS THIS PAYMENT at the price first seen, before the
+  // wallet is opened: over the limits, the refusal is the router's quote.
+  const slot = router ? await args.admit!(firstSeenAmount) : undefined;
 
   const provider = resolveWalletProvider(
     ctx,
@@ -394,6 +414,33 @@ async function executePay(
     }
   }
   const amountAtomic = BigInt(effectiveRequirement.amount);
+  if (router) {
+    const refusal = spendSlot(slot, amountAtomic);
+    if (refusal === 'above_plan') {
+      throw new CliError(
+        'PAYMENT_FAILED',
+        `The live price ($${toMoney(amountAtomic.toString()).usd}) is above the $${toMoney(slot!.amountAtomic.toString()).usd} this call planned for it, so nothing was signed.`,
+        {
+          fix: 'Call again for a fresh plan at the new price.',
+          details: {
+            reason: 'above_plan',
+            plannedAtomic: slot!.amountAtomic.toString(),
+            live: { amount: amountAtomic.toString() },
+          },
+        },
+      );
+    }
+    if (refusal !== null) {
+      throw new CliError(
+        'REFUSED',
+        "A router payment is signed only against an unspent slot of its call's spend plan; nothing was signed.",
+        { details: { reason: refusal } },
+      );
+    }
+  }
+  // A PLAN A PERSON APPROVED is theirs, as a manual payment is: it may pass
+  // the automatic limits, and it does not use up the automatic budget.
+  const approved = slot?.approved === true;
 
   const authorizer = resolveSpendAuthorizer(
     ctx,
@@ -404,7 +451,7 @@ async function executePay(
   // hosts); the gate itself is shared with `buy` so the two verbs cannot drift.
   const verifiedVia = registry ?? termsLabel;
   const via = verifiedVia !== undefined ? ` (${sanitizeForTerminal(verifiedVia)})` : '';
-  const mode = router ? 'automatic' : 'manual';
+  const mode = router && !approved ? 'automatic' : 'manual';
   const reservationId = await gateSpend({
     mode,
     ctx,
@@ -413,7 +460,7 @@ async function executePay(
     creator: host,
     ...(maxPriceAtomic !== undefined ? { maxPriceAtomic } : {}),
     ...(args.requestKey !== undefined ? { requestKey: args.requestKey } : {}),
-    yes: args.yes === true,
+    yes: args.yes === true || approved,
     ...(deps.confirm !== undefined ? { confirm: deps.confirm } : {}),
     payeeLabel: `${sanitizeForTerminal(url)}${via}; recipient ${sanitizeForTerminal(effectiveRequirement.payTo)}, ${sanitizeForTerminal(effectiveRequirement.network)} / ${sanitizeForTerminal(effectiveRequirement.asset)}`,
     allowlistSubject: 'this host',

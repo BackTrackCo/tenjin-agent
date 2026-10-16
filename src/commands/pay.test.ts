@@ -3,6 +3,8 @@ import { mkdtemp, rm, writeFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MAX_PAID_LEG_TIMEOUT_MS, paidLegTimeoutMs, runPay, type PaidLeg } from './pay';
+import { admitPlan, admitQuote, type PlanSlot } from '../lib/spend-plan';
+import { createQuote } from '../lib/spend-quotes';
 import { saveSweepListings } from '../lib/bazaar';
 import { CliError } from '../lib/errors';
 import { MAX_BODY_BYTES } from '../lib/request-schema';
@@ -39,6 +41,18 @@ const FOREIGN_URL = 'https://seller.example/api/enrich';
 const REGISTRY = 'https://registry.test';
 
 const RESERVATION = 'rsv-test';
+
+/** A router payment's place in its call's plan: a plan of one, admitted under
+ *  a policy with room for anything. */
+async function planned(amountAtomic: bigint): Promise<PlanSlot> {
+  const plan = await admitPlan([{ amountAtomic, creator: 'seller.example' }], {
+    dataDir: dir,
+    policy: { maxAutoSpendAtomic: 10n ** 12n, sessionBudgetAtomic: null, allowlistCreators: [] },
+    balance: async () => null,
+  });
+  if (!('admitted' in plan)) throw new Error('a roomy plan was not admitted');
+  return plan.admitted[0]!;
+}
 
 /**
  * The Bazaar lane resolves its destination before it probes, and `.example`
@@ -222,7 +236,7 @@ describe('runPay, tenjin lane', () => {
     const authorizer = fakeAuthorizer('allow');
     await expect(
       runPay(
-        { url: TENJIN_URL, terms: { source: 'router', maxAmountAtomic: '99999' } },
+        { url: TENJIN_URL, terms: { source: 'router', maxAmountAtomic: '99999' }, admit: planned },
         makeCtx(),
         { ...PUBLIC_DNS, fetchImpl: fetch, provider: testWalletProvider(), authorizer },
       ),
@@ -1156,7 +1170,7 @@ describe('runPay, the shared request gate', () => {
     ]);
     let prompt = '';
     const result = await runPay(
-      { url: FOREIGN_URL, terms: { ...TERMS, source: 'a decision' } },
+      { url: FOREIGN_URL, terms: { ...TERMS, source: 'a decision' }, admit: planned },
       makeCtx(),
       {
         ...PUBLIC_DNS,
@@ -1185,7 +1199,7 @@ describe('runPay, the shared request gate', () => {
     const { fetch, calls } = scriptedFetch([json(402, {}, { 'PAYMENT-REQUIRED': fixture.header })]);
     const authorizer = fakeAuthorizer('allow');
     await expect(
-      runPay({ url: FOREIGN_URL, terms: TERMS }, makeCtx(), {
+      runPay({ url: FOREIGN_URL, terms: TERMS, admit: planned }, makeCtx(), {
         ...PUBLIC_DNS,
         fetchImpl: fetch,
         provider: testWalletProvider(),
@@ -1194,6 +1208,94 @@ describe('runPay, the shared request gate', () => {
     ).rejects.toMatchObject({ code: 'REGISTRY_MISMATCH' });
     expect(calls).toHaveLength(1);
     expect(authorizer.authorize).not.toHaveBeenCalled();
+  });
+
+  /** A ROUTER PAYMENT IS SIGNED ONLY AGAINST ITS CALL'S PLAN: no plan, a
+   *  slot nobody admitted, a slot already spent, or a live price above the
+   *  plan signs nothing. */
+  it('refuses a router payment its call never planned, before anything is sent', async () => {
+    await writeConfig();
+    const { fetch, calls } = scriptedFetch([]);
+    await expect(
+      runPay({ url: FOREIGN_URL, terms: TERMS }, makeCtx(), { ...PUBLIC_DNS, fetchImpl: fetch }),
+    ).rejects.toMatchObject({ code: 'REFUSED', details: { reason: 'unplanned' } });
+    expect(calls).toHaveLength(0);
+  });
+
+  it('refuses a slot no plan admitted, one already spent, and a price above the plan', async () => {
+    await writeConfig();
+    const attempt = async (admit: () => Promise<PlanSlot>) => {
+      const fixture = buildPaymentRequired();
+      const { fetch } = scriptedFetch([json(402, {}, { 'PAYMENT-REQUIRED': fixture.header })]);
+      const authorizer = fakeAuthorizer('allow');
+      const err = await runPay({ url: FOREIGN_URL, terms: TERMS, admit }, makeCtx(), {
+        ...PUBLIC_DNS,
+        fetchImpl: fetch,
+        provider: testWalletProvider(),
+        authorizer,
+      }).catch((caught: unknown) => caught);
+      expect(authorizer.authorize).not.toHaveBeenCalled();
+      return err;
+    };
+    expect(await attempt(async () => ({ amountAtomic: 10n ** 9n, approved: true }))).toMatchObject({
+      code: 'REFUSED',
+      details: { reason: 'unplanned' },
+    });
+    const once = await planned(100_000n);
+    const paid = buildPaymentRequired();
+    const { fetch } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': paid.header }),
+      json(200, { ok: true }),
+    ]);
+    await runPay({ url: FOREIGN_URL, terms: TERMS, admit: async () => once }, makeCtx(), {
+      ...PUBLIC_DNS,
+      fetchImpl: fetch,
+      provider: testWalletProvider(),
+      authorizer: fakeAuthorizer('allow'),
+    });
+    expect(await attempt(async () => once)).toMatchObject({
+      code: 'REFUSED',
+      details: { reason: 'spent' },
+    });
+    expect(await attempt(() => planned(99_999n))).toMatchObject({
+      code: 'PAYMENT_FAILED',
+      details: { reason: 'above_plan' },
+    });
+  });
+
+  /** A QUOTE A PERSON APPROVED is theirs, as a manual payment is: past the
+   *  automatic limits, and outside the automatic budget. */
+  it("signs a slot of an approved quote as the user's own payment", async () => {
+    await writeConfig({ maxAutoSpend: '0', sessionBudget: '0' });
+    const quote = await createQuote(dir, {
+      what: 'one call to a seller',
+      sentence: 'One call to a seller costs $0.1.',
+      payments: [{ amountAtomic: 100_000n, creator: 'seller.example' }],
+      call: {},
+    });
+    const admitted = await admitQuote(dir, quote.id, {
+      terminal: false,
+      balance: async () => null,
+    });
+    if (!('admitted' in admitted)) throw new Error('the quote was not admitted');
+    const fixture = buildPaymentRequired();
+    const { fetch } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': fixture.header }),
+      json(200, { ok: true }),
+    ]);
+    const authorizer = fakeAuthorizer('confirm');
+    const result = await runPay(
+      { url: FOREIGN_URL, terms: TERMS, admit: async () => admitted.admitted[0]! },
+      makeCtx(),
+      { ...PUBLIC_DNS, fetchImpl: fetch, provider: testWalletProvider(), authorizer },
+    );
+    expect((result.data as { paid: boolean }).paid).toBe(true);
+    expect(authorizer.authorize).toHaveBeenCalledWith(expect.objectContaining({ mode: 'manual' }));
+    expect(authorizer.commit).toHaveBeenCalledWith(
+      RESERVATION,
+      100_000n,
+      expect.objectContaining({ mode: 'manual' }),
+    );
   });
 
   it('carries the duplicate-guard key into the authorizer', async () => {
@@ -1555,7 +1657,7 @@ describe('runPay, a 402 that advertises several chains', () => {
       json(402, {}, { 'PAYMENT-REQUIRED': multiChain() }),
       json(200, { data: { BTC: 1 } }),
     ]);
-    const result = await runPay({ url: FOREIGN_URL, terms: TERMS }, makeCtx(), {
+    const result = await runPay({ url: FOREIGN_URL, terms: TERMS, admit: planned }, makeCtx(), {
       ...PUBLIC_DNS,
       fetchImpl: fetch,
       provider: testWalletProvider(),
@@ -1575,7 +1677,7 @@ describe('runPay, a 402 that advertises several chains', () => {
       json(402, {}, { 'PAYMENT-REQUIRED': multiChain() }),
       json(200, { ok: true }),
     ]);
-    await runPay({ url: FOREIGN_URL, terms: TERMS }, makeCtx(), {
+    await runPay({ url: FOREIGN_URL, terms: TERMS, admit: planned }, makeCtx(), {
       ...PUBLIC_DNS,
       fetchImpl: fetch,
       provider: testWalletProvider(),
@@ -1603,7 +1705,7 @@ describe('runPay, a 402 that advertises several chains', () => {
       ),
     ]);
     const authorizer = fakeAuthorizer('allow');
-    const err = await runPay({ url: FOREIGN_URL, terms: TERMS }, makeCtx(), {
+    const err = await runPay({ url: FOREIGN_URL, terms: TERMS, admit: planned }, makeCtx(), {
       ...PUBLIC_DNS,
       fetchImpl: fetch,
       provider: testWalletProvider(),
@@ -1629,7 +1731,7 @@ describe('runPay, a 402 that advertises several chains', () => {
       ),
     ]);
     const err = await runPay(
-      { url: FOREIGN_URL, terms: { ...TERMS, maxAmountAtomic: '9999' } },
+      { url: FOREIGN_URL, terms: { ...TERMS, maxAmountAtomic: '9999' }, admit: planned },
       makeCtx(),
       { ...PUBLIC_DNS, fetchImpl: fetch, provider: testWalletProvider() },
     ).catch((e: unknown) => e);
@@ -1644,6 +1746,7 @@ describe('runPay, a 402 that advertises several chains', () => {
       {
         url: FOREIGN_URL,
         terms: { ...TERMS, payTo: '0x9999999999999999999999999999999999999999' },
+        admit: planned,
       },
       makeCtx(),
       { ...PUBLIC_DNS, fetchImpl: fetch, provider: testWalletProvider() },

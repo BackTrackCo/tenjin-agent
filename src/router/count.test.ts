@@ -14,7 +14,8 @@ import { runRequestTool } from './tool';
 
 /**
  * `request({id, input, count})`: several takes of one media call, each its own
- * claim, request key and payment, after one spend check for them all. The
+ * claim, request key and payment, after one spend plan for them all: their
+ * total against the per-call limit, the day's budget and the balance. The
  * seller here answers each paid take with the image's bytes.
  */
 
@@ -218,16 +219,46 @@ describe('several takes of one call', () => {
       status: 'needs_approval',
       cost: ['provider price 0 USD'],
     });
-    expect(String(result.envelope.reason)).toContain(
-      '3 takes of AiSpace (Muse) costs $0.15 at its live price',
+    expect(String(result.envelope.reason)).toBe(
+      "3 takes of AiSpace (Muse) cost $0.15 in total ($0.05 each). That is more than today's automatic budget has left ($0.12), so nothing was paid.",
     );
-    expect(String(result.envelope.reason)).toContain('tenjin config set sessionBudget');
+    expect(result.envelope.quote).toMatchObject({
+      what: '3 takes of AiSpace (Muse)',
+      total: '$0.15',
+    });
     expect(auth.authorize).not.toHaveBeenCalled();
     // One unpaid probe for the price, and nothing else.
     expect(calls.filter((call) => !call.url.startsWith(ROUTER))).toEqual([
       expect.objectContaining({ paid: false }),
     ]);
     expect(await claims()).toEqual([]);
+  });
+
+  /** THE COUNT IS ONE CALL: three 5¢ takes are 15¢ against a 10¢ per-call
+   *  limit, though each one alone would fit it. */
+  it('plans the takes as one call: their total against the per-call limit', async () => {
+    await policy({ maxAutoSpend: '100000', sessionBudget: '5000000' });
+    const auth = authorizer();
+    const { fetchImpl, calls } = seller();
+    const result = await runRequestTool({ id: ID, input: INPUT, count: 3 }, deps(fetchImpl, auth));
+    expect(result.envelope).toMatchObject({
+      status: 'needs_approval',
+      quote: { what: '3 takes of AiSpace (Muse)', total: '$0.15' },
+    });
+    expect(String(result.envelope.reason)).toContain(
+      'That is over the $0.1 this machine pays for one call without asking',
+    );
+    expect(auth.authorize).not.toHaveBeenCalled();
+    expect(calls.filter((call) => call.paid)).toEqual([]);
+    expect(await claims()).toEqual([]);
+
+    // Two takes fit, and run with no question.
+    const two = seller();
+    const ran = await runRequestTool(
+      { id: ID, input: INPUT, count: 2 },
+      deps(two.fetchImpl, authorizer()),
+    );
+    expect(ran.envelope).toMatchObject({ status: 'fulfilled', cost: ['provider price 0.1 USD'] });
   });
 
   it('refuses a take over the per-call cap before anything is signed', async () => {
@@ -273,7 +304,7 @@ describe('several takes of one call', () => {
     const { fetchImpl, calls } = seller([], 0, ['64000']);
     const result = await runRequestTool({ id: ID, input: INPUT, count: 3 }, deps(fetchImpl, auth));
     expect(result.envelope).toMatchObject({ status: 'needs_approval' });
-    expect(String(result.envelope.reason)).toContain('costs $0.192 at its live price');
+    expect(String(result.envelope.reason)).toContain('cost $0.192 in total ($0.064 each)');
     expect(auth.authorize).not.toHaveBeenCalled();
     expect(calls.filter((call) => call.paid)).toEqual([]);
     expect(await claims()).toEqual([]);
@@ -293,13 +324,13 @@ describe('several takes of one call', () => {
     expect(reports(calls)[0]).toMatchObject({ id: ID, status: 'unpaid', reason: 'terms' });
   });
 
-  /** A TAKE QUOTED HIGHER THAN THE FIRST meets the spend gate again on its
-   *  own when it is signed, and is refused there with nothing signed. */
-  it('re-checks a take quoted higher on its own, and signs nothing for it', async () => {
+  /** A TAKE QUOTED HIGHER THAN ITS PLAN when it is signed is refused there,
+   *  with nothing signed for it: the plan is what was agreed to. */
+  it('refuses a take quoted above its plan when it is signed, and signs nothing for it', async () => {
     await storeSpecs(dir, [GPT_IMAGE_2]);
     const settings = await resolveContextSettings(ctx());
     const auth = createLocalSpendAuthorizer({ dir, policy: settings.policy });
-    // The set's quote and two takes at 6.4¢, then one take at 30¢: over the cap.
+    // The set's quote and two takes at 6.4¢, then one take at 30¢: over the plan.
     const { fetchImpl, calls } = seller([], 0, ['64000', '64000', '64000', '300000']);
     const result = await runRequestTool({ id: ID, input: INPUT, count: 3 }, deps(fetchImpl, auth));
     expect(result.envelope).toMatchObject({
@@ -309,7 +340,12 @@ describe('several takes of one call', () => {
     const statuses = (result.envelope.results as Record<string, unknown>[]).map(
       (take) => take.status,
     );
-    expect(statuses.sort()).toEqual(['fulfilled', 'fulfilled', 'needs_approval']);
+    expect(statuses.sort()).toEqual(['failed', 'fulfilled', 'fulfilled']);
+    const above = (result.envelope.results as Record<string, unknown>[]).find(
+      (take) => take.status === 'failed',
+    )!;
+    expect(String(above.reason)).toContain('above the $0.064 this call planned for it');
+    expect(above).toMatchObject({ cost: ['provider price 0 USD'] });
     expect(calls.filter((call) => call.paid)).toHaveLength(2);
   });
 
