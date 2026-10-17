@@ -66,7 +66,8 @@ import type { FundLink } from '../commands/fund';
  * nothing into `settings.json` or `~/.claude.json` itself.
  *
  * NO STEP IS LEFT TO THE PERSON. An agent runs this in the person's session:
- * the spend and funding questions come back for the agent to ask there, the `claude`
+ * the spend question comes back for the agent to ask there, the funding question
+ * with the install its answer picks, the `claude`
  * binary is found through `CLAUDE_CODE_EXECPATH` where PATH lacks it, a failed
  * plugin command falls back to the folder, and the one step after it is
  * typing `/reload-plugins` in the same session, or starting the next one.
@@ -437,15 +438,16 @@ export async function runRouterInstall(
       : undefined;
   // A warning, never a failure: everything above is written and correct, and
   // the network this machine is on now may not be the one it uses later.
+  const asksAgent = !canPrompt && underAgentHarness(env);
   const [router, fund] = await Promise.all([
     probeRouter(effective.baseUrl, {
       timeoutMs: ctx.flags.timeout,
       env,
       ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
     }),
-    // An agent's install hands the person two questions; a person's own
-    // terminal gets what it always got.
-    !canPrompt && underAgentHarness(env)
+    // The spend question comes first, because its answer picks the install
+    // command. The funding question rides on the install that follows it.
+    asksAgent && approval === undefined
       ? fundStep(ctx, wallet, effective.rpcUrl, deps)
       : Promise.resolve(undefined),
   ]);
@@ -458,7 +460,7 @@ export async function runRouterInstall(
     plugin,
     claudeCode,
     migration,
-    next: nextStep(plugin, claude, wallet, migration, fund !== undefined),
+    next: nextStep(plugin, claude, wallet, migration, asksAgent && nextSteps.length > 0),
     nextSteps,
     spend: {
       ...spend,
@@ -484,6 +486,7 @@ export async function runRouterInstall(
         migration,
         wallet,
         ...(fund !== undefined ? { fund } : {}),
+        asks: asksAgent && nextSteps.length > 0,
         policy: effective.policy,
         ...(approval !== undefined ? { approval } : {}),
         router,
@@ -527,14 +530,12 @@ function nextStep(
   claude: ClaudeCodeState,
   wallet: WalletOutcome,
   migration: Migration,
-  asksFunding: boolean,
+  asksQuestion: boolean,
 ): string {
   if (plugin.state === 'failed') return registrationFix(plugin);
   const steps: string[] = [];
-  if (asksFunding) {
-    steps.push(
-      'ask the person the questions in nextSteps, in order, then run what each answer names',
-    );
+  if (asksQuestion) {
+    steps.push('ask the person the question in nextSteps, then run what the answer names');
   } else if (wallet.status === 'created') {
     steps.push('fund the wallet with `tenjin wallet fund`');
   }
@@ -692,7 +693,7 @@ function namedLimits(args: RouterInstallArgs): {
   return { limits, keys };
 }
 
-/** The funding question an agent's install hands over after the spend question. */
+/** The funding question an agent's completed install hands over. */
 export const FUND_QUESTION = 'Do you want to add funds to your Tenjin wallet now?';
 /** Its yes: the agent runs this alone, in the turn the person answered. */
 export const FUND_COMMAND = 'tenjin wallet fund';
@@ -740,9 +741,9 @@ function spendStep(approval: SpendApproval): QuestionStep {
 
 /**
  * THE QUESTION BEFORE THE ACTION. Under an agent harness, install opens no
- * browser and pays nothing: it hands the agent the funding question, after
- * the spend question, so every real-world step follows an answer the person
- * gave in the session. It mints the same signed link `tenjin wallet fund`
+ * browser and pays nothing: once the spend answer has picked the install, the
+ * install hands the agent the funding question, so the page opens only after
+ * an answer the person gave in the session. It mints the same signed link `tenjin wallet fund`
  * does (a read: nothing moves until the person pays on the page) for the
  * person to keep. A wallet that already holds USDC gets no question; a link
  * that cannot be minted leaves the address.
@@ -789,7 +790,7 @@ async function fundStep(
       },
       { id: 'later', label: 'Not now', recommended: false, command: null },
     ],
-    next: `Ask the person this question with your question tool, after the spend question and before you run anything. On "Yes, open the funding page", run \`${FUND_COMMAND}\` alone, in the same turn, after any spend command. On "Not now", run nothing and show the person this for later: ${show} Never run \`${FUND_COMMAND}\` without this yes. ${SHOW_NOT_RUN}`,
+    next: `The install is done. Ask the person this question with your question tool. On "Yes, open the funding page", run \`${FUND_COMMAND}\` alone, in the same turn. On "Not now", run nothing and show the person this for later: ${show} Never run \`${FUND_COMMAND}\` without this yes. ${SHOW_NOT_RUN}`,
     address,
     url,
     expiresAt: expires?.toISOString() ?? null,
@@ -828,7 +829,7 @@ function fundLines(ctx: CommandContext, fund: FundStep): string[] {
     ...(fund.reason !== undefined
       ? [paint(ctx.io, 'yellow', `! No fund link: ${fund.reason}`)]
       : []),
-    `  Then ask the person: ${fund.question}`,
+    `  Ask the person: ${fund.question}`,
     `  Yes, open the funding page: ${FUND_COMMAND}`,
     `  Not now: run nothing, show them: ${fund.show}`,
   ];
@@ -1012,6 +1013,7 @@ function lines(
     migration: Migration;
     wallet: WalletOutcome;
     fund?: FundStep;
+    asks: boolean;
     policy: SpendPolicy;
     approval?: SpendApproval;
     router: RouterCheck;
@@ -1059,7 +1061,7 @@ function lines(
     ...migrationLines(ctx, s.migration),
     ...router,
     '',
-    `Next: ${nextStep(s.plugin, s.claude, s.wallet, s.migration, s.fund !== undefined)}`,
+    `Next: ${nextStep(s.plugin, s.claude, s.wallet, s.migration, s.asks)}`,
   ];
 }
 

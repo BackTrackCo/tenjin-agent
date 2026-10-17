@@ -95,12 +95,12 @@ Prefer the narrow rules on this page to a broad `Bash(tenjin:*)`, `Bash(tenjin w
 
 ## When your agent runs the install
 
-Under an agent harness (Claude Code, Claude Desktop, Codex), `tenjin install` opens nothing and pays nothing. It hands the agent up to two questions in `nextSteps`, in order, each with the one command every answer names:
+Under an agent harness (Claude Code, Claude Desktop, Codex), `tenjin install` opens nothing and pays nothing. Each question comes at the point where its answer is needed, in `nextSteps`, with the one command every answer names:
 
-1. The spend question, while the limits are unanswered: Default, Custom limits or No automatic spending, as above.
-2. The funding question, when the wallet is new or holds no USDC: "Do you want to add funds to your Tenjin wallet now?" "Yes, open the funding page" runs `tenjin wallet fund`, which opens the fund page in your default browser. "Not now" runs nothing: the agent shows you the fund link and the wallet address (`nextSteps[].show`) for later. The link is the one `tenjin wallet fund` mints, signed by the wallet's key; minting it moves no money. Install asks for it with `purpose: "install"`, and it works until `expiresAt`, which the `show` text states.
+1. The spend question comes first, while the limits are unanswered, because the answer picks the install command: Default (`tenjin install --yes`), Custom limits (`--max-auto-spend <usd> --session-budget <usd|none>`) or No automatic spending, as above.
+2. The funding question comes from the output of that install command, when the wallet is new or holds no USDC: "Do you want to add funds to your Tenjin wallet now?" "Yes, open the funding page" runs `tenjin wallet fund`, which opens the fund page in your default browser. "Not now" runs nothing: the agent shows you the fund link and the wallet address (`nextSteps[].show`) for later. The link is the one `tenjin wallet fund` mints, signed by the wallet's key. Minting it moves no money. Install asks for it with `purpose: "install"`, and it works until `expiresAt`, which the `show` text states.
 
-The agent asks both questions with its question tool before it runs anything, then runs each command your answers name on its own, never joined with another command, in that same turn. It never runs `tenjin wallet fund` without your yes to the funding question. It shows you links and addresses, and never asks you to run a command. A person running `tenjin install` in a terminal answers the spend question there and gets no question handed over.
+So the agent asks the spend question, runs the one install command your answer names, asks the funding question from that command's output, and runs `tenjin wallet fund` alone only after your yes. It never runs `tenjin wallet fund` without that yes. It shows you links and addresses, and never asks you to run a command. A person running `tenjin install` in a terminal answers the spend question there and gets no question handed over.
 
 ## What `tenjin install` writes, in full
 

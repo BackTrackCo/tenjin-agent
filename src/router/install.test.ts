@@ -1080,7 +1080,7 @@ describe('install applies the spend answer an agent relays, in one command', () 
   });
 });
 
-describe('install run by an agent hands over the questions before any action', () => {
+describe('install run by an agent asks each question where its answer is needed', () => {
   type Step = {
     id: string;
     question: string;
@@ -1094,15 +1094,35 @@ describe('install run by an agent hands over the questions before any action', (
   };
   const stepsOf = (result: { data: unknown }) => (result.data as { nextSteps: Step[] }).nextSteps;
 
-  it('asks the spend question, then the funding question, with the command for each answer', async () => {
+  it('asks only the spend question first, with no funding question and no link minted', async () => {
+    const fundLink = vi.fn(async () => fundLinkOf());
+    const result = await runRouterInstall({}, ctx(), deps({ env: HARNESS_ENV, fundLink }));
+    expect(stepsOf(result).map((q) => q.id)).toEqual(['spend']);
+    expect(stepsOf(result)[0]).toMatchObject({ question: QUESTION });
+    expect(fundLink).not.toHaveBeenCalled();
+    expect(result.humanLines).toEqual(expect.arrayContaining(ASK_LINES));
+    expect(result.humanLines).not.toContain(
+      '  Ask the person: Do you want to add funds to your Tenjin wallet now?',
+    );
+    const { next } = result.data as { next: string };
+    expect(next).toBe(
+      `ask the person the question in nextSteps, then run what the answer names, then ${RELOAD}`,
+    );
+    expect(next).not.toContain('wallet fund');
+  });
+
+  it('the completed install asks the funding question, with the link and the command for each answer', async () => {
     const link = fundLinkOf(10 * 60_000);
     const { url } = link;
     const fundLink = vi.fn(async () => link);
-    const result = await runRouterInstall({}, ctx(), deps({ env: HARNESS_ENV, fundLink }));
+    const result = await runRouterInstall(
+      { yes: true },
+      ctx(),
+      deps({ env: HARNESS_ENV, fundLink }),
+    );
     const steps = stepsOf(result);
-    expect(steps.map((q) => q.id)).toEqual(['spend', 'fund']);
-    expect(steps[0]).toMatchObject({ question: QUESTION });
-    const fund = steps[1]!;
+    expect(steps.map((q) => q.id)).toEqual(['fund']);
+    const fund = steps[0]!;
     const show = `To add funds, open this link (valid 10 minutes): ${url} Or send USDC on Base to ${ADDRESS}.`;
     expect(fund).toMatchObject({
       question: 'Do you want to add funds to your Tenjin wallet now?',
@@ -1115,23 +1135,30 @@ describe('install run by an agent hands over the questions before any action', (
       show,
     });
     expect(Date.parse(fund.expiresAt!)).toBeGreaterThan(Date.now());
-    expect(fund.next).toContain('after the spend question and before you run anything');
+    expect(fund.next).toContain('The install is done.');
     expect(fund.next).toContain('Never run `tenjin wallet fund` without this yes.');
     expect(fund.next).toContain('never ask them to run a command');
     expect(fundLink).toHaveBeenCalledWith(expect.anything(), ADDRESS);
-    // The summary carries the same questions, and its next step points at them.
     expect(result.humanLines).toEqual(
       expect.arrayContaining([
-        ...ASK_LINES,
-        '  Then ask the person: Do you want to add funds to your Tenjin wallet now?',
+        '  Ask the person: Do you want to add funds to your Tenjin wallet now?',
         '  Yes, open the funding page: tenjin wallet fund',
         `  Not now: run nothing, show them: ${show}`,
       ]),
     );
     expect(result.humanLines!.at(-1)).toBe(
-      `Next: ask the person the questions in nextSteps, in order, then run what each answer names, then ${RELOAD}`,
+      `Next: ask the person the question in nextSteps, then run what the answer names, then ${RELOAD}`,
     );
     expect((result.data as { next: string }).next).not.toContain('wallet fund');
+  });
+
+  it('the custom-limits install asks the funding question too', async () => {
+    const result = await runRouterInstall(
+      { maxAutoSpend: '0.10', sessionBudget: 'none' },
+      ctx(),
+      deps({ env: HARNESS_ENV }),
+    );
+    expect(stepsOf(result).map((q) => q.id)).toEqual(['fund']);
   });
 
   it('says how long the link works from the expiry the server minted', async () => {
@@ -1148,8 +1175,12 @@ describe('install run by an agent hands over the questions before any action', (
     });
   });
 
-  it('asks only the funding question once the limits are answered', async () => {
-    const result = await runRouterInstall({ yes: true }, ctx(), deps({ env: HARNESS_ENV }));
+  it('asks only the funding question when the limits were answered earlier', async () => {
+    await writeFile(
+      join(data, 'config.json'),
+      JSON.stringify({ maxAutoSpend: '250000', sessionBudget: '5000000' }),
+    );
+    const result = await runRouterInstall({}, ctx(), deps({ env: HARNESS_ENV }));
     expect(stepsOf(result).map((q) => q.id)).toEqual(['fund']);
   });
 
