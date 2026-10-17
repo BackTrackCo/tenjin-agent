@@ -54,7 +54,7 @@ export interface CodexSetupDeps
   /** Codex's merged config (`config/read`), or null when it could not be read. */
   config?: () => Promise<unknown>;
   /** Writes the grant's value, or clears it with null (`config/batchWrite`). */
-  writeGrant?: (value: string | null) => Promise<boolean>;
+  writeGrant?: (value: unknown) => Promise<boolean>;
   /** Codex's hook list (`hooks/list`). */
   hooks?: () => Promise<unknown>;
   version?: () => Promise<string | null>;
@@ -80,7 +80,7 @@ function runCodex(args: string[]): Promise<CodexRun> {
   });
 }
 
-async function writeGrant(value: string | null): Promise<boolean> {
+async function writeGrant(value: unknown): Promise<boolean> {
   const result = await withAppServer(homedir(), process.env, APP_SERVER_TIMEOUT_MS, (request) =>
     request('config/batchWrite', {
       edits: [{ keyPath: CODEX_GRANT, value, mergeStrategy: 'replace' }],
@@ -244,9 +244,12 @@ export async function runCodexInstall(
 
   const before = await (deps.config ?? (() => readCodexConfig(process.cwd(), 3_000)))();
   const existing = grantOf(before);
-  let grant: 'approved' | 'kept' | 'pending' | 'refused';
-  if (typeof existing === 'string' && existing !== GRANT_VALUE) grant = 'kept';
+  // A config that could not be read is not an unset grant: the write replaces
+  // the value, so only a read that shows none may make it.
+  let grant: 'approved' | 'kept' | 'pending' | 'refused' | 'unread';
+  if (before === null || before === undefined) grant = 'unread';
   else if (existing === GRANT_VALUE) grant = 'approved';
+  else if (existing !== undefined) grant = 'kept';
   else if (!consented) grant = 'pending';
   else grant = (await (deps.writeGrant ?? writeGrant)(GRANT_VALUE)) ? 'approved' : 'refused';
 
@@ -261,8 +264,10 @@ export async function runCodexInstall(
       : grant === 'kept'
         ? `Request tool: your own Codex policy (${String(existing)}) is kept`
         : grant === 'pending'
-          ? `Request tool: not approved yet; approve with \`${approve}\``
-          : 'Request tool: Codex refused the grant; check its managed policy',
+          ? `Request tool: not approved yet. Approve it with \`${approve}\``
+          : grant === 'unread'
+            ? `Request tool: not approved, because Codex's config could not be read. Run \`${approve}\` again`
+            : 'Request tool: Codex refused the grant. Check its managed policy',
     TRUST_STEP,
   ];
   return {
@@ -289,11 +294,17 @@ export async function runCodexUninstall(
   const run = deps.run ?? runCodex;
   // `codex plugin remove` drops the plugin's whole config table, so a value
   // the user set for the request tool is read first and written back after.
-  const existing = grantOf(await (deps.config ?? (() => readCodexConfig(process.cwd(), 3_000)))());
+  const config = await (deps.config ?? (() => readCodexConfig(process.cwd(), 3_000)))();
+  if (config === null || config === undefined) {
+    throw new CliError('REFUSED', "Codex's config could not be read, so nothing was removed.", {
+      fix: 'Check that `codex` runs, then re-run `tenjin uninstall --harness codex`.',
+    });
+  }
+  const existing = grantOf(config);
   const removed = await run(['plugin', 'remove', CODEX_PLUGIN, '--json']);
   if (removed.code !== 0) throw failed('plugin remove', removed);
   const kept =
-    typeof existing === 'string' && existing !== GRANT_VALUE
+    existing !== undefined && existing !== GRANT_VALUE
       ? await (deps.writeGrant ?? writeGrant)(existing)
       : false;
   // Absent already is the state uninstall wants.

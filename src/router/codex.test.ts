@@ -413,6 +413,19 @@ describe('Codex install, uninstall and doctor', () => {
     expect(kept.data).toMatchObject({ grant: 'kept' });
   });
 
+  it('writes no grant when the Codex config read timed out, and uninstall removes nothing', async () => {
+    const unread = host(null);
+    const out = await runCodexInstall({ yes: true }, ctx(), unread.deps);
+    expect(unread.steps.some((s) => s.startsWith('grant'))).toBe(false);
+    expect(out.data).toMatchObject({ grant: 'unread' });
+
+    const gone = host(null);
+    await expect(runCodexUninstall({}, ctx(), gone.deps)).rejects.toMatchObject({
+      code: 'REFUSED',
+    });
+    expect(gone.steps).toEqual([]);
+  });
+
   it('refuses project scope before any write', async () => {
     const { steps, deps } = host();
     await expect(runCodexInstall({ project: true }, ctx(), deps)).rejects.toThrow('user only');
