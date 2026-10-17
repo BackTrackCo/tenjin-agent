@@ -613,7 +613,7 @@ async function spendShortfall(
   const price = `$${toMoney(decision.providerPriceAtomic).usd}`;
   const approval = (detail: string): Shortfall => ({
     withheld: 'offer needs approval',
-    note: `Note: ${price} ${detail}; request will return needs_approval with a quote, and approve asks the user before anything is paid.`,
+    note: `Note: ${price} ${detail}; request will pay nothing and return needs_approval with what it costs.`,
   });
   let rpcUrl: string;
   try {

@@ -141,9 +141,10 @@ import {
  * one `maxAutoSpend` per call inside the daily budget without the user's yes.
  *
  * `needs_approval` is a LOCAL outcome only. The server never sends it: it is
- * what a plan over the limits looks like from here. Nothing is paid; the plan
- * is kept as a quote, and `approve({quote})` puts it to the user and runs it
- * exactly, only on their yes ({@link runApproveTool}).
+ * what a plan over the limits looks like from here. Nothing is paid. Where the
+ * host offers `approve`, the plan is kept as a quote, and the user's yes to
+ * the host's own prompt on `approve({quote})` runs it exactly
+ * ({@link runApproveTool}).
  */
 
 export interface RequestToolArgs {
@@ -208,6 +209,10 @@ export interface RequestToolDeps {
    *  it as a progress notification, which keeps a waiting host's timeout from
    *  running out. */
   onPoll?: () => Promise<void> | void;
+  /** The host puts every `approve` call to a person first (Claude Code's
+   *  `requiresUserInteraction`, `mcp.ts`), so a call over the limits is kept
+   *  as a quote for it. Without it, such a call is refused with nothing kept. */
+  approves?: boolean;
   /** The host lets one call wait as long as a job's own `maxWaitS` (Claude
    *  Code moves a long call into the background and delivers it when it
    *  ends), so the call is not handed back `running` at
@@ -262,36 +267,30 @@ export async function runRequestTool(
 export interface ApproveToolArgs {
   /** The quote a `needs_approval` result named. */
   quote: string;
-  /** The quote's total and what it buys, echoed so a host that asks before
-   *  the call shows them; each must match the quote. */
+  /** The quote's total and what it buys, which the host's prompt shows the
+   *  user; each must match the quote. */
   total?: string;
   what?: string;
 }
 
-/** How the host puts a quote to a person. */
-export type HostApproval =
-  /** It asks before the call reaches this server, and no rule or mode skips
-   *  that (Claude Code's `requiresUserInteraction`): the call is the yes. */
-  | { kind: 'prompted' }
-  /** It asks mid-call when this server asks it to (MCP elicitation). */
-  | { kind: 'asks'; ask: (message: string) => Promise<'accept' | 'decline' | 'cancel'> }
-  /** Neither: a terminal is the only place a person can say yes. */
-  | { kind: 'none' };
-
 /**
- * `approve({quote})`: A QUOTE THE USER SAYS YES TO, RUN EXACTLY. The quote is
- * the plan a call over the automatic limits kept, with nothing paid: the
- * call, its input, each payment and the total. Nothing about it changes here;
- * the agent sends only its id. A person's yes comes from the host's own
- * prompt before this call, or from the host asking mid-call, or from
- * `tenjin approve <quote>` at a terminal; with none of them, nothing is paid
- * and the answer is that command. A yes runs the quote once, past
- * `maxAutoSpend` and the day's budget, which a person just agreed to, never
- * past the balance, and answers as `request` would have.
+ * `approve({quote, total, what})`: A QUOTE THE USER SAID YES TO, RUN EXACTLY.
+ * The quote is the plan a call over the automatic limits kept, with nothing
+ * paid: the call, its input, each payment and the total. Nothing about it
+ * changes here; the agent sends only its id and the numbers it was shown.
+ *
+ * THE YES IS THE HOST'S OWN PROMPT. The tool is offered only to a host that
+ * puts every call of it to a person before it reaches this process (Claude
+ * Code's `requiresUserInteraction`, `mcp.ts`), so a call here is that
+ * person's yes; nothing on disk counts as one. The prompt shows the call's
+ * arguments, so the total and what it buys must be there and must be the
+ * quote's. A yes runs the quote once, past `maxAutoSpend` and the day's
+ * budget, which a person just agreed to, never past the balance, and answers
+ * as `request` would have.
  */
 export async function runApproveTool(
   args: ApproveToolArgs,
-  deps: RequestToolDeps & { host: HostApproval },
+  deps: RequestToolDeps,
 ): Promise<RequestToolResult> {
   const off = await routerOff(deps);
   if (off !== null) return fail('needs_input', off, { nextStep: ROUTER_OFF_NEXT_STEP });
@@ -333,39 +332,14 @@ export async function runApproveTool(
       { quote: quoteView(quote), nextStep: `Call ${approveCall(quote)}.` },
     );
   }
-  const terminal = quote.approvedAt !== undefined;
-  if (!terminal) {
-    if (deps.host.kind === 'prompted') {
-      // The prompt showed this call's arguments: without the total and what
-      // they buy, nobody saw what they said yes to.
-      if (args.total === undefined || args.what === undefined) {
-        return fail(
-          'needs_input',
-          "Send the quote's total and what it buys with it, so the user sees them when asked; nothing was paid.",
-          { quote: quoteView(quote), nextStep: `Call ${approveCall(quote)}.` },
-        );
-      }
-    } else {
-      const answer =
-        deps.host.kind === 'asks'
-          ? await deps.host.ask(`${quote.sentence} Go ahead?`).catch(() => null)
-          : null;
-      if (answer === 'decline' || answer === 'cancel') {
-        return fail('declined', `The user said no to ${quote.what}, so nothing was paid.`, {
-          nextStep: 'Continue without it, and do not ask again for this.',
-        });
-      }
-      if (answer !== 'accept') {
-        return fail(
-          'needs_approval',
-          `${quote.sentence} This host cannot ask the user here, so nothing was paid.`,
-          {
-            quote: quoteView(quote),
-            nextStep: `Ask the user to run \`tenjin approve ${quote.id}\` in a terminal, then call approve({quote: ${JSON.stringify(quote.id)}}). Do not suggest changing a setting.`,
-          },
-        );
-      }
-    }
+  // The prompt showed this call's arguments: without the total and what they
+  // buy, nobody saw what they said yes to.
+  if (args.total === undefined || args.what === undefined) {
+    return fail(
+      'needs_input',
+      "Send the quote's total and what it buys with it, so the user sees them when asked; nothing was paid.",
+      { quote: quoteView(quote), nextStep: `Call ${approveCall(quote)}.` },
+    );
   }
   const call_: RequestToolDeps = {
     ...deps,
@@ -374,7 +348,6 @@ export async function runApproveTool(
   };
   const settings = await resolveContextSettings(deps.ctx);
   const admitted = await admitQuote(dataDir, quote.id, {
-    terminal,
     balance: () => walletBalance(call_, settings.rpcUrl),
     now,
   });
@@ -2365,7 +2338,7 @@ async function saveBinary(
   }
 }
 
-export type FailStatus = 'failed' | 'needs_approval' | 'needs_input' | 'native' | 'declined';
+export type FailStatus = 'failed' | 'needs_approval' | 'needs_input' | 'native';
 
 function checkContract(contract: DecisionContract): { status: FailStatus; reason: string } | null {
   const built = contract.request;
@@ -2440,17 +2413,11 @@ export function costLines(providerAtomic: bigint): string[] {
 /**
  * ROUTINE CONTROL OUTCOMES, not failures of this tool. A routing decision was
  * delivered and it says the turn continues somewhere else: with the host's own
- * tools, with a question for the user, with an approval the user gives, or
- * with the user's no to one. The MCP error flag is for what went WRONG, and
- * raising it on these put a red box in front of the user on the most ordinary
- * answer the router has.
+ * tools, with a question for the user, or with an approval the user gives.
+ * The MCP error flag is for what went WRONG, and raising it on these put a
+ * red box in front of the user on the most ordinary answer the router has.
  */
-const ROUTINE: ReadonlySet<FailStatus> = new Set([
-  'native',
-  'needs_input',
-  'needs_approval',
-  'declined',
-]);
+const ROUTINE: ReadonlySet<FailStatus> = new Set(['native', 'needs_input', 'needs_approval']);
 
 const ROUTER_OFF_NEXT_STEP =
   'Continue with your own tools. Nothing was sent to the router and nothing was bought.';
@@ -2478,9 +2445,7 @@ const NEXT_STEP: Record<string, string> = {
   native: 'Continue with your own tools. Nothing was bought.',
   needs_input:
     'Ask the user for the missing detail, then call `request` again with it. Nothing was bought.',
-  needs_approval:
-    'Tell the user this needs their approval; nothing was paid. Do not suggest changing a setting.',
-  declined: 'Continue without it; nothing was bought.',
+  needs_approval: 'Tell the user what it would cost; nothing was paid.',
 };
 
 /**
@@ -2535,7 +2500,6 @@ function summaryFor(status: FailStatus, reason: string): string {
   if (status === 'native') return `No paid lookup needed: ${reason}`;
   if (status === 'needs_input') return `More input needed: ${reason}`;
   if (status === 'needs_approval') return `Needs the user's approval: ${reason}`;
-  if (status === 'declined') return `Not approved: ${reason}`;
   return `x402 request ${status}: ${reason}`;
 }
 

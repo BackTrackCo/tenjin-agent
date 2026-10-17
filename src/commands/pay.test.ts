@@ -1350,7 +1350,6 @@ describe('runPay, the shared request gate', () => {
       call: {},
     });
     const admitted = await admitQuote(dir, quote.id, {
-      terminal: false,
       balance: async () => null,
     });
     if (!('admitted' in admitted)) throw new Error('the quote was not admitted');

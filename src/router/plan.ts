@@ -15,8 +15,9 @@ import type { FailExtras, FailStatus, ProviderCall, RequestToolDeps } from './to
  * offer is a plan of one at its live price, a count is N takes at the price
  * one take is quoted, and a choice set is each option at its own quote. This
  * file says what such a plan buys, keeps one over the automatic limits as a
- * quote with exactly what it runs, and words the stop: the sentence the agent
- * repeats, the quote, and the one call that asks the user.
+ * quote with exactly what it runs where the host offers `approve`, and words
+ * the stop: the sentence the agent repeats, and, with a quote, the one call
+ * that asks the user.
  *
  * Imported by `tool.ts` and `choices.ts` alone, so it stays in the request
  * tool's chunk.
@@ -180,11 +181,12 @@ export interface PlanStop {
  * payee outside `allowlistCreators` is the user's own hard rule, which no
  * approval clears. A wallet short of the total is the fund command, as for
  * any payment. `alternative` is the smaller call the agent may make instead.
+ * A host that does not offer `approve` keeps no quote: nobody could run it.
  */
 export async function planStop(
   admission: Exclude<PlanAdmission, { admitted: unknown }>,
   plan: PlanWords & { payments: readonly PlannedPayment[]; call: QuotedCall },
-  deps: Pick<RequestToolDeps, 'ctx' | 'now'>,
+  deps: Pick<RequestToolDeps, 'ctx' | 'now' | 'approves'>,
   alternative?: string,
 ): Promise<PlanStop> {
   const or = alternative !== undefined ? `, or ${alternative}` : '';
@@ -206,6 +208,14 @@ export async function planStop(
     };
   }
   const why = whyAsked(admission.over);
+  if (deps.approves !== true) {
+    return {
+      status: 'needs_approval',
+      reason: `${plan.sentence} ${why}, so nothing was paid.`,
+      extras: { nextStep: `Tell the user what it would cost${or}; nothing was paid.` },
+      outcome: { status: 'needs_approval' },
+    };
+  }
   try {
     const quote = await createQuote(
       deps.ctx.dataDir,

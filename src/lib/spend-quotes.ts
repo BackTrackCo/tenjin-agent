@@ -9,20 +9,22 @@ import { quotesDir } from './paths';
 
 /**
  * A SPEND THE USER IS ASKED ABOUT BEFORE IT IS MADE. A router call whose plan
- * is over the automatic limits pays nothing: its exact plan is kept here as a
- * quote (what it buys, each payment, the total, and the call to run) until a
- * person says yes, it runs, or it expires. One file per quote,
- * `~/.tenjin/quotes/<id>.json`, written 0600 through an atomic rename and read
- * with O_NOFOLLOW, as a job's record is.
+ * is over the automatic limits pays nothing: on a host that asks the user
+ * before every `approve` call, its exact plan is kept here as a quote (what
+ * it buys, each payment, the total, and the call to run) until it runs or
+ * expires. One file per quote, `~/.tenjin/quotes/<id>.json`, written 0600
+ * through an atomic rename and read with O_NOFOLLOW, as a job's record is.
  *
- * A QUOTE RUNS ONCE. `useQuote` marks it used under its lock before anything
- * is signed, so two calls racing on one quote pay once between them. One past
- * its ten minutes is refused, and pruned. What it runs (`call`) is the
- * router's to read; this file keeps the money.
+ * NOTHING IN THE FILE IS AN APPROVAL. The user's yes is the host's own
+ * permission prompt on the `approve` call; a quote only says what that call
+ * runs. A QUOTE RUNS ONCE: `useQuote` marks it used under its lock before
+ * anything is signed, so two calls racing on one quote pay once between them.
+ * One past its ten minutes is refused, and pruned. What it runs (`call`) is
+ * the router's to read; this file keeps the money.
  */
 
 /** How long a quote waits for the user's yes. */
-export const QUOTE_TTL_MS = 10 * 60_000;
+const QUOTE_TTL_MS = 10 * 60_000;
 /** A quote holds every spec it runs: a few of them, and their inputs. */
 const MAX_QUOTE_BYTES = 512 * 1024;
 const QUOTE_ID = /^q_[A-Za-z0-9_-]{12}$/;
@@ -46,14 +48,12 @@ const QuoteSchema = z.strictObject({
     .max(8),
   /** The call this quote runs, exactly: the router's own shape. */
   call: z.unknown(),
-  /** A person approved it at a terminal (`tenjin approve`). */
-  approvedAt: Iso.optional(),
   /** It ran: nothing more is paid on it. */
   usedAt: Iso.optional(),
 });
 export type Quote = z.infer<typeof QuoteSchema>;
 
-export type QuoteRefusal = 'missing' | 'expired' | 'used' | 'unapproved';
+export type QuoteRefusal = 'missing' | 'expired' | 'used';
 
 export function isQuoteId(id: string): boolean {
   return QUOTE_ID.test(id);
@@ -122,10 +122,7 @@ export async function readQuote(dataDir: string, id: string): Promise<Quote | nu
 }
 
 /** Why a quote can no longer run, or null while it can. */
-export function quoteClosed(
-  quote: Quote,
-  now: number,
-): Exclude<QuoteRefusal, 'missing' | 'unapproved'> | null {
+export function quoteClosed(quote: Quote, now: number): Exclude<QuoteRefusal, 'missing'> | null {
   if (quote.usedAt !== undefined) return 'used';
   return Date.parse(quote.expiresAt) <= now ? 'expired' : null;
 }
@@ -154,34 +151,16 @@ async function changeQuote(
   );
 }
 
-/** A person's yes at a terminal, kept on the quote for the call that runs it. */
-export function approveQuote(
+/** USE A QUOTE UP: marked used before anything is signed, so it pays once
+ *  whatever happens next. */
+export function useQuote(
   dataDir: string,
   id: string,
   now: () => number = Date.now,
 ): Promise<{ quote: Quote } | { refused: QuoteRefusal }> {
   return changeQuote(dataDir, id, (quote) => {
     const at = now();
-    return quoteClosed(quote, at) ?? { ...quote, approvedAt: new Date(at).toISOString() };
-  });
-}
-
-/**
- * USE A QUOTE UP: marked used before anything is signed, so it pays once
- * whatever happens next. `terminal`: the yes is the one `tenjin approve` kept,
- * which must be there.
- */
-export function useQuote(
-  dataDir: string,
-  id: string,
-  opts: { terminal: boolean; now?: () => number },
-): Promise<{ quote: Quote } | { refused: QuoteRefusal }> {
-  return changeQuote(dataDir, id, (quote) => {
-    const at = (opts.now ?? Date.now)();
-    const closed = quoteClosed(quote, at);
-    if (closed !== null) return closed;
-    if (opts.terminal && quote.approvedAt === undefined) return 'unapproved';
-    return { ...quote, usedAt: new Date(at).toISOString() };
+    return quoteClosed(quote, at) ?? { ...quote, usedAt: new Date(at).toISOString() };
   });
 }
 

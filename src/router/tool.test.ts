@@ -718,7 +718,7 @@ describe('what the tool refuses to execute', () => {
         destination: PUBLIC,
       },
     };
-    const result = await runRequestTool({ query: 'q' }, real);
+    const result = await runRequestTool({ query: 'q' }, { ...real, approves: true });
     expect(result.envelope).toMatchObject({
       status: 'needs_approval',
       quote: { total: '$0.9', id: expect.stringMatching(/^q_/) as string },

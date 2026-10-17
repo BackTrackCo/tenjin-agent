@@ -7,16 +7,15 @@ import { readQuote } from '../lib/spend-quotes';
 import type { SpendAuthorization, SpendAuthorizer } from '../lib/wallet';
 import type { CommandContext } from '../context';
 import { storeChoices, storeSpecs } from './specs';
-import { runApproveCommand } from './approve';
 import type { Choices, OfferSpec } from './decision';
-import { runApproveTool, runRequestTool, type HostApproval } from './tool';
+import { runApproveTool, runRequestTool } from './tool';
 
 /**
- * A CALL OVER THE AUTOMATIC LIMITS, PUT TO THE USER. `request` pays nothing
- * and keeps the call's exact plan as a quote; `approve({quote})` runs it only
- * on a person's yes: the host's own prompt, the host asking mid-call, or
- * `tenjin approve` at a terminal. The seller here answers each paid call with
- * an image's bytes.
+ * A CALL OVER THE AUTOMATIC LIMITS, PUT TO THE USER. `request` pays nothing.
+ * Where the host offers `approve` (Claude Code's own prompt is the yes), it
+ * keeps the call's exact plan as a quote, and `approve({quote, total, what})`
+ * runs it once; anywhere else the call is refused with nothing kept. The
+ * seller here answers each paid call with an image's bytes.
  */
 
 const ROUTER = 'https://tenjin.sh';
@@ -138,15 +137,12 @@ function deps(fetchImpl: typeof fetch, auth = authorizer(), balance = 100_000_00
   };
 }
 
-const prompted: HostApproval = { kind: 'prompted' };
-const none: HostApproval = { kind: 'none' };
-
 /** A call over the limits, quoted: the quote as the agent is handed it. */
 async function quoted(
   args: Parameters<typeof runRequestTool>[0],
   fetchImpl: typeof fetch,
 ): Promise<{ id: string; total: string; what: string }> {
-  const result = await runRequestTool(args, deps(fetchImpl));
+  const result = await runRequestTool(args, { ...deps(fetchImpl), approves: true });
   expect(result.envelope).toMatchObject({
     status: 'needs_approval',
     cost: ['provider price 0 USD'],
@@ -158,7 +154,10 @@ describe('a call over the automatic limits', () => {
   it('pays nothing, keeps the exact plan as a quote, and names the one call that asks', async () => {
     await policy({ maxAutoSpend: '100000', sessionBudget: '5000000' });
     const { fetchImpl, paidCalls } = seller();
-    const result = await runRequestTool({ id: ID, input: INPUT }, deps(fetchImpl));
+    const result = await runRequestTool(
+      { id: ID, input: INPUT },
+      { ...deps(fetchImpl), approves: true },
+    );
     expect(result.isError).toBe(false);
     expect(result.envelope).toMatchObject({
       status: 'needs_approval',
@@ -183,6 +182,26 @@ describe('a call over the automatic limits', () => {
     expect(kept!.usedAt).toBeUndefined();
   });
 
+  /** A HOST THAT DOES NOT OFFER `approve` gets the cost and nothing else:
+   *  no quote kept, no route to approve, and no limit to raise. */
+  it('pays nothing and keeps nothing where the host offers no approve', async () => {
+    await policy({ maxAutoSpend: '100000', sessionBudget: '5000000' });
+    const { fetchImpl, paidCalls } = seller();
+    const result = await runRequestTool({ id: ID, input: INPUT }, deps(fetchImpl));
+    expect(result.isError).toBe(false);
+    expect(result.envelope).toMatchObject({
+      status: 'needs_approval',
+      cost: ['provider price 0 USD'],
+      reason:
+        'One call to AiSpace (Hailuo 3 Max) costs $0.155. That is over the $0.1 this machine pays for one call without asking, so nothing was paid.',
+      nextStep: 'Tell the user what it would cost; nothing was paid.',
+    });
+    expect(result.envelope).not.toHaveProperty('quote');
+    expect(JSON.stringify(result)).not.toMatch(/approve\(|tenjin approve|config set/);
+    expect(paidCalls()).toEqual([]);
+    expect(await readdir(join(dir, 'quotes')).catch(() => [])).toEqual([]);
+  });
+
   it('runs under the limits with no question at all', async () => {
     const { fetchImpl, paidCalls } = seller();
     const result = await runRequestTool({ id: ID, input: INPUT }, deps(fetchImpl));
@@ -192,7 +211,7 @@ describe('a call over the automatic limits', () => {
   });
 });
 
-describe('approve, on a host that prompts before every call', () => {
+describe("approve, called through the host's own prompt", () => {
   it("runs exactly the quoted call once, as the user's own payment", async () => {
     await policy({ maxAutoSpend: '100000', sessionBudget: '100000' });
     const { fetchImpl, paidCalls } = seller();
@@ -200,7 +219,7 @@ describe('approve, on a host that prompts before every call', () => {
     const auth = authorizer();
     const result = await runApproveTool(
       { quote: quote.id, total: quote.total, what: quote.what },
-      { ...deps(fetchImpl, auth), host: prompted },
+      { ...deps(fetchImpl, auth), approves: true },
     );
     expect(result.envelope).toMatchObject({
       status: 'fulfilled',
@@ -215,7 +234,7 @@ describe('approve, on a host that prompts before every call', () => {
     // A quote pays once.
     const again = await runApproveTool(
       { quote: quote.id, total: quote.total, what: quote.what },
-      { ...deps(fetchImpl), host: prompted },
+      { ...deps(fetchImpl), approves: true },
     );
     expect(again.envelope).toMatchObject({ status: 'needs_input' });
     expect(String(again.envelope.reason)).toContain('already ran');
@@ -232,7 +251,7 @@ describe('approve, on a host that prompts before every call', () => {
     ]) {
       const result = await runApproveTool(
         { quote: quote.id, ...echoed },
-        { ...deps(fetchImpl), host: prompted },
+        { ...deps(fetchImpl), approves: true },
       );
       expect(result.envelope).toMatchObject({ status: 'needs_input', quote: { total: '$0.155' } });
       expect(String(result.envelope.reason)).toContain(
@@ -240,14 +259,14 @@ describe('approve, on a host that prompts before every call', () => {
       );
     }
     // The prompt showed only the id: nobody saw what they said yes to.
-    const bare = await runApproveTool({ quote: quote.id }, { ...deps(fetchImpl), host: prompted });
+    const bare = await runApproveTool({ quote: quote.id }, { ...deps(fetchImpl), approves: true });
     expect(bare.envelope).toMatchObject({ status: 'needs_input' });
     expect(paidCalls()).toEqual([]);
     expect((await readQuote(dir, quote.id))!.usedAt).toBeUndefined();
     // `0.155` is the same total as `$0.155`.
     const plain = await runApproveTool(
       { quote: quote.id, total: '0.155', what: quote.what },
-      { ...deps(fetchImpl), host: prompted },
+      { ...deps(fetchImpl), approves: true },
     );
     expect(plain.envelope).toMatchObject({ status: 'fulfilled' });
   });
@@ -259,13 +278,13 @@ describe('approve, on a host that prompts before every call', () => {
     clock += 10 * 60_000 + 1;
     const late = await runApproveTool(
       { quote: quote.id, total: quote.total, what: quote.what },
-      { ...deps(fetchImpl), host: prompted },
+      { ...deps(fetchImpl), approves: true },
     );
     expect(late.envelope).toMatchObject({ status: 'needs_input' });
     expect(String(late.envelope.reason)).toContain('expired');
     const unknown = await runApproveTool(
       { quote: 'q_AAAAAAAAAAAA', total: '$1', what: 'x' },
-      { ...deps(fetchImpl), host: prompted },
+      { ...deps(fetchImpl), approves: true },
     );
     expect(String(unknown.envelope.reason)).toContain('No quote is kept');
     expect(paidCalls()).toEqual([]);
@@ -277,78 +296,13 @@ describe('approve, on a host that prompts before every call', () => {
     const quote = await quoted({ id: ID, input: INPUT }, fetchImpl);
     const short = await runApproveTool(
       { quote: quote.id, total: quote.total, what: quote.what },
-      { ...deps(fetchImpl, authorizer(), 100_000n), host: prompted },
+      { ...deps(fetchImpl, authorizer(), 100_000n), approves: true },
     );
     // The wallet emptied after the quote: the fund command, nothing paid.
     expect(short.envelope).toMatchObject({ status: 'failed', cost: ['provider price 0 USD'] });
     expect(String(short.envelope.reason)).toContain('`tenjin wallet fund`');
     expect(paidCalls()).toEqual([]);
     expect((await readQuote(dir, quote.id))!.usedAt).toBeUndefined();
-  });
-});
-
-describe('approve, on a host that asks mid-call', () => {
-  it("asks with the quote's own sentence, and runs only on accept", async () => {
-    await policy({ maxAutoSpend: '100000', sessionBudget: '5000000' });
-    const { fetchImpl, paidCalls } = seller();
-    const quote = await quoted({ id: ID, input: INPUT }, fetchImpl);
-    const asked: string[] = [];
-    const declined = await runApproveTool(
-      { quote: quote.id },
-      {
-        ...deps(fetchImpl),
-        host: {
-          kind: 'asks',
-          ask: async (message) => {
-            asked.push(message);
-            return 'decline';
-          },
-        },
-      },
-    );
-    expect(asked).toEqual(['One call to AiSpace (Hailuo 3 Max) costs $0.155. Go ahead?']);
-    expect(declined.isError).toBe(false);
-    expect(declined.envelope).toMatchObject({ status: 'declined', cost: ['provider price 0 USD'] });
-    expect(paidCalls()).toEqual([]);
-    expect((await readQuote(dir, quote.id))!.usedAt).toBeUndefined();
-
-    const accepted = await runApproveTool(
-      { quote: quote.id },
-      { ...deps(fetchImpl), host: { kind: 'asks', ask: async () => 'accept' } },
-    );
-    expect(accepted.envelope).toMatchObject({ status: 'fulfilled' });
-    expect(paidCalls()).toHaveLength(1);
-  });
-});
-
-describe('approve, on a host that can do neither', () => {
-  it('pays nothing and names the terminal command, which a person answers', async () => {
-    await policy({ maxAutoSpend: '100000', sessionBudget: '5000000' });
-    const { fetchImpl, paidCalls } = seller();
-    const quote = await quoted({ id: ID, input: INPUT }, fetchImpl);
-    const first = await runApproveTool({ quote: quote.id }, { ...deps(fetchImpl), host: none });
-    expect(first.envelope).toMatchObject({ status: 'needs_approval' });
-    expect(String(first.envelope.nextStep)).toContain(`\`tenjin approve ${quote.id}\``);
-    expect(paidCalls()).toEqual([]);
-
-    // An agent's shell is no terminal: it cannot approve its own quote.
-    await expect(runApproveCommand({ quote: quote.id }, ctx(false))).rejects.toMatchObject({
-      code: 'REFUSED',
-    });
-    const asked: string[] = [];
-    const said = await runApproveCommand({ quote: quote.id }, ctx(true), {
-      ask: async (prompt) => {
-        asked.push(prompt);
-        return true;
-      },
-      now: () => clock,
-    });
-    expect(asked).toEqual(['One call to AiSpace (Hailuo 3 Max) costs $0.155. Go ahead? [y/N] ']);
-    expect(said.data).toMatchObject({ approved: true });
-
-    const ran = await runApproveTool({ quote: quote.id }, { ...deps(fetchImpl), host: none });
-    expect(ran.envelope).toMatchObject({ status: 'fulfilled' });
-    expect(paidCalls()).toHaveLength(1);
   });
 });
 
@@ -364,7 +318,7 @@ describe('approve runs every kind of plan', () => {
     );
     const result = await runApproveTool(
       { quote: quote.id, total: quote.total, what: quote.what },
-      { ...deps(fetchImpl), host: prompted },
+      { ...deps(fetchImpl), approves: true },
     );
     expect(result.envelope).toMatchObject({
       status: 'fulfilled',
@@ -398,7 +352,7 @@ describe('approve runs every kind of plan', () => {
     expect(quote).toMatchObject({ what: '2 choices (Hailuo 3 Max, Other)', total: '$0.31' });
     const result = await runApproveTool(
       { quote: quote.id, total: quote.total, what: quote.what },
-      { ...deps(fetchImpl), host: prompted },
+      { ...deps(fetchImpl), approves: true },
     );
     expect(result.envelope).toMatchObject({
       status: 'fulfilled',

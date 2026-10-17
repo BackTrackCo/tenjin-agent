@@ -214,7 +214,10 @@ describe('several takes of one call', () => {
     await policy({ maxAutoSpend: '250000', sessionBudget: '120000' });
     const auth = authorizer();
     const { fetchImpl, calls } = seller();
-    const result = await runRequestTool({ id: ID, input: INPUT, count: 3 }, deps(fetchImpl, auth));
+    const result = await runRequestTool(
+      { id: ID, input: INPUT, count: 3 },
+      { ...deps(fetchImpl, auth), approves: true },
+    );
     expect(result.envelope).toMatchObject({
       status: 'needs_approval',
       cost: ['provider price 0 USD'],
@@ -240,7 +243,10 @@ describe('several takes of one call', () => {
     await policy({ maxAutoSpend: '100000', sessionBudget: '5000000' });
     const auth = authorizer();
     const { fetchImpl, calls } = seller();
-    const result = await runRequestTool({ id: ID, input: INPUT, count: 3 }, deps(fetchImpl, auth));
+    const result = await runRequestTool(
+      { id: ID, input: INPUT, count: 3 },
+      { ...deps(fetchImpl, auth), approves: true },
+    );
     expect(result.envelope).toMatchObject({
       status: 'needs_approval',
       quote: { what: '3 takes of AiSpace (Muse)', total: '$0.15' },

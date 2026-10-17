@@ -339,7 +339,7 @@ describe('running every choice', () => {
     const { fetchImpl, calls } = sellers();
     const result = await runRequestTool(
       { id: ID, choice: 'all', input: INPUT },
-      deps(fetchImpl, auth),
+      { ...deps(fetchImpl, auth), approves: true },
     );
     expect(result.isError).toBe(false);
     expect(result.envelope).toMatchObject({

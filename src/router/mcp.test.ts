@@ -4,9 +4,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { ElicitRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-import { createQuote, readQuote } from '../lib/spend-quotes';
-import { testWalletProvider } from '../lib/read-test-utils';
+import { buildPaymentRequired, testWalletProvider } from '../lib/read-test-utils';
 import type { SpendAuthorization, SpendAuthorizer } from '../lib/wallet';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { FakeRouter, payerDeps } from './fee-test-utils';
@@ -24,6 +22,7 @@ import {
   waitsForJobs,
 } from './mcp';
 import { RoutingPayer } from './routing-payer';
+import { storeSpecs } from './specs';
 
 /** The envelope a call returned: the JSON text block after the summary line. */
 function envelopeOf(called: Record<string, unknown>): unknown {
@@ -104,17 +103,13 @@ describe('the router MCP server', () => {
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
     try {
       const tools = await client.listTools();
-      expect(tools.tools.map((t) => t.name)).toEqual(['request', 'approve', 'hook']);
+      // `approve` is Claude Code's alone (below): this client never sees it.
+      expect(tools.tools.map((t) => t.name)).toEqual(['request', 'hook']);
       // The harness reads its inline-result threshold from the listed tool.
       expect(tools.tools[0]!._meta).toEqual({
         [MAX_RESULT_SIZE_KEY]: MAX_RESULT_SIZE_CHARS,
       });
-      // Only `approve` makes Claude Code put every call to a person.
-      expect(tools.tools[1]!._meta).toEqual({
-        [MAX_RESULT_SIZE_KEY]: MAX_RESULT_SIZE_CHARS,
-        [REQUIRES_USER_INTERACTION_KEY]: true,
-      });
-      expect(tools.tools[2]!._meta).toBeUndefined();
+      expect(tools.tools[1]!._meta).toBeUndefined();
       const called = await client.callTool({ name: 'request', arguments: { query: 'weather' } });
       // A `native` decision is a routing outcome delivered, not a tool failure:
       // the MCP error flag stays down and the status carries the fact.
@@ -152,12 +147,14 @@ describe('the router MCP server', () => {
  * these calls send exactly that shape.
  */
 /**
- * THE APPROVE TOOL ASKS A PERSON THE WAY THE HOST CAN: Claude Code from
- * 2.1.214 prompts before every call, so the call is the yes; a host that
- * takes elicitation is asked mid-call; any other hands the user the terminal
- * command. Nothing here is paid: each answer stops before the run.
+ * THE APPROVE TOOL IS CLAUDE CODE'S OWN PROMPT. Offered only to Claude Code
+ * from 2.1.214, which puts every call of a tool marked
+ * `requiresUserInteraction` to a person, so a call that arrives is the yes.
+ * Any other client never sees it, and a call over the limits there pays
+ * nothing and keeps nothing.
  */
 describe('the approve tool', () => {
+  const PAY_TO = '0xA7f3Ad0E69F61864092FAbBa6Cee00AF6e584689';
   const SPEC: OfferSpec = {
     id: '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d51',
     capabilityId: 'aispace-hailuo-3-max',
@@ -167,7 +164,7 @@ describe('the approve tool', () => {
     priceAtomic: '155000',
     priceVaries: false,
     maxAmountAtomic: '155000',
-    payTo: '0xA7f3Ad0E69F61864092FAbBa6Cee00AF6e584689',
+    payTo: PAY_TO,
     network: 'eip155:8453',
     asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
     request: { method: 'POST', url: 'https://x402.aispace.bot/v', fields: {}, location: 'body' },
@@ -175,25 +172,52 @@ describe('the approve tool', () => {
     pinned: {},
   };
 
+  /** The seller: a 402 at the spec's price, then the clip; every paid call kept. */
+  function seller() {
+    const paid: string[] = [];
+    const fetchImpl = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      const url = String(input);
+      if (url.startsWith('https://tenjin.sh')) return new Response(null, { status: 204 });
+      if (new Headers(init?.headers ?? {}).get('payment-signature') === null) {
+        const challenge = buildPaymentRequired({ amount: SPEC.priceAtomic, payTo: PAY_TO });
+        return new Response('{}', {
+          status: 402,
+          headers: { 'content-type': 'application/json', 'PAYMENT-REQUIRED': challenge.header },
+        });
+      }
+      paid.push(String(init?.body));
+      return new Response(new Uint8Array([0, 0, 0, 24]), {
+        status: 200,
+        headers: { 'content-type': 'video/mp4' },
+      });
+    }) as typeof fetch;
+    return { fetchImpl, paid };
+  }
+
   async function connected(client: Client) {
-    const quote = await createQuote(dir, {
-      what: 'one call to AiSpace (Hailuo 3 Max)',
-      sentence: 'One call to AiSpace (Hailuo 3 Max) costs $0.155.',
-      payments: [{ amountAtomic: 155_000n, creator: 'x402.aispace.bot' }],
-      call: { kind: 'spec', id: SPEC.id, spec: SPEC, input: { prompt: 'a plane' } },
-    });
+    await storeSpecs(dir, [SPEC]);
+    const { fetchImpl, paid } = seller();
     const server = buildRouterMcpServer({
       dataDir: dir,
-      handlerDeps: { cwd: dir, authorizer: authorizer(), provider: testWalletProvider() },
+      handlerDeps: {
+        cwd: dir,
+        authorizer: authorizer(),
+        provider: testWalletProvider(),
+        fetchImpl,
+        payDeps: {
+          fetchImpl,
+          readBalance: async () => 100_000_000n,
+          destination: { resolveHostname: async () => [{ address: '93.184.216.34', family: 4 }] },
+        },
+      },
     });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
     return {
-      quote,
-      call: async (args: Record<string, unknown>) =>
-        envelopeOf(
-          await client.callTool({ name: 'approve', arguments: { quote: quote.id, ...args } }),
-        ),
+      paid,
+      tools: async () => (await client.listTools()).tools,
+      call: async (name: string, args: Record<string, unknown>) =>
+        client.callTool({ name, arguments: args }).catch((err: unknown) => ({ thrown: err })),
       close: async () => {
         await client.close();
         await server.close();
@@ -201,44 +225,67 @@ describe('the approve tool', () => {
     };
   }
 
-  it('asks through elicitation where the host takes it, and pays nothing on a no', async () => {
-    const client = new Client(
-      { name: 'some-host', version: '1.0.0' },
-      { capabilities: { elicitation: { form: {} } } },
-    );
-    const asked: string[] = [];
-    client.setRequestHandler(ElicitRequestSchema, async (request) => {
-      asked.push(request.params.message);
-      return { action: 'decline' };
-    });
-    const { quote, call, close } = await connected(client);
+  it.each([
+    ['claude-code', '2.1.214', true],
+    ['claude-code', '2.1.301', true],
+    ['claude-code', '2.1.213', false],
+    ['some-host', '9.9.9', false],
+  ])('lists approve to %s %s: %s', async (name, version, offered) => {
+    const { tools, call, close } = await connected(new Client({ name, version }));
     try {
-      expect(await call({})).toMatchObject({ status: 'declined', cost: ['provider price 0 USD'] });
-      expect(asked).toEqual(['One call to AiSpace (Hailuo 3 Max) costs $0.155. Go ahead?']);
-      expect((await readQuote(dir, quote.id))!.usedAt).toBeUndefined();
+      const listed = (await tools()).find((tool) => tool.name === 'approve');
+      if (offered) {
+        // Claude Code puts every call of it to a person.
+        expect(listed?._meta).toMatchObject({ [REQUIRES_USER_INTERACTION_KEY]: true });
+      } else {
+        expect(listed).toBeUndefined();
+        const refused = (await call('approve', { quote: 'q_AAAAAAAAAAAA' })) as {
+          isError?: boolean;
+          thrown?: unknown;
+        };
+        expect(refused.isError === true || refused.thrown !== undefined).toBe(true);
+      }
     } finally {
       await close();
     }
   });
 
-  it('hands the terminal command to a host that can neither prompt nor ask', async () => {
-    const { quote, call, close } = await connected(new Client({ name: 'some-host', version: '1' }));
-    try {
-      const envelope = (await call({})) as { status: string; nextStep: string };
-      expect(envelope.status).toBe('needs_approval');
-      expect(envelope.nextStep).toContain(`\`tenjin approve ${quote.id}\``);
-    } finally {
-      await close();
-    }
-  });
-
-  it("takes Claude Code's own prompt as the yes, once it showed the total", async () => {
-    const { call, close } = await connected(
+  it("runs the stored plan once Claude Code's prompt said yes", async () => {
+    const { call, paid, close } = await connected(
       new Client({ name: 'claude-code', version: '2.1.214' }),
     );
     try {
-      // The prompt showed only the id: refused, nothing paid.
-      expect(await call({})).toMatchObject({ status: 'needs_input' });
+      const over = envelopeOf(
+        await call('request', { id: SPEC.id, input: { prompt: 'a plane' } }),
+      ) as { status: string; nextStep: string; quote: { id: string; total: string; what: string } };
+      expect(over.status).toBe('needs_approval');
+      expect(over.nextStep).toContain(`approve({quote: "${over.quote.id}"`);
+      expect(paid).toEqual([]);
+      const ran = envelopeOf(
+        await call('approve', {
+          quote: over.quote.id,
+          total: over.quote.total,
+          what: over.quote.what,
+        }),
+      );
+      expect(ran).toMatchObject({ status: 'fulfilled', cost: ['provider price 0.155 USD'] });
+      expect(paid).toEqual([JSON.stringify({ prompt: 'a plane' })]);
+    } finally {
+      await close();
+    }
+  });
+
+  it('refuses a call over the limits with no approve route on any other client', async () => {
+    const { call, paid, close } = await connected(new Client({ name: 'some-host', version: '1' }));
+    try {
+      const over = envelopeOf(await call('request', { id: SPEC.id, input: { prompt: 'a plane' } }));
+      expect(over).toMatchObject({
+        status: 'needs_approval',
+        nextStep: 'Tell the user what it would cost; nothing was paid.',
+      });
+      expect(over).not.toHaveProperty('quote');
+      expect(JSON.stringify(over)).not.toMatch(/approve/);
+      expect(paid).toEqual([]);
     } finally {
       await close();
     }
