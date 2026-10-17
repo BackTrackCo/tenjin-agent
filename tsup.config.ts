@@ -1,21 +1,24 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { defineConfig } from 'tsup';
-import { renderHostFiles } from './src/router/plugin-files';
+import { renderCodexHostFiles, renderHostFiles } from './src/router/plugin-files';
 
 /**
- * THE CLAUDE CODE PLUGIN SHIPS IN `dist/hosts/claude`, rendered from the same
- * module the CLI reads, with this build's version stamped into its manifest.
- * `tenjin install` registers that folder as a `directory` marketplace, so it
- * must sit inside the published `files`; `dist` already is. The checked-in
- * `hosts/claude/` templates are pinned to the same render by a test.
+ * THE PLUGINS SHIP IN `dist/hosts/claude` AND `dist/hosts/codex`, rendered from
+ * the same module the CLI reads, with this build's version stamped into each
+ * manifest. `tenjin install` registers those folders as local marketplaces, so
+ * they must sit inside the published `files`; `dist` already is. The checked-in
+ * `hosts/` templates are pinned to the same render by a test.
  */
 function writeHosts(): void {
   const { version } = JSON.parse(readFileSync('package.json', 'utf8')) as { version: string };
-  for (const [path, body] of Object.entries(renderHostFiles(version))) {
-    const target = join('dist', 'hosts', 'claude', path);
-    mkdirSync(dirname(target), { recursive: true });
-    writeFileSync(target, body);
+  const hosts = { claude: renderHostFiles(version), codex: renderCodexHostFiles(version) };
+  for (const [host, files] of Object.entries(hosts)) {
+    for (const [path, body] of Object.entries(files)) {
+      const target = join('dist', 'hosts', host, path);
+      mkdirSync(dirname(target), { recursive: true });
+      writeFileSync(target, body);
+    }
   }
 }
 

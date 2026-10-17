@@ -163,3 +163,7 @@ A subagent is only redirected or offered a lookup when it is known to have `mcp_
 ## Not the same as `allowlistCreators`
 
 `allowlistCreators` is a spend-policy key that restricts which hosts may be paid at all. The plugin's permission answers on this page are a harness setting about which tool may run. They are separate gates and neither substitutes for the other.
+
+## Codex
+
+`tenjin install --harness codex` writes the wallet, the spend limits, the Codex plugin through `codex plugin add`, and then one grant: `plugins."tenjin@tenjin".mcp_servers.router.tools.request.approval_mode = "approve"`. It writes the grant only after you approve the spend limits, and never over a value you set yourself. The grant covers the request tool alone, and your spend limits still bound every payment. Codex asks you to trust the plugin's three hooks in `/hooks`, and Tenjin never skips that review. `tenjin uninstall --harness codex` removes the plugin, its marketplace, and the grant only when it is still exactly `approve`.

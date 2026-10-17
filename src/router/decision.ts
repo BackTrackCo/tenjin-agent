@@ -3,6 +3,7 @@ import { fetchFailureToCliError, httpRequest } from '../lib/http';
 import type { FetchJsonFailure, HttpRequestOptions, HttpResult } from '../lib/http';
 import type { CommandContext } from '../context';
 import type { Packet } from './context';
+import type { Harness } from './names';
 
 /**
  * `POST /api/x402-router`: ONE DECISION PER LOOKUP. On the free path it costs
@@ -407,12 +408,13 @@ export function acceptsFor(bazaar: boolean): string[] {
  */
 export function buildHookBody(
   packet: Packet,
-  extras: { sessionId?: string; accepts?: readonly string[] } = {},
+  extras: { sessionId?: string; accepts?: readonly string[]; harness?: Harness } = {},
 ): Record<string, unknown> {
   return {
     schemaVersion: 1,
     ...(extras.sessionId !== undefined ? { sessionId: extras.sessionId } : {}),
     ...(extras.accepts !== undefined ? { accepts: [...extras.accepts] } : {}),
+    ...(extras.harness !== undefined ? { harness: extras.harness } : {}),
     packet,
   };
 }
@@ -425,6 +427,7 @@ export function buildToolBody(request: {
   id?: string;
   gateHint?: GateHint;
   accepts?: readonly string[];
+  harness?: Harness;
 }): Record<string, unknown> {
   return {
     schemaVersion: 1,
@@ -432,6 +435,7 @@ export function buildToolBody(request: {
     ...(request.id !== undefined ? { id: request.id } : {}),
     ...(request.gateHint !== undefined ? { gateHint: request.gateHint } : {}),
     ...(request.accepts !== undefined ? { accepts: [...request.accepts] } : {}),
+    ...(request.harness !== undefined ? { harness: request.harness } : {}),
   };
 }
 
@@ -459,6 +463,12 @@ export interface DecisionDeps {
   /** `experimental.bazaar`: add {@link BAZAAR_ACCEPT}, so a service from the
    *  open Bazaar may come back. Off by default: curated and the Tenjin list. */
   acceptsBazaar?: boolean;
+  /**
+   * The host asking. The server filters out the lookups that host's own tools
+   * already do, and nothing else: never payment, limits or the fee. Absent is
+   * `claude`, and every production caller sends it.
+   */
+  harness?: Harness;
   fetchImpl?: typeof fetch;
   /** Overrides the per-call deadline; the hook passes its own, smaller one. */
   timeoutMs?: number;
@@ -560,12 +570,14 @@ export async function requestDecision(
         ? buildHookBody(request.packet as Packet, {
             ...(request.sessionId !== undefined ? { sessionId: request.sessionId } : {}),
             accepts: acceptsFor(deps.acceptsBazaar === true),
+            harness: deps.harness ?? 'claude',
           })
         : buildToolBody({
             ...(request.query !== undefined ? { query: request.query } : {}),
             ...(request.id !== undefined ? { id: request.id } : {}),
             ...(request.gateHint !== undefined ? { gateHint: request.gateHint } : {}),
             accepts: acceptsFor(deps.acceptsBazaar === true),
+            harness: deps.harness ?? 'claude',
           }),
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   };
@@ -632,14 +644,14 @@ export const OUTCOME_TIMEOUT_MS = 3_000;
  */
 export async function reportSpecOutcome(
   outcome: SpecOutcome,
-  deps: Pick<DecisionDeps, 'ctx' | 'baseUrl' | 'fetchImpl'>,
+  deps: Pick<DecisionDeps, 'ctx' | 'baseUrl' | 'fetchImpl' | 'harness'>,
 ): Promise<void> {
   try {
     await httpRequest(new URL(ROUTER_PATH, deps.baseUrl).toString(), {
       method: 'POST',
       timeoutMs: OUTCOME_TIMEOUT_MS,
       blockRedirects: true,
-      jsonBody: buildOutcomeBody(outcome),
+      jsonBody: buildOutcomeBody(outcome, deps.harness ?? 'claude'),
       ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
     });
   } catch {
@@ -648,10 +660,11 @@ export async function reportSpecOutcome(
 }
 
 /** The exact body of an outcome report, pinned to the shared fixtures. */
-export function buildOutcomeBody(outcome: SpecOutcome): Record<string, unknown> {
+export function buildOutcomeBody(outcome: SpecOutcome, harness?: Harness): Record<string, unknown> {
   return {
     schemaVersion: 1,
     id: outcome.id,
+    ...(harness !== undefined ? { harness } : {}),
     status: outcome.status,
     ...(outcome.reason !== undefined ? { reason: outcome.reason } : {}),
     ...(outcome.httpStatus !== undefined ? { httpStatus: outcome.httpStatus } : {}),

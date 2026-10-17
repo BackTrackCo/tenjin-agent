@@ -45,15 +45,29 @@ export function launchedByPlugin(env: NodeJS.ProcessEnv = process.env): boolean 
   return typeof root === 'string' && root.length > 0;
 }
 
+/** The agent hosts the router serves, as the CLI names them to the server. */
+export const HARNESSES = ['claude', 'codex'] as const;
+export type Harness = (typeof HARNESSES)[number];
+
 /**
- * The request tool's name as THIS process's harness exposes it: the plugin's
- * tool for a server the plugin launched, and the `x402` server's tool for one a
- * settings install launched, so an offer line never names a tool the model
- * does not have.
- *
- * SHIM: the second branch goes on or after 2026-12-01 (see
- * {@link LEGACY_MCP_SERVER_NAME}); the name is then always {@link REQUEST_TOOL}.
+ * Codex names an MCP tool `mcp__<server>__<tool>`, and its plugin's server is
+ * {@link MCP_SERVER_NAME}, so the grant key and the tool name move together.
  */
-export function requestToolName(env: NodeJS.ProcessEnv = process.env): string {
+export const CODEX_REQUEST_TOOL = `mcp__${MCP_SERVER_NAME}__request`;
+
+/**
+ * The request tool's name as the host exposes it, so an offer line never names
+ * a tool the model does not have. In Claude Code: the plugin's tool for a
+ * server the plugin launched, and the `x402` server's tool for one a settings
+ * install launched.
+ *
+ * SHIM: the Claude settings branch goes on or after 2026-12-01 (see
+ * {@link LEGACY_MCP_SERVER_NAME}); Claude's name is then always {@link REQUEST_TOOL}.
+ */
+export function requestToolName(
+  host: Harness = 'claude',
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  if (host === 'codex') return CODEX_REQUEST_TOOL;
   return launchedByPlugin(env) ? REQUEST_TOOL : LEGACY_REQUEST_TOOL;
 }

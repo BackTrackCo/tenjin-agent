@@ -1,0 +1,39 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "tenjin hook prompt --harness codex",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "webrun",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "tenjin hook native --harness codex",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "webrun",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "tenjin hook shortfall --harness codex",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}

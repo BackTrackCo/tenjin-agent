@@ -3,6 +3,8 @@ import { isIP } from 'node:net';
 import { dirname, join } from 'node:path';
 import { isPublicAddress } from '../lib/destination';
 import { mask } from '../lib/redact';
+import { parseCodexHistory } from './codex-history';
+import type { Harness } from './names';
 
 /**
  * The bounded conversation packet the router's gate and paid decision read.
@@ -274,10 +276,11 @@ export async function buildPromptPacket(
   transcriptPath: string | undefined,
   sessionId: string,
   prompt: string,
+  harness: Harness = 'claude',
 ): Promise<Packet> {
   const trimmed = prompt.trim();
   const text = trimmed.length > 0 ? trimmed : '(empty prompt)';
-  const read = await readHistory(transcriptPath, { sessionId });
+  const read = await readHistory(transcriptPath, { sessionId, harness });
   return {
     current: { role: 'user', text },
     history: read ?? [],
@@ -306,11 +309,11 @@ export async function buildNativePacket(
   transcriptPath: string | undefined,
   sessionId: string,
   pending: PendingCall,
-  opts: { agentId?: string; nativeOutcome?: NativeOutcome } = {},
+  opts: { agentId?: string; nativeOutcome?: NativeOutcome; harness?: Harness } = {},
 ): Promise<Packet> {
-  const { agentId, nativeOutcome } = opts;
+  const { agentId, nativeOutcome, harness = 'claude' } = opts;
   const subject = subjectOf(pending);
-  const read = await readHistory(transcriptPath, { sessionId });
+  const read = await readHistory(transcriptPath, { sessionId, harness });
   // A SUBAGENT'S CALL BELONGS TO ITS OWN TASK. The harness hands every
   // subagent hook the PARENT's transcript, whose latest user message is not
   // what this subagent was asked to do, so two subagents with different
@@ -320,7 +323,7 @@ export async function buildNativePacket(
   // reaches this call. A subagent file that cannot be read is today's
   // behaviour, not a refusal.
   const own =
-    agentId === undefined
+    agentId === undefined || harness === 'codex'
       ? null
       : await readHistory(subagentTranscriptPath(transcriptPath, sessionId, agentId), {
           sessionId,
@@ -369,6 +372,8 @@ export function subagentTranscriptPath(
 interface RowScope {
   sessionId: string;
   agentId?: string;
+  /** Codex's rollout file has its own rows and its own ownership check. */
+  harness?: Harness;
 }
 
 /** `null` means "cannot be vouched for"; an empty array is a genuinely fresh session. */
@@ -398,6 +403,8 @@ async function readHistory(
     await file.close();
   }
   try {
+    // A Codex tail has lost the rollout's ownership header, so it is unavailable.
+    if (scope.harness === 'codex') return tail ? null : parseCodexHistory(raw, scope.sessionId);
     const messages = parseRows(raw, scope);
     // A TAIL MUST HOLD THE TURN. The latest user message is the newest of
     // them, so a tail with any user message holds this turn's; one with none

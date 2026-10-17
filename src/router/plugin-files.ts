@@ -248,3 +248,80 @@ export function renderHostFiles(version?: string): Record<string, string> {
     ...Object.fromEntries(plugin),
   };
 }
+
+/**
+ * THE CODEX PLUGIN, AS FILES, shipped in `dist/hosts/codex` and pinned to the
+ * checked-in `hosts/codex/` by the same test. Codex copies a plugin from its
+ * marketplace into its own cache, so `install` and `update` re-add it from
+ * the package. Its legs are command hooks: the prompt, and one web search
+ * before it runs and after (Codex has no PostToolUseFailure). Codex trusts a
+ * hook by its hash, so `hooks.json` carries no version and survives an update.
+ */
+export const CODEX_WEB_MATCHER = 'webrun';
+export const CODEX_LEGS = ['prompt', 'native', 'shortfall'] as const;
+
+export function codexHookCommand(kind: (typeof CODEX_LEGS)[number]): string {
+  return `tenjin hook ${kind} --harness codex`;
+}
+
+function codexLeg(kind: (typeof CODEX_LEGS)[number], timeout = ROUTE_HOOK_TIMEOUT_SECONDS) {
+  return [{ type: 'command', command: codexHookCommand(kind), timeout }];
+}
+
+export function renderCodexHooks(): { hooks: Record<string, unknown[]> } {
+  return {
+    hooks: {
+      UserPromptSubmit: [{ hooks: codexLeg('prompt') }],
+      PreToolUse: [{ matcher: CODEX_WEB_MATCHER, hooks: codexLeg('native') }],
+      PostToolUse: [
+        { matcher: CODEX_WEB_MATCHER, hooks: codexLeg('shortfall', AFTER_CALL_TIMEOUT_SECONDS) },
+      ],
+    },
+  };
+}
+
+export const CODEX_MCP_ARGS = ['mcp', '--harness', 'codex'] as const;
+
+export function renderCodexMcp(): { mcpServers: Record<string, unknown> } {
+  return { mcpServers: { [MCP_SERVER_NAME]: { command: 'tenjin', args: [...CODEX_MCP_ARGS] } } };
+}
+
+/** `.codex-plugin/plugin.json`, its version the CLI's, stamped at build time. */
+export function renderCodexManifest(version?: string): Record<string, unknown> {
+  return {
+    name: PLUGIN_NAME,
+    ...(version !== undefined ? { version } : {}),
+    description: DESCRIPTION,
+    author: { name: 'Tenjin', url: PRODUCTION_ORIGIN },
+    homepage: `${PRODUCTION_ORIGIN}/agents`,
+    repository: 'https://github.com/BackTrackCo/tenjin-agent',
+    interface: { displayName: 'Tenjin', developerName: 'Tenjin', category: 'Productivity' },
+    mcpServers: './.mcp.json',
+  };
+}
+
+/** `.agents/plugins/marketplace.json`: one local plugin, copied by `codex plugin add`. */
+export function renderCodexMarketplace(): Record<string, unknown> {
+  return {
+    name: MARKETPLACE_NAME,
+    interface: { displayName: 'Tenjin' },
+    plugins: [
+      {
+        name: PLUGIN_NAME,
+        source: { source: 'local', path: `./${PLUGIN_DIR}` },
+        policy: { installation: 'AVAILABLE', authentication: 'ON_INSTALL' },
+        category: 'Productivity',
+      },
+    ],
+  };
+}
+
+/** The Codex marketplace folder's files: its catalog and the plugin under {@link PLUGIN_DIR}. */
+export function renderCodexHostFiles(version?: string): Record<string, string> {
+  return {
+    '.agents/plugins/marketplace.json': json(renderCodexMarketplace()),
+    [`${PLUGIN_DIR}/.mcp.json`]: json(renderCodexMcp()),
+    [`${PLUGIN_DIR}/hooks/hooks.json`]: json(renderCodexHooks()),
+    [`${PLUGIN_DIR}/.codex-plugin/plugin.json`]: json(renderCodexManifest(version)),
+  };
+}

@@ -186,6 +186,52 @@ describe('the request bodies', () => {
     ]);
   });
 
+  /** A CODEX CLIENT NAMES ITS HOST, the server's own fixture copied across. */
+  it('builds the Codex hook request with its harness, byte for byte', () => {
+    const canonical = fixture('wire-hook-request-harness.json');
+    expect(
+      buildHookBody(canonical.packet as Packet, {
+        accepts: canonical.accepts as string[],
+        harness: 'codex',
+      }),
+    ).toEqual(canonical);
+  });
+
+  /**
+   * THE CLAUDE REPLAY. Every request this build sends, rebuilt the way it now
+   * goes out from Claude Code: the one change is `harness: "claude"`, with
+   * every other field and its value as before.
+   */
+  it('replays every Claude request with harness as the only new field', () => {
+    const hooks = readdirSync(dir).filter(
+      (name) => name.startsWith('wire-hook-request-') && name !== 'wire-hook-request-harness.json',
+    );
+    expect(hooks.length).toBeGreaterThanOrEqual(7);
+    for (const name of hooks) {
+      const canonical = fixture(name);
+      const body = buildHookBody(canonical.packet as Packet, {
+        ...(canonical.sessionId !== undefined ? { sessionId: canonical.sessionId as string } : {}),
+        ...(canonical.accepts !== undefined ? { accepts: canonical.accepts as string[] } : {}),
+        harness: 'claude',
+      });
+      expect(body, name).toEqual({ ...canonical, harness: 'claude' });
+    }
+    for (const name of readdirSync(dir).filter((n) => n.startsWith('wire-tool-request-'))) {
+      const canonical = fixture(name);
+      const body = buildToolBody({
+        query: canonical.query as string,
+        accepts: canonical.accepts as string[],
+        harness: 'claude',
+      });
+      expect(body, name).toEqual({ ...canonical, harness: 'claude' });
+    }
+    for (const name of ['wire-outcome-request.json', 'wire-outcome-unpaid.json']) {
+      const canonical = fixture(name);
+      const body = buildOutcomeBody(canonical as unknown as SpecOutcome, 'claude');
+      expect(body, name).toEqual({ ...canonical, harness: 'claude' });
+    }
+  });
+
   it('carries nothing about money on any form', () => {
     for (const name of [
       'wire-hook-request-prompt.json',
@@ -197,6 +243,7 @@ describe('the request bodies', () => {
       'wire-hook-request-catalog.json',
       'wire-tool-request-spec.json',
       'wire-tool-request-catalog.json',
+      'wire-hook-request-harness.json',
     ]) {
       expect(JSON.stringify(fixture(name))).not.toMatch(/billing|admission|payment/i);
     }

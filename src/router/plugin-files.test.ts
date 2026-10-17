@@ -15,6 +15,11 @@ import {
   renderMarketplace,
   renderPluginHooks,
   renderPluginManifest,
+  renderCodexHooks,
+  renderCodexHostFiles,
+  renderCodexManifest,
+  renderCodexMarketplace,
+  renderCodexMcp,
 } from './plugin-files';
 
 const HOSTS = fileURLToPath(new URL('../../hosts/claude', import.meta.url));
@@ -137,5 +142,56 @@ describe('the manifest and the marketplace', () => {
       name: 'tenjin',
       plugins: [{ name: 'tenjin', source: './tenjin', version: '1.2.3' }],
     });
+  });
+});
+
+const CODEX_HOSTS = fileURLToPath(new URL('../../hosts/codex', import.meta.url));
+
+describe('the checked-in hosts/codex templates', () => {
+  it('are exactly what the renderer writes, file for file', () => {
+    const rendered = renderCodexHostFiles();
+    expect(filesUnder(CODEX_HOSTS)).toEqual(Object.keys(rendered).sort());
+    for (const [path, body] of Object.entries(rendered)) {
+      expect(JSON.parse(readFileSync(join(CODEX_HOSTS, path), 'utf8')), path).toEqual(
+        JSON.parse(body),
+      );
+    }
+  });
+
+  it('carry the prompt leg and one web search before and after, as command hooks', () => {
+    const { hooks } = renderCodexHooks();
+    const cmd = (kind: string, timeout = 5) => [
+      { type: 'command', command: `tenjin hook ${kind} --harness codex`, timeout },
+    ];
+    expect(hooks).toEqual({
+      UserPromptSubmit: [{ hooks: cmd('prompt') }],
+      PreToolUse: [{ matcher: 'webrun', hooks: cmd('native') }],
+      PostToolUse: [{ matcher: 'webrun', hooks: cmd('shortfall', 15) }],
+    });
+  });
+
+  it("names #25's plugin and server, starts the server as Codex's, and never names x402", () => {
+    expect(renderCodexMcp()).toEqual({
+      mcpServers: { router: { command: 'tenjin', args: ['mcp', '--harness', 'codex'] } },
+    });
+    expect(renderCodexMarketplace()).toMatchObject({
+      name: 'tenjin',
+      plugins: [{ name: 'tenjin', source: { source: 'local', path: './tenjin' } }],
+    });
+    expect(JSON.stringify(renderCodexHostFiles('1.2.3'))).not.toMatch(/x402/i);
+  });
+
+  it('stamps the CLI version into the manifest and keeps the hooks free of it', () => {
+    const files = renderCodexHostFiles('1.2.3');
+    expect(JSON.parse(files['tenjin/.codex-plugin/plugin.json']!)).toMatchObject({
+      name: 'tenjin',
+      version: '1.2.3',
+      mcpServers: './.mcp.json',
+    });
+    expect(renderCodexManifest()).not.toHaveProperty('version');
+    // Codex trusts a hook by its hash: an update must not change these bytes.
+    expect(files['tenjin/hooks/hooks.json']).toBe(
+      renderCodexHostFiles('9.9.9')['tenjin/hooks/hooks.json'],
+    );
   });
 });

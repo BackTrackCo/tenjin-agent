@@ -110,6 +110,7 @@ async function deps(overrides: Partial<UpdateDeps> = {}): Promise<UpdateDeps> {
     homeDir: dir,
     refreshCommand: join(dir, 'bin', 'tenjin.js'),
     listMcpProcesses: async () => [],
+    codexInstalled: async () => false,
     ...overrides,
   };
 }
@@ -150,6 +151,28 @@ describe('runUpdate', () => {
     expect(result.humanLines?.join(' ')).toContain('0.1.0-alpha.6 -> 0.1.0-alpha.7');
     // The install question names the routing fee; update stays silent about it.
     expect(result.humanLines?.join(' ')).not.toContain('Routing costs');
+  });
+
+  it('re-adds the Codex plugin from the new build only where Codex lists it', async () => {
+    const { ctx } = makeCtx();
+    const spawned = spawnRecorder();
+    const result = await runUpdate(
+      { check: false },
+      ctx,
+      await deps({ spawnImpl: spawned.impl, codexInstalled: async () => true }),
+    );
+    expect(spawned.calls.at(-1)?.args.slice(1)).toEqual([
+      'install',
+      '--harness',
+      'codex',
+      '--refresh',
+    ]);
+    expect(result.data).toMatchObject({ codex: 'refreshed' });
+    expect(result.humanLines).toContain('Refreshed the Codex plugin.');
+
+    const none = spawnRecorder();
+    await runUpdate({ check: false }, ctx, await deps({ spawnImpl: none.impl }));
+    expect(none.calls.some((call) => call.args.includes('--harness'))).toBe(false);
   });
 
   // The live-registry regression this command has to survive: `alpha` sat on

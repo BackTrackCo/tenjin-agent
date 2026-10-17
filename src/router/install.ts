@@ -593,8 +593,12 @@ export interface SpendApproval {
  * it, and the zero holds.
  */
 function spendApproval(config: PartialConfig, args: RouterInstallArgs): SpendApproval {
+  return spendApprovalFor(config, yesCommand(args));
+}
+
+/** The same question, for an install whose yes is `approve`. */
+export function spendApprovalFor(config: PartialConfig, approve: string): SpendApproval {
   const limits = shownLimits(config);
-  const approve = yesCommand(args);
   return {
     question: spendQuestion(limits),
     limits: limitsUsd(limits),
@@ -622,9 +626,9 @@ function yesCommand(args: RouterInstallArgs): string {
  * The question names the routing fee and its deposits too, and either answer
  * approves it. Cancelling at any step writes nothing.
  */
-async function approveLimits(
+export async function approveLimits(
   config: PartialConfig,
-  deps: RouterInstallDeps,
+  deps: Pick<RouterInstallDeps, 'promptLimits' | 'promptAmount'>,
 ): Promise<RouterLimits | undefined> {
   const shown = shownLimits(config);
   const askCall = config.maxAutoSpend === undefined;

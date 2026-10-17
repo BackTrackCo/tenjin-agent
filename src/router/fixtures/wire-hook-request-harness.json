@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "accepts": ["catalog", "spec", "label", "fields"],
+  "harness": "codex",
+  "packet": {
+    "current": {
+      "role": "user",
+      "text": "Summarize https://www.reddit.com/r/programming/comments/1o2abcd/what_broke_in_prod_this_week/"
+    },
+    "history": [],
+    "literalUrls": [
+      "https://www.reddit.com/r/programming/comments/1o2abcd/what_broke_in_prod_this_week/"
+    ],
+    "historyStatus": "ok",
+    "pendingCall": {
+      "tool": "WebFetch",
+      "url": "https://www.reddit.com/r/programming/comments/1o2abcd/what_broke_in_prod_this_week/"
+    }
+  }
+}

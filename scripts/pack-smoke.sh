@@ -133,6 +133,22 @@ EXPECTED_VERSION="$EXPECTED_VERSION" HOSTS="$HOSTS" node -e '
   echo "pack-smoke: FAIL: the packed plugin manifest is not tenjin@$EXPECTED_VERSION" >&2
   exit 1
 }
+# The Codex plugin ships beside it, a local marketplace `codex plugin add` copies.
+CODEX_HOSTS="./node_modules/tenjin-cli/dist/hosts/codex"
+for f in .agents/plugins/marketplace.json tenjin/.codex-plugin/plugin.json tenjin/.mcp.json tenjin/hooks/hooks.json; do
+  [ -f "$CODEX_HOSTS/$f" ] || {
+    echo "pack-smoke: FAIL: dist/hosts/codex/$f missing from the installed package" >&2
+    exit 1
+  }
+done
+EXPECTED_VERSION="$EXPECTED_VERSION" HOSTS="$CODEX_HOSTS" node -e '
+  const { readFileSync } = require("node:fs");
+  const manifest = JSON.parse(readFileSync(process.env.HOSTS + "/tenjin/.codex-plugin/plugin.json", "utf8"));
+  if (manifest.name !== "tenjin" || manifest.version !== process.env.EXPECTED_VERSION) process.exit(1);
+' || {
+  echo "pack-smoke: FAIL: the packed Codex plugin manifest is not tenjin@$EXPECTED_VERSION" >&2
+  exit 1
+}
 # Claude Code's own validator, where a runner has the binary.
 if command -v claude >/dev/null 2>&1; then
   CLAUDE_CONFIG_DIR="$DATA_DIR/claude" claude plugin validate "$HOSTS" >/dev/null || {

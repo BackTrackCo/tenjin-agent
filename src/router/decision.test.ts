@@ -136,6 +136,7 @@ describe('one free decision', () => {
     // is asking is read from `packet.pendingCall`, not from a field beside it.
     expect(Object.keys(calls[0]!.body as object).sort()).toEqual([
       'accepts',
+      'harness',
       'packet',
       'schemaVersion',
     ]);
@@ -180,6 +181,7 @@ describe('one free decision', () => {
     // The packet lives on the backend against the id; the client keeps none.
     expect(Object.keys(calls[0]!.body as object).sort()).toEqual([
       'accepts',
+      'harness',
       'id',
       'query',
       'schemaVersion',
