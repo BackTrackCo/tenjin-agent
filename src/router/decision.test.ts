@@ -295,10 +295,21 @@ describe('a choice set', () => {
   };
   const options = (decision: Record<string, unknown>) =>
     (decision.choices as { options: { key: string; id: string }[] }).options;
+  /** A third option, valid on its own, with its own spec: the set the server
+   *  sends has two, and a rule between two options that are not the default
+   *  needs three. */
+  const withThird = (decision: Record<string, unknown>) => {
+    const specs = decision.specs as { id: string }[];
+    const third = '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d29';
+    decision.specs = [...specs, { ...specs[1]!, id: third }];
+    options(decision).push({ ...options(decision)[1]!, key: 'third', id: third });
+  };
 
   it('parses on both calls, with a spec for every option', () => {
     expect(parseForTests('hook', CHOICES).success).toBe(true);
     expect(parseForTests('tool', CHOICES).success).toBe(true);
+    // The three-option set the cases below build parses too.
+    expect(parseForTests('tool', withDecision(withThird)).success).toBe(true);
     const specIds = CHOICES.decision.specs.map((spec) => spec.id);
     for (const option of CHOICES.decision.choices.options) expect(specIds).toContain(option.id);
   });
@@ -313,13 +324,15 @@ describe('a choice set', () => {
     [
       'an id named twice',
       (decision: Record<string, unknown>) => {
+        withThird(decision);
         options(decision)[2]!.id = options(decision)[1]!.id;
       },
     ],
     [
       'an option with no spec',
       (decision: Record<string, unknown>) => {
-        decision.specs = (decision.specs as { id: string }[]).slice(0, 2);
+        const specs = decision.specs as { id: string }[];
+        decision.specs = specs.slice(0, specs.length - 1);
       },
     ],
     [
@@ -337,7 +350,7 @@ describe('a choice set', () => {
     [
       'an option keyed "all"',
       (decision: Record<string, unknown>) => {
-        options(decision)[2]!.key = 'all';
+        options(decision)[1]!.key = 'all';
       },
     ],
     [
@@ -346,7 +359,10 @@ describe('a choice set', () => {
         const specs = decision.specs as { id: string }[];
         decision.specs = [
           ...specs,
-          ...Array.from({ length: 6 }, (_, n) => ({ ...specs[0]!, id: `extra-spec-${n}` })),
+          ...Array.from({ length: 9 - specs.length }, (_, n) => ({
+            ...specs[0]!,
+            id: `extra-spec-${n}`,
+          })),
         ];
       },
     ],

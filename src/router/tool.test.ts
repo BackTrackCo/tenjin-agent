@@ -2100,53 +2100,54 @@ describe('a choice from the set a line offered', () => {
     const { decision } = await read();
     await storeSpecs(dir, decision.specs);
     await storeChoices(dir, decision.id, { choices: decision.choices, hint: decision.hint });
-    return { id: decision.id, grok: decision.specs[2]! };
+    // The option that is not the line's own offer: a choice is what runs it.
+    return { id: decision.id, other: decision.specs[1]! };
   };
 
   it("runs the chosen option's spec under the option's own id", async () => {
-    const { id, grok } = await keep();
+    const { id, other } = await keep();
     const { fetchImpl, calls } = net([
       {
-        url: grok.request.url,
+        url: other.request.url,
         status: 402,
         body: {},
-        headers: { 'PAYMENT-REQUIRED': challenge({ amount: '43000', payTo: grok.payTo }) },
+        headers: { 'PAYMENT-REQUIRED': challenge({ amount: '50000', payTo: other.payTo }) },
       },
-      { url: grok.request.url, status: 200, body: { id: 'img_1', data: [] } },
+      { url: other.request.url, status: 200, body: { id: 'img_1', data: [] } },
       { url: ROUTER, status: 200, body: {} },
     ]);
     const result = await runRequestTool(
-      { id, choice: 'grok-imagine-2', input: { prompt: 'a lighthouse at dusk' } },
+      { id, choice: 'nano-banana-2.1', input: { prompt: 'a lighthouse at dusk' } },
       deps(fetchImpl),
     );
     expect(result.envelope).toMatchObject({
       status: 'fulfilled',
-      supplier: 'blockrun.ai',
-      cost: ['provider price 0.043 USD'],
+      supplier: 'x402.aispace.bot',
+      cost: ['provider price 0.05 USD'],
     });
-    expect(calls[0]).toMatchObject({ url: grok.request.url, paid: false });
+    expect(calls[0]).toMatchObject({ url: other.request.url, paid: false });
     expect(JSON.parse(calls[1]!.body!)).toEqual({
       prompt: 'a lighthouse at dusk',
-      model: 'xai/grok-imagine-image-2.0',
-      size: '1024x1024',
-      n: 1,
+      model: 'nano-banana-2-1',
+      resolution: '1K',
+      return_binary: true,
     });
     await vi.waitFor(() => expect(calls).toHaveLength(3));
-    expect(JSON.parse(calls[2]!.body!)).toMatchObject({ id: grok.id, status: 'fulfilled' });
+    expect(JSON.parse(calls[2]!.body!)).toMatchObject({ id: other.id, status: 'fulfilled' });
     // The payment was claimed under the option's id, which pays once.
     const again = await runRequestTool(
-      { id: grok.id, input: { prompt: 'a lighthouse at dusk' } },
+      { id: other.id, input: { prompt: 'a lighthouse at dusk' } },
       deps(fetchImpl),
     );
     expect(String(again.envelope.reason)).toContain('already paid for');
   });
 
   it("shows the chosen option's spec when no input comes with it, and pays nothing", async () => {
-    const { id, grok } = await keep();
+    const { id, other } = await keep();
     const { fetchImpl, calls } = net([]);
-    const result = await runRequestTool({ id, choice: 'grok-imagine-2' }, deps(fetchImpl));
-    expect(result.envelope).toMatchObject({ status: 'spec', id: grok.id });
-    expect(result.summary).toContain('BlockRun');
+    const result = await runRequestTool({ id, choice: 'nano-banana-2.1' }, deps(fetchImpl));
+    expect(result.envelope).toMatchObject({ status: 'spec', id: other.id });
+    expect(result.summary).toContain('Nano Banana 2.1');
     expect(calls).toEqual([]);
   });
 
@@ -2154,7 +2155,7 @@ describe('a choice from the set a line offered', () => {
     const { decision } = await read();
     const { fetchImpl, calls } = net([]);
     const none = await runRequestTool(
-      { id: decision.id, choice: 'grok-imagine-2', input: { prompt: 'x' } },
+      { id: decision.id, choice: 'nano-banana-2.1', input: { prompt: 'x' } },
       deps(fetchImpl),
     );
     expect(none.envelope).toMatchObject({ status: 'needs_input' });
@@ -2165,9 +2166,7 @@ describe('a choice from the set a line offered', () => {
       deps(fetchImpl),
     );
     expect(unknown.envelope).toMatchObject({ status: 'needs_input' });
-    expect(String(unknown.envelope.reason)).toContain(
-      '"gpt-image-2.5", "nano-banana-2.1", "grok-imagine-2", "all"',
-    );
+    expect(String(unknown.envelope.reason)).toContain('"gpt-image-2.5", "nano-banana-2.1", "all"');
     expect(calls).toEqual([]);
   });
 });
