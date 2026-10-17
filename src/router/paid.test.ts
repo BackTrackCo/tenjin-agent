@@ -192,6 +192,52 @@ describe('the media a paid result links to', () => {
     expect(all).toEqual([[null, [{ address: '93.184.216.34', family: 4 }]]]);
   });
 
+  /** THE CALL'S CAP COUNTS WHAT WAS WRITTEN: a download still in flight holds
+   *  only its own bytes, so a file beside it is saved while the real total is
+   *  under the cap, and none is written past it. */
+  it("saves side by side up to the call's cap, and never past it", async () => {
+    const file = new Uint8Array(8);
+    // The first download answers once the second has started, or after a
+    // moment: side by side, the first must not hold the second's room.
+    let started = 0;
+    let bothIn!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      bothIn = resolve;
+    });
+    const gated: MediaTransport = async () => {
+      started += 1;
+      if (started === 2) bothIn();
+      else await Promise.race([gate, new Promise((resolve) => setTimeout(resolve, 200))]);
+      return {
+        status: 200,
+        body: (async function* () {
+          yield file;
+        })(),
+        discard: () => undefined,
+      };
+    };
+    const budget = { leftBytes: 20 };
+    const both = await Promise.all(
+      ['https://cdn.test/a.png', 'https://cdn.test/b.png'].map((url) =>
+        saveMedia(dir, 'room', [url], { transport: gated, destination: PUBLIC, budget }),
+      ),
+    );
+    expect(both.map(({ saved, capped }) => [saved.length, capped])).toEqual([
+      [1, false],
+      [1, false],
+    ]);
+    expect(budget.leftBytes).toBe(4);
+    // 16 written of 20: a third 8-byte file would pass the cap, so it is not
+    // kept, its bytes go back, and the call says it ran out of room.
+    const third = await saveMedia(dir, 'room', ['https://cdn.test/c.png'], {
+      transport: gated,
+      destination: PUBLIC,
+      budget,
+    });
+    expect(third).toEqual({ saved: [], capped: true });
+    expect(budget.leftBytes).toBe(4);
+  });
+
   /** Two lookups saving in the same millisecond each get their own file. */
   it('never gives two saves the same file', async () => {
     const { transport: t } = transport(() => ({ status: 200, body: new Uint8Array([9]) }));

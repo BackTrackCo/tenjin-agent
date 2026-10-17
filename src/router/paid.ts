@@ -406,8 +406,9 @@ export interface MediaDeps {
   timeoutMs?: number;
   maxBytes?: number;
   /** What the call may still write, shared by every file it saves, side by
-   *  side or not: each file's room is taken from it before the download, and
-   *  what the file did not use is given back after. */
+   *  side or not: charged as each chunk is written, so a download still in
+   *  flight holds only what it wrote. A chunk that would take it below zero
+   *  stops that file, and a file that is not kept gives its bytes back. */
   budget?: { leftBytes: number };
 }
 
@@ -496,13 +497,12 @@ async function saveOne(
   const transport = deps.transport ?? pinnedGet;
   const cap = deps.maxBytes ?? MAX_MEDIA_BYTES;
   const { budget } = deps;
-  const maxBytes = budget !== undefined ? Math.min(cap, budget.leftBytes) : cap;
-  if (maxBytes <= 0) return CAPPED;
-  if (budget !== undefined) budget.leftBytes -= maxBytes;
-  // A file over its room was cut short by the budget, not by its own cap.
-  const short = maxBytes < cap;
-  let used = 0;
-  let over = false;
+  if (budget !== undefined && budget.leftBytes <= 0) return CAPPED;
+  // What this file has taken from the call's budget, given back unless kept.
+  let charged = 0;
+  let kept = false;
+  // Stopped by the call's budget, not by the file's own cap.
+  let capped = false;
   const signal = AbortSignal.timeout(deps.timeoutMs ?? MEDIA_TIMEOUT_MS);
   let target = raw;
   let path: string | null = null;
@@ -520,9 +520,14 @@ async function saveOne(
       res?.discard();
       return null;
     }
-    if ((res.contentLength ?? 0) > maxBytes) {
+    const declared = res.contentLength ?? 0;
+    if (declared > cap) {
       res.discard();
-      return short ? CAPPED : null;
+      return null;
+    }
+    if (budget !== undefined && declared > budget.leftBytes) {
+      res.discard();
+      return CAPPED;
     }
     const ext = new URL(target).pathname.split('.').pop()?.toLowerCase() ?? 'bin';
     const file = await createUniqueFile(
@@ -535,23 +540,34 @@ async function saveOne(
     try {
       for await (const chunk of res.body) {
         size += chunk.byteLength;
-        if (size > maxBytes) {
+        if (size > cap) {
           res.discard();
-          over = true;
           throw new Error('media over the size cap');
+        }
+        // Charged before the write, in the same turn as the check, so files
+        // saving side by side can never write past the call's cap between
+        // them.
+        if (budget !== undefined) {
+          if (chunk.byteLength > budget.leftBytes) {
+            res.discard();
+            capped = true;
+            throw new Error("media over the call's download cap");
+          }
+          budget.leftBytes -= chunk.byteLength;
+          charged += chunk.byteLength;
         }
         await writeAll(file.handle, chunk);
       }
     } finally {
       await file.handle.close();
     }
-    used = size;
+    kept = true;
     return path;
   } catch {
     if (path !== null) await rm(path, { force: true }).catch(() => undefined);
-    return over && short ? CAPPED : null;
+    return capped ? CAPPED : null;
   } finally {
-    if (budget !== undefined) budget.leftBytes += maxBytes - used;
+    if (budget !== undefined && !kept) budget.leftBytes += charged;
   }
 }
 
