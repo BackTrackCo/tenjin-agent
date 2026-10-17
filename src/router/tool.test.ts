@@ -1568,7 +1568,7 @@ describe('an offer with a request spec', () => {
         'utf8',
       ),
     ) as Record<string, unknown>;
-    expect(Object.keys(report).sort()).toEqual(Object.keys(fixture).sort());
+    expect(Object.keys(report).sort()).toEqual([...Object.keys(fixture), 'harness'].sort());
   });
 
   it('refuses an input that misses the spec, naming every problem, and reports it unpaid', async () => {
@@ -1598,6 +1598,7 @@ describe('an offer with a request spec', () => {
     expect(await reported(calls)).toEqual({
       schemaVersion: 1,
       id: SPEC_ID,
+      harness: 'claude',
       status: 'unpaid',
       reason: 'input',
       ms: expect.any(Number) as number,
@@ -1838,6 +1839,7 @@ describe('an offer with a request spec', () => {
     expect(await reported(calls)).toEqual({
       schemaVersion: 1,
       id: SPEC_ID,
+      harness: 'claude',
       status: 'unpaid',
       reason: 'provider',
       httpStatus: 503,
@@ -1915,6 +1917,7 @@ describe('an offer with a request spec', () => {
       schemaVersion: 1,
       query,
       accepts: ['catalog', 'spec'],
+      harness: 'claude',
     });
     // The next call runs from the kept spec: no second decision.
     const ran = await runRequestTool({ id: PICKED, input: { symbol: 'BTC' } }, deps(fetchImpl));
@@ -2001,6 +2004,7 @@ describe('an offer with a request spec', () => {
       query: 'BTC price',
       id: SPEC_ID,
       accepts: ['catalog', 'spec'],
+      harness: 'claude',
     });
   });
 });

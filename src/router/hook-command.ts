@@ -39,6 +39,8 @@ export interface HookCommandDeps extends Omit<HookDeps, 'route'> {
   readEvent?: () => Promise<string>;
   /** Test seam for this process's environment. */
   env?: NodeJS.ProcessEnv;
+  /** Test seam for whether Codex has granted the request tool (`codex-host.ts`). */
+  codexReady?: (cwd: string) => Promise<boolean>;
 }
 
 export async function runHookCommand(kind: HookKind, io: Io, deps: HookCommandDeps): Promise<void> {
@@ -46,10 +48,19 @@ export async function runHookCommand(kind: HookKind, io: Io, deps: HookCommandDe
   try {
     const raw = await (deps.readEvent ?? readStdin)();
     const event = JSON.parse(raw) as unknown;
-    // An entry an older settings install wrote stays silent in a session the
-    // plugin serves (see `alive.ts`). SHIM: goes on or after 2026-12-01.
-    if (!launchedByPlugin(deps.env) && (await sessionServedByPlugin(deps.dataDir, event))) return;
-    response = await runHookKind(kind, event, deps);
+    if (deps.harness === 'codex') {
+      const cwd = (event as { cwd?: unknown } | null)?.cwd;
+      const { codexHookReady } = await import('./codex-host');
+      const ready = deps.codexReady ?? codexHookReady;
+      if (!(await ready(typeof cwd === 'string' ? cwd : process.cwd()))) return;
+      const { codexResponse } = await import('./codex-event');
+      response = codexResponse(await runHookKind(kind, event, deps));
+    } else {
+      // An entry an older settings install wrote stays silent in a session the
+      // plugin serves (see `alive.ts`). SHIM: goes on or after 2026-12-01.
+      if (!launchedByPlugin(deps.env) && (await sessionServedByPlugin(deps.dataDir, event))) return;
+      response = await runHookKind(kind, event, deps);
+    }
   } catch {
     response = null;
   }

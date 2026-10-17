@@ -206,13 +206,8 @@ describe('main', () => {
     const help = cap.stdout();
     expect(help).toContain('--project');
     expect(help).toContain('--refresh');
-    for (const gone of [
-      '--harness',
-      '--bazaar-pay',
-      '--no-grant',
-      '--publish-mode',
-      '--status-line',
-    ])
+    expect(help).toContain('--harness');
+    for (const gone of ['--bazaar-pay', '--no-grant', '--publish-mode', '--status-line'])
       expect(help).not.toContain(gone);
   });
 

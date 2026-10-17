@@ -58,6 +58,7 @@ import {
   type SignedAuthorization,
 } from './paid';
 import { routerSettings } from './settings';
+import type { Harness } from './names';
 
 /**
  * The `request` tool: one free decision per lookup, then ONE payment, to the
@@ -135,6 +136,8 @@ export interface RequestToolDeps {
   /** Test seam for the media download; production pins each connection to
    *  the address it validated. */
   mediaTransport?: MediaTransport;
+  /** The host that launched this server; absent is Claude Code. */
+  harness?: Harness;
 }
 
 export interface RequestToolResult {
@@ -242,6 +245,7 @@ export async function runRequestTool(
     ctx: deps.ctx,
     baseUrl: settings.baseUrl,
     acceptsBazaar: settings.experimentalBazaar,
+    harness: deps.harness ?? 'claude',
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   };
 
@@ -505,7 +509,7 @@ async function runSpec(
 }
 
 /** Where a spec call's outcome report goes. */
-export type ReportDeps = Pick<DecisionDeps, 'ctx' | 'baseUrl' | 'fetchImpl'>;
+export type ReportDeps = Pick<DecisionDeps, 'ctx' | 'baseUrl' | 'fetchImpl' | 'harness'>;
 
 /**
  * EVERY CALL FROM A SPEC IS REPORTED, refused or run, so the server can tell
@@ -525,6 +529,7 @@ export function reportOutcome(
       ctx: reportDeps.ctx,
       baseUrl: reportDeps.baseUrl,
       ...(reportDeps.fetchImpl !== undefined ? { fetchImpl: reportDeps.fetchImpl } : {}),
+      ...(reportDeps.harness !== undefined ? { harness: reportDeps.harness } : {}),
     },
   );
 }

@@ -266,6 +266,7 @@ describe('the prompt hook', () => {
     // turn with no hint.
     expect(Object.keys(sent.body).sort()).toEqual([
       'accepts',
+      'harness',
       'packet',
       'schemaVersion',
       'sessionId',
@@ -436,6 +437,7 @@ describe('the shortfall hook', () => {
     const sent = calls[0] as { body: Record<string, unknown> };
     expect(Object.keys(sent.body).sort()).toEqual([
       'accepts',
+      'harness',
       'packet',
       'schemaVersion',
       'sessionId',
@@ -668,10 +670,10 @@ describe('the shortfall hook', () => {
 describe('the tool name in a hint', () => {
   it('comes from the plugin and server names, in a process the plugin launched', () => {
     expect(REQUEST_TOOL).toBe(`mcp__plugin_tenjin_${MCP_SERVER_NAME}__request`);
-    expect(toolNamed('Call request({query: "q"})', { CLAUDE_PLUGIN_ROOT: '/plugin' })).toBe(
-      'Call mcp__plugin_tenjin_router__request({query: "q"})',
-    );
-    expect(toolNamed('Call request({query: "q"})', {})).toBe(
+    expect(
+      toolNamed('Call request({query: "q"})', 'claude', { CLAUDE_PLUGIN_ROOT: '/plugin' }),
+    ).toBe('Call mcp__plugin_tenjin_router__request({query: "q"})');
+    expect(toolNamed('Call request({query: "q"})', 'claude', {})).toBe(
       'Call mcp__x402__request({query: "q"})',
     );
   });
@@ -2184,6 +2186,7 @@ describe('the delegation hook', () => {
       const sent = calls[0] as { body: Record<string, unknown> };
       expect(Object.keys(sent.body).sort()).toEqual([
         'accepts',
+        'harness',
         'packet',
         'schemaVersion',
         'sessionId',

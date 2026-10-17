@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
-import { codexHome } from '../adapters/codex';
+import { codexHome } from './codex-home';
 
 /**
  * Codex's persistent command grant: `$CODEX_HOME/rules/tenjin.rules`.

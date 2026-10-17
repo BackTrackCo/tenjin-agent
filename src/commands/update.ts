@@ -115,6 +115,8 @@ export interface UpdateDeps {
   listMcpProcesses?: ListMcpProcesses;
   /** When the new build was installed; tests inject it. */
   installedAt?: InstalledAt;
+  /** Whether Codex lists the Tenjin plugin, injected in tests. */
+  codexInstalled?: () => Promise<boolean>;
 }
 
 interface UpdateData {
@@ -267,6 +269,7 @@ export async function runUpdate(
   );
 
   const refresh = await refreshProfiles(ctx, deps);
+  const codex = await refreshCodex(deps);
   // The refresh child's output is captured, so the warning it would print about
   // a `tenjin mcp` still running the old build is checked again here, with the
   // fix the child's migration state calls for.
@@ -274,16 +277,57 @@ export async function runUpdate(
     settingsInstallPending: refresh.settingsInstallPending,
   });
   return {
-    data: { ...data(true), refresh, mcpServer: servers.check },
+    data: {
+      ...data(true),
+      refresh,
+      ...(codex !== null ? { codex } : {}),
+      mcpServer: servers.check,
+    },
     humanLines: [
       `Updated tenjin-cli ${current} -> ${latest}.`,
       ...refreshLines(refresh),
+      ...(codex === 'refreshed' ? ['Refreshed the Codex plugin.'] : []),
+      ...(codex === 'failed'
+        ? ['Could not refresh the Codex plugin. Run `tenjin install --harness codex --refresh`.']
+        : []),
       ...refresh.notices,
       ...(servers.stale > 0
         ? [`! ${servers.check.detail}. ${servers.check.fix ?? ''}`.trim()]
         : []),
     ],
   };
+}
+
+/**
+ * THE CODEX PLUGIN IS A COPY. Codex reads it from its own cache, taken from the
+ * package at `codex plugin add`, so the new build re-adds it, only where Codex
+ * already lists it. Its hooks carry no version, so their trust survives.
+ */
+async function refreshCodex(deps: UpdateDeps): Promise<'refreshed' | 'failed' | null> {
+  const installed = await (
+    deps.codexInstalled ??
+    (async () => {
+      const { readCodexListing } = await import('../router/codex-install');
+      const { execFile } = await import('node:child_process');
+      const run = (args: string[]) =>
+        new Promise<{ code: number; stdout: string; stderr: string }>((done) => {
+          execFile('codex', args, { timeout: 10_000 }, (err, stdout, stderr) =>
+            done({ code: err === null ? 0 : 1, stdout: String(stdout), stderr: String(stderr) }),
+          );
+        });
+      return (await readCodexListing(run)).installed;
+    })
+  )().catch(() => false);
+  if (!installed) return null;
+  const entry = versionFreeEntry(deps.refreshCommand ?? process.argv[1]);
+  if (entry === null) return 'failed';
+  const outcome = await (deps.spawnImpl ?? spawnCapture)(
+    process.execPath,
+    [entry, 'install', '--harness', 'codex', '--refresh'],
+    { cwd: homedir(), timeoutMs: REFRESH_TIMEOUT_MS, env: { [NUDGE_OPT_OUT]: '1' } },
+    () => {},
+  );
+  return outcome.kind === 'exit' && outcome.code === 0 ? 'refreshed' : 'failed';
 }
 
 /** How long one `install --refresh` child gets. Local file writes only, no
