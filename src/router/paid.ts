@@ -88,6 +88,44 @@ export async function appendPaidRecord(dataDir: string, record: PaidRecord): Pro
   }
 }
 
+/**
+ * A JOB'S ROW, FINISHED IN PLACE. A paid call whose seller was still working
+ * is recorded when it is paid, so a crash mid-poll loses no row; the files the
+ * job later saved, and the settlement its last answer named, are written onto
+ * that same row, found by its authorization's nonce, under the lock reconcile
+ * rewrites with. One payment, one row. Never throws.
+ */
+export async function updatePaidRecord(
+  dataDir: string,
+  nonce: string,
+  patch: { savedFiles?: string[]; txHash?: string },
+): Promise<void> {
+  try {
+    const path = paidLedgerPath(dataDir);
+    const key = nonce.toLowerCase();
+    await withFileLock(`${path}.lock`, async () => {
+      const current = parseLedger(await readFile(path, 'utf8').catch(() => ''));
+      let found = false;
+      const lines = current.map(({ line, record }) => {
+        if (record?.authorization?.nonce.toLowerCase() !== key) return line;
+        found = true;
+        return JSON.stringify({
+          ...record,
+          ...(patch.savedFiles !== undefined ? { savedFiles: patch.savedFiles } : {}),
+          ...(patch.txHash !== undefined && record.settlement === 'unknown'
+            ? { txHash: patch.txHash, settlement: 'settled' }
+            : {}),
+        });
+      });
+      if (found) {
+        await writeFileAtomic(path, lines.map((line) => `${line}\n`).join(''), { mode: 0o600 });
+      }
+    });
+  } catch {
+    // The record is the user's convenience; the lookup already happened.
+  }
+}
+
 /** `authorizationState(address,bytes32)`: the first four bytes of its keccak-256. */
 const AUTHORIZATION_STATE_SELECTOR = '0xe94a0102';
 const WORD_RE = /^0x[0-9a-fA-F]{64}$/;
@@ -367,6 +405,11 @@ export interface MediaDeps {
   now?: () => number;
   timeoutMs?: number;
   maxBytes?: number;
+  /** What the call may still write, shared by every file it saves, side by
+   *  side or not: charged as each chunk is written, so a download still in
+   *  flight holds only what it wrote. A chunk that would take it below zero
+   *  stops that file, and a file that is not kept gives its bytes back. */
+  budget?: { leftBytes: number };
 }
 
 /**
@@ -418,24 +461,31 @@ type LookupCallback = (
   family?: number,
 ) => void;
 
+/** A file the budget left too little room for. */
+const CAPPED = Symbol('capped');
+
 /**
  * Download each URL into the downloads dir, one at a time, each under its own
  * size cap and deadline, every hop of a redirect validated and connected to
- * the address it validated. Returns the paths that were written; a URL that
- * fails is skipped and never fails the call.
+ * the address it validated. Returns the paths that were written, and whether
+ * the budget left a file too little room (`capped`), which a later call, with
+ * a budget of its own, could save; a URL that fails is skipped and never
+ * fails the call.
  */
 export async function saveMedia(
   dataDir: string,
   stem: string,
   urls: string[],
   deps: MediaDeps = {},
-): Promise<string[]> {
+): Promise<{ saved: string[]; capped: boolean }> {
   const saved: string[] = [];
+  let capped = false;
   for (const [index, url] of urls.entries()) {
     const path = await saveOne(dataDir, `${stem}-${index + 1}`, url, deps);
-    if (path !== null) saved.push(path);
+    if (path === CAPPED) capped = true;
+    else if (path !== null) saved.push(path);
   }
-  return saved;
+  return { saved, capped };
 }
 
 async function saveOne(
@@ -443,9 +493,16 @@ async function saveOne(
   stem: string,
   raw: string,
   deps: MediaDeps,
-): Promise<string | null> {
+): Promise<string | typeof CAPPED | null> {
   const transport = deps.transport ?? pinnedGet;
-  const maxBytes = deps.maxBytes ?? MAX_MEDIA_BYTES;
+  const cap = deps.maxBytes ?? MAX_MEDIA_BYTES;
+  const { budget } = deps;
+  if (budget !== undefined && budget.leftBytes <= 0) return CAPPED;
+  // What this file has taken from the call's budget, given back unless kept.
+  let charged = 0;
+  let kept = false;
+  // Stopped by the call's budget, not by the file's own cap.
+  let capped = false;
   const signal = AbortSignal.timeout(deps.timeoutMs ?? MEDIA_TIMEOUT_MS);
   let target = raw;
   let path: string | null = null;
@@ -463,9 +520,14 @@ async function saveOne(
       res?.discard();
       return null;
     }
-    if ((res.contentLength ?? 0) > maxBytes) {
+    const declared = res.contentLength ?? 0;
+    if (declared > cap) {
       res.discard();
       return null;
+    }
+    if (budget !== undefined && declared > budget.leftBytes) {
+      res.discard();
+      return CAPPED;
     }
     const ext = new URL(target).pathname.split('.').pop()?.toLowerCase() ?? 'bin';
     const file = await createUniqueFile(
@@ -478,19 +540,34 @@ async function saveOne(
     try {
       for await (const chunk of res.body) {
         size += chunk.byteLength;
-        if (size > maxBytes) {
+        if (size > cap) {
           res.discard();
           throw new Error('media over the size cap');
+        }
+        // Charged before the write, in the same turn as the check, so files
+        // saving side by side can never write past the call's cap between
+        // them.
+        if (budget !== undefined) {
+          if (chunk.byteLength > budget.leftBytes) {
+            res.discard();
+            capped = true;
+            throw new Error("media over the call's download cap");
+          }
+          budget.leftBytes -= chunk.byteLength;
+          charged += chunk.byteLength;
         }
         await writeAll(file.handle, chunk);
       }
     } finally {
       await file.handle.close();
     }
+    kept = true;
     return path;
   } catch {
     if (path !== null) await rm(path, { force: true }).catch(() => undefined);
-    return null;
+    return capped ? CAPPED : null;
+  } finally {
+    if (budget !== undefined && !kept) budget.leftBytes += charged;
   }
 }
 

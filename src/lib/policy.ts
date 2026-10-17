@@ -67,6 +67,14 @@ function normCreator(value: string): string {
   return value.trim().toLowerCase();
 }
 
+/** Whether `allowlistCreators` lets this creator be paid: any, when it is empty. */
+function allowsCreator(policy: SpendPolicy, creator: string): boolean {
+  return (
+    policy.allowlistCreators.length === 0 ||
+    policy.allowlistCreators.map(normCreator).includes(normCreator(creator))
+  );
+}
+
 /** Hard price/creator checks apply in both modes. Manual payments require consent;
  * automatic payments must fit both configured ceilings without prompting. */
 export function evaluateSpendPolicy(policy: SpendPolicy, req: SpendRequest): PolicyEvaluation {
@@ -78,15 +86,12 @@ export function evaluateSpendPolicy(policy: SpendPolicy, req: SpendRequest): Pol
     };
   }
 
-  if (policy.allowlistCreators.length > 0) {
-    const allowed = policy.allowlistCreators.map(normCreator);
-    if (!allowed.includes(normCreator(req.creator))) {
-      return {
-        decision: 'deny',
-        reason: 'not_allowlisted',
-        message: `Creator "${req.creator}" is not in allowlistCreators.`,
-      };
-    }
+  if (!allowsCreator(policy, req.creator)) {
+    return {
+      decision: 'deny',
+      reason: 'not_allowlisted',
+      message: `Creator "${req.creator}" is not in allowlistCreators.`,
+    };
   }
 
   if (req.mode === 'manual') {
@@ -122,28 +127,33 @@ export function evaluateSpendPolicy(policy: SpendPolicy, req: SpendRequest): Pol
 }
 
 /**
- * WHETHER A SET OF AUTOMATIC PAYMENTS FITS, all of them, before any is signed.
- * Each one meets {@link evaluateSpendPolicy} exactly as it would alone, with
- * the ones before it already counted against the session: so every step is
- * held to the per-call cap on its own and the set's total to the budget. The
+ * WHETHER ONE CALL'S PAYMENTS FIT, AS A WHOLE, before any is signed. Every
+ * payee meets the allowlist on its own; their TOTAL meets the session budget
+ * with what the window already spent, and `maxAutoSpend`, which is the
+ * automatic limit for the whole call however many payments it makes. The
  * first refusal is the answer; each payment still meets the gate when it is
  * signed.
  */
-export function policyCoversSet(
+export function evaluatePlan(
   policy: SpendPolicy,
-  steps: readonly { amountAtomic: bigint; creator: string }[],
+  payments: readonly { amountAtomic: bigint; creator: string }[],
   sessionSpentAtomic: bigint,
 ): PolicyEvaluation {
-  let spent = sessionSpentAtomic;
-  for (const step of steps) {
-    const evaluation = evaluateSpendPolicy(policy, {
-      mode: 'automatic',
-      amountAtomic: step.amountAtomic,
-      creator: step.creator,
-      sessionSpentAtomic: spent,
-    });
-    if (evaluation.decision !== 'allow') return evaluation;
-    spent += step.amountAtomic;
+  const outside = payments.find((payment) => !allowsCreator(policy, payment.creator));
+  if (outside !== undefined) {
+    return {
+      decision: 'deny',
+      reason: 'not_allowlisted',
+      message: `Creator "${outside.creator}" is not in allowlistCreators.`,
+    };
   }
-  return { decision: 'allow', reason: 'within_policy', message: 'within spend policy' };
+  if (payments.length === 0) {
+    return { decision: 'allow', reason: 'within_policy', message: 'No payment required.' };
+  }
+  return evaluateSpendPolicy(policy, {
+    mode: 'automatic',
+    amountAtomic: payments.reduce((sum, payment) => sum + payment.amountAtomic, 0n),
+    creator: payments[0]!.creator,
+    sessionSpentAtomic,
+  });
 }
