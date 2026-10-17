@@ -211,7 +211,7 @@ describe('the hook legs and the routing fee', () => {
     [
       'the wallet holds less than the deposit',
       { walletBalance: async () => 50_000n },
-      '`tenjin wallet fund 2`',
+      '`tenjin wallet fund 5`',
     ],
     [
       'the wallet cannot be unlocked',

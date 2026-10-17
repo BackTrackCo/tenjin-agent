@@ -29,11 +29,11 @@ export const CHANNEL_DEPOSIT_ATOMIC = 250_000n;
  */
 export const MIN_DEPOSIT_ATOMIC = 10n * ROUTING_FEE_ATOMIC;
 /**
- * The top-up every "fund the wallet" hint names, in USD: the README's amount,
- * the routing deposit and a few hundred lookups. `tenjin wallet fund` sends it
- * to the checkout as a preset, which the checkout raises to its own floor.
+ * The top-up every "fund the wallet" hint names, in USD: the checkout's Apple
+ * Pay and Google Pay minimum, which covers the routing deposit and a few
+ * hundred lookups. `tenjin wallet fund` sends it to the checkout as a preset.
  */
-export const SUGGESTED_FUND_USD = '2';
+export const SUGGESTED_FUND_USD = '5';
 /** The spend ledger key a deposit's exposure is recorded under, before its id. */
 export const ROUTING_DEPOSIT_KEY = 'routing-deposit:';
 
