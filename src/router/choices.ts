@@ -285,7 +285,7 @@ export async function runChoiceSet(
     );
     return refuse(
       'failed',
-      `Running ${claimed.length} choices costs up to $${toMoney(ceiling.toString()).usd}, and the wallet holds $${toMoney(balance.toString()).usd}. The wallet has insufficient USDC; no payment was signed. Fund this wallet on Base with \`tenjin wallet fund\` before paying.`,
+      `Running ${claimed.length} choices costs up to $${toMoney(ceiling.toString()).usd}, and the wallet holds $${toMoney(balance.toString()).usd}: $${toMoney((ceiling - balance).toString()).usd} short. The wallet has insufficient USDC; no payment was signed. Fund this wallet on Base with \`tenjin wallet fund\` before paying.`,
       'Tell the user, or pick one choice the wallet covers; nothing was paid.',
     );
   }

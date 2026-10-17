@@ -364,6 +364,7 @@ describe('running every choice', () => {
     expect(result.envelope).toMatchObject({ status: 'failed', cost: ['provider price 0 USD'] });
     expect(String(result.envelope.reason)).toContain('insufficient USDC; no payment was signed');
     expect(String(result.envelope.reason)).toContain('$0.253');
+    expect(String(result.envelope.reason)).toContain('$0.103 short');
     await stoppedSet(calls, { status: 'unpaid', reason: 'wallet' });
     expect(auth.authorize).not.toHaveBeenCalled();
     expect(await claims()).toEqual([]);

@@ -360,6 +360,32 @@ describe('routing outcomes that buy nothing', () => {
     expect(String(result.envelope.reason)).not.toContain('could not pay');
   });
 
+  it('names a routing deposit once, in the result of the call that took it', async () => {
+    let deposited = 250_000n;
+    const route = async () => ({
+      path: '/api/x402-router/route',
+      send: (url: string, options: HttpRequestOptions) => httpRequest(url, options),
+      deposited: () => deposited,
+    });
+    const { fetchImpl } = net([
+      { url: ROUTER, status: 200, body: NATIVE },
+      { url: ROUTER, status: 200, body: NATIVE },
+    ]);
+    const first = await runRequestTool(
+      { query: 'what is the weather' },
+      { ...deps(fetchImpl), route },
+    );
+    expect(first.summary.split('\n').at(-1)).toBe(
+      'Tenjin moved $0.25 into prepaid routing credit; each routing call uses $0.003.',
+    );
+    deposited = 0n;
+    const next = await runRequestTool(
+      { query: 'what is the weather' },
+      { ...deps(fetchImpl), route },
+    );
+    expect(next.summary).not.toContain('routing credit');
+  });
+
   it('says a routing payment went out when the call ran out of time after sending it', async () => {
     const route = async () => ({
       path: '/api/x402-router/route',
@@ -566,6 +592,50 @@ describe('a paid call the provider refused', () => {
   it('carries no settlementError when the seller sent no payment-response header', async () => {
     const result = await refused({ body: { success: false, error: REASON } });
     expect(result.envelope).not.toHaveProperty('settlementError');
+  });
+});
+
+describe('a paid long job that named a status URL before its time ran out', () => {
+  it('hands the agent the URL and says a second call would pay again', async () => {
+    const scripted = net([
+      { url: ROUTER, status: 200, body: decision() },
+      {
+        url: PROVIDER,
+        status: 402,
+        body: {},
+        headers: { 'PAYMENT-REQUIRED': challenge({ maxTimeoutSeconds: 1 }) },
+      },
+    ]);
+    // The paid leg: its headers at once, its body never before the deadline.
+    const fetchImpl = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      if (!new Headers(init?.headers).has('payment-signature'))
+        return scripted.fetchImpl(input, init);
+      const body = new ReadableStream({
+        start(controller) {
+          init?.signal?.addEventListener('abort', () =>
+            controller.error(new DOMException('The operation was aborted', 'AbortError')),
+          );
+        },
+      });
+      return new Response(body, {
+        status: 200,
+        headers: { 'X-Status-Url': 'https://pro-api.example.test/jobs/42' },
+      });
+    }) as typeof fetch;
+    const quick = { ...ctx(), flags: { ...ctx().flags, timeout: 50 } };
+    const result = await runRequestTool(
+      { query: 'BTC price', id: 'k3f9-abcd' },
+      { ...deps(fetchImpl), ctx: quick },
+    );
+    expect(result.envelope).toMatchObject({
+      status: 'failed',
+      statusUrl: 'https://pro-api.example.test/jobs/42',
+      settlement: 'unknown',
+      cost: ['provider price 0.01 USD'],
+      nextStep:
+        'Check statusUrl for the result. Do not call request again for this: it would pay again.',
+    });
+    expect(String(result.envelope.reason)).toContain('The seller is still working on this');
   });
 });
 

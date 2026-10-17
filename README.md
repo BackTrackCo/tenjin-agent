@@ -52,7 +52,7 @@ Or in a terminal (Node.js 22 or newer):
 ```bash
 npm i -g tenjin-cli
 tenjin install          # adds the Tenjin plugin to Claude Code and creates your wallet
-tenjin wallet fund 2    # optional: add $2 with a card, via Coinbase
+tenjin wallet fund 5    # optional: add $5 with a card, via Coinbase
 ```
 
 ## What it can do
@@ -122,13 +122,13 @@ Tenjin pays for tools with [x402](https://www.x402.org), an open standard that b
 
 ### Routing fee
 
-Each routing call costs a flat $0.003, paid over x402 `batch-settlement` by `tenjin mcp` from a channel deposit of up to $0.25 (less when your per-call limit is lower). A deposit is an automatic payment: it counts against the limits above, and approving them at install approves the fee. The fees come out of the deposit and are not counted again. When a call cannot be paid, it takes the free path, and Claude Code tells you once per session why and what fixes it; `tenjin doctor` says the same. Details are in [docs/agent-permissions.md](docs/agent-permissions.md#what-bounds-a-router-payment-on-top-of-that).
+Each routing call costs a flat $0.003, paid over x402 `batch-settlement` by `tenjin mcp` from a channel deposit of up to $0.25 (less when your per-call limit is lower). A deposit is an automatic payment: it counts against the limits above, and approving them at install approves the fee. The fees come out of the deposit and are not counted again. When a deposit is taken, Claude Code says so once; `tenjin status` shows it as prepaid routing credit, apart from what lookups cost, and `tenjin wallet balance` adds the credit still left. When a call cannot be paid, it takes the free path, and Claude Code tells you once per session why and what fixes it; `tenjin doctor` says the same. Details are in [docs/agent-permissions.md](docs/agent-permissions.md#what-bounds-a-router-payment-on-top-of-that).
 
 ### Funding
 
-`tenjin wallet fund 2` opens a Coinbase Onramp checkout for your wallet. In the US, Apple Pay or Google Pay with no Coinbase account. Elsewhere, your Coinbase account. You can also send USDC on Base to the address `tenjin wallet address` prints; at a terminal it and `tenjin wallet fund` also draw that address as a QR code for a phone wallet to scan (`--no-qr` skips it).
+`tenjin wallet fund 5` opens a Coinbase Onramp checkout for your wallet. In the US, Apple Pay or Google Pay with no Coinbase account. Elsewhere, your Coinbase account. You can also send USDC on Base to the address `tenjin wallet address` prints; at a terminal it and `tenjin wallet fund` also draw that address as a QR code for a phone wallet to scan (`--no-qr` skips it).
 
-$1–2 goes a long way. $2 covers about 280 web searches, 200 page reads or 100 Wolfram Alpha answers.
+$5, the Apple Pay and Google Pay minimum, covers about 700 web searches, 500 page reads or 250 Wolfram Alpha answers.
 
 ### Withdrawing
 
@@ -140,6 +140,7 @@ $1–2 goes a long way. $2 covers about 280 web searches, 200 page reads or 100 
 tenjin status                  # what you've spent today
 tenjin wallet balance          # what's left
 tenjin wallet fund 5           # top up
+tenjin payments                # the paid lookups this machine made
 tenjin payments reconcile      # settle paid lookups whose settlement was unknown
 tenjin update                  # newest version; wallet and settings stay
 tenjin config set router.enabled false             # pause the router on this machine
@@ -147,7 +148,9 @@ tenjin config set --project router.enabled false   # ...or just in this repo
 tenjin uninstall               # remove the Claude Code plugin; your wallet stays
 ```
 
-Use `tenjin install --project` to set it up for a single project. Add `--json` to any command for machine-readable output.
+Use `tenjin install --project` to set it up for a single project; `tenjin doctor` run in that project checks it, and `tenjin update` refreshes it with the rest. Add `--json` to any command for machine-readable output.
+
+The CLI asks npm at most once a day whether a newer version exists and says so; it never updates itself, so `tenjin update` is yours to run. `tenjin config set update.mode off` turns that check off, the request to npm included, and `TENJIN_NO_UPDATE_CHECK=1` in the environment does the same wherever it is set.
 
 Every paid lookup is recorded on your machine, with the files and full results it returned. [Where they live, and what `payments reconcile` does →](./docs/agent-permissions.md#what-a-paid-lookup-leaves-on-your-machine)
 

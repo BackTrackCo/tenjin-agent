@@ -474,6 +474,9 @@ export interface DecisionDeps {
 export interface DecisionRoute {
   path: string;
   send: (url: string, options: HttpRequestOptions) => Promise<HttpResult>;
+  /** What this route's calls deposited into the routing channel and the
+   *  router took, 0n for none: the caller says so once, where it is read. */
+  deposited?: () => bigint;
 }
 
 /** The paid path gave this call no answer: the wallet locked, low or over

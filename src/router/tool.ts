@@ -34,10 +34,11 @@ import {
   type DecisionContract,
   type DecisionDeps,
   type DecisionDiagnostics,
+  type DecisionRoute,
   type OfferSpec,
 } from './decision';
 import { pickChoice, runChoiceSet, showChoices } from './choices';
-import { FEE_REQUIRED, isFeeRequired, unpaidSentence, type RouteFor } from './fee';
+import { depositSentence, FEE_REQUIRED, isFeeRequired, unpaidSentence, type RouteFor } from './fee';
 import { unpaidNotice } from './spend-question';
 import { clearRouterMemo } from './router-memo';
 import { loadRawConfig } from '../lib/config';
@@ -144,6 +145,34 @@ export interface RequestToolResult {
 }
 
 export async function runRequestTool(
+  args: RequestToolArgs,
+  deps: RequestToolDeps,
+): Promise<RequestToolResult> {
+  // A ROUTING DEPOSIT IS SAID WHERE THE AGENT READS IT: once, in the result of
+  // the call that took it, beside whatever that call answered. A hook leg says
+  // it in its `systemMessage` instead.
+  const routes: DecisionRoute[] = [];
+  const { route } = deps;
+  const result = await requestTool(
+    args,
+    route === undefined
+      ? deps
+      : {
+          ...deps,
+          route: async (baseUrl) => {
+            const picked = await route(baseUrl);
+            if (picked !== null) routes.push(picked);
+            return picked;
+          },
+        },
+  );
+  const deposited = routes.reduce((sum, r) => sum + (r.deposited?.() ?? 0n), 0n);
+  return deposited > 0n
+    ? { ...result, summary: `${result.summary}\n${depositSentence(deposited)}` }
+    : result;
+}
+
+async function requestTool(
   args: RequestToolArgs,
   deps: RequestToolDeps,
 ): Promise<RequestToolResult> {
@@ -884,6 +913,9 @@ async function payAndDeliver(
       providerError?: string;
       /** The seller's reason for not settling, from its payment-response header. */
       settlementError?: string;
+      /** Where a long job's result will be, named by the seller before the paid
+       *  leg timed out. */
+      statusUrl?: string;
       authorization?: SignedAuthorization;
       /** The live 402's terms, on a REGISTRY_MISMATCH. */
       live?: { amount?: string };
@@ -965,11 +997,19 @@ async function payAndDeliver(
         // field it cannot see.
         request: { method: built.method, url: built.url },
         ...(call.parameters !== undefined ? { parameters: call.parameters } : {}),
+        // A LONG JOB STILL RUNNING: where its result will be, and that this
+        // call was paid, so a second one would pay again.
+        ...(typeof detail.statusUrl === 'string' ? { statusUrl: detail.statusUrl } : {}),
         ...(overCeiling
           ? { nextStep: 'Change the input and call again with the same id.' }
           : rejectedInput
             ? { nextStep: 'Fix the input and call again with the same id.' }
-            : {}),
+            : typeof detail.statusUrl === 'string'
+              ? {
+                  nextStep:
+                    'Check statusUrl for the result. Do not call request again for this: it would pay again.',
+                }
+              : {}),
       }),
     };
   }
@@ -1322,6 +1362,8 @@ interface FailExtras {
   /** Why the seller says it did not settle a signed payment, bounded and
    *  redacted. Provider content. */
   settlementError?: string;
+  /** Where a long job's result will be, as the seller named it. Provider content. */
+  statusUrl?: string;
   /** The backend's own stable error code, from a typed non-2xx body. */
   errorCode?: string;
   /** What stopped a non-execute decision, in the backend's own terms. */
@@ -1390,6 +1432,7 @@ export function fail(
       ...(extras.providerStatus !== undefined ? { providerStatus: extras.providerStatus } : {}),
       ...(extras.providerError !== undefined ? { providerError: extras.providerError } : {}),
       ...(extras.settlementError !== undefined ? { settlementError: extras.settlementError } : {}),
+      ...(extras.statusUrl !== undefined ? { statusUrl: extras.statusUrl } : {}),
       ...(extras.request !== undefined ? { request: extras.request } : {}),
       ...(extras.parameters !== undefined ? { parameters: extras.parameters } : {}),
       providerContentUntrusted: true,

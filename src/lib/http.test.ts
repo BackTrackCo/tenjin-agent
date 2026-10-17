@@ -214,6 +214,28 @@ describe('fetchJson', () => {
     });
     expect(res).toMatchObject({ ok: false, kind: 'timeout' });
   });
+
+  it('keeps the headers that came before a body that ran out of time', async () => {
+    const stalledFetch: typeof fetch = (async (_url, init) => {
+      const body = new ReadableStream({
+        start(controller) {
+          init?.signal?.addEventListener('abort', () =>
+            controller.error(new DOMException('The operation was aborted', 'AbortError')),
+          );
+        },
+      });
+      return new Response(body, {
+        status: 200,
+        headers: { 'X-Status-Url': 'https://x.example/status/1' },
+      });
+    }) as typeof fetch;
+    const res = await httpRequest('https://x.example/api', {
+      timeoutMs: 20,
+      fetchImpl: stalledFetch,
+    });
+    expect(res).toMatchObject({ ok: false, kind: 'timeout' });
+    expect(!res.ok && res.header?.('x-status-url')).toBe('https://x.example/status/1');
+  });
 });
 
 /**

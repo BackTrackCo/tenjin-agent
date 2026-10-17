@@ -59,7 +59,8 @@ export const SCOPE_RULE =
  */
 const INSTRUCTIONS =
   "Paid lookups through Tenjin's router (math, live prices, research, page reads, " +
-  'company/person/email lookups). When one fits, a hook line names the service and how ' +
+  'company/person/email lookups, and generating images, voice, music, sound or video). ' +
+  'When one fits, a hook line names the service and how ' +
   'to call it: at the start of a turn, in place of a WebSearch or WebFetch call, after ' +
   'one comes back short, or in a delegated task. ' +
   'The line is the call to make, with its fields: fill them and call `{id, input}` once, ' +

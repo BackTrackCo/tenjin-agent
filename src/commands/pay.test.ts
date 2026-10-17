@@ -387,6 +387,61 @@ describe('runPay, paid-leg timeout', () => {
     expect((result.data as { paid: boolean }).paid).toBe(true);
   });
 
+  /** A paid leg whose headers name `statusUrl` and whose body never arrives
+   *  before the deadline: the refusal, and which legs were sent. */
+  async function longJob(statusUrl: string): Promise<{ err: CliError; calls: string[] }> {
+    const fixture = buildPaymentRequired({ maxTimeoutSeconds: 1 });
+    const calls: string[] = [];
+    const fetchImpl: typeof fetch = (async (
+      _input: Parameters<typeof fetch>[0],
+      init?: RequestInit,
+    ) => {
+      calls.push(new Headers(init?.headers).has('PAYMENT-SIGNATURE') ? 'paid' : 'probe');
+      if (calls.length === 1) return json(402, {}, { 'PAYMENT-REQUIRED': fixture.header });
+      // The render's headers come at once; its body never does before the deadline.
+      const body = new ReadableStream({
+        start(controller) {
+          init?.signal?.addEventListener('abort', () =>
+            controller.error(new DOMException('The operation was aborted', 'AbortError')),
+          );
+        },
+      });
+      return new Response(body, { status: 200, headers: { 'X-Status-Url': statusUrl } });
+    }) as typeof fetch;
+    const err = (await runPay({ url: TENJIN_URL }, makeCtx({ timeout: 50 }), {
+      ...PUBLIC_DNS,
+      fetchImpl,
+      provider: testWalletProvider(),
+      authorizer: fakeAuthorizer('allow'),
+    }).then(
+      () => undefined,
+      (e: unknown) => e,
+    )) as CliError;
+    return { err, calls };
+  }
+
+  it('names the status URL a long job sent with its headers, and pays nothing more', async () => {
+    const { err, calls } = await longJob('/jobs/42');
+    expect(err).toBeInstanceOf(CliError);
+    expect(err.message).toBe(
+      'The seller is still working on this: no result within 1 s, and it named a status URL to check: https://tenjin.blog/jobs/42',
+    );
+    expect(err.fix).toContain('Do not pay again: check the status URL for the result.');
+    expect(err.details).toMatchObject({
+      statusUrl: 'https://tenjin.blog/jobs/42',
+      settlement: 'unknown',
+    });
+    expect(calls).toEqual(['probe', 'paid']);
+  });
+
+  it('never points the agent at a status URL on another host', async () => {
+    const { err } = await longJob('https://localhost/jobs/42');
+    expect(err).toBeInstanceOf(CliError);
+    expect(err.message).not.toContain('status URL');
+    expect(err.details).not.toHaveProperty('statusUrl');
+    expect(err.details).toMatchObject({ settlement: 'unknown' });
+  });
+
   it('keeps the unpaid probe on the CLI timeout', async () => {
     const fixture = buildPaymentRequired({ maxTimeoutSeconds: 1 });
     const fetch = slowFetch([json(402, {}, { 'PAYMENT-REQUIRED': fixture.header })], [150]);
@@ -1748,6 +1803,13 @@ describe('direct registry warning acknowledgement and balance enforcement', () =
       ).rejects.toMatchObject({
         code: 'REFUSED',
         details: { reason: balance === null ? 'balance_unavailable' : 'insufficient_funds' },
+        ...(balance === 99_999n
+          ? {
+              message: expect.stringContaining(
+                'It holds 0.099999 USD and this costs 0.1 USD: 0.000001 USD short.',
+              ),
+            }
+          : {}),
       });
       expect(readBalance).toHaveBeenCalledWith(signer.address, expect.any(String), {
         timeoutMs: expect.any(Number),
