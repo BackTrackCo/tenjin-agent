@@ -726,8 +726,11 @@ async function quoteTake(
         terms: specTerms(spec),
       },
       deps.ctx,
-      // The same seams the paid leg is given.
-      deps.payDeps ?? {},
+      // The same seams, and the same wallet, the paid leg is given.
+      {
+        ...(deps.payDeps ?? {}),
+        ...(deps.provider !== undefined ? { provider: deps.provider } : {}),
+      },
     );
     return { atomic };
   } catch (err) {

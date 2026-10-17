@@ -317,9 +317,13 @@ async function executePay(
       warnings,
     );
   }
-  // THE CALL'S PLAN ADMITS THIS PAYMENT at the price first seen, before the
-  // wallet is opened: over the limits, the refusal is the router's quote.
-  const slot = router ? await args.admit!(firstSeenAmount) : undefined;
+  // THE CALL'S PLAN ADMITS ONLY A PAYMENT STILL NEEDED. With no entitlement
+  // to check, it is admitted here, at the price first seen, before the wallet
+  // is opened; over the limits, the refusal is the router's quote. A seller
+  // that takes sign-in-with-x is asked first, below: a wallet that already
+  // owns the result re-reads it free, and is never quoted a payment for it.
+  const entitlement = paymentRequired.extensions?.[SIGN_IN_WITH_X] !== undefined;
+  let slot = router && !entitlement ? await args.admit!(firstSeenAmount) : undefined;
 
   const provider = resolveWalletProvider(
     ctx,
@@ -335,7 +339,7 @@ async function executePay(
   // so a foreign seller gets a credential worth nothing anywhere else.
   let effectiveChallenge = paymentRequired;
   let effectiveRequirement = requirement;
-  if (paymentRequired.extensions?.[SIGN_IN_WITH_X] !== undefined) {
+  if (entitlement) {
     const siwxHeader = await buildSiwxHeader(signer, {
       baseUrl: new URL(url).origin,
       chainId: requirement.network,
@@ -414,6 +418,7 @@ async function executePay(
     }
   }
   const amountAtomic = BigInt(effectiveRequirement.amount);
+  if (router && entitlement) slot = await args.admit!(amountAtomic);
   if (router) {
     const refusal = spendSlot(slot, amountAtomic);
     if (refusal === 'above_plan') {
@@ -678,8 +683,10 @@ async function assertBalanceCovers(
  * nothing signed and nothing reserved. It is the number a single call gates
  * on, so several takes of one call are checked at it rather than at the
  * spec's ceiling: a price that varies by input is quoted for this input.
- * A probe that answers 2xx is free: 0. Every refusal is the paid leg's own,
- * with nothing sent but the probe.
+ * A probe that answers 2xx is free: 0. A seller that takes sign-in-with-x is
+ * asked as the paid leg asks it, so a wallet that already owns the result
+ * quotes 0 and is never planned a payment for it. Every refusal is the paid
+ * leg's own, with nothing sent but the probe and that re-read.
  */
 export async function quoteRouterCall(
   args: Pick<PayArgs, 'url' | 'method' | 'headers' | 'rawBody'> & { terms: AdvertisedTerms },
@@ -723,7 +730,42 @@ export async function quoteRouterCall(
   const requirement = selectRequirement(payer.core, challenge, args.terms);
   if (requirement === undefined) throw noMatchingEntry(challenge, args.terms);
   assertWithinTerms(args.terms, requirement);
-  return BigInt(requirement.amount);
+  if (challenge.extensions?.[SIGN_IN_WITH_X] === undefined) return BigInt(requirement.amount);
+  const signer = await openWallet(
+    resolveWalletProvider(ctx, deps.provider !== undefined ? { provider: deps.provider } : {}),
+  );
+  const recheck = await httpRequest(url, {
+    timeoutMs: ctx.flags.timeout,
+    blockRedirects: true,
+    binaryBody: true,
+    method: resolveMethod(args),
+    ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+    ...(args.rawBody !== undefined ? { rawBody: args.rawBody } : {}),
+    headers: {
+      ...headers,
+      [SIWX_HEADER]: await buildSiwxHeader(signer, {
+        baseUrl: new URL(url).origin,
+        chainId: requirement.network,
+      }),
+    },
+  });
+  if (!recheck.ok) throw fetchFailureToCliError(recheck);
+  if (recheck.status >= 200 && recheck.status < 300) return 0n;
+  if (recheck.status !== 402) {
+    throw new CliError(
+      'API_UNREACHABLE',
+      `${url} answered ${recheck.status} on the entitlement re-check.`,
+      {
+        fix: 'Nothing was paid.',
+        details: { status: recheck.status, body: recheck.json, ...providerError(recheck.text) },
+      },
+    );
+  }
+  const fresh = decodeChallenge(recheck, url);
+  const owed = selectRequirement(payer.core, fresh, args.terms);
+  if (owed === undefined) throw noMatchingEntry(fresh, args.terms);
+  assertWithinTerms(args.terms, owed);
+  return BigInt(owed.amount);
 }
 
 /** Which lane may pay this URL, or the exact refusal. */

@@ -2,7 +2,13 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtemp, rm, writeFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { MAX_PAID_LEG_TIMEOUT_MS, paidLegTimeoutMs, runPay, type PaidLeg } from './pay';
+import {
+  MAX_PAID_LEG_TIMEOUT_MS,
+  paidLegTimeoutMs,
+  quoteRouterCall,
+  runPay,
+  type PaidLeg,
+} from './pay';
 import { admitPlan, admitQuote, type PlanSlot } from '../lib/spend-plan';
 import { createQuote } from '../lib/spend-quotes';
 import { saveSweepListings } from '../lib/bazaar';
@@ -615,6 +621,76 @@ describe('runPay, the sign-in-with-x extension', () => {
     expect(calls).toHaveLength(3);
     expect(calls[2]!.headers['payment-signature']).toBeDefined();
     expect(calls[2]!.headers['sign-in-with-x']).toBeUndefined(); // payment IS the credential
+  });
+
+  /** A WALLET THAT ALREADY OWNS THE RESULT is never quoted a payment for it:
+   *  the router's plan admits only a payment the re-read says is still owed,
+   *  at the price it says. */
+  it('re-reads free for an entitled wallet before its call plans any payment', async () => {
+    const { fetch, calls } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': siwxFixture(TENJIN_URL).header }),
+      json(200, { answer: 'yours already' }),
+    ]);
+    const admit = vi.fn(async (): Promise<PlanSlot> => {
+      throw new CliError('POLICY_REFUSED', 'over the limit: a quote');
+    });
+    const result = await runPay(
+      { url: TENJIN_URL, terms: { source: 'router', maxAmountAtomic: '100000' }, admit },
+      makeCtx(),
+      { ...PUBLIC_DNS, fetchImpl: fetch, provider: testWalletProvider() },
+    );
+    expect(result.data).toMatchObject({ paid: false, entitled: true });
+    expect(calls[1]!.headers['sign-in-with-x']).toBeDefined();
+    expect(admit).not.toHaveBeenCalled();
+  });
+
+  it('plans an unentitled wallet at the price the re-read still asks', async () => {
+    const { fetch } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': siwxFixture(TENJIN_URL).header }),
+      json(402, {}, { 'PAYMENT-REQUIRED': siwxFixture(TENJIN_URL, '90000').header }),
+      json(200, { answer: 'paid' }),
+    ]);
+    const admit = vi.fn(planned);
+    const result = await runPay(
+      { url: TENJIN_URL, terms: { source: 'router', maxAmountAtomic: '100000' }, admit },
+      makeCtx(),
+      {
+        ...PUBLIC_DNS,
+        fetchImpl: fetch,
+        provider: testWalletProvider(),
+        authorizer: fakeAuthorizer('allow'),
+      },
+    );
+    expect(result.data).toMatchObject({ paid: true });
+    expect(admit.mock.calls).toEqual([[90_000n]]);
+  });
+
+  it("quotes an entitled wallet's router call at nothing, and an unentitled one fresh", async () => {
+    const terms = { source: 'router', maxAmountAtomic: '100000' };
+    const owned = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': siwxFixture(TENJIN_URL).header }),
+      json(200, { answer: 'yours already' }),
+    ]);
+    expect(
+      await quoteRouterCall({ url: TENJIN_URL, terms }, makeCtx(), {
+        ...PUBLIC_DNS,
+        fetchImpl: owned.fetch,
+        provider: testWalletProvider(),
+      }),
+    ).toBe(0n);
+    expect(owned.calls[1]!.headers['sign-in-with-x']).toBeDefined();
+    expect(owned.calls[1]!.headers['payment-signature']).toBeUndefined();
+    const owed = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': siwxFixture(TENJIN_URL).header }),
+      json(402, {}, { 'PAYMENT-REQUIRED': siwxFixture(TENJIN_URL, '90000').header }),
+    ]);
+    expect(
+      await quoteRouterCall({ url: TENJIN_URL, terms }, makeCtx(), {
+        ...PUBLIC_DNS,
+        fetchImpl: owed.fetch,
+        provider: testWalletProvider(),
+      }),
+    ).toBe(90_000n);
   });
 
   it('a price bump between the first look and signing is refused', async () => {
