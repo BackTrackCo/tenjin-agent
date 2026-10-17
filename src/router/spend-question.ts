@@ -73,6 +73,49 @@ export function spendQuestion(limits: RouterLimits): string {
   return `May Tenjin pay for tool calls without asking you each time, ${limitsPhrase(limits)}? ${ROUTING_FEE_TERMS} ${FEE_APPROVAL}`;
 }
 
+/** The question an install that could not ask hands to its agent, with {@link spendOptions}. */
+export function spendChoiceQuestion(): string {
+  return `How much may Tenjin pay for tool calls without asking you each time? ${ROUTING_FEE_TERMS} ${FEE_APPROVAL}`;
+}
+
+/** One answer to {@link spendChoiceQuestion}, and the one command that applies it. */
+export interface SpendOption {
+  id: 'default' | 'custom' | 'none';
+  label: string;
+  recommended: boolean;
+  /** What to ask the person after they pick this option, before running `command`. */
+  ask?: string[];
+  /** The command the agent runs alone for this answer, or null: run nothing. */
+  command: string | null;
+}
+
+/**
+ * The three answers, each applied by the agent with one command and never by
+ * the person: `install` is the install that was run (its `--project` and
+ * `--no-wallet` kept), so the answer leaves every other choice as it was.
+ */
+export function spendOptions(limits: RouterLimits, install: string): SpendOption[] {
+  return [
+    {
+      id: 'default',
+      label: `Default: ${limitsPhrase(limits)}`,
+      recommended: true,
+      command: `${install} --yes`,
+    },
+    {
+      id: 'custom',
+      label: 'Custom limits',
+      recommended: false,
+      ask: [
+        'The most Tenjin may pay for one call, in USD',
+        'The most it may pay in a day, in USD, or none for no daily limit',
+      ],
+      command: `${install} --max-auto-spend <usd> --session-budget <usd|none>`,
+    },
+    { id: 'none', label: 'No automatic spending', recommended: false, command: null },
+  ];
+}
+
 /** Who reads a notice: the user, in the hook's `systemMessage`, or the agent,
  *  in the request tool's answer. */
 export type NoticeReader = 'user' | 'agent';

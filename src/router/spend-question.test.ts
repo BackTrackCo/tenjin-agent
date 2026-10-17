@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { ROUTER_DEFAULTS } from '../commands/config';
-import { ACCEPT_COMMAND, shownLimits, spendQuestion, unpaidNotice } from './spend-question';
+import {
+  ACCEPT_COMMAND,
+  shownLimits,
+  spendChoiceQuestion,
+  spendOptions,
+  spendQuestion,
+  unpaidNotice,
+} from './spend-question';
 
 describe('the spend question', () => {
   it('shows the defaults where the file names no limit, and the file where it does', () => {
@@ -37,5 +44,19 @@ describe('the spend question', () => {
       'Tenjin pays for nothing on its own yet: the spend limits are not answered. It can pay for tool calls without asking you each time, up to $0.25 a call and $5 a day. Routing costs $0.003 a call, paid from channel deposits of up to $0.25 that stay yours until spent; each deposit counts against these limits. Using these limits or choosing your own also approves the routing fee. To use these limits, run `tenjin config set maxAutoSpend 0.25`; to choose your own, run `tenjin config set maxAutoSpend <usd>` and `tenjin config set sessionBudget <usd|none>`.',
     );
     expect(unpaidNotice('limit_below_deposit', {}, 'agent')).toContain('Ask the user: May Tenjin');
+  });
+
+  it('offers an agent three answers, each applied by one install command', () => {
+    expect(spendChoiceQuestion()).toBe(
+      'How much may Tenjin pay for tool calls without asking you each time? Routing costs $0.003 a call, paid from channel deposits of up to $0.25 that stay yours until spent; each deposit counts against these limits. Using these limits or choosing your own also approves the routing fee.',
+    );
+    const options = spendOptions(shownLimits({}), 'tenjin install');
+    expect(options.map((o) => [o.label, o.recommended, o.command])).toEqual([
+      ['Default: up to $0.25 a call and $5 a day', true, 'tenjin install --yes'],
+      ['Custom limits', false, 'tenjin install --max-auto-spend <usd> --session-budget <usd|none>'],
+      ['No automatic spending', false, null],
+    ]);
+    // No answer is a command for the person, or one joined with funding.
+    for (const o of options) expect(o.command ?? '').not.toMatch(/&&|;|wallet fund|config set/);
   });
 });
