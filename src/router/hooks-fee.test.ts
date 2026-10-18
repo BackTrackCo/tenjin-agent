@@ -401,6 +401,8 @@ describe('the hook legs and the routing fee', () => {
     // The leg returns at the deposit budget, inside the hook's 5 s, unpaid and silent.
     expect(Date.now() - started).toBeLessThan(DEPOSIT_GATE_TIMEOUT_MS + 400);
     expect(systemMessageOf(first)).toBeUndefined();
+    // The lost decision still leaves the model a line pointing at request (#482).
+    expect(contextOf(first)).toContain('A Tenjin service may fit this step');
     fake.delayMs = 0;
     // The next call waits for the first to settle, then pays a voucher from
     // the channel the SDK recorded: no second deposit, no corrective 402.

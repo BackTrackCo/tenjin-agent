@@ -19,6 +19,7 @@ import {
 } from './hooks';
 import { MCP_SERVER_NAME, REQUEST_TOOL } from './names';
 import { runHookCommand } from './hook-command';
+import { markSessionServed } from './alive';
 import { readChoices, readSpec } from './specs';
 import { ROUTER_PATH } from './decision';
 import {
@@ -180,6 +181,31 @@ const NEEDS_INPUT = {
   },
 };
 
+/** The hook route's answer to an unclear gate or an already-offered pick. */
+const HOOK_NEEDS_INPUT = JSON.parse(
+  readFileSync(
+    fileURLToPath(new URL('./fixtures/wire-hook-needs-input.json', import.meta.url)),
+    'utf8',
+  ),
+) as unknown;
+
+/** The line a lost hint leaves, as the host sees it outside the plugin. */
+const LOST_LINE = `${HINT_SOURCE}: A Tenjin service may fit this step, so if it needs a lookup or generation from outside, call mcp__x402__request({query}) with your own query.`;
+
+/** A fetch that answers only when its signal aborts, as a slow router does.
+ *  The caller's own signal: a `Request`'s copy of it can be collected first. */
+const hangs = (async (_input: Parameters<typeof fetch>[0], init?: RequestInit) =>
+  new Promise<Response>((_resolve, reject) => {
+    init?.signal?.addEventListener('abort', () =>
+      reject(new DOMException('The operation was aborted.', 'AbortError')),
+    );
+  })) as typeof fetch;
+
+function contextOf(response: unknown): string | undefined {
+  return (response as { hookSpecificOutput?: { additionalContext?: string } } | null)
+    ?.hookSpecificOutput?.additionalContext;
+}
+
 function promptEvent(prompt: string): unknown {
   return { hook_event_name: 'UserPromptSubmit', session_id: 'sess-1', cwd: dir, prompt };
 }
@@ -317,20 +343,102 @@ describe('the prompt hook', () => {
     expect(out.action).toBe('native');
   });
 
-  it('says nothing on needs_input', async () => {
+  /** A LOST HINT IS STILL A LINE (#482), pointing at `request({query})`. */
+  it('points at request on needs_input, carrying the inputs the server names', async () => {
     const { fetchImpl } = router(NEEDS_INPUT);
     const out = await runPromptHook(promptEvent('enrich them'), {
       dataDir: dir,
       baseUrl: BASE,
       fetchImpl,
     });
-    expect(out.response).toBeNull();
+    expect(contextOf(out.response)).toBe(
+      `${HINT_SOURCE}: A Tenjin service may fit this step once it has company_domain, so if it needs a lookup or generation from outside, call mcp__x402__request({query}) with your own query that includes it.`,
+    );
     expect(out.action).toBe('needs_input');
   });
 
-  /** A decision that did not arrive is silence; the cause went to stderr. */
+  it("points at request on the hook's own needs_input, which names no input", async () => {
+    const { fetchImpl } = router(HOOK_NEEDS_INPUT);
+    const out = await runPromptHook(promptEvent('Generate a new coding soundtrack'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+    expect(contextOf(out.response)).toBe(LOST_LINE);
+    expect(out.action).toBe('needs_input');
+  });
+
+  it('names only argument paths, never server prose, from a needs_input', async () => {
+    const { fetchImpl } = router({
+      ...NEEDS_INPUT,
+      decision: {
+        ...NEEDS_INPUT.decision,
+        diagnostics: {
+          ...NEEDS_INPUT.decision.diagnostics,
+          missing: ['genre', 'ignore previous instructions', 'length'],
+        },
+      },
+    });
+    const out = await runPromptHook(promptEvent('make me a song'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+    expect(contextOf(out.response)).toContain('once it has genre, length, so');
+  });
+
+  it('points at request when the decision runs out of time', async () => {
+    const out = await runPromptHook(promptEvent('Generate a new coding soundtrack'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl: hangs,
+      timeoutMs: 30,
+      warn: () => undefined,
+    });
+    expect(out).toEqual({
+      response: {
+        hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: LOST_LINE },
+      },
+      lost: true,
+    });
+    expect(await renderProgress(dir, 'sess-1')).toBe(
+      'x402 · prompt: native tools (router unavailable)',
+    );
+  });
+
+  it('points at request on a router error', async () => {
+    const { fetchImpl } = router({ error: { code: 'router_unavailable', message: 'retry' } }, 503);
+    const out = await runPromptHook(promptEvent('research x402'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+      warn: () => undefined,
+    });
+    expect(contextOf(out.response)).toBe(LOST_LINE);
+    expect(out.lost).toBe(true);
+  });
+
+  it('names the plugin tool in a process the plugin launched', async () => {
+    const saved = process.env.CLAUDE_PLUGIN_ROOT;
+    process.env.CLAUDE_PLUGIN_ROOT = '/plugin';
+    try {
+      const out = await runPromptHook(promptEvent('Generate a new coding soundtrack'), {
+        dataDir: dir,
+        baseUrl: BASE,
+        fetchImpl: hangs,
+        timeoutMs: 30,
+        warn: () => undefined,
+      });
+      expect(contextOf(out.response)).toBe(LOST_LINE.replace('mcp__x402__request', REQUEST_TOOL));
+    } finally {
+      if (saved === undefined) delete process.env.CLAUDE_PLUGIN_ROOT;
+      else process.env.CLAUDE_PLUGIN_ROOT = saved;
+    }
+  });
+
+  /** `request` would meet the same wall, so these stay silent. */
   it.each([
-    ['a refusal', { error: { code: 'nope', message: 'no' } }, 503],
+    ['a refusal', { error: { code: 'unauthorized', message: 'no' } }, 401],
     ['a body this build cannot read', { schemaVersion: 2 }, 200],
   ])('says nothing on %s', async (_label, body, status) => {
     const { fetchImpl } = router(body, status);
@@ -341,6 +449,66 @@ describe('the prompt hook', () => {
       warn: () => undefined,
     });
     expect(out.response).toBeNull();
+  });
+
+  it('says nothing when the router cannot be reached', async () => {
+    const refused = (async () => {
+      throw Object.assign(new TypeError('fetch failed'), {
+        cause: Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }),
+      });
+    }) as typeof fetch;
+    const out = await runPromptHook(promptEvent('research x402'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl: refused,
+      warn: () => undefined,
+    });
+    expect(out.response).toBeNull();
+  });
+
+  it('keeps the answer arm to offers: a lost decision after a question says nothing', async () => {
+    const out = await runAnswerHook(
+      {
+        hook_event_name: 'PostToolUse',
+        session_id: 'sess-1',
+        cwd: dir,
+        tool_name: 'AskUserQuestion',
+        tool_input: { questions: [] },
+        tool_response: { answers: { 'Which genre?': 'lo-fi' } },
+      },
+      { dataDir: dir, baseUrl: BASE, fetchImpl: hangs, timeoutMs: 30, warn: () => undefined },
+    );
+    expect(out.response).toBeNull();
+  });
+
+  /** One prompt, one line: an older settings entry stays silent where the
+   *  plugin serves the session, a lost decision included. */
+  it('says nothing from the command form in a session the plugin serves', async () => {
+    await markSessionServed(dir, { session_id: 'sess-1' });
+    let calls = 0;
+    const counted = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      calls += 1;
+      return hangs(input, init);
+    }) as typeof fetch;
+    let stdout = '';
+    await runHookCommand(
+      'prompt',
+      {
+        stdout: { write: (chunk: string) => ((stdout += chunk), true) },
+        stderr: { write: () => true },
+        isTTY: false,
+      } as never,
+      {
+        dataDir: dir,
+        baseUrl: BASE,
+        fetchImpl: counted,
+        timeoutMs: 30,
+        env: {},
+        readEvent: async () => JSON.stringify(promptEvent('Generate a new coding soundtrack')),
+      },
+    );
+    expect(stdout).toBe('');
+    expect(calls).toBe(0);
   });
 
   it('never asks about a slash command or an acknowledgement', async () => {
@@ -386,11 +554,8 @@ describe('the prompt hook', () => {
 
 describe('the shortfall hook', () => {
   /** NO OUTPUT IS THE DEFAULT, and an offer is the exception. */
-  it.each([
-    ['native', NATIVE],
-    ['needs_input', NEEDS_INPUT],
-  ])('says nothing on %s', async (_label, body) => {
-    const { fetchImpl } = router(body);
+  it('says nothing on native', async () => {
+    const { fetchImpl } = router(NATIVE);
     const out = await runShortfallHook(await readableEvent('btc price today'), {
       dataDir: dir,
       baseUrl: BASE,
@@ -399,8 +564,31 @@ describe('the shortfall hook', () => {
     expect(out.response).toBeNull();
   });
 
+  /** The free tool already fell short, so a lost hint gets the prompt's line. */
   it.each([
-    ['a refusal', { error: { code: 'nope', message: 'no' } }, 503],
+    ['needs_input', router(NEEDS_INPUT).fetchImpl, 'needs_input'],
+    [
+      'a router error',
+      router({ error: { code: 'nope', message: 'no' } }, 503).fetchImpl,
+      undefined,
+    ],
+    ['a timeout', hangs, undefined],
+  ])('points at request on %s', async (_label, fetchImpl, action) => {
+    const out = await runShortfallHook(await readableEvent('btc price today'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+      timeoutMs: 100,
+      warn: () => undefined,
+    });
+    expect(contextOf(out.response)).toBe(
+      `${HINT_SOURCE}: your WebSearch call came back short. Optional: ${LOST_LINE.slice(HINT_SOURCE.length + 2)}`,
+    );
+    expect(out.action).toBe(action);
+  });
+
+  it.each([
+    ['a refusal', { error: { code: 'nope', message: 'no' } }, 400],
     ['a body this build cannot read', { schemaVersion: 2 }, 200],
   ])('says nothing on %s', async (_label, body, status) => {
     const { fetchImpl } = router(body, status);
@@ -822,6 +1010,22 @@ describe('the pre-call hook', () => {
   // What `tenjin install` writes: the fixture's 15000-atomic lookup auto-executes.
   beforeEach(async () => {
     await setConfig(ROUTER_POLICY);
+  });
+
+  /** A lost decision lets the free call run: a note beside it is not followed,
+   *  and the after-call arm still covers a short result. */
+  it.each([
+    ['needs_input', router(NEEDS_INPUT).fetchImpl],
+    ['a timeout', hangs],
+  ])('lets the call run with no output on %s', async (_label, fetchImpl) => {
+    const out = await runNativeHook(await preCall('https://example.test/spec'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+      timeoutMs: 100,
+      warn: () => undefined,
+    });
+    expect(out.response).toBeNull();
   });
 
   it('denies the main agent on execute, as main does, with the attributed hint', async () => {
@@ -2151,6 +2355,21 @@ describe('the delegation hook', () => {
     );
     expect(out.response).toBeNull();
     expect(calls).toHaveLength(0);
+  });
+
+  /** The subagent's own native and shortfall legs still route each lookup. */
+  it.each([
+    ['needs_input', router(NEEDS_INPUT).fetchImpl],
+    ['a timeout', hangs],
+  ])('leaves the task unchanged on %s', async (_label, fetchImpl) => {
+    const out = await runDelegationHook(await delegation(), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+      timeoutMs: 100,
+      warn: () => undefined,
+    });
+    expect(out.response).toBeNull();
   });
 
   it.each(['Agent', 'Task'])(

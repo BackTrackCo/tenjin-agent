@@ -515,6 +515,8 @@ export type DecisionOutcome<T> =
       unreachable?: true;
       /** No answer came back at all: a transport failure or a timeout. */
       noAnswer?: true;
+      /** The router answered 5xx: it is there, and a retry can succeed. */
+      serverError?: true;
     }
   /** The paid path gave no answer ({@link RouteSkipped}) and no time was left
    *  for the free path: the native tool runs. */
@@ -595,6 +597,7 @@ export async function requestDecision(
         ...(free.errorCode !== undefined ? { errorCode: free.errorCode } : {}),
         // Still no answer, which must not end another call's backoff.
         ...(free.noAnswer === true ? { noAnswer: true as const } : {}),
+        ...(free.serverError === true ? { serverError: true as const } : {}),
         freePath: err.why,
       };
     }
@@ -684,6 +687,7 @@ function readDecision<T extends z.ZodTypeAny>(
           ? `The router endpoint answered ${response.status}.`
           : `The router endpoint answered ${response.status} (${named.code}): ${named.message}`,
       ...(named !== null ? { errorCode: named.code } : {}),
+      ...(response.status >= 500 ? { serverError: true as const } : {}),
     };
   }
   const parsed = schema.safeParse(response.json);

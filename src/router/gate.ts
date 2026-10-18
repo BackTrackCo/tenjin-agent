@@ -15,14 +15,15 @@
  * chain read, the wallet read before a deposit and the paid request. The
  * command form (`tenjin hook`, always free) waits up to 1 s for stdin first. Either way 500 ms are left for startup, the
  * transcript read and the reply; `wire.test.ts` pins the sums.
- * The expected wait is about 1 s: the backend answers on the gate question and
- * binds afterwards.
+ * Measured on 2026-10-18 (tenjin-agent#482): the backend answers in 0.25 to
+ * 0.5 s, a paid call in 0.4 to 0.8 s once `tenjin mcp` is warm and 1.6 s as
+ * its first, and a call that deposits in 4.5 to 4.8 s.
  *
- * AN ABORT HERE IS A LOST HINT, not a lost turn. The hook falls back to one
- * line telling the model to call `request` with its own query, and the tool
- * makes the decision instead. One of four live prompts was swallowed at a 1.5 s
- * abort against a backend measured at 0.4 to 0.5 s, so this holds the slack the
- * harness budget was already leaving unused.
+ * AN ABORT HERE IS A LOST HINT, not a lost turn. The prompt and shortfall legs
+ * fall back to one line telling the model to call `request` with its own query,
+ * and the tool makes the decision instead. One of four live prompts was
+ * swallowed at a 1.5 s abort against a backend measured at 0.4 to 0.5 s, so
+ * this holds the slack the harness budget was already leaving unused.
  */
 export const GATE_TIMEOUT_MS = 3_500;
 

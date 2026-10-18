@@ -68,9 +68,11 @@ import { routerSettings, type RouterSettings } from './settings';
  * payer, not this file, signs and pays (`routing-payer.ts`). Run as
  * `tenjin hook <kind>`, every call is free.
  *
- * EVERY FAILURE IS SILENT. A backend that is down, slow or answering nonsense
- * leaves the prompt and the native result unchanged; the cause goes to
- * stderr. The user's turn is never blocked by this.
+ * NO FAILURE BLOCKS THE TURN. A backend that is down, slow or answering
+ * nonsense leaves the prompt and the native result unchanged, and the cause
+ * goes to stderr. The one thing said is {@link lostHint}: a prompt or a short
+ * native result whose decision was lost or needs input gets one line pointing
+ * at `request`, which decides again on its own budget.
  *
  * A DENY ONLY WHERE IT CAN BE ACTED ON. The pre-call arm redirects a native
  * call the router routes, as every release has, because a note beside the call
@@ -523,6 +525,22 @@ function delegationOffer(hint: string): string {
   return `${HINT_SOURCE}, optional if your own tools fall short: ${toolNamed(hint)} Your own tools are fine when they are enough.`;
 }
 
+/** A missing input the server names: an argument path, never a value. */
+const ARGUMENT_PATH_RE = /^[A-Za-z0-9_.[\]-]{1,64}$/;
+
+/** THE LINE A LOST HINT LEAVES (#482): no answer in time, a 5xx or `needs_input`.
+ *  `request({query})` decides again on its own budget. Missing inputs the
+ *  server names ride along, and the hook's own `gate_unclear` names none. */
+function lostHint(decision: HookDecision | null): string {
+  const missing =
+    decision?.action === 'needs_input'
+      ? decision.diagnostics.missing.filter((path) => ARGUMENT_PATH_RE.test(path)).slice(0, 5)
+      : [];
+  return missing.length === 0
+    ? 'A Tenjin service may fit this step, so if it needs a lookup or generation from outside, call request({query}) with your own query.'
+    : `A Tenjin service may fit this step once it has ${missing.join(', ')}, so if it needs a lookup or generation from outside, call request({query}) with your own query that includes it.`;
+}
+
 export interface HookDeps {
   dataDir: string;
   /** Overrides the resolved base URL entirely; tests point it at a local stub. */
@@ -797,15 +815,17 @@ export interface PromptHookOutcome {
   /** An `execute` whose hint was not shown: the paid call would not run on its
    *  own, for want of approval or of funds. */
   withheld?: true;
+  /** No decision arrived in time, or the router failed: {@link lostHint}. */
+  lost?: true;
 }
 
 /**
  * `tenjin hook prompt` (UserPromptSubmit). One free decision from the user's
- * own words. Only an offer (`execute`, or a `discovered` service) gets a line:
- * the server's hint, attributed. `native`, `needs_input` and a decision that
- * failed or timed out are silence:
- * a turn with no lookup carries nothing extra, and `decide` has already written
- * any failure cause to stderr.
+ * own words. An offer (`execute`, or a `discovered` service) gets the server's
+ * hint, attributed. `needs_input` and a decision lost to the timeout or a
+ * router error get {@link lostHint}, since a silent turn reads the same as
+ * "no service" to the model (tenjin-agent#482). `native` is silence: a turn
+ * with no lookup carries nothing extra.
  *
  * THE HINT ASKS FOR A CALL THAT HAS TO RUN. Over the cap or past the budget,
  * `request` answers `needs_approval`, and a model sent there stops to ask the
@@ -851,9 +871,20 @@ async function offerOnUserText(
   );
   const footer = await openFooter(deps, event.sessionId, 'prompt');
   const deadline = gateDeadline(deps);
-  const outcome = await decide(sealed, deps, router.config, event.sessionId, deadline);
+  const decided = await decide(sealed, deps, router.config, event.sessionId, deadline);
+  const outcome = decided === LOST ? null : decided;
   if (!isOffer(outcome)) {
     await footer.close(outcome);
+    // The answer arm keeps its offer-only rule: the user just answered a question.
+    if (
+      hookEventName === 'UserPromptSubmit' &&
+      (decided === LOST || outcome?.action === 'needs_input')
+    ) {
+      return {
+        ...injection(hookEventName, attributed(lostHint(outcome))),
+        ...(outcome !== null ? { action: outcome.action } : { lost: true as const }),
+      };
+    }
     return { response: null, ...(outcome !== null ? { action: outcome.action } : {}) };
   }
   const vetted = await vetOffer(outcome, deps, deadline, true);
@@ -894,6 +925,8 @@ export interface NativeHookOutcome {
   free?: true;
   /** And its docs are being fetched, to ride above the search's results. */
   augmenting?: true;
+  /** No decision arrived in time, or the router failed. */
+  lost?: true;
 }
 
 export interface ShortfallHookOutcome extends NativeHookOutcome {
@@ -1035,12 +1068,17 @@ async function routeNativeCall(
   }
   const footer = await openFooter(deps, event.sessionId, opts.operation ?? 'search');
   const deadline = gateDeadline(deps);
-  const outcome = await decide(sealed, deps, router.config, event.sessionId, deadline);
+  const decided = await decide(sealed, deps, router.config, event.sessionId, deadline);
+  const outcome = decided === LOST ? null : decided;
   if (!isOffer(outcome)) {
     await footer.close(outcome);
     return {
       offer: null,
-      outcome: { response: null, ...(outcome !== null ? { action: outcome.action } : {}) },
+      outcome: {
+        response: null,
+        ...(outcome !== null ? { action: outcome.action } : {}),
+        ...(decided === LOST ? { lost: true as const } : {}),
+      },
     };
   }
   if (opts.passFree === true && isFree(outcome)) {
@@ -1291,7 +1329,23 @@ async function offerOnShortfall(
     return { response: null, nativeOutcome, alreadyOffered: true };
   }
   const routed = await routeNativeCall(event, pending, deps, { nativeOutcome });
-  if (routed.offer === null) return { ...routed.outcome, nativeOutcome };
+  if (routed.offer === null) {
+    const { outcome } = routed;
+    // The free tool already fell short, so the prompt's lost-hint rule applies.
+    if (outcome.lost !== true && outcome.action !== 'needs_input') {
+      return { ...outcome, nativeOutcome };
+    }
+    return {
+      ...outcome,
+      response: {
+        hookSpecificOutput: {
+          hookEventName: eventName,
+          additionalContext: shortfallOffer(event.tool, lostHint(null)),
+        },
+      },
+      nativeOutcome,
+    };
+  }
   // The free docs lookup for this very search just came back empty: offering
   // it again would send the agent to the same miss. Only a paid offer stands.
   if (docsJustMissed && isFree(routed.offer))
@@ -1363,7 +1417,8 @@ export async function runDelegationHook(
   if (sealed.packet.historyStatus !== 'ok') return { response: null };
   const footer = await openFooter(deps, event.sessionId, 'delegate');
   const deadline = gateDeadline(deps);
-  const outcome = await decide(sealed, deps, router.config, event.sessionId, deadline);
+  const decided = await decide(sealed, deps, router.config, event.sessionId, deadline);
+  const outcome = decided === LOST ? null : decided;
   if (!isOffer(outcome)) {
     await footer.close(outcome);
     return { response: null, ...(outcome !== null ? { action: outcome.action } : {}) };
@@ -1465,6 +1520,9 @@ function hookOutcome(decision: HookDecision | null): string {
   return 'needs input';
 }
 
+/** A decision that did not arrive though the router is there ({@link decide}). */
+const LOST = 'lost';
+
 /** The one routing call, its packet SEALED (masked and bounded): a path that
  *  skips the mask does not typecheck. Inside `tenjin mcp` it takes the paid
  *  path; a call that path cannot pay takes the free path, and the first such
@@ -1473,14 +1531,16 @@ function hookOutcome(decision: HookDecision | null): string {
  *  BACKOFF: a call that could not reach the router starts the machine's
  *  `unreachable` memo, and for its minute every leg skips the call and the
  *  native tool runs at once, rather than each one waiting out the gate. It
- *  ends after its minute, or when `tenjin doctor` reaches the router. */
+ *  ends after its minute, or when `tenjin doctor` reaches the router.
+ *  {@link LOST} (no answer in time, or a 5xx) is one `request` can still
+ *  decide. Any other failure is null: `request` meets the same wall. */
 async function decide(
   { packet }: Sealed,
   deps: HookDeps,
   config: PartialConfig,
   sessionId: string,
   deadline: number,
-): Promise<HookDecision | null> {
+): Promise<HookDecision | typeof LOST | null> {
   const baseUrl = resolveBaseUrl(deps, config);
   const warn = deps.warn ?? ((line: string) => process.stderr.write(`${line}\n`));
   const now = deps.now?.() ?? Date.now();
@@ -1524,7 +1584,7 @@ async function decide(
   }
   if (outcome.status === 'skipped') {
     warn(`tenjin hook: the routing fee was not paid (${outcome.why}), so the native tool runs`);
-    return null;
+    return LOST;
   }
   if (outcome.freePath !== undefined) {
     warn(`tenjin hook: the routing fee was not paid (${outcome.freePath}), so the free path ran`);
@@ -1545,7 +1605,9 @@ async function decide(
   }
   if (outcome.status === 'failed') {
     warn(`tenjin hook: ${baseUrl}${route?.path ?? ROUTER_PATH} ${outcome.reason}`);
-    return null;
+    const retryable =
+      outcome.unreachable !== true && (outcome.noAnswer === true || outcome.serverError === true);
+    return retryable ? LOST : null;
   }
   return outcome.decision.decision;
 }
