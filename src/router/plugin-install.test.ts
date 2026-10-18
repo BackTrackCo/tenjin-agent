@@ -83,6 +83,7 @@ function deps(over: Record<string, unknown> = {}) {
     cwd: work,
     env: env(),
     hostsDir: hosts,
+    cliEntry: join(root, 'pkg', 'dist', 'index.js'),
     walletExists: async () => true,
     walletAddress: async () => ADDRESS,
     createWallet: vi.fn(async () => ADDRESS),
@@ -231,7 +232,16 @@ describe('tenjin install registers the plugin through Claude Code', () => {
       state: 'written',
       path: folder,
     });
-    const files = renderPluginFiles(pkg.version);
+    // Outside the package, so its commands carry the absolute entry install resolved.
+    const files = renderPluginFiles(pkg.version, join(root, 'pkg', 'dist', 'index.js'));
+    expect(JSON.parse(files['.mcp.json']!)).toEqual({
+      mcpServers: {
+        router: {
+          command: 'node',
+          args: [join(root, 'pkg', 'dist', 'index.js'), 'mcp', '--plugin'],
+        },
+      },
+    });
     for (const path of PLUGIN_FILES) {
       expect(await readFile(join(folder, path), 'utf8')).toBe(files[path]);
     }
@@ -757,6 +767,60 @@ describe('tenjin doctor', () => {
     expect(c['plugin']?.fix).toContain('/reload-plugins');
   });
 
+  it('reads the hook form where Claude Code loads the plugin: exec, with no shell', async () => {
+    const stale = join(root, 'cache', 'tenjin');
+    await mkdir(join(stale, 'hooks'), { recursive: true });
+    const old = { type: 'command', command: 'tenjin hook alive' };
+    await writeFile(
+      join(stale, 'hooks', 'hooks.json'),
+      JSON.stringify({ hooks: { SessionStart: [{ hooks: [old] }] } }),
+    );
+    await mkdir(join(cfg, 'plugins'), { recursive: true });
+    await writeFile(
+      join(cfg, 'plugins', 'installed_plugins.json'),
+      JSON.stringify({ plugins: { 'tenjin@tenjin': [{ installPath: stale }] } }),
+    );
+    // A recorded install path alone is read.
+    expect((await checks({ platform: 'win32' }))['hook form']?.status).toBe('warn');
+    // A directory marketplace loads in place, so its folder wins over the cache copy.
+    await writeFile(
+      join(cfg, 'plugins', 'known_marketplaces.json'),
+      JSON.stringify({
+        tenjin: { source: { source: 'directory', path: hosts }, installLocation: hosts },
+      }),
+    );
+    expect((await checks({ platform: 'win32' }))['hook form']).toMatchObject({
+      status: 'ok',
+      detail: 'exec, 3 command hooks and no shell',
+    });
+  });
+
+  it('warns on Windows about a shell-form folder or settings install, naming each file', async () => {
+    const noClaude = env({ PATH: await emptyPath() });
+    await runRouterInstall({}, ctx(), deps({ env: noClaude }));
+    const hooksFile = join(cfg, 'skills', 'tenjin-router', 'hooks', 'hooks.json');
+    const old = { type: 'command', command: 'tenjin hook alive', timeout: 5 };
+    await writeFile(hooksFile, JSON.stringify({ hooks: { SessionStart: [{ hooks: [old] }] } }));
+    await writeFile(
+      join(cfg, 'settings.json'),
+      JSON.stringify({
+        hooks: {
+          UserPromptSubmit: [{ hooks: [{ type: 'command', command: 'tenjin hook prompt' }] }],
+        },
+      }),
+    );
+    const c = await checks({ env: noClaude, platform: 'win32' });
+    expect(c['hook form']?.status).toBe('warn');
+    expect(c['hook form']?.detail).toContain(hooksFile);
+    expect(c['hook form']?.detail).toContain(join(cfg, 'settings.json'));
+    expect(c['hook form']?.fix).toBe(
+      'Run `tenjin install`: it writes the plugin in exec form, and removes an earlier settings install once the plugin has loaded.',
+    );
+    const elsewhere = await checks({ env: noClaude, platform: 'darwin' });
+    expect(elsewhere['hook form']).toMatchObject({ status: 'ok' });
+    expect(elsewhere['hook form']?.detail).toMatch(/^shell, in /);
+  });
+
   it('never sends anyone out of the session to fix a check', async () => {
     await writeLegacy();
     await fake.respond('version', '2.1.100 (Claude Code)\n');
@@ -764,5 +828,17 @@ describe('tenjin doctor', () => {
     for (const check of Object.values(c)) {
       expect(check.fix ?? '', check.name).not.toMatch(/terminal|restart Claude Code|by hand/i);
     }
+  });
+});
+
+describe('packageCliEntry', () => {
+  it('is the bundle entry beside the running chunk, version-free under pnpm', async () => {
+    const { packageCliEntry } = await import('./plugin-registration');
+    expect(packageCliEntry(join(root, 'pkg', 'dist'))).toBe(join(root, 'pkg', 'dist', 'index.js'));
+    const modules = join(root, 'global', 'node_modules');
+    const pinned = join(modules, '.pnpm', 'tenjin-cli@1.0.0', 'node_modules', 'tenjin-cli', 'dist');
+    await mkdir(join(modules, 'tenjin-cli', 'dist'), { recursive: true });
+    await writeFile(join(modules, 'tenjin-cli', 'dist', 'index.js'), '');
+    expect(packageCliEntry(pinned)).toBe(join(modules, 'tenjin-cli', 'dist', 'index.js'));
   });
 });

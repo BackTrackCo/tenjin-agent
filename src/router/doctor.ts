@@ -35,9 +35,11 @@ import {
   usd,
 } from './fee';
 import { loadStep, pluginProof, settingsInstallPaths } from './install';
+import { commandForm, handlersIn } from './hook-form';
 import { inspectLegacyInstall, type LegacyInstall } from './legacy-install';
 import { routerSettings, type RouterSettings } from './settings';
-import { PLUGIN_ID, PLUGIN_SERVER, REQUEST_TOOL } from './names';
+import { MARKETPLACE_NAME, PLUGIN_ID, PLUGIN_SERVER, REQUEST_TOOL } from './names';
+import { PLUGIN_DIR } from './plugin-files';
 import { folderState, readPluginListing, type PluginScope } from './plugin-registration';
 import { probeRouter, type RouterCheck } from './reachability';
 import { readMcpServers, type InstalledAt, type ListMcpProcesses } from './mcp-processes';
@@ -86,6 +88,8 @@ export interface RouterDoctorDeps {
   /** When this build was installed; tests inject it. */
   installedAt?: InstalledAt;
   now?: () => number;
+  /** The platform the hook-form check judges for. Tests inject `win32`. */
+  platform?: NodeJS.Platform;
 }
 
 const NODE_FLOOR = 22;
@@ -113,6 +117,11 @@ export async function runRouterDoctor(
   checks.push(claudeCodeCheck(claude));
   const plugin = await pluginCheck(claude, { scope, env, home, cwd, dataDir: ctx.dataDir, legacy });
   checks.push(plugin.check);
+  const form = await hookFormCheck(
+    { scope, env, home, cwd, dataDir: ctx.dataDir, legacy },
+    deps.platform ?? process.platform,
+  );
+  if (form !== null) checks.push(form);
   if (plugin.registered && claude.binary !== null) {
     checks.push(await serverCheck(claude.binary, env, cwd));
   }
@@ -414,10 +423,85 @@ async function listedInClaudeFiles(env: NodeJS.ProcessEnv, home: string): Promis
 }
 
 /**
+ * THE FORM OF EVERY TENJIN COMMAND HOOK ON DISK: the plugin's, wherever Claude
+ * Code loads it from, and an earlier release's settings install. Shell form
+ * runs under Git Bash or PowerShell on Windows, where these commands fail, so
+ * a stale install shows here before a session finds out.
+ */
+async function hookFormCheck(
+  c: PluginContext,
+  platform: NodeJS.Platform,
+): Promise<RouterCheck | null> {
+  const shell = new Set<string>();
+  let exec = 0;
+  for (const path of await pluginHookFiles(c)) {
+    for (const handler of handlersIn(await readJson(path))) {
+      const form = commandForm(handler);
+      if (form === 'exec') exec += 1;
+      else if (form === 'shell') shell.add(path);
+    }
+  }
+  if (c.legacy.shellCommands > 0) shell.add(c.legacy.settingsPath);
+  const name = 'hook form';
+  if (shell.size === 0) {
+    return exec === 0
+      ? null
+      : { name, status: 'ok', required: false, detail: `exec, ${exec} command hooks and no shell` };
+  }
+  const detail = `shell, in ${[...shell].join(', ')}: Windows runs these through Git Bash or PowerShell, where they fail`;
+  if (platform !== 'win32') return { name, status: 'ok', required: false, detail };
+  return {
+    name,
+    status: 'warn',
+    required: false,
+    detail,
+    fix: `Run \`tenjin install${c.scope === 'local' ? ' --project' : ''}\`: it writes the plugin in exec form, and removes an earlier settings install once the plugin has loaded.`,
+  };
+}
+
+/**
+ * The plugin's hooks files as Claude Code loads them: the folder fallback's,
+ * the marketplace folder for a `directory` marketplace (loaded in place, its
+ * cache copy unread), and otherwise each install path Claude Code records.
+ */
+async function pluginHookFiles(c: PluginContext): Promise<string[]> {
+  const out: string[] = [];
+  const folder = await folderState(c.scope, c.env, c.home, c.cwd);
+  if (folder.state === 'ours') out.push(join(folder.path, 'hooks', 'hooks.json'));
+  const plugins = join(claudeConfigDir(c.env, c.home), 'plugins');
+  const market = (await readJson(join(plugins, 'known_marketplaces.json')))?.[MARKETPLACE_NAME] as
+    { source?: { source?: unknown }; installLocation?: unknown } | undefined;
+  if (market?.source?.source === 'directory' && typeof market.installLocation === 'string') {
+    out.push(join(market.installLocation, PLUGIN_DIR, 'hooks', 'hooks.json'));
+    return out;
+  }
+  const records = (
+    (await readJson(join(plugins, 'installed_plugins.json')))?.plugins as
+      Record<string, unknown> | undefined
+  )?.[PLUGIN_ID];
+  for (const record of Array.isArray(records) ? records : []) {
+    const path = (record as { installPath?: unknown } | null)?.installPath;
+    if (typeof path === 'string' && path.length > 0) out.push(join(path, 'hooks', 'hooks.json'));
+  }
+  return out;
+}
+
+async function readJson(path: string): Promise<Record<string, unknown> | null> {
+  try {
+    const parsed = JSON.parse(await readFile(path, 'utf8')) as unknown;
+    return parsed !== null && typeof parsed === 'object'
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * The plugin's `router` server, through `claude mcp get`, which starts it the
- * way a session would and reports whether it answered. It starts `tenjin mcp`
- * from the PATH Claude Code sees, so a `tenjin` that is not on that PATH shows
- * up here as a server that fails to connect.
+ * way a session would and reports whether it answered. It starts `node` from
+ * the PATH Claude Code sees with this CLI's entry, so a `node` that is not on
+ * that PATH shows up here as a server that fails to connect.
  */
 async function serverCheck(
   binary: ClaudeBinary,
@@ -444,7 +528,7 @@ async function serverCheck(
     status: 'fail',
     required: true,
     detail: `${PLUGIN_SERVER} did not connect${status !== undefined ? `: ${status.slice(0, 200)}` : ''}`,
-    fix: 'Run `tenjin --version` in this session: the plugin starts `tenjin mcp` from PATH, so it must print a version.',
+    fix: 'Run `node --version` and `tenjin --version` in this session: the plugin starts the CLI with `node` from PATH, so both must print a version.',
   };
 }
 

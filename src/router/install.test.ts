@@ -618,6 +618,7 @@ describe('the doctor this release registers', () => {
       'node',
       'claude code',
       'plugin',
+      'hook form',
       'routing',
       'mcp server',
       'spend',
