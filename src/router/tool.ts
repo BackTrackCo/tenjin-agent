@@ -224,6 +224,7 @@ export interface RequestToolDeps {
 export const MAX_CALL_DOWNLOAD_BYTES = 1024 * 1024 * 1024;
 /** Why a file this call had no room left for was not saved. */
 const CAP_REACHED = `not saved: this call already saved ${Math.round(MAX_CALL_DOWNLOAD_BYTES / 1_048_576)} MB, its cap`;
+const DOWNLOAD_FAILED = 'a file it links to failed to download';
 
 export interface RequestToolResult {
   isError: boolean;
@@ -1496,8 +1497,9 @@ async function deliverResult(
         call.capabilityId,
         mediaUrlsIn(bodyText ?? '', MAX_MEDIA_FILES - (inline?.savedFiles.length ?? 0)),
       )
-    : { saved: [], capped: false };
+    : { saved: [], capped: false, failed: false };
   if (linked.capped) unsaved ??= CAP_REACHED;
+  if (linked.failed) unsaved ??= DOWNLOAD_FAILED;
   const savedFiles = [
     ...(binary?.savedTo !== undefined ? [binary.savedTo] : []),
     ...(inline?.savedFiles ?? []),
@@ -1583,7 +1585,7 @@ async function saveLinked(
   deps: RequestToolDeps,
   stem: string,
   urls: string[],
-): Promise<{ saved: string[]; capped: boolean }> {
+): Promise<{ saved: string[]; capped: boolean; failed: boolean }> {
   return saveMedia(deps.ctx.dataDir, stem, urls, {
     ...(deps.mediaTransport !== undefined ? { transport: deps.mediaTransport } : {}),
     ...(deps.payDeps?.destination !== undefined ? { destination: deps.payDeps.destination } : {}),

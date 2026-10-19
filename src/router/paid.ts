@@ -463,37 +463,45 @@ type LookupCallback = (
 
 /** A file the budget left too little room for. */
 const CAPPED = Symbol('capped');
+/** A file a later try could save: the network, the file's server or this
+ *  disk failed, not a rule of ours. */
+const FAILED = Symbol('failed');
 
 /**
  * Download each URL into the downloads dir, one at a time, each under its own
  * size cap and deadline, every hop of a redirect validated and connected to
- * the address it validated. Returns the paths that were written, and whether
- * the budget left a file too little room (`capped`), which a later call, with
- * a budget of its own, could save; a URL that fails is skipped and never
- * fails the call.
+ * the address it validated. Returns the paths that were written, whether the
+ * budget left a file too little room (`capped`), and whether a download
+ * failed in a way a later try could get past (`failed`); a later call could
+ * save either. A URL that fails is skipped and never fails the call.
  */
 export async function saveMedia(
   dataDir: string,
   stem: string,
   urls: string[],
   deps: MediaDeps = {},
-): Promise<{ saved: string[]; capped: boolean }> {
+): Promise<{ saved: string[]; capped: boolean; failed: boolean }> {
   const saved: string[] = [];
   let capped = false;
+  let failed = false;
   for (const [index, url] of urls.entries()) {
     const path = await saveOne(dataDir, `${stem}-${index + 1}`, url, deps);
     if (path === CAPPED) capped = true;
+    else if (path === FAILED) failed = true;
     else if (path !== null) saved.push(path);
   }
-  return { saved, capped };
+  return { saved, capped, failed };
 }
+
+/** Statuses a later try could get past: the server, not the link, failed. */
+const RETRYABLE_STATUS = new Set([408, 429]);
 
 async function saveOne(
   dataDir: string,
   stem: string,
   raw: string,
   deps: MediaDeps,
-): Promise<string | typeof CAPPED | null> {
+): Promise<string | typeof CAPPED | typeof FAILED | null> {
   const transport = deps.transport ?? pinnedGet;
   const cap = deps.maxBytes ?? MAX_MEDIA_BYTES;
   const { budget } = deps;
@@ -503,13 +511,21 @@ async function saveOne(
   let kept = false;
   // Stopped by the call's budget, not by the file's own cap.
   let capped = false;
+  // Stopped by a rule of ours (an address, the file's cap), which no later
+  // try gets past.
+  let refused = false;
   const signal = AbortSignal.timeout(deps.timeoutMs ?? MEDIA_TIMEOUT_MS);
   let target = raw;
   let path: string | null = null;
   try {
     let res: MediaResponse | null = null;
     for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
-      const pinned = await resolvePublicDestination(target, deps.destination ?? {});
+      const pinned = await resolvePublicDestination(target, deps.destination ?? {}).catch(
+        (err: unknown) => {
+          refused = true;
+          throw err;
+        },
+      );
       res = await transport(pinned, signal);
       if (res.status < 300 || res.status >= 400 || res.location === undefined) break;
       res.discard();
@@ -518,7 +534,8 @@ async function saveOne(
     }
     if (res === null || res.status < 200 || res.status >= 300) {
       res?.discard();
-      return null;
+      const status = res?.status ?? 0;
+      return status >= 500 || RETRYABLE_STATUS.has(status) ? FAILED : null;
     }
     const declared = res.contentLength ?? 0;
     if (declared > cap) {
@@ -542,6 +559,7 @@ async function saveOne(
         size += chunk.byteLength;
         if (size > cap) {
           res.discard();
+          refused = true;
           throw new Error('media over the size cap');
         }
         // Charged before the write, in the same turn as the check, so files
@@ -565,7 +583,7 @@ async function saveOne(
     return path;
   } catch {
     if (path !== null) await rm(path, { force: true }).catch(() => undefined);
-    return capped ? CAPPED : null;
+    return capped ? CAPPED : refused ? null : FAILED;
   } finally {
     if (budget !== undefined && !kept) budget.leftBytes += charged;
   }

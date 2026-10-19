@@ -172,6 +172,32 @@ describe('the media a paid result links to', () => {
     expect(hops.map((h) => h.url)).toEqual(['https://cdn.test/a.png']);
   });
 
+  /** A FAILURE A LATER TRY COULD GET PAST (the network, a 5xx, a 429) is
+   *  `failed`; a refusal of ours (a private address, the size cap) or a link
+   *  that is gone (a 404) is not. */
+  it('reports a download a later try could save as failed', async () => {
+    const save = (t: MediaTransport, opts: { maxBytes?: number } = {}) =>
+      saveMedia(dir, 'try', ['https://cdn.test/a.png'], {
+        transport: t,
+        destination: PUBLIC,
+        ...opts,
+      });
+    const down: MediaTransport = async () => {
+      throw new Error('socket hang up');
+    };
+    expect(await save(down)).toEqual({ saved: [], capped: false, failed: true });
+    for (const status of [503, 429]) {
+      expect(await save(transport(() => ({ status })).transport)).toMatchObject({ failed: true });
+    }
+    expect(await save(transport(() => ({ status: 404 })).transport)).toMatchObject({
+      failed: false,
+    });
+    const big = transport(() => ({ status: 200, body: new Uint8Array(64) })).transport;
+    expect(await save(big, { maxBytes: 16 })).toMatchObject({ failed: false });
+    const away = transport(() => ({ status: 302, location: 'https://127.0.0.1/a.png' }));
+    expect(await save(away.transport)).toMatchObject({ failed: false });
+  });
+
   /** DNS REBINDING: the socket's lookup answers the validated address, not a
    *  fresh resolution of the name. */
   it('pins the connection: the lookup answers only the validated address', () => {
@@ -234,7 +260,7 @@ describe('the media a paid result links to', () => {
       destination: PUBLIC,
       budget,
     });
-    expect(third).toEqual({ saved: [], capped: true });
+    expect(third).toEqual({ saved: [], capped: true, failed: false });
     expect(budget.leftBytes).toBe(4);
   });
 

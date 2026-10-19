@@ -468,6 +468,39 @@ describe('a 202 naming the URL to poll', () => {
     expect(await readFile(takePath(dir, ID, 1), 'utf8')).not.toContain(submitted);
   });
 
+  /** A LINKED FILE THAT FAILED TO DOWNLOAD (the network, its server) is not an
+   *  ending: the seller still holds it, so the take stays running and a
+   *  resume brings it home, unpaid. A file refused by a rule of ours, which
+   *  no try gets past, ends the take as before. */
+  it('keeps a take whose linked file failed to download resumable', async () => {
+    await storeSpecs(dir, [BLOCKRUN]);
+    const { fetchImpl } = submit(BLOCKRUN, accepted);
+    const done = {
+      status: 200,
+      body: { status: 'completed', data: [{ url: 'https://cdn.blockrun.ai/out/img_1.png' }] },
+    };
+    const down: MediaTransport = async () => {
+      throw new Error('socket hang up');
+    };
+    const result = await runRequestTool(
+      { id: ID, input: INPUT },
+      { ...deps(fetchImpl, polls([done]).transport), mediaTransport: down },
+    );
+    expect(result.envelope).toMatchObject({ status: 'running', job: ID });
+    expect(String(result.envelope.note)).toContain('failed to download');
+    expect(await readTake(dir, ID, 1)).toMatchObject({ state: 'running' });
+
+    const auth = authorizer();
+    const resumed = await runRequestTool(
+      { job: ID },
+      deps(fetchImpl, polls([done]).transport, { auth }),
+    );
+    expect(resumed.envelope).toMatchObject({ status: 'fulfilled', job: ID });
+    expect(resumed.envelope.savedFiles).toHaveLength(1);
+    expect(auth.authorize).not.toHaveBeenCalled();
+    expect(await readTake(dir, ID, 1)).toMatchObject({ state: 'done' });
+  });
+
   /** A POLL THAT ASKS TO BE PAID AGAIN for a result already paid for is
    *  answered with nothing: the take fails, and its cost stays its one
    *  payment. */
