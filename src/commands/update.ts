@@ -19,6 +19,7 @@ import { loadRawConfig } from '../lib/config';
 import { defaultDataDir } from '../lib/paths';
 import type { CommandContext, CommandResult } from '../context';
 import { persistRouterProject } from './config';
+import { projectInstallHere } from '../router/install';
 import { readMcpServers, type InstalledAt, type ListMcpProcesses } from '../router/mcp-processes';
 
 /**
@@ -439,8 +440,8 @@ async function refreshProfiles(ctx: CommandContext, deps: UpdateDeps): Promise<R
   // home, where a `--project` install (Claude Code's local scope) is not
   // visible, so each one `install --project` recorded is refreshed where it
   // lives, and the child finds the install there itself. A directory that is
-  // gone, or that no longer holds one (the child refreshed user scope
-  // instead), is forgotten.
+  // gone, or that no longer holds one (none found there, or the child
+  // refreshed user scope instead), is forgotten.
   const projects: string[] = [];
   const projectsFailed: RefreshOutcome['projectsFailed'] = [];
   const recorded = profiles.includes(ctx.dataDir)
@@ -448,7 +449,7 @@ async function refreshProfiles(ctx: CommandContext, deps: UpdateDeps): Promise<R
     : [];
   for (const project of recorded) {
     const forget = () => persistRouterProject(ctx.dataDir, project, false).catch(() => undefined);
-    if (!isExistingDir(project)) {
+    if (!isExistingDir(project) || !(await projectInstallHere(project, home, process.env))) {
       await forget();
       continue;
     }

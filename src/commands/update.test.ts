@@ -14,6 +14,7 @@ import {
 import { REFUSALS, resolveNpmCli } from '../lib/install-location';
 import { CliError } from '../lib/errors';
 import { buildFailureEnvelope, buildSuccessEnvelope } from '../lib/output';
+import { PLUGIN_ID } from '../router/names';
 import type { CommandContext, GlobalFlags } from '../context';
 
 let dir: string;
@@ -774,6 +775,17 @@ describe('runUpdate: the post-swap refresh', () => {
     return path;
   };
 
+  /** A project directory holding a `--project` install, as Claude Code's local
+   *  scope records it: the refresh forgets a recorded project that holds none. */
+  const projectDir = async (name: string): Promise<string> => {
+    const path = await profileDir(join(name, '.claude'));
+    await writeFile(
+      join(path, 'settings.local.json'),
+      JSON.stringify({ enabledPlugins: { [PLUGIN_ID]: true } }),
+    );
+    return join(dir, name);
+  };
+
   /** A spawn seam that answers per call, so the manager can succeed while the
    *  refresh fails — the case the whole warn path exists for. `outputs` is what
    *  each child writes to the merged pipe, indexed the same way. */
@@ -1133,8 +1145,8 @@ describe('runUpdate: the post-swap refresh', () => {
    */
   it('refreshes each recorded project install from its own directory', async () => {
     const profile = await profileDir('.tenjin');
-    const kept = await profileDir('app');
-    const moved = await profileDir('old-app');
+    const kept = await projectDir('app');
+    const moved = await projectDir('old-app');
     const gone = join(dir, 'deleted-app');
     await writeFile(
       join(profile, 'config.json'),
@@ -1165,7 +1177,7 @@ describe('runUpdate: the post-swap refresh', () => {
 
   it('names the project and its own fix when a project refresh fails', async () => {
     const profile = await profileDir('.tenjin');
-    const app = await profileDir('app');
+    const app = await projectDir('app');
     await writeFile(
       join(profile, 'config.json'),
       JSON.stringify({ install: { routerProjects: [app] } }),
@@ -1198,6 +1210,35 @@ describe('runUpdate: the post-swap refresh', () => {
       },
     });
     expect(result.humanLines?.join('\n')).toContain('Could not refresh the project install in 1:');
+  });
+
+  /**
+   * AN INSTALL REMOVED WITHOUT `uninstall --project` (a `git clean -fdx` took
+   * `.claude/settings.local.json`) leaves its record behind. Refreshed, it
+   * would fail as "nothing to refresh" on every update; it is forgotten
+   * instead, with no child spawned there.
+   */
+  it('forgets a recorded project that no longer holds an install', async () => {
+    const profile = await profileDir('.tenjin');
+    const cleaned = await profileDir('app');
+    await writeFile(
+      join(profile, 'config.json'),
+      JSON.stringify({ install: { routerProjects: [cleaned] } }),
+    );
+    const { ctx } = makeCtx();
+    ctx.dataDir = profile;
+    const spawned = scriptedSpawn([]);
+    const result = await runUpdate(
+      { check: false },
+      ctx,
+      await deps({ spawnImpl: spawned.impl, refreshCommand: ENTRY }),
+    );
+    expect(spawned.refreshes().map((c) => c.cwd)).toEqual([homedir()]);
+    expect(result.data).toMatchObject({ refresh: { projects: [], projectsFailed: [] } });
+    const config = JSON.parse(await readFile(join(profile, 'config.json'), 'utf8')) as {
+      install: { routerProjects: string[] };
+    };
+    expect(config.install.routerProjects).toEqual([]);
   });
 
   it('reports every profile as unrefreshed when there is no entry to re-exec', async () => {

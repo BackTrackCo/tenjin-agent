@@ -52,7 +52,7 @@ Or in a terminal (Node.js 22 or newer):
 ```bash
 npm i -g tenjin-cli
 tenjin install          # adds the Tenjin plugin to Claude Code and creates your wallet
-tenjin wallet fund 2    # optional: add $2 with a card, via Coinbase
+tenjin wallet fund 5    # optional: add $5 with a card, via Coinbase
 ```
 
 ## What it can do
@@ -126,9 +126,9 @@ Each routing call costs a flat $0.003, paid over x402 `batch-settlement` by `ten
 
 ### Funding
 
-`tenjin wallet fund 2` opens a Coinbase Onramp checkout for your wallet. In the US, Apple Pay or Google Pay with no Coinbase account. Elsewhere, your Coinbase account. You can also send USDC on Base to the address `tenjin wallet address` prints; at a terminal it and `tenjin wallet fund` also draw that address as a QR code for a phone wallet to scan (`--no-qr` skips it).
+`tenjin wallet fund 5` opens a Coinbase Onramp checkout for your wallet. In the US, Apple Pay or Google Pay with no Coinbase account. Elsewhere, your Coinbase account. You can also send USDC on Base to the address `tenjin wallet address` prints; at a terminal it and `tenjin wallet fund` also draw that address as a QR code for a phone wallet to scan (`--no-qr` skips it).
 
-$1–2 goes a long way. $2 covers about 280 web searches, 200 page reads or 100 Wolfram Alpha answers.
+$5, the Apple Pay and Google Pay minimum, covers about 700 web searches, 500 page reads or 250 Wolfram Alpha answers.
 
 ### Withdrawing
 
@@ -139,7 +139,7 @@ $1–2 goes a long way. $2 covers about 280 web searches, 200 page reads or 100 
 ```bash
 tenjin status                  # what you've spent today
 tenjin wallet balance          # what's left
-tenjin wallet fund 2           # top up
+tenjin wallet fund 5           # top up
 tenjin payments                # the paid lookups this machine made
 tenjin payments reconcile      # settle paid lookups whose settlement was unknown
 tenjin update                  # newest version; wallet and settings stay
