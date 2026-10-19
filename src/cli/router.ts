@@ -78,7 +78,11 @@ export function registerRouter(reg: Registration): void {
     .action(async function (this: Command) {
       const ctx = buildContext(this);
       const { runRouterMcpServer } = await import('../router/mcp');
-      await runRouterMcpServer({ dataDir: ctx.dataDir, flags: ctx.flags });
+      await runRouterMcpServer({
+        dataDir: ctx.dataDir,
+        flags: ctx.flags,
+        plugin: this.opts<{ plugin?: boolean }>().plugin === true,
+      });
     });
 
   leaf(INTEGRATION, 'status-line', "the live footer, for Claude Code's status line")

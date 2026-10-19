@@ -36,11 +36,23 @@ import {
 } from './fee';
 import { loadStep, pluginProof, settingsInstallPaths } from './install';
 import { commandForm, handlersIn } from './hook-form';
+import {
+  launchCheck,
+  readNpmPrefix,
+  readSavedPath,
+  stalePathCheck,
+  type PathProbe,
+} from './launch-check';
 import { inspectLegacyInstall, type LegacyInstall } from './legacy-install';
 import { routerSettings, type RouterSettings } from './settings';
 import { MARKETPLACE_NAME, PLUGIN_ID, PLUGIN_SERVER, REQUEST_TOOL } from './names';
 import { PLUGIN_DIR } from './plugin-files';
-import { folderState, readPluginListing, type PluginScope } from './plugin-registration';
+import {
+  folderState,
+  packageCliEntry,
+  readPluginListing,
+  type PluginScope,
+} from './plugin-registration';
 import { probeRouter, type RouterCheck } from './reachability';
 import { readMcpServers, type InstalledAt, type ListMcpProcesses } from './mcp-processes';
 import { clearRouterMemo, readRouterMemo, type RouterMemo } from './router-memo';
@@ -88,8 +100,12 @@ export interface RouterDoctorDeps {
   /** When this build was installed; tests inject it. */
   installedAt?: InstalledAt;
   now?: () => number;
-  /** The platform the hook-form check judges for. Tests inject `win32`. */
+  /** The platform the hook-form and PATH checks judge for. Tests inject `win32`. */
   platform?: NodeJS.Platform;
+  /** The stale-PATH row's reads (the saved PATH, npm's prefix); tests inject them. */
+  pathProbe?: Partial<PathProbe>;
+  /** Whether a pinned launch path exists; tests inject it for Windows paths. */
+  launchExists?: (path: string) => Promise<boolean>;
 }
 
 const NODE_FLOOR = 22;
@@ -117,11 +133,28 @@ export async function runRouterDoctor(
   checks.push(claudeCodeCheck(claude));
   const plugin = await pluginCheck(claude, { scope, env, home, cwd, dataDir: ctx.dataDir, legacy });
   checks.push(plugin.check);
+  const platform = deps.platform ?? process.platform;
+  const roots = await pluginRoots({ scope, env, home, cwd, dataDir: ctx.dataDir, legacy });
   const form = await hookFormCheck(
+    roots,
     { scope, env, home, cwd, dataDir: ctx.dataDir, legacy },
-    deps.platform ?? process.platform,
+    platform,
   );
   if (form !== null) checks.push(form);
+  const launch = await launchCheck(roots, {
+    scope,
+    ...(deps.launchExists !== undefined ? { exists: deps.launchExists } : {}),
+  });
+  if (launch !== null) checks.push(launch);
+  const stale = await stalePathCheck({
+    platform,
+    env,
+    savedPath: () => readSavedPath(platform, env),
+    npmPrefix: () => readNpmPrefix(platform),
+    cliEntry: packageCliEntry(),
+    ...deps.pathProbe,
+  });
+  if (stale !== null) checks.push(stale);
   if (plugin.registered && claude.binary !== null) {
     checks.push(await serverCheck(claude.binary, env, cwd));
   }
@@ -429,12 +462,13 @@ async function listedInClaudeFiles(env: NodeJS.ProcessEnv, home: string): Promis
  * a stale install shows here before a session finds out.
  */
 async function hookFormCheck(
+  roots: readonly string[],
   c: PluginContext,
   platform: NodeJS.Platform,
 ): Promise<RouterCheck | null> {
   const shell = new Set<string>();
   let exec = 0;
-  for (const path of await pluginHookFiles(c)) {
+  for (const path of roots.map((r) => join(r, 'hooks', 'hooks.json'))) {
     for (const handler of handlersIn(await readJson(path))) {
       const form = commandForm(handler);
       if (form === 'exec') exec += 1;
@@ -460,19 +494,19 @@ async function hookFormCheck(
 }
 
 /**
- * The plugin's hooks files as Claude Code loads them: the folder fallback's,
- * the marketplace folder for a `directory` marketplace (loaded in place, its
- * cache copy unread), and otherwise each install path Claude Code records.
+ * The plugin's roots as Claude Code loads them: the folder fallback, the
+ * plugin inside a `directory` marketplace (loaded in place, its cache copy
+ * unread), and otherwise each install path Claude Code records.
  */
-async function pluginHookFiles(c: PluginContext): Promise<string[]> {
+async function pluginRoots(c: PluginContext): Promise<string[]> {
   const out: string[] = [];
   const folder = await folderState(c.scope, c.env, c.home, c.cwd);
-  if (folder.state === 'ours') out.push(join(folder.path, 'hooks', 'hooks.json'));
+  if (folder.state === 'ours') out.push(folder.path);
   const plugins = join(claudeConfigDir(c.env, c.home), 'plugins');
   const market = (await readJson(join(plugins, 'known_marketplaces.json')))?.[MARKETPLACE_NAME] as
     { source?: { source?: unknown }; installLocation?: unknown } | undefined;
   if (market?.source?.source === 'directory' && typeof market.installLocation === 'string') {
-    out.push(join(market.installLocation, PLUGIN_DIR, 'hooks', 'hooks.json'));
+    out.push(join(market.installLocation, PLUGIN_DIR));
     return out;
   }
   const records = (
@@ -481,7 +515,7 @@ async function pluginHookFiles(c: PluginContext): Promise<string[]> {
   )?.[PLUGIN_ID];
   for (const record of Array.isArray(records) ? records : []) {
     const path = (record as { installPath?: unknown } | null)?.installPath;
-    if (typeof path === 'string' && path.length > 0) out.push(join(path, 'hooks', 'hooks.json'));
+    if (typeof path === 'string' && path.length > 0) out.push(path);
   }
   return out;
 }
@@ -499,9 +533,10 @@ async function readJson(path: string): Promise<Record<string, unknown> | null> {
 
 /**
  * The plugin's `router` server, through `claude mcp get`, which starts it the
- * way a session would and reports whether it answered. It starts `node` from
- * the PATH Claude Code sees with this CLI's entry, so a `node` that is not on
- * that PATH shows up here as a server that fails to connect.
+ * way a session would and reports whether it answered. A rendered plugin
+ * starts it from absolute paths the launch row checks; the build's template
+ * starts `node` from PATH, so there a `node` missing from that PATH shows up
+ * as a server that fails to connect.
  */
 async function serverCheck(
   binary: ClaudeBinary,
@@ -528,7 +563,7 @@ async function serverCheck(
     status: 'fail',
     required: true,
     detail: `${PLUGIN_SERVER} did not connect${status !== undefined ? `: ${status.slice(0, 200)}` : ''}`,
-    fix: 'Run `node --version` and `tenjin --version` in this session: the plugin starts the CLI with `node` from PATH, so both must print a version.',
+    fix: 'Run `tenjin install` again: it renders the plugin with the absolute Node and CLI paths running it, then start a new session.',
   };
 }
 

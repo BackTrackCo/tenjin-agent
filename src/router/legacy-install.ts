@@ -32,7 +32,7 @@ import { classifyStatusLine, decomposeCommand, type StatusLineState } from './st
  */
 
 const TENJIN_BIN = /^(\S*[\\/])?tenjin(\.cmd)?$/i;
-const NODE_BIN = /^(\S*[\\/])?node(\.exe)?$/i;
+const NODE_BIN = /^(.*[\\/])?node(\.exe)?$/i;
 const CLI_ENTRY = /[\\/]tenjin-cli[\\/]dist[\\/]index\.js$/;
 
 /** `tenjin hook <leg>` and nothing more, however the CLI was started. */

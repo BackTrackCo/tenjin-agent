@@ -7,7 +7,12 @@ import { findClaudeBinary, jsonList, jsonResult, runClaude, type ClaudeBinary } 
 import { settingsInstallPaths } from './install';
 import { inspectLegacyInstall, removeLegacyInstall, type LegacyRemoval } from './legacy-install';
 import { MARKETPLACE_NAME, PLUGIN_ID } from './names';
-import { removePluginFolder, type FolderRemoval } from './plugin-folder';
+import {
+  marketplaceFolderPath,
+  removeMarketplaceFolder,
+  removePluginFolder,
+  type FolderRemoval,
+} from './plugin-folder';
 import { folderFor, ownMarketplace, type PluginScope } from './plugin-registration';
 
 /**
@@ -41,6 +46,8 @@ export interface PluginRemoval {
   plugin: 'removed' | 'absent' | 'kept';
   marketplace: 'removed' | 'absent' | 'kept';
   folder: FolderRemoval;
+  /** The marketplace folder `install` rendered under the data dir, removed once nothing points at it. */
+  marketplaceFolder?: FolderRemoval;
   reason?: string;
 }
 
@@ -57,7 +64,7 @@ export async function runRouterUninstall(
   const scope: PluginScope = project ? 'local' : 'user';
   const binary = (deps.findClaude ?? findClaudeBinary)(env);
 
-  const plugin = await removePlugin(binary, scope, env, home, cwd);
+  const plugin = await removePlugin(binary, scope, env, home, cwd, ctx.dataDir);
   const paths = settingsInstallPaths(project, env, home, cwd);
   const legacy = await inspectLegacyInstall(paths.settingsPath, paths.mcpFile);
   const settings: LegacyRemoval | null = legacy.present
@@ -82,8 +89,10 @@ async function removePlugin(
   env: NodeJS.ProcessEnv,
   home: string,
   cwd: string,
+  dataDir: string,
 ): Promise<PluginRemoval> {
   const folder = await removePluginFolder(folderFor(scope, env, home, cwd));
+  const rendered = marketplaceFolderPath(dataDir);
   if (binary === null) {
     return {
       plugin: 'kept',
@@ -103,7 +112,7 @@ async function removePlugin(
   const row = listed.find((m) => m.name === MARKETPLACE_NAME);
   let marketplace: PluginRemoval['marketplace'] = 'absent';
   if (row !== undefined) {
-    if (await ownMarketplace(row)) {
+    if (await ownMarketplace(row, rendered)) {
       // Named only for a project install, as `install` added it.
       const scoped = scope === 'user' ? [] : ['--scope', scope];
       const removed = await run([
@@ -119,10 +128,15 @@ async function removePlugin(
   }
   const message =
     typeof result?.message === 'string' ? result.message : uninstall.stderr.trim().slice(0, 200);
+  // Kept while Claude Code still points at it: a marketplace left in place
+  // reads the folder, and an empty one would fail every session.
+  const marketplaceFolder =
+    marketplace === 'kept' ? undefined : await removeMarketplaceFolder(rendered);
   return {
     plugin: pluginState,
     marketplace,
     folder,
+    ...(marketplaceFolder?.removed === true ? { marketplaceFolder } : {}),
     ...(pluginState === 'kept'
       ? { reason: `claude plugin uninstall did not succeed: ${message}` }
       : {}),
@@ -142,6 +156,9 @@ function uninstallLines(
         : `plugin: ${plugin.reason ?? 'left in place'}`,
   ];
   if (plugin.marketplace === 'removed') lines.push(`removed the ${MARKETPLACE_NAME} marketplace`);
+  if (plugin.marketplaceFolder !== undefined) {
+    lines.push(`removed the marketplace folder ${plugin.marketplaceFolder.path}`);
+  }
   if (plugin.folder.removed) {
     lines.push(
       plugin.folder.left.length === 0

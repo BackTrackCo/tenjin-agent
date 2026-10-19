@@ -30,6 +30,7 @@ import {
   type LegacyRemoval,
 } from './legacy-install';
 import { PLUGIN_ID } from './names';
+import type { Launcher } from './plugin-files';
 import { CLAUDE_CODE_FLOOR } from './claude-cli';
 import {
   folderState,
@@ -54,10 +55,11 @@ import {
  * the Claude Code plugin `tenjin`, registered with no step left to the person.
  *
  * WHAT IT WRITES. The wallet and the spend defaults under the data dir, as
- * before. The plugin is registered through Claude Code's own `claude plugin`
- * commands from this package's `dist/hosts/claude` folder (see
- * `plugin-registration.ts`), or written as a folder under the config dir's
- * `skills/` where no `claude` binary can be run. The plugin carries the seven
+ * before. The plugin is rendered under the data dir with every command pinned
+ * to this machine's absolute Node and CLI paths, and registered through Claude
+ * Code's own `claude plugin` commands (see `plugin-registration.ts`), or
+ * written as a folder under the config dir's `skills/` where no `claude`
+ * binary can be run. The plugin carries the seven
  * routing legs, the `router` MCP server, and the hooks that allow the request
  * tool and deny the legs' own tool to the model, so this command writes
  * nothing into `settings.json` or `~/.claude.json` itself.
@@ -129,10 +131,10 @@ export interface RouterInstallDeps extends WalletDeps {
   env?: NodeJS.ProcessEnv;
   /** Finds the `claude` binary; tests inject one, production reads PATH and `CLAUDE_CODE_EXECPATH`. */
   findClaude?: (env: NodeJS.ProcessEnv) => ClaudeBinary | null;
-  /** The marketplace folder; production reads this package's `dist/hosts/claude`. */
-  hostsDir?: string | null;
-  /** The CLI entry a plugin folder's commands run. Production reads this package's `dist/index.js`. */
-  cliEntry?: string;
+  /** The marketplace folder install renders; production uses `<data dir>/claude-plugin`. */
+  hostsDir?: string;
+  /** The absolute Node binary and CLI entry the plugin's commands start from. Production pins its own. */
+  launcher?: Launcher;
   /** Whether a person can answer the spend-limit question (a TTY on stdout and
    *  stdin, no `--json`); injected in tests. */
   isInteractive?: boolean;
@@ -354,8 +356,9 @@ export async function runRouterInstall(
           env,
           home,
           cwd,
+          dataDir: ctx.dataDir,
           ...(deps.hostsDir !== undefined ? { hostsDir: deps.hostsDir } : {}),
-          ...(deps.cliEntry !== undefined ? { cliEntry: deps.cliEntry } : {}),
+          ...(deps.launcher !== undefined ? { launcher: deps.launcher } : {}),
         });
   const migration =
     legacy.unreadable !== undefined && !legacy.present

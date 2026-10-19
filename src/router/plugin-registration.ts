@@ -1,5 +1,6 @@
+import { realpathSync } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { versionFreeEntry } from '../commands/update';
 import {
@@ -10,12 +11,16 @@ import {
   type ClaudeBinary,
   type ClaudeRun,
 } from './claude-cli';
+import { processPath, splitPath } from './launch-check';
 import { MARKETPLACE_NAME, PLUGIN_ID, PLUGIN_NAME, SKILLS_DIR_PLUGIN_ID } from './names';
-import { PLUGIN_DIR, renderPluginFiles } from './plugin-files';
+import { PLUGIN_DIR, renderHostFiles, renderPluginFiles, type Launcher } from './plugin-files';
 import {
   inspectPluginFolder,
+  marketplaceFolderPath,
   pluginFolderPath,
+  refreshMarketplaceFolder,
   removePluginFolder,
+  writeMarketplaceFolder,
   writePluginFolder,
   type FolderRemoval,
 } from './plugin-folder';
@@ -24,16 +29,20 @@ import {
  * REGISTERING THE PLUGIN, WITH NO STEP LEFT TO THE PERSON. With a `claude`
  * binary (on PATH, or the one Claude Code names in `CLAUDE_CODE_EXECPATH`):
  *
- *   claude plugin marketplace add <package>/dist/hosts/claude --json
+ *   claude plugin marketplace add <data dir>/claude-plugin --json
  *   claude plugin install tenjin@tenjin --scope <scope> --json
  *   claude plugin update tenjin@tenjin --scope <scope> --json   (only when the version moved)
  *
- * The marketplace is a `directory` source read in place from the installed
- * package, so there is no git or network step and the plugin is the CLI's own
- * build. Each command is non-interactive, idempotent and answers one JSON line
- * (lab, Claude Code 2.1.296): a second `add` of the same folder is a no-op, an
- * `add` of a moved folder repoints the marketplace, and `install` of an
- * installed plugin reports both versions. No binary, or a command that fails:
+ * The marketplace is a `directory` source this run renders and Claude Code
+ * reads in place, so there is no git or network step and the plugin is the
+ * CLI's own build. NOTHING IT RUNS IS LOOKED UP ON PATH: every command starts
+ * from the absolute Node binary and CLI entry this run resolved (a
+ * {@link Launcher}), because Claude Code's PATH is the one it was started
+ * with, and on Windows an app started before Node's installer edited PATH
+ * finds neither `tenjin` nor `node`. Each command is non-interactive,
+ * idempotent and answers one JSON line (lab, Claude Code 2.1.296): a second
+ * `add` of the same folder is a no-op, an `add` of a moved folder repoints the
+ * marketplace, and `install` of an installed plugin reports both versions. No binary, or a command that fails:
  * the plugin is written as a folder under the config dir's `skills/`, which
  * Claude Code loads with no command at all.
  */
@@ -78,10 +87,12 @@ export interface RegisterOptions {
   env: NodeJS.ProcessEnv;
   home: string;
   cwd: string;
-  /** The marketplace folder; defaults to this package's `dist/hosts/claude`. */
-  hostsDir?: string | null;
-  /** The CLI entry the folder fallback's commands run. Defaults to this package's `dist/index.js`. */
-  cliEntry?: string;
+  /** The data dir, which holds the rendered marketplace folder. */
+  dataDir: string;
+  /** The marketplace folder to render; defaults to `<data dir>/claude-plugin`. */
+  hostsDir?: string;
+  /** The paths every command starts from. Defaults to {@link installLauncher}. */
+  launcher?: Launcher;
 }
 
 /** Where the folder fallback lives for this scope. */
@@ -91,12 +102,14 @@ export function folderFor(scope: PluginScope, env: NodeJS.ProcessEnv, home: stri
 
 export async function registerPlugin(opts: RegisterOptions): Promise<PluginRegistration> {
   const folder = folderFor(opts.scope, opts.env, opts.home, opts.cwd);
+  const launcher = opts.launcher ?? installLauncher();
   const steps: RegistrationStep[] = [];
   let fallbackReason: string;
   if (opts.binary !== null) {
-    const hosts = opts.hostsDir === undefined ? await packageHostsDir() : opts.hostsDir;
-    if (hosts === null) {
-      fallbackReason = 'this build carries no plugin marketplace folder (dist/hosts/claude)';
+    const hosts = opts.hostsDir ?? marketplaceFolderPath(opts.dataDir);
+    const rendered = await writeMarketplaceFolder(hosts, renderHostFiles(opts.version, launcher));
+    if (rendered.state !== 'written') {
+      fallbackReason = `the marketplace folder could not be written: ${rendered.reason ?? hosts}`;
     } else {
       const done = await viaPluginCommands(opts.binary, hosts, opts, steps);
       if (done.ok) {
@@ -146,10 +159,7 @@ export async function registerPlugin(opts: RegisterOptions): Promise<PluginRegis
       };
     }
   }
-  const written = await writePluginFolder(
-    folder,
-    renderPluginFiles(opts.version, opts.cliEntry ?? packageCliEntry()),
-  );
+  const written = await writePluginFolder(folder, renderPluginFiles(opts.version, launcher));
   if (written.state === 'written') {
     return {
       method: 'skills-dir',
@@ -208,7 +218,7 @@ async function viaPluginCommands(
     };
   }
   const existing = listed.find((m) => m.name === MARKETPLACE_NAME);
-  if (existing !== undefined && !(await ownMarketplace(existing))) {
+  if (existing !== undefined && !(await ownMarketplace(existing, hosts))) {
     return {
       ok: false,
       reason: `a marketplace named ${MARKETPLACE_NAME} that this CLI did not add is already configured, so it was left as it is`,
@@ -259,14 +269,18 @@ function commandDetail(out: ClaudeRun, result: Record<string, unknown> | null = 
 /**
  * Is this marketplace one `install` added? A directory source whose plugin
  * folder carries the `tenjin-cli` marker in its manifest, or, when that folder
- * is gone (a package manager removed the old version's directory), one whose
- * path is a `tenjin-cli` package's `dist/hosts/claude`.
+ * is gone, one at `rendered` (this data dir's marketplace folder) or at a
+ * `tenjin-cli` package's `dist/hosts/claude`, where releases before the
+ * rendered folder registered it.
  */
-export async function ownMarketplace(row: Record<string, unknown>): Promise<boolean> {
+export async function ownMarketplace(
+  row: Record<string, unknown>,
+  rendered?: string,
+): Promise<boolean> {
   const path = typeof row.path === 'string' ? row.path : undefined;
   if (row.source !== 'directory' || path === undefined) return false;
   if ((await stat(path).catch(() => null)) === null) {
-    return /tenjin-cli[\\/]dist[\\/]hosts[\\/]claude$/.test(path);
+    return path === rendered || /tenjin-cli[\\/]dist[\\/]hosts[\\/]claude$/.test(path);
   }
   return (await inspectPluginFolder(join(path, PLUGIN_DIR))) === 'ours';
 }
@@ -311,31 +325,89 @@ async function installedThroughCommands(env: NodeJS.ProcessEnv, home: string): P
 }
 
 /**
- * THIS PACKAGE'S MARKETPLACE FOLDER, `dist/hosts/claude`, beside the bundle
- * that is running. Under pnpm the running path pins a version
- * (`.pnpm/tenjin-cli@<v>/...`), and a marketplace registered there would point
- * at a directory the next upgrade deletes, so the version-free path beside the
- * store is used when it exists, as `tenjin update` does for its re-exec.
- */
-export async function packageHostsDir(
-  moduleDir: string = dirname(fileURLToPath(import.meta.url)),
-): Promise<string | null> {
-  const catalog = join(moduleDir, 'hosts', 'claude', '.claude-plugin', 'marketplace.json');
-  const stable = versionFreeEntry(catalog) ?? catalog;
-  if ((await stat(stable).catch(() => null))?.isFile() !== true) return null;
-  return dirname(dirname(stable));
-}
-
-/**
- * THIS PACKAGE'S CLI ENTRY, `dist/index.js` beside the running bundle, for a
- * plugin folder outside the package. The version-free path under pnpm, as
- * {@link packageHostsDir} uses, so an upgrade does not strand it.
+ * THIS PACKAGE'S CLI ENTRY, `dist/index.js` beside the running bundle, for
+ * the plugin commands `install` renders. Under pnpm the running path pins a
+ * version (`.pnpm/tenjin-cli@<v>/...`) the next upgrade deletes, so the
+ * version-free path beside the store is used when it exists, as `tenjin
+ * update` does for its re-exec.
  */
 export function packageCliEntry(
   moduleDir: string = dirname(fileURLToPath(import.meta.url)),
 ): string {
   const entry = join(moduleDir, 'index.js');
   return versionFreeEntry(entry) ?? entry;
+}
+
+/**
+ * THE NODE PATH TO PIN: the first candidate that is the running binary, else
+ * the running binary itself. `process.execPath` is the resolved file, which
+ * under Homebrew names a versioned Cellar folder an upgrade deletes; the
+ * `node` on PATH that links to it survives upgrades, so it is preferred.
+ */
+export function stableNode(execPath: string, candidates: readonly string[]): string {
+  const real = (path: string): string | null => {
+    try {
+      return realpathSync(path);
+    } catch {
+      return null;
+    }
+  };
+  const target = real(execPath) ?? execPath;
+  return candidates.find((c) => isAbsolute(c) && real(c) === target) ?? execPath;
+}
+
+/** Each place PATH would find `node`, in PATH order. */
+export function nodeOnPath(env: NodeJS.ProcessEnv, platform: NodeJS.Platform): string[] {
+  const name = platform === 'win32' ? 'node.exe' : 'node';
+  return splitPath(processPath(env), platform).map((dir) => join(dir, name));
+}
+
+/**
+ * THE LAUNCHER `install` PINS: the Node binary running it and this package's
+ * entry, both absolute. An npm upgrade replaces the entry in place and
+ * `tenjin update` re-runs the install; a Node that moved (a version manager
+ * switching versions) is what `tenjin doctor`'s launch row catches.
+ */
+export function installLauncher(
+  execPath: string = process.execPath,
+  moduleDir: string = dirname(fileURLToPath(import.meta.url)),
+  env: NodeJS.ProcessEnv = process.env,
+): Launcher {
+  return {
+    node: stableNode(execPath, nodeOnPath(env, process.platform)),
+    entry: packageCliEntry(moduleDir),
+  };
+}
+
+/**
+ * THE PLUGIN'S SERVER KEEPS ITS OWN FOLDER CURRENT. An upgrade through npm,
+ * not `tenjin update`, swaps the entry in place and runs no install, so the
+ * rendered hooks and manifest would stay the old build's. The server the
+ * plugin starts runs the new build from the same pinned paths, and rewrites
+ * the folder when its render differs; the next session reads it. Nothing is
+ * written where `install` rendered no folder.
+ */
+export async function refreshRenderedPlugin(
+  dataDir: string,
+  version: string,
+  launcher?: Launcher,
+): Promise<'absent' | 'current' | 'rewritten' | 'refused'> {
+  const dir = marketplaceFolderPath(dataDir);
+  // The Node path install pinned stays while it is this binary: the server's
+  // PATH is Claude Code's, which may not hold the alias install chose.
+  const pinned = await readFile(join(dir, PLUGIN_DIR, '.mcp.json'), 'utf8')
+    .then((raw) => {
+      const servers = (JSON.parse(raw) as { mcpServers?: Record<string, { command?: unknown }> })
+        .mcpServers;
+      const command = Object.values(servers ?? {})[0]?.command;
+      return typeof command === 'string' ? [command] : [];
+    })
+    .catch(() => []);
+  const resolved = launcher ?? {
+    node: stableNode(process.execPath, [...pinned, ...nodeOnPath(process.env, process.platform)]),
+    entry: packageCliEntry(),
+  };
+  return refreshMarketplaceFolder(dir, renderHostFiles(version, resolved));
 }
 
 /** Doctor's and the migration's read: is the plugin installed and enabled? */

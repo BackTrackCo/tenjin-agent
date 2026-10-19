@@ -1,6 +1,7 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { loadRawConfig } from '../lib/config';
 import { CliError } from '../lib/errors';
@@ -69,12 +70,19 @@ const ASK_LINES = [
 const RELOAD =
   'type /reload-plugins in this Claude Code session, or start a new session, so Tenjin loads';
 
+/** Pinned to files that exist: the source tree has no `dist/index.js` beside it. */
+const LAUNCHER = {
+  node: process.execPath,
+  entry: fileURLToPath(new URL('./install.ts', import.meta.url)),
+};
+
 /** Wallet seams are always stubbed: the real create writes to the OS keychain. */
 function deps(over: Record<string, unknown> = {}) {
   return {
     homeDir: home,
     env: {},
     findClaude: () => null,
+    launcher: LAUNCHER,
     walletExists: async () => false,
     createWallet: vi.fn(async () => ADDRESS),
     walletAddress: async () => ADDRESS,
@@ -619,6 +627,7 @@ describe('the doctor this release registers', () => {
       'claude code',
       'plugin',
       'hook form',
+      'plugin launch',
       'routing',
       'mcp server',
       'spend',

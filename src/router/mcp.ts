@@ -98,6 +98,8 @@ export interface RouterMcpOptions {
   homeDir?: string;
   /** Test seam for this process's environment: whether the plugin launched it. */
   env?: NodeJS.ProcessEnv;
+  /** Started by the plugin (`--plugin`): the server refreshes the folder it was started from. */
+  plugin?: boolean;
 }
 
 function buildContext(opts: RouterMcpOptions): CommandContext {
@@ -289,6 +291,12 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
  */
 export async function runRouterMcpServer(opts: RouterMcpOptions = {}): Promise<void> {
   const ctx = buildContext(opts);
+  // Off the startup path: the folder only matters to the next session.
+  if (opts.plugin === true) {
+    void import('./plugin-registration')
+      .then((m) => m.refreshRenderedPlugin(ctx.dataDir, pkg.version))
+      .catch(() => undefined);
+  }
   const payer = opts.payer ?? (await routingPayer(ctx));
   const server = buildRouterMcpServer({ ...opts, payer });
   await server.connect(new StdioServerTransport());
