@@ -1140,39 +1140,69 @@ describe('runUpdate: the post-swap refresh', () => {
   /**
    * A `--project` INSTALL IS CLAUDE CODE'S LOCAL SCOPE, which the refresh from
    * home cannot see. Each project `install --project` recorded is refreshed from
-   * its own directory; one that no longer holds an install, or is gone, is
-   * forgotten.
+   * its own directory, as `--project`; one that is gone is forgotten.
    */
   it('refreshes each recorded project install from its own directory', async () => {
     const profile = await profileDir('.tenjin');
     const kept = await projectDir('app');
-    const moved = await projectDir('old-app');
     const gone = join(dir, 'deleted-app');
     await writeFile(
       join(profile, 'config.json'),
-      JSON.stringify({ install: { routerProjects: [kept, moved, gone] } }),
+      JSON.stringify({ install: { routerProjects: [kept, gone] } }),
     );
     const said = (scope: string) =>
       `${JSON.stringify(buildSuccessEnvelope('install', { refresh: true, scope }), null, 2)}\n`;
     const { ctx } = makeCtx();
     ctx.dataDir = profile;
-    const spawned = scriptedSpawn([], [undefined, said('user'), said('local'), said('user')]);
+    const spawned = scriptedSpawn([], [undefined, said('user'), said('local')]);
     const result = await runUpdate(
       { check: false },
       ctx,
       await deps({ spawnImpl: spawned.impl, refreshCommand: ENTRY }),
     );
-    expect(spawned.refreshes().map((c) => c.cwd)).toEqual([homedir(), kept, moved]);
-    for (const call of spawned.refreshes()) {
-      expect(call.args).toEqual([ENTRY, 'install', '--refresh']);
-      expect(call.env?.TENJIN_DATA_DIR).toBe(profile);
-    }
+    expect(spawned.refreshes().map((c) => c.cwd)).toEqual([homedir(), kept]);
+    expect(spawned.refreshes().map((c) => c.args)).toEqual([
+      [ENTRY, 'install', '--refresh'],
+      [ENTRY, 'install', '--refresh', '--project'],
+    ]);
+    for (const call of spawned.refreshes()) expect(call.env?.TENJIN_DATA_DIR).toBe(profile);
     expect(result.data).toMatchObject({ refresh: { projects: [kept], projectsFailed: [] } });
     expect(result.humanLines).toContain(`Refreshed the project install in ${kept}.`);
     const config = JSON.parse(await readFile(join(profile, 'config.json'), 'utf8')) as {
       install: { routerProjects: string[] };
     };
     expect(config.install.routerProjects).toEqual([kept]);
+  });
+
+  /**
+   * A `--project` INSTALL AT HOME shares the user install's plugin folder and
+   * settings file, so only its `settings.local.json` proves it. It is kept and
+   * refreshed from home as `--project`, never taken for the user install.
+   */
+  it('keeps and refreshes a recorded project install at home', async () => {
+    const profile = await profileDir('.tenjin');
+    const home = await projectDir('home');
+    await writeFile(
+      join(profile, 'config.json'),
+      JSON.stringify({ install: { routerProjects: [home] } }),
+    );
+    const { ctx } = makeCtx();
+    ctx.dataDir = profile;
+    const spawned = scriptedSpawn([]);
+    const result = await runUpdate(
+      { check: false },
+      ctx,
+      await deps({ spawnImpl: spawned.impl, refreshCommand: ENTRY, homeDir: home }),
+    );
+    expect(spawned.refreshes().at(-1)).toMatchObject({
+      cwd: home,
+      args: [ENTRY, 'install', '--refresh', '--project'],
+    });
+    expect(result.data).toMatchObject({ refresh: { projects: [home], projectsFailed: [] } });
+    const config = JSON.parse(await readFile(join(profile, 'config.json'), 'utf8')) as {
+      install: { routerProjects: string[] };
+    };
+    expect(config.install.routerProjects).toEqual([home]);
   });
 
   it('names the project and its own fix when a project refresh fails', async () => {

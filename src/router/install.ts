@@ -256,18 +256,37 @@ export async function projectInstallHere(
   home: string,
   env: NodeJS.ProcessEnv,
 ): Promise<boolean> {
-  const [cwdPath, homePath] = await Promise.all([
-    realpath(cwd).catch(() => cwd),
-    realpath(home).catch(() => home),
-  ]);
-  if (cwdPath === homePath) return false;
-  const local = await readFile(join(cwd, '.claude', 'settings.local.json'), 'utf8')
+  if (await isHome(cwd, home)) return false;
+  return projectInstallAt(cwd, home, env);
+}
+
+/**
+ * Does `dir` still hold the project install `install --project` recorded
+ * there? Home included: a `--project` install at home is supported, and there
+ * its plugin folder and settings file are the user install's own, so only the
+ * plugin enabled in `.claude/settings.local.json` proves it.
+ */
+export async function projectInstallAt(
+  dir: string,
+  home: string,
+  env: NodeJS.ProcessEnv,
+): Promise<boolean> {
+  const local = await readFile(join(dir, '.claude', 'settings.local.json'), 'utf8')
     .then((raw) => JSON.parse(raw) as { enabledPlugins?: Record<string, unknown> })
     .catch(() => null);
   if (local?.enabledPlugins?.[PLUGIN_ID] === true) return true;
-  if ((await folderState('local', env, home, cwd)).state === 'ours') return true;
-  const paths = settingsInstallPaths(true, env, home, cwd);
+  if (await isHome(dir, home)) return false;
+  if ((await folderState('local', env, home, dir)).state === 'ours') return true;
+  const paths = settingsInstallPaths(true, env, home, dir);
   return (await inspectLegacyInstall(paths.settingsPath, paths.mcpFile)).events.length > 0;
+}
+
+async function isHome(dir: string, home: string): Promise<boolean> {
+  const [dirPath, homePath] = await Promise.all([
+    realpath(dir).catch(() => dir),
+    realpath(home).catch(() => home),
+  ]);
+  return dirPath === homePath;
 }
 
 /** Is any install of ours here for a refresh to bring up to date? */
