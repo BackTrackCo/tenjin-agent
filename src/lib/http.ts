@@ -321,6 +321,23 @@ function carriesSignedMaterial(headers: Record<string, string>): boolean {
   return Object.keys(headers).some((name) => CREDENTIAL_HEADERS.has(name.toLowerCase()));
 }
 
+/**
+ * A request header name this client sets itself and an operator may not: the
+ * wallet-signed material above, the shelf bypass secret, this install's
+ * identity, and the x402 payment namespace. Kept beside the set so the two
+ * cannot drift.
+ */
+export function isReservedRequestHeader(name: string): boolean {
+  const lowered = name.toLowerCase();
+  return (
+    CREDENTIAL_HEADERS.has(lowered) ||
+    lowered === SHELF_BYPASS_HEADER ||
+    lowered === INSTALL_ID_HEADER ||
+    lowered.startsWith('payment-') ||
+    lowered.startsWith('x-payment')
+  );
+}
+
 export type FetchJsonResult = FetchJsonSuccess | FetchJsonFailure;
 
 export async function fetchJson(url: string, opts: FetchJsonOptions): Promise<FetchJsonResult> {

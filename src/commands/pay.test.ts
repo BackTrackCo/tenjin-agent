@@ -628,6 +628,74 @@ describe('runPay, usage errors', () => {
   });
 });
 
+describe('runPay, operator headers (-H)', () => {
+  const BETA = 'dynamic-highlights-2026-08-28';
+
+  it('rides on the probe and the paid leg, beneath the signature', async () => {
+    const fixture = buildPaymentRequired();
+    const { fetch, calls } = scriptedFetch([
+      json(402, { error: 'payment required' }, { 'PAYMENT-REQUIRED': fixture.header }),
+      json(200, { answer: 'paid' }),
+    ]);
+    const result = await runPay(
+      { url: TENJIN_URL, data: '{"q":"x"}', header: [`Exa-Beta: ${BETA}`, 'X-Trace: t-1'] },
+      makeCtx(),
+      {
+        ...PUBLIC_DNS,
+        fetchImpl: fetch,
+        provider: testWalletProvider(),
+        authorizer: fakeAuthorizer('allow'),
+      },
+    );
+    expect((result.data as { paid: boolean }).paid).toBe(true);
+    expect(calls).toHaveLength(2);
+    for (const call of calls) {
+      expect(call.headers['exa-beta']).toBe(BETA);
+      expect(call.headers['x-trace']).toBe('t-1');
+      expect(call.headers['content-type']).toBe('application/json');
+    }
+    expect(calls[0]!.headers['payment-signature']).toBeUndefined();
+    expect(calls[1]!.headers['payment-signature']).toBeDefined();
+  });
+
+  it('refuses a header this command signs or sets itself, before any network', async () => {
+    for (const line of [
+      'Payment-Signature: forged',
+      'X-PAYMENT: forged',
+      'Sign-In-With-X: forged',
+      'Tenjin-Session-Delegation: forged',
+      'X-Vercel-Protection-Bypass: secret',
+      'Tenjin-Install-Id: other',
+      'Content-Type: text/plain',
+      'Host: elsewhere.example',
+    ]) {
+      const { fetch, calls } = scriptedFetch([]);
+      await expect(
+        runPay({ url: TENJIN_URL, header: [line] }, makeCtx(), { ...PUBLIC_DNS, fetchImpl: fetch }),
+      ).rejects.toMatchObject({ code: 'USAGE' });
+      expect(calls).toHaveLength(0);
+    }
+  });
+
+  it('refuses a malformed, multi-line, over-long or repeated header', async () => {
+    for (const lines of [
+      ['no-colon'],
+      [': value'],
+      ['Bad Name: v'],
+      ['X-Empty:   '],
+      ['X-Split: a\r\nb'],
+      [`X-Long: ${'a'.repeat(1_025)}`],
+      ['X-Twice: a', 'x-twice: b'],
+    ]) {
+      const { fetch, calls } = scriptedFetch([]);
+      await expect(
+        runPay({ url: TENJIN_URL, header: lines }, makeCtx(), { ...PUBLIC_DNS, fetchImpl: fetch }),
+      ).rejects.toMatchObject({ code: 'USAGE' });
+      expect(calls).toHaveLength(0);
+    }
+  });
+});
+
 describe('runPay, bazaar lane', () => {
   it('delivers a free foreign endpoint without any payment toggle', async () => {
     const { fetch, calls } = scriptedFetch([json(200, { free: true })]);

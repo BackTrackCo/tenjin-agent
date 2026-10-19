@@ -7,7 +7,7 @@ import { readUsdcBalanceWithFallback, type readUsdcBalance } from '../lib/usdc-b
 import { assertPublicDestination, type DestinationOptions } from '../lib/destination';
 import { CliError } from '../lib/errors';
 import { validateResultBody, type ResultCheck } from '../lib/request-schema';
-import { fetchFailureToCliError, httpRequest } from '../lib/http';
+import { fetchFailureToCliError, httpRequest, isReservedRequestHeader } from '../lib/http';
 import type { HttpResponse } from '../lib/http';
 import { parseUsdToAtomic, toMoney } from '../lib/money';
 import { sanitizeForTerminal } from '../lib/output';
@@ -107,6 +107,12 @@ export interface PayArgs {
    * payment header in beside the one this command signs.
    */
   headers?: Record<string, string>;
+  /**
+   * `-H 'Name: value'` lines from the operator, for a header the endpoint
+   * itself asks for (a beta opt-in, an API version). Manual lane only. Any
+   * name this command signs or sets is refused before the probe.
+   */
+  header?: string[];
   /** A body the caller already encoded; sent byte for byte. Needs `-X POST`. */
   rawBody?: string;
   /** The same-turn duplicate guard's identity for this request. */
@@ -203,7 +209,7 @@ async function executePay(
   if (lane === 'bazaar') await assertPublicDestination(url, deps.destination ?? {});
   const method = resolveMethod(args);
   const jsonBody = parseBody(args.data);
-  const headers = callerHeaders(args.headers);
+  const headers = { ...operatorHeaders(args.header), ...callerHeaders(args.headers) };
 
   const fetchOpts = {
     timeoutMs: ctx.flags.timeout,
@@ -611,10 +617,59 @@ function resolveMethod(args: PayArgs): 'GET' | 'POST' {
   return method;
 }
 
+/** One header name, as RFC 9110 spells a token. */
+const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
+/** Names the transport or the body encoding own; `-H` may not restate them. */
+const TRANSPORT_HEADERS = new Set(['host', 'content-length', 'content-type', 'user-agent']);
+
 /**
- * The caller's headers, or a refusal. Two names only: everything else on this
- * request is either this command's to set (the payment signature, the user
- * agent, the shelf bypass) or nobody's.
+ * The operator's `-H` lines, or a refusal. The opposite rule from
+ * {@link callerHeaders}: a person typing the command may name any header the
+ * endpoint asks for, except what this command signs or sets itself. Values
+ * are bounded and single-line, the same bar the router's two names meet.
+ */
+function operatorHeaders(lines: string[] | undefined): Record<string, string> {
+  if (lines === undefined) return {};
+  const out: Record<string, string> = {};
+  for (const line of lines) {
+    const at = line.indexOf(':');
+    const name = at > 0 ? line.slice(0, at).trim() : '';
+    const value = at > 0 ? line.slice(at + 1).trim() : '';
+    if (!HEADER_NAME.test(name) || value.length === 0) {
+      throw new CliError('USAGE', `Not a request header: ${JSON.stringify(line)}`, {
+        fix: "Pass -H 'Name: value'.",
+      });
+    }
+    const lowered = name.toLowerCase();
+    if (isReservedRequestHeader(lowered) || TRANSPORT_HEADERS.has(lowered)) {
+      throw new CliError('USAGE', `This command sets the header ${JSON.stringify(name)} itself.`, {
+        fix: 'Payment, sign-in, bypass and transport headers are never taken from -H; --data is always application/json.',
+      });
+    }
+    if (value.length > 1_024 || /[\r\n]/.test(value)) {
+      throw new CliError(
+        'USAGE',
+        `The value of ${JSON.stringify(name)} is too long or spans lines.`,
+        {
+          fix: 'Keep each -H value on one line, under 1,024 characters.',
+        },
+      );
+    }
+    if (lowered in out) {
+      throw new CliError('USAGE', `The header ${JSON.stringify(name)} was given twice.`, {
+        fix: 'Pass each header name once.',
+      });
+    }
+    out[lowered] = value;
+  }
+  return out;
+}
+
+/**
+ * The router's headers, or a refusal. Two names only: a decision composes
+ * `accept` and `content-type`, and everything else on this request is either
+ * this command's to set (the payment signature, the user agent, the shelf
+ * bypass) or the operator's through `-H`.
  */
 function callerHeaders(headers: Record<string, string> | undefined): Record<string, string> {
   if (headers === undefined) return {};

@@ -70,6 +70,8 @@ Review the live endpoint, recipient, network, asset and amount. `--ignore-warnin
 tenjin pay https://api.example.com/quote --json --max-price 0.05
 # After reviewing a registry warning and the live quote:
 tenjin pay https://api.example.com/quote --json --max-price 0.05 --ignore-warnings --yes
+# A header the endpoint asks for (a beta opt-in, an API version); never a payment or sign-in header:
+tenjin pay https://api.example.com/search -d '{"q":"x"}' -H 'X-Api-Beta: 2026-08-28' --max-price 0.05 --yes
 ```
 
 Both flags still obey the optional explicit `--max-price` cap, destination and supported-challenge checks, and the authoritative wallet balance check. Warnings and acknowledgement status remain in JSON output. Each paid invocation can spend again; nothing deduplicates repeat payments. Free or SIWX-entitled delivery needs neither warning acknowledgement nor a payment balance read.

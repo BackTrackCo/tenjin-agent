@@ -1,6 +1,6 @@
 import type { Command } from 'commander';
 import { PERMISSIONS_DOC_URL } from '../lib/permissions';
-import { SETUP, WALLET, type Registration } from './registration';
+import { SETUP, WALLET, collect, type Registration } from './registration';
 
 /**
  * The core product: setting this machine up, the wallet, and the one standard
@@ -264,6 +264,11 @@ Examples:
       'acknowledge direct-payment registry warnings only; all payment checks still apply',
     )
     .option('--print-body', 'print the full body instead of the capped preview')
+    .option(
+      '-H, --header <line>',
+      "a request header the endpoint asks for, as 'Name: value' (repeatable); payment, sign-in and bypass headers are refused",
+      collect,
+    )
     .addHelpText(
       'after',
       `
@@ -271,6 +276,7 @@ Examples:
   $ tenjin pay https://api.example.com/quote --max-price 0.05
   $ tenjin pay https://api.example.com/quote --json --max-price 0.05 --ignore-warnings --yes
   $ tenjin pay https://api.example.com/quote -d '{"symbol":"ETH"}' --yes
+  $ tenjin pay https://api.example.com/search -d '{"q":"x"}' -H 'X-Api-Beta: 2026-08-28' --yes
 `,
     )
     .action(async function (this: Command, url: string) {
@@ -286,6 +292,9 @@ Examples:
             ...(o.yes === true ? { yes: true } : {}),
             ...(o.printBody === true ? { printBody: true } : {}),
             ...(o.ignoreWarnings === true ? { ignoreWarnings: true } : {}),
+            ...(Array.isArray(o.header) && o.header.length > 0
+              ? { header: o.header as string[] }
+              : {}),
           },
           ctx,
         );
