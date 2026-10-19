@@ -293,6 +293,12 @@ describe('User-Agent identity', () => {
     expect([...sent.keys()].filter((k) => k === 'user-agent')).toHaveLength(1);
   });
 
+  it('a bodyless PATCH asks for JSON, as POST and PUT do', async () => {
+    const { fetchImpl, calls } = headerCapture();
+    await httpRequest('https://tenjin.blog/api/x', { method: 'PATCH', timeoutMs: 1000, fetchImpl });
+    expect(calls[0]?.get('accept')).toBe('application/json');
+  });
+
   it('call-specific accept/content-type still win their own slot without disturbing the User-Agent', async () => {
     const { fetchImpl, calls } = headerCapture();
     await httpRequest('https://tenjin.blog/api/read/x', {

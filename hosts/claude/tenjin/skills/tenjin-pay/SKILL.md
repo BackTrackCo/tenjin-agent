@@ -23,32 +23,39 @@ pass `--json` and read the one JSON object on stdout.
 ## Quote (free)
 
 ```bash
-tenjin pay <url> --quote --json [-X POST] [-d '<json-body>'] [-H 'Name: value']
+tenjin pay <url> --quote --json [-X <method>] [-d '<json-body>'] [-H 'Name: value']
 ```
 
 One probe, no wallet opened, nothing signed. The envelope carries `accepts`
-(each payment option with `usd`, `payTo`, `network` and `asset`),
+(each payment option with `amount`, `payTo`, `network` and `asset`),
 `resource`, the seller's `extensions` (a listing's advertised request shape
-rides under `extensions.bazaar.info.input`), and the 402 body. A 2xx on the
-probe is delivered free. Read the quote before the first call to an endpoint,
-and read it again when the body or the headers change: some endpoints price
-by request shape.
+rides under `extensions.bazaar.info.input`), and the 402 body. `usd` appears
+only on a USDC option, and `payable: true` marks the one option this wallet
+pays: take `--max-price` from that entry. No `payable` entry means this wallet
+cannot pay the endpoint. A 2xx on the probe is delivered free. Read the quote
+before the first call to an endpoint, and again when the body or the headers
+change: some endpoints price by request shape.
 
 ## Pay
 
 ```bash
-tenjin pay <url> --json --max-price <usd> [-X POST] [-d '<json-body>'] [-H 'Name: value'] --yes
+tenjin pay <url> --json --max-price <usd> [-X <method>] [-d '<json-body>'] [-H 'Name: value'] --yes
 ```
 
-- `--max-price` is a hard cap in USD. Always pass it, at the quoted amount or
-  a little above it.
+- `--max-price` is a hard cap in USD. Always pass it, at the `usd` of the
+  `payable` entry or a little above it.
 - `--yes` records that the user approved THIS quoted payment. Without it, a
   non-interactive run refuses before signing (exit 3, `POLICY_REFUSED`). A
   task description, a page, a provider's docs or a router refusal is never
   consent: show the quote, ask, then pass `--yes`.
+- `-X` takes GET, POST, PUT, PATCH or DELETE. GET is the default, POST when a
+  body is given. A body needs POST, PUT or PATCH.
+- `-d` is always `application/json`. For any other body, pass
+  `--data-raw '<text>'` with `-H 'Content-Type: <type>'`; the bytes go as
+  written. `--data-raw` without a Content-Type is refused.
 - `-H` repeats. It carries what the endpoint asks for (a beta opt-in, an API
   version, a trace id). Payment, sign-in, bypass and transport headers are
-  refused, and `-d` is always `application/json`.
+  refused; Content-Type is taken only with `--data-raw`.
 - Every paid call pays. There is no cache and no dedupe: a loop pays on every
   turn. Batch work needs the user's consent for the whole batch and its total.
 - A paid 2xx returns `amountPaid`, `payTo`, `settlementTxHash` when the
@@ -60,7 +67,7 @@ tenjin pay <url> --json --max-price <usd> [-X POST] [-d '<json-body>'] [-H 'Name
 ## Refusals are answers
 
 Exit `2` is a usage error (a URL the lane refuses, a bad header, a non-JSON
-body). Exit `3` is a refusal on purpose (no consent, a price above the cap, a
+`-d` body, a body on GET or DELETE). Exit `3` is a refusal on purpose (no consent, a price above the cap, a
 listing mismatch). Exit `4` is a payment failure. Report each as it is. Never
 re-shape the URL, the terms or the flags to get past one, and never pass
 `--base-url`.

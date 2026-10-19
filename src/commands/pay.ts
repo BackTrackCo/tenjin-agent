@@ -27,6 +27,7 @@ import {
 import {
   buildExactPayment,
   createPayerClient,
+  isCanonicalUsdc,
   noPayableRequirement,
   selectPayableRequirement,
 } from '../lib/x402-pay';
@@ -84,10 +85,16 @@ export interface AdvertisedTerms {
 
 export interface PayArgs {
   url: string;
-  /** GET (default) or POST; POST is implied when --data is given. */
+  /** GET, POST, PUT, PATCH or DELETE. GET by default, POST when a body is given. */
   method?: string;
   /** A JSON request body; content-type is always application/json. */
   data?: string;
+  /**
+   * `--data-raw`: a body sent byte for byte, for an endpoint that does not
+   * take JSON. Its content type is the operator's own `-H 'Content-Type: …'`,
+   * which is required with it and refused everywhere else.
+   */
+  dataRaw?: string;
   /** Decimal USD; the hard price cap, never bypassed by --yes. */
   maxPrice?: string;
   /** Bypass the interactive confirm only (never the price cap or a hard deny). */
@@ -119,7 +126,7 @@ export interface PayArgs {
    * opened and nothing is signed. A 2xx on the probe still delivers free.
    */
   quote?: boolean;
-  /** A body the caller already encoded; sent byte for byte. Needs `-X POST`. */
+  /** The router's body, already encoded; sent byte for byte. Needs POST, PUT or PATCH. */
   rawBody?: string;
   /** The same-turn duplicate guard's identity for this request. */
   requestKey?: string;
@@ -214,8 +221,9 @@ async function executePay(
   // that is the one that has to prove it is not on this network.
   if (lane === 'bazaar') await assertPublicDestination(url, deps.destination ?? {});
   const method = resolveMethod(args);
-  const jsonBody = parseBody(args.data);
-  const headers = { ...operatorHeaders(args.header), ...callerHeaders(args.headers) };
+  const operator = operatorHeaders(args.header, args.dataRaw !== undefined);
+  const body = resolveBody(args, operator);
+  const headers = { ...operator, ...callerHeaders(args.headers) };
 
   const fetchOpts = {
     timeoutMs: ctx.flags.timeout,
@@ -224,8 +232,7 @@ async function executePay(
     // probe too, so the challenge always comes from the URL that was gated).
     blockRedirects: true as const,
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
-    ...(jsonBody !== undefined ? { jsonBody } : {}),
-    ...(jsonBody === undefined && args.rawBody !== undefined ? { rawBody: args.rawBody } : {}),
+    ...body,
     ...(Object.keys(headers).length > 0 ? { headers } : {}),
     // A router lookup can buy a file (a sound, an image): its bytes are kept
     // whole for the tool to save, never decoded as text.
@@ -269,16 +276,17 @@ async function executePay(
   }
 
   const paymentRequired = decodeChallenge(probe, url);
-  // `--quote` is a READ: the 402 is reported as it came, and nothing below this
-  // line runs, so no wallet is opened and nothing is signed.
-  if (args.quote === true) {
-    return deliverQuote(url, lane, probe, paymentRequired, args.printBody === true);
-  }
   // The client is built BEFORE the wallet is opened on purpose: selection needs
   // only the registered networks and the policies, never a key, so an
   // unpayable or unverifiable deal is refused before a signer exists.
   const payer = createPayerClient(() => signerOrThrow(openedSigner));
   const requirement = selectRequirement(payer.core, paymentRequired, args.terms);
+  // `--quote` is a READ: the 402 is reported as it came, with the entry the
+  // paid path would sign marked by the same selection. Nothing below this line
+  // runs, so no wallet is opened and nothing is signed.
+  if (args.quote === true) {
+    return deliverQuote(url, lane, probe, paymentRequired, requirement, args.printBody === true);
+  }
   if (requirement === undefined) {
     throw noMatchingEntry(paymentRequired, args.terms);
   }
@@ -613,19 +621,56 @@ function resolveLane(url: string, settings: ResolvedSettings): Lane {
   return 'bazaar';
 }
 
-function resolveMethod(args: PayArgs): 'GET' | 'POST' {
-  const method = args.method?.toUpperCase() ?? (args.data !== undefined ? 'POST' : 'GET');
-  if (method !== 'GET' && method !== 'POST') {
+type Method = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+const METHODS: ReadonlySet<string> = new Set<Method>(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']);
+/** The methods that carry a body. GET and DELETE never do here. */
+const BODY_METHODS: ReadonlySet<string> = new Set<Method>(['POST', 'PUT', 'PATCH']);
+
+function hasBody(args: PayArgs): boolean {
+  return args.data !== undefined || args.dataRaw !== undefined || args.rawBody !== undefined;
+}
+
+function resolveMethod(args: PayArgs): Method {
+  const method = args.method?.toUpperCase() ?? (hasBody(args) ? 'POST' : 'GET');
+  if (!METHODS.has(method)) {
     throw new CliError('USAGE', `Unsupported method ${JSON.stringify(args.method)}`, {
-      fix: 'Use -X GET or -X POST.',
+      fix: 'Use -X GET, POST, PUT, PATCH or DELETE.',
     });
   }
-  if (method === 'GET' && (args.data !== undefined || args.rawBody !== undefined)) {
-    throw new CliError('USAGE', 'A request body needs -X POST.', {
-      fix: 'Drop --data, or pass -X POST.',
+  if (hasBody(args) && !BODY_METHODS.has(method)) {
+    throw new CliError('USAGE', 'A request body needs -X POST, PUT or PATCH.', {
+      fix: 'Drop the body, or pass -X POST, PUT or PATCH.',
     });
   }
-  return method;
+  return method as Method;
+}
+
+/**
+ * The one body this request carries, or none. `--data` is JSON and sets its
+ * own content type; `--data-raw` goes byte for byte under the operator's
+ * Content-Type; `rawBody` is the router's, already encoded. Two at once is a
+ * usage error, never a silent pick.
+ */
+function resolveBody(
+  args: PayArgs,
+  operator: Record<string, string>,
+): { jsonBody?: unknown; rawBody?: string } {
+  const given = [args.data, args.dataRaw, args.rawBody].filter((b) => b !== undefined);
+  if (given.length > 1) {
+    throw new CliError('USAGE', 'Pass one request body: --data or --data-raw, not both.', {
+      fix: 'Use --data for a JSON body, or --data-raw with its own Content-Type.',
+    });
+  }
+  if (args.data !== undefined) return { jsonBody: parseBody(args.data) };
+  if (args.dataRaw !== undefined) {
+    if (operator['content-type'] === undefined) {
+      throw new CliError('USAGE', 'A --data-raw body needs its content type.', {
+        fix: "Pass -H 'Content-Type: <type>' with --data-raw.",
+      });
+    }
+    return { rawBody: args.dataRaw };
+  }
+  return args.rawBody !== undefined ? { rawBody: args.rawBody } : {};
 }
 
 /** One header name, as RFC 9110 spells a token. */
@@ -638,8 +683,10 @@ const TRANSPORT_HEADERS = new Set(['host', 'content-length', 'content-type', 'us
  * {@link callerHeaders}: a person typing the command may name any header the
  * endpoint asks for, except what this command signs or sets itself. Values
  * are bounded and single-line, the same bar the router's two names meet.
+ * `content-type` is the operator's only with `--data-raw`, whose bytes this
+ * command does not encode; `--data` is always JSON.
  */
-function operatorHeaders(lines: string[] | undefined): Record<string, string> {
+function operatorHeaders(lines: string[] | undefined, rawBody: boolean): Record<string, string> {
   if (lines === undefined) return {};
   const out: Record<string, string> = {};
   for (const line of lines) {
@@ -652,9 +699,10 @@ function operatorHeaders(lines: string[] | undefined): Record<string, string> {
       });
     }
     const lowered = name.toLowerCase();
-    if (isReservedRequestHeader(lowered) || TRANSPORT_HEADERS.has(lowered)) {
+    const ownContentType = rawBody && lowered === 'content-type';
+    if (isReservedRequestHeader(lowered) || (TRANSPORT_HEADERS.has(lowered) && !ownContentType)) {
       throw new CliError('USAGE', `This command sets the header ${JSON.stringify(name)} itself.`, {
-        fix: 'Payment, sign-in, bypass and transport headers are never taken from -H; --data is always application/json.',
+        fix: 'Payment, sign-in, bypass and transport headers are never taken from -H. --data is always application/json; only --data-raw takes a Content-Type from -H.',
       });
     }
     if (value.length > 1_024 || /[\r\n]/.test(value)) {
@@ -975,24 +1023,33 @@ type DeliverOpts = {
 );
 
 /**
- * The 402 as a quote: every accepted payment option in the seller's order with
- * its amount in USD, the resource line, the extensions the seller attached (a
- * listing's advertised request shape rides there), and the 402 body as data.
- * Nothing was paid, and the terminal line says so.
+ * The 402 as a quote: every accepted payment option in the seller's order, the
+ * resource line, the extensions the seller attached (a listing's advertised
+ * request shape rides there), and the 402 body as data. Nothing was paid, and
+ * the terminal line says so.
+ *
+ * `usd` rides only on a canonical USDC entry, the one kind whose amount is
+ * 6-decimal by construction: a seller listing an 18-decimal entry first had it
+ * labelled as dollars. `payable` marks the entry the paid path would sign, and
+ * the headline prices that entry or says there is none.
  */
 function deliverQuote(
   url: string,
   lane: Lane,
   res: HttpResponse,
   challenge: PaymentRequired,
+  chosen: PaymentRequirements | undefined,
   printBody: boolean,
 ): CommandResult {
-  const accepts = challenge.accepts.map((a) => ({
+  const chosenAt =
+    chosen === undefined ? -1 : challenge.accepts.findIndex((a) => sameDeal(a, chosen));
+  const accepts = challenge.accepts.map((a, i) => ({
     scheme: a.scheme,
     network: a.network,
     asset: a.asset,
     amount: a.amount,
-    usd: toMoney(a.amount).usd,
+    ...(isCanonicalUsdc(a) ? { usd: toMoney(a.amount).usd } : {}),
+    ...(i === chosenAt ? { payable: true as const } : {}),
     payTo: a.payTo,
     maxTimeoutSeconds: a.maxTimeoutSeconds,
     ...(a.extra !== undefined ? { extra: a.extra } : {}),
@@ -1010,17 +1067,31 @@ function deliverQuote(
     bodyText: res.text,
   };
   const host = sanitizeForTerminal(new URL(url).host);
-  const first = accepts[0];
+  const payable = accepts[chosenAt];
   const headline =
-    first === undefined
-      ? `quote: ${host} answered 402 with no payment option (nothing paid)`
-      : `quote: ${first.usd} USD to ${host} on ${sanitizeForTerminal(first.network)} (nothing paid)`;
+    payable?.usd !== undefined
+      ? `quote: ${payable.usd} USD to ${host} on ${sanitizeForTerminal(payable.network)} (nothing paid)`
+      : accepts.length === 0
+        ? `quote: ${host} answered 402 with no payment option (nothing paid)`
+        : `quote: ${host} lists no option this wallet can pay, only USDC on Base is supported (nothing paid)`;
   const body = sanitizeForTerminal(res.text);
   const preview =
     printBody || body.length <= BODY_PREVIEW_CHARS
       ? body
       : `${body.slice(0, BODY_PREVIEW_CHARS)}\n… truncated; run with --print-body or --json for the full body`;
   return { data, humanLines: [headline, ...(preview.length > 0 ? [preview] : [])] };
+}
+
+/** The same advertised deal, whether or not the SDK handed back the same object. */
+function sameDeal(a: PaymentRequirements, b: PaymentRequirements): boolean {
+  return (
+    a === b ||
+    (a.scheme === b.scheme &&
+      a.network === b.network &&
+      a.asset.toLowerCase() === b.asset.toLowerCase() &&
+      a.amount === b.amount &&
+      a.payTo.toLowerCase() === b.payTo.toLowerCase())
+  );
 }
 
 function deliver(url: string, lane: Lane, res: HttpResponse, opts: DeliverOpts): CommandResult {

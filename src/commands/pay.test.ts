@@ -614,17 +614,99 @@ describe('runPay, usage errors', () => {
     expect(calls).toHaveLength(0);
   });
 
-  it('rejects GET with a body, and unsupported methods', async () => {
-    const { fetch } = scriptedFetch([]);
-    await expect(
-      runPay({ url: TENJIN_URL, method: 'GET', data: '{}' }, makeCtx(), {
+  it('rejects GET or DELETE with a body, and unsupported methods', async () => {
+    const { fetch, calls } = scriptedFetch([]);
+    for (const args of [
+      { method: 'GET', data: '{}' },
+      { method: 'DELETE', data: '{}' },
+      { method: 'delete', dataRaw: 'a=1', header: ['Content-Type: text/plain'] },
+      { method: 'OPTIONS' },
+    ]) {
+      await expect(
+        runPay({ url: TENJIN_URL, ...args }, makeCtx(), { ...PUBLIC_DNS, fetchImpl: fetch }),
+      ).rejects.toMatchObject({ code: 'USAGE' });
+    }
+    expect(calls).toHaveLength(0);
+  });
+});
+
+describe('runPay, methods and bodies', () => {
+  it('PUT and PATCH carry the JSON body with that method on the probe and the paid leg', async () => {
+    for (const method of ['PUT', 'patch']) {
+      const fixture = buildPaymentRequired();
+      const { fetch, calls } = scriptedFetch([
+        json(402, {}, { 'PAYMENT-REQUIRED': fixture.header }),
+        json(200, { ok: true }),
+      ]);
+      const result = await runPay({ url: TENJIN_URL, method, data: '{"name":"y"}' }, makeCtx(), {
         ...PUBLIC_DNS,
         fetchImpl: fetch,
-      }),
-    ).rejects.toMatchObject({ code: 'USAGE' });
-    await expect(
-      runPay({ url: TENJIN_URL, method: 'DELETE' }, makeCtx(), { ...PUBLIC_DNS, fetchImpl: fetch }),
-    ).rejects.toMatchObject({ code: 'USAGE' });
+        provider: testWalletProvider(),
+        authorizer: fakeAuthorizer('allow'),
+      });
+      expect((result.data as { paid: boolean }).paid).toBe(true);
+      expect(calls).toHaveLength(2);
+      for (const call of calls) {
+        expect(call.method).toBe(method.toUpperCase());
+        expect(call.body).toBe('{"name":"y"}');
+        expect(call.headers['content-type']).toBe('application/json');
+      }
+    }
+  });
+
+  it('DELETE without a body reaches the endpoint as DELETE', async () => {
+    const { fetch, calls } = scriptedFetch([json(200, { deleted: true })]);
+    await runPay({ url: TENJIN_URL, method: 'DELETE' }, makeCtx(), {
+      ...PUBLIC_DNS,
+      fetchImpl: fetch,
+    });
+    expect(calls[0]!.method).toBe('DELETE');
+    expect(calls[0]!.body).toBeUndefined();
+  });
+
+  it('--data-raw sends its exact bytes under the operator content type on both legs', async () => {
+    const fixture = buildPaymentRequired();
+    const { fetch, calls } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': fixture.header }),
+      json(200, { ok: true }),
+    ]);
+    const result = await runPay(
+      {
+        url: TENJIN_URL,
+        dataRaw: 'a=1',
+        header: ['Content-Type: application/x-www-form-urlencoded'],
+      },
+      makeCtx(),
+      {
+        ...PUBLIC_DNS,
+        fetchImpl: fetch,
+        provider: testWalletProvider(),
+        authorizer: fakeAuthorizer('allow'),
+      },
+    );
+    expect((result.data as { paid: boolean }).paid).toBe(true);
+    expect(calls).toHaveLength(2);
+    for (const call of calls) {
+      expect(call.method).toBe('POST');
+      expect(call.body).toBe('a=1');
+      expect(call.headers['content-type']).toBe('application/x-www-form-urlencoded');
+    }
+    expect(calls[1]!.headers['payment-signature']).toBeDefined();
+  });
+
+  it('refuses --data-raw without a content type, and --data with --data-raw', async () => {
+    for (const args of [
+      { dataRaw: 'a=1' },
+      { dataRaw: 'a=1', header: ['X-Trace: t-1'] },
+      { data: '{}', dataRaw: 'a=1', header: ['Content-Type: text/plain'] },
+      { data: '{}', header: ['Content-Type: text/plain'] },
+    ]) {
+      const { fetch, calls } = scriptedFetch([]);
+      await expect(
+        runPay({ url: TENJIN_URL, ...args }, makeCtx(), { ...PUBLIC_DNS, fetchImpl: fetch }),
+      ).rejects.toMatchObject({ code: 'USAGE' });
+      expect(calls).toHaveLength(0);
+    }
   });
 });
 
@@ -671,6 +753,78 @@ describe('runPay, --quote', () => {
     expect(result.humanLines?.[0]).toMatch(
       /^quote: .* USD to tenjin\.blog on eip155:8453 \(nothing paid\)$/,
     );
+  });
+
+  it('prices only the USDC entry and marks it payable when an 18-decimal entry is listed first', async () => {
+    const paymentRequired: PaymentRequired = {
+      x402Version: 2,
+      resource: { url: TENJIN_URL, description: 'A paid search', mimeType: 'application/json' },
+      accepts: [
+        {
+          scheme: 'exact',
+          network: 'eip155:56',
+          asset: '0x0000000000000000000000000000000000000000',
+          amount: '1000000000000000',
+          payTo: '0x1111111111111111111111111111111111111111',
+          maxTimeoutSeconds: 300,
+          extra: {},
+        },
+        {
+          scheme: 'exact',
+          network: 'eip155:8453',
+          asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+          amount: '10000',
+          payTo: '0x1111111111111111111111111111111111111111',
+          maxTimeoutSeconds: 300,
+          extra: { name: 'USD Coin', version: '2' },
+        },
+      ],
+    };
+    const { fetch } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': encodePaymentRequiredHeader(paymentRequired) }),
+    ]);
+    const result = await runPay({ url: TENJIN_URL, quote: true }, makeCtx(), {
+      ...PUBLIC_DNS,
+      fetchImpl: fetch,
+    });
+    const accepts = (result.data as { accepts: Array<Record<string, unknown>> }).accepts;
+    expect(accepts).toHaveLength(2);
+    expect(accepts[0]).not.toHaveProperty('usd');
+    expect(accepts[0]).not.toHaveProperty('payable');
+    expect(accepts[1]).toMatchObject({ usd: '0.01', payable: true, network: 'eip155:8453' });
+    expect(result.humanLines?.[0]).toBe(
+      'quote: 0.01 USD to tenjin.blog on eip155:8453 (nothing paid)',
+    );
+  });
+
+  it('says so when no entry is payable, and prices none of them', async () => {
+    const paymentRequired: PaymentRequired = {
+      x402Version: 2,
+      resource: { url: TENJIN_URL, description: 'A paid search', mimeType: 'application/json' },
+      accepts: [
+        {
+          scheme: 'exact',
+          network: 'eip155:56',
+          asset: '0x0000000000000000000000000000000000000000',
+          amount: '1000000000000000',
+          payTo: '0x1111111111111111111111111111111111111111',
+          maxTimeoutSeconds: 300,
+          extra: {},
+        },
+      ],
+    };
+    const { fetch } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': encodePaymentRequiredHeader(paymentRequired) }),
+    ]);
+    const result = await runPay({ url: TENJIN_URL, quote: true }, makeCtx(), {
+      ...PUBLIC_DNS,
+      fetchImpl: fetch,
+    });
+    const accepts = (result.data as { accepts: Array<Record<string, unknown>> }).accepts;
+    expect(accepts[0]).not.toHaveProperty('usd');
+    expect(accepts[0]).not.toHaveProperty('payable');
+    expect(result.humanLines?.[0]).toMatch(/lists no option this wallet can pay/);
+    expect(result.humanLines?.[0]).not.toMatch(/USD to/);
   });
 
   it('a 2xx on the probe is delivered free, quote or not', async () => {
