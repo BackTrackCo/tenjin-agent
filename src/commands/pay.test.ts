@@ -628,6 +628,65 @@ describe('runPay, usage errors', () => {
   });
 });
 
+describe('runPay, --quote', () => {
+  it('reports the 402 terms and the advertised request shape, opening no wallet', async () => {
+    const shape = { type: 'http', method: 'POST', bodyType: 'json', body: { q: 'x' } };
+    const fixture = buildPaymentRequired(
+      {},
+      { extensions: { bazaar: { info: { input: shape } } } },
+    );
+    const { fetch, calls } = scriptedFetch([
+      json(402, { error: 'payment required' }, { 'PAYMENT-REQUIRED': fixture.header }),
+    ]);
+    // No provider and no authorizer: reaching either would throw, so a quote
+    // that returns proves nothing past the probe ran.
+    const result = await runPay(
+      { url: TENJIN_URL, data: '{"q":"x"}', quote: true, header: ['X-Api-Beta: 1'] },
+      makeCtx(),
+      { ...PUBLIC_DNS, fetchImpl: fetch },
+    );
+    const data = result.data as {
+      paid: boolean;
+      quote: boolean;
+      status: number;
+      accepts: Array<{ amount: string; usd: string; payTo: string; network: string }>;
+      extensions: { bazaar: { info: { input: unknown } } };
+      body: { error: string };
+    };
+    expect(data.paid).toBe(false);
+    expect(data.quote).toBe(true);
+    expect(data.status).toBe(402);
+    expect(data.accepts).toHaveLength(1);
+    expect(data.accepts[0]).toMatchObject({
+      amount: '100000',
+      payTo: '0x1111111111111111111111111111111111111111',
+      network: 'eip155:8453',
+    });
+    expect(data.accepts[0]!.usd).toBeDefined();
+    expect(data.extensions.bazaar.info.input).toEqual(shape);
+    expect(data.body.error).toBe('payment required');
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.headers['x-api-beta']).toBe('1');
+    expect(calls[0]!.headers['payment-signature']).toBeUndefined();
+    expect(result.humanLines?.[0]).toMatch(
+      /^quote: .* USD to tenjin\.blog on eip155:8453 \(nothing paid\)$/,
+    );
+  });
+
+  it('a 2xx on the probe is delivered free, quote or not', async () => {
+    const { fetch, calls } = scriptedFetch([json(200, { ok: 1 })]);
+    const result = await runPay({ url: TENJIN_URL, quote: true }, makeCtx(), {
+      ...PUBLIC_DNS,
+      fetchImpl: fetch,
+    });
+    const data = result.data as { paid: boolean; quote?: boolean; status: number };
+    expect(data.paid).toBe(false);
+    expect(data.quote).toBeUndefined();
+    expect(data.status).toBe(200);
+    expect(calls).toHaveLength(1);
+  });
+});
+
 describe('runPay, operator headers (-H)', () => {
   const BETA = 'dynamic-highlights-2026-08-28';
 

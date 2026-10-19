@@ -1,3 +1,4 @@
+import { PAY_SKILL, PAY_SKILL_PATH } from './plugin-skill';
 import { PRODUCTION_ORIGIN } from '../lib/production-origin';
 import { HOOK_TOOL, hookToolInput, type HookKind } from './hook-tool';
 import {
@@ -224,6 +225,7 @@ export function renderMarketplace(version?: string): Record<string, unknown> {
 export const PLUGIN_FILES = [
   '.mcp.json',
   'hooks/hooks.json',
+  PAY_SKILL_PATH,
   '.claude-plugin/plugin.json',
 ] as const;
 
@@ -234,6 +236,7 @@ export function renderPluginFiles(version?: string): Record<string, string> {
   return {
     '.mcp.json': json(renderPluginMcp()),
     'hooks/hooks.json': json(renderPluginHooks()),
+    [PAY_SKILL_PATH]: PAY_SKILL,
     '.claude-plugin/plugin.json': json(renderPluginManifest(version)),
   };
 }

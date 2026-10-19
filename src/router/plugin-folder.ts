@@ -109,9 +109,17 @@ export async function removePluginFolder(dir: string): Promise<FolderRemoval> {
     };
   }
   for (const path of PLUGIN_FILES) await rm(join(dir, path), { force: true });
-  const subdirs = [...new Set(PLUGIN_FILES.map((p) => dirname(p)).filter((d) => d !== '.'))].sort(
-    (a, b) => b.split('/').length - a.split('/').length,
-  );
+  // Every ancestor of every file, deepest first: a nested skill directory
+  // leaves its parent behind otherwise.
+  const subdirs = [
+    ...new Set(
+      PLUGIN_FILES.flatMap((p) => {
+        const out: string[] = [];
+        for (let d = dirname(p); d !== '.'; d = dirname(d)) out.push(d);
+        return out;
+      }),
+    ),
+  ].sort((a, b) => b.split('/').length - a.split('/').length);
   for (const sub of subdirs) await rmdir(join(dir, sub)).catch(() => undefined);
   const left = await listFiles(dir);
   if (left.length === 0) await rmdir(dir).catch(() => undefined);

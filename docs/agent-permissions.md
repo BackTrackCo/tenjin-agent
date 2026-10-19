@@ -70,6 +70,8 @@ Review the live endpoint, recipient, network, asset and amount. `--ignore-warnin
 tenjin pay https://api.example.com/quote --json --max-price 0.05
 # After reviewing a registry warning and the live quote:
 tenjin pay https://api.example.com/quote --json --max-price 0.05 --ignore-warnings --yes
+# The 402 terms and the endpoint's advertised request shape, free; opens no wallet:
+tenjin pay https://api.example.com/search -d '{"q":"x"}' --quote --json
 # A header the endpoint asks for (a beta opt-in, an API version); never a payment or sign-in header:
 tenjin pay https://api.example.com/search -d '{"q":"x"}' -H 'X-Api-Beta: 2026-08-28' --max-price 0.05 --yes
 ```
@@ -112,7 +114,7 @@ Claude Code 2.1.287 or later is required. `tenjin install` and `tenjin doctor` r
 
 Install then sends the router one empty, unsigned request to check that this machine can reach it. When it cannot, install still succeeds, and it names the layer that refused (a proxy, DNS, TLS, or the connection) with the fix. `tenjin doctor` runs the same check. Both also look for running `tenjin mcp` processes that started before this install: Claude Code keeps an MCP server for the whole session, so one of those still runs the old build, and the new hooks can fail there with "Tool hook not found". They name the count and the fix (type `/reload-plugins` in the session, or start a new one; only a new session while an earlier release's settings install is still here) and stop nothing.
 
-The installer installs no skills. Install/refresh removes only an owned obsolete `tenjin-pay/SKILL.md`, preserving adjacent user files and foreign skills.
+The plugin carries one skill, `tenjin-pay`: how an agent quotes an endpoint for free with `tenjin pay --quote`, and pays it with `tenjin pay` under your consent, with this machine's wallet rather than another tool's. Install/refresh still removes only an owned obsolete `~/.claude/skills/tenjin-pay/SKILL.md` from an earlier release, preserving adjacent user files and foreign skills.
 
 After install, type `/reload-plugins` in the same Claude Code session, or start a new session, and the plugin loads. While an earlier release's settings install is still on the machine, start a new session instead: `/reload-plugins` reconnects plugin servers only, so it would load the plugin beside the old `x402` server that session is still running, and every event would route twice. `tenjin uninstall` runs `claude plugin uninstall tenjin@tenjin`, removes the `tenjin` marketplace only when it is the one install added, unlinks the plugin folder's own files, removes an earlier release's settings install under the rules above, and keeps your wallet, your ledger and your config.
 

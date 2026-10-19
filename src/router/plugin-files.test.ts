@@ -49,8 +49,11 @@ describe('the checked-in hosts/claude templates', () => {
     const rendered = renderHostFiles();
     expect(filesUnder(HOSTS)).toEqual(Object.keys(rendered).sort());
     for (const [path, body] of Object.entries(rendered)) {
-      // Parsed, so prettier's formatting of the checked-in copy is not drift.
-      expect(JSON.parse(readFileSync(join(HOSTS, path), 'utf8')), path).toEqual(JSON.parse(body));
+      const checkedIn = readFileSync(join(HOSTS, path), 'utf8');
+      // JSON is parsed, so prettier's formatting of the checked-in copy is not
+      // drift; the skill is prose and ships byte for byte.
+      if (path.endsWith('.json')) expect(JSON.parse(checkedIn), path).toEqual(JSON.parse(body));
+      else expect(checkedIn, path).toBe(body);
     }
   });
 

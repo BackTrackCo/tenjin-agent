@@ -113,6 +113,12 @@ export interface PayArgs {
    * name this command signs or sets is refused before the probe.
    */
   header?: string[];
+  /**
+   * `--quote`: decode and report the 402 (every payment option, the resource
+   * line, the seller's extensions and the body) and stop there. No wallet is
+   * opened and nothing is signed. A 2xx on the probe still delivers free.
+   */
+  quote?: boolean;
   /** A body the caller already encoded; sent byte for byte. Needs `-X POST`. */
   rawBody?: string;
   /** The same-turn duplicate guard's identity for this request. */
@@ -263,6 +269,11 @@ async function executePay(
   }
 
   const paymentRequired = decodeChallenge(probe, url);
+  // `--quote` is a READ: the 402 is reported as it came, and nothing below this
+  // line runs, so no wallet is opened and nothing is signed.
+  if (args.quote === true) {
+    return deliverQuote(url, lane, probe, paymentRequired, args.printBody === true);
+  }
   // The client is built BEFORE the wallet is opened on purpose: selection needs
   // only the registered networks and the policies, never a key, so an
   // unpayable or unverifiable deal is refused before a signer exists.
@@ -962,6 +973,55 @@ type DeliverOpts = {
       printBody: boolean;
     }
 );
+
+/**
+ * The 402 as a quote: every accepted payment option in the seller's order with
+ * its amount in USD, the resource line, the extensions the seller attached (a
+ * listing's advertised request shape rides there), and the 402 body as data.
+ * Nothing was paid, and the terminal line says so.
+ */
+function deliverQuote(
+  url: string,
+  lane: Lane,
+  res: HttpResponse,
+  challenge: PaymentRequired,
+  printBody: boolean,
+): CommandResult {
+  const accepts = challenge.accepts.map((a) => ({
+    scheme: a.scheme,
+    network: a.network,
+    asset: a.asset,
+    amount: a.amount,
+    usd: toMoney(a.amount).usd,
+    payTo: a.payTo,
+    maxTimeoutSeconds: a.maxTimeoutSeconds,
+    ...(a.extra !== undefined ? { extra: a.extra } : {}),
+  }));
+  const data = {
+    url,
+    lane,
+    status: res.status,
+    paid: false,
+    quote: true,
+    resource: challenge.resource,
+    accepts,
+    ...(challenge.extensions !== undefined ? { extensions: challenge.extensions } : {}),
+    ...(res.json !== undefined ? { body: res.json } : {}),
+    bodyText: res.text,
+  };
+  const host = sanitizeForTerminal(new URL(url).host);
+  const first = accepts[0];
+  const headline =
+    first === undefined
+      ? `quote: ${host} answered 402 with no payment option (nothing paid)`
+      : `quote: ${first.usd} USD to ${host} on ${sanitizeForTerminal(first.network)} (nothing paid)`;
+  const body = sanitizeForTerminal(res.text);
+  const preview =
+    printBody || body.length <= BODY_PREVIEW_CHARS
+      ? body
+      : `${body.slice(0, BODY_PREVIEW_CHARS)}\n… truncated; run with --print-body or --json for the full body`;
+  return { data, humanLines: [headline, ...(preview.length > 0 ? [preview] : [])] };
+}
 
 function deliver(url: string, lane: Lane, res: HttpResponse, opts: DeliverOpts): CommandResult {
   const settlementTxHash = opts.paid ? settlementTx(res) : undefined;
