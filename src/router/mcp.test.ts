@@ -557,12 +557,15 @@ describe('what the tool tells the model to send', () => {
     try {
       const tools = await client.listTools();
       const request = tools.tools.find((t) => t.name === 'request')!;
-      // ONE GENERIC SENTENCE, and no catalog here: the client is not a second
-      // source of what services exist, and the hook line names the one that
-      // fits the turn.
-      expect(request.description?.startsWith("Paid lookups through Tenjin's router")).toBe(true);
-      expect(request.description).toContain('generating images, voice, music, sound or video');
-      expect(request.description).toContain('a hook line names the service and how to call it');
+      // WHAT THE AGENT DOES, and no catalog or list of kinds here: the client is
+      // not a second source of what services exist, a list reads as all there
+      // is, and the hook line names the one that fits the turn.
+      expect(
+        request.description?.startsWith(
+          "When a hook line names a service from Tenjin's router, call it as the line says.",
+        ),
+      ).toBe(true);
+      expect(request.description).not.toContain('Paid lookups');
       for (const name of ['Exa', 'Firecrawl', 'CoinMarketCap', 'Wolfram', 'Hunter', 'Minerva']) {
         expect(request.description).not.toContain(name);
       }

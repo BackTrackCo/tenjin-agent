@@ -58,10 +58,8 @@ export const SCOPE_RULE =
  * that, per turn, from the server that actually knows.
  */
 const INSTRUCTIONS =
-  "Paid lookups through Tenjin's router (math, live prices, research, page reads, " +
-  'company/person/email lookups, and generating images, voice, music, sound or video). ' +
-  'When one fits, a hook line names the service and how ' +
-  'to call it: at the start of a turn, in place of a WebSearch or WebFetch call, after ' +
+  "When a hook line names a service from Tenjin's router, call it as the line says. " +
+  'A line comes at the start of a turn, in place of a WebSearch or WebFetch call, after ' +
   'one comes back short, or in a delegated task. ' +
   'The line is the call to make, with its fields: fill them and call `{id, input}` once, ' +
   'which runs it. This CLI builds and pays the call, and returns the full spec (its ' +
