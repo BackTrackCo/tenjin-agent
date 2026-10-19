@@ -11,6 +11,7 @@ import { hookToolInput, type HookKind } from './hook-tool';
 import { runRouterInstall } from './install';
 import { fileURLToPath } from 'node:url';
 import {
+  MOD_FILES,
   PLUGIN_DIR,
   PLUGIN_FILES,
   renderHostFiles,
@@ -438,6 +439,43 @@ describe('tenjin install registers the plugin through Claude Code', () => {
       'plugin install tenjin@tenjin --scope local --json',
     ]);
     expect(result.data).toMatchObject({ plugin: { scope: 'local' } });
+  });
+});
+
+/**
+ * THE MOD SHIPS IN EVERY PLUGIN FOLDER INSTALL HANDS CLAUDE CODE. The mod is
+ * copied as written, never rendered, so a render that forgets it still writes
+ * a working plugin and every other test passes: these read the folder Claude
+ * Code is pointed at, whichever folder that is, and require each mod file in
+ * it byte for byte, with the hooks file naming the module.
+ */
+describe('the mod in the registered plugin', () => {
+  async function expectMod(pluginDir: string): Promise<void> {
+    expect(MOD_FILES).toContain('hooks/register.tsx');
+    for (const path of MOD_FILES) {
+      expect(await readFile(join(pluginDir, path), 'utf8'), path).toBe(mod[path]);
+    }
+    const hooks = JSON.parse(await readFile(join(pluginDir, 'hooks', 'hooks.json'), 'utf8'));
+    expect(hooks).toMatchObject({ modules: ['./register.tsx'] });
+  }
+
+  it('is in the marketplace folder the plugin commands add', async () => {
+    await runRouterInstall({}, ctx(), deps());
+    const added = (await fake.calls())
+      .map((call) => /^plugin marketplace add (.+) --json$/.exec(call)?.[1])
+      .find((path) => path !== undefined);
+    expect(added).toBeDefined();
+    await expectMod(join(added!, PLUGIN_DIR));
+  });
+
+  it('is in the folder the fallback writes', async () => {
+    const result = await runRouterInstall(
+      {},
+      ctx(),
+      deps({ env: env({ PATH: await emptyPath() }) }),
+    );
+    expect(pluginOf(result)).toMatchObject({ method: 'skills-dir', state: 'written' });
+    await expectMod(join(cfg, 'skills', 'tenjin-router'));
   });
 });
 

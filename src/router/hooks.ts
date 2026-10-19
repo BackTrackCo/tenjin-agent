@@ -612,9 +612,15 @@ async function spendShortfall(
   deadline: number,
 ): Promise<Shortfall | null> {
   const price = `$${toMoney(decision.providerPriceAtomic).usd}`;
-  const approval = (detail: string): Shortfall => ({
+  // Pay once covers the automatic limit alone: over it, `request` asks the
+  // user itself where the client shows the dialog, so the line never says to.
+  const approval = (detail: string, payOnce = false): Shortfall => ({
     withheld: 'offer needs approval',
-    note: `Note: ${price} ${detail}; request will return needs_approval with the command the user runs to approve it — ask the user first.`,
+    note:
+      `Note: ${price} ${detail}; request ` +
+      (payOnce
+        ? 'asks the user itself to pay it once where it can, and otherwise returns needs_approval with the command the user runs.'
+        : 'returns needs_approval with the command the user runs.'),
   });
   let rpcUrl: string;
   try {
@@ -628,11 +634,12 @@ async function spendShortfall(
       sessionSpentAtomic: ledger === null ? 0n : spentOf(ledger),
     });
     if (evaluation.decision !== 'allow') {
-      return approval(
-        evaluation.reason === 'above_auto_spend'
-          ? `is above this machine's automatic per-call limit ($${toMoney(settings.policy.maxAutoSpendAtomic.toString()).usd})`
-          : "needs approval under this machine's spend limits",
-      );
+      return evaluation.reason === 'above_auto_spend'
+        ? approval(
+            `is above this machine's automatic per-call limit ($${toMoney(settings.policy.maxAutoSpendAtomic.toString()).usd})`,
+            true,
+          )
+        : approval("needs approval under this machine's spend limits");
     }
     rpcUrl = settings.rpcUrl;
   } catch {
@@ -676,8 +683,9 @@ interface Shortfall {
  * make good on alone is withheld, as it always was. A DISCOVERED one is never
  * withheld where someone can ask the user: it is the only line naming a
  * service that can do the step, so it is shown with one sentence saying the
- * call needs approval or funds, and the host asks first. Where nobody can ask
- * (a subagent's call, a delegated task) it is withheld like any other.
+ * call needs approval or funds; `request` asks for the approval itself where
+ * it can, so the host never asks first. Where nobody can ask (a subagent's
+ * call, a delegated task) it is withheld like any other.
  *
  * An offer that is shown can still list OTHER services beside its own: a Tenjin
  * list menu, or an alternative after a curated line. One priced over the cap
@@ -768,10 +776,10 @@ async function overCapNote(
   const which = over.length > 1 ? 'those services' : 'that service';
   return (
     `Note: ${prices} ${over.length > 1 ? 'are' : 'is'} above this machine's automatic per-call limit ` +
-    `($${toMoney(cap.toString()).usd}), so request returns needs_approval for ${which}; ` +
+    `($${toMoney(cap.toString()).usd}), so request ` +
     (canAskUser
-      ? 'prefer one within the limit, or ask the user first.'
-      : 'use one within the limit.')
+      ? `asks the user itself to pay once for ${which} where it can, and otherwise returns needs_approval; prefer one within the limit.`
+      : `returns needs_approval for ${which}; use one within the limit.`)
   );
 }
 
@@ -1207,9 +1215,10 @@ function redirect(offer: OfferDecision, oneBlock = ONE_BLOCK): NativeHookOutcome
  *
  * AN OFFER THE CALL COULD NOT MAKE GOOD ON ALONE NEVER TAKES THE QUESTION'S
  * PLACE. Elsewhere a discovered offer over the cap or the balance is shown
- * with a note telling the host to ask the user first; here the question IS
- * the asking, so denying it to say "ask the user" strands the turn. Any
- * shortfall, curated or discovered, withholds the offer and the question runs.
+ * with a note that the call needs approval or funds; here the question IS
+ * the asking, so denying it for a call that cannot run alone strands the
+ * turn. Any shortfall, curated or discovered, withholds the offer and the
+ * question runs.
  */
 export async function runAskHook(raw: unknown, deps: HookDeps): Promise<NativeHookOutcome> {
   const event = decodeEvent(raw);
