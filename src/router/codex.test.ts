@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { CommandContext } from '../context';
+import type { CliError } from '../lib/errors';
 import { parseCodexHistory } from './codex-history';
 import { codexRouterEvent, codexResponse } from './codex-event';
 import { at, CODEX_GRANT, CODEX_PLUGIN, requestConfigured } from './codex-host';
@@ -411,6 +412,19 @@ describe('Codex install, uninstall and doctor', () => {
     const kept = await runCodexInstall({ yes: true }, ctx(), own.deps);
     expect(own.steps.some((s) => s.startsWith('grant'))).toBe(false);
     expect(kept.data).toMatchObject({ grant: 'kept' });
+  });
+
+  it('names the plugin list command and its limit when the read times out', async () => {
+    const { deps } = host();
+    deps.run = async () => ({ code: 127, stdout: '', stderr: '', timedOutMs: 90_000 });
+    const err = (await runCodexDoctor({}, ctx(), deps).catch((e: unknown) => e)) as CliError;
+    expect(err.fix).toContain('`codex plugin list --json` timed out after 90 seconds');
+    expect(err.fix).not.toContain('could not read');
+    expect(err.details).toMatchObject({ listing: { read: false, timedOutMs: 90_000 } });
+
+    deps.run = async () => ({ code: 1, stdout: 'nope', stderr: '' });
+    const parse = (await runCodexDoctor({}, ctx(), deps).catch((e: unknown) => e)) as CliError;
+    expect(parse.fix).toContain('could not read `codex plugin list`');
   });
 
   it('writes no grant when the Codex config read timed out, and uninstall removes nothing', async () => {

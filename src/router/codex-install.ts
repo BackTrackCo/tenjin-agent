@@ -45,6 +45,8 @@ export interface CodexRun {
   code: number;
   stdout: string;
   stderr: string;
+  /** Set when the command was killed at this limit, in milliseconds. */
+  timedOutMs?: number;
 }
 
 export interface CodexSetupDeps
@@ -64,19 +66,23 @@ export interface CodexSetupDeps
 }
 
 const RUN_TIMEOUT_MS = 30_000;
+/** `codex plugin list` took about 34 s on a ChatGPT login (Codex 0.157.1). */
+const LIST_TIMEOUT_MS = 90_000;
 const APP_SERVER_TIMEOUT_MS = 5_000;
 
 function runCodex(args: string[]): Promise<CodexRun> {
+  const timeout = args[1] === 'list' ? LIST_TIMEOUT_MS : RUN_TIMEOUT_MS;
   return new Promise((resolve) => {
-    execFile(
-      'codex',
-      args,
-      { timeout: RUN_TIMEOUT_MS, maxBuffer: 4_000_000 },
-      (err, stdout, stderr) => {
-        const code = err === null ? 0 : typeof err.code === 'number' ? err.code : 127;
-        resolve({ code, stdout: String(stdout), stderr: String(stderr) });
-      },
-    );
+    execFile('codex', args, { timeout, maxBuffer: 4_000_000 }, (err, stdout, stderr) => {
+      const code = err === null ? 0 : typeof err.code === 'number' ? err.code : 127;
+      const timedOut = err !== null && err.killed === true && err.signal === 'SIGTERM';
+      resolve({
+        code,
+        stdout: String(stdout),
+        stderr: String(stderr),
+        ...(timedOut ? { timedOutMs: timeout } : {}),
+      });
+    });
   });
 }
 
@@ -114,6 +120,8 @@ export interface CodexListing {
   installed: boolean;
   enabled: boolean;
   version: string | null;
+  /** Set when the list command was killed at this limit, in milliseconds. */
+  timedOutMs?: number;
 }
 
 export async function readCodexListing(
@@ -126,7 +134,15 @@ export async function readCodexListing(
   } catch {
     rows = undefined;
   }
-  if (!Array.isArray(rows)) return { read: false, installed: false, enabled: false, version: null };
+  if (!Array.isArray(rows)) {
+    return {
+      read: false,
+      installed: false,
+      enabled: false,
+      version: null,
+      ...(out.timedOutMs === undefined ? {} : { timedOutMs: out.timedOutMs }),
+    };
+  }
   const row: unknown = rows.find((r) => at(r, 'pluginId') === CODEX_PLUGIN);
   const version = at(row, 'version');
   return {
@@ -322,6 +338,12 @@ export async function runCodexUninstall(
   };
 }
 
+function unreadListing(listing: CodexListing): string {
+  return listing.timedOutMs === undefined
+    ? 'could not read `codex plugin list`'
+    : `\`codex plugin list --json\` timed out after ${String(listing.timedOutMs / 1000)} seconds`;
+}
+
 /** Reads Codex's view of the plugin and writes nothing. */
 export async function runCodexDoctor(
   args: CodexArgs,
@@ -343,7 +365,7 @@ export async function runCodexDoctor(
   const elicitation = config === null ? null : elicitationCanShow(config);
   const ok = listing.enabled && granted && trust === 'trusted';
   const lines = [
-    `Codex plugin: ${!listing.read ? 'could not read `codex plugin list`' : listing.enabled ? `enabled (${listing.version ?? 'no version'})` : listing.installed ? 'disabled' : 'not installed'}`,
+    `Codex plugin: ${!listing.read ? unreadListing(listing) : listing.enabled ? `enabled (${listing.version ?? 'no version'})` : listing.installed ? 'disabled' : 'not installed'}`,
     `Hooks: ${trust === 'trusted' ? 'trusted' : trust === 'review' ? `review needed. ${TRUST_STEP}` : 'could not be read'}`,
     `Request tool: ${granted ? 'approved' : 'not approved; run `tenjin install --harness codex --yes`'}`,
     `Pay once ask: ${elicitation === null ? 'unknown' : elicitation ? 'can show' : 'cannot show (approval_policy never); a call over the limit returns needs_approval'}`,
