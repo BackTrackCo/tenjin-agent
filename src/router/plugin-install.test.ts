@@ -654,18 +654,83 @@ describe('tenjin uninstall', () => {
     expect(await exists(aliveDir(data))).toBe(false);
   });
 
-  it('removes the marketplace folder install rendered once the marketplace is gone', async () => {
-    await runRouterInstall({}, ctx(), deps({ hostsDir: undefined }));
-    const rendered = join(data, 'claude-plugin');
-    await fake.respond(
-      'mkt-list',
-      `${JSON.stringify([{ name: 'tenjin', source: 'directory', path: rendered }])}\n`,
-    );
-    const result = await runRouterUninstall({}, ctx(), { homeDir: home, cwd: work, env: env() });
-    expect(result.data).toMatchObject({
-      plugin: { marketplace: 'removed', marketplaceFolder: { removed: true, left: [] } },
+  describe('the rendered marketplace folder, which every scope shares', () => {
+    const rendered = () => join(data, 'claude-plugin');
+    const pointing = () =>
+      `${JSON.stringify([{ name: 'tenjin', source: 'directory', path: rendered() }])}\n`;
+    const uninstall = (args: { project?: boolean } = {}, cwd = work) =>
+      runRouterUninstall(args, ctx(), { homeDir: home, cwd, env: env() });
+    const folderOf = (result: { data: unknown }) =>
+      (result.data as { plugin: { marketplaceFolder?: Record<string, unknown> } }).plugin
+        .marketplaceFolder;
+
+    it('is removed once a readable list shows nothing points at it', async () => {
+      await runRouterInstall({}, ctx(), deps({ hostsDir: undefined }));
+      await fake.respond('mkt-list', pointing());
+      await fake.listAfterRemove('[]\n');
+      const result = await uninstall();
+      expect(result.data).toMatchObject({
+        plugin: { marketplace: 'removed', marketplaceFolder: { removed: true, left: [] } },
+      });
+      expect(await exists(rendered())).toBe(false);
     });
-    expect(await exists(rendered)).toBe(false);
+
+    it('is kept, and the failure named, when the marketplace list cannot be read', async () => {
+      await runRouterInstall({}, ctx(), deps({ hostsDir: undefined }));
+      await fake.respond('mkt-list', 'timed out\n', 1);
+      const result = await uninstall();
+      expect(result.data).toMatchObject({ plugin: { marketplace: 'unread' } });
+      expect(folderOf(result)).toMatchObject({ removed: false });
+      expect(String(folderOf(result)?.reason)).toContain('could not be read');
+      expect(result.humanLines?.join('\n')).toContain(`kept the marketplace folder ${rendered()}`);
+      expect(await exists(join(rendered(), 'tenjin', '.mcp.json'))).toBe(true);
+    });
+
+    it('is kept when the list after the removal cannot be read', async () => {
+      await runRouterInstall({}, ctx(), deps({ hostsDir: undefined }));
+      await fake.respond('mkt-list', pointing());
+      await fake.listAfterRemove('not json\n');
+      const result = await uninstall();
+      expect(folderOf(result)).toMatchObject({ removed: false });
+      expect(await exists(join(rendered(), 'tenjin', '.mcp.json'))).toBe(true);
+    });
+
+    it('outlives a project uninstall while the user install points at it, then goes with the last', async () => {
+      await runRouterInstall({}, ctx(), deps({ hostsDir: undefined }));
+      await runRouterInstall({ project: true }, ctx(), deps({ hostsDir: undefined }));
+      // The user's marketplace still names the folder after the project's is removed.
+      await fake.respond('mkt-list', pointing());
+      await fake.listAfterRemove(pointing());
+      const project = await uninstall({ project: true });
+      expect(project.data).toMatchObject({ plugin: { marketplace: 'removed' } });
+      expect(folderOf(project)).toMatchObject({ removed: false });
+      expect(await exists(join(rendered(), 'tenjin', '.mcp.json'))).toBe(true);
+      await fake.respond('mkt-list', pointing());
+      await fake.listAfterRemove('[]\n');
+      const user = await uninstall();
+      expect(folderOf(user)).toMatchObject({ removed: true });
+      expect(await exists(rendered())).toBe(false);
+    });
+
+    it('outlives a user uninstall while another recorded project still uses it', async () => {
+      const other = join(root, 'other-project');
+      await mkdir(join(other, '.claude'), { recursive: true });
+      await runRouterInstall({}, ctx(), deps({ hostsDir: undefined }));
+      await runRouterInstall({ project: true }, ctx(), deps({ hostsDir: undefined, cwd: other }));
+      // What `claude plugin install --scope local` leaves in that project.
+      const local = join(other, '.claude', 'settings.local.json');
+      await writeFile(local, JSON.stringify({ enabledPlugins: { 'tenjin@tenjin': true } }));
+      await fake.respond('mkt-list', pointing());
+      await fake.listAfterRemove('[]\n');
+      const user = await uninstall();
+      expect(folderOf(user)).toMatchObject({ removed: false });
+      expect(String(folderOf(user)?.reason)).toContain(other);
+      // Once that project no longer names the plugin, nothing holds the folder.
+      await writeFile(local, '{}');
+      await fake.respond('mkt-list', pointing());
+      await fake.listAfterRemove('[]\n');
+      expect(folderOf(await uninstall())).toMatchObject({ removed: true });
+    });
   });
 
   it('keeps a marketplace named tenjin that install did not add', async () => {
