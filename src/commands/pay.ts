@@ -16,6 +16,7 @@ import { isSameDeployment } from '../lib/production-origin';
 import { resolveContextSettings } from '../lib/settings';
 import { SIWX_HEADER, buildSiwxHeader } from '../lib/siwx';
 import { gateSpend } from '../lib/spend-gate';
+import { spendSlot, type PlanSlot } from '../lib/spend-plan';
 import type { ResolvedSettings } from '../lib/settings';
 import {
   describeWallet,
@@ -47,7 +48,8 @@ import type { CommandContext, CommandResult } from '../context';
  * any seller that supports it while nothing origin-bound can leak elsewhere.
  *
  * Direct third-party payments require acknowledgement of registry warnings.
- * Router calls retain their advertised-price and supplied-term hard checks.
+ * Router calls retain their advertised-price and supplied-term hard checks,
+ * and each is signed only against its call's spend plan (`admit`).
  * Every positive payment checks the actual signer's balance before signing.
  */
 
@@ -120,6 +122,27 @@ export interface PayArgs {
    * `resultCaveat` saying which.
    */
   resultSchema?: unknown;
+  /**
+   * The router's job seam: called once with the answer that delivered (free,
+   * entitled or paid), or with a paid leg that timed out after its headers
+   * came. A long job's status URL can be a header. Never part of `data`,
+   * which `tenjin pay --json` prints.
+   */
+  onPaidLeg?: (leg: PaidLeg) => void;
+  /**
+   * THE CALL'S SPEND PLAN, which every router payment is signed against.
+   * Handed the live price before the wallet is opened, it returns the slot an
+   * admitted plan holds for this payment (`lib/spend-plan.ts`), or throws the
+   * refusal: over the limits, the router's quote. Required in router mode: a
+   * router payment no plan admitted is refused with nothing sent.
+   */
+  admit?: (amountAtomic: bigint) => Promise<PlanSlot>;
+}
+
+/** What {@link PayArgs.onPaidLeg} is handed. */
+export interface PaidLeg {
+  status?: number;
+  header?: (name: string) => string | undefined;
 }
 
 export interface PayDeps {
@@ -187,6 +210,13 @@ async function executePay(
         { details: { reason: 'invalid_router_terms' } },
       );
     }
+    if (args.admit === undefined) {
+      throw new CliError(
+        'REFUSED',
+        "A router payment is signed only against its call's spend plan, and this one has none; nothing was sent.",
+        { details: { reason: 'unplanned' } },
+      );
+    }
   }
   const settings = await resolveContextSettings(ctx);
   const maxPriceAtomic =
@@ -231,6 +261,7 @@ async function executePay(
   }
   if (probe.status >= 200 && probe.status < 300) {
     const caveat = assertUsableResult(args.resultSchema, probe.text, probe.status, 'free');
+    args.onPaidLeg?.({ status: probe.status, header: probe.header });
     return deliver(url, lane, probe, {
       paid: false,
       ...(caveat !== undefined ? { caveat } : {}),
@@ -286,6 +317,13 @@ async function executePay(
       warnings,
     );
   }
+  // THE CALL'S PLAN ADMITS ONLY A PAYMENT STILL NEEDED. With no entitlement
+  // to check, it is admitted here, at the price first seen, before the wallet
+  // is opened; over the limits, the refusal is the router's quote. A seller
+  // that takes sign-in-with-x is asked first, below: a wallet that already
+  // owns the result re-reads it free, and is never quoted a payment for it.
+  const entitlement = paymentRequired.extensions?.[SIGN_IN_WITH_X] !== undefined;
+  let slot = router && !entitlement ? await args.admit!(firstSeenAmount) : undefined;
 
   const provider = resolveWalletProvider(
     ctx,
@@ -301,7 +339,7 @@ async function executePay(
   // so a foreign seller gets a credential worth nothing anywhere else.
   let effectiveChallenge = paymentRequired;
   let effectiveRequirement = requirement;
-  if (paymentRequired.extensions?.[SIGN_IN_WITH_X] !== undefined) {
+  if (entitlement) {
     const siwxHeader = await buildSiwxHeader(signer, {
       baseUrl: new URL(url).origin,
       chainId: requirement.network,
@@ -318,6 +356,7 @@ async function executePay(
         recheck.status,
         'entitled',
       );
+      args.onPaidLeg?.({ status: recheck.status, header: recheck.header });
       return deliver(url, lane, recheck, {
         paid: false,
         entitled: true,
@@ -379,6 +418,34 @@ async function executePay(
     }
   }
   const amountAtomic = BigInt(effectiveRequirement.amount);
+  if (router && entitlement) slot = await args.admit!(amountAtomic);
+  if (router) {
+    const refusal = spendSlot(slot, amountAtomic);
+    if (refusal === 'above_plan') {
+      throw new CliError(
+        'PAYMENT_FAILED',
+        `The live price ($${toMoney(amountAtomic.toString()).usd}) is above the $${toMoney(slot!.amountAtomic.toString()).usd} this call planned for it, so nothing was signed.`,
+        {
+          fix: 'Call again for a fresh plan at the new price.',
+          details: {
+            reason: 'above_plan',
+            plannedAtomic: slot!.amountAtomic.toString(),
+            live: { amount: amountAtomic.toString() },
+          },
+        },
+      );
+    }
+    if (refusal !== null) {
+      throw new CliError(
+        'REFUSED',
+        "A router payment is signed only against an unspent slot of its call's spend plan; nothing was signed.",
+        { details: { reason: refusal } },
+      );
+    }
+  }
+  // A PLAN A PERSON APPROVED is theirs, as a manual payment is: it may pass
+  // the automatic limits, and it does not use up the automatic budget.
+  const approved = slot?.approved === true;
 
   const authorizer = resolveSpendAuthorizer(
     ctx,
@@ -389,7 +456,7 @@ async function executePay(
   // hosts); the gate itself is shared with `buy` so the two verbs cannot drift.
   const verifiedVia = registry ?? termsLabel;
   const via = verifiedVia !== undefined ? ` (${sanitizeForTerminal(verifiedVia)})` : '';
-  const mode = router ? 'automatic' : 'manual';
+  const mode = router && !approved ? 'automatic' : 'manual';
   const reservationId = await gateSpend({
     mode,
     ctx,
@@ -398,7 +465,7 @@ async function executePay(
     creator: host,
     ...(maxPriceAtomic !== undefined ? { maxPriceAtomic } : {}),
     ...(args.requestKey !== undefined ? { requestKey: args.requestKey } : {}),
-    yes: args.yes === true,
+    yes: args.yes === true || approved,
     ...(deps.confirm !== undefined ? { confirm: deps.confirm } : {}),
     payeeLabel: `${sanitizeForTerminal(url)}${via}; recipient ${sanitizeForTerminal(effectiveRequirement.payTo)}, ${sanitizeForTerminal(effectiveRequirement.network)} / ${sanitizeForTerminal(effectiveRequirement.asset)}`,
     allowlistSubject: 'this host',
@@ -413,49 +480,7 @@ async function executePay(
     // narrowed to the one selection everything above ran against, so a seller
     // advertising several chains cannot have one entry priced and another
     // signed. Without this the builder re-picked `accepts[0]`.
-    if (amountAtomic > 0n) {
-      // One retry across a rate-limit interval, within the original read deadline.
-      const deadline = Date.now() + ctx.flags.timeout;
-      // Live, never the hooks' remembered balance: a minute-old read can count
-      // funds the wallet has since spent. The default RPC's public fallbacks
-      // are live reads too.
-      const readBalance = deps.readBalance ?? readUsdcBalanceWithFallback;
-      let balance = await readBalance(signer.address, settings.rpcUrl, {
-        timeoutMs: Math.max(1, Math.floor(ctx.flags.timeout / 2)),
-      });
-      if (balance === null && Date.now() < deadline) {
-        await delay(Math.min(1100, Math.floor((deadline - Date.now()) / 2)));
-        const remaining = deadline - Date.now();
-        if (remaining > 0)
-          balance = await readBalance(signer.address, settings.rpcUrl, { timeoutMs: remaining });
-      }
-      if (balance === null) {
-        throw new CliError(
-          'REFUSED',
-          'The wallet balance could not be read; no payment was signed.',
-          {
-            fix: 'Check the configured Base rpcUrl and retry when it is available.',
-            details: { reason: 'balance_unavailable', address: signer.address },
-          },
-        );
-      }
-      if (balance < amountAtomic) {
-        const short = toMoney((amountAtomic - balance).toString()).usd;
-        throw new CliError(
-          'REFUSED',
-          `The wallet has insufficient USDC; no payment was signed. It holds ${toMoney(balance.toString()).usd} USD and this costs ${toMoney(amountAtomic.toString()).usd} USD: ${short} USD short.`,
-          {
-            fix: `Fund this wallet on Base with \`tenjin wallet fund\` (at least ${short} USD more) before paying.`,
-            details: {
-              reason: 'insufficient_funds',
-              address: signer.address,
-              balanceAtomic: balance.toString(),
-              requiredAtomic: amountAtomic.toString(),
-            },
-          },
-        );
-      }
-    }
+    await assertBalanceCovers(signer.address, amountAtomic, settings.rpcUrl, ctx, deps);
     payment = await buildExactPayment(effectiveChallenge, signer, effectiveRequirement);
   } catch (err) {
     await authorizer.release(reservationId);
@@ -479,6 +504,12 @@ async function executePay(
     mode,
     ...(payment.authorization !== undefined ? { nonce: payment.authorization.nonce } : {}),
   });
+  if (paid.ok || paid.header !== undefined) {
+    args.onPaidLeg?.({
+      ...(paid.status !== undefined ? { status: paid.status } : {}),
+      ...(paid.header !== undefined ? { header: paid.header } : {}),
+    });
+  }
   // A TRANSPORT failure on this leg is a post-transmission outcome like any
   // other: the authorization has left, the reservation is committed above, and
   // a receipt that said nothing was paid would report a provider cost of zero
@@ -595,6 +626,146 @@ export function paidLegTimeoutMs(requirement: PaymentRequirements, cliTimeoutMs:
     return cliTimeoutMs;
   }
   return Math.max(cliTimeoutMs, Math.min(advertised * 1000, MAX_PAID_LEG_TIMEOUT_MS));
+}
+
+/**
+ * THE WALLET HOLDS THE AMOUNT, read live, or a refusal before anything is
+ * signed. Live, never the hooks' remembered balance: a minute-old read can
+ * count funds the wallet has since spent. The default RPC's public fallbacks
+ * are live reads too.
+ */
+async function assertBalanceCovers(
+  address: string,
+  amountAtomic: bigint,
+  rpcUrl: string,
+  ctx: CommandContext,
+  deps: PayDeps,
+): Promise<void> {
+  if (amountAtomic <= 0n) return;
+  // One retry across a rate-limit interval, within the original read deadline.
+  const deadline = Date.now() + ctx.flags.timeout;
+  const readBalance = deps.readBalance ?? readUsdcBalanceWithFallback;
+  let balance = await readBalance(address, rpcUrl, {
+    timeoutMs: Math.max(1, Math.floor(ctx.flags.timeout / 2)),
+  });
+  if (balance === null && Date.now() < deadline) {
+    await delay(Math.min(1100, Math.floor((deadline - Date.now()) / 2)));
+    const remaining = deadline - Date.now();
+    if (remaining > 0) balance = await readBalance(address, rpcUrl, { timeoutMs: remaining });
+  }
+  if (balance === null) {
+    throw new CliError('REFUSED', 'The wallet balance could not be read; no payment was signed.', {
+      fix: 'Check the configured Base rpcUrl and retry when it is available.',
+      details: { reason: 'balance_unavailable', address },
+    });
+  }
+  if (balance < amountAtomic) {
+    const short = toMoney((amountAtomic - balance).toString()).usd;
+    throw new CliError(
+      'REFUSED',
+      `The wallet has insufficient USDC; no payment was signed. It holds ${toMoney(balance.toString()).usd} USD and this costs ${toMoney(amountAtomic.toString()).usd} USD: ${short} USD short.`,
+      {
+        fix: `Fund this wallet on Base with \`tenjin wallet fund\` (at least ${short} USD more) before paying.`,
+        details: {
+          reason: 'insufficient_funds',
+          address,
+          balanceAtomic: balance.toString(),
+          requiredAtomic: amountAtomic.toString(),
+        },
+      },
+    );
+  }
+}
+
+/**
+ * WHAT A ROUTER CALL WILL COST, from one unpaid probe: the live 402's amount
+ * on the entry this call would sign, held to the advertised terms, with
+ * nothing signed and nothing reserved. It is the number a single call gates
+ * on, so several takes of one call are checked at it rather than at the
+ * spec's ceiling: a price that varies by input is quoted for this input.
+ * A probe that answers 2xx is free: 0. A seller that takes sign-in-with-x is
+ * asked as the paid leg asks it, so a wallet that already owns the result
+ * quotes 0 and is never planned a payment for it. Every refusal is the paid
+ * leg's own, with nothing sent but the probe and that re-read.
+ */
+export async function quoteRouterCall(
+  args: Pick<PayArgs, 'url' | 'method' | 'headers' | 'rawBody'> & { terms: AdvertisedTerms },
+  ctx: CommandContext,
+  deps: PayDeps = {},
+): Promise<bigint> {
+  const settings = await resolveContextSettings(ctx);
+  const url = args.url.trim();
+  if (resolveLane(url, settings) === 'bazaar') {
+    await assertPublicDestination(url, deps.destination ?? {});
+  }
+  const headers = callerHeaders(args.headers);
+  const probe = await httpRequest(url, {
+    timeoutMs: ctx.flags.timeout,
+    blockRedirects: true,
+    binaryBody: true,
+    method: resolveMethod(args),
+    ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+    ...(args.rawBody !== undefined ? { rawBody: args.rawBody } : {}),
+    ...(Object.keys(headers).length > 0 ? { headers } : {}),
+  });
+  if (!probe.ok) {
+    throw fetchFailureToCliError(probe, {
+      fix: `Nothing was sent and nothing was paid. ${legFix(probe)}`,
+    });
+  }
+  if (probe.status >= 200 && probe.status < 300) return 0n;
+  if (probe.status !== 402) {
+    const said = providerMessage(probe.json);
+    throw new CliError(
+      'API_UNREACHABLE',
+      `${url} answered ${probe.status}${said === null ? '.' : `: ${said}`}`,
+      {
+        fix: 'Nothing was paid.',
+        details: { status: probe.status, body: probe.json, ...providerError(probe.text) },
+      },
+    );
+  }
+  const challenge = decodeChallenge(probe, url);
+  const payer = createPayerClient(() => signerOrThrow({}));
+  const requirement = selectRequirement(payer.core, challenge, args.terms);
+  if (requirement === undefined) throw noMatchingEntry(challenge, args.terms);
+  assertWithinTerms(args.terms, requirement);
+  if (challenge.extensions?.[SIGN_IN_WITH_X] === undefined) return BigInt(requirement.amount);
+  const signer = await openWallet(
+    resolveWalletProvider(ctx, deps.provider !== undefined ? { provider: deps.provider } : {}),
+  );
+  const recheck = await httpRequest(url, {
+    timeoutMs: ctx.flags.timeout,
+    blockRedirects: true,
+    binaryBody: true,
+    method: resolveMethod(args),
+    ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+    ...(args.rawBody !== undefined ? { rawBody: args.rawBody } : {}),
+    headers: {
+      ...headers,
+      [SIWX_HEADER]: await buildSiwxHeader(signer, {
+        baseUrl: new URL(url).origin,
+        chainId: requirement.network,
+      }),
+    },
+  });
+  if (!recheck.ok) throw fetchFailureToCliError(recheck);
+  if (recheck.status >= 200 && recheck.status < 300) return 0n;
+  if (recheck.status !== 402) {
+    throw new CliError(
+      'API_UNREACHABLE',
+      `${url} answered ${recheck.status} on the entitlement re-check.`,
+      {
+        fix: 'Nothing was paid.',
+        details: { status: recheck.status, body: recheck.json, ...providerError(recheck.text) },
+      },
+    );
+  }
+  const fresh = decodeChallenge(recheck, url);
+  const owed = selectRequirement(payer.core, fresh, args.terms);
+  if (owed === undefined) throw noMatchingEntry(fresh, args.terms);
+  assertWithinTerms(args.terms, owed);
+  return BigInt(owed.amount);
 }
 
 /** Which lane may pay this URL, or the exact refusal. */
@@ -807,7 +978,7 @@ function providerError(text: string): { providerError?: string } {
 
 /** Seller text as one plain, redacted line of at most
  *  {@link PROVIDER_ERROR_CHARS} characters; empty when nothing is left. */
-function sellerLine(text: string): string {
+export function sellerLine(text: string): string {
   // Masked in a window well past the cap, so a large page costs nothing and a
   // secret that starts inside the snippet is seen whole.
   const flat = sanitizeForTerminal(

@@ -197,3 +197,20 @@ export function downloadsDir(dir: string = dataDir()): string {
 export function paidLedgerPath(dir: string = dataDir()): string {
   return join(dir, 'paid', 'ledger.jsonl');
 }
+
+/**
+ * One file per take of a paid router call whose seller was still working when
+ * the call ended: where to poll, until when, and what it saved. `request({job})`
+ * resumes from it in any later process.
+ */
+export function jobsDir(dir: string = dataDir()): string {
+  return join(dir, 'jobs');
+}
+
+/**
+ * One file per quote: a router call over the automatic limits, kept with its
+ * exact plan until the user approves it, it runs once, or it expires.
+ */
+export function quotesDir(dir: string = dataDir()): string {
+  return join(dir, 'quotes');
+}

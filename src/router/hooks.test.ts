@@ -2769,7 +2769,7 @@ describe('a discovered service', () => {
     });
     expect((calls[0] as { body: unknown }).body).toMatchObject({
       sessionId: 'sess-1',
-      accepts: ['catalog', 'spec'],
+      accepts: ['catalog', 'spec', 'jobs'],
     });
     // The footer names the seller, and the id binds this session for `request`.
     expect(await renderProgress(dir, 'sess-1')).toContain('BlockRun');
@@ -2905,6 +2905,7 @@ describe('a discovered service', () => {
     expect((first.calls[0] as { body: Record<string, unknown> }).body.accepts).toEqual([
       'catalog',
       'spec',
+      'jobs',
     ]);
     const fs = await import('node:fs/promises');
     await fs.writeFile(
@@ -2920,6 +2921,7 @@ describe('a discovered service', () => {
     expect((second.calls[0] as { body: Record<string, unknown> }).body.accepts).toEqual([
       'catalog',
       'spec',
+      'jobs',
       'bazaar',
     ]);
   });
@@ -3006,7 +3008,7 @@ describe('a discovered service', () => {
         hookEventName: 'UserPromptSubmit',
         additionalContext:
           `${SEEN_LINE} Note: $0.053501 is above this machine's automatic per-call limit ($0.05); ` +
-          'request will return needs_approval with the command the user runs to approve it — ask the user first.',
+          'request will pay nothing and return needs_approval with what it costs.',
       },
     });
   });
@@ -3043,7 +3045,7 @@ describe('a discovered service', () => {
     expect(line).toBe(
       `${HINT_SOURCE}: ${hint.replace('request({', 'mcp__x402__request({')} ` +
         "Note: $0.68 is above this machine's automatic per-call limit ($0.25); " +
-        'request will return needs_approval with the command the user runs to approve it — ask the user first.',
+        'request will pay nothing and return needs_approval with what it costs.',
     );
     expect(line).toContain('Other options: ClipForge ($0.90), Reelsmith ($1.10).');
   });
@@ -3078,7 +3080,7 @@ describe('a discovered service', () => {
     expect(
       (out.response as { hookSpecificOutput: { permissionDecisionReason: string } })
         .hookSpecificOutput.permissionDecisionReason,
-    ).toContain('ask the user first.');
+    ).toContain('return needs_approval with what it costs.');
   });
 
   /** Where nobody can ask the user, it is withheld like any other offer. */
@@ -3199,7 +3201,7 @@ describe('a question to the user', () => {
         'You pick a track: send me a licensed track.',
     });
     expect((body.packet.current as { text: string }).text).toContain('I can get API keys');
-    expect(body).toMatchObject({ sessionId: 'sess-1', accepts: ['catalog', 'spec'] });
+    expect(body).toMatchObject({ sessionId: 'sess-1', accepts: ['catalog', 'spec', 'jobs'] });
   });
 
   it('denies the question once on an offer, then lets it be asked', async () => {

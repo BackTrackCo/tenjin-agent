@@ -161,6 +161,72 @@ const DiscoveredCandidateSchema = z.strictObject({
   }),
 });
 
+/** A field name a job reads from an answer or writes into a poll body. */
+const JobField = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,63}$/);
+
+/** A body field whose value names a state: Treza's `status: "running"`. */
+const JobFieldStateSchema = z.strictObject({
+  field: JobField,
+  values: z.array(z.string().min(1).max(64)).min(1).max(8),
+});
+
+/** A poll body value naming a field of the call's input or of the submit's
+ *  answer; any other value is sent as written. */
+export const POLL_REFERENCE = /^\$(input|result)\.([A-Za-z_][A-Za-z0-9_]{0,63})$/;
+
+/**
+ * HOW A CALL WHOSE SELLER ANSWERS BEFORE THE RESULT IS READY IS FINISHED, sent
+ * on a spec only because this build asks for it (`accepts: ["jobs"]`): where
+ * the status is (a field or header of the submit's answer, or one fixed URL),
+ * how a poll is sent, what says it is still running or failed, how often and
+ * how long to poll, and how many hours the job can be resumed. `always`: the
+ * seller never answers inline. A poll is never signed: the take's one payment
+ * is its submit. Every field is the server's: the poll and complete URLs are
+ * still checked here against the submit's host (`jobs.ts`).
+ */
+export const JobSchema = z
+  .strictObject({
+    pollUrl: z.union([
+      z
+        .strictObject({
+          field: JobField.optional(),
+          header: z
+            .string()
+            .regex(/^[A-Za-z0-9-]{1,64}$/)
+            .optional(),
+        })
+        .refine((at) => at.field !== undefined || at.header !== undefined, 'a field or a header'),
+      z.strictObject({ fixed: z.string().min(1).max(2_048) }),
+    ]),
+    /** Sent once like a poll after the result is saved, never after a save
+     *  that failed: it frees the seller's copy (AiSpace's `/complete`). Its
+     *  answer is ignored. */
+    completeUrl: z.strictObject({ fixed: z.string().min(1).max(2_048) }).optional(),
+    pollMethod: z.enum(['GET', 'POST']),
+    pollBody: z
+      .record(JobField, z.unknown())
+      .refine(
+        (body) =>
+          Object.values(body).every(
+            (value) =>
+              typeof value !== 'string' || !value.startsWith('$') || POLL_REFERENCE.test(value),
+          ),
+        'a $ value is $input.<field> or $result.<field>',
+      )
+      .optional(),
+    running: z.union([
+      z.strictObject({ httpStatus: z.array(z.number().int().min(200).max(299)).min(1).max(8) }),
+      JobFieldStateSchema,
+    ]),
+    failed: JobFieldStateSchema.optional(),
+    everyS: z.number().int().min(1).max(30),
+    maxWaitS: z.number().int().min(1).max(600),
+    keepH: z.number().int().min(1).max(48),
+    always: z.literal(true).optional(),
+  })
+  .refine((job) => !job.pollBody || job.pollMethod === 'POST', 'only a POST poll has a body');
+export type Job = z.infer<typeof JobSchema>;
+
 /**
  * A REQUEST SPEC: the offered service's real contract, sent beside the line only
  * because this build asks for it (`accepts: ["spec"]`). The hook stores it by
@@ -204,6 +270,10 @@ export const ToolSpecSchema = z.strictObject({
   /** The fields the result promises (type, properties, items, required). The
    *  agent is handed only these; the whole body is saved to a file. */
   outputSchema: z.record(z.string(), z.unknown()).optional(),
+  /** How a call answered before its result is ready is finished. */
+  job: JobSchema.optional(),
+  /** A media service that runs several takes of one call: `count` up to `max`. */
+  takes: z.strictObject({ max: z.number().int().min(2).max(5) }).optional(),
 });
 export type ToolSpec = z.infer<typeof ToolSpecSchema>;
 
@@ -382,10 +452,12 @@ export type CallKind = 'hook' | 'tool';
  * `discovered:tenjin:` ids. `spec` asks for each offered service's request
  * spec beside its line, and for the picked service's spec in place of a
  * decision on a query with no id, which only a build that parses them can
- * take: the decision schemas are strict. `bazaar` widens discovery to the
- * open Bazaar and is sent only while `experimental.bazaar` is on.
+ * take: the decision schemas are strict. `jobs` asks for each spec's `job`,
+ * for the services that never answer inline, and for `count` on a media
+ * offer's line. `bazaar` widens discovery to the open Bazaar and is sent only
+ * while `experimental.bazaar` is on.
  */
-export const CLIENT_ACCEPTS: readonly string[] = ['catalog', 'spec'];
+export const CLIENT_ACCEPTS: readonly string[] = ['catalog', 'spec', 'jobs'];
 export const BAZAAR_ACCEPT = 'bazaar';
 
 /** The `accepts` this build sends, with the open Bazaar or without it. */
@@ -616,8 +688,9 @@ export type UnpaidReason = 'input' | 'terms' | 'provider' | 'unreachable' | 'wal
 export interface SpecOutcome {
   id: string;
   /** `unpaid`: stopped before anything was signed, which the server never
-   *  counts as the offer taken. */
-  status: 'fulfilled' | 'unverified' | 'failed' | 'needs_approval' | 'unpaid';
+   *  counts as the offer taken. `running`: paid, and the seller was still
+   *  rendering when the call ended. */
+  status: 'fulfilled' | 'unverified' | 'failed' | 'needs_approval' | 'unpaid' | 'running';
   /** On `unpaid` only, where the server requires it. */
   reason?: UnpaidReason;
   httpStatus?: number;
