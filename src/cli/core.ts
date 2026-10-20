@@ -1,4 +1,5 @@
 import type { Command } from 'commander';
+import { CliError } from '../lib/errors';
 import { PERMISSIONS_DOC_URL } from '../lib/permissions';
 import { SETUP, WALLET, type Registration } from './registration';
 import { harnessOption } from './router';
@@ -13,7 +14,7 @@ export function registerCore(reg: Registration): void {
 
   leaf(SETUP, 'install', 'set up Tenjin for Claude Code and create a wallet')
     .description(
-      "Set up Claude Code to use Tenjin: a wallet if this machine has none, spend limits for each lookup, and the Claude Code plugin `tenjin` (its routing hooks and its `router` MCP server), registered through Claude Code's own `claude plugin` commands. A settings-based install from an earlier release is removed once the plugin has loaded. With `--harness codex` it sets up the Codex plugin instead: the wallet, the spend limits, the plugin through `codex plugin` and the request tool's approval, user scope only.",
+      "Set up Claude Code to use Tenjin: a wallet if this machine has none, spend limits for each lookup, and the Claude Code plugin `tenjin` (its routing hooks and its `router` MCP server), registered through Claude Code's own `claude plugin` commands. A settings-based install from an earlier release is removed once the plugin has loaded. With `--harness codex` it sets up the Codex plugin instead: the wallet, the spend limits and the plugin through `codex plugin`, user scope only.",
     )
     .addOption(harnessOption())
     .option('--project', 'register the plugin for this project only')
@@ -37,6 +38,10 @@ Learn more:
       await runCommand('install', this, async (ctx) => {
         const o = this.opts();
         if (o.harness === 'codex') {
+          // Nothing in the Codex plugin changes between builds, so nothing to refresh.
+          if (o.refresh === true) {
+            throw new CliError('USAGE', 'The Codex plugin has no refresh; omit --refresh.');
+          }
           const { runCodexInstall } = await import('../router/codex-install');
           return runCodexInstall(codexArgs(o), ctx);
         }
@@ -55,7 +60,7 @@ Learn more:
 
   leaf(SETUP, 'uninstall', 'remove what install wrote; the wallet is kept')
     .description(
-      'Remove the Tenjin plugin `tenjin install` registered, and any settings-based install an earlier release wrote. With `--harness codex`, remove the Codex plugin, its marketplace and the request tool approval it wrote. Your wallet, spend ledger and config are kept.',
+      'Remove the Tenjin plugin `tenjin install` registered, and any settings-based install an earlier release wrote. With `--harness codex`, remove the Codex plugin and its marketplace. Your wallet, spend ledger and config are kept.',
     )
     .addOption(harnessOption())
     .option('--project', 'remove the project-only install')
@@ -73,7 +78,7 @@ Learn more:
 
   leaf(SETUP, 'doctor', 'check this machine can run a lookup')
     .description(
-      "Check everything a lookup needs: the Node floor, Claude Code's version, the Tenjin plugin and its router server, any settings install an earlier release left, the spend limits, the wallet, and the router endpoint answering its 402. It prints one line per check with a fix for each failure, writes nothing, and exits nonzero if a required one fails. With `--harness codex` it checks the Codex plugin, its hook trust, the request tool approval and whether a Pay once ask can show.",
+      "Check everything a lookup needs: the Node floor, Claude Code's version, the Tenjin plugin and its router server, any settings install an earlier release left, the spend limits, the wallet, and the router endpoint answering its 402. It prints one line per check with a fix for each failure, writes nothing, and exits nonzero if a required one fails. With `--harness codex` it reads Codex's hook list for the plugin and its hook trust, and whether a Pay once ask can show.",
     )
     .addOption(harnessOption())
     .option('--project', 'check the project-only install, as --project registered it')
@@ -314,7 +319,6 @@ Examples:
 function codexArgs(o: Record<string, unknown>): import('../router/codex-install').CodexArgs {
   return {
     ...(o.project === true ? { project: true } : {}),
-    ...(o.refresh === true ? { refresh: true } : {}),
     ...(o.yes === true ? { yes: true } : {}),
     ...(o.wallet === false ? { noWallet: true } : {}),
   };

@@ -5,14 +5,15 @@ import { renderCodexHostFiles, renderHostFiles } from './src/router/plugin-files
 
 /**
  * THE PLUGINS SHIP IN `dist/hosts/claude` AND `dist/hosts/codex`, rendered from
- * the same module the CLI reads, with this build's version stamped into each
- * manifest. `tenjin install` registers those folders as local marketplaces, so
- * they must sit inside the published `files`; `dist` already is. The checked-in
- * `hosts/` templates are pinned to the same render by a test.
+ * the same module the CLI reads, with this build's version stamped into the
+ * Claude Code manifest (the Codex plugin carries none). `tenjin install`
+ * registers those folders as local marketplaces, so they must sit inside the
+ * published `files`; `dist` already is. The checked-in `hosts/` templates are
+ * pinned to the same render by a test.
  */
 function writeHosts(): void {
   const { version } = JSON.parse(readFileSync('package.json', 'utf8')) as { version: string };
-  const hosts = { claude: renderHostFiles(version), codex: renderCodexHostFiles(version) };
+  const hosts = { claude: renderHostFiles(version), codex: renderCodexHostFiles() };
   for (const [host, files] of Object.entries(hosts)) {
     for (const [path, body] of Object.entries(files)) {
       const target = join('dist', 'hosts', host, path);

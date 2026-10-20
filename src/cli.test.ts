@@ -424,6 +424,15 @@ describe('the update nudge and `install --refresh`', () => {
     expect(fetched).toBe(0);
   });
 
+  it('refuses a Codex refresh as usage, with nothing to bring up to date', async () => {
+    const cap = captureIo();
+    expect(await main(['install', '--harness', 'codex', '--refresh', '--json'], cap.io)).not.toBe(
+      0,
+    );
+    expect(cap.stdout()).toContain('no refresh');
+    expect(existsSync(cachePath())).toBe(false);
+  });
+
   // The other half: without it the case above would pass on a nudge that was
   // already off for some unrelated reason.
   it('still nudges for a command that is not a refresh', async () => {

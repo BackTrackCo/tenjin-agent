@@ -12,31 +12,26 @@ import { CliError } from '../lib/errors';
 import type { CommandContext, CommandResult } from '../context';
 import {
   at,
-  CODEX_GRANT,
   CODEX_MARKETPLACE,
   CODEX_PLUGIN,
   codexVersion,
-  grantOf,
-  GRANT_VALUE,
   readCodexConfig,
-  requestConfigured,
   WEB_VERIFIED_VERSION,
 } from './codex-host';
 import { approveLimits, spendApprovalFor, type RouterInstallDeps } from './install';
-import { CODEX_LEGS } from './plugin-files';
+import { CODEX_ALLOW_HOOK_COMMAND, CODEX_HOOK_COUNT } from './plugin-files';
 import { shownLimits } from './spend-question';
 
 /**
  * `tenjin install|uninstall|doctor --harness codex`. Codex's own commands do
  * every plugin write: `codex plugin marketplace add` and `codex plugin add`
- * copy the plugin from this package's `dist/hosts/codex`, and the grant goes
- * through the app server's `config/batchWrite`. Install writes the wallet,
- * the spend defaults, the plugin and then the grant. User scope only.
+ * copy the plugin from this package's `dist/hosts/codex`. The plugin's own
+ * `PermissionRequest` hook allows the request tool, so install writes no Codex
+ * config: the wallet, the spend defaults and the plugin. User scope only.
  */
 
 export interface CodexArgs {
   project?: boolean;
-  refresh?: boolean;
   yes?: boolean;
   noWallet?: boolean;
 }
@@ -45,10 +40,6 @@ export interface CodexRun {
   code: number;
   stdout: string;
   stderr: string;
-  /** Set when the command was killed at this limit, in milliseconds. */
-  timedOutMs?: number;
-  /** Set when no `codex` is on PATH. */
-  missing?: true;
 }
 
 export interface CodexSetupDeps
@@ -57,8 +48,6 @@ export interface CodexSetupDeps
   run?: (args: string[]) => Promise<CodexRun>;
   /** Codex's merged config (`config/read`), or null when it could not be read. */
   config?: () => Promise<unknown>;
-  /** Writes the grant's value, or clears it with null (`config/batchWrite`). */
-  writeGrant?: (value: unknown) => Promise<boolean>;
   /** Codex's hook list (`hooks/list`). */
   hooks?: () => Promise<unknown>;
   version?: () => Promise<string | null>;
@@ -68,37 +57,20 @@ export interface CodexSetupDeps
 }
 
 const RUN_TIMEOUT_MS = 30_000;
-/** `codex plugin list` took about 34 s on a ChatGPT login (Codex 0.157.1). */
-const LIST_TIMEOUT_MS = 90_000;
 const APP_SERVER_TIMEOUT_MS = 5_000;
 
-export function runCodex(args: string[]): Promise<CodexRun> {
-  const timeout = args[1] === 'list' ? LIST_TIMEOUT_MS : RUN_TIMEOUT_MS;
+function runCodex(args: string[]): Promise<CodexRun> {
   return new Promise((resolve) => {
-    execFile('codex', args, { timeout, maxBuffer: 4_000_000 }, (err, stdout, stderr) => {
-      const code = err === null ? 0 : typeof err.code === 'number' ? err.code : 127;
-      const timedOut = err !== null && err.killed === true && err.signal === 'SIGTERM';
-      resolve({
-        code,
-        stdout: String(stdout),
-        stderr: String(stderr),
-        ...(timedOut ? { timedOutMs: timeout } : {}),
-        ...(err?.code === 'ENOENT' ? { missing: true as const } : {}),
-      });
-    });
+    execFile(
+      'codex',
+      args,
+      { timeout: RUN_TIMEOUT_MS, maxBuffer: 4_000_000 },
+      (err, stdout, stderr) => {
+        const code = err === null ? 0 : typeof err.code === 'number' ? err.code : 127;
+        resolve({ code, stdout: String(stdout), stderr: String(stderr) });
+      },
+    );
   });
-}
-
-async function writeGrant(value: unknown): Promise<boolean> {
-  const result = await withAppServer(homedir(), process.env, APP_SERVER_TIMEOUT_MS, (request) =>
-    request('config/batchWrite', {
-      edits: [{ keyPath: CODEX_GRANT, value, mergeStrategy: 'replace' }],
-      filePath: null,
-      expectedVersion: null,
-      reloadUserConfig: true,
-    }),
-  );
-  return at(result, 'status') === 'ok';
 }
 
 function listHooks(): Promise<unknown> {
@@ -117,64 +89,47 @@ export async function codexHostsDir(
   return dirname(dirname(dirname(stable)));
 }
 
-/** The plugin's row in `codex plugin list --json`, or why it could not be read. */
-export interface CodexListing {
-  read: boolean;
-  installed: boolean;
-  enabled: boolean;
-  version: string | null;
-  /** Set when the list command was killed at this limit, in milliseconds. */
-  timedOutMs?: number;
-  /** Set when no `codex` is on PATH: nothing to read, rather than a failed read. */
-  missing?: true;
+/**
+ * The plugin, as Codex's one `hooks/list` shows it. Every row carries its
+ * `pluginId`, `enabled` and `trustStatus`: no Tenjin row means the plugin is
+ * not installed (or is off), and every row present, enabled and trusted means
+ * it is installed, on and trusted.
+ */
+export interface CodexHookRows {
+  state: 'trusted' | 'review' | 'absent' | 'unknown';
+  /** The request tool's allow hook is off in `/hooks`, so the tool asks first. */
+  allowOff: boolean;
 }
 
-export async function readCodexListing(
-  run: (args: string[]) => Promise<CodexRun>,
-): Promise<CodexListing> {
-  const out = await run(['plugin', 'list', '--json']);
-  let rows: unknown;
-  try {
-    rows = out.code === 0 ? at(JSON.parse(out.stdout), 'installed') : undefined;
-  } catch {
-    rows = undefined;
-  }
-  if (!Array.isArray(rows)) {
-    return {
-      read: false,
-      installed: false,
-      enabled: false,
-      version: null,
-      ...(out.timedOutMs === undefined ? {} : { timedOutMs: out.timedOutMs }),
-      ...(out.missing === true ? { missing: true as const } : {}),
-    };
-  }
-  const row: unknown = rows.find((r) => at(r, 'pluginId') === CODEX_PLUGIN);
-  const version = at(row, 'version');
-  return {
-    read: true,
-    installed: row !== undefined,
-    enabled: at(row, 'enabled') === true,
-    version: typeof version === 'string' ? version : null,
-  };
+function isAllowHook(hook: unknown): boolean {
+  return (
+    at(hook, 'command') === CODEX_ALLOW_HOOK_COMMAND ||
+    String(at(hook, 'key')).includes(':permission_request:')
+  );
 }
 
-/** Hook trust, from Codex's own list: every Tenjin leg present, enabled and trusted. */
-export function hookTrust(list: unknown): 'trusted' | 'review' | 'unknown' {
+export function codexHookRows(list: unknown): CodexHookRows {
   const groups = at(list, 'data');
-  if (!Array.isArray(groups)) return 'unknown';
+  if (!Array.isArray(groups)) return { state: 'unknown', allowOff: false };
   const ours = groups
     .flatMap((group) => {
       const hooks = at(group, 'hooks');
       return Array.isArray(hooks) ? (hooks as unknown[]) : [];
     })
     .filter((hook) => at(hook, 'pluginId') === CODEX_PLUGIN);
-  const trusted = ours.filter(
+  if (ours.length === 0) return { state: 'absent', allowOff: false };
+  // Turning the allow hook off is the documented opt-out, not a broken install.
+  const optedOut = (hook: unknown) => isAllowHook(hook) && at(hook, 'enabled') === false;
+  const ready = ours.every(
     (hook) =>
-      at(hook, 'enabled') === true &&
-      ['trusted', 'managed'].includes(String(at(hook, 'trustStatus'))),
+      optedOut(hook) ||
+      (at(hook, 'enabled') === true &&
+        ['trusted', 'managed'].includes(String(at(hook, 'trustStatus')))),
   );
-  return ours.length === CODEX_LEGS.length && trusted.length === ours.length ? 'trusted' : 'review';
+  return {
+    state: ours.length === CODEX_HOOK_COUNT && ready ? 'trusted' : 'review',
+    allowOff: ours.some(optedOut),
+  };
 }
 
 /**
@@ -216,40 +171,26 @@ async function addPlugin(
 }
 
 const TRUST_STEP =
-  'Open Codex, run /hooks and trust the three Tenjin hooks, then start a new session.';
+  'Open Codex, run /hooks and trust the four Tenjin hooks, then start a new session.';
+
+function userScopeOnly(args: CodexArgs): void {
+  if (args.project === true) {
+    throw new CliError('USAGE', 'The Codex plugin installs for your user only; omit --project.');
+  }
+}
 
 export async function runCodexInstall(
   args: CodexArgs,
   ctx: CommandContext,
   deps: CodexSetupDeps = {},
 ): Promise<CommandResult> {
-  if (args.project === true) {
-    throw new CliError('USAGE', 'The Codex plugin installs for your user only; omit --project.');
-  }
+  userScopeOnly(args);
   const run = deps.run ?? runCodex;
   const hosts = deps.hostsDir === undefined ? await codexHostsDir() : deps.hostsDir;
-  if (args.refresh === true) {
-    const listing = await readCodexListing(run);
-    if (!listing.installed) {
-      throw new CliError(
-        'REFUSED',
-        `Nothing to refresh: the ${CODEX_PLUGIN} plugin is not in Codex.`,
-        {
-          fix: 'Run `tenjin install --harness codex` to set it up.',
-        },
-      );
-    }
-    await addPlugin(run, hosts);
-    return {
-      data: { plugin: CODEX_PLUGIN, refresh: true },
-      humanLines: ['Codex plugin refreshed. Start a new Codex session to load it.'],
-    };
-  }
   const config = await loadRawConfig(ctx.dataDir);
   const humanOutput = ctx.flags.json === true ? false : (deps.isInteractive ?? ctx.io.isTTY);
   const canPrompt = humanOutput && (deps.isInteractive ?? Boolean(process.stdin.isTTY));
-  // The one question comes before any write, and the answer is also the
-  // consent the grant needs.
+  // The one question comes before any write.
   const limits =
     args.yes === true ? shownLimits(config) : canPrompt ? await approveLimits(config, deps) : {};
   const consented = args.yes === true || canPrompt;
@@ -264,44 +205,24 @@ export async function runCodexInstall(
   const spend = await persistRouterDefaults(ctx.dataDir, false, limits);
   await addPlugin(run, hosts);
 
-  const before = await (deps.config ?? (() => readCodexConfig(process.cwd(), 3_000)))();
-  const existing = grantOf(before);
-  // A config that could not be read is not an unset grant: the write replaces
-  // the value, so only a read that shows none may make it.
-  let grant: 'approved' | 'kept' | 'pending' | 'refused' | 'unread';
-  if (before === null || before === undefined) grant = 'unread';
-  else if (existing === GRANT_VALUE) grant = 'approved';
-  else if (existing !== undefined) grant = 'kept';
-  else if (!consented) grant = 'pending';
-  else grant = (await (deps.writeGrant ?? writeGrant)(GRANT_VALUE)) ? 'approved' : 'refused';
-
   const approve = ['tenjin install --harness codex', args.noWallet ? '--no-wallet' : '', '--yes']
     .filter(Boolean)
     .join(' ');
-  const lines = [
-    `Wallet: ${walletValue(wallet)}`,
-    `Codex plugin: ${CODEX_PLUGIN} added from the package`,
-    grant === 'approved'
-      ? 'Request tool: approved in Codex, under your wallet spend limits'
-      : grant === 'kept'
-        ? `Request tool: your own Codex policy (${String(existing)}) is kept`
-        : grant === 'pending'
-          ? `Request tool: not approved yet. Approve it with \`${approve}\``
-          : grant === 'unread'
-            ? `Request tool: not approved, because Codex's config could not be read. Run \`${approve}\` again`
-            : 'Request tool: Codex refused the grant. Check its managed policy',
-    TRUST_STEP,
-  ];
   return {
     data: {
       plugin: CODEX_PLUGIN,
       wallet,
       spend,
-      grant,
-      ...(grant === 'pending' ? { approval: spendApprovalFor(config, approve) } : {}),
+      ...(consented ? {} : { approval: spendApprovalFor(config, approve) }),
       next: TRUST_STEP,
     },
-    humanLines: lines,
+    humanLines: [
+      `Wallet: ${walletValue(wallet)}`,
+      `Codex plugin: ${CODEX_PLUGIN} added from the package`,
+      ...(consented ? [] : [`Spend limits: not approved yet. Approve them with \`${approve}\``]),
+      'Request tool: its plugin hook allows it, under your wallet spend limits. Turn that hook off in /hooks to be asked first.',
+      TRUST_STEP,
+    ],
   };
 }
 
@@ -310,53 +231,26 @@ export async function runCodexUninstall(
   _ctx: CommandContext,
   deps: CodexSetupDeps = {},
 ): Promise<CommandResult> {
-  if (args.project === true) {
-    throw new CliError('USAGE', 'The Codex plugin installs for your user only; omit --project.');
-  }
+  userScopeOnly(args);
   const run = deps.run ?? runCodex;
-  // `codex plugin remove` drops the plugin's whole config table, so a value
-  // the user set for the request tool is read first and written back after.
-  const config = await (deps.config ?? (() => readCodexConfig(process.cwd(), 3_000)))();
-  if (config === null || config === undefined) {
-    throw new CliError('REFUSED', "Codex's config could not be read, so nothing was removed.", {
-      fix: 'Check that `codex` runs, then re-run `tenjin uninstall --harness codex`.',
-    });
-  }
-  const existing = grantOf(config);
-  const own = existing !== undefined && existing !== GRANT_VALUE;
   const removed = await run(['plugin', 'remove', CODEX_PLUGIN, '--json']);
   if (removed.code !== 0) throw failed('plugin remove', removed);
-  // The write-back can only follow the remove, which would drop it again.
-  const kept = own ? await (deps.writeGrant ?? writeGrant)(existing).catch(() => false) : false;
   // Absent already is the state uninstall wants.
   await run(['plugin', 'marketplace', 'remove', CODEX_MARKETPLACE]);
-  const grant =
-    existing === GRANT_VALUE ? 'removed' : !own ? 'absent' : kept ? 'kept' : 'restore_failed';
   return {
-    data: {
-      removed: CODEX_PLUGIN,
-      marketplace: CODEX_MARKETPLACE,
-      grant,
-      // The removed value, so it can be set again by hand.
-      ...(grant === 'restore_failed' ? { policy: { key: CODEX_GRANT, value: existing } } : {}),
-    },
+    data: { removed: CODEX_PLUGIN, marketplace: CODEX_MARKETPLACE },
     humanLines: [
       `Codex plugin ${CODEX_PLUGIN} and its marketplace removed. The wallet and Claude setup are kept.`,
-      ...(kept ? [`Your own request tool policy (${String(existing)}) is kept.`] : []),
-      ...(grant === 'restore_failed'
-        ? [
-            `! Could not write back your own request tool policy. To keep it, set ${CODEX_GRANT} = ${JSON.stringify(existing)} in Codex's config.toml.`,
-          ]
-        : []),
     ],
   };
 }
 
-function unreadListing(listing: CodexListing): string {
-  return listing.timedOutMs === undefined
-    ? 'could not read `codex plugin list`'
-    : `\`codex plugin list --json\` timed out after ${String(listing.timedOutMs / 1000)} seconds`;
-}
+const PLUGIN_LINE: Record<CodexHookRows['state'], string> = {
+  trusted: 'installed, its hooks on and trusted',
+  review: `installed, its hooks need review. ${TRUST_STEP}`,
+  absent: 'not installed or turned off. Run `tenjin install --harness codex`',
+  unknown: "could not read Codex's hook list",
+};
 
 /** Reads Codex's view of the plugin and writes nothing. */
 export async function runCodexDoctor(
@@ -364,32 +258,28 @@ export async function runCodexDoctor(
   _ctx: CommandContext,
   deps: CodexSetupDeps = {},
 ): Promise<CommandResult> {
-  if (args.project === true) {
-    throw new CliError('USAGE', 'The Codex plugin installs for your user only; omit --project.');
-  }
-  const run = deps.run ?? runCodex;
-  const [listing, config, hooks, version] = await Promise.all([
-    readCodexListing(run),
-    (deps.config ?? (() => readCodexConfig(process.cwd(), 3_000)))(),
+  userScopeOnly(args);
+  const [list, config, version] = await Promise.all([
     (deps.hooks ?? listHooks)(),
+    (deps.config ?? (() => readCodexConfig(process.cwd(), 3_000)))(),
     (deps.version ?? codexVersion)(),
   ]);
-  const granted = requestConfigured(config);
-  const trust = hookTrust(hooks);
-  const elicitation = config === null ? null : elicitationCanShow(config);
-  const ok = listing.enabled && granted && trust === 'trusted';
+  const hooks = codexHookRows(list);
+  const read = config !== null && config !== undefined;
+  const elicitation = read ? elicitationCanShow(config) : null;
+  // With its allow hook off, `approval_policy = "never"` refuses the tool.
+  const refused = hooks.allowOff && at(config, 'approval_policy') === 'never';
+  const ok = hooks.state === 'trusted' && !refused;
   const lines = [
-    `Codex plugin: ${!listing.read ? unreadListing(listing) : listing.enabled ? `enabled (${listing.version ?? 'no version'})` : listing.installed ? 'disabled' : 'not installed'}`,
-    `Hooks: ${trust === 'trusted' ? 'trusted' : trust === 'review' ? `review needed. ${TRUST_STEP}` : 'could not be read'}`,
-    `Request tool: ${granted ? 'approved' : 'not approved; run `tenjin install --harness codex --yes`'}`,
+    `Codex plugin: ${PLUGIN_LINE[hooks.state]}`,
+    `Request tool: ${refused ? 'refused: its allow hook is off in /hooks and approval_policy is never' : hooks.allowOff ? 'asks before each call (its allow hook is off in /hooks)' : 'allowed by its plugin hook, under your wallet spend limits'}`,
     `Pay once ask: ${elicitation === null ? 'unknown' : elicitation ? 'can show' : 'cannot show (approval_policy never); a call over the limit returns needs_approval'}`,
     `Codex build: ${version ?? 'unknown'} (web hooks last captured on ${WEB_VERIFIED_VERSION}; information only)`,
   ];
   const data = {
     plugin: CODEX_PLUGIN,
-    listing,
-    granted,
-    hooks: trust,
+    hooks: hooks.state,
+    allowOff: hooks.allowOff,
     elicitation,
     version,
     ok,

@@ -5,21 +5,20 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { CommandContext } from '../context';
-import type { CliError } from '../lib/errors';
 import { parseCodexHistory } from './codex-history';
 import { codexRouterEvent, codexResponse } from './codex-event';
-import { at, CODEX_GRANT, CODEX_PLUGIN, requestConfigured } from './codex-host';
+import { at, CODEX_PLUGIN } from './codex-host';
 import {
+  codexHookRows,
   elicitationCanShow,
-  hookTrust,
   runCodexDoctor,
   runCodexInstall,
-  readCodexListing,
   runCodexUninstall,
   type CodexRun,
   type CodexSetupDeps,
 } from './codex-install';
 import { runHookCommand } from './hook-command';
+import { CODEX_ALLOW_HOOK_COMMAND } from './plugin-files';
 import { runNativeHook, runPromptHook, runShortfallHook } from './hooks';
 import { CODEX_REQUEST_TOOL, requestToolName } from './names';
 import { resolveProgressSession, sessionDir } from './progress';
@@ -43,14 +42,6 @@ const item = (id: string, text: string, type = 'UserMessage') => ({
   },
 });
 const history = (...rows: unknown[]) => rows.map((r) => JSON.stringify(r)).join('\n');
-const granted = {
-  plugins: {
-    [CODEX_PLUGIN]: {
-      enabled: true,
-      mcp_servers: { router: { tools: { request: { approval_mode: 'approve' } } } },
-    },
-  },
-};
 const native = {
   hook_event_name: 'PreToolUse',
   session_id: session,
@@ -309,35 +300,24 @@ describe('Codex routing through the router', () => {
     );
   });
 
-  it('stays silent without the request grant, as approval_policy never would refuse the call', async () => {
+  it('speaks through the hook command with no Codex config read before it', async () => {
     const writes: string[] = [];
     const io = {
       stdout: { write: (s: string) => (writes.push(s), true) } as unknown as NodeJS.WritableStream,
       stderr: process.stderr,
       isTTY: false,
     };
-    const prompt = JSON.stringify({
-      hook_event_name: 'UserPromptSubmit',
-      session_id: session,
-      prompt: 'Research a topic',
-      cwd: dir,
-    });
-    await runHookCommand('prompt', io, {
-      dataDir: dir,
-      harness: 'codex',
-      readEvent: async () => prompt,
-      codexReady: async () => false,
-      fetchImpl: (async () => {
-        throw new Error('must not call the router');
-      }) as typeof fetch,
-    });
-    expect(writes).toEqual([]);
     const { fetchImpl } = router(paidOffer);
     await runHookCommand('prompt', io, {
       dataDir: dir,
       harness: 'codex',
-      readEvent: async () => prompt,
-      codexReady: async () => true,
+      readEvent: async () =>
+        JSON.stringify({
+          hook_event_name: 'UserPromptSubmit',
+          session_id: session,
+          prompt: 'Research a topic',
+          cwd: dir,
+        }),
       fetchImpl,
     });
     expect(writes).toHaveLength(1);
@@ -345,9 +325,6 @@ describe('Codex routing through the router', () => {
 
   it('names the request tool by host', () => {
     expect(requestToolName('codex')).toBe('mcp__router__request');
-    expect(CODEX_GRANT).toBe(
-      'plugins."tenjin@tenjin".mcp_servers.router.tools.request.approval_mode',
-    );
   });
 });
 
@@ -357,19 +334,15 @@ const ctx = (): CommandContext => ({
   io: { stdout: process.stdout, stderr: process.stderr, isTTY: false },
 });
 
-/** A Codex stand-in: records every command and grant write in order. */
+/** A Codex stand-in: records every command in order. */
 function host(config: unknown = {}) {
   const steps: string[] = [];
   const deps: CodexSetupDeps = {
     run: async (args: string[]): Promise<CodexRun> => {
       steps.push(`codex ${args.filter((a) => a !== '--json').join(' ')}`);
-      return { code: 0, stdout: '{"installed":[]}', stderr: '' };
+      return { code: 0, stdout: '{}', stderr: '' };
     },
     config: async () => config,
-    writeGrant: async (value) => {
-      steps.push(`grant ${String(value)}`);
-      return true;
-    },
     hooks: async () => ({ data: [] }),
     version: async () => '0.157.1',
     hostsDir: '/package/dist/hosts/codex',
@@ -382,8 +355,26 @@ function host(config: unknown = {}) {
   return { steps, deps };
 }
 
+/** One `hooks/list` row of the Tenjin plugin, as Codex's HookMetadata carries it. */
+const row = (key: string, over: Record<string, unknown> = {}) => ({
+  key,
+  pluginId: CODEX_PLUGIN,
+  enabled: true,
+  trustStatus: 'trusted',
+  ...over,
+});
+const allowRow = (over: Record<string, unknown> = {}) =>
+  row('/c/tenjin/hooks/hooks.json:permission_request:0:0', {
+    command: CODEX_ALLOW_HOOK_COMMAND,
+    ...over,
+  });
+const listed = (...rows: unknown[]) => ({
+  data: [{ hooks: [{ key: 'theirs', pluginId: 'other@x', trustStatus: 'untrusted' }, ...rows] }],
+});
+const allRows = () => [row('a'), row('b'), row('c'), allowRow()];
+
 describe('Codex install, uninstall and doctor', () => {
-  it('writes the wallet, the spend limits, the plugin and then the grant', async () => {
+  it('writes the wallet, the spend limits and the plugin, and no Codex config', async () => {
     const { steps, deps } = host();
     const out = await runCodexInstall({ yes: true }, ctx(), deps);
     const config = JSON.parse(readFileSync(join(dir, 'config.json'), 'utf8')) as object;
@@ -392,53 +383,16 @@ describe('Codex install, uninstall and doctor', () => {
       'wallet',
       'codex plugin marketplace add /package/dist/hosts/codex',
       'codex plugin add tenjin@tenjin',
-      'grant approve',
     ]);
-    expect(out.data).toMatchObject({ grant: 'approved' });
+    expect(out.data).not.toHaveProperty('grant');
+    expect(out.data).not.toHaveProperty('approval');
+    expect(out.humanLines?.join('\n')).toContain('four Tenjin hooks');
   });
 
-  it("asks before the grant where nobody consented, and never writes over the user's own value", async () => {
-    const pending = host();
-    const out = await runCodexInstall({}, ctx(), pending.deps);
-    expect(pending.steps).not.toContain('grant approve');
-    expect(out.data).toMatchObject({ grant: 'pending' });
-
-    const own = host({
-      plugins: {
-        [CODEX_PLUGIN]: {
-          mcp_servers: { router: { tools: { request: { approval_mode: 'prompt' } } } },
-        },
-      },
-    });
-    const kept = await runCodexInstall({ yes: true }, ctx(), own.deps);
-    expect(own.steps.some((s) => s.startsWith('grant'))).toBe(false);
-    expect(kept.data).toMatchObject({ grant: 'kept' });
-  });
-
-  it('names the plugin list command and its limit when the read times out', async () => {
+  it('asks for the spend limits where nobody consented', async () => {
     const { deps } = host();
-    deps.run = async () => ({ code: 127, stdout: '', stderr: '', timedOutMs: 90_000 });
-    const err = (await runCodexDoctor({}, ctx(), deps).catch((e: unknown) => e)) as CliError;
-    expect(err.fix).toContain('`codex plugin list --json` timed out after 90 seconds');
-    expect(err.fix).not.toContain('could not read');
-    expect(err.details).toMatchObject({ listing: { read: false, timedOutMs: 90_000 } });
-
-    deps.run = async () => ({ code: 1, stdout: 'nope', stderr: '' });
-    const parse = (await runCodexDoctor({}, ctx(), deps).catch((e: unknown) => e)) as CliError;
-    expect(parse.fix).toContain('could not read `codex plugin list`');
-  });
-
-  it('writes no grant when the Codex config read timed out, and uninstall removes nothing', async () => {
-    const unread = host(null);
-    const out = await runCodexInstall({ yes: true }, ctx(), unread.deps);
-    expect(unread.steps.some((s) => s.startsWith('grant'))).toBe(false);
-    expect(out.data).toMatchObject({ grant: 'unread' });
-
-    const gone = host(null);
-    await expect(runCodexUninstall({}, ctx(), gone.deps)).rejects.toMatchObject({
-      code: 'REFUSED',
-    });
-    expect(gone.steps).toEqual([]);
+    const out = await runCodexInstall({}, ctx(), deps);
+    expect(out.data).toHaveProperty('approval');
   });
 
   it('refuses project scope before any write', async () => {
@@ -447,112 +401,84 @@ describe('Codex install, uninstall and doctor', () => {
     expect(steps).toEqual([]);
   });
 
-  it('removes the plugin and marketplace, and drops the grant only when it is exactly approve', async () => {
-    const ours = host(granted);
-    await runCodexUninstall({}, ctx(), ours.deps);
-    expect(ours.steps).toEqual([
+  it('removes the plugin and its marketplace, reading no config first', async () => {
+    const { steps, deps } = host(null);
+    const out = await runCodexUninstall({}, ctx(), deps);
+    expect(steps).toEqual([
       'codex plugin remove tenjin@tenjin',
       'codex plugin marketplace remove tenjin',
     ]);
-    const theirs = host({
-      plugins: {
-        [CODEX_PLUGIN]: {
-          mcp_servers: { router: { tools: { request: { approval_mode: 'prompt' } } } },
-        },
-      },
-    });
-    await runCodexUninstall({}, ctx(), theirs.deps);
-    // Codex's remove drops the whole table, so the user's own value goes back.
-    expect(theirs.steps).toEqual([
-      'codex plugin remove tenjin@tenjin',
-      'grant prompt',
-      'codex plugin marketplace remove tenjin',
-    ]);
+    expect(out.data).toEqual({ removed: CODEX_PLUGIN, marketplace: 'tenjin' });
   });
 
-  it('reports a failed write-back, with the value, when the own policy cannot be restored', async () => {
-    const theirs = host({
-      plugins: {
-        [CODEX_PLUGIN]: {
-          mcp_servers: { router: { tools: { request: { approval_mode: 'prompt' } } } },
-        },
-      },
+  it('reads the plugin from hooks/list rows: installed and trusted, absent, untrusted', () => {
+    expect(codexHookRows(listed(...allRows()))).toEqual({ state: 'trusted', allowOff: false });
+    expect(codexHookRows(listed())).toEqual({ state: 'absent', allowOff: false });
+    expect(codexHookRows(listed(row('a'), row('b', { trustStatus: 'untrusted' })))).toMatchObject({
+      state: 'review',
     });
-    theirs.deps.writeGrant = async () => {
-      throw new Error('app-server timed out');
-    };
-    const out = await runCodexUninstall({}, ctx(), theirs.deps);
-    expect(out.data).toMatchObject({
-      grant: 'restore_failed',
-      policy: { key: CODEX_GRANT, value: 'prompt' },
-    });
-    expect(out.humanLines?.join(' ')).toContain(`set ${CODEX_GRANT} = "prompt"`);
-    theirs.deps.writeGrant = async () => false;
-    const refused = await runCodexUninstall({}, ctx(), theirs.deps);
-    expect(refused.data).toMatchObject({ grant: 'restore_failed' });
+    expect(
+      codexHookRows(listed(row('a'), row('b'), row('c', { enabled: false }), allowRow())),
+    ).toMatchObject({ state: 'review' });
+    expect(codexHookRows(listed(row('a'), row('b'), row('c')))).toMatchObject({ state: 'review' });
+    expect(codexHookRows(null)).toEqual({ state: 'unknown', allowOff: false });
+    // The allow hook off is the documented opt-out, so the plugin still counts as ready.
+    expect(
+      codexHookRows(
+        listed(
+          row('a'),
+          row('b'),
+          row('c'),
+          allowRow({ enabled: false, trustStatus: 'untrusted' }),
+        ),
+      ),
+    ).toEqual({ state: 'trusted', allowOff: true });
   });
 
-  it('tells a missing codex from a list that could not be read', async () => {
-    const run = (out: Partial<CodexRun>) => async () => ({
-      code: 0,
-      stdout: '',
-      stderr: '',
-      ...out,
-    });
-    expect(await readCodexListing(run({ code: 127, missing: true }))).toMatchObject({
-      read: false,
-      missing: true,
-    });
-    const slow = await readCodexListing(run({ code: 1, timedOutMs: 90_000 }));
-    expect(slow).toMatchObject({ read: false, timedOutMs: 90_000 });
-    expect(slow).not.toHaveProperty('missing');
-    expect(await readCodexListing(run({ stdout: '{"installed":[]}' }))).toMatchObject({
-      read: true,
-      installed: false,
-    });
-  });
-
-  it('refreshes only a plugin Codex already lists', async () => {
-    const { steps, deps } = host();
-    await expect(runCodexInstall({ refresh: true }, ctx(), deps)).rejects.toThrow(
-      'Nothing to refresh',
-    );
-    expect(steps).toEqual(['codex plugin list']);
-  });
-
-  it('reads trust, the grant and the elicitation, writes nothing, and never calls the build a gate', async () => {
-    const leg = (key: string, trustStatus = 'trusted') => ({
-      key,
-      pluginId: CODEX_PLUGIN,
-      enabled: true,
-      trustStatus,
-    });
-    const trusted = { data: [{ hooks: [leg('a'), leg('b'), leg('c')] }] };
-    expect(hookTrust(trusted)).toBe('trusted');
-    expect(hookTrust({ data: [{ hooks: [leg('a'), leg('b'), leg('c', 'untrusted')] }] })).toBe(
-      'review',
-    );
-    expect(hookTrust(null)).toBe('unknown');
-    expect(elicitationCanShow({ approval_policy: 'never' })).toBe(false);
-    expect(elicitationCanShow({ approval_policy: 'on-request' })).toBe(true);
-    expect(requestConfigured(granted)).toBe(true);
-    expect(requestConfigured({ plugins: { [CODEX_PLUGIN]: { enabled: true } } })).toBe(false);
-
-    const listed = JSON.stringify({
-      installed: [{ pluginId: CODEX_PLUGIN, enabled: true, version: '0.1.0' }],
-    });
-    const { steps, deps } = host({ ...granted, approval_policy: 'never' });
+  it('reads one hooks/list, runs no codex command, and never calls the build a gate', async () => {
+    const { steps, deps } = host({ approval_policy: 'never' });
     const ready = await runCodexDoctor({}, ctx(), {
       ...deps,
-      run: async (args) => {
-        steps.push(`codex ${args.join(' ')}`);
-        return { code: 0, stdout: listed, stderr: '' };
-      },
-      hooks: async () => trusted,
+      hooks: async () => listed(...allRows()),
     });
-    expect(steps).toEqual(['codex plugin list --json']);
-    expect(ready.data).toMatchObject({ ok: true, elicitation: false, version: '0.157.1' });
+    expect(steps).toEqual([]);
+    expect(ready.data).toMatchObject({
+      hooks: 'trusted',
+      ok: true,
+      elicitation: false,
+      version: '0.157.1',
+    });
     expect(ready.humanLines?.join('\n')).toContain('information only');
-    await expect(runCodexDoctor({}, ctx(), deps)).rejects.toMatchObject({ code: 'REFUSED' });
+    expect(elicitationCanShow({ approval_policy: 'on-request' })).toBe(true);
+  });
+
+  it('fails with the install step when absent and the /hooks step when untrusted', async () => {
+    const { deps } = host();
+    await expect(runCodexDoctor({}, ctx(), deps)).rejects.toMatchObject({
+      code: 'REFUSED',
+      details: { hooks: 'absent', ok: false },
+      fix: expect.stringContaining('tenjin install --harness codex'),
+    });
+    await expect(
+      runCodexDoctor({}, ctx(), {
+        ...deps,
+        hooks: async () => listed(...allRows().map((r) => ({ ...r, trustStatus: 'untrusted' }))),
+      }),
+    ).rejects.toMatchObject({
+      details: { hooks: 'review' },
+      fix: expect.stringContaining('/hooks'),
+    });
+  });
+
+  it('fails when the allow hook is off under approval_policy never, which refuses the tool', async () => {
+    const off = () => listed(row('a'), row('b'), row('c'), allowRow({ enabled: false }));
+    const prompt = await runCodexDoctor({}, ctx(), { ...host().deps, hooks: async () => off() });
+    expect(prompt.humanLines?.join('\n')).toContain('asks before each call');
+    await expect(
+      runCodexDoctor({}, ctx(), {
+        ...host({ approval_policy: 'never' }).deps,
+        hooks: async () => off(),
+      }),
+    ).rejects.toMatchObject({ details: { allowOff: true, ok: false } });
   });
 });
