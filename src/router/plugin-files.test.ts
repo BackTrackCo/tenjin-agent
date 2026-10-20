@@ -5,16 +5,21 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { hookToolInput } from './hook-tool';
 import { PLUGIN_HOOK_TOOL, PLUGIN_SERVER, REQUEST_TOOL } from './names';
+import { commandForm, handlersIn, shellDependence } from './hook-form';
 import {
-  ALIVE_COMMAND,
-  ALLOW_HOOK_COMMAND,
-  DENY_HOOK_COMMAND,
+  ALIVE_ARGS,
+  ALLOW_HOOK,
+  DENY_HOOK,
   PLUGIN_DIR,
   PLUGIN_FILES,
+  PLUGIN_ROOT_ENTRY,
   renderHostFiles,
   renderMarketplace,
+  renderPluginFiles,
   renderPluginHooks,
   renderPluginManifest,
+  renderPluginMcp,
+  type ExecLaunch,
   CODEX_ALLOW_HOOK_COMMAND,
   renderCodexHooks,
   renderCodexHostFiles,
@@ -48,7 +53,7 @@ const leg = (kind: Parameters<typeof hookToolInput>[0], timeout = 5) => [
     timeout,
   },
 ];
-const command = (text: string) => [{ type: 'command', command: text, timeout: 5 }];
+const command = (launch: ExecLaunch) => [{ type: 'command', ...launch, timeout: 5 }];
 
 describe('the checked-in hosts/claude templates', () => {
   it('are exactly what the renderer writes, file for file', () => {
@@ -75,8 +80,8 @@ describe("the plugin's hooks", () => {
       { matcher: 'WebSearch|WebFetch', hooks: leg('native') },
       { matcher: 'Agent|Task', hooks: leg('agent') },
       { matcher: 'AskUserQuestion', hooks: leg('ask') },
-      { matcher: 'mcp__plugin_tenjin_router__hook', hooks: command(DENY_HOOK_COMMAND) },
-      { matcher: 'mcp__plugin_tenjin_router__request', hooks: command(ALLOW_HOOK_COMMAND) },
+      { matcher: 'mcp__plugin_tenjin_router__hook', hooks: command(DENY_HOOK) },
+      { matcher: 'mcp__plugin_tenjin_router__request', hooks: command(ALLOW_HOOK) },
     ]);
     expect(hooks.PostToolUse).toEqual([
       { matcher: 'WebSearch|WebFetch', hooks: leg('shortfall', 15) },
@@ -88,26 +93,29 @@ describe("the plugin's hooks", () => {
     expect(PLUGIN_SERVER).toBe('plugin:tenjin:router');
   });
 
-  it('carry the alive leg as a SessionStart command with no matcher', () => {
-    expect(renderPluginHooks().hooks.SessionStart).toEqual([{ hooks: command(ALIVE_COMMAND) }]);
-    expect(ALIVE_COMMAND).toBe('tenjin hook alive');
+  it('carry the alive leg as a SessionStart command with no matcher, run by node from the entry', () => {
+    expect(renderPluginHooks().hooks.SessionStart).toEqual([
+      { hooks: command({ command: 'node', args: [PLUGIN_ROOT_ENTRY, 'hook', 'alive'] }) },
+    ]);
+    expect(ALIVE_ARGS).toEqual(['hook', 'alive']);
+    expect(PLUGIN_ROOT_ENTRY).toBe('${CLAUDE_PLUGIN_ROOT}/../../../index.js');
   });
 
-  it('deny the hook tool to the model and allow the request tool, as static answers', () => {
+  it('deny the hook tool to the model and allow the request tool, spawned with no shell', () => {
     // No stdin: the command never reads its event, and on Linux a child that
     // exits before Node writes the event fails the write with EPIPE.
-    const answer = (cmd: string) =>
+    const answer = ({ command: file, args }: ExecLaunch) =>
       JSON.parse(
-        execFileSync('sh', ['-c', cmd], { stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8' }),
+        execFileSync(file, args, { stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8' }),
       ) as {
         hookSpecificOutput: Record<string, string>;
       };
-    expect(answer(DENY_HOOK_COMMAND).hookSpecificOutput).toEqual({
+    expect(answer(DENY_HOOK).hookSpecificOutput).toEqual({
       hookEventName: 'PreToolUse',
       permissionDecision: 'deny',
       permissionDecisionReason: `Only the Tenjin hooks call this tool. To make a lookup, call ${REQUEST_TOOL}.`,
     });
-    expect(answer(ALLOW_HOOK_COMMAND).hookSpecificOutput).toMatchObject({
+    expect(answer(ALLOW_HOOK).hookSpecificOutput).toMatchObject({
       hookEventName: 'PreToolUse',
       permissionDecision: 'allow',
     });
@@ -121,14 +129,51 @@ describe("the plugin's hooks", () => {
 });
 
 describe("the plugin's server", () => {
-  it('runs the CLI on PATH with a command line of its own, so Claude Code does not suppress it', async () => {
-    const { renderPluginMcp } = await import('./plugin-files');
+  it('runs the CLI entry under node with a command line of its own, so Claude Code does not suppress it', () => {
     // A settings install registered `tenjin mcp`; Claude Code drops a plugin
     // server whose command and arguments match a configured one.
     expect(renderPluginMcp()).toEqual({
-      mcpServers: { router: { command: 'tenjin', args: ['mcp', '--plugin'] } },
+      mcpServers: {
+        router: { command: 'node', args: [PLUGIN_ROOT_ENTRY, 'mcp', '--plugin'] },
+      },
+    });
+    expect(renderPluginMcp('/opt/tenjin-cli/dist/index.js')).toEqual({
+      mcpServers: {
+        router: { command: 'node', args: ['/opt/tenjin-cli/dist/index.js', 'mcp', '--plugin'] },
+      },
     });
   });
+});
+
+/**
+ * NO SHELL ANYWHERE, so Windows runs the files macOS and Linux run: every
+ * command hook and the server are exec form, and none names the `tenjin` shim.
+ */
+describe('every command the plugin carries', () => {
+  const rendered = {
+    template: Object.fromEntries(
+      PLUGIN_FILES.map((p) => [p, readFileSync(join(HOSTS, PLUGIN_DIR, p), 'utf8')]),
+    ),
+    shipped: renderPluginFiles('1.2.3'),
+    folder: renderPluginFiles('1.2.3', 'C:\\Users\\me\\tenjin-cli\\dist\\index.js'),
+  };
+
+  for (const [name, files] of Object.entries(rendered)) {
+    it(`runs with no shell in the ${name} render`, () => {
+      const hooks = JSON.parse(files['hooks/hooks.json']!) as unknown;
+      const commands = handlersIn(hooks).filter((h) => commandForm(h) !== null);
+      expect(commands).toHaveLength(3);
+      for (const handler of commands) {
+        expect(commandForm(handler)).toBe('exec');
+        expect(shellDependence(handler)).toBeNull();
+      }
+      const { mcpServers } = JSON.parse(files['.mcp.json']!) as {
+        mcpServers: Record<string, unknown>;
+      };
+      for (const server of Object.values(mcpServers)) expect(shellDependence(server)).toBeNull();
+      expect(`${files['hooks/hooks.json']}${files['.mcp.json']}`).not.toMatch(/"tenjin(\.cmd)?"/);
+    });
+  }
 });
 
 describe('the manifest and the marketplace', () => {
