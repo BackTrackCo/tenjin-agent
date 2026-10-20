@@ -14,6 +14,7 @@ import {
   hookTrust,
   runCodexDoctor,
   runCodexInstall,
+  readCodexListing,
   runCodexUninstall,
   type CodexRun,
   type CodexSetupDeps,
@@ -467,6 +468,48 @@ describe('Codex install, uninstall and doctor', () => {
       'grant prompt',
       'codex plugin marketplace remove tenjin',
     ]);
+  });
+
+  it('reports a failed write-back, with the value, when the own policy cannot be restored', async () => {
+    const theirs = host({
+      plugins: {
+        [CODEX_PLUGIN]: {
+          mcp_servers: { router: { tools: { request: { approval_mode: 'prompt' } } } },
+        },
+      },
+    });
+    theirs.deps.writeGrant = async () => {
+      throw new Error('app-server timed out');
+    };
+    const out = await runCodexUninstall({}, ctx(), theirs.deps);
+    expect(out.data).toMatchObject({
+      grant: 'restore_failed',
+      policy: { key: CODEX_GRANT, value: 'prompt' },
+    });
+    expect(out.humanLines?.join(' ')).toContain(`set ${CODEX_GRANT} = "prompt"`);
+    theirs.deps.writeGrant = async () => false;
+    const refused = await runCodexUninstall({}, ctx(), theirs.deps);
+    expect(refused.data).toMatchObject({ grant: 'restore_failed' });
+  });
+
+  it('tells a missing codex from a list that could not be read', async () => {
+    const run = (out: Partial<CodexRun>) => async () => ({
+      code: 0,
+      stdout: '',
+      stderr: '',
+      ...out,
+    });
+    expect(await readCodexListing(run({ code: 127, missing: true }))).toMatchObject({
+      read: false,
+      missing: true,
+    });
+    const slow = await readCodexListing(run({ code: 1, timedOutMs: 90_000 }));
+    expect(slow).toMatchObject({ read: false, timedOutMs: 90_000 });
+    expect(slow).not.toHaveProperty('missing');
+    expect(await readCodexListing(run({ stdout: '{"installed":[]}' }))).toMatchObject({
+      read: true,
+      installed: false,
+    });
   });
 
   it('refreshes only a plugin Codex already lists', async () => {

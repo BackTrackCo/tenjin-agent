@@ -111,7 +111,7 @@ async function deps(overrides: Partial<UpdateDeps> = {}): Promise<UpdateDeps> {
     homeDir: dir,
     refreshCommand: join(dir, 'bin', 'tenjin.js'),
     listMcpProcesses: async () => [],
-    codexInstalled: async () => false,
+    codexPlugin: async () => 'absent',
     ...overrides,
   };
 }
@@ -167,7 +167,7 @@ describe('runUpdate', () => {
     const result = await runUpdate(
       { check: false },
       ctx,
-      await deps({ spawnImpl: spawned.impl, codexInstalled: async () => true }),
+      await deps({ spawnImpl: spawned.impl, codexPlugin: async () => 'installed' }),
     );
     expect(spawned.calls.at(-1)?.args.slice(1)).toEqual([
       'install',
@@ -179,8 +179,25 @@ describe('runUpdate', () => {
     expect(result.humanLines).toContain('Refreshed the Codex plugin.');
 
     const none = spawnRecorder();
-    await runUpdate({ check: false }, ctx, await deps({ spawnImpl: none.impl }));
+    const absent = await runUpdate({ check: false }, ctx, await deps({ spawnImpl: none.impl }));
     expect(none.calls.some((call) => call.args.includes('--harness'))).toBe(false);
+    expect(absent.data).not.toHaveProperty('codex');
+    expect(absent.humanLines?.join(' ')).not.toContain('Codex');
+  });
+
+  it('says so when the Codex plugin list could not be read, and refreshes nothing', async () => {
+    const { ctx } = makeCtx();
+    const spawned = spawnRecorder();
+    const result = await runUpdate(
+      { check: false },
+      ctx,
+      await deps({ spawnImpl: spawned.impl, codexPlugin: async () => 'unread' }),
+    );
+    expect(spawned.calls.some((call) => call.args.includes('--harness'))).toBe(false);
+    expect(result.data).toMatchObject({ codex: 'unread' });
+    expect(result.humanLines?.join(' ')).toContain(
+      'Could not read `codex plugin list`, so the Codex plugin was not refreshed.',
+    );
   });
 
   // The live-registry regression this command has to survive: `alpha` sat on

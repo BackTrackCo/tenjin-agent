@@ -47,6 +47,8 @@ export interface CodexRun {
   stderr: string;
   /** Set when the command was killed at this limit, in milliseconds. */
   timedOutMs?: number;
+  /** Set when no `codex` is on PATH. */
+  missing?: true;
 }
 
 export interface CodexSetupDeps
@@ -70,7 +72,7 @@ const RUN_TIMEOUT_MS = 30_000;
 const LIST_TIMEOUT_MS = 90_000;
 const APP_SERVER_TIMEOUT_MS = 5_000;
 
-function runCodex(args: string[]): Promise<CodexRun> {
+export function runCodex(args: string[]): Promise<CodexRun> {
   const timeout = args[1] === 'list' ? LIST_TIMEOUT_MS : RUN_TIMEOUT_MS;
   return new Promise((resolve) => {
     execFile('codex', args, { timeout, maxBuffer: 4_000_000 }, (err, stdout, stderr) => {
@@ -81,6 +83,7 @@ function runCodex(args: string[]): Promise<CodexRun> {
         stdout: String(stdout),
         stderr: String(stderr),
         ...(timedOut ? { timedOutMs: timeout } : {}),
+        ...(err?.code === 'ENOENT' ? { missing: true as const } : {}),
       });
     });
   });
@@ -122,6 +125,8 @@ export interface CodexListing {
   version: string | null;
   /** Set when the list command was killed at this limit, in milliseconds. */
   timedOutMs?: number;
+  /** Set when no `codex` is on PATH: nothing to read, rather than a failed read. */
+  missing?: true;
 }
 
 export async function readCodexListing(
@@ -141,6 +146,7 @@ export async function readCodexListing(
       enabled: false,
       version: null,
       ...(out.timedOutMs === undefined ? {} : { timedOutMs: out.timedOutMs }),
+      ...(out.missing === true ? { missing: true as const } : {}),
     };
   }
   const row: unknown = rows.find((r) => at(r, 'pluginId') === CODEX_PLUGIN);
@@ -317,23 +323,31 @@ export async function runCodexUninstall(
     });
   }
   const existing = grantOf(config);
+  const own = existing !== undefined && existing !== GRANT_VALUE;
   const removed = await run(['plugin', 'remove', CODEX_PLUGIN, '--json']);
   if (removed.code !== 0) throw failed('plugin remove', removed);
-  const kept =
-    existing !== undefined && existing !== GRANT_VALUE
-      ? await (deps.writeGrant ?? writeGrant)(existing)
-      : false;
+  // The write-back can only follow the remove, which would drop it again.
+  const kept = own ? await (deps.writeGrant ?? writeGrant)(existing).catch(() => false) : false;
   // Absent already is the state uninstall wants.
   await run(['plugin', 'marketplace', 'remove', CODEX_MARKETPLACE]);
+  const grant =
+    existing === GRANT_VALUE ? 'removed' : !own ? 'absent' : kept ? 'kept' : 'restore_failed';
   return {
     data: {
       removed: CODEX_PLUGIN,
       marketplace: CODEX_MARKETPLACE,
-      grant: existing === GRANT_VALUE ? 'removed' : kept ? 'kept' : 'absent',
+      grant,
+      // The removed value, so it can be set again by hand.
+      ...(grant === 'restore_failed' ? { policy: { key: CODEX_GRANT, value: existing } } : {}),
     },
     humanLines: [
       `Codex plugin ${CODEX_PLUGIN} and its marketplace removed. The wallet and Claude setup are kept.`,
       ...(kept ? [`Your own request tool policy (${String(existing)}) is kept.`] : []),
+      ...(grant === 'restore_failed'
+        ? [
+            `! Could not write back your own request tool policy. To keep it, set ${CODEX_GRANT} = ${JSON.stringify(existing)} in Codex's config.toml.`,
+          ]
+        : []),
     ],
   };
 }

@@ -118,8 +118,9 @@ export interface UpdateDeps {
   listMcpProcesses?: ListMcpProcesses;
   /** When the new build was installed; tests inject it. */
   installedAt?: InstalledAt;
-  /** Whether Codex lists the Tenjin plugin, injected in tests. */
-  codexInstalled?: () => Promise<boolean>;
+  /** Whether Codex lists the Tenjin plugin, or `unread` when its list could
+   *  not be read; injected in tests. */
+  codexPlugin?: () => Promise<'installed' | 'absent' | 'unread'>;
 }
 
 interface UpdateData {
@@ -294,6 +295,11 @@ export async function runUpdate(
       ...(codex === 'failed'
         ? ['Could not refresh the Codex plugin. Run `tenjin install --harness codex --refresh`.']
         : []),
+      ...(codex === 'unread'
+        ? [
+            'Could not read `codex plugin list`, so the Codex plugin was not refreshed. If you use it, run `tenjin install --harness codex --refresh`.',
+          ]
+        : []),
       ...refresh.notices,
       ...(servers.stale > 0
         ? [`! ${servers.check.detail}. ${servers.check.fix ?? ''}`.trim()]
@@ -307,22 +313,19 @@ export async function runUpdate(
  * package at `codex plugin add`, so the new build re-adds it, only where Codex
  * already lists it. Its hooks carry no version, so their trust survives.
  */
-async function refreshCodex(deps: UpdateDeps): Promise<'refreshed' | 'failed' | null> {
-  const installed = await (
-    deps.codexInstalled ??
+async function refreshCodex(deps: UpdateDeps): Promise<'refreshed' | 'failed' | 'unread' | null> {
+  const plugin = await (
+    deps.codexPlugin ??
     (async () => {
-      const { readCodexListing } = await import('../router/codex-install');
-      const { execFile } = await import('node:child_process');
-      const run = (args: string[]) =>
-        new Promise<{ code: number; stdout: string; stderr: string }>((done) => {
-          execFile('codex', args, { timeout: 10_000 }, (err, stdout, stderr) =>
-            done({ code: err === null ? 0 : 1, stdout: String(stdout), stderr: String(stderr) }),
-          );
-        });
-      return (await readCodexListing(run)).installed;
+      // The doctor's list budget: the list can take over 30 s on a ChatGPT login.
+      const { readCodexListing, runCodex } = await import('../router/codex-install');
+      const listing = await readCodexListing(runCodex);
+      if (listing.read) return listing.installed ? 'installed' : 'absent';
+      return listing.missing === true ? 'absent' : 'unread';
     })
-  )().catch(() => false);
-  if (!installed) return null;
+  )().catch(() => 'unread' as const);
+  if (plugin === 'unread') return 'unread';
+  if (plugin === 'absent') return null;
   const entry = versionFreeEntry(deps.refreshCommand ?? process.argv[1]);
   if (entry === null) return 'failed';
   const outcome = await (deps.spawnImpl ?? spawnCapture)(
