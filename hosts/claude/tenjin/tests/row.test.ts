@@ -242,3 +242,41 @@ test('a run mixing a lookup with other calls unfolds for the engine to draw', as
     await plain.unmount();
   }
 });
+
+test('a run this mod unfolds draws the paid row with nothing beneath; the engine-expanded run draws the block', async ($, on) => {
+  const { files } = machine(on);
+  await keepSpec(files, OFFER, EXA);
+  on('tool.call', { tool: TOOL }, async () => ({ result: PAID, text: PAID }));
+  on('ui.render', { component: 'ToolGroup' }, ($, e) => {
+    const { Text } = $.ui.resolve(e);
+    return Text({ children: [e.props.isExpanded ? 'rows' : 'engine count line'] });
+  });
+  await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_paid', id: OFFER, input: INPUT });
+  const read = toolRow('r1', 'Read', { file_path: '/a' }, 'ok');
+  const lookup = toolRow('toolu_paid', TOOL, { id: OFFER, input: INPUT }, PAID);
+  const paidRow = async () => {
+    const ui = await $.ui.mount({
+      plugin: 'tenjin',
+      surface: 'terminal',
+      component: 'ToolUse',
+      props: lookup,
+    });
+    const lines = await shownLines(ui);
+    await ui.unmount();
+    return lines;
+  };
+  const group = async (isExpanded: boolean) => {
+    const ui = await $.ui.mount({
+      plugin: 'tenjin',
+      surface: 'terminal',
+      component: 'ToolGroup',
+      props: { calls: [read, lookup] as never, isActive: false, isExpanded },
+    });
+    await ui.unmount();
+  };
+  await group(false);
+  expect(await paidRow()).toEqual(['⏺', 'Exa search', '(rust async runtimes)', ' · $0.04']);
+  // ctrl+o after the fact: the engine delivers the same run expanded.
+  await group(true);
+  expect((await paidRow()).slice(4, 6)).toEqual(['  ⎿  ', 'answer: Tokio']);
+});

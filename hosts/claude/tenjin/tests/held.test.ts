@@ -19,7 +19,12 @@ import {
 const SEARCH = { query: 'rust async runtimes', mode: 'standard' as const };
 /** The reason the model read on the deny: never drawn. */
 const REASON = 'Tenjin router (installed by the user): Exa search, $0.007: call request.';
-const PAID = envelope('fulfilled', { label: 'Exa search', cost: ['provider price 0.007 USD'] });
+const PAID = envelope('fulfilled', {
+  label: 'Exa search',
+  cost: ['provider price 0.007 USD'],
+  result: '{"answer":"Tokio"}',
+  fullResultPath: '/home/test/.tenjin/downloads/exa.json',
+});
 const INPUT = { id: OFFER, input: { query: 'rust async runtimes' } };
 
 /** A WebSearch the pre-call hook holds: it writes the offer record, then denies. */
@@ -101,7 +106,10 @@ test('a held search is struck with the offer named, then replaced in place by th
       component: 'ToolUse',
       props: heldRow(),
     });
-    expect(await rowText(ui)).toBe('⏺ Exa search("rust async runtimes") · $0.007');
+    // Standalone and ended, it carries what came back, as a lookup row does.
+    expect(await rowText(ui)).toBe(
+      '⏺ Exa search("rust async runtimes") · $0.007  ⎿  answer: Tokio',
+    );
     expect(await dotOf(ui)).toEqual({ color: 'success', dimColor: undefined });
     await ui.unmount();
     const own = await $.ui.mount({
@@ -147,7 +155,9 @@ test('a take that came back needs_input lets the hold go, for the retry to take'
     component: 'ToolUse',
     props: heldRow(),
   });
-  expect(await rowText(taken)).toBe('⏺ Exa search("rust async runtimes") · $0.007');
+  expect(await rowText(taken)).toBe(
+    '⏺ Exa search("rust async runtimes") · $0.007  ⎿  answer: Tokio',
+  );
   await taken.unmount();
 });
 
@@ -163,5 +173,38 @@ test('a held search the model then ran natively gives way to the engine row', as
     props: heldRow(),
   });
   expect(await shownLines(ui)).toEqual([]);
+  await ui.unmount();
+});
+
+test('a form A row in a run this mod unfolded draws nothing beneath', async ($, on) => {
+  const { files } = machine(on);
+  await keepSpec(files, OFFER, { label: 'Exa search', priceAtomic: '7000' });
+  holding(on, files);
+  on('tool.call', { tool: TOOL }, async () => ({ result: PAID, text: PAID }));
+  on('ui.render', { component: 'ToolGroup' }, ($, e) => {
+    const { Text } = $.ui.resolve(e);
+    return Text({ children: [e.props.isExpanded ? 'rows' : 'engine count line'] });
+  });
+  await $.tool.call({ tool: 'WebSearch', tool_use_id: 'toolu_held', ...SEARCH });
+  await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_take', ...INPUT });
+  const run = await $.ui.mount({
+    plugin: 'tenjin',
+    surface: 'terminal',
+    component: 'ToolGroup',
+    props: {
+      calls: [heldRow(), toolRow('toolu_take', TOOL, INPUT, PAID)] as never,
+      isActive: false,
+      isExpanded: false,
+    },
+  });
+  expect(await shownLines(run)).toEqual(['rows']);
+  await run.unmount();
+  const ui = await $.ui.mount({
+    plugin: 'tenjin',
+    surface: 'terminal',
+    component: 'ToolUse',
+    props: heldRow(),
+  });
+  expect(await rowText(ui)).toBe('⏺ Exa search("rust async runtimes") · $0.007');
   await ui.unmount();
 });

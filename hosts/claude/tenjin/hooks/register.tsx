@@ -32,6 +32,13 @@ const NATIVE_NAMES: Readonly<Record<string, string>> = {
 const ROWS = { plugin: 'tenjin', key: 'rows' } as const;
 const HELD = { plugin: 'tenjin', key: 'held' } as const;
 const LINKS = { plugin: 'tenjin', key: 'links' } as const;
+/**
+ * Calls of a run this mod unfolded in the normal view, where their rows draw no
+ * block. The module's own memory, not `$.state`: a drawing may not write state,
+ * and this is a fact about the drawing alone. A reload forgets it, and a row
+ * then draws its block until its run is drawn again.
+ */
+const unfoldedByUs = new Set<string>();
 const DOT = '⏺';
 const GUTTER = '  ⎿  ';
 const INDENT = '     ';
@@ -97,8 +104,18 @@ export const register: Register = (on) => {
 
   on('ui.render', { component: 'ToolGroup' }, async ($, e, next) => {
     const { calls, isExpanded } = e.props;
-    if (isExpanded) return next(e);
-    const unfold = () => next({ ...e, props: { ...e.props, isExpanded: true } });
+    const ids = calls.flatMap((c) => (c.tool_use_id !== undefined ? [c.tool_use_id] : []));
+    // EXPANDED BY THE ENGINE (ctrl+o, --verbose): its rows draw what came back,
+    // including rows this hook unfolded earlier in the normal view.
+    if (isExpanded) {
+      if (ids.some((id) => unfoldedByUs.delete(id))) $.ui.invalidate('ui.render');
+      return next(e);
+    }
+    // UNFOLDED BY US, in the normal view: its rows draw one line each, nothing beneath.
+    const unfold = () => {
+      for (const id of ids) unfoldedByUs.add(id);
+      return next({ ...e, props: { ...e.props, isExpanded: true } });
+    };
     const ours = calls.filter((c) => c.tool === REQUEST_TOOL);
     const others = calls.filter((c) => c.tool !== REQUEST_TOOL);
     if (ours.length === 0) {
@@ -138,7 +155,9 @@ export const register: Register = (on) => {
       const taker = takerId === undefined ? undefined : await row($, takerId);
       if (taker !== undefined && taker.status !== 'needs_input') {
         const shape = { ...shapeOf(taker), name: taker.label };
-        return line(ui, asked !== undefined ? { ...shape, argument: asked } : shape);
+        const head = line(ui, asked !== undefined ? { ...shape, argument: asked } : shape);
+        const ended = taker.status !== undefined && !unfoldedByUs.has(tool_use_id);
+        return block(ui, head, ended ? (taker.detail ?? []) : []);
       }
       const offered = held.label !== undefined ? { tail: ` · Tenjin offered ${held.label}` } : {};
       const name = NATIVE_NAMES[tool] as string;
@@ -148,7 +167,8 @@ export const register: Register = (on) => {
     if (tool !== REQUEST_TOOL) return next(e);
     const ui = $.ui.resolve(e);
     const drawn = await rowOf($, tool_use_id, e.props);
-    return drawn === null ? <ui.Box display="none" /> : callRow(ui, drawn, true);
+    if (drawn === null) return <ui.Box display="none" />;
+    return callRow(ui, drawn, !unfoldedByUs.has(tool_use_id));
   });
 
   // The envelope the model read, and a held call's deny: the row says both.
