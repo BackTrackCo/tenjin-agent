@@ -22,7 +22,7 @@ import {
 } from './context';
 import { storeChoices, storeSpecs } from './specs';
 import { requestDecision, ROUTER_PATH, type HookDecision } from './decision';
-import { FEE_REQUIRED, firstNoticeFor, isFeeRequired, type RouteFor } from './fee';
+import { depositSentence, FEE_REQUIRED, firstNoticeFor, isFeeRequired, type RouteFor } from './fee';
 import { unpaidNotice } from './spend-question';
 import { readsAsEmptyPage, savedPdfOf } from './fetch-result';
 import { GATE_TIMEOUT_MS } from './gate';
@@ -613,7 +613,7 @@ async function spendShortfall(
   const price = `$${toMoney(decision.providerPriceAtomic).usd}`;
   const approval = (detail: string): Shortfall => ({
     withheld: 'offer needs approval',
-    note: `Note: ${price} ${detail}; request will return needs_approval with the command the user runs to approve it — ask the user first.`,
+    note: `Note: ${price} ${detail}; request will pay nothing and return needs_approval with what it costs.`,
   });
   let rpcUrl: string;
   try {
@@ -655,10 +655,11 @@ async function spendShortfall(
     );
     return null;
   }
-  return balance < BigInt(decision.providerPriceAtomic)
+  const short = BigInt(decision.providerPriceAtomic) - balance;
+  return short > 0n
     ? {
         withheld: 'wallet needs USDC',
-        note: `Note: the wallet holds $${toMoney(balance.toString()).usd}; fund it with \`tenjin wallet fund\`.`,
+        note: `Note: the wallet holds $${toMoney(balance.toString()).usd}, $${toMoney(short.toString()).usd} short of its ${price}; fund it with \`tenjin wallet fund\`.`,
       }
     : null;
 }
@@ -1503,6 +1504,10 @@ async function decide(
       ...(route !== null ? { route } : {}),
     },
   );
+  // A DEPOSIT IS NEWS ONCE, when it is taken: it moved money into routing
+  // credit, and the user would otherwise see it only as spend.
+  const deposited = route?.deposited?.() ?? 0n;
+  if (deposited > 0n) deps.notice?.(depositSentence(deposited));
   const why =
     outcome.status === 'skipped'
       ? outcome.why

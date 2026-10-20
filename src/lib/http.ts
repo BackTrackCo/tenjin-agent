@@ -214,6 +214,12 @@ export interface FetchJsonFailure {
    * the wrong fix. See {@link transportFailure}.
    */
   transport?: TransportFailure;
+  /**
+   * On a `timeout` that came after the response headers did (`httpRequest`
+   * only): a case-insensitive lookup over them. A seller can name where a long
+   * job's result will be with its first byte, and only the body ran out of time.
+   */
+  header?: (name: string) => string | undefined;
 }
 
 /** Which layer refused a request that never reached the origin. */
@@ -736,7 +742,12 @@ export async function httpRequest(url: string, opts: HttpRequestOptions): Promis
         text = await res.text();
       }
     } catch (err) {
-      if (timedOut) return timeoutFailure(url, opts.timeoutMs);
+      if (timedOut) {
+        return {
+          ...timeoutFailure(url, opts.timeoutMs),
+          header: (name) => res.headers.get(name) ?? undefined,
+        };
+      }
       return {
         ok: false,
         kind: 'network',

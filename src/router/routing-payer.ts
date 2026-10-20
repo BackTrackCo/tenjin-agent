@@ -31,6 +31,7 @@ import {
   payerDir,
   refusedWhy,
   ROUTE_PAID_PATH,
+  ROUTING_DEPOSIT_KEY,
   ROUTING_FEE_ATOMIC,
 } from './fee';
 import { readRouterMemo, writeRouterMemo } from './router-memo';
@@ -227,14 +228,24 @@ export class RoutingPayer {
     if (await readRouterMemo(this.deps.dataDir, 'paid-path-absent', baseUrl, this.now())) {
       return null;
     }
+    const calls: Call[] = [];
     return {
       path: ROUTE_PAID_PATH,
       send: (url, options) => {
         // The caller's budget starts now, not when this call's turn comes.
         const sent = this.now();
         const until = sent + options.timeoutMs;
-        return this.turn(() => this.noted(sent, () => this.pay(url, options, until)), until, sent);
+        return this.turn(
+          () => this.noted(sent, () => this.pay(url, options, until, calls)),
+          until,
+          sent,
+        );
       },
+      deposited: () =>
+        calls
+          .flatMap((call) => call.deposits)
+          .filter((d) => d.state === 'settled')
+          .reduce((sum, d) => sum + d.amountAtomic, 0n),
     };
   }
 
@@ -405,7 +416,12 @@ export class RoutingPayer {
    * server's 402 becomes the stock wrapper's first answer, so asking before
    * the unlock adds no round trip.
    */
-  private async pay(url: string, options: HttpRequestOptions, until: number): Promise<HttpResult> {
+  private async pay(
+    url: string,
+    options: HttpRequestOptions,
+    until: number,
+    calls: Call[],
+  ): Promise<HttpResult> {
     if (until - this.now() <= 0) throw new RouteSkipped('busy');
     const call: Call = {
       host: new URL(url).host,
@@ -414,6 +430,8 @@ export class RoutingPayer {
       answered: false,
       deposits: [],
     };
+    // The route's own record, which its `deposited` reads once the call ends.
+    calls.push(call);
     const base = options.fetchImpl ?? this.deps.fetchImpl ?? fetch;
     const askFirst: typeof fetch = async (input, init) => {
       const request = new Request(input, init);
@@ -579,7 +597,7 @@ export class RoutingPayer {
       authorizer,
       reservationId: auth.reservationId,
       amountAtomic: amount,
-      key: `routing-deposit:${auth.reservationId ?? randomUUID()}`,
+      key: `${ROUTING_DEPOSIT_KEY}${auth.reservationId ?? randomUUID()}`,
       state: 'signed',
     });
     return amount;
