@@ -154,6 +154,9 @@ export interface RequestToolDeps {
    * over the cap returns `needs_approval` as before.
    */
   approveOverLimit?: (ask: OverLimitAsk) => Promise<boolean>;
+  /** The client's id for this call (`claudecode/toolUseId`), recorded on a held
+   *  native call's row so the mod draws this call there. Display only. */
+  toolUseId?: string;
 }
 
 /** What the user is asked to approve: who wants the money, and how much. */
@@ -252,7 +255,9 @@ export async function runRequestTool(
   // binding for the line's id (never a chosen option's), and every call on it
   // swallows its own failure.
   // A native call held for this offer now reads as routed in the mod's row.
-  if (offered !== undefined) await markRouted(deps.ctx.dataDir, offered);
+  if (offered !== undefined) {
+    await markRouted(deps.ctx.dataDir, offered, Date.now(), deps.toolUseId);
+  }
   const footer = await openLookupFooter(deps.ctx.dataDir, {
     ...(offered !== undefined ? { id: offered } : {}),
   });

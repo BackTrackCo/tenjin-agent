@@ -5,11 +5,12 @@ import type { TenjinLive, TenjinPaid, TenjinRow } from '../types';
 
 /**
  * THE TENJIN MOD: what the router does, shown to the person, and the one
- * permission answer it gives. ONE LINE PER LOOKUP: the request tool's row
- * reads like a native tool's, `Exa search(best local LLM) · $0.007`, and a
- * WebSearch or WebFetch call held for Tenjin reads as the switch on its own
- * row, `~~WebSearch~~ → Exa search(best local LLM) · $0.007`, with the
- * request's row then empty. Beside it: the spinner while a lookup is routed
+ * permission answer it gives. ONE LINE PER LOOKUP, drawn as the engine draws
+ * a tool row (its status dot, bold name, input in parentheses, a dim tail):
+ * the request tool's row reads `⏺ Exa search(best local LLM) · $0.007`. A
+ * WebSearch or WebFetch call held for Tenjin reads `⏺ ~~WebSearch~~(best
+ * local LLM)` until the request call takes it up, then becomes that call's
+ * row in place, with the request's own row empty. Beside it: the spinner while a lookup is routed
  * or paid, a toast when a call is paid, one spend line under a turn that
  * paid, the first-run wallet toast, and the prompt hint while the wallet is
  * unfunded.
@@ -34,10 +35,12 @@ import type { TenjinLive, TenjinPaid, TenjinRow } from '../types';
 const REQUEST_TOOL = 'mcp__plugin_tenjin_router__request';
 /** The native tools the CLI's pre-call hook can hold for an offer. */
 const NATIVE_TOOLS = new Set(['WebSearch', 'WebFetch']);
-/** Between a held native call and the call that took its place. */
-const SWITCH = ' → ';
-/** The `rows` key a request row is also kept under, for its held call's row. */
-const OFFER_KEY = 'offer:';
+/** The engine's status dot for a tool row (`⏺` where the terminal has it). */
+const DOT = '⏺';
+/** A row's state as its dot shows it: dim while running, then success or error. */
+type RowState = 'running' | 'done' | 'error';
+/** The outcomes that mean the call did not run to an answer. */
+const ERRORS = new Set(['failed', 'interrupted', 'not run']);
 /** The spinner's word between a held call and the request call it leads to. */
 const ROUTING_WORD = 'Routing to Tenjin';
 
@@ -110,11 +113,7 @@ async function onRequest<E extends { tool_use_id: string }>(
     list.filter((one) => one.heldOffer === undefined || !takes.has(one.heldOffer)),
   );
   const ref = { ...ROWS, id: e.tool_use_id };
-  const offerId = call.row.offerId;
   await $.state.set(ref, call.row);
-  if (offerId !== undefined) {
-    await $.state.set({ ...ROWS, id: `${OFFER_KEY}${offerId}` }, call.row);
-  }
   const running: TenjinLive | null =
     call.row.isPaid && call.priceAtomic !== undefined
       ? { toolUseId: e.tool_use_id, label: call.row.label, priceAtomic: call.priceAtomic }
@@ -124,10 +123,8 @@ async function onRequest<E extends { tool_use_id: string }>(
     const ran = await next(e);
     const settled = await settleCall($, call, ran, startedAt);
     await $.state.set(ref, { ...call.row, ...settled.row });
-    if (offerId !== undefined) {
-      await $.state.set({ ...ROWS, id: `${OFFER_KEY}${offerId}` }, { ...call.row, ...settled.row });
-      $.ui.invalidate('ui.render');
-    }
+    // A held call's row draws this call once it took the hold up.
+    if (call.row.offerId !== undefined) $.ui.invalidate('ui.render');
     // A toast, never a transcript line: the row already says it.
     if (settled.paidAtomic !== undefined) {
       const paid: TenjinPaid = { amountAtomic: settled.paidAtomic };
@@ -197,10 +194,10 @@ export const register: Register = (on) => {
   });
 
   // ONE LINE PER LOOKUP. A held native call is its name struck through, and
-  // once the request call took it up, the switch to that call on the same
-  // line; the request's own row is then empty. Once the same search ran
-  // natively instead, it draws nothing. Any other native row, an interrupted
-  // one included, is the engine's.
+  // once the request call took it up, that call's row in its place; the
+  // request's own row is then empty. Once the same search ran natively
+  // instead, it draws nothing. Any other native row, an interrupted one
+  // included, is the engine's.
   on('ui.render', { component: 'ToolUse' }, async ($, e, next) => {
     if (NATIVE_TOOLS.has(e.props.tool) && !e.props.isInterrupted) {
       const held = await heldRow($, e.props.tool_use_id);
@@ -211,14 +208,18 @@ export const register: Register = (on) => {
       if (held.outcome === 'native') return <Box />;
       const asked = nativeArgument(asRecord(e.props.input));
       if (held.outcome === 'held') {
-        return (
-          <Box>
-            <Text strikethrough>{e.props.tool}</Text>
-            <Text wrap="truncate-end">{asked !== undefined ? `(${asked})` : ''}</Text>
-          </Box>
-        );
+        return toolRow(Box, Text, {
+          state: 'running',
+          name: e.props.tool,
+          isStruck: true,
+          ...(asked !== undefined ? { argument: asked } : {}),
+        });
       }
-      const { value: taken } = await $.state.get({ ...ROWS, id: `${OFFER_KEY}${held.offerId}` });
+      // ROUTED: the row becomes the request call that took the hold up, in
+      // place. With no call named (a client that sends no id), that call's own
+      // row is the line and this one draws nothing.
+      if (held.routedToolUseId === undefined) return <Box />;
+      const { value: taken } = await $.state.get({ ...ROWS, id: held.routedToolUseId });
       const row: TenjinRow = taken ?? {
         label: held.label,
         isPaid: true,
@@ -226,23 +227,17 @@ export const register: Register = (on) => {
         ...(asked !== undefined ? { argument: asked } : {}),
         outcome: 'done',
       };
-      const same = row.argument === asked;
-      return (
-        <Box>
-          <Text strikethrough>{e.props.tool}</Text>
-          <Text wrap="truncate-end">
-            {`${!same && asked !== undefined ? `(${asked})` : ''}${SWITCH}`}
-          </Text>
-          {callLine(Text, row, row.outcome)}
-        </Box>
-      );
+      return toolRow(Box, Text, callShape(row, row.outcome));
     }
     if (e.props.tool !== REQUEST_TOOL) return next(e);
     const { value: stored } = await $.state.get({ ...ROWS, id: e.props.tool_use_id });
     const row = stored ?? (await describeCall($, { ...asRecord(e.props.input) })).row;
     const { Box, Text } = $.ui.resolve(e);
-    // Its held call's row already draws the switch to it.
-    if (row.offerId !== undefined && (await wasRouted($, row.offerId))) return <Box />;
+    // The held call's row draws this call in its place; any other call for
+    // the same offer (a later spec fetch, a second run) is its own row.
+    if (row.offerId !== undefined && (await tookUpHold($, row.offerId, e.props.tool_use_id))) {
+      return <Box />;
+    }
     const outcome =
       row.outcome ??
       (e.props.isRunning
@@ -250,7 +245,7 @@ export const register: Register = (on) => {
         : e.props.isInterrupted
           ? 'interrupted'
           : refusalOf(statusOf(textOf(e.props.output)), e.props.isErrored));
-    return <Box>{callLine(Text, row, outcome)}</Box>;
+    return toolRow(Box, Text, callShape(row, outcome));
   });
 
   // The result block under our own row is the text the model read: the
@@ -350,6 +345,7 @@ interface Held {
   label: string;
   priceAtomic?: string;
   offerId: string;
+  routedToolUseId?: string;
 }
 
 /**
@@ -369,6 +365,7 @@ async function heldRow($: Dollar, toolUseId: string): Promise<Held | null> {
     label: typeof row.label === 'string' ? labelOf({ label: row.label }) : UNLABELLED,
     ...(priceAtomic !== undefined ? { priceAtomic } : {}),
     offerId: row.offerId,
+    ...(typeof row.routedToolUseId === 'string' ? { routedToolUseId: row.routedToolUseId } : {}),
   };
 }
 
@@ -688,35 +685,80 @@ function nativeArgument(input: Json | undefined): string | undefined {
   return argumentOf({ query: input.query }) ?? argumentOf({ url: input.url });
 }
 
+/** What one tool row draws. */
+interface RowShape {
+  state: RowState;
+  name: string;
+  argument?: string;
+  /** The dim text after the input: ` · $0.007`, ` · $0.42 · needs approval`. */
+  tail?: string;
+  isStruck?: boolean;
+}
+
 /**
- * `Exa search(best local LLM) · $0.007`, the label bold as a tool's name:
- * `Calling …` while it runs, the amount paid once it paid, and the state only
- * when it is not a plain success.
+ * A request call's row: `Calling Exa search(q)…` while it runs, then
+ * `Exa search(q)` with the amount paid, and the state only when it is not a
+ * plain success.
  */
-function callLine(Text: TextElement, row: TenjinRow, outcome: string | undefined) {
+function callShape(row: TenjinRow, outcome: string | undefined): RowShape {
   const isRunning = outcome === undefined;
   const paid = outcome?.startsWith('$') === true ? outcome.split(' · ')[0] : undefined;
-  const isPlain = isRunning || paid !== undefined || outcome === 'done' || outcome === 'no charge';
+  const isPlain = isRunning || paid !== undefined || outcome === 'done';
   const tail = [paid ?? row.price, isPlain ? undefined : outcome].filter(
     (part): part is string => part !== undefined,
   );
-  const argument = row.argument !== undefined ? `(${row.argument})` : '';
-  return [
-    <Text bold>{isRunning ? `Calling ${row.label}` : row.label}</Text>,
-    <Text wrap="truncate-end">{`${argument}${isRunning ? '…' : ''}`}</Text>,
-    <Text dimColor>{tail.length > 0 ? ` · ${tail.join(' · ')}` : ''}</Text>,
-  ];
+  return {
+    state: isRunning ? 'running' : ERRORS.has(outcome) ? 'error' : 'done',
+    name: isRunning ? `Calling ${row.label}` : row.label,
+    ...(row.argument !== undefined ? { argument: row.argument } : {}),
+    ...(tail.length > 0 ? { tail: ` · ${tail.join(' · ')}` } : {}),
+  };
 }
 
-/** The element `callLine` draws with, from the surface's own table. */
+/**
+ * THE ENGINE'S TOOL ROW, as Claude Code 2.1.304 lays it out: one blank line
+ * above, the status dot in a two-column gutter (dim while running, the
+ * theme's success or error color after), the name bold, the input in
+ * parentheses, and a dim tail where the engine puts its ` · on <host>`.
+ */
+function toolRow(Box: BoxElement, Text: TextElement, shape: RowShape) {
+  const isRunning = shape.state === 'running';
+  return (
+    <Box flexDirection="row" marginTop={1}>
+      <Box minWidth={2}>
+        <Text
+          {...(isRunning
+            ? { dimColor: true }
+            : { color: shape.state === 'error' ? 'error' : 'success' })}
+        >
+          {DOT}
+        </Text>
+      </Box>
+      <Box flexShrink={0}>
+        <Text bold strikethrough={shape.isStruck === true} wrap="truncate-end">
+          {shape.name}
+        </Text>
+      </Box>
+      <Box flexWrap="nowrap">
+        <Text wrap="truncate-end">
+          {`${shape.argument !== undefined ? `(${shape.argument})` : ''}${isRunning && shape.isStruck !== true ? '…' : ''}`}
+        </Text>
+        <Text dimColor>{shape.tail ?? ''}</Text>
+      </Box>
+    </Box>
+  );
+}
+
+/** The elements a row draws with, from the surface's own table. */
 type TextElement = ReturnType<Dollar['ui']['resolve']>['Text'];
+type BoxElement = ReturnType<Dollar['ui']['resolve']>['Box'];
 
 /**
- * A held call was routed to this offer: its row draws the switch, so the
- * request's own row stays empty. Read from the CLI's index of the calls it
- * held for an offer id (`src/router/held.ts`).
+ * This request call took up a call held for its offer: the held row names it
+ * (`routedToolUseId`), so it draws there. Read from the CLI's index of the
+ * calls it held for an offer id (`src/router/held.ts`).
  */
-async function wasRouted($: Dollar, offerId: string): Promise<boolean> {
+async function tookUpHold($: Dollar, offerId: string, toolUseId: string): Promise<boolean> {
   const dataDir = await tenjinDataDir($);
   if (dataDir === null) return false;
   const index = await readJson(
@@ -727,7 +769,7 @@ async function wasRouted($: Dollar, offerId: string): Promise<boolean> {
   for (const id of ids) {
     if (typeof id !== 'string') continue;
     const held = await heldRow($, id);
-    if (held?.outcome === 'routed' && held.offerId === offerId) return true;
+    if (held?.outcome === 'routed' && held.routedToolUseId === toolUseId) return true;
   }
   return false;
 }

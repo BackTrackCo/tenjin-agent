@@ -147,9 +147,17 @@ export async function shownLines(ui: Pick<Mounted, 'findAll'>): Promise<string[]
   return (await ui.findAll({ type: 'Text' })).map((text) => text.text);
 }
 
-/** A one-line row as the person reads it: its pieces, joined. */
+/** A one-line row as the person reads it: the dot's gutter, then its pieces. */
 export async function rowText(ui: Pick<Mounted, 'findAll'>): Promise<string> {
-  return (await shownLines(ui)).join('');
+  return (await shownLines(ui)).join('').replace(/^⏺/, '⏺ ');
+}
+
+/** The row's status dot: its color, or dim while the call runs. */
+export async function dotOf(
+  ui: Pick<Mounted, 'findAll'>,
+): Promise<{ color?: unknown; dimColor?: unknown } | undefined> {
+  const [dot] = await ui.findAll({ type: 'Text', text: '⏺' });
+  return dot === undefined ? undefined : { color: dot.props.color, dimColor: dot.props.dimColor };
 }
 
 /** A tool row's props, as the engine hands them to `ui.render`. */

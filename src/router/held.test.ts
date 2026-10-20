@@ -24,8 +24,11 @@ describe('a native call held for Tenjin', () => {
     await markHeld(dir, 'toolu_b', TERMS, 1_000);
     await markHeld(dir, 'toolu_other', { ...TERMS, offerId: 'another-offer' }, 1_000);
     expect(await outcome('toolu_a')).toBe('held');
-    await markRouted(dir, OFFER, 2_000);
+    await markRouted(dir, OFFER, 2_000, 'toolu_request');
     expect(await outcome('toolu_a')).toBe('routed');
+    // The first call that ran the offer is the one named; a later one is not.
+    await markRouted(dir, OFFER, 3_000, 'toolu_later');
+    expect((await readHeld(heldRowPath(dir, 'toolu_a')))?.routedToolUseId).toBe('toolu_request');
     expect(await outcome('toolu_b')).toBe('routed');
     // Another offer's hold is not this request's.
     expect(await outcome('toolu_other')).toBe('held');

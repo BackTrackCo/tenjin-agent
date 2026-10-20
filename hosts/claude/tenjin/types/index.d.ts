@@ -1,8 +1,8 @@
 /**
  * One request row as the mod draws it, written once by the `tool.call` hook so
  * the row still reads right after the CLI prunes the spec it came from, and
- * kept a second time under `offer:<offer id>` for the row of a native call
- * held for that offer. Every string is user text: a label, a price, a state
+ * read again by the row of a native call held for its offer once it took that
+ * hold up. Every string is user text: a label, a price, a state
  * and the one input shown, never a description, JSON or tool id.
  */
 export type TenjinRow = {

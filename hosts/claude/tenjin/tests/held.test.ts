@@ -8,6 +8,7 @@ import {
   TOOL,
   keepSpec,
   machine,
+  dotOf,
   recordPayment,
   resultText,
   rowText,
@@ -29,6 +30,7 @@ async function holdRow(
   files: Map<string, string>,
   toolUseId: string,
   outcome: 'held' | 'routed' | 'native' = 'held',
+  routedToolUseId?: string,
 ): Promise<void> {
   files.set(
     `${DATA}/progress/held/${await sha256Hex(toolUseId)}.json`,
@@ -39,6 +41,7 @@ async function holdRow(
       label: 'Exa search',
       priceAtomic: '7000',
       offerId: OFFER,
+      ...(routedToolUseId !== undefined ? { routedToolUseId } : {}),
     }),
   );
   // The CLI's index of the calls it held for the offer.
@@ -58,7 +61,7 @@ function heldSearch(toolUseId: string) {
   };
 }
 
-test('a held search is its name struck through, then the switch on the same line', async ($, on) => {
+test('a held search is struck through, then becomes the request call in place', async ($, on) => {
   const { files } = machine(on);
   on('ui.render', { component: 'ToolUse' }, ($, e) => {
     const { Text } = $.ui.resolve(e);
@@ -70,8 +73,14 @@ test('a held search is its name struck through, then the switch on the same line
     priceAtomic: '7000',
     maxAmountAtomic: '7000',
   });
-  on('tool.call', { tool: TOOL }, async () => {
-    await holdRow(files, 'toolu_held', 'routed');
+  // Beneath the mod: the request tool, which pays and marks the hold as taken
+  // up by this call (the CLI's `markRouted`, from the client's tool id).
+  on('tool.call', { tool: TOOL }, async (_$, e) => {
+    if (e.input === undefined) {
+      const spec = JSON.stringify({ status: 'spec', cost: ['no charge'] });
+      return { result: spec, text: spec };
+    }
+    await holdRow(files, 'toolu_held', 'routed', e.tool_use_id);
     await recordPayment(files, OFFER, {
       capabilityId: 'exa-search',
       amountAtomic: '7000',
@@ -84,32 +93,45 @@ test('a held search is its name struck through, then the switch on the same line
     $.ui.mount({ plugin: 'tenjin', surface, component: 'ToolUse', props: props as never });
   for (const surface of SURFACES) {
     const ui = await mount(surface, heldSearch('toolu_held'));
-    expect(await rowText(ui)).toBe('WebSearch(rust async runtimes)');
-    const struck = await ui.findAll({ type: 'Text', text: 'WebSearch' });
-    expect(struck[0]?.props.strikethrough).toBe(true);
+    expect(await rowText(ui)).toBe('⏺ WebSearch(rust async runtimes)');
+    const [name] = await ui.findAll({ type: 'Text', text: 'WebSearch' });
+    expect(name?.props.strikethrough).toBe(true);
+    expect(await dotOf(ui)).toEqual({ color: undefined, dimColor: true });
     expect(await rowText(ui)).not.toContain('Tenjin router');
     await ui.unmount();
   }
   const request = { id: OFFER, input: { query: 'rust async runtimes' } };
   await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_request', ...request });
+  const done = (id: string, args: Record<string, unknown>, output: string) => ({
+    ...toolRow(id, TOOL, args),
+    isRunning: false,
+    output,
+  });
   for (const surface of SURFACES) {
     const ui = await mount(surface, heldSearch('toolu_held'));
     const line = await rowText(ui);
-    // One copy of the query when both calls searched the same text.
-    expect(line).toBe('WebSearch → Exa search(rust async runtimes) · $0.007');
+    // A full replace: the request call's row, with no struck name left.
+    expect(line).toBe('⏺ Exa search(rust async runtimes) · $0.007');
     expect(line).not.toMatch(MODEL_TEXT);
-    expect((await ui.findAll({ type: 'Text', text: 'WebSearch' }))[0]?.props.strikethrough).toBe(
-      true,
-    );
+    expect(await ui.findAll({ type: 'Text', text: 'WebSearch' })).toEqual([]);
+    expect(await dotOf(ui)).toEqual({ color: 'success', dimColor: undefined });
     await ui.unmount();
     // The request's own row is then empty: one line for the lookup.
-    const row = await mount(surface, {
-      ...toolRow('toolu_request', TOOL, request),
-      isRunning: false,
-      output: resultText('fulfilled'),
-    });
+    const row = await mount(surface, done('toolu_request', request, resultText('fulfilled')));
     expect(await shownLines(row)).toEqual([]);
     await row.unmount();
+  }
+  // A LATER CALL FOR THE SAME OFFER is its own row, and the held row still
+  // shows the call that paid.
+  const spec = JSON.stringify({ status: 'spec', cost: ['no charge'] });
+  await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_spec', id: OFFER });
+  for (const surface of SURFACES) {
+    const held = await mount(surface, heldSearch('toolu_held'));
+    expect(await rowText(held)).toBe('⏺ Exa search(rust async runtimes) · $0.007');
+    await held.unmount();
+    const fetch = await mount(surface, done('toolu_spec', { id: OFFER }, spec));
+    expect(await rowText(fetch)).toBe('⏺ Tenjin · no charge');
+    await fetch.unmount();
   }
 });
 

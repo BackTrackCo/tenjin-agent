@@ -1,4 +1,5 @@
 import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { heldRowPath, markHeld, readHeld } from './held';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -108,6 +109,51 @@ describe('the router MCP server', () => {
         status: 'native',
         reason: 'Your own tools cover this.',
         nextStep: 'Continue with your own tools. Nothing was bought.',
+      });
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it("records the client's tool id on a call held for the offer it runs", async () => {
+    const fetchImpl = router({
+      schemaVersion: 1,
+      routerVersion: '2026-09-23.1',
+      decision: {
+        action: 'native',
+        reason: 'Your own tools cover this.',
+        diagnostics: {
+          reasonCode: 'native_sufficient',
+          stage: 'capability',
+          missing: [],
+          nextAction: '',
+        },
+      },
+    });
+    await markHeld(dir, 'toolu_held', { offerId: 'k3f9-abcd', priceAtomic: '7000' });
+    const server = buildRouterMcpServer({
+      dataDir: dir,
+      handlerDeps: {
+        cwd: dir,
+        signer: await testWalletProvider().getSigner(),
+        authorizer: authorizer(),
+        fetchImpl,
+        payDeps: { fetchImpl },
+      },
+    });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: 'test', version: '0.0.0' });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      await client.callTool({
+        name: 'request',
+        arguments: { query: 'weather', id: 'k3f9-abcd' },
+        _meta: { 'claudecode/toolUseId': 'toolu_request' },
+      });
+      expect(await readHeld(heldRowPath(dir, 'toolu_held'))).toMatchObject({
+        outcome: 'routed',
+        routedToolUseId: 'toolu_request',
       });
     } finally {
       await client.close();

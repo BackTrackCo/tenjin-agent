@@ -8,6 +8,7 @@ import {
   keepSpec,
   machine,
   recordPayment,
+  dotOf,
   resultText,
   rowText,
   shownLines,
@@ -38,7 +39,9 @@ test('a paid row is one line: the label, the query and the price, then the amoun
 
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ plugin: 'tenjin', surface, component: 'ToolUse', props: row });
-    expect(await rowText(ui)).toBe('Calling Exa search(rust async runtimes)… · $0.04');
+    expect(await rowText(ui)).toBe('⏺ Calling Exa search(rust async runtimes)… · $0.04');
+    // The engine's dot: dim while the call runs.
+    expect(await dotOf(ui)).toEqual({ color: undefined, dimColor: true });
     await ui.unmount();
   }
 
@@ -55,7 +58,8 @@ test('a paid row is one line: the label, the query and the price, then the amoun
       props: { ...row, isRunning: false, output: resultText('fulfilled') },
     });
     const line = await rowText(ui);
-    expect(line).toBe('Exa search(rust async runtimes) · $0.04');
+    expect(line).toBe('⏺ Exa search(rust async runtimes) · $0.04');
+    expect(await dotOf(ui)).toEqual({ color: 'success', dimColor: undefined });
     expect([line, ...toasts].join('\n')).not.toMatch(MODEL_TEXT);
     await ui.unmount();
   }
@@ -86,7 +90,7 @@ test('a payment whose settlement is unknown reads as paid', async ($, on) => {
         output: resultText('fulfilled'),
       },
     });
-    expect(await rowText(ui)).toBe('Exa search(rust async runtimes) · $0.04');
+    expect(await rowText(ui)).toBe('⏺ Exa search(rust async runtimes) · $0.04');
     await ui.unmount();
   }
 });
@@ -106,7 +110,7 @@ test('a spec without a label is a Tenjin lookup, never its provider', async ($, 
       component: 'ToolUse',
       props: toolRow('toolu_glim', TOOL, { id: OFFER, input: { query: 'from:tenjin' } }),
     });
-    expect(await rowText(ui)).toBe('Calling Tenjin lookup(from:tenjin)… · $0.005');
+    expect(await rowText(ui)).toBe('⏺ Calling Tenjin lookup(from:tenjin)… · $0.005');
     await ui.unmount();
   }
 });
@@ -120,7 +124,7 @@ test('an id-less query is the router picking: Calling Tenjin…', async ($, on) 
       component: 'ToolUse',
       props: toolRow('toolu_pick', TOOL, { query: 'latest BTC price' }),
     });
-    expect(await rowText(ui)).toBe('Calling Tenjin(latest BTC price)…');
+    expect(await rowText(ui)).toBe('⏺ Calling Tenjin(latest BTC price)…');
     await ui.unmount();
   }
 });
@@ -146,7 +150,7 @@ test('a refusal reads as its state beside the price, with no toast and nothing p
         output: refused,
       },
     });
-    expect(await rowText(ui)).toBe('Exa search(rust async runtimes) · $0.42 · needs approval');
+    expect(await rowText(ui)).toBe('⏺ Exa search(rust async runtimes) · $0.42 · needs approval');
     await ui.unmount();
   }
   expect(toasts).toEqual([]);
@@ -169,6 +173,34 @@ test('the result under our row draws nothing of what the model read', async ($, 
     });
     expect((await shownLines(ui)).join('\n')).not.toMatch(MODEL_TEXT);
     await ui.unmount();
+  }
+});
+
+test("an assistant message is the engine's, its summary mark included", async ($, on) => {
+  machine(on);
+  // The engine marks a summarised block itself (` · summary`); the mod adds
+  // nothing to a message row.
+  on('ui.render', { component: 'AssistantMessage' }, ($, e) => {
+    const { Text } = $.ui.resolve(e);
+    return Text({ children: [`${e.props.text}${e.props.isSummary ? ' · summary' : ''}`] });
+  });
+  for (const surface of SURFACES) {
+    for (const isSummary of [true, undefined] as const) {
+      const ui = await $.ui.mount({
+        plugin: 'tenjin',
+        surface,
+        component: 'AssistantMessage',
+        props: {
+          text: "I'll look up current options.",
+          isFirstOfReply: true,
+          ...(isSummary ? { isSummary } : {}),
+        },
+      });
+      expect(await shownLines(ui)).toEqual([
+        `I'll look up current options.${isSummary ? ' · summary' : ''}`,
+      ]);
+      await ui.unmount();
+    }
   }
 });
 

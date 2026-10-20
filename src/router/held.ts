@@ -34,6 +34,8 @@ export interface HeldRow {
   offerId: string;
   /** The native call that ran in its place, once `native`. */
   nativeToolUseId?: string;
+  /** The request call that took it up, once `routed`, when the client named it. */
+  routedToolUseId?: string;
 }
 
 /** The held call for one search or URL, so a native retry of it finds its row. */
@@ -128,13 +130,17 @@ export async function markNative(
 
 /**
  * The request tool ran this offer's id: every call held for it in the last
- * {@link EXPIRY_MS} reads `routed`. An older hold is a turn that never made
- * the call, and stays `held`.
+ * {@link EXPIRY_MS} reads `routed`, naming the request call that took it up
+ * (`requestToolUseId`, the client's `claudecode/toolUseId`) so the mod draws
+ * that call, and only that call, on the held row. A later call for the same
+ * id finds the row already routed and leaves it. An older hold is a turn that
+ * never made the call, and stays `held`.
  */
 export async function markRouted(
   dataDir: string,
   offerId: string,
   now = Date.now(),
+  requestToolUseId?: string,
 ): Promise<void> {
   const index = await readIndex(dataDir, offerId);
   if (index === null) return;
@@ -143,7 +149,11 @@ export async function markRouted(
     const row = await readHeld(path);
     if (row === null || row.outcome !== 'held' || row.offerId !== offerId) continue;
     if (now - row.at > EXPIRY_MS) continue;
-    await write(path, { ...row, outcome: 'routed' });
+    await write(path, {
+      ...row,
+      outcome: 'routed',
+      ...(requestToolUseId !== undefined ? { routedToolUseId: requestToolUseId } : {}),
+    });
   }
 }
 
