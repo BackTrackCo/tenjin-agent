@@ -1,20 +1,13 @@
 import { z } from 'zod';
 import { toMoney } from '../lib/money';
 import { policyFix } from '../lib/spend-gate';
-import {
-  admitPlan,
-  admitQuote,
-  type PlanAdmission,
-  type PlannedPayment,
-  type PlanSlot,
-} from '../lib/spend-plan';
+import type { PlanAdmission, PlannedPayment } from '../lib/spend-plan';
 import { createQuote, type Quote } from '../lib/spend-quotes';
 import { readUsdcBalanceWithFallback } from '../lib/usdc-balance';
 import { resolveWalletProvider } from '../lib/wallet';
 import { OfferSpecSchema, type OfferSpec, type SpecOutcome } from './decision';
 import { KeptChoicesSchema, type KeptChoices } from './specs';
 import type { FailExtras, FailStatus, ProviderCall, RequestToolDeps } from './tool';
-import type { SpendPolicy } from '../lib/policy';
 
 /**
  * A CALL'S SPEND PLAN, AS THE AGENT AND THE USER HEAR IT. Every request-tool
@@ -244,66 +237,6 @@ export async function planStop(
       outcome: { status: 'needs_approval' },
     };
   }
-}
-
-/**
- * ONE GATE, TWO FRONT ENDS. A call's plan meets the automatic limits; over
- * them it is kept as a quote, and only a person's yes runs it. Where the
- * client shows a dialog (`approveOverLimit`, `pay-once.ts`), the yes is asked
- * for here, in place, with the plan's own sentence: a yes keeps the quote and
- * admits it exactly as `approve` does (`admitQuote`), so the payment runs in
- * this call with the same approved slots and the same record. No, or no
- * answer, pays nothing and keeps no quote, so nobody is asked twice. Without
- * a dialog the stop is {@link planStop}'s: the quote and the `approve` call.
- */
-export async function admitOrAsk(
-  payments: readonly PlannedPayment[],
-  plan: PlanWords & { call: QuotedCall },
-  deps: RequestToolDeps,
-  settings: { policy: SpendPolicy; rpcUrl: string },
-  alternative?: string,
-): Promise<{ admitted: PlanSlot[] } | { stop: PlanStop }> {
-  const balance = () => walletBalance(deps, settings.rpcUrl);
-  const admission = await admitPlan(payments, {
-    dataDir: deps.ctx.dataDir,
-    policy: settings.policy,
-    balance,
-    ...(deps.now !== undefined ? { now: deps.now } : {}),
-  });
-  if ('admitted' in admission) return admission;
-  const kept = { ...plan, payments };
-  if (!('over' in admission) || deps.approveOverLimit === undefined) {
-    return { stop: await planStop(admission, kept, deps, alternative) };
-  }
-  const why = whyAsked(admission.over);
-  const or = alternative !== undefined ? `, or ${alternative}` : '';
-  if (!(await deps.approveOverLimit(`${plan.sentence} ${why}. Pay once?`))) {
-    return {
-      stop: {
-        status: 'needs_approval',
-        reason: `${plan.sentence} ${why}, and the user did not approve it, so nothing was paid.`,
-        extras: { nextStep: `Go on without it${or}; do not ask the user again for this call.` },
-        outcome: { status: 'needs_approval' },
-      },
-    };
-  }
-  const stopped = await planStop(admission, kept, { ...deps, approves: true }, alternative);
-  const id = stopped.extras.quote?.id;
-  if (typeof id !== 'string') return { stop: stopped };
-  const admitted = await admitQuote(deps.ctx.dataDir, id, {
-    balance,
-    ...(deps.now !== undefined ? { now: deps.now } : {}),
-  });
-  if ('admitted' in admitted) return { admitted: admitted.admitted };
-  if ('short' in admitted) return { stop: await planStop(admitted, kept, deps, alternative) };
-  return {
-    stop: {
-      status: 'needs_approval',
-      reason: `${plan.sentence} The user approved it, but its quote could not run (${admitted.refused}), so nothing was paid.`,
-      extras: { nextStep: `Call request again with the same call${or}; nothing was paid.` },
-      outcome: { status: 'needs_approval' },
-    },
-  };
 }
 
 /** The paying wallet's USDC balance, read the way `runPay` reads it, or null

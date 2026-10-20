@@ -2909,7 +2909,7 @@ describe('a discovered service', () => {
 
     it('says which price is over the limit and to prefer one within it', async () => {
       expect(await shown(list('0.28'))).toMatch(
-        / Note: \$0\.28 is above this machine's automatic per-call limit \(\$0\.25\), so request asks the user itself to pay once for that service where it can, and otherwise returns needs_approval; prefer one within the limit\.$/,
+        / Note: \$0\.28 is above this machine's automatic per-call limit \(\$0\.25\), so request returns needs_approval for that service; prefer one within the limit\.$/,
       );
     });
 
@@ -2925,7 +2925,7 @@ describe('a discovered service', () => {
         " Alternative from Tenjin's catalog: Hunter (finds a work email, $0.30): " +
         'request({query: <name and company>, id: "k3f9-abcd"}).';
       expect(await shown(list('0.03', curated))).toMatch(
-        / Note: \$0\.30 is above this machine's automatic per-call limit \(\$0\.25\), so request asks the user itself to pay once for that service where it can,/,
+        / Note: \$0\.30 is above this machine's automatic per-call limit \(\$0\.25\), so request returns needs_approval for that service;/,
       );
       const seller =
         ' Alternative from Coinbase\'s Bazaar (unreviewed): "Pricey" (its listing says ' +
@@ -2962,7 +2962,7 @@ describe('a discovered service', () => {
         },
       });
       expect(await shown(offered('280000', '$0.03'))).toMatch(
-        / Note: \$0\.28 is above this machine's automatic per-call limit \(\$0\.25\), so request asks the user itself to pay once for that service where it can,/,
+        / Note: \$0\.28 is above this machine's automatic per-call limit \(\$0\.25\), so request returns needs_approval for that service;/,
       );
       expect(await shown(offered('30000', 'about $0.28 per call'))).not.toContain('Note:');
     });
@@ -2986,7 +2986,7 @@ describe('a discovered service', () => {
       expect(await shown(described(list('0.03', curated)))).not.toContain('Note:');
       const over = await shown(described(list('0.28', curated)));
       expect(over).toMatch(
-        / Note: \$0\.28 is above this machine's automatic per-call limit \(\$0\.25\), so request asks the user itself to pay once for that service where it can,/,
+        / Note: \$0\.28 is above this machine's automatic per-call limit \(\$0\.25\), so request returns needs_approval for that service;/,
       );
     });
   });
@@ -3100,7 +3100,7 @@ describe('a discovered service', () => {
    * line still names the service, with one sentence saying the call needs
    * approval; a curated offer over the cap is still withheld (above).
    */
-  it('is shown over the automatic cap, with a note that request asks the user itself', async () => {
+  it('is shown over the automatic cap, with a note that request returns needs_approval', async () => {
     const fs = await import('node:fs/promises');
     await fs.writeFile(
       join(dir, 'config.json'),
@@ -3118,7 +3118,7 @@ describe('a discovered service', () => {
         hookEventName: 'UserPromptSubmit',
         additionalContext:
           `${SEEN_LINE} Note: $0.053501 is above this machine's automatic per-call limit ($0.05); ` +
-          'request asks the user itself where it can, and otherwise pays nothing and returns needs_approval with what it costs.',
+          'request will pay nothing and return needs_approval with what it costs.',
       },
     });
   });
@@ -3155,7 +3155,7 @@ describe('a discovered service', () => {
     expect(line).toBe(
       `${HINT_SOURCE}: ${hint.replace('request({', 'mcp__x402__request({')} ` +
         "Note: $0.68 is above this machine's automatic per-call limit ($0.25); " +
-        'request asks the user itself where it can, and otherwise pays nothing and returns needs_approval with what it costs.',
+        'request will pay nothing and return needs_approval with what it costs.',
     );
     expect(line).toContain('Other options: ClipForge ($0.90), Reelsmith ($1.10).');
   });
@@ -3190,7 +3190,7 @@ describe('a discovered service', () => {
     expect(
       (out.response as { hookSpecificOutput: { permissionDecisionReason: string } })
         .hookSpecificOutput.permissionDecisionReason,
-    ).toContain('request asks the user itself where it can');
+    ).toContain('return needs_approval with what it costs.');
   });
 
   /** Where nobody can ask the user, it is withheld like any other offer. */

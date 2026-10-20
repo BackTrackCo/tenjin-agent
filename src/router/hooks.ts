@@ -615,11 +615,9 @@ async function spendShortfall(
   deadline: number,
 ): Promise<Shortfall | null> {
   const price = `$${toMoney(decision.providerPriceAtomic).usd}`;
-  // Over a limit, `request` asks the user itself where the client shows the
-  // dialog, so the line never tells the agent to ask first.
   const approval = (detail: string): Shortfall => ({
     withheld: 'offer needs approval',
-    note: `Note: ${price} ${detail}; request asks the user itself where it can, and otherwise pays nothing and returns needs_approval with what it costs.`,
+    note: `Note: ${price} ${detail}; request will pay nothing and return needs_approval with what it costs.`,
   });
   let rpcUrl: string;
   try {
@@ -633,11 +631,11 @@ async function spendShortfall(
       sessionSpentAtomic: ledger === null ? 0n : spentOf(ledger),
     });
     if (evaluation.decision !== 'allow') {
-      return evaluation.reason === 'above_auto_spend'
-        ? approval(
-            `is above this machine's automatic per-call limit ($${toMoney(settings.policy.maxAutoSpendAtomic.toString()).usd})`,
-          )
-        : approval("needs approval under this machine's spend limits");
+      return approval(
+        evaluation.reason === 'above_auto_spend'
+          ? `is above this machine's automatic per-call limit ($${toMoney(settings.policy.maxAutoSpendAtomic.toString()).usd})`
+          : "needs approval under this machine's spend limits",
+      );
     }
     rpcUrl = settings.rpcUrl;
   } catch {
@@ -682,9 +680,10 @@ interface Shortfall {
  * make good on alone is withheld, as it always was. A DISCOVERED one is never
  * withheld where someone can ask the user: it is the only line naming a
  * service that can do the step, so it is shown with one sentence saying the
- * call needs approval or funds; `request` asks for the approval itself where
- * it can, so the host never asks first. Where nobody can ask (a subagent's
- * call, a delegated task) it is withheld like any other.
+ * call needs approval or funds; its `needs_approval` result names the
+ * `approve` call, which is the asking, so the host never asks first. Where
+ * nobody can ask (a subagent's call, a delegated task) it is withheld like
+ * any other.
  *
  * An offer that is shown can still list OTHER services beside its own: a Tenjin
  * list menu, or an alternative after a curated line. One priced over the cap
@@ -775,10 +774,8 @@ async function overCapNote(
   const which = over.length > 1 ? 'those services' : 'that service';
   return (
     `Note: ${prices} ${over.length > 1 ? 'are' : 'is'} above this machine's automatic per-call limit ` +
-    `($${toMoney(cap.toString()).usd}), so request ` +
-    (canAskUser
-      ? `asks the user itself to pay once for ${which} where it can, and otherwise returns needs_approval; prefer one within the limit.`
-      : `returns needs_approval for ${which}; use one within the limit.`)
+    `($${toMoney(cap.toString()).usd}), so request returns needs_approval for ${which}; ` +
+    (canAskUser ? 'prefer one within the limit.' : 'use one within the limit.')
   );
 }
 

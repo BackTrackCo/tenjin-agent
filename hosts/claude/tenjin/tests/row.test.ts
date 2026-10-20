@@ -310,3 +310,16 @@ test('a run this mod unfolds draws the paid row with nothing beneath; the engine
   await group(true);
   expect((await paidRow()).slice(4, 6)).toEqual(['  ⎿  ', 'answer: Tokio']);
 });
+
+test("a job poll draws nothing: it repeats the starting call's result and cost", async ($, on) => {
+  machine(on);
+  const done = envelope('fulfilled', { label: 'Exa search', cost: ['provider price 0.42 USD'] });
+  on('tool.call', { tool: TOOL }, async () => ({ result: done, text: done }));
+  await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_poll', job: OFFER });
+  const poll = toolRow('toolu_poll', TOOL, { job: OFFER }, done);
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ plugin: 'tenjin', surface, component: 'ToolUse', props: poll });
+    expect(await shownLines(ui)).toEqual([]);
+    await ui.unmount();
+  }
+});

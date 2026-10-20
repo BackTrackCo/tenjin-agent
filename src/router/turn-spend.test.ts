@@ -38,6 +38,12 @@ describe('the payments one result made', () => {
     expect(paymentsOf(envelope)).toEqual([30_000n, 30_000n, 30_000n]);
   });
 
+  it("counts nothing for a job poll, whose result repeats the starting call's cost", () => {
+    const done = { status: 'fulfilled', cost: costLines(420_000n) };
+    expect(paymentsOf(done, { job: 'job-1' })).toEqual([]);
+    expect(paymentsOf(done)).toEqual([420_000n]);
+  });
+
   it('counts a call that failed after its payment left', () => {
     const failed = fail('failed', 'The provider answered 500.', { providerAtomic: 40_000n });
     expect(paymentsOf(failed.envelope)).toEqual([40_000n]);

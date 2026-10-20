@@ -2,9 +2,16 @@ import { quoteRouterCall } from '../commands/pay';
 import { CliError } from '../lib/errors';
 import { toMoney } from '../lib/money';
 import type { SpendPolicy } from '../lib/policy';
-import type { PlanSlot } from '../lib/spend-plan';
+import { admitPlan, type PlanSlot } from '../lib/spend-plan';
 import { ALL_CHOICES, type Choices, type OfferSpec, type SpecOutcome } from './decision';
-import { admitOrAsk, choicesOf, takesOf, type PlanWords, type QuotedCall } from './plan';
+import {
+  choicesOf,
+  planStop,
+  takesOf,
+  walletBalance,
+  type PlanWords,
+  type QuotedCall,
+} from './plan';
 import { SILENT_FOOTER, type LookupFooter } from './progress';
 import {
   claimSpecPayment,
@@ -240,16 +247,20 @@ async function runTakes(
         amountAtomic,
         creator: new URL(step.prepared.built.url).host,
       }));
-      const admission = await admitOrAsk(
-        payments,
-        { ...plan.words(planned), call: plan.call(planned) },
-        deps,
-        settings,
-        words.pickOne,
-      );
-      if ('stop' in admission) {
-        const { stop } = admission;
+      const admission = await admitPlan(payments, {
+        dataDir,
+        policy: settings.policy,
+        balance: () => walletBalance(deps, settings.rpcUrl),
+        ...(deps.now !== undefined ? { now: deps.now } : {}),
+      });
+      if (!('admitted' in admission)) {
         await release(planned.map(({ step }) => step));
+        const stop = await planStop(
+          admission,
+          { ...plan.words(planned), payments, call: plan.call(planned) },
+          deps,
+          words.pickOne,
+        );
         words.stopped(
           planned.map(({ step }) => step),
           stop.outcome,

@@ -16,7 +16,7 @@ import {
   validateResultBody,
 } from '../lib/request-schema';
 import { resolveContextSettings } from '../lib/settings';
-import { admitQuote, type PlanSlot } from '../lib/spend-plan';
+import { admitPlan, admitQuote, type PlanSlot } from '../lib/spend-plan';
 import { quoteClosed, readQuote } from '../lib/spend-quotes';
 import type { SpendAuthorizer, WalletProvider } from '../lib/wallet';
 import type { TenjinSigner } from '../lib/wallet/provider';
@@ -57,9 +57,9 @@ import {
 } from './decision';
 import { pickChoice, runChoiceSet, runCount, showChoices, takesResult } from './choices';
 import {
-  admitOrAsk,
   approveCall,
   oneCall,
+  planStop,
   quotedCall,
   quoteView,
   walletBalance,
@@ -228,15 +228,6 @@ export interface RequestToolDeps {
    *  ends), so the call is not handed back `running` at
    *  {@link MAX_CALL_WAIT_MS}. */
   waitsForJobs?: boolean;
-  /**
-   * PAY ONCE: the in-place front end of the one approval gate. Asked with the
-   * plan's sentence when a call is over the automatic limits, it resolves
-   * whether the user said yes in the host's own dialog; a yes keeps and runs
-   * the same quote `approve` runs (`plan.ts`). `tenjin mcp` sets it only for a
-   * client that declared form elicitation (`pay-once.ts`). Absent, a call over
-   * the limits takes the `approve` path.
-   */
-  approveOverLimit?: (message: string) => Promise<boolean>;
 }
 
 /** What one tool call may save to disk, across every take and file. */
@@ -1234,14 +1225,18 @@ function admitAlone(
   return async (amountAtomic) => {
     const settings = await resolveContextSettings(deps.ctx);
     const payments = [{ amountAtomic, creator: new URL(call.request.url).host }];
-    const admission = await admitOrAsk(
-      payments,
-      { ...oneCall(call.provider, amountAtomic), call: quoted },
-      deps,
-      settings,
-    );
+    const admission = await admitPlan(payments, {
+      dataDir: deps.ctx.dataDir,
+      policy: settings.policy,
+      balance: () => walletBalance(deps, settings.rpcUrl),
+      ...(deps.now !== undefined ? { now: deps.now } : {}),
+    });
     if ('admitted' in admission) return admission.admitted[0]!;
-    const { stop } = admission;
+    const stop = await planStop(
+      admission,
+      { ...oneCall(call.provider, amountAtomic), payments, call: quoted },
+      deps,
+    );
     throw new CliError(stop.status === 'failed' ? 'REFUSED' : 'POLICY_REFUSED', stop.reason, {
       details: { [PLAN_STOP]: stop },
     });
@@ -2563,10 +2558,16 @@ export function costAtomicOf(cost: unknown): bigint {
 /**
  * THE PAYMENTS ONE RESULT MADE, one amount each: a single call's, or each
  * take or option of a set that paid in this call. A step an earlier call
- * already paid says 0 and is left out, and a call that failed after its
- * payment left still counts what left.
+ * already paid says 0 and is left out, a call that failed after its payment
+ * left still counts what left, and a job poll counts nothing.
  */
-export function paymentsOf(envelope: Record<string, unknown>): bigint[] {
+export function paymentsOf(
+  envelope: Record<string, unknown>,
+  args: Pick<RequestToolArgs, 'job'> = {},
+): bigint[] {
+  // A job poll pays nothing: its result repeats what the call that started
+  // the job paid, which that call already counted.
+  if (args.job !== undefined) return [];
   const steps = Array.isArray(envelope.results) ? (envelope.results as unknown[]) : [envelope];
   return steps
     .map((step) =>

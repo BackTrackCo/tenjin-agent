@@ -204,3 +204,21 @@ test('a form A row in a run this mod unfolded draws nothing beneath', async ($, 
   expect(await rowText(ui)).toBe('⏺ Exa search("rust async runtimes") · $0.007');
   await ui.unmount();
 });
+
+test('a paid replacement stays when the model then runs the same search natively', async ($, on) => {
+  const { files } = machine(on);
+  await keepSpec(files, OFFER, { label: 'Exa search', priceAtomic: '7000' });
+  holding(on, files);
+  on('tool.call', { tool: TOOL }, async () => ({ result: PAID, text: PAID }));
+  await $.tool.call({ tool: 'WebSearch', tool_use_id: 'toolu_held', ...SEARCH });
+  await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_take', ...INPUT });
+  await $.tool.call({ tool: 'WebSearch', tool_use_id: 'toolu_native', ...SEARCH });
+  const ui = await $.ui.mount({
+    plugin: 'tenjin',
+    surface: 'terminal',
+    component: 'ToolUse',
+    props: heldRow(),
+  });
+  expect(await rowText(ui)).toBe('⏺ Exa search("rust async runtimes") · $0.007');
+  await ui.unmount();
+});

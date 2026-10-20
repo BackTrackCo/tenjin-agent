@@ -85,7 +85,8 @@ export const register: Register = (on) => {
     const ran = await next(e);
     const ended = endOf(envelopeOf(ran.text));
     const label = row?.label ?? ended.label;
-    if (label !== undefined) {
+    // A job poll is not a lookup of its own (see `rowOf`).
+    if (label !== undefined && typeof e.job !== 'string') {
       await $.state.set(ref, { ...row, ...ended, label });
       $.ui.invalidate('ui.render');
     }
@@ -153,8 +154,6 @@ export const register: Register = (on) => {
       const held = await heldOf($, tool_use_id, key);
       if (held === null) return next(e);
       const ui = $.ui.resolve(e);
-      const ran = await link($, `ran:${held.key}`);
-      if (ran !== undefined && ran !== tool_use_id) return <ui.Box display="none" />;
       const asked = nativeArgument(input);
       const takerId = await link($, `take:${held.offerId}`);
       const taker = takerId === undefined ? undefined : await row($, takerId);
@@ -164,6 +163,10 @@ export const register: Register = (on) => {
         const ended = taker.status !== undefined && expandedByEngine.has(tool_use_id);
         return block(ui, head, ended ? (taker.detail ?? []) : []);
       }
+      // An offer nobody took, and the model ran the same search natively: the
+      // engine's row for that call is the line.
+      const ran = await link($, `ran:${held.key}`);
+      if (ran !== undefined && ran !== tool_use_id) return <ui.Box display="none" />;
       const offered = held.label !== undefined ? { tail: ` · Tenjin offered ${held.label}` } : {};
       const name = NATIVE_NAMES[tool] as string;
       const argued = asked !== undefined ? { argument: asked } : {};
@@ -242,9 +245,11 @@ function endOf(envelope: Json | undefined): Partial<TenjinRow> {
 async function rowOf(
   $: Dollar,
   id: string,
-  call: { output?: unknown; isInterrupted: boolean },
+  call: { input: unknown; output?: unknown; isInterrupted: boolean },
 ): Promise<TenjinRow | null> {
   const stored = await row($, id);
+  // A JOB POLL repeats the result and the cost of the call that started it.
+  if (typeof asRecord(call.input)?.job === 'string') return null;
   const envelope = envelopeOf(textOf(call.output));
   const ended =
     envelope !== undefined ? endOf(envelope) : call.isInterrupted ? { status: 'interrupted' } : {};
