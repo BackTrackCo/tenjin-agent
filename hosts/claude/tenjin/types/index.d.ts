@@ -17,8 +17,6 @@ export type TenjinRow = {
   status?: string;
   /** What left the wallet, from the envelope's `cost`, once it has ended. */
   paid?: string;
-  /** What came back, one dim line each, for the expanded row. */
-  detail?: string[];
 };
 
 /** A native call the router held for an offer, from the CLI's offer record. */

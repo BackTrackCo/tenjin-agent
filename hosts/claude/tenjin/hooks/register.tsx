@@ -17,12 +17,12 @@ import type { TenjinHeld, TenjinRow } from '../types';
  * Free router calls and `needs_input` answers draw nothing; a charged failure
  * draws the error dot, the amount and the state, never a success.
  *
- * MINIMUM LINES: what came back (the CLI-cut fields, saved paths, a failure's
- * reason) is drawn beneath a row only where the engine itself expanded the
- * run it sits in (`ToolGroup.isExpanded` as received). No documented prop
- * tells the normal view from the transcript for a standalone row, so ctrl+o
- * shows the fields when the lookup sits in a run, and a standalone lookup
- * shows its one line everywhere.
+ * EXPANDED: where the engine itself expanded the run a lookup sits in (ctrl+o,
+ * --verbose: `ToolGroup.isExpanded` as received), the row steps aside and the
+ * engine draws its own expanded MCP row, input and result. Its title there is
+ * the engine's: the tool's static title, without the service name or price. No
+ * documented prop tells the normal view from the transcript for a standalone
+ * row, so a standalone lookup shows its one line everywhere.
  *
  * READ ONLY: the spec file and the offer record (`src/router/mod-state.ts`),
  * and the request tool's own envelope. The mod writes nothing under the data
@@ -39,8 +39,8 @@ const ROWS = { plugin: 'tenjin', key: 'rows' } as const;
 const HELD = { plugin: 'tenjin', key: 'held' } as const;
 const LINKS = { plugin: 'tenjin', key: 'links' } as const;
 /**
- * Calls of a run the ENGINE expanded (ctrl+o, --verbose): the only rows that
- * draw a block beneath. The module's own memory, not `$.state`: a drawing may
+ * Calls of a run the ENGINE expanded (ctrl+o, --verbose), where our rows step
+ * aside for the engine's own. The module's own memory, not `$.state`: a drawing may
  * not write state, and this is a fact about the drawing alone. A reload
  * forgets it, so a row draws one line until its run is expanded again.
  */
@@ -51,8 +51,6 @@ const INDENT = '     ';
 const EXPAND_HINT = '(ctrl+o to expand)';
 const LABEL_CHARS = 32;
 const SHOWN_MAX_CHARS = 80;
-const DETAIL_LINES = 8;
-const DETAIL_CHARS = 200;
 const ENVELOPE = '{"status":"';
 const SECRET_NAME = /(api[_-]?key|token|secret|passw|authorization|cookie|private[_-]?key)/i;
 /** Answers that ran nothing the person paid for: the router's own, or a retry ahead. */
@@ -112,7 +110,7 @@ export const register: Register = (on) => {
   on('ui.render', { component: 'ToolGroup' }, async ($, e, next) => {
     const { calls, isExpanded } = e.props;
     const ids = calls.flatMap((c) => (c.tool_use_id !== undefined ? [c.tool_use_id] : []));
-    // EXPANDED BY THE ENGINE (ctrl+o, --verbose): its rows draw what came back.
+    // EXPANDED BY THE ENGINE (ctrl+o, --verbose): our rows step aside there.
     if (isExpanded) {
       const fresh = ids.filter((id) => !expandedByEngine.has(id));
       for (const id of fresh) expandedByEngine.add(id);
@@ -140,9 +138,7 @@ export const register: Register = (on) => {
     if (drawn.length === 0) return <ui.Box display="none" />;
     return (
       <ui.Box flexDirection="column">
-        {drawn.map((row) =>
-          row.status === 'fulfilled' ? folded(ui, row) : callRow(ui, row, false),
-        )}
+        {drawn.map((row) => (row.status === 'fulfilled' ? folded(ui, row) : callRow(ui, row)))}
       </ui.Box>
     );
   });
@@ -159,9 +155,7 @@ export const register: Register = (on) => {
       const taker = takerId === undefined ? undefined : await row($, takerId);
       if (taker !== undefined && taker.status !== 'needs_input') {
         const shape = { ...shapeOf(taker), name: taker.label };
-        const head = line(ui, asked !== undefined ? { ...shape, argument: asked } : shape);
-        const ended = taker.status !== undefined && expandedByEngine.has(tool_use_id);
-        return block(ui, head, ended ? (taker.detail ?? []) : []);
+        return line(ui, asked !== undefined ? { ...shape, argument: asked } : shape);
       }
       // An offer nobody took, and the model ran the same search natively: the
       // engine's row for that call is the line.
@@ -176,7 +170,10 @@ export const register: Register = (on) => {
     const ui = $.ui.resolve(e);
     const drawn = await rowOf($, tool_use_id, e.props);
     if (drawn === null) return <ui.Box display="none" />;
-    return callRow(ui, drawn, expandedByEngine.has(tool_use_id));
+    // In a run the engine expanded, the engine draws its own expanded row,
+    // input and result, exactly as for any MCP call.
+    if (expandedByEngine.has(tool_use_id)) return next(e);
+    return callRow(ui, drawn);
   });
 
   // The envelope the model read, and a held call's deny: the row says both.
@@ -231,12 +228,10 @@ function endOf(envelope: Json | undefined): Partial<TenjinRow> {
   const steps = Array.isArray(envelope.results) ? envelope.results.map(asRecord) : [];
   const label =
     labelOf(envelope.label) ?? (steps.length > 0 ? `${steps.length} services` : undefined);
-  const detail = resultLines(envelope);
   return {
     status,
     ...(label !== undefined ? { label } : {}),
     ...(paid !== undefined ? { paid } : {}),
-    ...(detail.length > 0 ? { detail } : {}),
   };
 }
 
@@ -275,20 +270,18 @@ function shapeOf(row: TenjinRow): Shape {
 }
 
 /** A request call's own row: `Calling X… · $p` with its input under it while it
- *  runs, then the folded `Called X · $p`, or, in an engine-expanded run,
- *  `X(input) · $p` with what came back beneath. */
-function callRow(ui: Elements, row: TenjinRow, expanded: boolean) {
+ *  runs, then the folded `Called X · $p`; a refusal or a charged failure keeps
+ *  its dot and its state. */
+function callRow(ui: Elements, row: TenjinRow) {
   const shape = shapeOf(row);
   if (shape.state === 'running') {
     const under = row.argument !== undefined ? [`"${row.argument}"`] : [];
     return block(ui, line(ui, { ...shape, name: `Calling ${row.label}…` }), under);
   }
   // Ended and plain, as Claude Code leaves an ended MCP call wherever it is
-  // drawn (its one-call run, or the standalone row that run becomes): the dim
-  // folded line. A refusal or a charged failure keeps its dot and its state.
-  if (!expanded && row.status === 'fulfilled') return folded(ui, row);
-  const argued = row.argument !== undefined ? { ...shape, argument: row.argument } : shape;
-  return block(ui, line(ui, argued), expanded ? (row.detail ?? []) : []);
+  // drawn (its one-call run, or the standalone row that run becomes).
+  if (row.status === 'fulfilled') return folded(ui, row);
+  return line(ui, row.argument !== undefined ? { ...shape, argument: row.argument } : shape);
 }
 
 /** An ended lookup folded as the engine folds an ended MCP call: no dot, all dim. */
@@ -341,48 +334,6 @@ function block({ Box, Text }: Elements, head: ReturnType<typeof line>, under: st
       ))}
     </Box>
   );
-}
-
-/** What came back: saved paths, the spec's fields where the CLI cut the result
- *  to them, or the reason a call did not deliver. */
-function resultLines(envelope: Json): string[] {
-  if (envelope.status !== 'fulfilled' && envelope.status !== 'unverified') {
-    return typeof envelope.reason === 'string' ? [clean(envelope.reason, DETAIL_CHARS)] : [];
-  }
-  const steps = Array.isArray(envelope.results) ? envelope.results.map(asRecord) : [];
-  const saved = [envelope, ...steps].flatMap((one) =>
-    Array.isArray(one?.savedFiles) ? one.savedFiles : [],
-  );
-  const lines = saved
-    .filter((path) => typeof path === 'string')
-    .map((path) => `saved: ${clean(path, DETAIL_CHARS)}`);
-  const cut = typeof envelope.fullResultPath === 'string' ? parseJson(envelope.result) : undefined;
-  return [...lines, ...fieldLines(asRecord(cut))].slice(0, DETAIL_LINES);
-}
-
-function fieldLines(record: Json | undefined): string[] {
-  return Object.entries(record ?? {}).flatMap(([key, value]) => {
-    if (SECRET_NAME.test(key)) return [];
-    const name = clean(key, 40);
-    if (Array.isArray(value)) {
-      const first = value.slice(0, 3).map((item) => {
-        const one = asRecord(item);
-        return scalar(one === undefined ? item : (one.title ?? one.name ?? one.url));
-      });
-      return [
-        `${name}: ${value.length} ${value.length === 1 ? 'item' : 'items'}`,
-        ...first.filter((t) => t !== undefined).map((t) => `  ${t}`),
-      ];
-    }
-    const text = scalar(value);
-    return text !== undefined ? [`${name}: ${text}`] : [];
-  });
-}
-
-function scalar(value: unknown): string | undefined {
-  if (!['string', 'number', 'boolean'].includes(typeof value)) return undefined;
-  const text = clean(String(value), DETAIL_CHARS);
-  return text.length > 0 ? text : undefined;
 }
 
 /** The held native call's offer: from this session's state, else the CLI's

@@ -23,6 +23,17 @@ const PAID = envelope('fulfilled', {
   fullResultPath: '/home/test/.tenjin/downloads/exa.json',
 });
 
+/** The engine's own ToolUse drawing beneath the plugin: what it was handed. */
+function engineRows(on: Parameters<TestBody>[1]): { seen: unknown[] } {
+  const seen: unknown[] = [];
+  on('ui.render', { component: 'ToolUse' }, ($, e) => {
+    seen.push(e.props);
+    const { Text } = $.ui.resolve(e);
+    return Text({ children: ['engine row'] });
+  });
+  return { seen };
+}
+
 /** The engine delivering a run expanded, as ctrl+o and --verbose do. */
 async function expandRun($: Parameters<TestBody>[0], calls: unknown[]): Promise<void> {
   const ui = await $.ui.mount({
@@ -46,6 +57,7 @@ test('a lookup alone: Calling with its query while it runs, then the dim folded 
     const { Text } = $.ui.resolve(e);
     return Text({ children: ['rows'] });
   });
+  const engine = engineRows(on);
   const { files, clock } = machine(on);
   await keepSpec(files, OFFER, EXA);
   let release = (): void => undefined;
@@ -106,7 +118,8 @@ test('a lookup alone: Calling with its query while it runs, then the dim folded 
     expect(await rowText(alone)).toBe('Called Exa search · $0.04 (ctrl+o to expand)');
     expect(await dotOf(alone)).toBeUndefined();
     await alone.unmount();
-    // Expanded by the engine (ctrl+o): the whole row, what came back under it.
+    // EXPANDED BY THE ENGINE (ctrl+o, --verbose): the engine's own native row,
+    // input and result, handed exactly what it would draw for any MCP call.
     await expandRun($, [ended]);
     const open = await $.ui.mount({
       plugin: 'tenjin',
@@ -114,21 +127,8 @@ test('a lookup alone: Calling with its query while it runs, then the dim folded 
       component: 'ToolUse',
       props: ended,
     });
-    expect(await shownLines(open)).toEqual([
-      '⏺',
-      'Exa search',
-      '(rust async runtimes)',
-      ' · $0.04',
-      '  ⎿  ',
-      'answer: Tokio',
-      '     ',
-      'results: 2 items',
-      '     ',
-      '  Tokio',
-      '     ',
-      '  smol',
-    ]);
-    expect(await dotOf(open)).toEqual({ color: 'success', dimColor: undefined });
+    expect(await shownLines(open)).toEqual(['engine row']);
+    expect(engine.seen.at(-1)).toMatchObject({ input: ended.input, output: PAID });
     await open.unmount();
   }
 });
@@ -180,6 +180,7 @@ test('a charged failure draws the error dot, the amount and the state, never a s
     const { Text } = $.ui.resolve(e);
     return Text({ children: ['rows'] });
   });
+  engineRows(on);
   const { files } = machine(on);
   await keepSpec(files, OFFER, EXA);
   const failed = envelope('failed', {
@@ -201,9 +202,8 @@ test('a charged failure draws the error dot, the amount and the state, never a s
     await folded.unmount();
     await expandRun($, [row]);
     const open = await $.ui.mount({ plugin: 'tenjin', surface, component: 'ToolUse', props: row });
-    expect((await shownLines(open)).slice(-1)).toEqual([
-      'The provider answered 500 after the payment was sent.',
-    ]);
+    // Expanded, the engine's own row carries the reason the model read.
+    expect(await shownLines(open)).toEqual(['engine row']);
     await open.unmount();
   }
 });
@@ -275,9 +275,10 @@ test('a run mixing a lookup with other calls unfolds for the engine to draw', as
   }
 });
 
-test('a run this mod unfolds draws the paid row with nothing beneath; the engine-expanded run draws the block', async ($, on) => {
+test("a run this mod unfolds draws the folded row; the engine-expanded run is the engine's own row", async ($, on) => {
   const { files } = machine(on);
   await keepSpec(files, OFFER, EXA);
+  engineRows(on);
   on('tool.call', { tool: TOOL }, async () => ({ result: PAID, text: PAID }));
   on('ui.render', { component: 'ToolGroup' }, ($, e) => {
     const { Text } = $.ui.resolve(e);
@@ -310,7 +311,7 @@ test('a run this mod unfolds draws the paid row with nothing beneath; the engine
   expect(await paidRow()).toEqual(['Called Exa search · $0.04 (ctrl+o to expand)']);
   // ctrl+o after the fact: the engine delivers the same run expanded.
   await group(true);
-  expect((await paidRow()).slice(4, 6)).toEqual(['  ⎿  ', 'answer: Tokio']);
+  expect(await paidRow()).toEqual(['engine row']);
 });
 
 test("a job poll draws nothing: it repeats the starting call's result and cost", async ($, on) => {
