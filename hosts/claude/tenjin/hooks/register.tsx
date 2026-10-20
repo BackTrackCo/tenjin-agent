@@ -9,7 +9,7 @@ import type { TenjinPaid, TenjinRow } from '../types';
  * a tool row (its status dot, bold name, input in parentheses, a dim tail):
  * the request tool's row reads `⏺ Exa search(best local LLM) · $0.007`. A
  * WebSearch or WebFetch call held for Tenjin reads as the engine's own row
- * struck through, `⏺ ~~Web Search~~("best local LLM") · Routed by Tenjin`,
+ * struck through, `⏺ ~~Web Search~~("best local LLM") · Tenjin offered Exa search`,
  * until the request call takes it up, then becomes that call's row in place,
  * with the request's own row empty. Beside it: a toast when a call is paid,
  * one spend line under a turn that paid, the first-run wallet toast, and the
@@ -119,6 +119,14 @@ async function onRequest<E extends { tool_use_id: string }>(
   $.ui.invalidate('ui.render');
   const ran = await next(e);
   const settled = await settleCall($, call, ran, startedAt);
+  // THE ROUTER'S OWN CALL (a query it picks for, a browse row's spec) names
+  // the service it offered in its result, by the id it kept a spec under.
+  if (call.row.label === ROUTER && call.dataDir !== null) {
+    const kept = envelopeOf('text' in ran ? ran.text : undefined)?.id;
+    const offered =
+      typeof kept === 'string' ? offeredLabel(await readSpec($, call.dataDir, kept)) : undefined;
+    if (offered !== undefined) call.row = { ...call.row, label: offered, offered: true };
+  }
   await $.state.set(ref, { ...call.row, ...settled.row });
   if (holdOf !== undefined) {
     await $.state.set({ ...ROWS, id: `${HELD_KEY}${holdOf}` }, { ...call.row, ...settled.row });
@@ -205,16 +213,21 @@ export const register: Register = (on) => {
       // row is struck again and that call draws its own row.
       if (held.outcome === 'held') {
         if (taker !== undefined && taker.outcome === undefined) {
-          return toolRow(Box, Text, callShape(keep(taker), undefined));
+          return toolRow(Box, Text, callShape(keep(taker), undefined), e.viewport?.columns);
         }
-        return toolRow(Box, Text, {
-          state: 'running',
-          name: NATIVE_NAMES[e.props.tool] ?? e.props.tool,
-          isStruck: true,
-          // Why it is struck, in the dim tail the engine uses for ` · on <host>`.
-          tail: ROUTED_TAIL,
-          ...(asked !== undefined ? { argument: asked } : {}),
-        });
+        return toolRow(
+          Box,
+          Text,
+          {
+            state: 'running',
+            name: NATIVE_NAMES[e.props.tool] ?? e.props.tool,
+            isStruck: true,
+            // Why it is struck, in the dim tail the engine uses for ` · on <host>`.
+            ...(held.label !== UNLABELLED ? { tail: ` · ${OFFERED} ${held.label}` } : {}),
+            ...(asked !== undefined ? { argument: asked } : {}),
+          },
+          e.viewport?.columns,
+        );
       }
       // ROUTED: the call the CLI names as the one that took it up, from this
       // session's state, else (a resumed transcript) the offer's own label and
@@ -228,7 +241,7 @@ export const register: Register = (on) => {
         ...(held.priceAtomic !== undefined ? { price: `$${usd(held.priceAtomic)}` } : {}),
         outcome: 'done',
       };
-      return toolRow(Box, Text, callShape(keep(row), row.outcome));
+      return toolRow(Box, Text, callShape(keep(row), row.outcome), e.viewport?.columns);
     }
     if (e.props.tool !== REQUEST_TOOL) return next(e);
     const { Box, Text } = $.ui.resolve(e);
@@ -260,7 +273,9 @@ export const register: Register = (on) => {
     // A ROW WITH NO LABEL OF ITS OWN is not drawn: the router's own calls (a
     // spec fetch, a query it picks for) and a spec the server sent unlabelled
     // would read "Tenjin" or "Tenjin lookup".
-    if (row.label === ROUTER || row.label === UNLABELLED) return <Box display="none" />;
+    if (row.offered !== true && (row.label === ROUTER || row.label === UNLABELLED)) {
+      return <Box display="none" />;
+    }
     const outcome =
       row.outcome ??
       (!hasOutput
@@ -268,7 +283,7 @@ export const register: Register = (on) => {
         : e.props.isInterrupted
           ? 'interrupted'
           : refusalOf(statusOf(textOf(e.props.output)), e.props.isErrored));
-    return toolRow(Box, Text, callShape(row, outcome));
+    return toolRow(Box, Text, callShape(row, outcome), e.viewport?.columns);
   });
 
   // The result block under our own row is the text the model read: the
@@ -390,6 +405,24 @@ async function describeCall($: Dollar, args: Json): Promise<Call> {
     ...(argument !== undefined ? { argument } : {}),
     ...(id !== undefined ? { offerId: id } : {}),
   };
+  // A SPEC FETCH (`{id}` alone) is the router telling the agent what it
+  // offers: it draws as `Tenjin offered <label>`, once the label is known.
+  if (
+    input === undefined &&
+    id !== undefined &&
+    dataDir !== null &&
+    args.query === undefined &&
+    args.choice === undefined
+  ) {
+    const offered = offeredLabel(await readSpec($, dataDir, id));
+    if (offered !== undefined) {
+      return {
+        row: { label: offered, isPaid: false, offered: true, offerId: id },
+        ids: [],
+        dataDir,
+      };
+    }
+  }
   if (input === undefined || id === undefined || dataDir === null) {
     return { row: { label: ROUTER, isPaid: false, ...base }, ids: [], dataDir };
   }
@@ -467,6 +500,12 @@ async function choiceOptions(
       : [];
   });
   return rows;
+}
+
+/** A spec's own label, or undefined when it has none: an offer the row can name. */
+function offeredLabel(spec: Json | null): string | undefined {
+  const label = labelOf(spec);
+  return label === UNLABELLED ? undefined : label;
 }
 
 async function readSpec($: Dollar, dataDir: string, id: string): Promise<Json | null> {
@@ -678,9 +717,10 @@ function nativeArgument(input: Json | undefined): string | undefined {
   return query !== undefined ? `"${query}"` : argumentOf({ url: input.url });
 }
 
-/** A held row's tail while the request call has not taken it up yet. */
-const ROUTED_TAIL = ' · Routed by Tenjin';
-
+/** A request row's name marker, where the engine writes ` (MCP)`. */
+const MARKER = '(Tenjin)';
+/** A free router call's row: `Tenjin offered Ideogram V4`. */
+const OFFERED = 'Tenjin offered';
 /** The names the engine draws its native rows under (each tool's `userFacingName`). */
 const NATIVE_NAMES: Readonly<Record<string, string>> = {
   WebSearch: 'Web Search',
@@ -709,9 +749,14 @@ function callShape(row: TenjinRow, outcome: string | undefined): RowShape {
   const tail = [paid ?? row.price, isPlain ? undefined : outcome].filter(
     (part): part is string => part !== undefined,
   );
+  const state: RowState = isRunning ? 'running' : ERRORS.has(outcome) ? 'error' : 'done';
+  // What the router offered: the service by name, nothing to pay, no input.
+  if (row.offered === true) return { state, name: `${OFFERED} ${row.label}` };
   return {
-    state: isRunning ? 'running' : ERRORS.has(outcome) ? 'error' : 'done',
-    name: row.label,
+    state,
+    // The engine marks an MCP tool's name with ` (MCP)`; ours carry Tenjin's
+    // name in the same place, so they read as service calls, not built-ins.
+    name: `${row.label} ${MARKER}`,
     ...(row.argument !== undefined ? { argument: row.argument } : {}),
     ...(tail.length > 0 ? { tail: ` · ${tail.join(' · ')}` } : {}),
   };
@@ -723,8 +768,9 @@ function callShape(row: TenjinRow, outcome: string | undefined): RowShape {
  * theme's success or error color after), the name bold, the input in
  * parentheses, and a dim tail where the engine puts its ` · on <host>`.
  */
-function toolRow(Box: BoxElement, Text: TextElement, shape: RowShape) {
+function toolRow(Box: BoxElement, Text: TextElement, shape: RowShape, columns?: number) {
   const isRunning = shape.state === 'running';
+  const argument = shape.argument !== undefined ? fitArgument(shape, columns) : undefined;
   return (
     <Box flexDirection="row" marginTop={1}>
       <Box minWidth={2}>
@@ -742,11 +788,31 @@ function toolRow(Box: BoxElement, Text: TextElement, shape: RowShape) {
         </Text>
       </Box>
       <Box flexWrap="nowrap">
-        <Text wrap="truncate-end">{shape.argument !== undefined ? `(${shape.argument})` : ''}</Text>
+        <Text wrap="truncate-end">{argument !== undefined ? `(${argument})` : ''}</Text>
         <Text dimColor>{shape.tail ?? ''}</Text>
       </Box>
     </Box>
   );
+}
+
+/**
+ * THE INPUT CUT TO THE ROW, as the engine cuts a tool's: the room it gives
+ * the input is the width less the dot's gutter, the name and the
+ * parentheses, never under 20 columns; ours also keeps the tail in view. An
+ * input past it ends in `…`.
+ */
+function fitArgument(shape: RowShape, columns: number | undefined): string {
+  const argument = shape.argument ?? '';
+  if (columns === undefined) return argument;
+  const used = 2 + width(shape.name) + 2 + width(shape.tail ?? '');
+  const room = Math.max(columns - used, 20);
+  const chars = Array.from(argument);
+  return chars.length <= room ? argument : `${chars.slice(0, room - 1).join('')}…`;
+}
+
+/** Columns a plain line takes; the row's text is already free of wide controls. */
+function width(text: string): number {
+  return Array.from(text).length;
 }
 
 /** The elements a row draws with, from the surface's own table. */
