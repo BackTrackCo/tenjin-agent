@@ -96,6 +96,16 @@ describe('main', () => {
     expect(JSON.parse(cap.stdout()).error.code).toBe('USAGE');
   });
 
+  // The already-paid message in the `request` tool sends the agent to a bare
+  // `tenjin payments`; it once exited 2 because only `reconcile` existed. The
+  // list reads the local ledger and nothing else, so it runs here offline.
+  it('a bare `tenjin payments` lists the ledger rather than failing on usage', async () => {
+    const cap = captureIo();
+    expect(await main(['payments'], cap.io)).toBe(0);
+    const parsed = JSON.parse(cap.stdout());
+    expect(parsed).toMatchObject({ ok: true, command: 'payments', data: { total: 0 } });
+  });
+
   // The release ships two products and nothing else, so the root list is the
   // one place a stray shelf verb would show up.
   it('lists only the core and router commands', async () => {

@@ -248,7 +248,7 @@ describe('runFund', () => {
     });
     const block = stderr.find((chunk) => chunk.startsWith('Or send USDC'));
     expect(block?.split('\n')[0]).toBe(`Or send USDC from a phone wallet to ${address}:`);
-    expect(block?.trimEnd().split('\n')).toHaveLength(19);
+    expect(block?.trimEnd().split('\n')).toHaveLength(21);
     expect(block?.trimEnd().endsWith('USDC on Base (eip155:8453)')).toBe(true);
     expect(stderr.indexOf(block!)).toBeGreaterThan(
       stderr.findIndex((chunk) => chunk.includes(CHECKOUT)),
@@ -260,7 +260,7 @@ describe('runFund', () => {
     ['--json', { isTTY: true, json: true, columns: 80 }, {}],
     ['a pipe', { isTTY: false, json: false, columns: 80 }, {}],
     ['--no-qr', { isTTY: true, json: false, columns: 80 }, { qr: false }],
-    ['a 32-column terminal', { isTTY: true, json: false, columns: 32 }, {}],
+    ['a 36-column terminal', { isTTY: true, json: false, columns: 36 }, {}],
   ])('draws no QR for %s', async (_label, ctxOpts, fundOpts) => {
     const { provider } = fakeProvider();
     await runFund(makeCtx(ctxOpts), {

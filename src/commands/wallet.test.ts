@@ -5,10 +5,12 @@ import { join } from 'node:path';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import type { Address } from 'viem';
 import * as Keystore from 'ox/Keystore';
+import { FileClientChannelStorage } from '@x402/evm/batch-settlement/client/file-storage';
 import { CliError } from '../lib/errors';
 import type { CommandContext } from '../context';
 import type { WalletProvider } from '../lib/wallet';
 import type { ExecFn } from '../lib/wallet/passphrase';
+import { payerDir } from '../router/fee';
 
 // This suite runs real ox scrypt (N=262144) several times per test; the 5s
 // default flakes under parallel vitest load (tenjin-agent#47).
@@ -187,9 +189,7 @@ describe('runWalletCreate', () => {
 
   it('emits the exact funding line', async () => {
     const res = await runWalletCreate(makeCtx());
-    expect(res.humanLines).toContain(
-      'Fund it with `tenjin wallet fund` (card via Coinbase), or send USDC on Base. $5 covers ~50 typical resources.',
-    );
+    expect(res.humanLines).toContain('Fund it with `tenjin wallet fund 5`, or send USDC on Base.');
   });
 
   it('reports that the key is stored encrypted', async () => {
@@ -630,8 +630,8 @@ describe('runWalletShow', () => {
     const res = await runWalletShow(terminalCtx(), { provider });
     const lines = res.humanLines ?? [];
     expect(lines[0]).toBe(`Address: ${address}`);
-    expect(lines[18]).toBe('USDC on Base (eip155:8453)');
-    expect(lines[19]).toBe('Key source: remote');
+    expect(lines[20]).toBe('USDC on Base (eip155:8453)');
+    expect(lines[21]).toBe('Key source: remote');
     expect(res.data).toEqual((await runWalletShow(makeCtx(), { provider })).data);
   });
 
@@ -639,7 +639,7 @@ describe('runWalletShow', () => {
     ['--json', { json: true }, {}],
     ['a pipe', { isTTY: false }, {}],
     ['--no-qr', {}, { qr: false }],
-    ['a 32-column terminal', { columns: 32 }, {}],
+    ['a 36-column terminal', { columns: 36 }, {}],
   ])('prints no QR for %s', async (_label, ctxOpts, showOpts) => {
     const address = privateKeyToAccount(generatePrivateKey()).address;
     const { provider } = fakeRemoteProvider(address);
@@ -688,6 +688,19 @@ describe('runWalletBalance', () => {
     expect((res.data as { balance: unknown }).balance).toEqual({ atomic: '250000', usd: '0.25' });
   });
 
+  it("adds what the routing channel still holds, which is still the wallet owner's", async () => {
+    const address = privateKeyToAccount(generatePrivateKey()).address;
+    const { provider } = fakeRemoteProvider(address);
+    await new FileClientChannelStorage({ directory: payerDir(dataDir, address) }).set(
+      `0x${'ab'.repeat(32)}`,
+      { balance: '250000', chargedCumulativeAmount: '9000' },
+    );
+    mockedBalance.mockResolvedValue(1_700_000n);
+    const res = await runWalletBalance(makeCtx(), { provider });
+    expect(res.data).toMatchObject({ routingCredit: { atomic: '241000', usd: '0.241' } });
+    expect(res.humanLines).toEqual(['Balance: 1.7 USDC on Base (+0.241 routing credit)']);
+  });
+
   it('maps an RPC failure to RPC_ERROR with a config fix', async () => {
     await runWalletCreate(makeCtx());
     mockedBalance.mockRejectedValue(new Error('rpc down'));
@@ -703,6 +716,7 @@ describe('runWalletBalance', () => {
     mockedBalance.mockResolvedValue(1000000n);
     const res = await runWalletBalance(makeCtx(), { provider });
     expect((res.data as { balance: { usd: string } }).balance.usd).toBe('1');
+    expect(res.humanLines).toEqual(['Balance: 1 USDC on Base']);
     expect(getSigner).not.toHaveBeenCalled();
   });
 });
