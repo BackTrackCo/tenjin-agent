@@ -17,19 +17,20 @@ export function registerCore(reg: Registration): void {
     .option('--project', 'register the plugin for this project only')
     .option('--no-wallet', 'create no wallet')
     .option('--refresh', 'bring the plugin this machine already has up to this version')
-    .option('--yes', 'accept the default spend limits instead of asking')
-    .option('--max-auto-spend <usd>', 'the most the router may pay for one call, instead of asking')
-    .option(
-      '--session-budget <usd|none>',
-      'the most the router may pay in a day, or none, instead of asking',
-    )
+    .option('--yes', 'accept the defaults ($5 a day, $0.25 a call) instead of asking')
+    .option('--session-budget <usd|none>', 'your own daily limit, or none, instead of asking')
+    .option('--max-auto-spend <usd>', 'your own per-call limit, at least 0.25 (the default)')
     .addHelpText(
       'after',
       `
 Examples:
   $ tenjin install
   $ tenjin install --project
-  $ tenjin install --max-auto-spend 0.10 --session-budget 2
+  $ tenjin install --max-auto-spend 0.50 --session-budget 10
+
+The daily limit is the control, the per-call limit the runaway guard, and the
+wallet balance the hard stop. To turn the router off instead:
+  $ tenjin config set router.enabled false
 
 Learn more:
   What the router may spend, and what leaves this machine:

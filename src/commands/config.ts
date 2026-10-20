@@ -29,6 +29,8 @@ import {
   ROUTER_CONFIG_KEYS,
   ROUTER_CONTEXTS,
   loadRawConfig,
+  MAX_AUTO_SPEND_FLOOR_ATOMIC,
+  MAX_AUTO_SPEND_FLOOR_WHY,
   parseLoopValue,
   parsePublicFallbackFlag,
   parseAckServerWarnings,
@@ -133,8 +135,10 @@ const KEY_WIDTH = Math.max(
  * listing only. Machine `data` is unchanged; these are humanLines decoration.
  */
 const KEY_DESCRIPTIONS: Record<string, string> = {
-  maxAutoSpend: 'automatic router limit per call',
-  sessionBudget: 'automatic router daily limit: 0 blocks automatic spend, none removes the ceiling',
+  maxAutoSpend:
+    'automatic router limit per call, the runaway guard: at least 0.25 (the default); router.enabled false turns the router off',
+  sessionBudget:
+    'automatic router daily limit, the main control (5 by default): 0 blocks automatic spend, none removes the ceiling',
   sendMaxAmount:
     'hard cap per tenjin wallet send; unset = send refuses until set, 0 disables send, none = uncapped; never bypassed by --yes',
   allowlistCreators: 'only auto-pay these creators (empty = any)',
@@ -991,9 +995,9 @@ export interface RouterDefaultsResult {
 
 /** Remove/report retired keys in the same locked write. Refresh preserves absent
  * current settings; a fresh install fills only missing automatic limits, with the
- * values the person at the terminal approved or chose. A key `limits` leaves out
- * stays absent: that is how an install with nobody to approve keeps
- * `maxAutoSpend` at the bare CLI's zero. A key in `chosen` is an amount the
+ * values the person approved or chose. A key `limits` leaves out stays absent,
+ * and the code default ($0.25 a call, $5 a day) holds for it: that is an install
+ * nobody answered. A key in `chosen` is an amount the
  * user named for this install (`--max-auto-spend`, `--session-budget`), so it
  * replaces what the file holds. */
 export async function persistRouterDefaults(
@@ -1138,7 +1142,7 @@ function parseValue(key: ScalarConfigKey, value: string): string | string[] | bo
     case 'sessionBudget':
       return value === 'none' ? 'none' : parseUsdToAtomic(value);
     case 'maxAutoSpend':
-      return parseUsdToAtomic(value); // throws USAGE on a bad amount
+      return parseAutoSpend(value);
     case 'sendMaxAmount':
       return value === 'none' ? 'none' : parseUsdToAtomic(value);
     case 'allowlistCreators':
@@ -1156,6 +1160,17 @@ function parseValue(key: ScalarConfigKey, value: string): string | string[] | bo
     case 'bazaarRegistries':
       return parseRegistryList(value);
   }
+}
+
+/** A per-call limit, refused below the $0.25 floor (and on a bad amount). */
+function parseAutoSpend(value: string): string {
+  const atomic = parseUsdToAtomic(value);
+  if (BigInt(atomic) < MAX_AUTO_SPEND_FLOOR_ATOMIC) {
+    throw new CliError('USAGE', `maxAutoSpend ${value} is below the 0.25 USD minimum.`, {
+      fix: MAX_AUTO_SPEND_FLOOR_WHY,
+    });
+  }
+  return atomic;
 }
 
 /** "" clears to []; comma-split, each entry an absolute http(s) URL. */

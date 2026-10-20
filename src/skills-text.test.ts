@@ -623,9 +623,11 @@ describe('the permissions doc matches the product this release ships', () => {
   it('states the caps install sets, from the constants install writes', async () => {
     const { ROUTER_DEFAULTS } = await import('./commands/config');
     const { toMoney } = await import('./lib/money');
-    // Compared as NUMBERS: the page writes 0.10 where `toMoney` renders 0.1, and
+    // Compared as NUMBERS ($1 or 1 USD): the page writes 0.10 where `toMoney` renders 0.1, and
     // what must not drift is the amount, not its trailing zero.
-    const stated = [...PERMISSIONS_DOC.matchAll(/([\d.]+) USD/g)].map((m) => Number(m[1]));
+    const stated = [...PERMISSIONS_DOC.matchAll(/\$([\d.]+)|([\d.]+) USD/g)].map((m) =>
+      Number(m[1] ?? m[2]),
+    );
     for (const key of ['maxAutoSpend', 'sessionBudget'] as const) {
       expect(stated, `the page never states ${key}`).toContain(
         Number(toMoney(ROUTER_DEFAULTS[key]).usd),

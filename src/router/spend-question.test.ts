@@ -1,15 +1,24 @@
 import { describe, expect, it } from 'vitest';
+import { CONFIG_DEFAULTS, MAX_AUTO_SPEND_FLOOR_ATOMIC } from '../lib/config';
 import { ROUTER_DEFAULTS } from '../commands/config';
-import {
-  ACCEPT_COMMAND,
-  shownLimits,
-  spendChoiceQuestion,
-  spendOptions,
-  spendQuestion,
-  unpaidNotice,
-} from './spend-question';
+import { CHANNEL_DEPOSIT_ATOMIC } from './fee';
+import { shownLimits, spendChoiceQuestion, spendOptions } from './spend-question';
 
 describe('the spend question', () => {
+  it('holds the same defaults as the code: $0.25 a call and $5 a day', () => {
+    expect(ROUTER_DEFAULTS).toEqual({ maxAutoSpend: '250000', sessionBudget: '5000000' });
+    expect(CONFIG_DEFAULTS.maxAutoSpend).toBe(ROUTER_DEFAULTS.maxAutoSpend);
+    expect(CONFIG_DEFAULTS.sessionBudget).toBe(ROUTER_DEFAULTS.sessionBudget);
+  });
+
+  it('floors the per-call limit at the routing deposit, and defaults it there', () => {
+    // A ceiling below the deposit would leave routing unable to pay at all.
+    expect(MAX_AUTO_SPEND_FLOOR_ATOMIC).toBe(CHANNEL_DEPOSIT_ATOMIC);
+    expect(BigInt(ROUTER_DEFAULTS.maxAutoSpend)).toBeGreaterThanOrEqual(
+      MAX_AUTO_SPEND_FLOOR_ATOMIC,
+    );
+  });
+
   it('shows the defaults where the file names no limit, and the file where it does', () => {
     expect(shownLimits({})).toEqual(ROUTER_DEFAULTS);
     expect(shownLimits({ sessionBudget: 'none' })).toEqual({
@@ -18,45 +27,27 @@ describe('the spend question', () => {
     });
   });
 
-  it('names the limits and the routing fee, as the selector does', () => {
-    expect(spendQuestion(shownLimits({}))).toBe(
-      'May Tenjin pay for tool calls without asking you each time, up to $0.25 a call and $5 a day? Routing costs $0.003 a call, paid from channel deposits of up to $0.25 that stay yours until spent; each deposit counts against these limits. Using these limits or choosing your own also approves the routing fee.',
-    );
-  });
-
-  it('accepts with one command, whatever scope the hooks were installed in', () => {
-    expect(ACCEPT_COMMAND).toBe('tenjin config set maxAutoSpend 0.25');
-  });
-
-  it('turns an unpaid routing call on unanswered limits into the question', () => {
-    expect(unpaidNotice('limit_below_deposit', {}, 'agent')).toContain(
-      '`tenjin config set maxAutoSpend 0.25`',
-    );
-    // A zero the user wrote is their answer: the plain reason and fix.
-    expect(unpaidNotice('limit_below_deposit', { maxAutoSpend: '0' }, 'user')).toContain(
-      'the per-call spend limit is below the smallest routing deposit',
-    );
-    expect(unpaidNotice('channel_busy', {}, 'user')).toBeNull();
-  });
-
-  it('words the notice for whoever reads it: the user directly, or the agent to ask', () => {
-    expect(unpaidNotice('limit_below_deposit', {}, 'user')).toBe(
-      'Tenjin pays for nothing on its own yet: the spend limits are not answered. It can pay for tool calls without asking you each time, up to $0.25 a call and $5 a day. Routing costs $0.003 a call, paid from channel deposits of up to $0.25 that stay yours until spent; each deposit counts against these limits. Using these limits or choosing your own also approves the routing fee. To use these limits, run `tenjin config set maxAutoSpend 0.25`; to choose your own, run `tenjin config set maxAutoSpend <usd>` and `tenjin config set sessionBudget <usd|none>`.',
-    );
-    expect(unpaidNotice('limit_below_deposit', {}, 'agent')).toContain('Ask the user: May Tenjin');
-  });
-
-  it('offers an agent three answers, each applied by one install command', () => {
+  it('asks the defaults or your own limits, with the fee terms either answer approves', () => {
     expect(spendChoiceQuestion()).toBe(
-      'How much may Tenjin pay for tool calls without asking you each time? Routing costs $0.003 a call, paid from channel deposits of up to $0.25 that stay yours until spent; each deposit counts against these limits. Using these limits or choosing your own also approves the routing fee.',
+      'Use the defaults ($5 a day, $0.25 a call) or set your own limits. Routing costs $0.003 a call, paid from channel deposits of up to $0.25 that stay yours until spent; each deposit counts against these limits. Either answer also approves the routing fee.',
     );
-    const options = spendOptions(shownLimits({}), 'tenjin install');
+  });
+
+  it('offers an agent two answers, each applied by one install command', () => {
+    const options = spendOptions('tenjin install');
     expect(options.map((o) => [o.label, o.recommended, o.command])).toEqual([
-      ['Default: up to $0.25 a call and $5 a day', true, 'tenjin install --yes'],
-      ['Custom limits', false, 'tenjin install --max-auto-spend <usd> --session-budget <usd|none>'],
-      ['No automatic spending', false, null],
+      ['Use the defaults', true, 'tenjin install --yes'],
+      [
+        'Set my own limits',
+        false,
+        'tenjin install --max-auto-spend <usd> --session-budget <usd|none>',
+      ],
     ]);
-    // No answer is a command for the person, or one joined with funding.
-    for (const o of options) expect(o.command ?? '').not.toMatch(/&&|;|wallet fund|config set/);
+    // No answer turns automatic spending off, and none is a command for the
+    // person or one joined with funding.
+    for (const o of options) {
+      expect(o.command).not.toMatch(/&&|;|wallet fund|config set/);
+      expect(o.label).not.toMatch(/no automatic/i);
+    }
   });
 });

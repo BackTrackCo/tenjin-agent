@@ -97,7 +97,7 @@ describe('routingFeeBlock', () => {
     expect(await routingFeeBlock(input({ policy: { ...POLICY, ...change } }))).toBe(why);
   });
 
-  it('names unanswered limits before a locked wallet, as the payer meets them', async () => {
+  it('names a zero per-call limit before a locked wallet, as the payer meets them', async () => {
     expect(
       await routingFeeBlock(
         input({ provider: verified('unverified'), policy: { ...POLICY, maxAutoSpendAtomic: 0n } }),
@@ -116,22 +116,12 @@ describe('routingFeeBlock', () => {
 });
 
 describe('routingFeeRow', () => {
-  it('points an unanswered limit at the spend question, with its fee terms and one-step yes', () => {
-    const row = routingFeeRow('limit_below_deposit', 'tenjin.sh', {
-      limits: { maxAutoSpend: '250000', sessionBudget: '5000000' },
-    });
+  it('raises a limit an earlier release left below the deposit to the $0.25 floor, and says why', () => {
+    const row = routingFeeRow('limit_below_deposit', 'tenjin.sh');
     expect(row.status).toBe('warn');
-    expect(row.fix).toContain('May Tenjin pay for tool calls without asking you each time');
-    expect(row.fix).toContain('Routing costs $0.003 a call');
-    expect(row.fix).toContain('`tenjin config set maxAutoSpend 0.25`');
-    expect(row.fix).not.toContain('tenjin install --yes');
-    expect(row.fix).not.toContain('Raise it');
-  });
-
-  it('keeps the raise command for a limit the user chose', () => {
-    expect(routingFeeRow('limit_below_deposit', 'tenjin.sh', null).fix).toBe(
-      'Raise it with `tenjin config set maxAutoSpend 0.25`.',
-    );
+    expect(row.fix).toContain('Raise it with `tenjin config set maxAutoSpend 0.25`.');
+    expect(row.fix).toContain('the routing deposit: below it, routing cannot pay');
+    expect(row.fix).toContain('`tenjin config set router.enabled false`');
   });
 });
 

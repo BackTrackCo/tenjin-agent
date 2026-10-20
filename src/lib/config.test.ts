@@ -89,7 +89,7 @@ describe('resolveSettings — precedence and provenance', () => {
     const config = await loadRawConfig(dir);
     const s = resolveSettings({ config, flags: {}, env: {} });
     expect(s.baseUrl).toEqual({ value: CONFIG_DEFAULTS.baseUrl, source: 'default' });
-    expect(s.maxAutoSpend).toEqual({ value: '0', source: 'default' });
+    expect(s.maxAutoSpend).toEqual({ value: '250000', source: 'default' });
   });
 
   it('reports file provenance for a file-set key', async () => {

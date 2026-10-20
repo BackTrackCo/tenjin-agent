@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import pkg from '../../package.json';
-import { loadRawConfig } from '../lib/config';
+import { MAX_AUTO_SPEND_FLOOR_ATOMIC, MAX_AUTO_SPEND_FLOOR_WHY } from '../lib/config';
 import { CliError } from '../lib/errors';
 import { toMoney } from '../lib/money';
 import { evaluateSpendPolicy, type SpendPolicy } from '../lib/policy';
@@ -42,13 +42,6 @@ import { folderState, readPluginListing, type PluginScope } from './plugin-regis
 import { probeRouter, type RouterCheck } from './reachability';
 import { readMcpServers, type InstalledAt, type ListMcpProcesses } from './mcp-processes';
 import { clearRouterMemo, readRouterMemo, type RouterMemo } from './router-memo';
-import {
-  ACCEPT_COMMAND,
-  OWN_LIMITS_COMMANDS,
-  shownLimits,
-  spendQuestion,
-  type RouterLimits,
-} from './spend-question';
 
 /**
  * `tenjin doctor` for the router product: the things that decide whether a
@@ -124,14 +117,9 @@ export async function runRouterDoctor(
   }
   checks.push(routingCheck(router));
   checks.push((await readMcpServers(deps, { settingsInstallPending: legacy.present })).check);
-  const rawConfig = await loadRawConfig(ctx.dataDir);
-  const unanswered =
-    rawConfig.maxAutoSpend === undefined ? { limits: shownLimits(rawConfig) } : null;
-  checks.push(
-    spendCheck(settings.policy.maxAutoSpendAtomic, settings.policy.sessionBudgetAtomic, unanswered),
-  );
+  checks.push(spendCheck(settings.policy.maxAutoSpendAtomic, settings.policy.sessionBudgetAtomic));
   checks.push(experimentalCheck(settings.experimentalBazaar));
-  checks.push(await routingFeeCheck(ctx, settings, deps.fetchImpl, unanswered));
+  checks.push(await routingFeeCheck(ctx, settings, deps.fetchImpl));
   checks.push(...(await walletCheck(ctx)));
   const now = deps.now?.() ?? Date.now();
   const probe = await probeRouter(settings.baseUrl, {
@@ -541,7 +529,6 @@ async function routingFeeCheck(
   ctx: CommandContext,
   settings: ResolvedSettings,
   fetchImpl: typeof fetch | undefined,
-  unanswered: { limits: RouterLimits } | null,
 ): Promise<RouterCheck> {
   let host: string;
   try {
@@ -564,15 +551,11 @@ async function routingFeeCheck(
     provider: (await walletFileExists(ctx.dataDir)) ? resolveWalletProvider(ctx) : null,
     ...(fetchImpl !== undefined ? { fetchImpl } : {}),
   }).catch(() => null);
-  return routingFeeRow(why, host, unanswered);
+  return routingFeeRow(why, host);
 }
 
 /** The routing-fee row for what {@link routingFeeBlock} found. */
-export function routingFeeRow(
-  why: string | null,
-  host: string,
-  unanswered: { limits: RouterLimits } | null,
-): RouterCheck {
+export function routingFeeRow(why: string | null, host: string): RouterCheck {
   const u = why === null ? null : unpaid(why);
   if (why === null || u === null) {
     return {
@@ -582,20 +565,9 @@ export function routingFeeRow(
       detail: `$${usd(ROUTING_FEE_ATOMIC)} a call, paid from channel deposits of up to $${usd(CHANNEL_DEPOSIT_ATOMIC)} that count against the spend limits`,
     };
   }
-  if (why === 'limit_below_deposit' && unanswered !== null) {
-    // The zero is the open spend question, not a limit anyone chose: the fix
-    // is the question itself, with the fee terms it approves.
-    return {
-      name: 'routing fee',
-      status: 'warn',
-      required: false,
-      detail: 'the spend limits are not answered yet, so routing calls take the free path',
-      fix: `Answer the spend question: ${spendQuestion(unanswered.limits)} For a yes, run \`${ACCEPT_COMMAND}\`; for other amounts, ${OWN_LIMITS_COMMANDS}.`,
-    };
-  }
   const fixes: Record<string, string> = {
     no_wallet: `Run \`tenjin wallet create\`, then \`tenjin wallet fund ${SUGGESTED_FUND_USD}\`.`,
-    limit_below_deposit: `Raise it with \`tenjin config set maxAutoSpend ${usd(CHANNEL_DEPOSIT_ATOMIC)}\`.`,
+    limit_below_deposit: RAISE_TO_FLOOR,
     budget_reached:
       'Room comes back as the rolling day passes, or raise it with `tenjin config set sessionBudget <usd>`.',
     not_allowlisted: `Add ${host} to allowlistCreators, or clear the allowlist.`,
@@ -625,8 +597,8 @@ export interface RoutingFeeInput {
 export async function routingFeeBlock(input: RoutingFeeInput): Promise<string | null> {
   const { provider, policy } = input;
   // The fee's per-payment checks first, before the wallet, as the payer runs
-  // them on every call: a channel with credit pays nothing they refuse, and
-  // unanswered limits are the question to name, not the passphrase.
+  // them on every call: a channel with credit pays nothing they refuse, and a
+  // limit below the deposit is the fix to name, not the passphrase.
   const refused = feeRefusal(policy, input.host);
   if (refused !== null) return refused;
   if (provider === null) return 'no_wallet';
@@ -670,19 +642,16 @@ function experimentalCheck(bazaar: boolean): RouterCheck {
   };
 }
 
+/** The fix for a per-call limit a file holds below the $0.25 floor. */
+const RAISE_TO_FLOOR = `Raise it with \`tenjin config set maxAutoSpend ${toMoney(MAX_AUTO_SPEND_FLOOR_ATOMIC.toString()).usd}\`. ${MAX_AUTO_SPEND_FLOOR_WHY}`;
+
 /**
- * `unanswered` is set when the config file names no `maxAutoSpend`: the state
- * an install that could not ask leaves, the same as a cancel at its selector.
- * The code default's zero holds, and that is a question still open, not a
- * broken machine, so it warns with the question and its one-step yes, and the
- * checks after it (the router probe above all) still print. A 0 the user
- * wrote is their answer and stays a failure.
+ * The two limits: the daily budget is the control, the per-call ceiling the
+ * runaway guard. Nothing writes a per-call limit below the $0.25 floor any
+ * more, but a file from an earlier release may hold one: a zero pays for
+ * nothing and fails; anything else under it shrinks the routing deposit and warns.
  */
-function spendCheck(
-  maxAutoSpendAtomic: bigint,
-  sessionBudgetAtomic: bigint | null,
-  unanswered: { limits: RouterLimits } | null,
-): RouterCheck {
+function spendCheck(maxAutoSpendAtomic: bigint, sessionBudgetAtomic: bigint | null): RouterCheck {
   if (sessionBudgetAtomic === 0n) {
     return {
       name: 'spend',
@@ -692,22 +661,16 @@ function spendCheck(
       fix: 'Choose a daily limit with `tenjin config set sessionBudget <usd|none>`.',
     };
   }
-  if (maxAutoSpendAtomic === 0n && unanswered !== null) {
+  if (maxAutoSpendAtomic < MAX_AUTO_SPEND_FLOOR_ATOMIC) {
+    const zero = maxAutoSpendAtomic === 0n;
     return {
       name: 'spend',
-      status: 'warn',
-      required: false,
-      detail: `the spend limits are not answered yet, so automatic payments are off and every lookup needs approval. Ask the user: ${spendQuestion(unanswered.limits)}`,
-      fix: `Answer the spend question: for a yes, run \`${ACCEPT_COMMAND}\`; for other amounts, ${OWN_LIMITS_COMMANDS}.`,
-    };
-  }
-  if (maxAutoSpendAtomic === 0n) {
-    return {
-      name: 'spend',
-      status: 'fail',
-      required: true,
-      detail: 'maxAutoSpend is 0, so every lookup needs approval and none can pay',
-      fix: 'Set a per-call limit with `tenjin config set maxAutoSpend <usd>`.',
+      status: zero ? 'fail' : 'warn',
+      required: zero,
+      detail: zero
+        ? 'maxAutoSpend is 0, so every lookup needs approval and none can pay'
+        : `maxAutoSpend is ${toMoney(maxAutoSpendAtomic.toString()).usd} USD, below the 0.25 USD minimum, so routing deposits are sized down to it`,
+      fix: RAISE_TO_FLOOR,
     };
   }
   const budget =
