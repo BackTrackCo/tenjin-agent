@@ -31,13 +31,6 @@ export interface SpendGateInput {
   /** Interactive-confirm seam; defaults to a TTY y/n prompt. */
   confirm?: (prompt: string) => Promise<boolean>;
   /**
-   * PAY ONCE. Asked only when an automatic payment is refused as over
-   * `maxAutoSpend`, with the exact amount refused. True re-runs the gate's
-   * authorization once, in automatic mode, with that amount as the approval;
-   * false, or a throw, keeps the refusal. Never asked for any other reason.
-   */
-  approveOverLimit?: (amountAtomic: bigint) => Promise<boolean>;
-  /**
    * Who the human is told they are paying, PRE-SANITIZED by the caller (it
    * knows which parts are external input). Rendered before the price so escape
    * sequences could never repaint the amount being approved.
@@ -54,28 +47,13 @@ export interface SpendGateInput {
  *  Throws POLICY_REFUSED (deny, or confirm declined), releasing first. */
 export async function gateSpend(input: SpendGateInput): Promise<string | undefined> {
   const { authorizer, amountAtomic } = input;
-  const authorize = (approval?: bigint) =>
-    authorizer.authorize({
-      mode: input.mode,
-      amountAtomic,
-      creator: input.creator,
-      ...(input.maxPriceAtomic !== undefined ? { maxPriceAtomic: input.maxPriceAtomic } : {}),
-      ...(input.requestKey !== undefined ? { requestKey: input.requestKey } : {}),
-      ...(approval !== undefined ? { autoSpendApprovalAtomic: approval } : {}),
-    });
-  let authorization = await authorize();
-  // The approval is bound to this call and this exact amount, and lifts only
-  // the per-call ceiling: the re-run meets the price cap, the allowlist, the
-  // daily budget and the duplicate guard again, and a refusal there stands.
-  if (
-    authorization.decision === 'deny' &&
-    authorization.reason === 'above_auto_spend' &&
-    input.mode === 'automatic' &&
-    input.approveOverLimit !== undefined &&
-    (await input.approveOverLimit(amountAtomic).catch(() => false))
-  ) {
-    authorization = await authorize(amountAtomic);
-  }
+  const authorization = await authorizer.authorize({
+    mode: input.mode,
+    amountAtomic,
+    creator: input.creator,
+    ...(input.maxPriceAtomic !== undefined ? { maxPriceAtomic: input.maxPriceAtomic } : {}),
+    ...(input.requestKey !== undefined ? { requestKey: input.requestKey } : {}),
+  });
   if (authorization.decision === 'deny') {
     throw new CliError('POLICY_REFUSED', authorization.message, {
       fix: policyFix(authorization.reason, input.allowlistSubject),
@@ -102,7 +80,7 @@ export async function gateSpend(input: SpendGateInput): Promise<string | undefin
   return reservationId;
 }
 
-/** The command or setting that clears a refusal, by its policy reason. */
+/** What follows a refusal, by its policy reason. */
 export function policyFix(reason: string, allowlistSubject: string): string {
   switch (reason) {
     case 'price_cap_exceeded':
@@ -110,11 +88,11 @@ export function policyFix(reason: string, allowlistSubject: string): string {
     case 'not_allowlisted':
       return `Add ${allowlistSubject} to allowlistCreators, or clear the allowlist.`;
     case 'session_budget_exceeded':
-      return 'Raise sessionBudget with `tenjin config set sessionBudget <usd>`, or wait for the window to roll over.';
+      return "Today's automatic budget is spent; it comes back as the rolling 24 hours pass. Nothing more is paid without the user's yes.";
     case 'duplicate_in_flight':
       return 'Let the in-flight request finish and read its result; retrying the same request does not renew authorization.';
     default:
-      return 'Adjust your spend policy with `tenjin config set`.';
+      return "This is over what this machine pays without asking, so it is not paid without the user's yes.";
   }
 }
 

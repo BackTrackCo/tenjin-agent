@@ -23,7 +23,7 @@ import {
 import { markHeld, markNative } from './held';
 import { storeChoices, storeSpecs } from './specs';
 import { requestDecision, ROUTER_PATH, type HookDecision } from './decision';
-import { FEE_REQUIRED, firstNoticeFor, isFeeRequired, type RouteFor } from './fee';
+import { depositSentence, FEE_REQUIRED, firstNoticeFor, isFeeRequired, type RouteFor } from './fee';
 import { unpaidNotice } from './spend-question';
 import { readsAsEmptyPage, savedPdfOf } from './fetch-result';
 import { GATE_TIMEOUT_MS } from './gate';
@@ -613,15 +613,11 @@ async function spendShortfall(
   deadline: number,
 ): Promise<Shortfall | null> {
   const price = `$${toMoney(decision.providerPriceAtomic).usd}`;
-  // Pay once covers the automatic limit alone: over it, `request` asks the
-  // user itself where the client shows the dialog, so the line never says to.
-  const approval = (detail: string, payOnce = false): Shortfall => ({
+  // Over a limit, `request` asks the user itself where the client shows the
+  // dialog, so the line never tells the agent to ask first.
+  const approval = (detail: string): Shortfall => ({
     withheld: 'offer needs approval',
-    note:
-      `Note: ${price} ${detail}; request ` +
-      (payOnce
-        ? 'asks the user itself to pay it once where it can, and otherwise returns needs_approval with the command the user runs.'
-        : 'returns needs_approval with the command the user runs.'),
+    note: `Note: ${price} ${detail}; request asks the user itself where it can, and otherwise pays nothing and returns needs_approval with what it costs.`,
   });
   let rpcUrl: string;
   try {
@@ -638,7 +634,6 @@ async function spendShortfall(
       return evaluation.reason === 'above_auto_spend'
         ? approval(
             `is above this machine's automatic per-call limit ($${toMoney(settings.policy.maxAutoSpendAtomic.toString()).usd})`,
-            true,
           )
         : approval("needs approval under this machine's spend limits");
     }
@@ -664,10 +659,11 @@ async function spendShortfall(
     );
     return null;
   }
-  return balance < BigInt(decision.providerPriceAtomic)
+  const short = BigInt(decision.providerPriceAtomic) - balance;
+  return short > 0n
     ? {
         withheld: 'wallet needs USDC',
-        note: `Note: the wallet holds $${toMoney(balance.toString()).usd}; fund it with \`tenjin wallet fund\`.`,
+        note: `Note: the wallet holds $${toMoney(balance.toString()).usd}, $${toMoney(short.toString()).usd} short of its ${price}; fund it with \`tenjin wallet fund\`.`,
       }
     : null;
 }
@@ -1584,6 +1580,10 @@ async function decide(
       ...(route !== null ? { route } : {}),
     },
   );
+  // A DEPOSIT IS NEWS ONCE, when it is taken: it moved money into routing
+  // credit, and the user would otherwise see it only as spend.
+  const deposited = route?.deposited?.() ?? 0n;
+  if (deposited > 0n) deps.notice?.(depositSentence(deposited));
   const why =
     outcome.status === 'skipped'
       ? outcome.why

@@ -178,6 +178,21 @@ describe('the hook legs and the routing fee', () => {
     expect([...fake.channels.values()][0]!.charged).toBe(2n * ROUTING_FEE_ATOMIC);
   });
 
+  it('tells the user once, beside the offer, that the deposit became routing credit', async () => {
+    const fake = new FakeRouter();
+    fake.body = OFFER;
+    const p = payer(fake);
+    const first = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
+    expect(contextOf(first)).toContain('CoinMarketCap fits this');
+    expect(systemMessageOf(first)).toBe(
+      'Tenjin moved $0.25 into prepaid routing credit; each routing call uses $0.003.',
+    );
+    // A voucher from that deposit is nothing new.
+    const second = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
+    expect(systemMessageOf(second)).toBeUndefined();
+    expect(fake.deposits).toBe(1);
+  });
+
   it("takes the free path, and says nothing, when another session's call holds the channel", async () => {
     const fake = new FakeRouter();
     await runPromptHook(prompt(), deps(fake.fetch, payer(fake)));
@@ -196,7 +211,7 @@ describe('the hook legs and the routing fee', () => {
     [
       'the wallet holds less than the deposit',
       { walletBalance: async () => 50_000n },
-      '`tenjin wallet fund 0.25`',
+      '`tenjin wallet fund 5`',
     ],
     [
       'the wallet cannot be unlocked',
@@ -375,7 +390,7 @@ describe('the hook legs and the routing fee', () => {
     return { fetchImpl, paid: () => paid };
   }
 
-  it('gives a deposit call the longer budget: a settle at about 4 s is paid and says nothing', async () => {
+  it('gives a deposit call the longer budget: a settle at about 4 s is paid and names only the deposit', async () => {
     const fake = new FakeRouter();
     fake.body = OFFER;
     fake.delayMs = GATE_TIMEOUT_MS + 400;
@@ -383,7 +398,7 @@ describe('the hook legs and the routing fee', () => {
     const answer = await runHookKind('prompt', prompt(), deps(fake.fetch, payer(fake)));
     expect(Date.now() - started).toBeGreaterThan(GATE_TIMEOUT_MS);
     expect(contextOf(answer)).toContain('CoinMarketCap fits this');
-    expect(systemMessageOf(answer)).toBeUndefined();
+    expect(systemMessageOf(answer)).toContain('into prepaid routing credit');
     expect(fake.deposits).toBe(1);
     expect(fake.log.at(-1)).toBe('POST /api/x402-router/route paid');
     const ledger = await readSpendSummary(dir);

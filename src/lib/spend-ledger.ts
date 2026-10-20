@@ -132,6 +132,9 @@ export interface SpendSummary {
   windowStartMs: number;
   committedAtomic: string;
   automaticCommittedAtomic?: string;
+  /** The window's transmitted authorizations by key; a routing deposit's is
+   *  `routing-deposit:<id>`. */
+  exposures?: Exposure[];
   reservations: {
     amountAtomic: string;
     atMs: number;

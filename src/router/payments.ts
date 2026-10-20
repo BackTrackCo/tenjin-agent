@@ -1,8 +1,81 @@
-import { toMoney } from '../lib/money';
+import { ATOMIC_RE } from '../lib/ids';
+import { formatUsdDisplay, toMoney } from '../lib/money';
+import { sanitizeForTerminal } from '../lib/output';
 import { paidLedgerPath } from '../lib/paths';
 import { resolveContextSettings } from '../lib/settings';
 import type { CommandContext, CommandResult } from '../context';
-import { reconcilePayments } from './paid';
+import { readPaidRecords, reconcilePayments, type Settlement } from './paid';
+
+/** How many of the newest records a bare `tenjin payments` prints. */
+const LIST_LIMIT = 20;
+
+const SETTLEMENT_WORDS: Record<Settlement, string> = {
+  settled: 'settled',
+  unknown: 'unknown',
+  not_charged: 'not charged',
+};
+
+/**
+ * `tenjin payments`: the newest paid lookups in the ledger, newest first, at
+ * most {@link LIST_LIMIT}. It reads the local file and nothing else; a record
+ * whose settlement is unknown stays unknown here until `reconcile` asks.
+ */
+export async function runPaymentsList(ctx: CommandContext): Promise<CommandResult> {
+  const ledger = paidLedgerPath(ctx.dataDir);
+  const records = (await readPaidRecords(ctx.dataDir)).filter((record) =>
+    ATOMIC_RE.test(record.amountAtomic),
+  );
+  const payments = records
+    .slice(-LIST_LIMIT)
+    .reverse()
+    .map((record) => ({
+      at: record.ts,
+      provider: record.provider,
+      service: record.capabilityId,
+      amount: toMoney(record.amountAtomic),
+      settlement: record.settlement,
+      ...(record.txHash !== undefined ? { txHash: record.txHash } : {}),
+    }));
+  const unknown = records.filter((record) => record.settlement === 'unknown').length;
+  if (payments.length === 0) {
+    return {
+      data: { ledger, total: 0, payments },
+      humanLines: ['No paid lookups on this machine yet.'],
+    };
+  }
+  const header = ['TIME (UTC)', 'PROVIDER', 'SERVICE', 'AMOUNT', 'STATUS', 'TX'];
+  const cells = [
+    header,
+    ...payments.map((p) => [
+      p.at.slice(0, 16).replace('T', ' '),
+      sanitizeForTerminal(p.provider),
+      sanitizeForTerminal(p.service),
+      `$${formatUsdDisplay(p.amount.atomic)}`,
+      SETTLEMENT_WORDS[p.settlement] ?? p.settlement,
+      p.txHash ?? '',
+    ]),
+  ];
+  const width = header.map((_, i) => Math.max(...cells.map((row) => (row[i] ?? '').length)));
+  return {
+    data: { ledger, total: records.length, payments },
+    humanLines: [
+      ...cells.map((row) =>
+        row
+          .map((cell, i) => cell.padEnd(width[i] ?? 0))
+          .join('  ')
+          .trimEnd(),
+      ),
+      records.length > payments.length
+        ? `The newest ${payments.length} of ${records.length}; every one is in ${ledger}.`
+        : `From ${ledger}.`,
+      ...(unknown > 0
+        ? [
+            `${unknown} with settlement unknown: \`tenjin payments reconcile\` asks the chain once they expire.`,
+          ]
+        : []),
+    ],
+  };
+}
 
 /**
  * `tenjin payments reconcile`: settle every "settlement unknown" record in the
