@@ -323,3 +323,19 @@ test("a job poll draws nothing: it repeats the starting call's result and cost",
     await ui.unmount();
   }
 });
+
+test('an empty job is not a poll: the paid call draws its row', async ($, on) => {
+  const { files } = machine(on);
+  await keepSpec(files, OFFER, EXA);
+  on('tool.call', { tool: TOOL }, async () => ({ result: PAID, text: PAID }));
+  await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_empty', id: OFFER, input: INPUT, job: '' });
+  const ended = toolRow('toolu_empty', TOOL, { id: OFFER, input: INPUT, job: '' }, PAID);
+  const ui = await $.ui.mount({
+    plugin: 'tenjin',
+    surface: 'terminal',
+    component: 'ToolGroup',
+    props: groupOf([ended]),
+  });
+  expect(await rowText(ui)).toBe('Called Exa search · $0.04 (ctrl+o to expand)');
+  await ui.unmount();
+});

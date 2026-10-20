@@ -42,6 +42,8 @@ describe('the payments one result made', () => {
     const done = { status: 'fulfilled', cost: costLines(420_000n) };
     expect(paymentsOf(done, { job: 'job-1' })).toEqual([]);
     expect(paymentsOf(done)).toEqual([420_000n]);
+    // An empty `job` is not a poll: the call ran and paid as any other.
+    expect(paymentsOf(done, { job: '' })).toEqual([420_000n]);
   });
 
   it('counts a call that failed after its payment left', () => {

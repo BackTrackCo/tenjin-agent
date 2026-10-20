@@ -2567,7 +2567,8 @@ export function paymentsOf(
 ): bigint[] {
   // A job poll pays nothing: its result repeats what the call that started
   // the job paid, which that call already counted.
-  if (args.job !== undefined) return [];
+  // The same test the request tool runs before it polls: a nonempty `job`.
+  if (args.job !== undefined && args.job.length > 0) return [];
   const steps = Array.isArray(envelope.results) ? (envelope.results as unknown[]) : [envelope];
   return steps
     .map((step) =>

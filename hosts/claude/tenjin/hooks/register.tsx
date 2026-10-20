@@ -86,7 +86,7 @@ export const register: Register = (on) => {
     const ended = endOf(envelopeOf(ran.text));
     const label = row?.label ?? ended.label;
     // A job poll is not a lookup of its own (see `rowOf`).
-    if (label !== undefined && typeof e.job !== 'string') {
+    if (label !== undefined && !isJobPoll(e)) {
       await $.state.set(ref, { ...row, ...ended, label });
       $.ui.invalidate('ui.render');
     }
@@ -249,7 +249,7 @@ async function rowOf(
 ): Promise<TenjinRow | null> {
   const stored = await row($, id);
   // A JOB POLL repeats the result and the cost of the call that started it.
-  if (typeof asRecord(call.input)?.job === 'string') return null;
+  if (isJobPoll(asRecord(call.input))) return null;
   const envelope = envelopeOf(textOf(call.output));
   const ended =
     envelope !== undefined ? endOf(envelope) : call.isInterrupted ? { status: 'interrupted' } : {};
@@ -406,6 +406,11 @@ async function offerRecord(
 
 const row = async ($: Dollar, id: string) => (await $.state.get({ ...ROWS, id })).value;
 const link = async ($: Dollar, id: string) => (await $.state.get({ ...LINKS, id })).value;
+
+/** A `{job}` poll, as the CLI reads one: a nonempty `job` (`tool.ts`). */
+function isJobPoll(args: Json | undefined): boolean {
+  return typeof args?.job === 'string' && args.job.length > 0;
+}
 
 /** The native tool and what it was asked, as one key. */
 function nativeKey(tool: string, input: unknown): string | undefined {
