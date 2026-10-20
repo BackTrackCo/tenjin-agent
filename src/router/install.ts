@@ -56,6 +56,7 @@ import {
 } from './spend-question';
 import { underAgentHarness } from '../lib/session';
 import type { FundLink } from '../commands/fund';
+import type { TenjinSigner } from '../lib/wallet/provider';
 
 /**
  * `tenjin install` for the router product: the wallet, the spend limits, and
@@ -161,6 +162,10 @@ export interface RouterInstallDeps extends WalletDeps {
   fundLink?: (ctx: CommandContext, address: string) => Promise<FundLink>;
   /** The wallet's USDC balance in atomic units; production reads Base. */
   walletBalance?: (address: string, rpcUrl: string) => Promise<bigint>;
+  /** Unlocks the wallet's signer for the fund link, never with a prompt; production reads the OS store. */
+  unlockSigner?: (ctx: CommandContext) => Promise<TenjinSigner>;
+  /** How long the fund link waits for that unlock; {@link UNLOCK_TIMEOUT_MS} unless a test shortens it. */
+  unlockTimeoutMs?: number;
 }
 
 export type LimitsChoice = 'approve' | 'own';
@@ -801,7 +806,8 @@ async function fundStep(
           () => null,
         );
   if (funded === true) return undefined;
-  const minted = await (deps.fundLink ?? mintInstallFundLink)(ctx, address).then(
+  const mint = deps.fundLink ?? ((c: CommandContext, a: string) => mintInstallFundLink(c, a, deps));
+  const minted = await mint(ctx, address).then(
     (link) => link,
     (err: unknown) => ({ reason: err instanceof Error ? err.message : String(err) }),
   );
@@ -844,12 +850,39 @@ export function validFor(ms: number): string {
   return `${minutes} ${minutes === 1 ? 'minute' : 'minutes'}`;
 }
 
-/** Never a passphrase prompt for a link: a wallet that cannot unlock gets the address alone. */
-async function mintInstallFundLink(ctx: CommandContext, address: string): Promise<FundLink> {
+/** How long install waits for the wallet to unlock before it hands over the address alone. */
+export const UNLOCK_TIMEOUT_MS = 3_000;
+/** The reason a link was not minted when the wallet did not unlock in time. */
+export const UNLOCK_TIMEOUT_REASON = 'it needs an unlocked wallet; run `tenjin wallet fund` later';
+
+/**
+ * Never a passphrase prompt for a link, and never a wait without end: a locked
+ * or stalled OS store would otherwise hold the whole install, so the agent got
+ * neither the funding question nor the completion. A wallet that cannot unlock
+ * in time gets the address alone.
+ */
+async function mintInstallFundLink(
+  ctx: CommandContext,
+  address: string,
+  deps: RouterInstallDeps,
+): Promise<FundLink> {
   const { mintFundLink } = await import('../commands/fund');
+  const unlock = deps.unlockSigner ?? defaultUnlockSigner;
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(UNLOCK_TIMEOUT_REASON)),
+      deps.unlockTimeoutMs ?? UNLOCK_TIMEOUT_MS,
+    );
+    timer.unref();
+  });
+  const signer = await Promise.race([unlock(ctx), timeout]).finally(() => clearTimeout(timer));
+  return mintFundLink(ctx, signer, address, { purpose: 'install' });
+}
+
+async function defaultUnlockSigner(ctx: CommandContext): Promise<TenjinSigner> {
   const { resolveWalletProvider } = await import('../lib/wallet');
-  const provider = resolveWalletProvider({ ...ctx, io: { ...ctx.io, isTTY: false } });
-  return mintFundLink(ctx, await provider.getSigner(), address, { purpose: 'install' });
+  return resolveWalletProvider({ ...ctx, io: { ...ctx.io, isTTY: false } }).getSigner();
 }
 
 /** Loaded lazily: the status line shares this module's chunk and must not load viem. */

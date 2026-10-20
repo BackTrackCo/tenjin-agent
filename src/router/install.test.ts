@@ -1,10 +1,11 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { stripVTControlCharacters } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { loadRawConfig } from '../lib/config';
 import { CliError } from '../lib/errors';
-import { runRouterInstall } from './install';
+import { runRouterInstall, UNLOCK_TIMEOUT_REASON } from './install';
 import type { CommandContext } from '../context';
 
 /**
@@ -1271,6 +1272,29 @@ describe('install run by an agent asks each question where its answer is needed'
       show: `To add funds, send USDC on Base to ${ADDRESS}.`,
       reason: 'Coinbase Onramp is not available in your region.',
     });
+  });
+
+  it('a wallet that never unlocks still finishes the install, with the address alone', async () => {
+    // A locked or stalled OS store: the unlock never settles.
+    const unlockSigner = vi.fn(() => new Promise<never>(() => undefined));
+    const result = await runRouterInstall(
+      { yes: true },
+      ctx(),
+      deps({ env: HARNESS_ENV, fundLink: undefined, unlockSigner, unlockTimeoutMs: 20 }),
+    );
+    expect(unlockSigner).toHaveBeenCalledOnce();
+    expect(stepsOf(result)[0]).toMatchObject({
+      id: 'fund',
+      url: null,
+      expiresAt: null,
+      show: `To add funds, send USDC on Base to ${ADDRESS}.`,
+      reason: UNLOCK_TIMEOUT_REASON,
+    });
+    expect(
+      result
+        .humanLines!.filter((line) => line.includes('No fund link'))
+        .map(stripVTControlCharacters),
+    ).toEqual([`! No fund link: ${UNLOCK_TIMEOUT_REASON}`]);
   });
 
   it('a person at a terminal gets what it always got: no questions handed over, no link', async () => {
