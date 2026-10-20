@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { heldRowPath, markHeld, readHeld } from './held';
 import { readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -223,6 +224,13 @@ describe('the request tool, one decision and one payment per lookup', () => {
     expect(calls[0]!.method).toBe('POST');
     expect(calls[0]!.url).toBe(`${ROUTER}${ROUTER_PATH}`);
     expect(calls.filter((c) => c.paid)).toHaveLength(1);
+  });
+
+  it('marks a native call held for its id as routed', async () => {
+    const { fetchImpl } = net([{ url: ROUTER, status: 200, body: decision() }, ...providerLegs()]);
+    await markHeld(dir, 'toolu_held', { offerId: 'k3f9-abcd', priceAtomic: '10000' });
+    await runRequestTool({ query: 'BTC and ETH price', id: 'k3f9-abcd' }, deps(fetchImpl));
+    expect((await readHeld(heldRowPath(dir, 'toolu_held')))?.outcome).toBe('routed');
   });
 
   it('works the same with no id at all', async () => {

@@ -7,6 +7,7 @@ import { rememberingBalanceReader } from '../lib/usdc-balance';
 import { WalletRecordSchema } from '../lib/wallet/store';
 import { createLocalSpendAuthorizer } from '../lib/wallet/spend';
 import type { OfferSpec } from './decision';
+import { markHeld, markRouted } from './held';
 import { WALLET_CREATED_FILE, writeWalletCreated } from './mod-state';
 import { appendPaidRecord } from './paid';
 import { claimSpecPayment, settleSpecPayment, storeSpecs } from './specs';
@@ -113,6 +114,21 @@ describe('the state contract between the CLI and the mod', () => {
 
   it('keeps the wallet address top-level, readable without the passphrase', () => {
     expect(Object.keys(WalletRecordSchema.shape)).toContain('address');
+  });
+
+  it('keeps a held native call under the SHA-256 of its tool_use_id, and marks it routed', async () => {
+    await markHeld(dir, 'toolu_held', { offerId: ID, label: 'Exa search', priceAtomic: '7000' }, 1);
+    const path = `progress/held/${sha256('toolu_held')}.json`;
+    expect(await json(path)).toEqual({
+      version: 1,
+      at: 1,
+      outcome: 'held',
+      label: 'Exa search',
+      priceAtomic: '7000',
+      offerId: ID,
+    });
+    await markRouted(dir, ID, 2);
+    expect(await json(path)).toMatchObject({ version: 1, outcome: 'routed', offerId: ID });
   });
 
   it('marks a wallet the install created in this run', async () => {

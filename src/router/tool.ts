@@ -46,6 +46,7 @@ import { FEE_REQUIRED, isFeeRequired, unpaidSentence, type RouteFor } from './fe
 import { unpaidNotice } from './spend-question';
 import { clearRouterMemo } from './router-memo';
 import { loadRawConfig } from '../lib/config';
+import { markRouted } from './held';
 import { openLookupFooter, type LookupFooter } from './progress';
 import { saveInlineMedia } from './inline-media';
 import {
@@ -250,6 +251,8 @@ export async function runRequestTool(
   // the terminal while it runs, resolved to a session through the hook's own
   // binding for the line's id (never a chosen option's), and every call on it
   // swallows its own failure.
+  // A native call held for this offer now reads as routed in the mod's row.
+  if (offered !== undefined) await markRouted(deps.ctx.dataDir, offered);
   const footer = await openLookupFooter(deps.ctx.dataDir, {
     ...(offered !== undefined ? { id: offered } : {}),
   });

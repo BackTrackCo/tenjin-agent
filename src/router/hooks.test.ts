@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { heldRowPath, readHeld } from './held';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -3026,7 +3027,9 @@ describe('a discovered service', () => {
 
   it('denies a native call once, with the one-block sentence', async () => {
     const { fetchImpl } = router(DISCOVERED);
-    const event = await preCall('sound effect generator api', 'WebSearch');
+    const event = await preCall('sound effect generator api', 'WebSearch', {
+      tool_use_id: 'toolu_held',
+    });
     const out = await runNativeHook(event, { dataDir: dir, baseUrl: BASE, fetchImpl });
     expect(out).toMatchObject({ action: 'discovered', id: ID });
     expect(out.response).toEqual({
@@ -3035,6 +3038,13 @@ describe('a discovered service', () => {
         permissionDecision: 'deny',
         permissionDecisionReason: `${SEEN_LINE} ${ONE_BLOCK}`,
       },
+    });
+    // An offer the model acts on, never a block it narrates.
+    expect(`${SEEN_LINE} ${ONE_BLOCK}`).not.toMatch(/\b(block|blocked|denied|refused)\b/i);
+    // The mod draws this row as held, in place of the engine's hook error.
+    expect(await readHeld(heldRowPath(dir, 'toolu_held'))).toMatchObject({
+      outcome: 'held',
+      offerId: ID,
     });
     // The next discovered offer is withheld while this one is undelivered.
     const again = await runNativeHook(await preCall('sound effect generator api', 'WebSearch'), {

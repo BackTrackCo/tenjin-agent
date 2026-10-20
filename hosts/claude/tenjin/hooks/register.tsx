@@ -8,7 +8,9 @@ import type { TenjinLive, TenjinPaid, TenjinRow } from '../types';
  * permission answer it gives. Surfaces: the request tool's row, the spinner
  * while a paid call runs, a toast and one dim line when a call is paid, one
  * spend line under a turn that paid, the first-run wallet toast, and the
- * prompt hint while the wallet is unfunded. Each says the label, the state and
+ * prompt hint while the wallet is unfunded, and a WebSearch or WebFetch call
+ * held for Tenjin drawn calmly in place of the engine's red hook error. Each
+ * says the label, the state and
  * the price, and nothing the model reads: never a description, URL, input
  * JSON, tool id or `x402`.
  *
@@ -25,6 +27,12 @@ import type { TenjinLive, TenjinPaid, TenjinRow } from '../types';
 
 /** Our request tool, under the plugin's own server. */
 const REQUEST_TOOL = 'mcp__plugin_tenjin_router__request';
+/** The native tools the CLI's pre-call hook can hold for an offer. */
+const NATIVE_TOOLS = new Set(['WebSearch', 'WebFetch']);
+/** A held native call's row, before and after the request call ran its offer. */
+const HELD_HEADER = 'Held for Tenjin';
+/** The spinner's word between a held call and the request call it leads to. */
+const ROUTING_WORD = 'Routing to Tenjin';
 
 const ROWS = { plugin: 'tenjin', key: 'rows' } as const;
 const LIVE = { plugin: 'tenjin', key: 'live' } as const;
@@ -86,6 +94,13 @@ async function onRequest<E extends { tool_use_id: string }>(
 ): Promise<ToolCallResult> {
   const startedAt = await $.clock.now();
   const call = await describeCall($, e);
+  // The held call this one takes up stops being the spinner's newest entry,
+  // and its row, which the CLI now marks routed, redraws collapsed.
+  const offer = (e as { id?: unknown }).id;
+  const takes = new Set([...call.ids, ...(typeof offer === 'string' ? [offer] : [])]);
+  await update($, live, (list) =>
+    list.filter((one) => one.heldOffer === undefined || !takes.has(one.heldOffer)),
+  );
   const ref = { ...ROWS, id: e.tool_use_id };
   await $.state.set(ref, call.row);
   const running: TenjinLive | null =
@@ -95,6 +110,7 @@ async function onRequest<E extends { tool_use_id: string }>(
   if (running !== null) await update($, live, (list) => [...list, running]);
   try {
     const ran = await next(e);
+    if (takes.size > 0) $.ui.invalidate('ui.render');
     const settled = await settleCall($, call, ran, startedAt);
     await $.state.set(ref, { ...call.row, ...settled.row });
     if (settled.paidAtomic !== undefined) {
@@ -133,7 +149,40 @@ export const register: Register = (on) => {
 
   on('tool.call', { tool: REQUEST_TOOL }, ($, e, next) => onRequest($, e, next));
 
+  // A NATIVE CALL THE CLI HELD FOR AN OFFER: its pre-call hook denied it and
+  // wrote the held row. Until the request call takes it up, the spinner says
+  // where the turn is going.
+  on('tool.call', { tool: 'WebSearch' }, async ($, e, next) => {
+    const ran = await next(e);
+    if (ran.deny !== undefined) await noteHeld($, e.tool_use_id);
+    return ran;
+  });
+  on('tool.call', { tool: 'WebFetch' }, async ($, e, next) => {
+    const ran = await next(e);
+    if (ran.deny !== undefined) await noteHeld($, e.tool_use_id);
+    return ran;
+  });
+
+  // ITS ROW: one calm line while held, nothing once the request call ran it
+  // (the request's own row then names the service and its price). Never the
+  // reason the model read, the search or the URL. Any other native row, an
+  // interrupted one included, is the engine's.
   on('ui.render', { component: 'ToolUse' }, async ($, e, next) => {
+    if (NATIVE_TOOLS.has(e.props.tool) && !e.props.isInterrupted) {
+      const held = await heldRow($, e.props.tool_use_id);
+      if (held === null) return next(e);
+      const { Box, Text } = $.ui.resolve(e);
+      if (held.outcome === 'routed') return <Box />;
+      const price = held.priceAtomic !== undefined ? ` · $${usd(held.priceAtomic)}` : '';
+      return (
+        <Box flexDirection="column">
+          <Text bold>{HELD_HEADER}</Text>
+          <Box paddingLeft={2}>
+            <Text dimColor>{`${held.label}${price}`}</Text>
+          </Box>
+        </Box>
+      );
+    }
     if (e.props.tool !== REQUEST_TOOL) return next(e);
     const { value: stored } = await $.state.get({ ...ROWS, id: e.props.tool_use_id });
     const row = stored ?? (await describeCall($, { ...asRecord(e.props.input) })).row;
@@ -169,8 +218,11 @@ export const register: Register = (on) => {
   // The result block under our own row is the text the model read: the
   // provider's host, the envelope's JSON. The row above already says how it
   // ended, so nothing is drawn here.
-  on('ui.render', { component: 'ToolResult' }, ($, e, next) => {
-    if (e.props.tool !== REQUEST_TOOL) return next(e);
+  // A held native call's result is the deny the model read: drawn as nothing.
+  on('ui.render', { component: 'ToolResult' }, async ($, e, next) => {
+    const isHeld =
+      NATIVE_TOOLS.has(e.props.tool) && (await heldRow($, e.props.tool_use_id)) !== null;
+    if (e.props.tool !== REQUEST_TOOL && !isHeld) return next(e);
     const { Box } = $.ui.resolve(e);
     return <Box />;
   });
@@ -178,6 +230,12 @@ export const register: Register = (on) => {
   on('ui.render', { component: 'Spinner' }, async ($, e, next) => {
     const newest = (await read($, live)).at(-1);
     if (newest === undefined) return next(e);
+    if (newest.heldOffer !== undefined) {
+      return next({
+        ...e,
+        props: { ...e.props, word: ROUTING_WORD, suffix: `… · ${newest.label}` },
+      });
+    }
     return next({
       ...e,
       props: {
@@ -219,6 +277,8 @@ export const register: Register = (on) => {
   // the turn of the main loop that spawned it.
   on('turn.start', async ($, e, next) => {
     await $.state.set(TURN, []);
+    // A held call whose request never came is not still routing.
+    await update($, live, (list) => list.filter((one) => one.heldOffer === undefined));
     return next(e);
   });
 
@@ -232,6 +292,47 @@ export const register: Register = (on) => {
     return { ...done, text: done.text === e.answer ? line : `${done.text}\n${line}` };
   });
 };
+
+/** A native call the CLI held: the spinner's newest entry until its request runs. */
+async function noteHeld($: Dollar, toolUseId: string): Promise<void> {
+  const held = await heldRow($, toolUseId);
+  if (held?.outcome !== 'held') return;
+  const entry: TenjinLive = {
+    toolUseId,
+    label: held.label,
+    priceAtomic: held.priceAtomic ?? '0',
+    heldOffer: held.offerId,
+  };
+  await update($, live, (list) => [...list.filter((one) => one.toolUseId !== toolUseId), entry]);
+}
+
+/** A held native call's row, as the CLI writes it (`src/router/held.ts`). */
+interface Held {
+  outcome: 'held' | 'routed';
+  label: string;
+  priceAtomic?: string;
+  offerId: string;
+}
+
+/**
+ * `progress/held/<sha256(tool_use_id)>.json`, version 1, or null: a row the
+ * CLI did not hold, or one of a version this mod does not know, is the
+ * engine's to draw.
+ */
+async function heldRow($: Dollar, toolUseId: string): Promise<Held | null> {
+  const dataDir = await tenjinDataDir($);
+  if (dataDir === null) return null;
+  const row = await readJson($, `${dataDir}/progress/held/${await sha256Hex(toolUseId)}.json`);
+  if (row?.version !== 1 || typeof row.offerId !== 'string') return null;
+  if (row.outcome !== 'held' && row.outcome !== 'routed') return null;
+  const priceAtomic = atomicOf(row.priceAtomic);
+  return {
+    outcome: row.outcome,
+    label: typeof row.label === 'string' ? labelOf({ label: row.label }) : UNLABELLED,
+    ...(priceAtomic !== undefined ? { priceAtomic } : {}),
+    offerId: row.offerId,
+  };
+}
 
 interface Call {
   row: TenjinRow;

@@ -539,10 +539,14 @@ export async function openLookupFooter(
 }
 
 /**
- * Remove records past {@link EXPIRY_MS}. Run from a writer, never from the
+ * Remove records past {@link EXPIRY_MS}, or `expiryMs`. Run from a writer, never from the
  * renderer: the footer refreshes once a second and must stay read-only.
  */
-export async function pruneProgress(directory: string, now = Date.now()): Promise<void> {
+export async function pruneProgress(
+  directory: string,
+  now = Date.now(),
+  expiryMs = EXPIRY_MS,
+): Promise<void> {
   try {
     const dir = await opendir(directory);
     let count = 0;
@@ -551,7 +555,7 @@ export async function pruneProgress(directory: string, now = Date.now()): Promis
       if (!entry.isFile() || entry.name === SESSION_FILE) continue;
       const path = join(directory, entry.name);
       const record = agesByMtime(entry.name) ? await mtimeOf(path) : await readStamp(path);
-      if (record === null || now - record.at > EXPIRY_MS) {
+      if (record === null || now - record.at > expiryMs) {
         await rm(path, { force: true }).catch(() => undefined);
       }
     }

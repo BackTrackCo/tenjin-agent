@@ -20,6 +20,7 @@ import {
   type PendingCall,
   type Sealed,
 } from './context';
+import { markHeld } from './held';
 import { storeChoices, storeSpecs } from './specs';
 import { requestDecision, ROUTER_PATH, type HookDecision } from './decision';
 import { FEE_REQUIRED, firstNoticeFor, isFeeRequired, type RouteFor } from './fee';
@@ -1160,11 +1161,13 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
     };
   }
   if (event.toolUseId !== undefined) {
-    await markOffered(
+    const terms = offeredTerms(routed.offer);
+    await markOffered(deps.dataDir, event.sessionId, event.toolUseId, terms, deps.now?.());
+    // The mod draws this row in place of the engine's red hook error.
+    await markHeld(
       deps.dataDir,
-      event.sessionId,
       event.toolUseId,
-      offeredTerms(routed.offer),
+      { ...terms, offerId: routed.offer.id },
       deps.now?.(),
     );
   }
