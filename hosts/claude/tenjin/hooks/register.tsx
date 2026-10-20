@@ -5,19 +5,23 @@ import type { TenjinPaid, TenjinRow } from '../types';
 
 /**
  * THE TENJIN MOD: what the router does, shown to the person, and the one
- * permission answer it gives. ONE LINE PER LOOKUP, drawn as Claude Code
- * draws an MCP call: while it runs, `⏺ Calling Exa search… · $0.007` with the
- * query under it; once it ends, the dim folded line `Called Exa search ·
- * $0.007 (ctrl+o to expand)`, which the ctrl+o transcript opens into the
- * whole row, `⏺ Exa search(best local LLM) · $0.007`. A WebSearch or WebFetch
- * call held for Tenjin reads as the engine's own row struck through,
- * `⏺ ~~Web Search~~("best local LLM") · Tenjin offered Exa search`, until the
- * request call takes it up, then becomes, in place, that call drawn as a
- * built-in row would be, `⏺ Exa search("best local LLM") · $0.007`, with the
- * request's own row empty. The router's own free calls draw nothing. Beside
- * it: a toast when a call is paid, one spend line under a turn that paid, the
- * first-run wallet toast, and the prompt hint while the wallet is unfunded.
- * The engine's own spinner words stand; the row carries the state.
+ * permission answer it gives. ONE LINE PER LOOKUP. In both forms the router
+ * offered and the agent agreed; they differ in what the offer replaced.
+ *
+ * - AN OFFER THAT STOOD ON ITS OWN (made at the prompt, before any call)
+ *   draws like any other service call, as Claude Code draws an MCP call:
+ *   `⏺ Calling Exa search… · $0.007` with the query under it while it runs,
+ *   then the dim folded line `Called Exa search · $0.007 (ctrl+o to
+ *   expand)`, which the ctrl+o transcript opens into the whole row.
+ * - AN OFFER THAT REPLACED A NATIVE CALL draws where that built-in stood:
+ *   `⏺ ~~Web Search~~("best local LLM") · Tenjin offered Exa search` while
+ *   held, then in place `⏺ Exa search("best local LLM") · $0.007`, the dot
+ *   alone showing it runs or has ended; the request's own row stays empty.
+ *
+ * The router's own free calls draw nothing. Beside them: a toast when a call
+ * is paid, one spend line under a turn that paid, the first-run wallet toast,
+ * and the prompt hint while the wallet is unfunded. The engine's own spinner
+ * words stand; the row carries the state.
  *
  * WHAT A ROW SHOWS: the label, the price, the state, and the one input the
  * CLI says identifies the lookup (`<sha256(id)>.shown.json`: a search's query,
@@ -919,8 +923,9 @@ function callShape(row: TenjinRow, outcome: string | undefined, isExpanded = fal
 }
 
 /**
- * A REPLACEMENT: the request call that took up a held search, drawn in its
- * place as a built-in row would be, `⏺ Exa search("query") · $0.007`, the
+ * A REPLACEMENT: the request call that took up a held search (the offer
+ * replaced a native call the agent was about to make), drawn where that
+ * built-in stood, as a built-in row would be, `⏺ Exa search("query") · $0.007`, the
  * same text while it runs and after, the dot alone showing which. No
  * `Calling`, nothing under it, no fold: the pair reads as one switch.
  */
