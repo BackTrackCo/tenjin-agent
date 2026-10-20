@@ -104,9 +104,12 @@ test('a held search is one row: struck, then the request call running and done, 
   };
   for (const surface of SURFACES) {
     const ui = await mount(surface, heldSearch('toolu_held'));
-    expect(await rowText(ui)).toBe('⏺ Web Search("rust async runtimes")');
+    expect(await rowText(ui)).toBe('⏺ Web Search("rust async runtimes") · Routed by Tenjin');
     const [name] = await ui.findAll({ type: 'Text', text: 'Web Search' });
     expect(name?.props).toMatchObject({ bold: true, strikethrough: true });
+    // The reason, in the engine's dim secondary text.
+    const [tail] = await ui.findAll({ type: 'Text', text: ' · Routed by Tenjin' });
+    expect(tail?.props.dimColor).toBe(true);
     expect(await dotOf(ui)).toEqual({ color: undefined, dimColor: true });
     expect(await rowText(ui)).not.toContain('Tenjin router');
     await ui.unmount();
@@ -391,7 +394,7 @@ test('a request refused before it ran the offer draws its own row; the paid retr
   for (const surface of SURFACES) {
     // It took nothing: the held row is struck again, the refusal is its own row.
     const held = await mount(surface, heldSearch('toolu_held'));
-    expect(await rowText(held)).toBe('⏺ Web Search("rust async runtimes")');
+    expect(await rowText(held)).toBe('⏺ Web Search("rust async runtimes") · Routed by Tenjin');
     await held.unmount();
     const own = await mount(surface, done('toolu_big', big, refused, true));
     expect(await rowText(own)).toBe('⏺ Exa search(a very long input) · $0.007 · needs input');
@@ -450,7 +453,9 @@ test("a held WebFetch is struck under the engine's own name for it", async ($, o
         output: REASON,
       },
     });
-    expect((await shownLines(ui)).join('')).toBe('⏺Fetch(https://example.test/a)');
+    expect((await shownLines(ui)).join('')).toBe(
+      '⏺Fetch(https://example.test/a) · Routed by Tenjin',
+    );
     expect((await ui.findAll({ type: 'Text', text: 'Fetch' }))[0]?.props.strikethrough).toBe(true);
     await ui.unmount();
   }

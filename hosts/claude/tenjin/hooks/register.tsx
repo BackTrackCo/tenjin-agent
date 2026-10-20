@@ -9,11 +9,11 @@ import type { TenjinPaid, TenjinRow } from '../types';
  * a tool row (its status dot, bold name, input in parentheses, a dim tail):
  * the request tool's row reads `⏺ Exa search(best local LLM) · $0.007`. A
  * WebSearch or WebFetch call held for Tenjin reads as the engine's own row
- * struck through, `⏺ ~~Web Search~~("best local LLM")`, until the request
- * call takes it up, then becomes that call's row in place, with the
- * request's own row empty. Beside it: a toast when a
- * call is paid, one spend line under a turn that paid, the first-run wallet
- * toast, and the prompt hint while the wallet is unfunded. The engine's own
+ * struck through, `⏺ ~~Web Search~~("best local LLM") · Routed by Tenjin`,
+ * until the request call takes it up, then becomes that call's row in place,
+ * with the request's own row empty. Beside it: a toast when a call is paid,
+ * one spend line under a turn that paid, the first-run wallet toast, and the
+ * prompt hint while the wallet is unfunded. The engine's own
  * spinner words stand; the row carries the state.
  *
  * WHAT A ROW SHOWS: the label, the price, the state, and the one input the
@@ -211,6 +211,8 @@ export const register: Register = (on) => {
           state: 'running',
           name: NATIVE_NAMES[e.props.tool] ?? e.props.tool,
           isStruck: true,
+          // Why it is struck, in the dim tail the engine uses for ` · on <host>`.
+          tail: ROUTED_TAIL,
           ...(asked !== undefined ? { argument: asked } : {}),
         });
       }
@@ -675,6 +677,9 @@ function nativeArgument(input: Json | undefined): string | undefined {
   const query = argumentOf({ query: input.query });
   return query !== undefined ? `"${query}"` : argumentOf({ url: input.url });
 }
+
+/** A held row's tail while the request call has not taken it up yet. */
+const ROUTED_TAIL = ' · Routed by Tenjin';
 
 /** The names the engine draws its native rows under (each tool's `userFacingName`). */
 const NATIVE_NAMES: Readonly<Record<string, string>> = {
