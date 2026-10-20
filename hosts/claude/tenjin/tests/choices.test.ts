@@ -105,7 +105,7 @@ test('choice "all" totals every option it paid', async ($, on) => {
         output: resultText('fulfilled'),
       },
     });
-    expect(await rowText(ui)).toBe('⏺ 2 services · $0.07');
+    expect(await rowText(ui)).toBe('Called 2 services · $0.07 (ctrl+o to expand)');
     await ui.unmount();
   }
 });

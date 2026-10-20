@@ -5,18 +5,18 @@ import type { TenjinPaid, TenjinRow } from '../types';
 
 /**
  * THE TENJIN MOD: what the router does, shown to the person, and the one
- * permission answer it gives. ONE LINE PER LOOKUP, drawn as the engine draws
- * a tool row (its status dot, bold name, input in parentheses, a dim tail):
- * the request tool's row reads `⏺ Exa search(best local LLM) · $0.007`, and
- * while it runs, `  ⎿  Running…` under it as the engine shows an MCP call. A
- * WebSearch or WebFetch call held for Tenjin reads as the engine's own row
- * struck through, `⏺ ~~Web Search~~("best local LLM") · Tenjin offered Exa
- * search`, until the request call takes it up, then becomes that call's row
- * in place, with the request's own row empty. The router's own free calls
- * draw nothing. Beside it: a toast when a call is paid, one spend line under
- * a turn that paid, the first-run wallet toast, and the prompt hint while the
- * wallet is unfunded. The engine's own spinner words stand; the row carries
- * the state.
+ * permission answer it gives. ONE LINE PER LOOKUP, drawn as Claude Code
+ * draws an MCP call: while it runs, `⏺ Calling Exa search… · $0.007` with the
+ * query under it; once it ends, the dim folded line `Called Exa search ·
+ * $0.007 (ctrl+o to expand)`, which the ctrl+o transcript opens into the
+ * whole row, `⏺ Exa search(best local LLM) · $0.007`. A WebSearch or WebFetch
+ * call held for Tenjin reads as the engine's own row struck through,
+ * `⏺ ~~Web Search~~("best local LLM") · Tenjin offered Exa search`, until the
+ * request call takes it up, then becomes that call's row in place, with the
+ * request's own row empty. The router's own free calls draw nothing. Beside
+ * it: a toast when a call is paid, one spend line under a turn that paid, the
+ * first-run wallet toast, and the prompt hint while the wallet is unfunded.
+ * The engine's own spinner words stand; the row carries the state.
  *
  * WHAT A ROW SHOWS: the label, the price, the state, and the one input the
  * CLI says identifies the lookup (`<sha256(id)>.shown.json`: a search's query,
@@ -260,11 +260,16 @@ export const register: Register = (on) => {
         ...(held.priceAtomic !== undefined ? { price: `$${usd(held.priceAtomic)}` } : {}),
         outcome: 'done',
       };
-      return toolRow(Box, Text, callShape(keep(row), row.outcome), e.viewport?.columns);
+      return toolRow(
+        Box,
+        Text,
+        callShape(keep(row), row.outcome, expandedOf(e.props)),
+        e.viewport?.columns,
+      );
     }
     if (e.props.tool !== REQUEST_TOOL) return next(e);
     const { Box, Text } = $.ui.resolve(e);
-    const shape = await requestShape($, e.props);
+    const shape = await requestShape($, { ...e.props, isExpanded: expandedOf(e.props) });
     if (shape === null) return <Box display="none" />;
     return toolRow(Box, Text, shape, e.viewport?.columns);
   });
@@ -333,6 +338,17 @@ interface RequestCall {
   output?: unknown;
   isInterrupted: boolean;
   isErrored: boolean;
+  /** The ctrl+o transcript or --verbose: the whole row, not the folded line. */
+  isExpanded?: boolean;
+}
+
+/**
+ * Whether the row is drawn expanded. Claude Code 2.1.304 passes `isExpanded`
+ * on a ToolUse row (verbose or the ctrl+o transcript) beyond what its types
+ * declare; absent, the row is folded.
+ */
+function expandedOf(props: object): boolean {
+  return (props as { isExpanded?: unknown }).isExpanded === true;
 }
 
 /**
@@ -376,7 +392,7 @@ async function requestShape($: Dollar, call: RequestCall): Promise<RowShape | nu
       : call.isInterrupted
         ? 'interrupted'
         : refusalOf(statusOf(textOf(call.output)), call.isErrored));
-  return callShape(row, outcome);
+  return callShape(row, outcome, call.isExpanded === true);
 }
 
 /**
@@ -846,6 +862,8 @@ const GUTTER = '  ⎿  ';
 const EXPAND_HINT = '(ctrl+o to expand)';
 /** The verb the engine's folded line gives a running MCP call. */
 const CALLING = 'Calling';
+/** The verb on the engine's folded line once the call has ended. */
+const CALLED = 'Called';
 /** A held row's tail names the offer it is struck for: `· Tenjin offered Exa search`. */
 const OFFERED = 'Tenjin offered';
 /** The names the engine draws its native rows under (each tool's `userFacingName`). */
@@ -864,6 +882,8 @@ interface RowShape {
   isStruck?: boolean;
   /** What goes under the row while it runs, as the engine puts an MCP call's query. */
   hint?: string;
+  /** An ended call drawn as the engine's folded line for it. */
+  isFolded?: boolean;
 }
 
 /**
@@ -871,7 +891,7 @@ interface RowShape {
  * and after (only the dot shows progress, as on a native row), the amount
  * paid once it paid, and the state only when it is not a plain success.
  */
-function callShape(row: TenjinRow, outcome: string | undefined): RowShape {
+function callShape(row: TenjinRow, outcome: string | undefined, isExpanded = false): RowShape {
   const isRunning = outcome === undefined;
   const paid = outcome?.startsWith('$') === true ? outcome.split(' · ')[0] : undefined;
   const isPlain = isRunning || paid !== undefined || outcome === 'done';
@@ -879,20 +899,26 @@ function callShape(row: TenjinRow, outcome: string | undefined): RowShape {
     (part): part is string => part !== undefined,
   );
   const state: RowState = isRunning ? 'running' : ERRORS.has(outcome) ? 'error' : 'done';
+  const price = tail.length > 0 ? { tail: ` · ${tail.join(' · ')}` } : {};
   // While it runs, as Claude Code shows a running MCP call: its folded line
   // reads `Calling <server>…` and the call's query goes under it, quoted.
   if (isRunning) {
     return {
       state,
       name: `${CALLING} ${row.label}…`,
+      ...price,
       ...(row.argument !== undefined ? { hint: row.argument } : {}),
     };
   }
+  // Ended, as Claude Code folds an ended MCP call: `Called <server>`, the
+  // line dim with no dot, then the price, then its "(ctrl+o to expand)". The
+  // ctrl+o transcript draws the whole row instead.
+  if (!isExpanded) return { state, name: `${CALLED} ${row.label}`, ...price, isFolded: true };
   return {
     state,
     name: row.label,
     ...(row.argument !== undefined ? { argument: row.argument } : {}),
-    ...(tail.length > 0 ? { tail: ` · ${tail.join(' · ')}` } : {}),
+    ...price,
   };
 }
 
@@ -903,6 +929,19 @@ function callShape(row: TenjinRow, outcome: string | undefined): RowShape {
  * parentheses, and a dim tail where the engine puts its ` · on <host>`.
  */
 function toolRow(Box: BoxElement, Text: TextElement, shape: RowShape, columns?: number) {
+  if (shape.isFolded === true) {
+    // The engine's ended one-call group (2.1.304 `ng`): a blank two-column
+    // gutter, the whole line dim, a suffix (its ` · <elapsed>`, our price)
+    // after the words, then " " and the dim "(ctrl+o to expand)".
+    return (
+      <Box flexDirection="row" marginTop={1}>
+        <Box minWidth={2} />
+        <Text dimColor>{shape.name}</Text>
+        <Text dimColor>{shape.tail ?? ''}</Text>
+        <Text dimColor>{` ${EXPAND_HINT}`}</Text>
+      </Box>
+    );
+  }
   const isRunning = shape.state === 'running';
   const argument = shape.argument !== undefined ? fitArgument(shape, columns) : undefined;
   const line = (
