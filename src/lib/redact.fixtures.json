@@ -69,7 +69,9 @@
     ["3f9a1c77b2", "e04d5a8c6b", "1e2f9d0a4b7c"],
     ["sk-proj-SevzWEV_NmNn9", "abcdefghijklmnopqrstu", "vwxyz0123456789ABCDEFGH"],
     ["ghp_abcdefghi", "jklmnopqrstuv", "wxyz0123456789"],
-    ["sk-QzXvWuTsRqPoNm", "LkJiHgFeDcBa01234", "56789ZyXwVuTsRqPo"]
+    ["sk-QzXvWuTsRqPoNm", "LkJiHgFeDcBa01234", "56789ZyXwVuTsRqPo"],
+    ["xoxb_1234_abcd", "efghijklmnopqr", "stuvwxyz"],
+    ["live_abcD3fG", "h1jKlMn0pQr", "StUv"]
   ],
   "cases": [
     {
@@ -1320,6 +1322,35 @@
       "label": "negative",
       "input": "[\"https://acme.io/docs\",\"/var/lib/acme2/build1234567890abcdefghij\"]",
       "expect_ids": []
+    },
+    {
+      "id": "url-path-credential/neg-reddit-underscore-slug",
+      "scope": "publish",
+      "label": "negative",
+      "input": "read https://www.reddit.com/r/rust/comments/1dh773j/report_on_the_rustnl_2024_unconference/ and https://old.reddit.com/r/LocalLLaMA/comments/1c9x2kq/llama_3_8b_instruct_benchmarks_vs_mistral_7b/ first",
+      "expect_ids": []
+    },
+    {
+      "id": "url-path-credential/pos-underscore-token",
+      "scope": "publish",
+      "label": "positive",
+      "input": "the job calls https://hooks.acme.io/api/v1/%%t49%% then https://hooks.acme.io/notify/%%t50%% and stalls",
+      "expect_ids": ["url-path-credential"],
+      "secret": "%%t50%%"
+    },
+    {
+      "id": "mask/reddit-underscore-slug",
+      "scope": "query",
+      "label": "negative",
+      "input": "summarize https://www.reddit.com/r/rust/comments/1dh773j/report_on_the_rustnl_2024_unconference/",
+      "expect_text": "summarize https://www.reddit.com/r/rust/comments/1dh773j/report_on_the_rustnl_2024_unconference/"
+    },
+    {
+      "id": "mask/underscore-token-path",
+      "scope": "query",
+      "label": "positive",
+      "input": "fetch https://hooks.acme.io/api/v1/%%t49%% and https://hooks.acme.io/notify/%%t50%%",
+      "expect_text": "fetch https://hooks.acme.io/api/v1/…[redacted 36 chars] and https://hooks.acme.io/notify/…[redacted 27 chars]"
     },
     {
       "id": "mask/url-credentials",
