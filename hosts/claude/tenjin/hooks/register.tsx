@@ -39,6 +39,9 @@ const NATIVE_TOOLS = new Set(['WebSearch', 'WebFetch']);
 const DOT = '⏺';
 /** A row's state as its dot shows it: dim while running, then success or error. */
 type RowState = 'running' | 'done' | 'error';
+/** The `rows` key a request call is also kept under once it takes up a held
+ *  call, by that held call's id, so the held row draws it from its first frame. */
+const HELD_KEY = 'held:';
 /** The outcomes that mean the call did not run to an answer. */
 const ERRORS = new Set(['failed', 'interrupted', 'not run']);
 /** The spinner's word between a held call and the request call it leads to. */
@@ -112,8 +115,20 @@ async function onRequest<E extends { tool_use_id: string }>(
   await update($, live, (list) =>
     list.filter((one) => one.heldOffer === undefined || !takes.has(one.heldOffer)),
   );
+  // TAKING UP A HOLD, FROM THE FIRST FRAME: a call that runs a held offer (an
+  // input or a query with its id, not a spec fetch) is drawn on the held row
+  // while it runs and after, and its own row draws nothing.
+  const args = e as { input?: unknown; query?: unknown };
+  const runsOffer = asRecord(args.input) !== undefined || typeof args.query === 'string';
+  const holdOf =
+    runsOffer && call.row.offerId !== undefined ? await openHold($, call.row.offerId) : undefined;
+  if (holdOf !== undefined) call.row = { ...call.row, holdOf };
   const ref = { ...ROWS, id: e.tool_use_id };
   await $.state.set(ref, call.row);
+  if (holdOf !== undefined) {
+    await $.state.set({ ...ROWS, id: `${HELD_KEY}${holdOf}` }, call.row);
+    $.ui.invalidate('ui.render');
+  }
   const running: TenjinLive | null =
     call.row.isPaid && call.priceAtomic !== undefined
       ? { toolUseId: e.tool_use_id, label: call.row.label, priceAtomic: call.priceAtomic }
@@ -123,8 +138,10 @@ async function onRequest<E extends { tool_use_id: string }>(
     const ran = await next(e);
     const settled = await settleCall($, call, ran, startedAt);
     await $.state.set(ref, { ...call.row, ...settled.row });
-    // A held call's row draws this call once it took the hold up.
-    if (call.row.offerId !== undefined) $.ui.invalidate('ui.render');
+    if (holdOf !== undefined) {
+      await $.state.set({ ...ROWS, id: `${HELD_KEY}${holdOf}` }, { ...call.row, ...settled.row });
+      $.ui.invalidate('ui.render');
+    }
     // A toast, never a transcript line: the row already says it.
     if (settled.paidAtomic !== undefined) {
       const paid: TenjinPaid = { amountAtomic: settled.paidAtomic };
@@ -204,9 +221,21 @@ export const register: Register = (on) => {
       if (held === null) return next(e);
       const { Box, Text } = $.ui.resolve(e);
       // The model went back to its own tool: the engine's row for the call
-      // that ran is the line, and this one draws nothing.
-      if (held.outcome === 'native') return <Box />;
+      // that ran is the line, and this one takes no room.
+      if (held.outcome === 'native') return <Box display="none" />;
+      // ONE ARGUMENT IN EVERY STATE: what the model asked its own tool, so
+      // the line keeps its width and only the name, price and dot change.
       const asked = nativeArgument(asRecord(e.props.input));
+      const keep = (row: TenjinRow): TenjinRow => {
+        const kept: TenjinRow = { ...row };
+        delete kept.argument;
+        return asked !== undefined ? { ...kept, argument: asked } : kept;
+      };
+      const { value: taker } = await $.state.get({
+        ...ROWS,
+        id: `${HELD_KEY}${e.props.tool_use_id}`,
+      });
+      if (taker !== undefined) return toolRow(Box, Text, callShape(keep(taker), taker.outcome));
       if (held.outcome === 'held') {
         return toolRow(Box, Text, {
           state: 'running',
@@ -215,19 +244,18 @@ export const register: Register = (on) => {
           ...(asked !== undefined ? { argument: asked } : {}),
         });
       }
-      // ROUTED: the row becomes the request call that took the hold up, in
-      // place. With no call named (a client that sends no id), that call's own
-      // row is the line and this one draws nothing.
-      if (held.routedToolUseId === undefined) return <Box />;
+      // ROUTED in another session's state (a resumed transcript): the call
+      // the CLI named, else the offer's own label and price. With no call
+      // named, that call's own row is the line and this one takes no room.
+      if (held.routedToolUseId === undefined) return <Box display="none" />;
       const { value: taken } = await $.state.get({ ...ROWS, id: held.routedToolUseId });
       const row: TenjinRow = taken ?? {
         label: held.label,
         isPaid: true,
         ...(held.priceAtomic !== undefined ? { price: `$${usd(held.priceAtomic)}` } : {}),
-        ...(asked !== undefined ? { argument: asked } : {}),
         outcome: 'done',
       };
-      return toolRow(Box, Text, callShape(row, row.outcome));
+      return toolRow(Box, Text, callShape(keep(row), row.outcome));
     }
     if (e.props.tool !== REQUEST_TOOL) return next(e);
     const { value: stored } = await $.state.get({ ...ROWS, id: e.props.tool_use_id });
@@ -235,8 +263,11 @@ export const register: Register = (on) => {
     const { Box, Text } = $.ui.resolve(e);
     // The held call's row draws this call in its place; any other call for
     // the same offer (a later spec fetch, a second run) is its own row.
-    if (row.offerId !== undefined && (await tookUpHold($, row.offerId, e.props.tool_use_id))) {
-      return <Box />;
+    if (
+      row.holdOf !== undefined ||
+      (row.offerId !== undefined && (await tookUpHold($, row.offerId, e.props.tool_use_id)))
+    ) {
+      return <Box display="none" />;
     }
     const outcome =
       row.outcome ??
@@ -257,7 +288,7 @@ export const register: Register = (on) => {
       NATIVE_TOOLS.has(e.props.tool) && (await heldRow($, e.props.tool_use_id)) !== null;
     if (e.props.tool !== REQUEST_TOOL && !isHeld) return next(e);
     const { Box } = $.ui.resolve(e);
-    return <Box />;
+    return <Box display="none" />;
   });
 
   on('ui.render', { component: 'Spinner' }, async ($, e, next) => {
@@ -758,6 +789,28 @@ type BoxElement = ReturnType<Dollar['ui']['resolve']>['Box'];
  * (`routedToolUseId`), so it draws there. Read from the CLI's index of the
  * calls it held for an offer id (`src/router/held.ts`).
  */
+/**
+ * The held call a request for this offer takes up: the first one the CLI
+ * holds for it that is still `held` and that no request call took up yet.
+ */
+async function openHold($: Dollar, offerId: string): Promise<string | undefined> {
+  const dataDir = await tenjinDataDir($);
+  if (dataDir === null) return undefined;
+  const index = await readJson(
+    $,
+    `${dataDir}/progress/held/${await sha256Hex(offerId)}.offer.json`,
+  );
+  const ids = index?.version === 1 && Array.isArray(index.toolUseIds) ? index.toolUseIds : [];
+  for (const id of ids) {
+    if (typeof id !== 'string') continue;
+    const held = await heldRow($, id);
+    if (held?.outcome !== 'held' || held.offerId !== offerId) continue;
+    const { value: taken } = await $.state.get({ ...ROWS, id: `${HELD_KEY}${id}` });
+    if (taken === undefined) return id;
+  }
+  return undefined;
+}
+
 async function tookUpHold($: Dollar, offerId: string, toolUseId: string): Promise<boolean> {
   const dataDir = await tenjinDataDir($);
   if (dataDir === null) return false;

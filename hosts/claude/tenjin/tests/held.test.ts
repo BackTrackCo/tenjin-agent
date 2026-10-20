@@ -61,8 +61,8 @@ function heldSearch(toolUseId: string) {
   };
 }
 
-test('a held search is struck through, then becomes the request call in place', async ($, on) => {
-  const { files } = machine(on);
+test('a held search is one row: struck, then the request call running and done, in place', async ($, on) => {
+  const { files, clock } = machine(on);
   on('ui.render', { component: 'ToolUse' }, ($, e) => {
     const { Text } = $.ui.resolve(e);
     return Text({ children: ['blocked by hook'] });
@@ -73,13 +73,19 @@ test('a held search is struck through, then becomes the request call in place', 
     priceAtomic: '7000',
     maxAmountAtomic: '7000',
   });
-  // Beneath the mod: the request tool, which pays and marks the hold as taken
-  // up by this call (the CLI's `markRouted`, from the client's tool id).
+  let release = (): void => undefined;
+  const paying = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  // Beneath the mod: the request tool, which pays once released and marks
+  // the hold routed by this call (the CLI's `markRouted`).
   on('tool.call', { tool: TOOL }, async (_$, e) => {
     if (e.input === undefined) {
       const spec = JSON.stringify({ status: 'spec', cost: ['no charge'] });
       return { result: spec, text: spec };
     }
+    // Marked only after the gate, so the takeover while it runs is the mod's own.
+    await paying;
     await holdRow(files, 'toolu_held', 'routed', e.tool_use_id);
     await recordPayment(files, OFFER, {
       capabilityId: 'exa-search',
@@ -91,17 +97,36 @@ test('a held search is struck through, then becomes the request call in place', 
   await holdRow(files, 'toolu_held');
   const mount = (surface: (typeof SURFACES)[number], props: Record<string, unknown>) =>
     $.ui.mount({ plugin: 'tenjin', surface, component: 'ToolUse', props: props as never });
+  const hidden = async (ui: Awaited<ReturnType<typeof mount>>) => {
+    expect(await shownLines(ui)).toEqual([]);
+    // No room at all: the engine leaves no line where this row was.
+    const [box] = await ui.findAll({ type: 'Box' });
+    expect(box?.props.display).toBe('none');
+  };
   for (const surface of SURFACES) {
     const ui = await mount(surface, heldSearch('toolu_held'));
     expect(await rowText(ui)).toBe('⏺ WebSearch(rust async runtimes)');
     const [name] = await ui.findAll({ type: 'Text', text: 'WebSearch' });
-    expect(name?.props.strikethrough).toBe(true);
+    expect(name?.props).toMatchObject({ bold: true, strikethrough: true });
     expect(await dotOf(ui)).toEqual({ color: undefined, dimColor: true });
     expect(await rowText(ui)).not.toContain('Tenjin router');
     await ui.unmount();
   }
-  const request = { id: OFFER, input: { query: 'rust async runtimes' } };
-  await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_request', ...request });
+  // The provider's query is longer than the model's search: the held row keeps
+  // the model's, so the line does not change width between states.
+  const request = { id: OFFER, input: { query: 'rust async runtimes tokio smol comparison 2026' } };
+  const running = $.tool.call({ tool: TOOL, tool_use_id: 'toolu_request', ...request });
+  await clock.settle();
+  for (const surface of SURFACES) {
+    const ui = await mount(surface, heldSearch('toolu_held'));
+    expect(await rowText(ui)).toBe('⏺ Calling Exa search(rust async runtimes)… · $0.007');
+    expect(await dotOf(ui)).toEqual({ color: undefined, dimColor: true });
+    await ui.unmount();
+    // FROM ITS FIRST FRAME the request's own row takes no room.
+    await hidden(await mount(surface, toolRow('toolu_request', TOOL, request)));
+  }
+  release();
+  await running;
   const done = (id: string, args: Record<string, unknown>, output: string) => ({
     ...toolRow(id, TOOL, args),
     isRunning: false,
@@ -110,16 +135,12 @@ test('a held search is struck through, then becomes the request call in place', 
   for (const surface of SURFACES) {
     const ui = await mount(surface, heldSearch('toolu_held'));
     const line = await rowText(ui);
-    // A full replace: the request call's row, with no struck name left.
     expect(line).toBe('⏺ Exa search(rust async runtimes) · $0.007');
     expect(line).not.toMatch(MODEL_TEXT);
     expect(await ui.findAll({ type: 'Text', text: 'WebSearch' })).toEqual([]);
     expect(await dotOf(ui)).toEqual({ color: 'success', dimColor: undefined });
     await ui.unmount();
-    // The request's own row is then empty: one line for the lookup.
-    const row = await mount(surface, done('toolu_request', request, resultText('fulfilled')));
-    expect(await shownLines(row)).toEqual([]);
-    await row.unmount();
+    await hidden(await mount(surface, done('toolu_request', request, resultText('fulfilled'))));
   }
   // A LATER CALL FOR THE SAME OFFER is its own row, and the held row still
   // shows the call that paid.
@@ -132,6 +153,30 @@ test('a held search is struck through, then becomes the request call in place', 
     const fetch = await mount(surface, done('toolu_spec', { id: OFFER }, spec));
     expect(await rowText(fetch)).toBe('⏺ Tenjin · no charge');
     await fetch.unmount();
+  }
+});
+
+test('a row has one blank line above and none below, as the engine draws a tool row', async ($, on) => {
+  const { files } = machine(on);
+  await holdRow(files, 'toolu_held');
+  await keepSpec(files, OFFER, {
+    label: 'Exa search',
+    priceAtomic: '7000',
+    maxAmountAtomic: '7000',
+  });
+  for (const surface of SURFACES) {
+    for (const props of [
+      heldSearch('toolu_held'),
+      toolRow('toolu_direct', TOOL, { id: OFFER, input: { query: 'q' } }),
+    ]) {
+      const ui = await $.ui.mount({ plugin: 'tenjin', surface, component: 'ToolUse', props });
+      const [row] = await ui.findAll({ type: 'Box' });
+      expect(row?.props).toMatchObject({ flexDirection: 'row', marginTop: 1 });
+      expect(row?.props).not.toHaveProperty('marginBottom');
+      expect(row?.props).not.toHaveProperty('marginY');
+      expect(row?.props).not.toHaveProperty('paddingBottom');
+      await ui.unmount();
+    }
   }
 });
 
@@ -150,6 +195,7 @@ test('a held search the model then ran natively draws nothing', async ($, on) =>
       props: heldSearch('toolu_held'),
     });
     expect(await shownLines(ui)).toEqual([]);
+    expect((await ui.findAll({ type: 'Box' }))[0]?.props.display).toBe('none');
     await ui.unmount();
     // The call that ran natively has no held row: the engine draws it.
     const ran = await $.ui.mount({

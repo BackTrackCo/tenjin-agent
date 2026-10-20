@@ -1,8 +1,8 @@
 /**
  * One request row as the mod draws it, written once by the `tool.call` hook so
  * the row still reads right after the CLI prunes the spec it came from, and
- * read again by the row of a native call held for its offer once it took that
- * hold up. Every string is user text: a label, a price, a state
+ * kept a second time under `held:<held call id>` once it takes up a native
+ * call held for its offer, so that call's row draws it from its first frame. Every string is user text: a label, a price, a state
  * and the one input shown, never a description, JSON or tool id.
  */
 export type TenjinRow = {
@@ -17,6 +17,8 @@ export type TenjinRow = {
   argument?: string;
   /** The offer id the call carried, which a held native call names too. */
   offerId?: string;
+  /** The held native call this call took up, whose row draws it in its place. */
+  holdOf?: string;
   /** How it ended (`$0.007 · settled`, `pending`, `needs approval`), once it has. */
   outcome?: string;
 };
