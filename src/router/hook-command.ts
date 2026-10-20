@@ -39,6 +39,8 @@ export interface HookCommandDeps extends Omit<HookDeps, 'route'> {
   readEvent?: () => Promise<string>;
   /** Test seam for this process's environment. */
   env?: NodeJS.ProcessEnv;
+  /** Test seam for Codex's hook list (`hooks/list`). */
+  codexHooks?: (cwd: string, timeoutMs: number) => Promise<unknown>;
 }
 
 export async function runHookCommand(kind: HookKind, io: Io, deps: HookCommandDeps): Promise<void> {
@@ -47,8 +49,7 @@ export async function runHookCommand(kind: HookKind, io: Io, deps: HookCommandDe
     const raw = await (deps.readEvent ?? readStdin)();
     const event = JSON.parse(raw) as unknown;
     if (deps.harness === 'codex') {
-      const { codexResponse } = await import('./codex-event');
-      response = codexResponse(await runHookKind(kind, event, deps));
+      response = await runCodexHook(kind, event, deps);
     } else {
       // An entry an older settings install wrote stays silent in a session the
       // plugin serves (see `alive.ts`). SHIM: goes on or after 2026-12-01.
@@ -117,4 +118,28 @@ async function readStdin(): Promise<string> {
       reject(new Error('harness event unreadable'));
     });
   });
+}
+
+/** A Codex leg: the prompt leg also records whether the request tool can run. */
+async function runCodexHook(
+  kind: HookKind,
+  event: unknown,
+  deps: HookCommandDeps,
+): Promise<unknown> {
+  const { codexResponse, codexRouterEvent, codexSession } = await import('./codex-event');
+  const { refreshRequestTool, requestRunnable } = await import('./codex-host');
+  const mapped = codexRouterEvent(event);
+  const session = mapped === null ? null : codexSession(mapped.sessionId);
+  if (kind === 'prompt' && mapped !== null && session !== null) {
+    const [out] = await Promise.all([
+      runHookKind(kind, event, deps),
+      refreshRequestTool(deps.dataDir, session, mapped.cwd ?? process.cwd(), deps.codexHooks).catch(
+        () => undefined,
+      ),
+    ]);
+    return codexResponse(out);
+  }
+  const runnable =
+    kind === 'native' && session !== null ? await requestRunnable(deps.dataDir, session) : true;
+  return codexResponse(await runHookKind(kind, event, { ...deps, requestRunnable: runnable }));
 }

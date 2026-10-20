@@ -1,12 +1,10 @@
 import { execFile } from 'node:child_process';
 import { stat } from 'node:fs/promises';
-import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { persistRouterDefaults } from '../commands/config';
 import { versionFreeEntry } from '../commands/update';
 import type { WalletDeps, WalletOutcome } from '../commands/install-wallet';
-import { withAppServer } from '../lib/codex-app-server';
 import { loadRawConfig } from '../lib/config';
 import { CliError } from '../lib/errors';
 import type { CommandContext, CommandResult } from '../context';
@@ -14,12 +12,14 @@ import {
   at,
   CODEX_MARKETPLACE,
   CODEX_PLUGIN,
+  codexHookRows,
   codexVersion,
+  listCodexHooks,
   readCodexConfig,
+  type CodexHookRows,
   WEB_VERIFIED_VERSION,
 } from './codex-host';
 import { approveLimits, spendApprovalFor, type RouterInstallDeps } from './install';
-import { CODEX_ALLOW_HOOK_COMMAND, CODEX_HOOK_COUNT } from './plugin-files';
 import { shownLimits } from './spend-question';
 
 /**
@@ -57,7 +57,6 @@ export interface CodexSetupDeps
 }
 
 const RUN_TIMEOUT_MS = 30_000;
-const APP_SERVER_TIMEOUT_MS = 5_000;
 
 function runCodex(args: string[]): Promise<CodexRun> {
   return new Promise((resolve) => {
@@ -73,12 +72,6 @@ function runCodex(args: string[]): Promise<CodexRun> {
   });
 }
 
-function listHooks(): Promise<unknown> {
-  return withAppServer(homedir(), process.env, APP_SERVER_TIMEOUT_MS, (request) =>
-    request('hooks/list', { cwds: [process.cwd()] }),
-  );
-}
-
 /** This package's `dist/hosts/codex`, by its version-free path under pnpm. */
 export async function codexHostsDir(
   moduleDir: string = dirname(fileURLToPath(import.meta.url)),
@@ -87,49 +80,6 @@ export async function codexHostsDir(
   const stable = versionFreeEntry(catalog) ?? catalog;
   if ((await stat(stable).catch(() => null))?.isFile() !== true) return null;
   return dirname(dirname(dirname(stable)));
-}
-
-/**
- * The plugin, as Codex's one `hooks/list` shows it. Every row carries its
- * `pluginId`, `enabled` and `trustStatus`: no Tenjin row means the plugin is
- * not installed (or is off), and every row present, enabled and trusted means
- * it is installed, on and trusted.
- */
-export interface CodexHookRows {
-  state: 'trusted' | 'review' | 'absent' | 'unknown';
-  /** The request tool's allow hook is off in `/hooks`, so the tool asks first. */
-  allowOff: boolean;
-}
-
-function isAllowHook(hook: unknown): boolean {
-  return (
-    at(hook, 'command') === CODEX_ALLOW_HOOK_COMMAND ||
-    String(at(hook, 'key')).includes(':permission_request:')
-  );
-}
-
-export function codexHookRows(list: unknown): CodexHookRows {
-  const groups = at(list, 'data');
-  if (!Array.isArray(groups)) return { state: 'unknown', allowOff: false };
-  const ours = groups
-    .flatMap((group) => {
-      const hooks = at(group, 'hooks');
-      return Array.isArray(hooks) ? (hooks as unknown[]) : [];
-    })
-    .filter((hook) => at(hook, 'pluginId') === CODEX_PLUGIN);
-  if (ours.length === 0) return { state: 'absent', allowOff: false };
-  // Turning the allow hook off is the documented opt-out, not a broken install.
-  const optedOut = (hook: unknown) => isAllowHook(hook) && at(hook, 'enabled') === false;
-  const ready = ours.every(
-    (hook) =>
-      optedOut(hook) ||
-      (at(hook, 'enabled') === true &&
-        ['trusted', 'managed'].includes(String(at(hook, 'trustStatus')))),
-  );
-  return {
-    state: ours.length === CODEX_HOOK_COUNT && ready ? 'trusted' : 'review',
-    allowOff: ours.some(optedOut),
-  };
 }
 
 /**
@@ -260,7 +210,7 @@ export async function runCodexDoctor(
 ): Promise<CommandResult> {
   userScopeOnly(args);
   const [list, config, version] = await Promise.all([
-    (deps.hooks ?? listHooks)(),
+    (deps.hooks ?? (() => listCodexHooks(process.cwd(), 5_000)))(),
     (deps.config ?? (() => readCodexConfig(process.cwd(), 3_000)))(),
     (deps.version ?? codexVersion)(),
   ]);

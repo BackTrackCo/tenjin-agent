@@ -39,6 +39,11 @@ export function codexRouterEvent(raw: unknown): HookEvent | null {
   };
 }
 
+/** Where a Codex session's local state lives, never shared with Claude's. */
+export function codexSession(sessionId: string): string {
+  return `codex:${sessionId}`;
+}
+
 /**
  * Codex cannot replace a tool's output, so free docs ride beside the result as
  * `additionalContext`, and nothing else in a Claude-shaped answer survives.

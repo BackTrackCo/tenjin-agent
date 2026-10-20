@@ -7,9 +7,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { CommandContext } from '../context';
 import { parseCodexHistory } from './codex-history';
 import { codexRouterEvent, codexResponse } from './codex-event';
-import { at, CODEX_PLUGIN } from './codex-host';
+import { at, CODEX_PLUGIN, codexHookRows } from './codex-host';
 import {
-  codexHookRows,
   elicitationCanShow,
   runCodexDoctor,
   runCodexInstall,
@@ -300,7 +299,8 @@ describe('Codex routing through the router', () => {
     );
   });
 
-  it('speaks through the hook command with no Codex config read before it', async () => {
+  /** One hook command run, its stdout captured. */
+  async function hookRun(kind: 'prompt' | 'native', event: unknown, extra: object = {}) {
     const writes: string[] = [];
     const io = {
       stdout: { write: (s: string) => (writes.push(s), true) } as unknown as NodeJS.WritableStream,
@@ -308,19 +308,62 @@ describe('Codex routing through the router', () => {
       isTTY: false,
     };
     const { fetchImpl } = router(paidOffer);
-    await runHookCommand('prompt', io, {
+    await runHookCommand(kind, io, {
       dataDir: dir,
       harness: 'codex',
-      readEvent: async () =>
-        JSON.stringify({
-          hook_event_name: 'UserPromptSubmit',
-          session_id: session,
-          prompt: 'Research a topic',
-          cwd: dir,
-        }),
+      readEvent: async () => JSON.stringify(event),
       fetchImpl,
+      ...extra,
     });
-    expect(writes).toHaveLength(1);
+    return writes.length === 0 ? null : (JSON.parse(writes[0]!) as unknown);
+  }
+  // Built per test: `dir` and `transcript` are set in beforeEach.
+  const promptEvent = () => ({
+    hook_event_name: 'UserPromptSubmit',
+    session_id: session,
+    prompt: 'Research a topic',
+    cwd: dir,
+  });
+  const webEvent = () => ({ ...native, cwd: dir, transcript_path: transcript });
+
+  it('denies a search only once the prompt leg recorded that Codex allows the request tool', async () => {
+    // No record yet: the search runs, with the offer beside it.
+    const before = await hookRun('native', webEvent());
+    expect(at(before, 'hookSpecificOutput', 'permissionDecision')).toBeUndefined();
+    expect(String(at(before, 'hookSpecificOutput', 'additionalContext'))).toContain(
+      CODEX_REQUEST_TOOL,
+    );
+
+    const lists: string[] = [];
+    const codexHooks = async (cwd: string) => (lists.push(cwd), listed(...allRows()));
+    expect(await hookRun('prompt', promptEvent(), { codexHooks })).not.toBeNull();
+    expect(lists).toEqual([dir]);
+    const after = await hookRun('native', {
+      ...webEvent(),
+      tool_use_id: 'call-7',
+      tool_input: { search_query: [{ q: 'another search' }] },
+    });
+    expect(at(after, 'hookSpecificOutput', 'permissionDecision')).toBe('deny');
+    // The answer stands for the session: the next prompt does not ask again.
+    await hookRun('prompt', promptEvent(), { codexHooks });
+    expect(lists).toHaveLength(1);
+  });
+
+  it('lets the search run with the offer as context when the allow hook is off', async () => {
+    const off = async () => listed(row('a'), row('b'), row('c'), allowRow({ enabled: false }));
+    await hookRun('prompt', promptEvent(), { codexHooks: off });
+    const out = await hookRun('native', webEvent());
+    expect(at(out, 'hookSpecificOutput', 'permissionDecision')).toBeUndefined();
+    expect(at(out, 'hookSpecificOutput', 'hookEventName')).toBe('PreToolUse');
+    expect(String(at(out, 'hookSpecificOutput', 'additionalContext'))).toContain(
+      `${CODEX_REQUEST_TOOL}({`,
+    );
+  });
+
+  it('records nothing when the hook list cannot be read', async () => {
+    await hookRun('prompt', promptEvent(), { codexHooks: async () => null });
+    const out = await hookRun('native', webEvent());
+    expect(at(out, 'hookSpecificOutput', 'permissionDecision')).toBeUndefined();
   });
 
   it('names the request tool by host', () => {
