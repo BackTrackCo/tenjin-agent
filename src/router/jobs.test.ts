@@ -602,6 +602,7 @@ describe('a 202 naming the URL to poll', () => {
       status: 'running',
       httpStatus: 202,
       ms: expect.any(Number) as number,
+      harness: 'claude',
     });
     expect(await readTake(dir, ID, 1)).toMatchObject({ state: 'running' });
     const mode = (await lstat(takePath(dir, ID, 1))).mode & 0o777;
