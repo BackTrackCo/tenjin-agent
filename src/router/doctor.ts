@@ -36,13 +36,7 @@ import {
 import { channelCredit } from './channel-credit';
 import { loadStep, pluginProof, projectInstallHere, settingsInstallPaths } from './install';
 import { commandForm, handlersIn } from './hook-form';
-import {
-  launchCheck,
-  readNpmPrefix,
-  readSavedPath,
-  stalePathCheck,
-  type PathProbe,
-} from './launch-check';
+import { readNpmPrefix, readSavedPath, stalePathCheck, type PathProbe } from './path-check';
 import { inspectLegacyInstall, type LegacyInstall } from './legacy-install';
 import { routerSettings, type RouterSettings } from './settings';
 import { MARKETPLACE_NAME, PLUGIN_ID, PLUGIN_SERVER, REQUEST_TOOL } from './names';
@@ -105,8 +99,6 @@ export interface RouterDoctorDeps {
   platform?: NodeJS.Platform;
   /** The stale-PATH row's reads (the saved PATH, npm's prefix); tests inject them. */
   pathProbe?: Partial<PathProbe>;
-  /** Whether a pinned launch path exists; tests inject it for Windows paths. */
-  launchExists?: (path: string) => Promise<boolean>;
 }
 
 const NODE_FLOOR = 22;
@@ -137,18 +129,11 @@ export async function runRouterDoctor(
   const plugin = await pluginCheck(claude, { scope, env, home, cwd, dataDir: ctx.dataDir, legacy });
   checks.push(plugin.check);
   const platform = deps.platform ?? process.platform;
-  const roots = await pluginRoots({ scope, env, home, cwd, dataDir: ctx.dataDir, legacy });
   const form = await hookFormCheck(
-    roots,
     { scope, env, home, cwd, dataDir: ctx.dataDir, legacy },
     platform,
   );
   if (form !== null) checks.push(form);
-  const launch = await launchCheck(roots, {
-    scope,
-    ...(deps.launchExists !== undefined ? { exists: deps.launchExists } : {}),
-  });
-  if (launch !== null) checks.push(launch);
   const stale = await stalePathCheck({
     platform,
     env,
@@ -159,7 +144,7 @@ export async function runRouterDoctor(
   });
   if (stale !== null) checks.push(stale);
   if (plugin.registered && claude.binary !== null) {
-    checks.push(await serverCheck(claude.binary, env, cwd, scope));
+    checks.push(await serverCheck(claude.binary, env, cwd));
   }
   if (legacy.present || legacy.unreadable !== undefined) {
     checks.push(await migrationCheck(legacy, claude, ctx.dataDir, env, cwd));
@@ -466,13 +451,12 @@ async function listedInClaudeFiles(env: NodeJS.ProcessEnv, home: string): Promis
  * a stale install shows here before a session finds out.
  */
 async function hookFormCheck(
-  roots: readonly string[],
   c: PluginContext,
   platform: NodeJS.Platform,
 ): Promise<RouterCheck | null> {
   const shell = new Set<string>();
   let exec = 0;
-  for (const path of roots.map((r) => join(r, 'hooks', 'hooks.json'))) {
+  for (const path of await pluginHookFiles(c)) {
     for (const handler of handlersIn(await readJson(path))) {
       const form = commandForm(handler);
       if (form === 'exec') exec += 1;
@@ -498,19 +482,19 @@ async function hookFormCheck(
 }
 
 /**
- * The plugin's roots as Claude Code loads them: the folder fallback, the
- * plugin inside a `directory` marketplace (loaded in place, its cache copy
- * unread), and otherwise each install path Claude Code records.
+ * The plugin's hooks files as Claude Code loads them: the folder fallback's,
+ * the marketplace folder for a `directory` marketplace (loaded in place, its
+ * cache copy unread), and otherwise each install path Claude Code records.
  */
-async function pluginRoots(c: PluginContext): Promise<string[]> {
+async function pluginHookFiles(c: PluginContext): Promise<string[]> {
   const out: string[] = [];
   const folder = await folderState(c.scope, c.env, c.home, c.cwd);
-  if (folder.state === 'ours') out.push(folder.path);
+  if (folder.state === 'ours') out.push(join(folder.path, 'hooks', 'hooks.json'));
   const plugins = join(claudeConfigDir(c.env, c.home), 'plugins');
   const market = (await readJson(join(plugins, 'known_marketplaces.json')))?.[MARKETPLACE_NAME] as
     { source?: { source?: unknown }; installLocation?: unknown } | undefined;
   if (market?.source?.source === 'directory' && typeof market.installLocation === 'string') {
-    out.push(join(market.installLocation, PLUGIN_DIR));
+    out.push(join(market.installLocation, PLUGIN_DIR, 'hooks', 'hooks.json'));
     return out;
   }
   const records = (
@@ -519,7 +503,7 @@ async function pluginRoots(c: PluginContext): Promise<string[]> {
   )?.[PLUGIN_ID];
   for (const record of Array.isArray(records) ? records : []) {
     const path = (record as { installPath?: unknown } | null)?.installPath;
-    if (typeof path === 'string' && path.length > 0) out.push(path);
+    if (typeof path === 'string' && path.length > 0) out.push(join(path, 'hooks', 'hooks.json'));
   }
   return out;
 }
@@ -537,16 +521,14 @@ async function readJson(path: string): Promise<Record<string, unknown> | null> {
 
 /**
  * The plugin's `router` server, through `claude mcp get`, which starts it the
- * way a session would and reports whether it answered. A rendered plugin
- * starts it from absolute paths the launch row checks; the build's template
- * starts `node` from PATH, so there a `node` missing from that PATH shows up
- * as a server that fails to connect.
+ * way a session would and reports whether it answered. It starts `node` from
+ * the PATH Claude Code sees with this CLI's entry, so a `node` that is not on
+ * that PATH shows up here as a server that fails to connect.
  */
 async function serverCheck(
   binary: ClaudeBinary,
   env: NodeJS.ProcessEnv,
   cwd: string,
-  scope: PluginScope,
 ): Promise<RouterCheck> {
   const name = 'router server';
   const run = await runClaude(binary, ['mcp', 'get', PLUGIN_SERVER], {
@@ -568,7 +550,7 @@ async function serverCheck(
     status: 'fail',
     required: true,
     detail: `${PLUGIN_SERVER} did not connect${status !== undefined ? `: ${status.slice(0, 200)}` : ''}`,
-    fix: `Run \`tenjin install${scope === 'local' ? ' --project' : ''}\` again: it renders the plugin with the absolute Node and CLI paths running it, then start a new session.`,
+    fix: 'Restart Claude Code (quit it from the tray) or sign out and in: the plugin starts the CLI with `node` from the PATH Claude Code started with, so a Claude Code opened before Node was installed cannot find it.',
   };
 }
 

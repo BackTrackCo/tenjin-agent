@@ -1,115 +1,15 @@
 import { execFile } from 'node:child_process';
-import { readFile, stat } from 'node:fs/promises';
-import { join, posix, win32 } from 'node:path';
-import { commandForm, handlersIn } from './hook-form';
+import { posix, win32 } from 'node:path';
 import type { RouterCheck } from './reachability';
 
 /**
- * WHAT THE PLUGIN STARTS, AND FROM WHICH PATH. Claude Code hands every process
- * it spawns the PATH it was itself started with. On Windows that PATH is fixed
- * when the app starts, so a Claude Code running (or relaunched by a tray icon
- * or updater) from before Node's installer edited PATH finds neither `tenjin`
- * nor `node`, and the plugin's server fails with no cause shown. `install`
- * therefore renders every command with absolute paths; these checks prove the
- * paths still exist, and name a stale PATH in one line.
+ * WHICH PATH CLAUDE CODE STARTED WITH. Claude Code hands every process it
+ * spawns the PATH it was itself started with, and the plugin starts `node`
+ * from that PATH. On Windows that PATH is fixed when the app starts, so a
+ * Claude Code running (or relaunched by a tray icon or updater) from before
+ * Node's installer edited PATH cannot start the plugin's server, and the
+ * session shows only a closed connection. This row names the gap.
  */
-
-/** A launch as a plugin file carries it: a hook's or stdio server's `command` and `args`. */
-interface Launch {
-  command: string;
-  args: string[];
-}
-
-const isAbsolutePath = (p: string): boolean => posix.isAbsolute(p) || win32.isAbsolute(p);
-
-async function readJson(path: string): Promise<unknown> {
-  try {
-    return JSON.parse(await readFile(path, 'utf8')) as unknown;
-  } catch {
-    return null;
-  }
-}
-
-function asLaunch(value: unknown): Launch | null {
-  if (value === null || typeof value !== 'object') return null;
-  const { command, args } = value as { command?: unknown; args?: unknown };
-  if (typeof command !== 'string' || !Array.isArray(args)) return null;
-  return { command, args: args.filter((a): a is string => typeof a === 'string') };
-}
-
-/** Every launch a plugin root carries: its stdio servers, then its exec-form command hooks. */
-export async function pluginLaunches(root: string): Promise<{ server: Launch[]; hooks: Launch[] }> {
-  const mcp = (await readJson(join(root, '.mcp.json'))) as {
-    mcpServers?: Record<string, unknown>;
-  } | null;
-  const server = Object.values(mcp?.mcpServers ?? {})
-    .map(asLaunch)
-    .filter((l) => l !== null);
-  const hooks = handlersIn(await readJson(join(root, 'hooks', 'hooks.json')))
-    .filter((h) => commandForm(h) === 'exec')
-    .map(asLaunch)
-    .filter((l) => l !== null);
-  return { server, hooks };
-}
-
-const fileExists = async (path: string): Promise<boolean> =>
-  (await stat(path).catch(() => null))?.isFile() === true;
-
-/**
- * THE LAUNCH ROW. Fails when a pinned path is gone (a version manager moved
- * Node, or the package moved), since every command then fails to start; warns
- * when a command still names `node` with no path, which only a PATH current
- * at Claude Code's start can resolve.
- */
-export async function launchCheck(
-  roots: readonly string[],
-  opts: { scope: 'user' | 'local'; exists?: (path: string) => Promise<boolean> },
-): Promise<RouterCheck | null> {
-  const exists = opts.exists ?? fileExists;
-  const install = `\`tenjin install${opts.scope === 'local' ? ' --project' : ''}\``;
-  const missing = new Set<string>();
-  const bare = new Set<string>();
-  let pinned: Launch | null = null;
-  for (const root of roots) {
-    const { server, hooks } = await pluginLaunches(root);
-    for (const launch of [...server, ...hooks]) {
-      const paths = [launch.command];
-      const entry = launch.args[0];
-      if (entry !== undefined && entry !== '-e' && isAbsolutePath(entry)) paths.push(entry);
-      for (const path of paths) {
-        if (!isAbsolutePath(path)) bare.add(path);
-        else if (!(await exists(path))) missing.add(path);
-      }
-    }
-    pinned ??= server.find((l) => isAbsolutePath(l.command)) ?? null;
-  }
-  const name = 'plugin launch';
-  if (missing.size > 0) {
-    return {
-      name,
-      status: 'fail',
-      required: true,
-      detail: `the plugin starts from ${[...missing].join(', ')}, which no longer exists`,
-      fix: `Run ${install} again: it pins the Node binary and CLI entry running it.`,
-    };
-  }
-  if (bare.size > 0) {
-    return {
-      name,
-      status: 'warn',
-      required: false,
-      detail: `the plugin starts \`${[...bare].join('`, `')}\` from the PATH Claude Code started with, which can predate Node's install`,
-      fix: `Run ${install} again: it renders the plugin with this machine's absolute Node and CLI paths.`,
-    };
-  }
-  if (pinned === null) return null;
-  return {
-    name,
-    status: 'ok',
-    required: false,
-    detail: `${pinned.command} ${pinned.args[0] ?? ''}`.trim(),
-  };
-}
 
 /** Everything the stale-PATH row reads, injected in tests. */
 export interface PathProbe {
@@ -185,8 +85,9 @@ function under(file: string, dir: string, platform: NodeJS.Platform): boolean {
  * THE STALE-PATH ROW: the directories saved for new processes (the Windows
  * registry's user and machine PATH) and npm's global bin directory, when this
  * CLI lives under npm's prefix, that the running process's PATH lacks. Run in
- * a Claude Code session, that is Claude Code's own PATH. Only a warning: the
- * plugin's rendered commands do not read PATH.
+ * a Claude Code session, that is Claude Code's own PATH. A warning: a missing
+ * directory breaks the plugin only when it holds `node`, and the `router
+ * server` row fails when it does.
  */
 export async function stalePathCheck(probe: PathProbe): Promise<RouterCheck | null> {
   const wanted = [...((await probe.savedPath()) ?? [])];
@@ -204,9 +105,10 @@ export async function stalePathCheck(probe: PathProbe): Promise<RouterCheck | nu
     name: 'PATH',
     status: 'warn',
     required: false,
-    detail: inClaude
-      ? `Claude Code's PATH lacks ${shown}; restart Claude Code (quit it from the tray) or sign out and in`
-      : `this shell's PATH lacks ${shown}; open a new terminal, and restart Claude Code (quit it from the tray) or sign out and in if it was open before`,
+    detail: inClaude ? `Claude Code's PATH lacks ${shown}` : `this shell's PATH lacks ${shown}`,
+    fix: inClaude
+      ? 'Restart Claude Code (quit it from the tray) or sign out and in.'
+      : 'Open a new terminal. If Claude Code was open before, restart Claude Code (quit it from the tray) or sign out and in.',
   };
 }
 

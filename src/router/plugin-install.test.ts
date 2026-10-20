@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -83,7 +83,7 @@ function deps(over: Record<string, unknown> = {}) {
     cwd: work,
     env: env(),
     hostsDir: hosts,
-    launcher: LAUNCHER(root),
+    cliEntry: join(root, 'pkg', 'dist', 'index.js'),
     walletExists: async () => true,
     walletAddress: async () => ADDRESS,
     createWallet: vi.fn(async () => ADDRESS),
@@ -91,12 +91,6 @@ function deps(over: Record<string, unknown> = {}) {
     ...over,
   };
 }
-
-/** The Node binary and CLI entry the tests pin. */
-const LAUNCHER = (base: string) => ({
-  node: join(base, 'node', 'bin', 'node'),
-  entry: join(base, 'pkg', 'dist', 'index.js'),
-});
 
 async function exists(path: string): Promise<boolean> {
   return (await stat(path).catch(() => null)) !== null;
@@ -238,12 +232,12 @@ describe('tenjin install registers the plugin through Claude Code', () => {
       state: 'written',
       path: folder,
     });
-    // Its commands carry the absolute Node and entry install resolved, nothing from PATH.
-    const files = renderPluginFiles(pkg.version, LAUNCHER(root));
+    // Outside the package, so its commands carry the absolute entry install resolved.
+    const files = renderPluginFiles(pkg.version, join(root, 'pkg', 'dist', 'index.js'));
     expect(JSON.parse(files['.mcp.json']!)).toEqual({
       mcpServers: {
         router: {
-          command: join(root, 'node', 'bin', 'node'),
+          command: 'node',
           args: [join(root, 'pkg', 'dist', 'index.js'), 'mcp', '--plugin'],
         },
       },
@@ -402,30 +396,6 @@ describe('tenjin install registers the plugin through Claude Code', () => {
     );
     await runRouterInstall({}, ctx(), deps());
     expect(await fake.calls()).toContain(`plugin marketplace add ${hosts} --json`);
-  });
-
-  it('renders its marketplace under the data dir with every command pinned, and registers that folder', async () => {
-    const result = await runRouterInstall({}, ctx(), deps({ hostsDir: undefined }));
-    const rendered = join(data, 'claude-plugin');
-    expect(await fake.calls()).toContain(`plugin marketplace add ${rendered} --json`);
-    expect(pluginOf(result)).toMatchObject({ method: 'plugin', path: rendered });
-    for (const [path, body] of Object.entries(renderHostFiles(pkg.version, LAUNCHER(root)))) {
-      expect(await readFile(join(rendered, path), 'utf8'), path).toBe(body);
-    }
-    // Nothing in it is left for Claude Code's PATH to resolve.
-    const mcp = await readFile(join(rendered, 'tenjin', '.mcp.json'), 'utf8');
-    expect(JSON.parse(mcp).mcpServers.router.command).toBe(LAUNCHER(root).node);
-  });
-
-  it('moves a marketplace an earlier release registered at the package to the rendered folder', async () => {
-    await fake.respond(
-      'mkt-list',
-      `${JSON.stringify([{ name: 'tenjin', source: 'directory', path: hosts }])}\n`,
-    );
-    await runRouterInstall({}, ctx(), deps({ hostsDir: undefined }));
-    expect(await fake.calls()).toContain(
-      `plugin marketplace add ${join(data, 'claude-plugin')} --json`,
-    );
   });
 
   it('registers below the Claude Code floor, and the fix is `claude update` in the session', async () => {
@@ -665,85 +635,6 @@ describe('tenjin uninstall', () => {
     expect(await exists(aliveDir(data))).toBe(false);
   });
 
-  describe('the rendered marketplace folder, which every scope shares', () => {
-    const rendered = () => join(data, 'claude-plugin');
-    const pointing = () =>
-      `${JSON.stringify([{ name: 'tenjin', source: 'directory', path: rendered() }])}\n`;
-    const uninstall = (args: { project?: boolean } = {}, cwd = work) =>
-      runRouterUninstall(args, ctx(), { homeDir: home, cwd, env: env() });
-    const folderOf = (result: { data: unknown }) =>
-      (result.data as { plugin: { marketplaceFolder?: Record<string, unknown> } }).plugin
-        .marketplaceFolder;
-
-    it('is removed once a readable list shows nothing points at it', async () => {
-      await runRouterInstall({}, ctx(), deps({ hostsDir: undefined }));
-      await fake.respond('mkt-list', pointing());
-      await fake.listAfterRemove('[]\n');
-      const result = await uninstall();
-      expect(result.data).toMatchObject({
-        plugin: { marketplace: 'removed', marketplaceFolder: { removed: true, left: [] } },
-      });
-      expect(await exists(rendered())).toBe(false);
-    });
-
-    it('is kept, and the failure named, when the marketplace list cannot be read', async () => {
-      await runRouterInstall({}, ctx(), deps({ hostsDir: undefined }));
-      await fake.respond('mkt-list', 'timed out\n', 1);
-      const result = await uninstall();
-      expect(result.data).toMatchObject({ plugin: { marketplace: 'unread' } });
-      expect(folderOf(result)).toMatchObject({ removed: false });
-      expect(String(folderOf(result)?.reason)).toContain('could not be read');
-      expect(result.humanLines?.join('\n')).toContain(`kept the marketplace folder ${rendered()}`);
-      expect(await exists(join(rendered(), 'tenjin', '.mcp.json'))).toBe(true);
-    });
-
-    it('is kept when the list after the removal cannot be read', async () => {
-      await runRouterInstall({}, ctx(), deps({ hostsDir: undefined }));
-      await fake.respond('mkt-list', pointing());
-      await fake.listAfterRemove('not json\n');
-      const result = await uninstall();
-      expect(folderOf(result)).toMatchObject({ removed: false });
-      expect(await exists(join(rendered(), 'tenjin', '.mcp.json'))).toBe(true);
-    });
-
-    it('outlives a project uninstall while the user install points at it, then goes with the last', async () => {
-      await runRouterInstall({}, ctx(), deps({ hostsDir: undefined }));
-      await runRouterInstall({ project: true }, ctx(), deps({ hostsDir: undefined }));
-      // The user's marketplace still names the folder after the project's is removed.
-      await fake.respond('mkt-list', pointing());
-      await fake.listAfterRemove(pointing());
-      const project = await uninstall({ project: true });
-      expect(project.data).toMatchObject({ plugin: { marketplace: 'removed' } });
-      expect(folderOf(project)).toMatchObject({ removed: false });
-      expect(await exists(join(rendered(), 'tenjin', '.mcp.json'))).toBe(true);
-      await fake.respond('mkt-list', pointing());
-      await fake.listAfterRemove('[]\n');
-      const user = await uninstall();
-      expect(folderOf(user)).toMatchObject({ removed: true });
-      expect(await exists(rendered())).toBe(false);
-    });
-
-    it('outlives a user uninstall while another recorded project still uses it', async () => {
-      const other = join(root, 'other-project');
-      await mkdir(join(other, '.claude'), { recursive: true });
-      await runRouterInstall({}, ctx(), deps({ hostsDir: undefined }));
-      await runRouterInstall({ project: true }, ctx(), deps({ hostsDir: undefined, cwd: other }));
-      // What `claude plugin install --scope local` leaves in that project.
-      const local = join(other, '.claude', 'settings.local.json');
-      await writeFile(local, JSON.stringify({ enabledPlugins: { 'tenjin@tenjin': true } }));
-      await fake.respond('mkt-list', pointing());
-      await fake.listAfterRemove('[]\n');
-      const user = await uninstall();
-      expect(folderOf(user)).toMatchObject({ removed: false });
-      expect(String(folderOf(user)?.reason)).toContain(other);
-      // Once that project no longer names the plugin, nothing holds the folder.
-      await writeFile(local, '{}');
-      await fake.respond('mkt-list', pointing());
-      await fake.listAfterRemove('[]\n');
-      expect(folderOf(await uninstall())).toMatchObject({ removed: true });
-    });
-  });
-
   it('keeps a marketplace named tenjin that install did not add', async () => {
     await fake.respond(
       'mkt-list',
@@ -973,40 +864,6 @@ describe('tenjin doctor', () => {
     expect(elsewhere['hook form']?.detail).toMatch(/^shell, in /);
   });
 
-  it('checks that the pinned Node and CLI entry still exist', async () => {
-    const noClaude = env({ PATH: await emptyPath() });
-    await runRouterInstall({}, ctx(), deps({ env: noClaude }));
-    const pins = LAUNCHER(root);
-    const gone = await checks({ env: noClaude });
-    expect(gone['plugin launch']).toMatchObject({ status: 'fail' });
-    expect(gone['plugin launch']?.detail).toContain(pins.node);
-    for (const path of [pins.node, pins.entry]) {
-      await mkdir(dirname(path), { recursive: true });
-      await writeFile(path, '');
-    }
-    const ok = await checks({ env: noClaude });
-    expect(ok['plugin launch']).toMatchObject({
-      status: 'ok',
-      detail: `${pins.node} ${pins.entry}`,
-    });
-  });
-
-  it('names a stale Windows PATH in one line, from the saved PATH it was handed', async () => {
-    const c = await checks({
-      env: env({ PATH: 'C:\\Windows\\system32', CLAUDECODE: '1' }),
-      platform: 'win32',
-      pathProbe: {
-        savedPath: async () => ['C:\\Windows\\system32', 'C:\\Program Files\\nodejs\\'],
-        npmPrefix: async () => null,
-      },
-    });
-    expect(c['PATH']).toMatchObject({
-      status: 'warn',
-      detail:
-        "Claude Code's PATH lacks C:\\Program Files\\nodejs\\; restart Claude Code (quit it from the tray) or sign out and in",
-    });
-  });
-
   it('never sends anyone out of the session to fix a check', async () => {
     await writeLegacy();
     await fake.respond('version', '2.1.100 (Claude Code)\n');
@@ -1014,47 +871,6 @@ describe('tenjin doctor', () => {
     for (const check of Object.values(c)) {
       expect(check.fix ?? '', check.name).not.toMatch(/terminal|restart Claude Code|by hand/i);
     }
-  });
-});
-
-describe("the plugin's server keeps its rendered folder current", () => {
-  it('writes nothing where install rendered no folder', async () => {
-    const { refreshRenderedPlugin } = await import('./plugin-registration');
-    expect(await refreshRenderedPlugin(data, pkg.version, LAUNCHER(root))).toBe('absent');
-    expect(await exists(join(data, 'claude-plugin'))).toBe(false);
-  });
-
-  it('rewrites a folder another build rendered, and leaves a current one alone', async () => {
-    await runRouterInstall({}, ctx(), deps({ hostsDir: undefined }));
-    const { refreshRenderedPlugin } = await import('./plugin-registration');
-    expect(await refreshRenderedPlugin(data, pkg.version, LAUNCHER(root))).toBe('current');
-    expect(await refreshRenderedPlugin(data, '9.9.9', LAUNCHER(root))).toBe('rewritten');
-    const manifest = join(data, 'claude-plugin', 'tenjin', '.claude-plugin', 'plugin.json');
-    expect(JSON.parse(await readFile(manifest, 'utf8')).version).toBe('9.9.9');
-  });
-});
-
-describe('stableNode', () => {
-  it('pins the PATH alias of the running Node over its versioned real path, else the real path', async () => {
-    const { stableNode, nodeOnPath } = await import('./plugin-registration');
-    const cellar = join(root, 'Cellar', 'node', '24.1.0', 'bin', 'node');
-    const bin = join(root, 'bin');
-    await mkdir(dirname(cellar), { recursive: true });
-    await mkdir(bin, { recursive: true });
-    await writeFile(cellar, '');
-    await symlink(cellar, join(bin, 'node'));
-    const onPath = nodeOnPath({ PATH: [join(root, 'empty'), bin].join(':') }, 'linux');
-    expect(onPath).toEqual([join(root, 'empty', 'node'), join(bin, 'node')]);
-    expect(stableNode(cellar, onPath)).toBe(join(bin, 'node'));
-    expect(stableNode(cellar, [join(root, 'empty', 'node')])).toBe(cellar);
-  });
-
-  it('names node.exe in each Windows PATH entry', async () => {
-    const { nodeOnPath } = await import('./plugin-registration');
-    expect(nodeOnPath({ Path: 'C:\\Windows;C:\\Program Files\\nodejs\\' }, 'win32')).toEqual([
-      join('C:\\Windows', 'node.exe'),
-      join('C:\\Program Files\\nodejs\\', 'node.exe'),
-    ]);
   });
 });
 

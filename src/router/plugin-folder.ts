@@ -2,7 +2,7 @@ import { lstat, readdir, readFile, rm, rmdir } from 'node:fs/promises';
 import { dirname, join, relative, sep } from 'node:path';
 import { writeFileAtomic } from '../lib/atomic-json';
 import { PLUGIN_NAME } from './names';
-import { MARKETPLACE_FILE, OWNER_MARKER, PLUGIN_DIR, PLUGIN_FILES } from './plugin-files';
+import { OWNER_MARKER, PLUGIN_FILES } from './plugin-files';
 
 /**
  * THE FOLDER FALLBACK: the plugin as a folder under a config dir's `skills/`,
@@ -129,83 +129,4 @@ async function listFiles(dir: string): Promise<string[]> {
   };
   await walk(dir);
   return out.sort();
-}
-
-/**
- * THE MARKETPLACE FOLDER `install` RENDERS, `<data dir>/claude-plugin`: the
- * catalog and the plugin under {@link PLUGIN_DIR}, with every command pinned to
- * absolute paths. It is a `directory` marketplace, which Claude Code reads in
- * place, so these files are what runs, not a cache copy a plugin update
- * replaces. Only {@link MARKETPLACE_FILE} and the plugin's
- * {@link PLUGIN_FILES} are ever written or unlinked here.
- */
-export const MARKETPLACE_FOLDER = 'claude-plugin';
-
-export function marketplaceFolderPath(dataDir: string): string {
-  return join(dataDir, MARKETPLACE_FOLDER);
-}
-
-/** The plugin's files out of a marketplace render (`<plugin dir>/<path>`), by plugin path. */
-function pluginPart(files: Record<string, string>): Record<string, string> {
-  const prefix = `${PLUGIN_DIR}/`;
-  return Object.fromEntries(
-    Object.entries(files)
-      .filter(([path]) => path.startsWith(prefix))
-      .map(([path, body]) => [path.slice(prefix.length), body]),
-  );
-}
-
-/**
- * Write a marketplace render: the plugin first (its manifest last), then the
- * catalog, so Claude Code never reads a catalog naming a plugin that is not
- * there yet. A plugin folder there that is not ours is refused.
- */
-export async function writeMarketplaceFolder(
-  dir: string,
-  files: Record<string, string>,
-): Promise<FolderWrite> {
-  const plugin = await writePluginFolder(join(dir, PLUGIN_DIR), pluginPart(files));
-  if (plugin.state !== 'written') return { ...plugin, path: dir };
-  const catalog = files[MARKETPLACE_FILE];
-  try {
-    if (catalog !== undefined) await writeFileAtomic(join(dir, MARKETPLACE_FILE), catalog);
-  } catch (err) {
-    return {
-      path: dir,
-      state: 'refused',
-      reason: err instanceof Error ? err.message : String(err),
-    };
-  }
-  return { path: dir, state: 'written' };
-}
-
-/**
- * Bring a marketplace folder of ours up to `files`, rewriting only when a byte
- * differs. Nothing is created: no folder of ours here means `install` did not
- * register one, and nothing then points Claude Code at this path.
- */
-export async function refreshMarketplaceFolder(
-  dir: string,
-  files: Record<string, string>,
-): Promise<'absent' | 'current' | 'rewritten' | 'refused'> {
-  if ((await inspectPluginFolder(join(dir, PLUGIN_DIR))) !== 'ours') return 'absent';
-  const differs = await Promise.all(
-    Object.entries(files).map(async ([path, body]) => {
-      const now = await readFile(join(dir, path), 'utf8').catch(() => null);
-      return now !== body;
-    }),
-  );
-  if (!differs.includes(true)) return 'current';
-  return (await writeMarketplaceFolder(dir, files)).state === 'written' ? 'rewritten' : 'refused';
-}
-
-/** Remove a marketplace folder of ours: the plugin's files, the catalog, then the folders they leave empty. */
-export async function removeMarketplaceFolder(dir: string): Promise<FolderRemoval> {
-  const plugin = await removePluginFolder(join(dir, PLUGIN_DIR));
-  if (!plugin.removed) return { ...plugin, path: dir };
-  await rm(join(dir, MARKETPLACE_FILE), { force: true });
-  await rmdir(join(dir, dirname(MARKETPLACE_FILE))).catch(() => undefined);
-  const left = await listFiles(dir);
-  if (left.length === 0) await rmdir(dir).catch(() => undefined);
-  return { path: dir, removed: true, left };
 }

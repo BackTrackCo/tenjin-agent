@@ -10,13 +10,12 @@ import {
 } from './names';
 
 /**
- * THE CLAUDE CODE PLUGIN, AS FILES. `tenjin install` renders a marketplace
- * folder under the data dir with absolute launch paths and registers it with
- * Claude Code's own `claude plugin` commands, or writes the same plugin folder
- * under the config dir's `skills/` when there is no `claude` binary to run.
- * The build renders the template into `dist/hosts/claude`, and the checked-in
- * `hosts/claude/` copy is pinned to that render by a test, so the two cannot
- * drift.
+ * THE CLAUDE CODE PLUGIN, AS FILES. `tenjin install` registers it with Claude
+ * Code's own `claude plugin` commands from the package's `dist/hosts/claude`
+ * folder, which the build renders from this module, and writes the same plugin
+ * folder under the config dir's `skills/` when there is no `claude` binary to
+ * run. The checked-in `hosts/claude/` templates are pinned to this render by a
+ * test, so the two cannot drift.
  *
  * NOTHING HERE IMPORTS MORE THAN THE NAMES AND THE PRODUCTION ORIGIN:
  * `tsup.config.ts` loads this module to render the shipped files, and its
@@ -54,30 +53,14 @@ export const NATIVE_MATCHER = 'WebSearch|WebFetch';
 export const ASK_MATCHER = 'AskUserQuestion';
 
 /**
- * EVERY COMMAND RUNS NODE IN EXEC FORM, with no shell (see `hook-form.ts`).
- * The checked-in template and the build's `dist/hosts/claude` name `node` and
- * the entry three folders above `${CLAUDE_PLUGIN_ROOT}`, so they stay static.
- * They are templates: what Claude Code runs is the copy `install` renders
- * with a {@link Launcher}, because `node` from PATH is only as current as the
- * PATH Claude Code started with.
+ * EVERY COMMAND RUNS `node` IN EXEC FORM, with no shell (see `hook-form.ts`).
+ * The shipped plugin loads in place from the package's `dist/hosts/claude/tenjin`,
+ * so the bundle's entry is three folders above `${CLAUDE_PLUGIN_ROOT}`, which
+ * Claude Code substitutes into each argument, and the checked-in template
+ * stays static. The folder fallback lives under the config dir instead, and
+ * `install` renders it with the absolute entry of the CLI that wrote it.
  */
 export const PLUGIN_ROOT_ENTRY = '${CLAUDE_PLUGIN_ROOT}/../../../index.js';
-
-/**
- * THE TWO PATHS EVERY RENDERED COMMAND STARTS FROM, both absolute and resolved
- * by `install`: the Node binary running it (`process.execPath`) and this CLI's
- * entry script (never the npm `.cmd` shim). Claude Code then finds neither on
- * PATH, so a Claude Code started before Node or the CLI joined PATH (on
- * Windows, an app already running when the installer edited PATH) still
- * starts the plugin.
- */
-export interface Launcher {
-  node: string;
-  entry: string;
-}
-
-/** The template's launcher: `node` from PATH and the entry beside the plugin root. */
-export const TEMPLATE_LAUNCHER: Launcher = { node: 'node', entry: PLUGIN_ROOT_ENTRY };
 
 /** A process Claude Code spawns directly: a hook's `command` and `args`, or a stdio server's. */
 export interface ExecLaunch {
@@ -85,12 +68,9 @@ export interface ExecLaunch {
   args: string[];
 }
 
-/** The CLI run by Node from its entry script, never through the `tenjin` shim. */
-export function cliLaunch(
-  args: readonly string[],
-  launcher: Launcher = TEMPLATE_LAUNCHER,
-): ExecLaunch {
-  return { command: launcher.node, args: [launcher.entry, ...args] };
+/** The CLI run by `node` from its entry script, never through the `tenjin` shim. */
+export function cliLaunch(args: readonly string[], entry: string = PLUGIN_ROOT_ENTRY): ExecLaunch {
+  return { command: 'node', args: [entry, ...args] };
 }
 
 /**
@@ -117,8 +97,8 @@ function permissionAnswer(decision: 'allow' | 'deny', reason: string): string {
 /** A fixed answer `node -e` prints from its own argument: no shell, no CLI, no quoting. */
 export const PRINT_ARGUMENT = 'process.stdout.write(process.argv[1])';
 
-function printed(answer: string, node: string): ExecLaunch {
-  return { command: node, args: ['-e', PRINT_ARGUMENT, answer] };
+function printed(answer: string): ExecLaunch {
+  return { command: 'node', args: ['-e', PRINT_ARGUMENT, answer] };
 }
 
 /**
@@ -130,15 +110,12 @@ function printed(answer: string, node: string): ExecLaunch {
  * still run (lab, Claude Code 2.1.296). The tool stays in the model's list. The
  * tool's transcript check (`admitHookEvent`) stays for a machine with hooks off.
  */
-export function denyHook(node = TEMPLATE_LAUNCHER.node): ExecLaunch {
-  return printed(
-    permissionAnswer(
-      'deny',
-      `Only the Tenjin hooks call this tool. To make a lookup, call ${REQUEST_TOOL}.`,
-    ),
-    node,
-  );
-}
+export const DENY_HOOK = printed(
+  permissionAnswer(
+    'deny',
+    `Only the Tenjin hooks call this tool. To make a lookup, call ${REQUEST_TOOL}.`,
+  ),
+);
 
 /**
  * THE REQUEST TOOL IS ALLOWED BY THE PLUGIN ITSELF, replacing the settings
@@ -147,9 +124,7 @@ export function denyHook(node = TEMPLATE_LAUNCHER.node): ExecLaunch {
  * the tool. The tool still pays only within the local spend policy, and an
  * amount over it returns `needs_approval` with nothing paid.
  */
-export function allowHook(node = TEMPLATE_LAUNCHER.node): ExecLaunch {
-  return printed(permissionAnswer('allow', 'Tenjin lookup'), node);
-}
+export const ALLOW_HOOK = printed(permissionAnswer('allow', 'Tenjin lookup'));
 
 /** One routing leg: Claude Code calls the plugin server's `hook` tool. */
 function leg(kind: HookKind, timeout = ROUTE_HOOK_TIMEOUT_SECONDS): unknown[] {
@@ -192,14 +167,14 @@ export function routerHookPlan(): { event: string; matcher?: string; hooks: unkn
 }
 
 /** `hooks/hooks.json`: the `alive` leg, the seven routing legs and the two permission answers. */
-export function renderPluginHooks(launcher: Launcher = TEMPLATE_LAUNCHER): {
+export function renderPluginHooks(entry: string = PLUGIN_ROOT_ENTRY): {
   hooks: Record<string, unknown[]>;
 } {
   const plan = [
-    { event: 'SessionStart', hooks: command(cliLaunch(ALIVE_ARGS, launcher)) },
+    { event: 'SessionStart', hooks: command(cliLaunch(ALIVE_ARGS, entry)) },
     ...routerHookPlan(),
-    { event: 'PreToolUse', matcher: PLUGIN_HOOK_TOOL, hooks: command(denyHook(launcher.node)) },
-    { event: 'PreToolUse', matcher: REQUEST_TOOL, hooks: command(allowHook(launcher.node)) },
+    { event: 'PreToolUse', matcher: PLUGIN_HOOK_TOOL, hooks: command(DENY_HOOK) },
+    { event: 'PreToolUse', matcher: REQUEST_TOOL, hooks: command(ALLOW_HOOK) },
   ];
   const hooks: Record<string, unknown[]> = {};
   for (const { event, hooks: handlers, ...rest } of plan) {
@@ -210,7 +185,7 @@ export function renderPluginHooks(launcher: Launcher = TEMPLATE_LAUNCHER): {
 
 /**
  * `.mcp.json`: the server Claude Code starts for the plugin, the CLI's entry
- * run by Node, which Windows can spawn where it cannot spawn the shim.
+ * run by `node`, which Windows can spawn where it cannot spawn the shim.
  *
  * `--plugin` KEEPS IT FROM BEING SUPPRESSED. Claude Code drops a plugin's MCP
  * server whose command and arguments match a server the user configured, and
@@ -220,10 +195,10 @@ export function renderPluginHooks(launcher: Launcher = TEMPLATE_LAUNCHER): {
  */
 export const PLUGIN_MCP_ARGS = ['mcp', '--plugin'] as const;
 
-export function renderPluginMcp(launcher: Launcher = TEMPLATE_LAUNCHER): {
+export function renderPluginMcp(entry: string = PLUGIN_ROOT_ENTRY): {
   mcpServers: Record<string, unknown>;
 } {
-  return { mcpServers: { [MCP_SERVER_NAME]: cliLaunch(PLUGIN_MCP_ARGS, launcher) } };
+  return { mcpServers: { [MCP_SERVER_NAME]: cliLaunch(PLUGIN_MCP_ARGS, entry) } };
 }
 
 /** The key whose presence marks a plugin manifest as one this CLI wrote. */
@@ -255,7 +230,7 @@ export function renderPluginManifest(version?: string): Record<string, unknown> 
 /** The plugin's folder inside the marketplace folder. */
 export const PLUGIN_DIR = PLUGIN_NAME;
 
-/** `.claude-plugin/marketplace.json`: one plugin, read in place from the folder `install` renders. */
+/** `.claude-plugin/marketplace.json`: one plugin, read in place from the package. */
 export function renderMarketplace(version?: string): Record<string, unknown> {
   return {
     name: MARKETPLACE_NAME,
@@ -288,33 +263,25 @@ export const PLUGIN_FILES = [
 const json = (value: unknown): string => `${JSON.stringify(value, null, 2)}\n`;
 
 /**
- * The plugin folder's files, by {@link PLUGIN_FILES} path, every command
- * started from `launcher` (the template's unless `install` pinned one).
+ * The plugin folder's files, by {@link PLUGIN_FILES} path. `entry` is the CLI
+ * entry the commands run, {@link PLUGIN_ROOT_ENTRY} unless the folder lives
+ * outside the package.
  */
-export function renderPluginFiles(
-  version?: string,
-  launcher: Launcher = TEMPLATE_LAUNCHER,
-): Record<string, string> {
+export function renderPluginFiles(version?: string, entry?: string): Record<string, string> {
   return {
-    '.mcp.json': json(renderPluginMcp(launcher)),
-    'hooks/hooks.json': json(renderPluginHooks(launcher)),
+    '.mcp.json': json(renderPluginMcp(entry)),
+    'hooks/hooks.json': json(renderPluginHooks(entry)),
     '.claude-plugin/plugin.json': json(renderPluginManifest(version)),
   };
 }
 
-/** The catalog's path inside a marketplace folder. */
-export const MARKETPLACE_FILE = '.claude-plugin/marketplace.json';
-
 /** The marketplace folder's files: its catalog and the plugin under {@link PLUGIN_DIR}. */
-export function renderHostFiles(
-  version?: string,
-  launcher: Launcher = TEMPLATE_LAUNCHER,
-): Record<string, string> {
-  const plugin = Object.entries(renderPluginFiles(version, launcher)).map(
+export function renderHostFiles(version?: string): Record<string, string> {
+  const plugin = Object.entries(renderPluginFiles(version)).map(
     ([path, body]) => [`${PLUGIN_DIR}/${path}`, body] as const,
   );
   return {
-    [MARKETPLACE_FILE]: json(renderMarketplace(version)),
+    '.claude-plugin/marketplace.json': json(renderMarketplace(version)),
     ...Object.fromEntries(plugin),
   };
 }

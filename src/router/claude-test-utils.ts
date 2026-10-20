@@ -38,9 +38,6 @@ case "$*" in
   "mcp get"*) key=mcp-get;;
   *) key=unknown;;
 esac
-if [ "$key" = mkt-remove ] && [ -f "$d/mkt-list.after-remove" ]; then
-  /bin/cp "$d/mkt-list.after-remove" "$d/mkt-list.out"
-fi
 [ -f "$d/$key.out" ] && /bin/cat "$d/$key.out"
 code=0
 [ -f "$d/$key.code" ] && code=$(/bin/cat "$d/$key.code")
@@ -72,8 +69,6 @@ export interface FakeClaude {
   env: Record<string, string>;
   /** Set what one command prints and its exit code. */
   respond(key: FakeKey, out: string, code?: number): Promise<void>;
-  /** What `plugin marketplace list` prints once a `plugin marketplace remove` has run. */
-  listAfterRemove(out: string): Promise<void>;
   /** Every command line received, in order. */
   calls(): Promise<string[]>;
   /** The `CLAUDE_CONFIG_DIR` each command ran with. */
@@ -99,9 +94,6 @@ export async function fakeClaude(root: string): Promise<FakeClaude> {
     async respond(key, out, code = 0) {
       await writeFile(join(dir, `${key}.out`), out);
       await writeFile(join(dir, `${key}.code`), String(code));
-    },
-    async listAfterRemove(out) {
-      await writeFile(join(dir, 'mkt-list.after-remove'), out);
     },
     calls: () => lines('calls.log'),
     configDirs: () => lines('config-dirs.log'),

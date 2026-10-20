@@ -8,8 +8,8 @@ import { PLUGIN_HOOK_TOOL, PLUGIN_SERVER, REQUEST_TOOL } from './names';
 import { commandForm, handlersIn, shellDependence } from './hook-form';
 import {
   ALIVE_ARGS,
-  allowHook,
-  denyHook,
+  ALLOW_HOOK,
+  DENY_HOOK,
   PLUGIN_DIR,
   PLUGIN_FILES,
   PLUGIN_ROOT_ENTRY,
@@ -19,9 +19,7 @@ import {
   renderPluginHooks,
   renderPluginManifest,
   renderPluginMcp,
-  TEMPLATE_LAUNCHER,
   type ExecLaunch,
-  type Launcher,
 } from './plugin-files';
 
 const HOSTS = fileURLToPath(new URL('../../hosts/claude', import.meta.url));
@@ -76,8 +74,8 @@ describe("the plugin's hooks", () => {
       { matcher: 'WebSearch|WebFetch', hooks: leg('native') },
       { matcher: 'Agent|Task', hooks: leg('agent') },
       { matcher: 'AskUserQuestion', hooks: leg('ask') },
-      { matcher: 'mcp__plugin_tenjin_router__hook', hooks: command(denyHook()) },
-      { matcher: 'mcp__plugin_tenjin_router__request', hooks: command(allowHook()) },
+      { matcher: 'mcp__plugin_tenjin_router__hook', hooks: command(DENY_HOOK) },
+      { matcher: 'mcp__plugin_tenjin_router__request', hooks: command(ALLOW_HOOK) },
     ]);
     expect(hooks.PostToolUse).toEqual([
       { matcher: 'WebSearch|WebFetch', hooks: leg('shortfall', 15) },
@@ -97,26 +95,21 @@ describe("the plugin's hooks", () => {
     expect(PLUGIN_ROOT_ENTRY).toBe('${CLAUDE_PLUGIN_ROOT}/../../../index.js');
   });
 
-  it('deny the hook tool to the model and allow the request tool, spawned with no shell and no PATH', () => {
+  it('deny the hook tool to the model and allow the request tool, spawned with no shell', () => {
     // No stdin: the command never reads its event, and on Linux a child that
-    // exits before Node writes the event fails the write with EPIPE. An empty
-    // PATH is the stale one a Claude Code started before Node's install has.
+    // exits before Node writes the event fails the write with EPIPE.
     const answer = ({ command: file, args }: ExecLaunch) =>
       JSON.parse(
-        execFileSync(file, args, {
-          stdio: ['ignore', 'pipe', 'pipe'],
-          encoding: 'utf8',
-          env: { PATH: '' },
-        }),
+        execFileSync(file, args, { stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8' }),
       ) as {
         hookSpecificOutput: Record<string, string>;
       };
-    expect(answer(denyHook(process.execPath)).hookSpecificOutput).toEqual({
+    expect(answer(DENY_HOOK).hookSpecificOutput).toEqual({
       hookEventName: 'PreToolUse',
       permissionDecision: 'deny',
       permissionDecisionReason: `Only the Tenjin hooks call this tool. To make a lookup, call ${REQUEST_TOOL}.`,
     });
-    expect(answer(allowHook(process.execPath)).hookSpecificOutput).toMatchObject({
+    expect(answer(ALLOW_HOOK).hookSpecificOutput).toMatchObject({
       hookEventName: 'PreToolUse',
       permissionDecision: 'allow',
     });
@@ -138,57 +131,11 @@ describe("the plugin's server", () => {
         router: { command: 'node', args: [PLUGIN_ROOT_ENTRY, 'mcp', '--plugin'] },
       },
     });
-    expect(
-      renderPluginMcp({ node: '/usr/local/bin/node', entry: '/opt/tenjin-cli/dist/index.js' }),
-    ).toEqual({
+    expect(renderPluginMcp('/opt/tenjin-cli/dist/index.js')).toEqual({
       mcpServers: {
-        router: {
-          command: '/usr/local/bin/node',
-          args: ['/opt/tenjin-cli/dist/index.js', 'mcp', '--plugin'],
-        },
+        router: { command: 'node', args: ['/opt/tenjin-cli/dist/index.js', 'mcp', '--plugin'] },
       },
     });
-  });
-});
-
-/** What `install` pins on a Windows machine with Node and the CLI in their default folders. */
-const WINDOWS: Launcher = {
-  node: 'C:\\Program Files\\nodejs\\node.exe',
-  entry: 'C:\\Users\\me\\AppData\\Roaming\\npm\\node_modules\\tenjin-cli\\dist\\index.js',
-};
-
-/**
- * NOTHING FROM PATH IN A PINNED RENDER. Claude Code passes its own PATH to
- * what it spawns, and on Windows that PATH can predate Node's install, so
- * every command `install` renders names the Node binary and the CLI entry by
- * absolute path, and nothing is left for PATH to resolve.
- */
-describe('a render pinned to a launcher', () => {
-  const files = renderPluginFiles('1.2.3', WINDOWS);
-  const hooks = JSON.parse(files['hooks/hooks.json']!) as unknown;
-  const { mcpServers } = JSON.parse(files['.mcp.json']!) as {
-    mcpServers: Record<string, ExecLaunch>;
-  };
-
-  it('starts every command and the server from the pinned Node binary', () => {
-    const commands = handlersIn(hooks).filter((h) => commandForm(h) !== null) as ExecLaunch[];
-    expect(commands.map((c) => c.command)).toEqual([WINDOWS.node, WINDOWS.node, WINDOWS.node]);
-    expect(Object.values(mcpServers).map((s) => s.command)).toEqual([WINDOWS.node]);
-  });
-
-  it('runs the CLI from the pinned entry, never from the plugin root or the shim', () => {
-    expect(mcpServers.router).toEqual({
-      command: WINDOWS.node,
-      args: [WINDOWS.entry, 'mcp', '--plugin'],
-    });
-    expect(renderPluginHooks(WINDOWS).hooks.SessionStart).toEqual([
-      { hooks: command({ command: WINDOWS.node, args: [WINDOWS.entry, 'hook', 'alive'] }) },
-    ]);
-    expect(`${files['hooks/hooks.json']}${files['.mcp.json']}`).not.toContain('CLAUDE_PLUGIN_ROOT');
-  });
-
-  it('keeps the template on node from PATH, so the checked-in files stay machine-free', () => {
-    expect(TEMPLATE_LAUNCHER).toEqual({ node: 'node', entry: PLUGIN_ROOT_ENTRY });
   });
 });
 
@@ -202,7 +149,7 @@ describe('every command the plugin carries', () => {
       PLUGIN_FILES.map((p) => [p, readFileSync(join(HOSTS, PLUGIN_DIR, p), 'utf8')]),
     ),
     shipped: renderPluginFiles('1.2.3'),
-    pinned: renderPluginFiles('1.2.3', WINDOWS),
+    folder: renderPluginFiles('1.2.3', 'C:\\Users\\me\\tenjin-cli\\dist\\index.js'),
   };
 
   for (const [name, files] of Object.entries(rendered)) {

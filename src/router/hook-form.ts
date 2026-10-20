@@ -1,9 +1,8 @@
 /**
  * HOW CLAUDE CODE RUNS A COMMAND. With `args` (exec form) it spawns `command`
- * (from PATH unless it is a path) with no shell, and on Windows that needs a
- * real executable, never the `tenjin` `.cmd` shim. Without `args` (shell form)
- * it goes to `sh -c`, Git Bash or PowerShell, where bash syntax fails. Tenjin
- * writes exec form only.
+ * from PATH with no shell, and on Windows that needs a real executable, never
+ * the `tenjin` `.cmd` shim. Without `args` (shell form) it goes to `sh -c`, Git
+ * Bash or PowerShell, where bash syntax fails. Tenjin writes exec form only.
  */
 
 export type HookForm = 'exec' | 'shell';
@@ -12,13 +11,6 @@ export type HookForm = 'exec' | 'shell';
 const TENJIN_SHIM = /(^|[\\/])tenjin(\.cmd|\.bat|\.ps1)?$/i;
 /** Characters a shell would read, which exec form passes through as written. */
 const SHELL_SYNTAX = /[\s"'`$|&;<>()]/;
-/**
- * A command naming a path is one executable, spaces and parentheses included
- * (`C:\Program Files (x86)\nodejs\node.exe`); only a bare name with spaces
- * means tokens meant for a shell.
- */
-const PATH_SEPARATOR = /[\\/]/;
-const PATH_SHELL_SYNTAX = /["'`$|&;<>]/;
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -57,8 +49,7 @@ export function shellDependence(launch: unknown): string | null {
   if (typeof command !== 'string' || command.length === 0) return 'no command';
   if (!Array.isArray(args)) return `\`${command}\` has no args array, so a shell runs it`;
   if (args.some((a) => typeof a !== 'string')) return `\`${command}\` has a non-string argument`;
-  const syntax = PATH_SEPARATOR.test(command) ? PATH_SHELL_SYNTAX : SHELL_SYNTAX;
-  if (syntax.test(command)) return `\`${command}\` holds shell syntax`;
+  if (SHELL_SYNTAX.test(command)) return `\`${command}\` holds shell syntax`;
   if (TENJIN_SHIM.test(command)) {
     return `\`${command}\` is the npm shim, which Windows cannot spawn without a shell`;
   }

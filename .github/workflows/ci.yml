@@ -81,9 +81,8 @@ jobs:
         run: bash scripts/pack-smoke.sh
 
   # Claude Code runs a plugin's exec-form hooks and its stdio server with no
-  # shell and with the PATH it started with, and on Windows only a real
-  # executable starts that way. This builds the plugin and spawns each of its
-  # commands as Claude Code would.
+  # shell, and on Windows only a real executable starts that way. This builds
+  # the plugin and spawns each of its commands as Claude Code would.
   windows:
     name: Windows (plugin commands, no shell)
     runs-on: windows-latest
@@ -99,10 +98,7 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
-      - run: pnpm exec vitest run src/router/hook-form.test.ts src/router/plugin-files.test.ts src/router/legacy-install.test.ts src/router/launch-check.test.ts
+      - run: pnpm exec vitest run src/router/hook-form.test.ts src/router/plugin-files.test.ts src/router/legacy-install.test.ts
       # `pnpm build` starts with `rm -rf`, which cmd.exe lacks. A fresh checkout has no dist to clear.
       - run: pnpm exec tsup
       - run: node scripts/plugin-spawn-smoke.mjs dist/hosts/claude
-      # The plugin `tenjin install` renders, every command spawned with an empty
-      # PATH: the stale PATH a Claude Code started before Node's install has.
-      - run: node scripts/plugin-spawn-smoke.mjs --pinned dist/index.js

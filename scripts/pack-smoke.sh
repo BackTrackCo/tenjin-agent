@@ -110,11 +110,11 @@ KDF_KEYSTORE="$KDF_KEYSTORE" KDF_EXPECTED="$KDF_EXPECTED" node --input-type=modu
 }
 echo "pack-smoke: packed wallet-kdf-worker.mjs derives the expected key (ok)"
 
-# 1d) The Claude Code plugin template lives in the package, the shape `tenjin
-# install` renders with absolute paths. A build that stopped rendering it would
-# ship a plugin no validator ever saw, with every source-tree test green. The
-# manifest carries this version, so the plugin Claude Code lists is the build
-# that runs.
+# 1d) The Claude Code plugin `tenjin install` registers lives in the package, as
+# a directory marketplace Claude Code reads in place. A build that stopped
+# rendering it would leave install with nothing to register but the folder
+# fallback, with every source-tree test green. The manifest carries this
+# version, so the plugin Claude Code lists is the build that runs.
 HOSTS="./node_modules/tenjin-cli/dist/hosts/claude"
 for f in .claude-plugin/marketplace.json tenjin/.claude-plugin/plugin.json tenjin/.mcp.json tenjin/hooks/hooks.json; do
   [ -f "$HOSTS/$f" ] || {
@@ -145,12 +145,6 @@ echo "pack-smoke: packed Claude Code plugin tenjin@$EXPECTED_VERSION (ok)"
 # `${CLAUDE_PLUGIN_ROOT}/../../../index.js` entry resolves in the published layout.
 node "$PKG_DIR/scripts/plugin-spawn-smoke.mjs" "$HOSTS" || {
   echo "pack-smoke: FAIL: the packed plugin's commands did not start with no shell" >&2
-  exit 1
-}
-# The plugin `tenjin install` renders from the installed package, every command
-# pinned to absolute paths and spawned with an empty PATH.
-node "$PKG_DIR/scripts/plugin-spawn-smoke.mjs" --pinned "./node_modules/tenjin-cli/dist/index.js" || {
-  echo "pack-smoke: FAIL: the installed plugin's commands needed PATH to start" >&2
   exit 1
 }
 

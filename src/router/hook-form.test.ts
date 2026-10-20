@@ -28,21 +28,10 @@ describe('shellDependence', () => {
     expect(shellDependence({ command: 'node', args: ['/a/index.js', 'mcp'] })).toBeNull();
   });
 
-  it('passes an absolute Node path with spaces, which exec form spawns as one executable', () => {
-    for (const command of [
-      'C:\\Program Files\\nodejs\\node.exe',
-      'C:\\Program Files (x86)\\nodejs\\node.exe',
-      '/Users/me/My Tools/node',
-    ]) {
-      expect(shellDependence({ command, args: ['C:\\x\\index.js', 'mcp'] }), command).toBeNull();
-    }
-  });
-
   it.each([
     [{ type: 'command', command: 'tenjin hook alive' }, /no args array/],
     [{ type: 'command', command: `echo '{"a":1}'` }, /no args array/],
     [{ command: 'node "/a b/index.js"', args: [] }, /shell syntax/],
-    [{ command: 'node index.js', args: [] }, /shell syntax/],
     [{ command: 'tenjin', args: ['mcp', '--plugin'] }, /npm shim/],
     [{ command: 'C:\\npm\\tenjin.cmd', args: ['mcp'] }, /npm shim/],
     [{ command: 'node', args: ['-e', 1] }, /non-string/],
