@@ -6,15 +6,17 @@ import type { TenjinPaid, TenjinRow } from '../types';
 /**
  * THE TENJIN MOD: what the router does, shown to the person, and the one
  * permission answer it gives. ONE LINE PER LOOKUP, drawn as the engine draws
- * a tool row (its status dot, bold name, input in parentheses, a dim tail):
- * the request tool's row reads `⏺ Exa search(best local LLM) · $0.007`. A
+ * a tool row (its status dot, bold name, input in parentheses, a dim tail),
+ * with `(Tenjin)` where the engine marks an MCP tool's name: the request
+ * tool's row reads `⏺ Exa search (Tenjin)(best local LLM) · $0.007`. A
  * WebSearch or WebFetch call held for Tenjin reads as the engine's own row
- * struck through, `⏺ ~~Web Search~~("best local LLM") · Tenjin offered Exa search`,
- * until the request call takes it up, then becomes that call's row in place,
- * with the request's own row empty. Beside it: a toast when a call is paid,
- * one spend line under a turn that paid, the first-run wallet toast, and the
- * prompt hint while the wallet is unfunded. The engine's own
- * spinner words stand; the row carries the state.
+ * struck through, `⏺ ~~Web Search~~("best local LLM") · Tenjin offered Exa
+ * search`, until the request call takes it up, then becomes that call's row
+ * in place, with the request's own row empty. The router's own free calls
+ * draw nothing. Beside it: a toast when a call is paid, one spend line under
+ * a turn that paid, the first-run wallet toast, and the prompt hint while the
+ * wallet is unfunded. The engine's own spinner words stand; the row carries
+ * the state.
  *
  * WHAT A ROW SHOWS: the label, the price, the state, and the one input the
  * person would recognise (the query, the URL, else the first field, a field
@@ -119,14 +121,6 @@ async function onRequest<E extends { tool_use_id: string }>(
   $.ui.invalidate('ui.render');
   const ran = await next(e);
   const settled = await settleCall($, call, ran, startedAt);
-  // THE ROUTER'S OWN CALL (a query it picks for, a browse row's spec) names
-  // the service it offered in its result, by the id it kept a spec under.
-  if (call.row.label === ROUTER && call.dataDir !== null) {
-    const kept = envelopeOf('text' in ran ? ran.text : undefined)?.id;
-    const offered =
-      typeof kept === 'string' ? offeredLabel(await readSpec($, call.dataDir, kept)) : undefined;
-    if (offered !== undefined) call.row = { ...call.row, label: offered, offered: true };
-  }
   await $.state.set(ref, { ...call.row, ...settled.row });
   if (holdOf !== undefined) {
     await $.state.set({ ...ROWS, id: `${HELD_KEY}${holdOf}` }, { ...call.row, ...settled.row });
@@ -273,9 +267,7 @@ export const register: Register = (on) => {
     // A ROW WITH NO LABEL OF ITS OWN is not drawn: the router's own calls (a
     // spec fetch, a query it picks for) and a spec the server sent unlabelled
     // would read "Tenjin" or "Tenjin lookup".
-    if (row.offered !== true && (row.label === ROUTER || row.label === UNLABELLED)) {
-      return <Box display="none" />;
-    }
+    if (row.label === ROUTER || row.label === UNLABELLED) return <Box display="none" />;
     const outcome =
       row.outcome ??
       (!hasOutput
@@ -405,24 +397,6 @@ async function describeCall($: Dollar, args: Json): Promise<Call> {
     ...(argument !== undefined ? { argument } : {}),
     ...(id !== undefined ? { offerId: id } : {}),
   };
-  // A SPEC FETCH (`{id}` alone) is the router telling the agent what it
-  // offers: it draws as `Tenjin offered <label>`, once the label is known.
-  if (
-    input === undefined &&
-    id !== undefined &&
-    dataDir !== null &&
-    args.query === undefined &&
-    args.choice === undefined
-  ) {
-    const offered = offeredLabel(await readSpec($, dataDir, id));
-    if (offered !== undefined) {
-      return {
-        row: { label: offered, isPaid: false, offered: true, offerId: id },
-        ids: [],
-        dataDir,
-      };
-    }
-  }
   if (input === undefined || id === undefined || dataDir === null) {
     return { row: { label: ROUTER, isPaid: false, ...base }, ids: [], dataDir };
   }
@@ -500,12 +474,6 @@ async function choiceOptions(
       : [];
   });
   return rows;
-}
-
-/** A spec's own label, or undefined when it has none: an offer the row can name. */
-function offeredLabel(spec: Json | null): string | undefined {
-  const label = labelOf(spec);
-  return label === UNLABELLED ? undefined : label;
 }
 
 async function readSpec($: Dollar, dataDir: string, id: string): Promise<Json | null> {
@@ -719,7 +687,7 @@ function nativeArgument(input: Json | undefined): string | undefined {
 
 /** A request row's name marker, where the engine writes ` (MCP)`. */
 const MARKER = '(Tenjin)';
-/** A free router call's row: `Tenjin offered Ideogram V4`. */
+/** A held row's tail names the offer it is struck for: `· Tenjin offered Exa search`. */
 const OFFERED = 'Tenjin offered';
 /** The names the engine draws its native rows under (each tool's `userFacingName`). */
 const NATIVE_NAMES: Readonly<Record<string, string>> = {
@@ -750,8 +718,6 @@ function callShape(row: TenjinRow, outcome: string | undefined): RowShape {
     (part): part is string => part !== undefined,
   );
   const state: RowState = isRunning ? 'running' : ERRORS.has(outcome) ? 'error' : 'done';
-  // What the router offered: the service by name, nothing to pay, no input.
-  if (row.offered === true) return { state, name: `${OFFERED} ${row.label}` };
   return {
     state,
     // The engine marks an MCP tool's name with ` (MCP)`; ours carry Tenjin's

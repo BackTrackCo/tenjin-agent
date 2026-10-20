@@ -154,10 +154,9 @@ test('a held search is one row: struck, then the request call running and done, 
     const held = await mount(surface, heldSearch('toolu_held'));
     expect(await rowText(held)).toBe('⏺ Exa search (Tenjin)("rust async runtimes") · $0.007');
     await held.unmount();
-    // A spec fetch is the router naming what it offers, as its own row.
+    // A spec fetch, the router's own free call, is not drawn.
     const fetch = await mount(surface, done('toolu_spec', { id: OFFER }, spec));
-    expect(await rowText(fetch)).toBe('⏺ Tenjin offered Exa search');
-    expect(await rowText(fetch)).not.toMatch(/spec/i);
+    expect(await shownLines(fetch)).toEqual([]);
     await fetch.unmount();
   }
 });
@@ -467,44 +466,6 @@ test("a held WebFetch is struck under the engine's own name for it", async ($, o
     );
     expect((await ui.findAll({ type: 'Text', text: 'Fetch' }))[0]?.props.strikethrough).toBe(true);
     await ui.unmount();
-  }
-});
-
-test('a free router call names the service it offered, or draws nothing', async ($, on) => {
-  const { files } = machine(on);
-  await keepSpec(files, OFFER, {
-    capabilityId: 'ideogram',
-    label: 'Ideogram V4',
-    priceAtomic: '30000',
-    maxAmountAtomic: '30000',
-  });
-  const picked = JSON.stringify({ status: 'spec', id: OFFER, cost: ['no charge'] });
-  const none = JSON.stringify({ status: 'native', reason: 'Your own tools cover this.' });
-  on('tool.call', { tool: TOOL }, (_$, e) =>
-    e.tool_use_id === 'toolu_none'
-      ? { result: none, text: none }
-      : { result: picked, text: picked },
-  );
-  await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_pick', query: 'a banner image' });
-  await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_none', query: 'list my files' });
-  await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_spec', id: OFFER });
-  for (const surface of SURFACES) {
-    const mount = (id: string, args: Record<string, unknown>, output: string) =>
-      $.ui.mount({
-        plugin: 'tenjin',
-        surface,
-        component: 'ToolUse',
-        props: { ...toolRow(id, TOOL, args), isRunning: false, output },
-      });
-    const pick = await mount('toolu_pick', { query: 'a banner image' }, picked);
-    expect(await rowText(pick)).toBe('⏺ Tenjin offered Ideogram V4');
-    await pick.unmount();
-    const spec = await mount('toolu_spec', { id: OFFER }, picked);
-    expect(await rowText(spec)).toBe('⏺ Tenjin offered Ideogram V4');
-    await spec.unmount();
-    const nothing = await mount('toolu_none', { query: 'list my files' }, none);
-    expect(await shownLines(nothing)).toEqual([]);
-    await nothing.unmount();
   }
 });
 

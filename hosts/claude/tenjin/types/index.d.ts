@@ -19,8 +19,6 @@ export type TenjinRow = {
   offerId?: string;
   /** The held native call this call took up, whose row draws it in its place. */
   holdOf?: string;
-  /** A free router call that named a service: drawn `Tenjin offered <label>`. */
-  offered?: true;
   /** How it ended (`$0.007 · settled`, `pending`, `needs approval`), once it has. */
   outcome?: string;
 };
