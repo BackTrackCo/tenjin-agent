@@ -77,10 +77,10 @@ tenjin pay <url> --json --max-price <usd> [-X <method>] [-d '<json-body>'] [-H '
 ## Refusals are answers
 
 Exit \`2\` is a usage error (a URL the lane refuses, a bad header, a non-JSON
-\`-d\` body, a body on GET or DELETE). Exit \`3\` is a refusal on purpose (no consent, a price above the cap, a
-listing mismatch). Exit \`4\` is a payment failure. Report each as it is. Never
-re-shape the URL, the terms or the flags to get past one, and never pass
-\`--base-url\`.
+\`-d\` body, a body on GET or DELETE). Exit \`3\` is a refusal on purpose (no
+consent, a price above the cap, a listing mismatch). Exit \`4\` is a payment
+failure. Report each as it is. Never re-shape the URL, the terms or the flags
+to get past one, and never add a flag that points the command at another host.
 
 ## Safety
 
