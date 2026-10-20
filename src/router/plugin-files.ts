@@ -116,7 +116,7 @@ function command(text: string): unknown[] {
 }
 
 /**
- * The seven routing legs. The native tools are routed twice over one lookup:
+ * The routing legs, and the `Stop` leg that says what the turn paid. The native tools are routed twice over one lookup:
  * BEFORE the call, with a line pointing to a paid lookup when one fits; and
  * AFTER it, only when it came back short and nothing was said before, or to
  * add the free docs the pre-call arm fetched to a search's results. A failed
@@ -135,6 +135,7 @@ export function routerHookPlan(): { event: string; matcher?: string; hooks: unkn
     { event: 'PostToolUseFailure', matcher: NATIVE_MATCHER, hooks: afterCall() },
     { event: 'PreToolUse', matcher: ASK_MATCHER, hooks: leg('ask') },
     { event: 'PostToolUse', matcher: ASK_MATCHER, hooks: leg('answer') },
+    { event: 'Stop', hooks: leg('stop') },
   ];
 }
 

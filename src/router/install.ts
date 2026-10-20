@@ -18,7 +18,6 @@ import { removeRetiredSkills } from '../lib/skill-placement';
 import { loadRawConfig, type PartialConfig } from '../lib/config';
 import type { WalletDeps, WalletOutcome } from '../commands/install-wallet';
 import type { CommandContext, CommandResult } from '../context';
-import { writeWalletCreated } from './mod-state';
 import { readAliveStamp } from './alive';
 import {
   findClaudeBinary,
@@ -438,10 +437,6 @@ export async function runRouterInstall(
   // reported, never fatal; everything above is useful without it.
   const { resolveWallet } = await import('../commands/install-wallet');
   const wallet = await resolveWallet(ctx, deps, args.noWallet === true ? 'flag' : undefined, false);
-  // The mod's first-run toast reads this: a wallet made by this run, unfunded.
-  if (wallet.status === 'created' && wallet.address !== undefined) {
-    await writeWalletCreated(ctx.dataDir, wallet.address);
-  }
   // Read back AFTER the write: a machine that already carried its own caps
   // keeps them, and a readout quoting the defaults would describe limits this
   // run did not set.

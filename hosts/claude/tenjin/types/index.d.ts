@@ -1,41 +1,43 @@
 /**
- * One request row as the mod draws it, written once by the `tool.call` hook so
- * the row still reads right after the CLI prunes the spec it came from, and
- * kept a second time under `held:<held call id>` once it takes up a native
- * call held for its offer, so that call's row draws it from its first frame. Every string is user text: a label, a price, a state
- * and the one input shown, never a description, JSON or tool id.
+ * One request call as the mod draws it: what it is, written by the `tool.call`
+ * hook before the call runs, and how it ended, read from the request tool's
+ * result envelope once it has. Every string is user text: a label, a price, a
+ * state and the one input shown, never a description, JSON or a tool id.
  */
 export type TenjinRow = {
-  /** The spec's `label`, else `Tenjin lookup`; `Tenjin` for the router's own
-   *  calls (a spec fetch, an id-less query). */
+  /** The service's `label`, from its spec or the result envelope. */
   label: string;
-  /** A call that pays from a kept spec, as opposed to one of the router's own. */
-  isPaid: boolean;
-  /** `$0.007`, or `up to $0.05` when the price varies by input. */
+  /** `$0.007`, `$0.09` for three takes, or `up to $0.05` when it varies. */
   price?: string;
-  /** The one input shown: the query, the URL, else the first field, bounded. */
+  /** The one input the CLI says identifies the lookup, bounded. */
   argument?: string;
   /** The offer id the call carried, which a held native call names too. */
   offerId?: string;
-  /** The held native call this call took up, whose row draws it in its place. */
-  holdOf?: string;
-  /** How it ended (`$0.007 · settled`, `pending`, `needs approval`), once it has. */
-  outcome?: string;
-  /** What came back, one `name: value` line each, for the expanded row: the
-   *  spec's fields and the files the CLI saved, never the provider's body. */
+  /** The envelope's `status`, once the call has ended. */
+  status?: string;
+  /** What left the wallet, from the envelope's `cost`, once it has ended. */
+  paid?: string;
+  /** What came back, one dim line each, for the expanded row. */
   detail?: string[];
 };
 
-/** What one call of this turn paid, in atomic USDC. */
-export type TenjinPaid = { amountAtomic: string };
+/** A native call the router held for an offer, from the CLI's offer record. */
+export type TenjinHeld = {
+  offerId: string;
+  /** The offer's `label`, when the decision carried one. */
+  label?: string;
+  /** The native tool and its search or URL, to see the same call run natively. */
+  key: string;
+};
 
 declare module 'claude-code' {
   interface PluginState {
     tenjin: {
       rows: StateFamily<TenjinRow>;
-      turn: TenjinPaid[];
-      /** The first-run wallet toast showed in this session. */
-      welcomed: boolean;
+      held: StateFamily<TenjinHeld>;
+      /** `hold:<offer id>` and `take:<offer id>`: the held native call and the
+       *  request call taking it up; `ran:<key>`: a native call that ran. */
+      links: StateFamily<string>;
     };
   }
 }

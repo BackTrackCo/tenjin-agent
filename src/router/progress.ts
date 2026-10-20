@@ -111,20 +111,23 @@ interface SavedAugment extends Stamp {
 
 /**
  * THE OFFER RECORD, one per native call a hook redirected, keyed by its
- * `tool_use_id`: when it was made, the offer's `label` when the decision
- * carried one, and its price in atomic USDC. Part of the state contract
- * between this CLI and the plugin's mod, which reads it to name a redirected
- * row (`Tenjin: <label> fits this · <price>`) and never parses the reason the
- * model read. Version 1 grows by optional fields only, so a reader ignores
- * one it does not know, and an older CLI's prune still reads it as a record.
+ * `tool_use_id`: when it was made, the offer's id, its `label` when the
+ * decision carried one, and its price in atomic USDC. Part of the state
+ * contract between this CLI and the plugin's mod (`mod-state.ts`), which reads
+ * it to draw the redirected row and to find the `request` call that takes the
+ * offer up by its id; it never parses the reason the model read. Version 1
+ * grows by optional fields only, so a reader ignores one it does not know, and
+ * an older CLI's prune still reads it as a record.
  */
 interface SavedOffer extends Stamp {
+  offerId?: string;
   label?: string;
   priceAtomic?: string;
 }
 
-/** What the offer record names: the offer's display name and its price. */
+/** What the offer record names: the offer's id, display name and price. */
 export interface OfferedTerms {
+  offerId?: string;
   label?: string;
   priceAtomic: string;
 }
@@ -247,6 +250,9 @@ export async function markOffered(
   const saved: SavedOffer = {
     version: 1,
     at: now,
+    ...(offer.offerId !== undefined && /^[\w.:-]{1,200}$/.test(offer.offerId)
+      ? { offerId: offer.offerId }
+      : {}),
     ...(offer.label !== undefined ? { label: sanitize(offer.label, 32) } : {}),
     ...(/^\d{1,78}$/.test(offer.priceAtomic) ? { priceAtomic: offer.priceAtomic } : {}),
   };
@@ -539,14 +545,10 @@ export async function openLookupFooter(
 }
 
 /**
- * Remove records past {@link EXPIRY_MS}, or `expiryMs`. Run from a writer, never from the
+ * Remove records past {@link EXPIRY_MS}. Run from a writer, never from the
  * renderer: the footer refreshes once a second and must stay read-only.
  */
-export async function pruneProgress(
-  directory: string,
-  now = Date.now(),
-  expiryMs = EXPIRY_MS,
-): Promise<void> {
+export async function pruneProgress(directory: string, now = Date.now()): Promise<void> {
   try {
     const dir = await opendir(directory);
     let count = 0;
@@ -555,7 +557,7 @@ export async function pruneProgress(
       if (!entry.isFile() || entry.name === SESSION_FILE) continue;
       const path = join(directory, entry.name);
       const record = agesByMtime(entry.name) ? await mtimeOf(path) : await readStamp(path);
-      if (record === null || now - record.at > expiryMs) {
+      if (record === null || now - record.at > EXPIRY_MS) {
         await rm(path, { force: true }).catch(() => undefined);
       }
     }

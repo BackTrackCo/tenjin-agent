@@ -36,16 +36,15 @@ function specPath(dataDir: string, id: string): string {
   return join(dataDir, SPECS_DIR, `${digest(id)}.json`);
 }
 
-function shownPath(dataDir: string, id: string): string {
-  return join(dataDir, SPECS_DIR, `${digest(id)}.shown.json`);
-}
+/** The field of a kept spec that names the one input a row may show. */
+export const SHOWN_KEY = 'shown';
 
 /** Past this many characters an input is a prompt, not the key of a lookup. */
 export const SHOWN_INPUT_MAX_CHARS = 80;
 
 /**
  * WHICH INPUT A ROW MAY SHOW FOR A SERVICE, decided here so the mod reads a
- * field name and nothing else (`progress/specs/<sha256(id)>.shown.json`). Only
+ * field name and nothing else (`shown`, kept in the spec's own file). Only
  * a lookup's identifying input: the field the catalog says takes a search's
  * query or a fetch's URL (`holds`), else the service's first required string
  * field (a company or person name, an expression). Never for a service the
@@ -80,12 +79,6 @@ export function shownInput(spec: OfferSpec, input: Record<string, unknown>): str
   return text.length > 0 && Array.from(text).length <= SHOWN_INPUT_MAX_CHARS ? text : undefined;
 }
 
-/** What `shownPath` holds: the field a row may show, or none. */
-interface ShownInput {
-  version: 1;
-  field: string | null;
-}
-
 /**
  * Store each spec under its id, and drop expired ones. Never throws. Ages are
  * file mtimes, so they are read against the real clock, never a caller's.
@@ -97,12 +90,9 @@ export async function storeSpecs(
   if (specs === undefined || specs.length === 0) return;
   for (const spec of specs) {
     try {
-      await writeFileAtomic(specPath(dataDir, spec.id), JSON.stringify(spec), {
-        mode: 0o600,
-        dirMode: 0o700,
-      });
-      const shown: ShownInput = { version: 1, field: shownInputField(spec) };
-      await writeFileAtomic(shownPath(dataDir, spec.id), JSON.stringify(shown), {
+      // `shown` rides beside the spec for the mod, and is dropped on read.
+      const kept = { ...spec, [SHOWN_KEY]: shownInputField(spec) };
+      await writeFileAtomic(specPath(dataDir, spec.id), JSON.stringify(kept), {
         mode: 0o600,
         dirMode: 0o700,
       });
@@ -123,7 +113,9 @@ export async function readSpec(dataDir: string, id: string): Promise<OfferSpec |
   try {
     const stat = await file.stat();
     if (Date.now() - stat.mtimeMs > SPEC_TTL_MS || stat.size > MAX_SPEC_BYTES) return null;
-    const parsed = OfferSpecSchema.safeParse(JSON.parse(await file.readFile('utf8')));
+    const kept = JSON.parse(await file.readFile('utf8')) as Record<string, unknown>;
+    delete kept[SHOWN_KEY];
+    const parsed = OfferSpecSchema.safeParse(kept);
     return parsed.success && parsed.data.id === id ? parsed.data : null;
   } catch {
     return null;

@@ -337,8 +337,7 @@ describe('the specs a hook keeps', () => {
     await storeSpecs(dir, [spec()]);
     const specs = join(dir, 'progress', 'specs');
     const sha = (id: string) => createHash('sha256').update(id).digest('hex');
-    // The spec and the record of the input its row may show, written together.
-    const files = [`${sha(ID)}.json`, `${sha(ID)}.shown.json`];
+    const files = [`${sha(ID)}.json`];
     expect((await readdir(specs)).sort()).toEqual(files.sort());
     const age = (when: Date) =>
       Promise.all(files.map((name) => utimes(join(specs, name), when, when)));
@@ -349,8 +348,6 @@ describe('the specs a hook keeps', () => {
     expect(await readSpec(dir, ID)).toBeNull();
     const other = { ...spec(), id: '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d02' };
     await storeSpecs(dir, [other]);
-    expect((await readdir(specs)).sort()).toEqual(
-      [`${sha(other.id)}.json`, `${sha(other.id)}.shown.json`].sort(),
-    );
+    expect(await readdir(specs)).toEqual([`${sha(other.id)}.json`]);
   });
 });

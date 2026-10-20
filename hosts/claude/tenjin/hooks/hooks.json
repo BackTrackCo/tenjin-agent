@@ -201,6 +201,25 @@
           }
         ]
       }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "plugin:tenjin:router",
+            "tool": "hook",
+            "input": {
+              "kind": "stop",
+              "hook_event_name": "${hook_event_name}",
+              "session_id": "${session_id}",
+              "transcript_path": "${transcript_path}",
+              "cwd": "${cwd}"
+            },
+            "timeout": 5
+          }
+        ]
+      }
     ]
   },
   "modules": ["./register.tsx"]

@@ -92,7 +92,7 @@ describe('the record the mod reads', () => {
     await rm(dir, { recursive: true, force: true });
   });
 
-  it('keeps the field beside each spec, null for a media service', async () => {
+  it('keeps the field in each spec file, null for a media service', async () => {
     await storeSpecs(dir, [
       spec({ id: 'search', holds: { WebSearch: 'query' }, output: 'json' }),
       spec({ id: 'image', output: 'media' }),
@@ -100,16 +100,11 @@ describe('the record the mod reads', () => {
     const read = async (id: string) =>
       JSON.parse(
         await readFile(
-          join(
-            dir,
-            'progress',
-            'specs',
-            `${createHash('sha256').update(id).digest('hex')}.shown.json`,
-          ),
+          join(dir, 'progress', 'specs', `${createHash('sha256').update(id).digest('hex')}.json`),
           'utf8',
         ),
-      ) as unknown;
-    expect(await read('search')).toEqual({ version: 1, field: 'query' });
-    expect(await read('image')).toEqual({ version: 1, field: null });
+      ) as { shown?: unknown };
+    expect((await read('search')).shown).toBe('query');
+    expect((await read('image')).shown).toBeNull();
   });
 });

@@ -70,7 +70,6 @@ import { depositSentence, FEE_REQUIRED, isFeeRequired, unpaidSentence, type Rout
 import { unpaidNotice } from './spend-question';
 import { clearRouterMemo } from './router-memo';
 import { loadRawConfig } from '../lib/config';
-import { markRouted } from './held';
 import { openLookupFooter, SILENT_FOOTER, type LookupFooter } from './progress';
 import { saveInlineMedia } from './inline-media';
 import {
@@ -238,9 +237,6 @@ export interface RequestToolDeps {
    * the limits takes the `approve` path.
    */
   approveOverLimit?: (message: string) => Promise<boolean>;
-  /** The client's id for this call (`claudecode/toolUseId`), recorded on a held
-   *  native call's row so the mod draws this call there. Display only. */
-  toolUseId?: string;
 }
 
 /** What one tool call may save to disk, across every take and file. */
@@ -570,10 +566,6 @@ async function requestTool(
   // the terminal while it runs, resolved to a session through the hook's own
   // binding for the line's id (never a chosen option's), and every call on it
   // swallows its own failure.
-  // A native call held for this offer now reads as routed in the mod's row.
-  if (offered !== undefined) {
-    await markRouted(deps.ctx.dataDir, offered, Date.now(), deps.toolUseId);
-  }
   const footer = await openLookupFooter(deps.ctx.dataDir, {
     ...(offered !== undefined ? { id: offered } : {}),
   });
@@ -1670,6 +1662,8 @@ async function deliverResult(
   }
   const base = {
     supplier: supplierOf(built.url),
+    // The service's display name, which the plugin's mod draws its row from.
+    ...(call.label !== undefined ? { label: call.label } : {}),
     ...parameters,
     cost: costLines(providerAtomic),
     ...(money.txHash !== undefined ? { settlementTxHash: money.txHash } : {}),
@@ -2555,6 +2549,32 @@ function supplierOf(url: string): string {
 /** ONE COST LINE, because there is one payment: the provider's. */
 export function costLines(providerAtomic: bigint): string[] {
   return [`provider price ${toMoney(providerAtomic.toString()).usd} USD`];
+}
+
+/** What {@link costLines} said was paid, in atomic USDC; 0 for anything else. */
+export function costAtomicOf(cost: unknown): bigint {
+  const line = Array.isArray(cost) ? cost[0] : undefined;
+  const usd = typeof line === 'string' ? /^provider price (\d+(?:\.\d+)?) USD$/.exec(line) : null;
+  if (usd === null) return 0n;
+  const [whole = '0', fraction = ''] = usd[1]!.split('.');
+  return BigInt(whole) * 1_000_000n + BigInt(fraction.padEnd(6, '0').slice(0, 6));
+}
+
+/**
+ * THE PAYMENTS ONE RESULT MADE, one amount each: a single call's, or each
+ * take or option of a set that paid in this call. A step an earlier call
+ * already paid says 0 and is left out, and a call that failed after its
+ * payment left still counts what left.
+ */
+export function paymentsOf(envelope: Record<string, unknown>): bigint[] {
+  const steps = Array.isArray(envelope.results) ? (envelope.results as unknown[]) : [envelope];
+  return steps
+    .map((step) =>
+      step !== null && typeof step === 'object'
+        ? costAtomicOf((step as { cost?: unknown }).cost)
+        : 0n,
+    )
+    .filter((amount) => amount > 0n);
 }
 
 /**

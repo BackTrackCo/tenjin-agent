@@ -1,5 +1,4 @@
 import { createHash } from 'node:crypto';
-import { heldRowPath, readHeld } from './held';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -2699,6 +2698,7 @@ describe('free docs on top of a search', () => {
     expect(await offerRecord('sess-1', 'toolu_1')).toEqual({
       version: 1,
       at: expect.any(Number) as number,
+      offerId: expect.any(String) as string,
       label: 'Firecrawl scrape',
       priceAtomic: '15000',
     });
@@ -2706,6 +2706,7 @@ describe('free docs on top of a search', () => {
     expect(await offerRecord('sess-1', 'toolu_2')).toEqual({
       version: 1,
       at: expect.any(Number) as number,
+      offerId: expect.any(String) as string,
       priceAtomic: '15000',
     });
   });
@@ -3043,22 +3044,17 @@ describe('a discovered service', () => {
     });
     // An offer the model acts on, never a block it narrates.
     expect(`${SEEN_LINE} ${ONE_BLOCK}`).not.toMatch(/\b(block|blocked|denied|refused)\b/i);
-    // The mod draws this row as held, in place of the engine's hook error.
-    expect(await readHeld(heldRowPath(dir, 'toolu_held'))).toMatchObject({
-      outcome: 'held',
+    // The offer record names the offer, which the mod matches its request call to.
+    expect(await offerRecord('sess-1', 'toolu_held')).toMatchObject({
+      version: 1,
       offerId: ID,
     });
-    // The same search again is let run: the one-block rule. Its held row
-    // reads native, so the mod shows the engine's row for this call instead.
+    // The same search again is let run: the one-block rule.
     const again = await runNativeHook(
       await preCall('sound effect generator api', 'WebSearch', { tool_use_id: 'toolu_retry' }),
       { dataDir: dir, baseUrl: BASE, fetchImpl: router(DISCOVERED).fetchImpl },
     );
     expect(again).toEqual({ response: null, alreadyRedirected: true });
-    expect(await readHeld(heldRowPath(dir, 'toolu_held'))).toMatchObject({
-      outcome: 'native',
-      nativeToolUseId: 'toolu_retry',
-    });
   });
 
   it('is offered after a native call that came back short', async () => {

@@ -1,31 +1,37 @@
 import { expect, test } from 'claude-code/testing';
 
 import {
-  DATA,
   MODEL_TEXT,
+  OFFER,
   SURFACES,
   TOOL,
+  dotOf,
+  envelope,
   keepSpec,
   machine,
-  recordPayment,
-  dotOf,
-  resultText,
   rowText,
   shownLines,
   toolRow,
 } from './fixtures';
 
-const OFFER = 'b920ff14-5aed-4a50-8c25-240e871602f3';
 const INPUT = { query: 'rust async runtimes', numResults: 5 };
-const EXA = {
-  capabilityId: 'exa-search',
+const EXA = { label: 'Exa search', priceAtomic: '40000', maxAmountAtomic: '40000' };
+const PAID = envelope('fulfilled', {
   label: 'Exa search',
-  priceAtomic: '40000',
-  maxAmountAtomic: '40000',
-};
+  cost: ['provider price 0.04 USD'],
+  result: '{"answer":"Tokio","results":[{"title":"Tokio"},{"title":"smol"}]}',
+  fullResultPath: '/home/test/.tenjin/downloads/exa.json',
+});
 
-test('a paid row is one line: the label, the query and the price, then the amount paid', async ($, on) => {
-  const { files, toasts, logs, clock } = machine(on);
+/** A lookup alone, as the engine folds one MCP call into a group of one. */
+const groupOf = (calls: unknown[]) => ({
+  calls: calls as never,
+  isActive: true,
+  isExpanded: false,
+});
+
+test('a lookup alone: Calling with its query while it runs, then the dim folded line', async ($, on) => {
+  const { files, clock } = machine(on);
   await keepSpec(files, OFFER, EXA);
   let release = (): void => undefined;
   const paying = new Promise<void>((resolve) => {
@@ -33,298 +39,206 @@ test('a paid row is one line: the label, the query and the price, then the amoun
   });
   on('tool.call', { tool: TOOL }, async () => {
     await paying;
-    await recordPayment(files, OFFER, {
-      capabilityId: 'exa-search',
-      amountAtomic: '40000',
-      txHash: '0xc9fc',
-    });
-    return { result: resultText('fulfilled'), text: resultText('fulfilled') };
+    return { result: PAID, text: PAID };
   });
-  const row = toolRow('toolu_paid', TOOL, { id: OFFER, input: INPUT });
-
-  // Before its tool.call starts the label is not known: nothing is drawn.
+  const call = toolRow('toolu_paid', TOOL, { id: OFFER, input: INPUT });
   for (const surface of SURFACES) {
-    const ui = await $.ui.mount({ plugin: 'tenjin', surface, component: 'ToolUse', props: row });
-    expect(await shownLines(ui)).toEqual([]);
-    await ui.unmount();
+    // Before its tool.call starts the label is not known: nothing is drawn.
+    const before = await $.ui.mount({
+      plugin: 'tenjin',
+      surface,
+      component: 'ToolGroup',
+      props: groupOf([call]),
+    });
+    expect(await shownLines(before)).toEqual([]);
+    await before.unmount();
   }
   const running = $.tool.call({ tool: TOOL, tool_use_id: 'toolu_paid', id: OFFER, input: INPUT });
   await clock.settle();
   for (const surface of SURFACES) {
-    const ui = await $.ui.mount({ plugin: 'tenjin', surface, component: 'ToolUse', props: row });
-    // As Claude Code shows a running MCP call: `Calling <name>…`, the dot dim,
-    // and the call's query under it, quoted.
+    const ui = await $.ui.mount({
+      plugin: 'tenjin',
+      surface,
+      component: 'ToolGroup',
+      props: groupOf([call]),
+    });
     expect(await rowText(ui)).toBe('⏺ Calling Exa search… · $0.04  ⎿  "rust async runtimes"');
     expect(await dotOf(ui)).toEqual({ color: undefined, dimColor: true });
-    const [hint] = await ui.findAll({ type: 'Text', text: '"rust async runtimes"' });
-    expect(hint?.props.dimColor).toBe(true);
     await ui.unmount();
   }
   release();
   await running;
-  // The settle toast, and no transcript line: the row says it.
-  expect(toasts).toEqual(['Exa search · $0.04']);
-  expect(logs).toEqual([]);
-
+  const ended = toolRow('toolu_paid', TOOL, { id: OFFER, input: INPUT }, PAID);
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({
       plugin: 'tenjin',
       surface,
-      component: 'ToolUse',
-      props: { ...row, isRunning: false, output: resultText('fulfilled') },
+      component: 'ToolGroup',
+      props: groupOf([ended]),
     });
-    const line = await rowText(ui);
-    expect(line).toBe('Called Exa search · $0.04 (ctrl+o to expand)');
-    expect(line).not.toContain('Running');
-    // Ended: the engine's folded line has no dot.
+    expect(await rowText(ui)).toBe('Called Exa search · $0.04 (ctrl+o to expand)');
     expect(await dotOf(ui)).toBeUndefined();
-    expect([line, ...toasts].join('\n')).not.toMatch(MODEL_TEXT);
+    expect((await shownLines(ui)).join('')).not.toMatch(MODEL_TEXT);
     await ui.unmount();
-    // The ctrl+o transcript draws the whole row: the input, the price, the dot.
+    // Expanded (ctrl+o): the whole row, what came back under it.
     const open = await $.ui.mount({
       plugin: 'tenjin',
       surface,
       component: 'ToolUse',
-      props: {
-        ...row,
-        isRunning: false,
-        output: resultText('fulfilled'),
-        isExpanded: true,
-      } as never,
+      props: ended,
     });
-    expect(await rowText(open)).toBe('⏺ Exa search(rust async runtimes) · $0.04');
+    expect(await shownLines(open)).toEqual([
+      '⏺',
+      'Exa search',
+      '(rust async runtimes)',
+      ' · $0.04',
+      '  ⎿  ',
+      'answer: Tokio',
+      '     ',
+      'results: 2 items',
+      '     ',
+      '  Tokio',
+      '     ',
+      '  smol',
+    ]);
     expect(await dotOf(open)).toEqual({ color: 'success', dimColor: undefined });
     await open.unmount();
   }
 });
 
-test('a payment whose settlement is unknown reads as paid', async ($, on) => {
-  const { files, logs } = machine(on);
-  await keepSpec(files, OFFER, EXA);
-  on('tool.call', { tool: TOOL }, async () => {
-    await recordPayment(files, OFFER, {
-      capabilityId: 'exa-search',
-      amountAtomic: '40000',
-      txHash: '0xd00d',
-      settlement: 'unknown',
-    });
-    return { result: resultText('fulfilled'), text: resultText('fulfilled') };
-  });
-  await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_unknown', id: OFFER, input: INPUT });
-  expect(logs).toEqual([]);
-  for (const surface of SURFACES) {
-    const ui = await $.ui.mount({
-      plugin: 'tenjin',
-      surface,
-      component: 'ToolUse',
-      props: {
-        ...toolRow('toolu_unknown', TOOL, { id: OFFER, input: INPUT }),
-        isRunning: false,
-        output: resultText('fulfilled'),
-      },
-    });
-    expect(await rowText(ui)).toBe('Called Exa search · $0.04 (ctrl+o to expand)');
-    await ui.unmount();
-  }
-});
-
-test('a spec without a label is not drawn, never under its provider or "Tenjin lookup"', async ($, on) => {
+test('three takes show what the three paid, and the count of them while running', async ($, on) => {
   const { files } = machine(on);
-  await keepSpec(files, OFFER, {
-    capabilityId: 'glim-x-search',
-    provider: 'glim',
-    priceAtomic: '5000',
-    maxAmountAtomic: '5000',
+  await keepSpec(files, OFFER, { label: 'Ideogram V4', priceAtomic: '30000' }, null);
+  const result = envelope('fulfilled', {
+    results: [1, 2, 3].map((take) => ({
+      take,
+      status: 'fulfilled',
+      cost: ['provider price 0.03 USD'],
+    })),
+    cost: ['provider price 0.09 USD'],
   });
-  for (const surface of SURFACES) {
+  let seen: string[] = [];
+  on('tool.call', { tool: TOOL }, async () => {
     const ui = await $.ui.mount({
       plugin: 'tenjin',
-      surface,
+      surface: 'terminal',
       component: 'ToolUse',
-      props: {
-        ...toolRow('toolu_glim', TOOL, { id: OFFER, input: { query: 'from:tenjin' } }),
-        isRunning: false,
-      },
+      props: toolRow('toolu_takes', TOOL, { id: OFFER, input: { prompt: 'a banner' }, count: 3 }),
     });
-    expect(await shownLines(ui)).toEqual([]);
+    seen = await shownLines(ui);
     await ui.unmount();
-  }
-});
-
-test('an id-less query is the router picking: not drawn, never as "Tenjin"', async ($, on) => {
-  machine(on);
-  for (const surface of SURFACES) {
-    const ui = await $.ui.mount({
-      plugin: 'tenjin',
-      surface,
-      component: 'ToolUse',
-      props: { ...toolRow('toolu_pick', TOOL, { query: 'latest BTC price' }), isRunning: false },
-    });
-    expect(await shownLines(ui)).toEqual([]);
-    await ui.unmount();
-  }
-});
-
-test('a refusal reads as its state beside the price, with no toast and nothing paid', async ($, on) => {
-  const { files, toasts } = machine(on);
-  await keepSpec(files, OFFER, { ...EXA, priceAtomic: '420000', maxAmountAtomic: '420000' });
-  const refused = JSON.stringify({
-    status: 'needs_approval',
-    reason: 'over the $0.25 cap',
-    policyReason: 'above_auto_spend',
+    return { result, text: result };
   });
-  on('tool.call', { tool: TOOL }, () => ({ result: refused, text: refused }));
-  await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_cap', id: OFFER, input: INPUT });
-  for (const surface of SURFACES) {
-    const ui = await $.ui.mount({
-      plugin: 'tenjin',
-      surface,
-      component: 'ToolUse',
-      props: {
-        ...toolRow('toolu_cap', TOOL, { id: OFFER, input: INPUT }),
-        isRunning: false,
-        output: refused,
-      },
-    });
-    expect(await rowText(ui)).toBe('Called Exa search · $0.42 · needs approval (ctrl+o to expand)');
-    await ui.unmount();
-  }
-  expect(toasts).toEqual([]);
-  expect(files.has(`${DATA}/paid/ledger.jsonl`)).toBe(false);
-});
-
-test('the result under our row draws nothing of what the model read', async ($, on) => {
-  machine(on);
-  for (const surface of SURFACES) {
-    const ui = await $.ui.mount({
-      plugin: 'tenjin',
-      surface,
-      component: 'ToolResult',
-      props: {
-        tool_use_id: 'toolu_paid',
-        tool: TOOL,
-        output: resultText('fulfilled'),
-        isErrored: false,
-      },
-    });
-    expect((await shownLines(ui)).join('\n')).not.toMatch(MODEL_TEXT);
-    await ui.unmount();
-  }
-});
-
-test("an assistant message is the engine's, its summary mark included", async ($, on) => {
-  machine(on);
-  // The engine marks a summarised block itself (` · summary`); the mod adds
-  // nothing to a message row.
-  on('ui.render', { component: 'AssistantMessage' }, ($, e) => {
-    const { Text } = $.ui.resolve(e);
-    return Text({ children: [`${e.props.text}${e.props.isSummary ? ' · summary' : ''}`] });
+  await $.tool.call({
+    tool: TOOL,
+    tool_use_id: 'toolu_takes',
+    id: OFFER,
+    input: { prompt: 'a banner' },
+    count: 3,
   });
-  for (const surface of SURFACES) {
-    for (const isSummary of [true, undefined] as const) {
-      const ui = await $.ui.mount({
-        plugin: 'tenjin',
-        surface,
-        component: 'AssistantMessage',
-        props: {
-          text: "I'll look up current options.",
-          isFirstOfReply: true,
-          ...(isSummary ? { isSummary } : {}),
-        },
-      });
-      expect(await shownLines(ui)).toEqual([
-        `I'll look up current options.${isSummary ? ' · summary' : ''}`,
-      ]);
-      await ui.unmount();
-    }
-  }
+  expect(seen.join('')).toBe('⏺Calling Ideogram V4… · $0.09');
+  const ended = toolRow('toolu_takes', TOOL, { id: OFFER, input: {}, count: 3 }, result);
+  const ui = await $.ui.mount({
+    plugin: 'tenjin',
+    surface: 'terminal',
+    component: 'ToolGroup',
+    props: groupOf([ended]),
+  });
+  expect(await rowText(ui)).toBe('Called Ideogram V4 · $0.09 (ctrl+o to expand)');
+  await ui.unmount();
 });
 
-test('any other tool row is left to the engine', async ($, on) => {
-  machine(on);
-  on('ui.render', { component: 'ToolUse' }, ($, e) => {
-    const { Text } = $.ui.resolve(e);
-    return Text({ children: ['engine row'] });
-  });
-  on('ui.render', { component: 'ToolResult' }, ($, e) => {
-    const { Text } = $.ui.resolve(e);
-    return Text({ children: ['engine result'] });
-  });
-  for (const surface of SURFACES) {
-    const row = await $.ui.mount({
-      plugin: 'tenjin',
-      surface,
-      component: 'ToolUse',
-      props: toolRow('toolu_bash', 'Bash', { command: 'ls' }),
-    });
-    expect(await shownLines(row)).toEqual(['engine row']);
-    await row.unmount();
-    const result = await $.ui.mount({
-      plugin: 'tenjin',
-      surface,
-      component: 'ToolResult',
-      props: { tool_use_id: 'toolu_bash', tool: 'Bash', output: 'a\nb', isErrored: false },
-    });
-    expect(await shownLines(result)).toEqual(['engine result']);
-    await result.unmount();
-  }
-});
-
-test('a request sent back for a missing field draws nothing, alone or in a run of calls', async ($, on) => {
-  const { files, toasts } = machine(on);
+test('a charged failure draws the error dot, the amount and the state, never a success', async ($, on) => {
+  const { files } = machine(on);
   await keepSpec(files, OFFER, EXA);
-  const refused = JSON.stringify({
-    status: 'needs_input',
-    reason: 'Missing required field: query',
+  const failed = envelope('failed', {
+    reason: 'The provider answered 500 after the payment was sent.',
+    cost: ['provider price 0.04 USD'],
   });
-  on('tool.call', { tool: TOOL }, async (_$, e) => {
-    if (e.tool_use_id === 'toolu_missing') return { result: refused, text: refused, isError: true };
-    await recordPayment(files, OFFER, {
-      capabilityId: 'exa-search',
-      amountAtomic: '40000',
-      txHash: '0xc9fc',
-    });
-    return { result: resultText('fulfilled'), text: resultText('fulfilled') };
-  });
-  const missing = { id: OFFER, input: { q: 'rust async runtimes' } };
-  await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_missing', ...missing });
-  await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_paid', id: OFFER, input: INPUT });
-  const call = (id: string, tool: string, input: unknown, output: string, isErrored = false) => ({
-    ...toolRow(id, tool, input),
-    isRunning: false,
-    isErrored,
-    output,
-  });
-  const refusedRow = call('toolu_missing', TOOL, missing, refused, true);
+  on('tool.call', { tool: TOOL }, async () => ({ result: failed, text: failed }));
+  await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_failed', id: OFFER, input: INPUT });
+  const row = toolRow('toolu_failed', TOOL, { id: OFFER, input: INPUT }, failed);
   for (const surface of SURFACES) {
-    // Alone, stored or read back from a resumed transcript: nothing, no room.
-    for (const props of [refusedRow, call('toolu_resumed', TOOL, missing, refused, true)]) {
+    const folded = await $.ui.mount({
+      plugin: 'tenjin',
+      surface,
+      component: 'ToolGroup',
+      props: groupOf([row]),
+    });
+    expect(await rowText(folded)).toBe('⏺ Exa search(rust async runtimes) · $0.04 · failed');
+    expect(await dotOf(folded)).toEqual({ color: 'error', dimColor: undefined });
+    await folded.unmount();
+    const open = await $.ui.mount({ plugin: 'tenjin', surface, component: 'ToolUse', props: row });
+    expect((await shownLines(open)).slice(-1)).toEqual([
+      'The provider answered 500 after the payment was sent.',
+    ]);
+    await open.unmount();
+  }
+});
+
+test("draws nothing for a needs_input answer, a free call, or the router's own calls", async ($, on) => {
+  const { files } = machine(on);
+  await keepSpec(files, OFFER, EXA);
+  const needsInput = envelope('needs_input', {
+    reason: 'numResults is required',
+    cost: ['provider price 0 USD'],
+  });
+  const free = envelope('fulfilled', { label: 'Context7 docs', cost: ['provider price 0 USD'] });
+  const spec = envelope('spec', { cost: ['provider price 0 USD'] });
+  on('tool.call', { tool: TOOL }, async (_$, e) => {
+    const text =
+      e.tool_use_id === 'toolu_input' ? needsInput : e.tool_use_id === 'toolu_free' ? free : spec;
+    return { result: text, text };
+  });
+  await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_input', id: OFFER, input: INPUT });
+  await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_free', query: 'react docs' });
+  await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_spec', id: OFFER });
+  const rows = [
+    toolRow('toolu_input', TOOL, { id: OFFER, input: INPUT }, needsInput),
+    toolRow('toolu_free', TOOL, { query: 'react docs' }, free),
+    toolRow('toolu_spec', TOOL, { id: OFFER }, spec),
+  ];
+  for (const surface of SURFACES) {
+    for (const props of rows) {
       const ui = await $.ui.mount({ plugin: 'tenjin', surface, component: 'ToolUse', props });
       expect(await shownLines(ui)).toEqual([]);
-      expect((await ui.findAll({ type: 'Box' }))[0]?.props.display).toBe('none');
       await ui.unmount();
     }
-    // In a run: neither counted nor shown; the paid retry is the one row.
-    const mount = (calls: unknown[]) =>
-      $.ui.mount({
-        plugin: 'tenjin',
-        surface,
-        component: 'ToolGroup',
-        props: { calls: calls as never, isActive: false, isExpanded: false },
-      });
-    const mixed = await mount([
-      call('r1', 'Read', { file_path: '/a' }, 'ok'),
-      refusedRow,
-      call('toolu_paid', TOOL, { id: OFFER, input: INPUT }, resultText('fulfilled')),
-    ]);
-    expect((await shownLines(mixed)).join('')).toBe(
-      'Read 1 file (ctrl+o to expand)Called Exa search · $0.04 (ctrl+o to expand)',
-    );
-    await mixed.unmount();
-    const alone = await mount([refusedRow]);
-    expect(await shownLines(alone)).toEqual([]);
-    await alone.unmount();
+    const group = await $.ui.mount({
+      plugin: 'tenjin',
+      surface,
+      component: 'ToolGroup',
+      props: groupOf(rows),
+    });
+    expect(await shownLines(group)).toEqual([]);
+    await group.unmount();
   }
-  // No toast for it, and the turn counts the paid call alone.
-  expect(toasts).toEqual(['Exa search · $0.04']);
+});
+
+test('a run mixing a lookup with other calls unfolds for the engine to draw', async ($, on) => {
+  machine(on);
+  on('ui.render', { component: 'ToolGroup' }, ($, e) => {
+    const { Text } = $.ui.resolve(e);
+    return Text({ children: [e.props.isExpanded ? 'rows' : 'engine count line'] });
+  });
+  const read = toolRow('r1', 'Read', { file_path: '/a' }, 'ok');
+  const lookup = toolRow('toolu_paid', TOOL, { id: OFFER, input: INPUT }, PAID);
+  for (const surface of SURFACES) {
+    const mixed = await $.ui.mount({
+      plugin: 'tenjin',
+      surface,
+      component: 'ToolGroup',
+      props: groupOf([read, lookup]),
+    });
+    expect(await shownLines(mixed)).toEqual(['rows']);
+    await mixed.unmount();
+    const plain = await $.ui.mount({
+      plugin: 'tenjin',
+      surface,
+      component: 'ToolGroup',
+      props: groupOf([read]),
+    });
+    expect(await shownLines(plain)).toEqual(['engine count line']);
+    await plain.unmount();
+  }
 });

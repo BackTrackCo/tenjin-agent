@@ -13,7 +13,7 @@ import type { HookKind } from './hook-tool';
 import { launchedByPlugin } from './names';
 
 /**
- * `tenjin hook prompt`, `native`, `shortfall`, `agent`, `ask` and `answer`. The harness writes
+ * `tenjin hook prompt`, `native`, `shortfall`, `agent`, `ask`, `answer` and `stop`. The harness writes
  * its event on stdin and reads a JSON object (or nothing) from stdout, so these
  * commands
  * bypass the CLI's envelope entirely. They never fail the turn: a stdin that
@@ -66,6 +66,11 @@ export async function runHookKind(
   event: unknown,
   hookDeps: HookDeps,
 ): Promise<unknown | null> {
+  // THE TURN'S SPEND, shown to the user once the turn ends.
+  if (kind === 'stop') {
+    const line = (await hookDeps.stopLine?.()) ?? null;
+    return line === null ? null : { systemMessage: line };
+  }
   const notices = new Set<string>();
   const deps: HookDeps = { ...hookDeps, notice: (line) => notices.add(line) };
   const outcome =

@@ -1,5 +1,4 @@
 import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
-import { heldRowPath, markHeld, readHeld } from './held';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -16,6 +15,7 @@ import type { OfferSpec } from './decision';
 import {
   buildRouterMcpServer,
   MAX_RESULT_SIZE_CHARS,
+  ALWAYS_LOAD_KEY,
   MAX_RESULT_SIZE_KEY,
   pollProgress,
   promptsBeforeApprove,
@@ -106,9 +106,11 @@ describe('the router MCP server', () => {
       const tools = await client.listTools();
       // `approve` is Claude Code's alone (below): this client never sees it.
       expect(tools.tools.map((t) => t.name)).toEqual(['request', 'hook']);
-      // The harness reads its inline-result threshold from the listed tool.
+      // The harness reads its inline-result threshold from the listed tool,
+      // and keeps it out of tool search.
       expect(tools.tools[0]!._meta).toEqual({
         [MAX_RESULT_SIZE_KEY]: MAX_RESULT_SIZE_CHARS,
+        [ALWAYS_LOAD_KEY]: true,
       });
       expect(tools.tools[1]!._meta).toBeUndefined();
       const called = await client.callTool({ name: 'request', arguments: { query: 'weather' } });
@@ -121,51 +123,6 @@ describe('the router MCP server', () => {
         status: 'native',
         reason: 'Your own tools cover this.',
         nextStep: 'Continue with your own tools. Nothing was bought.',
-      });
-    } finally {
-      await client.close();
-      await server.close();
-    }
-  });
-
-  it("records the client's tool id on a call held for the offer it runs", async () => {
-    const fetchImpl = router({
-      schemaVersion: 1,
-      routerVersion: '2026-09-23.1',
-      decision: {
-        action: 'native',
-        reason: 'Your own tools cover this.',
-        diagnostics: {
-          reasonCode: 'native_sufficient',
-          stage: 'capability',
-          missing: [],
-          nextAction: '',
-        },
-      },
-    });
-    await markHeld(dir, 'toolu_held', { offerId: 'k3f9-abcd', priceAtomic: '7000' });
-    const server = buildRouterMcpServer({
-      dataDir: dir,
-      handlerDeps: {
-        cwd: dir,
-        signer: await testWalletProvider().getSigner(),
-        authorizer: authorizer(),
-        fetchImpl,
-        payDeps: { fetchImpl },
-      },
-    });
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    const client = new Client({ name: 'test', version: '0.0.0' });
-    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
-    try {
-      await client.callTool({
-        name: 'request',
-        arguments: { query: 'weather', id: 'k3f9-abcd' },
-        _meta: { 'claudecode/toolUseId': 'toolu_request' },
-      });
-      expect(await readHeld(heldRowPath(dir, 'toolu_held'))).toMatchObject({
-        outcome: 'routed',
-        routedToolUseId: 'toolu_request',
       });
     } finally {
       await client.close();
