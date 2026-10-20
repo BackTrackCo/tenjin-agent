@@ -104,8 +104,8 @@ test('a held search is one row: struck, then the request call running and done, 
   };
   for (const surface of SURFACES) {
     const ui = await mount(surface, heldSearch('toolu_held'));
-    expect(await rowText(ui)).toBe('⏺ WebSearch(rust async runtimes)');
-    const [name] = await ui.findAll({ type: 'Text', text: 'WebSearch' });
+    expect(await rowText(ui)).toBe('⏺ Web Search("rust async runtimes")');
+    const [name] = await ui.findAll({ type: 'Text', text: 'Web Search' });
     expect(name?.props).toMatchObject({ bold: true, strikethrough: true });
     expect(await dotOf(ui)).toEqual({ color: undefined, dimColor: true });
     expect(await rowText(ui)).not.toContain('Tenjin router');
@@ -118,7 +118,7 @@ test('a held search is one row: struck, then the request call running and done, 
   await clock.settle();
   for (const surface of SURFACES) {
     const ui = await mount(surface, heldSearch('toolu_held'));
-    expect(await rowText(ui)).toBe('⏺ Exa search(rust async runtimes) · $0.007');
+    expect(await rowText(ui)).toBe('⏺ Exa search("rust async runtimes") · $0.007');
     expect(await dotOf(ui)).toEqual({ color: undefined, dimColor: true });
     await ui.unmount();
     // FROM ITS FIRST FRAME the request's own row takes no room.
@@ -134,23 +134,24 @@ test('a held search is one row: struck, then the request call running and done, 
   for (const surface of SURFACES) {
     const ui = await mount(surface, heldSearch('toolu_held'));
     const line = await rowText(ui);
-    expect(line).toBe('⏺ Exa search(rust async runtimes) · $0.007');
+    expect(line).toBe('⏺ Exa search("rust async runtimes") · $0.007');
     expect(line).not.toMatch(MODEL_TEXT);
-    expect(await ui.findAll({ type: 'Text', text: 'WebSearch' })).toEqual([]);
+    expect(await ui.findAll({ type: 'Text', text: 'Web Search' })).toEqual([]);
     expect(await dotOf(ui)).toEqual({ color: 'success', dimColor: undefined });
     await ui.unmount();
     await hidden(await mount(surface, done('toolu_request', request, resultText('fulfilled'))));
   }
-  // A LATER CALL FOR THE SAME OFFER is its own row, and the held row still
-  // shows the call that paid.
+  // A LATER CALL FOR THE SAME OFFER does not replace the paid call on the
+  // held row.
   const spec = JSON.stringify({ status: 'spec', cost: ['no charge'] });
   await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_spec', id: OFFER });
   for (const surface of SURFACES) {
     const held = await mount(surface, heldSearch('toolu_held'));
-    expect(await rowText(held)).toBe('⏺ Exa search(rust async runtimes) · $0.007');
+    expect(await rowText(held)).toBe('⏺ Exa search("rust async runtimes") · $0.007');
     await held.unmount();
+    // A spec fetch has no label of its own: it is not drawn, and never as "Tenjin".
     const fetch = await mount(surface, done('toolu_spec', { id: OFFER }, spec));
-    expect(await rowText(fetch)).toBe('⏺ Tenjin · no charge');
+    expect(await shownLines(fetch)).toEqual([]);
     await fetch.unmount();
   }
 });
@@ -166,7 +167,11 @@ test('a row has one blank line above and none below, as the engine draws a tool 
   for (const surface of SURFACES) {
     for (const props of [
       heldSearch('toolu_held'),
-      { ...toolRow('toolu_direct', TOOL, { id: OFFER, input: { query: 'q' } }), isRunning: false },
+      {
+        ...toolRow('toolu_direct', TOOL, { id: OFFER, input: { query: 'q' } }),
+        isRunning: false,
+        output: resultText('fulfilled'),
+      },
     ]) {
       const ui = await $.ui.mount({ plugin: 'tenjin', surface, component: 'ToolUse', props });
       const [row] = await ui.findAll({ type: 'Box' });
@@ -386,7 +391,7 @@ test('a request refused before it ran the offer draws its own row; the paid retr
   for (const surface of SURFACES) {
     // It took nothing: the held row is struck again, the refusal is its own row.
     const held = await mount(surface, heldSearch('toolu_held'));
-    expect(await rowText(held)).toBe('⏺ WebSearch(rust async runtimes)');
+    expect(await rowText(held)).toBe('⏺ Web Search("rust async runtimes")');
     await held.unmount();
     const own = await mount(surface, done('toolu_big', big, refused, true));
     expect(await rowText(own)).toBe('⏺ Exa search(a very long input) · $0.007 · needs input');
@@ -395,7 +400,7 @@ test('a request refused before it ran the offer draws its own row; the paid retr
   await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_retry', ...retry });
   for (const surface of SURFACES) {
     const held = await mount(surface, heldSearch('toolu_held'));
-    expect(await rowText(held)).toBe('⏺ Exa search(rust async runtimes) · $0.007');
+    expect(await rowText(held)).toBe('⏺ Exa search("rust async runtimes") · $0.007');
     expect(await dotOf(held)).toEqual({ color: 'success', dimColor: undefined });
     await held.unmount();
     const paid = await mount(surface, done('toolu_retry', retry, resultText('fulfilled')));
@@ -405,5 +410,48 @@ test('a request refused before it ran the offer draws its own row; the paid retr
     const own = await mount(surface, done('toolu_big', big, refused, true));
     expect(await rowText(own)).toBe('⏺ Exa search(a very long input) · $0.007 · needs input');
     await own.unmount();
+  }
+});
+
+test('a request row is not drawn before it runs, while its input may still be arriving', async ($, on) => {
+  const { files } = machine(on);
+  await keepSpec(files, OFFER, {
+    label: 'Exa search',
+    priceAtomic: '7000',
+    maxAmountAtomic: '7000',
+  });
+  for (const surface of SURFACES) {
+    // Queued or streaming: not in progress yet, no output, a partial id.
+    for (const input of [{}, { id: OFFER.slice(0, 6) }, { id: OFFER, input: { query: 'q' } }]) {
+      const ui = await $.ui.mount({
+        plugin: 'tenjin',
+        surface,
+        component: 'ToolUse',
+        props: { ...toolRow('toolu_queued', TOOL, input), isRunning: false },
+      });
+      expect(await shownLines(ui)).toEqual([]);
+      await ui.unmount();
+    }
+  }
+});
+
+test("a held WebFetch is struck under the engine's own name for it", async ($, on) => {
+  const { files } = machine(on);
+  await holdRow(files, 'toolu_fetch');
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({
+      plugin: 'tenjin',
+      surface,
+      component: 'ToolUse',
+      props: {
+        ...toolRow('toolu_fetch', 'WebFetch', { url: 'https://example.test/a', prompt: 'p' }),
+        isRunning: false,
+        isErrored: true,
+        output: REASON,
+      },
+    });
+    expect((await shownLines(ui)).join('')).toBe('⏺Fetch(https://example.test/a)');
+    expect((await ui.findAll({ type: 'Text', text: 'Fetch' }))[0]?.props.strikethrough).toBe(true);
+    await ui.unmount();
   }
 });

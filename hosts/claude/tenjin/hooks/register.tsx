@@ -8,9 +8,10 @@ import type { TenjinPaid, TenjinRow } from '../types';
  * permission answer it gives. ONE LINE PER LOOKUP, drawn as the engine draws
  * a tool row (its status dot, bold name, input in parentheses, a dim tail):
  * the request tool's row reads `⏺ Exa search(best local LLM) · $0.007`. A
- * WebSearch or WebFetch call held for Tenjin reads `⏺ ~~WebSearch~~(best
- * local LLM)` until the request call takes it up, then becomes that call's
- * row in place, with the request's own row empty. Beside it: a toast when a
+ * WebSearch or WebFetch call held for Tenjin reads as the engine's own row
+ * struck through, `⏺ ~~Web Search~~("best local LLM")`, until the request
+ * call takes it up, then becomes that call's row in place, with the
+ * request's own row empty. Beside it: a toast when a
  * call is paid, one spend line under a turn that paid, the first-run wallet
  * toast, and the prompt hint while the wallet is unfunded. The engine's own
  * spinner words stand; the row carries the state.
@@ -127,7 +128,9 @@ async function onRequest<E extends { tool_use_id: string }>(
   if (settled.paidAtomic !== undefined) {
     const paid: TenjinPaid = { amountAtomic: settled.paidAtomic };
     await update($, turn, (list) => [...list, paid]);
-    $.ui.toast(`${call.row.label} · $${usd(settled.paidAtomic)}`);
+    // The label and the price; a call with no label of its own says the price.
+    const hasLabel = call.row.label !== ROUTER && call.row.label !== UNLABELLED;
+    $.ui.toast(`${hasLabel ? `${call.row.label} · ` : ''}$${usd(settled.paidAtomic)}`);
   }
   return ran;
 }
@@ -206,7 +209,7 @@ export const register: Register = (on) => {
         }
         return toolRow(Box, Text, {
           state: 'running',
-          name: e.props.tool,
+          name: NATIVE_NAMES[e.props.tool] ?? e.props.tool,
           isStruck: true,
           ...(asked !== undefined ? { argument: asked } : {}),
         });
@@ -228,29 +231,37 @@ export const register: Register = (on) => {
     if (e.props.tool !== REQUEST_TOOL) return next(e);
     const { Box, Text } = $.ui.resolve(e);
     const { value: stored } = await $.state.get({ ...ROWS, id: e.props.tool_use_id });
-    // NOT STARTED YET: its input may still be arriving and its label is not
-    // known, so nothing is drawn rather than a placeholder that would flash.
-    if (stored === undefined && e.props.isRunning) return <Box display="none" />;
+    // NOT STARTED YET. The engine draws a call's row before it runs, while its
+    // input is still streaming in and before it is in progress (`isRunning`
+    // false, no output): read then, the input names no offer yet and the row
+    // would say "Tenjin" for a frame. Nothing is drawn until the call's own
+    // tool.call has stored its row, or a result exists (a resumed transcript).
+    const hasOutput = e.props.output !== undefined;
+    if (stored === undefined && !hasOutput) return <Box display="none" />;
     // A CALL THAT RUNS A HELD OFFER draws on the held row, decided from its own
     // input on its first frame, before its tool.call has claimed the hold. A
     // later call for the same offer (a spec fetch, a second run) is its own row.
     const args = asRecord(e.props.input) ?? {};
     const offerId = typeof args.id === 'string' && args.id.length > 0 ? args.id : undefined;
     const runsOffer = asRecord(args.input) !== undefined || typeof args.query === 'string';
-    const isDone = stored?.outcome !== undefined || !e.props.isRunning;
+    const isDone = stored === undefined || stored.outcome !== undefined;
     if (
       offerId !== undefined &&
       (isDone
         ? await heldFor($, offerId, e.props.tool_use_id, 'routed')
-        : stored?.holdOf !== undefined ||
+        : stored.holdOf !== undefined ||
           (runsOffer && (await heldFor($, offerId, e.props.tool_use_id, 'held'))))
     ) {
       return <Box display="none" />;
     }
     const row = stored ?? (await describeCall($, args)).row;
+    // A ROW WITH NO LABEL OF ITS OWN is not drawn: the router's own calls (a
+    // spec fetch, a query it picks for) and a spec the server sent unlabelled
+    // would read "Tenjin" or "Tenjin lookup".
+    if (row.label === ROUTER || row.label === UNLABELLED) return <Box display="none" />;
     const outcome =
       row.outcome ??
-      (e.props.isRunning
+      (!hasOutput
         ? undefined
         : e.props.isInterrupted
           ? 'interrupted'
@@ -655,11 +666,21 @@ function argumentOf(input: Json): string | undefined {
   return text.length > 0 ? text : undefined;
 }
 
-/** A native call's own input as its row shows it: the search, or the URL. */
+/**
+ * A native call's own input as the engine's row shows it (Claude Code 2.1.304's
+ * `renderToolUseMessage`): WebSearch quotes its query, WebFetch shows its URL.
+ */
 function nativeArgument(input: Json | undefined): string | undefined {
   if (input === undefined) return undefined;
-  return argumentOf({ query: input.query }) ?? argumentOf({ url: input.url });
+  const query = argumentOf({ query: input.query });
+  return query !== undefined ? `"${query}"` : argumentOf({ url: input.url });
 }
+
+/** The names the engine draws its native rows under (each tool's `userFacingName`). */
+const NATIVE_NAMES: Readonly<Record<string, string>> = {
+  WebSearch: 'Web Search',
+  WebFetch: 'Fetch',
+};
 
 /** What one tool row draws. */
 interface RowShape {

@@ -9,6 +9,7 @@ import {
   recordPayment,
   resultText,
   rowText,
+  shownLines,
   toolRow,
 } from './fixtures';
 
@@ -56,7 +57,8 @@ test('a picked option is named and priced as itself, and only its payment counts
       component: 'ToolUse',
       props: { ...toolRow('toolu_gpt', TOOL, args), isRunning: false },
     });
-    expect(await rowText(ui)).toBe('⏺ GPT Image 2(a lighthouse at dusk) · $0.04');
+    // Not drawn before its tool.call starts.
+    expect(await shownLines(ui)).toEqual([]);
     await ui.unmount();
   }
   await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_gpt', ...args });
@@ -86,7 +88,8 @@ test('choice "all" totals every option it paid', async ($, on) => {
       component: 'ToolUse',
       props: { ...toolRow('toolu_all', TOOL, args), isRunning: false },
     });
-    expect(await rowText(ui)).toBe('⏺ 2 services(a lighthouse at dusk) · $0.07');
+    // Not drawn before its tool.call starts.
+    expect(await shownLines(ui)).toEqual([]);
     await ui.unmount();
   }
   await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_all', ...args });

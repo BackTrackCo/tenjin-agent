@@ -108,7 +108,7 @@ test('a payment whose settlement is unknown reads as paid', async ($, on) => {
   }
 });
 
-test('a spec without a label is a Tenjin lookup, never its provider', async ($, on) => {
+test('a spec without a label is not drawn, never under its provider or "Tenjin lookup"', async ($, on) => {
   const { files } = machine(on);
   await keepSpec(files, OFFER, {
     capabilityId: 'glim-x-search',
@@ -126,12 +126,12 @@ test('a spec without a label is a Tenjin lookup, never its provider', async ($, 
         isRunning: false,
       },
     });
-    expect(await rowText(ui)).toBe('⏺ Tenjin lookup(from:tenjin) · $0.005');
+    expect(await shownLines(ui)).toEqual([]);
     await ui.unmount();
   }
 });
 
-test('an id-less query is the router picking: Tenjin(query)', async ($, on) => {
+test('an id-less query is the router picking: not drawn, never as "Tenjin"', async ($, on) => {
   machine(on);
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({
@@ -140,7 +140,7 @@ test('an id-less query is the router picking: Tenjin(query)', async ($, on) => {
       component: 'ToolUse',
       props: { ...toolRow('toolu_pick', TOOL, { query: 'latest BTC price' }), isRunning: false },
     });
-    expect(await rowText(ui)).toBe('⏺ Tenjin(latest BTC price)');
+    expect(await shownLines(ui)).toEqual([]);
     await ui.unmount();
   }
 });
